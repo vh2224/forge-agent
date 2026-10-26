@@ -258,6 +258,9 @@ function validateRecoveryRequest(raw, options = {}) {
   const transport = capability(request.route?.resolved_worker_engine, request.unitType,
     request.scope === 'milestone' ? {} : request);
   if (!transport.supported) fail(transport.reason_code, transport.hint);
+  if (request.claudePermissions !== undefined && (request.claudePermissions !== 'verification'
+      || request.route?.resolved_worker_engine !== 'claude' || !['execute', 'fix'].includes(transport.mode)
+      || !request.execution_contract)) fail('claude-permission-policy-invalid');
   if (loc.preparation) require('./forge-task-preparation').validateRequest(request);
   if (transport.mode === 'fix' && request.execution_contract) {
     const roots = require('./forge-code-roots');
@@ -2106,7 +2109,16 @@ async function runUnitSidecarCore(request, runtime, identity) {
   if (execution) {
     xllm.validateResultFileTarget(executionStateFile, root);
   }
-  const verificationSeal = transport.mode === 'execute' && r.execution_contract && (nativeExecution || r.verification || runtime.verification) ? verificationApi.normalizeExecutionVerification(r.execution_contract, fs.readFileSync(r.planFile, 'utf8'), r.verification, runtime.verification, verificationIdentity) : null;
+  const claudeWriter = route.resolved_worker_engine === 'claude' && ['execute', 'fix'].includes(transport.mode);
+  const permissionRequested = r.claudePermissions !== undefined;
+  if (permissionRequested && (r.claudePermissions !== 'verification' || !claudeWriter || !r.execution_contract)) fail('claude-permission-policy-invalid');
+  const verificationSeal = r.execution_contract && ((transport.mode === 'execute' && (nativeExecution || permissionRequested || r.verification || runtime.verification))
+    || (transport.mode === 'fix' && permissionRequested))
+    ? verificationApi.normalizeExecutionVerification(r.execution_contract, transport.mode === 'execute' ? fs.readFileSync(r.planFile, 'utf8') : '', r.verification, runtime.verification, verificationIdentity) : null;
+  // Resolve permissions before creating a receipt or entering a transport.
+  // Legacy requests without a root contract gain no shell permission.
+  const permissionPolicy = permissionRequested && verificationSeal
+    ? require('./forge-claude-permissions').createPolicy({ seal: verificationSeal, contract: r.execution_contract, identity: verificationIdentity, cwd }) : null;
   const startedAt = new Date().toISOString();
   // Exclusive creation arbitrates concurrent invocations of the same attempt.
   fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'started', fingerprint, dispatch_id: dispatchId, before, started_at: startedAt,
@@ -2141,6 +2153,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
     return runtime.announce?.(stage, fields);
   };
   const options = { enterTransport: () => { enterTransport(); transportEntered = true; }, cwd, contextRoot: root, engine: route.resolved_worker_engine,
+    permissionPolicy, permissionIdentity: permissionPolicy ? verificationIdentity : undefined,
     unitType: r.unitType,
     calibrationOptions: runtime.calibrationOptions,
     onProgress: snapshot => {

@@ -226,6 +226,41 @@ an explicit opt-in and private storage/retention contract, not a debug default.
 
 #### Claude CLI structured stream, identity and safe progress
 
+For an explicitly authorized headless writer, the owner may set
+`claudePermissions: 'verification'` in the request **before** fingerprinting and
+dispatch. This opt-in is accepted only for Claude execute/review-fix with an
+execution contract. The adapter resolves the canonical verification seal
+(plan, preferences, supplements and legitimate discovery), then binds its exact
+commands, provenance, timeout, physical root and request identity to the
+invocation. Missing/invalid contracts or unsupported commands refuse before
+inference; they are caller setup failures, not model unavailability.
+
+The initial supported permission grammar is `node [--check] relative-file.js`
+(also `.cjs` and `.mjs`), with portable unquoted paths and exactly one code root.
+Quotes, spaces inside paths, backslashes, absolute paths, traversal, protected
+paths, symlink ancestors, shell operators, wildcards, extra arguments and other
+executables are refused. Each exact `Bash(command)` rule is a separate argv
+entry; no wildcard/prefix permission is introduced. This permits execution of
+the declared script, not a filesystem sandbox. Existing claims, protected
+metadata, delta verification and reset remain mandatory.
+
+Absent opt-in preserves the previous invocation without granting Bash. Read-only
+workers retain only Read/Glob/Grep. Writers retain `acceptEdits`, invocation-only
+settings and managed deny/ask precedence; no global preferences or bypass mode
+are changed. CLI version and policy digest are recorded, while managed-policy
+visibility remains unknown. Argv fixture tests do not prove real CLI permission
+acceptance or override a managed denial.
+
+Persisted sessions bind a separate semantic permission digest containing the
+seal scope (policy version, root identity, plan, commands/origins and timeout),
+excluding only the attempt identity. A successor must supply a newly bound
+request with the same scope. Changed permission scope, removing the opt-in, or
+adding it to a legacy session without a digest is refused before inference.
+Review-fix retains its existing no-session contract.
+
+Permission syntax/precedence source:
+https://code.claude.com/docs/en/permissions . Locally inspected CLI: 2.1.310.
+
 Claude uses `-p --output-format stream-json --verbose --include-partial-messages`
 and `--json-schema` from `forge-worker-result-contract.js`. The same per-unit
 contract renders the instruction and validates the candidate locally: only

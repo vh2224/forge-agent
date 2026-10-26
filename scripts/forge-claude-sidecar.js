@@ -62,6 +62,10 @@ const CLAUDE_SIDECAR_REASON_CODES = Object.freeze({
   SESSION_INVALID: 'claude-session-invalid',
   RESUME_ACCOUNT_MISMATCH: 'claude-resume-account-mismatch',
   RESUME_CONFIG_MISMATCH: 'claude-resume-config-mismatch',
+  PERMISSION_POLICY_INVALID: 'claude-permission-policy-invalid',
+  PERMISSION_COMMAND_UNSUPPORTED: 'claude-permission-command-unsupported',
+  PERMISSION_RESUME_MISMATCH: 'claude-permission-resume-mismatch',
+  PERMISSION_CLI_UNVERIFIED: 'claude-permission-cli-unverified',
 });
 
 // Membership, not truthiness. Native fs errors carry a `.code` too (EACCES,
@@ -925,7 +929,7 @@ function sessionMode(session, phase) {
 // One argv for every mode: start, persisted start and resume differ only in
 // `sessionTokens` and the `-p` instruction, so a resume keeps every other
 // position (model, effort, add-dir, schema, tools, permissions, settings).
-function buildClaudeArgs({ prefixArgs, model, effort, options, cwd, resultContract, sessionTokens, instruction }) {
+function buildClaudeArgs({ prefixArgs, model, effort, options, cwd, resultContract, sessionTokens, instruction, permissionPolicy }) {
   return [...prefixArgs, ...(model ? ['--model', model] : []),
     ...(options.readOnly && options.contextRoot && path.resolve(options.contextRoot) !== cwd ? ['--add-dir', path.resolve(options.contextRoot)] : []),
     ...(Array.isArray(options.writableRoots) ? options.writableRoots.flatMap(root => ['--add-dir', path.resolve(root)]) : []),
@@ -937,6 +941,7 @@ function buildClaudeArgs({ prefixArgs, model, effort, options, cwd, resultContra
     '--json-schema', JSON.stringify(resultContract.schema),
     '--tools', options.readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash',
     ...(options.readOnly ? ['--allowedTools', 'Read,Glob,Grep'] : ['--permission-mode', 'acceptEdits']),
+    ...(permissionPolicy ? ['--allowedTools', ...permissionPolicy.rules] : []),
     '-p', instruction];
 }
 
@@ -1077,6 +1082,13 @@ async function invokeClaudeSidecar(opts) {
   // probe, temp file or spawn: an ineligible phase or unknown mode is refused,
   // never downgraded; an invalid resume ref never reaches argv.
   const { mode: sessionModeName, ref: resumeRef } = sessionMode(options.session, phase);
+  const permissions = require('./forge-claude-permissions');
+  const permissionPolicy = permissions.validatePolicy(options.permissionPolicy, {
+    cwd, readOnly: options.readOnly, identity: options.permissionIdentity });
+  const permissionDigest = permissionPolicy?.sha256 || null;
+  if (resumeRef && (resumeRef.permission_policy_sha256 || null) !== (permissionPolicy?.session_sha256 || null)) {
+    throw preSpawnRefusal('claude-permission-resume-mismatch');
+  }
   const persistSession = sessionModeName === 'persist';
   // A missing prompt used to become '' and still spawn the real CLI with a
   // vacuous instruction, spending subscription quota to produce an invalid
@@ -1112,7 +1124,8 @@ async function invokeClaudeSidecar(opts) {
     try {
       sessionId = claudeSession.assertSessionId(claudeSession.newSessionId());
       sessionRef = claudeSession.createSessionRef({ id: sessionId, accountName: account.name,
-        configDir: claudeSession.configDir(env, process.platform), cwd });
+        configDir: claudeSession.configDir(env, process.platform), cwd,
+        ...(permissionDigest ? { permissionPolicySha256: permissionPolicy.session_sha256 } : {}) });
     } catch { throw invalidLaunchOption(); }
   } else if (resumeRef) {
     // Same account (by name: the config dir does not change per account), same
@@ -1164,15 +1177,16 @@ async function invokeClaudeSidecar(opts) {
   if (model && effort && modelPolicy.applyEffortPolicy({ model, effort }).unsupported) {
     throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.EFFORT_UNSUPPORTED_BY_MODEL);
   }
-  // Only a policy entry that declares a minimum CLI version is probed; every
-  // other model keeps the exact previous argv and spawn count.
+  // Explicit permission grants also require an observed CLI version. Legacy
+  // models without a minimum version keep their previous spawn count.
   let cliVersion = null;
   const policyDiagnostics = [];
   const policy = model ? modelPolicy.transportSupport({ model, transport: 'claude-cli' }) : null;
-  if (policy && policy.min_version) {
+  if ((policy && policy.min_version) || permissionPolicy) {
     const probeCommand = resolveClaudeCommand(sourceEnv);
     const probed = probeClaudeVersion(probeCommand.cmd, probeCommand.prefixArgs, cwd, sourceEnv,
       typeof options.probeRunner === 'function' ? options.probeRunner : spawnSync);
+    if (permissionPolicy && !probed) throw preSpawnRefusal('claude-permission-cli-unverified');
     const verdict = modelPolicy.transportSupport({ model, transport: 'claude-cli', cliVersion: probed });
     cliVersion = verdict.cli_version;
     policyDiagnostics.push(...verdict.diagnostics.filter((item) => item.code === 'transport-version-unverified'));
@@ -1187,6 +1201,8 @@ async function invokeClaudeSidecar(opts) {
   const telemetryBase = {
     model_argument: model, effort_sent: effort, effort_applied: null, effort_applied_source: null,
     cli_version: cliVersion, policy_diagnostics: policyDiagnostics,
+    ...(permissionPolicy ? { permission_policy_sha256: permissionDigest,
+      permission_rules_count: permissionPolicy.rules.length, managed_permission_policy: 'unknown' } : {}),
   };
   let tempDir = null;
   let primaryError = null;
@@ -1208,7 +1224,11 @@ async function invokeClaudeSidecar(opts) {
     const { cmd, prefixArgs } = resolveClaudeCommand(sourceEnv);
     const sessionTokens = resumeRef ? ['--resume', sessionId]
       : persistSession ? ['--session-id', sessionId] : ['--no-session-persistence'];
-    const args = buildClaudeArgs({ prefixArgs, model, effort, options, cwd, resultContract, sessionTokens, instruction });
+    if ((permissions.validatePolicy(options.permissionPolicy, {
+      cwd, readOnly: options.readOnly, identity: options.permissionIdentity })?.sha256 || null) !== permissionDigest) {
+      throw preSpawnRefusal('claude-permission-policy-invalid');
+    }
+    const args = buildClaudeArgs({ prefixArgs, model, effort, options, cwd, resultContract, sessionTokens, instruction, permissionPolicy });
     // Observe the actual CLI packaging, after instruction/argv construction.
     // Account credentials exist only in env and never enter this measurement.
     // A resume has no prompt file: its packaged context is the fixed instruction.
