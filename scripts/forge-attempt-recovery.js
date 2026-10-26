@@ -621,6 +621,24 @@ async function recoverAttempt(options) {
     inspection.valid_saved_response = true;
   }
   if (inspection.process_stopped !== true) fail('recovery-process-receipt-inspection-required');
+  // The old review-fix producer recorded only {cwd}, even though recovery now
+  // requires a held root contract. Preserve that historical identity only after
+  // the actual unit adapter proves its already-completed reset, read-only.
+  let assertLegacyReviewFix;
+  if (options.request.unitType === 'review-fix' && !options.request.execution_contract
+      && options.executionContract && state.roots_sha256 === digest({ cwd: options.request.cwd })
+      && !inspection.valid_saved_response) {
+    const inspectLegacy = () => require('./forge-unit-sidecar').reconcileLegacyReviewFix(options.request, inspection.receipt, options.executionContract);
+    inspectLegacy();
+    const resetHash = digest(fs.readFileSync(inspection.receipt.reset_state_file));
+    assertLegacyReviewFix = () => {
+      if (digest(fs.readFileSync(inspection.receipt.reset_state_file)) !== resetHash) fail('review-fix-recovery-snapshot-changed');
+      inspectLegacy();
+      options.validateExecutionAuthority?.();
+    };
+    assertLegacyReviewFix();
+    expectedRoots = state.roots_sha256;
+  }
   if (options.transitions && state.pending_questions.some(row => row.status === 'pending') && !options.answers?.length)
     return { action: 'pending-questions', questions: state.pending_questions };
   const transition = options.transitions ? await transitions.prepare(options, state, inspection) : null;
@@ -775,6 +793,7 @@ async function recoverAttempt(options) {
   // bytes immediately before reservation, then bind the newly saved state too.
   preSpawn?.assertUnchanged();
   if (!options.resumeReservation) {
+    assertLegacyReviewFix?.();
     const reserve = () => session.reserve(decision, correction?.request_sha256 || state.attempts.at(-1).request_sha256,
       !!(preSpawn || transitionGuard) && options.externalNativeHandoff === true && decision.route.worker_mode === 'native');
     const saved = transitionGuard ? transitionGuard.withLock(reserve) : reserve();
@@ -802,6 +821,7 @@ async function recoverAttempt(options) {
   };
   const assertReady = Object.assign(() => {
     assertAuthority();
+    assertLegacyReviewFix?.();
     if (transitionGuard) transitionGuard.withLock(() => {});
     else preSpawn?.assertUnchanged();
   }, { assertAuthority,

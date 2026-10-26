@@ -259,6 +259,26 @@ function validateRecoveryRequest(raw, options = {}) {
     request.scope === 'milestone' ? {} : request);
   if (!transport.supported) fail(transport.reason_code, transport.hint);
   if (loc.preparation) require('./forge-task-preparation').validateRequest(request);
+  if (transport.mode === 'fix' && request.execution_contract) {
+    const roots = require('./forge-code-roots');
+    const contract = roots.validateContract(request.execution_contract, { owner: request.contextRoot, revalidate: true });
+    const claim = request.claim;
+    const held = request.runId && require('./forge-runs').get(request.contextRoot, request.runId);
+    if (!claim || claim.schema_version !== 2 || claim.released || !claim.generation
+        || !held?.active || held.write_claim?.released || roots.digest(held.write_claim) !== roots.digest(claim)) fail('execution-held-claim-required');
+    roots.claimGroups(claim);
+    const fix = require('./forge-review-fix');
+    const derived = fix.deriveClaim(fix.normalizeItems(request.reviewFix?.items));
+    if (!derived.eligible || request.reviewFix?.decision !== 'proceed'
+        || roots.digest(contract) !== roots.digest(claim.execution_contract)
+        || contract.code_roots.length !== 1 || roots.key(contract.code_roots[0].path) !== roots.key(fs.realpathSync.native(request.cwd))
+        || JSON.stringify([...derived.paths].sort()) !== JSON.stringify([...new Set(request.reviewFix.claimPaths || [])].sort())
+        || roots.digest(claim.paths.map(p => roots.resolvePath(contract, p)).map(p => `${p.root_id}::${p.path}`).sort())
+          !== roots.digest(derived.paths.map(file => `${contract.primary_root_id}::${file}`).sort())) fail('execution-held-claim-mismatch');
+    fix.assertClaimTargetsPhysical(request.cwd, derived.paths);
+    if (request.gates?.claim !== 'proceed' || !['passed', 'not-applicable'].includes(request.gates?.security)) fail('execution-gates-required');
+    if (request.gates.security === 'passed' && (!request.securityFile || !fs.readFileSync(request.securityFile, 'utf8').trim())) fail('execution-security-required');
+  }
   if (transport.mode === 'execute') {
     if (loc.execution) {
       const prepared = require('./forge-task-execution').prepare({ ...request, nativeInvocation: options.nativeInvocation }, request.contextRoot, request.cwd);
@@ -347,6 +367,46 @@ function reconcileMilestoneAttempt(request, receipt, runtime = {}) {
   }
   return require('./forge-surgical-reset').reconcileFailedAttempt(baseline.state_file,
     { failed: true, processStopped: true, verifyOwnership: runtime.verifyOwnership });
+}
+// Legacy review-fix already performed its reset when it failed. Observe the
+// original boundary again; never reset twice or manufacture a v2 baseline now.
+function reconcileLegacyReviewFix(request, receipt, executionContract) {
+  const roots = require('./forge-code-roots'), reset = require('./forge-surgical-reset');
+  const contract = roots.validateContract(executionContract, { owner: request.contextRoot || request.cwd, revalidate: true });
+  if (request.unitType !== 'review-fix' || receipt.kind !== 'review-fix' || receipt.phase !== 'failed'
+      || request.execution_contract || receipt.recovery_baseline
+      || receipt.dispatch_id !== request.dispatchId || receipt.fingerprint !== artifactFingerprint(request)
+      || receipt.recovery_identity_sha256 !== recoveryIdentity(request)) fail('review-fix-recovery-binding');
+  const failure = receipt.failure;
+  if (failure?.recovery !== 'items-deferred' || failure.reset?.verified !== true
+      || failure.reset.reason_code !== 'reset-verified' || !Array.isArray(failure.reset.overlap) || failure.reset.overlap.length
+      || failure.publication_error || /^claude-model-|protected-metadata|baseline-moved/.test(failure.reason_code || '')) fail('review-fix-recovery-reset-unverified');
+  const files = artifactAttemptFiles(request), stateFile = `${files.resultFile}.reset-state.json`;
+  require('./forge-attempt-recovery').validateStateTarget(stateFile, request, contract);
+  if (receipt.reset_state_file !== stateFile) fail('review-fix-recovery-binding');
+  const state = reset.readState(stateFile);
+  // A historical single-cwd identity cannot authorize additional writer roots.
+  if (contract.code_roots.length !== 1 || request.writableRoots?.length || Object.hasOwn(state, 'repos')
+      || state.execution_contract || state.attempt !== request.dispatchId) fail('review-fix-recovery-roots');
+  const root = contract.code_roots[0];
+  if (roots.key(path.resolve(request.cwd)) !== roots.key(root.path)
+      || roots.key(path.resolve(state.code_dir)) !== roots.key(root.path)
+      || state.vcs !== root.vcs || root.vcs !== 'git') fail('review-fix-recovery-roots');
+  const fix = require('./forge-review-fix'), loc = locations(request);
+  const brief = fix.buildBrief({ boundary: loc.reviewFix.boundary, unitLabel: loc.reviewFix.unitLabel,
+    items: fix.normalizeItems(request.reviewFix.items), claimPaths: request.reviewFix.claimPaths, route: request.route });
+  if (brief.identity !== receipt.review_fix_identity
+      || roots.digest(routeIdentity(request.route, request.unitType)) !== roots.digest(receipt.route_identity)) fail('review-fix-recovery-binding');
+  const normalize = rows => {
+    if (!Array.isArray(rows) || rows.some(row => !row || typeof row.path !== 'string'
+        || !(row.hash === null || /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(row.hash)))) fail('review-fix-recovery-snapshot-invalid');
+    if (new Set(rows.map(row => row.path)).size !== rows.length) fail('review-fix-recovery-snapshot-invalid');
+    return rows.map(row => ({ path: row.path, hash: row.hash })).sort((a, b) => a.path.localeCompare(b.path));
+  };
+  const observed = reset.captureAttemptSnapshot(root.path);
+  if (observed.start_sha !== state.start_sha
+      || roots.digest(normalize(observed.pre_dirty)) !== roots.digest(normalize(state.pre_dirty))) fail('review-fix-recovery-baseline-changed');
+  return { ok: true, roots: [{ root_id: root.id, reconciled: true }], pending_roots: [] };
 }
 function assertMilestoneDeliveryReplay(request, record) {
   if (!record.milestone_delivery) return;
@@ -2552,11 +2612,17 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     // complete execution/security/context prompt after prepare.
     const executionPlan = canonical.scope === 'standalone-task' && canonical.phase === 'execute'
       ? fs.readFileSync(canonical.planFile, 'utf8') : null;
-    const rendered = !executionPlan && !request.prompt && !request.promptFile ? renderPrompt({
+    const reviewPrompt = canonical.unitType === 'review-fix' ? (() => {
+      const fix = require('./forge-review-fix'), loc = locations(request);
+      const brief = fix.buildBrief({ boundary: loc.reviewFix.boundary, unitLabel: loc.reviewFix.unitLabel,
+        items: fix.normalizeItems(request.reviewFix.items), claimPaths: request.reviewFix.claimPaths, route });
+      return fix.buildReviewFixPrompt(brief, { outputChannel: 'worker-result-block', constraints: request.constraints });
+    })() : null;
+    const rendered = !reviewPrompt && !executionPlan && !request.prompt && !request.promptFile ? renderPrompt({
       unitType: canonical.scope === 'standalone-task' && canonical.phase === 'execute' ? 'execute-loose-task' : request.unitType,
       cwd: canonical.contextRoot, codeDir: canonical.cwd, milestoneId: request.milestoneId, sliceId: request.sliceId,
       taskId: request.taskId, unitEffort: route.effort, autoCommit: false }) : null;
-    let prompt = executionPlan || request.prompt || (request.promptFile ? fs.readFileSync(request.promptFile, 'utf8') : rendered.prompt);
+    let prompt = reviewPrompt || executionPlan || request.prompt || (request.promptFile ? fs.readFileSync(request.promptFile, 'utf8') : rendered.prompt);
     const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: canonical.cwd,
       phase: canonical.scope === 'standalone-task' && canonical.phase === 'execute' ? 'execute-loose-task' : request.unitType,
       forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
@@ -2580,7 +2646,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     const replayed = await deliveryHelper.replay({ request: executionRequest, recovery, runtime, nativeOptions });
     if (replayed) return replayed;
   }
-  if (canonical.scope === 'milestone' && canonical.phase === 'execute') {
+  if (canonical.scope === 'milestone' && canonical.phase === 'execute' || canonical.unitType === 'review-fix') {
     if (!executionRequest.execution_contract) fail('execution-held-claim-required');
     validateRecoveryRequest(executionRequest, { nativeInvocation: request.route.worker_mode === 'native'
       ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route)) : undefined });
@@ -2596,6 +2662,8 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     validateExecutionAuthority: () => validateRecoveryRequest(executionRequest, { nativeInvocation: request.route.worker_mode === 'native'
       ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route)) : undefined }),
     reconcile: receipt => {
+      if (canonical.unitType === 'review-fix' && !request.execution_contract && !receipt.recovery_baseline)
+        return reconcileLegacyReviewFix(request, receipt, executionRequest.execution_contract);
       if (canonical.scope === 'milestone' || receipt.recovery_baseline) return reconcileMilestoneAttempt(request, receipt, runtime);
       if (!receipt.reset_state_file || !receipt.execution?.execution_contract) fail('recovery-baseline-required');
       require('./forge-task-execution').assertReplay(request, receipt);
@@ -2685,7 +2753,12 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
             assertReady?.();
             validateRecoveryRequest({ ...executionRequest, route }, { nativeInvocation: binding });
             assertReady?.consumeInvocation?.(binding);
-            return runtime.invokeNative(next, { ...binding, args });
+            return runtime.invokeNative(next, { ...binding, args }, {
+              assertAuthority: () => {
+                assertReady?.assertAuthority?.();
+                validateRecoveryRequest({ ...executionRequest, route }, { nativeInvocation: binding });
+              },
+            });
           });
         }
         next.nativeInvocation = invocation;
@@ -2701,7 +2774,7 @@ module.exports = { schema, memorySchema, memorySchemaV2, NEW_MEMORY_SCHEMA_VERSI
   memoryTransportSchema, memoryEvidenceContract, MEMORY_QUALITY_CONTRACT, locations, milestonePlanFile, validateRecoveryRequest, captureMilestoneBaseline, reconcileMilestoneAttempt, validateArtifacts, inspectArtifacts, inspectDeliveryContent, executeDeliveryArtifacts, MAX_ARTIFACT_BYTES,
   MAX_ARTIFACT_PAYLOAD_BYTES, target, markChecked, materialize, memoryPrompt, memorySourceContext,
   publishReadyRecord, nativeMemoryFingerprint, acceptNativeMemoryResult, candidateFromNativeResult, runNativeMemory,
-  routeIdentity, artifactFingerprint, artifactAttemptFiles, beginArtifactAttempt, replayArtifactAttempt,
+  routeIdentity, artifactFingerprint, artifactAttemptFiles, beginArtifactAttempt, replayArtifactAttempt, reconcileLegacyReviewFix,
   failArtifactAttempt, acceptArtifactResult, reconcileArtifactAttempt, runUnitSidecar, recoverUnitSidecar, reviewFixUnitLabel, effortTelemetry };
 if (require.main === module) {
   const announce = createStderrAnnouncer();
