@@ -250,6 +250,25 @@ function milestonePlanFile(request) {
   if (request.planFile && path.resolve(request.planFile) !== path.resolve(selected)) fail('execution-plan-path-mismatch');
   return selected;
 }
+// Pure readiness check over the wire representation, after caller assembly.
+// Without an identity this is diagnostic policy, never a reusable dispatch seal.
+function preflightExecutionVerification(raw, options = {}) {
+  const request = JSON.parse(JSON.stringify(raw));
+  if (!request.execution_contract || request.unitType !== 'execute-task') return null;
+  const root = request.contextRoot || request.cwd;
+  let planFile;
+  if (request.scope === 'standalone-task') {
+    const loc = require('./forge-task-execution').locations(request);
+    planFile = path.join(root, loc.task, `${request.taskId}-PLAN.md`);
+    // Preserve owner aliases supported by prepare(); its physical path/gate
+    // checks still run independently before execution authority is granted.
+    if (!request.planFile || require('./forge-code-roots').key(fs.realpathSync.native(request.planFile))
+        !== require('./forge-code-roots').key(fs.realpathSync.native(planFile))) fail('execution-plan-path-mismatch');
+  } else planFile = milestonePlanFile(request);
+  const runtimeVerification = options.verification === undefined ? undefined : JSON.parse(JSON.stringify(options.verification));
+  return require('./forge-verify').normalizeExecutionVerification(request.execution_contract,
+    fs.readFileSync(planFile, 'utf8'), request.verification, runtimeVerification, options.identity || {});
+}
 function validateRecoveryRequest(raw, options = {}) {
   const attempt = require('./forge-attempt-recovery');
   const request = attempt.canonicalRequest(raw.linked_begin_key && !raw.linkedEntryBinding ? attempt.bindLinkedRequest(raw, options.linkedEntryOptions) : raw);
@@ -258,6 +277,11 @@ function validateRecoveryRequest(raw, options = {}) {
   const transport = capability(request.route?.resolved_worker_engine, request.unitType,
     request.scope === 'milestone' ? {} : request);
   if (!transport.supported) fail(transport.reason_code, transport.hint);
+  // Existing attempts retain their receipt/seal/replay checks. Readiness must
+  // not reinterpret a legacy saved result or grant it new authority.
+  if (transport.mode === 'execute' && !fs.existsSync(`${request.resultFile}.receipt.json`)) {
+    preflightExecutionVerification(request, options);
+  }
   if (request.claudePermissions !== undefined && (request.claudePermissions !== 'verification'
       || request.route?.resolved_worker_engine !== 'claude' || !['execute', 'fix'].includes(transport.mode)
       || !request.execution_contract)) fail('claude-permission-policy-invalid');
@@ -1520,7 +1544,7 @@ async function runNativeExecutionTransport(r, runtime, execution, options, proce
     if (expected !== hash(JSON.stringify({ request: r, capabilities: runtime.activeCapabilities, verification: runtime.verification,
       baseline: record.recovery_baseline, seal: record.verification_seal, inputs: record.execution.inputs }))) fail('native-execution-authority-changed');
     const binding = validateNativeExecutionBinding(r, runtime);
-    validateRecoveryRequest(r, { nativeInvocation: binding });
+    validateRecoveryRequest(r, { verification: runtime.verification, nativeInvocation: binding });
     if (hash(fs.readFileSync(initialRecord.recovery_baseline.state_file)) !== initialState) fail('recovery-baseline-binding');
     for (const [input, expectedHash] of Object.entries(initialRecord.execution.inputs)) {
       if (hash(fs.readFileSync(input)) !== expectedHash) fail('execution-input-changed');
@@ -1597,7 +1621,7 @@ async function inspectSavedNativeExecution(r, runtime) {
       xllm.assertUntrustedOutputBarrier(candidate);
       const baseline = existing.recovery_baseline;
       if (!baseline || baseline.schema_version !== 1) fail('recovery-baseline-required');
-      const checked = validateRecoveryRequest(r, { nativeInvocation: validateNativeExecutionBinding(r, runtime) });
+      const checked = validateRecoveryRequest(r, { verification: runtime.verification, nativeInvocation: validateNativeExecutionBinding(r, runtime) });
       const contract = roots.validateContract(baseline.execution_contract, { owner: root, revalidate: true });
       if (roots.digest(contract) !== roots.digest(checked.contract)) fail('recovery-baseline-contract-mismatch');
       require('./forge-attempt-recovery').validateStateTarget(baseline.state_file, r, contract);
@@ -1667,6 +1691,9 @@ async function runUnitSidecarCore(request, runtime, identity) {
   const nativePromptIdentity = nativeExecution && r.nativePromptFile && fs.existsSync(r.nativePromptFile) ? physicalFileIdentity(r.nativePromptFile) : null;
   if (route.dispatch_allowed !== true || (!nativeExecution && (route.worker_mode !== 'sidecar' || !route.sidecar_declared))
     || !guard.dispatch_allowed) fail(guard.reason_code || 'route-refused', guard.hint);
+  if (transport.mode === 'execute' && !fs.existsSync(`${r.resultFile}.receipt.json`)) {
+    preflightExecutionVerification(r, { verification: runtime.verification });
+  }
   const authoritativeModel = route.model_resolved || route.model;
   if (!authoritativeModel
       || (route.model_resolved && route.model && route.model_resolved !== route.model)
@@ -1946,7 +1973,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
     if (!nativeExecution) return;
     runtime.assertRecoveryAuthority?.();
     if (nativeAuthority() !== nativeAuthorityHash) fail('native-execution-authority-changed');
-    validateRecoveryRequest(r, { nativeInvocation: validateNativeExecutionBinding(r, runtime) });
+    validateRecoveryRequest(r, { verification: runtime.verification, nativeInvocation: validateNativeExecutionBinding(r, runtime) });
     verifySeal(record);
     const baseline = record.recovery_baseline;
     if (!baseline || baseline.fingerprint !== record.fingerprint || baseline.dispatch_id !== r.dispatchId) fail('recovery-baseline-binding');
@@ -2006,7 +2033,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       await runtime.announce?.('reaproveitado', { ...identity, provider_called: false });
       if (nativeExecution && hash(fs.readFileSync(receiptFile)) !== replayHash) fail('native-replay-receipt-changed');
       if (replayBaselineHash && hash(fs.readFileSync(existing.recovery_baseline.state_file)) !== replayBaselineHash) fail('recovery-baseline-bytes-changed');
-      if (nativeExecution) validateRecoveryRequest(r, { nativeInvocation: validateNativeExecutionBinding(r, runtime) });
+      if (nativeExecution) validateRecoveryRequest(r, { verification: runtime.verification, nativeInvocation: validateNativeExecutionBinding(r, runtime) });
       verifySeal(existing);
       assertNativePublication(existing);
       try {
@@ -2025,7 +2052,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       const deferredEvents = [];
       const ready = await completeExecution(executed, deferredEvents);
       if (require('./forge-attempt-recovery').inspectReceipt(receiptFile, { request: r, processProbe: runtime.processProbe }).process_stopped !== true) fail('writer-observation-not-stopped');
-      validateRecoveryRequest(r, { nativeInvocation: validateNativeExecutionBinding(r, runtime) });
+      validateRecoveryRequest(r, { verification: runtime.verification, nativeInvocation: validateNativeExecutionBinding(r, runtime) });
       verifySeal(ready);
       const savedFile = runtime.savedNativeResult.resultFile;
       const savedIdentity = physicalFileIdentity(savedFile);
@@ -2112,9 +2139,10 @@ async function runUnitSidecarCore(request, runtime, identity) {
   const claudeWriter = route.resolved_worker_engine === 'claude' && ['execute', 'fix'].includes(transport.mode);
   const permissionRequested = r.claudePermissions !== undefined;
   if (permissionRequested && (r.claudePermissions !== 'verification' || !claudeWriter || !r.execution_contract)) fail('claude-permission-policy-invalid');
-  const verificationSeal = r.execution_contract && ((transport.mode === 'execute' && (nativeExecution || permissionRequested || r.verification || runtime.verification))
-    || (transport.mode === 'fix' && permissionRequested))
-    ? verificationApi.normalizeExecutionVerification(r.execution_contract, transport.mode === 'execute' ? fs.readFileSync(r.planFile, 'utf8') : '', r.verification, runtime.verification, verificationIdentity) : null;
+  const verificationSeal = r.execution_contract && transport.mode === 'execute'
+    ? preflightExecutionVerification(r, { verification: runtime.verification, identity: verificationIdentity })
+    : r.execution_contract && transport.mode === 'fix' && permissionRequested
+      ? verificationApi.normalizeExecutionVerification(r.execution_contract, '', r.verification, runtime.verification, verificationIdentity) : null;
   // Resolve permissions before creating a receipt or entering a transport.
   // Legacy requests without a root contract gain no shell permission.
   const permissionPolicy = permissionRequested && verificationSeal
@@ -2701,7 +2729,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
   }
   if (canonical.scope === 'milestone' && canonical.phase === 'execute' || canonical.unitType === 'review-fix') {
     if (!executionRequest.execution_contract) fail('execution-held-claim-required');
-    validateRecoveryRequest(executionRequest, { nativeInvocation: request.route.worker_mode === 'native'
+    validateRecoveryRequest(executionRequest, { verification: runtime.verification, nativeInvocation: request.route.worker_mode === 'native'
       ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route)) : undefined });
   }
   return require('./forge-attempt-recovery').recoverAttempt({ ...recovery, request,
@@ -2712,7 +2740,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     externalNativeHandoff: !runtime.invokeNative,
     inspectPreSpawn: runtime.inspectPreSpawn, inspectPreSpawnDelta: runtime.inspectPreSpawnDelta,
     validateEnvironmentalCorrection: runtime.validateEnvironmentalCorrection,
-    validateExecutionAuthority: () => validateRecoveryRequest(executionRequest, { nativeInvocation: request.route.worker_mode === 'native'
+    validateExecutionAuthority: () => validateRecoveryRequest(executionRequest, { verification: runtime.verification, nativeInvocation: request.route.worker_mode === 'native'
       ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route)) : undefined }),
     reconcile: receipt => {
       if (canonical.unitType === 'review-fix' && !request.execution_contract && !receipt.recovery_baseline)
@@ -2727,13 +2755,13 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       if (request.route.worker_mode === 'native') {
         const invocation = require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route));
         if (!invocation.ok) return invocation;
-        validateRecoveryRequest(executionRequest, { nativeInvocation: invocation });
+        validateRecoveryRequest(executionRequest, { verification: runtime.verification, nativeInvocation: invocation });
         return { ok: true, evidence_reference: 'unit-preflight:native-arguments',
           final_evidence: require('./forge-attempt-telemetry').captureFinal({ request: invocation.args,
             context: invocation.args.prompt || invocation.args.message, identity: request, route: request.route,
             model: request.route.model, effort: request.route.effort, transport: 'native-tool' }) };
       }
-      validateRecoveryRequest(executionRequest);
+      validateRecoveryRequest(executionRequest, { verification: runtime.verification });
       if (typeof runtime.validateCorrection !== 'function') return { ok: false, reason_code: 'recovery-final-packaging-required' };
       return runtime.validateCorrection(request);
     },
@@ -2743,7 +2771,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       const invocation = route.worker_mode === 'native'
         ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(route)) : { ok: true };
       if (!invocation.ok) return invocation;
-      try { validateRecoveryRequest({ ...executionRequest, route }, { nativeInvocation: invocation }); }
+      try { validateRecoveryRequest({ ...executionRequest, route }, { verification: runtime.verification, nativeInvocation: invocation }); }
       catch (error) { return { ok: false, reason_code: error.code || 'unit-contract-refused', provider_called: false }; }
       return invocation;
     },
@@ -2760,7 +2788,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     // a Claude sidecar route may carry it; runUnitSidecarCore revalidates the ref.
     invoke: async (route, invocation, _ceiling, assertReady, reservationHash, resume) => {
       if (resume != null && (route.worker_mode !== 'sidecar' || route.resolved_worker_engine !== 'claude')) fail('recovery-resume-route-invalid');
-      validateRecoveryRequest({ ...executionRequest, route }, { nativeInvocation: invocation });
+      validateRecoveryRequest({ ...executionRequest, route }, { verification: runtime.verification, nativeInvocation: invocation });
       const ceiling = route.worker_mode === 'sidecar' ? ceilingFromRoute(route) : null;
       const next = deliveryHelper ? finalRequest(route) : { ...executionRequest, recoveryStateFile: recovery.stateFile, route: ceiling
         ? { ...route, workers_timeout: ceiling.seconds, workers_timeout_source: ceiling.source } : route,
@@ -2777,7 +2805,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
             if (require('./forge-attempt-recovery').callerRequestHash(next) !== finalRequestHash) fail('recovery-final-request-changed');
             assertReady();
             runtime.assertBoundary();
-            validateRecoveryRequest(next, { nativeInvocation: binding, linkedEntryOptions: runtime.linkedEntryOptions });
+            validateRecoveryRequest(next, { verification: runtime.verification, nativeInvocation: binding, linkedEntryOptions: runtime.linkedEntryOptions });
             assertReady.consumeInvocation(binding, { ...session.start(),
               original_receipt_sha256: hash(fs.readFileSync(recovery.receiptFile)) });
             const result = await callback(next, { ...binding, args }, session);
@@ -2804,12 +2832,12 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
         if (next.scope !== 'standalone-task' || next.phase !== 'execute') {
           return require('./forge-native-invocation').invokeNative(nativeOptions(route), (args, binding) => {
             assertReady?.();
-            validateRecoveryRequest({ ...executionRequest, route }, { nativeInvocation: binding });
+            validateRecoveryRequest({ ...executionRequest, route }, { verification: runtime.verification, nativeInvocation: binding });
             assertReady?.consumeInvocation?.(binding);
             return runtime.invokeNative(next, { ...binding, args }, {
               assertAuthority: () => {
                 assertReady?.assertAuthority?.();
-                validateRecoveryRequest({ ...executionRequest, route }, { nativeInvocation: binding });
+                validateRecoveryRequest({ ...executionRequest, route }, { verification: runtime.verification, nativeInvocation: binding });
               },
             });
           });
@@ -2823,7 +2851,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     },
   });
 }
-module.exports = { schema, memorySchema, memorySchemaV2, NEW_MEMORY_SCHEMA_VERSION, memoryExtractionSchema, memoryResponseSchema,
+module.exports = { preflightExecutionVerification, schema, memorySchema, memorySchemaV2, NEW_MEMORY_SCHEMA_VERSION, memoryExtractionSchema, memoryResponseSchema,
   memoryTransportSchema, memoryEvidenceContract, MEMORY_QUALITY_CONTRACT, locations, milestonePlanFile, validateRecoveryRequest, captureMilestoneBaseline, reconcileMilestoneAttempt, validateArtifacts, inspectArtifacts, inspectDeliveryContent, executeDeliveryArtifacts, MAX_ARTIFACT_BYTES,
   MAX_ARTIFACT_PAYLOAD_BYTES, target, markChecked, materialize, memoryPrompt, memorySourceContext,
   publishReadyRecord, nativeMemoryFingerprint, acceptNativeMemoryResult, candidateFromNativeResult, runNativeMemory,

@@ -67,7 +67,8 @@ async function recoveryContracts() {
     chain: [{ id: 'claude-sonnet-5', engine: 'claude' }] };
   const request = { unitType: 'execute-task', scope: 'milestone', phase: 'execute', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01',
     cwd: lab.a, contextRoot: lab.owner, execution_contract: lab.contract, route,
-    workflowId: 'fixture', dispatchId: 'baseline', resultFile: path.join(lab.dir, 'r.json'), prompt: 'Fixture only.' };
+    workflowId: 'fixture', dispatchId: 'baseline', resultFile: path.join(lab.dir, 'r.json'), prompt: 'Fixture only.',
+    verification: { preferenceCommands: ['node --version'] } };
   const base = path.join(lab.owner, '.gsd/milestones/M001/slices/S01');
   fs.mkdirSync(path.join(base, 'tasks/T01'), { recursive: true });
   request.planFile = path.join(base, 'tasks/T01/T01-PLAN.md');

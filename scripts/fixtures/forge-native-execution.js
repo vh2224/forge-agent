@@ -113,7 +113,8 @@ function nativeFixture(options = {}) {
   require('../forge-runs').add(f.owner, { id: 'native-run', kind: 'task', session_id: 'fixture', write_claim: claim });
   const caps = { available: true, tool: 'spawn_agent', source: 'portable-host-fixture', models: options.models || ['gpt-6.1-sol'], reasoning_efforts: ['high'], fork_turns: ['none'] };
   Object.assign(f.r, { route, runId: 'native-run', claim, execution_contract: contract,
-    verification: { preferenceCommands: ['node -e "process.exit(0)"'] }, nativePromptFile: path.join(f.dir, 'native-prompt.txt') });
+    ...(options.defaultVerification === false ? {} : { verification: { preferenceCommands: ['node -e "process.exit(0)"'] } }),
+    nativePromptFile: path.join(f.dir, 'native-prompt.txt') });
   f.r.nativeInvocation = require('../forge-native-invocation').buildNativeInvocation({ hostRuntime: 'codex', resolvedDispatch: route,
     activeCapabilities: caps, agentType: 'forge-executor', taskName: `native_${sequence}`, forkTurns: 'none', prompt: 'binding preflight' });
   assert(f.r.nativeInvocation.ok);
