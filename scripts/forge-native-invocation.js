@@ -358,6 +358,7 @@ async function invokeNative(options, invoke) {
     effort: invocation.telemetry.effort_resolved }, invocation.args,
     invocation.args.prompt || invocation.args.message, 'native-tool');
   let invoked = false;
+  let observedProvider;
   const initial = JSON.stringify(invocation);
   const assertBoundary = stage => {
     const current = buildNativeInvocation(options);
@@ -382,6 +383,7 @@ async function invokeNative(options, invoke) {
       identity: supervision.digest(JSON.stringify({ invocation, identity: options.telemetryIdentity || null })),
       route: options.resolvedDispatch, terminal: options.terminalResult,
     }, () => { invoked = true; return invoke(invocation.args, invocation); });
+    observedProvider = supervised.provider_called;
     if (!supervised.ok) return { ...invocation, ok: false, result: null,
       reason_code: supervised.reason_code === 'native-terminal-unobserved' && options.invalidTerminalReason
         ? options.invalidTerminalReason : supervised.reason_code,
@@ -425,8 +427,8 @@ async function invokeNative(options, invoke) {
       result: null,
       reason_code: telemetryApi.code(error.code, 'native-invocation-failed'),
       final_evidence: { ...evidence, stage: 'invoked', duration_ms: Date.now() - started,
-        provider_called: invoked ? (typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown') : false },
-      provider_called: invoked ? (typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown') : false,
+        provider_called: observedProvider ?? (invoked ? (typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown') : false) },
+      provider_called: observedProvider ?? (invoked ? (typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown') : false),
       diagnostic: { reason_code: telemetryApi.code(error.code, 'native-tool-callback-failed'), layer: 'native-tool' },
       hint: 'The native tool callback failed; inspect the host diagnostic channel.',
     };

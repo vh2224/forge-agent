@@ -9,6 +9,8 @@ function clock(initial = 100000) {
   return { wall: () => now, monotonic: () => now,
     setTimeout(fn, ms) { timers.set(++id, { at: now + ms, fn }); return id; },
     clearTimeout(key) { timers.delete(key); }, size: () => timers.size, crash: () => timers.clear(),
+    jump(ms) { now += ms; },
+    fire() { for (const [key,t] of [...timers]) if(t.at <= now) { timers.delete(key); t.fn(); } },
     async advance(ms) { now += ms; for (let n = 0; n < 20; n++) { await Promise.resolve();
       const ready = [...timers].filter(([, t]) => t.at <= now);
       for (const [key, t] of ready) { timers.delete(key); t.fn(); }
@@ -23,6 +25,7 @@ async function run() {
     journal: { root, file: path.join(root, `${++serial}.json`), authorize: () => true } });
   const c = clock(); let settle;
   const pending = api.supervise(base(c), () => new Promise(resolve => { settle = resolve; }));
+  await c.advance(0);
   await c.advance(1000); const cut = await pending;
   assert.equal(cut.reason_code, 'native-safety-ceiling');
   assert.equal(cut.lifecycle.activity, 'unknown'); assert.equal(cut.lifecycle.possible_writer, true);
@@ -41,7 +44,7 @@ async function run() {
   const done = await ack; assert.equal(done.ok, true); assert.equal(disposed, 1); assert.equal(c2.size(), 0);
   const c3 = clock(), o3 = base(c3); let cancelled = 0;
   o3.adapter = { capabilities: { cancel: true }, cancel() { cancelled++; return new Promise(() => {}); } };
-  const cancel = api.supervise(o3, () => new Promise(() => {})); await c3.advance(1000);
+  const cancel = api.supervise(o3, () => new Promise(() => {})); await c3.advance(0); await c3.advance(1000);
   assert.equal((await cancel).lifecycle.stopped, 'unknown'); assert.equal(cancelled, 1); assert.equal(c3.size(), 0);
   const c4 = clock(), o4 = base(c4); let invokes = 0;
   fs.writeFileSync(o4.journal.file, JSON.stringify({ identity: 'foreign' }));
@@ -68,7 +71,7 @@ async function run() {
   assert.equal(persisted.sequence, 1); assert(!JSON.stringify(persisted).includes('own work'));
   // Restart binds the same handle and original wall deadline; no new invoke.
   const c6 = clock(), o6 = base(c6); let calls = 0;
-  const first = api.supervise(o6, () => new Promise(() => {})); await c6.advance(1000); await first;
+  const first = api.supervise(o6, () => new Promise(() => {})); await c6.advance(0); await c6.advance(1000); await first;
   o6.adapter = { capabilities: { resume: true }, resume() { calls++; } };
   const resumed = await api.supervise(o6, () => { throw Error('must never restart writer'); });
   assert.equal(resumed.reason_code, 'native-safety-ceiling'); assert.equal(calls, 0);
@@ -77,6 +80,7 @@ async function run() {
   const c7 = clock(), o7 = base(c7); let late, captures = 0;
   o7.captureLateResult = value => { assert.equal(value.status, 'done'); captures++; };
   const p7 = api.supervise(o7, () => new Promise(resolve => { late = resolve; }));
+  await c7.advance(0);
   await c7.advance(1000); assert.equal((await p7).ok, false);
   late({ status: 'done' }); await c7.advance(0); assert.equal(captures, 1); assert.equal(c7.size(), 0);
   // Tool state permits only the existing bounded extension.
@@ -93,7 +97,7 @@ async function run() {
   await c9.advance(1000); assert.equal((await race).ok, false, 'deadline wins even before its scheduled tick');
   const c10 = clock(), o10 = base(c10);
   o10.adapter = { capabilities: { remote_events: true } }; o10.policy = o5.policy;
-  const startup = api.supervise(o10, () => new Promise(() => {})); await c10.advance(11);
+  const startup = api.supervise(o10, () => new Promise(() => {})); await c10.advance(0); await c10.advance(11);
   assert.equal((await startup).reason_code, 'dead-start');
   const noJournal = { ...base(clock()), journal: undefined, resume: true };
   await assert.rejects(() => api.supervise(noJournal, () => assert.fail('must not spawn')), /native-journal-required/);
@@ -121,6 +125,18 @@ async function run() {
   await assert.rejects(() => api.supervise(backwards, () => assert.fail('no spawn')), /native-journal-identity-or-clock/);
   const escape = base(clock()); escape.journal.file = path.join(root, '..', 'foreign.json');
   await assert.rejects(() => api.supervise(escape, () => assert.fail('no spawn')), /native-journal-path/);
+  for (const resume of [false,true]) for (const fire of [false,true]) {
+    const launchClock=clock(), launchOptions=base(launchClock); let launches=0, resumes=0;
+    if(resume) {
+      await api.supervise(launchOptions, () => { throw Error('fixture interrupted attempt'); });
+      launchOptions.adapter={capabilities:{resume:true},resume(){resumes++;return {status:'done'};}};
+    }
+    const delayed=api.supervise(launchOptions,()=>{launches++;return {status:'done'};});
+    launchClock.jump(1000); if(fire) launchClock.fire();
+    const delayedResult=await delayed;
+    assert.equal(delayedResult.ok,false); assert.equal(launches,0,'no launch after scheduled cutoff');
+    assert.equal(resumes,0,'no resume after scheduled cutoff'); assert.equal(launchClock.size(),0);
+  }
   console.log('native supervision discriminating tests passed');
 }
 if (require.main === module) run().catch(error => { console.error(error); process.exitCode = 1; });

@@ -502,6 +502,19 @@ async function main() {
   assert.strictEqual(acknowledged.ok, false, 'ack must not be accepted as terminal');
   assert.strictEqual(acknowledged.reason_code, 'native-terminal-unobserved');
   assert.strictEqual(ackReadback, 0, 'ack must not reach readback');
+  const resumeDir=fs.mkdtempSync(path.join(os.tmpdir(),'native-resume-evidence-'));
+  for (const boundary of ['after-invoke','readback']) {
+    const lifecycle={journal:{root:fs.realpathSync.native(resumeDir),file:path.join(fs.realpathSync.native(resumeDir),boundary+'.json'),authorize:()=>true}};
+    await invokeNative({...options,lifecycle},()=>{throw Error('interrupted fixture');});
+    lifecycle.adapter={capabilities:{resume:true},resume:()=>({status:'done'})};
+    const resumedFailure=await invokeNative({...options,lifecycle,
+      assertInvocation:stage=>{if(stage===boundary)throw Object.assign(Error('fixture'),{code:'fixture-guard'});},
+      readback:()=>{if(boundary==='readback')throw Object.assign(Error('fixture'),{code:'fixture-readback'});return null;},
+    },()=>assert.fail('resume must not launch'));
+    assert.equal(resumedFailure.ok,false);
+    assert.equal(resumedFailure.provider_called,true,'observed resumed terminal survives later failure');
+    assert.equal(resumedFailure.final_evidence.provider_called,true);
+  }
   assert.strictEqual((await invokeNative(options)).provider_called, false);
   let refusedCalls = 0;
   const unsupported = await invokeNative({ ...options, activeCapabilities: { ...codexCapabilities, models: [] } },

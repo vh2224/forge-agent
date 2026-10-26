@@ -775,7 +775,10 @@ async function recoverStandaloneTask(rawRequest, recovery, deps = {}) {
       const bounded = ceiling ? { ...route, workers_timeout: ceiling.seconds, workers_timeout_source: ceiling.source } : route;
       const result = await prepareStandaloneTask(next, { ...deps, resolveDispatch: () => bounded,
         ...(deps.invokeNative ? { invokeNative: (args, binding) => { assertReady?.(); return deps.invokeNative(args, binding); } } : {}) });
-      return { ...result, ...(assertReady && result.action === 'invoke-native' ? { assertReady } : {}) };
+      return { ...result, ...(assertReady && result.action === 'invoke-native' ? {
+        assertReady,
+        invoke: callback => result.invoke((...args) => { assertReady(); return callback(...args); }),
+      } : {}) };
     },
   });
 }

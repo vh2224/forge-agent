@@ -166,7 +166,14 @@ async function supervise(options, invoke) {
     if (finished) cleanup(); else dispose = cleanup;
   };
   tick();
-  if (!finished) Promise.resolve().then(() => previous ? adapter.resume(snapshot()) : invoke())
+  if (!finished) Promise.resolve().then(() => {
+    // Scheduling is not launch authority: a timer or elapsed wall deadline can
+    // win before this microtask runs. Recheck at the actual callback boundary.
+    if (finished) return;
+    if (elapsed() >= state.ceiling_ms || clock.wall() >= state.deadline_wall_ms) tick();
+    if (finished) return;
+    return previous ? adapter.resume(snapshot()) : invoke();
+  })
     .then(accept).catch(error => {
       state.provider_called = typeof error?.provider_called === 'boolean' ? error.provider_called : 'unknown';
       finish(false, /^[a-z0-9-]{1,100}$/.test(error?.code || '') ? error.code : 'native-invocation-failed');

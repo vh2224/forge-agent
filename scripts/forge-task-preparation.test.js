@@ -345,6 +345,27 @@ async function main() {
     } finally { recoveryApi.recoverAttempt = realRecover; }
     assert.equal(delivered, 0);
   });
+  await test('external native recovery revalidates live authority at callback boundary', async () => {
+    const request=fixture({model:'gpt-5.6-sol'}); request.activeCapabilities=codexCapabilities();
+    request.prompt='before repair';
+    await prep.prepareStandaloneTask(request,{invokeNative:async()=>{throw Object.assign(Error('fixture'),{code:'context-budget-exceeded',provider_called:false});}});
+    request.prompt='after repair';
+    const receiptFile=request.resultFile+'.receipt.json', stateFile=request.resultFile+'.recovery.json';
+    const route=JSON.parse(fs.readFileSync(receiptFile)).route;
+    const recoveryApi=require('./forge-attempt-recovery'), originalRecover=recoveryApi.recoverAttempt;
+    let valid=true,calls=0,checks=0;
+    try {
+      recoveryApi.recoverAttempt=async options=>options.invoke(route,{ok:true},null,()=>{
+        checks++; if(!valid)throw Object.assign(Error('revoked fixture authority'),{code:'fixture-authority-revoked'});
+      },'fixture-reservation');
+      const handoff=await prep.recoverStandaloneTask(request,{receiptFile,stateFile,correction:true},{processProbe:()=> 'stopped'});
+      assert.equal(typeof handoff.invoke,'function'); valid=false;
+      const outcome=await handoff.invoke(async()=>{calls++;return framed(envelope(request));});
+      assert.equal(calls,0,'revoked handoff cannot invoke callback');
+      assert.equal(outcome.ok,false); assert.equal(outcome.reason_code,'fixture-authority-revoked');
+      assert(checks>0); assert(!fs.existsSync(artifactPath(request)));
+    } finally { recoveryApi.recoverAttempt=originalRecover; }
+  });
   await test('standalone native recovery route carries no synthetic workers_timeout', async () => {
     const request = fixture({ model: 'gpt-5.6-sol' });
     request.activeCapabilities = codexCapabilities();
