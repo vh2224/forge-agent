@@ -357,6 +357,34 @@ function outputPath(file, inputs) {
   }
   return absolute;
 }
+// Probe the destination directory itself: Windows can enable case sensitivity
+// per directory, and other platforms may use case-insensitive volumes.
+function caseInsensitiveDirectory(directory) {
+  const name = '.ci-profile-case-Aa-' + crypto.randomBytes(16).toString('hex');
+  const probe = path.join(directory, name);
+  const alternate = path.join(directory, name.toUpperCase());
+  const fd = fs.openSync(probe, 'wx', 0o600);
+  try {
+    const own = fs.fstatSync(fd);
+    try {
+      const other = fs.statSync(alternate);
+      return own.dev === other.dev && own.ino === other.ino;
+    } catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+  } finally { fs.closeSync(fd); fs.unlinkSync(probe); }
+}
+function validateOutputIdentities(outputs) {
+  const rows = outputs.map(file => ({ file, parent: fs.realpathSync(path.dirname(file)),
+    name: path.basename(file), stat: fs.existsSync(file) ? fs.statSync(file) : null }));
+  const semantics = new Map();
+  for (let i = 0; i < rows.length; i += 1) for (let j = i + 1; j < rows.length; j += 1) {
+    const a = rows[i], b = rows[j];
+    if (a.file === b.file || (a.stat && b.stat && a.stat.dev === b.stat.dev && a.stat.ino === b.stat.ino)) fail('ci-profile-output-collision');
+    const ap = fs.statSync(a.parent), bp = fs.statSync(b.parent);
+    if (ap.dev !== bp.dev || ap.ino !== bp.ino || a.name.toLowerCase() !== b.name.toLowerCase()) continue;
+    if (!semantics.has(a.parent)) semantics.set(a.parent, caseInsensitiveDirectory(a.parent));
+    if (semantics.get(a.parent)) fail('ci-profile-output-collision');
+  }
+}
 function writeOutput(file, text, inputs) {
   const absolute = outputPath(file, inputs);
   const temporary = path.join(path.dirname(absolute), `.ci-profile-${crypto.randomBytes(16).toString('hex')}.tmp`);
@@ -398,7 +426,7 @@ function main(args = process.argv.slice(2)) {
     const reads = descriptors.map(descriptor => ({ ...descriptor, read: readInput(descriptor.file) }));
     const inputs = reads.map(row => row.read);
     const outputs = ['out', 'json', 'markdown'].filter(key => options[key]).map(key => outputPath(options[key], inputs));
-    if (new Set(outputs).size !== outputs.length) fail('ci-profile-output-collision');
+    validateOutputIdentities(outputs);
     const sources = reads.filter(row => row.type === 'source').map(row => sourceFrom(row.read, { local_platform: row.local_platform || null }));
     if (options.command === 'build-shard-profile') {
       const profile = profileFromSources(sources);

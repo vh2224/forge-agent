@@ -264,6 +264,33 @@ try {
     }
   });
 
+  test('issue 216 output identities collide before publication without residue', () => {
+    const dir = fs.mkdtempSync(path.join(root, 'outputs-'));
+    const first = path.join(dir, 'report.json'), second = path.join(dir, 'other.json');
+    fs.writeFileSync(first, 'unchanged'); fs.linkSync(first, second);
+    const invoke = (a, b) => cli(['report', '--json', a, '--markdown', b]);
+    let result = invoke(first, second);
+    assert.notStrictEqual(result.status, 0); assert(result.stderr.includes('ci-profile-output-collision'));
+    assert.strictEqual(fs.readFileSync(first, 'utf8'), 'unchanged');
+    assert.strictEqual(fs.readFileSync(second, 'utf8'), 'unchanged');
+    assert.deepStrictEqual(fs.readdirSync(dir).sort(), ['other.json', 'report.json']);
+    const probe = path.join(dir, 'CaseProbe'); fs.writeFileSync(probe, 'probe');
+    const insensitive = fs.existsSync(path.join(dir, 'caseprobe')); fs.unlinkSync(probe);
+    const lower = path.join(dir, 'fresh.json'), upper = path.join(dir, 'FRESH.JSON');
+    result = invoke(lower, upper);
+    if (insensitive) {
+      assert.notStrictEqual(result.status, 0); assert(result.stderr.includes('ci-profile-output-collision'));
+      assert(!fs.existsSync(lower)); assert.deepStrictEqual(fs.readdirSync(dir).sort(), ['other.json', 'report.json']);
+      result = invoke(first, path.join(dir, 'REPORT.JSON'));
+      assert.notStrictEqual(result.status, 0); assert.strictEqual(fs.readFileSync(first, 'utf8'), 'unchanged');
+    } else {
+      assert.strictEqual(result.status, 0, result.stderr);
+      assert(JSON.parse(fs.readFileSync(lower)).schema); assert(fs.readFileSync(upper, 'utf8').startsWith('#'));
+    }
+    result = invoke(path.join(dir, 'distinct.json'), path.join(dir, 'distinct.md'));
+    assert.strictEqual(result.status, 0, result.stderr);
+  });
+
   test('bounded explicit files strict UTF8 link refusal and closed CLI output safety', () => {
     const good = write('good.log', fixture('windows-shard-1.log'));
     assert.strictEqual(collector.readInput(good).bytes, fs.statSync(good).size);
