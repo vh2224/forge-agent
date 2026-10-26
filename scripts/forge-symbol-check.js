@@ -9,10 +9,12 @@
 //
 //   resolveSymbol(symbol, cwd) → { state, ...fields }
 //     Non-binary resolver:
-//       VERIFIED   → { state: 'VERIFIED', location: '<file>:<line>', exported: <bool> }
+//       VERIFIED   → { state: 'VERIFIED', location: '<file>:<line>', exported: <bool|null> }
 //       MISSING    → { state: 'MISSING' }
 //       AMBIGUOUS  → { state: 'AMBIGUOUS', candidates: ['<file>:<line>', ...] }
 //       UNCHECKABLE→ { state: 'UNCHECKABLE', reason: '<string>' }
+//     exported:null means static export metadata is unknown; it does not change
+//     definition resolution or its counts. Consumers must not coerce null to false.
 //     Uses ripgrep (rg), falls back to grep. If neither available → UNCHECKABLE.
 //
 //   checkSymbols(planContent, cwd) → {
@@ -62,13 +64,6 @@ const DEFINITION_PATTERNS = [
   /^[^\S\r\n]*export[ \t]+(?:async[ \t]+)?function[ \t]+__SYMBOL__[ \t]*\(/,
   // ES6 named export const: "export const symbolName"
   /^[^\S\r\n]*export[ \t]+(?:const|let|var)[ \t]+__SYMBOL__[ \t]*=/,
-];
-
-// Export-detection patterns: lines that export a symbol
-const EXPORT_PATTERNS = [
-  /\bexport\b/,
-  /\bmodule\.exports\b/,
-  /\bexports\b\./,
 ];
 
 // Fixed internal deadline for checkSymbols — < 120s Claude Code Bash tool default
@@ -225,17 +220,82 @@ function isDefinitionLine(text, symbol) {
   return false;
 }
 
-/**
- * Determine if a line appears to export the symbol.
- *
- * @param {string} text
- * @returns {boolean}
- */
-function isExportLine(text) {
-  for (const pattern of EXPORT_PATTERNS) {
-    if (pattern.test(text)) return true;
-  }
-  return false;
+// Deliberately bounded static subset, never require/eval inspected source.
+// Unknown syntax yields null, not a guessed negative. Regex/template lexing and
+// arbitrary expression/control-flow evaluation are outside this rung-0 helper.
+function staticExportStatus(def, symbol) {
+  try {
+    if (fs.statSync(def.file).size > MAX_FILE_SIZE) return null;
+    const source = fs.readFileSync(def.file, 'utf8');
+    let clean = '';
+    for (let i = 0; i < source.length;) {
+      const c = source[i], next = source[i + 1];
+      if (c === '/' && next === '/') {
+        const end = source.indexOf('\n', i);
+        const stop = end < 0 ? source.length : end;
+        clean += ' '.repeat(stop - i); i = stop;
+      } else if (c === '/' && next === '*') {
+        const end = source.indexOf('*/', i + 2);
+        if (end < 0) return null;
+        clean += source.slice(i, end + 2).replace(/[^\r\n]/g, ' '); i = end + 2;
+      } else if (c === '"' || c === "'") {
+        let end = i + 1;
+        while (end < source.length && source[end] !== c) { if (source[end] === '\\') end++; end++; }
+        if (end >= source.length) return null;
+        clean += '#' + source.slice(i + 1, end + 1).replace(/[^\r\n]/g, ' '); i = end + 1;
+      } else if (c === '`' || c === '/') return null;
+      else { clean += c; i++; }
+    }
+    const lines = clean.split(/\r?\n/), definition = lines[def.line - 1] || '';
+    if (!isDefinitionLine(definition, symbol)) return null;
+    const depthAt = index => {
+      let depth = 0;
+      for (const c of clean.slice(0, index)) { if (c === '{') depth++; else if (c === '}') depth--; }
+      return depth;
+    };
+    const definitionOffset = clean.split('\n').slice(0, def.line - 1).join('\n').length;
+    if (depthAt(definitionOffset) !== 0) return null;
+    if (/^\s*export\s+(?:(?:async\s+)?function|const|let|var|class)\b/.test(definition)) return true;
+    if (/\b(?:const|let|var|function|class)\s+(?:module|exports)\b/.test(clean)) return null;
+    const id = '[A-Za-z_$][A-Za-z0-9_$]*';
+    const assignment = new RegExp(`\\b(module\\s*\\.\\s*exports|exports)(?:\\s*\\.\\s*(${id}))?\\s*=\\s*(\\{[^{}]*\\}|${id})\\s*(?=;|\\n|$)`, 'g');
+    const values = new Map();
+    let direct = null, replacements = 0, usesExportsAlias = false, match, assignments = 0;
+    let remainder = clean;
+    while ((match = assignment.exec(clean)) !== null) {
+      if (++assignments > 128) return null;
+      if (depthAt(match.index) !== 0) return null;
+      const before = clean.slice(0, match.index).trimEnd();
+      if (before && !/[;}]$/.test(before)) return null;
+      const target = match[1].replace(/\s/g, ''), property = match[2], rhs = match[3].trim();
+      if (target === 'exports') {
+        if (!property) return null;
+        usesExportsAlias = true;
+      }
+      if (!property) {
+        if (++replacements > 1) return null;
+        values.clear(); direct = null;
+        if (rhs[0] !== '{') direct = rhs;
+        else {
+          const fields = rhs.slice(1, -1).split(',');
+          for (let n = 0; n < fields.length; n++) {
+            const field = fields[n].trim();
+            if (!field && n === fields.length - 1) continue;
+            const pair = new RegExp(`^(${id})(?:\\s*:\\s*(${id}))?$`).exec(field);
+            if (!pair || pair[1] === '__proto__') return null;
+            values.set(pair[1], pair[2] || pair[1]);
+          }
+        }
+      } else {
+        if (!new RegExp(`^${id}$`).test(rhs)) return null;
+        values.set(property, rhs);
+      }
+      remainder = remainder.slice(0, match.index) + ' '.repeat(match[0].length) + remainder.slice(match.index + match[0].length);
+    }
+    if (replacements && usesExportsAlias) return null;
+    if (/\b(?:module|exports|export)\b/.test(remainder)) return null;
+    return direct === symbol || [...values.values()].includes(symbol);
+  } catch { return null; }
 }
 
 /**
@@ -391,7 +451,7 @@ function parseSymbolsFromPlan(planContent) {
 /**
  * Resolve a single symbol against the codebase at cwd.
  * Non-binary result:
- *   VERIFIED   → { state: 'VERIFIED', location: '<file>:<line>', exported: boolean }
+ *   VERIFIED   → { state: 'VERIFIED', location: '<file>:<line>', exported: boolean|null }
  *   MISSING    → { state: 'MISSING' }
  *   AMBIGUOUS  → { state: 'AMBIGUOUS', candidates: ['<file>:<line>', ...] }
  *   UNCHECKABLE→ { state: 'UNCHECKABLE', reason: string }
@@ -445,7 +505,7 @@ function resolveSymbol(symbol, cwd, opts = {}) {
 
     if (definitions.length === 1) {
       const def = definitions[0];
-      const exported = isExportLine(def.text);
+      const exported = staticExportStatus(def, symbol);
       return {
         state: 'VERIFIED',
         location: `${def.file}:${def.line}`,
@@ -468,7 +528,7 @@ function resolveSymbol(symbol, cwd, opts = {}) {
     if (candidates.length === 1) {
       // All dupes pointed to same location — treat as VERIFIED
       const def = definitions[0];
-      const exported = isExportLine(def.text);
+      const exported = staticExportStatus(def, symbol);
       return {
         state: 'VERIFIED',
         location: `${def.file}:${def.line}`,
