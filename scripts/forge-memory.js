@@ -1138,6 +1138,9 @@ function listFragments(cwd, opts) {
 // require avoids the forge-memory <-> forge-projection module cycle.
 function queryRelevant(query) {
   if (!query || typeof query !== 'object') throw new Error('memory query must be an object');
+  if (query.diagnostic !== undefined && query.diagnostic !== false && query.diagnostic !== true) {
+    throw new Error('Invalid memory diagnostic');
+  }
   // Module-boundary guard (forge-prompt.js:306 calls this directly). The
   // delegate below guards too; the dedupe Set in forge-schema-guard collapses
   // both into a single stderr emission per cwd.

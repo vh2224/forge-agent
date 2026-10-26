@@ -74,6 +74,50 @@ try {
       assert.strictEqual(received.at(-1).diagnostic, false);
     } finally { projection.queryMemoryEntries = original; }
   });
+  test('public seam rejects invalid diagnostic flags before schema reads or warnings', () => {
+    const future = path.join(root, 'future-schema');
+    fs.mkdirSync(path.join(future, '.gsd'), { recursive: true });
+    fs.writeFileSync(path.join(future, '.gsd/SCHEMA-VERSION'), 'fragment-store@999.0.0\n');
+    const guard = require('./forge-schema-guard.js');
+    const originalRead = fs.readFileSync;
+    const originalWrite = process.stderr.write;
+    let schemaReads = 0;
+    const warnings = [];
+    try {
+      fs.readFileSync = function (file, ...args) {
+        if (path.basename(String(file)) === 'SCHEMA-VERSION') schemaReads++;
+        return originalRead.call(this, file, ...args);
+      };
+      process.stderr.write = chunk => { warnings.push(String(chunk)); return true; };
+      for (const cwd of [root, future]) {
+        guard._resetSchemaWarnings();
+        for (const value of ['yes', 1, 0, '', null, {}, [], NaN]) {
+          assert.throws(() => memory.queryRelevant({ cwd, diagnostic: value }),
+            /^Error: Invalid memory diagnostic$/);
+          assert.equal(schemaReads, 0);
+          assert.equal(warnings.length, 0);
+        }
+      }
+      const results = [];
+      for (const flag of [{}, { diagnostic: false }, { diagnostic: true }]) {
+        guard._resetSchemaWarnings();
+        schemaReads = 0;
+        warnings.length = 0;
+        results.push(memory.queryRelevant({ cwd: future, nowMs, ...flag }));
+        assert(schemaReads > 0);
+        assert.equal(warnings.length, 1);
+        assert(warnings[0].includes('999.0.0'));
+      }
+      assert.deepStrictEqual(results[0], results[1]);
+      assert(!Object.hasOwn(results[0], 'diagnostic'));
+      assert.deepStrictEqual(base(results[2]), results[0]);
+      assert.equal(results[2].diagnostic.stages.source.schema_partial, true);
+    } finally {
+      fs.readFileSync = originalRead;
+      process.stderr.write = originalWrite;
+      guard._resetSchemaWarnings();
+    }
+  });
   test('truth 2: fixed-clock base equality and bounded trace use the same reads/sorts and namespace', () => {
     const originalList = memory.listFragments;
     const originalRead = memory.readFragmentText;
