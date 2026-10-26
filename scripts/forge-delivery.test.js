@@ -403,6 +403,63 @@ test('commands inside evidence remain inert data', () => {
   assert.strictEqual(fs.existsSync(marker), false);
 });
 
+test('staged and disk evidence produce identical whole deliveries and child fingerprints', () => {
+  const unit = { type: 'task', id: 'T01', milestone: 'M001', slice: 'S01' };
+  const fx = fixture('staged-parity', unit);
+  const verification = verificationEnvelope(fx, [{ exitCode: 0 }]);
+  const artifact = artifactEnvelope(fx, [{ path: 'scripts/result.js', exists: true, substantive: true, wired: true, flags: [] }]);
+  const sources = { 'unpublished/nested/verify.json': verification, 'unpublished/nested/artifact.json': artifact };
+  fx.input.bindings = [
+    bind('verification', Object.keys(sources)[0], criterionId(unit, 'truth', 0), { check_index: 0 }, 'behavioral'),
+    bind('artifact', Object.keys(sources)[1], criterionId(unit, 'artifact', 0), { row_path: 'scripts/result.js', property: 'exists' }, 'existence'),
+  ];
+  const options = { ownerRoot: fx.owner, codeDir: fx.code };
+  const staged = delivery.buildDelivery(fx.input, { ...options, sourceEnvelopes: sources });
+  for (const [ref, envelope] of Object.entries(sources)) writeJson(path.join(fx.owner, ref), envelope);
+  const disk = delivery.buildDelivery(fx.input, options);
+  assert.deepStrictEqual(staged, disk);
+  assert.deepStrictEqual(delivery.buildDelivery(fx.input, { ...options, sourceEnvelopes: sources }), disk);
+  const absoluteInput = structuredClone(fx.input), absoluteSources = {};
+  for (const binding of absoluteInput.bindings) {
+    const relative = binding.source.path;
+    binding.source.path = path.join(fx.owner, relative);
+    absoluteSources[binding.source.path] = sources[relative];
+  }
+  assert.deepStrictEqual(delivery.buildDelivery(absoluteInput, options), disk);
+  assert.deepStrictEqual(delivery.buildDelivery(absoluteInput, { ...options, sourceEnvelopes: absoluteSources }), disk);
+  const parent = { ...fx.input, unit: { type: 'slice', id: 'S01', milestone: 'M001' }, bindings: [],
+    expected_children: [{ unit, delivery: 'child.json' }] };
+  writeJson(path.join(fx.owner, 'child.json'), staged);
+  const stagedParent = delivery.buildDelivery(parent, options);
+  writeJson(path.join(fx.owner, 'child.json'), disk);
+  assert.deepStrictEqual(delivery.buildDelivery(parent, options), stagedParent);
+  assert(stagedParent.criteria.some(row => row.id === criterionId(unit, 'truth', 0) && row.status === 'verificado'));
+});
+
+test('staged references retain physical root containment before publication', () => {
+  const fx = fixture('staged-containment'), id = criterionId(fx.unit, 'truth', 0);
+  const envelope = verificationEnvelope(fx, [{ exitCode: 0 }]);
+  const outside = path.join(fx.root, 'outside/verify.json');
+  const input = { ...fx.input, bindings: [bind('verification', outside, id, { check_index: 0 }, 'behavioral')] };
+  const output = delivery.buildDelivery(input, { ownerRoot: fx.owner, codeDir: fx.code, sourceEnvelopes: { [outside]: envelope } });
+  assert.notEqual(byId(output, id).status, 'verificado');
+  assert(byId(output, id).evidence.some(row => row.reasons.includes('source_outside_roots')));
+});
+
+test('staged missing descendants cannot escape through a linked or dangling ancestor', () => {
+  const fx = fixture('staged-links'), id = criterionId(fx.unit, 'truth', 0);
+  const target = path.join(fx.root, 'outside'); fs.mkdirSync(target);
+  const link = path.join(fx.owner, 'linked');
+  try { fs.symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir'); }
+  catch (error) { if (error.code === 'EPERM') skip('symlink creation unavailable: EPERM'); throw error; }
+  const ref = 'linked/not-published.json', envelope = verificationEnvelope(fx, [{ exitCode: 0 }]);
+  const input = { ...fx.input, bindings: [bind('verification', ref, id, { check_index: 0 }, 'behavioral')] };
+  const staged = () => byId(delivery.buildDelivery(input, { ownerRoot: fx.owner, codeDir: fx.code, sourceEnvelopes: { [ref]: envelope } }), id);
+  assert(staged().evidence.some(row => row.reasons.includes('source_outside_roots')));
+  fs.rmdirSync(target);
+  assert(staged().evidence.some(row => row.reasons.includes('source_unreadable')));
+});
+
 test('Markdown rendering escapes pipes, line breaks, markup and backticks', () => {
   const fx = fixture('markdown', { type: 'task', id: 'TMD' }, plan('pipe | line <tag> `code` ![x](url) **bold**'));
   const markdown = delivery.renderDeliveryMarkdown(build(fx));
@@ -657,6 +714,9 @@ test('documentary capture is distinct from behavior and requires bound independe
     writeJson(path.join(fx.owner,'documentary.json'),artifactEnvelope(fx,[],{documentary:payload}));};
   fx.input.bindings=[bind('artifact','documentary.json',id,{property:'documentary'},'documentary')];
   emit(capture);let result=byId(build(fx),id);assert.equal(result.status,'verificado');
+  const documentaryBytes = JSON.parse(fs.readFileSync(path.join(fx.owner, 'documentary.json'), 'utf8'));
+  assert.deepStrictEqual(delivery.buildDelivery(fx.input, { ownerRoot: fx.owner, codeDir: fx.code,
+    sourceEnvelopes: { 'documentary.json': documentaryBytes } }), build(fx));
   assert.equal(result.evidence[0].coverage,'documentary');
   for(const mutate of [value=>{value.reviewer=value.producer;},value=>{value.criteria[0].text='foreign';},
     value=>{value.criteria[0].eligibility='behavioral';},value=>{value.criteria[0].documents=[];},

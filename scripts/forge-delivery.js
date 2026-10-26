@@ -68,8 +68,31 @@ function resolveSafeFile(reference, roots, options = {}) {
   if (!nonEmpty(reference)) return { error: 'reference_missing' };
   const absolute = path.isAbsolute(reference) ? path.resolve(reference) : path.resolve(options.base || roots[0], reference);
   let real;
-  try { real = fs.realpathSync.native(absolute); } catch (error) { return { error: error.code === 'ENOENT' ? 'source_missing' : 'source_unreadable' }; }
+  let missing = false;
+  try { real = fs.realpathSync.native(absolute); } catch (error) {
+    if (error.code !== 'ENOENT' || !options.allowMissing) return { error: error.code === 'ENOENT' ? 'source_missing' : 'source_unreadable' };
+    // Staging precedes publication. Resolve the nearest existing ancestor using
+    // the same physical roots as disk reads; never treat a dangling link as an
+    // absent directory or use the unvalidated caller string as evidence identity.
+    let ancestor = absolute;
+    for (;;) {
+      try {
+        const physical = fs.realpathSync.native(ancestor);
+        real = path.resolve(physical, path.relative(ancestor, absolute));
+        missing = true;
+        break;
+      } catch (ancestorError) {
+        if (ancestorError.code !== 'ENOENT') return { error: 'source_unreadable' };
+        try { if (fs.lstatSync(ancestor).isSymbolicLink()) return { error: 'source_unreadable' }; }
+        catch (statError) { if (statError.code !== 'ENOENT') return { error: 'source_unreadable' }; }
+        const parent = path.dirname(ancestor);
+        if (parent === ancestor) return { error: 'source_unreadable' };
+        ancestor = parent;
+      }
+    }
+  }
   if (!roots.some((root) => inside(root, real))) return { error: 'source_outside_roots' };
+  if (missing) return { path: real };
   let stat;
   try { stat = fs.statSync(real); } catch (_) { return { error: 'source_unreadable' }; }
   if (!stat.isFile()) return { error: 'source_not_file' };
@@ -363,7 +386,7 @@ function applyBindings(input, criteria, context, diagnostics) {
       criterion.observations.push(invalidObservation(binding, binding.source.path, aspect, 'binding_source_kind_invalid')); continue;
     }
     const staged = context.sourceEnvelopes?.[binding.source.path];
-    const loaded = staged ? { value: staged, path: binding.source.path }
+    const loaded = staged ? { ...resolveSafeFile(binding.source.path, context.roots, { base: context.ownerRoot, allowMissing: true }), value: staged }
       : readJsonReference(binding.source.path, context.roots, cache, { base: context.ownerRoot });
     if (loaded.error) { criterion.observations.push(invalidObservation(binding, binding.source.path, aspect, loaded.error)); continue; }
     if (!isObject(loaded.value)) { criterion.observations.push(invalidObservation(binding, loaded.path, aspect, 'source_schema_invalid')); continue; }
