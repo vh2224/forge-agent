@@ -41,6 +41,7 @@ const memoryMod    = require('./forge-memory');
 // Single interpretation of memory facts/stats (shared/forge-memory-evidence.md).
 const memoryEvidence = require('./forge-memory-evidence');
 const diagnostic = require('./forge-memory-diagnostic.js');
+const popularity = require('./forge-memory-popularity.js');
 const checkerMod   = require('./forge-checker-memory');
 const storeStateMod = require('./forge-store-state');
 const itemsMod     = require('./forge-items');
@@ -879,6 +880,9 @@ function queryMemoryEntries(cwd, opts) {
   if (opts.diagnostic !== undefined && opts.diagnostic !== false && opts.diagnostic !== true) {
     throw new Error('Invalid memory diagnostic');
   }
+  if (opts.popularityShadow !== undefined && opts.popularityShadow !== false && opts.popularityShadow !== true) {
+    throw new Error('Invalid memory popularity shadow');
+  }
   const tracing = opts.diagnostic === true;
   // Module boundary: forge-memory.queryRelevant (← forge-prompt.js:306) and the
   // `--query`/`--select` CLI both land here. Object envelope → additive fields.
@@ -1022,6 +1026,25 @@ function queryMemoryEntries(cwd, opts) {
       });
     } catch (_) {
       result.diagnostic = diagnostic.unavailableDiagnostic('diagnostic-failed');
+    }
+  }
+  if (opts.popularityShadow === true) {
+    try {
+      if (Math.max(0, ...preferred.values()) > popularity.PARAMETERS.max_category_weight) {
+        result.popularity_shadow = popularity.unavailableShadow('shadow-failed');
+      } else {
+        const rows = ranked.map(entry => ({
+          identity: entry.identity,
+          overlap_count: entry.matched.length,
+          category_weight: preferred.get(String(entry.fact.category || 'unknown').toLowerCase()) || 0,
+          confidence: entry.confidence,
+          hits: entry.hits,
+          baseline_quality: entry.confidence * Math.max(1, entry.hits),
+        }));
+        result.popularity_shadow = popularity.compareShadow(rows, { limit });
+      }
+    } catch (_) {
+      result.popularity_shadow = popularity.unavailableShadow('shadow-failed');
     }
   }
   return result;
