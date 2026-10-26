@@ -69,6 +69,19 @@ function history(f) {
 }
 function cleanup(f) { fs.rmSync(f.cwd, { recursive: true, force: true }); }
 function test(name, fn) { fn(); console.log(`ok - ${name}`); }
+function restartEntry(f, snapshot, input, answers) {
+  const file = path.join(f.cwd, 'restart-entry.json');
+  fs.writeFileSync(file, JSON.stringify({ f, snapshot, input, answers }));
+  const result = spawnSync(process.execPath, ['-e', `
+    const t = require(process.argv[1]), data = JSON.parse(require('fs').readFileSync(process.argv[2]));
+    const options = t.liveOptions(data.f);
+    if (data.answers) options.questionStateAdapter = ({ previous }) => ({ answers: [
+      ...previous.questions.filter(q => q.status === 'resolved').map(q => ({ id: q.id, answer: q.answer })), ...data.answers] });
+    process.stdout.write(JSON.stringify(t.invoke(data.f, 'reenter', data.snapshot, data.input, options)));
+  `, __filename, file], { encoding: 'utf8', timeout: 20000 });
+  assert.strictEqual(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout);
+}
 function worker(f, operation) {
   const child = fork(__filename, [operation, f.cwd], { stdio: ['pipe', 'pipe', 'pipe', 'ipc'] });
   let stderr = ''; child.stderr.on('data', value => { stderr += value; });
@@ -78,6 +91,143 @@ function worker(f, operation) {
 }
 
 async function main() {
+  test('211: second linked failure reenters through verified ancestors after restart', () => {
+    const f = fixture();
+    try {
+      const first = consume(f);
+      const entered = invoke(f, 'reenter', first.snapshot, entryInput(f, first));
+      assert.strictEqual(entered.reason_code, 'entry-ready');
+      const historical = history(f);
+      f.request = recovery.bindLinkedRequest({ ...f.request, linked_begin_key: entered.controller_result.details.transaction.idempotency_key },
+        { ...liveOptions(f), ownerToken: f.input.owner_token });
+      f.receiptFile = path.join(f.cwd, 'second-receipt.json');
+      fs.writeFileSync(f.receiptFile, JSON.stringify({ phase: 'failed', recovery_identity_sha256: require('./forge-code-roots').digest(recovery.requestIdentity(f.request)),
+        failure: { reason_code: 'claude-timeout', provider_called: 'unknown' } }));
+      const second = invoke(f, 'consume-failure', JSON.parse(JSON.stringify(entered.snapshot)));
+      assert.strictEqual(second.reason_code, 'failure-consumed');
+      const next = restartEntry(f, second.snapshot, entryInput(f, second, 'second-entry'));
+      assert.strictEqual(next.reason_code, 'entry-ready');
+      const bound = recovery.bindLinkedRequest({ ...f.request, linked_begin_key: next.controller_result.details.transaction.idempotency_key },
+        { ...liveOptions(f), ownerToken: f.input.owner_token });
+      assert.notDeepStrictEqual(recovery.requestIdentity(bound), recovery.requestIdentity(f.request));
+      assert.strictEqual(digest(fs.readFileSync(controller.transactionFile(f.cwd, f.begin.idempotency_key))), historical[0]);
+      assert.strictEqual(digest(fs.readFileSync(path.join(f.cwd, 'old-receipt.json'))), historical[1]);
+    } finally { cleanup(f); }
+  });
+  test('211: current explicit answers survive partial refusal and restart without mutating failure', () => {
+    const f = fixture();
+    try {
+      const questions = [{ id: 'q1', question: 'First?', status: 'pending' }, { id: 'q2', question: 'Second?', status: 'pending' }];
+      const options = liveOptions(f);
+      const inspect = options.inspectAttempt;
+      options.inspectAttempt = () => ({ ...inspect(), pending_questions: questions });
+      const consumed = consume(f, options), input = entryInput(f, consumed);
+      const file = controller.transactionFile(f.cwd, input.entry.failure_key), before = fs.readFileSync(file);
+      const partial = invoke(f, 'reenter', consumed.snapshot, input, liveOptions(f, {
+        questionStateAdapter: () => ({ answers: [{ id: 'q1', answer: 'yes' }] })
+      }));
+      assert.strictEqual(partial.reason_code, 'pending-questions');
+      assert.strictEqual(partial.snapshot.pending_questions.find(q => q.id === 'q1').status, 'resolved');
+      const done = restartEntry(f, partial.snapshot, input, [{ id: 'q2', answer: 'yes' }]);
+      assert.strictEqual(done.reason_code, 'entry-ready');
+      assert(done.snapshot.pending_questions.every(q => q.status === 'resolved'));
+      assert.deepStrictEqual(fs.readFileSync(file), before);
+      const live = liveOptions(f, { questionStateAdapter: ({ previous }) => ({ answers: previous.questions.map(q => ({ id: q.id, answer: q.answer })) }) });
+      assert.strictEqual(invoke(f, 'next', done.snapshot, {}, live).reason_code, 'entry-ready');
+      const newlyPending = liveOptions(f, { questionStateAdapter: ({ previous }) => ({
+        answers: previous.questions.map(q => ({ id: q.id, answer: q.answer })),
+        questions: [{ id: 'q3', question: 'New decision?', status: 'resolved', answer: 'forged' }]
+      }) });
+      const blocked = invoke(f, 'next', done.snapshot, {}, newlyPending);
+      assert.strictEqual(blocked.reason_code, 'pending-questions');
+      assert.strictEqual(blocked.snapshot.pending_questions.find(q => q.id === 'q3').status, 'pending');
+      const answered = liveOptions(f, { questionStateAdapter: ({ previous }) => ({ answers: previous.questions.map(q => ({ id: q.id, answer: q.answer || 'yes' })) }) });
+      const resumed = invoke(f, 'next', JSON.parse(JSON.stringify(blocked.snapshot)), {}, answered);
+      assert.strictEqual(resumed.reason_code, 'entry-ready');
+      assert(resumed.snapshot.pending_questions.every(q => q.status === 'resolved'));
+      const observed = liveOptions(f, { ...answered,
+        inspectAttempt: () => ({ ...inspect(), pending_questions: [{ id: 'q4', question: 'Observed at dispatch?', status: 'pending' }] }) });
+      const waiting = invoke(f, 'next', resumed.snapshot, {}, observed);
+      assert.strictEqual(waiting.reason_code, 'pending-questions');
+      assert(waiting.snapshot.pending_questions.some(q => q.id === 'q4' && q.status === 'pending'));
+      const stillPending = invoke(f, 'next', waiting.snapshot, {}, liveOptions(f, {
+        questionStateAdapter: ({ previous }) => ({ answers: previous.questions.filter(q => q.status === 'resolved').map(q => ({ id: q.id, answer: q.answer })) })
+      }));
+      assert.strictEqual(stillPending.reason_code, 'pending-questions');
+      assert.deepStrictEqual(fs.readFileSync(file), before);
+    } finally { cleanup(f); }
+  });
+  test('211: imported flags and invalid answers cannot authorize entry', () => {
+    for (const answers of [[], [{ id: 'foreign', answer: 'yes' }], [{ id: 'q', answer: '' }],
+      [{ id: 'q', answer: 'yes' }, { id: 'q', answer: 'yes' }]]) {
+      const f = fixture();
+      try {
+        const options = liveOptions(f), inspect = options.inspectAttempt;
+        options.inspectAttempt = () => ({ ...inspect(), pending_questions: [{ id: 'q', question: 'Decision?', status: 'pending' }] });
+        const consumed = consume(f, options), entry = entryInput(f, consumed);
+        const original = fs.readFileSync(controller.transactionFile(f.cwd, entry.entry.failure_key));
+        const result = invoke(f, 'reenter', consumed.snapshot, { ...entry, answers: [{ id: 'q', answer: 'yes' }],
+          questionStateAdapter: { resolved: true } }, liveOptions(f, {
+          questionStateAdapter: () => ({ answers, questions: [{ id: 'q', question: 'Decision?', status: 'resolved', answer: 'yes' }] })
+        }));
+        assert.strictEqual(result.outcome, 'blocked');
+        assert.strictEqual(lease.observe(f.cwd, f.selected.unit.key).lease, null);
+        assert.deepStrictEqual(fs.readFileSync(controller.transactionFile(f.cwd, entry.entry.failure_key)), original);
+      } finally { cleanup(f); }
+    }
+  });
+  test('211: persisted answers require reattestation and reject scope/path/conflict drift', () => {
+    for (const variant of ['no-adapter', 'unattested', 'conflict', 'scope', 'path']) {
+      const f = fixture();
+      try {
+        const options = liveOptions(f), inspect = options.inspectAttempt;
+        options.inspectAttempt = () => ({ ...inspect(), pending_questions: [
+          { id: 'q1', question: 'First?', status: 'pending' }, { id: 'q2', question: 'Second?', status: 'pending' }] });
+        const consumed = consume(f, options), entry = entryInput(f, consumed);
+        const partial = invoke(f, 'reenter', consumed.snapshot, entry, liveOptions(f, { questionStateAdapter: () => ({ answers: [{ id: 'q1', answer: 'yes' }] }) }));
+        assert.strictEqual(partial.reason_code, 'pending-questions');
+        const dir = path.join(f.cwd, '.gsd', 'forge', 'entry-questions'), file = path.join(dir, fs.readdirSync(dir)[0]);
+        const saved = fs.readFileSync(file);
+        let live = liveOptions(f, { questionStateAdapter: () => ({ answers: [{ id: 'q1', answer: variant === 'conflict' ? 'no' : 'yes' }, { id: 'q2', answer: 'yes' }] }) });
+        if (variant === 'no-adapter') live = liveOptions(f);
+        if (variant === 'unattested') live.questionStateAdapter = () => ({ answers: [{ id: 'q2', answer: 'yes' }] });
+        if (variant === 'scope') { const data = JSON.parse(saved); data.identity_sha256 = '0'.repeat(64); fs.writeFileSync(file, JSON.stringify(data)); }
+        if (variant === 'path') { fs.renameSync(dir, dir + '-original'); fs.symlinkSync(dir + '-original', dir, process.platform === 'win32' ? 'junction' : 'dir'); }
+        const result = invoke(f, 'reenter', JSON.parse(JSON.stringify(partial.snapshot)), entry, live);
+        assert.strictEqual(result.outcome, 'blocked', variant);
+        assert.strictEqual(lease.observe(f.cwd, f.selected.unit.key).lease, null);
+        if (variant !== 'scope') assert.deepStrictEqual(fs.readFileSync(file), saved);
+      } finally { cleanup(f); }
+    }
+  });
+  test('211: ancestor corruption, foreign scope and loose/cyclic links fail closed', () => {
+    for (const variant of ['tamper', 'foreign-owner', 'foreign-roots', 'loose', 'cycle']) {
+      const f = fixture();
+      try {
+        const first = consume(f), entered = invoke(f, 'reenter', first.snapshot, entryInput(f, first));
+        const second = invoke(f, 'consume-failure', entered.snapshot), input = entryInput(f, second, 'second');
+        const beginKey = entered.controller_result.details.transaction.idempotency_key;
+        const begin = controller.lookupRecord(f.cwd, 'transaction', beginKey);
+        if (variant === 'tamper') begin.linked_entry.failure_checksum = '0'.repeat(64);
+        if (variant === 'foreign-owner') begin.linked_entry.owner_digest = 'foreign';
+        if (variant === 'foreign-roots') begin.linked_entry.roots = [];
+        if (variant === 'loose') begin.linked_entry.failure_key = 'missing';
+        if (variant === 'cycle') begin.linked_entry.failure_key = input.entry.failure_key;
+        controller.writeAtomic(controller.transactionFile(f.cwd, beginKey), begin);
+        // Keep the terminal begin checksum internally consistent, so this
+        // regression reaches lineage validation rather than storage corruption.
+        const failure = controller.lookupRecord(f.cwd, 'transaction', input.entry.failure_key);
+        failure.terminal_failure.begin_checksum = require('./forge-orchestrate').checksum(begin);
+        controller.writeAtomic(controller.transactionFile(f.cwd, input.entry.failure_key), failure);
+        input.entry.failure_checksum = require('./forge-orchestrate').checksum(failure);
+        const result = invoke(f, 'reenter', second.snapshot, input);
+        assert.strictEqual(result.outcome, 'blocked', variant);
+        assert(['entry-ancestry-invalid', 'record-conflict'].includes(result.reason_code), result.reason_code);
+        assert.strictEqual(lease.observe(f.cwd, f.selected.unit.key).lease, null);
+      } finally { cleanup(f); }
+    }
+  });
+
   test('consumed T01 failure is scoped to its slice, preserving original recovery gate', () => {
     for (const host of ['codex', 'claude']) {
       const f = fixture(host, 'auto', true);
@@ -294,6 +444,11 @@ async function main() {
       assert.deepStrictEqual(history(f), before);
       await assert.rejects(sidecar.runUnitSidecar({ ...request, dispatchId: 'forged', linkedEntryBinding: {}, entry: { approved: true } }), /authority|required/);
       assert.strictEqual(calls, 1);
+      await assert.rejects(sidecar.runUnitSidecar({ ...request, dispatchId: 'new-question' }, { linkedEntryOptions: {
+        ...linkedEntryOptions, questionStateAdapter: () => ({ answers: [], questions: [{ id: 'dispatch-q', question: 'New choice?' }] })
+      } }), error => error.code === 'pending-questions');
+      assert.strictEqual(calls, 1, 'pending functional question must refuse before transport');
+      assert.deepStrictEqual(history(f), before);
       console.log('ok - real unit-sidecar validates linked entry before simulated transport and captures fresh identity');
     } finally { xllm.runPlan = original; cleanup(f); fs.rmSync(outputDir, { recursive: true, force: true }); }
   }

@@ -907,7 +907,7 @@ function projectLogicalHistory(cwd, milestone) {
 // Failure consumption is a new terminal transaction. The old begin, receipt,
 // candidate and recovery clock are immutable inputs, never patched history.
 function verifiedFailure(cwd, transaction) {
-  if (!transaction.terminal_failure || transaction.phase !== 'committed') return null;
+  if (!transaction?.terminal_failure || transaction.phase !== 'committed') return null;
   const begin = lookupRecord(cwd, 'transaction', transaction.terminal_failure.begin_key);
   const result = lookupRecord(cwd, 'result', transaction.idempotency_key);
   const event = readEvents(eventsFile(cwd, transaction.milestone)).find(item => item.idempotency_key === transaction.idempotency_key);
@@ -932,9 +932,40 @@ function failureProjection(cwd, milestone) {
   }
   return failures;
 }
+// Exempt only ancestors whose immutable links and scope are fully verified.
+function failureAncestors(cwd, key) {
+  const keys = new Set();
+  let failure = lookupRecord(cwd, 'transaction', key), expected = null;
+  while (failure) {
+    if (keys.has(failure.idempotency_key)) throw new ControllerError('entry-ancestry-invalid', 'failure cycle');
+    const checked = verifiedFailure(cwd, failure), begin = checked?.begin;
+    if (!checked || begin.action !== 'begin' || begin.phase !== 'committed'
+      || begin.unit.key !== failure.unit.key || begin.milestone !== failure.milestone
+      || begin.owner_digest !== failure.owner_digest || begin.host_runtime !== failure.host_runtime
+      || begin.after.state.active_slice !== failure.terminal_failure.slice
+      || expected && (expected.failure_checksum !== sha(failure) || expected.unit !== failure.unit.key
+        || expected.milestone !== failure.milestone || expected.slice !== failure.terminal_failure.slice
+        || expected.owner_digest !== failure.owner_digest || expected.host_runtime !== failure.host_runtime
+        || sha(expected.roots) !== sha(failure.terminal_failure.safety.roots)
+        || expected.begin_checksum !== failure.terminal_failure.begin_checksum)) {
+      throw new ControllerError('entry-ancestry-invalid', 'failure ancestry identity mismatch');
+    }
+    keys.add(failure.idempotency_key);
+    if (!begin.linked_entry) break;
+    const link = begin.linked_entry;
+    if (link.owner_digest !== failure.owner_digest || link.host_runtime !== failure.host_runtime
+      || sha(link.roots) !== sha(failure.terminal_failure.safety.roots)) throw new ControllerError('entry-ancestry-invalid', 'entry roots/owner mismatch');
+    expected = { ...link, unit: failure.unit.key, milestone: failure.milestone, slice: failure.terminal_failure.slice };
+    failure = lookupRecord(cwd, 'transaction', link.failure_key);
+    if (!failure) throw new ControllerError('entry-ancestry-invalid', 'missing ancestor');
+  }
+  if (!keys.size) throw new ControllerError('entry-ancestry-invalid', 'missing failure');
+  return keys;
+}
 function assertUnitAvailable(cwd, milestone, unit, slice, options, linked = {}) {
   if (pendingTransactions(cwd).some(item => item.idempotency_key !== linked.transactionKey && (item.terminal_failure || item.linked_entry))) throw new ControllerError('transaction-pending', 'transação vinculada incompleta impede begin');
-  const failures = failureProjection(cwd, milestone).filter(item => item.transaction.idempotency_key !== linked.failureKey);
+  const ancestors = linked.failureKey ? failureAncestors(cwd, linked.failureKey) : new Set();
+  const failures = failureProjection(cwd, milestone).filter(item => !ancestors.has(item.transaction.idempotency_key));
   const current = forgeState.read(cwd, milestone);
   const inventory = !current ? {} : options && typeof options.inventoryReader === 'function'
     ? options.inventoryReader(cwd, milestone, current) : discoverInventory(cwd, milestone, current);
@@ -1116,6 +1147,50 @@ function consumeFailure(cwd, request, options = {}) {
   });
 }
 
+// The live host reattests explicit answers from its evidence, including after
+// restart. Serialized resolved flags alone are never authority.
+function currentEntryQuestions(cwd, failure, options) {
+  return withMutex(cwd, 'unit-controller-questions', () => updateEntryQuestions(cwd, failure, options));
+}
+function updateEntryQuestions(cwd, failure, options) {
+  const interaction = require('./forge-interaction');
+  const identity = { failure_key: failure.idempotency_key, failure_checksum: sha(failure),
+    unit: failure.unit.key, milestone: failure.milestone, slice: failure.terminal_failure.slice,
+    owner_digest: failure.owner_digest, host_runtime: failure.host_runtime, roots: failure.terminal_failure.safety.roots };
+  if (sha(physicalRoots(identity.roots)) !== sha(identity.roots)) throw new ControllerError('entry-roots-mismatch', 'physical roots changed');
+  const file = path.join(rootDir(cwd), 'entry-questions', sha(identity) + '.json');
+  for (let cursor = file; cursor !== path.dirname(cursor); cursor = path.dirname(cursor)) {
+    if (fs.existsSync(cursor) && fs.lstatSync(cursor).isSymbolicLink()) throw new ControllerError('question-state-path-invalid', 'linked question state path');
+    if (path.resolve(cursor) === path.resolve(cwd)) break;
+  }
+  const previous = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : null;
+  if (previous && (previous.schema_version !== 1 || previous.identity_sha256 !== require('./forge-code-roots').digest(identity))) {
+    throw new ControllerError('question-state-scope-mismatch', 'foreign question state');
+  }
+  const historical = failure.terminal_failure.safety.pending_questions;
+  if (typeof options.questionStateAdapter !== 'function') {
+    if (previous || historical.some(q => q.status === 'pending')) throw new ControllerError('pending-questions', 'live question attestation required');
+    return clone(historical);
+  }
+  let questions = interaction.mergePendingQuestions(historical, previous?.questions || []);
+  questions = interaction.mergePendingQuestions(questions, options.observedPendingQuestions || []);
+  const live = options.questionStateAdapter({ identity: clone(identity), previous: clone(previous), historical: clone(historical), questions: clone(questions) });
+  if (!live || !Array.isArray(live.answers)) throw new ControllerError('question-state-attestation-required', 'explicit attested answers required');
+  questions = interaction.mergePendingQuestions(questions, live.questions || []);
+  if (live.answers.length) questions = interaction.resolvePendingQuestions(questions, live.answers);
+  for (const old of previous?.questions || []) {
+    const current = questions.find(q => q.id === old.id);
+    if (old.status === 'resolved' && (current.status !== 'resolved' || current.answer !== old.answer)) throw new ControllerError('question-state-attestation-required', 'persisted answer not reattested');
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  return interaction.persistQuestionState(file, identity, questions, live.answers);
+}
+function assertQuestionsResolved(questions) {
+  if (questions.some(q => q.status === 'pending')) {
+    const error = new ControllerError('pending-questions', 'decisão funcional pendente');
+    error.pending_questions = clone(questions); throw error;
+  }
+}
 function entryScope(cwd, input, failure, options) {
   if (typeof options.captureEntryBaseline !== 'function' || !options.entryAuthority || typeof options.entryAuthority.issue !== 'function') {
     throw new ControllerError('entry-authority-required', 'baseline e autorização viva da nova unidade obrigatórias');
@@ -1146,8 +1221,10 @@ function reenter(cwd, request, options = {}) {
     if (!verified || input.entry.failure_checksum !== sha(failure) || failure.unit.key !== unitFromRequest(input).key || failure.milestone !== input.milestone
       || failure.owner_digest !== ownerDigest(input.owner_token)
       || failure.host_runtime !== forgeRuntime.normalizeHostRuntime(input.host_runtime)) throw new ControllerError('entry-failure-mismatch', 'falha consumida não corresponde à entrada');
-    if (failure.terminal_failure.safety.pending_questions.some(item => item.status === 'pending')) throw new ControllerError('pending-questions', 'decisão funcional pendente');
+    failureAncestors(cwd, failure.idempotency_key);
     const linked = entryScope(cwd, input, failure, options), key = `linked-entry:${sha(linked.entry_id)}`;
+    const questions = currentEntryQuestions(cwd, failure, options);
+    assertQuestionsResolved(questions);
     let existing = lookupRecord(cwd, 'transaction', key);
     if (existing && sha(existing.linked_entry) !== sha(linked)) throw new ControllerError('entry-conflict', 'entry_id reutilizado com conteúdo divergente');
     if (pendingTransactions(cwd).some(item => item.idempotency_key !== key)) throw new ControllerError('transaction-pending', 'transação pendente impede reentrada');
@@ -1155,7 +1232,7 @@ function reenter(cwd, request, options = {}) {
       { failureKey: failure.idempotency_key, transactionKey: key });
     if (existing?.phase === 'committed') {
       assertLease(cwd, existing.unit.key, input.owner_token, existing.lease_generation);
-      return { ok: true, reason: 'entry-ready', transaction: publicTransaction(existing, cwd), linked_entry: clone(linked) };
+      return { ok: true, reason: 'entry-ready', transaction: publicTransaction(existing, cwd), linked_entry: clone(linked), pending_questions: questions };
     }
     if (!existing) {
       if (failureProjection(cwd, input.milestone).some(item => item.transaction.idempotency_key === failure.idempotency_key && item.entry)) throw new ControllerError('entry-conflict', 'falha já possui entrada');
@@ -1192,7 +1269,7 @@ function reenter(cwd, request, options = {}) {
       fail(options, 'after-intent');
     }
     const result = runTransaction(cwd, existing, input.owner_token, existing.lease_generation, options);
-    return { ...result, reason: 'entry-ready', linked_entry: clone(linked) };
+    return { ...result, reason: 'entry-ready', linked_entry: clone(linked), pending_questions: questions };
   });
 }
 
@@ -1203,13 +1280,16 @@ function validateLinkedEntry(cwd, key, options = {}) {
   if (!begin?.linked_entry || begin.action !== 'begin' || begin.phase !== 'committed') throw new ControllerError('entry-invalid', 'begin vinculado ausente');
   const linked = begin.linked_entry;
   const failure = lookupRecord(cwd, 'transaction', linked.failure_key);
-  verifiedFailure(cwd, failure);
+  failureAncestors(cwd, linked.failure_key);
+  if (!failure || linked.failure_checksum !== sha(failure)) throw new ControllerError('entry-conflict', 'linked failure changed');
   const ownerToken = options.ownerToken;
   const live = entryScope(cwd, { owner_token: ownerToken, host_runtime: linked.host_runtime,
     entry: { entry_id: linked.entry_id, authorization_ref: linked.authorization_ref } }, failure, options);
   if (sha(live) !== sha(linked)) throw new ControllerError('entry-conflict', 'entrada mudou desde autorização');
+  const questions = currentEntryQuestions(cwd, failure, options);
+  assertQuestionsResolved(questions);
   assertLease(cwd, begin.unit.key, ownerToken, begin.lease_generation);
-  return { entry_digest: linked.entry_digest, entry_id: linked.entry_id, begin_key: key, unit: begin.unit.key, roots: linked.roots, classification: 'new-unit' };
+  return { entry_digest: linked.entry_digest, entry_id: linked.entry_id, begin_key: key, unit: begin.unit.key, roots: linked.roots, classification: 'new-unit', pending_questions: questions };
 }
 
 function parseArgs(argv) {

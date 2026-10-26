@@ -102,12 +102,18 @@ function validatePending(inputValue, decision, options = {}) {
   if (consumed) return { ok: false, reason: 'failure-deferred' };
   const boundary = forgeController.lookupRecord(input.cwd, 'boundary', begun.unit.key);
   if (boundary?.kind === 'needs-input') return { ok: false, reason: 'pending-questions' };
-  if (begun.linked_entry) forgeController.validateLinkedEntry(input.cwd, begun.idempotency_key, { ...options, ownerToken: input.owner_token });
-  if (typeof options.inspectAttempt === 'function') {
-    const context = options.inspectAttempt({ cwd: input.cwd, begin: begun, references: {} });
-    if (context?.pending_questions?.some(item => item.status === 'pending')) return { ok: false, reason: 'pending-questions' };
+  const context = typeof options.inspectAttempt === 'function'
+    ? options.inspectAttempt({ cwd: input.cwd, begin: begun, references: {} }) : null;
+  const currentQuestions = begun.linked_entry
+    ? forgeController.validateLinkedEntry(input.cwd, begun.idempotency_key, { ...options, ownerToken: input.owner_token,
+      observedPendingQuestions: context?.pending_questions || [] }).pending_questions : null;
+  if (context) {
+    if (context?.pending_questions?.some(item => item.status === 'pending'
+      && !currentQuestions?.some(q => q.id === item.id && q.question === item.question && q.status === 'resolved'))) {
+      return { ok: false, reason: 'pending-questions', pending_questions: require('./forge-interaction').mergePendingQuestions(currentQuestions || [], context.pending_questions) };
+    }
   }
-  return { ok: true };
+  return { ok: true, ...(currentQuestions ? { pending_questions: currentQuestions } : {}) };
 }
 function unit(value) {
   if (!value) return null;
@@ -410,7 +416,9 @@ function linkedOperation(operation, inputValue, options) {
     return output;
   } catch (cause) {
     if (cause.code === 'CONTROLLER_FAILPOINT') throw cause;
-    return base(operation, 'blocked', cause.code || 'linked-operation-refused', input);
+    const result = base(operation, 'blocked', cause.code || 'linked-operation-refused', input);
+    if (cause.pending_questions) result.details = { pending_questions: cause.pending_questions };
+    return result;
   }
 }
 function run(operation, input, options) {

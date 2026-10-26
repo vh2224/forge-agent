@@ -91,7 +91,8 @@ function next(state, input, orchestrate) {
     if (orchestrate.validatePending) {
       let checked;
       try { checked = orchestrate.validatePending(delegateInput(input, state), state.last_decision.controller_result); }
-      catch (cause) { checked = { ok: false, reason: cause.code || 'pending-validation-failed' }; }
+      catch (cause) { checked = { ok: false, reason: cause.code || 'pending-validation-failed', pending_questions: cause.pending_questions }; }
+      if (checked.pending_questions) state.pending_questions = checked.pending_questions;
       if (!checked.ok) return publicResult('next', state, 'blocked', checked.reason, 'stop', null);
     }
     return { ...state.last_decision, snapshot: state };
@@ -184,6 +185,7 @@ function reenter(state, input, orchestrate) {
   const replay = state.last_entry_id === input.entry?.entry_id && state.last_decision;
   if (!replay && state.step_count >= state.max_steps) return publicResult('reenter', state, 'blocked', 'step-budget-exhausted', 'stop', null);
   const delegated = orchestrate.run('reenter', delegateInput(input, state));
+  if (delegated.details?.pending_questions) state.pending_questions = delegated.details.pending_questions;
   if (delegated.outcome !== 'completed') return publicResult('reenter', state, 'blocked', delegated.reason_code, 'stop', delegated);
   state.current_unit = safeUnit(delegated.unit); state.lifecycle = 'dispatch_required'; if (!replay) state.step_count += 1;
   state.last_entry_id = input.entry.entry_id;
@@ -200,7 +202,7 @@ function advance(snapshot, commandValue, input = {}, dependencies = {}) {
   const controller = dependencies.orchestrate || orchestrateDefault;
   if (!controller || typeof controller.run !== 'function') throw error('invalid-controller', 'forge-orchestrate indisponível');
   const trusted = {};
-  for (const name of ['prefsReader', 'inventoryReader', 'now', 'failpoint', 'inspectAttempt', 'processProbe', 'replaySavedResponse', 'reconcileRoots', 'captureEntryBaseline', 'entryAuthority']) {
+  for (const name of ['prefsReader', 'inventoryReader', 'now', 'failpoint', 'inspectAttempt', 'processProbe', 'replaySavedResponse', 'reconcileRoots', 'captureEntryBaseline', 'entryAuthority', 'questionStateAdapter']) {
     if (dependencies[name] !== undefined) trusted[name] = dependencies[name];
   }
   const orchestrate = { run: (operation, payload) => controller.run(operation, payload, trusted),

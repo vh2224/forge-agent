@@ -149,6 +149,31 @@ authority on entry and at the real sidecar boundary. A reference, `approved:true
 serialized handle or expired capability is not authority. A fresh entry consumes
 one step once and respects `max_steps`. Pending functional questions still block.
 
+Repeated failures traverse the full immutable failure → begin → linked failure
+chain. Only ancestors with matching checksums, unit, milestone, slice, host,
+owner and physical roots are exempt from the unresolved-failure guard. Missing,
+cyclic, altered or foreign links fail closed; unrelated failures remain blockers.
+
+For current functional answers, the trusted host supplies `questionStateAdapter`
+in loop dependencies and in sidecar `linkedEntryOptions`. This synchronous callback
+receives `{identity, historical, previous, questions}` and returns
+`{answers: [{id, answer}], questions?: [{id, question}]}`. It must verify its own
+conversation/evidence provenance and reattest all previously resolved explicit
+answers; it must not merely echo arbitrary JSON. Reattestation after restart uses
+persisted evidence and does not require asking the user again. Empty, foreign,
+duplicate or conflicting answer entries cannot resolve a question. New questions
+start pending regardless of imported status flags. Identity binds the failure
+checksum, unit, milestone/slice, owner, host and physical roots.
+
+Current state is stored separately under `.gsd/forge/entry-questions/` through the
+interaction helper; historical failure/begin/receipt bytes remain unchanged.
+Partial answers are returned in the blocked loop snapshot. Reentry and real
+linked dispatch revalidate the live adapter; restart without it cannot promote
+persisted answers into authority. Newly observed pending questions block cached
+dispatch and remain pending until explicitly answered. Missing or altered scoped
+state, path links and changed roots fail closed. This embedding contract does not
+authenticate a host that deliberately supplies a dishonest live callback.
+
 The old begin, receipt and recovery bytes, attempted destinations and cumulative
 60000 ms deadline remain unchanged. `linked_begin_key` is passed to
 `forge-unit-sidecar.runUnitSidecar` with trusted `linkedEntryOptions`. The adapter
