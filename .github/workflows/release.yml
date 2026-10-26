@@ -78,30 +78,7 @@ jobs:
         run: GITHUB_EVENT_PATH="$RUNNER_TEMP/release-event.json" node scripts/forge-release-github.js wait --sha "$GITHUB_SHA"
       - name: Resolve version
         id: version
-        run: node scripts/forge-release-version.js --check --github-output "$GITHUB_OUTPUT"
-      - name: Generate changelog
-        env:
-          RELEASE_RANGE: ${{ steps.version.outputs.range }}
-        shell: bash
-        run: |
-          node <<'NODE'
-          const fs = require('fs');
-          const path = require('path');
-          const { execFileSync } = require('child_process');
-          const range = process.env.RELEASE_RANGE;
-          let commits;
-          try { commits = execFileSync('git', ['log', range, '--pretty=format:%H %s'], { encoding: 'utf8' }); }
-          catch (_) { commits = execFileSync('git', ['log', '--pretty=format:%H %s'], { encoding: 'utf8' }); }
-          const sections = { 'Breaking Changes': [], Features: [], 'Bug Fixes': [], 'Other Changes': [] };
-          for (const line of commits.split('\n').filter(Boolean)) {
-            const hash = line.slice(0, 7); const message = line.slice(line.indexOf(' ') + 1);
-            const category = /^[a-z]+(\(.+\))?!:|BREAKING[ -]CHANGE/i.test(message) ? 'Breaking Changes' :
-              /^feat(\(.+\))?:/.test(message) ? 'Features' : /^fix(\(.+\))?:/.test(message) ? 'Bug Fixes' : 'Other Changes';
-            sections[category].push(`- ${message} (${hash})`);
-          }
-          fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'release-notes.md'),
-            Object.entries(sections).filter(([, rows]) => rows.length).map(([title, rows]) => `### ${title}\n\n${rows.join('\n')}\n`).join('\n'));
-          NODE
+        run: node scripts/forge-release-version.js --check --github-output "$GITHUB_OUTPUT" --notes "$RUNNER_TEMP/release-notes.md"
       - name: Fresh token-free prepare (10 minute receipt TTL)
         id: prepare
         env:
@@ -172,30 +149,7 @@ jobs:
           NODE
       - name: Resolve version
         id: version
-        run: node scripts/forge-release-version.js --check --github-output "$GITHUB_OUTPUT"
-      - name: Generate changelog
-        env:
-          RELEASE_RANGE: ${{ steps.version.outputs.range }}
-        shell: bash
-        run: |
-          node <<'NODE'
-          const fs = require('fs');
-          const path = require('path');
-          const { execFileSync } = require('child_process');
-          const range = process.env.RELEASE_RANGE;
-          let commits;
-          try { commits = execFileSync('git', ['log', range, '--pretty=format:%H %s'], { encoding: 'utf8' }); }
-          catch (_) { commits = execFileSync('git', ['log', '--pretty=format:%H %s'], { encoding: 'utf8' }); }
-          const sections = { 'Breaking Changes': [], Features: [], 'Bug Fixes': [], 'Other Changes': [] };
-          for (const line of commits.split('\n').filter(Boolean)) {
-            const hash = line.slice(0, 7); const message = line.slice(line.indexOf(' ') + 1);
-            const category = /^[a-z]+(\(.+\))?!:|BREAKING[ -]CHANGE/i.test(message) ? 'Breaking Changes' :
-              /^feat(\(.+\))?:/.test(message) ? 'Features' : /^fix(\(.+\))?:/.test(message) ? 'Bug Fixes' : 'Other Changes';
-            sections[category].push(`- ${message} (${hash})`);
-          }
-          fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'release-notes.md'),
-            Object.entries(sections).filter(([, rows]) => rows.length).map(([title, rows]) => `### ${title}\n\n${rows.join('\n')}\n`).join('\n'));
-          NODE
+        run: node scripts/forge-release-version.js --check --github-output "$GITHUB_OUTPUT" --notes "$RUNNER_TEMP/release-notes.md"
       - name: Fresh token-free prepare (10 minute receipt TTL)
         id: prepare
         env:

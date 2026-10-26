@@ -139,10 +139,10 @@ and atomicity against external publication writers are outside this module's pro
 Release starts only from `push` on `refs/heads/master`.
 Tag creation alone does not schedule Release; no tag-selected workflow is trusted.
 Existing exact-SHA tags and releases still pass through the complete master barrier.
-Version selection remains `forge-release-version.js --check --github-output`.
-No conventional-commit, semver, declared version or changelog policy changes here.
+S08 resolves version and notes together with `forge-release-version.js --check --github-output --notes`.
+S08 keeps label-based semver and declared-version checks; --check blocks impact-label-conflict/impact-invalid (see shared/forge-release-impact.md).
 The original Breaking Changes, Features, Bug Fixes and Other Changes order remains.
-Notes use commit subjects without shell evaluation and are saved under runner.temp.
+S08 classifies full commit messages via the helper, including breaking signals in bodies, without shell evaluation; notes are saved under runner.temp.
 
 Both jobs have a fixed master checkout, fetch-depth 0 and persist-credentials false.
 Only fixed checkout/setup-node actions and inline builtin/Git context checks run first.
@@ -212,7 +212,7 @@ This conservative coverage can increase cost/latency; no efficiency gain is clai
 ## Evidence levels and future slices
 
 The workflow harness reads real YAML, rejects unsupported step forms, executes its
-inline bootstrap/HEAD/changelog bodies and dispatches its real helper entrypoints
+inline bootstrap/HEAD bodies and the real version/notes argv in a temporary Git repository, without inline changelog, and dispatches helper entrypoints
 through controlled argv and productive prepare/apply with fake transport/effects.
 Its temporary Git index/object tree checks final blob bytes without changing the
 real checkout/index. It does not publish or exercise a remote GitHub runner.
@@ -226,7 +226,7 @@ and human UAT are independent facts. Remote CI/review/UAT remain pending unless
 separate concrete evidence establishes each one; local positives cannot infer them.
 S04 may narrow coverage only with proven dependencies, negative fixtures and joint
 policy/mapping/pin updates. Unknown paths remain conservative until then.
-S08 preserves current semver/changelog contracts; this route does not redesign them.
+S08 changes only the version/notes steps of this route; note generation now depends on the candidate helper from the same validated SHA, without an individual script pin. Markdown and URLs remain arbitrary data passed to gh --notes-file, bounded by the existing 4 MiB prepare limit.
 S09 consumes explicit evidence/acceptance and may not turn a simulated pass into UAT.
 
 ## S04: CI concurrency and observed shard profile
@@ -254,7 +254,7 @@ the current head's group; preservation of the newest head in that case is
 unverified and excluded from fresh-arrival claims. Separate hosted validation is
 pending, including cancellation, remote check consumers and rerun behavior.
 
-Release workflow bytes and pins remain unchanged: group release and
+S08 updates both release workflow byte pins together; exact reversal preserves the historical S04 evidence. Group release and
 cancel-in-progress:false preserve active publication. The existing limitation
 release-pending-may-be-replaced remains: a third arrival can replace a pending
 candidate while the first publishes. This is not durable FIFO and does not

@@ -182,7 +182,7 @@ Other events use run-id groups; cancel-in-progress is true only for pull_request
 Group inputs are event_name, pull_request.number and run_id, never title or head_ref.
 Release retains literal group release and cancel-in-progress false.
 Unknown keys including queue, string form, job concurrency and unknown expressions fail-closed.
-The release workflow bytes and its S02 pin remain unchanged.
+The release workflow bytes and its S02 pin remained unchanged through S04; on 2026-10-26 S08 replaced only the version/notes steps and updated both pins together (see forge-release-checks.md).
 
 `rehearse` reads final workflow bytes, records hashes and models fresh arrivals.
 It checks push-never-cancelled, pr-superseded-only and last-pr-run-completes.
