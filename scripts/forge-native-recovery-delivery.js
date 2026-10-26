@@ -4,6 +4,7 @@ const fs=require('fs'),path=require('path'),crypto=require('crypto');
 const api = name => require('./' + name);
 const hash=v=>crypto.createHash('sha256').update(v).digest('hex');
 const fail=c=>{throw Object.assign(new Error(c),{code:c});};
+const nonEmpty=value=>typeof value==='string'&&value.trim().length>0;
 // Match sidecar validation defaults without rewriting durable request/manifest bytes.
 const requestIdentity=request=>{
   const recovery=api('forge-attempt-recovery');
@@ -53,7 +54,7 @@ function createDocumentaryContinuation({originalManifestFile,originalResultFile,
   for(const row of review.criteria){
     const criterion=required.find(c=>c.id===row.criterion_id);
     if(!criterion||row.text!==criterion.text||row.eligibility!=='documentary'||row.status!=='met'
-      ||!row.rationale||!row.evidence||!Array.isArray(row.documents)||!row.documents.length
+      ||!nonEmpty(row.rationale)||!nonEmpty(row.evidence)||!Array.isArray(row.documents)||!row.documents.length
       ||row.documents.some(doc=>!preserved.some(p=>p.path===doc.path&&p.sha256===doc.sha256&&p.root_id===row.root_id)))fail('documentary-review-criterion');
   }
   // Reconciliation proof is the actual restored pre-write tree, not an imported
@@ -372,7 +373,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
         const matches=review.criteria.filter(c=>c.criterion_id===row.criterion_id&&c.root_id===req.root_id);
         if(matches.length!==1)fail('documentary-review-coverage');
         const c=matches[0];
-        if(c.text!==row.text||c.status!=='met'||c.eligibility!=='documentary'||!c.rationale||!c.evidence
+        if(c.text!==row.text||c.status!=='met'||c.eligibility!=='documentary'||!nonEmpty(c.rationale)||!nonEmpty(c.evidence)
           ||!Array.isArray(c.documents)||!c.documents.length||c.documents.some(doc=>!row.sources.some(s=>s.path===doc.path&&s.root_id===req.root_id)
             ||!sources.some(s=>s.path===doc.path&&s.root_id===req.root_id&&s.sha256===doc.sha256)))fail('documentary-review-criterion');
       }

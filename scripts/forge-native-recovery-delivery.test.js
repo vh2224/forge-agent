@@ -169,6 +169,15 @@ async function documentaryContinuation(){
     const options={originalManifestFile,originalResultFile,originalReceiptFile,request,documents,
       attestReview:()=>review,attestStoppedWriter:()=>true,assertAuthority:f.assertBoundary};
     const create=changes=>delivery.createDocumentaryContinuation({...options,...changes});
+    const originalFiles=[originalManifestFile,originalResultFile,originalReceiptFile];
+    const originalBytes=originalFiles.map(file=>fs.readFileSync(file));
+    const beforeShapeChecks=fs.readdirSync(f.dir).sort();
+    for(const field of ['rationale','evidence'])for(const value of [[],['text'],{},1,true,'',' \t\r\n',null,undefined]){
+      const malformed=structuredClone(review);malformed.criteria[0][field]=value;
+      assert.throws(()=>create({attestReview:()=>malformed}),{code:'documentary-review-criterion'},field+':'+JSON.stringify(value));
+      assert.deepEqual(fs.readdirSync(f.dir).sort(),beforeShapeChecks,'invalid review creates no capture');
+      originalFiles.forEach((file,index)=>assert.deepEqual(fs.readFileSync(file),originalBytes[index]));
+    }
     assert.throws(()=>create({attestReview:null}),/live-authority/);
     assert.throws(()=>create({attestStoppedWriter:()=>false}),/writer-not-stopped/);
     assert.throws(()=>create({attestReview:()=>({...review,reviewer:review.producer})}),/independent-review/);
@@ -250,6 +259,14 @@ async function initialMixedDocumentary(documentaryOnly=false){
       criterion_id:c.id,text:c.text,root_id:root.id,eligibility:'documentary',status:'met',rationale:'Manual review is required by this fixture policy.',
       evidence:'Reviewed exact returned bytes alongside actual structural or behavioral checks.',documents:sources.filter(s=>s.root_id===root.id&&policy.criteria.find(p=>p.criterion_id===c.id).sources.some(p=>p.path===s.path)).map(({path,sha256})=>({path,sha256}))})))});
     const reviewOptions={returnedReceiptFile:originalFile,attestReview:attest,attestStoppedWriter:()=>true};
+    const beforeShapeChecks=fs.readdirSync(f.dir).sort();
+    for(const field of ['rationale','evidence'])for(const value of [[],['text'],{},1,true,'',' \t\r\n',null,undefined]){
+      const malformed=challenge=>{const review=attest(challenge);review.criteria[0][field]=value;return review;};
+      assert.throws(()=>session.reviewDocumentary({...reviewOptions,attestReview:malformed}),{code:'documentary-review-criterion'},field+':'+JSON.stringify(value));
+      assert.deepEqual(fs.readdirSync(f.dir).sort(),beforeShapeChecks,'invalid review creates no capture');
+      assert.deepEqual(fs.readFileSync(originalFile),originalBytes);
+      assert.deepEqual(fs.readFileSync(request.resultFile+'.manifest.json'),manifestBytes);
+    }
     assert.throws(()=>session.reviewDocumentary({...reviewOptions,attestStoppedWriter:()=>false}),/writer-not-stopped/);
     assert.throws(()=>session.reviewDocumentary({...reviewOptions,attestReview:{}}),/live-authority/);
     assert.throws(()=>session.reviewDocumentary({...reviewOptions,attestReview:challenge=>{const review=attest(challenge);return {...review,reviewer:review.producer};}}),/independent-review-required/);
