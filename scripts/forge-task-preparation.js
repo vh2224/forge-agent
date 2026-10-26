@@ -335,6 +335,8 @@ function nativeTaskName(request) {
 
 function nativeOptions(request, route, prompt, contract = request.contract || phaseContract(request.phase)) {
   return {
+    terminalResult: raw => { try { candidateFromPreparationResult(raw, deliveryRequest(request, route, prompt)); return true; }
+      catch { return false; } },
     telemetryIdentity: request, telemetryRoute: route, budgets: request.budgets || {},
     hostRuntime: request.hostRuntime, resolvedDispatch: route,
     activeCapabilities: request.activeCapabilities,
@@ -475,8 +477,15 @@ async function startStandaloneTaskPreparationCore(rawRequest, deps = {}) {
     return refused(error.code === 'dispatch-identity-conflict' ? 'validation' : 'publication',
       error.code || 'preparation-attempt-failed', route, false);
   }
+  let consumed = false;
+  const invoke = callback => {
+    if (consumed) return Promise.resolve(refused('native', 'native-handoff-already-invoked', route));
+    consumed = true;
+    return invokePreparedNative(rawRequest, route, unit.artifactFingerprint(delivery), { ...deps, invokeNative: callback });
+  };
   return { ok: true, action: 'invoke-native', transport: 'native', status: 'ready',
     reason_code: invocation.reason_code, provider_called: false, route,
+    invoke,
     invocation: { tool: invocation.tool, args: invocation.args, telemetry: invocation.telemetry } };
 }
 function persistAuthorization(delivery, reference) {
@@ -677,8 +686,17 @@ async function prepareStandaloneTask(rawRequest, deps = {}) {
         error.code || 'sidecar-unit-failed', started.route, providerCalled, error.diagnostic);
     }
   }
+  return started.invoke(deps.invokeNative);
+}
+
+async function invokePreparedNative(rawRequest, route, expectedFingerprint, deps) {
+  const request = validateRequest(rawRequest);
+  validateContinuationReceipt(request);
+  const started = { route };
   const options = nativeOptions(request, started.route, buildPreparationPrompt(request));
+  options.lifecycle = deps.nativeLifecycle;
   const nativeDelivery = deliveryRequest(request, started.route, buildPreparationPrompt(request));
+  if (unit.artifactFingerprint(nativeDelivery) !== expectedFingerprint) return refused('native', 'dispatch-identity-conflict', route);
   options.onPackagedContext = packaged => {
     const files = unit.artifactAttemptFiles(nativeDelivery);
     const saved = readJson(files.receiptFile);

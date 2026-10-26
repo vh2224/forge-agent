@@ -269,7 +269,7 @@ async function extraCases() {
   const modifies = nativeFixture({ verify: `node -e "require('fs').appendFileSync('src.js','changed')"` });
   await refuse(modifies, modifies.runtime, /replay|delta|changed/, 1); label('verification-cannot-change-declared-bytes');
   const unknown = nativeFixture();
-  const unobserved = await native.invokeNative({ hostRuntime: 'codex', resolvedDispatch: unknown.r.route, activeCapabilities: unknown.caps, agentType: 'forge-executor', taskName: 'unknown_model', forkTurns: 'none', prompt: 'fixture', readback: async () => ({ model: 'gpt-6.1-sol' }) }, async () => unknown.result());
+  const unobserved = await native.invokeNative({ terminalResult: value => value?.status === 'done', hostRuntime: 'codex', resolvedDispatch: unknown.r.route, activeCapabilities: unknown.caps, agentType: 'forge-executor', taskName: 'unknown_model', forkTurns: 'none', prompt: 'fixture', readback: async () => ({ model: 'gpt-6.1-sol' }) }, async () => unknown.result());
   assert.strictEqual(unobserved.telemetry.model_observed, null); label('readback-without-source-unknown', { direct_tool_calls: 1, readback_calls: 1, model_observed: null });
   const discovery = nativeFixture(); write(path.join(discovery.cwd, 'package.json'), JSON.stringify({ scripts: { test: 'node --version' } }));
   const discovered = verify.normalizeExecutionVerification(discovery.r.execution_contract, fs.readFileSync(discovery.r.planFile, 'utf8'), {});

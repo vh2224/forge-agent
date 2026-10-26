@@ -413,6 +413,11 @@ async function durableReplay() {
 async function guardedHandoff() {
   const f=await fixture();
   try {
+    let nativeEvent, nativeIdentity, subscribed;
+    const watching=new Promise(resolve=>{subscribed=resolve;});
+    f.runtime.nativeLifecycle={adapter:{capabilities:{result:true},acknowledge:value=>value?.agent_id,
+      subscribe(handle,listener,context){assert.equal(handle,'fixture-ack');nativeEvent=listener;
+        nativeIdentity=context.identity;subscribed();return()=>{};}}};
     await assert.rejects(()=>side.recoverUnitSidecar({...f.request,scope:'standalone-task'},f.recovery,f.runtime),
       /ordinary-native-delivery-unsupported/);
     const handoff=await side.recoverUnitSidecar(f.request,f.recovery,f.runtime);
@@ -432,7 +437,18 @@ async function guardedHandoff() {
       assert.equal(stateApi.loadRecovery(f.stateFile).continuation.status,'prepared');
     }
     // A partial result is retained for the parent, never published as done.
-    const outcome=await live.invoke(async()=>{calls++;return {...f.result(),status:'partial'};});
+    const pending=live.invoke(async()=>{calls++;return {agent_id:'fixture-ack'};});
+    await Promise.race([watching,pending.then(value=>{throw Error('ack returned early: '+JSON.stringify(value));})]);
+    let ackStatus,ackReceipt;
+    try {
+      ackStatus=stateApi.loadRecovery(f.stateFile).continuation.status;
+      ackReceipt=fs.existsSync(live.request.resultFile+'.receipt.json');
+    } finally {
+      nativeEvent({identity:nativeIdentity,sequence:1,kind:'terminal',result:{...f.result(),status:'partial'}});
+    }
+    const outcome=await pending;
+    assert.equal(ackStatus,'dispatch-possible');
+    assert.equal(ackReceipt,false,'ack must not create returned receipt');
     assert.equal(outcome.ok,true,JSON.stringify(outcome));assert.equal(calls,1);
     assert.throws(()=>live.delivery.verify(outcome.result),/not-done/);
     assert(!fs.existsSync(path.join(f.owner,side.locations(f.request).required[0])));
@@ -440,5 +456,5 @@ async function guardedHandoff() {
     console.log('PASS retained handoff: final request, research and unclaimed drift refuse before callback; partial and duplicate invocation never publish');
   } finally { f.cleanup(); }
 }
-module.exports={fixture,main,protectedLeaseRenewal,documentaryContinuation,initialMixedDocumentary};
+module.exports={fixture,main,protectedLeaseRenewal,documentaryContinuation,initialMixedDocumentary,guardedHandoff};
 if(require.main===module)main().catch(error=>{console.error(error);process.exitCode=1;});

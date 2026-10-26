@@ -462,7 +462,7 @@ async function preSpawnRecoveryContracts(nativeInitial = false) {
       assert.strictEqual(binding.args.model, 'gpt-6.1-sol');
       assert(binding.args.message.includes('<!-- forge-procedure:recovery -->'));
       assert.strictEqual((binding.args.message.match(/<!-- forge-procedure:core -->/g) || []).length, 1);
-      return { fixture_only: true, provider_contact: false }; },
+      return { status: 'done', fixture_only: true, provider_contact: false }; },
   };
   const options = { stateFile, receiptFile, environmentalCorrection: true, clock: () => now };
   const invoke = (patch = {}, input = request, recoveryPatch = {}) => sidecar.recoverUnitSidecar(input, { ...options, ...recoveryPatch }, { ...runtime, ...patch });
@@ -583,7 +583,7 @@ async function preSpawnRecoveryContracts(nativeInitial = false) {
         correctedCalls++; assert.strictEqual(next.route.model, 'gpt-6-sol');
         assert.strictEqual(binding.args.model, 'gpt-6-sol');
         assert(binding.args.message.includes('<!-- forge-procedure:recovery -->'));
-        return { fixture_only: true, provider_contact: false };
+        return { status: 'done', fixture_only: true, provider_contact: false };
       } });
       assert.strictEqual(correctedCalls, 1); assert.strictEqual(corrected.corrected, true);
       const correctionSaved = JSON.parse(fs.readFileSync(correctionState));

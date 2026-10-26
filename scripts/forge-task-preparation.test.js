@@ -98,6 +98,21 @@ function codexCapabilities() {
 }
 
 async function main() {
+  await test('external native bridge observes ack until terminal without early artifact publication', async () => {
+    const request = fixture({ model: 'gpt-5.6-sol' }); request.activeCapabilities = codexCapabilities();
+    let emit, identity, ready; const subscribed = new Promise(resolve => { ready = resolve; });
+    const nativeLifecycle = { adapter: { capabilities: { result: true }, acknowledge: value => value?.agent_id,
+      subscribe(handle, callback, context) { assert.equal(handle, 'worker'); emit = callback; identity = context.identity;
+        ready(); return () => {}; } } };
+    const handoff = await prep.startStandaloneTaskPreparation(request, { nativeLifecycle });
+    assert.equal(typeof handoff.invoke, 'function');
+    const pending = handoff.invoke(async () => ({ agent_id: 'worker' }));
+    await Promise.race([subscribed, pending.then(value => { throw Error('bridge returned before subscription: ' + JSON.stringify(value)); })]);
+    assert(!fs.existsSync(artifactPath(request)), 'ack cannot publish an artifact');
+    emit({ identity, sequence: 1, kind: 'terminal', result: envelope(request) });
+    const result = await pending; assert.equal(result.ok, true, JSON.stringify(result));
+    assert(fs.existsSync(artifactPath(request)));
+  });
   await test('mandatory preparation procedures fail closed before either transport', async () => {
     for (const failure of ['pending', 'missing', 'hash']) {
       const request = fixture({ model: 'gpt-5.6-sol' });

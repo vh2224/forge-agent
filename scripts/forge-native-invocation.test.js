@@ -11,8 +11,12 @@ const {
   observeClaudeAgentBinding,
   buildNativeInvocation,
   preflightNativeBinding,
-  invokeNative,
+  invokeNative: invokeNativeRaw,
 } = require('./forge-native-invocation.js');
+// Legacy fixture adapter explicitly promises terminal payloads; an agent id
+// alone is an acknowledgment and does not satisfy this contract.
+const invokeNative = (options, callback) => invokeNativeRaw({
+  terminalResult: value => value?.status === 'done', ...options }, callback);
 const { resolveDispatch } = require('./forge-dispatch-resolve.js');
 
 const codexCapabilities = Object.freeze({
@@ -210,7 +214,7 @@ async function main() {
     agentType: 'forge-memory', prompt: 'memory', effortBinding,
   }, async (args) => {
     claudeCallbackArgs = args;
-    return { agent_id: 'claude-agent-1' };
+    return { status: 'done' };
   });
   assert.strictEqual(invokedClaude.ok, true, JSON.stringify(invokedClaude));
   assert.strictEqual(claudeCallbackArgs.prompt, 'memory');
@@ -294,7 +298,7 @@ async function main() {
     prompt: 'memory',
   }, async (args) => {
     callbackArgs = args;
-    return { agent_id: 'agent-123' };
+    return { status: 'done' };
   });
   assert.strictEqual(callbackArgs.model, 'gpt-6-luna');
   assert.strictEqual(callbackArgs.task_name, 'memory_extract');
@@ -311,6 +315,7 @@ async function main() {
     agentType: 'forge-memory',
     prompt: 'memory',
   }, async () => ({
+    status: 'done',
     model_readback: { model: 'gpt-6-sol', source: 'provider-response' },
   }));
   assert.strictEqual(workerClaimsReadback.telemetry.model_observed, null,
@@ -323,7 +328,7 @@ async function main() {
     agentType: 'forge-memory',
     prompt: 'memory',
     readback: async () => ({ model: 'gpt-6-sol', source: 'trusted-native-adapter' }),
-  }, async () => ({ agent_id: 'agent-456' }));
+  }, async () => ({ status: 'done' }));
   assert.strictEqual(withReadback.telemetry.model_observed, 'gpt-6-sol');
   assert.strictEqual(withReadback.telemetry.model_observed_source, 'trusted-native-adapter');
 
@@ -491,6 +496,12 @@ async function main() {
 
   const options = { hostRuntime: 'codex', resolvedDispatch: dispatch('gpt-6-luna', 'medium', 'codex'),
     activeCapabilities: codexCapabilities, agentType: 'forge-worker', prompt: 'Fixture only.', forkTurns: 'none' };
+  let ackReadback = 0;
+  const acknowledged = await invokeNative({ ...options, readback: () => { ackReadback++; return null; } },
+    async () => ({ agent_id: 'ack-is-not-a-result' }));
+  assert.strictEqual(acknowledged.ok, false, 'ack must not be accepted as terminal');
+  assert.strictEqual(acknowledged.reason_code, 'native-terminal-unobserved');
+  assert.strictEqual(ackReadback, 0, 'ack must not reach readback');
   assert.strictEqual((await invokeNative(options)).provider_called, false);
   let refusedCalls = 0;
   const unsupported = await invokeNative({ ...options, activeCapabilities: { ...codexCapabilities, models: [] } },
@@ -498,7 +509,7 @@ async function main() {
   assert.strictEqual(unsupported.provider_called, false); assert.strictEqual(refusedCalls, 0);
   const unknown = await invokeNative(options, () => { throw Object.assign(Error('secret fixture'), { code: 'host-timeout' }); });
   assert.strictEqual(unknown.provider_called, 'unknown');
-  assert.deepStrictEqual(unknown.diagnostic, { reason_code: 'host-timeout', layer: 'native-tool' });
+  assert.deepStrictEqual(unknown.diagnostic, { reason_code: 'host-timeout', layer: 'native-lifecycle' });
   assert(!JSON.stringify(unknown).includes('secret fixture'));
   for (const rejection of [null, undefined, 'secret rejection', 42, false]) {
     const failed = await invokeNative(options, () => Promise.reject(rejection));

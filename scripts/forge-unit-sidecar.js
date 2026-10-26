@@ -1441,6 +1441,10 @@ async function runNativeMemory(request, invoke) {
     }
   }
   const nativeOptions = {
+    lifecycle: r.nativeLifecycle,
+    terminalResult: value => { const candidate = candidateFromNativeResult(value);
+      return !!candidate && MEMORY_RESPONSE_VERSIONS.includes(candidate.schema_version); },
+    telemetryIdentity: r,
     hostRuntime: r.hostRuntime || r.route?.host_runtime, resolvedDispatch: r.route,
     activeCapabilities: r.activeCapabilities,
     taskName: r.taskName || `memory_${loc.sourceUnit}_${r.dispatchId}`,
@@ -1503,6 +1507,10 @@ function physicalFileIdentity(file) {
 }
 function nativeExecutionOptions(r, runtime, prompt) {
   return { hostRuntime: r.route.host_runtime, resolvedDispatch: r.route,
+    invalidTerminalReason: 'native-execution-result-invalid',
+    lifecycle: runtime.nativeLifecycle,
+    terminalResult: raw => validNativeExecutionResult(raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? raw : xllm.extractLastJsonBlock(raw)),
     activeCapabilities: runtime.activeCapabilities, agentType: 'forge-executor',
     taskName: r.nativeInvocation?.args?.task_name || r.taskName || r.dispatchId,
     forkTurns: 'none', effortBinding: r.effortBinding, prompt,
@@ -1578,6 +1586,7 @@ async function runNativeExecutionTransport(r, runtime, execution, options, proce
   };
   options.assertNativePublication = () => assertInvocation('publication');
   const nativeOptions = { ...nativeExecutionOptions(r, runtime, transportPrompt), assertInvocation,
+    lifecycle: { ...runtime.nativeLifecycle, captureLateResult: options.captureLateNativeResult },
     beforeInvoke: async () => { await options.announce('solicitado', { model_sent: r.route.model_resolved || r.route.model, provider_called: false }); },
     budgets: execution.budgets, onPackagedContext: packaged => options.onPackagedContext({ ...packaged,
       bytes: Buffer.byteLength(prompt), sha256: hash(prompt), transport_sha256: hash(transportPrompt),
@@ -2310,7 +2319,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
           .filter(code => fs.realpathSync(code.path) === root).map(code => code.id));
         return changes.filter(entry => !(entry.path === key && ownerIds.has(entry.root_id)));
       };
-      result = nativeExecution ? await runNativeExecutionTransport(r, runtime, execution, options, procedure) : await xllm.runExecute({ ...options, reconcileProtectedChanges, scope: r.scope, planFile: r.planFile, securityFile: r.securityFile,
+      result = nativeExecution ? await runNativeExecutionTransport(r, runtime, execution,
+        { ...options, captureLateNativeResult: preserveReturnedResponse }, procedure) : await xllm.runExecute({ ...options, reconcileProtectedChanges, scope: r.scope, planFile: r.planFile, securityFile: r.securityFile,
         contextFile: r.contextFile, writableRoots: execution ? execution.writableRoots
           : r.execution_contract ? r.execution_contract.code_roots.filter(code =>
             require('./forge-code-roots').key(fs.realpathSync.native(code.path)) !==
@@ -2735,6 +2745,9 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     prompt += '\n\n' + additional.join('');
     if (deliveryHelper) prompt = deliveryHelper.packagePrompt(finalRequest(route), prompt);
     return { hostRuntime: route.host_runtime, resolvedDispatch: route,
+    telemetryIdentity: finalRequest(route), lifecycle: runtime.nativeLifecycle,
+    terminalResult: value => deliveryHelper ? deliveryHelper.resultContract.validate(value).ok
+      : value && ['done', 'partial', 'blocked'].includes(value.status),
     activeCapabilities: runtime.activeCapabilities, effortBinding: runtime.effortBinding,
     prompt, forkTurns: 'none',
     taskName: nativeTaskName,
@@ -2819,18 +2832,25 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
             persistDeliveryReceipt: assertReady?.persistDeliveryReceipt,
             linkedEntryOptions: runtime.linkedEntryOptions });
           const finalRequestHash = require('./forge-attempt-recovery').callerRequestHash(next);
-          const invoke = callback => require('./forge-native-invocation').invokeNative(nativeOptions(route), async (args, binding) => {
+          const invoke = async callback => {
+            const supervisedOptions = nativeOptions(route);
+            supervisedOptions.lifecycle = { ...runtime.nativeLifecycle,
+              captureLateResult: result => session.returned(result) };
+            const outcome = await require('./forge-native-invocation').invokeNative(supervisedOptions, async (args, binding) => {
             if (require('./forge-attempt-recovery').callerRequestHash(next) !== finalRequestHash) fail('recovery-final-request-changed');
             assertReady();
             runtime.assertBoundary();
             validateRecoveryRequest(next, { verification: runtime.verification, nativeInvocation: binding, linkedEntryOptions: runtime.linkedEntryOptions });
             assertReady.consumeInvocation(binding, { ...session.start(),
               original_receipt_sha256: hash(fs.readFileSync(recovery.receiptFile)) });
-            const result = await callback(next, { ...binding, args }, session);
-            session.returned(result);
-            assertReady.invocationReturned();
-            return result;
+            return callback(next, { ...binding, args }, session);
           });
+            if (outcome.ok) {
+              session.returned(outcome.result);
+              assertReady.invocationReturned();
+            }
+            return outcome;
+          };
           if (!runtime.invokeNative) return { action: 'invoke-native', request: next, invocation, delivery: session, invoke };
           const outcome = await invoke(runtime.invokeNative);
           if (!outcome.ok || !deliveryHelper.resultContract.validate(outcome.result).ok) return outcome;
@@ -2839,31 +2859,35 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
           const published = session.publish(outcome.result);
           return { ...outcome, verified, published };
         }
-        if (!runtime.invokeNative) {
-          assertReady?.();
-          if ((recovery.environmentalCorrection || recovery.transitions) && !recovery.resumeReservation) return {
-            action: 'reattest-native-handoff', reservation_sha256: reservationHash, provider_called: false };
-          return { action: 'invoke-native', request: next, invocation, ...(assertReady ? { assertReady } : {}) };
-        }
         // Only standalone execution has the native execution lifecycle. Other
         // phase adapters retain their existing public native outcome contract.
-        if (next.scope !== 'standalone-task' || next.phase !== 'execute') {
+        const invokePhase = callback => {
           return require('./forge-native-invocation').invokeNative(nativeOptions(route), (args, binding) => {
             assertReady?.();
             validateRecoveryRequest({ ...executionRequest, route }, { verification: runtime.verification, nativeInvocation: binding });
             assertReady?.consumeInvocation?.(binding);
-            return runtime.invokeNative(next, { ...binding, args }, {
+            return callback(next, { ...binding, args }, {
               assertAuthority: () => {
                 assertReady?.assertAuthority?.();
                 validateRecoveryRequest({ ...executionRequest, route }, { verification: runtime.verification, nativeInvocation: binding });
               },
             });
           });
+        };
+        const invoke = callback => {
+          if (next.scope !== 'standalone-task' || next.phase !== 'execute') return invokePhase(callback);
+          next.nativeInvocation = invocation;
+          if (next.nativePromptFile) next.nativePromptFile = `${next.resultFile}.prompt.txt`;
+          return runUnitSidecar(next, { ...runtime, assertRecoveryReady: assertReady, assertRecoveryAuthority: assertReady?.assertAuthority,
+            invokeNative: (args, binding) => callback(next, { ...binding, args }) });
+        };
+        if (!runtime.invokeNative) {
+          assertReady?.();
+          if ((recovery.environmentalCorrection || recovery.transitions) && !recovery.resumeReservation) return {
+            action: 'reattest-native-handoff', reservation_sha256: reservationHash, provider_called: false };
+          return { action: 'invoke-native', request: next, invocation, invoke, ...(assertReady ? { assertReady } : {}) };
         }
-        next.nativeInvocation = invocation;
-        if (next.nativePromptFile) next.nativePromptFile = `${next.resultFile}.prompt.txt`;
-        return runUnitSidecar(next, { ...runtime, assertRecoveryReady: assertReady, assertRecoveryAuthority: assertReady?.assertAuthority,
-          invokeNative: (args, binding) => runtime.invokeNative(next, { ...binding, args }) });
+        return invoke(runtime.invokeNative);
       }
       return runUnitSidecar(next, { ...runtime, ...(assertReady?.appendOwnerEvent ? { assertRecoveryReady: assertReady } : {}) });
     },
