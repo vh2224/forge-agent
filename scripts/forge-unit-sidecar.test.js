@@ -300,6 +300,26 @@ async function recoveryContracts() {
     // Plan publication creates the exact source consumed by discovery/execution.
     const planning = { ...request, unitType: 'plan-slice', phase: 'plan', taskId: undefined, execution_contract: undefined,
       promptFile: request.planFile, dispatchId: 'plan', resultFile: path.join(lab.dir, 'p.json') };
+    const rejectedPlan = { status: 'done', summary: 'local-only explanation',
+      slice_plan: { content: '# Slice\n- [ ] T03: mismatch\n' },
+      task_plans: [{ id: 'T02', content: fixtures.plan(lab.contract) }],
+      transport_telemetry: { model_observed: 'fixture-model' } };
+    const mismatch = { ...planning, dispatchId: 'plan-mismatch', resultFile: path.join(lab.dir, 'mismatch.json') };
+    xllm.runPlan = async () => rejectedPlan;
+    await assert.rejects(sidecar.runUnitSidecar(resolveContext(mismatch)), /plan-task-list-mismatch/);
+    const rejectedBytes = fs.readFileSync(mismatch.resultFile + '.returned.json');
+    const failedPlan = JSON.parse(fs.readFileSync(mismatch.resultFile + '.receipt.json'));
+    assert.deepStrictEqual(JSON.parse(rejectedBytes).result, rejectedPlan);
+    assert.strictEqual(failedPlan.phase, 'failed');
+    assert.strictEqual(failedPlan.result, undefined);
+    assert.strictEqual(failedPlan.returned_response.sha256, crypto.createHash('sha256').update(rejectedBytes).digest('hex'));
+    assert.deepStrictEqual(failedPlan.plan_task_diagnostic.listed_ids, ['T03']);
+    assert.deepStrictEqual(failedPlan.plan_task_diagnostic.returned_ids, ['T02']);
+    assert.strictEqual(failedPlan.telemetry.model_observed, 'fixture-model');
+    assert(!fs.existsSync(path.join(base, 'tasks/T02/T02-PLAN.md')));
+    await assert.rejects(sidecar.runUnitSidecar(mismatch), error => error.code === 'plan-task-list-mismatch');
+    assert(fs.readFileSync(mismatch.resultFile + '.returned.json').equals(rejectedBytes));
+    assert(!fs.readFileSync(mismatch.resultFile, 'utf8').includes('local-only explanation'));
     xllm.runPlan = async () => ({ status: 'done', slice_plan: { content: '# Slice\n- [ ] **T02** — fixture\n' },
       task_plans: [{ id: 'T02', content: fixtures.plan(lab.contract) }] });
     await sidecar.runUnitSidecar(resolveContext(planning));
@@ -1820,10 +1840,16 @@ async function reviewFixRecoveryContracts() {
     fs.writeFileSync(path.join(lab.a, 'prior.txt'), 'preexisting\n');
     xllm.runFix = async () => {
       fs.writeFileSync(path.join(lab.a, 'same.txt'), 'partial worker\n');
-      return { status: 'partial', summary: 'fixture', items: [], files_changed: ['same.txt'] };
+      return { status: 'partial', summary: 'fixture', items: [], files_changed: ['same.txt'],
+        transport_telemetry: { model_observed: 'fix-fixture-model' } };
     };
     await assert.rejects(sidecar.runUnitSidecar(request), error => error.code === 'review-fix-worker-partial');
     const receiptBytes = fs.readFileSync(receiptFile), receipt = JSON.parse(receiptBytes);
+    const returnedBytes = fs.readFileSync(request.resultFile + '.returned.json');
+    assert.strictEqual(JSON.parse(returnedBytes).result.summary, 'fixture');
+    assert.strictEqual(receipt.phase, 'failed');
+    assert.strictEqual(receipt.returned_response.sha256, crypto.createHash('sha256').update(returnedBytes).digest('hex'));
+    assert.strictEqual(receipt.telemetry.model_observed, 'fix-fixture-model');
     const baselineFile = receipt.reset_state_file, baselineBytes = fs.readFileSync(baselineFile);
     const originalState = fs.readFileSync(stateFile);
     assert.strictEqual(receipt.failure.reset.verified, true);

@@ -629,9 +629,13 @@ function artifactAttemptFiles(request) {
   const resultFile = xllm.validateResultFileTarget(request.resultFile, cwd);
   xllm.validateResultFileTarget(resultFile, root);
   const receiptFile = `${resultFile}.receipt.json`;
+  const returnedFile = `${resultFile}.returned.json`;
+  xllm.validateResultFileTarget(returnedFile, cwd);
+  xllm.validateResultFileTarget(returnedFile, root);
   xllm.validateResultFileTarget(receiptFile, cwd);
   xllm.validateResultFileTarget(receiptFile, root);
   for (const code of request.execution_contract?.code_roots || []) {
+    xllm.validateResultFileTarget(returnedFile, code.path);
     xllm.validateResultFileTarget(resultFile, code.path);
     xllm.validateResultFileTarget(receiptFile, code.path);
   }
@@ -1861,6 +1865,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
       duration_ms: record.started_at ? Date.now() - Date.parse(record.started_at) : null,
       provider_called: typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown' };
     const failure = { status: 'adapter-failed', dispatch_id: dispatchId, reason_code: code,
+      ...(record.returned_response ? { returned_response: record.returned_response } : {}),
+      ...(record.plan_task_diagnostic ? { plan_task_diagnostic: record.plan_task_diagnostic } : {}),
       provider_called: typeof error.provider_called === 'boolean' ? error.provider_called : record.provider_called === true ? true : 'unknown',
       error_class: xllm.classifyErrorClass(error.message), diagnostic: detail,
       final_evidence: record.final_evidence || null,
@@ -1896,6 +1902,25 @@ async function runUnitSidecarCore(request, runtime, identity) {
     try { await event('failed', code, detail, failure.provider_called,
       loc.reviewFix ? { boundary: loc.reviewFix.boundary, items_total: reviewFixItemsTotal(r) } : null); }
     catch { /* Unproved owner drift cannot be adopted just to log a failure. */ }
+  }
+  // Local-only evidence, not a delivery or a replay authorization. Persist before
+  // unit validation can reject a transport-normalized response and overwrite its
+  // result channel. Exclusive creation prevents a later attempt replacing it.
+  async function preserveReturnedResponse(result) {
+    const file = `${resultFile}.returned.json`;
+    const envelope = { version: 1, dispatch_id: dispatchId, request_fingerprint: fingerprint,
+      result, trust: 'transport-normalized; unit-validation-pending' };
+    const bytes = Buffer.from(JSON.stringify(envelope, null, 2));
+    fs.writeFileSync(file, bytes, { flag: 'wx', mode: 0o600 });
+    // A queued owner-event append can still hold an older receipt snapshot.
+    // Drain it before reading and extending the receipt, without delaying the
+    // immutable response capture itself.
+    await livenessQueue;
+    const record = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+    record.returned_response = { version: 1, sha256: hash(bytes), bytes: bytes.length,
+      channel: 'resultFile.returned.json', unit_validation: 'pending' };
+    if (result.transport_telemetry) record.telemetry = result.transport_telemetry;
+    json(receiptFile, record);
   }
   const existing = fs.existsSync(receiptFile) ? JSON.parse(fs.readFileSync(receiptFile, 'utf8')) : null;
   const verificationIdentity = { dispatch_id: dispatchId, fingerprint, recovery_identity_sha256: recoveryIdentity(r) };
@@ -2322,12 +2347,20 @@ async function runUnitSidecarCore(request, runtime, identity) {
         transportEntered = true;
         result = await xllm.runPlan({ ...options, planContextFile });
         transportReturned = true;
+        await preserveReturnedResponse(result);
         await livenessQueue;
       } finally { fs.rmSync(promptDir, { recursive: true, force: true }); }
       const ids = result.task_plans.map(p => p.id);
       if (new Set(ids).size !== ids.length) fail('plan-task-ids-invalid');
       const listed = require('./forge-status').parsePlanTasks(result.slice_plan.content).map(t => t.id);
-      if (JSON.stringify([...listed].sort()) !== JSON.stringify([...ids].sort())) fail('plan-task-list-mismatch');
+      if (JSON.stringify([...listed].sort()) !== JSON.stringify([...ids].sort())) {
+        const safe = values => values.filter(v => typeof v === 'string' && v.length <= 64 && /^T\d+(?:\.\d+)?$/.test(v)).slice(0, 100);
+        const record = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+        record.plan_task_diagnostic = { listed_count: listed.length, returned_count: ids.length,
+          listed_ids: safe(listed), returned_ids: safe(ids), truncated: listed.length > 100 || ids.length > 100 };
+        json(receiptFile, record);
+        fail('plan-task-list-mismatch');
+      }
       artifacts = [{ path: loc.required[0], content: result.slice_plan.content },
         ...result.task_plans.map(p => {
           if (!/^T\d+(?:\.\d+)?$/.test(p.id)) fail('plan-task-ids-invalid');
@@ -2407,6 +2440,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       transportEntered = true;
       result = await xllm.runFix({ ...options, brief: fix.brief, writableRoots: r.writableRoots });
       transportReturned = true;
+      await preserveReturnedResponse(result);
       await livenessQueue;
       // A partial/blocked turn never publishes a success line or a commit.
       if (result.status !== 'done') fail(`review-fix-worker-${result.status}`, 'The review-fix worker did not finish; items are deferred.');
