@@ -91,6 +91,31 @@ function worker(f, operation) {
 }
 
 async function main() {
+  test('211 R1: deleting or truncating current state cannot erase a dispatch question', () => {
+    for (const mutation of ['delete', 'truncate']) for (const boundary of ['cached', 'binding']) {
+      const f = fixture();
+      try {
+        const consumed = consume(f), entered = invoke(f, 'reenter', consumed.snapshot, entryInput(f, consumed));
+        const key = entered.controller_result.details.transaction.idempotency_key;
+        const pending = invoke(f, 'next', entered.snapshot, {}, liveOptions(f, {
+          questionStateAdapter: () => ({ answers: [], questions: [{ id: 'q-new', question: 'New decision?' }] })
+        }));
+        assert.strictEqual(pending.reason_code, 'pending-questions');
+        const dir = path.join(f.cwd, '.gsd', 'forge', 'entry-questions');
+        const file = path.join(dir, fs.readdirSync(dir)[0]);
+        if (mutation === 'delete') fs.unlinkSync(file);
+        else { const value = JSON.parse(fs.readFileSync(file)); value.questions = []; fs.writeFileSync(file, JSON.stringify(value)); }
+        const options = liveOptions(f, { questionStateAdapter: () => ({ answers: [] }) });
+        if (boundary === 'cached') assert.strictEqual(invoke(f, 'next', pending.snapshot, {}, options).reason_code, 'pending-questions');
+        else assert.throws(() => recovery.bindLinkedRequest({ ...f.request, linked_begin_key: key }, { ...options, ownerToken: f.input.owner_token }), e => e.code === 'pending-questions');
+        const inventories = path.join(f.cwd, '.gsd', 'forge', 'entry-question-inventories');
+        fs.unlinkSync(path.join(inventories, fs.readdirSync(inventories)[0]));
+        fs.unlinkSync(file);
+        assert.throws(() => recovery.bindLinkedRequest({ ...f.request, linked_begin_key: key }, { ...options, ownerToken: f.input.owner_token }),
+          e => e.code === 'question-inventory-missing');
+      } finally { cleanup(f); }
+    }
+  });
   test('211: second linked failure reenters through verified ancestors after restart', () => {
     const f = fixture();
     try {
@@ -448,6 +473,16 @@ async function main() {
         ...linkedEntryOptions, questionStateAdapter: () => ({ answers: [], questions: [{ id: 'dispatch-q', question: 'New choice?' }] })
       } }), error => error.code === 'pending-questions');
       assert.strictEqual(calls, 1, 'pending functional question must refuse before transport');
+      const questionDir = path.join(f.cwd, '.gsd', 'forge', 'entry-questions');
+      const questionFile = path.join(questionDir, fs.readdirSync(questionDir)[0]);
+      for (const mutation of ['delete', 'truncate']) {
+        if (mutation === 'delete') fs.unlinkSync(questionFile);
+        else { const value = JSON.parse(fs.readFileSync(questionFile)); value.questions = []; fs.writeFileSync(questionFile, JSON.stringify(value)); }
+        await assert.rejects(sidecar.runUnitSidecar({ ...request, dispatchId: mutation }, { linkedEntryOptions: {
+          ...linkedEntryOptions, questionStateAdapter: () => ({ answers: [] })
+        } }), error => error.code === 'pending-questions');
+        assert.strictEqual(calls, 1, 'lost projection must refuse before transport');
+      }
       assert.deepStrictEqual(history(f), before);
       console.log('ok - real unit-sidecar validates linked entry before simulated transport and captures fresh identity');
     } finally { xllm.runPlan = original; cleanup(f); fs.rmSync(outputDir, { recursive: true, force: true }); }

@@ -1159,7 +1159,8 @@ function updateEntryQuestions(cwd, failure, options) {
     owner_digest: failure.owner_digest, host_runtime: failure.host_runtime, roots: failure.terminal_failure.safety.roots };
   if (sha(physicalRoots(identity.roots)) !== sha(identity.roots)) throw new ControllerError('entry-roots-mismatch', 'physical roots changed');
   const file = path.join(rootDir(cwd), 'entry-questions', sha(identity) + '.json');
-  for (let cursor = file; cursor !== path.dirname(cursor); cursor = path.dirname(cursor)) {
+  const inventoryFile = path.join(rootDir(cwd), 'entry-question-inventories', sha(identity) + '.json');
+  for (const target of [file, inventoryFile]) for (let cursor = target; cursor !== path.dirname(cursor); cursor = path.dirname(cursor)) {
     if (fs.existsSync(cursor) && fs.lstatSync(cursor).isSymbolicLink()) throw new ControllerError('question-state-path-invalid', 'linked question state path');
     if (path.resolve(cursor) === path.resolve(cwd)) break;
   }
@@ -1168,20 +1169,33 @@ function updateEntryQuestions(cwd, failure, options) {
     throw new ControllerError('question-state-scope-mismatch', 'foreign question state');
   }
   const historical = failure.terminal_failure.safety.pending_questions;
+  const inventory = readRecordJson(inventoryFile);
+  const required = discoverRecords(cwd, 'transaction').some(record => record.linked_entry?.failure_key === failure.idempotency_key
+    && record.linked_entry.question_inventory_version === 1);
+  if (!inventory && (required || previous)) throw new ControllerError('question-inventory-missing', 'durable question inventory missing');
+  if (inventory && inventory.identity_sha256 !== require('./forge-code-roots').digest(identity)) throw new ControllerError('question-state-scope-mismatch', 'foreign question inventory');
+  // Inventory is independent of the replaceable answer projection. Publish it
+  // first: interruption may conservatively retain a pending question, never lose it.
+  const saveInventory = questions => writeAtomic(inventoryFile, { schema_version: 1,
+    identity_sha256: require('./forge-code-roots').digest(identity),
+    questions: clone(questions) });
   if (typeof options.questionStateAdapter !== 'function') {
-    if (previous || historical.some(q => q.status === 'pending')) throw new ControllerError('pending-questions', 'live question attestation required');
+    if (previous || inventory?.questions.length || historical.some(q => q.status === 'pending')) throw new ControllerError('pending-questions', 'live question attestation required');
+    if (!inventory) saveInventory(historical);
     return clone(historical);
   }
   let questions = interaction.mergePendingQuestions(historical, previous?.questions || []);
+  questions = interaction.mergePendingQuestions(questions, inventory?.questions || []);
   questions = interaction.mergePendingQuestions(questions, options.observedPendingQuestions || []);
-  const live = options.questionStateAdapter({ identity: clone(identity), previous: clone(previous), historical: clone(historical), questions: clone(questions) });
+  const live = options.questionStateAdapter({ identity: clone(identity), previous: clone(previous), inventory: clone(inventory), historical: clone(historical), questions: clone(questions) });
   if (!live || !Array.isArray(live.answers)) throw new ControllerError('question-state-attestation-required', 'explicit attested answers required');
   questions = interaction.mergePendingQuestions(questions, live.questions || []);
   if (live.answers.length) questions = interaction.resolvePendingQuestions(questions, live.answers);
-  for (const old of previous?.questions || []) {
+  for (const old of [...inventory?.questions || [], ...previous?.questions || []]) {
     const current = questions.find(q => q.id === old.id);
     if (old.status === 'resolved' && (current.status !== 'resolved' || current.answer !== old.answer)) throw new ControllerError('question-state-attestation-required', 'persisted answer not reattested');
   }
+  saveInventory(questions);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   return interaction.persistQuestionState(file, identity, questions, live.answers);
 }
@@ -1199,9 +1213,12 @@ function entryScope(cwd, input, failure, options) {
   if (!baseline || !/^[a-f0-9]{64}$/.test(baseline.sha256 || '')) throw new ControllerError('entry-baseline-invalid', 'baseline atual inválida');
   const roots = physicalRoots(baseline.roots);
   if (sha(roots) !== sha(failure.terminal_failure.safety.roots)) throw new ControllerError('entry-roots-mismatch', 'raízes físicas da entrada divergentes');
-  const identity = { entry_id: opaque(input.entry?.entry_id, 'entry_id', true), failure_key: failure.idempotency_key,
+  const entryId = opaque(input.entry?.entry_id, 'entry_id', true);
+  const previousEntry = lookupRecord(cwd, 'transaction', `linked-entry:${sha(entryId)}`);
+  const identity = { entry_id: entryId, failure_key: failure.idempotency_key,
     failure_checksum: sha(failure), begin_checksum: failure.terminal_failure.begin_checksum, baseline_sha256: baseline.sha256,
-    roots, owner_digest: ownerDigest(input.owner_token), host_runtime: forgeRuntime.normalizeHostRuntime(input.host_runtime), classification: 'new-unit' };
+    roots, owner_digest: ownerDigest(input.owner_token), host_runtime: forgeRuntime.normalizeHostRuntime(input.host_runtime), classification: 'new-unit',
+    ...(!previousEntry || previousEntry.linked_entry?.question_inventory_version === 1 ? { question_inventory_version: 1 } : {}) };
   const digest = sha(identity), rootsDigest = sha(roots), now = nowOf(options);
   const scope = { unit: failure.unit.key, roots_sha256: rootsDigest, routes: [identity.host_runtime], purpose: 'linked-unit-entry',
     request_identity_sha256: digest, owner_digest: identity.owner_digest, gates_preserved: true, expires_at: now + 60000 };

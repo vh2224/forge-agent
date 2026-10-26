@@ -156,7 +156,7 @@ cyclic, altered or foreign links fail closed; unrelated failures remain blockers
 
 For current functional answers, the trusted host supplies `questionStateAdapter`
 in loop dependencies and in sidecar `linkedEntryOptions`. This synchronous callback
-receives `{identity, historical, previous, questions}` and returns
+receives `{identity, historical, previous, inventory, questions}` and returns
 `{answers: [{id, answer}], questions?: [{id, question}]}`. It must verify its own
 conversation/evidence provenance and reattest all previously resolved explicit
 answers; it must not merely echo arbitrary JSON. Reattestation after restart uses
@@ -167,6 +167,14 @@ checksum, unit, milestone/slice, owner, host and physical roots.
 
 Current state is stored separately under `.gsd/forge/entry-questions/` through the
 interaction helper; historical failure/begin/receipt bytes remain unchanged.
+An independent checksummed inventory under `.gsd/forge/entry-question-inventories/`
+retains every observed question and attested answer, and is published before the
+answer projection. Deleting/truncating that projection cannot remove questions
+or permit conflicting answers. New linked entries bind inventory version 1;
+dispatch refuses a missing inventory rather than initializing it again. Legacy
+entries preserve their original digest and acquire inventory when first observed.
+The callback can use the inventory with its provenance evidence to reattest after
+projection loss; persisted inventory alone never grants consent.
 Partial answers are returned in the blocked loop snapshot. Reentry and real
 linked dispatch revalidate the live adapter; restart without it cannot promote
 persisted answers into authority. Newly observed pending questions block cached
