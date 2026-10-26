@@ -241,10 +241,9 @@ try {
       assert.strictEqual(path.basename(source.name), source.name); assert(!/[\\/]/.test(source.name));
       assert(/^[a-f0-9]{64}$/.test(source.sha256)); assert(Number.isSafeInteger(source.bytes));
       assert(names.has(source.job_name)); assert.strictEqual(source.kind, 'run-tests-log');
-      assert(timestampInWindow(source.observed_from)); assert(timestampInWindow(source.observed_to));
+      // validateShardProfile above enforces UTC syntax, ordering and null reasons.
       assert(Number.isSafeInteger(source.suites_failed)); assert(source.suites_failed >= 0);
     }
-    function timestampInWindow(value) { return typeof value === 'string' && /^2026-10-21T/.test(value); }
     function hygiene(value) {
       if (typeof value === 'string') { assert(!/^(?:[A-Za-z]:[\\/]|\/|\\\\)/.test(value)); assert(!value.includes('.gsd')); }
       else if (Array.isArray(value)) value.forEach(hygiene);
@@ -262,6 +261,23 @@ try {
       assert.strictEqual(new Set(plan.shards.flat()).size, universe.length);
       assert.strictEqual(plan.shards.flat().length, universe.length);
     }
+  });
+
+  test('issue 219 replaceable profile dates obey schema, not historical fixture dates', () => {
+    const profile = loaded().doc;
+    const hashes = profile.sources.map(source => source.sha256);
+    for (const source of profile.sources) {
+      source.observed_from = '2030-01-01T00:00:00Z'; source.observed_to = '2030-01-01T00:01:00Z';
+    }
+    assert(shards.validateShardProfile(profile).ok);
+    assert.deepStrictEqual(profile.sources.map(source => source.sha256), hashes);
+    const source = profile.sources[0];
+    source.observed_to = '2029-01-01T00:00:00Z'; assert(!shards.validateShardProfile(profile).ok);
+    source.observed_to = 'invalid'; assert(!shards.validateShardProfile(profile).ok);
+    source.observed_to = null; assert(!shards.validateShardProfile(profile).ok);
+    source.unavailable.observed_to = 'not-observed-in-source'; assert(shards.validateShardProfile(profile).ok);
+    source.observed_from = null; assert(!shards.validateShardProfile(profile).ok);
+    source.unavailable.observed_from = 'not-observed-in-source'; assert(shards.validateShardProfile(profile).ok);
   });
 
   test('issue 216 output identities collide before publication without residue', () => {
