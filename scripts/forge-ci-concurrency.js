@@ -40,7 +40,7 @@ function readConcurrency(text) {
     // bounded YAML subset. Reject them before they can hide concurrency.
     if (indent === 0 && /^(?:['"]|[{[])/.test(line)) fail('concurrency-form-unsupported');
     if (inJobs && /^\s+(?:-\s+)?['"][^'"]+['"]\s*:/.test(line)) fail('job-concurrency-unsupported');
-    if ((inJobs || /^jobs\s*:/.test(line)) && /:\s*[{[]/.test(line)) fail('job-concurrency-unsupported');
+    if ((inJobs || /^jobs\s*:/.test(line)) && /^\s*(?:-\s+)?[\w-]+:\s*[{[]/.test(line)) fail('job-concurrency-unsupported');
     if (/^\s*(?:-\s+)?[\w-]+:\s*[|>][+-]?\s*(?:#.*)?$/.test(line)) scalarIndent = indent;
 
     if (/^\S/.test(line)) {

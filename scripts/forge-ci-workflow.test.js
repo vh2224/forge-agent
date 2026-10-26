@@ -52,6 +52,8 @@ for (const text of [
 ]) assert.throws(() => concurrency.readConcurrency(text), /unsupported/);
 assert.deepStrictEqual(concurrency.readConcurrency('# "concurrency": ignored\nname: "concurrency: text"\njobs:\n  test:\n    steps:\n      - run: |\n          concurrency: script text\n          "jobs": script text'), { present: false });
 
+assert.deepStrictEqual(concurrency.readConcurrency('jobs:\n  test:\n    steps:\n      - run: "echo concurrency: {text}"'), { present: false });
+
 const rehearsal = concurrency.rehearse(bytes);
 assert.strictEqual(rehearsal.schema, 'forge-ci-concurrency-rehearsal/v1');
 assert(rehearsal.passed);
