@@ -1867,6 +1867,10 @@ async function reviewFixRecoveryContracts() {
         nativeCalls++;
         assert.strictEqual(binding.args.model, 'gpt-6-sol');
         assert(binding.args.message.includes('same.txt'));
+        assert(binding.args.message.includes(`CODE_DIR (physical working directory): ${JSON.stringify(request.cwd)}`));
+        assert(binding.args.message.includes(`CONTEXT_ROOT (owner artifacts): ${JSON.stringify(request.contextRoot)}`));
+        assert(binding.args.message.includes('resolve claimed relative paths only inside CODE_DIR'));
+        assert(binding.args.message.includes('Do not edit owner artifacts or a separate CONTEXT_ROOT checkout'));
         assert(binding.args.message.includes('<!-- forge-procedure:recovery -->'));
         assert.strictEqual(binding.args.message.split('<!-- forge-procedure:core -->').length - 1, 1);
         // The public native callback owns preparation and acceptance. This is a

@@ -2616,7 +2616,13 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       const fix = require('./forge-review-fix'), loc = locations(request);
       const brief = fix.buildBrief({ boundary: loc.reviewFix.boundary, unitLabel: loc.reviewFix.unitLabel,
         items: fix.normalizeItems(request.reviewFix.items), claimPaths: request.reviewFix.claimPaths, route });
-      return fix.buildReviewFixPrompt(brief, { outputChannel: 'worker-result-block', constraints: request.constraints });
+      return [
+        `CODE_DIR (physical working directory): ${JSON.stringify(canonical.cwd)}`,
+        `CONTEXT_ROOT (owner artifacts): ${JSON.stringify(canonical.contextRoot)}`,
+        'Run every command with CODE_DIR as its working directory; resolve claimed relative paths only inside CODE_DIR.',
+        'Do not edit owner artifacts or a separate CONTEXT_ROOT checkout. The orchestrator owns artifact publication.',
+        fix.buildReviewFixPrompt(brief, { outputChannel: 'worker-result-block', constraints: request.constraints }),
+      ].join('\n\n');
     })() : null;
     const rendered = !reviewPrompt && !executionPlan && !request.prompt && !request.promptFile ? renderPrompt({
       unitType: canonical.scope === 'standalone-task' && canonical.phase === 'execute' ? 'execute-loose-task' : request.unitType,
