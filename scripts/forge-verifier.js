@@ -338,8 +338,33 @@ function walkImports(targetAbs, candidateFiles, opts) {
  * @param {string} cwd           Working directory to resolve path against
  * @returns {{ pass: boolean, flag?: object, content?: string, lineCount?: number }}
  */
-function checkExists(artifactPath, cwd) {
-  const absPath = path.join(cwd, artifactPath);
+// Resolving a legacy directory is not an execution authority: it may have no VCS.
+// Supplied execution contracts retain canonical checkout/identity validation.
+function artifactPathResolver(cwd, executionContract) {
+  const roots = require('./forge-code-roots');
+  const contract = executionContract
+    ? roots.validateContract(executionContract, { revalidate: true })
+    : { primary_root_id: 'primary', code_roots: [{ id: 'primary', path: roots.realDirectory(path.resolve(cwd)) }] };
+  // Keep verified lexical aliases (notably Windows short names) for absolute
+  // caller-supplied candidates. Every resulting relative path is still checked
+  // by resolvePath against the physical root, including symlink ancestors.
+  const addresses = contract.code_roots.map(root => ({ id: root.id, path: root.path }));
+  if (executionContract) addresses.push(...executionContract.code_roots.map(root => ({ id: root.id, path: root.path })));
+  const cwdRoot = contract.code_roots.find(root => roots.key(root.path) === roots.key(roots.realDirectory(path.resolve(cwd))));
+  if (cwdRoot) addresses.push({ id: cwdRoot.id, path: path.resolve(cwd) });
+  return (value, allowAbsolute = false) => {
+    if (allowAbsolute && typeof value === 'string' && path.isAbsolute(value)) {
+      const root = addresses.find(entry => roots.within(entry.path, path.resolve(value)));
+      if (!root) throw Object.assign(new Error('root-path-escape'), { code: 'root-path-escape' });
+      // resolvePath walks existing ancestors and rejects links/physical escapes.
+      value = { root_id: root.id, path: path.relative(root.path, value) };
+    }
+    return roots.resolvePath(contract, value, { legacy: true }).absolute;
+  };
+}
+
+function checkExists(artifactPath, cwd, resolve = artifactPathResolver(cwd)) {
+  const absPath = resolve(artifactPath);
   const content = readFileCached(absPath);
 
   if (content === null) {
@@ -628,7 +653,7 @@ function checkSubstantive(content, lineCount, artifact) {
  * @param {string}   cwd           Working directory
  * @returns {{ wired: boolean|string, flag?: object, walker_info?: object }}
  */
-function checkWired(artifact, nonJsTs, candidateFiles, cwd) {
+function checkWired(artifact, nonJsTs, candidateFiles, cwd, resolve = artifactPathResolver(cwd)) {
   if (nonJsTs) {
     return {
       wired: 'skipped',
@@ -636,7 +661,7 @@ function checkWired(artifact, nonJsTs, candidateFiles, cwd) {
     };
   }
 
-  const artifactAbs = path.resolve(cwd, artifact.path);
+  const artifactAbs = resolve(artifact.path);
   const result = walkImports(artifactAbs, candidateFiles, { cwd, depth: 2 });
 
   const walkerInfo = {
@@ -909,6 +934,7 @@ function auditTestQuality(content, artifact) {
  * @param {string[]}    sliceFiles List of relative file paths in the slice (for future Wired impl)
  * @param {object}      [opts]     Options
  * @param {string}      [opts.cwd] Working directory (default: process.cwd())
+ * @param {object}      [opts.execution_contract] Canonical roots with measured identities
  * @returns {{ legacy: boolean, rows: object[] }}
  */
 function verifyArtifact(mustHaves, sliceFiles, opts) {
@@ -938,9 +964,10 @@ function verifyArtifact(mustHaves, sliceFiles, opts) {
 
   // ── Build all artifact absolute paths for cross-reference ─────────────────
   // Candidates = all artifacts in this must-haves + extra sliceFiles passed by CLI
-  const artifactAbsPaths = artifacts.map(a => path.resolve(cwd, a.path));
+  const resolve = artifactPathResolver(cwd, opts && opts.execution_contract);
+  const artifactAbsPaths = artifacts.map(a => resolve(a.path));
   const extraAbsPaths = (Array.isArray(sliceFiles) ? sliceFiles : [])
-    .map(f => path.isAbsolute(f) ? f : path.resolve(cwd, f));
+    .map(f => resolve(f, true));
   const allCandidateAbsPaths = Array.from(new Set([...artifactAbsPaths, ...extraAbsPaths]));
 
   // ── Evaluate each artifact ────────────────────────────────────────────────
@@ -948,10 +975,10 @@ function verifyArtifact(mustHaves, sliceFiles, opts) {
 
   for (const artifact of artifacts) {
     const artifactPath = artifact.path;
-    const artifactAbs = path.resolve(cwd, artifactPath);
+    const artifactAbs = resolve(artifactPath);
 
     // ── Level 1: Exists ───────────────────────────────────────────────────
-    const existsResult = checkExists(artifactPath, cwd);
+    const existsResult = checkExists(artifactPath, cwd, resolve);
 
     if (!existsResult.pass) {
       rows.push({
@@ -986,7 +1013,7 @@ function verifyArtifact(mustHaves, sliceFiles, opts) {
     const candidateFiles = allCandidateAbsPaths.filter(
       p => path.normalize(p) !== path.normalize(artifactAbs)
     );
-    const wiredResult = checkWired(artifact, isNonJsTs, candidateFiles, cwd);
+    const wiredResult = checkWired(artifact, isNonJsTs, candidateFiles, cwd, resolve);
 
     const rowFlags = [];
     if (wiredResult.flag) rowFlags.push(wiredResult.flag);
@@ -1170,8 +1197,8 @@ function runSliceArtifactVerification(opts) {
     const combinedMustHaves = { artifacts: combinedArtifacts, key_links: [] };
     // Pass all artifact paths as sliceFiles so the walker has full candidate set
     const codeDir = opts.codeDir || opts.cwd;
-    const sliceFilesCandidates = combinedArtifacts.map(a => path.resolve(codeDir, a.path));
-    const verifyResult = verifyArtifact(combinedMustHaves, sliceFilesCandidates, { cwd: codeDir });
+    const sliceFilesCandidates = combinedArtifacts.map(a => a.path);
+    const verifyResult = verifyArtifact(combinedMustHaves, sliceFilesCandidates, { cwd: codeDir, execution_contract: opts.execution_contract });
     for (const row of verifyResult.rows) {
       // Find the sourceTask from the artifact we tagged
       const artifact = combinedArtifacts.find(a => a.path === row.path);
@@ -1489,7 +1516,7 @@ function runTaskArtifacts(opts) {
   const parsed = parseMustHaves(raw);
   const missing = [];
   const advisory = [];
-  const rowsResult = verifyArtifact({ artifacts: parsed.artifacts || [] }, [], { cwd });
+  const rowsResult = verifyArtifact({ artifacts: parsed.artifacts || [] }, [], { cwd, execution_contract: opts.execution_contract });
   for (const row of rowsResult.rows || []) {
     if (row.exists === false) {
       missing.push({ path: row.path, reason: (row.flags.find((f) => f.level === 'exists') || {}).reason || 'file_not_found' });
@@ -1504,8 +1531,9 @@ function runTaskArtifacts(opts) {
     }
   }
   const expected = Array.isArray(parsed.expected_output) ? parsed.expected_output : [];
+  const resolve = artifactPathResolver(cwd, opts.execution_contract);
   for (const rel of expected) {
-    const p = path.join(cwd, String(rel));
+    const p = resolve(rel);
     if (!fs.existsSync(p)) missing.push({ path: String(rel), reason: 'expected_output_not_found' });
   }
   return {

@@ -843,6 +843,87 @@ test('task boundary: a legacy plan passes through untouched', () => {
 });
 
 // ── Cleanup and summary ───────────────────────────────────────────────────────
+test('root-qualified artifacts and candidates match relative paths without VCS', () => {
+  const strict = require('assert');
+  writeTmp('roots/value.js', 'exports.value = 42;\n');
+  writeTmp('roots/consumer.js', "const value = require('./value');\nconsole.log(value);\n");
+  const run = (artifact, candidate) => verifyArtifact(mkMustHaves([fakeArtifact(artifact)]), [candidate], { cwd: ROOT }).rows[0];
+  const relative = run('roots/value.js', 'roots/consumer.js');
+  const qualified = run('primary::roots/value.js', 'primary::roots/consumer.js');
+  strict.strictEqual(relative.wired, true);
+  strict.deepStrictEqual({ ...qualified, path: relative.path }, relative);
+  strict.deepStrictEqual(run('roots/value.js', path.join(ROOT, 'roots/consumer.js')), relative);
+  for (const invalid of ['foreign::roots/value.js', 'primary::../outside.js', '../outside.js', path.join(ROOT, 'roots/value.js')]) {
+    strict.throws(() => run(invalid, 'roots/consumer.js'), /root-/);
+  }
+  strict.throws(() => run('roots/value.js', path.join(path.dirname(ROOT), 'outside.js')), /root-path-escape/);
+  strict.throws(() => run('roots/value.js', 'foreign::roots/consumer.js'), /root-unknown/);
+});
+
+test('canonical contracts resolve declared roots and reject missing or changed roots', () => {
+  const strict = require('assert'), roots = require('./forge-code-roots');
+  const { spawnSync } = require('child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-verifier-roots-'));
+  try {
+    for (const name of ['one', 'two']) {
+      const root = path.join(dir, name); fs.mkdirSync(root);
+      strict.strictEqual(spawnSync('git', ['init', root], { windowsHide: true }).status, 0);
+      fs.writeFileSync(path.join(root, 'value.txt'), name + '\n');
+    }
+    const contract = roots.validateContract({ schema_version: 2, owner: dir, primary_root_id: 'primary', code_roots: [
+      { id: 'primary', path: path.join(dir, 'one') }, { id: 'secondary', path: path.join(dir, 'two') },
+    ] });
+    const run = (value, c = contract) => verifyArtifact(mkMustHaves([fakeArtifact(value)]), [], { cwd: dir, execution_contract: c });
+    strict.strictEqual(run('secondary::value.txt').rows[0].exists, true);
+    strict.strictEqual(run('primary::value.txt').rows[0].exists, true);
+    strict.throws(() => run('foreign::value.txt'), /root-unknown/);
+    strict.throws(() => run('value.txt'), /root-qualified-path-required/);
+    const single = roots.singleContract(dir, path.join(dir, 'one'));
+    strict.strictEqual(run('value.txt', single).rows[0].exists, run('primary::value.txt', single).rows[0].exists);
+    const changed = structuredClone(contract); changed.code_roots[0].identity_sha256 = '0'.repeat(64);
+    strict.throws(() => run('primary::value.txt', changed), /root-identity-changed/);
+    fs.renameSync(path.join(dir, 'two'), path.join(dir, 'moved'));
+    strict.throws(() => run('primary::value.txt'), /root-identity-unresolved/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('root resolution rejects symlink ancestors for artifacts and absolute candidates', () => {
+  const strict = require('assert');
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-verifier-outside-'));
+  const link = path.join(ROOT, 'escape-link');
+  try {
+    fs.writeFileSync(path.join(outside, 'value.js'), 'exports.value = 42;\n');
+    try { fs.symlinkSync(outside, link, process.platform === 'win32' ? 'junction' : 'dir'); }
+    catch (error) { if (error.code === 'EPERM') { console.log('    symlink fixture unavailable: EPERM'); return; } throw error; }
+    strict.throws(() => verifyArtifact(mkMustHaves([fakeArtifact('primary::escape-link/value.js')]), [], { cwd: ROOT }), /root-path-link/);
+    strict.throws(() => verifyArtifact(mkMustHaves([fakeArtifact('roots/value.js')]), [path.join(link, 'value.js')], { cwd: ROOT }), /root-path-link/);
+  } finally { if (fs.existsSync(link)) fs.unlinkSync(link); fs.rmSync(outside, { recursive: true, force: true }); }
+});
+
+test('task and slice entrypoints preserve qualified artifact and expected_output paths', () => {
+  const strict = require('assert');
+  const qualifiedPlan = TASK_PLAN.replaceAll('lib/', 'primary::lib/').replace(/^(  - )(primary::[^\r\n]+)$/gm, '$1"$2"');
+  const dir = taskFixture(qualifiedPlan, {
+    'lib/created.js': 'module.exports = 1;\n', 'lib/missing.js': 'module.exports = 2;\n', 'lib/also-missing.txt': 'present\n',
+  });
+  try {
+    const taskPlan = path.join(dir, 'T01-PLAN.md');
+    strict.strictEqual(runTaskArtifactCheck({ taskPlan, cwd: dir }).passed, true);
+    fs.writeFileSync(taskPlan, qualifiedPlan.replaceAll('primary::lib/', 'primary::../lib/'));
+    strict.throws(() => runTaskArtifactCheck({ taskPlan, cwd: dir }), /root-path-invalid/);
+    fs.writeFileSync(taskPlan, qualifiedPlan.replace('"primary::lib/also-missing.txt"', '"primary::../outside.txt"'));
+    strict.throws(() => runTaskArtifactCheck({ taskPlan, cwd: dir }), /root-path-invalid/);
+    const taskDir = path.join(dir, '.gsd/milestones/M001/slices/S01/tasks/T01');
+    fs.mkdirSync(taskDir, { recursive: true });
+    fs.writeFileSync(path.join(taskDir, 'T01-PLAN.md'), qualifiedPlan);
+    const cli = require('child_process').spawnSync(process.execPath, [path.join(__dirname, 'forge-verifier.js'), '--cwd', dir, '--slice', 'S01', '--milestone', 'M001', '--json'], { encoding: 'utf8', windowsHide: true });
+    strict.strictEqual(cli.status, 0, cli.stderr);
+    const result = JSON.parse(cli.stdout);
+    strict.strictEqual(result.rows.length, 2);
+    strict.ok(result.rows.every(row => row.exists === true), cli.stdout);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('artifact entrypoints validate modules before reading even a legacy plan', () => {
   const strict = require('assert'), api = require('./forge-verifier');
   const dir = taskFixture('---\nid: T01\n---\n# legacy\n', {});
