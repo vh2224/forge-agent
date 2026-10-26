@@ -20,7 +20,7 @@ function parseTag(tag) {
 }
 
 function classifyCommit(message) {
-  const subject = String(message);
+  const subject = String(message).trim();
   if (/^[a-z]+(?:\(.+\))?!:|BREAKING[ -]CHANGE/i.test(subject)) return 'major';
   if (/^feat(?:\(.+\))?:/.test(subject)) return 'minor';
   if (/^fix(?:\(.+\))?:/.test(subject)) return 'patch';
@@ -113,7 +113,8 @@ function readCommits(cwd, range, options = {}) {
     catch (error) { throw failure('version-commit-malformed', 'UTF-8 inválido', error); }
     const separator = text.indexOf('\n\n');
     if (object.includes(0) || separator < 0) throw failure('version-commit-malformed', 'objeto sem mensagem ou com NUL');
-    records.push({ sha, message: text.slice(separator + 2).trim() });
+    // Mensagem íntegra: a validação de impacto precisa ver controles/espaços finais.
+    records.push({ sha, message: text.slice(separator + 2) });
     offset += size + 1;
   }
   if (offset !== bytes.length) throw failure('version-commit-malformed', 'EOF divergente');
@@ -193,7 +194,7 @@ function renderChangelog(records) {
     patch: ['Bug Fixes', []], none: ['Other Changes', []] };
   for (const { sha, message } of records) {
     if (typeof sha !== 'string' || ![40, 64].includes(sha.length) || !SHA.test(sha)) throw failure('changelog-record-invalid', 'SHA inválido');
-    const subject = message.split(/\r?\n\r?\n/)[0].replace(/\s+/g, ' ').trim();
+    const subject = message.trim().split(/\r?\n\r?\n/)[0].replace(/\s+/g, ' ').trim();
     const declarations = parseImpact(message).declarations;
     const annotation = declarations.length ? ` [impacto: ${declarations.map(item => `${item.surface}/${item.kind}`).join(', ')}]` : '';
     sections[classifyCommit(message)][1].push(`- ${subject} (${sha.slice(0, 7)})${annotation}`);
