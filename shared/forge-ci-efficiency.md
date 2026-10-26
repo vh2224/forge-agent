@@ -37,11 +37,14 @@ A shard records index, count, algorithm, fallback and profile/partition hashes.
 It also records predicted_ms and unprofiled/stale counts.
 Mode records baseline, fail_fast, match, changed and isolation.
 Each suite has id, ordinal, status, elapsed_ms, exit_code, signal and error_code.
+Suite exit_code preserves native integer statuses from 0 through 4294967295, or null.
 IDs are stable test basenames; ordinals are one-based execution order.
 Statuses are pass, fail and not-run; not-run execution fields remain null.
 Totals record executed, passed, failed and not_run.
 Verdict retains the runner exit and the bidirectional baseline result.
-Profile-writing failure is an explicit runner failure, not a successful run.
+Profile-writing failure emits a diagnostic to stderr and preserves the suite/baseline verdict.
+A successful runner exit does not guarantee a profile was written; consumers must check
+artifact availability separately.
 
 The document is bounded to 2 MiB, 5000 suites and 200-character general fields.
 CPU model text has a separate 100-character limit and excludes path separators.

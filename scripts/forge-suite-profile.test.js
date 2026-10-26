@@ -62,6 +62,31 @@ test('S04-T03 truth:0 stable suite identity execution selection shard mode total
   assert.equal(validateSuiteProfile(buildSuiteProfile(seconds)).ok, true);
 });
 
+test('native uint32 suite exits round-trip without signed coercion; verdict domain stays closed', () => {
+  for (const exitCode of [1, 2147483647, 2147483648, 3221225477, 4294967295, null]) {
+    const value = input();
+    value.suites[1].exit_code = exitCode;
+    value.suites[1].signal = exitCode === null ? 'SIGTERM' : null;
+    const parsed = parseSuiteProfile(JSON.stringify(buildSuiteProfile(value)));
+    assert.strictEqual(parsed.suites[1].exit_code, exitCode);
+    assert.strictEqual(parsed.suites[1].signal, value.suites[1].signal);
+    assert.strictEqual(parsed.suites[1].status, 'fail');
+    assert.strictEqual(parsed.verdict.exit_code, 1);
+  }
+  for (const exitCode of [-1, -2147483648, 0.5, 4294967296, '3221225477']) {
+    rejected(doc => { doc.suites[1].exit_code = exitCode; });
+  }
+  // JSON converts nonfinite numbers to null, so check their in-memory rejection directly.
+  for (const exitCode of [Infinity, NaN]) {
+    const doc = buildSuiteProfile(input());
+    doc.suites[1].exit_code = exitCode;
+    assert.strictEqual(validateSuiteProfile(doc).ok, false);
+  }
+  rejected(doc => { doc.suites[0].exit_code = 3221225477; });
+  rejected(doc => { doc.suites[2].exit_code = 3221225477; });
+  rejected(doc => { doc.verdict.exit_code = 3221225477; });
+});
+
 test('S04-T03 truth:1 bounded allowlist observations null reasons and unavailable queue cache', () => {
   const reads = [];
   const env = new Proxy(environment(), { get(target, key) { reads.push(key); return target[key]; },

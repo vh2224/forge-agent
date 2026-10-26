@@ -185,7 +185,8 @@ function validateSuiteProfile(doc) {
         if (['elapsed_ms', 'exit_code', 'signal', 'error_code'].some(field => suite[field] !== null)) errors.push('suite: not-run-incoerente');
       } else {
         counts.executed += 1; counts[suite.status === 'pass' ? 'passed' : 'failed'] += 1;
-        if (!integer(suite.elapsed_ms) || (suite.exit_code !== null && !integer(suite.exit_code, 0, 2147483647))
+        // Windows child statuses can span uint32; preserve the native value.
+        if (!integer(suite.elapsed_ms) || (suite.exit_code !== null && !integer(suite.exit_code, 0, 4294967295))
           || (suite.signal !== null && !matches(suite.signal, /^SIG[A-Z0-9]{1,27}$/))
           || (suite.error_code !== null && !matches(suite.error_code, ERROR_RE))) errors.push('suite: execucao-invalida');
         if (suite.status === 'pass' && (suite.exit_code !== 0 || suite.signal !== null || suite.error_code !== null)) errors.push('suite: pass-incoerente');

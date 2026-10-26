@@ -305,6 +305,29 @@ try {
     assert(!fs.readdirSync(root).some(name => name.startsWith('.suite-profile-')));
   });
 
+  test('native uint32 and signal child outcomes retain a parseable failure profile and runner verdict', () => {
+    for (const status of [3221225477, 4294967295, null]) {
+      resetMarkers();
+      const signal = status === null ? 'SIGTERM' : null;
+      // Inject the native spawn result; no crashing process or platform-specific
+      // process.exit conversion is needed to exercise runner/profile integration.
+      const wrapper = `require('child_process').spawnSync=()=>(${JSON.stringify({ status, signal, error: null })});`
+        + "process.exitCode=require('./scripts/run-tests.js').main(process.argv.slice(1));";
+      const out = path.join(root, `native-${status}.json`);
+      const result = invoke(['--match', 'b-fast', '--profile-out', out], wrapper);
+      assert.strictEqual(result.status, 1);
+      assert(!result.stderr.includes('Suite profile not written:'), result.stderr);
+      const profile = readProfile(out);
+      assert.strictEqual(profile.suites.length, 1);
+      assert.strictEqual(profile.suites[0].exit_code, status);
+      assert.strictEqual(profile.suites[0].signal, signal);
+      assert.strictEqual(profile.suites[0].status, 'fail');
+      assert.strictEqual(profile.verdict.exit_code, 1);
+      assert.deepStrictEqual(profile.totals, { executed: 1, passed: 0, failed: 1, not_run: 0 });
+      assert.deepStrictEqual(observed(), [], 'only spawn results are injected');
+    }
+  });
+
   test('S04-T04 truth:4 copied runner synthetic partition union disjunction fingerprints baseline fallback privacy', () => {
     assert.strictEqual(weightedProfiles.length, 2);
     const ids = weightedProfiles.flatMap(profile => profile.suites.map(row => row.id));
