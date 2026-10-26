@@ -318,6 +318,13 @@ function advisoryObservation(binding, ownerRoot, criterion) {
   return observation;
 }
 
+function validRequiredCoverages(value, criterion) {
+  return Array.isArray(value) && value.length > 0 && value.length <= 64
+    && value.every(row => isObject(row) && Object.keys(row).sort().join(',') === 'aspect,coverage,root_id'
+      && criterion.aspects.includes(row.aspect) && nonEmpty(row.root_id)
+      && ['behavioral', 'documentary'].includes(row.coverage))
+    && new Set(value.map(row => JSON.stringify([row.aspect,row.root_id,row.coverage]))).size === value.length;
+}
 function applyBindings(input, criteria, context, diagnostics) {
   const bindings = input.bindings === undefined ? [] : input.bindings;
   if (!Array.isArray(bindings)) { diagnostics.push('bindings_invalid'); return; }
@@ -330,6 +337,16 @@ function applyBindings(input, criteria, context, diagnostics) {
     const criterionIdValue = resolveCriterionSelector(binding, criteria, context.unit);
     if (!criterionIdValue) { diagnostics.push(`binding_unknown_criterion:${index}`); continue; }
     const criterion = byId.get(criterionIdValue);
+    // Obligations precede source loading: absent evidence must not erase them.
+    if (binding.required_coverages !== undefined) {
+      if (!validRequiredCoverages(binding.required_coverages, criterion)
+        || criterion.required_coverages && fingerprint(criterion.required_coverages) !== fingerprint(binding.required_coverages)) {
+        diagnostics.push(`binding_required_coverages_invalid:${index}`);
+        criterion.truncated_aspects = [...criterion.aspects];
+        continue;
+      }
+      criterion.required_coverages = structuredClone(binding.required_coverages);
+    }
     const aspect = nonEmpty(binding.aspect) ? binding.aspect : criterion.aspects[0];
     if (!criterion.aspects.includes(aspect)) { diagnostics.push(`binding_unknown_aspect:${index}`); continue; }
     if (criterion.observations.length >= MAX_OBSERVATIONS) {
@@ -373,10 +390,13 @@ function classifyCriterion(criterion) {
     const relevant = observations.filter((entry) => entry && entry.aspect === aspect);
     const positive = relevant.some((entry) => entry.positive === true);
     const missingRoots = (criterion.required_roots || []).filter(root => !relevant.some(entry => entry.positive === true && entry.root_id === root));
+    const missingCoverages = (criterion.required_coverages || []).filter(row => row.aspect === aspect
+      && !relevant.some(entry => entry.positive === true && entry.root_id === row.root_id && entry.coverage === row.coverage));
     const negative = relevant.some((entry) => entry.negative === true);
     const limited = relevant.some((entry) => Array.isArray(entry.limitations) && entry.limitations.length > 0);
     anyPositive = anyPositive || positive;
-    fullyPositive = fullyPositive && positive && !negative && !limited && missingRoots.length === 0;
+    fullyPositive = fullyPositive && positive && !negative && !limited && missingRoots.length === 0 && missingCoverages.length === 0;
+    pending.push(...missingCoverages.map(row => `coverage_unverified:${aspect}:${row.root_id}:${row.coverage}`));
     pending.push(...missingRoots.map(root => `root_unverified:${aspect}:${root}`));
     if (!positive) pending.push(`aspect_unverified:${aspect}`);
     if (negative && positive) pending.push(`evidence_conflict:${aspect}`);
@@ -426,6 +446,8 @@ function validateChildDelivery(child, expectedUnit, parentUnit) {
   if (!child.lineage.includes(childKey)) return { error: 'child_lineage_invalid' };
   const criteria = [];
   for (const item of child.criteria) {
+    if (item?.required_coverages !== undefined && (!Array.isArray(item.aspects)
+      || !validRequiredCoverages(item.required_coverages, item))) return { error: 'child_required_coverages_invalid' };
     if (!isObject(item) || !unitKey(item.unit)
       || !(sameUnit(item.unit, expectedUnit) || isDescendantUnit(item.unit, expectedUnit))
       || !child.lineage.includes(unitKey(item.unit))

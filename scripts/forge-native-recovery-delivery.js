@@ -170,7 +170,7 @@ function packagePrompt(request, prompt) {
   }).join('\n');
   const plan = fs.readFileSync(request.planFile, 'utf8');
   const checked = roots.validatePlan(plan, contract);
-  requireExplicitVerify(plan);
+  requireExplicitVerify(plan,request);
   return prompt + '\n## Execution boundaries\nPhysical CODE_DIR: ' + request.cwd
     + '\nOwner (parent publication only): ' + contract.owner + '\nDeclared writes: ' + JSON.stringify(checked.writes)
     + '\nDo not edit owner metadata. Write the response only to this validated TEMP result path: ' + request.resultFile
@@ -190,12 +190,16 @@ function verificationPolicy(request, plan) {
   return {identity,seal};
 }
 
-function requireExplicitVerify(text){
+function requireExplicitVerify(text,request){
   const commands=api('forge-verify').parsePlanVerify(text);
-  if(!commands?.length)fail('milestone-explicit-verify-required');
+  if(!commands?.length){
+    const declared=request?.verification;
+    if(declared&&(declared.preferenceCommands?.length||Object.values(declared.commandsByRoot||{}).some(list=>list?.length))){verificationPolicy(request,text);return declared;}
+    fail('milestone-explicit-verify-required');
+  }
   return typeof commands==='string'?[commands]:commands;
 }
-function criterionBindings(result,capture,unitKey,{inventory,contract,documentary}={}){
+function criterionBindings(result,capture,unitKey,{inventory,contract,documentary,coveragePolicy}={}){
   const bindings=[];
   if(!capture?.passed||!result.must_haves_status?.length)fail('criterion-evidence-required');
   if(!inventory?.structured||inventory.diagnostics.length||!inventory.criteria.length)fail('criterion-inventory-required');
@@ -216,8 +220,10 @@ function criterionBindings(result,capture,unitKey,{inventory,contract,documentar
       if(matches.length!==1)fail('artifact-row-missing-or-ambiguous');
       bindings.push({criterion_id,root_id:item.root_id,coverage:'structural',source:{kind:'artifact',row_index:matches[0].index,property:'substantive'}});continue;
     }
+    const policy=coveragePolicy?.criteria.find(row=>row.criterion_id===criterion_id);
     const reviewed=documentary?.criteria.filter(row=>row.criterion_id===criterion_id);
-    if(reviewed?.length){for(const row of reviewed)bindings.push({criterion_id,root_id:row.root_id,coverage:'documentary',source:{kind:'artifact',property:'documentary'}});continue;}
+    if(reviewed?.length){for(const row of reviewed)bindings.push({criterion_id,root_id:row.root_id,coverage:'documentary',source:{kind:'artifact',property:'documentary'}});
+      if(!policy||!policy.requirements.some(row=>row.coverage==='behavioral'))continue;}
     if(!item.evidence?.length)fail('criterion-observed-evidence-required');
     for(const evidence of item.evidence){
       const envelope=capture.gate.roots.find(root=>root.root_id===evidence.root_id);
@@ -227,11 +233,61 @@ function criterionBindings(result,capture,unitKey,{inventory,contract,documentar
     }
   }
   if(seen.size!==expected.size||[...expected.keys()].some(id=>!seen.has(id)))fail('criterion-coverage-incomplete');
+  for(const policy of coveragePolicy?.criteria||[]){
+    const rows=bindings.filter(row=>row.criterion_id===policy.criterion_id);
+    for(const requirement of policy.requirements){
+      if(!rows.some(row=>row.root_id===requirement.root_id&&row.coverage===requirement.coverage))fail('criterion-required-coverage-missing');
+    }
+    for(const row of rows)row.required_coverages=structuredClone(policy.requirements);
+  }
   return bindings;
+}
+function readDocumentarySource(source,contract,budget){
+  const file=source.external===true?source.path:api('forge-code-roots').resolvePath(contract,source.path,{legacy:contract.code_roots.length===1}).absolute;
+  const checked=api('forge-empirical-sources').checkedPath(file);
+  const read=api('forge-autonomy-sources').readBoundedStableFile(checked,1048576,{expectedReal:checked});
+  if(read.error)fail('documentary-source-'+read.error);
+  if(!budget.paths.has(checked)){budget.paths.add(checked);budget.bytes+=read.buffer.length;}
+  if(budget.bytes>8388608)fail('documentary-sources-total-bytes');
+  const sha256=hash(read.buffer);
+  if(source.external===true&&source.sha256!==sha256)fail('documentary-source-hash-changed');
+  return {...source,sha256};
+}
+function validateCoveragePolicy(policy,inventory,contract){
+  if(policy===undefined)return null;
+  const roots=api('forge-code-roots');
+  if(!policy||policy.schema_version!==1||!Array.isArray(policy.criteria)||!policy.criteria.length
+    ||policy.criteria.length>inventory.criteria.length)fail('documentary-policy-invalid');
+  const seen=new Set();
+  const budget={paths:new Set(),bytes:0};
+  for(const row of policy.criteria){
+    const criterion=inventory.criteria.find(c=>c.id===row.criterion_id&&c.origin!=='artifact');
+    if(!criterion||criterion.aspects.length!==1||!['default','declared-link'].includes(criterion.aspects[0])||seen.has(row.criterion_id)||row.text!==criterion.text||!Array.isArray(row.requirements)
+      ||!row.requirements.length||row.requirements.length>64||!Array.isArray(row.sources)||!row.sources.length||row.sources.length>64)fail('documentary-policy-invalid');
+    seen.add(row.criterion_id);
+    const keys=new Set();
+    for(const req of row.requirements){
+      const key=JSON.stringify([req.aspect,req.root_id,req.coverage]);
+      if(Object.keys(req).sort().join(',')!=='aspect,coverage,root_id'||!criterion.aspects.includes(req.aspect)
+        ||!contract.code_roots.some(r=>r.id===req.root_id)||!['behavioral','documentary'].includes(req.coverage)||keys.has(key))fail('documentary-policy-invalid');
+      keys.add(key);
+    }
+    if(!row.requirements.some(req=>req.coverage==='documentary'))fail('documentary-policy-invalid');
+    for(const source of row.sources){
+      if(!contract.code_roots.some(r=>r.id===source.root_id)||typeof source.path!=='string')fail('documentary-policy-source-invalid');
+      // Explicit external read-only sources are sealed as paths, never added to writes.
+      if(source.external===true){
+        if(!path.isAbsolute(source.path)||!/^[a-f0-9]{64}$/.test(source.sha256||''))fail('documentary-policy-source-invalid');
+        readDocumentarySource(source,contract,budget);
+      }
+      else if(roots.resolvePath(contract,source.path,{legacy:contract.code_roots.length===1}).root_id!==source.root_id)fail('documentary-policy-source-invalid');
+    }
+  }
+  return structuredClone(policy);
 }
 // Caller supplies the exact saved output of its single canonical resolver call,
 // already-held claim/gates, and real native binding. Never resolves or changes route.
-function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linkedEntryOptions,savedManifest,persistDeliveryReceipt,leaseRenewal,documentaryContinuation}={}){
+function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linkedEntryOptions,savedManifest,persistDeliveryReceipt,leaseRenewal,documentaryContinuation,coveragePolicy}={}){
   if(typeof assertBoundary!=='function'||typeof assertAuthority!=='function')fail('live-controller-boundary-required');
   const r=structuredClone(request);
   delete r.linkedEntryBinding;
@@ -248,7 +304,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
   side.validateRecoveryRequest(r,{nativeInvocation,linkedEntryOptions});
   requestIdentity(r);
   const plan=fs.readFileSync(r.planFile,'utf8'),context=fs.readFileSync(r.contextFile);
-  requireExplicitVerify(plan);
+  requireExplicitVerify(plan,r);
   const checked=roots.validatePlan(plan,r.execution_contract);
   const prepared=savedManifest?.prepared || {execution_contract:r.execution_contract,claims:checked.writes,
     snapshots:r.execution_contract.code_roots.map(root=>({...api('forge-surgical-reset').captureAttemptSnapshot(root.path),root_id:root.id})),
@@ -257,8 +313,14 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
   const planHash=hash(plan),contextHash=hash(context);
   const inputs = savedManifest?.inputs || inputSections(r).map(([label,file]) => ({label,file,sha256:hash(fs.readFileSync(file))}));
   const {identity:verificationIdentity,seal}=verificationPolicy(r,plan);
+  const loc=side.locations(r),inventory=api('forge-delivery').inventoryPlan(plan,r.planFile,loc.rules[loc.delivery.input].unit);
+  const policy=validateCoveragePolicy(coveragePolicy===undefined?savedManifest?.coverage_policy:coveragePolicy,inventory,r.execution_contract);
+  if(policy&&documentary)fail('documentary-policy-continuation-conflict');
+  let initialReview=null;
   function guard(publishing=false){
+    if(policy&&fs.existsSync(manifestFile)&&roots.digest(JSON.parse(fs.readFileSync(manifestFile,'utf8')))!==roots.digest(manifest))fail('documentary-manifest-changed');
     if(documentary)documentary.check();
+    if(initialReview)initialReview.check();
     assertAuthority();assertBoundary();side.validateRecoveryRequest(r,{nativeInvocation,linkedEntryOptions});
     if(hash(fs.readFileSync(r.planFile))!==planHash||hash(fs.readFileSync(r.contextFile))!==contextHash)fail('milestone-input-changed');
     if(inputs.some(row=>hash(fs.readFileSync(row.file))!==row.sha256))fail('milestone-input-changed');
@@ -269,6 +331,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
   let verified=null;
   const manifest={request:r,prepared,plan_sha256:planHash,context_sha256:contextHash,inputs,verification_seal:seal};
   if(documentary)manifest.documentary_continuation=documentary.evidence;
+  if(policy)manifest.coverage_policy=policy;
   if(savedManifest && roots.digest(manifest)!==roots.digest(savedManifest))fail('milestone-manifest-changed');
   const manifestFile=r.resultFile+'.manifest.json', receiptFile=r.resultFile+'.receipt.json';
   for(const file of [manifestFile,receiptFile])for(const root of [r.contextRoot,...r.execution_contract.code_roots.map(row=>row.path)])
@@ -283,6 +346,52 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
     persistDeliveryReceipt({file,sha256});
   };
   return {
+    reviewDocumentary({returnedReceiptFile,attestReview,attestStoppedWriter}={}){
+      guard(true);
+      if(!policy||typeof attestReview!=='function'||typeof attestStoppedWriter!=='function')fail('documentary-live-authority-required');
+      const originalBytes=fs.readFileSync(returnedReceiptFile),record=JSON.parse(originalBytes);
+      if(path.resolve(returnedReceiptFile)!==path.resolve(receiptFile+'.'+hash(originalBytes)+'.json')
+        ||record.kind!=='milestone-native-continuation'||record.phase!=='executed'||record.dispatch_id!==r.dispatchId||record.manifest_sha256!==hash(fs.readFileSync(manifestFile))
+        ||record.fingerprint!==side.artifactFingerprint(r)||record.recovery_identity_sha256!==roots.digest(requestIdentity(r))
+        ||!resultContract.validate(record.result).ok||!['done','partial'].includes(record.result.status))fail('documentary-returned-binding');
+      const readSources=()=>{const budget={paths:new Set(),bytes:0};return policy.criteria.flatMap(row=>row.sources.map(source=>readDocumentarySource(source,r.execution_contract,budget)));};
+      const sources=readSources();
+      const check=()=>{
+        assertAuthority();if(attestStoppedWriter()!==true)fail('documentary-writer-not-stopped');
+        if(hash(fs.readFileSync(returnedReceiptFile))!==hash(originalBytes)
+          ||roots.digest(execution.replayState(r.cwd,r.execution_contract))!==roots.digest(record.code_state)
+          ||roots.digest(readSources())!==roots.digest(sources))fail('documentary-returned-state-changed');
+      };
+      check();
+      const review=attestReview({manifest:structuredClone(manifest),result:structuredClone(record.result),policy:structuredClone(policy),sources:structuredClone(sources)});
+      if(!review?.reference||!review.reviewer||!review.producer||review.reviewer===review.producer||review.pending_questions?.length
+        ||!Array.isArray(review.criteria))fail('documentary-independent-review-required');
+      const expected=policy.criteria.flatMap(row=>row.requirements.filter(req=>req.coverage==='documentary').map(req=>({row,req})));
+      if(review.criteria.length!==expected.length)fail('documentary-review-coverage');
+      for(const {row,req} of expected){
+        const matches=review.criteria.filter(c=>c.criterion_id===row.criterion_id&&c.root_id===req.root_id);
+        if(matches.length!==1)fail('documentary-review-coverage');
+        const c=matches[0];
+        if(c.text!==row.text||c.status!=='met'||c.eligibility!=='documentary'||!c.rationale||!c.evidence
+          ||!Array.isArray(c.documents)||!c.documents.length||c.documents.some(doc=>!row.sources.some(s=>s.path===doc.path&&s.root_id===req.root_id)
+            ||!sources.some(s=>s.path===doc.path&&s.root_id===req.root_id&&s.sha256===doc.sha256)))fail('documentary-review-criterion');
+      }
+      const derived=structuredClone(record.result);
+      for(const item of derived.must_haves_status){
+        if(item.status==='unmet')fail('documentary-negative-result');
+        const id=api('forge-delivery').unitKey(loc.rules[loc.delivery.input].unit)+':'+item.kind+':'+item.index;
+        if(item.status!=='met'){if(!policy.criteria.some(row=>row.criterion_id===id))fail('documentary-unreviewed-result');item.status='met';}
+      }
+      derived.status='done';
+      const evidence={schema_version:1,original_manifest_sha256:record.manifest_sha256,original_result_sha256:hash(JSON.stringify(record.result)),
+        original_receipt_sha256:hash(originalBytes),review_reference:review.reference,reviewer:review.reviewer,producer:review.producer,criteria:structuredClone(review.criteria)};
+      evidence.fingerprint=api('forge-delivery').fingerprint(evidence);
+      check();initialReview={check,evidence,derived};
+      const reviewFile=r.resultFile+'.documentary-review.'+evidence.fingerprint+'.json',bytes=JSON.stringify({evidence,derived,returned_receipt:returnedReceiptFile});
+      for(const root of [r.contextRoot,...r.execution_contract.code_roots.map(row=>row.path)])api('forge-xllm').validateResultFileTarget(reviewFile,root);
+      try{fs.writeFileSync(reviewFile,bytes,{flag:'wx'});}catch(error){if(error.code!=='EEXIST'||fs.readFileSync(reviewFile,'utf8')!==bytes)throw error;}
+      return {result:structuredClone(derived),review_file:reviewFile,provider_called:false};
+    },
     restoreDocumentary(){
       if(!documentary)fail('documentary-capability-required');guard();
       if(!fs.existsSync(manifestFile))fail('documentary-manifest-required');
@@ -318,19 +427,22 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
     },
     verify(result){
       guard();if(!resultContract.validate(result).ok||result.status!=='done')fail('native-result-not-done');
+      if(policy&&(!initialReview||roots.digest(result)!==roots.digest(initialReview.derived)))fail('documentary-review-required');
       if(documentary&&roots.digest(result)!==roots.digest(documentary.derived))fail('documentary-result-changed');
       const delta=execution.verifyResult(r.cwd,prepared,result),loc=side.locations(r),resourceEvents=[];
       const capture=verify.captureRootDelivery(r.execution_contract,plan,{...r.verification,unit:loc.rules[loc.delivery.input].unit,
         verificationSeal:seal,verificationIdentity,resourceEventSink:line=>resourceEvents.push(line)});
       guard();if(!capture.passed)fail('verification-failed');
-      if(documentary){
+      if(documentary||initialReview){
+        if(documentary){
         for(const doc of documentary.preserved){const q=roots.resolvePath(r.execution_contract,doc.path);const root=r.execution_contract.code_roots.find(row=>row.id===q.root_id);
           if(hash(fs.readFileSync(path.join(root.path,q.path)))!==doc.sha256)fail('documentary-reviewed-bytes-changed');}
-        for(const envelope of capture.artifacts)envelope.documentary=structuredClone(documentary.evidence);
+        }
+        for(const envelope of capture.artifacts)envelope.documentary=structuredClone((documentary||initialReview).evidence);
       }
       const unit=loc.rules[loc.delivery.input].unit;
       const inventory=api('forge-delivery').inventoryPlan(plan,r.planFile,unit);
-      const bindings=criterionBindings(result,capture,api('forge-delivery').unitKey(unit),{inventory,contract:r.execution_contract,documentary:documentary?.evidence});
+      const bindings=criterionBindings(result,capture,api('forge-delivery').unitKey(unit),{inventory,contract:r.execution_contract,documentary:(documentary||initialReview)?.evidence,coveragePolicy:policy});
       // Canonical delivery validates coverage, criterion identity and actual captures.
       const publicationRequest={...r,verification:{...(r.verification||{}),bindings}};
       const artifacts=side.executeDeliveryArtifacts(publicationRequest,loc,result,r.contextRoot,r.cwd,capture);
@@ -362,9 +474,11 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
     replayReady(record){
       guard(true);
       const loc=side.locations(r);
-      if(documentary){
-        documentary.assertRestored();
-        if(roots.digest(record.result)!==roots.digest(documentary.derived)
+      if(policy&&!initialReview)fail('documentary-review-required');
+      if(documentary||initialReview){
+        if(documentary)documentary.assertRestored();
+        const reviewed=documentary||initialReview;
+        if(roots.digest(record.result)!==roots.digest(reviewed.derived)
           ||record.manifest_sha256!==hash(fs.readFileSync(manifestFile)))fail('documentary-ready-binding');
         // Recompose the canonical saved captures without running commands again.
         // A ready record is historical evidence, not a new live capability.
@@ -373,13 +487,13 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
           if(matches?.length!==1)fail('documentary-ready-capture-missing');
           const envelope=JSON.parse(matches[0].content);
           if(envelope.kind!==source.kind||envelope.root_id!==source.root_id
-            ||source.kind==='artifact'&&roots.digest(envelope.documentary)!==roots.digest(documentary.evidence))fail('documentary-ready-capture-changed');
+            ||source.kind==='artifact'&&roots.digest(envelope.documentary)!==roots.digest(reviewed.evidence))fail('documentary-ready-capture-changed');
           return envelope;
         });
         const captured={passed:true,gate:{roots:envelopes.filter(row=>row.kind==='verification')},artifacts:envelopes.filter(row=>row.kind==='artifact')};
         const unit=loc.rules[loc.delivery.input].unit;
         const inventory=api('forge-delivery').inventoryPlan(plan,r.planFile,unit);
-        const bindings=criterionBindings(record.result,captured,api('forge-delivery').unitKey(unit),{inventory,contract:r.execution_contract,documentary:documentary.evidence});
+        const bindings=criterionBindings(record.result,captured,api('forge-delivery').unitKey(unit),{inventory,contract:r.execution_contract,documentary:reviewed.evidence,coveragePolicy:policy});
         const recomposed=side.executeDeliveryArtifacts({...r,verification:{...r.verification,bindings}},loc,record.result,r.contextRoot,r.cwd,captured);
         if(roots.digest(record.artifacts.map(({path,content})=>({path,content})))!==roots.digest(recomposed))fail('documentary-ready-artifacts-changed');
       }

@@ -671,5 +671,40 @@ test('documentary capture is distinct from behavior and requires bound independe
   assert.notEqual(byId(build(fx),id).status,'verificado','coverage label alone is never proof');
 });
 
+test('mixed obligations are AND tuples, survive missing bindings and aggregate fail closed', () => {
+  const fx=fixture('mixed-obligations',{type:'task',id:'T01',milestone:'M001',slice:'S01'}),id=criterionId(fx.unit,'truth',0);
+  const criterion=delivery.inventoryPlan(fx.planText,'task/PLAN.md',fx.unit).criteria.find(c=>c.id===id);
+  const required=[{aspect:criterion.aspects[0],root_id:'alpha',coverage:'behavioral'},{aspect:criterion.aspects[0],root_id:'alpha',coverage:'documentary'}];
+  const observation=coverage=>({aspect:criterion.aspects[0],root_id:'alpha',coverage,positive:true,negative:false,limitations:[],reasons:[],revision:'same'});
+  const classify=observations=>delivery.classifyCriterion({...criterion,required_coverages:required,observations});
+  assert.notEqual(classify([observation('behavioral')]).status,'verificado');
+  assert.notEqual(classify([observation('documentary')]).status,'verificado');
+  assert.equal(classify([observation('behavioral'),observation('documentary')]).status,'verificado');
+  assert.notEqual(classify([observation('behavioral'),{...observation('documentary'),root_id:'beta'}]).status,'verificado','no Cartesian substitution');
+  assert.notEqual(classify([observation('behavioral'),{...observation('documentary'),negative:true}]).status,'verificado');
+  assert.notEqual(classify([observation('behavioral'),{...observation('documentary'),revision:'foreign'}]).status,'verificado');
+  writeJson(path.join(fx.owner,'verify.json'),verificationEnvelope(fx,[{exitCode:0}],{root_id:'alpha'}));
+  fx.input.bindings=[{...bind('verification','verify.json',id,{check_index:0},'behavioral'),required_coverages:required}];
+  let output=build(fx);assert.deepStrictEqual(byId(output,id).required_coverages,required);
+  assert.notEqual(byId(output,id).status,'verificado','removing documentary binding retains obligation on behavioral binding');
+  fx.input.bindings[0].source.path='missing.json';output=build(fx);
+  assert.deepStrictEqual(byId(output,id).required_coverages,required,'source failure cannot erase obligation');
+  fx.input.bindings[0].required_coverages=[{...required[0],coverage:'arbitrary'}];
+  assert(build(fx).diagnostics.some(d=>d.startsWith('binding_required_coverages_invalid')));
+  const child=build(fx,{...fx.input,bindings:[]});
+  child.criteria[0]=classify([observation('behavioral'),observation('documentary')]);
+  const aggregate=()=>build(fx,{...fx.input,bindings:[],unit:{type:'slice',id:'S01',milestone:'M001'},
+    expected_children:[{unit:fx.unit,delivery:'mixed-child.json'}]});
+  writeJson(path.join(fx.owner,'mixed-child.json'),delivery.finalizeOutput(child));
+  assert.equal(byId(aggregate(),id).status,'verificado');
+  child.criteria[0].evidence=child.criteria[0].evidence.filter(row=>row.coverage!=='documentary');
+  child.criteria[0].status='verificado';child.criteria[0].pending=[];
+  writeJson(path.join(fx.owner,'mixed-child.json'),delivery.finalizeOutput(child));
+  assert.notEqual(byId(aggregate(),id).status,'verificado','aggregation recomputes mixed obligation despite claimed green status');
+  child.criteria[0].required_coverages=[{...required[0],coverage:'unsupported'}];
+  writeJson(path.join(fx.owner,'mixed-child.json'),delivery.finalizeOutput(child));
+  assert(aggregate().diagnostics.some(d=>d.includes('child_required_coverages_invalid')));
+});
+
 for (const root of roots) { try { fs.rmSync(root, { recursive: true, force: true }); } catch (_) {} }
 process.stdout.write(`\n${passed} passed, ${skipped} skipped\n`);

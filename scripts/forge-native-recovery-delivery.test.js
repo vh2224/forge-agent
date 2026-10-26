@@ -77,6 +77,8 @@ async function fixture() {
   return f;
 }
 async function main(){
+  await initialMixedDocumentary();
+  await initialMixedDocumentary(true);
   await documentaryContinuation();
   await protectedLeaseRenewal();
   await implicitOrdinaryIdentity();
@@ -213,6 +215,70 @@ async function documentaryContinuation(){
     assert.deepEqual(fs.readFileSync(originalManifestFile),manifestBytes);
     console.log('PASS documentary continuation: preserved partial, actual reset, released/reacquired claim and maintenance metadata, fresh manifest, live review, restore, canonical verification/publication and replay without provider');
   } finally {f.cleanup();}
+}
+async function initialMixedDocumentary(documentaryOnly=false){
+  const f=await fixture();
+  try{
+    const handoff=await side.recoverUnitSidecar(f.request,f.recovery,f.runtime),request=handoff.result.request;
+    const nativeInvocation=require('./forge-native-invocation').buildNativeInvocation({hostRuntime:'codex',resolvedDispatch:request.route,
+      activeCapabilities:capabilities,prompt:'Initial mixed evidence fixture',forkTurns:'none',taskName:'fixture',agentType:'forge-executor'});
+    const inventory=require('./forge-delivery').inventoryPlan(fs.readFileSync(request.planFile,'utf8'),request.planFile,side.locations(request).rules[side.locations(request).delivery.input].unit);
+    const criteria=inventory.criteria.filter(c=>c.origin!=='artifact');
+    const policy={schema_version:1,criteria:criteria.map(c=>({criterion_id:c.id,text:c.text,
+      requirements:f.contract.code_roots.flatMap(root=>(documentaryOnly?['documentary']:['behavioral','documentary']).map(coverage=>({aspect:c.aspects[0],root_id:root.id,coverage}))),
+      sources:f.contract.code_roots.map(root=>({root_id:root.id,path:root.id+'::same.txt'}))}))};
+    const external=path.join(f.dir,'review-source.md');write(external,'Pinned historical evidence, read-only.\n');
+    policy.criteria[0].sources.push({root_id:'alpha',path:external,external:true,sha256:crypto.createHash('sha256').update(fs.readFileSync(external)).digest('hex')});
+    const receipts=[],options={request,nativeInvocation,assertBoundary:f.assertBoundary,assertAuthority:f.assertBoundary,
+      coveragePolicy:policy,persistDeliveryReceipt:reference=>receipts.push(reference)};
+    const invalidAspect=structuredClone(policy);invalidAspect.criteria[0].requirements[0].aspect='unsupported';
+    assert.throws(()=>delivery.prepare({...options,coveragePolicy:invalidAspect}),/policy-invalid/);
+    const missingPin=structuredClone(policy);delete missingPin.criteria[0].sources.at(-1).sha256;
+    assert.throws(()=>delivery.prepare({...options,coveragePolicy:missingPin}),/policy-source-invalid/);
+    write(external,Buffer.alloc(1048577));assert.throws(()=>delivery.prepare(options),/source.*large|source.*limit|source.*size/);write(external,'Pinned historical evidence, read-only.\n');
+    const linked=path.join(f.dir,'linked-source.md');
+    try{fs.symlinkSync(external,linked);const linkPolicy=structuredClone(policy);linkPolicy.criteria[0].sources.at(-1).path=linked;
+      assert.throws(()=>delivery.prepare({...options,coveragePolicy:linkPolicy}),/link|identity/);fs.unlinkSync(linked);
+    }catch(error){if(!['EPERM','EACCES','ENOTSUP'].includes(error.code))throw error;console.log('SKIP documentary source symlink fixture: '+error.code);}
+    const session=delivery.prepare(options);session.start();const manifest=session.manifest(),manifestBytes=fs.readFileSync(request.resultFile+'.manifest.json');
+    for(const root of f.contract.code_roots)write(path.join(root.path,'same.txt'),'after\n');
+    const result=f.result();if(documentaryOnly)for(const c of result.must_haves_status)if(c.kind!=='artifact')c.evidence=[];
+    session.returned(result);
+    const originalFile=receipts.at(-1).file,originalBytes=fs.readFileSync(originalFile);
+    assert.throws(()=>session.verify(result),/documentary-review-required/);
+    const attest=({sources})=>({reference:'review:initial-mixed',reviewer:'independent-reviewer',producer:'fixture-worker',criteria:criteria.flatMap(c=>f.contract.code_roots.map(root=>({
+      criterion_id:c.id,text:c.text,root_id:root.id,eligibility:'documentary',status:'met',rationale:'Manual review is required by this fixture policy.',
+      evidence:'Reviewed exact returned bytes alongside actual structural or behavioral checks.',documents:sources.filter(s=>s.root_id===root.id&&policy.criteria.find(p=>p.criterion_id===c.id).sources.some(p=>p.path===s.path)).map(({path,sha256})=>({path,sha256}))})))});
+    const reviewOptions={returnedReceiptFile:originalFile,attestReview:attest,attestStoppedWriter:()=>true};
+    assert.throws(()=>session.reviewDocumentary({...reviewOptions,attestStoppedWriter:()=>false}),/writer-not-stopped/);
+    assert.throws(()=>session.reviewDocumentary({...reviewOptions,attestReview:{}}),/live-authority/);
+    assert.throws(()=>session.reviewDocumentary({...reviewOptions,attestReview:challenge=>{const review=attest(challenge);return {...review,reviewer:review.producer};}}),/independent-review-required/);
+    const receiptCopy=path.join(f.dir,'imported-receipt.json');fs.writeFileSync(receiptCopy,originalBytes);
+    assert.throws(()=>session.reviewDocumentary({...reviewOptions,returnedReceiptFile:receiptCopy}),/returned-binding/);
+    write(external,'Changed after prepare.\n');assert.throws(()=>session.reviewDocumentary(reviewOptions),/source-hash-changed/);write(external,'Pinned historical evidence, read-only.\n');
+    assert.throws(()=>session.reviewDocumentary({...reviewOptions,attestReview:challenge=>({...attest(challenge),criteria:[]})}),/review-coverage/);
+    const open=()=>delivery.prepare({...options,coveragePolicy:undefined,savedManifest:manifest});
+    const changedManifest=structuredClone(manifest);changedManifest.coverage_policy.criteria[0].sources.pop();
+    const changedSession=delivery.prepare({...options,coveragePolicy:undefined,savedManifest:changedManifest});
+    assert.throws(()=>changedSession.reviewDocumentary(reviewOptions),/documentary-manifest-changed/);
+    assert.deepEqual(fs.readFileSync(request.resultFile+'.manifest.json'),manifestBytes);
+    const resumed=open();const reviewed=resumed.reviewDocumentary(reviewOptions);assert.equal(reviewed.provider_called,false);
+    assert.deepEqual(reviewed.result,result,'done initial return does not need artificial partial');
+    write(path.join(f.a,'same.txt'),'drift\n');assert.throws(()=>resumed.verify(result),/returned-state-changed/);write(path.join(f.a,'same.txt'),'after\n');
+    const checked=resumed.verify(result);
+    for(const p of policy.criteria){const rows=checked.bindings.filter(b=>b.criterion_id===p.criterion_id);assert.equal(rows.some(b=>b.coverage==='behavioral'),!documentaryOnly);assert(rows.some(b=>b.coverage==='documentary'));assert(rows.every(b=>roots.digest(b.required_coverages)===roots.digest(p.requirements)));}
+    const withoutBehavior=structuredClone(result);for(const c of withoutBehavior.must_haves_status)if(c.kind!=='artifact')c.evidence=[];
+    const bindOptions={inventory,contract:f.contract,documentary:JSON.parse(fs.readFileSync(reviewed.review_file)).evidence,coveragePolicy:policy};
+    if(!documentaryOnly)assert.throws(()=>delivery.criterionBindings(withoutBehavior,checked.capture,require('./forge-delivery').unitKey(inventory.criteria[0].unit),bindOptions),/observed-evidence-required/);
+    assert.throws(()=>delivery.criterionBindings(result,checked.capture,require('./forge-delivery').unitKey(inventory.criteria[0].unit),{...bindOptions,documentary:undefined}),/required-coverage-missing|observed-evidence-required/);
+    const materialize=side.materialize;
+    try{side.materialize=(r,record)=>{write(path.join(f.owner,record.artifacts[0].path),record.artifacts[0].content);throw Error('fixture partial publication');};assert.throws(()=>resumed.publish(result),/fixture partial publication/);}finally{side.materialize=materialize;}
+    const ready=JSON.parse(fs.readFileSync(receipts.at(-1).file));
+    const restart=open();assert.throws(()=>restart.replayReady(ready),/documentary-review-required/);
+    restart.reviewDocumentary(reviewOptions);restart.replayReady(ready);restart.replayReady(ready);
+    assert.deepEqual(fs.readFileSync(originalFile),originalBytes);assert.deepEqual(fs.readFileSync(request.resultFile+'.manifest.json'),manifestBytes);
+    console.log('PASS initial '+(documentaryOnly?'documentary-only':'mixed')+': real done return, sealed policy, pinned external sources, live independent review, required bindings, drift rejection, restarted review and idempotent partial-publication replay without provider');
+  }finally{f.cleanup();}
 }
 async function protectedLeaseRenewal() {
   const f=await fixture(),lease=require('./forge-unit-lease');
@@ -357,5 +423,5 @@ async function guardedHandoff() {
     console.log('PASS retained handoff: final request, research and unclaimed drift refuse before callback; partial and duplicate invocation never publish');
   } finally { f.cleanup(); }
 }
-module.exports={fixture,main,protectedLeaseRenewal,documentaryContinuation};
+module.exports={fixture,main,protectedLeaseRenewal,documentaryContinuation,initialMixedDocumentary};
 if(require.main===module)main().catch(error=>{console.error(error);process.exitCode=1;});

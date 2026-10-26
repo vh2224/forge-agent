@@ -213,4 +213,45 @@ markup are escaped. The JSON remains the complete reconstructible detail.
 
 ## Evidência de múltiplas raízes
 
+### Initial documentary and mixed capture
+
+The native delivery adapter accepts an explicit `coveragePolicy` before `prepare`.
+The immutable manifest seals each selected criterion's exact text, read-only
+source paths and required `(aspect, root_id, coverage)` tuples. Documentary
+policies support only each built-in criterion's sole aspect (`default` for a
+truth, `declared-link` for a key link); unsupported or multiple aspects refuse
+before preparation. External inputs require a SHA-256 pin at preparation and
+stable bounded reads (1 MiB per file, 8 MiB unique files per capture), with no
+symlink or junction components. The same reads and pins are checked again at
+review and publication. Locally produced sources are captured after return.
+Documentary
+eligibility is an independent review assertion about the plan, never a filename
+extension or a worker's `met` flag. Unselected criteria keep ordinary behavioral
+verification. Mixed criteria require both declared coverages; neither positive
+documentary evidence nor a successful command cancels a negative or limitation.
+
+After the actual worker return is persisted as an immutable executed receipt and
+the writer is stopped, `session.reviewDocumentary` requires live host authority,
+a live stopped-writer callback and independent review of the exact returned
+bytes. It writes a separate content-addressed review record and returns a derived
+result; it does not change the original result, manifest or claim and does not
+invoke a provider. External sources explicitly listed by the policy remain
+read-only inputs, not authorized writes. Unknown documentary outcomes may be
+adjudicated; unmet outcomes cannot be promoted. Real command capture remains
+mandatory, including behavioral assertions for every mixed obligation.
+
+Restart uses `prepare({savedManifest, ...liveAuthority})`, then reattests through
+`reviewDocumentary` using the original immutable executed receipt. Saved review
+JSON is evidence, not a live capability. `replayReady` recomposes saved captures
+and validates the same policy, review and bytes without repeating the provider
+or commands. This explicit API does not extend the legacy reservation replay
+API automatically. Publication retries preserve the original returned receipt.
+
+Bindings carry `required_coverages` to delivery and child aggregation. The native
+adapter derives these obligations from the sealed policy, checks representation
+before composition and attaches them to every binding of that criterion. The
+classifier requires every concrete tuple, preserving negatives, limitations and
+revision mismatches. As with behavioral captures, local envelope fingerprints
+detect changes; they are not cryptographic authentication.
+
 forge-verify.captureRootDelivery(execution_contract,planText,options) gera envelopes próprios de verification/artifact por root_id, identidade física, contract hash, cwd real, revisão/workspace, environment e captured_at contemporâneos. Os comandos rodam em cada checkout e expected_output é conferido em sua raiz. Input de delivery v2 conserva execution_contract e bindings com root_id; fonte estrangeira ou identidade alterada falha. Truth global requer binding explícito para cada raiz; artifact requer sua raiz e key_link as raízes de from/to. Um comando global, sucesso de outra raiz ou mero arquivo existente não cobre comportamento. CI/review/merge/install/aceite humano continuam fatos independentes.
