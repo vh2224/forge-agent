@@ -233,9 +233,34 @@ check('CHECK-VERSION-READER-FRAMING', () => withRepo(cwd => {
   const message = 'fix: framing\r\n\r\nbody\x1e\x1f\r\n\r\nForge-Impact: cli/compatible-correction; --flag\r\n';
   const id = commit(cwd, message);
   const records = api.readCommits(cwd, 'v1.2.3..HEAD');
-  assert.deepStrictEqual(records, [{ sha: id, message: message.trim() }]);
+  assert.deepStrictEqual(records, [{ sha: id, message }]);
   assert.strictEqual(api.resolveVersion(cwd).impact.declared_commits, 1);
   assert.deepStrictEqual(api.readCommits(cwd, 'v1.2.3..HEAD', { spawnSync() { return { status: 0, stdout: '' }; } }), []);
+}));
+
+check('CHECK-VERSION-READER-IMPACT-RAW-MESSAGE', () => withRepo(cwd => {
+  const trailer = 'Forge-Impact: cli/compatible-correction; ';
+  const long = 'a'.repeat(160);
+  const cases = [
+    ['tab', `${trailer}flag\t`, 'impact-invalid'],
+    ['cr', `${trailer}flag\r`, 'impact-invalid'],
+    ['long-ws', `${trailer}${long}  `, 'impact-invalid'],
+    ['valid', `${trailer}${long}`, null],
+  ];
+  for (const [label, line, expected] of cases) {
+    const id = commit(cwd, `fix: raw ${label}\n\nbody\n\n${line}`);
+    const records = api.readCommits(cwd, 'v1.2.3..HEAD');
+    assert.strictEqual(records[0].sha, id);
+    assert(records[0].message.endsWith(line), label);
+    const resolution = api.resolveFromFacts({ latestTag: 'v1.2.3', commits: [records[0]] });
+    if (expected) {
+      assert.strictEqual(resolution.impact.status, 'invalid', label);
+      assert.throws(() => api.checkDeclaredVersion(resolution, '1.2.4'), code('impact-invalid'));
+    } else {
+      assert.strictEqual(resolution.impact.status, 'consistent', label);
+      assert.strictEqual(api.checkDeclaredVersion(resolution, '1.2.4').ok, true);
+    }
+  }
 }));
 
 check('CHECK-VERSION-READER-MALFORMED-NUL', () => withRepo(cwd => {
