@@ -54,6 +54,19 @@ assert.deepStrictEqual(concurrency.readConcurrency('# "concurrency": ignored\nna
 
 assert.deepStrictEqual(concurrency.readConcurrency('jobs:\n  test:\n    steps:\n      - run: "echo concurrency: {text}"'), { present: false });
 
+// Review R1: whitespace before ':' must not disable the jobs boundary.
+const supportedRoot = 'concurrency:\n  group: ' + concurrency.SUPPORTED_FORMS.groups.ci
+  + '\n  cancel-in-progress: ' + concurrency.SUPPORTED_FORMS.cancellations.pull_request + '\n';
+for (const jobs of [
+  'jobs :\n  test:\n    "concurrency": all',
+  "jobs  :\n  test:\n    'concurrency': all",
+  'jobs \t:\n  test:\n    concurrency: all',
+  'jobs : {test: {concurrency: all}}',
+]) {
+  assert.throws(() => concurrency.modelFor(concurrency.readConcurrency(supportedRoot + jobs), 'ci'), /unsupported/);
+  assert.throws(() => concurrency.rehearse({ ...texts, ci: supportedRoot + jobs }), /unsupported/);
+}
+
 const rehearsal = concurrency.rehearse(bytes);
 assert.strictEqual(rehearsal.schema, 'forge-ci-concurrency-rehearsal/v1');
 assert(rehearsal.passed);
