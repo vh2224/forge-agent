@@ -104,12 +104,13 @@ now = 0; reducer = createReducer({ clock: () => now, secret: 'private-token' });
 now = 10; reducer.push(frame(start('tool')));
 now = 20; reducer.push(event({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use' } }));
 now = 500000; reducer.push(frame({ type: 'system', subtype: 'tool_progress', elapsed: 500000 }));
-assert.equal(reducer.snapshot().gap_suspended, true);
+assert.equal(reducer.snapshot().gap_suspended, false, 'open arguments retain silence supervision');
 reducer.push(event({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"key":"private-' } }));
 refused(() => reducer.push(event({ type: 'content_block_delta', index: 0,
   delta: { type: 'input_json_delta', partial_json: 'token"}' } })), 'secret-output');
 reducer = createReducer({ clock: () => now }); reducer.push(frame(start('one')));
-reducer.push(event({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use' } }));
+reducer.push(event({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'executing' } }));
+reducer.push(event({ type: 'content_block_stop', index: 0 }));
 now += 900000; reducer.push(frame(start('two')));
 assert.equal(reducer.snapshot().gap_sample_ms, null);
 now += 25; reducer.push(event({ type: 'message_delta', message_id: 'foreign', usage: {} }));
@@ -237,6 +238,8 @@ now = 0; reducer = createReducer({ clock: () => now });
 reducer.push(frame(start('parallel')));
 now = 10; reducer.push(event({ type: 'message_delta' }));
 reducer.push(toolStart('first', 0)); reducer.push(toolStart('second', 1));
+reducer.push(event({ type: 'content_block_stop', index: 0 }));
+reducer.push(event({ type: 'content_block_stop', index: 1 }));
 now = 1000; const timingBefore = reducer.snapshot();
 reducer.push(toolResult('first'));
 assert.equal(reducer.snapshot().tools_in_flight, 1);
@@ -267,6 +270,7 @@ const badResults = [
 ];
 for (const value of badResults) {
   reducer = createReducer(); reducer.push(frame(start('guard'))); reducer.push(toolStart('toolu_test'));
+  reducer.push(event({ type: 'content_block_stop', index: 0 }));
   const before = reducer.snapshot();
   assert.doesNotThrow(() => reducer.push(frame({ type: 'user', ...value })));
   assert.equal(reducer.snapshot().tools_in_flight, 1);
@@ -293,7 +297,8 @@ for (let index = 0; index < LIMITS.blocks; index++) {
   reducer.push(toolStart('stream-bounded-' + index));
   reducer.push(toolDelta('{}')); reducer.push(event({ type: 'content_block_stop', index: 0 }));
 }
-refused(() => reducer.push(toolStart('stream-overflow')), 'output-limit');
+reducer.push(toolStart('stream-overflow'));
+refused(() => reducer.push(event({ type: 'content_block_stop', index: 0 })), 'output-limit');
 // Tool accumulation shares the existing byte budget, including split UTF-8 text.
 reducer = createReducer(); reducer.push(frame(start('tool-byte-limit')));
 reducer.push(toolStart('tool-byte-limit'));
@@ -352,3 +357,76 @@ console.log('PASS Claude stream tool results: parallel tools, guarded documented
   assert.equal(reducer.sessionId(), null, 'init without id');
 }
 console.log('PASS Claude stream session_id: validated system/init capture, first wins, ignored elsewhere, absent from snapshot');
+
+// #212: join the real reducer and liveness policy with a deterministic clock.
+{
+  const { evaluate, DEFAULTS, ceilingForTier } = require('./forge-sidecar-liveness');
+  const inputs = { localProof: { capability: 'unavailable', proof: 'none' } };
+  let time = 0;
+  const observed = [];
+  const stream = createReducer({ clock: () => time, onToolCall: x => observed.push(x) });
+  time = 1; stream.push(frame(start('argument-owner')));
+  stream.push(toolStart('long-arguments'));
+  stream.push(toolDelta('{"private":"'));
+  for (let i = 1; i <= 661; i++) {
+    time = 1 + i * 1000;
+    stream.push(toolDelta('x'));
+    assert.equal(evaluate(stream.snapshot(), inputs).kill, false, 'advancing arguments remain live');
+  }
+  assert.equal(stream.snapshot().last_remote_ms, time);
+  assert.equal(stream.snapshot().gap_suspended, false, 'generation is not tool execution');
+  assert.equal(stream.snapshot().tools_in_flight, 0);
+  assert.equal(observed.length, 0);
+  const beforeIgnored = stream.snapshot();
+  time += 100;
+  stream.push(toolDelta(''));
+  stream.push(event({ type: 'content_block_delta', index: 0,
+    delta: { type: 'input_json_delta', text: 'not-arguments' } }));
+  stream.push(event({ type: 'content_block_delta', message_id: 'foreign', index: 0,
+    delta: { type: 'input_json_delta', partial_json: 'foreign' } }));
+  stream.push(frame({ type: 'stream_event', parent_tool_use_id: 'foreign-parent', event: {
+    type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: 'nested-foreign' } } }));
+  stream.push(event({ type: 'content_block_delta', index: 99,
+    delta: { type: 'input_json_delta', partial_json: 'unknown-block' } }));
+  stream.push(frame({ type: 'ping' }));
+  assert.equal(stream.snapshot().last_remote_ms, beforeIgnored.last_remote_ms);
+  assert.equal(stream.snapshot().remote_event_count, beforeIgnored.remote_event_count);
+  time += DEFAULTS.deadMs;
+  assert.equal(evaluate(stream.snapshot(), inputs).termination, 'dead-silence', 'silent generation keeps normal deadline');
+  stream.push(toolDelta('"}'));
+  time += 50;
+  stream.push(event({ type: 'content_block_stop', index: 0 }));
+  assert.equal(stream.snapshot().gap_suspended, true);
+  assert.equal(stream.snapshot().tools_in_flight, 1);
+  assert.equal(observed.length, 1);
+  assert.equal(stream.snapshot().remote_silence_ms, 0, 'execution starts its own bounded clock');
+  const executionClock = stream.snapshot().last_remote_ms;
+  time += 100;
+  stream.push(assistantTool('long-arguments', { private: 'x'.repeat(661) }));
+  assert.equal(stream.snapshot().last_remote_ms, time, 'a new assistant message is legitimate activity');
+  const completeClock = stream.snapshot().last_remote_ms;
+  time += 100;
+  stream.push(assistantTool('long-arguments', { private: 'x'.repeat(661) }));
+  assert.equal(stream.snapshot().last_remote_ms, completeClock, 'duplicate completed call cannot renew execution');
+  assert(executionClock < completeClock);
+  time = completeClock + DEFAULTS.deadMs + DEFAULTS.toolExtensionMs;
+  assert.equal(evaluate(stream.snapshot(), inputs).kill, false);
+  time++;
+  assert.equal(evaluate(stream.snapshot(), inputs).reason, 'tool-proof-unavailable-expired');
+  stream.push(toolResult('long-arguments'));
+  assert.equal(stream.snapshot().gap_suspended, false);
+  assert.equal(stream.snapshot().tools_in_flight, 0);
+  assert.equal(stream.snapshot().remote_silence_ms, 0);
+  assert(!JSON.stringify(stream.snapshot()).includes('private'));
+  assert.deepEqual(Object.keys(observed[0]), ['fingerprint']);
+
+  for (const tier of ['light', 'standard', 'heavy', 'max']) {
+    let tick = 0;
+    const bounded = createReducer({ clock: () => tick });
+    bounded.push(frame(start('ceiling'))); bounded.push(toolStart('ceiling'));
+    tick = ceilingForTier(tier); bounded.push(toolDelta('{'));
+    assert.equal(evaluate(bounded.snapshot(), inputs, DEFAULTS, ceilingForTier(tier)).termination,
+      'budget-exceeded-while-active', 'activity never bypasses the tier ceiling');
+  }
+}
+console.log('PASS Claude argument liveness: long owned deltas, silence, execution/results, ignored frames, privacy and tier ceilings');
