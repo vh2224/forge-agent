@@ -99,8 +99,13 @@ function safeSource(project, source) {
     ancestor = parent;
   }
   const actual = path.resolve(canonical(ancestor), path.relative(ancestor, absolute));
-  const roots = [project.path, ...project.aliases.filter(a => validAlias(project, a)).map(a => a.path)];
-  if (!roots.some(root => within(actual, root))) throw new Error('source-outside-project');
+  // Resolve physical containment before expensive worktree validation. Owner
+  // sources need no alias authority; unrelated aliases cannot authorize this
+  // source. Keep validation fresh for every actual alias access (no cache).
+  if (!within(actual, project.path)
+      && !project.aliases.some(alias => within(actual, alias.path) && validAlias(project, alias))) {
+    throw new Error('source-outside-project');
+  }
   return actual;
 }
 function resolveProject(store, options, mutation = false) {
