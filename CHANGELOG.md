@@ -1,5 +1,8 @@
 ## Não lançado
 
+- O `--timeout 300` explícito é respeitado pelo CLI de sidecar; o valor 300
+  herdado das preferências mantém o tratamento de compatibilidade com o legado.
+
 - Instalações nos dois hosts preservam os digests atualizados de cada renderer no
   manifesto, sem sobrescrevê-los com o histórico do outro host.
 - A primeira simulação de migração lê o monólito existente e contabiliza os

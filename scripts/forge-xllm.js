@@ -1866,7 +1866,8 @@ function cliCeiling(args, baseDir = process.cwd()) {
   const flag = args.timeout !== undefined && args.timeout !== true ? Number(args.timeout) : null;
   const explicit = flag !== null ? flag : readWorkersTimeoutRaw(baseDir);
   const tier = typeof args.tier === 'string' ? args.tier : undefined;
-  const resolved = resolveWorkerCeiling({ tier, explicit });
+  const resolved = resolveWorkerCeiling({ tier, explicit,
+    explicitSource: flag !== null ? 'cli' : 'configuration' });
   if (resolved.warning) process.stderr.write(`forge-xllm: aviso: ${resolved.warning.code}: ${resolved.warning.message}\n`);
   return resolved.seconds;
 }
