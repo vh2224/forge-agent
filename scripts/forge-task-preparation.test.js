@@ -98,6 +98,41 @@ function codexCapabilities() {
 }
 
 async function main() {
+  await test('external native bridge observes ack until terminal without early artifact publication', async () => {
+    const request = fixture({ model: 'gpt-5.6-sol' }); request.activeCapabilities = codexCapabilities();
+    let emit, identity, ready; const subscribed = new Promise(resolve => { ready = resolve; });
+    const nativeLifecycle = { adapter: { capabilities: { result: true }, acknowledge: value => value?.agent_id,
+      subscribe(handle, callback, context) { assert.equal(handle, 'worker'); emit = callback; identity = context.identity;
+        ready(); return () => {}; } } };
+    const handoff = await prep.startStandaloneTaskPreparation(request, { nativeLifecycle });
+    assert.equal(typeof handoff.invoke, 'function');
+    const pending = handoff.invoke(async () => ({ agent_id: 'worker' }));
+    await Promise.race([subscribed, pending.then(value => { throw Error('bridge returned before subscription: ' + JSON.stringify(value)); })]);
+    assert(!fs.existsSync(artifactPath(request)), 'ack cannot publish an artifact');
+    emit({ identity, sequence: 1, kind: 'terminal', result: envelope(request) });
+    const result = await pending; assert.equal(result.ok, true, JSON.stringify(result));
+    assert(fs.existsSync(artifactPath(request)));
+  });
+  await test('deferred native handoff ignores route mutation made after preparation', async () => {
+    const request = fixture({ model: 'gpt-5.6-sol' });
+    // Both models are admitted, so a mutated route would be dispatchable if it leaked.
+    request.activeCapabilities = { ...codexCapabilities(), models: ['gpt-5.6-sol', 'gpt-5.6-other'] };
+    const handoff = await prep.startStandaloneTaskPreparation(request, {});
+    assert.equal(typeof handoff.invoke, 'function');
+    const original = { model: handoff.route.model, resolved: handoff.route.model_resolved };
+    assert.equal(original.resolved, 'gpt-5.6-sol');
+    handoff.route.model_resolved = 'gpt-5.6-other'; handoff.route.model = 'gpt-5.6-other';
+    if (handoff.request) handoff.request.model = 'gpt-5.6-other';
+    const calls = [];
+    const result = await handoff.invoke(async (...args) => { calls.push(args);
+      return framed(envelope(request)); });
+    assert.equal(calls.length, 1, 'exactly one provider callback with the original route');
+    const seen = JSON.stringify(calls[0]);
+    assert(!seen.includes('gpt-5.6-other'), 'mutated model must not be dispatched');
+    assert.equal(calls[0][0].model, 'gpt-5.6-sol');
+    assert.equal(calls[0][0].reasoning_effort, 'medium');
+    assert.equal(result.ok, true, JSON.stringify(result));
+  });
   await test('mandatory preparation procedures fail closed before either transport', async () => {
     for (const failure of ['pending', 'missing', 'hash']) {
       const request = fixture({ model: 'gpt-5.6-sol' });
@@ -329,6 +364,27 @@ async function main() {
       }
     } finally { recoveryApi.recoverAttempt = realRecover; }
     assert.equal(delivered, 0);
+  });
+  await test('external native recovery revalidates live authority at callback boundary', async () => {
+    const request=fixture({model:'gpt-5.6-sol'}); request.activeCapabilities=codexCapabilities();
+    request.prompt='before repair';
+    await prep.prepareStandaloneTask(request,{invokeNative:async()=>{throw Object.assign(Error('fixture'),{code:'context-budget-exceeded',provider_called:false});}});
+    request.prompt='after repair';
+    const receiptFile=request.resultFile+'.receipt.json', stateFile=request.resultFile+'.recovery.json';
+    const route=JSON.parse(fs.readFileSync(receiptFile)).route;
+    const recoveryApi=require('./forge-attempt-recovery'), originalRecover=recoveryApi.recoverAttempt;
+    let valid=true,calls=0,checks=0;
+    try {
+      recoveryApi.recoverAttempt=async options=>options.invoke(route,{ok:true},null,()=>{
+        checks++; if(!valid)throw Object.assign(Error('revoked fixture authority'),{code:'fixture-authority-revoked'});
+      },'fixture-reservation');
+      const handoff=await prep.recoverStandaloneTask(request,{receiptFile,stateFile,correction:true},{processProbe:()=> 'stopped'});
+      assert.equal(typeof handoff.invoke,'function'); valid=false;
+      const outcome=await handoff.invoke(async()=>{calls++;return framed(envelope(request));});
+      assert.equal(calls,0,'revoked handoff cannot invoke callback');
+      assert.equal(outcome.ok,false); assert.equal(outcome.reason_code,'fixture-authority-revoked');
+      assert(checks>0); assert(!fs.existsSync(artifactPath(request)));
+    } finally { recoveryApi.recoverAttempt=originalRecover; }
   });
   await test('standalone native recovery route carries no synthetic workers_timeout', async () => {
     const request = fixture({ model: 'gpt-5.6-sol' });

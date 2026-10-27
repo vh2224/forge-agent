@@ -704,6 +704,7 @@ function parsePlanVerify(planContent) {
       const items = verifyBlockMatch[1]
         .split("\n")
         .map(l => l.replace(/^\s+-\s+/, "").trim())
+        .map(command => command.replace(/^(["'])(.*)\1$/, "$2"))
         .filter(Boolean);
       taskPlanVerify = items.join(" && ");
     }

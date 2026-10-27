@@ -441,6 +441,21 @@ async function main() {
   await test('observation is passive even after expiry and grace', testObservationDoesNotMutateOrRecoverLease);
   await test('request-bound rollback refuses a successor published by another process', testRequestBoundReleaseAndSuccessor);
   await test('protected window is bounded, opaque, read-only and never revives an expired owner', testProtectedWindow);
+  await test('terminal handle releases exact expired generation and proves absence without renewal', () => sandbox(cwd => {
+    const unit = 'execute-task/terminal', held = lease.acquire(cwd, unit, fixtureOptions(1, 'codex', { ownerToken: 'terminal-owner' }));
+    const before = fs.readFileSync(lease.leaseFile(cwd, unit));
+    let escaped;
+    lease.withTerminalGuard(cwd, unit, handle => {
+      escaped = handle;
+      assert.strictEqual(lease.inspectTerminal(handle, cwd, unit, 'terminal-owner', held.generation).present, true);
+      assert.strictEqual(lease.releaseTerminal(handle, cwd, unit, 'foreign', held.generation).ok, false);
+      assert.deepStrictEqual(fs.readFileSync(lease.leaseFile(cwd, unit)), before);
+      assert(lease.releaseTerminal(handle, cwd, unit, 'terminal-owner', held.generation).ok);
+      assert.strictEqual(lease.releaseTerminal(handle, cwd, unit, 'terminal-owner', held.generation).present, false);
+    });
+    assert.throws(() => lease.assertTerminalGuard(escaped, cwd, unit), /guard|GUARD/i);
+    assert.throws(() => lease.assertTerminalGuard({}, cwd, unit), /guard|GUARD/i);
+  }));
   await test('protected window covers the standard tier ceiling plus grace', testProtectedWindowCoversTierCeiling);
   console.log('forge-unit-lease tests passed');
 }

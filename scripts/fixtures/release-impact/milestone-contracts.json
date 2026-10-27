@@ -1,0 +1,2771 @@
+{
+  "schema_version": 2,
+  "status": "final-candidate",
+  "provenance": {
+    "code_dir": "C:/dev/.forge-worktrees/M-20261020200139-memoria-explicavel/forge-agent",
+    "branch": "forge/M-20261020200139-memoria-explicavel",
+    "observed_revision": "fd19ffd765252ce33fe66a7b8fc5a0c31c29e3e8",
+    "last_tag": "v4.45.1",
+    "last_tag_revision": "233b8e2fdd8fe6992a3499d40eef98b26ff1abb7",
+    "historical_tag": "v4.45.0",
+    "historical_tag_revision": "5a44919b9631545965e93d004cd7e17b3c6f616c",
+    "history": [
+      {
+        "path": "scripts/fixtures/release-impact/history/s08-intermediate/milestone-contracts.json",
+        "sha256": "a18fbbd860b8e7ee0cb21ed2b608670ac5bc55d3657903f5a72b4a68516fb437",
+        "blob_oid": "2dbba05709d51b2d24e5666bcf36504ef1394192",
+        "source_revision": "fd19ffd765252ce33fe66a7b8fc5a0c31c29e3e8"
+      },
+      {
+        "path": "scripts/fixtures/release-impact/history/s08-intermediate/README.md",
+        "sha256": "3be8a96d6b4088198482af8244c5cf085d278f00aba9396a8c24d1098b3b0041",
+        "blob_oid": "3a0a3a5a903433ffb25ecce59a93642e01a03155",
+        "source_revision": "fd19ffd765252ce33fe66a7b8fc5a0c31c29e3e8"
+      }
+    ]
+  },
+  "contracts": [
+    {
+      "id": "S02-publication",
+      "slice": "S02",
+      "issue": null,
+      "surface": "receipt",
+      "kind": "compatible-addition",
+      "bump": "minor",
+      "consumers": [
+        ".github/workflows/release.yml",
+        "scripts/forge-release-publish.test.js"
+      ],
+      "baseline": "slice-start",
+      "baseline_reference": "323ca6b356333edc72012a1d0d8e45ca5127c995^",
+      "released": true,
+      "evidence": [
+        {
+          "file": "scripts/forge-release-publish.js",
+          "symbol": "preparePublication",
+          "observed_sha": "323ca6b356333edc72012a1d0d8e45ca5127c995",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-release-publish.js",
+          "symbol": "notes_sha256",
+          "observed_sha": null,
+          "observed_on_branch": true
+        },
+        {
+          "file": "shared/forge-release-checks.md",
+          "symbol": "exact-SHA",
+          "observed_sha": null,
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "O produtor de prepare/apply acrescenta receipt vinculado ao SHA candidato, checks e hashes de pacote/notas. Comparacao com o inicio da adicao S02, nao com a API ja presente na baseline v4.45.1. O commit 323ca6b e ancestral de v4.45.0 (merge-base exit 0); 1ec6fb9 da branch nao e. Os bytes de forge-release-publish.js atuais sao identicos aos da tag; nenhuma nova quebra e inferida dessa duplicidade historica.",
+      "origin": "real",
+      "status": "final-candidate",
+      "example_ids": [],
+      "external_consumers": "unknown",
+      "history": [
+        {
+          "ref": "history/s08-intermediate/milestone-contracts.json#S02-publication",
+          "kind": "compatible-addition",
+          "baseline": "slice-start"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ]
+    },
+    {
+      "id": "S03-evidence-v2",
+      "slice": "S03",
+      "issue": null,
+      "surface": "schema",
+      "kind": "compatible-addition",
+      "bump": "minor",
+      "consumers": [
+        "scripts/forge-memory-extraction.js",
+        "scripts/forge-projection.js"
+      ],
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-memory-evidence.js",
+          "symbol": "validateExtractionV2",
+          "observed_sha": "c95dc2cac33647af936a4158731dd163edf0c655",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-memory-extraction.js",
+          "symbol": "SCHEMA_VERSIONS",
+          "observed_sha": null,
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Acrescenta envelope v2 e eventos com evidencia vinculada pelo owner; validateExtractionResult sem selecao explicita continua v1. Confirmacoes independentes sao exigidas para promocao v2, nao reinterpretadas como hits v1. Modulo v2 ausente na tag. Findings historicos de S03 continuam pendentes; isto nao prova eficacia.",
+      "origin": "real",
+      "status": "final-candidate",
+      "example_ids": [],
+      "external_consumers": "unknown",
+      "history": [
+        {
+          "ref": "history/s08-intermediate/milestone-contracts.json#S03-evidence-v2",
+          "kind": "compatible-addition",
+          "baseline": "last-tag"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ]
+    },
+    {
+      "id": "S04-shards",
+      "slice": "S04",
+      "issue": null,
+      "surface": "cli",
+      "kind": "compatible-addition",
+      "bump": "minor",
+      "consumers": [
+        ".github/workflows/ci.yml",
+        "scripts/forge-ci-workflow.test.js"
+      ],
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/run-tests.js",
+          "symbol": "--shard-profile",
+          "observed_sha": "37a27ad5dd663744f866dc930593c73fac78a5ba",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-ci-shards.js",
+          "symbol": "planShards",
+          "observed_sha": null,
+          "observed_on_branch": true
+        },
+        {
+          "file": ".github/workflows/ci.yml",
+          "symbol": "concurrency:",
+          "observed_sha": null,
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Flags opcionais shard-index/count/profile acrescentam particionamento e perfil; argv sem shards preserva a lista canonica. CI passa a consumir shards e cancelamento por concurrency; nao se infere eficacia hospedada nem resolucao dos R1-R6.",
+      "origin": "real",
+      "status": "final-candidate",
+      "example_ids": [],
+      "external_consumers": "unknown",
+      "history": [
+        {
+          "ref": "history/s08-intermediate/milestone-contracts.json#S04-shards",
+          "kind": "compatible-addition",
+          "baseline": "last-tag"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ]
+    },
+    {
+      "id": "S05-diagnostic",
+      "slice": "S05",
+      "issue": null,
+      "surface": "cli",
+      "kind": "compatible-addition",
+      "bump": "minor",
+      "consumers": [
+        "scripts/forge-memory-context.js",
+        "scripts/forge-memory-diagnostic-invariance.test.js"
+      ],
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-memory-diagnostic.js",
+          "symbol": "boundDiagnostic",
+          "observed_sha": "227c135632d26df480fad1366f7271c17db3316d",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-memory-context.js",
+          "symbol": "options.diagnostic === true",
+          "observed_sha": null,
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Diagnostico opt-in acrescenta campos limitados sem mudar ranking ou envelope quando desligado. Consumidor local seleciona explicitamente diagnostic:true. Modulo ausente na tag.",
+      "origin": "real",
+      "status": "final-candidate",
+      "example_ids": [
+        "real-minor"
+      ],
+      "external_consumers": "unknown",
+      "history": [
+        {
+          "ref": "history/s08-intermediate/milestone-contracts.json#S05-diagnostic",
+          "kind": "compatible-addition",
+          "baseline": "last-tag"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ]
+    },
+    {
+      "id": "S06-shadow",
+      "slice": "S06",
+      "issue": null,
+      "surface": "cli",
+      "kind": "compatible-addition",
+      "bump": "minor",
+      "consumers": [
+        "scripts/forge-memory-index.js",
+        "scripts/forge-memory-popularity-compare.js"
+      ],
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-memory-popularity.js",
+          "symbol": "compareShadow",
+          "observed_sha": "6c2f281e0ebf525a0879821b469bf8a7f77f7132",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-memory-popularity-compare.js",
+          "symbol": "popularity_shadow",
+          "observed_sha": null,
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Comparacao opt-in de popularidade expoe sombra e fingerprints separados da selecao ativa. Acrescenta observacao, nao aplica nova formula ao ranking ativo. Ausente na tag; consumidores externos desconhecidos.",
+      "origin": "real",
+      "status": "final-candidate",
+      "example_ids": [],
+      "external_consumers": "unknown",
+      "history": [
+        {
+          "ref": "history/s08-intermediate/milestone-contracts.json#S06-shadow",
+          "kind": "compatible-addition",
+          "baseline": "last-tag"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ]
+    },
+    {
+      "id": "S07-stage",
+      "slice": "S07",
+      "issue": null,
+      "surface": "schema",
+      "kind": "compatible-addition",
+      "bump": "minor",
+      "consumers": [
+        "scripts/forge-memory-stage-report.js",
+        "scripts/forge-memory-stage-workflow.test.js"
+      ],
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-memory-stage-evidence.js",
+          "symbol": "buildStageEvidence",
+          "observed_sha": "eac567b0204a3164049a16f3a786d884f0453d80",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-memory-stage-report.js",
+          "symbol": "buildStageReport",
+          "observed_sha": null,
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Suplemento por etapa e relatorio sao novos, com disponibilidade e perdas explicitas, sem transformar ausencia em eficacia. Ambos os modulos estao ausentes na baseline v4.45.1.",
+      "origin": "real",
+      "status": "final-candidate",
+      "example_ids": [],
+      "external_consumers": "unknown",
+      "history": [
+        {
+          "ref": "history/s08-intermediate/milestone-contracts.json#S07-stage",
+          "kind": "compatible-addition",
+          "baseline": "last-tag"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ]
+    },
+    {
+      "id": "issue-232-public",
+      "slice": "S07",
+      "issue": 232,
+      "surface": "schema",
+      "kind": "compatible-addition",
+      "bump": "minor",
+      "consumers": [
+        "scripts/forge-memory-stage-report.js"
+      ],
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-memory-stage-evidence.js",
+          "symbol": "publication(row, fact)",
+          "observed_sha": "26627ec1309b0137f71eeb025bc0f1267bbd8209",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-memory-stage-evidence.js",
+          "symbol": "selection(row, fact, published)",
+          "observed_sha": "26627ec1309b0137f71eeb025bc0f1267bbd8209",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-memory-stage-evidence.js",
+          "symbol": "content_hash_conflict",
+          "observed_sha": "26627ec1309b0137f71eeb025bc0f1267bbd8209",
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Contra a baseline v4.45.1, o modulo e uma adicao nova ainda nao lancada; #232 integra essa adicao. Nao e major publico por divergir de um estado intermediario. O commit 26627ec nao e ancestral de v4.45.0 (merge-base exit 1).",
+      "origin": "real",
+      "status": "final-candidate",
+      "example_ids": [],
+      "external_consumers": "unknown",
+      "history": [
+        {
+          "ref": "history/s08-intermediate/milestone-contracts.json#issue-232-public",
+          "kind": "compatible-addition",
+          "baseline": "last-tag"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ]
+    },
+    {
+      "id": "issue-232-intermediate",
+      "slice": "S07",
+      "issue": 232,
+      "surface": "schema",
+      "kind": "meaning-change",
+      "bump": "major",
+      "consumers": [
+        "scripts/forge-memory-stage-report.js"
+      ],
+      "baseline": "slice-start",
+      "baseline_reference": "26627ec1309b0137f71eeb025bc0f1267bbd8209^ (S07 entregue antes da correcao)",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-memory-stage-evidence.js",
+          "symbol": "publication(row, fact)",
+          "observed_sha": "26627ec1309b0137f71eeb025bc0f1267bbd8209",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-memory-stage-evidence.js",
+          "symbol": "selection(row, fact, published)",
+          "observed_sha": "26627ec1309b0137f71eeb025bc0f1267bbd8209",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-memory-stage-evidence.js",
+          "symbol": "content_hash_conflict",
+          "observed_sha": "26627ec1309b0137f71eeb025bc0f1267bbd8209",
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Contra S07 entregue, o mesmo MEM com hashes divergentes em state/fragment deixa de contar presente/retido e vira content_hash_conflict. publication e selection agora combinam ambas as fontes; muda o significado observavel do resultado. Major somente nessa baseline intermediaria nao lancada.",
+      "origin": "real",
+      "status": "final-candidate",
+      "example_ids": [],
+      "external_consumers": "unknown",
+      "history": [
+        {
+          "ref": "history/s08-intermediate/milestone-contracts.json#issue-232-intermediate",
+          "kind": "meaning-change",
+          "baseline": "slice-start"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ]
+    },
+    {
+      "id": "issue-233-public",
+      "slice": "S07",
+      "issue": 233,
+      "surface": "schema",
+      "kind": "compatible-addition",
+      "bump": "minor",
+      "consumers": [
+        "scripts/forge-memory-stage-workflow.test.js"
+      ],
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-memory-stage-report.js",
+          "symbol": "checkDimensions",
+          "observed_sha": "26627ec1309b0137f71eeb025bc0f1267bbd8209",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-memory-stage-report.js",
+          "symbol": "presentation_invalid",
+          "observed_sha": "26627ec1309b0137f71eeb025bc0f1267bbd8209",
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Contra a baseline v4.45.1, o modulo e uma adicao nova ainda nao lancada; #233 integra essa adicao. Nao e major publico por divergir de um estado intermediario. O commit 26627ec nao e ancestral de v4.45.0 (merge-base exit 1).",
+      "origin": "real",
+      "status": "final-candidate",
+      "example_ids": [],
+      "external_consumers": "unknown",
+      "history": [
+        {
+          "ref": "history/s08-intermediate/milestone-contracts.json#issue-233-public",
+          "kind": "compatible-addition",
+          "baseline": "last-tag"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ]
+    },
+    {
+      "id": "issue-233-intermediate",
+      "slice": "S07",
+      "issue": 233,
+      "surface": "schema",
+      "kind": "new-requirement",
+      "bump": "major",
+      "consumers": [
+        "scripts/forge-memory-stage-workflow.test.js"
+      ],
+      "baseline": "slice-start",
+      "baseline_reference": "26627ec1309b0137f71eeb025bc0f1267bbd8209^ (S07 entregue antes da correcao)",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-memory-stage-report.js",
+          "symbol": "checkDimensions",
+          "observed_sha": "26627ec1309b0137f71eeb025bc0f1267bbd8209",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-memory-stage-report.js",
+          "symbol": "presentation_invalid",
+          "observed_sha": "26627ec1309b0137f71eeb025bc0f1267bbd8209",
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Contra S07 entregue, checkDimensions passa a exigir tipos fechados para value, coverage, contagens e referencias; arrays/objetos aninhados antes aceitos agora falham presentation_invalid. Nova exigencia somente nessa baseline intermediaria nao lancada.",
+      "origin": "real",
+      "status": "final-candidate",
+      "example_ids": [],
+      "external_consumers": "unknown",
+      "history": [
+        {
+          "ref": "history/s08-intermediate/milestone-contracts.json#issue-233-intermediate",
+          "kind": "new-requirement",
+          "baseline": "slice-start"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ]
+    },
+    {
+      "id": "issue-231-documentary",
+      "slice": "S06",
+      "issue": 231,
+      "surface": "worker",
+      "kind": "compatible-addition",
+      "bump": "minor",
+      "consumers": [
+        "scripts/forge-native-recovery-delivery.js",
+        "scripts/forge-delivery.js"
+      ],
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-native-recovery-delivery.js",
+          "symbol": "reviewDocumentary",
+          "observed_sha": "df7dbd670a53f099534e8004ab805674ca19122a",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-delivery.js",
+          "symbol": "documentaryObservation",
+          "observed_sha": null,
+          "observed_on_branch": true
+        },
+        {
+          "file": "shared/forge-delivery.md",
+          "symbol": "Documentary continuation",
+          "observed_sha": null,
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Contra v4.45.1, o modulo forge-native-recovery-delivery.js e novo: captura documental por policy explicita e retomada preservada sao adicoes. A validacao atual exige evidence e rationale strings nao vazias em ambos os caminhos; a lacuna intermediaria #231 nao e mais atribuida ao codigo atual. Revisao independente da classificacao permanece pendente.",
+      "origin": "real",
+      "status": "final-candidate",
+      "example_ids": [],
+      "external_consumers": "unknown",
+      "history": [
+        {
+          "ref": "history/s08-intermediate/milestone-contracts.json#issue-231-documentary",
+          "kind": "compatible-addition",
+          "baseline": "last-tag"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ]
+    },
+    {
+      "id": "S08-impact",
+      "slice": "S08",
+      "issue": null,
+      "surface": "cli",
+      "kind": "compatible-addition",
+      "bump": "minor",
+      "consumers": [
+        ".github/workflows/release.yml",
+        ".github/workflows/ci.yml",
+        "scripts/forge-release-publish.js",
+        "scripts/forge-version.js"
+      ],
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-release-version.js",
+          "symbol": "resolution.impact",
+          "observed_sha": "a832ffa5b08404650b8101f5092e6410a3e0b675",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-release-version.js",
+          "symbol": "argv.indexOf('--notes')",
+          "observed_sha": null,
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-release-version.js",
+          "symbol": "checkDeclaredVersion",
+          "observed_sha": null,
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-release-version.js",
+          "symbol": "classifyCommit",
+          "observed_sha": null,
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-release-version.js",
+          "symbol": "collectNotesCommits",
+          "observed_sha": null,
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-release-version.js",
+          "symbol": "version-commit-malformed",
+          "observed_sha": null,
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-release-version.js",
+          "symbol": "version-range-invalid",
+          "observed_sha": null,
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Minor: impact acrescenta envelope na resolucao e --notes e flag nova; retorno ok de checkDeclaredVersion e intent legado sem impact permanecem. Bloqueio novo depende de trailer novo explicito; ausencia fica partial e nao bloqueia por impacto. Notas usam mensagem completa (breaking no corpo); fallback so para tag raiz comprovada. Rejeicao de objeto malformado e range fora da gramatica e robustez da fronteira nova, nao remocao de entrada CLI antes prometida. Notas e fallback corrigem comportamento preservando barreira exact-SHA. Nao ha prova de consumidores externos; se recusarem campos adicionais, S09 deve reavaliar. Nenhum major publico real demonstrado.",
+      "origin": "real",
+      "status": "final-candidate",
+      "example_ids": [
+        "real-s08",
+        "declared-s08"
+      ],
+      "external_consumers": "unknown",
+      "history": [
+        {
+          "ref": "history/s08-intermediate/milestone-contracts.json#S08-impact",
+          "kind": "compatible-addition",
+          "baseline": "last-tag"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ]
+    },
+    {
+      "id": "maintenance-208",
+      "slice": "maintenance",
+      "issue": 208,
+      "surface": "schema",
+      "kind": "compatible-correction",
+      "bump": "patch",
+      "consumers": [
+        "scripts/forge-unit-sidecar.js"
+      ],
+      "external_consumers": "unknown",
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-verifier.js",
+          "symbol": "artifactPathResolver",
+          "observed_sha": "f7c02728d36f56ffaf4a714d9d5b87e620160afb",
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Resolve artefatos root-qualified pela raiz fisica declarada, preservando paths legados e recusando escapes. Corrige a resolucao da verificacao; nao remove um path valido dentro do contrato.",
+      "origin": "real",
+      "status": "final-candidate",
+      "history": [
+        {
+          "ref": "evidence/final-repairs/issue-208/integration.json",
+          "commit": "f7c02728d36f56ffaf4a714d9d5b87e620160afb"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "maintenance-209",
+      "slice": "maintenance",
+      "issue": 209,
+      "surface": "schema",
+      "kind": "internal",
+      "bump": "none",
+      "consumers": [
+        "scripts/forge-delivery.test.js"
+      ],
+      "external_consumers": "unknown",
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-delivery.test.js",
+          "symbol": "fixture('staged-parity', unit)",
+          "observed_sha": "944c67f8bb9696d06f6e31ea6b3eda0ad757152f",
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "O commit integrado altera apenas a regressao de paridade para exigir evidencia de artefato valida. O registro lista forge-delivery.js como localizador, mas o diff integrado nao altera produto nem contrato de consumidor.",
+      "origin": "real",
+      "status": "final-candidate",
+      "history": [
+        {
+          "ref": "evidence/final-repairs/issue-209/integration.json",
+          "commit": "944c67f8bb9696d06f6e31ea6b3eda0ad757152f"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "maintenance-210",
+      "slice": "maintenance",
+      "issue": 210,
+      "surface": "schema",
+      "kind": "compatible-correction",
+      "bump": "patch",
+      "consumers": [
+        "scripts/forge-memory.js",
+        "scripts/forge-unit-sidecar.js"
+      ],
+      "external_consumers": "unknown",
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-memory-extraction.js",
+          "symbol": "buildPublication",
+          "observed_sha": "3934f4c5df2f5eb7ea1eb08e0338f1a5adad9c97",
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Mantem ordem cronologica, identidade duravel de entregas e deduplicacao de reforco v2. Corrige perda de identidade sem redefinir reforco nem o modo v1.",
+      "origin": "real",
+      "status": "final-candidate",
+      "history": [
+        {
+          "ref": "evidence/final-repairs/issue-210/integration.json",
+          "commit": "3934f4c5df2f5eb7ea1eb08e0338f1a5adad9c97"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "maintenance-211",
+      "slice": "maintenance",
+      "issue": 211,
+      "surface": "worker",
+      "kind": "compatible-correction",
+      "bump": "patch",
+      "consumers": [
+        "scripts/forge-orchestrate.js",
+        "scripts/forge-loop-controller.js"
+      ],
+      "external_consumers": "unknown",
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-unit-controller.js",
+          "symbol": "updateEntryQuestions",
+          "observed_sha": "fca3054cd01882488e2b71f1bba954ed30428ec3",
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Inventario duravel conserva perguntas e respostas atestadas entre reentradas; nao interpreta silencio como resposta. Continuidade do contrato de recuperacao, nao nova decisao funcional.",
+      "origin": "real",
+      "status": "final-candidate",
+      "history": [
+        {
+          "ref": "evidence/final-repairs/issue-211/integration.json",
+          "commit": "fca3054cd01882488e2b71f1bba954ed30428ec3"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "maintenance-212",
+      "slice": "maintenance",
+      "issue": 212,
+      "surface": "worker",
+      "kind": "compatible-correction",
+      "bump": "patch",
+      "consumers": [
+        "scripts/forge-claude-sidecar.js"
+      ],
+      "external_consumers": "unknown",
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-claude-stream.js",
+          "symbol": "input_json_delta",
+          "observed_sha": "a277a03b8ed92f60cbf71ce81b129132c0fc7be4",
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Geracao de argumentos de tool conta como atividade remota antes da execucao; relogio de tool inicia no fechamento. Corrige supervisao do stream sem prometer capacidades do host real.",
+      "origin": "real",
+      "status": "final-candidate",
+      "history": [
+        {
+          "ref": "evidence/final-repairs/issue-212/integration.json",
+          "commit": "a277a03b8ed92f60cbf71ce81b129132c0fc7be4"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "maintenance-214",
+      "slice": "maintenance",
+      "issue": 214,
+      "surface": "schema",
+      "kind": "compatible-correction",
+      "bump": "patch",
+      "consumers": [
+        "scripts/run-tests.js"
+      ],
+      "external_consumers": "unknown",
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-suite-profile.js",
+          "symbol": "4294967295",
+          "observed_sha": "ed2a91cd8dbdeeb84c09671c44260570dd63fc8c",
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Preserva exit codes uint32 nativos Windows e explicita falha de perfil. Amplia o dominio numerico valido do perfil sem apagar falhas nem converter unknown em pass; inclui o followup #217.",
+      "origin": "real",
+      "status": "final-candidate",
+      "history": [
+        {
+          "ref": "evidence/final-repairs/issue-214/integration.json",
+          "commit": "ed2a91cd8dbdeeb84c09671c44260570dd63fc8c"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "maintenance-215",
+      "slice": "maintenance",
+      "issue": 215,
+      "surface": "schema",
+      "kind": "compatible-correction",
+      "bump": "patch",
+      "consumers": [
+        "scripts/forge-ci-profile.js",
+        "scripts/forge-ci-workflow.test.js"
+      ],
+      "external_consumers": "unknown",
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-ci-concurrency.js",
+          "symbol": "concurrency-form-unsupported",
+          "observed_sha": "eb1c479ce42c948d9a86bd5c3db8366f7b2a8204",
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Parser de subconjunto YAML rejeita espacamento nao canonico em jobs antes de modelar. Fora do subconjunto suportado nao ha promessa de interpretacao; recusa conservadora corrige falsa analise. Registro agrega #216/#218/#219; divergencia R6 permanece literal, sem alegar reparo de todo finding.",
+      "origin": "real",
+      "status": "final-candidate",
+      "history": [
+        {
+          "ref": "evidence/final-repairs/issue-215/integration.json",
+          "commit": "eb1c479ce42c948d9a86bd5c3db8366f7b2a8204"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "maintenance-221",
+      "slice": "maintenance",
+      "issue": 221,
+      "surface": "worker",
+      "kind": "new-requirement",
+      "bump": "major",
+      "consumers": [
+        "scripts/forge-task-preparation.js",
+        "scripts/forge-unit-sidecar.js",
+        "scripts/forge-native-recovery-delivery.js"
+      ],
+      "external_consumers": "unknown",
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-native-invocation.js",
+          "symbol": "terminal: options.terminalResult",
+          "observed_sha": "fd19ffd765252ce33fe66a7b8fc5a0c31c29e3e8",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-native-execution.test.js",
+          "symbol": "terminalResult",
+          "observed_sha": "fd19ffd765252ce33fe66a7b8fc5a0c31c29e3e8",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-native-invocation.js",
+          "symbol": "terminalResult",
+          "observed_sha": "fd19ffd765252ce33fe66a7b8fc5a0c31c29e3e8",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-native-invocation.test.js",
+          "symbol": "terminalResult",
+          "observed_sha": "fd19ffd765252ce33fe66a7b8fc5a0c31c29e3e8",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-native-recovery-delivery.test.js",
+          "symbol": "'use strict';",
+          "observed_sha": "fd19ffd765252ce33fe66a7b8fc5a0c31c29e3e8",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-native-supervision.js",
+          "symbol": "terminalResult",
+          "observed_sha": "fd19ffd765252ce33fe66a7b8fc5a0c31c29e3e8",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-native-supervision.test.js",
+          "symbol": "supervise",
+          "observed_sha": "fd19ffd765252ce33fe66a7b8fc5a0c31c29e3e8",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-task-preparation.js",
+          "symbol": "terminalResult:",
+          "observed_sha": "fd19ffd765252ce33fe66a7b8fc5a0c31c29e3e8",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-task-preparation.test.js",
+          "symbol": "#!/usr/bin/env node",
+          "observed_sha": "fd19ffd765252ce33fe66a7b8fc5a0c31c29e3e8",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-unit-sidecar.js",
+          "symbol": "terminalResult",
+          "observed_sha": "fd19ffd765252ce33fe66a7b8fc5a0c31c29e3e8",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-unit-sidecar.test.js",
+          "symbol": "'use strict';",
+          "observed_sha": "fd19ffd765252ce33fe66a7b8fc5a0c31c29e3e8",
+          "observed_on_branch": true
+        },
+        {
+          "file": "shared/forge-native-supervision.md",
+          "symbol": "terminalResult",
+          "observed_sha": "fd19ffd765252ce33fe66a7b8fc5a0c31c29e3e8",
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Contra v4.45.1, invokeNative ja era exportado e chamava invoke sem terminalResult. Agora supervise exige terminal como funcao e recusa native-lifecycle-contract-required antes do callback quando ausente. Nova exigencia observavel para chamadores do primitivo; task-preparation, unit-sidecar e recovery fornecem terminalResult. Major real nessa baseline para esses consumidores, nao inferido do rotulo #221. Externos unknown; nao e major do modulo novo de supervisao isoladamente.",
+      "origin": "real",
+      "status": "final-candidate",
+      "history": [
+        {
+          "ref": "evidence/final-repairs/issue-221/integration.json",
+          "commit": "3cb9924cd8dcbf97233f199e45f5f0ef465698ad"
+        },
+        {
+          "ref": "impact/provenance-bridge.json (message-only replacement; original retained as history)",
+          "commit": "0f758eba34f2dbc2948aca02f0ad3c7fecda1fed",
+          "replacement": "256840d451441d4a034b06353b30478578a8f9f9",
+          "tree": "f04f0de66e20eb6dc069f1bf38bd3714729942d8"
+        },
+        {
+          "ref": "impact/provenance-bridge.json (message-only replacement; original retained as history)",
+          "commit": "3cb9924cd8dcbf97233f199e45f5f0ef465698ad",
+          "replacement": "fd19ffd765252ce33fe66a7b8fc5a0c31c29e3e8",
+          "tree": "98d33fb9f28a22d8c339075b40ddb6f0cfb06604"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "maintenance-222",
+      "slice": "maintenance",
+      "issue": 222,
+      "surface": "worker",
+      "kind": "compatible-correction",
+      "bump": "patch",
+      "consumers": [
+        "scripts/forge-task-preparation.js",
+        "scripts/forge-unit-sidecar.test.js"
+      ],
+      "external_consumers": "unknown",
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-unit-sidecar.js",
+          "symbol": "preflightExecutionVerification",
+          "observed_sha": "4c0a19890dfe8090adba5607cadee533fca095ae",
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Propaga verificacao resolvida ao preflight e a recuperacao, normalizando comandos antes do spawn. Corrige montagem interna do caller; nao autoriza ignorar selo, claims ou procedimento.",
+      "origin": "real",
+      "status": "final-candidate",
+      "history": [
+        {
+          "ref": "evidence/final-repairs/issue-222/integration.json",
+          "commit": "4c0a19890dfe8090adba5607cadee533fca095ae"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "maintenance-223",
+      "slice": "maintenance",
+      "issue": 223,
+      "surface": "procedure",
+      "kind": "compatible-correction",
+      "bump": "patch",
+      "consumers": [
+        "scripts/forge-personal-context-alias.test.js"
+      ],
+      "external_consumers": "unknown",
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-personal-context.js",
+          "symbol": "function safeSource",
+          "observed_sha": "e803f9eb4fb57ad27df93b3b9d5ea94fde31fefe",
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Valida apenas aliases que contem a fonte; fonte do owner nao depende de alias alheio. Mantem confinamento fisico e validacao fresca, corrigindo recusa de fonte valida.",
+      "origin": "real",
+      "status": "final-candidate",
+      "history": [
+        {
+          "ref": "evidence/final-repairs/issue-223/integration.json",
+          "commit": "e803f9eb4fb57ad27df93b3b9d5ea94fde31fefe"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "maintenance-226",
+      "slice": "maintenance",
+      "issue": 226,
+      "surface": "worker",
+      "kind": "compatible-addition",
+      "bump": "minor",
+      "consumers": [
+        "scripts/forge-claude-session.js",
+        "scripts/forge-unit-sidecar.js",
+        "scripts/forge-xllm.js"
+      ],
+      "external_consumers": "unknown",
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-claude-permissions.js",
+          "symbol": "function createPolicy",
+          "observed_sha": "f0177dadfcb0c0dc6a5af4cdca16d8c2608545bd",
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Policy opt-in derivada dos comandos selados concede somente comandos Node exatos numa raiz. Sem opt-in nao amplia autoridade; recurso adicional para transporte Claude, sem inferir permissao de shell arbitraria.",
+      "origin": "real",
+      "status": "final-candidate",
+      "history": [
+        {
+          "ref": "evidence/final-repairs/issue-226/integration.json",
+          "commit": "f0177dadfcb0c0dc6a5af4cdca16d8c2608545bd"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "maintenance-228",
+      "slice": "maintenance",
+      "issue": 228,
+      "surface": "schema",
+      "kind": "compatible-correction",
+      "bump": "patch",
+      "consumers": [
+        "scripts/forge-projection.js"
+      ],
+      "external_consumers": "unknown",
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-memory-evidence.js",
+          "symbol": "function applySeed",
+          "observed_sha": "812c65bdd85e6e5b84db5636b71ba5c9e6c5423a",
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Contadores legados nao finitos recebem fallback finito e score ativo permanece finito. Valores finitos preservam semantica legada; corrige overflow, nao altera ranking valido como politica nova.",
+      "origin": "real",
+      "status": "final-candidate",
+      "history": [
+        {
+          "ref": "evidence/final-repairs/issue-228/integration.json",
+          "commit": "812c65bdd85e6e5b84db5636b71ba5c9e6c5423a"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "maintenance-229",
+      "slice": "maintenance",
+      "issue": 229,
+      "surface": "procedure",
+      "kind": "compatible-correction",
+      "bump": "patch",
+      "consumers": [
+        "scripts/forge-symbol-check.test.js"
+      ],
+      "external_consumers": "unknown",
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-symbol-check.js",
+          "symbol": "values.size > 0",
+          "observed_sha": "e0dfae37906996b6548c12d9a8ac31cc54e155f9",
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Alias ou continuacao inconclusivos retornam unknown em vez de ausencia demonstrada. Corrige falso negativo da analise conservadora, sem prometer resolucao de alias.",
+      "origin": "real",
+      "status": "final-candidate",
+      "history": [
+        {
+          "ref": "evidence/final-repairs/issue-229/integration.json",
+          "commit": "e0dfae37906996b6548c12d9a8ac31cc54e155f9"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "maintenance-230",
+      "slice": "maintenance",
+      "issue": 230,
+      "surface": "worker",
+      "kind": "compatible-addition",
+      "bump": "minor",
+      "consumers": [
+        "scripts/forge-orchestrate.test.js"
+      ],
+      "external_consumers": "unknown",
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-orchestrate.js",
+          "symbol": "function failureDiagnostic",
+          "observed_sha": "7145aa2f24025dc4e3df5b950dc54e24bd02d22a",
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Acrescenta diagnostic limitado em falhas de controlador, com allowlist e referencia de transacao. Nao copia mensagem bruta nem muda o estado da transacao; novo campo aditivo para consumidor do resultado.",
+      "origin": "real",
+      "status": "final-candidate",
+      "history": [
+        {
+          "ref": "evidence/final-repairs/issue-230/integration.json",
+          "commit": "7145aa2f24025dc4e3df5b950dc54e24bd02d22a"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "maintenance-231-shape",
+      "slice": "maintenance",
+      "issue": 231,
+      "surface": "schema",
+      "kind": "compatible-addition",
+      "bump": "minor",
+      "consumers": [
+        "scripts/forge-delivery.js",
+        "scripts/forge-native-recovery-delivery.test.js"
+      ],
+      "external_consumers": "unknown",
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-native-recovery-delivery.js",
+          "symbol": "const nonEmpty=",
+          "observed_sha": "c651f001c4b588063dbda84a222aeb9fd71822aa",
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Shape de evidence/rationale e string nao vazia, como exige documentaryObservation. Contra v4.45.1 o modulo inteiro e novo; a recusa de arrays corrige sua implementacao intermediaria, nao e remocao de contrato presente nessa tag. Contra estado S08 a nova validacao seria new-requirement; a baseline efetiva desta linha e last-tag.",
+      "origin": "real",
+      "status": "final-candidate",
+      "history": [
+        {
+          "ref": "evidence/final-repairs/issue-231-shape/integration.json",
+          "commit": "c651f001c4b588063dbda84a222aeb9fd71822aa"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "maintenance-234",
+      "slice": "maintenance",
+      "issue": 234,
+      "surface": "cli",
+      "kind": "compatible-correction",
+      "bump": "patch",
+      "consumers": [
+        "scripts/forge-release-publish.js",
+        "scripts/forge-version.js"
+      ],
+      "external_consumers": "unknown",
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-release-version.js",
+          "symbol": "message: text.slice(separator + 2)",
+          "observed_sha": "c912c8d8b3b7490e3941103751f8017d2db25a05",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-release-version.test.js",
+          "symbol": "checkDeclaredVersion",
+          "observed_sha": "d98f9384f304ee8b1168c70a39d546e78f6cb733",
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Preserva bytes da mensagem para validar controles e comprimento de refs; trim fica em classifyCommit/renderChangelog. Corrige violacao da gramatica fail-closed, nao exige trailer de commit legado. c912c8d8 e correcao canonica; d98f9384 e regressao complementar do host, conforme S08-REVIEW e S08-SUMMARY:75, sem integration.json inventado.",
+      "origin": "real",
+      "status": "final-candidate",
+      "history": [
+        {
+          "ref": "slices/S08/S08-REVIEW.md; slices/S08/S08-SUMMARY.md:75",
+          "commit": "c912c8d8b3b7490e3941103751f8017d2db25a05"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "maintenance-235",
+      "slice": "maintenance",
+      "issue": 235,
+      "surface": "procedure",
+      "kind": "compatible-correction",
+      "bump": "patch",
+      "consumers": [
+        "scripts/forge-review-fix.test.js"
+      ],
+      "external_consumers": "unknown",
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.1",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-review-fix.js",
+          "symbol": "function setOutcomeInContent",
+          "observed_sha": "87667c9180c10a1f41eb2b888b087e2351df40f3",
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Aceita titulos de nivel dois alem dos de nivel tres ao registrar outcome de Rn. Amplia entrada suportada sem reescrever outros itens nem relaxar limite de secao.",
+      "origin": "real",
+      "status": "final-candidate",
+      "history": [
+        {
+          "ref": "evidence/final-repairs/issue-235/integration.json",
+          "commit": "87667c9180c10a1f41eb2b888b087e2351df40f3"
+        }
+      ],
+      "findings": [
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R1",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R2",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R3",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R4",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S03/S03-REVIEW.md#R5",
+          "state": "All five S03 findings remain pending."
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R1",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R2",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R3",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R4",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R5",
+          "state": "Concedidas — correção pendente"
+        },
+        {
+          "ref": "slices/S04/S04-REVIEW.md#R6",
+          "state": "Abertas — triagem final"
+        }
+      ],
+      "example_ids": []
+    }
+  ],
+  "examples": [
+    {
+      "id": "major-removal",
+      "origin": "illustrative",
+      "contract_id": null,
+      "base_tag": "v1.2.3",
+      "messages": [
+        "feat!: remover flag antiga\n\nForge-Impact: cli/removal; --old-flag"
+      ],
+      "declared_version": "2.0.0",
+      "expect": {
+        "bump": "major",
+        "new_tag": "v2.0.0",
+        "impact_status": "consistent",
+        "check": "ok",
+        "changelog_sections": [
+          "Breaking Changes"
+        ]
+      }
+    },
+    {
+      "id": "real-minor",
+      "origin": "real",
+      "contract_id": "S05-diagnostic",
+      "base_tag": "v1.2.3",
+      "messages": [
+        "feat(memory): implement S05/T01 bounded selection diagnostics"
+      ],
+      "declared_version": "1.3.0",
+      "expect": {
+        "bump": "minor",
+        "new_tag": "v1.3.0",
+        "impact_status": "partial",
+        "check": "ok",
+        "changelog_sections": [
+          "Features"
+        ]
+      }
+    },
+    {
+      "id": "patch-correction",
+      "origin": "illustrative",
+      "contract_id": null,
+      "base_tag": "v1.2.3",
+      "messages": [
+        "fix: restaurar retomada\n\nForge-Impact: migration/compatible-correction; checkpoint"
+      ],
+      "declared_version": "1.2.4",
+      "expect": {
+        "bump": "patch",
+        "new_tag": "v1.2.4",
+        "impact_status": "consistent",
+        "check": "ok",
+        "changelog_sections": [
+          "Bug Fixes"
+        ]
+      }
+    },
+    {
+      "id": "conflict-removal",
+      "origin": "illustrative",
+      "contract_id": null,
+      "base_tag": "v1.2.3",
+      "messages": [
+        "fix: remover flag\n\nForge-Impact: cli/removal; --old-flag"
+      ],
+      "declared_version": "1.2.4",
+      "expect": {
+        "bump": "patch",
+        "new_tag": "v1.2.4",
+        "impact_status": "conflict",
+        "check": "impact-label-conflict",
+        "changelog_sections": [
+          "Bug Fixes"
+        ]
+      }
+    },
+    {
+      "id": "resolved-removal",
+      "origin": "illustrative",
+      "contract_id": null,
+      "base_tag": "v1.2.3",
+      "messages": [
+        "fix: remover flag\n\nForge-Impact: cli/removal; --old-flag",
+        "chore: declarar nivel\n\nBREAKING CHANGE: remover --old-flag"
+      ],
+      "declared_version": "2.0.0",
+      "expect": {
+        "bump": "major",
+        "new_tag": "v2.0.0",
+        "impact_status": "partial",
+        "check": "ok",
+        "changelog_sections": [
+          "Bug Fixes",
+          "Breaking Changes"
+        ]
+      }
+    },
+    {
+      "id": "invalid-declaration",
+      "origin": "illustrative",
+      "contract_id": null,
+      "base_tag": "v1.2.3",
+      "messages": [
+        "fix: declarar\n\nForge-Impact: unknown/removal; x"
+      ],
+      "declared_version": "1.2.4",
+      "expect": {
+        "bump": "patch",
+        "new_tag": "v1.2.4",
+        "impact_status": "invalid",
+        "check": "impact-invalid",
+        "changelog_sections": [
+          "Bug Fixes"
+        ]
+      }
+    },
+    {
+      "id": "mismatched-version",
+      "origin": "illustrative",
+      "contract_id": null,
+      "base_tag": "v1.2.3",
+      "messages": [
+        "fix: corrigir\n\nForge-Impact: cli/compatible-correction; argv"
+      ],
+      "declared_version": "1.2.3",
+      "expect": {
+        "bump": "patch",
+        "new_tag": "v1.2.4",
+        "impact_status": "consistent",
+        "check": "declared-version-mismatch",
+        "changelog_sections": [
+          "Bug Fixes"
+        ]
+      }
+    },
+    {
+      "id": "D2-docs-conflict",
+      "origin": "illustrative",
+      "contract_id": null,
+      "base_tag": "v1.2.3",
+      "messages": [
+        "docs: corrigir contrato\n\nForge-Impact: procedure/compatible-correction; D2"
+      ],
+      "declared_version": "1.2.3",
+      "expect": {
+        "bump": "none",
+        "new_tag": "v1.2.3",
+        "impact_status": "conflict",
+        "check": "impact-label-conflict",
+        "changelog_sections": [
+          "Other Changes"
+        ]
+      }
+    },
+    {
+      "id": "real-s08",
+      "origin": "real",
+      "contract_id": "S08-impact",
+      "base_tag": "v1.2.3",
+      "messages": [
+        "feat(release): validate impact and frame complete commit messages"
+      ],
+      "declared_version": "1.3.0",
+      "expect": {
+        "bump": "minor",
+        "new_tag": "v1.3.0",
+        "impact_status": "partial",
+        "check": "ok",
+        "changelog_sections": [
+          "Features"
+        ]
+      }
+    },
+    {
+      "id": "declared-s08",
+      "origin": "illustrative",
+      "contract_id": "S08-impact",
+      "base_tag": "v1.2.3",
+      "messages": [
+        "feat(release): acrescentar impacto e notas\n\nForge-Impact: cli/compatible-addition; S08 --notes e impact"
+      ],
+      "declared_version": "1.3.0",
+      "expect": {
+        "bump": "minor",
+        "new_tag": "v1.3.0",
+        "impact_status": "consistent",
+        "check": "ok",
+        "changelog_sections": [
+          "Features"
+        ]
+      }
+    }
+  ],
+  "summary": {
+    "required_bump_last_tag": "major",
+    "rationale": "Maximo de KIND_BUMP das linhas last-tag: major pela nova exigencia terminalResult do primitivo invokeNative (#221). Majors slice-start #232/#233 permanecem separados; eventual conflito com os rotulos segue como achado para o owner."
+  }
+}

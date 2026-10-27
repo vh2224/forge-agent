@@ -16,6 +16,7 @@ function validSessionRef(ref) { return !!ref && validateSessionRef(ref).ok === t
 const exceptions = new WeakMap();
 const candidateSets = new WeakMap();
 const environmentalRepairs = new WeakSet();
+const linkedEntries = new WeakMap();
 const transitions = require('./forge-recovery-transition');
 function fail(code) { throw Object.assign(new Error(code), { code }); }
 function callerRequestHash(request) {
@@ -81,7 +82,30 @@ function requestIdentity(request) {
     milestone_id: request.milestoneId || null, slice_id: request.sliceId || null, task_id: request.taskId || null,
     host: request.route.host_runtime, owner: canonical(request.contextRoot), cwd: canonical(request.cwd) };
   for (const [key, field] of [['plan', 'planFile'], ['roadmap', 'roadmapFile']]) result[key] = request[field] ? canonical(request[field]) : null;
+  if (request.linked_begin_key) {
+    const entry = linkedEntries.get(request.linkedEntryBinding);
+    if (!entry || entry.begin_key !== request.linked_begin_key || entry.unit !== `${request.unitType}/${request.taskId || request.sliceId || request.milestoneId}`
+      || entry.owner !== canonical(request.contextRoot) || entry.host_runtime !== request.route.host_runtime
+      || entry.milestone !== request.milestoneId) fail('linked-entry-binding-required');
+    result.linked_entry = { entry_id: entry.entry_id, entry_digest: entry.entry_digest, classification: 'new-unit' };
+  }
   return result;
+}
+function bindLinkedRequest(request, options) {
+  if (!request.linked_begin_key) return request;
+  const entry = require('./forge-unit-controller').validateLinkedEntry(request.contextRoot || request.cwd, request.linked_begin_key, options);
+  const begin = require('./forge-unit-controller').lookupRecord(request.contextRoot || request.cwd, 'transaction', request.linked_begin_key);
+  const canonical = file => { const real = fs.realpathSync.native(file); return process.platform === 'win32' ? real.toLowerCase() : real; };
+  if (!entry.roots.some(root => canonical(root.path) === canonical(request.cwd))) fail('linked-entry-roots-mismatch');
+  if (request.execution_contract && request.execution_contract.code_roots.some(root => !entry.roots.some(bound => bound.root_id === root.id
+    && canonical(bound.path) === canonical(root.path)))) fail('linked-entry-roots-mismatch');
+  const handle = Object.freeze({});
+  const owner = fs.realpathSync(request.contextRoot || request.cwd);
+  linkedEntries.set(handle, { ...entry, owner: process.platform === 'win32' ? owner.toLowerCase() : owner,
+    host_runtime: begin.host_runtime, milestone: begin.milestone });
+  const bound = { ...request, linkedEntryBinding: handle };
+  requestIdentity(canonicalRequest(bound));
+  return bound;
 }
 function resolveCandidates(options, resolve = require('./forge-dispatch-resolve').resolveDispatch, request) {
   const identity = requestIdentity(request);
@@ -176,9 +200,45 @@ function createRecovery(options) {
     return JSON.parse(JSON.stringify(state));
   };
   const sidecarCeiling = route => route.worker_mode === 'sidecar' ? ceilingFromRoute(route) : null;
-  return Object.freeze({
+  const preflights = new WeakMap(), preflightDecisions = new WeakMap();
+  const historyHash = () => digest({ attempts: state.attempts, reservations: state.reservations || [] });
+  function assertPreflight(handle) {
+    const row = preflights.get(handle);
+    if (!row || row.history !== historyHash() || !['inspection', 'ready'].includes(state.phase)) fail('recovery-preflight-stale');
+    const proof = require('./forge-claude-permissions').assertUnsupportedPreflight(row.capability, row.request);
+    const observed = row.observe();
+    if (!observed || observed.request_sha256 !== proof.request_sha256 || observed.roots_sha256 !== proof.roots_sha256
+        || observed.route_key !== proof.route_key || observed.process_stopped !== true || observed.receipt_checked !== true
+        || observed.writer_possible !== false || observed.valid_saved_response !== false) fail('recovery-preflight-inspection-required');
+    return row;
+  }
+  const recovery = Object.freeze({
     snapshot: save, state_migration: migration,
     inspect: () => JSON.parse(JSON.stringify(state)),
+    observeAdapterPreflight({ request, capability, observe, rebuild = false }) {
+      if (typeof observe !== 'function') fail('recovery-preflight-observer-required');
+      const proof = require('./forge-claude-permissions').assertUnsupportedPreflight(capability, request);
+      if (proof.roots_sha256 !== state.roots_sha256 || digest(requestIdentity(request)) !== state.request_identity_sha256) fail('recovery-identity-mismatch');
+      const observed = observe();
+      if (!observed || observed.request_sha256 !== proof.request_sha256 || observed.roots_sha256 !== proof.roots_sha256
+          || observed.route_key !== proof.route_key || observed.process_stopped !== true || observed.receipt_checked !== true
+          || observed.writer_possible !== false || observed.valid_saved_response !== false) fail('recovery-preflight-inspection-required');
+      if (rebuild) {
+        const last = state.attempts.at(-1);
+        if (!last || last.failure_class !== 'caller' || last.provider_called !== false || last.layer !== 'adapter-preflight'
+            || digest(last.adapter_preflight) !== digest(proof) || last.request_sha256 !== proof.request_sha256
+            || routeKey(last.route) !== proof.route_key || !['inspection', 'ready'].includes(state.phase)) fail('recovery-preflight-record-mismatch');
+      } else {
+        if (state.attempts.length || state.reservations?.length) fail('recovery-preflight-record-exists');
+        recovery.record({ reason_code: proof.reason_code, layer: 'adapter-preflight', failure_class: 'caller', provider_called: false,
+          request_sha256: proof.request_sha256, request_bytes: Buffer.byteLength(JSON.stringify(request)),
+          context_sha256: null, context_bytes: null, duration_ms: null, budgets: {}, route: request.route, adapter_preflight: proof });
+      }
+      const handle = Object.freeze({});
+      preflights.set(handle, { request, capability, observe, history: historyHash() });
+      assertPreflight(handle);
+      return handle;
+    },
     transition(handle) {
       const row = transitions.assertLive(handle).reference;
       if (!(state.transitions || []).some(previous => digest(previous) === digest(row))) state.transitions = [...(state.transitions || []), row];
@@ -257,6 +317,13 @@ function createRecovery(options) {
       if (input.exception) scope = exceptionFor(input.exception, state, clock());
       const previous = state.attempts.at(-1);
       if (!previous) fail('recovery-previous-attempt-required');
+      const preflight = input.adapterPreflight ? assertPreflight(input.adapterPreflight) : null;
+      const livePreflightScope = () => {
+        assertPreflight(input.adapterPreflight);
+        if (typeof input.readException !== 'function') fail('recovery-preflight-live-authority-required');
+        return exceptionFor(input.readException(), state, clock());
+      };
+      if (preflight) scope = livePreflightScope();
       let routes, provenance;
       const silenceRetry = previous.failure_class === 'silence'
         && previous.observation?.silence?.cause === 'indeterminate' && scope
@@ -266,7 +333,7 @@ function createRecovery(options) {
       if (environmentRepair && (state.reservations || []).some(a => a.correction?.kind === 'environment'
           && a.correction.failure_id === input.correction.failure_id)) fail('recovery-corrected-retry-exhausted');
       if (silenceRetry) routes = [previous.route];
-      else if (!environmentRepair && !transition && (previous.failure_class === 'caller' || previous.failure_class === 'timeout' && input.correction)) {
+      else if (!preflight && !environmentRepair && !transition && (previous.failure_class === 'caller' || previous.failure_class === 'timeout' && input.correction)) {
         const correction = input.correction;
         if (!correction || correction.offline_validated !== true || !correction.evidence_reference
             || correction.request_sha256 === previous.request_sha256 || !correction.request_sha256) fail('recovery-correction-required');
@@ -304,14 +371,22 @@ function createRecovery(options) {
         let verdict;
         try { verdict = await input.validateInvocation(candidate); }
         catch (error) { verdict = { ok: false, reason_code: error.code || 'recovery-adapter-refused' }; }
+        if (preflight && verdict?.ok === true && (!verdict.request
+            || digest(requestIdentity(verdict.request)) !== state.request_identity_sha256
+            || digest(require('./forge-code-roots').validateContract(verdict.request.execution_contract, { revalidate: true })) !== state.roots_sha256
+            || routeKey(verdict.request.route) !== routeKey(candidate))) fail('recovery-preflight-successor-mismatch');
         if (verdict?.ok === true && candidate.dispatch_allowed === true) { route = candidate; invocation = verdict; break; }
         rejected.push({ route_key: routeKey(candidate), reason_code: verdict?.reason_code || candidate.dispatch_reason_code || 'recovery-adapter-refused' });
       }
       state.selection = { provenance: provenance || null, rejected, selected: route ? routeKey(route) : null }; save();
       if (!route) return { action: 'stop', reason_code: 'recovery-candidates-exhausted', rejected };
-      if (scope) exceptionFor(input.exception, state, clock());
+      if (preflight) {
+        scope = livePreflightScope();
+        if (!scope.routes.includes(routeKey(route))) fail('recovery-exception-invalid');
+      } else if (scope) exceptionFor(input.exception, state, clock());
       state.phase = 'ready'; save();
-      return { action: 'invoke', route, invocation, provenance, rejected, corrected: !!input.correction,
+      const decision = { action: 'invoke', route, invocation, provenance, rejected, corrected: !!input.correction,
+        ...(preflight ? { adapter_preflight: previous.adapter_preflight } : {}),
         ...(transition ? { transition_reference: transition.reference } : {}),
         correction: input.correction ? { offline_validated: true, request_sha256: input.correction.request_sha256,
           ...(environmentRepair ? { kind: 'environment', failure_id: input.correction.failure_id } : {}),
@@ -320,17 +395,31 @@ function createRecovery(options) {
         sidecar_ceiling: sidecarCeiling(route), silence_retry: !!silenceRetry,
         ...(scope ? { authorization_reference: scope.reference, authorization_expires_at: scope.expires_at,
           native_authorization_remaining_ms: Math.max(0, scope.expires_at - clock()) } : {}), provider_called: false };
+      if (preflight) {
+        const hash = digest(decision);
+        const requestHash = callerRequestHash(invocation.request);
+        preflightDecisions.set(decision, suppliedHash => {
+          if (digest(decision) !== hash || state.pending_questions.some(q => q.status === 'pending')
+              || suppliedHash !== requestHash
+              || !livePreflightScope().routes.includes(routeKey(decision.route))) fail('recovery-preflight-decision-changed');
+        });
+      }
+      return decision;
     },
     async resumeReservation(input) {
       if (state.pending_questions.some(q => q.status === 'pending')) return { action: 'pending-questions', questions: state.pending_questions };
+      if (input.inspection?.valid_saved_response === true) return { action: 'replay', provider_called: false };
       if (input.inspection?.process_stopped !== true || input.inspection.receipt_checked !== true
           || input.inspection.valid_saved_response || input.inspection.roots_reconciled !== true) fail('recovery-writer-reconciliation-required');
       const saved = state.reservations?.at(-1), previous = state.attempts.at(-1);
       const transition = input.transition ? transitions.assertLive(input.transition) : null;
-      if (!saved || digest(saved) !== input.reservation_sha256 || saved.handoff_pending !== true || saved.handed_off_at
+      const ordinary = transition?.uninvoked?.reservation_sha256 === input.reservation_sha256;
+      if (!saved || digest(saved) !== input.reservation_sha256 || (!ordinary && (saved.handoff_pending !== true || saved.handed_off_at
           || (transition ? digest(saved.transition_reference) !== digest(transition.reference)
             : !environmentalRepairs.has(input.correction) || saved.correction?.kind !== 'environment'
-              || saved.correction.failure_id !== input.correction.failure_id)) fail('recovery-handoff-reservation-invalid');
+              || saved.correction.failure_id !== input.correction.failure_id)))) fail('recovery-handoff-reservation-invalid');
+      if (ordinary && (state.phase !== 'reserved' || state.attempts.some(row => row.reservation && digest(row.reservation) === digest(saved))
+          || state.continuation && state.continuation.status !== 'prepared')) fail('recovery-reservation-consumed');
       const scope = exceptionFor(input.exception, state, clock()), observed = candidateSets.get(input.candidateSet);
       if (!observed || observed.provenance.request_identity_sha256 !== state.request_identity_sha256
           || digest(observed.provenance) !== digest(saved.provenance)
@@ -342,26 +431,64 @@ function createRecovery(options) {
       const invocation = await input.validateInvocation(route);
       if (invocation?.ok !== true) fail(invocation?.reason_code || 'recovery-adapter-refused');
       exceptionFor(input.exception, state, clock());
-      saved.handoff_pending = false; saved.handed_off_at = clock(); state.phase = 'external-handoff'; save();
+      if (ordinary) {
+        const args = invocation.args, prompt = args?.message || args?.prompt;
+        if (!args || typeof prompt !== 'string' || !prompt.trim()) fail('recovery-final-packaging-required');
+        const continuation = { schema_version: 1, status: 'prepared', reservation_sha256: input.reservation_sha256,
+          transition_reference: transition.reference, original_request_sha256: saved.request_sha256,
+          final_request_sha256: digest(args), prompt_sha256: digest(prompt), invocation_sha256: digest(invocation),
+          packaging_reason: 'ordinary-native-reservation-restart', offline_validation: 'native-adapter:final-arguments',
+          evidence_reference: transition.uninvoked.evidence_reference };
+        if (state.continuation && digest(state.continuation) !== digest(continuation)) fail('recovery-continuation-changed');
+        state.continuation = continuation; save();
+      } else {
+        saved.handoff_pending = false; saved.handed_off_at = clock(); state.phase = 'external-handoff'; save();
+      }
       return { action: 'invoke', route, invocation, corrected: true, correction: saved.correction,
         provenance: saved.provenance, sidecar_ceiling: sidecarCeiling(route),
         authorization_reference: scope.reference, authorization_expires_at: scope.expires_at,
-        provider_called: false, reservation_sha256: input.reservation_sha256 };
+        provider_called: false, reservation_sha256: input.reservation_sha256, ...(ordinary ? { continuation: true } : {}) };
+    },
+    consumeContinuation(invocation, reservationHash, delivery) {
+      const row = state.continuation;
+      if (!row || row.status !== 'prepared' || row.reservation_sha256 !== reservationHash
+          || digest(state.reservations.at(-1)) !== reservationHash || row.invocation_sha256 !== digest(invocation)
+          || state.pending_questions.some(q => q.status === 'pending')) fail('recovery-continuation-not-prepared');
+      if (delivery) row.delivery = JSON.parse(JSON.stringify(delivery));
+      row.status = 'dispatch-possible'; save();
+    },
+    returnContinuation() {
+      if (state.continuation?.status !== 'dispatch-possible') fail('recovery-continuation-not-dispatched');
+      state.continuation.status = 'returned'; save();
+    },
+    saveDeliveryReceipt(receipt) {
+      const row = state.continuation;
+      if (!row?.delivery || !['dispatch-possible', 'returned'].includes(row.status)
+          || !/^[a-f0-9]{64}$/.test(receipt?.sha256 || '')
+          || receipt.file !== row.delivery.receipt_file + '.' + receipt.sha256 + '.json') fail('recovery-delivery-receipt-invalid');
+      row.delivery.receipt = JSON.parse(JSON.stringify(receipt)); save();
     },
     reserve(decision, requestHash, handoffPending = false) {
       if (decision.action !== 'invoke' || state.phase !== 'ready' || state.selection?.selected !== routeKey(decision.route)) fail('recovery-reservation-invalid');
+      if (state.attempts.at(-1)?.adapter_preflight) {
+        const check = preflightDecisions.get(decision);
+        if (!check) fail('recovery-preflight-decision-required');
+        check(requestHash);
+      }
       const entry = { route_key: routeKey(decision.route), corrected: decision.corrected, request_sha256: requestHash,
         destination_key: transitions.destinationKey(decision.route),
         ...(decision.transition_reference ? { transition_reference: decision.transition_reference } : {}),
         correction: decision.correction || null,
         ...(handoffPending ? { handoff_pending: true } : {}),
         ...(decision.resume ? { session_sha256: decision.resume.session_sha256 } : {}),
-        reserved_at: clock(), reason: decision.resume ? RESUME_RESERVATION : decision.silence_retry ? 'anomalous-silence-same-target'
+        ...(decision.adapter_preflight ? { adapter_preflight: decision.adapter_preflight } : {}),
+        reserved_at: clock(), reason: decision.adapter_preflight ? 'adapter-preflight-incompatible' : decision.resume ? RESUME_RESERVATION : decision.silence_retry ? 'anomalous-silence-same-target'
           : decision.corrected ? 'offline-correction' : 'resolved-next-destination',
         provenance: decision.provenance || null, provider_called: 'unknown' };
       state.reservations = [...(state.reservations || []), entry]; state.phase = 'reserved'; return save();
     },
   });
+  return recovery;
 }
 function inspectReceipt(file, options = {}) {
   const fs = require('fs');
@@ -562,6 +689,24 @@ async function recoverAttempt(options) {
     inspection.valid_saved_response = true;
   }
   if (inspection.process_stopped !== true) fail('recovery-process-receipt-inspection-required');
+  // The old review-fix producer recorded only {cwd}, even though recovery now
+  // requires a held root contract. Preserve that historical identity only after
+  // the actual unit adapter proves its already-completed reset, read-only.
+  let assertLegacyReviewFix;
+  if (options.request.unitType === 'review-fix' && !options.request.execution_contract
+      && options.executionContract && state.roots_sha256 === digest({ cwd: options.request.cwd })
+      && !inspection.valid_saved_response) {
+    const inspectLegacy = () => require('./forge-unit-sidecar').reconcileLegacyReviewFix(options.request, inspection.receipt, options.executionContract);
+    inspectLegacy();
+    const resetHash = digest(fs.readFileSync(inspection.receipt.reset_state_file));
+    assertLegacyReviewFix = () => {
+      if (digest(fs.readFileSync(inspection.receipt.reset_state_file)) !== resetHash) fail('review-fix-recovery-snapshot-changed');
+      inspectLegacy();
+      options.validateExecutionAuthority?.();
+    };
+    assertLegacyReviewFix();
+    expectedRoots = state.roots_sha256;
+  }
   if (options.transitions && state.pending_questions.some(row => row.status === 'pending') && !options.answers?.length)
     return { action: 'pending-questions', questions: state.pending_questions };
   const transition = options.transitions ? await transitions.prepare(options, state, inspection) : null;
@@ -581,7 +726,8 @@ async function recoverAttempt(options) {
     ...(request.route ? { request } : {}),
     clock: options.clock, persist: value => {
       preSpawn?.assertUnchanged();
-      transitionGuard?.assertUnchanged();
+      if (value.continuation?.status === 'returned' || value.continuation?.delivery?.receipt) transitionGuard?.assertAuthority();
+      else transitionGuard?.assertUnchanged();
       const lockApi = require('./forge-lock');
       // A private transport mutex must not change guarded owner/code metadata.
       const lockRoot = path.join(require('os').tmpdir(), 'forge-recovery-' + digest(path.resolve(options.stateFile)));
@@ -715,6 +861,7 @@ async function recoverAttempt(options) {
   // bytes immediately before reservation, then bind the newly saved state too.
   preSpawn?.assertUnchanged();
   if (!options.resumeReservation) {
+    assertLegacyReviewFix?.();
     const reserve = () => session.reserve(decision, correction?.request_sha256 || state.attempts.at(-1).request_sha256,
       !!(preSpawn || transitionGuard) && options.externalNativeHandoff === true && decision.route.worker_mode === 'native');
     const saved = transitionGuard ? transitionGuard.withLock(reserve) : reserve();
@@ -729,7 +876,7 @@ async function recoverAttempt(options) {
   // sidecar route, never a remainder of a cumulative clock. Native authorization
   // validity is returned separately, never as a sidecar wait.
   preSpawn?.assertUnchanged();
-  const reservedStateHash = digest(require('fs').readFileSync(options.stateFile));
+  let reservedStateHash = digest(require('fs').readFileSync(options.stateFile));
   const reservedRequestHash = callerRequestHash(options.request);
   const assertAuthority = () => {
     const live = inspectReceipt(options.receiptFile, { processProbe: options.processProbe, request: options.request });
@@ -738,12 +885,24 @@ async function recoverAttempt(options) {
         || digest(require('fs').readFileSync(options.stateFile)) !== reservedStateHash) fail('recovery-process-receipt-inspection-changed');
     if (binding) binding.adapter.readStandingAuthorization(authorizedReference);
     if (exception) exceptionFor(exception, session.inspect(), (options.clock || Date.now)());
+    transitionGuard?.assertAuthority();
   };
   const assertReady = Object.assign(() => {
     assertAuthority();
+    assertLegacyReviewFix?.();
     if (transitionGuard) transitionGuard.withLock(() => {});
     else preSpawn?.assertUnchanged();
-  }, { assertAuthority, ...(transitionGuard ? { appendOwnerEvent: line => transitionGuard.appendOwnerEvent(line) } : {}) });
+  }, { assertAuthority,
+    ...(decision.continuation ? { consumeInvocation(invocation, delivery) {
+      assertReady();
+      transitionGuard.withLock(() => session.consumeContinuation(invocation, decision.reservation_sha256, delivery));
+      reservedStateHash = expectedStateHash;
+    }, invocationReturned() {
+      assertAuthority(); session.returnContinuation(); reservedStateHash = expectedStateHash;
+    }, persistDeliveryReceipt(receipt) {
+      assertAuthority(); session.saveDeliveryReceipt(receipt); reservedStateHash = expectedStateHash;
+    } } : {}),
+    ...(transitionGuard ? { appendOwnerEvent: line => transitionGuard.appendOwnerEvent(line) } : {}) });
   const invoke = () => options.invoke(decision.route, decision.invocation, decision.sidecar_ceiling,
     assertReady, decision.reservation_sha256,
     decision.resume ? { ...decision.resume, session: resumeSession } : undefined);
@@ -807,7 +966,7 @@ async function cli(argv) {
   }
   fail('usage: forge-attempt-recovery.js --inspect <state.json> <receipt.json> | --preparation <request.json>');
 }
-module.exports = { canonicalRequest, callerRequestHash, bindRecoveryAuthorization, createRecovery, migrateState, resolveCandidates, createAuthority, exceptionFor, requestIdentity, validateState, validateStateTarget, routeKey, safeDiagnostic, inspectReceipt, captureFailure, recoverAttempt, cli };
+module.exports = { canonicalRequest, callerRequestHash, bindRecoveryAuthorization, bindLinkedRequest, createRecovery, migrateState, resolveCandidates, createAuthority, exceptionFor, requestIdentity, validateState, validateStateTarget, routeKey, safeDiagnostic, inspectReceipt, captureFailure, recoverAttempt, cli };
 if (require.main === module) cli(process.argv.slice(2)).then(value => process.stdout.write(JSON.stringify(value) + '\n')).catch(error => {
   process.stderr.write(JSON.stringify({ reason_code: error.code || 'recovery-command-failed' }) + '\n'); process.exitCode = 2;
 });

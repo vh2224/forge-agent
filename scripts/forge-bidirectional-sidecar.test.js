@@ -84,7 +84,7 @@ function setup() {
   const cwd = path.join(root, `case-${++sequence}`); fs.mkdirSync(cwd);
   write(path.join(cwd, '.gsd/forge-prefs.jsonc'), { routing: { default: { planner: { heavy: ['claude-opus-5'], max: ['claude-fable-5'] }, executor: { standard: ['claude-sonnet-5'] } } }, tier_models: { standard: 'claude-sonnet-5', heavy: 'claude-opus-5', max: 'claude-fable-5' } });
   const m = '.gsd/milestones/M001';
-  write(path.join(cwd, m, 'M001-ROADMAP.md'), '# Roadmap\n\n- [ ] **S01: Work**\n');
+  write(path.join(cwd, m, 'M001-ROADMAP.md'), '# Roadmap\n\n- [ ] **S01: Work** `depends:[]`\n');
   write(path.join(cwd, m, 'M001-CONTEXT.md'), '# Decisions\n');
   write(path.join(cwd, m, 'slices/S01/S01-PLAN.md'), '# Plan\n\n- [ ] T01: Work\n');
   return cwd;
@@ -126,7 +126,7 @@ function artifactContent(r, p, loc) {
   if (rule) return JSON.stringify({ schema_version: 1, kind: rule.kind, unit: rule.unit,
     plan_fingerprint: 'fixture-sha', code_dir: r.cwd, revision: 'abc123', environment: 'fixture',
     captured_at: '2026-09-24T12:00:00Z', result: {} });
-  return r.unitType === 'plan-milestone' ? '# Roadmap\n\n- [ ] **S01: Work**\n' : '# Valid artifact\n\nFixture evidence.\n';
+  return r.unitType === 'plan-milestone' ? '# Roadmap\n\n- [ ] **S01: Work** `depends:[]`\n' : '# Valid artifact\n\nFixture evidence.\n';
 }
 function payload(r, includeDeliveryEnvelopes = false) { const loc = unit.locations(r);
   const paths = includeDeliveryEnvelopes && loc.delivery
@@ -319,7 +319,7 @@ async function reviewFixMatrix() {
       const model = engine === 'codex' ? 'gpt-6-luna' : 'claude-sonnet-5';
       write(path.join(working, '.gsd/forge-prefs.jsonc'), { tier_models: { light: model, standard: model, heavy: model, max: model },
         ...(effort ? { effort: { 'review-fix': effort } } : {}) });
-      write(path.join(working, '.gsd/milestones/M001/M001-ROADMAP.md'), '# Roadmap\n\n- [ ] **S01: Work**\n- [ ] **S02: More**\n');
+      write(path.join(working, '.gsd/milestones/M001/M001-ROADMAP.md'), '# Roadmap\n\n- [ ] **S01: Work** `depends:[]`\n- [ ] **S02: More**\n');
       write(path.join(working, RF_SLICE_REVIEW), RF_REVIEW);
       write(path.join(working, RF_S02_REVIEW), RF_REVIEW_S02);
       write(path.join(working, RF_TASK_REVIEW), RF_REVIEW);
@@ -925,7 +925,7 @@ async function reviewFixMatrix() {
     fs.unlinkSync(path.join(cwd, p.artifacts[0].path));
     // Only a originally-absent target can be replayed from absence.
     const receipt = JSON.parse(fs.readFileSync(r.resultFile + '.receipt.json'));
-    if (receipt.artifacts[0].before !== null) write(path.join(cwd, p.artifacts[0].path), type === 'discuss-milestone' ? '# Decisions\n' : '# Roadmap\n\n- [ ] **S01: Work**\n');
+    if (receipt.artifacts[0].before !== null) write(path.join(cwd, p.artifacts[0].path), type === 'discuss-milestone' ? '# Decisions\n' : '# Roadmap\n\n- [ ] **S01: Work** `depends:[]`\n');
     await unit.runUnitSidecar(r);
     // The ready receipt keeps the observation through the replay above.
     const readyTelemetry = JSON.parse(fs.readFileSync(r.resultFile + '.receipt.json')).telemetry;
@@ -1646,7 +1646,7 @@ async function reviewFixMatrix() {
   const replay = loop.invoke('codex', 'auto', 'complete', { ...input, result: delivered }, selected.snapshot).result;
   assert.strictEqual(replay.action, 'continue', JSON.stringify(replay));
   const next = loop.invoke('codex', 'auto', 'next', input, completion.snapshot).result;
-  assert.strictEqual(next.unit.type, 'plan-slice', JSON.stringify(next));
+  assert.strictEqual(next.unit?.type, 'plan-slice', JSON.stringify(next));
   assert.strictEqual(next.snapshot.workflow_id, flow.workflowId);
   assert.strictEqual(next.host_runtime, 'codex');
   console.log('Bidirectional contracts, artifact replay/conflicts, review-fix delivery matrix, failure classification and Codex forge-auto progression passed (fixture providers only).');

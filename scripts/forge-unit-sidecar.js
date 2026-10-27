@@ -18,7 +18,11 @@ const forgeIds = require('./forge-ids');
 const { MAX_FILE_BYTES: MAX_DELIVERY_BYTES } = require('./forge-delivery');
 
 const schema = xllm.loadSchemaFile('unit-artifacts.schema.json');
+// v1 stays exported unchanged for its consumers; new extractions select v2.
 const memorySchema = xllm.loadSchemaFile('memory-extraction.schema.json');
+const memorySchemaV2 = xllm.loadSchemaFile('memory-extraction-v2.schema.json');
+const MEMORY_SCHEMAS = Object.freeze({ 1: memorySchema, 2: memorySchemaV2 });
+const NEW_MEMORY_SCHEMA_VERSION = 2;
 const MAX_ARTIFACT_BYTES = 512 * 1024;
 // Leave room for the envelope and provider prose within the 1 MiB stream cap.
 const MAX_ARTIFACT_PAYLOAD_BYTES = 900 * 1024;
@@ -29,11 +33,38 @@ const PREPARATION_SURFACE_MAX_ENTRIES = 2048;
 const PREPARATION_SURFACE_MAX_BYTES = 16 * 1024 * 1024;
 const MEMORY_QUALITY_CONTRACT = [
   'Keep only project-specific, non-obvious, durable facts that became true; reject pending work, secrets, generic advice and temporary state.',
-  'Use candidate-local IDs only. Never allocate MEM IDs or return paths, owner identity, timestamps, commands or publication metadata.',
-  'Preserve W1-W4 semantics: new facts, near-duplicate hit/confirm, supersede with a replacement candidate, and cap-50 prune.',
-  'Emit promote only when owner-provided state proves confidence >= 0.85, hits >= 3, an eligible category, and durable non-fix text.',
+  'Return schema_version 2. Use candidate-local IDs and one unique local_event_id per event. Never allocate MEM IDs or return paths, owner identity, timestamps, commands or publication metadata.',
+  'Emit one seed per new fact, supersede with a replacement candidate, and cap-50 prune with reason "cap".',
+  'Evidence events target existing MEM IDs and cite only an INPUT.evidence_refs entry whose observed_kind equals the event kind (utility also cites an INPUT.outcome_refs entry). Without such a reference emit no confirm or utility; there is no hit kind.',
+  'Emit promote only when owner-provided state proves confidence >= 0.85, at least three independent confirmations, an eligible category, and durable non-fix text.',
   'Empty evidence returns done with empty facts/events. Partial, blocked or error returns no publishable facts/events.',
 ].join('\n');
+
+function memoryExtractionSchema(version) {
+  if (version !== 1 && version !== 2) fail('memory-schema-version-unsupported', 'Memory extraction schemas are versions 1 and 2.');
+  return MEMORY_SCHEMAS[version];
+}
+// Transport response schema for a contract version. v2 requests v2 and keeps a
+// v1 envelope decodable for workers that still emit it; the receipt binds the
+// v2 evidence contract (and its promotion rule) whichever envelope arrives.
+function memoryResponseSchema(version) {
+  const selected = memoryExtractionSchema(version);
+  if (version === 1) return selected;
+  const strip = ({ $schema, $id, title, description, $defs, ...rest }) => rest;
+  const legacy = value => JSON.parse(JSON.stringify(value)
+    .replace(/"#\/\$defs\/([A-Za-z]+)"/g, (match, name) => `"#/$defs/v1_${name}"`));
+  return {
+    $schema: selected.$schema,
+    $id: 'https://forge-agent.local/schemas/memory-extraction-response-v2.schema.json',
+    title: 'Forge memory extraction response (v2 requested, v1 decodable)',
+    type: 'object',
+    anyOf: [strip(selected), legacy(strip(memorySchema))],
+    $defs: { ...selected.$defs,
+      ...Object.fromEntries(Object.entries(memorySchema.$defs).map(([key, value]) => [`v1_${key}`, legacy(value)])) },
+  };
+}
+const memoryTransportSchema = memoryResponseSchema(NEW_MEMORY_SCHEMA_VERSION);
+const MEMORY_RESPONSE_VERSIONS = Object.freeze([2, 1]);
 
 function fail(code, hint) { const error = new Error(hint || code); error.code = code; throw error; }
 function hash(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
@@ -78,6 +109,30 @@ function inspectDeliveryContent(content, rule) {
     && typeof value.code_dir === 'string' && typeof value.revision === 'string'
     && typeof value.environment === 'string' && typeof value.captured_at === 'string'
     && value.result && typeof value.result === 'object' && !Array.isArray(value.result);
+}
+// Called only after the existing validator rejects; never changes acceptance.
+// Closed categories and field names keep provider content out of diagnostics.
+function deliveryFailureReason(content, rule) {
+  const category = ['input', 'delivery', 'standalone-preparation'].includes(rule.kind)
+    ? rule.kind : 'verification';
+  const reason = condition => `typed-${category}-${condition}`;
+  if (category === 'standalone-preparation') return reason('content');
+  let value;
+  try { value = JSON.parse(content); } catch { return reason('json'); }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return reason('object');
+  if (!(category === 'input' ? [1, 2] : [1]).includes(value.schema_version)) return reason('schema');
+  if (!sameUnit(value.unit, rule.unit)) return reason('unit');
+  if (category === 'delivery' && value.generated_by !== 'forge-delivery') return reason('generated-by');
+  if (category === 'verification' && value.kind !== rule.kind) return reason('kind');
+  const strings = category === 'input' ? ['plan', 'plan_fingerprint']
+    : category === 'delivery' ? ['delivery_fingerprint']
+      : ['plan_fingerprint', 'code_dir', 'revision', 'environment', 'captured_at'];
+  for (const field of strings) if (typeof value[field] !== 'string') return reason(field.replaceAll('_', '-'));
+  const arrays = category === 'input' ? ['bindings', 'expected_children']
+    : category === 'delivery' ? ['criteria', 'facts'] : [];
+  for (const field of arrays) if (!Array.isArray(value[field])) return reason(field.replaceAll('_', '-'));
+  if (category === 'verification') return reason('result');
+  return 'delivery-artifact-invalid';
 }
 const MILESTONE_ID_RE = /^(?:M\d+|M-\d{14}-[a-z0-9-]+)$/i;
 // Review-fix has three boundaries and publishes only outcome lines into the
@@ -186,22 +241,66 @@ function locations(request) {
   return { required, allowed: [...required, ...deliveryOptional, ...optional], rules, delivery, milestone, slice };
 }
 function milestonePlanFile(request) {
-  const loc = locations(request), root = request.contextRoot || request.cwd;
-  const canonical = target(root, `${loc.slice}/tasks/${request.taskId}/${request.taskId}-PLAN.md`);
-  const legacy = target(root, `${loc.slice}/tasks/${request.taskId}-PLAN.md`);
-  if (fs.existsSync(canonical) && fs.existsSync(legacy)) fail('legacy-task-plan-conflict');
-  const selected = fs.existsSync(canonical) ? canonical : legacy;
-  if (!fs.existsSync(selected)) fail('execution-plan-required');
-  if (request.planFile && path.resolve(request.planFile) !== path.resolve(selected)) fail('execution-plan-path-mismatch');
-  return selected;
+  locations(request);
+  return require('./forge-task-execution').milestonePlanFile(request);
+}
+
+// Pure readiness check over the wire representation, after caller assembly.
+// Without an identity this is diagnostic policy, never a reusable dispatch seal.
+function preflightExecutionVerification(raw, options = {}) {
+  const request = JSON.parse(JSON.stringify(raw));
+  if (!request.execution_contract || request.unitType !== 'execute-task') return null;
+  const root = request.contextRoot || request.cwd;
+  let planFile;
+  if (request.scope === 'standalone-task') {
+    const loc = require('./forge-task-execution').locations(request);
+    planFile = path.join(root, loc.task, `${request.taskId}-PLAN.md`);
+    // Preserve owner aliases supported by prepare(); its physical path/gate
+    // checks still run independently before execution authority is granted.
+    if (!request.planFile || require('./forge-code-roots').key(fs.realpathSync.native(request.planFile))
+        !== require('./forge-code-roots').key(fs.realpathSync.native(planFile))) fail('execution-plan-path-mismatch');
+  } else planFile = milestonePlanFile(request);
+  const runtimeVerification = options.verification === undefined ? undefined : JSON.parse(JSON.stringify(options.verification));
+  return require('./forge-verify').normalizeExecutionVerification(request.execution_contract,
+    fs.readFileSync(planFile, 'utf8'), request.verification, runtimeVerification, options.identity || {});
 }
 function validateRecoveryRequest(raw, options = {}) {
-  const request = require('./forge-attempt-recovery').canonicalRequest(raw);
+  const attempt = require('./forge-attempt-recovery');
+  const request = attempt.canonicalRequest(raw.linked_begin_key && !raw.linkedEntryBinding ? attempt.bindLinkedRequest(raw, options.linkedEntryOptions) : raw);
+  if (request.linked_begin_key) attempt.requestIdentity(request);
   const loc = locations(request);
   const transport = capability(request.route?.resolved_worker_engine, request.unitType,
     request.scope === 'milestone' ? {} : request);
   if (!transport.supported) fail(transport.reason_code, transport.hint);
+  // Existing attempts retain their receipt/seal/replay checks. Readiness must
+  // not reinterpret a legacy saved result or grant it new authority.
+  if (transport.mode === 'execute' && !fs.existsSync(`${request.resultFile}.receipt.json`)) {
+    preflightExecutionVerification(request, options);
+  }
+  if (request.claudePermissions !== undefined && (request.claudePermissions !== 'verification'
+      || request.route?.resolved_worker_engine !== 'claude' || !['execute', 'fix'].includes(transport.mode)
+      || !request.execution_contract)) fail('claude-permission-policy-invalid');
   if (loc.preparation) require('./forge-task-preparation').validateRequest(request);
+  if (transport.mode === 'fix' && request.execution_contract) {
+    const roots = require('./forge-code-roots');
+    const contract = roots.validateContract(request.execution_contract, { owner: request.contextRoot, revalidate: true });
+    const claim = request.claim;
+    const held = request.runId && require('./forge-runs').get(request.contextRoot, request.runId);
+    if (!claim || claim.schema_version !== 2 || claim.released || !claim.generation
+        || !held?.active || held.write_claim?.released || roots.digest(held.write_claim) !== roots.digest(claim)) fail('execution-held-claim-required');
+    roots.claimGroups(claim);
+    const fix = require('./forge-review-fix');
+    const derived = fix.deriveClaim(fix.normalizeItems(request.reviewFix?.items));
+    if (!derived.eligible || request.reviewFix?.decision !== 'proceed'
+        || roots.digest(contract) !== roots.digest(claim.execution_contract)
+        || contract.code_roots.length !== 1 || roots.key(contract.code_roots[0].path) !== roots.key(fs.realpathSync.native(request.cwd))
+        || JSON.stringify([...derived.paths].sort()) !== JSON.stringify([...new Set(request.reviewFix.claimPaths || [])].sort())
+        || roots.digest(claim.paths.map(p => roots.resolvePath(contract, p)).map(p => `${p.root_id}::${p.path}`).sort())
+          !== roots.digest(derived.paths.map(file => `${contract.primary_root_id}::${file}`).sort())) fail('execution-held-claim-mismatch');
+    fix.assertClaimTargetsPhysical(request.cwd, derived.paths);
+    if (request.gates?.claim !== 'proceed' || !['passed', 'not-applicable'].includes(request.gates?.security)) fail('execution-gates-required');
+    if (request.gates.security === 'passed' && (!request.securityFile || !fs.readFileSync(request.securityFile, 'utf8').trim())) fail('execution-security-required');
+  }
   if (transport.mode === 'execute') {
     if (loc.execution) {
       const prepared = require('./forge-task-execution').prepare({ ...request, nativeInvocation: options.nativeInvocation }, request.contextRoot, request.cwd);
@@ -226,7 +325,8 @@ function validateRecoveryRequest(raw, options = {}) {
         const gateFile = planFile.replace(/-PLAN\.md$/, '-PLAN-GATE.md');
         const gate = fs.existsSync(gateFile) ? fs.readFileSync(gateFile, 'utf8') : '';
         if (!/^status:\s*approved\s*$/m.test(gate)
-            && !(request.gates?.plan === 'skipped' && request.gates?.planSkipReason === 'interactive-off')) fail('execution-plan-gate-required');
+            && !(request.gates?.plan === 'skipped' && request.gates?.planSkipReason === 'interactive-off')
+            && !require('./forge-task-execution').autoGateAllowed(request)) fail('execution-plan-gate-required');
         const approvedHash = gate.match(/^plan_sha256:\s*([a-f0-9]{64})\s*$/m)?.[1];
         if (approvedHash && approvedHash !== hash(plan)) fail('execution-plan-gate-stale');
         if (request.gates?.claim !== 'proceed' || !['passed', 'not-applicable'].includes(request.gates?.security)) fail('execution-gates-required');
@@ -291,6 +391,46 @@ function reconcileMilestoneAttempt(request, receipt, runtime = {}) {
   return require('./forge-surgical-reset').reconcileFailedAttempt(baseline.state_file,
     { failed: true, processStopped: true, verifyOwnership: runtime.verifyOwnership });
 }
+// Legacy review-fix already performed its reset when it failed. Observe the
+// original boundary again; never reset twice or manufacture a v2 baseline now.
+function reconcileLegacyReviewFix(request, receipt, executionContract) {
+  const roots = require('./forge-code-roots'), reset = require('./forge-surgical-reset');
+  const contract = roots.validateContract(executionContract, { owner: request.contextRoot || request.cwd, revalidate: true });
+  if (request.unitType !== 'review-fix' || receipt.kind !== 'review-fix' || receipt.phase !== 'failed'
+      || request.execution_contract || receipt.recovery_baseline
+      || receipt.dispatch_id !== request.dispatchId || receipt.fingerprint !== artifactFingerprint(request)
+      || receipt.recovery_identity_sha256 !== recoveryIdentity(request)) fail('review-fix-recovery-binding');
+  const failure = receipt.failure;
+  if (failure?.recovery !== 'items-deferred' || failure.reset?.verified !== true
+      || failure.reset.reason_code !== 'reset-verified' || !Array.isArray(failure.reset.overlap) || failure.reset.overlap.length
+      || failure.publication_error || /^claude-model-|protected-metadata|baseline-moved/.test(failure.reason_code || '')) fail('review-fix-recovery-reset-unverified');
+  const files = artifactAttemptFiles(request), stateFile = `${files.resultFile}.reset-state.json`;
+  require('./forge-attempt-recovery').validateStateTarget(stateFile, request, contract);
+  if (receipt.reset_state_file !== stateFile) fail('review-fix-recovery-binding');
+  const state = reset.readState(stateFile);
+  // A historical single-cwd identity cannot authorize additional writer roots.
+  if (contract.code_roots.length !== 1 || request.writableRoots?.length || Object.hasOwn(state, 'repos')
+      || state.execution_contract || state.attempt !== request.dispatchId) fail('review-fix-recovery-roots');
+  const root = contract.code_roots[0];
+  if (roots.key(path.resolve(request.cwd)) !== roots.key(root.path)
+      || roots.key(path.resolve(state.code_dir)) !== roots.key(root.path)
+      || state.vcs !== root.vcs || root.vcs !== 'git') fail('review-fix-recovery-roots');
+  const fix = require('./forge-review-fix'), loc = locations(request);
+  const brief = fix.buildBrief({ boundary: loc.reviewFix.boundary, unitLabel: loc.reviewFix.unitLabel,
+    items: fix.normalizeItems(request.reviewFix.items), claimPaths: request.reviewFix.claimPaths, route: request.route });
+  if (brief.identity !== receipt.review_fix_identity
+      || roots.digest(routeIdentity(request.route, request.unitType)) !== roots.digest(receipt.route_identity)) fail('review-fix-recovery-binding');
+  const normalize = rows => {
+    if (!Array.isArray(rows) || rows.some(row => !row || typeof row.path !== 'string'
+        || !(row.hash === null || /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(row.hash)))) fail('review-fix-recovery-snapshot-invalid');
+    if (new Set(rows.map(row => row.path)).size !== rows.length) fail('review-fix-recovery-snapshot-invalid');
+    return rows.map(row => ({ path: row.path, hash: row.hash })).sort((a, b) => a.path.localeCompare(b.path));
+  };
+  const observed = reset.captureAttemptSnapshot(root.path);
+  if (observed.start_sha !== state.start_sha
+      || roots.digest(normalize(observed.pre_dirty)) !== roots.digest(normalize(state.pre_dirty))) fail('review-fix-recovery-baseline-changed');
+  return { ok: true, roots: [{ root_id: root.id, reconciled: true }], pending_roots: [] };
+}
 function assertMilestoneDeliveryReplay(request, record) {
   if (!record.milestone_delivery) return;
   const saved = record.milestone_delivery, api = require('./forge-task-execution');
@@ -328,7 +468,10 @@ function inspectArtifacts(value, allowed, required, maxPayloadBytes = Infinity, 
       || typeof artifact.path !== 'string' || typeof artifact.content !== 'string' || !artifact.content.trim()
       || Object.keys(artifact).some(k => !['path', 'content'].includes(k))) return bad('schema-invalid');
     if (!allowed.includes(artifact.path)) return bad('artifact-path-invalid');
-    if (rules[artifact.path] && !inspectDeliveryContent(artifact.content, rules[artifact.path])) return bad('delivery-artifact-invalid');
+    if (rules[artifact.path] && !inspectDeliveryContent(artifact.content, rules[artifact.path])) {
+      return bad(options.detailedDeliveryDiagnostic
+        ? deliveryFailureReason(artifact.content, rules[artifact.path]) : 'delivery-artifact-invalid');
+    }
     if (seen.has(artifact.path)) return bad('artifact-duplicate');
     const contentLimit = rules[artifact.path]?.kind === 'delivery' ? MAX_DELIVERY_BYTES : MAX_ARTIFACT_BYTES;
     if (Buffer.byteLength(artifact.content) > contentLimit) return bad('artifact-limit');
@@ -406,7 +549,7 @@ function markChecked(content, id) {
   const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return content.replace(new RegExp(`^(\\s*[-*] \\[) ([\\]]\\s+(?:\\*\\*)?${escaped}(?=[:\\s*]))`, 'm'), '$1x$2');
 }
-function materialize(request, record, publicationGuard, publicationLock) {
+function materialize(request, record, publicationGuard, publicationLock, options = {}) {
   if (record.kind === 'memory-extraction') fail('memory-publication-required', 'Use publishReadyRecord for memory extraction receipts.');
   if (record.result.status !== 'done') return record.result;
   const root = fs.realpathSync(request.contextRoot || request.cwd);
@@ -420,13 +563,15 @@ function materialize(request, record, publicationGuard, publicationLock) {
     else {
       const protectedOwner = (record.execution || record.milestone_delivery).protected_owner;
       if (!protectedOwner) fail('execution-owner-baseline-required');
-      const expected = { ...protectedOwner };
+      let expected = { ...protectedOwner };
       const current = require('./forge-task-execution').protectedSnapshot(root);
       for (const item of record.artifacts) if (current[item.path] === hash(item.content)) {
         expected[item.path] = current[item.path];
         let dir = path.posix.dirname(item.path);
         while (dir !== '.') { if (current[dir + '/'] === 'directory') expected[dir + '/'] = 'directory'; dir = path.posix.dirname(dir); }
       }
+      if(options.leaseRenewal!==undefined)expected=require('./forge-native-recovery-delivery')
+        .reconcileLeaseRenewalSurface(options.leaseRenewal,record,expected);
       require('./forge-task-execution').assertProtected(root, expected);
     }
   }
@@ -492,6 +637,10 @@ function unitLabel(request, loc) {
 
 function artifactFingerprint(request) {
   const copy = { ...request };
+  if (request.linked_begin_key) {
+    copy.linked_entry_identity = require('./forge-attempt-recovery').requestIdentity(require('./forge-attempt-recovery').canonicalRequest(request)).linked_entry;
+    delete copy.linkedEntryBinding;
+  }
   for (const key of ['rawResult', 'invocationTelemetry', 'providerCalled', 'resultFile',
     'signal', 'publicationSafe', 'publicationBoundary', 'waitForPublicationBoundary', 'ownerBroker']) delete copy[key];
   return hash(JSON.stringify(copy));
@@ -503,9 +652,13 @@ function artifactAttemptFiles(request) {
   const resultFile = xllm.validateResultFileTarget(request.resultFile, cwd);
   xllm.validateResultFileTarget(resultFile, root);
   const receiptFile = `${resultFile}.receipt.json`;
+  const returnedFile = `${resultFile}.returned.json`;
+  xllm.validateResultFileTarget(returnedFile, cwd);
+  xllm.validateResultFileTarget(returnedFile, root);
   xllm.validateResultFileTarget(receiptFile, cwd);
   xllm.validateResultFileTarget(receiptFile, root);
   for (const code of request.execution_contract?.code_roots || []) {
+    xllm.validateResultFileTarget(returnedFile, code.path);
     xllm.validateResultFileTarget(resultFile, code.path);
     xllm.validateResultFileTarget(receiptFile, code.path);
   }
@@ -696,37 +849,112 @@ async function reconcileArtifactAttempt(request, options) {
       json(files.resultFile, result);
     } });
 }
-function memorySourceContext(request, record) {
+function memorySourceLabel(request, sourceUnit) {
+  return `${request.sourceUnitType || 'unit'}/${sourceUnit}`;
+}
+function memorySourceFingerprint(request, sourceOnly = false) {
   const sourcePayload = {
     summaryContent: request.summaryContent || '', sourceResult: request.sourceResult || '',
-    keyDecisions: request.keyDecisions || [], existingMemory: request.existingMemory || { facts: [], stats: [] },
+    keyDecisions: request.keyDecisions || [],
+    ...(sourceOnly ? {} : { existingMemory: request.existingMemory || { facts: [], stats: [] } }),
   };
+  return request.sourceFingerprint || hash(JSON.stringify(sourcePayload));
+}
+// Replays use the digest-bound snapshot persisted in the v2 receipt, never a
+// recomputation; legacy receipts have none and keep the historical rules.
+function memoryContractEvidence(record) {
+  const contract = record.memory_contract;
+  if (!contract || typeof contract !== 'object' || Array.isArray(contract) || contract.schema_version !== NEW_MEMORY_SCHEMA_VERSION
+      || (contract.source_binding !== undefined && contract.source_binding !== 'source-only-v1')
+      || !contract.evidence || typeof contract.evidence !== 'object' || Array.isArray(contract.evidence)) {
+    fail('memory-contract-invalid', 'The memory receipt carries an unsupported evidence contract.');
+  }
+  return contract.evidence;
+}
+function memorySourceContext(request, record) {
   return {
     unitId: record.source_unit,
     ...(request.milestoneId ? { milestoneId: request.milestoneId } : {}),
     extractionId: record.extraction_id,
     extractedAt: record.extracted_at,
     source: {
-      sourceUnit: `${request.sourceUnitType || 'unit'}/${record.source_unit}`,
-      sourceFingerprint: request.sourceFingerprint || hash(JSON.stringify(sourcePayload)),
+      sourceUnit: memorySourceLabel(request, record.source_unit),
+      sourceFingerprint: memorySourceFingerprint(request, record.memory_contract?.source_binding === 'source-only-v1'),
       dispatchId: record.dispatch_id,
       model: record.model,
       effort: record.effort,
     },
+    ...(record.memory_contract !== undefined ? { evidence: memoryContractEvidence(record) } : {}),
   };
 }
+// Owner evidence registry for a new extraction, derived only from the source
+// identity and structured owner evidence (request.memoryEvidence), never from
+// narrative SUMMARY/result text or worker output. The source observation
+// excludes existingMemory, attempt, extraction ID and time, so re-extracting
+// the same source cannot manufacture a new observation. Confirm/utility exist
+// only when the owner supplies verified independence/outcome records.
+function memoryEvidenceContract(request, sourceUnit, historicalContext = false) {
+  const extraction = require('./forge-memory-extraction');
+  const supplied = request.memoryEvidence === undefined ? { records: [], outcomes: [] } : request.memoryEvidence;
+  if (!supplied || typeof supplied !== 'object' || Array.isArray(supplied)
+      || Object.keys(supplied).some(key => !['records', 'outcomes'].includes(key))
+      || !Array.isArray(supplied.records || []) || !Array.isArray(supplied.outcomes || [])) {
+    fail('memory-evidence-invalid', 'memoryEvidence must be { records, outcomes } owner data.');
+  }
+  const sourceLabel = memorySourceLabel(request, sourceUnit);
+  const sourceFingerprint = memorySourceFingerprint(request, !historicalContext);
+  const boundFingerprint = extraction.evidenceSourceFingerprint(sourceFingerprint);
+  const observation = hash(JSON.stringify({ unit: sourceLabel, milestone: request.milestoneId || null,
+    summary: request.summaryContent || '', result: request.sourceResult || '', key_decisions: request.keyDecisions || [] })).slice(0, 40);
+  const bind = record => (record && typeof record === 'object' && !Array.isArray(record)
+    ? { source_unit: sourceLabel, source_fingerprint: boundFingerprint, ...record } : record);
+  const records = [
+    { evidence_ref: 'source_exposure', observation_id: `source-${observation}-exposure`, observed_kind: 'exposure' },
+    { evidence_ref: 'source_reobserve', observation_id: `source-${observation}-reobserve`, observed_kind: 'reobserve' },
+    ...(supplied.records || []),
+  ].map(bind);
+  try {
+    return extraction.normalizeEvidenceRegistry({ records, outcomes: supplied.outcomes || [] },
+      { sourceUnit: sourceLabel, sourceFingerprint });
+  } catch (error) {
+    // Field locations and a reason only: no supplied value reaches the error.
+    fail('memory-evidence-invalid', `Owner memory evidence was refused (${error.reason || 'invalid'}).`);
+  }
+}
+function memoryRequestFingerprint(baseFingerprint, contract) {
+  return hash(JSON.stringify({ request: baseFingerprint,
+    memory_contract: { schema_version: NEW_MEMORY_SCHEMA_VERSION, evidence_digest: contract.digest } }));
+}
+// A receipt written before the v2 contract carries no memory_contract and the
+// historical fingerprint; only that exact pair keeps replaying (v1 rules).
+function legacyMemoryReceipt(existing, legacyFingerprint) {
+  return Boolean(existing) && existing.memory_contract === undefined && existing.fingerprint === legacyFingerprint;
+}
+// Recognize old v2 only by its exact historical request fingerprint. Saved
+// evidence and publication context retain their original semantics on replay.
+function historicalV2MemoryReceipt(existing, request, sourceUnit, baseFingerprint) {
+  if (!existing || existing.memory_contract?.source_binding !== undefined) return false;
+  return existing.fingerprint === memoryRequestFingerprint(baseFingerprint,
+    memoryEvidenceContract(request, sourceUnit, true));
+}
 function memoryPrompt(request, sourceUnit) {
+  const contract = memoryEvidenceContract(request, sourceUnit);
   const input = {
     unit_type: request.sourceUnitType || 'unit', unit_id: sourceUnit,
     milestone_id: request.milestoneId || null, summary_content: request.summaryContent || '',
     result_block: request.sourceResult || '', key_decisions: request.keyDecisions || [],
     existing_memory: request.existingMemory || { facts: [], stats: [] },
+    // References only: observation and binding details stay with the owner.
+    evidence_refs: contract.records.map(record => ({ evidence_ref: record.evidence_ref, observed_kind: record.observed_kind })),
+    outcome_refs: contract.outcomes.map(outcome => ({ outcome_ref: outcome.outcome_ref })),
   };
   const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: request.cwd || process.cwd(),
     phase: 'memory-extract', forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
-  return procedure.content + '\n\nRead-only memory extraction. Return exactly one JSON object matching the supplied schema. '
+  return procedure.content + '\n\nRead-only memory extraction. Return exactly one JSON object matching SCHEMA (schema_version 2). '
     + 'Do not write files, run commands, choose paths, or return owner identity/publication metadata.\n'
-    + `CONTRACT:\n${MEMORY_QUALITY_CONTRACT}\nINPUT:\n${JSON.stringify(input)}\nSCHEMA:\n${JSON.stringify(memorySchema)}`;
+    + `CONTRACT:\n${MEMORY_QUALITY_CONTRACT}\nINPUT:\n${JSON.stringify(input)}\nSCHEMA:\n${JSON.stringify(memorySchemaV2)}\n`
+    + 'LEGACY_SCHEMA (schema_version 1, decoded only for compatibility; it cannot cite evidence, confirm independently or satisfy promotion):\n'
+    + JSON.stringify(memorySchema);
 }
 function memoryBoundarySafe(request) {
   const boundary = request.publicationBoundary;
@@ -802,6 +1030,9 @@ function appendMemoryPublicationEvent(request, record, result) {
   }
   const route = request.route || {};
   const telemetry = memoryTelemetry(record);
+  // Version and a closed reason code only; publication detail stays redacted.
+  const reasonCode = result.publication?.status === 'conflict' && typeof result.publication.reason_code === 'string'
+    && /^[a-z0-9-]{1,64}$/.test(result.publication.reason_code) ? result.publication.reason_code : null;
   const event = {
     ts: request.publicationBoundary.checkedAt,
     event: 'memory-publication', event_id: eventId,
@@ -812,6 +1043,9 @@ function appendMemoryPublicationEvent(request, record, result) {
     worker_mode: telemetryScalar(route.worker_mode), status: telemetryScalar(result.status),
     publication_status: publicationStatus,
     publication_reason: publicationReason,
+    publication_reason_code: reasonCode,
+    schema_version: [1, 2].includes(record.extraction?.schema_version) ? record.extraction.schema_version : null,
+    memory_contract_version: record.memory_contract?.schema_version === NEW_MEMORY_SCHEMA_VERSION ? NEW_MEMORY_SCHEMA_VERSION : null,
     ...telemetry,
   };
   fs.mkdirSync(path.dirname(eventsFile), { recursive: true });
@@ -996,10 +1230,15 @@ function nativeReceiptFiles(request) {
   xllm.validateResultFileTarget(receiptFile, root);
   return { cwd, root, resultFile, receiptFile };
 }
-function nativeMemoryFingerprint(request) {
+function legacyNativeMemoryFingerprint(request) {
   return hash(JSON.stringify({ ...request, unitType: 'memory-extract', rawResult: undefined, invocationTelemetry: undefined,
     resultFile: undefined, publicationSafe: undefined, publicationBoundary: undefined,
     waitForPublicationBoundary: undefined }));
+}
+function nativeMemoryFingerprint(request) {
+  const r = request || {};
+  const loc = locations({ ...r, unitType: 'memory-extract' });
+  return memoryRequestFingerprint(legacyNativeMemoryFingerprint(r), memoryEvidenceContract(r, loc.sourceUnit));
 }
 function nativeMemoryRouteIdentity(request) {
   const r = request || {}, route = r.route || {};
@@ -1094,7 +1333,10 @@ function acceptNativeMemoryFailure(request, loc) {
   let failure = proposed;
   if (fs.existsSync(files.receiptFile)) {
     const existing = JSON.parse(fs.readFileSync(files.receiptFile, 'utf8'));
-    if (existing.fingerprint !== fingerprint) fail('dispatch-identity-conflict');
+    if (existing.fingerprint !== fingerprint && !legacyMemoryReceipt(existing, legacyNativeMemoryFingerprint(r))
+        && !historicalV2MemoryReceipt(existing, r, loc.sourceUnit, legacyNativeMemoryFingerprint(r))) {
+      fail('dispatch-identity-conflict');
+    }
     if (existing.phase !== 'failed' || !existing.failure) fail('dispatch-identity-conflict');
     failure = existing.failure;
   } else {
@@ -1112,10 +1354,16 @@ async function acceptNativeMemoryResult(request) {
   }
   if (r.nativeFailure !== undefined) return acceptNativeMemoryFailure(r, loc);
   const files = nativeReceiptFiles(r);
-  const fingerprint = nativeMemoryFingerprint(r);
+  // Refused owner evidence fails here, before any receipt exists.
+  let contract = memoryEvidenceContract(r, loc.sourceUnit);
+  let fingerprint = memoryRequestFingerprint(legacyNativeMemoryFingerprint(r), contract);
+  let sourceBinding = 'source-only-v1';
   const existing = fs.existsSync(files.receiptFile) ? JSON.parse(fs.readFileSync(files.receiptFile, 'utf8')) : null;
   if (existing) {
-    if (existing.fingerprint !== fingerprint) fail('dispatch-identity-conflict');
+    if (existing.fingerprint !== fingerprint && !legacyMemoryReceipt(existing, legacyNativeMemoryFingerprint(r))
+        && !historicalV2MemoryReceipt(existing, r, loc.sourceUnit, legacyNativeMemoryFingerprint(r))) {
+      fail('dispatch-identity-conflict');
+    }
     if (existing.phase === 'ready') {
       const replayIdentity = nativeMemoryIdentity(r, existing.telemetry);
       if (existing.model !== replayIdentity.model || existing.effort !== replayIdentity.effort) {
@@ -1127,6 +1375,11 @@ async function acceptNativeMemoryResult(request) {
     }
     if (existing.phase === 'failed') fail(existing.failure?.reason_code || 'native-memory-attempt-failed');
     if (existing.phase !== 'started' || r.rawResult === undefined) fail('native-memory-attempt-interrupted');
+    if (existing.fingerprint !== fingerprint) {
+      contract = memoryEvidenceContract(r, loc.sourceUnit, true);
+      fingerprint = existing.fingerprint;
+      sourceBinding = undefined;
+    }
   } else {
     fs.writeFileSync(files.receiptFile, JSON.stringify({ phase: 'started', fingerprint,
       dispatch_id: r.dispatchId }), { flag: 'wx', mode: 0o600 });
@@ -1134,12 +1387,13 @@ async function acceptNativeMemoryResult(request) {
   try {
     const identity = nativeMemoryIdentity(r);
     const extraction = require('./forge-memory-extraction').validateExtractionResult(r.rawResult,
-      { sourceUnit: loc.sourceUnit });
+      { sourceUnit: loc.sourceUnit, schemaVersions: MEMORY_RESPONSE_VERSIONS, evidence: contract });
     const record = { phase: 'ready', kind: 'memory-extraction', fingerprint,
       dispatch_id: r.dispatchId, extraction_id: r.extractionId || r.dispatchId,
       extracted_at: r.extractedAt || new Date().toISOString(), source_unit: loc.sourceUnit,
       model: identity.model, effort: identity.effort,
-      telemetry: r.invocationTelemetry || null, extraction, artifacts: [] };
+      telemetry: r.invocationTelemetry || null, extraction, artifacts: [],
+      memory_contract: { schema_version: NEW_MEMORY_SCHEMA_VERSION, ...(sourceBinding ? { source_binding: sourceBinding } : {}), evidence: contract } };
     json(files.receiptFile, record);
     const delivered = await publishReadyRecord(r, record);
     json(files.resultFile, delivered);
@@ -1183,6 +1437,10 @@ async function runNativeMemory(request, invoke) {
     }
   }
   const nativeOptions = {
+    lifecycle: r.nativeLifecycle,
+    terminalResult: value => { const candidate = candidateFromNativeResult(value);
+      return !!candidate && MEMORY_RESPONSE_VERSIONS.includes(candidate.schema_version); },
+    telemetryIdentity: r,
     hostRuntime: r.hostRuntime || r.route?.host_runtime, resolvedDispatch: r.route,
     activeCapabilities: r.activeCapabilities,
     taskName: r.taskName || `memory_${loc.sourceUnit}_${r.dispatchId}`,
@@ -1245,6 +1503,10 @@ function physicalFileIdentity(file) {
 }
 function nativeExecutionOptions(r, runtime, prompt) {
   return { hostRuntime: r.route.host_runtime, resolvedDispatch: r.route,
+    invalidTerminalReason: 'native-execution-result-invalid',
+    lifecycle: runtime.nativeLifecycle,
+    terminalResult: raw => validNativeExecutionResult(raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? raw : xllm.extractLastJsonBlock(raw)),
     activeCapabilities: runtime.activeCapabilities, agentType: 'forge-executor',
     taskName: r.nativeInvocation?.args?.task_name || r.taskName || r.dispatchId,
     forkTurns: 'none', effortBinding: r.effortBinding, prompt,
@@ -1303,7 +1565,7 @@ async function runNativeExecutionTransport(r, runtime, execution, options, proce
     if (expected !== hash(JSON.stringify({ request: r, capabilities: runtime.activeCapabilities, verification: runtime.verification,
       baseline: record.recovery_baseline, seal: record.verification_seal, inputs: record.execution.inputs }))) fail('native-execution-authority-changed');
     const binding = validateNativeExecutionBinding(r, runtime);
-    validateRecoveryRequest(r, { nativeInvocation: binding });
+    validateRecoveryRequest(r, { verification: runtime.verification, nativeInvocation: binding });
     if (hash(fs.readFileSync(initialRecord.recovery_baseline.state_file)) !== initialState) fail('recovery-baseline-binding');
     for (const [input, expectedHash] of Object.entries(initialRecord.execution.inputs)) {
       if (hash(fs.readFileSync(input)) !== expectedHash) fail('execution-input-changed');
@@ -1320,6 +1582,7 @@ async function runNativeExecutionTransport(r, runtime, execution, options, proce
   };
   options.assertNativePublication = () => assertInvocation('publication');
   const nativeOptions = { ...nativeExecutionOptions(r, runtime, transportPrompt), assertInvocation,
+    lifecycle: { ...runtime.nativeLifecycle, captureLateResult: options.captureLateNativeResult },
     beforeInvoke: async () => { await options.announce('solicitado', { model_sent: r.route.model_resolved || r.route.model, provider_called: false }); },
     budgets: execution.budgets, onPackagedContext: packaged => options.onPackagedContext({ ...packaged,
       bytes: Buffer.byteLength(prompt), sha256: hash(prompt), transport_sha256: hash(transportPrompt),
@@ -1380,7 +1643,7 @@ async function inspectSavedNativeExecution(r, runtime) {
       xllm.assertUntrustedOutputBarrier(candidate);
       const baseline = existing.recovery_baseline;
       if (!baseline || baseline.schema_version !== 1) fail('recovery-baseline-required');
-      const checked = validateRecoveryRequest(r, { nativeInvocation: validateNativeExecutionBinding(r, runtime) });
+      const checked = validateRecoveryRequest(r, { verification: runtime.verification, nativeInvocation: validateNativeExecutionBinding(r, runtime) });
       const contract = roots.validateContract(baseline.execution_contract, { owner: root, revalidate: true });
       if (roots.digest(contract) !== roots.digest(checked.contract)) fail('recovery-baseline-contract-mismatch');
       require('./forge-attempt-recovery').validateStateTarget(baseline.state_file, r, contract);
@@ -1450,6 +1713,9 @@ async function runUnitSidecarCore(request, runtime, identity) {
   const nativePromptIdentity = nativeExecution && r.nativePromptFile && fs.existsSync(r.nativePromptFile) ? physicalFileIdentity(r.nativePromptFile) : null;
   if (route.dispatch_allowed !== true || (!nativeExecution && (route.worker_mode !== 'sidecar' || !route.sidecar_declared))
     || !guard.dispatch_allowed) fail(guard.reason_code || 'route-refused', guard.hint);
+  if (transport.mode === 'execute' && !fs.existsSync(`${r.resultFile}.receipt.json`)) {
+    preflightExecutionVerification(r, { verification: runtime.verification });
+  }
   const authoritativeModel = route.model_resolved || route.model;
   if (!authoritativeModel
       || (route.model_resolved && route.model && route.model_resolved !== route.model)
@@ -1500,7 +1766,11 @@ async function runUnitSidecarCore(request, runtime, identity) {
     try { if (error?.session?.id) return claudeSessions.sessionDigest(error.session.id); } catch { /* invalid ref: no digest */ }
     return resumeSessionSha;
   };
-  const fingerprint = artifactFingerprint(r);
+  // Memory requests bind the v2 contract and its owner evidence digest; the
+  // historical fingerprint is kept only to recognize pre-v2 receipts.
+  const memoryContract = transport.mode === 'memory' ? memoryEvidenceContract(r, loc.sourceUnit) : null;
+  const legacyFingerprint = artifactFingerprint(r);
+  const fingerprint = memoryContract ? memoryRequestFingerprint(legacyFingerprint, memoryContract) : legacyFingerprint;
   const receiptFile = `${resultFile}.receipt.json`;
   xllm.validateResultFileTarget(receiptFile, cwd);
   xllm.validateResultFileTarget(receiptFile, root);
@@ -1647,6 +1917,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
       duration_ms: record.started_at ? Date.now() - Date.parse(record.started_at) : null,
       provider_called: typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown' };
     const failure = { status: 'adapter-failed', dispatch_id: dispatchId, reason_code: code,
+      ...(record.returned_response ? { returned_response: record.returned_response } : {}),
+      ...(record.plan_task_diagnostic ? { plan_task_diagnostic: record.plan_task_diagnostic } : {}),
       provider_called: typeof error.provider_called === 'boolean' ? error.provider_called : record.provider_called === true ? true : 'unknown',
       error_class: xllm.classifyErrorClass(error.message), diagnostic: detail,
       final_evidence: record.final_evidence || null,
@@ -1683,6 +1955,25 @@ async function runUnitSidecarCore(request, runtime, identity) {
       loc.reviewFix ? { boundary: loc.reviewFix.boundary, items_total: reviewFixItemsTotal(r) } : null); }
     catch { /* Unproved owner drift cannot be adopted just to log a failure. */ }
   }
+  // Local-only evidence, not a delivery or a replay authorization. Persist before
+  // unit validation can reject a transport-normalized response and overwrite its
+  // result channel. Exclusive creation prevents a later attempt replacing it.
+  async function preserveReturnedResponse(result) {
+    const file = `${resultFile}.returned.json`;
+    const envelope = { version: 1, dispatch_id: dispatchId, request_fingerprint: fingerprint,
+      result, trust: 'transport-normalized; unit-validation-pending' };
+    const bytes = Buffer.from(JSON.stringify(envelope, null, 2));
+    fs.writeFileSync(file, bytes, { flag: 'wx', mode: 0o600 });
+    // A queued owner-event append can still hold an older receipt snapshot.
+    // Drain it before reading and extending the receipt, without delaying the
+    // immutable response capture itself.
+    await livenessQueue;
+    const record = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+    record.returned_response = { version: 1, sha256: hash(bytes), bytes: bytes.length,
+      channel: 'resultFile.returned.json', unit_validation: 'pending' };
+    if (result.transport_telemetry) record.telemetry = result.transport_telemetry;
+    json(receiptFile, record);
+  }
   const existing = fs.existsSync(receiptFile) ? JSON.parse(fs.readFileSync(receiptFile, 'utf8')) : null;
   const verificationIdentity = { dispatch_id: dispatchId, fingerprint, recovery_identity_sha256: recoveryIdentity(r) };
   const verificationApi = require('./forge-verify');
@@ -1704,7 +1995,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
     if (!nativeExecution) return;
     runtime.assertRecoveryAuthority?.();
     if (nativeAuthority() !== nativeAuthorityHash) fail('native-execution-authority-changed');
-    validateRecoveryRequest(r, { nativeInvocation: validateNativeExecutionBinding(r, runtime) });
+    validateRecoveryRequest(r, { verification: runtime.verification, nativeInvocation: validateNativeExecutionBinding(r, runtime) });
     verifySeal(record);
     const baseline = record.recovery_baseline;
     if (!baseline || baseline.fingerprint !== record.fingerprint || baseline.dispatch_id !== r.dispatchId) fail('recovery-baseline-binding');
@@ -1747,7 +2038,10 @@ async function runUnitSidecarCore(request, runtime, identity) {
     return ready;
   }
   if (existing) {
-    if (existing.fingerprint !== fingerprint) fail('dispatch-identity-conflict');
+    if (existing.fingerprint !== fingerprint && !(memoryContract && (legacyMemoryReceipt(existing, legacyFingerprint)
+        || historicalV2MemoryReceipt(existing, r, loc.sourceUnit, legacyFingerprint)))) {
+      fail('dispatch-identity-conflict');
+    }
     if (existing.phase === 'ready' || existing.phase === 'executed') {
       if (nativeExecution) {
         const { native: ignoredNative, dispatch_id: ignoredDispatch, workflow_id: ignoredWorkflow,
@@ -1762,7 +2056,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       await runtime.announce?.('reaproveitado', { ...identity, provider_called: false });
       if (nativeExecution && hash(fs.readFileSync(receiptFile)) !== replayHash) fail('native-replay-receipt-changed');
       if (replayBaselineHash && hash(fs.readFileSync(existing.recovery_baseline.state_file)) !== replayBaselineHash) fail('recovery-baseline-bytes-changed');
-      if (nativeExecution) validateRecoveryRequest(r, { nativeInvocation: validateNativeExecutionBinding(r, runtime) });
+      if (nativeExecution) validateRecoveryRequest(r, { verification: runtime.verification, nativeInvocation: validateNativeExecutionBinding(r, runtime) });
       verifySeal(existing);
       assertNativePublication(existing);
       try {
@@ -1781,7 +2075,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       const deferredEvents = [];
       const ready = await completeExecution(executed, deferredEvents);
       if (require('./forge-attempt-recovery').inspectReceipt(receiptFile, { request: r, processProbe: runtime.processProbe }).process_stopped !== true) fail('writer-observation-not-stopped');
-      validateRecoveryRequest(r, { nativeInvocation: validateNativeExecutionBinding(r, runtime) });
+      validateRecoveryRequest(r, { verification: runtime.verification, nativeInvocation: validateNativeExecutionBinding(r, runtime) });
       verifySeal(ready);
       const savedFile = runtime.savedNativeResult.resultFile;
       const savedIdentity = physicalFileIdentity(savedFile);
@@ -1865,7 +2159,17 @@ async function runUnitSidecarCore(request, runtime, identity) {
   if (execution) {
     xllm.validateResultFileTarget(executionStateFile, root);
   }
-  const verificationSeal = transport.mode === 'execute' && r.execution_contract && (nativeExecution || r.verification || runtime.verification) ? verificationApi.normalizeExecutionVerification(r.execution_contract, fs.readFileSync(r.planFile, 'utf8'), r.verification, runtime.verification, verificationIdentity) : null;
+  const claudeWriter = route.resolved_worker_engine === 'claude' && ['execute', 'fix'].includes(transport.mode);
+  const permissionRequested = r.claudePermissions !== undefined;
+  if (permissionRequested && (r.claudePermissions !== 'verification' || !claudeWriter || !r.execution_contract)) fail('claude-permission-policy-invalid');
+  const verificationSeal = r.execution_contract && transport.mode === 'execute'
+    ? preflightExecutionVerification(r, { verification: runtime.verification, identity: verificationIdentity })
+    : r.execution_contract && transport.mode === 'fix' && permissionRequested
+      ? verificationApi.normalizeExecutionVerification(r.execution_contract, '', r.verification, runtime.verification, verificationIdentity) : null;
+  // Resolve permissions before creating a receipt or entering a transport.
+  // Legacy requests without a root contract gain no shell permission.
+  const permissionPolicy = permissionRequested && verificationSeal
+    ? require('./forge-claude-permissions').createPolicy({ seal: verificationSeal, contract: r.execution_contract, identity: verificationIdentity, cwd }) : null;
   const startedAt = new Date().toISOString();
   // Exclusive creation arbitrates concurrent invocations of the same attempt.
   fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'started', fingerprint, dispatch_id: dispatchId, before, started_at: startedAt,
@@ -1900,6 +2204,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
     return runtime.announce?.(stage, fields);
   };
   const options = { enterTransport: () => { enterTransport(); transportEntered = true; }, cwd, contextRoot: root, engine: route.resolved_worker_engine,
+    permissionPolicy, permissionIdentity: permissionPolicy ? verificationIdentity : undefined,
     unitType: r.unitType,
     calibrationOptions: runtime.calibrationOptions,
     onProgress: snapshot => {
@@ -1959,8 +2264,9 @@ async function runUnitSidecarCore(request, runtime, identity) {
     let transportTelemetry = null;
     if (transport.mode === 'memory') {
       const prompt = memoryPrompt(r, loc.sourceUnit);
+      const memoryValidation = { sourceUnit: loc.sourceUnit, schemaVersions: MEMORY_RESPONSE_VERSIONS, evidence: memoryContract };
       const validateMemory = value => {
-        try { require('./forge-memory-extraction').validateExtractionResult(value, { sourceUnit: loc.sourceUnit }); return true; }
+        try { require('./forge-memory-extraction').validateExtractionResult(value, memoryValidation); return true; }
         catch { return false; }
       };
       announce('solicitado', { ...identity, provider_called: false });
@@ -1969,7 +2275,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       if (options.engine === 'claude') {
         enterTransport();
         transportEntered = true;
-        const output = await xllm.invokeClaudeTransport({ ...options, prompt, resultProfile:'memory', resultSchema:memorySchema, calibrationPhase:'memory',
+        const output = await xllm.invokeClaudeTransport({ ...options, prompt, resultProfile:'memory', resultSchema:memoryTransportSchema, calibrationPhase:'memory',
           readOnly: true, validateCandidate: validateMemory, onHeartbeat: heartbeat,
           heartbeatIntervalMs: 15000, terminateChild: xllm.terminateOwnedProcessTree });
         transportReturned = true;
@@ -1979,13 +2285,13 @@ async function runUnitSidecarCore(request, runtime, identity) {
       } else {
         enterTransport();
         transportEntered = true;
-        const output = await xllm.invokeCodexAppServer({ ...options, prompt, schema: memorySchema,
+        const output = await xllm.invokeCodexAppServer({ ...options, prompt, schema: memoryTransportSchema,
           sandbox: 'read-only', onHeartbeat: heartbeat });
         transportReturned = true;
         await livenessQueue;
         result = xllm.extractLastJsonBlock(output.finalText || output.agentTexts);
       }
-      result = require('./forge-memory-extraction').validateExtractionResult(result, { sourceUnit: loc.sourceUnit });
+      result = require('./forge-memory-extraction').validateExtractionResult(result, memoryValidation);
       xllm.assertUntrustedOutputBarrier(result);
       artifacts = [];
     } else if (transport.mode === 'execute') {
@@ -2009,7 +2315,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
           .filter(code => fs.realpathSync(code.path) === root).map(code => code.id));
         return changes.filter(entry => !(entry.path === key && ownerIds.has(entry.root_id)));
       };
-      result = nativeExecution ? await runNativeExecutionTransport(r, runtime, execution, options, procedure) : await xllm.runExecute({ ...options, reconcileProtectedChanges, scope: r.scope, planFile: r.planFile, securityFile: r.securityFile,
+      result = nativeExecution ? await runNativeExecutionTransport(r, runtime, execution,
+        { ...options, captureLateNativeResult: preserveReturnedResponse }, procedure) : await xllm.runExecute({ ...options, reconcileProtectedChanges, scope: r.scope, planFile: r.planFile, securityFile: r.securityFile,
         contextFile: r.contextFile, writableRoots: execution ? execution.writableRoots
           : r.execution_contract ? r.execution_contract.code_roots.filter(code =>
             require('./forge-code-roots').key(fs.realpathSync.native(code.path)) !==
@@ -2105,12 +2412,20 @@ async function runUnitSidecarCore(request, runtime, identity) {
         transportEntered = true;
         result = await xllm.runPlan({ ...options, planContextFile });
         transportReturned = true;
+        await preserveReturnedResponse(result);
         await livenessQueue;
       } finally { fs.rmSync(promptDir, { recursive: true, force: true }); }
       const ids = result.task_plans.map(p => p.id);
       if (new Set(ids).size !== ids.length) fail('plan-task-ids-invalid');
       const listed = require('./forge-status').parsePlanTasks(result.slice_plan.content).map(t => t.id);
-      if (JSON.stringify([...listed].sort()) !== JSON.stringify([...ids].sort())) fail('plan-task-list-mismatch');
+      if (JSON.stringify([...listed].sort()) !== JSON.stringify([...ids].sort())) {
+        const safe = values => values.filter(v => typeof v === 'string' && v.length <= 64 && /^T\d+(?:\.\d+)?$/.test(v)).slice(0, 100);
+        const record = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+        record.plan_task_diagnostic = { listed_count: listed.length, returned_count: ids.length,
+          listed_ids: safe(listed), returned_ids: safe(ids), truncated: listed.length > 100 || ids.length > 100 };
+        json(receiptFile, record);
+        fail('plan-task-list-mismatch');
+      }
       artifacts = [{ path: loc.required[0], content: result.slice_plan.content },
         ...result.task_plans.map(p => {
           if (!/^T\d+(?:\.\d+)?$/.test(p.id)) fail('plan-task-ids-invalid');
@@ -2139,7 +2454,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         const output = await xllm.invokeClaudeTransport({ ...options, prompt, resultProfile:loc.preparation?'preparation':'artifacts', resultSchema:schema, calibrationPhase:sessionPhase === 'plan' ? 'plan' : r.phase || 'artifacts',
           ...(options.claudeSession ? { session: options.claudeSession } : {}),
           readOnly: true, validateCandidate: value => inspectArtifacts(value, loc.allowed, loc.required, payloadLimit, loc.rules,
-            { forbidArtifactsOnNonDone: loc.preparation === true }), onHeartbeat: heartbeat,
+            { forbidArtifactsOnNonDone: loc.preparation === true, detailedDeliveryDiagnostic: true }), onHeartbeat: heartbeat,
           heartbeatIntervalMs: 15000, terminateChild: xllm.terminateOwnedProcessTree });
         transportReturned = true;
         await livenessQueue;
@@ -2154,7 +2469,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         result = xllm.extractLastJsonBlock(output.finalText || output.agentTexts);
       }
       const verdict = inspectArtifacts(result, loc.allowed, loc.required, payloadLimit, loc.rules,
-        { forbidArtifactsOnNonDone: loc.preparation === true });
+        { forbidArtifactsOnNonDone: loc.preparation === true, detailedDeliveryDiagnostic: true });
       if (!verdict.ok) {
         const error = new Error('Invalid artifact result.');
         error.code = 'invalid-artifact-result';
@@ -2190,6 +2505,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       transportEntered = true;
       result = await xllm.runFix({ ...options, brief: fix.brief, writableRoots: r.writableRoots });
       transportReturned = true;
+      await preserveReturnedResponse(result);
       await livenessQueue;
       // A partial/blocked turn never publishes a success line or a commit.
       if (result.status !== 'done') fail(`review-fix-worker-${result.status}`, 'The review-fix worker did not finish; items are deferred.');
@@ -2224,6 +2540,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       ? { phase: 'ready', kind: 'memory-extraction', fingerprint, dispatch_id: dispatchId,
         extraction_id: r.extractionId || dispatchId, extracted_at: startedAt, source_unit: loc.sourceUnit,
         model: route.model_resolved || route.model, effort: route.effort, extraction: result, artifacts: [],
+        memory_contract: { schema_version: NEW_MEMORY_SCHEMA_VERSION, source_binding: 'source-only-v1', evidence: memoryContract },
         telemetry: { model_requested: route.model_requested || route.model || null,
           model_resolved: route.model_resolved || route.model || null, model_argument: model,
           ...observedModel,
@@ -2336,7 +2653,8 @@ function reviewFixItemsTotal(request) {
   return request.reviewFix && Array.isArray(request.reviewFix.items) ? request.reviewFix.items.length : 0;
 }
 async function runUnitSidecar(request, runtime = {}) {
-  const r = request || {}, route = r.route || {};
+  const r = request?.linked_begin_key ? require('./forge-attempt-recovery').bindLinkedRequest(request, runtime.linkedEntryOptions) : request || {};
+  const route = r.route || {};
   const identity = { phase: r.preparationIdentity?.phase, unit: r.unitType === 'review-fix' ? reviewFixUnitLabel(r)
     : `${r.unitType || '-'}/${r.taskId || r.sliceId || r.milestoneId || r.sourceUnit || '-'}`,
     engine: route.resolved_worker_engine, transport: route.resolved_worker_engine === 'claude' ? 'claude-cli' : 'app-server',
@@ -2359,6 +2677,7 @@ async function runUnitSidecar(request, runtime = {}) {
   }
 }
 async function recoverUnitSidecar(request, recovery, runtime = {}) {
+  if (request.linked_begin_key) request = require('./forge-attempt-recovery').bindLinkedRequest(request, runtime.linkedEntryOptions);
   // Mandatory obligations fail closed before process/receipt inspection.
   const recoveryProcedure = require('./forge-procedure-context').loadProcedureContext({ cwd: request.cwd, phase: 'recovery',
     forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
@@ -2368,6 +2687,10 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
   const executionRequest = { ...request, ...authority };
   if (Object.keys(authority).some(key => !['execution_contract', 'claim', 'runId', 'gates'].includes(key))) fail('recovery-execution-authority-invalid');
   const canonical = require('./forge-attempt-recovery').canonicalRequest(request);
+  if (recovery.transitions?.some(row => row.type === 'uninvoked-native-reservation')
+      && (canonical.scope !== 'milestone' || canonical.phase !== 'execute' || canonical.unitType !== 'execute-task')) {
+    fail('ordinary-native-delivery-unsupported');
+  }
   if (canonical.scope === 'standalone-task' && canonical.phase !== 'execute') {
     return require('./forge-task-preparation').recoverStandaloneTask(request, recovery, runtime);
   }
@@ -2375,17 +2698,36 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     hostRuntime: canonical.route.host_runtime, milestoneId: canonical.milestoneId,
     unitId: canonical.taskId || canonical.sliceId || canonical.milestoneId,
     planPath: canonical.planFile, roadmapPath: canonical.roadmapFile };
-  const nativeTaskName = `recovery_${request.dispatchId}_${crypto.randomUUID()}`;
+  const ordinaryResume = recovery.transitions?.some(row => row.type === 'uninvoked-native-reservation');
+  const continuationId = ordinaryResume ? recovery.resumeReservation?.sha256 : crypto.randomUUID();
+  if (ordinaryResume && !/^[a-f0-9]{64}$/.test(continuationId || '')) fail('recovery-reservation-required');
+  const nativeTaskName = `recovery_${request.dispatchId}_${continuationId}`;
+  const deliveryHelper = ordinaryResume && canonical.scope === 'milestone' && canonical.phase === 'execute'
+    ? require('./forge-native-recovery-delivery') : null;
+  const finalRequest = route => ({ ...executionRequest, route, recoveryStateFile: recovery.stateFile,
+    dispatchId: `${request.dispatchId}-recovery-${continuationId}`, resultFile: `${request.resultFile}.recovery-${continuationId}.json` });
   const nativeOptions = route => {
     // Binding preflight uses the real task plan; the transport composes the
     // complete execution/security/context prompt after prepare.
     const executionPlan = canonical.scope === 'standalone-task' && canonical.phase === 'execute'
       ? fs.readFileSync(canonical.planFile, 'utf8') : null;
-    const rendered = !executionPlan && !request.prompt && !request.promptFile ? renderPrompt({
+    const reviewPrompt = canonical.unitType === 'review-fix' ? (() => {
+      const fix = require('./forge-review-fix'), loc = locations(request);
+      const brief = fix.buildBrief({ boundary: loc.reviewFix.boundary, unitLabel: loc.reviewFix.unitLabel,
+        items: fix.normalizeItems(request.reviewFix.items), claimPaths: request.reviewFix.claimPaths, route });
+      return [
+        `CODE_DIR (physical working directory): ${JSON.stringify(canonical.cwd)}`,
+        `CONTEXT_ROOT (owner artifacts): ${JSON.stringify(canonical.contextRoot)}`,
+        'Run every command with CODE_DIR as its working directory; resolve claimed relative paths only inside CODE_DIR.',
+        'Do not edit owner artifacts or a separate CONTEXT_ROOT checkout. The orchestrator owns artifact publication.',
+        fix.buildReviewFixPrompt(brief, { outputChannel: 'worker-result-block', constraints: request.constraints }),
+      ].join('\n\n');
+    })() : null;
+    const rendered = !reviewPrompt && !executionPlan && !request.prompt && !request.promptFile ? renderPrompt({
       unitType: canonical.scope === 'standalone-task' && canonical.phase === 'execute' ? 'execute-loose-task' : request.unitType,
       cwd: canonical.contextRoot, codeDir: canonical.cwd, milestoneId: request.milestoneId, sliceId: request.sliceId,
       taskId: request.taskId, unitEffort: route.effort, autoCommit: false }) : null;
-    let prompt = executionPlan || request.prompt || (request.promptFile ? fs.readFileSync(request.promptFile, 'utf8') : rendered.prompt);
+    let prompt = reviewPrompt || executionPlan || request.prompt || (request.promptFile ? fs.readFileSync(request.promptFile, 'utf8') : rendered.prompt);
     const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: canonical.cwd,
       phase: canonical.scope === 'standalone-task' && canonical.phase === 'execute' ? 'execute-loose-task' : request.unitType,
       forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
@@ -2397,16 +2739,28 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     const additional = recoveryProcedure.content.split(/(?=<!-- forge-procedure:)/)
       .filter(segment => segment.trim() && !present.has(/^<!-- forge-procedure:([^>]+) -->/.exec(segment)?.[1]));
     prompt += '\n\n' + additional.join('');
+    if (deliveryHelper) prompt = deliveryHelper.packagePrompt(finalRequest(route), prompt);
     return { hostRuntime: route.host_runtime, resolvedDispatch: route,
+    telemetryIdentity: finalRequest(route), lifecycle: runtime.nativeLifecycle,
+    terminalResult: value => deliveryHelper ? deliveryHelper.resultContract.validate(value).ok
+      : canonical.unitType === 'review-fix' && typeof value === 'string'
+        // The review-fix prompt requires the textual worker-result block; the value
+        // itself stays untouched for downstream result acceptance.
+        ? require('./forge-worker-result').parseJsonEnvelope(value).ok === true
+        : value && ['done', 'partial', 'blocked'].includes(value.status),
     activeCapabilities: runtime.activeCapabilities, effortBinding: runtime.effortBinding,
     prompt, forkTurns: 'none',
     taskName: nativeTaskName,
     agentType: ({ execute: 'forge-executor', plan: 'forge-planner', research: 'forge-researcher', discuss: 'forge-discusser' })[canonical.phase] || 'forge-worker' };
   };
   // A stale writer cannot reconcile or reserve another attempt under a new claim.
-  if (canonical.scope === 'milestone' && canonical.phase === 'execute') {
+  if (deliveryHelper) {
+    const replayed = await deliveryHelper.replay({ request: executionRequest, recovery, runtime, nativeOptions });
+    if (replayed) return replayed;
+  }
+  if (canonical.scope === 'milestone' && canonical.phase === 'execute' || canonical.unitType === 'review-fix') {
     if (!executionRequest.execution_contract) fail('execution-held-claim-required');
-    validateRecoveryRequest(executionRequest, { nativeInvocation: request.route.worker_mode === 'native'
+    validateRecoveryRequest(executionRequest, { verification: runtime.verification, nativeInvocation: request.route.worker_mode === 'native'
       ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route)) : undefined });
   }
   return require('./forge-attempt-recovery').recoverAttempt({ ...recovery, request,
@@ -2417,9 +2771,11 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     externalNativeHandoff: !runtime.invokeNative,
     inspectPreSpawn: runtime.inspectPreSpawn, inspectPreSpawnDelta: runtime.inspectPreSpawnDelta,
     validateEnvironmentalCorrection: runtime.validateEnvironmentalCorrection,
-    validateExecutionAuthority: () => validateRecoveryRequest(executionRequest, { nativeInvocation: request.route.worker_mode === 'native'
+    validateExecutionAuthority: () => validateRecoveryRequest(executionRequest, { verification: runtime.verification, nativeInvocation: request.route.worker_mode === 'native'
       ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route)) : undefined }),
     reconcile: receipt => {
+      if (canonical.unitType === 'review-fix' && !request.execution_contract && !receipt.recovery_baseline)
+        return reconcileLegacyReviewFix(request, receipt, executionRequest.execution_contract);
       if (canonical.scope === 'milestone' || receipt.recovery_baseline) return reconcileMilestoneAttempt(request, receipt, runtime);
       if (!receipt.reset_state_file || !receipt.execution?.execution_contract) fail('recovery-baseline-required');
       require('./forge-task-execution').assertReplay(request, receipt);
@@ -2430,13 +2786,13 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       if (request.route.worker_mode === 'native') {
         const invocation = require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route));
         if (!invocation.ok) return invocation;
-        validateRecoveryRequest(executionRequest, { nativeInvocation: invocation });
+        validateRecoveryRequest(executionRequest, { verification: runtime.verification, nativeInvocation: invocation });
         return { ok: true, evidence_reference: 'unit-preflight:native-arguments',
           final_evidence: require('./forge-attempt-telemetry').captureFinal({ request: invocation.args,
             context: invocation.args.prompt || invocation.args.message, identity: request, route: request.route,
             model: request.route.model, effort: request.route.effort, transport: 'native-tool' }) };
       }
-      validateRecoveryRequest(executionRequest);
+      validateRecoveryRequest(executionRequest, { verification: runtime.verification });
       if (typeof runtime.validateCorrection !== 'function') return { ok: false, reason_code: 'recovery-final-packaging-required' };
       return runtime.validateCorrection(request);
     },
@@ -2446,7 +2802,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       const invocation = route.worker_mode === 'native'
         ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(route)) : { ok: true };
       if (!invocation.ok) return invocation;
-      try { validateRecoveryRequest({ ...executionRequest, route }, { nativeInvocation: invocation }); }
+      try { validateRecoveryRequest({ ...executionRequest, route }, { verification: runtime.verification, nativeInvocation: invocation }); }
       catch (error) { return { ok: false, reason_code: error.code || 'unit-contract-refused', provider_called: false }; }
       return invocation;
     },
@@ -2463,41 +2819,85 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     // a Claude sidecar route may carry it; runUnitSidecarCore revalidates the ref.
     invoke: async (route, invocation, _ceiling, assertReady, reservationHash, resume) => {
       if (resume != null && (route.worker_mode !== 'sidecar' || route.resolved_worker_engine !== 'claude')) fail('recovery-resume-route-invalid');
-      validateRecoveryRequest({ ...executionRequest, route }, { nativeInvocation: invocation });
+      validateRecoveryRequest({ ...executionRequest, route }, { verification: runtime.verification, nativeInvocation: invocation });
       const ceiling = route.worker_mode === 'sidecar' ? ceilingFromRoute(route) : null;
-      const next = { ...executionRequest, recoveryStateFile: recovery.stateFile, route: ceiling
+      const next = deliveryHelper ? finalRequest(route) : { ...executionRequest, recoveryStateFile: recovery.stateFile, route: ceiling
         ? { ...route, workers_timeout: ceiling.seconds, workers_timeout_source: ceiling.source } : route,
         dispatchId: `${request.dispatchId}-recovery-${crypto.randomUUID()}`, resultFile: `${request.resultFile}.recovery-${crypto.randomUUID()}.json`,
         ...(resume != null ? { claudeResume: resume.session, resumedFrom: resume.resumed_from } : {}) };
       if (route.worker_mode === 'native') {
+        if (deliveryHelper) {
+          const session = deliveryHelper.prepare({ request: next, nativeInvocation: invocation,
+            assertBoundary: runtime.assertBoundary, assertAuthority: assertReady?.assertAuthority,
+            persistDeliveryReceipt: assertReady?.persistDeliveryReceipt,
+            linkedEntryOptions: runtime.linkedEntryOptions });
+          const finalRequestHash = require('./forge-attempt-recovery').callerRequestHash(next);
+          const invoke = async callback => {
+            const supervisedOptions = nativeOptions(route);
+            supervisedOptions.lifecycle = { ...runtime.nativeLifecycle,
+              captureLateResult: result => session.returned(result) };
+            const outcome = await require('./forge-native-invocation').invokeNative(supervisedOptions, async (args, binding) => {
+            if (require('./forge-attempt-recovery').callerRequestHash(next) !== finalRequestHash) fail('recovery-final-request-changed');
+            assertReady();
+            runtime.assertBoundary();
+            validateRecoveryRequest(next, { verification: runtime.verification, nativeInvocation: binding, linkedEntryOptions: runtime.linkedEntryOptions });
+            assertReady.consumeInvocation(binding, { ...session.start(),
+              original_receipt_sha256: hash(fs.readFileSync(recovery.receiptFile)) });
+            return callback(next, { ...binding, args }, session);
+          });
+            if (outcome.ok) {
+              session.returned(outcome.result);
+              assertReady.invocationReturned();
+            }
+            return outcome;
+          };
+          if (!runtime.invokeNative) return { action: 'invoke-native', request: next, invocation, delivery: session, invoke };
+          const outcome = await invoke(runtime.invokeNative);
+          if (!outcome.ok || !deliveryHelper.resultContract.validate(outcome.result).ok) return outcome;
+          if (outcome.result.status !== 'done') return outcome;
+          const verified = session.verify(outcome.result);
+          const published = session.publish(outcome.result);
+          return { ...outcome, verified, published };
+        }
+        // Only standalone execution has the native execution lifecycle. Other
+        // phase adapters retain their existing public native outcome contract.
+        const invokePhase = callback => {
+          return require('./forge-native-invocation').invokeNative(nativeOptions(route), (args, binding) => {
+            assertReady?.();
+            validateRecoveryRequest({ ...executionRequest, route }, { verification: runtime.verification, nativeInvocation: binding });
+            assertReady?.consumeInvocation?.(binding);
+            return callback(next, { ...binding, args }, {
+              assertAuthority: () => {
+                assertReady?.assertAuthority?.();
+                validateRecoveryRequest({ ...executionRequest, route }, { verification: runtime.verification, nativeInvocation: binding });
+              },
+            });
+          });
+        };
+        const invoke = callback => {
+          if (next.scope !== 'standalone-task' || next.phase !== 'execute') return invokePhase(callback);
+          next.nativeInvocation = invocation;
+          if (next.nativePromptFile) next.nativePromptFile = `${next.resultFile}.prompt.txt`;
+          return runUnitSidecar(next, { ...runtime, assertRecoveryReady: assertReady, assertRecoveryAuthority: assertReady?.assertAuthority,
+            invokeNative: (args, binding) => callback(next, { ...binding, args }) });
+        };
         if (!runtime.invokeNative) {
           assertReady?.();
           if ((recovery.environmentalCorrection || recovery.transitions) && !recovery.resumeReservation) return {
             action: 'reattest-native-handoff', reservation_sha256: reservationHash, provider_called: false };
-          return { action: 'invoke-native', request: next, invocation, ...(assertReady ? { assertReady } : {}) };
+          return { action: 'invoke-native', request: next, invocation, invoke, ...(assertReady ? { assertReady } : {}) };
         }
-        // Only standalone execution has the native execution lifecycle. Other
-        // phase adapters retain their existing public native outcome contract.
-        if (next.scope !== 'standalone-task' || next.phase !== 'execute') {
-          return require('./forge-native-invocation').invokeNative(nativeOptions(route), (args, binding) => {
-            assertReady?.();
-            validateRecoveryRequest({ ...executionRequest, route }, { nativeInvocation: binding });
-            return runtime.invokeNative(next, { ...binding, args });
-          });
-        }
-        next.nativeInvocation = invocation;
-        if (next.nativePromptFile) next.nativePromptFile = `${next.resultFile}.prompt.txt`;
-        return runUnitSidecar(next, { ...runtime, assertRecoveryReady: assertReady, assertRecoveryAuthority: assertReady?.assertAuthority,
-          invokeNative: (args, binding) => runtime.invokeNative(next, { ...binding, args }) });
+        return invoke(runtime.invokeNative);
       }
       return runUnitSidecar(next, { ...runtime, ...(assertReady?.appendOwnerEvent ? { assertRecoveryReady: assertReady } : {}) });
     },
   });
 }
-module.exports = { schema, memorySchema, MEMORY_QUALITY_CONTRACT, locations, milestonePlanFile, validateRecoveryRequest, captureMilestoneBaseline, reconcileMilestoneAttempt, validateArtifacts, inspectArtifacts, inspectDeliveryContent, executeDeliveryArtifacts, MAX_ARTIFACT_BYTES,
+module.exports = { preflightExecutionVerification, schema, memorySchema, memorySchemaV2, NEW_MEMORY_SCHEMA_VERSION, memoryExtractionSchema, memoryResponseSchema,
+  memoryTransportSchema, memoryEvidenceContract, MEMORY_QUALITY_CONTRACT, locations, milestonePlanFile, validateRecoveryRequest, captureMilestoneBaseline, reconcileMilestoneAttempt, validateArtifacts, inspectArtifacts, inspectDeliveryContent, executeDeliveryArtifacts, MAX_ARTIFACT_BYTES,
   MAX_ARTIFACT_PAYLOAD_BYTES, target, markChecked, materialize, memoryPrompt, memorySourceContext,
   publishReadyRecord, nativeMemoryFingerprint, acceptNativeMemoryResult, candidateFromNativeResult, runNativeMemory,
-  routeIdentity, artifactFingerprint, artifactAttemptFiles, beginArtifactAttempt, replayArtifactAttempt,
+  routeIdentity, artifactFingerprint, artifactAttemptFiles, beginArtifactAttempt, replayArtifactAttempt, reconcileLegacyReviewFix,
   failArtifactAttempt, acceptArtifactResult, reconcileArtifactAttempt, runUnitSidecar, recoverUnitSidecar, reviewFixUnitLabel, effortTelemetry };
 if (require.main === module) {
   const announce = createStderrAnnouncer();

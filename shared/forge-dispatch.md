@@ -3108,3 +3108,39 @@ token_budget.coding_standards bounds optional standards only, with full-file ref
 retain requirements/research/checklist. No credentials or full prompt in telemetry.
 Personal handoff retains authority reference, evidence, acceptance and questions.
 Synthetic provider tests do not establish real provider execution or human UAT.
+
+### Ordinary native reservations without a retained handoff
+
+`uninvoked-native-reservation` is an exclusive recovery transition. A trusted live
+`attestUninvoked` callback must attest zero native calls for the exact challenge:
+original reservation, dispatch, receipt, request and physical roots. An absent PID,
+missing handoff flag, timeout, serialized boolean or source repair is not proof.
+Unknown or possible invocation refuses this transition. Preserve the original
+reservation, attempts, route provenance and historical clocks.
+
+The public `recoverUnitSidecar` path rebuilds and binds the complete final native
+milestone execute-task payload before consumption. Other public phase/scope adapters
+refuse this new transition until they implement the same consumption contract;
+their existing recovery paths remain unchanged. A durable continuation records the original and final
+request hashes and the validated invocation. Its compare-and-swap consumption
+precedes the actual callback, so a concurrent caller or crash cannot invoke twice.
+`dispatch-possible` without a saved result requires reconciliation, never blind retry.
+
+For milestone execution, `forge-native-recovery-delivery` supplies a dedicated
+strict result schema without changing standalone results. It includes plan,
+context, security and available research, physical boundaries, claims, the validated
+TEMP result target and sealed finite verification policy. Every truth, artifact and
+key link must match the canonical inventory exactly; named assertions must appear
+in actual verification output, and artifact evidence must match its physical root.
+Partial or blocked output never publishes completion.
+
+The pre-call manifest and returned result survive loss of the caller closures.
+Before publishing, persist the ready canonical artifacts and their before-hashes.
+Receipts are immutable and content-addressed; guarded continuation persistence
+selects their exact hash. A crash before selection can leave an unselected temporary
+file, which is never accepted automatically or used to justify another invocation.
+A restart through the same public API revalidates current authorization, claims,
+boundary/lease, input hashes, invocation, code and protected metadata. It also requires
+a fresh live `writerObservationAdapter` and process inspection for the saved native
+receipt. Replay accepts only the exact prior or already-published bytes, never new
+inference or a refreshed baseline. Imported receipt data is not live authority.

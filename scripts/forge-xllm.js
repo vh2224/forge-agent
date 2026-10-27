@@ -2636,6 +2636,8 @@ async function runWriteContractCore(opts, contract) {
         signal: opts.signal,
         contextRoot,
         writableRoots,
+        permissionPolicy: opts.permissionPolicy,
+        permissionIdentity: opts.permissionIdentity,
         timeoutSecs,
         onHeartbeat,
         heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,

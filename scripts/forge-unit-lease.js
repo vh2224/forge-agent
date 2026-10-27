@@ -136,7 +136,7 @@ function result(ok, reason, extra) { return Object.assign({ ok, reason }, extra 
 function withGuard(cwd, unit, fn, guardOptions) {
   let handle;
   guardOptions = guardOptions || {};
-  try { handle = mutex.acquireSync(cwd, mutexName(unit), { ttlMs: 5_000, retries: 80, allowStaleRecovery: guardOptions.allowStaleRecovery === true }); }
+  try { handle = mutex.acquireProcessSync(cwd, mutexName(unit), { ttlMs: 5_000, retries: 20, backoffMin: 10, backoffMax: 20 }); }
   catch (error) { if (error.code === 'LOCK_BUSY') return result(false, 'guard-busy'); throw error; }
   let output; let thrown;
   try { output = fn(handle); } catch (error) { thrown = error; }
@@ -260,6 +260,42 @@ function release(cwd, unitInput, ownerToken, generation, options) {
   });
 }
 
+// A terminal reconciliation holds the same mutex as *every* lease mutator.
+// Handles are process-local capabilities, scoped to a synchronous callback;
+// serialization, expiry and PID observations cannot recreate one.
+const terminalGuards = new WeakMap();
+function assertTerminalGuard(handle, cwd, unitInput) {
+  const held = terminalGuards.get(handle);
+  if (!held || held.cwd !== fs.realpathSync.native(cwd) || held.unit !== normalizeUnitKey(unitInput) || !mutex.assertOwned(held.guard)) {
+    throw Object.assign(new Error('forge-unit-lease: terminal-guard-invalid'), { code: 'GUARD_LOST' });
+  }
+  return held;
+}
+function inspectTerminal(handle, cwd, unitInput, ownerToken, generation) {
+  const held = assertTerminalGuard(handle, cwd, unitInput), read = readLease(leaseFile(cwd, held.unit));
+  if (read.corrupt || (read.record && !validRecord(read.record, held.unit))) return result(false, 'lease-corrupt');
+  if (!read.record) return result(true, 'lease-absent', { present: false });
+  if (!sameOwner(read.record, ownerToken, generation)) return result(false, 'owner-mismatch');
+  return result(true, 'lease-matching', { present: true, generation });
+}
+function releaseTerminal(handle, cwd, unitInput, ownerToken, generation) {
+  const held = assertTerminalGuard(handle, cwd, unitInput);
+  const checked = inspectTerminal(handle, cwd, unitInput, ownerToken, generation);
+  if (!checked.ok || !checked.present) return checked;
+  const saved = quarantine(leaseFile(cwd, held.unit), `released-${generation}`);
+  if (!saved) return result(false, 'contended-recovery');
+  removeQuarantine(saved);
+  return result(true, 'released', { generation });
+}
+function withTerminalGuard(cwd, unitInput, callback) {
+  const unit = normalizeUnitKey(unitInput);
+  return withGuard(cwd, unit, guard => {
+    const handle = Object.freeze({});
+    terminalGuards.set(handle, { cwd: fs.realpathSync.native(cwd), unit, guard });
+    try { return callback(handle); } finally { terminalGuards.delete(handle); }
+  });
+}
+
 // The parent must route its own scheduled heartbeat through this process-local
 // handle while protected snapshots are in use. Other processes remain subject
 // to ordinary ownership checks; this is coordination, not a global lock.
@@ -308,9 +344,7 @@ function openProtectedWindow(cwd, unitInput, ownerToken, generation, options = {
 function recover(cwd, unitInput, options) {
   const unit = normalizeUnitKey(unitInput); const now = nowOf(options || {}); const file = leaseFile(cwd, unit);
   fs.mkdirSync(leasesDir(cwd), { recursive: true });
-  // Explicit recovery is the only path allowed to reclaim a stale short
-  // mutex. Normal lease mutation never steals an expiring guard, so a paused
-  // publisher cannot race a successor's publication.
+  // Process death, never TTL, authorizes reclaiming this short mutex.
   return withGuard(cwd, unit, guard => { clearTemporaryFiles(file); return recoverInside(file, unit, now); }, { allowStaleRecovery: true });
 }
 
@@ -383,4 +417,5 @@ module.exports = {
   PROTOCOL_VERSION, DEFAULT_TTL_MS, DEFAULT_GRACE_MS, REASON_CODES,
   normalizeUnitKey, leasesDir, leaseFile, mutexName, acquire, observe,
   heartbeat, release, recover, publicLease, validRecord, readLease, openProtectedWindow, assertProtectedWindow,
+  withTerminalGuard, assertTerminalGuard, inspectTerminal, releaseTerminal,
 };

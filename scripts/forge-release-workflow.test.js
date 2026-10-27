@@ -10,7 +10,7 @@ const { spawnSync } = require('child_process');
 const checks = require('./forge-release-checks.js');
 const publisher = require('./forge-release-publish.js');
 const github = require('./forge-release-github.js');
-const version = require('./forge-release-version.js');
+const os = require('os');
 const ROOT = path.resolve(__dirname, '..');
 const source = fs.readFileSync(path.join(ROOT, '.github/workflows/release.yml'), 'utf8');
 const app = fs.readFileSync(path.join(ROOT, '.github/workflows/app.yml'), 'utf8');
@@ -66,6 +66,9 @@ assert.strictEqual(fixtureSource.split(marker).length, 2);
 const sandbox = { require: createRequire(fixtureFile), __dirname, process, Buffer, console, URL, module: { exports: {} } };
 vm.runInNewContext(fixtureSource.split(marker)[0] + '\nmodule.exports = { fixture, existing, A, B };', sandbox, { timeout: 1000 });
 const fixtures = sandbox.module.exports;
+const versionRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-workflow-version-')));
+const versionRepo = path.join(versionRoot, 'repo');
+let breakingSha;
 async function fixture(run) {
   const f = fixtures.fixture();
   try {
@@ -97,9 +100,12 @@ function inlineCode(run) {
 function argv(run, env) {
   assert(/^node scripts\/forge-release-(github|publish|version)\.js /.test(run));
   const parts = run.match(/"[^"\n]*"|[^\s]+/g);
-  return parts.slice(1).map(part => part.replace(/^"|"$/g, '').replace(/\$([A-Z_]+)/g, (_, name) => {
-    assert(Object.hasOwn(env, name), `missing env ${name}`); return env[name];
-  }));
+  return parts.slice(1).map(part => {
+    const value = part.replace(/^"|"$/g, '').replace(/\$([A-Z_]+)/g, (_, name) => {
+      assert(Object.hasOwn(env, name), `missing env ${name}`); return env[name];
+    });
+    return path.isAbsolute(value) ? path.normalize(value) : value;
+  });
 }
 async function execute(f, key, mutate = () => {}) {
   const env = { ...f.env, GITHUB_JOB: key }; const outputs = {}; const calls = [];
@@ -129,7 +135,8 @@ async function execute(f, key, mutate = () => {}) {
           assert.strictEqual(binary, 'git');
           if (args[0] === 'merge-base') { assert.strictEqual(args[2], fixtures.A); return ''; }
           if (args[0] === 'rev-parse') return f.state.head;
-          assert.strictEqual(args[0], 'log'); return `${fixtures.A} feat: fixture\n${fixtures.B} fix: regression`;
+          if (args[0] === 'log') throw new Error('changelog inline proibido');
+          throw new Error(`Git inline inesperado: ${args[0]}`);
         } };
         assert(['fs', 'path'].includes(name)); return require(name);
       };
@@ -138,10 +145,15 @@ async function execute(f, key, mutate = () => {}) {
       const args = argv(run, local); const file = args.shift(); f.candidateCalls = (f.candidateCalls || 0) + 1;
       assert.strictEqual(f.state.head, fixtures.A);
       if (file.endsWith('version.js')) {
-        assert.deepStrictEqual(args, ['--check', '--github-output', local.GITHUB_OUTPUT]);
-        const resolution = f.dependencies.resolveVersion();
-        version.checkDeclaredVersion(resolution, f.manifest.product_version);
-        version.appendGithubOutput(local.GITHUB_OUTPUT, resolution);
+        assert.deepStrictEqual(args, ['--check', '--github-output', local.GITHUB_OUTPUT,
+          '--notes', path.join(local.RUNNER_TEMP, 'release-notes.md')]);
+        const childEnv = { PATH: process.env.PATH, RUNNER_TEMP: local.RUNNER_TEMP };
+        if (process.env.SYSTEMROOT) childEnv.SYSTEMROOT = process.env.SYSTEMROOT;
+        const result = spawnSync(process.execPath, [file, ...args], {
+          cwd: versionRepo, env: childEnv, shell: false, encoding: 'utf8' });
+        assert.strictEqual(result.status, 0, result.stderr);
+        const lines = fs.readFileSync(local.GITHUB_OUTPUT, 'utf8').split('\n');
+        assert(lines.includes('new_tag=v2.0.0')); assert(lines.includes('bump=major'));
       } else if (file.endsWith('github.js')) {
         assert.deepStrictEqual(args, ['wait', '--sha', fixtures.A]); assert.strictEqual(local.GH_TOKEN, 'fixture-token');
         const candidate = { ...JSON.parse(fs.readFileSync(local.GITHUB_EVENT_PATH)), env: local };
@@ -168,6 +180,22 @@ async function execute(f, key, mutate = () => {}) {
 }
 
 (async () => {
+  fs.mkdirSync(path.join(versionRepo, 'scripts'), { recursive: true });
+  for (const name of ['forge-release-version.js', 'forge-release-impact.js', 'forge-version.js']) {
+    fs.copyFileSync(path.join(__dirname, name), path.join(versionRepo, 'scripts', name));
+  }
+  const git = args => {
+    const result = spawnSync('git', args, { cwd: versionRepo, shell: false, encoding: 'utf8' });
+    assert.strictEqual(result.status, 0, result.stderr); return result.stdout.trim();
+  };
+  git(['init']);
+  for (const [key, value] of [['commit.gpgsign', 'false'], ['tag.gpgSign', 'false'],
+    ['core.autocrlf', 'false'], ['user.name', 'Fixture'], ['user.email', 'fixture@example.invalid']]) git(['config', key, value]);
+  git(['add', 'scripts']); git(['commit', '-m', 'chore: base']); git(['tag', 'v1.2.3']);
+  git(['commit', '--allow-empty', '-m', 'feat: fixture', '-m', 'BREAKING CHANGE: campo removido']);
+  breakingSha = git(['rev-parse', 'HEAD']);
+  git(['commit', '--allow-empty', '-m', 'fix: regression']);
+  fs.writeFileSync(path.join(versionRepo, 'VERSION'), '2.0.0\n');
   await test('workflow-master-only-permissions-needs-deadlines-and-no-self-wait', () => {
     assert(source.startsWith('name: Release\n\non:\n  push:\n    branches: [master]\n\npermissions: {}\n'));
     assert(!/tags:|workflow_run:|pull_request|download-artifact|continue-on-error|cancel-in-progress: true/.test(source));
@@ -219,6 +247,22 @@ async function execute(f, key, mutate = () => {}) {
     assert.strictEqual((await f.apply(f.prepared)).reason_code, 'receipt-consumed');
     assert.strictEqual(f.state.mutations.length, 2);
   }));
+  await test('workflow-notes-from-helper-share-version-signals', async () => {
+    for (const steps of Object.values(jobs)) for (const step of steps) {
+      assert(!/%H %s|--pretty|Generate changelog|\bgit log\b/.test(step.run || ''));
+      assert.notStrictEqual(step.name, 'Generate changelog');
+    }
+    for (const key of ['coordinator', 'publisher']) await fixture(async f => {
+      await execute(f, key);
+      const notes = fs.readFileSync(path.join(f.temp, 'release-notes.md'));
+      const text = notes.toString('utf8');
+      assert(text.includes(`### Breaking Changes\n\n- feat: fixture (${breakingSha.slice(0, 7)})`));
+      assert(text.includes('### Bug Fixes\n\n- fix: regression'));
+      const receipt = JSON.parse(fs.readFileSync(f.prepared.state));
+      assert.strictEqual(crypto.createHash('sha256').update(notes).digest('hex'), receipt.notes_sha256);
+      assert.deepStrictEqual(fs.readFileSync(path.join(path.dirname(f.prepared.state), 'notes.md')), notes);
+    });
+  });
   await test('workflow-coordinator-readonly-get-wait-and-unusable-cross-job-receipt', () => fixture(async f => {
     await execute(f, 'coordinator'); assert.strictEqual(f.state.generates, 1); assert.strictEqual(f.state.mutations.length, 0);
     assert(f.state.calls.length > 0 && f.state.calls.every(call => call.method === 'GET'));
@@ -298,4 +342,5 @@ async function execute(f, key, mutate = () => {}) {
     for (const phrase of ['job-wide', 'same-UID', 'S04', 'S08', 'S09', 'UAT', 'external', 'pending']) assert(doc.includes(phrase));
   });
   console.log(`${count} workflow tests passed (local real YAML; fake transport/effects; remote/review/UAT pending)`);
-})().catch(error => { console.error(error.stack); process.exitCode = 1; });
+})().catch(error => { console.error(error.stack); process.exitCode = 1; })
+  .finally(() => fs.rmSync(versionRoot, { recursive: true, force: true }));

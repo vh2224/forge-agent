@@ -139,10 +139,10 @@ and atomicity against external publication writers are outside this module's pro
 Release starts only from `push` on `refs/heads/master`.
 Tag creation alone does not schedule Release; no tag-selected workflow is trusted.
 Existing exact-SHA tags and releases still pass through the complete master barrier.
-Version selection remains `forge-release-version.js --check --github-output`.
-No conventional-commit, semver, declared version or changelog policy changes here.
+S08 resolves version and notes together with `forge-release-version.js --check --github-output --notes`.
+S08 keeps label-based semver and declared-version checks; --check blocks impact-label-conflict/impact-invalid (see shared/forge-release-impact.md).
 The original Breaking Changes, Features, Bug Fixes and Other Changes order remains.
-Notes use commit subjects without shell evaluation and are saved under runner.temp.
+S08 classifies full commit messages via the helper, including breaking signals in bodies, without shell evaluation; notes are saved under runner.temp.
 
 Both jobs have a fixed master checkout, fetch-depth 0 and persist-credentials false.
 Only fixed checkout/setup-node actions and inline builtin/Git context checks run first.
@@ -212,7 +212,7 @@ This conservative coverage can increase cost/latency; no efficiency gain is clai
 ## Evidence levels and future slices
 
 The workflow harness reads real YAML, rejects unsupported step forms, executes its
-inline bootstrap/HEAD/changelog bodies and dispatches its real helper entrypoints
+inline bootstrap/HEAD bodies and the real version/notes argv in a temporary Git repository, without inline changelog, and dispatches helper entrypoints
 through controlled argv and productive prepare/apply with fake transport/effects.
 Its temporary Git index/object tree checks final blob bytes without changing the
 real checkout/index. It does not publish or exercise a remote GitHub runner.
@@ -226,5 +226,63 @@ and human UAT are independent facts. Remote CI/review/UAT remain pending unless
 separate concrete evidence establishes each one; local positives cannot infer them.
 S04 may narrow coverage only with proven dependencies, negative fixtures and joint
 policy/mapping/pin updates. Unknown paths remain conservative until then.
-S08 preserves current semver/changelog contracts; this route does not redesign them.
+S08 changes only the version/notes steps of this route; note generation now depends on the candidate helper from the same validated SHA, without an individual script pin. Markdown and URLs remain arbitrary data passed to gh --notes-file, bounded by the existing 4 MiB prepare limit.
 S09 consumes explicit evidence/acceptance and may not turn a simulated pass into UAT.
+
+## S04: CI concurrency and observed shard profile
+
+CI and app now declare workflow concurrency between permissions and jobs. Fresh
+pull_request arrivals share ci-pr-<number> or app-pr-<number>, respectively, with
+cancel-in-progress true only for pull_request. Every other event gets a unique
+ci-run-<run_id> or app-run-<run_id> group. This preserves independent master push
+validation for the exact-SHA release collector: a newer push cannot cancel or
+replace an older push through these groups. Group inputs are only event_name,
+the PR number and run_id, with distinct workflow prefixes; no head_ref, title or
+other author-selected string is evaluated. No job concurrency is introduced.
+
+The fixed-path, builtin-only forge-ci-concurrency reader accepts only reviewed
+group/cancellation scalar forms and rejects unknown keys, including queue. Its
+local rehearsal reads the actual three workflow byte sequences, records SHA-256
+and models fresh-arrival bursts with one active and one pending run per group.
+Cancellation latency and waiting for cancellation completion are model assumptions,
+not observed GitHub scheduler behavior. Invariants are checked at multiple latency
+choices; this does not measure GitHub timings. The official concurrency reference
+consulted on 2026-10-25 is
+https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency.
+No queue option is used or verified. Older manual reruns of PR attempts may share
+the current head's group; preservation of the newest head in that case is
+unverified and excluded from fresh-arrival claims. Separate hosted validation is
+pending, including cancellation, remote check consumers and rerun behavior.
+
+S08 updates both release workflow byte pins together; exact reversal preserves the historical S04 evidence. Group release and
+cancel-in-progress:false preserve active publication. The existing limitation
+release-pending-may-be-replaced remains: a third arrival can replace a pending
+candidate while the first publishes. This is not durable FIFO and does not
+promise publication for every push. No collector deadline or queue policy changes.
+The seven CI aliases remain unchanged; their always() behavior on cancelled PR
+runs may leave failed checks on superseded SHAs, an expected effect to observe in
+hosted validation. Unknown remote consumers are not evidence to remove a check.
+The app's existing PR path filter, cache, build and PTY commands remain unchanged;
+cache population after cancellation is unverified and is a separate measurement
+stratum. Master still schedules app for every push.
+
+Run test suites keeps its known-failures baseline and now passes
+--shard-profile scripts/fixtures/ci-shards/shard-profile.json before the final
+shard-index/count flags. The versioned profile is read from the checkout as
+bounded, closed-schema data; it is never generated or downloaded by CI. Every
+test matrix platform/count partitions the full discoverTests universe completely
+and disjointly, with consistent partition fingerprints across indices and no
+fallback when this profile is present. New unprofiled suites receive the default
+weight; stale entries are reported, not manually repaired. No selection by path,
+changed, match or fail-fast flags is introduced. CI triggers have no path filter.
+
+Job keys, rendered names, runners, needs, all 14 CI executions plus app, matrices,
+seven aliases, two Windows shards, offline gates, SVN provisioning and smoke
+steps remain unchanged. Section 76 of the smoke receives structural checks here;
+the full smoke is not executed by this task. CI/app SHA-256 and Git blob SHA-1 pins
+are updated together with this workflow change and unchanged semantic mappings.
+Until the owner commits those bytes, the release-checks suite must take
+pending-source-drift-rejected-at-committed-head rather than claim a committed gate.
+S02/offline local tests, the rehearsal and shard partition checks provide local
+evidence only. No coverage reduction, hosted performance improvement, remote
+protection, publication, installation or human UAT is established by this S04 work.

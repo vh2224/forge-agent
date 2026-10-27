@@ -14,7 +14,7 @@
 // ──────────────────────────────────────────────────────────────────────────────
 // Stub regex precedence order (evaluated in this exact order; first match wins per line):
 //   1. empty_function_body          — function foo() {}, () => {}, async () => {}
-//   2. return_null_function         — bare `return null;` at function-body indentation
+//   2. return_null_function         — function body containing only `return null;`
 //   3. jsx_placeholder_onclick      — onClick={() => {}}
 //   4. jsx_placeholder_return_div   — `return <div />;` or `return <div></div>;`
 //
@@ -124,10 +124,10 @@ const DEFAULT_STUB_REGEXES = [
   },
   {
     name: 'return_null_function',
-    // Matches a line that is solely `return null;` — bare stub body.
-    // Heuristic: flags every occurrence; human triages false positives (per RISK card).
+    // Candidate regex retained for registry compatibility. checkSubstantive uses
+    // lexical body context: a guard/fallback is not an unimplemented function.
     regex: /^\s*return\s+null\s*;?\s*$/,
-    description: 'Bare `return null;` indicating unimplemented function body',
+    description: 'Function body containing only return null (plus directives/comments)',
   },
   {
     name: 'jsx_placeholder_onclick',
@@ -338,8 +338,33 @@ function walkImports(targetAbs, candidateFiles, opts) {
  * @param {string} cwd           Working directory to resolve path against
  * @returns {{ pass: boolean, flag?: object, content?: string, lineCount?: number }}
  */
-function checkExists(artifactPath, cwd) {
-  const absPath = path.join(cwd, artifactPath);
+// Resolving a legacy directory is not an execution authority: it may have no VCS.
+// Supplied execution contracts retain canonical checkout/identity validation.
+function artifactPathResolver(cwd, executionContract) {
+  const roots = require('./forge-code-roots');
+  const contract = executionContract
+    ? roots.validateContract(executionContract, { revalidate: true })
+    : { primary_root_id: 'primary', code_roots: [{ id: 'primary', path: roots.realDirectory(path.resolve(cwd)) }] };
+  // Keep verified lexical aliases (notably Windows short names) for absolute
+  // caller-supplied candidates. Every resulting relative path is still checked
+  // by resolvePath against the physical root, including symlink ancestors.
+  const addresses = contract.code_roots.map(root => ({ id: root.id, path: root.path }));
+  if (executionContract) addresses.push(...executionContract.code_roots.map(root => ({ id: root.id, path: root.path })));
+  const cwdRoot = contract.code_roots.find(root => roots.key(root.path) === roots.key(roots.realDirectory(path.resolve(cwd))));
+  if (cwdRoot) addresses.push({ id: cwdRoot.id, path: path.resolve(cwd) });
+  return (value, allowAbsolute = false) => {
+    if (allowAbsolute && typeof value === 'string' && path.isAbsolute(value)) {
+      const root = addresses.find(entry => roots.within(entry.path, path.resolve(value)));
+      if (!root) throw Object.assign(new Error('root-path-escape'), { code: 'root-path-escape' });
+      // resolvePath walks existing ancestors and rejects links/physical escapes.
+      value = { root_id: root.id, path: path.relative(root.path, value) };
+    }
+    return roots.resolvePath(contract, value, { legacy: true }).absolute;
+  };
+}
+
+function checkExists(artifactPath, cwd, resolve = artifactPathResolver(cwd)) {
+  const absPath = resolve(artifactPath);
   const content = readFileCached(absPath);
 
   if (content === null) {
@@ -376,6 +401,158 @@ function checkExists(artifactPath, cwd) {
  * @param {object} artifact    Artifact descriptor from must_haves.artifacts[]
  * @returns {{ pass: boolean, flags?: object[] }}
  */
+// A deliberately limited JS lexical heuristic, not a parser or proof of substance.
+// Recognizes ordinary function/method and block-arrow bodies. Comments, quoted
+// strings, regex literals and template text cannot supply executable tokens;
+// template interpolations are scanned as code. TS return-type syntax and JSX
+// grammar are not inferred here. Other stub detectors keep their own contracts.
+function nullReturningFunctionLines(content) {
+  const tokens = [];
+  let offset = 0, line = 1;
+  const add = (value, kind = 'code', atLine = line) => tokens.push({ value, kind, line: atLine });
+  const advance = () => { if (content[offset++] === '\n') line++; };
+  const controls = new Set(['if', 'while', 'for', 'with', 'switch', 'catch']);
+  const parens = [];
+  const blocks = [];
+  const opensStatementBlock = () => {
+    const last = tokens.at(-1);
+    if (!last) return true;
+    if (last.value === ')') {
+      if (last.controlClose) return true;
+      let cursor = last.open - 1;
+      if (/^[\w$]+$/.test(tokens[cursor]?.value || '') && tokens[cursor]?.value !== 'function') cursor--;
+      if (tokens[cursor]?.value === '*') cursor--;
+      if (tokens[cursor]?.value !== 'function') return false;
+      cursor--;
+      while (['async', 'export', 'default'].includes(tokens[cursor]?.value)) cursor--;
+      return cursor < 0 || [';', '{', '}'].includes(tokens[cursor].value);
+    }
+    return last.kind === 'code' && [';', '{', '}', 'else', 'try', 'finally', 'do'].includes(last.value);
+  };
+  const regexAllowed = () => {
+    const last = tokens.at(-1);
+    return !last || last.controlClose === true || last.blockClose === true ||
+      (last.kind === 'code' && (/^(?:[({[=,:;!?&|+*%^~<>-]|=>|\$\{)$/.test(last.value) ||
+        /^(?:return|throw|case|delete|void|typeof|yield|await|in|of|instanceof|else|do)$/.test(last.value)));
+  };
+  function quoted(quote) {
+    const startLine = line;
+    advance();
+    let closed = false;
+    while (offset < content.length) {
+      if (content[offset] === '\\') { advance(); if (offset < content.length) advance(); }
+      else if (content[offset] === quote) { advance(); closed = true; break; }
+      else advance();
+    }
+    add('literal', closed ? 'string' : 'unknown', startLine);
+  }
+  function template() {
+    add('template', 'literal');
+    advance();
+    while (offset < content.length) {
+      if (content[offset] === '\\') { advance(); if (offset < content.length) advance(); }
+      else if (content[offset] === '`') { advance(); add('template-end', 'literal'); return; }
+      else if (content[offset] === '$' && content[offset + 1] === '{') {
+        add('${'); advance(); advance(); scan(true);
+      } else advance();
+    }
+    add('unterminated-template', 'unknown');
+  }
+  function regexLiteral() {
+    let end = offset + 1, inClass = false;
+    while (end < content.length && content[end] !== '\n' && content[end] !== '\r') {
+      const char = content[end++];
+      if (char === '\\') end++;
+      else if (char === '[') inClass = true;
+      else if (char === ']') inClass = false;
+      else if (char === '/' && !inClass) {
+        while (/[a-z]/i.test(content[end] || '') && end < content.length) end++;
+        add('regex', 'literal'); offset = end; return true;
+      }
+    }
+    return false;
+  }
+  function scan(interpolation = false) {
+    let depth = 0;
+    while (offset < content.length) {
+      const char = content[offset], next = content[offset + 1];
+      if (/\s/.test(char)) { advance(); continue; }
+      if (char === '/' && next === '/') {
+        while (offset < content.length && content[offset] !== '\n') advance();
+        continue;
+      }
+      if (char === '/' && next === '*') {
+        advance(); advance();
+        while (offset < content.length && !(content[offset] === '*' && content[offset + 1] === '/')) advance();
+        if (offset < content.length) { advance(); advance(); }
+        continue;
+      }
+      if (char === '"' || char === "'") { quoted(char); continue; }
+      if (char === '`') { template(); continue; }
+      if (char === '/' && regexAllowed() && regexLiteral()) continue;
+      if (/[\w$]/.test(char)) {
+        const start = offset;
+        while (offset < content.length && /[\w$]/.test(content[offset])) advance();
+        add(content.slice(start, offset)); continue;
+      }
+      if (char === '{') { depth++; blocks.push(opensStatementBlock()); }
+      if (char === '}') {
+        if (interpolation && depth === 0) { add('}'); advance(); return; }
+        depth--;
+        add('}'); tokens.at(-1).blockClose = blocks.pop() === true;
+        advance(); continue;
+      }
+      if (char === '(') parens.push(tokens.length);
+      if (char === ')') {
+        const open = parens.pop();
+        add(char);
+        tokens.at(-1).open = open;
+        tokens.at(-1).controlClose = controls.has(tokens[open - 1]?.value);
+        advance(); continue;
+      }
+      if ((char === '=' && next === '>') || (char === '+' && next === '+') || (char === '-' && next === '-')) {
+        add(char + next); advance(); advance(); continue;
+      }
+      add(char); advance();
+    }
+  }
+  scan();
+  const found = new Set(), braces = [];
+  const isFunctionBody = index => {
+    const previous = tokens[index - 1];
+    if (previous?.value === '=>') return true;
+    if (previous?.value !== ')' || previous.open === undefined) return false;
+    const name = tokens[previous.open - 1];
+    return name?.kind === 'code' &&
+      (name.value === 'function' || name.value === '*' && tokens[previous.open - 2]?.value === 'function' ||
+        /^[\w$]+$/.test(name.value) && !controls.has(name.value));
+  };
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token.kind !== 'code') continue;
+    if (token.value === '{' || token.value === '${') braces.push(index);
+    else if (token.value === '}') {
+      const open = braces.pop();
+      if (open === undefined || tokens[open].value !== '{' || !isFunctionBody(open)) continue;
+      let cursor = open + 1;
+      // A directive is a standalone string expression, not a string operand.
+      while (tokens[cursor]?.kind === 'string' && cursor < index) {
+        const following = tokens[cursor + 1];
+        if (following?.value === ';') cursor += 2;
+        else if ((following?.value === 'return' || following?.kind === 'string') && following.line > tokens[cursor].line) cursor++;
+        else break;
+      }
+      const returned = tokens[cursor], value = tokens[cursor + 1];
+      if (returned?.kind !== 'code' || returned.value !== 'return' || value?.kind !== 'code' ||
+          value.value !== 'null' || value.line !== returned.line) continue;
+      cursor += 2;
+      if (tokens[cursor]?.value === ';') cursor++;
+      if (cursor === index) found.add(returned.line);
+    }
+  }
+  return found;
+}
+
 function checkSubstantive(content, lineCount, artifact) {
   const minLines = artifact.min_lines || 0;
 
@@ -432,12 +609,14 @@ function checkSubstantive(content, lineCount, artifact) {
   // ── Scan lines for stub patterns ──────────────────────────────────────────
   const lines = content.split('\n');
   const matchedFlags = [];
+  const nullStubLines = effectiveRegexes.some(entry => entry.name === 'return_null_function')
+    ? nullReturningFunctionLines(content) : new Set();
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     // First match per line wins (precedence order preserved in array)
     for (const { name, regex } of effectiveRegexes) {
-      if (regex.test(line)) {
+      if (regex.test(line) && (name !== 'return_null_function' || nullStubLines.has(i + 1))) {
         matchedFlags.push({
           level: 'substantive',
           regex_name: name,
@@ -474,7 +653,7 @@ function checkSubstantive(content, lineCount, artifact) {
  * @param {string}   cwd           Working directory
  * @returns {{ wired: boolean|string, flag?: object, walker_info?: object }}
  */
-function checkWired(artifact, nonJsTs, candidateFiles, cwd) {
+function checkWired(artifact, nonJsTs, candidateFiles, cwd, resolve = artifactPathResolver(cwd)) {
   if (nonJsTs) {
     return {
       wired: 'skipped',
@@ -482,7 +661,7 @@ function checkWired(artifact, nonJsTs, candidateFiles, cwd) {
     };
   }
 
-  const artifactAbs = path.resolve(cwd, artifact.path);
+  const artifactAbs = resolve(artifact.path);
   const result = walkImports(artifactAbs, candidateFiles, { cwd, depth: 2 });
 
   const walkerInfo = {
@@ -755,6 +934,7 @@ function auditTestQuality(content, artifact) {
  * @param {string[]}    sliceFiles List of relative file paths in the slice (for future Wired impl)
  * @param {object}      [opts]     Options
  * @param {string}      [opts.cwd] Working directory (default: process.cwd())
+ * @param {object}      [opts.execution_contract] Canonical roots with measured identities
  * @returns {{ legacy: boolean, rows: object[] }}
  */
 function verifyArtifact(mustHaves, sliceFiles, opts) {
@@ -784,9 +964,10 @@ function verifyArtifact(mustHaves, sliceFiles, opts) {
 
   // ── Build all artifact absolute paths for cross-reference ─────────────────
   // Candidates = all artifacts in this must-haves + extra sliceFiles passed by CLI
-  const artifactAbsPaths = artifacts.map(a => path.resolve(cwd, a.path));
+  const resolve = artifactPathResolver(cwd, opts && opts.execution_contract);
+  const artifactAbsPaths = artifacts.map(a => resolve(a.path));
   const extraAbsPaths = (Array.isArray(sliceFiles) ? sliceFiles : [])
-    .map(f => path.isAbsolute(f) ? f : path.resolve(cwd, f));
+    .map(f => resolve(f, true));
   const allCandidateAbsPaths = Array.from(new Set([...artifactAbsPaths, ...extraAbsPaths]));
 
   // ── Evaluate each artifact ────────────────────────────────────────────────
@@ -794,10 +975,10 @@ function verifyArtifact(mustHaves, sliceFiles, opts) {
 
   for (const artifact of artifacts) {
     const artifactPath = artifact.path;
-    const artifactAbs = path.resolve(cwd, artifactPath);
+    const artifactAbs = resolve(artifactPath);
 
     // ── Level 1: Exists ───────────────────────────────────────────────────
-    const existsResult = checkExists(artifactPath, cwd);
+    const existsResult = checkExists(artifactPath, cwd, resolve);
 
     if (!existsResult.pass) {
       rows.push({
@@ -832,7 +1013,7 @@ function verifyArtifact(mustHaves, sliceFiles, opts) {
     const candidateFiles = allCandidateAbsPaths.filter(
       p => path.normalize(p) !== path.normalize(artifactAbs)
     );
-    const wiredResult = checkWired(artifact, isNonJsTs, candidateFiles, cwd);
+    const wiredResult = checkWired(artifact, isNonJsTs, candidateFiles, cwd, resolve);
 
     const rowFlags = [];
     if (wiredResult.flag) rowFlags.push(wiredResult.flag);
@@ -1016,8 +1197,8 @@ function runSliceArtifactVerification(opts) {
     const combinedMustHaves = { artifacts: combinedArtifacts, key_links: [] };
     // Pass all artifact paths as sliceFiles so the walker has full candidate set
     const codeDir = opts.codeDir || opts.cwd;
-    const sliceFilesCandidates = combinedArtifacts.map(a => path.resolve(codeDir, a.path));
-    const verifyResult = verifyArtifact(combinedMustHaves, sliceFilesCandidates, { cwd: codeDir });
+    const sliceFilesCandidates = combinedArtifacts.map(a => a.path);
+    const verifyResult = verifyArtifact(combinedMustHaves, sliceFilesCandidates, { cwd: codeDir, execution_contract: opts.execution_contract });
     for (const row of verifyResult.rows) {
       // Find the sourceTask from the artifact we tagged
       const artifact = combinedArtifacts.find(a => a.path === row.path);
@@ -1335,7 +1516,7 @@ function runTaskArtifacts(opts) {
   const parsed = parseMustHaves(raw);
   const missing = [];
   const advisory = [];
-  const rowsResult = verifyArtifact({ artifacts: parsed.artifacts || [] }, [], { cwd });
+  const rowsResult = verifyArtifact({ artifacts: parsed.artifacts || [] }, [], { cwd, execution_contract: opts.execution_contract });
   for (const row of rowsResult.rows || []) {
     if (row.exists === false) {
       missing.push({ path: row.path, reason: (row.flags.find((f) => f.level === 'exists') || {}).reason || 'file_not_found' });
@@ -1350,8 +1531,9 @@ function runTaskArtifacts(opts) {
     }
   }
   const expected = Array.isArray(parsed.expected_output) ? parsed.expected_output : [];
+  const resolve = artifactPathResolver(cwd, opts.execution_contract);
   for (const rel of expected) {
-    const p = path.join(cwd, String(rel));
+    const p = resolve(rel);
     if (!fs.existsSync(p)) missing.push({ path: String(rel), reason: 'expected_output_not_found' });
   }
   return {

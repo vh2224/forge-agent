@@ -17,6 +17,7 @@ const { countTokens } = require('./forge-tokens.js');
 const { resolveForgePaths } = require('./forge-home.js');
 const forgeIds = require('./forge-ids.js');
 const { selectMemoryContext } = require('./forge-memory-context.js');
+const { unavailableDiagnostic } = require('./forge-memory-diagnostic.js');
 const { loadProcedureContext } = require('./forge-procedure-context.js');
 
 const PROCEDURE_UNITS = new Set([
@@ -490,10 +491,13 @@ function resolveMemories(options) {
     } catch { status = 'optional-error'; }
     if (options.onMemorySelection) options.onMemorySelection({ status, source: { provider: options.memories != null ? 'direct' : 'override' },
       unit_type: query.unitType, limit: query.limit, max_tokens: query.maxTokens,
-      emitted_bytes: Buffer.byteLength(markdown, 'utf8'), selected: [] });
+      emitted_bytes: Buffer.byteLength(markdown, 'utf8'), selected: [],
+      ...(options.memoryDiagnostic === true ? {
+        diagnostic: unavailableDiagnostic(options.memories != null ? 'direct-memories' : 'override-provider'),
+      } : {}) });
     return markdown;
   }
-  const { markdown, ...selection } = selectMemoryContext(query);
+  const { markdown, ...selection } = selectMemoryContext(options.memoryDiagnostic === true ? { ...query, diagnostic: true } : query);
   if (options.onMemorySelection) options.onMemorySelection(selection);
   return markdown;
 }
@@ -598,6 +602,9 @@ function validateRenderOptions(rawOptions) {
   options.memoryLimit = boundedInteger(options.memoryLimit, 12, 0, 50, 'memory_limit');
   options.memoryMaxTokens = boundedInteger(options.memoryMaxTokens, 1200, 0, MAX_CONTEXT_TOKENS, 'memory_max_tokens');
   if (options.onMemorySelection !== undefined && typeof options.onMemorySelection !== 'function') throw new Error('Invalid memory selection callback');
+  // stdin-json retains memoryDiagnostic through cliOptions' base spread. Validate
+  // that API option here too, before optional selection or prompt publication.
+  if (options.memoryDiagnostic !== undefined && typeof options.memoryDiagnostic !== 'boolean') throw new Error('Invalid memory diagnostic option');
   options.standardsMaxTokens = boundedInteger(options.standardsMaxTokens, 3000, 0, MAX_CONTEXT_TOKENS, 'standards_max_tokens');
   // The ledger snapshot budget default lives HERE, as a literal (S02 B2). The
   // skill lines that read `${PREFS[token_budget][ledger_snapshot]:-1500}` are

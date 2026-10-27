@@ -1,0 +1,111 @@
+{
+  "fixture_version": 2,
+  "provenance": "Synthetic owner verification/outcome, no live account",
+  "now": "2026-10-24T12:00:00.000Z",
+  "memoryEvidence": {
+    "records": [
+      {
+        "evidence_ref": "exposure",
+        "observation_id": "fixture-observation-exposure",
+        "observed_kind": "exposure"
+      },
+      {
+        "evidence_ref": "reobserve",
+        "observation_id": "fixture-observation-reobserve",
+        "observed_kind": "reobserve"
+      },
+      {
+        "evidence_ref": "confirm",
+        "observation_id": "fixture-observation-confirm",
+        "observed_kind": "confirm",
+        "independent_ref": "fixture:verified:check-1"
+      },
+      {
+        "evidence_ref": "utility",
+        "observation_id": "fixture-observation-utility",
+        "observed_kind": "utility"
+      }
+    ],
+    "outcomes": [
+      {
+        "outcome_ref": "passed",
+        "outcome_id": "fixture-outcome",
+        "result_ref": "fixture:result:passed"
+      }
+    ]
+  },
+  "extraction": {
+    "schema_version": 2,
+    "status": "done",
+    "summary": "Synthetic compatibility fixture",
+    "questions": [],
+    "facts": [],
+    "events": [
+      {
+        "kind": "exposure",
+        "local_event_id": "e0",
+        "existing_id": "MEM001",
+        "evidence_ref": "exposure"
+      },
+      {
+        "kind": "reobserve",
+        "local_event_id": "e1",
+        "existing_id": "MEM001",
+        "evidence_ref": "reobserve"
+      },
+      {
+        "kind": "confirm",
+        "local_event_id": "e2",
+        "existing_id": "MEM001",
+        "evidence_ref": "confirm"
+      },
+      {
+        "kind": "utility",
+        "local_event_id": "e3",
+        "existing_id": "MEM001",
+        "evidence_ref": "utility",
+        "outcome_ref": "passed"
+      }
+    ]
+  },
+  "ready": {
+    "phase": "ready",
+    "kind": "memory-extraction",
+    "memory_contract_version": 2,
+    "artifacts": [],
+    "extraction": {
+      "schema_version": 2,
+      "status": "done",
+      "summary": "Synthetic compatibility fixture",
+      "questions": [],
+      "facts": [],
+      "events": [
+        {
+          "kind": "exposure",
+          "local_event_id": "e0",
+          "existing_id": "MEM001",
+          "evidence_ref": "exposure"
+        },
+        {
+          "kind": "reobserve",
+          "local_event_id": "e1",
+          "existing_id": "MEM001",
+          "evidence_ref": "reobserve"
+        },
+        {
+          "kind": "confirm",
+          "local_event_id": "e2",
+          "existing_id": "MEM001",
+          "evidence_ref": "confirm"
+        },
+        {
+          "kind": "utility",
+          "local_event_id": "e3",
+          "existing_id": "MEM001",
+          "evidence_ref": "utility",
+          "outcome_ref": "passed"
+        }
+      ]
+    }
+  }
+}

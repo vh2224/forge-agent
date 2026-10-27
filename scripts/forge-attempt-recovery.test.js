@@ -3,6 +3,17 @@ const assert = require('assert');
 const api = require('./forge-attempt-recovery');
 const { ceilingFromRoute } = require('./forge-worker-timeout');
 async function main() {
+  await adapterPreflightRecovery();
+  const linkedFixtures = require('./forge-loop-failure.test'), linkedFixture = linkedFixtures.fixture();
+  try {
+    const consumed = linkedFixtures.consume(linkedFixture);
+    const entered = linkedFixtures.invoke(linkedFixture, 'reenter', consumed.snapshot, linkedFixtures.entryInput(linkedFixture, consumed));
+    const linkedRequest = { ...linkedFixture.request, linked_begin_key: entered.controller_result.details.transaction.idempotency_key };
+    assert.throws(() => api.requestIdentity({ ...linkedRequest, linkedEntryBinding: {}, approved: true }), /binding|required/);
+    const bound = api.bindLinkedRequest(linkedRequest, { ...linkedFixtures.liveOptions(linkedFixture), ownerToken: linkedFixture.input.owner_token });
+    assert.strictEqual(api.requestIdentity(bound).linked_entry.entry_id, 'fixture-entry-1');
+    assert.throws(() => api.requestIdentity(JSON.parse(JSON.stringify(bound))), /binding|required/);
+  } finally { linkedFixtures.cleanup(linkedFixture); }
   let now = 0, saved;
   const identity = { unit: 'execute-task/T-recovery', roots_sha256: 'roots', clock: () => now, persist: state => { saved = state; } };
   const route = { unit_type: 'execute-task', host_runtime: 'codex', resolved_worker_engine: 'claude', worker_mode: 'sidecar',
@@ -80,9 +91,47 @@ async function main() {
   await sessionResumeRecovery({ ...route, worker_mode: 'sidecar', tier: 'heavy', workers_timeout: 21, workers_timeout_source: 'tier-default' });
   await codexAppServerRecovery(identity, route, attempt, inspection, candidateSet);
   await canonicalProvenance();
+  await continuationCrashRace();
   stateSchema(identity, attempt);
   await migratedLimits(identity, route, attempt, inspection, candidateSet);
   console.log('PASS recovery without cumulative clock, canonical candidate provenance/order, adapters, caller repair, pending IDs and live exception');
+}
+async function continuationCrashRace() {
+  const fs = require('fs'), path = require('path'), cp = require('child_process');
+  const fixtures = require('./forge-recovery-transition.test'), f = await fixtures.ordinaryFixture();
+  try {
+    const file = path.join(f.dir, 'continuation-fixture.json');
+    const calls = path.join(f.dir, 'native-calls.txt');
+    fs.writeFileSync(file, JSON.stringify({ request: f.request, stateFile: f.stateFile, receiptFile: f.receiptFile,
+      contract: f.contract, profile: f.profile, history: f.history, now: f.now, originalOptions: f.originalOptions,
+      roadmap: f.roadmap, transitions: f.transitions, resume: f.resume, calls }));
+    const run = () => new Promise((resolve, reject) => {
+      const child = cp.spawn(process.execPath, [__filename, '--continuation-crash', file], { windowsHide: true });
+      let output = ''; child.stdout.on('data', b => { output += b; }); child.stderr.on('data', b => { output += b; });
+      child.on('error', reject); child.on('exit', code => resolve({ code, output }));
+    });
+    const outcomes = await Promise.all([run(), run()]);
+    assert.strictEqual(outcomes.filter(row => row.code === 73).length, 1, JSON.stringify(outcomes));
+    assert.strictEqual(fs.readFileSync(calls, 'utf8'), 'consumed\n');
+    const saved = require('./forge-xllm-state').loadRecovery(f.stateFile);
+    assert.strictEqual(saved.continuation.status, 'dispatch-possible');
+    assert.deepStrictEqual(saved.reservations, f.initial.reservations);
+    const afterCrash = await run(); assert.notStrictEqual(afterCrash.code, 73, afterCrash.output);
+    assert.strictEqual(fs.readFileSync(calls, 'utf8'), 'consumed\n');
+    console.log('PASS continuation CAS: competing OS processes, crash after consumption, restart refuses a second native call');
+  } finally { f.cleanup(); }
+}
+async function continuationCrash() {
+  const fs = require('fs'), fixture = require('./forge-recovery-transition.test');
+  const f = JSON.parse(fs.readFileSync(process.argv[3], 'utf8')); f.binding = fixture.authority(f);
+  const digest = require('./forge-code-roots').digest;
+  await api.recoverAttempt(fixture.options(f, { transitions: f.transitions, resumeReservation: f.resume,
+    transitionAdapter: fixture.adapter(f, { attestUninvoked: challenge => ({ ...challenge,
+      binding_sha256: digest(challenge), status: 'uninvoked', native_calls: 0, evidence_reference: 'fixture:retained-native-tool-census' }) }),
+    invoke: async (_route, invocation, _remaining, guard) => {
+      guard.consumeInvocation(invocation); fs.appendFileSync(f.calls, 'consumed\n'); process.exit(73);
+    },
+  }));
 }
 async function silenceRecovery(identity, route, attempt, inspection, candidateSet) {
   let now = 0, saved;
@@ -772,6 +821,104 @@ async function canonicalProvenance() {
     fs.rmSync(root, { recursive: true, force: true });
   }
 }
+async function adapterPreflightRecovery() {
+  const fs = require('fs'), path = require('path'), roots = require('./forge-code-roots');
+  const fixtures = require('./forge-code-roots.test'), permissions = require('./forge-claude-permissions');
+  const lab = fixtures.fixture();
+  try {
+    const taskDir = path.join(lab.owner, '.gsd/milestones/M001/slices/S01/tasks/T01');
+    fs.mkdirSync(taskDir, { recursive: true });
+    const planFile = path.join(taskDir, 'T01-PLAN.md'), plan = fixtures.plan(lab.contract);
+    fs.writeFileSync(planFile, plan);
+    const route = { unit_type: 'execute-task', host_runtime: 'codex', resolved_worker_engine: 'claude', worker_mode: 'sidecar',
+      model: 'claude-sonnet-5', model_resolved: 'claude-sonnet-5', effort: 'medium', tier: 'standard', dispatch_allowed: true,
+      chain: [{ id: 'claude-sonnet-5', engine: 'claude' }, { id: 'gpt-6-astra', engine: 'gpt' }] };
+    const request = { unitType: 'execute-task', scope: 'milestone', phase: 'execute', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01',
+      cwd: lab.a, contextRoot: lab.owner, planFile, route, dispatchId: 'preflight-236', claudePermissions: 'verification',
+      execution_contract: lab.contract, verification: { commandsByRoot: { alpha: ['node scripts/test.js'], beta: ['node scripts/test.js'] } } };
+    request.resultFile = path.join(lab.dir, 'result.json');
+    request.workflowId = 'preflight-fixture';
+    request.runId = 'preflight-fixture';
+    request.claim = { schema_version: 2, generation: require('crypto').randomUUID(), execution_contract: lab.contract,
+      paths: [{ root_id: 'alpha', path: 'same.txt' }, { root_id: 'beta', path: 'same.txt' }] };
+    request.gates = { plan: 'skipped', planSkipReason: 'interactive-off', claim: 'proceed', security: 'not-applicable' };
+    require('./forge-runs').add(lab.owner, { id: request.runId, kind: 'milestone', session_id: 'fixture', write_claim: request.claim });
+    const identity = { dispatch_id: request.dispatchId, fingerprint: 'a'.repeat(64) };
+    const seal = require('./forge-verify').normalizeExecutionVerification(lab.contract, plan, request.verification, {}, identity);
+    for (const change of [
+      r => { r.gates.claim = 'blocked'; },
+      r => { r.claim.generation = 'foreign'; },
+      r => { r.resultFile = path.join(lab.a, 'same.txt'); },
+      r => { r.planFile = path.join(lab.owner, 'missing.md'); },
+      r => { r.taskId = '../foreign'; },
+      r => { r.verification.commandsByRoot.alpha = [null]; },
+      r => { r.workflowId = ''; },
+    ]) {
+      const invalid = JSON.parse(JSON.stringify(request)); change(invalid);
+      assert.throws(() => permissions.createUnsupportedPreflight({ request: invalid, seal, identity }));
+    }
+    const capability = permissions.createUnsupportedPreflight({ request, seal, identity });
+    const proof = permissions.assertUnsupportedPreflight(capability, request);
+    let observed = { ...proof, process_stopped: true, receipt_checked: true, writer_possible: false, valid_saved_response: false };
+    const options = { unit: 'execute-task/T01', roots_sha256: roots.digest(lab.contract), request, clock: () => 10 };
+    const resolverOptions = { unitType: request.unitType, scope: request.scope, phase: request.phase, unitId: request.taskId,
+      milestoneId: request.milestoneId, cwd: request.contextRoot, contextRoot: request.contextRoot, planPath: planFile, hostRuntime: 'codex' };
+    const candidateSet = api.resolveCandidates(resolverOptions, () => ({ ...route, source: 'fixture' }), request);
+    let revoked = false;
+    const authority = api.createAuthority(reference => revoked ? null : { reference, status: 'resolved', answer: 'authorize', resolved_at: 1 });
+    const readException = () => authority.issue('fixture-live', { unit: options.unit, roots_sha256: options.roots_sha256,
+      purpose: 'sidecar-recovery', expires_at: 1000, gates_preserved: true,
+      routes: [api.routeKey({ ...route, worker_mode: 'native', resolved_worker_engine: 'codex', model: 'gpt-6-astra', model_resolved: 'gpt-6-astra' })] }, () => 10);
+    const recovery = api.createRecovery(options);
+    assert.throws(() => recovery.observeAdapterPreflight({ request, capability: {}, observe: () => observed }), /preflight/);
+    for (const writer_possible of [true, 'unknown']) {
+      assert.throws(() => recovery.observeAdapterPreflight({ request, capability, observe: () => ({ ...observed, writer_possible }) }), /inspection/);
+    }
+    const adapterPreflight = recovery.observeAdapterPreflight({ request, capability, observe: () => observed });
+    const state = recovery.snapshot();
+    assert.strictEqual(state.attempts[0].provider_called, false);
+    assert.strictEqual(state.attempts[0].failure_class, 'caller');
+    const input = { inspection: observed, candidateSet, adapterPreflight, readException,
+      validateInvocation: candidate => ({ ok: true, request: { ...request, dispatchId: 'successor', route: candidate } }) };
+    await assert.rejects(recovery.next({ ...input, adapterPreflight: {} }), /preflight/);
+    const decision = await recovery.next(input);
+    assert.strictEqual(decision.action, 'invoke', JSON.stringify(decision));
+    assert.strictEqual(decision.route.worker_mode, 'native');
+    const requestHash = api.callerRequestHash(decision.invocation.request);
+    assert.throws(() => recovery.reserve(JSON.parse(JSON.stringify(decision)), requestHash), /preflight/);
+    assert.throws(() => recovery.reserve(decision, 'foreign'), /preflight/);
+    revoked = true;
+    assert.throws(() => recovery.reserve(decision, requestHash), /authorized|exception|answer/);
+    revoked = false;
+    request.gates.claim = 'blocked';
+    assert.throws(() => recovery.reserve(decision, requestHash), /preflight|gates/);
+    request.gates.claim = 'proceed';
+    fs.appendFileSync(planFile, '\nchanged');
+    assert.throws(() => recovery.reserve(decision, requestHash), /permission/);
+    fs.writeFileSync(planFile, plan);
+    observed = { ...observed, writer_possible: true };
+    assert.throws(() => recovery.reserve(decision, requestHash), /inspection/);
+    observed = { ...observed, writer_possible: false };
+    recovery.questions(['Required choice']);
+    assert.throws(() => recovery.reserve(decision, requestHash), /preflight|questions/);
+    const pendingRestart = api.createRecovery({ ...options, state: recovery.snapshot() });
+    assert.strictEqual((await pendingRestart.next(input)).action, 'pending-questions');
+    const pendingId = pendingRestart.snapshot().pending_questions[0].id;
+    pendingRestart.answer([{ id: pendingId, answer: 'Proceed with the authorized native route' }]);
+    const answeredCapability = pendingRestart.observeAdapterPreflight({ request,
+      capability: permissions.createUnsupportedPreflight({ request, seal, identity }), observe: () => observed, rebuild: true });
+    assert.strictEqual((await pendingRestart.next({ ...input, adapterPreflight: answeredCapability })).action, 'invoke');
+    const restored = api.createRecovery({ ...options, state });
+    await assert.rejects(restored.next({ ...input, adapterPreflight }), /preflight/);
+    const rebuilt = restored.observeAdapterPreflight({ request, capability: permissions.createUnsupportedPreflight({ request, seal, identity }),
+      observe: () => observed, rebuild: true });
+    const resumed = await restored.next({ ...input, adapterPreflight: rebuilt });
+    const reservation = restored.reserve(resumed, api.callerRequestHash(resumed.invocation.request));
+    assert.strictEqual(reservation.reservations.at(-1).reason, 'adapter-preflight-incompatible');
+    assert.throws(() => restored.reserve(resumed, api.callerRequestHash(resumed.invocation.request)), /reservation|preflight/);
+    console.log('PASS adapter preflight: physical capability, no writer, caller/providerfalse, live authority, drift, questions, restart and one reservation');
+  } finally { lab.cleanup(); }
+}
 async function resumeRecovery() {
   const fixture = JSON.parse(require('fs').readFileSync(process.argv[3], 'utf8'));
   const store = require('./forge-recovery-authority').createRecoveryAuthority({ resolveProfile: () => fixture.request.contextRoot, clock: () => 60001 });
@@ -786,4 +933,5 @@ async function resumeRecovery() {
   const afterReservation = await session.next(input);
   process.stdout.write(JSON.stringify({ native, afterReservation, state: session.snapshot() }));
 }
-(process.argv[2] === '--resume-recovery' ? resumeRecovery() : main()).catch(error => { console.error(error); process.exitCode = 1; });
+(process.argv[2] === '--continuation-crash' ? continuationCrash()
+  : process.argv[2] === '--resume-recovery' ? resumeRecovery() : main()).catch(error => { console.error(error); process.exitCode = 1; });

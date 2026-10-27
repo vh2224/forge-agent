@@ -1,0 +1,31 @@
+﻿2026-10-21T10:00:00.0000000Z ##[group]Runner Image Provisioner
+2026-10-21T10:00:01.0000000Z Version: 9999.1
+2026-10-21T10:00:02.0000000Z ##[endgroup]
+2026-10-21T10:00:03.0000000Z ##[group]Runner Image
+2026-10-21T10:00:04.0000000Z Image: windows-synthetic
+2026-10-21T10:00:05.0000000Z Version: 20261001.1
+2026-10-21T10:00:06.0000000Z ##[endgroup]
+2026-10-21T10:00:07.0000000Z Complete job name: Tests (windows-latest, shard 1/2)
+2026-10-21T10:00:08.0000000Z node: v22.23.3
+2026-10-21T10:00:09.0000000Z Found in cache @ X:/synthetic/node
+2026-10-21T10:00:10.0000000Z Cache hit for: synthetic-cache
+2026-10-21T10:00:11.0000000Z HEAD is now at abcdef1 Synthetic merge
+2026-10-21T10:00:12.0000000Z ##[group]Run test suites
+2026-10-21T10:00:13.0000000Z Shard plan: shard=1/2 algorithm=positional-v1 fallback=none selected=3 universe=6 unprofiled=0 stale=0 predicted_ms=none universe_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa profile_sha256=none partition_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+2026-10-21T10:00:14.0000000Z Running 3 test suites sequentially...
+2026-10-21T10:00:15.0000000Z 
+2026-10-21T10:00:16.0000000Z [32mPASS alpha.test.js (1.23s)[0m
+2026-10-21T10:00:17.0000000Z [32mPASS beta.test.js (2.00s)[0m
+2026-10-21T10:00:18.0000000Z PASS gamma.test.js (0.10s)
+2026-10-21T10:00:19.0000000Z 
+2026-10-21T10:00:20.0000000Z All 3 suites passed in 3.33s.
+2026-10-21T10:00:21.0000000Z Baseline match on win32: 0 known failure(s), 0 new, 0 stale.
+2026-10-21T10:00:22.0000000Z ##[endgroup]
+2026-10-21T10:00:23.0000000Z ##[group]Post job cleanup
+2026-10-21T10:00:24.0000000Z Synthetic cleanup
+2026-10-21T10:00:25.0000000Z ##[endgroup]
+2026-10-21T10:00:26.0000000Z Synthetic padding one
+2026-10-21T10:00:27.0000000Z Synthetic padding two
+2026-10-21T10:00:28.0000000Z Synthetic padding three
+2026-10-21T10:00:29.0000000Z Synthetic padding four
+2026-10-21T10:00:30.0000000Z Synthetic padding five

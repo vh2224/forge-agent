@@ -89,7 +89,7 @@ function sessionDigest(id) {
   return crypto.createHash('sha256').update(id, 'utf8').digest('hex');
 }
 
-function createSessionRef({ id, accountName, configDir: base, cwd, now } = {}) {
+function createSessionRef({ id, accountName, configDir: base, cwd, now, permissionPolicySha256 } = {}) {
   const at = now instanceof Date ? now : new Date(now === undefined ? Date.now() : now);
   const ref = Object.freeze({
     version: SESSION_REF_VERSION,
@@ -98,6 +98,7 @@ function createSessionRef({ id, accountName, configDir: base, cwd, now } = {}) {
     config_dir: base,
     cwd,
     created_at: at.toISOString(),
+    ...(permissionPolicySha256 !== undefined ? { permission_policy_sha256: permissionPolicySha256 } : {}),
   });
   const verdict = validateSessionRef(ref);
   if (!verdict.ok) throw codedError(INVALID_REF, verdict.reason);
@@ -109,6 +110,10 @@ function validateSessionRef(ref) {
   if (!ref || typeof ref !== 'object' || Array.isArray(ref)) return fail('not-object');
   const keys = Object.keys(ref).sort();
   const expected = SESSION_REF_KEYS.slice().sort();
+  if (Object.hasOwn(ref, 'permission_policy_sha256')) {
+    if (typeof ref.permission_policy_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(ref.permission_policy_sha256)) return fail('permission_policy_sha256');
+    expected.push('permission_policy_sha256'); expected.sort();
+  }
   if (keys.length !== expected.length || keys.some((key, i) => key !== expected[i])) return fail('keys');
   if (ref.version !== SESSION_REF_VERSION) return fail('version');
   if (!isSessionId(ref.id)) return fail('id');

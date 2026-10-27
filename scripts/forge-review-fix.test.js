@@ -149,18 +149,31 @@ test('boundary lines', () => {
   assert.strictEqual(rf.outcomeLine('milestone-triage', { verified: false }), '**Decisão:** refatorar — dispatch falhou, virou follow-up');
 });
 
-test('applyReviewOutcomes: idempotent, missing R# refused, snapshot conflict refused', () => {
+test('outcome headings: level 2/3 preserve IDs, section boundaries and EOL', () => {
+  for (const heading of ['##', '###']) for (const eol of ['\n', '\r\n']) {
+    const before = [`${heading} R10 — other`, '- **Correção:** untouched', `${heading} R1 — target`, '- item', '## Next', '- **Correção:** outside', ''].join(eol);
+    const line = '**Correção:** applied';
+    const expected = before.replace(`- item${eol}`, `- item${eol}- ${line}${eol}`);
+    assert.strictEqual(rf.setOutcomeInContent(before, 'R1', line), expected);
+    assert.strictEqual(rf.setOutcomeInContent(expected, 'R1', line), expected);
+    assert.strictEqual(rf.setOutcomeInContent(`${heading} R10 — other${eol}`, 'R1', line), null);
+  }
+  assert.strictEqual(rf.setOutcomeInContent('# R1\n#### R1\n', 'R1', 'x'), null);
+});
+
+for (const heading of ['##', '###']) test(`applyReviewOutcomes ${heading}: idempotent, missing R# refused, snapshot conflict refused`, () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-review-fix-pub-'));
   const rel = '.gsd/milestones/M001/slices/S01/S01-REVIEW.md';
   fs.mkdirSync(path.join(root, path.dirname(rel)), { recursive: true });
-  fs.writeFileSync(path.join(root, rel), REVIEW);
+  const review = REVIEW.replace(/^### /gm, `${heading} `);
+  fs.writeFileSync(path.join(root, rel), review);
   const resolveTarget = (base, relative) => path.join(base, relative);
-  const snapshot = { [rel]: sha256(Buffer.from(REVIEW)) };
+  const snapshot = { [rel]: sha256(Buffer.from(review)) };
   const outcomes = [{ r: 'R1', reviewFile: rel, line: rf.outcomeLine('slice', { verified: true, commitSha: 'abc1234' }) }];
   const first = rf.applyReviewOutcomes({ root, resolveTarget, outcomes, expectedHashes: snapshot });
   assert.deepStrictEqual(first.written, [rel]);
   const bytes = fs.readFileSync(path.join(root, rel), 'utf8');
-  assert.match(bytes, /### R1 — bug\n- \*\*Veredito:\*\* CONCEDED\n- \*\*Correção:\*\* aplicada — commit abc1234/);
+  assert.ok(bytes.includes(`${heading} R1 — bug\n- **Veredito:** CONCEDED\n- **Correção:** aplicada — commit abc1234`));
   const replay = rf.applyReviewOutcomes({ root, resolveTarget, outcomes, expectedHashes: snapshot });
   assert.deepStrictEqual(replay.written, [], 'replay changes no bytes');
   assert.strictEqual(fs.readFileSync(path.join(root, rel), 'utf8'), bytes);

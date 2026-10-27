@@ -105,8 +105,7 @@ test('VERIFIED: knownFn defined and exported in fixture dir', () => {
   assertEq(result.state, 'VERIFIED', 'expected VERIFIED');
   assert(typeof result.location === 'string' && result.location.length > 0, 'location should be a non-empty string');
   assert(result.location.includes('fixture.js'), `location should mention fixture.js, got: ${result.location}`);
-  // exported: true because exports.knownFn is on same line as the definition or there is exports.knownFn
-  assert(typeof result.exported === 'boolean', 'exported should be boolean');
+  assertEq(result.exported, true, 'separate exports assignment is recognized');
 });
 
 test('MISSING: ghostFn not defined anywhere in fixture dir', () => {
@@ -166,13 +165,75 @@ test('VERIFIED: exported flag is true when module.exports contains symbol', () =
 
   const result = resolveSymbol('exportedFn', dir);
   assertEq(result.state, 'VERIFIED');
-  // The definition line itself contains 'function exportedFn' — check exported separately
-  // Note: exported might be false if the definition line doesn't have export keyword
-  // The important thing is state is VERIFIED and location is set
-  assert(typeof result.exported === 'boolean');
+  assertEq(result.exported, true);
+});
+
+test('static CommonJS metadata resolves values without executing the inspected file', () => {
+  const cases = [
+    ['shorthand', 'module.exports = { sampleFn };', true],
+    ['named', 'module.exports = { publicName: sampleFn };', true],
+    ['multiline', 'module.exports = {\n publicName: sampleFn,\n};', true],
+    ['property', 'exports.publicName = sampleFn;', true],
+    ['module-property', 'module.exports.publicName = sampleFn;', true],
+    ['direct', 'module.exports = sampleFn;', true],
+    ['none', 'const local = 42;', false],
+    ['unresolved-value', 'module.exports = { otherFn };', null],
+    ['unresolved-named-value', 'module.exports = { sampleFn: otherFn };', null],
+    ['empty-object', 'module.exports = {};', false],
+    ['comment', '// module.exports = { sampleFn };\n/* exports.name = sampleFn; */', false],
+    ['string', 'const text = "module.exports = { sampleFn };";', false],
+    ['dynamic', 'module.exports = chooseExports();', null],
+    ['computed', 'exports[key] = sampleFn;', null],
+    ['conditional', 'if (condition) module.exports = { sampleFn };', null],
+    ['conditional-newline', 'if (condition)\nmodule.exports = { sampleFn };', null],
+    ['prototype', 'module.exports = { __proto__: sampleFn };', null],
+    ['nested', 'function setup() { module.exports = { sampleFn }; }', null],
+    ['spread', 'module.exports = { ...other, sampleFn };', null],
+    ['replaced', 'module.exports = { sampleFn };\nmodule.exports = other;', null],
+    ['shadowed', 'const module = {};\nmodule.exports = { sampleFn };', null],
+    ['alias-detached', 'module.exports = {};\nexports.name = sampleFn;', null],
+    ['template', 'const text = `module.exports = { sampleFn };`;', null],
+    ['regex', 'const text = /module.exports = { sampleFn }/;', null],
+  ];
+  for (const [name, source, expected] of cases) {
+    const dir = mkTmpDir(`export-static-${name}`);
+    writeFile(dir, 'fixture.js', `function sampleFn() { return 42; }\nfunction otherFn() {}\n${source}\nthrow new Error('must never execute');\n`);
+    const result = resolveSymbol('sampleFn', dir);
+    assertEq(result.state, 'VERIFIED', name);
+    assertEq(result.exported, expected, name);
+  }
+  const dir = mkTmpDir('export-no-definition');
+  writeFile(dir, 'fixture.js', 'module.exports = { absentFn };');
+  assertEq(resolveSymbol('absentFn', dir).state, 'MISSING');
+  const esm = mkTmpDir('export-esm');
+  writeFile(esm, 'fixture.mjs', 'export function sampleFn() {}');
+  assertEq(resolveSymbol('sampleFn', esm).exported, true);
 });
 
 // ── Section 2: greenfield exclusion ──────────────────────────────────────────
+
+test('static CommonJS metadata does not mistake newline continuations for completed assignments', () => {
+  for (const suffix of ['\n(123);', '\n+ 1;']) {
+    const dir = mkTmpDir('export-newline-continuation');
+    writeFile(dir, 'fixture.js', `function sampleFn() { return 42; }\nexports.publicName = sampleFn${suffix}\n`);
+    const result = resolveSymbol('sampleFn', dir);
+    assertEq(result.state, 'VERIFIED');
+    assertEq(result.exported, null, suffix);
+  }
+});
+
+test('static CommonJS metadata leaves unresolved object and property aliases unknown', () => {
+  for (const body of [
+    'const api = { sampleFn };\nmodule.exports = api;',
+    'const alias = sampleFn;\nexports.publicName = alias;',
+  ]) {
+    const dir = mkTmpDir('export-unresolved-alias');
+    writeFile(dir, 'fixture.js', `function sampleFn() {}\n${body}\n`);
+    const result = resolveSymbol('sampleFn', dir);
+    assertEq(result.state, 'VERIFIED');
+    assertEq(result.exported, null, body);
+  }
+});
 
 process.stdout.write('\nSection 2: Greenfield exclusion\n\n');
 

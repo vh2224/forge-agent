@@ -11,6 +11,12 @@ on:
 permissions:
   contents: read
 
+# Superseded pull request runs are cancelled; every other event gets a
+# unique per-run group, so master validation is never cancelled or queued.
+concurrency:
+  group: app-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   app:
     name: Swift app and PTY regressions

@@ -413,11 +413,11 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// Rewrite (or insert) one outcome line inside the `### R{n}` section. Pure.
+// Rewrite (or insert) one outcome line inside a `## R{n}` or `### R{n}` section. Pure.
 function setOutcomeInContent(content, r, line) {
   const eol = content.includes('\r\n') ? '\r\n' : '\n';
   const lines = content.split(/\r?\n/);
-  const header = new RegExp(`^###\\s+${escapeRegExp(r)}(?!\\d)`);
+  const header = new RegExp(`^#{2,3}\\s+${escapeRegExp(r)}(?!\\d)`);
   const start = lines.findIndex(text => header.test(text));
   if (start === -1) return null;
   let end = lines.length;

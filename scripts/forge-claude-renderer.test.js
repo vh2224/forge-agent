@@ -140,7 +140,13 @@ try {
     assert.strictEqual(renderer.hasOriginMarker(text), true, `projeção CRLF (${label}) lida como user-owned`);
   }
 
-  const golden = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'claude-renderer', 'claude-4.19.0.golden.json'), 'utf8'));
+  const historicalBytes = fs.readFileSync(path.join(__dirname, 'fixtures', 'claude-renderer', 'claude-4.19.0.golden.json'));
+  assert.strictEqual(crypto.createHash('sha256').update(historicalBytes).digest('hex'),
+    'f2b3e910445d2557f50aa4ced9e1b31498debc6b1cdd1ed05b452d8141b4307f', 'historical Claude 4.19.0 golden must remain byte-for-byte unchanged');
+  const golden = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'claude-renderer', 'claude-memory-v2.golden.json'), 'utf8'));
+  assert.strictEqual(golden.surfaces.length, 9);
+  assert.deepStrictEqual(golden.surfaces.map(({ sha256, ...identity }) => identity),
+    JSON.parse(historicalBytes).surfaces.map(({ sha256, ...identity }) => identity));
   assert.strictEqual(golden.runtime, first.runtime);
   assert.strictEqual(golden.version_policy, 'normalized-dynamic');
   for (const surface of golden.surfaces) {

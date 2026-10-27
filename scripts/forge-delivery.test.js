@@ -403,6 +403,65 @@ test('commands inside evidence remain inert data', () => {
   assert.strictEqual(fs.existsSync(marker), false);
 });
 
+test('staged and disk evidence produce identical whole deliveries and child fingerprints', () => {
+  const unit = { type: 'task', id: 'T01', milestone: 'M001', slice: 'S01' };
+  const fx = fixture('staged-parity', unit);
+  const verification = verificationEnvelope(fx, [{ exitCode: 0 }]);
+  const artifact = artifactEnvelope(fx, [{ path: 'scripts/result.js', exists: true, substantive: true, wired: true, flags: [] }]);
+  const sources = { 'unpublished/nested/verify.json': verification, 'unpublished/nested/artifact.json': artifact };
+  fx.input.bindings = [
+    bind('verification', Object.keys(sources)[0], criterionId(unit, 'truth', 0), { check_index: 0 }, 'behavioral'),
+    bind('artifact', Object.keys(sources)[1], criterionId(unit, 'artifact', 0), { row_index: 0, property: 'exists' }, 'structural'),
+  ];
+  const options = { ownerRoot: fx.owner, codeDir: fx.code };
+  const staged = delivery.buildDelivery(fx.input, { ...options, sourceEnvelopes: sources });
+  assert.strictEqual(byId(staged, criterionId(unit, 'artifact', 0)).status, 'verificado');
+  for (const [ref, envelope] of Object.entries(sources)) writeJson(path.join(fx.owner, ref), envelope);
+  const disk = delivery.buildDelivery(fx.input, options);
+  assert.deepStrictEqual(staged, disk);
+  assert.deepStrictEqual(delivery.buildDelivery(fx.input, { ...options, sourceEnvelopes: sources }), disk);
+  const absoluteInput = structuredClone(fx.input), absoluteSources = {};
+  for (const binding of absoluteInput.bindings) {
+    const relative = binding.source.path;
+    binding.source.path = path.join(fx.owner, relative);
+    absoluteSources[binding.source.path] = sources[relative];
+  }
+  assert.deepStrictEqual(delivery.buildDelivery(absoluteInput, options), disk);
+  assert.deepStrictEqual(delivery.buildDelivery(absoluteInput, { ...options, sourceEnvelopes: absoluteSources }), disk);
+  const parent = { ...fx.input, unit: { type: 'slice', id: 'S01', milestone: 'M001' }, bindings: [],
+    expected_children: [{ unit, delivery: 'child.json' }] };
+  writeJson(path.join(fx.owner, 'child.json'), staged);
+  const stagedParent = delivery.buildDelivery(parent, options);
+  assert.strictEqual(byId(stagedParent, criterionId(unit, 'artifact', 0)).status, 'verificado');
+  writeJson(path.join(fx.owner, 'child.json'), disk);
+  assert.deepStrictEqual(delivery.buildDelivery(parent, options), stagedParent);
+  assert(stagedParent.criteria.some(row => row.id === criterionId(unit, 'truth', 0) && row.status === 'verificado'));
+});
+
+test('staged references retain physical root containment before publication', () => {
+  const fx = fixture('staged-containment'), id = criterionId(fx.unit, 'truth', 0);
+  const envelope = verificationEnvelope(fx, [{ exitCode: 0 }]);
+  const outside = path.join(fx.root, 'outside/verify.json');
+  const input = { ...fx.input, bindings: [bind('verification', outside, id, { check_index: 0 }, 'behavioral')] };
+  const output = delivery.buildDelivery(input, { ownerRoot: fx.owner, codeDir: fx.code, sourceEnvelopes: { [outside]: envelope } });
+  assert.notEqual(byId(output, id).status, 'verificado');
+  assert(byId(output, id).evidence.some(row => row.reasons.includes('source_outside_roots')));
+});
+
+test('staged missing descendants cannot escape through a linked or dangling ancestor', () => {
+  const fx = fixture('staged-links'), id = criterionId(fx.unit, 'truth', 0);
+  const target = path.join(fx.root, 'outside'); fs.mkdirSync(target);
+  const link = path.join(fx.owner, 'linked');
+  try { fs.symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir'); }
+  catch (error) { if (error.code === 'EPERM') skip('symlink creation unavailable: EPERM'); throw error; }
+  const ref = 'linked/not-published.json', envelope = verificationEnvelope(fx, [{ exitCode: 0 }]);
+  const input = { ...fx.input, bindings: [bind('verification', ref, id, { check_index: 0 }, 'behavioral')] };
+  const staged = () => byId(delivery.buildDelivery(input, { ownerRoot: fx.owner, codeDir: fx.code, sourceEnvelopes: { [ref]: envelope } }), id);
+  assert(staged().evidence.some(row => row.reasons.includes('source_outside_roots')));
+  fs.rmdirSync(target);
+  assert(staged().evidence.some(row => row.reasons.includes('source_unreadable')));
+});
+
 test('Markdown rendering escapes pipes, line breaks, markup and backticks', () => {
   const fx = fixture('markdown', { type: 'task', id: 'TMD' }, plan('pipe | line <tag> `code` ![x](url) **bold**'));
   const markdown = delivery.renderDeliveryMarkdown(build(fx));
@@ -643,6 +702,70 @@ test('v2 global truths require both roots and reject a substituted identity', ()
   input.bindings.push(binding('beta')); assert.strictEqual(build().criteria[0].status, 'verificado');
   const source = JSON.parse(fs.readFileSync(path.join(f.owner, 'beta.json'))); source.root_identity_sha256 = 'forged';
   writeJson(path.join(f.owner, 'beta.json'), source); assert.notStrictEqual(build().criteria[0].status, 'verificado'); f.cleanup();
+});
+
+test('documentary capture is distinct from behavior and requires bound independent review provenance', () => {
+  const fx=fixture('documentary'), id=criterionId(fx.unit,'truth',0);
+  const criterion=delivery.inventoryPlan(fx.planText,'task/PLAN.md',fx.unit).criteria.find(row=>row.id===id);
+  const capture={schema_version:1,original_manifest_sha256:'a'.repeat(64),original_result_sha256:'b'.repeat(64),
+    original_receipt_sha256:'c'.repeat(64),review_reference:'review:fixture',reviewer:'reviewer',producer:'worker',
+    criteria:[{criterion_id:id,text:criterion.text,eligibility:'documentary',status:'met',
+      rationale:'The fixture criterion requires documentary review.',evidence:'Exact content reviewed.',
+      documents:[{path:'doc.md',sha256:'d'.repeat(64)}]}]};
+  const emit=value=>{const payload=structuredClone(value);payload.fingerprint=delivery.fingerprint(payload);
+    writeJson(path.join(fx.owner,'documentary.json'),artifactEnvelope(fx,[],{documentary:payload}));};
+  fx.input.bindings=[bind('artifact','documentary.json',id,{property:'documentary'},'documentary')];
+  emit(capture);let result=byId(build(fx),id);assert.equal(result.status,'verificado');
+  const documentaryBytes = JSON.parse(fs.readFileSync(path.join(fx.owner, 'documentary.json'), 'utf8'));
+  assert.deepStrictEqual(delivery.buildDelivery(fx.input, { ownerRoot: fx.owner, codeDir: fx.code,
+    sourceEnvelopes: { 'documentary.json': documentaryBytes } }), build(fx));
+  assert.equal(result.evidence[0].coverage,'documentary');
+  for(const mutate of [value=>{value.reviewer=value.producer;},value=>{value.criteria[0].text='foreign';},
+    value=>{value.criteria[0].eligibility='behavioral';},value=>{value.criteria[0].documents=[];},
+    value=>{value.original_manifest_sha256='bad';},value=>{value.criteria=[null];},value=>{value.criteria[0].documents=[null];}]) {
+    const changed=structuredClone(capture);mutate(changed);emit(changed);
+    assert.notEqual(byId(build(fx),id).status,'verificado');
+  }
+  emit(capture);const source=JSON.parse(fs.readFileSync(path.join(fx.owner,'documentary.json')));
+  source.documentary.criteria[0].evidence='changed without recapture';writeJson(path.join(fx.owner,'documentary.json'),source);
+  assert.notEqual(byId(build(fx),id).status,'verificado');
+  writeJson(path.join(fx.owner,'documentary.json'),artifactEnvelope(fx,[]));
+  assert.notEqual(byId(build(fx),id).status,'verificado','coverage label alone is never proof');
+});
+
+test('mixed obligations are AND tuples, survive missing bindings and aggregate fail closed', () => {
+  const fx=fixture('mixed-obligations',{type:'task',id:'T01',milestone:'M001',slice:'S01'}),id=criterionId(fx.unit,'truth',0);
+  const criterion=delivery.inventoryPlan(fx.planText,'task/PLAN.md',fx.unit).criteria.find(c=>c.id===id);
+  const required=[{aspect:criterion.aspects[0],root_id:'alpha',coverage:'behavioral'},{aspect:criterion.aspects[0],root_id:'alpha',coverage:'documentary'}];
+  const observation=coverage=>({aspect:criterion.aspects[0],root_id:'alpha',coverage,positive:true,negative:false,limitations:[],reasons:[],revision:'same'});
+  const classify=observations=>delivery.classifyCriterion({...criterion,required_coverages:required,observations});
+  assert.notEqual(classify([observation('behavioral')]).status,'verificado');
+  assert.notEqual(classify([observation('documentary')]).status,'verificado');
+  assert.equal(classify([observation('behavioral'),observation('documentary')]).status,'verificado');
+  assert.notEqual(classify([observation('behavioral'),{...observation('documentary'),root_id:'beta'}]).status,'verificado','no Cartesian substitution');
+  assert.notEqual(classify([observation('behavioral'),{...observation('documentary'),negative:true}]).status,'verificado');
+  assert.notEqual(classify([observation('behavioral'),{...observation('documentary'),revision:'foreign'}]).status,'verificado');
+  writeJson(path.join(fx.owner,'verify.json'),verificationEnvelope(fx,[{exitCode:0}],{root_id:'alpha'}));
+  fx.input.bindings=[{...bind('verification','verify.json',id,{check_index:0},'behavioral'),required_coverages:required}];
+  let output=build(fx);assert.deepStrictEqual(byId(output,id).required_coverages,required);
+  assert.notEqual(byId(output,id).status,'verificado','removing documentary binding retains obligation on behavioral binding');
+  fx.input.bindings[0].source.path='missing.json';output=build(fx);
+  assert.deepStrictEqual(byId(output,id).required_coverages,required,'source failure cannot erase obligation');
+  fx.input.bindings[0].required_coverages=[{...required[0],coverage:'arbitrary'}];
+  assert(build(fx).diagnostics.some(d=>d.startsWith('binding_required_coverages_invalid')));
+  const child=build(fx,{...fx.input,bindings:[]});
+  child.criteria[0]=classify([observation('behavioral'),observation('documentary')]);
+  const aggregate=()=>build(fx,{...fx.input,bindings:[],unit:{type:'slice',id:'S01',milestone:'M001'},
+    expected_children:[{unit:fx.unit,delivery:'mixed-child.json'}]});
+  writeJson(path.join(fx.owner,'mixed-child.json'),delivery.finalizeOutput(child));
+  assert.equal(byId(aggregate(),id).status,'verificado');
+  child.criteria[0].evidence=child.criteria[0].evidence.filter(row=>row.coverage!=='documentary');
+  child.criteria[0].status='verificado';child.criteria[0].pending=[];
+  writeJson(path.join(fx.owner,'mixed-child.json'),delivery.finalizeOutput(child));
+  assert.notEqual(byId(aggregate(),id).status,'verificado','aggregation recomputes mixed obligation despite claimed green status');
+  child.criteria[0].required_coverages=[{...required[0],coverage:'unsupported'}];
+  writeJson(path.join(fx.owner,'mixed-child.json'),delivery.finalizeOutput(child));
+  assert(aggregate().diagnostics.some(d=>d.includes('child_required_coverages_invalid')));
 });
 
 for (const root of roots) { try { fs.rmSync(root, { recursive: true, force: true }); } catch (_) {} }

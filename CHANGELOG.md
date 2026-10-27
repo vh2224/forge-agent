@@ -1,5 +1,10 @@
 ## Não lançado
 
+- Retomada de reserva nativa sem handoff exige atestado vivo de ausência de chamada,
+  vinculado ao pedido, receipt e reserva originais. O consumo é persistido antes do
+  callback e protegido contra concorrência; tentativas, destino e relógios anteriores
+  são preservados. Entrega de milestone usa contrato próprio, critérios completos e
+  verificações por raiz, com resultado durável e replay sem nova inferência.
 - Execução direta deixa de ter uma proibição absoluta para unidades Forge: reparos
   explicitamente autorizados do próprio Forge podem ser feitos pela sessão atual,
   preservando preparação, isolamento de arquivos, claims, reconciliação de writers,

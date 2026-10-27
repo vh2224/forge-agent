@@ -1,0 +1,232 @@
+{
+  "fixture_version": 2,
+  "provenance": "Synthetic composition; legacy sequence and multiplicity retained",
+  "now": "2026-10-24T12:00:00.000Z",
+  "fragments": [
+    {
+      "unit_id": "T01",
+      "milestone_id": "M001",
+      "facts": [
+        {
+          "mem_id": "MEM001",
+          "category": "architecture",
+          "text": "Synthetic reusable architecture constraint.",
+          "confidence_base": 0.9,
+          "created_at": "2026-10-24T12:00:00.000Z",
+          "source_unit": "execute-task/T01"
+        },
+        {
+          "mem_id": "MEM002",
+          "category": "architecture",
+          "text": "Synthetic superseded constraint.",
+          "confidence_base": 0.9,
+          "created_at": "2026-10-24T12:00:00.000Z",
+          "source_unit": "execute-task/T01"
+        },
+        {
+          "mem_id": "MEM003",
+          "category": "architecture",
+          "text": "Synthetic pruned constraint.",
+          "confidence_base": 0.9,
+          "created_at": "2026-10-24T12:00:00.000Z",
+          "source_unit": "execute-task/T01"
+        }
+      ],
+      "stats": [
+        {
+          "kind": "hit",
+          "mem_id": "MEM001",
+          "ts": "2026-10-24T12:00:00.000Z"
+        },
+        {
+          "kind": "seed",
+          "mem_id": "MEM001",
+          "ts": "2026-10-24T12:00:00.000Z",
+          "confidence_base": 0.9,
+          "hits": 2
+        },
+        {
+          "kind": "hit",
+          "mem_id": "MEM001",
+          "ts": "2026-10-24T12:00:00.000Z"
+        },
+        {
+          "kind": "hit",
+          "mem_id": "MEM001",
+          "ts": "2026-10-24T12:00:00.000Z"
+        },
+        {
+          "kind": "confirm",
+          "mem_id": "MEM001",
+          "ts": "2026-10-24T12:00:00.000Z"
+        },
+        {
+          "kind": "promote",
+          "mem_id": "MEM001",
+          "ts": "2026-10-24T12:00:00.000Z"
+        },
+        {
+          "kind": "decay",
+          "mem_id": "MEM001",
+          "ts": "2026-10-24T12:00:00.000Z",
+          "new_confidence": 0.7
+        },
+        {
+          "kind": "supersede",
+          "old_id": "MEM002",
+          "new_id": "MEM001",
+          "ts": "2026-10-24T12:00:00.000Z"
+        },
+        {
+          "kind": "prune",
+          "mem_id": "MEM003",
+          "reason": "cap",
+          "ts": "2026-10-24T12:00:00.000Z"
+        },
+        {
+          "kind": "exposure",
+          "evidence_version": 2,
+          "event_id": "fixture-v2:v2:e0",
+          "extraction_id": "fixture-v2",
+          "local_event_id": "e0",
+          "ts": "2026-10-24T12:00:00.000Z",
+          "mem_id": "MEM001",
+          "evidence_ref": "exposure",
+          "observation_id": "fixture-observation-exposure",
+          "source_unit": "execute-task/T01",
+          "source_fingerprint": "sha256:fixture",
+          "observed_kind": "exposure"
+        },
+        {
+          "kind": "reobserve",
+          "evidence_version": 2,
+          "event_id": "fixture-v2:v2:e1",
+          "extraction_id": "fixture-v2",
+          "local_event_id": "e1",
+          "ts": "2026-10-24T12:00:00.000Z",
+          "mem_id": "MEM001",
+          "evidence_ref": "reobserve",
+          "observation_id": "fixture-observation-reobserve",
+          "source_unit": "execute-task/T01",
+          "source_fingerprint": "sha256:fixture",
+          "observed_kind": "reobserve"
+        },
+        {
+          "kind": "confirm",
+          "evidence_version": 2,
+          "event_id": "fixture-v2:v2:e2",
+          "extraction_id": "fixture-v2",
+          "local_event_id": "e2",
+          "ts": "2026-10-24T12:00:00.000Z",
+          "mem_id": "MEM001",
+          "evidence_ref": "confirm",
+          "observation_id": "fixture-observation-confirm",
+          "source_unit": "execute-task/T01",
+          "source_fingerprint": "sha256:fixture",
+          "observed_kind": "confirm",
+          "independent_ref": "fixture:verified:check-1"
+        },
+        {
+          "kind": "utility",
+          "evidence_version": 2,
+          "event_id": "fixture-v2:v2:e3",
+          "extraction_id": "fixture-v2",
+          "local_event_id": "e3",
+          "ts": "2026-10-24T12:00:00.000Z",
+          "mem_id": "MEM001",
+          "evidence_ref": "utility",
+          "observation_id": "fixture-observation-utility",
+          "source_unit": "execute-task/T01",
+          "source_fingerprint": "sha256:fixture",
+          "observed_kind": "utility",
+          "outcome_ref": "passed",
+          "outcome_id": "fixture-outcome",
+          "outcome_result_ref": "fixture:result:passed"
+        }
+      ]
+    },
+    {
+      "unit_id": "T01",
+      "milestone_id": "M002",
+      "facts": [
+        {
+          "mem_id": "MEM001",
+          "category": "architecture",
+          "text": "Same local ID in another milestone.",
+          "confidence_base": 0.9,
+          "created_at": "2026-10-24T12:00:00.000Z",
+          "source_unit": "execute-task/T01"
+        }
+      ],
+      "stats": []
+    }
+  ],
+  "replay_rows": [
+    {
+      "kind": "exposure",
+      "evidence_version": 2,
+      "event_id": "fixture-v2:v2:e0",
+      "extraction_id": "fixture-v2",
+      "local_event_id": "e0",
+      "ts": "2026-10-24T12:00:00.000Z",
+      "mem_id": "MEM001",
+      "evidence_ref": "exposure",
+      "observation_id": "fixture-observation-exposure",
+      "source_unit": "execute-task/T01",
+      "source_fingerprint": "sha256:fixture",
+      "observed_kind": "exposure"
+    },
+    {
+      "kind": "reobserve",
+      "evidence_version": 2,
+      "event_id": "fixture-v2:v2:e1",
+      "extraction_id": "fixture-v2",
+      "local_event_id": "e1",
+      "ts": "2026-10-24T12:00:00.000Z",
+      "mem_id": "MEM001",
+      "evidence_ref": "reobserve",
+      "observation_id": "fixture-observation-reobserve",
+      "source_unit": "execute-task/T01",
+      "source_fingerprint": "sha256:fixture",
+      "observed_kind": "reobserve"
+    },
+    {
+      "kind": "confirm",
+      "evidence_version": 2,
+      "event_id": "fixture-v2:v2:e2",
+      "extraction_id": "fixture-v2",
+      "local_event_id": "e2",
+      "ts": "2026-10-24T12:00:00.000Z",
+      "mem_id": "MEM001",
+      "evidence_ref": "confirm",
+      "observation_id": "fixture-observation-confirm",
+      "source_unit": "execute-task/T01",
+      "source_fingerprint": "sha256:fixture",
+      "observed_kind": "confirm",
+      "independent_ref": "fixture:verified:check-1"
+    },
+    {
+      "kind": "utility",
+      "evidence_version": 2,
+      "event_id": "fixture-v2:v2:e3",
+      "extraction_id": "fixture-v2",
+      "local_event_id": "e3",
+      "ts": "2026-10-24T12:00:00.000Z",
+      "mem_id": "MEM001",
+      "evidence_ref": "utility",
+      "observation_id": "fixture-observation-utility",
+      "source_unit": "execute-task/T01",
+      "source_fingerprint": "sha256:fixture",
+      "observed_kind": "utility",
+      "outcome_ref": "passed",
+      "outcome_id": "fixture-outcome",
+      "outcome_result_ref": "fixture:result:passed"
+    }
+  ],
+  "arrival_order": [
+    3,
+    1,
+    0,
+    2
+  ]
+}

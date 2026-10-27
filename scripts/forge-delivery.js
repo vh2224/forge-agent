@@ -68,8 +68,31 @@ function resolveSafeFile(reference, roots, options = {}) {
   if (!nonEmpty(reference)) return { error: 'reference_missing' };
   const absolute = path.isAbsolute(reference) ? path.resolve(reference) : path.resolve(options.base || roots[0], reference);
   let real;
-  try { real = fs.realpathSync.native(absolute); } catch (error) { return { error: error.code === 'ENOENT' ? 'source_missing' : 'source_unreadable' }; }
+  let missing = false;
+  try { real = fs.realpathSync.native(absolute); } catch (error) {
+    if (error.code !== 'ENOENT' || !options.allowMissing) return { error: error.code === 'ENOENT' ? 'source_missing' : 'source_unreadable' };
+    // Staging precedes publication. Resolve the nearest existing ancestor using
+    // the same physical roots as disk reads; never treat a dangling link as an
+    // absent directory or use the unvalidated caller string as evidence identity.
+    let ancestor = absolute;
+    for (;;) {
+      try {
+        const physical = fs.realpathSync.native(ancestor);
+        real = path.resolve(physical, path.relative(ancestor, absolute));
+        missing = true;
+        break;
+      } catch (ancestorError) {
+        if (ancestorError.code !== 'ENOENT') return { error: 'source_unreadable' };
+        try { if (fs.lstatSync(ancestor).isSymbolicLink()) return { error: 'source_unreadable' }; }
+        catch (statError) { if (statError.code !== 'ENOENT') return { error: 'source_unreadable' }; }
+        const parent = path.dirname(ancestor);
+        if (parent === ancestor) return { error: 'source_unreadable' };
+        ancestor = parent;
+      }
+    }
+  }
   if (!roots.some((root) => inside(root, real))) return { error: 'source_outside_roots' };
+  if (missing) return { path: real };
   let stat;
   try { stat = fs.statSync(real); } catch (_) { return { error: 'source_unreadable' }; }
   if (!stat.isFile()) return { error: 'source_not_file' };
@@ -229,6 +252,7 @@ function verificationObservation(binding, envelope, sourcePath, criterion, expec
 }
 
 function artifactObservation(binding, envelope, sourcePath, criterion, expected) {
+  if (binding.source.property === 'documentary') return documentaryObservation(binding, envelope, sourcePath, criterion, expected);
   const aspect = nonEmpty(binding.aspect) ? binding.aspect : criterion.aspects[0];
   const index = binding.source.row_index;
   const property = binding.source.property;
@@ -271,6 +295,41 @@ function artifactObservation(binding, envelope, sourcePath, criterion, expected)
   return observation;
 }
 
+// Documentary captures use the same persisted-envelope trust boundary as local
+// command captures. A digest detects alteration; it is not a signature or a
+// substitute for the live authority required by the capture adapter.
+function documentaryObservation(binding, envelope, sourcePath, criterion, expected) {
+  const observation = observationBase(binding, `${sourcePath}#documentary`, binding.aspect || criterion.aspects[0]);
+  observation.environment = envelope.environment || null;
+  observation.revision = envelope.revision || null;
+  if (expected.executionContract) observation.root_id = envelope.root_id;
+  const reasons = contextReasons(envelope, expected);
+  const capture = envelope.documentary;
+  const sha = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+  if (binding.coverage !== 'documentary' || envelope.kind !== 'artifact' || envelope.schema_version !== SCHEMA_VERSION
+      || !isObject(capture) || capture.schema_version !== 1) reasons.push('documentary_capture_invalid');
+  if (isObject(capture)) {
+    const {fingerprint: saved, ...payload} = capture;
+    if (saved !== fingerprint(payload)) reasons.push('documentary_capture_fingerprint');
+    if (!sha(capture.original_manifest_sha256) || !sha(capture.original_result_sha256)
+        || !sha(capture.original_receipt_sha256) || !nonEmpty(capture.review_reference)
+        || !nonEmpty(capture.reviewer) || !nonEmpty(capture.producer)
+        || capture.reviewer === capture.producer) reasons.push('documentary_provenance_invalid');
+    const rows = Array.isArray(capture.criteria) ? capture.criteria.filter(row => isObject(row) && row.criterion_id === criterion.id && row.root_id === envelope.root_id) : [];
+    const row = rows[0];
+    if (rows.length !== 1 || row.text !== criterion.text || row.root_id !== envelope.root_id
+        || row.eligibility !== 'documentary' || row.status !== 'met' || !nonEmpty(row.rationale)
+        || !nonEmpty(row.evidence) || !Array.isArray(row.documents) || !row.documents.length
+        || row.documents.some(doc => !isObject(doc) || !nonEmpty(doc.path) || !sha(doc.sha256))) reasons.push('documentary_criterion_invalid');
+    observation.review_reference = capture.review_reference;
+    observation.evidence_limit = 'Independent review of documentary requirements only; no implementation, remote CI or UAT claim.';
+  }
+  observation.positive = reasons.length === 0;
+  observation.reasons.push(...reasons);
+  observation.limitations.push(...reasons);
+  return observation;
+}
+
 function advisoryObservation(binding, ownerRoot, criterion) {
   const aspect = nonEmpty(binding.aspect) ? binding.aspect : criterion.aspects[0];
   const observation = observationBase(binding, binding.source.path || 'verification_evidence', aspect);
@@ -282,6 +341,13 @@ function advisoryObservation(binding, ownerRoot, criterion) {
   return observation;
 }
 
+function validRequiredCoverages(value, criterion) {
+  return Array.isArray(value) && value.length > 0 && value.length <= 64
+    && value.every(row => isObject(row) && Object.keys(row).sort().join(',') === 'aspect,coverage,root_id'
+      && criterion.aspects.includes(row.aspect) && nonEmpty(row.root_id)
+      && ['behavioral', 'documentary'].includes(row.coverage))
+    && new Set(value.map(row => JSON.stringify([row.aspect,row.root_id,row.coverage]))).size === value.length;
+}
 function applyBindings(input, criteria, context, diagnostics) {
   const bindings = input.bindings === undefined ? [] : input.bindings;
   if (!Array.isArray(bindings)) { diagnostics.push('bindings_invalid'); return; }
@@ -294,6 +360,16 @@ function applyBindings(input, criteria, context, diagnostics) {
     const criterionIdValue = resolveCriterionSelector(binding, criteria, context.unit);
     if (!criterionIdValue) { diagnostics.push(`binding_unknown_criterion:${index}`); continue; }
     const criterion = byId.get(criterionIdValue);
+    // Obligations precede source loading: absent evidence must not erase them.
+    if (binding.required_coverages !== undefined) {
+      if (!validRequiredCoverages(binding.required_coverages, criterion)
+        || criterion.required_coverages && fingerprint(criterion.required_coverages) !== fingerprint(binding.required_coverages)) {
+        diagnostics.push(`binding_required_coverages_invalid:${index}`);
+        criterion.truncated_aspects = [...criterion.aspects];
+        continue;
+      }
+      criterion.required_coverages = structuredClone(binding.required_coverages);
+    }
     const aspect = nonEmpty(binding.aspect) ? binding.aspect : criterion.aspects[0];
     if (!criterion.aspects.includes(aspect)) { diagnostics.push(`binding_unknown_aspect:${index}`); continue; }
     if (criterion.observations.length >= MAX_OBSERVATIONS) {
@@ -310,7 +386,7 @@ function applyBindings(input, criteria, context, diagnostics) {
       criterion.observations.push(invalidObservation(binding, binding.source.path, aspect, 'binding_source_kind_invalid')); continue;
     }
     const staged = context.sourceEnvelopes?.[binding.source.path];
-    const loaded = staged ? { value: staged, path: binding.source.path }
+    const loaded = staged ? { ...resolveSafeFile(binding.source.path, context.roots, { base: context.ownerRoot, allowMissing: true }), value: staged }
       : readJsonReference(binding.source.path, context.roots, cache, { base: context.ownerRoot });
     if (loaded.error) { criterion.observations.push(invalidObservation(binding, binding.source.path, aspect, loaded.error)); continue; }
     if (!isObject(loaded.value)) { criterion.observations.push(invalidObservation(binding, loaded.path, aspect, 'source_schema_invalid')); continue; }
@@ -337,10 +413,13 @@ function classifyCriterion(criterion) {
     const relevant = observations.filter((entry) => entry && entry.aspect === aspect);
     const positive = relevant.some((entry) => entry.positive === true);
     const missingRoots = (criterion.required_roots || []).filter(root => !relevant.some(entry => entry.positive === true && entry.root_id === root));
+    const missingCoverages = (criterion.required_coverages || []).filter(row => row.aspect === aspect
+      && !relevant.some(entry => entry.positive === true && entry.root_id === row.root_id && entry.coverage === row.coverage));
     const negative = relevant.some((entry) => entry.negative === true);
     const limited = relevant.some((entry) => Array.isArray(entry.limitations) && entry.limitations.length > 0);
     anyPositive = anyPositive || positive;
-    fullyPositive = fullyPositive && positive && !negative && !limited && missingRoots.length === 0;
+    fullyPositive = fullyPositive && positive && !negative && !limited && missingRoots.length === 0 && missingCoverages.length === 0;
+    pending.push(...missingCoverages.map(row => `coverage_unverified:${aspect}:${row.root_id}:${row.coverage}`));
     pending.push(...missingRoots.map(root => `root_unverified:${aspect}:${root}`));
     if (!positive) pending.push(`aspect_unverified:${aspect}`);
     if (negative && positive) pending.push(`evidence_conflict:${aspect}`);
@@ -390,6 +469,8 @@ function validateChildDelivery(child, expectedUnit, parentUnit) {
   if (!child.lineage.includes(childKey)) return { error: 'child_lineage_invalid' };
   const criteria = [];
   for (const item of child.criteria) {
+    if (item?.required_coverages !== undefined && (!Array.isArray(item.aspects)
+      || !validRequiredCoverages(item.required_coverages, item))) return { error: 'child_required_coverages_invalid' };
     if (!isObject(item) || !unitKey(item.unit)
       || !(sameUnit(item.unit, expectedUnit) || isDescendantUnit(item.unit, expectedUnit))
       || !child.lineage.includes(unitKey(item.unit))
@@ -463,7 +544,12 @@ function buildDelivery(input, options = {}) {
   const inventory = inventoryPlan(planRaw, planReference, unit);
   diagnostics.push(...inventory.diagnostics);
   const criteria = inventory.criteria;
-  const checkedPlan = executionContract ? require('./forge-code-roots').validatePlan(planRaw, executionContract) : null;
+  // A milestone ROADMAP aggregates children/additional criteria; it is not a task
+  // execution plan. Preserve full validation for every structured plan and for
+  // task/slice units, including all write/path/root checks.
+  const aggregateRoadmap = unit.type === 'milestone' && !hasStructuredMustHaves(planRaw);
+  const checkedPlan = executionContract && !aggregateRoadmap
+    ? require('./forge-code-roots').validatePlan(planRaw, executionContract) : null;
   if (executionContract) for (const criterion of criteria) {
     for (const field of ['artifact_path', 'link_from', 'link_to']) if (criterion[field]) {
       const rootPaths = require('./forge-code-roots');

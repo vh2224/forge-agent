@@ -71,7 +71,7 @@ function testSelectionDiscoversArtifactsWithoutWriting() {
   const fixture = setup();
   try {
     const dir = path.join(fixture.cwd, '.gsd', 'milestones', fixture.milestone);
-    fs.writeFileSync(path.join(dir, `${fixture.milestone}-ROADMAP.md`), '- [x] **S01: Done**\n- [ ] **S02: Next**\n');
+    fs.writeFileSync(path.join(dir, `${fixture.milestone}-ROADMAP.md`), '- [x] **S01: Done** `depends:[]`\n- [ ] **S02: Next** `depends:[S01]`\n');
     fs.mkdirSync(path.join(dir, 'slices', 'S02'), { recursive: true });
     fs.writeFileSync(path.join(dir, 'slices', 'S02', 'S02-PLAN.md'), '- [ ] T01: Work\n');
     const file = state.statePath(fixture.cwd, fixture.milestone);

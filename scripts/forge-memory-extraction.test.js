@@ -94,6 +94,71 @@ function canonicalFact(memId, text) {
   };
 }
 
+// ── v2 fixtures: owner evidence is bound to context().source ────────────────
+const SOURCE = { sourceUnit: 'execute-task/T01', sourceFingerprint: 'sha256:source' };
+const NOW_MS = Date.parse('2026-09-24T22:30:00.000Z');
+
+function v2Result(overrides) {
+  return { schema_version: 2, status: 'done', summary: 'evidence findings', questions: [], facts: [], events: [],
+    ...(overrides || {}) };
+}
+
+function ownerRecord(ref, kind, overrides) {
+  return { evidence_ref: ref, observation_id: `obs-${ref}`, source_unit: SOURCE.sourceUnit,
+    source_fingerprint: SOURCE.sourceFingerprint, observed_kind: kind,
+    ...(kind === 'confirm' ? { independent_ref: `verify:${ref}` } : {}), ...(overrides || {}) };
+}
+
+function registry(records, outcomes) {
+  return extraction.normalizeEvidenceRegistry({ records, outcomes: outcomes || [] }, SOURCE);
+}
+
+function v2Context(extractionId, records, outcomes, overrides) {
+  return context(extractionId, { evidence: registry(records || [], outcomes), ...(overrides || {}) });
+}
+
+function originFact(memId, text, overrides) {
+  return { ...canonicalFact(memId, text), extraction_id: 'origin-extraction', source_fingerprint: 'sha256:origin',
+    ...(overrides || {}) };
+}
+
+function reason(fn) {
+  try {
+    fn();
+  } catch (error) {
+    return error.reason;
+  }
+  return null;
+}
+
+// Publication and projection fold the same stored rows with the same reducer:
+// the published semantic state equals the projected one at a fixed clock.
+function assertProjectionMatches(cwd, state) {
+  assert(Array.isArray(state) && state.length > 0, 'publication returns its folded state');
+  const projected = projection.projectMemoryState(cwd, { nowMs: NOW_MS });
+  const byIdentity = new Map(projected.entries.map(entry => [entry.identity, entry]));
+  for (const item of state) {
+    const entry = byIdentity.get(`M001/T01/${item.mem_id}`);
+    if (item.pruned) {
+      assert(!entry, `${item.mem_id} is pruned in both views`);
+      continue;
+    }
+    assert(entry, `${item.mem_id} is projected`);
+    const counters = entry.evidence.counters;
+    assert.deepStrictEqual(
+      [entry.hits, entry.base_confidence, entry.promoted, entry.evidence.v2.independent_confirmation_count,
+        entry.evidence.v2.confidence, entry.evidence.v2.promoted, counters.exposure.count, counters.reobserve.count,
+        counters.independent_confirmation.count, counters.utility.count],
+      [item.hits, item.confidence, item.promoted, item.independent_confirmation_count, item.v2_confidence,
+        item.v2_promoted, item.counters.exposure, item.counters.reobserve, item.counters.independent_confirmation,
+        item.counters.utility],
+      item.mem_id,
+    );
+  }
+  assert.strictEqual(projected.entries.filter(entry => entry.identity.startsWith('M001/T01/')).length,
+    state.filter(item => !item.pruned).length);
+}
+
 test('validator accepts the exact strict envelope and returns a frozen copy', () => {
   const validated = extraction.validateExtractionResult(result({
     facts: [candidate('new1', 'A durable project-specific constraint.')],
@@ -496,6 +561,316 @@ test('grouped refusal retains full payload/provenance and replay reuses one quar
     assert.strictEqual(record.fragment.facts[1].source_fingerprint, 'sha256:source');
     assert.strictEqual(record.container, fs.realpathSync(container));
     assert.ok(record.remedy);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('validateExtractionResult selects v1 or v2 explicitly and refuses unknown, hybrid and cross-field envelopes', () => {
+  const fresh = v2Result({ facts: [candidate('fresh', 'A durable v2 fact.')],
+    events: [{ kind: 'seed', local_event_id: 'e0', local_id: 'fresh' }] });
+  assert.throws(() => extraction.validateExtractionResult(fresh), /must equal 1/, 'v1 stays the default contract');
+  const decoded = extraction.validateExtractionResult(fresh, { schemaVersions: [2] });
+  assert.strictEqual(decoded.schema_version, 2);
+  assert(Object.isFrozen(decoded.events[0]));
+  assert.strictEqual(extraction.validateExtractionResult(result(), { schemaVersions: [1, 2] }).schema_version, 1);
+  assert.throws(() => extraction.validateExtractionResult(result(), { schemaVersions: [2] }), /not selected/);
+  assert.throws(() => extraction.validateExtractionResult(fresh, { schemaVersions: [3] }), TypeError);
+  const both = { schemaVersions: [1, 2] };
+  const refusals = [
+    [{ ...fresh, schema_version: 3 }, 'unknown-schema-version'],
+    [{ ...fresh, schema_version: '2' }, 'unknown-schema-version'],
+    [result({ events: [{ kind: 'hit', existing_id: 'MEM001', local_event_id: 'e1' }] }), 'hybrid-shape'],
+    [result({ events: [{ kind: 'exposure', existing_id: 'MEM001' }] }), 'hybrid-shape'],
+    [v2Result({ events: [{ kind: 'hit', local_event_id: 'e1', existing_id: 'MEM001' }] }), 'hybrid-shape'],
+    [v2Result({ events: [{ kind: 'confirm', local_event_id: 'e1', existing_id: 'MEM001', evidence_ref: 'r', mem_id: 'MEM009' }] }), 'invalid-envelope'],
+    [v2Result({ events: [{ kind: 'seed', local_event_id: 'e1', local_id: 'missing' }] }), 'invalid-envelope'],
+    [v2Result({ status: 'partial', facts: [candidate('x', 'must not publish')] }), 'invalid-envelope'],
+    [v2Result({ events: Array.from({ length: extraction.LIMITS.events + 1 }, (_, index) => (
+      { kind: 'exposure', local_event_id: `e${index}`, existing_id: 'MEM001', evidence_ref: 'r' })) }), 'invalid-envelope'],
+    [v2Result({ events: [{ kind: 'exposure', local_event_id: 'e1', existing_id: 'MEM001', evidence_ref: 'r' },
+      { kind: 'reobserve', local_event_id: 'e1', existing_id: 'MEM001', evidence_ref: 'r' }] }), 'invalid-envelope'],
+  ];
+  for (const [value, expected] of refusals) {
+    assert.throws(() => extraction.validateExtractionResult(value, both),
+      error => error.code === 'MEMORY_EXTRACTION_INVALID' && error.reason === expected, `${expected}: ${JSON.stringify(value).slice(0, 120)}`);
+  }
+  assert.throws(() => extraction.validateExtractionResult(v2Result({ facts: [candidate('a', 'one')], events: [
+    { kind: 'seed', local_event_id: 's1', local_id: 'a' }, { kind: 'seed', local_event_id: 's2', local_id: 'a' }] }), both),
+  /duplicate seed/);
+  // With the owner registry known, references outside it are invalid before any write.
+  const owner = registry([ownerRecord('seen', 'exposure'), ownerRecord('verified', 'confirm')]);
+  const cite = (kind, ref) => v2Result({ events: [{ kind, local_event_id: 'e1', existing_id: 'MEM001', evidence_ref: ref }] });
+  assert.strictEqual(extraction.validateExtractionResult(cite('confirm', 'verified'), { ...both, evidence: owner }).events.length, 1);
+  assert.throws(() => extraction.validateExtractionResult(cite('confirm', 'ghost'), { ...both, evidence: owner }), /owner-supplied evidence/);
+  assert.throws(() => extraction.validateExtractionResult(cite('confirm', 'seen'), { ...both, evidence: owner }), /owner observed exposure/);
+  assert.throws(() => extraction.validateExtractionResult(v2Result({ events: [{ kind: 'utility', local_event_id: 'u1',
+    existing_id: 'MEM001', evidence_ref: 'seen', outcome_ref: 'nothing' }] }), { ...both, evidence: owner }), /owner observed|outcome/);
+});
+
+test('owner evidence registry is closed, bounded, source-bound, digest-stable and sanitized', () => {
+  const records = [ownerRecord('verified', 'confirm'), ownerRecord('seen', 'exposure'), ownerRecord('used', 'utility')];
+  const outcomes = [{ outcome_ref: 'passed', outcome_id: 'outcome-T05', result_ref: 'result:T05:verify' }];
+  const first = registry(records, outcomes);
+  const second = registry([...records].reverse(), outcomes);
+  assert(Object.isFrozen(first) && Object.isFrozen(first.records[0]));
+  assert.strictEqual(first.contract_version, 2);
+  assert.match(first.digest, /^[0-9a-f]{64}$/);
+  assert.strictEqual(second.digest, first.digest, 'order of the owner list never changes the snapshot');
+  assert.deepStrictEqual(first.records.map(record => record.evidence_ref), ['seen', 'used', 'verified']);
+  assert.strictEqual(extraction.normalizeEvidenceRegistry(JSON.parse(JSON.stringify(first)), SOURCE).digest, first.digest);
+  const refuse = (value, source) => reason(() => extraction.normalizeEvidenceRegistry(value, source || SOURCE));
+  assert.strictEqual(refuse({ records: [ownerRecord('a', 'exposure', { source_unit: 'execute-task/T99' })], outcomes: [] }), 'evidence-source-mismatch');
+  assert.strictEqual(refuse({ records: [ownerRecord('a', 'exposure', { source_fingerprint: 'sha256:other' })], outcomes: [] }), 'evidence-source-mismatch');
+  const unverified = ownerRecord('a', 'confirm');
+  delete unverified.independent_ref;
+  assert.strictEqual(refuse({ records: [unverified], outcomes: [] }), 'confirm-binding-missing');
+  assert.strictEqual(refuse({ records: [ownerRecord('a', 'reobserve', { independent_ref: 'verify:a' })], outcomes: [] }), 'unexpected-property');
+  assert.strictEqual(refuse({ records: [ownerRecord('a', 'exposure', { path: '/etc/passwd' })], outcomes: [] }), 'unexpected-property');
+  assert.strictEqual(refuse({ records: [ownerRecord('../escape', 'exposure')], outcomes: [] }), 'invalid-identifier');
+  assert.strictEqual(refuse({ records: [ownerRecord('a', 'hit')], outcomes: [] }), 'unknown-kind');
+  assert.strictEqual(refuse({ records: [ownerRecord('a', 'exposure'), ownerRecord('a', 'reobserve', { observation_id: 'obs-b' })], outcomes: [] }), 'duplicate-reference');
+  assert.strictEqual(refuse({ records: [ownerRecord('a', 'exposure'), ownerRecord('b', 'reobserve', { observation_id: 'obs-a' })], outcomes: [] }), 'duplicate-observation');
+  assert.strictEqual(refuse({ records: Array.from({ length: 65 }, (_, index) => ownerRecord(`r${index}`, 'exposure')), outcomes: [] }), 'limit');
+  assert.strictEqual(refuse({ ...first, digest: 'f'.repeat(64) }), 'evidence-digest-mismatch');
+  assert.strictEqual(refuse({ records: [], outcomes: [{ outcome_ref: 'o', outcome_id: 'x' }] }), 'binding-missing');
+  const secret = 'PRIVATE source text that must stay out of errors';
+  assert.throws(() => extraction.normalizeEvidenceRegistry({ records: [ownerRecord('a', 'exposure', { observation_id: secret })], outcomes: [] }, SOURCE),
+    error => error.code === 'MEMORY_EVIDENCE_REGISTRY_INVALID' && !error.message.includes('PRIVATE'));
+  assert.strictEqual(extraction.evidenceSourceFingerprint('sha256:source'), 'sha256:source');
+  assert.match(extraction.evidenceSourceFingerprint('free form / fingerprint'), /^sha256:[0-9a-f]{64}$/);
+});
+
+test('v2 publication binds owner evidence under stable local_event_id identities and matches the projection', () => {
+  const cwd = tempDir();
+  try {
+    memory.writeFragment(cwd, { unit_id: 'T01', milestone_id: 'M001', facts: [originFact('MEM001', 'Origin fact.')], stats: [] });
+    const records = [ownerRecord('seen', 'exposure'), ownerRecord('again', 'reobserve'), ownerRecord('verified', 'confirm'),
+      ownerRecord('used', 'utility')];
+    const outcomes = [{ outcome_ref: 'passed', outcome_id: 'outcome-T05', result_ref: 'result:T05:verify' }];
+    const events = [
+      { kind: 'seed', local_event_id: 'e0', local_id: 'fresh' },
+      { kind: 'exposure', local_event_id: 'e1', existing_id: 'MEM001', evidence_ref: 'seen' },
+      { kind: 'reobserve', local_event_id: 'e2', existing_id: 'MEM001', evidence_ref: 'again' },
+      { kind: 'confirm', local_event_id: 'e3', existing_id: 'MEM001', evidence_ref: 'verified' },
+      { kind: 'utility', local_event_id: 'e4', existing_id: 'MEM001', evidence_ref: 'used', outcome_ref: 'passed' },
+    ];
+    const value = v2Result({ facts: [candidate('fresh', 'A durable v2 fact.')], events });
+    const ctx = v2Context('v2-a', records, outcomes);
+    const first = publish(cwd, value, ctx);
+    assert.strictEqual(first.status, 'written', first.reason);
+    assert.deepStrictEqual([first.schema_version, first.promotion_policy], [2, 'v2']);
+    assert.deepStrictEqual(first.mappings, { fresh: 'MEM002' });
+    const fragment = memory.readFragment(cwd, 'T01', { milestoneId: 'M001' });
+    const v2Rows = fragment.stats.filter(stat => stat.evidence_version !== undefined);
+    assert.deepStrictEqual(v2Rows.map(stat => stat.event_id).sort(), ['v2-a:v2:e0', 'v2-a:v2:e1', 'v2-a:v2:e2', 'v2-a:v2:e3', 'v2-a:v2:e4']);
+    assert(!fragment.stats.some(stat => String(stat.event_id).startsWith('v2-a:seed:')), 'an explicit v2 seed replaces the owner seed');
+    const confirm = v2Rows.find(stat => stat.kind === 'confirm');
+    assert.deepStrictEqual([confirm.observation_id, confirm.independent_ref, confirm.source_unit],
+      ['obs-verified', 'verify:verified', 'execute-task/T01'], 'binding comes from the owner registry');
+    const entry = first.state.find(item => item.mem_id === 'MEM001');
+    assert.deepStrictEqual(entry.counters, { exposure: 1, reobserve: 1, independent_confirmation: 1, utility: 1 });
+    assert.strictEqual(entry.hits, 1, 'only the independent confirmation reinforces');
+    assertProjectionMatches(cwd, first.state);
+
+    const bytes = fs.readFileSync(first.path);
+    const replay = publish(cwd, value, ctx);
+    assert.deepStrictEqual([replay.status, replay.reason], ['noop', 'replay']);
+    const reordered = publish(cwd, v2Result({ facts: value.facts, events: [...events].reverse() }), ctx);
+    assert.deepStrictEqual([reordered.status, reordered.reason], ['noop', 'replay'], 'array position is not identity');
+    assert(fs.readFileSync(first.path).equals(bytes));
+
+    const repackaged = publish(cwd, v2Result({ events: [{ kind: 'confirm', local_event_id: 'c9', existing_id: 'MEM001',
+      evidence_ref: 'verified' }] }), v2Context('v2-b', records, outcomes));
+    assert.strictEqual(repackaged.status, 'written', 'same observation retains its new delivery identity');
+    assert.strictEqual(repackaged.state.find(item => item.mem_id === 'MEM001').independent_confirmation_count, 1);
+    assert(!fs.readFileSync(first.path).equals(bytes));
+    const afterDelivery = fs.readFileSync(first.path);
+
+    const changed = publish(cwd, v2Result({ events: [{ kind: 'reobserve', local_event_id: 'e3', existing_id: 'MEM001',
+      evidence_ref: 'again' }] }), ctx);
+    assert.strictEqual(changed.status, 'conflict');
+    assert.match(changed.reason, /event identity v2-a:v2:e3/);
+    const ghost = publish(cwd, v2Result({ events: [{ kind: 'confirm', local_event_id: 'g1', existing_id: 'MEM001',
+      evidence_ref: 'ghost' }] }), v2Context('v2-c', records, outcomes));
+    assert.deepStrictEqual([ghost.status, ghost.reason_code], ['conflict', 'evidence-binding-refused']);
+    const unbound = publish(cwd, v2Result({ events: [{ kind: 'confirm', local_event_id: 'u1', existing_id: 'MEM001',
+      evidence_ref: 'verified' }] }), context('v2-d'));
+    assert.deepStrictEqual([unbound.status, unbound.reason_code], ['conflict', 'evidence-binding-refused'],
+      'without an owner registry a worker claim never becomes a confirmation');
+    const tampered = publish(cwd, v2Result({ events: [{ kind: 'confirm', local_event_id: 't1', existing_id: 'MEM001',
+      evidence_ref: 'verified' }] }), context('v2-e', { evidence: { ...registry(records, outcomes), digest: 'f'.repeat(64) } }));
+    assert.deepStrictEqual([tampered.status, tampered.reason_code], ['conflict', 'evidence-registry-refused']);
+    const foreignSource = { sourceUnit: 'execute-task/T99', sourceFingerprint: 'sha256:source' };
+    const foreign = publish(cwd, v2Result({ events: [{ kind: 'confirm', local_event_id: 'f1', existing_id: 'MEM001',
+      evidence_ref: 'verified' }] }), context('v2-f', { evidence: extraction.normalizeEvidenceRegistry({
+      records: [ownerRecord('verified', 'confirm', { source_unit: foreignSource.sourceUnit })], outcomes: [] }, foreignSource) }));
+    assert.deepStrictEqual([foreign.status, foreign.reason_code], ['conflict', 'evidence-registry-refused'], 'divergent source');
+    assert(fs.readFileSync(first.path).equals(afterDelivery), 'refusals write nothing');
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('confirmation from the fact origin is refused by the shared reducer before any write', () => {
+  const cwd = tempDir();
+  try {
+    memory.writeFragment(cwd, { unit_id: 'T01', milestone_id: 'M001',
+      facts: [originFact('MEM001', 'Same-origin fact.', { source_fingerprint: SOURCE.sourceFingerprint })], stats: [] });
+    const before = snapshot(cwd);
+    const outcome = publish(cwd, v2Result({ events: [{ kind: 'confirm', local_event_id: 'c1', existing_id: 'MEM001',
+      evidence_ref: 'verified' }] }), v2Context('same-origin', [ownerRecord('verified', 'confirm')]));
+    assert.deepStrictEqual([outcome.status, outcome.reason_code], ['conflict', 'evidence-reducer-refused']);
+    assert.match(outcome.reason, /confirm-not-independent/);
+    assert.deepStrictEqual(snapshot(cwd), before);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('new promotion needs three deduplicated independent confirmations; exposure, reobserve and ambiguous hits never promote', () => {
+  const cwd = tempDir();
+  try {
+    memory.writeFragment(cwd, { unit_id: 'T01', milestone_id: 'M001', facts: [
+      originFact('MEM001', 'Reusable architecture constraint.', { confidence_base: 0.8 }),
+      originFact('MEM002', 'Low confidence architecture note.', { confidence_base: 0.5 }),
+    ], stats: [{ kind: 'seed', mem_id: 'MEM001', ts: '2026-09-20T00:00:00.000Z', confidence_base: 0.9, hits: 5 }] });
+    const promote = memId => v2Result({ events: [{ kind: 'promote', local_event_id: 'p1', existing_id: memId, threshold_met: true }] });
+    const refused = publish(cwd, promote('MEM001'), context('promote-early'));
+    assert.deepStrictEqual([refused.status, refused.reason_code], ['conflict', 'promotion-threshold-not-met'],
+      'legacy seed hits are ambiguous and never satisfy the v2 rule');
+
+    for (let index = 0; index < 50; index += 1) {
+      const outcome = publish(cwd, v2Result({ events: [
+        { kind: 'exposure', local_event_id: 'x', existing_id: 'MEM001', evidence_ref: `seen${index}` },
+        { kind: 'reobserve', local_event_id: 'r', existing_id: 'MEM001', evidence_ref: `again${index}` },
+      ] }), v2Context(`exposure-${index}`, [ownerRecord(`seen${index}`, 'exposure'), ownerRecord(`again${index}`, 'reobserve')]));
+      assert.strictEqual(outcome.status, 'written', outcome.reason);
+    }
+    const ambiguous = publish(cwd, result({ events: [
+      { kind: 'hit', existing_id: 'MEM001' }, { kind: 'confirm', existing_id: 'MEM001' },
+      { kind: 'promote', existing_id: 'MEM001', threshold_met: true },
+    ] }), v2Context('ambiguous'));
+    assert.deepStrictEqual([ambiguous.status, ambiguous.reason_code], ['conflict', 'promotion-threshold-not-met'],
+      'a v1 envelope under the v2 contract cannot bypass the rule');
+    const exposed = publish(cwd, promote('MEM001'), context('promote-after-exposure'));
+    assert.strictEqual(exposed.status, 'conflict', '100 exposures/reobservations never promote');
+    let state = publish(cwd, v2Result({ events: [{ kind: 'exposure', local_event_id: 'x', existing_id: 'MEM001',
+      evidence_ref: 'seen0' }] }), v2Context('exposure-0', [ownerRecord('seen0', 'exposure'), ownerRecord('again0', 'reobserve')])).state;
+    const exposedEntry = state.find(item => item.mem_id === 'MEM001');
+    assert.deepStrictEqual([exposedEntry.counters.exposure, exposedEntry.counters.reobserve, exposedEntry.hits,
+      exposedEntry.independent_confirmation_count], [50, 50, 5, 0]);
+
+    const confirmations = index => v2Context(`confirm-${index}`, [ownerRecord(`ver${index}`, 'confirm')]);
+    const confirmBoth = index => v2Result({ events: [
+      { kind: 'confirm', local_event_id: 'c1', existing_id: 'MEM001', evidence_ref: `ver${index}` },
+      { kind: 'confirm', local_event_id: 'c2', existing_id: 'MEM002', evidence_ref: `ver${index}` },
+    ] });
+    for (const index of [0, 1]) assert.strictEqual(publish(cwd, confirmBoth(index), confirmations(index)).status, 'written');
+    assert.strictEqual(publish(cwd, promote('MEM001'), context('promote-two')).status, 'conflict', 'two confirmations are not enough');
+    const duplicate = publish(cwd, confirmBoth(0), v2Context('confirm-again', [ownerRecord('ver0', 'confirm')]));
+    assert.strictEqual(duplicate.status, 'written', 'delivery retained; repeated observation adds no reinforcement');
+    assert.strictEqual(duplicate.state.find(item => item.mem_id === 'MEM001').independent_confirmation_count, 2);
+    assert.strictEqual(publish(cwd, confirmBoth(2), confirmations(2)).status, 'written');
+    assert.strictEqual(publish(cwd, promote('MEM002'), context('promote-low')).reason_code, 'promotion-threshold-not-met',
+      'three confirmations still need confidence >= 0.85');
+
+    const usedRecords = [ownerRecord('used', 'utility')];
+    const usedOutcomes = [{ outcome_ref: 'passed', outcome_id: 'outcome-T05', result_ref: 'result:T05:verify' }];
+    const beforeUtility = publish(cwd, confirmBoth(2), confirmations(2)).state.find(item => item.mem_id === 'MEM001');
+    const utility = publish(cwd, v2Result({ events: [{ kind: 'utility', local_event_id: 'u1', existing_id: 'MEM001',
+      evidence_ref: 'used', outcome_ref: 'passed' }] }), v2Context('utility', usedRecords, usedOutcomes));
+    const afterUtility = utility.state.find(item => item.mem_id === 'MEM001');
+    assert.strictEqual(afterUtility.counters.utility, 1);
+    assert.deepStrictEqual([afterUtility.hits, afterUtility.confidence], [beforeUtility.hits, beforeUtility.confidence],
+      'utility records an outcome without touching ranking');
+
+    const promoted = publish(cwd, promote('MEM001'), context('promote-ok'));
+    assert.strictEqual(promoted.status, 'written', promoted.reason);
+    state = promoted.state;
+    const promotedEntry = state.find(item => item.mem_id === 'MEM001');
+    assert.deepStrictEqual([promotedEntry.independent_confirmation_count, promotedEntry.v2_promoted, promotedEntry.promoted],
+      [3, true, true]);
+    assertProjectionMatches(cwd, state);
+    assert.strictEqual(publish(cwd, promote('MEM001'), context('promote-ok')).status, 'noop', 'replayed promotion');
+    assert.strictEqual(publish(cwd, promote('MEM001'), context('promote-again')).status, 'noop', 'historical promotion is kept');
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('v1 envelopes keep seed/event/cap identities; the historical rule applies only outside the v2 contract', () => {
+  const cwd = tempDir();
+  try {
+    memory.writeFragment(cwd, { unit_id: 'T01', milestone_id: 'M001',
+      facts: [canonicalFact('MEM001', 'Reusable architecture constraint.')],
+      stats: [{ kind: 'seed', mem_id: 'MEM001', ts: '2026-09-20T00:00:00.000Z', confidence_base: 0.9, hits: 2 }] });
+    const value = result({ facts: [candidate('legacy', 'Legacy envelope fact.')], events: [
+      { kind: 'hit', existing_id: 'MEM001' }, { kind: 'promote', existing_id: 'MEM001', threshold_met: true }] });
+    const before = snapshot(cwd);
+    const contracted = publish(cwd, value, v2Context('legacy-contract'));
+    assert.deepStrictEqual([contracted.status, contracted.promotion_policy], ['conflict', 'v2']);
+    assert.deepStrictEqual(snapshot(cwd), before, 'no partial hit is written');
+    const historical = publish(cwd, value, context('legacy-ok'));
+    assert.deepStrictEqual([historical.status, historical.schema_version, historical.promotion_policy], ['written', 1, 'v1']);
+    const stats = memory.readFragment(cwd, 'T01', { milestoneId: 'M001' }).stats;
+    assert.deepStrictEqual(stats.filter(stat => String(stat.event_id || '').startsWith('legacy-ok:')).map(stat => stat.event_id).sort(),
+      ['legacy-ok:event:000', 'legacy-ok:event:001', 'legacy-ok:seed:legacy']);
+    assert(!stats.some(stat => stat.evidence_version !== undefined), 'v1 never writes v2 rows');
+    const entry = historical.state.find(item => item.mem_id === 'MEM001');
+    assert.deepStrictEqual([entry.promoted, entry.v2_promoted, entry.independent_confirmation_count], [true, false, 0],
+      'a historical promotion stays legacy history');
+    assertProjectionMatches(cwd, historical.state);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('v2 cap prunes keep owner cap identities and refuse ineligible targets without writes', () => {
+  const cwd = tempDir();
+  try {
+    memory.writeFragment(cwd, { unit_id: 'T01', milestone_id: 'M001',
+      facts: Array.from({ length: 50 }, (_, index) => canonicalFact(`MEM${String(index + 1).padStart(3, '0')}`, `Existing fact ${index}.`)),
+      stats: [] });
+    const overflow = prune => v2Result({ facts: [candidate('overflow', 'Overflow v2 fact.')], events: [
+      { kind: 'seed', local_event_id: 's1', local_id: 'overflow' },
+      { kind: 'prune', local_event_id: 'p1', existing_id: prune, reason: 'cap' }] });
+    const before = snapshot(cwd);
+    const refused = publish(cwd, overflow('MEM002'), context('v2-cap'));
+    assert.strictEqual(refused.status, 'conflict');
+    assert.deepStrictEqual(snapshot(cwd), before);
+    const written = publish(cwd, overflow('MEM001'), context('v2-cap-ok'));
+    assert.strictEqual(written.status, 'written', written.reason);
+    const prunes = memory.readFragment(cwd, 'T01', { milestoneId: 'M001' }).stats.filter(stat => stat.kind === 'prune');
+    assert.deepStrictEqual(prunes.map(stat => stat.event_id), ['v2-cap-ok:cap:MEM001']);
+    assert.strictEqual(publish(cwd, overflow('MEM001'), context('v2-cap-ok')).status, 'noop');
+    assertProjectionMatches(cwd, written.state);
+    assert.strictEqual(projection.projectMemoryEntries(cwd, { nowMs: NOW_MS }).length, 50);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('mixed v1 and v2 history publishes the same semantic state the projection rebuilds', () => {
+  const cwd = tempDir();
+  try {
+    memory.writeFragment(cwd, { unit_id: 'T01', milestone_id: 'M001', facts: [originFact('MEM001', 'Mixed history fact.')],
+      stats: [{ kind: 'seed', mem_id: 'MEM001', ts: '2026-09-20T00:00:00.000Z', confidence_base: 0.7, hits: 1 },
+        { kind: 'decay', mem_id: 'MEM001', ts: '2026-09-21T00:00:00.000Z', new_confidence: 0.6 }] });
+    assert.strictEqual(publish(cwd, result({ events: [{ kind: 'hit', existing_id: 'MEM001' }] }), context('mixed-v1')).status, 'written');
+    const mixed = publish(cwd, v2Result({ events: [
+      { kind: 'confirm', local_event_id: 'c1', existing_id: 'MEM001', evidence_ref: 'verified' },
+      { kind: 'reobserve', local_event_id: 'r1', existing_id: 'MEM001', evidence_ref: 'again' },
+    ] }), v2Context('mixed-v2', [ownerRecord('verified', 'confirm'), ownerRecord('again', 'reobserve')]));
+    assert.strictEqual(mixed.status, 'written', mixed.reason);
+    const entry = mixed.state.find(item => item.mem_id === 'MEM001');
+    assert.deepStrictEqual([entry.hits, entry.independent_confirmation_count, entry.counters.reobserve], [3, 1, 1]);
+    assertProjectionMatches(cwd, mixed.state);
+    const stored = memory.readFragment(cwd, 'T01', { milestoneId: 'M001' });
+    const folded = extraction._private.foldPublication(stored.facts, stored.stats, { milestoneId: 'M001', unitId: 'T01' });
+    assert.deepStrictEqual(extraction._private.semanticState(folded.folded), mixed.state);
+    const legacy = folded.state.get('MEM001');
+    assert.deepStrictEqual([legacy.hits, legacy.confidence], [3, 0.7], 'the cap/historical view keeps its own numbers');
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }

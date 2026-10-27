@@ -43,7 +43,7 @@
     {
       "id": "planning",
       "path": "shared/forge-procedure-planning.md",
-      "sha256": "f2eb17357b97fd39a35bb4c1b7dca22c91f133ea317a5554ab94e60863cb621c",
+      "sha256": "d294821aab3778e9ed24cb6e146fea62c0554948583671889f1279bc0082084a",
       "status": "ready",
       "owner": "T02",
       "dependencies": [
@@ -145,7 +145,7 @@
     {
       "id": "memory",
       "path": "shared/forge-procedure-memory.md",
-      "sha256": "6c04f67eef1fd2001df2e17d3f3ba4f66a93793f019486457a2a1af5b6db0eba",
+      "sha256": "11c516a0995aa412a518618505c147723f677e07fb73197d3ce6ec3693eff3a2",
       "status": "ready",
       "owner": "T04",
       "dependencies": [

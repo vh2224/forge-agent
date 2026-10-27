@@ -144,6 +144,12 @@ function createReducer(options = {}) {
       seenTools.add(id);
       toolsInFlight.add(id);
     }
+    if (toolsInFlight.has(id)) {
+      // A closed invocation starts execution, not the opening argument block.
+      // Parallel/duplicate calls must not extend an already running tool clock.
+      if (!suspended) last = elapsed();
+      suspended = true;
+    }
     return true;
   }
 
@@ -157,6 +163,7 @@ function createReducer(options = {}) {
 
   function closeTool(block) {
     inspectTool(block, true);
+    trackTool(block.id);
     let input;
     try { input = JSON.parse(block.text); } catch { return; }
     reportTool(block.id, block.name, input);
@@ -174,7 +181,6 @@ function createReducer(options = {}) {
     }
     if (Array.isArray(value.content) && value.content.some(block => block?.type === 'tool_use')) {
       toolMessage = true;
-      suspended = true;
     }
   }
 
@@ -192,7 +198,7 @@ function createReducer(options = {}) {
       sessionId = value.session_id;
     }
     const e = value.type === 'stream_event' ? value.event : value;
-    const owned = message && (!e?.message_id || e.message_id === message);
+    const owned = message && value.parent_tool_use_id == null && (!e?.message_id || e.message_id === message);
     if (e?.type === 'message_start') startMessage(e.message);
     else if (value.type === 'assistant') {
       startMessage(value.message);
@@ -205,19 +211,20 @@ function createReducer(options = {}) {
       if (blocks.has(e.index) || blocks.size >= LIMITS.blocks) failure('output-limit');
       const tool = e.content_block?.type === 'tool_use';
       blocks.set(e.index, { text: '', tool, id: e.content_block?.id, name: e.content_block?.name });
-      if (tool) trackTool(e.content_block.id);
-      if (tool) { suspended = true; toolMessage = true; }
+      if (tool) toolMessage = true;
     } else if (e?.type === 'content_block_delta' && owned && blocks.has(e.index)) {
       const block = blocks.get(e.index), delta = e.delta;
-      const piece = delta?.text ?? delta?.partial_json ?? delta?.thinking ?? delta?.signature;
+      const piece = block.tool ? delta?.partial_json : delta?.text ?? delta?.thinking ?? delta?.signature;
       if (typeof piece === 'string') {
         const bytes = Buffer.byteLength(piece);
         if (reconstruction + bytes > LIMITS.reconstruction) failure('output-limit');
         reconstruction += bytes;
         block.text += piece;
         if (secret && block.text.includes(secret)) failure('secret-output');
-        if (block.tool) inspectTool(block);
-        else if (['text_delta', 'thinking_delta', 'signature_delta'].includes(delta.type)) eligible(!toolMessage);
+        if (block.tool) {
+          inspectTool(block);
+          if (delta.type === 'input_json_delta' && bytes > 0) eligible(true);
+        } else if (['text_delta', 'thinking_delta', 'signature_delta'].includes(delta.type)) eligible(!toolMessage);
       }
     } else if (e?.type === 'content_block_stop' && owned && blocks.has(e.index)) {
       const block = blocks.get(e.index);

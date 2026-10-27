@@ -24,3 +24,20 @@ Provider success does not establish quality, publication or human acceptance.
 Ready receipts replay idempotently without another provider.
 Keep source unit, dispatch identity and sanitized actual telemetry with receipts.
 Publication waits for the protected owner boundary and exact allowed target.
+
+Use schema v2: shared/schemas/memory-extraction-v2.schema.json.
+Duplicate observation becomes reobserve, never hit or independent confirmation.
+Use only evidence_ref/outcome_ref entries supplied in the owner input.
+Without a matching reference omit the event and report evidence unavailable.
+Confirmation requires an owner-verified independent binding; utility requires outcome.
+A new attempt, repeated text, frequency or extraction ID establishes neither.
+Promotion requires v2 confidence >= 0.85 and three independent confirmations.
+Preserve category/durability exclusions and ready v1 receipt semantics.
+Record exposure only after positive delivery evidence with the real dispatchId.
+Use the already selected, actually included entries; never a second selector.
+CLI --expose --event-id binds replay to the same owner/memory/delivery tuple.
+Legacy --hit is an exposure alias with limited local invocation provenance.
+Exposure/reobserve/utility do not change ranking, confidence or last access.
+Unidentified --hit records closed legacy-invocation-only exposure with invocation_id.
+Never invent observation, independent binding, delivery proof or outcome for it.
+Deduplicate repeated entries in that invocation; separate calls have no replay promise.

@@ -18,6 +18,7 @@ The owner supplies:
 - `MILESTONE_ID`: optional namespace for milestone-backed units.
 - `SUMMARY_CONTENT`, `RESULT_BLOCK`, and `KEY_DECISIONS`: completed work evidence.
 - `EXISTING_MEMORY`: owner-read current facts and projected event state. Only reference canonical IDs present here.
+- `EVIDENCE` and `OUTCOMES`: owner-provided bounded reference lists. Never invent a reference, observation, independent binding or outcome.
 
 ## Output-only boundary
 
@@ -42,15 +43,26 @@ Reject secrets, credentials, temporary state, generic advice, one-off fix narrat
 - **PASSES:** "The resolver now rejects a configured Claude worker paired with a GPT model." This is a verified behavior that became true and will constrain future dispatch work.
 - **REJECTED:** "Update the remaining dispatch callers." Pendência é item de trabalho, not a durable fact; leave it out of memory until completed and evidenced.
 
-For a near duplicate, emit a `hit` event for the existing canonical ID and do not repeat the fact. For a contradiction, emit a replacement candidate plus a `supersede` event. When the active set would exceed 50, emit `prune` for the lowest-scored existing entry. Emit `promote` only when the owner-provided state proves confidence at least 0.85, at least three hits, a category other than preference/environment, and durable text that is not a one-time fix.
+For a near duplicate, emit `reobserve` using an owner-supplied evidence_ref,
+not another fact or confirmation. Without a matching reference, omit the event
+and describe the missing evidence in summary. `exposure` only means shown context;
+`confirm` needs an owner-verified independent binding, and `utility` needs the
+corresponding owner outcome_ref. Repeated text, frequency, timestamps and attempts
+prove neither independence nor utility. For contradiction, emit a replacement
+candidate and `supersede`. Cap remains 50. Promote only when owner v2 state proves
+undecayed confidence >= 0.85 and at least three independent confirmations, with
+category other than preference/environment and durable text beyond a one-time fix.
+Legacy hits never satisfy that requirement; ready v1 receipts retain their historical
+publication semantics without becoming independent evidence.
 
 ## Envelope
 
-Return exactly one JSON object:
+Return exactly one JSON object matching `shared/schemas/memory-extraction-v2.schema.json`.
+The illustrative references below must be supplied by the owner for this unit:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "status": "done",
   "summary": "Short extraction summary",
   "questions": [],
@@ -63,10 +75,12 @@ Return exactly one JSON object:
     }
   ],
   "events": [
-    { "kind": "hit", "existing_id": "MEM001" },
-    { "kind": "supersede", "existing_id": "MEM002", "replacement_local_id": "new1" },
-    { "kind": "prune", "existing_id": "MEM003", "reason": "cap" },
-    { "kind": "promote", "existing_id": "MEM004", "threshold_met": true }
+    { "kind": "reobserve", "local_event_id": "seen1", "existing_id": "MEM001", "evidence_ref": "seenAgain" },
+    { "kind": "confirm", "local_event_id": "verified1", "existing_id": "MEM005", "evidence_ref": "independentCheck" },
+    { "kind": "utility", "local_event_id": "useful1", "existing_id": "MEM006", "evidence_ref": "applied", "outcome_ref": "verifiedOutcome" },
+    { "kind": "supersede", "local_event_id": "replace1", "existing_id": "MEM002", "replacement_local_id": "new1" },
+    { "kind": "prune", "local_event_id": "cap1", "existing_id": "MEM003", "reason": "cap" },
+    { "kind": "promote", "local_event_id": "promote1", "existing_id": "MEM004", "threshold_met": true }
   ]
 }
 ```

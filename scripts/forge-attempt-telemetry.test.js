@@ -65,7 +65,8 @@ const capabilities = { available: true, tool: 'spawn_agent', source: 'fixture-to
   models: ['gpt-6-sol'], reasoning_efforts: ['medium'], fork_turns: ['none'] };
 function nativeOptions(prompt) {
   return { hostRuntime: 'codex', resolvedDispatch: route(), activeCapabilities: capabilities,
-    agentType: 'forge-worker', taskName: 'final_fixture', prompt };
+    agentType: 'forge-worker', taskName: 'final_fixture', prompt,
+    terminalResult: value => value === 'ok' };
 }
 function checkMeasurement(measurement, bytes, structured = false) {
   const buffer = Buffer.from(structured ? JSON.stringify(bytes) : bytes, 'utf8');

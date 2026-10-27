@@ -358,6 +358,7 @@ async function invokeNative(options, invoke) {
     effort: invocation.telemetry.effort_resolved }, invocation.args,
     invocation.args.prompt || invocation.args.message, 'native-tool');
   let invoked = false;
+  let observedProvider;
   const initial = JSON.stringify(invocation);
   const assertBoundary = stage => {
     const current = buildNativeInvocation(options);
@@ -377,8 +378,20 @@ async function invokeNative(options, invoke) {
     if (options.beforeInvoke) await options.beforeInvoke(invocation);
     await assertGuard('before-invoke');
     assertBoundary('before-invoke');
-    invoked = true;
-    const result = await invoke(invocation.args, invocation);
+    const supervision = require('./forge-native-supervision');
+    const supervised = await supervision.supervise({ ...options.lifecycle,
+      identity: supervision.digest(JSON.stringify({ invocation, identity: options.telemetryIdentity || null })),
+      route: options.resolvedDispatch, terminal: options.terminalResult,
+    }, () => { invoked = true; return invoke(invocation.args, invocation); });
+    observedProvider = supervised.provider_called;
+    if (!supervised.ok) return { ...invocation, ok: false, result: null,
+      reason_code: supervised.reason_code === 'native-terminal-unobserved' && options.invalidTerminalReason
+        ? options.invalidTerminalReason : supervised.reason_code,
+      provider_called: supervised.provider_called, lifecycle: supervised.lifecycle,
+      final_evidence: { ...evidence, stage: 'invoked', provider_called: supervised.provider_called,
+        duration_ms: Date.now() - started, native_lifecycle: supervised.lifecycle },
+      diagnostic: { reason_code: supervised.reason_code, layer: 'native-lifecycle' } };
+    const result = supervised.result;
     await assertGuard('after-invoke');
     assertBoundary('after-invoke');
     const readback = typeof options.readback === 'function'
@@ -397,6 +410,7 @@ async function invokeNative(options, invoke) {
       ...invocation,
       provider_called: true,
       result,
+      lifecycle: supervised.lifecycle,
       final_evidence: { ...evidence, stage: 'returned', provider_called: true, duration_ms: Date.now() - started,
         model_observed: observed && source ? telemetryApi.code(observed) : null },
       telemetry: {
@@ -413,8 +427,8 @@ async function invokeNative(options, invoke) {
       result: null,
       reason_code: telemetryApi.code(error.code, 'native-invocation-failed'),
       final_evidence: { ...evidence, stage: 'invoked', duration_ms: Date.now() - started,
-        provider_called: invoked ? (typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown') : false },
-      provider_called: invoked ? (typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown') : false,
+        provider_called: observedProvider ?? (invoked ? (typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown') : false) },
+      provider_called: observedProvider ?? (invoked ? (typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown') : false),
       diagnostic: { reason_code: telemetryApi.code(error.code, 'native-tool-callback-failed'), layer: 'native-tool' },
       hint: 'The native tool callback failed; inspect the host diagnostic channel.',
     };

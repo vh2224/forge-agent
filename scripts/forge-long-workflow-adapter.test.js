@@ -60,6 +60,16 @@ for (const host of ['claude', 'codex']) {
 assert.deepStrictEqual(refusals.claude, refusals.codex, 'the refusal must not depend on the host');
 
 const source = require('fs').readFileSync(require('path').join(__dirname, 'forge-long-workflow-adapter.js'), 'utf8');
+{
+  const fixtures = require('./forge-loop-failure.test'), f = fixtures.fixture();
+  try {
+    const imported = fixtures.invoke(f, 'consume-failure', f.selected.snapshot, { approved: true, process_stopped: true }, {});
+    assert.strictEqual(imported.reason_code, 'failure-inspector-required');
+    const consumed = fixtures.consume(f);
+    assert.strictEqual(consumed.reason_code, 'failure-consumed');
+    assert.strictEqual(consumed.snapshot.step_count, 1);
+  } finally { fixtures.cleanup(f); }
+}
 assert.strictEqual(/child_process|\bspawn(?:Sync)?\s*\(/.test(source), false, 'adapter must not spawn');
 const executableSource = source.replace(/^\s*\/\/.*$/gm, '');
 assert.strictEqual(/modelFamily|worker_engine|forge-dispatch-resolve|forge-xllm/.test(executableSource), false, 'adapter must not choose fallback or worker');

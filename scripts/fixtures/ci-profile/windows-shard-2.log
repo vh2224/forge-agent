@@ -1,0 +1,26 @@
+2026-10-21T11:00:00.000Z ##[group]Runner Image Provisioner
+2026-10-21T11:00:01.000Z Version: 9999.2
+2026-10-21T11:00:02.000Z ##[endgroup]
+2026-10-21T11:00:03.000Z ##[group]Runner Image
+2026-10-21T11:00:04.000Z Image: windows-synthetic
+2026-10-21T11:00:05.000Z Version: 20261001.1
+2026-10-21T11:00:06.000Z ##[endgroup]
+2026-10-21T11:00:07.000Z Complete job name: Tests (windows-latest, shard 2/2)
+2026-10-21T11:00:08.000Z node: v22.23.3
+2026-10-21T11:00:09.000Z Attempting to download v22.23.3
+2026-10-21T11:00:10.000Z Cache not found for input keys: synthetic
+2026-10-21T11:00:11.000Z HEAD is now at abcdef1 Synthetic merge
+2026-10-21T11:00:12.000Z Running 2 test suites sequentially...
+2026-10-21T11:00:13.000Z PASS delta.test.js (1.00s)
+2026-10-21T11:00:14.000Z FAIL epsilon.test.js (0.50s)
+2026-10-21T11:00:15.000Z Captured child output follows
+2026-10-21T11:00:16.000Z PASS delta.test.js (9.99s)
+2026-10-21T11:00:17.000Z Captured child output ends
+2026-10-21T11:00:18.000Z 1 of 2 executed suites failed in 1.50s:
+2026-10-21T11:00:19.000Z   - epsilon.test.js (exit 1)
+2026-10-21T11:00:20.000Z Baseline check FAILED on win32: 1 NEW failing suite not in the baseline:
+2026-10-21T11:00:21.000Z Synthetic post step
+2026-10-21T11:00:22.000Z Synthetic cleanup
+2026-10-21T11:00:23.000Z Synthetic padding one
+2026-10-21T11:00:24.000Z Synthetic padding two
+2026-10-21T11:00:25.000Z Synthetic padding three

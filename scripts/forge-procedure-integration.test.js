@@ -68,14 +68,18 @@ async function composedCycle(root, source, host) {
     assert(rendered.prompt.includes('SYNTHETIC restart handoff sentinel'));
     assert.equal(rendered.final_prompt_sha256, sha256(rendered.prompt));
     assert.equal(sidecar.beginArtifactAttempt(request).state, 'started');
+    const loc = sidecar.locations(request);
     const result = await native.invokeNative({ cwd: owner, hostRuntime: host, resolvedDispatch: route, activeCapabilities: caps,
       agentType: 'forge-researcher', taskName: `composed_${host}`, prompt: rendered.prompt,
+      terminalResult: value => sidecar.inspectArtifacts(value, loc.allowed, loc.required, Infinity, loc.rules,
+        { forbidArtifactsOnNonDone: true }).ok && require('./forge-worker-result-contract').contract('preparation').validate(value).ok,
       ...(host === 'claude' ? { effortBinding } : {}) }, async args => {
       calls++;
       assert.equal(host === 'codex' ? args.message : args.prompt, rendered.prompt);
       return candidate;
     });
-    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.ok, true, JSON.stringify({ reason_code: result.reason_code,
+      layer: result.diagnostic && result.diagnostic.layer, provider_called: result.provider_called }).slice(0, 512));
     // Independent emitter measurement agrees with the final native boundary.
     assert.equal(result.final_evidence.context.sha256, measure(rendered.prompt, 'emitter').sha256);
     const accepted = await sidecar.acceptArtifactResult(request, candidate, { providerCalled: true, finalEvidence: result.final_evidence });

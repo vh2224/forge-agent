@@ -33,6 +33,15 @@ let passed = 0;
 let failed = 0;
 const failures = [];
 
+{
+  const assert = require('assert');
+  const parsed = status.parseRoadmap('- [ ] **S01: Missing**\n- [ ] **S02: Empty** `depends:[]`\n- [ ] **S03: Invalid** `depends:[S99]`\n- [ ] **S04: Cycle** `depends:[S04]`\n');
+  assert.deepStrictEqual(parsed.slices.map(row => row.dependency_status), ['missing', 'valid', 'invalid', 'invalid']);
+  assert(parsed.slices[2].dependency_errors.includes('unknown-dependency:S99'));
+  assert(parsed.slices[3].dependency_errors.includes('self-dependency'));
+  assert(parsed.slices[3].dependency_errors.includes('dependency-cycle'));
+}
+
 function test(name, fn) {
   try {
     fn();
@@ -271,9 +280,9 @@ test('parseRoadmap extracts title and slices', () => {
   const r = status.parseRoadmap(ROADMAP_TEXT);
   assertEq(r.title, 'Alpha Milestone', 'title');
   assert(r.slices.length === 3, `expected 3 slices, got ${r.slices.length}`);
-  assertEq(r.slices[0], { checked: true, id: 'S01', title: 'Done one', risk: 'low' }, 's01');
-  assertEq(r.slices[1], { checked: false, id: 'S02', title: 'Active one', risk: 'high' }, 's02');
-  assertEq(r.slices[2], { checked: false, id: 'S03', title: 'Pending one', risk: null }, 's03');
+  assertEq(r.slices[0], { checked: true, id: 'S01', title: 'Done one', risk: 'low', dependencies: [], dependency_status: 'missing', dependency_errors: [] }, 's01');
+  assertEq(r.slices[1], { checked: false, id: 'S02', title: 'Active one', risk: 'high', dependencies: [], dependency_status: 'missing', dependency_errors: [] }, 's02');
+  assertEq(r.slices[2], { checked: false, id: 'S03', title: 'Pending one', risk: null, dependencies: [], dependency_status: 'missing', dependency_errors: [] }, 's03');
 });
 
 test('parsePlanTasks handles plain, bold-decomposed and T##.N variants', () => {

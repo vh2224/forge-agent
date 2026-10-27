@@ -14,6 +14,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { loadShardProfile, planShards, verifyPartition, formatShardPlanLine,
+  universeFingerprint } = require('./forge-ci-shards.js');
+const { observeCondition, buildSuiteProfile, writeSuiteProfile } = require('./forge-suite-profile.js');
 
 const scriptsDir = __dirname;
 const repoRoot = path.resolve(scriptsDir, '..');
@@ -42,6 +45,9 @@ function usage() {
     '                     suites still run and log; only the exit code changes.',
     '  --shard-index <n>  Run zero-based shard n (requires --shard-count)',
     '  --shard-count <n>  Split the canonical suite list into n disjoint shards',
+    '  --shard-profile <file>  Optional versioned weights; the partition remains',
+    '                         complete. A missing file falls back to positional.',
+    '  --profile-out <file>    Write a bounded execution profile (not with --list)',
     '  --help             Show this help',
   ].join('\n');
 }
@@ -57,6 +63,8 @@ function parseArgs(argv) {
     baseline: null,
     shardIndex: null,
     shardCount: null,
+    shardProfile: null,
+    profileOut: null,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -76,6 +84,13 @@ function parseArgs(argv) {
       const value = argv[index + 1];
       if (!value || value.startsWith('--')) throw new Error('--baseline requires a file path');
       options.baseline = value;
+      index += 1;
+    } else if (arg === '--shard-profile' || arg === '--profile-out') {
+      const value = argv[index + 1];
+      if (!value || value.startsWith('--')) throw new Error(`${arg} requires a file path`);
+      const key = arg === '--shard-profile' ? 'shardProfile' : 'profileOut';
+      if (options[key] !== null) throw new Error(`${arg} may only be specified once`);
+      options[key] = value;
       index += 1;
     } else if (arg === '--shard-index' || arg === '--shard-count') {
       const value = argv[index + 1];
@@ -99,6 +114,12 @@ function parseArgs(argv) {
   }
   if (options.shardIndex !== null && options.shardIndex >= options.shardCount) {
     throw new Error('--shard-index must be less than --shard-count');
+  }
+  if (options.shardProfile !== null && options.shardIndex === null) {
+    throw new Error('--shard-profile requires --shard-index and --shard-count');
+  }
+  if (options.profileOut !== null && options.list) {
+    throw new Error('--profile-out is incompatible with --list');
   }
   return options;
 }
@@ -380,6 +401,13 @@ function writeCaptured(result) {
   if (result.error) process.stderr.write(`${result.error.stack || result.error.message}\n`);
 }
 
+// Early selectors and invalid inputs did not execute suites, so they must not
+// leave a profile that could be mistaken for an observed run.
+function withoutSuiteProfile(options, code, reason) {
+  if (options.profileOut) process.stderr.write(`Suite profile not written: ${reason}\n`);
+  return code;
+}
+
 function main(argv) {
   let options;
   try {
@@ -398,24 +426,53 @@ function main(argv) {
   if (options.changed) {
     if (options.baseline) {
       process.stderr.write('--baseline requires the full suite set: it is incompatible with --changed.\n');
-      return 2;
+      return withoutSuiteProfile(options, 2, 'baseline-incompatible');
     }
     const changed = collectChangedFiles();
     if (changed === null) {
       // Loud, never a silent pass: a gate consumer must be able to tell
       // "nothing related changed" apart from "the selector could not look".
       process.stderr.write('--changed FAILED: git is unavailable or this is not a work tree — refusing to guess.\n');
-      return 2;
+      return withoutSuiteProfile(options, 2, 'changed-unavailable');
     }
     tests = suitesForChangedFiles(changed, tests);
     if (tests.length === 0) {
       process.stdout.write(`No suites related to the ${changed.length} changed file${changed.length === 1 ? '' : 's'} — nothing to run (legitimate for docs-only changes).\n`);
-      return 0;
+      return withoutSuiteProfile(options, 0, 'no-related-suites');
     }
   }
   const baselineUniverse = tests;
-  if (options.shardIndex !== null) {
+  let shardPlan = null;
+  // Keep the original selector when neither new flag is used. Limits belonging
+  // to the opt-in profile contracts must not narrow the legacy suite universe
+  // or the legacy range of safe shard counts.
+  const legacyShard = options.shardProfile === null && options.profileOut === null;
+  if (options.shardIndex !== null && legacyShard) {
     tests = suitesForShard(tests, options.shardIndex, options.shardCount);
+  }
+  if (options.shardIndex !== null && !legacyShard) {
+    let profile = null;
+    if (options.shardProfile !== null) {
+      try { profile = loadShardProfile(options.shardProfile); }
+      catch (error) {
+        process.stderr.write(`Shard profile FAILED: ${error.code}\n`);
+        for (const message of error.errors || []) process.stderr.write(`  - ${message}\n`);
+        return withoutSuiteProfile(options, 2, 'shard-profile-invalid');
+      }
+    }
+    try {
+      shardPlan = planShards({ suites: tests, index: options.shardIndex,
+        count: options.shardCount, platform: process.platform, profile });
+      if (!verifyPartition(tests, shardPlan.shards).ok) throw new Error('shard-partition-invalid');
+      if (options.shardProfile !== null) {
+        const output = options.list ? process.stderr : process.stdout;
+        output.write(`${formatShardPlanLine(shardPlan)}\n`);
+      }
+    } catch {
+      process.stderr.write('Shard plan FAILED\n');
+      return withoutSuiteProfile(options, 2, 'shard-plan-invalid');
+    }
+    tests = shardPlan.selected;
   }
   if (options.list) {
     process.stdout.write(tests.length ? `${tests.join('\n')}\n` : '');
@@ -423,7 +480,7 @@ function main(argv) {
   }
   if (tests.length === 0) {
     process.stderr.write('No test suites matched.\n');
-    return 2;
+    return withoutSuiteProfile(options, 2, 'no-suites-matched');
   }
 
   // Baseline mode needs the full, uninterrupted set: --match shrinks F and
@@ -433,14 +490,14 @@ function main(argv) {
   if (options.baseline) {
     if (options.matches.length > 0 || options.failFast) {
       process.stderr.write('--baseline requires a full, uninterrupted run: it is incompatible with --match and --fail-fast.\n');
-      return 2;
+      return withoutSuiteProfile(options, 2, 'baseline-incompatible');
     }
     let baselineText;
     try {
       baselineText = fs.readFileSync(options.baseline, 'utf8');
     } catch (error) {
       process.stderr.write(`Baseline check FAILED: baseline file ${options.baseline} could not be read (${error.code || error.message}) — refusing to run as if no baseline existed.\n`);
-      return 2;
+      return withoutSuiteProfile(options, 2, 'baseline-unreadable');
     }
     const resolved = resolveBaseline({
       text: baselineText,
@@ -450,7 +507,7 @@ function main(argv) {
     if (!resolved.ok) {
       process.stderr.write('Baseline check FAILED: baseline is invalid — refusing to run against it:\n');
       for (const message of resolved.errors) process.stderr.write(`  - ${message}\n`);
-      return 2;
+      return withoutSuiteProfile(options, 2, 'baseline-invalid');
     }
     baselineEntries = baselineEntriesForSuites(resolved.entries, tests);
   }
@@ -459,22 +516,30 @@ function main(argv) {
     ? null
     : fs.mkdtempSync(path.join(os.tmpdir(), 'forge-tests-'));
   const failures = [];
+  const suiteRecords = [];
   let executed = 0;
   const started = Date.now();
+  const monotonicStarted = process.hrtime.bigint();
 
   process.stdout.write(`Running ${tests.length} test suite${tests.length === 1 ? '' : 's'} sequentially...\n`);
   try {
     for (const filename of tests) {
       executed += 1;
-      const suiteStarted = Date.now();
+      const suiteStarted = process.hrtime.bigint();
       const result = spawnSync(process.execPath, [path.join(scriptsDir, filename)], {
         cwd: repoRoot,
         env: childEnv(isolatedRoot, filename),
         encoding: 'utf8',
         maxBuffer: 64 * 1024 * 1024,
       });
-      const elapsed = ((Date.now() - suiteStarted) / 1000).toFixed(2);
+      const elapsedMs = Number(process.hrtime.bigint() - suiteStarted) / 1e6;
+      const elapsed = (elapsedMs / 1000).toFixed(2);
       const passed = result.status === 0 && !result.error;
+      if (options.profileOut) suiteRecords.push({
+        id: filename, ordinal: executed, status: passed ? 'pass' : 'fail',
+        elapsed_ms: Math.round(elapsedMs), exit_code: result.status,
+        signal: result.signal || null, error_code: result.error ? result.error.code : null,
+      });
 
       process.stdout.write(`${passed ? 'PASS' : 'FAIL'} ${filename} (${elapsed}s)\n`);
       if (options.verbose || !passed) writeCaptured(result);
@@ -489,22 +554,60 @@ function main(argv) {
   }
 
   const elapsed = ((Date.now() - started) / 1000).toFixed(2);
+  let exitCode;
+  let baselineVerdict = null;
   if (baselineEntries) {
     // All suites ran and logged exactly as in the legacy path above — the
     // baseline only decides the exit code.
-    return reportBaselineRun({ executed, failures, elapsed, baselineEntries, platform: process.platform });
-  }
-  if (failures.length === 0) {
+    baselineVerdict = compareFailures({ executedCount: executed,
+      failedSuites: failures.map(failure => failure.filename),
+      baselineSuites: baselineEntries.map(entry => entry.suite) }).code;
+    exitCode = reportBaselineRun({ executed, failures, elapsed, baselineEntries, platform: process.platform });
+  } else if (failures.length === 0) {
     process.stdout.write(`\nAll ${executed} suites passed in ${elapsed}s.\n`);
-    return 0;
+    exitCode = 0;
+  } else {
+    process.stderr.write(`\n${failures.length} of ${executed} executed suite${executed === 1 ? '' : 's'} failed in ${elapsed}s:\n`);
+    for (const failure of failures) {
+      const detail = failure.signal ? `signal ${failure.signal}` : `exit ${failure.status == null ? 'unknown' : failure.status}`;
+      process.stderr.write(`  - ${failure.filename} (${detail})\n`);
+    }
+    exitCode = 1;
   }
-
-  process.stderr.write(`\n${failures.length} of ${executed} executed suite${executed === 1 ? '' : 's'} failed in ${elapsed}s:\n`);
-  for (const failure of failures) {
-    const detail = failure.signal ? `signal ${failure.signal}` : `exit ${failure.status == null ? 'unknown' : failure.status}`;
-    process.stderr.write(`  - ${failure.filename} (${detail})\n`);
+  if (options.profileOut) {
+    for (const filename of tests.slice(executed)) suiteRecords.push({
+      id: filename, ordinal: suiteRecords.length + 1, status: 'not-run',
+      elapsed_ms: null, exit_code: null, signal: null, error_code: null,
+    });
+    try {
+      const profile = buildSuiteProfile({
+        started_at: new Date(started).toISOString(), finished_at: new Date().toISOString(),
+        elapsed_ms: Math.round(Number(process.hrtime.bigint() - monotonicStarted) / 1e6),
+        condition: observeCondition(),
+        selection: { discovered: baselineUniverse.length, selected: tests.length,
+          universe_sha256: shardPlan ? shardPlan.universe_sha256 : universeFingerprint(baselineUniverse) },
+        shard: shardPlan ? {
+          index: shardPlan.index, count: shardPlan.count, algorithm: shardPlan.algorithm,
+          fallback: shardPlan.fallback, profile_sha256: shardPlan.profile_sha256,
+          partition_sha256: shardPlan.partition_sha256,
+          predicted_ms: shardPlan.predicted_ms === null ? null : shardPlan.predicted_ms[shardPlan.index],
+          unprofiled: shardPlan.unprofiled.length, stale: shardPlan.stale.length,
+        } : null,
+        mode: { baseline: !!options.baseline, fail_fast: options.failFast,
+          match: options.matches.length > 0, changed: options.changed,
+          isolation: options.inheritHome ? 'inherited-home' : 'isolated-home' },
+        suites: suiteRecords,
+        totals: { executed, passed: executed - failures.length, failed: failures.length,
+          not_run: tests.length - executed },
+        verdict: { exit_code: exitCode, baseline: baselineVerdict },
+      });
+      const written = writeSuiteProfile(options.profileOut, profile);
+      if (!written.ok) process.stderr.write(`Suite profile not written: ${written.code}\n`);
+    } catch (error) {
+      process.stderr.write(`Suite profile not written: ${error.code || 'suite-profile-invalid'}\n`);
+    }
   }
-  return 1;
+  return exitCode;
 }
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));

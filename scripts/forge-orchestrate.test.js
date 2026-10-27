@@ -31,6 +31,61 @@ function nextInput(cwd, host) {
 function withoutVolatile(value) { const copy = JSON.parse(JSON.stringify(value)); delete copy.details?.project_created; return copy; }
 
 try {
+  // Synthetic controller failure: retain safe context, never arbitrary exception data.
+  const diagnosticRoot = setup(), diagnosticInput = nextInput(diagnosticRoot, 'codex');
+  const synthetic = Object.assign(new Error('secret-token C:/private/source payload\n' + 'x'.repeat(10000)),
+    { code: 'EPERM', syscall: 'rename', errno: -4048, path: 'C:/private/source', dest: '/private/dest', extra: 'secret-token' });
+  const failed = orchestrate.next(diagnosticInput, { failpoint(stage) { if (stage === 'after-intent') throw synthetic; } });
+  assert.strictEqual(failed.reason_code, 'EPERM');
+  assert.strictEqual(failed.outcome, 'failed');
+  assert.strictEqual(failed.diagnostic.stage, 'begin');
+  assert.strictEqual(failed.diagnostic.syscall, 'rename');
+  assert.strictEqual(failed.diagnostic.errno, -4048);
+  assert.strictEqual(failed.diagnostic.message, 'operation not permitted');
+  assert.strictEqual(failed.diagnostic.message_source, 'code-summary');
+  assert.strictEqual(failed.diagnostic.transaction.phase, 'intent');
+  assert.strictEqual(failed.diagnostic.transaction.status, 'observed');
+  assert(/^\.gsd\/forge\/transactions\/transaction-v1-[a-f0-9]{64}\.json$/.test(failed.diagnostic.transaction.reference));
+  const diagnosticTx = JSON.parse(fs.readFileSync(path.join(diagnosticRoot, failed.diagnostic.transaction.reference), 'utf8'));
+  assert.strictEqual(diagnosticTx.phase, 'intent');
+  assert.strictEqual(diagnosticTx.idempotency_key, diagnosticInput.idempotency_key);
+  const serializedFailure = JSON.stringify(failed.diagnostic);
+  for (const secret of ['secret-token', 'private', 'payload', 'xxxxx', 'stack']) assert(!serializedFailure.includes(secret));
+  assert(serializedFailure.length < 1000);
+  const unknownRoot = setup();
+  const unknown = orchestrate.next(nextInput(unknownRoot, 'codex'), { failpoint(stage) {
+    if (stage === 'after-intent') throw Object.assign(new Error('secret-token'), { syscall: 'secret-token', errno: Infinity });
+  } });
+  assert.strictEqual(unknown.reason_code, 'failed');
+  assert.strictEqual(unknown.diagnostic.message, 'error details withheld');
+  assert.strictEqual(unknown.diagnostic.syscall, null);
+  assert.strictEqual(unknown.diagnostic.errno, null);
+  assert.strictEqual(unknown.diagnostic.transaction.phase, 'intent');
+  const controller = require('./forge-unit-controller');
+  const originalLookup = controller.lookupRecord, originalSelect = controller.select;
+  try {
+    const unreadable = orchestrate.next(nextInput(setup(), 'codex'), { failpoint(stage) {
+      if (stage === 'after-intent') {
+        controller.lookupRecord = () => { throw new Error('private secondary read failure'); };
+        throw synthetic;
+      }
+    } });
+    assert.strictEqual(unreadable.reason_code, 'EPERM');
+    assert.strictEqual(unreadable.diagnostic.transaction.status, 'unknown');
+    assert.strictEqual(unreadable.diagnostic.transaction.phase, null);
+    controller.lookupRecord = originalLookup;
+    controller.select = () => { throw synthetic; };
+    let stdout = '', stderr = '';
+    assert.strictEqual(orchestrate.main(['--next', '--json', JSON.stringify({ cwd: diagnosticRoot, milestone })],
+      text => { stdout += text; }, text => { stderr += text; }), 0);
+    const publicFailure = JSON.parse(stdout);
+    assert.strictEqual(publicFailure.diagnostic.stage, 'select');
+    assert.strictEqual(publicFailure.diagnostic.transaction, null);
+    assert.strictEqual(publicFailure.reason_code, 'EPERM');
+    assert(!stdout.includes('secret-token'));
+    assert.strictEqual(stderr, '');
+  } finally { controller.lookupRecord = originalLookup; controller.select = originalSelect; }
+
   // init writes through forge-state and is byte/idempotency stable on retry.
   const cwd = temp();
   const first = orchestrate.init({ cwd, milestone, host_runtime: 'claude', project: 'Fixture', description: 'fixture project' });
@@ -129,7 +184,9 @@ try {
   const codex = setup();
   const left = orchestrate.next(nextInput(claude, 'claude'));
   const right = orchestrate.next(nextInput(codex, 'codex'));
-  assert.deepStrictEqual(left, right);
+  const neutral = value => ({ ...value, details: { ...value.details, transaction: { ...value.details.transaction,
+    generation: '<generation>', begin_checksum: '<begin-checksum>', host_runtime: '<host>' } } });
+  assert.deepStrictEqual(neutral(left), neutral(right));
   assert.strictEqual(left.outcome, 'completed');
   assert.strictEqual(left.unit.key, 'execute-task/T01');
   assert.strictEqual(left.events[0].event, 'unit-began');

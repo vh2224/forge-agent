@@ -1,0 +1,132 @@
+{
+  "fixture_version": 2,
+  "provenance": "Synthetic invalid inputs; IDs are data",
+  "cases": [
+    {
+      "name": "unknown-version",
+      "result": {
+        "schema_version": 3,
+        "status": "done",
+        "summary": "Synthetic compatibility fixture",
+        "questions": [],
+        "facts": [],
+        "events": []
+      }
+    },
+    {
+      "name": "hybrid-v1",
+      "result": {
+        "schema_version": 1,
+        "status": "done",
+        "summary": "Synthetic compatibility fixture",
+        "questions": [],
+        "facts": [],
+        "events": [
+          {
+            "kind": "exposure",
+            "existing_id": "MEM001"
+          }
+        ]
+      }
+    },
+    {
+      "name": "hybrid-v2",
+      "result": {
+        "schema_version": 2,
+        "status": "done",
+        "summary": "Synthetic compatibility fixture",
+        "questions": [],
+        "facts": [],
+        "events": [
+          {
+            "kind": "hit",
+            "local_event_id": "x",
+            "existing_id": "MEM001"
+          }
+        ]
+      }
+    },
+    {
+      "name": "extra-field",
+      "result": {
+        "schema_version": 2,
+        "status": "done",
+        "summary": "Synthetic compatibility fixture",
+        "questions": [],
+        "facts": [],
+        "events": [],
+        "approved": true
+      }
+    },
+    {
+      "name": "duplicate-id",
+      "result": {
+        "schema_version": 2,
+        "status": "done",
+        "summary": "Synthetic compatibility fixture",
+        "questions": [],
+        "facts": [],
+        "events": [
+          {
+            "kind": "exposure",
+            "local_event_id": "e0",
+            "existing_id": "MEM001",
+            "evidence_ref": "exposure"
+          },
+          {
+            "kind": "exposure",
+            "local_event_id": "e0",
+            "existing_id": "MEM001",
+            "evidence_ref": "exposure"
+          }
+        ]
+      }
+    },
+    {
+      "name": "utility-without-outcome",
+      "result": {
+        "schema_version": 2,
+        "status": "done",
+        "summary": "Synthetic compatibility fixture",
+        "questions": [],
+        "facts": [],
+        "events": [
+          {
+            "kind": "utility",
+            "local_event_id": "u",
+            "existing_id": "MEM001",
+            "evidence_ref": "utility"
+          }
+        ]
+      }
+    },
+    {
+      "name": "identity-is-not-path",
+      "result": {
+        "schema_version": 2,
+        "status": "done",
+        "summary": "Synthetic compatibility fixture",
+        "questions": [],
+        "facts": [],
+        "events": [
+          {
+            "kind": "confirm",
+            "local_event_id": "../../private",
+            "existing_id": "MEM001",
+            "evidence_ref": "confirm"
+          }
+        ]
+      }
+    }
+  ],
+  "binding_conflicts": [
+    {
+      "name": "foreign-source",
+      "source_unit": "execute-task/T99"
+    },
+    {
+      "name": "unregistered-confirm",
+      "evidence_ref": "missing"
+    }
+  ]
+}

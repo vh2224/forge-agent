@@ -9,6 +9,12 @@ on:
 permissions:
   contents: read
 
+# Superseded pull request runs are cancelled; every other event gets a
+# unique per-run group, so master validation is never cancelled or queued.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   operational-offline:
     name: Offline ${{ matrix.host }} / ${{ matrix.platform }}
@@ -129,7 +135,7 @@ jobs:
         # rot into a green-but-inert gate. Measured cause: 20 of the last 20 PRs
         # merged with windows-latest red, which is why the wrapper-readers break
         # (the #94 x #98 interaction) was indistinguishable from the chronic noise.
-        run: node scripts/run-tests.js --baseline scripts/fixtures/ci-baseline/known-failures.json --shard-index ${{ matrix.shard-index }} --shard-count ${{ matrix.shard-count }}
+        run: node scripts/run-tests.js --baseline scripts/fixtures/ci-baseline/known-failures.json --shard-profile scripts/fixtures/ci-shards/shard-profile.json --shard-index ${{ matrix.shard-index }} --shard-count ${{ matrix.shard-count }}
 
       - name: Smoke suite (release gate)
         if: runner.os != 'Windows'

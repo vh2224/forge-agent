@@ -541,15 +541,26 @@ async function main() {
         const interrupted = { ...planning, phase: 'execute', unitType: 'execute-task', taskId: 'T01',
           ...executionAuthority,
           planFile: tasks[0].planPath, execution_contract: lab.contract, dispatchId: 'milestone-timeout',
-          resultFile: path.join(lab.dir, 'interrupted.json'), prompt: 'Synthetic timeout only' };
+          resultFile: path.join(lab.dir, 'interrupted.json'), prompt: 'Synthetic timeout only',
+          verification: { commandsByRoot: {
+            alpha: ['node -e "require(\'fs\').accessSync(\'same.txt\')"'],
+            beta: ['node -e "require(\'fs\').accessSync(\'same.txt\')"'],
+          } } };
+        let interruptedCalls = 0;
         xllm.runExecute = async () => {
+          interruptedCalls++;
           const receipt = JSON.parse(fs.readFileSync(interrupted.resultFile + '.receipt.json'));
           assert.equal(receipt.recovery_baseline.protected_roots.length, 2, 'baseline persisted before writer');
+          assert.deepEqual(receipt.verification_seal.roots.map(root => root.root_id).sort(), ['alpha', 'beta'],
+            'both physical roots have sealed executable verification before the writer');
           write(path.join(lab.a, 'same.txt'), 'Interrupted alpha\n');
           write(path.join(lab.b, 'same.txt'), 'Interrupted beta\n');
           throw Object.assign(Error('milestone timeout fixture'), { code: 'claude-timeout' });
         };
         await assert.rejects(unit.runUnitSidecar(resolveMilestone(interrupted)), /milestone timeout fixture/);
+        assert.equal(interruptedCalls, 1, 'the gated interruption scenario reached its writer exactly once');
+        assert.equal(fs.readFileSync(path.join(lab.a, 'same.txt'), 'utf8'), 'Interrupted alpha\n');
+        assert.equal(fs.readFileSync(path.join(lab.b, 'same.txt'), 'utf8'), 'Interrupted beta\n');
         const restartFile = path.join(lab.dir, 'milestone-restart.json'); write(restartFile, JSON.stringify(interrupted));
         child([__filename, '--milestone-restart', restartFile], env);
         const resetProof = JSON.parse(fs.readFileSync(restartFile + '.proof'));
@@ -612,7 +623,7 @@ async function main() {
         fs.unlinkSync(path.join(slice, 'tasks/T01/T01-SUMMARY.md'));
         write(path.join(slice, 'S01-PLAN.md'), '# Slice\n- [ ] **T01** First\n- [ ] **T02** Second\n');
       } finally { xllm.runExecute = originalExecute; }
-      write(path.join(base, `${milestoneId}-ROADMAP.md`), '# Roadmap\n- [ ] **S01: Workflow**\n');
+      write(path.join(base, `${milestoneId}-ROADMAP.md`), '# Roadmap\n- [ ] **S01: Workflow** `depends:[]`\n');
       const state = require('./forge-state');
       state.write(lab.owner, { milestone: milestoneId, kind: 'milestone', phase: 'execute-task', active_slice: 'S01', active_task: 'T01', next_action: 'execute', auto_mode: 'on' });
       const prefsReader = () => ({ ok: true, prefs: { skip_discuss: true, skip_research: true, skip_slice_research: true } });

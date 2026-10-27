@@ -8,7 +8,7 @@ const runtime = require('./forge-runtime.js');
 
 const PROTOCOL_VERSION = runtime.PROTOCOL_VERSION;
 const MODES = Object.freeze(['auto', 'task']);
-const COMMANDS = Object.freeze(['next', 'pause', 'resume', 'status', 'complete']);
+const COMMANDS = Object.freeze(['next', 'pause', 'resume', 'status', 'complete', 'consume-failure', 'reenter']);
 const TERMINAL = new Set(['completed', 'blocked', 'failed']);
 
 function error(code, message) { const value = new Error(message); value.code = code; return value; }
@@ -87,7 +87,16 @@ function taskScopeRefusal(state, input, command) {
   return publicResult(command, state, 'blocked', 'task-scope-unsupported', 'stop', null);
 }
 function next(state, input, orchestrate) {
-  if (state.lifecycle === 'dispatch_required' && state.last_decision) return { ...state.last_decision, snapshot: state };
+  if (state.lifecycle === 'dispatch_required' && state.last_decision) {
+    if (orchestrate.validatePending) {
+      let checked;
+      try { checked = orchestrate.validatePending(delegateInput(input, state), state.last_decision.controller_result); }
+      catch (cause) { checked = { ok: false, reason: cause.code || 'pending-validation-failed', pending_questions: cause.pending_questions }; }
+      if (checked.pending_questions) state.pending_questions = checked.pending_questions;
+      if (!checked.ok) return publicResult('next', state, 'blocked', checked.reason, 'stop', null);
+    }
+    return { ...state.last_decision, snapshot: state };
+  }
   if (state.lifecycle === 'paused') return publicResult('next', state, 'needs_input', 'pause-active', 'pause', null);
   if (TERMINAL.has(state.lifecycle)) return publicResult('next', state, state.lifecycle, 'workflow-terminal', 'stop', null);
   const refusedNext = taskScopeRefusal(state, input, 'next');
@@ -155,14 +164,51 @@ function complete(state, input, orchestrate) {
   state.lifecycle = state.mode === 'task' ? 'completed' : 'idle';
   return publicResult('complete', state, 'completed', delegated.reason_code, state.lifecycle === 'idle' ? 'continue' : 'stop', delegated);
 }
+function consumeFailure(state, input, orchestrate) {
+  const decision = state.last_decision?.controller_result;
+  const transaction = decision?.details?.transaction;
+  const prior = state.consumed_failure;
+  if (!transaction && !prior) return publicResult('consume-failure', state, 'blocked', 'dispatch-not-pending', 'stop', null);
+  const binding = transaction || prior.begin;
+  const delegated = orchestrate.run('consume-failure', { ...delegateInput(input, state),
+    unit: state.current_unit || prior.unit, begin_key: binding.idempotency_key, begin_checksum: binding.begin_checksum,
+    generation: binding.generation });
+  if (delegated.reason_code !== 'failure-consumed') return publicResult('consume-failure', state, 'blocked', delegated.reason_code, 'stop', delegated);
+  state.consumed_failure = { begin: binding, unit: state.current_unit || prior.unit,
+    failure_key: delegated.details.failure_key, failure_checksum: delegated.details.failure_checksum };
+  state.pending_questions = delegated.details.pending_questions || [];
+  state.current_unit = null; state.last_decision = null; state.boundary = delegated.boundary;
+  state.lifecycle = state.pending_questions.some(item => item.status === 'pending') ? 'blocked' : state.mode === 'task' ? 'failed' : 'idle';
+  return publicResult('consume-failure', state, 'failed', 'failure-consumed', state.lifecycle === 'idle' ? 'continue' : 'stop', delegated);
+}
+function reenter(state, input, orchestrate) {
+  const replay = state.last_entry_id === input.entry?.entry_id && state.last_decision;
+  if (!replay && state.step_count >= state.max_steps) return publicResult('reenter', state, 'blocked', 'step-budget-exhausted', 'stop', null);
+  const delegated = orchestrate.run('reenter', delegateInput(input, state));
+  if (delegated.details?.pending_questions) state.pending_questions = delegated.details.pending_questions;
+  if (delegated.outcome !== 'completed') return publicResult('reenter', state, 'blocked', delegated.reason_code, 'stop', delegated);
+  state.current_unit = safeUnit(delegated.unit); state.lifecycle = 'dispatch_required'; if (!replay) state.step_count += 1;
+  state.last_entry_id = input.entry.entry_id;
+  const result = publicResult('reenter', state, 'dispatch_required', 'entry-ready', 'dispatch', delegated);
+  const { snapshot: _snapshot, ...decision } = result; state.last_decision = decision;
+  return result;
+}
 function advance(snapshot, commandValue, input = {}, dependencies = {}) {
   const state = validateSnapshot(snapshot);
   const command = String(commandValue || '').toLowerCase();
   if (!COMMANDS.includes(command)) throw error('invalid-command', `command inválido: ${commandValue}`);
   const requestedHost = input.host_runtime || input.hostRuntime;
   if (requestedHost && command !== 'resume' && host(requestedHost) !== state.host_runtime) throw error('host-runtime-mismatch', 'host só muda em resume com boundary durável');
-  const orchestrate = dependencies.orchestrate || orchestrateDefault;
-  if (!orchestrate || typeof orchestrate.run !== 'function') throw error('invalid-controller', 'forge-orchestrate indisponível');
+  const controller = dependencies.orchestrate || orchestrateDefault;
+  if (!controller || typeof controller.run !== 'function') throw error('invalid-controller', 'forge-orchestrate indisponível');
+  const trusted = {};
+  for (const name of ['prefsReader', 'inventoryReader', 'now', 'failpoint', 'inspectAttempt', 'processProbe', 'replaySavedResponse', 'reconcileRoots', 'captureEntryBaseline', 'entryAuthority', 'questionStateAdapter']) {
+    if (dependencies[name] !== undefined) trusted[name] = dependencies[name];
+  }
+  const orchestrate = { run: (operation, payload) => controller.run(operation, payload, trusted),
+    ...(typeof controller.validatePending === 'function' ? { validatePending: (payload, decision) => controller.validatePending(payload, decision, trusted) } : {}) };
+  if (command === 'consume-failure') return consumeFailure(state, input, orchestrate);
+  if (command === 'reenter') return reenter(state, input, orchestrate);
   if (command === 'next') return next(state, input, orchestrate);
   if (command === 'pause') return pause(state, input, orchestrate);
   if (command === 'resume') return resume(state, input, orchestrate);

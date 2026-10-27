@@ -13,8 +13,8 @@ const POLICY = {
   workflows: {
     ci: {
       filename: 'ci.yml', path: '.github/workflows/ci.yml',
-      blob_oid: '54e1b33026e3e5b5dc4da494cb301cdd27e72d7a',
-      blob_sha256: '5c37cf20bab5613832e0a5efad3e5fa7b9494a57ddbd67a680e4510228e5ffdc',
+      blob_oid: '1e445bfaa5ba6ddb43fe8b368bd13718f2de74a9',
+      blob_sha256: '4710b62fa4dd556a907b9b54d216decece284ba2de9caee2420a4d02388e9efe',
       jobs: [
         { key: 'operational-offline', kind: 'native', needs: [],
           name: 'Offline ${{ matrix.host }} / ${{ matrix.platform }}',
@@ -39,14 +39,14 @@ const POLICY = {
     },
     app: {
       filename: 'app.yml', path: '.github/workflows/app.yml',
-      blob_oid: '6ad7bb5f3af423c74452afe659aae35db9785fd4',
-      blob_sha256: 'cb12bc265ca1e21335f2be3b20961cab8bb878aefe1cde6053a9fef1e55c33e5',
+      blob_oid: '2b8b405ca5e30d2213cad659d1f26d084df95938',
+      blob_sha256: 'aa82f5187c6872e6cb8f9b468f5812b4f1e118fba0997b4351ea7c2f4f07296f',
       jobs: [{ key: 'app', kind: 'native', needs: [], name: 'Swift app and PTY regressions', runner: 'macos-26', matrix: null }],
     },
     release: {
       filename: 'release.yml', path: '.github/workflows/release.yml',
-      blob_oid: '315d89bad9b4ef2965d3a2f3e969fd83005e61d2',
-      blob_sha256: 'c19b795426f6d0cec090630f90f1c3aa45d3bc83d573aab92cac332e0f3017a3',
+      blob_oid: 'cc8421b30163c9adc7d6be1ff7dbf9c7ef0f3edc',
+      blob_sha256: 'b93088ede606c56f5993977eaaf536bba31c1d9fbb30501803ff776d0d09248c',
       // Release is source-pinned but never waits for itself; job identity binds receipts.
       jobs: [
         { key: 'coordinator', kind: 'coordinator', name: 'Release coordinator', needs: [], runner: 'ubuntu-latest', matrix: null, permissions: { contents: 'read', actions: 'read' } },
