@@ -478,10 +478,15 @@ async function startStandaloneTaskPreparationCore(rawRequest, deps = {}) {
       error.code || 'preparation-attempt-failed', route, false);
   }
   let consumed = false;
+  // Bind identity now: later mutation of the returned route/request must not move the expected value.
+  const expectedFingerprint = unit.artifactFingerprint(delivery);
+  const routeSnapshot = JSON.parse(JSON.stringify(route));
+  let requestSnapshot = rawRequest;
+  try { requestSnapshot = structuredClone(rawRequest); } catch { /* keep the caller object */ }
   const invoke = callback => {
     if (consumed) return Promise.resolve(refused('native', 'native-handoff-already-invoked', route));
     consumed = true;
-    return invokePreparedNative(rawRequest, route, unit.artifactFingerprint(delivery), { ...deps, invokeNative: callback });
+    return invokePreparedNative(requestSnapshot, routeSnapshot, expectedFingerprint, { ...deps, invokeNative: callback });
   };
   return { ok: true, action: 'invoke-native', transport: 'native', status: 'ready',
     reason_code: invocation.reason_code, provider_called: false, route,
@@ -697,6 +702,10 @@ async function invokePreparedNative(rawRequest, route, expectedFingerprint, deps
   options.lifecycle = deps.nativeLifecycle;
   const nativeDelivery = deliveryRequest(request, started.route, buildPreparationPrompt(request));
   if (unit.artifactFingerprint(nativeDelivery) !== expectedFingerprint) return refused('native', 'dispatch-identity-conflict', route);
+  try {
+    if (readJson(unit.artifactAttemptFiles(nativeDelivery).receiptFile).fingerprint !== expectedFingerprint)
+      return refused('native', 'dispatch-identity-conflict', route);
+  } catch { return refused('native', 'dispatch-identity-conflict', route); }
   options.onPackagedContext = packaged => {
     const files = unit.artifactAttemptFiles(nativeDelivery);
     const saved = readJson(files.receiptFile);

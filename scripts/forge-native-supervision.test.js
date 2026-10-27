@@ -137,6 +137,23 @@ async function run() {
     assert.equal(delayedResult.ok,false); assert.equal(launches,0,'no launch after scheduled cutoff');
     assert.equal(resumes,0,'no resume after scheduled cutoff'); assert.equal(launchClock.size(),0);
   }
+  // Expired startup/silence limits and wall rollbacks win over a late event or terminal.
+  for (const kind of ['work', 'terminal']) for (const rollback of [false, true]) {
+    const lc = clock(), lo = base(lc); let lemit;
+    lo.route = { tier: 'light', workers_timeout: 60, workers_timeout_source: 'explicit' };
+    lo.policy = { startMs: 10, suspectMs: 10, deadMs: 20, toolExtensionMs: 30 };
+    lo.adapter = { capabilities: { result: true, remote_events: true },
+      acknowledge: () => 'late', subscribe: (h, cb) => { lemit = cb; return () => {}; } };
+    const late = api.supervise(lo, async () => ({ agent_id: 'late' }));
+    await lc.advance(0);
+    if (rollback) lc.jump(-5); else lc.jump(500);
+    lemit(kind === 'work' ? { identity: lo.identity, sequence: 1, kind: 'work', text: 'late' }
+      : { identity: lo.identity, sequence: 1, kind: 'terminal', result: { status: 'done' } });
+    const lateResult = await late;
+    assert.equal(lateResult.ok, false, `${kind}/${rollback} must not revive the attempt`);
+    assert.equal(lateResult.reason_code, rollback ? 'native-clock-inconsistent' : 'dead-start');
+    assert.equal(lateResult.lifecycle.first_remote_ms, null);
+  }
   console.log('native supervision discriminating tests passed');
 }
 if (require.main === module) run().catch(error => { console.error(error); process.exitCode = 1; });

@@ -1838,7 +1838,8 @@ async function reviewFixRecoveryContracts() {
     gates: { claim: 'proceed', security: 'not-applicable' } };
   runs.add(lab.owner, { id: executionAuthority.runId, kind: 'milestone', session_id: 'fixture', write_claim: executionAuthority.claim });
   const receiptFile = request.resultFile + '.receipt.json', stateFile = request.resultFile + '.recovery.json';
-  let nativeCalls = 0;
+  let nativeCalls = 0, nativeMode = 'object', textual = null;
+  const textualReport = { status: 'done', items: [{ r: 'R1', outcome: 'fixed', note: 'fixture' }] };
   try {
     fs.writeFileSync(path.join(lab.a, 'prior.txt'), 'preexisting\n');
     xllm.runFix = async () => {
@@ -1904,6 +1905,8 @@ async function reviewFixRecoveryContracts() {
         assert.strictEqual(binding.args.message.split('<!-- forge-procedure:core -->').length - 1, 1);
         // The public native callback owns preparation and acceptance. This is a
         // local worker fixture, not a provider invocation or a product receipt.
+        // Invalid textual output is rejected by the real supervision terminal contract.
+        if (nativeMode === 'malformed') return '---GSD-WORKER-RESULT---\nstatus: done\nresult_json: {"status":\n---END-RESULT---';
         const nativePreparation = fix.prepareNativeReviewFix({ ...next, vcs: 'git' });
         fs.writeFileSync(path.join(lab.a, 'same.txt'), 'fixed\n');
         guards.assertAuthority(); // Post-write authority does not reassert the old baseline.
@@ -1913,8 +1916,11 @@ async function reviewFixRecoveryContracts() {
         assert(fs.readFileSync(path.join(lab.owner, reviewFile)).equals(reviewBeforeRevocation));
         runs.update(lab.owner, executionAuthority.runId, { active: true });
         guards.assertAuthority();
-        return fix.acceptNativeReviewFix({ ...next, nativePreparation,
-          rawResult: { status: 'done', items: [{ r: 'R1', outcome: 'fixed', note: 'fixture' }] } });
+        if (nativeMode === 'text') {
+          textual = { next, nativePreparation };
+          return `---GSD-WORKER-RESULT---\nstatus: done\nresult_json: ${JSON.stringify(textualReport)}\n---END-RESULT---`;
+        }
+        return fix.acceptNativeReviewFix({ ...next, nativePreparation, rawResult: textualReport });
       } };
     const invoke = patch => sidecar.recoverUnitSidecar(request, { stateFile, receiptFile }, { ...runtime, ...patch });
     await assert.rejects(invoke({ processProbe: () => 'alive' }), /process-receipt-inspection/);
@@ -1933,6 +1939,33 @@ async function reviewFixRecoveryContracts() {
     assert.strictEqual(nativeCalls, 0);
     fs.writeFileSync(stateFile, originalState);
     fs.writeFileSync(baselineFile, baselineBytes);
+    // Isolated textual modes through the real recoverUnitSidecar/invokeNative/supervision
+    // path; each restores the fixture so the original object-result recovery below is unchanged.
+    const reviewBytes = fs.readFileSync(path.join(lab.owner, reviewFile));
+    const isolate = () => {
+      fs.writeFileSync(stateFile, originalState); fs.writeFileSync(baselineFile, baselineBytes);
+      fs.writeFileSync(receiptFile, receiptBytes); fs.writeFileSync(path.join(lab.owner, reviewFile), reviewBytes);
+      fs.writeFileSync(path.join(lab.a, 'same.txt'), 'before\n'); nativeMode = 'object'; textual = null;
+    };
+    nativeMode = 'text';
+    const textRecovered = await invoke();
+    assert.strictEqual(textRecovered.action, 'invoke', JSON.stringify({ action: textRecovered.action, reason: textRecovered.reason_code }));
+    assert.strictEqual(textRecovered.result.ok, true, JSON.stringify(textRecovered.result.diagnostic || textRecovered.result));
+    assert.strictEqual(typeof textRecovered.result.result, 'string');
+    const parsedText = require('./forge-worker-result').parseJsonEnvelope(textRecovered.result.result);
+    assert.strictEqual(parsedText.ok, true);
+    const textAccepted = fix.acceptNativeReviewFix({ ...textual.next, nativePreparation: textual.nativePreparation, rawResult: parsedText.payload });
+    assert.strictEqual(textAccepted.items[0].verified, true);
+    assert.strictEqual(nativeCalls, 1);
+    isolate();
+    nativeMode = 'malformed';
+    const malformed = await invoke().then(value => value, error => ({ rejected: error }));
+    assert.strictEqual(malformed.action, 'invoke');
+    assert.strictEqual(malformed.result.ok, false, 'malformed worker text must not be accepted');
+    assert.strictEqual(textual, null);
+    assert.strictEqual(fs.readFileSync(path.join(lab.a, 'same.txt'), 'utf8'), 'before\n');
+    assert.strictEqual(nativeCalls, 2);
+    isolate(); nativeCalls = 0;
     const recovered = await invoke();
     assert.strictEqual(recovered.action, 'invoke', JSON.stringify({ action: recovered.action, reason: recovered.reason_code, rejected: recovered.rejected }));
     assert.strictEqual(recovered.result.ok, true, JSON.stringify(recovered.result.diagnostic));

@@ -113,6 +113,26 @@ async function main() {
     const result = await pending; assert.equal(result.ok, true, JSON.stringify(result));
     assert(fs.existsSync(artifactPath(request)));
   });
+  await test('deferred native handoff ignores route mutation made after preparation', async () => {
+    const request = fixture({ model: 'gpt-5.6-sol' });
+    // Both models are admitted, so a mutated route would be dispatchable if it leaked.
+    request.activeCapabilities = { ...codexCapabilities(), models: ['gpt-5.6-sol', 'gpt-5.6-other'] };
+    const handoff = await prep.startStandaloneTaskPreparation(request, {});
+    assert.equal(typeof handoff.invoke, 'function');
+    const original = { model: handoff.route.model, resolved: handoff.route.model_resolved };
+    assert.equal(original.resolved, 'gpt-5.6-sol');
+    handoff.route.model_resolved = 'gpt-5.6-other'; handoff.route.model = 'gpt-5.6-other';
+    if (handoff.request) handoff.request.model = 'gpt-5.6-other';
+    const calls = [];
+    const result = await handoff.invoke(async (...args) => { calls.push(args);
+      return framed(envelope(request)); });
+    assert.equal(calls.length, 1, 'exactly one provider callback with the original route');
+    const seen = JSON.stringify(calls[0]);
+    assert(!seen.includes('gpt-5.6-other'), 'mutated model must not be dispatched');
+    assert.equal(calls[0][0].model, 'gpt-5.6-sol');
+    assert.equal(calls[0][0].reasoning_effort, 'medium');
+    assert.equal(result.ok, true, JSON.stringify(result));
+  });
   await test('mandatory preparation procedures fail closed before either transport', async () => {
     for (const failure of ['pending', 'missing', 'hash']) {
       const request = fixture({ model: 'gpt-5.6-sol' });

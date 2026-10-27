@@ -80,7 +80,8 @@ async function supervise(options, invoke) {
   let resolveOutcome;
   const outcome = new Promise(resolve => { resolveOutcome = resolve; });
   const elapsed = () => Math.floor(initialElapsed + Math.max(0, clock.monotonic() - mono));
-  const save = () => { state.last_wall_ms = clock.wall(); store?.save(state); };
+  // Never lower the high-water mark; tick() rejects a rollback before any observation is saved.
+  const save = () => { state.last_wall_ms = Math.max(state.last_wall_ms, clock.wall()); store?.save(state); };
   const snapshot = () => ({ ...state, journal_reference: store?.reference || null,
     persistence: store ? 'external-journal' : 'unavailable' });
   const clean = () => { if (timer !== null) clock.clearTimeout(timer); timer = null;
@@ -96,7 +97,8 @@ async function supervise(options, invoke) {
   const terminalResult = value => { try { return terminal(value) === true; } catch { return false; } };
   const receiveTerminal = value => {
     if (!terminalResult(value)) return false;
-    if (!finished && (elapsed() >= state.ceiling_ms || clock.wall() >= state.deadline_wall_ms)) tick();
+    // Validate clocks and startup/silence/ceiling limits against existing timestamps first.
+    if (!finished) tick();
     if (!finished) finish(true, 'native-terminal', value);
     else {
       state.late_terminal = true;
@@ -121,7 +123,8 @@ async function supervise(options, invoke) {
       && typeof observation.text === 'string' && observation.text.trim().length > 0;
     const tool = observation.kind === 'tool' && caps.open_tools === 'available' && typeof observation.open === 'boolean';
     if (!work && !tool) return; // Administrative heartbeat/wait/running is not work.
-    if (elapsed() >= state.ceiling_ms || clock.wall() >= state.deadline_wall_ms) { tick(); return; }
+    tick(); // expired liveness or a clock rollback must win over this activity
+    if (finished) return;
     state.sequence = observation.sequence;
     if (work || tool) { state.first_remote_ms ??= elapsed(); state.last_remote_ms = elapsed(); }
     if (tool) state.open_tools = observation.open;
@@ -129,6 +132,8 @@ async function supervise(options, invoke) {
   };
   const tick = () => {
     if (finished) return;
+    if (timer !== null) clock.clearTimeout(timer);
+    timer = null;
     const age = elapsed();
     const nowWall = clock.wall(), nowMono = clock.monotonic();
     if (!Number.isSafeInteger(nowWall) || nowWall < state.last_wall_ms

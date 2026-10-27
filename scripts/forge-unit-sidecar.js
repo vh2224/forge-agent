@@ -2747,7 +2747,11 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     return { hostRuntime: route.host_runtime, resolvedDispatch: route,
     telemetryIdentity: finalRequest(route), lifecycle: runtime.nativeLifecycle,
     terminalResult: value => deliveryHelper ? deliveryHelper.resultContract.validate(value).ok
-      : value && ['done', 'partial', 'blocked'].includes(value.status),
+      : canonical.unitType === 'review-fix' && typeof value === 'string'
+        // The review-fix prompt requires the textual worker-result block; the value
+        // itself stays untouched for downstream result acceptance.
+        ? require('./forge-worker-result').parseJsonEnvelope(value).ok === true
+        : value && ['done', 'partial', 'blocked'].includes(value.status),
     activeCapabilities: runtime.activeCapabilities, effortBinding: runtime.effortBinding,
     prompt, forkTurns: 'none',
     taskName: nativeTaskName,
