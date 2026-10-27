@@ -282,7 +282,25 @@ async function initialMixedDocumentary(documentaryOnly=false){
     const resumed=open();const reviewed=resumed.reviewDocumentary(reviewOptions);assert.equal(reviewed.provider_called,false);
     assert.deepEqual(reviewed.result,result,'done initial return does not need artificial partial');
     write(path.join(f.a,'same.txt'),'drift\n');assert.throws(()=>resumed.verify(result),/returned-state-changed/);write(path.join(f.a,'same.txt'),'after\n');
-    const checked=resumed.verify(result);
+    // Keep the real gate intact, but retain the failing fixture boundary in CI.
+    // These roots and commands are synthetic; never dump provider/host payloads.
+    const verifier=require('./forge-verify'),captureRootDelivery=verifier.captureRootDelivery;
+    let checked;
+    try {
+      verifier.captureRootDelivery=(...args)=>{
+        const captured=captureRootDelivery(...args);
+        if(!captured.passed)console.error('FAIL mixed documentary capture',JSON.stringify({
+          roots:captured.gate.roots.map(row=>({root_id:row.root_id,passed:row.result.passed,
+            skipped:row.result.skipped,source:row.result.discoverySource,
+            checks:row.result.checks.map(check=>({command:check.command,exitCode:check.exitCode,
+              stdout:String(check.stdout||'').slice(0,1500),stderr:String(check.stderr||'').slice(0,1500)}))})),
+          artifacts:captured.artifacts.map(row=>({root_id:row.root_id,passed:row.result.passed,
+            missing:row.result.missing,rows:row.result.rows.map(item=>({path:item.path,exists:item.exists}))}))
+        }));
+        return captured;
+      };
+      checked=resumed.verify(result);
+    } finally { verifier.captureRootDelivery=captureRootDelivery; }
     for(const p of policy.criteria){const rows=checked.bindings.filter(b=>b.criterion_id===p.criterion_id);assert.equal(rows.some(b=>b.coverage==='behavioral'),!documentaryOnly);assert(rows.some(b=>b.coverage==='documentary'));assert(rows.every(b=>roots.digest(b.required_coverages)===roots.digest(p.requirements)));}
     const withoutBehavior=structuredClone(result);for(const c of withoutBehavior.must_haves_status)if(c.kind!=='artifact')c.evidence=[];
     const bindOptions={inventory,contract:f.contract,documentary:JSON.parse(fs.readFileSync(reviewed.review_file)).evidence,coveragePolicy:policy};
