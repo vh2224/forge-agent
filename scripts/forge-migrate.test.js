@@ -279,6 +279,58 @@ test('--dry-run on already-migrated repo writes nothing and reports skip', () =>
   }
 });
 
+function treeSnapshot(root) {
+  const rows = [];
+  const visit = (directory, prefix = '') => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const relative = prefix + entry.name, file = path.join(directory, entry.name);
+      if (entry.isDirectory()) { rows.push([relative + '/']); visit(file, relative + '/'); }
+      else rows.push([relative, require('crypto').createHash('sha256').update(fs.readFileSync(file)).digest('hex')]);
+    }
+  };
+  visit(root);
+  return JSON.stringify(rows);
+}
+
+test('first-migration dry-run reads existing monoliths and writes nothing', () => {
+  const cwd = mkTmp();
+  try {
+    writeMonoliths(cwd);
+    const before = treeSnapshot(cwd);
+    const result = migrate.migrateAll(cwd, { dryRun: true });
+    assert(treeSnapshot(cwd) === before, 'dry-run changed the tree');
+    for (const name of STORE_NAMES) {
+      assert(result[name].bak === 'would-rename', `${name}: expected would-rename`);
+      assert(result[name].would_write > 0, `${name}: dry-run lost source entries`);
+      assert(result[name].written === 0 && result[name].error === null, `${name}: unexpected write/error`);
+      assert(!result[name].warnings.some(w => /not found/i.test(w)), `${name}: source falsely missing`);
+    }
+    assert(/^\(dry-run/.test(result.schema_version_written), 'dry-run schema not reported');
+  } finally { rmrf(cwd); }
+});
+
+test('dry-run preserves existing-backup precedence and real migration still writes', () => {
+  const cwd = mkTmp();
+  try {
+    writeMonoliths(cwd);
+    const backup = LEDGER_CONTENT + '\n' + LEDGER_CONTENT.replaceAll('M-20260101000000-smoke', 'M-20260102000000-smoke');
+    fs.writeFileSync(path.join(cwd, '.gsd/LEDGER.md.bak'), backup);
+    const before = treeSnapshot(cwd);
+    const dry = migrate.migrateAll(cwd, { dryRun: true });
+    assert(dry.ledger.bak === 'bak-exists' && dry.ledger.would_write === 2, 'dry-run did not read backup');
+    assert(treeSnapshot(cwd) === before, 'backup dry-run changed the tree');
+    const applied = migrate.migrateAll(cwd);
+    assert(applied.ledger.written === 2, 'real migration did not retain backup precedence');
+    for (const name of STORE_NAMES) {
+      assert(applied[name].written > 0 && !applied[name].error, `${name}: real migration failed`);
+      assert(applied[name].verification !== 'no-bak', `${name}: backup verification missing`);
+      if (name !== 'ledger') assert(applied[name].bak === 'renamed', `${name}: real rename missing`);
+    }
+    assert(fs.existsSync(path.join(cwd, '.gsd/SCHEMA-VERSION')), 'real schema stamp missing');
+    assert(fs.readFileSync(path.join(cwd, '.gsd/LEDGER.md.bak'), 'utf8') === backup, 'backup overwritten');
+  } finally { rmrf(cwd); }
+});
+
 // ── Summary ───────────────────────────────────────────────────────────────────
 console.log('');
 if (failed === 0) {
