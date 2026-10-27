@@ -65,7 +65,8 @@ const testCells = [...testBlock.matchAll(/- os: ([^\s]+)\s+platform: (linux|darw
   .map((match) => ({ os: match[1], platform: match[2], shardIndex: Number(match[3]), shardCount: Number(match[4]), label: match[5] }));
 assert.deepStrictEqual(testCells, [
   { os: 'ubuntu-latest', platform: 'linux', shardIndex: 0, shardCount: 1, label: 'ubuntu-latest' },
-  { os: 'macos-latest', platform: 'darwin', shardIndex: 0, shardCount: 1, label: 'macos-latest' },
+  { os: 'macos-latest', platform: 'darwin', shardIndex: 0, shardCount: 2, label: 'macos-latest, shard 1/2' },
+  { os: 'macos-latest', platform: 'darwin', shardIndex: 1, shardCount: 2, label: 'macos-latest, shard 2/2' },
   { os: 'windows-latest', platform: 'win32', shardIndex: 0, shardCount: 4, label: 'windows-latest, shard 1/4' },
   { os: 'windows-latest', platform: 'win32', shardIndex: 1, shardCount: 4, label: 'windows-latest, shard 2/4' },
   { os: 'windows-latest', platform: 'win32', shardIndex: 2, shardCount: 4, label: 'windows-latest, shard 3/4' },
@@ -77,11 +78,17 @@ assert.match(compatibilityBlock, /name: Offline \$\{\{ matrix\.host \}\} \/ \$\{
 assert.match(compatibilityBlock, /platform:\s*\r?\n\s+- linux\s*\r?\n\s+- darwin\s*\r?\n\s+- win32/);
 assert.match(compatibilityBlock, /host:\s*\r?\n\s+- claude\s*\r?\n\s+- codex/);
 assert.match(compatibilityBlock, /name: Tests \(windows-latest\)/);
+assert.match(compatibilityBlock, /name: Tests \(macos-latest\)/);
 assert.match(compatibilityBlock, /needs: operational-offline/);
 assert.match(compatibilityBlock, /needs: test/);
-assert.strictEqual((compatibilityBlock.match(/if: \$\{\{ always\(\) \}\}/g) || []).length, 2);
-assert.strictEqual((compatibilityBlock.match(/\.result \}\}" = success/g) || []).length, 2,
+assert.strictEqual((compatibilityBlock.match(/if: \$\{\{ always\(\) \}\}/g) || []).length, 3);
+assert.strictEqual((compatibilityBlock.match(/\.result \}\}" = success/g) || []).length, 3,
   'required-check compatibility jobs must fail when their real dependency fails');
+const testsAlias = (key, label) => `  ${key}:\n    name: Tests (${label})\n    needs: test\n    if: \${{ always() }}\n`
+  + '    runs-on: ubuntu-latest\n    steps:\n      - name: Preserve required-check contract\n'
+  + '        run: test "${{ needs.test.result }}" = success\n';
+assert(workflow.replace(/\r\n/g, '\n').endsWith(`${testsAlias('required-tests-windows', 'windows-latest')}\n${testsAlias('required-tests-macos', 'macos-latest')}`),
+  'macOS tests alias must follow the unchanged Windows alias at the end of the workflow');
 // This assertion replaces `assert.match(workflow, /shell:\s*pwsh/)`, which is exactly the
 // kind of guard that proves the wrong property: it matched the TEXT of a workflow GitHub
 // refused to schedule, so it stayed green across two runs on PR #71 that died at the

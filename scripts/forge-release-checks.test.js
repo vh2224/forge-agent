@@ -154,13 +154,18 @@ test('app-only-complete-empty-authenticated-diff-is-na', () => {
   delete unknown.workflows.app; blocked(unknown, 'workflow-missing');
 });
 
-test('policy-matrix-16-ci-one-native-app-and-local-inventory', () => {
+test('policy-matrix-18-ci-one-native-app-and-local-inventory', () => {
   const ci = checks.expandJobs(checks.POLICY.workflows.ci);
-  assert.strictEqual(ci.length, 16); assert.strictEqual(ci.filter(job => job.kind === 'native').length, 9);
-  assert.strictEqual(ci.filter(job => job.kind === 'alias').length, 7);
-  assert.strictEqual(new Set(ci.map(job => job.name)).size, 16);
+  assert.strictEqual(ci.length, 18); assert.strictEqual(ci.filter(job => job.kind === 'native').length, 10);
+  assert.strictEqual(ci.filter(job => job.kind === 'alias').length, 8);
+  assert.strictEqual(new Set(ci.map(job => job.name)).size, 18);
   assert.deepStrictEqual(ci.filter(job => job.key === 'test').map(job => job.name), [
-    'Tests (ubuntu-latest)', 'Tests (macos-latest)', 'Tests (windows-latest, shard 1/4)', 'Tests (windows-latest, shard 2/4)', 'Tests (windows-latest, shard 3/4)', 'Tests (windows-latest, shard 4/4)',
+    'Tests (ubuntu-latest)', 'Tests (macos-latest, shard 1/2)', 'Tests (macos-latest, shard 2/2)',
+    'Tests (windows-latest, shard 1/4)', 'Tests (windows-latest, shard 2/4)', 'Tests (windows-latest, shard 3/4)', 'Tests (windows-latest, shard 4/4)',
+  ]);
+  assert.deepStrictEqual(ci.filter(job => job.key.startsWith('required-tests-')).map(job => [job.key, job.name, job.kind, job.needs]), [
+    ['required-tests-windows', 'Tests (windows-latest)', 'alias', ['test']],
+    ['required-tests-macos', 'Tests (macos-latest)', 'alias', ['test']],
   ]);
   assert.deepStrictEqual(ci.filter(job => job.key === 'required-offline-windows').map(job => job.needs), Array(6).fill(['operational-offline']));
   assert.deepStrictEqual(checks.expandJobs(checks.POLICY.workflows.app).map(job => [job.key, job.runner, job.kind]), [['app', 'macos-26', 'native']]);
@@ -193,7 +198,7 @@ test('policy-synthetic-candidate-bytes-mapping-and-checkout-eol-independent', ()
   };
   const source = checks.assertPolicySources(candidate(), synthetic);
   assert.strictEqual(source.verified, true);
-  assert.strictEqual(source.workflows.ci.jobs.length, 16);
+  assert.strictEqual(source.workflows.ci.jobs.length, 18);
   for (const [key, workflow] of Object.entries(policy.workflows)) {
     const bytes = blobs[workflow.path];
     assert.notStrictEqual(sha256(bytes), sha256(Buffer.from(bytes.toString().replace(/\n/g, '\r\n'))));
@@ -220,7 +225,7 @@ test(committedMatches ? 'policy-committed-head-source-matches' : 'policy-pending
   if (committedMatches) {
     const source = checks.assertPolicySources(committedCandidate, { cwd: ROOT });
     assert.strictEqual(source.verified, true);
-    assert.strictEqual(source.workflows.ci.jobs.length, 16);
+    assert.strictEqual(source.workflows.ci.jobs.length, 18);
   } else {
     assert.throws(() => checks.assertPolicySources(committedCandidate, { cwd: ROOT }), { code: 'policy-source-drift' });
   }
@@ -261,7 +266,7 @@ test('policy-bounded-coordinator-publisher-permissions-and-needs', () => {
 
 test('checks-complete-current-attempt-source-key-name-execution-id', () => {
   const f = facts(); const result = checks.evaluateChecks(f);
-  assert.strictEqual(result.allowed, true); assert.strictEqual(result.checks.length, 17);
+  assert.strictEqual(result.allowed, true); assert.strictEqual(result.checks.length, 19);
   const job = result.checks.find(item => item.name === 'Tests (windows-latest, shard 1/4)');
   assert.strictEqual(job.job_key, 'test'); assert.strictEqual(job.kind, 'native');
   assert.strictEqual(job.execution_id, f.workflows.ci.jobs.find(item => item.name === job.name).id);
@@ -292,6 +297,28 @@ test('checks-missing-native-alias-only-duplicate-new-job-block', () => {
   const absent = facts(); delete absent.workflows.ci; blocked(absent, 'workflow-missing');
   const incomplete = facts(); incomplete.workflows.ci.jobs_complete = false; blocked(incomplete, 'attempt-incomplete');
   const old = facts(); old.workflows.ci.current_attempt = 3; blocked(old, 'attempt-incomplete');
+});
+
+test('checks-macos-shards-required-even-when-alias-succeeds', () => {
+  const shards = ['Tests (macos-latest, shard 1/2)', 'Tests (macos-latest, shard 2/2)'];
+  const alias = 'Tests (macos-latest)';
+  assert.strictEqual(checks.evaluateChecks(facts()).allowed, true);
+  for (const name of shards) {
+    const missing = facts();
+    assert(missing.workflows.ci.jobs.some(job => job.name === alias && job.conclusion === 'success'));
+    missing.workflows.ci.jobs = missing.workflows.ci.jobs.filter(job => job.name !== name);
+    blocked(missing, 'job-missing');
+    for (const conclusion of ['skipped', 'failure']) {
+      const failed = facts();
+      failed.workflows.ci.jobs.find(job => job.name === name).conclusion = conclusion;
+      assert.strictEqual(failed.workflows.ci.jobs.find(job => job.name === alias).conclusion, 'success');
+      blocked(failed, 'job-not-success');
+    }
+  }
+  const noAlias = facts();
+  assert(shards.every(name => noAlias.workflows.ci.jobs.find(job => job.name === name).conclusion === 'success'));
+  noAlias.workflows.ci.jobs = noAlias.workflows.ci.jobs.filter(job => job.name !== alias);
+  blocked(noAlias, 'job-missing');
 });
 
 test('checks-foreign-repository-workflow-sha-run-id-and-source-block', () => {

@@ -16,8 +16,8 @@ const texts = Object.fromEntries(Object.entries(bytes).map(([id, value]) => [id,
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 const marker = (kind, index, detail) => console.log(`PASS S04-T06 ${kind}:${index} ${detail}`);
 
-// Reverse the authorized concurrency, profile and four-shard changes. Old digests pin every
-// other byte: triggers, actions, permissions, matrices, SVN, smoke and aliases.
+// Reverse the authorized concurrency, profile, four-shard and two-macOS-shard changes. Old
+// digests pin every other byte: triggers, actions, permissions, matrices, SVN, smoke and aliases.
 for (const id of ['ci', 'app']) {
   assert(!bytes[id].includes(13) && !texts[id].startsWith('\uFEFF'), `${id} must retain LF without BOM`);
   const block = '# Superseded pull request runs are cancelled; every other event gets a\n'
@@ -33,6 +33,20 @@ for (const id of ['ci', 'app']) {
       `          - os: windows-latest\n            platform: win32\n            shard-index: ${index}\n            shard-count: ${count}\n            label: windows-latest, shard ${index + 1}/${count}`).join('\n');
     assert.strictEqual(original.split(windowsMatrix(4)).length, 2);
     original = original.replace(windowsMatrix(4), windowsMatrix(2));
+    const macosMatrix = count => Array.from({ length: count }, (_, index) =>
+      `          - os: macos-latest\n            platform: darwin\n            shard-index: ${index}\n            shard-count: ${count}\n`
+      + `            label: macos-latest${count === 1 ? '' : `, shard ${index + 1}/${count}`}`).join('\n');
+    const smokeIf = "        if: runner.os != 'Windows'";
+    const macosAlias = '\n  required-tests-macos:\n    name: Tests (macos-latest)\n    needs: test\n    if: ${{ always() }}\n'
+      + '    runs-on: ubuntu-latest\n    steps:\n      - name: Preserve required-check contract\n'
+      + '        run: test "${{ needs.test.result }}" = success\n';
+    for (const delta of [macosMatrix(2), `${smokeIf} && matrix.shard-index == 0\n`, macosAlias]) {
+      assert.strictEqual(original.split(delta).length, 2, delta);
+    }
+    assert(original.endsWith(macosAlias));
+    original = original.replace(macosMatrix(2), macosMatrix(1))
+      .replace(`${smokeIf} && matrix.shard-index == 0\n`, `${smokeIf}\n`)
+      .slice(0, -macosAlias.length);
   }
   assert.strictEqual(hash(original), id === 'ci'
     ? '5c37cf20bab5613832e0a5efad3e5fa7b9494a57ddbd67a680e4510228e5ffdc'
@@ -171,7 +185,11 @@ const steps = texts.ci.match(/^      - name:[^\n]*(?:\n(?!      - name:)[^\n]*)*
 const testIndex = texts.ci.indexOf('      - name: Run test suites');
 const smokeIndex = texts.ci.indexOf('      - name: Smoke suite (release gate)');
 assert(testIndex < smokeIndex);
-assert(texts.ci.slice(smokeIndex).includes("if: runner.os != 'Windows'"));
+const smokeStep = "      - name: Smoke suite (release gate)\n        if: runner.os != 'Windows' && matrix.shard-index == 0\n"
+  + '        run: node scripts/forge-smoke.js\n\n  required-offline-windows:\n';
+assert.strictEqual(texts.ci.split(smokeStep).length, 2);
+assert.strictEqual(texts.ci.indexOf(smokeStep), smokeIndex);
+assert.strictEqual(texts.ci.split('forge-smoke.js').length, 2);
 for (const [platform, pattern] of [
   ['Linux', /run:\s*sudo apt-get update && sudo apt-get install -y subversion/],
   ['macOS', /run:\s*brew install subversion/],
@@ -194,11 +212,18 @@ const verifySteps = steps.filter(step => /svn --version --quiet/.test(step) && /
 assert.strictEqual(verifySteps.length, 1);
 assert(!/^\s*if:/m.test(verifySteps[0]) && texts.ci.indexOf(verifySteps[0]) < testIndex);
 const rows = expandJobs(POLICY.workflows.ci);
-assert.strictEqual(rows.length, 16);
-assert.strictEqual(rows.filter(row => row.kind === 'alias').length, 7);
+assert.strictEqual(rows.length, 18);
+assert.strictEqual(rows.filter(row => row.kind === 'alias').length, 8);
 assert.deepStrictEqual(rows.filter(row => row.key === 'test').map(row => row.name), [
-  'Tests (ubuntu-latest)', 'Tests (macos-latest)', 'Tests (windows-latest, shard 1/4)', 'Tests (windows-latest, shard 2/4)', 'Tests (windows-latest, shard 3/4)', 'Tests (windows-latest, shard 4/4)']);
+  'Tests (ubuntu-latest)', 'Tests (macos-latest, shard 1/2)', 'Tests (macos-latest, shard 2/2)',
+  'Tests (windows-latest, shard 1/4)', 'Tests (windows-latest, shard 2/4)', 'Tests (windows-latest, shard 3/4)', 'Tests (windows-latest, shard 4/4)']);
 assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'win32').map(row => row.matrix['shard-count']), [4, 4, 4, 4]);
+assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'darwin').map(row => row.matrix['shard-count']), [2, 2]);
+// Smoke condition evaluated per policy cell: exactly one Linux and one macOS run, never Windows.
+const runnerOs = { 'ubuntu-latest': 'Linux', 'macos-latest': 'macOS', 'windows-latest': 'Windows' };
+const smokeCells = rows.filter(row => row.key === 'test'
+  && runnerOs[row.matrix.os] !== 'Windows' && row.matrix['shard-index'] === 0);
+assert.deepStrictEqual(['linux', 'darwin', 'win32'].map(platform => smokeCells.filter(row => row.matrix.platform === platform).length), [1, 1, 0]);
 marker('key_link', 2, 'CI source test command triggers concurrency SVN ordering and smoke structure asserted');
 
 const suites = discoverTests([]);
@@ -228,10 +253,18 @@ for (const id of ['ci', 'app', 'release']) {
   assertJobMapping(texts[id], workflow);
   if (id !== 'release') marker('key_link', id === 'ci' ? 3 : 4, `${id} final LF sha256 and Git blob SHA1 pins match unchanged job mapping`);
 }
-// Reconstruct only the authorized Windows matrix change before historical pinning.
+// Reconstruct only the authorized Windows and macOS matrix changes and remove the macOS
+// tests alias before historical pinning.
 const historicalJobs = JSON.parse(JSON.stringify(Object.fromEntries(Object.entries(POLICY.workflows).map(([key, value]) => [key, value.jobs]))));
+assert.strictEqual(historicalJobs.ci.filter(job => job.key === 'required-tests-macos').length, 1);
+assert.deepStrictEqual(historicalJobs.ci[historicalJobs.ci.length - 1], { key: 'required-tests-macos', kind: 'alias', needs: ['test'],
+  name: 'Tests (macos-latest)', runner: 'ubuntu-latest', matrix: null });
+historicalJobs.ci.pop();
 const testMatrix = historicalJobs.ci.find(job => job.key === 'test').matrix;
-testMatrix.include = testMatrix.include.filter(cell => cell.platform !== 'win32').concat(
+assert.deepStrictEqual(testMatrix.include.filter(cell => cell.platform === 'darwin'), [0, 1].map(index => ({
+  os: 'macos-latest', platform: 'darwin', 'shard-index': index, 'shard-count': 2, label: `macos-latest, shard ${index + 1}/2` })));
+testMatrix.include = testMatrix.include.filter(cell => cell.platform === 'linux').concat(
+  [{ os: 'macos-latest', platform: 'darwin', 'shard-index': 0, 'shard-count': 1, label: 'macos-latest' }],
   [0, 1].map(index => ({ os: 'windows-latest', platform: 'win32', 'shard-index': index,
     'shard-count': 2, label: `windows-latest, shard ${index + 1}/2` })));
 assert.strictEqual(hash(JSON.stringify(historicalJobs)),
