@@ -1,5 +1,13 @@
 ## Não lançado
 
+- O manifesto registra o digest final de AGENTS.md/CLAUDE.md após sincronizar as
+  instruções, somente para arquivos inteiramente gerados pelo Forge. Arquivos do
+  operador que recebem apenas blocos gerenciados não são adotados (#258).
+
+- O doctor de capabilities distingue falhas de probe e diagnósticos fatais, com
+  os campos aditivos `capability_failures` e `fatal_count`, preservando `ok:false`,
+  exit 1 e severidades (#259).
+
 - Planejamento de milestones deixa de exigir 4–10 slices: a divisão deve cobrir
   todo o escopo e justificar cada separação por risco, dependência, resultado
   verificável ou limite de contexto, preservando os gates existentes.
