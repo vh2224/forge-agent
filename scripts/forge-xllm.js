@@ -2407,6 +2407,7 @@ function fixContract(opts) {
   const reviewFix = require('./forge-review-fix');
   const brief = opts.brief;
   let procedure;
+  let verificationCommands;
   return {
     mode: 'fix',
     preflight() {
@@ -2414,11 +2415,27 @@ function fixContract(opts) {
       if (!brief || !Array.isArray(brief.items) || !brief.items.length || !Array.isArray(brief.claim_paths)) {
         throw boundaryError('review-fix-brief-required', 'fix mode requires a review-fix brief');
       }
+      const policy = require('./forge-claude-permissions').validatePolicy(opts.permissionPolicy,
+        { cwd: opts.cwd, readOnly: false, identity: opts.permissionIdentity });
+      verificationCommands = policy ? [...policy.seal.roots[0].commands] : null;
     },
     load() { return 'workspace'; },
     readsContextFiles: false,
     buildPrompt(extras) {
-      return composeProcedurePrompt(reviewFix.buildReviewFixPrompt(brief, { outputChannel: extras.outputChannel, constraints: extras.constraints }), procedure);
+      // Derive exact commands from the validated policy, never caller prose.
+      // Revalidate at final packaging so policy drift cannot retarget the prompt.
+      if (verificationCommands) {
+        const policy = require('./forge-claude-permissions').validatePolicy(opts.permissionPolicy,
+          { cwd: opts.cwd, readOnly: false, identity: opts.permissionIdentity });
+        if (JSON.stringify(policy?.seal.roots[0].commands) !== JSON.stringify(verificationCommands)) {
+          throw boundaryError('claude-permission-policy-invalid', 'Verification policy changed before packaging');
+        }
+      }
+      const verification = verificationCommands ? '\n\n## Exact authorized verification commands\n'
+        + 'Run these literal commands from the code directory. Do not add flags or substitute lint/test commands. '
+        + 'Managed policy can still deny them; report the failure without claiming verification.\n'
+        + verificationCommands.map(command => '- ' + command).join('\n') : '';
+      return composeProcedurePrompt(reviewFix.buildReviewFixPrompt(brief, { outputChannel: extras.outputChannel, constraints: extras.constraints }) + verification, procedure);
     },
     schema: reviewFix.reviewFixSchema,
     validate: value => reviewFix.validateReviewFixResult(value, brief.items),

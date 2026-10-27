@@ -45,8 +45,8 @@ const POLICY = {
     },
     release: {
       filename: 'release.yml', path: '.github/workflows/release.yml',
-      blob_oid: 'cc8421b30163c9adc7d6be1ff7dbf9c7ef0f3edc',
-      blob_sha256: 'b93088ede606c56f5993977eaaf536bba31c1d9fbb30501803ff776d0d09248c',
+      blob_oid: 'a0abdda28d8c37df0907f216ff445528ea3c7fd3',
+      blob_sha256: '635887910ef3fdb5b5c0b7731ee7e6dee86c39e6e675b6d701cacf8e4a321747',
       // Release is source-pinned but never waits for itself; job identity binds receipts.
       jobs: [
         { key: 'coordinator', kind: 'coordinator', name: 'Release coordinator', needs: [], runner: 'ubuntu-latest', matrix: null, permissions: { contents: 'read', actions: 'read' } },

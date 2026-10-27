@@ -106,12 +106,18 @@ function readProcedureFile(root, relative) {
   let descriptor;
   try {
     // Reject directories/devices before opening; do not read an outside target.
-    const before = fs.statSync(target);
+    const before = fs.statSync(target, { bigint: true });
     if (!before.isFile()) fail('procedure-file-type');
     if (before.size > MAX_FILE_BYTES) fail('procedure-file-too-large');
     descriptor = fs.openSync(target, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
-    const stat = fs.fstatSync(descriptor);
-    if (!stat.isFile() || stat.dev !== before.dev || stat.ino !== before.ino) fail('procedure-file-changed');
+    const stat = fs.fstatSync(descriptor, { bigint: true });
+    // Node 22 on Windows can report zero only on the pathname stat while
+    // fstat reports the real volume. Do not exempt descriptor-zero or other
+    // device mismatches; retain exact inode, size and timestamp comparisons.
+    const sameDevice = stat.dev === before.dev
+      || (process.platform === 'win32' && before.dev === 0n && stat.dev > 0n);
+    if (!stat.isFile() || !sameDevice || stat.ino !== before.ino
+        || stat.size !== before.size || stat.mtimeNs !== before.mtimeNs) fail('procedure-file-changed');
     if (stat.size > MAX_FILE_BYTES) fail('procedure-file-too-large');
     const bytes = Buffer.alloc(MAX_FILE_BYTES + 1);
     let size = 0; let read;

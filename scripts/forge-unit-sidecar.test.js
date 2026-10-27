@@ -443,13 +443,15 @@ async function recoveryContracts() {
     const executeApi = require('./forge-task-execution'), prepare = executeApi.prepare;
     executeApi.prepare = () => { throw Error('research must not execute.prepare'); };
     try {
-      const changedRequest = { ...readonly, prompt: 'Corrected fixture only.' };
+      const changedRequest = { ...readonly, prompt: undefined, promptFile: undefined,
+        description: 'Synthetic ultraviolet research correction' };
       const recovered = await sidecar.recoverUnitSidecar(changedRequest, {
         stateFile: readonly.resultFile + '.recovery.json', receiptFile: readonly.resultFile + '.receipt.json', correction: true }, {
         activeCapabilities: { available: true, tool: 'spawn_agent', source: 'fixture', models: ['gpt-5.6-sol'],
           reasoning_efforts: ['medium'], fork_turns: ['none'] } });
       assert(recovered.corrected);
       assert.strictEqual(recovered.result.action, 'invoke-native');
+      assert(recovered.result.invocation.args.message.includes(changedRequest.description));
       assert.strictEqual((recovered.result.invocation.args.message.match(/<!-- forge-procedure:core -->/g) || []).length, 1);
       assert(recovered.result.invocation.args.message.includes('<!-- forge-procedure:recovery -->'));
       const artifact = require('./forge-prompt').materializePrompt({ cwd: lab.owner, codeDir: lab.a, forgeHome: path.resolve(__dirname, '..'),
@@ -1933,6 +1935,22 @@ async function reviewFixRecoveryContracts() {
       return { status: 'partial', summary: 'fixture', items: [], files_changed: ['same.txt'],
         transport_telemetry: { model_observed: 'fix-fixture-model' } };
     };
+    const collisionRequest = { ...request, dispatchId: 'fix-archive-collision', resultFile: path.join(lab.dir, 'collision.json') };
+    const permissionRequest = { ...request, dispatchId: 'fix-missing-permission', resultFile: path.join(lab.dir, 'permission.json'), verification: {} };
+    assert.strictEqual(request.route.resolved_worker_engine, 'claude');
+    await assert.rejects(sidecar.runUnitSidecar(permissionRequest), error => error.code === 'claude-verification-permission-required');
+    assert(!fs.existsSync(permissionRequest.resultFile + '.receipt.json'));
+    assert.strictEqual(fs.readFileSync(path.join(lab.a, 'same.txt'), 'utf8'), 'before\n');
+    fs.writeFileSync(collisionRequest.resultFile + '.partial-patch.json', 'existing evidence');
+    await assert.rejects(sidecar.runUnitSidecar(collisionRequest), error => error.code === 'review-fix-worker-partial');
+    const collisionReceipt = JSON.parse(fs.readFileSync(collisionRequest.resultFile + '.receipt.json'));
+    assert.strictEqual(collisionReceipt.failure.reset.verified, false);
+    assert.strictEqual(collisionReceipt.failure.reset.reason_code, 'partial-patch-unavailable-preserved');
+    assert.strictEqual(collisionReceipt.failure.recovery, 'operator-required');
+    assert.strictEqual(fs.readFileSync(path.join(lab.a, 'same.txt'), 'utf8'), 'partial worker\n');
+    assert.strictEqual(fs.readFileSync(collisionRequest.resultFile + '.partial-patch.json', 'utf8'), 'existing evidence');
+    // Explicit fixture reconciliation; production leaves the authored tree intact.
+    fs.writeFileSync(path.join(lab.a, 'same.txt'), 'before\n');
     await assert.rejects(sidecar.runUnitSidecar(request), error => error.code === 'review-fix-worker-partial');
     const receiptBytes = fs.readFileSync(receiptFile), receipt = JSON.parse(receiptBytes);
     const returnedBytes = fs.readFileSync(request.resultFile + '.returned.json');
@@ -1943,6 +1961,10 @@ async function reviewFixRecoveryContracts() {
     const baselineFile = receipt.reset_state_file, baselineBytes = fs.readFileSync(baselineFile);
     const originalState = fs.readFileSync(stateFile);
     assert.strictEqual(receipt.failure.reset.verified, true);
+    assert.strictEqual(receipt.failure.partial_patch.complete, true);
+    const patchBytes = fs.readFileSync(request.resultFile + '.partial-patch.json');
+    assert.strictEqual(receipt.failure.partial_patch.sha256, crypto.createHash('sha256').update(patchBytes).digest('hex'));
+    assert.strictEqual(Buffer.from(JSON.parse(patchBytes).files.find(row => row.path === 'same.txt').content_base64, 'base64').toString(), 'partial worker\n');
     assert.strictEqual(fs.readFileSync(path.join(lab.a, 'same.txt'), 'utf8'), 'before\n');
     assert.strictEqual(JSON.parse(originalState).roots_sha256, roots.digest({ cwd: request.cwd }));
     assert.strictEqual(sidecar.reconcileLegacyReviewFix(request, receipt, contract).ok, true);

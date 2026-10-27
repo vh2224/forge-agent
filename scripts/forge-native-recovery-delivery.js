@@ -5,6 +5,36 @@ const api = name => require('./' + name);
 const hash=v=>crypto.createHash('sha256').update(v).digest('hex');
 const fail=c=>{throw Object.assign(new Error(c),{code:c});};
 const nonEmpty=value=>typeof value==='string'&&value.trim().length>0;
+// Diagnostics identify bounded positional checks, never copy root names,
+// commands, output, paths or worker-controlled error text into the exception.
+function verificationFailure(capture) {
+  const rows=[], limit=32;
+  const add=row=>{if(rows.length<limit)rows.push(row);};
+  const gates=Array.isArray(capture?.gate?.roots)?capture.gate.roots:[];
+  const artifacts=Array.isArray(capture?.artifacts)?capture.artifacts:[];
+  let truncated=gates.length>16||artifacts.length>16;
+  gates.slice(0,16).forEach((envelope,root_index)=>{
+    const result=envelope?.result,checks=Array.isArray(result?.checks)?result.checks:[];
+    if(result?.skipped||!checks.length)add({category:'root-unverified',root_index});
+    else {
+      truncated ||= checks.length>32;
+      checks.slice(0,32).forEach((check,check_index)=>{
+        if(check?.exitCode!==0)add({category:'command-failed',root_index,check_index,
+          exit_code:Number.isSafeInteger(check?.exitCode)?check.exitCode:null});
+      });
+      if(result?.passed!==true&&!checks.slice(0,32).some(check=>check?.exitCode!==0))add({category:'root-failed',root_index});
+    }
+  });
+  artifacts.slice(0,16).forEach((envelope,root_index)=>{
+    const result=envelope?.result;
+    if(result?.passed!==true)add({category:Array.isArray(result?.missing)&&result.missing.length?'expected-output-missing':'artifact-failed',root_index});
+  });
+  // The list is a bounded sample, not a claim of complete failure enumeration.
+  if(rows.length===limit)truncated=true;
+  const error=Object.assign(new Error('verification-failed'),{code:'verification-failed',
+    diagnostic:{schema_version:1,stage:'verification',failures:rows.length?rows:[{category:'capture-failed'}],truncated}});
+  throw error;
+}
 // Match sidecar validation defaults without rewriting durable request/manifest bytes.
 const requestIdentity=request=>{
   const recovery=api('forge-attempt-recovery');
@@ -433,7 +463,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       const delta=execution.verifyResult(r.cwd,prepared,result),loc=side.locations(r),resourceEvents=[];
       const capture=verify.captureRootDelivery(r.execution_contract,plan,{...r.verification,unit:loc.rules[loc.delivery.input].unit,
         verificationSeal:seal,verificationIdentity,resourceEventSink:line=>resourceEvents.push(line)});
-      guard();if(!capture.passed)fail('verification-failed');
+      guard();if(!capture.passed)verificationFailure(capture);
       if(documentary||initialReview){
         if(documentary){
         for(const doc of documentary.preserved){const q=roots.resolvePath(r.execution_contract,doc.path);const root=r.execution_contract.code_roots.find(row=>row.id===q.root_id);

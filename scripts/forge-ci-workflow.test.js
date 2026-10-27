@@ -34,13 +34,19 @@ for (const id of ['ci', 'app']) {
   assert.deepStrictEqual(concurrency.readConcurrency(texts[id]), { present: true,
     group: concurrency.SUPPORTED_FORMS.groups[id], 'cancel-in-progress': concurrency.SUPPORTED_FORMS.cancellations.pull_request });
 }
-// Reverse only the authorized S08 version/notes steps; pin every other byte.
+// Reverse the authorized S08 version/notes steps and coordinator wait extension;
+// retain the original historical digest so every unrelated byte stays pinned.
 const OLD_RESOLVE_RUN = "        run: node scripts/forge-release-version.js --check --github-output \"$GITHUB_OUTPUT\"\n";
 const OLD_CHANGELOG_STEP = "      - name: Generate changelog\n        env:\n          RELEASE_RANGE: ${{ steps.version.outputs.range }}\n        shell: bash\n        run: |\n          node <<'NODE'\n          const fs = require('fs');\n          const path = require('path');\n          const { execFileSync } = require('child_process');\n          const range = process.env.RELEASE_RANGE;\n          let commits;\n          try { commits = execFileSync('git', ['log', range, '--pretty=format:%H %s'], { encoding: 'utf8' }); }\n          catch (_) { commits = execFileSync('git', ['log', '--pretty=format:%H %s'], { encoding: 'utf8' }); }\n          const sections = { 'Breaking Changes': [], Features: [], 'Bug Fixes': [], 'Other Changes': [] };\n          for (const line of commits.split('\\n').filter(Boolean)) {\n            const hash = line.slice(0, 7); const message = line.slice(line.indexOf(' ') + 1);\n            const category = /^[a-z]+(\\(.+\\))?!:|BREAKING[ -]CHANGE/i.test(message) ? 'Breaking Changes' :\n              /^feat(\\(.+\\))?:/.test(message) ? 'Features' : /^fix(\\(.+\\))?:/.test(message) ? 'Bug Fixes' : 'Other Changes';\n            sections[category].push(`- ${message} (${hash})`);\n          }\n          fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'release-notes.md'),\n            Object.entries(sections).filter(([, rows]) => rows.length).map(([title, rows]) => `### ${title}\\n\\n${rows.join('\\n')}\\n`).join('\\n'));\n          NODE\n";
 const RESOLVE_RUN = "        run: node scripts/forge-release-version.js --check --github-output \"$GITHUB_OUTPUT\" --notes \"$RUNNER_TEMP/release-notes.md\"\n";
 assert(!bytes.release.includes(13) && !texts.release.startsWith('\uFEFF'));
 assert.strictEqual(texts.release.split(RESOLVE_RUN).length, 3);
-const historicalRelease = Buffer.from(texts.release.split(RESOLVE_RUN).join(OLD_RESOLVE_RUN + OLD_CHANGELOG_STEP));
+assert.strictEqual(texts.release.split('    timeout-minutes: 75\n').length, 2);
+assert.strictEqual(texts.release.split('Wait for complete CI and app (60 minute deadline)').length, 2);
+const historicalRelease = Buffer.from(texts.release
+  .replace('    timeout-minutes: 75\n', '    timeout-minutes: 45\n')
+  .replace('Wait for complete CI and app (60 minute deadline)', 'Wait for complete CI and app (30 minute deadline)')
+  .split(RESOLVE_RUN).join(OLD_RESOLVE_RUN + OLD_CHANGELOG_STEP));
 assert.strictEqual(hash(historicalRelease), 'c19b795426f6d0cec090630f90f1c3aa45d3bc83d573aab92cac332e0f3017a3');
 assert.strictEqual(crypto.createHash('sha1').update(`blob ${historicalRelease.length}\0`).update(historicalRelease).digest('hex'), '315d89bad9b4ef2965d3a2f3e969fd83005e61d2');
 assert.strictEqual(POLICY.workflows.release.blob_sha256, hash(bytes.release));

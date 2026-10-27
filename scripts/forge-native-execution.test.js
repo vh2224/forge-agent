@@ -77,12 +77,20 @@ async function main() {
   console.log(JSON.stringify({ label: 'matrix-applicability', fresh_native: 'No earlier writer/process or recovery authorization exists; claims/gates/caps/binding still checked.', recovered_native: 'Proven service failure permits next routed candidate without a recovery exception; live standing authorization is covered separately by attempt-recovery tests.', provider: 'synthetic', child_process: 'local retained handle', human_uat: 'not exercised' }));
   if (!process.argv.some(arg => ['--saved', '--extra', '--recovery'].includes(arg))) {
   const positive = nativeFixture();
+  const announcements=[];
+  positive.runtime.announce=(stage,fields)=>announcements.push({stage,...fields});
   const done = await unit.runUnitSidecar(positive.r, positive.runtime);
   assert.strictEqual(done.status, 'done'); assert.strictEqual(positive.calls(), 1);
   const first = receipt(positive);
   assert.strictEqual(first.phase, 'ready'); assert(first.recovery_baseline);
   assert.strictEqual(first.delivery_capture.verification_policy_sha256, first.verification_seal.sha256);
   assert.notStrictEqual(first.execution.packaged_context.sha256, first.execution.packaged_context.transport_sha256);
+  assert(announcements.length>0);
+  assert(announcements.every(row=>!row.transport||row.transport==='native-tool'));
+  const dispatches=fs.readFileSync(path.join(positive.owner,'.gsd/forge/events.jsonl'),'utf8').trim().split('\n').map(JSON.parse)
+    .filter(row=>row.transport);
+  assert(dispatches.some(row=>row.transport==='native-tool'));
+  assert(!dispatches.some(row=>row.transport==='app-server'||row.transport==='claude-cli'));
   label('native-positive');
   await unit.runUnitSidecar(positive.r, positive.runtime); assert.strictEqual(positive.calls(), 1); label('ready-replay');
   await assert.rejects(() => unit.runUnitSidecar(positive.r, { ...positive.runtime, verification: { preferenceCommands: ['node -e "process.exit(0)"', 'node -e "process.exit(1)"'] } }), /verification-policy-changed/);

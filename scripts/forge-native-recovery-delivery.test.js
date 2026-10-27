@@ -286,6 +286,33 @@ async function initialMixedDocumentary(documentaryOnly=false){
     // These roots and commands are synthetic; never dump provider/host payloads.
     const verifier=require('./forge-verify'),captureRootDelivery=verifier.captureRootDelivery;
     let checked;
+    // Exercise the actual adapter failure boundary with adversarial capture
+    // fields. No command/output/path is permitted in its public diagnostic.
+    if(!documentaryOnly){
+      const secret='PRIVATE_COMMAND_AND_PATH';
+      const cases=[
+        {gate:{roots:[{root_id:secret,result:{passed:false,checks:[{command:secret,stdout:secret,stderr:secret,exitCode:127}]}}]},artifacts:[]},
+        {gate:{roots:[{root_id:secret,result:{passed:true,skipped:secret,checks:[]}}]},artifacts:[]},
+        {gate:{roots:[]},artifacts:[{root_id:secret,result:{passed:false,missing:[{path:secret}]}}]},
+        {gate:{roots:[]},artifacts:[{root_id:secret,result:{passed:false,rows:[{path:secret,exists:false}]}}]},
+        {gate:{roots:[]},artifacts:[]},
+        {gate:{roots:Array.from({length:100},()=>({result:{passed:false,checks:Array.from({length:100},()=>({exitCode:secret}))}}))},artifacts:[]}
+      ];
+      const expected=['command-failed','root-unverified','expected-output-missing','artifact-failed','capture-failed','command-failed'];
+      try{cases.forEach((capture,index)=>{
+        verifier.captureRootDelivery=()=>({...capture,passed:false});
+        assert.throws(()=>resumed.verify(result),error=>{
+          assert.equal(error.code,'verification-failed');
+          assert.equal(error.diagnostic.failures[0].category,expected[index]);
+          assert(error.diagnostic.failures.length<=32);
+          assert(!JSON.stringify(error).includes(secret));
+          if(index===0)assert.equal(error.diagnostic.failures[0].exit_code,127);
+          if(index===5){assert.equal(error.diagnostic.truncated,true);assert.equal(error.diagnostic.failures[0].exit_code,null);}
+          return true;
+        });
+        assert.deepEqual(fs.readFileSync(originalFile),originalBytes,'failure never publishes success');
+      });}finally{verifier.captureRootDelivery=captureRootDelivery;}
+    }
     try {
       verifier.captureRootDelivery=(...args)=>{
         const captured=captureRootDelivery(...args);

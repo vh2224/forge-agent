@@ -1,5 +1,14 @@
 ## Não lançado
 
+- Manutenção pós-milestone: loader compatível com identidade de arquivos do Node 22
+  no Windows; contexto correto no resolver de review-fix; diagnósticos de verificação
+  limitados e sem conteúdo privado; comandos de verificação explícitos no contrato Claude.
+- Tentativas review-fix parciais preservam postimages locais antes do reset; captura
+  incompleta mantém a árvore para reconciliação. O arquivo não autoriza replay.
+- Transporte nativo é identificado como native-tool. O coordenador de release aguarda
+  CI por até 60 minutos com limites cumulativos preservados; pesos de shards atualizados
+  por logs medidos, sem alegar redução de latência ainda não observada.
+
 - Retomada de reserva nativa sem handoff exige atestado vivo de ausência de chamada,
   vinculado ao pedido, receipt e reserva originais. O consumo é persistido antes do
   callback e protegido contra concorrência; tentativas, destino e relógios anteriores

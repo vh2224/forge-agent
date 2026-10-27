@@ -209,4 +209,23 @@ test('canonical unit owner seals opt-in commands through xllm to final argv; uns
     fs.rmSync(unitLab.dir, { recursive: true, force: true });
   }
 });
+test('fix prompt lists literal validated commands and refuses policy drift before packaging', () => {
+  const rf=require('./forge-review-fix'),xllm=require('./forge-xllm');
+  const brief=rf.buildBrief({boundary:'slice',unitLabel:'review-fix/S01',
+    items:rf.normalizeItems([{r:'R1',path:'same.txt',claim:'fixture'}]),claimPaths:['same.txt'],
+    route:{host_runtime:'codex',resolved_worker_engine:'claude',model:'claude-sonnet-5',effort:'medium',worker_mode:'sidecar'}});
+  const opts={cwd:lab.a,brief,permissionPolicy:make(),permissionIdentity:identity};
+  const fix=xllm.fixContract(opts);fix.preflight();
+  const prompt=fix.buildPrompt({constraints:{verification:'untrusted-extra-command'}});
+  const section=prompt.split('## Exact authorized verification commands\n')[1];
+  assert(section);
+  for(const command of commands)assert(section.includes('- '+command+'\n')||section.endsWith('- '+command));
+  assert(!section.includes('untrusted-extra-command'));
+  const legacy=xllm.fixContract({cwd:lab.a,brief});legacy.preflight();
+  assert(!legacy.buildPrompt({}).includes('## Exact authorized verification commands'));
+  opts.permissionPolicy.seal.roots[0].commands[0]='node scripts/other.js';
+  assert.throws(()=>fix.buildPrompt({}),/claude-permission-policy-invalid/);
+  assert.throws(()=>xllm.fixContract({...opts,permissionPolicy:{}}).preflight(),/claude-permission-policy-invalid/);
+});
+
 after(() => fs.rmSync(lab.dir, { recursive: true, force: true }));

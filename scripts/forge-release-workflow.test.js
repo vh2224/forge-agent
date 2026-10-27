@@ -200,7 +200,9 @@ async function execute(f, key, mutate = () => {}) {
     assert(source.startsWith('name: Release\n\non:\n  push:\n    branches: [master]\n\npermissions: {}\n'));
     assert(!/tags:|workflow_run:|pull_request|download-artifact|continue-on-error|cancel-in-progress: true/.test(source));
     assert(source.includes('group: release\n  cancel-in-progress: false'));
-    assert.strictEqual((source.match(/timeout-minutes: 45/g) || []).length, 2);
+    assert.strictEqual((source.match(/timeout-minutes: 45/g) || []).length, 1);
+    assert(source.includes('name: Release coordinator\n    runs-on: ubuntu-latest\n    timeout-minutes: 75'));
+    assert(source.includes('name: Wait for complete CI and app (60 minute deadline)'));
     assert(source.includes('publisher:\n    name: Release publisher\n    needs: coordinator'));
     assert.strictEqual(checks.POLICY.workflows.release.jobs[0].permissions.contents, 'read');
     assert.strictEqual(checks.POLICY.workflows.release.jobs[1].permissions.contents, 'write');
@@ -217,7 +219,8 @@ async function execute(f, key, mutate = () => {}) {
       assert(!source.includes('forge-release-gate.js --report'));
       assert(key === 'coordinator' || steps.at(-1).run.includes('apply --state "$RELEASE_STATE" --nonce "$RELEASE_NONCE"'));
     }
-    assert.strictEqual(github.DEFAULT_LIMITS.deadlineMs, 1800000);
+    assert.strictEqual(github.DEFAULT_LIMITS.deadlineMs, 3600000);
+    assert(75*60000>=github.DEFAULT_LIMITS.deadlineMs+15*60000,'job retains setup/prepare margin');
     assert.strictEqual(publisher.TTL_MS, 600000);
   });
   await test('workflow-origin-rejections-before-candidate-code-both-jobs', async () => {

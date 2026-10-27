@@ -13,7 +13,10 @@ const { scrubEnvironment } = require('./forge-offline-ci.js');
 
 const ORIGIN = 'https://api.github.com';
 const API_VERSION = '2026-03-10';
-const DEFAULT_LIMITS = Object.freeze({ deadlineMs: 1800000, requestMs: 15000, pollMs: 15000,
+// Windows full-suite jobs have exceeded 30 minutes before aggregate scheduling.
+// Keep one bounded clock and all cumulative IO limits; allow the observed CI
+// critical path to finish without weakening exact-candidate eligibility.
+const DEFAULT_LIMITS = Object.freeze({ deadlineMs: 3600000, requestMs: 15000, pollMs: 15000,
   maxPages: 10, maxItems: 1000, maxBytes: 32 * 1024 * 1024, responseBytes: 4 * 1024 * 1024,
   maxRequests: 10000, maxTagDepth: 8 });
 const STATUSES = new Set(['queued', 'in_progress', 'completed', 'waiting', 'requested', 'pending']);
