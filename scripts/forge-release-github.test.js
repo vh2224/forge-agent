@@ -214,6 +214,19 @@ function manyRuns(f, total) {
     const exhausted = fixture({ limits: { deadlineMs: 30000 } }); pending(exhausted.state);
     code(await github.waitForChecks(exhausted), 'deadline-exhausted'); assert.deepStrictEqual(exhausted.state.sleeps, [15000]);
   });
+  await test('github-wait-allows-observed-long-CI-but-retains-one-hour-and-IO-ceilings', async () => {
+    const slow=fixture({onSleep:state=>{if(state.time>=35*60*1000)complete(state);}});
+    pending(slow.state);
+    const result=await github.waitForChecks(slow);
+    assert(result.allowed,JSON.stringify(result));
+    assert(result.snapshot.collection.elapsed_ms>=35*60*1000);
+    assert(slow.state.sleeps.length>120,'actual repeated polling beyond old deadline');
+    const stuck=fixture();pending(stuck.state);
+    code(await github.waitForChecks(stuck),'deadline-exhausted');
+    assert(stuck.state.time<github.DEFAULT_LIMITS.deadlineMs);
+    const bounded=fixture({limits:{maxBytes:100}});pending(bounded.state);
+    code(await github.waitForChecks(bounded),'response-limit');
+  });
   await test('github-terminal-failure-skipped-neutral-and-invalid-states-do-not-poll', async () => {
     for (const conclusion of ['failure', 'skipped', 'neutral', 'cancelled', 'timed_out', 'action_required']) {
       const f = fixture(); f.state.jobs.ci[0].conclusion = conclusion; code(await github.waitForChecks(f), 'job-not-success'); assert.strictEqual(f.state.sleeps.length, 0);
@@ -278,7 +291,7 @@ function manyRuns(f, total) {
     for (const tag of ['../x', 'a/../x', 'a//x', 'x.lock', 'x?token', 'x%2fy']) {
       const before = f.state.calls.length; code(await github.inspectTagRelease({ ...f, tag }), 'invalid-tag'); assert.strictEqual(f.state.calls.length, before);
     }
-    assert.throws(() => github.createGitHubReader({ token: '' })); assert.throws(() => github.createGitHubReader({ token: TOKEN, limits: { deadlineMs: 1800001 } }));
+    assert.throws(() => github.createGitHubReader({ token: '' })); assert.throws(() => github.createGitHubReader({ token: TOKEN, limits: { deadlineMs: github.DEFAULT_LIMITS.deadlineMs + 1 } }));
   });
   await test('github-cli-get-only-no-report-generation-and-no-token-argv', async () => {
     const result = spawnSync(process.execPath, [path.join(__dirname, 'forge-release-github.js'), 'wait', '--token', 'forbidden'], { encoding: 'utf8', env: {} });
@@ -286,7 +299,7 @@ function manyRuns(f, total) {
     const source = fs.readFileSync(path.join(__dirname, 'forge-release-github.js'), 'utf8');
     assert(!source.includes("require('./forge-release-gate")); assert(!source.includes('buildReport')); assert(!source.includes("method: 'POST'"));
     assert(source.includes('checks.evaluateChecks')); assert(source.includes("require('./forge-release-policy.js')"));
-    assert.strictEqual(github.DEFAULT_LIMITS.deadlineMs, 1800000); assert.strictEqual(github.DEFAULT_LIMITS.requestMs, 15000); assert.strictEqual(github.DEFAULT_LIMITS.pollMs, 15000);
+    assert.strictEqual(github.DEFAULT_LIMITS.deadlineMs, 3600000); assert.strictEqual(github.DEFAULT_LIMITS.requestMs, 15000); assert.strictEqual(github.DEFAULT_LIMITS.pollMs, 15000);
     assert.strictEqual(sha256(Buffer.from(source)).length, 64);
   });
   process.stdout.write(`${count} GitHub collector contract groups passed (fake transport/clock, no network or mutations).\n`);

@@ -1695,6 +1695,7 @@ async function inspectSavedNativeExecution(r, runtime) {
 
 async function runUnitSidecarCore(request, runtime, identity) {
   let transportReturned = false;
+  let partialFixResult = false;
   let recoveryReady = runtime.assertRecoveryReady;
   const enterTransport = () => {
     recoveryReady?.();
@@ -2161,6 +2162,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
   }
   const claudeWriter = route.resolved_worker_engine === 'claude' && ['execute', 'fix'].includes(transport.mode);
   const permissionRequested = r.claudePermissions !== undefined;
+  if (claudeWriter && transport.mode === 'fix' && r.verification !== undefined && !permissionRequested) fail('claude-verification-permission-required');
   if (permissionRequested && (r.claudePermissions !== 'verification' || !claudeWriter || !r.execution_contract)) fail('claude-permission-policy-invalid');
   const verificationSeal = r.execution_contract && transport.mode === 'execute'
     ? preflightExecutionVerification(r, { verification: runtime.verification, identity: verificationIdentity })
@@ -2187,7 +2189,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
     unit: label,
     milestone: r.milestoneId,
     slice: r.sliceId, dispatchId, model, engine: route.resolved_worker_engine,
-    transport: route.resolved_worker_engine === 'claude' ? 'claude-cli' : 'app-server',
+    transport: nativeExecution ? 'native-tool' : route.resolved_worker_engine === 'claude' ? 'claude-cli' : 'app-server',
   }, route, startedAt);
   if (r.ownerBroker) await require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker).append('.gsd/forge/events.jsonl', JSON.stringify(dispatchEvent) + '\n');
   else if (recoveryReady?.appendOwnerEvent) recoveryReady.appendOwnerEvent(JSON.stringify(dispatchEvent) + '\n');
@@ -2505,6 +2507,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       transportEntered = true;
       result = await xllm.runFix({ ...options, brief: fix.brief, writableRoots: r.writableRoots });
       transportReturned = true;
+      partialFixResult = ['partial', 'blocked'].includes(result?.status);
       await preserveReturnedResponse(result);
       await livenessQueue;
       // A partial/blocked turn never publishes a success line or a commit.
@@ -2597,13 +2600,28 @@ async function runUnitSidecarCore(request, runtime, identity) {
       // Claude model identity is the exception: the tree (new files included) is
       // left exactly as the worker left it for the operator, never reset.
       const identityRefused = typeof error.code === 'string' && error.code.startsWith('claude-model-');
+      let partialPatch = null, archiveUnavailable = false;
+      if (partialFixResult && !identityRefused) {
+        try {
+          const preserved = require('./forge-review-fix-archive').preservePartialPatch({
+            request: r, state: fix, fingerprint, assertStopped: () => transportReturned === true });
+          preserved.assertCurrent();
+          partialPatch = preserved.reference;
+        } catch {
+          archiveUnavailable = true;
+          partialPatch = { schema_version: 1, status: 'unavailable-tree-preserved', complete: false };
+        }
+      }
       const reset = identityRefused
         ? { verified: false, reason_code: 'identity-refused-preserved', restored: 0, removed: 0, overlap: [] }
+        : archiveUnavailable
+        ? { verified: false, reason_code: 'partial-patch-unavailable-preserved', restored: 0, removed: 0, overlap: [] }
         : resetReviewFixAttempt(r, fix);
       const terminalSafetyFailure = identityRefused
         || ['review-fix-protected-metadata', 'review-fix-baseline-moved'].includes(error.code);
       const publicationError = publishReviewFixFailure(r, loc, fix.items, fix.reviewSnapshot);
       extra = { reset, items: fix.items.map(item => ({ r: item.r, ...(item.review_file ? { review_file: item.review_file } : {}), outcome: 'failed', verified: false, commit_sha: null })),
+        ...(partialPatch ? { partial_patch: partialPatch } : {}),
         ...(publicationError ? { publication_error: publicationError } : {}),
         ...(error.outside ? { outside_claim: { count: error.outside.length, paths: error.outside } } : {}),
         recovery: reset.overlap.length || !reset.verified || terminalSafetyFailure ? 'operator-required' : 'items-deferred' };
@@ -2657,7 +2675,7 @@ async function runUnitSidecar(request, runtime = {}) {
   const route = r.route || {};
   const identity = { phase: r.preparationIdentity?.phase, unit: r.unitType === 'review-fix' ? reviewFixUnitLabel(r)
     : `${r.unitType || '-'}/${r.taskId || r.sliceId || r.milestoneId || r.sourceUnit || '-'}`,
-    engine: route.resolved_worker_engine, transport: route.resolved_worker_engine === 'claude' ? 'claude-cli' : 'app-server',
+    engine: route.resolved_worker_engine, transport: route.worker_mode === 'native' ? 'native-tool' : route.resolved_worker_engine === 'claude' ? 'claude-cli' : 'app-server',
     model_sent: '-', model_route: route.sidecar_model || route.model_resolved || route.model,
     model_resolved: route.model_resolved || route.model, effort: route.effort,
     host: route.host_runtime, dispatch_id: r.dispatchId };

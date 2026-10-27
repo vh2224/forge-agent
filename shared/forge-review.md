@@ -989,8 +989,17 @@ reproduces host/worker leg conditionals; posture takes no environment input, so
 there is nothing ambient to re-read.
 
 ```bash
+ # Set RF_BOUNDARY, RF_UNIT_ID, RF_MILESTONE_ID and HOST_RUNTIME from
+ # the current task/slice/milestone and actual host before resolving.
+RF_CONTEXT_ARGS=(--unit-id "$RF_UNIT_ID")
+case "$RF_BOUNDARY" in
+  task) ;; # standalone: never manufacture a milestone
+  slice) RF_CONTEXT_ARGS+=(--milestone "$RF_MILESTONE_ID") ;;
+  milestone-triage) RF_CONTEXT_ARGS=(--milestone "$RF_MILESTONE_ID" --unit-id "$RF_MILESTONE_ID") ;;
+  *) echo "review-fix boundary required" >&2; exit 1 ;;
+esac
 RF_ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" \
-  --unit-type review-fix --host-runtime claude --cwd "$WORKING_DIR" --json)
+  --unit-type review-fix --host-runtime "$HOST_RUNTIME" --cwd "$WORKING_DIR" "${RF_CONTEXT_ARGS[@]}" --json)
 RF_RESOLVE_EXIT=$?
 if [ "$RF_RESOLVE_EXIT" -ne 0 ]; then
   echo "✗ review-fix resolver halted — fixer not launched" >&2
@@ -1186,7 +1195,9 @@ engine.
 1. Build the request outside `WORKING_DIR`/`CODE_DIR` and run the adapter. The route is the saved
    resolver JSON itself — host, engine, model, effort and the sidecar declaration travel inside it,
    never as re-typed flags. `RF_BOUNDARY` is `slice`, `task` or `milestone-triage`; `RF_UNIT_ID` is
-   `{S##}`, `{TASK_ID}` or `{M###}-triage`; `$ITEMS_JSON` holds the conceded items (`r`,
+   `{S##}`, `{TASK_ID}` or `{M###}`; the milestone resolver context uses the milestone
+   ID, while the adapter derives the distinct operational label `review-fix/{M###}-triage`.
+   `$ITEMS_JSON` holds the conceded items (`r`,
    `path`/`path_line`, `claim`, `action`, `context`, plus `review_file` per item at the triage
    boundary); `$RF_CLAIM_PATHS_FILE` holds exactly the `paths` the claim gate returned with `proceed`;
    `RF_AUTO_COMMIT` is the operator's `auto_commit`; `RF_WRITABLE_ROOTS_JSON` is set only for
@@ -1218,8 +1229,25 @@ RF_SIDECAR_EXIT=$?
    turns); `failed` returns the recorded failure; `started` refuses with `sidecar-attempt-interrupted`.
 
 The same branch serves Step 7b (`Refatorar agora`) and Step 9 with boundary `milestone-triage`
-(`RF_UNIT_ID={M###}-triage`, one `review_file` per item) and the standalone task review with
+(`RF_UNIT_ID={M###}`, one `review_file` per item) and the standalone task review with
 boundary `task`.
+
+Before the first provider invocation, validate both
+`forge-dispatch-resolve.assertMilestoneContext(request)` and
+`forge-unit-sidecar.validateRecoveryRequest(request)`. The latter alone does not
+prove that the retained resolver context matches the request. Preserve the same
+route after correcting caller assembly; this is not a provider failure.
+
+A Claude sidecar fix requiring shell verification must additionally carry the
+held execution root contract, exact `verification` commands and
+`claudePermissions: 'verification'`. Validate the canonical seal and permission
+policy before dispatch; unsupported commands/roots require a compatible adapter,
+not broader shell permissions. Explicit verification without the policy is
+refused before receipt/provider creation. The final fix prompt derives its exact
+command list from that validated policy. Legacy requests that declare no
+verification remain compatible but gain no shell permission; the minimal request
+example above alone does not establish verification readiness. Managed denies
+remain authoritative even with a valid policy.
 - **No re-review.** The fix commit is NOT re-run through the reviewer (deliberate — prevents review ping-pong). The fix lands on the run branch `forge/{run}` and reaches the default branch only when the operator integrates that branch — there is no `complete-slice` merge; no unit of the loop integrates.
 
 ## Step 7b — Posture (handle OPEN items)

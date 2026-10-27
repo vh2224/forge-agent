@@ -146,6 +146,24 @@ try {
     fs.openSync = function(file, ...args) { if (String(file).endsWith('first.md')) { const error = new Error('synthetic'); error.code = 'EACCES'; throw error; } return open.call(fs, file, ...args); };
     try { assert.throws(() => f.load(), /procedure-file-unreadable/); } finally { fs.openSync = open; }
   });
+  test('Windows pathname device zero is directional and never hides changed identity', () => {
+    const f = fixture(), stat = fs.statSync, fstat = fs.fstatSync;
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+    function probe(host, beforeDev, afterDev, change = {}) {
+      Object.defineProperty(process, 'platform', { ...platform, value: host });
+      fs.statSync = function(file, options) { const value = stat.call(fs, file, options);
+        return options?.bigint ? Object.assign(value, { dev: beforeDev }) : value; };
+      fs.fstatSync = function(fd, options) { return Object.assign(fstat.call(fs, fd, options), { dev: afterDev }, change); };
+      try { return f.load(); } finally { fs.statSync = stat; fs.fstatSync = fstat; Object.defineProperty(process, 'platform', platform); }
+    }
+    assert(probe('win32', 0n, 123n).composition_sha256);
+    assert(probe('linux', 123n, 123n).composition_sha256);
+    for (const args of [['linux', 0n, 123n], ['win32', 123n, 0n], ['win32', 123n, 456n],
+      ['win32', 0n, 123n, { ino: -1n }], ['win32', 0n, 123n, { size: -1n }],
+      ['win32', 0n, 123n, { mtimeNs: -1n }], ['win32', 0n, 123n, { isFile: () => false }]]) {
+      assert.throws(() => probe(...args), /procedure-file-changed/);
+    }
+  });
   test('file and manifest size limits refuse without truncation', () => {
     rejects(f => fs.writeFileSync(path.join(f.root, 'shared/first.md'), Buffer.alloc(MAX_FILE_BYTES + 1, 65)), 'procedure-file-too-large');
     const f = fixture(); fs.writeFileSync(path.join(f.root, MANIFEST_PATH), ' '.repeat(MAX_FILE_BYTES + 1)); assert.throws(() => f.load(), /procedure-file-too-large/);

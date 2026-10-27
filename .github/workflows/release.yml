@@ -15,7 +15,7 @@ jobs:
   coordinator:
     name: Release coordinator
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     permissions:
       contents: read
       actions: read
@@ -72,7 +72,7 @@ jobs:
           const head = execFileSync('git', ['rev-parse', '--verify', 'HEAD'], { encoding: 'utf8', timeout: 30000 }).trim();
           if (head !== process.env.GITHUB_SHA) throw new Error('candidate-head-mismatch');
           NODE
-      - name: Wait for complete CI and app (30 minute deadline)
+      - name: Wait for complete CI and app (60 minute deadline)
         env:
           GH_TOKEN: ${{ github.token }}
         run: GITHUB_EVENT_PATH="$RUNNER_TEMP/release-event.json" node scripts/forge-release-github.js wait --sha "$GITHUB_SHA"
