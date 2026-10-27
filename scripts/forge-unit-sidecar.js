@@ -1799,32 +1799,16 @@ async function runUnitSidecarCore(request, runtime, identity) {
       }
       return;
     }
-    const executionApi = require('./forge-task-execution');
-    return require('./forge-artifact-reconciliation').withOwnerLock(root, () => {
-      const expected = { ...protectedOwner };
-      const current = executionApi.protectedSnapshot(root);
-      for (const item of record.artifacts || []) if (current[item.path] === hash(item.content)) {
-        expected[item.path] = current[item.path];
-        let dir = path.posix.dirname(item.path);
-        while (dir !== '.') { if (current[dir + '/'] === 'directory') expected[dir + '/'] = 'directory'; dir = path.posix.dirname(dir); }
-      }
-      executionApi.assertProtected(root, expected);
-      const previous = fs.readFileSync(eventsFile);
-      if (hash(previous) !== expected['.gsd/forge/events.jsonl']) fail('execution-owner-event-raced');
-      fs.appendFileSync(eventsFile, line);
-      const appended = Buffer.concat([previous, Buffer.from(line)]);
-      if (!fs.readFileSync(eventsFile).equals(appended)) fail('execution-owner-event-raced');
-      executionApi.assertProtected(root, { ...expected, '.gsd/forge/events.jsonl': hash(appended) });
-      // Advance only these exact caller bytes, never adopt a fresh owner snapshot.
-      const advanced = { ...protectedOwner, '.gsd/forge/events.jsonl': hash(appended) };
-      if (record.execution) record.execution.protected_owner = advanced;
-      else {
-        record.recovery_baseline.protected_owner = advanced;
-        for (const row of record.recovery_baseline.protected_roots) if (path.resolve(row.path) === path.resolve(root)) row.snapshot = advanced;
-      }
-      if (record.milestone_delivery) record.milestone_delivery.protected_owner = advanced;
-      json(receiptFile, record);
-    });
+    return appendProtectedOwnerEvents(root, receiptFile, record, [line]);
+  }
+  async function appendOwnedEvents(lines, record) {
+    if (!lines.length) return;
+    const batch = lines.slice();
+    await livenessQueue;
+    const protectedOwner = record?.execution?.protected_owner || record?.recovery_baseline?.protected_owner;
+    if (recoveryReady?.appendOwnerEvent || r.ownerBroker || !protectedOwner) {
+      for (const line of batch) await appendOwnedEvent(line, record);
+    } else return appendProtectedOwnerEvents(root, receiptFile, record, batch);
   }
   // Liveness events (sidecar-no-progress) share the owner's single event channel.
   // Appends are serialized and settled before any later owner event or receipt
@@ -2027,7 +2011,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         fs.readFileSync(r.planFile, 'utf8'), { ...r.verification, verificationSeal: record.verification_seal, verificationIdentity, unit: loc.rules[loc.delivery.input].unit,
           resourceEventSink: line => resourceEvents.push(line) });
       if (deferredEvents) deferredEvents.push(...resourceEvents);
-      else for (const line of resourceEvents) await appendOwnedEvent(line, record);
+      else await appendOwnedEvents(resourceEvents, record);
       if (!deliveryCapture.passed) fail('execution-verification-failed');
       record = { ...record, delivery_capture: deliveryCapture };
       if (record.execution) require('./forge-task-execution').assertReplay(r, record);
@@ -2093,7 +2077,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         require('./forge-recovery-transition').assertWriterObservation(publicationWriter);
         assertAccepted();
       });
-      for (const line of deferredEvents) await appendOwnedEvent(line, ready);
+      await appendOwnedEvents(deferredEvents, ready);
       json(receiptFile, ready);
       json(resultFile, result);
       await event(result.status, 'saved-native-result-accepted', null, existing.final_evidence?.provider_called ?? 'unknown');
@@ -2670,6 +2654,48 @@ function prepareReviewFix(request, loc, context) {
 function reviewFixItemsTotal(request) {
   return request.reviewFix && Array.isArray(request.reviewFix.items) ? request.reviewFix.items.length : 0;
 }
+// Only closed buffers of authenticated caller events enter this transaction.
+// A crash can leave up to N unanchored events (previously one); replay refuses.
+// Pre/post snapshots are not an OS sandbox: restored transient writes are unseen.
+function appendProtectedOwnerEvents(root, receiptFile, record, lines) {
+  const batch = lines.slice();
+  if (!batch.length) return;
+  xllm.validateResultFileTarget(receiptFile, root);
+  const protectedOwner = record?.execution?.protected_owner || record?.recovery_baseline?.protected_owner;
+  if (!protectedOwner) fail('execution-protected-metadata');
+  const eventsFile = target(root, '.gsd/forge/events.jsonl');
+  const executionApi = require('./forge-task-execution');
+  return require('./forge-artifact-reconciliation').withOwnerLock(root, () => {
+    const expected = { ...protectedOwner };
+    const current = executionApi.protectedSnapshot(root);
+    for (const item of record.artifacts || []) if (current[item.path] === hash(item.content)) {
+      expected[item.path] = current[item.path];
+      let dir = path.posix.dirname(item.path);
+      while (dir !== '.') { if (current[dir + '/'] === 'directory') expected[dir + '/'] = 'directory'; dir = path.posix.dirname(dir); }
+    }
+    executionApi.assertProtected(root, expected);
+    let appended = fs.readFileSync(eventsFile);
+    if (hash(appended) !== expected['.gsd/forge/events.jsonl']) fail('execution-owner-event-raced');
+    for (const line of batch) {
+      if (!fs.readFileSync(eventsFile).equals(appended)) fail('execution-owner-event-raced');
+      fs.appendFileSync(eventsFile, line);
+      appended = Buffer.concat([appended, Buffer.from(line)]);
+      if (!fs.readFileSync(eventsFile).equals(appended)) fail('execution-owner-event-raced');
+    }
+    executionApi.assertProtected(root, { ...expected, '.gsd/forge/events.jsonl': hash(appended) });
+    // Advance only exact caller bytes, never adopt a fresh owner snapshot.
+    const advanced = { ...protectedOwner, '.gsd/forge/events.jsonl': hash(appended) };
+    if (record.execution) record.execution.protected_owner = advanced;
+    else {
+      record.recovery_baseline.protected_owner = advanced;
+      for (const row of record.recovery_baseline.protected_roots) if (path.resolve(row.path) === path.resolve(root)) row.snapshot = advanced;
+    }
+    if (record.milestone_delivery) record.milestone_delivery.protected_owner = advanced;
+    // Saved-native failures keep their original failed/started receipt until here.
+    json(receiptFile, record);
+  });
+}
+
 async function runUnitSidecar(request, runtime = {}) {
   const r = request?.linked_begin_key ? require('./forge-attempt-recovery').bindLinkedRequest(request, runtime.linkedEntryOptions) : request || {};
   const route = r.route || {};
@@ -2911,7 +2937,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     },
   });
 }
-module.exports = { preflightExecutionVerification, schema, memorySchema, memorySchemaV2, NEW_MEMORY_SCHEMA_VERSION, memoryExtractionSchema, memoryResponseSchema,
+module.exports = { appendProtectedOwnerEvents, preflightExecutionVerification, schema, memorySchema, memorySchemaV2, NEW_MEMORY_SCHEMA_VERSION, memoryExtractionSchema, memoryResponseSchema,
   memoryTransportSchema, memoryEvidenceContract, MEMORY_QUALITY_CONTRACT, locations, milestonePlanFile, validateRecoveryRequest, captureMilestoneBaseline, reconcileMilestoneAttempt, validateArtifacts, inspectArtifacts, inspectDeliveryContent, executeDeliveryArtifacts, MAX_ARTIFACT_BYTES,
   MAX_ARTIFACT_PAYLOAD_BYTES, target, markChecked, materialize, memoryPrompt, memorySourceContext,
   publishReadyRecord, nativeMemoryFingerprint, acceptNativeMemoryResult, candidateFromNativeResult, runNativeMemory,

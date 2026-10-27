@@ -1,5 +1,12 @@
 ## Não lançado
 
+- Eventos de verificação bufferizados usam um lock e uma fronteira pré/pós por
+  lote, mantendo a checagem exata de prefixo por linha. Uma interrupção pode
+  deixar até N eventos sem âncora (antes, no máximo um), ampliando a janela de
+  crash com a mesma recusa de replay. No nativo salvo, o recibo original
+  failed/started é preservado até persistir o lote. As fronteiras não são sandbox
+  do SO e não detectam escrita estranha restaurada dentro do lote (#203).
+
 - O manifesto registra o digest final de AGENTS.md/CLAUDE.md após sincronizar as
   instruções, somente para arquivos inteiramente gerados pelo Forge. Arquivos do
   operador que recebem apenas blocos gerenciados não são adotados (#258).
