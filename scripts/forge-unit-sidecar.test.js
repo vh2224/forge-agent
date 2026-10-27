@@ -443,13 +443,15 @@ async function recoveryContracts() {
     const executeApi = require('./forge-task-execution'), prepare = executeApi.prepare;
     executeApi.prepare = () => { throw Error('research must not execute.prepare'); };
     try {
-      const changedRequest = { ...readonly, prompt: 'Corrected fixture only.' };
+      const changedRequest = { ...readonly, prompt: undefined, promptFile: undefined,
+        description: 'Synthetic ultraviolet research correction' };
       const recovered = await sidecar.recoverUnitSidecar(changedRequest, {
         stateFile: readonly.resultFile + '.recovery.json', receiptFile: readonly.resultFile + '.receipt.json', correction: true }, {
         activeCapabilities: { available: true, tool: 'spawn_agent', source: 'fixture', models: ['gpt-5.6-sol'],
           reasoning_efforts: ['medium'], fork_turns: ['none'] } });
       assert(recovered.corrected);
       assert.strictEqual(recovered.result.action, 'invoke-native');
+      assert(recovered.result.invocation.args.message.includes(changedRequest.description));
       assert.strictEqual((recovered.result.invocation.args.message.match(/<!-- forge-procedure:core -->/g) || []).length, 1);
       assert(recovered.result.invocation.args.message.includes('<!-- forge-procedure:recovery -->'));
       const artifact = require('./forge-prompt').materializePrompt({ cwd: lab.owner, codeDir: lab.a, forgeHome: path.resolve(__dirname, '..'),

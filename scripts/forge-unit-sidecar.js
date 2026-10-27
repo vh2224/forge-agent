@@ -2744,7 +2744,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     const rendered = !reviewPrompt && !executionPlan && !request.prompt && !request.promptFile ? renderPrompt({
       unitType: canonical.scope === 'standalone-task' && canonical.phase === 'execute' ? 'execute-loose-task' : request.unitType,
       cwd: canonical.contextRoot, codeDir: canonical.cwd, milestoneId: request.milestoneId, sliceId: request.sliceId,
-      taskId: request.taskId, unitEffort: route.effort, autoCommit: false }) : null;
+      taskId: request.taskId, description: request.description, unitEffort: route.effort, autoCommit: false }) : null;
     let prompt = reviewPrompt || executionPlan || request.prompt || (request.promptFile ? fs.readFileSync(request.promptFile, 'utf8') : rendered.prompt);
     const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: canonical.cwd,
       phase: canonical.scope === 'standalone-task' && canonical.phase === 'execute' ? 'execute-loose-task' : request.unitType,
