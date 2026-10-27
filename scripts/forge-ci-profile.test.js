@@ -254,6 +254,7 @@ try {
     // Observed weights retain their historical provenance after matrix changes.
     names.add('Tests (windows-latest, shard 1/2)');
     names.add('Tests (windows-latest, shard 2/2)');
+    names.add('Tests (macos-latest)');
     for (const source of profile.doc.sources) {
       assert.strictEqual(path.basename(source.name), source.name); assert(!/[\\/]/.test(source.name));
       assert(/^[a-f0-9]{64}$/.test(source.sha256)); assert(Number.isSafeInteger(source.bytes));
@@ -268,12 +269,13 @@ try {
     }
     hygiene(profile.doc);
     const universe = runner.discoverTests([]);
-    for (const [platform, count] of [['win32', 4], ['linux', 1], ['darwin', 1]]) {
+    for (const [platform, count] of [['win32', 4], ['linux', 1], ['darwin', 1], ['darwin', 2]]) {
       const row = profile.doc.platforms[platform]; assert.strictEqual(row.status, 'observed');
       assert(Object.values(row.weights_ms).every(weight => Number.isSafeInteger(weight) && weight >= 1));
       row.excluded.forEach(excluded => assert(!Object.hasOwn(row.weights_ms, excluded.suite)));
       const plan = shards.planShards({ suites: universe, platform, index: 0, count, profile });
       assert.strictEqual(plan.algorithm, 'weighted-lpt-v1'); assert.strictEqual(plan.fallback, null);
+      assert.strictEqual(plan.shards.length, count);
       assert(shards.verifyPartition(universe, plan.shards).ok);
       assert.strictEqual(new Set(plan.shards.flat()).size, universe.length);
       assert.strictEqual(plan.shards.flat().length, universe.length);

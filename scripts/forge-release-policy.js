@@ -13,8 +13,8 @@ const POLICY = {
   workflows: {
     ci: {
       filename: 'ci.yml', path: '.github/workflows/ci.yml',
-      blob_oid: 'b0c79219841d47c6cf745b2914d127befe65f281',
-      blob_sha256: '3ec181842940ed65b0354d092dc48d053f983747d1ba43ca86c954dc895032fa',
+      blob_oid: '23ce2e657afb77f78384d8a99b58988fa5735827',
+      blob_sha256: '2fb94cf0cfad7af205ed717f841f5e5580b83c61a1ac13c17d83ed1eb29ad83f',
       jobs: [
         { key: 'operational-offline', kind: 'native', needs: [],
           name: 'Offline ${{ matrix.host }} / ${{ matrix.platform }}',
@@ -26,7 +26,8 @@ const POLICY = {
         { key: 'test', kind: 'native', needs: [], name: 'Tests (${{ matrix.label }})',
           runner: '${{ matrix.os }}', matrix: { include: [
             { os: 'ubuntu-latest', platform: 'linux', 'shard-index': 0, 'shard-count': 1, label: 'ubuntu-latest' },
-            { os: 'macos-latest', platform: 'darwin', 'shard-index': 0, 'shard-count': 1, label: 'macos-latest' },
+            { os: 'macos-latest', platform: 'darwin', 'shard-index': 0, 'shard-count': 2, label: 'macos-latest, shard 1/2' },
+            { os: 'macos-latest', platform: 'darwin', 'shard-index': 1, 'shard-count': 2, label: 'macos-latest, shard 2/2' },
             { os: 'windows-latest', platform: 'win32', 'shard-index': 0, 'shard-count': 4, label: 'windows-latest, shard 1/4' },
             { os: 'windows-latest', platform: 'win32', 'shard-index': 1, 'shard-count': 4, label: 'windows-latest, shard 2/4' },
             { os: 'windows-latest', platform: 'win32', 'shard-index': 2, 'shard-count': 4, label: 'windows-latest, shard 3/4' },
@@ -37,6 +38,8 @@ const POLICY = {
           matrix: { host: ['claude', 'codex'], platform: ['linux', 'darwin', 'win32'] } },
         { key: 'required-tests-windows', kind: 'alias', needs: ['test'],
           name: 'Tests (windows-latest)', runner: 'ubuntu-latest', matrix: null },
+        { key: 'required-tests-macos', kind: 'alias', needs: ['test'],
+          name: 'Tests (macos-latest)', runner: 'ubuntu-latest', matrix: null },
       ],
     },
     app: {

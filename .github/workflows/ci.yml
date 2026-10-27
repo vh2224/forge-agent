@@ -62,8 +62,13 @@ jobs:
           - os: macos-latest
             platform: darwin
             shard-index: 0
-            shard-count: 1
-            label: macos-latest
+            shard-count: 2
+            label: macos-latest, shard 1/2
+          - os: macos-latest
+            platform: darwin
+            shard-index: 1
+            shard-count: 2
+            label: macos-latest, shard 2/2
           - os: windows-latest
             platform: win32
             shard-index: 0
@@ -148,7 +153,7 @@ jobs:
         run: node scripts/run-tests.js --baseline scripts/fixtures/ci-baseline/known-failures.json --shard-profile scripts/fixtures/ci-shards/shard-profile.json --shard-index ${{ matrix.shard-index }} --shard-count ${{ matrix.shard-count }}
 
       - name: Smoke suite (release gate)
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && matrix.shard-index == 0
         run: node scripts/forge-smoke.js
 
   required-offline-windows:
@@ -171,6 +176,15 @@ jobs:
 
   required-tests-windows:
     name: Tests (windows-latest)
+    needs: test
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Preserve required-check contract
+        run: test "${{ needs.test.result }}" = success
+
+  required-tests-macos:
+    name: Tests (macos-latest)
     needs: test
     if: ${{ always() }}
     runs-on: ubuntu-latest
