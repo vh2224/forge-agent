@@ -703,7 +703,7 @@ test('every operational emitter materializes string/string/boolean runtime field
   assert.strictEqual(canonical, 6, `canonical emitter call sites: ${canonical}`);
 });
 
-test('Claude historical skills repin is preserved and memory-v2 current report pins all nine surfaces', () => {
+test('Claude historical repin is preserved and current memory/instruction report pins all nine surfaces', () => {
   const historicalBytes = fs.readFileSync(HISTORICAL_GOLDEN_PATH);
   assert.strictEqual(crypto.createHash('sha256').update(historicalBytes).digest('hex'),
     'f2b3e910445d2557f50aa4ced9e1b31498debc6b1cdd1ed05b452d8141b4307f', 'historical Claude 4.19.0 golden must remain byte-for-byte unchanged');
@@ -714,7 +714,7 @@ test('Claude historical skills repin is preserved and memory-v2 current report p
     historical.surfaces.map(({ sha256, ...identity }) => identity));
   const historicalHashes = new Map(historical.surfaces.map(surface => [surface.source_id, surface.sha256]));
   assert.deepStrictEqual(golden.surfaces.filter(surface => historicalHashes.get(surface.source_id) !== surface.sha256)
-    .map(surface => surface.source_id), ['agents', 'skills']);
+    .map(surface => surface.source_id), ['agents', 'skills', 'claude-instructions']);
   const report = claudeRenderer.render({
     repo: ROOT,
     projectRoot: path.join(ROOT, 'scripts', '.guard-golden-project'),

@@ -68,10 +68,13 @@ Nos boundaries definidos pela política efetiva de memória, o worker resolvido 
 ### Configuração multi-camada
 
 Resolução (último sobrescreve):
-1. `~/.claude/forge-agent-prefs.jsonc` — global do operador
+1. `${FORGE_HOME:-~/.forge-agent}/forge-agent-prefs.jsonc` — global canônico do operador
 2. `.gsd/forge-prefs.jsonc` — local ao checkout, não configuração compartilhada por commit
 
-Arquivos Markdown antigos são compatibilidade de leitura, não destinos novos.
+O JSONC em `~/.claude/forge-agent-prefs.jsonc` é fallback legado, usado somente
+quando o arquivo global canônico não existe. Preferências Markdown exigem migração
+explícita: o resolvedor normal não as lê e recusa a camada sem JSONC; o utilitário
+de migração faz a leitura do legado.
 Use forge-prefs para conferir valores/camadas e forge-prefs-migrate --set para
 alterações autorizadas; confirme o ignore real no VCS de cada projeto.
 
