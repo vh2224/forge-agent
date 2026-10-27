@@ -13,6 +13,7 @@ const { detect: detectCapabilities } = require('./forge-capabilities');
 const { generate: generateProjections } = require('./forge-generate');
 const { VERSION } = require('./forge-version');
 const { loadAllProcedureContexts } = require('./forge-procedure-context');
+const ownership = require('./forge-projection-ownership');
 
 const RUNTIMES = Object.freeze(['claude', 'codex', 'both']);
 const MANAGED_CORE = Object.freeze([
@@ -497,10 +498,12 @@ function install(input = {}) {
   // Standing interaction rules also reach operator-owned instruction files.
   // This owns only its separate marker span; self-sourced repo files stay intact.
   const interaction = require('./forge-interaction');
+  const instructionFiles = [];
   for (const host of selected) {
     const file = path.join(projectRoot, host === 'codex' ? 'AGENTS.md' : 'CLAUDE.md');
     const report = generated.reports[host];
     if ((report.self_sourced || []).some((entry) => entry.destination === file)) continue;
+    instructionFiles.push({ host, file });
     const current = exists(file) ? fs.readFileSync(file, 'utf8') : '';
     const synced = interaction.sync(current);
     if (synced.malformed) {
@@ -554,6 +557,19 @@ function install(input = {}) {
       for (const [destination, digest] of Object.entries(report.ownership)) {
         if (digest !== priorOwnership[destination]) ownershipRecord[destination] = digest;
       }
+    }
+  }
+  // Sync can change renderer output. Refresh only whole-file ownership established
+  // by that host; synchronizing a managed span never adopts an operator's file.
+  if (!options.dryRun) {
+    for (const { host, file } of instructionFiles) {
+      const report = generated.reports[host];
+      const key = ownership.keyFor(file);
+      const at = (item) => ownership.keyFor(item.destination) === key;
+      const claimed = (report.written || []).some((item) => at(item) && !item.dry_run)
+        || (report.preserved || []).some((item) => at(item) && item.reason === 'already-current');
+      const disowned = (report.conflicts || []).some(at) || (report.self_sourced || []).some(at);
+      if (claimed && !disowned && exists(file)) ownershipRecord[key] = ownership.digest(fs.readFileSync(file, 'utf8'));
     }
   }
   // Provenance: WHICH clone rendered this installation. Without it an update run

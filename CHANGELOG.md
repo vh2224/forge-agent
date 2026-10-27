@@ -1,5 +1,9 @@
 ## Não lançado
 
+- O manifesto registra o digest final de AGENTS.md/CLAUDE.md após sincronizar as
+  instruções, somente para arquivos inteiramente gerados pelo Forge. Arquivos do
+  operador que recebem apenas blocos gerenciados não são adotados (#258).
+
 - Planejamento de milestones deixa de exigir 4–10 slices: a divisão deve cobrir
   todo o escopo e justificar cada separação por risco, dependência, resultado
   verificável ou limite de contexto, preservando os gates existentes.

@@ -1171,4 +1171,127 @@ test('BOM-prefixed source manifest installs through the canonical byte loader', 
   } finally { data.cleanup(); }
 });
 
+test('instruction sync preserves operator ownership, historical digests and malformed markers', () => {
+  const data = fixture();
+  const ownership = require('./forge-projection-ownership');
+  try {
+    fs.mkdirSync(data.projectRoot, { recursive: true });
+    const names = { codex: 'AGENTS.md', claude: 'CLAUDE.md' };
+    const original = '# Operator instructions\r\nPreserve these bytes.\r\n';
+    for (const name of Object.values(names)) fs.writeFileSync(path.join(data.projectRoot, name), original);
+    const options = { ...data.options, runtime: 'both', provenance: null };
+    const first = installer.install(options);
+    const manifestFile = path.join(data.forgeHome, 'manifest.json');
+    const prior = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+    for (const [host, name] of Object.entries(names)) {
+      const file = path.join(data.projectRoot, name), key = ownership.keyFor(file);
+      assert(first.manifest.adapters[host].conflicts.some(row => row.destination === file && row.reason === 'user_owned'));
+      assert(fs.readFileSync(file, 'utf8').startsWith(original), 'prefixo do operador alterado');
+      assert(fs.readFileSync(file, 'utf8').includes('<!-- forge:interaction:start -->'));
+      assert(!Object.hasOwn(prior.ownership, key), 'span adotou arquivo inteiro');
+      prior.ownership[key] = 'b'.repeat(64);
+    }
+    fs.writeFileSync(manifestFile, JSON.stringify(prior));
+    const second = installer.install({ ...options, update: true });
+    for (const [host, name] of Object.entries(names)) {
+      const file = path.join(data.projectRoot, name);
+      assert.strictEqual(second.manifest.ownership[ownership.keyFor(file)], 'b'.repeat(64));
+      assert(second.manifest.adapters[host].conflicts.some(row => row.destination === file && row.reason === 'user_owned'));
+      assert(fs.readFileSync(file, 'utf8').startsWith(original));
+    }
+    const malformed = '# Operator\n<!-- forge:interaction:start -->\nUnclosed\n';
+    const agents = path.join(data.projectRoot, 'AGENTS.md');
+    fs.writeFileSync(agents, malformed);
+    const third = installer.install({ ...options, runtime: 'codex', update: true });
+    assert(third.plan.some(row => row.destination === agents && row.op === 'skip' && row.reason === 'interaction-malformed-markers'));
+    assert.strictEqual(fs.readFileSync(agents, 'utf8'), malformed);
+    assert.strictEqual(third.manifest.ownership[ownership.keyFor(agents)], 'b'.repeat(64));
+    const withoutKey = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+    delete withoutKey.ownership[ownership.keyFor(agents)];
+    fs.writeFileSync(manifestFile, JSON.stringify(withoutKey));
+    const fourth = installer.install({ ...options, runtime: 'codex', update: true });
+    assert(fourth.plan.some(row => row.destination === agents && row.op === 'skip' && row.reason === 'interaction-malformed-markers'));
+    assert.strictEqual(fs.readFileSync(agents, 'utf8'), malformed);
+    assert(!Object.hasOwn(fourth.manifest.ownership, ownership.keyFor(agents)), 'marcador malformado adotou arquivo inteiro');
+  } finally { data.cleanup(); }
+});
+
+test('span-only and self-sourced instructions do not gain whole-file ownership', () => {
+  const data = fixture({ configurationOnly: true });
+  const ownership = require('./forge-projection-ownership');
+  try {
+    const report = installer.install({ ...data.options, runtime: 'claude', provenance: null });
+    const instruction = path.join(data.projectRoot, 'CLAUDE.md');
+    assert(fs.existsSync(instruction));
+    assert(!Object.hasOwn(report.manifest.ownership, ownership.keyFor(instruction)));
+    const inventoryFile = path.join(data.options.repo, 'forge-source-manifest.json');
+    const inventory = JSON.parse(fs.readFileSync(inventoryFile, 'utf8'));
+    const source = JSON.parse(fs.readFileSync(path.join(__dirname, '../forge-source-manifest.json'), 'utf8'));
+    inventory.sources.push(source.sources.find(row => row.source_id === 'claude-instructions'));
+    fs.writeFileSync(inventoryFile, JSON.stringify(inventory));
+    const self = path.join(data.options.repo, 'CLAUDE.md');
+    const original = '# Canonical instructions\nPreserve source.\n';
+    fs.writeFileSync(self, original);
+    const result = installer.install({ ...data.options, runtime: 'claude', update: true, projectRoot: data.options.repo, provenance: null });
+    assert.strictEqual(fs.readFileSync(self, 'utf8'), original);
+    assert(result.manifest.adapters.claude.self_sourced.includes(self));
+    assert(!Object.hasOwn(result.manifest.ownership, ownership.keyFor(self)));
+  } finally { data.cleanup(); }
+});
+
+test('Codex instruction ownership records final synchronized bytes across updates and dry runs', () => {
+  const data = fixture();
+  const ownership = require('./forge-projection-ownership');
+  try {
+    const options = { ...data.options, runtime: 'codex', provenance: null };
+    const first = installer.install(options);
+    const file = path.join(data.projectRoot, 'AGENTS.md'), key = ownership.keyFor(file);
+    const manifestFile = path.join(data.forgeHome, 'manifest.json');
+    assert(first.plan.some(row => row.op === 'write' && row.destination === file && row.reason === 'instructions:block-absent'));
+    assert.strictEqual(first.manifest.ownership[key], ownership.digest(fs.readFileSync(file, 'utf8')), 'digest anterior ao sync não representa os bytes finais');
+    const manifestBytes = fs.readFileSync(manifestFile), instructionBytes = fs.readFileSync(file);
+    const dry = installer.install({ ...options, update: true, dryRun: true });
+    assert.deepStrictEqual(fs.readFileSync(manifestFile), manifestBytes);
+    assert.deepStrictEqual(fs.readFileSync(file), instructionBytes);
+    assert.deepStrictEqual(dry.manifest.ownership, first.manifest.ownership);
+    const digests = [];
+    for (let iteration = 0; iteration < 2; iteration++) {
+      const result = installer.install({ ...options, update: true });
+      const recorded = JSON.parse(fs.readFileSync(manifestFile, 'utf8')).ownership[key];
+      assert.strictEqual(recorded, ownership.digest(fs.readFileSync(file, 'utf8')));
+      assert(!result.manifest.adapters.codex.conflicts.some(row => row.destination === file));
+      digests.push(recorded);
+    }
+    assert.strictEqual(digests[0], digests[1]);
+  } finally { data.cleanup(); }
+});
+
+test('both-host instruction digests remain final and single-host updates preserve the other host', () => {
+  const data = fixture();
+  const ownership = require('./forge-projection-ownership');
+  try {
+    const options = { ...data.options, runtime: 'both', provenance: null };
+    const files = ['AGENTS.md', 'CLAUDE.md'].map(name => path.join(data.projectRoot, name));
+    const dry = installer.install({ ...options, dryRun: true });
+    for (const file of files) {
+      assert(!fs.existsSync(file));
+      assert(!Object.hasOwn(dry.manifest.ownership, ownership.keyFor(file)));
+    }
+    const installed = installer.install(options);
+    for (const file of files) assert.strictEqual(installed.manifest.ownership[ownership.keyFor(file)], ownership.digest(fs.readFileSync(file, 'utf8')));
+    assert(installed.manifest.adapters.codex.project_files.includes('AGENTS.md'));
+    assert(installed.manifest.adapters.claude.project_files.includes('CLAUDE.md'));
+    const manifestFile = path.join(data.forgeHome, 'manifest.json');
+    const beforeDry = [manifestFile, ...files].map(file => fs.readFileSync(file));
+    const preview = installer.install({ ...options, update: true, dryRun: true });
+    [manifestFile, ...files].forEach((file, index) => assert.deepStrictEqual(fs.readFileSync(file), beforeDry[index]));
+    assert.deepStrictEqual(preview.manifest.ownership, installed.manifest.ownership);
+    const updated = installer.install({ ...options, runtime: 'claude', update: true });
+    for (const [key, digest] of Object.entries(installed.manifest.ownership)) {
+      if (key === ownership.keyFor(files[0]) || key.startsWith(path.resolve(data.codexHome) + path.sep)) assert.strictEqual(updated.manifest.ownership[key], digest);
+    }
+    assert.strictEqual(updated.manifest.ownership[ownership.keyFor(files[1])], ownership.digest(fs.readFileSync(files[1], 'utf8')));
+  } finally { data.cleanup(); }
+});
+
 process.stdout.write(`\n${passed} passed, 0 failed\n`);
