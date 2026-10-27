@@ -1,5 +1,8 @@
 ## Não lançado
 
+- Instalações nos dois hosts preservam os digests atualizados de cada renderer no
+  manifesto, sem sobrescrevê-los com o histórico do outro host.
+
 - Manutenção pós-milestone: loader compatível com identidade de arquivos do Node 22
   no Windows; contexto correto no resolver de review-fix; diagnósticos de verificação
   limitados e sem conteúdo privado; comandos de verificação explícitos no contrato Claude.
