@@ -272,12 +272,12 @@ async function execute(f, key, mutate = () => {}) {
     f.env.GITHUB_EVENT_PATH = path.join(f.temp, 'release-event.json');
     assert.strictEqual((await f.apply(f.prepared)).status, 'blocked'); assert.strictEqual(f.state.mutations.length, 0);
   }));
-  await test('workflow-app-all-master-pushes-pr-swift-pty-and-16-ci-cells-preserved', () => {
+  await test('workflow-app-all-master-pushes-pr-swift-pty-and-18-ci-cells-preserved', () => {
     assert(app.includes('  push:\n    branches: [master]\n\npermissions:'));
     assert(app.includes("  pull_request:\n    paths:\n      - 'app/**'\n      - '.github/workflows/app.yml'"));
     for (const text of ['  app:', 'name: Swift app and PTY regressions', 'runs-on: macos-26', 'timeout-minutes: 20',
       'actions/cache@v4', 'app/.build', 'swift build --package-path app --product Forge', 'swift run --package-path app ForgeKitTests']) assert(app.includes(text));
-    assert.strictEqual(checks.expandJobs(checks.POLICY.workflows.ci).length, 16);
+    assert.strictEqual(checks.expandJobs(checks.POLICY.workflows.ci).length, 18);
     const ci = fs.readFileSync(path.join(ROOT, checks.POLICY.workflows.ci.path));
     assert.strictEqual(crypto.createHash('sha256').update(ci).digest('hex'), checks.POLICY.workflows.ci.blob_sha256);
     assert(ci.toString().includes('baseline')); assert.strictEqual(checks.POLICY.local.suites.length, 11);
