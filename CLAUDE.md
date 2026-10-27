@@ -22,29 +22,32 @@ Milestone (M-<ts>-<slug>) → Slice (S##) → Task (T##)
 ```
 Regra de ferro: cada Task cabe em um context window. Slices agrupam tasks relacionadas. Milestones são entregas de valor.
 
-### Modelo de agentes (7 agentes + orquestrador)
+### Modelo de agentes
+
+A coluna de modelo é resolvida pela configuração atual por unidade; a tabela
+descreve responsabilidades e não autoriza omitir modelo ou escolher engine.
 
 | Agente | Modelo | Fase | Responsabilidade |
 |--------|--------|------|------------------|
 | **Orquestrador** | (contexto principal) | — | Dispatch loop: lê STATE, deriva próxima unidade, monta prompt, despacha, processa resultado |
-| `forge-planner` | Opus | plan-milestone, plan-slice | Decompõe trabalho em slices/tasks, escreve ROADMAP e PLANs |
-| `forge-discusser` | Opus | discuss-milestone, discuss-slice | Identifica ambiguidades, faz perguntas ao usuário, registra decisões |
-| `forge-researcher` | Opus | research-milestone, research-slice | Explora codebase, documenta padrões existentes, atualiza CODING-STANDARDS |
-| `forge-executor` | Sonnet | execute-task | Implementa código, verifica must-haves, commita, escreve SUMMARY |
-| `forge-completer` | Sonnet | complete-slice, complete-milestone | Escreve summaries, UAT scripts, fecha artefatos; no fecho da milestone dá tag e push da branch do run (`forge/{run}`) — nunca integra: a integração é do operador |
-| `forge-memory` | Haiku | pós-unidade | Extrai conhecimento durável do trabalho completado (quality gate: project-specific + non-obvious + durable) |
-| `forge-reviewer` | Sonnet | review gate (challenger) | Reviewer adversarial — acha bugs/brechas no diff do slice; em rebuttal mode reage à defesa do advocate. Read-only, advisory |
-| `forge-advocate` | Sonnet | review gate (defender) | Autor que defende o código contra as objeções do reviewer — refuta, concede ou marca `open`. Read-only, advisory |
-| `forge-plan-checker` | Sonnet | gate plan-slice→execute | Pontua 10 dimensões estruturais do plano (advisory) |
-| `forge-worker` | Vários | (template legado) | Template genérico — não usado diretamente |
+| `forge-planner` | Resolvido por unidade | plan-milestone, plan-slice | Decompõe trabalho em slices/tasks, escreve ROADMAP e PLANs |
+| `forge-discusser` | Resolvido por unidade | discuss-milestone, discuss-slice | Identifica ambiguidades, faz perguntas ao usuário, registra decisões |
+| `forge-researcher` | Resolvido por unidade | research-milestone, research-slice | Explora codebase, documenta padrões existentes, atualiza CODING-STANDARDS |
+| `forge-executor` | Resolvido por unidade | execute-task | Implementa código, verifica must-haves, commita, escreve SUMMARY |
+| `forge-completer` | Resolvido por unidade | complete-slice, complete-milestone | Escreve summaries, UAT scripts, fecha artefatos; no fecho da milestone dá tag e push da branch do run (`forge/{run}`) — nunca integra: a integração é do operador |
+| `forge-memory` | Resolvido por unidade | pós-unidade | Extrai conhecimento durável do trabalho completado (quality gate: project-specific + non-obvious + durable) |
+| `forge-reviewer` | Resolvido por unidade | review gate (challenger) | Reviewer adversarial — acha bugs/brechas no diff do slice; em rebuttal mode reage à defesa do advocate. Read-only, advisory |
+| `forge-advocate` | Resolvido por unidade | review gate (defender) | Autor que defende o código contra as objeções do reviewer — refuta, concede ou marca `open`. Read-only, advisory |
+| `forge-plan-checker` | Resolvido por unidade | gate plan-slice→execute | Pontua 10 dimensões estruturais do plano (advisory) |
+| `forge-worker` | Resolvido por unidade | (template legado) | Template genérico — não usado diretamente |
 
 ### Dispatch loop (forge-auto / forge-next)
 
 O orquestrador NÃO é um agente — roda no contexto principal. Ciclo:
-1. Lê STATE.md → deriva `unit_type` + `unit_id` da tabela de dispatch
+1. Resolve o trabalho pelo contexto pessoal canônico (ou ID explícito); então lê o estado da unidade selecionada e deriva `unit_type` + `unit_id`
 2. **Risk radar gate:** se `unit_type == plan-slice` e slice é `risk:high`, invoca `Skill("forge-risk-radar")` no contexto principal antes de despachar o planner
 3. Monta prompt com artefatos `.gsd/` inlined (não resumidos) + `effort` + `thinking` resolvidos de PREFS
-4. Despacha via `Agent(subagent_type, prompt)` com modelo configurável
+4. Valida e despacha pela rota/adaptador efetivos, com modelo e esforço explícitos; a ferramenta nativa depende do host
 5. Processa `---GSD-WORKER-RESULT---` (done/partial/blocked)
 6. Housekeeping: atualiza STATE, appende decisões, extrai memórias
 7. Repete (auto) ou para (next)
@@ -55,7 +58,7 @@ Cada unidade de trabalho roda em agente fresh — zero acúmulo de tokens entre 
 
 ### Sistema de memória emergente
 
-Após cada unidade, `forge-memory` (Haiku) lê o resultado e extrai padrões duráveis:
+Nos boundaries definidos pela política efetiva de memória, o worker resolvido lê o resultado e extrai padrões duráveis:
 - Categories: gotcha, convention, architecture, pattern, environment, preference
 - Quality gate: 3 perguntas (project-specific? non-obvious? durable?) — todas YES para salvar
 - Confidence scoring com decay (memórias não-acessadas perdem confiança)
@@ -65,9 +68,12 @@ Após cada unidade, `forge-memory` (Haiku) lê o resultado e extrai padrões dur
 ### Configuração multi-camada
 
 Resolução (último sobrescreve):
-1. `~/.claude/forge-agent-prefs.md` — user-global
-2. `.gsd/claude-agent-prefs.md` — repo shared (commitável)
-3. `.gsd/prefs.local.md` — local personal (gitignored)
+1. `~/.claude/forge-agent-prefs.jsonc` — global do operador
+2. `.gsd/forge-prefs.jsonc` — local ao checkout, não configuração compartilhada por commit
+
+Arquivos Markdown antigos são compatibilidade de leitura, não destinos novos.
+Use forge-prefs para conferir valores/camadas e forge-prefs-migrate --set para
+alterações autorizadas; confirme o ignore real no VCS de cada projeto.
 
 Configurável: modelos por fase, skip rules (discuss/research), merge_strategy (documental — a integração é do operador), auto_push (push da branch do run), isolation mode, **effort por fase** (`low|medium|high|max`), **thinking por fase** (`adaptive|disabled`).
 
@@ -205,11 +211,14 @@ novo: entrada completa no log; uma linha aqui só se virar regra operacional viv
 
 - **Orquestrador no contexto principal** — o dispatch loop roda via commands/skills no
   contexto principal (só ele tem a tool `Agent`); agentes nunca despacham agentes.
-- **Context isolation é inviolável** — cada unidade roda em subagente fresh; se `Agent()`
-  falhar, parar e surfacear. Executar a unidade inline no contexto principal nunca é fallback.
+- **Isolamento e recuperação** — unidades roteadas preservam contexto, claims e
+  identidade. Recusa bloqueia o despacho, não investigação ou recuperação válida.
+  Ações diretas elegíveis e manutenção do Forge expressamente autorizada seguem
+  shared/forge-direct-actions.md; não falsificar receipt nem substituir rota silenciosamente.
 - **Roteamento por tier; model vai como alias** — `{engine, model, tier, effort}` saem de
   `scripts/forge-dispatch-resolve.js`; `Agent(model:)` recebe o alias curto de
-  `scripts/forge-model-alias.js`; ID não mapeado → omitir `model:` e registrar warning.
+  o adaptador efetivo quando aplicável. Modelo não mapeado exige diagnóstico/rota
+  compatível; nunca omitir `model` para herdar um default.
 - **Guard de thinking** — `claude-fable-5` rejeita `thinking: disabled` explícito (HTTP 400);
   `claude-opus-5` rejeita `disabled` com effort `xhigh|max`. Fonte única:
   `forge-dispatch-resolve.js → thinking_header`.
@@ -325,9 +334,9 @@ como pass.
 - `plan_check.mode: advisory | blocking` — opt-in; `blocking` ativa o revision-loop (max 3 rodadas, decremento monotônico em `fail`).
 - `file_audit.ignore_list` — customize adicionando/removendo globs. Não muda a postura advisory — só o que é flagged.
 
-## Estado atual
+## Estado histórico — medições de agosto de 2026, não usar como fila atual
 
-- **Milestone ativo:** `M-20260825215030-paridade-host-worker` — paridade host/worker no dispatch
+- **Milestone registrado naquele momento:** `M-20260825215030-paridade-host-worker` — paridade host/worker no dispatch
   multi-LLM. S01–S03 fechadas; a próxima é S04 (dialeto Codex no renderer), ainda **não planejada**.
 - **Master:** verde — 39 dos últimos 40 runs de CI passando nas três plataformas (medido
   2026-08-23); o vermelho herdado dos merges #91/#94/#98 foi fechado nas semanas seguintes.
@@ -343,16 +352,14 @@ como pass.
 - **Em curso:** P0 do diagnóstico de 2026-08-23 — verification gate no-op (133/133 sem
   comando), dieta de contexto (este arquivo), effort decorativo, gates advisory inertes.
 
-## GSD — Início de sessão obrigatório (dogfood)
+## Início de sessão obrigatório
 
-Ao iniciar qualquer sessão de trabalho GSD neste projeto, leia em ordem:
-
-1. `.gsd/STATE.md` — posição atual e próxima ação
-2. `.gsd/milestones/<ativo>/M*-CONTEXT.md` — decisões de arquitetura do milestone ativo
-3. `.gsd/AUTO-MEMORY.md` — conhecimento auto-aprendido (se existir)
-
-Se houver `continue.md` no slice ativo → leia, delete, retome de "Next Action".
-Comandos, agentes e metodologia: ver seções acima deste arquivo.
+Siga o snapshot pessoal e os procedimentos canônicos nos blocos Forge abaixo.
+Boot é somente leitura: não selecionar pelo STATE/ledger, não reconstruir uma
+fila a partir de sessões recentes, não apagar continue.md nem criar vínculos.
+Após seleção explícita ou seleção canônica válida, ler o contexto e o handoff
+da unidade escolhida. Memória técnica compartilhada continua consultável.
+Ausência de vínculo é no-bindings; erro ou fonte desatualizada exige diagnóstico.
 
 <!-- forge:routing-contract:start -->
 <!-- Gerado por forge-instructions.js. Edite o script, não este bloco: um sync o reescreve. -->
