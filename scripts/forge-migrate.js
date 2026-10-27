@@ -255,7 +255,7 @@ function readSchemaVersion(cwd) {
 
 // ── backupMonolith ────────────────────────────────────────────────────────────
 // Renames monolith to .bak if monolith exists and .bak does not exist yet.
-// Returns { action: 'renamed'|'bak-exists'|'no-source', bakContent: string|null }
+// Returns { action: 'renamed'|'would-rename'|'bak-exists'|'no-source', bakContent: string|null, sourcePath: string|null }
 //
 // NOTE: this function only knows about file presence — it cannot tell a legacy
 // pre-migration monolith apart from a regenerated projection cache. The
@@ -267,13 +267,13 @@ function backupMonolith(cwd, store, dryRun) {
   const bakPath      = path.join(cwd, store.bakRel);
 
   if (!fs.existsSync(monolithPath)) {
-    return { action: 'no-source', bakContent: null };
+    return { action: 'no-source', bakContent: null, sourcePath: null };
   }
 
   if (fs.existsSync(bakPath)) {
     // .bak already exists — preserve it, read for verification
     const bakContent = fs.readFileSync(bakPath, 'utf8');
-    return { action: 'bak-exists', bakContent };
+    return { action: 'bak-exists', bakContent, sourcePath: bakPath };
   }
 
   // Read monolith content before rename (we need it for verification)
@@ -283,7 +283,7 @@ function backupMonolith(cwd, store, dryRun) {
     fs.renameSync(monolithPath, bakPath);
   }
 
-  return { action: dryRun ? 'would-rename' : 'renamed', bakContent };
+  return { action: dryRun ? 'would-rename' : 'renamed', bakContent, sourcePath: dryRun ? monolithPath : bakPath };
 }
 
 // ── migrateStore ──────────────────────────────────────────────────────────────
@@ -338,22 +338,24 @@ function migrateStore(cwd, store, opts) {
 
   // Step 1: backup
   let bakContent = null;
+  let sourcePath = null;
   try {
     const backup = backupMonolith(cwd, store, dryRun);
     result.bak   = backup.action;
     bakContent   = backup.bakContent;
+    sourcePath   = backup.sourcePath;
   } catch (e) {
     result.error = `backup failed: ${e.message}`;
     return result;
   }
 
-  // Step 2: migrate — pass bakPath as source when bakContent is available so the
-  // migrator reads from the .bak file (original content) instead of the now-renamed path.
+  // Step 2: migrate from the actual readable source. A dry-run leaves the
+  // monolith in place; an existing or newly renamed backup retains precedence.
   let migrateResult;
   try {
     const migrateOpts = { dryRun };
     if (bakContent !== null) {
-      migrateOpts.source = path.join(cwd, store.bakRel);
+      migrateOpts.source = sourcePath;
     }
     migrateResult = store.migrate(cwd, migrateOpts);
   } catch (e) {

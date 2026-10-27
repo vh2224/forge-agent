@@ -56,6 +56,9 @@ function git(cwd, args) {
   assert.strictEqual(r.status, 0, r.stderr); return r.stdout.trim();
 }
 function setup(vcsName = 'git') {
+  return setupFixture(vcsName, true);
+}
+function setupFixture(vcsName, resolveInitialRoute) {
   const dir = path.join(root, String(++sequence)), cwd = path.join(dir, 'code'), owner = path.join(dir, 'owner');
   fs.mkdirSync(cwd, { recursive: true });
   const task = path.join(owner, '.gsd/tasks', id), planFile = path.join(task, `${id}-PLAN.md`);
@@ -73,11 +76,19 @@ function setup(vcsName = 'git') {
     svn('svn', ['checkout', require('url').pathToFileURL(repository).href, '.']);
     svn('svn', ['add', 'src.js', 'dirty.txt']); svn('svn', ['commit', '-m', 'fixture baseline']); svn('svn', ['update']);
   } else {
-    git(cwd, ['init', '-q']); git(cwd, ['config', 'core.autocrlf', 'false']); git(cwd, ['add', '.']);
-    git(cwd, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'baseline']);
+    // Copy a private baseline, never share writable Git objects between cases.
+    const template = path.join(root, 'git-template');
+    if (!fs.existsSync(template)) {
+      fs.mkdirSync(template);
+      write(path.join(template, 'src.js'), 'before\n'); write(path.join(template, 'dirty.txt'), 'before\n');
+      git(template, ['init', '-q']); git(template, ['config', 'core.autocrlf', 'false']); git(template, ['add', '.']);
+      git(template, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'baseline']);
+    }
+    fs.cpSync(template, cwd, { recursive: true });
+    git(cwd, ['update-index', '-q', '--refresh']);
   }
   write(path.join(cwd, 'dirty.txt'), 'user dirty\n');
-  const route = resolveDispatch({ cwd: owner, unitType: 'execute-task', scope: 'standalone-task', phase: 'execute', planPath: planFile, hostRuntime: 'codex', unitId: id });
+  const route = resolveInitialRoute ? resolveDispatch({ cwd: owner, unitType: 'execute-task', scope: 'standalone-task', phase: 'execute', planPath: planFile, hostRuntime: 'codex', unitId: id }) : null;
   const r = { cwd, contextRoot: owner, scope: 'standalone-task', phase: 'execute', unitType: 'execute-task', taskId: id,
     planFile, route, workflowId: id, dispatchId: `attempt-${sequence}`, resultFile: path.join(dir, 'result.json'),
     gates: { plan: 'approved', security: 'passed', claim: 'proceed' }, constraints: { auto_commit: false, deploy: false } };
@@ -99,7 +110,8 @@ function close(completed) {
 }
 let latestNative;
 function nativeFixture(options = {}) {
-  const f = setup();
+  // Native setup replaces the plan and preferences before resolving its route.
+  const f = setupFixture('git', false);
   const roots = require('../forge-code-roots');
   const contract = roots.validateContract({ schema_version: 2, owner: f.owner, primary_root_id: 'app', code_roots: [{ id: 'app', path: f.cwd }] });
   let plan = require('../forge-code-roots.test').plan(contract).replaceAll('same.txt', 'src.js')

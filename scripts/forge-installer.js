@@ -475,6 +475,7 @@ function install(input = {}) {
   // the only proof of ownership a format without comment syntax can have, so a
   // run that forgets to carry it forward re-freezes every JSON projection.
   const priorManifest = readJsonIfPresent(paths.shared.manifest) || {};
+  const priorOwnership = priorManifest.ownership && typeof priorManifest.ownership === 'object' ? priorManifest.ownership : {};
   const generated = generateProjections({
     repo,
     runtime,
@@ -488,7 +489,7 @@ function install(input = {}) {
     questionSpawnSync: options.questionSpawnSync,
     codexQuestionBinary: options.codexQuestionBinary,
     env: options.env,
-    ownership: priorManifest.ownership && typeof priorManifest.ownership === 'object' ? priorManifest.ownership : {},
+    ownership: priorOwnership,
     // Undefined lets each renderer build its own resolver from `repo`; an explicit
     // null disables the release rung; an object is an injected resolver (tests).
     provenance: options.provenance,
@@ -544,10 +545,16 @@ function install(input = {}) {
   // Merge, never replace: a `--runtime claude` run must not drop the digests of
   // the Codex host's destinations, or the next Codex install treats every one of
   // them as an unmarked stranger.
-  const ownershipRecord = { ...(existingManifest.ownership || {}) };
+  const ownershipRecord = { ...priorOwnership };
   for (const host of installedHosts) {
     const report = generated.reports[host];
-    if (report && report.ownership && typeof report.ownership === 'object') Object.assign(ownershipRecord, report.ownership);
+    // Each renderer carries the same prior map. Copy only its changes, so the
+    // next host's unchanged history cannot undo this host's fresh digests.
+    if (report && report.ownership && typeof report.ownership === 'object') {
+      for (const [destination, digest] of Object.entries(report.ownership)) {
+        if (digest !== priorOwnership[destination]) ownershipRecord[destination] = digest;
+      }
+    }
   }
   // Provenance: WHICH clone rendered this installation. Without it an update run
   // from the installed copy has nothing to resolve the source repo from — the

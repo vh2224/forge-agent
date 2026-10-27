@@ -852,6 +852,55 @@ test('the ownership record is persisted in the manifest and survives a second ru
   } finally { data.cleanup(); }
 });
 
+test('both-host updates retain fresh ownership and preserve user conflicts and history', () => {
+  const data = fixture({ configurationOnly: true });
+  const ownership = require('./forge-projection-ownership');
+  try {
+    const options = { ...data.options, runtime: 'both', provenance: null };
+    installer.install(options);
+    const manifestFile = path.join(data.forgeHome, 'manifest.json');
+    const readManifest = () => JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+    const sourceFile = path.join(data.options.repo, 'forge-prefs.schema.json');
+    const changeSource = description => {
+      const source = JSON.parse(fs.readFileSync(sourceFile, 'utf8'));
+      source.description = description;
+      fs.writeFileSync(sourceFile, JSON.stringify(source));
+    };
+    const schemaDestination = path.join(data.claudeHome, 'forge-prefs.schema.json');
+    const operatorFile = path.join(data.claudeHome, 'forge-capabilities.json');
+    const before = readManifest();
+    const operatorDigest = before.ownership[ownership.keyFor(operatorFile)];
+    const historicalKey = ownership.keyFor(path.join(data.root, 'retired.json'));
+    before.ownership[historicalKey] = 'a'.repeat(64);
+    fs.writeFileSync(manifestFile, JSON.stringify(before));
+    const operatorBytes = '{"operator":true}\n';
+    fs.writeFileSync(operatorFile, operatorBytes);
+    changeSource('first synthetic update');
+    const manifestBytes = fs.readFileSync(manifestFile);
+    const dry = installer.install({ ...options, update: true, dryRun: true });
+    assert.deepStrictEqual(fs.readFileSync(manifestFile), manifestBytes);
+    assert.deepStrictEqual(dry.manifest.ownership, before.ownership);
+    for (const description of ['first synthetic update', 'second synthetic update']) {
+      changeSource(description);
+      const report = installer.install({ ...options, update: true });
+      const after = readManifest();
+      assert.strictEqual(after.ownership[ownership.keyFor(schemaDestination)],
+        ownership.digest(fs.readFileSync(schemaDestination, 'utf8')), 'fresh Claude digest was overwritten');
+      assert.strictEqual(JSON.parse(fs.readFileSync(schemaDestination, 'utf8')).description, description);
+      assert(!report.manifest.adapters.claude.conflicts.some(row => row.destination === schemaDestination));
+      assert(report.manifest.adapters.claude.conflicts.some(row => row.destination === operatorFile && row.reason === 'user_owned'));
+      assert.strictEqual(fs.readFileSync(operatorFile, 'utf8'), operatorBytes);
+      assert.strictEqual(after.ownership[ownership.keyFor(operatorFile)], operatorDigest);
+      assert.strictEqual(after.ownership[historicalKey], before.ownership[historicalKey]);
+      for (const [file, digest] of Object.entries(after.ownership)) {
+        if (file !== ownership.keyFor(operatorFile) && fs.existsSync(file)) {
+          assert.strictEqual(digest, ownership.digest(fs.readFileSync(file, 'utf8')), path.relative(data.root, file));
+        }
+      }
+    }
+  } finally { data.cleanup(); }
+});
+
 // Held by TWO independent mechanisms — the renderer spreads the record it was
 // given into the one it returns, and the installer merges over the prior
 // manifest. Removing either alone keeps this green; removing both turns it red

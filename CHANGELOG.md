@@ -1,5 +1,10 @@
 ## Não lançado
 
+- Instalações nos dois hosts preservam os digests atualizados de cada renderer no
+  manifesto, sem sobrescrevê-los com o histórico do outro host.
+- A primeira simulação de migração lê o monólito existente e contabiliza os
+  fragmentos previstos sem criar backups nem alterar arquivos.
+
 - Manutenção pós-milestone: loader compatível com identidade de arquivos do Node 22
   no Windows; contexto correto no resolver de review-fix; diagnósticos de verificação
   limitados e sem conteúdo privado; comandos de verificação explícitos no contrato Claude.
