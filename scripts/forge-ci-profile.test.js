@@ -32,7 +32,11 @@ const versioned = path.join(__dirname, 'fixtures', 'ci-shards', 'shard-profile.j
 const tempRoot = fs.realpathSync(os.tmpdir());
 const root = fs.mkdtempSync(path.join(tempRoot, 'forge-ci-profile-'));
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
-const fixture = name => fs.readFileSync(path.join(fixtures, name), 'utf8');
+const rawFixture = name => fs.readFileSync(path.join(fixtures, name), 'utf8');
+// In-memory synthetic current-policy names; retain historical fixture bytes.
+// These parser fixtures still exercise a two-way synthetic partition, not CI timing.
+const fixture = name => rawFixture(name).replace(/Tests \(windows-latest, shard ([12])\/2\)/g,
+  'Tests (windows-latest, shard $1/4)');
 const json = name => JSON.parse(fixture(name));
 let passed = 0, failed = 0;
 function test(name, body) {
@@ -45,17 +49,26 @@ function cli(args) {
   });
 }
 function write(name, value) { const file = path.join(root, name); fs.writeFileSync(file, value); return file; }
-function inputSource(name) { return collector.sourceFrom(collector.readInput(path.join(fixtures, name))); }
+function inputSource(name) { return collector.sourceFrom(collector.readInput(write(name, fixture(name)))); }
 function loaded() {
   const bytes = fs.readFileSync(versioned);
   return { state: 'loaded', doc: JSON.parse(bytes), sha256: hash(bytes) };
 }
 
 try {
+  test('historical shard names remain unknown to the current policy', () => {
+    const historical = collector.parseRunTestsLog(rawFixture('windows-shard-1.log'));
+    assert.strictEqual(historical.semantic_key, null);
+    assert.strictEqual(historical.unavailable.platform, 'name-not-in-current-policy');
+    assert.strictEqual(historical.shard.count, 2);
+    const jobs = collector.normalizeJobs(JSON.parse(rawFixture('jobs-page.json')));
+    assert.strictEqual(jobs[0].semantic_key, null);
+    assert.strictEqual(jobs[0].unavailable.semantic_key, 'name-not-in-current-policy');
+  });
   test('S04-T05 truth:0 exact log parse BOM timestamps ANSI counts failures metadata and fail-closed ambiguity', () => {
     const first = collector.parseRunTestsLog(fixture('windows-shard-1.log'), { name: 'windows-shard-1.log' });
     assert.strictEqual(first.platform, 'win32'); assert.strictEqual(first.semantic_key, 'test');
-    assert.strictEqual(first.job_name, 'Tests (windows-latest, shard 1/2)');
+    assert.strictEqual(first.job_name, 'Tests (windows-latest, shard 1/4)');
     assert.strictEqual(first.runner_image, 'windows-synthetic');
     assert.strictEqual(first.runner_image_version, '20261001.1');
     assert.strictEqual(first.node_version, 'v22.23.3');
@@ -238,6 +251,9 @@ try {
   test('S04-T05 truth:4 versioned observed profile valid sanitized provenance integer weights complete disjoint real universe', () => {
     const profile = loaded(); assert(shards.validateShardProfile(profile.doc).ok);
     const names = new Set(release.expandJobs(release.POLICY.workflows.ci).filter(row => row.key === 'test').map(row => row.name));
+    // Observed weights retain their historical provenance after matrix changes.
+    names.add('Tests (windows-latest, shard 1/2)');
+    names.add('Tests (windows-latest, shard 2/2)');
     for (const source of profile.doc.sources) {
       assert.strictEqual(path.basename(source.name), source.name); assert(!/[\\/]/.test(source.name));
       assert(/^[a-f0-9]{64}$/.test(source.sha256)); assert(Number.isSafeInteger(source.bytes));
@@ -252,7 +268,7 @@ try {
     }
     hygiene(profile.doc);
     const universe = runner.discoverTests([]);
-    for (const [platform, count] of [['win32', 2], ['linux', 1], ['darwin', 1]]) {
+    for (const [platform, count] of [['win32', 4], ['linux', 1], ['darwin', 1]]) {
       const row = profile.doc.platforms[platform]; assert.strictEqual(row.status, 'observed');
       assert(Object.values(row.weights_ms).every(weight => Number.isSafeInteger(weight) && weight >= 1));
       row.excluded.forEach(excluded => assert(!Object.hasOwn(row.weights_ms, excluded.suite)));

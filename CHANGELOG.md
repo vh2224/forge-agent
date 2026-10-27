@@ -1,5 +1,8 @@
 ## Não lançado
 
+- O CI distribui as mesmas suítes Windows em quatro shards, preservando o check
+  agregado obrigatório e a validação de todos os jobs antes da release.
+
 - O `--timeout 300` explícito é respeitado pelo CLI de sidecar; o valor 300
   herdado das preferências mantém o tratamento de compatibilidade com o legado.
 
