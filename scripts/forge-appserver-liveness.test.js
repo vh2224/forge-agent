@@ -133,4 +133,85 @@ function fresh(extra = {}) {
   assert.strictEqual(snap.phase, 'local-start');
 }
 
+// #205: suspension_epoch counts suspended windows; eviction never opens one
+{
+  const r = fresh({ maxOpenItems: 2 });
+  assert.strictEqual(r.snapshot().suspension_epoch, 0);
+  r.turnSent();
+  t = 10;
+  r.push(started(cmd('a'))); r.push(started(cmd('b')));
+  assert.strictEqual(r.snapshot().suspension_epoch, 1, 'parallel items share the window');
+  r.push(started(cmd('c'))); r.push(started(cmd('d')));
+  assert.strictEqual(r.snapshot().tools_in_flight, 2);
+  assert.strictEqual(r.snapshot().suspension_epoch, 1, 'eviction at maxOpenItems never increments');
+  r.push(started(cmd('c')));
+  assert.strictEqual(r.snapshot().suspension_epoch, 1);
+  t = 50;
+  r.push(completed(cmd('c'))); r.push(completed(cmd('d')));
+  const closed = r.snapshot();
+  assert.strictEqual(closed.gap_suspended, false);
+  r.push(started(cmd('e')));
+  const reopened = r.snapshot();
+  assert.strictEqual(reopened.gap_suspended, true);
+  assert.strictEqual(reopened.last_remote_ms, closed.last_remote_ms, 'same-ms complete and start repeat the anchor');
+  assert.strictEqual(reopened.suspension_epoch, 2, 'but not the epoch');
+}
+
+// #205: real reducer + tracker. A parallel item/completed moves the anchor, so the
+// silence restarts from it and the extension has to be earned again (conservative).
+{
+  const { createTracker } = require('./forge-sidecar-liveness');
+  const r = fresh();
+  const tracker = createTracker();
+  const tick = (proof, sampled_at_ms) => tracker.evaluate(r.snapshot(),
+    { localProof: { capability: 'available', proof, sampled_at_ms } }).result;
+  r.turnSent();
+  t = 10;
+  r.push(started(cmd('a'))); r.push(started(cmd('b')));
+  tick('positive', 1);
+  t = 1010; tick('positive', 2);
+  t = 2010; tick('positive', 3);
+  t = 300010;
+  const kept = tick('none', 4);
+  assert.strictEqual(kept.kill, false);
+  assert.strictEqual(kept.reason, 'tool-extended', 'both parallel items share the earned window');
+  r.push(completed(cmd('a')));
+  assert.strictEqual(r.snapshot().gap_suspended, true);
+  assert.strictEqual(r.snapshot().last_remote_ms, 300010, 'the parallel completion moved the anchor');
+  t = 300010 + 240001;
+  const reset = tick('none', 5);
+  assert.strictEqual(reset.kill, true);
+  assert.strictEqual(reset.reason, 'tool-unproven', 'a moved anchor resets the earned extension');
+
+  const again = fresh();
+  const reearned = createTracker();
+  const step = (proof, sampled_at_ms) => reearned.evaluate(again.snapshot(),
+    { localProof: { capability: 'available', proof, sampled_at_ms } }).result;
+  again.turnSent();
+  t = 10;
+  again.push(started(cmd('a'))); again.push(started(cmd('b')));
+  step('positive', 1); t = 1010; step('positive', 2); t = 2010; step('positive', 3);
+  t = 100000; again.push(completed(cmd('a')));
+  step('positive', 4); t = 101000; step('positive', 5); t = 102000; step('positive', 6);
+  t = 100000 + 660000;
+  assert.strictEqual(step('none', 7).reason, 'tool-extended', 'earned again from the new anchor');
+  t += 1;
+  assert.strictEqual(step('none', 8).reason, 'tool-extension-exhausted');
+  // The next window (same ms, same anchor) inherits nothing.
+  const following = fresh();
+  const next = createTracker();
+  const look = (proof, sampled_at_ms) => next.evaluate(following.snapshot(),
+    { localProof: { capability: 'available', proof, sampled_at_ms } }).result;
+  following.turnSent();
+  t = 10;
+  following.push(started(cmd('a')));
+  look('positive', 1); t = 1010; look('positive', 2); t = 2010; look('positive', 3);
+  t = 5000;
+  following.push(completed(cmd('a'))); following.push(started(cmd('b')));
+  assert.strictEqual(following.snapshot().last_remote_ms, 5000);
+  assert.strictEqual(following.snapshot().suspension_epoch, 2);
+  t = 5000 + 240001;
+  assert.strictEqual(look('none', 4).reason, 'tool-unproven', 'the next window must earn again');
+}
+
 console.log('forge-appserver-liveness: ok');

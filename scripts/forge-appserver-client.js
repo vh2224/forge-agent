@@ -91,11 +91,14 @@ const DEFAULT_PROGRESS_INTERVAL_MS = 30000;
 // unavailable/none allows the bounded tool extension up to 660000 ms).
 const UNAVAILABLE_LOCAL_PROOF = Object.freeze({ capability: 'unavailable', proof: 'none' });
 
-/** Only {capability, proof}; an invalid provider answer reads as unavailable
- * instead of throwing inside the watchdog tick (same shape as the Claude adapter). */
+/** Only {capability, proof}, plus the opaque sample identity the tracker needs;
+ * an invalid provider answer reads as unavailable instead of throwing inside the
+ * watchdog tick (same shape as the Claude adapter). */
 function currentLocalProof(provider) {
   try {
-    return liveness.normalizeLocalProof(provider.current());
+    const current = provider.current();
+    const normalized = liveness.normalizeLocalProof(current);
+    return Number.isFinite(current?.sampled_at_ms) ? { ...normalized, sampled_at_ms: current.sampled_at_ms } : normalized;
   } catch {
     return { ...UNAVAILABLE_LOCAL_PROOF };
   }
@@ -442,7 +445,9 @@ function startAppServerTurn(options) {
       const current = currentLocalProof(proof);
       let state;
       try { state = progress.state(); } catch { state = undefined; }
-      return { localProof: { capability: current.capability, proof: current.proof }, progress: state };
+      // sampled_at_ms only reaches the tracker; decisions never carry it.
+      return { localProof: { capability: current.capability, proof: current.proof,
+        ...(current.sampled_at_ms === undefined ? {} : { sampled_at_ms: current.sampled_at_ms }) }, progress: state };
     };
     // Last published state (same shape as the S06 `liveness` block).
     let livenessView = { version: 1, state: 'starting', since_ms: 0, reason: null };
@@ -763,11 +768,12 @@ function startAppServerTurn(options) {
       });
     };
     // Ceiling. The watchdog passes the decision that already won; the backstop
-    // classifies with the state that held WITHOUT the ceiling (same as the Claude
-    // adapter). A live stream at the ceiling is `budget-exceeded-while-active`; a
-    // ceiling reached while still `starting` keeps the load-bearing message, no code.
+    // classifies with the state that held WITHOUT the ceiling through the same
+    // tracker derivation as the watchdog, earned extension included (same as the
+    // Claude adapter). A live stream at the ceiling is `budget-exceeded-while-active`;
+    // a ceiling reached while still `starting` keeps the load-bearing message, no code.
     const ceilingError = (decision) => {
-      const view = decision || liveness.evaluate(reducer.snapshot(), livenessInputs(), policy, null);
+      const view = decision || tracker.assess(reducer.snapshot(), livenessInputs());
       const kind = decision ? decision.termination
         : liveness.classifyTermination({ cause: 'ceiling', state: view.state });
       const active = kind === APPSERVER_LIVENESS_CODES.BUDGET_EXCEEDED;

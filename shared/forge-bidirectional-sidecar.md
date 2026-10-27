@@ -341,7 +341,29 @@ Regras de silêncio de tool (base `deadMs` 240000, extensão 420000):
   tier. São as decisões do operador de 2026-10-23.
 - PID morto (`negative`): morre aos 240000 com `tool-proof-negative`.
 - Linux/macOS com medição disponível e sem prova (`available`/`none`): morrem aos
-  240000 com `tool-unproven`.
+  240000 com `tool-unproven`, salvo extensão conquistada na mesma janela.
+- Extensão conquistada (#205): uma prova `available`/`positive` medida dentro da
+  janela suspensa atual conquista a extensão para esse episódio. O tracker do
+  spawn (`createTracker`) é o dono desse estado. A primeira amostra vista na
+  janela é só linha de base, e a primeira amostra nova ainda mede um intervalo
+  que atravessa a abertura. Por isso só uma `positive` a partir da segunda
+  amostra nova conquista. Amostras ociosas (`available`/`none`) do mesmo
+  episódio conservam a extensão até 660000 ms de silêncio. Depois disso a tool
+  morre com `tool-extension-exhausted`. Acima de 240000 o estado é
+  `slow-suspect`/`tool-extended`. A prova publicada continua sendo a amostra
+  real (`none`), nunca `local-proof`. O episódio é o `suspension_epoch` do
+  reducer mais a âncora `last_remote_ms`. A extensão zera quando a janela fecha,
+  quando o epoch ou a âncora mudam, ou quando ficam ausentes ou inválidos, e
+  também em todo spawn novo. Assim, outra janela, tool paralela fora da janela,
+  sessão, replay ou retry nunca herdam a extensão. Uma `negative` prevalece e
+  revoga a extensão até o fim do episódio, sem antecipar o prazo de 240000. O teto
+  do tier também prevalece. O backstop de tempo real classifica pelo mesmo
+  tracker (`assess`, sem commit), então watchdog e backstop concordam. Uma tool
+  `available`/`none` que nunca teve `positive` medida na janela continua morrendo
+  após 240000. Os números são os defaults: com política resolvida diferente, os
+  limites são `deadMs` e `deadMs + toolExtensionMs`. A regra é de política,
+  verificada com relógio e leitores injetados. Não há medição de campo sobre
+  quantas tools ela salva.
 
 O detector de loop conta impressões SHA-256 de chamadas de tool. Cinco chamadas
 idênticas sem escrita entre elas produzem a transição `slow-suspect` com reason

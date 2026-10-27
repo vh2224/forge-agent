@@ -1154,6 +1154,10 @@ function acceleratedClock(factor, { fromFirstRemote = false } = {}) {
       pivotValue = real - t0;
       pivotReal = real;
     },
+    // Injected ms since the pivot (0 before it): drives scripted fake proofs.
+    since() {
+      return pivotReal === null ? 0 : (performance.now() - pivotReal) * factor;
+    },
   };
 }
 
@@ -1421,17 +1425,27 @@ function privateInput(extra = {}) {
 
 // Programmable fake provider: current() returns the injected proof; sample()
 // is counted; onWrite is exposed so a test can simulate a filesystem delta.
-function fakeProof(initial, { writeWhen } = {}) {
-  const state = { proof: initial, samples: 0, currents: 0, stops: 0, options: null, wrote: false };
+// Each sample() records options.clock() as its identity (sampled_at_ms); an
+// optional script() chooses the proof of that sample. `last` is the proof the
+// latest current() returned.
+function fakeProof(initial, { writeWhen, script } = {}) {
+  const state = { proof: initial, samples: 0, currents: 0, stops: 0, options: null, wrote: false,
+    sampledAt: null, last: null };
   state.factory = (options) => {
     state.options = options;
     return {
       sample() {
         state.samples++;
         if (writeWhen && !state.wrote && writeWhen()) { state.wrote = true; options.onWrite(); }
+        if (typeof options.clock === 'function') state.sampledAt = options.clock();
+        if (script) state.proof = script();
         return Promise.resolve();
       },
-      current() { state.currents++; return state.proof; },
+      current() {
+        state.currents++;
+        state.last = state.proof;
+        return state.sampledAt === null ? state.proof : { ...state.proof, sampled_at_ms: state.sampledAt };
+      },
       stop() { state.stops++; },
     };
   };
@@ -1528,6 +1542,77 @@ test('liveness/tool: persistent positive proof dies after 660000 as tool-extensi
   const silence = assertToolKill(run, 'tool-extension-exhausted', { extension: 420000 });
   ok(silence.window_ms > 660000, `window ${silence.window_ms}`);
   assert.deepStrictEqual(run.error.liveness.proof, { capability: 'available', proof: 'positive' });
+});
+
+// #205: positive CPU measured inside the window, then idle samples of the same
+// tool. The earned extension is kept up to 660000 and reported with the real proof.
+const AVAILABLE_POSITIVE = Object.freeze({ capability: 'available', proof: 'positive' });
+const AVAILABLE_NONE = Object.freeze({ capability: 'available', proof: 'none' });
+
+test('liveness/tool: an intermittent tool keeps its earned extension until 660000 (#205)', async () => {
+  const clock = acceleratedClock(400, { fromFirstRemote: true });
+  const fake = fakeProof(AVAILABLE_NONE,
+    { script: () => (clock.since() < 260000 ? AVAILABLE_POSITIVE : AVAILABLE_NONE) });
+  const fixture = toolFixture('claude tool intermittent fixture.js', { inputs: [privateInput()], result: false });
+  const snapshots = [];
+  const run = await runLive(fixture, clock, { localProofFactory: fake.factory, localProofIntervalMs: 20,
+    timeoutMs: 905000, onSnapshot: snapshot => snapshots.push(snapshot) });
+  const silence = assertToolKill(run, 'tool-extension-exhausted', { extension: 420000 });
+  ok(silence.window_ms > 660000, `window ${silence.window_ms}`);
+  assert.deepStrictEqual(run.error.liveness.proof, { capability: 'available', proof: 'none' });
+  assert.deepStrictEqual(fake.last, AVAILABLE_NONE, 'the last read before the kill was idle');
+  ok(run.transitions.some(t => t.to === 'slow-suspect' && t.reason === 'tool-extended' && t.at_ms > 240000),
+    `tool-extended past 240000 expected: ${JSON.stringify(run.transitions)}`);
+  const dead = run.transitions.filter(t => t.to === 'dead');
+  assert.strictEqual(dead.length, 1);
+  ok(dead[0].at_ms > 660000, `no death before 660000: ${JSON.stringify(run.transitions)}`);
+  for (const transition of run.transitions) {
+    ok(!Object.hasOwn(transition, 'sampled_at_ms') && !Object.hasOwn(transition, 'suspension_epoch'));
+  }
+  ok(snapshots.length > 0, 'progress snapshots were published');
+  const published = JSON.stringify([snapshots, run.error.liveness, run.error.diagnostic]);
+  ok(!published.includes('suspension_epoch') && !published.includes('sampled_at_ms'), published);
+
+  // A new invocation inherits nothing: never-positive dies after deadMs.
+  const fresh = fakeProof(AVAILABLE_NONE);
+  const next = await runLive(fixture, acceleratedClock(300, { fromFirstRemote: true }),
+    { localProofFactory: fresh.factory, localProofIntervalMs: 20 });
+  const unproven = assertToolKill(next, 'tool-unproven');
+  ok(unproven.window_ms < 660000, `killed at ${unproven.window_ms}`);
+  assert.deepStrictEqual(next.error.liveness.proof, { capability: 'available', proof: 'none' });
+});
+
+test('liveness/tool: the real backstop classifies an earned extension like the watchdog (#205)', async () => {
+  // Injected time runs at half speed after the first remote event, so the injected
+  // 2000 ms child ceiling is never reached before the real 2000 ms backstop fires.
+  const policy = { suspectMs: 50, deadMs: 100 };
+  const fixture = toolFixture('claude tool backstop fixture.js', { inputs: [privateInput()], result: false });
+  const clock = acceleratedClock(0.5, { fromFirstRemote: true });
+  const fake = fakeProof(AVAILABLE_NONE,
+    { script: () => (clock.since() < 120 ? AVAILABLE_POSITIVE : AVAILABLE_NONE) });
+  const run = await runLive(fixture, clock, { localProofFactory: fake.factory, localProofIntervalMs: 20,
+    livenessPolicy: policy, timeoutMs: 7000 });
+  ok(run.error, 'expected the real backstop');
+  assert.strictEqual(run.error.code, 'budget-exceeded-while-active',
+    `${run.error.code} ${JSON.stringify(run.error.liveness)}`);
+  assert.deepStrictEqual(run.error.liveness,
+    { version: 1, termination: 'budget-exceeded-while-active', state: 'slow-suspect', reason: 'tool-extended' });
+  assert.deepStrictEqual(fake.last, AVAILABLE_NONE, 'the last read before the backstop was idle');
+  ok(run.realMs >= 1900, `the real backstop ended the run after ${Math.round(run.realMs)} ms`);
+  ok(!run.transitions.some(t => t.to === 'dead'), JSON.stringify(run.transitions));
+  assert.strictEqual(run.terminations, 1);
+  assertPrivate(run);
+
+  // Control: no positive inside the window, the watchdog kills before the backstop.
+  const controlClock = acceleratedClock(0.5, { fromFirstRemote: true });
+  const control = await runLive(fixture, controlClock, { localProofFactory: fakeProof(AVAILABLE_NONE).factory,
+    localProofIntervalMs: 20, livenessPolicy: policy, timeoutMs: 7000 });
+  ok(control.error, 'expected the watchdog');
+  assert.strictEqual(control.error.code, 'claude-anomalous-silence');
+  assert.strictEqual(control.error.liveness.termination, 'dead-silence');
+  assert.strictEqual(control.error.liveness.reason, 'tool-unproven');
+  assert.deepStrictEqual(control.error.liveness.proof, { capability: 'available', proof: 'none' });
+  ok(control.realMs < 1900, `the watchdog won before the backstop: ${Math.round(control.realMs)} ms`);
 });
 
 test('liveness/tool: a ceiling below 660000 classifies with the current proof (positive tool stays working)', async () => {

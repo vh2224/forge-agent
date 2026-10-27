@@ -1,5 +1,15 @@
 ## Não lançado
 
+- Uma tool com prova `positive` medida dentro da janela suspensa conserva a
+  extensão nas amostras ociosas (`available`/`none`) do mesmo episódio, até
+  `deadMs + toolExtensionMs` (660000 ms de silêncio nos defaults). Um novo
+  `suspension_epoch` dos reducers identifica a janela. A extensão zera no fim da
+  janela, na troca de epoch ou âncora e em novo spawn. `negative` e o teto do tier
+  prevalecem, e `available`/`none` sem `positive` medida segue morrendo após
+  `deadMs`. O backstop usa o mesmo tracker do watchdog. A prova publicada é a
+  amostra real. Política verificada com leitores injetados, sem alegação de
+  campo (#205).
+
 - Eventos de verificação bufferizados usam um lock e uma fronteira pré/pós por
   lote, mantendo a checagem exata de prefixo por linha. Uma interrupção pode
   deixar até N eventos sem âncora (antes, no máximo um), ampliando a janela de
