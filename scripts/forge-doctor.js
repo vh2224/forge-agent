@@ -282,6 +282,12 @@ function checkCapabilities(cwd, options = {}) {
     const probe = report.probes && report.probes[id];
     return { id, status: probe && probe.status, reason_code: probe && probe.reason_code };
   });
+  const probeFailures = new Set(failures.map((failure) => failure.id));
+  const coveredByProbe = (item) => (item.capability === 'core-runtime' && probeFailures.has('node'))
+    || (item.capability === 'runtime-adapter' && probeFailures.has(item.runtime));
+  const capabilityFailures = (report.diagnostics || [])
+    .filter((item) => item.severity === 'fatal' && !coveredByProbe(item))
+    .map((item) => ({ capability_id: item.capability, host: item.runtime, status: item.status, reason_code: item.reason_code }));
   const warnings = Object.keys(report.probes || {}).sort()
     .map((id) => report.probes[id])
     .filter((probe) => probe.reason_code === 'not-selected'
@@ -289,17 +295,19 @@ function checkCapabilities(cwd, options = {}) {
     .map((probe) => ({ id: probe.id, status: probe.status, reason_code: probe.reason_code }));
   const message = report.ok
     ? `Capabilities ${report.runtime}: required capabilities available (${warnings.length} conditional warning(s)).`
-    : `Capabilities ${report.runtime}: ${failures.length} required failure(s); see reason_code.`;
+    : `Capabilities ${report.runtime}: ${failures.length} runtime probe failure(s); ${report.fatal_count} fatal diagnostic(s), including ${capabilityFailures.length} capability finding(s) not covered by probes; see diagnostics.`;
   return {
     check: 'capabilities',
     ok: report.ok,
     protocol_version: report.protocol_version,
     runtime: report.runtime,
     // Keep legacy probe fields byte-compatible; richer maintenance diagnostics
-    // are additive and do not change existing doctor consumers.
+    // are additive. Installation failures remain visible even with healthy probes.
     probes: report.probes || legacy.probes || {},
     diagnostics: report.diagnostics || [],
     failures,
+    capability_failures: capabilityFailures,
+    fatal_count: report.fatal_count,
     warnings,
     message,
   };
@@ -819,6 +827,10 @@ function formatResults(results) {
     }
     if (r.check === 'capabilities') {
       for (const failure of r.failures || []) lines.push(`      - ${failure.id}: ${failure.status} (${failure.reason_code})`);
+      if ((r.capability_failures || []).length) {
+        lines.push('      Fatal capability findings not covered by probes:');
+        for (const failure of r.capability_failures) lines.push(`      - ${failure.capability_id} [${failure.host}]: ${failure.status} (${failure.reason_code})`);
+      }
       for (const warning of r.warnings || []) if (warning.reason_code !== 'not-selected') lines.push(`      - warning ${warning.id}: ${warning.status} (${warning.reason_code})`);
     }
   }

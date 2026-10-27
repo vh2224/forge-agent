@@ -92,4 +92,94 @@ test('help advertises explicit claim recovery and restore surfaces', () => {
   assert.match(out.stdout, /--restore-claim/);
 });
 
+function capabilityCase({ probes = {}, requiredFailures = [], catalog = [], adapters = { codex: {} } } = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-doctor-findings-'));
+  const forgeHome = path.join(root, 'forge');
+  fs.mkdirSync(forgeHome);
+  fs.writeFileSync(path.join(forgeHome, 'manifest.json'), JSON.stringify({ adapters }));
+  const available = id => ({ id, status: 'available', reason_code: 'available' });
+  const options = { runtime: 'codex', forgeHome,
+    binaries: { claude: path.join(root, 'missing-claude'), codex: path.join(root, 'missing-codex') },
+    detectCapabilities: () => ({ runtime: 'codex', required_failures: requiredFailures,
+      probes: { node: available('node'), codex: available('codex'), claude: { id: 'claude', status: 'skipped', reason_code: 'not-selected' }, ...probes } }),
+    catalog: { capabilities: catalog } };
+  return { root, forgeHome, check: () => doctor.checkCapabilities(root, options), cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
+}
+const fatalCatalog = ['hooks', 'headless', 'mcp'].map((name, index) => ({
+  capability_id: `operational-${name}`, kind: ['hook', 'headless', 'mcp'][index], required: true, hosts: { codex: 'planned' },
+}));
+const expectedFatal = fatalCatalog.map(row => ({ capability_id: row.capability_id, host: 'codex', status: 'planned', reason_code: 'required-capability-missing' }));
+
+test('fatal catalog findings are reported even when every required probe is available', () => {
+  const data = capabilityCase({ catalog: fatalCatalog });
+  try {
+    const result = data.check();
+    assert.strictEqual(result.ok, false);
+    assert.deepStrictEqual(result.failures, []);
+    assert.strictEqual(result.fatal_count, 3, result.message);
+    assert.deepStrictEqual(result.capability_failures, expectedFatal);
+    assert.strictEqual(result.diagnostics.filter(row => row.severity === 'fatal').length, 3);
+    assert.strictEqual(result.message, 'Capabilities codex: 0 runtime probe failure(s); 3 fatal diagnostic(s), including 3 capability finding(s) not covered by probes; see diagnostics.');
+    const text = doctor.formatResults([result]);
+    const heading = text.indexOf('Fatal capability findings not covered by probes:');
+    assert(heading >= 0);
+    let previous = heading;
+    for (const row of expectedFatal) {
+      const index = text.indexOf(`${row.capability_id} [codex]: planned (required-capability-missing)`);
+      assert(index > previous); previous = index;
+    }
+    const json = JSON.stringify(result);
+    assert.strictEqual(json, JSON.stringify(data.check()));
+    assert(!json.includes(data.forgeHome) && !json.includes(data.root));
+  } finally { data.cleanup(); }
+});
+
+test('mixed probe and catalog failures retain distinct overlapping counts', () => {
+  const probe = { id: 'codex', status: 'missing', reason_code: 'missing' };
+  const data = capabilityCase({ probes: { codex: probe }, requiredFailures: ['codex'], catalog: fatalCatalog });
+  try {
+    const result = data.check();
+    assert.strictEqual(result.ok, false);
+    assert.deepStrictEqual(result.failures, [probe]);
+    assert.strictEqual(result.fatal_count, 4);
+    assert.deepStrictEqual(result.capability_failures, expectedFatal);
+    assert.match(result.message, /1 runtime probe failure\(s\); 4 fatal diagnostic\(s\), including 3 capability finding\(s\)/);
+    const text = doctor.formatResults([result]);
+    assert(text.indexOf('codex: missing (missing)') < text.indexOf('Fatal capability findings'));
+  } finally { data.cleanup(); }
+});
+
+test('installation-only fatal diagnostics cannot disappear from the summary', () => {
+  const data = capabilityCase({ adapters: { claude: {} } });
+  try {
+    const result = data.check();
+    assert.strictEqual(result.ok, false);
+    assert.deepStrictEqual(result.failures, []);
+    assert.strictEqual(result.fatal_count, 1);
+    assert.deepStrictEqual(result.capability_failures, [{ capability_id: 'installed-adapter', host: 'codex', status: 'missing', reason_code: 'adapter-missing' }]);
+    assert.match(result.message, /0 runtime probe failure\(s\); 1 fatal diagnostic\(s\), including 1 capability finding\(s\)/);
+    assert.match(doctor.formatResults([result]), /installed-adapter \[codex\]: missing \(adapter-missing\)/);
+  } finally { data.cleanup(); }
+});
+
+test('success and conditional warnings preserve the legacy presentation', () => {
+  const optional = { capability_id: 'optional-app', kind: 'app', required: false, hosts: { codex: 'unavailable' } };
+  const good = capabilityCase({ catalog: [...fatalCatalog.map(row => ({ ...row, hosts: { codex: 'implemented' } })), optional] });
+  const bad = capabilityCase({ catalog: [...fatalCatalog, optional] });
+  try {
+    const success = good.check(), failure = bad.check();
+    assert.strictEqual(success.ok, true);
+    assert.strictEqual(success.fatal_count, 0);
+    assert.deepStrictEqual(success.capability_failures, []);
+    assert.strictEqual(success.message, `Capabilities codex: required capabilities available (${success.warnings.length} conditional warning(s)).`);
+    assert.deepStrictEqual(success.warnings, failure.warnings);
+    for (const result of [success, failure]) {
+      assert(result.diagnostics.some(row => row.capability === 'optional-app' && row.severity === 'warning'));
+      assert(!result.capability_failures.some(row => row.capability_id === 'optional-app'));
+      assert(!doctor.formatResults([result]).includes('not-selected'));
+    }
+    assert(!doctor.formatResults([success]).includes('Fatal capability findings'));
+  } finally { good.cleanup(); bad.cleanup(); }
+});
+
 process.stdout.write(`\n${passed} passed, 0 failed\n`);
