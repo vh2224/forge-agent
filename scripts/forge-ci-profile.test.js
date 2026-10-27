@@ -29,7 +29,8 @@ originals.forEach(([module, name, original]) => { module[name] = original; });
 
 const fixtures = path.join(__dirname, 'fixtures', 'ci-profile');
 const versioned = path.join(__dirname, 'fixtures', 'ci-shards', 'shard-profile.json');
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-ci-profile-'));
+const tempRoot = fs.realpathSync(os.tmpdir());
+const root = fs.mkdtempSync(path.join(tempRoot, 'forge-ci-profile-'));
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 const fixture = name => fs.readFileSync(path.join(fixtures, name), 'utf8');
 const json = name => JSON.parse(fixture(name));
@@ -367,7 +368,7 @@ try {
     assert(profile.doc.sources.every(source => /^[a-f0-9]{64}$/.test(source.sha256) && !/[\\/]/.test(source.name)));
   });
 } finally {
-  assert.strictEqual(path.dirname(root), path.resolve(os.tmpdir()));
+  assert.strictEqual(path.dirname(root), tempRoot);
   assert(path.basename(root).startsWith('forge-ci-profile-'));
   fs.rmSync(root, { recursive: true, force: true });
 }

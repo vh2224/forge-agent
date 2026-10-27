@@ -66,6 +66,21 @@ test('multi-line list with a single item', () => {
   assertEqual(parsePlanVerify(content), 'npm test', 'single-item list');
 });
 
+test('multi-line quoted commands remove YAML delimiters before execution', () => {
+  for (const quote of ['"', "'"]) {
+    const content = fm(`verify:\n  - ${quote}node check.cjs${quote}\n  - ${quote}npm test${quote}`);
+    assertEqual(parsePlanVerify(content), 'node check.cjs && npm test', 'quoted list');
+  }
+});
+
+test('multi-line YAML delimiters preserve shell argument quoting', () => {
+  const command = 'node -e "process.exit(0)"';
+  assertEqual(parsePlanVerify(fm(`verify:\n  - '${command}'`)), command, 'inner shell quotes');
+  assertEqual(parsePlanVerify(fm(`verify:\n  - ${command}`)), command, 'unquoted YAML with shell argument quotes');
+  const executable = '"node" check.cjs';
+  assertEqual(parsePlanVerify(fm(`verify:\n  - ${executable}`)), executable, 'quoted executable is not a quoted YAML scalar');
+});
+
 test('multi-line list does not leak the leading dash', () => {
   const content = fm('verify:\n  - npm test');
   assert(!parsePlanVerify(content).includes('- '), 'result must not contain a literal "- "');
@@ -342,6 +357,16 @@ test('v2 root verification executes every cwd and refuses one failing root or mi
   const missing = api.captureRootDelivery(f.contract, fixture.plan(f.contract), base);
   strict.strictEqual(missing.passed, false); strict.strictEqual(missing.artifacts[1].result.missing[0].path, 'beta::same.txt');
   strict.strictEqual(fs.existsSync(require('path').join(f.b, '.gsd')), false); f.cleanup();
+});
+
+test('quoted multiline plan command and declared supplement seal as one command per root', () => {
+  const strict = require('assert'), lab = require('./forge-code-roots.test'), f = lab.fixture();
+  try {
+    const plan = lab.plan(f.contract).replace('must_haves:', 'verify:\n  - "node check.cjs"\nmust_haves:');
+    const seal = require('./forge-verify').normalizeExecutionVerification(f.contract, plan,
+      { commandsByRoot: { alpha: ['node check.cjs'], beta: ['node check.cjs'] } });
+    strict.deepStrictEqual(seal.roots.map(row => row.commands), [['node check.cjs'], ['node check.cjs']]);
+  } finally { f.cleanup(); }
 });
 
 test('single-root legacy capture normalizes artifacts and still detects missing outputs', () => {
