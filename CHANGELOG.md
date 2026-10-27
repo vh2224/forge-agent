@@ -1,5 +1,9 @@
 ## Não lançado
 
+- Planejamento de milestones deixa de exigir 4–10 slices: a divisão deve cobrir
+  todo o escopo e justificar cada separação por risco, dependência, resultado
+  verificável ou limite de contexto, preservando os gates existentes.
+
 - O CI distribui as mesmas suítes Windows em quatro shards, preservando o check
   agregado obrigatório e a validação de todos os jobs antes da release.
 

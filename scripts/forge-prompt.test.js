@@ -831,7 +831,7 @@ test('eleven final prompts deliver canonical core and phase modules once with ex
     'discuss-slice': ['S##-CONTEXT.md', '3-5 unresolved gray areas', 'stable ID'],
     'research-milestone': ['M###-RESEARCH.md', "Don't Hand-Roll", 'Relevant Code', 'CODING-STANDARDS.md'],
     'research-slice': ['S##-RESEARCH.md', 'Asset Map', 'Coding Conventions Detected'],
-    'plan-milestone': ['M###-ROADMAP.md', '4-10 slices', 'Boundary Map', 'structured must_haves'],
+    'plan-milestone': ['M###-ROADMAP.md', 'smallest dependency-safe set', 'no numeric minimum or target', 'justify each split', 'Preserve all plan, security, review and verification gates', 'Boundary Map', 'structured must_haves'],
     'plan-slice': ['individual T##-PLAN.md', 'depends/writes', 'expected_output', 'capability', 'security gate'],
     'plan-check': ['S##-PLAN-CHECK.md', '10 LOCKED dimensions', 'legacy_schema_detect', 'plan_check_counts'],
     'complete-slice': ['S##-UAT.md', 'S##-DELIVERY.json', 'hardcoded credentials', '--snapshot', '--verify'],

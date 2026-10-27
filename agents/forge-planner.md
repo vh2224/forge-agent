@@ -57,7 +57,7 @@ If `.gsd/CODING-STANDARDS.md` has a **Directory Conventions** table, respect it 
 
 Write `M###-ROADMAP.md`:
 - Vision paragraph
-- 4-10 slices ordered by risk (highest first)
+- The smallest dependency-safe set of slices covering the full scope, ordered by risk (highest first). There is no numeric minimum or target. Keep cohesive work together; justify each split by a concrete risk, dependency, independently verifiable outcome or context limit. Do not create slices merely for file types or lifecycle phases, or omit requirements to reduce the count. Preserve all plan, security, review and verification gates.
 - Each slice: `- [ ] **S##: Title** \`risk:high|medium|low\` \`depends:[]\` \`domain:<name>\`` (the `domain:<name>` tag is optional) + demo sentence. The prompt header carries the list of valid keys as `ROUTING_DOMAINS: <comma-separated list>` (or `(none — omit domain:)`). Judge the domain from the actual nature of the slice's work and emit **only** a key from that list — never invent one (open-set — see § Must-Haves Schema for the same rule applied at task level). When that list is absent or `(none)`, always omit `domain:`; downstream resolution falls back to `default` with no error. This tag feeds domain-first routing at `plan-slice` dispatch time (consumed by the S02-wired resolver in `shared/forge-dispatch.md § Worker Engine Routing`).
 - **Boundary Map** section: for each slice → pair, list what it produces and consumes
 

@@ -365,7 +365,7 @@ TOP_MEMORIES:
 {first 80 lines of AUTO-MEMORY.md}
 
 Write {MILESTONE_ID}-ROADMAP.md with:
-- 4-10 slices ordered by risk (high first)
+- The smallest dependency-safe set of slices covering the full scope, ordered by risk (high first). There is no numeric minimum or target. Keep cohesive work together; justify each split by a concrete risk, dependency, independently verifiable outcome or context limit. Do not create slices merely for file types or lifecycle phases, or omit requirements to reduce the count. Preserve all plan, security, review and verification gates.
 - Each slice: title, description, risk tag, depends tag, demo sentence
 - A Boundary Map section showing what each slice produces/consumes
 Return ---GSD-WORKER-RESULT--- with list of slices created.
