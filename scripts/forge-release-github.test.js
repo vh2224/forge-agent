@@ -102,7 +102,7 @@ function manyRuns(f, total) {
 (async () => {
   await test('github-complete-exact-sha-current-attempt-public-apis-and-get-only', async () => {
     const f = fixture(); const result = await f.collect(); assert(result.allowed, JSON.stringify(result));
-    assert.strictEqual(result.evaluation.checks.length, 15); assert.strictEqual(result.snapshot.api_version, github.API_VERSION);
+    assert.strictEqual(result.evaluation.checks.length, 17); assert.strictEqual(result.snapshot.api_version, github.API_VERSION);
     assert.strictEqual(result.snapshot.policy_sha256, checks.policyDigest()); assert(/^[a-f0-9]{64}$/.test(result.snapshot.sources_sha256));
     assert.strictEqual(result.snapshot.workflows.ci.semantic_jobs[0].key, 'operational-offline');
     assert(!Object.hasOwn(result.facts.workflows.ci.jobs[0], 'run_attempt')); assert(!Object.hasOwn(result.facts.workflows.ci.jobs[0], 'job_key'));

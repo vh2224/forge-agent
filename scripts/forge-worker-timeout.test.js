@@ -69,6 +69,25 @@ test('explicit 300 is the ignored legacy default with a pt-BR warning naming tie
   }
 });
 
+test('CLI provenance permits an intentional 300 while legacy and unknown sources retain compatibility', () => {
+  for (const tier of Object.keys(TIERS)) {
+    const chosen = resolveWorkerCeiling({ tier, explicit: 300, explicitSource: 'cli' });
+    assert.equal(chosen.seconds, 300);
+    assert.equal(chosen.source, 'explicit');
+    assert.equal(chosen.warning, null);
+    for (const explicitSource of [undefined, 'configuration', 'unknown']) {
+      const legacy = resolveWorkerCeiling({ tier, explicit: 300, explicitSource });
+      assert.equal(legacy.seconds, TIERS[tier]);
+      assert.equal(legacy.source, 'legacy-300-ignored');
+    }
+    for (const explicit of [0, -1, 1.5, 86401, NaN]) {
+      const invalid = resolveWorkerCeiling({ tier, explicit, explicitSource: 'cli' });
+      assert.equal(invalid.seconds, TIERS[tier]);
+      assert.equal(invalid.warning.code, 'workers-timeout-invalid');
+    }
+  }
+});
+
 test('invalid explicit falls back to the tier with workers-timeout-invalid', () => {
   for (const explicit of [0, -1, 1.5, 'abc', 86401, NaN, '1800', true, {}]) {
     const r = resolveWorkerCeiling({ tier: 'max', explicit });

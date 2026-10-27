@@ -16,7 +16,7 @@ const texts = Object.fromEntries(Object.entries(bytes).map(([id, value]) => [id,
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 const marker = (kind, index, detail) => console.log(`PASS S04-T06 ${kind}:${index} ${detail}`);
 
-// Reverse only the two authorized changes. The old physical digests pin every
+// Reverse the authorized concurrency, profile and four-shard changes. Old digests pin every
 // other byte: triggers, actions, permissions, matrices, SVN, smoke and aliases.
 for (const id of ['ci', 'app']) {
   assert(!bytes[id].includes(13) && !texts[id].startsWith('\uFEFF'), `${id} must retain LF without BOM`);
@@ -27,7 +27,13 @@ for (const id of ['ci', 'app']) {
   assert.strictEqual(texts[id].split(block).length, 2);
   assert(texts[id].includes(`permissions:\n  contents: read\n\n${block}jobs:`));
   let original = texts[id].replace(block, '');
-  if (id === 'ci') original = original.replace(' --shard-profile scripts/fixtures/ci-shards/shard-profile.json', '');
+  if (id === 'ci') {
+    original = original.replace(' --shard-profile scripts/fixtures/ci-shards/shard-profile.json', '');
+    const windowsMatrix = count => Array.from({ length: count }, (_, index) =>
+      `          - os: windows-latest\n            platform: win32\n            shard-index: ${index}\n            shard-count: ${count}\n            label: windows-latest, shard ${index + 1}/${count}`).join('\n');
+    assert.strictEqual(original.split(windowsMatrix(4)).length, 2);
+    original = original.replace(windowsMatrix(4), windowsMatrix(2));
+  }
   assert.strictEqual(hash(original), id === 'ci'
     ? '5c37cf20bab5613832e0a5efad3e5fa7b9494a57ddbd67a680e4510228e5ffdc'
     : 'cb12bc265ca1e21335f2be3b20961cab8bb878aefe1cde6053a9fef1e55c33e5');
@@ -188,11 +194,11 @@ const verifySteps = steps.filter(step => /svn --version --quiet/.test(step) && /
 assert.strictEqual(verifySteps.length, 1);
 assert(!/^\s*if:/m.test(verifySteps[0]) && texts.ci.indexOf(verifySteps[0]) < testIndex);
 const rows = expandJobs(POLICY.workflows.ci);
-assert.strictEqual(rows.length, 14);
+assert.strictEqual(rows.length, 16);
 assert.strictEqual(rows.filter(row => row.kind === 'alias').length, 7);
 assert.deepStrictEqual(rows.filter(row => row.key === 'test').map(row => row.name), [
-  'Tests (ubuntu-latest)', 'Tests (macos-latest)', 'Tests (windows-latest, shard 1/2)', 'Tests (windows-latest, shard 2/2)']);
-assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'win32').map(row => row.matrix['shard-count']), [2, 2]);
+  'Tests (ubuntu-latest)', 'Tests (macos-latest)', 'Tests (windows-latest, shard 1/4)', 'Tests (windows-latest, shard 2/4)', 'Tests (windows-latest, shard 3/4)', 'Tests (windows-latest, shard 4/4)']);
+assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'win32').map(row => row.matrix['shard-count']), [4, 4, 4, 4]);
 marker('key_link', 2, 'CI source test command triggers concurrency SVN ordering and smoke structure asserted');
 
 const suites = discoverTests([]);
@@ -222,7 +228,13 @@ for (const id of ['ci', 'app', 'release']) {
   assertJobMapping(texts[id], workflow);
   if (id !== 'release') marker('key_link', id === 'ci' ? 3 : 4, `${id} final LF sha256 and Git blob SHA1 pins match unchanged job mapping`);
 }
-assert.strictEqual(hash(JSON.stringify(Object.fromEntries(Object.entries(POLICY.workflows).map(([key, value]) => [key, value.jobs])))),
+// Reconstruct only the authorized Windows matrix change before historical pinning.
+const historicalJobs = JSON.parse(JSON.stringify(Object.fromEntries(Object.entries(POLICY.workflows).map(([key, value]) => [key, value.jobs]))));
+const testMatrix = historicalJobs.ci.find(job => job.key === 'test').matrix;
+testMatrix.include = testMatrix.include.filter(cell => cell.platform !== 'win32').concat(
+  [0, 1].map(index => ({ os: 'windows-latest', platform: 'win32', 'shard-index': index,
+    'shard-count': 2, label: `windows-latest, shard ${index + 1}/2` })));
+assert.strictEqual(hash(JSON.stringify(historicalJobs)),
   'b495392f2ed224612a17c5ad5a091043c0d7c8994ab845a3ecc22524eb5c4c16');
 const documentation = fs.readFileSync(path.join(root, 'shared', 'forge-release-checks.md'), 'utf8');
 for (const term of ['job-wide', 'same-UID', 'S04', 'S08', 'S09', 'UAT', 'external', 'pending',

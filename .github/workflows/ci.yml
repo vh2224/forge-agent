@@ -67,13 +67,23 @@ jobs:
           - os: windows-latest
             platform: win32
             shard-index: 0
-            shard-count: 2
-            label: windows-latest, shard 1/2
+            shard-count: 4
+            label: windows-latest, shard 1/4
           - os: windows-latest
             platform: win32
             shard-index: 1
-            shard-count: 2
-            label: windows-latest, shard 2/2
+            shard-count: 4
+            label: windows-latest, shard 2/4
+          - os: windows-latest
+            platform: win32
+            shard-index: 2
+            shard-count: 4
+            label: windows-latest, shard 3/4
+          - os: windows-latest
+            platform: win32
+            shard-index: 3
+            shard-count: 4
+            label: windows-latest, shard 4/4
 
     steps:
       - name: Check out repository

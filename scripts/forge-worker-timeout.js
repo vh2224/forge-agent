@@ -9,7 +9,8 @@
 const { TIER_CEILING_MS, ceilingForTier } = require('./forge-sidecar-liveness');
 
 // Detection marker for the inherited default (present in real operator prefs).
-// It is NOT a deadline: an explicit 300 is ignored in favour of the tier ceiling.
+// Configuration without explicit CLI provenance keeps this compatibility rule.
+// An intentional --timeout 300 is a supported ceiling, just like 299 or 301.
 const LEGACY_WORKER_TIMEOUT_SECS = 300;
 // setTimeout overflows above 2^31-1 ms and fires after ~1 ms; 86400 s stays safely below.
 const MAX_EXPLICIT_TIMEOUT_SECS = 86400;
@@ -30,8 +31,8 @@ function warning(code, message) {
   return Object.freeze({ code, message });
 }
 
-/** Resolve the safety ceiling from the tier and an optional explicit workers.timeout (seconds). */
-function resolveWorkerCeiling({ tier, explicit } = {}) {
+/** Resolve the safety ceiling; explicitSource 'cli' distinguishes a flag from legacy configuration. */
+function resolveWorkerCeiling({ tier, explicit, explicitSource } = {}) {
   const tierMs = ceilingForTier(tier);
   const tierFallback = tierMs === null;
   const effectiveTier = tierFallback ? FALLBACK_TIER : tier;
@@ -40,7 +41,7 @@ function resolveWorkerCeiling({ tier, explicit } = {}) {
   if (explicit === undefined || explicit === null) {
     return ceiling(tierSecs, 'tier-default', effectiveTier, tierFallback, null);
   }
-  if (explicit === LEGACY_WORKER_TIMEOUT_SECS) {
+  if (explicit === LEGACY_WORKER_TIMEOUT_SECS && explicitSource !== 'cli') {
     return ceiling(tierSecs, 'legacy-300-ignored', effectiveTier, tierFallback, warning('legacy-300-ignored',
       `workers.timeout=${LEGACY_WORKER_TIMEOUT_SECS} (default antigo) ignorado: usando o teto do tier `
       + `${effectiveTier} (${tierSecs}s). Defina outro valor explícito para sobrescrever.`));

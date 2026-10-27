@@ -13,8 +13,8 @@ const POLICY = {
   workflows: {
     ci: {
       filename: 'ci.yml', path: '.github/workflows/ci.yml',
-      blob_oid: '1e445bfaa5ba6ddb43fe8b368bd13718f2de74a9',
-      blob_sha256: '4710b62fa4dd556a907b9b54d216decece284ba2de9caee2420a4d02388e9efe',
+      blob_oid: 'b0c79219841d47c6cf745b2914d127befe65f281',
+      blob_sha256: '3ec181842940ed65b0354d092dc48d053f983747d1ba43ca86c954dc895032fa',
       jobs: [
         { key: 'operational-offline', kind: 'native', needs: [],
           name: 'Offline ${{ matrix.host }} / ${{ matrix.platform }}',
@@ -27,8 +27,10 @@ const POLICY = {
           runner: '${{ matrix.os }}', matrix: { include: [
             { os: 'ubuntu-latest', platform: 'linux', 'shard-index': 0, 'shard-count': 1, label: 'ubuntu-latest' },
             { os: 'macos-latest', platform: 'darwin', 'shard-index': 0, 'shard-count': 1, label: 'macos-latest' },
-            { os: 'windows-latest', platform: 'win32', 'shard-index': 0, 'shard-count': 2, label: 'windows-latest, shard 1/2' },
-            { os: 'windows-latest', platform: 'win32', 'shard-index': 1, 'shard-count': 2, label: 'windows-latest, shard 2/2' },
+            { os: 'windows-latest', platform: 'win32', 'shard-index': 0, 'shard-count': 4, label: 'windows-latest, shard 1/4' },
+            { os: 'windows-latest', platform: 'win32', 'shard-index': 1, 'shard-count': 4, label: 'windows-latest, shard 2/4' },
+            { os: 'windows-latest', platform: 'win32', 'shard-index': 2, 'shard-count': 4, label: 'windows-latest, shard 3/4' },
+            { os: 'windows-latest', platform: 'win32', 'shard-index': 3, 'shard-count': 4, label: 'windows-latest, shard 4/4' },
           ] } },
         { key: 'required-offline-windows', kind: 'alias', needs: ['operational-offline'],
           name: 'Offline ${{ matrix.host }} / ${{ matrix.platform }}', runner: 'ubuntu-latest',

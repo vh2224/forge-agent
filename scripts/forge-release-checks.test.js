@@ -154,13 +154,13 @@ test('app-only-complete-empty-authenticated-diff-is-na', () => {
   delete unknown.workflows.app; blocked(unknown, 'workflow-missing');
 });
 
-test('policy-matrix-14-ci-one-native-app-and-local-inventory', () => {
+test('policy-matrix-16-ci-one-native-app-and-local-inventory', () => {
   const ci = checks.expandJobs(checks.POLICY.workflows.ci);
-  assert.strictEqual(ci.length, 14); assert.strictEqual(ci.filter(job => job.kind === 'native').length, 7);
+  assert.strictEqual(ci.length, 16); assert.strictEqual(ci.filter(job => job.kind === 'native').length, 9);
   assert.strictEqual(ci.filter(job => job.kind === 'alias').length, 7);
-  assert.strictEqual(new Set(ci.map(job => job.name)).size, 14);
+  assert.strictEqual(new Set(ci.map(job => job.name)).size, 16);
   assert.deepStrictEqual(ci.filter(job => job.key === 'test').map(job => job.name), [
-    'Tests (ubuntu-latest)', 'Tests (macos-latest)', 'Tests (windows-latest, shard 1/2)', 'Tests (windows-latest, shard 2/2)',
+    'Tests (ubuntu-latest)', 'Tests (macos-latest)', 'Tests (windows-latest, shard 1/4)', 'Tests (windows-latest, shard 2/4)', 'Tests (windows-latest, shard 3/4)', 'Tests (windows-latest, shard 4/4)',
   ]);
   assert.deepStrictEqual(ci.filter(job => job.key === 'required-offline-windows').map(job => job.needs), Array(6).fill(['operational-offline']));
   assert.deepStrictEqual(checks.expandJobs(checks.POLICY.workflows.app).map(job => [job.key, job.runner, job.kind]), [['app', 'macos-26', 'native']]);
@@ -193,7 +193,7 @@ test('policy-synthetic-candidate-bytes-mapping-and-checkout-eol-independent', ()
   };
   const source = checks.assertPolicySources(candidate(), synthetic);
   assert.strictEqual(source.verified, true);
-  assert.strictEqual(source.workflows.ci.jobs.length, 14);
+  assert.strictEqual(source.workflows.ci.jobs.length, 16);
   for (const [key, workflow] of Object.entries(policy.workflows)) {
     const bytes = blobs[workflow.path];
     assert.notStrictEqual(sha256(bytes), sha256(Buffer.from(bytes.toString().replace(/\n/g, '\r\n'))));
@@ -220,7 +220,7 @@ test(committedMatches ? 'policy-committed-head-source-matches' : 'policy-pending
   if (committedMatches) {
     const source = checks.assertPolicySources(committedCandidate, { cwd: ROOT });
     assert.strictEqual(source.verified, true);
-    assert.strictEqual(source.workflows.ci.jobs.length, 14);
+    assert.strictEqual(source.workflows.ci.jobs.length, 16);
   } else {
     assert.throws(() => checks.assertPolicySources(committedCandidate, { cwd: ROOT }), { code: 'policy-source-drift' });
   }
@@ -261,8 +261,8 @@ test('policy-bounded-coordinator-publisher-permissions-and-needs', () => {
 
 test('checks-complete-current-attempt-source-key-name-execution-id', () => {
   const f = facts(); const result = checks.evaluateChecks(f);
-  assert.strictEqual(result.allowed, true); assert.strictEqual(result.checks.length, 15);
-  const job = result.checks.find(item => item.name === 'Tests (windows-latest, shard 1/2)');
+  assert.strictEqual(result.allowed, true); assert.strictEqual(result.checks.length, 17);
+  const job = result.checks.find(item => item.name === 'Tests (windows-latest, shard 1/4)');
   assert.strictEqual(job.job_key, 'test'); assert.strictEqual(job.kind, 'native');
   assert.strictEqual(job.execution_id, f.workflows.ci.jobs.find(item => item.name === job.name).id);
   assert.strictEqual(job.attempt, 2); assert.strictEqual(job.run_id, 11);

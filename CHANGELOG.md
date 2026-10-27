@@ -1,5 +1,15 @@
 ## Não lançado
 
+- Planejamento de milestones deixa de exigir 4–10 slices: a divisão deve cobrir
+  todo o escopo e justificar cada separação por risco, dependência, resultado
+  verificável ou limite de contexto, preservando os gates existentes.
+
+- O CI distribui as mesmas suítes Windows em quatro shards, preservando o check
+  agregado obrigatório e a validação de todos os jobs antes da release.
+
+- O `--timeout 300` explícito é respeitado pelo CLI de sidecar; o valor 300
+  herdado das preferências mantém o tratamento de compatibilidade com o legado.
+
 - Instalações nos dois hosts preservam os digests atualizados de cada renderer no
   manifesto, sem sobrescrevê-los com o histórico do outro host.
 - A primeira simulação de migração lê o monólito existente e contabiliza os

@@ -42,7 +42,7 @@ function fixture() {
     const adapter = require(${JSON.stringify(path.join(__dirname, 'forge-claude-sidecar.js'))});
     adapter.invokeClaudeSidecar = async options => {
       fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ prompt: options.prompt,
-        model: options.model, effort: options.effort, readOnly: options.readOnly,
+        model: options.model, effort: options.effort, readOnly: options.readOnly, timeoutSecs: options.timeoutSecs,
         sandbox: options.sandbox, resultProfile: options.resultProfile, resultSchema: options.resultSchema }));
       const scenario = process.env.FIXTURE_SCENARIO;
       if (scenario !== 'success') {
@@ -120,6 +120,17 @@ async function main() {
         assert(sent.resultSchema.properties.output);
         assert.strictEqual(sent.model, model); assert.strictEqual(sent.effort, 'medium');
         assert.strictEqual(sent.readOnly, true); assert.strictEqual(sent.sandbox, 'read-only');
+      }
+    });
+    await test('an explicit --timeout 300 reaches each real review CLI adapter without legacy substitution', () => {
+      for (const mode of ['challenge', 'defend', 'rebuttal']) {
+        const f = fixture();
+        fs.mkdirSync(path.join(f.cwd, '.gsd'));
+        fs.writeFileSync(path.join(f.cwd, '.gsd', 'forge-prefs.jsonc'), JSON.stringify({ workers: { timeout: 1234 } }));
+        const result = run(f, mode, 'success', ['--timeout', '300', '--tier', 'heavy']);
+        assert.strictEqual(result.status, 0, result.stderr);
+        assert.strictEqual(JSON.parse(fs.readFileSync(f.capture)).timeoutSecs, 300);
+        assert(!result.stderr.includes('legacy-300-ignored'), result.stderr);
       }
     });
     await test('actual review CLI accepts raw git diff with literal markers and boundary injection as DATA only', () => {
