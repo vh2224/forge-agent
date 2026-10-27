@@ -1,6 +1,6 @@
 'use strict';
 // A selector runs exactly one recovery scenario; no arguments retain full coverage.
-const scenarioSelectors = ['--milestone-auto-gate', '--review-fix-recovery', '--delivery-publication-limits', '--recovery-contracts', '--pre-spawn-sidecar', '--pre-spawn-native', '--no-progress-event', '--owner-event-reconcile', '--ceiling-route', '--claude-session', '--claude-resume', '--liveness-heartbeat', '--memory-evidence'];
+const scenarioSelectors = ['--owner-event-batch', '--milestone-auto-gate', '--review-fix-recovery', '--delivery-publication-limits', '--recovery-contracts', '--pre-spawn-sidecar', '--pre-spawn-native', '--no-progress-event', '--owner-event-reconcile', '--ceiling-route', '--claude-session', '--claude-resume', '--liveness-heartbeat', '--memory-evidence'];
 const scenarioArgs = process.argv.slice(2);
 if (scenarioArgs.length > 1 || (scenarioArgs.length === 1 && !scenarioSelectors.includes(scenarioArgs[0]))) {
   console.error(`Usage: node forge-unit-sidecar.test.js [${scenarioSelectors.join('|')}]`);
@@ -972,7 +972,99 @@ async function livenessHeartbeatContracts() {
 // R1/R2: the owner's authenticated no-progress append is reconciled into the
 // preparation surface (no broker) and into the shared write-contract validation
 // (owner == code root, events.jsonl tracked), while unrelated edits still fail.
-async function ownerEventReconcileContracts() {
+async function ownerEventBatchTransactions() {
+  const fs = require('fs'), os = require('os'), path = require('path'), crypto = require('crypto');
+  const api = require('./forge-unit-sidecar'), execution = require('./forge-task-execution');
+  const fixtures = require('./forge-code-roots.test'), source = fixtures.fixture(), lines = [];
+  const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+  try {
+    const gate = require('./forge-verify').runVerificationGate({ cwd: source.a, gsdDir: path.join(source.a, '.gsd'),
+      preferenceCommands: [0, 1, 2].map(n => `node -e "process.exit(${n} * 0)"`), resourceEventSink: line => lines.push(line) });
+    assert(gate.passed); assert.strictEqual(lines.length, 3);
+    assert(lines.every(line => JSON.parse(line).kind === 'resource-clamp-skipped' && line.endsWith('\n')));
+  } finally { source.cleanup(); }
+  const lab = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-owner-batch-')));
+  let serial = 0;
+  const fixture = (shape = 'execution') => {
+    const owner = path.join(lab, 'owner-' + serial++), gsd = path.join(owner, '.gsd'), events = path.join(gsd, 'forge/events.jsonl');
+    fs.mkdirSync(path.dirname(events), { recursive: true });
+    fs.writeFileSync(events, '{"kind":"seed"}\n'); fs.writeFileSync(path.join(gsd, 'protected.txt'), 'fixed');
+    const before = execution.protectedSnapshot(owner);
+    const record = shape === 'execution' ? { execution: { protected_owner: before } }
+      : { recovery_baseline: { protected_owner: before, protected_roots: [{ path: owner, snapshot: before }] } };
+    if (shape === 'milestone') record.milestone_delivery = { protected_owner: before };
+    const receipt = path.join(lab, 'receipt-' + serial + '.json'); fs.writeFileSync(receipt, JSON.stringify(record));
+    return { owner, gsd, events, receipt, record, before };
+  };
+  const append = (f, batch) => api.appendProtectedOwnerEvents(f.owner, f.receipt, f.record, batch);
+  const measured = async (f, batches) => {
+    let reads = 0; const original = fs.readdirSync;
+    fs.readdirSync = function(file, ...args) { if (path.resolve(String(file)) === f.gsd) reads++; return original.call(this, file, ...args); };
+    try { for (const batch of batches) await append(f, batch); } finally { fs.readdirSync = original; }
+    return reads;
+  };
+  try {
+    const one = await measured(fixture(), [[lines[0]]]), batch = await measured(fixture(), [lines]);
+    const sequential = await measured(fixture(), lines.map(line => [line]));
+    assert.strictEqual(batch, one); assert.strictEqual(sequential, lines.length * one);
+    console.log(`PASS owner-event-batch transaction reads single=${one} batch=${batch} sequential=${sequential}`);
+    for (const shape of ['execution', 'recovery', 'milestone']) {
+      const a = fixture(shape), b = fixture(shape);
+      for (const line of lines) await append(a, [line]); await append(b, lines);
+      assert(fs.readFileSync(a.events).equals(fs.readFileSync(b.events)));
+      assert.strictEqual(fs.readFileSync(b.events, 'utf8'), '{"kind":"seed"}\n' + lines.join(''));
+      const final = JSON.parse(fs.readFileSync(b.receipt)), expected = { ...b.before, '.gsd/forge/events.jsonl': digest(fs.readFileSync(b.events)) };
+      if (shape === 'execution') assert.deepStrictEqual(final.execution.protected_owner, expected);
+      else {
+        assert.deepStrictEqual(final.recovery_baseline.protected_owner, expected);
+        assert.deepStrictEqual(final.recovery_baseline.protected_roots[0].snapshot, expected);
+        if (shape === 'milestone') assert.deepStrictEqual(final.milestone_delivery.protected_owner, expected);
+      }
+      const aFinal = JSON.parse(fs.readFileSync(a.receipt));
+      assert.deepStrictEqual(aFinal.execution?.protected_owner || aFinal.recovery_baseline.protected_owner, expected);
+    }
+    const empty = fixture(), emptyReceipt = fs.readFileSync(empty.receipt), emptyEvents = fs.readFileSync(empty.events);
+    assert.strictEqual(await measured(empty, [[]]), 0); assert(fs.readFileSync(empty.receipt).equals(emptyReceipt)); assert(fs.readFileSync(empty.events).equals(emptyEvents));
+    const invalid = fixture();
+    await assert.rejects(async () => api.appendProtectedOwnerEvents(invalid.owner, path.join(invalid.gsd, 'receipt.json'), invalid.record, lines), /outside the workspace/);
+    await assert.rejects(async () => api.appendProtectedOwnerEvents(invalid.owner, invalid.receipt, {}, lines), /execution-protected-metadata/);
+    for (const fault of ['pre-events', 'between', 'post-drift', 'stable-drift', 'append-crash', 'receipt-crash']) {
+      const f = fixture(), originalReceipt = fs.readFileSync(f.receipt);
+      let fired = false, appended = 0;
+      const originalAppend = fs.appendFileSync, originalRename = fs.renameSync;
+      if (fault === 'pre-events') { fs.appendFileSync(f.events, '{"kind":"foreign"}\n'); fired = true; }
+      if (fault === 'stable-drift') { fs.writeFileSync(path.join(f.gsd, 'protected.txt'), 'foreign'); fired = true; }
+      fs.appendFileSync = function(file, data, ...args) {
+        if (path.resolve(String(file)) === f.events) {
+          if (fault === 'append-crash' && appended === 1) { fired = true; throw new Error('fixture-append-crash'); }
+          const result = originalAppend.call(this, file, data, ...args); appended++;
+          if (fault === 'between' && appended === 1) { fired = true; originalAppend(f.events, '{"kind":"foreign"}\n'); }
+          if (fault === 'post-drift' && appended === lines.length) { fired = true; fs.writeFileSync(path.join(f.gsd, 'protected.txt'), 'foreign'); }
+          return result;
+        }
+        return originalAppend.call(this, file, data, ...args);
+      };
+      fs.renameSync = function(from, to) {
+        if (fault === 'receipt-crash' && path.resolve(String(to)) === f.receipt) { fired = true; throw new Error('fixture-receipt-crash'); }
+        return originalRename.call(this, from, to);
+      };
+      try {
+        const reason = fault === 'between' ? /execution-owner-event-raced/ : fault === 'append-crash' ? /fixture-append-crash/
+          : fault === 'receipt-crash' ? /fixture-receipt-crash/ : /execution-protected-metadata/;
+        await assert.rejects(async () => append(f, lines), reason);
+      } finally { fs.appendFileSync = originalAppend; fs.renameSync = originalRename; }
+      assert(fired, fault + ' injection must fire'); assert(fs.readFileSync(f.receipt).equals(originalReceipt), fault + ' preserves receipt');
+      if (fault === 'pre-events' || fault === 'stable-drift') assert.strictEqual(appended, 0);
+      if (fault === 'between' || fault === 'append-crash') assert.strictEqual(appended, 1);
+      f.record = JSON.parse(originalReceipt);
+      await assert.rejects(async () => append(f, lines), /execution-protected-metadata/);
+      assert(fs.readFileSync(f.receipt).equals(originalReceipt), 'retry must not repair history');
+      console.log('PASS owner-event-batch ' + fault);
+    }
+  } finally { fs.rmSync(lab, { recursive: true, force: true }); }
+}
+
+async function ownerEventReconcileContracts(batchOnly = false) {
   const fs = require('fs'), path = require('path'), crypto = require('crypto'), os = require('os');
   const fixtures = require('./forge-code-roots.test'), runs = require('./forge-runs'), roots = require('./forge-code-roots');
   const FINGERPRINT = 'a1b2c3d4e5f60718';
@@ -994,7 +1086,7 @@ async function ownerEventReconcileContracts() {
     chain: [{ id: 'claude-sonnet-5', engine: 'claude' }] };
   try {
     // R2 - complete sidecar -> runExecute -> adapter path with owner == code root.
-    async function runOwnerCase(id, extraWorkerWrite) {
+    async function runOwnerCase(id, extraWorkerWrite, commandCount = 1) {
       const lab = fixtures.fixture();
       try {
         const contract = roots.validateContract({ schema_version: 2, owner: lab.a, primary_root_id: 'alpha',
@@ -1006,7 +1098,7 @@ async function ownerEventReconcileContracts() {
         const request = { unitType: 'execute-task', scope: 'milestone', phase: 'execute', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01',
           cwd: lab.a, contextRoot: lab.a, execution_contract: contract, route,
           workflowId: 'owner-event-fixture', dispatchId: id, resultFile: path.join(lab.dir, id + '.json'), prompt: 'Fixture only.',
-          verification: { preferenceCommands: ['node -e "process.exit(0)"'] } };
+          verification: { preferenceCommands: Array.from({ length: commandCount }, (_, i) => `node -e "process.exit(${i} * 0)"`) } };
         const base = path.join(lab.a, '.gsd/milestones/M001/slices/S01');
         fs.mkdirSync(path.join(base, 'tasks/T01'), { recursive: true });
         request.planFile = path.join(base, 'tasks/T01/T01-PLAN.md');
@@ -1029,11 +1121,42 @@ async function ownerEventReconcileContracts() {
           if (extraWorkerWrite) fs.appendFileSync(path.join(lab.a, '.gsd/forge/events.jsonl'), '{"event":"forged"}\n');
           return { candidate: { status: 'done', summary: 'Synthetic loop fixture', files_changed: ['alpha::same.txt', 'beta::same.txt'], must_haves_status: [] }, telemetry: null };
         };
-        let outcome;
+        let outcome, reads = 0;
+        const originalReadDir = fs.readdirSync, physicalGsd = fs.realpathSync(path.join(lab.a, '.gsd'));
+        fs.readdirSync = function(file, ...args) {
+          if (path.resolve(String(file)) === physicalGsd) reads++;
+          return originalReadDir.call(this, file, ...args);
+        };
         try { outcome = { result: await fresh.runUnitSidecar(request) }; } catch (error) { outcome = { error }; }
+        finally { fs.readdirSync = originalReadDir; }
+        outcome.reads = reads;
+        outcome.record = JSON.parse(fs.readFileSync(request.resultFile + '.receipt.json', 'utf8'));
         outcome.events = fs.readFileSync(path.join(lab.a, '.gsd/forge/events.jsonl'), 'utf8');
         return outcome;
       } finally { lab.cleanup(); }
+    }
+    if (batchOnly) {
+      const single = await runOwnerCase('owner-batch-single', false, 1);
+      const multiple = await runOwnerCase('owner-batch-multiple', false, 3);
+      for (const row of [single, multiple]) {
+        assert(!row.error, row.error && row.error.stack);
+        assert.strictEqual(row.result.status, 'done');
+      }
+      console.log('owner-event-batch e2e reads single=' + single.reads + ' multiple=' + multiple.reads);
+      assert.strictEqual(multiple.reads, single.reads, 'snapshot work must not scale with buffered verification events');
+      const events = multiple.events.trim().split('\n').map(JSON.parse);
+      const resources = events.map((e, i) => e.kind === 'resource-clamp-skipped' ? i : -1).filter(i => i >= 0);
+      assert(resources.length >= 2);
+      assert(resources.every((n, i) => n === resources[0] + i), 'resource events must be contiguous');
+      const noProgress = events.findIndex(e => e.event === 'sidecar-no-progress');
+      assert(noProgress >= 0 && noProgress < resources[0]);
+      assert(events.findLastIndex(e => e.kind === 'sidecar-unit' || e.event === 'sidecar-unit') > resources.at(-1));
+      const digest = crypto.createHash('sha256').update(multiple.events).digest('hex');
+      assert.strictEqual(multiple.record.recovery_baseline.protected_owner['.gsd/forge/events.jsonl'], digest);
+      assert.strictEqual(multiple.record.milestone_delivery.protected_owner['.gsd/forge/events.jsonl'], digest);
+      await ownerEventBatchTransactions();
+      console.log('PASS owner-event-batch e2e invariant reads=' + single.reads);
+      return;
     }
     const ok = await runOwnerCase('owner-event-ok', false);
     assert(!ok.error, ok.error && ok.error.stack);
@@ -2101,6 +2224,7 @@ async function runScenarios() {
     if (!selectedScenario || selectedScenario === '--pre-spawn-native') await preSpawnRecoveryContracts(true);
     if (!selectedScenario || selectedScenario === '--no-progress-event') await noProgressEventContracts();
     if (!selectedScenario || selectedScenario === '--owner-event-reconcile') await ownerEventReconcileContracts();
+    if (!selectedScenario || selectedScenario === '--owner-event-batch') await ownerEventReconcileContracts(true);
     if (!selectedScenario || selectedScenario === '--milestone-auto-gate') await milestoneAutoGateContracts();
     if (!selectedScenario || selectedScenario === '--ceiling-route') await ceilingRouteContracts();
     if (!selectedScenario || selectedScenario === '--claude-session') await claudeSessionContracts();

@@ -39,8 +39,8 @@ function liveAdapter(observe = () => {}) {
       binding_sha256: roots.digest(challenge), evidence_reference: 'fixture:controlled-host-observation' };
   });
 }
-async function savedFixture(phase = 'failed') {
-  const f = nativeFixture(), invoke = f.runtime.invokeNative;
+async function savedFixture(phase = 'failed', options = {}) {
+  const f = nativeFixture(options), invoke = f.runtime.invokeNative;
   f.mailbox = path.join(f.dir, 'mailbox.json');
   f.runtime.invokeNative = async (...args) => {
     const result = await invoke(...args); write(f.mailbox, '\ufeff' + JSON.stringify(result));
@@ -139,11 +139,18 @@ async function main() {
       await refuse(f, { ...f.savedRuntime, processProbe: () => state }, /writer-observation-not-stopped/, 1);
       label(`saved-${phase}-live-probe-${state}`);
     }
-    const f = await savedFixture(phase);
+    const f = await savedFixture(phase, { verify: 'node --version' });
     const result = await unit.runUnitSidecar(f.r, f.savedRuntime); assert.strictEqual(result.status, 'done');
     const record = receipt(f);
     assert.strictEqual(JSON.stringify({ failure: record.failure, final_evidence: record.final_evidence, baseline: record.recovery_baseline,
       identity: record.recovery_identity_sha256, fingerprint: record.fingerprint, started: record.started_at }), f.history);
+    const eventBytes = fs.readFileSync(path.join(f.owner, '.gsd/forge/events.jsonl'));
+    const events = eventBytes.toString('utf8').trim().split('\n').map(JSON.parse);
+    const resources = events.map((e, i) => e.kind === 'resource-clamp-skipped' ? i : -1).filter(i => i >= 0);
+    assert(resources.length >= 2);
+    assert(resources.every((n, i) => n === resources[0] + i));
+    assert(events.findLastIndex(e => e.reason_code === 'saved-native-result-accepted') > resources.at(-1));
+    assert.strictEqual(record.execution.protected_owner['.gsd/forge/events.jsonl'], roots.digest(eventBytes));
     assert.strictEqual(f.calls(), 1); label(`saved-${phase}-accepted`);
   }
   const imported = await savedFixture();
