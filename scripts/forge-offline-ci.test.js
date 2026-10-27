@@ -66,8 +66,10 @@ const testCells = [...testBlock.matchAll(/- os: ([^\s]+)\s+platform: (linux|darw
 assert.deepStrictEqual(testCells, [
   { os: 'ubuntu-latest', platform: 'linux', shardIndex: 0, shardCount: 1, label: 'ubuntu-latest' },
   { os: 'macos-latest', platform: 'darwin', shardIndex: 0, shardCount: 1, label: 'macos-latest' },
-  { os: 'windows-latest', platform: 'win32', shardIndex: 0, shardCount: 2, label: 'windows-latest, shard 1/2' },
-  { os: 'windows-latest', platform: 'win32', shardIndex: 1, shardCount: 2, label: 'windows-latest, shard 2/2' },
+  { os: 'windows-latest', platform: 'win32', shardIndex: 0, shardCount: 4, label: 'windows-latest, shard 1/4' },
+  { os: 'windows-latest', platform: 'win32', shardIndex: 1, shardCount: 4, label: 'windows-latest, shard 2/4' },
+  { os: 'windows-latest', platform: 'win32', shardIndex: 2, shardCount: 4, label: 'windows-latest, shard 3/4' },
+  { os: 'windows-latest', platform: 'win32', shardIndex: 3, shardCount: 4, label: 'windows-latest, shard 4/4' },
 ]);
 assert.match(testBlock, /run-tests\.js[^\r\n]+--shard-index \$\{\{ matrix\.shard-index \}\} --shard-count \$\{\{ matrix\.shard-count \}\}/);
 const compatibilityBlock = workflow.slice(workflow.indexOf('\n  required-offline-windows:'));
