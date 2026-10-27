@@ -190,6 +190,13 @@ async function main() {
   await assert.rejects(() => execution.withAutoPlanGate(automatic.r, () => ({ authorized: true, mode: 'interactive', reference: 'conversation:fixture-auto' }), () => {}), /execution-auto-gate-not-attested/);
   await execution.withAutoPlanGate(automatic.r, attest, async () => {
     await rejects({ ...automatic.r, dispatchId: 'foreign-attempt' }, 'execution-auto-gate-binding-mismatch');
+    for (const changed of [
+      { ...automatic.r, workflowId: 'foreign-workflow' },
+      { ...automatic.r, route: { ...automatic.r.route, host_runtime: 'foreign-host' } },
+      { ...automatic.r, gates: { ...automatic.r.gates, authorizationReference: 'foreign-reference' } },
+    ]) assert.throws(() => execution.autoGateAllowed(changed), /execution-auto-gate-binding-mismatch/);
+    assert.throws(() => execution.autoGateAllowed({ ...automatic.r, phase: 'plan' }), /execution-phase-unit-mismatch/);
+
     const originalPlan = fs.readFileSync(automatic.r.planFile, 'utf8');
     fs.appendFileSync(automatic.r.planFile, '\nChanged after authorization.\n');
     await rejects(automatic.r, 'execution-auto-gate-binding-mismatch');

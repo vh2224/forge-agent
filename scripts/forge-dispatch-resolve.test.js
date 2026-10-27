@@ -4,6 +4,7 @@
 // Standalone parity matrix for forge-dispatch-resolve.  This deliberately has
 // no test-framework dependency: it is useful before the installer runs too.
 
+const nodeAssert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -289,8 +290,13 @@ withHermeticHome((cliEnv) => {
     const contract = dispatch(legacy, { unitType: 'execute-task' });
     const cli = spawnSync('node', [SCRIPT, '--shell-exports'], { encoding: 'utf8', env: cliEnv, input: JSON.stringify(contract) });
     assertEqual(cli.status, 0, 'shell exports exit 0');
-    const probe = spawnSync('bash', ['-c', 'eval "$(cat)"; printf \'%s\n%s\n%s\' "$WORKERS_TIMEOUT" "$WORKERS_TIMEOUT_SOURCE" "$WORKERS_TIMEOUT_WARNING"'],
+    const bash = process.platform === 'win32'
+      ? path.join(process.env.ProgramFiles || 'C:/Program Files', 'Git', 'bin', 'bash.exe')
+      : 'bash';
+    const probe = spawnSync(bash, ['-c', 'eval "$(cat)"; printf \'%s\n%s\n%s\' "$WORKERS_TIMEOUT" "$WORKERS_TIMEOUT_SOURCE" "$WORKERS_TIMEOUT_WARNING"'],
       { encoding: 'utf8', input: cli.stdout });
+    nodeAssert.ifError(probe.error);
+    nodeAssert.strictEqual(probe.status, 0, 'shell export probe must exit zero before parsing stdout');
     const [timeout, source, message] = probe.stdout.split('\n');
     assertEqual(timeout, '1800', 'WORKERS_TIMEOUT is the ceiling');
     assertEqual(source, 'legacy-300-ignored', 'WORKERS_TIMEOUT_SOURCE evals');

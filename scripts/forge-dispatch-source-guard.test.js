@@ -17,7 +17,8 @@ const dispatchResolver = require('./forge-dispatch-resolve.js');
 const ROOT = path.resolve(__dirname, '..');
 const RESOLVER_SCRIPT = path.join(__dirname, 'forge-dispatch-resolve.js');
 const MANIFEST_PATH = path.join(ROOT, 'forge-source-manifest.json');
-const GOLDEN_PATH = path.join(__dirname, 'fixtures', 'claude-renderer', 'claude-4.19.0.golden.json');
+const HISTORICAL_GOLDEN_PATH = path.join(__dirname, 'fixtures', 'claude-renderer', 'claude-4.19.0.golden.json');
+const GOLDEN_PATH = path.join(__dirname, 'fixtures', 'claude-renderer', 'claude-memory-v2.golden.json');
 const PRE_REPIN_SKILLS_SHA = '940cc9f4348ffe52fc4b57e8d247431992dc81ab32eee9474d2149922edb1bf2';
 
 let passed = 0;
@@ -702,8 +703,18 @@ test('every operational emitter materializes string/string/boolean runtime field
   assert.strictEqual(canonical, 6, `canonical emitter call sites: ${canonical}`);
 });
 
-test('Claude golden drift before the repin is exactly skills and current report is fully pinned', () => {
+test('Claude historical skills repin is preserved and memory-v2 current report pins all nine surfaces', () => {
+  const historicalBytes = fs.readFileSync(HISTORICAL_GOLDEN_PATH);
+  assert.strictEqual(crypto.createHash('sha256').update(historicalBytes).digest('hex'),
+    'f2b3e910445d2557f50aa4ced9e1b31498debc6b1cdd1ed05b452d8141b4307f', 'historical Claude 4.19.0 golden must remain byte-for-byte unchanged');
+  const historical = JSON.parse(historicalBytes);
   const golden = JSON.parse(fs.readFileSync(GOLDEN_PATH, 'utf8'));
+  assert.strictEqual(golden.surfaces.length, 9);
+  assert.deepStrictEqual(golden.surfaces.map(({ sha256, ...identity }) => identity),
+    historical.surfaces.map(({ sha256, ...identity }) => identity));
+  const historicalHashes = new Map(historical.surfaces.map(surface => [surface.source_id, surface.sha256]));
+  assert.deepStrictEqual(golden.surfaces.filter(surface => historicalHashes.get(surface.source_id) !== surface.sha256)
+    .map(surface => surface.source_id), ['agents', 'skills']);
   const report = claudeRenderer.render({
     repo: ROOT,
     projectRoot: path.join(ROOT, 'scripts', '.guard-golden-project'),
@@ -716,15 +727,16 @@ test('Claude golden drift before the repin is exactly skills and current report 
     .map((surface) => surface.source_id);
   assert.deepStrictEqual(currentDrift, []);
 
-  const beforeRepin = new Map(golden.surfaces.map((surface) => [
+  // Preserve the older skills-only repin against its immutable historical snapshot.
+  const beforeRepin = new Map(historical.surfaces.map((surface) => [
     surface.source_id,
     surface.source_id === 'skills' ? PRE_REPIN_SKILLS_SHA : surface.sha256,
   ]));
-  const measuredDrift = golden.surfaces
-    .filter((surface) => measured.get(surface.source_id) !== beforeRepin.get(surface.source_id))
+  const measuredDrift = historical.surfaces
+    .filter((surface) => surface.sha256 !== beforeRepin.get(surface.source_id))
     .map((surface) => surface.source_id);
   assert.deepStrictEqual(measuredDrift, ['skills']);
-  assert.notStrictEqual(golden.surfaces.find((surface) => surface.source_id === 'skills').sha256, PRE_REPIN_SKILLS_SHA);
+  assert.notStrictEqual(historical.surfaces.find((surface) => surface.source_id === 'skills').sha256, PRE_REPIN_SKILLS_SHA);
 });
 
 test('guard CLI returns parseable JSON and release-gate status', () => {

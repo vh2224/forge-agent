@@ -1,10 +1,11 @@
 'use strict';
 const assert = require('assert'), fs = require('fs'), path = require('path');
+// Install the fixture account lookup before consumers capture it at module load.
+const harness = require('./fixtures/forge-native-execution').createFixtureHarness();
 const unit = require('./forge-unit-sidecar');
 const prep = require('./forge-task-preparation');
 const verify = require('./forge-verify');
 const roots = require('./forge-code-roots');
-const harness = require('./fixtures/forge-native-execution').createFixtureHarness();
 const { nativeFixture, write } = harness;
 const wire = value => JSON.parse(JSON.stringify(value));
 let passed = 0, failed = 0;

@@ -235,7 +235,7 @@ const REGISTRY_ROWS = [
   ["skills-forge-next-skill-md-agent-a8fb08e45b9f","skills/forge-next/SKILL.md","agent","excluded","sha256:a8fb08e45b9fb6e4363d9b6f3d3d7cbd880793f40dc8155ce3e4cd8a1d62fde7","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-next-skill-md-agent-ab81aa6b7768","skills/forge-next/SKILL.md","agent","operational","sha256:ab81aa6b77681ebb91102d91520ec5277ec6024f353e3023f3af43b65f5930c3","",""],
   ["skills-forge-next-skill-md-agent-ed7b09e29a6f","skills/forge-next/SKILL.md","agent","excluded","sha256:ed7b09e29a6f5e83c90addf1f6775bec93995e8140643a51f2bc25c4b3057031","projected explanatory Agent prose; it is not a worker invocation",""],
-  ["skills-forge-next-skill-md-agent-6c40f3ba04e9","skills/forge-next/SKILL.md","agent","excluded","sha256:6c40f3ba04e95c538a08593a405cc9b56468e179257d0d2544b1987df4e8daaf","projected explanatory Agent prose; it is not a worker invocation",""],
+  ["skills-forge-next-skill-md-agent-933733c0c065","skills/forge-next/SKILL.md","agent","excluded","sha256:933733c0c065d1d60494bc0f69d0c2a98cca6e0391d4d318613442e4f16b7e91","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-next-skill-md-agent-c12a7e952d0c","skills/forge-next/SKILL.md","agent","excluded","sha256:c12a7e952d0c16d5bac8d6c22e2e24bc02a1fbae58f5d61b18a55feb4427822e","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-next-skill-md-agent-9ee2adb32dc1","skills/forge-next/SKILL.md","agent","operational","sha256:9ee2adb32dc1017db07b504e4ec8fd67924ba681c9e0322e55f1b6f45cb488b8","",""],
   ["skills-forge-next-skill-md-emitter-66084c4d46a9","skills/forge-next/SKILL.md","emitter","operational","sha256:66084c4d46a938921bf002627489efc5cae68cb0f6a4c73766912a0dffb1fb23","",""],
@@ -299,7 +299,7 @@ const REGISTRY_ROWS = [
   ["skills-forge-task-skill-md-native-fd1518c01769","skills/forge-task/SKILL.md","native","operational","sha256:fd1518c017690481652b4ec9709b3c7fe645c2c3ca010bcea1980afe30f78157","",""],
   ["skills-forge-task-skill-md-native-1789a03a8db4","skills/forge-task/SKILL.md","native","operational","sha256:1789a03a8db4573f64785bcc722951f01beaa926bc768ac0889cd8298fa3dd6a","",""],
   ["shared-forge-review-md-native-c1f31a626717","shared/forge-review.md","native","excluded","sha256:c1f31a6267172b1980e6c51c6ac96b8c07a1f0dfdddbae56238e056f06a7b46d","documentation reference describing the preparation stop boundary; it invokes no native worker",""],
-  ["shared-forge-dispatch-md-native-8b52de8c8e73","shared/forge-dispatch.md","native","excluded","sha256:8b52de8c8e73ef4250f8cc0318446e8532e7e07e1697e8b10c272848780f6f64","documentation lists trusted runtime callbacks; it invokes no native worker",""],
+  ["shared-forge-dispatch-md-native-8ed9ddfdd09c","shared/forge-dispatch.md","native","excluded","sha256:8ed9ddfdd09c40b5d226fed510b3102cff1886dbd765ff5321bf45c307655ebf","documentation lists trusted runtime callbacks; it invokes no native worker",""],
   ["skills-forge-task-------md-native-8b52de8c8e73","skills/forge-task/SKILL.md","native","excluded","sha256:8b52de8c8e73ef4250f8cc0318446e8532e7e07e1697e8b10c272848780f6f64","documentation lists trusted runtime callbacks; it invokes no native worker",""],
 ];
 

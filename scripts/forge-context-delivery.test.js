@@ -165,14 +165,22 @@ async function native(s, name, query, budget, limit) {
   const rendered = fixed(() => renderPrompt({ cwd: s.owner, templateDir: s.templateDir, unitType: 'execute-task', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01',
     description: query, autoCommit: false, memoryMaxTokens: budget, memoryLimit: limit,
     ...(baseline === null ? {} : { memories: budget > 1 ? baseline : '' }), onMemorySelection: value => { selection = value; } }));
+  // This local callback returns a terminal fixture payload, never an agent acknowledgment.
+  const terminal = Object.freeze({ status: 'done', summary: 'Synthetic local context capture',
+    files_changed: Object.freeze([]), must_haves_status: Object.freeze([]) });
   const route = { model: 'gpt-6-sol', model_requested: 'gpt-6-sol', model_resolved: 'gpt-6-sol', effort: 'medium',
     dispatch_engine: 'codex', host_runtime: 'codex', resolved_worker_engine: 'codex', worker_mode: 'native', dispatch_allowed: true, config_ok: true };
   const result = await invokeNative({ hostRuntime: 'codex', resolvedDispatch: route,
     activeCapabilities: { available: true, tool: 'spawn_agent', source: 'fixture-tool-schema', models: ['gpt-6-sol'], reasoning_efforts: ['medium'], fork_turns: ['none'] },
     taskName: 'context-capture', agentType: 'forge-executor', prompt: rendered.prompt,
+    terminalResult: value => value === terminal,
     unitType: 'execute-task', scope: 'milestone', phase: 'execute', dispatchId: name, cwd: code, contextRoot: s.owner,
-    budgets: { auto_memory: budget }, onPackagedContext: value => { packaged = value; } }, async args => { captured = structuredClone(args); return { simulated: true }; });
+    budgets: { auto_memory: budget }, onPackagedContext: value => { packaged = value; } }, async args => {
+      captured = structuredClone(args);
+      return terminal;
+    });
   assert(result.ok, JSON.stringify(result)); assert.equal(captured.model, 'gpt-6-sol'); assert.equal(captured.reasoning_effort, 'medium');
+  assert.strictEqual(result.result, terminal, 'the local adapter returned the explicit terminal payload');
   assert.equal(result.final_evidence.model_observed, null); safePrompt(captured.message); assertMandatory(captured.message);
   const selected = baseline === null ? selection.selected.map(e => e.identity) : delivered(rendered.prompt);
   return { row: reportRow(name, packaged, captured.message, captured,

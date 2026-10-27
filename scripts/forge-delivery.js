@@ -544,7 +544,12 @@ function buildDelivery(input, options = {}) {
   const inventory = inventoryPlan(planRaw, planReference, unit);
   diagnostics.push(...inventory.diagnostics);
   const criteria = inventory.criteria;
-  const checkedPlan = executionContract ? require('./forge-code-roots').validatePlan(planRaw, executionContract) : null;
+  // A milestone ROADMAP aggregates children/additional criteria; it is not a task
+  // execution plan. Preserve full validation for every structured plan and for
+  // task/slice units, including all write/path/root checks.
+  const aggregateRoadmap = unit.type === 'milestone' && !hasStructuredMustHaves(planRaw);
+  const checkedPlan = executionContract && !aggregateRoadmap
+    ? require('./forge-code-roots').validatePlan(planRaw, executionContract) : null;
   if (executionContract) for (const criterion of criteria) {
     for (const field of ['artifact_path', 'link_from', 'link_to']) if (criterion[field]) {
       const rootPaths = require('./forge-code-roots');

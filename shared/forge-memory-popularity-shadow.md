@@ -16,16 +16,18 @@ Os estágios de orçamento não simulados são declarados abaixo.
 A referência é `scripts/forge-projection.js::queryMemoryEntries`:
 
 ```text
-quality = confidence * Math.max(1, hits)
-score = ((overlap_count * 100) + (category_weight * 10)) + quality
+quality = finiteScore(confidence * Math.max(1, hits))
+score = finiteScore(((overlap_count * 100) + (category_weight * 10)) + quality)
 comparator(a,b) = b.score !== a.score ? b.score - a.score
                                       : a.identity.localeCompare(b.identity)
 ```
 
 `category_weight` vem do mapa vivo `preferred`; `overlap_count` conta termos coincidentes.
-A qualidade ativa não tem teto: pode ser `Infinity` e pode ser `NaN` (`0 * Infinity`).
-Nesse último caso o comparador retorna NaN e a ordem depende do motor.
-Esse defeito latente preexistente é registrado para o owner, fora do escopo da S06.
+A qualidade ativa não adota o teto experimental de popularidade. A correção #228
+normaliza contadores legados não finitos para 0 antes do ranking e usa `finiteScore`
+para saturar overflow aritmético em ±Number.MAX_VALUE, preservando valores finitos.
+O caso histórico `0 * Infinity` deixou de ser alcançável por esse produtor; isso
+não altera a validação direta da sombra, que continua classificando Infinity como invalid.
 A sombra conserva o baseline na ordem realmente recebida em `ranked`, sem repará-lo,
 sem reconstruir sua ordenação e sem propagar números não finitos para a saída JSON.
 
@@ -79,8 +81,8 @@ Inválidos usam factor 1, sem coerção de tipo e sem aritmética que cresça co
 | `-1` | 1 | invalid | projetor |
 | `1.5` | 1 | invalid | só unidade, parseInt trunca |
 | `NaN` | 1 | invalid | só unidade, parseInt inválido vira 0 |
-| `Infinity` | 1 | invalid | projetor, cadeia decimal excedendo Number.MAX_VALUE |
-| `-Infinity` | 1 | invalid | projetor, cadeia decimal negativa excedente |
+| `Infinity` | 1 | invalid | só unidade; overflow decimal no projetor vira 0 após #228 |
+| `-Infinity` | 1 | invalid | só unidade; overflow decimal negativo no projetor vira 0 após #228 |
 | `'5'` | 1 | invalid | só unidade, projetor entrega number |
 | `5n` | 1 | invalid | só unidade |
 | `null` | 1 | invalid | só unidade |
@@ -88,11 +90,13 @@ Inválidos usam factor 1, sem coerção de tipo e sem aritmética que cresça co
 | `true` | 1 | invalid | só unidade |
 | `{}` | 1 | invalid | só unidade |
 
-`parseOrphanMemory` e o seed legado interpretam hits com `parseInt(...,10) || 0`.
+`parseOrphanMemory` e o seed legado preservam a interpretação decimal de hits
+com `parseInt(...,10)` e normalizam resultados não finitos para 0 após #228.
 Texto `'1e21'` vira 1, não um valor enorme. Fixtures realistas usam cadeias de
 dígitos decimais: `'1' + '0'.repeat(21)` tem 22 dígitos e produz 1e21;
-`'9'.repeat(400)` produz Infinity. A partir de 309 dígitos, depende da magnitude:
-não é qualquer cadeia de 309 dígitos que excede Number.MAX_VALUE.
+`'9'.repeat(400)` transborda no parse e chega à sombra como 0, status valid.
+A partir de 309 dígitos, o overflow depende da magnitude. A sombra não recebe
+a proveniência do valor normalizado e não deve inventar um status invalid.
 Valores hostis devem entrar pelo órfão; entradas só de unidade não provam alcance real.
 
 Confiança `number` finita é limitada a [0,1]; status `clamped` se a limitação muda
@@ -104,7 +108,8 @@ Um timestamp ilegível também devolve a base crua no código atual: equivale à
 de timestamp utilizável para esta premissa, não a um decaimento observado.
 No órfão, `confidence: 0` vira 0.5 por `parseFloat(...) || 0.5`.
 Com timestamp válido e relógio extremo, o decaimento pode chegar a 0 por underflow;
-isso é distinto da entrada literal zero no órfão e permite observar `0 * Infinity`.
+isso é distinto da entrada literal zero no órfão. Com hits normalizados para 0,
+a qualidade ativa e a sombra são 0, preservando o score finito e o rank observado.
 
 ## Invariante e interação
 
@@ -313,7 +318,8 @@ Continuam pendentes, sem correção nem mascaramento aqui:
 R3 (identidade de entrega), R4 e R5 (controller); `slices/S04/S04-REVIEW.md`
 R1, R2, R3, R4, R5 e R6. Paths relativos à raiz do milestone.
 Esse namespace difere de R1–R3 do comparador público do adendo S05 acima.
-O defeito latente de NaN do comparador ativo também permanece fora do escopo.
+A correção numérica ativa #228 foi integrada separadamente da sombra; a antiga
+reprodução de NaN permanece evidência histórica, não comportamento atual esperado.
 Limites históricos cumulativos de 300s/60s foram substituídos por vigilância de
 partida, silêncio, atividade e teto de segurança por tier; não os reintroduzir.
 Verificação local futura não prova CI hospedado, provider real, instalação,

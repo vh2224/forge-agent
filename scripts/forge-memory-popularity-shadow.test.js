@@ -182,7 +182,9 @@ try {
     const d = parity(hostile, { diagnostic: true }).popularity_shadow;
     const byId = id => d.candidates.find(c => c.identity === `legacy-orphan/${id}`);
     assert.equal(byId('MEM101').hits_status, 'saturated'); assert.equal(byId('MEM101').hits, null);
-    assert.equal(byId('MEM102').hits_status, 'invalid');
+    // #228 normalizes overflowing legacy counters before the shadow receives them.
+    assert.equal(byId('MEM102').hits_status, 'valid');
+    assert.equal(byId('MEM102').hits, 0);
     assert.equal(byId('MEM103').hits_status, 'invalid');
     assert.equal(byId('MEM104').confidence_status, 'clamped');
     assert.equal(byId('MEM105').confidence_status, 'clamped');
@@ -211,18 +213,23 @@ try {
     assert(parity(v2, { query: '' }).entries.some(e => e.evidence.counters.exposure > 0 &&
       e.evidence.legacy_ambiguous.seed_hits === 0));
   });
-  test('T03 truth 4: real underflow times Infinity records nonfinite null and observed baseline rank without active repair', () => {
+  test('T03 truth 4: normalized overflow with real underflow keeps finite quality and observed baseline rank', () => {
     const dir = root('nan');
     orphan(dir, [{ id: 'MEM201', hits: '9'.repeat(400), updated: '1970-01-01T00:00:00Z' },
       { id: 'MEM202', hits: 1 }]);
     const r = parity(dir, { nowMs: 8640000000000000, diagnostic: true });
     const c = r.popularity_shadow.candidates.find(row => row.identity === 'legacy-orphan/MEM201');
-    assert(r.popularity_shadow.measures.baseline_quality_nonfinite >= 1);
-    assert.equal(c.shadow_quality, 0); assert.equal(c.hits_status, 'invalid');
-    assert.equal(c.baseline_quality, null);
-    const observedRank = r.diagnostic.candidates.find(row => row.identity === c.identity).rank;
-    assert.equal(c.baseline_rank, observedRank);
-    assert(Number.isNaN(r.entries.find(row => row.identity === c.identity).score));
+    assert.equal(r.popularity_shadow.measures.baseline_quality_nonfinite, 0);
+    assert.equal(c.shadow_quality, 0); assert.equal(c.hits_status, 'valid');
+    assert.equal(c.hits, 0); assert.equal(c.baseline_quality, 0);
+    const observed = r.diagnostic.candidates.find(row => row.identity === c.identity);
+    assert.equal(c.baseline_rank, observed.rank);
+    const entry = r.entries.find(row => row.identity === c.identity);
+    assert.equal(entry.hits, 0); assert.equal(entry.confidence, 0);
+    assert.equal(observed.components.quality, 0);
+    assert(Number.isFinite(entry.score));
+    assert.equal(entry.score, observed.components.overlap_points + observed.components.category_points);
+    assert.equal(entry.score, observed.components.score);
   });
   test('T03 truth 5: observable A/C displacement, confidence counterexample, and valid-domain equality without quality claim', () => {
     const dir = root('displacement');

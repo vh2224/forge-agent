@@ -18,11 +18,36 @@ const MANDATORY_TOKEN_CEILINGS = Object.freeze({
   'discuss-milestone': 1300, 'discuss-slice': 1300,
   'research-milestone': 1300, 'research-slice': 1300,
 });
+// #239: fixed allocation for the reviewed mandatory planning-readiness paragraph.
+// This is not optional context and does not raise the unchanged baseline budget.
+const PLANNING_READINESS_SUPPLEMENT = [
+  'When legitimate command discovery is insufficient, put consumable commands in',
+  "the plan's verify field or an explicit execution-request verification policy for",
+  'each physical root. Prose checklists alone do not supply executable verification.',
+  'Validate the fully assembled, serialized request with the execution preflight;',
+  'structural plan acceptance does not establish execution readiness.',
+].join('\n') + '\n';
+const PLANNING_READINESS_TOKEN_LIMIT = 97;
+const PLANNING_PHASES = new Set(['plan-slice', 'plan-milestone', 'plan-check']);
 function optionalTokens(rendered, phase) {
   const procedure = loadProcedureContext({ cwd: root, phase });
   const optional = separateProcedurePrompt(rendered.prompt, procedure, rendered.procedure_context);
   assert(rendered.prompt.includes(procedure.content), `${phase}: canonical mandatory bytes`);
-  assert(countTokens(procedure.content) <= MANDATORY_TOKEN_CEILINGS[phase], `${phase}: mandatory ${countTokens(procedure.content)} tokens`);
+  const hasReadiness = PLANNING_PHASES.has(phase);
+  const supplement = hasReadiness ? PLANNING_READINESS_SUPPLEMENT : '';
+  if (hasReadiness) {
+    assert(procedure.modules.some(module => module.id === 'planning'));
+    assert.strictEqual(procedure.content.split(supplement).length, 2,
+      `${phase}: the reviewed readiness supplement occurs exactly once`);
+    assert.strictEqual(countTokens(supplement), PLANNING_READINESS_TOKEN_LIMIT);
+  }
+  const baselineMandatory = hasReadiness
+    ? procedure.content.replace(supplement, '') : procedure.content;
+  assert(countTokens(baselineMandatory) <= MANDATORY_TOKEN_CEILINGS[phase],
+    `${phase}: baseline mandatory content exceeded its unchanged allocation`);
+  assert(countTokens(procedure.content) <= MANDATORY_TOKEN_CEILINGS[phase]
+    + (hasReadiness ? PLANNING_READINESS_TOKEN_LIMIT : 0),
+    `${phase}: total mandatory content exceeded reviewed allocations`);
   assert.strictEqual(rendered.input_tokens, countTokens(rendered.prompt));
   return countTokens(optional);
 }

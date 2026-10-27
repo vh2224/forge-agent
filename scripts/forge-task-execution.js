@@ -12,15 +12,50 @@ const roots = require('./forge-code-roots');
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 function fail(code) { throw Object.assign(new Error(code), { code }); }
 const autoPlanGate = new AsyncLocalStorage();
+// Shared with the milestone adapter: identical canonical/legacy selection,
+// conflict, supplied-path and no-link rules. No dependency back to the adapter.
+function milestonePlanFile(r) {
+  if (!/^(?:M\d+|M-\d{14}-[a-z0-9-]+)$/i.test(r.milestoneId || '')) fail('invalid-milestone');
+  if (!/^S\d+$/.test(r.sliceId || '')) fail('invalid-slice');
+  if (!/^T\d+(?:\.\d+)?$/.test(r.taskId || '')) fail('invalid-task');
+  const root = r.contextRoot || r.cwd;
+  const prefix = `.gsd/milestones/${r.milestoneId}/slices/${r.sliceId}/tasks`;
+  function target(relative) {
+    let current = root;
+    for (const part of relative.split('/')) {
+      current = path.join(current, part);
+      try { if (fs.lstatSync(current).isSymbolicLink()) fail('artifact-link-refused'); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    return current;
+  }
+  const canonical = target(`${prefix}/${r.taskId}/${r.taskId}-PLAN.md`);
+  const legacy = target(`${prefix}/${r.taskId}-PLAN.md`);
+  if (fs.existsSync(canonical) && fs.existsSync(legacy)) fail('legacy-task-plan-conflict');
+  const selected = fs.existsSync(canonical) ? canonical : legacy;
+  if (!fs.existsSync(selected)) fail('execution-plan-required');
+  if (r.planFile && path.resolve(r.planFile) !== path.resolve(selected)) fail('execution-plan-path-mismatch');
+  return selected;
+}
 function autoGateScope(r) {
-  locations(r);
+  if (r.phase !== 'execute' || r.unitType !== 'execute-task') fail('execution-phase-unit-mismatch');
+  if (r.scope !== 'milestone') locations(r);
   const owner = fs.realpathSync(r.contextRoot || r.cwd);
-  const plan = path.join(owner, '.gsd/tasks', r.taskId, `${r.taskId}-PLAN.md`);
+  const plan = r.scope === 'milestone' ? milestonePlanFile(r)
+    : path.join(owner, '.gsd/tasks', r.taskId, `${r.taskId}-PLAN.md`);
   physical(owner, plan);
+  if (!r.planFile || roots.key(fs.realpathSync(r.planFile)) !== roots.key(fs.realpathSync(plan))) fail('execution-plan-path-mismatch');
+  physical(owner, r.planFile);
   const reference = r.gates?.authorizationReference;
-  if (typeof reference !== 'string' || !reference.trim() || !r.workflowId || !r.dispatchId) fail('execution-auto-gate-binding-required');
-  return Object.freeze({ taskId: r.taskId, workflowId: r.workflowId, dispatchId: r.dispatchId,
-    host: r.route?.host_runtime, owner, codeDir: fs.realpathSync(r.cwd), planSha256: hash(read(plan)), reference });
+  if (typeof reference !== 'string' || !reference.trim() || !r.workflowId || !r.dispatchId || !r.route?.host_runtime) fail('execution-auto-gate-binding-required');
+  const contract = r.execution_contract
+    ? roots.validateContract(r.execution_contract, { owner, revalidate: true }) : roots.singleContract(owner, r.cwd);
+  return Object.freeze({ scope: r.scope, phase: r.phase, unitType: r.unitType,
+    milestoneId: r.milestoneId || null, sliceId: r.sliceId || null,
+    taskId: r.taskId, workflowId: r.workflowId, dispatchId: r.dispatchId,
+    host: r.route.host_runtime, owner, codeDir: fs.realpathSync(r.cwd),
+    planFile: fs.realpathSync(plan), planSha256: hash(read(plan)),
+    executionContractSha256: roots.digest(contract), reference });
 }
 function autoGateAllowed(r) {
   const live = autoPlanGate.getStore();
@@ -307,4 +342,4 @@ function replayState(cwd, contract) {
   const state = require('./forge-surgical-reset').captureAttemptSnapshot(cwd);
   return { start_sha: state.start_sha, pre_dirty: state.pre_dirty, vcs: state.vcs };
 }
-module.exports = { locations, prepare, protectedSnapshot, assertProtected, verifyResult, assertReplay, replayState, withAutoPlanGate };
+module.exports = { locations, prepare, protectedSnapshot, assertProtected, verifyResult, assertReplay, replayState, withAutoPlanGate, autoGateAllowed, milestonePlanFile };

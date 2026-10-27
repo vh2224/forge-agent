@@ -397,7 +397,12 @@ test('v2 exposure, reobserve and utility never raise hits/confidence; repeated o
     const result = memory.writeFragment(mixedRoot, { unit_id: 'T01', facts: [], stats: NON_REINFORCING });
     assert(result.created === true, 'v2 rows were published');
     const stored = memory.readFragment(mixedRoot, 'T01').stats.filter(row => row.evidence_version);
-    assert(stored.length === NON_REINFORCING.length - 1, 'x4 repeats observation obs-x1 and is a store no-op');
+    assert(stored.length === NON_REINFORCING.length, 'distinct delivery IDs are retained even for repeated observations');
+    nodeAssert.deepStrictEqual(stored.map(row => row.event_id).sort(),
+      NON_REINFORCING.map(row => row.event_id).sort(), 'x1 and x4 remain separate delivery identities');
+    assert(memory.writeFragment(mixedRoot, { unit_id: 'T01', facts: [], stats: NON_REINFORCING }).created === false,
+      'exact replay of stored delivery IDs is a no-op');
+    nodeAssert.deepStrictEqual(memory.readFragment(mixedRoot, 'T01').stats.filter(row => row.evidence_version), stored);
     for (const nowMs of [NOW0, NOW0 + 3 * DAY_MS]) {
       const base = projection.projectMemoryEntries(legacyRoot, { nowMs });
       const mixed = projection.projectMemoryEntries(mixedRoot, { nowMs });
@@ -425,7 +430,13 @@ test('independent v2 confirmation reinforces once; the same observation repackag
     memory.writeFragment(tmp, { unit_id: 'T01', facts: [], stats: [confirm] });
     const repackaged = v2Row('confirm', 'c9', { mem_id: 'MEM002', extraction_id: 'extract-3', event_id: 'extract-3:v2:c9',
       observation_id: 'obs-c1', evidence_ref: 'other', ts: '2026-10-01T02:00:00.000Z' });
-    assert(memory.writeFragment(tmp, { unit_id: 'T01', facts: [], stats: [repackaged] }).created === false);
+    assert(memory.writeFragment(tmp, { unit_id: 'T01', facts: [], stats: [repackaged] }).created === true,
+      'a distinct delivery identity is retained without reinforcing the observation twice');
+    const stored = memory.readFragment(tmp, 'T01').stats.filter(row => row.evidence_version);
+    nodeAssert.deepStrictEqual(stored.map(row => row.event_id).sort(), [confirm.event_id, repackaged.event_id].sort());
+    assert(memory.writeFragment(tmp, { unit_id: 'T01', facts: [], stats: [repackaged] }).created === false,
+      'exact replay of the repackaged delivery is a no-op');
+    nodeAssert.deepStrictEqual(memory.readFragment(tmp, 'T01').stats.filter(row => row.evidence_version), stored);
     const entry = projection.projectMemoryEntries(tmp, { nowMs: NOW0 }).find(item => item.identity === 'T01/MEM002');
     assert(entry.hits === 5, `historical 4 + one independent confirmation, got ${entry.hits}`);
     near(entry.base_confidence, 0.52, 'confirmation nudges the legacy ranking confidence once');

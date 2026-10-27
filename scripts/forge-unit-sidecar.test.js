@@ -1,6 +1,6 @@
 'use strict';
 // A selector runs exactly one recovery scenario; no arguments retain full coverage.
-const scenarioSelectors = ['--review-fix-recovery', '--delivery-publication-limits', '--recovery-contracts', '--pre-spawn-sidecar', '--pre-spawn-native', '--no-progress-event', '--owner-event-reconcile', '--ceiling-route', '--claude-session', '--claude-resume', '--liveness-heartbeat', '--memory-evidence'];
+const scenarioSelectors = ['--milestone-auto-gate', '--review-fix-recovery', '--delivery-publication-limits', '--recovery-contracts', '--pre-spawn-sidecar', '--pre-spawn-native', '--no-progress-event', '--owner-event-reconcile', '--ceiling-route', '--claude-session', '--claude-resume', '--liveness-heartbeat', '--memory-evidence'];
 const scenarioArgs = process.argv.slice(2);
 if (scenarioArgs.length > 1 || (scenarioArgs.length === 1 && !scenarioSelectors.includes(scenarioArgs[0]))) {
   console.error(`Usage: node forge-unit-sidecar.test.js [${scenarioSelectors.join('|')}]`);
@@ -54,6 +54,92 @@ assert.strictEqual(sidecar.validateRecoveryRequest(research).mode, 'artifacts');
 assert.strictEqual(sidecar.validateRecoveryRequest({ ...research, unitType: 'plan-slice', sliceId: 'S01' }).mode, 'plan');
 assert.strictEqual(sidecar.locations({ ...research, unitType: 'execute-task', sliceId: 'S01', taskId: 'T01' }).required[0],
   '.gsd/milestones/M001/slices/S01/tasks/T01/T01-SUMMARY.md');
+
+
+async function milestoneAutoGateContracts() {
+  const fs = require('fs'), path = require('path'), crypto = require('crypto');
+  const { AsyncResource } = require('async_hooks');
+  const { EventEmitter } = require('events');
+  const execution = require('./forge-task-execution');
+  const fixtures = require('./forge-code-roots.test'), runs = require('./forge-runs');
+  const lab = fixtures.fixture();
+  try {
+    const base = path.join(lab.owner, '.gsd/milestones/M001/slices/S01');
+    fs.mkdirSync(path.join(base, 'tasks/T01'), { recursive: true });
+    const request = { unitType: 'execute-task', scope: 'milestone', phase: 'execute',
+      milestoneId: 'M001', sliceId: 'S01', taskId: 'T01', cwd: lab.a, contextRoot: lab.owner,
+      execution_contract: lab.contract, workflowId: 'milestone-auto', dispatchId: 'auto-gate-fixture',
+      runId: 'milestone-auto-fixture', planFile: path.join(base, 'tasks/T01/T01-PLAN.md'),
+      resultFile: path.join(lab.dir, 'auto-result.json'), prompt: 'Fixture only.',
+      verification: { preferenceCommands: ['node -e "process.exit(0)"'] } };
+    fs.writeFileSync(request.planFile, fixtures.plan(lab.contract));
+    fs.writeFileSync(path.join(base, 'S01-PLAN.md'), '# Slice\n- [ ] **T01** ? fixture\n');
+    fs.writeFileSync(path.join(lab.owner, '.gsd/forge-prefs.jsonc'), JSON.stringify({ tier_models: Object.fromEntries(
+      ['light', 'standard', 'heavy', 'max'].map(tier => [tier, ['gpt-6-sol']])) }));
+    resolveContext(request);
+    assert.strictEqual(request.route.worker_mode, 'native');
+    const binding = require('./forge-native-invocation').buildNativeInvocation({
+      hostRuntime: 'codex', resolvedDispatch: request.route, prompt: request.prompt,
+      agentType: 'forge-executor', taskName: request.dispatchId, forkTurns: 'none',
+      activeCapabilities: { available: true, tool: 'spawn_agent', source: 'test-active-tool',
+        models: ['gpt-6-sol'], reasoning_efforts: ['low', 'medium', 'high', 'xhigh'], fork_turns: ['none'] } });
+    assert.strictEqual(binding.ok, true, binding.reason_code);
+    request.claim = { schema_version: 2, generation: crypto.randomUUID(), execution_contract: lab.contract,
+      paths: ['alpha', 'beta'].map(root_id => ({ root_id, path: 'same.txt' })) };
+    request.gates = { plan: 'skipped', planSkipReason: 'auto-defer', authorizationReference: 'conversation:fixture-auto',
+      claim: 'proceed', security: 'not-applicable' };
+    runs.add(lab.owner, { id: request.runId, kind: 'milestone', session_id: 'fixture', write_claim: request.claim });
+    const validate = r => sidecar.validateRecoveryRequest(r, { nativeInvocation: binding });
+    assert.throws(() => validate(JSON.parse(JSON.stringify(request))), /execution-plan-gate-required/);
+    const attest = scope => ({ authorized: true, mode: 'auto', reference: scope.reference });
+    let authorized = true, bound, close, ready;
+    const emitter = new EventEmitter(); // created outside the live async scope
+    const started = new Promise(resolve => { ready = resolve; });
+    const closed = new Promise(resolve => { close = resolve; });
+    const active = execution.withAutoPlanGate(request, scope => ({ ...attest(scope), authorized }), async () => {
+      assert.strictEqual(validate(request).mode, 'execute');
+      for (const changed of [
+        { ...request, dispatchId: 'foreign' }, { ...request, workflowId: 'foreign' },
+        { ...request, route: { ...request.route, host_runtime: 'foreign' } },
+        { ...request, gates: { ...request.gates, authorizationReference: 'foreign' } },
+        { ...request, cwd: lab.b },
+        { ...request, execution_contract: { ...lab.contract, primary_root_id: 'beta' } },
+        { ...request, execution_contract: { ...lab.contract, code_roots: lab.contract.code_roots.filter(r => r.id !== 'beta') } },
+      ]) assert.throws(() => execution.autoGateAllowed(changed), /execution-auto-gate-binding-mismatch/);
+      for (const changed of [{ ...request, phase: 'plan' }, { ...request, unitType: 'plan-slice' },
+        { ...request, scope: 'other' }, { ...request, milestoneId: 'M002' },
+        { ...request, sliceId: 'S02' }, { ...request, taskId: 'T02' },
+        { ...request, planFile: path.join(lab.dir, 'foreign-PLAN.md') }])
+        assert.throws(() => execution.autoGateAllowed(changed));
+      const original = fs.readFileSync(request.planFile);
+      fs.appendFileSync(request.planFile, '\nChanged after authorization.\n');
+      assert.throws(() => execution.autoGateAllowed(request), /execution-auto-gate-binding-mismatch/);
+      fs.writeFileSync(request.planFile, original);
+      bound = AsyncResource.bind(() => validate(request));
+      emitter.on('validate', bound);
+      ready();
+      await closed;
+    });
+    await Promise.race([started, active.then(() => { throw new Error('auto scope closed before readiness'); })]);
+    try {
+      assert.strictEqual(execution.autoGateAllowed(request), false, 'outside scope has no capability');
+      assert.doesNotThrow(() => emitter.emit('validate'), 'bound externally emitted callback retains scope');
+      authorized = false;
+      assert.throws(() => emitter.emit('validate'), /execution-auto-gate-not-attested/);
+      authorized = true;
+    } finally { close(); await active; }
+    assert.throws(() => bound(), /execution-plan-gate-required/, 'captured callback cannot outlive scope');
+    assert.throws(() => validate(request), /execution-plan-gate-required/);
+    assert.strictEqual(validate({ ...request, gates: { ...request.gates, planSkipReason: 'interactive-off' } }).mode, 'execute');
+    const marker = request.planFile.replace('-PLAN.md', '-PLAN-GATE.md');
+    assert(!fs.existsSync(marker), 'live auto scope never writes human approval');
+    fs.writeFileSync(marker, 'status: approved\n');
+    assert.strictEqual(validate(request).mode, 'execute');
+    fs.writeFileSync(marker, 'status: approved\nplan_sha256: ' + '0'.repeat(64) + '\n');
+    assert.throws(() => validate(request), /execution-plan-gate-stale/);
+    console.log('milestone native auto gate: live authority, complete binding, revocation, closure and preserved gates passed');
+  } finally { lab.cleanup(); }
+}
 
 async function recoveryContracts() {
   const fs = require('fs'), path = require('path'), crypto = require('crypto');
@@ -1993,6 +2079,7 @@ async function runScenarios() {
     if (!selectedScenario || selectedScenario === '--pre-spawn-native') await preSpawnRecoveryContracts(true);
     if (!selectedScenario || selectedScenario === '--no-progress-event') await noProgressEventContracts();
     if (!selectedScenario || selectedScenario === '--owner-event-reconcile') await ownerEventReconcileContracts();
+    if (!selectedScenario || selectedScenario === '--milestone-auto-gate') await milestoneAutoGateContracts();
     if (!selectedScenario || selectedScenario === '--ceiling-route') await ceilingRouteContracts();
     if (!selectedScenario || selectedScenario === '--claude-session') await claudeSessionContracts();
     if (!selectedScenario || selectedScenario === '--claude-resume') await claudeResumeContracts();

@@ -241,15 +241,10 @@ function locations(request) {
   return { required, allowed: [...required, ...deliveryOptional, ...optional], rules, delivery, milestone, slice };
 }
 function milestonePlanFile(request) {
-  const loc = locations(request), root = request.contextRoot || request.cwd;
-  const canonical = target(root, `${loc.slice}/tasks/${request.taskId}/${request.taskId}-PLAN.md`);
-  const legacy = target(root, `${loc.slice}/tasks/${request.taskId}-PLAN.md`);
-  if (fs.existsSync(canonical) && fs.existsSync(legacy)) fail('legacy-task-plan-conflict');
-  const selected = fs.existsSync(canonical) ? canonical : legacy;
-  if (!fs.existsSync(selected)) fail('execution-plan-required');
-  if (request.planFile && path.resolve(request.planFile) !== path.resolve(selected)) fail('execution-plan-path-mismatch');
-  return selected;
+  locations(request);
+  return require('./forge-task-execution').milestonePlanFile(request);
 }
+
 // Pure readiness check over the wire representation, after caller assembly.
 // Without an identity this is diagnostic policy, never a reusable dispatch seal.
 function preflightExecutionVerification(raw, options = {}) {
@@ -330,7 +325,8 @@ function validateRecoveryRequest(raw, options = {}) {
         const gateFile = planFile.replace(/-PLAN\.md$/, '-PLAN-GATE.md');
         const gate = fs.existsSync(gateFile) ? fs.readFileSync(gateFile, 'utf8') : '';
         if (!/^status:\s*approved\s*$/m.test(gate)
-            && !(request.gates?.plan === 'skipped' && request.gates?.planSkipReason === 'interactive-off')) fail('execution-plan-gate-required');
+            && !(request.gates?.plan === 'skipped' && request.gates?.planSkipReason === 'interactive-off')
+            && !require('./forge-task-execution').autoGateAllowed(request)) fail('execution-plan-gate-required');
         const approvedHash = gate.match(/^plan_sha256:\s*([a-f0-9]{64})\s*$/m)?.[1];
         if (approvedHash && approvedHash !== hash(plan)) fail('execution-plan-gate-stale');
         if (request.gates?.claim !== 'proceed' || !['passed', 'not-applicable'].includes(request.gates?.security)) fail('execution-gates-required');

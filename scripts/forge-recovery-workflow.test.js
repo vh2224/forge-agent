@@ -541,15 +541,26 @@ async function main() {
         const interrupted = { ...planning, phase: 'execute', unitType: 'execute-task', taskId: 'T01',
           ...executionAuthority,
           planFile: tasks[0].planPath, execution_contract: lab.contract, dispatchId: 'milestone-timeout',
-          resultFile: path.join(lab.dir, 'interrupted.json'), prompt: 'Synthetic timeout only' };
+          resultFile: path.join(lab.dir, 'interrupted.json'), prompt: 'Synthetic timeout only',
+          verification: { commandsByRoot: {
+            alpha: ['node -e "require(\'fs\').accessSync(\'same.txt\')"'],
+            beta: ['node -e "require(\'fs\').accessSync(\'same.txt\')"'],
+          } } };
+        let interruptedCalls = 0;
         xllm.runExecute = async () => {
+          interruptedCalls++;
           const receipt = JSON.parse(fs.readFileSync(interrupted.resultFile + '.receipt.json'));
           assert.equal(receipt.recovery_baseline.protected_roots.length, 2, 'baseline persisted before writer');
+          assert.deepEqual(receipt.verification_seal.roots.map(root => root.root_id).sort(), ['alpha', 'beta'],
+            'both physical roots have sealed executable verification before the writer');
           write(path.join(lab.a, 'same.txt'), 'Interrupted alpha\n');
           write(path.join(lab.b, 'same.txt'), 'Interrupted beta\n');
           throw Object.assign(Error('milestone timeout fixture'), { code: 'claude-timeout' });
         };
         await assert.rejects(unit.runUnitSidecar(resolveMilestone(interrupted)), /milestone timeout fixture/);
+        assert.equal(interruptedCalls, 1, 'the gated interruption scenario reached its writer exactly once');
+        assert.equal(fs.readFileSync(path.join(lab.a, 'same.txt'), 'utf8'), 'Interrupted alpha\n');
+        assert.equal(fs.readFileSync(path.join(lab.b, 'same.txt'), 'utf8'), 'Interrupted beta\n');
         const restartFile = path.join(lab.dir, 'milestone-restart.json'); write(restartFile, JSON.stringify(interrupted));
         child([__filename, '--milestone-restart', restartFile], env);
         const resetProof = JSON.parse(fs.readFileSync(restartFile + '.proof'));
