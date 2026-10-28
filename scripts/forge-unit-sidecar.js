@@ -146,6 +146,7 @@ function reviewFixLocations(request) {
   const boundary = request.reviewFix && typeof request.reviewFix === 'object' ? request.reviewFix.boundary : undefined;
   const invalid = () => fail('review-fix-boundary-invalid',
     'review-fix requires boundary slice (milestone + slice), task (standalone task id) or milestone-triage (milestone + per-item review_file).');
+  if(request.scope==='standalone-task'&&boundary!=='task'||request.scope==='milestone'&&boundary==='task')invalid();
   if (boundary === 'slice') {
     if (!MILESTONE_ID_RE.test(m || '') || !/^S\d+$/.test(s || '') || t !== undefined) invalid();
     const milestone = `.gsd/milestones/${m}`, slice = `${milestone}/slices/${s}`;
@@ -2735,26 +2736,48 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
   const executionRequest = { ...request, ...authority };
   if (Object.keys(authority).some(key => !['execution_contract', 'claim', 'runId', 'gates'].includes(key))) fail('recovery-execution-authority-invalid');
   const canonical = require('./forge-attempt-recovery').canonicalRequest(request);
-  if (recovery.transitions?.some(row => row.type === 'uninvoked-native-reservation')
-      && (canonical.scope !== 'milestone' || canonical.phase !== 'execute' || canonical.unitType !== 'execute-task')) {
+  if (recovery.transitions?.some(row => ['uninvoked-native-reservation', 'uninvoked-native-repackage'].includes(row.type))
+      && (!['milestone', 'standalone-task'].includes(canonical.scope) || canonical.phase !== 'execute' || canonical.unitType !== 'execute-task')) {
     fail('ordinary-native-delivery-unsupported');
   }
-  if (canonical.scope === 'standalone-task' && canonical.phase !== 'execute') {
+  if (canonical.scope === 'standalone-task'
+      && require('./forge-task-preparation').phaseContract(canonical.phase)?.unitType===canonical.unitType) {
     return require('./forge-task-preparation').recoverStandaloneTask(request, recovery, runtime);
   }
   const resolverOptions = { cwd: canonical.contextRoot, unitType: canonical.unitType, scope: canonical.scope, phase: canonical.phase,
     hostRuntime: canonical.route.host_runtime, milestoneId: canonical.milestoneId,
     unitId: canonical.taskId || canonical.sliceId || canonical.milestoneId,
     planPath: canonical.planFile, roadmapPath: canonical.roadmapFile };
-  const ordinaryResume = recovery.transitions?.some(row => row.type === 'uninvoked-native-reservation');
+  const ordinaryResume = recovery.transitions?.some(row => ['uninvoked-native-reservation', 'uninvoked-native-repackage'].includes(row.type));
   const continuationId = ordinaryResume ? recovery.resumeReservation?.sha256 : crypto.randomUUID();
   if (ordinaryResume && !/^[a-f0-9]{64}$/.test(continuationId || '')) fail('recovery-reservation-required');
   const nativeTaskName = `recovery_${request.dispatchId}_${continuationId}`;
-  const deliveryHelper = ordinaryResume && canonical.scope === 'milestone' && canonical.phase === 'execute'
+  const deliveryHelper = ordinaryResume && ['milestone', 'standalone-task'].includes(canonical.scope) && canonical.phase === 'execute'
     ? require('./forge-native-recovery-delivery') : null;
-  const finalRequest = route => ({ ...executionRequest, route, recoveryStateFile: recovery.stateFile,
-    dispatchId: recoveryDispatchId(request.dispatchId, continuationId), resultFile: `${request.resultFile}.recovery-${continuationId}.json` });
-  const nativeOptions = route => {
+  let retainedRequest = null;
+  const finalRequest = route => {
+    const current = { ...executionRequest, route, recoveryStateFile: recovery.stateFile,
+      dispatchId: recoveryDispatchId(request.dispatchId, continuationId), resultFile: `${request.resultFile}.recovery-${continuationId}.json` };
+    return retainedRequest ? require('./forge-native-repackage').preserveRequest(current, retainedRequest) : current;
+  };
+  // This selects transport only; authority and the exact invocation hash are
+  // independently revalidated by recovery before any consumption or dispatch.
+  let retainedFileTransport = false;
+  if (deliveryHelper && fs.existsSync(recovery.stateFile)) {
+    require('./forge-attempt-recovery').validateStateTarget(recovery.stateFile, canonical, executionRequest.execution_contract);
+    const retainedState = require('./forge-xllm-state').loadRecovery(recovery.stateFile);
+    retainedFileTransport = retainedState?.continuation?.packaging_reason === 'uninvoked-native-file-repackage';
+    if (retainedFileTransport || recovery.transitions?.some(row => row.type === 'uninvoked-native-repackage')) {
+      const original = retainedFileTransport ? retainedState.continuation_history?.find(row => row.reservation_sha256 === continuationId) : retainedState.continuation;
+      if (!original?.delivery) fail('native-repackage-evidence-invalid');
+      require('./forge-attempt-recovery').validateStateTarget(original.delivery.manifest_file, canonical, executionRequest.execution_contract);
+      const bytes = fs.readFileSync(original.delivery.manifest_file);
+      if (hash(bytes) !== original.delivery.manifest_sha256) fail('native-repackage-evidence-invalid');
+      retainedRequest = JSON.parse(bytes).request;
+    }
+  }
+  const promptTransports = new Map();
+  const nativeOptions = (route, { fileBacked = false } = {}) => {
     // Binding preflight uses the real task plan; the transport composes the
     // complete execution/security/context prompt after prepare.
     const executionPlan = canonical.scope === 'standalone-task' && canonical.phase === 'execute'
@@ -2787,7 +2810,22 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     const additional = recoveryProcedure.content.split(/(?=<!-- forge-procedure:)/)
       .filter(segment => segment.trim() && !present.has(/^<!-- forge-procedure:([^>]+) -->/.exec(segment)?.[1]));
     prompt += '\n\n' + additional.join('');
-    if (deliveryHelper) prompt = deliveryHelper.packagePrompt(finalRequest(route), prompt);
+    if (deliveryHelper) {
+      // Capability preflight is not the final invocation; consume only the final packaged binding below.
+      const seed = canonical.scope === 'standalone-task' ? require('./forge-native-invocation').buildNativeInvocation({
+        hostRuntime: route.host_runtime, resolvedDispatch: route, activeCapabilities: runtime.activeCapabilities,
+        effortBinding: runtime.effortBinding, prompt, forkTurns: 'none', taskName: nativeTaskName, agentType: 'forge-executor' }) : null;
+      if (seed && !seed.ok) fail(seed.reason_code);
+      prompt = deliveryHelper.packagePrompt(finalRequest(route), prompt, { nativeInvocation: seed });
+    }
+    let transport = null;
+    if (deliveryHelper && (fileBacked || retainedFileTransport || request.nativePromptFile || recovery.transitions?.some(row => row.type === 'uninvoked-native-repackage'))) {
+      const file = finalRequest(route).resultFile + '.native-prompt.txt';
+      const promptHash = hash(prompt);
+      if (!promptTransports.has(promptHash)) promptTransports.set(promptHash, require('./forge-native-prompt-file').prepare({
+        file, prompt, contract: executionRequest.execution_contract, deferWrite: true }));
+      transport = promptTransports.get(promptHash);
+    }
     return { hostRuntime: route.host_runtime, resolvedDispatch: route,
     telemetryIdentity: finalRequest(route), lifecycle: runtime.nativeLifecycle,
     terminalResult: value => deliveryHelper ? deliveryHelper.resultContract.validate(value).ok
@@ -2797,7 +2835,12 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
         ? require('./forge-worker-result').parseJsonEnvelope(value).ok === true
         : value && ['done', 'partial', 'blocked'].includes(value.status),
     activeCapabilities: runtime.activeCapabilities, effortBinding: runtime.effortBinding,
-    prompt, forkTurns: 'none',
+    prompt: transport ? transport.message : prompt,
+    ...(transport ? { promptContext: prompt, assertReplay: () => transport.assertExisting(), assertInvocation: stage => {
+      if (stage === 'packaged') transport.materialize();
+      transport.assertUnchanged();
+    } } : {}),
+    onPackagedContext: runtime.onPackagedContext, forkTurns: 'none',
     taskName: nativeTaskName,
     agentType: ({ execute: 'forge-executor', plan: 'forge-planner', research: 'forge-researcher', discuss: 'forge-discusser' })[canonical.phase] || 'forge-worker' };
   };
@@ -2812,6 +2855,9 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route)) : undefined });
   }
   return require('./forge-attempt-recovery').recoverAttempt({ ...recovery, request,
+    nativeJournalFile: runtime.nativeLifecycle?.journal?.file,
+    ...(recovery.nativeRepackage ? { nativeRepackage: { ...recovery.nativeRepackage,
+      nextJournalFile: runtime.nativeLifecycle?.journal?.file } } : {}),
     inspectSavedResult: runtime.savedNativeResult ? async () => (await inspectSavedNativeExecution(executionRequest, runtime)).writer : undefined,
     recoveryAuthorization: runtime.recoveryAuthorization, processProbe: runtime.processProbe,
     transitionAdapter: runtime.transitionAdapter,
@@ -2876,6 +2922,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       if (route.worker_mode === 'native') {
         if (deliveryHelper) {
           const session = deliveryHelper.prepare({ request: next, nativeInvocation: invocation,
+            savedManifest: assertReady?.repackageManifest?.(runtime.nativeLifecycle?.journal?.file),
             assertBoundary: runtime.assertBoundary, assertAuthority: assertReady?.assertAuthority,
             persistDeliveryReceipt: assertReady?.persistDeliveryReceipt,
             linkedEntryOptions: runtime.linkedEntryOptions });

@@ -2027,22 +2027,23 @@ async function memoryEvidenceContracts() {
   }
 }
 
-async function reviewFixRecoveryContracts() {
+async function reviewFixRecoveryContracts(standalone=false) {
   const fs = require('fs'), path = require('path'), crypto = require('crypto');
   const fixtures = require('./forge-code-roots.test'), roots = require('./forge-code-roots');
   const recovery = require('./forge-attempt-recovery'), xllm = require('./forge-xllm'), runs = require('./forge-runs');
   const fix = require('./forge-review-fix'), lab = fixtures.fixture();
   const originalRunFix = xllm.runFix;
   const contract = roots.singleContract(lab.owner, lab.a);
-  const reviewFile = '.gsd/milestones/M001/slices/S01/S01-REVIEW.md';
+  const taskId='T-20261028040008-vigiar-progresso';
+  const reviewFile = standalone?`.gsd/tasks/${taskId}/${taskId}-REVIEW.md`:'.gsd/milestones/M001/slices/S01/S01-REVIEW.md';
   fs.mkdirSync(path.dirname(path.join(lab.owner, reviewFile)), { recursive: true });
   fs.writeFileSync(path.join(lab.owner, reviewFile), '# Review\n\n### R1 — bug\n- **Veredito:** CONCEDED\n');
-  fs.writeFileSync(path.join(lab.owner, '.gsd/milestones/M001/M001-ROADMAP.md'), '# Roadmap\n\n- [ ] **S01: Work** `depends:[]`\n');
+  if(!standalone)fs.writeFileSync(path.join(lab.owner, '.gsd/milestones/M001/M001-ROADMAP.md'), '# Roadmap\n\n- [ ] **S01: Work** `depends:[]`\n');
   fs.writeFileSync(path.join(lab.owner, '.gsd/forge-prefs.jsonc'), JSON.stringify({ tier_models: Object.fromEntries(
     ['light', 'standard', 'heavy', 'max'].map(tier => [tier, ['claude-sonnet-5', 'gpt-6-sol']])) }));
-  const request = resolveContext({ unitType: 'review-fix', milestoneId: 'M001', sliceId: 'S01',
+  const request = resolveContext({ unitType: 'review-fix', ...(standalone?{scope:'standalone-task',phase:'review-fix',taskId}:{milestoneId: 'M001', sliceId: 'S01'}),
     cwd: lab.a, contextRoot: lab.owner, resultFile: path.join(lab.dir, 'fix.json'), workflowId: 'fixture', dispatchId: 'fix-legacy',
-    constraints: { auto_commit: false }, reviewFix: { boundary: 'slice', decision: 'proceed', claimPaths: ['same.txt'],
+    constraints: { auto_commit: false }, reviewFix: { boundary: standalone?'task':'slice', decision: 'proceed', claimPaths: ['same.txt'],
       items: [{ r: 'R1', path: 'same.txt', claim: 'broken', action: 'repair' }] } });
   const executionAuthority = { execution_contract: contract, runId: 'fixture-fixer',
     claim: { schema_version: 2, generation: crypto.randomUUID(), execution_contract: contract, paths: [{ root_id: 'primary', path: 'same.txt' }] },
@@ -2205,7 +2206,7 @@ async function reviewFixRecoveryContracts() {
     assert(fs.readFileSync(receiptFile).equals(receiptBytes));
     assert(fs.readFileSync(baselineFile).equals(baselineBytes));
     assert.strictEqual(JSON.parse(fs.readFileSync(stateFile)).roots_sha256, roots.digest({ cwd: request.cwd }));
-    console.log('PASS legacy review-fix: real failed/reset producer, exact dirty restoration, held claim, pending questions, native prompt and public prepare/accept; historical bytes unchanged');
+    console.log('PASS '+(standalone?'standalone':'legacy')+' review-fix: real failed/reset producer, exact dirty restoration, held claim, pending questions, native prompt and public prepare/accept; historical bytes unchanged');
   } finally { xllm.runFix = originalRunFix; lab.cleanup(); }
 }
 
@@ -2217,7 +2218,7 @@ async function runScenarios() {
   process.env.CODEX_HOME = path.join(profile, '.codex'); process.env.CLAUDE_CONFIG_DIR = path.join(profile, '.claude');
   process.env.FORGE_HOME = path.resolve(__dirname, '..');
   try {
-    if (!selectedScenario || selectedScenario === '--review-fix-recovery') await reviewFixRecoveryContracts();
+    if (!selectedScenario || selectedScenario === '--review-fix-recovery') {await reviewFixRecoveryContracts();await reviewFixRecoveryContracts(true);}
     if (!selectedScenario || selectedScenario === '--delivery-publication-limits') await deliveryPublicationLimits();
     if (!selectedScenario || selectedScenario === '--recovery-contracts') await recoveryContracts();
     if (!selectedScenario || selectedScenario === '--pre-spawn-sidecar') await preSpawnRecoveryContracts();

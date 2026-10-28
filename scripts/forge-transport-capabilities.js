@@ -20,6 +20,7 @@ const UNIT_MODES = Object.freeze({
 function capability(engine, unitType, delivery = {}) {
   let standalone = false;
   let standaloneExecute = false;
+  const standaloneFix=delivery?.scope==='standalone-task'&&unitType==='review-fix'&&delivery.phase==='review-fix';
   if (delivery && delivery.scope === 'standalone-task') {
     if (unitType === 'execute-task' && delivery.phase === 'execute') standaloneExecute = true;
     else try {
@@ -29,7 +30,7 @@ function capability(engine, unitType, delivery = {}) {
   }
   const mode = standalone ? 'artifacts' : UNIT_MODES[unitType];
   const validScope = (!delivery.scope && delivery.phase === undefined)
-    || delivery.scope === 'standalone-task' && (standalone || standaloneExecute);
+    || delivery.scope === 'standalone-task' && (standalone || standaloneExecute || standaloneFix);
   const supported = ['claude', 'codex'].includes(engine) && !!mode && validScope;
   return {
     supported, mode: supported ? mode : null,

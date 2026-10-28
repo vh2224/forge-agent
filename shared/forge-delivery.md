@@ -215,6 +215,23 @@ markup are escaped. The JSON remains the complete reconstructible detail.
 
 ### Initial documentary and mixed capture
 
+A caller that omitted the initial documentary policy may supplement an immutable
+executed partial receipt through `prepare({savedManifest, supplementalCoverage})`.
+This is replay-only: it cannot write another worker return or alter the original
+manifest/result. The supplement supplies `policy`, `returnedReceiptFile`, a live
+`attestStoppedWriter` and independent `attestEligibility` callback bound to the
+original manifest/receipt hashes and policy digest. Only unknown non-artifact
+criteria are eligible; existing behavioral evidence retains behavioral coverage.
+The ordinary `reviewDocumentary`, concrete verification, claims, gates and source
+hash checks still apply. Eligibility is not a successful content review.
+
+Derived review evidence and ready receipts retain the supplemental provenance.
+Canonical replay requires fresh `runtime.supplementalCoverage` and
+`runtime.documentaryReview`; a ready receipt or serialized approval alone cannot
+grant this authority. Missing authority, changed original bytes, changed source
+evidence or an unreconciled writer refuses publication. Execution evidence does
+not settle independent code-review findings, CI, integration or human acceptance.
+
 The native delivery adapter accepts an explicit `coveragePolicy` before `prepare`.
 The immutable manifest seals each selected criterion's exact text, read-only
 source paths and required `(aspect, root_id, coverage)` tuples. Documentary

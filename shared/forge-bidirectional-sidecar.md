@@ -440,8 +440,18 @@ usa a mesma liveness neutra da S01 como autoridade primária do kill. O módulo 
 `scripts/forge-appserver-liveness.js` reduz as notificações JSON-RPC a um snapshot no
 contrato de entrada de `liveness.evaluate`; o cliente só acrescenta o watchdog. O
 bloco `liveness` exposto ao host é o mesmo da S06 (`observation()`, `progressLine`,
-`readProgressLine`), com a mesma cadência de 30000 ms e emissão na transição. O agy
-não é alterado.
+`readProgressLine`), com a mesma cadência de 30000 ms e emissão na transição.
+
+O review agy usa o mesmo tracker e DEFAULTS quando o binário anuncia
+`--output-format stream-json` no `--help`, consultado a cada invocação, sem cache.
+Sem anúncio ou com probe falho de término confirmado, mantém o caminho legado
+limitado e rotulado `unsupported-legacy`, sem supervisão semântica. O stream não
+tem prova local: a janela de ferramenta permanece limitada a 660000 ms nos
+defaults e ao timeout efetivo. O formato dos eventos e o vocabulário de
+tipos/estados são uma suposição documentada, ainda não verificada contra o
+provider. O host executou apenas `--version`/`--help` do binário oficial 1.4.8
+isoladamente; nenhuma inferência real foi executada. Saída de processo não
+confirmada bloqueia fallback e conserva o prompt até reconciliação.
 
 - **Evento remoto (suposição conservadora, sem probe ao vivo):** conta como remoto
   qualquer notificação do servidor depois do envio de `turn/start`, exceto o conjunto
@@ -851,6 +861,29 @@ História insuficiente conserva a recusa; implementar este mecanismo não desblo
 
 
 ## Standalone native execution and durable writer results
+
+An ordinary `uninvoked-native-reservation` continuation supports standalone
+execution with the same live history, held claim, gates and strict delivery checks.
+When `nativePromptFile` is requested, the final invocation binds a short file
+instruction and SHA-256; the complete UTF-8 prompt is retained beside the derived
+result path. File bytes, physical identity and ancestor links are rechecked at
+invocation boundaries. Telemetry measures the full context and actual tool arguments
+separately. The native tool must receive those arguments unchanged.
+
+`uninvoked-native-repackage` is an exclusive recovery transition for a consumed
+callback that the trusted host proves never called its executor tool. It requires
+`nativeRepackage.invocationFile` and `journalFile`, a fresh native lifecycle journal,
+the normal live history/root/uninvoked attestations and `attestRepackage(challenge)`.
+The latter binds the exact challenge with `actual_native_calls: 0`,
+`wrapper_stopped: true`, `status: 'uninvoked'` and an evidence reference. Process
+absence or these fields in imported JSON do not constitute proof. An observed
+acknowledgement, remote event, provider contact, result or receipt refuses this path.
+The original invocation, manifest, journal and full prompt must match the consumed
+binding; only transport changes. One replacement is allowed per reservation.
+Original attempts/reservations stay intact and the previous continuation is retained
+in `continuation_history`. A prepared replacement can resume through the ordinary
+transition with fresh live attestations and all retained evidence revalidated;
+returned results retain canonical replay priority without another inference.
 
 `runUnitSidecar(request, runtime)` accepts standalone `execute-task` with an
 explicit native route, nonempty held v2 claim and `request.nativeInvocation`.

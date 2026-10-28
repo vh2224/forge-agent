@@ -52,7 +52,9 @@ process.env.FORGE_XLLM_CLAUDE_BIN = provider;
 let sequence = 0;
 const id = 'T-20261008120000-fixture';
 function git(cwd, args) {
-  const r = cp.spawnSync('git', args, { cwd, encoding: 'utf8', windowsHide: true });
+  // A detached maintenance writer can remove its lock while the template is
+  // copied (#264). These are private test repositories, not user Git settings.
+  const r = cp.spawnSync('git', ['-c','maintenance.auto=false','-c','gc.auto=0',...args], { cwd, encoding: 'utf8', windowsHide: true });
   assert.strictEqual(r.status, 0, r.stderr); return r.stdout.trim();
 }
 function setup(vcsName = 'git') {
@@ -81,7 +83,11 @@ function setupFixture(vcsName, resolveInitialRoute) {
     if (!fs.existsSync(template)) {
       fs.mkdirSync(template);
       write(path.join(template, 'src.js'), 'before\n'); write(path.join(template, 'dirty.txt'), 'before\n');
-      git(template, ['init', '-q']); git(template, ['config', 'core.autocrlf', 'false']); git(template, ['add', '.']);
+      git(template, ['init', '-q']); git(template, ['config', 'core.autocrlf', 'false']);
+      // Persist before the first commit; every copied case retains this policy.
+      git(template, ['config', 'maintenance.auto', 'false']);
+      git(template, ['config', 'gc.auto', '0']);
+      git(template, ['add', '.']);
       git(template, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'baseline']);
     }
     // Use Node's per-entry traversal for this tiny private tree. The native bulk

@@ -48,9 +48,10 @@ function exceptionFor(handle, identity, now) {
 function routeKey(route) { return digest({ host: route.host_runtime, worker: route.resolved_worker_engine,
   transport: route.worker_mode, model: route.model_resolved || route.model, effort: route.effort }); }
 function canonicalRequest(request) {
-  const phase = request.phase || ({ 'execute-task': 'execute', 'plan-check': 'plan-check' }[request.unitType])
+  const standaloneFix=request.unitType==='review-fix'&&request.reviewFix?.boundary==='task'&&request.taskId&&!request.milestoneId&&!request.sliceId;
+  const phase = request.phase || (standaloneFix?'review-fix':null) || ({ 'execute-task': 'execute', 'plan-check': 'plan-check' }[request.unitType])
     || request.unitType?.split('-')[0];
-  return { ...request, scope: request.scope || (request.milestoneId ? 'milestone' : undefined), phase,
+  return { ...request, scope: request.scope || (standaloneFix?'standalone-task':request.milestoneId ? 'milestone' : undefined), phase,
     contextRoot: request.contextRoot || request.cwd };
 }
 // Only the embedding host can supply this object. JSON references are data;
@@ -414,15 +415,21 @@ function createRecovery(options) {
       const saved = state.reservations?.at(-1), previous = state.attempts.at(-1);
       const transition = input.transition ? transitions.assertLive(input.transition) : null;
       const ordinary = transition?.uninvoked?.reservation_sha256 === input.reservation_sha256;
+      const repackage = transition?.repackage;
       if (!saved || digest(saved) !== input.reservation_sha256 || (!ordinary && (saved.handoff_pending !== true || saved.handed_off_at
           || (transition ? digest(saved.transition_reference) !== digest(transition.reference)
             : !environmentalRepairs.has(input.correction) || saved.correction?.kind !== 'environment'
               || saved.correction.failure_id !== input.correction.failure_id)))) fail('recovery-handoff-reservation-invalid');
       if (ordinary && (state.phase !== 'reserved' || state.attempts.some(row => row.reservation && digest(row.reservation) === digest(saved))
-          || state.continuation && state.continuation.status !== 'prepared')) fail('recovery-reservation-consumed');
+          || !repackage && state.continuation && state.continuation.status !== 'prepared')) fail('recovery-reservation-consumed');
       const scope = exceptionFor(input.exception, state, clock()), observed = candidateSets.get(input.candidateSet);
+      // Offline caller corrections retain null provenance. Resume only through
+      // their exact authenticated native predecessor, without rewriting history.
+      const expectedProvenance = ordinary && saved.provenance === null
+        ? require('./forge-recovery-reservation-lineage').inheritedProvenance(state,
+          { ordinary, routeKey, destinationKey: transitions.destinationKey }) : saved.provenance;
       if (!observed || observed.provenance.request_identity_sha256 !== state.request_identity_sha256
-          || digest(observed.provenance) !== digest(saved.provenance)
+          || digest(observed.provenance) !== digest(expectedProvenance)
           || digest(transition?.resolution?.effective.chain || previous.route.chain) !== observed.provenance.chain_sha256) fail('recovery-candidate-provenance-required');
       const route = observed.routes.find(row => routeKey(row) === saved.route_key);
       const policy = transition?.resolution?.effective || previous.route;
@@ -439,7 +446,28 @@ function createRecovery(options) {
           final_request_sha256: digest(args), prompt_sha256: digest(prompt), invocation_sha256: digest(invocation),
           packaging_reason: 'ordinary-native-reservation-restart', offline_validation: 'native-adapter:final-arguments',
           evidence_reference: transition.uninvoked.evidence_reference };
-        if (state.continuation && digest(state.continuation) !== digest(continuation)) fail('recovery-continuation-changed');
+        if (repackage) {
+          if (digest(state.continuation) !== digest(repackage.old)
+              || state.continuation_history?.some(row => row.reservation_sha256 === input.reservation_sha256)) fail('recovery-continuation-changed');
+          repackage.validateInvocation(invocation);
+          state.continuation_history = [...(state.continuation_history || []), structuredClone(state.continuation)];
+          continuation.packaging_reason = 'uninvoked-native-file-repackage';
+          continuation.full_prompt_sha256 = repackage.old.prompt_sha256;
+          continuation.repackage_evidence = structuredClone(repackage.evidence);
+        } else if (state.continuation?.packaging_reason === 'uninvoked-native-file-repackage') {
+          // A crash before consumption retains the exact prepared binding. A
+          // fresh live uninvoked attestation resumes it, never repackages twice.
+          const retained = state.continuation;
+          if (!transition.preparedRepackage) fail('recovery-continuation-changed');
+          transition.preparedRepackage.validateInvocation(invocation);
+          if (retained.status !== 'prepared' || retained.reservation_sha256 !== input.reservation_sha256
+              || retained.original_request_sha256 !== saved.request_sha256
+              || retained.invocation_sha256 !== digest(invocation) || retained.final_request_sha256 !== digest(args)
+              || retained.prompt_sha256 !== digest(prompt)
+              || state.continuation_history?.filter(row => row.reservation_sha256 === input.reservation_sha256
+                && row.prompt_sha256 === retained.full_prompt_sha256).length !== 1) fail('recovery-continuation-changed');
+          Object.assign(continuation, structuredClone(retained));
+        } else if (state.continuation && digest(state.continuation) !== digest(continuation)) fail('recovery-continuation-changed');
         state.continuation = continuation; save();
       } else {
         saved.handoff_pending = false; saved.handed_off_at = clock(); state.phase = 'external-handoff'; save();
@@ -893,9 +921,19 @@ async function recoverAttempt(options) {
     if (transitionGuard) transitionGuard.withLock(() => {});
     else preSpawn?.assertUnchanged();
   }, { assertAuthority,
+    ...(decision.continuation && session.inspect().continuation?.packaging_reason === 'uninvoked-native-file-repackage' ? { repackageManifest(journalFile) {
+      assertReady();
+      const fs = require('fs');
+      if (!journalFile || fs.existsSync(journalFile)) fail('native-repackage-fresh-journal-required');
+      validateStateTarget(journalFile, options.request, options.executionContract);
+      const evidence = transitionGuard?.repackage || transitionGuard?.preparedRepackage;
+      if (!evidence) fail('recovery-continuation-changed');
+      return structuredClone(evidence.manifest);
+    } } : {}),
     ...(decision.continuation ? { consumeInvocation(invocation, delivery) {
       assertReady();
       transitionGuard.withLock(() => session.consumeContinuation(invocation, decision.reservation_sha256, delivery));
+      (transitionGuard.repackage || transitionGuard.preparedRepackage)?.consumed();
       reservedStateHash = expectedStateHash;
     }, invocationReturned() {
       assertAuthority(); session.returnContinuation(); reservedStateHash = expectedStateHash;

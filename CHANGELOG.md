@@ -1,5 +1,15 @@
 ## Não lançado
 
+- Fixtures: desabilita manutencao automatica Git somente nos repositorios privados antes do primeiro commit, evitando a corrida de maintenance.lock durante a copia integral (#264).
+
+- Reviews agy: supervisão limitada quando `--help` anuncia `stream-json`, com legado rotulado `unsupported-legacy`; o formato documentado ainda não foi verificado contra inferência real (#205)
+
+- Evidências documentais suplementares podem concluir uma entrega parcial com revisão independente e verificação real, preservando manifesto, resultado original e autoridade viva na retomada (#273).
+- Correções de review de tasks soltas preservam a identidade de escopo na validação e recuperação, sem serem encaminhadas à preparação de task (#275).
+
+- Tasks soltas podem retomar uma reserva nativa comprovadamente não invocada, inclusive após correção de montagem, mantendo a origem validada, o vínculo do prompt final, gates, histórico e replay durável (#273).
+- Retomadas nativas conservam o contexto completo em arquivo com hash e identidade física verificados. Reempacotamento após callback sem chamada real exige atestação viva do host, preserva os registros originais e mantém replay e retomada antes do consumo (#273).
+
 - Recuperações sucessivas geram IDs limitados com hash do pai, preservando histórico e evitando recusa antes da invocação (#272).
 
 - Preparação: recusas de conteúdo identificam a categoria inválida do plano ou das seções, sem expor texto do provedor nem alterar critérios de aceitação (#271).
