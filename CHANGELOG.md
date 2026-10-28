@@ -1,5 +1,7 @@
 ## Não lançado
 
+- Tasks soltas podem retomar uma reserva nativa comprovadamente não invocada, mantendo o vínculo do prompt final, gates, histórico e replay durável (#273).
+
 - Recuperações sucessivas geram IDs limitados com hash do pai, preservando histórico e evitando recusa antes da invocação (#272).
 
 - Preparação: recusas de conteúdo identificam a categoria inválida do plano ou das seções, sem expor texto do provedor nem alterar critérios de aceitação (#271).

@@ -2736,7 +2736,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
   if (Object.keys(authority).some(key => !['execution_contract', 'claim', 'runId', 'gates'].includes(key))) fail('recovery-execution-authority-invalid');
   const canonical = require('./forge-attempt-recovery').canonicalRequest(request);
   if (recovery.transitions?.some(row => row.type === 'uninvoked-native-reservation')
-      && (canonical.scope !== 'milestone' || canonical.phase !== 'execute' || canonical.unitType !== 'execute-task')) {
+      && (!['milestone', 'standalone-task'].includes(canonical.scope) || canonical.phase !== 'execute' || canonical.unitType !== 'execute-task')) {
     fail('ordinary-native-delivery-unsupported');
   }
   if (canonical.scope === 'standalone-task' && canonical.phase !== 'execute') {
@@ -2750,7 +2750,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
   const continuationId = ordinaryResume ? recovery.resumeReservation?.sha256 : crypto.randomUUID();
   if (ordinaryResume && !/^[a-f0-9]{64}$/.test(continuationId || '')) fail('recovery-reservation-required');
   const nativeTaskName = `recovery_${request.dispatchId}_${continuationId}`;
-  const deliveryHelper = ordinaryResume && canonical.scope === 'milestone' && canonical.phase === 'execute'
+  const deliveryHelper = ordinaryResume && ['milestone', 'standalone-task'].includes(canonical.scope) && canonical.phase === 'execute'
     ? require('./forge-native-recovery-delivery') : null;
   const finalRequest = route => ({ ...executionRequest, route, recoveryStateFile: recovery.stateFile,
     dispatchId: recoveryDispatchId(request.dispatchId, continuationId), resultFile: `${request.resultFile}.recovery-${continuationId}.json` });
@@ -2787,7 +2787,14 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     const additional = recoveryProcedure.content.split(/(?=<!-- forge-procedure:)/)
       .filter(segment => segment.trim() && !present.has(/^<!-- forge-procedure:([^>]+) -->/.exec(segment)?.[1]));
     prompt += '\n\n' + additional.join('');
-    if (deliveryHelper) prompt = deliveryHelper.packagePrompt(finalRequest(route), prompt);
+    if (deliveryHelper) {
+      // Capability preflight is not the final invocation; consume only the final packaged binding below.
+      const seed = canonical.scope === 'standalone-task' ? require('./forge-native-invocation').buildNativeInvocation({
+        hostRuntime: route.host_runtime, resolvedDispatch: route, activeCapabilities: runtime.activeCapabilities,
+        effortBinding: runtime.effortBinding, prompt, forkTurns: 'none', taskName: nativeTaskName, agentType: 'forge-executor' }) : null;
+      if (seed && !seed.ok) fail(seed.reason_code);
+      prompt = deliveryHelper.packagePrompt(finalRequest(route), prompt, { nativeInvocation: seed });
+    }
     return { hostRuntime: route.host_runtime, resolvedDispatch: route,
     telemetryIdentity: finalRequest(route), lifecycle: runtime.nativeLifecycle,
     terminalResult: value => deliveryHelper ? deliveryHelper.resultContract.validate(value).ok

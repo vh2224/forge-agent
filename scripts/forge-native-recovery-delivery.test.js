@@ -13,20 +13,26 @@ const delivery = require('./forge-native-recovery-delivery');
 const { write, capabilities } = fixtures;
 async function fixture(options = {}) {
   const f = fixtures.setup();
-  const base = path.join(f.owner, '.gsd/milestones/M901/slices/S01');
-  const planFile = path.join(base, 'tasks/T01/T01-PLAN.md');
+  const standalone = options.standalone === true;
+  const taskId = standalone ? 'T-20261028000000-reservation' : 'T01';
+  const base = path.join(f.owner, standalone ? '.gsd/tasks/' + taskId : '.gsd/milestones/M901/slices/S01');
+  const planFile = path.join(base, standalone ? taskId + '-PLAN.md' : 'tasks/T01/T01-PLAN.md');
   const command = 'node check.cjs';
   for (const root of f.contract.code_roots) write(path.join(root.path,'check.cjs'),
-    "require('assert').equal(require('fs').readFileSync('same.txt','utf8'),'after\\n');console.log('PASS claimed root content');");
-  const plan = require('./forge-code-roots.test').plan(f.contract).replace('id: T-roots','id: T01')
+    options.existenceOnly ? "require('assert').ok(require('fs').existsSync('same.txt'));console.log('PASS claimed root content');" :
+      "require('assert').equal(require('fs').readFileSync('same.txt','utf8'),'after\\n');console.log('PASS claimed root content');");
+  const plan = require('./forge-code-roots.test').plan(f.contract).replace('id: T-roots','id: ' + taskId)
     .replace('must_haves:', 'verify:\n  - ' + JSON.stringify(command) + '\nmust_haves:')
-    .replace('  key_links: []', "  key_links:\n    - from: 'alpha::same.txt'\n      to: 'beta::same.txt'\n      via: 'Both roots change together.'");
+    .replace('  key_links: []', "  key_links:\n    - from: 'alpha::same.txt'\n      to: 'beta::same.txt'\n      via: 'Both roots change together.'")
+    .replaceAll('min_lines: 1',options.existenceOnly?'min_lines: 10':'min_lines: 1');
   write(planFile, plan);
-  write(path.join(base,'S01-PLAN.md'),'# Slice\n- [ ] **T01** — fixture\n');
-  write(f.roadmap,'# Roadmap\n- [ ] **S01: Recovery** `depends:[]`\n');
+  if (!standalone) {
+    write(path.join(base,'S01-PLAN.md'),'# Slice\n- [ ] **T01** — fixture\n');
+    write(f.roadmap,'# Roadmap\n- [ ] **S01: Recovery** `depends:[]`\n');
+  }
   const claim = { schema_version: 2, generation: crypto.randomUUID(), execution_contract: f.contract,
     paths: f.contract.code_roots.map(row => ({root_id:row.id,path:'same.txt'})) };
-  require('./forge-runs').add(f.owner,{id:'fixture-run',kind:'milestone',session_id:'fixture',write_claim:claim});
+  require('./forge-runs').add(f.owner,{id:'fixture-run',kind:standalone?'task':'milestone',session_id:'fixture',write_claim:claim});
   const r = {unitType:'execute-task',scope:'milestone',phase:'execute',milestoneId:'M901',sliceId:'S01',taskId:'T01',
     cwd:f.a,contextRoot:f.owner,planFile,roadmapFile:f.roadmap,execution_contract:f.contract,claim,runId:'fixture-run',
     gates:{plan:'skipped',planSkipReason:'interactive-off',claim:'proceed',security:'passed'},
@@ -34,11 +40,30 @@ async function fixture(options = {}) {
     researchFile:path.join(base,'S01-RESEARCH.md'),workflowId:'fixture',dispatchId:options.dispatchId || 'ordinary-execute',
     resultFile:path.join(f.dir,'execute.json'),prompt:'Implement the claimed fixture only.',
     verification:{commandTimeoutMs:300000,commandsByRoot:{alpha:[command],beta:[command]}}};
+  if (standalone) {
+    Object.assign(r,{scope:'standalone-task',taskId, constraints:{auto_commit:false,deploy:false},
+      gates:{plan:'approved',claim:'proceed',security:'passed'},
+      contextFile:path.join(base,taskId+'-CONTEXT.md'),researchFile:path.join(base,taskId+'-RESEARCH.md')});
+    delete r.milestoneId; delete r.sliceId; delete r.roadmapFile;
+    write(planFile.replace('-PLAN.md','-PLAN-GATE.md'),'---\nstatus: approved\n---\n');
+    write(path.join(base,taskId+'-BRAINSTORM.md'),'Standalone alternatives and risks.');
+    const prefs=JSON.parse(fs.readFileSync(f.prefsFile));prefs.token_budget={coding_standards:32};
+    write(f.prefsFile,JSON.stringify(prefs));
+    write(path.join(f.owner,'.gsd/CODING-STANDARDS.md'),'OPTIONAL_STANDARD '.repeat(1000)+'STANDARDS_END');
+  }
   write(r.contextFile,'# Context\nChange both roots.');write(r.securityFile,'# Security\nPreserve claims and history.');
   write(r.researchFile,'# Research\nBoth files currently contain before.');
   f.originalOptions={cwd:f.owner,unitType:r.unitType,scope:r.scope,phase:r.phase,hostRuntime:'codex',milestoneId:'M901',unitId:'T01',planPath:planFile,roadmapPath:f.roadmap};
-  r.route=require('./forge-dispatch-resolve').resolveDispatch({...f.originalOptions,scope:undefined,phase:undefined});
+  if (standalone) {delete f.originalOptions.milestoneId;delete f.originalOptions.roadmapPath;f.originalOptions.unitId=taskId;}
+  r.route=require('./forge-dispatch-resolve').resolveDispatch(standalone?f.originalOptions:{...f.originalOptions,scope:undefined,phase:undefined});
   f.request=r;f.stateFile=r.resultFile+'.recovery.json';f.receiptFile=r.resultFile+'.receipt.json';
+  if (standalone) {
+    f.assertBoundary=()=>{
+      if(f.boundaryRejected)throw new Error('fixture-boundary-lost');
+      const held=require('./forge-runs').get(f.owner,'fixture-run');
+      assert.equal(held.active,true);assert.equal(roots.digest(held.write_claim),roots.digest(claim));
+    };
+  } else {
   const controller=require('./forge-unit-controller');
   require('./forge-state').write(f.owner,{milestone:'M901',kind:'milestone',phase:'idle',active_slice:'S01',active_task:'—',auto_mode:'on'});
   const begin=controller.begin(f.owner,{milestone:'M901',unit:{type:'execute-task',id:'T01',key:'execute-task/T01'},slice:'S01',owner_token:'fixture-owner',host_runtime:'codex',idempotency_key:'fixture-begin',ttl_ms:300000});
@@ -52,7 +77,8 @@ async function fixture(options = {}) {
     const lease=require('./forge-unit-lease').observe(f.owner,'execute-task/T01');
     assert.equal(lease.lease?.generation,begin.generation);assert.equal(lease.reason,'lease-active');
   };
-  const session=recovery.createRecovery({unit:'execute-task/T01',roots_sha256:roots.digest(f.contract),request:r,clock:()=>10,persist:value=>stateApi.saveRecovery(f.stateFile,value)});
+  }
+  const session=recovery.createRecovery({unit:'execute-task/'+taskId,roots_sha256:roots.digest(f.contract),request:r,clock:()=>10,persist:value=>stateApi.saveRecovery(f.stateFile,value)});
   session.record({...f.initial.attempts[0],route:r.route,caller_request_sha256:recovery.callerRequestHash(r)});
   write(f.receiptFile,JSON.stringify({phase:'failed',dispatch_id:r.dispatchId,fingerprint:side.artifactFingerprint(r),route:r.route,
     recovery_identity_sha256:roots.digest(recovery.requestIdentity(r)),failure:{reason_code:'sidecar-timeout',provider_called:'unknown'}}));
@@ -76,14 +102,60 @@ async function fixture(options = {}) {
   };
   return f;
 }
+async function standaloneReservation(){
+  const f=await fixture({standalone:true,dispatchId:'s'.repeat(128)});
+  try {
+    const handoff=await side.recoverUnitSidecar(f.request,f.recovery,f.runtime);
+    const live=handoff.result;let calls=0;
+    assert.equal(live.request.scope,'standalone-task');
+    assert.equal(live.request.milestoneId,undefined);assert.equal(live.request.sliceId,undefined);
+    const callback=async(next,binding)=>{
+      calls++;
+      const prompt=binding.args.message||binding.args.prompt;
+      for(const text of ['Standalone alternatives and risks.','Both files currently contain before.',
+        'Preserve claims and history.','forge-procedure:','Full coding standards:',f.request.taskId])assert(prompt.includes(text),text);
+      assert(!prompt.includes('STANDARDS_END'),'optional standards must be budgeted');
+      assert(next.dispatchId.length<=128);
+      for(const root of f.contract.code_roots)write(path.join(root.path,'same.txt'),'after\n');
+      return f.result();
+    };
+    const research=fs.readFileSync(f.request.researchFile);
+    fs.appendFileSync(f.request.researchFile,' altered');
+    assert.equal((await live.invoke(callback)).ok,false);assert.equal(calls,0);
+    fs.writeFileSync(f.request.researchFile,research);
+    const gateFile=f.request.planFile.replace('-PLAN.md','-PLAN-GATE.md'),gate=fs.readFileSync(gateFile);
+    write(gateFile,'---\nstatus: rejected\n---\n');
+    await assert.rejects(()=>live.invoke(callback),/execution-plan-gate-required/);assert.equal(calls,0);
+    fs.writeFileSync(gateFile,gate);
+    f.boundaryRejected=true;
+    assert.equal((await live.invoke(callback)).ok,false);assert.equal(calls,0);
+    f.boundaryRejected=false;
+    const outcome=await live.invoke(callback);
+    assert.equal(outcome.ok,true,JSON.stringify(outcome));assert.equal(calls,1);
+    live.delivery.verify(outcome.result);
+    const published=live.delivery.publish(outcome.result);
+    assert.equal(published.result.status,'done');
+    assert(fs.existsSync(path.join(f.owner,side.locations(f.request).required[0])));
+    assert.equal((await live.invoke(callback)).ok,false);assert.equal(calls,1);
+    assert.deepEqual(stateApi.loadRecovery(f.stateFile).reservations,f.initial.reservations);
+    assert.deepEqual(stateApi.loadRecovery(f.stateFile).attempts,f.initial.attempts);
+    console.log('PASS standalone unused reservation: canonical inputs, budget, live boundary, exact identity, one callback and publication');
+  }finally{f.cleanup();}
+}
 async function main(){
+  await standaloneReservation();
+  await standaloneNegativeEvidence();
   await initialMixedDocumentary();
   await initialMixedDocumentary(true);
   await documentaryContinuation();
   await protectedLeaseRenewal();
   await implicitOrdinaryIdentity();
   await durableReplay();
+  await durableReplay(true);
   await guardedHandoff();
+  await ordinaryPublication();
+}
+async function ordinaryPublication(){
   const f=await fixture();
   try{
     let calls=0;
@@ -125,6 +197,30 @@ async function main(){
     console.log('PASS public ordinary restart: exact payload, two claimed roots, one callback, canonical verified publication and immutable history');
     console.log('PASS milestone evidence: missing, duplicate, foreign, wrong-root, fabricated and unmet criteria refuse; standalone schema unchanged');
   }finally{f.cleanup();}
+}
+async function standaloneNegativeEvidence(){
+  for(const existenceOnly of [true,false]){
+    const f=await fixture({standalone:true,existenceOnly});
+    try{
+      const adapter=f.runtime.transitionAdapter;
+      f.runtime.transitionAdapter=transitions.createTransitionAdapter({
+        attestHistory:()=>{throw Error('must refuse missing native census first');},attestRoot:()=>({})});
+      await assert.rejects(()=>side.recoverUnitSidecar(f.request,f.recovery,f.runtime),/transition-uninvoked-adapter-required/);
+      f.runtime.transitionAdapter=adapter;
+      let calls=0;
+      f.runtime.invokeNative=async()=>{
+        calls++;
+        for(const root of f.contract.code_roots)write(path.join(root.path,'same.txt'),existenceOnly?'after\n':'wrong content\n');
+        return f.result();
+      };
+      await assert.rejects(()=>side.recoverUnitSidecar(f.request,f.recovery,f.runtime),
+        existenceOnly?/canonical-delivery-not-fully-verified/:/verification/);
+      assert.equal(calls,1);
+      assert(!fs.existsSync(path.join(f.owner,side.locations(f.request).required[0])));
+      assert.deepEqual(stateApi.loadRecovery(f.stateFile).reservations,f.initial.reservations);
+      console.log('PASS standalone refuses '+(existenceOnly?'non-substantive artifact despite passing command':'failed actual command')+' without publication');
+    }finally{f.cleanup();}
+  }
 }
 async function documentaryContinuation(){
   const f=await fixture();
@@ -416,9 +512,9 @@ async function implicitOrdinaryIdentity() {
     console.log('PASS invalid explicit identity refuses before manifest or receipt');
   } finally { invalid.cleanup(); }
 }
-async function durableReplay() {
+async function durableReplay(standalone=false) {
   for(const stage of ['returned','publication']) {
-    const f=await fixture({dispatchId:'r'.repeat(128)});
+    const f=await fixture({dispatchId:'r'.repeat(128),standalone});
     const materialize=side.materialize;
     try {
       let calls=0;
@@ -451,7 +547,7 @@ async function durableReplay() {
       const again=await side.recoverUnitSidecar(f.request,f.recovery,f.runtime);
       assert.equal(again.action,'replay');assert.equal(calls,1);
       assert.deepEqual(stateApi.loadRecovery(f.stateFile).reservations,f.initial.reservations);
-      console.log('PASS durable milestone replay after '+stage+': fresh live writer census, no second callback, idempotent canonical publication');
+      console.log('PASS durable '+(standalone?'standalone':'milestone')+' replay after '+stage+': fresh live writer census, no second callback, idempotent canonical publication');
     }finally{side.materialize=materialize;f.cleanup();}
   }
 }
@@ -464,7 +560,7 @@ async function guardedHandoff() {
       subscribe(handle,listener,context){assert.equal(handle,'fixture-ack');nativeEvent=listener;
         nativeIdentity=context.identity;subscribed();return()=>{};}}};
     await assert.rejects(()=>side.recoverUnitSidecar({...f.request,scope:'standalone-task'},f.recovery,f.runtime),
-      /ordinary-native-delivery-unsupported/);
+      /recovery-request-identity-required/);
     const handoff=await side.recoverUnitSidecar(f.request,f.recovery,f.runtime);
     const live=handoff.result;let calls=0;const originalModel=live.request.route.model;
     const callback=async()=>{calls++;return f.result();};
@@ -502,4 +598,5 @@ async function guardedHandoff() {
   } finally { f.cleanup(); }
 }
 module.exports={fixture,main,protectedLeaseRenewal,documentaryContinuation,initialMixedDocumentary,guardedHandoff};
-if(require.main===module)main().catch(error=>{console.error(error);process.exitCode=1;});
+async function continuations(){await durableReplay(true);await guardedHandoff();await ordinaryPublication();}
+if(require.main===module)(process.argv.includes('--standalone')?standaloneReservation():process.argv.includes('--standalone-negative')?standaloneNegativeEvidence():process.argv.includes('--continuations')?continuations():main()).catch(error=>{console.error(error);process.exitCode=1;});

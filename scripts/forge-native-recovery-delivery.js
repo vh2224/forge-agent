@@ -189,12 +189,14 @@ const resultContract = api('forge-worker-result-contract').contract('milestone-r
     root_id: string, evidence: array(object({ root_id: string, check: string, stdout_line: { ...string, minLength: 1 } })),
   })),
 }));
-function packagePrompt(request, prompt) {
+function packagePrompt(request, prompt, options = {}) {
   const roots = api('forge-code-roots');
   const contract = roots.validateContract(request.execution_contract, { owner: request.contextRoot, revalidate: true });
   for (const root of [contract.owner, ...contract.code_roots.map(row => row.path)])
     api('forge-xllm').validateResultFileTarget(request.resultFile, root);
-  const sections = inputSections(request);
+  const standalone = request.scope === 'standalone-task';
+  const execution = standalone ? api('forge-task-execution').prepare({ ...request, nativeInvocation: options.nativeInvocation }, request.contextRoot || request.cwd, request.cwd) : null;
+  const sections = standalone ? [] : inputSections(request);
   const inputs = sections.map(([label, file]) => {
     if (!file) fail('milestone-payload-input-required');
     return '\n## ' + label + '\n' + fs.readFileSync(file, 'utf8');
@@ -202,6 +204,18 @@ function packagePrompt(request, prompt) {
   const plan = fs.readFileSync(request.planFile, 'utf8');
   const checked = roots.validatePlan(plan, contract);
   requireExplicitVerify(plan,request);
+  if (execution) {
+    const procedure = api('forge-procedure-context').loadProcedureContext({ cwd: request.cwd,
+      phase: 'execute-loose-task', forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
+    prompt = api('forge-xllm').buildExecutePrompt(plan, { capability: api('forge-must-haves').resolveCapability(plan).capability,
+      constraints: request.constraints, securityText: execution.securityText, contextText: execution.contextText,
+      procedure, outputChannel: 'json-only' });
+    const recovery = api('forge-procedure-context').loadProcedureContext({ cwd: request.cwd,
+      phase: 'recovery', forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
+    const present = new Set(procedure.modules.map(row => row.id));
+    prompt += '\n\n' + recovery.content.split(/(?=<!-- forge-procedure:)/)
+      .filter(segment => segment.trim() && !present.has(/^<!-- forge-procedure:([^>]+) -->/.exec(segment)?.[1])).join('');
+  }
   return prompt + '\n## Execution boundaries\nPhysical CODE_DIR: ' + request.cwd
     + '\nOwner (parent publication only): ' + contract.owner + '\nDeclared writes: ' + JSON.stringify(checked.writes)
     + '\nDo not edit owner metadata. Write the response only to this validated TEMP result path: ' + request.resultFile
@@ -322,7 +336,8 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
   if(typeof assertBoundary!=='function'||typeof assertAuthority!=='function')fail('live-controller-boundary-required');
   const r=structuredClone(request);
   delete r.linkedEntryBinding;
-  if(r.unitType!=='execute-task'||r.scope==='standalone-task'||r.route?.worker_mode!=='native'||r.route.dispatch_allowed!==true||!r.execution_contract||!r.claim||!r.runId)fail('milestone-native-request-required');
+  const effectiveIdentity=api('forge-attempt-recovery').canonicalRequest(r);
+  if(r.unitType!=='execute-task'||!['milestone','standalone-task'].includes(effectiveIdentity.scope)||effectiveIdentity.phase!=='execute'||r.route?.worker_mode!=='native'||r.route.dispatch_allowed!==true||!r.execution_contract||!r.claim||!r.runId)fail('milestone-native-request-required');
   if(!nativeInvocation?.ok)fail('native-binding-required');
   assertBoundary();
   const side=api('forge-unit-sidecar'),execution=api('forge-task-execution'),roots=api('forge-code-roots'),verify=api('forge-verify');
@@ -337,12 +352,14 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
   const plan=fs.readFileSync(r.planFile,'utf8'),context=fs.readFileSync(r.contextFile);
   requireExplicitVerify(plan,r);
   const checked=roots.validatePlan(plan,r.execution_contract);
+  const standalone=r.scope==='standalone-task';
+  const taskPreparation=standalone?execution.prepare({...r,nativeInvocation},r.contextRoot || r.cwd,r.cwd):null;
   const prepared=savedManifest?.prepared || {execution_contract:r.execution_contract,claims:checked.writes,
-    snapshots:r.execution_contract.code_roots.map(root=>({...api('forge-surgical-reset').captureAttemptSnapshot(root.path),root_id:root.id})),
+    snapshots:taskPreparation?.snapshots || r.execution_contract.code_roots.map(root=>({...api('forge-surgical-reset').captureAttemptSnapshot(root.path),root_id:root.id})),
     protected_owner:execution.protectedSnapshot(r.contextRoot),
     protected_roots:r.execution_contract.code_roots.map(root=>({root_id:root.id,path:root.path,snapshot:execution.protectedSnapshot(root.path)}))};
   const planHash=hash(plan),contextHash=hash(context);
-  const inputs = savedManifest?.inputs || inputSections(r).map(([label,file]) => ({label,file,sha256:hash(fs.readFileSync(file))}));
+  const inputs = savedManifest?.inputs || (taskPreparation ? Object.keys(taskPreparation.inputs).map(file=>['Task input',file]) : inputSections(r)).map(([label,file]) => ({label,file,sha256:hash(fs.readFileSync(file))}));
   const {identity:verificationIdentity,seal}=verificationPolicy(r,plan);
   const loc=side.locations(r),inventory=api('forge-delivery').inventoryPlan(plan,r.planFile,loc.rules[loc.delivery.input].unit);
   const policy=validateCoveragePolicy(coveragePolicy===undefined?savedManifest?.coverage_policy:coveragePolicy,inventory,r.execution_contract);
@@ -382,7 +399,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       if(!policy||typeof attestReview!=='function'||typeof attestStoppedWriter!=='function')fail('documentary-live-authority-required');
       const originalBytes=fs.readFileSync(returnedReceiptFile),record=JSON.parse(originalBytes);
       if(path.resolve(returnedReceiptFile)!==path.resolve(receiptFile+'.'+hash(originalBytes)+'.json')
-        ||record.kind!=='milestone-native-continuation'||record.phase!=='executed'||record.dispatch_id!==r.dispatchId||record.manifest_sha256!==hash(fs.readFileSync(manifestFile))
+        ||record.kind!==(standalone?'standalone-native-continuation':'milestone-native-continuation')||record.phase!=='executed'||record.dispatch_id!==r.dispatchId||record.manifest_sha256!==hash(fs.readFileSync(manifestFile))
         ||record.fingerprint!==side.artifactFingerprint(r)||record.recovery_identity_sha256!==roots.digest(requestIdentity(r))
         ||!resultContract.validate(record.result).ok||!['done','partial'].includes(record.result.status))fail('documentary-returned-binding');
       const readSources=()=>{const budget={paths:new Set(),bytes:0};return policy.criteria.flatMap(row=>row.sources.map(source=>readDocumentarySource(source,r.execution_contract,budget)));};
@@ -450,7 +467,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
     returned(result){
       guard();
       if(!resultContract.validate(result).ok)fail('native-result-invalid');
-      persist({kind:'milestone-native-continuation',phase:'executed',dispatch_id:r.dispatchId,
+      persist({kind:standalone?'standalone-native-continuation':'milestone-native-continuation',phase:'executed',dispatch_id:r.dispatchId,
         ...(renewal?{lease_reconciliation:renewal.evidence}:{}),
         fingerprint:side.artifactFingerprint(r),recovery_identity_sha256:roots.digest(requestIdentity(r)),
         route:r.route,manifest_sha256:hash(fs.readFileSync(manifestFile)),result,
@@ -496,7 +513,8 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
         ...(renewal?{lease_reconciliation:renewal.evidence}:{}),
         fingerprint:side.artifactFingerprint(r),recovery_identity_sha256:roots.digest(requestIdentity(r)),
         manifest_sha256:hash(fs.readFileSync(manifestFile)),
-        milestone_delivery:{plan_sha256:planHash,protected_owner:prepared.protected_owner,protected_roots:prepared.protected_roots,code_state:execution.replayState(r.cwd,r.execution_contract)}};
+        // Legacy carrier name retained; task identity remains explicitly standalone.
+        milestone_delivery:{...(standalone?{scope:'standalone-task'}:{}),plan_sha256:planHash,protected_owner:prepared.protected_owner,protected_roots:prepared.protected_roots,code_state:execution.replayState(r.cwd,r.execution_contract)}};
       persist(record);
       side.materialize(verified.publicationRequest,record,()=>guard(true),undefined,renewal?{leaseRenewal}:undefined);
       for(const artifact of artifacts)if(fs.readFileSync(path.join(r.contextRoot,artifact.path),'utf8')!==artifact.content)fail('publication-readback-mismatch');
@@ -529,6 +547,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
         if(roots.digest(record.artifacts.map(({path,content})=>({path,content})))!==roots.digest(recomposed))fail('documentary-ready-artifacts-changed');
       }
       if(record.kind!=='native-execute-task'||record.phase!=='ready'||!record.milestone_delivery
+          ||standalone&&record.milestone_delivery.scope!=='standalone-task'
           ||record.response_sha256!==hash(JSON.stringify(record.result))
           ||roots.digest(record.milestone_delivery.protected_owner)!==roots.digest(prepared.protected_owner)
           ||roots.digest(record.milestone_delivery.protected_roots)!==roots.digest(prepared.protected_roots)

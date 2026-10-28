@@ -115,7 +115,8 @@ async function prepare(options, state, inspection) {
   if (options.correction || options.environmentalCorrection) fail('transition-correction-conflict');
   if (typeof options.processProbe !== 'function' || inspection.process_stopped !== true) fail('transition-process-proof-required');
   const recovery = require('./forge-attempt-recovery'), request = recovery.canonicalRequest(options.request);
-  if (ordinary && request.scope !== 'milestone') fail('transition-ordinary-scope-unsupported');
+  if (ordinary && request.scope !== 'milestone'
+      && !(request.scope === 'standalone-task' && request.unitType === 'execute-task' && request.phase === 'execute')) fail('transition-ordinary-scope-unsupported');
   const contract = roots.validateContract(options.executionContract || roots.singleContract(request.contextRoot, request.cwd),
     { owner: request.contextRoot, revalidate: true });
   const claim = options.executionAuthority?.claim || request.claim || null;
