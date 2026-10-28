@@ -16,6 +16,8 @@ const selfProjection = require('./forge-projection-self');
 const { detectEol } = require('./forge-instructions');
 const { VERSION } = require('./forge-version');
 const { DEFAULT_STATUS_LINE, addDefaultStatusLine } = require('./forge-codex-statusline');
+const { isDeepStrictEqual } = require('util');
+const { HOST_RUNTIMES } = require('./forge-runtime');
 
 const RUNTIME = 'codex';
 // Production callers pass this dialect explicitly. Keeping it as data preserves
@@ -228,6 +230,202 @@ function codexSources(manifest) {
 function tomlMultiline(value) {
   return norm(value).replace(/\\/g, '\\\\').replace(/"""/g, '\\"\\"\\"');
 }
+
+// Capabilities report (schema 2). JSON cannot carry an origin marker, so the
+// report identifies itself by content: who generated it, from which core and
+// which catalog. It is deterministic on purpose — no timestamp and no absolute
+// path — so two writes are byte-identical and freshness is a pure comparison.
+const REPORT_SCHEMA_VERSION = 2;
+const REPORT_SOURCE = 'codex-capabilities';
+const REPORT_GENERATOR = 'forge-codex-renderer';
+const REPORT_RELATIVE = 'adapters/codex/capabilities.json';
+const REPORT_MAX_BYTES = 1024 * 1024;
+// Every renderer from 3.1.4 through 4.46.x wrote exactly these four keys.
+const LEGACY_REPORT_KEYS = Object.freeze(['generated', 'runtime', 'surfaces', 'version']);
+const CURRENT_REPORT_KEYS = Object.freeze(['capabilities', 'core_version', 'forge_source', 'generated', 'generator', 'permissions', 'report_schema_version', 'runtime', 'source', 'surfaces', 'version']);
+const PERMISSIONS_CONTRACT = 'docs/codex-agent-permissions.md';
+const AGENT_SANDBOX_COMMENT = `# sandbox_mode é declaração: sandbox e aprovações efetivos vêm da sessão pai; o campo não prova isolamento por agente (contrato: ${PERMISSIONS_CONTRACT}).`;
+const REPORT_PERMISSIONS = Object.freeze({
+  native_custom_agents: Object.freeze({ sandbox: 'inherited-from-parent-session', toml_sandbox_mode: 'declared-not-isolation-proof' }),
+  app_server_sidecar: Object.freeze({ sandbox: 'per-turn-sandbox-policy' }),
+  headless_exec: Object.freeze({ sandbox: 'explicit-cli-flags' }),
+  contract: PERMISSIONS_CONTRACT,
+});
+const FRESHNESS = Object.freeze({ current: 'current', stale: 'stale', absent: 'absent', invalid: 'invalid' });
+const FRESHNESS_REASON = Object.freeze({
+  REPORT_ABSENT: 'report-absent',
+  OVERSIZE: 'oversize',
+  UNREADABLE_JSON: 'unreadable-json',
+  WRONG_RUNTIME: 'wrong-runtime',
+  NOT_GENERATED: 'not-generated',
+  UNRECOGNIZED_SHAPE: 'unrecognized-shape',
+  LEGACY_SHAPE: 'legacy-shape',
+  CORE_VERSION_MISMATCH: 'core-version-mismatch',
+  CATALOG_DIGEST_MISMATCH: 'catalog-digest-mismatch',
+  CATALOG_UNAVAILABLE: 'catalog-unavailable',
+  INSTALLED_CATALOG_UNAVAILABLE: 'installed-catalog-unavailable',
+});
+
+// Size is checked on the open descriptor before any byte is decoded, so an
+// oversized file is a named state and never a parser input.
+function readBounded(file, maxBytes = REPORT_MAX_BYTES) {
+  let descriptor;
+  try {
+    descriptor = fs.openSync(file, 'r');
+    const stat = fs.fstatSync(descriptor);
+    if (!stat.isFile()) return { state: 'unreadable' };
+    if (stat.size > maxBytes) return { state: 'oversize' };
+    const buffer = Buffer.alloc(stat.size);
+    let total = 0;
+    while (total < buffer.length) {
+      const count = fs.readSync(descriptor, buffer, total, buffer.length - total, null);
+      if (count === 0) break;
+      total += count;
+    }
+    return { state: 'read', text: buffer.subarray(0, total).toString('utf8') };
+  } catch (error) {
+    return { state: error && error.code === 'ENOENT' ? 'absent' : 'unreadable' };
+  } finally {
+    if (descriptor !== undefined) { try { fs.closeSync(descriptor); } catch (_) { /* read already settled */ } }
+  }
+}
+function parseObject(text) {
+  try {
+    const value = JSON.parse(String(text).replace(/^﻿/, ''));
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+  } catch (_) { return null; }
+}
+function catalogEligible(catalog) {
+  // The canonical semantic validator only consumes the schema's host enum.
+  // Use the canonical runtime registry, without requiring schemas/ in a
+  // configuration-only projection or duplicating capability validation here.
+  try { return require('./forge-capabilities').validateCatalog(catalog, { $defs: { host: { enum: HOST_RUNTIMES } } }).length === 0; }
+  catch (_) { return false; }
+}
+// Catalog identity read tolerantly from the repository's forge-capabilities.json.
+// loadCatalog is not used: it also requires schemas/, which configuration-only
+// sources do not carry. An absent, oversized or malformed catalog is its own
+// explicit state, never an empty classification that could look current.
+function catalogSource(repo) {
+  const read = readBounded(path.join(repo, 'forge-capabilities.json'));
+  const catalog = read.state === 'read' ? parseObject(read.text) : null;
+  let rows = null;
+  if (catalogEligible(catalog)) {
+    try { rows = require('./forge-capabilities').matrix(catalog); } catch (_) { rows = null; }
+  }
+  if (!rows) return { source: { catalog: 'unavailable', catalog_sha256: null, catalog_schema_version: null }, capabilities: null };
+  return {
+    source: {
+      catalog: 'available',
+      catalog_sha256: ownership.digest(read.text),
+      catalog_schema_version: typeof catalog.schema_version === 'string' ? catalog.schema_version : null,
+    },
+    capabilities: rows.map((row) => ({ capability_id: row.capability_id, kind: row.kind, required: row.required, codex: row.codex })),
+  };
+}
+function buildCapabilitiesReport(repo, manifest) {
+  const catalog = catalogSource(repo);
+  return {
+    report_schema_version: REPORT_SCHEMA_VERSION,
+    forge_source: REPORT_SOURCE,
+    generated: true,
+    runtime: RUNTIME,
+    core_version: VERSION,
+    // Legacy mirror: readers that predate schema 2 only know `version`.
+    version: VERSION,
+    generator: REPORT_GENERATOR,
+    source: { ...catalog.source, source_manifest_sha256: ownership.digest(sourceManifest.normalize(manifest)) },
+    capabilities: catalog.capabilities,
+    surfaces: manifest.sources.map((source) => ({ source_id: source.source_id, status: source.conditional && source.conditional.codex ? source.conditional.codex.status : 'common' })),
+    permissions: REPORT_PERMISSIONS,
+  };
+}
+// Shape recognition shared by ownership and freshness. Only two shapes are a
+// Forge-generated report: the exact legacy key set, or schema 2 carrying its
+// source and generator identity. runtime codex + generated true is necessary,
+// never sufficient, and nothing above REPORT_MAX_BYTES is parsed at all.
+function classifyReport(text) {
+  if (Buffer.byteLength(String(text), 'utf8') > REPORT_MAX_BYTES) return { shape: null, reason: FRESHNESS_REASON.OVERSIZE };
+  const value = parseObject(text);
+  if (!value) return { shape: null, reason: FRESHNESS_REASON.UNREADABLE_JSON };
+  if (value.runtime !== RUNTIME) return { shape: null, reason: FRESHNESS_REASON.WRONG_RUNTIME, value };
+  if (value.generated !== true) return { shape: null, reason: FRESHNESS_REASON.NOT_GENERATED, value };
+  const keys = Object.keys(value).sort();
+  const exactKeys = (item, expected) => item && typeof item === 'object' && !Array.isArray(item)
+    && isDeepStrictEqual(Object.keys(item).sort(), expected.slice().sort());
+  const version = (item) => typeof item === 'string' && /^\d+\.\d+\.\d+$/.test(item);
+  const digest = (item) => typeof item === 'string' && /^[a-f0-9]{64}$/.test(item);
+  const id = (item) => typeof item === 'string' && /^[a-z][a-z0-9-]*$/.test(item);
+  const capabilityContract = require('./forge-capabilities');
+  const surfaces = Array.isArray(value.surfaces) && value.surfaces.every((surface) => exactKeys(surface, ['source_id', 'status'])
+    && id(surface.source_id) && capabilityContract.AVAILABILITY.includes(surface.status));
+  if (keys.length === LEGACY_REPORT_KEYS.length && keys.every((key, index) => key === LEGACY_REPORT_KEYS[index])
+    && version(value.version) && surfaces) {
+    return { shape: 'legacy', reason: null, value };
+  }
+  const source = value.source;
+  const sourceShape = exactKeys(source, ['catalog', 'catalog_sha256', 'catalog_schema_version', 'source_manifest_sha256'])
+    && digest(source.source_manifest_sha256)
+    && ((source.catalog === 'available' && digest(source.catalog_sha256) && version(source.catalog_schema_version))
+      || (source.catalog === 'unavailable' && source.catalog_sha256 === null && source.catalog_schema_version === null));
+  const rows = value.capabilities;
+  const rowShape = sourceShape && (source.catalog === 'unavailable' ? rows === null
+    : Array.isArray(rows) && rows.length > 0 && new Set(rows.map((row) => row && row.capability_id)).size === rows.length
+      && rows.every((row) => exactKeys(row, ['capability_id', 'kind', 'required', 'codex']) && id(row.capability_id)
+        && capabilityContract.KINDS.includes(row.kind) && typeof row.required === 'boolean' && capabilityContract.AVAILABILITY.includes(row.codex)));
+  if (exactKeys(value, CURRENT_REPORT_KEYS) && value.report_schema_version === REPORT_SCHEMA_VERSION
+    && value.forge_source === REPORT_SOURCE && value.generator === REPORT_GENERATOR
+    && version(value.core_version) && value.version === value.core_version && sourceShape && rowShape && surfaces
+    && isDeepStrictEqual(value.permissions, REPORT_PERMISSIONS)) {
+    return { shape: 'current', reason: null, value };
+  }
+  return { shape: null, reason: FRESHNESS_REASON.UNRECOGNIZED_SHAPE, value };
+}
+function isGeneratedReport(text) { return classifyReport(text).shape !== null; }
+function installedVersionOf(forgeHome, version) {
+  if (typeof version === 'string' && version.trim()) return version.trim();
+  const read = readBounded(path.join(forgeHome, 'VERSION'), 64);
+  const value = read.state === 'read' ? read.text.trim() : '';
+  return /^\d+\.\d+\.\d+$/.test(value) ? value : VERSION;
+}
+/**
+ * Read-only freshness of the installed Codex capabilities report.
+ * current: schema 2, core_version equals the installed VERSION and catalog_sha256
+ * equals the digest of the installed forge-capabilities.json. A catalog that is
+ * unavailable on either side cannot prove freshness, so it is stale and named.
+ * The result carries relative paths only.
+ */
+function inspectCapabilitiesReport(options = {}) {
+  const forgeHome = path.resolve(options.forgeHome || require('./forge-home').resolveForgeHome({ env: options.env, userHome: options.userHome }));
+  const installedVersion = installedVersionOf(forgeHome, options.version);
+  const result = (state, reasons, extra = {}) => ({ report: REPORT_RELATIVE, state, reasons, installed_version: installedVersion, ...extra });
+  const read = readBounded(path.join(forgeHome, ...REPORT_RELATIVE.split('/')));
+  if (read.state === 'absent') return result(FRESHNESS.absent, [FRESHNESS_REASON.REPORT_ABSENT]);
+  if (read.state === 'oversize') return result(FRESHNESS.invalid, [FRESHNESS_REASON.OVERSIZE]);
+  if (read.state !== 'read') return result(FRESHNESS.invalid, [FRESHNESS_REASON.UNREADABLE_JSON]);
+  const classified = classifyReport(read.text);
+  if (!classified.shape) return result(FRESHNESS.invalid, [classified.reason]);
+  const report = classified.value;
+  const coreVersion = classified.shape === 'legacy' ? report.version : report.core_version;
+  const reasons = [];
+  if (classified.shape === 'legacy') reasons.push(FRESHNESS_REASON.LEGACY_SHAPE);
+  if (coreVersion !== installedVersion) reasons.push(FRESHNESS_REASON.CORE_VERSION_MISMATCH);
+  const installedCatalog = readBounded(path.join(forgeHome, 'forge-capabilities.json'));
+  const installedCatalogSha = installedCatalog.state === 'read' && catalogEligible(parseObject(installedCatalog.text)) ? ownership.digest(installedCatalog.text) : null;
+  const reportCatalogSha = classified.shape === 'current' && report.source.catalog === 'available' && typeof report.source.catalog_sha256 === 'string'
+    ? report.source.catalog_sha256 : null;
+  if (classified.shape === 'current') {
+    if (!reportCatalogSha) reasons.push(FRESHNESS_REASON.CATALOG_UNAVAILABLE);
+    else if (!installedCatalogSha) reasons.push(FRESHNESS_REASON.INSTALLED_CATALOG_UNAVAILABLE);
+    else if (reportCatalogSha !== installedCatalogSha) reasons.push(FRESHNESS_REASON.CATALOG_DIGEST_MISMATCH);
+  }
+  return result(reasons.length ? FRESHNESS.stale : FRESHNESS.current, reasons, {
+    shape: classified.shape,
+    core_version: typeof coreVersion === 'string' ? coreVersion : null,
+    catalog_sha256: reportCatalogSha,
+    installed_catalog_sha256: installedCatalogSha,
+  });
+}
 function render(options = {}) {
   const root = roots(options); const manifest = manifestFor(root, options); const sources = codexSources(manifest); const artifacts = [];
   // Legacy inventories without procedures remain valid. A current source cannot
@@ -258,7 +456,7 @@ function render(options = {}) {
   for (const file of agentFiles) {
     const name = path.basename(file, '.md');
     const source = rewriteMarkdown(fs.readFileSync(file, 'utf8'));
-    const config = [tomlOrigin(`agent-${name}`), `name = "${name}"`, `description = "Forge ${name.replace(/^forge-/, '')} worker"`, 'sandbox_mode = "workspace-write"', 'developer_instructions = """', tomlMultiline(source), '"""', ''].join('\n');
+    const config = [tomlOrigin(`agent-${name}`), `name = "${name}"`, `description = "Forge ${name.replace(/^forge-/, '')} worker"`, AGENT_SANDBOX_COMMENT, 'sandbox_mode = "workspace-write"', 'developer_instructions = """', tomlMultiline(source), '"""', ''].join('\n');
     add('agents', path.relative(root.repo, file).replace(/\\/g, '/'), path.join(root.codexHome, 'agents', `${name}.toml`), config, 'agent');
   }
   const commandSource = sources.find((source) => source.source_id === 'commands');
@@ -276,8 +474,8 @@ function render(options = {}) {
   }
   const config = `${tomlOrigin('config')}\n[forge]\nversion = "${VERSION}"\nhost_runtime = "codex"\nsource_manifest = "forge-source-manifest.json"\n\n[tui]\nstatus_line = ${JSON.stringify(DEFAULT_STATUS_LINE)}\n`;
   add('codex-config', 'config.toml', path.join(root.codexHome, 'config.toml'), config, 'config');
-  const capabilities = { version: VERSION, runtime: RUNTIME, generated: true, surfaces: manifest.sources.map((source) => ({ source_id: source.source_id, status: source.conditional && source.conditional.codex ? source.conditional.codex.status : 'common' })) };
-  add('codex-capabilities', 'forge-codex-capabilities.json', path.join(root.forgeHome, 'adapters', 'codex', 'capabilities.json'), `${JSON.stringify(capabilities, null, 2)}\n`, 'capabilities');
+  const capabilities = buildCapabilitiesReport(root.repo, manifest);
+  add('codex-capabilities', 'forge-codex-capabilities.json', path.join(root.forgeHome, ...REPORT_RELATIVE.split('/')), `${JSON.stringify(capabilities, null, 2)}\n`, 'capabilities');
   artifacts.sort((a, b) => a.destination.localeCompare(b.destination));
   return { runtime: RUNTIME, version: VERSION, repo: root.repo, forge_home: root.forgeHome, codex_home: root.codexHome, project_root: root.projectRoot, procedure_context: procedureContext, artifacts };
 }
@@ -290,6 +488,10 @@ function write(options = {}) {
   // projects `capabilities.json`, a format that can never carry a marker — so
   // without the digest rung that file froze on first divergence exactly like the
   // Claude-side JSON did, and each run reported success over it.
+  // The digest rung alone did not close it: a report that was already divergent
+  // has no record, and its synthetic `source` has no release history. For that
+  // one kind the recognized generated shape plays the marker's role (issue 280);
+  // any other bytes at that path, and every other kind, keep the existing rungs.
   const recorded = (options.ownership && typeof options.ownership === 'object') ? options.ownership : {};
   // Same release rung as the Claude host. Most Codex artifacts are SYNTHESIZED
   // (the TOML wrappers, the instructions, `capabilities.json`), so their `source`
@@ -340,7 +542,7 @@ function write(options = {}) {
     const verdict = ownership.decide({
       current,
       recordedDigest: recorded[ownership.keyFor(artifact.destination)],
-      markerPresent: current !== null && hasOrigin(current),
+      markerPresent: current !== null && (artifact.kind === 'capabilities' ? isGeneratedReport(current) : hasOrigin(current)),
       migrateLegacy: Boolean(options.update && options.migrateLegacy),
       releaseDigests: provenance ? () => provenance.digestsFor(artifact.source) : undefined,
     });
@@ -361,7 +563,9 @@ function write(options = {}) {
     }
     if (options.dryRun) { written.push({ ...artifact, dry_run: true }); continue; }
     fs.mkdirSync(path.dirname(artifact.destination), { recursive: true }); fs.writeFileSync(artifact.destination, artifact.content, 'utf8');
-    written.push(verdict.basis === 'release' ? { ...artifact, reason: 'release-adopted' } : artifact);
+    if (verdict.basis === 'release') written.push({ ...artifact, reason: 'release-adopted' });
+    else if (artifact.kind === 'capabilities' && verdict.basis === 'marker') written.push({ ...artifact, reason: 'generated-report-adopted' });
+    else written.push(artifact);
   }
   const ownedNow = [...written, ...preserved.filter((item) => item.reason === 'already-current')];
   const nextOwnership = { ...recorded, ...ownership.recordOf(ownedNow) };
@@ -382,6 +586,7 @@ function parseArgs(argv = process.argv.slice(2)) {
     else if (arg === '--agent-invocation') out.agentInvocation = argv[++i];
     else if (arg === '--host-runtime') out.hostRuntime = argv[++i];
     else if (arg === '--dry-run') out.dryRun = true;
+    else if (arg === '--inspect-report') out.inspectReport = true;
     else if (arg === '--json') out.json = true;
     else if (arg === '--help' || arg === '-h') out.help = true;
     else throw Object.assign(new Error(`opção desconhecida: ${arg}`), { code: REASON.invalid_options });
@@ -401,8 +606,17 @@ function main(argv = process.argv.slice(2), output = process.stdout.write.bind(p
   try {
     const options = parseArgs(argv);
     if (options.help) {
-      output('Usage: forge-codex-renderer.js [--repo DIR] [--codex-home DIR] [--forge-home DIR] [--project-root DIR] [--agent-invocation PREFIX] [--host-runtime HOST] [--dry-run] [--json]\n');
+      output('Usage: forge-codex-renderer.js [--repo DIR] [--codex-home DIR] [--forge-home DIR] [--project-root DIR] [--agent-invocation PREFIX] [--host-runtime HOST] [--dry-run] [--json]\n'
+        + '       forge-codex-renderer.js --inspect-report [--forge-home DIR] [--json]\n');
       return 0;
+    }
+    // Read-only branch: never renders, never writes. Exit 0 only for current.
+    if (options.inspectReport) {
+      const inspection = inspectCapabilitiesReport({ forgeHome: options.forgeHome });
+      output(options.json ? `${JSON.stringify(inspection)}\n`
+        : `Codex capabilities report: ${inspection.state}${inspection.reasons.length ? ` (${inspection.reasons.join(', ')})` : ''}`
+          + `${inspection.core_version ? ` core ${inspection.core_version}` : ''}; installed ${inspection.installed_version}\n`);
+      return inspection.state === FRESHNESS.current ? 0 : 1;
     }
     const report = write(options);
     output(options.json ? `${JSON.stringify(report)}\n` : `Codex renderer ${VERSION}: ${report.written.length} written, ${report.preserved.length} preserved\n`);
@@ -425,6 +639,18 @@ module.exports = {
   scanDispatchMarkers,
   locateDispatchBlock,
   rewriteDispatchDialect,
+  REPORT_SCHEMA_VERSION,
+  REPORT_RELATIVE,
+  REPORT_MAX_BYTES,
+  REPORT_PERMISSIONS,
+  PERMISSIONS_CONTRACT,
+  AGENT_SANDBOX_COMMENT,
+  FRESHNESS,
+  FRESHNESS_REASON,
+  buildCapabilitiesReport,
+  classifyReport,
+  isGeneratedReport,
+  inspectCapabilitiesReport,
   render,
   write,
   parseArgs,

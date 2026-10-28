@@ -1294,4 +1294,77 @@ test('both-host instruction digests remain final and single-host updates preserv
   } finally { data.cleanup(); }
 });
 
+// ── Codex capabilities report frozen at 4.8.0 (issue 280) ─────────────────────
+// Measured installation: legacy report shape at 4.8.0, `user_owned` in the Codex
+// adapter manifest and no key in the core ownership map. The real installer must
+// adopt exactly that recognized generated report and nothing else.
+function codexReportFixture() {
+  const data = fixture({ configurationOnly: true });
+  installer.install({ ...data.options, runtime: 'codex' });
+  const report = path.join(data.forgeHome, 'adapters', 'codex', 'capabilities.json');
+  const manifestFile = path.join(data.forgeHome, 'manifest.json');
+  const dropRecord = () => {
+    const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+    delete manifest.ownership[require('./forge-projection-ownership').keyFor(report)];
+    fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2));
+  };
+  const legacy = `${JSON.stringify({ version: '4.8.0', runtime: 'codex', generated: true,
+    surfaces: [{ source_id: 'agents', status: 'planned' }, { source_id: 'hooks', status: 'planned' }] }, null, 2)}\n`;
+  return { data, report, manifestFile, dropRecord, legacy };
+}
+
+test('update over a legacy 4.8.0 Codex report ends current and without conflict', () => {
+  const { data, report, manifestFile, dropRecord, legacy } = codexReportFixture();
+  const renderer = require('./forge-codex-renderer.js');
+  try {
+    fs.writeFileSync(report, legacy);
+    dropRecord();
+    assert.strictEqual(renderer.inspectCapabilitiesReport({ forgeHome: data.forgeHome }).state, 'stale');
+    const manifestBytes = fs.readFileSync(manifestFile);
+    installer.install({ ...data.options, runtime: 'codex', update: true, dryRun: true });
+    assert.strictEqual(fs.readFileSync(report, 'utf8'), legacy, 'dry-run reescreveu o relatório legado');
+    assert.deepStrictEqual(fs.readFileSync(manifestFile), manifestBytes, 'dry-run alterou o manifesto');
+    const result = installer.install({ ...data.options, runtime: 'codex', update: true });
+    assert(!result.manifest.adapters.codex.conflicts.some(row => row.destination === report), 'relatório gerado continuou conflito');
+    const adapterManifest = JSON.parse(fs.readFileSync(path.join(data.forgeHome, 'adapters', 'codex', 'manifest.json'), 'utf8'));
+    assert(!adapterManifest.conflicts.some(row => row.destination === report), 'manifest do adapter manteve user_owned');
+    assert(adapterManifest.files.length > 0);
+    const inspection = renderer.inspectCapabilitiesReport({ forgeHome: data.forgeHome });
+    assert.deepStrictEqual({ state: inspection.state, reasons: inspection.reasons }, { state: 'current', reasons: [] }, JSON.stringify(inspection));
+    const ownership = require('./forge-projection-ownership');
+    assert.strictEqual(result.manifest.ownership[ownership.keyFor(report)], ownership.digest(fs.readFileSync(report, 'utf8')), 'digest do relatório adotado não persistiu');
+    const bytes = fs.readFileSync(report);
+    installer.install({ ...data.options, runtime: 'codex', update: true });
+    assert.deepStrictEqual(fs.readFileSync(report), bytes, 'segunda atualização mudou o relatório');
+  } finally { data.cleanup(); }
+});
+
+test('non-generated content at the Codex report path stays preserved with a user_owned conflict', () => {
+  const { data, report, dropRecord, legacy } = codexReportFixture();
+  const renderer = require('./forge-codex-renderer.js');
+  try {
+    const schema2 = JSON.parse(fs.readFileSync(report, 'utf8'));
+    const incomplete = structuredClone(schema2); delete incomplete.permissions;
+    const cases = [
+      ['operator json', '{"operator":true}\n', 'wrong-runtime'],
+      ['operator text', 'anotações do operador\n', 'unreadable-json'],
+      ['claude report', legacy.replace('"runtime": "codex"', '"runtime": "claude"'), 'wrong-runtime'],
+      ['operator notes', `${JSON.stringify({ ...JSON.parse(legacy), operator_note: 'keep' }, null, 2)}\n`, 'unrecognized-shape'],
+      ['operator schema2 notes', `${JSON.stringify({ ...schema2, operator_note: 'keep' }, null, 2)}\n`, 'unrecognized-shape'],
+      ['future schema', `${JSON.stringify({ ...schema2, report_schema_version: 99 }, null, 2)}\n`, 'unrecognized-shape'],
+      ['incomplete schema', `${JSON.stringify(incomplete, null, 2)}\n`, 'unrecognized-shape'],
+    ];
+    for (const [label, bytes, reason] of cases) {
+      fs.writeFileSync(report, bytes);
+      dropRecord();
+      const result = installer.install({ ...data.options, runtime: 'codex', update: true });
+      const conflict = result.manifest.adapters.codex.conflicts.find(row => row.destination === report);
+      assert(conflict && conflict.reason === 'user_owned', `${label}: conflito user_owned ausente`);
+      assert.strictEqual(fs.readFileSync(report, 'utf8'), bytes, `${label}: bytes do operador sobrescritos`);
+      const inspection = renderer.inspectCapabilitiesReport({ forgeHome: data.forgeHome });
+      assert.deepStrictEqual({ state: inspection.state, reasons: inspection.reasons }, { state: 'invalid', reasons: [reason] }, label);
+    }
+  } finally { data.cleanup(); }
+});
+
 process.stdout.write(`\n${passed} passed, 0 failed\n`);
