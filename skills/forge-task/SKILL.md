@@ -309,20 +309,13 @@ else
 fi
 ```
 
-**Multi-run check** — refuse if too many active and no explicit resume:
-```bash
-# Migrate legacy STATE.md FIRST (idempotent) — required before any dashboard regen below
-node "$FORGE_SCRIPTS_DIR/forge-runs.js" --migrate-legacy --cwd "$(pwd)" > /dev/null 2>&1 || true
-
-if [ -z "$TASK_ID" ]; then
-  RESOLVE=$(node "$FORGE_SCRIPTS_DIR/forge-cli-helpers.js" --resolve-args --args "" --command forge-task)
-  STATUS=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).status)" "$RESOLVE")
-  if [ "$STATUS" = "refuse" ]; then
-    node -e "process.stdout.write(JSON.parse(process.argv[1]).message)" "$RESOLVE"
-    exit 0
-  fi
-fi
-```
+**Fresh creation is not personal work selection.** An explicit TASK_DESCRIPTION
+already chooses new work. Do not call the no-ID --resolve-args/--select path here
+or migrate legacy state: that path selects an existing personal work and can
+refuse an unrelated new task when several works are open. Missing descriptions
+were handled in Parse arguments. Explicit resume keeps its ID, binding and
+handoff flow below. Fresh creation still uses the canonical ID helper, configured
+isolation, run registration and all normal coordination/claim gates.
 
 **Determine TASK_ID:**
 ```bash
