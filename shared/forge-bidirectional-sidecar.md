@@ -852,6 +852,29 @@ História insuficiente conserva a recusa; implementar este mecanismo não desblo
 
 ## Standalone native execution and durable writer results
 
+An ordinary `uninvoked-native-reservation` continuation supports standalone
+execution with the same live history, held claim, gates and strict delivery checks.
+When `nativePromptFile` is requested, the final invocation binds a short file
+instruction and SHA-256; the complete UTF-8 prompt is retained beside the derived
+result path. File bytes, physical identity and ancestor links are rechecked at
+invocation boundaries. Telemetry measures the full context and actual tool arguments
+separately. The native tool must receive those arguments unchanged.
+
+`uninvoked-native-repackage` is an exclusive recovery transition for a consumed
+callback that the trusted host proves never called its executor tool. It requires
+`nativeRepackage.invocationFile` and `journalFile`, a fresh native lifecycle journal,
+the normal live history/root/uninvoked attestations and `attestRepackage(challenge)`.
+The latter binds the exact challenge with `actual_native_calls: 0`,
+`wrapper_stopped: true`, `status: 'uninvoked'` and an evidence reference. Process
+absence or these fields in imported JSON do not constitute proof. An observed
+acknowledgement, remote event, provider contact, result or receipt refuses this path.
+The original invocation, manifest, journal and full prompt must match the consumed
+binding; only transport changes. One replacement is allowed per reservation.
+Original attempts/reservations stay intact and the previous continuation is retained
+in `continuation_history`. A prepared replacement can resume through the ordinary
+transition with fresh live attestations and all retained evidence revalidated;
+returned results retain canonical replay priority without another inference.
+
 `runUnitSidecar(request, runtime)` accepts standalone `execute-task` with an
 explicit native route, nonempty held v2 claim and `request.nativeInvocation`.
 The latter is a declaration: the adapter rebuilds it from

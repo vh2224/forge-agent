@@ -2735,7 +2735,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
   const executionRequest = { ...request, ...authority };
   if (Object.keys(authority).some(key => !['execution_contract', 'claim', 'runId', 'gates'].includes(key))) fail('recovery-execution-authority-invalid');
   const canonical = require('./forge-attempt-recovery').canonicalRequest(request);
-  if (recovery.transitions?.some(row => row.type === 'uninvoked-native-reservation')
+  if (recovery.transitions?.some(row => ['uninvoked-native-reservation', 'uninvoked-native-repackage'].includes(row.type))
       && (!['milestone', 'standalone-task'].includes(canonical.scope) || canonical.phase !== 'execute' || canonical.unitType !== 'execute-task')) {
     fail('ordinary-native-delivery-unsupported');
   }
@@ -2746,7 +2746,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     hostRuntime: canonical.route.host_runtime, milestoneId: canonical.milestoneId,
     unitId: canonical.taskId || canonical.sliceId || canonical.milestoneId,
     planPath: canonical.planFile, roadmapPath: canonical.roadmapFile };
-  const ordinaryResume = recovery.transitions?.some(row => row.type === 'uninvoked-native-reservation');
+  const ordinaryResume = recovery.transitions?.some(row => ['uninvoked-native-reservation', 'uninvoked-native-repackage'].includes(row.type));
   const continuationId = ordinaryResume ? recovery.resumeReservation?.sha256 : crypto.randomUUID();
   if (ordinaryResume && !/^[a-f0-9]{64}$/.test(continuationId || '')) fail('recovery-reservation-required');
   const nativeTaskName = `recovery_${request.dispatchId}_${continuationId}`;
@@ -2754,7 +2754,15 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     ? require('./forge-native-recovery-delivery') : null;
   const finalRequest = route => ({ ...executionRequest, route, recoveryStateFile: recovery.stateFile,
     dispatchId: recoveryDispatchId(request.dispatchId, continuationId), resultFile: `${request.resultFile}.recovery-${continuationId}.json` });
-  const nativeOptions = route => {
+  // This selects transport only; authority and the exact invocation hash are
+  // independently revalidated by recovery before any consumption or dispatch.
+  let retainedFileTransport = false;
+  if (deliveryHelper && fs.existsSync(recovery.stateFile)) {
+    require('./forge-attempt-recovery').validateStateTarget(recovery.stateFile, canonical, executionRequest.execution_contract);
+    retainedFileTransport = require('./forge-xllm-state').loadRecovery(recovery.stateFile)?.continuation?.packaging_reason === 'uninvoked-native-file-repackage';
+  }
+  let promptTransport = null;
+  const nativeOptions = (route, { fileBacked = false } = {}) => {
     // Binding preflight uses the real task plan; the transport composes the
     // complete execution/security/context prompt after prepare.
     const executionPlan = canonical.scope === 'standalone-task' && canonical.phase === 'execute'
@@ -2795,6 +2803,15 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       if (seed && !seed.ok) fail(seed.reason_code);
       prompt = deliveryHelper.packagePrompt(finalRequest(route), prompt, { nativeInvocation: seed });
     }
+    let transport = null;
+    if (deliveryHelper && (fileBacked || retainedFileTransport || request.nativePromptFile || recovery.transitions?.some(row => row.type === 'uninvoked-native-repackage'))) {
+      const file = finalRequest(route).resultFile + '.native-prompt.txt';
+      if (!promptTransport) promptTransport = require('./forge-native-prompt-file').prepare({
+        file, prompt, contract: executionRequest.execution_contract });
+      if (promptTransport.sha256 !== hash(prompt)) fail('native-prompt-file-conflict');
+      promptTransport.assertUnchanged();
+      transport = promptTransport;
+    }
     return { hostRuntime: route.host_runtime, resolvedDispatch: route,
     telemetryIdentity: finalRequest(route), lifecycle: runtime.nativeLifecycle,
     terminalResult: value => deliveryHelper ? deliveryHelper.resultContract.validate(value).ok
@@ -2804,7 +2821,9 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
         ? require('./forge-worker-result').parseJsonEnvelope(value).ok === true
         : value && ['done', 'partial', 'blocked'].includes(value.status),
     activeCapabilities: runtime.activeCapabilities, effortBinding: runtime.effortBinding,
-    prompt, forkTurns: 'none',
+    prompt: transport ? transport.message : prompt,
+    ...(transport ? { promptContext: prompt, assertInvocation: () => transport.assertUnchanged() } : {}),
+    onPackagedContext: runtime.onPackagedContext, forkTurns: 'none',
     taskName: nativeTaskName,
     agentType: ({ execute: 'forge-executor', plan: 'forge-planner', research: 'forge-researcher', discuss: 'forge-discusser' })[canonical.phase] || 'forge-worker' };
   };
@@ -2819,6 +2838,9 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route)) : undefined });
   }
   return require('./forge-attempt-recovery').recoverAttempt({ ...recovery, request,
+    nativeJournalFile: runtime.nativeLifecycle?.journal?.file,
+    ...(recovery.nativeRepackage ? { nativeRepackage: { ...recovery.nativeRepackage,
+      nextJournalFile: runtime.nativeLifecycle?.journal?.file } } : {}),
     inspectSavedResult: runtime.savedNativeResult ? async () => (await inspectSavedNativeExecution(executionRequest, runtime)).writer : undefined,
     recoveryAuthorization: runtime.recoveryAuthorization, processProbe: runtime.processProbe,
     transitionAdapter: runtime.transitionAdapter,
@@ -2883,6 +2905,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       if (route.worker_mode === 'native') {
         if (deliveryHelper) {
           const session = deliveryHelper.prepare({ request: next, nativeInvocation: invocation,
+            savedManifest: assertReady?.repackageManifest?.(runtime.nativeLifecycle?.journal?.file),
             assertBoundary: runtime.assertBoundary, assertAuthority: assertReady?.assertAuthority,
             persistDeliveryReceipt: assertReady?.persistDeliveryReceipt,
             linkedEntryOptions: runtime.linkedEntryOptions });

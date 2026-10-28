@@ -356,7 +356,7 @@ async function invokeNative(options, invoke) {
   let packagedCallback;
   const evidence = telemetryApi.observeFinal({ ...options, onPackagedContext: value => { packagedCallback = options.onPackagedContext?.(value); }, model: invocation.telemetry.model_argument,
     effort: invocation.telemetry.effort_resolved }, invocation.args,
-    invocation.args.prompt || invocation.args.message, 'native-tool');
+    options.promptContext ?? (invocation.args.prompt || invocation.args.message), 'native-tool');
   let invoked = false;
   let observedProvider;
   const initial = JSON.stringify(invocation);

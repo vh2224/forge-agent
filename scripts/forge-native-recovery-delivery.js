@@ -594,7 +594,8 @@ async function replay({request,recovery,runtime,nativeOptions}) {
       || record.dispatch_id!==r.dispatchId||record.fingerprint!==api('forge-unit-sidecar').artifactFingerprint(r)
       || record.recovery_identity_sha256!==roots.digest(requestIdentity(r))
       || !resultContract.validate(record.result).ok||!['executed','ready'].includes(record.phase))fail('milestone-replay-receipt-binding');
-  const invocation=api('forge-native-invocation').buildNativeInvocation(nativeOptions(r.route));
+  const invocation=api('forge-native-invocation').buildNativeInvocation(nativeOptions(r.route,
+    {fileBacked:state.continuation.packaging_reason==='uninvoked-native-file-repackage'}));
   if(!invocation.ok||roots.digest(invocation)!==state.continuation.invocation_sha256)fail('milestone-replay-invocation-binding');
   const assertAuthority=()=>{
     if(hash(fs.readFileSync(recovery.stateFile))!==hash(stateBytes)
