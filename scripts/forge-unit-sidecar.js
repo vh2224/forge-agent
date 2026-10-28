@@ -116,7 +116,10 @@ function deliveryFailureReason(content, rule) {
   const category = ['input', 'delivery', 'standalone-preparation'].includes(rule.kind)
     ? rule.kind : 'verification';
   const reason = condition => `typed-${category}-${condition}`;
-  if (category === 'standalone-preparation') return reason('content');
+  if (category === 'standalone-preparation') {
+    const inspected = require('./forge-task-preparation').inspectPhaseContent(rule.phase, rule.taskId, content);
+    return reason(inspected.reason || 'content');
+  }
   let value;
   try { value = JSON.parse(content); } catch { return reason('json'); }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return reason('object');

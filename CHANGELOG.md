@@ -1,5 +1,7 @@
 ## Não lançado
 
+- Preparação: recusas de conteúdo identificam a categoria inválida do plano ou das seções, sem expor texto do provedor nem alterar critérios de aceitação (#271).
+
 - Fixtures: cópia privada do baseline Git usa travessia por entrada, preservando erros e isolamento, para evitar o caminho de cópia em massa envolvido no ENOENT macOS (#264).
 
 - CI: pesos recalibrados após a paralelização da matriz nativa, com 342 suítes observadas por plataforma e sem suítes desconhecidas no perfil (#249).

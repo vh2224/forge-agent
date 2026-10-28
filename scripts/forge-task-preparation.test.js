@@ -98,6 +98,33 @@ function codexCapabilities() {
 }
 
 async function main() {
+  await test('invalid plan diagnostics survive actual native acceptance, receipt and replay for object and framed results', async () => {
+    for (const asText of [false, true]) {
+      const request = fixture({ phase: 'plan', model: 'gpt-5.6-sol' });
+      request.activeCapabilities = codexCapabilities();
+      const started = await prep.startStandaloneTaskPreparation(request);
+      assert.equal(started.action, 'invoke-native');
+      const value = envelope(request);
+      value.artifacts[0].content = value.artifacts[0].content.replace('tier: standard', 'tier: private-sentinel');
+      const result = await prep.acceptStandaloneTaskPreparation(request, { route: started.route,
+        rawResult: asText ? framed(value) : value, invocationTelemetry: started.invocation.telemetry,
+        providerCalled: true });
+      assert.equal(result.ok, false);
+      assert.equal(result.diagnostic.reason, 'typed-standalone-preparation-tier');
+      assert.equal(result.diagnostic.stage, 'validation');
+      const receipt = JSON.parse(fs.readFileSync(request.resultFile + '.receipt.json', 'utf8'));
+      assert.equal(receipt.phase, 'failed');
+      assert.equal(receipt.failure.diagnostic.reason, 'typed-standalone-preparation-tier');
+      assert(!fs.existsSync(artifactPath(request)));
+      assert(!JSON.stringify([result, receipt]).includes('private-sentinel'));
+      const replay = await prep.startStandaloneTaskPreparation(request, {
+        resolveDispatch() { throw Error('failed replay must not resolve'); },
+        invokeNative() { throw Error('failed replay must not invoke'); },
+      });
+      assert.equal(replay.replayed, true);
+      assert.equal(replay.original_diagnostic.reason, 'typed-standalone-preparation-tier');
+    }
+  });
   await test('external native bridge observes ack until terminal without early artifact publication', async () => {
     const request = fixture({ model: 'gpt-5.6-sol' }); request.activeCapabilities = codexCapabilities();
     let emit, identity, ready; const subscribed = new Promise(resolve => { ready = resolve; });
