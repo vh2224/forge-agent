@@ -1,0 +1,229 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-10-28T19:26:14.410Z",
+  "client": {
+    "product": "Visual Studio Code",
+    "version": "1.143.1",
+    "commit": "e646868227c3e3a9e3f24277c8c7220be42c0be7",
+    "architecture": "x64",
+    "source": "code --version",
+    "terminal": {
+      "program": "vscode",
+      "version": "1.143.1"
+    },
+    "mounted_instance": null,
+    "consistency": "unknown",
+    "evidence": {
+      "command": "code --version",
+      "exit_code": 0,
+      "duration_ms": 167,
+      "output_sha256": "04fb3de70a59cd94e0df25660c2910080564c3fcd24d68c66044e7226b8f5b02",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "error_code": null
+    }
+  },
+  "codex_surface": {
+    "status": "not-found-in-inspected-profiles",
+    "extension": null,
+    "extensions": [
+      {
+        "id": "anthropic.claude-code",
+        "version": "2.1.312"
+      }
+    ],
+    "sources": [
+      {
+        "source": "code --list-extensions --show-versions",
+        "status": "inspected"
+      },
+      {
+        "source": "default extensions metadata",
+        "status": "inspected"
+      }
+    ],
+    "operator_declaration": "Codex no VS Code primeiro",
+    "limit": "A enumeração não cobre outros perfis nem componentes internos."
+  },
+  "extension_evidence": {
+    "command": "code --list-extensions --show-versions",
+    "exit_code": 0,
+    "duration_ms": 302,
+    "output_sha256": "b5b2d8553898271b348e190063af18076bbecc7c5d94eeda3bcaeb7f4d78557f",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "error_code": null
+  },
+  "mechanism": {
+    "view": "TreeView",
+    "container": "View Container",
+    "location": "activity bar",
+    "process": "local extension host",
+    "webview": false,
+    "server_required": false,
+    "listener": "none",
+    "hosting": "none",
+    "network": false
+  },
+  "mount": {
+    "result": "unknown",
+    "reason": "vscode-update-in-progress",
+    "evidence": {
+      "command": "Code.exe --user-data-dir <owned-temp>/user-data --extensions-dir <owned-temp>/extensions --disable-extensions --disable-workspace-trust --skip-welcome --skip-release-notes --new-window --wait --extensionDevelopmentPath=extensions/forge-vscode --extensionTestsPath=extensions/forge-vscode/test/mount-probe.js <owned-temp>/workspace",
+      "exit_code": 1,
+      "duration_ms": 31391,
+      "output_sha256": "12a539d87240018f58a835d8fbf9727a70db432e2363926a268c8bd94453d1fc",
+      "stderr_sha256": "5c4cf26782d9f44aae73de28e75e49f040533268f8b265ab83754ae5c1efe035",
+      "error_code": null,
+      "result_sha256": null,
+      "timeout_ms": 120000,
+      "observed": null,
+      "process_exit": "confirmed",
+      "shell": false,
+      "launcher": "installed-gui-executable"
+    },
+    "diagnostics": {
+      "result_channel": "missing",
+      "log_files": 0,
+      "omitted_files": 0,
+      "combined_sha256": "e80aefdef1e6a484444cb3e797ec372fb178424a8da76bb5a1a6a75842011fa7",
+      "counts": {
+        "extension-disabled": 0,
+        "runner-failed": 0,
+        "extension-activation-failed": 0,
+        "unknown-argument": 0,
+        "launch-error": 1,
+        "vscode-update-in-progress": 4
+      },
+      "private_capture": "saved",
+      "classification": "host-environment",
+      "post_capture_classification": {
+        "code": "vscode-update-in-progress",
+        "layer": "host-environment",
+        "source_sha256": "eed9b74f2a738618700240fb51ecfd0c6545c8b94f06dfa0b7e19c438196993f",
+        "classified_at": "2026-10-28T19:29:32.924Z",
+        "original_reason": "result-channel-unavailable"
+      }
+    },
+    "cleanup": {
+      "status": "removed",
+      "reason": "owned-tree-exited",
+      "marker": "forge-vscode-probe-i3XP3h"
+    },
+    "reexecute": "node scripts/forge-panel-probe.js --mount --json"
+  },
+  "claude_terminal": {
+    "version": "2.1.312",
+    "evidence": {
+      "command": "claude --version",
+      "exit_code": 0,
+      "duration_ms": 61,
+      "output_sha256": "791556e3bfd94f4112f9f6d25ee445c37338f0bcb8b3d362d3e40d8446a88a85",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "error_code": null
+    },
+    "subagent_statusline": {
+      "documented": true,
+      "documentation": "https://code.claude.com/docs/en/statusline.md",
+      "documentation_sha256": "a2391a0f4b8892bd32c0ea95d3d3d25f319c6891c963895ea0f2dd4c74150aa4",
+      "static_reference": "found",
+      "method": "bounded-local-stream-512MiB",
+      "runtime_display": "unknown",
+      "runtime_phase": "S03"
+    },
+    "panel_required": false
+  },
+  "subagent_surfaces": [
+    {
+      "host": "codex-cli",
+      "documented": "/subagents e navegação entre threads",
+      "observed": "unknown"
+    },
+    {
+      "host": "codex-vscode",
+      "documented": "sidebar da extensão IDE; agentes em background condicionais ao cliente",
+      "observed": "unknown"
+    },
+    {
+      "host": "claude-terminal",
+      "documented": "subagentes e subagentStatusLine",
+      "observed": "static-only"
+    }
+  ],
+  "g1": {
+    "required": false,
+    "question_id": null,
+    "reason": "C05-pending-observation",
+    "question": null
+  },
+  "acceptance": {
+    "visual_uat": "pending-final-round"
+  },
+  "observation_origin": "direct-local-probes",
+  "criterion_c05": "pending",
+  "previous_mount_attempts": [
+    {
+      "captured_at": "2026-10-28T19:15:07.756Z",
+      "mount": {
+        "result": "unknown",
+        "reason": "result-channel-unavailable",
+        "evidence": {
+          "command": "code --user-data-dir <owned-temp>/user-data --extensions-dir <owned-temp>/extensions --disable-extensions --disable-workspace-trust --skip-welcome --skip-release-notes --new-window --wait --extensionDevelopmentPath=extensions/forge-vscode --extensionTestsPath=extensions/forge-vscode/test/mount-probe.js <owned-temp>/workspace",
+          "exit_code": 0,
+          "duration_ms": 31499,
+          "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "error_code": null,
+          "result_sha256": null,
+          "timeout_ms": 120000,
+          "observed": null,
+          "process_exit": "confirmed",
+          "shell": false
+        },
+        "cleanup": {
+          "status": "removed",
+          "reason": "owned-tree-exited",
+          "marker": "<owned-temp>"
+        },
+        "reexecute": "node scripts/forge-panel-probe.js --mount --json"
+      }
+    },
+    {
+      "captured_at": "2026-10-28T19:20:13.725Z",
+      "mount": {
+        "result": "unknown",
+        "reason": "result-channel-unavailable",
+        "evidence": {
+          "command": "code --user-data-dir <owned-temp>/user-data --extensions-dir <owned-temp>/extensions --disable-extensions --disable-workspace-trust --skip-welcome --skip-release-notes --new-window --wait --extensionDevelopmentPath=extensions/forge-vscode --extensionTestsPath=extensions/forge-vscode/test/mount-probe.js <owned-temp>/workspace",
+          "exit_code": 0,
+          "duration_ms": 31692,
+          "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "error_code": null,
+          "result_sha256": null,
+          "timeout_ms": 120000,
+          "observed": null,
+          "process_exit": "confirmed",
+          "shell": false
+        },
+        "diagnostics": {
+          "result_channel": "missing",
+          "log_files": 0,
+          "omitted_files": 0,
+          "combined_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "counts": {
+            "extension-disabled": 0,
+            "runner-failed": 0,
+            "extension-activation-failed": 0,
+            "unknown-argument": 0,
+            "launch-error": 0
+          },
+          "private_capture": "saved"
+        },
+        "cleanup": {
+          "status": "removed",
+          "reason": "owned-tree-exited",
+          "marker": "forge-vscode-probe-5NIg7y"
+        },
+        "reexecute": "node scripts/forge-panel-probe.js --mount --json"
+      }
+    }
+  ]
+}
