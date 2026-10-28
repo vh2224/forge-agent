@@ -302,5 +302,67 @@ function manyRuns(f, total) {
     assert.strictEqual(github.DEFAULT_LIMITS.deadlineMs, 3600000); assert.strictEqual(github.DEFAULT_LIMITS.requestMs, 15000); assert.strictEqual(github.DEFAULT_LIMITS.pollMs, 15000);
     assert.strictEqual(sha256(Buffer.from(source)).length, 64);
   });
+  await test('github-cross-event-approved-pr-evidence-never-substitutes-exact-push', async () => {
+    // A green PR or merge-group run naming the candidate is never a push/master
+    // constituent, even if a faulty index returned it beside or instead of push.
+    const D = 'd'.repeat(40); const calls = [];
+    const crossEvent = (base, fields) => ({ ...clone(base), id: 4061, merge_commit_sha: A,
+      pull_requests: [{ number: 267, head: { sha: A }, base: { sha: C } }], ...fields });
+    const variants = [{ event: 'pull_request', head_branch: 'feature', head_sha: D },
+      { event: 'pull_request', head_branch: 'feature', head_sha: A },
+      { event: 'merge_group', head_branch: `gh-readonly-queue/master/pr-267-${A}`, head_sha: A }];
+    const control = fixture(); assert((await control.collect()).allowed); calls.push(...control.state.calls);
+    for (const fields of variants) {
+      for (const replace of [false, true]) {
+        const f = fixture({ hook: ({ kind, url, response, state }) => {
+          if (kind !== 'runs' || !url.pathname.includes('/11/')) return;
+          const run = crossEvent(state.runs.ci[0], fields);
+          if (replace) response.data = { total_count: 1, workflow_runs: [run] };
+          else { response.data.workflow_runs.push(run); response.data.total_count++; }
+        } });
+        const result = await f.collect(); code(result, 'run-identity'); assert.strictEqual(result.retryable, false, JSON.stringify(fields));
+        calls.push(...f.state.calls);
+      }
+    }
+    // Only PR evidence exists: the push/master index stays empty until the deadline.
+    const prOnly = fixture({ limits: { deadlineMs: 30000 }, hook: ({ kind, response }) => {
+      if (kind === 'runs') response.data = { total_count: 0, workflow_runs: [] };
+    } });
+    for (const key of ['ci', 'app']) prOnly.state.runs[key] = [crossEvent(prOnly.state.runs[key][0], { ...variants[1], id: prOnly.state.runs[key][0].id })];
+    const waited = await github.waitForChecks(prOnly);
+    code(waited, 'deadline-exhausted'); assert.strictEqual(waited.allowed, false);
+    assert(waited.last_reasons.some(reason => reason.code === 'workflow-missing'), JSON.stringify(waited));
+    assert.deepStrictEqual(prOnly.state.sleeps, [15000]); calls.push(...prOnly.state.calls);
+    const allowed = /^\/repos\/example\/forge-agent(?:\/actions\/workflows\/(?:ci\.yml|app\.yml|\d+)(?:\/runs)?|\/actions\/runs\/\d+(?:\/attempts\/\d+\/jobs)?)?$/;
+    assert(calls.some(call => /\/attempts\/\d+\/jobs$/.test(new URL(call.url).pathname)));
+    for (const call of calls) {
+      const url = new URL(call.url); assert(allowed.test(url.pathname), url.pathname);
+      if (url.pathname.endsWith('/runs')) { assert.strictEqual(url.searchParams.get('event'), 'push'); assert.strictEqual(url.searchParams.get('branch'), 'master'); }
+      for (const forbidden of ['/pulls', '/artifacts', '/logs', '/check-runs', '/check-suites', '/statuses', '/commits', '/attestations']) {
+        assert(!url.pathname.includes(forbidden), url.pathname);
+      }
+    }
+  });
+  await test('github-embedded-pr-metadata-mutation-is-inert', async () => {
+    // Observed 2026-10-28: run 40619617436 had head_sha 987cd55eac33d88baa3100708f523ee9f3310ee9,
+    // but its embedded pull_requests[0].head.sha already named the later PR267 head d067c1d4...
+    // Embedded PR metadata is mutable and must not enter facts, signatures or snapshots.
+    const LATER = 'd067c1d42ff23f635630fadbbee503b7db31b534';
+    const embed = f => { f.state.runs.ci[0].pull_requests = [{ number: 267, head: { sha: A }, base: { sha: C } }]; return f; };
+    const control = embed(fixture()); const expected = await control.collect(); assert(expected.allowed, JSON.stringify(expected));
+    let sawJobs = false; let mutated = 0;
+    const changed = embed(fixture({ hook: ({ kind, url, response }) => {
+      if (kind === 'jobs') sawJobs = true;
+      const runs = kind === 'run' ? [response.data] : kind === 'runs' && url.pathname.includes('/11/') ? response.data.workflow_runs : [];
+      for (const run of runs) if (sawJobs && run.pull_requests) { run.pull_requests[0].head.sha = LATER; mutated++; }
+    } }));
+    const result = await changed.collect(); assert(result.allowed, JSON.stringify(result)); assert(mutated >= 2, String(mutated));
+    assert.deepStrictEqual(result.evaluation, expected.evaluation);
+    assert.deepStrictEqual(result.snapshot.workflows, expected.snapshot.workflows);
+    for (const value of [result, expected]) {
+      const text = JSON.stringify({ facts: value.facts, workflows: value.snapshot.workflows });
+      assert(!text.includes('pull_requests')); assert(!text.includes('d067c1d4'));
+    }
+  });
   process.stdout.write(`${count} GitHub collector contract groups passed (fake transport/clock, no network or mutations).\n`);
 })().catch(error => { process.stderr.write(`${error.stack}\n`); process.exitCode = 1; });

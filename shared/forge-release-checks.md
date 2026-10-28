@@ -286,3 +286,148 @@ pending-source-drift-rejected-at-committed-head rather than claim a committed ga
 S02/offline local tests, the rehearsal and shard partition checks provide local
 evidence only. No coverage reduction, hosted performance improvement, remote
 protection, publication, installation or human UAT is established by this S04 work.
+
+## Cross-event CI reuse (#249): design, not enabled
+
+### Status
+
+Cross-event reuse is not enabled. The only path is the exact-candidate
+push/master barrier (`collectChecks` → `evaluateChecks`); it is the full CI fallback.
+There is no eligible item, no reuse manifest in `POLICY`, no reuse API,
+no new workflow and no new permission. Job counts come from `POLICY`; the
+collector bound comes from `DEFAULT_LIMITS.deadlineMs`. Neither changes here.
+No latency or runner-time gain is claimed. Implementation, local tests, hosted CI,
+review, merge and UAT remain separate facts; this design establishes none of them.
+
+### Threat boundary
+
+Trusted: the `release.yml` bootstrap on master for a push, the authenticated GET
+facts read by the coordinator, and the blob pins and `policyDigest` at the exact SHA.
+Hostile: everything a `pull_request` run executes or emits. Its workflow and
+permissions come from the PR merge commit, so a same-repository author controls
+steps, names, logs, artifacts, uploaded JSON, check/status names and aggregates.
+Also hostile: embedded `pull_requests[]`, the PR `merge_commit_sha`, tree equality
+and ancestry arithmetic.
+
+### Observed API evidence (2026-10-28)
+
+- Run 40619617436 had head_sha 987cd55e…, but `pull_requests[0].head.sha`
+  already named d067c1d4…, the later PR267 head. Embedded metadata is mutable.
+- Run 40623979994, attempt 1, job 122604819731 and its check suite exposed only
+  head_sha d067c1d4…. No enumerated key carried the tested merge SHA. This is a
+  limitation of those endpoints as observed, not proof that no such field exists.
+- The events reference
+  (https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)
+  states that `pull_request` `GITHUB_SHA` and checkout use `refs/pull/N/merge`;
+  the run head is therefore not the tested commit.
+- The merge ref is recomputed when the base moves. A squash merge has other
+  parents and possibly another tree.
+- OIDC (https://docs.github.com/en/actions/reference/security/oidc) offers signed
+  claims such as run_id, run_attempt, workflow_sha, job_workflow_sha,
+  repository_id and runner_environment.
+- Attestations (https://docs.github.com/en/rest/repos/attestations) require
+  signature, timestamp and signer verification by the consumer.
+- None of this was validated experimentally here. Signed claims do not prove
+  that a suite consumed particular inputs or that it passed.
+
+### Rejected provenance
+
+Alone or combined, these are not proof:
+
+- status or check names;
+- aggregate checks and `always()` aliases;
+- artifacts, logs, uploaded JSON and job outputs;
+- tree equality;
+- ancestry or tree arithmetic;
+- `pull_requests[].head.sha` / `pull_requests[].base.sha`;
+- `merge_commit_sha` as history;
+- a PR run head_sha as the tested commit.
+
+### Input classification
+
+The eligible set is empty. Default class: exact-only.
+
+| Unit | Class | Reason |
+| --- | --- | --- |
+| `Tests (*)` jobs | exact-only | Mix `run-tests.js` with baseline, `forge-release-version.js --check` (Linux, tags and history, `fetch-depth: 0`), `forge-smoke.js` (non-Windows, shard 0) and SVN provisioning; the API gives only the job conclusion. |
+| `Offline both / *` | exact-only | Not audited; `fetch-depth: 0`. |
+| `required-*` aliases | never evidence | Aggregates over needs. |
+| App Swift/PTY | exact-only | Not audited; the PR path filter may leave the run absent. |
+| Version/semver/impact labels, diff/applicability `before..after`, release gate, prepare/apply/publication | always exact-only | Read history, refs or the exact candidate. |
+| Individual suites | unclassified, so exact-only | No independence audit exists. |
+
+Future rule: the unit is one explicit check in its own job, whose API job
+conclusion is the only evidence. It needs complete declared inputs, a test of
+independence from history, tags, refs, `GITHUB_EVENT_NAME` and `GITHUB_REF`, and a
+reviewed manifest in `POLICY` (which changes `policyDigest`).
+
+### Attestation and consumer boundary
+
+- The issuer never executes candidate code: a separate job or a reusable
+  workflow pinned by full master SHA, with no caller inputs.
+- The issuer signs repository_id, run_id, run_attempt, job ids, the tested
+  commit, blob OIDs of the pinned workflows and of each declared input, the
+  runner environment/image and `policyDigest`.
+- The consumer in the push/master coordinator fetches it through the
+  authenticated API and verifies signature, timestamp and a pinned signer.
+- It also requires: same-repository PR, merged, base master, `merge_commit_sha`
+  equal to the candidate, `fork:false`; a `pull_request` run of the pinned
+  workflow, `completed/success`; complete, duplicate-free current-attempt jobs
+  with re-snapshot before and after; no newer or pending run; head equal to the
+  latest PR head; input blobs equal to the candidate's.
+- Any failure falls back to full CI with an explicit reason code.
+- Exact-only checks always run in the push run of the exact SHA. The publisher
+  stays `release.yml` on push/master only.
+- A future gain would exist only if a future collector accepted an eligible job
+  skipped on push with a verified attestation. Today `skipped` blocks with
+  `job-not-success`. The push trigger and push checks remain.
+- Unproven links: an immutable tested commit; a nonexistent issuer; per-suite
+  granularity only through logs/artifacts; binding of consumed inputs.
+
+### Alternatives
+
+- (a) Same-repository attestation with a per-check manifest: the only reuse
+  route, blocked today by the unproven links above.
+- (b) Merge queue `merge_group`: tests a group of changes. Whether the tested
+  SHA equals the final master commit is not asserted here; it needs a contract
+  and real payloads for the merge strategy in use, not validated. It requires
+  repository configuration (operator), a `merge_group` trigger with pin/mapping
+  updates, a collector accepting `merge_group` with head_sha equal to the
+  candidate, and event-sensitive checks still on push.
+- (c) Full CI with suite optimization (#266/PR267): baseline and fallback.
+- (d) Tree equality, aggregate checks or JSON: rejected.
+
+### Negative cases
+
+| Case | Current behavior | Test | Future consumer requirement |
+| --- | --- | --- | --- |
+| Forged or swapped head/run_id/workflow | Blocks | `github-run-repository-fork-event-branch-sha-path-and-id-bound`, `checks-foreign-repository-workflow-sha-run-id-and-source-block`, `github-cross-event-approved-pr-evidence-never-substitutes-exact-push`, `checks-cross-event-evidence-and-annotations-never-substitute-constituents` | Signed binding to run/attempt/workflow |
+| Fork or foreign head.repo | Blocks | Same as above | `fork:false`, same repository |
+| PR not merged, base or merge SHA | Not read: the collector never queries PRs | Endpoint allowlist in `github-cross-event-approved-pr-evidence-never-substitutes-exact-push` | Merged, base master, merge SHA equal to candidate |
+| Workflow or policy changed | Blocks before HTTP | `github-git-policy-source-drift-blocks-before-http` | Equal pinned blobs and `policyDigest` |
+| Attempt, rerun or race | Blocks or retries | `github-reread-run-attempt-and-entire-index-detect-races`, `github-partial-current-attempt-does-not-inherit-old-green` | Re-snapshot, current attempt |
+| Cancelled or superseded | Blocks | `github-terminal-failure-skipped-neutral-and-invalid-states-do-not-poll`, `github-latest-rerun-old-run-governs-and-overlap-is-ambiguous` | No newer or pending run |
+| Job missing, duplicate or skipped | Blocks | Existing job tests and `checks-cross-event-evidence-and-annotations-never-substitute-constituents` | Complete current-attempt jobs |
+| Mutable embedded metadata | Inert | `github-embedded-pr-metadata-mutation-is-inert` | Never read as provenance |
+| Unclassified item | Exact-only | Empty eligible set; `POLICY` has no reuse manifest | Reviewed manifest entry |
+| Exact-only check without an exact run | Blocks at deadline | PR-only world in `github-cross-event-approved-pr-evidence-never-substitutes-exact-push` | Exact push run required |
+| PR context publishes | Rejected at origin | `workflow-origin-rejections-before-candidate-code-both-jobs`, `origin-rejects-tag-pr-fork-ref-before-candidate-git` | Publisher only on push/master |
+
+Positive: `github-complete-exact-sha-current-attempt-public-apis-and-get-only`
+stays unchanged. There is no synthetic reuse positive: it would mark
+speculative provenance as validated.
+
+### Activation prerequisites
+
+Each needs separate evidence:
+
+1. A real payload proving immutable tested-commit identity bound to
+   run_id/run_attempt, captured outside CI without credentials.
+2. An implemented, security-reviewed issuer.
+3. Per-item audit, independence test and dedicated job, with a `POLICY` manifest.
+4. A consumer with the complete negative matrix and a positive built on real shapes.
+5. A prospective measurement baseline (see `shared/forge-ci-efficiency.md`).
+
+Operator decisions, not requested by this task: granting `id-token: write` or
+`attestations: write` to a PR-triggered issuer, or enabling merge queue.
+Until then the full CI fallback applies.
