@@ -133,6 +133,40 @@ function testClassification() {
   }
 }
 
+function testImageGeneration165() {
+  const pin = JSON.parse(fs.readFileSync(REAL_PIN, 'utf8'));
+  equal(pin.meta.codex_version, '0.165.0', 'exercise the actual new pin');
+  equal(admit.assertVariantCoverage(pin), {
+    ok: true, variants: 19, admissible: 2, inadmissible: 17, meta_variant_count: 19,
+  }, 'new pin still covers exactly 19 names and only two admissible variants');
+  const image = pin.definitions.ThreadItem.oneOf.find(item => item.properties.type.enum[0] === 'imageGeneration');
+  check(image.properties.inputImages, 'new pin declares observed input images');
+  check(image.anyOf.some(branch => branch.properties.fileId), 'new pin declares durable file identity');
+  equal(admit.VARIANT_ADMISSIBILITY.imageGeneration.reason, 'tool-result-unverified', 'image generation remains unverified tool output');
+  equal(admit.ADMISSIBLE_TYPES.slice().sort(), ['commandExecution', 'fileChange'], 'policy admits the same two names');
+  const result = admit.buildRuntimeEvidence([{
+    type: 'imageGeneration', id: 'image-fixture', status: 'completed', fileId: 'file-fixture',
+    inputImages: [{ path: '/fixture/input.png', sha256: 'a'.repeat(64) }],
+  }], { unit: 'execute-task/T03', now: '2026-10-28T00:00:00.000Z' });
+  equal(result.entries, [], 'inputImages and fileId cannot create evidence entries');
+  equal(result.census.inadmissible, 1, 'imageGeneration is counted as inadmissible');
+  equal(result.census.admitted, 0, 'imageGeneration is never admitted');
+  equal(result.census.rejected, [], 'known imageGeneration is not misreported as unknown');
+  equal(result.census.types_seen.imageGeneration, 1, 'image generation is present in census');
+  console.log('PASS C02 admissibility: new pin 19/2/17, imageGeneration inputImages/fileId counted inadmissible with zero entries; policy unchanged');
+}
+
+function testRealSchemaDoc165() {
+  const doc = path.join(__dirname, '..', 'docs', 'codex-schema-0.165.0.md');
+  const result = runCli(['--check-doc', doc, '--json']);
+  equal(result.status, 0, 'actual 0.165.0 document passes the real check-doc CLI');
+  const payload = JSON.parse(result.stdout);
+  equal(payload.ok, true, 'actual document verdicts and reasons agree with product policy');
+  equal(payload.parsed, 19, 'actual document includes all 19 variants');
+  equal(payload.problems, [], 'no divergent rows');
+  console.log('PASS C02 schema document table: real --check-doc exits 0 with 19 policy-coherent variants and no problems');
+}
+
 // ── 2. The anti-silence floor: collected-and-empty ≠ not-collected ─────────
 
 function testCollectedAndEmpty() {
@@ -568,6 +602,8 @@ function testMalformedKnown() {
 // ── Runner ─────────────────────────────────────────────────────────────────
 
 const tests = [
+  ['Codex 0.165.0 image generation stays inadmissible', testImageGeneration165],
+  ['Codex 0.165.0 actual document table', testRealSchemaDoc165],
   ['malformed-known variants (S04 R1)', testMalformedKnown],
   ['classification by name', testClassification],
   ['collected-and-empty floor', testCollectedAndEmpty],

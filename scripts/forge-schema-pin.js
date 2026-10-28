@@ -2,7 +2,7 @@
 'use strict';
 
 // Exports: canonicalize, projectSchema, generateSchema, checkDrift, diffValues.
-// CLI: --generate-pin | --check [--schema-dir DIR] [--json]
+// CLI: --generate-pin | --check [--schema-dir DIR] [--full] [--json]
 //
 // The app-server schema generator was marked [experimental] in codex-cli 0.144.4.
 // On 2026-08-05 five measurements had distinct file hashes but the same 516
@@ -250,10 +250,10 @@ function generateSchema(outDir) {
   return { outcome: 'match', codexVersion: match ? match[1] : 'unknown' };
 }
 
-function diffValues(expected, actual, currentPath, fields) {
+function diffValues(expected, actual, currentPath, fields, limit = 20) {
   const target = fields || [];
   const at = currentPath || '';
-  if (target.length >= 20) return target;
+  if (target.length >= limit) return target;
   if (expected === actual) return target;
   const expectedObject = expected && typeof expected === 'object';
   const actualObject = actual && typeof actual === 'object';
@@ -266,8 +266,8 @@ function diffValues(expected, actual, currentPath, fields) {
     : Array.from(new Set([...Object.keys(expected), ...Object.keys(actual)])).sort();
   for (const key of keys) {
     const next = Array.isArray(expected) ? `${at}[${key}]` : (at ? `${at}.${key}` : key);
-    diffValues(expected[key], actual[key], next, target);
-    if (target.length >= 20) break;
+    diffValues(expected[key], actual[key], next, target, limit);
+    if (target.length >= limit) break;
   }
   return target;
 }
@@ -312,11 +312,19 @@ function checkDrift(options) {
     if (count + referencedCount === 0) return { outcome: 'inconclusive', reason: '0 definitions compared', counts };
     // Both halves are compared: the roots hold `$ref` pointers, and drift inside a
     // pointed-at type only shows up under `referenced` (S01 review R1).
-    const fields = diffValues(
+    const allFields = diffValues(
       { definitions: pin.definitions, referenced: pin.referenced },
       { definitions: observed.definitions, referenced: observed.referenced },
+      '', [], Infinity,
     );
-    return { outcome: fields.length ? 'drift' : 'match', fields: fields.length ? fields : undefined, counts };
+    return {
+      outcome: allFields.length ? 'drift' : 'match',
+      fields: allFields.length ? (opts.full ? allFields : allFields.slice(0, 20)) : undefined,
+      fields_total: allFields.length,
+      // Describes the bounded default, even when --full supplies the complete list.
+      fields_truncated: allFields.length > 20,
+      counts,
+    };
   } finally {
     if (generatedDir) fs.rmSync(generatedDir, { recursive: true, force: true });
   }
@@ -327,19 +335,22 @@ function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--generate-pin') result.generatePin = true;
-    else if (arg === '--check' || arg === '--json') result[arg.slice(2)] = true;
+    else if (arg === '--check' || arg === '--json' || arg === '--full') result[arg.slice(2)] = true;
     else if (arg === '--schema-dir') result.schemaDir = argv[++index];
     else return { error: `unknown or incomplete argument: ${arg}` };
   }
-  if ((result.generatePin ? 1 : 0) + (result.check ? 1 : 0) !== 1 || (result.schemaDir !== undefined && !result.schemaDir)) {
-    return { error: 'usage: --generate-pin | --check [--schema-dir DIR] [--json]' };
+  if ((result.generatePin ? 1 : 0) + (result.check ? 1 : 0) !== 1 || (result.schemaDir !== undefined && !result.schemaDir) || (result.full && !result.check)) {
+    return { error: 'usage: --generate-pin | --check [--schema-dir DIR] [--full] [--json]; --full only valid with --check' };
   }
   return result;
 }
 
-function printResult(result, json) {
+function printResult(result, json, full) {
   if (json) process.stdout.write(`${JSON.stringify(result)}\n`);
-  else process.stdout.write(`forge-schema-pin: ${result.outcome}${result.reason ? `: ${result.reason}` : ''}\n`);
+  else {
+    process.stdout.write(`forge-schema-pin: ${result.outcome}${result.reason ? `: ${result.reason}` : ''}\n`);
+    if (full) for (const field of result.fields || []) process.stdout.write(`${field.kind}: ${field.path}\n`);
+  }
 }
 
 module.exports = { OUTCOMES, canonicalize, collectRefs, resolveReferences, projectSchema, generateSchema, checkDrift, diffValues, pinPath };
@@ -376,8 +387,8 @@ if (require.main === module) {
       fs.rmSync(directory, { recursive: true, force: true });
     }
   } else {
-    const result = checkDrift({ schemaDir: args.schemaDir });
-    printResult(result, args.json);
+    const result = checkDrift({ schemaDir: args.schemaDir, full: args.full });
+    printResult(result, args.json, args.full);
     if (result.outcome !== 'match') {
       if (result.outcome === 'drift') process.stderr.write('forge-schema-pin: drift detected; run --generate-pin and review the named fields.\n');
       process.exitCode = 1;
