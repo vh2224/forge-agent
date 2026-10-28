@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "unit": "M-20261028132636-experiencia/S01/T01",
+  "source": "owner checkout; own analysis of 2026-10-28",
+  "source_manifest_captured_at": "2026-10-28T14:11:31.212Z",
+  "executor": "owner-context-preparation",
+  "files": [
+    {
+      "file": "docs/host-compatibility-2026-10-28.md",
+      "source_sha256": "54ab27a29082b2315da0b7bb7d3691c411683208283511d589759cdde36db424",
+      "imported_sha256": "54ab27a29082b2315da0b7bb7d3691c411683208283511d589759cdde36db424",
+      "pre_import_sha256": null,
+      "eol": "LF",
+      "edited_after_import": false
+    },
+    {
+      "file": "docs/host-compatibility-baseline.json",
+      "source_sha256": "31b5e62a1cb73a1856a134a5bc295667088254a63726d6222c65bf6cd6f6fea9",
+      "imported_sha256": "31b5e62a1cb73a1856a134a5bc295667088254a63726d6222c65bf6cd6f6fea9",
+      "pre_import_sha256": null,
+      "eol": "LF",
+      "edited_after_import": false
+    },
+    {
+      "file": "docs/host-compatibility-2026-10-28.evidence.json",
+      "source_sha256": "95974b4ecf41c98d331978755d7523dab4491d969e145d7a9c86cd7cf67d125c",
+      "imported_sha256": "95974b4ecf41c98d331978755d7523dab4491d969e145d7a9c86cd7cf67d125c",
+      "pre_import_sha256": null,
+      "eol": "LF",
+      "edited_after_import": false
+    },
+    {
+      "file": "docs/runtime-compatibility.md",
+      "source_sha256": "13c9c99ed62b4964e2c8193406d88c995e1114678786b6fc76261adea433ef6b",
+      "imported_sha256": "13c9c99ed62b4964e2c8193406d88c995e1114678786b6fc76261adea433ef6b",
+      "pre_import_sha256": "1321b325c6e563de44059ce453deadc6e6ee4d2541c8a0e7eb07ef6d607c58fc",
+      "eol": "CRLF-or-mixed",
+      "edited_after_import": true
+    }
+  ],
+  "notes": "The first sidecar returned blocked with no writes because the owner sources were unreadable in its allowed directories. The host staged exact bytes under the existing held claims. Physical CRLF in runtime-compatibility.md was preserved at import; its historical evidence fingerprint ab80aa... predates the owner baseline link, so the comparison used the current bytes. The import-time content differed from the pre-import CODE_DIR version only by the owner paragraph in Canonical matrix (CRLF/LF ignored for that comparison only). The worker of S01/T01 then edited runtime-compatibility.md for catalog schema 1.1.0 and wrote it with LF, matching the repository eol=lf policy; imported_sha256 keeps the verbatim import hash, reconstructible from the owner source. The three host-compatibility files remain byte-identical to their sources. Independent review remains pending."
+}

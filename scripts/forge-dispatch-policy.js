@@ -33,7 +33,9 @@ function own(value, key) { return Object.prototype.hasOwnProperty.call(value || 
 function list(value) { return Array.isArray(value) ? [...new Set(value.filter((item) => typeof item === 'string' && item.trim()).map((item) => item.trim()))] : []; }
 function normalizeRole(value) { return value === 'executor' ? 'worker' : value; }
 function inside(base, target) { const relative = path.relative(path.resolve(base), path.resolve(target)); return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative)); }
-function hostStatusAvailable(value) { return !['planned', 'unavailable', 'missing'].includes(String(value || '').toLowerCase()); }
+// Fail-closed for `unknown` (catalog schema 1.1.0); `distributed` and
+// `demonstrated` describe a projected surface and stay available.
+function hostStatusAvailable(value) { return !['planned', 'unavailable', 'missing', 'unknown'].includes(String(value || '').toLowerCase()); }
 function catalogCapabilities(input, host) {
   const found = new Set(list(input.available_capabilities));
   const catalog = input.capability_catalog;

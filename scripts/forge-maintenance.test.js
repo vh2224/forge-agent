@@ -66,6 +66,76 @@ test('required and conditional capability reasons have different fatality', () =
   } finally { data.cleanup(); }
 });
 
+test('schema 1.1.0 states: demonstrated is available, distributed is non-fatal, unknown is fail-closed when required', () => {
+  const data = fixture('codex');
+  try {
+    const row = (id, kind, required, status) => ({ capability_id: id, kind, required, hosts: { codex: status }, probe: { kind: 'filesystem', path: 'scripts/forge-hook.js' } });
+    const catalog = { capabilities: [
+      row('demonstrated-required', 'headless', true, 'demonstrated'),
+      row('distributed-required', 'headless', true, 'distributed'),
+      row('distributed-optional', 'mcp', false, 'distributed'),
+      row('unknown-optional', 'mcp', false, 'unknown'),
+    ] };
+    const report = maintenance.diagnose({ runtime: 'codex', forgeHome: data.forgeHome, detectCapabilities: detector('codex'), catalog });
+    const byId = new Map(report.diagnostics.map((item) => [item.capability, item]));
+    assert.deepStrictEqual([byId.get('demonstrated-required').status, byId.get('demonstrated-required').reason_code, byId.get('demonstrated-required').severity], ['available', 'available', 'info']);
+    for (const id of ['distributed-required', 'distributed-optional']) {
+      assert.strictEqual(byId.get(id).reason_code, 'capability-not-demonstrated', id);
+      assert.strictEqual(byId.get(id).status, 'distributed', id);
+      assert.strictEqual(byId.get(id).severity, 'warning', id);
+    }
+    assert.strictEqual(byId.get('unknown-optional').severity, 'warning');
+    assert.strictEqual(byId.get('unknown-optional').status, 'unknown');
+    assert.strictEqual(report.ok, true, 'distributed and optional unknown never become fatal');
+
+    const required = maintenance.diagnose({ runtime: 'codex', forgeHome: data.forgeHome, detectCapabilities: detector('codex'), catalog: { capabilities: [row('unknown-required', 'headless', true, 'unknown')] } });
+    const unknown = required.diagnostics.find((item) => item.capability === 'unknown-required');
+    assert.strictEqual(required.ok, false);
+    assert.deepStrictEqual([unknown.status, unknown.reason_code, unknown.severity], ['unknown', 'required-capability-unknown', 'fatal']);
+
+    // A distributed surface whose projected source is absent is still a required gap.
+    const absent = maintenance.diagnose({ runtime: 'codex', forgeHome: data.forgeHome, detectCapabilities: detector('codex'), catalog: { capabilities: [{ ...row('distributed-absent', 'headless', true, 'distributed'), probe: { kind: 'filesystem', path: 'definitely-absent' } }] } });
+    assert.strictEqual(absent.diagnostics.find((item) => item.capability === 'distributed-absent').reason_code, 'required-capability-missing');
+    assert.strictEqual(absent.ok, false);
+  } finally { data.cleanup(); }
+});
+
+test('required unknown remains fatal when hook trust is disabled', () => {
+  const data = fixture('codex');
+  try {
+    for (const trusted of [true, false]) {
+      const catalog = { capabilities: [{ capability_id: 'required-unknown-hook', kind: 'hook', required: true,
+        hosts: { codex: 'unknown' }, probe: { kind: 'filesystem', path: 'scripts/forge-hook.js' } }] };
+      const report = maintenance.diagnose({ runtime: 'codex', forgeHome: data.forgeHome,
+        detectCapabilities: detector('codex'), hookTrust: { codex: trusted }, catalog });
+      const finding = report.diagnostics.find((item) => item.capability === 'required-unknown-hook');
+      assert.strictEqual(report.ok, false, `trust=${trusted}`);
+      assert.deepStrictEqual([finding.status, finding.reason_code, finding.severity],
+        ['unknown', 'required-capability-unknown', 'fatal'], `trust=${trusted}`);
+    }
+  } finally { data.cleanup(); }
+});
+
+test('schema 1.1.0 keeps planned, conditional, implemented and common semantics', () => {
+  const data = fixture('codex');
+  try {
+    const row = (id, kind, required, status) => ({ capability_id: id, kind, required, hosts: { codex: status }, probe: { kind: 'filesystem', path: 'scripts/forge-hook.js' } });
+    const report = maintenance.diagnose({ runtime: 'codex', forgeHome: data.forgeHome, detectCapabilities: detector('codex'), catalog: { capabilities: [
+      row('planned-required', 'headless', true, 'planned'),
+      row('planned-optional', 'mcp', false, 'planned'),
+      row('conditional-required', 'statusline', true, 'conditional'),
+      row('implemented-required', 'headless', true, 'implemented'),
+      row('common-required', 'headless', true, 'common'),
+    ] } });
+    const byId = new Map(report.diagnostics.map((item) => [item.capability, item]));
+    assert.deepStrictEqual([byId.get('planned-required').reason_code, byId.get('planned-required').severity], ['required-capability-missing', 'fatal']);
+    assert.deepStrictEqual([byId.get('planned-optional').reason_code, byId.get('planned-optional').severity], ['conditional-capability-unavailable', 'warning']);
+    assert.deepStrictEqual([byId.get('conditional-required').reason_code, byId.get('conditional-required').severity], ['conditional-capability-unavailable', 'warning']);
+    assert.strictEqual(byId.get('implemented-required').reason_code, 'available');
+    assert.strictEqual(byId.get('common-required').reason_code, 'available');
+  } finally { data.cleanup(); }
+});
+
 test('core and adapter failures have stable explicit reasons', () => {
   const data = fixture('codex');
   try {

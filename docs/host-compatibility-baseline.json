@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis_date": "2026-10-28",
+  "report": "docs/host-compatibility-2026-10-28.md",
+  "evidence": "docs/host-compatibility-2026-10-28.evidence.json",
+  "forge": {
+    "version": "4.46.8",
+    "commit": "6fee802526c5b80fa53f63a34688308929f2ea5d"
+  },
+  "codex_cli": {
+    "installed": "0.165.0",
+    "latest_stable_found": "0.165.0",
+    "schema_pin": "0.163.0",
+    "release_notes_range": { "after_exclusive": "0.163.0", "through_inclusive": "0.165.0" },
+    "next_release_notes_after_exclusive": "0.165.0",
+    "local_schema_check": "drift",
+    "provider_execution_tested": false
+  },
+  "claude_code": {
+    "installed": "2.1.312",
+    "latest_stable_found": "2.1.312",
+    "prior_local_headless_reference": "2.1.310",
+    "release_notes_range": { "after_exclusive": "2.1.310", "through_inclusive": "2.1.312" },
+    "next_release_notes_after_exclusive": "2.1.312",
+    "provider_execution_tested": false
+  },
+  "desktop_ui": {
+    "installed_build": null,
+    "documentation_reviewed_as_of": "2026-10-28",
+    "visual_uat_performed": false,
+    "version_range_closed": false
+  },
+  "open_findings": [
+    { "id": "schema-drift", "issue": "https://github.com/vh2224/forge-agent/issues/279", "status_at_analysis": "open" },
+    { "id": "compatibility-report-freshness", "issue": "https://github.com/vh2224/forge-agent/issues/280", "status_at_analysis": "open" },
+    { "id": "custom-agent-permissions-contract", "status_at_analysis": "audit-required-no-escape-demonstrated" },
+    { "id": "communication-and-agent-progress", "status_at_analysis": "proposed-not-implemented" },
+    { "id": "question-lifecycle-uat", "status_at_analysis": "proposed-not-implemented" },
+    { "id": "forge-plugin-sidebar", "status_at_analysis": "feasibility-proposed-not-implemented" }
+  ],
+  "reanalysis_policy": {
+    "review_new_release_range": true,
+    "carry_forward_open_findings": true,
+    "revalidate_changed_source_or_configuration": true,
+    "unchanged_version_does_not_prove_unchanged_docs_or_ui": true,
+    "baseline_is_not_a_minimum_version_or_runtime_compatibility_guarantee": true
+  }
+}
