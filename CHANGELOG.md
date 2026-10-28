@@ -1,5 +1,7 @@
 ## Não lançado
 
+- forge-task: criação explícita de task nova não consulta a seleção de trabalhos pessoais existentes; retomada explícita e isolamento permanecem preservados (#268).
+
 - CI: a matriz nativa executa os mesmos casos em até dois processos isolados, conserva o caminho sequencial com `--serial` e propaga falhas de todos os grupos; pesos de shards atualizados de sete jobs concluídos (#249).
 
 - Uma tool com prova `positive` medida dentro da janela suspensa conserva a
