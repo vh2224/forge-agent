@@ -84,7 +84,10 @@ function setupFixture(vcsName, resolveInitialRoute) {
       git(template, ['init', '-q']); git(template, ['config', 'core.autocrlf', 'false']); git(template, ['add', '.']);
       git(template, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'baseline']);
     }
-    fs.cpSync(template, cwd, { recursive: true });
+    // Use Node's per-entry traversal for this tiny private tree. The native bulk
+    // copy has failed with ENOENT on macOS (#264); include every entry and let
+    // real filesystem errors propagate without a retry or partial-success path.
+    fs.cpSync(template, cwd, { recursive: true, filter: () => true });
     git(cwd, ['update-index', '-q', '--refresh']);
   }
   write(path.join(cwd, 'dirty.txt'), 'user dirty\n');

@@ -43,7 +43,7 @@
     {
       "id": "planning",
       "path": "shared/forge-procedure-planning.md",
-      "sha256": "d294821aab3778e9ed24cb6e146fea62c0554948583671889f1279bc0082084a",
+      "sha256": "2686df10b60be91b5aa3bbb6824f93858e50ea3cac3e09dbdc51b7e955b3a335",
       "status": "ready",
       "owner": "T02",
       "dependencies": [
@@ -63,7 +63,7 @@
     {
       "id": "task-preparation",
       "path": "shared/forge-procedure-task-preparation.md",
-      "sha256": "8ac860070ff00bb6cd4857f6875e7cca3382ae71fbf87872cd7d2aefd3878cbd",
+      "sha256": "1d9f39dd7e782f761e43762b09f7253abaa0d152446ca7e3e9fa33109d4b38f7",
       "status": "ready",
       "owner": "T03",
       "dependencies": [
