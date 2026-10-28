@@ -1,5 +1,7 @@
 ## Não lançado
 
+- Fixtures: desabilita manutencao automatica Git somente nos repositorios privados antes do primeiro commit, evitando a corrida de maintenance.lock durante a copia integral (#264).
+
 - Reviews agy: supervisão limitada quando `--help` anuncia `stream-json`, com legado rotulado `unsupported-legacy`; o formato documentado ainda não foi verificado contra inferência real (#205)
 
 - Evidências documentais suplementares podem concluir uma entrega parcial com revisão independente e verificação real, preservando manifesto, resultado original e autoridade viva na retomada (#273).
