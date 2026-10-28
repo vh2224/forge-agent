@@ -1,5 +1,7 @@
 ## Não lançado
 
+- CI: pesos recalibrados após a paralelização da matriz nativa, com 342 suítes observadas por plataforma e sem suítes desconhecidas no perfil (#249).
+
 - CI: a matriz nativa executa os mesmos casos em até dois processos isolados, conserva o caminho sequencial com `--serial` e propaga falhas de todos os grupos; pesos de shards atualizados de sete jobs concluídos (#249).
 
 - Uma tool com prova `positive` medida dentro da janela suspensa conserva a
