@@ -4,6 +4,19 @@
 const fs = require('fs');
 const { digest, key } = require('./forge-code-roots');
 const fail = () => { throw Object.assign(new Error('native-repackage-evidence-invalid'), { code: 'native-repackage-evidence-invalid', provider_called: false }); };
+function preserveRequest(current, retained) {
+  // Runtime maintenance changes the resolver's source observation, not the
+  // historical request seal. Every other route/request field must still match;
+  // the current resolver and native adapter remain the dispatch authority.
+  const { route: currentRoute, ...currentRequest } = current;
+  const { route: retainedRoute, ...retainedRequest } = retained;
+  const { resolution_sources: currentSources, ...currentPolicy } = currentRoute;
+  const { resolution_sources: retainedSources, ...retainedPolicy } = retainedRoute;
+  const equal = require('util').isDeepStrictEqual;
+  if (!Array.isArray(currentSources) || !Array.isArray(retainedSources)
+      || !equal(currentRequest, retainedRequest) || !equal(currentPolicy, retainedPolicy)) fail();
+  return structuredClone(retained);
+}
 function inspect(options, state, request, resumePrepared = false) {
   const retained = state.continuation?.repackage_evidence;
   const input = resumePrepared ? { invocationFile: retained?.invocation_file, journalFile: retained?.journal_file,
@@ -49,9 +62,10 @@ function inspect(options, state, request, resumePrepared = false) {
           || digest({ ...invocation.args, message: ipc.args.message }) !== digest(ipc.args)) fail();
       const mapped = require('./forge-native-prompt-file').prepare({
         file: manifest.request.resultFile + '.native-prompt.txt', prompt: ipc.args.message,
-        contract: manifest.request.execution_contract });
+        contract: manifest.request.execution_contract, deferWrite: true });
       if (invocation.args.message !== mapped.message) fail();
+      mapped.materialize();
       mapped.assertUnchanged();
     }, journalFile: input.journalFile };
 }
-module.exports = { inspect };
+module.exports = { inspect, preserveRequest };

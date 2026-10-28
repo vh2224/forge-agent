@@ -41,6 +41,7 @@ async function fixture(options = {}) {
     resultFile:path.join(f.dir,'execute.json'),prompt:'Implement the claimed fixture only.',
     verification:{commandTimeoutMs:300000,commandsByRoot:{alpha:[command],beta:[command]}}};
   if (standalone) {
+    if (options.nativePromptFile) r.nativePromptFile = path.join(f.dir, 'requested-prompt.txt');
     Object.assign(r,{scope:'standalone-task',taskId, constraints:{auto_commit:false,deploy:false},
       gates:{plan:'approved',claim:'proceed',security:'passed'},
       contextFile:path.join(base,taskId+'-CONTEXT.md'),researchFile:path.join(base,taskId+'-RESEARCH.md')});

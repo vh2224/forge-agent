@@ -6,6 +6,18 @@ try {
   const owner = path.join(dir, 'owner'), code = path.join(dir, 'code');
   fs.mkdirSync(owner); fs.mkdirSync(code);
   const contract = { owner, code_roots: [{ id: 'primary', path: code }] };
+  const stagedFile = path.join(dir, 'staged.txt');
+  const preliminary = api.prepare({ file: stagedFile, prompt: 'Preflight request seal', contract, deferWrite: true });
+  const final = api.prepare({ file: stagedFile, prompt: 'Final request seal', contract, deferWrite: true });
+  assert(!fs.existsSync(stagedFile), 'capability preflight must not publish a different final payload');
+  final.materialize(); final.assertUnchanged();
+  assert.equal(fs.readFileSync(stagedFile, 'utf8'), 'Final request seal');
+  assert.throws(() => preliminary.materialize(), /native-prompt-file-conflict/);
+  const stagedDir = path.join(dir, 'staged-parent'); fs.mkdirSync(stagedDir);
+  const delayed = api.prepare({ file: path.join(stagedDir, 'prompt.txt'), prompt: 'Final', contract, deferWrite: true });
+  fs.renameSync(stagedDir, stagedDir + '-original'); fs.mkdirSync(stagedDir);
+  assert.throws(() => delayed.materialize(), /native-prompt-file-target/);
+  assert(!fs.existsSync(path.join(stagedDir, 'prompt.txt')), 'changed parent must refuse before writing');
   const file = path.join(dir, 'prompt.txt'), prompt = '\uFEFFMandatory é\r\n' + '完整 payload\n'.repeat(10000);
   const mapped = api.prepare({ file, prompt, contract });
   assert.equal(fs.readFileSync(mapped.file, 'utf8'), prompt);

@@ -84,6 +84,14 @@ async function main() {
     assert.equal(calls, 1);
     f.runtime.writerObservationAdapter = require('./forge-recovery-transition').createWriterObservationAdapter(challenge => ({ ...challenge,
       binding_sha256: roots.digest(challenge), status: 'stopped', writer_identity: 'fixture-native', evidence_reference: 'fixture:awaited-return' }));
+    const promptFile = ipc.request.resultFile + '.native-prompt.txt', promptBytes = fs.readFileSync(promptFile);
+    fs.renameSync(promptFile, promptFile + '.preserved');
+    await assert.rejects(() => side.recoverUnitSidecar(f.request, f.recovery, f.runtime), /native-prompt-file-missing/);
+    assert(!fs.existsSync(promptFile), 'replay must never recreate the prompt');
+    fs.renameSync(promptFile + '.preserved', promptFile);
+    fs.appendFileSync(promptFile, 'changed');
+    await assert.rejects(() => side.recoverUnitSidecar(f.request, f.recovery, f.runtime), /native-prompt-file-conflict/);
+    fs.writeFileSync(promptFile, promptBytes);
     const replay = await side.recoverUnitSidecar(f.request, f.recovery, f.runtime);
     assert.equal(replay.action, 'replay'); assert.equal(replay.result.published.result.status, 'done');
     assert.equal((await side.recoverUnitSidecar(f.request, f.recovery, f.runtime)).action, 'replay');

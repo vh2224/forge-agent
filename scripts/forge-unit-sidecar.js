@@ -2752,16 +2752,29 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
   const nativeTaskName = `recovery_${request.dispatchId}_${continuationId}`;
   const deliveryHelper = ordinaryResume && ['milestone', 'standalone-task'].includes(canonical.scope) && canonical.phase === 'execute'
     ? require('./forge-native-recovery-delivery') : null;
-  const finalRequest = route => ({ ...executionRequest, route, recoveryStateFile: recovery.stateFile,
-    dispatchId: recoveryDispatchId(request.dispatchId, continuationId), resultFile: `${request.resultFile}.recovery-${continuationId}.json` });
+  let retainedRequest = null;
+  const finalRequest = route => {
+    const current = { ...executionRequest, route, recoveryStateFile: recovery.stateFile,
+      dispatchId: recoveryDispatchId(request.dispatchId, continuationId), resultFile: `${request.resultFile}.recovery-${continuationId}.json` };
+    return retainedRequest ? require('./forge-native-repackage').preserveRequest(current, retainedRequest) : current;
+  };
   // This selects transport only; authority and the exact invocation hash are
   // independently revalidated by recovery before any consumption or dispatch.
   let retainedFileTransport = false;
   if (deliveryHelper && fs.existsSync(recovery.stateFile)) {
     require('./forge-attempt-recovery').validateStateTarget(recovery.stateFile, canonical, executionRequest.execution_contract);
-    retainedFileTransport = require('./forge-xllm-state').loadRecovery(recovery.stateFile)?.continuation?.packaging_reason === 'uninvoked-native-file-repackage';
+    const retainedState = require('./forge-xllm-state').loadRecovery(recovery.stateFile);
+    retainedFileTransport = retainedState?.continuation?.packaging_reason === 'uninvoked-native-file-repackage';
+    if (retainedFileTransport || recovery.transitions?.some(row => row.type === 'uninvoked-native-repackage')) {
+      const original = retainedFileTransport ? retainedState.continuation_history?.find(row => row.reservation_sha256 === continuationId) : retainedState.continuation;
+      if (!original?.delivery) fail('native-repackage-evidence-invalid');
+      require('./forge-attempt-recovery').validateStateTarget(original.delivery.manifest_file, canonical, executionRequest.execution_contract);
+      const bytes = fs.readFileSync(original.delivery.manifest_file);
+      if (hash(bytes) !== original.delivery.manifest_sha256) fail('native-repackage-evidence-invalid');
+      retainedRequest = JSON.parse(bytes).request;
+    }
   }
-  let promptTransport = null;
+  const promptTransports = new Map();
   const nativeOptions = (route, { fileBacked = false } = {}) => {
     // Binding preflight uses the real task plan; the transport composes the
     // complete execution/security/context prompt after prepare.
@@ -2806,11 +2819,10 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     let transport = null;
     if (deliveryHelper && (fileBacked || retainedFileTransport || request.nativePromptFile || recovery.transitions?.some(row => row.type === 'uninvoked-native-repackage'))) {
       const file = finalRequest(route).resultFile + '.native-prompt.txt';
-      if (!promptTransport) promptTransport = require('./forge-native-prompt-file').prepare({
-        file, prompt, contract: executionRequest.execution_contract });
-      if (promptTransport.sha256 !== hash(prompt)) fail('native-prompt-file-conflict');
-      promptTransport.assertUnchanged();
-      transport = promptTransport;
+      const promptHash = hash(prompt);
+      if (!promptTransports.has(promptHash)) promptTransports.set(promptHash, require('./forge-native-prompt-file').prepare({
+        file, prompt, contract: executionRequest.execution_contract, deferWrite: true }));
+      transport = promptTransports.get(promptHash);
     }
     return { hostRuntime: route.host_runtime, resolvedDispatch: route,
     telemetryIdentity: finalRequest(route), lifecycle: runtime.nativeLifecycle,
@@ -2822,7 +2834,10 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
         : value && ['done', 'partial', 'blocked'].includes(value.status),
     activeCapabilities: runtime.activeCapabilities, effortBinding: runtime.effortBinding,
     prompt: transport ? transport.message : prompt,
-    ...(transport ? { promptContext: prompt, assertInvocation: () => transport.assertUnchanged() } : {}),
+    ...(transport ? { promptContext: prompt, assertReplay: () => transport.assertExisting(), assertInvocation: stage => {
+      if (stage === 'packaged') transport.materialize();
+      transport.assertUnchanged();
+    } } : {}),
     onPackagedContext: runtime.onPackagedContext, forkTurns: 'none',
     taskName: nativeTaskName,
     agentType: ({ execute: 'forge-executor', plan: 'forge-planner', research: 'forge-researcher', discuss: 'forge-discusser' })[canonical.phase] || 'forge-worker' };

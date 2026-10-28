@@ -7,6 +7,14 @@ try {
   require('child_process').execFileSync('git', ['init', '--quiet', code], { stdio: 'pipe' });
   const contract = roots.singleContract(owner, code), request = { cwd: code, contextRoot: owner, execution_contract: contract };
   const next = { ...request, resultFile: path.join(dir, 'result.json') };
+  const retainedRequest = { ...next, route: { model: 'fixture', effort: 'high', resolution_sources: [{ sha256: 'old' }] } };
+  const currentRequest = { ...retainedRequest, route: { ...retainedRequest.route, resolution_sources: [{ sha256: 'current' }] } };
+  assert.deepEqual(api.preserveRequest(currentRequest, retainedRequest), retainedRequest);
+  for (const altered of [{ ...currentRequest, cwd: owner }, { ...currentRequest, route: { ...currentRequest.route, model: 'other' } },
+    { ...currentRequest, route: { ...currentRequest.route, effort: 'low' } },
+    { ...currentRequest, route: { ...currentRequest.route, dispatch_allowed: true } }]) {
+    assert.throws(() => api.preserveRequest(altered, retainedRequest), /native-repackage-evidence-invalid/);
+  }
   const manifestFile = next.resultFile + '.manifest.json', ipcFile = path.join(dir, 'ipc.json'), journalFile = path.join(dir, 'journal.json');
   const manifest = JSON.stringify({ request: next }), args = { message: 'Full original context', model: 'fixture' };
   fs.writeFileSync(manifestFile, manifest);
