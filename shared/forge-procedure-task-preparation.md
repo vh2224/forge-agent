@@ -19,6 +19,15 @@ Compare alternatives and risks in brainstorm, settle decisions in discuss,
 record verifiable sources in research and produce observable must-haves in plan.
 Preserve requirements and mandatory checklists regardless of optional budgets.
 
+During plan preparation, map checks to observable requirements and inspect runner
+selections for overlap. At one verification point, do not require an individual
+suite and a runner selection containing it with unchanged inputs and equivalent
+arguments/environment unless the repetition has an explicit reason. Preserve
+mandatory owner re-verification and security/review/integration gates; this does
+not authorize skipping an approved command or accepting stale results. Prefer
+existing behavioral coverage and add cases for uncovered behavior rather than
+tests that merely restate implementation.
+
 ## Delivery
 
 Operate read-only with respect to canonical artifacts and code during preparation.
