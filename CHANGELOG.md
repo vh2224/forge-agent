@@ -1,6 +1,6 @@
 ## Não lançado
 
-- Tasks soltas podem retomar uma reserva nativa comprovadamente não invocada, mantendo o vínculo do prompt final, gates, histórico e replay durável (#273).
+- Tasks soltas podem retomar uma reserva nativa comprovadamente não invocada, inclusive após correção de montagem, mantendo a origem validada, o vínculo do prompt final, gates, histórico e replay durável (#273).
 
 - Recuperações sucessivas geram IDs limitados com hash do pai, preservando histórico e evitando recusa antes da invocação (#272).
 

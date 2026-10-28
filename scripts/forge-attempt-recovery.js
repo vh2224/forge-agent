@@ -421,8 +421,13 @@ function createRecovery(options) {
       if (ordinary && (state.phase !== 'reserved' || state.attempts.some(row => row.reservation && digest(row.reservation) === digest(saved))
           || state.continuation && state.continuation.status !== 'prepared')) fail('recovery-reservation-consumed');
       const scope = exceptionFor(input.exception, state, clock()), observed = candidateSets.get(input.candidateSet);
+      // Offline caller corrections retain null provenance. Resume only through
+      // their exact authenticated native predecessor, without rewriting history.
+      const expectedProvenance = ordinary && saved.provenance === null
+        ? require('./forge-recovery-reservation-lineage').inheritedProvenance(state,
+          { ordinary, routeKey, destinationKey: transitions.destinationKey }) : saved.provenance;
       if (!observed || observed.provenance.request_identity_sha256 !== state.request_identity_sha256
-          || digest(observed.provenance) !== digest(saved.provenance)
+          || digest(observed.provenance) !== digest(expectedProvenance)
           || digest(transition?.resolution?.effective.chain || previous.route.chain) !== observed.provenance.chain_sha256) fail('recovery-candidate-provenance-required');
       const route = observed.routes.find(row => routeKey(row) === saved.route_key);
       const policy = transition?.resolution?.effective || previous.route;

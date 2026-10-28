@@ -82,10 +82,27 @@ async function fixture(options = {}) {
   session.record({...f.initial.attempts[0],route:r.route,caller_request_sha256:recovery.callerRequestHash(r)});
   write(f.receiptFile,JSON.stringify({phase:'failed',dispatch_id:r.dispatchId,fingerprint:side.artifactFingerprint(r),route:r.route,
     recovery_identity_sha256:roots.digest(recovery.requestIdentity(r)),failure:{reason_code:'sidecar-timeout',provider_called:'unknown'}}));
-  await recovery.recoverAttempt({request:r,stateFile:f.stateFile,receiptFile:f.receiptFile,executionContract:f.contract,
+  const reserved=await recovery.recoverAttempt({request:r,stateFile:f.stateFile,receiptFile:f.receiptFile,executionContract:f.contract,
     clock:()=>f.now,processProbe:()=> 'stopped',recoveryAuthorization:f.binding,resolverOptions:f.originalOptions,
     reconcile:()=>({ok:true,roots:f.contract.code_roots.map(row=>({root_id:row.id,reconciled:true}))}),
     validateInvocation:route=>require('./forge-native-invocation').buildNativeInvocation({hostRuntime:'codex',resolvedDispatch:route,activeCapabilities:capabilities,prompt:'Original lost closure',forkTurns:'none',taskName:'fixture',agentType:'forge-executor'})});
+  if(options.corrected){
+    const caller=recovery.createRecovery({unit:'execute-task/'+taskId,roots_sha256:roots.digest(f.contract),request:r,
+      state:stateApi.loadRecovery(f.stateFile),clock:()=>f.now,
+      persist:value=>stateApi.saveRecovery(f.stateFile,value)});
+    r.route=reserved.route;
+    caller.record({...f.initial.attempts[0],route:r.route,failure_class:'caller',provider_called:false,
+      reason_code:'native-prompt-file-target',layer:'caller',caller_request_sha256:recovery.callerRequestHash(r)});
+    const correction={offline_validated:true,evidence_reference:'fixture:validated-packaging',
+      request_sha256:crypto.createHash('sha256').update('corrected final native arguments').digest('hex')};
+    const decision=await caller.next({inspection:{process_stopped:true,receipt_checked:true,writer_possible:false},correction,
+      validateInvocation:route=>require('./forge-native-invocation').buildNativeInvocation({hostRuntime:'codex',resolvedDispatch:route,
+        activeCapabilities:capabilities,prompt:'Corrected packaging',forkTurns:'none',taskName:'fixture',agentType:'forge-executor'})});
+    caller.reserve(decision,correction.request_sha256);
+    write(f.receiptFile,JSON.stringify({phase:'failed',dispatch_id:r.dispatchId,fingerprint:side.artifactFingerprint(r),route:r.route,
+      recovery_identity_sha256:roots.digest(recovery.requestIdentity(r)),failure:{reason_code:'native-prompt-file-target',provider_called:false}}));
+    assert.equal(stateApi.loadRecovery(f.stateFile).reservations.at(-1).provenance,null);
+  }
   f.initial=stateApi.loadRecovery(f.stateFile);
   f.history=transitions.observeHistory({request:r,state:f.initial,receiptFile:f.receiptFile,contract:f.contract,claim,resolverOptions:f.originalOptions});
   f.recovery={stateFile:f.stateFile,receiptFile:f.receiptFile,clock:()=>f.now,
@@ -102,8 +119,8 @@ async function fixture(options = {}) {
   };
   return f;
 }
-async function standaloneReservation(){
-  const f=await fixture({standalone:true,dispatchId:'s'.repeat(128)});
+async function standaloneReservation(options={}){
+  const f=await fixture({standalone:true,dispatchId:'s'.repeat(128),...options});
   try {
     const handoff=await side.recoverUnitSidecar(f.request,f.recovery,f.runtime);
     const live=handoff.result;let calls=0;
@@ -144,6 +161,7 @@ async function standaloneReservation(){
 }
 async function main(){
   await standaloneReservation();
+  await standaloneReservation({corrected:true});
   await standaloneNegativeEvidence();
   await initialMixedDocumentary();
   await initialMixedDocumentary(true);
@@ -152,6 +170,7 @@ async function main(){
   await implicitOrdinaryIdentity();
   await durableReplay();
   await durableReplay(true);
+  await durableReplay(true,true);
   await guardedHandoff();
   await ordinaryPublication();
 }
@@ -512,9 +531,9 @@ async function implicitOrdinaryIdentity() {
     console.log('PASS invalid explicit identity refuses before manifest or receipt');
   } finally { invalid.cleanup(); }
 }
-async function durableReplay(standalone=false) {
+async function durableReplay(standalone=false,corrected=false) {
   for(const stage of ['returned','publication']) {
-    const f=await fixture({dispatchId:'r'.repeat(128),standalone});
+    const f=await fixture({dispatchId:'r'.repeat(128),standalone,corrected});
     const materialize=side.materialize;
     try {
       let calls=0;
@@ -599,4 +618,5 @@ async function guardedHandoff() {
 }
 module.exports={fixture,main,protectedLeaseRenewal,documentaryContinuation,initialMixedDocumentary,guardedHandoff};
 async function continuations(){await durableReplay(true);await guardedHandoff();await ordinaryPublication();}
-if(require.main===module)(process.argv.includes('--standalone')?standaloneReservation():process.argv.includes('--standalone-negative')?standaloneNegativeEvidence():process.argv.includes('--continuations')?continuations():main()).catch(error=>{console.error(error);process.exitCode=1;});
+async function correctedContinuations(){await standaloneReservation({corrected:true});await durableReplay(true,true);}
+if(require.main===module)(process.argv.includes('--standalone')?standaloneReservation():process.argv.includes('--standalone-negative')?standaloneNegativeEvidence():process.argv.includes('--continuations')?continuations():process.argv.includes('--corrected')?correctedContinuations():main()).catch(error=>{console.error(error);process.exitCode=1;});
