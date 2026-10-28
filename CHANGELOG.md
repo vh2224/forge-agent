@@ -1,5 +1,7 @@
 ## Não lançado
 
+- Fixtures: cópia privada do baseline Git usa travessia por entrada, preservando erros e isolamento, para evitar o caminho de cópia em massa envolvido no ENOENT macOS (#264).
+
 - CI: pesos recalibrados após a paralelização da matriz nativa, com 342 suítes observadas por plataforma e sem suítes desconhecidas no perfil (#249).
 
 - CI: a matriz nativa executa os mesmos casos em até dois processos isolados, conserva o caminho sequencial com `--serial` e propaga falhas de todos os grupos; pesos de shards atualizados de sete jobs concluídos (#249).
