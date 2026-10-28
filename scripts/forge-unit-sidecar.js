@@ -538,7 +538,8 @@ function executeDeliveryArtifacts(request, loc, result, root, cwd, captured) {
   const delivery = require('./forge-delivery');
   const output = delivery.buildDelivery(input, { ownerRoot: root, codeDir: cwd, sourceEnvelopes: sources });
   const deliveryReference = `./${path.posix.basename(loc.delivery.output)}`;
-  const deliverySection = delivery.renderDeliveryMarkdown(output, { detailReference: deliveryReference });
+  // Canonical SUMMARY/replay bytes keep the historical table-only rendering.
+  const deliverySection = delivery.renderDeliveryMarkdown(output, { detailReference: deliveryReference, summary: false });
   const artifacts = [
     ...sourceArtifacts,
     { path: loc.required[0], content: `---\nstatus: done\n---\n\n# ${request.taskId} Summary\n\n${result.summary}\n\n## Must haves\n\n${JSON.stringify(result.must_haves_status, null, 2)}\n\n${deliverySection}` },
@@ -553,6 +554,47 @@ function executeDeliveryArtifacts(request, loc, result, root, cwd, captured) {
 function markChecked(content, id) {
   const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return content.replace(new RegExp(`^(\\s*[-*] \\[) ([\\]]\\s+(?:\\*\\*)?${escaped}(?=[:\\s*]))`, 'm'), '$1x$2');
+}
+// Owner-generated slice-plan checkbox for milestone execute-task. The path comes
+// only from IDs validated by locations(); workers never supply it, so allowed
+// stays without the S##-PLAN. The started receipt preimage is the CAS baseline.
+function taskMarkerPath(request) {
+  if (request.unitType !== 'execute-task' || request.scope === 'standalone-task') fail('task-marker-scope-invalid');
+  const loc = locations(request);
+  if (loc.execution || !loc.slice) fail('task-marker-scope-invalid');
+  return `${loc.slice}/${request.sliceId}-PLAN.md`;
+}
+function createTaskMarker(request, root, preimageSha256) {
+  const relative = taskMarkerPath(request);
+  if (typeof preimageSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(preimageSha256)) fail('task-marker-preimage-required');
+  const file = target(root, relative);
+  const bytes = fs.existsSync(file) ? fs.readFileSync(file) : null;
+  // Never recapture: an edit since the recorded preimage stays the operator's.
+  if (!bytes || hash(bytes) !== preimageSha256) fail('task-marker-preimage-changed', 'O plano da slice mudou desde a preimagem registrada; a marcação não foi aplicada.');
+  const preimage = bytes.toString('utf8');
+  if (!Buffer.from(preimage, 'utf8').equals(bytes)) fail('task-marker-preimage-invalid');
+  const content = markChecked(preimage, request.taskId);
+  return content === preimage ? null : { path: relative, content, before: preimageSha256 };
+}
+function verifyTaskMarker(request, artifact, preimageSha256) {
+  const invalid = () => fail('task-marker-invalid', 'O marcador não corresponde ao artefato canônico desta task.');
+  let relative;
+  try { relative = taskMarkerPath(request); } catch { invalid(); }
+  if (!artifact || typeof artifact !== 'object' || Array.isArray(artifact)
+      || Object.keys(artifact).some(key => !['path', 'content', 'before'].includes(key))
+      || artifact.path !== relative || typeof artifact.content !== 'string'
+      || typeof preimageSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(preimageSha256) || artifact.before !== preimageSha256) invalid();
+  // Candidate preimages: the content itself (no-op) or one checked line of this
+  // task undone. Only markChecked of a preimage with the recorded hash is canonical.
+  const escaped = request.taskId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const checked = new RegExp(`^(\\s*[-*] \\[)x(?=[\\]]\\s+(?:\\*\\*)?${escaped}(?=[:\\s*]))`, 'gm');
+  const candidates = [artifact.content];
+  for (const match of artifact.content.matchAll(checked)) {
+    const at = match.index + match[1].length;
+    candidates.push(`${artifact.content.slice(0, at)} ${artifact.content.slice(at + 1)}`);
+  }
+  if (!candidates.some(preimage => hash(preimage) === preimageSha256 && markChecked(preimage, request.taskId) === artifact.content)) invalid();
+  return true;
 }
 function materialize(request, record, publicationGuard, publicationLock, options = {}) {
   if (record.kind === 'memory-extraction') fail('memory-publication-required', 'Use publishReadyRecord for memory extraction receipts.');
@@ -2024,6 +2066,12 @@ async function runUnitSidecarCore(request, runtime, identity) {
     }
     const artifacts = executeDeliveryArtifacts(r, loc, record.result, root, cwd, record.delivery_capture);
     const ready = { ...record, phase: 'ready', artifacts: artifacts.map(a => ({ ...a, before: record.before[a.path] ?? null })) };
+    // Milestone v2 only: the owner marker enters the durable record after the
+    // validated delivery artifacts and last, so a checked task implies delivery.
+    if (r.execution_contract && record.milestone_delivery && !record.execution && record.result?.status === 'done') {
+      const marker = createTaskMarker(r, root, record.before?.[taskMarkerPath(r)]);
+      if (marker) ready.artifacts.push(marker);
+    }
     if (!deferredEvents) json(receiptFile, ready);
     return ready;
   }
@@ -2990,7 +3038,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
 }
 module.exports = { appendProtectedOwnerEvents, preflightExecutionVerification, schema, memorySchema, memorySchemaV2, NEW_MEMORY_SCHEMA_VERSION, memoryExtractionSchema, memoryResponseSchema,
   memoryTransportSchema, memoryEvidenceContract, MEMORY_QUALITY_CONTRACT, locations, milestonePlanFile, validateRecoveryRequest, captureMilestoneBaseline, reconcileMilestoneAttempt, validateArtifacts, inspectArtifacts, inspectDeliveryContent, executeDeliveryArtifacts, MAX_ARTIFACT_BYTES,
-  MAX_ARTIFACT_PAYLOAD_BYTES, target, markChecked, materialize, memoryPrompt, memorySourceContext,
+  MAX_ARTIFACT_PAYLOAD_BYTES, target, markChecked, createTaskMarker, verifyTaskMarker, materialize, memoryPrompt, memorySourceContext,
   publishReadyRecord, nativeMemoryFingerprint, acceptNativeMemoryResult, candidateFromNativeResult, runNativeMemory,
   routeIdentity, artifactFingerprint, artifactAttemptFiles, beginArtifactAttempt, replayArtifactAttempt, reconcileLegacyReviewFix,
   failArtifactAttempt, acceptArtifactResult, reconcileArtifactAttempt, runUnitSidecar, recoverUnitSidecar, reviewFixUnitLabel, effortTelemetry };
