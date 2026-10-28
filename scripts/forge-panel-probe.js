@@ -375,7 +375,8 @@ function record(observations) {
     subagent_surfaces: [
       { host: 'codex-cli', documented: '/subagents e navegação entre threads', observed: 'unknown' },
       { host: 'codex-vscode', documented: 'sidebar da extensão IDE; agentes em background condicionais ao cliente', observed: 'unknown' },
-      { host: 'claude-terminal', documented: 'subagentes e subagentStatusLine', observed: 'static-only' },
+      { host: 'claude-terminal', documented: 'subagentes e subagentStatusLine',
+        observed: claudeTerminal.subagent_statusline.static_reference === 'found' ? 'static-only' : 'unknown' },
     ], g1: gate(MECHANISM, mounting), acceptance: { visual_uat: 'pending-final-round' },
     observation_origin: 'direct-local-probes', criterion_c05: mounting.result === 'mounted' ? 'runtime-mounted-visual-pending' : 'pending' };
 }
@@ -468,6 +469,9 @@ function validateRecord(value, options = {}) {
     && statusline?.documentation_sha256 === 'a2391a0f4b8892bd32c0ea95d3d3d25f319c6891c963895ea0f2dd4c74150aa4'
     && statusline?.method === 'bounded-local-stream-512MiB', 'claude-source-invalid');
   check(Array.isArray(value.subagent_surfaces) && value.subagent_surfaces.length === 3 && value.subagent_surfaces.every(row => typeof row.documented === 'string' && ['unknown', 'static-only'].includes(row.observed)), 'subagents-invalid');
+  check(value.subagent_surfaces?.[0]?.observed === 'unknown' && value.subagent_surfaces[1]?.observed === 'unknown'
+    && value.subagent_surfaces[2]?.host === 'claude-terminal'
+    && value.subagent_surfaces[2].observed === (statusline?.static_reference === 'found' ? 'static-only' : 'unknown'), 'subagents-incoherent');
   check(value.acceptance?.visual_uat === 'pending-final-round', 'acceptance-invalid');
   check(JSON.stringify(value.g1) === JSON.stringify(gate(value.mechanism || {}, mount || {})), 'g1-incoherent');
   check(value.criterion_c05 === (mount?.result === 'mounted' ? 'runtime-mounted-visual-pending' : 'pending'), 'criterion-incoherent');

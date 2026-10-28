@@ -266,6 +266,19 @@ async function run() {
       const value = copy(record); mutate(value); assert.equal(probe.validateRecord(value, baseOptions).valid, false);
     }
     assert.equal(probe.validateRecord(probe.record({ ...observations, mounting: unknown }), baseOptions).valid, true);
+    assert.equal(record.subagent_surfaces[2].observed, 'static-only');
+    for (const reference of ['unknown', 'not-found']) {
+      const degraded = { ...claude, evidence: { ...claude.evidence, error_code: 'executable-unavailable' },
+        subagent_statusline: { ...claude.subagent_statusline, static_reference: reference } };
+      const value = probe.record({ ...observations, claudeTerminal: degraded });
+      assert.equal(value.subagent_surfaces[2].observed, 'unknown');
+      assert.equal(value.claude_terminal.subagent_statusline.runtime_display, 'unknown');
+      assert.equal(probe.validateRecord(value, baseOptions).valid, true);
+      const forged = copy(value); forged.subagent_surfaces[2].observed = 'static-only';
+      assert.equal(probe.validateRecord(forged, baseOptions).valid, false);
+    }
+    const mismatch = copy(record); mismatch.subagent_surfaces[2].observed = 'unknown';
+    assert.equal(probe.validateRecord(mismatch, baseOptions).valid, false);
     pass('record validator: coherent client TreeView local no server record; absolute user workspace foreign extension and false mount or UAT proofs rejected');
 
     for (const mount of [failed, unknown, success]) {

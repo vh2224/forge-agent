@@ -114,6 +114,25 @@ test('C01 versions: newer exact interval and same require revalidation for both 
   }
   assert.strictEqual(compareHostVersion('0.165.0', '0.164.0').relation, 'older');
   assert.strictEqual(compareHostVersion('invalid', '0.166.0').relation, 'unknown');
+  const promoted = compareHostVersion('0.165.0-alpha.1', '0.165.0');
+  assert.strictEqual(promoted.relation, 'newer');
+  assert.deepStrictEqual(promoted.next_range, { after_exclusive: '0.165.0-alpha.1', through_inclusive: '0.165.0' });
+  const rc = compareHostVersion('0.165.0', '0.165.0-rc.1');
+  assert.strictEqual(rc.relation, 'older');
+  assert.strictEqual(rc.next_range, null);
+  assert.strictEqual(compareHostVersion('0.165.0-alpha.1', '0.165.0-alpha.2').relation, 'newer');
+  assert.strictEqual(compareHostVersion('0.165.0-alpha.2', '0.165.0-alpha.10').relation, 'newer');
+  assert.strictEqual(compareHostVersion('0.165.0-alpha', '0.165.0-alpha.1').relation, 'newer');
+  assert.strictEqual(compareHostVersion('0.165.0-1', '0.165.0-alpha').relation, 'newer');
+  assert.strictEqual(compareHostVersion('0.165.0+a', '0.165.0+b').relation, 'same');
+  assert.strictEqual(compareHostVersion('0.165.0+a', '0.165.0').relation, 'same');
+  assert.strictEqual(compareHostVersion('0.165.0-a..b', '0.165.0').relation, 'unknown');
+  assert.strictEqual(compareHostVersion('0.165.0-a..b', '0.166.0').relation, 'unknown');
+  assert.strictEqual(compareHostVersion('0.166.0', '0.165.0-a..b').relation, 'unknown');
+  const large = compareHostVersion('0.165.0-alpha.9007199254740992', '0.165.0-alpha.9007199254740993');
+  assert.strictEqual(large.relation, 'newer');
+  assert.deepStrictEqual(large.next_range, { after_exclusive: '0.165.0-alpha.9007199254740992', through_inclusive: '0.165.0-alpha.9007199254740993' });
+  assert.strictEqual(compareHostVersion('0.165.0-alpha.9007199254740993', '0.165.0-alpha.9007199254740992').relation, 'older');
 });
 test('C01 unknown versions and UI stay unknown without inferred build', (root) => {
   const report = validateBaseline({ cwd: root });

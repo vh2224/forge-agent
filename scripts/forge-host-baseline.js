@@ -29,9 +29,43 @@ function relativeFile(value) {
     && path.posix.normalize(value) === value;
 }
 
+// SemVer 2.0 precedence for the prerelease part; build metadata is ignored.
+// Returns null (unknown) when a prerelease is not valid SemVer.
+function prerelease(version) {
+  const rest = version.split('+')[0];
+  const dash = rest.indexOf('-');
+  if (dash === -1) return [];
+  const ids = rest.slice(dash + 1).split('.');
+  return ids.every((id) => /^(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)$/.test(id)) ? ids : null;
+}
+
+function comparePrerelease(left, right) {
+  if (left.length === 0 || right.length === 0) return left.length === right.length ? 0 : left.length === 0 ? 1 : -1;
+  for (let index = 0; index < Math.min(left.length, right.length); index++) {
+    const [a, b] = [left[index], right[index]];
+    const numeric = [/^\d+$/.test(a), /^\d+$/.test(b)];
+    if (numeric[0] && numeric[1]) {
+      // Valid numeric identifiers have no leading zeros; compare decimal text
+      // exactly, including values beyond Number.MAX_SAFE_INTEGER.
+      if (a.length !== b.length) return a.length > b.length ? 1 : -1;
+      if (a !== b) return a > b ? 1 : -1;
+    }
+    else if (numeric[0] !== numeric[1]) return numeric[0] ? -1 : 1;
+    else if (a !== b) return a > b ? 1 : -1;
+  }
+  return left.length === right.length ? 0 : left.length > right.length ? 1 : -1;
+}
+
+function compareHostVersions(observedVersion, baselineVersion) {
+  const [observedPre, baselinePre] = [prerelease(observedVersion), prerelease(baselineVersion)];
+  if (observedPre === null || baselinePre === null) return null;
+  const core = capabilities.compareVersion(observedVersion, baselineVersion);
+  return core !== 0 ? core : comparePrerelease(observedPre, baselinePre);
+}
+
 function compareHostVersion(baselineVersion, observedVersion) {
   const comparison = VERSION.test(baselineVersion || '') && VERSION.test(observedVersion || '')
-    ? capabilities.compareVersion(observedVersion, baselineVersion) : null;
+    ? compareHostVersions(observedVersion, baselineVersion) : null;
   return {
     baseline_version: VERSION.test(baselineVersion || '') ? baselineVersion : null,
     observed_version: VERSION.test(observedVersion || '') ? observedVersion : null,
