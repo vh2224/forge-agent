@@ -18,7 +18,7 @@ const REASONS = Object.freeze({
   'result-error': 'envelope', 'result-envelope-invalid': 'envelope',
   'json-invalid': 'json',
   'model-substituted': 'identity', 'model-unverified': 'identity',
-  'model-required': 'identity',
+  'model-required': 'identity', 'model-not-found': 'identity',
   'status-mismatch': 'validation', 'schema-invalid': 'validation',
   'validator-failed': 'validation', 'artifact-path-invalid': 'validation',
   'artifact-duplicate': 'validation', 'artifact-missing': 'validation',

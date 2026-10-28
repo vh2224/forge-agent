@@ -77,6 +77,25 @@ const APPSERVER_LIVENESS_CODES = Object.freeze({
   SILENCE: 'appserver-anomalous-silence',
   BUDGET_EXCEEDED: 'budget-exceeded-while-active',
 });
+// Terminal failures of the requested route (S01/T04, issue 279), recognised from the
+// pinned TurnError.codexErrorInfo of the completion matched to THIS turn. Closed map:
+// only an exact string key is recognised; every other value, the object variants and
+// null keep the generic `turn ended with status failed` with no code. Same rules as
+// the liveness codes: a string code, never `rpcError`, a fixed message free of
+// `terminated`/`timeout`/`network`, and no provider text (TurnError.message and
+// additionalDetails are never read, so they cannot reach the error or the census).
+const APPSERVER_TERMINAL_CODES = Object.freeze({
+  MODEL_NOT_FOUND: 'model-not-found',
+});
+const APPSERVER_TERMINAL_MESSAGES = Object.freeze({
+  MODEL_NOT_FOUND: 'forge-appserver-client: turn ended with status failed (modelNotFound)',
+});
+const CODEX_TERMINAL_ERROR_INFO = Object.freeze({
+  modelNotFound: APPSERVER_TERMINAL_CODES.MODEL_NOT_FOUND,
+});
+// Only a `failed` turn can carry a terminal route failure; `interrupted` keeps its
+// own generic message even if the server attached the marker.
+const TURN_STATUS_FAILED = 'failed';
 // Watchdog cadence. Overridable via `livenessIntervalMs` (test seam, like
 // interruptGraceMs); production never passes it.
 const LIVENESS_INTERVAL_MS = 1000;
@@ -397,7 +416,10 @@ function startAppServerTurn(options) {
         : (typeof params.turnId === 'string' ? params.turnId : null);
       const status = typeof turn.status === 'string' ? turn.status
         : (typeof params.status === 'string' ? params.status : null);
-      keep(completions, { id, status }, 'turnCompletions');
+      // Only the closed marker is kept, never TurnError.message/additionalDetails.
+      const info = turn.error && typeof turn.error === 'object' ? turn.error.codexErrorInfo : undefined;
+      const marker = typeof info === 'string' && Object.hasOwn(CODEX_TERMINAL_ERROR_INFO, info) ? info : null;
+      keep(completions, marker ? { id, status, codexErrorInfo: marker } : { id, status }, 'turnCompletions');
     };
     // The latch, derived. `null` means "no completion for THIS turn yet"; a record with
     // a non-success status is still a match — it ends the wait, it just does not end it
@@ -888,6 +910,22 @@ function startAppServerTurn(options) {
         // that errored as a `done` unit. `null` is here too: a completion with no
         // readable status is not evidence of success, and calling it one would be the
         // same optimism readTurnStatus refuses.
+        // A terminal failure of the requested route is recognised here, BEFORE
+        // forge-xllm sees the error: the fixed message and closed code keep the
+        // stderr tail out of the message and the keyword heuristic out of the class.
+        if (completion.status === TURN_STATUS_FAILED && completion.codexErrorInfo) {
+          const code = CODEX_TERMINAL_ERROR_INFO[completion.codexErrorInfo];
+          fail(APPSERVER_TERMINAL_MESSAGES.MODEL_NOT_FOUND.replace(/^forge-appserver-client: /, ''), {
+            code,
+            codexErrorInfo: completion.codexErrorInfo,
+            turnStatus: completion.status,
+            turnId: turnId || null,
+            turnCompletions: completionCensus(),
+            // Counters only, with the same terminal phase the final snapshot reports.
+            diagnostic: diagnostic(code, { observation: observe({ phase: 'failed' }) }),
+          }, true);
+          return;
+        }
         if (completion.status !== TURN_STATUS_SUCCESS) {
           fail(`turn ended with status ${completion.status === null ? 'unknown' : completion.status}`, {
             turnStatus: completion.status,
@@ -940,6 +978,9 @@ module.exports = {
   INTERRUPT_OUTCOMES,
   INTERRUPT_GRACE_MS,
   APPSERVER_LIVENESS_CODES,
+  APPSERVER_TERMINAL_CODES,
+  APPSERVER_TERMINAL_MESSAGES,
+  CODEX_TERMINAL_ERROR_INFO,
   LIVENESS_INTERVAL_MS,
   LOCAL_PROOF_INTERVAL_MS,
   DEFAULT_PROGRESS_INTERVAL_MS,

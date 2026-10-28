@@ -409,6 +409,22 @@ test('identity stage carries model_count and, only on substitution, the validate
   assert.deepEqual(diagnostic('model-unverified', { model_count: 2, model_observed: 'claude-haiku-4-5' }),
     { version: 1, stage: 'identity', reason: 'model-unverified', model_count: 2 });
 });
+test('model-not-found is a closed identity reason that never carries provider text or a model id', () => {
+  // S01/T04 (issue 279): the requested route's model does not exist on the provider.
+  assert.deepEqual(diagnostic('model-not-found'), { version: 1, stage: 'identity', reason: 'model-not-found' });
+  const safe = diagnostic('model-not-found', { message: 'private-sentinel', tail: 'private-sentinel',
+    model_observed: 'gpt-missing', stderr_bytes: 7, observation: { phase: 'failed', elapsed_ms: 12, text: 'private-sentinel' } });
+  assert.equal(safe.reason, 'model-not-found');
+  assert.equal(safe.stage, 'identity');
+  assert.equal(safe.stderr_bytes, 7);
+  assert.equal(safe.observation.phase, 'failed');
+  assert(!('model_observed' in safe), 'only a substitution names an observed model');
+  assert(!JSON.stringify(safe).includes('private-sentinel'));
+  // The vocabulary stays closed: an unknown reason still collapses to adapter-failed.
+  for (const unknown of ['modelNotFound', 'model-not-found ', 'private-sentinel', undefined]) {
+    assert.deepEqual(diagnostic(unknown), { version: 1, stage: 'adapter', reason: 'adapter-failed' });
+  }
+});
 test('real rendered research prompt, simulated provider, publication and replay use one invocation', async () => {
   const p = payload();
   p.artifacts.push({ path: optionalPath, content: '# Standards' });

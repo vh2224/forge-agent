@@ -12,7 +12,7 @@ const {
   startAppServerTurn, encodeMessage, decodeLine, INTERRUPT_OUTCOMES, INTERRUPT_GRACE_MS,
   RETENTION_LIMITS, TURN_STATUS_SUCCESS, STDERR_TAIL_BYTES, tailBytes,
   isContextNotification, APPSERVER_LIVENESS_CODES, LIVENESS_INTERVAL_MS, LOCAL_PROOF_INTERVAL_MS,
-  DEFAULT_PROGRESS_INTERVAL_MS,
+  DEFAULT_PROGRESS_INTERVAL_MS, APPSERVER_TERMINAL_CODES, APPSERVER_TERMINAL_MESSAGES, CODEX_TERMINAL_ERROR_INFO,
 } =require('./forge-appserver-client');
 const { classifyError, isTransient } = require('./forge-classify-error');
 const { observation, progressLine, readProgressLine } = require('./forge-sidecar-diagnostic');
@@ -60,6 +60,11 @@ const LIVENESS_MODES = ['active-stream', 'silent-after-started', 'silent-after-e
 // S07/T03: tool items carry a sentinel command so leaks into liveness are detectable.
 const TOOL_SENTINEL = 'FORGE_T03_PRIVATE_COMMAND_SENTINEL';
 const toolItem = (id, command) => ({ id, type: 'commandExecution', command, cwd: '/private/tool/cwd' });
+// S01/T04: typed turn failures with provider and stderr sentinels.
+const TYPED_FAILURE_MODES = ['model-not-found', 'failed-other-info', 'failed-object-info', 'failed-null-info',
+  'interrupted-model-not-found', 'model-not-found-foreign'];
+const PROVIDER_SENTINEL = 'FORGE_T04_PROVIDER_SENTINEL';
+const STDERR_SENTINEL = 'FORGE_T04_STDERR_SENTINEL';
 let streamStopped = false;
 const delta = () => ({ method: 'item/agentMessage/delta', params: { itemId: 'msg-1', delta: 'x' } });
 // The SERVER stamps what it received, so ordering is proved by the peer's own record
@@ -136,6 +141,33 @@ process.stdin.on('data', chunk => {
       if (mode === 'completed-failed') {
         send({ id: message.id, result: { turn: { id: 'turn-1' } } });
         send({ method: 'turn/completed', params: { turn: { id: 'turn-1', status: 'failed' } } });
+        continue;
+      }
+      // S01/T04. Our turn fails with a typed TurnError. The provider message, its
+      // details and a transient-looking stderr carry sentinels that must never reach
+      // the message, code, diagnostic or census. stderr goes out first and the turn
+      // after a short delay, so the tail is already held when the session fails.
+      if (TYPED_FAILURE_MODES.includes(mode)) {
+        process.stderr.write('mock: network connection terminated 503 ' + STDERR_SENTINEL + '\n');
+        const turnError = info => ({ message: PROVIDER_SENTINEL + ' model gpt-missing does not exist (network timeout)',
+          codexErrorInfo: info, additionalDetails: PROVIDER_SENTINEL + ' details' });
+        const failed = (id, info) => ({ method: 'turn/completed',
+          params: { turn: { id, status: 'failed', items: [], error: turnError(info) } } });
+        setTimeout(() => {
+          send({ id: message.id, result: { turn: { id: 'turn-1' } } });
+          if (mode === 'model-not-found') send(failed('turn-1', 'modelNotFound'));
+          else if (mode === 'failed-other-info') send(failed('turn-1', 'serverOverloaded'));
+          else if (mode === 'failed-object-info') send(failed('turn-1', { httpConnectionFailed: { httpStatusCode: 404 } }));
+          else if (mode === 'failed-null-info') send(failed('turn-1', null));
+          else if (mode === 'interrupted-model-not-found') {
+            send({ method: 'turn/completed', params: { turn: { id: 'turn-1', status: 'interrupted', items: [],
+              error: turnError('modelNotFound') } } });
+          } else {
+            // model-not-found-foreign: the marker rides ANOTHER turn's completion.
+            send(failed('turn-OTHER', 'modelNotFound'));
+            send({ method: 'turn/completed', params: { turn: { id: 'turn-1', status: 'failed', items: [] } } });
+          }
+        }, 30);
         continue;
       }
       // S07 R1. Exit immediately after a successful completion. The setTimeout is 0ms
@@ -706,6 +738,101 @@ async function testNonSuccessStatusRejects(mock, dir) {
     assert.strictEqual(error.turnStatus, 'failed');
     assert.strictEqual(error.turnCompletions.matched, 1);
   });
+}
+
+// S01/T04 (issue 279). The pinned TurnError.codexErrorInfo names a missing model; the
+// client recognises ONLY that closed marker on the completion matched to its own turn
+// and rejects with a fixed message, a closed code and a closed diagnostic. Provider
+// text (TurnError.message/additionalDetails) and stderr never cross into any of them.
+const PROVIDER_SENTINEL = 'FORGE_T04_PROVIDER_SENTINEL';
+const STDERR_SENTINEL = 'FORGE_T04_STDERR_SENTINEL';
+const typedFailure = (mock, dir, mode) => rejectionOf(startAppServerTurn({
+  cmd: process.execPath, args: [mock], cwd: dir, timeoutMs: 4000,
+  env: { ...process.env, FORGE_APPSERVER_MOCK_MODE: mode },
+}));
+const typedView = error => ({
+  message: error.message,
+  code: error.code ?? null,
+  codexErrorInfo: error.codexErrorInfo ?? null,
+  turnStatus: error.turnStatus,
+  diagnostic: error.diagnostic ? { version: error.diagnostic.version, stage: error.diagnostic.stage, reason: error.diagnostic.reason } : null,
+  records: error.turnCompletions.records,
+});
+function assertNoProviderText(label, error) {
+  const exposed = JSON.stringify({ message: error.message, code: error.code, codexErrorInfo: error.codexErrorInfo,
+    diagnostic: error.diagnostic, turnCompletions: error.turnCompletions });
+  assert(!exposed.includes(PROVIDER_SENTINEL), `${label} leaked provider TurnError text`);
+  assert(!exposed.includes(STDERR_SENTINEL), `${label} leaked provider stderr`);
+  assert(!/does not exist/.test(exposed), `${label} leaked the provider message body`);
+}
+
+async function testModelNotFound(mock, dir) {
+  // Observed behaviour first, so a regression diff shows the whole projection.
+  const error = await typedFailure(mock, dir, 'model-not-found');
+  assert.deepStrictEqual(typedView(error), {
+    message: 'forge-appserver-client: turn ended with status failed (modelNotFound)',
+    code: 'model-not-found',
+    codexErrorInfo: 'modelNotFound',
+    turnStatus: 'failed',
+    diagnostic: { version: 1, stage: 'identity', reason: 'model-not-found' },
+    records: [{ id: 'turn-1', status: 'failed', codexErrorInfo: 'modelNotFound' }],
+  });
+  assert.deepStrictEqual(APPSERVER_TERMINAL_CODES, { MODEL_NOT_FOUND: 'model-not-found' });
+  assert(Object.isFrozen(APPSERVER_TERMINAL_CODES));
+  assert.deepStrictEqual(APPSERVER_TERMINAL_MESSAGES,
+    { MODEL_NOT_FOUND: 'forge-appserver-client: turn ended with status failed (modelNotFound)' });
+  assert(Object.isFrozen(APPSERVER_TERMINAL_MESSAGES));
+  assert.deepStrictEqual(CODEX_TERMINAL_ERROR_INFO, { modelNotFound: APPSERVER_TERMINAL_CODES.MODEL_NOT_FOUND });
+  assert(Object.isFrozen(CODEX_TERMINAL_ERROR_INFO));
+  // The literal the client matches belongs to the pinned CodexErrorInfo string enum.
+  const pin = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'shared', 'schemas', 'codex-appserver-pin.json'), 'utf8'));
+  const info = (pin.referenced && pin.referenced.CodexErrorInfo) || (pin.definitions && pin.definitions.CodexErrorInfo);
+  assert(info && Array.isArray(info.anyOf), 'pin must define CodexErrorInfo');
+  const stringEnum = info.anyOf.find(branch => branch.type === 'string' && Array.isArray(branch.enum));
+  assert(stringEnum, 'CodexErrorInfo must keep its string enum');
+  for (const literal of Object.keys(CODEX_TERMINAL_ERROR_INFO)) {
+    assert(stringEnum.enum.includes(literal), `${literal} must be a pinned CodexErrorInfo value`);
+  }
+  // No new message may be read as transient (CONNECTION_RE/NETWORK_RE).
+  for (const message of Object.values(APPSERVER_TERMINAL_MESSAGES)) {
+    assert(!/terminated|timeout|network/i.test(message), message);
+    assert.strictEqual(isTransient(classifyError(message)), false, `${message} must not be transient`);
+  }
+  assert.strictEqual(error.turnId, 'turn-1');
+  assert.strictEqual(error.turnCompletions.matched, 1);
+  assert.strictEqual(error.diagnostic.observation.version, 1, 'diagnostic carries the closed observation');
+  assert.strictEqual(error.diagnostic.observation.phase, 'failed');
+  assert.strictEqual(error.rpcError, undefined, 'never confused with the numeric JSON-RPC path');
+  assertNoProviderText('model-not-found', error);
+  // The fixture really carried the transient-looking tail: the client keeps it as a
+  // property (unchanged contract), only never in the classified fields above.
+  assert(String(error.stderrTail).includes(STDERR_SENTINEL), 'fixture must exercise a provider stderr tail');
+}
+
+// Everything that is NOT exactly the closed marker on our own completion keeps the
+// generic message with no code: other enum values, the object variants, null, a
+// non-failed status and a marker carried by another turn's completion.
+async function testTypedFailureRegressions(mock, dir) {
+  for (const mode of ['failed-other-info', 'failed-object-info', 'failed-null-info', 'model-not-found-foreign']) {
+    const error = await typedFailure(mock, dir, mode);
+    assert.strictEqual(error.message, 'forge-appserver-client: turn ended with status failed', mode);
+    assert.strictEqual(error.code, undefined, `${mode} carries no code`);
+    assert.strictEqual(error.codexErrorInfo, undefined, `${mode} carries no marker`);
+    assert.strictEqual(error.diagnostic, undefined, `${mode} carries no diagnostic`);
+    assert.strictEqual(error.turnStatus, 'failed');
+    assertNoProviderText(mode, error);
+    const ours = error.turnCompletions.records.filter(entry => entry.id === 'turn-1');
+    assert.deepStrictEqual(ours, [{ id: 'turn-1', status: 'failed' }], `${mode}: no marker recorded for our turn`);
+  }
+  const foreign = await typedFailure(mock, dir, 'model-not-found-foreign');
+  assert.deepStrictEqual(foreign.turnCompletions.records.find(entry => entry.id === 'turn-OTHER'),
+    { id: 'turn-OTHER', status: 'failed', codexErrorInfo: 'modelNotFound' }, 'the foreign marker is censused, never applied');
+  assert.strictEqual(foreign.turnCompletions.ignored, 1);
+  const interrupted = await typedFailure(mock, dir, 'interrupted-model-not-found');
+  assert.strictEqual(interrupted.message, 'forge-appserver-client: turn ended with status interrupted');
+  assert.strictEqual(interrupted.code, undefined, 'only a failed turn is classified as model-not-found');
+  assert.strictEqual(interrupted.diagnostic, undefined);
+  assertNoProviderText('interrupted-model-not-found', interrupted);
 }
 
 // S07 R1. The child exits right after a successful turn/completed, before settlement.
@@ -1465,6 +1592,10 @@ async function main() {
     await testBusy(mock, dir);
     await testForeignCompletionIgnored(mock, dir);
     await testNonSuccessStatusRejects(mock, dir);
+    await testModelNotFound(mock, dir);
+    process.stdout.write('PASS C02 modelNotFound client: matched failed turn, fixed closed error, sanitized census and pin vocabulary\n');
+    await testTypedFailureRegressions(mock, dir);
+    process.stdout.write('PASS C02 modelNotFound regressions: other null object foreign and interrupted completions stay generic\n');
     await testExitAfterCompleted(mock, dir);
     await testRetentionCaps(mock, dir);
     await testOversizedLine(mock, dir);
