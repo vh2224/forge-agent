@@ -117,6 +117,8 @@ const { classifyError, isTransient } = require('./forge-classify-error.js');
 const { countTokens, truncateAtSectionBoundary } = require('./forge-tokens.js');
 const { deriveTransport } = require('./forge-transport.js');
 const { resolveWorkerCeiling } = require('./forge-worker-timeout');
+// Provider-free: native modules plus the neutral liveness/diagnostic modules (IN-15).
+const { createPromptFile, probeAgyCapabilities, planAgyArgs, runAgyStream, AGY_REASON_CODES, AGY_LIVENESS } = require('./forge-agy-transport');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -252,11 +254,19 @@ function reviewFailureDiagnostic(error = {}) {
     'native-effort-transport-unimplemented', 'native-effort-transport-unsupported',
     'native-effort-binding-mismatch', 'thinking-transport-unsupported', 'thinking-mode-undocumented',
     'thinking-disabled-incompatible', 'thinking-enabled-incompatible', 'thinking-between-tools-incompatible',
-    'thinking-mode-unknown', 'agy-output-empty', ...appServerLivenessCodes()];
+    'thinking-mode-unknown', 'agy-output-empty', ...Object.values(AGY_REASON_CODES), ...appServerLivenessCodes()];
   return { reason_code: knownCodes.includes(error.code) ? error.code : 'adapter-failed',
     diagnostic: safeDiagnostic,
     provider_called: typeof error.provider_called === 'boolean' ? error.provider_called : null,
-    model_observed: safeDiagnostic.model_observed || null };
+    model_observed: safeDiagnostic.model_observed || null,
+    ...pendingOwnership(error) };
+}
+
+// Only an unconfirmed agy exit carries pending ownership: a boolean and a positive integer pid.
+function pendingOwnership(error) {
+  if (error?.code !== AGY_REASON_CODES.exitUnconfirmed || error.ownership_pending !== true) return {};
+  const pid = error.ownership?.pid;
+  return { ownership_pending: true, ...(Number.isSafeInteger(pid) && pid > 0 ? { pid } : {}) };
 }
 
 function loadReviewProcedure(mode, opts) {
@@ -1445,7 +1455,7 @@ function assertSafeForCmdShell(args) {
 }
 
 /**
- * Invoke `agy --print` headless. No retry.
+ * Legacy `agy --print` headless invocation. No retry.
  *
  * Deviations from the codex path, all empirically verified (2026-07-15, agy 1.0.16):
  *  - stdin MUST be 'ignore': agy blocks forever when stdin is an open non-TTY pipe.
@@ -1461,90 +1471,118 @@ function assertSafeForCmdShell(args) {
  *    print mode can exit 0 with an EMPTY stdout; that surfaces here as a throw
  *    (adapter exit 2) and the orchestrator falls back per shared/forge-review.md.
  *
+ * This synchronous body is the LEGACY path, kept byte-for-byte in behavior for a
+ * binary whose `--help` does not advertise `--output-format stream-json`: no
+ * semantic liveness, labelled `unsupported-legacy` by invokeAgy below.
+ *
+ * @param {object} opts
+ * @param {string} opts.cwd
+ * @param {number} opts.timeoutSecs
+ * @param {string[]} args — legacy argv planned by planAgyArgs (prompt-file instruction inline)
+ * @returns {string} raw stdout of the agy process
+ * @throws {Error} on any invocation failure — cause in message
+ */
+function invokeAgyLegacy(opts, args) {
+  const { cwd, timeoutSecs, envPolicy = 'minimal' } = opts;
+  const { cmd, prefixArgs, viaCmdShell } = resolveAgyCommand();
+  // On the cmd.exe /c last-resort path, cmd re-parses arguments after /c
+  // (CVE-2024-27980) — reject any that carry shell metacharacters/quotes
+  // before they reach the shell. The JS-entry-point path never hits cmd.exe.
+  if (viaCmdShell) {
+    assertSafeForCmdShell([...prefixArgs, ...args]);
+  }
+  const res = spawnSync(cmd, [...prefixArgs, ...args], {
+    cwd,
+    shell: false,
+    // agy's own --print-timeout fires first and lets it exit cleanly; the spawn
+    // timeout is a 5s-grace hard backstop for a hung process (the non-TTY hang).
+    timeout: timeoutSecs * 1000 + 5000,
+    killSignal: 'SIGKILL',
+    encoding: 'utf8',
+    maxBuffer: MAX_BUFFER,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: buildSidecarEnv(envPolicy),
+  });
+
+  if (!res.error && Number.isInteger(res.pid) && res.pid > 0 && opts._sidecarIdentity) {
+    identityStage(opts, 'iniciado', { pid: res.pid, retroactive: true });
+  }
+
+  if (res.error) {
+    throw new Error(`agy spawn failed: ${res.error.code || res.error.message}`);
+  }
+  if (res.signal === 'SIGKILL') {
+    throw new Error(`agy killed after exceeding timeout (${timeoutSecs}s + 5s grace)`);
+  }
+  if (res.status !== 0) {
+    const stderrSnippet = (res.stderr ? String(res.stderr) : '').trim().slice(0, 200);
+    throw new Error(`agy exited ${res.status}${stderrSnippet ? `: ${stderrSnippet}` : ''}`);
+  }
+
+  const content = res.stdout;
+  if (!content || !content.trim()) {
+    throw Object.assign(new Error('agy-output-empty'), { code: 'agy-output-empty',
+      diagnostic: diagnostic('output-empty', { stdout_bytes: 0 }) });
+  }
+
+  return content;
+}
+
+function agyTransportDeps() {
+  return { resolveCommand: resolveAgyCommand, buildSidecarEnv, terminateChild: terminateOwnedProcessTree,
+    assertSafeForCmdShell };
+}
+
+/**
+ * Invoke `agy --print` headless for one review turn. No retry, no probe cache.
+ *
+ * R3: the prompt file lives INSIDE the cwd (agy's --sandbox roots the agent there).
+ * A bounded `--help` probe runs on every call: only a binary that advertises
+ * `--output-format stream-json` gets the supervised stream transport (same neutral
+ * liveness tracker and DEFAULTS, no local proof). Otherwise the legacy synchronous
+ * path runs unchanged and is labelled `unsupported-legacy`. A process whose exit
+ * could not be confirmed keeps the prompt file and forbids any fallback.
+ *
  * @param {object} opts
  * @param {string} opts.prompt
  * @param {string} opts.cwd
  * @param {string} [opts.model]  — agy model LABEL, may contain spaces (e.g. "Gemini 3.1 Pro (High)")
- * @param {number} opts.timeoutSecs
- * @returns {string} raw stdout of the agy process
- * @throws {Error} on any invocation failure — cause in message
+ * @param {number} opts.timeoutSecs — effective ceiling, also sent as --print-timeout
+ * @returns {Promise<string>} raw response text of the agy process
  */
-function invokeAgy(opts) {
-  const { prompt, cwd, model, timeoutSecs, envPolicy = 'minimal' } = opts;
-
-  // R3: the tmpdir MUST live INSIDE the cwd. agy's --sandbox roots the agent at the
-  // cwd, so a prompt file under os.tmpdir() is UNREADABLE by the sandboxed agent.
-  // Creating it under the cwd (a dotted prefix, git-ignored, cleaned in finally) keeps
-  // it within the sandbox root. Never committed — it is removed in the finally block.
-  let tmpDir;
+async function invokeAgy(opts) {
+  const { prompt, cwd, model, effort, timeoutSecs, envPolicy = 'minimal' } = opts;
+  // `_agyDeps` is a private test seam (like `_sidecarIdentity`); the CLI never sets it.
+  const deps = { ...agyTransportDeps(), ...(opts._agyDeps || {}) };
+  const telemetry = { engine: 'agy', transport: 'agy-cli', liveness: AGY_LIVENESS.legacy, capability_source: null,
+    probe_ms: null, model_observed: null, effort_applied: null };
+  const file = createPromptFile({ cwd, prompt });
+  let retain = false;
   try {
-    tmpDir = fs.mkdtempSync(path.join(cwd, '.forge-xllm-'));
-  } catch (e) {
-    throw new Error(`failed to create tmpdir: ${e.message}`);
-  }
-
-  const promptFile = path.join(tmpDir, 'prompt.txt');
-
-  try {
-    fs.writeFileSync(promptFile, prompt, 'utf8');
-
-    const inline = `Read the file at ${promptFile} and follow the instructions in it exactly. `
-      + 'Your entire response must be ONLY the JSON object it specifies — no prose, no markdown fences.';
-
-    const args = ['--sandbox', '-p', inline, '--print-timeout', `${timeoutSecs}s`];
-    if (model) {
-      args.push('--model', model);
+    const probe = await probeAgyCapabilities(deps, { cwd, envPolicy });
+    telemetry.capability_source = probe.source;
+    telemetry.probe_ms = probe.probe_ms;
+    const args = planAgyArgs({ probe, effort, model, inline: file.inline, timeoutSecs });
+    let content;
+    if (probe.stream) {
+      telemetry.liveness = AGY_LIVENESS.supervised;
+      content = await runAgyStream(deps, { cwd, args, timeoutSecs, envPolicy, signal: opts.signal,
+        onHeartbeat: opts.onHeartbeat, onLiveness: opts.onLiveness });
+    } else {
+      content = invokeAgyLegacy(opts, args);
     }
-
-    const { cmd, prefixArgs, viaCmdShell } = resolveAgyCommand();
-    // On the cmd.exe /c last-resort path, cmd re-parses arguments after /c
-    // (CVE-2024-27980) — reject any that carry shell metacharacters/quotes
-    // before they reach the shell. The JS-entry-point path never hits cmd.exe.
-    if (viaCmdShell) {
-      assertSafeForCmdShell([...prefixArgs, ...args]);
-    }
-    const res = spawnSync(cmd, [...prefixArgs, ...args], {
-      cwd,
-      shell: false,
-      // agy's own --print-timeout fires first and lets it exit cleanly; the spawn
-      // timeout is a 5s-grace hard backstop for a hung process (the non-TTY hang).
-      timeout: timeoutSecs * 1000 + 5000,
-      killSignal: 'SIGKILL',
-      encoding: 'utf8',
-      maxBuffer: MAX_BUFFER,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: buildSidecarEnv(envPolicy),
-    });
-
-    if (!res.error && Number.isInteger(res.pid) && res.pid > 0 && opts._sidecarIdentity) {
-      identityStage(opts, 'iniciado', { pid: res.pid, retroactive: true });
-    }
-
-    if (res.error) {
-      throw new Error(`agy spawn failed: ${res.error.code || res.error.message}`);
-    }
-    if (res.signal === 'SIGKILL') {
-      throw new Error(`agy killed after exceeding timeout (${timeoutSecs}s + 5s grace)`);
-    }
-    if (res.status !== 0) {
-      const stderrSnippet = (res.stderr ? String(res.stderr) : '').trim().slice(0, 200);
-      throw new Error(`agy exited ${res.status}${stderrSnippet ? `: ${stderrSnippet}` : ''}`);
-    }
-
-    const content = res.stdout;
-    if (!content || !content.trim()) {
-      throw Object.assign(new Error('agy-output-empty'), { code: 'agy-output-empty',
-        diagnostic: diagnostic('output-empty', { stdout_bytes: 0 }) });
-    }
-
+    try { if (typeof opts.onTransportTelemetry === 'function') opts.onTransportTelemetry({ ...telemetry }); } catch { /* observer only */ }
     return content;
-  } finally {
-    // Best-effort cleanup — the prompt file contains diff excerpts.
-    try {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-    } catch (e) {
-      // ignore — best-effort
+  } catch (error) {
+    if (error && typeof error === 'object') {
+      // An unreconciled writer may still read the prompt: never delete it under it.
+      if (error.ownership_pending === true) retain = true;
+      if (telemetry.capability_source === null && error.capability_source) telemetry.capability_source = error.capability_source;
+      error.agy_transport = { ...telemetry };
     }
+    throw error;
+  } finally {
+    if (!retain) file.cleanup();
   }
 }
 
@@ -1601,10 +1639,11 @@ function assertEngineSupportsMode(mode, engine) {
 /**
  * Route one review prompt to the selected engine and resolve to the RAW model output.
  *
- * ALWAYS returns a Promise, for BOTH engines. `agy` stays synchronous on the inside —
- * wrapping `invokeAgy` keeps that path from loading any session code, which is what
- * IN-15/D11 require (agy gets tolerance, not parity, and must never pull in
- * forge-appserver-client). But the SIGNATURE must not vary by engine: a router that
+ * ALWAYS returns a Promise, for EVERY engine. `invokeAgy` is async now (bounded probe,
+ * then the supervised stream or the synchronous legacy path) and still loads no
+ * session code, which is what IN-15/D11 require (agy gets tolerance, not parity, and
+ * must never pull in forge-appserver-client or the Claude sidecar; its transport
+ * imports only the neutral liveness/diagnostic modules). But the SIGNATURE must not vary by engine: a router that
  * returns a string for one engine and a Promise for the other hands the first
  * distracted consumer an `undefined` — a `.then` on a string, or a Promise
  * serialized into a prompt — with nothing failing. One shape, always.
@@ -1633,7 +1672,7 @@ function invokeEngine(engine, opts) {
   if (opts.sandbox !== CAPABILITY_SANDBOX_MODE.readonly) {
     throw new Error(`invokeEngine is the review router: sandbox must be '${CAPABILITY_SANDBOX_MODE.readonly}' (got ${JSON.stringify(opts.sandbox)})`);
   }
-  if (engine === 'agy') return Promise.resolve(invokeAgy(opts));
+  if (engine === 'agy') return invokeAgy(opts);
   // Claude also reports its transport telemetry (proven model) through the
   // optional callback; the resolved value stays the same raw string.
   if (engine === 'claude') return invokeClaudeJson(opts, value => value && value.status === 'done'
@@ -1671,10 +1710,11 @@ function invokeClaudeTransport(options) {
   return invokeClaudeSidecar({...options,onProgress});
 }
 
-// Claude-only additions to the review legs. codex and agy receive neither the
-// callback nor the extra key, so their options and stdout JSON stay byte-identical.
+// Transport telemetry for the review legs: Claude (proven model) and agy (closed
+// liveness label, no calibration). codex receives neither the callback nor the
+// extra key, so its options and stdout JSON stay byte-identical.
 function claudeTelemetrySink(engine, sink) {
-  return engine === 'claude' ? { onTransportTelemetry: sink } : {};
+  return engine === 'claude' || engine === 'agy' ? { onTransportTelemetry: sink } : {};
 }
 
 // Claude-only liveness observer for the review legs, same posture as the sink:
@@ -1684,6 +1724,8 @@ function claudeLiveness(engine, onLiveness) {
 }
 
 async function withClaudeTelemetry(engine, normalized, telemetry) {
+  // agy: the label is attached after the same schema/barrier gates; never a calibration.
+  if (engine === 'agy') return telemetry ? { ...normalized, transport_telemetry: telemetry } : normalized;
   if (engine !== 'claude') return normalized;
   // This point follows the review schema, semantic gates and output barrier.
   // The adapter proposal remains in the returned result for publication/replay.
@@ -1951,13 +1993,19 @@ function boundaryError(code, message) { const error = new Error(message); error.
 function terminateOwnedProcessTree(child, platform = process.platform, runner = spawnSync) {
   if (!child || !Number.isInteger(child.pid) || child.pid <= 0) return { ok: false, reason_code: 'process-termination-invalid-owner' };
   let treeKilled = false;
+  // tree_terminated is the whole-tree step alone; ok also counts a signal to the parent.
+  let treeStep = false;
   if (platform === 'win32') {
-    try { const result = runner('taskkill', ['/PID', String(child.pid), '/T', '/F'], { shell: false, stdio: 'ignore' }); treeKilled = !result.error && result.status === 0; } catch { /* best-effort */ }
+    try { const result = runner('taskkill', ['/PID', String(child.pid), '/T', '/F'], { shell: false, stdio: 'ignore' }); treeKilled = !result.error && result.status === 0; treeStep = treeKilled; } catch { /* best-effort */ }
+    // Missing/exited parent is not proof about descendants that outlived it.
   } else {
-    try { process.kill(-child.pid, 'SIGKILL'); treeKilled = true; } catch { /* group gone */ }
+    try { process.kill(-child.pid, 'SIGKILL'); treeKilled = true; treeStep = true; } catch (e) {
+      // ESRCH proves the group is gone only when the owned parent already exited.
+      treeStep = e?.code === 'ESRCH' && (child.exitCode != null || child.signalCode != null);
+    }
   }
   try { child.kill('SIGKILL'); treeKilled = true; } catch { /* already dead */ }
-  return { ok: treeKilled, reason_code: treeKilled ? 'process-tree-terminated' : 'process-termination-failed' };
+  return { ok: treeKilled, tree_terminated: treeStep, reason_code: treeKilled ? 'process-tree-terminated' : 'process-termination-failed' };
 }
 
 /**
@@ -3128,6 +3176,7 @@ module.exports = {
   collectRuntimeEvidence,
   readTurnStatus,
   assertSafeForCmdShell,
+  invokeAgy,
   resolveShimJsEntry,
   classifyErrorClass,
   normalizeDispatchId,

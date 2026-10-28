@@ -1,5 +1,7 @@
 ## Não lançado
 
+- Reviews agy: supervisão limitada quando `--help` anuncia `stream-json`, com legado rotulado `unsupported-legacy`; o formato documentado ainda não foi verificado contra inferência real (#205)
+
 - Evidências documentais suplementares podem concluir uma entrega parcial com revisão independente e verificação real, preservando manifesto, resultado original e autoridade viva na retomada (#273).
 - Correções de review de tasks soltas preservam a identidade de escopo na validação e recuperação, sem serem encaminhadas à preparação de task (#275).
 

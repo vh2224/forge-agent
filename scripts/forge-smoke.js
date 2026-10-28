@@ -2245,12 +2245,22 @@ function mkGitRepo(dir) {
 // it first verifies the adapter's invocation contract (--sandbox present, -p
 // carries a "Read the file at <path>" instruction, the prompt file exists and
 // holds the real payload) and exits 3 on any violation.
+// The adapter probes `--help` before every review: the mock answers it at once
+// (opts.help, else a legacy help without --output-format, so the legacy path
+// runs). With opts.stream and `--output-format stream-json` on argv it writes
+// the NDJSON lines of opts.events ([event, delayMs?]) instead of the payload.
+const MOCK_AGY_LEGACY_HELP = 'Usage: agy [options]\n\nOptions:\n  -p, --print <prompt>  Run headless\n  --sandbox             Restrict terminal access\n';
 function writeMockAgy(dir, opts) {
   opts = opts || {};
+  const events = (opts.events || []).map((entry) => [JSON.stringify(entry[0]), entry[1] || 0]);
   const js = [
     '// forge-smoke mock agy',
     "const fs = require('fs');",
     'const args = process.argv.slice(2);',
+    "if (args.includes('--help')) {",
+    `  process.stdout.write(${JSON.stringify(opts.help == null ? MOCK_AGY_LEGACY_HELP : String(opts.help))});`,
+    '  process.exit(0);',
+    '}',
     "const pIdx = args.indexOf('-p');",
     "const inline = pIdx >= 0 ? String(args[pIdx + 1] || '') : '';",
     `if (${opts.checkContract ? 'true' : 'false'}) {`,
@@ -2260,11 +2270,22 @@ function writeMockAgy(dir, opts) {
     "  let t = ''; try { t = fs.readFileSync(m[1], 'utf8'); } catch (e) { process.stderr.write('mock: prompt file unreadable'); process.exit(3); }",
     "  if (!t.includes('DIFF START') && !t.includes('OBJECTIONS')) { process.stderr.write('mock: prompt file misses payload'); process.exit(3); }",
     '}',
+    `if (${opts.stream ? 'true' : 'false'}) {`,
+    "  if (args[args.indexOf('--output-format') + 1] !== 'stream-json' || !args.includes('--print-timeout')) { process.stderr.write('mock: stream contract missing'); process.exit(3); }",
+    '  (async () => {',
+    `    for (const [line, delay] of ${JSON.stringify(events)}) {`,
+    '      if (delay) await new Promise(resolve => setTimeout(resolve, delay));',
+    "      process.stdout.write(line + '\\n');",
+    '    }',
+    `    process.exit(${typeof opts.exitCode === 'number' ? opts.exitCode : 0});`,
+    '  })();',
+    '} else {',
     opts.sleepMs
       ? `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${opts.sleepMs});`
       : '',
     `process.stdout.write(${JSON.stringify(String(opts.payload == null ? '' : opts.payload))});`,
     `process.exit(${typeof opts.exitCode === 'number' ? opts.exitCode : 0});`,
+    '}',
     '',
   ].join('\n');
   const agyPath = path.join(dir, 'mock-agy.js');
@@ -2527,6 +2548,31 @@ function smokeXllm() {
     assert(!!parsed && parsed.verdicts && parsed.verdicts[0] && parsed.verdicts[0].verdict === 'maintained'
       && typeof parsed.verdicts[0].reason === 'string',
       'L: agy normalized verdict has verdict=maintained and reason', `stdout=${r.stdout}`);
+    cleanup(dir);
+    cleanup(mockDir);
+  }
+
+  // Scenario G2 — capability-advertised stream through the real CLI review boundary.
+  {
+    const dir = mkTmp('xllm-g2');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-g2-mock-'));
+    const response = JSON.stringify({ objections: [{ id: 'R1', severity: 'high', path_line: 'src/a.js:12',
+      claim: 'structured concern', suggested_fix: 'bounded fix', challenge: 'Is this real?' }] });
+    const mockPath = writeMockAgy(mockDir, { checkContract: true, stream: true,
+      help: 'Options:\n  --output-format <format>  text, json, stream-json\n  --sandbox\n',
+      events: [[{ event: 'init', conversation_id: 'smoke-g2' }],
+        [{ event: 'step_update', step_update: { conversation_id: 'smoke-g2', step_index: 0,
+          state: 'DONE', step_type: 'agent_response', text: response } }],
+        [{ event: 'result', conversation_id: 'smoke-g2', status: 'SUCCESS', response }]] });
+    const r = runXllm(['--mode', 'challenge', '--engine', 'agy', '--diff-cmd', 'echo diff', '--cwd', dir],
+      null, dir, { FORGE_XLLM_AGY_BIN: mockPath });
+    let parsed = null;
+    try { parsed = JSON.parse(r.stdout); } catch { /* leave null */ }
+    assert(r.status === 0, 'G2: agy advertised stream challenge exits 0', `status=${r.status} stderr=${r.stderr}`);
+    assert(parsed && parsed.objections && parsed.objections[0] && parsed.objections[0].issue === 'structured concern',
+      'G2: agy stream normalizes objections', `stdout=${r.stdout}`);
+    assert(parsed && parsed.transport_telemetry && parsed.transport_telemetry.liveness === 'stream-json',
+      'G2: agy stream reports supervised transport telemetry', `stdout=${r.stdout}`);
     cleanup(dir);
     cleanup(mockDir);
   }
@@ -8617,30 +8663,32 @@ function smokeSidecarEnvContract() {
   // exception (a signal-delivery call, not a sidecar process spawn). This is the
   // inverse of counting sites that HAVE env: (which silently passes a future 4th
   // spawn added without it) — it walks every call-site and fails closed.
-  // The floor dropped from 4 to 3 in M018 S05 T02: `invokeCodex`/`invokeCodexDetached`
-  // left with the `codex exec` transport, taking their spawn call-sites (and the
-  // taskkill signal call) with them. What is measured now: `spawnSync` in invokeAgy,
-  // `spawnSync` in the git reader, plus one occurrence inside resolveAgyCommand's
-  // doc comment. The taskkill exception below is therefore currently UNREACHABLE in
-  // this file — the real Windows process-tree kill moved to
-  // forge-appserver-client.js and is asserted by Section 26 (g). The branch stays so
-  // that a signal call re-added here is not forced to carry a sidecar env.
+  // The adapter retains its floor of three: legacy agy, git reader and the
+  // historical occurrence in resolveAgyCommand's documentation. The new agy
+  // transport has two actual spawn sites (help probe and supervised stream).
+  // Keep the existing adapter labels and check both files with the same rule.
   const spawnCallRe = /\b(spawnSync|spawn)\(/g;
   const spawnMatches = [...adapter.matchAll(spawnCallRe)];
   assert(spawnMatches.length >= 3,
     '(f) sanity: adapter still has the expected spawn(/spawnSync( call-sites', `found=${spawnMatches.length}`);
   const uncovered = [];
-  for (const m of spawnMatches) {
-    const start = m.index;
-    const closeIdx = adapter.indexOf('});', start);
-    const block = adapter.slice(start, closeIdx > start ? closeIdx + 3 : start + 400);
-    const isTaskkill = block.includes('taskkill');
-    const hasEnv = block.includes('env: buildSidecarEnv(');
-    if (isTaskkill) {
-      if (hasEnv) uncovered.push(`taskkill call-site unexpectedly carries env: (index=${start})`);
-      continue;
+  for (const [filename, floor] of [['forge-xllm.js', 3], ['forge-agy-transport.js', 2]]) {
+    const source = filename === 'forge-xllm.js' ? adapter : fs.readFileSync(path.join(SCRIPTS, filename), 'utf8');
+    const matches = [...source.matchAll(spawnCallRe)];
+    if (filename !== 'forge-xllm.js') assert(matches.length >= floor,
+      '(f) agy transport retains probe and stream spawn call-sites', `found=${matches.length}`);
+    for (const m of matches) {
+      const start = m.index;
+      const closeIdx = source.indexOf('});', start);
+      const block = source.slice(start, closeIdx > start ? closeIdx + 3 : start + 400);
+      const isTaskkill = block.includes('taskkill');
+      const hasEnv = block.includes('env: buildSidecarEnv(');
+      if (isTaskkill) {
+        if (hasEnv) uncovered.push(`taskkill call-site unexpectedly carries env: (index=${start})`);
+        continue;
+      }
+      if (!hasEnv) uncovered.push(`${filename}: spawn call-site missing env: buildSidecarEnv( (index=${start})`);
     }
-    if (!hasEnv) uncovered.push(`spawn call-site missing env: buildSidecarEnv( (index=${start})`);
   }
   assert(uncovered.length === 0,
     '(f) every non-taskkill spawn(/spawnSync( call-site carries env: buildSidecarEnv(', uncovered.join('; '));

@@ -440,8 +440,18 @@ usa a mesma liveness neutra da S01 como autoridade primária do kill. O módulo 
 `scripts/forge-appserver-liveness.js` reduz as notificações JSON-RPC a um snapshot no
 contrato de entrada de `liveness.evaluate`; o cliente só acrescenta o watchdog. O
 bloco `liveness` exposto ao host é o mesmo da S06 (`observation()`, `progressLine`,
-`readProgressLine`), com a mesma cadência de 30000 ms e emissão na transição. O agy
-não é alterado.
+`readProgressLine`), com a mesma cadência de 30000 ms e emissão na transição.
+
+O review agy usa o mesmo tracker e DEFAULTS quando o binário anuncia
+`--output-format stream-json` no `--help`, consultado a cada invocação, sem cache.
+Sem anúncio ou com probe falho de término confirmado, mantém o caminho legado
+limitado e rotulado `unsupported-legacy`, sem supervisão semântica. O stream não
+tem prova local: a janela de ferramenta permanece limitada a 660000 ms nos
+defaults e ao timeout efetivo. O formato dos eventos e o vocabulário de
+tipos/estados são uma suposição documentada, ainda não verificada contra o
+provider. O host executou apenas `--version`/`--help` do binário oficial 1.4.8
+isoladamente; nenhuma inferência real foi executada. Saída de processo não
+confirmada bloqueia fallback e conserva o prompt até reconciliação.
 
 - **Evento remoto (suposição conservadora, sem probe ao vivo):** conta como remoto
   qualquer notificação do servidor depois do envio de `turn/start`, exceto o conjunto

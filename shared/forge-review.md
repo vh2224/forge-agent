@@ -361,6 +361,8 @@ Modeled on **Fallback agents** above. One event type, two triggers discriminated
 {"ts":"<ISO>","event":"review-challenger-fallback","milestone":"{M###}","slice":"{S##}","reason":"gemini-exit-nonzero"}
 ```
 
+**Reconciliation barrier (`agy-process-exit-unconfirmed`):** when the adapter's stderr JSON carries `reason_code: "agy-process-exit-unconfirmed"` (with `ownership_pending: true` and, when known, a positive integer `pid`), the exit is NOT a generic `exit-nonzero`: an external review process may still be running. **Do not** dispatch `Agent("forge-reviewer")` / `Agent("forge-advocate")`, retry, or append a `*-exit-nonzero` fallback event. Stop that review leg, keep the retained prompt, report the pending `pid` and require reconciliation (confirm the owned process tree is gone; an exited or missing parent PID alone is insufficient) before any fallback or new worker. Never print the prompt, raw stderr or paths.
+
 > `<ISO>` for both comes from bash (`date -u +%Y-%m-%dT%H:%M:%SZ`) — never from inside a script. **Rebuttal has no fallback of its own:** an adapter rebuttal failure degrades non-conceded objections to `maintained` (conservative), it does NOT emit this event nor dispatch an agent (see Step 4).
 
 ### Agent unavailability (review-agent-unavailable)
@@ -587,7 +589,8 @@ XLLM_EXIT=$?
 ```
 
 - **exit 0** → stdout is JSON `{objections:[{id,severity,file,line,issue,fix,challenge}]}` (already normalized by the adapter). Map each objection into the same `OBJECTIONS` contract the Claude branch produces — id (`R#`), `path:line` (`file:line`), severity, claim (`issue`), suggested fix (`fix`), and the `challenge` question — so Steps 3/5/6 consume it identically. Empty `objections` array → treat as `NO_FLAGS` (write a clean `{S##}-REVIEW.md`, proceed).
-- **exit != 0** → **single fallback** (no retry) to `Agent("forge-reviewer")` (the `challenger == 'claude'` invocation above), echo `⚠ challenger: $CHALLENGER indisponível (exit ≠ 0) — usando forge-reviewer`, and append a `review-challenger-fallback` event with `reason: "{challenger}-exit-nonzero"` (`codex-exit-nonzero` or `gemini-exit-nonzero`; cause is on the adapter's stderr). See **Fallback challenger (review-challenger-fallback)** (trigger b). The gate then continues with the agent's objections.
+- **exit != 0 with `reason_code: "agy-process-exit-unconfirmed"`** → **no fallback**: apply the Reconciliation barrier (trigger b above) and reconcile the owned tree associated with the reported `pid` first.
+- **exit != 0** (any other reason) → **single fallback** (no retry) to `Agent("forge-reviewer")` (the `challenger == 'claude'` invocation above), echo `⚠ challenger: $CHALLENGER indisponível (exit ≠ 0) — usando forge-reviewer`, and append a `review-challenger-fallback` event with `reason: "{challenger}-exit-nonzero"` (`codex-exit-nonzero` or `gemini-exit-nonzero`; cause is on the adapter's stderr). See **Fallback challenger (review-challenger-fallback)** (trigger b). The gate then continues with the agent's objections.
 
 ## Step 3 — Defense
 
@@ -610,7 +613,8 @@ XLLM_DEFEND_EXIT=$?
 ```
 
 - **exit 0** → stdout is JSON `{verdicts:[{id,verdict,rationale}]}` with `verdict ∈ refuted|conceded|open` — the exact contract the Claude branch produces, so Steps 4/5/6/7a consume it identically and never learn which family defended.
-- **exit != 0** → **single fallback** (no retry) to `Agent("forge-advocate")` (the `claude` branch below), echo `⚠ advocate: $RESOLVED_ADVOCATE indisponível (exit ≠ 0) — usando forge-advocate`, and append a `review-pairing-fallback` event with `reason: "{advocate}-defend-exit-nonzero"`. **The debate then IS intra-family** — recompute `INTRA_FAMILY` against the advocate that actually ran, so the Step 6 header and the emitted event both say so. A fallback that silently keeps the pre-fallback pairing in the artifact is the exact drift this gate exists to surface.
+- **exit != 0 with `reason_code: "agy-process-exit-unconfirmed"`** → **no fallback**: apply the Reconciliation barrier (challenger trigger b) and reconcile the owned tree associated with the reported `pid` first.
+- **exit != 0** (any other reason) → **single fallback** (no retry) to `Agent("forge-advocate")` (the `claude` branch below), echo `⚠ advocate: $RESOLVED_ADVOCATE indisponível (exit ≠ 0) — usando forge-advocate`, and append a `review-pairing-fallback` event with `reason: "{advocate}-defend-exit-nonzero"`. **The debate then IS intra-family** — recompute `INTRA_FAMILY` against the advocate that actually ran, so the Step 6 header and the emitted event both say so. A fallback that silently keeps the pre-fallback pairing in the artifact is the exact drift this gate exists to surface.
 
 `$ADVOCATE_MODEL_EXTERNAL` is `advocate_model` when its family matches the resolved external advocate, else empty (CLI default). A `claude-*` id must never be forwarded to `codex`/`agy` as `--model`.
 

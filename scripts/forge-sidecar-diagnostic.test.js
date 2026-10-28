@@ -365,7 +365,33 @@ test('review failures preserve closed resolver/output causes without arbitrary m
   const empty = reviewFailureDiagnostic({ code: 'agy-output-empty', diagnostic: diagnostic('output-empty', { stdout_bytes: 0 }) });
   assert.equal(empty.reason_code, 'agy-output-empty'); assert.equal(empty.diagnostic.reason, 'output-empty');
   assert.equal(empty.provider_called, null);
-  const unknown = reviewFailureDiagnostic({ code: 'private-sentinel', message: 'private-sentinel', diagnostic: { reason: 'private-sentinel', tail: 'private-sentinel' } });
+  const reasons = { 'agy-timeout': 'provider-timeout', 'agy-cancelled': 'provider-cancelled', 'agy-output-limit': 'output-limit',
+    'agy-stream-invalid': 'result-error', 'agy-anomalous-silence': 'anomalous-silence', 'agy-exit-nonzero': 'provider-exit',
+    'budget-exceeded-while-active': 'budget-exceeded-while-active', 'agy-process-exit-unconfirmed': 'adapter-failed' };
+  for (const code of Object.values(require('./forge-agy-transport').AGY_REASON_CODES)) {
+    for (const provider_called of [false, null]) {
+      const safe = reviewFailureDiagnostic({ code, provider_called: provider_called ?? undefined, message: 'private-sentinel',
+        diagnostic: diagnostic(reasons[code], { stdout_bytes: 5, tail: 'private-sentinel' }) });
+      assert.equal(safe.reason_code, code); assert.equal(safe.provider_called, provider_called);
+      assert.equal(safe.diagnostic.reason, reasons[code]); assert.equal(safe.model_observed, null);
+      assert(!JSON.stringify(safe).includes('private-sentinel'));
+    }
+  }
+  const pending = reviewFailureDiagnostic({ code: 'agy-process-exit-unconfirmed', ownership_pending: true,
+    ownership: { state: 'pending', pid: 4242, path: 'private-sentinel' }, message: 'private-sentinel' });
+  assert.equal(pending.ownership_pending, true); assert.equal(pending.pid, 4242);
+  assert(!JSON.stringify(pending).includes('private-sentinel'));
+  for (const pid of [0, -1, 1.5, '4242', null, undefined]) {
+    const odd = reviewFailureDiagnostic({ code: 'agy-process-exit-unconfirmed', ownership_pending: true, ownership: { pid } });
+    assert.equal(odd.ownership_pending, true); assert.equal('pid' in odd, false);
+  }
+  for (const other of ['agy-timeout', 'private-sentinel']) {
+    const leaked = reviewFailureDiagnostic({ code: other, ownership_pending: true, ownership: { pid: 4242 } });
+    assert.equal('ownership_pending' in leaked, false); assert.equal('pid' in leaked, false);
+  }
+  assert.equal('ownership_pending' in reviewFailureDiagnostic({ code: 'agy-process-exit-unconfirmed' }), false);
+  process.stdout.write('PASS agy diagnostic codes preserve provider observations without private text\n');
+  const unknown =reviewFailureDiagnostic({ code: 'private-sentinel', message: 'private-sentinel', diagnostic: { reason: 'private-sentinel', tail: 'private-sentinel' } });
   assert.equal(unknown.reason_code, 'adapter-failed'); assert.equal(unknown.provider_called, null);
   assert(!JSON.stringify(unknown).includes('private-sentinel'));
 });
