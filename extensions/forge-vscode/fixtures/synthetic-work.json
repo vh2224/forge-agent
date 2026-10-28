@@ -1,0 +1,17 @@
+{
+  "synthetic": true,
+  "phase": "Demonstração local",
+  "agents": [
+    { "name": "Agente Alfa", "type": "nativo" },
+    { "name": "Agente Beta", "type": "sidecar" }
+  ],
+  "pending": [
+    {
+      "id": "pergunta-exemplo",
+      "text": "Escolha fictícia para demonstração"
+    }
+  ],
+  "evidence": [
+    { "label": "Prova inventada", "link": "docs/prova-inventada.md" }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "name": "forge-vscode",
+  "displayName": "Forge",
+  "description": "Prova local do painel Forge, somente leitura e com dados sintéticos.",
+  "version": "0.0.1",
+  "publisher": "forge-agent",
+  "private": true,
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "main": "./extension.js",
+  "activationEvents": ["onView:forge.work"],
+  "capabilities": {
+    "untrustedWorkspaces": { "supported": true },
+    "virtualWorkspaces": true
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        { "id": "forge", "title": "Forge", "icon": "media/forge.svg" }
+      ]
+    },
+    "views": {
+      "forge": [
+        { "id": "forge.work", "name": "Trabalho (sintético)" }
+      ]
+    }
+  }
+}
