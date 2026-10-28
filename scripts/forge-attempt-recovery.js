@@ -48,9 +48,10 @@ function exceptionFor(handle, identity, now) {
 function routeKey(route) { return digest({ host: route.host_runtime, worker: route.resolved_worker_engine,
   transport: route.worker_mode, model: route.model_resolved || route.model, effort: route.effort }); }
 function canonicalRequest(request) {
-  const phase = request.phase || ({ 'execute-task': 'execute', 'plan-check': 'plan-check' }[request.unitType])
+  const standaloneFix=request.unitType==='review-fix'&&request.reviewFix?.boundary==='task'&&request.taskId&&!request.milestoneId&&!request.sliceId;
+  const phase = request.phase || (standaloneFix?'review-fix':null) || ({ 'execute-task': 'execute', 'plan-check': 'plan-check' }[request.unitType])
     || request.unitType?.split('-')[0];
-  return { ...request, scope: request.scope || (request.milestoneId ? 'milestone' : undefined), phase,
+  return { ...request, scope: request.scope || (standaloneFix?'standalone-task':request.milestoneId ? 'milestone' : undefined), phase,
     contextRoot: request.contextRoot || request.cwd };
 }
 // Only the embedding host can supply this object. JSON references are data;

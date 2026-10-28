@@ -332,7 +332,7 @@ function validateCoveragePolicy(policy,inventory,contract){
 }
 // Caller supplies the exact saved output of its single canonical resolver call,
 // already-held claim/gates, and real native binding. Never resolves or changes route.
-function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linkedEntryOptions,savedManifest,persistDeliveryReceipt,leaseRenewal,documentaryContinuation,coveragePolicy}={}){
+function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linkedEntryOptions,savedManifest,persistDeliveryReceipt,leaseRenewal,documentaryContinuation,coveragePolicy,supplementalCoverage}={}){
   if(typeof assertBoundary!=='function'||typeof assertAuthority!=='function')fail('live-controller-boundary-required');
   const r=structuredClone(request);
   delete r.linkedEntryBinding;
@@ -362,10 +362,44 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
   const inputs = savedManifest?.inputs || (taskPreparation ? Object.keys(taskPreparation.inputs).map(file=>['Task input',file]) : inputSections(r)).map(([label,file]) => ({label,file,sha256:hash(fs.readFileSync(file))}));
   const {identity:verificationIdentity,seal}=verificationPolicy(r,plan);
   const loc=side.locations(r),inventory=api('forge-delivery').inventoryPlan(plan,r.planFile,loc.rules[loc.delivery.input].unit);
-  const policy=validateCoveragePolicy(coveragePolicy===undefined?savedManifest?.coverage_policy:coveragePolicy,inventory,r.execution_contract);
+  if(supplementalCoverage&&(!savedManifest||savedManifest.coverage_policy||coveragePolicy!==undefined||documentary
+    ||typeof supplementalCoverage.attestEligibility!=='function'||typeof supplementalCoverage.attestStoppedWriter!=='function'))fail('supplemental-live-authority-required');
+  const policy=validateCoveragePolicy(supplementalCoverage?supplementalCoverage.policy:coveragePolicy===undefined?savedManifest?.coverage_policy:coveragePolicy,inventory,r.execution_contract);
+  let supplement=null;
+  if(supplementalCoverage){
+    if(!policy)fail('supplemental-policy-required');
+    const file=supplementalCoverage.returnedReceiptFile,bytes=fs.readFileSync(file),record=JSON.parse(bytes);
+    if(path.resolve(file)!==path.resolve(r.resultFile+'.receipt.json.'+hash(bytes)+'.json')
+      ||record.phase!=='executed'||record.result?.status!=='partial'||!resultContract.validate(record.result).ok
+      ||record.manifest_sha256!==hash(fs.readFileSync(r.resultFile+'.manifest.json'))
+      ||record.dispatch_id!==r.dispatchId||record.fingerprint!==side.artifactFingerprint(r)
+      ||record.recovery_identity_sha256!==roots.digest(requestIdentity(r)))fail('supplemental-returned-binding');
+    for(const row of policy.criteria){
+      const item=record.result.must_haves_status.find(item=>api('forge-delivery').unitKey(loc.rules[loc.delivery.input].unit)+':'+item.kind+':'+item.index===row.criterion_id);
+      if(!item||item.kind==='artifact'||item.status!=='unknown')fail('supplemental-unknown-only');
+      for(const evidence of item.evidence||[]){
+        if(!row.requirements.some(req=>req.coverage==='behavioral'&&req.root_id===evidence.root_id))fail('supplemental-behavior-required');
+      }
+    }
+    const challenge={manifest_sha256:record.manifest_sha256,receipt_sha256:hash(bytes),policy:structuredClone(policy)};
+    const check=()=>{
+      assertAuthority();assertBoundary();
+      if(supplementalCoverage.attestStoppedWriter()!==true)fail('supplemental-writer-not-stopped');
+      if(hash(fs.readFileSync(file))!==hash(bytes)||hash(fs.readFileSync(r.resultFile+'.manifest.json'))!==record.manifest_sha256
+        ||roots.digest(execution.replayState(r.cwd,r.execution_contract))!==roots.digest(record.code_state))fail('supplemental-returned-state-changed');
+    };
+    check();
+    const attestation=supplementalCoverage.attestEligibility(structuredClone(challenge));
+    if(!nonEmpty(attestation?.reference)||!nonEmpty(attestation?.reviewer)||!nonEmpty(attestation?.producer)
+      ||attestation.reviewer===attestation.producer||attestation.pending_questions?.length
+      ||attestation.manifest_sha256!==challenge.manifest_sha256||attestation.receipt_sha256!==challenge.receipt_sha256
+      ||attestation.policy_sha256!==roots.digest(policy)||!nonEmpty(attestation.rationale))fail('supplemental-independent-eligibility-required');
+    supplement={check,file,evidence:{...challenge,eligibility:structuredClone(attestation)}};
+  }
   if(policy&&documentary)fail('documentary-policy-continuation-conflict');
   let initialReview=null;
   function guard(publishing=false){
+    if(supplement)supplement.check();
     if(policy&&fs.existsSync(manifestFile)&&roots.digest(JSON.parse(fs.readFileSync(manifestFile,'utf8')))!==roots.digest(manifest))fail('documentary-manifest-changed');
     if(documentary)documentary.check();
     if(initialReview)initialReview.check();
@@ -379,7 +413,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
   let verified=null;
   const manifest={request:r,prepared,plan_sha256:planHash,context_sha256:contextHash,inputs,verification_seal:seal};
   if(documentary)manifest.documentary_continuation=documentary.evidence;
-  if(policy)manifest.coverage_policy=policy;
+  if(policy&&!supplement)manifest.coverage_policy=policy;
   if(savedManifest && roots.digest(manifest)!==roots.digest(savedManifest))fail('milestone-manifest-changed');
   const manifestFile=r.resultFile+'.manifest.json', receiptFile=r.resultFile+'.receipt.json';
   for(const file of [manifestFile,receiptFile])for(const root of [r.contextRoot,...r.execution_contract.code_roots.map(row=>row.path)])
@@ -396,6 +430,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
   return {
     reviewDocumentary({returnedReceiptFile,attestReview,attestStoppedWriter}={}){
       guard(true);
+      if(supplement&&path.resolve(returnedReceiptFile)!==path.resolve(supplement.file))fail('supplemental-returned-binding');
       if(!policy||typeof attestReview!=='function'||typeof attestStoppedWriter!=='function')fail('documentary-live-authority-required');
       const originalBytes=fs.readFileSync(returnedReceiptFile),record=JSON.parse(originalBytes);
       if(path.resolve(returnedReceiptFile)!==path.resolve(receiptFile+'.'+hash(originalBytes)+'.json')
@@ -432,6 +467,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       }
       derived.status='done';
       const evidence={schema_version:1,original_manifest_sha256:record.manifest_sha256,original_result_sha256:hash(JSON.stringify(record.result)),
+        ...(supplement?{supplemental_coverage:structuredClone(supplement.evidence)}:{}),
         original_receipt_sha256:hash(originalBytes),review_reference:review.reference,reviewer:review.reviewer,producer:review.producer,criteria:structuredClone(review.criteria)};
       evidence.fingerprint=api('forge-delivery').fingerprint(evidence);
       check();initialReview={check,evidence,derived};
@@ -465,6 +501,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       return {manifest_file:manifestFile,manifest_sha256:hash(bytes),receipt_file:receiptFile};
     },
     returned(result){
+      if(supplement)fail('supplemental-replay-only');
       guard();
       if(!resultContract.validate(result).ok)fail('native-result-invalid');
       persist({kind:standalone?'standalone-native-continuation':'milestone-native-continuation',phase:'executed',dispatch_id:r.dispatchId,
@@ -510,6 +547,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       }
       const artifacts=verified.artifacts.map(a=>({...a,before:fs.existsSync(path.join(r.contextRoot,a.path))?hash(fs.readFileSync(path.join(r.contextRoot,a.path))):null}));
       const record={kind:'native-execute-task',phase:'ready',dispatch_id:r.dispatchId,result,artifacts,route:r.route,response_sha256:hash(JSON.stringify(result)),
+        ...(supplement?{supplemental_coverage:structuredClone(supplement.evidence)}:{}),
         ...(renewal?{lease_reconciliation:renewal.evidence}:{}),
         fingerprint:side.artifactFingerprint(r),recovery_identity_sha256:roots.digest(requestIdentity(r)),
         manifest_sha256:hash(fs.readFileSync(manifestFile)),
@@ -522,6 +560,12 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
     },
     replayReady(record){
       guard(true);
+      if(Boolean(record.supplemental_coverage)!==Boolean(supplement)
+        ||supplement&&roots.digest(record.supplemental_coverage)!==roots.digest(supplement.evidence))fail('supplemental-replay-authority-required');
+      for(const artifact of record.artifacts||[]){
+        let parsed;try{parsed=JSON.parse(artifact.content);}catch{continue;}
+        if(parsed?.documentary?.supplemental_coverage&&(!supplement||roots.digest(parsed.documentary.supplemental_coverage)!==roots.digest(supplement.evidence)))fail('supplemental-replay-authority-required');
+      }
       const loc=side.locations(r);
       if(policy&&!initialReview)fail('documentary-review-required');
       if(documentary||initialReview){
@@ -612,6 +656,7 @@ async function replay({request,recovery,runtime,nativeOptions}) {
     {receiptFile:savedReceiptFile,request:r,contract:r.execution_contract,processProbe:runtime.processProbe,assertUnchanged:inspect});
   api('forge-recovery-transition').assertWriterObservation(writer);
   const session=prepare({request:r,nativeInvocation:invocation,assertBoundary:runtime.assertBoundary,assertAuthority,
+    supplementalCoverage:runtime.supplementalCoverage,
     linkedEntryOptions:runtime.linkedEntryOptions,savedManifest:manifest,persistDeliveryReceipt:receipt=>{
       inspect();
       const lock=api('forge-lock'),lockRoot=path.join(require('os').tmpdir(),'forge-recovery-'+roots.digest(path.resolve(recovery.stateFile)));
@@ -626,10 +671,16 @@ async function replay({request,recovery,runtime,nativeOptions}) {
         stateBytes=fs.readFileSync(recovery.stateFile);
       }finally{held.release();}
     }});
-  if(record.result.status!=='done')return {action:'replay',provider_called:false,result:record.result};
+  if(record.supplemental_coverage&&!runtime.supplementalCoverage)fail('supplemental-replay-authority-required');
+  let effectiveResult=record.result;
+  if(runtime.supplementalCoverage){
+    if(!runtime.documentaryReview)fail('documentary-live-authority-required');
+    effectiveResult=session.reviewDocumentary(runtime.documentaryReview).result;
+  }
+  if(effectiveResult.status!=='done')return {action:'replay',provider_called:false,result:effectiveResult};
   if(record.phase==='ready')return {action:'replay',provider_called:false,result:{published:session.replayReady(record)}};
   if(roots.digest(record.code_state)!==roots.digest(api('forge-task-execution').replayState(r.cwd,r.execution_contract)))fail('milestone-replay-code-changed');
-  const verified=session.verify(record.result),published=session.publish(record.result);
+  const verified=session.verify(effectiveResult),published=session.publish(effectiveResult);
   return {action:'replay',provider_called:false,result:{verified,published}};
 }
 module.exports={prepare,replay,requireExplicitVerify,criterionBindings,resultContract,packagePrompt,createLeaseRenewalReconciliation,reconcileLeaseRenewalSurface,createDocumentaryContinuation};

@@ -146,6 +146,7 @@ function reviewFixLocations(request) {
   const boundary = request.reviewFix && typeof request.reviewFix === 'object' ? request.reviewFix.boundary : undefined;
   const invalid = () => fail('review-fix-boundary-invalid',
     'review-fix requires boundary slice (milestone + slice), task (standalone task id) or milestone-triage (milestone + per-item review_file).');
+  if(request.scope==='standalone-task'&&boundary!=='task'||request.scope==='milestone'&&boundary==='task')invalid();
   if (boundary === 'slice') {
     if (!MILESTONE_ID_RE.test(m || '') || !/^S\d+$/.test(s || '') || t !== undefined) invalid();
     const milestone = `.gsd/milestones/${m}`, slice = `${milestone}/slices/${s}`;
@@ -2739,7 +2740,8 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       && (!['milestone', 'standalone-task'].includes(canonical.scope) || canonical.phase !== 'execute' || canonical.unitType !== 'execute-task')) {
     fail('ordinary-native-delivery-unsupported');
   }
-  if (canonical.scope === 'standalone-task' && canonical.phase !== 'execute') {
+  if (canonical.scope === 'standalone-task'
+      && require('./forge-task-preparation').phaseContract(canonical.phase)?.unitType===canonical.unitType) {
     return require('./forge-task-preparation').recoverStandaloneTask(request, recovery, runtime);
   }
   const resolverOptions = { cwd: canonical.contextRoot, unitType: canonical.unitType, scope: canonical.scope, phase: canonical.phase,
