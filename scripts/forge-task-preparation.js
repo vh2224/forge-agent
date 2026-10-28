@@ -7,6 +7,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { recoveryDispatchId } = require('./forge-recovery-dispatch-id');
 const forgeIds = require('./forge-ids');
 const resolver = require('./forge-dispatch-resolve');
 const nativeApi = require('./forge-native-invocation');
@@ -791,7 +792,7 @@ async function recoverStandaloneTask(rawRequest, recovery, deps = {}) {
       assertReady?.();
       if (route.worker_mode === 'native' && !deps.invokeNative && recovery.transitions && !recovery.resumeReservation)
         return { action: 'reattest-native-handoff', reservation_sha256: reservationHash, provider_called: false };
-      const next = { ...invocationRequest, recoveryStateFile: recovery.stateFile, dispatchId: `${request.dispatchId}-recovery-${crypto.randomUUID()}`,
+      const next = { ...invocationRequest, recoveryStateFile: recovery.stateFile, dispatchId: recoveryDispatchId(request.dispatchId),
         resultFile: `${request.resultFile}.recovery-${crypto.randomUUID()}.json`,
         ...(resume != null ? { claudeResume: resume.session, resumedFrom: resume.resumed_from } : {}) };
       // Tier safety ceiling from the single source; no cumulative-clock remainder.

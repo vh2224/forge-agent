@@ -255,6 +255,7 @@ async function main() {
   await test('research recovery from a migrated v1 state with ~21s left on the old clock gives the sidecar the full tier ceiling', async () => {
     const request = fixture({ phase: 'research', hostRuntime: 'codex', model: 'claude-sonnet-5' });
     request.prompt = 'UNIQUE-research-recovery-instructions';
+    request.dispatchId = 'p'.repeat(128);
     // Two sidecar destinations: the timed-out one and an untried one, so recovery
     // reaches a second sidecar instead of exhausting the chain.
     const prefsFile = path.join(request.contextRoot, '.gsd/forge-prefs.jsonc');
@@ -286,7 +287,7 @@ async function main() {
     const recovered = await prep.recoverStandaloneTask(request, { receiptFile, stateFile, clock: () => now }, {
       processProbe: () => 'stopped', recoveryAuthorization: { adapter: restarted, reference },
       resolveDispatch: options => (resolved = resolveDispatch(options)),
-      invokeSidecar: async delivery => { delivered++; handed = delivery.route; return envelope(request); },
+      invokeSidecar: async delivery => { delivered++; handed = delivery.route; assert(delivery.dispatchId.length <= 128); assert.notEqual(delivery.dispatchId, request.dispatchId); return envelope(request); },
     });
     assert.equal(recovered.route.worker_mode, 'sidecar', JSON.stringify(recovered));
     assert.equal(recovered.state_migration && recovered.state_migration.from, 1);

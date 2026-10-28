@@ -6,6 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { recoveryDispatchId } = require('./forge-recovery-dispatch-id');
 const xllm = require('./forge-xllm');
 const { createStderrAnnouncer } = require('./forge-sidecar-identity');
 const { evaluateDispatchGuard } = require('./forge-dispatch-guard');
@@ -2752,7 +2753,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
   const deliveryHelper = ordinaryResume && canonical.scope === 'milestone' && canonical.phase === 'execute'
     ? require('./forge-native-recovery-delivery') : null;
   const finalRequest = route => ({ ...executionRequest, route, recoveryStateFile: recovery.stateFile,
-    dispatchId: `${request.dispatchId}-recovery-${continuationId}`, resultFile: `${request.resultFile}.recovery-${continuationId}.json` });
+    dispatchId: recoveryDispatchId(request.dispatchId, continuationId), resultFile: `${request.resultFile}.recovery-${continuationId}.json` });
   const nativeOptions = route => {
     // Binding preflight uses the real task plan; the transport composes the
     // complete execution/security/context prompt after prepare.
@@ -2870,7 +2871,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       const ceiling = route.worker_mode === 'sidecar' ? ceilingFromRoute(route) : null;
       const next = deliveryHelper ? finalRequest(route) : { ...executionRequest, recoveryStateFile: recovery.stateFile, route: ceiling
         ? { ...route, workers_timeout: ceiling.seconds, workers_timeout_source: ceiling.source } : route,
-        dispatchId: `${request.dispatchId}-recovery-${crypto.randomUUID()}`, resultFile: `${request.resultFile}.recovery-${crypto.randomUUID()}.json`,
+        dispatchId: recoveryDispatchId(request.dispatchId), resultFile: `${request.resultFile}.recovery-${crypto.randomUUID()}.json`,
         ...(resume != null ? { claudeResume: resume.session, resumedFrom: resume.resumed_from } : {}) };
       if (route.worker_mode === 'native') {
         if (deliveryHelper) {
