@@ -787,7 +787,9 @@ function acceleratedClock(factor) {
     const real = performance.now();
     return anchor === null ? real : anchor + (real - anchor) * factor;
   };
-  return { clock, accelerate() { if (anchor === null) anchor = performance.now(); } };
+  return { clock, accelerate() { if (anchor === null) anchor = performance.now(); },
+    // Injected ms since the trigger (0 before it): drives scripted fake proofs.
+    since() { return anchor === null ? 0 : (performance.now() - anchor) * factor; } };
 }
 
 const REAL_BUDGET_MS = 5000;
@@ -982,14 +984,24 @@ const isToolStarted = message => message.method === 'item/started'
 
 // Programmable fake provider (pattern of forge-claude-sidecar.test.js): current()
 // returns the injected proof, sample()/stop() are counted, and the options the
-// client passed (pid, roots, ignore, onWrite) are kept for assertions.
-function fakeProof(initial) {
-  const state = { proof: initial, samples: 0, stops: 0, options: null };
+// client passed (pid, roots, ignore, onWrite) are kept for assertions. Each sample()
+// records options.clock() as its identity (sampled_at_ms); an optional script()
+// chooses the proof of that sample. `last` is the proof the latest current() returned.
+function fakeProof(initial, { script } = {}) {
+  const state = { proof: initial, samples: 0, stops: 0, options: null, sampledAt: null, last: null };
   state.factory = (options) => {
     state.options = options;
     return {
-      sample() { state.samples += 1; return Promise.resolve(); },
-      current() { return state.proof; },
+      sample() {
+        state.samples += 1;
+        if (typeof options.clock === 'function') state.sampledAt = options.clock();
+        if (script) state.proof = script();
+        return Promise.resolve();
+      },
+      current() {
+        state.last = state.proof;
+        return state.sampledAt === null ? state.proof : { ...state.proof, sampled_at_ms: state.sampledAt };
+      },
       stop() { state.stops += 1; },
     };
   };
@@ -1001,8 +1013,8 @@ function assertNoSentinel(label, value) {
 }
 
 // One open commandExecution on an accelerated clock (from the tool's item/started).
-async function runOpenTool(mock, dir, { label, factor, factory, timeoutMs, holdMs, pidFile }) {
-  const accelerated = acceleratedClock(factor);
+async function runOpenTool(mock, dir, { label, factor, factory, timeoutMs, holdMs, pidFile,
+  accelerated = acceleratedClock(factor), livenessPolicy, proofIntervalMs = 50, onProgress }) {
   const transitions = [];
   let spawnedPid = null;
   const env = { ...process.env, FORGE_APPSERVER_MOCK_MODE: 'tool-open' };
@@ -1014,8 +1026,9 @@ async function runOpenTool(mock, dir, { label, factor, factory, timeoutMs, holdM
   try {
     result = await startAppServerTurn({
       cmd: process.execPath, args: [mock], cwd: dir, timeoutMs, livenessIntervalMs: 10, interruptGraceMs: 1000,
-      env, clock: accelerated.clock, localProofFactory: factory, localProofIntervalMs: 50,
+      env, clock: accelerated.clock, localProofFactory: factory, localProofIntervalMs: proofIntervalMs,
       proofRoots: [dir], localProofIgnore: [path.join(dir, 'ignored')],
+      ...(livenessPolicy ? { livenessPolicy } : {}), ...(onProgress ? { onProgress } : {}),
       onSpawn: pid => { spawnedPid = pid; },
       onEvent: message => { if (isToolStarted(message)) accelerated.accelerate(); },
       onLiveness: transition => transitions.push(transition),
@@ -1029,7 +1042,7 @@ async function runOpenTool(mock, dir, { label, factor, factory, timeoutMs, holdM
     assertNoSentinel(`${label} error.diagnostic`, error.diagnostic);
     assert(!String(error.message).includes(TOOL_SENTINEL), `${label} error message leaked tool text`);
   }
-  return { result, error, transitions, spawnedPid };
+  return { result, error, transitions, spawnedPid, realMs };
 }
 
 function assertToolKill(error, reason, extension) {
@@ -1143,6 +1156,64 @@ async function testBrokenProviderIsUnavailable(mock, dir) {
     assert(suspect && suspect.reason === 'proof-unavailable', `${label}: ${JSON.stringify(run.transitions)}`);
     assert(!run.transitions.some(t => t.to === 'dead'), `${label}: unavailable survives 240000`);
   }
+}
+
+// #205: positive CPU measured inside the window, then idle samples of the same tool.
+// The earned extension is kept up to 660000 and reported with the real proof.
+const AVAILABLE_POSITIVE = Object.freeze({ capability: 'available', proof: 'positive' });
+const AVAILABLE_NONE = Object.freeze({ capability: 'available', proof: 'none' });
+
+async function testOpenToolEarnedExtension(mock, dir) {
+  const accelerated = acceleratedClock(400);
+  const fake = fakeProof(AVAILABLE_NONE,
+    { script: () => (accelerated.since() < 260000 ? AVAILABLE_POSITIVE : AVAILABLE_NONE) });
+  const snapshots = [];
+  const run = await runOpenTool(mock, dir, { label: 'tool-intermittent', accelerated, factory: fake.factory,
+    timeoutMs: 905000, proofIntervalMs: 20, onProgress: snapshot => { snapshots.push(snapshot); } });
+  const silence = assertToolKill(run.error, 'tool-extension-exhausted', 420000);
+  assert(silence.window_ms > 660000, `dies after 660000, window ${silence.window_ms}`);
+  assert.deepStrictEqual(run.error.liveness.proof, { capability: 'available', proof: 'none' });
+  assert.deepStrictEqual(fake.last, AVAILABLE_NONE, 'the last read before the kill was idle');
+  const extended = run.transitions.find(t => t.to === 'slow-suspect');
+  assert(extended && extended.reason === 'tool-extended' && extended.at_ms > 240000,
+    `slow-suspect/tool-extended past 240000 expected: ${JSON.stringify(run.transitions)}`);
+  const dead = run.transitions.filter(t => t.to === 'dead');
+  assert.strictEqual(dead.length, 1);
+  assert(dead[0].at_ms > 660000, `no death before 660000: ${JSON.stringify(run.transitions)}`);
+  assert(snapshots.length > 0, 'progress snapshots were published');
+  const published = JSON.stringify([snapshots, run.transitions, run.error.liveness, run.error.diagnostic]);
+  assert(!published.includes('suspension_epoch') && !published.includes('sampled_at_ms'), published);
+}
+
+// #205: the real backstop sees the same earned extension as the watchdog. Injected
+// time runs at half speed after item/started, so the injected 2000 ms ceiling is
+// never reached before the real 2000 ms backstop fires.
+async function testBackstopAgreesWithWatchdog(mock, dir) {
+  const livenessPolicy = { suspectMs: 50, deadMs: 100 };
+  const accelerated = acceleratedClock(0.5);
+  const fake = fakeProof(AVAILABLE_NONE,
+    { script: () => (accelerated.since() < 120 ? AVAILABLE_POSITIVE : AVAILABLE_NONE) });
+  const run = await runOpenTool(mock, dir, { label: 'tool-backstop', accelerated, factory: fake.factory,
+    timeoutMs: 2000, proofIntervalMs: 20, livenessPolicy });
+  assert(run.error, 'expected the real backstop');
+  assert.match(run.error.message, /^forge-appserver-client: budget exceeded while active after 2s$/,
+    `${run.error.message} ${JSON.stringify(run.error.liveness)}`);
+  assert.strictEqual(run.error.code, APPSERVER_LIVENESS_CODES.BUDGET_EXCEEDED);
+  assert.deepStrictEqual(run.error.liveness,
+    { version: 1, termination: 'budget-exceeded-while-active', state: 'slow-suspect', reason: 'tool-extended' });
+  assert.deepStrictEqual(fake.last, AVAILABLE_NONE, 'the last read before the backstop was idle');
+  assert(run.realMs >= 1900, `the real backstop ended the turn after ${run.realMs} ms`);
+  assert(!run.transitions.some(t => t.to === 'dead'), JSON.stringify(run.transitions));
+
+  // Control: no positive inside the window, the watchdog kills before the backstop.
+  const control = await runOpenTool(mock, dir, { label: 'tool-backstop-control', accelerated: acceleratedClock(0.5),
+    factory: fakeProof(AVAILABLE_NONE).factory, timeoutMs: 2000, proofIntervalMs: 20, livenessPolicy });
+  assert(control.error, 'expected the watchdog');
+  assert.match(control.error.message, /^forge-appserver-client: anomalous silence \(dead-silence\) after \d+(\.\d+)?s$/);
+  assert.strictEqual(control.error.code, APPSERVER_LIVENESS_CODES.SILENCE);
+  assert.strictEqual(control.error.liveness.reason, 'tool-unproven');
+  assert.deepStrictEqual(control.error.liveness.proof, { capability: 'available', proof: 'none' });
+  assert(control.realMs < 1900, `the watchdog won before the backstop: ${control.realMs} ms`);
 }
 
 // Five identical tool calls without a write: slow-suspect/no-progress, no kill, the
@@ -1421,6 +1492,8 @@ async function main() {
     await testOpenToolProofPositive(mock, dir);
     await testOpenToolProofNegative(mock, dir);
     await testBrokenProviderIsUnavailable(mock, dir);
+    await testOpenToolEarnedExtension(mock, dir);
+    await testBackstopAgreesWithWatchdog(mock, dir);
     await testToolLoopDetector(mock, dir);
     await testProgressOptionValidation();
     await testProgressHostContract(mock, dir);

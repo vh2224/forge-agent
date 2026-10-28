@@ -98,6 +98,9 @@ function classifyTermination({ cause, state, dimension } = {}) {
  * localProof accepts legacy available/proven booleans or capability/proof enums.
  * Positive and unavailable/none proofs permit a bounded tool extension; negative
  * and available/none proofs retain the ordinary dead-silence deadline.
+ * `extensionEarned: true` (derived only by createTracker) keeps an extension
+ * earned in the same suspended window for an available/none sample; the current
+ * proof is still reported unchanged and never as local-proof.
  * No-progress is advisory; it cannot cancel silence termination or the ceiling.
  */
 function evaluate(snapshot, inputs = {}, policy = DEFAULTS, ceilingMs = null) {
@@ -106,6 +109,7 @@ function evaluate(snapshot, inputs = {}, policy = DEFAULTS, ceilingMs = null) {
   const first = milliseconds(snapshot?.first_remote_ms);
   const silence = milliseconds(snapshot?.remote_silence_ms);
   const { capability, proof } = normalizeLocalProof(inputs?.localProof);
+  const earned = inputs?.extensionEarned === true && capability === 'available' && proof === 'none';
 
   const result = { state: 'working', kill: false, cause: null, termination: null,
     reason: null, window_ms: silence, threshold_ms: limits.suspectMs, dimension: 'gap', extension_ms: null };
@@ -114,7 +118,7 @@ function evaluate(snapshot, inputs = {}, policy = DEFAULTS, ceilingMs = null) {
     result.proof = proof;
   }
   const extendedMaximum = limits.deadMs + limits.toolExtensionMs;
-  const extended = proof === 'positive' || (capability === 'unavailable' && proof === 'none');
+  const extended = proof === 'positive' || (capability === 'unavailable' && proof === 'none') || earned;
   const toolMaximum = extended ? extendedMaximum : limits.deadMs;
   if (first === null) {
     result.state = 'starting';
@@ -134,7 +138,7 @@ function evaluate(snapshot, inputs = {}, policy = DEFAULTS, ceilingMs = null) {
       result.cause = 'liveness';
       result.termination = classifyTermination(result);
       result.threshold_ms = limits.deadMs;
-      result.reason = proof === 'positive' ? 'tool-extension-exhausted'
+      result.reason = proof === 'positive' || earned ? 'tool-extension-exhausted'
         : proof === 'negative' ? 'tool-proof-negative'
           : capability === 'available' ? 'tool-unproven' : 'tool-proof-unavailable-expired';
       result.extension_ms = extended ? limits.toolExtensionMs : null;
@@ -143,6 +147,9 @@ function evaluate(snapshot, inputs = {}, policy = DEFAULTS, ceilingMs = null) {
       if (proof === 'positive') {
         result.state = silence > limits.deadMs ? 'slow-suspect' : 'working';
         result.reason = silence > limits.deadMs ? 'tool-extended' : 'local-proof';
+      } else if (earned && silence > limits.deadMs) {
+        // The earned extension is in use; the idle sample is no fresh proof.
+        result.reason = 'tool-extended';
       } else {
         result.reason = proof === 'negative' ? 'tool-proof-negative'
           : capability === 'available' ? 'tool-unproven' : 'proof-unavailable';
@@ -184,14 +191,58 @@ function evaluate(snapshot, inputs = {}, policy = DEFAULTS, ceilingMs = null) {
   return result;
 }
 
-/** Minimal stateful wrapper; tracker.evaluate receives every time via snapshot. */
+/**
+ * Earned-extension episode for the next tick, or null outside a valid suspended
+ * window. The episode is the reducer's suspension_epoch plus the window anchor
+ * (last_remote_ms, fractional ms allowed); a change of either restarts it. The
+ * first tick only records the sample identity (sampled_at_ms) as a baseline:
+ * the first new sample still measures across the window opening, so only a
+ * positive from the second new sample on earns. A negative revokes until the
+ * episode ends. Pure: it never mutates the episode it receives.
+ */
+function deriveEpisode(episode, snapshot, inputs) {
+  const epoch = snapshot?.suspension_epoch;
+  const anchor = snapshot?.last_remote_ms;
+  if (snapshot?.gap_suspended !== true || !Number.isSafeInteger(epoch) || epoch < 0
+      || !Number.isFinite(anchor) || anchor < 0) return null;
+  const { capability, proof } = normalizeLocalProof(inputs?.localProof);
+  const sampled = inputs?.localProof?.sampled_at_ms;
+  const identity = Number.isFinite(sampled) ? sampled : null;
+  let next;
+  if (episode === null || episode.epoch !== epoch || episode.anchor !== anchor) {
+    next = { epoch, anchor, identity, fresh: 0, earned: false, revoked: false };
+  } else {
+    const fresh = identity !== null && identity !== episode.identity;
+    next = { ...episode, identity: fresh ? identity : episode.identity,
+      fresh: fresh ? Math.min(episode.fresh + 1, 2) : episode.fresh };
+  }
+  if (proof === 'negative') {
+    next.revoked = true;
+    next.earned = false;
+  } else if (!next.revoked && identity !== null && next.fresh >= 2
+      && capability === 'available' && proof === 'positive') {
+    next.earned = true;
+  }
+  return next;
+}
+
+/**
+ * Per-spawn state owner: transitions plus the earned tool extension. Both the
+ * watchdog (evaluate) and the backstop (assess) use the same derivation; a
+ * caller-provided extensionEarned is always replaced by it.
+ */
 function createTracker(policy = DEFAULTS, ceilingMs = null) {
   const limits = normalizePolicy(policy);
   let previous = null;
   let previousLoop = false;
+  let episode = null;
+  const decide = (next, snapshot, inputs, ceiling) =>
+    evaluate(snapshot, { ...inputs, extensionEarned: next?.earned === true }, limits, ceiling);
   return {
     evaluate(snapshot, inputs = {}) {
-      const result = evaluate(snapshot, inputs, limits, ceilingMs);
+      const next = deriveEpisode(episode, snapshot, inputs);
+      const result = decide(next, snapshot, inputs, ceilingMs);
+      episode = next;
       // The no-progress episode is tracked independently of the state: it can
       // begin or end while the state stays slow-suspect.
       const loop = result.reason === 'no-progress';
@@ -200,6 +251,11 @@ function createTracker(policy = DEFAULTS, ceilingMs = null) {
       previous = result.state;
       previousLoop = loop;
       return { result, transition };
+    },
+    // Classification without the ceiling and without committing anything: the
+    // real-time backstop sees the same earned extension as the watchdog.
+    assess(snapshot, inputs = {}) {
+      return decide(deriveEpisode(episode, snapshot, inputs), snapshot, inputs, null);
     },
   };
 }

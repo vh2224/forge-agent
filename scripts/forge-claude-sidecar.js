@@ -328,11 +328,14 @@ function localProofIgnorePrefixes(value) {
     : [];
 }
 
-/** Only {capability, proof}; an invalid provider answer reads as unavailable
- * instead of throwing inside the watchdog tick. */
+/** Only {capability, proof}, plus the opaque sample identity the tracker needs;
+ * an invalid provider answer reads as unavailable instead of throwing inside the
+ * watchdog tick. */
 function currentLocalProof(provider) {
   try {
-    return liveness.normalizeLocalProof(provider.current());
+    const current = provider.current();
+    const normalized = liveness.normalizeLocalProof(current);
+    return Number.isFinite(current?.sampled_at_ms) ? { ...normalized, sampled_at_ms: current.sampled_at_ms } : normalized;
   } catch {
     return { ...UNAVAILABLE_LOCAL_PROOF };
   }
@@ -682,7 +685,9 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
       const current = currentLocalProof(proof);
       let state;
       try { state = progress.state(); } catch { state = undefined; }
-      return { localProof: { capability: current.capability, proof: current.proof }, progress: state };
+      // sampled_at_ms only reaches the tracker; decisions never carry it.
+      return { localProof: { capability: current.capability, proof: current.proof,
+        ...(current.sampled_at_ms === undefined ? {} : { sampled_at_ms: current.sampled_at_ms }) }, progress: state };
     }
     const snapshot = () => {
       const current = reducer.snapshot();
@@ -757,11 +762,11 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
     process.once('SIGTERM', cancel);
     function ceilingError(decision) {
       // The watchdog passes the decision that already won; the backstop path
-      // classifies with the state that held without the ceiling, using the same
-      // current proof/progress, so a tool whose proof allows its extension is
-      // active, not dead, when the ceiling arrives.
+      // classifies with the state that held without the ceiling through the same
+      // tracker derivation (current proof/progress and earned extension), so a
+      // tool whose extension holds is active, not dead, when the ceiling arrives.
       const { state, reason, termination } = decision
-        || liveness.evaluate(reducer.snapshot(), livenessInputs(), policy, null);
+        || tracker.assess(reducer.snapshot(), livenessInputs());
       const kind = decision ? termination : liveness.classifyTermination({ cause: 'ceiling', state });
       // A live stream at the ceiling is not a timeout of the destination: it has
       // its own reason code (S03 decision 8). A ceiling reached while still

@@ -430,3 +430,73 @@ console.log('PASS Claude stream session_id: validated system/init capture, first
   }
 }
 console.log('PASS Claude argument liveness: long owned deltas, silence, execution/results, ignored frames, privacy and tier ceilings');
+
+// #205: suspension_epoch counts suspended windows; the anchor alone cannot.
+{
+  let time = 0;
+  const stream = createReducer({ clock: () => time });
+  assert.equal(stream.snapshot().suspension_epoch, 0);
+  stream.push(frame(start('epoch-parallel')));
+  time = 10;
+  stream.push(toolStart('epoch-a', 0)); stream.push(toolStart('epoch-b', 1));
+  stream.push(event({ type: 'content_block_stop', index: 0 }));
+  assert.equal(stream.snapshot().suspension_epoch, 1);
+  time = 20;
+  stream.push(event({ type: 'content_block_stop', index: 1 }));
+  assert.equal(stream.snapshot().suspension_epoch, 1, 'parallel tools share the window');
+  assert.equal(stream.snapshot().last_remote_ms, 10);
+  time = 500;
+  stream.push(toolResult('epoch-a'));
+  assert.equal(stream.snapshot().gap_suspended, true);
+  assert.equal(stream.snapshot().suspension_epoch, 1, 'a partial tool_result keeps the window');
+  assert.equal(stream.snapshot().last_remote_ms, 10);
+  time = 900;
+  stream.push(toolResult('epoch-b'));
+  const closed = stream.snapshot();
+  assert.equal(closed.gap_suspended, false);
+  assert.equal(closed.suspension_epoch, 1);
+  stream.push(assistantTool('epoch-c'));
+  const reopened = stream.snapshot();
+  assert.equal(reopened.gap_suspended, true);
+  assert.equal(reopened.last_remote_ms, closed.last_remote_ms, 'same-ms close and reopen repeats the anchor');
+  assert.equal(reopened.suspension_epoch, 2, 'but not the epoch');
+  stream.push(assistantTool('epoch-c'));
+  assert.equal(stream.snapshot().suspension_epoch, 2, 'a duplicate call never opens another window');
+  stream.push(frame(terminal)); stream.end(); stream.dispose();
+  assert.equal(stream.snapshot().suspension_epoch, 2, 'dispose keeps the final value');
+}
+console.log('PASS Claude suspension epoch: parallel tools, partial results, same-ms anchor collision and dispose');
+
+// #205: real reducer + tracker. Parallel tools share the earned extension; the next
+// window inherits nothing, even with the same anchor in the same ms.
+{
+  const { createTracker } = require('./forge-sidecar-liveness');
+  let time = 0;
+  const stream = createReducer({ clock: () => time });
+  const tracker = createTracker();
+  const tick = (proof, sampled_at_ms) => tracker.evaluate(stream.snapshot(),
+    { localProof: { capability: 'available', proof, sampled_at_ms } }).result;
+  stream.push(frame(start('earned-parallel')));
+  time = 10;
+  stream.push(toolStart('earned-a', 0)); stream.push(toolStart('earned-b', 1));
+  stream.push(event({ type: 'content_block_stop', index: 0 }));
+  stream.push(event({ type: 'content_block_stop', index: 1 }));
+  tick('positive', 1);
+  time = 1010; tick('positive', 2);
+  time = 2010; tick('positive', 3);
+  time = 100000; stream.push(toolResult('earned-a'));
+  time = 300010;
+  const kept = tick('none', 4);
+  assert.equal(kept.kill, false);
+  assert.equal(kept.reason, 'tool-extended', 'both parallel tools share the earned window');
+  stream.push(toolResult('earned-b'));
+  stream.push(assistantTool('earned-c'));
+  const next = stream.snapshot();
+  assert.equal(next.last_remote_ms, 300010);
+  assert.equal(next.suspension_epoch, 2);
+  time = 300010 + 240001;
+  const result = tick('none', 5);
+  assert.equal(result.kill, true);
+  assert.equal(result.reason, 'tool-unproven', 'the next window must earn again');
+}
+console.log('PASS Claude earned extension: shared by parallel tools, never inherited by the next window');

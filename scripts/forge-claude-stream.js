@@ -84,6 +84,9 @@ function createReducer(options = {}) {
   const blocks = new Map(), seenMessages = new Set();
   const seenTools = new Set(), reportedTools = new Set(), toolsInFlight = new Set();
   let reconstruction = 0, suspended = false, toolMessage = false;
+  // Suspended-window counter, not a timestamp: last_remote_ms moves inside a
+  // window and can repeat across windows closed and reopened in the same ms.
+  let epoch = 0;
   let first = null, last = null, maxGap = null, remote = 0, events = 0, stdout = 0, stderr = 0;
   const usage = { input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_write_tokens: null, cost_usd: null };
   let denials = { read: null, write: null, shell: null, other: null };
@@ -147,7 +150,7 @@ function createReducer(options = {}) {
     if (toolsInFlight.has(id)) {
       // A closed invocation starts execution, not the opening argument block.
       // Parallel/duplicate calls must not extend an already running tool clock.
-      if (!suspended) last = elapsed();
+      if (!suspended) { last = elapsed(); epoch++; }
       suspended = true;
     }
     return true;
@@ -351,7 +354,7 @@ function createReducer(options = {}) {
         event_count: events, remote_event_count: remote, first_remote_ms: first, last_remote_ms: last,
         initial_sample_ms: first, gap_sample_ms: remote >= 2 ? maxGap : null,
         remote_silence_ms: last === null ? null : time - last, gap_suspended: suspended, tools_in_flight: toolsInFlight.size,
-        ...usage, denials: { ...denials }, process_exit_observed: false };
+        suspension_epoch: epoch, ...usage, denials: { ...denials }, process_exit_observed: false };
     },
   };
 }

@@ -58,6 +58,9 @@ function createNotificationReducer(options = {}) {
   let remote = 0;
   let first = null;
   let last = null;
+  // Suspended-window counter, not a timestamp: last_remote_ms moves on every remote
+  // notification inside a window and can repeat across windows in the same ms.
+  let epoch = 0;
 
   // Bounded insertion: the oldest entry is evicted so the set never grows past `limit`.
   const bound = (collection, add) => {
@@ -75,6 +78,8 @@ function createNotificationReducer(options = {}) {
     if (!isObject(item) || typeof item.id !== 'string' || !item.id) return;
     if (method === 'item/completed') { open.delete(item.id); return; }
     if (method !== 'item/started' || !TOOL_ITEM_TYPES.includes(item.type)) return;
+    // Only an empty map opens a window; eviction happens at the limit, never at 0.
+    if (open.size === 0) epoch++;
     bound(open, () => open.set(item.id, item.type));
     if (reported.has(item.id)) return;
     bound(reported, () => reported.add(item.id));
@@ -106,7 +111,8 @@ function createNotificationReducer(options = {}) {
       const time = elapsed();
       return { version: 1, phase: terminal ? 'terminal' : remote ? 'remote-activity' : 'local-start', elapsed_ms: time,
         event_count: events, remote_event_count: remote, first_remote_ms: first, last_remote_ms: last,
-        remote_silence_ms: last === null ? null : time - last, gap_suspended: open.size > 0, tools_in_flight: open.size };
+        remote_silence_ms: last === null ? null : time - last, gap_suspended: open.size > 0, tools_in_flight: open.size,
+        suspension_epoch: epoch };
     },
   };
 }

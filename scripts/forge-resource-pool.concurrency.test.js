@@ -20,8 +20,8 @@
 // Known trap (documented in forge-resource-pool.js and re-stated here):
 // forge-unit-lease.js's `nowOf(options)` only honors `options.now` when it is
 // itself a FUNCTION — a raw number is silently discarded in favor of
-// Date.now(). Every direct lease call below either omits `now` (real wall
-// clock, deliberate for the kill case) or passes a closure, never a number.
+// Date.now(). The holder uses real time; the kill case's parent checks the
+// recorded expiry boundaries with closures, independently of OS scheduling.
 
 const fs = require('fs');
 const os = require('os');
@@ -282,25 +282,30 @@ test('kill -9: slot retained before ttl+grace, reaped with stale-lease-reaped af
     process.kill(holder.pid, 'SIGKILL');
     await holderExited;
 
-    // Immediately after the kill (well before ttlMs+graceMs = 400ms real),
-    // the slot must be RETAINED — a direct lease.acquire contending for the
-    // SAME slot key must be refused, proving the lease is still active.
-    const contended = lease.acquire(dir, 'resource-pool/slot-0', { ownerToken: 'intruder' });
-    if (contended.ok) throw new Error('slot must be retained immediately after SIGKILL, before ttl+grace elapses');
-    if (contended.reason !== 'lease-active' && contended.reason !== 'expired-awaiting-grace') {
-      throw new Error(`expected retained reason lease-active|expired-awaiting-grace, got ${contended.reason}`);
-    }
-
-    // Poll (bounded, named deadline) until real wall time has passed ttl+grace.
-    const killedAt = Date.now();
-    await pollUntil(() => (Date.now() - killedAt) > (ttlMs + graceMs + 200), {
-      intervalMs: 25, deadlineMs: 5000, label: 'real wall time to pass ttl+grace',
+    // Process startup/exit can exceed the 400ms lease window on a busy host.
+    // Keep the real child crash, but inspect its lease at explicit boundaries.
+    const expiresAt = acquireResult.lease && acquireResult.lease.expires_at;
+    if (!Number.isSafeInteger(expiresAt)) throw new Error('holder must publish its lease expiry');
+    const contended = lease.acquire(dir, 'resource-pool/slot-0', {
+      ownerToken: 'intruder', now: () => expiresAt - 1,
     });
+    if (contended.ok) throw new Error('slot must be retained before lease expiry after SIGKILL');
+    if (contended.reason !== 'lease-active') {
+      throw new Error(`expected retained reason lease-active, got ${contended.reason}`);
+    }
+    const atGrace = lease.acquire(dir, 'resource-pool/slot-0', {
+      ownerToken: 'intruder', now: () => expiresAt + graceMs,
+    });
+    if (atGrace.ok || atGrace.reason !== 'expired-awaiting-grace') {
+      throw new Error('slot must remain retained at the exact grace boundary');
+    }
 
     // The next acquisition (via the POOL, not the raw lease module) is what
     // opportunistically reaps stale holders (forge-resource-pool.js
     // acquireSlots -> reapStale). This is the ROADMAP demo path.
-    const reaped = pool.acquireSlots(1, { poolDir: dir, cwd: projectDir, ownerToken: 'reaper' });
+    const reaped = pool.acquireSlots(1, {
+      poolDir: dir, cwd: projectDir, ownerToken: 'reaper', now: () => expiresAt + graceMs + 1,
+    });
     if (!reaped.ok) throw new Error('re-acquisition after ttl+grace must succeed (ok:true)');
     if (reaped.granted !== 1) throw new Error(`expected the freed slot to be granted (1), got ${reaped.granted}`);
     if (reaped.reason !== pool.POOL_REASON_CODES.POOL_GRANTED) {

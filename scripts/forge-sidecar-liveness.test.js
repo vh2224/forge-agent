@@ -1,10 +1,11 @@
 'use strict';
 
 const assert = require('assert/strict');
-const { POLICY, SOURCE_DEFAULT, SOURCE_CALIBRATED, DEFAULTS, TIER_CEILING_MS, STATES, TERMINATIONS, REASONS,
+const { POLICY, SOURCE_DEFAULT, SOURCE_CALIBRATED, DEFAULTS, CALIBRATION_FLOORS, TIER_CEILING_MS, STATES, TERMINATIONS, REASONS,
   LOOP_REPEATS, PROOF_CAPABILITIES, PROOF_VALUES, normalizeLocalProof, createProgressTracker,
   evaluate, classifyTermination, ceilingForTier, normalizePolicy, createTracker } = require('./forge-sidecar-liveness');
 const { observation } = require('./forge-sidecar-diagnostic');
+const { createLocalProof } = require('./forge-sidecar-local-proof');
 
 const tests = [];
 const test = (name, run) => tests.push({ name, run });
@@ -512,10 +513,399 @@ test('REASONS is the closed vocabulary and covers every reason evaluate() produc
   assert.deepEqual([...seen].sort(), [...REASONS].sort());
 });
 
-function main() {
+// #205: the proof-probe timeline ported to createTracker over the real provider
+// with injected readers and a fake clock (no I/O, no provider call). The tool keeps
+// burning CPU until the 250000 sample and is idle (pid alive) at 265000.
+const PROBE_SAMPLES = [0, ...Array.from({ length: 18 }, (_, k) => 10000 + 15000 * k)];
+const probeSnapshot = time => ({ elapsed_ms: time + 10, first_remote_ms: 10, last_remote_ms: 10,
+  remote_silence_ms: time, gap_suspended: true, suspension_epoch: 1 });
+
+async function probeTimeline(platform, extraSamples = []) {
+  let now = 0, cpu = 0;
+  const p = createLocalProof({ pid: 4242, platform, clock: () => now, readers: {
+    pidAlive: async () => true,
+    cpuTreeMs: async () => cpu,
+  } });
+  const tracker = createTracker();
+  const ticks = new Map();
+  for (const time of [...PROBE_SAMPLES, ...extraSamples]) {
+    now = time;
+    if (time > 0 && time <= 250000) cpu += 1000;
+    await p.sample();
+    ticks.set(time, { proof: p.current(), ...tracker.evaluate(probeSnapshot(time), { localProof: p.current() }) });
+  }
+  return { ticks, tracker, proof: p };
+}
+
+test('MH-01 probe timeline: an earned extension survives the idle 265000 sample on linux and darwin', async () => {
+  assert.deepEqual(PROBE_SAMPLES.slice(-2), [250000, 265000]);
+  for (const platform of ['linux', 'darwin']) {
+    const { ticks } = await probeTimeline(platform);
+    assert.equal(ticks.get(250000).proof.proof, 'positive', platform);
+    assert.equal(ticks.get(265000).proof.proof, 'none', `${platform}: the idle sample is reported as none`);
+    assert.equal(ticks.get(250000).result.kill, false);
+    assert.equal(ticks.get(250000).result.reason, 'tool-extended');
+    const idle = ticks.get(265000).result;
+    assert.equal(idle.kill, false, `${platform}: idle@265000 ${idle.state}/${idle.reason}`);
+    assert.equal(idle.state, 'slow-suspect');
+    assert.equal(idle.reason, 'tool-extended');
+    assert.equal(idle.proof_capability, 'available');
+    assert.equal(idle.proof, 'none');
+  }
+});
+
+const NONE = Object.freeze({ capability: 'available', proof: 'none' });
+const POSITIVE = Object.freeze({ capability: 'available', proof: 'positive' });
+const NEGATIVE = Object.freeze({ capability: 'available', proof: 'negative' });
+const sampled = (proof, sampled_at_ms) => ({ ...proof, sampled_at_ms });
+const windowAt = (silence, extra = {}) => active(silence, { gap_suspended: true, last_remote_ms: 10,
+  suspension_epoch: 1, ...extra });
+// Baseline, first new sample (its delta crosses the opening) and the second new
+// sample, the first one measured inside the window: only that one earns.
+function earn(tracker, extra = {}) {
+  tracker.evaluate(windowAt(0, extra), { localProof: sampled(POSITIVE, 1) });
+  tracker.evaluate(windowAt(1000, extra), { localProof: sampled(POSITIVE, 2) });
+  return tracker.evaluate(windowAt(2000, extra), { localProof: sampled(POSITIVE, 3) });
+}
+const verdict = ({ state, kill, reason }) => ({ state, kill, reason });
+const EXTENDED = { state: 'slow-suspect', kill: false, reason: 'tool-extended' };
+const UNPROVEN_DEAD = { state: 'dead', kill: true, reason: 'tool-unproven' };
+
+test('MH-02 pure evaluate keeps its contract unless extensionEarned is exactly true', () => {
+  assert.deepEqual(CALIBRATION_FLOORS, { startMs: 30000, deadMs: 120000 });
+  assert(Object.isFrozen(CALIBRATION_FLOORS));
+  // Literal proof-probe verdicts through the pure function.
+  const positive = evaluate(probeSnapshot(250000), { localProof: POSITIVE });
+  assert.deepEqual(verdict(positive), EXTENDED);
+  assert.deepEqual(verdict(evaluate(probeSnapshot(265000), { localProof: NONE })), UNPROVEN_DEAD);
+  assert.equal(evaluate(probeSnapshot(660001), { localProof: POSITIVE }).reason, 'tool-extension-exhausted');
+  // Same grid as the REASONS sweep, plus the exact tool boundaries.
+  const proofs = [undefined];
+  for (const capability of PROOF_CAPABILITIES) for (const proof of PROOF_VALUES) proofs.push({ capability, proof });
+  const snapshots = [];
+  for (const elapsed of [0, 59999, 60001, 500000]) {
+    snapshots.push({ elapsed_ms: elapsed, first_remote_ms: null, remote_silence_ms: null, gap_suspended: false });
+    snapshots.push({ elapsed_ms: elapsed, first_remote_ms: null, remote_silence_ms: null, gap_suspended: true });
+  }
+  for (const silence of [0, 100000, 120000, 120001, 121000, 130000, 240000, 240001, 241000, 250000,
+    660000, 660001, 700000]) {
+    for (const suspended of [false, true]) snapshots.push(active(silence, { gap_suspended: suspended }));
+  }
+  let changed = 0;
+  for (const snapshot of snapshots) {
+    for (const localProof of proofs) {
+      for (const no_progress of [false, true]) {
+        for (const ceiling of [null, 1000000]) {
+          const inputs = { localProof, progress: { no_progress } };
+          const plain = evaluate(snapshot, inputs, DEFAULTS, ceiling);
+          for (const extensionEarned of [undefined, false, 'true', 1, {}, null]) {
+            assert.deepEqual(evaluate(snapshot, { ...inputs, extensionEarned }, DEFAULTS, ceiling), plain);
+          }
+          const earned = evaluate(snapshot, { ...inputs, extensionEarned: true }, DEFAULTS, ceiling);
+          if (earned.reason !== null) assert(REASONS.includes(earned.reason), earned.reason);
+          assert(STATES.includes(earned.state));
+          const idle = localProof?.capability === 'available' && localProof.proof === 'none';
+          if (idle) assert.notEqual(earned.reason, 'local-proof', 'a conserved extension is never fresh local proof');
+          const applies = snapshot.gap_suspended === true && snapshot.first_remote_ms !== null
+            && idle && snapshot.remote_silence_ms > DEFAULTS.deadMs;
+          if (!applies) { assert.deepEqual(earned, plain); continue; }
+          if (JSON.stringify(earned) !== JSON.stringify(plain)) changed++;
+          if (no_progress || ceiling !== null) continue;
+          const silence = snapshot.remote_silence_ms;
+          assert.deepEqual(earned, silence > 660000 ? {
+            state: 'dead', kill: true, cause: 'liveness', termination: 'dead-silence',
+            reason: 'tool-extension-exhausted', window_ms: silence, threshold_ms: 240000, dimension: 'gap',
+            extension_ms: 420000, proof_capability: 'available', proof: 'none',
+          } : {
+            state: 'slow-suspect', kill: false, cause: null, termination: null, reason: 'tool-extended',
+            window_ms: silence, threshold_ms: 120000, dimension: 'gap', extension_ms: null,
+            proof_capability: 'available', proof: 'none',
+          });
+        }
+      }
+    }
+  }
+  assert(changed > 0, 'the differential sweep exercised the earned branch');
+  for (const silence of [120001, 240000]) {
+    assert.deepEqual(verdict(evaluate(windowAt(silence), { localProof: NONE, extensionEarned: true })),
+      { state: 'slow-suspect', kill: false, reason: 'tool-unproven' });
+  }
+  for (const localProof of [NEGATIVE, undefined, { capability: 'unavailable', proof: 'none' }, POSITIVE]) {
+    for (const silence of [240001, 660001]) {
+      assert.deepEqual(evaluate(windowAt(silence), { localProof, extensionEarned: true }),
+        evaluate(windowAt(silence), { localProof }));
+    }
+  }
+});
+
+test('MH-03 the tracker derives the extension itself and assess commits nothing', () => {
+  // A caller flag is replaced by the derivation: nothing was earned here.
+  const forged = createTracker();
+  forged.evaluate(windowAt(0), { localProof: sampled(NONE, 1), extensionEarned: true });
+  assert.deepEqual(verdict(forged.assess(windowAt(240001), { localProof: sampled(NONE, 2), extensionEarned: true })),
+    UNPROVEN_DEAD);
+  assert.deepEqual(verdict(forged.evaluate(windowAt(240001),
+    { localProof: sampled(NONE, 2), extensionEarned: true }).result), UNPROVEN_DEAD);
+  const earned = createTracker();
+  earn(earned, {}, 0);
+  assert.deepEqual(verdict(earned.evaluate(windowAt(240001),
+    { localProof: sampled(NONE, 4), extensionEarned: false }).result), EXTENDED);
+
+  // assess interleaved with tempting inputs never changes evaluate's results or transitions.
+  const ticks = [];
+  for (let silence = 0, id = 1; silence <= 240001; silence += silence === 240000 ? 1 : 20000, id++) {
+    ticks.push([windowAt(silence), { localProof: sampled(NONE, id) }]);
+  }
+  const plain = createTracker(DEFAULTS, 900000);
+  const probed = createTracker(DEFAULTS, 900000);
+  for (const [index, [snapshot, inputs]] of ticks.entries()) {
+    for (let k = 0; k < 3; k++) probed.assess(snapshot, { localProof: sampled(POSITIVE, 1000 + index * 3 + k) });
+    probed.assess(windowAt(1, { suspension_epoch: 9 }), { localProof: sampled(POSITIVE, 5000 + index) });
+    assert.deepEqual(probed.evaluate(snapshot, inputs), plain.evaluate(snapshot, inputs), `tick ${index}`);
+  }
+  assert.deepEqual(verdict(plain.evaluate(windowAt(240002), { localProof: sampled(NONE, 999) }).result),
+    UNPROVEN_DEAD);
+
+  // assess applies the same derivation, including the current snapshot, with no ceiling.
+  const tracker = createTracker(DEFAULTS, 100);
+  earn(tracker);
+  const inputs = { localProof: sampled(NONE, 4) };
+  assert.deepEqual(tracker.assess(windowAt(300000), inputs),
+    evaluate(windowAt(300000), { ...inputs, extensionEarned: true }, DEFAULTS, null));
+  assert.notEqual(tracker.assess(windowAt(300000), inputs).cause, 'ceiling');
+  assert.deepEqual(verdict(tracker.assess(windowAt(300000, { suspension_epoch: 2 }), inputs)), UNPROVEN_DEAD);
+  assert.deepEqual(verdict(tracker.assess(windowAt(300000), { localProof: sampled(NEGATIVE, 5) })),
+    { state: 'dead', kill: true, reason: 'tool-proof-negative' });
+  // Neither assessment committed its reset nor its revocation.
+  const after = createTracker();
+  earn(after);
+  after.assess(windowAt(300000, { suspension_epoch: 2 }), inputs);
+  after.assess(windowAt(300000), { localProof: sampled(NEGATIVE, 5) });
+  after.assess(active(300000), inputs);
+  assert.deepEqual(verdict(after.evaluate(windowAt(300000), inputs).result), EXTENDED);
+});
+
+test('MH-04 an intermittent tool keeps its earned extension up to exactly 660000', async () => {
+  for (const platform of ['linux', 'darwin']) {
+    const { ticks } = await probeTimeline(platform, [280000, 400000, 520000, 660000, 660001]);
+    for (const time of [265000, 280000, 400000, 520000, 660000]) {
+      assert.deepEqual(verdict(ticks.get(time).result), EXTENDED, `${platform} ${time}`);
+      assert.equal(ticks.get(time).proof.proof, 'none');
+    }
+    assert.deepEqual(ticks.get(660001).result, {
+      state: 'dead', kill: true, cause: 'liveness', termination: 'dead-silence',
+      reason: 'tool-extension-exhausted', window_ms: 660001, threshold_ms: 240000, dimension: 'gap',
+      extension_ms: 420000, proof_capability: 'available', proof: 'none',
+    });
+    assert.deepEqual(ticks.get(660001).transition,
+      { from: 'slow-suspect', to: 'dead', at_ms: 660011, reason: 'tool-extension-exhausted' });
+  }
+  // Positives after the conquest never move the limit: it stays anchored.
+  const tracker = createTracker();
+  earn(tracker);
+  let id = 10;
+  for (const [silence, proof] of [[250000, NONE], [500000, POSITIVE], [600000, POSITIVE], [650000, NONE],
+    [660000, NONE]]) {
+    assert.equal(tracker.evaluate(windowAt(silence), { localProof: sampled(proof, id++) }).result.kill, false);
+  }
+  const last = tracker.evaluate(windowAt(660001), { localProof: sampled(NONE, id++) }).result;
+  assert.equal(last.reason, 'tool-extension-exhausted');
+  assert.equal(last.extension_ms, 420000);
+});
+
+test('MH-05 never-positive tools and the window opening keep the ordinary 240000 cutoff', () => {
+  // (a) only fresh available/none samples: identical to the pure function on every tick.
+  const tracker = createTracker();
+  let id = 1;
+  for (const silence of [0, 15000, 120000, 120001, 200000, 240000, 240001]) {
+    const inputs = { localProof: sampled(NONE, id++) };
+    assert.deepEqual(tracker.evaluate(windowAt(silence), inputs).result, evaluate(windowAt(silence), inputs));
+  }
+  assert.deepEqual(verdict(evaluate(windowAt(240000), { localProof: NONE })),
+    { state: 'slow-suspect', kill: false, reason: 'tool-unproven' });
+  // (b) a cached positive from before the window (baseline) and a positive first new
+  // sample whose CPU delta crosses the opening are the model streaming, not the tool.
+  const crossing = createTracker();
+  crossing.evaluate(windowAt(0), { localProof: sampled(POSITIVE, 1) });
+  crossing.evaluate(windowAt(5000), { localProof: sampled(POSITIVE, 2) });
+  crossing.evaluate(windowAt(20000), { localProof: sampled(NONE, 3) });
+  assert.deepEqual(verdict(crossing.evaluate(windowAt(240000), { localProof: sampled(NONE, 4) }).result),
+    { state: 'slow-suspect', kill: false, reason: 'tool-unproven' });
+  assert.deepEqual(verdict(crossing.evaluate(windowAt(240001), { localProof: sampled(NONE, 5) }).result),
+    UNPROVEN_DEAD);
+  // (c) Accepted: a positive sample (id 3) that is born and replaced between two
+  // ticks is never observed, so it cannot earn; the tool dies at 240001.
+  const missed = createTracker();
+  for (const [silence, id] of [[0, 1], [15000, 2], [45000, 4], [240001, 5]]) {
+    const { result } = missed.evaluate(windowAt(silence), { localProof: sampled(NONE, id) });
+    if (silence === 240001) assert.deepEqual(verdict(result), UNPROVEN_DEAD);
+  }
+  // (d) absent, non-finite or repeated (frozen clock) identities never earn.
+  for (const identity of [undefined, null, NaN, Infinity, -Infinity, '5', {}, 'repeat']) {
+    const frozen = createTracker();
+    for (const silence of [0, 1000, 2000, 3000, 4000]) {
+      const localProof = identity === 'repeat' ? sampled(POSITIVE, 7)
+        : identity === undefined ? { ...POSITIVE } : sampled(POSITIVE, identity);
+      frozen.evaluate(windowAt(silence), { localProof });
+    }
+    const localProof = identity === 'repeat' ? sampled(NONE, 7) : sampled(NONE, 8);
+    assert.deepEqual(verdict(frozen.evaluate(windowAt(240001), { localProof }).result), UNPROVEN_DEAD,
+      String(identity));
+  }
+});
+
+test('MH-06 a negative proof wins without killing before the ordinary deadline', () => {
+  const early = createTracker();
+  earn(early);
+  assert.deepEqual(verdict(early.evaluate(windowAt(200000), { localProof: sampled(NEGATIVE, 4) }).result),
+    { state: 'slow-suspect', kill: false, reason: 'tool-proof-negative' });
+  assert.equal(early.evaluate(windowAt(240000), { localProof: sampled(NEGATIVE, 4) }).result.kill, false);
+  const killed = early.evaluate(windowAt(240001), { localProof: sampled(NEGATIVE, 4) }).result;
+  assert.deepEqual(verdict(killed), { state: 'dead', kill: true, reason: 'tool-proof-negative' });
+  assert.equal(killed.extension_ms, null);
+  assert.equal(killed.threshold_ms, 240000);
+
+  const late = createTracker();
+  earn(late);
+  assert.deepEqual(verdict(late.evaluate(windowAt(299999), { localProof: sampled(NONE, 4) }).result), EXTENDED);
+  const dead = late.evaluate(windowAt(300000), { localProof: sampled(NEGATIVE, 5) }).result;
+  assert.deepEqual(verdict(dead), { state: 'dead', kill: true, reason: 'tool-proof-negative' });
+  assert.equal(dead.extension_ms, null);
+
+  // The revocation lasts until the episode ends: a later none conserves nothing.
+  const revoked = createTracker();
+  earn(revoked);
+  revoked.evaluate(windowAt(100000), { localProof: sampled(NEGATIVE, 4) });
+  revoked.evaluate(windowAt(110000), { localProof: sampled(POSITIVE, 5) });
+  revoked.evaluate(windowAt(120000), { localProof: sampled(POSITIVE, 6) });
+  assert.deepEqual(verdict(revoked.evaluate(windowAt(240001), { localProof: sampled(NONE, 7) }).result),
+    UNPROVEN_DEAD);
+});
+
+test('MH-07 the earned state resets with the window, epoch, anchor and tracker (also fractional anchors)', () => {
+  for (const anchor of [10, 10.25]) {
+    const base = { last_remote_ms: anchor };
+    const retained = createTracker();
+    earn(retained, base);
+    assert.deepEqual(verdict(retained.evaluate(windowAt(400000, base), { localProof: sampled(NONE, 4) }).result),
+      EXTENDED, `retained with anchor ${anchor}`);
+    const resets = [
+      ['window closed for one tick', [active(5000, { ...base, suspension_epoch: 1 })], windowAt(240001, base)],
+      ['different anchor, same epoch', [], windowAt(240001, { last_remote_ms: anchor + 1 })],
+      ['same anchor, new epoch (close and reopen in the same ms)', [], windowAt(240001, { ...base, suspension_epoch: 2 })],
+    ];
+    for (const [label, between, final] of resets) {
+      const tracker = createTracker();
+      earn(tracker, base);
+      for (const snapshot of between) tracker.evaluate(snapshot, { localProof: sampled(NONE, 4) });
+      assert.deepEqual(verdict(tracker.evaluate(final, { localProof: sampled(NONE, 5) }).result), UNPROVEN_DEAD,
+        `${label} (anchor ${anchor})`);
+    }
+    // A new tracker fed the same snapshots and identities (replay, session, retry)
+    // starts from its own baseline and inherits nothing.
+    const replay = createTracker();
+    replay.evaluate(windowAt(2000, base), { localProof: sampled(POSITIVE, 3) });
+    assert.deepEqual(verdict(replay.evaluate(windowAt(240001, base), { localProof: sampled(NONE, 4) }).result),
+      UNPROVEN_DEAD);
+    // No indefinite renewal: each new epoch must earn again, from its own anchor.
+    const renewed = createTracker();
+    earn(renewed, base);
+    const next = { last_remote_ms: anchor + 500000, suspension_epoch: 2 };
+    earn(renewed, next);
+    assert.deepEqual(verdict(renewed.evaluate(windowAt(660000, next), { localProof: sampled(NONE, 9) }).result),
+      EXTENDED);
+    assert.equal(renewed.evaluate(windowAt(660001, next), { localProof: sampled(NONE, 10) }).result.reason,
+      'tool-extension-exhausted');
+  }
+  // An absent or invalid epoch/anchor behaves exactly like the pure function.
+  for (const invalid of [{ suspension_epoch: undefined }, { suspension_epoch: 1.5 }, { suspension_epoch: -1 },
+    { suspension_epoch: Number.MAX_SAFE_INTEGER + 1 }, { suspension_epoch: '1' }, { suspension_epoch: null },
+    { last_remote_ms: undefined }, { last_remote_ms: NaN }, { last_remote_ms: -1 }, { last_remote_ms: Infinity },
+    { last_remote_ms: '10' }, { last_remote_ms: null }]) {
+    const tracker = createTracker();
+    let id = 1;
+    for (const [silence, proof] of [[0, POSITIVE], [1000, POSITIVE], [2000, POSITIVE], [3000, POSITIVE],
+      [240000, NONE], [240001, NONE]]) {
+      const snapshot = windowAt(silence, invalid);
+      const inputs = { localProof: sampled(proof, id++) };
+      assert.deepEqual(tracker.evaluate(snapshot, inputs).result, evaluate(snapshot, inputs), JSON.stringify(invalid));
+    }
+  }
+});
+
+test('MH-10 the window counter and sample identity never reach the diagnostic observation', () => {
+  const { createReducer } = require('./forge-claude-stream');
+  const { createNotificationReducer } = require('./forge-appserver-liveness');
+  const claude = createReducer({ clock: () => 0 });
+  claude.push(Buffer.from(JSON.stringify({ type: 'assistant', message: { id: 'm', role: 'assistant',
+    content: [{ type: 'tool_use', id: 'toolu_1', name: 'Bash', input: {} }] } }) + '\n'));
+  const appserver = createNotificationReducer({ clock: () => 0 });
+  appserver.turnSent();
+  appserver.push({ method: 'item/started', params: { item: { id: 'i', type: 'commandExecution' } } });
+  for (const snapshot of [claude.snapshot(), appserver.snapshot()]) {
+    assert.equal(snapshot.suspension_epoch, 1);
+    const observed = observation({ ...snapshot, sampled_at_ms: 5 });
+    assert(!Object.hasOwn(observed, 'suspension_epoch'));
+    assert(!Object.hasOwn(observed, 'sampled_at_ms'));
+    assert.equal(observed.gap_suspended, true);
+  }
+  // The conserved decision reports the real current proof, not fresh activity.
+  const tracker = createTracker();
+  earn(tracker);
+  const { result } = tracker.evaluate(windowAt(300000), { localProof: sampled(NONE, 4) });
+  assert.deepEqual({ capability: result.proof_capability, proof: result.proof }, NONE);
+  assert(!Object.hasOwn(result, 'sampled_at_ms') && !Object.hasOwn(result, 'extensionEarned'));
+});
+
+test('MH-13 the tier ceiling still wins and unavailable or absent proof never earns', () => {
+  const light = TIER_CEILING_MS.light;
+  assert.equal(light, 900000);
+  const anchored = (elapsed, anchor) => ({ elapsed_ms: elapsed, first_remote_ms: 10, last_remote_ms: anchor,
+    remote_silence_ms: elapsed - anchor, gap_suspended: true, suspension_epoch: 1 });
+  const late = createTracker(DEFAULTS, light);
+  let id = 1;
+  for (const elapsed of [300000, 301000, 302000]) late.evaluate(anchored(elapsed, 300000), { localProof: sampled(POSITIVE, id++) });
+  assert.deepEqual(verdict(late.evaluate(anchored(899999, 300000), { localProof: sampled(NONE, id++) }).result), EXTENDED);
+  const capped = late.evaluate(anchored(900000, 300000), { localProof: sampled(NONE, id++) }).result;
+  assert.equal(capped.kill, true);
+  assert.equal(capped.cause, 'ceiling');
+  assert.equal(capped.termination, 'budget-exceeded-while-active');
+  assert.equal(capped.state, 'slow-suspect');
+  assert.equal(capped.extension_ms, null);
+  assert.equal(capped.threshold_ms, 900000);
+
+  const early = createTracker(DEFAULTS, light);
+  earn(early);
+  assert.equal(early.evaluate(windowAt(660000), { localProof: sampled(NONE, 4) }).result.kill, false);
+  const exhausted = early.evaluate(windowAt(660001), { localProof: sampled(NONE, 5) }).result;
+  assert.equal(windowAt(660001).elapsed_ms, 660011);
+  assert.equal(exhausted.cause, 'liveness');
+  assert.equal(exhausted.termination, 'dead-silence');
+  assert.equal(exhausted.reason, 'tool-extension-exhausted');
+
+  for (const proof of [undefined, { capability: 'unavailable', proof: 'none' },
+    { capability: 'unavailable', proof: 'positive' }]) {
+    const tracker = createTracker();
+    let n = 1;
+    for (const silence of [0, 1000, 2000, 3000, 120001, 240001, 660000, 660001]) {
+      const inputs = { localProof: proof === undefined ? undefined : sampled(proof, n++) };
+      assert.deepEqual(tracker.evaluate(windowAt(silence), inputs).result, evaluate(windowAt(silence), inputs));
+    }
+    const switched = createTracker();
+    for (const silence of [0, 1000, 2000, 3000]) {
+      switched.evaluate(windowAt(silence), { localProof: proof === undefined ? undefined : sampled(proof, n++) });
+    }
+    assert.deepEqual(verdict(switched.evaluate(windowAt(240001), { localProof: sampled(NONE, n++) }).result),
+      UNPROVEN_DEAD, 'unavailable proof never marks a conquest');
+  }
+  assert.equal(evaluate(windowAt(660001)).reason, 'tool-proof-unavailable-expired');
+  assert.equal(evaluate(windowAt(240001)).reason, 'proof-unavailable');
+});
+
+async function main() {
   let failures = 0;
   for (const { name, run } of tests) {
-    try { run(); console.log(`PASS ${name}`); }
+    try { await run(); console.log(`PASS ${name}`); }
     catch (error) { failures++; console.error(`FAIL ${name}`); console.error(error); }
   }
   console.log(`${tests.length - failures}/${tests.length} sidecar liveness tests passed`);
