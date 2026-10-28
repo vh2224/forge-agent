@@ -429,6 +429,7 @@ async function recoveryCases() {
   for (const mutation of ['valid', 'claim', 'caps', 'prompt', 'gates', 'model', 'effort', 'roots', 'inputs', 'baseline', 'metadata', 'process']) {
     if (mutation === 'valid' && stage !== 'onPackagedContext') continue;
     const f = nativeFixture({ models: ['gpt-6-sol', 'gpt-6.1-sol'] }), invoke = f.runtime.invokeNative;
+    if (mutation === 'valid') f.r.dispatchId = 'n'.repeat(128);
     f.runtime.invokeNative = async (...args) => { await invoke(...args); throw Object.assign(new Error('fixture service unavailable'), { code: 'model-unavailable', provider_called: true }); };
     await assert.rejects(() => unit.runUnitSidecar(f.r, f.runtime), /model-unavailable/);
     const originalReceipt = fs.readFileSync(f.r.resultFile + '.receipt.json');
@@ -452,6 +453,7 @@ async function recoveryCases() {
       readback: async () => { f.metrics.readback_calls++; await Promise.resolve(); if (stage === 'readback') mutate(); return {}; },
       invokeNative: async (next, binding) => {
         calls++; nextRequest = next;
+        assert(next.dispatchId.length <= 128); assert.notStrictEqual(next.dispatchId, f.r.dispatchId);
         assert.strictEqual(binding.args.model, 'gpt-6.1-sol'); assert.strictEqual(binding.args.reasoning_effort, 'high');
         const row = JSON.parse(fs.readFileSync(next.resultFile + '.receipt.json'));
         assert.strictEqual(row.phase, 'started'); assert(row.recovery_baseline);

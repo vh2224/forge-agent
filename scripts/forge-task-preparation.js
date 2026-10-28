@@ -7,6 +7,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { recoveryDispatchId } = require('./forge-recovery-dispatch-id');
 const forgeIds = require('./forge-ids');
 const resolver = require('./forge-dispatch-resolve');
 const nativeApi = require('./forge-native-invocation');
@@ -205,21 +206,23 @@ function requiredSectionsHaveContent(content, required, exact = false) {
   return true;
 }
 
-function validatePhaseContent(phase, taskId, content) {
-  if (typeof content !== 'string' || !content.trim() || content.includes('\0')) return false;
-  if (/^#\s+(?:Roadmap|Slice Plan)\b/im.test(content) || /^\s*- \[[ x]\] \*\*S\d+:/im.test(content)) return false;
+// Closed diagnostic categories only: never return provider text or heading names.
+function inspectPhaseContent(phase, taskId, content) {
+  const bad = reason => ({ ok: false, reason });
+  if (typeof content !== 'string' || !content.trim() || content.includes('\0')) return bad('content');
+  if (/^#\s+(?:Roadmap|Slice Plan)\b/im.test(content) || /^\s*- \[[ x]\] \*\*S\d+:/im.test(content)) return bad('scope');
   const headings = {
     brainstorm: ['Recommended Approach', 'Alternatives Considered', 'Top Risks', 'Out of Scope'],
     discuss: ['Decisions', 'Open Questions', 'Out of Scope'],
     research: ['Summary', "Don't Hand-Roll", 'Relevant Code'],
   }[phase];
-  if (headings) return requiredSectionsHaveContent(content, headings);
-  if (phase !== 'plan') return false;
+  if (headings) return requiredSectionsHaveContent(content, headings) ? { ok: true } : bad('sections');
+  if (phase !== 'plan') return bad('phase');
   const frontmatter = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
-  if (!frontmatter) return false;
+  if (!frontmatter) return bad('frontmatter');
   const topLevelKeys = [...frontmatter[1].matchAll(/^([A-Za-z][A-Za-z0-9_-]*):/gm)]
     .map(match => match[1].toLowerCase());
-  if (new Set(topLevelKeys).size !== topLevelKeys.length) return false;
+  if (new Set(topLevelKeys).size !== topLevelKeys.length) return bad('duplicate-fields');
   const scalar = key => [...frontmatter[1].matchAll(new RegExp(`^${key}:\\s*([^\\s#]+)(?:\\s+#.*)?$`, 'gmi'))]
     .map(match => match[1].toLowerCase());
   const tiers = scalar('tier'), efforts = scalar('effort');
@@ -229,11 +232,16 @@ function validatePhaseContent(phase, taskId, content) {
     const fields = parser.parseExecutionFields(content), criteria = parser.parseMustHaves(content);
     writes = parser.hasStructuredMustHaves(content) && Array.isArray(fields.depends)
       && fields.writes?.length > 0 && fields.expected_output?.length > 0 && criteria.truths.length > 0;
-  } catch { return false; }
+  } catch { return bad('structured-fields'); }
   const required = ['Steps', 'Must-Haves', 'Standards', 'Files to Change'];
-  return tiers.length === 1 && ['light', 'standard', 'heavy', 'max'].includes(tiers[0])
-    && efforts.length === 1 && ['low', 'medium', 'high', 'xhigh', 'max'].includes(efforts[0])
-    && writes && requiredSectionsHaveContent(content, required, true);
+  if (tiers.length !== 1 || !['light', 'standard', 'heavy', 'max'].includes(tiers[0])) return bad('tier');
+  if (efforts.length !== 1 || !['low', 'medium', 'high', 'xhigh', 'max'].includes(efforts[0])) return bad('effort');
+  if (!writes) return bad('structured-fields');
+  return requiredSectionsHaveContent(content, required, true) ? { ok: true } : bad('sections');
+}
+
+function validatePhaseContent(phase, taskId, content) {
+  return inspectPhaseContent(phase, taskId, content).ok;
 }
 
 function preparationRequestFingerprint(request) {
@@ -561,13 +569,22 @@ function validateNativeTelemetry(actual, expected) {
 function candidateFromPreparationResult(raw, delivery) {
   const loc = unit.locations(delivery);
   const validate = value => {
-    const artifacts = unit.inspectArtifacts(value, loc.allowed, loc.required, Infinity, loc.rules, { forbidArtifactsOnNonDone: true });
-    if (!artifacts.ok) throw preparationError(artifacts.reason, 'validation');
+    const artifacts = unit.inspectArtifacts(value, loc.allowed, loc.required, Infinity, loc.rules,
+      { forbidArtifactsOnNonDone: true, detailedDeliveryDiagnostic: true });
+    if (!artifacts.ok) return artifacts;
     const checked = require('./forge-worker-result-contract').contract('preparation').validate(value);
-    if (!checked.ok) throw preparationError(checked.reason, 'validation');
+    if (!checked.ok) return checked;
     return true;
   };
-  const accepted = value => { validate(value); return value; };
+  const accepted = value => {
+    const checked = validate(value);
+    if (checked !== true && checked?.ok !== true) {
+      const error = preparationError(checked.reason, 'validation');
+      error.diagnostic = safeSidecarDiagnostic(checked.reason);
+      throw error;
+    }
+    return value;
+  };
   if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
     if (['done', 'partial', 'blocked'].includes(raw.status) && Array.isArray(raw.artifacts)) return accepted(raw);
     if (raw.result_json && typeof raw.result_json === 'object') {
@@ -639,7 +656,7 @@ async function acceptStandaloneTaskPreparation(rawRequest, acceptance) {
       ? 'artifact-direct-write-detected' : code === 'invalid-artifact-result' ? 'validator-failed' : 'adapter-failed');
     try { unit.failArtifactAttempt(delivery, code, detail, acceptanceProviderCalled); } catch { /* preserve first refusal */ }
     return refused(error.stage || (code === 'artifact-conflict' ? 'publication' : 'validation'),
-      code, route, acceptanceProviderCalled);
+      code, route, acceptanceProviderCalled, error.diagnostic);
   }
 }
 
@@ -775,7 +792,7 @@ async function recoverStandaloneTask(rawRequest, recovery, deps = {}) {
       assertReady?.();
       if (route.worker_mode === 'native' && !deps.invokeNative && recovery.transitions && !recovery.resumeReservation)
         return { action: 'reattest-native-handoff', reservation_sha256: reservationHash, provider_called: false };
-      const next = { ...invocationRequest, recoveryStateFile: recovery.stateFile, dispatchId: `${request.dispatchId}-recovery-${crypto.randomUUID()}`,
+      const next = { ...invocationRequest, recoveryStateFile: recovery.stateFile, dispatchId: recoveryDispatchId(request.dispatchId),
         resultFile: `${request.resultFile}.recovery-${crypto.randomUUID()}.json`,
         ...(resume != null ? { claudeResume: resume.session, resumedFrom: resume.resumed_from } : {}) };
       // Tier safety ceiling from the single source; no cumulative-clock remainder.
@@ -806,7 +823,7 @@ async function cli(argv, deps = {}) {
 
 module.exports = {
   REQUEST_SCHEMA_VERSION, PHASE_CONTRACTS, phaseContract, validateRequest,
-  requiredArtifact, validatePhaseContent, preparationRequestFingerprint,
+  requiredArtifact, validatePhaseContent, inspectPhaseContent, preparationRequestFingerprint,
   buildPreparationPrompt, deliveryRequest, nativeOptions, preflightPlan,
   candidateFromPreparationResult, startStandaloneTaskPreparation,
   acceptStandaloneTaskPreparation, prepareStandaloneTask, recoverStandaloneTask,

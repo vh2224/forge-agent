@@ -11,7 +11,7 @@ const stateApi = require('./forge-xllm-state');
 const side = require('./forge-unit-sidecar');
 const delivery = require('./forge-native-recovery-delivery');
 const { write, capabilities } = fixtures;
-async function fixture() {
+async function fixture(options = {}) {
   const f = fixtures.setup();
   const base = path.join(f.owner, '.gsd/milestones/M901/slices/S01');
   const planFile = path.join(base, 'tasks/T01/T01-PLAN.md');
@@ -31,7 +31,7 @@ async function fixture() {
     cwd:f.a,contextRoot:f.owner,planFile,roadmapFile:f.roadmap,execution_contract:f.contract,claim,runId:'fixture-run',
     gates:{plan:'skipped',planSkipReason:'interactive-off',claim:'proceed',security:'passed'},
     contextFile:path.join(base,'S01-CONTEXT.md'),securityFile:planFile.replace('-PLAN.md','-SECURITY.md'),
-    researchFile:path.join(base,'S01-RESEARCH.md'),workflowId:'fixture',dispatchId:'ordinary-execute',
+    researchFile:path.join(base,'S01-RESEARCH.md'),workflowId:'fixture',dispatchId:options.dispatchId || 'ordinary-execute',
     resultFile:path.join(f.dir,'execute.json'),prompt:'Implement the claimed fixture only.',
     verification:{commandTimeoutMs:300000,commandsByRoot:{alpha:[command],beta:[command]}}};
   write(r.contextFile,'# Context\nChange both roots.');write(r.securityFile,'# Security\nPreserve claims and history.');
@@ -418,7 +418,7 @@ async function implicitOrdinaryIdentity() {
 }
 async function durableReplay() {
   for(const stage of ['returned','publication']) {
-    const f=await fixture();
+    const f=await fixture({dispatchId:'r'.repeat(128)});
     const materialize=side.materialize;
     try {
       let calls=0;

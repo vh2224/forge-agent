@@ -570,7 +570,7 @@ async function replay({request,recovery,runtime,nativeOptions}) {
   if(hash(manifestBytes)!==binding.manifest_sha256)fail('milestone-replay-manifest-binding');
   const manifest=JSON.parse(manifestBytes), record=JSON.parse(receiptBytes), r=manifest.request;
   const expectedRequest={...request,route:r.route,recoveryStateFile:recovery.stateFile,
-    dispatchId:request.dispatchId+'-recovery-'+recovery.resumeReservation.sha256,resultFile:expected};
+    dispatchId:api('forge-recovery-dispatch-id').recoveryDispatchId(request.dispatchId,recovery.resumeReservation.sha256),resultFile:expected};
   if(roots.digest(r)!==roots.digest(expectedRequest)||record.manifest_sha256!==binding.manifest_sha256
       || record.dispatch_id!==r.dispatchId||record.fingerprint!==api('forge-unit-sidecar').artifactFingerprint(r)
       || record.recovery_identity_sha256!==roots.digest(requestIdentity(r))
