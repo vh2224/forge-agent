@@ -14,3 +14,8 @@ active surface hashes stay unchanged relative to the #254 baseline. The historic
 `agents`, `skills`, `dispatch-templates`, and `claude-instructions`.
 
 The source-guard test separately retains the older skills-only repin comparison within historical data, checks that the historical-to-current change is exactly agents, skills, dispatch-templates, and claude-instructions, and compares current rendered output against all nine active hashes. Future intentional source changes need a scoped reviewed baseline update; drift remains a failure.
+
+The #268 fresh-task creation correction updates only the active `skills` hash for
+`skills/forge-task/SKILL.md`; the other eight active hashes and all historical
+snapshots remain unchanged. It removes unrelated personal selection and legacy
+migration from explicit fresh creation, preserving explicit resume and isolation.
