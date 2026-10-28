@@ -208,6 +208,27 @@ Do not add CI path filters or reuse --changed without a complete dependency grap
 Do not parallelize suites without fixture isolation and demonstrated coverage equivalence.
 Do not change smokes, Windows coverage or app PR filtering without separate dependency evidence.
 Do not change collector deadlines or add artifact upload without reviewed need and security evidence.
+Do not accept pull_request, merge_group, attested or uploaded evidence in the release barrier; see Cross-event CI reuse in shared/forge-release-checks.md.
+
+## Cross-event reuse measurement
+
+Nothing is enabled and no cross-event reuse, speedup or saving is claimed.
+Measurement is prospective and uses only the existing profiler report.
+1. Outside CI, capture through authorized GET (as in Reproducible profile update outside CI)
+   `workflow_runs` and per-attempt jobs snapshots for ci/app (`pull_request` and push) and release (push).
+2. Run `node scripts/forge-ci-profile.js report --runs <file> --jobs <file> --json <file>`.
+3. Runs carry event, head_sha, path and timestamps; jobs carry `started_to_completed_ms`.
+
+Potentially repeated runner time is the sum of comparable PR and push job intervals.
+Do not call it duplication without input identity. Report earlier failed attempts separately; never hide them.
+Approximate post-push latency runs from CI push run creation to completion of the last release job on the same SHA,
+using complete job timestamps. Also report PR CI start to release completion.
+Do not treat updated_at or run creation as the exact merge or completion instant.
+Wall-clock latency and summed runner time are different quantities; neither is billed time (`no-billing-evidence`).
+Compare only equivalent, complete and successful strata.
+Unmatched populations and cancelled, failed or incomplete runs are not before/after evidence.
+PR open and approval times are not ingested and remain unavailable.
+No percentages are produced.
 
 ## Downstream limits
 

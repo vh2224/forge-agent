@@ -343,6 +343,37 @@ test('checks-foreign-repository-workflow-sha-run-id-and-source-block', () => {
   for (const [mutate, code] of mutations) { const f = facts(); mutate(f); blocked(f, code); }
 });
 
+test('checks-cross-event-evidence-and-annotations-never-substitute-constituents', () => {
+  const D = 'd'.repeat(40);
+  const embedded = () => [{ number: 267, head: { sha: A }, base: { sha: C } }];
+  const crossEvent = [
+    [f => { Object.assign(f.workflows.ci.run, { event: 'pull_request', head_branch: 'feature', head_sha: D, pull_requests: embedded() });
+      f.workflows.ci.jobs.forEach(job => { job.head_sha = D; }); f.workflows.ci.merge_commit_sha = A; }, ['workflow-identity', 'job-identity']],
+    [f => { Object.assign(f.workflows.ci.run, { event: 'pull_request', head_branch: 'feature', head_sha: A, pull_requests: embedded() });
+      f.workflows.ci.merge_commit_sha = A; }, ['workflow-identity']],
+    [f => { Object.assign(f.workflows.ci.run, { event: 'merge_group', head_branch: `gh-readonly-queue/master/pr-267-${A}`, head_sha: A }); }, ['workflow-identity']],
+  ];
+  for (const [mutate, codes] of crossEvent) { const f = facts(); mutate(f); for (const code of codes) blocked(f, code); }
+  // Candidate-supplied reuse/attestation/tree/status annotations are inert data.
+  const expected = checks.expandJobs(checks.POLICY.workflows.ci);
+  const annotate = f => {
+    Object.assign(f.workflows.ci, { reuse: { eligible: ['*'], source_run_id: 4061 }, attestation: { verified: true, subject: A },
+      tree_sha: 'e'.repeat(40), status_name: 'CI / required', reused_jobs: expected.map(job => job.name) });
+    f.workflows.ci.run.pull_requests = embedded(); f.reuse = { allowed: true }; return f;
+  };
+  const valid = checks.evaluateChecks(annotate(facts()));
+  assert.strictEqual(valid.allowed, true, JSON.stringify(valid.reasons));
+  assert.deepStrictEqual(valid, checks.evaluateChecks(facts()));
+  const inert = result => { const text = JSON.stringify(result);
+    for (const key of ['reuse', 'attestation', 'tree_sha', 'status_name', 'pull_requests', 'reused_jobs']) assert(!text.includes(key), key); };
+  inert(valid);
+  const target = expected.find(job => job.kind === 'native' && job.key === 'test').name;
+  const missing = annotate(facts()); missing.workflows.ci.jobs = missing.workflows.ci.jobs.filter(job => job.name !== target); blocked(missing, 'job-missing');
+  const skipped = annotate(facts()); skipped.workflows.ci.jobs.find(job => job.name === target).conclusion = 'skipped'; blocked(skipped, 'job-not-success');
+  const stale = annotate(facts()); stale.workflows.ci.current_attempt = stale.workflows.ci.run.run_attempt - 1; blocked(stale, 'attempt-incomplete');
+  for (const f of [missing, skipped, stale]) inert(checks.evaluateChecks(f));
+});
+
 test('documentation-public-api-and-directed-contract-links', () => {
   const doc = fs.readFileSync(path.join(ROOT, 'shared/forge-release-checks.md'), 'utf8');
   for (const name of ['resolveCandidate', 'resolveApplicability', 'assertPolicySources', 'evaluateChecks']) {
