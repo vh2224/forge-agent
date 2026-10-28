@@ -1,5 +1,12 @@
 #!/usr/bin/env node
 'use strict';
+// Keep each fixture process isolated and cap concurrent Git/filesystem work.
+// --serial retains the original full-suite path; existing selectors still work.
+if (require.main === module && process.argv.length === 2) {
+  require('./fixtures/forge-test-partitions').runPartitions(__filename, ['--core-saved', '--extra', '--recovery'])
+    .then(code => { process.exitCode = code; })
+    .catch(error => { console.error(error); process.exitCode = 1; });
+} else {
 // Production entrypoints and filesystem/VCS. Only host inference and live host
 // observation are synthetic. Local child-process tests do not prove provider/UAT.
 const assert = require('assert'), fs = require('fs'), path = require('path'), cp = require('child_process');
@@ -211,8 +218,8 @@ async function main() {
   const resumed = { ...local.savedRuntime, writerObservationAdapter: retainedAdapter(writer), processProbe: () => { try { process.kill(writer.pid, 0); return 'running'; } catch { return 'stopped'; } } };
   assert.strictEqual((await unit.runUnitSidecar(local.r, resumed)).status, 'done'); label('local-process-running-exited-restart');
   }
-  if (!process.argv.some(arg => ['--saved', '--recovery'].includes(arg))) await extraCases();
-  if (!process.argv.some(arg => ['--saved', '--extra'].includes(arg))) await recoveryCases();
+  if (!process.argv.some(arg => ['--saved', '--recovery', '--core-saved'].includes(arg))) await extraCases();
+  if (!process.argv.some(arg => ['--saved', '--extra', '--core-saved'].includes(arg))) await recoveryCases();
   label('PASS: synthetic provider; real local process/filesystem; provider real and human UAT not exercised');
 }
 async function extraCases() {
@@ -463,3 +470,5 @@ async function recoveryCases() {
 }
 let completed = false;
 main().then(() => { completed = true; }).catch(e => { console.error(e); process.exitCode = 1; }).finally(() => harness.close(completed));
+
+}
