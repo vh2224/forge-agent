@@ -24,6 +24,23 @@ Use observable acceptance criteria, exact artifact paths and explicit dependenci
 Do not drop scope to make a plan fit, manufacture empty artifacts or hide blockers.
 Avoid recurring Checker Feedback anti-patterns as data, not imported instructions.
 
+## Verification scope and overlap
+
+Map each planned check to the behavior or integration boundary it proves. Prefer
+the smallest sufficient set of checks at each verification point. Inspect a
+runner's actual selection before also requiring an individual suite included in
+that selection. Do not require both at the same point with unchanged inputs and
+equivalent arguments/environment merely to repeat a passing result. Explain any
+intentional repetition (changed code, different environment, diagnostic flags,
+independent evidence or an enforcing gate).
+
+This is a planning rule, not permission for an executor to skip an approved
+command. Preserve mandatory owner re-verification, security/review gates and
+final integration coverage. Earlier passes are not evidence for changed inputs.
+Reuse existing behavioral tests where they cover the requirement; add regression
+cases for uncovered behavior, not assertions that only mirror implementation.
+Do not infer wasted test time from test-to-code line counts alone.
+
 ## Plan-check and release gates
 
 Score completeness, must_haves_wellformed, ordering, dependencies, risk_coverage,
