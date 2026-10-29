@@ -326,7 +326,12 @@ function createRecovery(options) {
       };
       if (preflight) scope = livePreflightScope();
       let routes, provenance;
-      const silenceRetry = previous.failure_class === 'silence'
+      // A registered standing grant binds the personal source through the opaque
+      // exception. It authorizes advancing the original list, not an unchanged
+      // retry; ordinary one-time grants retain their historical retry policy.
+      const standingNextCandidate = typeof scope?.authorization_profile === 'string' && scope.authorization_profile.length > 0
+        && /^[a-f0-9]{64}$/.test(scope.authorization_source_sha256 || '');
+      const silenceRetry = !standingNextCandidate && previous.failure_class === 'silence'
         && previous.observation?.silence?.cause === 'indeterminate' && scope
         && !(state.reservations || []).some(r => r.reason === 'anomalous-silence-same-target');
       const transition = input.transition ? transitions.assertLive(input.transition) : null;
