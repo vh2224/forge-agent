@@ -1,0 +1,2754 @@
+{
+  "schema_version": 1,
+  "base_revision": "3e25c611a54b2bdd23f11cb11eb474b3facc95e3",
+  "contract_sha256": "d409a0cc91b426bd0e407931a6168185d745080a4d5d56e77839e628189781b3",
+  "skill_templates_before_sha256": "4aa6c4a06d2e8183782b97169db3b0ea22f1f891fbf235989afd0867e6249126",
+  "rubric_elements": [
+    "resultado",
+    "fase",
+    "executor",
+    "proximo_passo",
+    "decisao_pendente"
+  ],
+  "rubric_values": [
+    "presente",
+    "ausente",
+    "desconhecido",
+    "nao-aplicavel"
+  ],
+  "labels": [
+    "observado",
+    "renderizado-offline",
+    "modelo-da-skill",
+    "redigido"
+  ],
+  "human_acceptance": {
+    "status": "pending-final-round",
+    "reference": "AUTONOMY-AUTHORIZATION.md",
+    "visual": "pending",
+    "comprehension": "pending"
+  },
+  "limits": {
+    "provider_calls": false,
+    "real_host_rendering": false,
+    "human_uat_exercised": false
+  },
+  "presentation_preferences": {
+    "suite": "node scripts/forge-presentation-prefs.test.js",
+    "offline": "passed-in-completed-T06",
+    "installed_before_after": "runtime-pending",
+    "reference": "S02/T06-SUMMARY.md; S02/T06-DELIVERY.json — fixtures concluídas, não reexecutadas nesta task"
+  },
+  "entries": [
+    {
+      "id": "claude-code-terminal-diagnostico",
+      "host": "claude-code-terminal",
+      "scenario": "diagnostico",
+      "channel": "Claude Code no terminal: TaskCreate/TaskUpdate e ferramenta de pergunta somente quando expostas e permitidas; nenhum acionamento nesta avaliação.",
+      "before": {
+        "label": "renderizado-offline",
+        "source": {
+          "file": "scripts/forge-recovery-diagnostic.js",
+          "reference": "scripts/forge-recovery-diagnostic.js#renderRecovery",
+          "renderer": "renderRecovery",
+          "input": {
+            "id": "recuperacao-sintetica",
+            "observedAt": "2000-01-01T00:00:00.000Z",
+            "status": "partial",
+            "sources": [
+              {
+                "name": "personal-store",
+                "state": "current",
+                "source": "C:/synthetic-forge-fixture/context.json",
+                "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "provenResults": [
+              {
+                "kind": "personal-checkpoint",
+                "evidence": {
+                  "text": "Verificação sintética preservada; publicação ainda desconhecida.",
+                  "validity": "current",
+                  "resolved": false,
+                  "source": "C:/synthetic-forge-fixture/capture.json",
+                  "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "capturedAt": "2000-01-01T00:00:00.000Z"
+                }
+              }
+            ],
+            "uncertainties": [
+              "Executor observado desconhecido; causa da interrupção desconhecida."
+            ],
+            "artifacts": [
+              {
+                "kind": "summary",
+                "existence": "observed",
+                "integrity": "unverified",
+                "source": "C:/synthetic-forge-fixture/summary.md",
+                "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "conflicts": 2
+              },
+              {
+                "kind": "summary",
+                "existence": "observed",
+                "integrity": "unverified",
+                "source": "C:/synthetic-forge-fixture/summary-uncontested.md",
+                "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "conflicts": 0
+              }
+            ],
+            "continuity": {
+              "state": "recorded",
+              "bound": true,
+              "workStatus": "pending",
+              "activity": "unknown",
+              "checkpoint": {}
+            },
+            "pendingDecisions": [
+              {
+                "text": "escolha-sintetica: aguardar a inspeção do processo?",
+                "validity": "current",
+                "resolved": false,
+                "source": "C:/synthetic-forge-fixture/capture.json",
+                "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "capturedAt": "2000-01-01T00:00:00.000Z"
+              }
+            ],
+            "acceptances": [],
+            "claim": {
+              "state": "unknown"
+            },
+            "controller": {
+              "coverage": "unknown",
+              "globalCompletion": "unknown"
+            },
+            "coverage": {
+              "personal": "observed",
+              "claim": "not-observed",
+              "controller": "not-observed",
+              "artifacts": "observed"
+            },
+            "uncovered": [
+              "sweep",
+              "sidecar-reset",
+              "other-journals"
+            ],
+            "nextSafeStep": "Inspecionar processo e receipt; preservar a decisão escolha-sintetica e a evidência antes de retomar."
+          },
+          "options": {
+            "summary": false
+          },
+          "synthetic": true
+        },
+        "text": "Diagnóstico de recuperação: recuperacao-sintetica\nObservado em: 2000-01-01T00:00:00.000Z\nEstado: parcial (não significa conclusão do trabalho)\n\nFontes e estado da evidência:\n- store pessoal: atual\n    Fonte: C:/synthetic-forge-fixture/context.json\n    SHA-256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\nResultado comprovado:\n- resultado registrado no checkpoint: Verificação sintética preservada; publicação ainda desconhecida. — atual; resolvido: não\n    Fonte: C:/synthetic-forge-fixture/capture.json; SHA-256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; capturado em: 2000-01-01T00:00:00.000Z\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nIncertezas:\n- Executor observado desconhecido; causa da interrupção desconhecida.\n\nArtefatos preservados:\n- resumo: observado; integridade: não verificado\n    Fonte: C:/synthetic-forge-fixture/summary.md; SHA-256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; conflitos: 2\n- resumo: observado; integridade: não verificado\n    Fonte: C:/synthetic-forge-fixture/summary-uncontested.md; SHA-256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; conflitos: 0\n\nContinuidade pessoal:\n- Registro: registrado; vínculo pessoal: sim\n- Situação do trabalho: pendente; atividade: desconhecido\n\nDecisões pendentes:\n- escolha-sintetica: aguardar a inspeção do processo? — atual; resolvido: não\n    Fonte: C:/synthetic-forge-fixture/capture.json; SHA-256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; capturado em: 2000-01-01T00:00:00.000Z\n\nAceites registrados:\n- Nenhum registro nas fontes observadas.\n\nReserva de escrita:\n- Estado: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nControlador:\n- Cobertura: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nFamílias não cobertas (resultado desconhecido):\n- limpeza\n- reinício do sidecar\n- outros journals\n\nPróximo passo seguro: Inspecionar processo e receipt; preservar a decisão escolha-sintetica e a evidência antes de retomar.\n",
+        "rubric": {
+          "assessment": "author",
+          "resultado": "presente",
+          "fase": "desconhecido",
+          "executor": "desconhecido",
+          "proximo_passo": "presente",
+          "decisao_pendente": "presente"
+        },
+        "volume": {
+          "lines": 48,
+          "characters": 2101
+        },
+        "dumps": {
+          "hashes": 5,
+          "dispatch_or_receipt": 0,
+          "absolute_paths": 5,
+          "helper_lists": 0,
+          "navigation_references": 0
+        },
+        "human_view": {
+          "rule": "complete-v1",
+          "text": "Diagnóstico de recuperação: recuperacao-sintetica\nObservado em: 2000-01-01T00:00:00.000Z\nEstado: parcial (não significa conclusão do trabalho)\n\nFontes e estado da evidência:\n- store pessoal: atual\n    Fonte: C:/synthetic-forge-fixture/context.json\n    SHA-256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\nResultado comprovado:\n- resultado registrado no checkpoint: Verificação sintética preservada; publicação ainda desconhecida. — atual; resolvido: não\n    Fonte: C:/synthetic-forge-fixture/capture.json; SHA-256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; capturado em: 2000-01-01T00:00:00.000Z\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nIncertezas:\n- Executor observado desconhecido; causa da interrupção desconhecida.\n\nArtefatos preservados:\n- resumo: observado; integridade: não verificado\n    Fonte: C:/synthetic-forge-fixture/summary.md; SHA-256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; conflitos: 2\n- resumo: observado; integridade: não verificado\n    Fonte: C:/synthetic-forge-fixture/summary-uncontested.md; SHA-256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; conflitos: 0\n\nContinuidade pessoal:\n- Registro: registrado; vínculo pessoal: sim\n- Situação do trabalho: pendente; atividade: desconhecido\n\nDecisões pendentes:\n- escolha-sintetica: aguardar a inspeção do processo? — atual; resolvido: não\n    Fonte: C:/synthetic-forge-fixture/capture.json; SHA-256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; capturado em: 2000-01-01T00:00:00.000Z\n\nAceites registrados:\n- Nenhum registro nas fontes observadas.\n\nReserva de escrita:\n- Estado: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nControlador:\n- Cobertura: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nFamílias não cobertas (resultado desconhecido):\n- limpeza\n- reinício do sidecar\n- outros journals\n\nPróximo passo seguro: Inspecionar processo e receipt; preservar a decisão escolha-sintetica e a evidência antes de retomar.\n",
+          "volume": {
+            "lines": 48,
+            "characters": 2101
+          },
+          "dumps": {
+            "hashes": 5,
+            "dispatch_or_receipt": 0,
+            "absolute_paths": 5,
+            "helper_lists": 0,
+            "navigation_references": 0
+          }
+        }
+      },
+      "after": {
+        "label": "renderizado-offline",
+        "source": {
+          "file": "scripts/forge-recovery-diagnostic.js",
+          "reference": "scripts/forge-recovery-diagnostic.js#renderRecovery",
+          "renderer": "renderRecovery",
+          "input": {
+            "id": "recuperacao-sintetica",
+            "observedAt": "2000-01-01T00:00:00.000Z",
+            "status": "partial",
+            "sources": [
+              {
+                "name": "personal-store",
+                "state": "current",
+                "source": "C:/synthetic-forge-fixture/context.json",
+                "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "provenResults": [
+              {
+                "kind": "personal-checkpoint",
+                "evidence": {
+                  "text": "Verificação sintética preservada; publicação ainda desconhecida.",
+                  "validity": "current",
+                  "resolved": false,
+                  "source": "C:/synthetic-forge-fixture/capture.json",
+                  "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "capturedAt": "2000-01-01T00:00:00.000Z"
+                }
+              }
+            ],
+            "uncertainties": [
+              "Executor observado desconhecido; causa da interrupção desconhecida."
+            ],
+            "artifacts": [
+              {
+                "kind": "summary",
+                "existence": "observed",
+                "integrity": "unverified",
+                "source": "C:/synthetic-forge-fixture/summary.md",
+                "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "conflicts": 2
+              },
+              {
+                "kind": "summary",
+                "existence": "observed",
+                "integrity": "unverified",
+                "source": "C:/synthetic-forge-fixture/summary-uncontested.md",
+                "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "conflicts": 0
+              }
+            ],
+            "continuity": {
+              "state": "recorded",
+              "bound": true,
+              "workStatus": "pending",
+              "activity": "unknown",
+              "checkpoint": {}
+            },
+            "pendingDecisions": [
+              {
+                "text": "escolha-sintetica: aguardar a inspeção do processo?",
+                "validity": "current",
+                "resolved": false,
+                "source": "C:/synthetic-forge-fixture/capture.json",
+                "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "capturedAt": "2000-01-01T00:00:00.000Z"
+              }
+            ],
+            "acceptances": [],
+            "claim": {
+              "state": "unknown"
+            },
+            "controller": {
+              "coverage": "unknown",
+              "globalCompletion": "unknown"
+            },
+            "coverage": {
+              "personal": "observed",
+              "claim": "not-observed",
+              "controller": "not-observed",
+              "artifacts": "observed"
+            },
+            "uncovered": [
+              "sweep",
+              "sidecar-reset",
+              "other-journals"
+            ],
+            "nextSafeStep": "Inspecionar processo e receipt; preservar a decisão escolha-sintetica e a evidência antes de retomar."
+          },
+          "options": {},
+          "synthetic": true
+        },
+        "text": "Resumo da recuperação de recuperacao-sintetica\nSituação: parcial (não significa conclusão do trabalho)\nResultados já comprovados: observação incompleta\nIncertezas em aberto: 1 (Executor observado desconhecido; causa da interrupção desconhecida.)\nPendências de decisão: 1; aceites no registro: 0\nPróximo passo seguro: Inspecionar processo e receipt; preservar a decisão escolha-sintetica e a evidência antes de retomar.\nFontes, SHA-256 e detalhes ficam no registro técnico abaixo.\n\nDiagnóstico de recuperação: recuperacao-sintetica\nObservado em: 2000-01-01T00:00:00.000Z\nEstado: parcial (não significa conclusão do trabalho)\n\nFontes e estado da evidência:\n- store pessoal: atual\n    Fonte: C:/synthetic-forge-fixture/context.json\n    SHA-256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\nResultado comprovado:\n- resultado registrado no checkpoint: Verificação sintética preservada; publicação ainda desconhecida. — atual; resolvido: não\n    Fonte: C:/synthetic-forge-fixture/capture.json; SHA-256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; capturado em: 2000-01-01T00:00:00.000Z\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nIncertezas:\n- Executor observado desconhecido; causa da interrupção desconhecida.\n\nArtefatos preservados:\n- resumo: observado; integridade: não verificado\n    Fonte: C:/synthetic-forge-fixture/summary.md; SHA-256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; conflitos: 2\n- resumo: observado; integridade: não verificado\n    Fonte: C:/synthetic-forge-fixture/summary-uncontested.md; SHA-256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; conflitos: 0\n\nContinuidade pessoal:\n- Registro: registrado; vínculo pessoal: sim\n- Situação do trabalho: pendente; atividade: desconhecido\n\nDecisões pendentes:\n- escolha-sintetica: aguardar a inspeção do processo? — atual; resolvido: não\n    Fonte: C:/synthetic-forge-fixture/capture.json; SHA-256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; capturado em: 2000-01-01T00:00:00.000Z\n\nAceites registrados:\n- Nenhum registro nas fontes observadas.\n\nReserva de escrita:\n- Estado: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nControlador:\n- Cobertura: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nFamílias não cobertas (resultado desconhecido):\n- limpeza\n- reinício do sidecar\n- outros journals\n\nPróximo passo seguro: Inspecionar processo e receipt; preservar a decisão escolha-sintetica e a evidência antes de retomar.\n",
+        "rubric": {
+          "assessment": "author",
+          "resultado": "presente",
+          "fase": "desconhecido",
+          "executor": "desconhecido",
+          "proximo_passo": "presente",
+          "decisao_pendente": "presente"
+        },
+        "volume": {
+          "lines": 56,
+          "characters": 2582
+        },
+        "dumps": {
+          "hashes": 5,
+          "dispatch_or_receipt": 0,
+          "absolute_paths": 5,
+          "helper_lists": 0,
+          "navigation_references": 0
+        },
+        "human_view": {
+          "rule": "recovery-human-v1",
+          "text": "Resumo da recuperação de recuperacao-sintetica\nSituação: parcial (não significa conclusão do trabalho)\nResultados já comprovados: observação incompleta\nIncertezas em aberto: 1 (Executor observado desconhecido; causa da interrupção desconhecida.)\nPendências de decisão: 1; aceites no registro: 0\nPróximo passo seguro: Inspecionar processo e receipt; preservar a decisão escolha-sintetica e a evidência antes de retomar.\n\nDiagnóstico de recuperação: recuperacao-sintetica\nEstado: parcial (não significa conclusão do trabalho)\n\nFontes e estado da evidência:\n- store pessoal: atual\n\nResultado comprovado:\n- resultado registrado no checkpoint: Verificação sintética preservada; publicação ainda desconhecida. — atual; resolvido: não\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nIncertezas:\n- Executor observado desconhecido; causa da interrupção desconhecida.\n\nArtefatos preservados:\n- resumo: observado; integridade: não verificado\n    conflitos: 2\n- resumo: observado; integridade: não verificado\n    conflitos: 0\n\nContinuidade pessoal:\n- Registro: registrado; vínculo pessoal: sim\n- Situação do trabalho: pendente; atividade: desconhecido\n\nDecisões pendentes:\n- escolha-sintetica: aguardar a inspeção do processo? — atual; resolvido: não\n\nAceites registrados:\n- Nenhum registro nas fontes observadas.\n\nReserva de escrita:\n- Estado: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nControlador:\n- Cobertura: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nFamílias não cobertas (resultado desconhecido):\n- limpeza\n- reinício do sidecar\n- outros journals\n\nPróximo passo seguro: Inspecionar processo e receipt; preservar a decisão escolha-sintetica e a evidência antes de retomar.\n",
+          "volume": {
+            "lines": 50,
+            "characters": 1767
+          },
+          "dumps": {
+            "hashes": 0,
+            "dispatch_or_receipt": 0,
+            "absolute_paths": 0,
+            "helper_lists": 0,
+            "navigation_references": 0
+          }
+        }
+      },
+      "utility": "O resumo antecipa situação e próxima ação; a vista humana conserva todas as linhas semânticas, inclusive a decisão e os desconhecidos. A saída completa cresce; a utilidade percebida ainda não foi medida."
+    },
+    {
+      "id": "claude-code-terminal-execucao-com-agente",
+      "host": "claude-code-terminal",
+      "scenario": "execucao-com-agente",
+      "channel": "Claude Code no terminal: TaskCreate/TaskUpdate e ferramenta de pergunta somente quando expostas e permitidas; nenhum acionamento nesta avaliação.",
+      "before": {
+        "label": "renderizado-offline",
+        "source": {
+          "file": "scripts/forge-sidecar-identity.js",
+          "reference": "scripts/forge-sidecar-identity.js#formatIdentityLine",
+          "renderer": "formatIdentityLine",
+          "input": {
+            "stage": "iniciado",
+            "fields": {
+              "phase": "execute-task",
+              "unit": "checagem-sintetica",
+              "engine": "claude",
+              "transport": "claude-stream-json",
+              "model_sent": "synthetic-model",
+              "effort": "high",
+              "host": "claude-code",
+              "dispatch_id": "fixture-nav"
+            }
+          },
+          "options": {},
+          "synthetic": true
+        },
+        "text": "[forge-sidecar] iniciado fase=execute-task unidade=checagem-sintetica engine=claude transporte=claude-stream-json modelo_enviado=synthetic-model esforco=high host=claude-code dispatch=fixture-nav provider_called=unknown observado=nao-confirmado",
+        "rubric": {
+          "assessment": "author",
+          "resultado": "ausente",
+          "fase": "presente",
+          "executor": "presente",
+          "proximo_passo": "ausente",
+          "decisao_pendente": "ausente"
+        },
+        "volume": {
+          "lines": 1,
+          "characters": 244
+        },
+        "dumps": {
+          "hashes": 0,
+          "dispatch_or_receipt": 1,
+          "absolute_paths": 0,
+          "helper_lists": 0,
+          "navigation_references": 0
+        },
+        "human_view": {
+          "rule": "complete-v1",
+          "text": "[forge-sidecar] iniciado fase=execute-task unidade=checagem-sintetica engine=claude transporte=claude-stream-json modelo_enviado=synthetic-model esforco=high host=claude-code dispatch=fixture-nav provider_called=unknown observado=nao-confirmado",
+          "volume": {
+            "lines": 1,
+            "characters": 244
+          },
+          "dumps": {
+            "hashes": 0,
+            "dispatch_or_receipt": 1,
+            "absolute_paths": 0,
+            "helper_lists": 0,
+            "navigation_references": 0
+          }
+        }
+      },
+      "after": {
+        "label": "renderizado-offline",
+        "source": {
+          "file": "scripts/forge-sidecar-identity.js",
+          "reference": "scripts/forge-sidecar-identity.js#formatHumanIdentity",
+          "renderer": "formatHumanIdentity",
+          "input": {
+            "stage": "iniciado",
+            "fields": {
+              "phase": "execute-task",
+              "unit": "checagem-sintetica",
+              "engine": "claude",
+              "transport": "claude-stream-json",
+              "model_sent": "synthetic-model",
+              "effort": "high",
+              "host": "claude-code",
+              "dispatch_id": "fixture-nav"
+            }
+          },
+          "options": {},
+          "synthetic": true
+        },
+        "text": "[forge-agente] em execução: checagem-sintetica (execute-task) · executor sidecar claude via claude-stream-json · modelo enviado synthetic-model (aplicação não confirmada) · esforço high · host claude-code · acompanhe nesta conversa; registro técnico dispatch fixture-nav",
+        "rubric": {
+          "assessment": "author",
+          "resultado": "ausente",
+          "fase": "presente",
+          "executor": "presente",
+          "proximo_passo": "presente",
+          "decisao_pendente": "ausente"
+        },
+        "volume": {
+          "lines": 1,
+          "characters": 270
+        },
+        "dumps": {
+          "hashes": 0,
+          "dispatch_or_receipt": 0,
+          "absolute_paths": 0,
+          "helper_lists": 0,
+          "navigation_references": 1
+        },
+        "human_view": {
+          "rule": "identity-human-v1",
+          "text": "[forge-agente] em execução: checagem-sintetica (execute-task) · executor sidecar claude via claude-stream-json · modelo enviado synthetic-model (aplicação não confirmada) · esforço high · host claude-code · acompanhe nesta conversa; registro técnico dispatch fixture-nav",
+          "volume": {
+            "lines": 1,
+            "characters": 270
+          },
+          "dumps": {
+            "hashes": 0,
+            "dispatch_or_receipt": 0,
+            "absolute_paths": 0,
+            "helper_lists": 0,
+            "navigation_references": 1
+          }
+        }
+      },
+      "supporting": {
+        "delivery": {
+          "before": {
+            "label": "renderizado-offline",
+            "source": {
+              "file": "scripts/forge-delivery.js",
+              "reference": "scripts/forge-delivery.js#renderDeliveryMarkdown",
+              "renderer": "renderDeliveryMarkdown",
+              "input": {
+                "unit": {
+                  "id": "entrega-sintetica"
+                },
+                "criteria": [
+                  {
+                    "id": "implementacao-sintetica",
+                    "text": "Verificação sintética concluída",
+                    "reference": "criterio-sintetico",
+                    "status": "verificado",
+                    "evidence": [
+                      {
+                        "positive": true,
+                        "source": "C:/synthetic-forge-fixture/verification.json",
+                        "environment": "offline-sintetico",
+                        "reasons": [
+                          "synthetic-check-passed"
+                        ]
+                      }
+                    ],
+                    "pending": []
+                  },
+                  {
+                    "id": "aceite-sintetico",
+                    "text": "Compreensão e aparência na rodada final",
+                    "reference": "criterio-sintetico",
+                    "status": "não verificado",
+                    "evidence": [],
+                    "pending": [
+                      "pending-final-round"
+                    ]
+                  },
+                  {
+                    "id": "comportamento-sintetico",
+                    "text": "Falha sintética de comportamento preservada",
+                    "reference": "criterio-sintetico",
+                    "status": "não verificado",
+                    "evidence": [
+                      {
+                        "negative": true,
+                        "source": "C:/synthetic-forge-fixture/failure.json",
+                        "environment": "offline-sintetico",
+                        "reasons": [
+                          "synthetic-check-failed"
+                        ]
+                      }
+                    ],
+                    "pending": [
+                      "Falha sintética continua visível."
+                    ]
+                  },
+                  {
+                    "id": "ambiente-sintetico",
+                    "text": "Contexto sintético do ambiente incompleto",
+                    "reference": "criterio-sintetico",
+                    "status": "parcialmente verificado",
+                    "evidence": [
+                      {
+                        "source": "C:/synthetic-forge-fixture/limited.json",
+                        "reasons": [
+                          "source_context_missing:environment",
+                          "synthetic-coverage-unknown"
+                        ]
+                      }
+                    ],
+                    "pending": [
+                      "Ambiente de execução desconhecido."
+                    ]
+                  }
+                ],
+                "facts": [
+                  {
+                    "name": "implementation",
+                    "status": "implementado offline",
+                    "reference": "C:/synthetic-forge-fixture/implementation.json"
+                  },
+                  {
+                    "name": "ci",
+                    "status": "não informado",
+                    "reference": null
+                  },
+                  {
+                    "name": "review",
+                    "status": "pendente",
+                    "reference": null
+                  },
+                  {
+                    "name": "merge",
+                    "status": "pendente",
+                    "reference": null
+                  },
+                  {
+                    "name": "installation",
+                    "status": "pendente",
+                    "reference": null
+                  },
+                  {
+                    "name": "human_acceptance",
+                    "status": "pending-final-round",
+                    "reference": "AUTONOMY-AUTHORIZATION.md"
+                  }
+                ],
+                "diagnostics": []
+              },
+              "options": {
+                "summary": false,
+                "detailReference": "C:/synthetic-forge-fixture/delivery.json"
+              },
+              "synthetic": true
+            },
+            "text": "## Entrega por critério\n\nDetalhe integral reconstruível: C:/synthetic-forge-fixture/delivery.json\n\n| Critério | Situação | Evidência | Ambiente exercitado | Pendência/limite |\n|---|---|---|---|---|\n| aceite-sintetico — Compreensão e aparência na rodada final (criterio-sintetico) | não verificado | nenhuma | não informado | pending-final-round |\n| comportamento-sintetico — Falha sintética de comportamento preservada (criterio-sintetico) | não verificado | falha: C:/synthetic-forge-fixture/failure.json &#91;synthetic-check-failed&#93; | offline-sintetico | Falha sintética continua visível. |\n| ambiente-sintetico — Contexto sintético do ambiente incompleto (criterio-sintetico) | parcialmente verificado | limite: C:/synthetic-forge-fixture/limited.json &#91;source&#95;context&#95;missing:environment, synthetic-coverage-unknown&#93; | não informado | Ambiente de execução desconhecido. |\n| implementacao-sintetica — Verificação sintética concluída (criterio-sintetico) | verificado | ok: C:/synthetic-forge-fixture/verification.json &#91;synthetic-check-passed&#93; | offline-sintetico | nenhuma |\n\n### Fatos independentes\n\n| Fato | Situação | Referência |\n|---|---|---|\n| Implementação | implementado offline | C:/synthetic-forge-fixture/implementation.json |\n| CI | não informado | não informado |\n| Revisão | pendente | não informado |\n| Merge | pendente | não informado |\n| Instalação | pendente | não informado |\n| Aceite humano | pending-final-round | AUTONOMY-AUTHORIZATION.md |\n",
+            "rubric": {
+              "assessment": "author",
+              "resultado": "presente",
+              "fase": "ausente",
+              "executor": "ausente",
+              "proximo_passo": "presente",
+              "decisao_pendente": "presente"
+            },
+            "volume": {
+              "lines": 21,
+              "characters": 1493
+            },
+            "dumps": {
+              "hashes": 0,
+              "dispatch_or_receipt": 0,
+              "absolute_paths": 5,
+              "helper_lists": 0,
+              "navigation_references": 0
+            },
+            "human_view": {
+              "rule": "complete-v1",
+              "text": "## Entrega por critério\n\nDetalhe integral reconstruível: C:/synthetic-forge-fixture/delivery.json\n\n| Critério | Situação | Evidência | Ambiente exercitado | Pendência/limite |\n|---|---|---|---|---|\n| aceite-sintetico — Compreensão e aparência na rodada final (criterio-sintetico) | não verificado | nenhuma | não informado | pending-final-round |\n| comportamento-sintetico — Falha sintética de comportamento preservada (criterio-sintetico) | não verificado | falha: C:/synthetic-forge-fixture/failure.json &#91;synthetic-check-failed&#93; | offline-sintetico | Falha sintética continua visível. |\n| ambiente-sintetico — Contexto sintético do ambiente incompleto (criterio-sintetico) | parcialmente verificado | limite: C:/synthetic-forge-fixture/limited.json &#91;source&#95;context&#95;missing:environment, synthetic-coverage-unknown&#93; | não informado | Ambiente de execução desconhecido. |\n| implementacao-sintetica — Verificação sintética concluída (criterio-sintetico) | verificado | ok: C:/synthetic-forge-fixture/verification.json &#91;synthetic-check-passed&#93; | offline-sintetico | nenhuma |\n\n### Fatos independentes\n\n| Fato | Situação | Referência |\n|---|---|---|\n| Implementação | implementado offline | C:/synthetic-forge-fixture/implementation.json |\n| CI | não informado | não informado |\n| Revisão | pendente | não informado |\n| Merge | pendente | não informado |\n| Instalação | pendente | não informado |\n| Aceite humano | pending-final-round | AUTONOMY-AUTHORIZATION.md |\n",
+              "volume": {
+                "lines": 21,
+                "characters": 1493
+              },
+              "dumps": {
+                "hashes": 0,
+                "dispatch_or_receipt": 0,
+                "absolute_paths": 5,
+                "helper_lists": 0,
+                "navigation_references": 0
+              }
+            }
+          },
+          "after": {
+            "label": "renderizado-offline",
+            "source": {
+              "file": "scripts/forge-delivery.js",
+              "reference": "scripts/forge-delivery.js#renderDeliveryMarkdown",
+              "renderer": "renderDeliveryMarkdown",
+              "input": {
+                "unit": {
+                  "id": "entrega-sintetica"
+                },
+                "criteria": [
+                  {
+                    "id": "implementacao-sintetica",
+                    "text": "Verificação sintética concluída",
+                    "reference": "criterio-sintetico",
+                    "status": "verificado",
+                    "evidence": [
+                      {
+                        "positive": true,
+                        "source": "C:/synthetic-forge-fixture/verification.json",
+                        "environment": "offline-sintetico",
+                        "reasons": [
+                          "synthetic-check-passed"
+                        ]
+                      }
+                    ],
+                    "pending": []
+                  },
+                  {
+                    "id": "aceite-sintetico",
+                    "text": "Compreensão e aparência na rodada final",
+                    "reference": "criterio-sintetico",
+                    "status": "não verificado",
+                    "evidence": [],
+                    "pending": [
+                      "pending-final-round"
+                    ]
+                  },
+                  {
+                    "id": "comportamento-sintetico",
+                    "text": "Falha sintética de comportamento preservada",
+                    "reference": "criterio-sintetico",
+                    "status": "não verificado",
+                    "evidence": [
+                      {
+                        "negative": true,
+                        "source": "C:/synthetic-forge-fixture/failure.json",
+                        "environment": "offline-sintetico",
+                        "reasons": [
+                          "synthetic-check-failed"
+                        ]
+                      }
+                    ],
+                    "pending": [
+                      "Falha sintética continua visível."
+                    ]
+                  },
+                  {
+                    "id": "ambiente-sintetico",
+                    "text": "Contexto sintético do ambiente incompleto",
+                    "reference": "criterio-sintetico",
+                    "status": "parcialmente verificado",
+                    "evidence": [
+                      {
+                        "source": "C:/synthetic-forge-fixture/limited.json",
+                        "reasons": [
+                          "source_context_missing:environment",
+                          "synthetic-coverage-unknown"
+                        ]
+                      }
+                    ],
+                    "pending": [
+                      "Ambiente de execução desconhecido."
+                    ]
+                  }
+                ],
+                "facts": [
+                  {
+                    "name": "implementation",
+                    "status": "implementado offline",
+                    "reference": "C:/synthetic-forge-fixture/implementation.json"
+                  },
+                  {
+                    "name": "ci",
+                    "status": "não informado",
+                    "reference": null
+                  },
+                  {
+                    "name": "review",
+                    "status": "pendente",
+                    "reference": null
+                  },
+                  {
+                    "name": "merge",
+                    "status": "pendente",
+                    "reference": null
+                  },
+                  {
+                    "name": "installation",
+                    "status": "pendente",
+                    "reference": null
+                  },
+                  {
+                    "name": "human_acceptance",
+                    "status": "pending-final-round",
+                    "reference": "AUTONOMY-AUTHORIZATION.md"
+                  }
+                ],
+                "diagnostics": []
+              },
+              "options": {
+                "detailReference": "C:/synthetic-forge-fixture/delivery.json"
+              },
+              "synthetic": true
+            },
+            "text": "## Entrega por critério\n\nResumo: 1 verificado(s), 1 parcialmente verificado(s) e 2 não verificado(s) de 4 critério(s). Pendências: aceite-sintetico, comportamento-sintetico, ambiente-sintetico. Fatos: Implementação — implementado offline; CI — não informado; Revisão — pendente; Merge — pendente; Instalação — pendente; Aceite humano — pending-final-round. Um fato não implica outro.\n\nDetalhe integral reconstruível: C:/synthetic-forge-fixture/delivery.json\n\n| Critério | Situação | Evidência | Ambiente exercitado | Pendência/limite |\n|---|---|---|---|---|\n| aceite-sintetico — Compreensão e aparência na rodada final (criterio-sintetico) | não verificado | nenhuma | não informado | pending-final-round |\n| comportamento-sintetico — Falha sintética de comportamento preservada (criterio-sintetico) | não verificado | falha: C:/synthetic-forge-fixture/failure.json &#91;synthetic-check-failed&#93; | offline-sintetico | Falha sintética continua visível. |\n| ambiente-sintetico — Contexto sintético do ambiente incompleto (criterio-sintetico) | parcialmente verificado | limite: C:/synthetic-forge-fixture/limited.json &#91;source&#95;context&#95;missing:environment, synthetic-coverage-unknown&#93; | não informado | Ambiente de execução desconhecido. |\n| implementacao-sintetica — Verificação sintética concluída (criterio-sintetico) | verificado | ok: C:/synthetic-forge-fixture/verification.json &#91;synthetic-check-passed&#93; | offline-sintetico | nenhuma |\n\n### Fatos independentes\n\n| Fato | Situação | Referência |\n|---|---|---|\n| Implementação | implementado offline | C:/synthetic-forge-fixture/implementation.json |\n| CI | não informado | não informado |\n| Revisão | pendente | não informado |\n| Merge | pendente | não informado |\n| Instalação | pendente | não informado |\n| Aceite humano | pending-final-round | AUTONOMY-AUTHORIZATION.md |\n",
+            "rubric": {
+              "assessment": "author",
+              "resultado": "presente",
+              "fase": "ausente",
+              "executor": "ausente",
+              "proximo_passo": "presente",
+              "decisao_pendente": "presente"
+            },
+            "volume": {
+              "lines": 23,
+              "characters": 1853
+            },
+            "dumps": {
+              "hashes": 0,
+              "dispatch_or_receipt": 0,
+              "absolute_paths": 5,
+              "helper_lists": 0,
+              "navigation_references": 0
+            },
+            "human_view": {
+              "rule": "delivery-human-v1",
+              "text": "## Entrega por critério\n\nResumo: 1 verificado(s), 1 parcialmente verificado(s) e 2 não verificado(s) de 4 critério(s). Pendências: aceite-sintetico, comportamento-sintetico, ambiente-sintetico. Fatos: Implementação — implementado offline; CI — não informado; Revisão — pendente; Merge — pendente; Instalação — pendente; Aceite humano — pending-final-round. Um fato não implica outro.\n\n\n| Critério | Situação | Evidência | Ambiente exercitado | Pendência/limite |\n| --- | --- | --- | --- | --- |\n| aceite-sintetico — Compreensão e aparência na rodada final (criterio-sintetico) | não verificado | nenhuma | não informado | pending-final-round |\n| comportamento-sintetico — Falha sintética de comportamento preservada (criterio-sintetico) | não verificado | falha &#91;synthetic-check-failed&#93; | offline-sintetico | Falha sintética continua visível. |\n| ambiente-sintetico — Contexto sintético do ambiente incompleto (criterio-sintetico) | parcialmente verificado | limite &#91;source&#95;context&#95;missing:environment, synthetic-coverage-unknown&#93; | não informado | Ambiente de execução desconhecido. |\n| implementacao-sintetica — Verificação sintética concluída (criterio-sintetico) | verificado | ok &#91;synthetic-check-passed&#93; | offline-sintetico | nenhuma |\n\n### Fatos independentes\n\n| Fato | Situação |\n| --- | --- |\n| Implementação | implementado offline |\n| CI | não informado |\n| Revisão | pendente |\n| Merge | pendente |\n| Instalação | pendente |\n| Aceite humano | pending-final-round |\n",
+              "volume": {
+                "lines": 22,
+                "characters": 1508
+              },
+              "dumps": {
+                "hashes": 0,
+                "dispatch_or_receipt": 0,
+                "absolute_paths": 0,
+                "helper_lists": 0,
+                "navigation_references": 0
+              }
+            }
+          }
+        },
+        "timeline": {
+          "before": {
+            "label": "modelo-da-skill",
+            "source": {
+              "file": "docs/communication-evaluation/skill-templates-before.md",
+              "reference": "docs/communication-evaluation/skill-templates-before.md#modelo-literal",
+              "sha256": "4aa6c4a06d2e8183782b97169db3b0ea22f1f891fbf235989afd0867e6249126"
+            },
+            "text": "TaskCreate({ subject: \"[{TASK_ID}] execute\", activeForm: \"execute · forge-executor (sonnet)\" })",
+            "rubric": {
+              "assessment": "author",
+              "resultado": "ausente",
+              "fase": "presente",
+              "executor": "presente",
+              "proximo_passo": "ausente",
+              "decisao_pendente": "ausente"
+            },
+            "volume": {
+              "lines": 1,
+              "characters": 95
+            },
+            "dumps": {
+              "hashes": 0,
+              "dispatch_or_receipt": 0,
+              "absolute_paths": 0,
+              "helper_lists": 0,
+              "navigation_references": 0
+            },
+            "human_view": {
+              "rule": "complete-v1",
+              "text": "TaskCreate({ subject: \"[{TASK_ID}] execute\", activeForm: \"execute · forge-executor (sonnet)\" })",
+              "volume": {
+                "lines": 1,
+                "characters": 95
+              },
+              "dumps": {
+                "hashes": 0,
+                "dispatch_or_receipt": 0,
+                "absolute_paths": 0,
+                "helper_lists": 0,
+                "navigation_references": 0
+              }
+            }
+          },
+          "after": {
+            "label": "modelo-da-skill",
+            "source": {
+              "file": "skills/forge-task/SKILL.md",
+              "reference": "skills/forge-task/SKILL.md#modelo-literal",
+              "sha256": "9bdba39c187aa590cc034d056cad9601c0a3e606edaee299fc5e4594a33cef71"
+            },
+            "text": "TaskCreate({ subject: \"⚡ {TASK_ID} — execute: {descrição humana da task}\", description: \"executor {nativo|sidecar} forge-executor ({modelo resolvido})\", activeForm: \"executando agente: {descrição humana} · forge-executor\" })",
+            "rubric": {
+              "assessment": "author",
+              "resultado": "presente",
+              "fase": "presente",
+              "executor": "presente",
+              "proximo_passo": "ausente",
+              "decisao_pendente": "ausente"
+            },
+            "volume": {
+              "lines": 1,
+              "characters": 224
+            },
+            "dumps": {
+              "hashes": 0,
+              "dispatch_or_receipt": 0,
+              "absolute_paths": 0,
+              "helper_lists": 0,
+              "navigation_references": 0
+            },
+            "human_view": {
+              "rule": "complete-v1",
+              "text": "TaskCreate({ subject: \"⚡ {TASK_ID} — execute: {descrição humana da task}\", description: \"executor {nativo|sidecar} forge-executor ({modelo resolvido})\", activeForm: \"executando agente: {descrição humana} · forge-executor\" })",
+              "volume": {
+                "lines": 1,
+                "characters": 224
+              },
+              "dumps": {
+                "hashes": 0,
+                "dispatch_or_receipt": 0,
+                "absolute_paths": 0,
+                "helper_lists": 0,
+                "navigation_references": 0
+              }
+            }
+          }
+        }
+      },
+      "utility": "A identidade humana explica executor e onde acompanhar; a descrição do trabalho vem do modelo de timeline, e a entrega separa critérios de CI, instalação e aceite. Não se atribui melhora percebida."
+    },
+    {
+      "id": "claude-code-terminal-falha-recuperavel",
+      "host": "claude-code-terminal",
+      "scenario": "falha-recuperavel",
+      "channel": "Claude Code no terminal: TaskCreate/TaskUpdate e ferramenta de pergunta somente quando expostas e permitidas; nenhum acionamento nesta avaliação.",
+      "before": {
+        "label": "renderizado-offline",
+        "source": {
+          "file": "scripts/forge-sidecar-identity.js",
+          "reference": "scripts/forge-sidecar-identity.js#formatIdentityLine",
+          "renderer": "formatIdentityLine",
+          "input": {
+            "stage": "falhou",
+            "fields": {
+              "phase": "execute-task",
+              "unit": "checagem-sintetica",
+              "engine": "claude",
+              "transport": "claude-stream-json",
+              "model_sent": "synthetic-model",
+              "effort": "high",
+              "host": "claude-code",
+              "dispatch_id": "fixture-nav",
+              "reason_code": "anomalous-silence"
+            }
+          },
+          "options": {},
+          "synthetic": true
+        },
+        "text": "[forge-sidecar] falhou fase=execute-task unidade=checagem-sintetica engine=claude transporte=claude-stream-json modelo_enviado=synthetic-model esforco=high host=claude-code dispatch=fixture-nav causa=anomalous-silence provider_called=unknown observado=nao-confirmado",
+        "rubric": {
+          "assessment": "author",
+          "resultado": "ausente",
+          "fase": "presente",
+          "executor": "presente",
+          "proximo_passo": "ausente",
+          "decisao_pendente": "ausente"
+        },
+        "volume": {
+          "lines": 1,
+          "characters": 266
+        },
+        "dumps": {
+          "hashes": 0,
+          "dispatch_or_receipt": 1,
+          "absolute_paths": 0,
+          "helper_lists": 0,
+          "navigation_references": 0
+        },
+        "human_view": {
+          "rule": "complete-v1",
+          "text": "[forge-sidecar] falhou fase=execute-task unidade=checagem-sintetica engine=claude transporte=claude-stream-json modelo_enviado=synthetic-model esforco=high host=claude-code dispatch=fixture-nav causa=anomalous-silence provider_called=unknown observado=nao-confirmado",
+          "volume": {
+            "lines": 1,
+            "characters": 266
+          },
+          "dumps": {
+            "hashes": 0,
+            "dispatch_or_receipt": 1,
+            "absolute_paths": 0,
+            "helper_lists": 0,
+            "navigation_references": 0
+          }
+        }
+      },
+      "after": {
+        "label": "renderizado-offline",
+        "source": {
+          "file": "scripts/forge-sidecar-identity.js",
+          "reference": "scripts/forge-sidecar-identity.js#formatHumanIdentity",
+          "renderer": "formatHumanIdentity",
+          "input": {
+            "stage": "falhou",
+            "fields": {
+              "phase": "execute-task",
+              "unit": "checagem-sintetica",
+              "engine": "claude",
+              "transport": "claude-stream-json",
+              "model_sent": "synthetic-model",
+              "effort": "high",
+              "host": "claude-code",
+              "dispatch_id": "fixture-nav",
+              "reason_code": "anomalous-silence"
+            }
+          },
+          "options": {},
+          "synthetic": true
+        },
+        "text": "[forge-agente] falhou: checagem-sintetica (execute-task) · executor sidecar claude via claude-stream-json · modelo enviado synthetic-model (aplicação não confirmada) · esforço high · host claude-code · causa anomalous-silence · provedor chamado: desconhecido · próximo passo: inspecione o processo e o receipt antes de nova tentativa · acompanhe nesta conversa; registro técnico dispatch fixture-nav",
+        "rubric": {
+          "assessment": "author",
+          "resultado": "ausente",
+          "fase": "presente",
+          "executor": "presente",
+          "proximo_passo": "presente",
+          "decisao_pendente": "ausente"
+        },
+        "volume": {
+          "lines": 1,
+          "characters": 399
+        },
+        "dumps": {
+          "hashes": 0,
+          "dispatch_or_receipt": 0,
+          "absolute_paths": 0,
+          "helper_lists": 0,
+          "navigation_references": 1
+        },
+        "human_view": {
+          "rule": "identity-human-v1",
+          "text": "[forge-agente] falhou: checagem-sintetica (execute-task) · executor sidecar claude via claude-stream-json · modelo enviado synthetic-model (aplicação não confirmada) · esforço high · host claude-code · causa anomalous-silence · provedor chamado: desconhecido · próximo passo: inspecione o processo e o receipt antes de nova tentativa · acompanhe nesta conversa; registro técnico dispatch fixture-nav",
+          "volume": {
+            "lines": 1,
+            "characters": 399
+          },
+          "dumps": {
+            "hashes": 0,
+            "dispatch_or_receipt": 0,
+            "absolute_paths": 0,
+            "helper_lists": 0,
+            "navigation_references": 1
+          }
+        }
+      },
+      "supporting": {
+        "partial": {
+          "before": {
+            "label": "modelo-da-skill",
+            "source": {
+              "file": "docs/communication-evaluation/skill-templates-before.md",
+              "reference": "docs/communication-evaluation/skill-templates-before.md#parcial",
+              "sha256": "4aa6c4a06d2e8183782b97169db3b0ea22f1f891fbf235989afd0867e6249126"
+            },
+            "text": "Trabalho parcial salvo. Execute `/forge-next` para retomar de onde parou.",
+            "rubric": {
+              "assessment": "author",
+              "resultado": "presente",
+              "fase": "ausente",
+              "executor": "ausente",
+              "proximo_passo": "presente",
+              "decisao_pendente": "ausente"
+            },
+            "volume": {
+              "lines": 1,
+              "characters": 73
+            },
+            "dumps": {
+              "hashes": 0,
+              "dispatch_or_receipt": 0,
+              "absolute_paths": 0,
+              "helper_lists": 0,
+              "navigation_references": 0
+            },
+            "human_view": {
+              "rule": "complete-v1",
+              "text": "Trabalho parcial salvo. Execute `/forge-next` para retomar de onde parou.",
+              "volume": {
+                "lines": 1,
+                "characters": 73
+              },
+              "dumps": {
+                "hashes": 0,
+                "dispatch_or_receipt": 0,
+                "absolute_paths": 0,
+                "helper_lists": 0,
+                "navigation_references": 0
+              }
+            }
+          },
+          "after": {
+            "label": "modelo-da-skill",
+            "source": {
+              "file": "skills/forge-next/SKILL.md",
+              "reference": "skills/forge-next/SKILL.md#parcial",
+              "sha256": "375a6b5c3fa2ed371174ad0d94b36a8755cb6cc3896509f4fcf7db187cd545e9"
+            },
+            "text": "Trabalho parcial salvo em continue.md: {o que ficou feito}. Continua executável: {o que segue}. Decisão pendente: {ID ou nenhuma}. Para retomar: /forge-next.",
+            "rubric": {
+              "assessment": "author",
+              "resultado": "presente",
+              "fase": "ausente",
+              "executor": "ausente",
+              "proximo_passo": "presente",
+              "decisao_pendente": "presente"
+            },
+            "volume": {
+              "lines": 1,
+              "characters": 157
+            },
+            "dumps": {
+              "hashes": 0,
+              "dispatch_or_receipt": 0,
+              "absolute_paths": 0,
+              "helper_lists": 0,
+              "navigation_references": 0
+            },
+            "human_view": {
+              "rule": "complete-v1",
+              "text": "Trabalho parcial salvo em continue.md: {o que ficou feito}. Continua executável: {o que segue}. Decisão pendente: {ID ou nenhuma}. Para retomar: /forge-next.",
+              "volume": {
+                "lines": 1,
+                "characters": 157
+              },
+              "dumps": {
+                "hashes": 0,
+                "dispatch_or_receipt": 0,
+                "absolute_paths": 0,
+                "helper_lists": 0,
+                "navigation_references": 0
+              }
+            }
+          }
+        },
+        "recovery": {
+          "before": {
+            "label": "renderizado-offline",
+            "source": {
+              "file": "scripts/forge-recovery-diagnostic.js",
+              "reference": "scripts/forge-recovery-diagnostic.js#renderRecovery",
+              "renderer": "renderRecovery",
+              "input": {
+                "id": "recuperacao-sintetica",
+                "observedAt": "2000-01-01T00:00:00.000Z",
+                "status": "partial",
+                "sources": [
+                  {
+                    "name": "personal-store",
+                    "state": "current",
+                    "source": "C:/synthetic-forge-fixture/context.json",
+                    "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                  }
+                ],
+                "provenResults": [
+                  {
+                    "kind": "personal-checkpoint",
+                    "evidence": {
+                      "text": "Verificação sintética preservada; publicação ainda desconhecida.",
+                      "validity": "current",
+                      "resolved": false,
+                      "source": "C:/synthetic-forge-fixture/capture.json",
+                      "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                      "capturedAt": "2000-01-01T00:00:00.000Z"
+                    }
+                  }
+                ],
+                "uncertainties": [
+                  "Executor observado desconhecido; causa da interrupção desconhecida."
+                ],
+                "artifacts": [
+                  {
+                    "kind": "summary",
+                    "existence": "observed",
+                    "integrity": "unverified",
+                    "source": "C:/synthetic-forge-fixture/summary.md",
+                    "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "conflicts": 2
+                  },
+                  {
+                    "kind": "summary",
+                    "existence": "observed",
+                    "integrity": "unverified",
+                    "source": "C:/synthetic-forge-fixture/summary-uncontested.md",
+                    "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "conflicts": 0
+                  }
+                ],
+                "continuity": {
+                  "state": "recorded",
+                  "bound": true,
+                  "workStatus": "pending",
+                  "activity": "unknown",
+                  "checkpoint": {}
+                },
+                "pendingDecisions": [
+                  {
+                    "text": "escolha-sintetica: aguardar a inspeção do processo?",
+                    "validity": "current",
+                    "resolved": false,
+                    "source": "C:/synthetic-forge-fixture/capture.json",
+                    "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "capturedAt": "2000-01-01T00:00:00.000Z"
+                  }
+                ],
+                "acceptances": [],
+                "claim": {
+                  "state": "unknown"
+                },
+                "controller": {
+                  "coverage": "unknown",
+                  "globalCompletion": "unknown"
+                },
+                "coverage": {
+                  "personal": "observed",
+                  "claim": "not-observed",
+                  "controller": "not-observed",
+                  "artifacts": "observed"
+                },
+                "uncovered": [
+                  "sweep",
+                  "sidecar-reset",
+                  "other-journals"
+                ],
+                "nextSafeStep": "Inspecionar processo e receipt antes de nova tentativa; causa e chamada ao provedor continuam desconhecidas."
+              },
+              "options": {
+                "summary": false
+              },
+              "synthetic": true
+            },
+            "text": "Diagnóstico de recuperação: recuperacao-sintetica\nObservado em: 2000-01-01T00:00:00.000Z\nEstado: parcial (não significa conclusão do trabalho)\n\nFontes e estado da evidência:\n- store pessoal: atual\n    Fonte: C:/synthetic-forge-fixture/context.json\n    SHA-256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\nResultado comprovado:\n- resultado registrado no checkpoint: Verificação sintética preservada; publicação ainda desconhecida. — atual; resolvido: não\n    Fonte: C:/synthetic-forge-fixture/capture.json; SHA-256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; capturado em: 2000-01-01T00:00:00.000Z\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nIncertezas:\n- Executor observado desconhecido; causa da interrupção desconhecida.\n\nArtefatos preservados:\n- resumo: observado; integridade: não verificado\n    Fonte: C:/synthetic-forge-fixture/summary.md; SHA-256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; conflitos: 2\n- resumo: observado; integridade: não verificado\n    Fonte: C:/synthetic-forge-fixture/summary-uncontested.md; SHA-256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; conflitos: 0\n\nContinuidade pessoal:\n- Registro: registrado; vínculo pessoal: sim\n- Situação do trabalho: pendente; atividade: desconhecido\n\nDecisões pendentes:\n- escolha-sintetica: aguardar a inspeção do processo? — atual; resolvido: não\n    Fonte: C:/synthetic-forge-fixture/capture.json; SHA-256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; capturado em: 2000-01-01T00:00:00.000Z\n\nAceites registrados:\n- Nenhum registro nas fontes observadas.\n\nReserva de escrita:\n- Estado: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nControlador:\n- Cobertura: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nFamílias não cobertas (resultado desconhecido):\n- limpeza\n- reinício do sidecar\n- outros journals\n\nPróximo passo seguro: Inspecionar processo e receipt antes de nova tentativa; causa e chamada ao provedor continuam desconhecidas.\n",
+            "rubric": {
+              "assessment": "author",
+              "resultado": "presente",
+              "fase": "desconhecido",
+              "executor": "desconhecido",
+              "proximo_passo": "presente",
+              "decisao_pendente": "presente"
+            },
+            "volume": {
+              "lines": 48,
+              "characters": 2108
+            },
+            "dumps": {
+              "hashes": 5,
+              "dispatch_or_receipt": 0,
+              "absolute_paths": 5,
+              "helper_lists": 0,
+              "navigation_references": 0
+            },
+            "human_view": {
+              "rule": "complete-v1",
+              "text": "Diagnóstico de recuperação: recuperacao-sintetica\nObservado em: 2000-01-01T00:00:00.000Z\nEstado: parcial (não significa conclusão do trabalho)\n\nFontes e estado da evidência:\n- store pessoal: atual\n    Fonte: C:/synthetic-forge-fixture/context.json\n    SHA-256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\nResultado comprovado:\n- resultado registrado no checkpoint: Verificação sintética preservada; publicação ainda desconhecida. — atual; resolvido: não\n    Fonte: C:/synthetic-forge-fixture/capture.json; SHA-256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; capturado em: 2000-01-01T00:00:00.000Z\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nIncertezas:\n- Executor observado desconhecido; causa da interrupção desconhecida.\n\nArtefatos preservados:\n- resumo: observado; integridade: não verificado\n    Fonte: C:/synthetic-forge-fixture/summary.md; SHA-256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; conflitos: 2\n- resumo: observado; integridade: não verificado\n    Fonte: C:/synthetic-forge-fixture/summary-uncontested.md; SHA-256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; conflitos: 0\n\nContinuidade pessoal:\n- Registro: registrado; vínculo pessoal: sim\n- Situação do trabalho: pendente; atividade: desconhecido\n\nDecisões pendentes:\n- escolha-sintetica: aguardar a inspeção do processo? — atual; resolvido: não\n    Fonte: C:/synthetic-forge-fixture/capture.json; SHA-256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; capturado em: 2000-01-01T00:00:00.000Z\n\nAceites registrados:\n- Nenhum registro nas fontes observadas.\n\nReserva de escrita:\n- Estado: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nControlador:\n- Cobertura: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nFamílias não cobertas (resultado desconhecido):\n- limpeza\n- reinício do sidecar\n- outros journals\n\nPróximo passo seguro: Inspecionar processo e receipt antes de nova tentativa; causa e chamada ao provedor continuam desconhecidas.\n",
+              "volume": {
+                "lines": 48,
+                "characters": 2108
+              },
+              "dumps": {
+                "hashes": 5,
+                "dispatch_or_receipt": 0,
+                "absolute_paths": 5,
+                "helper_lists": 0,
+                "navigation_references": 0
+              }
+            }
+          },
+          "after": {
+            "label": "renderizado-offline",
+            "source": {
+              "file": "scripts/forge-recovery-diagnostic.js",
+              "reference": "scripts/forge-recovery-diagnostic.js#renderRecovery",
+              "renderer": "renderRecovery",
+              "input": {
+                "id": "recuperacao-sintetica",
+                "observedAt": "2000-01-01T00:00:00.000Z",
+                "status": "partial",
+                "sources": [
+                  {
+                    "name": "personal-store",
+                    "state": "current",
+                    "source": "C:/synthetic-forge-fixture/context.json",
+                    "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                  }
+                ],
+                "provenResults": [
+                  {
+                    "kind": "personal-checkpoint",
+                    "evidence": {
+                      "text": "Verificação sintética preservada; publicação ainda desconhecida.",
+                      "validity": "current",
+                      "resolved": false,
+                      "source": "C:/synthetic-forge-fixture/capture.json",
+                      "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                      "capturedAt": "2000-01-01T00:00:00.000Z"
+                    }
+                  }
+                ],
+                "uncertainties": [
+                  "Executor observado desconhecido; causa da interrupção desconhecida."
+                ],
+                "artifacts": [
+                  {
+                    "kind": "summary",
+                    "existence": "observed",
+                    "integrity": "unverified",
+                    "source": "C:/synthetic-forge-fixture/summary.md",
+                    "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "conflicts": 2
+                  },
+                  {
+                    "kind": "summary",
+                    "existence": "observed",
+                    "integrity": "unverified",
+                    "source": "C:/synthetic-forge-fixture/summary-uncontested.md",
+                    "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "conflicts": 0
+                  }
+                ],
+                "continuity": {
+                  "state": "recorded",
+                  "bound": true,
+                  "workStatus": "pending",
+                  "activity": "unknown",
+                  "checkpoint": {}
+                },
+                "pendingDecisions": [
+                  {
+                    "text": "escolha-sintetica: aguardar a inspeção do processo?",
+                    "validity": "current",
+                    "resolved": false,
+                    "source": "C:/synthetic-forge-fixture/capture.json",
+                    "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "capturedAt": "2000-01-01T00:00:00.000Z"
+                  }
+                ],
+                "acceptances": [],
+                "claim": {
+                  "state": "unknown"
+                },
+                "controller": {
+                  "coverage": "unknown",
+                  "globalCompletion": "unknown"
+                },
+                "coverage": {
+                  "personal": "observed",
+                  "claim": "not-observed",
+                  "controller": "not-observed",
+                  "artifacts": "observed"
+                },
+                "uncovered": [
+                  "sweep",
+                  "sidecar-reset",
+                  "other-journals"
+                ],
+                "nextSafeStep": "Inspecionar processo e receipt antes de nova tentativa; causa e chamada ao provedor continuam desconhecidas."
+              },
+              "options": {},
+              "synthetic": true
+            },
+            "text": "Resumo da recuperação de recuperacao-sintetica\nSituação: parcial (não significa conclusão do trabalho)\nResultados já comprovados: observação incompleta\nIncertezas em aberto: 1 (Executor observado desconhecido; causa da interrupção desconhecida.)\nPendências de decisão: 1; aceites no registro: 0\nPróximo passo seguro: Inspecionar processo e receipt antes de nova tentativa; causa e chamada ao provedor continuam desconhecidas.\nFontes, SHA-256 e detalhes ficam no registro técnico abaixo.\n\nDiagnóstico de recuperação: recuperacao-sintetica\nObservado em: 2000-01-01T00:00:00.000Z\nEstado: parcial (não significa conclusão do trabalho)\n\nFontes e estado da evidência:\n- store pessoal: atual\n    Fonte: C:/synthetic-forge-fixture/context.json\n    SHA-256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\nResultado comprovado:\n- resultado registrado no checkpoint: Verificação sintética preservada; publicação ainda desconhecida. — atual; resolvido: não\n    Fonte: C:/synthetic-forge-fixture/capture.json; SHA-256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; capturado em: 2000-01-01T00:00:00.000Z\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nIncertezas:\n- Executor observado desconhecido; causa da interrupção desconhecida.\n\nArtefatos preservados:\n- resumo: observado; integridade: não verificado\n    Fonte: C:/synthetic-forge-fixture/summary.md; SHA-256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; conflitos: 2\n- resumo: observado; integridade: não verificado\n    Fonte: C:/synthetic-forge-fixture/summary-uncontested.md; SHA-256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; conflitos: 0\n\nContinuidade pessoal:\n- Registro: registrado; vínculo pessoal: sim\n- Situação do trabalho: pendente; atividade: desconhecido\n\nDecisões pendentes:\n- escolha-sintetica: aguardar a inspeção do processo? — atual; resolvido: não\n    Fonte: C:/synthetic-forge-fixture/capture.json; SHA-256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; capturado em: 2000-01-01T00:00:00.000Z\n\nAceites registrados:\n- Nenhum registro nas fontes observadas.\n\nReserva de escrita:\n- Estado: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nControlador:\n- Cobertura: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nFamílias não cobertas (resultado desconhecido):\n- limpeza\n- reinício do sidecar\n- outros journals\n\nPróximo passo seguro: Inspecionar processo e receipt antes de nova tentativa; causa e chamada ao provedor continuam desconhecidas.\n",
+            "rubric": {
+              "assessment": "author",
+              "resultado": "presente",
+              "fase": "desconhecido",
+              "executor": "desconhecido",
+              "proximo_passo": "presente",
+              "decisao_pendente": "presente"
+            },
+            "volume": {
+              "lines": 56,
+              "characters": 2596
+            },
+            "dumps": {
+              "hashes": 5,
+              "dispatch_or_receipt": 0,
+              "absolute_paths": 5,
+              "helper_lists": 0,
+              "navigation_references": 0
+            },
+            "human_view": {
+              "rule": "recovery-human-v1",
+              "text": "Resumo da recuperação de recuperacao-sintetica\nSituação: parcial (não significa conclusão do trabalho)\nResultados já comprovados: observação incompleta\nIncertezas em aberto: 1 (Executor observado desconhecido; causa da interrupção desconhecida.)\nPendências de decisão: 1; aceites no registro: 0\nPróximo passo seguro: Inspecionar processo e receipt antes de nova tentativa; causa e chamada ao provedor continuam desconhecidas.\n\nDiagnóstico de recuperação: recuperacao-sintetica\nEstado: parcial (não significa conclusão do trabalho)\n\nFontes e estado da evidência:\n- store pessoal: atual\n\nResultado comprovado:\n- resultado registrado no checkpoint: Verificação sintética preservada; publicação ainda desconhecida. — atual; resolvido: não\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nIncertezas:\n- Executor observado desconhecido; causa da interrupção desconhecida.\n\nArtefatos preservados:\n- resumo: observado; integridade: não verificado\n    conflitos: 2\n- resumo: observado; integridade: não verificado\n    conflitos: 0\n\nContinuidade pessoal:\n- Registro: registrado; vínculo pessoal: sim\n- Situação do trabalho: pendente; atividade: desconhecido\n\nDecisões pendentes:\n- escolha-sintetica: aguardar a inspeção do processo? — atual; resolvido: não\n\nAceites registrados:\n- Nenhum registro nas fontes observadas.\n\nReserva de escrita:\n- Estado: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nControlador:\n- Cobertura: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nFamílias não cobertas (resultado desconhecido):\n- limpeza\n- reinício do sidecar\n- outros journals\n\nPróximo passo seguro: Inspecionar processo e receipt antes de nova tentativa; causa e chamada ao provedor continuam desconhecidas.\n",
+              "volume": {
+                "lines": 50,
+                "characters": 1781
+              },
+              "dumps": {
+                "hashes": 0,
+                "dispatch_or_receipt": 0,
+                "absolute_paths": 0,
+                "helper_lists": 0,
+                "navigation_references": 0
+              }
+            }
+          }
+        }
+      },
+      "utility": "A falha mantém o provedor desconhecido e orienta inspeção antes de tentar de novo. O parcial explicita o que continua executável; a amostra não prova retomada real nem disponibilidade do destino."
+    },
+    {
+      "id": "claude-code-terminal-decisao-humana",
+      "host": "claude-code-terminal",
+      "scenario": "decisao-humana",
+      "channel": "Claude Code no terminal: TaskCreate/TaskUpdate e ferramenta de pergunta somente quando expostas e permitidas; nenhum acionamento nesta avaliação.",
+      "before": {
+        "label": "redigido",
+        "source": {
+          "file": "shared/forge-interaction.md",
+          "reference": "shared/forge-interaction.md#decision-handling",
+          "synthetic": true
+        },
+        "text": "O diagnóstico terminou e a publicação aguarda definição. Há fontes preservadas e uma inspeção por fazer; escolha-sintetica: aguardar a inspeção do processo? A resposta é necessária antes de continuar a ação dependente.",
+        "rubric": {
+          "assessment": "author",
+          "resultado": "presente",
+          "fase": "ausente",
+          "executor": "ausente",
+          "proximo_passo": "desconhecido",
+          "decisao_pendente": "presente"
+        },
+        "volume": {
+          "lines": 1,
+          "characters": 218
+        },
+        "dumps": {
+          "hashes": 0,
+          "dispatch_or_receipt": 0,
+          "absolute_paths": 0,
+          "helper_lists": 0,
+          "navigation_references": 0
+        },
+        "human_view": {
+          "rule": "complete-v1",
+          "text": "O diagnóstico terminou e a publicação aguarda definição. Há fontes preservadas e uma inspeção por fazer; escolha-sintetica: aguardar a inspeção do processo? A resposta é necessária antes de continuar a ação dependente.",
+          "volume": {
+            "lines": 1,
+            "characters": 218
+          },
+          "dumps": {
+            "hashes": 0,
+            "dispatch_or_receipt": 0,
+            "absolute_paths": 0,
+            "helper_lists": 0,
+            "navigation_references": 0
+          }
+        }
+      },
+      "after": {
+        "label": "redigido",
+        "source": {
+          "file": "shared/forge-interaction.md",
+          "reference": "shared/forge-interaction.md#decision-handling",
+          "synthetic": true
+        },
+        "text": "Resultado buscado: definir a continuação segura. Fase: aguardando decisão. Executor observado: desconhecido.\n\nDecisão pendente: escolha-sintetica — aguardar a inspeção do processo? A ação dependente continua bloqueada; investigação independente pode prosseguir.\n\nPróximo passo: responder a escolha-sintetica. Use uma ferramenta nativa realmente exposta e permitida para finalidade e modo; sem ela, apresente a pergunta em texto separado e aguarde resposta explícita. Silêncio, timeout, fechamento e resposta vazia não resolvem a decisão.",
+        "rubric": {
+          "assessment": "author",
+          "resultado": "presente",
+          "fase": "presente",
+          "executor": "desconhecido",
+          "proximo_passo": "presente",
+          "decisao_pendente": "presente"
+        },
+        "volume": {
+          "lines": 5,
+          "characters": 537
+        },
+        "dumps": {
+          "hashes": 0,
+          "dispatch_or_receipt": 0,
+          "absolute_paths": 0,
+          "helper_lists": 0,
+          "navigation_references": 0
+        },
+        "human_view": {
+          "rule": "complete-v1",
+          "text": "Resultado buscado: definir a continuação segura. Fase: aguardando decisão. Executor observado: desconhecido.\n\nDecisão pendente: escolha-sintetica — aguardar a inspeção do processo? A ação dependente continua bloqueada; investigação independente pode prosseguir.\n\nPróximo passo: responder a escolha-sintetica. Use uma ferramenta nativa realmente exposta e permitida para finalidade e modo; sem ela, apresente a pergunta em texto separado e aguarde resposta explícita. Silêncio, timeout, fechamento e resposta vazia não resolvem a decisão.",
+          "volume": {
+            "lines": 5,
+            "characters": 537
+          },
+          "dumps": {
+            "hashes": 0,
+            "dispatch_or_receipt": 0,
+            "absolute_paths": 0,
+            "helper_lists": 0,
+            "navigation_references": 0
+          }
+        }
+      },
+      "utility": "A pergunta redigida fica separada do progresso e conserva ID, consequência e ausência de consentimento por silêncio. Não demonstra apresentação de cartão, resposta humana ou funcionamento da ferramenta."
+    },
+    {
+      "id": "codex-vscode-diagnostico",
+      "host": "codex-vscode",
+      "scenario": "diagnostico",
+      "channel": "Codex no VS Code: texto; ferramenta de plano ou pergunta somente quando realmente exposta e permitida para finalidade e modo. Citações TaskCreate são modelos de origem Claude, não chamadas Codex.",
+      "before": {
+        "label": "renderizado-offline",
+        "source": {
+          "file": "scripts/forge-recovery-diagnostic.js",
+          "reference": "scripts/forge-recovery-diagnostic.js#renderRecovery",
+          "renderer": "renderRecovery",
+          "input": {
+            "id": "recuperacao-sintetica",
+            "observedAt": "2000-01-01T00:00:00.000Z",
+            "status": "partial",
+            "sources": [
+              {
+                "name": "personal-store",
+                "state": "current",
+                "source": "C:/synthetic-forge-fixture/context.json",
+                "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "provenResults": [
+              {
+                "kind": "personal-checkpoint",
+                "evidence": {
+                  "text": "Verificação sintética preservada; publicação ainda desconhecida.",
+                  "validity": "current",
+                  "resolved": false,
+                  "source": "C:/synthetic-forge-fixture/capture.json",
+                  "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "capturedAt": "2000-01-01T00:00:00.000Z"
+                }
+              }
+            ],
+            "uncertainties": [
+              "Executor observado desconhecido; causa da interrupção desconhecida."
+            ],
+            "artifacts": [
+              {
+                "kind": "summary",
+                "existence": "observed",
+                "integrity": "unverified",
+                "source": "C:/synthetic-forge-fixture/summary.md",
+                "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "conflicts": 2
+              },
+              {
+                "kind": "summary",
+                "existence": "observed",
+                "integrity": "unverified",
+                "source": "C:/synthetic-forge-fixture/summary-uncontested.md",
+                "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "conflicts": 0
+              }
+            ],
+            "continuity": {
+              "state": "recorded",
+              "bound": true,
+              "workStatus": "pending",
+              "activity": "unknown",
+              "checkpoint": {}
+            },
+            "pendingDecisions": [
+              {
+                "text": "escolha-sintetica: aguardar a inspeção do processo?",
+                "validity": "current",
+                "resolved": false,
+                "source": "C:/synthetic-forge-fixture/capture.json",
+                "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "capturedAt": "2000-01-01T00:00:00.000Z"
+              }
+            ],
+            "acceptances": [],
+            "claim": {
+              "state": "unknown"
+            },
+            "controller": {
+              "coverage": "unknown",
+              "globalCompletion": "unknown"
+            },
+            "coverage": {
+              "personal": "observed",
+              "claim": "not-observed",
+              "controller": "not-observed",
+              "artifacts": "observed"
+            },
+            "uncovered": [
+              "sweep",
+              "sidecar-reset",
+              "other-journals"
+            ],
+            "nextSafeStep": "Inspecionar processo e receipt; preservar a decisão escolha-sintetica e a evidência antes de retomar."
+          },
+          "options": {
+            "summary": false
+          },
+          "synthetic": true
+        },
+        "text": "Diagnóstico de recuperação: recuperacao-sintetica\nObservado em: 2000-01-01T00:00:00.000Z\nEstado: parcial (não significa conclusão do trabalho)\n\nFontes e estado da evidência:\n- store pessoal: atual\n    Fonte: C:/synthetic-forge-fixture/context.json\n    SHA-256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\nResultado comprovado:\n- resultado registrado no checkpoint: Verificação sintética preservada; publicação ainda desconhecida. — atual; resolvido: não\n    Fonte: C:/synthetic-forge-fixture/capture.json; SHA-256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; capturado em: 2000-01-01T00:00:00.000Z\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nIncertezas:\n- Executor observado desconhecido; causa da interrupção desconhecida.\n\nArtefatos preservados:\n- resumo: observado; integridade: não verificado\n    Fonte: C:/synthetic-forge-fixture/summary.md; SHA-256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; conflitos: 2\n- resumo: observado; integridade: não verificado\n    Fonte: C:/synthetic-forge-fixture/summary-uncontested.md; SHA-256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; conflitos: 0\n\nContinuidade pessoal:\n- Registro: registrado; vínculo pessoal: sim\n- Situação do trabalho: pendente; atividade: desconhecido\n\nDecisões pendentes:\n- escolha-sintetica: aguardar a inspeção do processo? — atual; resolvido: não\n    Fonte: C:/synthetic-forge-fixture/capture.json; SHA-256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; capturado em: 2000-01-01T00:00:00.000Z\n\nAceites registrados:\n- Nenhum registro nas fontes observadas.\n\nReserva de escrita:\n- Estado: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nControlador:\n- Cobertura: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nFamílias não cobertas (resultado desconhecido):\n- limpeza\n- reinício do sidecar\n- outros journals\n\nPróximo passo seguro: Inspecionar processo e receipt; preservar a decisão escolha-sintetica e a evidência antes de retomar.\n",
+        "rubric": {
+          "assessment": "author",
+          "resultado": "presente",
+          "fase": "desconhecido",
+          "executor": "desconhecido",
+          "proximo_passo": "presente",
+          "decisao_pendente": "presente"
+        },
+        "volume": {
+          "lines": 48,
+          "characters": 2101
+        },
+        "dumps": {
+          "hashes": 5,
+          "dispatch_or_receipt": 0,
+          "absolute_paths": 5,
+          "helper_lists": 0,
+          "navigation_references": 0
+        },
+        "human_view": {
+          "rule": "complete-v1",
+          "text": "Diagnóstico de recuperação: recuperacao-sintetica\nObservado em: 2000-01-01T00:00:00.000Z\nEstado: parcial (não significa conclusão do trabalho)\n\nFontes e estado da evidência:\n- store pessoal: atual\n    Fonte: C:/synthetic-forge-fixture/context.json\n    SHA-256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\nResultado comprovado:\n- resultado registrado no checkpoint: Verificação sintética preservada; publicação ainda desconhecida. — atual; resolvido: não\n    Fonte: C:/synthetic-forge-fixture/capture.json; SHA-256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; capturado em: 2000-01-01T00:00:00.000Z\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nIncertezas:\n- Executor observado desconhecido; causa da interrupção desconhecida.\n\nArtefatos preservados:\n- resumo: observado; integridade: não verificado\n    Fonte: C:/synthetic-forge-fixture/summary.md; SHA-256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; conflitos: 2\n- resumo: observado; integridade: não verificado\n    Fonte: C:/synthetic-forge-fixture/summary-uncontested.md; SHA-256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; conflitos: 0\n\nContinuidade pessoal:\n- Registro: registrado; vínculo pessoal: sim\n- Situação do trabalho: pendente; atividade: desconhecido\n\nDecisões pendentes:\n- escolha-sintetica: aguardar a inspeção do processo? — atual; resolvido: não\n    Fonte: C:/synthetic-forge-fixture/capture.json; SHA-256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; capturado em: 2000-01-01T00:00:00.000Z\n\nAceites registrados:\n- Nenhum registro nas fontes observadas.\n\nReserva de escrita:\n- Estado: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nControlador:\n- Cobertura: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nFamílias não cobertas (resultado desconhecido):\n- limpeza\n- reinício do sidecar\n- outros journals\n\nPróximo passo seguro: Inspecionar processo e receipt; preservar a decisão escolha-sintetica e a evidência antes de retomar.\n",
+          "volume": {
+            "lines": 48,
+            "characters": 2101
+          },
+          "dumps": {
+            "hashes": 5,
+            "dispatch_or_receipt": 0,
+            "absolute_paths": 5,
+            "helper_lists": 0,
+            "navigation_references": 0
+          }
+        }
+      },
+      "after": {
+        "label": "renderizado-offline",
+        "source": {
+          "file": "scripts/forge-recovery-diagnostic.js",
+          "reference": "scripts/forge-recovery-diagnostic.js#renderRecovery",
+          "renderer": "renderRecovery",
+          "input": {
+            "id": "recuperacao-sintetica",
+            "observedAt": "2000-01-01T00:00:00.000Z",
+            "status": "partial",
+            "sources": [
+              {
+                "name": "personal-store",
+                "state": "current",
+                "source": "C:/synthetic-forge-fixture/context.json",
+                "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "provenResults": [
+              {
+                "kind": "personal-checkpoint",
+                "evidence": {
+                  "text": "Verificação sintética preservada; publicação ainda desconhecida.",
+                  "validity": "current",
+                  "resolved": false,
+                  "source": "C:/synthetic-forge-fixture/capture.json",
+                  "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "capturedAt": "2000-01-01T00:00:00.000Z"
+                }
+              }
+            ],
+            "uncertainties": [
+              "Executor observado desconhecido; causa da interrupção desconhecida."
+            ],
+            "artifacts": [
+              {
+                "kind": "summary",
+                "existence": "observed",
+                "integrity": "unverified",
+                "source": "C:/synthetic-forge-fixture/summary.md",
+                "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "conflicts": 2
+              },
+              {
+                "kind": "summary",
+                "existence": "observed",
+                "integrity": "unverified",
+                "source": "C:/synthetic-forge-fixture/summary-uncontested.md",
+                "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "conflicts": 0
+              }
+            ],
+            "continuity": {
+              "state": "recorded",
+              "bound": true,
+              "workStatus": "pending",
+              "activity": "unknown",
+              "checkpoint": {}
+            },
+            "pendingDecisions": [
+              {
+                "text": "escolha-sintetica: aguardar a inspeção do processo?",
+                "validity": "current",
+                "resolved": false,
+                "source": "C:/synthetic-forge-fixture/capture.json",
+                "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "capturedAt": "2000-01-01T00:00:00.000Z"
+              }
+            ],
+            "acceptances": [],
+            "claim": {
+              "state": "unknown"
+            },
+            "controller": {
+              "coverage": "unknown",
+              "globalCompletion": "unknown"
+            },
+            "coverage": {
+              "personal": "observed",
+              "claim": "not-observed",
+              "controller": "not-observed",
+              "artifacts": "observed"
+            },
+            "uncovered": [
+              "sweep",
+              "sidecar-reset",
+              "other-journals"
+            ],
+            "nextSafeStep": "Inspecionar processo e receipt; preservar a decisão escolha-sintetica e a evidência antes de retomar."
+          },
+          "options": {},
+          "synthetic": true
+        },
+        "text": "Resumo da recuperação de recuperacao-sintetica\nSituação: parcial (não significa conclusão do trabalho)\nResultados já comprovados: observação incompleta\nIncertezas em aberto: 1 (Executor observado desconhecido; causa da interrupção desconhecida.)\nPendências de decisão: 1; aceites no registro: 0\nPróximo passo seguro: Inspecionar processo e receipt; preservar a decisão escolha-sintetica e a evidência antes de retomar.\nFontes, SHA-256 e detalhes ficam no registro técnico abaixo.\n\nDiagnóstico de recuperação: recuperacao-sintetica\nObservado em: 2000-01-01T00:00:00.000Z\nEstado: parcial (não significa conclusão do trabalho)\n\nFontes e estado da evidência:\n- store pessoal: atual\n    Fonte: C:/synthetic-forge-fixture/context.json\n    SHA-256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\nResultado comprovado:\n- resultado registrado no checkpoint: Verificação sintética preservada; publicação ainda desconhecida. — atual; resolvido: não\n    Fonte: C:/synthetic-forge-fixture/capture.json; SHA-256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; capturado em: 2000-01-01T00:00:00.000Z\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nIncertezas:\n- Executor observado desconhecido; causa da interrupção desconhecida.\n\nArtefatos preservados:\n- resumo: observado; integridade: não verificado\n    Fonte: C:/synthetic-forge-fixture/summary.md; SHA-256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; conflitos: 2\n- resumo: observado; integridade: não verificado\n    Fonte: C:/synthetic-forge-fixture/summary-uncontested.md; SHA-256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; conflitos: 0\n\nContinuidade pessoal:\n- Registro: registrado; vínculo pessoal: sim\n- Situação do trabalho: pendente; atividade: desconhecido\n\nDecisões pendentes:\n- escolha-sintetica: aguardar a inspeção do processo? — atual; resolvido: não\n    Fonte: C:/synthetic-forge-fixture/capture.json; SHA-256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; capturado em: 2000-01-01T00:00:00.000Z\n\nAceites registrados:\n- Nenhum registro nas fontes observadas.\n\nReserva de escrita:\n- Estado: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nControlador:\n- Cobertura: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nFamílias não cobertas (resultado desconhecido):\n- limpeza\n- reinício do sidecar\n- outros journals\n\nPróximo passo seguro: Inspecionar processo e receipt; preservar a decisão escolha-sintetica e a evidência antes de retomar.\n",
+        "rubric": {
+          "assessment": "author",
+          "resultado": "presente",
+          "fase": "desconhecido",
+          "executor": "desconhecido",
+          "proximo_passo": "presente",
+          "decisao_pendente": "presente"
+        },
+        "volume": {
+          "lines": 56,
+          "characters": 2582
+        },
+        "dumps": {
+          "hashes": 5,
+          "dispatch_or_receipt": 0,
+          "absolute_paths": 5,
+          "helper_lists": 0,
+          "navigation_references": 0
+        },
+        "human_view": {
+          "rule": "recovery-human-v1",
+          "text": "Resumo da recuperação de recuperacao-sintetica\nSituação: parcial (não significa conclusão do trabalho)\nResultados já comprovados: observação incompleta\nIncertezas em aberto: 1 (Executor observado desconhecido; causa da interrupção desconhecida.)\nPendências de decisão: 1; aceites no registro: 0\nPróximo passo seguro: Inspecionar processo e receipt; preservar a decisão escolha-sintetica e a evidência antes de retomar.\n\nDiagnóstico de recuperação: recuperacao-sintetica\nEstado: parcial (não significa conclusão do trabalho)\n\nFontes e estado da evidência:\n- store pessoal: atual\n\nResultado comprovado:\n- resultado registrado no checkpoint: Verificação sintética preservada; publicação ainda desconhecida. — atual; resolvido: não\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nIncertezas:\n- Executor observado desconhecido; causa da interrupção desconhecida.\n\nArtefatos preservados:\n- resumo: observado; integridade: não verificado\n    conflitos: 2\n- resumo: observado; integridade: não verificado\n    conflitos: 0\n\nContinuidade pessoal:\n- Registro: registrado; vínculo pessoal: sim\n- Situação do trabalho: pendente; atividade: desconhecido\n\nDecisões pendentes:\n- escolha-sintetica: aguardar a inspeção do processo? — atual; resolvido: não\n\nAceites registrados:\n- Nenhum registro nas fontes observadas.\n\nReserva de escrita:\n- Estado: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nControlador:\n- Cobertura: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nFamílias não cobertas (resultado desconhecido):\n- limpeza\n- reinício do sidecar\n- outros journals\n\nPróximo passo seguro: Inspecionar processo e receipt; preservar a decisão escolha-sintetica e a evidência antes de retomar.\n",
+          "volume": {
+            "lines": 50,
+            "characters": 1767
+          },
+          "dumps": {
+            "hashes": 0,
+            "dispatch_or_receipt": 0,
+            "absolute_paths": 0,
+            "helper_lists": 0,
+            "navigation_references": 0
+          }
+        }
+      },
+      "utility": "O resumo antecipa situação e próxima ação; a vista humana conserva todas as linhas semânticas, inclusive a decisão e os desconhecidos. A saída completa cresce; a utilidade percebida ainda não foi medida."
+    },
+    {
+      "id": "codex-vscode-execucao-com-agente",
+      "host": "codex-vscode",
+      "scenario": "execucao-com-agente",
+      "channel": "Codex no VS Code: texto; ferramenta de plano ou pergunta somente quando realmente exposta e permitida para finalidade e modo. Citações TaskCreate são modelos de origem Claude, não chamadas Codex.",
+      "before": {
+        "label": "renderizado-offline",
+        "source": {
+          "file": "scripts/forge-sidecar-identity.js",
+          "reference": "scripts/forge-sidecar-identity.js#formatIdentityLine",
+          "renderer": "formatIdentityLine",
+          "input": {
+            "stage": "iniciado",
+            "fields": {
+              "phase": "execute-task",
+              "unit": "checagem-sintetica",
+              "engine": "codex",
+              "transport": "codex-app-server",
+              "model_sent": "synthetic-model",
+              "effort": "high",
+              "host": "codex",
+              "dispatch_id": "fixture-nav"
+            }
+          },
+          "options": {},
+          "synthetic": true
+        },
+        "text": "[forge-sidecar] iniciado fase=execute-task unidade=checagem-sintetica engine=codex transporte=codex-app-server modelo_enviado=synthetic-model esforco=high host=codex dispatch=fixture-nav provider_called=unknown observado=nao-confirmado",
+        "rubric": {
+          "assessment": "author",
+          "resultado": "ausente",
+          "fase": "presente",
+          "executor": "presente",
+          "proximo_passo": "ausente",
+          "decisao_pendente": "ausente"
+        },
+        "volume": {
+          "lines": 1,
+          "characters": 235
+        },
+        "dumps": {
+          "hashes": 0,
+          "dispatch_or_receipt": 1,
+          "absolute_paths": 0,
+          "helper_lists": 0,
+          "navigation_references": 0
+        },
+        "human_view": {
+          "rule": "complete-v1",
+          "text": "[forge-sidecar] iniciado fase=execute-task unidade=checagem-sintetica engine=codex transporte=codex-app-server modelo_enviado=synthetic-model esforco=high host=codex dispatch=fixture-nav provider_called=unknown observado=nao-confirmado",
+          "volume": {
+            "lines": 1,
+            "characters": 235
+          },
+          "dumps": {
+            "hashes": 0,
+            "dispatch_or_receipt": 1,
+            "absolute_paths": 0,
+            "helper_lists": 0,
+            "navigation_references": 0
+          }
+        }
+      },
+      "after": {
+        "label": "renderizado-offline",
+        "source": {
+          "file": "scripts/forge-sidecar-identity.js",
+          "reference": "scripts/forge-sidecar-identity.js#formatHumanIdentity",
+          "renderer": "formatHumanIdentity",
+          "input": {
+            "stage": "iniciado",
+            "fields": {
+              "phase": "execute-task",
+              "unit": "checagem-sintetica",
+              "engine": "codex",
+              "transport": "codex-app-server",
+              "model_sent": "synthetic-model",
+              "effort": "high",
+              "host": "codex",
+              "dispatch_id": "fixture-nav"
+            }
+          },
+          "options": {},
+          "synthetic": true
+        },
+        "text": "[forge-agente] em execução: checagem-sintetica (execute-task) · executor sidecar codex via codex-app-server · modelo enviado synthetic-model (aplicação não confirmada) · esforço high · host codex · acompanhe nesta conversa; registro técnico dispatch fixture-nav",
+        "rubric": {
+          "assessment": "author",
+          "resultado": "ausente",
+          "fase": "presente",
+          "executor": "presente",
+          "proximo_passo": "presente",
+          "decisao_pendente": "ausente"
+        },
+        "volume": {
+          "lines": 1,
+          "characters": 261
+        },
+        "dumps": {
+          "hashes": 0,
+          "dispatch_or_receipt": 0,
+          "absolute_paths": 0,
+          "helper_lists": 0,
+          "navigation_references": 1
+        },
+        "human_view": {
+          "rule": "identity-human-v1",
+          "text": "[forge-agente] em execução: checagem-sintetica (execute-task) · executor sidecar codex via codex-app-server · modelo enviado synthetic-model (aplicação não confirmada) · esforço high · host codex · acompanhe nesta conversa; registro técnico dispatch fixture-nav",
+          "volume": {
+            "lines": 1,
+            "characters": 261
+          },
+          "dumps": {
+            "hashes": 0,
+            "dispatch_or_receipt": 0,
+            "absolute_paths": 0,
+            "helper_lists": 0,
+            "navigation_references": 1
+          }
+        }
+      },
+      "supporting": {
+        "delivery": {
+          "before": {
+            "label": "renderizado-offline",
+            "source": {
+              "file": "scripts/forge-delivery.js",
+              "reference": "scripts/forge-delivery.js#renderDeliveryMarkdown",
+              "renderer": "renderDeliveryMarkdown",
+              "input": {
+                "unit": {
+                  "id": "entrega-sintetica"
+                },
+                "criteria": [
+                  {
+                    "id": "implementacao-sintetica",
+                    "text": "Verificação sintética concluída",
+                    "reference": "criterio-sintetico",
+                    "status": "verificado",
+                    "evidence": [
+                      {
+                        "positive": true,
+                        "source": "C:/synthetic-forge-fixture/verification.json",
+                        "environment": "offline-sintetico",
+                        "reasons": [
+                          "synthetic-check-passed"
+                        ]
+                      }
+                    ],
+                    "pending": []
+                  },
+                  {
+                    "id": "aceite-sintetico",
+                    "text": "Compreensão e aparência na rodada final",
+                    "reference": "criterio-sintetico",
+                    "status": "não verificado",
+                    "evidence": [],
+                    "pending": [
+                      "pending-final-round"
+                    ]
+                  },
+                  {
+                    "id": "comportamento-sintetico",
+                    "text": "Falha sintética de comportamento preservada",
+                    "reference": "criterio-sintetico",
+                    "status": "não verificado",
+                    "evidence": [
+                      {
+                        "negative": true,
+                        "source": "C:/synthetic-forge-fixture/failure.json",
+                        "environment": "offline-sintetico",
+                        "reasons": [
+                          "synthetic-check-failed"
+                        ]
+                      }
+                    ],
+                    "pending": [
+                      "Falha sintética continua visível."
+                    ]
+                  },
+                  {
+                    "id": "ambiente-sintetico",
+                    "text": "Contexto sintético do ambiente incompleto",
+                    "reference": "criterio-sintetico",
+                    "status": "parcialmente verificado",
+                    "evidence": [
+                      {
+                        "source": "C:/synthetic-forge-fixture/limited.json",
+                        "reasons": [
+                          "source_context_missing:environment",
+                          "synthetic-coverage-unknown"
+                        ]
+                      }
+                    ],
+                    "pending": [
+                      "Ambiente de execução desconhecido."
+                    ]
+                  }
+                ],
+                "facts": [
+                  {
+                    "name": "implementation",
+                    "status": "implementado offline",
+                    "reference": "C:/synthetic-forge-fixture/implementation.json"
+                  },
+                  {
+                    "name": "ci",
+                    "status": "não informado",
+                    "reference": null
+                  },
+                  {
+                    "name": "review",
+                    "status": "pendente",
+                    "reference": null
+                  },
+                  {
+                    "name": "merge",
+                    "status": "pendente",
+                    "reference": null
+                  },
+                  {
+                    "name": "installation",
+                    "status": "pendente",
+                    "reference": null
+                  },
+                  {
+                    "name": "human_acceptance",
+                    "status": "pending-final-round",
+                    "reference": "AUTONOMY-AUTHORIZATION.md"
+                  }
+                ],
+                "diagnostics": []
+              },
+              "options": {
+                "summary": false,
+                "detailReference": "C:/synthetic-forge-fixture/delivery.json"
+              },
+              "synthetic": true
+            },
+            "text": "## Entrega por critério\n\nDetalhe integral reconstruível: C:/synthetic-forge-fixture/delivery.json\n\n| Critério | Situação | Evidência | Ambiente exercitado | Pendência/limite |\n|---|---|---|---|---|\n| aceite-sintetico — Compreensão e aparência na rodada final (criterio-sintetico) | não verificado | nenhuma | não informado | pending-final-round |\n| comportamento-sintetico — Falha sintética de comportamento preservada (criterio-sintetico) | não verificado | falha: C:/synthetic-forge-fixture/failure.json &#91;synthetic-check-failed&#93; | offline-sintetico | Falha sintética continua visível. |\n| ambiente-sintetico — Contexto sintético do ambiente incompleto (criterio-sintetico) | parcialmente verificado | limite: C:/synthetic-forge-fixture/limited.json &#91;source&#95;context&#95;missing:environment, synthetic-coverage-unknown&#93; | não informado | Ambiente de execução desconhecido. |\n| implementacao-sintetica — Verificação sintética concluída (criterio-sintetico) | verificado | ok: C:/synthetic-forge-fixture/verification.json &#91;synthetic-check-passed&#93; | offline-sintetico | nenhuma |\n\n### Fatos independentes\n\n| Fato | Situação | Referência |\n|---|---|---|\n| Implementação | implementado offline | C:/synthetic-forge-fixture/implementation.json |\n| CI | não informado | não informado |\n| Revisão | pendente | não informado |\n| Merge | pendente | não informado |\n| Instalação | pendente | não informado |\n| Aceite humano | pending-final-round | AUTONOMY-AUTHORIZATION.md |\n",
+            "rubric": {
+              "assessment": "author",
+              "resultado": "presente",
+              "fase": "ausente",
+              "executor": "ausente",
+              "proximo_passo": "presente",
+              "decisao_pendente": "presente"
+            },
+            "volume": {
+              "lines": 21,
+              "characters": 1493
+            },
+            "dumps": {
+              "hashes": 0,
+              "dispatch_or_receipt": 0,
+              "absolute_paths": 5,
+              "helper_lists": 0,
+              "navigation_references": 0
+            },
+            "human_view": {
+              "rule": "complete-v1",
+              "text": "## Entrega por critério\n\nDetalhe integral reconstruível: C:/synthetic-forge-fixture/delivery.json\n\n| Critério | Situação | Evidência | Ambiente exercitado | Pendência/limite |\n|---|---|---|---|---|\n| aceite-sintetico — Compreensão e aparência na rodada final (criterio-sintetico) | não verificado | nenhuma | não informado | pending-final-round |\n| comportamento-sintetico — Falha sintética de comportamento preservada (criterio-sintetico) | não verificado | falha: C:/synthetic-forge-fixture/failure.json &#91;synthetic-check-failed&#93; | offline-sintetico | Falha sintética continua visível. |\n| ambiente-sintetico — Contexto sintético do ambiente incompleto (criterio-sintetico) | parcialmente verificado | limite: C:/synthetic-forge-fixture/limited.json &#91;source&#95;context&#95;missing:environment, synthetic-coverage-unknown&#93; | não informado | Ambiente de execução desconhecido. |\n| implementacao-sintetica — Verificação sintética concluída (criterio-sintetico) | verificado | ok: C:/synthetic-forge-fixture/verification.json &#91;synthetic-check-passed&#93; | offline-sintetico | nenhuma |\n\n### Fatos independentes\n\n| Fato | Situação | Referência |\n|---|---|---|\n| Implementação | implementado offline | C:/synthetic-forge-fixture/implementation.json |\n| CI | não informado | não informado |\n| Revisão | pendente | não informado |\n| Merge | pendente | não informado |\n| Instalação | pendente | não informado |\n| Aceite humano | pending-final-round | AUTONOMY-AUTHORIZATION.md |\n",
+              "volume": {
+                "lines": 21,
+                "characters": 1493
+              },
+              "dumps": {
+                "hashes": 0,
+                "dispatch_or_receipt": 0,
+                "absolute_paths": 5,
+                "helper_lists": 0,
+                "navigation_references": 0
+              }
+            }
+          },
+          "after": {
+            "label": "renderizado-offline",
+            "source": {
+              "file": "scripts/forge-delivery.js",
+              "reference": "scripts/forge-delivery.js#renderDeliveryMarkdown",
+              "renderer": "renderDeliveryMarkdown",
+              "input": {
+                "unit": {
+                  "id": "entrega-sintetica"
+                },
+                "criteria": [
+                  {
+                    "id": "implementacao-sintetica",
+                    "text": "Verificação sintética concluída",
+                    "reference": "criterio-sintetico",
+                    "status": "verificado",
+                    "evidence": [
+                      {
+                        "positive": true,
+                        "source": "C:/synthetic-forge-fixture/verification.json",
+                        "environment": "offline-sintetico",
+                        "reasons": [
+                          "synthetic-check-passed"
+                        ]
+                      }
+                    ],
+                    "pending": []
+                  },
+                  {
+                    "id": "aceite-sintetico",
+                    "text": "Compreensão e aparência na rodada final",
+                    "reference": "criterio-sintetico",
+                    "status": "não verificado",
+                    "evidence": [],
+                    "pending": [
+                      "pending-final-round"
+                    ]
+                  },
+                  {
+                    "id": "comportamento-sintetico",
+                    "text": "Falha sintética de comportamento preservada",
+                    "reference": "criterio-sintetico",
+                    "status": "não verificado",
+                    "evidence": [
+                      {
+                        "negative": true,
+                        "source": "C:/synthetic-forge-fixture/failure.json",
+                        "environment": "offline-sintetico",
+                        "reasons": [
+                          "synthetic-check-failed"
+                        ]
+                      }
+                    ],
+                    "pending": [
+                      "Falha sintética continua visível."
+                    ]
+                  },
+                  {
+                    "id": "ambiente-sintetico",
+                    "text": "Contexto sintético do ambiente incompleto",
+                    "reference": "criterio-sintetico",
+                    "status": "parcialmente verificado",
+                    "evidence": [
+                      {
+                        "source": "C:/synthetic-forge-fixture/limited.json",
+                        "reasons": [
+                          "source_context_missing:environment",
+                          "synthetic-coverage-unknown"
+                        ]
+                      }
+                    ],
+                    "pending": [
+                      "Ambiente de execução desconhecido."
+                    ]
+                  }
+                ],
+                "facts": [
+                  {
+                    "name": "implementation",
+                    "status": "implementado offline",
+                    "reference": "C:/synthetic-forge-fixture/implementation.json"
+                  },
+                  {
+                    "name": "ci",
+                    "status": "não informado",
+                    "reference": null
+                  },
+                  {
+                    "name": "review",
+                    "status": "pendente",
+                    "reference": null
+                  },
+                  {
+                    "name": "merge",
+                    "status": "pendente",
+                    "reference": null
+                  },
+                  {
+                    "name": "installation",
+                    "status": "pendente",
+                    "reference": null
+                  },
+                  {
+                    "name": "human_acceptance",
+                    "status": "pending-final-round",
+                    "reference": "AUTONOMY-AUTHORIZATION.md"
+                  }
+                ],
+                "diagnostics": []
+              },
+              "options": {
+                "detailReference": "C:/synthetic-forge-fixture/delivery.json"
+              },
+              "synthetic": true
+            },
+            "text": "## Entrega por critério\n\nResumo: 1 verificado(s), 1 parcialmente verificado(s) e 2 não verificado(s) de 4 critério(s). Pendências: aceite-sintetico, comportamento-sintetico, ambiente-sintetico. Fatos: Implementação — implementado offline; CI — não informado; Revisão — pendente; Merge — pendente; Instalação — pendente; Aceite humano — pending-final-round. Um fato não implica outro.\n\nDetalhe integral reconstruível: C:/synthetic-forge-fixture/delivery.json\n\n| Critério | Situação | Evidência | Ambiente exercitado | Pendência/limite |\n|---|---|---|---|---|\n| aceite-sintetico — Compreensão e aparência na rodada final (criterio-sintetico) | não verificado | nenhuma | não informado | pending-final-round |\n| comportamento-sintetico — Falha sintética de comportamento preservada (criterio-sintetico) | não verificado | falha: C:/synthetic-forge-fixture/failure.json &#91;synthetic-check-failed&#93; | offline-sintetico | Falha sintética continua visível. |\n| ambiente-sintetico — Contexto sintético do ambiente incompleto (criterio-sintetico) | parcialmente verificado | limite: C:/synthetic-forge-fixture/limited.json &#91;source&#95;context&#95;missing:environment, synthetic-coverage-unknown&#93; | não informado | Ambiente de execução desconhecido. |\n| implementacao-sintetica — Verificação sintética concluída (criterio-sintetico) | verificado | ok: C:/synthetic-forge-fixture/verification.json &#91;synthetic-check-passed&#93; | offline-sintetico | nenhuma |\n\n### Fatos independentes\n\n| Fato | Situação | Referência |\n|---|---|---|\n| Implementação | implementado offline | C:/synthetic-forge-fixture/implementation.json |\n| CI | não informado | não informado |\n| Revisão | pendente | não informado |\n| Merge | pendente | não informado |\n| Instalação | pendente | não informado |\n| Aceite humano | pending-final-round | AUTONOMY-AUTHORIZATION.md |\n",
+            "rubric": {
+              "assessment": "author",
+              "resultado": "presente",
+              "fase": "ausente",
+              "executor": "ausente",
+              "proximo_passo": "presente",
+              "decisao_pendente": "presente"
+            },
+            "volume": {
+              "lines": 23,
+              "characters": 1853
+            },
+            "dumps": {
+              "hashes": 0,
+              "dispatch_or_receipt": 0,
+              "absolute_paths": 5,
+              "helper_lists": 0,
+              "navigation_references": 0
+            },
+            "human_view": {
+              "rule": "delivery-human-v1",
+              "text": "## Entrega por critério\n\nResumo: 1 verificado(s), 1 parcialmente verificado(s) e 2 não verificado(s) de 4 critério(s). Pendências: aceite-sintetico, comportamento-sintetico, ambiente-sintetico. Fatos: Implementação — implementado offline; CI — não informado; Revisão — pendente; Merge — pendente; Instalação — pendente; Aceite humano — pending-final-round. Um fato não implica outro.\n\n\n| Critério | Situação | Evidência | Ambiente exercitado | Pendência/limite |\n| --- | --- | --- | --- | --- |\n| aceite-sintetico — Compreensão e aparência na rodada final (criterio-sintetico) | não verificado | nenhuma | não informado | pending-final-round |\n| comportamento-sintetico — Falha sintética de comportamento preservada (criterio-sintetico) | não verificado | falha &#91;synthetic-check-failed&#93; | offline-sintetico | Falha sintética continua visível. |\n| ambiente-sintetico — Contexto sintético do ambiente incompleto (criterio-sintetico) | parcialmente verificado | limite &#91;source&#95;context&#95;missing:environment, synthetic-coverage-unknown&#93; | não informado | Ambiente de execução desconhecido. |\n| implementacao-sintetica — Verificação sintética concluída (criterio-sintetico) | verificado | ok &#91;synthetic-check-passed&#93; | offline-sintetico | nenhuma |\n\n### Fatos independentes\n\n| Fato | Situação |\n| --- | --- |\n| Implementação | implementado offline |\n| CI | não informado |\n| Revisão | pendente |\n| Merge | pendente |\n| Instalação | pendente |\n| Aceite humano | pending-final-round |\n",
+              "volume": {
+                "lines": 22,
+                "characters": 1508
+              },
+              "dumps": {
+                "hashes": 0,
+                "dispatch_or_receipt": 0,
+                "absolute_paths": 0,
+                "helper_lists": 0,
+                "navigation_references": 0
+              }
+            }
+          }
+        },
+        "timeline": {
+          "before": {
+            "label": "modelo-da-skill",
+            "source": {
+              "file": "docs/communication-evaluation/skill-templates-before.md",
+              "reference": "docs/communication-evaluation/skill-templates-before.md#modelo-literal",
+              "sha256": "4aa6c4a06d2e8183782b97169db3b0ea22f1f891fbf235989afd0867e6249126"
+            },
+            "text": "TaskCreate({ subject: \"[{TASK_ID}] execute\", activeForm: \"execute · forge-executor (sonnet)\" })",
+            "rubric": {
+              "assessment": "author",
+              "resultado": "ausente",
+              "fase": "presente",
+              "executor": "presente",
+              "proximo_passo": "ausente",
+              "decisao_pendente": "ausente"
+            },
+            "volume": {
+              "lines": 1,
+              "characters": 95
+            },
+            "dumps": {
+              "hashes": 0,
+              "dispatch_or_receipt": 0,
+              "absolute_paths": 0,
+              "helper_lists": 0,
+              "navigation_references": 0
+            },
+            "human_view": {
+              "rule": "complete-v1",
+              "text": "TaskCreate({ subject: \"[{TASK_ID}] execute\", activeForm: \"execute · forge-executor (sonnet)\" })",
+              "volume": {
+                "lines": 1,
+                "characters": 95
+              },
+              "dumps": {
+                "hashes": 0,
+                "dispatch_or_receipt": 0,
+                "absolute_paths": 0,
+                "helper_lists": 0,
+                "navigation_references": 0
+              }
+            }
+          },
+          "after": {
+            "label": "modelo-da-skill",
+            "source": {
+              "file": "skills/forge-task/SKILL.md",
+              "reference": "skills/forge-task/SKILL.md#modelo-literal",
+              "sha256": "9bdba39c187aa590cc034d056cad9601c0a3e606edaee299fc5e4594a33cef71"
+            },
+            "text": "TaskCreate({ subject: \"⚡ {TASK_ID} — execute: {descrição humana da task}\", description: \"executor {nativo|sidecar} forge-executor ({modelo resolvido})\", activeForm: \"executando agente: {descrição humana} · forge-executor\" })",
+            "rubric": {
+              "assessment": "author",
+              "resultado": "presente",
+              "fase": "presente",
+              "executor": "presente",
+              "proximo_passo": "ausente",
+              "decisao_pendente": "ausente"
+            },
+            "volume": {
+              "lines": 1,
+              "characters": 224
+            },
+            "dumps": {
+              "hashes": 0,
+              "dispatch_or_receipt": 0,
+              "absolute_paths": 0,
+              "helper_lists": 0,
+              "navigation_references": 0
+            },
+            "human_view": {
+              "rule": "complete-v1",
+              "text": "TaskCreate({ subject: \"⚡ {TASK_ID} — execute: {descrição humana da task}\", description: \"executor {nativo|sidecar} forge-executor ({modelo resolvido})\", activeForm: \"executando agente: {descrição humana} · forge-executor\" })",
+              "volume": {
+                "lines": 1,
+                "characters": 224
+              },
+              "dumps": {
+                "hashes": 0,
+                "dispatch_or_receipt": 0,
+                "absolute_paths": 0,
+                "helper_lists": 0,
+                "navigation_references": 0
+              }
+            }
+          }
+        }
+      },
+      "utility": "A identidade humana explica executor e onde acompanhar; a descrição do trabalho vem do modelo de timeline, e a entrega separa critérios de CI, instalação e aceite. Não se atribui melhora percebida."
+    },
+    {
+      "id": "codex-vscode-falha-recuperavel",
+      "host": "codex-vscode",
+      "scenario": "falha-recuperavel",
+      "channel": "Codex no VS Code: texto; ferramenta de plano ou pergunta somente quando realmente exposta e permitida para finalidade e modo. Citações TaskCreate são modelos de origem Claude, não chamadas Codex.",
+      "before": {
+        "label": "renderizado-offline",
+        "source": {
+          "file": "scripts/forge-sidecar-identity.js",
+          "reference": "scripts/forge-sidecar-identity.js#formatIdentityLine",
+          "renderer": "formatIdentityLine",
+          "input": {
+            "stage": "falhou",
+            "fields": {
+              "phase": "execute-task",
+              "unit": "checagem-sintetica",
+              "engine": "codex",
+              "transport": "codex-app-server",
+              "model_sent": "synthetic-model",
+              "effort": "high",
+              "host": "codex",
+              "dispatch_id": "fixture-nav",
+              "reason_code": "anomalous-silence"
+            }
+          },
+          "options": {},
+          "synthetic": true
+        },
+        "text": "[forge-sidecar] falhou fase=execute-task unidade=checagem-sintetica engine=codex transporte=codex-app-server modelo_enviado=synthetic-model esforco=high host=codex dispatch=fixture-nav causa=anomalous-silence provider_called=unknown observado=nao-confirmado",
+        "rubric": {
+          "assessment": "author",
+          "resultado": "ausente",
+          "fase": "presente",
+          "executor": "presente",
+          "proximo_passo": "ausente",
+          "decisao_pendente": "ausente"
+        },
+        "volume": {
+          "lines": 1,
+          "characters": 257
+        },
+        "dumps": {
+          "hashes": 0,
+          "dispatch_or_receipt": 1,
+          "absolute_paths": 0,
+          "helper_lists": 0,
+          "navigation_references": 0
+        },
+        "human_view": {
+          "rule": "complete-v1",
+          "text": "[forge-sidecar] falhou fase=execute-task unidade=checagem-sintetica engine=codex transporte=codex-app-server modelo_enviado=synthetic-model esforco=high host=codex dispatch=fixture-nav causa=anomalous-silence provider_called=unknown observado=nao-confirmado",
+          "volume": {
+            "lines": 1,
+            "characters": 257
+          },
+          "dumps": {
+            "hashes": 0,
+            "dispatch_or_receipt": 1,
+            "absolute_paths": 0,
+            "helper_lists": 0,
+            "navigation_references": 0
+          }
+        }
+      },
+      "after": {
+        "label": "renderizado-offline",
+        "source": {
+          "file": "scripts/forge-sidecar-identity.js",
+          "reference": "scripts/forge-sidecar-identity.js#formatHumanIdentity",
+          "renderer": "formatHumanIdentity",
+          "input": {
+            "stage": "falhou",
+            "fields": {
+              "phase": "execute-task",
+              "unit": "checagem-sintetica",
+              "engine": "codex",
+              "transport": "codex-app-server",
+              "model_sent": "synthetic-model",
+              "effort": "high",
+              "host": "codex",
+              "dispatch_id": "fixture-nav",
+              "reason_code": "anomalous-silence"
+            }
+          },
+          "options": {},
+          "synthetic": true
+        },
+        "text": "[forge-agente] falhou: checagem-sintetica (execute-task) · executor sidecar codex via codex-app-server · modelo enviado synthetic-model (aplicação não confirmada) · esforço high · host codex · causa anomalous-silence · provedor chamado: desconhecido · próximo passo: inspecione o processo e o receipt antes de nova tentativa · acompanhe nesta conversa; registro técnico dispatch fixture-nav",
+        "rubric": {
+          "assessment": "author",
+          "resultado": "ausente",
+          "fase": "presente",
+          "executor": "presente",
+          "proximo_passo": "presente",
+          "decisao_pendente": "ausente"
+        },
+        "volume": {
+          "lines": 1,
+          "characters": 390
+        },
+        "dumps": {
+          "hashes": 0,
+          "dispatch_or_receipt": 0,
+          "absolute_paths": 0,
+          "helper_lists": 0,
+          "navigation_references": 1
+        },
+        "human_view": {
+          "rule": "identity-human-v1",
+          "text": "[forge-agente] falhou: checagem-sintetica (execute-task) · executor sidecar codex via codex-app-server · modelo enviado synthetic-model (aplicação não confirmada) · esforço high · host codex · causa anomalous-silence · provedor chamado: desconhecido · próximo passo: inspecione o processo e o receipt antes de nova tentativa · acompanhe nesta conversa; registro técnico dispatch fixture-nav",
+          "volume": {
+            "lines": 1,
+            "characters": 390
+          },
+          "dumps": {
+            "hashes": 0,
+            "dispatch_or_receipt": 0,
+            "absolute_paths": 0,
+            "helper_lists": 0,
+            "navigation_references": 1
+          }
+        }
+      },
+      "supporting": {
+        "partial": {
+          "before": {
+            "label": "modelo-da-skill",
+            "source": {
+              "file": "docs/communication-evaluation/skill-templates-before.md",
+              "reference": "docs/communication-evaluation/skill-templates-before.md#parcial",
+              "sha256": "4aa6c4a06d2e8183782b97169db3b0ea22f1f891fbf235989afd0867e6249126"
+            },
+            "text": "Trabalho parcial salvo. Execute `/forge-next` para retomar de onde parou.",
+            "rubric": {
+              "assessment": "author",
+              "resultado": "presente",
+              "fase": "ausente",
+              "executor": "ausente",
+              "proximo_passo": "presente",
+              "decisao_pendente": "ausente"
+            },
+            "volume": {
+              "lines": 1,
+              "characters": 73
+            },
+            "dumps": {
+              "hashes": 0,
+              "dispatch_or_receipt": 0,
+              "absolute_paths": 0,
+              "helper_lists": 0,
+              "navigation_references": 0
+            },
+            "human_view": {
+              "rule": "complete-v1",
+              "text": "Trabalho parcial salvo. Execute `/forge-next` para retomar de onde parou.",
+              "volume": {
+                "lines": 1,
+                "characters": 73
+              },
+              "dumps": {
+                "hashes": 0,
+                "dispatch_or_receipt": 0,
+                "absolute_paths": 0,
+                "helper_lists": 0,
+                "navigation_references": 0
+              }
+            }
+          },
+          "after": {
+            "label": "modelo-da-skill",
+            "source": {
+              "file": "skills/forge-next/SKILL.md",
+              "reference": "skills/forge-next/SKILL.md#parcial",
+              "sha256": "375a6b5c3fa2ed371174ad0d94b36a8755cb6cc3896509f4fcf7db187cd545e9"
+            },
+            "text": "Trabalho parcial salvo em continue.md: {o que ficou feito}. Continua executável: {o que segue}. Decisão pendente: {ID ou nenhuma}. Para retomar: /forge-next.",
+            "rubric": {
+              "assessment": "author",
+              "resultado": "presente",
+              "fase": "ausente",
+              "executor": "ausente",
+              "proximo_passo": "presente",
+              "decisao_pendente": "presente"
+            },
+            "volume": {
+              "lines": 1,
+              "characters": 157
+            },
+            "dumps": {
+              "hashes": 0,
+              "dispatch_or_receipt": 0,
+              "absolute_paths": 0,
+              "helper_lists": 0,
+              "navigation_references": 0
+            },
+            "human_view": {
+              "rule": "complete-v1",
+              "text": "Trabalho parcial salvo em continue.md: {o que ficou feito}. Continua executável: {o que segue}. Decisão pendente: {ID ou nenhuma}. Para retomar: /forge-next.",
+              "volume": {
+                "lines": 1,
+                "characters": 157
+              },
+              "dumps": {
+                "hashes": 0,
+                "dispatch_or_receipt": 0,
+                "absolute_paths": 0,
+                "helper_lists": 0,
+                "navigation_references": 0
+              }
+            }
+          }
+        },
+        "recovery": {
+          "before": {
+            "label": "renderizado-offline",
+            "source": {
+              "file": "scripts/forge-recovery-diagnostic.js",
+              "reference": "scripts/forge-recovery-diagnostic.js#renderRecovery",
+              "renderer": "renderRecovery",
+              "input": {
+                "id": "recuperacao-sintetica",
+                "observedAt": "2000-01-01T00:00:00.000Z",
+                "status": "partial",
+                "sources": [
+                  {
+                    "name": "personal-store",
+                    "state": "current",
+                    "source": "C:/synthetic-forge-fixture/context.json",
+                    "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                  }
+                ],
+                "provenResults": [
+                  {
+                    "kind": "personal-checkpoint",
+                    "evidence": {
+                      "text": "Verificação sintética preservada; publicação ainda desconhecida.",
+                      "validity": "current",
+                      "resolved": false,
+                      "source": "C:/synthetic-forge-fixture/capture.json",
+                      "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                      "capturedAt": "2000-01-01T00:00:00.000Z"
+                    }
+                  }
+                ],
+                "uncertainties": [
+                  "Executor observado desconhecido; causa da interrupção desconhecida."
+                ],
+                "artifacts": [
+                  {
+                    "kind": "summary",
+                    "existence": "observed",
+                    "integrity": "unverified",
+                    "source": "C:/synthetic-forge-fixture/summary.md",
+                    "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "conflicts": 2
+                  },
+                  {
+                    "kind": "summary",
+                    "existence": "observed",
+                    "integrity": "unverified",
+                    "source": "C:/synthetic-forge-fixture/summary-uncontested.md",
+                    "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "conflicts": 0
+                  }
+                ],
+                "continuity": {
+                  "state": "recorded",
+                  "bound": true,
+                  "workStatus": "pending",
+                  "activity": "unknown",
+                  "checkpoint": {}
+                },
+                "pendingDecisions": [
+                  {
+                    "text": "escolha-sintetica: aguardar a inspeção do processo?",
+                    "validity": "current",
+                    "resolved": false,
+                    "source": "C:/synthetic-forge-fixture/capture.json",
+                    "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "capturedAt": "2000-01-01T00:00:00.000Z"
+                  }
+                ],
+                "acceptances": [],
+                "claim": {
+                  "state": "unknown"
+                },
+                "controller": {
+                  "coverage": "unknown",
+                  "globalCompletion": "unknown"
+                },
+                "coverage": {
+                  "personal": "observed",
+                  "claim": "not-observed",
+                  "controller": "not-observed",
+                  "artifacts": "observed"
+                },
+                "uncovered": [
+                  "sweep",
+                  "sidecar-reset",
+                  "other-journals"
+                ],
+                "nextSafeStep": "Inspecionar processo e receipt antes de nova tentativa; causa e chamada ao provedor continuam desconhecidas."
+              },
+              "options": {
+                "summary": false
+              },
+              "synthetic": true
+            },
+            "text": "Diagnóstico de recuperação: recuperacao-sintetica\nObservado em: 2000-01-01T00:00:00.000Z\nEstado: parcial (não significa conclusão do trabalho)\n\nFontes e estado da evidência:\n- store pessoal: atual\n    Fonte: C:/synthetic-forge-fixture/context.json\n    SHA-256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\nResultado comprovado:\n- resultado registrado no checkpoint: Verificação sintética preservada; publicação ainda desconhecida. — atual; resolvido: não\n    Fonte: C:/synthetic-forge-fixture/capture.json; SHA-256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; capturado em: 2000-01-01T00:00:00.000Z\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nIncertezas:\n- Executor observado desconhecido; causa da interrupção desconhecida.\n\nArtefatos preservados:\n- resumo: observado; integridade: não verificado\n    Fonte: C:/synthetic-forge-fixture/summary.md; SHA-256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; conflitos: 2\n- resumo: observado; integridade: não verificado\n    Fonte: C:/synthetic-forge-fixture/summary-uncontested.md; SHA-256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; conflitos: 0\n\nContinuidade pessoal:\n- Registro: registrado; vínculo pessoal: sim\n- Situação do trabalho: pendente; atividade: desconhecido\n\nDecisões pendentes:\n- escolha-sintetica: aguardar a inspeção do processo? — atual; resolvido: não\n    Fonte: C:/synthetic-forge-fixture/capture.json; SHA-256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; capturado em: 2000-01-01T00:00:00.000Z\n\nAceites registrados:\n- Nenhum registro nas fontes observadas.\n\nReserva de escrita:\n- Estado: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nControlador:\n- Cobertura: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nFamílias não cobertas (resultado desconhecido):\n- limpeza\n- reinício do sidecar\n- outros journals\n\nPróximo passo seguro: Inspecionar processo e receipt antes de nova tentativa; causa e chamada ao provedor continuam desconhecidas.\n",
+            "rubric": {
+              "assessment": "author",
+              "resultado": "presente",
+              "fase": "desconhecido",
+              "executor": "desconhecido",
+              "proximo_passo": "presente",
+              "decisao_pendente": "presente"
+            },
+            "volume": {
+              "lines": 48,
+              "characters": 2108
+            },
+            "dumps": {
+              "hashes": 5,
+              "dispatch_or_receipt": 0,
+              "absolute_paths": 5,
+              "helper_lists": 0,
+              "navigation_references": 0
+            },
+            "human_view": {
+              "rule": "complete-v1",
+              "text": "Diagnóstico de recuperação: recuperacao-sintetica\nObservado em: 2000-01-01T00:00:00.000Z\nEstado: parcial (não significa conclusão do trabalho)\n\nFontes e estado da evidência:\n- store pessoal: atual\n    Fonte: C:/synthetic-forge-fixture/context.json\n    SHA-256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\nResultado comprovado:\n- resultado registrado no checkpoint: Verificação sintética preservada; publicação ainda desconhecida. — atual; resolvido: não\n    Fonte: C:/synthetic-forge-fixture/capture.json; SHA-256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; capturado em: 2000-01-01T00:00:00.000Z\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nIncertezas:\n- Executor observado desconhecido; causa da interrupção desconhecida.\n\nArtefatos preservados:\n- resumo: observado; integridade: não verificado\n    Fonte: C:/synthetic-forge-fixture/summary.md; SHA-256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; conflitos: 2\n- resumo: observado; integridade: não verificado\n    Fonte: C:/synthetic-forge-fixture/summary-uncontested.md; SHA-256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; conflitos: 0\n\nContinuidade pessoal:\n- Registro: registrado; vínculo pessoal: sim\n- Situação do trabalho: pendente; atividade: desconhecido\n\nDecisões pendentes:\n- escolha-sintetica: aguardar a inspeção do processo? — atual; resolvido: não\n    Fonte: C:/synthetic-forge-fixture/capture.json; SHA-256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; capturado em: 2000-01-01T00:00:00.000Z\n\nAceites registrados:\n- Nenhum registro nas fontes observadas.\n\nReserva de escrita:\n- Estado: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nControlador:\n- Cobertura: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nFamílias não cobertas (resultado desconhecido):\n- limpeza\n- reinício do sidecar\n- outros journals\n\nPróximo passo seguro: Inspecionar processo e receipt antes de nova tentativa; causa e chamada ao provedor continuam desconhecidas.\n",
+              "volume": {
+                "lines": 48,
+                "characters": 2108
+              },
+              "dumps": {
+                "hashes": 5,
+                "dispatch_or_receipt": 0,
+                "absolute_paths": 5,
+                "helper_lists": 0,
+                "navigation_references": 0
+              }
+            }
+          },
+          "after": {
+            "label": "renderizado-offline",
+            "source": {
+              "file": "scripts/forge-recovery-diagnostic.js",
+              "reference": "scripts/forge-recovery-diagnostic.js#renderRecovery",
+              "renderer": "renderRecovery",
+              "input": {
+                "id": "recuperacao-sintetica",
+                "observedAt": "2000-01-01T00:00:00.000Z",
+                "status": "partial",
+                "sources": [
+                  {
+                    "name": "personal-store",
+                    "state": "current",
+                    "source": "C:/synthetic-forge-fixture/context.json",
+                    "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                  }
+                ],
+                "provenResults": [
+                  {
+                    "kind": "personal-checkpoint",
+                    "evidence": {
+                      "text": "Verificação sintética preservada; publicação ainda desconhecida.",
+                      "validity": "current",
+                      "resolved": false,
+                      "source": "C:/synthetic-forge-fixture/capture.json",
+                      "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                      "capturedAt": "2000-01-01T00:00:00.000Z"
+                    }
+                  }
+                ],
+                "uncertainties": [
+                  "Executor observado desconhecido; causa da interrupção desconhecida."
+                ],
+                "artifacts": [
+                  {
+                    "kind": "summary",
+                    "existence": "observed",
+                    "integrity": "unverified",
+                    "source": "C:/synthetic-forge-fixture/summary.md",
+                    "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "conflicts": 2
+                  },
+                  {
+                    "kind": "summary",
+                    "existence": "observed",
+                    "integrity": "unverified",
+                    "source": "C:/synthetic-forge-fixture/summary-uncontested.md",
+                    "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "conflicts": 0
+                  }
+                ],
+                "continuity": {
+                  "state": "recorded",
+                  "bound": true,
+                  "workStatus": "pending",
+                  "activity": "unknown",
+                  "checkpoint": {}
+                },
+                "pendingDecisions": [
+                  {
+                    "text": "escolha-sintetica: aguardar a inspeção do processo?",
+                    "validity": "current",
+                    "resolved": false,
+                    "source": "C:/synthetic-forge-fixture/capture.json",
+                    "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "capturedAt": "2000-01-01T00:00:00.000Z"
+                  }
+                ],
+                "acceptances": [],
+                "claim": {
+                  "state": "unknown"
+                },
+                "controller": {
+                  "coverage": "unknown",
+                  "globalCompletion": "unknown"
+                },
+                "coverage": {
+                  "personal": "observed",
+                  "claim": "not-observed",
+                  "controller": "not-observed",
+                  "artifacts": "observed"
+                },
+                "uncovered": [
+                  "sweep",
+                  "sidecar-reset",
+                  "other-journals"
+                ],
+                "nextSafeStep": "Inspecionar processo e receipt antes de nova tentativa; causa e chamada ao provedor continuam desconhecidas."
+              },
+              "options": {},
+              "synthetic": true
+            },
+            "text": "Resumo da recuperação de recuperacao-sintetica\nSituação: parcial (não significa conclusão do trabalho)\nResultados já comprovados: observação incompleta\nIncertezas em aberto: 1 (Executor observado desconhecido; causa da interrupção desconhecida.)\nPendências de decisão: 1; aceites no registro: 0\nPróximo passo seguro: Inspecionar processo e receipt antes de nova tentativa; causa e chamada ao provedor continuam desconhecidas.\nFontes, SHA-256 e detalhes ficam no registro técnico abaixo.\n\nDiagnóstico de recuperação: recuperacao-sintetica\nObservado em: 2000-01-01T00:00:00.000Z\nEstado: parcial (não significa conclusão do trabalho)\n\nFontes e estado da evidência:\n- store pessoal: atual\n    Fonte: C:/synthetic-forge-fixture/context.json\n    SHA-256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\nResultado comprovado:\n- resultado registrado no checkpoint: Verificação sintética preservada; publicação ainda desconhecida. — atual; resolvido: não\n    Fonte: C:/synthetic-forge-fixture/capture.json; SHA-256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; capturado em: 2000-01-01T00:00:00.000Z\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nIncertezas:\n- Executor observado desconhecido; causa da interrupção desconhecida.\n\nArtefatos preservados:\n- resumo: observado; integridade: não verificado\n    Fonte: C:/synthetic-forge-fixture/summary.md; SHA-256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; conflitos: 2\n- resumo: observado; integridade: não verificado\n    Fonte: C:/synthetic-forge-fixture/summary-uncontested.md; SHA-256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; conflitos: 0\n\nContinuidade pessoal:\n- Registro: registrado; vínculo pessoal: sim\n- Situação do trabalho: pendente; atividade: desconhecido\n\nDecisões pendentes:\n- escolha-sintetica: aguardar a inspeção do processo? — atual; resolvido: não\n    Fonte: C:/synthetic-forge-fixture/capture.json; SHA-256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; capturado em: 2000-01-01T00:00:00.000Z\n\nAceites registrados:\n- Nenhum registro nas fontes observadas.\n\nReserva de escrita:\n- Estado: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nControlador:\n- Cobertura: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nFamílias não cobertas (resultado desconhecido):\n- limpeza\n- reinício do sidecar\n- outros journals\n\nPróximo passo seguro: Inspecionar processo e receipt antes de nova tentativa; causa e chamada ao provedor continuam desconhecidas.\n",
+            "rubric": {
+              "assessment": "author",
+              "resultado": "presente",
+              "fase": "desconhecido",
+              "executor": "desconhecido",
+              "proximo_passo": "presente",
+              "decisao_pendente": "presente"
+            },
+            "volume": {
+              "lines": 56,
+              "characters": 2596
+            },
+            "dumps": {
+              "hashes": 5,
+              "dispatch_or_receipt": 0,
+              "absolute_paths": 5,
+              "helper_lists": 0,
+              "navigation_references": 0
+            },
+            "human_view": {
+              "rule": "recovery-human-v1",
+              "text": "Resumo da recuperação de recuperacao-sintetica\nSituação: parcial (não significa conclusão do trabalho)\nResultados já comprovados: observação incompleta\nIncertezas em aberto: 1 (Executor observado desconhecido; causa da interrupção desconhecida.)\nPendências de decisão: 1; aceites no registro: 0\nPróximo passo seguro: Inspecionar processo e receipt antes de nova tentativa; causa e chamada ao provedor continuam desconhecidas.\n\nDiagnóstico de recuperação: recuperacao-sintetica\nEstado: parcial (não significa conclusão do trabalho)\n\nFontes e estado da evidência:\n- store pessoal: atual\n\nResultado comprovado:\n- resultado registrado no checkpoint: Verificação sintética preservada; publicação ainda desconhecida. — atual; resolvido: não\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nIncertezas:\n- Executor observado desconhecido; causa da interrupção desconhecida.\n\nArtefatos preservados:\n- resumo: observado; integridade: não verificado\n    conflitos: 2\n- resumo: observado; integridade: não verificado\n    conflitos: 0\n\nContinuidade pessoal:\n- Registro: registrado; vínculo pessoal: sim\n- Situação do trabalho: pendente; atividade: desconhecido\n\nDecisões pendentes:\n- escolha-sintetica: aguardar a inspeção do processo? — atual; resolvido: não\n\nAceites registrados:\n- Nenhum registro nas fontes observadas.\n\nReserva de escrita:\n- Estado: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nControlador:\n- Cobertura: desconhecido\n- Observação incompleta: outros registros podem não ter sido lidos.\n\nFamílias não cobertas (resultado desconhecido):\n- limpeza\n- reinício do sidecar\n- outros journals\n\nPróximo passo seguro: Inspecionar processo e receipt antes de nova tentativa; causa e chamada ao provedor continuam desconhecidas.\n",
+              "volume": {
+                "lines": 50,
+                "characters": 1781
+              },
+              "dumps": {
+                "hashes": 0,
+                "dispatch_or_receipt": 0,
+                "absolute_paths": 0,
+                "helper_lists": 0,
+                "navigation_references": 0
+              }
+            }
+          }
+        }
+      },
+      "utility": "A falha mantém o provedor desconhecido e orienta inspeção antes de tentar de novo. O parcial explicita o que continua executável; a amostra não prova retomada real nem disponibilidade do destino."
+    },
+    {
+      "id": "codex-vscode-decisao-humana",
+      "host": "codex-vscode",
+      "scenario": "decisao-humana",
+      "channel": "Codex no VS Code: texto; ferramenta de plano ou pergunta somente quando realmente exposta e permitida para finalidade e modo. Citações TaskCreate são modelos de origem Claude, não chamadas Codex.",
+      "before": {
+        "label": "redigido",
+        "source": {
+          "file": "shared/forge-interaction.md",
+          "reference": "shared/forge-interaction.md#decision-handling",
+          "synthetic": true
+        },
+        "text": "O diagnóstico terminou e a publicação aguarda definição. Há fontes preservadas e uma inspeção por fazer; escolha-sintetica: aguardar a inspeção do processo? A resposta é necessária antes de continuar a ação dependente.",
+        "rubric": {
+          "assessment": "author",
+          "resultado": "presente",
+          "fase": "ausente",
+          "executor": "ausente",
+          "proximo_passo": "desconhecido",
+          "decisao_pendente": "presente"
+        },
+        "volume": {
+          "lines": 1,
+          "characters": 218
+        },
+        "dumps": {
+          "hashes": 0,
+          "dispatch_or_receipt": 0,
+          "absolute_paths": 0,
+          "helper_lists": 0,
+          "navigation_references": 0
+        },
+        "human_view": {
+          "rule": "complete-v1",
+          "text": "O diagnóstico terminou e a publicação aguarda definição. Há fontes preservadas e uma inspeção por fazer; escolha-sintetica: aguardar a inspeção do processo? A resposta é necessária antes de continuar a ação dependente.",
+          "volume": {
+            "lines": 1,
+            "characters": 218
+          },
+          "dumps": {
+            "hashes": 0,
+            "dispatch_or_receipt": 0,
+            "absolute_paths": 0,
+            "helper_lists": 0,
+            "navigation_references": 0
+          }
+        }
+      },
+      "after": {
+        "label": "redigido",
+        "source": {
+          "file": "shared/forge-interaction.md",
+          "reference": "shared/forge-interaction.md#decision-handling",
+          "synthetic": true
+        },
+        "text": "Resultado buscado: definir a continuação segura. Fase: aguardando decisão. Executor observado: desconhecido.\n\nDecisão pendente: escolha-sintetica — aguardar a inspeção do processo? A ação dependente continua bloqueada; investigação independente pode prosseguir.\n\nPróximo passo: responder a escolha-sintetica. Use uma ferramenta nativa realmente exposta e permitida para finalidade e modo; sem ela, apresente a pergunta em texto separado e aguarde resposta explícita. Silêncio, timeout, fechamento e resposta vazia não resolvem a decisão.",
+        "rubric": {
+          "assessment": "author",
+          "resultado": "presente",
+          "fase": "presente",
+          "executor": "desconhecido",
+          "proximo_passo": "presente",
+          "decisao_pendente": "presente"
+        },
+        "volume": {
+          "lines": 5,
+          "characters": 537
+        },
+        "dumps": {
+          "hashes": 0,
+          "dispatch_or_receipt": 0,
+          "absolute_paths": 0,
+          "helper_lists": 0,
+          "navigation_references": 0
+        },
+        "human_view": {
+          "rule": "complete-v1",
+          "text": "Resultado buscado: definir a continuação segura. Fase: aguardando decisão. Executor observado: desconhecido.\n\nDecisão pendente: escolha-sintetica — aguardar a inspeção do processo? A ação dependente continua bloqueada; investigação independente pode prosseguir.\n\nPróximo passo: responder a escolha-sintetica. Use uma ferramenta nativa realmente exposta e permitida para finalidade e modo; sem ela, apresente a pergunta em texto separado e aguarde resposta explícita. Silêncio, timeout, fechamento e resposta vazia não resolvem a decisão.",
+          "volume": {
+            "lines": 5,
+            "characters": 537
+          },
+          "dumps": {
+            "hashes": 0,
+            "dispatch_or_receipt": 0,
+            "absolute_paths": 0,
+            "helper_lists": 0,
+            "navigation_references": 0
+          }
+        }
+      },
+      "utility": "A pergunta redigida fica separada do progresso e conserva ID, consequência e ausência de consentimento por silêncio. Não demonstra apresentação de cartão, resposta humana ou funcionamento da ferramenta."
+    }
+  ]
+}
