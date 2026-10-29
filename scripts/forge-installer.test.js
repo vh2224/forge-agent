@@ -1242,12 +1242,36 @@ test('span-only and self-sourced instructions do not gain whole-file ownership',
 test('Codex instruction ownership records final synchronized bytes across updates and dry runs', () => {
   const data = fixture();
   const ownership = require('./forge-projection-ownership');
+  const renderer = require('./forge-codex-renderer');
+  const instructions = require('./forge-instructions');
   try {
     const options = { ...data.options, runtime: 'codex', provenance: null };
-    const first = installer.install(options);
+    installer.install({ ...options, dryRun: true });
+    for (const directory of [data.forgeHome, data.codexHome, data.projectRoot]) assert(!fs.existsSync(directory));
+    const originalWrite = renderer.write;
+    let first, generatedInstruction;
+    try {
+      // Observe the production renderer's actual write, not an intermediate sync
+      // that is redundant once the renderer supplies the complete managed block.
+      renderer.write = function (input) {
+        const report = originalWrite(input);
+        generatedInstruction = report.written.find(item => item.kind === 'instructions');
+        return report;
+      };
+      first = installer.install(options);
+    } finally { renderer.write = originalWrite; }
     const file = path.join(data.projectRoot, 'AGENTS.md'), key = ownership.keyFor(file);
     const manifestFile = path.join(data.forgeHome, 'manifest.json');
-    assert(first.plan.some(row => row.op === 'write' && row.destination === file && row.reason === 'instructions:block-absent'));
+    assert(generatedInstruction && !generatedInstruction.dry_run, 'renderer não gravou as instruções iniciais');
+    assert.strictEqual(generatedInstruction.destination, file);
+    const content = fs.readFileSync(file, 'utf8');
+    assert.strictEqual(content, generatedInstruction.content, 'sync alterou a gravação completa do renderer');
+    assert.strictEqual(content.split(instructions.MARKER_START).length - 1, 1);
+    assert.strictEqual(content.split(instructions.MARKER_END).length - 1, 1);
+    assert.strictEqual(content.split(instructions.renderCommunicationContract()).length - 1, 1);
+    assert(!first.plan.some(row => row.op === 'write' && row.destination === file), 'sync gerou escrita redundante');
+    assert.strictEqual(instructions.syncFile(file, { host: 'codex' }).outcome, 'unchanged');
+    assert.strictEqual(fs.readFileSync(file, 'utf8'), content);
     assert.strictEqual(first.manifest.ownership[key], ownership.digest(fs.readFileSync(file, 'utf8')), 'digest anterior ao sync não representa os bytes finais');
     const manifestBytes = fs.readFileSync(manifestFile), instructionBytes = fs.readFileSync(file);
     const dry = installer.install({ ...options, update: true, dryRun: true });
@@ -1260,9 +1284,11 @@ test('Codex instruction ownership records final synchronized bytes across update
       const recorded = JSON.parse(fs.readFileSync(manifestFile, 'utf8')).ownership[key];
       assert.strictEqual(recorded, ownership.digest(fs.readFileSync(file, 'utf8')));
       assert(!result.manifest.adapters.codex.conflicts.some(row => row.destination === file));
+      assert.deepStrictEqual(fs.readFileSync(file), instructionBytes, 'update mudou instruções já atuais');
       digests.push(recorded);
     }
     assert.strictEqual(digests[0], digests[1]);
+    console.log('PASS communication installer: actual generated first write has one managed contract, sync unchanged, final ownership, dry-run no writes and byte-idempotent updates');
   } finally { data.cleanup(); }
 });
 

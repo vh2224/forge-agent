@@ -114,6 +114,30 @@ function hasAgentOutsideFence(text) {
 try {
   const project = path.join(temp, 'project Ω'); const codex = path.join(temp, 'Codex Home Ω'); const forge = path.join(temp, 'Forge Home Ω'); fs.mkdirSync(project, { recursive: true });
   const report = renderer.render({ repo: root, projectRoot: project, codexHome: codex, forgeHome: forge, ...PRODUCTION_DISPATCH_DIALECT });
+  const standing = require('./forge-instructions');
+  const canonicalCommunication = standing.renderCommunicationContract();
+  const instructionsArtifact = report.artifacts.find(item => item.kind === 'instructions');
+  assert.strictEqual(instructionsArtifact.content.split(canonicalCommunication).length - 1, 1);
+  assert.strictEqual(instructionsArtifact.content.split(standing.renderBlock()).length - 1, 1);
+  for (const contract of [standing.renderPersonalContract(), standing.renderEntryContract()]) {
+    assert.strictEqual(instructionsArtifact.content.split(contract).length - 1, 1);
+  }
+  const communicationManifest = JSON.parse(fs.readFileSync(path.join(root, 'forge-source-manifest.json'), 'utf8'));
+  const communicationSource = communicationManifest.sources.find(source => source.source_id === 'communication');
+  assert(communicationSource, 'communication source missing');
+  assert.deepStrictEqual(communicationSource.inputs, ['shared/forge-communication.md']);
+  assert.deepStrictEqual(communicationSource.render_targets, [{ path: 'shared/forge-communication.md', recursive: false }]);
+  assert.strictEqual(communicationSource.owner, 'orchestration');
+  assert.strictEqual(communicationSource.capability, 'integration-communication-contract');
+  assert.strictEqual(communicationSource.security_role, 'public');
+  assert.strictEqual(communicationSource.newline, 'lf');
+  assert.deepStrictEqual(communicationSource.common, { format: 'markdown', delivery: 'managed-instruction-block' });
+  assert.deepStrictEqual(communicationSource.conditional, { claude: { status: 'distributed' }, codex: { status: 'distributed' } });
+  const communicationReport = JSON.parse(report.artifacts.find(item => item.kind === 'capabilities').content);
+  assert.deepStrictEqual(communicationReport.surfaces.filter(source => source.source_id === 'communication'), [{ source_id: 'communication', status: 'distributed' }]);
+  assert(!report.artifacts.some(item => item.source_id === 'communication'), 'communication emitted as separate Codex artifact');
+  assert(fs.readFileSync(path.join(root, 'shared/forge-codex-renderer.md'), 'utf8').includes('standing.renderBlock'));
+  console.log('PASS communication Codex: single managed block retains routing personal entry and communication contracts, manifest exact and capabilities distributed without a separate artifact');
   assert.strictEqual(report.runtime, 'codex'); assert(report.artifacts.some((item) => item.destination.endsWith(path.join('project Ω', 'AGENTS.md')))); assert(report.artifacts.some((item) => item.destination.endsWith(path.join('Codex Home Ω', 'agents', 'forge-executor.toml')))); assert(report.artifacts.every((item) => !item.destination.includes('.claude'))); assert(report.artifacts.every((item) => !item.content.includes('\r')));
   const agent = report.artifacts.find((item) => item.destination.endsWith(path.join('agents', 'forge-executor.toml')));
   assert.match(agent.content, new RegExp(`^# forge-source:codex-agent-forge-executor version=${versionPattern}$`, 'm'));

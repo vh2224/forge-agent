@@ -449,10 +449,10 @@ function render(options = {}) {
   const agentFiles = agents ? walk(path.join(root.repo, agents.inputs[0])).filter((file) => file.endsWith('.md')) : [];
   const instructions = [ORIGIN, `# Forge Agent ${VERSION} — Codex host`, '', 'Estas instruções são geradas a partir das fontes canônicas do Forge.', '', '## Superfícies comuns', ...common.map((source) => `- ${source.source_id}: ${source.capability}`), '', '## Agentes customizados', ...agentFiles.map((file) => `- ${path.basename(file, '.md')}: .codex/agents/${path.basename(file, '.md')}.toml`), '', '## Skills e comandos', '- Conteúdo canônico materializado em `$CODEX_HOME/skills`, `$CODEX_HOME/commands` e `$CODEX_HOME/templates/dispatch`.', ''].join('\n');
   // Standing contracts come from the single projector, never a second copy: the
-  // Codex host must read the same personal-session and intent-first entry rules
-  // the Claude block carries, or "the same contract" is only true in prose.
+  // managed block owns routing, personal, entry and communication together, so
+  // the installer's later sync replaces that same span without duplicate prose.
   const standing = require('./forge-instructions');
-  add('codex-instructions', 'AGENTS.md', path.join(root.projectRoot, 'AGENTS.md'), interaction.project(instructions + '\n' + standing.renderPersonalContract() + '\n\n' + standing.renderEntryContract() + '\n'), 'instructions');
+  add('codex-instructions', 'AGENTS.md', path.join(root.projectRoot, 'AGENTS.md'), interaction.project(instructions + '\n' + standing.renderBlock() + '\n'), 'instructions');
   for (const file of agentFiles) {
     const name = path.basename(file, '.md');
     const source = rewriteMarkdown(fs.readFileSync(file, 'utf8'));

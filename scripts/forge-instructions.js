@@ -28,6 +28,7 @@
 //   renderBlock(opts)           // ({eol}) → block text
 //   renderPersonalContract()    // standing personal-session rules
 //   renderEntryContract()       // standing intent-first entry rules
+//   renderCommunicationContract(opts) // canonical user communication rules
 //   findBlock(text)             // → {start, end} | null | {malformed: reason}
 //   syncFile(file, opts)        // one file → {file, host, outcome, reason}
 //   syncInstructions(cwd, opts) // → {cwd, files: [...], changed: n}
@@ -137,9 +138,24 @@ function renderBlock(options = {}) {
     renderPersonalContract(),
     '',
     renderEntryContract(),
+    '',
+    renderCommunicationContract(),
     MARKER_END,
   ];
   return lines.join('\n').replace(/\r?\n/g, eol);
+}
+
+// Resolve beside the script in both the checkout and installed Forge home.
+// The explicit file seam permits isolated failure tests without an env override.
+function renderCommunicationContract(options = {}) {
+  try {
+    const content = fs.readFileSync(options.file || path.join(__dirname, '..', 'shared', 'forge-communication.md'), 'utf8')
+      .replace(/\r\n/g, '\n').trimEnd();
+    if (content) return content;
+  } catch (_) { /* fail closed without leaking a source path or read diagnostic */ }
+  const error = new Error('communication-contract-missing');
+  error.code = 'communication-contract-missing';
+  throw error;
 }
 
 // The entry rules travel with the routing and personal ones for the same reason:
@@ -483,6 +499,7 @@ module.exports = {
   renderBlock,
   renderPersonalContract,
   renderEntryContract,
+  renderCommunicationContract,
   scanMarkers,
   findBlock,
   detectEol,

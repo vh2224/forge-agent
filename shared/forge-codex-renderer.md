@@ -27,6 +27,20 @@ capabilities no Forge home, sem ler ou escrever `~/.claude`.
 Superfícies sem tradução oficial 1:1 permanecem explicitamente condicionais ou
 indisponíveis no relatório; o renderer não usa o CLI Claude como fallback.
 
+`AGENTS.md` carrega o contrato de comunicação de `shared/forge-communication.md`
+por meio do projetor único `forge-instructions.renderCommunicationContract`,
+incorporado em `standing.renderBlock` junto dos contratos de roteamento, pessoal
+e de entrada. O renderer usa esse mesmo bloco gerenciado, que a sincronização
+posterior substitui sem acrescentar cópia independente ou reter texto obsoleto.
+A fonte `communication` aparece como `distributed` no relatório, sem artefato
+separado; isso não comprova funcionamento na interface ou aceite humano.
+
+Medição local S02/T03: o bloco gerenciado passou de 9 764 para 14 138 bytes
+UTF-8 (acréscimo de 4 374 bytes). A suíte declara um orçamento local de
+16 384 bytes para detectar crescimento; esse teto não é um limite verificado do host.
+O contrato canônico tem 37 linhas. Esses números medem a distribuição textual,
+sem comprovar consumo pelo cliente ou compreensão humana.
+
 ## Relatório de capabilities (schema 2)
 
 `adapters/codex/capabilities.json`, no Forge home, informa qual core gerou o

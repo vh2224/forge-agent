@@ -255,6 +255,7 @@ function targetFor(source, input, file, target, repo) {
 }
 
 function selected(source) {
+  if (source.common && source.common.delivery === 'managed-instruction-block') return false;
   const state = source.conditional && source.conditional[RUNTIME];
   return !state || !state.status || !['unavailable', 'planned'].includes(state.status);
 }
