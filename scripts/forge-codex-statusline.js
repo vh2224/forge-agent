@@ -72,20 +72,20 @@ function keyPath(code) {
   return null;
 }
 
-// This is a conservative, additive editor, not a TOML serializer. Keep every
-// existing byte and decline ambiguous syntax rather than rewriting user config.
-function addDefaultSetting(current, tableName, keyName, assignment, reasonPrefix) {
-  const eol = current.includes('\r\n') ? '\r\n' : '\n';
-  const conflict = { content: current, conflict: true, reason: `${reasonPrefix}-manual-merge` };
+// Shared conservative declaration reader. Values stay internal to callers;
+// this does not validate or serialize arbitrary TOML values.
+function readSettingDeclarations(current, tableName, keyName) {
   const entries = statements(current);
-  if (!entries) return conflict;
+  if (!entries) return null;
+  const values = [];
   let section = [], header = null, preserved = false, ambiguous = false, cannotAdd = false;
   for (const entry of entries) {
     if (entry.code.startsWith('[')) {
       const table = /^(\[\[?)([\s\S]*?)(\]\]?)$/.exec(entry.code);
-      if (!table || table[1].length !== table[3].length) return conflict;
+      if (!table || table[1].length !== table[3].length) return null;
       section = keyPath(table[2]);
-      if (!section) return conflict;
+      if (!section) return null;
+      if (!tableName && section[0] === keyName) cannotAdd = true;
       if (section[0] === tableName) {
         if (section.length !== 1 || table[1] !== '[' || header) ambiguous = true;
         else header = entry;
@@ -95,11 +95,27 @@ function addDefaultSetting(current, tableName, keyName, assignment, reasonPrefix
     // '=' inside a quoted key is not an assignment separator.
     const binding = /^((?:"[^"\\]*"|'[^']*'|[^="'])+)=/.exec(entry.code);
     const keys = binding && keyPath(binding[1]);
-    if (!keys) return conflict;
+    if (!keys) return null;
     const path = [...section, ...keys];
-    if (path.length === 2 && path[0] === tableName && path[1] === keyName) preserved = true;
-    else if (path[0] === tableName && (path[1] === keyName || !section.length)) cannotAdd = true;
+    if ((tableName && path.length === 2 && path[0] === tableName && path[1] === keyName)
+      || (!tableName && path.length === 1 && path[0] === keyName)) {
+      preserved = true;
+      values.push(entry.code.slice(binding[0].length).trim());
+    }
+    else if ((path[0] === tableName && (path[1] === keyName || !section.length))
+      || (!tableName && path[0] === keyName)) cannotAdd = true;
   }
+  return { header, preserved, ambiguous, cannotAdd, values };
+}
+
+// This is a conservative, additive editor, not a TOML serializer. Keep every
+// existing byte and decline ambiguous syntax rather than rewriting user config.
+function addDefaultSetting(current, tableName, keyName, assignment, reasonPrefix) {
+  const eol = current.includes('\r\n') ? '\r\n' : '\n';
+  const conflict = { content: current, conflict: true, reason: `${reasonPrefix}-manual-merge` };
+  const declaration = readSettingDeclarations(current, tableName, keyName);
+  if (!declaration) return conflict;
+  const { header, preserved, ambiguous, cannotAdd } = declaration;
   if (ambiguous) return conflict;
   if (preserved) return { content: current, reason: `${reasonPrefix}-preserved` };
   if (cannotAdd) return conflict;
@@ -118,4 +134,33 @@ function addDefaultStatusLine(current) {
   return addDefaultSetting(current, 'tui', 'status_line', assignment, 'status-line');
 }
 
-module.exports = { DEFAULT_STATUS_LINE, addDefaultStatusLine, addDefaultSetting };
+// Simple TOML strings only; unsupported multiline/escape syntax is manual-merge.
+// Shared with the public inspector, which redacts values outside closed vocabularies.
+function readSimpleString(value) {
+  if (/^'[^'\r\n]*'$/.test(value)) return value.slice(1, -1);
+  if (!/^"(?:[^"\\\r\n]|\\.)*"$/.test(value)) return null;
+  try { return JSON.parse(value); } catch (_) { return null; }
+}
+
+function diagnoseStatusLine(config) {
+  const manual = { selection: 'manual-merge', items: [], missing_limit_indicators: [] };
+  const declaration = readSettingDeclarations(config, 'tui', 'status_line');
+  if (!declaration || declaration.ambiguous || declaration.values.length > 1) return manual;
+  if (!declaration.preserved) return declaration.cannotAdd ? manual : { selection: 'absent', items: [], missing_limit_indicators: [] };
+  const value = declaration.values[0];
+  if (!value.startsWith('[') || !value.endsWith(']')) return manual;
+  let rest = value.slice(1, -1).trim();
+  const items = [];
+  while (rest) {
+    const match = /^("(?:[^"\\\r\n]|\\.)*"|'[^'\r\n]*')/.exec(rest);
+    const item = match && readSimpleString(match[0]);
+    if (item === null || !match) return manual;
+    items.push(item);
+    rest = rest.slice(match[0].length).trim();
+    if (rest && !rest.startsWith(',')) return manual;
+    rest = rest.slice(1).trim();
+  }
+  return { selection: 'explicit', items, missing_limit_indicators: ['usage-limit', 'secondary-usage-limit'].filter(item => !items.includes(item)) };
+}
+
+module.exports = { DEFAULT_STATUS_LINE, addDefaultStatusLine, addDefaultSetting, readSettingDeclarations, readSimpleString, diagnoseStatusLine };

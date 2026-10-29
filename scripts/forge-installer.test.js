@@ -392,6 +392,43 @@ test('ambiguous Codex config is preserved with actionable status-line guidance',
   assert(!output.includes('--migrate-legacy'));
 });
 
+test('presentation limits suggestion is read-only, selected-host local and absent from persisted manifests', () => {
+  const data = fixture({ configurationOnly: true });
+  try {
+    fs.mkdirSync(data.codexHome, { recursive: true });
+    const config = path.join(data.codexHome, 'config.toml');
+    const selections = [null, require('./forge-codex-statusline').DEFAULT_STATUS_LINE, ['usage-limit', 'secondary-usage-limit'], ['context-used'], ['usage-limit']];
+    for (const items of selections) {
+      const text = 'personality = "pragmatic"\nmodel_verbosity = "low"\n' + (items ? `tui.status_line = ${JSON.stringify(items)}\n` : '');
+      fs.writeFileSync(config, text);
+      const mtime = fs.statSync(config).mtimeMs;
+      const preview = installer.install({ ...data.options, runtime: 'codex', update: true, dryRun: true });
+      assert.strictEqual(fs.readFileSync(config, 'utf8'), text);
+      assert.strictEqual(fs.statSync(config).mtimeMs, mtime);
+      const missing = items !== null && (!items.includes('usage-limit') || !items.includes('secondary-usage-limit'));
+      assert.strictEqual(preview.presentation.suggestions.length, missing ? 1 : 0);
+      assert.strictEqual(installer.render(preview).split('\n').filter(line => line.includes('Nada foi alterado.')).length, missing ? 1 : 0);
+      const report = installer.install({ ...data.options, runtime: 'codex', update: true });
+      assert.strictEqual(report.presentation.suggestions.length, missing ? 1 : 0);
+      assert.strictEqual(report.presentation.writes, 0);
+      assert.strictEqual(report.presentation.claude, undefined);
+      assert(!fs.existsSync(data.claudeHome));
+      const after = fs.readFileSync(config, 'utf8');
+      if (items) {
+        assert.strictEqual(after, text); assert.strictEqual(fs.statSync(config).mtimeMs, mtime);
+      } else assert(after.includes('usage-limit'));
+      assert(!Object.hasOwn(report.manifest, 'presentation'));
+      for (const file of [path.join(data.forgeHome, 'manifest.json'), path.join(data.forgeHome, 'adapters', 'codex', 'manifest.json')]) {
+        const persisted = fs.readFileSync(file, 'utf8');
+        assert(!persisted.includes('codex-status-line-limits'));
+        assert(!persisted.includes('missing_limit_indicators'));
+        assert(!persisted.includes('"presentation"'));
+      }
+    }
+    console.log('PASS installer presentation: explicit missing limits get one pt-BR suggestion without config bytes or mtime changes; absent default complete have none; diagnosis stays in memory outside manifests');
+  } finally { data.cleanup(); }
+});
+
 test('update backs up managed files and preserves prefs and unmanaged files', () => {
   const data = fixture();
   try {
