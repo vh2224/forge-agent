@@ -636,3 +636,113 @@ test('observation v2 branch does not change v1 or liveness-v1 projections', () =
   assert.deepEqual(Object.keys(observation({ calibration: { initial: 'calibrated', gap: 'calibrated' } }).calibration),
     ['diagnostic', 'initial', 'gap']);
 });
+
+// ── S03/T01: tool_activity and terminal_observed, additive, closed and idempotent ──
+// Bytes pinned from the pre-T01 observation()/progressLine() for inputs without the new fields.
+const T01_FULL = { version: 1, phase: 'terminal', elapsed_ms: 900, transport_ms: 800, verification_ms: 100, stdout_bytes: 512,
+  stderr_bytes: 3, event_count: 9, remote_event_count: 4, first_remote_ms: 20, last_remote_ms: 700, initial_sample_ms: 20,
+  gap_sample_ms: 300, remote_silence_ms: 200, gap_suspended: true, tools_in_flight: 1, suspension_epoch: 2,
+  input_tokens: 401, output_tokens: 403, cache_read_tokens: 0, cache_write_tokens: null, cost_usd: 0.0123,
+  denials: { read: 1, write: 0, shell: 0, other: 1 }, process_exit_observed: true, model_observed: 'claude-fixture-model',
+  calibration: { diagnostic: null, initial: 'calibrated', gap: 'calibrating' },
+  silence: { dimension: 'gap', window_ms: 240001, threshold_ms: 240000, policy: 'forge-liveness-v1',
+    source: 'locked-default', cause: 'indeterminate' },
+  liveness: { version: 1, state: 'dead', since_ms: 240000, reason: 'silence', termination: 'dead-silence' } };
+const T01_EMPTY_BYTES = '{"version":1,"elapsed_ms":null,"transport_ms":null,"verification_ms":null,"stdout_bytes":null,'
+  + '"stderr_bytes":null,"event_count":null,"remote_event_count":null,"first_remote_ms":null,"last_remote_ms":null,'
+  + '"initial_sample_ms":null,"gap_sample_ms":null,"remote_silence_ms":null,"input_tokens":null,"output_tokens":null,'
+  + '"cache_read_tokens":null,"cache_write_tokens":null,"phase":"local-start","cost_usd":null,"cost_source":null,'
+  + '"remote_source":null,"usage_source":null,"gap_suspended":false,"process_exit_observed":false,'
+  + '"denials":{"read":null,"write":null,"shell":null,"other":null}}';
+const T01_FULL_BYTES = '{"version":1,"elapsed_ms":900,"transport_ms":800,"verification_ms":100,"stdout_bytes":512,'
+  + '"stderr_bytes":3,"event_count":9,"remote_event_count":4,"first_remote_ms":20,"last_remote_ms":700,'
+  + '"initial_sample_ms":20,"gap_sample_ms":300,"remote_silence_ms":200,"input_tokens":401,"output_tokens":403,'
+  + '"cache_read_tokens":0,"cache_write_tokens":null,"phase":"terminal","cost_usd":0.0123,"cost_source":"cli-estimate-usd",'
+  + '"remote_source":"cli-reported-protocol","usage_source":"cli-reported-usage","gap_suspended":true,'
+  + '"process_exit_observed":true,"denials":{"read":1,"write":0,"shell":0,"other":1},'
+  + '"model_observed":"claude-fixture-model","model_source":"claude-json-modelUsage",'
+  + '"calibration":{"diagnostic":null,"initial":"calibrated","gap":"calibrating"},'
+  + '"silence":{"dimension":"gap","window_ms":240001,"threshold_ms":240000,"policy":"forge-liveness-v1",'
+  + '"source":"locked-default","cause":"indeterminate"},'
+  + '"liveness":{"version":1,"state":"dead","since_ms":240000,"reason":"silence","termination":"dead-silence"}}';
+const T01_ACTIVITY = { read: 2, write: 1, shell: 3, other: 0, last_class: 'shell', last_ms: 850 };
+const T01_ZERO_ACTIVITY = { read: 0, write: 0, shell: 0, other: 0, last_class: null, last_ms: null };
+
+test('S03/T01 observation keeps pre-T01 bytes for inputs without the new fields', () => {
+  for (const [input, bytes] of [[{}, T01_EMPTY_BYTES], [T01_FULL, T01_FULL_BYTES]]) {
+    assert.equal(JSON.stringify(observation(input)), bytes);
+    assert.equal(progressLine(input), '[forge-sidecar-progress] ' + bytes + '\n');
+    // A reducer with zero counted calls and no terminal marker is byte-identical too.
+    assert.equal(JSON.stringify(observation({ ...input, tool_activity: T01_ZERO_ACTIVITY })), bytes);
+    for (const marker of [false, 'true', 1, null, {}]) {
+      assert.equal(JSON.stringify(observation({ ...input, terminal_observed: marker })), bytes, String(marker));
+    }
+  }
+  console.log('PASS S03/T01 observation bytes: inputs without tool_activity/terminal_observed unchanged, zero activity omitted');
+});
+
+test('S03/T01 observation appends closed tool_activity and terminal_observed after every current key', () => {
+  const result = observation({ ...T01_FULL, tool_activity: { ...T01_ACTIVITY, name: 'Bash', id: 'toolu_private',
+    input: { command: token } }, terminal_observed: true });
+  assert.deepEqual(result.tool_activity, T01_ACTIVITY);
+  assert.equal(result.terminal_observed, true);
+  assert.deepEqual(Object.keys(result), [...Object.keys(JSON.parse(T01_FULL_BYTES)), 'tool_activity', 'terminal_observed']);
+  assert.equal(JSON.stringify(result), T01_FULL_BYTES.slice(0, -1)
+    + ',"tool_activity":{"read":2,"write":1,"shell":3,"other":0,"last_class":"shell","last_ms":850},"terminal_observed":true}');
+  for (const value of [token, 'Bash', 'toolu_private', 'command']) assert(!JSON.stringify(result).includes(value));
+  const only = observation({ terminal_observed: true });
+  assert.equal(JSON.stringify(only), T01_EMPTY_BYTES.slice(0, -1) + ',"terminal_observed":true}');
+  console.log('PASS S03/T01 observation additive blocks: tool_activity and terminal_observed last, extras dropped');
+});
+
+test('S03/T01 observation discards invalid tool_activity values without coercion', () => {
+  for (const bad of ['1', -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, null, true, [1], { valueOf: () => 3 }]) {
+    const result = observation({ tool_activity: { read: bad, write: 1, shell: 0, other: 0, last_class: 'write', last_ms: 5 } });
+    assert.deepEqual(result.tool_activity, { read: 0, write: 1, shell: 0, other: 0, last_class: 'write', last_ms: 5 }, String(bad));
+  }
+  for (const bad of [undefined, null, 'Read', 'READ', 'read ', 'unknown', 1, ['read'], {}]) {
+    assert.equal(observation({ tool_activity: { read: 1, last_class: bad } }).tool_activity.last_class, null, String(bad));
+  }
+  for (const bad of [undefined, null, -1, 1.5, '5', NaN, Number.MAX_SAFE_INTEGER + 1, { valueOf: () => 5 }]) {
+    assert.equal(observation({ tool_activity: { other: 4, last_class: 'other', last_ms: bad } }).tool_activity.last_ms, null, String(bad));
+  }
+  assert.deepEqual(observation({ tool_activity: { shell: Number.MAX_SAFE_INTEGER, last_class: 'shell', last_ms: 0 } }).tool_activity,
+    { read: 0, write: 0, shell: Number.MAX_SAFE_INTEGER, other: 0, last_class: 'shell', last_ms: 0 });
+  for (const absent of [undefined, null, 'tool', 7, [T01_ACTIVITY], { read: '2', write: -1, shell: 1.5, other: null },
+    { last_class: 'read', last_ms: 9 }, T01_ZERO_ACTIVITY]) {
+    assert(!('tool_activity' in observation({ tool_activity: absent })), JSON.stringify(absent));
+  }
+  console.log('PASS S03/T01 observation validation: safe nonnegative integers only, closed last_class, invalid last_ms null');
+});
+
+test('S03/T01 observation is idempotent through reapplication, diagnostic, progress line and recovery.record', () => {
+  const { createRecovery } = require('./forge-attempt-recovery');
+  const route = { unit_type: 'execute-task', host_runtime: 'codex', resolved_worker_engine: 'claude', worker_mode: 'sidecar',
+    model: 'claude-sonnet-5', model_resolved: 'claude-sonnet-5', effort: 'medium', tier: 'standard', dispatch_allowed: true };
+  const statePath = path.join(root, 's03-t01-recovery-state.json');
+  const inputs = [{}, T01_FULL, { ...T01_FULL, tool_activity: T01_ACTIVITY },
+    { ...T01_FULL, phase: 'failed', process_exit_observed: false, tool_activity: T01_ACTIVITY, terminal_observed: true },
+    { elapsed_ms: 7, terminal_observed: true }, { tool_activity: { write: 1, last_class: 'bogus', last_ms: -3 } }];
+  for (const input of inputs) {
+    const once = observation(input);
+    const twice = observation(once);
+    assert.deepEqual(twice, once);
+    assert.equal(JSON.stringify(twice), JSON.stringify(once));
+    const diagnosed = diagnostic('provider-timeout', { observation: once }).observation;
+    assert.deepEqual(diagnosed, once);
+    assert.equal(JSON.stringify(diagnosed), JSON.stringify(once));
+    const read = readProgressLine(progressLine(input));
+    assert.deepEqual(read, once);
+    assert.equal(JSON.stringify(read), JSON.stringify(once));
+    const recovery = createRecovery({ unit: 'execute-task/T-s03-t01', roots_sha256: 'roots', clock: () => 1,
+      persist: state => fs.writeFileSync(statePath, JSON.stringify(state)) });
+    const saved = recovery.record({ reason_code: 'claude-timeout', layer: 'transport', failure_class: 'timeout',
+      request_sha256: null, request_bytes: null, context_sha256: null, context_bytes: null, duration_ms: 10,
+      budgets: {}, route, observation: once });
+    assert.deepEqual(saved.attempts[0].observation, once);
+    const persisted = JSON.parse(fs.readFileSync(statePath, 'utf8')).attempts[0].observation;
+    assert.deepEqual(persisted, once);
+    assert.equal(JSON.stringify(persisted), JSON.stringify(once));
+  }
+  console.log('PASS S03/T01 observation idempotence: double application, diagnostic, progress roundtrip and recovery.record');
+});

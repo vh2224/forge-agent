@@ -37,6 +37,9 @@ const REASONS = Object.freeze({
 const POLICY_V2 = 'claude-silence-v2';
 const V2_SOURCES = Object.freeze(['persisted-calibration', 'model-fallback']);
 const COUNTS = ['stdout_bytes', 'stderr_bytes', 'duration_ms', 'marker_count', 'model_count'];
+// Closed tool classes of forge-claude-stream toolClass(), declared locally so
+// providers that must not load the Claude stream can still use observation().
+const TOOL_CLASSES = Object.freeze(['read', 'write', 'shell', 'other']);
 // One token, no list separators, no path or shell characters; an optional
 // bracketed context suffix such as `[1m]`. Shared with the Claude adapter so
 // the only id a diagnostic can carry is one the adapter already validated.
@@ -72,7 +75,7 @@ function observation(input = {}) {
     .some(key => out[key] !== null) ? 'cli-reported-usage' : null;
   out.gap_suspended = input.gap_suspended === true;
   out.process_exit_observed = input.process_exit_observed === true;
-  out.denials = Object.fromEntries(['read', 'write', 'shell', 'other'].map(key => [key,
+  out.denials = Object.fromEntries(TOOL_CLASSES.map(key => [key,
     Number.isSafeInteger(input.denials?.[key]) && input.denials[key] >= 0 ? input.denials[key] : null]));
   if (isSafeModelId(input.model_observed)) {
     out.model_observed = input.model_observed;
@@ -120,6 +123,21 @@ function observation(input = {}) {
       reason: liveness.REASONS.includes(beat.reason) ? beat.reason : null };
     if (liveness.TERMINATIONS.includes(beat.termination)) out.liveness.termination = beat.termination;
   }
+  // Additive and last: absent unless a reported call was counted, so older
+  // inputs keep their exact bytes. Zero counted differs from unavailable.
+  const activity = toolActivity(input.tool_activity);
+  if (activity) out.tool_activity = activity;
+  // A protocol terminal preceded the failure; never a validated result or exit.
+  if (input.terminal_observed === true) out.terminal_observed = true;
+  return out;
+}
+function toolActivity(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  const count = value => Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  const out = Object.fromEntries(TOOL_CLASSES.map(key => [key, count(input[key])]));
+  if (!TOOL_CLASSES.some(key => out[key] > 0)) return null;
+  out.last_class = TOOL_CLASSES.includes(input.last_class) ? input.last_class : null;
+  out.last_ms = Number.isSafeInteger(input.last_ms) && input.last_ms >= 0 ? input.last_ms : null;
   return out;
 }
 const PROGRESS_PREFIX = '[forge-sidecar-progress] ';

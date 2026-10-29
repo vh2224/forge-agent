@@ -10,6 +10,12 @@ function failure(reason) {
   throw Object.assign(new Error('Claude stream refused.'), { reason });
 }
 
+// Closed tool class shared by permission_denials and tool_activity: the name
+// only selects a class and never leaves the reducer.
+function toolClass(name) {
+  return /^(Read|Glob|Grep)$/.test(name) ? 'read' : /^(Edit|Write)$/.test(name) ? 'write' : name === 'Bash' ? 'shell' : 'other';
+}
+
 // Only traverse JSON values: the public helper first serializes/parses its input.
 function canonical(value) {
   if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
@@ -90,6 +96,8 @@ function createReducer(options = {}) {
   let first = null, last = null, maxGap = null, remote = 0, events = 0, stdout = 0, stderr = 0;
   const usage = { input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_write_tokens: null, cost_usd: null };
   let denials = { read: null, write: null, shell: null, other: null };
+  // Public observation shape: counts per reported call, last class and its relative ms.
+  const toolActivity = { read: 0, write: 0, shell: 0, other: 0, last_class: null, last_ms: null };
   let secret = options.secret || '';
   let onRemote = options.onRemote, onEvent = options.onEvent, onToolCall = options.onToolCall;
   options = null;
@@ -161,6 +169,10 @@ function createReducer(options = {}) {
     const fingerprint = toolFingerprint(name, input);
     if (!fingerprint) return;
     reportedTools.add(id);
+    const kind = toolClass(name);
+    toolActivity[kind]++;
+    toolActivity.last_class = kind;
+    toolActivity.last_ms = elapsed();
     try { onToolCall?.({ fingerprint }); } catch { /* Observers cannot fail the stream. */ }
   }
 
@@ -268,8 +280,7 @@ function createReducer(options = {}) {
       if (Array.isArray(value.permission_denials)) {
         denials = { read: 0, write: 0, shell: 0, other: 0 };
         for (const denial of value.permission_denials) {
-          const name = denial?.tool_name;
-          denials[/^(Read|Glob|Grep)$/.test(name) ? 'read' : /^(Edit|Write)$/.test(name) ? 'write' : name === 'Bash' ? 'shell' : 'other']++;
+          denials[toolClass(denial?.tool_name)]++;
         }
       }
     }
@@ -347,16 +358,19 @@ function createReducer(options = {}) {
       return sessionId;
     },
     snapshot() {
-      if (disposed) return { ...finalSnapshot, denials: { ...finalSnapshot.denials } };
+      if (disposed) {
+        return { ...finalSnapshot, denials: { ...finalSnapshot.denials }, tool_activity: { ...finalSnapshot.tool_activity } };
+      }
       const time = elapsed();
       return { version: 1, phase: terminal ? 'terminal' : remote ? 'remote-activity' : 'local-start', elapsed_ms: time,
         transport_ms: time, verification_ms: null, stdout_bytes: stdout, stderr_bytes: stderr,
         event_count: events, remote_event_count: remote, first_remote_ms: first, last_remote_ms: last,
         initial_sample_ms: first, gap_sample_ms: remote >= 2 ? maxGap : null,
         remote_silence_ms: last === null ? null : time - last, gap_suspended: suspended, tools_in_flight: toolsInFlight.size,
-        suspension_epoch: epoch, ...usage, denials: { ...denials }, process_exit_observed: false };
+        suspension_epoch: epoch, ...usage, denials: { ...denials }, tool_activity: { ...toolActivity },
+        process_exit_observed: false };
     },
   };
 }
 
-module.exports = { createReducer, toolFingerprint, LIMITS };
+module.exports = { createReducer, toolFingerprint, toolClass, LIMITS };
