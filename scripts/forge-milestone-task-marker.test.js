@@ -220,7 +220,7 @@ async function publicationAndSelection() {
 
     assert(renderOptions.length >= 1 && renderOptions.every(options => options.summary === false), JSON.stringify(renderOptions));
     const summary = f.read(`${unit}-SUMMARY.md`);
-    const historical = render(JSON.parse(f.read(`${unit}-DELIVERY.json`)), { detailReference: './T01-DELIVERY.json' });
+    const historical = render(JSON.parse(f.read(`${unit}-DELIVERY.json`)), { detailReference: './T01-DELIVERY.json', summary: false });
     assert(summary.endsWith(historical), 'SUMMARY keeps the historical table-only delivery bytes');
     console.log('PASS canonical SUMMARY: executeDeliveryArtifacts passes summary:false and keeps the historical delivery bytes');
 

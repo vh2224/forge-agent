@@ -39,9 +39,9 @@ até a próxima recovery da unidade; a varredura periódica fica para a S09.
 
 Antes de disparar um sidecar, anuncie fase/unidade, engine, modelo enviado, esforço e host da rota resolvida com o rótulo **solicitação do orquestrador — aguardando confirmação do adaptador**. Essa frase descreve a intenção do despacho.
 
-Depois, leia o stderr completo do processo, inclusive em `run_in_background` pela ferramenta de saída do host. Reproduza literalmente, na conversa, cada linha que começa com `[forge-sidecar]`, incluindo `recusado`, `falhou` e `reaproveitado`. Se nenhuma linha aparecer, diga que falta prova do adaptador. Preserve `observado=nao-confirmado` e diga **modelo enviado**; não afirme que o provedor aplicou o modelo.
+Depois, leia o stderr completo do processo, inclusive em `run_in_background` pela ferramenta de saída do host. Cada estágio aceito chega como a linha técnica `[forge-sidecar]` seguida da linha humana `[forge-agente]`. Repasse literalmente, na conversa, cada linha que começa com `[forge-agente]`, incluindo `recusado`, `falhou` e `reaproveitado`. Mantenha `[forge-sidecar]` como registro técnico no stderr e repasse-a literalmente quando o usuário pedir detalhes, quando não houver linha `[forge-agente]` correspondente ou quando o adaptador instalado ainda não a emitir. Se nenhuma das duas linhas aparecer, diga que falta prova do adaptador. Preserve `observado=nao-confirmado` e `aplicação não confirmada` e diga **modelo enviado**; não afirme que o provedor aplicou o modelo. O sidecar é acompanhado nesta conversa; não crie abas nem threads nativas para ele.
 
-As linhas `[forge-sidecar]` registram identidade e estágio. A causa continua na linha `forge-xllm:` ou `forge-unit-sidecar:` e no result-file. Preserve ambos os canais. Nunca redirecione o stderr do comando de despacho para `/dev/null`. Se o stdout for capturado com `$(...)`, ainda leia e exponha as linhas de identidade do stderr.
+As linhas `[forge-sidecar]` registram identidade e estágio; `[forge-agente]` reapresenta os mesmos campos em pt-BR, sem acrescentar prova. A causa continua na linha `forge-xllm:` ou `forge-unit-sidecar:` e no result-file. Preserve ambos os canais. Nunca redirecione o stderr do comando de despacho para `/dev/null`. Se o stdout for capturado com `$(...)`, ainda leia e exponha as linhas de identidade do stderr.
 
 ## Standalone task execution
 

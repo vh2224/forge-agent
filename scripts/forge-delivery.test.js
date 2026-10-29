@@ -768,5 +768,56 @@ test('mixed obligations are AND tuples, survive missing bindings and aggregate f
   assert(aggregate().diagnostics.some(d=>d.includes('child_required_coverages_invalid')));
 });
 
+function summaryDelivery(criteria) {
+  return { unit: { id: 'T01' }, criteria, diagnostics: ['plan_legacy'],
+    facts: ['implementation', 'ci', 'review', 'merge', 'installation', 'human_acceptance'].map((name) => ({ name, status: 'não informado/pendente' })) };
+}
+const HISTORICAL_SECTION = [
+  '## Entrega por critério', '', 'Detalhe integral reconstruível: T01-DELIVERY.json', '',
+  '| Critério | Situação | Evidência | Ambiente exercitado | Pendência/limite |', '|---|---|---|---|---|',
+  '| T01#b — z (p#2) | não verificado | nenhuma | não informado | falta |',
+  '| T01#a — x &#124; y (p#1) | verificado | nenhuma | não informado | nenhuma |',
+  '', '### Fatos independentes', '', '| Fato | Situação | Referência |', '|---|---|---|',
+  ...['Implementação', 'CI', 'Revisão', 'Merge', 'Instalação', 'Aceite humano'].map((label) => `| ${label} | não informado/pendente | não informado |`),
+  '', 'Diagnósticos: plan&#95;legacy.', ''].join('\n');
+
+test('summary:false keeps the historical section bytes and the default inserts only the summary below the title', () => {
+  const output = summaryDelivery([
+    { id: 'T01#a', text: 'x | y', reference: 'p#1', status: 'verificado', evidence: [], pending: [] },
+    { id: 'T01#b', text: 'z', reference: 'p#2', status: 'não verificado', evidence: [], pending: ['falta'] }]);
+  const before = JSON.stringify(output);
+  assert.strictEqual(delivery.renderDeliveryMarkdown(output, { summary: false }), HISTORICAL_SECTION);
+  const markdown = delivery.renderDeliveryMarkdown(output);
+  const summary = 'Resumo: 1 verificado(s), 0 parcialmente verificado(s) e 1 não verificado(s) de 2 critério(s). Pendências: T01#b.'
+    + ' Fatos: Implementação — não informado/pendente; CI — não informado/pendente; Revisão — não informado/pendente;'
+    + ' Merge — não informado/pendente; Instalação — não informado/pendente; Aceite humano — não informado/pendente. Um fato não implica outro.';
+  assert.strictEqual(markdown, HISTORICAL_SECTION.replace('## Entrega por critério\n\n', `## Entrega por critério\n\n${summary}\n\n`));
+  assert(markdown.startsWith('## Entrega por critério\n\nResumo: '));
+  assert.strictEqual(JSON.stringify(output), before, 'rendering never changes the delivery');
+  assert(fs.readFileSync(path.join(__dirname, 'forge-delivery.js'), 'utf8').includes('documentaryObservation'));
+  process.stdout.write('PASS delivery summary insertion: summary:false keeps historical bytes, default adds only the Resumo paragraph under the title\n');
+});
+
+test('delivery summary counts statuses, names up to three pending IDs and keeps the six facts independent', () => {
+  const statuses = ['não verificado', 'parcialmente verificado', 'verificado', 'não verificado', 'não verificado', 'verificado'];
+  const output = summaryDelivery(statuses.map((status, index) => ({ id: `T01|c${index}*`, text: `t${index}`, reference: `p#${index}`, status, evidence: [], pending: [] })));
+  output.facts[0] = { name: 'implementation', status: 'concluída <b>', reference: 'commit abc' };
+  const paragraph = delivery.renderDeliveryMarkdown(output, { detailReference: 'full.json' }).split('\n')[2];
+  assert(paragraph.startsWith('Resumo: 2 verificado(s), 1 parcialmente verificado(s) e 3 não verificado(s) de 6 critério(s).'));
+  assert(paragraph.includes(' Pendências: T01&#124;c0&#42;, T01&#124;c3&#42;, T01&#124;c4&#42; e mais 1 em full.json.'), paragraph);
+  assert(paragraph.includes('Implementação — concluída &lt;b&gt;; CI — não informado/pendente;'));
+  for (const label of ['Implementação', 'CI', 'Revisão', 'Merge', 'Instalação', 'Aceite humano']) assert(paragraph.includes(`${label} — `), label);
+  assert(paragraph.endsWith('. Um fato não implica outro.'));
+  assert(!paragraph.includes('|') && !paragraph.includes('<b>'));
+  const fx = fixture('summary-real');
+  const built = build(fx); const fingerprint = built.fingerprint; const bytes = JSON.stringify(built);
+  const real = delivery.renderDeliveryMarkdown(built);
+  assert(real.includes(`Resumo: 0 verificado(s), 0 parcialmente verificado(s) e ${built.criteria.length} não verificado(s) de ${built.criteria.length} critério(s).`));
+  assert.strictEqual(JSON.stringify(build(fx)), bytes); assert.strictEqual(built.fingerprint, fingerprint);
+  const verified = summaryDelivery([{ id: 'T01#a', text: 'x', reference: 'p', status: 'verificado', evidence: [], pending: [] }]);
+  assert(delivery.renderDeliveryMarkdown(verified).includes(' Pendências: nenhuma. '));
+  process.stdout.write('PASS delivery summary content: status counts, at most three pending IDs, six separate facts and the independence sentence, escaped\n');
+});
+
 for (const root of roots) { try { fs.rmSync(root, { recursive: true, force: true }); } catch (_) {} }
 process.stdout.write(`\n${passed} passed, ${skipped} skipped\n`);

@@ -604,6 +604,19 @@ function evidenceText(criterion) {
     return `${entry.positive ? 'ok' : entry.negative ? 'falha' : 'limite'}: ${entry.source}${reasons}`;
   }).join('; ');
 }
+// Human lead for the delivery section. It only counts and names what the
+// delivery already states; facts stay separate and never promote one another.
+function renderDeliverySummary(delivery, ranked, detail) {
+  const count = (status) => ranked.filter((criterion) => criterion.status === status).length;
+  const pending = ranked.filter((criterion) => criterion.status !== 'verificado');
+  const named = pending.slice(0, 3).map((criterion) => escapeMarkdownCell(criterion.id)).join(', ');
+  const more = pending.length > 3 ? ` e mais ${pending.length - 3} em ${escapeMarkdownCell(detail)}` : '';
+  const facts = delivery.facts.map((fact) => `${FACT_LABELS[fact.name]} — ${escapeMarkdownCell(fact.status)}`).join('; ');
+  return `Resumo: ${count('verificado')} verificado(s), ${count('parcialmente verificado')} parcialmente verificado(s)`
+    + ` e ${count('não verificado')} não verificado(s) de ${ranked.length} critério(s).`
+    + ` Pendências: ${pending.length ? `${named}${more}` : 'nenhuma'}.`
+    + ` Fatos: ${facts || 'nenhum informado'}. Um fato não implica outro.`;
+}
 function renderDeliveryMarkdown(delivery, options = {}) {
   const limit = Number.isInteger(options.tableLimit) && options.tableLimit > 0 ? options.tableLimit : 50;
   const detail = options.detailReference || `${delivery.unit.id}-DELIVERY.json`;
@@ -625,6 +638,8 @@ function renderDeliveryMarkdown(delivery, options = {}) {
   lines.push('', '### Fatos independentes', '', '| Fato | Situação | Referência |', '|---|---|---|');
   for (const fact of delivery.facts) lines.push(`| ${FACT_LABELS[fact.name]} | ${escapeMarkdownCell(fact.status)} | ${escapeMarkdownCell(fact.reference || 'não informado')} |`);
   if (delivery.diagnostics.length) lines.push('', `Diagnósticos: ${delivery.diagnostics.map(escapeMarkdownCell).join('; ')}.`);
+  // summary:false reproduces the historical table-only bytes (canonical SUMMARY).
+  if (options.summary !== false) lines.splice(2, 0, renderDeliverySummary(delivery, ranked, detail), '');
   return `${lines.join('\n')}\n`;
 }
 

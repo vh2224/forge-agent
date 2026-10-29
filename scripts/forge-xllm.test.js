@@ -243,10 +243,23 @@ try {
   assert.strictEqual(refusedMarker.status, 'adapter-failed');
   assert.strictEqual(refusedMarker.reason_code, 'invalid-runtime-contract', 'explicit false survives CLI and public run layers');
   const refusalLines = refused.stderr.trim().split(/\r?\n/);
-  assert.match(refusalLines[0], /^\[forge-sidecar\] solicitado /);
-  assert.match(refusalLines[1], /^\[forge-sidecar\] recusado /);
-  assert.match(refusalLines[1], /provider_called=false observado=nao-confirmado$/);
+  const technicalLines = refusalLines.filter(line => line.startsWith('[forge-sidecar] '));
+  assert.strictEqual(technicalLines.length, 2);
+  assert.match(technicalLines[0], /^\[forge-sidecar\] solicitado /);
+  assert.match(technicalLines[1], /^\[forge-sidecar\] recusado /);
+  assert.match(technicalLines[1], /provider_called=false observado=nao-confirmado$/);
   assert(!refused.stderr.includes('[forge-sidecar] iniciado'));
+  // Each technical line is followed by its human companion in the same write.
+  for (const [technical, word] of [[technicalLines[0], 'pedido ao adaptador'], [technicalLines[1], 'recusado']]) {
+    const human = refusalLines[refusalLines.indexOf(technical) + 1];
+    assert(human.startsWith(`[forge-agente] ${word}: `), human);
+    assert(human.includes(' (execute) · executor sidecar codex via '), human);
+  }
+  const refusalHuman = refusalLines[refusalLines.indexOf(technicalLines[1]) + 1];
+  assert.match(refusalHuman, / · causa adapter-failed · provedor chamado: não · /);
+  assert(!refusalHuman.includes('invalid-runtime-contract'), 'human cause uses the closed fallback while the technical marker retains the exact runtime reason');
+  assert(!refused.stderr.includes('[forge-agente] em execução'));
+  console.log('PASS sidecar identity order: [forge-sidecar] lines filtered by prefix keep solicitado then recusado, each followed by its [forge-agente] line');
   assert.match(refusalLines[refusalLines.length - 1], /^forge-xllm: /);
   assert.ok(!`${refused.stdout}${refused.stderr}${refusedMarkerText}`.includes(secretSentinel),
     'failure channels contain no ambient token value');
