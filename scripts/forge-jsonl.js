@@ -78,15 +78,18 @@ function emptyResult() {
  * @returns {{ lines: object[], total: number, skipped_empty: number, skipped_malformed: number, truncated_tail: boolean }}
  */
 function readJsonl(absPath, opts) {
-  opts = opts || {};
-  const maxLines = typeof opts.maxLines === 'number' && opts.maxLines >= 0 ? opts.maxLines : null;
-
-  let raw;
   try {
-    raw = fs.readFileSync(absPath, 'utf8');
+    return parseJsonlText(fs.readFileSync(absPath, 'utf8'), opts);
   } catch (e) {
     return emptyResult();
   }
+}
+
+/** Parse already bounded input with the exact readJsonl normalization/window. */
+function parseJsonlText(raw, opts) {
+  opts = opts || {};
+  if (typeof raw !== 'string') return emptyResult();
+  const maxLines = typeof opts.maxLines === 'number' && opts.maxLines >= 0 ? opts.maxLines : null;
 
   // Form A-funnel: normalize both CRLF and lone CR to LF at the read. The
   // rest of this module (and both former call sites) only ever deals with
@@ -136,4 +139,4 @@ function readJsonl(absPath, opts) {
   };
 }
 
-module.exports = { readJsonl };
+module.exports = { readJsonl, parseJsonlText };
