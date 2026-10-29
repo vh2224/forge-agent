@@ -4,7 +4,9 @@ description: "Task autonoma sem milestone — brainstorm, discuss, plan, execute
 allowed-tools: Read, Write, Edit, Bash, Agent, Skill, AskUserQuestion, TaskCreate, TaskUpdate, TaskList, TaskStop, SendMessage, WebSearch, WebFetch
 ---
 
-Na preparação de task solta e nos demais despachos sidecar, siga `shared/forge-bidirectional-sidecar.md § Identidade do sidecar exibida na conversa`: anuncie a solicitação pré-disparo e repasse literalmente as linhas `[forge-sidecar]` do stderr.
+Na preparação de task solta e nos demais despachos sidecar, siga `shared/forge-bidirectional-sidecar.md § Identidade do sidecar exibida na conversa`: anuncie a solicitação pré-disparo e repasse literalmente as linhas `[forge-agente]` do stderr; as linhas `[forge-sidecar]` ficam no registro técnico e só são repassadas nos casos daquele contrato.
+
+Mensagens ao usuário seguem `shared/forge-communication.md` (no repositório ou em `${FORGE_HOME:-~/.forge-agent}/shared`), projetado no bloco gerenciado do CLAUDE.md e do AGENTS.md.
 
 ## Personal lifecycle (all exits)
 
@@ -597,6 +599,15 @@ but may not call the provider; an answered continuation is a new dispatch.
 Every other action/refusal stops with its `reason_code`, diagnostic layer and
 `provider_called` value. `dispatch_allowed:true` alone is never delivery proof.
 
+Timeline da preparação: o `TaskCreate` de cada fase vem antes do `--start`,
+quando ainda não há rota comprovada: a descrição é `executor e modelo ainda não
+resolvidos`. Depois que esse mesmo `--start` retornar, use a rota desse retorno:
+`transport` ou `route.worker_mode`, `route.resolved_worker_engine` e
+`route.model_resolved ?? route.model`. Atualize somente campos que o schema real
+do `TaskUpdate` exposto aceitar; sem esse campo, comunique a rota numa linha
+curta da conversa. Campo ausente e modelo observado continuam `desconhecido`.
+Não chame o resolvedor de novo, não infira default e não use rótulo fixo de modelo.
+
 ---
 
 ### Step 1 — Brainstorm
@@ -612,7 +623,7 @@ a reused phase still has to hand its content downstream.
 
 **Create timeline task:**
 ```
-    TaskCreate({ subject: "[{TASK_ID}] brainstorm", activeForm: "brainstorm · forge-planner (resolved model)" })
+TaskCreate({ subject: "💬 {TASK_ID} — brainstorm: {descrição humana da task}", description: "executor e modelo ainda não resolvidos", activeForm: "preparando: brainstorm de {descrição humana} · forge-planner" })
 TaskUpdate({ taskId: <id>, status: "in_progress" })
 ```
 
@@ -676,7 +687,7 @@ After the caller returns terminal `done` and publishes the artifact:
 
 **Create timeline task:**
 ```
-TaskCreate({ subject: "[{TASK_ID}] discuss", activeForm: "discuss · forge-discusser (resolved model)" })
+TaskCreate({ subject: "💬 {TASK_ID} — discuss: {descrição humana da task}", description: "executor e modelo ainda não resolvidos", activeForm: "preparando: decisões de {descrição humana} · forge-discusser" })
 TaskUpdate({ taskId: <id>, status: "in_progress" })
 ```
 
@@ -724,7 +735,7 @@ again, reported with the file that drifted.
 
 **Create timeline task:**
 ```
-TaskCreate({ subject: "[{TASK_ID}] research", activeForm: "research · forge-researcher (opus)" })
+TaskCreate({ subject: "🔬 {TASK_ID} — research: {descrição humana da task}", description: "executor e modelo ainda não resolvidos", activeForm: "preparando: pesquisa de {descrição humana} · forge-researcher" })
 TaskUpdate({ taskId: <id>, status: "in_progress" })
 ```
 
@@ -781,7 +792,7 @@ Skill({ skill: "forge-security", args: "{TASK_ID}" })
 
 **Create timeline task:**
 ```
-TaskCreate({ subject: "[{TASK_ID}] plan", activeForm: "plan · forge-planner (opus)" })
+TaskCreate({ subject: "⚙ {TASK_ID} — plan: {descrição humana da task}", description: "executor e modelo ainda não resolvidos", activeForm: "planejando: {descrição humana} · forge-planner" })
 TaskUpdate({ taskId: <id>, status: "in_progress" })
 ```
 
@@ -1249,9 +1260,10 @@ ENGINE=claude; DISPATCH_ENGINE=claude; RESOLVED_WORKER_ENGINE=claude; WORKER_MOD
 
 **Create timeline task:**
 ```
-TaskCreate({ subject: "[{TASK_ID}] execute", activeForm: "execute · forge-executor (sonnet)" })
+TaskCreate({ subject: "⚡ {TASK_ID} — execute: {descrição humana da task}", description: "executor {nativo|sidecar} forge-executor ({modelo resolvido})", activeForm: "executando agente: {descrição humana} · forge-executor" })
 TaskUpdate({ taskId: <id>, status: "in_progress" })
 ```
+A rota deste despacho já foi resolvida acima: use `$WORKER_MODE` e `$MODEL_ID` (`route.model_resolved ?? route.model`) desse mesmo retorno. Campo ausente fica `desconhecido`, sem nova resolução nem rótulo fixo de modelo.
 
 Antes do dispatch, emita o banner de liveness (ver `shared/forge-dispatch.md § Spawn Liveness Banner`):
 `◆ Despachando forge-executor… (roda em subagente — sem output até retornar, ~3–8 min; esperado, não é travamento)`
@@ -1488,8 +1500,9 @@ fi
 
 **Create timeline tasks:**
 ```
-TaskCreate({ subject: "[{TASK_ID}] review", activeForm: "review · forge-reviewer (sonnet)" })
+TaskCreate({ subject: "⚖ {TASK_ID} — review: {descrição humana da task}", description: "executor {nativo|sidecar} forge-reviewer ({modelo resolvido})", activeForm: "revisando: {descrição humana} · forge-reviewer" })
 ```
+Executor e modelo vêm do roteamento do challenger já resolvido no Step 0 de `shared/forge-review.md` (`$CHALLENGER_MODEL`). Se ainda não estiver resolvido, a descrição é `executor e modelo ainda não resolvidos`; campo ausente fica `desconhecido`, sem rótulo fixo de modelo.
 
 **Run the dialectic loop** — follow `shared/forge-review.md` Steps 2–7 with these bindings:
 - `UNIT = task/{TASK_ID}`, `DIFF_CMD` as above, `MODE = interactive`, artifact = `.gsd/tasks/{TASK_ID}/{TASK_ID}-REVIEW.md`.
@@ -1708,17 +1721,23 @@ node "$FORGE_SCRIPTS_DIR/forge-isolation.js" --cleanup --run "$TASK_ID" --cwd "$
 
 **Final report:**
 ```
-✓ {TASK_ID} concluída: {TASK_DESCRIPTION}
+✓ {TASK_ID} concluída: {resultado em uma frase}
 
-Arquivos modificados:
+Validação: {n de m critérios verificados no {TASK_ID}-DELIVERY.json}{; pendências: IDs}
+Fatos separados: implementação {estado}; revisão {estado}; CI {estado}; merge {estado}; instalação {estado}; aceite humano {estado}
+
+Arquivos principais:
 {key_files from SUMMARY.md, one per line}
 
-Must-haves: todos verificados ✓
+Decisão pendente: {ID — pergunta curta, ou nenhuma}
+Entregável: branch `forge/{TASK_ID}` quando houver isolamento — a integração na branch default é do operador; a task nunca integra.
 
-→ Nova task: /forge-task <descrição>
+→ Próximo passo: {ação concreta, ou /forge-task <descrição> para uma nova task}
 → A partir de um item: /forge-task <item-id>
 → Ver tasks: /forge-status
 ```
+
+Cada `{estado}` cita a própria evidência (SUMMARY, DELIVERY, REVIEW, execução de CI, merge, registro de instalação, UAT) ou fica `pendente`; sem evidência, `desconhecido`. Sem DELIVERY, diga `Validação: sem DELIVERY para esta task`. A conclusão da task não prova CI, merge, instalação nem aceite humano.
 
 ---
 

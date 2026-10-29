@@ -19,3 +19,15 @@ The #268 fresh-task creation correction updates only the active `skills` hash fo
 `skills/forge-task/SKILL.md`; the other eight active hashes and all historical
 snapshots remain unchanged. It removes unrelated personal selection and legacy
 migration from explicit fresh creation, preserving explicit resume and isolation.
+
+The S02 communication update (M-20261028132636-experiencia, S02/T05) changes only
+the active `skills` and `claude-instructions` hashes. Its sources are
+`skills/forge-auto/SKILL.md`, `skills/forge-next/SKILL.md`,
+`skills/forge-task/SKILL.md` and `skills/forge-status/SKILL.md` (pointer to
+`shared/forge-communication.md`, human relay line and message templates), plus
+`CLAUDE.md`, re-synced by `forge-instructions.js` so its managed block carries the
+communication contract. Both hashes were measured through the render path with
+the assertion formula above, before and after the edits: the other seven active
+hashes and all historical snapshots stay unchanged, and the historical-to-current
+surface set asserted by `forge-dispatch-source-guard.test.js` is still `agents`,
+`skills`, `dispatch-templates`, `claude-instructions`, and `configuration`.

@@ -5,7 +5,9 @@ disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Bash, Agent, Skill, TaskCreate, TaskUpdate, TaskList, TaskStop, SendMessage, WebSearch, WebFetch
 ---
 
-Nos despachos sidecar, siga `shared/forge-bidirectional-sidecar.md § Identidade do sidecar exibida na conversa`: anuncie a solicitação pré-disparo e repasse literalmente as linhas `[forge-sidecar]` do stderr.
+Nos despachos sidecar, siga `shared/forge-bidirectional-sidecar.md § Identidade do sidecar exibida na conversa`: anuncie a solicitação pré-disparo e repasse literalmente as linhas `[forge-agente]` do stderr; as linhas `[forge-sidecar]` ficam no registro técnico e só são repassadas nos casos daquele contrato.
+
+Mensagens ao usuário seguem `shared/forge-communication.md` (no repositório ou em `${FORGE_HOME:-~/.forge-agent}/shared`), projetado no bloco gerenciado do CLAUDE.md e do AGENTS.md.
 
 ## Personal selection - before any operational load
 
@@ -1285,11 +1287,12 @@ NATIVE_TO_SIDECAR_COUNT=0
 **Create timeline task** — use `TaskCreate` to show progress in the UI:
 ```
 TaskCreate({
-  subject: "[{M###}/{S##}/{T##}] {unit_type} — {one-liner}",
-  description: "{agent_name} ({model_id})",
-  activeForm: "{unit_type} {unit_id} — {one-liner} · {agent_name}"
+  subject: "{M###}/{S##}/{T##} — {descrição humana do plano}",
+  description: "executor {nativo|sidecar} {agent_name} ({modelo resolvido})",
+  activeForm: "{fase}: {descrição humana} · {agent_name}"
 })
 ```
+Executor e modelo vêm da rota já comprovada deste despacho: `$WORKER_MODE` e `$MODEL_ID` (`route.model_resolved ?? route.model`) do mesmo retorno do resolvedor. Campo ausente aparece como `desconhecido`, e o modelo observado não é afirmado aqui. Não resolva de novo, não infira default e não use rótulo fixo de modelo. A fase usa o vocabulário de `shared/forge-communication.md` (por exemplo `executando agente`).
 Store the returned `taskId` as `current_task_id`. Then immediately mark it as in progress:
 ```
 TaskUpdate({ taskId: current_task_id, status: "in_progress" })
@@ -1624,13 +1627,14 @@ pre-dispatch gate, which is enforcing. The `claim-release` event is written **by
 node "$FORGE_SCRIPTS_DIR/forge-isolation.js" --cleanup --run "$ISO_RUN" --cwd "$WORKING_DIR" || true
 ```
 
-**f) Emit progress + next action:**
+**f) Emit progress + next action** — no máximo três linhas:
 ```
-✓ [M001/S02/T03] execute-task — JWT auth with refresh rotation  · forge-executor (claude-sonnet-5)
-→ Next: /forge-next para {next unit_type} {unit_id}
+✓ {T##} — {resultado em uma frase} · executor {nativo|sidecar} {engine} ({modelo resolvido ou enviado})
+Validação: {n de m critérios verificados no {T##}-DELIVERY.json}{; pendências: IDs}
+→ Próximo passo: /forge-next ({próxima unidade}){ · decisão pendente: {ID} — {pergunta curta}}
 ```
 
-Display the progress line AND the next action (read from the per-run `M###-STATE.md` you just updated, not the root dashboard). The user needs to know what comes next to decide whether to continue. Do not add summaries, explanations, or other follow-up text beyond these two lines.
+`{T##}` é o ID da unidade processada. O executor e o modelo vêm da rota deste despacho (resolvido no nativo, enviado no sidecar); o que faltar fica `desconhecido`. A validação conta os critérios do DELIVERY da unidade; sem DELIVERY, diga `Validação: sem DELIVERY para esta unidade`. Read the next unit from the per-run `M###-STATE.md` you just updated, not the root dashboard. Mostre a decisão pendente somente quando houver; não acrescente outro resumo além dessas linhas.
 
 Exception — when the unit just processed was `complete-milestone` with `status: done`, add ONE line naming the deliverable:
 ```
@@ -1674,7 +1678,7 @@ saved_at: {ISO8601}
 ```
 
 2. Write the per-run state `.gsd/milestones/M###/M###-STATE.md` (via `scripts/forge-state.js` — never the root `.gsd/STATE.md`, which is a generated dashboard) to point to this task with `phase: resume`, then run `node scripts/forge-dashboard.js --cwd .` to regenerate the dashboard.
-3. Tell the user: "Trabalho parcial salvo. Execute `/forge-next` para retomar de onde parou."
+3. Tell the user: `Trabalho parcial salvo em continue.md: {o que ficou feito}. Continua executável: {o que segue}. Decisão pendente: {ID ou nenhuma}. Para retomar: /forge-next.`
 
 On resume: per-run STATE has `phase: resume` → read `continue.md`, inline into worker prompt with instruction "Resume from continue.md — skip completed work, start from Next Action."
 

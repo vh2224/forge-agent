@@ -15,7 +15,9 @@ FORGE_SCRIPTS_DIR=$([ -f scripts/forge-status.js ] && echo scripts || echo "${FO
 node "$FORGE_SCRIPTS_DIR/forge-status.js" $ARGUMENTS
 ```
 
-Repasse a saída verbatim. Default is personal; ID is explicit inspection without
+Repasse a saída verbatim.
+Não reescreva nem resuma a saída; ao comentar, siga `shared/forge-communication.md` (no repositório ou em `${FORGE_HOME:-~/.forge-agent}/shared`), sem despejo técnico.
+Default is personal; ID is explicit inspection without
 binding; `--scope workspace` is an explicitly requested global diagnostic.
 Do not append team ledger/activities to personal output or infer completion from
 inactivity. Shared technical knowledge uses canonical memory/decision projections.

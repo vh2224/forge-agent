@@ -4,7 +4,9 @@ description: "Executa o milestone inteiro de forma autonoma ate concluir."
 allowed-tools: Read, Write, Edit, Bash, Agent, Skill, TaskCreate, TaskUpdate, TaskList, TaskStop, SendMessage, AskUserQuestion, WebSearch, WebFetch
 ---
 
-Nos despachos sidecar, siga `shared/forge-bidirectional-sidecar.md § Identidade do sidecar exibida na conversa`: anuncie a solicitação pré-disparo e repasse literalmente as linhas `[forge-sidecar]` do stderr.
+Nos despachos sidecar, siga `shared/forge-bidirectional-sidecar.md § Identidade do sidecar exibida na conversa`: anuncie a solicitação pré-disparo e repasse literalmente as linhas `[forge-agente]` do stderr; as linhas `[forge-sidecar]` ficam no registro técnico e só são repassadas nos casos daquele contrato.
+
+Mensagens ao usuário seguem `shared/forge-communication.md` (no repositório ou em `${FORGE_HOME:-~/.forge-agent}/shared`), projetado no bloco gerenciado do CLAUDE.md e do AGENTS.md.
 
 ## Direct execution and maintenance boundary
 
@@ -1314,11 +1316,12 @@ Use the icon for the current `unit_type`:
 
 ```
 TaskCreate({
-  subject: "{icon} [{M###}/{S##}/{T##}] {unit_type} — {one-liner}",
-  description: "{agent_name} ({model_id})",
-  activeForm: "{icon} {unit_type} · {agent_name} ({model_id}) · {M###}/{S##}/{T##}"
+  subject: "{icon} {M###}/{S##}/{T##} — {descrição humana do plano}",
+  description: "executor {nativo|sidecar} {agent_name} ({modelo resolvido})",
+  activeForm: "{fase}: {descrição humana} · {agent_name}"
 })
 ```
+Executor e modelo vêm da rota já comprovada deste despacho: `$WORKER_MODE`, `$RESOLVED_WORKER_ENGINE` e `$MODEL_ID` (`route.model_resolved ?? route.model`) do mesmo retorno do resolvedor. Campo ausente aparece como `desconhecido`, e o modelo observado não é afirmado aqui. Não resolva de novo, não infira default e não use rótulo fixo de modelo. A fase usa o vocabulário de `shared/forge-communication.md` (por exemplo `executando agente`).
 Store the returned `taskId` as `current_task_id`. Then immediately mark it as in progress:
 ```
 TaskUpdate({ taskId: current_task_id, status: "in_progress" })
@@ -1474,7 +1477,7 @@ done
 
 Process `SIDECAR_BATCH_IDS` sequentially through `shared/forge-sidecar-auto.md` before or after the native group, never concurrently with it. For each entry bind `$PLAN_PATH` and the other task inputs from that entry, parse its stored `BATCH_ROUTE_JSON[$ENTRY_ID]` with the flag-free `--shell-exports` transform, immediately re-check `DISPATCH_ALLOWED`, then load Branch C. This re-binding cannot borrow another task's scalars and does not re-resolve or change the route.
 
-**b) Create N timeline tasks** — emit one `TaskCreate` per batch member (icon `⚡`, one-liner from T##-PLAN.md). Store returned IDs in parallel array `task_ids = [id1, id2, ...]`. Mark each `in_progress` via `TaskUpdate`.
+**b) Create N timeline tasks** — emit one `TaskCreate` per batch member in the single-task form above (icon `⚡`, descrição humana do T##-PLAN.md, executor e modelo da rota já resolvida desse membro; campo ausente fica `desconhecido`). Store returned IDs in parallel array `task_ids = [id1, id2, ...]`. Mark each `in_progress` via `TaskUpdate`.
 
 **c) Heartbeat — record multi-worker** before parallel dispatching (M005+ pattern):
 ```bash
@@ -1613,7 +1616,7 @@ A rung that yields a status hands back a `recovered.block` — parse **that** wi
 
 Parse the `---GSD-WORKER-RESULT---` block:
 - `status: done` → proceed to post-unit housekeeping, then **immediately continue loop** (do NOT pause or ask user)
-- `status: partial` → write `continue.md`, update STATE, emit compact signal, **fire push (call-site 1):** use Push helper with message `"Forge {RUN_ID} travou — partial: {resumo do blocker}. Run pausado, requer ação manual."`, then **deactivate run NOW** (`node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json '{"active":false}'` — see `## Deactivate auto-mode indicator`), **stop loop**
+- `status: partial` → write `continue.md`, update STATE, emit compact signal, tell the user `Trabalho parcial salvo em continue.md: {o que ficou feito}. Continua executável: {o que segue}. Decisão pendente: {ID ou nenhuma}. Para retomar: /forge-auto {RUN_ID}.`, **fire push (call-site 1):** use Push helper with message `"Forge {RUN_ID} travou — partial: {resumo do blocker}. Run pausado, requer ação manual."`, then **deactivate run NOW** (`node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json '{"active":false}'` — see `## Deactivate auto-mode indicator`), **stop loop**
 - `status: blocked` → apply failure taxonomy before stopping; if no auto-recovery or recovery exhausted:
 
   <!-- item-capture:blocked:start -->
@@ -1886,8 +1889,9 @@ The `claim-release` event is written **by the module**, not narrated here
 **e) Track progress:**
 ```
 session_units += 1
-completed_units.append("✓ [M###/S##/T##] {unit_type} — {one-liner}  · {agent} ({model})")
+completed_units.append("✓ {T##} — {resultado} · executor {nativo|sidecar} {engine} ({modelo})")
 ```
+`{T##}` é o ID da unidade (task, slice ou milestone) e `{resultado}` é o resultado dela em uma frase. Executor, engine e modelo (resolvido no nativo, enviado no sidecar) vêm da mesma rota usada no despacho; o que faltar fica `desconhecido`.
 
 #### 7. Pause + checkpoint check
 
@@ -1944,10 +1948,13 @@ fi
 
 Emit and **stop loop**:
 ```
-⏸  Auto-mode pausado após {session_units} unidades.
+⏸  Auto-mode pausado após {session_units} unidades: {resultado até aqui em uma frase}.
 {completed_units list, one per line}
 
-Execute /forge-auto {RUN_ID} para retomar a partir de: {next_action from STATE.md}
+Salvo: {o que ficou salvo — STATE, continue.md ou checkpoint}.
+Continua executável: {next_action from STATE.md}.
+{Decisão pendente: {ID} — {pergunta curta}, somente quando houver}
+→ Retomar: /forge-auto {RUN_ID}
 ```
 
 **Context checkpoint** (only fires if the user explicitly set `compact_after` in prefs AND `session_units >= COMPACT_AFTER`):
@@ -2030,7 +2037,10 @@ node "$FORGE_SCRIPTS_DIR/forge-isolation.js" --cleanup --run "${RUN_ID:-<active 
 If the cleanup output contains `status: "error"` entries, surface them in the final report (advisory — do not fail the milestone).
 
 ```
-✓ Milestone {M###} completo
+✓ Milestone {M###} completo: {resultado em uma frase}
+
+Validação: {n de m critérios verificados nos S##-DELIVERY.json}{; pendências: IDs}
+Fatos separados: implementação {estado}; revisão {estado}; CI {estado}; merge {estado}; instalação {estado}; aceite humano {estado}
 
 Entregável: branch `forge/{run}` — pronta para push e PR.
 Pronta para PR — a integração na branch default é do OPERADOR; o loop nunca integra.
@@ -2046,8 +2056,12 @@ Slices entregues:
 | S01   | 5        | 2                       | 1       | 0          |
 {follow-up lines, if any: "R# path:line — <objeção>" → item {I-id} (.gsd/items/)}
 
-Próximo milestone: /forge-new-milestone <descrição>
+Arquivos principais: {key_files dos S##-SUMMARY.md, um por linha}
+Decisão pendente: {ID — pergunta curta, ou nenhuma}
+→ Próximo passo: {PR da branch `forge/{run}` pelo operador ou /forge-new-milestone <descrição>}
 ```
+
+Cada `{estado}` cita a própria evidência (SUMMARY, DELIVERY, REVIEW, execução de CI, merge, registro de instalação, UAT) ou fica `pendente`; sem evidência, `desconhecido`. O loop não roda CI, não integra nem instala, então esses fatos nunca são inferidos da conclusão da milestone.
 
 The review digest is built from the `review` / `review-triage` events in `events.jsonl` (fallback: scan the `**Outcome:**` lines of each `{S##}-REVIEW.md`). Omit the section entirely when the milestone had zero objections.
 

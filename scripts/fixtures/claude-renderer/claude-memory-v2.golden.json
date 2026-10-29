@@ -17,7 +17,7 @@
     {
       "source_id": "skills",
       "target": "skills",
-      "sha256": "daea5a1c019970c411239c20a0783bcc012202e04b13ed5ecb98786c86583e6e"
+      "sha256": "62926097a5d24d2d1b637900971324425930bb8d1f437422812ab8cdb8d16e99"
     },
     {
       "source_id": "dispatch-templates",
@@ -37,7 +37,7 @@
     {
       "source_id": "claude-instructions",
       "target": "project/CLAUDE.md",
-      "sha256": "aed6456b2c7ca9f4b37a4bd21e8ab7348e02a1b2c95b591298aefbb6a76d2d38"
+      "sha256": "f2c7e2e5c25e0815a41e05c91d840c48c5c00da8903f83bee1db319c5075ec8a"
     },
     {
       "source_id": "claude-settings",
