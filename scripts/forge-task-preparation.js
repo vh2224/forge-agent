@@ -800,7 +800,8 @@ async function recoverStandaloneTask(rawRequest, recovery, deps = {}) {
       const ceiling = route.worker_mode === 'sidecar' ? ceilingFromRoute(route) : null;
       const bounded = ceiling ? { ...route, workers_timeout: ceiling.seconds, workers_timeout_source: ceiling.source } : route;
       const result = await prepareStandaloneTask(next, { ...deps, resolveDispatch: () => bounded,
-        ...(deps.invokeNative ? { invokeNative: (args, binding) => { assertReady?.(); return deps.invokeNative(args, binding); } } : {}) });
+        // The third argument is the Forge host-identity observer; pass it through unchanged.
+        ...(deps.invokeNative ? { invokeNative: (args, binding, observer) => { assertReady?.(); return deps.invokeNative(args, binding, observer); } } : {}) });
       return { ...result, ...(assertReady && result.action === 'invoke-native' ? {
         assertReady,
         invoke: callback => result.invoke((...args) => { assertReady(); return callback(...args); }),

@@ -39,12 +39,21 @@ function journalStore(journal, identity) {
   };
 }
 
+// Journals written before host identity existed have no key and resume as before.
+function savedHostIdentity(previous, wall, dispatchId) {
+  if (previous.host_identity === undefined || previous.host_identity === null) return true;
+  const saved = require('./forge-agent-identity').normalizeHostIdentity(previous.host_identity);
+  return saved !== null && saved.observed_ms <= wall - previous.start_wall_ms && saved.dispatch_id === dispatchId;
+}
+
 async function supervise(options, invoke) {
   const { identity, terminal, adapter = null } = options;
   if (!/^[a-f0-9]{64}$/.test(identity || '') || typeof terminal !== 'function') fail('native-lifecycle-contract-required');
   const clock = options.clock || systemClock, wall = clock.wall(), mono = clock.monotonic();
   if (!Number.isSafeInteger(wall) || wall < 0 || !Number.isFinite(mono) || mono < 0) fail('native-clock-inconsistent');
   const ceiling = ceilingFromRoute(options.route), policy = liveness.normalizePolicy(options.policy);
+  // Trusted request binding for an observed host identity; unsafe values bind nothing.
+  const dispatchId = require('./forge-attempt-telemetry').code(options.dispatchId);
   const store = journalStore(options.journal, identity), previous = store?.read();
   const caps = Object.fromEntries(['result', 'remote_events', 'open_tools', 'cancel', 'resume', 'stop_proof']
     .map(key => [key, adapter?.capabilities?.[key] === true ? 'available' : 'unknown']));
@@ -67,10 +76,12 @@ async function supervise(options, invoke) {
         || JSON.stringify(liveness.normalizePolicy(previous.policy)) !== JSON.stringify(previous.policy)
         || ![previous.first_remote_ms, previous.last_remote_ms].every(value => value === null
           || Number.isSafeInteger(value) && value >= 0 && value <= wall - previous.start_wall_ms)
-        || previous.handle_sha256 !== null && !/^[a-f0-9]{64}$/.test(previous.handle_sha256 || '')) fail('native-journal-identity-or-clock');
+        || previous.handle_sha256 !== null && !/^[a-f0-9]{64}$/.test(previous.handle_sha256 || '')
+        || !savedHostIdentity(previous, wall, dispatchId)) fail('native-journal-identity-or-clock');
     // A saved record grants no right to reattach, and can never start a new writer.
     if (caps.resume !== 'available' || typeof adapter?.resume !== 'function') fail('native-journal-reattach-required');
     state = Object.fromEntries(Object.keys(state).map(key => [key, previous[key] ?? state[key]]));
+    if (previous.host_identity) state.host_identity = { ...previous.host_identity };
     state.capabilities = caps;
   } else if (options.resume) fail('native-journal-required');
   else store?.create(state);
@@ -82,8 +93,24 @@ async function supervise(options, invoke) {
   const elapsed = () => Math.floor(initialElapsed + Math.max(0, clock.monotonic() - mono));
   // Never lower the high-water mark; tick() rejects a rollback before any observation is saved.
   const save = () => { state.last_wall_ms = Math.max(state.last_wall_ms, clock.wall()); store?.save(state); };
-  const snapshot = () => ({ ...state, journal_reference: store?.reference || null,
-    persistence: store ? 'external-journal' : 'unavailable' });
+  const snapshot = () => ({ ...state, ...(state.host_identity ? { host_identity: { ...state.host_identity } } : {}),
+    journal_reference: store?.reference || null, persistence: store ? 'external-journal' : 'unavailable' });
+  // Forge capability handed to the host adapter with the launch callback. The
+  // first valid value returned by the host tool wins; it is opaque data only.
+  const observer = Object.freeze({ hostIdentity(value) {
+    if (finished) return { ok: false, reason_code: 'native-host-identity-after-terminal' };
+    if (!require('./forge-agent-identity').validateAgentId(value).ok) return { ok: false, reason_code: 'native-host-identity-invalid' };
+    const current = state.host_identity;
+    if (current?.value === value) return { ok: true };
+    if (current) {
+      if (current.conflict) return { ok: false, reason_code: 'native-host-identity-conflict' };
+      state.host_identity = { ...current, conflict: true };
+    } else {
+      state.host_identity = { value, source: 'host-tool-return', observed_ms: elapsed(), dispatch_id: dispatchId, conflict: false };
+    }
+    try { save(); } catch { finish(false, 'native-journal-write-failed'); return { ok: false, reason_code: 'native-journal-write-failed' }; }
+    return state.host_identity.conflict ? { ok: false, reason_code: 'native-host-identity-conflict' } : { ok: true };
+  } });
   const clean = () => { if (timer !== null) clock.clearTimeout(timer); timer = null;
     if (dispose) { try { dispose(); } catch { /* no host text in evidence */ } dispose = null; } };
   const finish = (ok, reason, result) => {
@@ -177,7 +204,7 @@ async function supervise(options, invoke) {
     if (finished) return;
     if (elapsed() >= state.ceiling_ms || clock.wall() >= state.deadline_wall_ms) tick();
     if (finished) return;
-    return previous ? adapter.resume(snapshot()) : invoke();
+    return previous ? adapter.resume(snapshot()) : invoke(observer);
   })
     .then(accept).catch(error => {
       state.provider_called = typeof error?.provider_called === 'boolean' ? error.provider_called : 'unknown';

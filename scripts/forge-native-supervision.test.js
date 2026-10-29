@@ -154,6 +154,86 @@ async function run() {
     assert.equal(lateResult.reason_code, rollback ? 'native-clock-inconsistent' : 'dead-start');
     assert.equal(lateResult.lifecycle.first_remote_ms, null);
   }
+
+  // S03/T02: the host identity observer writes only the external journal.
+  const hostValue = '/root/experience_s02_t07_334497b58af1';
+  const readJournal = file => JSON.parse(fs.readFileSync(file, 'utf8'));
+  const ci = clock(), oi = { ...base(ci), dispatchId: 'dispatch-s03-t02' }; let seen, finishRun;
+  const idRun = api.supervise(oi, observer => { seen = observer; return new Promise(resolve => { finishRun = resolve; }); });
+  await ci.advance(0); await ci.advance(5);
+  assert(Object.isFrozen(seen)); assert.deepEqual(Object.keys(seen), ['hostIdentity']);
+  for (const invalid of ['', 'bad value', 'a\x1b[31m', 'x'.repeat(257), 7, null]) {
+    assert.deepEqual(seen.hostIdentity(invalid), { ok: false, reason_code: 'native-host-identity-invalid' });
+  }
+  assert(!('host_identity' in readJournal(oi.journal.file)), 'invalid values are not recorded');
+  assert.deepEqual(seen.hostIdentity(hostValue), { ok: true });
+  const firstRecord = { value: hostValue, source: 'host-tool-return', observed_ms: 5, dispatch_id: 'dispatch-s03-t02', conflict: false };
+  assert.deepEqual(readJournal(oi.journal.file).host_identity, firstRecord);
+  const afterFirst = fs.readFileSync(oi.journal.file);
+  assert.deepEqual(seen.hostIdentity(hostValue), { ok: true });
+  assert(fs.readFileSync(oi.journal.file).equals(afterFirst), 'same value is a no-op');
+  assert.deepEqual(seen.hostIdentity('/root/other'), { ok: false, reason_code: 'native-host-identity-conflict' });
+  assert.deepEqual(readJournal(oi.journal.file).host_identity, { ...firstRecord, conflict: true }, 'conflict keeps the first value');
+  finishRun({ status: 'done' });
+  const idDone = await idRun;
+  assert.equal(idDone.ok, true); assert.deepEqual(idDone.lifecycle.host_identity, { ...firstRecord, conflict: true });
+  idDone.lifecycle.host_identity.value = 'mutated';
+  assert.equal(readJournal(oi.journal.file).host_identity.value, hostValue);
+  const terminalBytes = fs.readFileSync(oi.journal.file);
+  for (const late of [hostValue, '/root/late']) {
+    assert.deepEqual(seen.hostIdentity(late), { ok: false, reason_code: 'native-host-identity-after-terminal' });
+  }
+  assert(fs.readFileSync(oi.journal.file).equals(terminalBytes), 'late identity cannot alter the journal');
+  const cc = clock(), oc = base(cc); let cutObserver;
+  const cutRun = api.supervise(oc, observer => { cutObserver = observer; return new Promise(() => {}); });
+  await cc.advance(0); await cc.advance(1000); assert.equal((await cutRun).ok, false);
+  const cutBytes = fs.readFileSync(oc.journal.file);
+  assert.deepEqual(cutObserver.hostIdentity(hostValue), { ok: false, reason_code: 'native-host-identity-after-terminal' });
+  assert(fs.readFileSync(oc.journal.file).equals(cutBytes));
+  console.log(`EXAMPLE S03/T02 journal with host_identity: ${fs.readFileSync(oi.journal.file, 'utf8')}`);
+  console.log('PASS S03/T02 supervision host identity: frozen observer, first valid value in the external journal, invalid unrecorded, same value no-op, conflict keeps the first, after terminal or cutoff refused without journal change');
+
+  const memory = await api.supervise({ ...base(clock()), journal: undefined, dispatchId: 'unsafe dispatch id' },
+    observer => { assert.deepEqual(observer.hostIdentity(hostValue), { ok: true }); return { status: 'done' }; });
+  assert.equal(memory.lifecycle.persistence, 'unavailable');
+  assert.deepEqual(memory.lifecycle.host_identity, { value: hostValue, source: 'host-tool-return', observed_ms: 0, dispatch_id: null, conflict: false });
+  const quiet = base(clock());
+  const quietRun = await api.supervise(quiet, () => ({ status: 'done' }));
+  assert(!('host_identity' in quietRun.lifecycle) && !('host_identity' in readJournal(quiet.journal.file)));
+  console.log('PASS S03/T02 supervision without journal or observation: in-memory lifecycle record with unsafe dispatch as null; no key when the host reports nothing');
+
+  const or = { ...base(clock()), dispatchId: 'dispatch-resume' };
+  await api.supervise(or, observer => { observer.hostIdentity(hostValue); throw Object.assign(Error('fixture'), { code: 'fixture-interrupted' }); });
+  const saved = readJournal(or.journal.file);
+  assert.equal(saved.phase, 'interrupted'); assert.equal(saved.host_identity.value, hostValue);
+  let reattaches = 0;
+  const reattach = { capabilities: { resume: true }, resume: () => { reattaches++; return { status: 'done' }; } };
+  const resumeWith = (journal, dispatchId = 'dispatch-resume') => {
+    fs.writeFileSync(or.journal.file, JSON.stringify(journal));
+    return api.supervise({ ...or, dispatchId, clock: clock(100500), adapter: reattach }, () => assert.fail('no relaunch'));
+  };
+  const resumedOk = await resumeWith(saved);
+  assert.equal(resumedOk.ok, true); assert.deepEqual(resumedOk.lifecycle.host_identity, saved.host_identity);
+  assert.deepEqual(readJournal(or.journal.file).host_identity, saved.host_identity);
+  const nullRecord = await resumeWith({ ...saved, host_identity: null });
+  assert.equal(nullRecord.ok, true); assert(!('host_identity' in nullRecord.lifecycle));
+  const { host_identity: _dropped, ...oldJournal } = saved;
+  const oldResumed = await resumeWith(oldJournal);
+  assert.equal(oldResumed.ok, true); assert(!('host_identity' in oldResumed.lifecycle), 'journals without the key resume as before');
+  const invalidRecords = [
+    ['observed after the elapsed clock', { ...saved, host_identity: { ...saved.host_identity, observed_ms: 10000000 } }],
+    ['invalid saved value', { ...saved, host_identity: { ...saved.host_identity, value: 'bad value' } }],
+    ['unknown source', { ...saved, host_identity: { ...saved.host_identity, source: 'task-name' } }],
+    ['extra key', { ...saved, host_identity: { ...saved.host_identity, extra: true } }],
+    ['not a record', { ...saved, host_identity: hostValue }],
+  ];
+  const before = reattaches;
+  for (const [label, journal] of invalidRecords) {
+    await assert.rejects(() => resumeWith(journal), /native-journal-identity-or-clock/, label);
+  }
+  await assert.rejects(() => resumeWith(saved, 'dispatch-other'), /native-journal-identity-or-clock/, 'foreign dispatch binding');
+  assert.equal(reattaches, before, 'refused journals never reattach');
+  console.log('PASS S03/T02 supervision resume: valid host_identity survives restart, null or absent key resumes as before, invalid record, clock or dispatch refused');
   console.log('native supervision discriminating tests passed');
 }
 if (require.main === module) run().catch(error => { console.error(error); process.exitCode = 1; });

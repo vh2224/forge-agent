@@ -15,6 +15,27 @@ function clean(value, missing = '-', limit = 64) {
   return /[\s="\\]/.test(bounded) ? JSON.stringify(bounded) : bounded;
 }
 
+// OSC accepts BEL or ST; DCS, SOS, PM and APC accept ST only. Embedded
+// BEL/ESC bytes remain payload until the appropriate terminator. Incomplete
+// strings swallow the remaining input so their payload cannot become visible.
+const TERMINAL_STRING = /(?:\x1b\]|\x9d)(?:(?!\x1b\\)[^\x07\x9c])*(?:\x07|\x9c|\x1b\\|$)|(?:\x1b[PX^_]|[\x90\x98\x9e\x9f])(?:(?!\x1b\\)[^\x9c])*(?:\x9c|\x1b\\|$)/g;
+const CONTROL_SEQUENCE = /(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]?|\x1b[ -/]*[0-~]?/g;
+const LINE_BREAKS = /[\t\n\v\f\r\x85\u{2028}\u{2029}]/gu;
+const INVISIBLE = /[\x00-\x1f\x7f-\x9f\u{61c}\u{200e}\u{200f}\u{202a}-\u{202e}\u{2066}-\u{2069}]/gu;
+
+// The single plain-text line sanitizer for human surfaces. Unlike clean(), it
+// never quotes or escapes: the result is visible text only, one line, bounded
+// by code points. clean() keeps its own bytes for the technical line.
+function plainText(value, { missing = '-', limit = 64 } = {}) {
+  if (!Number.isSafeInteger(limit) || limit < 1) throw Object.assign(new Error('plain-text-limit-invalid'), { code: 'plain-text-limit-invalid' });
+  if (!['string', 'number', 'bigint', 'boolean'].includes(typeof value) || value === '') return missing;
+  const text = String(value).replace(TERMINAL_STRING, '').replace(CONTROL_SEQUENCE, '')
+    .replace(LINE_BREAKS, ' ').replace(INVISIBLE, '').replace(/\s+/g, ' ').trim();
+  if (!text) return missing;
+  const points = Array.from(text);
+  return points.length > limit ? `${points.slice(0, limit - 1).join('').trimEnd()}~` : text;
+}
+
 function formatIdentityLine(stage, fields = {}) {
   if (!STAGES.has(stage)) throw new Error(`unknown sidecar identity stage: ${stage}`);
   const values = {
@@ -113,4 +134,4 @@ function createAnnouncer({ write } = {}) {
 
 function createStderrAnnouncer() { return createAnnouncer({ write: line => process.stderr.write(line) }); }
 
-module.exports = { HUMAN_PREFIX, formatIdentityLine, formatHumanIdentity, createAnnouncer, createStderrAnnouncer };
+module.exports = { HUMAN_PREFIX, plainText, formatIdentityLine, formatHumanIdentity, createAnnouncer, createStderrAnnouncer };

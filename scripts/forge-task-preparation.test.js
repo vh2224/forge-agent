@@ -203,6 +203,37 @@ async function main() {
     assert.equal(state.reservations.length, 1);
     assert.equal(state.reservations[0].correction.evidence_reference, 'preparation-preflight:native-arguments');
   });
+  await test('S03/T02 recovery wrapper passes the host identity observer to the native callback; two-argument callbacks unchanged', async () => {
+    for (const arity of ['observer', 'legacy']) {
+      const request = fixture({ model: 'gpt-5.6-sol' });
+      request.activeCapabilities = codexCapabilities();
+      const failed = await prep.prepareStandaloneTask(request, { invokeNative: async () => {
+        throw Object.assign(Error('fixture caller error'), { code: 'context-budget-exceeded', provider_called: false });
+      } });
+      assert.equal(failed.ok, false);
+      request.prompt = 'after offline repair';
+      const recovery = { receiptFile: request.resultFile + '.receipt.json', stateFile: request.resultFile + '.recovery.json', correction: true };
+      const seen = [];
+      const invokeNative = arity === 'observer'
+        ? async (args, binding, observer) => { seen.push({ args, binding, observer, recorded: observer.hostIdentity('/root/recovery_fixture') });
+          return framed(envelope(request)); }
+        : async (args, binding) => { seen.push({ args, binding }); return framed(envelope(request)); };
+      const recovered = await prep.recoverStandaloneTask(request, recovery, { processProbe: () => 'stopped', invokeNative });
+      assert.equal(recovered.corrected, true, JSON.stringify(recovered));
+      assert.equal(recovered.result.status, 'done');
+      assert.equal(seen.length, 1);
+      assert.deepEqual(Object.keys(seen[0].args), ['task_name', 'message', 'agent_type', 'model', 'reasoning_effort', 'fork_turns']);
+      assert.equal(seen[0].binding.args, seen[0].args);
+      if (arity === 'observer') {
+        assert(Object.isFrozen(seen[0].observer));
+        assert.deepEqual(Object.keys(seen[0].observer), ['hostIdentity']);
+        assert.deepEqual(seen[0].recorded, { ok: true });
+      }
+      assert(!JSON.stringify(seen[0].args).includes('hostIdentity'), 'the observer is never a tool argument');
+    }
+    const source = fs.readFileSync(path.join(__dirname, 'forge-task-preparation.js'), 'utf8');
+    assert(source.includes('terminalResult:'), 'release-impact literal remains');
+  });
   await test('trusted caller authority survives restart and routes a timed-out standalone phase to the explicit native candidate', async () => {
     const request = fixture({ phase: 'brainstorm' });
     const prefs = path.join(request.contextRoot, '.gsd/forge-prefs.jsonc');

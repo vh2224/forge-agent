@@ -133,4 +133,78 @@ assert(identitySection.includes('quando o adaptador instalado ainda não a emiti
 for (const token of ['**modelo enviado**', 'observado=nao-confirmado', 'falta prova do adaptador',
   'solicitação do orquestrador — aguardando confirmação do adaptador']) assert(identitySection.includes(token), token);
 console.log('PASS forwarding rule: the human prefix emitted by the renderer is the one cited in shared/forge-bidirectional-sidecar.md');
+
+// S03/T02: legacy outputs stay byte-identical. The digest was measured on the
+// module before plainText existed; clean() is reached through every field.
+const legacyHostile = { phase: 'a\u{202e}b', unit: 'u\u{2028}v\u{2029}w', engine: '\x1b]8;;https://example.invalid\x1b\\t\x1b]8;;\x1b\\',
+  transport: '\x9b31mx', model_sent: '\x9d0;title\x9cm', effort: '"q" \\', host: 'h\nh', dispatch_id: '\x1b]8;;https://example.invalid t',
+  model_resolved: '\u{2066}r\u{2069}', model_route: 'route\x7f', reason_code: 'provider-exit', pid: 7, retroactive: true };
+const legacyInputs = [base, running, { ...running, pid: 10, provider_called: 'unknown' },
+  { ...running, reason_code: 'provider-exit', provider_called: true }, { ...base, model_resolved: 'x y', model_route: 'r', retroactive: true, pid: 3 },
+  legacyHostile, { ...base, model_sent: 'G\n[forge-sidecar] iniciado\r\x1b[31m' + 'x'.repeat(500) }];
+const legacyOutputs = [];
+for (const fields of legacyInputs) {
+  for (const stage of Object.keys(words)) legacyOutputs.push(formatIdentityLine(stage, fields), formatHumanIdentity(stage, fields));
+  const writes = [], legacyAnnounce = createAnnouncer({ write: value => writes.push(value) });
+  for (const stage of ['solicitado', 'iniciado', 'falhou', 'recusado']) legacyAnnounce(stage, { ...fields, pid: 10 });
+  legacyOutputs.push(...writes);
+}
+const legacyDigest = require('crypto').createHash('sha256').update(JSON.stringify(legacyOutputs)).digest('hex');
+assert.strictEqual(legacyDigest, 'a33cdf9a858ec6b5d03032ffa84df28d7845fb8052f8143e7214fedf091d9b4e', `legacy identity bytes changed: ${legacyDigest}`);
+console.log('PASS S03/T02 legacy identity bytes: formatIdentityLine, formatHumanIdentity, createAnnouncer and clean() unchanged');
+
+const { plainText } = require('./forge-sidecar-identity');
+const ESC = '\x1b', BEL = '\x07', ST = '\x1b\\';
+const hostileVectors = [
+  ['U+202E bidi override', 'a\u{202e}b', 'ab'],
+  ['other bidi marks', '\u{61c}\u{200e}\u{200f}x\u{202a}\u{202b}\u{202c}\u{202d}\u{2066}\u{2067}\u{2068}\u{2069}y', 'xy'],
+  ['U+2028 line separator', 'a\u{2028}b', 'a b'],
+  ['U+2029 paragraph separator', 'a\u{2029}b', 'a b'],
+  ['complete OSC 8 keeps visible text', `${ESC}]8;;https://example.invalid${ST}t${ESC}]8;;${ST}`, 't'],
+  ['OSC 8 terminated by BEL', `${ESC}]8;;https://example.invalid${BEL}t${ESC}]8;;${BEL}`, 't'],
+  ['unterminated OSC 8 runs to the end', `${ESC}]8;;https://example.invalid t`, '-'],
+  ['8-bit CSI before text', '\x9b31mtext', 'text'],
+  ['8-bit OSC with 8-bit ST', '\x9d0;title\x9cvisible', 'visible'],
+  ['8-bit OSC unterminated', 'keep\x9d0;title', 'keep'],
+  ['7-bit CSI', `${ESC}[1;31mred${ESC}[0m`, 'red'],
+  ['DCS, SOS, PM and APC', `a${ESC}Pdcs${ST}b${ESC}Xsos${ST}c${ESC}^pm${ST}d${ESC}_apc${ST}e\x90x\x9cf\x98y\x9cg\x9ez\x9ch\x9fw\x9ci`, 'abcdefghi'],
+  ['unterminated DCS', `a${ESC}Ppayload`, 'a'],
+  ['ESC inside unterminated OSC remains hidden', `${ESC}]0;secret-title${ESC}[31mtext`, '-'],
+  ['other ESC sequences', `a${ESC}(Bb${ESC}=c${ESC}`, 'abc'],
+  ['C0, C1 and DEL (NEL breaks a line)', 'a\x00b\x01c\x7fd\x85e\x80f', 'abcd ef'],
+  ['quotes stay plain text', '"quoted" \'single\' \\', '"quoted" \'single\' \\'],
+  ['line breaks collapse', 'line1\nline2\r\n\tline3', 'line1 line2 line3'],
+  ['whitespace collapses and trims', '   a    b   ', 'a b'],
+  ['empty after sanitizing', `${ESC}[0m\u{202e}\x00`, '-'],
+];
+for (const introducer of [`${ESC}P`, `${ESC}X`, `${ESC}^`, `${ESC}_`, '\x90', '\x98', '\x9e', '\x9f']) {
+  for (const terminator of [ST, '\x9c']) {
+    hostileVectors.push(['string control hides BEL and embedded ESC until ST',
+      `a${introducer}hidden${BEL}leaked${ESC}[31mstill-hidden${terminator}b`, 'ab']);
+  }
+  hostileVectors.push(['unterminated string control hides BEL and embedded ESC',
+    `a${introducer}hidden${BEL}leaked${ESC}[31mstill-hidden`, 'a']);
+}
+hostileVectors.push(['OSC hides embedded ESC until ST', `a${ESC}]hidden${ESC}[31mhidden${ST}b`, 'ab']);
+for (const [label, input, expected] of hostileVectors) {
+  const output = plainText(input);
+  assert.strictEqual(output, expected, label);
+  assert(!/[\x00-\x1f\x7f-\x9f\u{61c}\u{200e}\u{200f}\u{202a}-\u{202e}\u{2066}-\u{2069}\u{2028}\u{2029}]/u.test(output), label);
+}
+console.log('PASS S03/T02 plainText hostile vectors: CSI/OSC 7 and 8 bit, unterminated OSC, DCS/SOS/PM/APC, ESC, C0/C1/DEL, bidi and separators removed');
+
+assert.strictEqual(plainText(undefined), '-');
+assert.strictEqual(plainText(null, { missing: null }), null);
+assert.strictEqual(plainText('', { missing: 'ausente' }), 'ausente');
+assert.strictEqual(plainText({ toString() { throw new Error('never coerced'); } }), '-');
+assert.strictEqual(plainText(42), '42');
+assert.strictEqual(plainText('abcdef', { limit: 4 }), 'abc~');
+assert.strictEqual(plainText('😀😀😀😀😀', { limit: 3 }), '😀😀~', 'truncation counts code points');
+assert.strictEqual(plainText('ab cdef', { limit: 4 }), 'ab~', 'no trailing space before the marker');
+assert.strictEqual(Array.from(plainText('ç'.repeat(400), { limit: 160 })).length, 160);
+assert.strictEqual(plainText('x'.repeat(64)), 'x'.repeat(64));
+assert.strictEqual(plainText('x'.repeat(65)), 'x'.repeat(63) + '~');
+assert.strictEqual(plainText('valor com espaço'), 'valor com espaço', 'never adds JSON quotes');
+assert.throws(() => plainText('x', { limit: 0 }), /plain-text-limit-invalid/);
+console.log('PASS S03/T02 plainText bounds: missing value, no coercion of objects, code-point truncation with ~, no JSON quoting');
 console.log('forge-sidecar-identity tests passed');

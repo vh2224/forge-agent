@@ -45,6 +45,26 @@ provider unavailability. Cancellation and observation promises cannot delay that
 ceiling. Timers/subscriptions are cleaned up at terminal/cutoff. Observation after
 cleanup requires the host's reattachment/saved-result path, not a hidden watcher.
 
+## Host identity observer
+
+The launch callback receives `invoke(args, invocation, observer)`. `observer` is
+a frozen Forge capability with one method, `hostIdentity(value)`; it is not a
+tool argument, and the tool still receives exactly the same arguments. A host
+adapter passes the opaque identifier its tool actually returned (for example
+`/root/<name>`), never one derived from `task_name`. The first valid value wins
+and is kept as `host_identity { value, source: host-tool-return, observed_ms,
+dispatch_id, conflict }`, with `dispatch_id` from the trusted request. The same
+value again is a no-op; a different value keeps the first and marks
+`conflict: true`; values after terminal or cutoff are refused without changing
+the journal. With a journal the record is saved in the same external evidence
+location, outside protected owner/code snapshots; without one it stays in the
+in-memory lifecycle. Restart accepts only a valid saved record bound to the same
+dispatch and elapsed clock; older journals without it resume as before. The
+durable `agent-identity` event is appended only after publication or the
+recorded failure, through a proven owner channel (`forge-agent-identity.js`).
+Callbacks that ignore the observer behave as before and report no identity.
+Offline tests prove these transitions, not that a host adapter calls the observer.
+
 ## External evidence and restart
 
 There is no implicit TEMP durability promise. The host can provide
