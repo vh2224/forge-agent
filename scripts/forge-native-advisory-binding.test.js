@@ -171,7 +171,13 @@ function main() {
     refuses(() => s.bind(mutateEvidence(e => { e.stdout_line = 'PASS advisory observers: invented'; })), 'criterion-unobserved-evidence', 'absent line');
     for (const line of ['   ', '', '\t']) refuses(() => s.bind(mutateEvidence(e => { e.stdout_line = line; })), 'artifact-evidence-line-empty', 'empty line ' + JSON.stringify(line));
     for (const line of ['ℹ pass 2', 'All tests passed', 'ℹ pass 25', '# pass 25', 'ℹ tests 3', 'Todos os testes passaram', '25 passing', '3/3 passed',
-      'PASS', 'ok', '✓ passed', 'pass: 25', 'Tests: 25 passed', 'forge-x: all scenarios passed', '1..25'])
+      'PASS', 'ok', '✓ passed', 'pass: 25', 'Tests: 25 passed', 'forge-x: all scenarios passed', '1..25',
+      'forge-sidecar-identity tests passed', 'forge-lock tests passed', 'forge-capability.test.js: all tests passed',
+      'forge-codex-questions tests passed (probe and conservative config cases)', 'forge-surgical-reset boundary tests passed',
+      'forge-dispatch-policy tests passed (win32; 2 hosts × 3 platforms)', '12 bundle contract tests passed', '7 workflow checks passed; public synthetic seams only',
+      'OK: forge-migrate guard suite passed (4/4)', 'forge-source-manifest tests passed on win32', '4 tests passed, 0 failed.', '3/3 sidecar local proof tests passed',
+      'forge-prefs-schema: 5/5 checks passed', 'forge-sweep-curate: 9 tests passed', 'native supervision discriminating tests passed',
+      'forge-milestone-task-marker: all scenarios passed', '4 route-audit tests passed, 1 skipped', `${'x'.repeat(90)} tests passed`])
       refuses(() => s.bind(mutateEvidence(e => { e.stdout_line = line; })), 'artifact-evidence-global-summary', 'global ' + line);
     const negative = structuredClone(s.capture);
     negative.gate.roots.find(r => r.root_id === 'alpha').result.checks[0].exitCode = 1;

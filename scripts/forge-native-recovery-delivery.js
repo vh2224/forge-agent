@@ -257,6 +257,8 @@ const GLOBAL_SUMMARY_LINES=[
   /^\d+\s*(?:\/\s*\d+\s*)?(?:tests?|checks?|scenarios?|passing|passed|ok|testes?|cen[aá]rios?)\b/i,
   /^(?:[✓✔✅]\s*)?(?:pass(?:ed)?|ok|success|succeeded|done|green|tudo\s+ok|sucesso|passou)[.!]?$/i,
   /^tests?\s+(?:passed|ok|completed)\b/i,
+  // Suite footers of any prefix length/suffix metadata: "<anything> tests passed (...)", "N checks passed; ...".
+  /\b(?:tests?|scenarios?|checks?|suites?|cases?|specs?|assertions?)\s+(?:have\s+)?(?:passed|pass|ok|green|succeeded|completed)\b/i,
   /^1\.\.\d+$/,
 ];
 const ADVISORY_LIMIT='Flags heurísticas mantidas visíveis; comportamento provado só por linhas nomeadas da execução local do próprio artefato, sem alegação de CI remoto ou UAT.';
