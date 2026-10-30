@@ -463,6 +463,58 @@ test('review R1 actual shell variables capture and verify readonly units and fai
   }
 });
 
+test('S04 decision lifecycle: canonical old and new safeguards remain distributed', () => {
+  const text = read('shared/forge-interaction.md');
+  for (const phrase of [
+    '# Forge interaction contract', '## Decision handling', '## Native adapters',
+    '## Standing recovery authorization', '## Pending decision persistence',
+    'A required live decision remains pending', 'optional-only tool', 'Plan-only tool',
+    'approval-prohibited tool', 'returned pending handle is not an answer', 'multiSelect',
+    'questions per batch', 'separate, concise text message', 'auto/headless deferment',
+    'createRecoveryAuthorizationAdapter', 'registerStandingAuthorization',
+    'readStandingAuthorization(reference)', 'tier safety ceiling',
+    'Standing permission never answers a functional question',
+    'one required decision per round', 'two or three options (up to four in Claude)',
+    'each with its consequence', 'nothing preselected', 'forge-question-channel.js',
+    '## Economic wait', 'Never sleep, poll or resume the model', 'single native call',
+    'closed, cancelled, empty or timeout', 'close the round', 'neither an answer nor cancellation',
+    'forge-question-channel.js --preference', 'never edit it', 'prefer request_user_input_async',
+    'Owner only', '<FORGE_SCRIPTS_DIR>/forge-pending-questions.js',
+    '--open', '--handoff', '--round', '--answer', '--continuation', '--list',
+    'receipt is closed', 'protected writer window', 'never from workers', 'personal checkpoint',
+    'item/tool/requestUserInput', 'mcpServer/elicitation/request', 'appserver-input-required',
+    'inbound-', 'approvalPolicy', 'Never retry an input-required attempt',
+    'new dispatch of the same unit', 'answered-continuation-required',
+  ]) assert(text.includes(phrase), `interaction contract lost: ${phrase}`);
+  assert(!/proceed regardless|orchestrator always has the tool/i.test(text));
+  assert.strictEqual(count(read('CLAUDE.md'), interaction.renderBlock()), 1);
+});
+
+test('S04 Codex lifecycle: skill, agent TOML and dispatch template contain canonical block exactly once', () => {
+  const renderer = require('./forge-codex-renderer');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-question-distribution-'));
+  temps.push(temp);
+  const report = renderer.render({ repo: root, projectRoot: temp,
+    codexHome: path.join(temp, 'codex'), forgeHome: path.join(temp, 'forge'),
+    ...renderer.PRODUCTION_DISPATCH_DIALECT });
+  for (const id of ['skills', 'agents', 'dispatch-templates']) {
+    const artifact = report.artifacts.find(item => item.source_id === id);
+    assert(artifact, `missing projection: ${id}`);
+    // TOML multiline prompt bodies retain the same literal Markdown contract.
+    assert.strictEqual(count(artifact.content, interaction.renderBlock()), 1, id);
+    assert(artifact.content.includes('## Economic wait'), id);
+  }
+});
+
+test('S04 discuss: one required decision per round retains stable pending IDs and explicit answers', () => {
+  const text = read('skills/forge-discuss/SKILL.md');
+  assert(text.includes('Ask one required decision per round through the interaction contract'));
+  assert(text.includes('keep other areas pending by stable ID'));
+  assert(text.includes('Require an explicit answer for each ID before dependent work'));
+  assert(text.includes('persist and close unanswered rounds under Economic wait'));
+  assert(!text.includes('Ask ALL questions at once'));
+});
+
 for (const temp of temps) fs.rmSync(temp, { recursive: true, force: true });
 
 console.log('');

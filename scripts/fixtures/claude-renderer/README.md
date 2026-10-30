@@ -56,3 +56,17 @@ Only the active `skills` surface changed from
 `de4f137d05d37fbee993ba3adfc4a11372ea1c972f158cceddc5ae7e8ce02981` to
 `28410c1f6ac4bf55ec693e379bc76328e77277bbfb9676f2b6f5fe564d7e37b7`.
 The other eight active surfaces and historical golden bytes remain unchanged.
+
+## S04/T03 remeasurement (2026-10-30)
+
+Measured before and after with forge-claude-renderer.render, sorting artifacts by source,
+joining source + NUL + content (version normalized to <dynamic>) with NUL, then SHA-256,
+exactly as forge-claude-renderer.test.js. Sources changed: skills/forge-discuss/SKILL.md
+and the managed forge:interaction block of CLAUDE.md (shared/forge-interaction.md).
+
+- skills: `28410c1f6ac4bf55ec693e379bc76328e77277bbfb9676f2b6f5fe564d7e37b7` to `0ba4bf99be2a459df9aee5fa657e35c94d8c05e7c0cb093c37173f24c5b618cd`.
+- claude-instructions: `f2c7e2e5c25e0815a41e05c91d840c48c5c00da8903f83bee1db319c5075ec8a` to `7997a0ef19dcd6479b90fc48eaa732cd12a7337d54c6332ac11c6c6ddb257ffb`.
+
+The other seven active surfaces and immutable Claude 4.19.0 golden remain unchanged.
+The historical-to-current changed surface set remains agents, skills, dispatch-templates,
+claude-instructions and configuration. Distribution does not establish host UI or human acceptance.

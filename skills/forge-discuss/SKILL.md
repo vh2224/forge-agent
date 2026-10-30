@@ -70,9 +70,9 @@ Identify 3-5 gray areas not already resolved by:
 
 Focus on genuine architecture/scope choices with real trade-offs. Skip anything already locked.
 
-Ask ALL questions at once — not one by one.
+Ask one required decision per round through the interaction contract; keep other areas pending by stable ID.
 
-Wait for user answers.
+Require an explicit answer for each ID before dependent work; persist and close unanswered rounds under Economic wait.
 
 ---
 
