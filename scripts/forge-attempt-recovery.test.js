@@ -93,6 +93,7 @@ async function main() {
   await codexAppServerRecovery(identity, route, attempt, inspection, candidateSet);
   await modelNotFoundRecovery(identity, route, attempt, inspection, candidateSet);
   console.log('PASS C02 modelNotFound recovery: no live authority stops without invocation and the authorized route uses another model');
+  await inboundInputRecovery(identity, route, attempt, inspection, candidateSet);
   await canonicalProvenance();
   await continuationCrashRace();
   stateSchema(identity, attempt);
@@ -291,6 +292,117 @@ async function modelNotFoundRecovery(identity, route, attempt, inspection, candi
   assert.notStrictEqual(decision.route.model, missingRoute.model, 'never the same missing model again');
   assert.notStrictEqual(decision.silence_retry, true);
   console.log('PASS model-not-found: unknown class, no outage or timeout cause, stops unproved without live authority');
+}
+// S04/T02: the app-server asked for human input and the client stopped the turn.
+// captureFailure turns each closed input record into a stable pending question;
+// after explicit answers the recovery stops for the owner's continuation, and the
+// standing exception, candidate set or a correction never answer it.
+async function inboundInputRecovery(identity, route, attempt, inspection, candidateSet) {
+  const fs = require('fs'), path = require('path'), crypto = require('crypto'), { digest } = require('./forge-code-roots');
+  const client = require('./forge-appserver-client');
+  // The recovery constants are local (it never loads the client); bind them here.
+  assert.strictEqual(api.INPUT_REQUIRED_CODE, client.APPSERVER_INPUT_CODES.INPUT_REQUIRED);
+  assert.deepStrictEqual(api.INBOUND_INPUT_METHODS.slice().sort(), Object.entries(client.INBOUND_REQUEST_CLASSES)
+    .filter(([, kind]) => kind === 'input').map(([method]) => method).sort());
+  const lab = require('./forge-code-roots.test').laboratory('recovery-inbound-input');
+  const cwd = path.join(lab.dir, 'code'); fs.mkdirSync(cwd);
+  const codexRoute = { ...route, resolved_worker_engine: 'codex', model: 'gpt-requested-model', model_resolved: 'gpt-requested-model',
+    worker_mode: 'sidecar', tier: 'heavy', workers_timeout: 21, workers_timeout_source: 'tier-default' };
+  const unit = 'research-milestone/M001';
+  const request = { cwd, contextRoot: cwd, scope: 'milestone', phase: 'research', unitType: 'research-milestone',
+    milestoneId: 'M001', dispatchId: 'dispatch-s04-input', route: { ...codexRoute, unit_type: 'research-milestone' },
+    prompt: 'codex', resultFile: path.join(lab.dir, 'result.json') };
+  const receiptFile = path.join(lab.dir, 'receipt.json');
+  fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'failed', dispatch_id: request.dispatchId,
+    recovery_identity_sha256: digest(api.requestIdentity(request)), failure: { provider_called: true } }));
+  const sentinel = 'FORGE_S04_PROVIDER_SENTINEL';
+  const userInput = { id: 'req-1', method: 'item/tool/requestUserInput', class: 'input', thread_id: 'thread-1', turn_id: 'turn-1' };
+  const elicitation = { id: 901, method: 'mcpServer/elicitation/request', class: 'input', thread_id: 'thread-1', turn_id: 'turn-1' };
+  // The exact rejection forge-appserver-client builds (sessionError + terminateTurn),
+  // plus records outside the closed form that must be ignored, never asked.
+  const clientError = Object.assign(new Error(client.APPSERVER_INPUT_MESSAGES.INPUT_REQUIRED), {
+    code: client.APPSERVER_INPUT_CODES.INPUT_REQUIRED,
+    inboundRequests: [userInput, elicitation,
+      { ...userInput, id: 'req-extra', params: { question: sentinel } },
+      { ...userInput, id: `bad id ${sentinel}` },
+      { ...userInput, id: 7, method: 'execCommandApproval', class: 'approval' },
+      { ...userInput, id: 8, class: 'approval' },
+      { ...userInput, id: 9, thread_id: `${sentinel} thread` },
+      `${sentinel} string`, null],
+    diagnostic: require('./forge-sidecar-diagnostic').diagnostic('appserver-input-required', { observation: { phase: 'failed' } }),
+    timeoutMs: 21000, interrupt: client.INTERRUPT_OUTCOMES.ACKNOWLEDGED, turnId: 'turn-1', turnIdSource: 'turn/started',
+    turnCompletions: { observed: 0, matched: 0, ignored: 0, dropped: 0, records: [] },
+    retention: { limits: client.RETENTION_LIMITS, dropped: { notifications: 0, items: 0, inboundRequests: 0, turnCompletions: 0 } },
+    discarded: { count: 0, kinds: {}, sample: [] }, stderrTail: `network connection terminated 503 ${sentinel}` });
+  const stateFile = path.join(lab.dir, 'state.json');
+  // forge-unit-sidecar recordFailure spreads the client error into captureFailure.
+  const capture = providerCalled => api.captureFailure({ stateFile, receiptFile, request, unit, route: codexRoute,
+    finalEvidence: require('./forge-attempt-telemetry').captureFinal({ request: { argv: ['--model', codexRoute.model] }, context: request.prompt }),
+    error: { ...clientError, provider_called: providerCalled }, budgets: { coding_standards: 3000 } });
+  const first = capture(true);
+  const row = first.attempts.at(-1);
+  assert.strictEqual(row.failure_class, 'unknown');
+  assert.strictEqual(row.reason_code, 'appserver-input-required');
+  assert.strictEqual(row.service_failure_proven, false);
+  assert.strictEqual(row.timeout_cause, null);
+  assert.deepStrictEqual(row.inbound_requests, [userInput, elicitation], 'only the closed input records are kept');
+  const expectedId = record => `inbound-${crypto.createHash('sha256').update(JSON.stringify([unit, request.dispatchId,
+    record.thread_id, record.turn_id, record.id, record.method])).digest('hex').slice(0, 24)}`;
+  assert.deepStrictEqual(first.pending_questions.map(q => [q.id, q.status]),
+    [[expectedId(userInput), 'pending'], [expectedId(elicitation), 'pending']]);
+  for (const [question, record] of [[first.pending_questions[0], userInput], [first.pending_questions[1], elicitation]]) {
+    assert.match(question.id, /^inbound-[0-9a-f]{24}$/);
+    assert.strictEqual(question.question, `A unidade ${unit} recebeu do sidecar app-server o pedido de entrada humana ${record.method} `
+      + `(request ${record.id}); o turno foi parado e a recusa aguarda decisão explícita do owner.`);
+  }
+  const persisted = fs.readFileSync(stateFile, 'utf8');
+  assert(!persisted.includes(sentinel), 'no provider text, params or stderr in the recovery state');
+  assert(!/req-extra|execCommandApproval|bad id/.test(persisted), 'malformed records are ignored');
+  // The same failure captured again maps to the same questions; provider_called
+  // false does not turn it into a caller defect.
+  const again = capture(false);
+  assert.strictEqual(again.attempts.length, 2);
+  assert.strictEqual(again.attempts.at(-1).failure_class, 'unknown');
+  assert.deepStrictEqual(again.pending_questions.map(q => q.id), first.pending_questions.map(q => q.id));
+  // Through recoverAttempt: pending blocks, then explicit answers stop for the owner.
+  const guarded = { stateFile, receiptFile, request, clock: () => Date.now(), processProbe: () => 'stopped',
+    resolveDispatch() { throw Error('an input stop must not resolve candidates'); },
+    validateInvocation: async () => { throw Error('an input stop must not validate a candidate'); },
+    invoke() { throw Error('an input stop must not invoke'); } };
+  const blocked = await api.recoverAttempt(guarded);
+  assert.strictEqual(blocked.action, 'pending-questions');
+  assert.deepStrictEqual(blocked.questions.map(q => q.id), first.pending_questions.map(q => q.id));
+  const answered = await api.recoverAttempt({ ...guarded,
+    answers: first.pending_questions.map(q => ({ id: q.id, answer: 'manter a recusa' })) });
+  assert.deepStrictEqual(answered, { action: 'stop', reason_code: 'answered-continuation-required' });
+  assert(require('./forge-xllm-state').loadRecovery(stateFile).pending_questions.every(q => q.status === 'resolved'));
+  // In memory, with a live standing exception and a candidate set: pending first,
+  // then the same stop. No invoke, silence retry, corrected retry, resume or walk.
+  const probe = api.createRecovery({ ...identity, state: undefined, clock: () => 0, persist: undefined });
+  probe.record(attempt);
+  const target = (await probe.next({ inspection, candidateSet, validateInvocation: async () => ({ ok: true }) })).route;
+  const authority = api.createAuthority(reference => ({ reference, status: 'resolved', answer: 'authorize', resolved_at: 'fixture' }));
+  const exception = authority.issue('fixture:inbound-input', { unit: identity.unit, roots_sha256: identity.roots_sha256,
+    purpose: 'sidecar-recovery', expires_at: 120000, routes: [api.routeKey(route), api.routeKey(target)], gates_preserved: true }, () => 0);
+  const session = api.createRecovery({ ...identity, state: undefined, clock: () => 0, persist: undefined });
+  session.record({ ...attempt, reason_code: 'appserver-input-required', failure_class: 'unknown', service_failure_proven: false,
+    inbound_requests: [userInput] });
+  session.questions([{ id: expectedId(userInput), question: 'fixture input question' }]);
+  const refuse = async () => { throw Error('an input stop must not reach the adapter'); };
+  const pendingDecision = await session.next({ inspection, exception, candidateSet, validateInvocation: refuse });
+  assert.strictEqual(pendingDecision.action, 'pending-questions');
+  session.answer([{ id: expectedId(userInput), answer: 'manter a recusa' }]);
+  for (const extra of [{}, { correction: { request_sha256: 'new', offline_validated: true, evidence_reference: 'check' } }]) {
+    const decision = await session.next({ inspection, exception, candidateSet, validateInvocation: refuse, ...extra });
+    assert.deepStrictEqual(decision, { action: 'stop', reason_code: 'answered-continuation-required' });
+  }
+  assert.strictEqual(session.inspect().reservations, undefined, 'no reservation');
+  assert.strictEqual(session.inspect().selection, undefined, 'no candidate selection');
+  // The gate is the reason code: the same row as model-not-found keeps its path.
+  const control = api.createRecovery({ ...identity, state: undefined, clock: () => 0, persist: undefined });
+  control.record({ ...attempt, reason_code: 'model-not-found', failure_class: 'unknown', service_failure_proven: false });
+  assert.strictEqual((await control.next({ inspection, exception, candidateSet, validateInvocation: async () => ({ ok: true }) })).action, 'invoke');
+  console.log('PASS C11 inbound input recovery: client error shape, stable inbound IDs, closed records, pending block and answered-continuation stop');
 }
 // Migrated from the S03 named stop: after the existing pending-question,
 // inspection, replay and reconciliation checks, active-budget either resumes

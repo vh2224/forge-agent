@@ -239,6 +239,12 @@ function appServerTerminalCodes() {
   return loaded && loaded.exports && loaded.exports.APPSERVER_TERMINAL_CODES
     ? Object.values(loaded.exports.APPSERVER_TERMINAL_CODES) : [];
 }
+// The inbound input stop (S04/T02, appserver-input-required) is read the same lazy way.
+function appServerInputCodes() {
+  const loaded = require.cache[require.resolve('./forge-appserver-client')];
+  return loaded && loaded.exports && loaded.exports.APPSERVER_INPUT_CODES
+    ? Object.values(loaded.exports.APPSERVER_INPUT_CODES) : [];
+}
 
 // Only adapter vocabulary and re-sanitized diagnostic fields cross the CLI.
 // A local process/elapsed duration does not establish a remote provider call.
@@ -261,7 +267,7 @@ function reviewFailureDiagnostic(error = {}) {
     'native-effort-binding-mismatch', 'thinking-transport-unsupported', 'thinking-mode-undocumented',
     'thinking-disabled-incompatible', 'thinking-enabled-incompatible', 'thinking-between-tools-incompatible',
     'thinking-mode-unknown', 'agy-output-empty', ...Object.values(AGY_REASON_CODES), ...appServerLivenessCodes(),
-    ...appServerTerminalCodes()];
+    ...appServerTerminalCodes(), ...appServerInputCodes()];
   return { reason_code: knownCodes.includes(error.code) ? error.code : 'adapter-failed',
     diagnostic: safeDiagnostic,
     provider_called: typeof error.provider_called === 'boolean' ? error.provider_called : null,
@@ -1162,7 +1168,7 @@ function invokeCodexAppServer(opts) {
   // Lazy by contract: agy and every non-execute path must never load the app-server
   // client. Keeping this require here also lets a missing optional client fail only
   // for the transport that needs it.
-  const { startAppServerTurn, APPSERVER_LIVENESS_CODES, APPSERVER_TERMINAL_CODES } = require('./forge-appserver-client');
+  const { startAppServerTurn, APPSERVER_LIVENESS_CODES, APPSERVER_TERMINAL_CODES, APPSERVER_INPUT_CODES } = require('./forge-appserver-client');
   const {
     prompt, schema, cwd, model, timeoutSecs, onHeartbeat, sandbox,
     envPolicy = 'minimal', heartbeatIntervalMs, writableRoots = [],
@@ -1304,8 +1310,9 @@ function invokeCodexAppServer(opts) {
     // stderr tail would make it unstable and could smuggle a transient keyword in.
     // A terminal route failure (model-not-found) is the same kind of fixed verdict,
     // read from the typed TurnError: provider stderr never reaches its message.
+    // A refused inbound input request (S04/T02) is the client's fixed verdict too.
     const fixedVerdict = Boolean(error) && [...Object.values(APPSERVER_LIVENESS_CODES),
-      ...Object.values(APPSERVER_TERMINAL_CODES)].includes(error.code);
+      ...Object.values(APPSERVER_TERMINAL_CODES), ...Object.values(APPSERVER_INPUT_CODES)].includes(error.code);
     const tail = !fixedVerdict && error && typeof error.stderrTail === 'string' ? error.stderrTail.trim() : '';
     if (tail) {
       const snippet = tail.slice(-MAX_STDERR_SNIPPET);
@@ -3215,6 +3222,9 @@ function classifyErrorClass(msg) {
   // A missing requested model (S01/T04) is a terminal failure of the route, anchored
   // on the client's fixed message: no retry in place and no model swap.
   if (/^forge-appserver-client: turn ended with status failed \(modelNotFound\)$/.test(msg || '')) return 'terminal';
+  // A refused inbound input request (S04/T02) waits for the owner, never a retry:
+  // anchored on the client's fixed message, before any keyword heuristic.
+  if (/^forge-appserver-client: inbound input request refused; owner decision required$/.test(msg || '')) return 'terminal';
   return isTransient(classifyError(msg)) ? 'transient' : 'terminal';
 }
 

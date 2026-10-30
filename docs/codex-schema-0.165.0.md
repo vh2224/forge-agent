@@ -130,6 +130,33 @@ São dez métodos. O cliente atual (`scripts/forge-appserver-client.js`) recusa
 todos com `-32601` e retém até 500 requests. Este inventário não implementa
 brokering, resposta ou consentimento; esse comportamento é decidido na S04.
 
+### Decisão da S04 (T02)
+
+O cliente classifica cada request de entrada por esta tabela em
+`INBOUND_REQUEST_CLASSES`: classe `input` para `item/tool/requestUserInput` e
+`mcpServer/elicitation/request`; `approval` para os cinco pedidos de aprovação;
+`other` para `item/tool/call`, `account/chatgptAuthTokens/refresh` e
+`attestation/generate`; qualquer outro método é `unknown`. Todos continuam
+recusados com `-32601`, sem teto na resposta.
+
+- **Classe input:** recusa seguida de parada do turno pelo caminho único de kill
+  (`turn/interrupt` e depois a árvore do processo), com código fechado
+  `appserver-input-required` e mensagem fixa. No recovery state cada pedido vira
+  pendência rastreável do owner, com ID estável `inbound-` e texto pt-BR fixo,
+  sem texto do provider. Depois de respostas explícitas a recuperação para com
+  `answered-continuation-required`: a autorização permanente, candidatos, retry
+  ou troca de modelo nunca respondem a pergunta funcional.
+- **`item/tool/requestUserInput`** é EXPERIMENTAL e não foi adotado (G3).
+- **`mcpServer/elicitation/request`** não recebe brokering no turno: a thread é
+  efêmera e a espera econômica não dá identidade, persistência, resposta,
+  cancelamento e retomada comprovados.
+- **Aprovações** seguem `approvalPolicy` (`never`) e os gates: são recusadas, o
+  turno segue e nunca viram pergunta funcional. As classes `other` e `unknown`
+  mantêm o mesmo comportamento.
+- **Params nunca são retidos:** o cliente guarda até 500 registros fechados
+  `{id, method, class, thread_id, turn_id}`, com thread e turno da própria
+  sessão; params não são retidos, devolvidos nem reportados.
+
 ## Limites da verificação e ambiente observado
 
 - Versão medida: `codex --version` → `codex-cli 0.165.0`.

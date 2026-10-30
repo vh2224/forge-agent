@@ -425,6 +425,39 @@ test('model-not-found is a closed identity reason that never carries provider te
     assert.deepEqual(diagnostic(unknown), { version: 1, stage: 'adapter', reason: 'adapter-failed' });
   }
 });
+test('S04/T02 appserver-input-required is a closed transport reason; prior outputs keep their bytes', () => {
+  // The app-server asked for a human answer; the client refused it and stopped the turn.
+  assert.deepEqual(diagnostic('appserver-input-required'), { version: 1, stage: 'transport', reason: 'appserver-input-required' });
+  const safe = diagnostic('appserver-input-required', { message: 'private-sentinel', params: { question: 'private-sentinel' },
+    method: 'item/tool/requestUserInput', stdout_bytes: 4, observation: { phase: 'failed', elapsed_ms: 9, text: 'private-sentinel' } });
+  assert.equal(safe.stage, 'transport');
+  assert.equal(safe.stdout_bytes, 4);
+  assert.equal(safe.observation.phase, 'failed');
+  assert.deepEqual(Object.keys(safe), ['version', 'stage', 'reason', 'stdout_bytes', 'observation'], 'no new field');
+  assert(!JSON.stringify(safe).includes('private-sentinel'));
+  assert(!JSON.stringify(safe).includes('requestUserInput'));
+  // Existing stage, no new one: the stage set is exactly the pre-T02 set.
+  const stages = new Set(['validation', 'envelope', 'json', 'identity', 'publication', 'security', 'transport', 'adapter']);
+  assert(stages.has(diagnostic('appserver-input-required').stage));
+  // Unknown reasons still collapse, including near-misses of the new one.
+  for (const unknown of ['appserver-input-required ', 'input-required', 'item/tool/requestUserInput', 'private-sentinel']) {
+    assert.deepEqual(diagnostic(unknown), { version: 1, stage: 'adapter', reason: 'adapter-failed' });
+  }
+  // Byte-identical outputs pinned from the pre-T02 module.
+  const pinned = [
+    [['model-not-found'], '{"version":1,"stage":"identity","reason":"model-not-found"}'],
+    [['anomalous-silence', { stderr_bytes: 2 }], '{"version":1,"stage":"transport","reason":"anomalous-silence","stderr_bytes":2}'],
+    [['budget-exceeded-while-active'], '{"version":1,"stage":"transport","reason":"budget-exceeded-while-active"}'],
+    [['provider-timeout', { duration_ms: 10 }], '{"version":1,"stage":"transport","reason":"provider-timeout","duration_ms":10}'],
+    [['private-sentinel', { stdout_bytes: 3 }], '{"version":1,"stage":"adapter","reason":"adapter-failed","stdout_bytes":3}'],
+    [['model-substituted', { model_count: 1, model_observed: 'claude-fixture-model' }],
+      '{"version":1,"stage":"identity","reason":"model-substituted","model_count":1,"model_observed":"claude-fixture-model"}'],
+  ];
+  for (const [args, bytes] of pinned) assert.equal(JSON.stringify(diagnostic(...args)), bytes, args[0]);
+  assert.equal(JSON.stringify(diagnostic('provider-timeout', { observation: {} })),
+    '{"version":1,"stage":"transport","reason":"provider-timeout","observation":' + JSON.stringify(observation({})) + '}');
+  console.log('PASS C10 diagnostic appserver-input-required: closed transport reason, unknown collapse and prior bytes unchanged');
+});
 test('real rendered research prompt, simulated provider, publication and replay use one invocation', async () => {
   const p = payload();
   p.artifacts.push({ path: optionalPath, content: '# Standards' });

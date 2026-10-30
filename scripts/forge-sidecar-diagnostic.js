@@ -32,6 +32,8 @@ const REASONS = Object.freeze({
   'provider-unavailable': 'transport', 'publication-failed': 'publication',
   'adapter-failed': 'adapter', 'anomalous-silence': 'transport',
   'budget-exceeded-while-active': 'transport', 'duplicate-terminal':'envelope', 'event-after-terminal':'envelope',
+  // S04/T02: the app-server asked for a human answer; refused and the turn stopped.
+  'appserver-input-required': 'transport',
 });
 // Declared locally: the v2 calibration module imports this file (no cycle).
 const POLICY_V2 = 'claude-silence-v2';
