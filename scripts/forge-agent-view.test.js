@@ -20,6 +20,57 @@ function fromCase(row, extra = {}) {
   return derive({ ...row, empty_reason: row.source_error }, extra);
 }
 function clone(value) { return JSON.parse(JSON.stringify(value)); }
+
+// Run first: this is the real 124-character recovery regression against the
+// unchanged T03 reader as well as the adjacent canonical dispatch boundaries.
+check('dispatch recovery 120 121 124 128 exact event receipt journal joins', () => {
+  const { recoveryDispatchId } = require('./forge-recovery-dispatch-id');
+  const { code, dispatchCode } = require('./forge-attempt-telemetry');
+  for (const length of [124, 120, 121, 128]) {
+    const dispatch = recoveryDispatchId('d'.repeat(length - 46), '11111111-1111-4111-8111-111111111111');
+    assert.strictEqual(dispatch.length, length);
+    assert.strictEqual(dispatchCode(dispatch), dispatch);
+    assert.strictEqual(code(dispatch), length <= 120 ? dispatch : null);
+    const row = clone(first('native-with-id'));
+    row.records.forEach(record => { record.dispatch_id = dispatch; });
+    row.records.push({ event: 'sidecar-unit', dispatch_id: dispatch, status: 'started' });
+    row.receipts = [{ dispatch_id: dispatch, phase: 'executed' }];
+    row.journals = clone(first('native-journal-live').journals);
+    row.journals[0].host_identity.dispatch_id = dispatch;
+    row.journals[0].host_identity.value = row.records[1].agent_id;
+    const before = JSON.stringify(row), result = fromCase(row);
+    assert.strictEqual(result.agents.length, 1, 'same dispatch must join without unit inference');
+    const agent = result.agents[0];
+    assert.strictEqual(agent.dispatch_id, dispatch, `dispatch${length} exact bytes`);
+    assert.strictEqual(agent.technical.dispatch_id, dispatch);
+    assert.strictEqual(agent.identity.value, row.records[1].agent_id);
+    assert.strictEqual(agent.identity.provenance, 'native-lifecycle');
+    assert.strictEqual(agent.phase, 'verifying', 'receipt joined');
+    row.records.splice(1, 1);
+    assert.strictEqual(fromCase(row).agents[0].identity.provenance, 'journal-unpublished', 'journal joined');
+    row.records[0].unit = 'u'.repeat(121);
+    assert.strictEqual(fromCase(row).agents[0].unit, 'unknown', 'generic code remains bounded');
+    row.records[0].unit = 'execute-task/T03';
+    row.records.splice(1, 0, JSON.parse(before).records[1]);
+    assert.strictEqual(JSON.stringify(row), before, 'derivation has no mutation');
+    row.journals[0].host_identity.value = '/root/conflicting-agent';
+    assert.strictEqual(fromCase(row).agents[0].identity.reason, 'host-id-conflict');
+    row.records[1].dispatch_id = `${dispatch.slice(0, -1)}2`;
+    row.journals[0].host_identity.dispatch_id = `${dispatch.slice(0, -1)}3`;
+    assert.strictEqual(fromCase(row).agents[0].identity.value, 'unknown', 'foreign exact ID cannot join');
+    row.records[1].dispatch_id = dispatch;
+    row.records[1].agent_id = 'invalid agent id';
+    assert.strictEqual(fromCase(row).agents[0].identity.value, 'unknown');
+  }
+  for (const dispatch of ['d'.repeat(129), 'dispatch\n', 'dispatch\u202e', 'dispatch with spaces']) {
+    const row = clone(first('native-with-id'));
+    row.records.forEach(record => { record.dispatch_id = dispatch; });
+    const before = JSON.stringify(row), result = fromCase(row);
+    assert.strictEqual(result.agents[0].dispatch_id, 'unknown');
+    assert.strictEqual(result.agents[0].identity.value, 'unknown');
+    assert.strictEqual(JSON.stringify(row), before);
+  }
+});
 function assertExpected(result, expected) {
   if ('count' in expected) assert.strictEqual(result.agents.length, expected.count);
   if ('empty_reason' in expected) assert.strictEqual(result.empty_reason, expected.empty_reason);
@@ -270,6 +321,36 @@ try {
   journalData.host_identity.value = '/root/opaque-agent';
   const journal = path.join(outside, 'journal.json'); fs.writeFileSync(journal, JSON.stringify(journalData));
   write('.gsd/milestones/M001/slices/S03/tasks/T03/T03-PLAN.md', '---\ntitle: Título real do plano\n---\n# Outro título\n');
+  check('bounded source reader recovery dispatch joins provenance and foreign rejection unchanged', () => {
+    const { recoveryDispatchId } = require('./forge-recovery-dispatch-id');
+    const saved = fs.readFileSync(events);
+    try {
+      for (const length of [120, 121, 124, 128]) {
+        const dispatch = recoveryDispatchId('d'.repeat(length - 46), '11111111-1111-4111-8111-111111111111');
+        const row = clone(first('native-with-id'));
+        row.records.forEach(record => { record.dispatch_id = dispatch; });
+        row.records.push({ event: 'sidecar-unit', dispatch_id: dispatch, status: 'started' });
+        row.records.push({ ...row.records[0], milestone: 'M002', workflow_id: 'M002', model: 'foreign-model' });
+        fs.writeFileSync(events, row.records.map(record => JSON.stringify(record)).join('\n') + '\n');
+        const exactReceipt = json(`evidence/long-${length}.json`, { dispatch_id: dispatch, phase: 'executed' });
+        const live = clone(journalData); live.host_identity.dispatch_id = dispatch; live.host_identity.value = row.records[1].agent_id;
+        const exactJournal = path.join(outside, `long-${length}.json`); fs.writeFileSync(exactJournal, JSON.stringify(live));
+        const rejected = ['d'.repeat(129), dispatch + '\n', 'invalid dispatch', dispatch.slice(0, -1) + '2'].map((bad, index) =>
+          json(`evidence/bad-${length}-${index}.json`, { dispatch_id: bad, phase: 'ready' }));
+        const foreignJournal = json(`evidence/foreign-journal-${length}.json`, { ...live,
+          host_identity: { ...live.host_identity, dispatch_id: dispatch.slice(0, -1) + '3' } });
+        const before = tree(temp);
+        const bundle = view.readAgentSources({ cwd: owner, filter: scope, receipts: [exactReceipt, ...rejected], journals: [exactJournal, foreignJournal] });
+        assert.strictEqual(bundle.receipts.length, 1); assert.strictEqual(bundle.journals.length, 1);
+        assert.strictEqual(bundle.records.length, 3); assert.strictEqual(bundle.sources.events.census.total, 4);
+        const agent = view.deriveAgentView(bundle, { now: fixture.now }).agents[0];
+        assert.strictEqual(agent.dispatch_id, dispatch); assert.strictEqual(agent.technical.receipt, `evidence/long-${length}.json`);
+        assert.strictEqual(agent.identity.provenance, 'native-lifecycle'); assert.strictEqual(agent.phase, 'verifying');
+        assert(bundle.sources.journals[0].reference.startsWith('sha256:'));
+        assert.deepStrictEqual(tree(temp), before);
+      }
+    } finally { fs.writeFileSync(events, saved); }
+  });
   check('bounded reader sources titles census and byte-for-byte no writes', () => {
     const before = tree(temp);
     const bundle = view.readAgentSources({ cwd: owner, filter: scope, receipts: [receipt], journals: [journal] });

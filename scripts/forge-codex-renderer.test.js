@@ -114,6 +114,31 @@ function hasAgentOutsideFence(text) {
 try {
   const project = path.join(temp, 'project Ω'); const codex = path.join(temp, 'Codex Home Ω'); const forge = path.join(temp, 'Forge Home Ω'); fs.mkdirSync(project, { recursive: true });
   const report = renderer.render({ repo: root, projectRoot: project, codexHome: codex, forgeHome: forge, ...PRODUCTION_DISPATCH_DIALECT });
+  const { AGENT_ROLES } = require('./forge-agent-view');
+  const roleAgents = report.artifacts.filter(item => item.kind === 'agent');
+  assert.strictEqual(roleAgents.length, 10);
+  assert.deepStrictEqual(roleAgents.map(item => path.basename(item.destination, '.toml')).sort(), Object.keys(AGENT_ROLES).sort());
+  for (const item of roleAgents) {
+    const name = path.basename(item.destination, '.toml');
+    const header = item.content.split('developer_instructions =')[0];
+    assert(header.includes(`description = "${AGENT_ROLES[name].description}"\n`));
+    assert.match(header, new RegExp(`^name = "${name}"$`, 'm'));
+    assert(header.includes(renderer.AGENT_SANDBOX_COMMENT + '\nsandbox_mode = "workspace-write"'));
+    assert.match(item.content, /developer_instructions = """[\s\S]+"""/);
+    const description = header.split('\n').find(row => row.startsWith('description ='));
+    assert.match(description, /^description = "[^"\n\r]+"$/);
+    assert(!/gpt|claude|sonnet|opus|effort|isolamento|sandbox/i.test(description));
+    assert.match(header, /^# forge-source:codex-agent-/);
+  }
+  const unknownRepo = path.join(temp, 'unknown-role-repo');
+  fs.mkdirSync(path.join(unknownRepo, 'agents'), { recursive: true });
+  fs.writeFileSync(path.join(unknownRepo, 'agents', 'forge-unknown.md'), '# Fixture unknown agent\n');
+  const unknownManifest = fixtureManifest();
+  delete unknownManifest.sources.find(source => source.source_id === 'agents').conditional;
+  const unknown = renderer.render({ repo: unknownRepo, manifest: unknownManifest, projectRoot: project,
+    codexHome: codex, forgeHome: forge, ...PRODUCTION_DISPATCH_DIALECT }).artifacts.find(item => item.kind === 'agent');
+  assert(unknown.content.includes('description = "Forge · agente forge-unknown"'));
+  console.log('PASS S03/T05 Codex ten role descriptions unknown fallback quoted scalars inherited sandbox and instructions');
   const standing = require('./forge-instructions');
   const canonicalCommunication = standing.renderCommunicationContract();
   const instructionsArtifact = report.artifacts.find(item => item.kind === 'instructions');

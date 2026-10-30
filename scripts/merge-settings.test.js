@@ -279,6 +279,29 @@ test('PostToolUse registers the evidence matchers (Agent + Bash + Write + Edit)'
   }
 });
 
+test('S03/T05 remove optional Forge subagent row and preserve third-party value', () => {
+  for (const command of ['node ~/.forge-agent/scripts/forge-subagent-statusline.js', 'node "C:/fixture/scripts/forge-subagent-statusline.js"']) {
+    const file = seed(mktmp(), { subagentStatusLine: { type: 'command', command }, outputStyle: 'Learning' });
+    const result = run(file, ['--remove']);
+    assertEqual(result.status, 0); assert(!Object.hasOwn(result.settings, 'subagentStatusLine'));
+    assertEqual(result.settings.outputStyle, 'Learning');
+  }
+  const custom = { type: 'command', command: 'echo operator', extra: true };
+  const file = seed(mktmp(), { subagentStatusLine: custom });
+  assertEqual(JSON.stringify(run(file, ['--remove']).settings.subagentStatusLine), JSON.stringify(custom));
+  console.log('PASS S03/T05 merge remove Forge subagent row preserves third-party settings');
+});
+
+test('S03/T05 enable never activates or changes optional subagent row', () => {
+  for (const optional of [undefined, { type: 'command', command: 'echo operator' }, { type: 'command', command: 'node fixture/forge-subagent-statusline.js' }]) {
+    const file = seed(mktmp(), optional === undefined ? {} : { subagentStatusLine: optional });
+    const result = run(file);
+    assertEqual(result.status, 0); assertEqual(JSON.stringify(result.settings.subagentStatusLine), JSON.stringify(optional));
+    assertEqual(Object.hasOwn(result.settings, 'subagentStatusLine'), optional !== undefined);
+  }
+  console.log('PASS S03/T05 merge enable keeps optional subagent setting untouched and evidence matchers unchanged');
+});
+
 // ── summary ─────────────────────────────────────────────────────────────────
 cleanup();
 console.log(`\nmerge-settings.test.js: ${passed} passed, ${failed} failed`);

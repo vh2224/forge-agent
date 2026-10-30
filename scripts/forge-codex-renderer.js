@@ -18,6 +18,7 @@ const { VERSION } = require('./forge-version');
 const { DEFAULT_STATUS_LINE, addDefaultStatusLine } = require('./forge-codex-statusline');
 const { isDeepStrictEqual } = require('util');
 const { HOST_RUNTIMES } = require('./forge-runtime');
+const { AGENT_ROLES } = require('./forge-agent-view');
 
 const RUNTIME = 'codex';
 // Production callers pass this dialect explicitly. Keeping it as data preserves
@@ -456,7 +457,8 @@ function render(options = {}) {
   for (const file of agentFiles) {
     const name = path.basename(file, '.md');
     const source = rewriteMarkdown(fs.readFileSync(file, 'utf8'));
-    const config = [tomlOrigin(`agent-${name}`), `name = "${name}"`, `description = "Forge ${name.replace(/^forge-/, '')} worker"`, AGENT_SANDBOX_COMMENT, 'sandbox_mode = "workspace-write"', 'developer_instructions = """', tomlMultiline(source), '"""', ''].join('\n');
+    const description = Object.hasOwn(AGENT_ROLES, name) ? AGENT_ROLES[name].description : `Forge · agente ${name}`;
+    const config = [tomlOrigin(`agent-${name}`), `name = "${name}"`, `description = ${JSON.stringify(description)}`, AGENT_SANDBOX_COMMENT, 'sandbox_mode = "workspace-write"', 'developer_instructions = """', tomlMultiline(source), '"""', ''].join('\n');
     add('agents', path.relative(root.repo, file).replace(/\\/g, '/'), path.join(root.codexHome, 'agents', `${name}.toml`), config, 'agent');
   }
   const commandSource = sources.find((source) => source.source_id === 'commands');

@@ -40,6 +40,7 @@ const safeModel = value => isSafeModelId(value) ? value : 'unknown';
 const safeEffort = value => EFFORTS.includes(value) ? value : 'unknown';
 // Reuse the existing telemetry vocabulary, without coercing or shortening IDs.
 const safeCode = value => typeof value === 'string' && require('./forge-attempt-telemetry').code(value) === value ? value : null;
+const safeDispatch = value => require('./forge-attempt-telemetry').dispatchCode(value);
 const valueOf = input => object(input?.value) ? input.value : input;
 const lastValue = (rows, getter) => {
   for (let i = rows.length - 1; i >= 0; i--) {
@@ -62,7 +63,7 @@ function matches(record, scope) {
 }
 function canJoin(record, scope, dispatches) {
   if (matches(record, scope)) return true;
-  if (!dispatches.has(safeCode(record.dispatch_id))) return false;
+  if (!dispatches.has(safeDispatch(record.dispatch_id))) return false;
   // An unlabelled entry dispatch may join its scoped unit result; an explicitly
   // foreign record may not borrow membership merely by copying the key.
   if (scope.type === 'unit') return !record.unit;
@@ -174,16 +175,16 @@ function deriveAgentView(input, options = {}) {
   if (empty) return { schema_version: 1, scope, sources, agents: [], empty_reason: empty };
   const records = (bundle.records || []).filter(object);
   const scopedIds = new Set(records.filter(row => RECORDS.includes(row.event) && matches(row, scope))
-    .map(row => safeCode(row.dispatch_id)).filter(Boolean));
+    .map(row => safeDispatch(row.dispatch_id)).filter(Boolean));
   const identityRecords = new Map();
-  for (const row of records.filter(row => row.event === 'agent-identity' && scopedIds.has(safeCode(row.dispatch_id)))) {
+  for (const row of records.filter(row => row.event === 'agent-identity' && scopedIds.has(safeDispatch(row.dispatch_id)))) {
     if (!identityRecords.has(row.dispatch_id)) identityRecords.set(row.dispatch_id, []);
     identityRecords.get(row.dispatch_id).push(row);
   }
   const groups = new Map();
   for (const row of records) {
     if (!RECORDS.includes(row.event) || !canJoin(row, scope, scopedIds)) continue;
-    const dispatch = safeCode(row.dispatch_id);
+    const dispatch = safeDispatch(row.dispatch_id);
     const key = dispatch || Symbol('unjoined-record');
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(row);
@@ -191,7 +192,7 @@ function deriveAgentView(input, options = {}) {
   // Scope membership is established by dispatch data, never an orphan identity.
   const agents = [];
   for (const rows of groups.values()) {
-    const dispatchId = safeCode(rows[0].dispatch_id);
+    const dispatchId = safeDispatch(rows[0].dispatch_id);
     const scopedReceipts = dispatchId ? receipts.filter(row => valueOf(row)?.dispatch_id === dispatchId) : [];
     const scopedJournals = dispatchId ? journals.filter(row => valueOf(row)?.schema_version === 1
       && valueOf(row)?.host_identity?.dispatch_id === dispatchId && normalizeHostIdentity(valueOf(row).host_identity)) : [];
@@ -346,7 +347,7 @@ function readAgentSources(options = {}) {
   const census = { total: parsed.total, skipped_empty: parsed.skipped_empty, skipped_malformed: parsed.skipped_malformed,
     truncated_tail: parsed.truncated_tail, reason: eventRead.error === 'source_too_large' ? 'events-too-large' : eventRead.error || null };
   const matching = parsed.lines.filter(row => object(row) && RECORDS.includes(row.event) && matches(row, scope));
-  const dispatches = new Set(matching.map(row => safeCode(row.dispatch_id)).filter(Boolean));
+  const dispatches = new Set(matching.map(row => safeDispatch(row.dispatch_id)).filter(Boolean));
   const scoped = parsed.lines.filter(row => object(row) && RECORDS.includes(row.event) && canJoin(row, scope, dispatches));
   const scopedSet = new Set(scoped);
   const records = parsed.lines.filter(row => scopedSet.has(row) || object(row) && row.event === 'agent-identity' && dispatches.has(row.dispatch_id));
