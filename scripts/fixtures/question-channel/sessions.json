@@ -1,0 +1,36 @@
+[
+  { "name": "codex-sync", "input": { "host": "codex", "mode": "default", "tools": ["request_user_input"] }, "channel": "codex-request-user-input" },
+  { "name": "codex-async", "input": { "host": "codex", "mode": "default", "tools": ["request_user_input_async"] }, "channel": "codex-request-user-input-async" },
+  { "name": "codex-both", "input": { "host": "codex", "mode": "default", "tools": ["request_user_input", "request_user_input_async"] }, "channel": "codex-request-user-input-async" },
+  {
+    "name": "codex-probe-only",
+    "input": { "host": "codex", "mode": "default", "probe": { "available": true }, "default_mode_request_user_input": true },
+    "channel": "text-fallback"
+  },
+  {
+    "name": "codex-plan-only-default",
+    "input": { "host": "codex", "mode": "default", "tools": ["request_user_input"], "restrictions": { "request_user_input": ["plan-only"] } },
+    "channel": "text-fallback"
+  },
+  {
+    "name": "codex-plan-only-plan",
+    "input": { "host": "codex", "mode": "plan", "tools": ["request_user_input"], "restrictions": { "request_user_input": ["plan-only"] } },
+    "channel": "codex-request-user-input"
+  },
+  {
+    "name": "codex-optional-only-required",
+    "input": { "host": "codex", "mode": "default", "purpose": "required", "tools": ["request_user_input"], "restrictions": { "request_user_input": ["optional-only"] } },
+    "channel": "text-fallback"
+  },
+  {
+    "name": "codex-optional-only-optional",
+    "input": { "host": "codex", "mode": "default", "purpose": "optional", "tools": ["request_user_input"], "restrictions": { "request_user_input": ["optional-only"] } },
+    "channel": "codex-request-user-input"
+  },
+  { "name": "codex-not-permitted", "input": { "host": "codex", "mode": "default", "tools": ["request_user_input"], "restrictions": { "request_user_input": ["not-permitted"] } }, "channel": "text-fallback" },
+  { "name": "codex-approval-prohibited", "input": { "host": "codex", "mode": "default", "purpose": "approval", "tools": ["request_user_input"], "restrictions": { "request_user_input": ["approval-prohibited"] } }, "channel": "text-fallback" },
+  { "name": "claude-exposed", "input": { "host": "claude", "mode": "default", "tools": ["AskUserQuestion"] }, "channel": "claude-ask-user-question" },
+  { "name": "claude-not-permitted", "input": { "host": "claude", "mode": "default", "tools": ["AskUserQuestion"], "restrictions": { "AskUserQuestion": ["not-permitted"] } }, "channel": "text-fallback" },
+  { "name": "headless-worker", "input": { "host": "codex", "mode": "default", "interactive": false, "tools": ["request_user_input"] }, "channel": "worker-partial" },
+  { "name": "unknown-host", "input": { "host": "unknown", "mode": "default", "tools": ["request_user_input"] }, "channel": "text-fallback" }
+]

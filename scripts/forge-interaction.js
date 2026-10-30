@@ -78,10 +78,31 @@ function persistQuestionState(file, identity, questions, answers = []) {
   require('./forge-surgical-reset').writeJsonAtomic(file, next);
   return rows;
 }
+const QUESTION_ROUND_OUTCOMES = Object.freeze(['presented', 'handle-accepted', 'closed-unanswered', 'cancelled', 'empty', 'timeout', 'answered']);
+function recordQuestionRound(file, identity, round) {
+  if (!fs.existsSync(file)) throw new Error('pending-question-state-required');
+  if (fs.lstatSync(file).isSymbolicLink()) throw new Error('pending-question-path-link');
+  const old = JSON.parse(fs.readFileSync(file, 'utf8'));
+  if (old.schema_version !== 1 || old.identity_sha256 !== require('./forge-code-roots').digest(identity)) throw new Error('pending-question-scope-mismatch');
+  if (!round || !QUESTION_ROUND_OUTCOMES.includes(round.outcome) || !Array.isArray(round.ids) || !round.ids.length
+      || new Set(round.ids).size !== round.ids.length || !require('./forge-attempt-telemetry').code(round.channel)) throw new Error('pending-question-round-invalid');
+  for (const id of round.ids) {
+    const q = old.questions.find(row => row.id === id);
+    if (!q || round.outcome === 'answered' && q.status !== 'resolved') throw new Error('pending-question-round-id-invalid');
+  }
+  if (old.rounds !== undefined && (!Array.isArray(old.rounds) || old.rounds.length > 64)
+      || old.rounds_dropped !== undefined && (!Number.isSafeInteger(old.rounds_dropped) || old.rounds_dropped < 0)) throw new Error('pending-question-round-invalid');
+  const rounds = [...(old.rounds || []), { ids: [...round.ids], channel: round.channel, outcome: round.outcome }];
+  const dropped = Math.max(0, rounds.length - 64);
+  const next = { ...old, rounds: rounds.slice(-64), rounds_dropped: (old.rounds_dropped || 0) + dropped };
+  require('./forge-surgical-reset').writeJsonAtomic(file, next);
+  return next.rounds;
+}
+
 // This factory is an embedding boundary for a live host adapter. Imported
 // consent/flags are never callbacks and never resolve functional questions.
 function createRecoveryAuthorizationAdapter(attestAuthorization, dependencies = {}) {
   if (typeof attestAuthorization !== 'function') throw new Error('recovery-host-attestation-required');
   return require('./forge-recovery-authority').createRecoveryAuthority({ ...dependencies, attestAuthorization });
 }
-module.exports = { START, END, contract, renderBlock, project, sync, mergePendingQuestions, resolvePendingQuestions, persistQuestionState, createRecoveryAuthorizationAdapter };
+module.exports = { START, END, contract, renderBlock, project, sync, mergePendingQuestions, resolvePendingQuestions, persistQuestionState, QUESTION_ROUND_OUTCOMES, recordQuestionRound, createRecoveryAuthorizationAdapter };
