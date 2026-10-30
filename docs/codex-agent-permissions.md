@@ -120,23 +120,66 @@ transporte nativo Codex, o TOML declara
 sessão pai. Assim, nesse transporte nenhuma garantia somente leitura vem do
 `sandbox_mode` nem de outro sandbox por agente. Restam as instruções e as
 garantias do Forge listadas acima (worktree, claims, reconciliação, `.gsd/` do
-owner, revisão independente). Este levantamento não localizou verificação
-pós-revisão de árvore inalterada específica do caminho nativo Codex.
+owner, revisão independente).
 
-- **Disposição:** registrado, **não corrigido** na T05. Trocar o TOML para
-  `read-only` não criaria isolamento comprovado, porque o pai governa. Seria uma
-  declaração sem efeito provado, contrária a este contrato. As correções reais
-  exigem mudar rota ou acrescentar verificação fora dos arquivos da T05.
-- **Opções para o owner**, com a recomendação primeiro:
-  1. **(recomendada)** acrescentar ao fluxo de revisão uma verificação do Forge
-     de que a árvore e o índice ficaram inalterados após uma unidade somente
-     leitura nativa (snapshot antes e depois), com falha nomeada. Não muda
-     rota nem permissão do host.
-  2. Rotear unidades somente leitura Codex para o sidecar app-server, que já
-     envia `readOnly` em todas as plataformas. Isso é mudança de rota e exige
-     decisão explícita.
-  3. Aceitar o limite documentado, mantendo a sessão pai em modo restrito
-     quando houver revisão nativa.
+- **Disposição G2-1:** a S03 acrescenta detecção depois da unidade por
+  `scripts/forge-native-readonly-guard.js`, sem mudar rota, TOML ou permissões.
+  Não é sandbox do SO nem isolamento independente por agente. A ligação das
+  pernas nativas Codex (challenge, defense e rebuttal) está em
+  `shared/forge-review.md`: captura antes do spawn, verificação depois do retorno
+  terminal e writer reconciliado. Falha na captura impede o spawn; saída 3 ou 4
+  torna a perna não confiável, registra a falha nomeada no REVIEW mínimo e
+  impede review-fix ou outro writer até a reconciliação do owner.
+- **Captura:** `--capture --owner <raiz física> --code-root <raiz física>`
+  (repetível), `--mode full` ou `--mode code-only`, `--out <baseline externa>`.
+  O destino usa realpath do pai e chave canônica sem distinção de caixa no
+  Windows, inclusive nomes curtos; links são recusados. Deve ficar fora do owner,
+  das raízes de código e de `.gsd`, e é criado exclusivamente com `wx`.
+  Destino existente ou contido e permissões inválidas saem 2.
+- **Cobertura:** ambos os modos guardam HEAD, coluna do índice nos códigos
+  porcelain, hashes dos caminhos sujos rastreados/não rastreados não ignorados,
+  digest do índice (inclusive mudança de blob com código MM inalterado), refs
+  incluindo stash, lista do stash, configuração local e hooks resolvidos por
+  `git rev-parse --git-path hooks`. O modo `full` inclui o protectedSnapshot de
+  todo `.gsd` do owner; `code-only` ignora `.gsd`. As primitivas de VCS existentes
+  são reutilizadas; chamadas adicionais são Git somente leitura, sem shell,
+  com argv fixo e saída limitada. Hooks e arquivos de código/registros próprios
+  têm limite de 1 MiB; append/baseline, 16 MiB; árvores, 20000 entradas.
+  O arquivo guarda digests, tamanhos, status e caminhos, nunca bytes de conteúdo.
+  Pré-imagens analisadas próprias guardam relógios e digests dos demais campos,
+  sem copiar owner_token, geração ou conteúdo bruto dos registros.
+  A captura recusa índices com assume-unchanged, skip-worktree ou outro estado
+  que possa ocultar caminhos dos helpers de status: indisponibilidade explícita
+  antes do spawn, sem limpar bits nem alterar o índice. Se um desses bits for
+  introduzido depois da captura, o digest do índice acusa a mutação.
+- **Permissões exatas fixadas na captura:** `--allow-append .gsd/forge/events.jsonl`
+  permite só acréscimo preservando tamanho e hash do prefixo;
+  `--allow-publication .gsd/<arquivo exato>` permite a publicação identificada,
+  como o DEFENSE_FILE. Caminhos absolutos, `..`, curingas e caminhos fora de
+  `.gsd` são recusados. `--own-lease <unidade>` permite só heartbeat_at e
+  expires_at não decrescentes, mesmo owner_token/geração e validRecord;
+  `--own-run <id>` permite só last_heartbeat não decrescente no registro próprio.
+  Qualquer outro delta, inclusive heartbeat alheio, é owner-control.
+  O alias legado não ganha permissão pelo run: se mudar, exige publicação exata
+  separada. Não recapture a baseline depois de escritas para esconder o delta.
+- **Verificação:** `--verify <baseline> --writer-stopped`. Essa opção é atestado
+  do chamador, não prova de processo. Árvore inalterada sai 0; mutação sai 3 com
+  `native-readonly-mutation-detected`, até 100 mudanças com raiz/caminho
+  relativo/kind e indicador truncated. Append permitido, publicações e
+  transições próprias aparecem separados em appended, allowed_publications e
+  owner_transitions. Sem atestado sai 4, `native-readonly-writer-unreconciled`;
+  instabilidade, link, limite, VCS indisponível ou porcelain inesperado saem 4,
+  `native-readonly-guard-unavailable`. Esses casos nunca são sucesso.
+- **Limites explícitos:** caminhos ignorados, escritas fora das raízes guardadas,
+  mudança criada e revertida dentro da janela, efeitos de rede e escritores
+  alheios concorrentes no mesmo owner não ficam provados. A baseline externa
+  precisa ser preservada pelo chamador. O guard nunca reverte, apaga ou corrige
+  arquivos, nem atribui autoria ou encerra processos. As allowlists e o
+  permission mode do Claude continuam vigentes; ali o guard é opcional.
+
+Trocar o TOML para `read-only` continuaria sem criar isolamento comprovado,
+porque o pai governa. Instalação, comportamento visual do host e aceite humano
+continuam fatos independentes, não demonstrados por testes do guard.
 
 **G2-2. Garantia aplicada só pelo `sandbox_mode` do TOML.** Nenhuma foi
 encontrada. O valor é uniforme (`workspace-write`) em todos os agentes, nenhum
