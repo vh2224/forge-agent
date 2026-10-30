@@ -250,7 +250,7 @@ function deriveAgentView(input, options = {}) {
       workflow_id: safeCode(pick(row => row.workflow_id)) || 'unknown', dispatch_id: dispatchId || 'unknown', host_runtime: host,
       engine: ['codex', 'claude', 'agy'].includes(pick(row => row.engine || row.worker_engine || row.resolved_worker_engine))
         ? pick(row => row.engine || row.worker_engine || row.resolved_worker_engine) : 'unknown', transport,
-      task: plainText(titles[unit] || lastValue(identities, row => row.description) || unit, { missing: 'unknown', limit: 160 }),
+      task: plainText(titles[dispatchId] || lastValue(identities, row => row.description) || unit, { missing: 'unknown', limit: 160 }),
       task_name: requestedName, identity, native_thread: kind === 'native', model, effort, outcome,
       phase, questions, reason: phase === 'failed' ? diagnostic(finalEvent?.diagnostic?.reason || finalEvent?.reason_code || receipt?.failure?.diagnostic?.reason).reason : null,
       activity, freshness: stale ? 'stale' : 'current', freshness_ceiling_ms: ceilingMs,
@@ -286,7 +286,15 @@ function formatActivityLine(raw, fields = {}) {
   return activityLine(deriveActivity(raw, { ...fields, live: true, now: fields.now ?? 0 }));
 }
 function renderAgentView(view) {
-  if (!view.agents.length) return humanLine([HUMAN_PREFIX, 'nenhum agente no escopo informado']);
+  if (!view.agents.length) {
+    const labels = { 'no-agents': 'nenhum agente no escopo informado',
+      'events-too-large': 'fonte de eventos acima do limite; censo indisponível',
+      source_unreadable: 'fonte de eventos ilegível; censo indisponível',
+      source_link: 'fonte de eventos com link; censo indisponível',
+      'no-bindings': 'nenhum vínculo pessoal; censo indisponível' };
+    return humanLine([HUMAN_PREFIX, Object.hasOwn(labels, view.empty_reason) ? labels[view.empty_reason]
+      : `censo indisponível; ${diagnostic(view.empty_reason).reason}`]);
+  }
   return view.agents.flatMap(agent => [
     humanLine([HUMAN_PREFIX, agent.kind === 'native' ? 'executor nativo' : agent.kind === 'sidecar' ? 'executor sidecar' : 'executor desconhecido',
       `host ${['codex', 'claude'].includes(agent.host_runtime) ? agent.host_runtime : 'desconhecido'}`,
@@ -370,8 +378,11 @@ function readAgentSources(options = {}) {
   const journals = references('journals', LIMITS.journal, row => row.schema_version === 1
     && normalizeHostIdentity(row.host_identity) && dispatches.has(row.host_identity.dispatch_id));
   const titles = {};
+  const titleReads = new Set();
+  const planTitles = new Map();
   for (const row of scoped) {
-    if (titles[row.unit]) continue;
+    const titleKey = safeDispatch(row.dispatch_id);
+    if (!titleKey || titleReads.has(titleKey)) continue;
     const unit = typeof row.unit === 'string' ? row.unit.split('/') : [];
     const id = unit.length === 2 ? unit[1] : null;
     let relative = null;
@@ -384,12 +395,18 @@ function readAgentSources(options = {}) {
       relative = `.gsd/milestones/${row.milestone}/slices/${row.slice}/tasks/${id}/${id}-PLAN.md`;
     }
     if (!relative) continue;
+    titleReads.add(titleKey);
+    if (planTitles.has(relative)) {
+      if (planTitles.get(relative)) titles[titleKey] = planTitles.get(relative);
+      continue;
+    }
+    planTitles.set(relative, null);
     const result = read(relative, LIMITS.plans, true);
     if (result.error) continue;
     const text = result.buffer.toString('utf8');
     const front = text.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
     const title = front?.[1].match(/^title\s*:\s*(.*?)\s*$/m)?.[1] || text.match(/^#[ \t]+(.+)$/m)?.[1];
-    if (title) { titles[row.unit] = plainText(title.startsWith("'") && title.endsWith("'") || title.startsWith('"') && title.endsWith('"') ? title.slice(1, -1) : title, { missing: null, limit: 160 }); sources.titles.push({ reference: result.source }); }
+    if (title) { titles[titleKey] = plainText(title.startsWith("'") && title.endsWith("'") || title.startsWith('"') && title.endsWith('"') ? title.slice(1, -1) : title, { missing: null, limit: 160 }); planTitles.set(relative, titles[titleKey]); sources.titles.push({ reference: result.source }); }
   }
   return { records, receipts, journals, titles, scope, sources,
     empty_reason: emptyReason || (eventRead.error ? census.reason : null) };

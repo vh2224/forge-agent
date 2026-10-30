@@ -54,6 +54,11 @@ function commandFor(options = {}) {
   return `node "${path.join(home, 'scripts', 'forge-subagent-statusline.js').split(path.sep).join('/')}"`;
 }
 
+function isManagedCommand(command, options = {}) {
+  if (typeof command !== 'string') return false;
+  return command === 'node ~/.forge-agent/scripts/forge-subagent-statusline.js' || command === commandFor(options);
+}
+
 function versionStatus(version) {
   const { compareHostVersion } = require('./forge-host-baseline');
   const comparison = compareHostVersion(MIN_VERSION, version);
@@ -83,7 +88,7 @@ function planSetup(settings, options = {}) {
   if (!object(settings)) return result('settings-invalid');
   if (Number.isSafeInteger(options.bytes) && options.bytes > MAX_BYTES) return result('settings-oversize');
   const current = settings.subagentStatusLine;
-  const owned = object(current) && typeof current.command === 'string' && current.command.includes('forge-subagent-statusline.js');
+  const owned = object(current) && isManagedCommand(current.command, options);
   if (options.remove && !owned) return result('absent-noop');
   const version = versionStatus(options.claudeVersion);
   if (version.reason_code !== 'supported') return result(version.reason_code);
@@ -120,7 +125,7 @@ function changeSettings(file, options) {
   try { settings = JSON.parse(initial.buffer.toString('utf8')); } catch { return done('settings-invalid'); }
   const version = options.observe ? observeClaudeVersion(options).version : options.claudeVersion;
   const command = commandFor(options);
-  const plan = planSetup(settings, { claudeVersion: version, command, remove: options.remove, bytes: initial.buffer.length });
+  const plan = planSetup(settings, { ...options, claudeVersion: version, command, remove: options.remove, bytes: initial.buffer.length });
   if (!plan.changed) return done(plan.reason_code);
   const candidate = Buffer.from(JSON.stringify(plan.settings, null, 2) + '\n');
   if (candidate.length > MAX_BYTES) return done('settings-oversize');
@@ -153,7 +158,7 @@ function changeSettings(file, options) {
 function setup(file, options = {}) { return changeSettings(file, { ...options, remove: false }); }
 function remove(file, options = {}) { return changeSettings(file, { ...options, remove: true }); }
 
-module.exports = { formatRows, planSetup, setup, remove, commandFor, observeClaudeVersion };
+module.exports = { formatRows, planSetup, setup, remove, commandFor, isManagedCommand, observeClaudeVersion };
 
 if (require.main === module) {
   const args = process.argv.slice(2);

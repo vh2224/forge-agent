@@ -1860,7 +1860,9 @@ async function runUnitSidecarCore(request, runtime, identity) {
     notifyPhase('publishing');
     return publishReadyRecord(r, record, publicationGuard);
   };
-  const completed = result => notifyPhase('completed', { outcome: result?.status });
+  const completed = result => notifyPhase(result?.status === 'partial' ? 'waiting'
+    : result?.status === 'blocked' ? 'failed' : 'completed',
+  { outcome: result?.status, reason_code: result?.diagnostic?.reason || result?.reason_code });
   // Native host identity accepted by identityFromLifecycle; appended once, after
   // the final or failed event, through the same owner channel as those events.
   let nativeIdentity = null, nativeIdentityAppended = false;

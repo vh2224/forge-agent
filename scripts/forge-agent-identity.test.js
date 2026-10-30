@@ -354,7 +354,49 @@ async function main() {
   console.log('PASS S03/T02 lazy requires: loading forge-agent-identity does not load supervision, reconciliation, invocation or bounded readers; supervision loads identity only when used');
 }
 
-main().then(() => {
+async function reviewRegressions() {
+  const reconciliation = require('./forge-artifact-reconciliation');
+  for (const same of [false, true]) {
+    const dir = owner(), file = eventsOf(dir);
+    fs.writeFileSync(file, '');
+    const broker = await reconciliation.startBroker({ owner: dir, dispatchId: base.dispatch_id,
+      request_sha256: 'a'.repeat(64), manifestFile: path.join(root, `broker-${++sequence}.json`) });
+    try {
+      const results = await Promise.allSettled([
+        api.appendAgentIdentityEvent({ broker }, attested),
+        api.appendAgentIdentityEvent({ broker }, { ...attested, agent_id: same ? HOST_VALUE : '/root/other-agent' }),
+      ]);
+      assert.equal(results[0].status, 'fulfilled'); assert.equal(results[0].value.status, 'appended');
+      if (same) { assert.equal(results[1].status, 'fulfilled'); assert.equal(results[1].value.status, 'already-recorded'); }
+      else { assert.equal(results[1].status, 'rejected'); assert.equal(results[1].reason.code, 'agent-identity-conflict'); }
+      assert.equal(fs.readFileSync(file, 'utf8').trim().split('\n').length, 1);
+      assert.equal(broker.proofs().length, 1); assert(broker.verify().passed);
+      await broker.append('.gsd/forge/events.jsonl', '{"event":"ordinary"}\n');
+      assert.equal(broker.proofs().length, 2); assert(broker.verify().passed);
+    } finally { await broker.close(); }
+  }
+  console.log('PASS review R9 real child-process broker IPC: concurrent conflicting/equal IDs append once; proof verification and generic append preserved');
+  for (const kind of ['dangling', 'internal', 'external']) {
+    const dir = owner(), file = eventsOf(dir), target = kind === 'internal'
+      ? path.join(dir, 'target.jsonl') : path.join(root, `outside-${++sequence}.jsonl`);
+    if (kind !== 'dangling') fs.writeFileSync(target, 'preserve\n');
+    try { fs.symlinkSync(target, file, 'file'); }
+    catch (error) {
+      if (['EPERM', 'EACCES', 'ENOSYS'].includes(error.code)) { console.log(`SKIP review R8 ${kind}: platform ${error.code}`); continue; }
+      throw error;
+    }
+    const before = bytesOf(target);
+    await assert.rejects(api.appendAgentIdentityEvent({ owner: dir, closedReceiptFile: receipt('ready') }, attested), /agent-identity-events-path/);
+    assert(fs.lstatSync(file).isSymbolicLink()); assert.deepEqual(bytesOf(target), before);
+    console.log(`PASS review R8 ${kind} file symlink refused; target and link preserved`);
+  }
+  const dir = owner(), channel = { owner: dir, closedReceiptFile: receipt('ready') };
+  assert.equal((await api.appendAgentIdentityEvent(channel, attested)).status, 'appended');
+  assert.equal((await api.appendAgentIdentityEvent(channel, attested)).status, 'already-recorded');
+  console.log('PASS review R8 normal exclusive creation and descriptor append; duplicate remains no-op');
+}
+
+(process.argv.includes('--review-regressions') ? reviewRegressions() : main().then(reviewRegressions)).then(() => {
   fs.rmSync(root, { recursive: true, force: true });
   console.log('forge-agent-identity tests passed');
 }, error => {

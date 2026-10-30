@@ -724,11 +724,45 @@ async function standaloneNative() {
   } finally { harness.close(completed); }
 }
 
+async function terminalOutcomes() {
+  const lab = rootsFixtures.laboratory('terminal-outcomes'), original = xllm.invokeClaudeTransport;
+  try {
+    const owner = path.join(lab.dir, 'owner'), code = path.join(lab.dir, 'code');
+    fs.mkdirSync(path.join(owner, '.gsd/milestones/M001'), { recursive: true }); fs.mkdirSync(code);
+    fs.writeFileSync(path.join(owner, '.gsd/forge-prefs.jsonc'), JSON.stringify({
+      tier_models: Object.fromEntries(['light', 'standard', 'heavy', 'max'].map(tier => [tier, ['claude-sonnet-5']])) }));
+    fs.writeFileSync(path.join(owner, '.gsd/milestones/M001/M001-ROADMAP.md'), ROADMAP);
+    for (const [status, phase, text] of [['partial', 'waiting', 'aguardando decisão'], ['blocked', 'failed', 'falhou'], ['done', 'completed', 'concluído']]) {
+      const request = { unitType: 'research-milestone', phase: 'research', scope: 'milestone', milestoneId: 'M001',
+        cwd: code, contextRoot: owner, workflowId: 'terminal-fixture', dispatchId: `terminal-${status}`,
+        resultFile: path.join(lab.dir, `${status}.json`), prompt: 'Synthetic terminal outcome only.' };
+      request.route = require('./forge-dispatch-resolve').resolveDispatch({ cwd: owner, unitType: request.unitType,
+        milestoneId: 'M001', unitId: 'M001', hostRuntime: 'codex' });
+      const candidate = { status, summary: 'Synthetic terminal outcome', questions: status === 'partial'
+        ? [{ id: 'decision', question: 'Choose source?' }] : [], artifacts: status === 'done'
+        ? [{ path: sidecar.locations(request).required[0], content: '# Research\nMeasured fixture.\n' }] : [] };
+      xllm.invokeClaudeTransport = async () => ({ candidate });
+      const phases = [], output = [], observers = sidecar.cliObservers({ write: value => output.push(value) });
+      const result = await sidecar.runUnitSidecar(request, { ...observers,
+        onPhase: record => { phases.push(record); observers.onPhase(record); } });
+      assert.equal(result.status, status); assert.equal(phases.at(-1).phase, phase);
+      assert.equal(phases.at(-1).outcome, status); assert(output.join('').includes(text));
+      assert.deepEqual(result.questions, candidate.questions);
+      const before = fs.readFileSync(request.resultFile + '.receipt.json'), events = fs.readFileSync(path.join(owner, '.gsd/forge/events.jsonl'));
+      const replay = await sidecar.runUnitSidecar(request);
+      assert.equal(replay.status, status);
+      assert.deepEqual(fs.readFileSync(request.resultFile + '.receipt.json'), before);
+      assert.deepEqual(fs.readFileSync(path.join(owner, '.gsd/forge/events.jsonl')), events);
+    }
+    console.log('PASS review R3 actual artifact publication/replay: partial waits with question intact, blocked fails, done completes; receipts/events unchanged on replay');
+  } finally { xllm.invokeClaudeTransport = original; lab.cleanup(); }
+}
+
 async function main() {
   const selected = process.argv.find(arg => arg.startsWith('--review-regression='));
   if (selected) {
     const cases = { replay: publicDeferredGate, late: publicLateCapture, cli: cliFreshness, immediate: publicImmediateGate,
-      identity: publicIdentityChannels };
+      identity: publicIdentityChannels, terminal: terminalOutcomes };
     const run = cases[selected.slice('--review-regression='.length)];
     assert.equal(typeof run, 'function', 'unknown review regression');
     return run();
@@ -747,8 +781,10 @@ async function main() {
   await publicImmediateGate();
   await publicIdentityChannels();
   await standaloneNative();
+  await terminalOutcomes();
 }
-main().then(() => console.log('forge-agent-phase: all scenarios passed')).catch(error => {
+main().then(() => console.log(process.argv.some(arg => arg.startsWith('--review-regression='))
+  ? 'forge-agent-phase: selected regression passed; full suite not run' : 'forge-agent-phase: all scenarios passed')).catch(error => {
   console.error(error);
   process.exitCode = 1;
 });

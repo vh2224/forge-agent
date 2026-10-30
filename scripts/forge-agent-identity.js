@@ -127,12 +127,17 @@ function boundedRead(file, maxBytes) {
 // Same dispatch with the same agent_id is already recorded; any other agent_id
 // for that dispatch is a conflict. Nothing is written in either case.
 function alreadyRecorded(file, event) {
-  if (!fs.existsSync(file)) return false;
+  if (!eventsFileStat(file)) return false;
   const read = boundedRead(file, MAX_EVENTS_BYTES);
   if (read.error === 'source_too_large') fail('agent-identity-events-too-large');
   if (read.error) fail('agent-identity-events-unreadable');
+  return identityAlreadyRecorded(read.buffer, event);
+}
+
+function identityAlreadyRecorded(buffer, event) {
+  if (buffer.length > MAX_EVENTS_BYTES) fail('agent-identity-events-too-large');
   let same = false;
-  for (const row of read.buffer.toString('utf8').split('\n')) {
+  for (const row of buffer.toString('utf8').split('\n')) {
     let parsed;
     try { parsed = JSON.parse(row); } catch { continue; }
     if (parsed?.event !== 'agent-identity' || parsed.dispatch_id !== event.dispatch_id) continue;
@@ -140,6 +145,16 @@ function alreadyRecorded(file, event) {
     same = true;
   }
   return same;
+}
+
+function eventsFileStat(file) {
+  let stat;
+  try { stat = fs.lstatSync(file); } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    fail('agent-identity-events-path');
+  }
+  if (stat.isSymbolicLink() || !stat.isFile()) fail('agent-identity-events-path');
+  return stat;
 }
 
 function assertClosedReceipt(file, dispatchId) {
@@ -175,9 +190,19 @@ function appendUnderOwnerLock(owner, event, receiptFile) {
     existingEventsDirectory(real);
     if (receiptFile !== null) assertClosedReceipt(receiptFile, event.dispatch_id);
     const file = path.join(real, ...EVENTS_RELATIVE);
-    if (fs.existsSync(file) && (fs.lstatSync(file).isSymbolicLink() || !fs.statSync(file).isFile())) fail('agent-identity-events-path');
+    const initial = eventsFileStat(file);
     if (alreadyRecorded(file, event)) return { status: 'already-recorded', line };
-    fs.appendFileSync(file, line, { mode: 0o600 });
+    // Exclusive creation refuses a newly inserted link on platforms without
+    // O_NOFOLLOW. Existing files must retain their pre-open descriptor identity.
+    const flags = fs.constants.O_WRONLY | fs.constants.O_APPEND | (fs.constants.O_NOFOLLOW || 0)
+      | (initial ? 0 : fs.constants.O_CREAT | fs.constants.O_EXCL);
+    const fd = fs.openSync(file, flags, 0o600);
+    try {
+      const opened = fs.fstatSync(fd), current = eventsFileStat(file);
+      if (!opened.isFile() || !current || opened.dev !== current.dev || opened.ino !== current.ino
+          || initial && (opened.dev !== initial.dev || opened.ino !== initial.ino || opened.size !== initial.size)) fail('agent-identity-events-path');
+      fs.writeFileSync(fd, line);
+    } finally { fs.closeSync(fd); }
     return { status: 'appended', line };
   });
 }
@@ -191,9 +216,8 @@ async function appendAgentIdentityEvent(channel, fields, options = {}) {
   const line = renderAgentIdentityEvent(event);
   if (kinds[0] === 'broker') {
     const broker = require('./forge-artifact-reconciliation').assertBroker(channel.broker);
-    if (alreadyRecorded(path.join(broker.manifest.owner, ...EVENTS_RELATIVE), event)) return { status: 'already-recorded', line };
-    await broker.append(EVENTS_RELATIVE.join('/'), line);
-    return { status: 'appended', line };
+    const appended = await broker.append(EVENTS_RELATIVE.join('/'), line);
+    return { status: appended.status || 'appended', line };
   }
   if (kinds[0] === 'appendOwnerEvent') {
     if (typeof channel.appendOwnerEvent !== 'function') fail('agent-identity-channel-required');
@@ -294,7 +318,7 @@ function main(argv, io = { stdout: process.stdout, stderr: process.stderr }) {
 
 module.exports = {
   EVENT_KEYS, validateAgentId, normalizeHostIdentity, sanitizeDescription, buildAgentIdentityEvent,
-  renderAgentIdentityEvent, identityFromLifecycle, appendAgentIdentityEvent, main,
+  renderAgentIdentityEvent, identityFromLifecycle, identityAlreadyRecorded, appendAgentIdentityEvent, main,
 };
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));

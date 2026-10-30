@@ -1403,10 +1403,13 @@ a partir da unidade, do plano e dessa tentativa. Saída vazia de `--task-name`
 mantém o `taskName` atual; só um valor não vazio vai como `taskName` da adaptação
 nativa abaixo. O mesmo `NATIVE_DISPATCH_ID` segue para o emissor de dispatch.
 ```bash
-NATIVE_DISPATCH_ID="${unitType}-${unitId}-$(node -e "console.log(require('crypto').randomBytes(8).toString('hex'))")"
+if [ "$HOST_RUNTIME" = "codex" ]; then
+  [ -n "$unit_type" ] && [ -n "$unit_id" ] || stop
+fi
+NATIVE_DISPATCH_ID="${unit_type}-${unit_id}-$(node -e "console.log(require('crypto').randomBytes(8).toString('hex'))")"
 NATIVE_TASK_NAME=""
 if [ "$HOST_RUNTIME" = "codex" ] && [ -n "$PLAN_PATH" ]; then
-  NATIVE_TASK_NAME=$(node "$FORGE_SCRIPTS_DIR/forge-agent-identity.js" --task-name --unit "${unitType}/${unitId}" \
+  NATIVE_TASK_NAME=$(node "$FORGE_SCRIPTS_DIR/forge-agent-identity.js" --task-name --unit "${unit_type}/${unit_id}" \
     --plan "$WORKING_DIR/$PLAN_PATH" --attempt "$NATIVE_DISPATCH_ID" 2>/dev/null || true)
 fi
 ```
@@ -1417,7 +1420,7 @@ e `READONLY_BASELINE` apontando para um arquivo novo fora dessas raízes e de `.
 falha na captura impede o spawn.
 ```bash
 if [ "$HOST_RUNTIME" = "codex" ]; then
-  case "$unitType" in plan-milestone|plan-slice|research-*|discuss-*)
+  case "$unit_type" in plan-milestone|plan-slice|research-*|discuss-*)
     node "$FORGE_SCRIPTS_DIR/forge-native-readonly-guard.js" --capture --owner "$WORKING_DIR" \
       --code-root "${CODE_DIR:-$WORKING_DIR}" --mode code-only --out "$READONLY_BASELINE" || stop ;;
   esac
@@ -1461,7 +1464,7 @@ Claude), exatamente como veio. Logo depois desse retorno, se nenhuma janela
 protegida do owner está aberta, registre:
 ```bash
 if [ -n "$NATIVE_AGENT_ID" ]; then
-  node "$FORGE_SCRIPTS_DIR/forge-agent-identity.js" --record --unit "${unitType}/${unitId}" \
+  node "$FORGE_SCRIPTS_DIR/forge-agent-identity.js" --record --unit "${unit_type}/${unit_id}" \
     --dispatch-id "$NATIVE_DISPATCH_ID" --host "$HOST_RUNTIME" --agent-type "{agent_name}" \
     ${NATIVE_TASK_NAME:+--task-name "$NATIVE_TASK_NAME"} \
     --agent-id "$NATIVE_AGENT_ID" --agent-id-source host-tool-return \
@@ -1481,7 +1484,11 @@ atividade a partir de timers locais e não apresente sidecar como thread nativa.
 No host Codex, depois do retorno terminal de uma unidade `plan-*`, `research-*` ou
 `discuss-*` e antes de qualquer writer seguinte, verifique a mesma baseline:
 ```bash
-node "$FORGE_SCRIPTS_DIR/forge-native-readonly-guard.js" --verify "$READONLY_BASELINE" --writer-stopped
+if [ "$HOST_RUNTIME" = "codex" ]; then
+  case "$unit_type" in plan-milestone|plan-slice|research-*|discuss-*)
+    node "$FORGE_SCRIPTS_DIR/forge-native-readonly-guard.js" --verify "$READONLY_BASELINE" --writer-stopped || stop ;;
+  esac
+fi
 ```
 Saída 3 ou 4 para antes do próximo writer: a unidade não é confiável, a falha
 nomeada (`reason_code` e caminhos relativos) é registrada, o run é desativado como
@@ -1496,7 +1503,7 @@ mkdir -p .gsd/forge/
 # shared/forge-dispatch.md § DISPATCH_VCS prelude (canonical — VCS-agnostic)
 DISPATCH_VCS=$(node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --detect --field vcs --cwd "${CODE_DIR:-$WORKING_DIR}" 2>/dev/null || echo "unknown")
 node "$FORGE_SCRIPTS_DIR/forge-dispatch-event.js" --route-json "$ROUTE_JSON" \
-  --unit "${unitType}/${unitId}" --model "$MODEL_ID" --tier "$TIER" --reason "$REASON" \
+  --unit "${unit_type}/${unit_id}" --model "$MODEL_ID" --tier "$TIER" --reason "$REASON" \
   --effort "$EFFORT" --effort-reason "$EFFORT_REASON" --engine "${ENGINE:-claude}" \
   --domain "$DOMAIN_USED" --route-source "$ROUTE_SOURCE" --chain-len "$CHAIN_LEN" \
   --slice "{S##}" --milestone "${RUN_ID:-{M###}}" --input-tokens "$INPUT_TOKENS" \

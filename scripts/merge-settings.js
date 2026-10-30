@@ -139,7 +139,7 @@ if (remove) {
   if (settings.statusLine?.command?.includes('forge-statusline.js')) {
     delete settings.statusLine;
   }
-  if (typeof settings.subagentStatusLine?.command === 'string' && settings.subagentStatusLine.command.includes('forge-subagent-statusline.js')) {
+  if (require('./forge-subagent-statusline').isManagedCommand(settings.subagentStatusLine?.command)) {
     delete settings.subagentStatusLine;
   }
 

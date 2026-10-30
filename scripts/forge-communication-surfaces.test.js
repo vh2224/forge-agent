@@ -318,7 +318,7 @@ test('S03/T07 native identity: one attempt id before invocation, same emitter id
   const auto = skills['forge-auto'];
   const single = between(auto, '**Single-task native flow', '#### 4-P.');
   assertNativeFlow('forge-auto single', single, { id: 'NATIVE_DISPATCH_ID', invoke: '**Native invocation adaptation**',
-    name: { attempt: '$NATIVE_DISPATCH_ID', emitter: '$NATIVE_DISPATCH_ID' }, agentId: '$NATIVE_AGENT_ID', unit: '${unitType}/${unitId}' });
+    name: { attempt: '$NATIVE_DISPATCH_ID', emitter: '$NATIVE_DISPATCH_ID' }, agentId: '$NATIVE_AGENT_ID', unit: '${unit_type}/${unit_id}' });
   assert(flat(single).includes('Logo depois desse retorno, se nenhuma janela protegida do owner está aberta, registre'), 'forge-auto: immediate record outside windows missing');
   assert(flat(single).includes('reconhecimento do spawn no Codex ou conclusão no Claude'), 'forge-auto: host return moments missing');
   assert(flat(single).includes('Saída vazia de `--task-name` mantém o `taskName` atual'), 'forge-auto: empty task name rule missing');
@@ -334,7 +334,7 @@ test('S03/T07 native identity: one attempt id before invocation, same emitter id
   const next = skills['forge-next'];
   const nextFlow = between(next, '**Native dispatch (`WORKER_MODE == native`)**', '### 5. Process result');
   assertNativeFlow('forge-next', nextFlow, { id: 'NATIVE_DISPATCH_ID', invoke: '**Native invocation adaptation**',
-    name: { attempt: '$NATIVE_DISPATCH_ID', emitter: '$NATIVE_DISPATCH_ID' }, agentId: '$NATIVE_AGENT_ID', unit: '${unitType}/${unitId}' });
+    name: { attempt: '$NATIVE_DISPATCH_ID', emitter: '$NATIVE_DISPATCH_ID' }, agentId: '$NATIVE_AGENT_ID', unit: '${unit_type}/${unit_id}' });
   assert.strictEqual(recordCount(next), 1, 'forge-next: one record per native flow');
 
   const task = skills['forge-task'];
@@ -440,6 +440,27 @@ test('S03/T07 Codex projection: identity record, personal view and read-only gua
     assert(content.includes('forge-native-readonly-guard.js') && content.includes('`code-only`'), `${name}: projected read-only guard missing`);
   }
   assert(projected('forge-status').includes('forge-agent-view.js" --personal'), 'forge-status: projected personal view missing');
+});
+
+test('review R1 actual shell variables capture and verify readonly units and fail closed on empty identity', () => {
+  const bash = process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : '/bin/bash';
+  assert(fs.existsSync(bash), 'review R1 needs bash to execute the documented guard branches');
+  for (const skill of ['forge-auto', 'forge-next']) {
+    const blocks = [...read(`skills/${skill}/SKILL.md`).matchAll(/```bash\n([\s\S]*?)```/g)].map(match => match[1]);
+    const identity = blocks.find(block => block.includes('NATIVE_DISPATCH_ID=') && !block.includes('BY_TASK'));
+    const capture = blocks.find(block => block.includes('forge-native-readonly-guard.js') && block.includes('--capture') && block.includes('case'));
+    const verify = blocks.find(block => block.includes('forge-native-readonly-guard.js') && block.includes('--verify') && block.includes('case'));
+    assert(identity && capture && verify, `${skill}: documented branches missing`);
+    for (const [unit_type, unit_id, expected, status] of [['plan-slice', 'S01', 'capture\nverify\n', 0],
+      ['execute-task', 'T01', '', 0], ['', 'S01', '', 9], ['plan-slice', '', '', 9]]) {
+      const script = 'stop() { exit 9; }; node() { case "$*" in *--capture*) echo capture ;; *--verify*) echo verify ;; esac; };\n'
+        + identity + '\n' + capture + '\n' + verify;
+      const result = require('child_process').spawnSync(bash, ['-c', script], { encoding: 'utf8', timeout: 10000,
+        env: { ...process.env, HOST_RUNTIME: 'codex', unit_type, unit_id, PLAN_PATH: '', READONLY_BASELINE: '/fixture/baseline', WORKING_DIR: '/fixture', FORGE_SCRIPTS_DIR: '/fixture/scripts' } });
+      assert.strictEqual(result.status, status, `${skill}: ${result.stderr}`);
+      assert.strictEqual(result.stdout, expected);
+    }
+  }
 });
 
 for (const temp of temps) fs.rmSync(temp, { recursive: true, force: true });

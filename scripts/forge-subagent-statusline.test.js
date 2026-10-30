@@ -215,6 +215,30 @@ try {
     require('./forge-claude-renderer').write({ repo: path.resolve(__dirname, '..'), projectRoot: project, forgeHome: forge, claudeHome: claude, provenance: null });
     assert.deepStrictEqual(snapshot(file), before); assert(!Object.hasOwn(JSON.parse(fs.readFileSync(file)), 'subagentStatusLine'));
   });
+  check('review R2 R7 exact managed ownership preserves operator command bytes', () => {
+    const options = { env, claudeVersion: '2.1.312' };
+    const managed = line.commandFor(options);
+    for (const command of ['echo forge-subagent-statusline.js; node company-rows.js',
+      'node /operator/tools/custom-forge-subagent-statusline.js --custom',
+      `${managed} --extra`, `${managed}; echo operator`, 'python ~/.forge-agent/scripts/forge-subagent-statusline.js',
+      'node "/other/scripts/forge-subagent-statusline.js"']) {
+      const file = seed(JSON.stringify({ subagentStatusLine: { type: 'command', command }, operator: 'preserve' }));
+      const before = snapshot(file);
+      assert.strictEqual(line.setup(file, options).reason_code, 'operator-owned');
+      assert.strictEqual(line.remove(file, options).reason_code, 'absent-noop');
+      assert.deepStrictEqual(snapshot(file), before);
+      const result = spawnSync(process.execPath, [path.join(__dirname, 'merge-settings.js'), file, '--remove'], { env, encoding: 'utf8', timeout: 10000 });
+      assert.strictEqual(result.status, 0, result.stderr);
+      assert.strictEqual(JSON.parse(fs.readFileSync(file)).subagentStatusLine.command, command);
+    }
+    for (const forgeHome of [path.join(temp, '.forge-agent'), path.join(temp, 'relocated forge')]) {
+      const opts = { ...options, env: { ...env, FORGE_HOME: forgeHome } };
+      const command = line.commandFor(opts), file = seed(JSON.stringify({ subagentStatusLine: { type: 'command', command } }));
+      assert(line.isManagedCommand(command, opts));
+      assert.strictEqual(line.remove(file, opts).reason_code, 'removed');
+      assert(!Object.hasOwn(JSON.parse(fs.readFileSync(file)), 'subagentStatusLine'));
+    }
+  });
   console.log(`EXAMPLE S03/T05 row: ${line.formatRows({ tasks: [task] }, { now })[0].content}`);
   console.log('EXAMPLE S03/T05 observe fake terminal: 2.1.312; supported; terminal-cli --version');
 } finally { fs.rmSync(temp, { recursive: true, force: true }); }

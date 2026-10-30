@@ -89,6 +89,13 @@ Os exemplos são produzidos **sem chamada a provider** e **sem host real renderi
 
 ## Re-pin das fontes modelo-da-skill (S03/T07)
 
+Na correção R1 da revisão S03, somente as duas referências de forge-next em
+`entries[2]` e `entries[6]` foram atualizadas novamente: de
+`f60cbc7b52c4546d35ce3b6c876b67890885c5b2e8fbd69d48618d458f9f4bf8` para
+`31cbaaecd02b708261b97c2141d9b0b673ab720c96977095a00571d2e0dc194c`.
+Isso acompanha os bytes da skill com `unit_type`/`unit_id` e o guard fechado;
+citações, rótulos, rubricas, contrato, privacidade e aceite humano permanecem iguais.
+
 A S03/T07 editou `skills/forge-task/SKILL.md` e `skills/forge-next/SKILL.md` para a identidade nativa por tentativa, o nome humano, o registro do ID devolvido pelo host fora das janelas protegidas e o guard somente leitura no Codex. Como o validador fixa o SHA-256 dos bytes de cada fonte citada, só o `source.sha256` das quatro citações modelo-da-skill dessas duas skills mudou; o texto citado (o TaskCreate de execução e o template parcial) continua literalmente presente nas skills, e nada mais no registro mudou: base_revision, contract_sha256, rótulos, as oito entradas, rubricas, métricas, limites, privacidade e human_acceptance pending-final-round.
 
 | Amostra (campo) | Fonte | SHA-256 anterior | SHA-256 novo |

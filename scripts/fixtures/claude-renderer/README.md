@@ -47,3 +47,12 @@ through the render path with the assertion formula above. The other eight active
 hashes and all historical snapshots stay unchanged; the historical-to-current
 surface set is still `agents`, `skills`, `dispatch-templates`,
 `claude-instructions`, and `configuration`.
+
+The S03 review R1 correction uses the executable flow's `unit_type`/`unit_id`
+in forge-auto and forge-next and fails closed on missing Codex identity. A scoped
+before/after measurement retained all 248 dispatch registry entries, classifications,
+and emitter/builder counts; only the two single-unit emitter windows changed.
+Only the active `skills` surface changed from
+`de4f137d05d37fbee993ba3adfc4a11372ea1c972f158cceddc5ae7e8ce02981` to
+`28410c1f6ac4bf55ec693e379bc76328e77277bbfb9676f2b6f5fe564d7e37b7`.
+The other eight active surfaces and historical golden bytes remain unchanged.

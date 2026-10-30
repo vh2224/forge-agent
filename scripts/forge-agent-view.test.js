@@ -95,8 +95,8 @@ for (const row of fixture.cases) check(`fixture ${row.name}`, () => {
 
 check('pure schema and metadata', () => {
   const row = clone(first('recent')), before = JSON.stringify(row);
-  const a = fromCase(row, { titles: { 'execute-task/T03': 'Título do plano canônico' } });
-  const b = fromCase(row, { titles: { 'execute-task/T03': 'Título do plano canônico' } });
+  const a = fromCase(row, { titles: { [row.records[0].dispatch_id]: 'Título do plano canônico' } });
+  const b = fromCase(row, { titles: { [row.records[0].dispatch_id]: 'Título do plano canônico' } });
   assert.deepStrictEqual(a, b); assert.strictEqual(JSON.stringify(row), before);
   assert.deepStrictEqual(Object.keys(a), ['schema_version', 'scope', 'sources', 'agents', 'empty_reason']);
   assert.strictEqual(a.schema_version, 1); assert.strictEqual(a.empty_reason, null);
@@ -444,3 +444,29 @@ try {
 
 assert.deepStrictEqual(fixture.cases.map(row => row.name).sort(), ['recent', 'delayed', 'absent', 'heartbeat-only', 'tool-running', 'failure', 'completion', 'observed-absent', 'observed-divergent', 'native-with-id', 'native-journal-live', 'native-caller-attested', 'native-without-id', 'host-id-conflict', 'identity-without-dispatch', 'native-entry-dispatch', 'native-post-return-dispatch', 'stale', 'terminal-unvalidated', 'terminal-rejected-after-exit', 'waiting-decision', 'waiting-without-receipt', 'other-workflow', 'events-too-large', 'hostile-values'].sort());
 console.log('PASS S03/T03 fixture inventory: all 25 named states exercised');
+
+check('review R4 dispatch-scoped filesystem titles and missing-plan isolation', () => {
+  const owner = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-review-titles-'));
+  try {
+    fs.mkdirSync(path.join(owner, '.gsd/forge'), { recursive: true });
+    const records = ['S01', 'S02', 'S03'].map((slice, index) => ({ event: 'dispatch', milestone: 'M001', slice,
+      unit: 'execute-task/T01', dispatch_id: `title-${index}`, worker_mode: 'native' }));
+    for (const [index, title] of ['Primeira tarefa', 'Segunda tarefa'].entries()) {
+      const file = path.join(owner, `.gsd/milestones/M001/slices/S0${index + 1}/tasks/T01/T01-PLAN.md`);
+      fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, `# ${title}\n`);
+    }
+    fs.writeFileSync(path.join(owner, '.gsd/forge/events.jsonl'), [...records, records[0]].map(JSON.stringify).join('\n') + '\n');
+    const bundle = view.readAgentSources({ cwd: owner, filter: scope });
+    const result = view.deriveAgentView(bundle);
+    assert.deepStrictEqual(result.agents.map(row => row.task), ['Primeira tarefa', 'Segunda tarefa', 'execute-task/T01']);
+    assert.strictEqual(bundle.sources.titles.length, 2, 'duplicate dispatch reads its plan once');
+  } finally { fs.rmSync(owner, { recursive: true, force: true }); }
+});
+check('review R5 unavailable census never claims confirmed absence or leaks paths', () => {
+  for (const reason of ['events-too-large', 'source_unreadable', 'source_link', 'no-bindings', 'C:/private/secret']) {
+    const output = view.renderAgentView(view.deriveAgentView({ empty_reason: reason }));
+    assert(!output.includes('nenhum agente no escopo informado')); assert(output.includes('censo indisponível'));
+    assert(!output.includes('private') && !output.includes('secret'));
+  }
+  assert(view.renderAgentView(view.deriveAgentView([])).includes('nenhum agente no escopo informado'));
+});

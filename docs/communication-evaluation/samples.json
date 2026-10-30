@@ -998,7 +998,7 @@
             "source": {
               "file": "skills/forge-next/SKILL.md",
               "reference": "skills/forge-next/SKILL.md#parcial",
-              "sha256": "f60cbc7b52c4546d35ce3b6c876b67890885c5b2e8fbd69d48618d458f9f4bf8"
+              "sha256": "31cbaaecd02b708261b97c2141d9b0b673ab720c96977095a00571d2e0dc194c"
             },
             "text": "Trabalho parcial salvo em continue.md: {o que ficou feito}. Continua executável: {o que segue}. Decisão pendente: {ID ou nenhuma}. Para retomar: /forge-next.",
             "rubric": {
@@ -2353,7 +2353,7 @@
             "source": {
               "file": "skills/forge-next/SKILL.md",
               "reference": "skills/forge-next/SKILL.md#parcial",
-              "sha256": "f60cbc7b52c4546d35ce3b6c876b67890885c5b2e8fbd69d48618d458f9f4bf8"
+              "sha256": "31cbaaecd02b708261b97c2141d9b0b673ab720c96977095a00571d2e0dc194c"
             },
             "text": "Trabalho parcial salvo em continue.md: {o que ficou feito}. Continua executável: {o que segue}. Decisão pendente: {ID ou nenhuma}. Para retomar: /forge-next.",
             "rubric": {
