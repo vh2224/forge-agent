@@ -50,6 +50,26 @@ test('operators, glob/prefix rules, quoted/absolute/Windows paths, traversal and
     assert.throws(() => make([command]), undefined, command);
   }
 });
+test('parseNodeCommand is the exported parser of the policy form and createPolicy keeps its decisions', () => {
+  for (const [command, expected] of [['node scripts/a.js', 'scripts/a.js'], ['node --check scripts/a.js', 'scripts/a.js'],
+    ['node a.cjs', 'a.cjs'], ['node --check lib/x-y_z.mjs', 'lib/x-y_z.mjs'], ['node scripts/../a.js', 'scripts/../a.js']]) {
+    assert.strictEqual(permissions.parseNodeCommand(command), expected, command);
+  }
+  for (const command of ['node scripts/a.js && node scripts/b.js', 'node "scripts/a b.js"', 'node C:/repo/a.js',
+    'node /abs/a.js', 'node scripts\\a.js', 'node ../a.js', 'node .gsd/a.js', 'node  scripts/a.js', 'node scripts/a.js --flag',
+    'node --eval code', 'npm test', 'node scripts/a.ts', 'node --check', '', null, undefined, 1, ['node a.js']]) {
+    assert.strictEqual(permissions.parseNodeCommand(command), null, String(command));
+  }
+  // Same exact decisions: accepted commands still map to one rule each, and a
+  // parser-accepted traversal is still refused by the physical path check.
+  assert.deepStrictEqual(make().rules, commands.map(c => `Bash(${c})`));
+  assert.throws(() => make(['node scripts/../a.js']), /claude-permission-policy-invalid/);
+  const long = `node ${'a/'.repeat(254)}x.js`;
+  assert(long.length > 512 && permissions.parseNodeCommand(long));
+  assert.throws(() => make([long]), /claude-permission-command-unsupported/);
+  assert.match(fs.readFileSync(require.resolve('./forge-claude-permissions'), 'utf8'), /function createPolicy/);
+  console.log('PASS parseNodeCommand: exported policy parser accepts only node [--check] relative js/cjs/mjs and createPolicy decisions unchanged');
+});
 test('link ancestors are refused, including Windows junctions', () => {
   const link = path.join(lab.a, 'linked');
   fs.symlinkSync(lab.b, link, process.platform === 'win32' ? 'junction' : 'dir');

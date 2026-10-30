@@ -514,6 +514,30 @@ function runVerificationGate(options) {
   return { ...runVerificationCommands(options), procedure_context };
 }
 
+// Progress label: the original command (never the clamp rewrite) only when it is
+// the exact relative Node form of the Claude policy; otherwise a numbered label.
+function checkLabel(command, index) {
+  const file = require('./forge-claude-permissions').parseNodeCommand(command);
+  const absolute = file && (require('path').posix.isAbsolute(file) || require('path').win32.isAbsolute(file));
+  return file && !absolute && !file.split('/').includes('..') ? command : `comando ${index}`;
+}
+// Synchronous best-effort observer: closed records, no output, and its errors
+// never change spawn, timeout, leases, overlays or the returned checks.
+// timed_out mirrors the exit-124 predicate; it does not prove children ended.
+function checkProgress(options, total) {
+  if (typeof options.onCheck !== 'function') return () => {};
+  const rootId = typeof options.checkRootId === 'string' ? options.checkRootId : null;
+  return (position, command, finished) => {
+    try {
+      const record = { schema_version: 1, root_id: rootId, index: position + 1, total,
+        label: checkLabel(command, position + 1), state: finished ? 'finished' : 'started' };
+      if (finished) Object.assign(record, { exit_code: finished.exitCode, duration_ms: finished.durationMs,
+        timed_out: finished.isTimeout === true });
+      options.onCheck(Object.freeze(record));
+    } catch { /* observer errors never affect verification */ }
+  };
+}
+
 function runVerificationCommands(options) {
   const timestamp = Date.now();
   const { commands, source } = discoverCommands({
@@ -536,8 +560,10 @@ function runVerificationCommands(options) {
 
   const timeoutMs = options.commandTimeoutMs || DEFAULT_COMMAND_TIMEOUT_MS;
   const checks = [];
+  const progress = checkProgress(options, commands.length);
 
-  for (const command of commands) {
+  for (const [position, command] of commands.entries()) {
+    progress(position, command, null);
     const start = Date.now();
 
     // Resource wiring (S04/T02, D10 zero sizing rules here): fail-open,
@@ -640,6 +666,7 @@ function runVerificationCommands(options) {
     };
     if (checkSkipped) check.skipped = checkSkipped;
     checks.push(check);
+    progress(position, command, { exitCode, durationMs, isTimeout });
   }
 
   return {
@@ -945,7 +972,7 @@ function runRootVerification(contract, options = {}) {
   const results = measured.code_roots.map(root => {
     const sealed = options.verificationSeal?.roots.find(row => row.root_id === root.id);
     const snapshot = require('./forge-surgical-reset').captureAttemptSnapshot(root.path);
-    const result = runVerificationGate({ ...options, cwd: root.path, gsdDir: require('path').join(measured.owner, '.gsd'),
+    const result = runVerificationGate({ ...options, cwd: root.path, gsdDir: require('path').join(measured.owner, '.gsd'), checkRootId: root.id,
       preferenceCommands: sealed?.commands || options.commandsByRoot?.[root.id] || options.preferenceCommands,
       ...(sealed ? { taskPlanVerify: null, commandTimeoutMs: options.verificationSeal.command_timeout_ms } : {}) });
     return { schema_version: 1, kind: 'verification', unit: options.unit, plan_fingerprint: options.planFingerprint,

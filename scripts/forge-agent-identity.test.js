@@ -278,6 +278,67 @@ async function main() {
   assert(bytesOf(cliEvents).equals(recordedBytes), 'invalid usage or value writes nothing');
   console.log('PASS S03/T02 CLI --record: caller-attested line, append under the derived owner lock only in an existing .gsd/forge, already-recorded exit 0, conflict/open receipt/oversize exit 3, invalid usage or value exit 2, never creates .gsd');
 
+  // Issue 297: canonical recovery dispatches exceed the generic 120 code limit.
+  const { recoveryDispatchId } = require('./forge-recovery-dispatch-id');
+  const parent124 = 'M-20261028132636-fixture-S03-T02-native-dispatch-'.padEnd(78, 'x');
+  const real124 = recoveryDispatchId(parent124, '0f8e2d9c-1b7a-4c3e-9d5f-6a2b1c0e7f48');
+  const real128 = recoveryDispatchId('p'.repeat(128), '0f8e2d9c-1b7a-4c3e-9d5f-6a2b1c0e7f48');
+  assert.equal(real124.length, 124); assert.equal(real128.length, 128);
+  const sized = length => 'd'.repeat(length - 2) + '-1';
+  for (const dispatchId of [sized(120), sized(121), real124, sized(124), real128, sized(128)]) {
+    assert.equal(api.buildAgentIdentityEvent({ ...attested, dispatch_id: dispatchId }, fixedNow).dispatch_id, dispatchId);
+    const record = { value: HOST_VALUE, source: 'host-tool-return', observed_ms: 1, dispatch_id: dispatchId, conflict: false };
+    assert.deepEqual(api.normalizeHostIdentity(record), record);
+  }
+  for (const dispatchId of [sized(129), 'dispatch with space', `${real124}\n`, 'acentuação', 'bidi‮']) {
+    assert.throws(() => api.buildAgentIdentityEvent({ ...attested, dispatch_id: dispatchId }, fixedNow), /agent-identity-dispatch-invalid/);
+    assert.equal(api.normalizeHostIdentity({ value: HOST_VALUE, source: 'host-tool-return', observed_ms: 1, dispatch_id: dispatchId, conflict: false }), null);
+  }
+  assert.throws(() => api.buildAgentIdentityEvent({ ...attested, unit: sized(121) }, fixedNow), /agent-identity-unit-invalid/,
+    'other fields keep the generic 120 limit');
+  console.log('PASS issue297 identity: event dispatch_id and host_identity keep 120/121/124/128 exactly and refuse 129 or invalid characters; other fields stay at 120');
+  const longRuns = {};
+  for (const dispatchId of [real124, real128]) {
+    const longRequest = { ...request, dispatchId };
+    const longOptions = { ...options, telemetryIdentity: longRequest };
+    const longRun = await invokeNative(longOptions, async (args, inv, observer) => { observer.hostIdentity(HOST_VALUE); return { status: 'done' }; });
+    assert.equal(longRun.ok, true);
+    assert.equal(longRun.lifecycle.host_identity.dispatch_id, dispatchId, 'journal binding is the exact dispatch');
+    assert.equal(longRun.final_evidence.dispatch_id, dispatchId, 'final evidence keeps the exact dispatch');
+    const longInvocation = buildNativeInvocation(longOptions);
+    const longBound = api.identityFromLifecycle({ lifecycle: longRun.lifecycle, request: longRequest, invocation: longInvocation });
+    assert.equal(longBound.ok, true, JSON.stringify(longBound));
+    assert.equal(longBound.fields.dispatch_id, dispatchId);
+    for (const [label, input] of [
+      ['foreign dispatch', { lifecycle: longRun.lifecycle, request: { ...longRequest, dispatchId: real124 === dispatchId ? real128 : real124 }, invocation: longInvocation }],
+      ['host record for a truncated dispatch', { lifecycle: { ...longRun.lifecycle, host_identity: { ...longRun.lifecycle.host_identity, dispatch_id: dispatchId.slice(0, 120) } }, request: longRequest, invocation: longInvocation }],
+      ['forged digest', { lifecycle: { ...longRun.lifecycle, identity: 'e'.repeat(64) }, request: longRequest, invocation: longInvocation }],
+    ]) assert.equal(api.identityFromLifecycle(input).ok, false, label);
+    longRuns[dispatchId] = longBound;
+  }
+  const oversizedRequest = { ...request, dispatchId: sized(129) };
+  const oversizedRun = await invokeNative({ ...options, telemetryIdentity: oversizedRequest },
+    async (args, inv, observer) => { observer.hostIdentity(HOST_VALUE); return { status: 'done' }; });
+  assert.equal(oversizedRun.lifecycle.host_identity.dispatch_id, null, 'an oversized dispatch binds nothing');
+  assert.deepEqual(api.identityFromLifecycle({ lifecycle: oversizedRun.lifecycle, request: oversizedRequest,
+    invocation: buildNativeInvocation({ ...options, telemetryIdentity: oversizedRequest }) }), { ok: false, reason_code: 'agent-identity-binding' });
+  console.log('PASS issue297 identity: identityFromLifecycle binds 124/128 canonical recovery dispatches exactly through a real invokeNative lifecycle; foreign, truncated, forged and 129 refused');
+  const longOwner = owner();
+  const longReceipt = receipt('ready', real124);
+  const longAppend = await api.appendAgentIdentityEvent({ owner: longOwner, closedReceiptFile: longReceipt },
+    { unit: 'S03/T02', ...longRuns[real124].fields }, { now: fixedNow });
+  assert.equal(longAppend.status, 'appended');
+  assert.equal(JSON.parse(fs.readFileSync(eventsOf(longOwner), 'utf8')).dispatch_id, real124);
+  const longBytes = bytesOf(eventsOf(longOwner));
+  await assert.rejects(api.appendAgentIdentityEvent({ owner: longOwner, closedReceiptFile: receipt('ready', real128) },
+    { unit: 'S03/T02', ...longRuns[real124].fields }), /agent-identity-unit-open/);
+  await assert.rejects(api.appendAgentIdentityEvent({ owner: longOwner, closedReceiptFile: longReceipt },
+    { unit: 'S03/T02', ...longRuns[real124].fields, agent_id: '/root/other' }), /agent-identity-conflict/);
+  await assert.rejects(api.appendAgentIdentityEvent({ owner: longOwner, closedReceiptFile: receipt('started', real124) },
+    { unit: 'S03/T02', ...longRuns[real124].fields }), /agent-identity-unit-open/);
+  assert(bytesOf(eventsOf(longOwner)).equals(longBytes), 'incompatible receipt or conflict writes nothing');
+  console.log('PASS issue297 identity: post-publication append with the exact closed 124 receipt records the full dispatch; foreign receipt, open receipt and conflicting agent refused without writing');
+
   const probe = spawnSync(process.execPath, ['-e', [
     "require('./forge-agent-identity');",
     "const loaded = Object.keys(require.cache).map(file => require('path').basename(file));",

@@ -53,7 +53,7 @@ async function supervise(options, invoke) {
   if (!Number.isSafeInteger(wall) || wall < 0 || !Number.isFinite(mono) || mono < 0) fail('native-clock-inconsistent');
   const ceiling = ceilingFromRoute(options.route), policy = liveness.normalizePolicy(options.policy);
   // Trusted request binding for an observed host identity; unsafe values bind nothing.
-  const dispatchId = require('./forge-attempt-telemetry').code(options.dispatchId);
+  const dispatchId = require('./forge-attempt-telemetry').dispatchCode(options.dispatchId);
   const store = journalStore(options.journal, identity), previous = store?.read();
   const caps = Object.fromEntries(['result', 'remote_events', 'open_tools', 'cancel', 'resume', 'stop_proof']
     .map(key => [key, adapter?.capabilities?.[key] === true ? 'available' : 'unknown']));

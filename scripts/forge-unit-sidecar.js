@@ -1572,6 +1572,18 @@ function validateNativeExecutionBinding(r, runtime) {
   if (!fs.existsSync(r.resultFile + '.receipt.json') && typeof runtime.invokeNative !== 'function') fail('native-tool-callback-missing');
   return fresh;
 }
+// Event fields only when the host reported an identity through the observer and
+// identityFromLifecycle binds it to this exact invocation and trusted request.
+function nativeIdentityFields(outcome, invocation, request) {
+  if (!outcome?.lifecycle?.host_identity || !invocation || !request) return null;
+  const bound = require('./forge-agent-identity').identityFromLifecycle({ lifecycle: outcome.lifecycle, request, invocation });
+  if (!bound.ok) return null;
+  // The host-returned agent_id is the identity. A recovery task_name longer than
+  // the event vocabulary (recovery_<dispatch>_<sha>) is left unrecorded, never cut.
+  const taskName = bound.fields.task_name;
+  return taskName === null || require('./forge-attempt-telemetry').code(taskName) === taskName
+    ? bound.fields : { ...bound.fields, task_name: null };
+}
 async function runNativeExecutionTransport(r, runtime, execution, options, procedure) {
   const planText = fs.readFileSync(r.planFile, 'utf8');
   let prompt = xllm.buildExecutePrompt(planText, {
@@ -1634,11 +1646,16 @@ async function runNativeExecutionTransport(r, runtime, execution, options, proce
     budgets: execution.budgets, onPackagedContext: packaged => options.onPackagedContext({ ...packaged,
       bytes: Buffer.byteLength(prompt), sha256: hash(prompt), transport_sha256: hash(transportPrompt),
       input_tokens: Math.ceil(prompt.length / 4), token_method: 'heuristic-chars-4' }) };
-  const outcome = await require('./forge-native-invocation').invokeNative(nativeOptions, (args, binding) => {
+  let invoked = null;
+  const outcome = await require('./forge-native-invocation').invokeNative(nativeOptions, (args, binding, observer) => {
+    invoked = binding;
     options.enterTransport();
     assertInvocation('before-invoke');
-    return runtime.invokeNative(args, binding);
+    // The Forge identity observer rides after the existing arguments; it is never a tool argument.
+    return runtime.invokeNative(args, binding, observer);
   });
+  const bound = nativeIdentityFields(outcome, invoked, nativeOptions.telemetryIdentity);
+  if (bound) options.recordNativeIdentity?.(bound);
   const receiptFile = r.resultFile + '.receipt.json';
   const saved = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
   if (outcome.final_evidence) json(receiptFile, { ...saved, final_evidence: outcome.final_evidence });
@@ -1744,9 +1761,14 @@ async function runUnitSidecarCore(request, runtime, identity) {
   let transportReturned = false;
   let partialFixResult = false;
   let recoveryReady = runtime.assertRecoveryReady;
+  // Phase observer (bound below once the unit identity is validated). It only
+  // reads: no durable write, no announcer stage, errors never reach the unit.
+  let notifyPhase = () => {};
+  let executingObserved = false;
   const enterTransport = () => {
     recoveryReady?.();
     recoveryReady = null;
+    if (!executingObserved) { executingObserved = true; notifyPhase('executing'); }
   };
   const r = request || {}, route = r.route || {};
   if (!fs.existsSync(`${r.resultFile}.receipt.json`)) require('./forge-dispatch-resolve').assertMilestoneContext(r);
@@ -1824,6 +1846,35 @@ async function runUnitSidecarCore(request, runtime, identity) {
   xllm.validateResultFileTarget(receiptFile, root);
   const eventsFile = target(root, '.gsd/forge/events.jsonl');
   const label = unitLabel(r, loc);
+  notifyPhase = (phase, detail = {}) => {
+    if (typeof runtime.onPhase !== 'function') return;
+    const record = { schema_version: 1, phase, dispatch_id: dispatchId, unit: label,
+      worker_mode: nativeExecution ? 'native' : 'sidecar', at: new Date().toISOString() };
+    if (['done', 'partial', 'blocked'].includes(detail.outcome)) record.outcome = detail.outcome;
+    const reason = require('./forge-attempt-telemetry').code(detail.reason_code);
+    if (reason) record.reason_code = reason;
+    try { runtime.onPhase(Object.freeze(record)); } catch { /* observer errors never affect the unit */ }
+  };
+  // Publication seam: one observer call, then the unchanged canonical publication.
+  const publish = (record, publicationGuard) => {
+    notifyPhase('publishing');
+    return publishReadyRecord(r, record, publicationGuard);
+  };
+  const completed = result => notifyPhase('completed', { outcome: result?.status });
+  // Native host identity accepted by identityFromLifecycle; appended once, after
+  // the final or failed event, through the same owner channel as those events.
+  let nativeIdentity = null, nativeIdentityAppended = false;
+  async function appendNativeIdentity() {
+    if (!nativeIdentity || nativeIdentityAppended) return;
+    nativeIdentityAppended = true;
+    try {
+      const identityApi = require('./forge-agent-identity');
+      const line = identityApi.renderAgentIdentityEvent(identityApi.buildAgentIdentityEvent({ unit: label, ...nativeIdentity }));
+      await livenessQueue;
+      const record = fs.existsSync(receiptFile) ? JSON.parse(fs.readFileSync(receiptFile, 'utf8')) : null;
+      await appendOwnedEvent(line, record);
+    } catch { /* the identity stays unknown; the canonical outcome is unchanged */ }
+  }
   async function appendOwnedEvent(line, record) {
     if (recoveryReady?.appendOwnerEvent) return recoveryReady.appendOwnerEvent(line);
     if (r.ownerBroker) return require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker)
@@ -1986,6 +2037,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
     try { await event('failed', code, detail, failure.provider_called,
       loc.reviewFix ? { boundary: loc.reviewFix.boundary, items_total: reviewFixItemsTotal(r) } : null); }
     catch { /* Unproved owner drift cannot be adopted just to log a failure. */ }
+    await appendNativeIdentity();
+    notifyPhase('failed', { reason_code: code });
   }
   // Local-only evidence, not a delivery or a replay authorization. Persist before
   // unit validation can reject a transport-normalized response and overwrite its
@@ -2054,9 +2107,11 @@ async function runUnitSidecarCore(request, runtime, identity) {
     }
     if (r.execution_contract && !record.delivery_capture) {
       const resourceEvents = [];
+      notifyPhase('verifying');
       const deliveryCapture = require('./forge-verify').captureRootDelivery(r.execution_contract,
         fs.readFileSync(r.planFile, 'utf8'), { ...r.verification, verificationSeal: record.verification_seal, verificationIdentity, unit: loc.rules[loc.delivery.input].unit,
-          resourceEventSink: line => resourceEvents.push(line) });
+          resourceEventSink: line => resourceEvents.push(line),
+          ...(typeof runtime.onVerificationCheck === 'function' ? { onCheck: runtime.onVerificationCheck } : {}) });
       if (deferredEvents) deferredEvents.push(...resourceEvents);
       else await appendOwnedEvents(resourceEvents, record);
       if (!deliveryCapture.passed) fail('execution-verification-failed');
@@ -2099,8 +2154,9 @@ async function runUnitSidecarCore(request, runtime, identity) {
       assertNativePublication(existing);
       try {
         const ready = existing.phase === 'executed' ? await completeExecution(existing) : existing;
-        const result = await publishReadyRecord(r, ready, () => assertNativePublication(ready));
+        const result = await publish(ready, () => assertNativePublication(ready));
         json(resultFile, result);
+        completed(result);
         return result;
       } catch (error) { await recordFailure(error); throw error; }
     }
@@ -2126,7 +2182,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       const publicationWriter = await require('./forge-recovery-transition').observeStoppedWriter(runtime.writerObservationAdapter,
         { previous: inspected.writer, receiptFile, request: r, contract: r.execution_contract,
           processProbe: runtime.processProbe, assertUnchanged: assertAccepted });
-      const result = await publishReadyRecord(r, ready, () => {
+      const result = await publish(ready, () => {
         require('./forge-recovery-transition').assertWriterObservation(publicationWriter);
         assertAccepted();
       });
@@ -2134,6 +2190,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       json(receiptFile, ready);
       json(resultFile, result);
       await event(result.status, 'saved-native-result-accepted', null, existing.final_evidence?.provider_called ?? 'unknown');
+      completed(result);
       return result;
     }
     if (existing.phase === 'failed') {
@@ -2142,6 +2199,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
       error.code = existing.failure.reason_code;
       error.diagnostic = diagnostic(existing.failure.diagnostic?.reason, existing.failure.diagnostic);
       json(resultFile, existing.failure);
+      // Follows the failure event recorded by the attempt itself; nothing is relaunched.
+      notifyPhase('failed', { reason_code: existing.failure.reason_code });
       throw error;
     }
     fail('sidecar-attempt-interrupted', 'Inspect the recorded heartbeat/process and recover this attempt before retrying with a new dispatch id. No worker was relaunched.');
@@ -2251,6 +2310,9 @@ async function runUnitSidecarCore(request, runtime, identity) {
       const saved = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
       if (saved.phase === 'started') json(receiptFile, { ...saved,
         telemetry: { ...saved.telemetry, observation: safe } });
+      if (typeof runtime.onObservation === 'function') {
+        try { runtime.onObservation(safe); } catch { /* observer errors never affect the unit */ }
+      }
       if (runtime.onProgress) return runtime.onProgress(safe);
       if (require.main === module) process.stderr.write(require('./forge-sidecar-calibration').progressLine(safe));
     },
@@ -2355,7 +2417,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
         return changes.filter(entry => !(entry.path === key && ownerIds.has(entry.root_id)));
       };
       result = nativeExecution ? await runNativeExecutionTransport(r, runtime, execution,
-        { ...options, captureLateNativeResult: preserveReturnedResponse }, procedure) : await xllm.runExecute({ ...options, reconcileProtectedChanges, scope: r.scope, planFile: r.planFile, securityFile: r.securityFile,
+        { ...options, captureLateNativeResult: preserveReturnedResponse, recordNativeIdentity: fields => { nativeIdentity = fields; } },
+        procedure) : await xllm.runExecute({ ...options, reconcileProtectedChanges, scope: r.scope, planFile: r.planFile, securityFile: r.securityFile,
         contextFile: r.contextFile, writableRoots: execution ? execution.writableRoots
           : r.execution_contract ? r.execution_contract.code_roots.filter(code =>
             require('./forge-code-roots').key(fs.realpathSync.native(code.path)) !==
@@ -2398,10 +2461,12 @@ async function runUnitSidecarCore(request, runtime, identity) {
             host_runtime: route.host_runtime, worker_engine: options.engine } };
         json(receiptFile, executed);
         const ready = await completeExecution(executed);
-        result = await publishReadyRecord(r, ready, () => { assertNativePublication(ready); options.assertNativePublication?.(); });
+        result = await publish(ready, () => { assertNativePublication(ready); options.assertNativePublication?.(); });
         json(resultFile, result);
         await sessionCleanupEvent(transportTelemetry?.session?.cleanup, sessionShaOf(transportTelemetry));
         await event(result.status, null, null, true);
+        await appendNativeIdentity();
+        completed(result);
         return result;
       }
       if (r.execution_contract && result.status === 'done') {
@@ -2432,10 +2497,11 @@ async function runUnitSidecarCore(request, runtime, identity) {
             host_runtime: route.host_runtime, worker_engine: options.engine } };
         json(receiptFile, executed);
         const ready = await completeExecution(executed);
-        result = await publishReadyRecord(r, ready, () => { assertNativePublication(ready); options.assertNativePublication?.(); });
+        result = await publish(ready, () => { assertNativePublication(ready); options.assertNativePublication?.(); });
         json(resultFile, result);
         await sessionCleanupEvent(transportTelemetry?.session?.cleanup, sessionShaOf(transportTelemetry));
         await event(result.status, null, null, true);
+        completed(result);
         return result;
       }
       artifacts = executeDeliveryArtifacts(r, loc, result, root, cwd);
@@ -2606,7 +2672,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
     // Durable validated response BEFORE artifact publication: a crash anywhere
     // after here replays publication, without spending another provider turn.
     json(receiptFile, record);
-    result = await publishReadyRecord(r, record);
+    result = await publish(record);
     json(resultFile, result);
     await sessionCleanupEvent(transportTelemetry?.session?.cleanup, sessionShaOf(transportTelemetry));
     if (transport.mode !== 'memory') {
@@ -2614,6 +2680,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         items_fixed: result.items.filter(item => item.verified).length, commit_sha: result.commit_sha,
         effort_sent: result.telemetry ? result.telemetry.effort_sent : null } : null);
     }
+    completed(result);
     return result;
   } catch (error) {
     // A transport failure can leave a queued liveness append: settle it before
@@ -2783,6 +2850,17 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
   const authority = runtime.executionAuthority || {};
   const executionRequest = { ...request, ...authority };
   if (Object.keys(authority).some(key => !['execution_contract', 'claim', 'runId', 'gates'].includes(key))) fail('recovery-execution-authority-invalid');
+  // Issue 288: with a host adapter (runtime.executionPlanGate), each auto-deferred
+  // request gets its own fresh exact live gate at its actual seam: original checks
+  // synchronously, even inside a successor scope; successor operations separately.
+  // Without one, nothing changes and the existing gates decide.
+  const planGate = runtime.executionPlanGate;
+  const gated = value => planGate !== undefined && value?.gates?.plan === 'skipped' && value.gates.planSkipReason === 'auto-defer';
+  const gateSync = (value, action) => gated(value)
+    ? require('./forge-task-execution').withAutoPlanGateAdapterSync(planGate, value, action) : action();
+  const gateAsync = (value, action) => gated(value)
+    ? require('./forge-task-execution').withAutoPlanGateAdapter(planGate, value, action) : action();
+  const asOriginal = gateSync, asSuccessorSync = gateSync, asSuccessor = gateAsync;
   const canonical = require('./forge-attempt-recovery').canonicalRequest(request);
   if (recovery.transitions?.some(row => ['uninvoked-native-reservation', 'uninvoked-native-repackage'].includes(row.type))
       && (!['milestone', 'standalone-task'].includes(canonical.scope) || canonical.phase !== 'execute' || canonical.unitType !== 'execute-task')) {
@@ -2864,7 +2942,8 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
         hostRuntime: route.host_runtime, resolvedDispatch: route, activeCapabilities: runtime.activeCapabilities,
         effortBinding: runtime.effortBinding, prompt, forkTurns: 'none', taskName: nativeTaskName, agentType: 'forge-executor' }) : null;
       if (seed && !seed.ok) fail(seed.reason_code);
-      prompt = deliveryHelper.packagePrompt(finalRequest(route), prompt, { nativeInvocation: seed });
+      const successor = finalRequest(route);
+      prompt = asSuccessorSync(successor, () => deliveryHelper.packagePrompt(successor, prompt, { nativeInvocation: seed }));
     }
     let transport = null;
     if (deliveryHelper && (fileBacked || retainedFileTransport || request.nativePromptFile || recovery.transitions?.some(row => row.type === 'uninvoked-native-repackage'))) {
@@ -2892,29 +2971,32 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     taskName: nativeTaskName,
     agentType: ({ execute: 'forge-executor', plan: 'forge-planner', research: 'forge-researcher', discuss: 'forge-discusser' })[canonical.phase] || 'forge-worker' };
   };
-  // A stale writer cannot reconcile or reserve another attempt under a new claim.
+  if (canonical.scope === 'milestone' && canonical.phase === 'execute' || canonical.unitType === 'review-fix') {
+    if (!executionRequest.execution_contract) fail('execution-held-claim-required');
+    asOriginal(executionRequest, () => validateRecoveryRequest(executionRequest, { verification: runtime.verification, nativeInvocation: request.route.worker_mode === 'native'
+      ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route)) : undefined }));
+  }
+  // Replay retains both authorities: the original must still be authorized
+  // before the delivery helper opens its separate fresh successor scope.
   if (deliveryHelper) {
     const replayed = await deliveryHelper.replay({ request: executionRequest, recovery, runtime, nativeOptions });
     if (replayed) return replayed;
-  }
-  if (canonical.scope === 'milestone' && canonical.phase === 'execute' || canonical.unitType === 'review-fix') {
-    if (!executionRequest.execution_contract) fail('execution-held-claim-required');
-    validateRecoveryRequest(executionRequest, { verification: runtime.verification, nativeInvocation: request.route.worker_mode === 'native'
-      ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route)) : undefined });
   }
   return require('./forge-attempt-recovery').recoverAttempt({ ...recovery, request,
     nativeJournalFile: runtime.nativeLifecycle?.journal?.file,
     ...(recovery.nativeRepackage ? { nativeRepackage: { ...recovery.nativeRepackage,
       nextJournalFile: runtime.nativeLifecycle?.journal?.file } } : {}),
-    inspectSavedResult: runtime.savedNativeResult ? async () => (await inspectSavedNativeExecution(executionRequest, runtime)).writer : undefined,
+    inspectSavedResult: runtime.savedNativeResult ? async () => (await gateAsync(executionRequest, () => inspectSavedNativeExecution(executionRequest, runtime))).writer : undefined,
     recoveryAuthorization: runtime.recoveryAuthorization, processProbe: runtime.processProbe,
     transitionAdapter: runtime.transitionAdapter,
     executionContract: executionRequest.execution_contract, executionAuthority: authority,
     externalNativeHandoff: !runtime.invokeNative,
     inspectPreSpawn: runtime.inspectPreSpawn, inspectPreSpawnDelta: runtime.inspectPreSpawnDelta,
     validateEnvironmentalCorrection: runtime.validateEnvironmentalCorrection,
-    validateExecutionAuthority: () => validateRecoveryRequest(executionRequest, { verification: runtime.verification, nativeInvocation: request.route.worker_mode === 'native'
-      ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route)) : undefined }),
+    // Reached synchronously through transitionGuard.assertAuthority, also from
+    // inside a successor scope: the original keeps its own fresh exact scope.
+    validateExecutionAuthority: () => asOriginal(executionRequest, () => validateRecoveryRequest(executionRequest, { verification: runtime.verification, nativeInvocation: request.route.worker_mode === 'native'
+      ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route)) : undefined })),
     reconcile: receipt => {
       if (canonical.unitType === 'review-fix' && !request.execution_contract && !receipt.recovery_baseline)
         return reconcileLegacyReviewFix(request, receipt, executionRequest.execution_contract);
@@ -2928,13 +3010,13 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       if (request.route.worker_mode === 'native') {
         const invocation = require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route));
         if (!invocation.ok) return invocation;
-        validateRecoveryRequest(executionRequest, { verification: runtime.verification, nativeInvocation: invocation });
+        asOriginal(executionRequest, () => validateRecoveryRequest(executionRequest, { verification: runtime.verification, nativeInvocation: invocation }));
         return { ok: true, evidence_reference: 'unit-preflight:native-arguments',
           final_evidence: require('./forge-attempt-telemetry').captureFinal({ request: invocation.args,
             context: invocation.args.prompt || invocation.args.message, identity: request, route: request.route,
             model: request.route.model, effort: request.route.effort, transport: 'native-tool' }) };
       }
-      validateRecoveryRequest(executionRequest, { verification: runtime.verification });
+      asOriginal(executionRequest, () => validateRecoveryRequest(executionRequest, { verification: runtime.verification }));
       if (typeof runtime.validateCorrection !== 'function') return { ok: false, reason_code: 'recovery-final-packaging-required' };
       return runtime.validateCorrection(request);
     },
@@ -2944,7 +3026,8 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       const invocation = route.worker_mode === 'native'
         ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(route)) : { ok: true };
       if (!invocation.ok) return invocation;
-      try { validateRecoveryRequest({ ...executionRequest, route }, { verification: runtime.verification, nativeInvocation: invocation }); }
+      const candidate = { ...executionRequest, route };
+      try { asOriginal(candidate, () => validateRecoveryRequest(candidate, { verification: runtime.verification, nativeInvocation: invocation })); }
       catch (error) { return { ok: false, reason_code: error.code || 'unit-contract-refused', provider_called: false }; }
       return invocation;
     },
@@ -2953,7 +3036,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
         if (!recovery.reconciliation) fail('recovery-artifact-reconciliation-required');
         return reconcileArtifactAttempt(request, recovery.reconciliation);
       }
-      return runUnitSidecar(request, runtime);
+      return gateAsync(request, () => runUnitSidecar(request, runtime));
     },
     // The third argument is the decision's sidecar_ceiling; the route ceiling is
     // recomputed here from the single source instead of trusting the argument.
@@ -2961,7 +3044,8 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     // a Claude sidecar route may carry it; runUnitSidecarCore revalidates the ref.
     invoke: async (route, invocation, _ceiling, assertReady, reservationHash, resume) => {
       if (resume != null && (route.worker_mode !== 'sidecar' || route.resolved_worker_engine !== 'claude')) fail('recovery-resume-route-invalid');
-      validateRecoveryRequest({ ...executionRequest, route }, { verification: runtime.verification, nativeInvocation: invocation });
+      const routed = { ...executionRequest, route };
+      asOriginal(routed, () => validateRecoveryRequest(routed, { verification: runtime.verification, nativeInvocation: invocation }));
       const ceiling = route.worker_mode === 'sidecar' ? ceilingFromRoute(route) : null;
       const next = deliveryHelper ? finalRequest(route) : { ...executionRequest, recoveryStateFile: recovery.stateFile, route: ceiling
         ? { ...route, workers_timeout: ceiling.seconds, workers_timeout_source: ceiling.source } : route,
@@ -2969,60 +3053,88 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
         ...(resume != null ? { claudeResume: resume.session, resumedFrom: resume.resumed_from } : {}) };
       if (route.worker_mode === 'native') {
         if (deliveryHelper) {
-          const session = deliveryHelper.prepare({ request: next, nativeInvocation: invocation,
+          // The successor has a new dispatch: an auto-deferred one needs the
+          // host adapter; the original authorization is never reused for it.
+          if (planGate === undefined && next.gates?.plan === 'skipped' && next.gates.planSkipReason === 'auto-defer') fail('execution-auto-gate-adapter-required');
+          let persistedReceipt = null;
+          const session = asSuccessorSync(next, () => deliveryHelper.prepare({ request: next, nativeInvocation: invocation,
             savedManifest: assertReady?.repackageManifest?.(runtime.nativeLifecycle?.journal?.file),
             assertBoundary: runtime.assertBoundary, assertAuthority: assertReady?.assertAuthority,
-            persistDeliveryReceipt: assertReady?.persistDeliveryReceipt,
-            linkedEntryOptions: runtime.linkedEntryOptions });
+            persistDeliveryReceipt: typeof assertReady?.persistDeliveryReceipt === 'function'
+              ? receipt => { assertReady.persistDeliveryReceipt(receipt); persistedReceipt = receipt; } : undefined,
+            linkedEntryOptions: runtime.linkedEntryOptions, onPhase: runtime.onPhase, onCheck: runtime.onVerificationCheck }));
           const finalRequestHash = require('./forge-attempt-recovery').callerRequestHash(next);
-          const invoke = async callback => {
+          let invoked = null, identityRequest = null;
+          // Each call opens a fresh successor scope and reattests; a captured
+          // callback or saved descriptor never revives a closed scope.
+          const invoke = callback => asSuccessor(next, async () => {
             const supervisedOptions = nativeOptions(route);
+            identityRequest = supervisedOptions.telemetryIdentity;
             supervisedOptions.lifecycle = { ...runtime.nativeLifecycle,
-              captureLateResult: result => session.returned(result) };
-            const outcome = await require('./forge-native-invocation').invokeNative(supervisedOptions, async (args, binding) => {
+              captureLateResult: result => asSuccessorSync(next, () => session.returned(result)) };
+            const outcome = await require('./forge-native-invocation').invokeNative(supervisedOptions, async (args, binding, observer) => {
             if (require('./forge-attempt-recovery').callerRequestHash(next) !== finalRequestHash) fail('recovery-final-request-changed');
             assertReady();
             runtime.assertBoundary();
             validateRecoveryRequest(next, { verification: runtime.verification, nativeInvocation: binding, linkedEntryOptions: runtime.linkedEntryOptions });
             assertReady.consumeInvocation(binding, { ...session.start(),
               original_receipt_sha256: hash(fs.readFileSync(recovery.receiptFile)) });
-            return callback(next, { ...binding, args }, session);
+            invoked = binding;
+            return callback(next, { ...binding, args }, session, observer);
           });
             if (outcome.ok) {
               session.returned(outcome.result);
               assertReady.invocationReturned();
             }
             return outcome;
-          };
+          });
           if (!runtime.invokeNative) return { action: 'invoke-native', request: next, invocation, delivery: session, invoke };
           const outcome = await invoke(runtime.invokeNative);
           if (!outcome.ok || !deliveryHelper.resultContract.validate(outcome.result).ok) return outcome;
           if (outcome.result.status !== 'done') return outcome;
-          const verified = session.verify(outcome.result);
-          const published = session.publish(outcome.result);
+          const verified = asSuccessorSync(next, () => session.verify(outcome.result));
+          const published = asSuccessorSync(next, () => session.publish(outcome.result));
+          // Durable identity only after session.publish returned, through a proven channel.
+          const fields = nativeIdentityFields(outcome, invoked, identityRequest);
+          if (fields) {
+            try {
+              const event = { unit: unitLabel(next, locations(next)), ...fields };
+              // The transition channel still guards the pre-worker roots. After
+              // publication use the existing owner lock and the exact saved ready
+              // receipt instead; never adopt a new transition baseline here.
+              if (!persistedReceipt?.file) fail('agent-identity-receipt-required');
+              const receiptBytes = fs.readFileSync(persistedReceipt.file);
+              if (hash(receiptBytes) !== persistedReceipt.sha256
+                  || require('./forge-code-roots').digest(JSON.parse(receiptBytes)) !== require('./forge-code-roots').digest(published)) {
+                fail('agent-identity-receipt-invalid');
+              }
+              await require('./forge-agent-identity').appendAgentIdentityEvent(
+                { owner: next.contextRoot, closedReceiptFile: persistedReceipt.file }, event);
+            } catch { /* the identity stays unknown; publication is unchanged */ }
+          }
           return { ...outcome, verified, published };
         }
         // Only standalone execution has the native execution lifecycle. Other
         // phase adapters retain their existing public native outcome contract.
         const invokePhase = callback => {
-          return require('./forge-native-invocation').invokeNative(nativeOptions(route), (args, binding) => {
+          return require('./forge-native-invocation').invokeNative(nativeOptions(route), (args, binding, observer) => {
             assertReady?.();
-            validateRecoveryRequest({ ...executionRequest, route }, { verification: runtime.verification, nativeInvocation: binding });
+            asOriginal(routed, () => validateRecoveryRequest(routed, { verification: runtime.verification, nativeInvocation: binding }));
             assertReady?.consumeInvocation?.(binding);
             return callback(next, { ...binding, args }, {
               assertAuthority: () => {
                 assertReady?.assertAuthority?.();
-                validateRecoveryRequest({ ...executionRequest, route }, { verification: runtime.verification, nativeInvocation: binding });
+                asOriginal(routed, () => validateRecoveryRequest(routed, { verification: runtime.verification, nativeInvocation: binding }));
               },
-            });
+            }, observer);
           });
         };
         const invoke = callback => {
           if (next.scope !== 'standalone-task' || next.phase !== 'execute') return invokePhase(callback);
           next.nativeInvocation = invocation;
           if (next.nativePromptFile) next.nativePromptFile = `${next.resultFile}.prompt.txt`;
-          return runUnitSidecar(next, { ...runtime, assertRecoveryReady: assertReady, assertRecoveryAuthority: assertReady?.assertAuthority,
-            invokeNative: (args, binding) => callback(next, { ...binding, args }) });
+          return asSuccessor(next, () => runUnitSidecar(next, { ...runtime, assertRecoveryReady: assertReady, assertRecoveryAuthority: assertReady?.assertAuthority,
+            invokeNative: (args, binding, observer) => callback(next, { ...binding, args }, observer) }));
         };
         if (!runtime.invokeNative) {
           assertReady?.();
@@ -3032,7 +3144,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
         }
         return invoke(runtime.invokeNative);
       }
-      return runUnitSidecar(next, { ...runtime, ...(assertReady?.appendOwnerEvent ? { assertRecoveryReady: assertReady } : {}) });
+      return asSuccessor(next, () => runUnitSidecar(next, { ...runtime, ...(assertReady?.appendOwnerEvent ? { assertRecoveryReady: assertReady } : {}) }));
     },
   });
 }
@@ -3041,13 +3153,45 @@ module.exports = { appendProtectedOwnerEvents, preflightExecutionVerification, s
   MAX_ARTIFACT_PAYLOAD_BYTES, target, markChecked, createTaskMarker, verifyTaskMarker, materialize, memoryPrompt, memorySourceContext,
   publishReadyRecord, nativeMemoryFingerprint, acceptNativeMemoryResult, candidateFromNativeResult, runNativeMemory,
   routeIdentity, artifactFingerprint, artifactAttemptFiles, beginArtifactAttempt, replayArtifactAttempt, reconcileLegacyReviewFix,
-  failArtifactAttempt, acceptArtifactResult, reconcileArtifactAttempt, runUnitSidecar, recoverUnitSidecar, reviewFixUnitLabel, effortTelemetry };
+  failArtifactAttempt, acceptArtifactResult, reconcileArtifactAttempt, runUnitSidecar, recoverUnitSidecar, reviewFixUnitLabel, effortTelemetry,
+  cliObservers };
+// Default CLI observers: stderr only, never through the announcer. Phase lines and
+// activity lines use the sanitized T03 formatters; activity is written only on a
+// phase or liveness-state transition, at most 20 lines per unit. Verification
+// progress is a technical record: closed JSON, no output, no rewritten command.
+const MAX_ACTIVITY_LINES = 20;
+function cliObservers(stream = process.stderr) {
+  const { formatPhaseLine, formatActivityLine } = require('./forge-agent-view');
+  let phase = 'unknown', pendingLiveness = null, lastActivityKey = null, activityLines = 0;
+  const write = line => { try { stream.write(`${line}\n`); } catch { /* stderr loss never affects the unit */ } };
+  const activity = observation => {
+    if (activityLines >= MAX_ACTIVITY_LINES) return;
+    activityLines++;
+    write(formatActivityLine(observation, { now: Date.now() }));
+  };
+  return {
+    onPhase: record => { phase = record.phase; write(formatPhaseLine(record.phase, { reason_code: record.reason_code })); },
+    onVerificationCheck: record => write(`[forge-verify-progress] ${JSON.stringify(record)}`),
+    // Only a newly delivered observation may be rendered as live. Phase and
+    // transition notifications contain no new snapshot and never refresh one.
+    onObservation: value => {
+      const state = value?.liveness?.state || null;
+      if (pendingLiveness !== null && state !== pendingLiveness) return;
+      pendingLiveness = null;
+      const key = JSON.stringify([phase, state]);
+      if (key === lastActivityKey) return;
+      lastActivityKey = key;
+      activity(value);
+    },
+    onLiveness: transition => { if (transition && transition.from !== transition.to) pendingLiveness = transition.to; },
+  };
+}
 if (require.main === module) {
   const announce = createStderrAnnouncer();
   Promise.resolve().then(() => {
     if (!['--request', '--accept-native-memory'].includes(process.argv[2]) || !process.argv[3]) fail('request-file-required');
     const request = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
-    return process.argv[2] === '--accept-native-memory' ? acceptNativeMemoryResult(request) : runUnitSidecar(request, { announce });
+    return process.argv[2] === '--accept-native-memory' ? acceptNativeMemoryResult(request) : runUnitSidecar(request, { announce, ...cliObservers() });
   }).then(result => {
     process.stdout.write(`${JSON.stringify(result)}\n`);
   }).catch(error => { process.stderr.write(`forge-unit-sidecar: ${error.code || 'sidecar-unit-failed'}\n`); process.exitCode = 1; });

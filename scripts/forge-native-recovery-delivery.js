@@ -379,9 +379,17 @@ function validateCoveragePolicy(policy,inventory,contract){
 }
 // Caller supplies the exact saved output of its single canonical resolver call,
 // already-held claim/gates, and real native binding. Never resolves or changes route.
-function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linkedEntryOptions,savedManifest,persistDeliveryReceipt,leaseRenewal,documentaryContinuation,coveragePolicy,supplementalCoverage}={}){
+// Phase and per-check observers are synchronous and best-effort: closed records,
+// no durable write, and an observer error never changes a result or refusal.
+function phaseNotifier(onPhase,r){
+  if(typeof onPhase!=='function')return()=>{};
+  return phase=>{try{onPhase(Object.freeze({schema_version:1,phase,dispatch_id:r.dispatchId,unit:r.unitType+'/'+r.taskId,
+    worker_mode:'native',at:new Date().toISOString()}));}catch{/* observer errors never affect delivery */}};
+}
+function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linkedEntryOptions,savedManifest,persistDeliveryReceipt,leaseRenewal,documentaryContinuation,coveragePolicy,supplementalCoverage,onPhase,onCheck}={}){
   if(typeof assertBoundary!=='function'||typeof assertAuthority!=='function')fail('live-controller-boundary-required');
   const r=structuredClone(request);
+  const phase=phaseNotifier(onPhase,r);
   delete r.linkedEntryBinding;
   const effectiveIdentity=api('forge-attempt-recovery').canonicalRequest(r);
   if(r.unitType!=='execute-task'||!['milestone','standalone-task'].includes(effectiveIdentity.scope)||effectiveIdentity.phase!=='execute'||r.route?.worker_mode!=='native'||r.route.dispatch_allowed!==true||!r.execution_contract||!r.claim||!r.runId)fail('milestone-native-request-required');
@@ -547,6 +555,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       try {fs.writeFileSync(manifestFile,bytes,{flag:'wx'});}catch(error){
         if(error.code!=='EEXIST'||fs.readFileSync(manifestFile,'utf8')!==bytes)throw error;
       }
+      phase('executing');
       return {manifest_file:manifestFile,manifest_sha256:hash(bytes),receipt_file:receiptFile};
     },
     returned(result){
@@ -564,8 +573,10 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       if(policy&&(!initialReview||roots.digest(result)!==roots.digest(initialReview.derived)))fail('documentary-review-required');
       if(documentary&&roots.digest(result)!==roots.digest(documentary.derived))fail('documentary-result-changed');
       const delta=execution.verifyResult(r.cwd,prepared,result),loc=side.locations(r),resourceEvents=[];
+      phase('verifying');
       const capture=verify.captureRootDelivery(r.execution_contract,plan,{...r.verification,unit:loc.rules[loc.delivery.input].unit,
-        verificationSeal:seal,verificationIdentity,resourceEventSink:line=>resourceEvents.push(line)});
+        verificationSeal:seal,verificationIdentity,resourceEventSink:line=>resourceEvents.push(line),
+        ...(typeof onCheck==='function'?{onCheck}:{})});
       guard();if(!capture.passed)verificationFailure(capture);
       if(documentary||initialReview){
         if(documentary){
@@ -604,9 +615,11 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
         manifest_sha256:hash(fs.readFileSync(manifestFile)),
         // Legacy carrier name retained; task identity remains explicitly standalone.
         milestone_delivery:{...(standalone?{scope:'standalone-task'}:{}),plan_sha256:planHash,protected_owner:prepared.protected_owner,protected_roots:prepared.protected_roots,code_state:execution.replayState(r.cwd,r.execution_contract)}};
+      phase('publishing');
       persist(record);
       side.materialize(verified.publicationRequest,record,()=>guard(true),undefined,renewal?{leaseRenewal}:undefined);
       for(const artifact of artifacts)if(fs.readFileSync(path.join(r.contextRoot,artifact.path),'utf8')!==artifact.content)fail('publication-readback-mismatch');
+      phase('completed');
       return record;
     },
     replayReady(record){
@@ -659,7 +672,9 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
           ||!side.validateArtifacts({status:'done',summary:record.result.summary,questions:[],artifacts:deliveryArtifacts.map(({path,content})=>({path,content}))},
             loc.allowed,loc.required,Infinity,loc.rules))fail('milestone-ready-receipt-invalid');
       execution.verifyResult(r.cwd,prepared,record.result);
+      phase('publishing');
       side.materialize(r,record,()=>guard(true),undefined,renewal?{leaseRenewal}:undefined);
+      phase('completed');
       return record;
     },
   };
@@ -714,8 +729,12 @@ async function replay({request,recovery,runtime,nativeOptions}) {
   const writer=await api('forge-recovery-transition').observeStoppedWriter(runtime.writerObservationAdapter,
     {receiptFile:savedReceiptFile,request:r,contract:r.execution_contract,processProbe:runtime.processProbe,assertUnchanged:inspect});
   api('forge-recovery-transition').assertWriterObservation(writer);
-  const session=prepare({request:r,nativeInvocation:invocation,assertBoundary:runtime.assertBoundary,assertAuthority,
-    supplementalCoverage:runtime.supplementalCoverage,
+  // Issue 288: the validated successor gets its own fresh exact auto gate per
+  // operation through the host adapter; without one the existing gates decide.
+  const successor=action=>runtime.executionPlanGate===undefined||r.gates?.plan!=='skipped'||r.gates?.planSkipReason!=='auto-defer'
+    ?action():api('forge-task-execution').withAutoPlanGateAdapterSync(runtime.executionPlanGate,r,action);
+  const session=successor(()=>prepare({request:r,nativeInvocation:invocation,assertBoundary:runtime.assertBoundary,assertAuthority,
+    supplementalCoverage:runtime.supplementalCoverage,onPhase:runtime.onPhase,onCheck:runtime.onVerificationCheck,
     linkedEntryOptions:runtime.linkedEntryOptions,savedManifest:manifest,persistDeliveryReceipt:receipt=>{
       inspect();
       const lock=api('forge-lock'),lockRoot=path.join(require('os').tmpdir(),'forge-recovery-'+roots.digest(path.resolve(recovery.stateFile)));
@@ -729,17 +748,17 @@ async function replay({request,recovery,runtime,nativeOptions}) {
         api('forge-xllm-state').saveRecovery(recovery.stateFile,state);
         stateBytes=fs.readFileSync(recovery.stateFile);
       }finally{held.release();}
-    }});
+    }}));
   if(record.supplemental_coverage&&!runtime.supplementalCoverage)fail('supplemental-replay-authority-required');
   let effectiveResult=record.result;
   if(runtime.supplementalCoverage){
     if(!runtime.documentaryReview)fail('documentary-live-authority-required');
-    effectiveResult=session.reviewDocumentary(runtime.documentaryReview).result;
+    effectiveResult=successor(()=>session.reviewDocumentary(runtime.documentaryReview)).result;
   }
   if(effectiveResult.status!=='done')return {action:'replay',provider_called:false,result:effectiveResult};
-  if(record.phase==='ready')return {action:'replay',provider_called:false,result:{published:session.replayReady(record)}};
+  if(record.phase==='ready')return {action:'replay',provider_called:false,result:{published:successor(()=>session.replayReady(record))}};
   if(roots.digest(record.code_state)!==roots.digest(api('forge-task-execution').replayState(r.cwd,r.execution_contract)))fail('milestone-replay-code-changed');
-  const verified=session.verify(effectiveResult),published=session.publish(effectiveResult);
+  const verified=successor(()=>session.verify(effectiveResult)),published=successor(()=>session.publish(effectiveResult));
   return {action:'replay',provider_called:false,result:{verified,published}};
 }
 module.exports={prepare,replay,requireExplicitVerify,criterionBindings,resultContract,packagePrompt,createLeaseRenewalReconciliation,reconcileLeaseRenewalSurface,createDocumentaryContinuation};

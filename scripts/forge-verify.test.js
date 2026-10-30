@@ -427,6 +427,124 @@ test('verification validates mandatory modules before commands and no-stack skip
   } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
 });
 
+// onCheck: a synchronous best-effort observer around each command. Only the
+// times are normalized for the parity comparison; everything else is equal.
+function normalizeTimes(value) {
+  return JSON.parse(JSON.stringify(value, (key, item) => ['durationMs', 'duration_ms', 'timestamp', 'ts', 'captured_at',
+    'started_at', 'updated_at'].includes(key) ? 0 : item));
+}
+function checkFixture() {
+  const cwd = tmpRepo(), gsdDir = path.join(cwd, '.gsd');
+  fs.mkdirSync(path.join(cwd, 'scripts'));
+  fs.writeFileSync(path.join(cwd, 'scripts', 'ok.js'), "console.log('PASS fixture ok');");
+  fs.writeFileSync(path.join(cwd, 'scripts', 'rewritten.js'), "console.log('REWRITTEN BODY');");
+  // The child exits by itself shortly after the timeout; timed_out never claims it did.
+  // On Windows the surviving child can hold the directory (issue 289), so cleanup retries.
+  fs.writeFileSync(path.join(cwd, 'wait.js'), 'setTimeout(() => {}, 1000);');
+  const cleanup = () => {
+    for (let attempt = 0; ; attempt++) {
+      try { fs.rmSync(cwd, { recursive: true, force: true }); return; }
+      catch (error) {
+        if (!['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(error.code) || attempt >= 60) throw error;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+      }
+    }
+  };
+  return { cwd, gsdDir, cleanup };
+}
+
+test('onCheck reports started/finished per command in order with safe and generic labels', () => {
+  const strict = require('assert'), api = require('./forge-verify'), f = checkFixture();
+  const commands = ['node scripts/ok.js', 'node --check scripts/ok.js', 'node -e "process.exit(3)"',
+    'node scripts/../scripts/ok.js', 'node C:/abs/ok.js', 'node /abs/ok.js'];
+  const records = [];
+  try {
+    const result = api.runVerificationGate({ cwd: f.cwd, gsdDir: f.gsdDir, preferenceCommands: commands,
+      resourceEventSink() {}, onCheck: record => records.push(record) });
+    strict.strictEqual(records.length, commands.length * 2);
+    records.forEach((record, i) => {
+      const index = Math.floor(i / 2) + 1, finished = i % 2 === 1;
+      strict(Object.isFrozen(record));
+      strict.deepStrictEqual(Object.keys(record), ['schema_version', 'root_id', 'index', 'total', 'label', 'state',
+        ...(finished ? ['exit_code', 'duration_ms', 'timed_out'] : [])]);
+      strict.strictEqual(record.schema_version, 1); strict.strictEqual(record.root_id, null);
+      strict.strictEqual(record.index, index); strict.strictEqual(record.total, commands.length);
+      strict.strictEqual(record.state, finished ? 'finished' : 'started');
+      if (finished) {
+        strict.strictEqual(record.exit_code, result.checks[index - 1].exitCode);
+        strict(Number.isInteger(record.duration_ms) && record.duration_ms >= 0);
+        strict.strictEqual(record.timed_out, false);
+      }
+    });
+    strict.deepStrictEqual(records.filter(r => r.state === 'started').map(r => r.label),
+      ['node scripts/ok.js', 'node --check scripts/ok.js', 'comando 3', 'comando 4', 'comando 5', 'comando 6']);
+    strict.strictEqual(records[5].exit_code, 3);
+    strict(!JSON.stringify(records).includes('PASS fixture ok'), 'no stdout in progress records');
+    console.log('PASS verify onCheck: ordered started/finished records with exact relative node labels, generic numbered labels, traversal and absolute paths refused');
+  } finally { f.cleanup(); }
+});
+
+test('onCheck label is the original command, never the clamp rewrite', () => {
+  const strict = require('assert'), api = require('./forge-verify'), f = checkFixture();
+  const released = [], records = [];
+  const options = { cwd: f.cwd, gsdDir: f.gsdDir, preferenceCommands: ['node scripts/ok.js'], resourceEventSink() {},
+    requireCommandRewrite: () => ({ looksLikeRunnerCommand: () => true,
+      planRewrite: () => ({ outcome: 'rewritten', command: 'node scripts/rewritten.js', reason: 'fixture', runner: 'fixture' }) }),
+    requireResources: () => ({ acquireCommandBudget: () => ({ workers: 1, heapMb: 512, pool: { handle: { slots: [1] } } }),
+      releaseCommandBudget: handle => released.push(handle) }) };
+  try {
+    const result = api.runVerificationGate({ ...options, onCheck: record => records.push(record) });
+    strict(result.checks[0].stdout.includes('REWRITTEN BODY'), 'the clamp rewrite actually ran');
+    strict.strictEqual(result.checks[0].command, 'node scripts/ok.js');
+    strict.deepStrictEqual(records.map(r => r.label), ['node scripts/ok.js', 'node scripts/ok.js']);
+    strict.strictEqual(released.length, 1, 'lease released once');
+    console.log('PASS verify onCheck: label keeps the original accepted command while the clamp rewrite and lease run unchanged');
+  } finally { f.cleanup(); }
+});
+
+test('onCheck timeout uses the exit-124 predicate and results are identical with, without and with a throwing observer', () => {
+  const strict = require('assert'), api = require('./forge-verify'), f = checkFixture();
+  const base = { cwd: f.cwd, gsdDir: f.gsdDir, commandTimeoutMs: 400, preferenceCommands: ['node scripts/ok.js', 'node wait.js'] };
+  const sink = lines => line => lines.push(line);
+  try {
+    const plainLines = [], observedLines = [], throwingLines = [], records = [];
+    const plain = api.runVerificationGate({ ...base, resourceEventSink: sink(plainLines) });
+    const observed = api.runVerificationGate({ ...base, resourceEventSink: sink(observedLines), onCheck: record => records.push(record) });
+    let thrown = 0;
+    const throwing = api.runVerificationGate({ ...base, resourceEventSink: sink(throwingLines),
+      onCheck: () => { thrown++; throw new Error('observer failure'); } });
+    strict.strictEqual(thrown, 4, 'observer is called and its errors are swallowed');
+    for (const result of [plain, observed, throwing]) {
+      strict.strictEqual(result.checks[1].exitCode, 124); strict.strictEqual(result.checks[1].skipped, 'timeout');
+    }
+    strict.deepStrictEqual(normalizeTimes(observed), normalizeTimes(plain));
+    strict.deepStrictEqual(normalizeTimes(throwing), normalizeTimes(plain));
+    strict.deepStrictEqual(normalizeTimes(observedLines.map(JSON.parse)), normalizeTimes(plainLines.map(JSON.parse)));
+    strict.deepStrictEqual(normalizeTimes(throwingLines.map(JSON.parse)), normalizeTimes(plainLines.map(JSON.parse)));
+    const finished = records.filter(r => r.state === 'finished');
+    strict.deepStrictEqual(finished.map(r => [r.exit_code, r.timed_out]), [[0, false], [124, true]]);
+    console.log('PASS verify onCheck timeout: timed_out mirrors exit 124 without claiming child termination');
+    console.log('PASS verify onCheck parity: checks, passed, stdout, stderr, exit codes, skipped and resource events identical with, without and throwing observer');
+  } finally { f.cleanup(); }
+});
+
+test('captureRootDelivery forwards onCheck per root with per-root index and total', () => {
+  const strict = require('assert'), lab = require('./forge-code-roots.test'), f = lab.fixture(), api = require('./forge-verify');
+  const records = [];
+  try {
+    const options = { unit: { type: 'task', id: 'T-roots' }, resourceEventSink() {},
+      commandsByRoot: { alpha: ['node -e "process.exit(0)"'], beta: ['node -e "process.exit(0)"', 'node -e "process.exit(0)"'] } };
+    const plain = api.captureRootDelivery(f.contract, lab.plan(f.contract), options);
+    const observed = api.captureRootDelivery(f.contract, lab.plan(f.contract), { ...options, onCheck: record => records.push(record) });
+    strict.deepStrictEqual(records.map(r => [r.root_id, r.index, r.total, r.state, r.label]), [
+      ['alpha', 1, 1, 'started', 'comando 1'], ['alpha', 1, 1, 'finished', 'comando 1'],
+      ['beta', 1, 2, 'started', 'comando 1'], ['beta', 1, 2, 'finished', 'comando 1'],
+      ['beta', 2, 2, 'started', 'comando 2'], ['beta', 2, 2, 'finished', 'comando 2']]);
+    strict.deepStrictEqual(normalizeTimes(observed), normalizeTimes(plain));
+    console.log('PASS verify onCheck roots: captureRootDelivery forwards per-root records and the capture is unchanged');
+  } finally { f.cleanup(); }
+});
+
 console.log(`${passed} passed, ${failed} failed`);
 if (failed > 0) {
   console.log('\nFailures:');

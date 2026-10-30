@@ -43,6 +43,8 @@ Depois, leia o stderr completo do processo, inclusive em `run_in_background` pel
 
 As linhas `[forge-sidecar]` registram identidade e estágio; `[forge-agente]` reapresenta os mesmos campos em pt-BR, sem acrescentar prova. A causa continua na linha `forge-xllm:` ou `forge-unit-sidecar:` e no result-file. Preserve ambos os canais. Nunca redirecione o stderr do comando de despacho para `/dev/null`. Se o stdout for capturado com `$(...)`, ainda leia e exponha as linhas de identidade do stderr.
 
+As linhas de fase (executando agente, verificando a entrega, publicando evidência, concluído ou falhou) e as linhas de atividade também usam `[forge-agente]` e seguem o mesmo repasse literal; a atividade só aparece em transição de fase ou de liveness, no máximo 20 linhas por unidade, e nenhuma fase vira evento durável. A linha `[forge-verify-progress]` é registro técnico do progresso por comando de verificação (índice, total, rótulo seguro, código de saída, duração e `timed_out`), consultado quando o usuário pergunta ou a espera é longa; `timed_out` não prova que processos filhos terminaram.
+
 ## Standalone task execution
 
 For an approved loose task, Step 5 uses the writing contract in
@@ -859,6 +861,59 @@ Não há relógio cumulativo: cada sidecar de recuperação recebe o tier safety
 Só destino ainda não tentado, autoridade viva e modelo/tier/esforço/ferramenta realmente suportados permitem execução.
 História insuficiente conserva a recusa; implementar este mecanismo não desbloqueia receipts históricos.
 
+## Gate automático do successor na recuperação (issue 288)
+
+O gate automático (`plan: skipped`, `planSkipReason: auto-defer`) vale para um escopo
+exato e vivo, que inclui o `dispatchId`. O successor de recuperação tem outro dispatch;
+a autorização do original nunca é reaproveitada para ele, e o matcher exato
+(`autoGateAllowed`) não muda. O host confiável cria, uma vez por processo,
+`createAutoPlanGateAdapter(attest)` de `scripts/forge-task-execution.js` com o seu
+callback vivo de atestado e passa o handle opaco em `runtime.executionPlanGate` para
+`recoverUnitSidecar(request, recovery, runtime)`. O handle vale só no processo que o
+criou (WeakMap do mesmo módulo); cópia JSON, objeto parecido ou handle de outra instância
+do módulo é recusado com `execution-auto-gate-adapter-required`. Criar o handle não
+autoriza nada: cada execução de `withAutoPlanGateAdapter(adapter, request, action)`
+(assíncrono) ou `withAutoPlanGateAdapterSync(adapter, request, action)` (síncrono) abre
+um escopo fresco e exato, chama de novo o atestado vivo e o encerra ao sair. O runner
+síncrono preserva valor e erro síncronos, recusa thenable (`execution-auto-gate-sync-required`)
+e restaura o escopo em volta. Depois de reiniciar, o host cria outro adapter e reatesta.
+
+- Original: `validateExecutionAuthority`, chamado por `transitionGuard.assertAuthority`
+  (também de dentro de uma operação do successor), o preflight da milestone, a correção,
+  `validateInvocation` e a validação no `invoke` rodam o pedido ORIGINAL dentro de
+  `withAutoPlanGateAdapterSync` com esse original, sem cache e sem Promise.
+- Imediato (`runtime.invokeNative` presente): o wrapper abre um escopo fresco do successor
+  para `prepare`, para `invoke` (até o callback nativo e o retorno) e para cada `verify` e
+  `publish`. Sem adapter, o successor auto-deferido falha antes da ferramenta com
+  `execution-auto-gate-adapter-required`.
+- Deferido (sem `runtime.invokeNative`): o resultado mantém
+  `{action:'invoke-native', request, invocation, delivery, invoke}`. `invoke(callback)` abre
+  um escopo fresco a cada chamada legítima; o consumo da invocação continua impedindo
+  duplicata. Os métodos de `delivery` continuam síncronos: depois que o escopo anterior
+  fechou, o host os chama assim, e sem esse envolvimento eles recusam:
+  `withAutoPlanGateAdapterSync(adapter, descriptor.request, () => descriptor.delivery.verify(result))`,
+  e da mesma forma `publish(result)` e `replayReady(record)`.
+- Replay antecipado: `forge-native-recovery-delivery.replay` reconstrói o successor pelo
+  manifest e pelo receipt, valida origem, estado, rota, invocação e writer parado, e só então
+  usa o adapter em `prepare` e em cada `replayReady`, `verify` ou `publish`.
+
+Autorização revogada em qualquer costura recusa antes da ferramenta ou da publicação.
+Callback capturado, escopo assíncrono encerrado, marcador ou handle serializado não
+reativam autorização. Gates manuais (`approved`, `interactive-off`) e caminhos que não são
+execução não exigem o adapter e ficam como estavam.
+
+Observadores opcionais do host: `runtime.onPhase` recebe registros fechados
+(`schema_version`, `phase`, `dispatch_id`, `unit`, `worker_mode`, `at` e, quando há,
+`outcome` ou `reason_code`) nas costuras reais de execução, verificação, publicação e
+término; `runtime.onVerificationCheck` recebe o progresso por comando de `captureRootDelivery`.
+Eles são síncronos e best-effort: erro do observador não muda resultado, receipt, eventos
+nem publicação. O callback nativo do host recebe o observer de identidade como último
+argumento, depois dos atuais. Na entrega imediata, o evento durável `agent-identity`
+(`evidence: native-lifecycle`) só é anexado depois que `session.publish` retornou, por
+lock do owner com o receipt fechado exato já salvo, validando seu SHA-256 e a
+correspondência com o registro publicado. O canal pré-worker `assertReady.appendOwnerEvent`
+permanece inalterado e não é reutilizado para este append após a publicação; nenhum
+snapshot é readotado. Um host deferido registra a identidade depois da sua própria publicação.
 
 ## Standalone native execution and durable writer results
 

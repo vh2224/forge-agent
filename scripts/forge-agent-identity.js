@@ -9,7 +9,7 @@
 const fs = require('fs');
 const path = require('path');
 const { plainText } = require('./forge-sidecar-identity');
-const { code } = require('./forge-attempt-telemetry');
+const { code, dispatchCode } = require('./forge-attempt-telemetry');
 
 const EVENT_KEYS = Object.freeze(['ts', 'event', 'unit', 'dispatch_id', 'host_runtime', 'worker_mode', 'agent_type',
   'task_name', 'agent_id', 'agent_id_source', 'evidence', 'lifecycle_identity_sha256', 'description']);
@@ -44,7 +44,7 @@ function normalizeHostIdentity(record) {
   if (Object.keys(record).sort().join(',') !== 'conflict,dispatch_id,observed_ms,source,value') return null;
   const { value, source, observed_ms: observedMs, dispatch_id: dispatchId, conflict } = record;
   if (!validateAgentId(value).ok || source !== AGENT_ID_SOURCE || !Number.isSafeInteger(observedMs) || observedMs < 0
-      || typeof conflict !== 'boolean' || !(dispatchId === null || code(dispatchId) === dispatchId)) return null;
+      || typeof conflict !== 'boolean' || !(dispatchId === null || dispatchCode(dispatchId) === dispatchId)) return null;
   return { value, source, observed_ms: observedMs, dispatch_id: dispatchId, conflict };
 }
 
@@ -52,8 +52,8 @@ function sanitizeDescription(value) {
   return plainText(value, { missing: null, limit: DESCRIPTION_MAX });
 }
 
-function safeCode(value, reason) {
-  if (typeof value !== 'string' || code(value) !== value) fail(reason);
+function safeCode(value, reason, validate = code) {
+  if (typeof value !== 'string' || validate(value) !== value) fail(reason);
   return value;
 }
 
@@ -81,7 +81,7 @@ function buildAgentIdentityEvent(fields = {}, now = Date.now) {
   return {
     ts, event: 'agent-identity',
     unit: safeCode(fields.unit, 'agent-identity-unit-invalid'),
-    dispatch_id: safeCode(fields.dispatch_id, 'agent-identity-dispatch-invalid'),
+    dispatch_id: safeCode(fields.dispatch_id, 'agent-identity-dispatch-invalid', dispatchCode),
     host_runtime: fields.host_runtime, worker_mode: 'native', agent_type: fields.agent_type,
     task_name: taskName, agent_id: agentId, agent_id_source: source, evidence,
     lifecycle_identity_sha256: lifecycle, description: sanitizeDescription(optional('description')),
@@ -109,7 +109,7 @@ function identityFromLifecycle({ lifecycle, request, invocation } = {}) {
   const host = normalizeHostIdentity(lifecycle.host_identity);
   if (!host) return refuse('agent-identity-binding');
   if (host.conflict) return refuse('agent-identity-conflict');
-  if (typeof request.dispatchId !== 'string' || code(request.dispatchId) !== request.dispatchId
+  if (typeof request.dispatchId !== 'string' || dispatchCode(request.dispatchId) !== request.dispatchId
       || host.dispatch_id !== request.dispatchId) return refuse('agent-identity-binding');
   const args = invocation.args || {};
   return { ok: true, fields: { dispatch_id: request.dispatchId, host_runtime: invocation.host_runtime,

@@ -52,6 +52,8 @@ async function fixture(options = {}) {
     write(f.prefsFile,JSON.stringify(prefs));
     write(path.join(f.owner,'.gsd/CODING-STANDARDS.md'),'OPTIONAL_STANDARD '.repeat(1000)+'STANDARDS_END');
   }
+  // Issue 288 fixtures need the actual gate decision before the recovery state binds the request.
+  if (options.gates) r.gates = {...r.gates,...options.gates};
   write(r.contextFile,'# Context\nChange both roots.');write(r.securityFile,'# Security\nPreserve claims and history.');
   write(r.researchFile,'# Research\nBoth files currently contain before.');
   f.originalOptions={cwd:f.owner,unitType:r.unitType,scope:r.scope,phase:r.phase,hostRuntime:'codex',milestoneId:'M901',unitId:'T01',planPath:planFile,roadmapPath:f.roadmap};
@@ -179,6 +181,7 @@ function scenarios(){return [
   ()=>guardedHandoff(),
   ()=>ordinaryPublication(),
   ()=>nativeTaskMarker(),
+  ()=>observedPhases(),
 ];}
 async function main(){for(const scenario of scenarios())await scenario();}
 const COHORTS=3;
@@ -775,7 +778,105 @@ async function guardedHandoff() {
     console.log('PASS retained handoff: final request, research and unclaimed drift refuse before callback; partial and duplicate invocation never publish');
   } finally { f.cleanup(); }
 }
-module.exports={fixture,main,protectedLeaseRenewal,documentaryContinuation,initialMixedDocumentary,guardedHandoff};
+// Time is the only legitimate difference between two otherwise identical runs:
+// freeze it, so results and bytes are compared without any other normalization.
+function freezeTime(at=Date.parse('2026-10-29T12:00:00.000Z')){
+  const RealDate=Date;
+  class FrozenDate extends RealDate{constructor(...args){super(...(args.length?args:[at]));}static now(){return at;}}
+  global.Date=FrozenDate;
+  return()=>{global.Date=RealDate;};
+}
+function fileMap(dir){
+  const out={};
+  const visit=(current,rel)=>{for(const name of fs.readdirSync(current).sort()){
+    if(name==='.git')continue;
+    const file=path.join(current,name),key=rel?rel+'/'+name:name;
+    if(fs.lstatSync(file).isDirectory())visit(file,key);else out[key]=sha256(fs.readFileSync(file));
+  }};
+  visit(dir,'');return out;
+}
+// Restore contents in place: existing directories keep their physical identity
+// (code roots are bound by dev/ino/birthtime); unchanged files are not rewritten.
+function restoreDir(dir,backup){
+  const wanted=new Set(fs.readdirSync(backup));
+  for(const name of fs.readdirSync(dir))if(!wanted.has(name))fs.rmSync(path.join(dir,name),{recursive:true,force:true});
+  for(const name of wanted){
+    const from=path.join(backup,name),to=path.join(dir,name),directory=fs.lstatSync(from).isDirectory();
+    if(fs.existsSync(to)&&fs.lstatSync(to).isDirectory()!==directory)fs.rmSync(to,{recursive:true,force:true});
+    if(directory){if(!fs.existsSync(to))fs.mkdirSync(to);restoreDir(to,from);continue;}
+    const source=fs.readFileSync(from);
+    if(fs.existsSync(to)&&fs.readFileSync(to).equals(source))continue;
+    if(fs.existsSync(to))fs.chmodSync(to,0o666);
+    fs.writeFileSync(to,source);
+  }
+}
+// S03/T04: phase and per-check observers at start, verify, publish and replayReady;
+// with, without and with throwing observers, results and bytes are identical.
+async function observedPhases(){
+  const f=await fixture();
+  const backup=f.dir+'-phase-backup';
+  try{
+    const handoff=await side.recoverUnitSidecar(f.request,f.recovery,f.runtime),request=handoff.result.request;
+    const nativeInvocation=require('./forge-native-invocation').buildNativeInvocation({hostRuntime:'codex',resolvedDispatch:request.route,
+      activeCapabilities:capabilities,prompt:'Observed phases fixture',forkTurns:'none',taskName:'fixture',agentType:'forge-executor'});
+    fs.cpSync(f.dir,backup,{recursive:true});
+    // One instant for every run, inside the live lease window of this fixture.
+    const instant=Date.now();
+    const run=observers=>{
+      restoreDir(f.dir,backup);
+      const thaw=freezeTime(instant);
+      try{
+        const receipts=[],options={request,nativeInvocation,assertBoundary:f.assertBoundary,assertAuthority:f.assertBoundary,
+          persistDeliveryReceipt:receipt=>receipts.push(receipt),...observers};
+        const session=delivery.prepare(options);
+        const started=session.start();
+        for(const root of f.contract.code_roots)write(path.join(root.path,'same.txt'),'after\n');
+        const result=f.result();session.returned(result);
+        const verified=session.verify(result),published=session.publish(result);
+        const ready=JSON.parse(fs.readFileSync(receipts.at(-1).file));
+        const verifier=require('./forge-verify'),capture=verifier.captureRootDelivery;let checks=0;
+        verifier.captureRootDelivery=(...args)=>{checks++;return capture(...args);};
+        let replayed;
+        try{replayed=delivery.prepare({...options,savedManifest:session.manifest()}).replayReady(ready);}
+        finally{verifier.captureRootDelivery=capture;}
+        assert.equal(checks,0,'replayReady runs no verification');
+        return {values:JSON.stringify({started,verified,published,replayed,receipts}),files:fileMap(f.dir)};
+      }finally{thaw();}
+    };
+    const plain=run({});
+    const phases=[],checks=[];
+    const observed=run({onPhase:record=>phases.push(record),onCheck:record=>checks.push(record)});
+    let thrown=0;
+    const throwing=run({onPhase:()=>{thrown++;throw new Error('observer failure');},onCheck:()=>{thrown++;throw new Error('observer failure');}});
+    assert.deepEqual(phases.map(row=>row.phase),['executing','verifying','publishing','completed','publishing','completed']);
+    for(const row of phases){
+      assert(Object.isFrozen(row));
+      assert.deepEqual(Object.keys(row),['schema_version','phase','dispatch_id','unit','worker_mode','at']);
+      assert.equal(row.schema_version,1);assert.equal(row.dispatch_id,request.dispatchId);
+      assert.equal(row.unit,'execute-task/T01');assert.equal(row.worker_mode,'native');
+    }
+    console.log('PASS native delivery phases: start executing, verify verifying, publish publishing then completed after readback, replayReady publishing and completed');
+    assert.deepEqual(checks.map(row=>[row.root_id,row.index,row.total,row.state,row.label]),[
+      ['alpha',1,1,'started','node check.cjs'],['alpha',1,1,'finished','node check.cjs'],
+      ['beta',1,1,'started','node check.cjs'],['beta',1,1,'finished','node check.cjs']]);
+    assert(checks.filter(row=>row.state==='finished').every(row=>row.exit_code===0&&row.timed_out===false));
+    console.log('PASS native delivery onCheck: verify forwards per-root progress records with the safe original command label');
+    assert(thrown>=phases.length+checks.length,'throwing observers were called');
+    assert.equal(observed.values,plain.values);assert.equal(throwing.values,plain.values);
+    assert.deepEqual(observed.files,plain.files);assert.deepEqual(throwing.files,plain.files);
+    console.log('PASS native delivery observer parity: manifest, receipts, ready record, published bytes and errors identical with, without and throwing observers (frozen time)');
+    restoreDir(f.dir,backup);
+    const receipts=[],session=delivery.prepare({request,nativeInvocation,assertBoundary:f.assertBoundary,assertAuthority:f.assertBoundary,
+      persistDeliveryReceipt:receipt=>receipts.push(receipt),onPhase:()=>{throw new Error('observer failure');}});
+    session.start();
+    for(const root of f.contract.code_roots)write(path.join(root.path,'same.txt'),'after\n');
+    session.returned(f.result());
+    fs.appendFileSync(path.join(f.owner,SLICE_PLAN),'operator note\n');
+    assert.throws(()=>session.verify(f.result()),{code:'execution-protected-metadata'},'a throwing observer never hides the guard refusal');
+    console.log('PASS native delivery observer refusal: guard errors are unchanged with a throwing observer');
+  }finally{fs.rmSync(backup,{recursive:true,force:true});f.cleanup();}
+}
+module.exports={fixture,main,protectedLeaseRenewal,documentaryContinuation,initialMixedDocumentary,guardedHandoff,freezeTime,fileMap,restoreDir};
 async function continuations(){await durableReplay(true);await guardedHandoff();await ordinaryPublication();}
 async function correctedContinuations(){await standaloneReservation({corrected:true});await durableReplay(true,true);}
-if(require.main===module)(process.argv.includes('--cohort')?runCohort(Number(process.argv[process.argv.indexOf('--cohort')+1])):process.argv.includes('--standalone')?standaloneReservation():process.argv.includes('--standalone-negative')?standaloneNegativeEvidence():process.argv.includes('--continuations')?continuations():process.argv.includes('--corrected')?correctedContinuations():isolatedMain()).catch(error=>{console.error(error);process.exitCode=1;});
+if(require.main===module)(process.argv.includes('--cohort')?runCohort(Number(process.argv[process.argv.indexOf('--cohort')+1])):process.argv.includes('--standalone')?standaloneReservation():process.argv.includes('--standalone-negative')?standaloneNegativeEvidence():process.argv.includes('--continuations')?continuations():process.argv.includes('--corrected')?correctedContinuations():process.argv.includes('--observed-phases')?observedPhases():isolatedMain()).catch(error=>{console.error(error);process.exitCode=1;});
