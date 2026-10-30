@@ -31,3 +31,19 @@ the assertion formula above, before and after the edits: the other seven active
 hashes and all historical snapshots stay unchanged, and the historical-to-current
 surface set asserted by `forge-dispatch-source-guard.test.js` is still `agents`,
 `skills`, `dispatch-templates`, `claude-instructions`, and `configuration`.
+
+The S03 agent-identity update (M-20261028132636-experiencia, S03/T07) changes only
+the active `skills` hash, from
+`62926097a5d24d2d1b637900971324425930bb8d1f437422812ab8cdb8d16e99` to
+`de4f137d05d37fbee993ba3adfc4a11372ea1c972f158cceddc5ae7e8ce02981`. Its sources are
+`skills/forge-auto/SKILL.md`, `skills/forge-next/SKILL.md` and
+`skills/forge-task/SKILL.md` (per-attempt native dispatch id, human task name,
+host-returned agent identity ordered by the owner's protected windows, and the
+Codex read-only guard around the plan-checker and read-only native units), plus
+`skills/forge-status/SKILL.md` (personal agent view) and
+`skills/forge-config/SKILL.md` (explicit `subagents on|off`). The value before was
+measured at revision `06f7d5a` and the value after on the final skill bytes, both
+through the render path with the assertion formula above. The other eight active
+hashes and all historical snapshots stay unchanged; the historical-to-current
+surface set is still `agents`, `skills`, `dispatch-templates`,
+`claude-instructions`, and `configuration`.

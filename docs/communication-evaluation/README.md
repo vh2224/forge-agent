@@ -87,6 +87,19 @@ Para decisão humana, o exemplo separa a pergunta do progresso, conserva o ID es
 
 Os exemplos são produzidos **sem chamada a provider** e **sem host real renderizando**. Não demonstram cartões, abas, montagem do painel, resposta real de LLM, recuperação operacional, melhoria percebida, CI, merge, release ou instalação. A interpretação da rubrica é autoral e limitada ao trecho.
 
+## Re-pin das fontes modelo-da-skill (S03/T07)
+
+A S03/T07 editou `skills/forge-task/SKILL.md` e `skills/forge-next/SKILL.md` para a identidade nativa por tentativa, o nome humano, o registro do ID devolvido pelo host fora das janelas protegidas e o guard somente leitura no Codex. Como o validador fixa o SHA-256 dos bytes de cada fonte citada, só o `source.sha256` das quatro citações modelo-da-skill dessas duas skills mudou; o texto citado (o TaskCreate de execução e o template parcial) continua literalmente presente nas skills, e nada mais no registro mudou: base_revision, contract_sha256, rótulos, as oito entradas, rubricas, métricas, limites, privacidade e human_acceptance pending-final-round.
+
+| Amostra (campo) | Fonte | SHA-256 anterior | SHA-256 novo |
+|---|---|---|---|
+| entries[1].supporting.timeline.after.source.sha256 | skills/forge-task/SKILL.md#modelo-literal | 9bdba39c187aa590cc034d056cad9601c0a3e606edaee299fc5e4594a33cef71 | d81556180d9bb16d45a8f81ba6b5faa12ece7f6601a510963f29eb50fe10679b |
+| entries[5].supporting.timeline.after.source.sha256 | skills/forge-task/SKILL.md#modelo-literal | 9bdba39c187aa590cc034d056cad9601c0a3e606edaee299fc5e4594a33cef71 | d81556180d9bb16d45a8f81ba6b5faa12ece7f6601a510963f29eb50fe10679b |
+| entries[2].supporting.partial.after.source.sha256 | skills/forge-next/SKILL.md#parcial | 375a6b5c3fa2ed371174ad0d94b36a8755cb6cc3896509f4fcf7db187cd545e9 | f60cbc7b52c4546d35ce3b6c876b67890885c5b2e8fbd69d48618d458f9f4bf8 |
+| entries[6].supporting.partial.after.source.sha256 | skills/forge-next/SKILL.md#parcial | 375a6b5c3fa2ed371174ad0d94b36a8755cb6cc3896509f4fcf7db187cd545e9 | f60cbc7b52c4546d35ce3b6c876b67890885c5b2e8fbd69d48618d458f9f4bf8 |
+
+Os valores anteriores são os bytes da revisão 06f7d5a; os novos são os bytes finais das skills nesta task. O re-pin registra proveniência, não melhora de comunicação nem comportamento real dos hosts.
+
 As preferências de apresentação estão **preservadas offline** pela evidência já concluída da T06, suíte node scripts/forge-presentation-prefs.test.js: homes temporários, bytes e mtime, renderers e instalador, diagnóstico somente leitura. O handoff T06 e sua entrega registram nove comandos aprovados, 49 testes do instalador e nenhum skip observado nessa rodada. T07 cita essa evidência anterior e não reexecuta a suíte inalterada. personality, model_verbosity, output style e seleções de barra explícitas não são alterados aqui. O antes e depois na instalação real continua como **runtime pendente**; o corpus não prova preservação em hosts instalados.
 
 Na **rodada final**, uma pessoa ainda deve comparar os quatro cenários nos dois hosts, verificar compreensão de resultado/fase/executor/próximo passo/decisão e avaliar aparência, canais e preferências na instalação real. Esses aceites ficam pending-final-round até evidência própria. Resultados técnicos, revisão, integração e aceite humano continuam fatos separados.

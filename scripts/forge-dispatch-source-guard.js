@@ -291,7 +291,7 @@ const REGISTRY_ROWS = [
   ["skills-forge-task-skill-md-native-258cdfcadcfa","skills/forge-task/SKILL.md","native","operational","sha256:258cdfcadcfa403982ee7927684266c7520932e2c60b8128f198904674f812e3","",""],
   ["skills-forge-task-skill-md-native-11b44dddb544","skills/forge-task/SKILL.md","native","operational","sha256:11b44dddb5449fed8679480d430790a09764ad07c92d05f07880d65b79621eb4","",""],
   ["skills-forge-task-skill-md-native-ef3530569ac1","skills/forge-task/SKILL.md","native","operational","sha256:fb27596bf58c9b398617f18a72b5c74437bb671062399b22d9517d2c3613456e","",""],
-  ["skills-forge-task-skill-md-native-9fea978f6a6e","skills/forge-task/SKILL.md","native","operational","sha256:f9438c51a411d5a0ff95d2a5b352b5fb27990b6f92c92674d9c92c3fc3a20a69","",""],
+  ["skills-forge-task-skill-md-native-4b35b39a87dd","skills/forge-task/SKILL.md","native","operational","sha256:4b35b39a87dddcc448fe3d053dfe8565a11720ded6d0fda5d49104425d7deaf7","",""],
   ["skills-forge-task-skill-md-native-4ebc1f2a019d","skills/forge-task/SKILL.md","native","operational","sha256:4ebc1f2a019d611b90245286d49ffdcaba97d73a16248ac065482d5a6202d327","",""],
   ["skills-forge-auto-skill-md-native-ad24933a9194","skills/forge-auto/SKILL.md","native","operational","sha256:ad24933a91949d11cba81affa2292c7d5d7cd380e6e2fac24631e55a5e8984c1","",""],
   ["skills-forge-auto-skill-md-native-957c2ceb980c","skills/forge-auto/SKILL.md","native","operational","sha256:957c2ceb980c7d64165aa5d8368f113e6d99d453192da039336e5590f4280e71","",""],
