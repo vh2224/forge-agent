@@ -70,3 +70,10 @@ and the managed forge:interaction block of CLAUDE.md (shared/forge-interaction.m
 The other seven active surfaces and immutable Claude 4.19.0 golden remain unchanged.
 The historical-to-current changed surface set remains agents, skills, dispatch-templates,
 claude-instructions and configuration. Distribution does not establish host UI or human acceptance.
+
+The continued #203 proportional-planning correction updates only the active agents
+hash from914b8f44b6448ab2f5fb6d15dc4b33ab1582de74105270ffc3bff47207b85dd2
+to437d3c709908bb6d3babdfbb237e320847a65737edaaa54ca77ae8ccf7dbe662 for
+agents/forge-planner.md. All eight other active surface hashes and every historical
+snapshot stay unchanged. Mandatory planning guidance is consolidated within the
+existing context ceiling; optional budgets and allocation assertions are unchanged.

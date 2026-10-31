@@ -28,6 +28,14 @@ for (const id of ['ci', 'app']) {
   assert(texts[id].includes(`permissions:\n  contents: read\n\n${block}jobs:`));
   let original = texts[id].replace(block, '');
   if (id === 'ci') {
+    const profileArgument = ' --profile-out "${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}.json"';
+    const profileStep = '\n      - name: Preserve bounded suite timing profile\n'
+      + '        if: always()\n        uses: actions/upload-artifact@v4\n        with:\n'
+      + '          name: suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}\n'
+      + '          path: ${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}.json\n'
+      + '          if-no-files-found: warn\n          retention-days: 14\n';
+    for (const delta of [profileArgument, profileStep]) assert.strictEqual(original.split(delta).length, 2);
+    original = original.replace(profileArgument, '').replace(profileStep, '');
     original = original.replace(' --shard-profile scripts/fixtures/ci-shards/shard-profile.json', '');
     const windowsMatrix = count => Array.from({ length: count }, (_, index) =>
       `          - os: windows-latest\n            platform: win32\n            shard-index: ${index}\n            shard-count: ${count}\n            label: windows-latest, shard ${index + 1}/${count}`).join('\n');
@@ -178,7 +186,8 @@ marker('key_link', 0, 'readConcurrency and rehearse consume real workflow bytes;
 const testStep = texts.ci.match(/^      - name: Run test suites\n([\s\S]*?)(?=^      - name:)/m)[1];
 const command = testStep.match(/^        run: (.+)$/m)[1];
 assert.strictEqual(command, 'node scripts/run-tests.js --baseline scripts/fixtures/ci-baseline/known-failures.json'
-  + ' --shard-profile scripts/fixtures/ci-shards/shard-profile.json --shard-index ${{ matrix.shard-index }} --shard-count ${{ matrix.shard-count }}');
+  + ' --shard-profile scripts/fixtures/ci-shards/shard-profile.json --shard-index ${{ matrix.shard-index }} --shard-count ${{ matrix.shard-count }}'
+  + ' --profile-out "${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}.json"');
 assert(!/--(?:changed|match|fail-fast|inherit-home)\b/.test(command));
 assert(!/\b(?:paths|paths-ignore|branches-ignore):/.test(texts.ci.split('\npermissions:')[0]));
 const steps = texts.ci.match(/^      - name:[^\n]*(?:\n(?!      - name:)[^\n]*)*/gm);

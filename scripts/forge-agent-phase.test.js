@@ -758,6 +758,23 @@ async function terminalOutcomes() {
   } finally { xllm.invokeClaudeTransport = original; lab.cleanup(); }
 }
 
+const cohorts = ['identity', 'recovery', 'native', 'sidecar'];
+async function runCohort(name) {
+  assert(cohorts.includes(name), 'unknown phase cohort');
+  if (name === 'identity') return publicIdentityChannels();
+  if (name === 'recovery') {
+    await publicDeferredGate(); await publicLateCapture();
+    await publicImmediateGate(); await terminalOutcomes();
+    return;
+  }
+  if (name === 'native') { await identityLifecycle(); await standaloneNative(); return; }
+  // These cases intentionally share the transport stub within this child only.
+  xllm.runExecute = async options => transport(options);
+  try {
+    await milestonePhases(); await executedReplayAndFailure();
+    await observerParity(); cliLimits(); cliFreshness();
+  } finally { xllm.runExecute = realRunExecute; }
+}
 async function main() {
   const selected = process.argv.find(arg => arg.startsWith('--review-regression='));
   if (selected) {
@@ -770,24 +787,18 @@ async function main() {
     assert.equal(typeof run, 'function', 'unknown review regression');
     return run();
   }
-  xllm.runExecute = async options => transport(options);
-  try {
-    await milestonePhases();
-    await executedReplayAndFailure();
-    await observerParity();
-    cliLimits();
-    cliFreshness();
-  } finally { xllm.runExecute = realRunExecute; }
-  await identityLifecycle();
-  await publicDeferredGate();
-  await publicLateCapture();
-  await publicImmediateGate();
-  await publicIdentityChannels();
-  await standaloneNative();
-  await terminalOutcomes();
+  const cohort = process.argv.find(arg => arg.startsWith('--phase-cohort='));
+  if (cohort) return runCohort(cohort.slice('--phase-cohort='.length));
+  // Every old scenario runs once. Each child owns its global stubs and fixtures;
+  // the shared runner caps concurrency at two and drains failures before return.
+  const code = await require('./fixtures/forge-test-partitions').runPartitions(__filename,
+    cohorts.map(name => `--phase-cohort=${name}`));
+  assert.equal(code, 0, 'phase cohort failed');
 }
 main().then(() => console.log(process.argv.some(arg => arg.startsWith('--review-regression='))
-  ? 'forge-agent-phase: selected regression passed; full suite not run' : 'forge-agent-phase: all scenarios passed')).catch(error => {
+  ? 'forge-agent-phase: selected regression passed; full suite not run'
+  : process.argv.some(arg => arg.startsWith('--phase-cohort=')) ? 'forge-agent-phase: cohort passed; full suite not run'
+    : 'forge-agent-phase: all scenarios passed')).catch(error => {
   console.error(error);
   process.exitCode = 1;
 });

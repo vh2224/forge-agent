@@ -17,9 +17,10 @@
 
 // ── Regex constants — copied verbatim from GSD-2 error-classifier.js ─────────
 const PERMANENT_RE    = /auth|unauthorized|forbidden|invalid.*key|invalid.*api|billing|quota exceeded|account/i;
-const RATE_LIMIT_RE   = /rate.?limit|too many requests|429/i;
+// Numeric HTTP codes must be complete tokens, never digits inside durations or IDs.
+const RATE_LIMIT_RE   = /rate.?limit|too many requests|(?:^|[^\w.])429(?!\w|\.\d)/i;
 const NETWORK_RE      = /network|ECONNRESET|ETIMEDOUT|ECONNREFUSED|socket hang up|fetch failed|connection.*reset|dns/i;
-const SERVER_RE       = /internal server error|500|502|503|overloaded|server_error|api_error|service.?unavailable/i;
+const SERVER_RE       = /internal server error|(?:^|[^\w.])(?:500|502|503)(?!\w|\.\d)|overloaded|server_error|api_error|service.?unavailable/i;
 // ECONNRESET/ECONNREFUSED are in NETWORK_RE (same-model retry first).
 const CONNECTION_RE   = /terminated|connection.?refused|other side closed|EPIPE|network.?(?:is\s+)?unavailable|stream_exhausted(?:_without_result)?/i;
 // Catch-all for V8 JSON.parse errors: all modern variants end with "in JSON at position \d+".
