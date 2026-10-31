@@ -267,7 +267,7 @@ test('validation rejects malformed capability probes and unknown runtime keys', 
     const cases = [
       [{ ...cli, capability_probes: {} }, 'capability_probes must be an array'],
       [{ ...cli, capability_probes: [{ id: 'Bad_Id', args: ['--help'] }] }, 'invalid capability probe id'],
-      [{ ...cli, capability_probes: [{ id: 'dup', args: ['--help'] }, { id: 'dup', args: ['exec'] }] }, 'duplicate capability probe id dup'],
+      [{ ...cli, capability_probes: [{ id: 'dup', args: ['--help'] }, { id: 'dup', args: ['--version'] }] }, 'duplicate capability probe id dup'],
       [{ ...cli, capability_probes: [{ id: 'empty-args', args: [] }] }, 'args must be a non-empty argv array'],
       [{ ...cli, capability_probes: [{ id: 'shell-string', args: 'exec --help' }] }, 'args must be a non-empty argv array'],
       [{ ...cli, capability_probes: [{ id: 'tokens', args: ['--help'], expect_output: '--json' }] }, 'expect_output must be an array'],
@@ -342,10 +342,10 @@ test('detects a fake CLI with argv and never spawns the non-selected host', () =
     assert.strictEqual(fs.readFileSync(marker, 'utf8').split(/\r?\n/).filter(Boolean).length, 2);
     assert.strictEqual(report.probes.claude.capabilities['claude-stream-json'].status, 'absent');
     assert.strictEqual(report.probes.claude.capabilities['claude-stream-json'].reason_code, 'capability-absent');
-    assert.deepStrictEqual(report.probes.codex.capabilities, {
-      'codex-app-server': { id: 'codex-app-server', args: ['app-server', '--help'], status: 'inconclusive', reason_code: 'not-selected' },
-      'codex-exec-json': { id: 'codex-exec-json', args: ['exec', '--help'], status: 'inconclusive', reason_code: 'not-selected' },
-    });
+    // All declared probes remain metadata for the non-selected host; none runs.
+    const inactiveSpecs = api.loadCatalog(path.resolve(__dirname, '..')).catalog.runtimes.codex.capability_probes;
+    assert.deepStrictEqual(report.probes.codex.capabilities, Object.fromEntries(inactiveSpecs.map(({ id, args }) =>
+      [id, { id, args, status: 'inconclusive', reason_code: 'not-selected' }])));
     assert.strictEqual(report.ok, true);
     assert.deepStrictEqual(report.required_failures, []);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }

@@ -289,7 +289,8 @@ test('C01 read-only default: no spawn network git or writes, canonical readers/h
   const child = require('child_process'); const http = require('http'); const https = require('https'); const net = require('net');
   const saved = [];
   const forbid = (target, key) => { saved.push([target, key, target[key]]); target[key] = () => { throw new Error(`forbidden ${key}`); }; };
-  for (const key of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync']) forbid(child, key);
+  // Block every child-process function, including constructors and fork.
+  for (const key of Object.keys(child).filter((key) => typeof child[key] === 'function')) forbid(child, key);
   for (const key of ['writeFileSync', 'appendFileSync', 'mkdirSync', 'renameSync', 'unlinkSync']) forbid(fs, key);
   forbid(http, 'request'); forbid(https, 'request'); forbid(net, 'connect');
   const beforeReads = reads; const beforeComparisons = comparisons;

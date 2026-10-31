@@ -2151,6 +2151,8 @@ If NO alternative account is registered:
 
 ## Final Report (milestone complete)
 
+**Fire push (call-site 3):** After printing the Final Report below, use Push helper with message `"Forge {RUN_ID} — milestone completa. {N} slices entregues."` (N = count of slices in the report table).
+
 **Isolation cleanup** — runs ONLY here (milestone complete), never on pause/blocked/partial exits (the branch/worktree must survive for resume). No-op when `ISOLATION_MODE == shared`. In `branch` mode it checks the repo back out to the default branch (the `forge/{run}` branch is kept for PR/merge by the operator). In `worktree` mode it removes the worktree only if `worktree_cleanup_on_complete: true` in prefs:
 
 ```bash
@@ -2188,7 +2190,6 @@ Cada `{estado}` cita a própria evidência (SUMMARY, DELIVERY, REVIEW, execuçã
 
 The review digest is built from the `review` / `review-triage` events in `events.jsonl` (fallback: scan the `**Outcome:**` lines of each `{S##}-REVIEW.md`). Omit the section entirely when the milestone had zero objections.
 
-**Fire push (call-site 3):** After printing the Final Report above, use Push helper with message `"Forge {RUN_ID} — milestone completa. {N} slices entregues."` (N = count of slices in the report table).
 
 ---
 

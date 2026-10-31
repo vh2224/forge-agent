@@ -220,7 +220,7 @@
     },
     {
       "file": "scripts/forge-host-baseline.test.js",
-      "sha256": "99203fa2fcf29f6327347c7fcb3326b7681e3b289c2362e693aa8e2f9b1a0094"
+      "sha256": "cd2d91e9c8920c68986d94478c2337f8aa385abfdc42a51e5ccc3fb0cc01f4b4"
     },
     {
       "file": "docs/runtime-compatibility.md",
