@@ -225,10 +225,13 @@ function existingFiles(files) {
 // re-verify. With default dirs the CLI path uses the REAL readPrefs(cwd);
 // with test overrides (globalDir/localDir) it composes the identical shape
 // via the same exported primitives (parseJsonc / legacyReadLayer / deepMerge).
-function resolveCurrent(cwd, opts) {
+function resolveCurrent(cwd, opts, replacementLayer) {
   const options = opts || {};
   const errors = [];
   const layers = layerDescriptors(cwd, options).map((layer) => {
+    // Preview a pending layer through the same ordering and domain-atomic
+    // merge used after publication. No temporary catalog or inherited copy.
+    if (replacementLayer && replacementLayer.name === layer.name) return replacementLayer.value;
     const jsoncCandidates = layer.jsoncCandidates || [layer.jsoncPath];
     const jsoncPresent = existingFiles(jsoncCandidates);
     if (jsoncPresent.length > 0) {
@@ -575,16 +578,33 @@ function setPreference(cwd, expression, opts) {
   const next = exists
     ? setCatalogValue(original, requested.key, requested.value, schema)
     : activateValues(original, setDottedValue({}, requested.key, requested.value), schema);
-  if (!options.dryRun) {
-    fs.mkdirSync(path.dirname(layer.jsoncPath), { recursive: true });
-    fs.writeFileSync(layer.jsoncPath, next, 'utf8');
-  }
-  const resolved = options.dryRun
-    ? parseJsonc(next).value
-    : resolveCurrent(cwd, options).prefs;
-  const actual = getDottedValue(resolved, requested.key);
+  const nextLayer = parseJsonc(next).value;
+  const actual = getDottedValue(nextLayer, requested.key);
   if (!actual.found || !jsonEqual(actual.value, requested.value)) {
     throw new Error(`--set verification failed for ${requested.key}`);
+  }
+  const expected = resolveCurrent(cwd, options, { name: layerName, value: nextLayer });
+  if (expected.errors.length) throw new Error('--set cannot verify preference layers before writing');
+  if (!options.dryRun) {
+    let writeState = 'not-written';
+    try {
+      fs.mkdirSync(path.dirname(layer.jsoncPath), { recursive: true });
+      writeState = 'unknown'; // An I/O exception can follow a partial write.
+      fs.writeFileSync(layer.jsoncPath, next, 'utf8');
+      writeState = 'written';
+      const observedLayer = parseJsonc(fs.readFileSync(layer.jsoncPath, 'utf8'));
+      const observed = resolveCurrent(cwd, options);
+      if (!observedLayer.ok || resolvedDiff(nextLayer, observedLayer.value).length
+          || observed.errors.length || resolvedDiff(expected.prefs, observed.prefs).length) {
+        throw new Error(`--set verification failed for ${requested.key}`);
+      }
+    } catch (error) {
+      // Preserve an intervening writer's bytes rather than pretending a safe
+      // rollback is possible. Callers must inspect effects before retrying.
+      error.write_state = writeState;
+      if (writeState !== 'not-written') error.message += ` (catalog write state: ${writeState}; inspect before retry)`;
+      throw error;
+    }
   }
   return { status: options.dryRun ? 'dry-run' : 'set', layer: layerName, path: layer.jsoncPath, key: requested.key, value: requested.value };
 }

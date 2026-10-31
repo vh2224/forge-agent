@@ -11,6 +11,7 @@
 
 const { resolveDispatch, TIER_DEFAULTS } = require('./forge-dispatch-resolve.js');
 const { mapPhase, readRoutingConfig } = require('./forge-routing.js');
+const { readPrefs, validatePrefs, loadSchema } = require('./forge-prefs.js');
 
 function domainsFor(cwd) {
   try {
@@ -65,7 +66,9 @@ function buildPhases(cwd) {
       for (const domain of domains) rows.push(makeRow(unitType, domain, resolvedCwd));
     }
   }
-  return { domains, unit_types, rows };
+  const warnings = validatePrefs(readPrefs(resolvedCwd).prefs, loadSchema())
+    .filter(warning => warning.key === 'routing' || warning.key.startsWith('routing.'));
+  return { domains, unit_types, rows, warnings };
 }
 
 function pad(value, width) {
@@ -93,6 +96,10 @@ function renderPhases(cwd) {
   notes.push(
     `Nota: plan-milestone tem tier fixo ${TIER_DEFAULTS['plan-milestone']}, mas seu modelo é configurável em tier_models.${TIER_DEFAULTS['plan-milestone']}.`,
   );
+  if (table.warnings.length) {
+    const { plainText } = require('./forge-sidecar-identity');
+    notes.push('Avisos de routing:', ...table.warnings.map(warning => `- ${plainText(warning.message, { limit: 500 })}`));
+  }
   return [
     'Resolução viva por fase (derivada do resolver do workspace):',
     line(headers),
