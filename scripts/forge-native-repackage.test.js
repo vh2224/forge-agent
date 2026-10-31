@@ -7,8 +7,8 @@ const { fixture } = require('./forge-native-recovery-delivery.test');
 const side = require('./forge-unit-sidecar');
 const roots = require('./forge-code-roots');
 const stateApi = require('./forge-xllm-state');
-async function main() {
-  const f = await fixture({ standalone: true, corrected: true });
+async function scenario(linked = false) {
+  const f = await fixture({ standalone: !linked, corrected: true, linked });
   try {
     const ipcFile = path.join(f.dir, 'ipc.json'), oldJournal = path.join(f.dir, 'old-journal.json');
     const journal = file => ({ journal: { root: f.dir, file, authorize: () => true } });
@@ -97,8 +97,9 @@ async function main() {
     assert.equal((await side.recoverUnitSidecar(f.request, f.recovery, f.runtime)).action, 'replay');
     assert.equal(calls, 1);
     assert.deepEqual(fs.readFileSync(oldJournal), journalBytes);
-    console.log('PASS canonical uninvoked repackage: live census, immutable history, pre-consumption restart, exact payload, short binding and returned/publication replay');
+    console.log('PASS '+(linked?'linked ':'')+'canonical uninvoked repackage: live census, immutable history, pre-consumption restart, exact payload, short binding and returned/publication replay');
   } finally { f.cleanup(); }
 }
-if (require.main === module) main().catch(error => { console.error(error); process.exitCode = 1; });
-module.exports = { main };
+async function main(){await scenario();await scenario(true);}
+if (require.main === module) (process.argv.includes('--linked')?scenario(true):main()).catch(error => { console.error(error); process.exitCode = 1; });
+module.exports = { main, scenario };

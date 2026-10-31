@@ -36,9 +36,17 @@ function verificationFailure(capture) {
   throw error;
 }
 // Match sidecar validation defaults without rewriting durable request/manifest bytes.
-const requestIdentity=request=>{
+const wireProjection=request=>{
+  const {linkedEntryBinding:ignored,...wire}=request;
+  return wire;
+};
+const requestIdentity=(request,linkedEntryOptions)=>{
   const recovery=api('forge-attempt-recovery');
-  return recovery.requestIdentity(recovery.canonicalRequest(request));
+  // Durable requests contain locators only. Reattest through the live adapter;
+  // a capability created inside another validator's clone does not bind this one.
+  const wire=wireProjection(request);
+  return recovery.requestIdentity(recovery.canonicalRequest(wire.linked_begin_key
+    ? recovery.bindLinkedRequest(wire,linkedEntryOptions):wire));
 };
 const leaseRenewals=new WeakMap();
 const documentaryContinuations=new WeakMap();
@@ -101,7 +109,7 @@ function createDocumentaryContinuation({originalManifestFile,originalResultFile,
   const resumedBytes=continuationManifestFile?fs.readFileSync(continuationManifestFile):null;
   const resumed=resumedBytes?JSON.parse(resumedBytes):null;
   if(resumed&&(path.resolve(continuationManifestFile)!==path.resolve(request.resultFile+'.manifest.json')
-    ||roots.digest(resumed.request)!==roots.digest(request)
+    ||roots.digest(wireProjection(resumed.request))!==roots.digest(wireProjection(request))
     ||roots.digest(resumed.documentary_continuation)!==roots.digest(evidence)
     ||roots.digest(resumed.prepared.snapshots)!==roots.digest(original.prepared.snapshots)))fail('documentary-resume-binding');
   const assertRestored=()=>{
@@ -133,7 +141,7 @@ function createDocumentaryContinuation({originalManifestFile,originalResultFile,
       ||resumedBytes&&hash(fs.readFileSync(continuationManifestFile))!==hash(resumedBytes))fail('documentary-original-changed');
   };
   check();const handle=Object.freeze({});
-  documentaryContinuations.set(handle,{request_digest:roots.digest(request),evidence,derived,preserved,check,assertReconciled,assertRestored,
+  documentaryContinuations.set(handle,{request_digest:roots.digest(wireProjection(request)),evidence,derived,preserved,check,assertReconciled,assertRestored,
     resumed_manifest_digest:resumed?roots.digest(resumed):null});return handle;
 }
 // Trusted host capability: imported receipts never authorize metadata changes.
@@ -230,7 +238,7 @@ function inputSections(request) {
 }
 function verificationPolicy(request, plan) {
   const identity = {dispatch_id:request.dispatchId,unit_type:request.unitType,milestone_id:request.milestoneId,
-    slice_id:request.sliceId,task_id:request.taskId,request_sha256:api('forge-code-roots').digest(request)};
+    slice_id:request.sliceId,task_id:request.taskId,request_sha256:api('forge-code-roots').digest(wireProjection(request))};
   const seal = api('forge-verify').normalizeExecutionVerification(request.execution_contract,plan,request.verification||{},{},identity);
   return {identity,seal};
 }
@@ -297,7 +305,10 @@ function criterionBindings(result,capture,unitKey,{inventory,contract,documentar
   for(const item of result.must_haves_status){
     if(item.status!=='met'||!['truth','artifact','key_link'].includes(item.kind)||!Number.isInteger(item.index)||item.index<0)fail('criterion-unmet-or-invalid');
     const criterion_id=unitKey+':'+item.kind+':'+item.index;
-    if(!expected.has(criterion_id)||item.item!==expected.get(criterion_id).text||typeof item.note!=='string')fail('criterion-foreign-or-schema-invalid');
+    // kind/index identify the canonical inventory; item is the worker's display
+    // label, whose public schema permits paraphrases. Keep that original result
+    // intact while bindings use the canonical criterion ID and observed evidence.
+    if(!expected.has(criterion_id)||typeof item.item!=='string'||!item.item.trim()||typeof item.note!=='string')fail('criterion-foreign-or-schema-invalid');
     if(seen.has(criterion_id))fail('criterion-duplicate');seen.add(criterion_id);
     if(item.kind==='artifact'){
       if(!item.root_id)fail('artifact-root-required');
@@ -388,22 +399,24 @@ function phaseNotifier(onPhase,r){
 }
 function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linkedEntryOptions,savedManifest,persistDeliveryReceipt,leaseRenewal,documentaryContinuation,coveragePolicy,supplementalCoverage,onPhase,onCheck}={}){
   if(typeof assertBoundary!=='function'||typeof assertAuthority!=='function')fail('live-controller-boundary-required');
-  const r=structuredClone(request);
+  let r=structuredClone(request);
   const phase=phaseNotifier(onPhase,r);
   delete r.linkedEntryBinding;
+  const wireRequest=structuredClone(r);
   const effectiveIdentity=api('forge-attempt-recovery').canonicalRequest(r);
   if(r.unitType!=='execute-task'||!['milestone','standalone-task'].includes(effectiveIdentity.scope)||effectiveIdentity.phase!=='execute'||r.route?.worker_mode!=='native'||r.route.dispatch_allowed!==true||!r.execution_contract||!r.claim||!r.runId)fail('milestone-native-request-required');
   if(!nativeInvocation?.ok)fail('native-binding-required');
   assertBoundary();
   const side=api('forge-unit-sidecar'),execution=api('forge-task-execution'),roots=api('forge-code-roots'),verify=api('forge-verify');
   const documentary=documentaryContinuation===undefined?null:documentaryContinuations.get(documentaryContinuation);
-  if(documentaryContinuation!==undefined&&(!documentary||documentary.request_digest!==roots.digest(request)
+  if(documentaryContinuation!==undefined&&(!documentary||documentary.request_digest!==roots.digest(wireProjection(request))
     ||(savedManifest?documentary.resumed_manifest_digest!==roots.digest(savedManifest):documentary.resumed_manifest_digest!==null)))fail('documentary-capability-required');
   if(documentary){if(savedManifest)documentary.assertRestored();else documentary.assertReconciled();}
   const renewal=leaseRenewal===undefined?null:leaseRenewals.get(leaseRenewal);
   if(leaseRenewal!==undefined&&(!renewal||!savedManifest||renewal.manifest_digest!==roots.digest(savedManifest)))fail('lease-renewal-capability-required');
   side.validateRecoveryRequest(r,{nativeInvocation,linkedEntryOptions});
-  requestIdentity(r);
+  if(r.linked_begin_key)r=api('forge-attempt-recovery').bindLinkedRequest(wireRequest,linkedEntryOptions);
+  requestIdentity(r,linkedEntryOptions);
   const plan=fs.readFileSync(r.planFile,'utf8'),context=fs.readFileSync(r.contextFile);
   requireExplicitVerify(plan,r);
   const checked=roots.validatePlan(plan,r.execution_contract);
@@ -430,7 +443,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       ||record.phase!=='executed'||record.result?.status!=='partial'||!resultContract.validate(record.result).ok
       ||record.manifest_sha256!==hash(fs.readFileSync(r.resultFile+'.manifest.json'))
       ||record.dispatch_id!==r.dispatchId||record.fingerprint!==side.artifactFingerprint(r)
-      ||record.recovery_identity_sha256!==roots.digest(requestIdentity(r)))fail('supplemental-returned-binding');
+      ||record.recovery_identity_sha256!==roots.digest(requestIdentity(r,linkedEntryOptions)))fail('supplemental-returned-binding');
     for(const row of policy.criteria){
       const item=record.result.must_haves_status.find(item=>api('forge-delivery').unitKey(loc.rules[loc.delivery.input].unit)+':'+item.kind+':'+item.index===row.criterion_id);
       if(!item||item.kind==='artifact'||item.status!=='unknown')fail('supplemental-unknown-only');
@@ -460,7 +473,12 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
     if(policy&&fs.existsSync(manifestFile)&&roots.digest(JSON.parse(fs.readFileSync(manifestFile,'utf8')))!==roots.digest(manifest))fail('documentary-manifest-changed');
     if(documentary)documentary.check();
     if(initialReview)initialReview.check();
-    assertAuthority();assertBoundary();side.validateRecoveryRequest(r,{nativeInvocation,linkedEntryOptions});
+    assertAuthority();assertBoundary();
+    // A capability attests one observation, not future answers/authority.
+    // Rebind the wire locator at every lifecycle boundary, even when the host's
+    // other callbacks validate only claims, leases or a controller boundary.
+    if(wireRequest.linked_begin_key)r=api('forge-attempt-recovery').bindLinkedRequest(wireRequest,linkedEntryOptions);
+    side.validateRecoveryRequest(r,{nativeInvocation,linkedEntryOptions});
     if(hash(fs.readFileSync(r.planFile))!==planHash||hash(fs.readFileSync(r.contextFile))!==contextHash)fail('milestone-input-changed');
     if(inputs.some(row=>hash(fs.readFileSync(row.file))!==row.sha256))fail('milestone-input-changed');
     if(renewal)renewal.check(publishing);
@@ -468,7 +486,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
     for(const root of prepared.protected_roots)execution.assertProtected(root.path,root.snapshot);
   }
   let verified=null;
-  const manifest={request:r,prepared,plan_sha256:planHash,context_sha256:contextHash,inputs,verification_seal:seal};
+  const manifest={request:wireRequest,prepared,plan_sha256:planHash,context_sha256:contextHash,inputs,verification_seal:seal};
   if(documentary)manifest.documentary_continuation=documentary.evidence;
   if(policy&&!supplement)manifest.coverage_policy=policy;
   if(savedManifest && roots.digest(manifest)!==roots.digest(savedManifest))fail('milestone-manifest-changed');
@@ -492,7 +510,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       const originalBytes=fs.readFileSync(returnedReceiptFile),record=JSON.parse(originalBytes);
       if(path.resolve(returnedReceiptFile)!==path.resolve(receiptFile+'.'+hash(originalBytes)+'.json')
         ||record.kind!==(standalone?'standalone-native-continuation':'milestone-native-continuation')||record.phase!=='executed'||record.dispatch_id!==r.dispatchId||record.manifest_sha256!==hash(fs.readFileSync(manifestFile))
-        ||record.fingerprint!==side.artifactFingerprint(r)||record.recovery_identity_sha256!==roots.digest(requestIdentity(r))
+        ||record.fingerprint!==side.artifactFingerprint(r)||record.recovery_identity_sha256!==roots.digest(requestIdentity(r,linkedEntryOptions))
         ||!resultContract.validate(record.result).ok||!['done','partial'].includes(record.result.status))fail('documentary-returned-binding');
       const readSources=()=>{const budget={paths:new Set(),bytes:0};return policy.criteria.flatMap(row=>row.sources.map(source=>readDocumentarySource(source,r.execution_contract,budget)));};
       const sources=readSources();
@@ -564,7 +582,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       if(!resultContract.validate(result).ok)fail('native-result-invalid');
       persist({kind:standalone?'standalone-native-continuation':'milestone-native-continuation',phase:'executed',dispatch_id:r.dispatchId,
         ...(renewal?{lease_reconciliation:renewal.evidence}:{}),
-        fingerprint:side.artifactFingerprint(r),recovery_identity_sha256:roots.digest(requestIdentity(r)),
+        fingerprint:side.artifactFingerprint(r),recovery_identity_sha256:roots.digest(requestIdentity(r,linkedEntryOptions)),
         route:r.route,manifest_sha256:hash(fs.readFileSync(manifestFile)),result,
         code_state:execution.replayState(r.cwd,r.execution_contract)});
     },
@@ -577,6 +595,17 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       const capture=verify.captureRootDelivery(r.execution_contract,plan,{...r.verification,unit:loc.rules[loc.delivery.input].unit,
         verificationSeal:seal,verificationIdentity,resourceEventSink:line=>resourceEvents.push(line),
         ...(typeof onCheck==='function'?{onCheck}:{})});
+      // Retain actual command results before guards or criterion binding can
+      // refuse. This private evidence is neither a ready receipt nor authority
+      // to replay/skip verification. Its digest binds the original result and
+      // exact manifest; failed attempts remain failed.
+      const captured={schema_version:1,kind:'native-verification-capture',dispatch_id:r.dispatchId,
+        manifest_sha256:hash(fs.readFileSync(manifestFile)),result_sha256:hash(JSON.stringify(result)),capture};
+      const captureBytes=JSON.stringify(captured)+'\n',retained=path.join(path.dirname(r.resultFile),'forge-verification-'+hash(captureBytes)+'.json');
+      for(const root of [r.contextRoot,...r.execution_contract.code_roots.map(row=>row.path)])api('forge-xllm').validateResultFileTarget(retained,root);
+      try{fs.writeFileSync(retained,captureBytes,{flag:'wx',mode:0o600});}
+      catch(error){if(error.code!=='EEXIST'||!fs.lstatSync(retained).isFile()||fs.lstatSync(retained).isSymbolicLink()
+        ||fs.readFileSync(retained,'utf8')!==captureBytes)throw error;}
       guard();if(!capture.passed)verificationFailure(capture);
       if(documentary||initialReview){
         if(documentary){
@@ -611,7 +640,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       const record={kind:'native-execute-task',phase:'ready',dispatch_id:r.dispatchId,result,artifacts,route:r.route,response_sha256:hash(JSON.stringify(result)),
         ...(supplement?{supplemental_coverage:structuredClone(supplement.evidence)}:{}),
         ...(renewal?{lease_reconciliation:renewal.evidence}:{}),
-        fingerprint:side.artifactFingerprint(r),recovery_identity_sha256:roots.digest(requestIdentity(r)),
+        fingerprint:side.artifactFingerprint(r),recovery_identity_sha256:roots.digest(requestIdentity(r,linkedEntryOptions)),
         manifest_sha256:hash(fs.readFileSync(manifestFile)),
         // Legacy carrier name retained; task identity remains explicitly standalone.
         milestone_delivery:{...(standalone?{scope:'standalone-task'}:{}),plan_sha256:planHash,protected_owner:prepared.protected_owner,protected_roots:prepared.protected_roots,code_state:execution.replayState(r.cwd,r.execution_contract)}};
@@ -693,7 +722,7 @@ async function replay({request,recovery,runtime,nativeOptions}) {
   const reservation=state.reservations.at(-1);
   if(roots.digest(reservation)!==recovery.resumeReservation?.sha256
       || state.continuation.reservation_sha256!==recovery.resumeReservation.sha256
-      || state.request_identity_sha256!==roots.digest(requestIdentity(request))
+      || state.request_identity_sha256!==roots.digest(requestIdentity(request,runtime.linkedEntryOptions))
       || state.pending_questions.some(q=>q.status==='pending'))fail('milestone-replay-state-binding');
   const expected=request.resultFile+'.recovery-'+recovery.resumeReservation.sha256+'.json';
   if(binding.manifest_file!==expected+'.manifest.json'||binding.receipt_file!==expected+'.receipt.json')fail('milestone-replay-path-binding');
@@ -705,12 +734,14 @@ async function replay({request,recovery,runtime,nativeOptions}) {
   const manifestBytes=fs.readFileSync(binding.manifest_file), receiptBytes=fs.readFileSync(savedReceiptFile);
   if(hash(receiptBytes)!==binding.receipt.sha256)fail('milestone-replay-receipt-hash');
   if(hash(manifestBytes)!==binding.manifest_sha256)fail('milestone-replay-manifest-binding');
-  const manifest=JSON.parse(manifestBytes), record=JSON.parse(receiptBytes), r=manifest.request;
+  const manifest=JSON.parse(manifestBytes), record=JSON.parse(receiptBytes), wireRequest=manifest.request;
+  const r=wireRequest.linked_begin_key?recoveryApi.bindLinkedRequest(wireRequest,runtime.linkedEntryOptions):wireRequest;
   const expectedRequest={...request,route:r.route,recoveryStateFile:recovery.stateFile,
     dispatchId:api('forge-recovery-dispatch-id').recoveryDispatchId(request.dispatchId,recovery.resumeReservation.sha256),resultFile:expected};
-  if(roots.digest(r)!==roots.digest(expectedRequest)||record.manifest_sha256!==binding.manifest_sha256
+  delete expectedRequest.linkedEntryBinding;
+  if(roots.digest(wireRequest)!==roots.digest(expectedRequest)||record.manifest_sha256!==binding.manifest_sha256
       || record.dispatch_id!==r.dispatchId||record.fingerprint!==api('forge-unit-sidecar').artifactFingerprint(r)
-      || record.recovery_identity_sha256!==roots.digest(requestIdentity(r))
+      || record.recovery_identity_sha256!==roots.digest(requestIdentity(r,runtime.linkedEntryOptions))
       || !resultContract.validate(record.result).ok||!['executed','ready'].includes(record.phase))fail('milestone-replay-receipt-binding');
   const replayOptions=nativeOptions(r.route,{fileBacked:state.continuation.packaging_reason==='uninvoked-native-file-repackage'});
   replayOptions.assertReplay?.();
