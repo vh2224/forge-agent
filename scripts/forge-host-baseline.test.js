@@ -541,8 +541,21 @@ test('T05 real documents: CP2 versions pending gates matrix and safe evidence ha
   assert.strictEqual(evidence.current_panel_runtime.panel_stable_sha256, evidence.current_panel_runtime.canonical_stable_sha256);
   assert(evidence.official_releases.every((row) => row.status === 'revalidated' && row.release_notes_review === 'pending'
     && /^[a-f0-9]{64}$/.test(row.sha256) && row.body_bytes > 0));
-  for (const row of [...evidence.inspected_source_fingerprints, ...evidence.artifacts]) {
+  // Dated evidence/artifacts stay immutable; inspected runtime source can
+  // legitimately change. The canonical reader must expose that drift instead
+  // of forcing a rewrite of historical fingerprints to make the test green.
+  for (const row of evidence.artifacts) {
     assert.strictEqual(sha256(fs.readFileSync(path.join(REPO, row.file))), row.sha256, row.file);
+  }
+  const current = validateBaseline({ cwd: REPO, baseline: file });
+  for (const row of evidence.inspected_source_fingerprints) {
+    const observed = current.sources.find(source => source.file === row.file);
+    const hash = sha256(fs.readFileSync(path.join(REPO, row.file)));
+    assert(observed, row.file);
+    assert.strictEqual(observed.recorded_sha256, row.sha256, row.file);
+    assert.strictEqual(observed.current_sha256, hash, row.file);
+    assert.strictEqual(observed.status, hash === row.sha256 ? 'unchanged' : 'changed', row.file);
+    assert.strictEqual(observed.revalidation_required, hash !== row.sha256, row.file);
   }
   const report = fs.readFileSync(path.join(REPO, data.report), 'utf8');
   const runtime = fs.readFileSync(path.join(REPO, 'docs/runtime-compatibility.md'), 'utf8');
@@ -569,7 +582,11 @@ test('T05 real repository: current pointer lineage immutable originals and final
   assert.strictEqual(result.ok, true, JSON.stringify(result.issues));
   assert.strictEqual(result.selection.source, 'pointer');
   assert.strictEqual(result.lineage[0].previous, BASE);
-  assert(result.sources.every((row) => !row.file.startsWith('scripts/forge-host-baseline') || row.status === 'unchanged'));
+  for (const row of result.sources.filter(source => source.file.startsWith('scripts/forge-host-baseline'))) {
+    const changed = sha256(fs.readFileSync(path.join(REPO, row.file))) !== row.recorded_sha256;
+    assert.strictEqual(row.status, changed ? 'changed' : 'unchanged');
+    assert.strictEqual(row.revalidation_required, changed);
+  }
   assert.strictEqual(validateBaseline({ cwd: REPO, baseline: BASE }).ok, true);
 });
 bounded.readBoundedStableFile = originalRead;
