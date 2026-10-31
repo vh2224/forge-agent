@@ -17,3 +17,12 @@ de `modelNotFound` e no tipo `ImageGenerationInputImage`.
 
 Não regenerar esta fixture para fazer um teste passar. Uma revisão futura deve
 adicionar outro arquivo com versão e proveniência próprias, preservando este.
+
+## Codex 0.165.0 historical pin
+
+Exact source bytes from commit44ef89fa4a7b3302db46ec12cb4ded7de268aeeb, before the0.166.0 repin.
+
+- File: `codex-appserver-pin-0.165.0.json`
+- SHA-256: `ffb3f1573729c89465e6f8a5c7460cd5b1396660c35a22a96004e891efe56659`
+- Generator timestamp: `2026-10-28T17:17:41.004Z`
+- Use: retain the dated0.165 review and compare the next actual projection without rewriting history.

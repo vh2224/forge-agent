@@ -43,6 +43,7 @@
       "type": "object"
     },
     "ThreadItem": {
+      "description": "A thread item and its recorded lifecycle times. The payload stays flat on the wire.",
       "oneOf": [
         {
           "properties": {
@@ -825,6 +826,14 @@
               ],
               "default": null
             },
+            "generationId": {
+              "default": null,
+              "description": "Image generation identifier for the generated image, when provided by the image backend.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "id": {
               "type": "string"
             },
@@ -945,7 +954,28 @@
           "title": "ContextCompactionThreadItem",
           "type": "object"
         }
-      ]
+      ],
+      "properties": {
+        "completedAtMs": {
+          "default": null,
+          "description": "Unix timestamp in milliseconds when the item completed, if recorded.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "startedAtMs": {
+          "default": null,
+          "description": "Unix timestamp in milliseconds when the item started, if recorded.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
     },
     "TurnCompletedNotification": {
       "properties": {
@@ -1128,8 +1158,8 @@
     }
   },
   "meta": {
-    "codex_version": "0.165.0",
-    "projected_at": "2026-10-28T17:17:41.004Z",
+    "codex_version": "0.166.0",
+    "projected_at": "2026-10-31T14:10:04.290Z",
     "referenced_count": 54,
     "unresolved_refs": [],
     "variant_count": 19
@@ -1254,6 +1284,7 @@
             "flexUnavailable",
             "serverOverloaded",
             "modelNotFound",
+            "policyCapacityUnavailable",
             "cyberPolicy",
             "misalignmentPolicyViolation",
             "tooManyDenials",
