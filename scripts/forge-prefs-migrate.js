@@ -419,7 +419,7 @@ function rootEntryEnd(mask, text, keyStart) {
   let started = false;
   for (index += 1; index < mask.length; index++) {
     const character = mask[index];
-    if (/[ \t\r\n]/.test(character)) {
+    if (/\s/.test(character)) {
       if (!started) continue;
       if (depth === 0) break;
     }
@@ -443,11 +443,11 @@ function rootEntryEnd(mask, text, keyStart) {
   // Consume the entry delimiter even when whitespace/comments separate it from
   // the value, but never consume the following key or the outer closing brace.
   let delimiter = index;
-  while (delimiter < mask.length && /[ \t\r\n]/.test(mask[delimiter])) delimiter += 1;
+  while (delimiter < mask.length && /\s/.test(mask[delimiter])) delimiter += 1;
   if (mask[delimiter] === ',') index = delimiter + 1;
   // A complete own line may be replaced, including CRLF/CR. On a shared line,
   // leave every following byte intact rather than searching for a later EOL.
-  const tail = /^[ \t]*(?:\r\n|\n|\r)/.exec(text.slice(index));
+  const tail = /^[ \t]*(?:\r?\n|\r)/.exec(text.slice(index));
   return tail === null ? index : index + tail[0].length;
 }
 
