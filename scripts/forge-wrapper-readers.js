@@ -92,6 +92,13 @@ const WRAPPER_DIR_READERS = Object.freeze([
     why: 'The specific snapshotForge filter walks only path.join(gsd, \'forge\'); milestone occurrences are deterministic fixture construction, so no third-party wrapper root is enumerated.',
   },
   {
+    file: 'forge-panel-probe.js',
+    dirs: Object.freeze(['.gsd/milestones', '.gsd/tasks']),
+    evidence: 'forge-panel-probe.js:sourceSnapshot fingerprints explicit personal bound-work STATE/PLAN paths; readdirSync locates Code resources and opendirSync lists only .gsd/forge/questions.',
+    verdict: 'safe-by-construction',
+    why: 'Specific bound-work IDs select terminal files directly; the probe never enumerates milestone or task wrapper roots. Question and Code-resource enumeration cannot consume wrapper entries; uncertain source stability remains unknown.',
+  },
+  {
     file: 'forge-memory-migrate.js',
     dirs: Object.freeze(['.gsd/milestones']),
     evidence: 'forge-memory-migrate.js:184-204 — fs.readdirSync(milestonesDir) and stat.isDirectory() select milestone directories.',
