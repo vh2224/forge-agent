@@ -77,9 +77,9 @@ main_branch: main
 
 routing:
   backend:
-    execute:
-      tier: [standard, heavy]
-      fallback: codex
+    executor:
+      standard: [gpt-6-luna, claude-sonnet-5-5]
+      fallback: gpt-6-luna
 
 ## Review Settings
 
@@ -172,7 +172,7 @@ const userValues = {
   effort: { 'plan-milestone': 'max', 'execute-task': 'low' },
   auto_commit: true,
   main_branch: 'main',
-  routing: { backend: { execute: { tier: ['standard', 'heavy'], fallback: 'codex' } } },
+  routing: { backend: { executor: { standard: ['gpt-6-luna', 'claude-sonnet-5-5'], fallback: 'gpt-6-luna' } } },
 };
 const activated = activateValues(scaffold, userValues, schema);
 const activatedParsed = parseJsonc(activated);
@@ -210,8 +210,8 @@ process.stdout.write('\nmigrateAll — happy path round-trip\n');
     'post-migration resolved deep-equals pre-migration resolved');
   assert(newLocal.review.rounds === 3, 'fold direction: prefs.local.md wins the conflict (rounds 3)');
   assert(newGlobal.auto_commit === true && newGlobal.main_branch === 'main', 'legacy flat scalars survive');
-  assert(deepEqual(newGlobal.routing.backend.execute.tier, ['standard', 'heavy']), 'routing tier list survives');
-  assert(newGlobal.routing.backend.execute.fallback === 'codex', 'routing fallback survives');
+  assert(deepEqual(newGlobal.routing.backend.executor.standard, ['gpt-6-luna', 'claude-sonnet-5-5']), 'routing tier list survives');
+  assert(newGlobal.routing.backend.executor.fallback === 'gpt-6-luna', 'routing fallback survives');
 
   // .bak present for every legacy md; legacy md removed after re-verify.
   assert(fs.existsSync(path.join(fx.globalDir, 'forge-agent-prefs.md.bak')), 'global .bak exists');
@@ -500,6 +500,74 @@ process.stdout.write('\nT02 — --set rewrites in place instead of appending\n')
   const afterSet = resolveCurrent(fx.cwd, opts).prefs;
   assert(afterSet.review.rounds === 3 && afterSet.review.style === 'dialectic',
     'a later --set reads the hand-edited value forward instead of overwriting it');
+}
+
+process.stdout.write('\nIssues277/278 — routing shape and layer-aware set verification\n');
+{
+  const fx = makeFixture({ globalMd: null });
+  const globalPath = path.join(fx.globalDir, 'forge-agent-prefs.jsonc');
+  const localPath = path.join(fx.localDir, 'forge-prefs.jsonc');
+  const inherited = { routing: { default: { executor: { light: ['gpt-6-luna'] } } }, review: { rounds: 2 } };
+  fs.writeFileSync(globalPath, JSON.stringify(inherited, null, 2));
+  fs.writeFileSync(localPath, '{}');
+  const opts = { globalDir: fx.globalDir, localDir: fx.localDir, layer: 'local' };
+  const expression = 'routing=' + JSON.stringify({ visual: { executor: { light: ['gpt-6.1-terra'] } } });
+  const originalGlobal = fs.readFileSync(globalPath, 'utf8'), originalLocal = fs.readFileSync(localPath, 'utf8');
+  const dry = setPreference(fx.cwd, expression, { ...opts, dryRun: true });
+  assert(dry.status === 'dry-run' && fs.readFileSync(globalPath, 'utf8') === originalGlobal && fs.readFileSync(localPath, 'utf8') === originalLocal,
+    'issue278 dry-run previews inherited routing without writing either layer');
+  const applied = setPreference(fx.cwd, expression, opts);
+  const local = parseJsonc(fs.readFileSync(localPath, 'utf8')).value;
+  const resolved = resolveCurrent(fx.cwd, opts).prefs;
+  assert(applied.status === 'set' && deepEqual(local.routing, JSON.parse(expression.slice('routing='.length)))
+    && deepEqual(Object.keys(resolved.routing).sort(), ['default', 'visual']) && resolved.review.rounds === 2
+    && fs.readFileSync(globalPath, 'utf8') === originalGlobal,
+    'issue278 apply verifies only the requested layer plus canonical merged semantics, preserving inherited domains');
+  setPreference(fx.cwd, 'routing.default=' + JSON.stringify({ planner: { heavy: ['claude-opus-5-5'] } }), opts);
+  assert(!resolveCurrent(fx.cwd, opts).prefs.routing.default.executor,
+    'issue278 setting a domain preserves whole-domain replacement rather than inheriting omitted phases');
+  setPreference(fx.cwd, 'review.rounds=3', opts);
+  assert(setPreference(fx.cwd, 'review.rounds=1', { ...opts, layer: 'global' }).status === 'set'
+    && parseJsonc(fs.readFileSync(globalPath, 'utf8')).value.review.rounds === 1
+    && resolveCurrent(fx.cwd, opts).prefs.review.rounds === 3,
+    'issue278 global layer updates succeed even when a local value intentionally overrides the result');
+  const beforeRefusal = fs.readFileSync(localPath, 'utf8');
+  for (const dryRun of [true, false]) {
+    let refused = false;
+    try { setPreference(fx.cwd, 'routing.tier_models.light=["claude-haiku-5-5"]', { ...opts, dryRun }); }
+    catch (error) { refused = /routing phase/.test(error.message); }
+    assert(refused && fs.readFileSync(localPath, 'utf8') === beforeRefusal,
+      'issue277 malformed routing is rejected before writes in both dry-run and apply');
+  }
+  assert(setPreference(fx.cwd, 'routing.tier_models=' + JSON.stringify({ executor: { light: ['gpt-6-luna'] } }), opts).status === 'set',
+    'issue277 a custom domain named tier_models remains supported with a valid structure');
+  const originalWrite = fs.writeFileSync;
+  let failure;
+  try {
+    fs.writeFileSync = function (file, content, ...args) {
+      const result = originalWrite.call(fs, file, content, ...args);
+      if (path.resolve(file) === path.resolve(localPath)) originalWrite.call(fs, file, JSON.stringify({ review: { rounds: 2 } }, null, 2));
+      return result;
+    };
+    try { setPreference(fx.cwd, 'review.rounds=1', opts); } catch (error) { failure = error; }
+  } finally { fs.writeFileSync = originalWrite; }
+  assert(failure && failure.write_state === 'written' && /catalog write state: written/.test(failure.message)
+    && parseJsonc(fs.readFileSync(localPath, 'utf8')).value.review.rounds === 2,
+    'issue278 post-write drift discloses the retained write and never erases intervening bytes');
+  let partialFailure;
+  try {
+    fs.writeFileSync = function (file, content, ...args) {
+      if (path.resolve(file) === path.resolve(localPath)) {
+        originalWrite.call(fs, file, '{');
+        throw Object.assign(new Error('synthetic interrupted write'), { code: 'EIO' });
+      }
+      return originalWrite.call(fs, file, content, ...args);
+    };
+    try { setPreference(fx.cwd, 'review.rounds=1', opts); } catch (error) { partialFailure = error; }
+  } finally { fs.writeFileSync = originalWrite; }
+  assert(partialFailure && partialFailure.code === 'EIO' && partialFailure.write_state === 'unknown'
+    && /catalog write state: unknown/.test(partialFailure.message) && fs.readFileSync(localPath, 'utf8') === '{',
+    'issue278 partial I/O failure preserves the uncertain write and original error without unsafe rollback');
 }
 
 process.stdout.write(`\n${passes} passed, ${failures} failed\n`);
