@@ -692,6 +692,7 @@ function runCli(argv) {
 }
 
 module.exports = {
+  scanJsonc,
   parseJsonc,
   stripJsonc,
   preferenceLayerDescriptors,
