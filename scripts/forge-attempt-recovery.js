@@ -772,8 +772,9 @@ async function recoverAttempt(options) {
   // requires a held root contract. Preserve that historical identity only after
   // the actual unit adapter proves its already-completed reset, read-only.
   let assertLegacyReviewFix;
-  if (options.request.unitType === 'review-fix' && !options.request.execution_contract
-      && options.executionContract && state.roots_sha256 === digest({ cwd: options.request.cwd })
+  if (options.request.unitType === 'review-fix'
+      && options.executionContract && !inspection.receipt.recovery_baseline
+      && [digest({ cwd: options.request.cwd }),digest(options.executionContract)].includes(state.roots_sha256)
       && !inspection.valid_saved_response) {
     const inspectLegacy = () => require('./forge-unit-sidecar').reconcileLegacyReviewFix(options.request, inspection.receipt, options.executionContract);
     inspectLegacy();

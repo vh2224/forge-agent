@@ -4,18 +4,25 @@
 const fs = require('fs');
 const { digest, key } = require('./forge-code-roots');
 const fail = () => { throw Object.assign(new Error('native-repackage-evidence-invalid'), { code: 'native-repackage-evidence-invalid', provider_called: false }); };
+// Wire evidence never carries an opaque process-local capability. Comparing
+// these data projections grants no authority; callers must reattest live entry.
+function wireRequest(request) {
+  const { linkedEntryBinding: ignored, ...wire } = request;
+  return wire;
+}
 function preserveRequest(current, retained) {
   // Runtime maintenance changes the resolver's source observation, not the
   // historical request seal. Every other route/request field must still match;
   // the current resolver and native adapter remain the dispatch authority.
-  const { route: currentRoute, ...currentRequest } = current;
-  const { route: retainedRoute, ...retainedRequest } = retained;
+  const { route: currentRoute, ...currentRequest } = wireRequest(current);
+  const { route: retainedRoute, ...retainedRequest } = wireRequest(retained);
   const { resolution_sources: currentSources, ...currentPolicy } = currentRoute;
   const { resolution_sources: retainedSources, ...retainedPolicy } = retainedRoute;
   const equal = require('util').isDeepStrictEqual;
   if (!Array.isArray(currentSources) || !Array.isArray(retainedSources)
       || !equal(currentRequest, retainedRequest) || !equal(currentPolicy, retainedPolicy)) fail();
-  return structuredClone(retained);
+  return { ...structuredClone(wireRequest(retained)),
+    ...(current.linkedEntryBinding ? { linkedEntryBinding: current.linkedEntryBinding } : {}) };
 }
 function inspect(options, state, request, resumePrepared = false) {
   const retained = state.continuation?.repackage_evidence;
@@ -34,7 +41,7 @@ function inspect(options, state, request, resumePrepared = false) {
   const bytes = files.map(file => fs.readFileSync(file));
   const [ipc, journal, manifest] = bytes.map(value => JSON.parse(value));
   if (digest(bytes[2]) !== old.delivery.manifest_sha256 || ipc.manifest_file !== old.delivery.manifest_file
-      || digest(ipc.request) !== digest(manifest.request) || digest(ipc.args) !== old.final_request_sha256
+      || digest(wireRequest(ipc.request)) !== digest(wireRequest(manifest.request)) || digest(ipc.args) !== old.final_request_sha256
       || digest(ipc.args?.message) !== old.prompt_sha256
       || old.delivery.manifest_file !== manifest.request.resultFile + '.manifest.json'
       || old.delivery.receipt_file !== manifest.request.resultFile + '.receipt.json'
@@ -58,7 +65,10 @@ function inspect(options, state, request, resumePrepared = false) {
       assertUnchanged();
       const rebuilt = { ...invocation, args: ipc.args };
       if (digest(rebuilt) !== old.invocation_sha256
-          || require('./forge-native-supervision').digest(JSON.stringify({ invocation: rebuilt, identity: manifest.request })) !== journal.identity
+          // The original journal was sealed over the original IPC identity,
+          // which can contain a serialized empty handle. Keep those historical
+          // bytes; wire equivalence above never rewrites that identity/hash.
+          || require('./forge-native-supervision').digest(JSON.stringify({ invocation: rebuilt, identity: ipc.request })) !== journal.identity
           || digest({ ...invocation.args, message: ipc.args.message }) !== digest(ipc.args)) fail();
       const mapped = require('./forge-native-prompt-file').prepare({
         file: manifest.request.resultFile + '.native-prompt.txt', prompt: ipc.args.message,

@@ -33,12 +33,12 @@ async function fixture(options = {}) {
   const claim = { schema_version: 2, generation: crypto.randomUUID(), execution_contract: f.contract,
     paths: f.contract.code_roots.map(row => ({root_id:row.id,path:'same.txt'})) };
   require('./forge-runs').add(f.owner,{id:'fixture-run',kind:standalone?'task':'milestone',session_id:'fixture',write_claim:claim});
-  const r = {unitType:'execute-task',scope:'milestone',phase:'execute',milestoneId:'M901',sliceId:'S01',taskId:'T01',
+  let r = {unitType:'execute-task',scope:'milestone',phase:'execute',milestoneId:'M901',sliceId:'S01',taskId:'T01',
     cwd:f.a,contextRoot:f.owner,planFile,roadmapFile:f.roadmap,execution_contract:f.contract,claim,runId:'fixture-run',
     gates:{plan:'skipped',planSkipReason:'interactive-off',claim:'proceed',security:'passed'},
     contextFile:path.join(base,'S01-CONTEXT.md'),securityFile:planFile.replace('-PLAN.md','-SECURITY.md'),
     researchFile:path.join(base,'S01-RESEARCH.md'),workflowId:'fixture',dispatchId:options.dispatchId || 'ordinary-execute',
-    resultFile:path.join(f.dir,'execute.json'),prompt:'Implement the claimed fixture only.',
+    resultFile:path.join(f.dir,options.resultBasename || 'execute.json'),prompt:'Implement the claimed fixture only.',
     verification:{commandTimeoutMs:300000,commandsByRoot:{alpha:[command],beta:[command]}}};
   if (standalone) {
     if (options.nativePromptFile) r.nativePromptFile = path.join(f.dir, 'requested-prompt.txt');
@@ -81,6 +81,28 @@ async function fixture(options = {}) {
     assert.equal(lease.lease?.generation,begin.generation);assert.equal(lease.reason,'lease-active');
   };
   }
+  if(options.linked){
+    assert(!standalone,'linked controller fixture has milestone scope');
+    const controller=require('./forge-unit-controller'),oldReceipt=path.join(f.dir,'linked-prior.receipt.json');
+    write(oldReceipt,JSON.stringify({phase:'failed',recovery_identity_sha256:roots.digest(recovery.requestIdentity(r)),
+      failure:{reason_code:'fixture-linked-terminal',provider_called:false}}));
+    const physical=[{root_id:'owner',path:f.owner},...f.contract.code_roots.map(root=>({root_id:root.id,path:root.path}))];
+    const originalRequest={...r};
+    const live={ownerToken:'fixture-owner',prefsReader:()=>({ok:true,prefs:{workflow:{skip_discuss:true,skip_research:true}}}),
+      processProbe:()=> 'stopped',inspectAttempt:()=>({receipt_path:oldReceipt,request:originalRequest,roots:physical,pending_questions:[]}),
+      reconcileRoots:({root})=>({root_id:root.root_id,process_stopped:true,reconciled:true}),
+      captureEntryBaseline:()=>({sha256:'a'.repeat(64),roots:physical}),questionStateAdapter:()=>({answers:[]}),
+      entryAuthority:recovery.createAuthority(reference=>({reference,status:'resolved',answer:'authorize',resolved_at:new Date().toISOString()}))};
+    const begin=controller.lookupRecord(f.owner,'transaction','fixture-begin');
+    const consumed=controller.consumeFailure(f.owner,{milestone:'M901',unit:begin.unit,begin_key:begin.idempotency_key,
+      owner_token:'fixture-owner',host_runtime:'codex',slice:'S01'},live);
+    const entered=controller.reenter(f.owner,{milestone:'M901',unit:begin.unit,owner_token:'fixture-owner',host_runtime:'codex',
+      entry:{entry_id:'linked-repackage-fixture',failure_key:consumed.failure_key,failure_checksum:consumed.failure_checksum,
+        authorization_ref:'conversation:linked-repackage'}},live);
+    r.linked_begin_key=entered.transaction.idempotency_key;r=recovery.bindLinkedRequest(r,live);f.request=r;
+    f.linkedEntryOptions=live;
+    f.assertBoundary=()=>controller.validateLinkedEntry(f.owner,r.linked_begin_key,live);
+  }
   const session=recovery.createRecovery({unit:'execute-task/'+taskId,roots_sha256:roots.digest(f.contract),request:r,clock:()=>10,persist:value=>stateApi.saveRecovery(f.stateFile,value)});
   session.record({...f.initial.attempts[0],route:r.route,caller_request_sha256:recovery.callerRequestHash(r)});
   write(f.receiptFile,JSON.stringify({phase:'failed',dispatch_id:r.dispatchId,fingerprint:side.artifactFingerprint(r),route:r.route,
@@ -112,6 +134,7 @@ async function fixture(options = {}) {
     transitions:[{type:'uninvoked-native-reservation',reference:'fixture:retained-census'}],resumeReservation:{sha256:roots.digest(f.initial.reservations.at(-1))}};
   f.runtime={processProbe:()=> 'stopped',recoveryAuthorization:f.binding,activeCapabilities:capabilities,assertBoundary:f.assertBoundary,
     transitionAdapter:fixtures.adapter(f,{attestUninvoked:challenge=>({...challenge,binding_sha256:roots.digest(challenge),status:'uninvoked',native_calls:0,evidence_reference:'fixture:retained-native-census'})})};
+  if(f.linkedEntryOptions)f.runtime.linkedEntryOptions=f.linkedEntryOptions;
   f.result=()=>{
     const unit=side.locations(r).rules[side.locations(r).delivery.input].unit;
     const inventory=require('./forge-delivery').inventoryPlan(plan,planFile,unit);
@@ -250,11 +273,13 @@ async function ordinaryPublication(){
     const bind=value=>delivery.criterionBindings(value,result.result.verified.capture,require('./forge-delivery').unitKey(unit),{inventory,contract:f.contract});
     for(const [name,change] of [
       ['missing',r=>r.must_haves_status.pop()],['duplicate',r=>r.must_haves_status.push(r.must_haves_status[0])],
-      ['foreign item',r=>{r.must_haves_status[0].item='foreign';}],
+      ['foreign index',r=>{r.must_haves_status[0].index=999;}],
       ['foreign root',r=>{r.must_haves_status[1].root_id='beta';}],
       ['fabricated assertion',r=>{r.must_haves_status[0].evidence[0].stdout_line='PASS invented';}],
       ['unmet',r=>{r.must_haves_status[0].status='unmet';}],
     ]) {const changed=f.result();change(changed);assert.throws(()=>bind(changed),undefined,name);}
+    const paraphrased=f.result();paraphrased.must_haves_status[0].item='Observed behavior in my own words';
+    assert.deepEqual(bind(paraphrased),bind(f.result()),'stable kind/index bind the same canonical criterion');
     const extra=f.result();extra.must_haves_status[0].approved=true;
     assert.equal(delivery.resultContract.validate(extra).ok,false);
     console.log('PASS public ordinary restart: exact payload, two claimed roots, one callback, canonical verified publication and immutable history');
