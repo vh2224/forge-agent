@@ -156,12 +156,32 @@ function hashObject(cwd, relPath, vcsName = 'git') {
  * (now-missing → hash:null), so an overlap on either side is detected.
  * @returns {{path:string, hash:string|null}[]}
  */
+function snapshotFailure(result, message) {
+  const error = new Error(message);
+  if (result?.vcs !== 'svn' || !result.diagnostic || typeof result.diagnostic !== 'object') return error;
+  const source = result.diagnostic, diagnostic = { schema_version: 1, layer: 'snapshot-adapter', reconciliation: 'blocked' };
+  const stages = ['policy', 'inventory', 'status', 'properties', 'content', 'missing-paths', 'finalize',
+    'baseline:status', 'baseline:info', 'svn:status', 'svn:info', 'svn:proplist', 'svnversion'];
+  if (stages.includes(source.stage)) diagnostic.stage = source.stage;
+  for (const field of ['budget_ms', 'inventory_entries', 'inventory_bytes', 'content_bytes_read', 'elapsed_ms'])
+    if (Number.isSafeInteger(source[field]) && source[field] >= 0) diagnostic[field] = source[field];
+  const limits = {};
+  for (const field of ['maxEntries', 'maxDepth', 'maxFileBytes', 'maxTotalBytes'])
+    if (Number.isSafeInteger(source.limits?.[field]) && source.limits[field] > 0) limits[field] = source.limits[field];
+  if (Object.keys(limits).length) diagnostic.limits = limits;
+  if (['svn-snapshot-limit', 'svn-snapshot-timeout', 'svn-snapshot-policy-invalid'].includes(result.error)) error.code = result.error;
+  error.diagnostic = diagnostic;
+  error.hint = 'Snapshot refused; reconciliation is incomplete. Inspect the measured stage, inventory and effective limits. '
+    + 'Retain the original attempt evidence; do not raise limits, delete checkout data or skip writer snapshots as an automatic retry.';
+  return error;
+}
+
 function captureSnapshot(cwd, vcsName = 'git') {
   const census = new Set();
   const result = vcs.captureDirty(cwd, { ...optionsFor(cwd, vcsName, census), vcs: vcsName });
   // Never trust `.entries` without checking `.ok` on a SAFETY-CRITICAL path: a silent
   // `[]` here would make the engine believe there was no pre-existing dirty work (R1).
-  if (!result.ok) throw new Error(`git status failed: ${result.error}`);
+  if (!result.ok) throw snapshotFailure(result, `${vcsName} status failed: ${result.error}`);
   return attachCensus(result.entries, census);
 }
 
@@ -336,7 +356,7 @@ function captureAttemptSnapshot(cwd, options = {}) {
     error.code = 'snapshot-baseline-moved'; throw error;
   }
   const svnState = vcsName === 'svn' ? vcs.captureDirty(cwd, { maxBuffer: OPTS.maxBuffer, vcs: 'svn', strict: true }) : null;
-  if (svnState && !svnState.ok) throw new Error(svnState.error || 'svn-snapshot-unavailable');
+  if (svnState && !svnState.ok) throw snapshotFailure(svnState, svnState.error || 'svn-snapshot-unavailable');
   return { attempt_id: options.attemptId || null, start_sha: before, pre_dirty: preDirty, code_dir: path.resolve(cwd), vcs: vcsName,
     ...(svnState ? { svn_state: svnState } : {}) };
 }

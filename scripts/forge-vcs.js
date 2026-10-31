@@ -820,6 +820,9 @@ function svnStrictSnapshot(cwd, opts = {}) {
     const root = fs.realpathSync.native(cwd), policy = { ...SVN_STRICT_POLICY, ...(opts.strictLimits || {}) };
     if (Object.keys(policy).sort().join(',') !== Object.keys(SVN_STRICT_POLICY).sort().join(',')) throw new Error('svn-snapshot-policy-invalid');
     for (const value of Object.values(policy)) if (!Number.isSafeInteger(value) || value < 1) throw new Error('svn-snapshot-policy-invalid');
+    // Report only the effective, validated numeric policy, including when the
+    // inventory refuses before content or SVN commands are read.
+    diagnostic.limits = { ...policy };
     if (typeof opts.exclude === 'function') throw new Error('svn-snapshot-exclusion-unsupported');
     const observation = opts.reviewObservation;
     if (observation && !validateSvnReviewObservation(observation)) throw new Error('svn-review-scope-invalid');
