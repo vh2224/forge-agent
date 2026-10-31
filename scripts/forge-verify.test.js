@@ -431,15 +431,15 @@ test('verification validates mandatory modules before commands and no-stack skip
 // times are normalized for the parity comparison; everything else is equal.
 function normalizeTimes(value) {
   return JSON.parse(JSON.stringify(value, (key, item) => ['durationMs', 'duration_ms', 'timestamp', 'ts', 'captured_at',
-    'started_at', 'updated_at'].includes(key) ? 0 : item));
+    'started_at', 'updated_at', 'supervisor_pid', 'root_pid', 'job_name'].includes(key) ? 0 : item));
 }
 function checkFixture() {
   const cwd = tmpRepo(), gsdDir = path.join(cwd, '.gsd');
   fs.mkdirSync(path.join(cwd, 'scripts'));
   fs.writeFileSync(path.join(cwd, 'scripts', 'ok.js'), "console.log('PASS fixture ok');");
   fs.writeFileSync(path.join(cwd, 'scripts', 'rewritten.js'), "console.log('REWRITTEN BODY');");
-  // The child exits by itself shortly after the timeout; timed_out never claims it did.
-  // On Windows the surviving child can hold the directory (issue 289), so cleanup retries.
+  // The progress flag remains a timeout predicate. Windows separately reports
+  // the job join; POSIX keeps its existing child-exit behavior.
   fs.writeFileSync(path.join(cwd, 'wait.js'), 'setTimeout(() => {}, 1000);');
   const cleanup = () => {
     for (let attempt = 0; ; attempt++) {

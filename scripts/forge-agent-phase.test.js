@@ -761,7 +761,10 @@ async function terminalOutcomes() {
 async function main() {
   const selected = process.argv.find(arg => arg.startsWith('--review-regression='));
   if (selected) {
-    const cases = { replay: publicDeferredGate, late: publicLateCapture, cli: cliFreshness, immediate: publicImmediateGate,
+    const cases = { parity: async () => {
+      xllm.runExecute = async options => transport(options);
+      try { await observerParity(); } finally { xllm.runExecute = realRunExecute; transport = null; }
+    }, replay: publicDeferredGate, late: publicLateCapture, cli: cliFreshness, immediate: publicImmediateGate,
       identity: publicIdentityChannels, terminal: terminalOutcomes };
     const run = cases[selected.slice('--review-regression='.length)];
     assert.equal(typeof run, 'function', 'unknown review regression');

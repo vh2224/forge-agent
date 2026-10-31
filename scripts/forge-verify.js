@@ -560,6 +560,7 @@ function runVerificationCommands(options) {
 
   const timeoutMs = options.commandTimeoutMs || DEFAULT_COMMAND_TIMEOUT_MS;
   const checks = [];
+  let stopped = null;
   const progress = checkProgress(options, commands.length);
 
   for (const [position, command] of commands.entries()) {
@@ -610,7 +611,9 @@ function runVerificationCommands(options) {
     let result;
     try {
       // shell: false — explicit argv binary + args (avoids Node DEP0190, prevents injection)
-      result = spawnSync(shellBin, shellArgs, {
+      result = process.platform === "win32"
+        ? require("./forge-verification-process").runWindowsCommand(commandToRun, { cwd: options.cwd, timeoutMs, env })
+        : spawnSync(shellBin, shellArgs, {
         cwd: options.cwd,  // --cwd is a spawnSync option, never shell-interpolated
         stdio: "pipe",
         encoding: "utf-8",
@@ -620,11 +623,21 @@ function runVerificationCommands(options) {
         timeout: timeoutMs,
         env,
       });
+    } catch (error) {
+      if (process.platform !== "win32") throw error;
+      result = { status: null, stdout: "", stderr: "", signal: null, stop: true,
+        error: Object.assign(new Error("verification supervisor failed before cleanup proof"), { code: "EVERIFYCLEANUP" }),
+        cleanup: { platform: "win32", status: "unproved", started: "unknown", reason: "supervisor-threw",
+          diagnostic: typeof error?.code === "string" && /^[A-Z0-9_-]{1,80}$/.test(error.code) ? error.code : "unknown" } };
     } finally {
-      // W5: released on EVERY exit path of this spawn — success, failure,
-      // timeout, or spawnSync throwing outright.
-      if (leaseHandle && leaseMod && typeof leaseMod.releaseCommandBudget === "function") {
+      // Windows ownership must be joined before releasing the resource budget.
+      // A missing/invalid supervisor result is unknown cleanup, never proof that
+      // a descendant stopped. POSIX retains the existing synchronous behavior.
+      const joined = process.platform !== "win32" || result?.cleanup?.status === "joined";
+      if (joined && leaseHandle && leaseMod && typeof leaseMod.releaseCommandBudget === "function") {
         try { leaseMod.releaseCommandBudget(leaseHandle, { cwd: options.cwd }); } catch { /* MEM008 */ }
+      } else if (!joined && result?.cleanup && leaseHandle) {
+        result.cleanup.budget_release = "deferred";
       }
     }
 
@@ -665,8 +678,14 @@ function runVerificationCommands(options) {
       durationMs,
     };
     if (checkSkipped) check.skipped = checkSkipped;
+    if (result.cleanup) check.cleanup = result.cleanup;
     checks.push(check);
     progress(position, command, { exitCode, durationMs, isTimeout });
+    if (result.stop) {
+      stopped = { reason: result.cleanup?.status === "unproved" ? "cleanup-unproved"
+        : isTimeout ? "timeout" : "supervisor-stopped", not_run: commands.slice(position + 1) };
+      break;
+    }
   }
 
   return {
@@ -674,6 +693,7 @@ function runVerificationCommands(options) {
     checks,
     discoverySource: source,
     timestamp,
+    ...(stopped ? { stopped } : {}),
   };
 }
 

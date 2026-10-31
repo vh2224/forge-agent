@@ -809,7 +809,22 @@ function freezeTime(at=Date.parse('2026-10-29T12:00:00.000Z')){
   const RealDate=Date;
   class FrozenDate extends RealDate{constructor(...args){super(...(args.length?args:[at]));}static now(){return at;}}
   global.Date=FrozenDate;
-  return()=>{global.Date=RealDate;};
+  // These parity fixtures compare full serialized receipts including their
+  // hashes. Run the real supervisor, but give its fresh identities deterministic
+  // test values BEFORE verification hashes are calculated. Production evidence
+  // and the real process-ownership suites remain untouched.
+  const supervisor=require('./forge-verification-process'),original=supervisor.runWindowsCommand;
+  supervisor.runWindowsCommand=(...args)=>{
+    const result=original(...args),cleanup=result.cleanup;
+    if(cleanup?.platform==='win32'&&cleanup.status==='joined'){
+      assert.equal(cleanup.active_processes,0);
+      assert(/^Local\\ForgeVerification-[0-9a-f-]+$/.test(cleanup.job_name));
+      for(const key of ['supervisor_pid','root_pid'])assert(cleanup[key]===null||Number.isSafeInteger(cleanup[key])&&cleanup[key]>0);
+      return {...result,cleanup:{...cleanup,supervisor_pid:cleanup.supervisor_pid===null?null:1,root_pid:cleanup.root_pid===null?null:2,job_name:'Local\\ForgeVerification-parity-fixture'}};
+    }
+    return result;
+  };
+  return()=>{global.Date=RealDate;supervisor.runWindowsCommand=original;};
 }
 function fileMap(dir){
   const out={};
