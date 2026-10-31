@@ -108,6 +108,7 @@ function measureBaseline(cwd, opts) {
       unit_types: Object.keys(byUnitType).length,
     },
     telemetry,
+    ...(options.eventsFile ? { phase_cost: require('./forge-phase-cost').measurePhaseCost(options.eventsFile) } : {}),
     errors,
   };
 }
@@ -144,12 +145,21 @@ function renderMarkdown(result) {
     }
   }
 
+  if (result.phase_cost) {
+    const cost = result.phase_cost;
+    lines.push('', 'Observed phase durations (aggregate unit time; not billing or fixed overhead):', '',
+      '| phase | completed units | aggregate minutes |', '| --- | --- | --- |');
+    for (const [phase, row] of Object.entries(cost.by_phase).sort()) lines.push(`| ${phase} | ${row.count} | ${(row.duration_ms / 60000).toFixed(2)} |`);
+    lines.push('', `Source SHA-256: ${cost.source_sha256}. Paired units: ${cost.completed_pairs}; observed active wall minutes: ${(cost.observed_active_wall_ms / 60000).toFixed(2)}.`,
+      'Fixed overhead and actual per-phase token attribution remain unknown. Diagnostics: ' + JSON.stringify(cost.diagnostics));
+  }
+
   return lines.join('\n') + '\n';
 }
 
 function parseArgs(argv) {
   const booleanFlags = new Set(['json', 'markdown', 'help']);
-  const valueFlags = new Set(['cwd', 'label', 'milestone']);
+  const valueFlags = new Set(['cwd', 'label', 'milestone', 'events']);
   const args = {};
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i];
@@ -183,6 +193,7 @@ Options:
   --cwd DIR     Project root to measure (default: cwd)
   --label TEXT  Free-text label stamped into the result (default: baseline)
   --milestone ID  Milestone ID passed to forge-tokens.aggregate for telemetry
+  --events FILE  Explicit read-only event source for measured phase durations
   --help        Show this message
 `);
 }
@@ -194,7 +205,7 @@ function cliMain(argv) {
     return 0;
   }
   const cwd = args.cwd || process.cwd();
-  const result = measureBaseline(cwd, { label: args.label, milestoneId: args.milestone });
+  const result = measureBaseline(cwd, { label: args.label, milestoneId: args.milestone, eventsFile: args.events });
   if (args.markdown) {
     process.stdout.write(renderMarkdown(result));
   } else {

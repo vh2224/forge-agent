@@ -10,6 +10,10 @@ is separate.
 ## Plans
 
 Milestones: slices, risks, dependencies, demos, Boundary Map.
+First test whether one cohesive deliverable covers the request. For a compact
+outcome, consider 1–3 slices as a hypothesis, never a quota; justify a fourth
+with a concrete dependency, risk, independent acceptance or context constraint.
+Keep every requirement and gate. Task-only/direct requests do not gain a milestone.
 Slices cover authorized scope in context-sized tasks. Tasks declare
 structured must_haves (truths, artifacts, key_links), depends/writes,
 expected_output, capability, relevant ## Standards and concrete verification.
@@ -29,6 +33,22 @@ unchanged inputs/args/env at one point; justify repeats. Preserve approved check
 owner re-verification, security/review and integration. Changed inputs need fresh
 evidence. Reuse adequate tests; add missing behavioral regressions, not mirrors.
 Line counts do not prove waste.
+Build a behavior-to-check coverage map: reuse a suitable existing regression
+instead of adding a test that repeats implementation. Reference current scoped
+captures with exact inputs, arguments, environment and contract. Revalidate them
+through canonical mechanisms; a file's existence or an old green run is insufficient.
+Rerun for changed inputs, a failure, new uncertainty or an enforcing integration
+gate. Do not silently waive owner verification, CI, security or independent review.
+
+## Preparation cost and risk
+
+Reuse adequate current research and resolved decisions through the entry/phase
+validators; preserve pending questions and previous acceptance. Summarize the
+source rather than repeat inference. Use existing cost-policy adaptive review
+only when selected by explicit preferences; this text changes no preference or gate.
+Separate measured phase duration, aggregate runner/unit time and estimated prompt
+tokens. Events alone do not distinguish useful preparation from fixed overhead.
+Unknown token/time attribution stays unknown; elapsed time alone justifies no skip.
 
 ## Plan-check and release gates
 

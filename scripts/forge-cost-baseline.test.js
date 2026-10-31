@@ -97,5 +97,27 @@ test('CLI with an unknown flag exits 2', () => {
   assert.ok(proc.stderr.length > 0);
 });
 
+test('explicit --events integrates readonly measured duration without promoting estimates to actual tokens', () => {
+  const fs = require('fs'), os = require('os');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-cost-events-'));
+  try {
+    const file = path.join(dir, 'events.jsonl');
+    const rows = ['unit-began', 'unit-transition'].map((event, index) => ({ event, unit: 'execute-task/T01',
+      action: index ? 'complete' : 'begin',
+      milestone: 'M-fixture', ts: `2026-01-01T00:00:0${index}.000Z` }));
+    const bytes = rows.map(JSON.stringify).join('\n') + '\n'; fs.writeFileSync(file, bytes);
+    const run = spawnSync(process.execPath, [scriptPath, '--json', '--cwd', root, '--events', file], { encoding: 'utf8' });
+    assert.equal(run.status, 0, run.stderr);
+    const result = JSON.parse(run.stdout);
+    assert.equal(result.phase_cost.aggregate_unit_ms, 1000); assert.equal(result.phase_cost.fixed_overhead.status, 'unknown');
+    assert.equal(result.phase_cost.actual_token_attribution, 'unknown'); assert.equal(result.inputs, 'deterministic');
+    assert.equal(fs.readFileSync(file, 'utf8'), bytes);
+    assert(renderMarkdown(result).includes('not billing or fixed overhead'));
+    fs.writeFileSync(file, 'malformed');
+    const bad = spawnSync(process.execPath, [scriptPath, '--events', file], { encoding: 'utf8' });
+    assert.equal(bad.status, 2); assert(bad.stderr.includes('phase-cost-json-invalid'));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 process.stdout.write(`\n${passed} passed, ${failed} failed\n`);
 process.exitCode = failed === 0 ? 0 : 1;
