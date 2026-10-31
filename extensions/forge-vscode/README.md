@@ -1,33 +1,95 @@
-# Forge no VS Code — prova da S01
+# Forge no VS Code — painel Trabalho
 
-Este pacote local prova a viabilidade técnica de uma TreeView em um View Container
-Forge na barra de atividades do VS Code. A view **Trabalho (sintético)** é somente
-leitura. Todos os nós e o snapshot empacotado são **dados sintéticos** inventados.
+Este pacote local mostra, numa TreeView **Trabalho** do View Container Forge na
+barra de atividades, o trabalho pessoal real do operador no projeto aberto. O
+painel é **somente leitura**: a única interação é o botão **Atualizar** no título
+da view. Não há dados sintéticos; tudo o que aparece vem do núcleo Forge.
 
-A extensão não lê arquivos do workspace nem dados pessoais. Não executa comandos,
-não escreve, não envia telemetria e funciona sem rede, listener, servidor, hosting
-ou webview. Os links relativos das evidências são texto para inspeção, sem ação de
-abertura. Agentes nativos e sidecars têm rótulos distintos; nada representa uma
-sessão real do Codex ou do Claude.
+## O que o painel mostra e de onde vem cada dado
 
-## Montagem de desenvolvimento isolada
+Os dados vêm de uma única leitura do núcleo canônico `scripts/forge-panel-source.js`
+(`readPanelSource`, DTO schema 1). O painel não lê nenhuma outra fonte e não
+mantém uma segunda fonte de verdade.
 
-A montagem real pertence à T07. Use somente modo desenvolvimento, apontando
-`--extensionDevelopmentPath` para este diretório e `--extensionTestsPath` para a
-prova de montagem da T07. Use `--user-data-dir` e `--extensions-dir` temporários e
-isolados, exclusivos da prova. Não use o perfil real do operador.
+- **Trabalho**: identificador, fase, status e próximo passo de cada trabalho
+  vinculado no contexto pessoal canônico (`~/.forge-personal/context.json` e o
+  STATE de cada trabalho). Um frescor diferente de atual aparece como texto.
+- **Agentes**: tipo (nativo ou sidecar), tarefa, host e transporte, fase,
+  modelo resolvido e observado, atividade e navegação condicional, derivados do
+  registro de eventos do projeto pela visão pessoal de agentes.
+- **Pendências**: ID, status e pergunta das perguntas estruturadas do escopo
+  pessoal, com a origem e o tipo do agente quando houver. Respostas nunca são
+  exibidas; perguntas de outro escopo aparecem só como contagem.
+- **Evidências**: rótulo, caminho relativo, localização e validade das capturas
+  já registradas no checkpoint. Caminhos absolutos não aparecem.
+- **Rodapé**: a hora local da leitura e a marca somente leitura.
 
-Este pacote é privado e local: nenhuma instalação no perfil real e nenhuma
-publicação no marketplace são realizadas na S01. Não há dependências npm, build
-ou servidor a iniciar. A ativação acontece ao abrir a view `forge.work`.
+Os rótulos de fase, atividade, tipo de agente e seções vêm do vocabulário do
+próprio núcleo. Motivos de seção vazia ou indisponível (por exemplo, nenhum
+agente ou eventos acima do limite) e itens acima do limite aparecem como texto.
 
-## Evidência e limites
+## Estados explícitos
 
-`node scripts/forge-vscode-panel.test.js`, a partir da raiz do repositório, prova
-a ativação com stub e os contratos de leitura, dados e inventário. Essa prova
-offline não demonstra montagem no cliente, aparência ou compreensão humana.
-A T07 registra a montagem em extension host com perfil isolado. O aceite visual
-e de compreensão permanece pendente para a rodada humana final.
+Antes da primeira leitura a view mostra "Lendo o trabalho...". Depois disso, um
+estado diferente de atual vira um único nó explicativo:
 
-A S05 decide a distribuição, a exclusão de `test/` do pacote e a leitura das
-fontes pessoais canônicas. A S01 não consulta nem persiste estado real de trabalho.
+- do núcleo: sem vínculo pessoal, pastas de projetos diferentes (ambíguo),
+  projeto não resolvido, contexto pessoal inválido, corrompido ou acima do limite;
+- locais: `no-workspace` (nenhuma pasta aberta), `workspace-not-local` (pasta
+  fora do sistema de arquivos local, sem leitura), `core-unavailable` (núcleo
+  Forge indisponível), `core-timeout` (leitura acima de 20 s), `core-failed`
+  (leitura falhou, sem expor mensagem, stack ou caminho) e `dto-invalid` (resposta
+  fora do DTO schema 1).
+
+## Garantias somente leitura
+
+- Sem rede, listener, servidor, webview, hosting ou marketplace.
+- Sem ações: nenhum item tem comando ou menu próprio. Não é possível responder,
+  aceitar, vincular, adotar, executar, abrir arquivo ou abrir link pelo painel.
+- Sem escrita, terminal, tarefas, entrada de texto, área de transferência,
+  observador de arquivos ou polling. A releitura acontece na ativação, quando a
+  view fica visível, no foco da janela com a view visível, na mudança de pastas e
+  pelo botão Atualizar, com uma leitura por vez e intervalo mínimo de 2 s para os
+  gatilhos automáticos.
+- A leitura roda num worker com limite de memória e tempo, fora da thread do
+  extension host.
+
+## De onde o núcleo é carregado
+
+Nenhuma pasta do workspace, configuração ou dado escolhe o núcleo. Ele só é
+carregado de:
+
+1. a árvore-fonte que contém esta extensão (dois níveis acima), quando o
+   `forge-source-manifest.json` dela declara a fonte `vscode-panel`; ou
+2. a instalação Forge reconhecida (`FORGE_HOME`, senão `~/.forge-agent`), com
+   `VERSION`, `manifest.json` e `scripts/forge-panel-source.js`.
+
+Todo componente do caminho precisa ser arquivo ou pasta real, sem link ou
+junction. Sem candidato válido, o estado é `core-unavailable`.
+
+## Uso local sem instalar
+
+Use o Extension Development Host, que abre uma janela de desenvolvimento e não
+grava nada no perfil do operador:
+
+```sh
+code --extensionDevelopmentPath=<checkout>/extensions/forge-vscode <projeto>
+```
+
+Não há dependências npm, build ou servidor a iniciar. A ativação acontece ao abrir
+a view `forge.work`. Em workspace não confiável o painel só lê dados. Em
+workspace remoto a extensão roda do lado remoto e o núcleo precisa existir lá; em
+workspace virtual o estado é workspace não local.
+
+## Pendências e limites
+
+- A instalação persistente no perfil do operador é uma etapa pendente, de
+  integração autorizada; este pacote é privado e nada é publicado nem instalado.
+- A navegação nativa do Codex para agentes continua condicional e aparece como
+  texto.
+- O aceite visual e de compreensão permanece pendente para a rodada final.
+
+`node scripts/forge-vscode-panel.test.js` é prova offline: contrato do pacote,
+localizador, worker, modelo, ativação com stub e negativos de mutação. Prova
+offline e prova runtime são distintas; esta suíte não demonstra montagem no
+cliente, aparência ou uso.

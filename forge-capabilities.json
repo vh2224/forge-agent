@@ -86,6 +86,7 @@
     { "capability_id": "operational-mcp", "kind": "mcp", "owner": "integrations", "required": true, "classification": "conditional", "hosts": { "claude": "implemented", "codex": "planned" }, "probe": { "kind": "filesystem", "path": "shared/forge-mcps.md" } },
     { "capability_id": "integration-claude-instructions", "kind": "headless", "owner": "integration", "required": false, "classification": "conditional", "hosts": { "claude": "implemented", "codex": "unavailable" }, "probe": { "kind": "filesystem", "path": "CLAUDE.md" } },
     { "capability_id": "integration-claude-settings", "kind": "runtime", "owner": "integration", "required": false, "classification": "conditional", "hosts": { "claude": "implemented", "codex": "unavailable" }, "probe": { "kind": "filesystem", "path": "shared/templates/claude/settings.jsonc" } },
+    { "capability_id": "integration-vscode-panel", "kind": "app", "owner": "integration", "required": false, "classification": "conditional", "hosts": { "claude": "unavailable", "codex": "conditional" }, "platforms": { "macos": "conditional", "windows": "conditional", "linux": "conditional" }, "probe": { "kind": "filesystem", "path": "extensions/forge-vscode/package.json" } },
     { "capability_id": "configuration-forge", "kind": "runtime", "owner": "configuration", "required": false, "classification": "common", "hosts": { "claude": "common", "codex": "common" }, "probe": { "kind": "filesystem", "path": "forge-capabilities.json" } }
   ]
 }
