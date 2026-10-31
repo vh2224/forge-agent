@@ -133,22 +133,25 @@ function testClassification() {
   }
 }
 
-function testImageGeneration165() {
+function testImageGeneration166() {
   const pin = JSON.parse(fs.readFileSync(REAL_PIN, 'utf8'));
-  equal(pin.meta.codex_version, '0.165.0', 'exercise the actual new pin');
+  equal(pin.meta.codex_version, '0.166.0', 'exercise the actual reviewed pin');
   equal(admit.assertVariantCoverage(pin), {
     ok: true, variants: 19, admissible: 2, inadmissible: 17, meta_variant_count: 19,
   }, 'new pin still covers exactly 19 names and only two admissible variants');
   const image = pin.definitions.ThreadItem.oneOf.find(item => item.properties.type.enum[0] === 'imageGeneration');
   check(image.properties.inputImages, 'new pin declares observed input images');
   check(image.anyOf.some(branch => branch.properties.fileId), 'new pin declares durable file identity');
+  equal(image.properties.generationId.type, ['string','null'], '0.166 declares nullable generation identity');
+  check(!(image.required || []).includes('generationId'), 'new identity remains optional');
   equal(admit.VARIANT_ADMISSIBILITY.imageGeneration.reason, 'tool-result-unverified', 'image generation remains unverified tool output');
   equal(admit.ADMISSIBLE_TYPES.slice().sort(), ['commandExecution', 'fileChange'], 'policy admits the same two names');
   const result = admit.buildRuntimeEvidence([{
     type: 'imageGeneration', id: 'image-fixture', status: 'completed', fileId: 'file-fixture',
+    generationId:'generation-fixture',startedAtMs:100,completedAtMs:200,
     inputImages: [{ path: '/fixture/input.png', sha256: 'a'.repeat(64) }],
   }], { unit: 'execute-task/T03', now: '2026-10-28T00:00:00.000Z' });
-  equal(result.entries, [], 'inputImages and fileId cannot create evidence entries');
+  equal(result.entries, [], 'inputImages, fileId, generationId and lifecycle times cannot create evidence entries');
   equal(result.census.inadmissible, 1, 'imageGeneration is counted as inadmissible');
   equal(result.census.admitted, 0, 'imageGeneration is never admitted');
   equal(result.census.rejected, [], 'known imageGeneration is not misreported as unknown');
@@ -602,7 +605,7 @@ function testMalformedKnown() {
 // ── Runner ─────────────────────────────────────────────────────────────────
 
 const tests = [
-  ['Codex 0.165.0 image generation stays inadmissible', testImageGeneration165],
+  ['Codex 0.166.0 image generation stays inadmissible', testImageGeneration166],
   ['Codex 0.165.0 actual document table', testRealSchemaDoc165],
   ['malformed-known variants (S04 R1)', testMalformedKnown],
   ['classification by name', testClassification],

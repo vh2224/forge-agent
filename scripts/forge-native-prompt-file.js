@@ -18,9 +18,9 @@ function prepare({ file, prompt, contract, deferWrite = false }) {
   const chainIdentity = start => {
     const chain = [];
     for (let cursor = start;; cursor = path.dirname(cursor)) {
-      const stat = fs.lstatSync(cursor);
+      const stat = fs.lstatSync(cursor, { bigint: true });
       if (stat.isSymbolicLink()) fail('native-prompt-file-target');
-      chain.push([cursor, stat.dev, stat.ino, stat.birthtimeMs]);
+      chain.push([cursor, String(stat.dev), String(stat.ino), String(stat.birthtimeNs)]);
       if (path.dirname(cursor) === cursor) break;
     }
     return digest(chain);

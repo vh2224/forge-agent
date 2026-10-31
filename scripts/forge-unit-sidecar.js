@@ -402,9 +402,11 @@ function reconcileLegacyReviewFix(request, receipt, executionContract) {
   const roots = require('./forge-code-roots'), reset = require('./forge-surgical-reset');
   const contract = roots.validateContract(executionContract, { owner: request.contextRoot || request.cwd, revalidate: true });
   if (request.unitType !== 'review-fix' || receipt.kind !== 'review-fix' || receipt.phase !== 'failed'
-      || request.execution_contract || receipt.recovery_baseline
+      || receipt.recovery_baseline
       || receipt.dispatch_id !== request.dispatchId || receipt.fingerprint !== artifactFingerprint(request)
       || receipt.recovery_identity_sha256 !== recoveryIdentity(request)) fail('review-fix-recovery-binding');
+  if (request.execution_contract && roots.digest(roots.validateContract(request.execution_contract, { revalidate: true })) !== roots.digest(contract))
+    fail('review-fix-recovery-roots');
   const failure = receipt.failure;
   if (failure?.recovery !== 'items-deferred' || failure.reset?.verified !== true
       || failure.reset.reason_code !== 'reset-verified' || !Array.isArray(failure.reset.overlap) || failure.reset.overlap.length
@@ -3000,7 +3002,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     validateExecutionAuthority: () => asOriginal(executionRequest, () => validateRecoveryRequest(executionRequest, { verification: runtime.verification, nativeInvocation: request.route.worker_mode === 'native'
       ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route)) : undefined })),
     reconcile: receipt => {
-      if (canonical.unitType === 'review-fix' && !request.execution_contract && !receipt.recovery_baseline)
+      if (canonical.unitType === 'review-fix' && !receipt.recovery_baseline)
         return reconcileLegacyReviewFix(request, receipt, executionRequest.execution_contract);
       if (canonical.scope === 'milestone' || receipt.recovery_baseline) return reconcileMilestoneAttempt(request, receipt, runtime);
       if (!receipt.reset_state_file || !receipt.execution?.execution_contract) fail('recovery-baseline-required');
