@@ -68,6 +68,20 @@ these figures are neither the historical prompts nor billed tokens.
 
 ## Changes and bounded proposals
 
+The historical plan audit also inspected all **47 task plans** (409,274 bytes),
+retaining a SHA-256 inventory privately. Forty-three name at least one test suite.
+Repeated script references include `forge-unit-sidecar.test.js` in eight plans,
+`forge-claude-sidecar.test.js` in seven, `forge-sidecar-liveness.test.js` in six and
+`forge-attempt-recovery.test.js` in five. These counts show repeated verification
+boundaries; they do not establish redundant executions because source revisions,
+arguments, environment and behavior coverage may differ. None of these historical
+plans has a standalone `verify:` frontmatter field; test instructions occur in
+their body and are not evidence that command discovery failed at runtime.
+The historical roadmap has five high-risk, three medium-risk and one low-risk
+slice declarations. The evidence therefore does not support treating every slice
+as low risk or removing its security/review checks. The reported 1.7 test/code
+line ratio remains an inspection signal, not a justified deletion target.
+
 - Begin with one cohesive deliverable; consider 1–3 slices for compact outcomes
   as a hypothesis. A fourth needs a concrete dependency, risk, separate acceptance
   or context constraint. Requirements, isolation and applicable gates remain.
