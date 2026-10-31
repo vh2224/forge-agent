@@ -484,6 +484,31 @@ test('verdict table (no-command / timeout=124 / not-found: 127 on sh, cmd.exe st
   }
 });
 
+test('Windows unproved cleanup retains the budget and blocks all following commands', () => {
+  if (process.platform !== 'win32') { console.log('    (skipped: Windows lifecycle boundary)'); return; }
+  const api = require('./forge-verification-process'), original = api.runWindowsCommand;
+  let invoked = 0, released = 0;
+  const options = { cwd: workDir, preferenceCommands: ['fixture first', 'fixture second'], resourceEventSink() {},
+    requireCommandRewrite: () => ({ looksLikeRunnerCommand: () => true,
+      planRewrite: command => ({ outcome: 'rewritten', command, reason: 'fixture', runner: 'fixture' }) }),
+    requireResources: () => ({ acquireCommandBudget: () => ({ workers: 1, heapMb: 512, pool: { handle: { slots: [1] } } }),
+      releaseCommandBudget: () => { released++; } }) };
+  try {
+    api.runWindowsCommand = () => { invoked++; return { status: null, stdout: '', stderr: '', stop: true,
+      error: Object.assign(new Error('fixture unknown join'), { code: 'EVERIFYCLEANUP' }),
+      cleanup: { platform: 'win32', status: 'unproved', started: true, reason: 'job-join-unproved' } }; };
+    const result = runVerificationGate(options);
+    assertEqual(invoked, 1); assertEqual(released, 0); assertEqual(result.passed, false);
+    assertEqual(result.stopped.reason, 'cleanup-unproved'); assertEqual(result.stopped.not_run.length, 1);
+    assertEqual(result.checks[0].cleanup.budget_release, 'deferred');
+    invoked = 0;
+    api.runWindowsCommand = () => { invoked++; throw Object.assign(new Error('fixture supervisor throw'), { code: 'EIO' }); };
+    const thrown = runVerificationGate(options);
+    assertEqual(invoked, 1); assertEqual(released, 0); assertEqual(thrown.stopped.reason, 'cleanup-unproved');
+    assertEqual(thrown.checks[0].cleanup.diagnostic, 'EIO');
+  } finally { api.runWindowsCommand = original; }
+});
+
 teardown();
 
 // ── Summary ──────────────────────────────────────────────────────────────────
