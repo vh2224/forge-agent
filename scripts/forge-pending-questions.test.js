@@ -50,6 +50,95 @@ try {
   api.openQuestions({ cwd: owner, unit: 'execute-task/T01', milestone: 'M001', slice: 'S04', task: 'T01', decision_set: 'owner-choice', questions: [{ id: 'extra', question: 'Outra decisão?' }] });
   assert.deepStrictEqual(api.continuation(base).pending_ids, ['extra']);
   console.log('PASS owner lifecycle: immutable origin, idempotence, explicit partial answers, round history and child-process restart');
+  { // R1: interrupted first publication (origin written, state missing) recovers exactly.
+    const own = path.join(root, 'owner-interrupted'); fs.mkdirSync(path.join(own, '.gsd/forge'), { recursive: true });
+    const opts = { cwd: own, unit: 'execute-task/T01', milestone: 'M001', slice: 'S04', task: 'T01', decision_set: 'owner-choice', questions };
+    const id = api.openQuestions(opts).identity_sha256, qdir = path.join(own, '.gsd/forge/questions');
+    const stateFile = path.join(qdir, `${id}.json`), originFile2 = path.join(qdir, `${id}.origin.json`), originBytes2 = fs.readFileSync(originFile2);
+    fs.unlinkSync(stateFile);
+    assert.strictEqual(api.openQuestions(opts).status, 'pending');
+    assert.deepStrictEqual(api.continuation({ cwd: own, identity: id }).pending_ids, ['root', 'scope']);
+    assert.deepStrictEqual(fs.readFileSync(originFile2), originBytes2);
+    fs.unlinkSync(stateFile);
+    // Simulate the lstat/exists semantics of a dangling link without requiring
+    // Windows file-symlink privileges. Recovery must refuse before publication.
+    const atomic = require('./forge-surgical-reset'), originalWrite = atomic.writeJsonAtomic, originalStat = fs.lstatSync;
+    const stateParent = fs.realpathSync.native(path.dirname(stateFile));
+    const sameState = target => path.basename(target) === path.basename(stateFile)
+      && fs.realpathSync.native(path.dirname(target)) === stateParent;
+    let publications = 0;
+    fs.lstatSync = function(target, ...args) {
+      if (sameState(target)) return { isSymbolicLink: () => true };
+      return originalStat.call(fs, target, ...args);
+    };
+    atomic.writeJsonAtomic = function(target, value) {
+      if (sameState(target)) { publications++; throw new Error('unexpected state publication to dangling link'); }
+      return originalWrite(target, value);
+    };
+    try { assert.throws(() => api.openQuestions(opts), /path-link/); }
+    finally { fs.lstatSync = originalStat; atomic.writeJsonAtomic = originalWrite; }
+    assert.strictEqual(publications, 0); assert(!fs.existsSync(stateFile));
+    assert.deepStrictEqual(fs.readFileSync(originFile2), originBytes2);
+    console.log('PASS dangling state link: origin-only recovery refuses before any publication');
+    fs.appendFileSync(originFile2, ' ');
+    assert.throws(() => api.openQuestions(opts), /origin-mismatch/); assert(!fs.existsSync(stateFile));
+    fs.writeFileSync(originFile2, originBytes2); fs.unlinkSync(originFile2);
+    fs.writeFileSync(stateFile, JSON.stringify({ schema_version: 1, identity_sha256: id, questions: [] }));
+    assert.throws(() => api.openQuestions(opts), /pending-/); assert(!fs.existsSync(originFile2));
+  }
+  { // R2: variable-length IDs across 64+ rounds never push the state past the read limit.
+    const own = path.join(root, 'owner-large'); fs.mkdirSync(path.join(own, '.gsd/forge'), { recursive: true });
+    const many = Array.from({ length: 6 }, (_, i) => ({ id: `${'long-id-'.repeat(14)}${i}`, question: `q${i} ${'x'.repeat(36000)}` }));
+    const opts = { cwd: own, unit: 'execute-task/T01', milestone: 'M001', slice: 'S04', task: 'T01', decision_set: 'owner-choice', questions: many };
+    const id = api.openQuestions(opts).identity_sha256, stateFile = path.join(own, '.gsd/forge/questions', `${id}.json`), ctx = { cwd: own, identity: id };
+    for (let i = 0; i < 70; i++) api.recordRound({ ...ctx, ids: many.map(q => q.id), channel: 'text-fallback', outcome: 'presented' });
+    assert(fs.statSync(stateFile).size <= 256 * 1024);
+    assert.strictEqual(api.continuation(ctx).pending_ids.length, 6);
+    const before = fs.readFileSync(stateFile);
+    api.answer({ ...ctx, answers: [{ id: many[0].id, answer: 'ok', source: 'user-text' }] });
+    assert(fs.statSync(stateFile).size <= 256 * 1024);
+    assert.strictEqual(api.continuation(ctx).pending_ids.length, 5);
+    assert(JSON.parse(fs.readFileSync(stateFile)).rounds_dropped > 0 && before.length > 0);
+    // A large answer must publish its bounded final state exactly once. Failure
+    // before that atomic publication preserves the pending answer and origin.
+    const atomic = require('./forge-surgical-reset'), writeAtomic = atomic.writeJsonAtomic;
+    const answerInput = { ...ctx, answers: [{ id: many[1].id, answer: 'a'.repeat(10000), source: 'user-text' }] };
+    const answerBefore = fs.readFileSync(stateFile), originPath = stateFile.replace(/\.json$/, '.origin.json');
+    const answerOrigin = fs.readFileSync(originPath), droppedBefore = JSON.parse(answerBefore).rounds_dropped;
+    const isStateTarget = target => fs.realpathSync.native(target) === fs.realpathSync.native(stateFile);
+    atomic.writeJsonAtomic = function(target, value) {
+      if (isStateTarget(target)) throw new Error('injected answer publication failure');
+      return writeAtomic(target, value);
+    };
+    try { assert.throws(() => api.answer(answerInput), /injected answer publication failure/); }
+    finally { atomic.writeJsonAtomic = writeAtomic; }
+    assert.deepStrictEqual(fs.readFileSync(stateFile), answerBefore);
+    assert.deepStrictEqual(fs.readFileSync(originPath), answerOrigin);
+    assert(api.continuation(ctx).pending_ids.includes(many[1].id));
+    const publications = [];
+    atomic.writeJsonAtomic = function(target, value) {
+      if (isStateTarget(target)) {
+        publications.push(Buffer.byteLength(JSON.stringify(value)));
+        assert(publications.at(-1) <= 256 * 1024, 'every answer publication must stay readable');
+        assert.strictEqual(publications.length, 1, 'answer must publish one atomic final state');
+      }
+      return writeAtomic(target, value);
+    };
+    try { api.answer(answerInput); }
+    finally { atomic.writeJsonAtomic = writeAtomic; }
+    assert.strictEqual(publications.length, 1);
+    assert.strictEqual(api.continuation(ctx).pending_ids.length, 4);
+    assert(JSON.parse(fs.readFileSync(stateFile)).rounds_dropped > droppedBefore);
+    assert.deepStrictEqual(fs.readFileSync(originPath), answerOrigin);
+    console.log('PASS atomic bounded answer: one readable publication, failure preserves pending bytes and origin');
+    // A state that cannot fit even one more round is refused without changing bytes.
+    const edge = JSON.parse(fs.readFileSync(stateFile)); edge.rounds = [];
+    const pad = 256 * 1024 - Buffer.byteLength(JSON.stringify(edge)) - 40; edge.questions[1].question += 'y'.repeat(Math.max(0, pad));
+    fs.writeFileSync(stateFile, JSON.stringify(edge)); const edgeBytes = fs.readFileSync(stateFile);
+    assert.throws(() => api.recordRound({ ...ctx, ids: many.map(q => q.id), channel: 'text-fallback', outcome: 'presented' }), /state-too-large/);
+    assert.deepStrictEqual(fs.readFileSync(stateFile), edgeBytes);
+  }
+  console.log('PASS interrupted origin recovery and bounded round history');
   const receiptFile = path.join(root, 'receipt.json');
   const receipt = { phase: 'ready', dispatch_id: 'fixture-dispatch', fingerprint: 'a'.repeat(64), result: { status: 'partial', questions }, preparation_identity: { milestone: 'M001', slice: 'S04', task: 'T01' } };
   const handoffOptions = { cwd: owner, receipt: receiptFile, unit: 'execute-task/T01', milestone: 'M001', slice: 'S04', task: 'T01' };

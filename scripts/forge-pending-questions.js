@@ -9,7 +9,7 @@ const ids = require('./forge-ids');
 const { plainText } = require('./forge-sidecar-identity');
 const { readBoundedStableFile } = require('./forge-autonomy-sources');
 const { withOwnerLock } = require('./forge-artifact-reconciliation');
-const { mergePendingQuestions, resolvePendingQuestions, persistQuestionState, recordQuestionRound } = require('./forge-interaction');
+const { mergePendingQuestions, resolvePendingQuestions, persistQuestionState, recordQuestionRound, boundedRoundState } = require('./forge-interaction');
 const { CHANNELS } = require('./forge-question-channel');
 const MAX_STATE = 256 * 1024;
 function fail(reason) { throw Object.assign(new Error(reason), { code: reason }); }
@@ -102,16 +102,21 @@ function persist(owner, identity, questions) {
   const hash = digest(identity), files = statePaths(owner, hash);
   return withOwnerLock(owner, () => {
     ownerRoot({ cwd: owner }, true); noLinks(files.directory, true);
+    noLinks(files.file, true);
     let existing;
-    if (fs.existsSync(files.file) || fs.existsSync(files.origin)) existing = loadState(owner, hash);
     const originBytes = JSON.stringify({ schema_version: 1, identity_sha256: hash, identity }) + '\n';
+    // An origin without state is an interrupted first publication: recover it only
+    // when its bytes are exactly the expected ones; anything else stays refused.
+    const originOnly = !fs.existsSync(files.file) && fs.existsSync(files.origin);
+    if (originOnly) { if (!readJson(files.origin, MAX_STATE, true).buffer.equals(Buffer.from(originBytes))) fail('pending-question-origin-mismatch'); }
+    else if (fs.existsSync(files.file)) existing = loadState(owner, hash);
     if (existing && !existing.origin_bytes.equals(Buffer.from(originBytes))) fail('pending-question-origin-mismatch');
     const rows = mergePendingQuestions(existing?.state.questions || [], questions);
     if (Buffer.byteLength(JSON.stringify({ ...(existing?.state || { schema_version: 1, identity_sha256: hash }), questions: rows })) > MAX_STATE - 32768) fail('pending-question-state-too-large');
     if (existing && JSON.stringify(rows) === JSON.stringify(existing.state.questions)) return { identity_sha256: hash, identity, questions: rows, status: rows.some(q => q.status === 'pending') ? 'pending' : 'resolved' };
     if (!fs.existsSync(files.directory)) fs.mkdirSync(files.directory, { recursive: false });
     if (!fs.lstatSync(files.directory).isDirectory()) fail('pending-question-path-invalid');
-    if (!existing) {
+    if (!existing && !originOnly) {
       noLinks(files.origin, true);
       fs.writeFileSync(files.origin, originBytes, { flag: 'wx', mode: 0o600 });
     }
@@ -167,7 +172,7 @@ function mutate(options, callback) {
 }
 function recordRound(options) {
   if (!CHANNELS.includes(options.channel)) fail('pending-question-channel-invalid');
-  return mutate(options, loaded => ({ ok: true, rounds: recordQuestionRound(loaded.file, loaded.identity, { ids: options.ids, channel: options.channel, outcome: options.outcome }) }));
+  return mutate(options, loaded => ({ ok: true, rounds: recordQuestionRound(loaded.file, loaded.identity, { ids: options.ids, channel: options.channel, outcome: options.outcome }, MAX_STATE) }));
 }
 function answer(options) {
   return mutate(options, loaded => {
@@ -182,11 +187,14 @@ function answer(options) {
     // Validate every answer and round before either write: a partial invalid
     // request must leave all state bytes untouched.
     const resolved = resolvePendingQuestions(loaded.state.questions, answers);
-    if (Buffer.byteLength(JSON.stringify({ ...loaded.state, questions: resolved })) > MAX_STATE - 32768) fail('pending-question-state-too-large');
+    if (Buffer.byteLength(JSON.stringify({ ...loaded.state, rounds: undefined, questions: resolved })) > MAX_STATE - 32768) fail('pending-question-state-too-large');
     if (loaded.state.rounds_dropped !== undefined && (!Number.isSafeInteger(loaded.state.rounds_dropped) || loaded.state.rounds_dropped < 0)) fail('pending-question-round-invalid');
-    const questions = persistQuestionState(loaded.file, loaded.identity, [], answers);
-    recordQuestionRound(loaded.file, loaded.identity, { ids: answers.map(row => row.id), channel, outcome: 'answered' });
-    return { ok: true, identity_sha256: options.identity, pending_ids: questions.filter(q => q.status === 'pending').map(q => q.id) };
+    const answeredRound = { ids: answers.map(row => row.id), channel, outcome: 'answered' };
+    // Publish answers and bounded history together: every visible state must
+    // remain readable even if execution stops immediately after publication.
+    const next = boundedRoundState({ ...loaded.state, questions: resolved }, answeredRound, MAX_STATE);
+    require('./forge-surgical-reset').writeJsonAtomic(loaded.file, next);
+    return { ok: true, identity_sha256: options.identity, pending_ids: resolved.filter(q => q.status === 'pending').map(q => q.id) };
   });
 }
 function continuation(options) {
