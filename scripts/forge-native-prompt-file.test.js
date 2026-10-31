@@ -27,6 +27,26 @@ try {
   fs.appendFileSync(file, 'changed');
   assert.throws(() => mapped.assertUnchanged(), /native-prompt-file-conflict/);
   fs.writeFileSync(file, prompt); mapped.assertUnchanged();
+  const precisionFile = path.join(dir, 'precision.txt'), originalLstat = fs.lstatSync;
+  let inode = 9007199254740992n;
+  assert.equal(Number(inode), Number(inode + 1n), 'fixture represents distinct IDs that alias as Number');
+  fs.lstatSync = (target, options) => {
+    const stat = originalLstat(target, options);
+    if (typeof target === 'string' && path.resolve(target) === precisionFile) {
+      const big = options?.bigint === true;
+      stat.ino = big ? inode : Number(inode);
+      stat.dev = big ? 1n : 1;
+      stat.birthtimeNs = 1000000n;
+      stat.birthtimeMs = big ? 1n : 1;
+    }
+    return stat;
+  };
+  try {
+    const precise = api.prepare({ file: precisionFile, prompt: 'Synthetic exact identity', contract });
+    precise.assertUnchanged(); inode += 1n;
+    assert.throws(() => precise.assertUnchanged(), /native-prompt-file-identity-changed/,
+      'lossless adjacent file IDs must not authorize a replacement with identical bytes');
+  } finally { fs.lstatSync = originalLstat; }
   fs.renameSync(file, file + '.old'); fs.writeFileSync(file, prompt);
   assert.throws(() => mapped.assertUnchanged(), /native-prompt-file-identity-changed/);
   assert.throws(() => api.prepare({ file: path.join(code, 'prompt'), prompt, contract }), /outside the workspace/);
