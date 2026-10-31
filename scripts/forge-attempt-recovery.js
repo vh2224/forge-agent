@@ -94,6 +94,9 @@ function bindRecoveryAuthorization(binding) {
 // Resolve in the caller. A JSON list, even one labelled approved, is not a
 // live resolver observation and cannot authorize a destination.
 function requestIdentity(request) {
+  return projectRequestIdentity(request, () => linkedEntries.get(request.linkedEntryBinding));
+}
+function projectRequestIdentity(request, readEntry) {
   const path = require('path'), fs = require('fs');
   if (!request || !request.unitType || !['milestone', 'standalone-task'].includes(request.scope) || !request.phase
       || !request.route?.host_runtime || !request.cwd || !request.contextRoot
@@ -111,13 +114,29 @@ function requestIdentity(request) {
     host: request.route.host_runtime, owner: canonical(request.contextRoot), cwd: canonical(request.cwd) };
   for (const [key, field] of [['plan', 'planFile'], ['roadmap', 'roadmapFile']]) result[key] = request[field] ? canonical(request[field]) : null;
   if (request.linked_begin_key) {
-    const entry = linkedEntries.get(request.linkedEntryBinding);
+    const entry = readEntry();
     if (!entry || entry.begin_key !== request.linked_begin_key || entry.unit !== `${request.unitType}/${request.taskId || request.sliceId || request.milestoneId}`
       || entry.owner !== canonical(request.contextRoot) || entry.host_runtime !== request.route.host_runtime
       || entry.milestone !== request.milestoneId) fail('linked-entry-binding-required');
     result.linked_entry = { entry_id: entry.entry_id, entry_digest: entry.entry_digest, classification: 'new-unit' };
   }
   return result;
+}
+// Ephemeral inspection data only. It cannot enter linkedEntries or authorize a
+// route, recovery or spawn. The live terminal guard and exact durable transaction
+// are revalidated synchronously on each call; nothing is attached to the request.
+function inspectTerminalRequest(request, context) {
+  const cwd = request.contextRoot || request.cwd;
+  const entry = require('./forge-unit-controller').validateTerminalLinkedEntry(cwd, request.linked_begin_key, context);
+  const begin = require('./forge-unit-controller').lookupRecord(cwd, 'transaction', request.linked_begin_key);
+  const canonical = file => { const real = fs.realpathSync.native(file); return process.platform === 'win32' ? real.toLowerCase() : real; };
+  if (!entry.roots.some(root => canonical(root.path) === canonical(request.cwd))
+    || request.execution_contract?.code_roots.some(root => !entry.roots.some(bound => bound.root_id === root.id
+      && canonical(bound.path) === canonical(root.path)))) fail('linked-entry-roots-mismatch');
+  const owner = fs.realpathSync(cwd);
+  const identity = projectRequestIdentity(canonicalRequest(request), () => ({ ...entry, owner: process.platform === 'win32' ? owner.toLowerCase() : owner,
+    host_runtime: begin.host_runtime, milestone: begin.milestone }));
+  return { identity, fingerprint: require('./forge-request-fingerprint').projectFingerprint(request, identity.linked_entry) };
 }
 function bindLinkedRequest(request, options) {
   if (!request.linked_begin_key) return request;
@@ -1058,7 +1077,7 @@ async function cli(argv) {
   }
   fail('usage: forge-attempt-recovery.js --inspect <state.json> <receipt.json> | --preparation <request.json>');
 }
-module.exports = { canonicalRequest, callerRequestHash, bindRecoveryAuthorization, bindLinkedRequest, createRecovery, migrateState, resolveCandidates, createAuthority, exceptionFor, requestIdentity, validateState, validateStateTarget, routeKey, safeDiagnostic, inspectReceipt, captureFailure, recoverAttempt, cli,
+module.exports = { canonicalRequest, callerRequestHash, bindRecoveryAuthorization, bindLinkedRequest, inspectTerminalRequest, createRecovery, migrateState, resolveCandidates, createAuthority, exceptionFor, requestIdentity, validateState, validateStateTarget, routeKey, safeDiagnostic, inspectReceipt, captureFailure, recoverAttempt, cli,
   INPUT_REQUIRED_CODE, INBOUND_INPUT_METHODS, ANSWERED_CONTINUATION_STOP };
 if (require.main === module) cli(process.argv.slice(2)).then(value => process.stdout.write(JSON.stringify(value) + '\n')).catch(error => {
   process.stderr.write(JSON.stringify({ reason_code: error.code || 'recovery-command-failed' }) + '\n'); process.exitCode = 2;
