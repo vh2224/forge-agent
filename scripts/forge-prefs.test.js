@@ -2,7 +2,7 @@
 'use strict';
 
 // Standalone, zero-dependency adversarial runner for the JSONC state machine.
-const { parseJsonc, stripJsonc, readPrefs, readPrefsCached, validatePrefs, buildProvenance } = require('./forge-prefs.js');
+const { parseJsonc, stripJsonc, readPrefs, readPrefsCached, validatePrefs, buildProvenance, loadSchema } = require('./forge-prefs.js');
 const { legacyReadFile, legacyReadLayer } = require('./forge-prefs-legacy.js');
 const fs = require('fs');
 const path = require('path');
@@ -545,6 +545,23 @@ try {
   if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
   if (oldUserProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = oldUserProfile;
 }
+
+for (const routing of [
+  { tier_models: { light: ['claude-haiku-5-5'] } },
+  { custom: { executor: { light: 'gpt-6-luna' } } },
+  { custom: { executor: { light: [''] } } },
+  { custom: { executor: { light: [17] } } },
+  { custom: { planner: { standard: [], fallback: [] } } },
+  { custom: null },
+  { custom: { executor: [] } },
+  { custom: { planner: { tier_models: ['gpt-6-luna'] } } },
+]) assert(validatePrefs({ routing }, loadSchema()).some(w => w.key.startsWith('routing.')),
+  'issue277 malformed domain phase tier or fallback produces a routing diagnostic');
+assert(deepEqual(validatePrefs({ routing: {
+  tier_models: { executor: { light: ['gpt-6-luna'], fallback: null } },
+  arbitrary_domain: { planner: { heavy: [], fallback: 'claude-opus-5-5' } },
+  empty_domain: {},
+} }, loadSchema()), []), 'issue277 arbitrary domain names and valid phase tier fallback shapes remain accepted');
 
 fs.rmSync(fixtureDir, { recursive: true, force: true });
 process.stdout.write(`\n${passes} passed, ${failures} failed\n`);

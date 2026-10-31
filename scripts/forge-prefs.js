@@ -450,6 +450,32 @@ function validatePrefs(resolved, schema) {
     }
   }
   walk(resolved, schema, []);
+  // Domain names are open; the values still need the shape consumed by
+  // forge-routing.resolveCell. A misplaced tier_models subtree is otherwise
+  // silently accepted as a domain that can never select its intended model.
+  if (schema.properties?.routing && isPlainObject(resolved?.routing)) {
+    const tiers = new Set(['light', 'standard', 'heavy', 'max']);
+    const warn = (key, expected) => warnings.push({ key, message: `${key}: ${expected}` });
+    for (const [domain, phases] of Object.entries(resolved.routing)) {
+      const prefix = `routing.${domain}`;
+      if (!isPlainObject(phases)) { warn(prefix, 'expected a routing domain object'); continue; }
+      for (const [phase, cells] of Object.entries(phases)) {
+        const phaseKey = `${prefix}.${phase}`;
+        if (phase !== 'executor' && phase !== 'planner') {
+          warn(phaseKey, 'expected a routing phase (executor or planner), then tier arrays');
+          continue;
+        }
+        if (!isPlainObject(cells)) { warn(phaseKey, 'expected a routing phase object'); continue; }
+        for (const [tier, ids] of Object.entries(cells)) {
+          const key = `${phaseKey}.${tier}`;
+          if (tier === 'fallback') {
+            if (ids !== null && (typeof ids !== 'string' || !ids.trim())) warn(key, 'expected a nonempty fallback model string or null');
+          } else if (!tiers.has(tier)) warn(key, 'expected a routing tier (light, standard, heavy or max) or fallback');
+          else if (!Array.isArray(ids) || ids.some(id => typeof id !== 'string' || !id.trim())) warn(key, 'expected an array of nonempty model strings');
+        }
+      }
+    }
+  }
   return warnings;
 }
 
