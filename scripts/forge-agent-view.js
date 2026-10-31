@@ -11,6 +11,15 @@ const { EVENT_KEYS, validateAgentId, normalizeHostIdentity, buildAgentIdentityEv
 const PHASES = Object.freeze({ preparing: 'preparando', planning: 'planejando', executing: 'executando agente',
   verifying: 'verificando a entrega', publishing: 'publicando evidência', reviewing: 'revisando',
   waiting: 'aguardando decisão', completed: 'concluído', failed: 'falhou', unknown: 'desconhecido' });
+const ACTIVITY_LABELS = Object.freeze({ recent: 'atividade remota recente', delayed: 'atividade remota atrasada', absent: 'atividade remota ausente',
+  dead: 'atividade remota encerrada pela liveness', unknown: 'atividade remota desconhecida',
+  'tool-running': 'ferramenta em andamento com atividade remota suspensa' });
+const KIND_LABELS = Object.freeze({ native: 'executor nativo', sidecar: 'executor sidecar', unknown: 'executor desconhecido' });
+const EMPTY_LABELS = Object.freeze({ 'no-agents': 'nenhum agente no escopo informado',
+  'events-too-large': 'fonte de eventos acima do limite; censo indisponível',
+  source_unreadable: 'fonte de eventos ilegível; censo indisponível',
+  source_link: 'fonte de eventos com link; censo indisponível',
+  'no-bindings': 'nenhum vínculo pessoal; censo indisponível' });
 const AGENT_ROLES = Object.freeze(Object.fromEntries([
   ['advocate', 'Defensor', 'Avalia os achados da revisão e fundamenta a resposta técnica'],
   ['completer', 'Consolidador', 'Confere entregas e consolida as evidências da unidade'],
@@ -271,9 +280,7 @@ function formatPhaseLine(phase, fields = {}) {
   return humanLine(parts);
 }
 function activityLine(activity) {
-  const labels = { recent: 'atividade remota recente', delayed: 'atividade remota atrasada', absent: 'atividade remota ausente',
-    dead: 'atividade remota encerrada pela liveness', unknown: 'atividade remota desconhecida',
-    'tool-running': 'ferramenta em andamento com atividade remota suspensa' };
+  const labels = ACTIVITY_LABELS;
   const parts = [HUMAN_PREFIX, labels[activity.remote] || labels.unknown];
   if (activity.local?.length) parts.push('atividade local registrada separadamente');
   if (activity.terminal === 'unvalidated') parts.push('terminal recebido, processo sem encerramento confirmado e resultado não validado');
@@ -287,16 +294,12 @@ function formatActivityLine(raw, fields = {}) {
 }
 function renderAgentView(view) {
   if (!view.agents.length) {
-    const labels = { 'no-agents': 'nenhum agente no escopo informado',
-      'events-too-large': 'fonte de eventos acima do limite; censo indisponível',
-      source_unreadable: 'fonte de eventos ilegível; censo indisponível',
-      source_link: 'fonte de eventos com link; censo indisponível',
-      'no-bindings': 'nenhum vínculo pessoal; censo indisponível' };
+    const labels = EMPTY_LABELS;
     return humanLine([HUMAN_PREFIX, Object.hasOwn(labels, view.empty_reason) ? labels[view.empty_reason]
       : `censo indisponível; ${diagnostic(view.empty_reason).reason}`]);
   }
   return view.agents.flatMap(agent => [
-    humanLine([HUMAN_PREFIX, agent.kind === 'native' ? 'executor nativo' : agent.kind === 'sidecar' ? 'executor sidecar' : 'executor desconhecido',
+    humanLine([HUMAN_PREFIX, KIND_LABELS[agent.kind] || KIND_LABELS.unknown,
       `host ${['codex', 'claude'].includes(agent.host_runtime) ? agent.host_runtime : 'desconhecido'}`,
       `transporte ${TRANSPORTS.includes(agent.transport) ? agent.transport : 'desconhecido'}`,
       `modelo resolvido ${humanModel(agent.model.resolved)}`, `observado ${humanModel(agent.model.observed)}`,
@@ -442,5 +445,6 @@ function main(argv) {
   }
 }
 
-module.exports = { deriveAgentView, readAgentSources, renderAgentView, formatPhaseLine, formatActivityLine, PHASES, AGENT_ROLES, NAVIGATION };
+module.exports = { deriveAgentView, readAgentSources, renderAgentView, formatPhaseLine, formatActivityLine, PHASES, AGENT_ROLES, NAVIGATION,
+  ACTIVITY_LABELS, KIND_LABELS, EMPTY_LABELS };
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
