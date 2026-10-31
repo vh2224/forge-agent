@@ -714,7 +714,7 @@ test('Claude historical repin is preserved and current memory/instruction report
     historical.surfaces.map(({ sha256, ...identity }) => identity));
   const historicalHashes = new Map(historical.surfaces.map(surface => [surface.source_id, surface.sha256]));
   assert.deepStrictEqual(golden.surfaces.filter(surface => historicalHashes.get(surface.source_id) !== surface.sha256)
-    .map(surface => surface.source_id), ['agents', 'skills', 'dispatch-templates', 'claude-instructions']);
+    .map(surface => surface.source_id), ['agents', 'skills', 'dispatch-templates', 'claude-instructions', 'configuration']);
   const report = claudeRenderer.render({
     repo: ROOT,
     projectRoot: path.join(ROOT, 'scripts', '.guard-golden-project'),

@@ -532,6 +532,152 @@ async function main() {
     assert.strictEqual(failed.final_evidence.stage, 'invoked');
     assert(!JSON.stringify(failed).includes('secret rejection'));
   }
+
+  // S03/T02: readable task name per dispatch. codexTaskName keeps its bytes.
+  const { humanTaskName, codexTaskName } = require('./forge-native-invocation.js');
+  assert.strictEqual(codexTaskName('Execute-Task/T01'), 'execute_task_t01');
+  assert.strictEqual(codexTaskName('', 'forge-memory'), 'forge_memory');
+  assert.strictEqual(codexTaskName('__A..B__'), 'a_b');
+  const hex8 = value => crypto.createHash('sha256').update(String(value), 'utf8').digest('hex').slice(0, 8);
+  const nameShape = /^[a-z0-9]+(_[a-z0-9]+)*$/;
+  const nameVectors = [
+    ['short unit', { unitId: 'S03/T02', title: 'Identidade nativa', attempt: 'dispatch-1' },
+      `s03_t02_identidade_nativa_${hex8('dispatch-1')}`],
+    ['milestone unit keeps t03', { unitId: 'M-20261028132636-experiencia/S03/T03', title: 'Modelo de leitura', attempt: 'a' },
+      `experiencia_s03_t03_modelo_de_leitura_${hex8('a')}`],
+    ['long standalone id keeps its useful end', { unitId: 'T-20260928000001-fixture-long-standalone-name', title: 'Plano', attempt: 'b' },
+      `long_standalone_name_plano_${hex8('b')}`],
+    ['accented title', { unitId: 'S01/T01', title: 'Ação rápida çé', attempt: 'c' }, `s01_t01_acao_rapida_ce_${hex8('c')}`],
+    ['emoji title', { unitId: 'S01/T01', title: '🚀 Lançar painel 😀', attempt: 'd' }, `s01_t01_lancar_painel_${hex8('d')}`],
+    ['empty title', { unitId: 'S03/T02', title: '', attempt: 'e' }, `s03_t02_${hex8('e')}`],
+    ['numeric attempt', { unitId: 'S03/T02', title: 'Nome', attempt: 7 }, `s03_t02_nome_${hex8('7')}`],
+    ['title without unit', { title: 'Só título', attempt: 'f' }, `so_titulo_${hex8('f')}`],
+  ];
+  for (const [label, input, expected] of nameVectors) {
+    const name = humanTaskName(input);
+    assert.strictEqual(name, expected, label);
+    assert.strictEqual(humanTaskName(input), name, `${label}: deterministic`);
+    assert.strictEqual(codexTaskName(name), name, `${label}: idempotent under codexTaskName`);
+    assert.match(name, nameShape, label);
+    assert(name.length <= 64, label);
+    assert.match(name, new RegExp(`_${hex8(input.attempt)}$`), label);
+  }
+  const longTitle = 'Identidade nativa sanitizador de linha unico nome humano por despacho retorno real do host no journal';
+  const longName = humanTaskName({ unitId: 'M-20261028132636-experiencia/S03/T02', title: longTitle, attempt: 'dispatch-s03-t02' });
+  assert(longName.length <= 64 && nameShape.test(longName), longName);
+  const titlePart = longName.slice('experiencia_s03_t02_'.length, -9);
+  const normalizedTitle = codexTaskName(longTitle);
+  assert(longName.startsWith('experiencia_s03_t02_') && normalizedTitle.startsWith(titlePart)
+    && normalizedTitle[titlePart.length] === '_', `cut at a word boundary: ${longName}`);
+  assert.strictEqual(humanTaskName({ unitId: 'x'.repeat(40), title: 'y'.repeat(80), attempt: 'g' }).length <= 64, true);
+  for (const attempt of [null, undefined, '']) assert.strictEqual(humanTaskName({ unitId: 'S03/T02', title: 'Nome', attempt }), null);
+  assert.strictEqual(humanTaskName({ unitId: '', title: '😀 ---', attempt: 'h' }), null, 'empty unit and title');
+  assert.strictEqual(humanTaskName(), null);
+  const attemptNames = new Set(Array.from({ length: 64 }, (_, index) => humanTaskName({ unitId: 'S03/T02', title: 'Nome', attempt: `dispatch-${index}` })));
+  assert.strictEqual(attemptNames.size, 64, 'distinct attempts give distinct names');
+  const preparationSource = fs.readFileSync(path.join(__dirname, 'forge-task-preparation.js'), 'utf8');
+  assert(!preparationSource.includes('humanTaskName'), 'preparation keeps its own naming');
+  assert(preparationSource.includes(".digest('hex').slice(0, 16);"), 'preparation keeps its 16-hex suffix');
+  console.log('PASS S03/T02 humanTaskName vectors: ASCII fold, unit tail at _ boundary, title cut at word boundary, 8-hex attempt suffix, deterministic, distinct, idempotent, null without attempt');
+
+  const humanName = humanTaskName({ unitId: 'S03/T02', title: 'Identidade nativa', attempt: 'dispatch-1' });
+  const codexHuman = buildNativeInvocation({ hostRuntime: 'codex', resolvedDispatch: dispatch('gpt-6-luna', 'medium', 'codex'),
+    activeCapabilities: codexCapabilities, taskName: humanName, agentType: 'forge-executor', prompt: 'Fixture only.', forkTurns: 'none' });
+  assert.deepStrictEqual(Object.keys(codexHuman.args), ['task_name', 'message', 'agent_type', 'model', 'reasoning_effort', 'fork_turns']);
+  assert.strictEqual(codexHuman.args.task_name, humanName);
+  const humanAgent = agentFixture('forge-memory', 'medium');
+  const humanBinding = { transport: 'agent-frontmatter', agentPath: humanAgent.filename, sourceFingerprint: humanAgent.fingerprint };
+  const claudeHuman = buildNativeInvocation({ hostRuntime: 'claude', resolvedDispatch: dispatch('claude-sonnet-5', 'medium', 'claude', 'sonnet'),
+    activeCapabilities: claudeCapabilities, taskName: humanName, agentType: 'forge-memory', prompt: 'memory', effortBinding: humanBinding });
+  assert.deepStrictEqual(claudeHuman.args, { subagent_type: 'forge-memory', prompt: 'memory', model: 'sonnet' }, JSON.stringify(claudeHuman));
+  assert.deepStrictEqual(preflightNativeBinding({ hostRuntime: 'codex', resolvedDispatch: dispatch('gpt-6-luna', 'medium', 'codex'),
+    activeCapabilities: codexCapabilities, taskName: humanName, agentType: 'forge-executor' }).args, null);
+  console.log('PASS S03/T02 native arguments: Codex receives exactly the six keys with the human task_name, Claude keeps subagent_type, prompt and model');
+
+  // Observer: a frozen Forge capability in the third callback argument only.
+  const hostValue = '/root/experience_s02_t07_334497b58af1';
+  const observing = { ...options, taskName: humanName, telemetryIdentity: { dispatchId: 'dispatch-observer' } };
+  let seenArgs, seenObserver, observerResult;
+  const observedRun = await invokeNative(observing, async (args, invocation, observer) => {
+    seenArgs = args; seenObserver = observer; observerResult = observer.hostIdentity(hostValue);
+    assert.strictEqual(invocation.args, args);
+    return { status: 'done' };
+  });
+  assert.strictEqual(observedRun.ok, true, JSON.stringify(observedRun));
+  assert.deepStrictEqual(Object.keys(seenArgs), ['task_name', 'message', 'agent_type', 'model', 'reasoning_effort', 'fork_turns']);
+  assert(Object.isFrozen(seenObserver));
+  assert.deepStrictEqual(Object.keys(seenObserver), ['hostIdentity']);
+  assert.deepStrictEqual(observerResult, { ok: true });
+  const expectedIdentity = { value: hostValue, source: 'host-tool-return', observed_ms: observedRun.host_identity.observed_ms,
+    dispatch_id: 'dispatch-observer', conflict: false };
+  assert(Number.isSafeInteger(expectedIdentity.observed_ms) && expectedIdentity.observed_ms >= 0);
+  assert.deepStrictEqual(observedRun.host_identity, expectedIdentity);
+  assert.deepStrictEqual(observedRun.lifecycle.host_identity, expectedIdentity);
+  const quietOptions = { ...options, taskName: humanName, telemetryIdentity: { dispatchId: 'dispatch-observer' } };
+  const twoArguments = await invokeNative(quietOptions, async (args, invocation) => ({ status: 'done', seen: [args.task_name, invocation.ok] }));
+  const ignoresThird = await invokeNative(quietOptions, async () => ({ status: 'done', seen: [humanName, true] }));
+  const legacyKeys = ['ok', 'host_runtime', 'tool', 'args', 'telemetry', 'reason_code', 'hint', 'provider_called', 'result', 'lifecycle', 'final_evidence'];
+  for (const run of [twoArguments, ignoresThird]) {
+    assert.deepStrictEqual(Object.keys(run), legacyKeys);
+    assert(!('host_identity' in run.lifecycle));
+    assert.deepStrictEqual(run.telemetry, observedRun.telemetry, 'telemetry does not change with observation');
+    assert.deepStrictEqual(Object.keys(run.final_evidence), Object.keys(observedRun.final_evidence));
+  }
+  const timeless = run => JSON.stringify({ ...run, final_evidence: { ...run.final_evidence, captured_at: 0, duration_ms: 0 },
+    lifecycle: { ...run.lifecycle, start_wall_ms: 0, last_wall_ms: 0, deadline_wall_ms: 0 } });
+  assert.strictEqual(timeless(twoArguments), timeless(ignoresThird), 'old and new callbacks give the same result after normalizing time');
+  const observedFailure = await invokeNative(observing, async (args, invocation, observer) => {
+    observer.hostIdentity(hostValue); throw Object.assign(Error('fixture'), { code: 'fixture-host-failure' });
+  });
+  assert.strictEqual(observedFailure.ok, false);
+  assert.deepStrictEqual({ ...observedFailure.host_identity, observed_ms: 0 }, { ...expectedIdentity, observed_ms: 0 });
+  assert.strictEqual(observedFailure.final_evidence.native_lifecycle.host_identity.value, hostValue);
+  for (const mode of ['readback-throws', 'readback-invalid', 'after-invoke-throws', 'after-readback-throws']) {
+    for (const observe of [true, false]) {
+      let originalInvocation;
+      const failed = await invokeNative({ ...observing,
+        readback: () => {
+          if (mode === 'readback-throws') throw Object.assign(Error('fixture'), { code: 'fixture-readback' });
+          return mode === 'readback-invalid' ? [] : null;
+        },
+        assertInvocation: stage => {
+          if (mode === `${stage}-throws`) throw Object.assign(Error('fixture'), { code: 'fixture-guard' });
+        },
+      }, async (args, invocation, observer) => {
+        originalInvocation = invocation;
+        if (observe) observer.hostIdentity(hostValue);
+        return { status: 'done' };
+      });
+      assert.strictEqual(failed.ok, false, mode);
+      if (observe) {
+        assert.strictEqual(failed.lifecycle.host_identity.value, hostValue, mode);
+        assert.deepStrictEqual(failed.final_evidence.native_lifecycle, failed.lifecycle, mode);
+        const bound = require('./forge-agent-identity').identityFromLifecycle({
+          lifecycle: failed.lifecycle, request: observing.telemetryIdentity, invocation: originalInvocation,
+        });
+        assert.strictEqual(bound.ok, true, mode);
+        assert.strictEqual(bound.fields.agent_id, hostValue, mode);
+      } else {
+        assert(!('host_identity' in failed), mode);
+        assert(!('lifecycle' in failed), 'legacy post-supervision failure shape remains unchanged');
+        assert(!('native_lifecycle' in failed.final_evidence), mode);
+      }
+    }
+  }
+  console.log('PASS S03/T02 post-supervision failure identity: readback throw/invalid and both assertion boundaries preserve lifecycle binding only when observed');
+  const silentFailure = await invokeNative(observing, async () => { throw Object.assign(Error('fixture'), { code: 'fixture-host-failure' }); });
+  assert(!('host_identity' in silentFailure) && !('host_identity' in silentFailure.lifecycle));
+  let claudeObserver;
+  const claudeObserved = await invokeNative({ hostRuntime: 'claude', resolvedDispatch: dispatch('claude-sonnet-5', 'medium', 'claude', 'sonnet'),
+    activeCapabilities: claudeCapabilities, agentType: 'forge-memory', prompt: 'memory', effortBinding: humanBinding },
+  async (args, invocation, observer) => { claudeObserver = observer; assert.deepStrictEqual(Object.keys(args), ['subagent_type', 'prompt', 'model']);
+    return { status: 'done' }; });
+  assert.strictEqual(claudeObserved.ok, true); assert.strictEqual(typeof claudeObserver.hostIdentity, 'function');
+  assert(!('host_identity' in claudeObserved));
+  fs.rmSync(humanAgent.dir, { recursive: true, force: true });
+  const invocationSource = fs.readFileSync(path.join(__dirname, 'forge-native-invocation.js'), 'utf8');
+  assert(invocationSource.includes('terminal: options.terminalResult') && invocationSource.includes('terminalResult'));
+  console.log('PASS S03/T02 invokeNative observer: third argument only, frozen hostIdentity, host_identity on success and failure only when observed, old callbacks unchanged');
   process.stdout.write('forge-native-invocation: ok\n');
 }
 

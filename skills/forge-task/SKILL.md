@@ -4,7 +4,9 @@ description: "Task autonoma sem milestone — brainstorm, discuss, plan, execute
 allowed-tools: Read, Write, Edit, Bash, Agent, Skill, AskUserQuestion, TaskCreate, TaskUpdate, TaskList, TaskStop, SendMessage, WebSearch, WebFetch
 ---
 
-Na preparação de task solta e nos demais despachos sidecar, siga `shared/forge-bidirectional-sidecar.md § Identidade do sidecar exibida na conversa`: anuncie a solicitação pré-disparo e repasse literalmente as linhas `[forge-sidecar]` do stderr.
+Na preparação de task solta e nos demais despachos sidecar, siga `shared/forge-bidirectional-sidecar.md § Identidade do sidecar exibida na conversa`: anuncie a solicitação pré-disparo e repasse literalmente as linhas `[forge-agente]` do stderr; as linhas `[forge-sidecar]` ficam no registro técnico e só são repassadas nos casos daquele contrato.
+
+Mensagens ao usuário seguem `shared/forge-communication.md` (no repositório ou em `${FORGE_HOME:-~/.forge-agent}/shared`), projetado no bloco gerenciado do CLAUDE.md e do AGENTS.md.
 
 ## Personal lifecycle (all exits)
 
@@ -588,6 +590,36 @@ baseline with the state at acceptance and refuses observable changes. This does
 not prove that no restored write or write elsewhere occurred; do not describe
 it as an OS-enforced sandbox. Sidecars use their enforced read-only profile.
 
+No host Codex, cada fase nativa de preparação também roda dentro de
+`forge-native-readonly-guard.js` em modo `code-only`. Depois de
+`action:"invoke-native"` e antes de chamar a ferramenta, capture com
+`--capture --owner "$WORKING_DIR"`, um `--code-root` por raiz de código guardada,
+`--mode code-only` e `--out` num arquivo novo fora dessas raízes e de `.gsd`;
+falha na captura impede a chamada. Depois do retorno terminal e antes do
+`--accept-native`, rode `--verify <baseline> --writer-stopped`. Saída 3 ou 4 não
+vira `rawResult`: feche a tentativa pelo mesmo `--accept-native` com
+`nativeFailure` (o `reason_code` do guard, `provider_called:true` e a telemetria
+da invocação), pare com essa falha nomeada e os caminhos relativos, não reverta
+nada e não inicie outro writer antes da reconciliação do owner.
+
+Identidade nativa da fase: o `NATIVE_DISPATCH_ID` é o `dispatchId` novo desta fase,
+gerado antes da invocação, e `PREPARATION_RESULT_FILE` é o seu `resultFile`. Entre
+`--start` e `--accept-native` a janela protegida do owner está aberta: só mostre na
+conversa o identificador que a ferramenta devolveu (`NATIVE_AGENT_ID`, exatamente
+como veio). Depois do `--accept-native`, registre-o com o receipt fechado da fase:
+```bash
+if [ -n "$NATIVE_AGENT_ID" ]; then
+  node "$FORGE_SCRIPTS_DIR/forge-agent-identity.js" --record --unit "{unitType da fase}/{TASK_ID}" \
+    --dispatch-id "$NATIVE_DISPATCH_ID" --host "{hostRuntime do request}" --agent-type "{agente de invocation.args}" \
+    --agent-id "$NATIVE_AGENT_ID" --agent-id-source host-tool-return \
+    --events "$WORKING_DIR/.gsd/forge/events.jsonl" --receipt "$PREPARATION_RESULT_FILE.receipt.json"
+fi
+```
+Sem retorno do host, nada é registrado e a identidade fica `desconhecido`. Nunca
+componha o ID a partir de `task_name`, de `/root/` mais nome, de hook ou de prosa
+(`/root/<nome>` só entra quando é o valor que a ferramenta devolveu), não infira
+atividade a partir de timers locais e não apresente sidecar como thread nativa.
+
 Accept a phase only from terminal `action:"complete"` with `status:"done"` and
 the expected task artifact present. For `partial` or `blocked`, keep the
 timeline task in progress, surface `result.questions` through
@@ -596,6 +628,15 @@ answer may be inferred. Replaying the same dispatch may replay a ready receipt
 but may not call the provider; an answered continuation is a new dispatch.
 Every other action/refusal stops with its `reason_code`, diagnostic layer and
 `provider_called` value. `dispatch_allowed:true` alone is never delivery proof.
+
+Timeline da preparação: o `TaskCreate` de cada fase vem antes do `--start`,
+quando ainda não há rota comprovada: a descrição é `executor e modelo ainda não
+resolvidos`. Depois que esse mesmo `--start` retornar, use a rota desse retorno:
+`transport` ou `route.worker_mode`, `route.resolved_worker_engine` e
+`route.model_resolved ?? route.model`. Atualize somente campos que o schema real
+do `TaskUpdate` exposto aceitar; sem esse campo, comunique a rota numa linha
+curta da conversa. Campo ausente e modelo observado continuam `desconhecido`.
+Não chame o resolvedor de novo, não infira default e não use rótulo fixo de modelo.
 
 ---
 
@@ -612,7 +653,7 @@ a reused phase still has to hand its content downstream.
 
 **Create timeline task:**
 ```
-    TaskCreate({ subject: "[{TASK_ID}] brainstorm", activeForm: "brainstorm · forge-planner (resolved model)" })
+TaskCreate({ subject: "💬 {TASK_ID} — brainstorm: {descrição humana da task}", description: "executor e modelo ainda não resolvidos", activeForm: "preparando: brainstorm de {descrição humana} · forge-planner" })
 TaskUpdate({ taskId: <id>, status: "in_progress" })
 ```
 
@@ -676,7 +717,7 @@ After the caller returns terminal `done` and publishes the artifact:
 
 **Create timeline task:**
 ```
-TaskCreate({ subject: "[{TASK_ID}] discuss", activeForm: "discuss · forge-discusser (resolved model)" })
+TaskCreate({ subject: "💬 {TASK_ID} — discuss: {descrição humana da task}", description: "executor e modelo ainda não resolvidos", activeForm: "preparando: decisões de {descrição humana} · forge-discusser" })
 TaskUpdate({ taskId: <id>, status: "in_progress" })
 ```
 
@@ -724,7 +765,7 @@ again, reported with the file that drifted.
 
 **Create timeline task:**
 ```
-TaskCreate({ subject: "[{TASK_ID}] research", activeForm: "research · forge-researcher (opus)" })
+TaskCreate({ subject: "🔬 {TASK_ID} — research: {descrição humana da task}", description: "executor e modelo ainda não resolvidos", activeForm: "preparando: pesquisa de {descrição humana} · forge-researcher" })
 TaskUpdate({ taskId: <id>, status: "in_progress" })
 ```
 
@@ -781,7 +822,7 @@ Skill({ skill: "forge-security", args: "{TASK_ID}" })
 
 **Create timeline task:**
 ```
-TaskCreate({ subject: "[{TASK_ID}] plan", activeForm: "plan · forge-planner (opus)" })
+TaskCreate({ subject: "⚙ {TASK_ID} — plan: {descrição humana da task}", description: "executor e modelo ainda não resolvidos", activeForm: "planejando: {descrição humana} · forge-planner" })
 TaskUpdate({ taskId: <id>, status: "in_progress" })
 ```
 
@@ -1249,9 +1290,10 @@ ENGINE=claude; DISPATCH_ENGINE=claude; RESOLVED_WORKER_ENGINE=claude; WORKER_MOD
 
 **Create timeline task:**
 ```
-TaskCreate({ subject: "[{TASK_ID}] execute", activeForm: "execute · forge-executor (sonnet)" })
+TaskCreate({ subject: "⚡ {TASK_ID} — execute: {descrição humana da task}", description: "executor {nativo|sidecar} forge-executor ({modelo resolvido})", activeForm: "executando agente: {descrição humana} · forge-executor" })
 TaskUpdate({ taskId: <id>, status: "in_progress" })
 ```
+A rota deste despacho já foi resolvida acima: use `$WORKER_MODE` e `$MODEL_ID` (`route.model_resolved ?? route.model`) desse mesmo retorno. Campo ausente fica `desconhecido`, sem nova resolução nem rótulo fixo de modelo.
 
 Antes do dispatch, emita o banner de liveness (ver `shared/forge-dispatch.md § Spawn Liveness Banner`):
 `◆ Despachando forge-executor… (roda em subagente — sem output até retornar, ~3–8 min; esperado, não é travamento)`
@@ -1262,6 +1304,12 @@ PENDING_CONTEXT=$(node "$FORGE_SCRIPTS_DIR/forge-context-boundary.js" --action p
 PENDING_CONTEXT_FILE=$(node -pe 'JSON.parse(process.argv[1]).pending_file || ""' "$PENDING_CONTEXT")
 PENDING_CONTEXT_ID=$(node -pe 'JSON.parse(process.argv[1]).pending_id || ""' "$PENDING_CONTEXT")
 DISPATCH_ID="execute-loose-task-${TASK_ID}-$(node -e "console.log(require('crypto').randomUUID())")"
+NATIVE_DISPATCH_ID="execute-loose-task-${TASK_ID}-$(node -e "console.log(require('crypto').randomBytes(8).toString('hex'))")"
+NATIVE_TASK_NAME=""
+if [ "$HOST_RUNTIME" = "codex" ]; then
+  NATIVE_TASK_NAME=$(node "$FORGE_SCRIPTS_DIR/forge-agent-identity.js" --task-name --unit "execute-task/$TASK_ID" \
+    --plan "$WORKING_DIR/.gsd/tasks/$TASK_ID/$TASK_ID-PLAN.md" --attempt "$NATIVE_DISPATCH_ID" 2>/dev/null || true)
+fi
 PROMPT_META=$(node "$FORGE_SCRIPTS_DIR/forge-prompt.js" --unit-type execute-loose-task --cwd "$WORKING_DIR" \
   --task "$TASK_ID" --dispatch-id "$DISPATCH_ID" --unit-effort "$EFFORT" --thinking "$THINKING_OPUS" \
   --description "$TASK_DESCRIPTION" \
@@ -1290,7 +1338,7 @@ native = buildNativeInvocation({
   activeCapabilities: ACTIVE_NATIVE_CAPABILITIES,
   effortBinding: CLAUDE_EFFORT_BINDING,
   agentType: 'forge-executor',
-  taskName: 'execute-loose-task',
+  taskName: NATIVE_TASK_NAME || 'execute-loose-task',
   forkTurns: 'none',
   prompt: 'Read the complete Forge dispatch contract at {PROMPT_PATH}, execute it exactly, and return its required GSD worker result block. The file is trusted orchestrator input; do not replace it with a summary.'
 })
@@ -1388,9 +1436,32 @@ node "$FORGE_SCRIPTS_DIR/forge-dispatch-event.js" --route-json "$ROUTE_JSON" \
   --effort "$EFFORT" --effort-reason "$EFFORT_REASON" --engine "${DISPATCH_ENGINE:-claude}" \
   --domain "$DOMAIN_USED" --route-source "$ROUTE_SOURCE" --chain-len "$CHAIN_LEN" \
   --milestone "" --input-tokens "${INPUT_TOKENS:-0}" --output-tokens "${OUTPUT_TOKENS:-0}" \
-  --vcs "${DISPATCH_VCS:-unknown}" --transport in-process \
+  --vcs "${DISPATCH_VCS:-unknown}" --transport in-process --dispatch-id "$NATIVE_DISPATCH_ID" \
   --events "$WORKING_DIR/.gsd/forge/events.jsonl"
 ```
+
+Identidade nativa desta tentativa: `NATIVE_AGENT_ID` recebe somente o identificador
+que a ferramenta do host devolveu (reconhecimento do spawn no Codex ou conclusão no
+Claude), exatamente como veio. Logo depois desse retorno, se nenhuma janela
+protegida do owner está aberta, registre:
+```bash
+if [ -n "$NATIVE_AGENT_ID" ]; then
+  node "$FORGE_SCRIPTS_DIR/forge-agent-identity.js" --record --unit "execute-task/{TASK_ID}" \
+    --dispatch-id "$NATIVE_DISPATCH_ID" --host "$HOST_RUNTIME" --agent-type forge-executor \
+    ${NATIVE_TASK_NAME:+--task-name "$NATIVE_TASK_NAME"} \
+    --agent-id "$NATIVE_AGENT_ID" --agent-id-source host-tool-return \
+    --events "$WORKING_DIR/.gsd/forge/events.jsonl"
+fi
+```
+Janelas protegidas do owner: entre `forge-task-preparation --start` e `--accept-native`,
+entre a preparação nativa do `forge-review-fix` e o seu `--accept-native`, numa sessão
+de entrega nativa entre start e publish, e enquanto uma publicação de memória protegida
+ainda não foi unida. Dentro delas, só mostre a identidade na conversa e registre depois
+da aceitação ou da publicação, com `--receipt` quando o fluxo tem receipt. Sem
+retorno do host, nada é registrado e a identidade fica `desconhecido`. Nunca
+componha o ID a partir de `task_name`, de `/root/` mais nome, de hook ou de prosa
+(`/root/<nome>` só entra quando é o valor que a ferramenta devolveu), não infira
+atividade a partir de timers locais e não apresente sidecar como thread nativa.
 
 **Contract miss gate (Layer 0) — BEFORE parsing any status.** Classify the return rather than eyeballing it:
 
@@ -1488,8 +1559,9 @@ fi
 
 **Create timeline tasks:**
 ```
-TaskCreate({ subject: "[{TASK_ID}] review", activeForm: "review · forge-reviewer (sonnet)" })
+TaskCreate({ subject: "⚖ {TASK_ID} — review: {descrição humana da task}", description: "executor {nativo|sidecar} forge-reviewer ({modelo resolvido})", activeForm: "revisando: {descrição humana} · forge-reviewer" })
 ```
+Executor e modelo vêm do roteamento do challenger já resolvido no Step 0 de `shared/forge-review.md` (`$CHALLENGER_MODEL`). Se ainda não estiver resolvido, a descrição é `executor e modelo ainda não resolvidos`; campo ausente fica `desconhecido`, sem rótulo fixo de modelo.
 
 **Run the dialectic loop** — follow `shared/forge-review.md` Steps 2–7 with these bindings:
 - `UNIT = task/{TASK_ID}`, `DIFF_CMD` as above, `MODE = interactive`, artifact = `.gsd/tasks/{TASK_ID}/{TASK_ID}-REVIEW.md`.
@@ -1533,6 +1605,14 @@ TaskCreate({ subject: "[{TASK_ID}] review", activeForm: "review · forge-reviewe
         RF_RUNTIME_READY=false
       else
         RF_RUNTIME_READY=true
+        if [ "$RF_WORKER_MODE" = "native" ]; then
+          RF_NATIVE_DISPATCH_ID="review-fix-{TASK_ID}-$(node -e "console.log(require('crypto').randomBytes(8).toString('hex'))")"
+          RF_NATIVE_TASK_NAME=""
+          if [ "$RF_HOST_RUNTIME" = "codex" ]; then
+            RF_NATIVE_TASK_NAME=$(node "$FORGE_SCRIPTS_DIR/forge-agent-identity.js" --task-name --unit "review-fix/{TASK_ID}" \
+              --plan "$WORKING_DIR/.gsd/tasks/{TASK_ID}/{TASK_ID}-PLAN.md" --attempt "$RF_NATIVE_DISPATCH_ID" 2>/dev/null || true)
+          fi
+        fi
         if [ "$DISPATCH_DECISION" = "advisory" ] && [ -n "$DISPATCH_HINT" ]; then
           printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
         fi
@@ -1547,12 +1627,29 @@ TaskCreate({ subject: "[{TASK_ID}] review", activeForm: "review · forge-reviewe
   fixer = buildNativeInvocation({ hostRuntime: RF_HOST_RUNTIME,
     resolvedDispatch: RF_ROUTE_JSON, activeCapabilities: ACTIVE_NATIVE_CAPABILITIES,
     effortBinding: CLAUDE_EFFORT_BINDING,
-    agentType: 'forge-executor', taskName: 'review-fix', forkTurns: 'none',
+    agentType: 'forge-executor', taskName: RF_NATIVE_TASK_NAME || 'review-fix', forkTurns: 'none',
     prompt: 'WORKING_DIR: {WORKING_DIR}\nUNIT: review-fix/{TASK_ID}\nCLAIM_PATHS: {claimPaths}\nCONSTRAINTS: {constraints}\n{isolation header lines when ISOLATION_MODE != shared}\nFix ONLY the accepted review items listed below. Minimal diffs; no refactors or scope creep beyond those items. Run configured lint/format commands. Honor constraints.auto_commit: commit only claimed fixes when true; leave changes uncommitted when false.\n{accepted items including r, review_file when supplied, path:line, verify_paths, claim, action and rationale}\nReturn ---GSD-WORKER-RESULT--- with status: done|partial|blocked, commit_sha: <actual SHA when constraints.auto_commit=true and status=done; null otherwise>, and items: [{r: R#, review_file: <copy when supplied>, outcome: fixed|failed|skipped, note: <verification evidence>}]. Include exactly one items entry per listed review_file/R# pair; repeated R# in different review files are distinct. Report fixed only after verifying that item. Do not create task PLAN/SUMMARY or modify Forge metadata; this is a review-fix unit.' })
   review_fix_result = invoke(fixer.tool, fixer.args)
   ```
 
   The parent adds `rawResult: review_fix_result` and the exact `nativePreparation` to the same request, then runs `forge-review-fix.js --accept-native` as prescribed by the shared contract before publishing outcomes; never rebuild the evidence from a worker report. Preserve the REVIEW snapshot and review_file/R# correlation. No acceptance or new writer follows failed preparation.
+
+  Identidade nativa do fixer: entre `--prepare-native` e `--accept-native` a janela
+  protegida do owner está aberta, então o identificador que a ferramenta devolveu
+  (`RF_NATIVE_AGENT_ID`, exatamente como veio) só aparece na conversa. Depois do
+  `--accept-native`, registre-o; este fluxo não tem receipt fechado, então vai sem
+  `--receipt`. Sem retorno do host, nada é registrado e a identidade fica
+  `desconhecido`; as mesmas regras de não inferência do execute-loose-task valem aqui.
+
+  ```bash
+  if [ -n "$RF_NATIVE_AGENT_ID" ]; then
+    node "$FORGE_SCRIPTS_DIR/forge-agent-identity.js" --record --unit "review-fix/{TASK_ID}" \
+      --dispatch-id "$RF_NATIVE_DISPATCH_ID" --host "$RF_HOST_RUNTIME" --agent-type forge-executor \
+      ${RF_NATIVE_TASK_NAME:+--task-name "$RF_NATIVE_TASK_NAME"} \
+      --agent-id "$RF_NATIVE_AGENT_ID" --agent-id-source host-tool-return \
+      --events "$WORKING_DIR/.gsd/forge/events.jsonl"
+  fi
+  ```
 
   After a successful native fixer, its dispatch event records the captured gate axes with no invented milestone or slice:
 
@@ -1564,6 +1661,7 @@ TaskCreate({ subject: "[{TASK_ID}] review", activeForm: "review · forge-reviewe
     --host-runtime "$RF_HOST_RUNTIME" --worker-mode "$RF_WORKER_MODE" \
     --dispatch-allowed "$RF_DISPATCH_ALLOWED" --engine "${RF_DISPATCH_ENGINE:-claude}" \
     --milestone "" --transport in-process --vcs "${DISPATCH_VCS:-unknown}" \
+    --dispatch-id "$RF_NATIVE_DISPATCH_ID" \
     --events "$WORKING_DIR/.gsd/forge/events.jsonl"
   ```
 - **OPEN items (Step 7b):** for each, `AskUserQuestion` live (`Manter` / `Refatorar agora` — dispatches a `review-fix` unit / `Criar follow-up`) and record the decision.
@@ -1708,17 +1806,23 @@ node "$FORGE_SCRIPTS_DIR/forge-isolation.js" --cleanup --run "$TASK_ID" --cwd "$
 
 **Final report:**
 ```
-✓ {TASK_ID} concluída: {TASK_DESCRIPTION}
+✓ {TASK_ID} concluída: {resultado em uma frase}
 
-Arquivos modificados:
+Validação: {n de m critérios verificados no {TASK_ID}-DELIVERY.json}{; pendências: IDs}
+Fatos separados: implementação {estado}; revisão {estado}; CI {estado}; merge {estado}; instalação {estado}; aceite humano {estado}
+
+Arquivos principais:
 {key_files from SUMMARY.md, one per line}
 
-Must-haves: todos verificados ✓
+Decisão pendente: {ID — pergunta curta, ou nenhuma}
+Entregável: branch `forge/{TASK_ID}` quando houver isolamento — a integração na branch default é do operador; a task nunca integra.
 
-→ Nova task: /forge-task <descrição>
+→ Próximo passo: {ação concreta, ou /forge-task <descrição> para uma nova task}
 → A partir de um item: /forge-task <item-id>
 → Ver tasks: /forge-status
 ```
+
+Cada `{estado}` cita a própria evidência (SUMMARY, DELIVERY, REVIEW, execução de CI, merge, registro de instalação, UAT) ou fica `pendente`; sem evidência, `desconhecido`. Sem DELIVERY, diga `Validação: sem DELIVERY para esta task`. A conclusão da task não prova CI, merge, instalação nem aceite humano.
 
 ---
 

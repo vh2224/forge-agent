@@ -79,6 +79,45 @@ async function withAutoPlanGate(request, attest, action) {
     } finally { live.active = false; }
   });
 }
+// Explicit host adapter for requests the host creates later (recovery successors).
+// The handle is opaque and process-local: it holds no scope or approval, only the
+// host's live attestation callback, which every run calls again for the exact
+// current scope. Serialized copies, look-alikes and other module instances fail.
+const autoGateAdapters = new WeakMap();
+function createAutoPlanGateAdapter(attest) {
+  if (typeof attest !== 'function') fail('execution-auto-gate-host-required');
+  const adapter = Object.freeze({});
+  autoGateAdapters.set(adapter, attest);
+  return adapter;
+}
+function adapterAttest(adapter) {
+  const attest = adapter !== null && typeof adapter === 'object' ? autoGateAdapters.get(adapter) : undefined;
+  if (typeof attest !== 'function') fail('execution-auto-gate-adapter-required');
+  return attest;
+}
+async function withAutoPlanGateAdapter(adapter, request, action) {
+  return withAutoPlanGate(request, adapterAttest(adapter), action);
+}
+// Same storage, scope, matcher and live attestation for synchronous guards; the
+// fresh scope closes in finally and the surrounding scope is restored. A thenable
+// would outlive the scope, so it is refused after the scope is already inactive.
+function withAutoPlanGateAdapterSync(adapter, request, action) {
+  const attest = adapterAttest(adapter);
+  if (typeof action !== 'function') fail('execution-auto-gate-host-required');
+  const live = { scope: autoGateScope(request), attest, active: true };
+  return autoPlanGate.run(live, () => {
+    let value;
+    try {
+      if (!autoGateAllowed(request)) fail('execution-auto-gate-required');
+      value = action();
+    } finally { live.active = false; }
+    if (value !== null && (typeof value === 'object' || typeof value === 'function') && typeof value.then === 'function') {
+      Promise.resolve(value).catch(() => { /* the refusal below is the outcome */ });
+      fail('execution-auto-gate-sync-required');
+    }
+    return value;
+  });
+}
 
 function locations(r) {
   if (r.scope !== 'standalone-task' || r.phase !== 'execute' || r.unitType !== 'execute-task') fail('execution-phase-unit-mismatch');
@@ -342,4 +381,5 @@ function replayState(cwd, contract) {
   const state = require('./forge-surgical-reset').captureAttemptSnapshot(cwd);
   return { start_sha: state.start_sha, pre_dirty: state.pre_dirty, vcs: state.vcs };
 }
-module.exports = { locations, prepare, protectedSnapshot, assertProtected, verifyResult, assertReplay, replayState, withAutoPlanGate, autoGateAllowed, milestonePlanFile };
+module.exports = { locations, prepare, protectedSnapshot, assertProtected, verifyResult, assertReplay, replayState, withAutoPlanGate,
+  createAutoPlanGateAdapter, withAutoPlanGateAdapter, withAutoPlanGateAdapterSync, autoGateAllowed, milestonePlanFile };

@@ -8,6 +8,10 @@ const os = require('os');
 const path = require('path');
 
 const schemaPin = require('./forge-schema-pin');
+const { sha256 } = require('./forge-delivery');
+
+const HISTORICAL_PIN = path.join(__dirname, 'fixtures', 'schema-pin', 'codex-appserver-pin-0.163.0.json');
+const HISTORICAL_SHA256 = '1060034061a031cc64af06ed68666b9945af8e26c72c330fec77202728f4813f';
 
 let assertions = 0;
 function check(condition, message) {
@@ -95,6 +99,61 @@ function testCliDrift() {
       });
     });
     equal(run().outcome, 'match', 'object keys and required ordering do not drift');
+    equal(run().fields_total, 0, 'matching schema reports zero differences');
+    equal(run().fields_truncated, false, 'matching schema is not truncated');
+    for (const size of [1, 20, 21, 35]) {
+      fixture(definitions => {
+        for (let index = 0; index < size; index += 1) {
+          definitions.TurnStartParams.properties[`fixtureField${String(index).padStart(2, '0')}`] = { type: 'string' };
+        }
+      });
+      const bounded = run();
+      equal(bounded.fields_total, size, 'total measures all differences once');
+      equal(bounded.fields.length, Math.min(size, 20), 'default output stays bounded');
+      equal(bounded.fields_truncated, size > 20, 'truncation is true iff total exceeds 20');
+      const full = run({}, ['--check', '--schema-dir', directory, '--full']);
+      equal(full.fields.length, size, '--full names every path');
+      equal(full.fields_total, size, '--full keeps the exact total');
+      equal(full.fields_truncated, size > 20, '--full reports whether the default would truncate');
+      equal(bounded.fields, full.fields.slice(0, 20), 'default is the same ordered prefix');
+      equal(schemaPin.checkDrift({ schemaDir: directory }).fields_total, size, 'module API counts full drift too');
+      const text = childProcess.spawnSync(process.execPath,
+        [path.join(__dirname, 'forge-schema-pin.js'), '--check', '--schema-dir', directory, '--full'], { encoding: 'utf8' });
+      equal(text.status, 1, 'plain full drift exits 1');
+      for (const field of full.fields) check(text.stdout.includes(`${field.kind}: ${field.path}\n`), 'plain --full also names every path');
+    }
+    equal(schemaPin.diffValues(Array(25).fill(0), Array(25).fill(1)).length, 20, 'diffValues defaults to 20');
+    equal(schemaPin.diffValues(Array(25).fill(0), Array(25).fill(1), '', [], 3).length, 3, 'diffValues accepts a custom limit');
+    equal(schemaPin.diffValues(Array(25).fill(0), Array(25).fill(1), '', [], Infinity).length, 25, 'Infinity is unlimited');
+    for (const args of [['--full'], ['--generate-pin', '--full'], ['--full', '--generate-pin']]) {
+      const bad = childProcess.spawnSync(process.execPath, [path.join(__dirname, 'forge-schema-pin.js'), ...args], { encoding: 'utf8' });
+      equal(bad.status, 2, '--full outside check is a usage error before generation');
+      check(bad.stderr.includes('--full only valid with --check'), 'usage names the restriction');
+    }
+    console.log('PASS C02 full drift: 0/1/20/21/35 totals, bounded prefix, full JSON/text and invalid mode exit 2');
+
+    fixture();
+    equal(sha256(fs.readFileSync(HISTORICAL_PIN)), HISTORICAL_SHA256, 'historical fixture retains exact original bytes');
+    const historical = JSON.parse(fs.readFileSync(HISTORICAL_PIN, 'utf8'));
+    equal(historical.meta.codex_version, '0.163.0', 'fixture records historical version');
+    const old = run({ FORGE_SCHEMA_PIN_FILE: HISTORICAL_PIN }, ['--check', '--schema-dir', directory, '--full']);
+    equal(old.outcome, 'drift', 'new schema against historical pin must drift');
+    equal(old.fields_total, 18, 'historical negative names the reviewed 18 differences');
+    equal(old.fields_truncated, false, '18 differences are not truncated');
+    check(old.fields.some(field => field.path === 'referenced.CodexErrorInfo.anyOf[0].enum[6]'), 'drift names the modelNotFound insertion index');
+    check(old.fields.some(field => field.path === 'referenced.ImageGenerationInputImage'), 'drift names new referenced type');
+    const enumValues = pin.referenced.CodexErrorInfo.anyOf[0].enum;
+    equal(enumValues[6], 'modelNotFound', 'new pin has the inserted value');
+    fixture((definitions, referenced) => {
+      const values = referenced.CodexErrorInfo.anyOf[0].enum;
+      [values[0], values[1]] = [values[1], values[0]];
+    });
+    const reordered = run();
+    equal(reordered.fields.map(field => field.path), [
+      'referenced.CodexErrorInfo.anyOf[0].enum[0]', 'referenced.CodexErrorInfo.anyOf[0].enum[1]',
+    ], 'reordered enum preserves positional drift at both indices');
+    console.log('PASS C02 historical pin: SHA256 immutable, FORGE_SCHEMA_PIN_FILE names enum insertion and ImageGenerationInputImage; reordered enum names both indices');
+
     fixture(definitions => definitions.ThreadItem.oneOf.reverse());
     equal(run().outcome, 'drift', 'oneOf ordering is not normalized away');
     const commandIndex = pin.definitions.ThreadItem.oneOf.findIndex(item => item.properties.type.enum[0] === 'commandExecution');
@@ -138,6 +197,7 @@ function testCliDrift() {
     equal(run({ FORGE_SCHEMA_PIN_FILE: outputPin, FORGE_SCHEMA_PIN_CODEX_BIN: generator }, ['--generate-pin']).outcome,
       'match', 'reviewed variants can be pinned through the same CLI');
     equal(JSON.parse(fs.readFileSync(outputPin, 'utf8')).definitions, pin.definitions, 'successful repin preserves projected definitions');
+    console.log('PASS C02 existing negatives: renamed field, referenced drift, unreadable pin, missing generator and replacement variant refusal preserve destination');
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -167,9 +227,75 @@ function testPinnedCount() {
     check(Object.prototype.hasOwnProperty.call(pin.referenced, name), `closure pins ${name}`);
   }
   equal(pin.meta.unresolved_refs, [], 'every reachable ref resolves at this codex version');
+  equal(pin.meta.codex_version, '0.165.0', 'real pin records the reviewed generator version');
+  equal(pin.meta.referenced_count, 54, 'reviewed projection has 54 referenced types');
   // B2 stays alive: the pin is a projection, not the 3.4 MB / 267-file raw generation.
   const bytes = fs.statSync(schemaPin.pinPath()).size;
   check(bytes < 512 * 1024, `pin stays a projection (${(bytes / 1024).toFixed(1)} KB, cap 512 KB)`);
+  console.log('PASS C02 pin metadata: Codex 0.165.0, 5 roots, 19 variants, 54 referenced types, zero unresolved refs');
+}
+
+function testSchemaDocument() {
+  const doc = fs.readFileSync(path.join(__dirname, '..', 'docs', 'codex-schema-0.165.0.md'), 'utf8');
+  const pin = JSON.parse(fs.readFileSync(schemaPin.pinPath(), 'utf8'));
+  const previous = JSON.parse(fs.readFileSync(HISTORICAL_PIN, 'utf8'));
+  const fields = schemaPin.diffValues(
+    { definitions: previous.definitions, referenced: previous.referenced },
+    { definitions: pin.definitions, referenced: pin.referenced }, '', [], Infinity);
+  const evidence = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'docs', 'host-compatibility-2026-10-28.evidence.json'), 'utf8'));
+  equal(fields.length, evidence.schema.unlimited_diff_paths, 'current full diff confronts original analysis total');
+  for (const field of fields) check(doc.includes(`\`${field.path}\``), 'document inventories each exact full helper path');
+  for (const phrase of ['fields_total: 18', 'fields_truncated: false', 'ThreadStartParams', 'modelNotFound', 'S01/T04', 'ServerRequest.json', '-32601', '500', 'Limites da verificação', 'issues/279']) {
+    check(doc.includes(phrase), `document records ${phrase}`);
+  }
+  check(doc.split('\n').length >= 90, 'schema review is substantive');
+  check(!/TODO|TBD/.test(doc), 'schema review has no stub markers');
+  const readme = fs.readFileSync(path.join(__dirname, 'fixtures', 'schema-pin', 'README.md'), 'utf8');
+  check(readme.includes(HISTORICAL_SHA256) && readme.includes(previous.meta.projected_at), 'README records exact hash and original timestamp');
+  check(readme.split('\n').length >= 10, 'historical provenance is substantive');
+  console.log('PASS C02 document: every full helper path grouped, 18 matches dated evidence, truncation explicit, policy/params/inbound/limits and historical provenance recorded');
+}
+
+function testLive165() {
+  // Local generation only, no inference. CI does not install Codex; absence or a
+  // different CLI version is explicitly unverified rather than a matching schema.
+  const version = childProcess.spawnSync('codex', ['--version'], { encoding: 'utf8', shell: false });
+  if (version.status !== 0 || !/^codex-cli 0\.165\.0\s*$/.test(version.stdout)) {
+    console.log('SKIP C02 live Codex 0.165.0: reviewed CLI not installed; offline fixtures do not prove live compatibility');
+    return;
+  }
+  const live = childProcess.spawnSync(process.execPath, [path.join(__dirname, 'forge-schema-pin.js'), '--check', '--json'], { encoding: 'utf8', shell: false });
+  equal(live.status, 0, 'installed 0.165.0 guard matches the regenerated pin');
+  const result = JSON.parse(live.stdout);
+  equal(result.outcome, 'match', 'live result is a real match');
+  equal(result.counts, { definitions_compared: 5, referenced_compared: 54 }, 'live compares five roots and the whole closure');
+  equal(result.fields_total, 0, 'no live drift');
+  equal(result.fields_truncated, false, 'matching live result not truncated');
+  const directory = tempDir('live-inspect');
+  try {
+    equal(schemaPin.generateSchema(directory).codexVersion, '0.165.0', 'inspect files generated by the real CLI with argv');
+    const thread = JSON.parse(fs.readFileSync(path.join(directory, 'v2', 'ThreadStartParams.json'), 'utf8'));
+    equal(thread.required || [], [], 'thread start has no required fields');
+    equal(thread.properties.model.type, ['string', 'null'], 'explicit model remains supported');
+    equal(thread.properties.ephemeral.type, ['boolean', 'null'], 'ephemeral remains supported');
+    check(thread.properties.approvalPolicy.anyOf.some(branch => branch.$ref === '#/definitions/AskForApproval'), 'approval policy type remains supported');
+    const turn = JSON.parse(fs.readFileSync(path.join(directory, 'v2', 'TurnStartParams.json'), 'utf8'));
+    equal(turn.required, ['input', 'threadId'], 'turn still requires input and threadId');
+    const requests = JSON.parse(fs.readFileSync(path.join(directory, 'ServerRequest.json'), 'utf8'));
+    const doc = fs.readFileSync(path.join(__dirname, '..', 'docs', 'codex-schema-0.165.0.md'), 'utf8');
+    equal(requests.oneOf.length, 10, 'server request inventory has ten methods');
+    for (const request of requests.oneOf) {
+      const method = request.properties.method.enum[0];
+      const params = request.properties.params.$ref.slice('#/definitions/'.length);
+      check(doc.includes(`\`${method}\``) && doc.includes(`\`${params}\``), 'document names actual generated method and params type');
+      equal(/EXPERIMENTAL/.test(request.description || ''), method === 'item/tool/requestUserInput', 'experimental marking is read from schema');
+    }
+  } finally {
+    const actual = fs.realpathSync(directory);
+    check(path.dirname(actual) === fs.realpathSync(os.tmpdir()) && path.basename(actual).startsWith('forge-schema-pin-test-live-inspect-'), 'cleanup contains only owned OS temp directory');
+    fs.rmSync(actual, { recursive: true, force: true });
+  }
+  console.log('PASS C02 live Codex 0.165.0: match 5/54, ThreadStartParams model/approval/ephemeral and all 10 inbound request types/experimental markers revalidated; temp removed');
 }
 
 // The stopping rule is reachability, and an unreachable pointer is NAMED, not dropped.
@@ -289,6 +415,8 @@ if (process.argv[2] === '--generator-missing-child') {
   testCliDrift();
   testProjectionFixture();
   testPinnedCount();
+  testSchemaDocument();
+  testLive165();
   testReferenceClosure();
   testPinUnreadable();
   testGeneratorDegradations();

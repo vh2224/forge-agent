@@ -4,7 +4,9 @@ description: "Executa o milestone inteiro de forma autonoma ate concluir."
 allowed-tools: Read, Write, Edit, Bash, Agent, Skill, TaskCreate, TaskUpdate, TaskList, TaskStop, SendMessage, AskUserQuestion, WebSearch, WebFetch
 ---
 
-Nos despachos sidecar, siga `shared/forge-bidirectional-sidecar.md § Identidade do sidecar exibida na conversa`: anuncie a solicitação pré-disparo e repasse literalmente as linhas `[forge-sidecar]` do stderr.
+Nos despachos sidecar, siga `shared/forge-bidirectional-sidecar.md § Identidade do sidecar exibida na conversa`: anuncie a solicitação pré-disparo e repasse literalmente as linhas `[forge-agente]` do stderr; as linhas `[forge-sidecar]` ficam no registro técnico e só são repassadas nos casos daquele contrato.
+
+Mensagens ao usuário seguem `shared/forge-communication.md` (no repositório ou em `${FORGE_HOME:-~/.forge-agent}/shared`), projetado no bloco gerenciado do CLAUDE.md e do AGENTS.md.
 
 ## Direct execution and maintenance boundary
 
@@ -918,6 +920,28 @@ After a successful `plan-slice` unit, before dispatching the first `execute-task
 
 5. **Fill the plan-check template** from `shared/forge-dispatch.md § plan-check` with `$WORKING_DIR` (not raw CWD — always use the bash-captured variable), `{M###}`, `{S##}`, `{PLAN_CHECK_MODE}`, `{MUST_HAVES_CHECK_RESULTS}`.
 
+   No host Codex, o despacho nativo do `forge-plan-checker` (este passo e a
+   re-execução e. do loop de revisão) roda dentro de `forge-native-readonly-guard.js`
+   em modo `full`. Antes do spawn, capture com um `--code-root` por raiz de código
+   guardada, a publicação exata do PLAN-CHECK da slice, o append de eventos e, só
+   quando o pai detém esse lease e esse run, `--own-lease` e `--own-run`
+   (`OWN_LEASE_UNIT` e `OWN_RUN_ID` vazios quando não detém). `PLAN_CHECK_BASELINE`
+   é um arquivo novo fora das raízes guardadas e de `.gsd`; falha na captura
+   impede o spawn.
+   ```bash
+   node "$FORGE_SCRIPTS_DIR/forge-native-readonly-guard.js" --capture --owner "$WORKING_DIR" \
+     --code-root "${CODE_DIR:-$WORKING_DIR}" --mode full \
+     --allow-publication ".gsd/milestones/{M###}/slices/{S##}/{S##}-PLAN-CHECK.md" \
+     --allow-append .gsd/forge/events.jsonl \
+     ${OWN_LEASE_UNIT:+--own-lease "$OWN_LEASE_UNIT"} ${OWN_RUN_ID:+--own-run "$OWN_RUN_ID"} \
+     --out "$PLAN_CHECK_BASELINE" || stop
+   ```
+   Depois do retorno terminal e antes do passo 7, rode
+   `forge-native-readonly-guard.js --verify "$PLAN_CHECK_BASELINE" --writer-stopped`.
+   Saída 3 ou 4 para antes do próximo writer: o resultado do plan-checker não é
+   usado, a falha nomeada e os caminhos relativos são registrados, o run é
+   desativado e nada é revertido até a reconciliação do owner.
+
 6. **Dispatch:**
    > Antes de despachar o plan-checker, exiba o **Spawn Liveness Banner** (ver `shared/forge-dispatch.md § Spawn Liveness Banner`) — duração estimada `plan-check`: ~1–2 min.
    ```
@@ -1047,6 +1071,7 @@ echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan_check\",\"mile
   Wait for the planner result. If the planner returns `status: blocked`, terminate immediately (do not enter the non-decreasing check — surfacing the planner failure takes precedence).
 
   **e. Re-run the plan-check gate** — dispatch `forge-plan-checker` again using the same template from `shared/forge-dispatch.md § plan-check`, with `{PLAN_CHECK_MODE}: blocking` and `round: {round}` passed in the prompt. This produces a new `{S##}-PLAN-CHECK.md` (overwriting any prior file — the backup in step (a) already preserved the previous round).
+  No host Codex, esta re-execução usa o mesmo guard `full` do passo 5: captura nova depois do backup de a. e antes do spawn, e verificação antes de f.
 
   **f. Parse new counts** → `new_fail_count` (from the worker result `plan_check_counts.fail`).
 
@@ -1314,11 +1339,12 @@ Use the icon for the current `unit_type`:
 
 ```
 TaskCreate({
-  subject: "{icon} [{M###}/{S##}/{T##}] {unit_type} — {one-liner}",
-  description: "{agent_name} ({model_id})",
-  activeForm: "{icon} {unit_type} · {agent_name} ({model_id}) · {M###}/{S##}/{T##}"
+  subject: "{icon} {M###}/{S##}/{T##} — {descrição humana do plano}",
+  description: "executor {nativo|sidecar} {agent_name} ({modelo resolvido})",
+  activeForm: "{fase}: {descrição humana} · {agent_name}"
 })
 ```
+Executor e modelo vêm da rota já comprovada deste despacho: `$WORKER_MODE`, `$RESOLVED_WORKER_ENGINE` e `$MODEL_ID` (`route.model_resolved ?? route.model`) do mesmo retorno do resolvedor. Campo ausente aparece como `desconhecido`, e o modelo observado não é afirmado aqui. Não resolva de novo, não infira default e não use rótulo fixo de modelo. A fase usa o vocabulário de `shared/forge-communication.md` (por exemplo `executando agente`).
 Store the returned `taskId` as `current_task_id`. Then immediately mark it as in progress:
 ```
 TaskUpdate({ taskId: current_task_id, status: "in_progress" })
@@ -1371,6 +1397,36 @@ node "$FORGE_SCRIPTS_DIR/forge-runs.js" --heartbeat ${RUN_ID:+--run "$RUN_ID"} -
 ```
 Replace `UNIT_TYPE/UNIT_ID` with the actual values (e.g., `execute-task/T01`), and `SLICE_ID` with the slice this unit belongs to (e.g., `S01`) — use `null` (unquoted) when the unit has no slice (`plan-milestone`, `research-milestone`, a loose task). `worker` carries no slice axis, so **this** field is the only thing that tells the evidence log which slice a tool call belonged to (S01/T02). Multi-run uses each run's own `runs/{id}.json` as source-of-truth; `auto-mode.json` is automatically synced to oldest-active by `forge-runs.refreshLegacyAlias` (eliminates cross-tab race). Legacy mode preserved for pre-M004 workspaces.
 
+Antes de cada invocação nativa (inclusive cada re-dispatch do Retry Handler), gere
+a identidade de dispatch desta tentativa e, no host Codex, o nome humano da tarefa
+a partir da unidade, do plano e dessa tentativa. Saída vazia de `--task-name`
+mantém o `taskName` atual; só um valor não vazio vai como `taskName` da adaptação
+nativa abaixo. O mesmo `NATIVE_DISPATCH_ID` segue para o emissor de dispatch.
+```bash
+if [ "$HOST_RUNTIME" = "codex" ]; then
+  [ -n "$unit_type" ] && [ -n "$unit_id" ] || stop
+fi
+NATIVE_DISPATCH_ID="${unit_type}-${unit_id}-$(node -e "console.log(require('crypto').randomBytes(8).toString('hex'))")"
+NATIVE_TASK_NAME=""
+if [ "$HOST_RUNTIME" = "codex" ] && [ -n "$PLAN_PATH" ]; then
+  NATIVE_TASK_NAME=$(node "$FORGE_SCRIPTS_DIR/forge-agent-identity.js" --task-name --unit "${unit_type}/${unit_id}" \
+    --plan "$WORKING_DIR/$PLAN_PATH" --attempt "$NATIVE_DISPATCH_ID" 2>/dev/null || true)
+fi
+```
+No host Codex, as unidades nativas somente leitura `plan-milestone`, `plan-slice`,
+`research-*` e `discuss-*` rodam dentro do guard de mutação em modo `code-only`.
+Antes do spawn, capture a baseline com um `--code-root` por raiz de código guardada
+e `READONLY_BASELINE` apontando para um arquivo novo fora dessas raízes e de `.gsd`;
+falha na captura impede o spawn.
+```bash
+if [ "$HOST_RUNTIME" = "codex" ]; then
+  case "$unit_type" in plan-milestone|plan-slice|research-*|discuss-*)
+    node "$FORGE_SCRIPTS_DIR/forge-native-readonly-guard.js" --capture --owner "$WORKING_DIR" \
+      --code-root "${CODE_DIR:-$WORKING_DIR}" --mode code-only --out "$READONLY_BASELINE" || stop ;;
+  esac
+fi
+```
+
 <!-- token-telemetry-integration -->
 Per `shared/forge-dispatch.md § Token Telemetry` — compute input tokens, dispatch, capture output tokens, append dispatch event (I/O errors MUST propagate):
 ```bash
@@ -1402,6 +1458,44 @@ configured model to inherit agent frontmatter. Use a description with the same i
 
 Wait for the result. If its named native outcome is `not-spawned`, apply the one-shot declared transition above and enter the loaded sidecar mirror; do not count it as a completed native call and do not emit the native event below. Every other successful native result continues here. A throw still follows the Retry Handler and never masquerades as `not-spawned`.
 
+Identidade nativa desta tentativa: `NATIVE_AGENT_ID` recebe somente o identificador
+que a ferramenta do host devolveu (reconhecimento do spawn no Codex ou conclusão no
+Claude), exatamente como veio. Logo depois desse retorno, se nenhuma janela
+protegida do owner está aberta, registre:
+```bash
+if [ -n "$NATIVE_AGENT_ID" ]; then
+  node "$FORGE_SCRIPTS_DIR/forge-agent-identity.js" --record --unit "${unit_type}/${unit_id}" \
+    --dispatch-id "$NATIVE_DISPATCH_ID" --host "$HOST_RUNTIME" --agent-type "{agent_name}" \
+    ${NATIVE_TASK_NAME:+--task-name "$NATIVE_TASK_NAME"} \
+    --agent-id "$NATIVE_AGENT_ID" --agent-id-source host-tool-return \
+    --events "$WORKING_DIR/.gsd/forge/events.jsonl"
+fi
+```
+Janelas protegidas do owner: entre `forge-task-preparation --start` e `--accept-native`,
+entre `forge-review-fix --prepare-native` e `--accept-native`, numa sessão de entrega
+nativa entre start e publish, e enquanto uma publicação de memória protegida (6d)
+ainda não foi unida. Dentro delas, só mostre a identidade na conversa e registre
+depois da aceitação ou da publicação, com `--receipt` quando o fluxo tem receipt.
+Sem retorno do host, nada é registrado e a identidade fica `desconhecido`. Nunca
+componha o ID a partir de `task_name`, de `/root/` mais nome, de hook ou de prosa
+(`/root/<nome>` só entra quando é o valor que a ferramenta devolveu), não infira
+atividade a partir de timers locais e não apresente sidecar como thread nativa.
+
+No host Codex, depois do retorno terminal de uma unidade `plan-*`, `research-*` ou
+`discuss-*` e antes de qualquer writer seguinte, verifique a mesma baseline:
+```bash
+if [ "$HOST_RUNTIME" = "codex" ]; then
+  case "$unit_type" in plan-milestone|plan-slice|research-*|discuss-*)
+    node "$FORGE_SCRIPTS_DIR/forge-native-readonly-guard.js" --verify "$READONLY_BASELINE" --writer-stopped || stop ;;
+  esac
+fi
+```
+Saída 3 ou 4 para antes do próximo writer: a unidade não é confiável, a falha
+nomeada (`reason_code` e caminhos relativos) é registrada, o run é desativado como
+no caminho CRITICAL e nada é revertido até a reconciliação do owner.
+`--writer-stopped` é atestado do chamador, não prova de processo; o guard é
+detecção depois da unidade, não sandbox do SO.
+
 Then:
 ```bash
 OUTPUT_TOKENS=$(node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --inline "$result")
@@ -1409,12 +1503,12 @@ mkdir -p .gsd/forge/
 # shared/forge-dispatch.md § DISPATCH_VCS prelude (canonical — VCS-agnostic)
 DISPATCH_VCS=$(node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --detect --field vcs --cwd "${CODE_DIR:-$WORKING_DIR}" 2>/dev/null || echo "unknown")
 node "$FORGE_SCRIPTS_DIR/forge-dispatch-event.js" --route-json "$ROUTE_JSON" \
-  --unit "${unitType}/${unitId}" --model "$MODEL_ID" --tier "$TIER" --reason "$REASON" \
+  --unit "${unit_type}/${unit_id}" --model "$MODEL_ID" --tier "$TIER" --reason "$REASON" \
   --effort "$EFFORT" --effort-reason "$EFFORT_REASON" --engine "${ENGINE:-claude}" \
   --domain "$DOMAIN_USED" --route-source "$ROUTE_SOURCE" --chain-len "$CHAIN_LEN" \
   --slice "{S##}" --milestone "${RUN_ID:-{M###}}" --input-tokens "$INPUT_TOKENS" \
   --output-tokens "$OUTPUT_TOKENS" \
-  --vcs "${DISPATCH_VCS:-unknown}" --transport in-process \
+  --vcs "${DISPATCH_VCS:-unknown}" --transport in-process --dispatch-id "$NATIVE_DISPATCH_ID" \
   --events .gsd/forge/events.jsonl
 ```
 
@@ -1474,7 +1568,7 @@ done
 
 Process `SIDECAR_BATCH_IDS` sequentially through `shared/forge-sidecar-auto.md` before or after the native group, never concurrently with it. For each entry bind `$PLAN_PATH` and the other task inputs from that entry, parse its stored `BATCH_ROUTE_JSON[$ENTRY_ID]` with the flag-free `--shell-exports` transform, immediately re-check `DISPATCH_ALLOWED`, then load Branch C. This re-binding cannot borrow another task's scalars and does not re-resolve or change the route.
 
-**b) Create N timeline tasks** — emit one `TaskCreate` per batch member (icon `⚡`, one-liner from T##-PLAN.md). Store returned IDs in parallel array `task_ids = [id1, id2, ...]`. Mark each `in_progress` via `TaskUpdate`.
+**b) Create N timeline tasks** — emit one `TaskCreate` per batch member in the single-task form above (icon `⚡`, descrição humana do T##-PLAN.md, executor e modelo da rota já resolvida desse membro; campo ausente fica `desconhecido`). Store returned IDs in parallel array `task_ids = [id1, id2, ...]`. Mark each `in_progress` via `TaskUpdate`.
 
 **c) Heartbeat — record multi-worker** before parallel dispatching (M005+ pattern):
 ```bash
@@ -1495,6 +1589,22 @@ done
 native invocation per task from its immutable route/capabilities. Multiple native
 tool-use blocks in a single assistant turn execute concurrently. Emit all returned
 tool/argument calls inside the same assistant message, preserving batch order.
+
+Antes de montar essas invocações, cada `ENTRY_ID` nativo recebe a identidade de
+dispatch da sua tentativa e, no host Codex, o nome humano a partir da unidade, do
+plano e dessa tentativa. Saída vazia mantém o `taskName` atual daquela invocação.
+```bash
+declare -A NATIVE_DISPATCH_ID_BY_TASK NATIVE_TASK_NAME_BY_TASK NATIVE_AGENT_ID_BY_TASK
+for ENTRY_ID in "${NATIVE_BATCH_IDS[@]}"; do
+  NATIVE_DISPATCH_ID_BY_TASK["$ENTRY_ID"]="execute-task-${ENTRY_ID}-$(node -e "console.log(require('crypto').randomBytes(8).toString('hex'))")"
+  NATIVE_TASK_NAME_BY_TASK["$ENTRY_ID"]=""
+  if [ "${BATCH_HOST_RUNTIME[$ENTRY_ID]}" = "codex" ]; then
+    NATIVE_TASK_NAME_BY_TASK["$ENTRY_ID"]=$(node "$FORGE_SCRIPTS_DIR/forge-agent-identity.js" --task-name \
+      --unit "execute-task/${ENTRY_ID}" --plan "$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}/tasks/${ENTRY_ID}/${ENTRY_ID}-PLAN.md" \
+      --attempt "${NATIVE_DISPATCH_ID_BY_TASK[$ENTRY_ID]}" 2>/dev/null || true)
+  fi
+done
+```
 
 **⚠ CRITICAL — tool-call shape (read before dispatching):**
 
@@ -1560,6 +1670,7 @@ for ENTRY_ID in "${NATIVE_BATCH_IDS[@]}"; do
     --slice "{S##}" --milestone "${RUN_ID:-{M###}}" \
     --input-tokens "${INPUT_TOKENS_BY_TASK[$ENTRY_ID]}" --output-tokens "${OUTPUT_TOKENS_CURRENT}" \
     --batch-size "${BATCH_LENGTH}" --vcs "${DISPATCH_VCS:-unknown}" --transport in-process \
+    --dispatch-id "${NATIVE_DISPATCH_ID_BY_TASK[$ENTRY_ID]}" \
     --events .gsd/forge/events.jsonl
 done
 ```
@@ -1569,6 +1680,21 @@ The extra `batch_size` field lets post-hoc analysis separate parallel from seque
 **i) Heartbeat — clear worker field** after all Agent() calls return (M005+ pattern):
 ```bash
 node "$FORGE_SCRIPTS_DIR/forge-runs.js" --heartbeat ${RUN_ID:+--run "$RUN_ID"} --clear > /dev/null
+```
+
+Identidade nativa do lote: `NATIVE_AGENT_ID_BY_TASK[$ENTRY_ID]` recebe somente o
+identificador que a ferramenta do host devolveu para aquela invocação, exatamente
+como veio. Registre cada um com as mesmas regras de ordem, de janelas protegidas e
+de não inferência do fluxo de tarefa única; sem retorno do host, nada é registrado.
+```bash
+for ENTRY_ID in "${NATIVE_BATCH_IDS[@]}"; do
+  [ -n "${NATIVE_AGENT_ID_BY_TASK[$ENTRY_ID]}" ] || continue
+  node "$FORGE_SCRIPTS_DIR/forge-agent-identity.js" --record --unit "execute-task/${ENTRY_ID}" \
+    --dispatch-id "${NATIVE_DISPATCH_ID_BY_TASK[$ENTRY_ID]}" --host "${BATCH_HOST_RUNTIME[$ENTRY_ID]}" \
+    --agent-type forge-executor ${NATIVE_TASK_NAME_BY_TASK[$ENTRY_ID]:+--task-name "${NATIVE_TASK_NAME_BY_TASK[$ENTRY_ID]}"} \
+    --agent-id "${NATIVE_AGENT_ID_BY_TASK[$ENTRY_ID]}" --agent-id-source host-tool-return \
+    --events "$WORKING_DIR/.gsd/forge/events.jsonl"
+done
 ```
 
 **j) Process each result serially** — iterate `results` in order and for each, run the full Step 5 (Process result) + Step 6 (Post-unit housekeeping) pipeline. Specifically:
@@ -1613,7 +1739,7 @@ A rung that yields a status hands back a `recovered.block` — parse **that** wi
 
 Parse the `---GSD-WORKER-RESULT---` block:
 - `status: done` → proceed to post-unit housekeeping, then **immediately continue loop** (do NOT pause or ask user)
-- `status: partial` → write `continue.md`, update STATE, emit compact signal, **fire push (call-site 1):** use Push helper with message `"Forge {RUN_ID} travou — partial: {resumo do blocker}. Run pausado, requer ação manual."`, then **deactivate run NOW** (`node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json '{"active":false}'` — see `## Deactivate auto-mode indicator`), **stop loop**
+- `status: partial` → write `continue.md`, update STATE, emit compact signal, tell the user `Trabalho parcial salvo em continue.md: {o que ficou feito}. Continua executável: {o que segue}. Decisão pendente: {ID ou nenhuma}. Para retomar: /forge-auto {RUN_ID}.`, **fire push (call-site 1):** use Push helper with message `"Forge {RUN_ID} travou — partial: {resumo do blocker}. Run pausado, requer ação manual."`, then **deactivate run NOW** (`node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json '{"active":false}'` — see `## Deactivate auto-mode indicator`), **stop loop**
 - `status: blocked` → apply failure taxonomy before stopping; if no auto-recovery or recovery exhausted:
 
   <!-- item-capture:blocked:start -->
@@ -1886,8 +2012,9 @@ The `claim-release` event is written **by the module**, not narrated here
 **e) Track progress:**
 ```
 session_units += 1
-completed_units.append("✓ [M###/S##/T##] {unit_type} — {one-liner}  · {agent} ({model})")
+completed_units.append("✓ {T##} — {resultado} · executor {nativo|sidecar} {engine} ({modelo})")
 ```
+`{T##}` é o ID da unidade (task, slice ou milestone) e `{resultado}` é o resultado dela em uma frase. Executor, engine e modelo (resolvido no nativo, enviado no sidecar) vêm da mesma rota usada no despacho; o que faltar fica `desconhecido`.
 
 #### 7. Pause + checkpoint check
 
@@ -1944,10 +2071,13 @@ fi
 
 Emit and **stop loop**:
 ```
-⏸  Auto-mode pausado após {session_units} unidades.
+⏸  Auto-mode pausado após {session_units} unidades: {resultado até aqui em uma frase}.
 {completed_units list, one per line}
 
-Execute /forge-auto {RUN_ID} para retomar a partir de: {next_action from STATE.md}
+Salvo: {o que ficou salvo — STATE, continue.md ou checkpoint}.
+Continua executável: {next_action from STATE.md}.
+{Decisão pendente: {ID} — {pergunta curta}, somente quando houver}
+→ Retomar: /forge-auto {RUN_ID}
 ```
 
 **Context checkpoint** (only fires if the user explicitly set `compact_after` in prefs AND `session_units >= COMPACT_AFTER`):
@@ -2021,6 +2151,8 @@ If NO alternative account is registered:
 
 ## Final Report (milestone complete)
 
+**Fire push (call-site 3):** After printing the Final Report below, use Push helper with message `"Forge {RUN_ID} — milestone completa. {N} slices entregues."` (N = count of slices in the report table).
+
 **Isolation cleanup** — runs ONLY here (milestone complete), never on pause/blocked/partial exits (the branch/worktree must survive for resume). No-op when `ISOLATION_MODE == shared`. In `branch` mode it checks the repo back out to the default branch (the `forge/{run}` branch is kept for PR/merge by the operator). In `worktree` mode it removes the worktree only if `worktree_cleanup_on_complete: true` in prefs:
 
 ```bash
@@ -2030,7 +2162,10 @@ node "$FORGE_SCRIPTS_DIR/forge-isolation.js" --cleanup --run "${RUN_ID:-<active 
 If the cleanup output contains `status: "error"` entries, surface them in the final report (advisory — do not fail the milestone).
 
 ```
-✓ Milestone {M###} completo
+✓ Milestone {M###} completo: {resultado em uma frase}
+
+Validação: {n de m critérios verificados nos S##-DELIVERY.json}{; pendências: IDs}
+Fatos separados: implementação {estado}; revisão {estado}; CI {estado}; merge {estado}; instalação {estado}; aceite humano {estado}
 
 Entregável: branch `forge/{run}` — pronta para push e PR.
 Pronta para PR — a integração na branch default é do OPERADOR; o loop nunca integra.
@@ -2046,12 +2181,15 @@ Slices entregues:
 | S01   | 5        | 2                       | 1       | 0          |
 {follow-up lines, if any: "R# path:line — <objeção>" → item {I-id} (.gsd/items/)}
 
-Próximo milestone: /forge-new-milestone <descrição>
+Arquivos principais: {key_files dos S##-SUMMARY.md, um por linha}
+Decisão pendente: {ID — pergunta curta, ou nenhuma}
+→ Próximo passo: {PR da branch `forge/{run}` pelo operador ou /forge-new-milestone <descrição>}
 ```
+
+Cada `{estado}` cita a própria evidência (SUMMARY, DELIVERY, REVIEW, execução de CI, merge, registro de instalação, UAT) ou fica `pendente`; sem evidência, `desconhecido`. O loop não roda CI, não integra nem instala, então esses fatos nunca são inferidos da conclusão da milestone.
 
 The review digest is built from the `review` / `review-triage` events in `events.jsonl` (fallback: scan the `**Outcome:**` lines of each `{S##}-REVIEW.md`). Omit the section entirely when the milestone had zero objections.
 
-**Fire push (call-site 3):** After printing the Final Report above, use Push helper with message `"Forge {RUN_ID} — milestone completa. {N} slices entregues."` (N = count of slices in the report table).
 
 ---
 

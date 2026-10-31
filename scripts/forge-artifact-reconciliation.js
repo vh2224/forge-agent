@@ -153,6 +153,7 @@ async function startBroker(options) {
     async append(relative, line) {
       if (typeof line !== 'string' || !line.endsWith('\n') || Buffer.byteLength(line) > 65536) fail('broker-append-invalid');
       const proof = await call('append', { path: relative, bytes: Buffer.from(line).toString('base64') });
+      if (proof.status === 'already-recorded') return proof;
       const fd = fs.openSync(`${manifestFile}.proofs.jsonl`, 'a', 0o600);
       try { fs.writeFileSync(fd, JSON.stringify(proof) + '\n'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
       proofs.push(proof); return proof;
@@ -266,6 +267,18 @@ if (require.main === module && process.argv[2] === '--broker' && process.send) {
           safeTarget(manifest.owner, rel);
           const identity = fs.lstatSync(file, { bigint: true });
           if (logIdentity(file) !== tail.identity_sha256) fail('broker-log-replaced');
+          // Canonical identity events use the broker's existing atomic boundary.
+          // The closed event is data, never an imported caller capability.
+          let event;
+          try { event = JSON.parse(append.toString('utf8')); } catch { /* Generic append. */ }
+          if (rel === '.gsd/forge/events.jsonl' && event?.event === 'agent-identity') {
+            const identityApi = require('./forge-agent-identity');
+            if (identityApi.renderAgentIdentityEvent(event) !== append.toString('utf8')) fail('agent-identity-event-invalid');
+            if (identityApi.identityAlreadyRecorded(before, event)) {
+              process.send({ id: message.id, result: { status: 'already-recorded' } });
+              return;
+            }
+          }
           const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_APPEND | (fs.constants.O_NOFOLLOW || 0));
           try {
             const opened = fs.fstatSync(fd, { bigint: true });

@@ -697,7 +697,10 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
         verification_ms: transportEnd === null ? null : Math.max(0, current.elapsed_ms - transportEnd),
         calibration: calibrationBlock,
         ...(silence ? { silence } : {}),
-        liveness: livenessTermination ? { ...livenessView, termination: livenessTermination } : livenessView });
+        liveness: livenessTermination ? { ...livenessView, termination: livenessTermination } : livenessView,
+        // An accepted protocol terminal preceded this failure (issue 290): not a
+        // validated result, a publication or proof of exit (process_exit_observed).
+        ...(failed && current.phase === 'terminal' ? { terminal_observed: true } : {}) });
     };
     function bestEffort(callback, value) {
       try { Promise.resolve(callback?.(value)).catch(() => {}); } catch { /* observer only */ }

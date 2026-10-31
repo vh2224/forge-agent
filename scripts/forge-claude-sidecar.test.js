@@ -16,6 +16,7 @@ const childProcess = require('child_process');
 
 const ADAPTER_PATH = require.resolve('./forge-claude-sidecar');
 const ACCOUNTS_PATH = require.resolve('./forge-accounts');
+const diagnosticModule = require('./forge-sidecar-diagnostic');
 const ROOT = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-claude-sidecar-test-')));
 const WORKSPACE = path.join(ROOT, 'workspace with spaces Î©');
 const MISSING_REGISTRY = path.join(ROOT, 'registry-does-not-exist.json');
@@ -2513,6 +2514,144 @@ test('calibration v2: a tool kill (gap suspended) records no censored sample', a
     { localProofFactory: fake.factory, calibrationOptions: options });
   assertToolKill(run, 'tool-unproven');
   assert.strictEqual(fs.existsSync(v2File(options)), false, 'no censored sample for a suspended gap');
+});
+
+// ── S03/T01: tool activity classes and terminal-before-failure (issue 290, observable part) ──
+// One reported Read call, then an accepted success result; `ending` decides what
+// follows: 'hang' never closes, 'exit' closes with a nonzero code, 'clean' exits 0.
+const TERMINAL_SENTINEL = 'forge-s03-t01-private-terminal-sentinel';
+const TERMINAL_SESSION = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+function terminalFixture(name, ending) {
+  return writeFixture(name, `
+'use strict';
+${ENVELOPE_PRELUDE}
+const out = value => process.stdout.write(JSON.stringify(value) + '\\n');
+const at = process.argv.indexOf('--session-id');
+out({ type: 'system', subtype: 'init', session_id: at >= 0 ? process.argv[at + 1] : ${JSON.stringify(TERMINAL_SESSION)} });
+out({ type: 'assistant', message: { id: 'msg-tool', role: 'assistant', content: [{ type: 'tool_use',
+  id: 'toolu_terminal', name: 'Read', input: { file_path: ${JSON.stringify(TERMINAL_SENTINEL)} } }] } });
+out({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_terminal',
+  content: ${JSON.stringify(TERMINAL_SENTINEL)} }] }, parent_tool_use_id: null });
+out({ type: 'stream_event', event: { type: 'message_start', message: { id: 'msg-final', role: 'assistant' } } });
+out({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } });
+out({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'x' } } });
+out({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
+out({ type: 'stream_event', event: { type: 'message_stop' } });
+process.stdout.write(envelope(${JSON.stringify(okBlock('terminal fixture'))}) + '\\n');
+${ending === 'hang' ? 'setInterval(() => {}, 1000);' : ending === 'exit' ? 'process.exitCode = 3;' : ''}
+`);
+}
+const TERMINAL_ACTIVITY = { read: 1, write: 0, shell: 0, other: 0, last_class: 'read' };
+function assertTerminalPrivacy(run, snapshots) {
+  for (const text of [JSON.stringify(snapshots), JSON.stringify(run.error?.diagnostic || {}),
+    JSON.stringify(run.result?.metadata || {})]) {
+    ok(!text.includes(TERMINAL_SENTINEL), 'tool argument or output reached a public observation');
+    ok(!text.includes('toolu_terminal'), 'tool id reached a public observation');
+    ok(!text.includes('"Read"'), 'tool name reached a public observation');
+    ok(!text.includes(TERMINAL_SESSION) && !(run.id && text.includes(run.id)), 'session id reached a public observation');
+  }
+}
+// Persisted session: observedSessionId and awaitExit stay internal, yet still
+// decide the kept ref (ceiling) or the cleanup after the observed exit (liveness).
+async function runTerminalSession(fixture, clock, options = {}) {
+  const snapshots = [];
+  const run = await runSession(fixture, { session: { persist: true }, ...options, onProgress(value) {
+    if (value.phase !== 'local-start') clock.accelerate();
+    snapshots.push(value);
+  } }, clock);
+  return { run, snapshots };
+}
+function assertActivity(value) {
+  const { last_ms: lastMs, ...rest } = value.tool_activity;
+  assert.deepStrictEqual(rest, TERMINAL_ACTIVITY);
+  ok(Number.isSafeInteger(lastMs) && lastMs >= 0, 'last_ms is relative ms of the injected clock');
+}
+async function assertFailedTerminal(run, snapshots, { exitObserved }) {
+  ok(run.error, 'expected rejection');
+  const observed = run.error.diagnostic.observation;
+  assert.strictEqual(observed.phase, 'failed');
+  assert.strictEqual(observed.terminal_observed, true);
+  assert.strictEqual(observed.process_exit_observed, exitObserved);
+  assertActivity(observed);
+  assert.deepStrictEqual(Object.keys(observed).slice(-2), ['tool_activity', 'terminal_observed'], 'additive keys come last');
+  assert.deepStrictEqual(diagnosticModule.observation(observed), observed, 'reapplied observation is unchanged');
+  assert.strictEqual(run.error.observedSessionId, undefined, 'the internal session confirmation never leaks');
+  assert.strictEqual(run.error.awaitExit, undefined, 'the internal exit probe never leaks');
+  assert.strictEqual(snapshots.at(-1).terminal_observed, true, 'the final progress snapshot carries the marker');
+  const before = snapshots.slice(0, -1);
+  ok(before.every(value => value.terminal_observed === undefined), 'only the failure observation is marked');
+  ok(before.some(value => value.phase === 'terminal'), 'the terminal phase was published before the failure');
+  assertTerminalPrivacy(run, snapshots);
+}
+
+test('S03/T01 terminal without close: liveness kill marks terminal_observed with process_exit_observed false', async () => {
+  const { run, snapshots } = await runTerminalSession(terminalFixture('claude terminal hang liveness fixture.js', 'hang'),
+    acceleratedClock(300, { fromFirstRemote: true }));
+  await assertFailedTerminal(run, snapshots, { exitObserved: false });
+  assert.strictEqual(run.error.code, 'claude-anomalous-silence');
+  assert.strictEqual(run.error.diagnostic.reason, 'anomalous-silence');
+  assert.strictEqual(run.error.liveness.termination, 'dead-silence');
+  assert.strictEqual(run.error.liveness.state, 'dead');
+  assert.strictEqual(run.error.diagnostic.observation.liveness.termination, 'dead-silence');
+  assert.strictEqual(run.terminations, 1);
+  // awaitExit resolved from the observed close after the kill: cleanup ran, no ref kept.
+  assert.strictEqual(run.error.session, undefined);
+  assert.strictEqual(run.error.session_cleanup, undefined);
+  console.log('PASS S03/T01 sidecar terminal-without-close: liveness kill keeps codes, terminal_observed true, process_exit_observed false');
+});
+
+test('S03/T01 terminal without close: ceiling kill marks terminal_observed with process_exit_observed false', async () => {
+  const { run, snapshots } = await runTerminalSession(terminalFixture('claude terminal hang ceiling fixture.js', 'hang'),
+    acceleratedClock(300, { fromFirstRemote: true }), { timeoutMs: 60000 });
+  try {
+    await assertFailedTerminal(run, snapshots, { exitObserved: false });
+    assert.strictEqual(run.error.code, 'budget-exceeded-while-active');
+    assert.strictEqual(run.error.diagnostic.reason, 'budget-exceeded-while-active');
+    assert.strictEqual(run.error.liveness.termination, 'budget-exceeded-while-active');
+    assert.strictEqual(run.error.liveness.state, 'working');
+    assert.strictEqual(run.error.diagnostic.observation.silence, undefined);
+    assert.strictEqual(run.terminations, 1);
+    // The ref is kept only when observedSessionId matched the Forge-generated id.
+    assert.strictEqual(run.error.session.id, run.id, 'observedSessionId still confirms the session');
+  } finally {
+    if (run.error && run.error.session) SESSION_MODULE.removeSession(run.error.session);
+  }
+  console.log('PASS S03/T01 sidecar terminal-without-close: ceiling kill keeps codes, terminal_observed true, process_exit_observed false');
+});
+
+test('S03/T01 failure after a real close: nonzero exit and rejected candidate mark both terminal and exit', async () => {
+  const exitSnapshots = [];
+  const exited = await runLive(terminalFixture('claude terminal exit fixture.js', 'exit'),
+    acceleratedClock(1), { onSnapshot: value => exitSnapshots.push(value) });
+  await assertFailedTerminal(exited, exitSnapshots, { exitObserved: true });
+  assert.strictEqual(exited.error.code, 'claude-exit-nonzero');
+  assert.strictEqual(exited.error.diagnostic.reason, 'provider-exit');
+  assert.strictEqual(exited.terminations, 0);
+  const rejectedSnapshots = [];
+  const rejected = await runLive(terminalFixture('claude terminal rejected fixture.js', 'clean'),
+    acceleratedClock(1), { onSnapshot: value => rejectedSnapshots.push(value), validateCandidate: () => false });
+  await assertFailedTerminal(rejected, rejectedSnapshots, { exitObserved: true });
+  assert.strictEqual(rejected.error.code, 'claude-invalid-result');
+  assert.strictEqual(rejected.error.diagnostic.reason, 'validator-failed');
+  console.log('PASS S03/T01 sidecar failure-after-close: codes unchanged, terminal_observed true, process_exit_observed true');
+});
+
+test('S03/T01 success carries tool_activity and never terminal_observed', async () => {
+  const snapshots = [];
+  const run = await runLive(terminalFixture('claude terminal clean fixture.js', 'clean'),
+    acceleratedClock(1), { onSnapshot: value => snapshots.push(value) });
+  assert.strictEqual(run.error, null, run.error && run.error.code);
+  assert.strictEqual(run.result.candidate.status, 'done');
+  const observed = run.result.metadata.observation;
+  assert.strictEqual(observed.phase, 'closed');
+  assert.strictEqual(observed.process_exit_observed, true);
+  assertActivity(observed);
+  ok(!('terminal_observed' in observed), 'success never gains terminal_observed');
+  ok(snapshots.every(value => !('terminal_observed' in value)), 'no progress snapshot gains terminal_observed');
+  ok(snapshots.filter(value => value.tool_activity).every(value => value.tool_activity.read === 1));
+  assert.strictEqual(run.result.observedSessionId, undefined, 'the session confirmation stays internal');
+  assertTerminalPrivacy(run, snapshots);
+  console.log('PASS S03/T01 sidecar success: tool_activity by class, no terminal_observed, no tool name/id/argument');
 });
 
 async function main() {

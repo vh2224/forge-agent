@@ -52,6 +52,8 @@ async function fixture(options = {}) {
     write(f.prefsFile,JSON.stringify(prefs));
     write(path.join(f.owner,'.gsd/CODING-STANDARDS.md'),'OPTIONAL_STANDARD '.repeat(1000)+'STANDARDS_END');
   }
+  // Issue 288 fixtures need the actual gate decision before the recovery state binds the request.
+  if (options.gates) r.gates = {...r.gates,...options.gates};
   write(r.contextFile,'# Context\nChange both roots.');write(r.securityFile,'# Security\nPreserve claims and history.');
   write(r.researchFile,'# Research\nBoth files currently contain before.');
   f.originalOptions={cwd:f.owner,unitType:r.unitType,scope:r.scope,phase:r.phase,hostRuntime:'codex',milestoneId:'M901',unitId:'T01',planPath:planFile,roadmapPath:f.roadmap};
@@ -153,6 +155,7 @@ async function standaloneReservation(options={}){
     live.delivery.verify(outcome.result);
     const published=live.delivery.publish(outcome.result);
     assert.equal(published.result.status,'done');
+    assert(!published.artifacts.some(a=>a.path.endsWith('-PLAN.md')),'standalone publish never creates a slice marker');
     assert(fs.existsSync(path.join(f.owner,side.locations(f.request).required[0])));
     assert.equal((await live.invoke(callback)).ok,false);assert.equal(calls,1);
     assert.deepEqual(stateApi.loadRecovery(f.stateFile).reservations,f.initial.reservations);
@@ -160,20 +163,53 @@ async function standaloneReservation(options={}){
     console.log('PASS standalone unused reservation: canonical inputs, budget, live boundary, exact identity, one callback and publication');
   }finally{f.cleanup();}
 }
-async function main(){
-  await standaloneReservation();
-  await standaloneReservation({corrected:true});
-  await standaloneNegativeEvidence();
-  await initialMixedDocumentary();
-  await initialMixedDocumentary(true);
-  await documentaryContinuation();
-  await protectedLeaseRenewal();
-  await implicitOrdinaryIdentity();
-  await durableReplay();
-  await durableReplay(true);
-  await durableReplay(true,true);
-  await guardedHandoff();
-  await ordinaryPublication();
+// One scenario inventory serves the public serial main and every isolated cohort.
+// Each fixture owns its roots/profile. Separate processes keep temporary env,
+// module state, mock callbacks and publication fault injection independent.
+function scenarios(){return [
+  ()=>standaloneReservation(),
+  ()=>standaloneReservation({corrected:true}),
+  ()=>standaloneNegativeEvidence(),
+  ()=>initialMixedDocumentary(),
+  ()=>initialMixedDocumentary(true),
+  ()=>documentaryContinuation(),
+  ()=>protectedLeaseRenewal(),
+  ()=>implicitOrdinaryIdentity(),
+  ()=>durableReplay(),
+  ()=>durableReplay(true),
+  ()=>durableReplay(true,true),
+  ()=>guardedHandoff(),
+  ()=>ordinaryPublication(),
+  ()=>nativeTaskMarker(),
+  ()=>observedPhases(),
+];}
+async function main(){for(const scenario of scenarios())await scenario();}
+const COHORTS=3;
+async function runCohort(index){
+  assert(Number.isInteger(index)&&index>=0&&index<COHORTS,'invalid recovery test cohort');
+  const selected=scenarios().filter((_,i)=>i%COHORTS===index);
+  assert(selected.length,'empty recovery test cohort');
+  for(const scenario of selected)await scenario();
+}
+async function isolatedMain(){
+  const {spawn}=require('child_process');
+  const outcomes=await Promise.allSettled(Array.from({length:COHORTS},(_,index)=>new Promise((resolve,reject)=>{
+    const child=spawn(process.execPath,[__filename,'--cohort',String(index)],{cwd:process.cwd(),env:process.env,windowsHide:true,stdio:['ignore','pipe','pipe']});
+    let stdout='',stderr='',overflow=false;
+    const collect=(which,text)=>{if(Buffer.byteLength(stdout)+Buffer.byteLength(stderr)+Buffer.byteLength(text)>4*1024*1024){overflow=true;return;}if(which==='stdout')stdout+=text;else stderr+=text;};
+    child.stdout.setEncoding('utf8');child.stderr.setEncoding('utf8');
+    child.stdout.on('data',text=>collect('stdout',text));child.stderr.on('data',text=>collect('stderr',text));
+    child.once('error',reject);child.once('close',(code,signal)=>resolve({index,code,signal,stdout,stderr,overflow}));
+  })));
+  // Join every child even if one fails. Emit complete streams after joining so
+  // named assertion lines from different children cannot interleave mid-line.
+  for(const outcome of outcomes){if(outcome.status==='fulfilled'){process.stdout.write(outcome.value.stdout);process.stderr.write(outcome.value.stderr);}}
+  for(const outcome of outcomes){
+    if(outcome.status==='rejected')throw outcome.reason;
+    assert(!outcome.value.overflow,'recovery test cohort output exceeded bound');
+    assert.equal(outcome.value.signal,null,'recovery test cohort ended by signal');
+    assert.equal(outcome.value.code,0,'recovery test cohort '+outcome.value.index+' failed');
+  }
 }
 async function ordinaryPublication(){
   const f=await fixture();
@@ -195,8 +231,15 @@ async function ordinaryPublication(){
       for(const root of f.contract.code_roots)write(path.join(root.path,'same.txt'),'after\n');
       return f.result();
     };
+    const taskPlan=fs.readFileSync(f.request.planFile);
+    assert.equal(nextUnit(f.owner),'execute-task/T01');
     const result=await side.recoverUnitSidecar(JSON.parse(JSON.stringify(f.request)),f.recovery,f.runtime);
     assert.equal(calls,1);assert.equal(result.result.published.result.status,'done');
+    assert.equal(result.result.published.artifacts.at(-1).path,SLICE_PLAN);
+    assert.equal(fs.readFileSync(path.join(f.owner,SLICE_PLAN),'utf8'),'# Slice\n- [x] **T01** — fixture\n');
+    assert.equal(sha256(fs.readFileSync(f.request.planFile)),sha256(taskPlan));
+    assert.notEqual(nextUnit(f.owner),'execute-task/T01');
+    console.log('PASS ordinary native marker: verify and publish mark T01 in S01-PLAN, keep the T01-PLAN sha256 and the controller no longer selects T01');
     const state=stateApi.loadRecovery(f.stateFile);
     assert.deepEqual(state.reservations,f.initial.reservations);assert.deepEqual(state.attempts,f.initial.attempts);
     assert.equal(state.deadline_at,f.initial.deadline_at);assert.equal(state.continuation.status,'returned');
@@ -327,6 +370,7 @@ async function documentaryContinuation(){
     const checked=restarted.verify(result);
     assert(checked.bindings.some(row=>row.coverage==='documentary'));
     assert(!checked.bindings.some(row=>row.coverage==='behavioral'));
+    const sliceFile=path.join(f.owner,SLICE_PLAN),slicePreimage=fs.readFileSync(sliceFile);
     const materialize=side.materialize;
     try {
       side.materialize=(request,record)=>{write(path.join(f.owner,record.artifacts[0].path),record.artifacts[0].content);throw new Error('fixture partial publication');};
@@ -334,7 +378,31 @@ async function documentaryContinuation(){
     }finally{side.materialize=materialize;}
     const published=JSON.parse(fs.readFileSync(receipts.at(-1).file));
     assert.equal(published.result.status,'done');
-    const afterReady=reopen();afterReady.replayReady(published);afterReady.replayReady(published);
+    assert.equal(published.artifacts.at(-1).path,SLICE_PLAN);
+    assert.equal(published.artifacts.at(-1).before,sha256(slicePreimage));
+    const afterReady=reopen(),legacy=structuredClone(published);legacy.artifacts.pop();
+    const verifier=require('./forge-verify'),capture=verifier.captureRootDelivery;
+    const originalInvoke=f.runtime.invokeNative;
+    let calls=0;
+    try {
+      verifier.captureRootDelivery=()=>{calls++;throw Error('unexpected replay verification');};
+      f.runtime.invokeNative=()=>{calls++;throw Error('unexpected replay native invocation');};
+      afterReady.replayReady(legacy);
+      assert.deepEqual(fs.readFileSync(sliceFile),slicePreimage,'legacy documentary ready never acquires a marker');
+      const files=published.artifacts.map(a=>path.join(f.owner,a.path));
+      const stamp=()=>files.map(file=>[fs.readFileSync(file,'utf8'),fs.statSync(file).mtimeMs]);
+      const legacyStamp=stamp();afterReady.replayReady(legacy);assert.deepEqual(stamp(),legacyStamp);
+      const foreign=structuredClone(published);foreign.artifacts.at(-1).path=SLICE_PLAN.replaceAll('S01','S02');
+      assert.throws(()=>afterReady.replayReady(foreign),{code:'milestone-ready-receipt-invalid'});
+      const forgedMarker=structuredClone(published);forgedMarker.artifacts.at(-1).content+='forged\n';
+      assert.throws(()=>afterReady.replayReady(forgedMarker),{code:'task-marker-invalid'});
+      assert.deepEqual(stamp(),legacyStamp,'invalid documentary markers are refused before writes');
+      afterReady.replayReady(published);
+      assert.equal(fs.readFileSync(sliceFile,'utf8'),published.artifacts.at(-1).content);
+      const settled=stamp();afterReady.replayReady(published);assert.deepEqual(stamp(),settled);
+      assert.equal(calls,0,'documentary replay does not call native transport or verification');
+    } finally {verifier.captureRootDelivery=capture;f.runtime.invokeNative=originalInvoke;}
+    console.log('PASS documentary marker replay: marker separated before recomposition and validation, legacy stays unmarked, repeated bytes and mtimes unchanged, no native callback or checks');
     const changed=structuredClone(published);changed.result.summary='forged';
     assert.throws(()=>afterReady.replayReady(changed),/ready-binding/);
     assert.deepEqual(fs.readFileSync(originalManifestFile),manifestBytes);
@@ -532,6 +600,89 @@ async function implicitOrdinaryIdentity() {
     console.log('PASS invalid explicit identity refuses before manifest or receipt');
   } finally { invalid.cleanup(); }
 }
+const SLICE_PLAN='.gsd/milestones/M901/slices/S01/S01-PLAN.md';
+const sha256=value=>crypto.createHash('sha256').update(value).digest('hex');
+function nextUnit(owner){
+  const controller=require('./forge-unit-controller'),state={milestone:'M901'};
+  const selection=controller.selectNextUnit({state,inventory:controller.discoverInventory(owner,'M901',state),prefs:{skip_discuss:true,skip_research:true}});
+  return selection.unit&&selection.unit.type+'/'+selection.unit.id;
+}
+// Issue 282 on the native path: the owner marker is created from the prepared
+// protected preimage, published last with CAS and split before replay checks.
+async function nativeTaskMarker() {
+  const f=await fixture();
+  try {
+    const handoff=await side.recoverUnitSidecar(f.request,f.recovery,f.runtime),request=handoff.result.request;
+    const slicePlan=path.join(f.owner,SLICE_PLAN);
+    write(slicePlan,'# Slice\n- [ ] **T01** — fixture\n- [ ] **T02** — next\n');
+    const nativeInvocation=require('./forge-native-invocation').buildNativeInvocation({hostRuntime:'codex',resolvedDispatch:request.route,
+      activeCapabilities:capabilities,prompt:'Native marker fixture',forkTurns:'none',taskName:'fixture',agentType:'forge-executor'});
+    const receipts=[],options={request,nativeInvocation,assertBoundary:f.assertBoundary,assertAuthority:f.assertBoundary,
+      persistDeliveryReceipt:receipt=>receipts.push(receipt)};
+    const session=delivery.prepare(options);session.start();
+    const preimage=fs.readFileSync(slicePlan),taskPlan=fs.readFileSync(request.planFile),manifest=session.manifest();
+    assert.equal(manifest.prepared.protected_owner[SLICE_PLAN],sha256(preimage));
+    assert.equal(nextUnit(f.owner),'execute-task/T01');
+    for(const root of f.contract.code_roots)write(path.join(root.path,'same.txt'),'after\n');
+    const result=f.result();session.returned(result);session.verify(result);
+    fs.appendFileSync(slicePlan,'operator note\n');
+    const edited=fs.readFileSync(slicePlan),persisted=receipts.length;
+    // The live owner guard is the first barrier; the marker CAS backs it up.
+    assert.throws(()=>session.publish(result),error=>['execution-protected-metadata','task-marker-preimage-changed'].includes(error.code));
+    assert.equal(receipts.length,persisted,'no ready receipt before a valid marker');
+    assert.deepEqual(fs.readFileSync(slicePlan),edited,'operator bytes kept, no recapture');
+    assert(!fs.existsSync(path.join(f.owner,side.locations(request).required[0])));
+    fs.writeFileSync(slicePlan,preimage);
+    console.log('PASS native marker CAS: a slice plan edited since prepare fails closed before persist, keeping operator bytes without recapture');
+
+    const published=session.publish(result);
+    const marker=published.artifacts.at(-1);
+    assert.deepEqual(marker,{path:SLICE_PLAN,content:'# Slice\n- [x] **T01** — fixture\n- [ ] **T02** — next\n',before:sha256(preimage)});
+    assert.equal(marker.before,published.milestone_delivery.protected_owner[SLICE_PLAN]);
+    assert.equal(published.artifacts.filter(a=>a.path===SLICE_PLAN).length,1);
+    assert.deepEqual(JSON.parse(fs.readFileSync(receipts.at(-1).file)),published,'durable ready record holds the marker');
+    assert.equal(fs.readFileSync(slicePlan,'utf8'),marker.content);
+    assert.deepEqual(fs.readFileSync(request.planFile),taskPlan,'executed T01-PLAN keeps its bytes');
+    assert.equal(nextUnit(f.owner),'execute-task/T02');
+    console.log('PASS native marker publish: ready record carries the marker last with the prepared before, S01-PLAN marks only T01, T01-PLAN unchanged and the controller selects T02');
+
+    const reopen=()=>delivery.prepare({...options,savedManifest:manifest});
+    const files=published.artifacts.map(a=>path.join(f.owner,a.path));
+    const stamp=()=>files.map(file=>[fs.readFileSync(file,'utf8'),fs.statSync(file).mtimeMs]);
+    const settled=stamp();
+    reopen().replayReady(published);reopen().replayReady(published);
+    assert.deepEqual(stamp(),settled,'repeated replay writes no bytes');
+    console.log('PASS native marker replay: repeated replayReady keeps every published byte and mtime');
+
+    // Crash before the marker write: delivery present, checkbox still open.
+    fs.writeFileSync(slicePlan,preimage);
+    const deliveryFiles=files.filter(file=>!file.endsWith('S01-PLAN.md'));
+    const deliveryStamp=()=>deliveryFiles.map(file=>fs.readFileSync(file,'utf8'));
+    const delivered=deliveryStamp();
+    const legacy=structuredClone(published);legacy.artifacts.pop();
+    reopen().replayReady(legacy);
+    assert.deepEqual(fs.readFileSync(slicePlan),preimage,'legacy ready never gains a marker');
+    console.log('PASS legacy native ready: a record without marker replays idempotently and never marks the slice plan');
+    const forged=change=>{const record=structuredClone(published);change(record);return record;};
+    for(const [name,record,code] of [
+      ['other slice',forged(r=>{r.artifacts.at(-1).path='.gsd/milestones/M901/slices/S02/S02-PLAN.md';}),'milestone-ready-receipt-invalid'],
+      ['other taskId',forged(r=>{r.artifacts.at(-1).content='# Slice\n- [ ] **T01** — fixture\n- [x] **T02** — next\n';}),'task-marker-invalid'],
+      ['divergent before',forged(r=>{r.artifacts.at(-1).before=sha256('other preimage');}),'task-marker-invalid'],
+      ['altered content',forged(r=>{r.artifacts.at(-1).content+='forged\n';}),'task-marker-invalid'],
+      ['not last',forged(r=>{r.artifacts.unshift(r.artifacts.pop());}),'milestone-ready-receipt-invalid'],
+      ['duplicate',forged(r=>{r.artifacts.push(structuredClone(r.artifacts.at(-1)));}),'milestone-ready-receipt-invalid'],
+    ]) {
+      assert.throws(()=>reopen().replayReady(record),{code},name);
+      assert.deepEqual(fs.readFileSync(slicePlan),preimage,name+': refused before any write');
+      assert.deepEqual(deliveryStamp(),delivered,name);
+    }
+    console.log('PASS native marker refusals: other slice, other taskId, divergent before, altered content, misplaced and duplicate markers refuse before any write');
+    reopen().replayReady(published);
+    assert.equal(fs.readFileSync(slicePlan,'utf8'),marker.content);
+    const recovered=stamp();reopen().replayReady(published);assert.deepEqual(stamp(),recovered);
+    console.log('PASS native marker crash recovery: replayReady marks the slice plan once and the next replay writes nothing');
+  } finally { f.cleanup(); }
+}
 async function durableReplay(standalone=false,corrected=false) {
   for(const stage of ['returned','publication']) {
     const f=await fixture({dispatchId:'r'.repeat(128),standalone,corrected});
@@ -564,8 +715,18 @@ async function durableReplay(standalone=false,corrected=false) {
       const resumed=await side.recoverUnitSidecar(JSON.parse(JSON.stringify(f.request)),f.recovery,f.runtime);
       assert.equal(resumed.action,'replay');assert.equal(resumed.provider_called,false);assert.equal(calls,1);
       assert.equal(resumed.result.published.result.status,'done');
+      const record=resumed.result.published;
+      const files=record.artifacts.map(a=>path.join(f.owner,a.path));
+      const stamp=()=>files.map(file=>[fs.readFileSync(file,'utf8'),fs.statSync(file).mtimeMs]);
+      const settled=stamp();
+      if(standalone)assert(!record.artifacts.some(a=>a.path.endsWith('-PLAN.md')),'standalone publish has no slice marker');
+      else {
+        assert.equal(record.artifacts.at(-1).path,SLICE_PLAN);
+        assert.equal(fs.readFileSync(path.join(f.owner,SLICE_PLAN),'utf8'),'# Slice\n- [x] **T01** — fixture\n');
+      }
       const again=await side.recoverUnitSidecar(f.request,f.recovery,f.runtime);
       assert.equal(again.action,'replay');assert.equal(calls,1);
+      assert.deepEqual(stamp(),settled,'repeated ready replay writes no bytes');
       assert.deepEqual(stateApi.loadRecovery(f.stateFile).reservations,f.initial.reservations);
       console.log('PASS durable '+(standalone?'standalone':'milestone')+' replay after '+stage+': fresh live writer census, no second callback, idempotent canonical publication');
     }finally{side.materialize=materialize;f.cleanup();}
@@ -617,7 +778,105 @@ async function guardedHandoff() {
     console.log('PASS retained handoff: final request, research and unclaimed drift refuse before callback; partial and duplicate invocation never publish');
   } finally { f.cleanup(); }
 }
-module.exports={fixture,main,protectedLeaseRenewal,documentaryContinuation,initialMixedDocumentary,guardedHandoff};
+// Time is the only legitimate difference between two otherwise identical runs:
+// freeze it, so results and bytes are compared without any other normalization.
+function freezeTime(at=Date.parse('2026-10-29T12:00:00.000Z')){
+  const RealDate=Date;
+  class FrozenDate extends RealDate{constructor(...args){super(...(args.length?args:[at]));}static now(){return at;}}
+  global.Date=FrozenDate;
+  return()=>{global.Date=RealDate;};
+}
+function fileMap(dir){
+  const out={};
+  const visit=(current,rel)=>{for(const name of fs.readdirSync(current).sort()){
+    if(name==='.git')continue;
+    const file=path.join(current,name),key=rel?rel+'/'+name:name;
+    if(fs.lstatSync(file).isDirectory())visit(file,key);else out[key]=sha256(fs.readFileSync(file));
+  }};
+  visit(dir,'');return out;
+}
+// Restore contents in place: existing directories keep their physical identity
+// (code roots are bound by dev/ino/birthtime); unchanged files are not rewritten.
+function restoreDir(dir,backup){
+  const wanted=new Set(fs.readdirSync(backup));
+  for(const name of fs.readdirSync(dir))if(!wanted.has(name))fs.rmSync(path.join(dir,name),{recursive:true,force:true});
+  for(const name of wanted){
+    const from=path.join(backup,name),to=path.join(dir,name),directory=fs.lstatSync(from).isDirectory();
+    if(fs.existsSync(to)&&fs.lstatSync(to).isDirectory()!==directory)fs.rmSync(to,{recursive:true,force:true});
+    if(directory){if(!fs.existsSync(to))fs.mkdirSync(to);restoreDir(to,from);continue;}
+    const source=fs.readFileSync(from);
+    if(fs.existsSync(to)&&fs.readFileSync(to).equals(source))continue;
+    if(fs.existsSync(to))fs.chmodSync(to,0o666);
+    fs.writeFileSync(to,source);
+  }
+}
+// S03/T04: phase and per-check observers at start, verify, publish and replayReady;
+// with, without and with throwing observers, results and bytes are identical.
+async function observedPhases(){
+  const f=await fixture();
+  const backup=f.dir+'-phase-backup';
+  try{
+    const handoff=await side.recoverUnitSidecar(f.request,f.recovery,f.runtime),request=handoff.result.request;
+    const nativeInvocation=require('./forge-native-invocation').buildNativeInvocation({hostRuntime:'codex',resolvedDispatch:request.route,
+      activeCapabilities:capabilities,prompt:'Observed phases fixture',forkTurns:'none',taskName:'fixture',agentType:'forge-executor'});
+    fs.cpSync(f.dir,backup,{recursive:true});
+    // One instant for every run, inside the live lease window of this fixture.
+    const instant=Date.now();
+    const run=observers=>{
+      restoreDir(f.dir,backup);
+      const thaw=freezeTime(instant);
+      try{
+        const receipts=[],options={request,nativeInvocation,assertBoundary:f.assertBoundary,assertAuthority:f.assertBoundary,
+          persistDeliveryReceipt:receipt=>receipts.push(receipt),...observers};
+        const session=delivery.prepare(options);
+        const started=session.start();
+        for(const root of f.contract.code_roots)write(path.join(root.path,'same.txt'),'after\n');
+        const result=f.result();session.returned(result);
+        const verified=session.verify(result),published=session.publish(result);
+        const ready=JSON.parse(fs.readFileSync(receipts.at(-1).file));
+        const verifier=require('./forge-verify'),capture=verifier.captureRootDelivery;let checks=0;
+        verifier.captureRootDelivery=(...args)=>{checks++;return capture(...args);};
+        let replayed;
+        try{replayed=delivery.prepare({...options,savedManifest:session.manifest()}).replayReady(ready);}
+        finally{verifier.captureRootDelivery=capture;}
+        assert.equal(checks,0,'replayReady runs no verification');
+        return {values:JSON.stringify({started,verified,published,replayed,receipts}),files:fileMap(f.dir)};
+      }finally{thaw();}
+    };
+    const plain=run({});
+    const phases=[],checks=[];
+    const observed=run({onPhase:record=>phases.push(record),onCheck:record=>checks.push(record)});
+    let thrown=0;
+    const throwing=run({onPhase:()=>{thrown++;throw new Error('observer failure');},onCheck:()=>{thrown++;throw new Error('observer failure');}});
+    assert.deepEqual(phases.map(row=>row.phase),['executing','verifying','publishing','completed','publishing','completed']);
+    for(const row of phases){
+      assert(Object.isFrozen(row));
+      assert.deepEqual(Object.keys(row),['schema_version','phase','dispatch_id','unit','worker_mode','at']);
+      assert.equal(row.schema_version,1);assert.equal(row.dispatch_id,request.dispatchId);
+      assert.equal(row.unit,'execute-task/T01');assert.equal(row.worker_mode,'native');
+    }
+    console.log('PASS native delivery phases: start executing, verify verifying, publish publishing then completed after readback, replayReady publishing and completed');
+    assert.deepEqual(checks.map(row=>[row.root_id,row.index,row.total,row.state,row.label]),[
+      ['alpha',1,1,'started','node check.cjs'],['alpha',1,1,'finished','node check.cjs'],
+      ['beta',1,1,'started','node check.cjs'],['beta',1,1,'finished','node check.cjs']]);
+    assert(checks.filter(row=>row.state==='finished').every(row=>row.exit_code===0&&row.timed_out===false));
+    console.log('PASS native delivery onCheck: verify forwards per-root progress records with the safe original command label');
+    assert(thrown>=phases.length+checks.length,'throwing observers were called');
+    assert.equal(observed.values,plain.values);assert.equal(throwing.values,plain.values);
+    assert.deepEqual(observed.files,plain.files);assert.deepEqual(throwing.files,plain.files);
+    console.log('PASS native delivery observer parity: manifest, receipts, ready record, published bytes and errors identical with, without and throwing observers (frozen time)');
+    restoreDir(f.dir,backup);
+    const receipts=[],session=delivery.prepare({request,nativeInvocation,assertBoundary:f.assertBoundary,assertAuthority:f.assertBoundary,
+      persistDeliveryReceipt:receipt=>receipts.push(receipt),onPhase:()=>{throw new Error('observer failure');}});
+    session.start();
+    for(const root of f.contract.code_roots)write(path.join(root.path,'same.txt'),'after\n');
+    session.returned(f.result());
+    fs.appendFileSync(path.join(f.owner,SLICE_PLAN),'operator note\n');
+    assert.throws(()=>session.verify(f.result()),{code:'execution-protected-metadata'},'a throwing observer never hides the guard refusal');
+    console.log('PASS native delivery observer refusal: guard errors are unchanged with a throwing observer');
+  }finally{fs.rmSync(backup,{recursive:true,force:true});f.cleanup();}
+}
+module.exports={fixture,main,protectedLeaseRenewal,documentaryContinuation,initialMixedDocumentary,guardedHandoff,freezeTime,fileMap,restoreDir};
 async function continuations(){await durableReplay(true);await guardedHandoff();await ordinaryPublication();}
 async function correctedContinuations(){await standaloneReservation({corrected:true});await durableReplay(true,true);}
-if(require.main===module)(process.argv.includes('--standalone')?standaloneReservation():process.argv.includes('--standalone-negative')?standaloneNegativeEvidence():process.argv.includes('--continuations')?continuations():process.argv.includes('--corrected')?correctedContinuations():main()).catch(error=>{console.error(error);process.exitCode=1;});
+if(require.main===module)(process.argv.includes('--cohort')?runCohort(Number(process.argv[process.argv.indexOf('--cohort')+1])):process.argv.includes('--standalone')?standaloneReservation():process.argv.includes('--standalone-negative')?standaloneNegativeEvidence():process.argv.includes('--continuations')?continuations():process.argv.includes('--corrected')?correctedContinuations():process.argv.includes('--observed-phases')?observedPhases():isolatedMain()).catch(error=>{console.error(error);process.exitCode=1;});

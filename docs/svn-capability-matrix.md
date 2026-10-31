@@ -55,7 +55,8 @@ Phase 4 closes every inventoried surface with an executable or explicit VCS-neut
 | operational-mcp | MCP | scripts/forge-mcp.js | VCS-neutral | forge-operational-parity.test.js (2 hosts x 3 platforms) | phase-04-full-gates.results.json#claim=svn-focused | verified-neutral | host projection is independent of project VCS |
 | integration-claude-instructions | host/Claude | CLAUDE.md | VCS-neutral | instruction projection smoke + full regression | phase-04-full-gates.results.json#claim=svn-focused | verified-neutral | host instructions are project-VCS independent |
 | integration-claude-settings | host/Claude | shared/templates/claude/settings.jsonc | VCS-neutral | forge-claude-renderer.test.js deterministic projection | phase-04-full-gates.results.json#claim=svn-focused | verified-neutral | declarative host integration has no VCS primitive |
-| configuration-forge | configuration | forge-capabilities.json | applicable | forge-svn-audit.js | phase-04-full-gates.results.json#claim=svn-focused | verified | 52 expected/observed; zero missing, duplicate, or incomplete |
+| integration-vscode-panel | VSCode readonly TreeView | extensions/forge-vscode/extension.js | VCS-neutral | forge-vscode-panel.test.js and forge-panel-probe.test.js | docs/panel-feasibility.md | declared-limitation | filesystem DTO has no VCS mutation; live SVN workspace rendering is unvalidated; isolated Code mount is separate |
+| configuration-forge | configuration | forge-capabilities.json | applicable | forge-svn-audit.js | phase-04-full-gates.results.json#claim=svn-focused | verified | Phase4 historical52; current catalog53; zero missing, duplicate, or incomplete |
 | family-vcs-primitives | internal family | scripts/forge-vcs.js | applicable | forge-vcs.test.js live SVN reset | phase-04-full-gates.results.json#claim=svn-focused | verified | status/diff/reset and SVN primitives green |
 | family-review-diff | internal family | scripts/forge-review-diff.js | applicable | forge-review-diff.test.js | phase-04-full-gates.results.json#claim=svn-focused | verified | scoped diff and no-VCS guard green |
 | family-touch | internal family | scripts/forge-touch.js | applicable | forge-touch.test.js live no-Git SVN WC | phase-04-full-gates.results.json#claim=svn-focused | verified | current WC delta reported honestly |
@@ -74,3 +75,7 @@ Phase 4 closes every inventoried surface with an executable or explicit VCS-neut
 - Final rows left at `inventory`: 0.
 - New reproducible SVN product gaps in Phase 4: 0.
 - Overall gate verdict: not 100% green; see Phase 4 evidence for base-clean Windows/environment failures.
+
+## Current catalog extension — 2026-10-31
+
+The historical Phase4 counts above remain52. The current catalog has53 expected/observed IDs after adding integration-vscode-panel; all seven additional families remain. The new row declares its live SVN rendering limitation and does not inherit historical passed claims. Issue308 tracks this dependent-matrix integration omission.

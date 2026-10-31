@@ -352,7 +352,40 @@ function renderCapture(item) {
   return `${safeText(item.text)} — ${textLabel(item.validity)}; resolvido: ${item.resolved ? 'sim' : 'não'}`
     + `\n    Fonte: ${safeText(item.source)}; SHA-256: ${safeText(item.hash)}; capturado em: ${safeText(item.capturedAt || 'não informado')}`;
 }
-function renderRecovery(report) {
+function uncertaintyText(report, item) {
+  const pair = report.sources.find(entry => item === `${entry.name}: ${entry.state}`
+    && Object.hasOwn(TEXT_LABELS, entry.name) && Object.hasOwn(TEXT_LABELS, entry.state));
+  return pair ? `${textLabel(pair.name)}: ${textLabel(pair.state)}` : safeText(item);
+}
+// Human lead derived only from the report. Unobserved phases stay explicit
+// instead of becoming an empty list, and no cause is inferred.
+function renderRecoverySummary(report) {
+  const coverage = report.coverage || {};
+  const personalObserved = coverage.personal === 'observed';
+  const resultsObserved = personalObserved && coverage.claim === 'observed' && ['observed', 'not-covered'].includes(coverage.controller);
+  const listed = (entries, render) => entries.length > 3
+    ? `${entries.slice(0, 3).map(render).join('; ')}; e mais ${entries.length - 3} no registro técnico`
+    : entries.map(render).join('; ');
+  const counted = (entries, observed) => observed ? String(entries.length) : 'observação incompleta';
+  const results = !resultsObserved ? 'observação incompleta'
+    : report.provenResults.length ? `${report.provenResults.length} (${listed(report.provenResults, item => textLabel(item.kind))})`
+      : 'nenhum nas fontes observadas';
+  const uncertainties = report.uncertainties.length
+    ? `${report.uncertainties.length} (${listed(report.uncertainties, item => uncertaintyText(report, item))})`
+    : report.status === 'ok' ? 'nenhuma' : 'observação incompleta';
+  return [`Resumo da recuperação de ${safeText(report.id)}`,
+    `Situação: ${textLabel(report.status)} (não significa conclusão do trabalho)`,
+    `Resultados já comprovados: ${results}`,
+    `Incertezas em aberto: ${uncertainties}`,
+    `Pendências de decisão: ${counted(report.pendingDecisions, personalObserved)}; aceites no registro: ${counted(report.acceptances, personalObserved)}`,
+    `Próximo passo seguro: ${safeText(report.nextSafeStep)}`,
+    'Fontes, SHA-256 e detalhes ficam no registro técnico abaixo.'].join('\n') + '\n';
+}
+function renderRecovery(report, options = {}) {
+  // summary:false reproduces the historical technical record byte for byte.
+  return options.summary === false ? renderRecoveryRecord(report) : `${renderRecoverySummary(report)}\n${renderRecoveryRecord(report)}`;
+}
+function renderRecoveryRecord(report) {
   const lines = [`Diagnóstico de recuperação: ${safeText(report.id)}`, `Observado em: ${safeText(report.observedAt)}`,
     `Estado: ${textLabel(report.status)} (não significa conclusão do trabalho)`];
   const coverage = report.coverage || {};
@@ -368,11 +401,8 @@ function renderRecovery(report) {
   section('Resultado comprovado', report.provenResults.map(item => textLabel(item.kind)
     + (item.evidence ? `: ${renderCapture(item.evidence)}` : '')
     + (item.at != null ? `; instante registrado (ms): ${safeText(item.at)}; mecanismo: ${textLabel(item.mechanism)}` : '')), resultsObserved);
-  section('Incertezas', report.uncertainties.map(item => {
-    const pair = report.sources.find(entry => item === `${entry.name}: ${entry.state}`
-      && Object.hasOwn(TEXT_LABELS, entry.name) && Object.hasOwn(TEXT_LABELS, entry.state));
-    return pair ? `${textLabel(pair.name)}: ${textLabel(pair.state)}` : safeText(item);
-  }), report.status === 'ok' || report.uncertainties.length > 0);
+  section('Incertezas', report.uncertainties.map(item => uncertaintyText(report, item)),
+    report.status === 'ok' || report.uncertainties.length > 0);
   section('Artefatos preservados', report.artifacts.map(item => `${textLabel(item.kind)}: ${textLabel(item.existence)}; integridade: ${textLabel(item.integrity)}`
     + `\n    Fonte: ${safeText(item.source)}` + (item.hash ? `; SHA-256: ${safeText(item.hash)}` : '')
     + (item.conflicts != null ? `; conflitos: ${safeText(item.conflicts)}` : '')), coverage.artifacts === 'observed');

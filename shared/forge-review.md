@@ -165,6 +165,29 @@ effort; a missing, stale, or mismatched binding is named worker unavailability
 at the relevant review stage. Preserve the adapter telemetry with the dispatch;
 observed binding remains distinct from provider-applied effort.
 
+Nas pernas nativas somente leitura no host Codex (challenge, defense e rebuttal),
+o chamador captura a baseline com `forge-native-readonly-guard.js --capture`
+antes do spawn: `--owner` físico, um `--code-root` por raiz guardada, `--mode full`
+e `--out` exclusivo fora de todas essas raízes e de `.gsd`. Fixa nessa captura
+`--allow-append .gsd/forge/events.jsonl`; na defesa, acrescenta
+`--allow-publication` com o caminho relativo exato do `DEFENSE_FILE` sob `.gsd`.
+Acrescenta `--own-lease <unidade>` e `--own-run <id>` somente quando detém esse
+lease e esse run. Essas permissões aceitam só os avanços de relógio próprios,
+com owner e geração intactos; nenhum outro controle ganha permissão implícita.
+Se o helper também publicar o alias legado, seu caminho exato precisa de
+permissão de publicação separada; não há curinga nem recaptura depois de escritas.
+
+Depois do retorno terminal, com o writer reconciliado, o chamador verifica a
+mesma baseline por `--verify <baseline> --writer-stopped`. O atestado é do
+chamador e não prova de processo. A saída 3 ou 4 torna a perna não confiável:
+registre a falha nomeada e os caminhos relativos disponíveis no REVIEW mínimo,
+e impeça iniciar review-fix ou outro writer antes da reconciliação do owner.
+Falha na captura também impede o spawn. O guard é detecção depois da unidade,
+não sandbox do SO: caminhos ignorados, escritas fora das raízes, mudança criada
+e revertida na janela, efeitos de rede e escritores alheios concorrentes não
+ficam provados; ele nunca reverte, apaga ou corrige arquivos. Nas pernas nativas
+Claude mantenha as allowlists e o permission mode existentes; o guard é opcional.
+
 ### Resolução de pairing (`auto`) — uma vez, antes de tudo
 
 `challenger`/`advocate` aceitam `claude | codex | gemini | auto` — **ambos os eixos, mesmo whitelist**. O advocate GPT/Gemini deixou de ser fase 2: `scripts/forge-xllm.js --mode defend` existe, então `advocate: auto` resolve para a família **do autor** em vez de degradar para Claude. A degradação antiga (`defend-mode-unavailable`) continua alcançável via `--defend-unavailable`, para adapters instalados sem o modo. Quando **qualquer** eixo é `auto`, o pairing é resolvido **por autoria do diff** via `scripts/forge-review-pairing.js` — **uma única vez**, e essa resolução acontece **ANTES** da regra `engine: workflow força agents` (precedência abaixo) e **ANTES** do branch `style: flags`. `auto` cru nunca é testado por nenhuma regra a jusante; só o valor **resolvido** (`RESOLVED_CHALLENGER`/`RESOLVED_ADVOCATE`) é consumido dali em diante.

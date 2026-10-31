@@ -3,12 +3,19 @@
 const fs = require('fs');
 const { digest } = require('./forge-code-roots');
 const { isSafeModelId } = require('./forge-sidecar-diagnostic');
+const { MAX_DISPATCH_ID } = require('./forge-recovery-dispatch-id');
 const safeModel = value => isSafeModelId(value) ? value : null;
+const CODE_CHARS = /^[a-zA-Z0-9_.:/-]+$/;
 
 // No prompt, argv, arbitrary error text or provider output crosses this boundary.
 // Hash the original bytes first; sanitization applies only to retained metadata.
 function code(value, fallback = null) {
-  return typeof value === 'string' && /^[a-zA-Z0-9_.:/-]{1,120}$/.test(value) ? value : fallback;
+  return typeof value === 'string' && value.length <= 120 && CODE_CHARS.test(value) ? value : fallback;
+}
+// Dispatch identities only: the same closed vocabulary, bounded by the canonical
+// generator's MAX_DISPATCH_ID. Exact bytes or the fallback; never truncated.
+function dispatchCode(value, fallback = null) {
+  return typeof value === 'string' && value.length <= MAX_DISPATCH_ID && CODE_CHARS.test(value) ? value : fallback;
 }
 function measure(value, source, structured = false) {
   if (value === undefined || value === null) return { status: 'unknown', bytes: null, sha256: null,
@@ -39,7 +46,7 @@ function captureFinal(options = {}) {
   return { schema_version: 1, captured_at: new Date().toISOString(), stage: code(options.stage, 'prepared'),
     context, request: measure(options.request, 'adapter-arguments', true),
     unit_type: code(identity.unitType), scope: code(identity.scope), phase: code(identity.phase),
-    dispatch_id: code(identity.dispatchId),
+    dispatch_id: dispatchCode(identity.dispatchId),
     // Private recovery identity is validated separately; telemetry never retains paths.
     paths: {},
     model_requested: safeModel(route.model_requested), model_sent: safeModel(options.model), model_observed: null,
@@ -79,4 +86,4 @@ function observeFinal(options, request, context, transport) {
     token_method: 'heuristic-chars-4', budgets: evidence.budgets, final_evidence: evidence });
   return evidence;
 }
-module.exports = { measure, captureFinal, observeFinal, sanitizeFinal, numericBudgets, code };
+module.exports = { measure, captureFinal, observeFinal, sanitizeFinal, numericBudgets, code, dispatchCode };

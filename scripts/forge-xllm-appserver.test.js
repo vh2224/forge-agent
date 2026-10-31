@@ -75,9 +75,15 @@ let initialized = false;
 let threadParams;
 let turnParams;
 let turnStarts = 0;
+let threadStarts = 0;
+// S01/T04: every spawn and request, appended across processes, so a second session
+// or a request without a model is visible even if it ran in another mock process.
+const requestLog = process.env.FORGE_MOCK_REQUEST_LOG;
+function logRequest(entry) { if (requestLog) fs.appendFileSync(requestLog, JSON.stringify(entry) + '\n'); }
+logRequest({ event: 'spawn' });
 function send(value) { process.stdout.write(JSON.stringify(value) + '\n'); }
 function captureState() {
-  if (capture) fs.writeFileSync(capture, JSON.stringify({ threadParams, turnParams, turnStarts }, null, 2));
+  if (capture) fs.writeFileSync(capture, JSON.stringify({ threadParams, turnParams, turnStarts, threadStarts }, null, 2));
 }
 function result(model) {
   return { status: 'done', summary: model || 'mock result', must_haves_status: [], files_changed: [],
@@ -92,7 +98,7 @@ function answer(model) {
 }
 function respondTurn(message) {
   const params = message.params || {};
-  fs.writeFileSync(capture, JSON.stringify({ threadParams, turnParams: params, turnStarts }, null, 2));
+  fs.writeFileSync(capture, JSON.stringify({ threadParams, turnParams: params, turnStarts, threadStarts }, null, 2));
   if (scenario === 'git-commit') {
     cp.spawnSync('git', ['-C', process.cwd(), 'commit', '--allow-empty', '-m', 'mock commit'], { stdio: 'ignore' });
   }
@@ -119,8 +125,41 @@ function respondTurn(message) {
     send({ method: 'item/agentMessage/delta', params: { itemId: 'msg-1', delta: 'x' } });
     return;
   }
+  // S01/T04 (issue 279): the requested model does not exist. The pinned TurnError
+  // carries codexErrorInfo modelNotFound plus provider text; stderr carries the
+  // transient keywords (network, 503, terminated) and a sentinel. stderr goes out
+  // first so the client already holds the tail when the turn fails.
+  if (scenario === 'model-not-found') {
+    process.stderr.write('mock: network connection terminated 503 FORGE_T04_STDERR_SENTINEL\n');
+    setTimeout(() => {
+      send({ id: message.id, result: { turn: { id: 'turn-1' } } });
+      send({ method: 'turn/completed', params: { turn: { id: 'turn-1', status: 'failed', items: [], error: {
+        message: 'FORGE_T04_PROVIDER_SENTINEL model ' + params.model + ' does not exist (network timeout)',
+        codexErrorInfo: 'modelNotFound', additionalDetails: 'FORGE_T04_PROVIDER_SENTINEL details' } } } });
+    }, 30);
+    return;
+  }
+  // S04/T02: mid-turn the server asks for human input (EXPERIMENTAL requestUserInput)
+  // with provider sentinels in params and a transient-looking stderr, then keeps
+  // streaming until the client's turn/interrupt.
+  if (scenario === 'request-user-input') {
+    process.stderr.write('mock: network connection terminated 503 FORGE_S04_STDERR_SENTINEL\n');
+    setTimeout(() => {
+      send({ id: message.id, result: { turn: { id: 'turn-1' } } });
+      send({ method: 'turn/started', params: { turn: { id: 'turn-1' } } });
+      send({ id: 'req-1', method: 'item/tool/requestUserInput', params: { threadId: 'FORGE_S04_PROVIDER_SENTINEL',
+        turnId: 'FORGE_S04_PROVIDER_SENTINEL', itemId: 'item-1',
+        questions: [{ id: 'q-1', question: 'FORGE_S04_PROVIDER_SENTINEL approve deploy?' }] } });
+      const tick = setInterval(() => {
+        if (interrupted) { clearInterval(tick); return; }
+        send({ method: 'item/agentMessage/delta', params: { itemId: 'msg-1', delta: 'x' } });
+      }, 20);
+    }, 30);
+    return;
+  }
   if (scenario === 'silent-then-reply') setTimeout(emit, 320); else emit();
 }
+let interrupted = false;
 
 let pending = '';
 process.stdin.setEncoding('utf8');
@@ -132,10 +171,16 @@ process.stdin.on('data', chunk => {
     if (!line) continue;
     const message = JSON.parse(line);
     if (Object.prototype.hasOwnProperty.call(message, 'jsonrpc')) process.exit(91);
-    if (message.method === 'initialize') send({ id: message.id, result: { serverInfo: { name: 'forge-test' } } });
+    logRequest({ method: message.method, model: message.params && typeof message.params.model === 'string' ? message.params.model : null,
+      ...(message.error ? { reply_to: message.id, error_code: message.error.code, error_message: message.error.message } : {}) });
+    if (message.method === 'turn/interrupt' && scenario === 'request-user-input') {
+      interrupted = true;
+      send({ id: message.id, result: {} });
+    } else if (message.method === 'initialize') send({ id: message.id, result: { serverInfo: { name: 'forge-test' } } });
     else if (message.method === 'initialized') initialized = true;
     else if (message.method === 'thread/start') {
       if (!initialized) process.exit(92);
+      threadStarts += 1;
       threadParams = message.params || {};
       send({ id: message.id, result: { thread: { id: 'thread-fixed' } } });
     } else if (message.method === 'turn/start') {
@@ -615,6 +660,207 @@ client.startAppServerTurn = (options) => start({ ...options, livenessPolicy: ${J
   assert.strictEqual(marker.error_class, 'terminal');
   assert.strictEqual(marker.reason_code, 'appserver-anomalous-silence');
   assert.match(marker.reason, T05_MESSAGE, 'no stderr splice on a liveness kill: the message stays stable');
+}
+
+// ── S01/T04 (issue 279): modelNotFound is a terminal failure of the requested route ──
+const MODEL_NOT_FOUND_MESSAGE = 'forge-appserver-client: turn ended with status failed (modelNotFound)';
+const T04_SENTINEL = /FORGE_T04_(PROVIDER|STDERR)_SENTINEL|does not exist/;
+
+function readRequestLog(file) {
+  return fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)) : [];
+}
+
+// Exactly one session with the requested model: one spawn, one thread/start and one
+// turn/start, both naming the model; no retry, no second session, no request
+// without a model and no silent substitution.
+function assertSingleRequestedSession(log, model, label) {
+  assert.strictEqual(log.filter(entry => entry.event === 'spawn').length, 1, `${label}: exactly one app-server process`);
+  const threads = log.filter(entry => entry.method === 'thread/start');
+  const turns = log.filter(entry => entry.method === 'turn/start');
+  assert.deepStrictEqual(threads.map(entry => entry.model), [model], `${label}: one thread/start with the requested model`);
+  assert.deepStrictEqual(turns.map(entry => entry.model), [model], `${label}: one turn/start with the requested model`);
+  const methods = log.filter(entry => entry.method).map(entry => entry.method);
+  assert.deepStrictEqual(methods, ['initialize', 'initialized', 'thread/start', 'turn/start'], `${label}: nothing after the failure`);
+}
+
+async function testModelNotFoundThroughRunExecute(mock, root) {
+  const repo = fixtureRepo(root);
+  const model = 'gpt-missing-model';
+  const requestLog = path.join(root, 'model-not-found-requests.jsonl');
+  const capture = path.join(root, 'model-not-found-capture.json');
+  process.env.FORGE_MOCK_REQUEST_LOG = requestLog;
+  let error;
+  try {
+    error = await expectReject(() => withMock(mock, 'model-not-found', capture,
+      () => runExecute({ ...executeOptions(repo, planFile(root), path.join(root, 'model-not-found-result.json'), model), effort: 'high' })), /./);
+  } finally { delete process.env.FORGE_MOCK_REQUEST_LOG; }
+  // Observed behaviour first, so a regression diff shows the whole projection.
+  assert.deepStrictEqual({ message: error.message, code: error.code ?? null, codexErrorInfo: error.codexErrorInfo ?? null,
+    turnStatus: error.turnStatus, diagnostic: error.diagnostic ? error.diagnostic.reason : null,
+    error_class: classifyErrorClass(error.message), review_reason_code: reviewFailureDiagnostic(error).reason_code }, {
+    message: MODEL_NOT_FOUND_MESSAGE, code: 'model-not-found', codexErrorInfo: 'modelNotFound', turnStatus: 'failed',
+    diagnostic: 'model-not-found', error_class: 'terminal', review_reason_code: 'model-not-found' });
+  assert.strictEqual(error.diagnostic.stage, 'identity');
+  assert.strictEqual(reviewFailureDiagnostic(error).diagnostic.reason, 'model-not-found', 'review keeps the closed reason');
+  assert(!T04_SENTINEL.test(JSON.stringify({ message: error.message, diagnostic: error.diagnostic,
+    review: reviewFailureDiagnostic(error) })), 'no provider text in message or diagnostic');
+  // The provider stderr was really there (transient keywords included); the client keeps
+  // it as a property, the adapter never splices it into the classified message.
+  assert(/terminated 503 FORGE_T04_STDERR_SENTINEL/.test(String(error.stderrTail)), 'fixture must exercise a provider stderr tail');
+  assertSingleRequestedSession(readRequestLog(requestLog), model, 'runExecute');
+  const wire = JSON.parse(fs.readFileSync(capture, 'utf8'));
+  assert.strictEqual(wire.threadStarts, 1);
+  assert.strictEqual(wire.turnStarts, 1);
+  assert.strictEqual(wire.threadParams.model, model);
+  assert.strictEqual(wire.turnParams.model, model);
+  assert.strictEqual(wire.turnParams.effort, 'high');
+}
+
+function testModelNotFoundClassification() {
+  assert.strictEqual(classifyErrorClass(MODEL_NOT_FOUND_MESSAGE), 'terminal');
+  // Anchored: the fixed message only, never a variant carrying provider text.
+  assert.strictEqual(classifyErrorClass(`${MODEL_NOT_FOUND_MESSAGE}: network connection terminated 503`), 'transient',
+    'the anchor does not swallow a spliced transient tail; the splice itself is what is excluded');
+  for (const provider_called of [true, undefined]) {
+    const safe = reviewFailureDiagnostic({ code: 'model-not-found', provider_called, message: 'private-sentinel',
+      diagnostic: { version: 1, stage: 'identity', reason: 'model-not-found', tail: 'private-sentinel' } });
+    assert.strictEqual(safe.reason_code, 'model-not-found');
+    assert.strictEqual(safe.diagnostic.reason, 'model-not-found');
+    assert.strictEqual(safe.diagnostic.stage, 'identity');
+    assert.strictEqual(safe.provider_called, provider_called ?? null);
+    assert(!JSON.stringify(safe).includes('private-sentinel'));
+  }
+  // Unknown diagnostic reasons and codes still collapse to adapter-failed.
+  const unknown = reviewFailureDiagnostic({ code: 'modelNotFound', diagnostic: { reason: 'private-sentinel' } });
+  assert.strictEqual(unknown.reason_code, 'adapter-failed');
+  assert.strictEqual(unknown.diagnostic.reason, 'adapter-failed');
+}
+
+// The result-file channel of the real CLI, execute and plan: adapter-failed with the
+// fixed reason, the closed reason_code and the terminal class, and nothing else.
+function testModelNotFoundThroughCli(mock, root) {
+  const model = 'gpt-missing-model';
+  const contextFile = path.join(root, 'model-not-found-plan-context.md');
+  fs.writeFileSync(contextFile, '# Plan context\n\nPlan this fixture slice.\n');
+  for (const [mode, input] of [['execute', ['--plan', planFile(root)]], ['plan', ['--plan-context', contextFile]]]) {
+    const repo = fixtureRepo(root);
+    const resultFile = path.join(root, `cli-model-not-found-${mode}-result.json`);
+    const requestLog = path.join(root, `cli-model-not-found-${mode}-requests.jsonl`);
+    const run = spawnSync(process.execPath, [path.join(__dirname, 'forge-xllm.js'), '--mode', mode, '--engine', 'codex',
+      ...input, '--result-file', resultFile, '--cwd', repo, '--timeout', '30', '--model', model, '--dispatch-id', `T04-${mode}`], {
+      cwd: root, encoding: 'utf8', windowsHide: true, timeout: 60000,
+      env: { ...process.env, FORGE_XLLM_CODEX_BIN: mock, FORGE_MOCK_SCENARIO: 'model-not-found',
+        FORGE_MOCK_CAPTURE: path.join(root, `cli-model-not-found-${mode}-capture.json`), FORGE_MOCK_REQUEST_LOG: requestLog },
+    });
+    assert.strictEqual(run.status, 2, `${mode}: ${run.stderr}`);
+    assert.strictEqual(run.stdout, '', `${mode}: stdout stays the result channel`);
+    const raw = fs.readFileSync(resultFile, 'utf8');
+    const marker = JSON.parse(raw);
+    assert.deepStrictEqual({ status: marker.status, reason: marker.reason, reason_code: marker.reason_code, error_class: marker.error_class },
+      { status: 'adapter-failed', reason: MODEL_NOT_FOUND_MESSAGE, reason_code: 'model-not-found', error_class: 'terminal' }, mode);
+    assert(!T04_SENTINEL.test(raw), `${mode}: no provider text in the result file`);
+    assert(!/FORGE_T04_PROVIDER_SENTINEL/.test(run.stderr), `${mode}: no provider TurnError text on the CLI stderr`);
+    assertSingleRequestedSession(readRequestLog(requestLog), model, `cli ${mode}`);
+  }
+}
+
+// ── S04/T02: an inbound input request stops the turn with a fixed terminal verdict ──
+const INPUT_REQUIRED_MESSAGE = 'forge-appserver-client: inbound input request refused; owner decision required';
+const S04_SENTINEL = /FORGE_S04_(PROVIDER|STDERR)_SENTINEL|approve deploy/;
+
+// One session with the requested model, refused and interrupted: one spawn, one
+// thread/start and one turn/start naming the model, the -32601 refusal of the
+// request and then exactly one turn/interrupt. No retry, second session, request
+// without a model or model swap.
+function assertSingleInterruptedSession(log, model, label) {
+  assert.strictEqual(log.filter(entry => entry.event === 'spawn').length, 1, `${label}: exactly one app-server process`);
+  assert.deepStrictEqual(log.filter(entry => entry.method === 'thread/start').map(entry => entry.model), [model],
+    `${label}: one thread/start with the requested model`);
+  assert.deepStrictEqual(log.filter(entry => entry.method === 'turn/start').map(entry => entry.model), [model],
+    `${label}: one turn/start with the requested model`);
+  assert.deepStrictEqual(log.filter(entry => entry.method).map(entry => entry.method),
+    ['initialize', 'initialized', 'thread/start', 'turn/start', 'turn/interrupt'], `${label}: interrupt and nothing else after the request`);
+  const refusal = log.findIndex(entry => entry.reply_to === 'req-1' && entry.error_code === -32601);
+  const interrupt = log.findIndex(entry => entry.method === 'turn/interrupt');
+  assert(refusal >= 0 && refusal < interrupt, `${label}: refused with -32601 before turn/interrupt`);
+  assert(!S04_SENTINEL.test(log[refusal].error_message), `${label}: the refusal never echoes provider text`);
+}
+
+async function testInputRequiredThroughRunExecute(mock, root) {
+  const repo = fixtureRepo(root);
+  const model = 'gpt-requested-model';
+  const requestLog = path.join(root, 'input-required-requests.jsonl');
+  const capture = path.join(root, 'input-required-capture.json');
+  const resultFile = path.join(root, 'input-required-result.json');
+  process.env.FORGE_MOCK_REQUEST_LOG = requestLog;
+  let error;
+  try {
+    error = await expectReject(() => withMock(mock, 'request-user-input', capture,
+      () => runExecute({ ...executeOptions(repo, planFile(root), resultFile, model), effort: 'high' })), /./);
+  } finally { delete process.env.FORGE_MOCK_REQUEST_LOG; }
+  // Observed behaviour first, so a regression diff shows the whole projection.
+  assert.deepStrictEqual({ message: error.message, code: error.code ?? null,
+    diagnostic: error.diagnostic ? error.diagnostic.reason : null, inboundRequests: error.inboundRequests,
+    error_class: classifyErrorClass(error.message), review_reason_code: reviewFailureDiagnostic(error).reason_code }, {
+    message: INPUT_REQUIRED_MESSAGE, code: 'appserver-input-required', diagnostic: 'appserver-input-required',
+    inboundRequests: [{ id: 'req-1', method: 'item/tool/requestUserInput', class: 'input', thread_id: 'thread-fixed', turn_id: 'turn-1' }],
+    error_class: 'terminal', review_reason_code: 'appserver-input-required' });
+  assert.strictEqual(error.diagnostic.stage, 'transport');
+  assert.strictEqual(reviewFailureDiagnostic(error).diagnostic.reason, 'appserver-input-required', 'review keeps the closed reason');
+  assert.strictEqual(error.interrupt, 'acknowledged');
+  assert(!S04_SENTINEL.test(JSON.stringify({ message: error.message, diagnostic: error.diagnostic,
+    inboundRequests: error.inboundRequests, review: reviewFailureDiagnostic(error) })), 'no provider text in message, records or diagnostic');
+  // The transient-looking stderr was really there; the fixed verdict never splices it.
+  assert(/terminated 503 FORGE_S04_STDERR_SENTINEL/.test(String(error.stderrTail)), 'fixture must exercise a provider stderr tail');
+  assertSingleInterruptedSession(readRequestLog(requestLog), model, 'runExecute');
+  const wire = JSON.parse(fs.readFileSync(capture, 'utf8'));
+  assert.strictEqual(wire.threadStarts, 1);
+  assert.strictEqual(wire.turnStarts, 1);
+  assert.strictEqual(wire.threadParams.model, model);
+  assert.strictEqual(wire.turnParams.model, model);
+  assert.strictEqual(wire.threadParams.approvalPolicy, 'never', 'approvalPolicy is unchanged');
+  assert.strictEqual(wire.threadParams.ephemeral, true, 'the thread stays ephemeral');
+}
+
+function testInputRequiredClassification() {
+  assert.strictEqual(classifyErrorClass(INPUT_REQUIRED_MESSAGE), 'terminal');
+  // Anchored on the fixed message: a spliced tail is a different message, which is
+  // exactly why invokeCodexAppServer never splices one onto this verdict.
+  assert.strictEqual(classifyErrorClass(`${INPUT_REQUIRED_MESSAGE}: network connection terminated 503`), 'transient');
+  const safe = reviewFailureDiagnostic({ code: 'appserver-input-required', message: 'private-sentinel',
+    diagnostic: { version: 1, stage: 'transport', reason: 'appserver-input-required', tail: 'private-sentinel' } });
+  assert.strictEqual(safe.reason_code, 'appserver-input-required');
+  assert.strictEqual(safe.diagnostic.reason, 'appserver-input-required');
+  assert(!JSON.stringify(safe).includes('private-sentinel'));
+  assert.strictEqual(reviewFailureDiagnostic({ code: 'appserver-input-required ' }).reason_code, 'adapter-failed');
+}
+
+// The result-file channel of the real CLI, execute and plan: adapter-failed with the
+// fixed reason, the closed reason_code and the terminal class.
+function testInputRequiredThroughCli(mock, root) {
+  const model = 'gpt-requested-model';
+  const contextFile = path.join(root, 'input-required-plan-context.md');
+  fs.writeFileSync(contextFile, '# Plan context\n\nPlan this fixture slice.\n');
+  for (const [mode, input] of [['execute', ['--plan', planFile(root)]], ['plan', ['--plan-context', contextFile]]]) {
+    const repo = fixtureRepo(root);
+    const resultFile = path.join(root, `cli-input-required-${mode}-result.json`);
+    const requestLog = path.join(root, `cli-input-required-${mode}-requests.jsonl`);
+    const run = spawnSync(process.execPath, [path.join(__dirname, 'forge-xllm.js'), '--mode', mode, '--engine', 'codex',
+      ...input, '--result-file', resultFile, '--cwd', repo, '--timeout', '30', '--model', model, '--dispatch-id', `S04-${mode}`], {
+      cwd: root, encoding: 'utf8', windowsHide: true, timeout: 60000,
+      env: { ...process.env, FORGE_XLLM_CODEX_BIN: mock, FORGE_MOCK_SCENARIO: 'request-user-input',
+        FORGE_MOCK_CAPTURE: path.join(root, `cli-input-required-${mode}-capture.json`), FORGE_MOCK_REQUEST_LOG: requestLog },
+    });
+    assert.strictEqual(run.status, 2, `${mode}: ${run.stderr}`);
+    assert.strictEqual(run.stdout, '', `${mode}: stdout stays the result channel`);
+    const raw = fs.readFileSync(resultFile, 'utf8');
+    const marker = JSON.parse(raw);
+    assert.deepStrictEqual({ status: marker.status, reason: marker.reason, reason_code: marker.reason_code, error_class: marker.error_class },
+      { status: 'adapter-failed', reason: INPUT_REQUIRED_MESSAGE, reason_code: 'appserver-input-required', error_class: 'terminal' }, mode);
+    assert(!S04_SENTINEL.test(raw), `${mode}: no provider text in the result file`);
+    assert(!/FORGE_S04_PROVIDER_SENTINEL|approve deploy/.test(run.stderr), `${mode}: no provider request text on the CLI stderr`);
+    assertSingleInterruptedSession(readRequestLog(requestLog), model, `cli ${mode}`);
+  }
 }
 
 async function testGuards(mock, root) {
@@ -1256,6 +1502,18 @@ async function main() {
     await testLivenessOptionWiring(root);
     await testLivenessKillThroughRunExecute(mock, root);
     testLivenessKillThroughCli(mock, root);
+    await testModelNotFoundThroughRunExecute(mock, root);
+    process.stdout.write('PASS C02 modelNotFound execute: fixed terminal error excludes stderr and preserves closed review diagnostic\n');
+    testModelNotFoundClassification();
+    process.stdout.write('PASS C02 modelNotFound classification: stderr keywords cannot change the terminal class\n');
+    testModelNotFoundThroughCli(mock, root);
+    process.stdout.write('PASS C02 modelNotFound CLI execute and plan: sanitized result files and exactly one explicit-model session\n');
+    await testInputRequiredThroughRunExecute(mock, root);
+    process.stdout.write('PASS C10 appserver-input-required execute: refused, interrupted, one session, fixed verdict without stderr\n');
+    testInputRequiredClassification();
+    process.stdout.write('PASS C10 appserver-input-required classification: anchored terminal class and known review code\n');
+    testInputRequiredThroughCli(mock, root);
+    process.stdout.write('PASS C10 appserver-input-required CLI execute and plan: sanitized result files and no retry or model swap\n');
     await testGuards(mock, root);
     await testResultFileContract(mock, root);
     await testSvnTurnCarriesExplicitSandboxPolicy(mock, root);

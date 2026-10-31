@@ -397,7 +397,8 @@ function install(input = {}) {
   const installComplete = coreAlready && exists(paths.shared.version) && exists(paths.shared.prefs)
     && selected.every((host) => projectionComplete(paths, host, projectRoot));
   if (installComplete && !options.update && !options.dryRun && !options.withApp) {
-    return { ok: true, changed: false, already_installed: true, runtime, forge_home: paths.forgeHome, selected, backup: null, capabilities, plan: [{ op: 'skip', reason: 'already-installed', destination: paths.forgeHome }] };
+    const presentation = require('./forge-presentation-prefs').inspectPresentationPrefs({ ...options, runtimes: selected });
+    return { ok: true, changed: false, already_installed: true, runtime, forge_home: paths.forgeHome, selected, backup: null, capabilities, presentation, plan: [{ op: 'skip', reason: 'already-installed', destination: paths.forgeHome }] };
   }
   if (options.update) {
     if (coreAlready) backupExisting(coreFiles.map((item) => path.join(paths.forgeHome, item)), backupRoot, plan, options);
@@ -495,6 +496,9 @@ function install(input = {}) {
     // null disables the release rung; an object is an injected resolver (tests).
     provenance: options.provenance,
   });
+  // Observe only after host projection. This report is deliberately separate
+  // from every persisted manifest and never changes the operator's selection.
+  const presentation = require('./forge-presentation-prefs').inspectPresentationPrefs({ ...options, runtimes: selected });
   // Standing interaction rules also reach operator-owned instruction files.
   // This owns only its separate marker span; self-sourced repo files stay intact.
   const interaction = require('./forge-interaction');
@@ -597,7 +601,7 @@ function install(input = {}) {
   const app = installApp(repo, plan, options, paths.platform);
   const backupPath = path.resolve(backupRoot);
   const hasBackup = options.update && plan.some((entry) => entry.destination && (path.resolve(entry.destination) === backupPath || path.resolve(entry.destination).startsWith(`${backupPath}${path.sep}`)));
-  return { ok: true, changed: plan.some((entry) => entry.op === 'copy' || entry.op === 'write' || entry.op === 'app-build'), dry_run: Boolean(options.dryRun), runtime, selected, forge_home: paths.forgeHome, runtime_homes: Object.fromEntries(selected.map((host) => [host, paths.runtimeHomes[host]])), backup: hasBackup ? backupRoot : null, capabilities, plan, manifest, app };
+  return { ok: true, changed: plan.some((entry) => entry.op === 'copy' || entry.op === 'write' || entry.op === 'app-build'), dry_run: Boolean(options.dryRun), runtime, selected, forge_home: paths.forgeHome, runtime_homes: Object.fromEntries(selected.map((host) => [host, paths.runtimeHomes[host]])), backup: hasBackup ? backupRoot : null, capabilities, presentation, plan, manifest, app };
 }
 
 /**
@@ -627,6 +631,7 @@ function render(report) {
   else lines.push(`${report.changed ? 'Installed' : 'No changes'}; ${report.plan.length} operation(s).`);
   if (report.app) lines.push(`App: ${report.app.status}${report.app.reason ? ` (${report.app.reason})` : ''}`);
   if (report.backup) lines.push(`Backup: ${report.backup}`);
+  for (const suggestion of report.presentation ? report.presentation.suggestions : []) lines.push(suggestion.text);
   // Retirement is not wholesale, so the summary says what stayed — and a hook
   // pointing into the retired directory is loud rather than absent. A count with
   // no names is what made the previous loss invisible.

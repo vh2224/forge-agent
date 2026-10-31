@@ -12,6 +12,33 @@ const RESUME_RESERVATION = 'same-session-resume';
 const RESUME_PRE_SPAWN_REFUSALS = Object.freeze(['claude-resume-account-mismatch', 'claude-resume-config-mismatch', 'claude-session-invalid']);
 const SILENCE_CODES = Object.freeze(['claude-anomalous-silence', 'appserver-anomalous-silence']);
 const SESSION_TERMINAL_STOPS = Object.freeze(['budget-exceeded-resume-exhausted', 'budget-exceeded-resume-refused']);
+// S04/T02: the app-server asked for a human answer and the client stopped the turn.
+// Local constants (recovery never loads the client); the suite binds both to
+// APPSERVER_INPUT_CODES and to the `input` class of INBOUND_REQUEST_CLASSES.
+const INPUT_REQUIRED_CODE = 'appserver-input-required';
+const INBOUND_INPUT_METHODS = Object.freeze(['item/tool/requestUserInput', 'mcpServer/elicitation/request']);
+const ANSWERED_CONTINUATION_STOP = 'answered-continuation-required';
+const INBOUND_RECORD_KEYS = 'class,id,method,thread_id,turn_id';
+// Only the closed record the client emits {id, method, class, thread_id, turn_id}:
+// anything else is ignored, never turned into a question or kept in the attempt.
+function closedInboundRecord(value) {
+  const telemetry = require('./forge-attempt-telemetry');
+  const closed = item => item === null || telemetry.code(item) === item;
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).sort().join(',') !== INBOUND_RECORD_KEYS
+      || value.class !== 'input' || !INBOUND_INPUT_METHODS.includes(value.method)
+      || !(value.id === null || Number.isSafeInteger(value.id) || telemetry.code(value.id) === value.id)
+      || !closed(value.thread_id) || !closed(value.turn_id)) return null;
+  return { id: value.id, method: value.method, class: value.class, thread_id: value.thread_id, turn_id: value.turn_id };
+}
+// Stable across re-captures and restarts: the same unit, dispatch, thread, turn and
+// request always map to the same pending question; the text is fixed pt-BR and
+// names only owner identities and closed fields, never provider text.
+function inboundQuestion(unit, dispatchId, record) {
+  const id = `inbound-${crypto.createHash('sha256').update(JSON.stringify([unit, dispatchId,
+    record.thread_id, record.turn_id, record.id, record.method])).digest('hex').slice(0, 24)}`;
+  return { id, question: `A unidade ${unit} recebeu do sidecar app-server o pedido de entrada humana ${record.method} `
+    + `(request ${record.id === null ? 'sem id' : record.id}); o turno foi parado e a recusa aguarda decisão explícita do owner.` };
+}
 function validSessionRef(ref) { return !!ref && validateSessionRef(ref).ok === true; }
 const exceptions = new WeakMap();
 const candidateSets = new WeakMap();
@@ -281,6 +308,12 @@ function createRecovery(options) {
       if (!input.inspection || input.inspection.process_stopped !== true || input.inspection.receipt_checked !== true) fail('recovery-process-receipt-inspection-required');
       if (input.inspection.valid_saved_response === true) return { action: 'replay', provider_called: false };
       if (input.inspection.writer_possible !== false && input.inspection.roots_reconciled !== true) fail('recovery-writer-reconciliation-required');
+      // S04/T02: the turn stopped on a request for human input. Explicit answers
+      // close the questions, but neither they nor a standing exception, a candidate
+      // set or a correction re-enter the provider here: the answered continuation
+      // belongs to the owner. No invoke, silence retry, corrected retry, resume or
+      // candidate walk, and no other model.
+      if (state.attempts.at(-1)?.reason_code === INPUT_REQUIRED_CODE) return { action: 'stop', reason_code: ANSWERED_CONTINUATION_STOP };
       const pendingReservation = state.reservations?.at(-1);
       // An unmatched reservation has no recorded outcome: its invocation may still
       // be running, so neither exhaustion nor session cleanup can be concluded.
@@ -326,7 +359,12 @@ function createRecovery(options) {
       };
       if (preflight) scope = livePreflightScope();
       let routes, provenance;
-      const silenceRetry = previous.failure_class === 'silence'
+      // A registered standing grant binds the personal source through the opaque
+      // exception. It authorizes advancing the original list, not an unchanged
+      // retry; ordinary one-time grants retain their historical retry policy.
+      const standingNextCandidate = typeof scope?.authorization_profile === 'string' && scope.authorization_profile.length > 0
+        && /^[a-f0-9]{64}$/.test(scope.authorization_source_sha256 || '');
+      const silenceRetry = !standingNextCandidate && previous.failure_class === 'silence'
         && previous.observation?.silence?.cause === 'indeterminate' && scope
         && !(state.reservations || []).some(r => r.reason === 'anomalous-silence-same-target');
       const transition = input.transition ? transitions.assertLive(input.transition) : null;
@@ -412,6 +450,8 @@ function createRecovery(options) {
       if (input.inspection?.valid_saved_response === true) return { action: 'replay', provider_called: false };
       if (input.inspection?.process_stopped !== true || input.inspection.receipt_checked !== true
           || input.inspection.valid_saved_response || input.inspection.roots_reconciled !== true) fail('recovery-writer-reconciliation-required');
+      // Same gate as next(): a stored reservation never continues an input stop.
+      if (state.attempts.at(-1)?.reason_code === INPUT_REQUIRED_CODE) return { action: 'stop', reason_code: ANSWERED_CONTINUATION_STOP };
       const saved = state.reservations?.at(-1), previous = state.attempts.at(-1);
       const transition = input.transition ? transitions.assertLive(input.transition) : null;
       const ordinary = transition?.uninvoked?.reservation_sha256 === input.reservation_sha256;
@@ -587,7 +627,14 @@ function captureFailure(options) {
     && require('./forge-sidecar-diagnostic').observation(error.diagnostic?.observation).silence?.cause === 'indeterminate';
   const timeout = /timeout|timed-out/.test(code);
   const service = !activeBudget && provider === true && /quota|rate-limit|model-unavailable|service-unavailable/.test(code);
-  session.record({ failure_class: activeBudget ? 'active-budget' : silence ? 'silence' : timeout ? 'timeout' : service ? 'service' : provider === false ? 'caller' : 'unknown',
+  // A refused inbound input request (S04/T02) proves no outage, no timeout and no
+  // caller defect: it stays unknown, and each closed input record becomes a stable
+  // pending question for the owner. Malformed records are ignored.
+  const inputRequired = code === INPUT_REQUIRED_CODE;
+  const inbound = inputRequired && Array.isArray(error.inboundRequests)
+    ? error.inboundRequests.map(closedInboundRecord).filter(Boolean) : [];
+  session.record({ failure_class: inputRequired ? 'unknown' : activeBudget ? 'active-budget' : silence ? 'silence' : timeout ? 'timeout' : service ? 'service' : provider === false ? 'caller' : 'unknown',
+    ...(inputRequired ? { inbound_requests: inbound } : {}),
     observation: error.diagnostic?.observation, service_failure_proven: service, ...(activeBudget || cleanupPending && sessionRef ? { session: sessionRef } : {}),
     ...(cleanupPending && sessionRef ? { session_cleanup_pending: true } : {}), reason_code: code, layer: options.layer || error.stage || 'unknown', route: options.route,
     request_sha256: observed.request.sha256, caller_request_sha256: callerRequestHash(options.request), context_sha256: context.sha256,
@@ -603,6 +650,10 @@ function captureFailure(options) {
   const questions = options.questions || (options.receiptFile && fs.existsSync(options.receiptFile)
     ? JSON.parse(fs.readFileSync(options.receiptFile, 'utf8')).pending_questions : null) || options.request.pending_questions;
   if (questions?.length) session.questions(questions);
+  if (inbound.length) {
+    const dispatchId = telemetry.dispatchCode(options.request.dispatchId, null);
+    session.questions(inbound.map(record => inboundQuestion(options.unit, dispatchId, record)));
+  }
   const snapshot = session.snapshot();
   // Returned copy only; the persisted state never carries this marker.
   return session.state_migration ? { ...snapshot, state_migration: session.state_migration } : snapshot;
@@ -848,6 +899,8 @@ async function recoverAttempt(options) {
     && !session.snapshot().pending_questions.some(q => q.status === 'pending')
     // active-budget resumes the same route: no candidate list, no exception issued.
     && state.attempts.at(-1)?.failure_class !== 'active-budget'
+    // An input stop (S04/T02) never walks candidates: no list, no exception issued.
+    && state.attempts.at(-1)?.reason_code !== INPUT_REQUIRED_CODE
     && (state.attempts.at(-1)?.service_failure_proven === true || exception || binding)
     ? resolveCandidates(transition?.resolution ? { ...transition.resolution.options, scope: request.scope, phase: request.phase }
       : options.resolverOptions, transitionGuard ? undefined : options.resolveDispatch, request) : undefined;
@@ -1004,7 +1057,8 @@ async function cli(argv) {
   }
   fail('usage: forge-attempt-recovery.js --inspect <state.json> <receipt.json> | --preparation <request.json>');
 }
-module.exports = { canonicalRequest, callerRequestHash, bindRecoveryAuthorization, bindLinkedRequest, createRecovery, migrateState, resolveCandidates, createAuthority, exceptionFor, requestIdentity, validateState, validateStateTarget, routeKey, safeDiagnostic, inspectReceipt, captureFailure, recoverAttempt, cli };
+module.exports = { canonicalRequest, callerRequestHash, bindRecoveryAuthorization, bindLinkedRequest, createRecovery, migrateState, resolveCandidates, createAuthority, exceptionFor, requestIdentity, validateState, validateStateTarget, routeKey, safeDiagnostic, inspectReceipt, captureFailure, recoverAttempt, cli,
+  INPUT_REQUIRED_CODE, INBOUND_INPUT_METHODS, ANSWERED_CONTINUATION_STOP };
 if (require.main === module) cli(process.argv.slice(2)).then(value => process.stdout.write(JSON.stringify(value) + '\n')).catch(error => {
   process.stderr.write(JSON.stringify({ reason_code: error.code || 'recovery-command-failed' }) + '\n'); process.exitCode = 2;
 });

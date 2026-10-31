@@ -289,6 +289,42 @@ async function main() {
     assert.equal(sanitized.model_sent, 'claude-sonnet-4-6[1m]');
     assert.equal(sanitized.model_observed, 'claude-sonnet-4-6[1m]');
   });
+  await test('issue297 dispatchCode keeps canonical recovery dispatch IDs intact; generic code stays at 120', () => {
+    const { recoveryDispatchId, MAX_DISPATCH_ID } = require('./forge-recovery-dispatch-id');
+    assert.equal(MAX_DISPATCH_ID, 128);
+    const source = fs.readFileSync(require.resolve('./forge-attempt-telemetry'), 'utf8');
+    assert.match(source, /require\('\.\/forge-recovery-dispatch-id'\)/, 'limit imported from the canonical generator');
+    // Real shape without personal data: a 78-character parent plus the
+    // "-recovery-<uuid>" suffix gives the observed 124-character dispatch.
+    const parent124 = 'M-20261028132636-fixture-S03-T02-native-dispatch-'.padEnd(78, 'x');
+    const real124 = recoveryDispatchId(parent124, '0f8e2d9c-1b7a-4c3e-9d5f-6a2b1c0e7f48');
+    const real128 = recoveryDispatchId('p'.repeat(128), '0f8e2d9c-1b7a-4c3e-9d5f-6a2b1c0e7f48');
+    assert.equal(real124.length, 124); assert.equal(real128.length, 128);
+    const ids = Object.fromEntries([120, 121, 124, 128, 129].map(length => [length, 'd'.repeat(length - 2) + '-1']));
+    for (const length of [120, 121, 124, 128]) assert.equal(api.dispatchCode(ids[length]), ids[length], `dispatch ${length}`);
+    assert.equal(api.dispatchCode(ids[129]), null); assert.equal(api.dispatchCode(ids[129], 'fallback'), 'fallback');
+    for (const value of [real124, real128]) assert.equal(api.dispatchCode(value), value);
+    assert.equal(api.code(ids[120]), ids[120], 'generic code 120 unchanged');
+    for (const length of [121, 124, 128, 129]) assert.equal(api.code(ids[length]), null, `generic code ${length}`);
+    for (const value of ['', 'with space', 'line\nbreak', 'tab\t', 'acentuação', 'bidi‮', 'sep ', 'null\0',
+      'quote"', 'back\\slash', 'semi;colon', '$(x)', 42, null, undefined, ['a'], { id: 'a' }]) {
+      assert.equal(api.dispatchCode(value), null, JSON.stringify(String(value)));
+      assert.equal(api.code(value), null, JSON.stringify(String(value)));
+    }
+    for (const dispatchId of [real124, real128, ids[120]]) {
+      const raw = api.captureFinal({ identity: { unitType: 'execute-task', scope: 'milestone', phase: 'execute', dispatchId } });
+      assert.equal(raw.dispatch_id, dispatchId);
+      assert.equal(api.sanitizeFinal(raw).dispatch_id, dispatchId);
+      assert.equal(api.sanitizeFinal(api.sanitizeFinal(raw)).dispatch_id, dispatchId);
+    }
+    for (const dispatchId of [ids[129], 'bad id', real124 + '\n']) {
+      assert.equal(api.captureFinal({ identity: { dispatchId } }).dispatch_id, null);
+      assert.equal(api.sanitizeFinal({ ...api.captureFinal({}), dispatch_id: dispatchId }).dispatch_id, null);
+    }
+    process.stdout.write('PASS issue297 telemetry: dispatchCode accepts 120/121/124/128 and refuses 129, generic code stays 120\n');
+    process.stdout.write('PASS issue297 telemetry: captureFinal and sanitizeFinal keep 124/128 canonical recovery dispatch bytes exactly\n');
+    process.stdout.write('PASS issue297 telemetry: refused characters and non-strings never coerce into a dispatch\n');
+  });
   process.stdout.write(`PASS ${passed} final telemetry contracts (simulated transports, no providers)\n`);
 }
 main().catch(error => { process.stderr.write(`${error.stack}\n`); process.exitCode = 1; }).finally(() => {

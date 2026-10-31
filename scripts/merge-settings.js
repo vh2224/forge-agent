@@ -139,6 +139,9 @@ if (remove) {
   if (settings.statusLine?.command?.includes('forge-statusline.js')) {
     delete settings.statusLine;
   }
+  if (require('./forge-subagent-statusline').isManagedCommand(settings.subagentStatusLine?.command)) {
+    delete settings.subagentStatusLine;
+  }
 
   // Remove forge-managed permission defaults
   if (settings.skipDangerousModePermissionPrompt === true) {

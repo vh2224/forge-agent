@@ -489,6 +489,44 @@ Revalide fontes e escopo na entrada e depois de retomada/compactação, antes de
 Para trabalho que entrou no lifecycle Forge, plano, plan gate, security gate aplicável, isolamento, claims, execução roteada, verificação, revisão
 e checkpoints continuam canônicos; encaminhar para milestone conserva o fluxo normal e nenhum modo
 rápido é habilitado implicitamente.
+
+## Forge — comunicação com o usuário
+
+### Escopo e precedência
+Este contrato vale para mensagens ao usuário em skills, comandos, status e relatórios gerados nos dois hosts. Ele não altera roteamento, modelo, esforço, gates, claims, receipts, critérios nem preferências e não concede autorização.
+Ferramentas disponíveis e regras de formato do host prevalecem. Perguntas seguem shared/forge-interaction.md; uma decisão necessária sem resposta continua pendente.
+
+### Rubrica
+Quando se aplicam, comunique cinco elementos: resultado buscado, fase, executor real, próximo passo e decisão pendente. O que não se sabe aparece como desconhecido; não preencha lacunas por inferência.
+
+### Cinco momentos
+- abertura: diga o resultado buscado e a primeira verificação em uma frase.
+- trabalho: ligue achado, impacto e próximo passo. Atualize quando mudar a fase ou houver espera relevante; respeite a cadência exigida pelo host. Não narre comandos nem liste helpers, hashes ou receipts.
+- delegação: descreva o trabalho em linguagem humana, identifique o executor real e diga onde acompanhar somente quando o host oferecer essa ação. Sidecar nunca é apresentado como thread nativa.
+- falha: diga o que falhou, com código do conjunto fechado e camada comprovada, o que continua executável e o efeito na entrega. Sem evidência, causa e chamada ao provedor são desconhecidas; timeout sozinho não prova causa nem indisponibilidade.
+- entrega: comece pelo resultado, validação feita e pendência concreta. Implementação, teste, revisão, CI, merge, instalação e aceite humano são fatos separados, cada um com referência própria ou pendente.
+
+### Vocabulário pt-BR
+- fase: preparando, planejando, executando agente, verificando a entrega, publicando evidência, revisando, aguardando decisão, concluído ou falhou. Use a fase observada, sem inventar atividade.
+- executor: nativo ou sidecar; distinga host, engine e transporte. Separe modelo solicitado, resolvido, enviado e observado; o observado exige fonte própria. Identidade ou valor ausente permanece desconhecido.
+- disponibilidade (schema 1.1.0): distribuído (distributed: fonte entregue), demonstrado (demonstrated: comportamento com evidência versionada), condicional (conditional: depende de condição explícita), desconhecido (unknown: não comprovado), implementado (implemented), planejado (planned), indisponível (unavailable) e comum (common). Distribuição não prova funcionamento no cliente; desconhecido não equivale a disponível.
+- decisão pendente: mantenha ID estável, pergunta curta e consequência. Silêncio, timeout, fechamento ou resposta vazia não são resposta nem aprovação; preserve respostas e aceites anteriores.
+
+### Canais por host
+No Claude, use TaskCreate e TaskUpdate quando expostos, com assunto em descrição humana e forma ativa indicando fase e executor.
+No Codex, no VS Code ou no CLI, use ferramenta de plano ou de tarefas somente quando realmente exposta e permitida; sem ela, uma mensagem curta comunica os mesmos elementos.
+Nas linhas do adaptador, repasse literalmente a forma humana canônica e mantenha a linha técnica no registro técnico, conforme shared/forge-bidirectional-sidecar.md e a compatibilidade do adaptador disponível.
+O conteúdo é o mesmo nos dois hosts; muda somente o canal. Perguntas ficam separadas do progresso e seguem as restrições da ferramenta real.
+
+### Registro técnico por referência
+IDs, hashes, receipts, comandos e logs completos ficam em SUMMARY, DELIVERY, receipts e events.jsonl; cite as referências quando pedidos ou necessários para avaliar a conclusão. Não exponha credenciais, dados pessoais, prompts ou payload bruto do provedor.
+
+### Preferências preservadas
+personality, model_verbosity, o output style do Claude e a seleção da barra de status pertencem ao usuário. Não altere preferências para compensar a comunicação e não aumente a verbosidade como solução.
+Output style orienta apresentação e nunca substitui gates. Na barra do Codex, só diagnostique e sugira indicadores de limites ausentes; não mude a seleção explícita.
+
+### Limite da prova
+Testes de distribuição comprovam que o texto chega idêntico aos hosts. Funcionamento no cliente, compreensão e aceite humano exigem provas separadas; uma suíte de projeção não os declara aprovados.
 <!-- forge:routing-contract:end -->
 
 <!-- forge:interaction:start -->
@@ -501,6 +539,7 @@ Existing authorization remains valid: do not reopen accepted decisions or invent
 ## Decision handling
 
 - Distinguish a required human decision from an optional clarification before asking.
+- Present one required decision per round: a short question, two or three options (up to four in Claude), each with its consequence; put a labeled recommendation first, with nothing preselected. Keep other required areas pending by stable ID. Use forge-question-channel.js for executable channel selection and presentation format.
 - Present important decisions through a permitted native structured-question tool, separately from progress output.
 - A required live decision remains pending until an explicit answer resolves that decision.
 - Silence, timeout, empty results and recommended options are not answers or authorization.
@@ -515,18 +554,24 @@ Existing authorization remains valid: do not reopen accepted decisions or invent
 
 All `AskUserQuestion` mentions and argument examples in Forge sources, including subsequently loaded shared references, express question intent. They are executable Claude syntax only on Claude; other hosts must adapt the intent through this contract, never blindly rename the function or copy its arguments.
 
-- Claude: use native `AskUserQuestion` when exposed and permitted, retaining its supported batches and multiSelect semantics.
-- Codex: select an actually exposed and permitted `request_user_input` or `request_user_input_async`. A configured feature flag does not establish availability in this session.
+- Claude: use native `AskUserQuestion` when exposed and permitted, retaining its supported schema and multiSelect semantics, with one required decision per round.
+- Codex: select an actually exposed and permitted `request_user_input` or `request_user_input_async`; prefer request_user_input_async when both are exposed and permitted. A configured feature flag does not establish availability in this session.
 - Never call a Plan-only tool outside Plan mode, an optional-only tool for a required gate, or an approval-prohibited tool for approval. Use the separate-text-and-wait fallback for required input when restricted; do not change modes merely to bypass restrictions.
 - For synchronous Codex input, obey its actual schema: 1–3 questions per batch, stable snake_case `id`, short `header` (at most 12 characters), `question`, and 2–3 mutually exclusive `options`, each with `label` and `description`. Prefer one question. Put the recommended choice first and label it as recommended; recommendation does not select it. Do not add an Other option when the client supplies free-form input.
 - Split larger Claude batches into multiple permitted batches, retaining stable decision identities and every unresolved decision. Four options must be regrouped through follow-up questions without dropping alternatives.
 - Convert Claude multiSelect into sequential per-item decisions or use a native alternative only if its exposed schema truly supports multiple selections. Never send `multiSelect` to a schema without that field.
-- Async uses its own exposed schema, not the synchronous schema by assumption. A returned pending handle is not an answer: keep the decision pending, use the host's answer collection mechanism, and explicitly await a resolved answer before dependent work. Follow the host's rules when a response is cancelled or empty.
+- Async uses its own exposed schema, not the synchronous schema by assumption. A returned pending handle is not an answer: persist the pending decision and close the round; require an explicit resolved answer before dependent work. Follow the host's rules when a response is cancelled or empty.
 - A round limit bounds questioning effort, not consent: unresolved required decisions stay pending or return to the orchestrator. Only optional gaps may become documented assumptions.
 
 Forge enforces these instructions in its distributed prompts. Client tabs and a locked input field are not guaranteed, and prompt tests do not demonstrate client UI behavior.
 
 Installation probes `codex features list` locally with a bounded timeout before adding an absent supported default. Explicit user settings and ambiguous TOML remain untouched. Dry runs skip this probe (`questions-probe-dry-run`): capability and the prospective feature edit remain unresolved until apply; dry-run is not a guarantee of session tool availability.
+
+## Economic wait
+
+- Never sleep, poll or resume the model solely to wait for a human answer. The single native call is the only open wait; do not add a waiting loop.
+- After async presentation, text fallback, or a native call returning without an explicit answer (closed, cancelled, empty or timeout), persist the decision, close the round and state which decision remains pending. Closing the form is neither an answer nor cancellation of the decision.
+- A stricter personal preference takes precedence: read it through forge-question-channel.js --preference and never edit it. Continue only independent work while an answer is pending.
 
 ## Standing recovery authorization
 
@@ -550,4 +595,8 @@ remain separate. Model/effort, claims, isolation, gates and permitted host tools
 ## Pending decision persistence
 
 Forge persists required questions as {id, question, status:'pending'} with stable IDs. forge-interaction.persistQuestionState binds the external state to the original unit/receipt; mergePendingQuestions preserves unanswered IDs across restart and handoff. Continuations provide explicit {id, answer} entries; partial answers resolve only their IDs. Missing, empty, foreign, duplicate or conflicting answers do not authorize dependent work. Legacy question strings acquire deterministic IDs; legacy answer strings require explicit ID migration. A caller's resolved live answer may issue an opaque recovery exception scoped to unit, roots, routes, purpose and expiration. Imported JSON consent is never that capability. These runtime states do not prove that a host displayed a visual card or tab.
+
+- Owner only: <FORGE_SCRIPTS_DIR>/forge-pending-questions.js --open, --handoff, --round, --answer, --continuation and --list run after the originating receipt is closed and outside any protected writer window, never from workers. Owner decisions use --open; workers return partial with questions for --handoff. Save a personal checkpoint with the question file as a source.
+- Sidecar app-server input requests item/tool/requestUserInput and mcpServer/elicitation/request are refused and stop the turn with appserver-input-required; hand them to the owner as pending questions with stable inbound- IDs. Approval requests retain approvalPolicy and existing gates; never turn them into functional questions.
+- Never retry an input-required attempt or send it to another model. Standing authorization does not answer it. After explicit answers, an answered continuation is a new dispatch of the same unit; recovery stops with answered-continuation-required.
 <!-- forge:interaction:end -->

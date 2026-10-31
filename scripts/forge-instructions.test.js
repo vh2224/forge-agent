@@ -639,6 +639,138 @@ test('both generated boot entries require effective core composition before phas
   }
 });
 
+// Communication is delivered by the same block in both hosts. These checks
+// exercise real rendering/synchronization, including a source update between
+// installation and sync, rather than treating the presence of a heading as proof.
+test('communication canonical content, bounded form and presentation boundaries', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'shared', 'forge-communication.md'), 'utf8');
+  const canonical = source.replace(/\r\n/g, '\n').trimEnd();
+  assertEqual(mod.renderCommunicationContract(), canonical, 'canonical bytes');
+  assert(!source.includes('\r'), 'canonical source must be LF');
+  assert(canonical.split('\n').length <= 80, 'communication exceeds 80 lines');
+  assert(!/<!-- forge:|```|~~~/.test(canonical), 'communication contains markers or fences');
+  for (const term of ['resultado buscado', 'fase', 'executor', 'próximo passo', 'decisão pendente',
+    'desconhecido', 'abertura', 'trabalho', 'delegação', 'falha', 'entrega',
+    'preparando', 'planejando', 'executando agente', 'verificando a entrega', 'publicando evidência',
+    'revisando', 'aguardando decisão', 'concluído', 'falhou', 'nativo', 'sidecar', 'transporte',
+    'solicitado', 'resolvido', 'enviado', 'observado', 'distribuído', 'demonstrado', 'condicional',
+    'implementado', 'planejado', 'indisponível', 'comum', '1.1.0', 'TaskCreate', 'TaskUpdate',
+    'VS Code', 'CLI', 'shared/forge-interaction.md', 'SUMMARY', 'DELIVERY', 'receipts', 'events.jsonl',
+    'personality', 'model_verbosity', 'output style', 'barra de status', 'aceite humano']) {
+    assert(canonical.includes(term), `communication missing ${term}`);
+  }
+  assert(/não altera roteamento, modelo, esforço, gates, claims, receipts, critérios nem preferências/.test(canonical), 'authority boundary missing');
+  const block = renderBlock();
+  assertEqual(block.split(canonical).length - 1, 1, 'contract count');
+  assert(block.indexOf(canonical) > block.indexOf(mod.renderEntryContract()), 'communication precedes entry contract');
+  assert(!/routing:\s*$/m.test(block), 'routing snapshot introduced');
+  assert(!block.includes('Nunca execute a unidade inline'), 'absolute inline prohibition introduced');
+  for (const name of ['forge-instructions.js', 'forge-codex-renderer.js', 'forge-claude-renderer.js']) {
+    const script = fs.readFileSync(path.join(__dirname, name), 'utf8');
+    for (const line of canonical.split('\n').filter(line => line.length > 100)) {
+      assert(!script.includes(line), `${name} embeds communication prose`);
+    }
+  }
+  console.log('PASS communication source: bounded pt-BR contract, authority, rubric, moments, vocabulary, channels, preferences and independent human acceptance');
+  console.log('PASS communication projector: adjacent canonical bytes once after entry, no script copy or routing regression');
+  const blockBytes = Buffer.byteLength(block, 'utf8');
+  assert(blockBytes <= 16384, 'local managed block budget exceeded (not a host limit)');
+  const documentation = fs.readFileSync(path.join(__dirname, '..', 'shared', 'forge-codex-renderer.md'), 'utf8');
+  for (const term of ['9 764', '14 138', '16 384', 'não é um limite verificado do host']) {
+    assert(documentation.includes(term), `local byte measurement missing ${term}`);
+  }
+  console.log(`communication measurement: ${canonical.split('\n').length} lines; managed block ${blockBytes} UTF-8 bytes`);
+  console.log('PASS communication local budget: block stays within the declared test ceiling and before-after bytes are documented without a host limit claim');
+});
+
+test('communication sync both hosts preserves CRLF and every operator byte', () => {
+  const prefix = '# Operador Ω\r\n\r\n  texto e espaços  \r\n';
+  const suffix = '\r\n\r\nCauda do operador Ω  \r\n';
+  const root = project(Object.fromEntries(TARGETS.map(target => [target.file, prefix + legacyBlock('1.0.0', '\r\n') + suffix])));
+  const first = syncInstructions(root, { host: 'both' });
+  assertEqual(first.changed, 2, 'both targets changed');
+  const canonical = mod.renderCommunicationContract();
+  const once = TARGETS.map(target => read(root, target.file));
+  for (const content of once) {
+    const found = findBlock(content);
+    assertEqual(content.slice(0, found.start), prefix, 'operator prefix');
+    assert(content.slice(found.end).startsWith(suffix), 'operator suffix');
+    assertEqual(content.replace(/\r\n/g, '\n').split(canonical).length - 1, 1, 'canonical bytes exactly once');
+    assert(!content.replace(/\r\n/g, '').includes('\n'), 'lone LF in CRLF file');
+  }
+  assertEqual(syncInstructions(root, { host: 'both' }).changed, 0, 'second sync');
+  TARGETS.forEach((target, index) => assertEqual(read(root, target.file), once[index], 'stable bytes'));
+  console.log('PASS communication sync: both hosts exact canonical bytes once, CRLF, operator prefix and suffix preserved, second sync changed zero');
+});
+
+test('communication missing or unreadable source fails before any target write', () => {
+  const check = require('assert');
+  const isolated = mktmp();
+  fs.mkdirSync(path.join(isolated, 'scripts'));
+  fs.mkdirSync(path.join(isolated, 'shared'));
+  for (const name of ['forge-instructions.js', 'forge-interaction.js']) {
+    fs.copyFileSync(path.join(__dirname, name), path.join(isolated, 'scripts', name));
+  }
+  fs.copyFileSync(path.join(__dirname, '..', 'shared', 'forge-interaction.md'), path.join(isolated, 'shared', 'forge-interaction.md'));
+  const isolatedMod = require(path.join(isolated, 'scripts', 'forge-instructions.js'));
+  const target = path.join(isolated, 'AGENTS.md');
+  const namedError = error => error.code === 'communication-contract-missing'
+    && error.message === 'communication-contract-missing';
+  for (const existing of [false, true]) {
+    if (existing) fs.writeFileSync(target, '# Operador Ω\r\n');
+    check.throws(() => isolatedMod.syncFile(target, { host: 'codex' }), namedError);
+    if (existing) assertEqual(fs.readFileSync(target, 'utf8'), '# Operador Ω\r\n', 'operator file changed');
+    else assert(!fs.existsSync(target), 'missing source created target');
+  }
+  const source = path.join(isolated, 'shared', 'forge-communication.md');
+  fs.mkdirSync(source);
+  check.throws(() => isolatedMod.renderBlock(), namedError);
+  check.throws(() => isolatedMod.renderCommunicationContract({ file: path.join(isolated, 'absent.md') }), namedError);
+  fs.rmdirSync(source);
+  fs.writeFileSync(source, 'Fonte adjacente Ω  \r\nsegunda linha\r\n\r\n');
+  assertEqual(isolatedMod.renderCommunicationContract(), 'Fonte adjacente Ω  \nsegunda linha', 'adjacent source and EOL normalization');
+  console.log('PASS communication read failures: absent and unreadable sources throw communication-contract-missing before writes, adjacent source normalizes LF and trims only the end');
+});
+
+test('communication renderer and real sync compose one current contract', () => {
+  const renderer = require('./forge-codex-renderer');
+  const root = mktmp();
+  const report = renderer.render({ repo: path.join(__dirname, '..'), projectRoot: root,
+    codexHome: path.join(root, 'host'), forgeHome: path.join(root, 'forge'), ...renderer.PRODUCTION_DISPATCH_DIALECT });
+  const instructions = report.artifacts.find(item => item.kind === 'instructions');
+  const canonical = mod.renderCommunicationContract();
+  assertEqual(instructions.content.split(canonical).length - 1, 1, 'renderer canonical count');
+  const prefix = '# Operador preservado Ω\n\n';
+  const file = path.join(root, 'AGENTS.md');
+  fs.writeFileSync(file, prefix + instructions.content);
+  assertEqual(syncFile(file, { host: 'codex' }).outcome, 'unchanged', 'render then sync');
+  const sourceFile = path.resolve(__dirname, '..', 'shared', 'forge-communication.md');
+  const originalRead = fs.readFileSync;
+  const updated = canonical + '\n\nFonte atualizada em fixture isolada Ω.';
+  try {
+    // Present changed canonical bytes at the I/O seam without editing source or
+    // bypassing the real renderBlock/syncFile composition under test.
+    fs.readFileSync = function (name, ...args) {
+      return path.resolve(String(name)) === sourceFile ? updated + '\r\n' : originalRead.call(this, name, ...args);
+    };
+    assertEqual(syncFile(file, { host: 'codex' }).outcome, 'updated', 'source update');
+    const once = read(root, 'AGENTS.md');
+    assert(once.startsWith(prefix), 'operator prefix lost');
+    assertEqual(once.split(updated).length - 1, 1, 'current canonical once');
+    assertEqual(once.split(canonical).length - 1, 1, 'no stale duplicate');
+    assertEqual(syncFile(file, { host: 'codex' }).outcome, 'unchanged', 'updated second sync');
+    assertEqual(read(root, 'AGENTS.md'), once, 'updated bytes stable');
+    const claudeFile = path.join(root, 'CLAUDE.md');
+    syncFile(claudeFile, { host: 'claude' });
+    const claudeBlock = read(root, 'CLAUDE.md');
+    assertEqual(claudeBlock.replace(/\r\n/g, '\n').split(updated).length - 1, 1, 'Claude same canonical source');
+    const rerendered = renderer.render({ repo: path.join(__dirname, '..'), projectRoot: root,
+      codexHome: path.join(root, 'host'), forgeHome: path.join(root, 'forge'), ...renderer.PRODUCTION_DISPATCH_DIALECT }).artifacts.find(item => item.kind === 'instructions');
+    assertEqual(rerendered.content.split(updated).length - 1, 1, 'updated renderer');
+  } finally { fs.readFileSync = originalRead; }
+  console.log('PASS communication composition: Codex render then real sync unchanged, updated source replaces owned block once, second sync stable and Claude bytes identical');
+});
+
 cleanup();
 
 console.log('');

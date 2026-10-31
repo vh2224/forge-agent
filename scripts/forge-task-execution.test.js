@@ -178,6 +178,81 @@ function snapshotRegressions() {
   assert.throws(() => execution.protectedSnapshot(limit), /execution-protected-snapshot-limit/);
   console.log('protected snapshot: >64 MiB file, 72 MiB aggregate, bounded reads, mutations, races, descriptor cleanup, links/types and 20000-entry limit passed');
 }
+// Issue 288: an explicit host adapter opens fresh exact scopes for requests the
+// host creates later. The handle grants nothing by itself and never revives a
+// closed scope; every run asks the live host callback again.
+async function autoPlanGateAdapterContracts(original) {
+  const { AsyncResource } = require('async_hooks');
+  const successor = { ...original, dispatchId: `${original.dispatchId}-recovery-successor` };
+  let revoked = false, attestations = 0;
+  const adapter = execution.createAutoPlanGateAdapter(scope => {
+    attestations++;
+    return { authorized: !revoked, mode: 'auto', reference: scope.reference };
+  });
+  assert(Object.isFrozen(adapter)); assert.deepStrictEqual(Object.keys(adapter), []);
+  assert.throws(() => execution.createAutoPlanGateAdapter({ authorized: true }), /execution-auto-gate-host-required/);
+  const key = require.resolve('./forge-task-execution'), current = require.cache[key];
+  delete require.cache[key];
+  const otherInstance = require('./forge-task-execution');
+  require.cache[key] = current;
+  assert.notStrictEqual(otherInstance, execution);
+  const foreignModule = otherInstance.createAutoPlanGateAdapter(scope => ({ authorized: true, mode: 'auto', reference: scope.reference }));
+  for (const forged of [JSON.parse(JSON.stringify(adapter)), {}, Object.freeze({}), foreignModule, null, undefined, 'adapter']) {
+    await assert.rejects(() => execution.withAutoPlanGateAdapter(forged, successor, () => 'reached'), /execution-auto-gate-adapter-required/);
+    assert.throws(() => execution.withAutoPlanGateAdapterSync(forged, successor, () => 'reached'), /execution-auto-gate-adapter-required/);
+  }
+  console.log('PASS issue288 adapter handle: opaque process-local handle; serialized, look-alike, null and other-module-instance handles refused');
+  const before = attestations;
+  const value = await execution.withAutoPlanGateAdapter(adapter, successor, async () => {
+    assert.strictEqual(execution.autoGateAllowed(successor), true);
+    assert.throws(() => execution.autoGateAllowed(original), /execution-auto-gate-binding-mismatch/, 'successor scope never covers the original');
+    for (const changed of [{ ...successor, workflowId: 'foreign-workflow' }, { ...successor, route: { ...successor.route, host_runtime: 'foreign-host' } },
+      { ...successor, gates: { ...successor.gates, authorizationReference: 'foreign-reference' } }, { ...successor, dispatchId: 'foreign-dispatch' }]) {
+      assert.throws(() => execution.autoGateAllowed(changed), /execution-auto-gate-binding-mismatch/);
+    }
+    // Transitive original check: a fresh exact original scope inside the successor scope.
+    const inner = execution.withAutoPlanGateAdapterSync(adapter, original, () => {
+      assert.strictEqual(execution.autoGateAllowed(original), true);
+      assert.throws(() => execution.autoGateAllowed(successor), /execution-auto-gate-binding-mismatch/);
+      return 'original-validated';
+    });
+    assert.strictEqual(inner, 'original-validated');
+    assert.strictEqual(execution.autoGateAllowed(successor), true, 'successor scope restored after the original scope closed');
+    return 'successor-done';
+  });
+  assert.strictEqual(value, 'successor-done');
+  assert(attestations - before >= 4, 'each scope and check re-reads the live host callback');
+  assert.strictEqual(execution.autoGateAllowed(successor), false, 'no scope outside the runner');
+  console.log('PASS issue288 adapter scopes: fresh exact successor scope, nested synchronous original scope restores the successor, exact matcher unchanged');
+  const sentinel = Object.freeze({ sync: true });
+  assert.strictEqual(execution.withAutoPlanGateAdapterSync(adapter, original, () => sentinel), sentinel, 'synchronous value preserved');
+  const failure = Object.assign(new Error('fixture-sync-error'), { code: 'fixture-sync-error' });
+  assert.throws(() => execution.withAutoPlanGateAdapterSync(adapter, original, () => { throw failure; }), error => error === failure);
+  let captured;
+  assert.throws(() => execution.withAutoPlanGateAdapterSync(adapter, original, () => {
+    captured = AsyncResource.bind(() => execution.autoGateAllowed(original));
+    assert.strictEqual(captured(), true);
+    return Promise.resolve('late');
+  }), /execution-auto-gate-sync-required/);
+  assert.throws(() => execution.withAutoPlanGateAdapterSync(adapter, original, () => ({ then() {} })), /execution-auto-gate-sync-required/);
+  assert.strictEqual(captured(), false, 'captured context is inactive after the synchronous scope');
+  let asyncCaptured;
+  await execution.withAutoPlanGateAdapter(adapter, successor, async () => { asyncCaptured = AsyncResource.bind(() => execution.autoGateAllowed(successor)); });
+  assert.strictEqual(asyncCaptured(), false, 'captured async scope is inactive after closing');
+  console.log('PASS issue288 sync runner: preserves synchronous values and errors, refuses thenables after closing the scope, captured contexts stay inactive');
+  revoked = true;
+  await assert.rejects(() => execution.withAutoPlanGateAdapter(adapter, successor, () => 'reached'), /execution-auto-gate-not-attested/);
+  assert.throws(() => execution.withAutoPlanGateAdapterSync(adapter, original, () => 'reached'), /execution-auto-gate-not-attested/);
+  revoked = false;
+  await execution.withAutoPlanGateAdapter(adapter, successor, async () => {
+    revoked = true;
+    assert.throws(() => execution.autoGateAllowed(successor), /execution-auto-gate-not-attested/, 'revocation inside a live scope refuses at the next check');
+    revoked = false;
+  });
+  await assert.rejects(() => execution.withAutoPlanGateAdapter(adapter, { ...successor, gates: { ...successor.gates, planSkipReason: 'interactive-off' } }, () => 'reached'),
+    /execution-auto-gate-required/, 'manual gate decisions never become automatic');
+  console.log('PASS issue288 revocation: revoked host authorization refuses new and live scopes; manual gates are not converted');
+}
 async function main() {
   const automatic = setup();
   const marker = path.join(automatic.task, `${id}-PLAN-GATE.md`);
@@ -218,6 +293,7 @@ async function main() {
   assert(!fs.existsSync(marker), 'auto mode must not manufacture human approval');
   assert.strictEqual(fs.readFileSync(automatic.control.calls, 'utf8'), 'spawn\n');
   console.log('standalone execute: live auto gate, binding, revocation and closed async scope passed');
+  await autoPlanGateAdapterContracts(automatic.r);
   // Production milestone -> xllm -> Claude adapter contract, with only inference
   // substituted by the local process fixture above.
   const multi = setup(), second = path.join(multi.dir, 'second');

@@ -1,0 +1,448 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-10-28T13:17:55.332Z",
+  "forge_commit": "6fee802526c5b80fa53f63a34688308929f2ea5d",
+  "installed_forge_version": "4.46.8",
+  "sources": [
+    {
+      "id": "codex-changelog",
+      "url": "https://learn.chatgpt.com/docs/changelog",
+      "final_url": "https://learn.chatgpt.com/docs/changelog",
+      "sha256": "2fc4e94ecfeaffa4ab6ba4882f8d72d0453395b34770cec3533d482feb3a6bd0",
+      "bytes": 4450452,
+      "retrieved_at": "2026-10-28T13:11:36.006Z"
+    },
+    {
+      "id": "codex-subagents",
+      "url": "https://learn.chatgpt.com/docs/agent-configuration/subagents",
+      "final_url": "https://learn.chatgpt.com/docs/agent-configuration/subagents",
+      "sha256": "676fd398452308162e980d70c51777d650d2e8e702206576046b298453a73ba5",
+      "bytes": 614720,
+      "retrieved_at": "2026-10-28T13:11:35.879Z"
+    },
+    {
+      "id": "codex-config",
+      "url": "https://learn.chatgpt.com/docs/config-file/config-reference",
+      "final_url": "https://learn.chatgpt.com/docs/config-file/config-reference",
+      "sha256": "6a1d3f283071d1e08b3e1b6977c9bbc332609e5bbf1bd69cfe10e4fd06ef759d",
+      "bytes": 1456967,
+      "retrieved_at": "2026-10-28T13:11:35.945Z"
+    },
+    {
+      "id": "codex-appserver",
+      "url": "https://learn.chatgpt.com/docs/app-server",
+      "final_url": "https://learn.chatgpt.com/docs/app-server",
+      "sha256": "ec622218804a10ac2a24d1ae0c8b79808f30600eb58375b96a0fa1e60fd09e8e",
+      "bytes": 981661,
+      "retrieved_at": "2026-10-28T13:11:35.924Z"
+    },
+    {
+      "id": "codex-projects",
+      "url": "https://learn.chatgpt.com/docs/projects",
+      "final_url": "https://learn.chatgpt.com/docs/projects",
+      "sha256": "fee3184aa533ab8d2f12be801a98feaebe9d0d02dc66b4914f4626721adfc1a0",
+      "bytes": 549047,
+      "retrieved_at": "2026-10-28T13:11:35.892Z"
+    },
+    {
+      "id": "codex-extensions",
+      "url": "https://developers.openai.com/plugins/build/extensions",
+      "final_url": "https://developers.openai.com/plugins/build/extensions",
+      "sha256": "8050ec57afb730c2102d4b7c41bb19c0c287505550dfb5ba82cf54a9d916352e",
+      "bytes": 408709,
+      "retrieved_at": "2026-10-28T13:11:36.071Z"
+    },
+    {
+      "id": "codex-prompting",
+      "url": "https://learn.chatgpt.com/docs/prompting",
+      "final_url": "https://learn.chatgpt.com/docs/prompting",
+      "sha256": "8efe5d97a27db979b4e10400507b45ccd13f48ff784e7bce2edd4c25e119e670",
+      "bytes": 543554,
+      "retrieved_at": "2026-10-28T13:11:35.907Z"
+    },
+    {
+      "id": "claude-changelog",
+      "url": "https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md",
+      "final_url": "https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md",
+      "sha256": "379eaa1f7cecbca8ac5604b92877c72a1bb59b4a860ba0458773ee660100eda9",
+      "bytes": 1104632,
+      "retrieved_at": "2026-10-28T13:11:35.864Z"
+    },
+    {
+      "id": "claude-subagents",
+      "url": "https://code.claude.com/docs/en/sub-agents.md",
+      "final_url": "https://code.claude.com/docs/en/sub-agents.md",
+      "sha256": "c7f693e6394ee8ca9e4096629ac34d95de92d2a2322e89bef375bac512aab61a",
+      "bytes": 116051,
+      "retrieved_at": "2026-10-28T13:11:36.106Z"
+    },
+    {
+      "id": "claude-statusline",
+      "url": "https://code.claude.com/docs/en/statusline.md",
+      "final_url": "https://code.claude.com/docs/en/statusline.md",
+      "sha256": "a2391a0f4b8892bd32c0ea95d3d3d25f319c6891c963895ea0f2dd4c74150aa4",
+      "bytes": 66126,
+      "retrieved_at": "2026-10-28T13:11:36.029Z"
+    },
+    {
+      "id": "claude-interactive",
+      "url": "https://code.claude.com/docs/en/interactive-mode.md",
+      "final_url": "https://code.claude.com/docs/en/interactive-mode.md",
+      "sha256": "924d6623b32f2d81c9ec613289a0ec5198c2ad36bac65eb7c6db5e18f2609eb6",
+      "bytes": 77977,
+      "retrieved_at": "2026-10-28T13:11:36.064Z"
+    },
+    {
+      "id": "claude-output",
+      "url": "https://code.claude.com/docs/en/output-styles.md",
+      "final_url": "https://code.claude.com/docs/en/output-styles.md",
+      "sha256": "74bc7dfd0e61dc4a2cd5ffaca349f40702b49c33f9fba7cb4334b1d623a1bda1",
+      "bytes": 17182,
+      "retrieved_at": "2026-10-28T13:11:36.062Z"
+    }
+  ],
+  "claude_release_metadata": [
+    {
+      "version": "2.1.310",
+      "published_at": "2026-10-23T23:39:00Z",
+      "url": "https://github.com/anthropics/claude-code/releases/tag/v2.1.310",
+      "notes_sha256": "4a2790d850518ceec4ab9ae097c315dfef5284c2765870a6d682011ae4ea9d89"
+    },
+    {
+      "version": "2.1.311",
+      "published_at": "2026-10-26T21:51:23Z",
+      "url": "https://github.com/anthropics/claude-code/releases/tag/v2.1.311",
+      "notes_sha256": "95ec17960ff0b9fce9c4121e799c09e4ccf2efc1642b8c61ba8a58bf15c8d936"
+    },
+    {
+      "version": "2.1.312",
+      "published_at": "2026-10-27T20:24:20Z",
+      "url": "https://github.com/anthropics/claude-code/releases/tag/v2.1.312",
+      "notes_sha256": "9d4b2e43c12591836e0b1cd65c302e58fbf5ad6bf589643414d7158be0c75eb7"
+    }
+  ],
+  "inspected_source_fingerprints": [
+    {
+      "file": "shared/schemas/codex-appserver-pin.json",
+      "sha256": "1060034061a031cc64af06ed68666b9945af8e26c72c330fec77202728f4813f"
+    },
+    {
+      "file": "scripts/forge-appserver-client.js",
+      "sha256": "cc7f5b6d33adba3f44d192f906369e601ede262e2e116d43053e5d75cc17b5ae"
+    },
+    {
+      "file": "scripts/forge-transport.js",
+      "sha256": "6a9249b4533d8e9b9ee42843d8621569a51fd1d0ad95da16e1ec4c073b81c8fc"
+    },
+    {
+      "file": "scripts/forge-codex-renderer.js",
+      "sha256": "49a9b9adaaf6934e20ce7ea5a55c592c042840a568768ee6ca023878a0e1b46a"
+    },
+    {
+      "file": "scripts/forge-codex-questions.js",
+      "sha256": "8c9d42a01e194dd55eb7e3148373cdfb543a47bba17789c93a597cec1d955866"
+    },
+    {
+      "file": "scripts/forge-codex-statusline.js",
+      "sha256": "fe79754ff74f7bbaf20d15e94b8a40e7ece5ebfdc967f7910904badf5b7d32af"
+    },
+    {
+      "file": "shared/forge-interaction.md",
+      "sha256": "ae7eda2a3c18caafd3da09bf7cbf7b49fa9504905dde41128fde5c515c44fb0a"
+    },
+    {
+      "file": "shared/forge-codex-renderer.md",
+      "sha256": "c333d742229e704d9f340c2f5f4a07eb9a035efe74d1efa3bfb4b771223cb666"
+    },
+    {
+      "file": "forge-capabilities.json",
+      "sha256": "35b453588ab501c884a4734dcc3c91dff2f68d20764d682dc2c770ec83a695de"
+    },
+    {
+      "file": "docs/runtime-compatibility.md",
+      "sha256": "ab80aa109a1d953ef42e499d110ed82f208258338706010ac13b4455f5ec6be5"
+    }
+  ],
+  "source_vs_installed": [
+    {
+      "file": "shared/schemas/codex-appserver-pin.json",
+      "source_sha256": "1060034061a031cc64af06ed68666b9945af8e26c72c330fec77202728f4813f",
+      "installed_sha256": "1060034061a031cc64af06ed68666b9945af8e26c72c330fec77202728f4813f",
+      "identical": true
+    },
+    {
+      "file": "scripts/forge-codex-renderer.js",
+      "source_sha256": "49a9b9adaaf6934e20ce7ea5a55c592c042840a568768ee6ca023878a0e1b46a",
+      "installed_sha256": "49a9b9adaaf6934e20ce7ea5a55c592c042840a568768ee6ca023878a0e1b46a",
+      "identical": true
+    },
+    {
+      "file": "scripts/forge-codex-questions.js",
+      "source_sha256": "8c9d42a01e194dd55eb7e3148373cdfb543a47bba17789c93a597cec1d955866",
+      "installed_sha256": "8c9d42a01e194dd55eb7e3148373cdfb543a47bba17789c93a597cec1d955866",
+      "identical": true
+    },
+    {
+      "file": "scripts/forge-appserver-client.js",
+      "source_sha256": "cc7f5b6d33adba3f44d192f906369e601ede262e2e116d43053e5d75cc17b5ae",
+      "installed_sha256": "cc7f5b6d33adba3f44d192f906369e601ede262e2e116d43053e5d75cc17b5ae",
+      "identical": true
+    }
+  ],
+  "schema": {
+    "pin_meta": {
+      "codex_version": "0.163.0",
+      "projected_at": "2026-10-20T04:24:12.966Z",
+      "referenced_count": 53,
+      "unresolved_refs": [],
+      "variant_count": 19
+    },
+    "observed_meta": {
+      "codex_version": "0.165.0",
+      "projected_at": "2026-10-28T13:11:36.353Z",
+      "referenced_count": 54,
+      "unresolved_refs": [],
+      "variant_count": 19
+    },
+    "local_check": {
+      "command": "node scripts/forge-schema-pin.js --check --json",
+      "exit_code": 1,
+      "outcome": "drift"
+    },
+    "unlimited_diff_paths": 18,
+    "diffs": [
+      {
+        "path": ".definitions.ThreadItem.oneOf.15.properties.result",
+        "kind": "removed",
+        "before": {
+          "type": "string"
+        }
+      },
+      {
+        "path": ".definitions.ThreadItem.oneOf.15.properties.inputImages",
+        "kind": "added",
+        "after": {
+          "description": "Observed local inputs for a completed generation, absent on older items.",
+          "items": {
+            "$ref": "#/definitions/ImageGenerationInputImage"
+          },
+          "type": "array"
+        }
+      },
+      {
+        "path": ".definitions.ThreadItem.oneOf.15.required.1",
+        "kind": "changed",
+        "before": "result",
+        "after": "status"
+      },
+      {
+        "path": ".definitions.ThreadItem.oneOf.15.required.2",
+        "kind": "changed",
+        "before": "status",
+        "after": "type"
+      },
+      {
+        "path": ".definitions.ThreadItem.oneOf.15.required.3",
+        "kind": "removed",
+        "before": "type"
+      },
+      {
+        "path": ".definitions.ThreadItem.oneOf.15.anyOf",
+        "kind": "added",
+        "after": [
+          {
+            "properties": {
+              "fileId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "fileId"
+            ],
+            "title": "FileIdThreadItem",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "result": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "result"
+            ],
+            "title": "ResultThreadItem",
+            "type": "object"
+          }
+        ]
+      },
+      {
+        "path": ".definitions.ThreadItem.oneOf.15.description",
+        "kind": "added",
+        "after": "Either inline generated-image data or its durable attachment-store identity.\n\n`File` must remain first so rollouts written during the migration, which contain both an empty `result` and a `fileId`, retain the file reference when deserialized."
+      },
+      {
+        "path": ".referenced.CodexErrorInfo.anyOf.0.enum.6",
+        "kind": "changed",
+        "before": "cyberPolicy",
+        "after": "modelNotFound"
+      },
+      {
+        "path": ".referenced.CodexErrorInfo.anyOf.0.enum.7",
+        "kind": "changed",
+        "before": "misalignmentPolicyViolation",
+        "after": "cyberPolicy"
+      },
+      {
+        "path": ".referenced.CodexErrorInfo.anyOf.0.enum.8",
+        "kind": "changed",
+        "before": "tooManyDenials",
+        "after": "misalignmentPolicyViolation"
+      },
+      {
+        "path": ".referenced.CodexErrorInfo.anyOf.0.enum.9",
+        "kind": "changed",
+        "before": "internalServerError",
+        "after": "tooManyDenials"
+      },
+      {
+        "path": ".referenced.CodexErrorInfo.anyOf.0.enum.10",
+        "kind": "changed",
+        "before": "unauthorized",
+        "after": "internalServerError"
+      },
+      {
+        "path": ".referenced.CodexErrorInfo.anyOf.0.enum.11",
+        "kind": "changed",
+        "before": "badRequest",
+        "after": "unauthorized"
+      },
+      {
+        "path": ".referenced.CodexErrorInfo.anyOf.0.enum.12",
+        "kind": "changed",
+        "before": "threadRollbackFailed",
+        "after": "badRequest"
+      },
+      {
+        "path": ".referenced.CodexErrorInfo.anyOf.0.enum.13",
+        "kind": "changed",
+        "before": "sandboxError",
+        "after": "threadRollbackFailed"
+      },
+      {
+        "path": ".referenced.CodexErrorInfo.anyOf.0.enum.14",
+        "kind": "changed",
+        "before": "other",
+        "after": "sandboxError"
+      },
+      {
+        "path": ".referenced.CodexErrorInfo.anyOf.0.enum.15",
+        "kind": "added",
+        "after": "other"
+      },
+      {
+        "path": ".referenced.ImageGenerationInputImage",
+        "kind": "added",
+        "after": {
+          "description": "A local image file successfully read for this exact image-generation request.",
+          "properties": {
+            "path": {
+              "$ref": "#/definitions/AbsolutePathBuf"
+            },
+            "sha256": {
+              "description": "Lowercase SHA-256 of the file bytes read before image normalization.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "sha256"
+          ],
+          "type": "object"
+        }
+      }
+    ]
+  },
+  "offline_tests": [
+    {
+      "suite": "forge-schema-pin",
+      "exit_code": 0,
+      "signal": null,
+      "started_at": "2026-10-28T13:11:05.839Z",
+      "completed_at": "2026-10-28T13:11:07.158Z",
+      "log_sha256": "ae68c9074fb7d9bf22f5292a724cb40c110ed294c47fc68d8b46a4ca4ef207fd"
+    },
+    {
+      "suite": "forge-evidence-admit",
+      "exit_code": 0,
+      "signal": null,
+      "started_at": "2026-10-28T13:11:05.846Z",
+      "completed_at": "2026-10-28T13:11:07.602Z",
+      "log_sha256": "aa08cd5e9498e9e018e152b0385baa479f3090b1f2ff97595da989027decce55"
+    },
+    {
+      "suite": "forge-appserver-client",
+      "exit_code": 0,
+      "signal": null,
+      "started_at": "2026-10-28T13:11:07.602Z",
+      "completed_at": "2026-10-28T13:11:48.217Z",
+      "log_sha256": "1283b76174bcadd24b0da3ef1a2b13a0c183c1560c7e450f87061f54c7e9ced3"
+    },
+    {
+      "suite": "forge-codex-renderer",
+      "exit_code": 0,
+      "signal": null,
+      "started_at": "2026-10-28T13:11:07.607Z",
+      "completed_at": "2026-10-28T13:11:12.184Z",
+      "log_sha256": "45adcd8bef7feab2968613269eb38c8003db9bdac9bdd73589b738de5b71588e"
+    },
+    {
+      "suite": "forge-codex-statusline",
+      "exit_code": 0,
+      "signal": null,
+      "started_at": "2026-10-28T13:11:48.217Z",
+      "completed_at": "2026-10-28T13:11:48.313Z",
+      "log_sha256": "6953942a8cd4e94b34ef147adbfcb5affeddb6163466ff7dbf0ee40dd8b6bdc0"
+    },
+    {
+      "suite": "forge-codex-questions",
+      "exit_code": 0,
+      "signal": null,
+      "started_at": "2026-10-28T13:11:48.225Z",
+      "completed_at": "2026-10-28T13:11:48.420Z",
+      "log_sha256": "9b1e111b84256ec8763bfbd93f0026ad26fe8d64124d8ed648b4f0183e09f55f"
+    },
+    {
+      "suite": "forge-interaction",
+      "exit_code": 0,
+      "signal": null,
+      "started_at": "2026-10-28T13:11:48.420Z",
+      "completed_at": "2026-10-28T13:11:48.602Z",
+      "log_sha256": "2c09255fe8b3624bc74aa7a17f6a999dc9a55483da0c7334cb5cb4853c51abba"
+    },
+    {
+      "suite": "forge-statusline-resources",
+      "exit_code": 0,
+      "signal": null,
+      "started_at": "2026-10-28T13:11:48.426Z",
+      "completed_at": "2026-10-28T13:11:50.521Z",
+      "log_sha256": "b58d9b01f0cb729802f25a80e6f3afc06414b1c4498aeb9283683b71af337156"
+    }
+  ],
+  "installed_adapter_report_version": "4.8.0",
+  "ui": {
+    "installed_build": null,
+    "visual_uat": false
+  },
+  "provider_calls_performed": false,
+  "artifacts": [
+    {
+      "file": "docs/host-compatibility-2026-10-28.md",
+      "sha256": "54ab27a29082b2315da0b7bb7d3691c411683208283511d589759cdde36db424"
+    },
+    {
+      "file": "docs/host-compatibility-baseline.json",
+      "sha256": "31b5e62a1cb73a1856a134a5bc295667088254a63726d6222c65bf6cd6f6fea9"
+    }
+  ]
+}

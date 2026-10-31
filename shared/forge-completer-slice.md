@@ -307,7 +307,7 @@ Given all `T##-SUMMARY.md` files from the slice, also read every complete siblin
     a. **Invoke the detector CLI:**
        ```bash
        FORGE_SCRIPTS_DIR=$([ -f scripts/forge-claim-audit.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
-       node "$FORGE_SCRIPTS_DIR/forge-claim-audit.js" \
+       node "$FORGE_SCRIPTS_DIR/forge-claim-audit.js" --json \
          --slice {S##} \
          --milestone {M###} \
          --cwd {WORKING_DIR} \

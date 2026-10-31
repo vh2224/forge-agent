@@ -17,7 +17,7 @@
     {
       "source_id": "skills",
       "target": "skills",
-      "sha256": "daea5a1c019970c411239c20a0783bcc012202e04b13ed5ecb98786c86583e6e"
+      "sha256": "75e3baa5d47466212359e6e022ed3a76781256b3b99d75c0eb6d83d9d30a6727"
     },
     {
       "source_id": "dispatch-templates",
@@ -37,7 +37,7 @@
     {
       "source_id": "claude-instructions",
       "target": "project/CLAUDE.md",
-      "sha256": "aed6456b2c7ca9f4b37a4bd21e8ab7348e02a1b2c95b591298aefbb6a76d2d38"
+      "sha256": "7997a0ef19dcd6479b90fc48eaa732cd12a7337d54c6332ac11c6c6ddb257ffb"
     },
     {
       "source_id": "claude-settings",
@@ -47,7 +47,7 @@
     {
       "source_id": "configuration",
       "target": "forge-capabilities.json;forge-prefs.schema.json",
-      "sha256": "58c2b68f6822492d3019de9b1209a1862223c883fdadb9baf700b26092b6185b"
+      "sha256": "e8aa7391a8a71f70600274de8f7d49e19e1ea2206ee014b6504be4936b655271"
     }
   ]
 }

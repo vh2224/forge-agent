@@ -114,6 +114,55 @@ function hasAgentOutsideFence(text) {
 try {
   const project = path.join(temp, 'project Ω'); const codex = path.join(temp, 'Codex Home Ω'); const forge = path.join(temp, 'Forge Home Ω'); fs.mkdirSync(project, { recursive: true });
   const report = renderer.render({ repo: root, projectRoot: project, codexHome: codex, forgeHome: forge, ...PRODUCTION_DISPATCH_DIALECT });
+  const { AGENT_ROLES } = require('./forge-agent-view');
+  const roleAgents = report.artifacts.filter(item => item.kind === 'agent');
+  assert.strictEqual(roleAgents.length, 10);
+  assert.deepStrictEqual(roleAgents.map(item => path.basename(item.destination, '.toml')).sort(), Object.keys(AGENT_ROLES).sort());
+  for (const item of roleAgents) {
+    const name = path.basename(item.destination, '.toml');
+    const header = item.content.split('developer_instructions =')[0];
+    assert(header.includes(`description = "${AGENT_ROLES[name].description}"\n`));
+    assert.match(header, new RegExp(`^name = "${name}"$`, 'm'));
+    assert(header.includes(renderer.AGENT_SANDBOX_COMMENT + '\nsandbox_mode = "workspace-write"'));
+    assert.match(item.content, /developer_instructions = """[\s\S]+"""/);
+    const description = header.split('\n').find(row => row.startsWith('description ='));
+    assert.match(description, /^description = "[^"\n\r]+"$/);
+    assert(!/gpt|claude|sonnet|opus|effort|isolamento|sandbox/i.test(description));
+    assert.match(header, /^# forge-source:codex-agent-/);
+  }
+  const unknownRepo = path.join(temp, 'unknown-role-repo');
+  fs.mkdirSync(path.join(unknownRepo, 'agents'), { recursive: true });
+  fs.writeFileSync(path.join(unknownRepo, 'agents', 'forge-unknown.md'), '# Fixture unknown agent\n');
+  const unknownManifest = fixtureManifest();
+  delete unknownManifest.sources.find(source => source.source_id === 'agents').conditional;
+  const unknown = renderer.render({ repo: unknownRepo, manifest: unknownManifest, projectRoot: project,
+    codexHome: codex, forgeHome: forge, ...PRODUCTION_DISPATCH_DIALECT }).artifacts.find(item => item.kind === 'agent');
+  assert(unknown.content.includes('description = "Forge · agente forge-unknown"'));
+  console.log('PASS S03/T05 Codex ten role descriptions unknown fallback quoted scalars inherited sandbox and instructions');
+  const standing = require('./forge-instructions');
+  const canonicalCommunication = standing.renderCommunicationContract();
+  const instructionsArtifact = report.artifacts.find(item => item.kind === 'instructions');
+  assert.strictEqual(instructionsArtifact.content.split(canonicalCommunication).length - 1, 1);
+  assert.strictEqual(instructionsArtifact.content.split(standing.renderBlock()).length - 1, 1);
+  for (const contract of [standing.renderPersonalContract(), standing.renderEntryContract()]) {
+    assert.strictEqual(instructionsArtifact.content.split(contract).length - 1, 1);
+  }
+  const communicationManifest = JSON.parse(fs.readFileSync(path.join(root, 'forge-source-manifest.json'), 'utf8'));
+  const communicationSource = communicationManifest.sources.find(source => source.source_id === 'communication');
+  assert(communicationSource, 'communication source missing');
+  assert.deepStrictEqual(communicationSource.inputs, ['shared/forge-communication.md']);
+  assert.deepStrictEqual(communicationSource.render_targets, [{ path: 'shared/forge-communication.md', recursive: false }]);
+  assert.strictEqual(communicationSource.owner, 'orchestration');
+  assert.strictEqual(communicationSource.capability, 'integration-communication-contract');
+  assert.strictEqual(communicationSource.security_role, 'public');
+  assert.strictEqual(communicationSource.newline, 'lf');
+  assert.deepStrictEqual(communicationSource.common, { format: 'markdown', delivery: 'managed-instruction-block' });
+  assert.deepStrictEqual(communicationSource.conditional, { claude: { status: 'distributed' }, codex: { status: 'distributed' } });
+  const communicationReport = JSON.parse(report.artifacts.find(item => item.kind === 'capabilities').content);
+  assert.deepStrictEqual(communicationReport.surfaces.filter(source => source.source_id === 'communication'), [{ source_id: 'communication', status: 'distributed' }]);
+  assert(!report.artifacts.some(item => item.source_id === 'communication'), 'communication emitted as separate Codex artifact');
+  assert(fs.readFileSync(path.join(root, 'shared/forge-codex-renderer.md'), 'utf8').includes('standing.renderBlock'));
+  console.log('PASS communication Codex: single managed block retains routing personal entry and communication contracts, manifest exact and capabilities distributed without a separate artifact');
   assert.strictEqual(report.runtime, 'codex'); assert(report.artifacts.some((item) => item.destination.endsWith(path.join('project Ω', 'AGENTS.md')))); assert(report.artifacts.some((item) => item.destination.endsWith(path.join('Codex Home Ω', 'agents', 'forge-executor.toml')))); assert(report.artifacts.every((item) => !item.destination.includes('.claude'))); assert(report.artifacts.every((item) => !item.content.includes('\r')));
   const agent = report.artifacts.find((item) => item.destination.endsWith(path.join('agents', 'forge-executor.toml')));
   assert.match(agent.content, new RegExp(`^# forge-source:codex-agent-forge-executor version=${versionPattern}$`, 'm'));
@@ -576,5 +625,275 @@ try {
   assert.throws(() => renderer.write(procedureOptions), /procedure-file-unreadable/);
   assert(!fs.existsSync(procedureOptions.codexHome), 'invalid closure wrote host artifacts');
   assert(!fs.existsSync(path.join(procedureProject, 'AGENTS.md')));
+
+  // ── Relatório Codex parado em 4.8.0 (issue 280): causa reproduzida ─────────
+  // Forma medida na instalação: chaves generated/runtime/surfaces/version, sem
+  // marker possível e sem digest no registro de ownership. Antes da correção,
+  // write() preservava esse arquivo como user_owned em toda execução.
+  const legacyLabel = (label) => path.join(temp, `legacy report ${label} Ω`);
+  const legacyReportBytes = `${JSON.stringify({ version: '4.8.0', runtime: 'codex', generated: true,
+    surfaces: realManifest.sources.map((source) => ({ source_id: source.source_id,
+      status: source.conditional && source.conditional.codex ? source.conditional.codex.status : 'common' })) }, null, 2)}\n`;
+  const seedReport = (label, bytes) => {
+    const forgeHome = legacyLabel(`${label} forge`);
+    const file = path.join(forgeHome, 'adapters', 'codex', 'capabilities.json');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, bytes);
+    fs.mkdirSync(legacyLabel(`${label} project`), { recursive: true });
+    return { file, options: { repo: root, ...PRODUCTION_DISPATCH_DIALECT, forgeHome, ownership: {}, provenance: null,
+      codexHome: legacyLabel(`${label} codex`), projectRoot: legacyLabel(`${label} project`) } };
+  };
+  const legacySeed = seedReport('adopt', legacyReportBytes);
+  const legacyRun = renderer.write(legacySeed.options);
+  assert(!legacyRun.conflicts.some((item) => item.destination === legacySeed.file),
+    'relatório legado gerado pelo Forge continuou user_owned sem marker nem digest');
+  const ownershipModule = require('./forge-projection-ownership');
+  const adoptedEntry = legacyRun.written.find((item) => item.destination === legacySeed.file);
+  assert(adoptedEntry && adoptedEntry.reason === 'generated-report-adopted', 'adoção do relatório não foi nomeada');
+  const adoptedBytes = fs.readFileSync(legacySeed.file, 'utf8');
+  assert.strictEqual(JSON.parse(adoptedBytes).report_schema_version, 2);
+  assert.strictEqual(legacyRun.ownership[ownershipModule.keyFor(legacySeed.file)], ownershipModule.digest(adoptedBytes),
+    'o relatório adotado ficou fora do registro de ownership');
+  const legacyDry = seedReport('adopt dry', legacyReportBytes);
+  const legacyDryRun = renderer.write({ ...legacyDry.options, dryRun: true });
+  assert.strictEqual(fs.readFileSync(legacyDry.file, 'utf8'), legacyReportBytes, 'dry-run reescreveu o relatório legado');
+  assert(!Object.hasOwn(legacyDryRun.ownership, ownershipModule.keyFor(legacyDry.file)));
+
+  // ── Relatório schema 2: campos, fonte, determinismo e coerência ─────────────
+  const reportFile = path.join(forge, 'adapters', 'codex', 'capabilities.json');
+  const reportBytes = fs.readFileSync(reportFile, 'utf8');
+  const schema2 = JSON.parse(reportBytes);
+  for (const [key, value] of Object.entries({ report_schema_version: 2, forge_source: 'codex-capabilities', generated: true,
+    runtime: 'codex', core_version: renderer.VERSION, version: renderer.VERSION, generator: 'forge-codex-renderer' })) {
+    assert.strictEqual(schema2[key], value, `campo de identidade ${key}`);
+  }
+  const catalogText = fs.readFileSync(path.join(root, 'forge-capabilities.json'), 'utf8');
+  const catalogJson = JSON.parse(catalogText);
+  assert.deepStrictEqual(schema2.source, {
+    catalog: 'available',
+    catalog_sha256: ownershipModule.digest(catalogText),
+    catalog_schema_version: catalogJson.schema_version,
+    source_manifest_sha256: ownershipModule.digest(require('./forge-source-manifest').normalize(realManifest)),
+  });
+  assert.deepStrictEqual(schema2.permissions, {
+    native_custom_agents: { sandbox: 'inherited-from-parent-session', toml_sandbox_mode: 'declared-not-isolation-proof' },
+    app_server_sidecar: { sandbox: 'per-turn-sandbox-policy' },
+    headless_exec: { sandbox: 'explicit-cli-flags' },
+    contract: 'docs/codex-agent-permissions.md',
+  });
+  // Raw, JSON-escaped and POSIX spellings: a Windows path inside JSON is escaped.
+  const mentions = (text, location) => [location, JSON.stringify(location).slice(1, -1), location.replace(/\\/g, '/')].some((form) => text.includes(form));
+  for (const forbidden of [temp, root, os.homedir(), forge]) assert(!mentions(reportBytes, forbidden), 'caminho absoluto no relatório');
+  assert.doesNotMatch(reportBytes, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}|"(?:generated_at|timestamp|captured_at)"/, 'timestamp no relatório');
+  // The report's codex column must be the catalog CLI's codex column, row for row.
+  const { spawnSync } = require('child_process');
+  const matrixRun = spawnSync(process.execPath, [path.join(root, 'scripts', 'forge-capabilities.js'), '--matrix', '--json', '--cwd', root], { encoding: 'utf8', shell: false });
+  assert.strictEqual(matrixRun.status, 0, matrixRun.stderr);
+  const cliRows = JSON.parse(matrixRun.stdout).capabilities;
+  assert.deepStrictEqual(schema2.capabilities, cliRows.map((row) => ({ capability_id: row.capability_id, kind: row.kind, required: row.required, codex: row.codex })),
+    'classificação Codex do relatório diverge de --matrix --json');
+  assert(schema2.capabilities.some((row) => row.codex === 'distributed') && schema2.capabilities.some((row) => row.codex === 'planned'));
+  const rewrite = renderer.write({ repo: root, projectRoot: project, codexHome: codex, forgeHome: forge, ...PRODUCTION_DISPATCH_DIALECT });
+  assert(!rewrite.written.some((item) => item.destination === reportFile), 'segunda escrita reescreveu o relatório');
+  assertBytesEqual(fs.readFileSync(reportFile, 'utf8'), reportBytes, 'duas escritas seguidas divergiram');
+  const renderedTwice = [0, 1].map(() => renderer.render({ repo: root, projectRoot: project, codexHome: codex, forgeHome: forge, ...PRODUCTION_DISPATCH_DIALECT })
+    .artifacts.find((item) => item.kind === 'capabilities').content);
+  assertBytesEqual(renderedTwice[0], renderedTwice[1], 'render do relatório não é determinístico');
+  const catalogVariant = (edit) => { const value = structuredClone(catalogJson); edit(value); return JSON.stringify(value); };
+  const invalidCatalogCases = [
+    ['minimal empty catalog', JSON.stringify({ capabilities: [] })],
+    ['empty capability list', catalogVariant(value => { value.capabilities = []; })],
+    ['missing catalog schema', catalogVariant(value => { delete value.$schema; })],
+    ['missing catalog version', catalogVariant(value => { delete value.schema_version; })],
+    ['missing release identity', catalogVariant(value => { delete value.release; })],
+    ['invalid host state', catalogVariant(value => { value.capabilities[0].hosts.codex = 'invented'; })],
+    ['duplicate capability', catalogVariant(value => { value.capabilities.push(structuredClone(value.capabilities[0])); })],
+    ['null capability', catalogVariant(value => { value.capabilities[0] = null; })],
+  ];
+  // Semantic catalog validation is shared by generation and inspection.
+  for (const [label, catalogBytes] of [['catalog absent', null], ['catalog malformed', '{"capabilities": ['], ...invalidCatalogCases]) {
+    const unavailableRepo = fixtureRepository(label, 'Fixture dispatch\n').repo;
+    if (catalogBytes !== null) fs.writeFileSync(path.join(unavailableRepo, 'forge-capabilities.json'), catalogBytes);
+    const unavailable = JSON.parse(renderer.render({ repo: unavailableRepo, manifest: fixtureManifest(), ...PRODUCTION_DISPATCH_DIALECT,
+      projectRoot: path.join(unavailableRepo, 'project'), codexHome: path.join(unavailableRepo, 'codex'), forgeHome: path.join(unavailableRepo, 'forge') })
+      .artifacts.find((item) => item.kind === 'capabilities').content);
+    assert.deepStrictEqual({ ...unavailable.source, source_manifest_sha256: undefined },
+      { catalog: 'unavailable', catalog_sha256: null, catalog_schema_version: null, source_manifest_sha256: undefined }, label);
+    assert.strictEqual(unavailable.capabilities, null, label);
+  }
+  console.log('PASS C03 invalid catalogs: generation refuses missing malformed empty foreign and inconsistent semantic structures');
+
+  // ── Freshness: current, stale, absent e invalid, somente leitura ────────────
+  const treeBytes = (directory) => {
+    if (!fs.existsSync(directory)) return [];
+    return fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name)).flatMap((entry) => {
+      const full = path.join(directory, entry.name);
+      return entry.isDirectory() ? treeBytes(full) : [[full, fs.readFileSync(full).toString('base64')]];
+    });
+  };
+  const freshHome = legacyLabel('fresh forge');
+  const freshReport = path.join(freshHome, 'adapters', 'codex', 'capabilities.json');
+  const inspect = (extra = {}) => {
+    const before = treeBytes(freshHome);
+    const inspection = renderer.inspectCapabilitiesReport({ forgeHome: freshHome, ...extra });
+    assert.deepStrictEqual(treeBytes(freshHome), before, 'inspectCapabilitiesReport alterou o Forge home');
+    assert(!mentions(JSON.stringify(inspection), freshHome) && !mentions(JSON.stringify(inspection), temp), 'caminho absoluto no diagnóstico');
+    return inspection;
+  };
+  const expectState = (inspection, state, reasons, label) => {
+    assert.strictEqual(inspection.state, state, `${label}: ${JSON.stringify(inspection)}`);
+    assert.deepStrictEqual(inspection.reasons, reasons, label);
+  };
+  fs.mkdirSync(freshHome, { recursive: true });
+  expectState(inspect(), 'absent', ['report-absent'], 'absent');
+  const freshProject = legacyLabel('fresh project'); fs.mkdirSync(freshProject, { recursive: true });
+  renderer.write({ repo: root, ...PRODUCTION_DISPATCH_DIALECT, forgeHome: freshHome, codexHome: legacyLabel('fresh codex'), projectRoot: freshProject, provenance: null });
+  fs.writeFileSync(path.join(freshHome, 'VERSION'), `${renderer.VERSION}\n`);
+  fs.copyFileSync(path.join(root, 'forge-capabilities.json'), path.join(freshHome, 'forge-capabilities.json'));
+  const current = inspect();
+  expectState(current, 'current', [], 'current');
+  assert.strictEqual(current.core_version, renderer.VERSION);
+  assert.strictEqual(current.catalog_sha256, ownershipModule.digest(catalogText));
+  expectState(inspect({ version: '0.0.1' }), 'stale', ['core-version-mismatch'], 'core mismatch');
+  fs.writeFileSync(path.join(freshHome, 'VERSION'), '0.0.2\n');
+  expectState(inspect(), 'stale', ['core-version-mismatch'], 'installed VERSION file is the comparison');
+  fs.writeFileSync(path.join(freshHome, 'VERSION'), `${renderer.VERSION}\n`);
+  const installedCatalog = path.join(freshHome, 'forge-capabilities.json');
+  fs.writeFileSync(installedCatalog, catalogVariant(value => { value.capabilities[0].hosts.codex = 'planned'; }));
+  expectState(inspect(), 'stale', ['catalog-digest-mismatch'], 'catalog mismatch');
+  for (const [label, bytes] of invalidCatalogCases) {
+    fs.writeFileSync(installedCatalog, bytes);
+    expectState(inspect(), 'stale', ['installed-catalog-unavailable'], label);
+  }
+  console.log('PASS C03 invalid catalogs: installed semantic failures cannot establish current freshness');
+  fs.writeFileSync(installedCatalog, '{ malformed');
+  expectState(inspect(), 'stale', ['installed-catalog-unavailable'], 'installed catalog malformed');
+  fs.rmSync(installedCatalog);
+  expectState(inspect(), 'stale', ['installed-catalog-unavailable'], 'installed catalog absent');
+  fs.copyFileSync(path.join(root, 'forge-capabilities.json'), installedCatalog);
+  const schema2Bytes = fs.readFileSync(freshReport, 'utf8');
+  const withSource = (source) => `${JSON.stringify({ ...JSON.parse(schema2Bytes), source: { ...JSON.parse(schema2Bytes).source, ...source } }, null, 2)}\n`;
+  fs.writeFileSync(freshReport, `${JSON.stringify({ ...JSON.parse(withSource({ catalog: 'unavailable', catalog_sha256: null, catalog_schema_version: null })), capabilities: null })}\n`);
+  expectState(inspect(), 'stale', ['catalog-unavailable'], 'report without catalog cannot prove freshness');
+  fs.writeFileSync(freshReport, legacyReportBytes);
+  expectState(inspect({ version: '4.8.0' }), 'stale', ['legacy-shape'], 'legacy shape');
+  expectState(inspect(), 'stale', ['legacy-shape', 'core-version-mismatch'], 'legacy 4.8.0');
+  const reportVariant = (edit) => { const value = JSON.parse(schema2Bytes); edit(value); return `${JSON.stringify(value, null, 2)}\n`; };
+  const unknownReports = [
+    ['future report schema', reportVariant(value => { value.report_schema_version = 99; })],
+    ['operator schema2 extension', reportVariant(value => { value.operator_note = 'keep'; })],
+    ['incomplete report identity', reportVariant(value => { delete value.permissions; })],
+    ['unknown source extension', reportVariant(value => { value.source.operator_note = 'keep'; })],
+    ['invalid catalog digest', reportVariant(value => { value.source.catalog_sha256 = 'not-a-digest'; })],
+    ['missing capability rows', reportVariant(value => { value.capabilities = []; })],
+    ['invalid capability row', reportVariant(value => { value.capabilities[0].required = 'yes'; })],
+    ['invalid permissions', reportVariant(value => { value.permissions = {}; })],
+    ['version mirror mismatch', reportVariant(value => { value.version = '0.0.1'; })],
+    ['invalid surface row', reportVariant(value => { value.surfaces[0].operator_note = 'keep'; })],
+  ];
+  const invalidCases = [
+    ['unreadable-json', '{ "runtime": "codex", '],
+    ['unreadable-json', '[1, 2]\n'],
+    ['wrong-runtime', legacyReportBytes.replace('"runtime": "codex"', '"runtime": "claude"')],
+    ['not-generated', legacyReportBytes.replace('"generated": true', '"generated": false')],
+    ['unrecognized-shape', `${JSON.stringify({ runtime: 'codex', generated: true, operator: 'notes' })}\n`],
+    ['oversize', `${JSON.stringify({ runtime: 'codex', generated: true, version: '4.8.0', surfaces: [{ source_id: 'x'.repeat(renderer.REPORT_MAX_BYTES) }] })}\n`],
+    ...unknownReports.map(([, bytes]) => ['unrecognized-shape', bytes]),
+  ];
+  for (const [reason, bytes] of invalidCases) {
+    fs.writeFileSync(freshReport, bytes);
+    expectState(inspect(), 'invalid', [reason], reason);
+  }
+  // CLI: read-only, exit 0 only for current.
+  fs.writeFileSync(freshReport, schema2Bytes);
+  const cli = (argv) => { let out = ''; let err = ''; const before = treeBytes(freshHome); const code = renderer.main(argv, (text) => { out += text; }, (text) => { err += text; }); assert.deepStrictEqual(treeBytes(freshHome), before, 'CLI --inspect-report escreveu'); return { code, out, err }; };
+  const cliCurrent = cli(['--inspect-report', '--forge-home', freshHome, '--json']);
+  assert.strictEqual(cliCurrent.code, 0, cliCurrent.err);
+  assert.strictEqual(JSON.parse(cliCurrent.out).state, 'current');
+  assert(!mentions(cliCurrent.out, freshHome));
+  fs.writeFileSync(freshReport, legacyReportBytes);
+  const cliStale = cli(['--inspect-report', '--forge-home', freshHome]);
+  assert.strictEqual(cliStale.code, 1);
+  assert.match(cliStale.out, /^Codex capabilities report: stale \(legacy-shape, core-version-mismatch\) core 4\.8\.0;/);
+  fs.rmSync(freshReport);
+  assert.strictEqual(cli(['--inspect-report', '--forge-home', freshHome, '--json']).code, 1);
+
+  // ── Ownership nas duas direções: só o relatório reconhecido é adotado ───────
+  const olderSchema2 = `${JSON.stringify({ ...JSON.parse(schema2Bytes), core_version: '4.40.0', version: '4.40.0' }, null, 2)}\n`;
+  for (const [label, bytes] of [['legacy crlf', legacyReportBytes.replace(/\n/g, '\r\n')], ['older schema 2', olderSchema2]]) {
+    const seed = seedReport(label, bytes);
+    const run = renderer.write(seed.options);
+    assert(!run.conflicts.some((item) => item.destination === seed.file), `${label}: relatório gerado não foi adotado`);
+    assert.strictEqual(JSON.parse(fs.readFileSync(seed.file, 'utf8')).core_version, renderer.VERSION, label);
+  }
+  const foreignCases = [
+    ['operator json', '{"operator":true}\n'],
+    ['operator text', 'anotações do operador\n'],
+    ['claude runtime', legacyReportBytes.replace('"runtime": "codex"', '"runtime": "claude"')],
+    ['not generated', legacyReportBytes.replace('"generated": true', '"generated": false')],
+    ['extra key', `${JSON.stringify({ ...JSON.parse(legacyReportBytes), operator_note: 'keep' }, null, 2)}\n`],
+    ['wrong source', `${JSON.stringify({ ...JSON.parse(schema2Bytes), forge_source: 'operator' }, null, 2)}\n`],
+    ['oversize legacy shape', invalidCases.find(([reason]) => reason === 'oversize')[1]],
+    ...unknownReports,
+  ];
+  for (const [label, bytes] of foreignCases) {
+    for (const mismatchingRecord of [false, true]) {
+    const seed = seedReport(`${label} ${mismatchingRecord}`, bytes);
+    const run = renderer.write({ ...seed.options, ...(mismatchingRecord ? { ownership: { [ownershipModule.keyFor(seed.file)]: ownershipModule.digest('previous generated bytes') } } : {}) });
+    const conflict = run.conflicts.find((item) => item.destination === seed.file);
+    assert(conflict && conflict.reason === 'user_owned', `${label}: conteúdo não gerado perdeu o conflict user_owned`);
+    assert.strictEqual(fs.readFileSync(seed.file, 'utf8'), bytes, `${label}: bytes do operador sobrescritos`);
+    if (mismatchingRecord) assert.strictEqual(run.ownership[ownershipModule.keyFor(seed.file)], ownershipModule.digest('previous generated bytes'), `${label}: histórico de ownership alterado`);
+    else assert(!Object.hasOwn(run.ownership, ownershipModule.keyFor(seed.file)), `${label}: conteúdo alheio entrou no registro`);
+    }
+  }
+  console.log('PASS C03 report recognition: future incomplete operator-extended and invalid schema2 bytes stay user-owned with absent or mismatching digest');
+  // The recognized-report rung is scoped to kind capabilities: the same bytes in
+  // any other managed destination keep the marker rule and stay the operator's.
+  const otherKind = seedReport('other kind', legacyReportBytes);
+  const otherSkill = path.join(otherKind.options.codexHome, 'skills', 'forge-help', 'SKILL.md');
+  fs.mkdirSync(path.dirname(otherSkill), { recursive: true });
+  fs.writeFileSync(otherSkill, legacyReportBytes);
+  const otherRun = renderer.write(otherKind.options);
+  assert(otherRun.conflicts.some((item) => item.destination === otherSkill && item.reason === 'user_owned'), 'regra de ownership de outro artefato mudou');
+  assert.strictEqual(fs.readFileSync(otherSkill, 'utf8'), legacyReportBytes);
+  // The existing digest rung still grants: operator-looking bytes we recorded are ours.
+  const recordedSeed = seedReport('recorded digest', '{"operator":true}\n');
+  const recordedRun = renderer.write({ ...recordedSeed.options, ownership: { [ownershipModule.keyFor(recordedSeed.file)]: ownershipModule.digest('{"operator":true}\n') } });
+  assert(!recordedRun.conflicts.some((item) => item.destination === recordedSeed.file), 'rung de digest deixou de conceder');
+
+  // ── Permissões: TOML nunca acima de workspace-write e args nativos exatos ───
+  const agentTomls = realCodex.artifacts.filter((item) => item.kind === 'agent');
+  assert(agentTomls.length >= 10, 'censo de TOMLs de agente vazio');
+  for (const toml of agentTomls) {
+    const sandboxLines = toml.content.split('\n').filter((line) => /^\s*sandbox_mode\s*=/.test(line));
+    assert.deepStrictEqual(sandboxLines, ['sandbox_mode = "workspace-write"'], `${toml.source}: sandbox_mode diferente de workspace-write`);
+    assert(!/danger-full-access|dangerFullAccess/.test(toml.content.split('developer_instructions =')[0]), `${toml.source}: sandbox amplo declarado`);
+    const lines = toml.content.split('\n');
+    assert.strictEqual(lines[lines.indexOf('sandbox_mode = "workspace-write"') - 1], renderer.AGENT_SANDBOX_COMMENT, `${toml.source}: comentário de herança ausente`);
+    assert(lines[0].startsWith('# forge-source:codex-agent-'), `${toml.source}: marker deixou a linha 1`);
+  }
+  assert.match(renderer.AGENT_SANDBOX_COMMENT, /^# .*sessão pai.*não prova isolamento por agente.*docs\/codex-agent-permissions\.md/);
+  const { buildNativeInvocation } = require('./forge-native-invocation');
+  const nativeCall = buildNativeInvocation({
+    hostRuntime: 'codex',
+    resolvedDispatch: { host_runtime: 'codex', resolved_worker_engine: 'codex', dispatch_engine: 'codex', worker_mode: 'native',
+      dispatch_allowed: true, config_ok: true, model_requested: 'gpt-6-sol', model_resolved: 'gpt-6-sol', model: 'gpt-6-sol', effort: 'high' },
+    activeCapabilities: { available: true, tool: 'spawn_agent', source: 'renderer-test-active-tool', models: ['gpt-6-sol'], reasoning_efforts: ['high'], fork_turns: ['none'] },
+    agentType: 'forge-reviewer', taskName: 'review-T05', prompt: 'review fixture', forkTurns: 'none',
+  });
+  assert.strictEqual(nativeCall.ok, true, JSON.stringify(nativeCall));
+  assert.deepStrictEqual(Object.keys(nativeCall.args).sort(), ['agent_type', 'fork_turns', 'message', 'model', 'reasoning_effort', 'task_name'],
+    'args nativos Codex ganharam ou perderam campos');
+  assert.deepStrictEqual({ model: nativeCall.args.model, reasoning_effort: nativeCall.args.reasoning_effort }, { model: 'gpt-6-sol', reasoning_effort: 'high' },
+    'modelo e esforço resolvidos não chegaram intactos');
+  const permissionsDoc = fs.readFileSync(path.join(root, 'docs', 'codex-agent-permissions.md'), 'utf8');
+  for (const anchor of ['forge-native-invocation.js', 'forge-xllm.js', 'forge-headless.js', 'forge-dispatch-policy.js', 'G2', 'Nenhum escape de sandbox foi demonstrado']) {
+    assert(permissionsDoc.includes(anchor), `contrato de permissões sem ${anchor}`);
+  }
+  assert(fs.readFileSync(path.join(root, 'shared', 'forge-codex-renderer.md'), 'utf8').includes('docs/codex-agent-permissions.md'), 'contrato do renderer não liga o contrato de permissões');
+  assert.doesNotMatch(permissionsDoc, /vira sandbox do SO apenas[^\n]*sidecar Claude/, 'allowlist Claude apresentada como sandbox do SO');
+  assert.match(permissionsDoc, /allowlists e permission mode do Claude são controles do host, não prova de sandbox independente do SO/);
+  console.log('PASS C04 Claude permissions: tool and permission controls do not claim an independent OS sandbox');
   console.log('forge-codex-renderer tests passed');
 } finally { fs.rmSync(temp, { recursive: true, force: true }); }

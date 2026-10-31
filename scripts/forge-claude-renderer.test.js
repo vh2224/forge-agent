@@ -43,6 +43,19 @@ try {
   const first = renderer.render({ repo: root, projectRoot: root, claudeHome: path.join(root, 'Claude Home Ω'), forgeHome: path.join(root, 'Forge Home Ω') });
   const second = renderer.render({ repo: root, projectRoot: root, claudeHome: path.join(root, 'Claude Home Ω'), forgeHome: path.join(root, 'Forge Home Ω') });
   assert.deepStrictEqual(first.artifacts, second.artifacts);
+  const communicationSource = manifestFor(root).sources.find(source => source.source_id === 'communication');
+  assert(communicationSource, 'communication source missing');
+  assert(!first.artifacts.some(item => item.source_id === 'communication'), 'separate Claude communication artifact');
+  const ordinaryManifest = manifestFor(root);
+  const ordinaryCommunication = ordinaryManifest.sources.find(source => source.source_id === 'communication');
+  ordinaryCommunication.common = { format: 'markdown' };
+  // Use an existing fixture source: only the selector's delivery class changes.
+  ordinaryCommunication.inputs = ['shared/forge-mcps.md'];
+  const ordinary = renderer.render({ repo: root, projectRoot: root, manifest: ordinaryManifest,
+    claudeHome: path.join(root, 'ordinary-host'), forgeHome: path.join(root, 'ordinary-forge') });
+  assert(ordinary.artifacts.some(item => item.source_id === 'communication'), 'distributed status lost its existing selection meaning');
+  assert(fs.readFileSync(path.join(repo, 'shared/forge-claude-renderer.md'), 'utf8').includes('managed-instruction-block'));
+  console.log('PASS communication Claude selector: managed-instruction-block excluded, ordinary distributed source selected and no separate communication artifact');
   assert(first.procedure_context.content.includes('<!-- forge-procedure:distribution -->'));
   assert(first.procedure_context.content.includes('<!-- forge-procedure:core -->'));
   assert(first.artifacts.find(item => item.source === 'skills/forge-auto/SKILL.md').content.includes('forge-procedure-context.js'));
@@ -163,6 +176,8 @@ try {
   }
 
   // Markdown receives a safe origin marker; JSONC and CommonJS stay parseable/textual.
+  assert.strictEqual(new Set(first.artifacts.map(item => item.source_id)).size, 9, 'unexpected Claude surface');
+  console.log('PASS communication Claude goldens: exactly nine surfaces retain every golden hash and historical fixture bytes');
   const settings = first.artifacts.find((item) => item.source.endsWith('settings.jsonc'));
   const hook = first.artifacts.find((item) => item.source === 'scripts/forge-hook.js');
   assert(!settings.content.startsWith('<!--'));

@@ -10,6 +10,9 @@ const { LEGACY_VERSION } = require('./forge-version.js');
 const PROTOCOL_VERSION = '1.0.0';
 const RUNTIMES = ['claude', 'codex', 'both'];
 const OPERATIONAL_KINDS = new Set(['statusline', 'accounts', 'app', 'hook', 'headless', 'mcp']);
+// Catalog schema 1.1.0: `demonstrated` counts as implemented. `distributed` and
+// `unknown` are handled explicitly in diagnose and are never available here.
+const AVAILABLE_STATES = new Set(['implemented', 'common', 'demonstrated']);
 
 function selectedRuntimes(runtime) {
   if (!RUNTIMES.includes(runtime)) throw new Error(`runtime inválido: ${JSON.stringify(runtime)} (use claude, codex ou both)`);
@@ -111,8 +114,13 @@ function diagnose(options = {}) {
       const probePath = entry.probe && entry.probe.kind === 'filesystem' ? path.join(repo, entry.probe.path) : null;
       const present = !probePath || exists(probePath, options.fs || fs);
       const trusted = entry.kind !== 'hook' || !options.hookTrust || options.hookTrust[host] !== false;
-      if ((effective === 'implemented' || effective === 'common') && present && trusted) {
+      if (AVAILABLE_STATES.has(effective) && present && trusted) {
         diagnostics.push(finding(entry.capability_id, host, 'available', 'available', false, { required: entry.required }));
+      } else if (effective === 'distributed' && present && trusted) {
+        // Projected by the release but not demonstrated: visible, never fatal.
+        diagnostics.push(finding(entry.capability_id, host, 'distributed', 'capability-not-demonstrated', false, { required: entry.required }));
+      } else if (effective === 'unknown' && entry.required) {
+        diagnostics.push(finding(entry.capability_id, host, 'unknown', 'required-capability-unknown', true, { required: true }));
       } else if (effective === 'conditional' || !trusted || !entry.required) {
         diagnostics.push(finding(entry.capability_id, host, present && !trusted ? 'untrusted' : effective, 'conditional-capability-unavailable', false, { required: entry.required }));
       } else {

@@ -31,6 +31,10 @@ Parse the JSON. Detect:
 
 **If $ARGUMENTS is "statusline off"** → disable (see below).
 
+**If $ARGUMENTS is "subagents on"** → linhas de subagente, setup explícito (see below).
+
+**If $ARGUMENTS is "subagents off"** → remove as linhas de subagente da Forge (see below).
+
 **If $ARGUMENTS starts with "mcps"** → strip the "mcps" prefix and follow the exact same logic as `/forge-mcps` would with the remaining arguments. For example: `mcps add github` → behave as `/forge-mcps add github`. `mcps` alone → behave as `/forge-mcps` (list). See the MCP Management section below.
 
 **Otherwise** → show error: `Opção desconhecida: "$ARGUMENTS". Use /forge-config para ver as opções.`
@@ -69,6 +73,7 @@ Forge Config
   Comandos disponíveis
   ────────────────────────────────────
   /forge-config statusline on|off    Ativa/desativa status line
+  /forge-config subagents on|off     Ativa/desativa linhas de subagente
   /forge-config mcps                 Lista MCPs (alias de /forge-mcps)
   /forge-mcps                        Gerencia MCPs — lista, add, remove
   /forge-mcps add <nome>             Adiciona um MCP (catálogo ou custom)
@@ -191,6 +196,42 @@ Reinicie o Claude Code para aplicar.
 ```
 
 If exit code != 0, show the error output.
+
+---
+
+## Subagents — "subagents on" / "subagents off"
+
+Ativar as linhas por subagente é sempre esta ação explícita do operador; nada mais
+grava `subagentStatusLine`. O helper observa a versão do CLI de terminal do Claude
+(`--observe`), faz backup exclusivo antes de escrever e reserializa o arquivo com 2
+espaços, mudando só a chave da Forge.
+
+```bash
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-subagent-statusline.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
+# versão observada (as duas rotas)
+node "$FORGE_SCRIPTS_DIR/forge-subagent-statusline.js" --observe
+# subagents on
+node "$FORGE_SCRIPTS_DIR/forge-subagent-statusline.js" --setup ~/.claude/settings.json --observe
+# subagents off
+node "$FORGE_SCRIPTS_DIR/forge-subagent-statusline.js" --remove ~/.claude/settings.json --observe
+```
+
+Rode a observação e depois só a linha da rota pedida, e leia os JSON devolvidos.
+Mostre ao operador, em linhas curtas:
+- a versão observada do CLI de terminal (`version`, ou `desconhecida`), sua relação
+  com a mínima (`relation`) e a origem dessa leitura (`source`);
+- o caminho do backup (`backup`), quando houve escrita;
+- que o arquivo foi reserializado com 2 espaços (`reserialized`) e que só a chave
+  `subagentStatusLine` da Forge mudou;
+- os gates externos que ficam desconhecidos (`external_gates`: confiança do
+  workspace, política gerenciada e settings de projeto);
+- a recusa nomeada pelo `reason_code` quando nada mudou (por exemplo versão abaixo
+  da mínima, `disableAllHooks`/`allowManagedHooksOnly`, valor do operador
+  preservado, arquivo inválido, alterado durante a escrita ou grande demais).
+
+Termine com a `message` do helper: disponibilidade condicional; a renderização no
+host não foi validada. Reinicie o Claude Code para aplicar. `statusline on` e
+`statusline off` continuam como estão.
 
 ---
 

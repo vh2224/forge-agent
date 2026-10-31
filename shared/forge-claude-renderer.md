@@ -5,6 +5,13 @@ versioned `forge-source-manifest.json`. It reads canonical repository sources
 and emits deterministic LF text for project instructions, Claude settings,
 agents, skills, commands, hooks and MCP documentation.
 
+Fontes com `common.delivery: managed-instruction-block`, como `communication`,
+são excluídas pelo seletor de artefatos: `forge-instructions` incorpora o contrato
+canônico de `shared/forge-communication.md` ao bloco gerenciado de `CLAUDE.md`.
+Não há um artefato Claude separado para essa fonte; o inventário registra sua
+distribuição sem acrescentar uma superfície ao golden. Distribuição não prova
+compreensão nem aceite humano.
+
 ```text
 node scripts/forge-claude-renderer.js --repo . --claude-home "$CLAUDE_HOME" --dry-run --json
 ```

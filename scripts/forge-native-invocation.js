@@ -28,6 +28,38 @@ function codexTaskName(value, fallback) {
     .replace(/^_+|_+$/g, '');
 }
 
+const HUMAN_TASK_NAME_MAX = 64;
+const HUMAN_UNIT_MAX = 24;
+
+// Last `max` characters of a normalized name, starting at a `_` boundary so the
+// useful end (t03, the tail of a long standalone id) survives.
+function tailAtBoundary(value, max) {
+  if (value.length <= max) return value;
+  for (let index = value.length - max; index < value.length; index++) {
+    if (value[index - 1] === '_') return value.slice(index);
+  }
+  return value.slice(-max).replace(/^_+/, '');
+}
+
+function headAtBoundary(value, max) {
+  if (value.length <= max) return value;
+  const cut = value.slice(0, max + 1).lastIndexOf('_');
+  return (cut > 0 ? value.slice(0, cut) : value.slice(0, max)).replace(/_+$/, '');
+}
+
+// Readable per-dispatch Codex task_name from trusted plan data. The attempt
+// suffix keeps names distinct; null tells the caller to keep its current name.
+function humanTaskName({ unitId, title, attempt } = {}) {
+  if (attempt === null || attempt === undefined || attempt === '') return null;
+  const fold = value => codexTaskName(typeof value === 'string' ? value.normalize('NFD').replace(/\p{M}/gu, '') : '');
+  const unit = tailAtBoundary(fold(unitId), HUMAN_UNIT_MAX);
+  const suffix = crypto.createHash('sha256').update(String(attempt), 'utf8').digest('hex').slice(0, 8);
+  const room = HUMAN_TASK_NAME_MAX - suffix.length - 1 - (unit ? unit.length + 1 : 0);
+  const head = headAtBoundary(fold(title), room);
+  if (!unit && !head) return null;
+  return codexTaskName([unit, head, suffix].filter(Boolean).join('_'));
+}
+
 function refusal(hostRuntime, reasonCode, hint) {
   return {
     ok: false,
@@ -359,6 +391,10 @@ async function invokeNative(options, invoke) {
     options.promptContext ?? (invocation.args.prompt || invocation.args.message), 'native-tool');
   let invoked = false;
   let observedProvider;
+  let supervised;
+  // The host identity rides on the lifecycle only when the host adapter reported one.
+  const hostIdentity = () => supervised?.lifecycle?.host_identity
+    ? { host_identity: { ...supervised.lifecycle.host_identity } } : {};
   const initial = JSON.stringify(invocation);
   const assertBoundary = stage => {
     const current = buildNativeInvocation(options);
@@ -379,15 +415,17 @@ async function invokeNative(options, invoke) {
     await assertGuard('before-invoke');
     assertBoundary('before-invoke');
     const supervision = require('./forge-native-supervision');
-    const supervised = await supervision.supervise({ ...options.lifecycle,
+    // The observer is a Forge capability for the host adapter, never a tool argument.
+    supervised = await supervision.supervise({ ...options.lifecycle,
       identity: supervision.digest(JSON.stringify({ invocation, identity: options.telemetryIdentity || null })),
       route: options.resolvedDispatch, terminal: options.terminalResult,
-    }, () => { invoked = true; return invoke(invocation.args, invocation); });
+      dispatchId: options.telemetryIdentity?.dispatchId ?? null,
+    }, observer => { invoked = true; return invoke(invocation.args, invocation, observer); });
     observedProvider = supervised.provider_called;
     if (!supervised.ok) return { ...invocation, ok: false, result: null,
       reason_code: supervised.reason_code === 'native-terminal-unobserved' && options.invalidTerminalReason
         ? options.invalidTerminalReason : supervised.reason_code,
-      provider_called: supervised.provider_called, lifecycle: supervised.lifecycle,
+      provider_called: supervised.provider_called, lifecycle: supervised.lifecycle, ...hostIdentity(),
       final_evidence: { ...evidence, stage: 'invoked', provider_called: supervised.provider_called,
         duration_ms: Date.now() - started, native_lifecycle: supervised.lifecycle },
       diagnostic: { reason_code: supervised.reason_code, layer: 'native-lifecycle' } };
@@ -411,6 +449,7 @@ async function invokeNative(options, invoke) {
       provider_called: true,
       result,
       lifecycle: supervised.lifecycle,
+      ...hostIdentity(),
       final_evidence: { ...evidence, stage: 'returned', provider_called: true, duration_ms: Date.now() - started,
         model_observed: observed && source ? telemetryApi.code(observed) : null },
       telemetry: {
@@ -427,10 +466,13 @@ async function invokeNative(options, invoke) {
       result: null,
       reason_code: telemetryApi.code(error.code, 'native-invocation-failed'),
       final_evidence: { ...evidence, stage: 'invoked', duration_ms: Date.now() - started,
-        provider_called: observedProvider ?? (invoked ? (typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown') : false) },
+        provider_called: observedProvider ?? (invoked ? (typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown') : false),
+        ...(supervised?.lifecycle?.host_identity ? { native_lifecycle: supervised.lifecycle } : {}) },
       provider_called: observedProvider ?? (invoked ? (typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown') : false),
       diagnostic: { reason_code: telemetryApi.code(error.code, 'native-tool-callback-failed'), layer: 'native-tool' },
       hint: 'The native tool callback failed; inspect the host diagnostic channel.',
+      ...(supervised?.lifecycle?.host_identity ? { lifecycle: supervised.lifecycle } : {}),
+      ...hostIdentity(),
     };
   }
 }
@@ -442,4 +484,5 @@ module.exports = {
   preflightNativeBinding,
   invokeNative,
   codexTaskName,
+  humanTaskName,
 };

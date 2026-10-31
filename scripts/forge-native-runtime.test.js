@@ -175,11 +175,15 @@ test('native Claude contracts remain represented in the capability catalog', () 
   const result = capabilities.audit(root);
   assert.deepStrictEqual(result.issues, [], 'capability catalog must audit cleanly');
   const byId = new Map(result.catalog.capabilities.map((entry) => [entry.capability_id, entry]));
-  for (const id of ['operational-hooks', 'operational-headless', 'operational-mcp']) {
+  // Codex: headless dispatch templates are projected (distributed), hooks and
+  // MCP are not projected (planned); none is implemented or demonstrated.
+  const expectedCodex = { 'operational-hooks': 'planned', 'operational-headless': 'distributed', 'operational-mcp': 'planned' };
+  for (const [id, codex] of Object.entries(expectedCodex)) {
     const entry = byId.get(id);
     assert(entry, `${id} must remain cataloged`);
     assert.strictEqual(entry.hosts.claude, 'implemented', `${id} must retain current Claude availability`);
-    assert.strictEqual(entry.hosts.codex, 'planned', `${id} must not claim a Codex implementation early`);
+    assert.strictEqual(entry.hosts.codex, codex, `${id} Codex status must match the projected surface`);
+    assert(!['implemented', 'demonstrated'].includes(entry.hosts.codex), `${id} must not claim a Codex implementation early`);
   }
   for (const agent of agentFiles) {
     const id = `agent-${path.basename(agent, '.md')}`;

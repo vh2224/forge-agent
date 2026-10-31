@@ -500,3 +500,97 @@ console.log('PASS Claude suspension epoch: parallel tools, partial results, same
   assert.equal(result.reason, 'tool-unproven', 'the next window must earn again');
 }
 console.log('PASS Claude earned extension: shared by parallel tools, never inherited by the next window');
+
+// S03/T01: one closed toolClass() for permission_denials and tool_activity.
+{
+  const { toolClass } = require('./forge-claude-stream');
+  // Pre-T01 inline denial expression, kept verbatim as the oracle for unchanged counts.
+  const legacy = name => /^(Read|Glob|Grep)$/.test(name) ? 'read' : /^(Edit|Write)$/.test(name) ? 'write' : name === 'Bash' ? 'shell' : 'other';
+  const names = ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash', 'MultiEdit', 'NotebookEdit', 'mcp__srv__Read',
+    'read', 'Bash ', ' Read', '', undefined, null, 42, ['Read'], { name: 'Bash' }];
+  for (const name of names) assert.equal(toolClass(name), legacy(name), 'toolClass matches the pre-T01 denial class: ' + String(name));
+  assert.deepEqual(['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash', 'Task'].map(toolClass),
+    ['read', 'read', 'read', 'write', 'write', 'shell', 'other']);
+  const denialVectors = [
+    [[{ tool_name: 'Read' }, { tool_name: 'untrusted-label' }], { read: 1, write: 0, shell: 0, other: 1 }],
+    [[{ tool_name: 'Read' }, { tool_name: 'Glob' }, { tool_name: 'Grep' }, { tool_name: 'Edit' }, { tool_name: 'Write' },
+      { tool_name: 'Bash' }, { tool_name: 'mcp__srv__tool' }, {}, null, { tool_name: 42 }], { read: 3, write: 2, shell: 1, other: 4 }],
+    [[], { read: 0, write: 0, shell: 0, other: 0 }],
+  ];
+  for (const [permission_denials, expected] of denialVectors) {
+    reducer = createReducer(); reducer.push(frame({ ...terminal, permission_denials })); reducer.end();
+    assert.deepEqual(reducer.snapshot().denials, expected);
+    const oracle = { read: 0, write: 0, shell: 0, other: 0 };
+    for (const denial of permission_denials) oracle[legacy(denial?.tool_name)]++;
+    assert.deepEqual(reducer.snapshot().denials, oracle, 'denial counts equal the pre-T01 expression');
+  }
+  reducer = createReducer(); reducer.push(frame(terminal)); reducer.end();
+  assert.deepEqual(reducer.snapshot().denials, { read: null, write: null, shell: null, other: null }, 'absent denials stay unknown');
+}
+console.log('PASS S03/T01 stream toolClass: closed classes and permission_denials counts identical to the previous expression');
+
+{
+  const assistantNamed = (id, name, input = { private: 'forge-t01-private-argument' }) => frame({ type: 'assistant',
+    message: { id: 'assistant-' + id, role: 'assistant', content: [{ type: 'tool_use', id, name, input }] } });
+  now = 0;
+  const fingerprints = [];
+  reducer = createReducer({ clock: () => now, onToolCall: call => fingerprints.push(call) });
+  assert.deepEqual(reducer.snapshot().tool_activity, { read: 0, write: 0, shell: 0, other: 0, last_class: null, last_ms: null },
+    'zero counted is explicit before any call');
+  now = 100; reducer.push(assistantNamed('id-read', 'Read'));
+  assert.deepEqual(reducer.snapshot().tool_activity, { read: 1, write: 0, shell: 0, other: 0, last_class: 'read', last_ms: 100 });
+  now = 150; reducer.push(assistantNamed('id-read', 'Read'));
+  assert.equal(reducer.snapshot().tool_activity.read, 1, 'a repeated id is counted once');
+  assert.equal(reducer.snapshot().tool_activity.last_ms, 100, 'a repeated id does not move last_ms');
+  now = 200; reducer.push(assistantNamed('id-grep', 'Grep'));
+  now = 300; reducer.push(assistantNamed('id-bash', 'Bash'));
+  now = 400; reducer.push(assistantNamed('id-edit', 'Edit'));
+  now = 500; reducer.push(assistantNamed('id-write', 'Write'));
+  now = 600; reducer.push(assistantNamed('id-mcp', 'mcp__private_server__private_tool'));
+  for (const [id, input] of [['id-string', 'forge-t01-private-argument'], ['id-array', []], ['id-null', null]]) {
+    now += 10; reducer.push(assistantNamed(id, 'Bash', input));
+  }
+  for (const id of ['', ' ', 'x'.repeat(257)]) reducer.push(assistantNamed(id, 'Write'));
+  reducer.push(assistantNamed('id-no-name', ''));
+  // Streamed block then the same id in the assistant message: one reported call.
+  now = 700; reducer.push(frame(start('streamed')));
+  reducer.push(toolStart('id-streamed', 0, 'Glob')); reducer.push(toolDelta('{"pattern":"forge-t01-private-argument"}'));
+  reducer.push(event({ type: 'content_block_stop', index: 0 }));
+  now = 750; reducer.push(assistantNamed('id-streamed', 'Glob', { pattern: 'forge-t01-private-argument' }));
+  const activity = reducer.snapshot().tool_activity;
+  assert.deepEqual(activity, { read: 3, write: 2, shell: 1, other: 1, last_class: 'read', last_ms: 700 });
+  assert.equal(fingerprints.length, 7, 'counted exactly the fingerprint-accepted calls');
+  const text = JSON.stringify(reducer.snapshot());
+  for (const value of ['Read', 'Grep', 'Glob', 'Bash', 'Edit', 'Write', 'mcp__private_server__private_tool', 'private_tool',
+    'id-read', 'id-streamed', 'forge-t01-private-argument', 'pattern']) {
+    assert(!text.includes('"' + value) && !text.includes(value + '"'), 'snapshot never carries ' + value);
+  }
+  assert.deepEqual(Object.keys(reducer.snapshot().tool_activity), ['read', 'write', 'shell', 'other', 'last_class', 'last_ms']);
+}
+console.log('PASS S03/T01 stream tool_activity: counts per reported id after accepted fingerprint, closed class, relative ms, no names/ids/arguments');
+
+{
+  const sid = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+  now = 0; reducer = createReducer({ clock: () => now });
+  reducer.push(frame({ type: 'system', subtype: 'init', session_id: sid }));
+  now = 40; reducer.push(assistantTool('copy-tool', {}, 'Bash'));
+  const live = reducer.snapshot();
+  live.tool_activity.shell = 99; live.denials.read = 99;
+  assert.equal(reducer.snapshot().tool_activity.shell, 1, 'a live snapshot copy cannot mutate the reducer');
+  reducer.push(frame({ ...terminal, permission_denials: [{ tool_name: 'Edit' }] })); reducer.end();
+  const before = reducer.snapshot();
+  reducer.dispose();
+  const first = reducer.snapshot();
+  assert.deepEqual(first, before);
+  assert.equal(first.phase, 'terminal', 'finalSnapshot keeps the terminal phase');
+  first.tool_activity.shell = 77; first.tool_activity.last_class = 'write'; first.denials.write = 77;
+  const second = reducer.snapshot();
+  assert.deepEqual(second, before, 'mutating a disposed snapshot cannot change the next one');
+  assert.notStrictEqual(second.tool_activity, first.tool_activity);
+  assert.notStrictEqual(second.denials, first.denials);
+  assert.deepEqual(second.tool_activity, { read: 0, write: 0, shell: 1, other: 0, last_class: 'shell', last_ms: 40 });
+  assert.deepEqual(second.denials, { read: 0, write: 1, shell: 0, other: 0 });
+  assert.equal(reducer.sessionId(), sid, 'sessionId survives dispose');
+  assert(!JSON.stringify(second).includes(sid));
+}
+console.log('PASS S03/T01 stream dispose: independent tool_activity/denials copies, finalSnapshot and sessionId preserved');

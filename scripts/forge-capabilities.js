@@ -13,16 +13,25 @@ const os = require('os');
 const { spawnSync } = require('child_process');
 const { HOST_RUNTIMES } = require('./forge-runtime.js');
 
-const AVAILABILITY = Object.freeze(['implemented', 'planned', 'conditional', 'unavailable', 'common']);
+// Schema 1.1.0 vocabulary. `distributed` means the release projects the surface
+// into the host without demonstrated behavior; `demonstrated` additionally needs
+// versioned evidence; `unknown` is never treated as available by consumers.
+const AVAILABILITY = Object.freeze(['implemented', 'planned', 'conditional', 'unavailable', 'common', 'distributed', 'demonstrated', 'unknown']);
 const CLASSIFICATIONS = Object.freeze(['common', 'conditional', 'unavailable']);
 const KINDS = Object.freeze(['skill', 'agent', 'command', 'hook', 'headless', 'mcp', 'statusline', 'accounts', 'app', 'runtime']);
 const PLATFORMS = Object.freeze(['macos', 'windows', 'linux']);
 const PROBE_STATUSES = Object.freeze(['available', 'missing', 'unsupported', 'inconclusive']);
-const REASON_CODES = Object.freeze(['available', 'missing', 'unsupported', 'inconclusive', 'permission-denied', 'not-selected', 'invalid-output', 'exit-nonzero', 'minimum-version']);
+const CAPABILITY_PROBE_STATUSES = Object.freeze(['observed', 'absent', 'inconclusive']);
+const REASON_CODES = Object.freeze(['available', 'missing', 'unsupported', 'inconclusive', 'permission-denied', 'not-selected', 'invalid-output', 'exit-nonzero', 'minimum-version', 'capability-observed', 'capability-absent']);
 const RUNTIME_IDS = Object.freeze(['node', 'claude', 'codex']);
 const DEFAULT_RUNTIME_COMMANDS = Object.freeze({ claude: 'claude', codex: 'codex' });
-const DEFAULT_MINIMUMS = Object.freeze({ node: '18.0.0', claude: '2.0.0', codex: '0.1.0' });
+// Host CLIs have no generic floor: a version number does not prove a modern
+// feature, so Claude/Codex are checked through cataloged capability_probes.
+const DEFAULT_MINIMUMS = Object.freeze({ node: '18.0.0' });
 const DEFAULT_PROBE_TIMEOUT_MS = 30_000;
+const CAPABILITY_KEYS = Object.freeze(['capability_id', 'kind', 'owner', 'required', 'classification', 'hosts', 'probe', 'platforms', 'evidence']);
+const RUNTIME_KEYS = Object.freeze(['required', 'minimum_version', 'probe', 'platforms', 'capability_probes']);
+const CAPABILITY_PROBE_KEYS = Object.freeze(['id', 'args', 'expect_output']);
 
 // Public API notes for adapter authors:
 // AVAILABILITY is deliberately closed so a typo cannot claim a green host.
@@ -90,6 +99,48 @@ function rejectUnknownKeys(issues, value, allowed, label) {
   }
 }
 
+// A catalog path is relative, POSIX-separated and free of `.`/`..`/empty
+// segments, so it can only name something inside the checkout lexically.
+function isNormalizedPath(value) {
+  return typeof value === 'string' && value.length > 0 && !value.includes('\\') && !value.startsWith('/')
+    && !/^[A-Za-z]:/.test(value) && value.split('/').every((segment) => segment && segment !== '.' && segment !== '..');
+}
+
+function validateEvidence(issues, capability, id) {
+  const hosts = capability.hosts || {};
+  const evidence = capability.evidence;
+  if (evidence !== undefined) {
+    rejectUnknownKeys(issues, evidence, HOST_RUNTIMES, `${id}: evidence`);
+    if (evidence && typeof evidence === 'object' && !Array.isArray(evidence)) {
+      for (const host of HOST_RUNTIMES) {
+        if (!Object.prototype.hasOwnProperty.call(evidence, host)) continue;
+        if (hosts[host] !== 'demonstrated') issue(issues, `${id}: evidence for ${host} requires demonstrated status`);
+        if (!isNormalizedPath(evidence[host])) issue(issues, `${id}: evidence for ${host} must be a normalized relative path`);
+      }
+    }
+  }
+  for (const host of HOST_RUNTIMES) {
+    if (hosts[host] !== 'demonstrated') continue;
+    const own = evidence && typeof evidence === 'object' && !Array.isArray(evidence) && Object.prototype.hasOwnProperty.call(evidence, host);
+    if (!own) issue(issues, `${id}: demonstrated ${host} requires evidence for the same host`);
+  }
+}
+
+function validateCapabilityProbes(issues, runtimeId, runtime, seen) {
+  if (runtime.capability_probes === undefined) return;
+  if (!Array.isArray(runtime.capability_probes)) { issue(issues, `${runtimeId}: capability_probes must be an array`); return; }
+  if ((runtime.probe || {}).kind !== 'cli') issue(issues, `${runtimeId}: capability_probes require a cli runtime probe`);
+  for (const probe of runtime.capability_probes) {
+    rejectUnknownKeys(issues, probe, CAPABILITY_PROBE_KEYS, `${runtimeId}: capability probe`);
+    const probeId = probe && probe.id;
+    if (!/^[a-z][a-z0-9-]*$/.test(String(probeId || ''))) issue(issues, `${runtimeId}: invalid capability probe id ${JSON.stringify(probeId)}`);
+    else if (seen.has(probeId)) issue(issues, `${runtimeId}: duplicate capability probe id ${probeId}`);
+    seen.add(probeId);
+    if (!probe || !Array.isArray(probe.args) || probe.args.length === 0 || probe.args.some((arg) => typeof arg !== 'string' || !arg)) issue(issues, `${runtimeId}: capability probe ${probeId} args must be a non-empty argv array`);
+    if (probe && probe.expect_output !== undefined && (!Array.isArray(probe.expect_output) || probe.expect_output.some((token) => typeof token !== 'string' || !token))) issue(issues, `${runtimeId}: capability probe ${probeId} expect_output must be an array of non-empty strings`);
+  }
+}
+
 function validateCatalog(catalog, schema) {
   const issues = [];
   if (!catalog || typeof catalog !== 'object' || Array.isArray(catalog)) return ['catalog must be an object'];
@@ -111,6 +162,7 @@ function validateCatalog(catalog, schema) {
     if (!/^[a-z][a-z0-9-]*$/.test(String(id || ''))) issue(issues, `invalid capability_id ${JSON.stringify(id)}`);
     if (ids.has(id)) issue(issues, `duplicate capability_id ${id}`);
     ids.add(id);
+    rejectUnknownKeys(issues, capability, CAPABILITY_KEYS, `${id}`);
     if (!KINDS.includes(capability.kind)) issue(issues, `${id}: invalid kind ${capability.kind}`);
     if (!/^[a-z][a-z0-9-]*$/.test(String(capability.owner || ''))) issue(issues, `${id}: owner is required`);
     if (typeof capability.required !== 'boolean') issue(issues, `${id}: required must be boolean`);
@@ -119,6 +171,7 @@ function validateCatalog(catalog, schema) {
       const status = (capability.hosts || {})[host];
       if (!AVAILABILITY.includes(status)) issue(issues, `${id}: invalid ${host} classification ${JSON.stringify(status)}`);
     }
+    validateEvidence(issues, capability || {}, id);
     const probe = capability.probe || {};
     if (probe.kind !== 'filesystem' || typeof probe.path !== 'string' || !probe.path || probe.path.includes('\\') || probe.path.split('/').some((segment) => segment === '.' || segment === '..')) issue(issues, `${id}: probe must be a normalized filesystem path`);
     if (capability.required && (!probe.path || !probe.kind)) issue(issues, `${id}: required capability has no planned probe`);
@@ -141,10 +194,13 @@ function validateCatalog(catalog, schema) {
     if (!catalog.runtimes || typeof catalog.runtimes !== 'object' || Array.isArray(catalog.runtimes)) issue(issues, 'runtimes must be an object');
     else {
       for (const id of Object.keys(catalog.runtimes)) if (!RUNTIME_IDS.includes(id)) issue(issues, `unknown runtime ${id}`);
+      const capabilityProbeIds = new Set();
       for (const id of RUNTIME_IDS) {
         const runtime = catalog.runtimes[id];
         if (!runtime) continue;
+        rejectUnknownKeys(issues, runtime, RUNTIME_KEYS, `${id}: runtime`);
         if (typeof runtime.required !== 'boolean') issue(issues, `${id}: required must be boolean`);
+        validateCapabilityProbes(issues, id, runtime, capabilityProbeIds);
         if (runtime.minimum_version !== undefined && !/^\d+\.\d+\.\d+$/.test(String(runtime.minimum_version))) issue(issues, `${id}: minimum_version must be semver`);
         const probe = runtime.probe || {};
         if (!['node', 'cli'].includes(probe.kind)) issue(issues, `${id}: runtime probe kind must be node or cli`);
@@ -157,6 +213,18 @@ function validateCatalog(catalog, schema) {
   return issues;
 }
 
+// Evidence must be a regular file physically inside the checkout. The lexical
+// rule already refuses traversal; realpath also refuses a link that escapes.
+function evidenceProblem(root, relative) {
+  let realRoot; let realTarget;
+  try { realRoot = fs.realpathSync(root); } catch (_) { return 'cannot resolve the checkout'; }
+  try { realTarget = fs.realpathSync(path.join(root, relative)); } catch (_) { return 'does not exist'; }
+  const inside = path.relative(realRoot, realTarget);
+  if (!inside || inside === '..' || inside.startsWith(`..${path.sep}`) || path.isAbsolute(inside)) return 'escapes the checkout';
+  try { if (!fs.statSync(realTarget).isFile()) return 'is not a file'; } catch (_) { return 'does not exist'; }
+  return null;
+}
+
 function audit(cwd = path.resolve(__dirname, '..')) {
   const { root, catalog, schema } = loadCatalog(cwd);
   const issues = validateCatalog(catalog, schema);
@@ -167,6 +235,16 @@ function audit(cwd = path.resolve(__dirname, '..')) {
     if (listedByPath.has(probePath)) issue(issues, `duplicate probe path ${probePath}`);
     listedByPath.set(probePath, capability);
     if (capability.required && !fs.existsSync(path.join(root, probePath))) issue(issues, `${capability.capability_id}: required probe does not exist: ${probePath}`);
+  }
+  for (const capability of catalog.capabilities || []) {
+    const evidence = capability && capability.evidence;
+    if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) continue;
+    for (const host of HOST_RUNTIMES) {
+      const relative = evidence[host];
+      if (!isNormalizedPath(relative)) continue;
+      const problem = evidenceProblem(root, relative);
+      if (problem) issue(issues, `${capability.capability_id}: evidence for ${host} ${problem}: ${relative}`);
+    }
   }
   for (const surface of discover(root)) {
     const capability = listedByPath.get(surface.path);
@@ -212,6 +290,7 @@ function matrix(catalog) {
       platforms: entry.platforms || null,
       probe: entry.probe && (entry.probe.command || entry.probe.kind),
       minimum_version: entry.minimum_version || null,
+      capability_probes: Array.isArray(entry.capability_probes) ? entry.capability_probes.map((probe) => probe.id) : [],
     };
   });
   return surfaces.concat(runtimes).sort((a, b) => a.capability_id.localeCompare(b.capability_id));
@@ -332,9 +411,56 @@ function probeNode(runtime, options = {}) {
   return makeProbe('node', 'available', 'available', { version, minimum_version: minimum, selected: true, executable: process.execPath });
 }
 
+function capabilityProbesOf(runtime) {
+  return Array.isArray(runtime && runtime.capability_probes) ? runtime.capability_probes : [];
+}
+
+// Capability probes never run when the runtime is unselected or unavailable;
+// each one is still listed so absence of evidence is visible, not omitted.
+function skippedCapabilities(runtime, reasonCode) {
+  const result = {};
+  for (const probe of capabilityProbesOf(runtime)) result[probe.id] = { id: probe.id, args: probe.args.slice(), status: 'inconclusive', reason_code: reasonCode };
+  return result;
+}
+
+function hasToken(output, token) {
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[^A-Za-z0-9_-])${escaped}(?![A-Za-z0-9_-])`).test(output);
+}
+
+// Informational only: results never change status, ok or required_failures.
+// The cache key binds the resolved executable and the full argv, so a run is
+// reused only for the identical invocation of the same runtime binary.
+function runCapabilityProbes(runtime, executable, fixedArgs, version, cache, options) {
+  const result = {};
+  for (const probe of capabilityProbesOf(runtime)) {
+    const argv = fixedArgs.concat(probe.args);
+    const key = JSON.stringify([executable, ...argv]);
+    if (!cache.has(key)) cache.set(key, invoke(executable, argv, options));
+    const run = cache.get(key);
+    const base = { id: probe.id, args: probe.args.slice(), version };
+    if (run.error) { result[probe.id] = { ...base, status: 'inconclusive', reason_code: run.error.code === 'EACCES' ? 'permission-denied' : 'inconclusive' }; continue; }
+    if (run.status !== 0) { result[probe.id] = { ...base, status: 'inconclusive', reason_code: 'exit-nonzero', exit_code: run.status }; continue; }
+    const output = outputOf(run);
+    const missing = (probe.expect_output || []).filter((token) => !hasToken(output, token));
+    result[probe.id] = missing.length
+      ? { ...base, status: 'absent', reason_code: 'capability-absent', missing_tokens: missing }
+      : { ...base, status: 'observed', reason_code: 'capability-observed' };
+  }
+  return result;
+}
+
 function probeCli(id, runtime, options = {}) {
+  const result = probeCliRuntime(id, runtime, options);
+  if (capabilityProbesOf(runtime).length && !result.capabilities) {
+    result.capabilities = skippedCapabilities(runtime, result.reason_code === 'not-selected' ? 'not-selected' : 'inconclusive');
+  }
+  return result;
+}
+
+function probeCliRuntime(id, runtime, options = {}) {
   const selected = selectedRuntimes(options).includes(id);
-  if (!selected) return makeProbe(id, 'inconclusive', 'not-selected', { selected: false, minimum_version: runtime.minimum_version || DEFAULT_MINIMUMS[id] });
+  if (!selected) return makeProbe(id, 'inconclusive', 'not-selected', { selected: false, minimum_version: runtime.minimum_version || DEFAULT_MINIMUMS[id] || null });
   const descriptor = descriptorFor(id, runtime, options);
   const executable = resolveExecutable(descriptor.command, options);
   if (!executable && !isPathCommand(descriptor.command)) {
@@ -354,16 +480,26 @@ function evaluateCliProbe(id, runtime, executable, fixedArgs, versionRun, option
   if (versionRun.status !== 0) return makeProbe(id, 'inconclusive', 'exit-nonzero', { selected: true, executable, exit_code: versionRun.status, output: outputOf(versionRun) });
   const output = outputOf(versionRun);
   const version = semver(output);
-  const minimum = runtime.minimum_version || DEFAULT_MINIMUMS[id];
+  // Only an explicitly declared floor is enforced; otherwise the observed
+  // version is recorded with minimum_version null.
+  const minimum = runtime.minimum_version || DEFAULT_MINIMUMS[id] || null;
   if (!version) return makeProbe(id, 'inconclusive', 'invalid-output', { selected: true, executable, output });
   const normalizedVersion = version.join('.');
-  const order = compareVersion(normalizedVersion, minimum);
-  if (order === null || order < 0) return makeProbe(id, 'unsupported', 'minimum-version', { selected: true, executable, version: normalizedVersion, minimum_version: minimum });
-  const behaviorArgs = runtime.probe.behavior_args || ['--help'];
-  const behavior = invoke(executable, fixedArgs.concat(behaviorArgs), options);
+  if (minimum !== null) {
+    const order = compareVersion(normalizedVersion, minimum);
+    if (order === null || order < 0) return makeProbe(id, 'unsupported', 'minimum-version', { selected: true, executable, version: normalizedVersion, minimum_version: minimum });
+  }
+  const versionArgs = fixedArgs.concat(runtime.probe.version_args || ['--version']);
+  const behaviorArgs = fixedArgs.concat(runtime.probe.behavior_args || ['--help']);
+  const behavior = invoke(executable, behaviorArgs, options);
   if (behavior.error) return makeProbe(id, 'inconclusive', behavior.error.code === 'EACCES' ? 'permission-denied' : 'inconclusive', { selected: true, executable, version: normalizedVersion, error: behavior.error.code || behavior.error.message });
   if (behavior.status !== 0) return makeProbe(id, 'inconclusive', 'exit-nonzero', { selected: true, executable, version: normalizedVersion, behavior_exit_code: behavior.status });
-  return makeProbe(id, 'available', 'available', { selected: true, executable, version: normalizedVersion, minimum_version: minimum, behavior: 'passed' });
+  const extras = { selected: true, executable, version: normalizedVersion, minimum_version: minimum, behavior: 'passed' };
+  if (capabilityProbesOf(runtime).length) {
+    const cache = new Map([[JSON.stringify([executable, ...versionArgs]), versionRun], [JSON.stringify([executable, ...behaviorArgs]), behavior]]);
+    extras.capabilities = runCapabilityProbes(runtime, executable, fixedArgs, normalizedVersion, cache, options);
+  }
+  return makeProbe(id, 'available', 'available', extras);
 }
 
 function detect(cwdOrOptions, maybeOptions) {
@@ -373,7 +509,7 @@ function detect(cwdOrOptions, maybeOptions) {
   const runtimes = loaded.catalog.runtimes || {};
   const nodeRuntime = runtimes.node || { minimum_version: DEFAULT_MINIMUMS.node, probe: { kind: 'node' }, required: true };
   const results = { node: probeNode(nodeRuntime, options) };
-  for (const id of HOST_RUNTIMES) results[id] = probeCli(id, runtimes[id] || { minimum_version: DEFAULT_MINIMUMS[id], probe: { kind: 'cli', command: DEFAULT_RUNTIME_COMMANDS[id] }, required: true }, options);
+  for (const id of HOST_RUNTIMES) results[id] = probeCli(id, runtimes[id] || { probe: { kind: 'cli', command: DEFAULT_RUNTIME_COMMANDS[id] }, required: true }, options);
   const selected = selectedRuntimes(options);
   const required = ['node'].concat(selected);
   const requiredFailures = required.filter((id) => results[id].status !== 'available');
@@ -415,6 +551,7 @@ function run(argv = process.argv.slice(2), write = process.stdout.write.bind(pro
       for (const id of ['node', 'claude', 'codex']) {
         const probe = detection.probes[id];
         write(`  ${id}: ${probe.status} (${probe.reason_code})${probe.version ? ` ${probe.version}` : ''}\n`);
+        for (const capability of Object.values(probe.capabilities || {})) write(`    ${capability.id}: ${capability.status} (${capability.reason_code})\n`);
       }
     }
     return detection.ok ? 0 : 1;
@@ -426,7 +563,7 @@ function run(argv = process.argv.slice(2), write = process.stdout.write.bind(pro
 }
 
 module.exports = {
-  AVAILABILITY, CLASSIFICATIONS, KINDS, PLATFORMS, PROBE_STATUSES, REASON_CODES, DEFAULT_PROBE_TIMEOUT_MS,
+  AVAILABILITY, CLASSIFICATIONS, KINDS, PLATFORMS, PROBE_STATUSES, CAPABILITY_PROBE_STATUSES, REASON_CODES, DEFAULT_PROBE_TIMEOUT_MS,
   RUNTIME_IDS, posixPath, loadCatalog, discover, validateCatalog, audit, matrix,
   renderText, classifySurface, parseArgs, run, semver, compareVersion, resolveExecutable, invoke,
   probeNode, probeCli, detect, detectCapabilities: detect, probeRuntime: detect,

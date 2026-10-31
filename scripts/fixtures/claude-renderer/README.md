@@ -19,3 +19,54 @@ The #268 fresh-task creation correction updates only the active `skills` hash fo
 `skills/forge-task/SKILL.md`; the other eight active hashes and all historical
 snapshots remain unchanged. It removes unrelated personal selection and legacy
 migration from explicit fresh creation, preserving explicit resume and isolation.
+
+The S02 communication update (M-20261028132636-experiencia, S02/T05) changes only
+the active `skills` and `claude-instructions` hashes. Its sources are
+`skills/forge-auto/SKILL.md`, `skills/forge-next/SKILL.md`,
+`skills/forge-task/SKILL.md` and `skills/forge-status/SKILL.md` (pointer to
+`shared/forge-communication.md`, human relay line and message templates), plus
+`CLAUDE.md`, re-synced by `forge-instructions.js` so its managed block carries the
+communication contract. Both hashes were measured through the render path with
+the assertion formula above, before and after the edits: the other seven active
+hashes and all historical snapshots stay unchanged, and the historical-to-current
+surface set asserted by `forge-dispatch-source-guard.test.js` is still `agents`,
+`skills`, `dispatch-templates`, `claude-instructions`, and `configuration`.
+
+The S03 agent-identity update (M-20261028132636-experiencia, S03/T07) changes only
+the active `skills` hash, from
+`62926097a5d24d2d1b637900971324425930bb8d1f437422812ab8cdb8d16e99` to
+`de4f137d05d37fbee993ba3adfc4a11372ea1c972f158cceddc5ae7e8ce02981`. Its sources are
+`skills/forge-auto/SKILL.md`, `skills/forge-next/SKILL.md` and
+`skills/forge-task/SKILL.md` (per-attempt native dispatch id, human task name,
+host-returned agent identity ordered by the owner's protected windows, and the
+Codex read-only guard around the plan-checker and read-only native units), plus
+`skills/forge-status/SKILL.md` (personal agent view) and
+`skills/forge-config/SKILL.md` (explicit `subagents on|off`). The value before was
+measured at revision `06f7d5a` and the value after on the final skill bytes, both
+through the render path with the assertion formula above. The other eight active
+hashes and all historical snapshots stay unchanged; the historical-to-current
+surface set is still `agents`, `skills`, `dispatch-templates`,
+`claude-instructions`, and `configuration`.
+
+The S03 review R1 correction uses the executable flow's `unit_type`/`unit_id`
+in forge-auto and forge-next and fails closed on missing Codex identity. A scoped
+before/after measurement retained all 248 dispatch registry entries, classifications,
+and emitter/builder counts; only the two single-unit emitter windows changed.
+Only the active `skills` surface changed from
+`de4f137d05d37fbee993ba3adfc4a11372ea1c972f158cceddc5ae7e8ce02981` to
+`28410c1f6ac4bf55ec693e379bc76328e77277bbfb9676f2b6f5fe564d7e37b7`.
+The other eight active surfaces and historical golden bytes remain unchanged.
+
+## S04/T03 remeasurement (2026-10-30)
+
+Measured before and after with forge-claude-renderer.render, sorting artifacts by source,
+joining source + NUL + content (version normalized to <dynamic>) with NUL, then SHA-256,
+exactly as forge-claude-renderer.test.js. Sources changed: skills/forge-discuss/SKILL.md
+and the managed forge:interaction block of CLAUDE.md (shared/forge-interaction.md).
+
+- skills: `28410c1f6ac4bf55ec693e379bc76328e77277bbfb9676f2b6f5fe564d7e37b7` to `0ba4bf99be2a459df9aee5fa657e35c94d8c05e7c0cb093c37173f24c5b618cd`.
+- claude-instructions: `f2c7e2e5c25e0815a41e05c91d840c48c5c00da8903f83bee1db319c5075ec8a` to `7997a0ef19dcd6479b90fc48eaa732cd12a7337d54c6332ac11c6c6ddb257ffb`.
+
+The other seven active surfaces and immutable Claude 4.19.0 golden remain unchanged.
+The historical-to-current changed surface set remains agents, skills, dispatch-templates,
+claude-instructions and configuration. Distribution does not establish host UI or human acceptance.

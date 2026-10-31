@@ -9,7 +9,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { readJsonl } = require('./forge-jsonl.js');
+const { readJsonl, parseJsonlText } = require('./forge-jsonl.js');
 
 let passed = 0;
 let failed = 0;
@@ -167,6 +167,22 @@ test('empty file: empty result', () => {
   const file = tmpFile('');
   const result = readJsonl(file);
   assert.deepStrictEqual(result, { lines: [], total: 0, skipped_empty: 0, skipped_malformed: 0, truncated_tail: false });
+});
+
+test('parseJsonlText equivalence: normalization, census, raw windows and invalid input', () => {
+  for (const text of ['', ' ', '\ufeff' + rec1 + '\r' + rec2, rec1 + '\r\n\r\n' + rec2 + '\n', rec1 + '\n{"bad', 'null\nfalse\n1\n[]\n{}']) {
+    const file = tmpFile(text);
+    try {
+      for (const maxLines of [undefined, null, -1, '2', 0, 1, 2, 20, 1.5]) {
+        assert.deepStrictEqual(parseJsonlText(text, { maxLines }), readJsonl(file, { maxLines }));
+      }
+    } finally { fs.rmSync(path.dirname(file), { recursive: true, force: true }); }
+  }
+  for (const input of [null, undefined, {}, 3]) assert.deepStrictEqual(parseJsonlText(input), parseJsonlText(''));
+  assert.deepStrictEqual(parseJsonlText(rec1 + '\n\n{"bad', { maxLines: 2 }), {
+    lines: [], total: 2, skipped_empty: 1, skipped_malformed: 1, truncated_tail: true,
+  });
+  process.stdout.write('PASS S03/T03 parseJsonlText: readJsonl equivalence and pinned normalization census window semantics\n');
 });
 
 process.stdout.write(`\n${passed} passed, ${failed} failed\n`);

@@ -1,0 +1,1385 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "now": 1793275210000,
+  "cases": [
+    {
+      "name": "recent",
+      "records": [
+        {
+          "event": "dispatch",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "milestone": "M001",
+          "slice": "S03",
+          "workflow_id": "M001",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "sidecar",
+          "transport": "claude-cli",
+          "engine": "claude",
+          "tier": "standard",
+          "model_requested": "claude-sonnet-5",
+          "model_resolved": "claude-sonnet-5",
+          "effort_requested": "high",
+          "effort": "high"
+        }
+      ],
+      "receipts": [
+        {
+          "dispatch_id": "dispatch-1",
+          "phase": "started",
+          "started_at": "2026-10-29T12:00:00Z",
+          "telemetry": {
+            "model_requested": "claude-sonnet-5",
+            "model_resolved": "claude-sonnet-5",
+            "model_argument": "claude-sonnet-5",
+            "effort_requested": "high",
+            "effort_resolved": "high",
+            "effort_argument": "high",
+            "observation": {
+              "version": 1,
+              "elapsed_ms": 9000,
+              "transport_ms": null,
+              "verification_ms": null,
+              "stdout_bytes": null,
+              "stderr_bytes": null,
+              "event_count": null,
+              "remote_event_count": 2,
+              "first_remote_ms": null,
+              "last_remote_ms": null,
+              "initial_sample_ms": null,
+              "gap_sample_ms": null,
+              "remote_silence_ms": 100,
+              "input_tokens": null,
+              "output_tokens": null,
+              "cache_read_tokens": null,
+              "cache_write_tokens": null,
+              "phase": "remote-activity",
+              "cost_usd": null,
+              "cost_source": null,
+              "remote_source": "cli-reported-protocol",
+              "usage_source": null,
+              "gap_suspended": false,
+              "process_exit_observed": false,
+              "denials": {
+                "read": null,
+                "write": null,
+                "shell": null,
+                "other": null
+              },
+              "liveness": {
+                "version": 1,
+                "state": "working",
+                "since_ms": 9000,
+                "reason": null
+              }
+            }
+          }
+        }
+      ],
+      "journals": [],
+      "expect": {
+        "kind": "sidecar",
+        "phase": "executing",
+        "remote": "recent"
+      }
+    },
+    {
+      "name": "delayed",
+      "records": [
+        {
+          "event": "dispatch",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "milestone": "M001",
+          "slice": "S03",
+          "workflow_id": "M001",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "sidecar",
+          "transport": "claude-cli",
+          "engine": "claude",
+          "tier": "standard",
+          "model_requested": "claude-sonnet-5",
+          "model_resolved": "claude-sonnet-5",
+          "effort_requested": "high",
+          "effort": "high"
+        }
+      ],
+      "receipts": [
+        {
+          "dispatch_id": "dispatch-1",
+          "phase": "started",
+          "started_at": "2026-10-29T12:00:00Z",
+          "telemetry": {
+            "model_requested": "claude-sonnet-5",
+            "model_resolved": "claude-sonnet-5",
+            "model_argument": "claude-sonnet-5",
+            "effort_requested": "high",
+            "effort_resolved": "high",
+            "effort_argument": "high",
+            "observation": {
+              "version": 1,
+              "elapsed_ms": 9000,
+              "transport_ms": null,
+              "verification_ms": null,
+              "stdout_bytes": null,
+              "stderr_bytes": null,
+              "event_count": null,
+              "remote_event_count": 2,
+              "first_remote_ms": null,
+              "last_remote_ms": null,
+              "initial_sample_ms": null,
+              "gap_sample_ms": null,
+              "remote_silence_ms": 120001,
+              "input_tokens": null,
+              "output_tokens": null,
+              "cache_read_tokens": null,
+              "cache_write_tokens": null,
+              "phase": "remote-activity",
+              "cost_usd": null,
+              "cost_source": null,
+              "remote_source": "cli-reported-protocol",
+              "usage_source": null,
+              "gap_suspended": false,
+              "process_exit_observed": false,
+              "denials": {
+                "read": null,
+                "write": null,
+                "shell": null,
+                "other": null
+              },
+              "liveness": {
+                "version": 1,
+                "state": "working",
+                "since_ms": 9000,
+                "reason": null
+              }
+            }
+          }
+        }
+      ],
+      "journals": [],
+      "expect": {
+        "remote": "delayed"
+      }
+    },
+    {
+      "name": "absent",
+      "records": [
+        {
+          "event": "dispatch",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "milestone": "M001",
+          "slice": "S03",
+          "workflow_id": "M001",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "sidecar",
+          "transport": "claude-cli",
+          "engine": "claude",
+          "tier": "standard",
+          "model_requested": "claude-sonnet-5",
+          "model_resolved": "claude-sonnet-5",
+          "effort_requested": "high",
+          "effort": "high"
+        }
+      ],
+      "receipts": [
+        {
+          "dispatch_id": "dispatch-1",
+          "phase": "started",
+          "started_at": "2026-10-29T12:00:00Z",
+          "telemetry": {
+            "model_requested": "claude-sonnet-5",
+            "model_resolved": "claude-sonnet-5",
+            "model_argument": "claude-sonnet-5",
+            "effort_requested": "high",
+            "effort_resolved": "high",
+            "effort_argument": "high",
+            "observation": {
+              "version": 1,
+              "elapsed_ms": 9000,
+              "transport_ms": null,
+              "verification_ms": null,
+              "stdout_bytes": null,
+              "stderr_bytes": null,
+              "event_count": null,
+              "remote_event_count": 0,
+              "first_remote_ms": null,
+              "last_remote_ms": null,
+              "initial_sample_ms": null,
+              "gap_sample_ms": null,
+              "remote_silence_ms": 100,
+              "input_tokens": null,
+              "output_tokens": null,
+              "cache_read_tokens": null,
+              "cache_write_tokens": null,
+              "phase": "remote-activity",
+              "cost_usd": null,
+              "cost_source": null,
+              "remote_source": null,
+              "usage_source": null,
+              "gap_suspended": false,
+              "process_exit_observed": false,
+              "denials": {
+                "read": null,
+                "write": null,
+                "shell": null,
+                "other": null
+              },
+              "liveness": {
+                "version": 1,
+                "state": "working",
+                "since_ms": 9000,
+                "reason": null
+              }
+            }
+          }
+        }
+      ],
+      "journals": [],
+      "expect": {
+        "remote": "absent"
+      }
+    },
+    {
+      "name": "heartbeat-only",
+      "records": [
+        {
+          "event": "dispatch",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "milestone": "M001",
+          "slice": "S03",
+          "workflow_id": "M001",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "sidecar",
+          "transport": "claude-cli",
+          "engine": "claude",
+          "tier": "standard",
+          "model_requested": "claude-sonnet-5",
+          "model_resolved": "claude-sonnet-5",
+          "effort_requested": "high",
+          "effort": "high"
+        },
+        {
+          "event": "sidecar-no-progress",
+          "dispatch_id": "dispatch-1",
+          "workflow_id": "M001",
+          "heartbeat": true
+        }
+      ],
+      "receipts": [
+        {
+          "dispatch_id": "dispatch-1",
+          "phase": "started",
+          "started_at": "2026-10-29T12:00:00Z",
+          "telemetry": {
+            "model_requested": "claude-sonnet-5",
+            "model_resolved": "claude-sonnet-5",
+            "model_argument": "claude-sonnet-5",
+            "effort_requested": "high",
+            "effort_resolved": "high",
+            "effort_argument": "high",
+            "observation": {
+              "version": 1,
+              "elapsed_ms": 9000,
+              "transport_ms": null,
+              "verification_ms": null,
+              "stdout_bytes": null,
+              "stderr_bytes": null,
+              "event_count": 900,
+              "remote_event_count": 0,
+              "first_remote_ms": null,
+              "last_remote_ms": null,
+              "initial_sample_ms": null,
+              "gap_sample_ms": null,
+              "remote_silence_ms": 100,
+              "input_tokens": null,
+              "output_tokens": null,
+              "cache_read_tokens": null,
+              "cache_write_tokens": null,
+              "phase": "remote-activity",
+              "cost_usd": null,
+              "cost_source": null,
+              "remote_source": null,
+              "usage_source": null,
+              "gap_suspended": false,
+              "process_exit_observed": false,
+              "denials": {
+                "read": null,
+                "write": null,
+                "shell": null,
+                "other": null
+              },
+              "liveness": {
+                "version": 1,
+                "state": "working",
+                "since_ms": 9000,
+                "reason": null
+              }
+            }
+          }
+        }
+      ],
+      "journals": [],
+      "expect": {
+        "remote": "absent",
+        "local": "heartbeat"
+      }
+    },
+    {
+      "name": "tool-running",
+      "records": [
+        {
+          "event": "dispatch",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "milestone": "M001",
+          "slice": "S03",
+          "workflow_id": "M001",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "sidecar",
+          "transport": "claude-cli",
+          "engine": "claude",
+          "tier": "standard",
+          "model_requested": "claude-sonnet-5",
+          "model_resolved": "claude-sonnet-5",
+          "effort_requested": "high",
+          "effort": "high"
+        }
+      ],
+      "receipts": [
+        {
+          "dispatch_id": "dispatch-1",
+          "phase": "started",
+          "started_at": "2026-10-29T12:00:00Z",
+          "telemetry": {
+            "model_requested": "claude-sonnet-5",
+            "model_resolved": "claude-sonnet-5",
+            "model_argument": "claude-sonnet-5",
+            "effort_requested": "high",
+            "effort_resolved": "high",
+            "effort_argument": "high",
+            "observation": {
+              "version": 1,
+              "elapsed_ms": 9000,
+              "transport_ms": null,
+              "verification_ms": null,
+              "stdout_bytes": null,
+              "stderr_bytes": null,
+              "event_count": null,
+              "remote_event_count": 2,
+              "first_remote_ms": null,
+              "last_remote_ms": null,
+              "initial_sample_ms": null,
+              "gap_sample_ms": null,
+              "remote_silence_ms": 100,
+              "input_tokens": null,
+              "output_tokens": null,
+              "cache_read_tokens": null,
+              "cache_write_tokens": null,
+              "phase": "remote-activity",
+              "cost_usd": null,
+              "cost_source": null,
+              "remote_source": "cli-reported-protocol",
+              "usage_source": null,
+              "gap_suspended": true,
+              "process_exit_observed": false,
+              "denials": {
+                "read": null,
+                "write": null,
+                "shell": null,
+                "other": null
+              },
+              "liveness": {
+                "version": 1,
+                "state": "working",
+                "since_ms": null,
+                "reason": "local-proof"
+              },
+              "tool_activity": {
+                "read": 0,
+                "write": 0,
+                "shell": 1,
+                "other": 0,
+                "last_class": "shell",
+                "last_ms": 8000
+              }
+            }
+          }
+        }
+      ],
+      "journals": [],
+      "expect": {
+        "remote": "tool-running"
+      }
+    },
+    {
+      "name": "failure",
+      "records": [
+        {
+          "event": "dispatch",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "milestone": "M001",
+          "slice": "S03",
+          "workflow_id": "M001",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "sidecar",
+          "transport": "claude-cli",
+          "engine": "claude",
+          "tier": "standard",
+          "model_requested": "claude-sonnet-5",
+          "model_resolved": "claude-sonnet-5",
+          "effort_requested": "high",
+          "effort": "high"
+        },
+        {
+          "event": "sidecar-unit",
+          "dispatch_id": "dispatch-1",
+          "workflow_id": "M001",
+          "status": "failed",
+          "diagnostic": {
+            "reason": "provider-exit"
+          }
+        }
+      ],
+      "receipts": [],
+      "journals": [],
+      "expect": {
+        "phase": "failed",
+        "outcome": "failed"
+      }
+    },
+    {
+      "name": "completion",
+      "records": [
+        {
+          "event": "dispatch",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "milestone": "M001",
+          "slice": "S03",
+          "workflow_id": "M001",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "sidecar",
+          "transport": "claude-cli",
+          "engine": "claude",
+          "tier": "standard",
+          "model_requested": "claude-sonnet-5",
+          "model_resolved": "claude-sonnet-5",
+          "effort_requested": "high",
+          "effort": "high"
+        },
+        {
+          "event": "sidecar-unit",
+          "dispatch_id": "dispatch-1",
+          "workflow_id": "M001",
+          "status": "done"
+        }
+      ],
+      "receipts": [],
+      "journals": [],
+      "expect": {
+        "phase": "completed",
+        "outcome": "done"
+      }
+    },
+    {
+      "name": "observed-absent",
+      "records": [
+        {
+          "event": "dispatch",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "milestone": "M001",
+          "slice": "S03",
+          "workflow_id": "M001",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "native",
+          "transport": "native-tool",
+          "engine": "codex",
+          "tier": "standard",
+          "model_requested": "claude-sonnet-5",
+          "model_resolved": "claude-sonnet-5",
+          "effort_requested": "high",
+          "effort": "high"
+        }
+      ],
+      "receipts": [
+        {
+          "dispatch_id": "dispatch-1",
+          "phase": "started",
+          "started_at": "2026-10-29T12:00:00Z",
+          "telemetry": {
+            "model_requested": "claude-sonnet-5",
+            "model_resolved": "claude-sonnet-5",
+            "model_argument": "claude-sonnet-5",
+            "effort_requested": "high",
+            "effort_resolved": "high",
+            "effort_argument": "high",
+            "observation": {
+              "version": 1,
+              "elapsed_ms": 9000,
+              "transport_ms": null,
+              "verification_ms": null,
+              "stdout_bytes": null,
+              "stderr_bytes": null,
+              "event_count": null,
+              "remote_event_count": 2,
+              "first_remote_ms": null,
+              "last_remote_ms": null,
+              "initial_sample_ms": null,
+              "gap_sample_ms": null,
+              "remote_silence_ms": 100,
+              "input_tokens": null,
+              "output_tokens": null,
+              "cache_read_tokens": null,
+              "cache_write_tokens": null,
+              "phase": "remote-activity",
+              "cost_usd": null,
+              "cost_source": null,
+              "remote_source": "cli-reported-protocol",
+              "usage_source": null,
+              "gap_suspended": false,
+              "process_exit_observed": false,
+              "denials": {
+                "read": null,
+                "write": null,
+                "shell": null,
+                "other": null
+              },
+              "liveness": {
+                "version": 1,
+                "state": "working",
+                "since_ms": 9000,
+                "reason": null
+              }
+            }
+          }
+        }
+      ],
+      "journals": [],
+      "expect": {
+        "observed": "unknown"
+      }
+    },
+    {
+      "name": "observed-divergent",
+      "records": [
+        {
+          "event": "dispatch",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "milestone": "M001",
+          "slice": "S03",
+          "workflow_id": "M001",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "sidecar",
+          "transport": "claude-cli",
+          "engine": "claude",
+          "tier": "standard",
+          "model_requested": "claude-sonnet-5",
+          "model_resolved": "claude-sonnet-5",
+          "effort_requested": "high",
+          "effort": "high"
+        }
+      ],
+      "receipts": [
+        {
+          "dispatch_id": "dispatch-1",
+          "phase": "started",
+          "started_at": "2026-10-29T12:00:00Z",
+          "telemetry": {
+            "model_requested": "claude-sonnet-5",
+            "model_resolved": "claude-sonnet-5",
+            "model_argument": "claude-sonnet-5",
+            "effort_requested": "high",
+            "effort_resolved": "high",
+            "effort_argument": "high",
+            "observation": {
+              "version": 1,
+              "elapsed_ms": 9000,
+              "transport_ms": null,
+              "verification_ms": null,
+              "stdout_bytes": null,
+              "stderr_bytes": null,
+              "event_count": null,
+              "remote_event_count": 2,
+              "first_remote_ms": null,
+              "last_remote_ms": null,
+              "initial_sample_ms": null,
+              "gap_sample_ms": null,
+              "remote_silence_ms": 100,
+              "input_tokens": null,
+              "output_tokens": null,
+              "cache_read_tokens": null,
+              "cache_write_tokens": null,
+              "phase": "remote-activity",
+              "cost_usd": null,
+              "cost_source": null,
+              "remote_source": "cli-reported-protocol",
+              "usage_source": null,
+              "gap_suspended": false,
+              "process_exit_observed": false,
+              "denials": {
+                "read": null,
+                "write": null,
+                "shell": null,
+                "other": null
+              },
+              "model_observed": "claude-opus-5",
+              "model_source": "claude-json-modelUsage",
+              "liveness": {
+                "version": 1,
+                "state": "working",
+                "since_ms": 9000,
+                "reason": null
+              }
+            }
+          }
+        }
+      ],
+      "journals": [],
+      "expect": {
+        "observed": "claude-opus-5",
+        "divergent": true
+      }
+    },
+    {
+      "name": "native-with-id",
+      "records": [
+        {
+          "event": "dispatch",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "milestone": "M001",
+          "slice": "S03",
+          "workflow_id": "M001",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "native",
+          "transport": "native-tool",
+          "engine": "codex",
+          "tier": "standard",
+          "model_requested": "claude-sonnet-5",
+          "model_resolved": "claude-sonnet-5",
+          "effort_requested": "high",
+          "effort": "high"
+        },
+        {
+          "event": "agent-identity",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "native",
+          "agent_type": "forge-executor",
+          "task_name": "read_agent_view",
+          "agent_id": "/root/opaque-agent",
+          "agent_id_source": "host-tool-return",
+          "evidence": "native-lifecycle",
+          "lifecycle_identity_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "description": "Implementar a visão de agentes"
+        }
+      ],
+      "receipts": [],
+      "journals": [],
+      "expect": {
+        "kind": "native",
+        "identity": "/root/opaque-agent",
+        "provenance": "native-lifecycle"
+      }
+    },
+    {
+      "name": "native-journal-live",
+      "records": [
+        {
+          "event": "dispatch",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "milestone": "M001",
+          "slice": "S03",
+          "workflow_id": "M001",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "native",
+          "transport": "native-tool",
+          "engine": "codex",
+          "tier": "standard",
+          "model_requested": "claude-sonnet-5",
+          "model_resolved": "claude-sonnet-5",
+          "effort_requested": "high",
+          "effort": "high"
+        }
+      ],
+      "receipts": [],
+      "journals": [
+        {
+          "schema_version": 1,
+          "start_wall_ms": 1793275200000,
+          "last_wall_ms": 1793275209500,
+          "phase": "acknowledged",
+          "activity": "unknown",
+          "capabilities": {
+            "remote_events": "unknown"
+          },
+          "policy": {
+            "suspectMs": 120000
+          },
+          "last_remote_ms": null,
+          "host_identity": {
+            "value": "/root/journal-agent",
+            "source": "host-tool-return",
+            "observed_ms": 500,
+            "dispatch_id": "dispatch-1",
+            "conflict": false
+          }
+        }
+      ],
+      "expect": {
+        "identity": "/root/journal-agent",
+        "provenance": "journal-unpublished",
+        "remote": "unknown"
+      }
+    },
+    {
+      "name": "native-caller-attested",
+      "records": [
+        {
+          "event": "dispatch",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "milestone": "M001",
+          "slice": "S03",
+          "workflow_id": "M001",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "native",
+          "transport": "native-tool",
+          "engine": "codex",
+          "tier": "standard",
+          "model_requested": "claude-sonnet-5",
+          "model_resolved": "claude-sonnet-5",
+          "effort_requested": "high",
+          "effort": "high"
+        },
+        {
+          "event": "agent-identity",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "native",
+          "agent_type": "forge-executor",
+          "task_name": "read_agent_view",
+          "agent_id": "/root/opaque-agent",
+          "agent_id_source": "host-tool-return",
+          "evidence": "caller-attested",
+          "lifecycle_identity_sha256": null,
+          "description": "Implementar a visão de agentes"
+        }
+      ],
+      "receipts": [],
+      "journals": [],
+      "expect": {
+        "identity": "/root/opaque-agent",
+        "provenance": "caller-attested"
+      }
+    },
+    {
+      "name": "native-without-id",
+      "records": [
+        {
+          "event": "dispatch",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "milestone": "M001",
+          "slice": "S03",
+          "workflow_id": "M001",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "native",
+          "transport": "native-tool",
+          "engine": "codex",
+          "tier": "standard",
+          "model_requested": "claude-sonnet-5",
+          "model_resolved": "claude-sonnet-5",
+          "effort_requested": "high",
+          "effort": "high"
+        }
+      ],
+      "receipts": [],
+      "journals": [],
+      "expect": {
+        "identity": "unknown",
+        "identity_reason": "host-id-not-recorded"
+      }
+    },
+    {
+      "name": "host-id-conflict",
+      "records": [
+        {
+          "event": "dispatch",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "milestone": "M001",
+          "slice": "S03",
+          "workflow_id": "M001",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "native",
+          "transport": "native-tool",
+          "engine": "codex",
+          "tier": "standard",
+          "model_requested": "claude-sonnet-5",
+          "model_resolved": "claude-sonnet-5",
+          "effort_requested": "high",
+          "effort": "high"
+        },
+        {
+          "event": "agent-identity",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "native",
+          "agent_type": "forge-executor",
+          "task_name": "read_agent_view",
+          "agent_id": "/root/opaque-agent",
+          "agent_id_source": "host-tool-return",
+          "evidence": "native-lifecycle",
+          "lifecycle_identity_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "description": "Implementar a visão de agentes"
+        },
+        {
+          "event": "agent-identity",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "native",
+          "agent_type": "forge-executor",
+          "task_name": "read_agent_view",
+          "agent_id": "/root/another-agent",
+          "agent_id_source": "host-tool-return",
+          "evidence": "native-lifecycle",
+          "lifecycle_identity_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "description": "Implementar a visão de agentes"
+        }
+      ],
+      "receipts": [],
+      "journals": [],
+      "expect": {
+        "identity": "unknown",
+        "identity_reason": "host-id-conflict"
+      }
+    },
+    {
+      "name": "identity-without-dispatch",
+      "records": [
+        {
+          "event": "agent-identity",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "native",
+          "agent_type": "forge-executor",
+          "task_name": "read_agent_view",
+          "agent_id": "/root/opaque-agent",
+          "agent_id_source": "host-tool-return",
+          "evidence": "native-lifecycle",
+          "lifecycle_identity_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "description": "Implementar a visão de agentes"
+        }
+      ],
+      "receipts": [],
+      "journals": [],
+      "expect": {
+        "count": 0
+      }
+    },
+    {
+      "name": "native-entry-dispatch",
+      "records": [
+        {
+          "event": "dispatch",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "milestone": "M001",
+          "slice": "S03",
+          "workflow_id": "M001",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "native",
+          "transport": "native-tool",
+          "engine": "codex",
+          "tier": "standard",
+          "model_requested": "claude-sonnet-5",
+          "model_resolved": "claude-sonnet-5",
+          "effort_requested": "high",
+          "effort": "high"
+        }
+      ],
+      "receipts": [],
+      "journals": [],
+      "expect": {
+        "kind": "native",
+        "phase": "executing"
+      }
+    },
+    {
+      "name": "native-post-return-dispatch",
+      "records": [
+        {
+          "event": "dispatch",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "milestone": "M001",
+          "slice": "S03",
+          "workflow_id": "M001",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "native",
+          "transport": "in-process",
+          "engine": "codex",
+          "tier": "standard",
+          "model_requested": "claude-sonnet-5",
+          "model_resolved": "claude-sonnet-5",
+          "effort_requested": "high",
+          "effort": "high"
+        }
+      ],
+      "receipts": [],
+      "journals": [],
+      "expect": {
+        "kind": "native",
+        "phase": "unknown",
+        "outcome": "returned"
+      }
+    },
+    {
+      "name": "stale",
+      "records": [
+        {
+          "event": "dispatch",
+          "ts": "2026-10-29T10:00:00Z",
+          "unit": "execute-task/T03",
+          "milestone": "M001",
+          "slice": "S03",
+          "workflow_id": "M001",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "native",
+          "transport": "native-tool",
+          "engine": "codex",
+          "tier": "missing",
+          "model_requested": "claude-sonnet-5",
+          "model_resolved": "claude-sonnet-5",
+          "effort_requested": "high",
+          "effort": "high"
+        }
+      ],
+      "receipts": [],
+      "journals": [],
+      "expect": {
+        "freshness": "stale",
+        "outcome": "unknown"
+      }
+    },
+    {
+      "name": "terminal-unvalidated",
+      "records": [
+        {
+          "event": "dispatch",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "milestone": "M001",
+          "slice": "S03",
+          "workflow_id": "M001",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "sidecar",
+          "transport": "claude-cli",
+          "engine": "claude",
+          "tier": "standard",
+          "model_requested": "claude-sonnet-5",
+          "model_resolved": "claude-sonnet-5",
+          "effort_requested": "high",
+          "effort": "high"
+        }
+      ],
+      "receipts": [
+        {
+          "dispatch_id": "dispatch-1",
+          "phase": "started",
+          "started_at": "2026-10-29T12:00:00Z",
+          "telemetry": {
+            "model_requested": "claude-sonnet-5",
+            "model_resolved": "claude-sonnet-5",
+            "model_argument": "claude-sonnet-5",
+            "effort_requested": "high",
+            "effort_resolved": "high",
+            "effort_argument": "high",
+            "observation": {
+              "version": 1,
+              "elapsed_ms": 9000,
+              "transport_ms": null,
+              "verification_ms": null,
+              "stdout_bytes": null,
+              "stderr_bytes": null,
+              "event_count": null,
+              "remote_event_count": 2,
+              "first_remote_ms": null,
+              "last_remote_ms": null,
+              "initial_sample_ms": null,
+              "gap_sample_ms": null,
+              "remote_silence_ms": 100,
+              "input_tokens": null,
+              "output_tokens": null,
+              "cache_read_tokens": null,
+              "cache_write_tokens": null,
+              "phase": "failed",
+              "cost_usd": null,
+              "cost_source": null,
+              "remote_source": "cli-reported-protocol",
+              "usage_source": null,
+              "gap_suspended": false,
+              "process_exit_observed": false,
+              "denials": {
+                "read": null,
+                "write": null,
+                "shell": null,
+                "other": null
+              },
+              "liveness": {
+                "version": 1,
+                "state": "working",
+                "since_ms": 9000,
+                "reason": null
+              },
+              "terminal_observed": true
+            }
+          }
+        }
+      ],
+      "journals": [],
+      "expect": {
+        "terminal": "unvalidated",
+        "phase": "unknown"
+      }
+    },
+    {
+      "name": "terminal-rejected-after-exit",
+      "records": [
+        {
+          "event": "dispatch",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "milestone": "M001",
+          "slice": "S03",
+          "workflow_id": "M001",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "sidecar",
+          "transport": "claude-cli",
+          "engine": "claude",
+          "tier": "standard",
+          "model_requested": "claude-sonnet-5",
+          "model_resolved": "claude-sonnet-5",
+          "effort_requested": "high",
+          "effort": "high"
+        }
+      ],
+      "receipts": [
+        {
+          "dispatch_id": "dispatch-1",
+          "phase": "started",
+          "started_at": "2026-10-29T12:00:00Z",
+          "telemetry": {
+            "model_requested": "claude-sonnet-5",
+            "model_resolved": "claude-sonnet-5",
+            "model_argument": "claude-sonnet-5",
+            "effort_requested": "high",
+            "effort_resolved": "high",
+            "effort_argument": "high",
+            "observation": {
+              "version": 1,
+              "elapsed_ms": 9000,
+              "transport_ms": null,
+              "verification_ms": null,
+              "stdout_bytes": null,
+              "stderr_bytes": null,
+              "event_count": null,
+              "remote_event_count": 2,
+              "first_remote_ms": null,
+              "last_remote_ms": null,
+              "initial_sample_ms": null,
+              "gap_sample_ms": null,
+              "remote_silence_ms": 100,
+              "input_tokens": null,
+              "output_tokens": null,
+              "cache_read_tokens": null,
+              "cache_write_tokens": null,
+              "phase": "failed",
+              "cost_usd": null,
+              "cost_source": null,
+              "remote_source": "cli-reported-protocol",
+              "usage_source": null,
+              "gap_suspended": false,
+              "process_exit_observed": true,
+              "denials": {
+                "read": null,
+                "write": null,
+                "shell": null,
+                "other": null
+              },
+              "liveness": {
+                "version": 1,
+                "state": "working",
+                "since_ms": 9000,
+                "reason": null
+              },
+              "terminal_observed": true
+            }
+          }
+        }
+      ],
+      "journals": [],
+      "expect": {
+        "terminal": "rejected-after-exit",
+        "phase": "unknown"
+      }
+    },
+    {
+      "name": "waiting-decision",
+      "records": [
+        {
+          "event": "dispatch",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "milestone": "M001",
+          "slice": "S03",
+          "workflow_id": "M001",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "sidecar",
+          "transport": "claude-cli",
+          "engine": "claude",
+          "tier": "standard",
+          "model_requested": "claude-sonnet-5",
+          "model_resolved": "claude-sonnet-5",
+          "effort_requested": "high",
+          "effort": "high"
+        },
+        {
+          "event": "sidecar-unit",
+          "dispatch_id": "dispatch-1",
+          "workflow_id": "M001",
+          "status": "partial"
+        }
+      ],
+      "receipts": [
+        {
+          "dispatch_id": "dispatch-1",
+          "phase": "ready",
+          "started_at": "2026-10-29T12:00:00Z",
+          "telemetry": {
+            "model_requested": "claude-sonnet-5",
+            "model_resolved": "claude-sonnet-5",
+            "model_argument": "claude-sonnet-5",
+            "effort_requested": "high",
+            "effort_resolved": "high",
+            "effort_argument": "high",
+            "observation": {
+              "version": 1,
+              "elapsed_ms": 9000,
+              "transport_ms": null,
+              "verification_ms": null,
+              "stdout_bytes": null,
+              "stderr_bytes": null,
+              "event_count": null,
+              "remote_event_count": 2,
+              "first_remote_ms": null,
+              "last_remote_ms": null,
+              "initial_sample_ms": null,
+              "gap_sample_ms": null,
+              "remote_silence_ms": 100,
+              "input_tokens": null,
+              "output_tokens": null,
+              "cache_read_tokens": null,
+              "cache_write_tokens": null,
+              "phase": "remote-activity",
+              "cost_usd": null,
+              "cost_source": null,
+              "remote_source": "cli-reported-protocol",
+              "usage_source": null,
+              "gap_suspended": false,
+              "process_exit_observed": false,
+              "denials": {
+                "read": null,
+                "write": null,
+                "shell": null,
+                "other": null
+              },
+              "liveness": {
+                "version": 1,
+                "state": "working",
+                "since_ms": 9000,
+                "reason": null
+              }
+            }
+          },
+          "result": {
+            "status": "partial",
+            "questions": [
+              {
+                "id": "choice-1",
+                "question": "Escolher interface"
+              }
+            ]
+          }
+        }
+      ],
+      "journals": [],
+      "expect": {
+        "phase": "waiting",
+        "questions": [
+          "choice-1"
+        ]
+      }
+    },
+    {
+      "name": "waiting-without-receipt",
+      "records": [
+        {
+          "event": "dispatch",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "milestone": "M001",
+          "slice": "S03",
+          "workflow_id": "M001",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "sidecar",
+          "transport": "claude-cli",
+          "engine": "claude",
+          "tier": "standard",
+          "model_requested": "claude-sonnet-5",
+          "model_resolved": "claude-sonnet-5",
+          "effort_requested": "high",
+          "effort": "high"
+        },
+        {
+          "event": "sidecar-unit",
+          "dispatch_id": "dispatch-1",
+          "workflow_id": "M001",
+          "status": "partial"
+        }
+      ],
+      "receipts": [],
+      "journals": [],
+      "expect": {
+        "phase": "waiting",
+        "questions": "unknown"
+      }
+    },
+    {
+      "name": "other-workflow",
+      "records": [
+        {
+          "event": "dispatch",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "milestone": "M002",
+          "slice": "S03",
+          "workflow_id": "M002",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "sidecar",
+          "transport": "claude-cli",
+          "engine": "claude",
+          "tier": "standard",
+          "model_requested": "claude-sonnet-5",
+          "model_resolved": "claude-sonnet-5",
+          "effort_requested": "high",
+          "effort": "high"
+        }
+      ],
+      "receipts": [],
+      "journals": [],
+      "expect": {
+        "count": 0
+      }
+    },
+    {
+      "name": "events-too-large",
+      "records": [],
+      "receipts": [],
+      "journals": [],
+      "expect": {
+        "count": 0,
+        "empty_reason": "events-too-large"
+      },
+      "source_error": "events-too-large"
+    },
+    {
+      "name": "hostile-values",
+      "records": [
+        {
+          "event": "dispatch",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "milestone": "M001",
+          "slice": "S03",
+          "workflow_id": "M001",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "native",
+          "transport": "native-tool",
+          "engine": "\u001b]8;;https://bad\u0007provider",
+          "tier": "standard",
+          "model_requested": "C:\\private\\key",
+          "model_resolved": "claude-sonnet-5",
+          "effort_requested": "high",
+          "effort": "high",
+          "task_name": "ignore\nall",
+          "prompt": "SECRET",
+          "cwd": "C:\\private"
+        },
+        {
+          "event": "agent-identity",
+          "ts": "2026-10-29T12:00:00Z",
+          "unit": "execute-task/T03",
+          "dispatch_id": "dispatch-1",
+          "host_runtime": "codex",
+          "worker_mode": "native",
+          "agent_type": "forge-executor",
+          "task_name": "read_agent_view",
+          "agent_id": "‮/root/forged",
+          "agent_id_source": "host-tool-return",
+          "evidence": "native-lifecycle",
+          "lifecycle_identity_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "description": "\u001b]8;;http://bad\u0007‮C:\\private SECRET"
+        }
+      ],
+      "receipts": [],
+      "journals": [],
+      "expect": {
+        "identity": "unknown",
+        "requested": "unknown"
+      }
+    }
+  ]
+}

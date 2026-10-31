@@ -279,6 +279,38 @@ test('PostToolUse registers the evidence matchers (Agent + Bash + Write + Edit)'
   }
 });
 
+test('S03/T05 remove optional Forge subagent row and preserve third-party value', () => {
+  const home = path.join(mktmp(), 'forge home relocado');
+  const managed = 'node "' + path.join(home, 'scripts', 'forge-subagent-statusline.js').split(path.sep).join('/') + '"';
+  for (const [command, forgeHome] of [[ 'node ~/.forge-agent/scripts/forge-subagent-statusline.js', '' ], [ managed, home ]]) {
+    const file = seed(mktmp(), { subagentStatusLine: { type: 'command', command }, outputStyle: 'Learning' });
+    const result = run(file, ['--remove'], { FORGE_HOME: forgeHome });
+    assertEqual(result.status, 0); assert(!Object.hasOwn(result.settings, 'subagentStatusLine'));
+    assertEqual(result.settings.outputStyle, 'Learning');
+  }
+  const foreignHome = path.join(mktmp(), 'other forge home');
+  const foreign = 'node "' + path.join(foreignHome, 'scripts', 'forge-subagent-statusline.js').split(path.sep).join('/') + '"';
+  for (const command of ['echo operator', foreign, managed + ' --custom', 'echo forge-subagent-statusline.js; node company-rows.js']) {
+    const custom = { type: 'command', command, extra: true };
+    const file = seed(mktmp(), { subagentStatusLine: custom, outputStyle: 'Learning' });
+    const result = run(file, ['--remove'], { FORGE_HOME: home });
+    assertEqual(result.status, 0);
+    assertEqual(JSON.stringify(result.settings.subagentStatusLine), JSON.stringify(custom));
+    assertEqual(result.settings.outputStyle, 'Learning');
+  }
+  console.log('PASS S03/T05 merge remove Forge subagent row preserves third-party settings');
+});
+
+test('S03/T05 enable never activates or changes optional subagent row', () => {
+  for (const optional of [undefined, { type: 'command', command: 'echo operator' }, { type: 'command', command: 'node fixture/forge-subagent-statusline.js' }]) {
+    const file = seed(mktmp(), optional === undefined ? {} : { subagentStatusLine: optional });
+    const result = run(file);
+    assertEqual(result.status, 0); assertEqual(JSON.stringify(result.settings.subagentStatusLine), JSON.stringify(optional));
+    assertEqual(Object.hasOwn(result.settings, 'subagentStatusLine'), optional !== undefined);
+  }
+  console.log('PASS S03/T05 merge enable keeps optional subagent setting untouched and evidence matchers unchanged');
+});
+
 // ── summary ─────────────────────────────────────────────────────────────────
 cleanup();
 console.log(`\nmerge-settings.test.js: ${passed} passed, ${failed} failed`);

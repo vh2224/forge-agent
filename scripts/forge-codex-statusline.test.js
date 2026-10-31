@@ -56,3 +56,18 @@ for (const original of [
   assert.deepStrictEqual(addDefaultStatusLine(original), { content: original, conflict: true, reason: 'status-line-manual-merge' });
 }
 console.log('PASS Codex status-line additive merge, preservation, CRLF/BOM, idempotence and ambiguous TOML.');
+
+const { diagnoseStatusLine, DEFAULT_STATUS_LINE } = require('./forge-codex-statusline');
+assert.deepStrictEqual(diagnoseStatusLine('model = "custom"\n'), { selection: 'absent', items: [], missing_limit_indicators: [] });
+for (const config of ['[tui]\nstatus_line = ["context-used"]\n', "tui.status_line = [\n 'context-used', # comment\n]\n"]) {
+  assert.deepStrictEqual(diagnoseStatusLine(config), { selection: 'explicit', items: ['context-used'], missing_limit_indicators: ['usage-limit', 'secondary-usage-limit'] });
+  assert.strictEqual(addDefaultStatusLine(config).content, config);
+}
+assert.deepStrictEqual(diagnoseStatusLine('tui.status_line = ["usage-limit"]'), { selection: 'explicit', items: ['usage-limit'], missing_limit_indicators: ['secondary-usage-limit'] });
+for (const items of [DEFAULT_STATUS_LINE, ['usage-limit', 'secondary-usage-limit']]) {
+  assert.deepStrictEqual(diagnoseStatusLine(`tui.status_line = ${JSON.stringify(items)}`), { selection: 'explicit', items, missing_limit_indicators: [] });
+}
+for (const config of ['[tui]\n[tui]\n', 'tui = {status_line = []}', 'tui.notifications = false', 'tui.status_line = [true]', 'tui.status_line = ["x", ["y"]]', 'tui.status_line = ["x"]\ntui.status_line = []', 'tui.status_line = ["x" "y"]']) {
+  assert.deepStrictEqual(diagnoseStatusLine(config), { selection: 'manual-merge', items: [], missing_limit_indicators: [] });
+}
+console.log('PASS status-line diagnosis: absent, explicit missing one or both limits, complete and ambiguous selections share the conservative reader without changing editor defaults');

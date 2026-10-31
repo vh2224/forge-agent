@@ -154,6 +154,121 @@ async function run() {
     assert.equal(lateResult.reason_code, rollback ? 'native-clock-inconsistent' : 'dead-start');
     assert.equal(lateResult.lifecycle.first_remote_ms, null);
   }
+
+  // S03/T02: the host identity observer writes only the external journal.
+  const hostValue = '/root/experience_s02_t07_334497b58af1';
+  const readJournal = file => JSON.parse(fs.readFileSync(file, 'utf8'));
+  const ci = clock(), oi = { ...base(ci), dispatchId: 'dispatch-s03-t02' }; let seen, finishRun;
+  const idRun = api.supervise(oi, observer => { seen = observer; return new Promise(resolve => { finishRun = resolve; }); });
+  await ci.advance(0); await ci.advance(5);
+  assert(Object.isFrozen(seen)); assert.deepEqual(Object.keys(seen), ['hostIdentity']);
+  for (const invalid of ['', 'bad value', 'a\x1b[31m', 'x'.repeat(257), 7, null]) {
+    assert.deepEqual(seen.hostIdentity(invalid), { ok: false, reason_code: 'native-host-identity-invalid' });
+  }
+  assert(!('host_identity' in readJournal(oi.journal.file)), 'invalid values are not recorded');
+  assert.deepEqual(seen.hostIdentity(hostValue), { ok: true });
+  const firstRecord = { value: hostValue, source: 'host-tool-return', observed_ms: 5, dispatch_id: 'dispatch-s03-t02', conflict: false };
+  assert.deepEqual(readJournal(oi.journal.file).host_identity, firstRecord);
+  const afterFirst = fs.readFileSync(oi.journal.file);
+  assert.deepEqual(seen.hostIdentity(hostValue), { ok: true });
+  assert(fs.readFileSync(oi.journal.file).equals(afterFirst), 'same value is a no-op');
+  assert.deepEqual(seen.hostIdentity('/root/other'), { ok: false, reason_code: 'native-host-identity-conflict' });
+  assert.deepEqual(readJournal(oi.journal.file).host_identity, { ...firstRecord, conflict: true }, 'conflict keeps the first value');
+  finishRun({ status: 'done' });
+  const idDone = await idRun;
+  assert.equal(idDone.ok, true); assert.deepEqual(idDone.lifecycle.host_identity, { ...firstRecord, conflict: true });
+  idDone.lifecycle.host_identity.value = 'mutated';
+  assert.equal(readJournal(oi.journal.file).host_identity.value, hostValue);
+  const terminalBytes = fs.readFileSync(oi.journal.file);
+  for (const late of [hostValue, '/root/late']) {
+    assert.deepEqual(seen.hostIdentity(late), { ok: false, reason_code: 'native-host-identity-after-terminal' });
+  }
+  assert(fs.readFileSync(oi.journal.file).equals(terminalBytes), 'late identity cannot alter the journal');
+  const cc = clock(), oc = base(cc); let cutObserver;
+  const cutRun = api.supervise(oc, observer => { cutObserver = observer; return new Promise(() => {}); });
+  await cc.advance(0); await cc.advance(1000); assert.equal((await cutRun).ok, false);
+  const cutBytes = fs.readFileSync(oc.journal.file);
+  assert.deepEqual(cutObserver.hostIdentity(hostValue), { ok: false, reason_code: 'native-host-identity-after-terminal' });
+  assert(fs.readFileSync(oc.journal.file).equals(cutBytes));
+  console.log(`EXAMPLE S03/T02 journal with host_identity: ${fs.readFileSync(oi.journal.file, 'utf8')}`);
+  console.log('PASS S03/T02 supervision host identity: frozen observer, first valid value in the external journal, invalid unrecorded, same value no-op, conflict keeps the first, after terminal or cutoff refused without journal change');
+
+  const memory = await api.supervise({ ...base(clock()), journal: undefined, dispatchId: 'unsafe dispatch id' },
+    observer => { assert.deepEqual(observer.hostIdentity(hostValue), { ok: true }); return { status: 'done' }; });
+  assert.equal(memory.lifecycle.persistence, 'unavailable');
+  assert.deepEqual(memory.lifecycle.host_identity, { value: hostValue, source: 'host-tool-return', observed_ms: 0, dispatch_id: null, conflict: false });
+  const quiet = base(clock());
+  const quietRun = await api.supervise(quiet, () => ({ status: 'done' }));
+  assert(!('host_identity' in quietRun.lifecycle) && !('host_identity' in readJournal(quiet.journal.file)));
+  console.log('PASS S03/T02 supervision without journal or observation: in-memory lifecycle record with unsafe dispatch as null; no key when the host reports nothing');
+
+  const or = { ...base(clock()), dispatchId: 'dispatch-resume' };
+  await api.supervise(or, observer => { observer.hostIdentity(hostValue); throw Object.assign(Error('fixture'), { code: 'fixture-interrupted' }); });
+  const saved = readJournal(or.journal.file);
+  assert.equal(saved.phase, 'interrupted'); assert.equal(saved.host_identity.value, hostValue);
+  let reattaches = 0;
+  const reattach = { capabilities: { resume: true }, resume: () => { reattaches++; return { status: 'done' }; } };
+  const resumeWith = (journal, dispatchId = 'dispatch-resume') => {
+    fs.writeFileSync(or.journal.file, JSON.stringify(journal));
+    return api.supervise({ ...or, dispatchId, clock: clock(100500), adapter: reattach }, () => assert.fail('no relaunch'));
+  };
+  const resumedOk = await resumeWith(saved);
+  assert.equal(resumedOk.ok, true); assert.deepEqual(resumedOk.lifecycle.host_identity, saved.host_identity);
+  assert.deepEqual(readJournal(or.journal.file).host_identity, saved.host_identity);
+  const nullRecord = await resumeWith({ ...saved, host_identity: null });
+  assert.equal(nullRecord.ok, true); assert(!('host_identity' in nullRecord.lifecycle));
+  const { host_identity: _dropped, ...oldJournal } = saved;
+  const oldResumed = await resumeWith(oldJournal);
+  assert.equal(oldResumed.ok, true); assert(!('host_identity' in oldResumed.lifecycle), 'journals without the key resume as before');
+  const invalidRecords = [
+    ['observed after the elapsed clock', { ...saved, host_identity: { ...saved.host_identity, observed_ms: 10000000 } }],
+    ['invalid saved value', { ...saved, host_identity: { ...saved.host_identity, value: 'bad value' } }],
+    ['unknown source', { ...saved, host_identity: { ...saved.host_identity, source: 'task-name' } }],
+    ['extra key', { ...saved, host_identity: { ...saved.host_identity, extra: true } }],
+    ['not a record', { ...saved, host_identity: hostValue }],
+  ];
+  const before = reattaches;
+  for (const [label, journal] of invalidRecords) {
+    await assert.rejects(() => resumeWith(journal), /native-journal-identity-or-clock/, label);
+  }
+  await assert.rejects(() => resumeWith(saved, 'dispatch-other'), /native-journal-identity-or-clock/, 'foreign dispatch binding');
+  assert.equal(reattaches, before, 'refused journals never reattach');
+  console.log('PASS S03/T02 supervision resume: valid host_identity survives restart, null or absent key resumes as before, invalid record, clock or dispatch refused');
+
+  // Issue 297: the journal, observer and resume keep canonical recovery dispatches intact.
+  const { recoveryDispatchId } = require('./forge-recovery-dispatch-id');
+  const real124 = recoveryDispatchId('M-20261028132636-fixture-S03-T02-native-dispatch-'.padEnd(78, 'x'),
+    '0f8e2d9c-1b7a-4c3e-9d5f-6a2b1c0e7f48');
+  const real128 = recoveryDispatchId('p'.repeat(128), '0f8e2d9c-1b7a-4c3e-9d5f-6a2b1c0e7f48');
+  assert.equal(real124.length, 124); assert.equal(real128.length, 128);
+  const sized = length => 'd'.repeat(length - 2) + '-1';
+  for (const dispatchId of [sized(120), sized(121), real124, real128]) {
+    const options = { ...base(clock()), dispatchId };
+    const observed = await api.supervise(options, observer => { assert.deepEqual(observer.hostIdentity(hostValue), { ok: true }); return { status: 'done' }; });
+    assert.equal(observed.lifecycle.host_identity.dispatch_id, dispatchId, `journal binding ${dispatchId.length}`);
+    assert.equal(readJournal(options.journal.file).host_identity.dispatch_id, dispatchId);
+  }
+  for (const dispatchId of [sized(129), 'dispatch with space', `${real124}\n`]) {
+    const refused = await api.supervise({ ...base(clock()), dispatchId }, observer => { observer.hostIdentity(hostValue); return { status: 'done' }; });
+    assert.equal(refused.lifecycle.host_identity.dispatch_id, null, 'an unsafe dispatch binds nothing');
+  }
+  console.log('PASS issue297 supervision: the observer records 120/121/124/128 dispatches exactly in the external journal; 129 or invalid binds null');
+  for (const dispatchId of [real124, real128]) {
+    const options = { ...base(clock()), dispatchId };
+    await api.supervise(options, observer => { observer.hostIdentity(hostValue); throw Object.assign(Error('fixture'), { code: 'fixture-interrupted' }); });
+    const interrupted = readJournal(options.journal.file);
+    assert.equal(interrupted.host_identity.dispatch_id, dispatchId);
+    const reattachLong = { capabilities: { resume: true }, resume: () => ({ status: 'done' }) };
+    const resumedLong = await api.supervise({ ...options, clock: clock(100500), adapter: reattachLong }, () => assert.fail('no relaunch'));
+    assert.equal(resumedLong.ok, true); assert.equal(resumedLong.lifecycle.host_identity.dispatch_id, dispatchId);
+    fs.writeFileSync(options.journal.file, JSON.stringify(interrupted));
+    const other = dispatchId === real124 ? real128 : real124;
+    for (const foreign of [other, dispatchId.slice(0, 120), sized(129)]) {
+      await assert.rejects(() => api.supervise({ ...options, dispatchId: foreign, clock: clock(100500), adapter: reattachLong },
+        () => assert.fail('no relaunch')), /native-journal-identity-or-clock/, `resume ${foreign.length}`);
+    }
+  }
+  console.log('PASS issue297 supervision resume: 124/128 journals resume with the exact dispatch; foreign, truncated and 129 dispatches refused without reattach');
   console.log('native supervision discriminating tests passed');
 }
 if (require.main === module) run().catch(error => { console.error(error); process.exitCode = 1; });

@@ -10,6 +10,14 @@ const HEX = /^[a-f0-9]{64}$/;
 function fail(code = 'claude-permission-policy-invalid') {
   throw Object.assign(new Error(code), { code, reason_code: code, provider_called: false, layer: 'caller' });
 }
+// The single parser of the representable form: the repo-relative path, or null.
+// ASCII spaces and portable unquoted paths only. Deliberately do not normalize
+// shell syntax: a rule must match the exact sealed command.
+function parseNodeCommand(command) {
+  if (typeof command !== 'string') return null;
+  const match = /^node (?:--check )?([A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:js|cjs|mjs))$/.exec(command);
+  return match ? match[1] : null;
+}
 function createPolicy({ seal, contract, identity, cwd } = {}) {
   try {
     contract = roots.validateContract(contract, { revalidate: true });
@@ -27,12 +35,10 @@ function createPolicy({ seal, contract, identity, cwd } = {}) {
         || [...row.origins, ...row.configuration_sources].some(v => typeof v !== 'string' || !v || v.length > 128)) fail();
     const rules = row.commands.map(command => {
       if (typeof command !== 'string' || command.length > 512) fail('claude-permission-command-unsupported');
-      // ASCII spaces and portable unquoted paths only. Deliberately do not
-      // normalize shell syntax: the rule must match the exact sealed command.
-      const match = /^node (?:--check )?([A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:js|cjs|mjs))$/.exec(command);
-      if (!match) fail('claude-permission-command-unsupported');
-      const file = roots.resolvePath(contract, { root_id: root.id, path: match[1] });
-      if (file.path !== match[1]) fail('claude-permission-command-unsupported');
+      const relative = parseNodeCommand(command);
+      if (!relative) fail('claude-permission-command-unsupported');
+      const file = roots.resolvePath(contract, { root_id: root.id, path: relative });
+      if (file.path !== relative) fail('claude-permission-command-unsupported');
       return `Bash(${command})`;
     });
     // A canonical recovery gets a new dispatch/request fingerprint. Preserve
@@ -94,4 +100,4 @@ function assertUnsupportedPreflight(handle, request) {
   if (roots.digest(current) !== roots.digest(saved.proof)) fail('claude-permission-preflight-changed');
   return Object.freeze(current);
 }
-module.exports = { createPolicy, validatePolicy, createUnsupportedPreflight, assertUnsupportedPreflight };
+module.exports = { parseNodeCommand, createPolicy, validatePolicy, createUnsupportedPreflight, assertUnsupportedPreflight };

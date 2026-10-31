@@ -1,0 +1,208 @@
+{
+  "schema_version": 1,
+  "analysis_date": "2026-10-31",
+  "report": "docs/host-compatibility-2026-10-31.md",
+  "evidence": "docs/host-compatibility-2026-10-31.evidence.json",
+  "forge": {
+    "version": "4.47.0",
+    "commit": "30147f9a117b858d9de60cd13e8ed42a2c44a4f7"
+  },
+  "codex_cli": {
+    "installed": "0.166.0",
+    "latest_stable_found": "0.166.0",
+    "schema_pin": "0.165.0",
+    "release_notes_range": {
+      "after_exclusive": "0.165.0",
+      "through_inclusive": "0.166.0"
+    },
+    "next_release_notes_after_exclusive": "0.165.0",
+    "local_schema_check": "drift",
+    "provider_execution_tested": false,
+    "release_notes_review": "pending",
+    "revalidation_required": true
+  },
+  "claude_code": {
+    "installed": "2.1.312",
+    "latest_stable_found": "2.1.316",
+    "prior_local_headless_reference": "2.1.310",
+    "release_notes_range": null,
+    "next_release_notes_after_exclusive": "2.1.312",
+    "provider_execution_tested": false,
+    "release_notes_review": "not-applicable-same-version",
+    "revalidation_required": true,
+    "latest_release_notes_review": "pending"
+  },
+  "desktop_ui": {
+    "installed_build": null,
+    "documentation_reviewed_as_of": "2026-10-28",
+    "visual_uat_performed": false,
+    "version_range_closed": false
+  },
+  "open_findings": [
+    {
+      "id": "schema-drift",
+      "issue": "https://github.com/vh2224/forge-agent/issues/279",
+      "status_at_analysis": "open",
+      "disposition": "repinned-previous-range-current-drift-open",
+      "evidence": "docs/codex-schema-0.165.0.md"
+    },
+    {
+      "id": "compatibility-report-freshness",
+      "issue": "https://github.com/vh2224/forge-agent/issues/280",
+      "status_at_analysis": "implemented-installation-pending",
+      "disposition": "source-corrected-installation-pending",
+      "evidence": "docs/runtime-compatibility.md"
+    },
+    {
+      "id": "custom-agent-permissions-contract",
+      "status_at_analysis": "limitation-documented",
+      "disposition": "documented-no-agent-sandbox-guarantee",
+      "evidence": "docs/codex-agent-permissions.md"
+    },
+    {
+      "id": "communication-and-agent-progress",
+      "status_at_analysis": "implemented-uat-pending",
+      "disposition": "implemented-human-acceptance-pending",
+      "evidence": "docs/communication-evaluation/README.md"
+    },
+    {
+      "id": "question-lifecycle-uat",
+      "status_at_analysis": "implemented-uat-pending",
+      "disposition": "implemented-human-acceptance-pending",
+      "evidence": "scripts/forge-question-flow.test.js"
+    },
+    {
+      "id": "forge-plugin-sidebar",
+      "status_at_analysis": "implemented-installation-uat-pending",
+      "disposition": "mounted-operator-installation-pending",
+      "evidence": "extensions/forge-vscode/README.md"
+    },
+    {
+      "id": "statusline-r6",
+      "status_at_analysis": "implemented-final-review-pending",
+      "disposition": "implemented-final-review-pending",
+      "evidence": "scripts/forge-subagent-statusline.js"
+    },
+    {
+      "id": "issue-294",
+      "status_at_analysis": "documentation-corrected-final-review-pending",
+      "disposition": "documentation-corrected-final-review-pending",
+      "evidence": "shared/forge-completer-slice.md",
+      "issue": "https://github.com/vh2224/forge-agent/issues/294"
+    },
+    {
+      "id": "issue-306",
+      "status_at_analysis": "implemented-integration-pending",
+      "disposition": "implemented-integration-pending",
+      "evidence": "scripts/forge-question-flow.test.js",
+      "issue": "https://github.com/vh2224/forge-agent/issues/306"
+    },
+    {
+      "id": "g2-1",
+      "status_at_analysis": "limitation-documented",
+      "disposition": "limitation-documented",
+      "evidence": "docs/codex-agent-permissions.md"
+    },
+    {
+      "id": "g2-2",
+      "status_at_analysis": "preexisting-win32-limitation",
+      "disposition": "preexisting-win32-limitation",
+      "evidence": "scripts/forge-xllm.js"
+    },
+    {
+      "id": "issue-288",
+      "status_at_analysis": "recorded-only",
+      "disposition": "recorded-only",
+      "evidence": "docs/host-compatibility-2026-10-31.md",
+      "issue": "https://github.com/vh2224/forge-agent/issues/288"
+    },
+    {
+      "id": "issue-289",
+      "status_at_analysis": "recorded-only",
+      "disposition": "recorded-only",
+      "evidence": "docs/host-compatibility-2026-10-31.md",
+      "issue": "https://github.com/vh2224/forge-agent/issues/289"
+    },
+    {
+      "id": "issue-290",
+      "status_at_analysis": "recorded-only",
+      "disposition": "recorded-only",
+      "evidence": "docs/host-compatibility-2026-10-31.md",
+      "issue": "https://github.com/vh2224/forge-agent/issues/290"
+    },
+    {
+      "id": "windows-link-negatives",
+      "status_at_analysis": "eperm-limit-pending",
+      "disposition": "eperm-limit-pending",
+      "evidence": "docs/host-compatibility-2026-10-31.md"
+    },
+    {
+      "id": "panel-operator-installation",
+      "status_at_analysis": "pending",
+      "disposition": "pending",
+      "evidence": "extensions/forge-vscode/README.md"
+    },
+    {
+      "id": "native-navigation",
+      "status_at_analysis": "not-demonstrated",
+      "disposition": "not-demonstrated",
+      "evidence": "scripts/forge-native-invocation.js"
+    },
+    {
+      "id": "subagent-statusline-rendering",
+      "status_at_analysis": "not-demonstrated",
+      "disposition": "not-demonstrated",
+      "evidence": "scripts/forge-subagent-statusline.js"
+    },
+    {
+      "id": "sidecar-real-input",
+      "status_at_analysis": "not-observed",
+      "disposition": "not-observed",
+      "evidence": "scripts/forge-question-flow.test.js"
+    },
+    {
+      "id": "final-human-uat",
+      "status_at_analysis": "pending-final-round",
+      "disposition": "pending-final-round",
+      "evidence": "docs/host-compatibility-2026-10-31.md"
+    },
+    {
+      "id": "release-review-codex",
+      "status_at_analysis": "pending",
+      "disposition": "pending",
+      "evidence": "docs/host-compatibility-2026-10-31.evidence.json"
+    },
+    {
+      "id": "release-review-claude",
+      "status_at_analysis": "pending",
+      "disposition": "pending",
+      "evidence": "docs/host-compatibility-2026-10-31.evidence.json"
+    }
+  ],
+  "reanalysis_policy": {
+    "review_new_release_range": true,
+    "carry_forward_open_findings": true,
+    "revalidate_changed_source_or_configuration": true,
+    "unchanged_version_does_not_prove_unchanged_docs_or_ui": true,
+    "baseline_is_not_a_minimum_version_or_runtime_compatibility_guarantee": true
+  },
+  "lineage": {
+    "previous": "docs/host-compatibility-baseline.json",
+    "previous_sha256": "31b5e62a1cb73a1856a134a5bc295667088254a63726d6222c65bf6cd6f6fea9"
+  },
+  "vscode_client": {
+    "version": "1.144.0",
+    "commit": "2c33b50b16c472efe58357d1d2a8a5414bc23fbf",
+    "arch": "x64",
+    "codex_extension": {
+      "status": "unknown",
+      "reason": "not found in bounded default-profile metadata; other profiles not inspected"
+    },
+    "default_profile_matching_extensions": [
+      {
+        "id": "anthropic.claude-code",
+        "version": "2.1.314"
+      }
+    ]
+  }
+}

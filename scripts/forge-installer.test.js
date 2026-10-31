@@ -392,6 +392,43 @@ test('ambiguous Codex config is preserved with actionable status-line guidance',
   assert(!output.includes('--migrate-legacy'));
 });
 
+test('presentation limits suggestion is read-only, selected-host local and absent from persisted manifests', () => {
+  const data = fixture({ configurationOnly: true });
+  try {
+    fs.mkdirSync(data.codexHome, { recursive: true });
+    const config = path.join(data.codexHome, 'config.toml');
+    const selections = [null, require('./forge-codex-statusline').DEFAULT_STATUS_LINE, ['usage-limit', 'secondary-usage-limit'], ['context-used'], ['usage-limit']];
+    for (const items of selections) {
+      const text = 'personality = "pragmatic"\nmodel_verbosity = "low"\n' + (items ? `tui.status_line = ${JSON.stringify(items)}\n` : '');
+      fs.writeFileSync(config, text);
+      const mtime = fs.statSync(config).mtimeMs;
+      const preview = installer.install({ ...data.options, runtime: 'codex', update: true, dryRun: true });
+      assert.strictEqual(fs.readFileSync(config, 'utf8'), text);
+      assert.strictEqual(fs.statSync(config).mtimeMs, mtime);
+      const missing = items !== null && (!items.includes('usage-limit') || !items.includes('secondary-usage-limit'));
+      assert.strictEqual(preview.presentation.suggestions.length, missing ? 1 : 0);
+      assert.strictEqual(installer.render(preview).split('\n').filter(line => line.includes('Nada foi alterado.')).length, missing ? 1 : 0);
+      const report = installer.install({ ...data.options, runtime: 'codex', update: true });
+      assert.strictEqual(report.presentation.suggestions.length, missing ? 1 : 0);
+      assert.strictEqual(report.presentation.writes, 0);
+      assert.strictEqual(report.presentation.claude, undefined);
+      assert(!fs.existsSync(data.claudeHome));
+      const after = fs.readFileSync(config, 'utf8');
+      if (items) {
+        assert.strictEqual(after, text); assert.strictEqual(fs.statSync(config).mtimeMs, mtime);
+      } else assert(after.includes('usage-limit'));
+      assert(!Object.hasOwn(report.manifest, 'presentation'));
+      for (const file of [path.join(data.forgeHome, 'manifest.json'), path.join(data.forgeHome, 'adapters', 'codex', 'manifest.json')]) {
+        const persisted = fs.readFileSync(file, 'utf8');
+        assert(!persisted.includes('codex-status-line-limits'));
+        assert(!persisted.includes('missing_limit_indicators'));
+        assert(!persisted.includes('"presentation"'));
+      }
+    }
+    console.log('PASS installer presentation: explicit missing limits get one pt-BR suggestion without config bytes or mtime changes; absent default complete have none; diagnosis stays in memory outside manifests');
+  } finally { data.cleanup(); }
+});
+
 test('update backs up managed files and preserves prefs and unmanaged files', () => {
   const data = fixture();
   try {
@@ -1242,12 +1279,36 @@ test('span-only and self-sourced instructions do not gain whole-file ownership',
 test('Codex instruction ownership records final synchronized bytes across updates and dry runs', () => {
   const data = fixture();
   const ownership = require('./forge-projection-ownership');
+  const renderer = require('./forge-codex-renderer');
+  const instructions = require('./forge-instructions');
   try {
     const options = { ...data.options, runtime: 'codex', provenance: null };
-    const first = installer.install(options);
+    installer.install({ ...options, dryRun: true });
+    for (const directory of [data.forgeHome, data.codexHome, data.projectRoot]) assert(!fs.existsSync(directory));
+    const originalWrite = renderer.write;
+    let first, generatedInstruction;
+    try {
+      // Observe the production renderer's actual write, not an intermediate sync
+      // that is redundant once the renderer supplies the complete managed block.
+      renderer.write = function (input) {
+        const report = originalWrite(input);
+        generatedInstruction = report.written.find(item => item.kind === 'instructions');
+        return report;
+      };
+      first = installer.install(options);
+    } finally { renderer.write = originalWrite; }
     const file = path.join(data.projectRoot, 'AGENTS.md'), key = ownership.keyFor(file);
     const manifestFile = path.join(data.forgeHome, 'manifest.json');
-    assert(first.plan.some(row => row.op === 'write' && row.destination === file && row.reason === 'instructions:block-absent'));
+    assert(generatedInstruction && !generatedInstruction.dry_run, 'renderer não gravou as instruções iniciais');
+    assert.strictEqual(generatedInstruction.destination, file);
+    const content = fs.readFileSync(file, 'utf8');
+    assert.strictEqual(content, generatedInstruction.content, 'sync alterou a gravação completa do renderer');
+    assert.strictEqual(content.split(instructions.MARKER_START).length - 1, 1);
+    assert.strictEqual(content.split(instructions.MARKER_END).length - 1, 1);
+    assert.strictEqual(content.split(instructions.renderCommunicationContract()).length - 1, 1);
+    assert(!first.plan.some(row => row.op === 'write' && row.destination === file), 'sync gerou escrita redundante');
+    assert.strictEqual(instructions.syncFile(file, { host: 'codex' }).outcome, 'unchanged');
+    assert.strictEqual(fs.readFileSync(file, 'utf8'), content);
     assert.strictEqual(first.manifest.ownership[key], ownership.digest(fs.readFileSync(file, 'utf8')), 'digest anterior ao sync não representa os bytes finais');
     const manifestBytes = fs.readFileSync(manifestFile), instructionBytes = fs.readFileSync(file);
     const dry = installer.install({ ...options, update: true, dryRun: true });
@@ -1260,9 +1321,11 @@ test('Codex instruction ownership records final synchronized bytes across update
       const recorded = JSON.parse(fs.readFileSync(manifestFile, 'utf8')).ownership[key];
       assert.strictEqual(recorded, ownership.digest(fs.readFileSync(file, 'utf8')));
       assert(!result.manifest.adapters.codex.conflicts.some(row => row.destination === file));
+      assert.deepStrictEqual(fs.readFileSync(file), instructionBytes, 'update mudou instruções já atuais');
       digests.push(recorded);
     }
     assert.strictEqual(digests[0], digests[1]);
+    console.log('PASS communication installer: actual generated first write has one managed contract, sync unchanged, final ownership, dry-run no writes and byte-idempotent updates');
   } finally { data.cleanup(); }
 });
 
@@ -1291,6 +1354,79 @@ test('both-host instruction digests remain final and single-host updates preserv
       if (key === ownership.keyFor(files[0]) || key.startsWith(path.resolve(data.codexHome) + path.sep)) assert.strictEqual(updated.manifest.ownership[key], digest);
     }
     assert.strictEqual(updated.manifest.ownership[ownership.keyFor(files[1])], ownership.digest(fs.readFileSync(files[1], 'utf8')));
+  } finally { data.cleanup(); }
+});
+
+// ── Codex capabilities report frozen at 4.8.0 (issue 280) ─────────────────────
+// Measured installation: legacy report shape at 4.8.0, `user_owned` in the Codex
+// adapter manifest and no key in the core ownership map. The real installer must
+// adopt exactly that recognized generated report and nothing else.
+function codexReportFixture() {
+  const data = fixture({ configurationOnly: true });
+  installer.install({ ...data.options, runtime: 'codex' });
+  const report = path.join(data.forgeHome, 'adapters', 'codex', 'capabilities.json');
+  const manifestFile = path.join(data.forgeHome, 'manifest.json');
+  const dropRecord = () => {
+    const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+    delete manifest.ownership[require('./forge-projection-ownership').keyFor(report)];
+    fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2));
+  };
+  const legacy = `${JSON.stringify({ version: '4.8.0', runtime: 'codex', generated: true,
+    surfaces: [{ source_id: 'agents', status: 'planned' }, { source_id: 'hooks', status: 'planned' }] }, null, 2)}\n`;
+  return { data, report, manifestFile, dropRecord, legacy };
+}
+
+test('update over a legacy 4.8.0 Codex report ends current and without conflict', () => {
+  const { data, report, manifestFile, dropRecord, legacy } = codexReportFixture();
+  const renderer = require('./forge-codex-renderer.js');
+  try {
+    fs.writeFileSync(report, legacy);
+    dropRecord();
+    assert.strictEqual(renderer.inspectCapabilitiesReport({ forgeHome: data.forgeHome }).state, 'stale');
+    const manifestBytes = fs.readFileSync(manifestFile);
+    installer.install({ ...data.options, runtime: 'codex', update: true, dryRun: true });
+    assert.strictEqual(fs.readFileSync(report, 'utf8'), legacy, 'dry-run reescreveu o relatório legado');
+    assert.deepStrictEqual(fs.readFileSync(manifestFile), manifestBytes, 'dry-run alterou o manifesto');
+    const result = installer.install({ ...data.options, runtime: 'codex', update: true });
+    assert(!result.manifest.adapters.codex.conflicts.some(row => row.destination === report), 'relatório gerado continuou conflito');
+    const adapterManifest = JSON.parse(fs.readFileSync(path.join(data.forgeHome, 'adapters', 'codex', 'manifest.json'), 'utf8'));
+    assert(!adapterManifest.conflicts.some(row => row.destination === report), 'manifest do adapter manteve user_owned');
+    assert(adapterManifest.files.length > 0);
+    const inspection = renderer.inspectCapabilitiesReport({ forgeHome: data.forgeHome });
+    assert.deepStrictEqual({ state: inspection.state, reasons: inspection.reasons }, { state: 'current', reasons: [] }, JSON.stringify(inspection));
+    const ownership = require('./forge-projection-ownership');
+    assert.strictEqual(result.manifest.ownership[ownership.keyFor(report)], ownership.digest(fs.readFileSync(report, 'utf8')), 'digest do relatório adotado não persistiu');
+    const bytes = fs.readFileSync(report);
+    installer.install({ ...data.options, runtime: 'codex', update: true });
+    assert.deepStrictEqual(fs.readFileSync(report), bytes, 'segunda atualização mudou o relatório');
+  } finally { data.cleanup(); }
+});
+
+test('non-generated content at the Codex report path stays preserved with a user_owned conflict', () => {
+  const { data, report, dropRecord, legacy } = codexReportFixture();
+  const renderer = require('./forge-codex-renderer.js');
+  try {
+    const schema2 = JSON.parse(fs.readFileSync(report, 'utf8'));
+    const incomplete = structuredClone(schema2); delete incomplete.permissions;
+    const cases = [
+      ['operator json', '{"operator":true}\n', 'wrong-runtime'],
+      ['operator text', 'anotações do operador\n', 'unreadable-json'],
+      ['claude report', legacy.replace('"runtime": "codex"', '"runtime": "claude"'), 'wrong-runtime'],
+      ['operator notes', `${JSON.stringify({ ...JSON.parse(legacy), operator_note: 'keep' }, null, 2)}\n`, 'unrecognized-shape'],
+      ['operator schema2 notes', `${JSON.stringify({ ...schema2, operator_note: 'keep' }, null, 2)}\n`, 'unrecognized-shape'],
+      ['future schema', `${JSON.stringify({ ...schema2, report_schema_version: 99 }, null, 2)}\n`, 'unrecognized-shape'],
+      ['incomplete schema', `${JSON.stringify(incomplete, null, 2)}\n`, 'unrecognized-shape'],
+    ];
+    for (const [label, bytes, reason] of cases) {
+      fs.writeFileSync(report, bytes);
+      dropRecord();
+      const result = installer.install({ ...data.options, runtime: 'codex', update: true });
+      const conflict = result.manifest.adapters.codex.conflicts.find(row => row.destination === report);
+      assert(conflict && conflict.reason === 'user_owned', `${label}: conflito user_owned ausente`);
+      assert.strictEqual(fs.readFileSync(report, 'utf8'), bytes, `${label}: bytes do operador sobrescritos`);
+      const inspection = renderer.inspectCapabilitiesReport({ forgeHome: data.forgeHome });
+      assert.deepStrictEqual({ state: inspection.state, reasons: inspection.reasons }, { state: 'invalid', reasons: [reason] }, label);
+    }
   } finally { data.cleanup(); }
 });
 

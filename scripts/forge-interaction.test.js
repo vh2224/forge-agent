@@ -36,5 +36,25 @@ if (process.argv[2] === '--resume') {
     assert.throws(() => api.createRecoveryAuthorizationAdapter({ approved: true }), /attestation-required/);
     assert.deepStrictEqual(api.mergePendingQuestions(partial, [{ id: 'scope', question: 'Choose scope', status: 'resolved', answer: 'authorized' }]), partial);
     console.log('PASS partial answers, foreign/duplicate/conflicting IDs, silence/timeout/final/accepted:true and child-process pending state');
+    const beforeRounds = JSON.parse(fs.readFileSync(file));
+    assert.deepStrictEqual(api.QUESTION_ROUND_OUTCOMES, ['presented', 'handle-accepted', 'closed-unanswered', 'cancelled', 'empty', 'timeout', 'answered']);
+    for (let i = 0; i < 67; i++) api.recordQuestionRound(file, identity, { ids: ['root'], channel: 'text-fallback', outcome: 'presented' });
+    const afterRounds = JSON.parse(fs.readFileSync(file));
+    assert.strictEqual(afterRounds.rounds.length, 64); assert.strictEqual(afterRounds.rounds_dropped, 3);
+    assert.deepStrictEqual(afterRounds.questions, beforeRounds.questions);
+    assert.deepStrictEqual(api.persistQuestionState(file, identity, []), completed);
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(file)).rounds, afterRounds.rounds);
+    const bytes = fs.readFileSync(file);
+    assert.throws(() => api.recordQuestionRound(file, { unit: 'other' }, { ids: ['root'], channel: 'text-fallback', outcome: 'presented' }), /scope-mismatch/);
+    assert.throws(() => api.recordQuestionRound(file, identity, { ids: ['foreign'], channel: 'text-fallback', outcome: 'presented' }), /round-id-invalid/);
+    assert.throws(() => api.recordQuestionRound(file, identity, { ids: ['root'], channel: 'text-fallback', outcome: 'invented' }), /round-invalid/);
+    assert.deepStrictEqual(fs.readFileSync(file), bytes);
+    const pendingFile = path.join(root, 'pending.json'); api.persistQuestionState(pendingFile, identity, questions);
+    assert.throws(() => api.recordQuestionRound(pendingFile, identity, { ids: ['root'], channel: 'text-fallback', outcome: 'answered' }), /round-id-invalid/);
+    assert.throws(() => api.recordQuestionRound(path.join(root, 'missing.json'), identity, { ids: ['root'], channel: 'text-fallback', outcome: 'presented' }), /state-required/);
+    const link = path.join(root, 'link.json');
+    try { fs.symlinkSync(file, link); assert.throws(() => api.recordQuestionRound(link, identity, { ids: ['root'], channel: 'text-fallback', outcome: 'presented' }), /path-link/); }
+    catch (error) { if (error.code !== 'EPERM') throw error; console.log('SKIP round link negative: Windows EPERM'); }
+    console.log('PASS additive question rounds preserve answers, bound history to64 and reject foreign scope, pending answered, missing state and links');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 }

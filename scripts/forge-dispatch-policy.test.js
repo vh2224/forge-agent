@@ -76,6 +76,17 @@ try {
   assert.strictEqual(fromCatalog.decision, 'allow');
   const plannedOnly = policy.decide(input({ host_runtime: 'codex', available_capabilities: [], capability_catalog: { capabilities: [{ capability_id: 'workspace.read', hosts: { codex: 'planned' } }] } }));
   assert.strictEqual(plannedOnly.reason_code, 'capability-missing');
+  // Catalog schema 1.1.0: unknown is fail-closed; distributed/demonstrated stay available.
+  const unknownOnly = policy.decide(input({ host_runtime: 'codex', available_capabilities: [], capability_catalog: { capabilities: [{ capability_id: 'workspace.read', hosts: { codex: 'unknown' } }] } }));
+  assert.strictEqual(unknownOnly.decision, 'deny');
+  assert.strictEqual(unknownOnly.reason_code, 'capability-missing');
+  const unknownManifest = policy.decide(input({ host_runtime: 'codex', available_capabilities: [], source_manifest: { sources: [{ capability: 'workspace.read', conditional: { codex: { status: 'unknown' } } }] } }));
+  assert.strictEqual(unknownManifest.reason_code, 'capability-missing');
+  for (const status of ['distributed', 'demonstrated']) {
+    const projected = policy.decide(input({ host_runtime: 'codex', available_capabilities: [], capability_catalog: { capabilities: [{ capability_id: 'workspace.read', hosts: { codex: status } }] } }));
+    assert.strictEqual(projected.decision, 'allow', status);
+    assert.strictEqual(projected.reason_code, 'policy-allowed', status);
+  }
   const absentHost = policy.decide(input({ host_runtime: 'codex', available_capabilities: [], capability_catalog: { capabilities: [{ capability_id: 'workspace.read', hosts: { claude: 'implemented' } }] } }));
   assert.strictEqual(absentHost.reason_code, 'capability-missing');
   assert.strictEqual(policy.decide(input({ role: undefined })).reason_code, 'invalid-role');

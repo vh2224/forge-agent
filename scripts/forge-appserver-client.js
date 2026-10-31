@@ -14,6 +14,7 @@ const liveness = require('./forge-sidecar-liveness');
 const { createNotificationReducer } = require('./forge-appserver-liveness');
 const { createLocalProof } = require('./forge-sidecar-local-proof');
 const { diagnostic, observation } = require('./forge-sidecar-diagnostic');
+const { code: closedCode } = require('./forge-attempt-telemetry');
 
 const STDERR_TAIL_BYTES = 4096;
 const DISCARDED_SAMPLE_LIMIT = 5;
@@ -76,6 +77,54 @@ const INTERRUPT_OUTCOMES = Object.freeze({
 const APPSERVER_LIVENESS_CODES = Object.freeze({
   SILENCE: 'appserver-anomalous-silence',
   BUDGET_EXCEEDED: 'budget-exceeded-while-active',
+});
+// Terminal failures of the requested route (S01/T04, issue 279), recognised from the
+// pinned TurnError.codexErrorInfo of the completion matched to THIS turn. Closed map:
+// only an exact string key is recognised; every other value, the object variants and
+// null keep the generic `turn ended with status failed` with no code. Same rules as
+// the liveness codes: a string code, never `rpcError`, a fixed message free of
+// `terminated`/`timeout`/`network`, and no provider text (TurnError.message and
+// additionalDetails are never read, so they cannot reach the error or the census).
+const APPSERVER_TERMINAL_CODES = Object.freeze({
+  MODEL_NOT_FOUND: 'model-not-found',
+});
+const APPSERVER_TERMINAL_MESSAGES = Object.freeze({
+  MODEL_NOT_FOUND: 'forge-appserver-client: turn ended with status failed (modelNotFound)',
+});
+const CODEX_TERMINAL_ERROR_INFO = Object.freeze({
+  modelNotFound: APPSERVER_TERMINAL_CODES.MODEL_NOT_FOUND,
+});
+// Only a `failed` turn can carry a terminal route failure; `interrupted` keeps its
+// own generic message even if the server attached the marker.
+const TURN_STATUS_FAILED = 'failed';
+// Inbound server requests (S04/T02), classified by the inventory of
+// docs/codex-schema-0.165.0.md (ServerRequest.json, codex-cli 0.165.0). Closed map:
+// any other method is `unknown`. Every class is still refused with -32601; only
+// `input` (a request for a human answer) also stops the turn, because a sidecar that
+// keeps working after asking would decide by silence. Approvals keep following
+// approvalPolicy and the gates, and never become functional questions.
+const INBOUND_REQUEST_CLASSES = Object.freeze({
+  'item/tool/requestUserInput': 'input',
+  'mcpServer/elicitation/request': 'input',
+  'item/commandExecution/requestApproval': 'approval',
+  'item/fileChange/requestApproval': 'approval',
+  'item/permissions/requestApproval': 'approval',
+  applyPatchApproval: 'approval',
+  execCommandApproval: 'approval',
+  'item/tool/call': 'other',
+  'account/chatgptAuthTokens/refresh': 'other',
+  'attestation/generate': 'other',
+});
+const INBOUND_REQUEST_UNKNOWN = 'unknown';
+// The input stop is the client's own fixed verdict, in the mould of the terminal
+// codes: a string code, never `rpcError`, a fixed message free of
+// `terminated`/`timeout`/`network`, and nothing the provider sent (params are never
+// read, so they cannot reach the error, the diagnostic or the census).
+const APPSERVER_INPUT_CODES = Object.freeze({
+  INPUT_REQUIRED: 'appserver-input-required',
+});
+const APPSERVER_INPUT_MESSAGES = Object.freeze({
+  INPUT_REQUIRED: 'forge-appserver-client: inbound input request refused; owner decision required',
 });
 // Watchdog cadence. Overridable via `livenessIntervalMs` (test seam, like
 // interruptGraceMs); production never passes it.
@@ -348,6 +397,11 @@ function startAppServerTurn(options) {
     const items = [];
     const notifications = [];
     const inboundRequests = [];
+    // The input-class records only, for the rejection of THIS turn. Separate from
+    // `inboundRequests` so a retention already at its cap (an approval flood) can
+    // never hide the request that stopped the turn: the cap is the same, and it is
+    // always >= 1, so the first input record is always kept.
+    const inputRequests = [];
     // A census, not a line counter. `count` used to cover only unparseable lines, so
     // the two shapes that actually indicate a protocol violation — valid JSON carrying
     // neither id nor method, and a response to an id nobody is waiting on — vanished
@@ -397,7 +451,10 @@ function startAppServerTurn(options) {
         : (typeof params.turnId === 'string' ? params.turnId : null);
       const status = typeof turn.status === 'string' ? turn.status
         : (typeof params.status === 'string' ? params.status : null);
-      keep(completions, { id, status }, 'turnCompletions');
+      // Only the closed marker is kept, never TurnError.message/additionalDetails.
+      const info = turn.error && typeof turn.error === 'object' ? turn.error.codexErrorInfo : undefined;
+      const marker = typeof info === 'string' && Object.hasOwn(CODEX_TERMINAL_ERROR_INFO, info) ? info : null;
+      keep(completions, marker ? { id, status, codexErrorInfo: marker } : { id, status }, 'turnCompletions');
     };
     // The latch, derived. `null` means "no completion for THIS turn yet"; a record with
     // a non-success status is still a match — it ends the wait, it just does not end it
@@ -549,14 +606,30 @@ function startAppServerTurn(options) {
     });
     const rejectInboundRequest = (message) => {
       // Pitfall 6/#21982: id + method is a server request, never a response.
-      const record = { id: message.id, method: message.method, params: message.params };
+      // Closed record only (S04/T02): `params` is provider data and is never kept,
+      // echoed or reported. The id survives only as a closed code or a safe integer,
+      // the method only when it is in the inventory, and thread/turn come from this
+      // session's own thread/start and turn, never from the request.
+      const known = typeof message.method === 'string' && Object.hasOwn(INBOUND_REQUEST_CLASSES, message.method);
+      const record = {
+        id: Number.isSafeInteger(message.id) ? message.id : closedCode(message.id, null),
+        method: known ? message.method : INBOUND_REQUEST_UNKNOWN,
+        class: known ? INBOUND_REQUEST_CLASSES[message.method] : INBOUND_REQUEST_UNKNOWN,
+        thread_id: closedCode(threadId, null),
+        turn_id: closedCode(turnId, null),
+      };
       // Retention is capped; the REPLY below is not. Refusing to answer a request we
       // chose not to remember would leave the server waiting forever.
       keep(inboundRequests, record, 'inboundRequests');
       send({ id: message.id, error: {
         code: -32601,
-        message: `forge-appserver-client: inbound request refused: ${message.method}`,
+        message: `forge-appserver-client: inbound request refused: ${record.method}`,
       } });
+      if (record.class !== 'input') return;
+      if (inputRequests.length < limits.inboundRequests) inputRequests.push(record);
+      // Refused first, then stopped through the one kill path. A completion that is
+      // already matched but not yet settled loses to the latch set here.
+      terminateTurn(() => inputError());
     };
     const handleMessage = (message) => {
       if (!message || typeof message !== 'object' || Array.isArray(message)) {
@@ -821,6 +894,18 @@ function startAppServerTurn(options) {
         },
       };
     };
+    // Input stop (S04/T02): the turn asked for a human answer that this client never
+    // gives. Fixed message and closed code, the input-class records only, and a
+    // closed diagnostic with counters. No liveness termination: the stream was alive.
+    const inputError = () => ({
+      termination: null,
+      message: APPSERVER_INPUT_MESSAGES.INPUT_REQUIRED.replace(/^forge-appserver-client: /, ''),
+      details: {
+        code: APPSERVER_INPUT_CODES.INPUT_REQUIRED,
+        inboundRequests: inputRequests.map(record => ({ ...record })),
+        diagnostic: diagnostic(APPSERVER_INPUT_CODES.INPUT_REQUIRED, { observation: observe({ phase: 'failed' }) }),
+      },
+    });
     // Backstop: the real-time ceiling, independent of the injected clock.
     timer = setTimeout(() => terminateTurn(() => ceilingError()), timeoutMs);
     // Primary authority: the neutral tracker over the reducer snapshot plus the
@@ -888,6 +973,22 @@ function startAppServerTurn(options) {
         // that errored as a `done` unit. `null` is here too: a completion with no
         // readable status is not evidence of success, and calling it one would be the
         // same optimism readTurnStatus refuses.
+        // A terminal failure of the requested route is recognised here, BEFORE
+        // forge-xllm sees the error: the fixed message and closed code keep the
+        // stderr tail out of the message and the keyword heuristic out of the class.
+        if (completion.status === TURN_STATUS_FAILED && completion.codexErrorInfo) {
+          const code = CODEX_TERMINAL_ERROR_INFO[completion.codexErrorInfo];
+          fail(APPSERVER_TERMINAL_MESSAGES.MODEL_NOT_FOUND.replace(/^forge-appserver-client: /, ''), {
+            code,
+            codexErrorInfo: completion.codexErrorInfo,
+            turnStatus: completion.status,
+            turnId: turnId || null,
+            turnCompletions: completionCensus(),
+            // Counters only, with the same terminal phase the final snapshot reports.
+            diagnostic: diagnostic(code, { observation: observe({ phase: 'failed' }) }),
+          }, true);
+          return;
+        }
         if (completion.status !== TURN_STATUS_SUCCESS) {
           fail(`turn ended with status ${completion.status === null ? 'unknown' : completion.status}`, {
             turnStatus: completion.status,
@@ -940,6 +1041,12 @@ module.exports = {
   INTERRUPT_OUTCOMES,
   INTERRUPT_GRACE_MS,
   APPSERVER_LIVENESS_CODES,
+  APPSERVER_TERMINAL_CODES,
+  APPSERVER_TERMINAL_MESSAGES,
+  CODEX_TERMINAL_ERROR_INFO,
+  INBOUND_REQUEST_CLASSES,
+  APPSERVER_INPUT_CODES,
+  APPSERVER_INPUT_MESSAGES,
   LIVENESS_INTERVAL_MS,
   LOCAL_PROOF_INTERVAL_MS,
   DEFAULT_PROGRESS_INTERVAL_MS,

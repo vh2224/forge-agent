@@ -12,7 +12,8 @@ const {
   startAppServerTurn, encodeMessage, decodeLine, INTERRUPT_OUTCOMES, INTERRUPT_GRACE_MS,
   RETENTION_LIMITS, TURN_STATUS_SUCCESS, STDERR_TAIL_BYTES, tailBytes,
   isContextNotification, APPSERVER_LIVENESS_CODES, LIVENESS_INTERVAL_MS, LOCAL_PROOF_INTERVAL_MS,
-  DEFAULT_PROGRESS_INTERVAL_MS,
+  DEFAULT_PROGRESS_INTERVAL_MS, APPSERVER_TERMINAL_CODES, APPSERVER_TERMINAL_MESSAGES, CODEX_TERMINAL_ERROR_INFO,
+  INBOUND_REQUEST_CLASSES, APPSERVER_INPUT_CODES, APPSERVER_INPUT_MESSAGES,
 } =require('./forge-appserver-client');
 const { classifyError, isTransient } = require('./forge-classify-error');
 const { observation, progressLine, readProgressLine } = require('./forge-sidecar-diagnostic');
@@ -60,6 +61,11 @@ const LIVENESS_MODES = ['active-stream', 'silent-after-started', 'silent-after-e
 // S07/T03: tool items carry a sentinel command so leaks into liveness are detectable.
 const TOOL_SENTINEL = 'FORGE_T03_PRIVATE_COMMAND_SENTINEL';
 const toolItem = (id, command) => ({ id, type: 'commandExecution', command, cwd: '/private/tool/cwd' });
+// S01/T04: typed turn failures with provider and stderr sentinels.
+const TYPED_FAILURE_MODES = ['model-not-found', 'failed-other-info', 'failed-object-info', 'failed-null-info',
+  'interrupted-model-not-found', 'model-not-found-foreign'];
+const PROVIDER_SENTINEL = 'FORGE_T04_PROVIDER_SENTINEL';
+const STDERR_SENTINEL = 'FORGE_T04_STDERR_SENTINEL';
 let streamStopped = false;
 const delta = () => ({ method: 'item/agentMessage/delta', params: { itemId: 'msg-1', delta: 'x' } });
 // The SERVER stamps what it received, so ordering is proved by the peer's own record
@@ -67,8 +73,18 @@ const delta = () => ({ method: 'item/agentMessage/delta', params: { itemId: 'msg
 const logFile = process.env.FORGE_APPSERVER_LOG_FILE;
 function logMethod(message) {
   if (!logFile) return;
-  fs.appendFileSync(logFile, JSON.stringify({ method: message.method, params: message.params, at: Date.now() }) + '\n');
+  // S04/T02: refusals are logged too (id, code and the refusal text), so the order
+  // "-32601 first, then turn/interrupt" is proved by the peer's own record.
+  const refusal = message.error ? { id: message.id, error_code: message.error.code, error_message: message.error.message } : {};
+  fs.appendFileSync(logFile, JSON.stringify({ method: message.method, params: message.params, at: Date.now(), ...refusal }) + '\n');
 }
+// S04/T02: inbound requests from the server. Every hostile field carries a provider
+// sentinel (params, a forged thread/turn, an unknown method, malformed ids) that must
+// never reach a record, error, diagnostic or census.
+const INPUT_MODES = ['request-user-input', 'elicitation', 'approval-then-input', 'input-with-completion'];
+const INBOUND_SENTINEL = 'FORGE_S04_PROVIDER_SENTINEL';
+const hostileParams = () => ({ threadId: INBOUND_SENTINEL + '-thread', turnId: INBOUND_SENTINEL + '-turn',
+  itemId: INBOUND_SENTINEL, questions: [{ id: 'q-1', question: INBOUND_SENTINEL + ' token=private /private/path' }] });
 process.stdout.write('mock app-server banner (not JSON)\n');
 function send(value) { process.stdout.write(JSON.stringify(value) + '\n'); }
 function reject(message) { send({ id: message.id, error: { code: -32001, message: 'request before initialized' } }); }
@@ -88,7 +104,7 @@ process.stdin.on('data', chunk => {
       // interrupt-ignored deliberately never answers: that is what makes the grace
       // expire instead of being acknowledged.
       if (mode === 'interrupt-acked') { send({ id: message.id, result: {} }); }
-      else if (LIVENESS_MODES.includes(mode)) { streamStopped = true; send({ id: message.id, result: {} }); }
+      else if (LIVENESS_MODES.includes(mode) || INPUT_MODES.includes(mode)) { streamStopped = true; send({ id: message.id, result: {} }); }
       else if (mode === 'interrupt-then-completed') {
         // Order matters and is deliberate. turn/completed {status:'interrupted'} is what
         // a real server emits in response to an interrupt (measured: TurnStatus includes
@@ -136,6 +152,69 @@ process.stdin.on('data', chunk => {
       if (mode === 'completed-failed') {
         send({ id: message.id, result: { turn: { id: 'turn-1' } } });
         send({ method: 'turn/completed', params: { turn: { id: 'turn-1', status: 'failed' } } });
+        continue;
+      }
+      // S01/T04. Our turn fails with a typed TurnError. The provider message, its
+      // details and a transient-looking stderr carry sentinels that must never reach
+      // the message, code, diagnostic or census. stderr goes out first and the turn
+      // after a short delay, so the tail is already held when the session fails.
+      if (TYPED_FAILURE_MODES.includes(mode)) {
+        process.stderr.write('mock: network connection terminated 503 ' + STDERR_SENTINEL + '\n');
+        const turnError = info => ({ message: PROVIDER_SENTINEL + ' model gpt-missing does not exist (network timeout)',
+          codexErrorInfo: info, additionalDetails: PROVIDER_SENTINEL + ' details' });
+        const failed = (id, info) => ({ method: 'turn/completed',
+          params: { turn: { id, status: 'failed', items: [], error: turnError(info) } } });
+        setTimeout(() => {
+          send({ id: message.id, result: { turn: { id: 'turn-1' } } });
+          if (mode === 'model-not-found') send(failed('turn-1', 'modelNotFound'));
+          else if (mode === 'failed-other-info') send(failed('turn-1', 'serverOverloaded'));
+          else if (mode === 'failed-object-info') send(failed('turn-1', { httpConnectionFailed: { httpStatusCode: 404 } }));
+          else if (mode === 'failed-null-info') send(failed('turn-1', null));
+          else if (mode === 'interrupted-model-not-found') {
+            send({ method: 'turn/completed', params: { turn: { id: 'turn-1', status: 'interrupted', items: [],
+              error: turnError('modelNotFound') } } });
+          } else {
+            // model-not-found-foreign: the marker rides ANOTHER turn's completion.
+            send(failed('turn-OTHER', 'modelNotFound'));
+            send({ method: 'turn/completed', params: { turn: { id: 'turn-1', status: 'failed', items: [] } } });
+          }
+        }, 30);
+        continue;
+      }
+      // S04/T02. The turn starts, then the server sends inbound requests. Input modes
+      // keep streaming after the request (a turn that would otherwise decide alone)
+      // until the client's turn/interrupt stops the stream.
+      if (INPUT_MODES.includes(mode) || mode === 'unknown-request') {
+        send({ id: message.id, result: { turn: { id: 'turn-1' } } });
+        send({ method: 'turn/started', params: { turn: { id: 'turn-1' } } });
+        if (mode === 'input-with-completion') {
+          // Our completion and the input request in ONE stdout chunk: the completion
+          // is matched but not yet settled when the request is handled.
+          process.stdout.write([
+            { method: 'turn/completed', params: { turn: { id: 'turn-1', status: 'completed' } } },
+            { id: 'req-same-chunk', method: 'item/tool/requestUserInput', params: hostileParams() },
+          ].map(value => JSON.stringify(value)).join('\n') + '\n');
+          continue;
+        }
+        if (mode === 'unknown-request') {
+          send({ id: { nested: INBOUND_SENTINEL }, method: 'x/' + INBOUND_SENTINEL, params: hostileParams() });
+          send({ id: 'bad id ' + INBOUND_SENTINEL, method: 'item/tool/call', params: hostileParams() });
+          send({ id: 903, method: 'item/fileChange/requestApproval', params: hostileParams() });
+          setTimeout(() => {
+            send({ method: 'item/completed', params: { item: { id: 'item-1', type: 'message' } } });
+            send({ method: 'turn/completed', params: { turn: { id: 'turn-1', status: 'completed' } } });
+          }, 30);
+          continue;
+        }
+        if (mode === 'approval-then-input') {
+          for (let i = 0; i < 3; i += 1) send({ id: 600 + i, method: 'execCommandApproval', params: hostileParams() });
+        }
+        const inputMethod = mode === 'elicitation' ? 'mcpServer/elicitation/request' : 'item/tool/requestUserInput';
+        send({ id: mode === 'elicitation' ? 901 : 'req-1', method: inputMethod, params: hostileParams() });
+        const tick = setInterval(() => {
+          if (streamStopped) { clearInterval(tick); return; }
+          send(delta());
+        }, 20);
         continue;
       }
       // S07 R1. Exit immediately after a successful completion. The setTimeout is 0ms
@@ -329,6 +408,11 @@ async function testHappyPath(mock, dir) {
   assert(events.includes('item/completed') && events.includes('turn/completed'));
   assert.strictEqual(result.inboundRequests.length, 1);
   assert.strictEqual(result.inboundRequests[0].method, 'execCommandApproval');
+  // S04/T02: a closed record, never the params; an approval keeps the turn going.
+  assert.deepStrictEqual(Object.keys(result.inboundRequests[0]).sort(), ['class', 'id', 'method', 'thread_id', 'turn_id']);
+  assert.strictEqual(result.inboundRequests[0].id, 77);
+  assert.strictEqual(result.inboundRequests[0].class, 'approval');
+  assert.strictEqual(result.inboundRequests[0].thread_id, 'thread-1');
   // The census names WHY each drop happened. The banner is unparseable; the mock also
   // emits one routable-by-nothing object and one reply to an id nobody awaits, and both
   // of those used to disappear without incrementing anything (R10).
@@ -708,6 +792,101 @@ async function testNonSuccessStatusRejects(mock, dir) {
   });
 }
 
+// S01/T04 (issue 279). The pinned TurnError.codexErrorInfo names a missing model; the
+// client recognises ONLY that closed marker on the completion matched to its own turn
+// and rejects with a fixed message, a closed code and a closed diagnostic. Provider
+// text (TurnError.message/additionalDetails) and stderr never cross into any of them.
+const PROVIDER_SENTINEL = 'FORGE_T04_PROVIDER_SENTINEL';
+const STDERR_SENTINEL = 'FORGE_T04_STDERR_SENTINEL';
+const typedFailure = (mock, dir, mode) => rejectionOf(startAppServerTurn({
+  cmd: process.execPath, args: [mock], cwd: dir, timeoutMs: 4000,
+  env: { ...process.env, FORGE_APPSERVER_MOCK_MODE: mode },
+}));
+const typedView = error => ({
+  message: error.message,
+  code: error.code ?? null,
+  codexErrorInfo: error.codexErrorInfo ?? null,
+  turnStatus: error.turnStatus,
+  diagnostic: error.diagnostic ? { version: error.diagnostic.version, stage: error.diagnostic.stage, reason: error.diagnostic.reason } : null,
+  records: error.turnCompletions.records,
+});
+function assertNoProviderText(label, error) {
+  const exposed = JSON.stringify({ message: error.message, code: error.code, codexErrorInfo: error.codexErrorInfo,
+    diagnostic: error.diagnostic, turnCompletions: error.turnCompletions });
+  assert(!exposed.includes(PROVIDER_SENTINEL), `${label} leaked provider TurnError text`);
+  assert(!exposed.includes(STDERR_SENTINEL), `${label} leaked provider stderr`);
+  assert(!/does not exist/.test(exposed), `${label} leaked the provider message body`);
+}
+
+async function testModelNotFound(mock, dir) {
+  // Observed behaviour first, so a regression diff shows the whole projection.
+  const error = await typedFailure(mock, dir, 'model-not-found');
+  assert.deepStrictEqual(typedView(error), {
+    message: 'forge-appserver-client: turn ended with status failed (modelNotFound)',
+    code: 'model-not-found',
+    codexErrorInfo: 'modelNotFound',
+    turnStatus: 'failed',
+    diagnostic: { version: 1, stage: 'identity', reason: 'model-not-found' },
+    records: [{ id: 'turn-1', status: 'failed', codexErrorInfo: 'modelNotFound' }],
+  });
+  assert.deepStrictEqual(APPSERVER_TERMINAL_CODES, { MODEL_NOT_FOUND: 'model-not-found' });
+  assert(Object.isFrozen(APPSERVER_TERMINAL_CODES));
+  assert.deepStrictEqual(APPSERVER_TERMINAL_MESSAGES,
+    { MODEL_NOT_FOUND: 'forge-appserver-client: turn ended with status failed (modelNotFound)' });
+  assert(Object.isFrozen(APPSERVER_TERMINAL_MESSAGES));
+  assert.deepStrictEqual(CODEX_TERMINAL_ERROR_INFO, { modelNotFound: APPSERVER_TERMINAL_CODES.MODEL_NOT_FOUND });
+  assert(Object.isFrozen(CODEX_TERMINAL_ERROR_INFO));
+  // The literal the client matches belongs to the pinned CodexErrorInfo string enum.
+  const pin = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'shared', 'schemas', 'codex-appserver-pin.json'), 'utf8'));
+  const info = (pin.referenced && pin.referenced.CodexErrorInfo) || (pin.definitions && pin.definitions.CodexErrorInfo);
+  assert(info && Array.isArray(info.anyOf), 'pin must define CodexErrorInfo');
+  const stringEnum = info.anyOf.find(branch => branch.type === 'string' && Array.isArray(branch.enum));
+  assert(stringEnum, 'CodexErrorInfo must keep its string enum');
+  for (const literal of Object.keys(CODEX_TERMINAL_ERROR_INFO)) {
+    assert(stringEnum.enum.includes(literal), `${literal} must be a pinned CodexErrorInfo value`);
+  }
+  // No new message may be read as transient (CONNECTION_RE/NETWORK_RE).
+  for (const message of Object.values(APPSERVER_TERMINAL_MESSAGES)) {
+    assert(!/terminated|timeout|network/i.test(message), message);
+    assert.strictEqual(isTransient(classifyError(message)), false, `${message} must not be transient`);
+  }
+  assert.strictEqual(error.turnId, 'turn-1');
+  assert.strictEqual(error.turnCompletions.matched, 1);
+  assert.strictEqual(error.diagnostic.observation.version, 1, 'diagnostic carries the closed observation');
+  assert.strictEqual(error.diagnostic.observation.phase, 'failed');
+  assert.strictEqual(error.rpcError, undefined, 'never confused with the numeric JSON-RPC path');
+  assertNoProviderText('model-not-found', error);
+  // The fixture really carried the transient-looking tail: the client keeps it as a
+  // property (unchanged contract), only never in the classified fields above.
+  assert(String(error.stderrTail).includes(STDERR_SENTINEL), 'fixture must exercise a provider stderr tail');
+}
+
+// Everything that is NOT exactly the closed marker on our own completion keeps the
+// generic message with no code: other enum values, the object variants, null, a
+// non-failed status and a marker carried by another turn's completion.
+async function testTypedFailureRegressions(mock, dir) {
+  for (const mode of ['failed-other-info', 'failed-object-info', 'failed-null-info', 'model-not-found-foreign']) {
+    const error = await typedFailure(mock, dir, mode);
+    assert.strictEqual(error.message, 'forge-appserver-client: turn ended with status failed', mode);
+    assert.strictEqual(error.code, undefined, `${mode} carries no code`);
+    assert.strictEqual(error.codexErrorInfo, undefined, `${mode} carries no marker`);
+    assert.strictEqual(error.diagnostic, undefined, `${mode} carries no diagnostic`);
+    assert.strictEqual(error.turnStatus, 'failed');
+    assertNoProviderText(mode, error);
+    const ours = error.turnCompletions.records.filter(entry => entry.id === 'turn-1');
+    assert.deepStrictEqual(ours, [{ id: 'turn-1', status: 'failed' }], `${mode}: no marker recorded for our turn`);
+  }
+  const foreign = await typedFailure(mock, dir, 'model-not-found-foreign');
+  assert.deepStrictEqual(foreign.turnCompletions.records.find(entry => entry.id === 'turn-OTHER'),
+    { id: 'turn-OTHER', status: 'failed', codexErrorInfo: 'modelNotFound' }, 'the foreign marker is censused, never applied');
+  assert.strictEqual(foreign.turnCompletions.ignored, 1);
+  const interrupted = await typedFailure(mock, dir, 'interrupted-model-not-found');
+  assert.strictEqual(interrupted.message, 'forge-appserver-client: turn ended with status interrupted');
+  assert.strictEqual(interrupted.code, undefined, 'only a failed turn is classified as model-not-found');
+  assert.strictEqual(interrupted.diagnostic, undefined);
+  assertNoProviderText('interrupted-model-not-found', interrupted);
+}
+
 // S07 R1. The child exits right after a successful turn/completed, before settlement.
 // Measured as a REAL window: settlement waits on a 5ms poll, the exit lands inside it.
 async function testExitAfterCompleted(mock, dir) {
@@ -738,6 +917,161 @@ async function testRetentionCaps(mock, dir) {
   // Capping RETENTION must not cap the protocol duty: every inbound request is still
   // answered, or the server waits forever on the ones we chose not to remember.
   assert.strictEqual(result.turnStatus, TURN_STATUS_SUCCESS);
+  // S04/T02: the kept approval is a closed record without params.
+  assert.deepStrictEqual(result.inboundRequests, [{ id: 500, method: 'execCommandApproval', class: 'approval',
+    thread_id: 'thread-1', turn_id: result.inboundRequests[0].turn_id }]);
+  assert(!JSON.stringify(result.inboundRequests).includes('nope'), 'approval params are never retained');
+}
+
+// ── S04/T02: inbound requests classified, refused, and input stops the turn ──────
+const INBOUND_SENTINEL = 'FORGE_S04_PROVIDER_SENTINEL';
+const INPUT_RECORD = (id, method) => ({ id, method, class: 'input', thread_id: 'thread-1', turn_id: 'turn-1' });
+
+// The inventory is read from the reviewed document (S01), never retyped here: the
+// table rows of "## Requests de entrada do app-server" name exactly the ten methods.
+function documentedInboundMethods() {
+  const doc = fs.readFileSync(path.join(__dirname, '..', 'docs', 'codex-schema-0.165.0.md'), 'utf8');
+  const methods = [];
+  let inSection = false;
+  for (const line of doc.split('\n')) {
+    if (line.startsWith('## ')) { inSection = line.trim() === '## Requests de entrada do app-server'; continue; }
+    const row = inSection && line.match(/^\| `([^`]+)` \| `[A-Za-z]+Params` \|/);
+    if (row) methods.push(row[1]);
+  }
+  return methods;
+}
+
+function assertNoInboundLeak(label, value) {
+  const json = JSON.stringify(value);
+  assert(!json.includes(INBOUND_SENTINEL), `${label} leaked provider request text`);
+  assert(!/private\/path|token=private|"params"|"questions"/.test(json), `${label} leaked request params`);
+}
+
+// Everything the caller can see on a rejection: own fields plus the message.
+const errorView = error => ({ ...error, message: error.message });
+
+async function testInboundInventory() {
+  const documented = documentedInboundMethods();
+  assert.strictEqual(documented.length, 10, `the document inventories ten methods, got ${documented.length}`);
+  assert.deepStrictEqual(Object.keys(INBOUND_REQUEST_CLASSES).sort(), documented.slice().sort(),
+    'the client classes exactly the documented methods');
+  assert(Object.isFrozen(INBOUND_REQUEST_CLASSES));
+  assert.deepStrictEqual(INBOUND_REQUEST_CLASSES, {
+    'item/tool/requestUserInput': 'input',
+    'mcpServer/elicitation/request': 'input',
+    'item/commandExecution/requestApproval': 'approval',
+    'item/fileChange/requestApproval': 'approval',
+    'item/permissions/requestApproval': 'approval',
+    applyPatchApproval: 'approval',
+    execCommandApproval: 'approval',
+    'item/tool/call': 'other',
+    'account/chatgptAuthTokens/refresh': 'other',
+    'attestation/generate': 'other',
+  });
+  assert.deepStrictEqual(APPSERVER_INPUT_CODES, { INPUT_REQUIRED: 'appserver-input-required' });
+  assert(Object.isFrozen(APPSERVER_INPUT_CODES));
+  assert.deepStrictEqual(APPSERVER_INPUT_MESSAGES,
+    { INPUT_REQUIRED: 'forge-appserver-client: inbound input request refused; owner decision required' });
+  assert(Object.isFrozen(APPSERVER_INPUT_MESSAGES));
+  for (const message of Object.values(APPSERVER_INPUT_MESSAGES)) {
+    assert(!/terminated|timeout|network/i.test(message), message);
+    assert.strictEqual(isTransient(classifyError(message)), false, `${message} must not be transient`);
+  }
+}
+
+async function runInputStop(mock, dir, mode, extra = {}) {
+  const logFile = path.join(dir, `${mode}.log`);
+  const pidFile = path.join(dir, `${mode}.pid`);
+  const snapshots = [];
+  const error = await rejectionOf(startAppServerTurn({
+    cmd: process.execPath, args: [mock], cwd: dir, timeoutMs: 8000, interruptGraceMs: 1500,
+    env: { ...process.env, FORGE_APPSERVER_MOCK_MODE: mode, FORGE_APPSERVER_LOG_FILE: logFile, FORGE_APPSERVER_PID_FILE: pidFile },
+    onProgress: snapshot => snapshots.push(snapshot), ...extra,
+  }));
+  return { error, log: readLog(logFile), pidFile, snapshots };
+}
+
+function assertInputStop(label, run, records) {
+  const { error, log } = run;
+  assert.strictEqual(error.message, APPSERVER_INPUT_MESSAGES.INPUT_REQUIRED, `${label}: ${error.message}`);
+  assert.strictEqual(error.code, APPSERVER_INPUT_CODES.INPUT_REQUIRED);
+  assert.strictEqual(error.rpcError, undefined, 'never confused with the numeric JSON-RPC path');
+  assert.deepStrictEqual(error.inboundRequests, records, `${label}: input-class closed records only`);
+  assert.strictEqual(error.interrupt, INTERRUPT_OUTCOMES.ACKNOWLEDGED, `${label}: stopped through turn/interrupt`);
+  assert.strictEqual(error.turnId, 'turn-1');
+  assert(error.turnCompletions && Array.isArray(error.turnCompletions.records), `${label}: completion census present`);
+  assert(error.retention && error.retention.dropped, `${label}: retention census present`);
+  assert(error.discarded && error.discarded.kinds, `${label}: discard census present`);
+  assert.deepStrictEqual({ version: error.diagnostic.version, stage: error.diagnostic.stage, reason: error.diagnostic.reason },
+    { version: 1, stage: 'transport', reason: 'appserver-input-required' });
+  assert.strictEqual(error.diagnostic.observation.phase, 'failed');
+  assert.strictEqual(error.liveness, undefined, 'an input stop is not a liveness termination');
+  assertNoInboundLeak(label, errorView(error));
+  assertNoInboundLeak(`${label} progress`, run.snapshots);
+  // Refused first, then interrupted, on the peer's own record.
+  const refusal = log.findIndex(entry => entry.error_code === -32601 && entry.id === records[0].id);
+  const interrupt = log.findIndex(entry => entry.method === 'turn/interrupt');
+  assert(refusal >= 0, `${label}: the input request was answered with -32601`);
+  assert(interrupt > refusal, `${label}: turn/interrupt after the refusal`);
+  assert.deepStrictEqual(log[interrupt].params, { threadId: 'thread-1', turnId: 'turn-1' });
+  assert.strictEqual(log.filter(entry => entry.method === 'turn/start').length, 1, `${label}: no second turn`);
+  assert(!log.some(entry => typeof entry.error_message === 'string' && entry.error_message.includes(INBOUND_SENTINEL)),
+    `${label}: the refusal never echoes provider text`);
+}
+
+async function testRequestUserInputStopsTurn(mock, dir) {
+  const run = await runInputStop(mock, dir, 'request-user-input');
+  assertInputStop('requestUserInput', run, [INPUT_RECORD('req-1', 'item/tool/requestUserInput')]);
+  await waitForDeath(await readPidFileWhenWritten(run.pidFile, 'mock must record its pid'), 'the input stop kills the app-server');
+}
+
+async function testElicitationStopsTurn(mock, dir) {
+  const run = await runInputStop(mock, dir, 'elicitation');
+  assertInputStop('elicitation', run, [INPUT_RECORD(901, 'mcpServer/elicitation/request')]);
+  await waitForDeath(await readPidFileWhenWritten(run.pidFile, 'mock must record its pid'), 'the input stop kills the app-server');
+}
+
+// Retention already at its cap (approvals first): the input still stops the turn and
+// its record is still reported; the approvals stay refused, censused and closed.
+async function testApprovalThenInputAtCap(mock, dir) {
+  const run = await runInputStop(mock, dir, 'approval-then-input', { retentionLimits: { inboundRequests: 1 } });
+  assertInputStop('approval-then-input', run, [INPUT_RECORD('req-1', 'item/tool/requestUserInput')]);
+  assert.strictEqual(run.error.retention.limits.inboundRequests, 1);
+  assert.strictEqual(run.error.retention.dropped.inboundRequests, 3, 'two approvals and the input past the cap of one');
+  for (const id of [600, 601, 602]) {
+    assert(run.log.some(entry => entry.error_code === -32601 && entry.id === id), `approval ${id} still answered at the cap`);
+  }
+}
+
+// A matched completion that has not settled yet does not become a success.
+async function testInputWithConcurrentCompletion(mock, dir) {
+  const run = await runInputStop(mock, dir, 'input-with-completion');
+  assertInputStop('input-with-completion', run, [INPUT_RECORD('req-same-chunk', 'item/tool/requestUserInput')]);
+  assert.strictEqual(run.error.turnCompletions.matched, 1, 'the completion was matched and still lost to the input stop');
+  assert.strictEqual(run.error.turnStatus, undefined);
+}
+
+// approval/other/unknown keep today's behaviour: refused, the turn goes on and
+// completes. Unknown methods and malformed ids reach the record only as closed values.
+async function testOtherInboundClassesContinue(mock, dir) {
+  const logFile = path.join(dir, 'unknown-request.log');
+  const result = await startAppServerTurn({
+    cmd: process.execPath, args: [mock], cwd: dir, timeoutMs: 4000,
+    env: { ...process.env, FORGE_APPSERVER_MOCK_MODE: 'unknown-request', FORGE_APPSERVER_LOG_FILE: logFile },
+  });
+  assert.strictEqual(result.turnStatus, TURN_STATUS_SUCCESS);
+  assert.deepStrictEqual(result.inboundRequests, [
+    { id: null, method: 'unknown', class: 'unknown', thread_id: 'thread-1', turn_id: 'turn-1' },
+    { id: null, method: 'item/tool/call', class: 'other', thread_id: 'thread-1', turn_id: 'turn-1' },
+    { id: 903, method: 'item/fileChange/requestApproval', class: 'approval', thread_id: 'thread-1', turn_id: 'turn-1' },
+  ]);
+  assertNoInboundLeak('unknown/other/approval records', { inboundRequests: result.inboundRequests,
+    retention: result.retention, discarded: result.discarded, turnCompletions: result.turnCompletions });
+  const log = readLog(logFile);
+  assert.strictEqual(log.filter(entry => entry.error_code === -32601).length, 3, 'every inbound request is refused');
+  assert(!log.some(entry => entry.method === 'turn/interrupt'), 'approval, other and unknown never stop the turn');
+  assert(!log.some(entry => typeof entry.error_message === 'string' && entry.error_message.includes(INBOUND_SENTINEL)),
+    'the refusal of an unknown method never echoes it');
 }
 
 // R16. An unterminated line is dropped once past the cap, named in the same census as
@@ -1465,8 +1799,22 @@ async function main() {
     await testBusy(mock, dir);
     await testForeignCompletionIgnored(mock, dir);
     await testNonSuccessStatusRejects(mock, dir);
+    await testModelNotFound(mock, dir);
+    process.stdout.write('PASS C02 modelNotFound client: matched failed turn, fixed closed error, sanitized census and pin vocabulary\n');
+    await testTypedFailureRegressions(mock, dir);
+    process.stdout.write('PASS C02 modelNotFound regressions: other null object foreign and interrupted completions stay generic\n');
     await testExitAfterCompleted(mock, dir);
     await testRetentionCaps(mock, dir);
+    await testInboundInventory();
+    process.stdout.write('PASS C10 inbound inventory: ten documented methods, closed classes and fixed non-transient input verdict\n');
+    await testRequestUserInputStopsTurn(mock, dir);
+    await testElicitationStopsTurn(mock, dir);
+    process.stdout.write('PASS C10 inbound input: refused with -32601, turn interrupted and killed, closed records without params\n');
+    await testApprovalThenInputAtCap(mock, dir);
+    await testInputWithConcurrentCompletion(mock, dir);
+    process.stdout.write('PASS C10 inbound input negatives: retention at cap and a matched unsettled completion still stop the turn\n');
+    await testOtherInboundClassesContinue(mock, dir);
+    process.stdout.write('PASS C10 inbound approval/other/unknown: refused, turn continues, malformed ids and methods closed\n');
     await testOversizedLine(mock, dir);
     await testStderrTailIsBytes(mock, dir);
     // Sized from a live measurement rather than a constant: see measureHandshakeMs.

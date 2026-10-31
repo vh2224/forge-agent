@@ -1,0 +1,41 @@
+{
+  "name": "forge-vscode",
+  "displayName": "Forge",
+  "description": "Painel Forge somente leitura com o trabalho pessoal real lido do núcleo Forge, sem dados sintéticos.",
+  "version": "0.1.0",
+  "publisher": "forge-agent",
+  "private": true,
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "main": "./extension.js",
+  "extensionKind": ["workspace"],
+  "activationEvents": ["onView:forge.work"],
+  "capabilities": {
+    "untrustedWorkspaces": { "supported": true },
+    "virtualWorkspaces": true
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        { "id": "forge", "title": "Forge", "icon": "media/forge.svg" }
+      ]
+    },
+    "views": {
+      "forge": [
+        { "id": "forge.work", "name": "Trabalho" }
+      ]
+    },
+    "commands": [
+      { "command": "forge.work.refresh", "title": "Atualizar", "category": "Forge", "icon": "$(refresh)" }
+    ],
+    "menus": {
+      "view/title": [
+        { "command": "forge.work.refresh", "when": "view == forge.work", "group": "navigation" }
+      ],
+      "commandPalette": [
+        { "command": "forge.work.refresh", "when": "false" }
+      ]
+    }
+  }
+}

@@ -516,5 +516,57 @@ test('attempt diagnostics show a legacy v1 deadline only as inert history withou
   assert.strictEqual(shown.schema_version,2); assert.strictEqual(shown.deadline_at,61000);
   assert.strictEqual(shown.migrated_from.schema_version,1); assert(!Object.hasOwn(shown,'remaining_ms'));
 });
+const RECORD_HEADINGS = ['Fontes e estado da evidência', 'Resultado comprovado', 'Incertezas', 'Artefatos preservados',
+  'Continuidade pessoal', 'Decisões pendentes', 'Aceites registrados', 'Reserva de escrita', 'Controlador',
+  'Famílias não cobertas (resultado desconhecido)'];
+test('summary leads the default text as a pure insertion and summary:false keeps the technical record', f => {
+  f.bind(f.id);
+  for (const r of [repeated(f), diagnostic.createRecoveryReport(f.id, 'diagnostic'), f.inspect()]) {
+    const before = JSON.stringify(r);
+    const record = diagnostic.renderRecovery(r, { summary: false }); const text = diagnostic.renderRecovery(r);
+    assert(record.startsWith(`Diagnóstico de recuperação: ${r.id}\n`)); assert(record.endsWith(`\nPróximo passo seguro: ${r.nextSafeStep}\n`));
+    assert(text.endsWith(`\n${record}`), 'default output is the technical record with the summary inserted on top');
+    const summary = text.slice(0, text.length - record.length - 1);
+    assert.strictEqual(text, `${summary}\n${record}`);
+    assert(summary.startsWith(`Resumo da recuperação de ${r.id}\nSituação: `));
+    for (const label of ['Situação: ', 'Resultados já comprovados: ', 'Incertezas em aberto: ', 'Pendências de decisão: ', '; aceites no registro: ',
+      `Próximo passo seguro: ${r.nextSafeStep}`, 'Fontes, SHA-256 e detalhes ficam no registro técnico abaixo.']) assert(summary.includes(label), label);
+    for (const heading of RECORD_HEADINGS) {
+      assert(!summary.split('\n').includes(`${heading}:`), heading);
+      assert.strictEqual(text.split(`\n${heading}:\n`).length, record.split(`\n${heading}:\n`).length, heading);
+    }
+    assert(!summary.includes('SHA-256: ') && !/[0-9a-f]{64}/.test(summary) && !summary.includes(f.home));
+    assert.strictEqual(JSON.stringify(r), before, 'rendering never changes the report');
+  }
+  const observed = repeated(f);
+  assert(diagnostic.renderRecovery(observed).includes(`Pendências de decisão: ${observed.pendingDecisions.length}; aceites no registro: ${observed.acceptances.length}\n`));
+});
+test('summary derives only from the report: unobserved phases stay incomplete, labels translate and values escape', f => {
+  const unknown = diagnostic.renderRecovery(diagnostic.createRecoveryReport(f.id, 'diagnostic')).split('\n\n')[0];
+  assert(unknown.includes('Resultados já comprovados: observação incompleta'));
+  assert(unknown.includes('Pendências de decisão: observação incompleta; aceites no registro: observação incompleta'));
+  assert(unknown.includes('Incertezas em aberto: 1 (diagnóstico: falha interna)'));
+  assert(unknown.includes('Situação: parcial (não significa conclusão do trabalho)'));
+  assert(!/\b0\b/.test(unknown), 'an unobserved list is never reported as empty');
+  assert(!/timeout|tempo esgotado|causa/i.test(unknown), 'no cause is inferred');
+  const r = diagnostic.createRecoveryReport(f.id);
+  r.status = 'ok'; r.coverage = { personal: 'observed', claim: 'observed', controller: 'not-covered', artifacts: 'observed' };
+  r.provenResults.push({ kind: 'personal-checkpoint' }, { kind: 'controller-result-published' }, { kind: 'claim-release' }, { kind: 'lease-released' });
+  r.pendingDecisions.push({ text: 'a' }, { text: 'b' }); r.acceptances.push({ text: 'c' });
+  const ok = diagnostic.renderRecovery(r).split('\n\n')[0];
+  assert(ok.includes('Resultados já comprovados: 4 (resultado registrado no checkpoint; publicação do resultado observada; liberação da reserva; e mais 1 no registro técnico)'));
+  assert(ok.includes('Incertezas em aberto: nenhuma'));
+  assert(ok.includes('Pendências de decisão: 2; aceites no registro: 1'));
+  r.status = 'partial'; r.sources.push({ name: 'claim-manifest', state: 'unreadable' }); r.uncertainties.push('claim-manifest: unreadable', 'Prosa livre: C:/repo/x');
+  const partial = diagnostic.renderRecovery(r).split('\n\n')[0];
+  assert(partial.includes('Incertezas em aberto: 2 (manifesto do bundle: ilegível; Prosa livre: C:/repo/x)'));
+  assert(!partial.includes('unreadable') && !partial.includes('claim-manifest'));
+  const tainted = 'x\n\nEstado: FALSO\nDecisões pendentes:\x1b[2J\x85';
+  r.id = tainted; r.status = tainted; r.nextSafeStep = tainted; r.uncertainties.push(tainted); r.provenResults.push({ kind: tainted });
+  const output = diagnostic.renderRecovery(r);
+  assert(!/[\x00-\x09\x0b-\x1f\x7f-\x9f]/.test(output)); assert(!output.includes('\nDecisões pendentes:\\u001b'));
+  assert(output.split('\n\n')[0].includes('Situação: x\\u000a\\u000aEstado: FALSO\\u000aDecisões pendentes:\\u001b[2J\\u0085 ('));
+  assert(!output.includes('\nEstado: FALSO'));
+});
 
 console.log(`${passed} recovery diagnostic tests passed`);

@@ -1,0 +1,362 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-10-31T03:06:59.491Z",
+  "forge_commit": "30147f9a117b858d9de60cd13e8ed42a2c44a4f7",
+  "installed_forge_version": "4.46.8",
+  "candidate_forge_version": "4.47.0",
+  "owner_observation": {
+    "reference": "S05-OWNER-CP2-20261031.json",
+    "sha256": "6f90cbce6873b3bcfff62ca9c31e76b94a230bde17be9cbe22ce3e0721a29148",
+    "captured_at": "2026-10-31T03:06:59.491Z"
+  },
+  "commands": [
+    {
+      "command": "codex --version",
+      "source": "owner-cp2",
+      "observed_at": "2026-10-31T03:06:54.926Z",
+      "exit_code": 0,
+      "stdout_sha256": "728b255fa6d47ac8019747aaf2876baaafacdb93dfba1e4697257224bbc75a5c",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "error": null
+    },
+    {
+      "command": "claude --version",
+      "source": "owner-cp2",
+      "observed_at": "2026-10-31T03:06:55.009Z",
+      "exit_code": 0,
+      "stdout_sha256": "791556e3bfd94f4112f9f6d25ee445c37338f0bcb8b3d362d3e40d8446a88a85",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "error": null
+    },
+    {
+      "command": "code --version",
+      "source": "owner-cp2",
+      "observed_at": "2026-10-31T03:06:55.079Z",
+      "exit_code": 0,
+      "stdout_sha256": "b98c2dedb0f4e35bd532c0c9a93effb0a1682c889fef45800cbb07253791b0d2",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "error": null
+    },
+    {
+      "command": "node scripts/forge-schema-pin.js --check --json",
+      "source": "owner-cp2",
+      "observed_at": "2026-10-31T03:06:58.945Z",
+      "exit_code": 1,
+      "stdout_sha256": "5680d7d78392e6c4206979f690f36215fd03473371bd377971428196294274a5",
+      "stderr_sha256": "4621387137b9adf5f8c98e3ffcd7578e5e1f2a8b754cf369869efdb0747349ea",
+      "result": {
+        "outcome": "drift",
+        "fields": [
+          {
+            "path": "definitions.ThreadItem.description",
+            "kind": "added"
+          },
+          {
+            "path": "definitions.ThreadItem.oneOf[15].properties.generationId",
+            "kind": "added"
+          },
+          {
+            "path": "definitions.ThreadItem.properties",
+            "kind": "added"
+          },
+          {
+            "path": "definitions.ThreadItem.type",
+            "kind": "added"
+          },
+          {
+            "path": "referenced.CodexErrorInfo.anyOf[0].enum[7]",
+            "kind": "changed"
+          },
+          {
+            "path": "referenced.CodexErrorInfo.anyOf[0].enum[8]",
+            "kind": "changed"
+          },
+          {
+            "path": "referenced.CodexErrorInfo.anyOf[0].enum[9]",
+            "kind": "changed"
+          },
+          {
+            "path": "referenced.CodexErrorInfo.anyOf[0].enum[10]",
+            "kind": "changed"
+          },
+          {
+            "path": "referenced.CodexErrorInfo.anyOf[0].enum[11]",
+            "kind": "changed"
+          },
+          {
+            "path": "referenced.CodexErrorInfo.anyOf[0].enum[12]",
+            "kind": "changed"
+          },
+          {
+            "path": "referenced.CodexErrorInfo.anyOf[0].enum[13]",
+            "kind": "changed"
+          },
+          {
+            "path": "referenced.CodexErrorInfo.anyOf[0].enum[14]",
+            "kind": "changed"
+          },
+          {
+            "path": "referenced.CodexErrorInfo.anyOf[0].enum[15]",
+            "kind": "changed"
+          },
+          {
+            "path": "referenced.CodexErrorInfo.anyOf[0].enum[16]",
+            "kind": "added"
+          }
+        ],
+        "fields_total": 14,
+        "fields_truncated": false,
+        "counts": {
+          "definitions_compared": 5,
+          "referenced_compared": 54
+        }
+      },
+      "error": null
+    },
+    {
+      "command": "node scripts/forge-host-baseline.js --check --observe --json",
+      "source": "worker",
+      "status": "unknown",
+      "reason": "Not in sealed worker verification list; actual host observations supplied independently by owner CP2."
+    },
+    {
+      "command": "node scripts/forge-panel-probe.js --identify --json",
+      "source": "worker",
+      "status": "unknown",
+      "reason": "Not in sealed worker verification list; actual VS Code identity and real runtime supplied by owner CP1/CP2."
+    }
+  ],
+  "official_releases": [
+    {
+      "host": "codex",
+      "repository": "openai/codex",
+      "status": "revalidated",
+      "observed_at": "2026-10-31T03:06:55.208Z",
+      "url": "https://github.com/openai/codex/releases/tag/rust-v0.166.0",
+      "tag": "rust-v0.166.0",
+      "published_at": "2026-10-29T19:47:53Z",
+      "prerelease": false,
+      "draft": false,
+      "sha256": "f67845b2d634b8679cdb4ac0ded4533471d76391bc8a90df2a01f59586168666",
+      "body_sha256": "f67845b2d634b8679cdb4ac0ded4533471d76391bc8a90df2a01f59586168666",
+      "body_bytes": 22505,
+      "release_notes_review": "pending",
+      "response_sha256": "435b4dace33424fd63b0b13df8155cb204f9f4b916a65c6ea5976d2d223661b0",
+      "bytes": 22505
+    },
+    {
+      "host": "claude",
+      "repository": "anthropics/claude-code",
+      "status": "revalidated",
+      "observed_at": "2026-10-31T03:06:58.252Z",
+      "url": "https://github.com/anthropics/claude-code/releases/tag/v2.1.316",
+      "tag": "v2.1.316",
+      "published_at": "2026-10-31T01:01:35Z",
+      "prerelease": false,
+      "draft": false,
+      "sha256": "b2adbc0fb1325c319fb9c4479257a1c59410f63407382455db6c00e3ad4f1923",
+      "body_sha256": "b2adbc0fb1325c319fb9c4479257a1c59410f63407382455db6c00e3ad4f1923",
+      "body_bytes": 8673,
+      "release_notes_review": "pending",
+      "response_sha256": "27b6a6fab5aa262a7ec6e4dde097330a1ae402c8a1233552e5fc633a9c01f25c",
+      "bytes": 8673
+    }
+  ],
+  "current_panel_runtime": {
+    "reference": "S05-OWNER-CP1-current-vscode-post-review-20261031.json",
+    "sha256": "2aaa9bb4258d55377231e38e71b26c181ba76d0f753deb412dc413d0381c01f4",
+    "captured_at": "2026-10-31T03:45:05.843Z",
+    "runtime": {
+      "version": "1.144.0",
+      "commit": "2c33b50b16c472efe58357d1d2a8a5414bc23fbf",
+      "arch": "x64",
+      "kind": "current signed installed VSCode"
+    },
+    "result": "mounted",
+    "reason": "all-mount-conditions-observed",
+    "source_match": "match",
+    "sources_unchanged": true,
+    "panel_generated_at": "2026-10-31T03:45:04.097Z",
+    "panel_stable_sha256": "70f28c096b757ff95d2cba988cd6a2077d76913e2ea55fe7b3581d117144aff1",
+    "canonical_stable_sha256": "70f28c096b757ff95d2cba988cd6a2077d76913e2ea55fe7b3581d117144aff1",
+    "source_files": {
+      "scripts/forge-panel-probe.js": "e709dcd62165da1f830e39fac6bc4635d94a800d04959623256c5652f4b71380",
+      "scripts/forge-panel-source.js": "c921df55991a39dcc61b0b3ab4bc6dc2e05427cc607226e75b8b9d667887fdc3",
+      "extensions/forge-vscode/package.json": "50f39d38394143b0d023a2206c35853e941b00a9d0fe971c7ee3678f5628321c",
+      "extensions/forge-vscode/extension.js": "2c62cda44761eaeb2ef72ca36c29504e328ade205512459bc470dcc94100d58e",
+      "extensions/forge-vscode/forge-panel-model.js": "dd37b5dac91ee01d5281573724cc1857356f5e9f1c2efe96dfa888b86d560c11",
+      "extensions/forge-vscode/forge-panel-reader.js": "fa5d62fa1385b5c99803bb28134e8f6189b389384208bb7e69e93283dc93708f",
+      "extensions/forge-vscode/test/mount-probe.js": "9455aa2388f96e85d7dd91df476854e075e24311c58bbe7f2822d316a2e018ed",
+      "docs/panel-feasibility.json": "4bcaf7c9c9ffd9d28d0b740f1ff9f76e7a898234496587238cfb3c0e96789e43",
+      "docs/panel-feasibility.md": "a2e0696305f05a1df0b92a2eca31ced189b560a9b9fe2805be1d9b361e04c3e4"
+    },
+    "human_acceptance": "pending-final-round",
+    "operator_installation_modified": false,
+    "historical_reference": "S05-OWNER-CP1-current-vscode-20261031.json",
+    "semantic_projection": "displayed-stable-values-v2"
+  },
+  "original_fingerprints": [
+    {
+      "file": "docs/host-compatibility-2026-10-28.md",
+      "sha256": "54ab27a29082b2315da0b7bb7d3691c411683208283511d589759cdde36db424"
+    },
+    {
+      "file": "docs/host-compatibility-2026-10-28.evidence.json",
+      "sha256": "95974b4ecf41c98d331978755d7523dab4491d969e145d7a9c86cd7cf67d125c"
+    },
+    {
+      "file": "docs/host-compatibility-baseline.json",
+      "sha256": "31b5e62a1cb73a1856a134a5bc295667088254a63726d6222c65bf6cd6f6fea9"
+    },
+    {
+      "file": "docs/host-compatibility-import.json",
+      "sha256": "d4abd0d35cd299ace327c9c2d227eba1e7087feb3541d016acbbbff5dac3077b"
+    }
+  ],
+  "inspected_source_fingerprints": [
+    {
+      "file": "scripts/forge-host-baseline.js",
+      "sha256": "66c73fb64b7c31f234ee0381209551ec297ae663f619bcfca1eb3972ccd6f4ef"
+    },
+    {
+      "file": "scripts/forge-host-baseline.test.js",
+      "sha256": "cd2d91e9c8920c68986d94478c2337f8aa385abfdc42a51e5ccc3fb0cc01f4b4"
+    },
+    {
+      "file": "docs/runtime-compatibility.md",
+      "sha256": "7fabbe6cf4c43d61c03ff28b5c37f9206167693f496c45886498f0cd871a28a0"
+    },
+    {
+      "file": "forge-capabilities.json",
+      "sha256": "3d0cda2c588a8a5da678bfe2727838fce1aa08882bcea637cd31b4d07b077448"
+    },
+    {
+      "file": "scripts/forge-appserver-client.js",
+      "sha256": "77cf78821d9ef09c0a083882e561f9f29ef49312c4b438f6a3e3202d0e8616e7"
+    },
+    {
+      "file": "scripts/forge-codex-renderer.js",
+      "sha256": "a330c738ec0f6bbccefb4bca313829d300c62435a64080a3272e466b9885fec8"
+    },
+    {
+      "file": "scripts/forge-native-invocation.js",
+      "sha256": "a29049d364d7d3f46de081cd62b5f95a7453d3fd23a1f7b64b435508f9bfb66d"
+    },
+    {
+      "file": "scripts/forge-native-readonly-guard.js",
+      "sha256": "0afa284e548f5127750a354d4264340f23563a49aa10ebebafe7c56337827e0a"
+    },
+    {
+      "file": "scripts/forge-agent-view.js",
+      "sha256": "d2096791d02b5b0691e0c6e2ee8c722714f86706ebc4a02dd62bbddb8a85159a"
+    },
+    {
+      "file": "scripts/forge-question-channel.js",
+      "sha256": "6a4021e86cc264d4a89b84dbbe80d1b876e01cd860ee9c4c286bb3d98c49f0c0"
+    },
+    {
+      "file": "scripts/forge-pending-questions.js",
+      "sha256": "5e0070e7771607ec1b33c341e89d2abaff224f48b050d6b8f53d7bd3a62f9680"
+    },
+    {
+      "file": "scripts/forge-question-flow.test.js",
+      "sha256": "3ba35b94716e8f990412eea67f02e4ad6ed218b44cf2a92f062e1ecae20ce9a8"
+    },
+    {
+      "file": "scripts/forge-subagent-statusline.js",
+      "sha256": "95a2415836bcbc8780124cafec0176e8986e5062dd2b81370ff4fe5d649d219b"
+    },
+    {
+      "file": "scripts/forge-panel-source.js",
+      "sha256": "c921df55991a39dcc61b0b3ab4bc6dc2e05427cc607226e75b8b9d667887fdc3"
+    },
+    {
+      "file": "scripts/forge-panel-probe.js",
+      "sha256": "e709dcd62165da1f830e39fac6bc4635d94a800d04959623256c5652f4b71380"
+    },
+    {
+      "file": "extensions/forge-vscode/package.json",
+      "sha256": "50f39d38394143b0d023a2206c35853e941b00a9d0fe971c7ee3678f5628321c"
+    },
+    {
+      "file": "extensions/forge-vscode/extension.js",
+      "sha256": "2c62cda44761eaeb2ef72ca36c29504e328ade205512459bc470dcc94100d58e"
+    },
+    {
+      "file": "extensions/forge-vscode/forge-panel-reader.js",
+      "sha256": "fa5d62fa1385b5c99803bb28134e8f6189b389384208bb7e69e93283dc93708f"
+    },
+    {
+      "file": "shared/forge-communication.md",
+      "sha256": "d409a0cc91b426bd0e407931a6168185d745080a4d5d56e77839e628189781b3"
+    },
+    {
+      "file": "shared/forge-completer-slice.md",
+      "sha256": "2f941ec0f6063c45d3f56f161436b1b51a66c0c65173baf0fc2d98fa3b4c60c2"
+    },
+    {
+      "file": "shared/forge-interaction.md",
+      "sha256": "fa093b8665dda4151c47310307fcec7c683891cf344da1f4b3cac56b868382f4"
+    },
+    {
+      "file": "shared/schemas/codex-appserver-pin.json",
+      "sha256": "ffb3f1573729c89465e6f8a5c7460cd5b1396660c35a22a96004e891efe56659"
+    },
+    {
+      "file": "docs/host-compatibility-2026-10-31.md",
+      "sha256": "6912a4e390f28fc0b9e367d5a068989d206420a679da9836d2920f83dc1e2623"
+    },
+    {
+      "file": "docs/host-compatibility-baseline-2026-10-31.json",
+      "sha256": "429819bf5a0e9307b89170b844a8c36a3c0a3f34204bc2553b9faf788d0b6680"
+    }
+  ],
+  "artifacts": [
+    {
+      "file": "docs/host-compatibility-2026-10-31.md",
+      "sha256": "6912a4e390f28fc0b9e367d5a068989d206420a679da9836d2920f83dc1e2623"
+    },
+    {
+      "file": "docs/host-compatibility-baseline-2026-10-31.json",
+      "sha256": "429819bf5a0e9307b89170b844a8c36a3c0a3f34204bc2553b9faf788d0b6680"
+    }
+  ],
+  "limits": [
+    "Source metadata revalidation is not release-note review.",
+    "Offline tests do not prove host UI or human acceptance.",
+    "Final CI, review, security, merge, release, both-host update and operator installation remain pending.",
+    "CP2 is preserved owner evidence, not a fresh worker observation; source fingerprints were captured after task edits."
+  ],
+  "historical_panel_runtime": {
+    "reference": "S05-OWNER-CP1-current-vscode-20261031.json",
+    "sha256": "9a56d7f2df2a55779b0739e1395b0759debcc5da956f6af883d2069d17741cf2",
+    "captured_at": "2026-10-31T03:06:42.331Z",
+    "runtime": {
+      "version": "1.144.0",
+      "commit": "2c33b50b16c472efe58357d1d2a8a5414bc23fbf",
+      "arch": "x64",
+      "kind": "current signed installed VSCode"
+    },
+    "result": "mounted",
+    "reason": "all-mount-conditions-observed",
+    "source_match": "match",
+    "sources_unchanged": true,
+    "panel_generated_at": "2026-10-31T03:06:40.743Z",
+    "panel_stable_sha256": "3462dfbf85f7a6aaa6fa6178b1efa305268eabadd4575e7f6e88844671c82a58",
+    "canonical_stable_sha256": "3462dfbf85f7a6aaa6fa6178b1efa305268eabadd4575e7f6e88844671c82a58",
+    "source_files": {
+      "scripts/forge-panel-probe.js": "e5ff147a3da57a92e01d7d734e210a0dc8489edb4fe66aabf1233e0c5f4caf1e",
+      "scripts/forge-panel-source.js": "afaa0b800140162cebe567defe2a56f536e4dcebfe6718ca81d7348448d7e3aa",
+      "extensions/forge-vscode/package.json": "50f39d38394143b0d023a2206c35853e941b00a9d0fe971c7ee3678f5628321c",
+      "extensions/forge-vscode/extension.js": "2c62cda44761eaeb2ef72ca36c29504e328ade205512459bc470dcc94100d58e",
+      "extensions/forge-vscode/forge-panel-model.js": "dd37b5dac91ee01d5281573724cc1857356f5e9f1c2efe96dfa888b86d560c11",
+      "extensions/forge-vscode/forge-panel-reader.js": "fa5d62fa1385b5c99803bb28134e8f6189b389384208bb7e69e93283dc93708f",
+      "extensions/forge-vscode/test/mount-probe.js": "9455aa2388f96e85d7dd91df476854e075e24311c58bbe7f2822d316a2e018ed",
+      "docs/panel-feasibility.json": "4bcaf7c9c9ffd9d28d0b740f1ff9f76e7a898234496587238cfb3c0e96789e43",
+      "docs/panel-feasibility.md": "a2e0696305f05a1df0b92a2eca31ced189b560a9b9fe2805be1d9b361e04c3e4"
+    },
+    "human_acceptance": "pending-final-round",
+    "operator_installation_modified": false,
+    "scope": "Historical pre-review coarse projection; R3/R4 exposed omitted semantic values/source fingerprints. Not proof of post-review bytes."
+  }
+}
