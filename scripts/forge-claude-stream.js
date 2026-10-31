@@ -332,6 +332,11 @@ function createReducer(options = {}) {
       if (!terminal) failure(events ? 'result-envelope-invalid' : 'output-empty');
       return terminal;
     },
+    provisionalTerminal() {
+      // A complete processed frame only; never flush pending bytes or treat it
+      // as validated output. Callers must retain it privately before disposal.
+      return disposed || terminal === null ? null : JSON.parse(JSON.stringify(terminal));
+    },
     dispose() {
       if (disposed) return;
       finalSnapshot = this.snapshot();

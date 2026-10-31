@@ -2580,7 +2580,7 @@ async function runWriteContractCore(opts, contract) {
   // Validate the result channel before the first heartbeat write. This resolves the
   // real parent and rejects symlink/junction tricks, including case-folded Windows
   // paths that lexically appear outside the workspace.
-  const resultFile = validateResultFileTarget(opts.resultFile, cwd);
+  let resultFile = validateResultFileTarget(opts.resultFile, cwd);
   let contextRoot = null;
   if (opts.contextRoot) {
     const requested = path.resolve(opts.contextRoot);
@@ -2698,12 +2698,14 @@ async function runWriteContractCore(opts, contract) {
   let degradation;
   let outputTokens = 0;
   let transportTelemetry = null;
+  let normalizedFinishedAt = null, normalizedDurationSecs = null;
 
   opts._sidecarIdentity.attempted = true;
   if (engine === 'claude') {
     let claudeOutput;
     try {
       claudeOutput = await invokeClaudeTransport({
+        provisionalStoreRoot: opts.provisionalStoreRoot,
         onProgress: opts.onProgress, calibrationOptions: opts.calibrationOptions, calibrationOptions: opts.calibrationOptions,
     onPackagedContext: opts.onPackagedContext, telemetryIdentity: opts.telemetryIdentity,
         telemetryRoute: opts.telemetryRoute, budgets: opts.executionContext?.budgets || opts.budgets,
@@ -2739,18 +2741,16 @@ async function runWriteContractCore(opts, contract) {
       // A contract with its own named invalid-result code reports it instead of
       // the transport's generic one; execute keeps claude-invalid-result.
       if (contract.invalidCode && error && error.code === 'claude-invalid-result') error.code = contract.invalidCode;
+      if (require('./forge-claude-provisional').describe(error)?.private_ref) {
+        require('./forge-claude-provisional').addFinalizer(error, (output, context) => {
+          resultFile = validateResultFileTarget(context.resultFile || resultFile, cwd);
+          if (contextRoot) validateResultFileTarget(resultFile, contextRoot);
+          return finishWrite(output);
+        }, { cacheOnReplay: true });
+      }
       throw error;
     }
-    parsed = claudeOutput && claudeOutput.candidate;
-    transportTelemetry = claudeOutput && claudeOutput.telemetry ? claudeOutput.telemetry : null;
-    // The adapter validates structured_output before returning it. Repeat the
-    // shared contract gate here so no alternate/mocked adapter can bypass the
-    // contract at the transport join.
-    if (!contract.validate(parsed)) {
-      throw boundaryError(contract.invalidCode || 'claude-invalid-result', contract.invalidClaudeMessage);
-    }
-    parsePath = 'structured-output';
-    outputTokens = countTokens(JSON.stringify(parsed));
+    acceptClaudeOutput(claudeOutput);
   } else {
     appServerOutput = await invokeCodexAppServer({
       onProgress: opts.onProgress, calibrationOptions: opts.calibrationOptions,
@@ -2782,6 +2782,21 @@ async function runWriteContractCore(opts, contract) {
     outputTokens = countTokens(rawContent);
   }
 
+  return finishWrite();
+  function acceptClaudeOutput(claudeOutput) {
+    parsed = claudeOutput && claudeOutput.candidate;
+    transportTelemetry = claudeOutput && claudeOutput.telemetry ? claudeOutput.telemetry : null;
+    // The adapter validates structured_output before returning it. Repeat the
+    // shared contract gate here so no alternate/mocked adapter can bypass the
+    // contract at the transport join.
+    if (!contract.validate(parsed)) {
+      throw boundaryError(contract.invalidCode || 'claude-invalid-result', contract.invalidClaudeMessage);
+    }
+    parsePath = 'structured-output';
+    outputTokens = countTokens(JSON.stringify(parsed));
+  }
+  async function finishWrite(claudeOutput) {
+    if (claudeOutput) acceptClaudeOutput(claudeOutput);
   // Persist response telemetry before post-response gates. If JSON/schema/HEAD/.gsd
   // validation fails, the adapter-failed marker preserves the tokens already spent.
   writeJsonAtomic(resultFile, {
@@ -2861,7 +2876,7 @@ async function runWriteContractCore(opts, contract) {
     if (contract.protectedCode) error.code = contract.protectedCode;
     throw error;
   }
-  const finishedAt = new Date().toISOString();
+  const finishedAt = normalizedFinishedAt ||= new Date().toISOString();
 
   // Keep both transports inside the existing nested envelope. A seam that stops
   // reporting its transport degrades to a named floor, never an absent public field.
@@ -2883,7 +2898,7 @@ async function runWriteContractCore(opts, contract) {
     vcsField: vcsName === 'svn' ? { vcs: 'svn' } : {},
     startedAt,
     finishedAt,
-    durationSecs: Math.round((Date.now() - startedMs) / 1000),
+    durationSecs: (normalizedDurationSecs ??= Math.round((Date.now() - startedMs) / 1000)),
     dispatchId,
     inputTokens,
     outputTokens,
@@ -2918,6 +2933,7 @@ async function runWriteContractCore(opts, contract) {
 
   writeJsonAtomic(resultFile, result);
   return result;
+  }
 }
 
 /**
@@ -2958,7 +2974,7 @@ async function runPlanCore(opts) {
   identityStage(opts, 'solicitado');
   authorizeSidecar('plan', { ...opts, ...sidecarOptions, cwd, engine });
 
-  const resultFile = validateResultFileTarget(opts.resultFile, cwd);
+  let resultFile = validateResultFileTarget(opts.resultFile, cwd);
 
   let contextText;
   try {
@@ -3028,6 +3044,7 @@ async function runPlanCore(opts) {
   // transport off this result file, so omitting it would make every plan-slice
   // dispatch report `no-transport-field` forever.
   const planOptions = {
+    provisionalStoreRoot: opts.provisionalStoreRoot,
     onProgress: opts.onProgress, calibrationOptions: opts.calibrationOptions,
     onPackagedContext: opts.onPackagedContext, telemetryIdentity: opts.telemetryIdentity,
     telemetryRoute: opts.telemetryRoute, budgets: opts.budgets,
@@ -3045,18 +3062,36 @@ async function runPlanCore(opts) {
   opts._sidecarIdentity.attempted = true;
   let transportTelemetry = null;
   let appServerOutput;
+  let normalizedFinishedAt = null, normalizedDurationSecs = null;
   if (engine === 'claude') {
     // Claude-only keys: planOptions also feeds the app-server branch unchanged.
     // The plan unit's session opt-in comes only from its owner (S05); review
     // legs never call runPlanCore and never receive `session`.
-    const claudeOutput = await invokeClaudeJson({ ...planOptions, onLiveness: opts.onLiveness,
+    try {
+      const claudeOutput = await invokeClaudeJson({ ...planOptions, onLiveness: opts.onLiveness,
       localProofIgnore: opts.localProofIgnore, ...(opts.claudeSession ? { session: opts.claudeSession } : {}) }, validatePlanResult);
-    transportTelemetry = claudeOutput.telemetry;
-    appServerOutput = { finalText: JSON.stringify(claudeOutput.candidate), transport: { kind: 'claude-cli', version: 'unknown' } };
+      acceptClaudePlanOutput(claudeOutput);
+    } catch (error) {
+      if (require('./forge-claude-provisional').describe(error)?.private_ref) {
+        require('./forge-claude-provisional').addFinalizer(error, (output, context) => {
+          resultFile = validateResultFileTarget(context.resultFile || resultFile, cwd);
+          if (opts.contextRoot) validateResultFileTarget(resultFile, opts.contextRoot);
+          return finishPlan(output);
+        }, { cacheOnReplay: true });
+      }
+      throw error;
+    }
   } else {
     appServerOutput = await invokeCodexAppServer({ ...planOptions, onLiveness: opts.onLiveness,
       localProofIgnore: opts.localProofIgnore });
   }
+  return finishPlan();
+  function acceptClaudePlanOutput(output) {
+    transportTelemetry = output.telemetry;
+    appServerOutput = { finalText: JSON.stringify(output.candidate), transport: { kind: 'claude-cli', version: 'unknown' } };
+  }
+  async function finishPlan(output) {
+    if (output) acceptClaudePlanOutput(output);
   const rawContent = appServerOutput.finalText || appServerOutput.agentTexts;
   // Anti-silence floor: an empty turn is a FAILURE, never an empty plan accepted in
   // silence. `codex exec` enforced this as "codex -o file is empty"; the app-server
@@ -3103,7 +3138,7 @@ async function runPlanCore(opts) {
     }
   }
 
-  const finishedAt = new Date().toISOString();
+  const finishedAt = normalizedFinishedAt ||= new Date().toISOString();
   const planTransport = appServerOutput.transport || { kind: 'unknown', version: 'unknown' };
   const result = {
     status: parsed.status,
@@ -3123,7 +3158,7 @@ async function runPlanCore(opts) {
     },
     started_at: startedAt,
     finished_at: finishedAt,
-    duration_secs: Math.round((Date.now() - startedMs) / 1000),
+    duration_secs: (normalizedDurationSecs ??= Math.round((Date.now() - startedMs) / 1000)),
     dispatch_id: dispatchId,
     input_tokens: inputTokens,
     output_tokens: outputTokens,
@@ -3134,6 +3169,7 @@ async function runPlanCore(opts) {
 
   writeJsonAtomic(resultFile, result);
   return result;
+  }
 }
 
 function runChallenge(opts) { return withSidecarIdentity('challenge', opts, runChallengeCore); }
