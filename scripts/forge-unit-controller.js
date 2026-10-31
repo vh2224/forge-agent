@@ -1010,22 +1010,26 @@ function physicalRoots(roots) {
     return { root_id: root.root_id, path: real, dev: String(stat.dev), ino: String(stat.ino) };
   }).sort((a, b) => a.root_id.localeCompare(b.root_id));
 }
-function inspectFailure(cwd, begin, failure, options) {
+function inspectFailure(cwd, begin, failure, options, terminal) {
   if (!options || typeof options.inspectAttempt !== 'function' || typeof options.processProbe !== 'function') {
     throw new ControllerError('failure-inspector-required', 'inspeção viva do host obrigatória');
   }
   const context = options.inspectAttempt({ cwd, begin: clone(begin), references: clone(failure || {}) });
   if (!context || typeof context.receipt_path !== 'string' || !context.request) throw new ControllerError('attempt-evidence-missing', 'receipt/pedido original ausente');
   const recovery = require('./forge-attempt-recovery.js');
-  const identity = recovery.requestIdentity(recovery.canonicalRequest(context.request));
+  const terminalInspection = terminal && context.request.linked_begin_key
+    ? recovery.inspectTerminalRequest(context.request, { ...options, ...terminal }) : null;
+  const identity = terminalInspection?.identity || recovery.requestIdentity(recovery.canonicalRequest(context.request));
   if (`${identity.unit_type}/${identity.task_id || identity.slice_id || identity.milestone_id}` !== begin.unit.key
     || identity.milestone_id !== begin.milestone || identity.host !== begin.host_runtime
     || identity.slice_id && begin.after.state.active_slice !== identity.slice_id) {
     throw new ControllerError('attempt-identity-mismatch', 'pedido original não corresponde ao begin');
   }
-  const inspection = recovery.inspectReceipt(context.receipt_path, { request: context.request, processProbe: options.processProbe });
+  // Terminal data is not a dispatch binding. Without one the inspector keeps
+  // writer_possible unknown, conservatively requiring every root reconciled.
+  const inspection = recovery.inspectReceipt(context.receipt_path, { request: terminalInspection ? undefined : context.request, processProbe: options.processProbe });
   if (inspection.receipt.recovery_identity_sha256 && inspection.receipt.recovery_identity_sha256 !== require('./forge-code-roots').digest(identity)
-    || inspection.receipt.fingerprint && inspection.receipt.fingerprint !== require('./forge-unit-sidecar').artifactFingerprint(context.request)) {
+    || inspection.receipt.fingerprint && inspection.receipt.fingerprint !== (terminalInspection?.fingerprint || require('./forge-unit-sidecar').artifactFingerprint(context.request))) {
     throw new ControllerError('attempt-identity-mismatch', 'receipt não corresponde ao pedido original');
   }
   if (!inspection.receipt_checked || inspection.process_stopped !== true) throw new ControllerError('process-not-stopped', 'processo ativo ou desconhecido');
@@ -1087,7 +1091,8 @@ function runTerminal(cwd, transaction, begin, input, options, guard) {
     assertNoSuccessor(cwd, begin, transaction.idempotency_key);
     const lease = forgeLease.inspectTerminal(guard, cwd, begin.unit.key, input.owner_token, begin.lease_generation);
     if (!lease.ok) throw new ControllerError('lease-owner-mismatch', lease.reason);
-    const live = inspectFailure(cwd, begin, input.failure, options);
+    const live = inspectFailure(cwd, begin, input.failure, options, { guard, ownerToken: input.owner_token,
+      transactionKey: transaction.idempotency_key, transactionChecksum: sha(transaction) });
     if (live.receipt_sha256 !== transaction.terminal_failure.safety.receipt_sha256 || sha(live.roots) !== sha(transaction.terminal_failure.safety.roots)
       || sha(live.pending_questions) !== sha(transaction.terminal_failure.safety.pending_questions)) throw new ControllerError('attempt-evidence-changed', 'evidência mudou durante o consumo');
     return lease;
@@ -1293,6 +1298,12 @@ function reenter(cwd, request, options = {}) {
 // Revalidation at the real sidecar boundary, including restart, uses live host
 // adapters again. A linked JSON record is a locator, never a capability.
 function validateLinkedEntry(cwd, key, options = {}) {
+  const entry = validateLinkedScope(cwd, key, options);
+  const begin = lookupRecord(cwd, 'transaction', key);
+  assertLease(cwd, begin.unit.key, options.ownerToken, begin.lease_generation);
+  return entry;
+}
+function validateLinkedScope(cwd, key, options) {
   const begin = lookupRecord(cwd, 'transaction', key);
   if (!begin?.linked_entry || begin.action !== 'begin' || begin.phase !== 'committed') throw new ControllerError('entry-invalid', 'begin vinculado ausente');
   const linked = begin.linked_entry;
@@ -1305,8 +1316,31 @@ function validateLinkedEntry(cwd, key, options = {}) {
   if (sha(live) !== sha(linked)) throw new ControllerError('entry-conflict', 'entrada mudou desde autorização');
   const questions = currentEntryQuestions(cwd, failure, options);
   assertQuestionsResolved(questions);
-  assertLease(cwd, begin.unit.key, ownerToken, begin.lease_generation);
   return { entry_digest: linked.entry_digest, entry_id: linked.entry_id, begin_key: key, unit: begin.unit.key, roots: linked.roots, classification: 'new-unit', pending_questions: questions };
+}
+
+function validateTerminalLinkedEntry(cwd, key, options = {}) {
+  const begin = lookupRecord(cwd, 'transaction', key);
+  if (!begin?.linked_entry) throw new ControllerError('entry-invalid', 'begin vinculado ausente');
+  forgeLease.assertTerminalGuard(options.guard, cwd, begin.unit.key);
+  const transaction = lookupRecord(cwd, 'transaction', options.transactionKey);
+  const expectedKey = `consume-failure:${sha({ begin: begin.idempotency_key, checksum: sha(begin) })}`;
+  if (!transaction || !PHASES.includes(transaction.phase) || transaction.phase === 'committed' || transaction.action !== 'fail'
+    || transaction.idempotency_key !== expectedKey || sha(transaction) !== options.transactionChecksum
+    || transaction.terminal_failure?.begin_key !== key || transaction.terminal_failure.begin_checksum !== sha(begin)
+    || transaction.terminal_failure.slice !== (begin.after.state.active_slice === '—' ? null : begin.after.state.active_slice)
+    || transaction.unit.key !== begin.unit.key || transaction.milestone !== begin.milestone
+    || transaction.host_runtime !== begin.host_runtime || transaction.owner_digest !== begin.owner_digest
+    || transaction.lease_generation !== begin.lease_generation || ownerDigest(options.ownerToken) !== begin.owner_digest) {
+    throw new ControllerError('terminal-inspection-invalid', 'transacao terminal divergente');
+  }
+  assertNoSuccessor(cwd, begin, expectedKey);
+  const lease = forgeLease.inspectTerminal(options.guard, cwd, begin.unit.key, options.ownerToken, begin.lease_generation);
+  if (!lease.ok) throw new ControllerError('lease-owner-mismatch', lease.reason);
+  if (!lease.present && !['lease-release-pending', 'lease-released', 'boundary-ready'].includes(transaction.phase)) {
+    throw new ControllerError('lease-required', 'lease ausente antes da fronteira de liberacao');
+  }
+  return validateLinkedScope(cwd, key, options);
 }
 
 function parseArgs(argv) {
@@ -1353,6 +1387,6 @@ module.exports = {
   transactionDir, resultDir, boundaryDir, eventsFile, transactionFile,
   resultFile, boundaryFile, readEvents, readJson, writeAtomic,
   lookupRecord, preflightPaths,
-  consumeFailure, reenter, failureProjection, validateLinkedEntry,
+  consumeFailure, reenter, failureProjection, validateLinkedEntry, validateTerminalLinkedEntry,
   dependencies: { forgeState, forgeRuns, forgePrefs, forgeRuntime, forgeIds, forgeLease },
 };

@@ -685,14 +685,9 @@ function unitLabel(request, loc) {
 }
 
 function artifactFingerprint(request) {
-  const copy = { ...request };
-  if (request.linked_begin_key) {
-    copy.linked_entry_identity = require('./forge-attempt-recovery').requestIdentity(require('./forge-attempt-recovery').canonicalRequest(request)).linked_entry;
-    delete copy.linkedEntryBinding;
-  }
-  for (const key of ['rawResult', 'invocationTelemetry', 'providerCalled', 'resultFile',
-    'signal', 'publicationSafe', 'publicationBoundary', 'waitForPublicationBoundary', 'ownerBroker']) delete copy[key];
-  return hash(JSON.stringify(copy));
+  const linked = request.linked_begin_key
+    ? require('./forge-attempt-recovery').requestIdentity(require('./forge-attempt-recovery').canonicalRequest(request)).linked_entry : null;
+  return require('./forge-request-fingerprint').projectFingerprint(request, linked);
 }
 
 function artifactAttemptFiles(request) {

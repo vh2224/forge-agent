@@ -91,6 +91,7 @@ function worker(f, operation) {
 }
 
 async function main() {
+  if (process.argv.includes('--terminal-linked')) return terminalLinkedRestarts();
   test('211 R1: deleting or truncating current state cannot erase a dispatch question', () => {
     for (const mutation of ['delete', 'truncate']) for (const boundary of ['cached', 'binding']) {
       const f = fixture();
@@ -636,6 +637,7 @@ async function main() {
       assert.strictEqual(invoke(f, 'reenter', consumed.snapshot, entryInput(f, consumed)).reason_code, 'entry-roots-mismatch');
     } finally { cleanup(f); fs.rmSync(code, { recursive: true, force: true }); }
   });
+  terminalLinkedRestarts();
   for (const point of ['after-intent', 'after-result-published', 'after-event-published', 'after-boundary-pending', 'after-state-published', 'after-lease-release-pending', 'after-lease-released', 'after-boundary-ready', 'after-committed']) test(`subprocess crash/restart ${point}`, () => {
     const f = fixture();
     try {
@@ -678,7 +680,141 @@ async function main() {
   }
 }
 
+function terminalLinkedRestarts() {
+  for (const point of ['after-state-published', 'after-lease-release-pending', 'after-release-before-phase', 'after-lease-released', 'after-boundary-ready']) {
+    const f = fixture();
+    try {
+      const consumed = consume(f), entered = invoke(f, 'reenter', consumed.snapshot, entryInput(f, consumed));
+      assert.strictEqual(entered.reason_code, 'entry-ready');
+      f.request = recovery.bindLinkedRequest({ ...f.request, linked_begin_key: entered.controller_result.details.transaction.idempotency_key },
+        { ...liveOptions(f), ownerToken: f.input.owner_token });
+      f.receiptFile = path.join(f.cwd, 'linked-receipt.json');
+      fs.writeFileSync(f.receiptFile, JSON.stringify({ phase: 'failed', recovery_identity_sha256: require('./forge-code-roots').digest(recovery.requestIdentity(f.request)),
+        fingerprint: require('./forge-unit-sidecar').artifactFingerprint(f.request), failure: { reason_code: 'claude-timeout', provider_called: 'unknown' } }));
+      f.selected = entered;
+      f.begin = entered.controller_result.details.transaction;
+      fs.writeFileSync(path.join(f.cwd, 'fixture.json'), JSON.stringify(f));
+      const before = history(f);
+      const child = spawnSync(process.execPath, [__filename, '--linked-consume-worker', f.cwd, point], { encoding: 'utf8', timeout: 20000 });
+      assert.strictEqual(child.status, 23, child.stderr || child.stdout);
+      if (point === 'after-lease-released') {
+        const negative = spawnSync(process.execPath, [__filename, '--linked-negative-worker', f.cwd], { encoding: 'utf8', timeout: 20000 });
+        assert.strictEqual(negative.status, 0, negative.stderr || negative.stdout);
+      }
+      const observe = spawnSync(process.execPath, [__filename, '--linked-resume-worker', f.cwd], { encoding: 'utf8', timeout: 20000 });
+      assert.strictEqual(observe.status, 0, observe.stderr || observe.stdout);
+      assert.deepStrictEqual(history(f), before);
+      assert.strictEqual(controller.readEvents(controller.eventsFile(f.cwd, f.milestone)).filter(row => row.action === 'fail').length, 2);
+      assert.strictEqual(lease.observe(f.cwd, f.begin.unit).lease, null);
+      console.log(`ok - issue301 fresh linked terminal consumption at ${point}, no dispatch binding`);
+    } finally { cleanup(f); }
+  }
+}
+
+function terminalLinkedNegatives(f) {
+  const key = f.request.linked_begin_key;
+  const begin = controller.lookupRecord(f.cwd, 'transaction', key);
+  const transactions = controller.pendingTransactions(f.cwd);
+  assert.strictEqual(transactions.length, 1);
+  const transaction = transactions[0];
+  const stable = value => value && typeof value === 'object'
+    ? Array.isArray(value) ? value.map(stable) : Object.fromEntries(Object.keys(value).sort().map(k => [k, stable(value[k])])) : value;
+  const checksum = value => digest(JSON.stringify(stable(value)));
+  const frozenHistory = history(f);
+  const questionDirs = ['entry-questions', 'entry-question-inventories'].map(name => path.join(f.cwd, '.gsd', 'forge', name));
+  const questionFiles = () => questionDirs.flatMap(dir => fs.existsSync(dir) ? fs.readdirSync(dir).map(file => path.join(dir, file)) : []);
+  const questionBytes = new Map(questionFiles().map(file => [file, fs.readFileSync(file)]));
+  const base = liveOptions(f);
+  lease.withTerminalGuard(f.cwd, begin.unit.key, guard => {
+    const context = { ...base, guard, ownerToken: f.input.owner_token, transactionKey: transaction.idempotency_key, transactionChecksum: checksum(transaction) };
+    const data = recovery.inspectTerminalRequest(f.request, context);
+    assert.strictEqual(data.identity.linked_entry.entry_id, 'fixture-entry-1');
+    assert.strictEqual(data.fingerprint, JSON.parse(fs.readFileSync(f.receiptFile)).fingerprint);
+    assert.throws(() => recovery.requestIdentity({ ...f.request, linkedEntryBinding: data }), /linked-entry-binding-required/);
+    assert.throws(() => require('./forge-unit-sidecar').artifactFingerprint({ ...f.request, linkedEntryBinding: data }), /linked-entry-binding-required/);
+    assert.throws(() => recovery.inspectTerminalRequest({ ...f.request, sliceId: 'S04' }, context), /linked-entry-binding-required/);
+    const file = controller.transactionFile(f.cwd, transaction.idempotency_key), original = fs.readFileSync(file);
+    try {
+      for (const [change, expected] of [
+        [row => { row.phase = 'state-published'; }, 'lease-required'],
+        [row => { row.phase = 'foreign-phase'; }, 'terminal-inspection-invalid'],
+        [row => { row.terminal_failure.begin_checksum = '0'.repeat(64); }, 'terminal-inspection-invalid'],
+        [row => { row.lease_generation = 'foreign'; }, 'terminal-inspection-invalid'],
+        [row => { row.owner_digest = 'foreign'; }, 'terminal-inspection-invalid'],
+        [row => { row.host_runtime = 'claude'; }, 'terminal-inspection-invalid'],
+      ]) {
+        const candidate = JSON.parse(JSON.stringify(transaction)); change(candidate);
+        controller.writeAtomic(file, candidate);
+        assert.throws(() => recovery.inspectTerminalRequest(f.request, { ...context, transactionChecksum: checksum(candidate) }), error => error.code === expected);
+      }
+    } finally { fs.writeFileSync(file, original); }
+    for (const changes of [
+      { guard: {} }, { transactionChecksum: '0'.repeat(64) }, { transactionKey: 'foreign' }, { ownerToken: 'foreign' },
+      { captureEntryBaseline: () => ({ sha256: 'b'.repeat(64), roots: [{ root_id: 'primary', path: f.cwd }] }) },
+      { captureEntryBaseline: () => ({ sha256: 'a'.repeat(64), roots: [] }) },
+      { entryAuthority: recovery.createAuthority(() => ({ status: 'pending' })) },
+      { questionStateAdapter: () => ({ answers: [], questions: [{ id: 'new-functional', question: 'Choose?' }] }) },
+    ]) {
+      // A newly observed pending question persists by contract; test it last.
+      assert.throws(() => recovery.inspectTerminalRequest(f.request, { ...context, ...changes }));
+    }
+  });
+  assert.throws(() => recovery.inspectTerminalRequest(f.request, { ...base, guard: {}, ownerToken: f.input.owner_token,
+    transactionKey: transaction.idempotency_key, transactionChecksum: checksum(transaction) }));
+  assert(questionFiles().some(file => fs.readFileSync(file, 'utf8').includes('new-functional')));
+  // Restore only these disposable fixture projections after proving the new
+  // pending question persisted and blocked inspection. Operational code never
+  // erases questions; the independent positive restart uses its original input.
+  for (const file of questionFiles()) if (!questionBytes.has(file)) fs.unlinkSync(file);
+  for (const [file, bytes] of questionBytes) fs.writeFileSync(file, bytes);
+  for (const [changes, expected] of [
+    [{ processProbe: () => 'alive' }, 'process-not-stopped'],
+    [{ processProbe: () => 'unknown' }, 'process-not-stopped'],
+    [{ reconcileRoots: () => ({ reconciled: false }) }, 'roots-unreconciled'],
+  ]) {
+    const result = consume(f, { ...base, ...changes });
+    assert.strictEqual(result.reason_code, expected);
+  }
+  const receiptBytes = fs.readFileSync(f.receiptFile), receipt = JSON.parse(receiptBytes);
+  try {
+    fs.writeFileSync(f.receiptFile, JSON.stringify({ ...receipt, saved_candidate: { file: 'candidate.json' } }));
+    assert.strictEqual(consume(f).reason_code, 'saved-response-replay-required');
+    fs.writeFileSync(f.receiptFile, JSON.stringify({ ...receipt, failure: { ...receipt.failure, reason_code: 'different-failure' } }));
+    assert.strictEqual(consume(f).reason_code, 'attempt-evidence-changed');
+  } finally { fs.writeFileSync(f.receiptFile, receiptBytes); }
+  const foreign = lease.acquire(f.cwd, begin.unit.key, { ownerToken: 'foreign', requestId: 'foreign', hostRuntime: f.host });
+  assert.strictEqual(foreign.ok, true);
+  try { assert.strictEqual(consume(f).reason_code, 'lease-owner-mismatch'); }
+  finally { assert.strictEqual(lease.release(f.cwd, begin.unit.key, 'foreign', foreign.generation).ok, true); }
+  assert.deepStrictEqual(history(f), frozenHistory);
+}
+
 if (require.main === module) {
+  if (['--linked-consume-worker', '--linked-resume-worker', '--linked-negative-worker'].includes(process.argv[2])) {
+    const f = JSON.parse(fs.readFileSync(path.join(process.argv[3], 'fixture.json')));
+    if (process.argv[2] === '--linked-consume-worker') {
+      f.request = recovery.bindLinkedRequest(f.request, { ...liveOptions(f), ownerToken: f.input.owner_token });
+      if (process.argv[4] === 'after-release-before-phase') {
+        const release = lease.releaseTerminal;
+        lease.releaseTerminal = (...args) => { const result = release(...args); assert.strictEqual(result.ok, true); process.exit(23); };
+      }
+      const result = consume(f, liveOptions(f, { failpoint: point => { if (point === process.argv[4]) process.exit(23); return false; } }));
+      throw Error(`linked consume did not reach failpoint: ${result.reason_code}`);
+    } else if (process.argv[2] === '--linked-negative-worker') {
+      terminalLinkedNegatives(f);
+    } else {
+      if (lease.observe(f.cwd, f.begin.unit).lease) {
+        f.request = recovery.bindLinkedRequest(f.request, { ...liveOptions(f), ownerToken: f.input.owner_token });
+      } else {
+        assert.throws(() => recovery.bindLinkedRequest(f.request, { ...liveOptions(f), ownerToken: f.input.owner_token }), /lease-required/);
+        assert.throws(() => recovery.requestIdentity(f.request), /linked-entry-binding-required/);
+      }
+      const result = consume(f);
+      assert.strictEqual(result.reason_code, 'failure-consumed', JSON.stringify(result));
+      assert.throws(() => recovery.bindLinkedRequest(f.request, { ...liveOptions(f), ownerToken: f.input.owner_token }), /lease-required/);
+      assert.strictEqual(consume(f).reason_code, 'failure-consumed');
+    }
+  } else
   if (['--consume-worker', '--guard-worker', '--race-worker'].includes(process.argv[2])) {
     const f = JSON.parse(fs.readFileSync(path.join(process.argv[3], 'fixture.json')));
     if (process.argv[2] === '--guard-worker') {
