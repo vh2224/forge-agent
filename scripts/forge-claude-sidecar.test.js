@@ -185,7 +185,8 @@ function loadAdapter({ resolver, spawnImpl } = {}) {
     const adapter = require(ADAPTER_PATH);
     return { ...adapter, invokeClaudeSidecar: options => adapter.invokeClaudeSidecar(
       options && typeof options === 'object' && options.calibrationOptions === undefined
-        ? { ...options, calibrationOptions: DEFAULT_CALIBRATION_OPTIONS } : options) };
+        ? { provisionalStoreRoot: path.join(ROOT, 'private-terminals'), ...options, calibrationOptions: DEFAULT_CALIBRATION_OPTIONS }
+        : options && typeof options === 'object' ? { provisionalStoreRoot: path.join(ROOT, 'private-terminals'), ...options } : options) };
   } finally {
     accounts.resolveLaunch = originalResolver;
     childProcess.spawn = originalSpawn;
@@ -2652,6 +2653,49 @@ test('S03/T01 success carries tool_activity and never terminal_observed', async 
   assert.strictEqual(run.result.observedSessionId, undefined, 'the session confirmation stays internal');
   assertTerminalPrivacy(run, snapshots);
   console.log('PASS S03/T01 sidecar success: tool_activity by class, no terminal_observed, no tool name/id/argument');
+});
+
+test('provisional: delayed zero close validates; late failures and invalid identity/schema never promote', async () => {
+  const privateApi = require('./forge-claude-provisional');
+  for (const mode of ['valid', 'schema', 'model', 'session', 'duplicate', 'nonzero', 'secret']) {
+    let child, accelerated = false, removals = 0;
+    const fixture = writeFixture(`provisional-${mode}.js`, ENVELOPE_PRELUDE + `
+      const args=process.argv.slice(2);if(args.includes('--version')){console.log('2.1.310 (Claude Code)');process.exit(0);}
+      const sid=args[args.indexOf('--session-id')+1];
+      console.log(JSON.stringify({type:'system',subtype:'init',session_id:${mode === 'session' ? "'550e8400-e29b-41d4-a716-446655440000'" : 'sid'}}));
+      const packet=JSON.parse(envelope(${JSON.stringify(okBlock('retained negative matrix'))}));
+      ${mode === 'schema' ? 'packet.structured_output.summary=23;' : ''}
+      ${mode === 'model' ? "packet.modelUsage={'claude-other-model':{inputTokens:1}};" : ''}
+      console.log(JSON.stringify(packet));
+      setTimeout(()=>{${mode === 'duplicate' ? 'console.log(JSON.stringify(packet));' : mode === 'secret' ? `console.log(${JSON.stringify(FIXTURE_TOKEN)});` : mode === 'nonzero' ? 'process.exitCode=7;' : ''}},1000);
+    `);
+    const adapter = loadAdapter();
+    let error;
+    try { await adapter.invokeClaudeSidecar({ cwd: WORKSPACE, prompt: 'retention fixture', model: FIXTURE_MODEL,
+      readOnly: true, session: { persist: true }, sourceEnv: sourceEnvFor(fixture), timeoutMs: 20000,
+      monotonicClock: () => performance.now() + (accelerated ? 4000000 : 0), livenessIntervalMs: 10,
+      onProgress: snapshot => { if (snapshot.phase === 'terminal') accelerated = true; },
+      sessionRemover() { removals++; return { ok: true }; },
+      terminateChild: owned => { child = owned; }, terminationWaitMs: 0 }); }
+    catch (caught) { error = caught; }
+    try {
+      assert(error && privateApi.describe(error), mode + ': complete terminal retained');
+      assert(child, mode + ': owned process captured');
+      await new Promise(resolve => { if (child.exitCode !== null || child.signalCode !== null) resolve(); else child.once('close', resolve); });
+      const live = { assertCurrent: () => true,
+        proveStopped: observed => ({ child: observed, process_stopped: child.exitCode !== null || child.signalCode !== null, descendants_stopped: true }),
+        reconcileRoot: root => ({ root_id: root.root_id, process_stopped: true, reconciled: true, original_snapshot_preserved: true }) };
+      if (mode === 'valid') {
+        assert.equal(removals, 0, 'active failure defers transcript cleanup');
+        const promoted = await privateApi.resume(error, live);
+        assert.equal(promoted.candidate.status, 'done');
+        assert.equal(removals, 1, 'proved stopped recovery actually removes deferred session');
+        assert.equal(promoted.telemetry.session.cleanup.ok, true);
+      }
+      else await assert.rejects(privateApi.resume(error, live), failure => typeof failure.code === 'string', mode);
+      assert(!JSON.stringify(error).includes(FIXTURE_TOKEN), 'private account credential never serialized');
+    } finally { if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); }
+  }
 });
 
 async function main() {

@@ -594,3 +594,15 @@ console.log('PASS S03/T01 stream tool_activity: counts per reported id after acc
   assert(!JSON.stringify(second).includes(sid));
 }
 console.log('PASS S03/T01 stream dispose: independent tool_activity/denials copies, finalSnapshot and sessionId preserved');
+{
+  const reducer = createReducer();
+  assert.equal(reducer.provisionalTerminal(), null);
+  reducer.push(frame(terminal));
+  const first = reducer.provisionalTerminal();
+  assert.deepEqual(first, terminal);
+  first.structured_output = { forged: true };
+  assert.deepEqual(reducer.provisionalTerminal(), terminal, 'private copy cannot mutate reducer storage');
+  reducer.dispose();
+  assert.equal(reducer.provisionalTerminal(), null, 'disposal does not recreate payload');
+}
+console.log('PASS provisional terminal accessor: complete frame, independent copy and no post-dispose resurrection');

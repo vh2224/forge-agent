@@ -31,6 +31,7 @@ const { observation } = calibrationApi;
 const liveness = require('./forge-sidecar-liveness');
 const { createLocalProof } = require('./forge-sidecar-local-proof');
 const claudeSession = require('./forge-claude-session');
+const provisional = require('./forge-claude-provisional');
 
 const CLAUDE_SIDECAR_REASON_CODES = Object.freeze({
   ACCOUNT_UNAVAILABLE: 'claude-account-unavailable',
@@ -618,20 +619,39 @@ function defaultTerminate(child) {
   try { child.kill('SIGKILL'); } catch { /* the owned process already exited */ }
 }
 
+function checkedTerminalOutput(terminal, metadata, requestedModel, resultContract, validateCandidate) {
+  const { observedSessionId, ...publicMetadata } = metadata;
+  const observedModel = verifyModelIdentity(terminal.modelUsage, requestedModel);
+  const candidate = terminal.structured_output;
+  const checked = resultContract.validate(candidate);
+  if (!checked.ok) throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT, checked.reason);
+  if (validateCandidate) {
+    let verdict;
+    try { verdict = validateCandidate(candidate); }
+    catch { throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT, 'validator-failed'); }
+    if (verdict !== true && verdict?.ok !== true) throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT, verdict?.reason || 'validator-failed');
+  }
+  return { candidate, observedModel, observedSessionId,
+    metadata: Object.freeze({ ...publicMetadata, observation: observation({ ...metadata.observation, model_observed: observedModel }) }) };
+}
+
 function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeartbeat,
   heartbeatIntervalMs, validateCandidate, signal, requestedModel, resultContract, onProgress, clock, calibration,
   onLiveness, livenessIntervalMs = DEFAULT_LIVENESS_INTERVAL_MS, livenessPolicy,
   proofRoots = [], localProofIgnore = [], localProofFactory = null,
-  localProofIntervalMs = DEFAULT_LOCAL_PROOF_INTERVAL_MS, progressIntervalMs = DEFAULT_PROGRESS_INTERVAL_MS }) {
+  localProofIntervalMs = DEFAULT_LOCAL_PROOF_INTERVAL_MS, progressIntervalMs = DEFAULT_PROGRESS_INTERVAL_MS,
+  provisionalControl = null }) {
   if (signal?.aborted) return Promise.reject(sidecarError(CLAUDE_SIDECAR_REASON_CODES.CANCELLED));
   let child;
   try {
     child = spawn(cmd, args, { cwd, shell: false, env, stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true, detached: process.platform !== 'win32' });
   } catch (error) { return Promise.reject(mapSpawnError(error)); }
+  try { provisionalControl?.start(child); } catch { provisionalControl = null; }
 
   return new Promise((resolve, reject) => {
     let settled = false, terminationAttempted = false, closed = false, failed = false, spawnFailed = false;
+    let retained = false, lateProtocolValid = true, closeOutcome = null;
     let resolveExit;
     const exited = new Promise(done => { resolveExit = done; });
     let watchdog, heartbeatTimer, progressTimer, proofTimer, timer, silence = null, transportEnd = null;
@@ -739,7 +759,19 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
       });
       error.diagnostic.observation = observed;
       emit();
-      reducer.dispose();
+      // Only a complete accepted frame is eligible for private retention.
+      // Storage failure must preserve the original failure and never imply a
+      // saved/validated candidate. Continue protocol auditing until actual EOF.
+      try {
+        const terminal = reducer.provisionalTerminal();
+        if (terminal && provisionalControl) {
+          provisionalControl.capture(terminal, error, { observedSessionId: reducer.sessionId(), observation: observed,
+            command: path.basename(cmd), argv_count: args.length });
+          retained = true;
+          if (closed && closeOutcome) provisionalControl.closeAudit({ ...closeOutcome, protocolValid: true });
+        } else if (terminal) provisional.markUnavailable(error);
+      } catch { provisional.markUnavailable(error); provisionalControl?.invalidate(); }
+      if (!retained) reducer.dispose();
       reject(error);
     }
     function terminate(error) {
@@ -752,6 +784,7 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
       finish(error);
     }
     function protocolError(error) {
+      provisionalControl?.invalidate();
       const reason = error.reason || 'result-envelope-invalid';
       const code = reason === 'output-limit' ? CLAUDE_SIDECAR_REASON_CODES.OUTPUT_LIMIT
         : reason === 'authentication-failed' ? CLAUDE_SIDECAR_REASON_CODES.AUTH_FAILED
@@ -849,18 +882,34 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
     }, livenessIntervalMs);
     child.stdout?.on('data', chunk => {
       if (!settled) try { reducer.push(chunk); } catch (error) { protocolError(error); }
+      else if (retained && lateProtocolValid) try { reducer.push(chunk); } catch {
+        lateProtocolValid = false; provisionalControl.invalidate(); reducer.dispose();
+      }
     });
     child.stderr?.on('data', chunk => {
       if (!settled) try { reducer.stderr(chunk); } catch (error) { protocolError(error); }
+      else if (retained && lateProtocolValid) try { reducer.stderr(chunk); } catch {
+        lateProtocolValid = false; provisionalControl.invalidate(); reducer.dispose();
+      }
     });
     child.once('error', error => {
+      if (settled && retained) provisionalControl.invalidate();
       if (!Number.isSafeInteger(child.pid)) spawnFailed = true;
       finish(mapSpawnError(error));
     });
     child.once('close', (code, exitSignal) => {
       closed = true;
+      closeOutcome = { code, signal: exitSignal || null };
       resolveExit(true);
-      if (settled) return;
+      if (settled) {
+        if (retained) {
+          if (lateProtocolValid) try { reducer.end(); } catch { lateProtocolValid = false; provisionalControl.invalidate(); }
+          try { provisionalControl.closeAudit({ code, signal: exitSignal || null, protocolValid: lateProtocolValid }); }
+          catch { provisionalControl.invalidate(); }
+          reducer.dispose();
+        }
+        return;
+      }
       transportEnd = reducer.snapshot().elapsed_ms;
       try { refreshLiveness(); } catch { /* the view stays at its last published state */ }
       let terminal;
@@ -873,25 +922,14 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
       }
       if (code !== 0) { finish(sidecarError(CLAUDE_SIDECAR_REASON_CODES.EXIT_NONZERO)); return; }
       try {
-        const observedModel = verifyModelIdentity(terminal.modelUsage, requestedModel);
-        const candidate = terminal.structured_output;
-        const checked = resultContract.validate(candidate);
-        if (!checked.ok) throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT, checked.reason);
-        if (validateCandidate) {
-          let verdict;
-          try { verdict = validateCandidate(candidate); }
-          catch { throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT, 'validator-failed'); }
-          if (verdict !== true && verdict?.ok !== true) {
-            throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT, verdict?.reason || 'validator-failed');
-          }
-        }
-        const observed = observation({ ...snapshot(), model_observed: observedModel });
-        bestEffort(onProgress, observed);
-        finish(null, { candidate, observedModel, observedSessionId: reducer.sessionId(), metadata: Object.freeze({
+        const output = checkedTerminalOutput(terminal, {
+          observedSessionId: reducer.sessionId(),
           pid: Number.isSafeInteger(child.pid) ? child.pid : null, exit_code: code, signal: exitSignal || null,
-          duration_ms: observed.elapsed_ms, stdout_bytes: observed.stdout_bytes, stderr_bytes: observed.stderr_bytes,
-          marker_count: 0, command: path.basename(cmd), argv_count: args.length, observation: observed,
-        }) });
+          duration_ms: snapshot().elapsed_ms, stdout_bytes: snapshot().stdout_bytes, stderr_bytes: snapshot().stderr_bytes,
+          marker_count: 0, command: path.basename(cmd), argv_count: args.length, observation: snapshot(),
+        }, requestedModel, resultContract, validateCandidate);
+        bestEffort(onProgress, output.metadata.observation);
+        finish(null, output);
       } catch (error) {
         if (error.reason) protocolError(error);
         else finish(error);
@@ -1214,6 +1252,16 @@ async function invokeClaudeSidecar(opts) {
   };
   let tempDir = null;
   let primaryError = null;
+  let provisionalControl = null;
+  function finalizeOutput({ observedModel, observedSessionId, ...output }, recovered = false) {
+    if (sessionRef && observedSessionId !== sessionId) throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.SESSION_MISMATCH);
+    const proposal = recovered ? null : calibrationV2.propose({ model, effort: effort || 'medium', phase }, output.metadata.observation);
+    const session = sessionRef ? Object.freeze({ [resumeRef ? 'resumed' : 'persisted']: true,
+      session_sha256: claudeSession.sessionDigest(sessionId), cleanup: cleanupSession() }) : null;
+    return { ...output, telemetry: Object.freeze({ ...telemetryBase,
+      model_observed: observedModel, model_observed_source: OBSERVED_MODEL_SOURCE, observation: output.metadata.observation,
+      calibration_proposal: proposal, ...(session ? { session } : {}) }) };
+  }
 
   try {
     let instruction = CLAUDE_RESUME_INSTRUCTION;
@@ -1240,28 +1288,37 @@ async function invokeClaudeSidecar(opts) {
     // Observe the actual CLI packaging, after instruction/argv construction.
     // Account credentials exist only in env and never enter this measurement.
     // A resume has no prompt file: its packaged context is the fixed instruction.
-    require('./forge-attempt-telemetry').observeFinal(options, { cmd, args },
+    const finalEvidence = require('./forge-attempt-telemetry').observeFinal(options, { cmd, args },
       resumeRef ? instruction : fs.readFileSync(promptFile, 'utf8'), 'claude-cli');
-    const { observedModel, observedSessionId, ...output } = await runOwnedChild({
+    try {
+      provisionalControl = provisional.prepare({
+        binding: { request_sha256: finalEvidence.request.sha256, context_sha256: finalEvidence.context.sha256,
+          model, effort, phase, dispatch_id: finalEvidence.dispatch_id,
+          schema_sha256: require('crypto').createHash('sha256').update(JSON.stringify(resultContract.schema)).digest('hex'),
+          session_sha256: sessionId ? claudeSession.sessionDigest(sessionId) : null },
+        roots: [...proofRoots, cwd, ...(options.contextRoot ? [options.contextRoot] : []),
+          ...(options.telemetryIdentity?.execution_contract?.code_roots || []).map(root => root.path)],
+        storeRoot: options.provisionalStoreRoot || (options.calibrationOptions?.userHome
+          ? path.join(options.calibrationOptions.userHome, '.forge-agent', 'private-attempts') : undefined),
+        validate: (terminal, metadata) => {
+          const current = resolveLaunch(null);
+          if (!current || current.name !== account.name || current.token !== account.token) throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.RESUME_ACCOUNT_MISMATCH);
+          return checkedTerminalOutput(terminal, { ...metadata, exit_code: 0, signal: null,
+            marker_count: 0, pid: null }, model, resultContract, options.validateCandidate);
+        },
+      });
+    } catch { /* retention unavailable: the original transport still runs */ }
+    const output = await runOwnedChild({
       cmd, args, cwd, env, timeoutMs: childTimeoutMs, terminateChild,
       onHeartbeat, heartbeatIntervalMs, validateCandidate: options.validateCandidate, signal: options.signal,
       requestedModel: model, resultContract, onProgress: options.onProgress, clock: options.monotonicClock,
       calibration: readCalibration({ model, effort: effort || 'medium', phase }, options.calibrationOptions),
       onLiveness, livenessIntervalMs, livenessPolicy: options.livenessPolicy,
       proofRoots, localProofIgnore, localProofFactory, localProofIntervalMs, progressIntervalMs,
+      provisionalControl,
     });
     // The stream only confirms the Forge-generated id; it never replaces it.
-    if (sessionRef && observedSessionId !== sessionId) {
-      throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.SESSION_MISMATCH);
-    }
-    // Accepted attempts propose v2 samples; commitAccepted dispatches by version.
-    const proposal = calibrationV2.propose({ model, effort: effort || 'medium', phase }, output.metadata.observation);
-    // A failed removal is reported, never turned into a failure of a valid result.
-    const session = sessionRef ? Object.freeze({ [resumeRef ? 'resumed' : 'persisted']: true,
-      session_sha256: claudeSession.sessionDigest(sessionId), cleanup: cleanupSession() }) : null;
-    return { ...output, telemetry: Object.freeze({ ...telemetryBase,
-      model_observed: observedModel, model_observed_source: OBSERVED_MODEL_SOURCE, observation: output.metadata.observation,
-      calibration_proposal: proposal, ...(session ? { session } : {}) }) };
+    return finalizeOutput(output);
   } catch (error) {
     const observedSessionId = error && typeof error === 'object' ? error.observedSessionId : undefined;
     if (error && typeof error === 'object') delete error.observedSessionId;
@@ -1275,20 +1332,20 @@ async function invokeClaudeSidecar(opts) {
     primaryError = error && typeof error.code === 'string'
       && CLAUDE_SIDECAR_REASON_CODE_SET.has(error.code)
       ? error : sidecarError(CLAUDE_SIDECAR_REASON_CODES.PROMPT_IO);
+    provisional.transferFailure(error, primaryError);
+    if (provisional.describe(primaryError)?.private_ref) provisional.addFinalizer(primaryError, value => finalizeOutput(value, true), { cache: true });
     if (sessionRef) {
       // Only an active stream that hit the safety ceiling under the confirmed
       // id keeps its session, for the single same-session resume (S05). A
       // resume never keeps it: at most one resume per unit.
       if (!resumeRef && primaryError.code === CLAUDE_SIDECAR_REASON_CODES.BUDGET_EXCEEDED
         && observedSessionId === sessionId) {
-        sessionCleaned = true;
         primaryError.session = sessionRef;
       } else if (typeof awaitExit === 'function'
         && await awaitExit(Number.isSafeInteger(options.terminationWaitMs) && options.terminationWaitMs >= 0
           ? options.terminationWaitMs : TERMINATION_WAIT_MS) !== true) {
         // The owned CLI may still be writing: removing now could be undone by it.
         // Defer to recovery, which removes the session once the process is stopped.
-        sessionCleaned = true;
         primaryError.session = sessionRef;
         primaryError.session_cleanup = Object.freeze({ ok: false, pending: true,
           refused: Object.freeze([]), errors: Object.freeze([]) });
@@ -1299,6 +1356,7 @@ async function invokeClaudeSidecar(opts) {
     }
     throw primaryError;
   } finally {
+    try { provisionalControl?.emptyCleanup(); } catch { /* private directory may retain failure evidence */ }
     if (tempDir) {
       try {
         fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 2, retryDelay: 10 });
