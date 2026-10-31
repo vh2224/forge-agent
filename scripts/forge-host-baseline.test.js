@@ -27,7 +27,7 @@ function write(root, file, value) {
   fs.writeFileSync(target, typeof value === 'string' || Buffer.isBuffer(value) ? value : JSON.stringify(value, null, 2));
 }
 function fixture() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-host-baseline-'));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'forge-host-baseline-'));
   const baseline = readJson(REPO, BASE);
   const evidence = readJson(REPO, baseline.evidence);
   const imported = readJson(REPO, IMPORT);
@@ -54,7 +54,7 @@ function repack(root, mutateBaseline = () => {}, mutateEvidence = () => {}) {
   write(root, IMPORT, imported);
 }
 function cli(root, args = []) {
-  return spawnSync(process.execPath, [CLI, '--check', '--cwd', root, '--json', ...args], { encoding: 'utf8', timeout: 10000 });
+  return spawnSync(process.execPath, [CLI, '--check', '--cwd', root, '--baseline', BASE, '--json', ...args], { encoding: 'utf8', timeout: 10000 });
 }
 function snapshot(root) {
   const result = {};
@@ -135,12 +135,12 @@ test('C01 versions: newer exact interval and same require revalidation for both 
   assert.strictEqual(compareHostVersion('0.165.0-alpha.9007199254740993', '0.165.0-alpha.9007199254740992').relation, 'older');
 });
 test('C01 unknown versions and UI stay unknown without inferred build', (root) => {
-  const report = validateBaseline({ cwd: root });
+  const report = validateBaseline({ cwd: root, baseline: BASE });
   for (const host of ['codex', 'claude']) {
     assert.strictEqual(report.hosts[host].relation, 'unknown');
     assert.strictEqual(report.hosts[host].observed_source, 'none');
   }
-  const observed = validateBaseline({ cwd: root, observed: { codex: '0.166.0', claude: '2.1.313' } });
+  const observed = validateBaseline({ cwd: root, baseline: BASE, observed: { codex: '0.166.0', claude: '2.1.313' } });
   assert.deepStrictEqual(observed.ui, { installed_build: null, range_closed: false, state: 'unknown' });
 });
 test('C01 sources: changed and missing named, unchanged retained, revalidation without errors', (root) => {
@@ -151,7 +151,7 @@ test('C01 sources: changed and missing named, unchanged retained, revalidation w
   });
   fs.appendFileSync(path.join(root, rows[0].file), '\nchanged');
   fs.unlinkSync(path.join(root, rows[1].file));
-  const report = validateBaseline({ cwd: root });
+  const report = validateBaseline({ cwd: root, baseline: BASE });
   assert.strictEqual(report.ok, true);
   for (const [index, status] of [[0, 'changed'], [1, 'missing'], [2, 'unchanged']]) {
     const row = report.sources.find((entry) => entry.file === rows[index].file);
@@ -163,7 +163,7 @@ test('C01 sources: changed and missing named, unchanged retained, revalidation w
 test('C01 findings: all carry forward and dropped open ID is error exit 1', (root) => {
   const data = readJson(root, BASE);
   write(root, 'previous.json', data);
-  assert.deepStrictEqual(validateBaseline({ cwd: root }).carry_forward, data.open_findings.map((row) => row.id).sort());
+  assert.deepStrictEqual(validateBaseline({ cwd: root, baseline: BASE }).carry_forward, data.open_findings.map((row) => row.id).sort());
   const removed = data.open_findings[0].id;
   repack(root, (baseline) => { baseline.open_findings.shift(); });
   const result = cli(root, ['--previous', 'previous.json']);
@@ -185,7 +185,7 @@ test('C01 tampered report baseline evidence and unmarked edit fail hash verifica
   const record = readJson(root, IMPORT);
   record.files.find((row) => row.file === 'docs/runtime-compatibility.md').edited_after_import = false;
   write(root, IMPORT, record);
-  hasIssue(validateBaseline({ cwd: root }), 'artifact-hash-mismatch');
+  hasIssue(validateBaseline({ cwd: root, baseline: BASE }), 'artifact-hash-mismatch');
 });
 test('C01 invalid JSON and shapes are named and never echo content', (root) => {
   const original = fs.readFileSync(path.join(root, BASE));
@@ -196,14 +196,14 @@ test('C01 invalid JSON and shapes are named and never echo content', (root) => {
   hasIssue(JSON.parse(result.stdout), 'invalid-json');
   for (const value of [null, [], {}, { schema_version: 99 }]) {
     write(root, BASE, JSON.stringify(value));
-    hasIssue(validateBaseline({ cwd: root }), 'invalid-shape');
+    hasIssue(validateBaseline({ cwd: root, baseline: BASE }), 'invalid-shape');
   }
   fs.writeFileSync(path.join(root, BASE), original);
   const data = readJson(root, BASE);
   write(root, data.evidence, {});
-  hasIssue(validateBaseline({ cwd: root }), 'invalid-shape');
+  hasIssue(validateBaseline({ cwd: root, baseline: BASE }), 'invalid-shape');
   write(root, IMPORT, []);
-  hasIssue(validateBaseline({ cwd: root }), 'invalid-shape');
+  hasIssue(validateBaseline({ cwd: root, baseline: BASE }), 'invalid-shape');
 });
 test('C01 import consistency: hashes, missing rows, duplicate rows and core edit flags rejected', (root) => {
   const record = readJson(root, IMPORT);
@@ -217,7 +217,7 @@ test('C01 import consistency: hashes, missing rows, duplicate rows and core edit
     assert.strictEqual(cli(root).status, 1);
   }
   fs.unlinkSync(path.join(root, IMPORT));
-  const absent = validateBaseline({ cwd: root });
+  const absent = validateBaseline({ cwd: root, baseline: BASE });
   assert.strictEqual(absent.import_record, 'absent');
   assert.strictEqual(absent.ok, true);
   assert.strictEqual(absent.artifacts.find((row) => row.file.endsWith('.evidence.json')).status, 'unknown');
@@ -225,7 +225,7 @@ test('C01 import consistency: hashes, missing rows, duplicate rows and core edit
 test('C01 containment: absolute traversal ADS backslash and link escape refused before reads', (root) => {
   for (const file of ['/outside', 'C:/outside', '../outside', 'docs/../outside', 'docs\\outside', 'docs/x:stream']) {
     hasIssue(validateBaseline({ cwd: root, baseline: file }), 'invalid-path');
-    hasIssue(validateBaseline({ cwd: root, previous: file }), 'invalid-path');
+    hasIssue(validateBaseline({ cwd: root, baseline: BASE, previous: file }), 'invalid-path');
   }
   const baseline = readJson(root, BASE);
   const original = fs.readFileSync(path.join(root, baseline.evidence));
@@ -233,7 +233,7 @@ test('C01 containment: absolute traversal ADS backslash and link escape refused 
     const evidence = JSON.parse(original);
     evidence.inspected_source_fingerprints[0].file = file;
     write(root, baseline.evidence, evidence);
-    hasIssue(validateBaseline({ cwd: root }), 'invalid-shape');
+    hasIssue(validateBaseline({ cwd: root, baseline: BASE }), 'invalid-shape');
   }
   fs.writeFileSync(path.join(root, baseline.evidence), original);
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-host-outside-'));
@@ -242,7 +242,7 @@ test('C01 containment: absolute traversal ADS backslash and link escape refused 
     fs.symlinkSync(outside, path.join(root, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
     hasIssue(validateBaseline({ cwd: root, baseline: 'escape/private.json' }), 'source-outside-roots');
     repack(root, undefined, (evidence) => { evidence.inspected_source_fingerprints[0].file = 'escape/private.json'; });
-    const report = validateBaseline({ cwd: root });
+    const report = validateBaseline({ cwd: root, baseline: BASE });
     hasIssue(report, 'source-outside-roots');
     assert(!JSON.stringify(report).includes('PRIVATE_CONTENT'));
     fs.unlinkSync(path.join(root, 'escape'));
@@ -256,17 +256,17 @@ test('C01 bounded IO: oversize baseline artifact and source rejected, unstable f
   const source = evidence.inspected_source_fingerprints[0].file;
   const reportBytes = fs.readFileSync(path.join(root, data.report));
   write(root, data.report, Buffer.alloc(1024 * 1024 + 1));
-  hasIssue(validateBaseline({ cwd: root }), 'source-too-large');
+  hasIssue(validateBaseline({ cwd: root, baseline: BASE }), 'source-too-large');
   fs.writeFileSync(path.join(root, data.report), reportBytes);
   write(root, source, Buffer.alloc(1024 * 1024 + 1));
-  hasIssue(validateBaseline({ cwd: root }), 'source-too-large');
+  hasIssue(validateBaseline({ cwd: root, baseline: BASE }), 'source-too-large');
   let calls = 0;
   const io = { ...fs, fstatSync(fd) {
     const stat = fs.fstatSync(fd);
     if (++calls % 2 === 0) Object.defineProperty(stat, 'mtimeMs', { value: stat.mtimeMs + 1 });
     return stat;
   } };
-  hasIssue(validateBaseline({ cwd: root, io }), 'source-changed-during-read');
+  hasIssue(validateBaseline({ cwd: root, baseline: BASE, io }), 'source-changed-during-read');
 });
 test('C01 CLI strict arguments: exit 2, help, deterministic JSON and BOM input', (root) => {
   for (const args of [['--bogus'], ['--cwd'], ['--codex-version', 'garbage'], ['--json', '--json'], ['--previous']]) {
@@ -280,9 +280,11 @@ test('C01 CLI strict arguments: exit 2, help, deterministic JSON and BOM input',
   assert.strictEqual(first.stdout, second.stdout);
   assert.strictEqual(first.stdout, JSON.stringify(canonical(JSON.parse(first.stdout))) + '\n');
   fs.writeFileSync(path.join(root, BASE), '\uFEFF' + fs.readFileSync(path.join(root, BASE), 'utf8'));
-  assert.notStrictEqual(validateBaseline({ cwd: root }).baseline, null);
+  assert.notStrictEqual(validateBaseline({ cwd: root, baseline: BASE }).baseline, null);
 });
 test('C01 read-only default: no spawn network git or writes, canonical readers/hash/version used', (root) => {
+  successor(root);
+  pointer(root);
   const before = snapshot(root);
   const child = require('child_process'); const http = require('http'); const https = require('https'); const net = require('net');
   const saved = [];
@@ -295,6 +297,7 @@ test('C01 read-only default: no spawn network git or writes, canonical readers/h
     let stdout = '';
     assert.strictEqual(main(['--check', '--cwd', root, '--codex-version', '0.166.0', '--json'], (text) => { stdout += text; }), 0);
     assert.strictEqual(JSON.parse(stdout).hosts.codex.relation, 'newer');
+    assert.strictEqual(JSON.parse(stdout).selection.source, 'pointer');
     assert(reads > beforeReads);
     assert(comparisons > beforeComparisons);
   } finally { for (const [target, key, value] of saved) target[key] = value; }
@@ -328,6 +331,244 @@ test('C01 artifacts and key links: exported API, substantive files and CLI proce
     if (file.endsWith('baseline.js')) assert(!/TODO|TBD|FIXME/.test(text));
   }
   assert(reads > 0 && comparisons > 0);
+});
+// Each successor has its own report/evidence; no fixture edits the import
+// record to make a new analysis look like the original imported analysis.
+function successor(root, file = 'docs/current.json', previous = BASE, mutate = () => {}) {
+  const prior = readJson(root, previous);
+  const value = structuredClone(prior);
+  value.analysis_date = '2026-10-31';
+  value.report = file.replace('.json', '.md');
+  value.evidence = file.replace('.json', '.evidence.json');
+  value.lineage = { previous, previous_sha256: sha256(fs.readFileSync(path.join(root, previous))) };
+  for (const key of ['codex_cli', 'claude_code']) {
+    value[key].release_notes_range = null;
+    value[key].release_notes_review = 'not-applicable-same-version';
+    value[key].revalidation_required = true;
+  }
+  mutate(value);
+  write(root, value.report, '# Current fixture analysis\n');
+  write(root, file, value);
+  write(root, value.evidence, { schema_version: 1, inspected_source_fingerprints: [], artifacts: [
+    { file, sha256: sha256(fs.readFileSync(path.join(root, file))) },
+    { file: value.report, sha256: sha256(fs.readFileSync(path.join(root, value.report))) },
+  ] });
+  return file;
+}
+function current(root, mutate) {
+  return validateBaseline({ cwd: root, baseline: successor(root, 'docs/current.json', BASE, mutate) });
+}
+function pointer(root, baseline = 'docs/current.json', mutate = () => {}) {
+  const value = { schema_version: 1, baseline, baseline_sha256: sha256(fs.readFileSync(path.join(root, baseline))) };
+  mutate(value);
+  write(root, 'docs/host-compatibility-current.json', value);
+}
+test('T05 lineage: two links reach unchanged import and expose artifact origins', (root) => {
+  const first = successor(root);
+  const second = successor(root, 'docs/current-two.json', first);
+  const report = validateBaseline({ cwd: root, baseline: second });
+  assert.strictEqual(report.ok, true, JSON.stringify(report.issues));
+  assert.strictEqual(report.lineage.length, 2);
+  assert.deepStrictEqual(report.selection, { source: 'explicit', file: second });
+  assert(report.artifacts.some((row) => row.origin === 'lineage'));
+  assert(report.artifacts.some((row) => row.origin === 'current-evidence'));
+  assert(report.artifacts.some((row) => row.origin === 'import-record'));
+});
+test('T05 lineage: tampered missing foreign and unanchored predecessors refuse', (root) => {
+  let file = successor(root);
+  fs.appendFileSync(path.join(root, BASE), ' ');
+  hasIssue(validateBaseline({ cwd: root, baseline: file }), 'lineage-hash-mismatch');
+  repack(root);
+  hasIssue(current(root, (row) => { row.lineage.previous = 'docs/missing.json'; }), 'lineage-missing');
+  for (const previous of ['outside.json', '../docs/out.json', '/docs/out.json', 'docs/x:ads', 'docs\\out.json']) {
+    hasIssue(current(root, (row) => { row.lineage.previous = previous; }), 'lineage-foreign');
+  }
+  hasIssue(current(root, (row) => { delete row.lineage; }), 'lineage-required');
+  file = successor(root, 'docs/unanchored.json', BASE, (row) => { delete row.lineage; });
+  const next = successor(root, 'docs/child.json', file);
+  hasIssue(validateBaseline({ cwd: root, baseline: next }), 'lineage-foreign');
+});
+test('T05 lineage: date order cycle and ninth link refuse', (root) => {
+  hasIssue(current(root, (row) => { row.analysis_date = '2026-10-27'; }), 'lineage-order-invalid');
+  hasIssue(current(root, (row) => { row.lineage.previous = 'docs/current.json'; }), 'lineage-cycle');
+  let previous = BASE;
+  for (let index = 0; index < 8; index++) previous = successor(root, `docs/depth-${index}.json`, previous);
+  assert.strictEqual(validateBaseline({ cwd: root, baseline: previous }).ok, true);
+  const ninth = successor(root, 'docs/ninth.json', previous);
+  hasIssue(validateBaseline({ cwd: root, baseline: ninth }), 'lineage-depth-exceeded');
+});
+test('T05 lineage: import terminal and all original core rows retain enforcing checks', (root) => {
+  for (const target of [BASE, readJson(root, BASE).report, readJson(root, BASE).evidence]) {
+    const record = readJson(root, IMPORT);
+    const changed = structuredClone(record);
+    changed.files.find((row) => row.file === target).edited_after_import = true;
+    write(root, IMPORT, changed);
+    hasIssue(current(root), 'import-record-inconsistent');
+    write(root, IMPORT, record);
+  }
+  fs.unlinkSync(path.join(root, IMPORT));
+  hasIssue(current(root), 'lineage-foreign');
+});
+test('T05 carry-forward: dropped IDs changed status and evidence are enforced', (root) => {
+  hasIssue(current(root, (row) => { row.open_findings.shift(); }), 'open-finding-dropped');
+  hasIssue(current(root, (row) => { row.open_findings[0].status_at_analysis = 'implemented-uat-pending'; }), 'finding-disposition-missing');
+  hasIssue(current(root, (row) => {
+    Object.assign(row.open_findings[0], { status_at_analysis: 'implemented-uat-pending', disposition: 'implemented', evidence: 'docs/missing.md' });
+  }), 'finding-disposition-missing');
+  const report = current(root, (row) => {
+    Object.assign(row.open_findings[0], { status_at_analysis: 'implemented-uat-pending', disposition: 'implemented', evidence: row.report });
+  });
+  assert.strictEqual(report.ok, true, JSON.stringify(report.issues));
+  assert.strictEqual(report.carry_forward.length, 6);
+});
+test('T05 closure: green checks commits and missing operator reference cannot close findings', (root) => {
+  for (const closure of [undefined, { source: 'test', reference: BASE }, { source: 'operator', reference: '' },
+    { source: 'guard', reference: BASE }, { source: 'commit', reference: BASE }]) {
+    hasIssue(current(root, (row) => {
+      Object.assign(row.open_findings[0], { status_at_analysis: 'closed', disposition: 'operator-accepted', evidence: row.report, closure });
+    }), 'finding-closure-unverified');
+  }
+  const report = current(root, (row) => {
+    Object.assign(row.open_findings[0], { status_at_analysis: 'resolved', disposition: 'operator-accepted', evidence: row.report,
+      closure: { source: 'operator', reference: row.report } });
+  });
+  assert.strictEqual(report.ok, true, JSON.stringify(report.issues));
+});
+test('T05 ranges: normal pending range preserves reviewed anchor and requires open review finding', (root) => {
+  const update = (row) => {
+    Object.assign(row.codex_cli, { installed: '0.166.0', release_notes_range: { after_exclusive: '0.165.0', through_inclusive: '0.166.0' }, release_notes_review: 'pending' });
+    row.open_findings.push({ id: 'release-review-codex', status_at_analysis: 'pending' });
+  };
+  assert.strictEqual(current(root, update).ok, true);
+  hasIssue(current(root, (row) => { update(row); row.open_findings.pop(); }), 'release-range-invalid');
+  hasIssue(current(root, (row) => { update(row); row.codex_cli.next_release_notes_after_exclusive = '0.166.0'; }), 'release-range-gap');
+  hasIssue(current(root, (row) => { update(row); row.codex_cli.release_notes_range.after_exclusive = '0.164.0'; }), 'release-range-gap');
+  hasIssue(current(root, (row) => { update(row); row.codex_cli.release_notes_range.after_exclusive = '0.165.1'; }), 'release-range-gap');
+  hasIssue(current(root, (row) => { update(row); row.codex_cli.release_notes_range.through_inclusive = '0.167.0'; }), 'release-range-invalid');
+});
+test('T05 ranges: same older reviewed-without-sources and missing revalidation refuse', (root) => {
+  assert.strictEqual(current(root).ok, true);
+  hasIssue(current(root, (row) => { row.codex_cli.installed = '0.164.0'; }), 'release-range-invalid');
+  hasIssue(current(root, (row) => { row.codex_cli.release_notes_range = { after_exclusive: '0.164.0', through_inclusive: '0.165.0' }; }), 'release-range-invalid');
+  hasIssue(current(root, (row) => { row.codex_cli.revalidation_required = false; }), 'release-range-invalid');
+  hasIssue(current(root, (row) => {
+    Object.assign(row.codex_cli, { installed: '0.166.0', release_notes_range: { after_exclusive: '0.165.0', through_inclusive: '0.166.0' }, release_notes_review: 'reviewed', next_release_notes_after_exclusive: '0.166.0' });
+  }), 'release-range-invalid');
+});
+test('T05 ranges: reviewed interval needs matching dated official source and moves only reviewed anchor', (root) => {
+  const file = successor(root, 'docs/reviewed.json', BASE, (row) => {
+    Object.assign(row.codex_cli, { installed: '0.166.0', release_notes_range: { after_exclusive: '0.165.0', through_inclusive: '0.166.0' },
+      release_notes_review: 'reviewed', next_release_notes_after_exclusive: '0.166.0' });
+  });
+  const baseline = readJson(root, file);
+  const evidence = readJson(root, baseline.evidence);
+  evidence.official_releases = [{ host: 'codex', release_notes_review: 'reviewed', after_exclusive: '0.165.0',
+    through_inclusive: '0.166.0', url: 'https://github.com/openai/codex/releases/tag/rust-v0.166.0',
+    body_sha256: '1'.repeat(64), body_bytes: 12, observed_at: '2026-10-31T03:06:55Z' }];
+  write(root, baseline.evidence, evidence);
+  assert.strictEqual(validateBaseline({ cwd: root, baseline: file }).ok, true);
+  evidence.official_releases[0].after_exclusive = '0.164.0';
+  write(root, baseline.evidence, evidence);
+  hasIssue(validateBaseline({ cwd: root, baseline: file }), 'release-range-invalid');
+});
+test('T05 pointer: absent default explicit override and valid selection never mutate inputs', (root) => {
+  assert.deepStrictEqual(validateBaseline({ cwd: root }).selection, { source: 'default', file: BASE });
+  const file = successor(root);
+  pointer(root, file);
+  const before = snapshot(root);
+  const result = validateBaseline({ cwd: root });
+  assert.strictEqual(result.ok, true, JSON.stringify(result.issues));
+  assert.deepStrictEqual(result.selection, { source: 'pointer', file });
+  assert.deepStrictEqual(validateBaseline({ cwd: root, baseline: BASE }).selection, { source: 'explicit', file: BASE });
+  assert.deepStrictEqual(snapshot(root), before);
+});
+test('T05 pointer: malformed tampered foreign missing and invalid target fail without fallback', (root) => {
+  successor(root);
+  pointer(root, undefined, (row) => { row.baseline_sha256 = '0'.repeat(64); });
+  hasIssue(validateBaseline({ cwd: root }), 'pointer-hash-mismatch');
+  for (const baseline of ['outside.json', '../outside.json', '/docs/out.json', 'docs/missing.json']) {
+    pointer(root, undefined, (row) => { row.baseline = baseline; });
+    hasIssue(validateBaseline({ cwd: root }), 'pointer-invalid');
+  }
+  write(root, 'docs/host-compatibility-current.json', '{ invalid');
+  hasIssue(validateBaseline({ cwd: root }), 'pointer-invalid');
+  write(root, 'docs/current.json', {});
+  pointer(root);
+  hasIssue(validateBaseline({ cwd: root }), 'pointer-invalid');
+});
+test('T05 containment: internal foreign alias cannot bypass docs or default', (root) => {
+  write(root, 'outside/previous.json', fs.readFileSync(path.join(root, BASE)));
+  // Junction creation is supported without elevated symlink privileges on
+  // Windows; it exercises a lexical docs path resolving physically elsewhere.
+  fs.symlinkSync(path.join(root, 'outside'), path.join(root, 'docs/alias'), process.platform === 'win32' ? 'junction' : 'dir');
+  hasIssue(current(root, (row) => { row.lineage.previous = 'docs/alias/previous.json'; }), 'lineage-foreign');
+  pointer(root, undefined, (row) => { row.baseline = 'docs/alias/previous.json'; });
+  hasIssue(validateBaseline({ cwd: root }), 'pointer-invalid');
+  fs.unlinkSync(path.join(root, 'docs/alias'));
+});
+test('T05 real documents: CP2 versions pending gates matrix and safe evidence have concrete hashes', () => {
+  const file = 'docs/host-compatibility-baseline-2026-10-31.json';
+  const data = readJson(REPO, file);
+  const evidence = readJson(REPO, data.evidence);
+  assert.strictEqual(data.forge.version, '4.47.0');
+  assert.strictEqual(data.forge.commit, '30147f9a117b858d9de60cd13e8ed42a2c44a4f7');
+  assert.strictEqual(data.codex_cli.installed, '0.166.0');
+  assert.strictEqual(data.codex_cli.next_release_notes_after_exclusive, '0.165.0');
+  assert.strictEqual(data.claude_code.installed, '2.1.312');
+  assert.strictEqual(data.claude_code.latest_stable_found, '2.1.316');
+  assert.strictEqual(data.claude_code.release_notes_range, null);
+  assert.strictEqual(data.vscode_client.commit, '2c33b50b16c472efe58357d1d2a8a5414bc23fbf');
+  assert.strictEqual(data.vscode_client.codex_extension.status, 'unknown');
+  assert.strictEqual(data.desktop_ui.installed_build, null);
+  for (const key of Object.keys(readJson(REPO, BASE).reanalysis_policy)) assert.strictEqual(data.reanalysis_policy[key], true);
+  for (const row of readJson(REPO, BASE).open_findings) {
+    const next = data.open_findings.find((finding) => finding.id === row.id);
+    assert(next && next.disposition && fs.statSync(path.join(REPO, next.evidence)).isFile());
+  }
+  assert(data.open_findings.every((row) => !['closed', 'resolved'].includes(row.status_at_analysis)));
+  for (const id of ['release-review-codex', 'release-review-claude', 'statusline-r6', 'issue-294', 'issue-306', 'g2-1', 'g2-2',
+    'issue-288', 'issue-289', 'issue-290', 'windows-link-negatives', 'panel-operator-installation', 'native-navigation',
+    'subagent-statusline-rendering', 'sidecar-real-input', 'final-human-uat']) assert(data.open_findings.some((row) => row.id === id));
+  assert.strictEqual(evidence.schema_version, 1);
+  assert.strictEqual(evidence.owner_observation.sha256, '6f90cbce6873b3bcfff62ca9c31e76b94a230bde17be9cbe22ce3e0721a29148');
+  assert.strictEqual(evidence.commands.find((row) => row.command.includes('forge-schema-pin')).result.fields_total, 14);
+  assert.strictEqual(evidence.current_panel_runtime.result, 'mounted');
+  assert.strictEqual(evidence.current_panel_runtime.source_match, 'match');
+  assert.strictEqual(evidence.current_panel_runtime.sources_unchanged, true);
+  assert.strictEqual(evidence.current_panel_runtime.panel_generated_at, '2026-10-31T03:06:40.743Z');
+  assert.strictEqual(evidence.current_panel_runtime.panel_stable_sha256, evidence.current_panel_runtime.canonical_stable_sha256);
+  assert(evidence.official_releases.every((row) => row.status === 'revalidated' && row.release_notes_review === 'pending'
+    && /^[a-f0-9]{64}$/.test(row.sha256) && row.body_bytes > 0));
+  for (const row of [...evidence.inspected_source_fingerprints, ...evidence.artifacts]) {
+    assert.strictEqual(sha256(fs.readFileSync(path.join(REPO, row.file))), row.sha256, row.file);
+  }
+  const report = fs.readFileSync(path.join(REPO, data.report), 'utf8');
+  const runtime = fs.readFileSync(path.join(REPO, 'docs/runtime-compatibility.md'), 'utf8');
+  assert.strictEqual((report.match(/^\| (Codex no VS Code|Claude Code terminal|Codex CLI|Desktop, informativo).*\| R[1-5] \|/gm) || []).length, 20);
+  assert(report.includes('pending-final-round') && report.includes('security gate final: **pendente**'));
+  assert(runtime.includes('(host-compatibility-baseline.json)') && runtime.includes('(host-compatibility-current.json)'));
+  assert(runtime.includes('`conditional` for Codex in VS Code') && runtime.includes('`unavailable` for Claude'));
+  for (const [name, minimum] of [[data.report, 90], [file, 50], [data.evidence, 40], ['docs/runtime-compatibility.md', 210]]) {
+    const text = fs.readFileSync(path.join(REPO, name), 'utf8');
+    assert(text.split('\n').length >= minimum, name);
+    assert(!text.includes('\r') && !text.startsWith('\uFEFF'));
+    assert(!/\b[A-Za-z]:[\\/]|\\\\|\/Users\/|\/home\//.test(text), name);
+  }
+});
+test('T05 real repository: current pointer lineage immutable originals and final sources', () => {
+  const originals = {
+    'docs/host-compatibility-2026-10-28.md': '54ab27a29082b2315da0b7bb7d3691c411683208283511d589759cdde36db424',
+    'docs/host-compatibility-2026-10-28.evidence.json': '95974b4ecf41c98d331978755d7523dab4491d969e145d7a9c86cd7cf67d125c',
+    [BASE]: '31b5e62a1cb73a1856a134a5bc295667088254a63726d6222c65bf6cd6f6fea9',
+    [IMPORT]: 'd4abd0d35cd299ace327c9c2d227eba1e7087feb3541d016acbbbff5dac3077b',
+  };
+  for (const [file, hash] of Object.entries(originals)) assert.strictEqual(sha256(fs.readFileSync(path.join(REPO, file))), hash);
+  const result = validateBaseline({ cwd: REPO });
+  assert.strictEqual(result.ok, true, JSON.stringify(result.issues));
+  assert.strictEqual(result.selection.source, 'pointer');
+  assert.strictEqual(result.lineage[0].previous, BASE);
+  assert(result.sources.every((row) => !row.file.startsWith('scripts/forge-host-baseline') || row.status === 'unchanged'));
+  assert.strictEqual(validateBaseline({ cwd: REPO, baseline: BASE }).ok, true);
 });
 bounded.readBoundedStableFile = originalRead;
 capabilities.compareVersion = originalCompare;

@@ -24,6 +24,12 @@ the current Codex renderer, tracked in issue #280. The catalog posture below
 was reclassified against the renderer as part of that work; the issue stays
 open until its remaining report and freshness findings are verified.
 
+The [current baseline pointer](host-compatibility-current.json) selects the
+[2026-10-31 baseline](host-compatibility-baseline-2026-10-31.json) and
+[delivery analysis](host-compatibility-2026-10-31.md). Its verified lineage
+ends at the unchanged original import. Pending release-note review does not
+advance the reviewed boundary; unchanged versions still require revalidation.
+
 Generate the current matrix from the repository:
 
 ```text
@@ -142,6 +148,22 @@ No entry is `demonstrated` in this release.
 Planned is deliberately not rendered as green, and neither is distributed.
 
 This preserves a truthful path toward parity.
+
+## VS Code panel posture
+
+The local Forge TreeView is `conditional` for Codex in VS Code and
+`unavailable` for Claude. Claude Code receives the terminal surfaces; a VS Code
+extension is not a Claude terminal panel. See the
+[extension contract](../extensions/forge-vscode/README.md) and the
+[dated delivery evidence](host-compatibility-2026-10-31.evidence.json).
+
+The panel is read-only: it displays the current owner's canonical personal
+work, agents, pending questions and evidence. Refresh only rereads. It cannot
+answer a question, release a gate, adopt work or execute workspace code.
+An isolated technical mount on signed VS Code 1.144.0 proved activation and
+matching source data. Installation in the operator profile remains pending,
+as does the final human visual/comprehension acceptance round. The historical
+1.143.1 synthetic mount remains a separate proof with unchanged bytes.
 
 ## Capability probes and floors
 

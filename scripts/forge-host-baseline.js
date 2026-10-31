@@ -11,6 +11,8 @@ const capabilities = require('./forge-capabilities');
 
 const DEFAULT_BASELINE = 'docs/host-compatibility-baseline.json';
 const IMPORT_RECORD = 'docs/host-compatibility-import.json';
+const CURRENT_POINTER = 'docs/host-compatibility-current.json';
+const MAX_LINEAGE_LINKS = 8;
 const HASH = /^[a-f0-9]{64}$/;
 const VERSION = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 const ID = /^[a-z0-9][a-z0-9-]{0,127}$/;
@@ -103,10 +105,10 @@ function openFindings(baseline) {
     .map((row) => row.id).sort();
 }
 
-function validateBaseline({ cwd = process.cwd(), baseline = DEFAULT_BASELINE, observed = {}, previous, io = fs } = {}) {
+function validateBaseline({ cwd = process.cwd(), baseline, observed = {}, previous, io = fs } = {}) {
   const report = { ok: false, issues: [], baseline: null, artifacts: [], sources: [], hosts: {},
     import_record: 'absent', ui: { installed_build: null, state: 'unknown', range_closed: false },
-    open_findings: [], carry_forward: [], dropped_findings: [] };
+    open_findings: [], carry_forward: [], dropped_findings: [], lineage: [], selection: null };
   const issue = (code, detail) => report.issues.push(`${code}:${detail}`);
   let root;
   try { root = fs.realpathSync.native(path.resolve(cwd)); }
@@ -117,12 +119,16 @@ function validateBaseline({ cwd = process.cwd(), baseline = DEFAULT_BASELINE, ob
     if (cache.has(file)) return cache.get(file);
     const resolved = resolveSafeFile(file, [root], { base: root, maxBytes: MAX_FILE_BYTES });
     if (resolved.error) {
-      if (!(optional && resolved.error === 'source_missing')) issue(resolved.error.replace(/_/g, '-'), label);
+      if (optional && resolved.error === 'source_missing') {
+        // A dangling pointer/link is present, not an absent optional file.
+        try { fs.lstatSync(path.resolve(root, file)); issue('source-unreadable', label); }
+        catch (error) { if (error.code !== 'ENOENT') issue('source-unreadable', label); }
+      } else issue(resolved.error.replace(/_/g, '-'), label);
       return null;
     }
     const result = readBoundedStableFile(resolved.path, MAX_FILE_BYTES, { io, expectedReal: resolved.path });
     if (result.error) { issue(result.error.replace(/_/g, '-'), label); return null; }
-    const entry = { buffer: result.buffer, sha256: sha256(result.buffer) };
+    const entry = { buffer: result.buffer, sha256: sha256(result.buffer), real: resolved.path };
     cache.set(file, entry);
     return entry;
   }
@@ -131,30 +137,6 @@ function validateBaseline({ cwd = process.cwd(), baseline = DEFAULT_BASELINE, ob
     if (!entry) return null;
     try { return { ...entry, value: JSON.parse(entry.buffer.toString('utf8').replace(/^\uFEFF/, '')) }; }
     catch (_) { issue('invalid-json', label); return null; }
-  }
-  const current = json(baseline, 'baseline');
-  if (!current) return canonical(report);
-  if (!baselineShape(current.value)) { issue('invalid-shape', 'baseline'); return canonical(report); }
-  const data = current.value;
-  report.baseline = { file: baseline, sha256: current.sha256, analysis_date: data.analysis_date,
-    forge_version: data.forge.version, forge_commit: data.forge.commit };
-  report.open_findings = openFindings(data);
-  report.carry_forward = report.open_findings.slice();
-  for (const [host, key] of [['codex', 'codex_cli'], ['claude', 'claude_code']]) {
-    const observation = observed[host];
-    const version = object(observation) ? observation.version : observation;
-    report.hosts[host] = { ...compareHostVersion(data[key].installed, version),
-      observed_source: version && VERSION.test(version) ? (object(observation) && observation.source === 'observe' ? 'observe' : 'flag') : 'none' };
-  }
-  // Desktop build is independent of all CLI observations.
-  if (data.desktop_ui.installed_build !== null) {
-    report.ui = { installed_build: data.desktop_ui.installed_build, state: 'observed', range_closed: false };
-  }
-  let evidence = json(data.evidence, 'evidence');
-  if (evidence && !(object(evidence.value) && evidence.value.schema_version === 1
-    && hashRows(evidence.value.artifacts) && hashRows(evidence.value.inspected_source_fingerprints)
-    && [baseline, data.report].every((file) => evidence.value.artifacts.some((row) => row.file === file)))) {
-    issue('invalid-shape', 'evidence'); evidence = null;
   }
   const imported = json(IMPORT_RECORD, 'import-record', true);
   let records = [];
@@ -172,46 +154,186 @@ function validateBaseline({ cwd = process.cwd(), baseline = DEFAULT_BASELINE, ob
       for (const [index, row] of records.entries()) {
         if (row.source_sha256 !== row.imported_sha256) issue('import-record-inconsistent', `row-${index}`);
       }
-      for (const file of [baseline, data.report, data.evidence]) {
-        const row = records.find((entry) => entry.file === file);
-        if (!row || row.edited_after_import) issue('import-record-inconsistent', file);
+    }
+  }
+  const docsFile = (file) => relativeFile(file) && file.startsWith('docs/');
+  function physicalDocsFile(file) {
+    if (!docsFile(file)) return false;
+    const resolved = resolveSafeFile(file, [root], { base: root, maxBytes: MAX_FILE_BYTES });
+    // Missing files retain their specific pointer/lineage diagnostic later.
+    if (resolved.error === 'source_missing') return true;
+    return !resolved.error && path.relative(root, resolved.path).split(path.sep)[0] === 'docs';
+  }
+  if (baseline === undefined) {
+    const pointer = json(CURRENT_POINTER, 'pointer', true);
+    if (pointer) {
+      const value = pointer.value;
+      report.selection = { source: 'pointer', file: object(value) && typeof value.baseline === 'string' ? value.baseline : null };
+      if (!(object(value) && value.schema_version === 1 && physicalDocsFile(value.baseline) && HASH.test(value.baseline_sha256 || '')
+        && Object.keys(value).every((key) => ['schema_version', 'baseline', 'baseline_sha256'].includes(key)))) {
+        issue('pointer-invalid', CURRENT_POINTER); return canonical(report);
+      }
+      const target = json(value.baseline, 'pointer-target');
+      if (!target || !baselineShape(target.value)) { issue('pointer-invalid', 'target'); return canonical(report); }
+      if (target.sha256 !== value.baseline_sha256) { issue('pointer-hash-mismatch', value.baseline); return canonical(report); }
+      baseline = value.baseline;
+    } else if (report.issues.length) {
+      issue('pointer-invalid', CURRENT_POINTER); return canonical(report);
+    } else {
+      baseline = DEFAULT_BASELINE;
+      report.selection = { source: 'default', file: baseline };
+    }
+  } else report.selection = { source: 'explicit', file: baseline };
+
+  function carryForward(data, prior) {
+    const currentIds = new Map(data.open_findings.map((row) => [row.id, row]));
+    const dropped = openFindings(prior).filter((id) => !currentIds.has(id));
+    report.dropped_findings.push(...dropped);
+    for (const id of dropped) issue('open-finding-dropped', id);
+    for (const old of prior.open_findings) {
+      const row = currentIds.get(old.id);
+      if (row && row.status_at_analysis !== old.status_at_analysis
+        && !(ID.test(row.disposition || '') && relativeFile(row.evidence) && read(row.evidence, `finding-${row.id}`, true))) {
+        issue('finding-disposition-missing', row.id);
       }
     }
   }
-  const expectedArtifacts = evidence ? evidence.value.artifacts : [];
-  const files = [...new Set([data.report, baseline, data.evidence, ...expectedArtifacts.map((row) => row.file), ...records.map((row) => row.file)])];
-  for (const file of files) {
-    const entry = read(file, file);
-    const fromEvidence = expectedArtifacts.find((row) => row.file === file);
-    const fromImport = records.find((row) => row.file === file);
-    if (fromEvidence && fromImport && fromEvidence.sha256 !== fromImport.imported_sha256) issue('import-record-inconsistent', file);
-    const expected = { evidence: fromEvidence ? fromEvidence.sha256 : null, import: fromImport ? fromImport.imported_sha256 : null };
-    const hashes = Object.values(expected).filter(Boolean);
-    let status = !entry ? 'missing' : hashes.length === 0 ? 'unknown'
-      : hashes.every((hash) => hash === entry.sha256) ? 'match' : 'mismatch';
-    if (status === 'mismatch' && fromImport && fromImport.edited_after_import === true && !fromEvidence) status = 'changed-after-import';
-    if (status === 'mismatch') issue('artifact-hash-mismatch', file);
-    report.artifacts.push({ file, expected_sha256: expected, current_sha256: entry ? entry.sha256 : null, status });
-  }
-  if (evidence) {
-    for (const row of evidence.value.inspected_source_fingerprints) {
-      const entry = read(row.file, row.file, true);
-      const status = !entry ? 'missing' : entry.sha256 === row.sha256 ? 'unchanged' : 'changed';
-      report.sources.push({ file: row.file, recorded_sha256: row.sha256, current_sha256: entry ? entry.sha256 : null,
-        status, revalidation_required: status !== 'unchanged' });
+  function ranges(data, prior, evidence) {
+    for (const [host, key] of [['codex', 'codex_cli'], ['claude', 'claude_code']]) {
+      const row = data[key];
+      const anchor = prior[key].next_release_notes_after_exclusive;
+      const comparison = compareHostVersion(anchor, row.installed);
+      if (row.revalidation_required !== true || ['unknown', 'older'].includes(comparison.relation)
+        || compareHostVersion(prior[key].installed, row.installed).relation === 'older') {
+        issue('release-range-invalid', host); continue;
+      }
+      if (comparison.relation === 'same') {
+        if (row.release_notes_range !== null || row.release_notes_review !== 'not-applicable-same-version') issue('release-range-invalid', host);
+        if (row.next_release_notes_after_exclusive !== anchor) issue('release-range-gap', host);
+        continue;
+      }
+      const range = row.release_notes_range;
+      if (!object(range) || range.through_inclusive !== row.installed) issue('release-range-invalid', host);
+      if (!object(range) || range.after_exclusive !== anchor) issue('release-range-gap', host);
+      if (row.release_notes_review === 'pending') {
+        if (!openFindings(data).includes(`release-review-${host}`)) issue('release-range-invalid', `${host}-pending-finding`);
+        if (row.next_release_notes_after_exclusive !== anchor) issue('release-range-gap', `${host}-unreviewed-anchor`);
+      } else if (row.release_notes_review === 'reviewed') {
+        const sources = evidence && evidence.value.official_releases;
+        if (!Array.isArray(sources) || !sources.some((source) => object(source) && source.host === host
+          && source.release_notes_review === 'reviewed' && source.after_exclusive === anchor
+          && source.through_inclusive === row.installed && /^https:\/\//.test(source.url || '')
+          && HASH.test(source.body_sha256 || '') && Number.isInteger(source.body_bytes) && source.body_bytes > 0
+          && typeof source.observed_at === 'string' && Number.isFinite(Date.parse(source.observed_at)))) issue('release-range-invalid', `${host}-review-sources`);
+        if (row.next_release_notes_after_exclusive !== row.installed) issue('release-range-gap', `${host}-reviewed-anchor`);
+      } else issue('release-range-invalid', `${host}-review`);
     }
   }
+  function visit(file, depth, seen) {
+    if (depth > MAX_LINEAGE_LINKS) { issue('lineage-depth-exceeded', file); return null; }
+    const current = json(file, depth ? 'lineage' : 'baseline');
+    if (!current) return null;
+    if (!baselineShape(current.value)) { issue('invalid-shape', depth ? 'lineage' : 'baseline'); return null; }
+    const data = current.value;
+    let evidence = json(data.evidence, 'evidence');
+    if (evidence && !(object(evidence.value) && evidence.value.schema_version === 1
+      && hashRows(evidence.value.artifacts) && hashRows(evidence.value.inspected_source_fingerprints)
+      && [file, data.report].every((target) => evidence.value.artifacts.some((row) => row.file === target)))) {
+      issue('invalid-shape', 'evidence'); evidence = null;
+    }
+    const importedBaseline = records.find((row) => row.file === file);
+    const terminal = importedBaseline || file === DEFAULT_BASELINE;
+    if (terminal) {
+      if (imported) {
+        for (const target of [file, data.report, data.evidence]) {
+          const row = records.find((entry) => entry.file === target);
+          if (!row || row.edited_after_import) issue('import-record-inconsistent', target);
+        }
+      }
+      if (depth && !importedBaseline) issue('lineage-foreign', file);
+    } else if (!object(data.lineage)) issue(depth ? 'lineage-foreign' : 'lineage-required', file);
+    else {
+      const link = data.lineage;
+      if (!physicalDocsFile(file) || !physicalDocsFile(link.previous) || !HASH.test(link.previous_sha256 || '')) issue('lineage-foreign', file);
+      else if (seen.has(link.previous)) issue('lineage-cycle', link.previous);
+      else {
+        const prior = json(link.previous, 'lineage', true);
+        if (!prior) issue('lineage-missing', link.previous);
+        else if ([...seen].some((name) => cache.get(name) && cache.get(name).real === prior.real)) issue('lineage-cycle', link.previous);
+        else if (prior.sha256 !== link.previous_sha256) issue('lineage-hash-mismatch', link.previous);
+        else {
+          report.lineage.push({ file, previous: link.previous, previous_sha256: prior.sha256 });
+          const validated = visit(link.previous, depth + 1, new Set([...seen, link.previous]));
+          if (validated) {
+            if (validated.analysis_date > data.analysis_date) issue('lineage-order-invalid', file);
+            carryForward(data, validated);
+            ranges(data, validated, evidence);
+          }
+        }
+      }
+    }
+    for (const row of data.open_findings) {
+      if (['closed', 'resolved'].includes(row.status_at_analysis)
+        && !(object(row.closure) && row.closure.source === 'operator' && relativeFile(row.closure.reference)
+          && read(row.closure.reference, `closure-${row.id}`, true))) issue('finding-closure-unverified', row.id);
+    }
+    const expectedArtifacts = evidence ? evidence.value.artifacts : [];
+    const files = [...new Set([data.report, file, data.evidence, ...expectedArtifacts.map((row) => row.file), ...records.map((row) => row.file)])];
+    for (const target of files) {
+      const entry = read(target, target);
+      const fromEvidence = expectedArtifacts.find((row) => row.file === target);
+      const fromImport = records.find((row) => row.file === target);
+      if (fromEvidence && fromImport && fromEvidence.sha256 !== fromImport.imported_sha256) issue('import-record-inconsistent', target);
+      const expected = { evidence: fromEvidence ? fromEvidence.sha256 : null, import: fromImport ? fromImport.imported_sha256 : null };
+      const hashes = Object.values(expected).filter(Boolean);
+      let status = !entry ? 'missing' : hashes.length === 0 ? 'unknown'
+        : hashes.every((hash) => hash === entry.sha256) ? 'match' : 'mismatch';
+      if (status === 'mismatch' && fromImport && fromImport.edited_after_import && !fromEvidence) status = 'changed-after-import';
+      if (status === 'mismatch') {
+        issue('artifact-hash-mismatch', target);
+        if (fromImport && !fromImport.edited_after_import) issue('import-record-inconsistent', target);
+      }
+      // One physical row per artifact; the selected analysis wins over an
+      // ancestor's evidence row while import provenance remains explicit.
+      const artifact = { file: target, expected_sha256: expected, current_sha256: entry ? entry.sha256 : null, status,
+        origin: fromImport ? 'import-record' : depth ? 'lineage' : 'current-evidence' };
+      const index = report.artifacts.findIndex((row) => row.file === target);
+      if (index < 0) report.artifacts.push(artifact);
+      else report.artifacts[index] = artifact;
+    }
+    if (evidence && depth === 0) {
+      for (const row of evidence.value.inspected_source_fingerprints) {
+        const entry = read(row.file, row.file, true);
+        const status = !entry ? 'missing' : entry.sha256 === row.sha256 ? 'unchanged' : 'changed';
+        report.sources.push({ file: row.file, recorded_sha256: row.sha256, current_sha256: entry ? entry.sha256 : null,
+          status, revalidation_required: status !== 'unchanged' });
+      }
+    }
+    return data;
+  }
+  const data = visit(baseline, 0, new Set([baseline]));
+  if (!data) return canonical(report);
+  report.baseline = { file: baseline, sha256: cache.get(baseline).sha256, analysis_date: data.analysis_date,
+    forge_version: data.forge.version, forge_commit: data.forge.commit };
+  report.open_findings = openFindings(data);
+  report.carry_forward = report.open_findings.slice();
+  for (const [host, key] of [['codex', 'codex_cli'], ['claude', 'claude_code']]) {
+    const observation = observed[host];
+    const version = object(observation) ? observation.version : observation;
+    report.hosts[host] = { ...compareHostVersion(data[key].installed, version),
+      observed_source: version && VERSION.test(version) ? (object(observation) && observation.source === 'observe' ? 'observe' : 'flag') : 'none' };
+  }
+  // Desktop build is independent of all CLI observations.
+  if (data.desktop_ui.installed_build !== null) report.ui = { installed_build: data.desktop_ui.installed_build, state: 'observed', range_closed: false };
   if (previous !== undefined) {
     const prior = json(previous, 'previous');
     if (prior) {
       if (!baselineShape(prior.value)) issue('invalid-shape', 'previous');
-      else {
-        const currentIds = new Set(data.open_findings.map((row) => row.id));
-        report.dropped_findings = openFindings(prior.value).filter((id) => !currentIds.has(id));
-        for (const id of report.dropped_findings) issue('open-finding-dropped', id);
-      }
+      else carryForward(data, prior.value);
     }
   }
+  report.dropped_findings = [...new Set(report.dropped_findings)].sort();
+  if (report.selection.source === 'pointer' && report.issues.length) issue('pointer-invalid', 'target');
   report.issues = [...new Set(report.issues)].sort();
   report.ok = report.issues.length === 0;
   report.artifacts.sort((a, b) => a.file.localeCompare(b.file, 'en'));
