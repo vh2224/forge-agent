@@ -72,6 +72,7 @@ function fixture(options = {}) {
     "let prompt = null; try { prompt = match ? fs.readFileSync(match[1], 'utf8') : null; } catch {}",
     `fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ pid: process.pid, args, prompt }) + '\\n');`,
     '(async () => {',
+    options.startDelayMs ? `  await sleep(${options.startDelayMs});` : '',
     options.grandchild ? [
       "  require('child_process').spawn(process.execPath, ['-e',",
       `    ${JSON.stringify(`require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);`)}],`,
@@ -119,8 +120,31 @@ function stream(fake, extra = {}) {
   const cwd = extra.cwd || dir('cwd');
   return runAgyStream(deps(fake, extra.deps), { cwd, args: ['--sandbox', '-p', 'x', '--print-timeout', `${extra.timeoutSecs || 30}s`,
     '--output-format', 'stream-json'], timeoutSecs: extra.timeoutSecs || 30, livenessPolicy: POLICY,
-  livenessIntervalMs: 25, exitWaitMs: extra.exitWaitMs, signal: extra.signal, onHeartbeat: extra.onHeartbeat,
+  livenessIntervalMs: 25, clock: extra.clock, exitWaitMs: extra.exitWaitMs, signal: extra.signal, onHeartbeat: extra.onHeartbeat,
   onLiveness: extra.onLiveness, processSignals: extra.processSignals });
+}
+
+// These fixtures test post-start behavior, not OS scheduling. Keep logical time
+// at zero until an actual output chunk arrives, then measure real silence.
+function afterFirstOutput() {
+  let first = null;
+  return { clock: () => first === null ? 0 : performance.now() - first,
+    deps: { spawn(cmd, args, options) {
+      const child = spawn(cmd, args, options);
+      child.stdout.prependOnceListener('data', () => { first = performance.now(); });
+      return child;
+    } } };
+}
+function grandchildReady(fake) {
+  return new Promise((resolve, reject) => {
+    let watcher, timer;
+    const finish = (error, pid) => { clearTimeout(timer); watcher?.close(); error ? reject(error) : resolve(pid); };
+    const inspect = () => { const pid = fake.grandchild(); if (Number.isInteger(pid) && pid > 0) finish(null, pid); };
+    watcher = fs.watch(path.dirname(fake.file), inspect);
+    watcher.once('error', error => finish(error));
+    timer = setTimeout(() => finish(new Error('fixture grandchild did not become ready')), 10000);
+    inspect();
+  });
 }
 
 async function rejectsWith(promise, code) {
@@ -456,21 +480,32 @@ test('non-zero exit keeps the literal message with a bounded stderr tail', async
   await assert.rejects(missing, /^Error: agy spawn failed: ENOENT$/);
 });
 
+test('a delayed real fixture reproduces startup winning before post-start behavior', async () => {
+  const fake = fixture({ startDelayMs: 1100, events: [[init]], sleepMs: 20000 });
+  const error = await rejectsWith(stream(fake), 'agy-anomalous-silence');
+  assert.equal(error.liveness.termination, 'dead-start');
+});
+
 test('output overflow kills the owner with agy-output-limit', async () => {
-  const fake = fixture({ events: [[init]], flood: 2 * 1048576, sleepMs: 20000 });
-  const error = await rejectsWith(stream(fake), 'agy-output-limit');
+  const fake = fixture({ startDelayMs: 1100, events: [[init]], flood: 2 * 1048576, sleepMs: 20000 });
+  // Overflow remains a real owned process. A fixed test clock prevents startup
+  // and flood throughput from selecting an unrelated liveness classification.
+  const error = await rejectsWith(stream(fake, { clock: () => 0 }), 'agy-output-limit');
   assert.equal(error.diagnostic.reason, 'output-limit');
   assert(await gone(fake.calls()[0].pid));
 });
 
 test('the ceiling classifies starting as timeout and active as budget exceeded', async () => {
-  const slowStart = fixture({ sleepMs: 20000 });
+  // Classification is deterministic in-process; OS tree termination remains
+  // covered by the real cancellation and dead-silence fixtures below.
+  const synthetic = onStart => deps(fixture(), { spawn: () => syntheticChild(onStart),
+    terminateChild(child) { queueMicrotask(() => child.emit('close', 0)); return { ok: true, tree_terminated: true }; } });
   const startPolicy = { ...POLICY, startMs: 5000 };
-  const e1 = await rejectsWith(runAgyStream(deps(slowStart), { cwd: dir('cwd'), args: [], timeoutSecs: 1,
+  const e1 = await rejectsWith(runAgyStream(synthetic(), { cwd: dir('cwd'), args: [], timeoutSecs: 1, clock: () => 0,
     livenessPolicy: startPolicy, livenessIntervalMs: 25 }), 'agy-timeout');
   assert.equal(e1.diagnostic.reason, 'provider-timeout');
-  const busy = fixture({ events: [[init], ...Array.from({ length: 40 }, (_, i) => [stepUpdate(i, 'ACTIVE', 'agent_response', `c${i}`), 100])] });
-  const e2 = await rejectsWith(runAgyStream(deps(busy), { cwd: dir('cwd'), args: [], timeoutSecs: 1,
+  const busy = synthetic(child => child.stdout.write(JSON.stringify(init) + '\n' + JSON.stringify(stepUpdate(0, 'ACTIVE', 'agent_response', 'active')) + '\n'));
+  const e2 = await rejectsWith(runAgyStream(busy, { cwd: dir('cwd'), args: [], timeoutSecs: 1, clock: () => 0,
     livenessPolicy: POLICY, livenessIntervalMs: 25 }), 'budget-exceeded-while-active');
   assert.equal(e2.liveness.termination, 'budget-exceeded-while-active');
   assert.equal(e2.diagnostic.reason, 'budget-exceeded-while-active');
@@ -480,9 +515,8 @@ test('the ceiling classifies starting as timeout and active as budget exceeded',
 test('cancellation kills the whole owned tree, grandchild included', async () => {
   const fake = fixture({ grandchild: true, events: [[init]], sleepMs: 20000 });
   const controller = new AbortController();
-  const pending = stream(fake, { signal: controller.signal });
-  for (let i = 0; i < 200 && !fake.grandchild(); i++) await new Promise(resolve => setTimeout(resolve, 20));
-  const grandchild = fake.grandchild();
+  const pending = stream(fake, { signal: controller.signal, clock: () => 0 });
+  const grandchild = await grandchildReady(fake).catch(async error => { controller.abort(); await pending.catch(() => {}); throw error; });
   assert(grandchild, 'grandchild started');
   strays.add(grandchild);
   controller.abort();
@@ -494,8 +528,8 @@ test('cancellation kills the whole owned tree, grandchild included', async () =>
 });
 
 test('silence kill also reaches the grandchild and process signals cancel once', async () => {
-  const fake = fixture({ grandchild: true, events: [[init]], sleepMs: 20000 });
-  const error = await rejectsWith(stream(fake), 'agy-anomalous-silence');
+  const fake = fixture({ startDelayMs: 1100, grandchild: true, events: [[init]], sleepMs: 20000 });
+  const error = await rejectsWith(stream(fake, afterFirstOutput()), 'agy-anomalous-silence');
   assert.equal(error.liveness.termination, 'dead-silence');
   const grandchild = fake.grandchild();
   strays.add(grandchild);
