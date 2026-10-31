@@ -17,6 +17,7 @@ const {
   migrateAll,
   ensureGitignore,
   setPreference,
+  setCatalogValue,
   resolveCurrent,
 } = require('./forge-prefs-migrate.js');
 const { parseJsonc, loadSchema, deepMerge } = require('./forge-prefs.js');
@@ -568,6 +569,44 @@ process.stdout.write('\nIssues277/278 — routing shape and layer-aware set veri
   assert(partialFailure && partialFailure.code === 'EIO' && partialFailure.write_state === 'unknown'
     && /catalog write state: unknown/.test(partialFailure.message) && fs.readFileSync(localPath, 'utf8') === '{',
     'issue278 partial I/O failure preserves the uncertain write and original error without unsafe rollback');
+}
+
+process.stdout.write('\nIssue312 — compact catalog entry boundaries\n');
+for (const [input, key, value, retained, label] of [
+  ['{"review":{"rounds":1},"auto_commit":false}', 'review.rounds', 2, '"auto_commit":false}', 'first object and same-line neighbor'],
+  ['{"auto_commit":false,"review":{"rounds":1}}', 'auto_commit', true, '"review":{"rounds":1}}', 'first primitive and same-line neighbor'],
+  ['{"auto_commit":false,"review":{"rounds":1}}', 'review.rounds', 2, '{"auto_commit":false,', 'last object and root close'],
+  ['{"review":{"rounds":1},"auto_commit":false}', 'auto_commit', true, '{"review":{"rounds":1},', 'last primitive without comma'],
+  ['{"operator":"old\\\"value","auto_commit":false}', 'operator', 'new', '"auto_commit":false}', 'quoted scalar and neighbor'],
+  ['{"operator":[1,{"x":"y"}],"auto_commit":false}', 'operator', [2], '"auto_commit":false}', 'array and neighbor'],
+  ['{"operator":null,"auto_commit":false}', 'operator', true, '"auto_commit":false}', 'null scalar and neighbor'],
+  ['{"operator":-1.25e+3,"review":{"rounds":1}}', 'operator', -2, '"review":{"rounds":1}}', 'numeric scalar and neighbor'],
+  ['{"review":{"rounds":1} /* section, } */ , "auto_commit":false /* untouched, } */}', 'review.rounds', 2,
+    '"auto_commit":false /* untouched, } */}', 'comment delimiters and unrelated comment'],
+  ['{\r  "review": {"rounds":1},\r  "auto_commit":false\r}', 'review.rounds', 2, '  "auto_commit":false\r}', 'CR-only lines'],
+  ['{\r\n  "review": {"rounds":1},\r\n  "auto_commit":false\r\n}', 'auto_commit', true, '{\r\n  "review": {"rounds":1},\r\n', 'last scalar and CRLF'],
+  ['{"review":{"rounds":0},"auto_commit":false,"review":{"rounds":1},"operator":"tail"}', 'review.rounds', 2, '"auto_commit":false,', 'same-line duplicate sections'],
+]) {
+  let output;
+  try { output = setCatalogValue(input, key, value, schema); }
+  catch (error) { assert(false, `issue312 ${label}: ${error.message}`); continue; }
+  const result = parseJsonc(output);
+  const actual = key.split('.').reduce((object, part) => object[part], result.value);
+  assert(result.ok && JSON.stringify(actual) === JSON.stringify(value), `issue312 ${label} applies the requested value`);
+  assert(output.includes(retained) && output.trimStart().startsWith('{') && output.trimEnd().endsWith('}'),
+    `issue312 ${label} retains unrelated bytes and root braces`);
+  assert(setCatalogValue(output, key, value, schema) === output, `issue312 ${label} repeat is a byte-for-byte fixed point`);
+}
+{
+  const fx = makeFixture({ globalMd: null, repoMd: undefined, localMd: undefined });
+  const localPath = path.join(fx.localDir, 'forge-prefs.jsonc');
+  fs.writeFileSync(localPath, '{"review":{"rounds":1},"auto_commit":false}');
+  try {
+    const result = setPreference(fx.cwd, 'review.rounds=2', { globalDir: fx.globalDir, localDir: fx.localDir, layer: 'local' });
+    const bytes = fs.readFileSync(localPath, 'utf8');
+    assert(result.status === 'set' && parseJsonc(bytes).value.review.rounds === 2 && bytes.includes('"auto_commit":false}'),
+      'issue312 public setter writes a valid compact catalog without changing its neighbor');
+  } catch (error) { assert(false, `issue312 public setter: ${error.message}`); }
 }
 
 process.stdout.write(`\n${passes} passed, ${failures} failed\n`);

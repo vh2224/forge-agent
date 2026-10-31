@@ -38,7 +38,7 @@ const { execFileSync } = require('child_process');
 
 const {
   parseJsonc,
-  stripJsonc,
+  scanJsonc,
   preferenceLayerDescriptors,
   deepMerge,
   loadSchema,
@@ -416,8 +416,14 @@ function rootEntryEnd(mask, text, keyStart) {
   let index = mask.indexOf(':', quoted.end);
   if (index === -1) return null;
   let depth = 0;
+  let started = false;
   for (index += 1; index < mask.length; index++) {
     const character = mask[index];
+    if (/[ \t\r\n]/.test(character)) {
+      if (!started) continue;
+      if (depth === 0) break;
+    }
+    started = true;
     if (character === '"') {
       const string = readQuoted(mask, index);
       if (!string) continue;
@@ -434,15 +440,15 @@ function rootEntryEnd(mask, text, keyStart) {
     }
     if (depth === 0 && character === ',') break;
   }
-  while (index < mask.length && (mask[index] === ' ' || mask[index] === '\t')) index += 1;
-  if (mask[index] === ',') index += 1;
-  // The returned offset is consumed as a RANGE end by activeSectionRanges →
-  // setCatalogValue, which rewrites the catalogue by slicing. It must land just
-  // past the whole line terminator, whatever that terminator is. `indexOf('\n')`
-  // already lands correctly on CRLF (the LF is the last byte of the pair) but is
-  // blind to a lone CR, which would fold two source lines into one range.
-  const tail = /\r\n|\n|\r/.exec(text.slice(index));
-  return tail === null ? text.length : index + tail.index + tail[0].length;
+  // Consume the entry delimiter even when whitespace/comments separate it from
+  // the value, but never consume the following key or the outer closing brace.
+  let delimiter = index;
+  while (delimiter < mask.length && /[ \t\r\n]/.test(mask[delimiter])) delimiter += 1;
+  if (mask[delimiter] === ',') index = delimiter + 1;
+  // A complete own line may be replaced, including CRLF/CR. On a shared line,
+  // leave every following byte intact rather than searching for a later EOL.
+  const tail = /^[ \t]*(?:\r\n|\n|\r)/.exec(text.slice(index));
+  return tail === null ? index : index + tail[0].length;
 }
 
 // Every ACTIVE occurrence of `section` as an absolute source range, in document
@@ -452,20 +458,23 @@ function rootEntryEnd(mask, text, keyStart) {
 // clamps consecutive duplicates in a way that misattributes markers.
 function activeSectionRanges(text, section) {
   const needle = `// ${SET_MARKER}`;
-  const mask = stripJsonc(text);
-  const lineStartOf = (index) => text.lastIndexOf('\n', Math.max(0, index - 1)) + 1;
+  // The parser's strict-JSON mask removes trailing commas; source ranges must
+  // retain those delimiters so replacing the entry cannot leave a duplicate.
+  const mask = scanJsonc(text).text;
+  const lineStartOf = (index) => Math.max(text.lastIndexOf('\n', index - 1), text.lastIndexOf('\r', index - 1)) + 1;
   const ranges = [];
   for (const anchor of rootKeys(mask)) {
     if (anchor.key !== section) continue;
     const end = rootEntryEnd(mask, text, anchor.start);
     if (end === null) continue;
-    let start = lineStartOf(anchor.start);
+    const lineStart = lineStartOf(anchor.start);
+    let start = /^[ \t]*$/.test(text.slice(lineStart, anchor.start)) ? lineStart : anchor.start;
     const head = text.slice(0, start);
     const marker = head.lastIndexOf(needle);
     // Whitespace-only between the marker and the key proves the marker labels
     // THIS entry and not an unrelated earlier one.
     if (marker !== -1 && head.slice(marker + needle.length).trim() === '') start = lineStartOf(marker);
-    ranges.push({ start, end });
+    ranges.push({ start, end, inline: start === anchor.start && start !== lineStart });
   }
   return ranges;
 }
@@ -506,7 +515,9 @@ function setCatalogValue(catalogText, dotted, value, schema) {
       const range = occurrences[index];
       if (range.start < cursor) continue;
       output += catalogText.slice(cursor, range.start);
-      if (index === 0) output += entry;
+      // An inline key already has its original prefix. Reintroducing the
+      // renderer's line indentation here would grow that prefix on every set.
+      if (index === 0) output += range.inline ? entry.trimStart() : entry;
       cursor = range.end;
     }
     output += catalogText.slice(cursor);
