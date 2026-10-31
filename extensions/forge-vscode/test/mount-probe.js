@@ -28,10 +28,11 @@ async function run() {
   const target = resultTarget(process.env.FORGE_VSCODE_MOUNT_RESULT);
   const vscode = require('vscode');
   const result = {
-    schema_version: 1, version: vscode.version, app_name: vscode.env.appName,
+    schema_version: 2, version: vscode.version, app_name: vscode.env.appName,
     app_host: vscode.env.appHost, ui_kind: vscode.env.uiKind,
     extension_found: false, extension_active: false, container_revealed: false,
-    view_visible: false, synthetic_nodes: 0, reason: 'extension-missing',
+    view_visible: false, panel_nodes: 0, panel_status: null, panel_reason: null,
+    panel_stable_sha256: null, panel_generated_at: null, reason: 'extension-missing',
   };
   try {
     const extension = vscode.extensions.getExtension('forge-agent.forge-vscode');
@@ -46,9 +47,25 @@ async function run() {
         await new Promise(resolve => setTimeout(resolve, 100));
       }
       result.view_visible = api?.treeView?.visible === true;
-      const children = await api?.provider?.getChildren();
-      result.synthetic_nodes = Array.isArray(children)
-        ? children.filter(node => typeof node?.description === 'string' && node.description.includes('Dados sintéticos')).length : 0;
+      let timer;
+      try {
+        await Promise.race([api.refresh(), new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('panel-refresh-timeout')), 30000);
+        })]);
+      } finally { clearTimeout(timer); }
+      const state = api.state();
+      const children = await api.provider.getChildren();
+      result.panel_nodes = Array.isArray(children) ? children.length : 0;
+      // Closed values only; never serialize labels, work identities or node text.
+      result.panel_status = ['ok', 'empty', 'unavailable', 'invalid'].includes(state?.status) ? state.status : null;
+      const { STATE_REASONS } = require('../../../scripts/forge-panel-source');
+      result.panel_reason = Object.hasOwn(STATE_REASONS, state?.reason) ? state.reason : null;
+      result.panel_stable_sha256 = typeof state?.stable_sha256 === 'string'
+        && /^[a-f0-9]{64}$/.test(state.stable_sha256) ? state.stable_sha256 : null;
+      result.panel_generated_at = typeof state?.generated_at === 'string'
+        && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(state.generated_at)
+        && Number.isFinite(Date.parse(state.generated_at))
+        && new Date(state.generated_at).toISOString() === state.generated_at ? state.generated_at : null;
       result.reason = 'observed';
     }
   } catch (_) {

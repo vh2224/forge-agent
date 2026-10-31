@@ -8,13 +8,24 @@ const { Worker, isMainThread, parentPort, workerData } = require('node:worker_th
 const capabilities = require('./forge-capabilities');
 const { readBoundedStableFile } = require('./forge-autonomy-sources');
 const { sha256 } = require('./forge-delivery');
+const { readPanelSource, STATE_REASONS, LIMITS: PANEL_LIMITS } = require('./forge-panel-source');
+const { readPersonalSnapshot } = require('./forge-personal-context');
+const { resolveUserHome } = require('./forge-home');
+const { resolveOwner } = require('./forge-workspace');
 
 const ROOT = path.resolve(__dirname, '..');
 const MAX_BYTES = 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 120000;
+// Canonical agent events and question-state reader ceilings (not exported).
+const SOURCE_LIMITS = Object.freeze({ events: 16 * MAX_BYTES, question: 256 * 1024, questionFiles: 128 });
 const REEXECUTE = 'node scripts/forge-panel-probe.js --mount --json';
 const MOUNT_KEYS = ['schema_version', 'version', 'app_name', 'app_host', 'ui_kind', 'extension_found',
   'extension_active', 'container_revealed', 'view_visible', 'synthetic_nodes', 'reason'];
+const MOUNT_KEYS_V2 = [...MOUNT_KEYS.filter(key => key !== 'synthetic_nodes'), 'panel_nodes', 'panel_status',
+  'panel_reason', 'panel_stable_sha256', 'panel_generated_at'];
+const ISO_TIME = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/;
+const isoTime = value => typeof value === 'string' && ISO_TIME.test(value) && Number.isFinite(Date.parse(value))
+  && new Date(value).toISOString() === value;
 const MECHANISM = Object.freeze({ view: 'TreeView', container: 'View Container', location: 'activity bar',
   process: 'local extension host', webview: false, server_required: false, listener: 'none', hosting: 'none', network: false });
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -115,18 +126,46 @@ function identify(options = {}) {
 }
 
 function mountShape(value) {
+  const keys = value?.schema_version === 2 ? MOUNT_KEYS_V2 : MOUNT_KEYS;
+  const nodes = value?.schema_version === 2 ? value.panel_nodes : value?.synthetic_nodes;
   return value && typeof value === 'object' && !Array.isArray(value)
-    && Object.keys(value).length === MOUNT_KEYS.length && MOUNT_KEYS.every(key => Object.hasOwn(value, key))
-    && value.schema_version === 1 && version(value.version) !== 'unknown'
+    && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key))
+    && [1, 2].includes(value.schema_version) && version(value.version) !== 'unknown'
     && typeof value.app_name === 'string' && /^[\p{L}\d .()+-]{1,80}$/u.test(value.app_name)
     && ['desktop', 'web'].includes(value.app_host) && [1, 2].includes(value.ui_kind)
     && ['extension_found', 'extension_active', 'container_revealed', 'view_visible'].every(key => typeof value[key] === 'boolean')
-    && Number.isSafeInteger(value.synthetic_nodes) && value.synthetic_nodes >= 0 && value.synthetic_nodes <= 10000
+    && Number.isSafeInteger(nodes) && nodes >= 0 && nodes <= 10000
+    && (value.schema_version === 1 || ((value.panel_status === null || ['ok', 'empty', 'unavailable', 'invalid'].includes(value.panel_status))
+      && (value.panel_reason === null || Object.hasOwn(STATE_REASONS, value.panel_reason))
+      && (value.panel_stable_sha256 === null || typeof value.panel_stable_sha256 === 'string' && /^[a-f0-9]{64}$/.test(value.panel_stable_sha256))
+      && (value.panel_generated_at === null || isoTime(value.panel_generated_at))))
     && ['observed', 'extension-missing', 'extension-observation-failed'].includes(value.reason);
 }
 
 function mounted(value) {
-  return value.extension_found && value.extension_active && value.container_revealed && value.view_visible && value.synthetic_nodes > 0;
+  return value.extension_found && value.extension_active && value.container_revealed && value.view_visible
+    && (value.schema_version === 2 ? value.panel_nodes > 0 && Object.hasOwn(STATE_REASONS, value.panel_reason)
+      && STATE_REASONS[value.panel_reason].status === value.panel_status : value.synthetic_nodes > 0);
+}
+
+// Check every component before realpath; a resolved alias is not an allowed input.
+function physicalPath(value, kind) {
+  if (typeof value !== 'string' || !path.isAbsolute(value)) throw new Error(`${kind}-absolute-required`);
+  const absolute = path.resolve(value);
+  for (let cursor = absolute;; cursor = path.dirname(cursor)) {
+    if (fs.lstatSync(cursor).isSymbolicLink()) throw new Error(`${kind}-link`);
+    if (cursor === path.dirname(cursor)) break;
+  }
+  if (fs.realpathSync.native(absolute) !== absolute) throw new Error(`${kind}-realpath`);
+  const stat = fs.lstatSync(absolute);
+  if (kind === 'workspace' ? !stat.isDirectory() : !stat.isFile()) throw new Error(`${kind}-type`);
+  return absolute;
+}
+
+function codePath(value) {
+  const file = physicalPath(value, 'code');
+  if (!['code', 'code.cmd', 'code.exe'].includes(path.basename(file).toLowerCase())) throw new Error('code-launcher-invalid');
+  return file;
 }
 
 // Only process identities/relationships carrying this invocation's unique root are retained.
@@ -231,25 +270,30 @@ function mountDiagnostics(root, result, resultIssue) {
 }
 
 async function mount(options = {}) {
+  const suppliedWorkspace = options.workspace === undefined ? null : physicalPath(options.workspace, 'workspace');
+  // Object overrides are a trusted offline-test seam, never accepted by the CLI.
+  if (typeof options.code === 'string') codePath(options.code);
   const target = nativeMountTarget(executable('code', options));
   const timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;
   const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'forge-vscode-probe-'));
   const resultFile = path.join(root, 'mount-result.json');
   const profile = path.join(root, 'user-data');
   const extensions = path.join(root, 'extensions');
-  const workspace = path.join(root, 'workspace');
+  const workspace = suppliedWorkspace || path.join(root, 'workspace');
   fs.mkdirSync(path.join(profile, 'User'), { recursive: true });
-  fs.mkdirSync(extensions); fs.mkdirSync(workspace);
+  fs.mkdirSync(extensions); if (!suppliedWorkspace) fs.mkdirSync(workspace);
   fs.writeFileSync(path.join(profile, 'User', 'settings.json'), JSON.stringify({
     'telemetry.telemetryLevel': 'off', 'update.mode': 'none', 'extensions.autoUpdate': false,
     'extensions.autoCheckUpdates': false, 'security.workspace.trust.enabled': false,
     'workbench.startupEditor': 'none', 'workbench.enableExperiments': false,
+    'git.enabled': false, 'git.autoRepositoryDetection': false, 'git.autofetch': false,
   }));
   const args = ['--user-data-dir', profile, '--extensions-dir', extensions, '--disable-extensions',
+    '--disable-extension', 'vscode.git', '--disable-extension', 'vscode.git-base', '--disable-extension', 'vscode.github',
     '--disable-workspace-trust', '--skip-welcome', '--skip-release-notes', '--new-window', '--wait',
     `--extensionDevelopmentPath=${path.join(ROOT, 'extensions', 'forge-vscode')}`,
     `--extensionTestsPath=${path.join(ROOT, 'extensions', 'forge-vscode', 'test', 'mount-probe.js')}`, workspace];
-  const command = `${target.launcher === 'installed-gui-executable' ? 'Code.exe' : 'code'} --user-data-dir <owned-temp>/user-data --extensions-dir <owned-temp>/extensions --disable-extensions --disable-workspace-trust --skip-welcome --skip-release-notes --new-window --wait --extensionDevelopmentPath=extensions/forge-vscode --extensionTestsPath=extensions/forge-vscode/test/mount-probe.js <owned-temp>/workspace`;
+  const command = `${target.launcher === 'installed-gui-executable' ? 'Code.exe' : 'code'} --user-data-dir <owned-temp>/user-data --extensions-dir <owned-temp>/extensions --disable-extensions --disable-extension vscode.git --disable-extension vscode.git-base --disable-extension vscode.github --disable-workspace-trust --skip-welcome --skip-release-notes --new-window --wait --extensionDevelopmentPath=extensions/forge-vscode --extensionTestsPath=extensions/forge-vscode/test/mount-probe.js ${suppliedWorkspace ? '<workspace>' : '<owned-temp>/workspace'}`;
   const env = { ...(options.env || process.env), FORGE_VSCODE_MOUNT_RESULT: resultFile };
   // Do not inherit an IDE IPC hook: the development profile must start a separate instance.
   delete env.VSCODE_IPC_HOOK_CLI;
@@ -320,6 +364,96 @@ async function mount(options = {}) {
       : !observed ? 'result-channel-unavailable' : outcome === 'mounted' ? 'all-mount-conditions-observed' : 'mount-condition-failed',
     evidence: { ...commandEvidence(command, result), result_sha256: resultHash, timeout_ms: timeoutMs, observed,
       process_exit: exited ? 'confirmed' : 'unknown', shell: false, launcher: target.launcher }, diagnostics, cleanup: clean, reexecute: REEXECUTE };
+}
+
+// These snapshots are ephemeral and never returned. Missing suffixes are a
+// stable observation; unreadable, linked or oversized sources cannot prove it.
+function sourceSnapshot(workspace, options = {}) {
+  try {
+    const home = resolveUserHome(options);
+    const store = path.join(home, '.forge-personal', 'context.json');
+    const files = [];
+    const noLinks = file => {
+      for (let cursor = path.resolve(file);; cursor = path.dirname(cursor)) {
+        try { if (fs.lstatSync(cursor).isSymbolicLink()) throw new Error('source-link'); }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
+        if (cursor === path.dirname(cursor)) break;
+      }
+    };
+    const capture = (file, limit) => {
+      noLinks(file);
+      let stat;
+      try { stat = fs.lstatSync(file); }
+      catch (error) { if (error.code === 'ENOENT') { files.push([file, 'missing']); return; } throw error; }
+      if (!stat.isFile()) throw new Error('source-not-file');
+      const read = readBoundedStableFile(file, limit, { expectedReal: file });
+      if (read.error) throw new Error('source-unreadable');
+      files.push([file, read.stat.size, read.stat.mtimeMs, sha256(read.buffer)]);
+    };
+    capture(store, PANEL_LIMITS.store);
+    const snapshot = readPersonalSnapshot({ ...options, cwd: workspace });
+    const resolvedOwner = snapshot.project || resolveOwner(workspace);
+    if (!resolvedOwner) return null;
+    const owner = fs.realpathSync.native(resolvedOwner);
+    physicalPath(owner, 'workspace');
+    capture(path.join(owner, '.gsd', 'forge', 'events.jsonl'), SOURCE_LIMITS.events);
+    const directory = path.join(owner, '.gsd', 'forge', 'questions');
+    noLinks(directory);
+    try {
+      const stat = fs.lstatSync(directory);
+      if (!stat.isDirectory()) return null;
+      const names = [];
+      const handle = fs.opendirSync(directory);
+      try {
+        let entry;
+        while ((entry = handle.readSync()) !== null) {
+          if (names.length >= SOURCE_LIMITS.questionFiles) throw new Error('questions-limit');
+          names.push(entry.name);
+        }
+      } finally { handle.closeSync(); }
+      names.sort(); files.push([directory, stat.mtimeMs, names]);
+      for (const name of names) capture(path.join(directory, name), SOURCE_LIMITS.question);
+      const after = fs.statSync(directory);
+      if (after.mtimeMs !== stat.mtimeMs || after.ino !== stat.ino) return null;
+    } catch (error) {
+      if (error.code !== 'ENOENT') return null;
+      files.push([directory, 'missing']);
+    }
+    return files;
+  } catch (_) { return null; }
+}
+
+function privacyProblems(value, options = {}) {
+  const text = JSON.stringify(value);
+  const problems = [];
+  if (/\b[A-Za-z]:[\\/]|\\\\[^\\]|(?:^|["\s])\/(?!\/|subagents(?:\s|"))|\b(?:Users|home)[\\/]|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/.test(text)) problems.push('personal-or-absolute-path');
+  if (text.toLowerCase().includes(path.basename(options.cwd || ROOT).toLowerCase())) problems.push('workspace-name');
+  return problems;
+}
+
+async function panelCheck(options = {}) {
+  const workspace = physicalPath(options.workspace, 'workspace');
+  const before = sourceSnapshot(workspace, options);
+  const mounting = await mount({ ...options, workspace });
+  const observed = mounting.evidence.observed;
+  let canonical = { status: null, reason: null, counts: null, stable_sha256: null };
+  if (observed?.schema_version === 2 && isoTime(observed.panel_generated_at)) {
+    const dto = readPanelSource({ ...options, cwd: workspace, now: observed.panel_generated_at });
+    canonical = { status: dto.state.status, reason: dto.state.reason,
+      counts: Object.fromEntries(['works', 'agents', 'pending', 'evidence'].map(key => [key, dto[key].length])),
+      stable_sha256: dto.stable_sha256 };
+  }
+  const after = sourceSnapshot(workspace, options);
+  const unchanged = before !== null && after !== null && JSON.stringify(before) === JSON.stringify(after);
+  const match = !unchanged || observed?.schema_version !== 2 || !isoTime(observed.panel_generated_at)
+    || !observed.panel_stable_sha256 || !canonical.stable_sha256 ? 'unknown'
+    : observed.panel_stable_sha256 === canonical.stable_sha256 ? 'match' : 'mismatch';
+  const { observed: _observed, ...evidence } = mounting.evidence;
+  const result = { schema_version: 1, captured_at: new Date().toISOString(),
+    mount: { result: mounting.result, reason: mounting.reason, evidence, cleanup: mounting.cleanup },
+    observed, canonical, source_match: match, sources_unchanged: unchanged };
+  if (privacyProblems(result, { cwd: workspace }).length) throw new Error('panel-check-privacy');
+  return result;
 }
 
 function scanLiteral(file) {
@@ -404,10 +538,7 @@ function validateRecord(value, options = {}) {
   }
   check(typeof value.captured_at === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value.captured_at)
     && Number.isFinite(Date.parse(value.captured_at)) && value.observation_origin === 'direct-local-probes', 'capture-invalid');
-  const text = JSON.stringify(value);
-  check(!/\b[A-Za-z]:[\\/]|\\\\[^\\]|(?:^|["\s])\/(?!\/|subagents(?:\s|"))|\b(?:Users|home)[\\/]|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/.test(text), 'personal-or-absolute-path');
-  const workspace = path.basename(options.cwd || ROOT);
-  check(!text.toLowerCase().includes(workspace.toLowerCase()), 'workspace-name');
+  problems.push(...privacyProblems(value, options));
   check(value.client?.product === 'Visual Studio Code' && (value.client.version === 'unknown' || version(value.client.version) !== 'unknown')
     && /^(unknown|[a-f0-9]{40})$/i.test(value.client.commit) && ['unknown', 'x64', 'arm64', 'ia32'].includes(value.client.architecture), 'client-invalid');
   check(value.client?.source === 'code --version' && ['unknown', 'same-version', 'different-version'].includes(value.client.consistency), 'client-source-invalid');
@@ -496,29 +627,41 @@ function outputTarget(relative, cwd = ROOT) {
 }
 
 async function main(args, suppliedOptions = {}) {
-  const modes = ['--identify', '--mount', '--claude', '--record', '--validate-record'];
+  const modes = ['--identify', '--mount', '--claude', '--record', '--validate-record', '--panel-check'];
   const selected = args.filter(arg => modes.includes(arg));
-  if (selected.length !== 1 || args.some(arg => arg.startsWith('--') && ![...modes, '--json', '--out', '--timeout-ms'].includes(arg))) return 2;
+  if (selected.length !== 1 || args.some(arg => arg.startsWith('--') && ![...modes, '--json', '--out', '--timeout-ms', '--workspace', '--code'].includes(arg))) return 2;
   const mode = selected[0];
   const values = new Set();
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
     if (values.has(arg)) return 2;
     values.add(arg);
-    if (['--out', '--timeout-ms', '--validate-record'].includes(arg)) {
+    if (['--out', '--timeout-ms', '--validate-record', '--workspace', '--code'].includes(arg)) {
       if (!args[index + 1] || args[index + 1].startsWith('--')) return 2;
       index++;
     } else if (arg !== '--json' && !modes.includes(arg)) return 2;
   }
   if ((mode === '--record') !== args.includes('--out')) return 2;
   const options = { ...suppliedOptions };
+  if (mode === '--panel-check' && !args.includes('--workspace')) return 2;
+  try {
+    for (const [flag, key, validate] of [['--workspace', 'workspace', value => physicalPath(value, 'workspace')], ['--code', 'code', codePath]]) {
+      if (!args.includes(flag)) continue;
+      if (!['--mount', '--record', '--panel-check'].includes(mode)) return 2;
+      options[key] = validate(args[args.indexOf(flag) + 1]);
+    }
+  } catch (_) { return 2; }
   if (args.includes('--timeout-ms')) {
     const raw = args[args.indexOf('--timeout-ms') + 1];
-    if (!/^\d+$/.test(raw || '') || Number(raw) < 100 || Number(raw) > 300000 || !['--mount', '--record'].includes(mode)) return 2;
+    if (!/^\d+$/.test(raw || '') || Number(raw) < 100 || Number(raw) > 300000 || !['--mount', '--record', '--panel-check'].includes(mode)) return 2;
     options.timeoutMs = Number(raw);
   }
   let result;
-  if (mode === '--identify') result = identify(options);
+  if (mode === '--panel-check') {
+    result = await panelCheck(options);
+    console.log(JSON.stringify(result, null, 2));
+    return result.mount.result === 'mounted' && result.source_match === 'match' ? 0 : 1;
+  } else if (mode === '--identify') result = identify(options);
   else if (mode === '--mount') result = await mount(options);
   else if (mode === '--claude') result = claude(options);
   else if (mode === '--validate-record') {
@@ -539,7 +682,7 @@ async function main(args, suppliedOptions = {}) {
   return 0;
 }
 
-module.exports = { identify, mount, claude, record, validateRecord, outputTarget, mountShape,
+module.exports = { identify, mount, panelCheck, sourceSnapshot, privacyProblems, physicalPath, codePath, claude, record, validateRecord, outputTarget, mountShape,
   mounted, gate, cleanup, safeOwnedTree, ownsRootArgument, trackProcesses, scanLiteral, extensionRows, nativeMountTarget, MECHANISM, main };
 if (!isMainThread) {
   const { target, args, options } = workerData;
