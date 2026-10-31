@@ -69,12 +69,17 @@ junction. Sem candidato válido, o estado é `core-unavailable`.
 
 ## Uso local sem instalar
 
-Use o Extension Development Host, que abre uma janela de desenvolvimento e não
-grava nada no perfil do operador:
+Use o Extension Development Host com diretórios temporários exclusivos de dados
+de usuário e de extensões e com as demais extensões desativadas. Só assim o
+perfil do operador fica intocado; `--extensionDevelopmentPath` sozinho não isola
+o armazenamento do VS Code nem as extensões instaladas:
 
 ```sh
-code --extensionDevelopmentPath=<checkout>/extensions/forge-vscode <projeto>
+code --user-data-dir=<temp-exclusivo>/user-data --extensions-dir=<temp-exclusivo>/extensions --disable-extensions --extensionDevelopmentPath=<checkout>/extensions/forge-vscode <projeto>
 ```
+
+O caminho isolado já automatizado é
+`node scripts/forge-panel-probe.js --panel-check --workspace <projeto>`.
 
 Não há dependências npm, build ou servidor a iniciar. A ativação acontece ao abrir
 a view `forge.work`. Em workspace não confiável o painel só lê dados. Em

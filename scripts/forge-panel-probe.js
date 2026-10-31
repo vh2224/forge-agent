@@ -17,7 +17,8 @@ const ROOT = path.resolve(__dirname, '..');
 const MAX_BYTES = 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 120000;
 // Canonical agent events and question-state reader ceilings (not exported).
-const SOURCE_LIMITS = Object.freeze({ events: 16 * MAX_BYTES, question: 256 * 1024, questionFiles: 128 });
+const SOURCE_LIMITS = Object.freeze({ events: 16 * MAX_BYTES, question: 256 * 1024, questionFiles: 128,
+  boundFiles: 256, boundBytes: 8 * MAX_BYTES });
 const REEXECUTE = 'node scripts/forge-panel-probe.js --mount --json';
 const MOUNT_KEYS = ['schema_version', 'version', 'app_name', 'app_host', 'ui_kind', 'extension_found',
   'extension_active', 'container_revealed', 'view_visible', 'synthetic_nodes', 'reason'];
@@ -397,6 +398,37 @@ function sourceSnapshot(workspace, options = {}) {
     const owner = fs.realpathSync.native(resolvedOwner);
     physicalPath(owner, 'workspace');
     capture(path.join(owner, '.gsd', 'forge', 'events.jsonl'), SOURCE_LIMITS.events);
+    // The DTO also derives from each bound work's terminal STATE/PLAN, run file and
+    // every checkpoint capture, including rows the view hides. A source outside the
+    // validated project has no authority here, so stability stays unknown.
+    const inside = file => [owner, resolvedOwner].some(root => {
+      const relative = path.relative(root, file);
+      return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+    });
+    const bound = new Set();
+    let boundBytes = 0;
+    const captureBound = file => {
+      const resolved = path.resolve(file);
+      if (!inside(resolved)) throw new Error('source-outside-project');
+      if (bound.has(resolved)) return;
+      if (bound.size >= SOURCE_LIMITS.boundFiles) throw new Error('bound-sources-limit');
+      bound.add(resolved);
+      capture(resolved, MAX_BYTES);
+      const row = files.at(-1);
+      if (typeof row[1] === 'number') boundBytes += row[1];
+      if (boundBytes > SOURCE_LIMITS.boundBytes) throw new Error('bound-sources-bytes');
+    };
+    for (const work of Array.isArray(snapshot.works) ? snapshot.works : []) {
+      captureBound(path.join(owner, '.gsd', 'forge', 'runs', `${work.id}.json`));
+      captureBound(work.kind === 'task' ? path.join(owner, '.gsd', 'tasks', work.id, `${work.id}-PLAN.md`)
+        : path.join(owner, '.gsd', 'milestones', work.id, `${work.id}-STATE.md`));
+      for (const entries of Object.values(work.checkpoint || {})) {
+        for (const entry of Array.isArray(entries) ? entries : []) {
+          if (typeof entry?.source !== 'string' || !path.isAbsolute(entry.source)) throw new Error('source-unknown');
+          captureBound(entry.source);
+        }
+      }
+    }
     const directory = path.join(owner, '.gsd', 'forge', 'questions');
     noLinks(directory);
     try {

@@ -120,6 +120,29 @@ try {
     assert(a.agents.some(row => row.freshness === 'current')); assert(c.agents.some(row => row.freshness === 'stale'));
     assert.notStrictEqual(a.stable_sha256, c.stable_sha256);
   });
+  check('displayed next action task and question text change the hash; clock alone does not', () => {
+    const shown = root('shown'); const shownState = bind(shown); events(shown);
+    const base = safe(read(shown)).stable_sha256;
+    const original = fs.readFileSync(shownState, 'utf8');
+    fs.writeFileSync(shownState, original.replace('Conferir fontes', 'Outro passo'));
+    const action = safe(read(shown));
+    assert.strictEqual(action.works[0].next_action.text, 'Outro passo'); assert.strictEqual(action.works[0].freshness, 'current');
+    assert.notStrictEqual(action.stable_sha256, base);
+    fs.writeFileSync(shownState, original.replace('**Active Task:** T01', '**Active Task:** T02'));
+    const task = safe(read(shown));
+    assert.strictEqual(task.works[0].active_task, 'T02'); assert.notStrictEqual(task.stable_sha256, base);
+    fs.writeFileSync(shownState, original);
+    assert.strictEqual(safe(read(shown)).stable_sha256, base);
+    assert.strictEqual(safe(read(shown, { now: now + 1 })).stable_sha256, base);
+    const asked = pending.openQuestions({ cwd: shown.cwd, unit: 'execute-task/T03', milestone: 'M001', decision_set: 'text-a', questions: [{ id: 'q', question: 'Primeira?' }] });
+    assert.strictEqual(asked.status, 'pending');
+    const first = safe(read(shown)).stable_sha256; assert.notStrictEqual(first, base);
+    const other = root('shown-b'); bind(other); events(other);
+    pending.openQuestions({ cwd: other.cwd, unit: 'execute-task/T03', milestone: 'M001', decision_set: 'text-a', questions: [{ id: 'q', question: 'Segunda?' }] });
+    const second = safe(read(other));
+    assert.deepStrictEqual(second.pending.map(row => row.id), safe(read(shown)).pending.map(row => row.id));
+    assert.notStrictEqual(second.stable_sha256, first);
+  });
   check('empty missing no bindings ambiguous and unresolved workspace states', () => {
     assert.strictEqual(safe(read(own, { folders: [] })).state.reason, 'no-workspace');
     const empty = root('empty'); assert.strictEqual(safe(read(empty)).state.reason, 'no-bindings');

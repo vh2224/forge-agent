@@ -535,7 +535,8 @@ test('T05 real documents: CP2 versions pending gates matrix and safe evidence ha
   assert.strictEqual(evidence.current_panel_runtime.result, 'mounted');
   assert.strictEqual(evidence.current_panel_runtime.source_match, 'match');
   assert.strictEqual(evidence.current_panel_runtime.sources_unchanged, true);
-  assert.strictEqual(evidence.current_panel_runtime.panel_generated_at, '2026-10-31T03:06:40.743Z');
+  assert(Number.isFinite(Date.parse(evidence.current_panel_runtime.panel_generated_at)), 'actual dated runtime timestamp');
+  assert(evidence.current_panel_runtime.historical_reference && evidence.current_panel_runtime.semantic_projection === 'displayed-stable-values-v2');
   assert.strictEqual(evidence.current_panel_runtime.panel_stable_sha256, evidence.current_panel_runtime.canonical_stable_sha256);
   assert(evidence.official_releases.every((row) => row.status === 'revalidated' && row.release_notes_review === 'pending'
     && /^[a-f0-9]{64}$/.test(row.sha256) && row.body_bytes > 0));

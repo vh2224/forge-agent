@@ -10,7 +10,7 @@ revisão final, merge, release, instalação e UAT ainda dependem da entrega do 
 A [evidência desta análise](host-compatibility-2026-10-31.evidence.json) conserva
 os hashes e horários das observações CP1/CP2 do owner, sem caminhos pessoais.
 CP2 foi capturado em 2026-10-31T03:06:59.491Z; a montagem CP1 em
-2026-10-31T03:06:42.331Z. Os registros privados completos ficam com o owner.
+2026-10-31T03:45:05.843Z. Os registros privados completos ficam com o owner.
 O SHA-256 do CP2 é `6f90cbce6873b3bcfff62ca9c31e76b94a230bde17be9cbe22ce3e0721a29148`.
 
 | Camada | Versão observada | Alcance e fonte |
@@ -74,8 +74,8 @@ R1 = compatibilidade; R2 = comunicação; R3 = agentes; R4 = perguntas; R5 = pai
 | Desktop, informativo | R5 | Mecanismo escolhido é TreeView VS Code, [contrato](../extensions/forge-vscode/README.md) | Não demonstrado no desktop; CP1 não prova Plugin Extensions | Não realizado |
 
 CP1 comparou o hash da projeção canônica com o painel usando o mesmo
-`panel_generated_at: 2026-10-31T03:06:40.743Z`. Ambos registraram
-`3462dfbf85f7a6aaa6fa6178b1efa305268eabadd4575e7f6e88844671c82a58`.
+`panel_generated_at: 2026-10-31T03:45:04.097Z`. Ambos registraram
+`70f28c096b757ff95d2cba988cd6a2077d76913e2ea55fe7b3581d117144aff1`.
 Sem aquele horário ou com fontes alteradas a conclusão seria unknown.
 O registro histórico 1.143.1/`e646868227c3e3a9e3f24277c8c7220be42c0be7`
 com dados sintéticos continua distinto desta observação real atual.
@@ -127,3 +127,7 @@ CI obrigatória do candidato final: **pendente**; revisão final independente:
 **pendente**; atualização do Forge nos dois hosts: **pendente**; instalação local
 no perfil VS Code do operador: **pendente**; aceite humano: **pending-final-round**.
 O owner registrará cada fato com sua evidência; esta análise pré-commit não o aprova.
+
+## Revalidação após revisão de S05
+
+A montagem acima foi recapturada após R3/R4: a projeção agora compara valores semânticos exibidos, incluindo próximo passo, tarefa e texto de pergunta. A estabilidade inclui STATE/PLAN, registros de run e fontes dos checkpoints próprios, com limites e recusa de links. Incerteza produz unknown. A observação anterior de 2026-10-31T03:06:42.331Z continua histórica na evidência, com sua projeção mais restrita; não comprova os bytes corrigidos. O perfil do operador e o aceite humano continuam separados. A issue308 registra a dependência esquecida entre catálogo53 e matriz SVN; a linha nova declara a limitação de renderização SVN ainda não validada.

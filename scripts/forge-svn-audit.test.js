@@ -32,8 +32,8 @@ function runFixture(options) {
 function evidence(claims) { return { schema: 'forge-svn-evidence/v1', claims }; }
 
 const good = audit(root, matrix);
-assert.strictEqual(good.expected_ids, 52);
-assert.strictEqual(good.observed_ids, 52);
+assert.strictEqual(good.expected_ids, 53);
+assert.strictEqual(good.observed_ids, 53);
 for (const key of ['missing', 'duplicates', 'incomplete', 'invalid_applicability', 'invalid_verdict', 'unresolved_evidence', 'semantic_evidence_errors']) assert.deepStrictEqual(good[key], []);
 assert.strictEqual(good.additional_families, 7);
 assert.strictEqual(good.ok, true);

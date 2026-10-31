@@ -62,11 +62,16 @@ function within(file, root) {
 }
 function stableProjection(dto) {
   const pick = (row, keys) => Object.fromEntries(keys.map(key => [key, row[key]]));
+  // Displayed semantic values are included; only generated_at and clock-derived
+  // ages (agent freshness, local activity text) stay out so the same visible
+  // projection hashes identically at different instants.
   return { state: pick(dto.state, ['status', 'reason']), sections: dto.sections, census: dto.census,
-    works: dto.works.map(row => ({ ...pick(row, ['id', 'kind', 'status', 'freshness']), phase: row.phase.value })),
-    agents: dto.agents.map(row => ({ ...pick(row, ['dispatch_id', 'kind', 'unit', 'host', 'transport', 'outcome']), phase: row.phase.value })),
-    pending: dto.pending.map(row => pick(row, ['id', 'status', 'answered', 'unit', 'dispatch_id'])),
-    evidence: dto.evidence.map(row => pick(row, ['path', 'location', 'validity', 'work_id'])) };
+    works: dto.works.map(row => ({ ...pick(row, ['id', 'kind', 'status', 'freshness', 'active_slice', 'active_task']),
+      phase: row.phase.value, raw_phase: row.phase.raw, next_action: pick(row.next_action, ['text', 'validity']) })),
+    agents: dto.agents.map(row => ({ ...pick(row, ['dispatch_id', 'kind', 'unit', 'host', 'transport', 'outcome', 'task']),
+      model: pick(row.model, ['requested', 'resolved', 'observed', 'divergent']), phase: row.phase.value, activity: row.activity.remote })),
+    pending: dto.pending.map(row => pick(row, ['id', 'status', 'answered', 'unit', 'dispatch_id', 'question'])),
+    evidence: dto.evidence.map(row => pick(row, ['label', 'path', 'location', 'validity', 'work_id'])) };
 }
 
 function readPanelSource(options = {}) {

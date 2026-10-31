@@ -357,6 +357,10 @@ class AutoWorker extends FakeWorker {
   assert.equal(FakeWorker.created.length, 2);
   coalescing.dispose();
 
+  const originalSchedulingNow = Date.now;
+  let schedulingNow = 1000;
+  Date.now = () => schedulingNow;
+  try {
   AutoWorker.dto = dtoA;
   FakeWorker.created.length = 0;
   const throttled = reader.createReader({ locate, WorkerImpl: AutoWorker, minIntervalMs: 200 });
@@ -366,14 +370,45 @@ class AutoWorker extends FakeWorker {
   const focus = throttled.read(['a'], { trigger: 'focus' });
   assert.equal(visible, focus, 'automatic triggers inside the interval share one scheduled read');
   assert.equal(FakeWorker.created.length, 1);
+  schedulingNow += 200;
   await visible;
   assert.equal(FakeWorker.created.length, 2);
   assert(Date.now() - started >= 150, 'automatic read waited for the minimum interval');
-  const manualStart = Date.now();
-  await throttled.read(['a'], { trigger: 'manual' });
+  // Scheduling is proved by synchronous worker creation, not a wall-clock bound.
+  const manual = throttled.read(['a'], { trigger: 'manual' });
+  assert.equal(FakeWorker.created.length, 3, 'manual refresh bypasses the interval and creates its worker immediately');
+  await manual;
   assert.equal(FakeWorker.created.length, 3);
-  assert(Date.now() - manualStart < 150, 'manual refresh only coalesces');
   throttled.dispose();
+
+  // An automatic trigger at the same point is deferred until the interval timer.
+  FakeWorker.created.length = 0;
+  const deferred = reader.createReader({ locate, WorkerImpl: AutoWorker, minIntervalMs: 200 });
+  await deferred.read(['a'], { trigger: 'activation' });
+  assert.equal(FakeWorker.created.length, 1);
+  const automatic = deferred.read(['a'], { trigger: 'visible' });
+  assert.equal(FakeWorker.created.length, 1, 'automatic read inside the interval does not create a worker synchronously');
+  schedulingNow += 200;
+  await automatic;
+  assert.equal(FakeWorker.created.length, 2);
+  deferred.dispose();
+
+  } finally { Date.now = originalSchedulingNow; }
+
+  // A manual request during an in-flight read joins the queue, never a concurrent worker.
+  FakeWorker.created.length = 0;
+  const serial = reader.createReader({ locate, WorkerImpl: FakeWorker, minIntervalMs: 200 });
+  const running = serial.read(['a'], { trigger: 'manual' });
+  assert.equal(FakeWorker.created.length, 1);
+  const joined = serial.read(['b'], { trigger: 'manual' });
+  assert.equal(FakeWorker.created.length, 1, 'manual refresh while a read is in flight creates no second worker');
+  FakeWorker.created[0].reply(dtoA);
+  assert.deepEqual(await running, dtoA);
+  assert.equal(FakeWorker.created.length, 2);
+  FakeWorker.created[1].reply(dtoB);
+  assert.deepEqual(await joined, dtoB);
+  assert.equal(FakeWorker.created.length, 2);
+  serial.dispose();
 
   FakeWorker.created.length = 0;
   const disposable = reader.createReader({ locate, WorkerImpl: FakeWorker });
@@ -695,10 +730,19 @@ class AutoWorker extends FakeWorker {
   for (const pattern of [/somente leitura/, /forge-panel-source\.js/, /readPanelSource/, /Trabalho/, /Agentes/, /Pendências/, /Evidências/,
     /no-workspace/, /workspace-not-local/, /core-unavailable/, /core-timeout/, /core-failed/, /dto-invalid/,
     /Sem rede, listener, servidor, webview, hosting ou marketplace/, /Sem ações/, /FORGE_HOME/, /junction/,
-    /--extensionDevelopmentPath/, /não\s+grava nada no perfil/, /instalação persistente no perfil do operador é uma etapa pendente/,
+    /--extensionDevelopmentPath/, /instalação persistente no perfil do operador é uma etapa pendente/,
     /aceite visual e de compreensão permanece pendente/, /Prova\s+offline e prova runtime são distintas/]) {
     assert.match(readme, pattern);
   }
+  // A development command is only documented as profile-safe when it isolates user data and extensions.
+  const devCommands = readme.split('\n').filter(line => /^\s*code\b.*--extensionDevelopmentPath/.test(line));
+  assert(devCommands.length >= 1);
+  for (const line of devCommands) {
+    for (const flag of [/--user-data-dir=\S*temp\S*/, /--extensions-dir=\S*temp\S*/, /--disable-extensions\b/]) assert.match(line, flag);
+  }
+  const bare = 'code --extensionDevelopmentPath=<checkout>/extensions/forge-vscode <projeto>';
+  assert(!devCommands.some(line => line.trim() === bare), 'bare development command must not return');
+  assert(!/não\s+grava nada no perfil/.test(readme) || devCommands.every(line => /--user-data-dir/.test(line) && /--extensions-dir/.test(line)));
   // The only mention of synthetic data is its explicit absence.
   assert.equal((readme.match(/sintétic/g) || []).length, 1);
   assert.match(readme, /Não há dados sintéticos/);

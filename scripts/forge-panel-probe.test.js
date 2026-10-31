@@ -66,6 +66,12 @@ if (args.includes('--version')) {
         if (scenario === 'v2-invalid-time') value.panel_generated_at = 'invalid';
         if (scenario === 'v2-changed' || scenario === 'v2-changed-missing-time') fs.appendFileSync(path.join(args.at(-1), '.gsd', 'forge', 'events.jsonl'), '{}\n');
         if (scenario === 'v2-store-changed') fs.appendFileSync(path.join(process.env.HOME, '.forge-personal', 'context.json'), ' ');
+        if (scenario === 'v2-state-changed') {
+          const file = path.join(args.at(-1), '.gsd', 'milestones', 'M001', 'M001-STATE.md');
+          fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('**Phase:** execute-task', '**Phase:** complete-slice'));
+        }
+        if (scenario === 'v2-run-changed') fs.writeFileSync(path.join(args.at(-1), '.gsd', 'forge', 'runs', 'M001.json'), '{"changed":true}');
+        if (scenario === 'v2-capture-changed') fs.appendFileSync(process.env.FORGE_FAKE_CAPTURE, ' edited');
         if (scenario === 'v2-questions-changed') fs.writeFileSync(path.join(args.at(-1), '.gsd', 'forge', 'questions', 'added.json'), '{}');
       }
       fs.writeFileSync(target, JSON.stringify(value) + '\n');
@@ -116,6 +122,44 @@ async function run() {
       assert(!JSON.stringify(result).includes('M001')); assert(!JSON.stringify(result).includes(temp));
     }
     pass('panel-check: v2 match mismatch invisible and changed store events questions; v1 or missing invalid time stays unknown');
+
+    // Bound STATE, run file and checkpoint captures feed the DTO, so a change in
+    // any of them while mounting is unknown, never a misleading mismatch.
+    const stateFile = path.join(workspace, '.gsd', 'milestones', 'M001', 'M001-STATE.md');
+    const runsDir = path.join(forge, 'runs'); const runFile = path.join(runsDir, 'M001.json');
+    const captureFile = path.join(workspace, 'proof.md'); fs.writeFileSync(captureFile, 'proof');
+    nativeEnv.FORGE_FAKE_CAPTURE = captureFile;
+    assert.equal(personal.saveCheckpoint({ cwd: workspace, userHome: home, id: 'M001', intent: 'checkpoint',
+      checkpoint: { lastResult: [{ source: captureFile, text: 'Prova' }] } }).status, 'ok');
+    const savedState = fs.readFileSync(stateFile);
+    fs.mkdirSync(runsDir, { recursive: true });
+    const clean = await probe.panelCheck(options('v2-match', { workspace }));
+    assert.equal(clean.source_match, 'match'); assert.equal(clean.sources_unchanged, true);
+    for (const scenario of ['v2-state-changed', 'v2-run-changed', 'v2-capture-changed']) {
+      const result = await probe.panelCheck(options(scenario, { workspace }));
+      assert.equal(result.sources_unchanged, false, scenario); assert.equal(result.source_match, 'unknown', scenario);
+      fs.writeFileSync(stateFile, savedState); fs.rmSync(runFile, { force: true }); fs.writeFileSync(captureFile, 'proof');
+    }
+    const snapshotFiles = probe.sourceSnapshot(workspace, { env: nativeEnv });
+    assert(Array.isArray(snapshotFiles));
+    const same = (a, b) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+    for (const file of [stateFile, runFile, captureFile]) assert(snapshotFiles.some(row => same(row[0], file)), path.basename(file));
+    fs.writeFileSync(stateFile, Buffer.alloc(1024 * 1024 + 1));
+    assert.equal(probe.sourceSnapshot(workspace, { env: nativeEnv }), null);
+    fs.writeFileSync(stateFile, savedState);
+    fs.writeFileSync(runFile, Buffer.alloc(1024 * 1024 + 1));
+    assert.equal(probe.sourceSnapshot(workspace, { env: nativeEnv }), null);
+    fs.rmSync(runFile);
+    fs.writeFileSync(captureFile, Buffer.alloc(1024 * 1024 + 1));
+    assert.equal(probe.sourceSnapshot(workspace, { env: nativeEnv }), null);
+    fs.writeFileSync(captureFile, 'proof');
+    const realRuns = path.join(temp, 'linked-runs'); fs.mkdirSync(realRuns);
+    fs.rmSync(runsDir, { recursive: true });
+    fs.symlinkSync(realRuns, runsDir, process.platform === 'win32' ? 'junction' : 'dir');
+    assert.equal(probe.sourceSnapshot(workspace, { env: nativeEnv }), null);
+    fs.unlinkSync(runsDir); fs.mkdirSync(runsDir);
+    assert(Array.isArray(probe.sourceSnapshot(workspace, { env: nativeEnv })));
+    pass('bound sources: STATE run and capture changes are unknown; oversized or linked bound sources refused');
 
     const fixture = require('./fixtures/agent-view/records.json');
     const observedNow = fixture.now;
