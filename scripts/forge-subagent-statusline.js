@@ -138,18 +138,14 @@ function changeSettings(file, options) {
   const backup = `${target}.forge-subagents-${randomUUID()}.bak`;
   const temporary = path.join(path.dirname(target), `.${path.basename(target)}.forge-subagents-${randomUUID()}.tmp`);
   const retired = `${target}.forge-subagents-${randomUUID()}.retired.bak`;
+  const probe = `${temporary}.link-probe`;
   let temporaryCreated = false;
+  let probeCreated = false;
   let retiredReserved = false;
   let retiredMoved = false;
   const retained = { backup, semantic_equal: true };
   // Both placement and restoration must refuse an occupied live pathname.
-  const placeExclusive = source => {
-    try { fs.linkSync(source, target); }
-    catch (error) {
-      if (!['EPERM', 'ENOTSUP', 'EXDEV', 'ENOSYS'].includes(error.code)) throw error;
-      fs.copyFileSync(source, target, require('fs').constants.COPYFILE_EXCL);
-    }
-  };
+  const placeExclusive = source => fs.linkSync(source, target);
   const restore = reason => {
     try { placeExclusive(retired); }
     catch (error) { return done(error.code === 'EEXIST' ? 'settings-conflict' : 'settings-write-failed', retained); }
@@ -161,6 +157,17 @@ function changeSettings(file, options) {
     const descriptor = fs.openSync(temporary, 'wx', initial.stat.mode & 0o777);
     temporaryCreated = true;
     try { fs.writeFileSync(descriptor, candidate); } finally { fs.closeSync(descriptor); }
+    // COPYFILE_EXCL only makes creation exclusive; its later transfer/cleanup
+    // can overwrite or remove an intervening editor's bytes. Establish the
+    // atomic no-clobber primitive using private paths before retiring settings.
+    try {
+      fs.linkSync(temporary, probe); probeCreated = true;
+      fs.unlinkSync(probe); probeCreated = false;
+    } catch (error) {
+      const unavailable = ['EPERM', 'ENOTSUP', 'EXDEV', 'ENOSYS'].includes(error.code);
+      return done('settings-write-failed', { ...retained, publication_capability: unavailable ? 'unavailable' : 'unknown',
+        message: 'Não foi possível confirmar a publicação exclusiva; o arquivo de configuração original foi preservado.' });
+    }
     const current = read();
     if (current.error || !current.buffer.equals(initial.buffer)) return done('settings-changed', retained);
     // Reserve our own random name exclusively before renaming onto it. The
@@ -187,6 +194,7 @@ function changeSettings(file, options) {
   } catch {
     return done('settings-write-failed', retained);
   } finally {
+    if (probeCreated) { try { fs.unlinkSync(probe); } catch { /* Only our exclusive private probe may be removed. */ } }
     if (temporaryCreated) { try { fs.unlinkSync(temporary); } catch { /* Only our exclusive temporary may be cleaned up. */ } }
     if (retiredReserved && !retiredMoved) { try { fs.unlinkSync(retired); } catch { /* Only our empty reservation may be removed. */ } }
     // Keep the actual retired inode, also on success: original open descriptors

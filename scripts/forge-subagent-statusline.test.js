@@ -154,7 +154,7 @@ try {
     for (const stage of ['cas', 'post']) {
       const file = seed('{}'), io = Object.create(fs), concurrent = '{"operator":"concurrent"}\n';
       if (stage === 'cas') io.writeFileSync = (target, bytes, opts) => { fs.writeFileSync(target, bytes, opts); if (typeof target === 'string' && target !== file && !target.endsWith('.tmp')) fs.writeFileSync(file, concurrent); };
-      else io.linkSync = (from, to) => { fs.linkSync(from, to); if (String(from).endsWith('.tmp')) fs.writeFileSync(to, concurrent); };
+      else io.linkSync = (from, to) => { fs.linkSync(from, to); if (to === file && String(from).endsWith('.tmp')) fs.writeFileSync(to, concurrent); };
       const result = line.setup(file, { ...options, fs: io });
       assert.strictEqual(result.reason_code, stage === 'cas' ? 'settings-changed' : 'settings-raced');
       assert.strictEqual(fs.readFileSync(file, 'utf8'), concurrent); assert.strictEqual(fs.readFileSync(result.backup, 'utf8'), '{}');
@@ -182,7 +182,7 @@ try {
       };
       io.linkSync = (from, to) => {
         fs.linkSync(from, to);
-        if (String(from).endsWith('.tmp')) {
+        if (to === file && String(from).endsWith('.tmp')) {
           placed = true;
           if (stage === 'after-place-retired') { fs.writeFileSync(retired, concurrent); injected = true; }
           if (stage === 'before-final') edit();
@@ -198,25 +198,44 @@ try {
       assert(!fs.readdirSync(path.dirname(file)).some(name => name.endsWith('.tmp')));
     }
   });
-  check('R6 exclusive placement falls back for unsupported hard links and never overwrites', () => {
+  check('R6 unsupported atomic publication refuses before retirement and cannot lose a mid-copy edit', () => {
     for (const remove of [false, true]) for (const code of ['EPERM', 'ENOTSUP', 'EXDEV', 'ENOSYS']) for (const conflict of [false, true]) {
       const original = JSON.stringify(remove ? { subagentStatusLine: own, theme: 'initial' } : { theme: 'initial' });
-      const file = seed(original), io = Object.create(fs), concurrent = '{"operator":"copy-race"}'; let copies = 0;
+      const file = seed(original), before = snapshot(file), io = Object.create(fs), concurrent = '{"operator":"copy-race"}'; let copies = 0, retirements = 0;
       io.linkSync = () => { throw Object.assign(new Error('unsupported'), { code }); };
-      io.copyFileSync = (from, to, flags) => { assert.strictEqual(flags, fs.constants.COPYFILE_EXCL); copies++; if (conflict && String(from).endsWith('.tmp')) fs.writeFileSync(to, concurrent); return fs.copyFileSync(from, to, flags); };
+      io.renameSync = (from, to) => { if (from === file) retirements++; return fs.renameSync(from, to); };
+      io.copyFileSync = (from, to, flags) => {
+        copies++; assert.strictEqual(flags, fs.constants.COPYFILE_EXCL);
+        // Model exclusive creation followed by separate content transfer. An
+        // editor can write between those two stages even with COPYFILE_EXCL.
+        fs.writeFileSync(to, '', { flag: 'wx' });
+        if (conflict) fs.writeFileSync(to, concurrent);
+        return fs.copyFileSync(from, to);
+      };
       const result = (remove ? line.remove : line.setup)(file, { ...options, fs: io });
-      assert(copies); assert.strictEqual(result.changed, !conflict); assert.strictEqual(result.reason_code, conflict ? 'settings-conflict' : remove ? 'removed' : 'added');
-      assert.strictEqual(fs.readFileSync(result.retired, 'utf8'), original); assert.strictEqual(fs.readFileSync(result.backup, 'utf8'), original);
-      if (conflict) assert.strictEqual(fs.readFileSync(file, 'utf8'), concurrent);
+      assert.strictEqual(copies, 0, 'a non-atomic live-path copy can lose an intervening edit');
+      assert.strictEqual(retirements, 0); assert.strictEqual(result.changed, false); assert.strictEqual(result.reason_code, 'settings-write-failed');
+      assert.strictEqual(result.publication_capability, 'unavailable'); assert.deepStrictEqual(snapshot(file), before);
+      assert.strictEqual(fs.readFileSync(result.backup, 'utf8'), original);
     }
   });
   check('R6 failed placement restores exclusively and keeps retired original inode', () => {
-    for (const occupied of [false, true]) {
+    for (const occupied of [false, true]) for (const code of ['EACCES', 'EPERM', 'ENOTSUP']) {
       const file = seed('{}'), io = Object.create(fs), concurrent = '{"operator":"placement"}'; let first = true;
-      io.linkSync = (from, to) => { if (first) { first = false; if (occupied) fs.writeFileSync(file, concurrent); throw Object.assign(new Error('placement'), { code: 'EACCES' }); } return fs.linkSync(from, to); };
+      io.linkSync = (from, to) => { if (to === file && first) { first = false; if (occupied) fs.writeFileSync(file, concurrent); throw Object.assign(new Error('placement'), { code }); } return fs.linkSync(from, to); };
       const result = line.setup(file, { ...options, fs: io });
       assert.strictEqual(result.reason_code, occupied ? 'settings-conflict' : 'settings-write-failed'); assert.strictEqual(result.changed, false);
       assert.strictEqual(fs.readFileSync(file, 'utf8'), occupied ? concurrent : '{}'); assert.strictEqual(fs.readFileSync(result.retired, 'utf8'), '{}');
+    }
+  });
+  check('R6 unrelated private-probe errors preserve settings without claiming unsupported capability', () => {
+    for (const code of ['EACCES', 'EIO', 'ENOSPC', 'EEXIST', undefined]) {
+      const file = seed('{"operator":"preserved"}'), before = snapshot(file), io = Object.create(fs);
+      io.linkSync = () => { throw Object.assign(new Error('private failure detail'), { code }); };
+      const result = line.setup(file, { ...options, fs: io });
+      assert.strictEqual(result.changed, false); assert.strictEqual(result.reason_code, 'settings-write-failed');
+      assert.strictEqual(result.publication_capability, 'unknown'); assert.deepStrictEqual(snapshot(file), before);
+      assert(!JSON.stringify(result).includes('private failure detail'));
     }
   });
   check('R6 retained original descriptor remains recoverable after last reread and return', () => {
