@@ -286,7 +286,7 @@ check('role catalog exactly matches agents and has safe TOML descriptions', () =
   }
 });
 
-const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-agent-view-'));
+const temp = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'forge-agent-view-'));
 const owner = path.join(temp, 'owner'), outside = path.join(temp, 'external'), home = path.join(temp, 'alice');
 const cli = path.join(__dirname, 'forge-agent-view.js');
 const inheritedEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !['HOME', 'USERPROFILE', 'FORGE_HOME', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR'].includes(key.toUpperCase())));
@@ -446,7 +446,7 @@ assert.deepStrictEqual(fixture.cases.map(row => row.name).sort(), ['recent', 'de
 console.log('PASS S03/T03 fixture inventory: all 25 named states exercised');
 
 check('review R4 dispatch-scoped filesystem titles and missing-plan isolation', () => {
-  const owner = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-review-titles-'));
+  const owner = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'forge-review-titles-'));
   try {
     fs.mkdirSync(path.join(owner, '.gsd/forge'), { recursive: true });
     const records = ['S01', 'S02', 'S03'].map((slice, index) => ({ event: 'dispatch', milestone: 'M001', slice,

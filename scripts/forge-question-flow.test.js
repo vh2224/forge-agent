@@ -14,7 +14,7 @@ const { digest } = require('./forge-code-roots');
 const personal = require('./forge-personal-context');
 
 async function main() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-question-flow-'));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'forge-question-flow-'));
   const owner = path.join(root, 'owner'), code = path.join(root, 'code'), home = path.join(root, 'home');
   const write = (file, data) => {
     fs.mkdirSync(path.dirname(file), { recursive: true });

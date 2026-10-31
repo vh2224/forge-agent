@@ -5,7 +5,7 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const api = require('./forge-pending-questions');
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-pending-questions-'));
+const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'forge-pending-questions-'));
 const owner = path.join(root, 'owner');
 const cli = path.join(__dirname, 'forge-pending-questions.js');
 function write(file, data) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, typeof data === 'string' ? data : JSON.stringify(data)); }

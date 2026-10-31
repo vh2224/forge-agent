@@ -58,6 +58,7 @@ test('sub-step 1.87 invokes forge-claim-audit.js with --write', () => {
   const block = extractSubStep(spec, '1.87');
   assert(block.includes('forge-claim-audit.js'), 'forge-claim-audit.js not referenced in 1.87');
   assert(/--write\s/.test(block), '--write flag not present in 1.87 invocation');
+  assert(/--json(?:\s|$)/.test(block), '--json flag not present in 1.87 invocation');
   assert(block.includes('--slice'), '--slice flag missing');
   assert(block.includes('--milestone'), '--milestone flag missing');
   assert(block.includes('--code-dir'), '--code-dir flag missing');
@@ -154,7 +155,7 @@ function checkInvocationPresent(specText) {
   const nextMatch = /\n\d+\.\d+\. \*\*/.exec(rest.slice(1));
   const end = nextMatch ? start + 1 + nextMatch.index : specText.length;
   const block = specText.slice(start, end);
-  return block.includes('forge-claim-audit.js') && /--write\s/.test(block);
+  return block.includes('forge-claim-audit.js') && /--write\s/.test(block) && /--json(?:\s|$)/.test(block);
 }
 
 test('BITE: removing the 1.87 invocation line turns the invocation-presence guard red', () => {
@@ -162,7 +163,7 @@ test('BITE: removing the 1.87 invocation line turns the invocation-presence guar
   assert.strictEqual(checkInvocationPresent(original), true, 'baseline (unmutated) must be green first');
 
   withMutatedSpec((text) => text.replace(
-    /node "\$FORGE_SCRIPTS_DIR\/forge-claim-audit\.js" \\\n {9}--slice \{S##\} \\\n {9}--milestone \{M###\} \\\n {9}--cwd \{WORKING_DIR\} \\\n {9}--code-dir \{CODE_DIR\} \\\n {9}--run \{RUN_ID\} \\\n {9}--write "\{WORKING_DIR\}\/\.gsd\/milestones\/\{M###\}\/slices\/\{S##\}\/\{S##\}-SUMMARY\.md"/,
+    /node "\$FORGE_SCRIPTS_DIR\/forge-claim-audit\.js" --json \\\n {9}--slice \{S##\} \\\n {9}--milestone \{M###\} \\\n {9}--cwd \{WORKING_DIR\} \\\n {9}--code-dir \{CODE_DIR\} \\\n {9}--run \{RUN_ID\} \\\n {9}--write "\{WORKING_DIR\}\/\.gsd\/milestones\/\{M###\}\/slices\/\{S##\}\/\{S##\}-SUMMARY\.md"/,
     'echo removed-for-bite-test',
   ), (mutatedPath) => {
     const mutatedText = fs.readFileSync(mutatedPath, 'utf8');
@@ -170,6 +171,17 @@ test('BITE: removing the 1.87 invocation line turns the invocation-presence guar
     const result = checkInvocationPresent(mutatedText);
     assert.strictEqual(result, false, 'BITE FAILED: guard stayed green after removing the invocation line');
     process.stdout.write('  ✓ BITE recorded: invocation-presence assert went RED after removal, as expected\n');
+  });
+});
+
+test('BITE: removing --json from the 1.87 invocation turns the guard red', () => {
+  const original = readSpec();
+  assert.strictEqual(checkInvocationPresent(original), true);
+  withMutatedSpec(text => text.replace('forge-claim-audit.js" --json', 'forge-claim-audit.js"'), mutatedPath => {
+    const changed = fs.readFileSync(mutatedPath, 'utf8');
+    assert.notStrictEqual(changed, original, 'mutation must change the invocation');
+    assert.strictEqual(checkInvocationPresent(changed), false, 'BITE FAILED: missing --json stayed green');
+    process.stdout.write('  ? BITE recorded: --json removal went RED as expected\n');
   });
 });
 

@@ -11,7 +11,7 @@ const { AGENT_ROLES } = require('./forge-agent-view');
 const { plainText } = require('./forge-sidecar-identity');
 const { resolveUserHome, resolveForgeHome } = require('./forge-home');
 const check = (name, action) => { action(); console.log(`PASS S03/T05 ${name}`); };
-const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-subagent-'));
+const temp = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'forge-subagent-'));
 const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !['HOME', 'USERPROFILE', 'FORGE_HOME', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'PATH'].includes(key.toUpperCase())));
 const env = { ...inherited, HOME: temp, USERPROFILE: temp, FORGE_HOME: path.join(temp, '.forge-agent'),
   CODEX_HOME: path.join(temp, '.codex'), CLAUDE_CONFIG_DIR: path.join(temp, '.claude'), PATH: path.dirname(process.execPath) };
@@ -153,12 +153,88 @@ try {
   check('CAS changed and post-rename raced preserve concurrent writer and original backup', () => {
     for (const stage of ['cas', 'post']) {
       const file = seed('{}'), io = Object.create(fs), concurrent = '{"operator":"concurrent"}\n';
-      if (stage === 'cas') io.writeFileSync = (target, bytes, opts) => { fs.writeFileSync(target, bytes, opts); if (target !== file && !target.endsWith('.tmp')) fs.writeFileSync(file, concurrent); };
-      else io.renameSync = (from, to) => { fs.renameSync(from, to); fs.writeFileSync(to, concurrent); };
+      if (stage === 'cas') io.writeFileSync = (target, bytes, opts) => { fs.writeFileSync(target, bytes, opts); if (typeof target === 'string' && target !== file && !target.endsWith('.tmp')) fs.writeFileSync(file, concurrent); };
+      else io.linkSync = (from, to) => { fs.linkSync(from, to); if (String(from).endsWith('.tmp')) fs.writeFileSync(to, concurrent); };
       const result = line.setup(file, { ...options, fs: io });
       assert.strictEqual(result.reason_code, stage === 'cas' ? 'settings-changed' : 'settings-raced');
       assert.strictEqual(fs.readFileSync(file, 'utf8'), concurrent); assert.strictEqual(fs.readFileSync(result.backup, 'utf8'), '{}');
       assert(!fs.readdirSync(path.dirname(file)).some(name => name.endsWith('.tmp')));
+    }
+  });
+  check('R6 every boundary preserves operator bytes for setup and removal', () => {
+    for (const remove of [false, true]) for (const stage of ['before-backup', 'after-temporary', 'before-retire-inplace', 'before-retire-rename', 'after-retire', 'after-place-retired', 'before-final']) {
+      const original = JSON.stringify(remove ? { subagentStatusLine: own, theme: 'initial' } : { theme: 'initial' });
+      const file = seed(original), io = Object.create(fs), concurrent = '{"operator":"concurrent"}\n';
+      let retired, placed = false, injected = false;
+      const edit = () => { injected = true; fs.writeFileSync(file, concurrent); };
+      io.writeFileSync = (target, bytes, opts) => {
+        if (stage === 'before-backup' && String(target).endsWith('.bak') && !injected) edit();
+        fs.writeFileSync(target, bytes, opts);
+        if (stage === 'after-temporary' && typeof target === 'number' && !injected) edit();
+      };
+      io.renameSync = (from, to) => {
+        if (from === file) {
+          if (stage === 'before-retire-inplace') edit();
+          if (stage === 'before-retire-rename') { const operator = file + '.operator'; fs.writeFileSync(operator, concurrent); fs.renameSync(operator, file); injected = true; }
+          fs.renameSync(from, to); retired = to;
+          if (stage === 'after-retire') edit();
+        } else fs.renameSync(from, to);
+      };
+      io.linkSync = (from, to) => {
+        fs.linkSync(from, to);
+        if (String(from).endsWith('.tmp')) {
+          placed = true;
+          if (stage === 'after-place-retired') { fs.writeFileSync(retired, concurrent); injected = true; }
+          if (stage === 'before-final') edit();
+        }
+      };
+      const result = (remove ? line.remove : line.setup)(file, { ...options, fs: io });
+      const expected = ['before-backup', 'after-temporary'].includes(stage) ? 'settings-changed' : stage === 'before-final' ? 'settings-raced' : 'settings-conflict';
+      assert(injected, stage); assert.strictEqual(result.reason_code, expected, stage); assert.strictEqual(result.changed, false, stage);
+      assert.strictEqual(fs.readFileSync(result.backup, 'utf8'), original, stage);
+      if (stage === 'after-place-retired') { assert(placed); assert.strictEqual(fs.readFileSync(result.retired, 'utf8'), concurrent); assert.notStrictEqual(fs.readFileSync(file, 'utf8'), concurrent); }
+      else assert.strictEqual(fs.readFileSync(file, 'utf8'), concurrent, stage);
+      if (retired) { assert.strictEqual(result.retired, retired); assert(fs.existsSync(retired)); assert(/reconcilia/i.test(result.message), result.message); }
+      assert(!fs.readdirSync(path.dirname(file)).some(name => name.endsWith('.tmp')));
+    }
+  });
+  check('R6 exclusive placement falls back for unsupported hard links and never overwrites', () => {
+    for (const remove of [false, true]) for (const code of ['EPERM', 'ENOTSUP', 'EXDEV', 'ENOSYS']) for (const conflict of [false, true]) {
+      const original = JSON.stringify(remove ? { subagentStatusLine: own, theme: 'initial' } : { theme: 'initial' });
+      const file = seed(original), io = Object.create(fs), concurrent = '{"operator":"copy-race"}'; let copies = 0;
+      io.linkSync = () => { throw Object.assign(new Error('unsupported'), { code }); };
+      io.copyFileSync = (from, to, flags) => { assert.strictEqual(flags, fs.constants.COPYFILE_EXCL); copies++; if (conflict && String(from).endsWith('.tmp')) fs.writeFileSync(to, concurrent); return fs.copyFileSync(from, to, flags); };
+      const result = (remove ? line.remove : line.setup)(file, { ...options, fs: io });
+      assert(copies); assert.strictEqual(result.changed, !conflict); assert.strictEqual(result.reason_code, conflict ? 'settings-conflict' : remove ? 'removed' : 'added');
+      assert.strictEqual(fs.readFileSync(result.retired, 'utf8'), original); assert.strictEqual(fs.readFileSync(result.backup, 'utf8'), original);
+      if (conflict) assert.strictEqual(fs.readFileSync(file, 'utf8'), concurrent);
+    }
+  });
+  check('R6 failed placement restores exclusively and keeps retired original inode', () => {
+    for (const occupied of [false, true]) {
+      const file = seed('{}'), io = Object.create(fs), concurrent = '{"operator":"placement"}'; let first = true;
+      io.linkSync = (from, to) => { if (first) { first = false; if (occupied) fs.writeFileSync(file, concurrent); throw Object.assign(new Error('placement'), { code: 'EACCES' }); } return fs.linkSync(from, to); };
+      const result = line.setup(file, { ...options, fs: io });
+      assert.strictEqual(result.reason_code, occupied ? 'settings-conflict' : 'settings-write-failed'); assert.strictEqual(result.changed, false);
+      assert.strictEqual(fs.readFileSync(file, 'utf8'), occupied ? concurrent : '{}'); assert.strictEqual(fs.readFileSync(result.retired, 'utf8'), '{}');
+    }
+  });
+  check('R6 retained original descriptor remains recoverable after last reread and return', () => {
+    for (const afterReturn of [false, true]) for (const remove of [false, true]) {
+      const original = JSON.stringify(remove ? { subagentStatusLine: own, theme: 'initial' } : { theme: 'initial' });
+      const file = seed(original), descriptor = fs.openSync(file, 'r+'), io = Object.create(fs), late = '{"operator":"late-descriptor-write"}';
+      let retired, reads = 0; const descriptors = new Map();
+      const writeLate = () => { fs.ftruncateSync(descriptor, 0); fs.writeSync(descriptor, late, 0, 'utf8'); };
+      io.renameSync = (from, to) => { fs.renameSync(from, to); if (from === file) retired = to; };
+      io.openSync = (target, ...args) => { const fd = fs.openSync(target, ...args); if (target === retired) descriptors.set(fd, ++reads); return fd; };
+      io.closeSync = fd => { fs.closeSync(fd); if (!afterReturn && descriptors.get(fd) === 2) { descriptors.delete(fd); writeLate(); } };
+      try {
+        const result = (remove ? line.remove : line.setup)(file, { ...options, fs: io });
+        assert.strictEqual(result.changed, true); assert.strictEqual(result.retired, retired); if (afterReturn) writeLate();
+        assert.strictEqual(fs.readFileSync(result.retired, 'utf8'), late); assert.strictEqual(fs.statSync(result.retired).ino, fs.fstatSync(descriptor).ino);
+        const live = JSON.parse(fs.readFileSync(file, 'utf8')); assert.strictEqual(live.theme, 'initial'); assert.strictEqual(Object.hasOwn(live, 'subagentStatusLine'), !remove);
+        assert.strictEqual(fs.readFileSync(result.backup, 'utf8'), original);
+      } finally { fs.closeSync(descriptor); }
     }
   });
   check('rename EPERM EBUSY EACCES keep original backup remove own temporary and expose unknown external gates', () => {

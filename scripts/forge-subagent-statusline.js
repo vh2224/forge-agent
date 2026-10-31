@@ -111,7 +111,9 @@ function changeSettings(file, options) {
   const { readBoundedStableFile } = require('./forge-autonomy-sources');
   const base = { availability: 'conditional', rendering: 'unknown', reserialized: false,
     external_gates: { workspace_trust: 'unknown', managed_policy: 'unknown', project_settings: 'unknown' } };
-  const done = (reason_code, extras = {}) => ({ ...base, reason_code, changed: false, ...extras });
+  const done = (reason_code, extras = {}) => ({ ...base, reason_code, changed: false,
+    ...(['settings-changed', 'settings-conflict', 'settings-raced'].includes(reason_code)
+      ? { message: 'Edição concorrente observada; reconciliação manual dos settings e arquivos retidos necessária.' } : {}), ...extras });
   const target = path.resolve(file);
   let real;
   try {
@@ -135,16 +137,50 @@ function changeSettings(file, options) {
       || (options.remove ? Object.hasOwn(parsed, 'subagentStatusLine') : !isDeepStrictEqual(parsed.subagentStatusLine, { type: 'command', command }))) return done('settings-invalid');
   const backup = `${target}.forge-subagents-${randomUUID()}.bak`;
   const temporary = path.join(path.dirname(target), `.${path.basename(target)}.forge-subagents-${randomUUID()}.tmp`);
+  const retired = `${target}.forge-subagents-${randomUUID()}.retired.bak`;
   let temporaryCreated = false;
+  let retiredReserved = false;
+  let retiredMoved = false;
   const retained = { backup, semantic_equal: true };
+  // Both placement and restoration must refuse an occupied live pathname.
+  const placeExclusive = source => {
+    try { fs.linkSync(source, target); }
+    catch (error) {
+      if (!['EPERM', 'ENOTSUP', 'EXDEV', 'ENOSYS'].includes(error.code)) throw error;
+      fs.copyFileSync(source, target, require('fs').constants.COPYFILE_EXCL);
+    }
+  };
+  const restore = reason => {
+    try { placeExclusive(retired); }
+    catch (error) { return done(error.code === 'EEXIST' ? 'settings-conflict' : 'settings-write-failed', retained); }
+    return done(reason, retained);
+  };
+  const readRetired = () => readBoundedStableFile(retired, MAX_BYTES, { io: fs, expectedReal: retired });
   try {
     fs.writeFileSync(backup, initial.buffer, { flag: 'wx', mode: initial.stat.mode & 0o777 });
-    const current = read();
-    if (current.error || !current.buffer.equals(initial.buffer)) return done('settings-changed', retained);
     const descriptor = fs.openSync(temporary, 'wx', initial.stat.mode & 0o777);
     temporaryCreated = true;
     try { fs.writeFileSync(descriptor, candidate); } finally { fs.closeSync(descriptor); }
-    fs.renameSync(temporary, target); temporaryCreated = false;
+    const current = read();
+    if (current.error || !current.buffer.equals(initial.buffer)) return done('settings-changed', retained);
+    // Reserve our own random name exclusively before renaming onto it. The
+    // live target is never a rename destination and can never be overwritten.
+    const reservation = fs.openSync(retired, 'wx', initial.stat.mode & 0o777);
+    retiredReserved = true;
+    fs.closeSync(reservation);
+    fs.renameSync(target, retired);
+    retiredMoved = true;
+    retained.retired = retired;
+    const moved = readRetired();
+    if (moved.error || !moved.buffer.equals(initial.buffer)) return restore('settings-conflict');
+    try { placeExclusive(temporary); }
+    catch (error) {
+      if (error.code === 'EEXIST') return done('settings-conflict', retained);
+      return restore('settings-write-failed');
+    }
+    fs.unlinkSync(temporary); temporaryCreated = false;
+    const confirmed = readRetired();
+    if (confirmed.error || !confirmed.buffer.equals(initial.buffer)) return done('settings-conflict', { ...retained, reserialized: true });
     const final = read();
     if (final.error || !final.buffer.equals(candidate)) return done('settings-raced', { ...retained, reserialized: true });
     return done(plan.reason_code, { ...retained, changed: true, reserialized: true });
@@ -152,6 +188,9 @@ function changeSettings(file, options) {
     return done('settings-write-failed', retained);
   } finally {
     if (temporaryCreated) { try { fs.unlinkSync(temporary); } catch { /* Only our exclusive temporary may be cleaned up. */ } }
+    if (retiredReserved && !retiredMoved) { try { fs.unlinkSync(retired); } catch { /* Only our empty reservation may be removed. */ } }
+    // Keep the actual retired inode, also on success: original open descriptors
+    // may still write after our last observation or after this function returns.
   }
 }
 
@@ -173,7 +212,7 @@ if (require.main === module) {
       }
       const result = mode ? (mode === '--setup' ? setup : remove)(file, { claudeVersion, observe }) : observe ? observeClaudeVersion() : null;
       if (!result) throw new Error('arguments');
-      process.stdout.write(JSON.stringify({ ...result, message: 'Disponibilidade condicional; renderização no host não validada.' }) + '\n');
+      process.stdout.write(JSON.stringify({ ...result, message: result.message || 'Disponibilidade condicional; renderização no host não validada.' }) + '\n');
     } catch { process.stdout.write(JSON.stringify({ reason_code: 'arguments-invalid', message: 'Argumentos inválidos.' }) + '\n'); }
   } else {
     let size = 0, oversize = false;

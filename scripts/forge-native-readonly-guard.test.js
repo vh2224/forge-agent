@@ -13,7 +13,7 @@ const execution = require('./forge-task-execution');
 const vcs = require('./forge-vcs');
 const dispatchEvent = require('./forge-dispatch-event');
 
-const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-readonly-'));
+const temporary = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'forge-readonly-'));
 const script = path.join(__dirname, 'forge-native-readonly-guard.js');
 let serial = 0;
 function git(root, ...args) {
@@ -259,6 +259,6 @@ try {
     finally { roots.key = old; }
   });
 } finally {
-  assert.ok(path.resolve(temporary).startsWith(path.resolve(os.tmpdir()) + path.sep));
+  assert.ok(path.resolve(temporary).startsWith(path.resolve(fs.realpathSync.native(os.tmpdir())) + path.sep));
   fs.rmSync(temporary, { recursive: true, force: true, maxRetries: 3 });
 }

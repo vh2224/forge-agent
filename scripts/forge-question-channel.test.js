@@ -68,7 +68,7 @@ for (const channel of api.CHANNELS) {
   assert.strictEqual(api.waitPolicy(channel, { marker: 'present' }).preference_source, 'personal');
 }
 console.log('PASS economic wait never schedules model work and nonanswers stay pending');
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-question-channel-'));
+const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'forge-question-channel-'));
 try {
   const codex = path.join(root, 'codex'), claude = path.join(root, 'claude');
   fs.mkdirSync(codex); fs.mkdirSync(claude);
