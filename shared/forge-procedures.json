@@ -43,7 +43,7 @@
     {
       "id": "planning",
       "path": "shared/forge-procedure-planning.md",
-      "sha256": "163461d960e487d57d6c40de85ad14270b7d5cf02bd38704a4b68e18f6054b1c",
+      "sha256": "cdef6fe80c3abae71de6be8739d835be3cfd2de2089fbc234013dc6818d749b2",
       "status": "ready",
       "owner": "T02",
       "dependencies": [
