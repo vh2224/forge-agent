@@ -730,7 +730,7 @@ class AutoWorker extends FakeWorker {
   for (const pattern of [/somente leitura/, /forge-panel-source\.js/, /readPanelSource/, /Trabalho/, /Agentes/, /Pendências/, /Evidências/,
     /no-workspace/, /workspace-not-local/, /core-unavailable/, /core-timeout/, /core-failed/, /dto-invalid/,
     /Sem rede, listener, servidor, webview, hosting ou marketplace/, /Sem ações/, /FORGE_HOME/, /junction/,
-    /--extensionDevelopmentPath/, /instalação persistente no perfil do operador é uma etapa pendente/,
+    /--extensionDevelopmentPath/, /instalação e atualização pelo forge-update/,
     /aceite visual e de compreensão permanece pendente/, /Prova\s+offline e prova runtime são distintas/]) {
     assert.match(readme, pattern);
   }

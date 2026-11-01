@@ -14,6 +14,7 @@ const { generate: generateProjections } = require('./forge-generate');
 const { VERSION } = require('./forge-version');
 const { loadAllProcedureContexts } = require('./forge-procedure-context');
 const ownership = require('./forge-projection-ownership');
+const vscodePanel = require('./forge-vscode-install');
 
 const RUNTIMES = Object.freeze(['claude', 'codex', 'both']);
 const MANAGED_CORE = Object.freeze([
@@ -22,6 +23,7 @@ const MANAGED_CORE = Object.freeze([
 
 function parseArgs(argv = process.argv.slice(2)) {
   const result = { runtime: 'claude', update: false, dryRun: false, noModelProbe: false, withApp: false, repo: path.resolve(__dirname, '..') };
+  const panel = new Set();
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--runtime') result.runtime = argv[++i] || '';
@@ -31,6 +33,8 @@ function parseArgs(argv = process.argv.slice(2)) {
     else if (arg === '--capability-timeout') result.capabilityTimeout = Number(argv[++i] || '');
     else if (arg === '--migrate-legacy') result.migrateLegacy = true;
     else if (arg === '--with-app') result.withApp = true;
+    else if (arg === '--with-vscode-panel') panel.add('opt-in');
+    else if (arg === '--without-vscode-panel') panel.add('opt-out');
     else if (arg === '--repo') result.repo = path.resolve(argv[++i] || '');
     else if (arg === '--forge-home') result.forgeHome = path.resolve(argv[++i] || '');
     else if (arg === '--claude-home') result.claudeHome = path.resolve(argv[++i] || '');
@@ -39,6 +43,8 @@ function parseArgs(argv = process.argv.slice(2)) {
     else if (arg === '--help' || arg === '-h') result.help = true;
     else throw new Error(`opção desconhecida: ${arg}`);
   }
+  if (panel.size > 1) throw new Error('opções conflitantes: --with-vscode-panel e --without-vscode-panel');
+  if (panel.size) result.vscodePanel = [...panel][0];
   if (result.capabilityTimeout !== undefined && (!Number.isFinite(result.capabilityTimeout) || result.capabilityTimeout <= 0)) throw new Error(`capability timeout inválido: ${JSON.stringify(result.capabilityTimeout)}`);
   if (!RUNTIMES.includes(result.runtime)) throw new Error(`runtime inválido: ${JSON.stringify(result.runtime)} (use claude, codex ou both)`);
   return result;
@@ -357,6 +363,9 @@ function install(input = {}) {
   const options = { ...input };
   const runtime = options.runtime || 'claude';
   if (!RUNTIMES.includes(runtime)) throw new Error(`runtime inválido: ${JSON.stringify(runtime)} (use claude, codex ou both)`);
+  if (options.vscodePanel !== undefined && options.vscodePanel !== null && !['opt-in', 'opt-out'].includes(options.vscodePanel)) {
+    throw new Error(`vscodePanel inválido: ${JSON.stringify(options.vscodePanel)} (use opt-in ou opt-out)`);
+  }
   const repo = path.resolve(options.repo || path.resolve(__dirname, '..'));
   // Validate the complete phase closure before backups, runtime copying or host
   // projection. Never merge a partial source inventory with installed modules.
@@ -377,6 +386,7 @@ function install(input = {}) {
     platform: options.platform,
   });
   const plan = [];
+  let panelStateBackupFailure = null;
   const selected = selectedRuntimes(runtime);
   const projectRoot = path.resolve(options.projectRoot || options.cwd || process.cwd());
   if (declaresProcedures) loadAllProcedureContexts({ cwd: projectRoot, forgeHome: repo,
@@ -396,12 +406,27 @@ function install(input = {}) {
   const coreAlready = exists(paths.forgeHome) && coreFiles.length > 0 && coreFiles.every((item) => exists(path.join(paths.forgeHome, item)));
   const installComplete = coreAlready && exists(paths.shared.version) && exists(paths.shared.prefs)
     && selected.every((host) => projectionComplete(paths, host, projectRoot));
-  if (installComplete && !options.update && !options.dryRun && !options.withApp) {
+  // An explicit panel flag bypasses the shortcut exactly like --with-app; a
+  // recorded opt-in alone is reported as deferred without touching the CLI.
+  if (installComplete && !options.update && !options.dryRun && !options.withApp && !options.vscodePanel) {
     const presentation = require('./forge-presentation-prefs').inspectPresentationPrefs({ ...options, runtimes: selected });
-    return { ok: true, changed: false, already_installed: true, runtime, forge_home: paths.forgeHome, selected, backup: null, capabilities, presentation, plan: [{ op: 'skip', reason: 'already-installed', destination: paths.forgeHome }] };
+    return { ok: true, changed: false, already_installed: true, runtime, forge_home: paths.forgeHome, selected, backup: null, capabilities, presentation, plan: [{ op: 'skip', reason: 'already-installed', destination: paths.forgeHome }], vscode_panel: vscodePanel.panelSummary(paths.forgeHome) };
   }
   if (options.update) {
     if (coreAlready) backupExisting(coreFiles.map((item) => path.join(paths.forgeHome, item)), backupRoot, plan, options);
+    const panelBackupPlanStart = plan.length;
+    try {
+      const panelState = vscodePanel.backupCandidate(paths.forgeHome);
+      if (panelState) backupExisting([panelState], backupRoot, plan, options);
+    } catch (error) {
+      // Keep failed optional copies out of the applied-plan/backup claims.
+      plan.splice(panelBackupPlanStart);
+      const previous = vscodePanel.panelSummary(paths.forgeHome);
+      panelStateBackupFailure = vscodePanel.panelReport('state-invalid', 'backup-failed', {
+        requested: options.vscodePanel, opted_in: previous.opted_in, version: VERSION, dry_run: Boolean(options.dryRun),
+        detail: error && typeof error.code === 'string' && /^[A-Z0-9_]+$/.test(error.code) ? error.code : 'backup-failed',
+      });
+    }
     for (const host of selected) {
       const home = paths.runtimeHomes[host];
       for (const directory of ['agents', 'commands', 'skills', path.join('templates', 'dispatch')]) {
@@ -599,9 +624,15 @@ function install(input = {}) {
   };
   writeText(paths.shared.manifest, JSON.stringify(manifest, null, 2) + '\n', plan, options);
   const app = installApp(repo, plan, options, paths.platform);
+  // Never throws: the core above is already applied and its outcome stays ok.
+  const panel = panelStateBackupFailure || vscodePanel.applyPanel({
+    repo, forgeHome: paths.forgeHome, version: VERSION, request: options.vscodePanel, dryRun: Boolean(options.dryRun), plan,
+    env: options.env || process.env, platform: paths.platform, spawnSync: options.vscodeSpawnSync,
+    windowsRunner: options.vscodeWindowsRunner, stagingRoot: options.vscodeStagingRoot, onStaged: options.vscodeOnStaged,
+  });
   const backupPath = path.resolve(backupRoot);
   const hasBackup = options.update && plan.some((entry) => entry.destination && (path.resolve(entry.destination) === backupPath || path.resolve(entry.destination).startsWith(`${backupPath}${path.sep}`)));
-  return { ok: true, changed: plan.some((entry) => entry.op === 'copy' || entry.op === 'write' || entry.op === 'app-build'), dry_run: Boolean(options.dryRun), runtime, selected, forge_home: paths.forgeHome, runtime_homes: Object.fromEntries(selected.map((host) => [host, paths.runtimeHomes[host]])), backup: hasBackup ? backupRoot : null, capabilities, presentation, plan, manifest, app };
+  return { ok: true, changed: plan.some((entry) => entry.op === 'copy' || entry.op === 'write' || entry.op === 'app-build' || entry.op === 'vscode-panel-install'), dry_run: Boolean(options.dryRun), runtime, selected, forge_home: paths.forgeHome, runtime_homes: Object.fromEntries(selected.map((host) => [host, paths.runtimeHomes[host]])), backup: hasBackup ? backupRoot : null, capabilities, presentation, plan, manifest, app, vscode_panel: panel };
 }
 
 /**
@@ -630,6 +661,7 @@ function render(report) {
   if (report.dry_run) lines.push(...planLines(report));
   else lines.push(`${report.changed ? 'Installed' : 'No changes'}; ${report.plan.length} operation(s).`);
   if (report.app) lines.push(`App: ${report.app.status}${report.app.reason ? ` (${report.app.reason})` : ''}`);
+  lines.push(...vscodePanel.renderPanelLines(report.vscode_panel));
   if (report.backup) lines.push(`Backup: ${report.backup}`);
   for (const suggestion of report.presentation ? report.presentation.suggestions : []) lines.push(suggestion.text);
   // Retirement is not wholesale, so the summary says what stayed — and a hook
@@ -707,7 +739,7 @@ function render(report) {
 function run(argv = process.argv.slice(2), write = process.stdout.write.bind(process.stdout), errorWrite = process.stderr.write.bind(process.stderr)) {
   let options;
   try { options = parseArgs(argv); } catch (error) { errorWrite(`forge-installer: ${error.message}\n`); return 2; }
-  if (options.help) { write('Usage: install.{sh,ps1} --runtime claude|codex|both [--project-root DIR] [--update] [--dry-run] [--no-model-probe] [--capability-timeout MS] [--migrate-legacy] [--with-app]\n'); return 0; }
+  if (options.help) { write('Usage: install.{sh,ps1} --runtime claude|codex|both [--project-root DIR] [--update] [--dry-run] [--no-model-probe] [--capability-timeout MS] [--migrate-legacy] [--with-app] [--with-vscode-panel|--without-vscode-panel]\n'); return 0; }
   try { const report = install(options); if (options.dryRun || report.ok) write(render(report)); return report.ok ? 0 : 1; }
   catch (error) { errorWrite(`forge-installer: ${error.message}\n`); return 1; }
 }

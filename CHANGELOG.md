@@ -1,6 +1,7 @@
 ## Não lançado
 
 - Contexto pessoal: nova consulta resumida e limitada (`forge-personal-context.js --summary`, módulo `forge-personal-summary.js`) para entrada, retomada, “onde paramos?” e status simples nos dois hosts. A saída é uma linha de JSON compacto montada por allowlist, com fontes relativas e validade (atual, histórico, ausente, incerto), no máximo 5 trabalhos, 3 itens por campo, 240 code points por texto e 4096 bytes. Pendências e aceites não resolvidos nunca somem em silêncio: omissões viram contagens e `attention-required` com o diagnóstico explícito. `--snapshot`, `--select`, `--bind` e `--checkpoint` mantêm formato e semântica, e `--summary` combinado com eles é recusado. Boot, REPL, template do init, contrato pessoal projetado e a nova seção “Consulta simples” do contrato de comunicação passam a usar o resumo; o snapshot completo fica para diagnóstico pedido. O limite vale só para a saída dessa interface: não impede outra chamada, não oculta logs do cliente nem garante obediência do modelo.
+- Painel VS Code opcional instalado e atualizado pelo forge-update: adesão explícita com `--with-vscode-panel` (saída com `--without-vscode-panel`), VSIX determinístico verificado por sha256 e pela listagem da CLI, só no perfil padrão do VS Code estável, sem Marketplace, e resultado `components.vscode_panel` separado do núcleo, sem alterar o exit code.
 
 - Fixtures: desabilita manutencao automatica Git somente nos repositorios privados antes do primeiro commit, evitando a corrida de maintenance.lock durante a copia integral (#264).
 

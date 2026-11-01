@@ -9,6 +9,7 @@ const installer = require('./forge-installer.js');
 const { resolveForgeHome } = require('./forge-home.js');
 const { resolveExecutable } = require('./forge-capabilities.js');
 const remoteUpdater = require('./forge-update-remote.js');
+const vscodePanel = require('./forge-vscode-install.js');
 
 const SOURCE_MANIFEST = 'forge-source-manifest.json';
 const declaredVersionCache = new Map();
@@ -17,6 +18,7 @@ function parseArgs(argv = process.argv.slice(2), env = process.env) {
   // `repo` is deliberately NOT defaulted. Normal updates use the server; only
   // the explicit local/recovery mode resolves a source repository.
   const options = { apply: false, json: false, source: 'remote', channel: remoteUpdater.DEFAULT_CHANNEL, remote: remoteUpdater.DEFAULT_REMOTE };
+  const panel = new Set();
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--runtime') options.runtime = argv[++i] || '';
@@ -33,11 +35,15 @@ function parseArgs(argv = process.argv.slice(2), env = process.env) {
     else if (arg === '--json') options.json = true;
     else if (arg === '--no-model-probe') options.noModelProbe = true;
     else if (arg === '--with-app') options.withApp = true;
+    else if (arg === '--with-vscode-panel') panel.add('opt-in');
+    else if (arg === '--without-vscode-panel') panel.add('opt-out');
     else if (arg === '--capability-timeout') options.capabilityTimeout = Number(argv[++i] || '');
     else if (arg === '--migrate-legacy') options.migrateLegacy = true;
     else if (arg === '--help' || arg === '-h') options.help = true;
     else throw new Error(`opção desconhecida: ${arg}`);
   }
+  if (panel.size > 1) throw new Error('opções conflitantes: --with-vscode-panel e --without-vscode-panel');
+  if (panel.size) options.vscodePanel = [...panel][0];
   if (options.runtime) maintenance.selectedRuntimes(options.runtime);
   if (!['remote', 'local'].includes(options.source)) throw new Error(`source inválido: ${JSON.stringify(options.source)} (use remote ou local)`);
   if (!['stable', 'master'].includes(options.channel)) throw new Error(`channel inválido: ${JSON.stringify(options.channel)} (use stable ou master)`);
@@ -262,6 +268,7 @@ function update(input = {}, dependencies = {}) {
     skipCapabilityCheck: preview ? true : input.skipCapabilityCheck,
     migrateLegacy: input.migrateLegacy,
     withApp: input.withApp,
+    vscodePanel: input.vscodePanel,
     // In JSON mode this process's stdout IS the report — the remote bootstrap
     // parses it. The installer needs to know so the app build's progress goes
     // to stderr instead of corrupting the JSON.
@@ -273,8 +280,10 @@ function update(input = {}, dependencies = {}) {
   // preview, so the run that actually moved files — the `--apply` an operator
   // reads once and never again — said nothing about what it retired or kept.
   const retirements = installed.plan.filter((entry) => entry.op === 'retire' || (entry.op === 'skip' && entry.reason === 'already-retired'));
-  if (preview) return { ...plan, source_repo: sourceRepo, remote_source: input.remoteProvenance || null, applied: false, installer: installed, retirements };
-  return { ...plan, source_repo: sourceRepo, remote_source: input.remoteProvenance || null, applied: true, changed: installed.changed, backup: installed.backup, installer: installed, retirements };
+  // Core and panel outcomes stay separate: a panel failure never alters ok.
+  const components = { core: { status: preview ? 'planned' : 'applied', changed: installed.changed }, vscode_panel: installed.vscode_panel || null };
+  if (preview) return { ...plan, source_repo: sourceRepo, remote_source: input.remoteProvenance || null, applied: false, installer: installed, retirements, components };
+  return { ...plan, source_repo: sourceRepo, remote_source: input.remoteProvenance || null, applied: true, changed: installed.changed, backup: installed.backup, installer: installed, retirements, components };
 }
 
 // The clone's own state for explicit local/recovery mode. `behind_tracking` is
@@ -352,6 +361,7 @@ function render(report) {
   if (conflicts) lines.push(`conflicts preserved: ${conflicts}; use --migrate-legacy to replace unmarked legacy projections`);
   if (report.applied) lines.push(report.changed ? 'managed files updated' : 'no managed-file changes');
   else lines.push('no files written; pass --apply to update');
+  lines.push(...vscodePanel.renderPanelLines(report.components && report.components.vscode_panel));
   // The file-by-file preview an operator had before `install.sh --update
   // --dry-run` was routed through this updater. Borrowed from the installer's own
   // formatter so the two previews cannot drift.
@@ -365,7 +375,7 @@ function run(argv = process.argv.slice(2), write = process.stdout.write.bind(pro
   try {
     const options = parseArgs(argv);
     if (options.help) {
-      write('Usage: forge-update.js [--runtime claude|codex|both] [--apply|--dry-run] [--channel stable|master] [--remote HTTPS_URL] [--json] [--no-model-probe] [--capability-timeout MS] [--migrate-legacy] [--with-app]\n       forge-update.js --source local --repo DIR [demais opções]\n');
+      write('Usage: forge-update.js [--runtime claude|codex|both] [--apply|--dry-run] [--channel stable|master] [--remote HTTPS_URL] [--json] [--no-model-probe] [--capability-timeout MS] [--migrate-legacy] [--with-app] [--with-vscode-panel|--without-vscode-panel]\n       forge-update.js --source local --repo DIR [demais opções]\n');
       return 0;
     }
     borrowLoginPath({ runtime: options.runtime });

@@ -7,9 +7,10 @@ const os = require('os');
 const path = require('path');
 const installer = require('./forge-installer.js');
 const generation = require('./forge-generate.js');
+const vsix = require('./forge-vscode-package.js');
 
 const SCHEMA_VERSION = '1.0.0';
-const COMPONENTS = Object.freeze(['core', 'adapter-claude', 'adapter-codex']);
+const COMPONENTS = Object.freeze(['core', 'adapter-claude', 'adapter-codex', 'vscode-panel']);
 
 function sha256(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
 function slash(value) { return String(value).replace(/\\/g, '/'); }
@@ -65,6 +66,11 @@ function build(options = {}) {
     const version = Buffer.from(`${installer.VERSION}\n`, 'utf8');
     entries.push({ component: 'core', path: 'VERSION', bytes: version.length, sha256: sha256(version) });
     sources.set('core/VERSION', { bytes: version });
+    // The panel travels as one deterministic VSIX built from the same tree, so
+    // the release gate regenerates identical bytes for the pinned commit.
+    const panel = vsix.buildVsix({ repo, version: installer.VERSION });
+    entries.push({ component: 'vscode-panel', path: panel.file_name, bytes: panel.bytes.length, sha256: panel.sha256 });
+    sources.set(`vscode-panel/${panel.file_name}`, { bytes: panel.bytes });
 
     const projectRoot = path.join(temp, 'project space Ω');
     const claudeHome = path.join(temp, 'Claude Home Ω');

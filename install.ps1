@@ -5,6 +5,7 @@ Examples:
   .\install.ps1 -Runtime claude -DryRun
   .\install.ps1 -Runtime codex -Update
   .\install.ps1 -Runtime both -NoModelProbe
+  .\install.ps1 -Update -WithVscodePanel
 ]
 #>
 param(
@@ -14,6 +15,8 @@ param(
   [switch]$DryRun,
   [switch]$NoModelProbe,
   [switch]$WithApp,
+  [switch]$WithVscodePanel,
+  [switch]$WithoutVscodePanel,
   [switch]$MigrateLegacy,
   [int]$CapabilityTimeout,
   [string]$ForgeHome,
@@ -33,6 +36,9 @@ if (-not $Update -or $PSBoundParameters.ContainsKey('Runtime')) {
 if ($DryRun) { $nodeArgs += '--dry-run' }
 if ($NoModelProbe) { $nodeArgs += '--no-model-probe' }
 if ($WithApp) { $nodeArgs += '--with-app' }
+# Both switches are forwarded as given; the Node core refuses the conflict.
+if ($WithVscodePanel) { $nodeArgs += '--with-vscode-panel' }
+if ($WithoutVscodePanel) { $nodeArgs += '--without-vscode-panel' }
 if ($MigrateLegacy) { $nodeArgs += '--migrate-legacy' }
 if ($CapabilityTimeout) { $nodeArgs += @('--capability-timeout', $CapabilityTimeout) }
 if ($ForgeHome) {

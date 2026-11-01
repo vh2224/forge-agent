@@ -8,6 +8,7 @@ const path = require('path');
 const pack = require('./forge-package.js');
 const installer = require('./forge-installer.js');
 const updater = require('./forge-update.js');
+const vsix = require('./forge-vscode-package.js');
 
 const REPO = path.resolve(__dirname, '..');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-package-test Ω-'));
@@ -41,6 +42,12 @@ try {
     assert(!core.some(entry => entry.path.endsWith('.test.js') || entry.path === 'scripts/forge-smoke.js'));
     assert(core.some(entry => entry.path === 'scripts/forge-doctor.js'));
     assert(core.some(entry => entry.path === 'scripts/fixtures/offline-ci/matrix.json'));
+    assert(core.some(entry => entry.path === 'scripts/forge-vscode-package.js') && core.some(entry => entry.path === 'scripts/forge-vscode-install.js'));
+    assert(!core.some(entry => entry.path.startsWith('extensions/')), 'extensions/ never enters the managed core');
+    assert.deepStrictEqual(installer.MANAGED_CORE, ['scripts', 'schemas', 'shared', 'bin', 'forge-capabilities.json', 'forge-prefs.schema.json']);
+    const panel = manifest.files.filter(entry => entry.component === 'vscode-panel');
+    const expected = vsix.buildVsix({ repo: REPO, version: installer.VERSION });
+    assert.deepStrictEqual(panel, [{ component: 'vscode-panel', path: `forge-vscode-${installer.VERSION}.vsix`, bytes: expected.bytes.length, sha256: expected.sha256 }]);
   });
 
   test('materialized package verifies and detects byte drift', () => {
@@ -53,6 +60,12 @@ try {
     const drift = pack.verify(output);
     assert.strictEqual(drift.ok, false);
     assert(drift.errors.includes('checksum:core/VERSION'));
+    const name = `forge-vscode-${installer.VERSION}.vsix`;
+    const panel = path.join(output, 'payload', 'vscode-panel', name);
+    const expected = created.manifest.files.find(entry => entry.component === 'vscode-panel');
+    assert.strictEqual(vsix.verifyVsix(fs.readFileSync(panel), { sha256: expected.sha256, version: installer.VERSION }).ok, true);
+    fs.appendFileSync(panel, 'x');
+    assert(pack.verify(output).errors.includes(`checksum:vscode-panel/${name}`));
   });
 
   test('Claude 3.1.4 upgrade preserves prefs, project .gsd, hook and templates byte-for-byte', () => {

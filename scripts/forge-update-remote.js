@@ -201,7 +201,9 @@ function pushFlag(args, flag, value) {
   args.push(flag, String(value));
 }
 
-function bootstrapArgs(source, input = {}) {
+// The panel flags reach only a checkout whose updater lists them; an older
+// release rejects unknown options and would fail the whole update.
+function bootstrapArgs(source, input = {}, support = {}) {
   const args = [path.join(source.path, 'scripts', 'forge-update.js'), '--source', 'local', '--repo', source.path, input.apply ? '--apply' : '--dry-run', '--json'];
   pushFlag(args, '--runtime', input.runtime);
   pushFlag(args, '--forge-home', input.forgeHome);
@@ -212,7 +214,17 @@ function bootstrapArgs(source, input = {}) {
   if (input.noModelProbe) args.push('--no-model-probe');
   if (input.migrateLegacy) args.push('--migrate-legacy');
   if (input.withApp) args.push('--with-app');
+  if (support.vscodePanel && input.vscodePanel === 'opt-in') args.push('--with-vscode-panel');
+  if (support.vscodePanel && input.vscodePanel === 'opt-out') args.push('--without-vscode-panel');
   return args;
+}
+
+function probeHelp(source, runner = spawnSync) {
+  const result = runner(process.execPath, [path.join(source.path, 'scripts', 'forge-update.js'), '--help'], {
+    cwd: source.path, encoding: 'utf8', shell: false, maxBuffer: MAX_BUFFER,
+  });
+  if (!result || result.status !== 0) return null;
+  return String(result.stdout || '');
 }
 
 /**
@@ -226,11 +238,24 @@ function bootstrapArgs(source, input = {}) {
  * an error string back out of a failed run.
  */
 function supportsSourceMode(source, runner = spawnSync) {
-  const result = runner(process.execPath, [path.join(source.path, 'scripts', 'forge-update.js'), '--help'], {
-    cwd: source.path, encoding: 'utf8', shell: false, maxBuffer: MAX_BUFFER,
-  });
-  if (!result || result.status !== 0) return false;
-  return /--source local/.test(String(result.stdout || ''));
+  const help = probeHelp(source, runner);
+  return help !== null && /--source local/.test(help);
+}
+
+// When the panel was requested or is recorded as opted in, a child that did
+// not report it must surface as unsupported, never as a silent success.
+function markPanelUnsupported(report, input, reason) {
+  if (report && report.components && report.components.vscode_panel) return report;
+  const panel = require('./forge-vscode-install.js');
+  const { resolveForgeHome } = require('./forge-home.js');
+  let optedIn = null;
+  try {
+    const read = panel.readState(resolveForgeHome(input));
+    optedIn = read.ok && read.state ? read.state.vscode_panel.opted_in : null;
+  } catch (_) { optedIn = null; }
+  if (!input.vscodePanel && optedIn !== true) return report;
+  return { ...report, components: { ...((report && report.components) || {}),
+    vscode_panel: panel.sourceUnsupported(reason, { requested: input.vscodePanel, opted_in: optedIn === null ? undefined : optedIn }) } };
 }
 
 /**
@@ -316,8 +341,13 @@ function runCompatBootstrap(source, input, dependencies, provenance) {
 function runBootstrappedUpdate(source, input = {}, dependencies = {}) {
   const runner = dependencies.runner || spawnSync;
   const provenance = { remote: source.remote, channel: source.channel, ref: source.ref, tag: source.tag, sha: source.sha, declared_version: source.declared_version, version_matches_ref: source.version_matches_ref };
-  if (!supportsSourceMode(source, runner)) return runCompatBootstrap(source, input, dependencies, provenance);
-  const result = runner(process.execPath, bootstrapArgs(source, input), {
+  // One --help probe answers both questions: local mode and panel support.
+  const help = probeHelp(source, runner);
+  if (help === null || !/--source local/.test(help)) {
+    return markPanelUnsupported(runCompatBootstrap(source, input, dependencies, provenance), input, 'compat-bootstrap');
+  }
+  const panelSupported = /--with-vscode-panel/.test(help);
+  const result = runner(process.execPath, bootstrapArgs(source, input, { vscodePanel: panelSupported }), {
     cwd: input.cwd || process.cwd(),
     encoding: 'utf8',
     shell: false,
@@ -331,7 +361,7 @@ function runBootstrappedUpdate(source, input = {}, dependencies = {}) {
   let report;
   try { report = JSON.parse(String(result.stdout || '')); }
   catch (error) { throw new Error(`bootstrap remoto retornou JSON inválido: ${error.message}`); }
-  return { ...report, remote_source: provenance };
+  return markPanelUnsupported({ ...report, remote_source: provenance }, input, 'remote-without-panel');
 }
 
 function updateFromRemote(input = {}, dependencies = {}) {
@@ -356,7 +386,9 @@ module.exports = {
   validateMaterializedSource,
   materializeRemoteSource,
   bootstrapArgs,
+  probeHelp,
   supportsSourceMode,
+  markPanelUnsupported,
   compatInstallerArgs,
   normalizeCompatManifest,
   runCompatBootstrap,
