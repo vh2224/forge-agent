@@ -119,6 +119,7 @@ try {
       if (!file.endsWith('.test.js')) assert(!/\b(?:TODO|TBD|FIXME)\b/.test(source), file);
     }
     assert.equal(fixture.schema_version, 1); assert(fixture.cases.length >= 8);
+    assert.equal(fixture.provenance.renamed_from, 'effort'); assert(fixture.cases.every(row => !Object.hasOwn(row.expect, 'effort')));
     assert(fixture.cases.every(row => row.name && row.input && row.expect));
   });
   test('policy-exports-purity-and-no-implicit-clock', () => {
@@ -136,8 +137,13 @@ try {
     assert.equal(result.status, 'measured', JSON.stringify(result));
     assert.equal(result.elapsed.since_activation_ms, expected.elapsed); assert.equal(result.elapsed.preselection_ms, 4);
     assert.equal(result.consumption.consumed_ms, expected.consumed); assert.equal(result.consumption.unknown_ms, expected.unknown);
-    assert.equal(result.effort.worker_ms, expected.effort); assert.equal(result.effort.open_units, expected.open || 0);
+    // Pre-release `effort` expectations were controller unit sums, not worker time.
+    assert.equal(result.effort.unit_interval_sum_ms, expected.unit_interval_sum); assert.equal(result.effort.open_units, expected.open || 0);
+    assert.equal(result.effort.basis, 'controller-unit-intervals'); assert(!Object.hasOwn(result.effort, 'worker_ms'));
     assert.equal(result.effort.ambiguous_units, expected.ambiguous || 0);
+    assert.equal(result.effort.unit_complete, !expected.open && !expected.ambiguous);
+    assert.equal(result.effort.worker.status, 'unknown'); assert.equal(result.effort.worker.worker_ms, null);
+    assert.equal(result.effort.worker.observed_worker_ms, null);
     if (expected.gap_reason) assert(result.gaps.some(g => g.reason === expected.gap_reason));
     if (expected.wait) assert.equal(result.waits[expected.wait[0]], expected.wait[1]);
     assert.equal(Object.values(result.consumption.by_class).reduce((a, b) => a + b, 0), expected.elapsed);
@@ -329,6 +335,78 @@ try {
     assert(!stdout.includes(f.cwd)); assert.equal(stderr, ''); assert.deepEqual(snapshot(f.cwd), before);
     assert.equal(clock.main(['--foreign'], io), 2);
     write(f.cwd, '.gsd/milestones/M001/M001-ROADMAP.md', 'changed'); assert.equal(clock.readForecast(f).reason, 'allocation-roadmap-mismatch');
+  });
+  // T08: worker effort is observed invocation evidence only. Synthetic records
+  // follow the persisted schema; acquisition is covered by the observations test.
+  const workers = require('./forge-milestone-worker-observations');
+  function observation(unit, invocation, start, end, extra = {}) {
+    const row = { schema_version: 1, id: '', milestone: M, unit: 'execute-task/' + unit, kind: 'native-supervision',
+      invocation_sha256: hash(invocation), dispatch_sha256: hash('d-' + invocation), request_sha256: hash('r-' + unit), root_sha256: hash('root'),
+      source: { kind: 'native-journal', sha256: hash('source-' + invocation), bytes: 128 }, started_at: iso(start), finished_at: iso(end),
+      duration_ms: end - start, placement: 'exact', bound: 'complete', terminal: 'terminal', provider_called: true,
+      boundary: workers.POLICY.boundaries['native-supervision'], ...extra };
+    row.id = hash(JSON.stringify([M, row.kind, row.invocation_sha256])); assert(workers.validObservation(row)); return row;
+  }
+  function coverage(unit, begin, ids, state = 'complete') {
+    const row = { schema_version: 1, id: hash(JSON.stringify([M, 'execute-task/' + unit, begin])), milestone: M, unit: 'execute-task/' + unit,
+      begin_sha256: hash(begin), completion: 'complete', coverage: state, inventory: state, observations: ids, not_invoked: 0, successors: 0,
+      refused: state === 'complete' ? [] : ['observation-boundary-unavailable'], reader: 'trusted-live' };
+    assert(workers.validCoverage(row)); return row;
+  }
+  function keyedInput() {
+    // One controller unit [0,10] and one T02 unit [4,12]; idempotency keys bind coverage.
+    const rows = [event('unit-began', 'T01', 0, { idempotency_key: 'begin-T01' }), event('unit-began', 'T02', 4, { idempotency_key: 'begin-T02' }),
+      event('unit-transition', 'T01', 10, { idempotency_key: 'begin-T01:complete' }), event('unit-transition', 'T02', 12, { idempotency_key: 'begin-T02:complete' })];
+    return { contract: contract(), now: BASE + 12, events: phase.analyzeEventIntervals(Buffer.from(rows.map(JSON.stringify).join('\n') + '\n')), journal: [], pending: [], rows };
+  }
+  test('parallel-observed-invocations-sum-while-consumption-and-unit-sum-unchanged', () => {
+    const input = keyedInput(), without = clock.computeClock(input);
+    // Two overlapping invocations inside one controller unit plus one in T02.
+    const a = observation('T01', 'a', 1, 7), b = observation('T01', 'b', 2, 9), c = observation('T02', 'c', 5, 11);
+    const evidence = { status: 'valid', observations: [a, b, c], coverage: [coverage('T01', 'begin-T01', [a.id, b.id]), coverage('T02', 'begin-T02', [c.id])] };
+    const withWorkers = clock.computeClock({ ...input, workers: evidence });
+    assert.deepEqual(withWorkers.consumption, without.consumption); assert.equal(withWorkers.consumption.consumed_ms, 12);
+    assert.equal(withWorkers.effort.unit_interval_sum_ms, 18); assert.equal(without.effort.unit_interval_sum_ms, 18);
+    const worker = withWorkers.effort.worker;
+    assert.equal(worker.status, 'complete'); assert.equal(worker.worker_ms, 6 + 7 + 6); assert.equal(worker.observed_worker_ms, 19);
+    assert.equal(worker.invocations, 3); assert.equal(worker.coverage.covered, 2); assert.equal(worker.basis, 'observed-invocation-wall-intervals');
+    assert(worker.limitations.includes('not-cpu-active-llm-or-billing')); assert(worker.policy.excludes.includes('receipt-lifetime'));
+    assert.notEqual(worker.worker_ms, withWorkers.effort.unit_interval_sum_ms, 'never a unit-duration fallback');
+  });
+  test('absent-partial-and-unusable-worker-evidence-never-zero-or-unit-fallback', () => {
+    const input = keyedInput(), a = observation('T01', 'a', 1, 7);
+    const partial = clock.computeClock({ ...input, workers: { status: 'valid', observations: [a], coverage: [coverage('T01', 'begin-T01', [a.id])] } });
+    assert.equal(partial.effort.worker.status, 'partial'); assert.equal(partial.effort.worker.worker_ms, null);
+    assert.equal(partial.effort.worker.observed_worker_ms, 6); assert.equal(partial.effort.worker.coverage.unobserved, 1);
+    const incomplete = clock.computeClock({ ...input, workers: { status: 'valid', observations: [a],
+      coverage: [coverage('T01', 'begin-T01', [a.id], 'partial'), coverage('T02', 'begin-T02', [], 'partial')] } });
+    assert.equal(incomplete.effort.worker.worker_ms, null); assert.equal(incomplete.effort.worker.coverage.partial, 2);
+    const empty = clock.computeClock({ ...input, workers: { status: 'valid', observations: [], coverage: [] } });
+    assert.equal(empty.effort.worker.status, 'unknown'); assert.equal(empty.effort.worker.observed_worker_ms, null);
+    for (const broken of [undefined, { status: 'unknown', reason: 'observation-record-invalid' }, { status: 'valid', observations: null, coverage: [] }]) {
+      const result = clock.computeClock({ ...input, workers: broken });
+      assert.equal(result.status, 'measured'); assert.equal(result.consumption.consumed_ms, 12);
+      assert.equal(result.effort.worker.worker_ms, null); assert.equal(result.effort.worker.observed_worker_ms, null);
+    }
+    const future = observation('T01', 'f', 3, 13);
+    const later = clock.computeClock({ ...input, workers: { status: 'valid', observations: [a, future], coverage: [coverage('T01', 'begin-T01', [a.id, future.id])] } });
+    assert.equal(later.effort.worker.observed_worker_ms, 6, 'not yet finished at now is not counted');
+    const open = clock.computeClock({ ...inputOf({ now_ms: 12, units: [['T01', 2, null]] }), workers: { status: 'valid', observations: [], coverage: [] } });
+    assert.equal(open.effort.worker.worker_ms, null); assert.equal(open.effort.worker.coverage.open_units, 1);
+  });
+  test('persisted-worker-records-read-separately-damage-leaves-clock-and-consumption', () => {
+    const f = setup({ now_ms: 12, units: [['T01', 0, 7]] }), before = clock.readClock(f);
+    const dir = '.gsd/forge/time/M001/observations/', a = observation('T01', 'a', 1, 6);
+    write(f.cwd, dir + a.id + '.json', a);
+    const read = clock.readClock(f);
+    assert.equal(read.status, 'measured'); assert.deepEqual(read.consumption, before.consumption);
+    assert.equal(read.effort.worker.observed_worker_ms, 5); assert.equal(read.effort.worker.status, 'partial');
+    assert(read.sources.some(s => s.path === '.gsd/forge/time/M001/observations' && s.status === 'record-set' && s.records === 1));
+    write(f.cwd, dir + a.id + '.json', { ...a, duration_ms: 4 });
+    const damaged = clock.readClock(f);
+    assert.equal(damaged.status, 'measured'); assert.deepEqual(damaged.consumption, before.consumption);
+    assert.equal(damaged.effort.worker.status, 'unknown'); assert.equal(damaged.effort.worker.reason, 'observation-record-invalid');
+    write(f.cwd, dir + 'other.json', a); assert.equal(clock.readClock(f).effort.worker.reason, 'observation-record-unreadable');
   });
 } finally { for (const dir of roots) fs.rmSync(dir, { recursive: true, force: true }); }
 console.log(`PASS milestone-clock-complete: ${count} named checks; synthetic bounded readonly evidence, no git or network`);

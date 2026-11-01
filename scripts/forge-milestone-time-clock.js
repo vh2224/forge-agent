@@ -9,6 +9,7 @@ const { unionDuration } = require('./forge-autonomy');
 const time = require('./forge-milestone-time');
 const { continuation } = require('./forge-pending-questions');
 const { readBoundedStableFile } = require('./forge-autonomy-sources');
+const observations = require('./forge-milestone-worker-observations');
 const CLASSES = Object.freeze(['unit-work', 'owner-session', 'human-wait', 'pause', 'ci-wait', 'external-wait', 'unknown']);
 const CONSUMES = Object.freeze(Object.fromEntries(CLASSES.map(k => [k, ['unit-work', 'owner-session', 'unknown'].includes(k)])));
 const CLOCK_POLICY = Object.freeze({ id: 'forge-milestone-time-clock', version: 1,
@@ -122,10 +123,12 @@ function observationOptions(options) {
     now: typeof options.now === 'function' ? options.now() : options.now ?? Date.now() };
 }
 
-// Pure input: {contract, now, events: analyzeEventIntervals(...), journal: [], pending: [source.ref]}.
-// Every boundary is explicit; presence never extends beyond its last observation.
+// Pure input: {contract, now, events: analyzeEventIntervals(...), journal: [], pending: [source.ref],
+// workers: readWorkerEvidence(...)}. Every boundary is explicit; presence never
+// extends beyond its last observation. Worker effort comes only from observed
+// invocation records; controller unit intervals are reported separately.
 function computeClock(input) {
-  const { contract, events, journal = [], pending = [] } = input;
+  const { contract, events, journal = [], pending = [], workers } = input;
   if (!time.validateContract(contract).valid) return unknown('time-contract-schema-invalid');
   const start = instant(contract.activated_at), now = instant(input.now);
   if (!Number.isFinite(now) || now < start) return unknown('clock-now-invalid');
@@ -207,13 +210,19 @@ function computeClock(input) {
     // Union cross-check is also used for the public unit-work total, never the sum.
     byClass['unit-work'] = unionDuration(spans.filter(r => r.class === 'unit-work'));
     const consumed = CLASSES.filter(k => CONSUMES[k]).reduce((sum, k) => sum + byClass[k], 0);
-    const workerMs = [...units, ...open.map(r => ({ ...r, end: now }))]
+    // Controller unit-began..unit-transition sum: owner preparation/publication
+    // included, so it is a unit proxy and never labeled as worker effort.
+    const unitSum = [...units, ...open.map(r => ({ ...r, end: now }))]
       .reduce((sum, r) => sum + Math.max(0, Math.min(now, r.end) - Math.max(start, r.start)), 0);
+    // Unusable worker evidence leaves effort unknown; it never voids the clock.
+    let worker;
+    try { worker = observations.projectWorkerEffort({ start, now, units, open, ambiguous, evidence: workers }); }
+    catch { worker = observations.projectWorkerEffort({ start, now, units, open, ambiguous, evidence: { status: 'unknown', reason: 'observation-record-invalid' } }); }
     return { status: 'measured', policy: CLOCK_POLICY, now, elapsed: { since_activation_ms: now - start,
       preselection_ms: start - instant(contract.preselection_started_at) },
       consumption: { consumed_ms: consumed, unknown_ms: byClass.unknown, by_class: byClass },
-      effort: { worker_ms: workerMs, units: units.length, open_units: open.length,
-        ambiguous_units: ambiguous.length, complete: ambiguous.length === 0 && open.length === 0 },
+      effort: { unit_interval_sum_ms: unitSum, basis: 'controller-unit-intervals', units: units.length, open_units: open.length,
+        ambiguous_units: ambiguous.length, unit_complete: ambiguous.length === 0 && open.length === 0, worker },
       waits: Object.fromEntries(CLASSES.filter(k => !CONSUMES[k]).map(k => [k, byClass[k]])), gaps, segments };
   } catch (e) { return unknown(sourceReason(e)); }
 }
@@ -263,7 +272,18 @@ function readClock(options) {
     }
     sources.push(...['.gsd/forge/events.jsonl', '.gsd/forge/receipts'].map(reference => ({ path: reference,
       status: 'nested-not-counted', sha256: null, bytes: null, records: null, reason: 'already-contained-in-unit-intervals' })));
-    const result = computeClock({ contract: contract.contract, now: options.now, events: observed.events, journal: journal.records, pending });
+    // Immutable owner observations are read separately and rechecked; damage or
+    // a race leaves worker effort unknown without touching consumption.
+    const workerRead = () => { try { return observations.readWorkerEvidence(options); } catch { return { status: 'unknown', reason: 'observation-record-unreadable' }; } };
+    let workers = workerRead();
+    const compute = () => computeClock({ contract: contract.contract, now: options.now, events: observed.events, journal: journal.records, pending, workers });
+    let result = compute();
+    if (workers.status === 'valid' && workerRead().sha256 !== workers.sha256) {
+      workers = { status: 'unknown', reason: 'observation-source-unstable' }; result = compute();
+    }
+    sources.push(...['observations', 'coverage'].map(kind => ({ path: `.gsd/forge/time/${options.milestone}/${kind}`,
+      status: workers.status === 'valid' ? 'record-set' : 'unavailable', sha256: workers.status === 'valid' ? workers.sha256 : null, bytes: null,
+      records: workers.status === 'valid' ? workers[kind].length : null, reason: workers.status === 'valid' ? 'worker-evidence-only' : workers.reason || 'no-worker-evidence' })));
     // Contract/journal APIs are rechecked after collection, across amendment races.
     const after = time.readContract(options);
     if (after.status !== 'valid' || after.sha256 !== contract.sha256) fail('clock-source-unstable');

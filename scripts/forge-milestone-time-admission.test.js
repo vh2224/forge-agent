@@ -144,6 +144,18 @@ try {
     assert.deepEqual(Object.keys(r.record).sort(), ['decision', 'contract_version', 'contract_sha256', 'policy', 'consumed_ms', 'unknown_ms', 'ceiling_ms', 'at'].sort());
     assert.equal(r.record.contract_sha256, time.readContract({ cwd, milestone: M }).sha256);
   });
+  test('missing-or-damaged-worker-evidence-never-refuses-admission-or-adds-unknown', () => {
+    const cwd = setup(); events(cwd, [['execute-task/T01', 0], ['execute-task/T01', 10, 'complete']]);
+    const plain = decide(cwd, 20), projected = status(cwd, 20);
+    assert.equal(plain.decision, 'admitted'); assert.equal(projected.clocks.effort.unit_interval_sum_ms, 10);
+    assert.equal(projected.clocks.effort.worker.status, 'unknown'); assert.equal(projected.clocks.effort.worker.worker_ms, null);
+    assert(!projected.unknowns.some(k => k.startsWith('observation-') || k.startsWith('worker-')));
+    write(cwd, '.gsd/forge/time/M001/observations/broken.json', '{');
+    const damaged = decide(cwd, 20);
+    assert.equal(damaged.decision, 'admitted'); assert.equal(damaged.record.consumed_ms, plain.record.consumed_ms);
+    assert.equal(status(cwd, 20).clocks.effort.worker.reason, 'observation-record-unreadable');
+    assert.deepEqual(status(cwd, 20).unknowns, projected.unknowns);
+  });
   test('cap-exhausted-foreign-open-and-ambiguous-draining', () => {
     const cwd = setup(); assert.equal(decide(cwd, 100).reason_code, 'milestone-budget-exhausted');
     events(cwd, [['execute-task/T02', 0]]); assert.equal(decide(cwd, 100).reason_code, 'milestone-budget-draining');

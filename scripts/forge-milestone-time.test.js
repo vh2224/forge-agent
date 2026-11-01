@@ -267,6 +267,30 @@ try {
     for (let n = 2; n <= 257; n++) write(path.join(p.checkpoints, n + '.json'), { version: n });
     assert.strictEqual(time.readCheckpoints({ cwd, milestone: M }).reason, 'time-record-limit');
   });
+  test('worker-evidence-single-owner-lock-coverage-last-idempotent-conflict-and-no-contract', () => {
+    const { cwd } = activate(), p = time.timePaths({ cwd, milestone: M });
+    const locking = require('./forge-artifact-reconciliation'), original = locking.withOwnerLock, link = fs.linkSync;
+    const observation = { id: 'a'.repeat(64), milestone: M, duration_ms: 4 }, coverage = { id: 'b'.repeat(64), milestone: M, observations: ['a'.repeat(64)] };
+    let calls = 0, order = [];
+    locking.withOwnerLock = (root, callback) => { calls++; return original(root, callback); };
+    fs.linkSync = (from, to) => { order.push(path.basename(path.dirname(to))); return link(from, to); };
+    try {
+      assert.deepStrictEqual(time.recordWorkerEvidence({ cwd, milestone: M, observations: [observation, observation], coverage }),
+        { status: 'valid', published: 2, unchanged: 1 });
+      assert.strictEqual(calls, 1); assert.deepStrictEqual(order, ['observations', 'coverage']);
+    } finally { locking.withOwnerLock = original; fs.linkSync = link; }
+    const before = snapshot(cwd);
+    assert.deepStrictEqual(time.recordWorkerEvidence({ cwd, milestone: M, observations: [observation], coverage }), { status: 'valid', published: 0, unchanged: 2 });
+    assert.deepStrictEqual(snapshot(cwd), before);
+    assert.strictEqual(time.readObservations({ cwd, milestone: M }).records.length, 1); assert.strictEqual(time.readCoverage({ cwd, milestone: M }).records.length, 1);
+    rejectsUnchanged(cwd, 'time-record-conflict', () => time.recordWorkerEvidence({ cwd, milestone: M, observations: [{ ...observation, duration_ms: 5 }], coverage }));
+    rejectsUnchanged(cwd, 'time-record-invalid', () => time.recordWorkerEvidence({ cwd, milestone: M, observations: [{ ...observation, path: '/private/session' }], coverage }));
+    assert.ok(fs.existsSync(path.join(p.observations, 'a'.repeat(64) + '.json')));
+    const empty = owner(), untouched = snapshot(empty);
+    assert.throws(() => time.recordWorkerEvidence({ cwd: empty, milestone: M, observations: [], coverage }), e => e.code === 'time-contract-required');
+    assert.deepStrictEqual(snapshot(empty), untouched);
+    assert.strictEqual(time.readObservations({ cwd: empty, milestone: M }).status, 'no-contract');
+  });
   test('canonical-owner-lock-fault-and-exclusive-publication-preserve-history', () => {
     const { cwd } = activate(), p = time.timePaths({ cwd, milestone: M });
     const locking = require('./forge-artifact-reconciliation'), original = locking.withOwnerLock, append = fs.appendFileSync, link = fs.linkSync;

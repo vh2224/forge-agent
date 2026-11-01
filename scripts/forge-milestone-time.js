@@ -53,7 +53,7 @@ function timePaths(options) {
   if (!ids.isValid(milestone) || typeof milestone !== 'string' || /[\\/\0]/.test(milestone) || !['milestone', 'task'].includes(ids.entityKind(milestone))) fail('time-work-id-invalid');
   if (ids.entityKind(milestone) !== 'milestone') fail('time-work-kind-unsupported');
   const owner = path.resolve(options.cwd || '.'), forge = path.join(owner, '.gsd/forge'), directory = path.join(forge, 'time', milestone);
-  return { owner, forge, directory, contract: path.join(directory, 'contract.json'), amendments: path.join(directory, 'amendments'), journal: path.join(directory, 'journal.jsonl'), warnings: path.join(directory, 'warnings'), checkpoints: path.join(directory, 'checkpoints'), roadmap: path.join(owner, '.gsd/milestones', milestone, milestone + '-ROADMAP.md') };
+  return { owner, forge, directory, contract: path.join(directory, 'contract.json'), amendments: path.join(directory, 'amendments'), journal: path.join(directory, 'journal.jsonl'), warnings: path.join(directory, 'warnings'), checkpoints: path.join(directory, 'checkpoints'), observations: path.join(directory, 'observations'), coverage: path.join(directory, 'coverage'), roadmap: path.join(owner, '.gsd/milestones', milestone, milestone + '-ROADMAP.md') };
 }
 function bounded(file, max, json = true) {
   noLinks(file); const real = fs.realpathSync.native(file);
@@ -299,7 +299,7 @@ function appendJournal(options) {
     fs.appendFileSync(p.journal, line, { mode: 0o600 }); return { status: 'valid', count: records.length };
   });
 }
-function recordIdentity(record, type) { return type === 'warnings' ? id(record?.id) ? record.id : null : ms(record?.version) ? String(record.version) : null; }
+function recordIdentity(record, type) { return type !== 'checkpoints' ? id(record?.id) ? record.id : null : ms(record?.version) ? String(record.version) : null; }
 function readRecords(options, type) {
   try {
     const p = timePaths(options), contract = readContract(options); if (contract.status === 'invalid') fail(contract.reason);
@@ -331,6 +331,31 @@ function recordWarning(options) { return record(options, 'warnings'); }
 function listWarnings(options) { return readRecords(options, 'warnings'); }
 function recordCheckpoint(options) { return record(options, 'checkpoints'); }
 function readCheckpoints(options) { return readRecords(options, 'checkpoints'); }
+function readObservations(options) { return readRecords(options, 'observations'); }
+function readCoverage(options) { return readRecords(options, 'coverage'); }
+// Worker evidence is published by the owner in one lock window: immutable
+// observations first and the per-unit coverage marker last. Replay of identical
+// bytes is idempotent; a different record with the same identity refuses.
+function recordWorkerEvidence(options) {
+  const rows = [...(options.observations || []).map(r => ['observations', r]), ['coverage', options.coverage]];
+  if (rows.length > MAX_RECORDS || rows.some(([type, r]) => !recordIdentity(r, type) || !publicData(r))) fail('time-record-invalid');
+  return withWriter(options, p => {
+    validStored(options);
+    const listings = { observations: readRecords(options, 'observations'), coverage: readRecords(options, 'coverage') };
+    for (const listing of Object.values(listings)) if (listing.status !== 'valid') fail(listing.reason);
+    const pending = [];
+    for (const [type, value] of rows) {
+      const identity = recordIdentity(value, type), previous = listings[type].records.find(r => r.id === identity);
+      if (previous) { if (!same(previous, value)) fail('time-record-conflict'); continue; }
+      if (!pending.some(([t, v]) => t === type && v.id === identity)) pending.push([type, value]);
+    }
+    for (const type of Object.keys(listings)) {
+      if (listings[type].records.length + pending.filter(([t]) => t === type).length > MAX_RECORDS) fail('time-record-limit');
+    }
+    for (const [type, value] of pending) publishExclusive(path.join(p[type], value.id + '.json'), value, MAX_AMENDMENT);
+    return { status: 'valid', published: pending.length, unchanged: rows.length - pending.length };
+  });
+}
 function main(argv = process.argv.slice(2), io = process, liveAdapter) {
   const options = {}; let action, json = argv.includes('--json');
   try {
@@ -374,5 +399,5 @@ function main(argv = process.argv.slice(2), io = process, liveAdapter) {
 }
 module.exports = { SCHEMA_VERSION, ENDPOINT_ITEMS, ITEM_STATES, AMENDMENT_KINDS, JOURNAL_TYPES, WAIT_CLASSES,
   timePaths, readContract, validateContract, createDecisionAuthority, activateContract, amendContract, appendJournal, readJournal,
-  recordWarning, listWarnings, recordCheckpoint, readCheckpoints, main };
+  recordWarning, listWarnings, recordCheckpoint, readCheckpoints, readObservations, readCoverage, recordWorkerEvidence, main };
 if (require.main === module) process.exitCode = main();

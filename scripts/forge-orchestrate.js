@@ -96,6 +96,21 @@ function recordTimePresence(input, boundary, options = {}) {
       session_sha256: crypto.createHash('sha256').update(input.time_session).digest('hex'), at: new Date(now).toISOString() } });
   }
 }
+// Safe owner boundary after a committed terminal transaction: the trusted live
+// reader (an in-process adapter, never JSON) names already observed invocation
+// sources. Absent reader or contract-free work: nothing is read or written.
+function observeWorkers(input, unitKey, beginKey, completionKey, completion, options = {}) {
+  if (!input.milestone || require('./forge-milestone-time').readContract({ cwd: input.cwd, milestone: input.milestone }).status !== 'valid') return null;
+  const workers = require('./forge-milestone-worker-observations');
+  try {
+    return workers.publicResult(workers.observeCompletion({ cwd: input.cwd, milestone: input.milestone, unit: unitKey,
+      begin_key: beginKey, completion_key: completionKey, completion, reader: options.workerObservationReader, now: options.now }));
+  } catch { return { status: 'unknown', reason: 'observation-failed' }; }
+}
+function attachWorkers(output, workers) {
+  if (workers) output.details = { ...(output.details || {}), time: { ...(output.details?.time || {}), worker_observations: workers } };
+  return output;
+}
 function publicTime(status) {
   return { ...milestoneTime.summarizeTimeStatus(status), contract: status.contract, contract_version: status.contract_version,
     open_writers: status.open_writers || [], unknowns: status.unknowns || [] };
@@ -180,7 +195,7 @@ function complete(inputValue, options) {
     output.unit = selected; output.boundary = committed.transaction.boundary;
     try { recordTimePresence(input, 'complete', options); }
     catch { output.details = { time: { presence: 'unknown', unknowns: ['time-presence-unrecorded'] } }; }
-    return output;
+    return attachWorkers(output, observeWorkers(input, selected.key, key, `${key}:complete`, 'complete', options));
   } catch (cause) {
     return base('complete', 'blocked', cause.code || 'completion-failed', input);
   }
@@ -478,6 +493,10 @@ function linkedOperation(operation, inputValue, options) {
     output.details = result;
     output.details.transaction = { ...result.transaction,
       begin_checksum: operation === 'reenter' ? checksum(forgeController.lookupRecord(input.cwd, 'transaction', result.transaction.idempotency_key)) : undefined };
+    // A consumed terminal failure is also a reconciled owner boundary: actual
+    // invocation evidence may be observed; a pre-provider refusal adds no interval.
+    if (operation === 'consume-failure') attachWorkers(output, observeWorkers(input, output.unit.key, inputValue.begin_key,
+      result.failure_key, 'consume-failure', options));
     return output;
   } catch (cause) {
     if (cause.code === 'CONTROLLER_FAILPOINT') throw cause;

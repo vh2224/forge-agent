@@ -230,7 +230,7 @@ function advance(snapshot, commandValue, input = {}, dependencies = {}) {
   const controller = dependencies.orchestrate || orchestrateDefault;
   if (!controller || typeof controller.run !== 'function') throw error('invalid-controller', 'forge-orchestrate indisponível');
   const trusted = {};
-  for (const name of ['prefsReader', 'inventoryReader', 'now', 'failpoint', 'inspectAttempt', 'processProbe', 'replaySavedResponse', 'reconcileRoots', 'captureEntryBaseline', 'entryAuthority', 'questionStateAdapter', 'reconcileRetainedClaim', 'userHome', 'env']) {
+  for (const name of ['prefsReader', 'inventoryReader', 'now', 'failpoint', 'inspectAttempt', 'processProbe', 'replaySavedResponse', 'reconcileRoots', 'captureEntryBaseline', 'entryAuthority', 'questionStateAdapter', 'reconcileRetainedClaim', 'userHome', 'env', 'workerObservationReader']) {
     if (dependencies[name] !== undefined) trusted[name] = dependencies[name];
   }
   const orchestrate = { run: (operation, payload) => controller.run(operation, payload, trusted),
