@@ -15,6 +15,7 @@ const CONSUMES = Object.freeze(Object.fromEntries(CLASSES.map(k => [k, ['unit-wo
 const CLOCK_POLICY = Object.freeze({ id: 'forge-milestone-time-clock', version: 1,
   classes: CLASSES, priority: CLASSES, consumption: CONSUMES });
 const FORECAST_POLICY = Object.freeze({ id: 'forge-milestone-time-forecast', version: 1 });
+const DELIVERY_PROOF_MODES = Object.freeze(['current-source-strict', 'historical-delivery']);
 const MAX_JSON = 1024 * 1024;
 function fail(code) { throw Object.assign(new Error(code), { code }); }
 function hash(bytes) { return crypto.createHash('sha256').update(bytes).digest('hex'); }
@@ -79,6 +80,24 @@ function revisionBlobHash(cwd, revision, relative) {
     return { ok: true, hash: object };
   } catch { return { ok: false }; }
 }
+function capturedSourceHash(options, envelope, relative) {
+  const cache = options.deliveryCache, codeRoot = options.codeDir || options.cwd;
+  const entries = envelope.workspace.filter(r => r.path === relative);
+  if (entries.length > 1) fail('delivery-workspace-conflicting-path');
+  if (entries.length) {
+    if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(entries[0].hash)) fail('delivery-current-source-binding-missing');
+    return entries[0].hash;
+  }
+  if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(envelope.revision)) fail('delivery-current-source-binding-missing');
+  const key = codeRoot + '\0' + envelope.revision + '\0' + relative;
+  if (!cache.blobs.has(key)) {
+    if (cache.blobs.size >= 256) fail('delivery-revision-limit');
+    const read = (options.revisionBlobReader || revisionBlobHash)(codeRoot, envelope.revision, relative);
+    if (!read?.ok || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(read.hash)) fail('delivery-revision-unreadable');
+    cache.blobs.set(key, read.hash);
+  }
+  return cache.blobs.get(key);
+}
 function validateCurrentSources(options, envelope, scope) {
   const cache = options.deliveryCache, codeRoot = options.codeDir || options.cwd;
   if (!envelope || !Array.isArray(envelope.workspace) || !scope.length) fail('delivery-current-source-binding-missing');
@@ -86,23 +105,7 @@ function validateCurrentSources(options, envelope, scope) {
   for (const relative of scope) {
     const source = deliverySource(options, codeRoot, relative, phaseCost.MAX_BYTES);
     if (source.status !== 'valid') fail('delivery-current-source-changed');
-    const entries = envelope.workspace.filter(r => r.path === relative);
-    if (entries.length > 1) fail('delivery-workspace-conflicting-path');
-    let expected;
-    if (entries.length) {
-      if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(entries[0].hash)) fail('delivery-current-source-binding-missing');
-      expected = entries[0].hash;
-    } else {
-      if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(envelope.revision)) fail('delivery-current-source-binding-missing');
-      const key = codeRoot + '\0' + envelope.revision + '\0' + relative;
-      if (!cache.blobs.has(key)) {
-        if (cache.blobs.size >= 256) fail('delivery-revision-limit');
-        const read = (options.revisionBlobReader || revisionBlobHash)(codeRoot, envelope.revision, relative);
-        if (!read?.ok || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(read.hash)) fail('delivery-revision-unreadable');
-        cache.blobs.set(key, read.hash);
-      }
-      expected = cache.blobs.get(key);
-    }
+    const expected = capturedSourceHash(options, envelope, relative);
     const key = codeRoot + '\0' + relative;
     if (!cache.hashes.has(key)) {
       if (cache.hashes.size >= 256) fail('delivery-revision-limit');
@@ -114,6 +117,28 @@ function validateCurrentSources(options, envelope, scope) {
     }
     if (cache.hashes.get(key) !== expected) fail('delivery-current-source-changed');
   }
+}
+// Historical source bindings describe the captured workspace. They do not compare
+// it to today's files, and cannot stand in for integrated verification/review.
+function historicalCapture(options, reference, read, scope, expected) {
+  const envelope = read.value, codeRoot = options.codeDir || options.cwd;
+  if (!Array.isArray(envelope?.workspace) || envelope.workspace.length > 256
+      || path.resolve(envelope.code_dir || '') !== path.resolve(codeRoot)) fail('delivery-current-source-binding-missing');
+  const capturedAt = instant(envelope.captured_at);
+  if (!Number.isFinite(capturedAt) || capturedAt > options.completionAt) fail('delivery-capture-time-invalid');
+  const paths = new Set();
+  const workspace = envelope.workspace.map(row => {
+    if (!row || paths.has(row.path)) fail('delivery-workspace-conflicting-path');
+    safeFile(codeRoot, row.path); paths.add(row.path);
+    // Out-of-scope dirty metadata can include deleted paths. Only scoped files
+    // are positive source evidence and require a concrete captured blob hash.
+    return { path: row.path, hash: /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(row.hash) ? row.hash : null };
+  }).filter(row => scope.includes(row.path));
+  const bindings = scope.map(relative => ({ path: relative, hash: capturedSourceHash(options, envelope, relative) }));
+  return { unit: require('./forge-delivery').unitKey(expected), reference, sha256: read.sha256,
+    revision: /^(?:[a-f0-9]{40}|[a-f0-9]{64}|[a-z][a-z0-9.-]{0,99})$/.test(envelope.revision) ? envelope.revision : null,
+    workspace, workspace_scope: 'declared-source-paths-only', captured_at: envelope.captured_at,
+    plan_fingerprint: envelope.plan_fingerprint, source_bindings: bindings, current_source_conformity: 'not-evaluated' };
 }
 function sourceReason(error) {
   return /^(?:clock-|phase-cost-|time-|delivery-)/.test(error.code || '') ? error.code : 'clock-source-unreadable';
@@ -294,8 +319,8 @@ function readClock(options) {
   } catch (e) { return unknown(sourceReason(e), sources); }
 }
 
-// Rebuild each canonical projection from its input, including child inputs. No
-// historical revision or green projection alone establishes current source bytes.
+// Rebuild immutable canonical history in both modes. Only strict mode also
+// establishes current source conformity; neither mode grants endpoint authority.
 function validateDelivery(options, reference, expected, seen = new Set()) {
   if (seen.has(reference) || seen.size >= 64) fail('delivery-cycle-or-limit'); seen.add(reference);
   const delivery = require('./forge-delivery');
@@ -306,6 +331,17 @@ function validateDelivery(options, reference, expected, seen = new Set()) {
   const inputRead = deliverySource(options, options.cwd, inputReference, MAX_JSON, true), input = inputRead.value;
   if (!input || delivery.unitKey(input.unit) !== delivery.unitKey(expected)
       || delivery.unitKey(stored.value?.unit) !== delivery.unitKey(expected)) fail('delivery-unit-mismatch');
+  const plan = deliverySource(options, options.cwd, input.plan, MAX_JSON);
+  if (plan.status !== 'valid') fail('delivery-plan-missing');
+  const planText = plan.buffer.toString('utf8');
+  if (!Array.isArray(input.bindings || []) || !Array.isArray(input.expected_children || [])) fail('delivery-binding-invalid');
+  // Bound every source before the canonical builder opens it; the final cache
+  // reread detects changes across the recursive rebuild.
+  const envelopes = new Map();
+  for (const binding of input.bindings || []) {
+    if (!binding?.source?.path || !['verification', 'artifact'].includes(binding.source.kind)) fail('delivery-binding-invalid');
+    envelopes.set(binding.source.path, deliverySource(options, options.cwd, binding.source.path, MAX_JSON, true));
+  }
   for (const child of input.expected_children || []) {
     if (!child?.unit || !child.delivery) fail('delivery-child-invalid');
     validateDelivery(options, child.delivery, child.unit, seen);
@@ -316,8 +352,6 @@ function validateDelivery(options, reference, expected, seen = new Set()) {
   const legacySlice = expected.type === 'slice' && input.expected_children?.length > 0;
   if (rebuilt.generated_by !== 'forge-delivery' || rebuilt.diagnostics.some(r => !(legacySlice && r === 'plan_legacy')) || !rebuilt.criteria.length
       || rebuilt.criteria.some(c => c.status !== 'verificado' || c.pending.length)) fail('delivery-criteria-unproven');
-  const plan = deliverySource(options, options.cwd, input.plan, MAX_JSON);
-  const planText = plan.buffer.toString('utf8');
   if (expected.type === 'slice') {
     const tasks = require('./forge-status').parsePlanTasks(planText);
     const children = input.expected_children || [];
@@ -328,18 +362,27 @@ function validateDelivery(options, reference, expected, seen = new Set()) {
   const fields = rebuilt.plan.structured ? require('./forge-must-haves').parseExecutionFields(planText) : {};
   const inventory = delivery.inventoryPlan(plan.buffer.toString('utf8'), input.plan, expected);
   const scope = [...new Set([...(fields.writes || []), ...inventory.criteria.flatMap(c => [c.artifact_path, c.link_from, c.link_to].filter(Boolean))])];
-  const bindings = input.bindings || [];
-  for (const reference of new Set(bindings.map(binding => binding.source?.path))) {
-    if (!reference) fail('delivery-binding-invalid');
-    const envelope = deliverySource(options, options.cwd, reference, MAX_JSON, true).value;
-    validateCurrentSources(options, envelope, scope);
+  for (const [sourceReference, read] of envelopes) {
+    if (options.proofMode === 'current-source-strict') validateCurrentSources(options, read.value, scope);
+    const capture = historicalCapture(options, sourceReference, read, scope, expected);
+    options.proof.captures.push({ ...capture, current_source_conformity: options.proofMode === 'current-source-strict' ? 'matched' : 'not-evaluated' });
   }
+  options.proof.units.push({ unit: delivery.unitKey(expected), reference, delivery_sha256: stored.sha256,
+    input_sha256: inputRead.sha256, plan_sha256: plan.sha256, criteria: rebuilt.criteria.filter(c => delivery.unitKey(c.unit) === delivery.unitKey(expected)).length });
   return rebuilt;
 }
 function readDeliveries(options) {
   const proven = [], unproven = [], sources = [];
+  const proofKind = options?.proofMode ?? 'current-source-strict';
+  const purpose = { proof_kind: proofKind, current_integrated_acceptance: 'not-evaluated',
+    current_source_conformity: proofKind === 'historical-delivery' ? 'not-evaluated' : 'unknown',
+    limitations: ['canonical-fingerprints-are-not-authorship-or-live-authority',
+      'workspace-and-capture-time-are-recorded-metadata-not-fully-bound-by-delivery-fingerprint',
+      'capture-times-do-not-prove-worker-duration', 'integrated-endpoint-verification-and-review-required-separately'] };
   try {
+    if (!DELIVERY_PROOF_MODES.includes(proofKind)) fail('delivery-proof-mode-invalid');
     options = observationOptions(options);
+    options.proofMode = proofKind;
     options.deliveryCache = { files: new Map(), hashes: new Map(), blobs: new Map(), bytes: 0 };
     time.timePaths(options);
     const observed = eventSource(options); sources.push(publicSource(observed.source));
@@ -395,16 +438,26 @@ function readDeliveries(options) {
             || require('./forge-delivery').fingerprint(tx.boundary) !== require('./forge-delivery').fingerprint(boundary)
             || boundary.result_ref !== path.relative(options.cwd, controller.resultFile(options.cwd, event.idempotency_key)).split(path.sep).join('/')) fail('delivery-completion-unproven');
         const reference = `.gsd/milestones/${options.milestone}/slices/${slice}/${slice}-DELIVERY.json`;
+        options.completionAt = instant(event.ts);
+        options.proof = { units: [], captures: [] };
         const projection = validateDelivery(options, reference, { type: 'slice', id: slice, milestone: options.milestone });
-        proven.push({ slice, reference, fingerprint: projection.delivery_fingerprint, completion_sha256: hash(event.idempotency_key) });
+        proven.push({ slice, reference, fingerprint: projection.delivery_fingerprint, completion_sha256: hash(event.idempotency_key),
+          proof_kind: proofKind, completed_at: event.ts, committed_at: boundary.committed_at,
+          current_source_conformity: proofKind === 'current-source-strict' ? 'matched' : 'not-evaluated',
+          current_integrated_acceptance: 'not-evaluated', coverage: { status: 'complete',
+            units: options.proof.units.length, captures: options.proof.captures.length, criteria: projection.criteria.length },
+          history: options.proof.units, captures: options.proof.captures });
       } catch (e) { unproven.push({ slice, reason: sourceReason(e) === 'clock-source-unreadable' ? 'delivery-completion-invalid' : sourceReason(e) }); }
     }
     for (const read of options.deliveryCache.files.values()) {
       if (readSource(read.root, read.reference, read.limit).sha256 !== read.source.sha256) fail('clock-source-unstable');
     }
-    return { status: 'observed', proven, unproven, sources };
-  } catch (e) { return { status: 'unknown', reason: sourceReason(e), proven: [], unproven, sources }; }
+    if (proofKind === 'current-source-strict') purpose.current_source_conformity =
+      unproven.some(row => row.reason === 'delivery-current-source-changed') ? 'changed' : unproven.length || !proven.length ? 'unknown' : 'matched';
+    return { status: 'observed', ...purpose, proven, unproven, sources };
+  } catch (e) { return { status: 'unknown', ...purpose, reason: sourceReason(e), proven: [], unproven, sources }; }
 }
+function readHistoricalDeliveries(options) { return readDeliveries({ ...options, proofMode: 'historical-delivery' }); }
 
 function computeForecast({ contract, clock, deliveries }) {
   const base = { policy: FORECAST_POLICY, deliveries: deliveries?.proven || [], pending: [], burn_ratio: null,
@@ -438,7 +491,7 @@ function readForecast(options) {
       if (roadmap.sha256 !== contract.contract.allocation.roadmap_sha256) return { status: 'unknown', reason: 'allocation-roadmap-mismatch', policy: FORECAST_POLICY };
     }
     const clock = readClock(options), slices = contract.contract.allocation?.items.filter(r => r.kind === 'slice').map(r => r.slice);
-    return computeForecast({ contract: contract.contract, clock, deliveries: readDeliveries({ ...options, ...(slices ? { slices } : {}) }) });
+    return computeForecast({ contract: contract.contract, clock, deliveries: readHistoricalDeliveries({ ...options, ...(slices ? { slices } : {}) }) });
   } catch (e) { return { status: 'unknown', reason: sourceReason(e), policy: FORECAST_POLICY }; }
 }
 function main(argv = process.argv.slice(2), io = process, options = {}) {
@@ -453,5 +506,5 @@ function main(argv = process.argv.slice(2), io = process, options = {}) {
   const result = { clock: readClock(input), forecast: readForecast(input) };
   io.stdout.write(JSON.stringify(result) + '\n'); return 0;
 }
-module.exports = { CLOCK_POLICY, FORECAST_POLICY, computeClock, readClock, readDeliveries, computeForecast, readForecast, main };
+module.exports = { CLOCK_POLICY, FORECAST_POLICY, DELIVERY_PROOF_MODES, computeClock, readClock, readDeliveries, readHistoricalDeliveries, computeForecast, readForecast, main };
 if (require.main === module) process.exitCode = main();

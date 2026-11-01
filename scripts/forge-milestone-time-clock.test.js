@@ -110,6 +110,69 @@ function deliveredFixture() {
   assert.equal(completed.transaction.phase, 'committed');
   return { ...f, deliveryRef, envelopeRef, envelope, projection, deliveryInput: input, source, planRef, currentHashReader: fixtureCurrentHash };
 }
+// Real Git plus canonical verification envelopes, delivery projections and
+// controller completions. A and B intentionally own the same source in sequence.
+function overlapFixture() {
+  const cwd = fs.realpathSync.native(root()), git = args => require('./forge-git-process').git(cwd, args);
+  git(['init', '--quiet']);
+  write(cwd, '.gitignore', '.gsd/\n');
+  write(cwd, 'scripts/result.js', 'module.exports = 1;\n');
+  write(cwd, 'scripts/check.js', "require('assert/strict').equal(require('./result'), Number(process.argv[2])); console.log('PASS overlap-source-behavior');\n");
+  git(['add', '.']);
+  const commit = message => git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--quiet', '-m', message]);
+  commit('initial fixture');
+  const dir = '.gsd/milestones/M001/slices/S01', children = [], envelopes = [];
+  const inventoryReader = () => ({ slices: [{ id: 'S01', tasks: [{ id: 'T01' }, { id: 'T02' }] }] });
+  const finish = (unit, slice, at) => {
+    require('./forge-state').write(cwd, { milestone: M, kind: 'milestone', phase: unit.split('/')[0],
+      active_slice: slice, active_task: unit.startsWith('execute-task/') ? unit.split('/')[1] : '—', next_action: 'complete', auto_mode: 'on' });
+    const request = { milestone: M, slice, unit, host_runtime: 'codex', owner_token: 'fixture-owner' };
+    const opts = { now: () => at, prefsReader: () => ({ ok: true, prefs: {} }), inventoryReader };
+    const begin = controller.begin(cwd, { ...request, idempotency_key: unit + ':begin' }, opts);
+    const completed = controller.complete(cwd, { ...request, generation: begin.generation,
+      idempotency_key: unit + ':complete', result: { status: 'succeeded' } }, opts);
+    assert.equal(completed.transaction.phase, 'committed');
+  };
+  for (const [index, id] of ['T01', 'T02'].entries()) {
+    if (index) { write(cwd, 'scripts/result.js', 'module.exports = 2;\n'); commitAfterSource(); }
+    const unit = { type: 'task', id, slice: 'S01', milestone: M }, base = `${dir}/tasks/${id}/${id}`;
+    const plan = `---\nid: ${id}\nwrites: [scripts/result.js]\nmust_haves:\n  truths: [observed overlapping source behavior]\n  artifacts: []\n  key_links: []\nverify:\n  - node scripts/check.js ${index + 1}\n---\n`;
+    write(cwd, base + '-PLAN.md', plan);
+    const contract = require('./forge-code-roots').singleContract(cwd, cwd);
+    const gate = require('./forge-verify').runRootVerification(contract, { unit, planFingerprint: hash(plan),
+      taskPlanVerify: `node scripts/check.js ${index + 1}`, commandTimeoutMs: 10000 });
+    assert.equal(gate.passed, true, JSON.stringify(gate));
+    const envelope = gate.roots[0], envelopeRef = base + '-VERIFY-ENVELOPE.json';
+    assert.equal(path.resolve(envelope.code_dir), path.resolve(cwd), 'canonical capture physical root');
+    assert.match(envelope.revision, /^[a-f0-9]{40}$/); assert(Array.isArray(envelope.workspace));
+    write(cwd, envelopeRef, envelope); envelopes.push({ envelopeRef, envelope });
+    const input = { schema_version: 1, unit, plan: base + '-PLAN.md', plan_fingerprint: hash(plan), bindings: [
+      { criterion: { kind: 'truth', index: 0 }, aspect: 'default', coverage: 'behavioral',
+        source: { kind: 'verification', path: envelopeRef, check_index: 0 } } ] };
+    write(cwd, base + '-DELIVERY-INPUT.json', input);
+    const projected = delivery.buildDelivery(input, { ownerRoot: cwd, codeDir: cwd });
+    assert(projected.criteria.every(row => row.status === 'verificado'));
+    write(cwd, base + '-DELIVERY.json', projected);
+    children.push({ unit, delivery: base + '-DELIVERY.json' });
+    finish('execute-task/' + id, 'S01', Date.now() + 1);
+  }
+  function commitAfterSource() { git(['add', 'scripts/result.js']); commit('authorized later task changes shared source'); }
+  const unit = { type: 'slice', id: 'S01', milestone: M }, planRef = dir + '/S01-PLAN.md';
+  const plan = '# Historical complete-slice\n- [x] T01: First verified child\n- [x] T02: Later verified overlapping child\n';
+  write(cwd, planRef, plan);
+  const input = { schema_version: 1, unit, plan: planRef, plan_fingerprint: hash(plan), expected_children: children, bindings: [] };
+  const deliveryRef = dir + '/S01-DELIVERY.json';
+  write(cwd, dir + '/S01-DELIVERY-INPUT.json', input);
+  const projected = delivery.buildDelivery(input, { ownerRoot: cwd, codeDir: cwd });
+  assert(projected.criteria.every(row => row.status === 'verificado'));
+  write(cwd, deliveryRef, projected);
+  const completedAt = Date.now() + 2; finish('complete-slice/S01', 'S01', completedAt);
+  const c = contract(), roadmap = '# Overlap roadmap\n';
+  c.activated_at = new Date(completedAt - 1000).toISOString(); c.preselection_started_at = c.activated_at; c.ceiling_ms = 10000;
+  c.allocation = { roadmap_sha256: hash(roadmap), items: [{ id: 's1', kind: 'slice', slice: 'S01', ms: 2000 }, { id: 's2', kind: 'slice', slice: 'S02', ms: 2000 }] };
+  write(cwd, '.gsd/forge/time/M001/contract.json', c); write(cwd, '.gsd/milestones/M001/M001-ROADMAP.md', roadmap);
+  return { cwd, milestone: M, now: completedAt + 10, planRef, deliveryRef, input, children, envelopes };
+}
 try {
   test('declared-artifact-files-substantive-and-fixture-inputs', () => {
     for (const [file, lines] of [['forge-phase-cost.js', 130], ['forge-phase-cost.test.js', 95],
@@ -228,6 +291,58 @@ try {
     const f = deliveredFixture(), before = snapshot(f.cwd), result = clock.readDeliveries({ ...f, slices: ['S01'] });
     assert.deepEqual(result.unproven, [], JSON.stringify(result)); assert.equal(result.proven.length, 1);
     assert.deepEqual(snapshot(f.cwd), before);
+  });
+  test('historical-overlap-real-git-canonical-children-forecast-without-current-acceptance', () => {
+    const f = overlapFixture(), before = snapshot(f.cwd);
+    const historical = clock.readHistoricalDeliveries(f), strict = clock.readDeliveries(f);
+    assert.equal(historical.proof_kind, 'historical-delivery'); assert.equal(historical.proven.length, 1, JSON.stringify(historical));
+    assert.equal(historical.proven[0].coverage.status, 'complete'); assert.equal(historical.proven[0].coverage.units, 3);
+    assert.equal(historical.proven[0].coverage.captures, 2); assert.equal(historical.proven[0].coverage.criteria, 2);
+    assert.equal(strict.proven.length, 0); assert.equal(strict.current_source_conformity, 'changed');
+    assert.equal(strict.unproven[0].reason, 'delivery-current-source-changed');
+    assert.deepEqual(clock.readDeliveries({ ...f, proofMode: 'current-source-strict' }), strict);
+    assert.equal(historical.current_source_conformity, 'not-evaluated');
+    assert.equal(historical.current_integrated_acceptance, 'not-evaluated');
+    const captures = historical.proven[0].captures;
+    assert(captures.every(row => row.captured_at && row.revision && row.sha256.length === 64 && row.source_bindings.length === 1));
+    assert.notEqual(captures[0].revision, captures[1].revision);
+    assert(historical.limitations.includes('workspace-and-capture-time-are-recorded-metadata-not-fully-bound-by-delivery-fingerprint'));
+    const forecast = clock.readForecast(f); assert.equal(forecast.reason, 'evidence-based-projection');
+    assert.deepEqual(forecast.deliveries.map(row => row.slice), ['S01']); assert.deepEqual(forecast.pending.map(row => row.slice), ['S02']);
+    assert.equal(forecast.deliveries[0].proof_kind, 'historical-delivery'); assert.equal(forecast.status, 'fits');
+    assert(!JSON.stringify(historical).includes(f.cwd)); assert.deepEqual(snapshot(f.cwd), before);
+    const child = spawnSync(process.execPath, ['-e', 'process.stdout.write(JSON.stringify(require(process.argv[1]).readHistoricalDeliveries(JSON.parse(process.argv[2]))));',
+      require.resolve('./forge-milestone-time-clock'), JSON.stringify({ cwd: f.cwd, milestone: M, now: f.now })], { encoding: 'utf8', timeout: 10000 });
+    assert.equal(child.status, 0, child.stderr); assert.deepEqual(JSON.parse(child.stdout), historical);
+    assert.deepEqual(snapshot(f.cwd), before);
+    const consumption = clock.readClock(f).consumption;
+    fs.unlinkSync(path.join(f.cwd, 'scripts/result.js'));
+    assert.equal(clock.readHistoricalDeliveries(f).proven.length, 1, 'historical capture does not read current child sources');
+    assert.deepEqual(clock.readClock(f).consumption, consumption);
+  });
+  test('historical-proof-rejects-unknown-mode-and-immutable-history-tampering', () => {
+    const f = overlapFixture(), read = () => clock.readHistoricalDeliveries(f);
+    assert.equal(clock.readDeliveries({ ...f, proofMode: 'approved' }).reason, 'delivery-proof-mode-invalid');
+    assert.equal(clock.readDeliveries({ ...f, proofMode: 'approved' }).proven.length, 0);
+    const mutations = [
+      [f.envelopes[0].envelopeRef, value => ({ ...value, unit: { ...value.unit, milestone: 'M002' } })],
+      [f.envelopes[0].envelopeRef, value => ({ ...value, result: { passed: false, checks: [{ command: 'changed-check', exitCode: 1 }] } })],
+      [f.envelopes[0].envelopeRef, value => ({ ...value, captured_at: new Date(f.now + 1).toISOString() })],
+      [f.children[0].delivery.replace('-DELIVERY.json', '-DELIVERY-INPUT.json'), value => ({ ...value, bindings: value.bindings.map(row => ({ ...row, source: { ...row.source, path: f.envelopes[1].envelopeRef } })) })],
+      [f.deliveryRef.replace('-DELIVERY.json', '-DELIVERY-INPUT.json'), value => ({ ...value, expected_children: value.expected_children.slice(1) })],
+    ];
+    for (const [ref, mutate] of mutations) {
+      const original = fs.readFileSync(path.join(f.cwd, ref));
+      write(f.cwd, ref, mutate(JSON.parse(original))); assert.equal(read().proven.length, 0, ref);
+      fs.writeFileSync(path.join(f.cwd, ref), original); assert.equal(read().proven.length, 1);
+    }
+    for (const ref of [f.planRef, f.children[0].delivery, f.envelopes[0].envelopeRef,
+      path.relative(f.cwd, controller.transactionFile(f.cwd, 'complete-slice/S01:complete'))]) {
+      const file = path.join(f.cwd, ref), original = fs.readFileSync(file);
+      fs.unlinkSync(file); assert.equal(read().proven.length, 0, 'missing ' + ref);
+      fs.writeFileSync(file, '{'); assert.equal(read().proven.length, 0, 'corrupt ' + ref);
+      fs.writeFileSync(file, original); assert.equal(read().proven.length, 1);
+    }
   });
   test('delivery-negatives-forged-pending-foreign-stale-corrupt-and-event-only', () => {
     const f = deliveredFixture(), read = () => clock.readDeliveries({ ...f, slices: ['S01'] });
@@ -409,4 +524,4 @@ try {
     write(f.cwd, dir + 'other.json', a); assert.equal(clock.readClock(f).effort.worker.reason, 'observation-record-unreadable');
   });
 } finally { for (const dir of roots) fs.rmSync(dir, { recursive: true, force: true }); }
-console.log(`PASS milestone-clock-complete: ${count} named checks; synthetic bounded readonly evidence, no git or network`);
+console.log(`PASS milestone-clock-complete: ${count} named checks; bounded readonly evidence and temporary real Git, no network`);

@@ -229,7 +229,7 @@ function observeBoundary(cwd, milestone, options = {}) {
   if (!['slice-boundary', 'blocked'].includes(options.kind)
       || options.kind === 'blocked' && !BLOCKED_REASONS.includes(options.reason)) return { status: 'ignored' };
   const clocks = require('./forge-milestone-time-clock');
-  const deliveries = clocks.readDeliveries(input), forecast = clocks.readForecast(input), clock = clocks.readClock(input);
+  const deliveries = clocks.readHistoricalDeliveries(input), forecast = clocks.readForecast(input), clock = clocks.readClock(input);
   if (options.kind === 'slice-boundary' && (deliveries.status !== 'observed' || !deliveries.proven.length)) return { status: 'unchanged' };
   const proven = [...new Set((deliveries.proven || []).map(r => r.slice))].sort();
   const units = [...new Set((options.units || []).map(unitKey))].sort();
@@ -245,7 +245,8 @@ function observeBoundary(cwd, milestone, options = {}) {
   const warning = ['at-risk', 'exceeds'].includes(classification);
   const record = { id, version: current.version, sequence: rows.length + 1, kind: options.kind, boundary_key: key,
     classification, warning, at: new Date(input.now).toISOString(), cause: reasonCode(forecast.reason),
-    progress: { proven_slices: proven, units: options.kind === 'blocked' ? units : [] },
+    progress: { proof_kind: deliveries.proof_kind, current_integrated_acceptance: 'not-evaluated',
+      proven_slices: proven, units: options.kind === 'blocked' ? units : [] },
     consumed_ms: clock.status === 'measured' ? clock.consumption.consumed_ms : null,
     remaining_ms: clock.status === 'measured' ? current.contract.ceiling_ms - clock.consumption.consumed_ms : null,
     alternatives: warning ? ['extend', 'reduce-scope', 'continue-to-cap'] : [] };

@@ -110,7 +110,10 @@ function delivered(cwd) {
   const roadmap = '# Fixture roadmap\n'; write(cwd, '.gsd/milestones/M001/M001-ROADMAP.md', roadmap);
   amend(cwd, 'allocation', { allocation: { roadmap_sha256: hash(roadmap), items: [
     { id: 'slice1', kind: 'slice', slice: 'S01', ms: 20 }, { id: 'integration', kind: 'integration', ms: 50 } ] } });
-  return { currentHashReader: () => ({ ok: true, hash: blob }) };
+  return { currentHashReader: () => {
+    const current = fs.readFileSync(path.join(cwd, source));
+    return { ok: true, hash: crypto.createHash('sha1').update(Buffer.from('blob ' + current.length + '\0')).update(current).digest('hex') };
+  } };
 }
 try {
   test('exports-frozen-vocabulary-and-inert-lazy-import', () => {
@@ -248,6 +251,28 @@ try {
     const summary = admission.summarizeTimeStatus(status(cwd, 40, extra));
     assert(Buffer.byteLength(JSON.stringify(summary)) <= 512); assert(!JSON.stringify(summary).includes(cwd));
     assert.deepEqual(Object.keys(summary).sort(), ['state', 'ceiling_ms', 'consumed_ms', 'unknown_ms', 'remaining_ms', 'forecast', 'last_warning', 'unknown', 'decision_pending'].sort());
+  });
+  test('historical-boundary-progress-survives-current-drift-without-budget-or-endpoint-authority', () => {
+    const cwd = setup(), extra = delivered(cwd), input = { cwd, milestone: M, now: BASE + 40, ...extra };
+    const before = clock.readClock(input).consumption, contract = time.readContract(input);
+    write(cwd, 'scripts/result.js', 'module.exports = 2;\n');
+    const stable = snapshot(cwd), strict = clock.readDeliveries(input);
+    assert.equal(strict.unproven[0].reason, 'delivery-current-source-changed');
+    const historical = clock.readHistoricalDeliveries(input);
+    assert.equal(historical.proven.length, 1); assert.equal(historical.current_integrated_acceptance, 'not-evaluated');
+    assert.equal(clock.readForecast(input).deliveries[0].proof_kind, 'historical-delivery');
+    assert.deepEqual(clock.readClock(input).consumption, before); assert.deepEqual(snapshot(cwd), stable);
+    const boundary = admission.observeBoundary(cwd, M, { kind: 'slice-boundary', now: input.now, ...extra });
+    assert.equal(boundary.status, 'recorded'); assert.equal(boundary.record.progress.proof_kind, 'historical-delivery');
+    assert.equal(boundary.record.progress.current_integrated_acceptance, 'not-evaluated');
+    assert.deepEqual(boundary.record.progress.proven_slices, ['S01']);
+    const after = snapshot(cwd), s = status(cwd, 40, extra);
+    assert.deepEqual(s.horizon.endpoint, contract.contract.endpoint);
+    assert(Object.values(s.horizon.endpoint.items).every(value => value === 'pending'));
+    assert.equal(decide(cwd, 40, extra).decision, 'admitted');
+    assert.throws(() => admission.assertTransportEntry({ cwd, milestone: M, unit: 'execute-task/T03', now: BASE + 100 }),
+      error => error.code === 'milestone-budget-exhausted' && error.provider_called === false);
+    assert.deepEqual(snapshot(cwd), after);
   });
   test('new-blocked-boundaries-class-changes-and-informational-no-authority', () => {
     const cwd = setup(), extra = delivered(cwd);
