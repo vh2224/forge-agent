@@ -252,6 +252,53 @@ try {
       fs.writeFileSync(p.journal, value); assert.strictEqual(time.readJournal({ cwd, milestone: M }).reason, reason); }
     fs.writeFileSync(p.journal, bytes);
   });
+  test('interrupted-publication-leaves-history-intact-and-resumes-under-owner-lock', () => {
+    const { cwd, contract } = activate(), p = time.timePaths({ cwd, milestone: M });
+    const staged = () => fs.existsSync(p.staging) ? fs.readdirSync(p.staging) : [];
+    // A separate process interrupted after staging the bytes and before the hard link
+    // commit; its staging file is never cleaned up (the owner lock is released).
+    const warning = { id: 'forecast-1', kind: 'at-risk', at: new Date(NOW).toISOString() };
+    const script = `const fs=require('fs'),unlink=fs.unlinkSync;fs.linkSync=()=>{throw Object.assign(new Error('killed'),{code:'EKILLED'})};`
+      + `fs.unlinkSync=f=>{if(!String(f).endsWith('.tmp'))unlink(f)};require(${JSON.stringify(require.resolve('./forge-milestone-time'))})`
+      + `.recordWarning({cwd:${JSON.stringify(cwd)},milestone:${JSON.stringify(M)},record:${JSON.stringify(warning)}});`;
+    const crashed = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8' });
+    assert.notStrictEqual(crashed.status, 0); assert.match(crashed.stderr, /EKILLED/);
+    assert.strictEqual(staged().length, 1, 'the interrupted staging file exists outside committed directories');
+    assert.ok(!fs.existsSync(p.warnings) || fs.readdirSync(p.warnings).length === 0);
+    assert.strictEqual(time.readContract({ cwd, milestone: M }).status, 'valid');
+    assert.strictEqual(time.listWarnings({ cwd, milestone: M }).status, 'valid');
+    assert.strictEqual(time.listWarnings({ cwd, milestone: M }).records.length, 0);
+    time.recordWarning({ cwd, milestone: M, record: warning });
+    assert.deepStrictEqual(staged(), [], 'the next publication reconciles the leftover');
+    assert.strictEqual(fs.readFileSync(path.join(p.warnings, 'forecast-1.json'), 'utf8'), JSON.stringify(warning) + '\n');
+    // The same interruption for an amendment and a checkpoint, simulated in-process.
+    const interrupt = callback => {
+      const link = fs.linkSync, unlink = fs.unlinkSync;
+      fs.linkSync = () => { throw Object.assign(new Error('killed'), { code: 'EKILLED' }); };
+      fs.unlinkSync = file => { if (!String(file).endsWith('.tmp')) unlink(file); };
+      try { assert.throws(callback, e => e.code === 'EKILLED'); } finally { fs.linkSync = link; fs.unlinkSync = unlink; }
+    };
+    const a = amendment(cwd, 'extension', { ceiling_ms: 7200000 });
+    interrupt(() => amend(cwd, a));
+    assert.strictEqual(staged().length, 1);
+    assert.deepStrictEqual(fs.existsSync(p.amendments) ? fs.readdirSync(p.amendments) : [], []);
+    const intact = time.readContract({ cwd, milestone: M }); assert.strictEqual(intact.status, 'valid'); assert.strictEqual(intact.version, 1);
+    assert.strictEqual(intact.contract.ceiling_ms, contract.ceiling_ms);
+    const resumed = amend(cwd, a); assert.strictEqual(resumed.version, 2); assert.strictEqual(resumed.contract.ceiling_ms, 7200000);
+    assert.deepStrictEqual(staged(), []);
+    assert.strictEqual(amend(cwd, a).version, 2, 'replay is idempotent');
+    const checkpoint = { version: 2, drained: true, overshoot_ms: 25 };
+    interrupt(() => time.recordCheckpoint({ cwd, milestone: M, record: checkpoint }));
+    assert.strictEqual(time.readCheckpoints({ cwd, milestone: M }).status, 'valid');
+    time.recordCheckpoint({ cwd, milestone: M, record: checkpoint });
+    assert.strictEqual(time.readCheckpoints({ cwd, milestone: M }).records.length, 1); assert.deepStrictEqual(staged(), []);
+    // Unexpected committed names are still rejected.
+    fs.writeFileSync(path.join(p.warnings, 'forecast-2.json.1.x.tmp'), '{}\n');
+    assert.strictEqual(time.listWarnings({ cwd, milestone: M }).reason, 'time-record-invalid');
+    fs.unlinkSync(path.join(p.warnings, 'forecast-2.json.1.x.tmp'));
+    fs.writeFileSync(path.join(p.amendments, '0003.json.1.x.tmp'), '{}\n');
+    assert.strictEqual(time.readContract({ cwd, milestone: M }).reason, 'time-amendment-sequence-invalid');
+  });
   test('warnings-checkpoints-exclusive-idempotent-limited-and-read-only', () => {
     const { cwd } = activate(), p = time.timePaths({ cwd, milestone: M });
     const warning = { id: 'forecast-1', kind: 'at-risk', at: new Date(NOW).toISOString() }, checkpoint = { version: 1, drained: true, overshoot_ms: 25 };

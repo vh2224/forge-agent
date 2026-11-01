@@ -716,6 +716,27 @@ test('time: exhausted, draining, checkpointed and open-warning milestones are pr
   assert.strictEqual(summary.attention.works, 1, 'only the hidden protected task is counted');
 });
 
+test('time: completed milestones keep the time block but gain no priority or protection from clocks', f => {
+  const ids = ['M001', 'M002', 'M003', 'M004', 'M005'];
+  for (const id of ids) timeMilestone(f, id, 'exhausted');
+  protectedTasks(f, 1);
+  for (const id of ids) {
+    const work = f.work(id, 'milestone');
+    fs.writeFileSync(work.source, `---\nmilestone: ${id}\nkind: milestone\nstatus: done\n---\n**Phase:** idle\n`);
+  }
+  const summary = summarize(f);
+  assertShape(summary);
+  const listed = summary.works.map(work => work.id);
+  assert(listed.includes('TASK-001'), `active task stays visible: ${listed}`);
+  assert.strictEqual(listed[0], 'TASK-001', 'open work is ranked before completed history');
+  for (const work of summary.works.filter(row => row.kind === 'milestone')) {
+    assert.strictEqual(work.workStatus, 'completed');
+    assert.strictEqual(work.time.state, 'exhausted', 'historical time block is retained');
+  }
+  assert.strictEqual(summary.attention, null);
+  assert(bytes(summary) + 1 <= SUMMARY_LIMITS.bytes);
+});
+
 test('time: the byte ladder never silently drops protected time work', f => {
   const long = 'Pendência longa '.repeat(20);
   for (let index = 1; index <= 5; index++) {

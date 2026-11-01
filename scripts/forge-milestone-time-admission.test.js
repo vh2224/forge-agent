@@ -287,6 +287,24 @@ try {
     const unknown = admission.observeBoundary(setup(), M, { kind: 'blocked', reason: 'units-blocked', units: [], now: BASE });
     assert.equal(unknown.record.classification, 'unknown'); assert.deepEqual(unknown.record.alternatives, []);
   });
+  test('same-blocked-boundary-publishes-class-change-and-stays-idempotent', () => {
+    const cwd = setup(), extra = delivered(cwd), units = ['execute-task/T01'];
+    const observe = at => admission.observeBoundary(cwd, M, { kind: 'blocked', reason: 'units-blocked', units, now: BASE + at, ...extra });
+    const fits = observe(10); assert.equal(fits.status, 'recorded'); assert.equal(fits.record.classification, 'fits');
+    const exceeds = observe(60); assert.equal(exceeds.status, 'recorded'); assert.equal(exceeds.record.classification, 'exceeds');
+    assert.equal(exceeds.record.boundary_key, fits.record.boundary_key); assert.equal(exceeds.record.warning, true);
+    const before = snapshot(cwd); assert.equal(observe(61).status, 'unchanged'); assert.deepEqual(snapshot(cwd), before);
+    assert.equal(time.listWarnings({ cwd, milestone: M }).records.length, 2); assert.equal(time.readContract({ cwd, milestone: M }).version, 2);
+  });
+  test('dotted-canonical-task-ids-are-admitted-by-controller-and-transport', () => {
+    const cwd = setup(), unit = 'execute-task/T01.1';
+    assert.equal(decide(cwd, 1, { unit }).decision, 'admitted');
+    assert.equal(admission.assertTransportEntry({ cwd, milestone: M, unit, now: BASE + 1 }).decision, 'admitted');
+    for (const bad of ['execute-task/T01.', 'execute-task/T01..1', 'execute-task/.1', 'execute-task/T01.1.2', 'execute-task/T01.a']) {
+      assert.throws(() => admission.assertTransportEntry({ cwd, milestone: M, unit: bad, now: BASE + 1 }),
+        e => e.code === 'milestone-time-invalid' && e.provider_called === false);
+    }
+  });
   test('status-and-cli-public-fields-pure-and-exit-zero-two-three', () => {
     const cwd = setup(), file = path.join(__dirname, 'forge-milestone-time-admission.js'), before = snapshot(cwd);
     const cli = args => spawnSync(process.execPath, [file, ...args, '--cwd', cwd, '--json'], { encoding: 'utf8' });

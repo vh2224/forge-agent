@@ -65,7 +65,7 @@ function fixture(contract = true, base = BASE) {
   assert.equal(f.begin.ok, true, JSON.stringify(f.begin));
   return f;
 }
-function request(f, engine, unitType = 'research-milestone') {
+function request(f, engine, unitType = 'research-milestone', taskId = 'T01') {
   const host = engine === 'claude' ? 'codex' : 'claude';
   const model = engine === 'claude' ? 'claude-sonnet-5' : 'gpt-6-sol';
   const tiers = Object.fromEntries(['light', 'standard', 'heavy', 'max'].map(tier => [tier, [model]]));
@@ -79,7 +79,7 @@ function request(f, engine, unitType = 'research-milestone') {
   if (unitType === 'plan-slice' || unitType === 'execute-task') r.sliceId = 'S01';
   if (unitType === 'plan-slice') r.promptFile = write(f.dir, id + '-prompt.md', 'Isolated fixture only.');
   if (unitType === 'execute-task') {
-    r.phase = 'execute'; r.taskId = 'T01'; r.planFile = f.plan; r.execution_contract = f.contract;
+    r.phase = 'execute'; r.taskId = taskId; r.planFile = f.plan; r.execution_contract = f.contract;
     r.verification = { preferenceCommands: ['node --version'] }; r.runId = 'fixture-run';
     r.claim = { schema_version: 2, generation: 'budget-claim', execution_contract: f.contract,
       paths: ['alpha', 'beta'].map(root_id => ({ root_id, path: 'same.txt' })) };
@@ -155,6 +155,19 @@ async function main() {
         }
       }
       assert.equal(spawns, 0); assert.equal(kills, 0);
+    });
+    await test('canonical dotted task id T01.1 passes real transport entry below cap and is refused beyond it', async () => {
+      const savedPlan = f.plan;
+      f.plan = write(f.owner, '.gsd/milestones/M001/slices/S01/tasks/T01.1/T01.1-PLAN.md', fixtures.plan(f.contract));
+      try {
+        f.at = 1; const r = request(f, 'codex', 'execute-task', 'T01.1');
+        const before = providers;
+        await assert.rejects(sidecar.runUnitSidecar(r, runtime(f)), error => error.code === 'fixture-provider-reached');
+        assert.equal(providers, before + 1);
+        f.at = 101; const late = request(f, 'codex', 'execute-task', 'T01.1');
+        await assert.rejects(sidecar.runUnitSidecar(late, runtime(f)), refusal);
+        assert.equal(providers, before + 1); assert.equal(spawns, 0); assert.equal(kills, 0);
+      } finally { f.plan = savedPlan; }
     });
   } finally { Object.assign(xllm, original); cp.spawn = spawn; }
   await test('real saved executed response replays verification and publication beyond cap without provider reentry', async () => {

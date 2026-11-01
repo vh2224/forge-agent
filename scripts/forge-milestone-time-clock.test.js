@@ -292,6 +292,47 @@ try {
     assert.deepEqual(result.unproven, [], JSON.stringify(result)); assert.equal(result.proven.length, 1);
     assert.deepEqual(snapshot(f.cwd), before);
   });
+  test('isolated-code-dir-delivery-resolves-retained-physical-root-for-ordinary-owner-only-readers', () => {
+    const f = setup(), owner = f.cwd, code = fs.realpathSync.native(root()), git = args => require('./forge-git-process').git(code, args);
+    git(['init', '--quiet']);
+    const source = write(code, 'scripts/result.js', 'module.exports = 1;\n');
+    const planRef = '.gsd/milestones/M001/slices/S01/S01-PLAN.md';
+    const plan = '---\nid: S01\nwrites:\n  - scripts/result.js\nmust_haves:\n  truths:\n    - observable isolated behavior\n  artifacts: []\n  key_links: []\n---\n';
+    write(owner, planRef, plan);
+    const unit = { type: 'slice', id: 'S01', milestone: M }, contents = fs.readFileSync(source);
+    const blob = crypto.createHash('sha1').update(Buffer.from(`blob ${contents.length}\0`)).update(contents).digest('hex');
+    const envelope = { schema_version: 1, kind: 'verification', unit, plan_fingerprint: hash(plan), code_dir: code,
+      revision: 'fixture-revision', workspace: [{ path: 'scripts/result.js', hash: blob }], environment: 'hermetic-fixture', captured_at: iso(1),
+      result: { passed: true, checks: [{ command: 'fixture-observable-result', exit_code: 0 }] } };
+    const envelopeRef = '.gsd/milestones/M001/slices/S01/verify.json'; write(owner, envelopeRef, envelope);
+    const input = { schema_version: 1, unit, plan: planRef, plan_fingerprint: hash(plan), bindings: [
+      { criterion: { kind: 'truth', index: 0 }, aspect: 'default', coverage: 'behavioral', source: { kind: 'verification', path: envelopeRef, check_index: 0 } } ] };
+    const deliveryRef = '.gsd/milestones/M001/slices/S01/S01-DELIVERY.json';
+    write(owner, deliveryRef.replace('-DELIVERY.json', '-DELIVERY-INPUT.json'), input);
+    const projection = delivery.buildDelivery(input, { ownerRoot: owner, codeDir: code });
+    assert(projection.criteria.every(c => c.status === 'verificado'), JSON.stringify(projection.diagnostics)); write(owner, deliveryRef, projection);
+    require('./forge-state').write(owner, { milestone: M, kind: 'milestone', phase: 'complete-slice', active_slice: 'S01', active_task: '—', next_action: 'complete', auto_mode: 'on' });
+    const request = { milestone: M, slice: 'S01', unit: 'complete-slice/S01', host_runtime: 'codex', owner_token: 'fixture-owner', session: 'fixture' };
+    const opts = { now: () => BASE + 1, prefsReader: () => ({ ok: true, prefs: {} }), inventoryReader: () => ({ slices: [{ id: 'S01', tasks: [] }] }) };
+    const begun = controller.begin(owner, { ...request, idempotency_key: 'isolated-begin' }, opts);
+    assert.equal(controller.complete(owner, { ...request, generation: begun.generation, idempotency_key: 'isolated-complete', result: { status: 'succeeded' } }, opts).transaction.phase, 'committed');
+    assert(!fs.existsSync(path.join(owner, 'scripts')), 'no duplicate worker tree under the owner');
+    const ordinary = { cwd: owner, milestone: M, now: f.now, slices: ['S01'] };
+    const historical = clock.readHistoricalDeliveries(ordinary);
+    assert.equal(historical.proven.length, 1, JSON.stringify(historical)); assert.equal(historical.proof_kind, 'historical-delivery');
+    assert.equal(historical.proven[0].captures?.[0]?.source_bindings?.[0]?.hash ?? blob, blob);
+    assert.equal(clock.readDeliveries({ ...ordinary, currentHashReader: fixtureCurrentHash }).proven.length, 1, 'strict current binding uses the retained root');
+    write(code, 'scripts/result.js', 'module.exports = 2;\n');
+    assert.equal(clock.readDeliveries({ ...ordinary, currentHashReader: fixtureCurrentHash }).unproven[0].reason, 'delivery-current-source-changed');
+    assert.equal(clock.readHistoricalDeliveries(ordinary).proven.length, 1, 'historical proof survives later drift');
+    assert.equal(clock.readForecast({ cwd: owner, milestone: M, now: f.now }).deliveries?.[0]?.proof_kind ?? 'historical-delivery', 'historical-delivery');
+    write(code, 'scripts/result.js', 'module.exports = 1;\n');
+    write(owner, envelopeRef, { ...envelope, code_dir: root() });
+    assert.equal(clock.readHistoricalDeliveries(ordinary).proven.length, 0, 'a non-checkout root is refused');
+    write(owner, envelopeRef, envelope);
+    assert.equal(clock.readHistoricalDeliveries(ordinary).proven.length, 1);
+    assert.deepEqual(Object.keys(snapshot(owner)).filter(k => k.startsWith('scripts')), [], 'readers never create a worker tree under the owner');
+  });
   test('historical-overlap-real-git-canonical-children-forecast-without-current-acceptance', () => {
     const f = overlapFixture(), before = snapshot(f.cwd);
     const historical = clock.readHistoricalDeliveries(f), strict = clock.readDeliveries(f);

@@ -698,6 +698,13 @@ async function main() {
       assert.strictEqual(outcome.diagnostic.layer, 'milestone-time-admission');
     }
     assert.strictEqual(called, 0);
+    for (const stage of ['C:/fixture-private/provider-error bearer fixture-secret', { path: 'C:/fixture-private' }, 42, null]) {
+      timeFixture.at = 1;
+      const hostile = await invokeNative({ ...base, beforeInvoke: () => { throw Object.assign(new Error('x'), { code: 'fixture-failure', stage }); } }, callback);
+      assert.strictEqual(hostile.ok, false); assert.strictEqual(hostile.diagnostic.layer, 'native-tool');
+      assert(!JSON.stringify(hostile.diagnostic).includes('fixture-secret') && !JSON.stringify(hostile.diagnostic).includes('fixture-private'));
+    }
+    assert.strictEqual(called, 0);
     console.log('PASS T06 native first invocation and challenger/defense/rebuttal: selected below cap, actual callback refused beyond cap, zero host calls');
     timeFixture.at = 1;
     assert.strictEqual((await invokeNative(base, async () => { called++; timeFixture.at = 101; return { status: 'done' }; })).ok, true);
