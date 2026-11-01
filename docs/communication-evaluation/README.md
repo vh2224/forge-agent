@@ -10,6 +10,8 @@ O registro [samples.json](./samples.json) tem schema_version 1 e oito entradas: 
 
 A revisão base é 3e25c611a54b2bdd23f11cb11eb474b3facc95e3, informada no handoff do owner. O registro fixa o SHA-256 dos bytes de [shared/forge-communication.md](../../shared/forge-communication.md) e do [arquivo histórico de modelos](./skill-templates-before.md). Mudanças nessas fontes exigem atualizar a avaliação; o validador rejeita divergências.
 
+Proveniência da atualização do contrato (T-20261101004951-comunicacao-pessoal): o contrato ganhou a seção “Consulta simples” (interface resumida primeiro, conteúdo integral só em diagnóstico pedido e limite da proteção declarado). Somente `contract_sha256` foi atualizado para os bytes novos, de `d409a0cc91b426bd0e407931a6168185d745080a4d5d56e77839e628189781b3` para `ac32504157a07a2445cfd0ba3061ee397a82695334021099e191365aefe11bbc`. Entradas, limites e aceite humano (**pending-final-round**) ficam inalterados; as amostras não foram reavaliadas contra a nova seção.
+
 Os rótulos formam um conjunto fechado:
 
 - **observado**: exigiria um trace real sanitizado. Não é usado neste corpus porque não houve execução de host observada.

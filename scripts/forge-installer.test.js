@@ -63,6 +63,7 @@ test('runtime install omits tests and update backs up only known unchanged devel
       assert(entry.includes('shared/forge-intent-entry.md'));
       const boot = fs.readFileSync(path.join(home, 'commands', 'forge.md'), 'utf8');
       assert(boot.includes('shared/forge-intent-entry.md') && boot.includes('--assessment'));
+      assert(boot.includes('forge-personal-context.js" --summary --cwd "$WORKING_DIR"'), 'installed boot does not run the bounded summary');
       const task = fs.readFileSync(path.join(home, 'skills', 'forge-task', 'SKILL.md'), 'utf8');
       assert(task.includes('forge-entry-assessment.js') && task.includes('REUSE_RESEARCH'));
       const runtime = home === data.claudeHome ? 'claude' : 'codex';
@@ -123,6 +124,22 @@ test('runtime install omits tests and update backs up only known unchanged devel
     const projected = fs.readFileSync(path.join(data.projectRoot, 'AGENTS.md'), 'utf8');
     assert(projected.includes('--snapshot'));
     assert(projected.includes(require('./forge-instructions.js').renderEntryContract()));
+    const personalContract = require('./forge-instructions.js').renderPersonalContract();
+    assert(personalContract.includes('--summary --cwd') && projected.includes(personalContract), 'AGENTS.md lacks the summary-first personal contract');
+    // The installed copy answers by itself: another project, clean profile, no source tree.
+    assert(fs.existsSync(path.join(scripts, 'forge-personal-summary.js')));
+    const otherProject = path.join(data.root, 'Other Project Ω');
+    fs.mkdirSync(path.join(otherProject, '.gsd', 'tasks'), { recursive: true });
+    const cleanHome = path.join(data.root, 'Clean Home');
+    const summary = spawnSync(process.execPath, [path.join(scripts, 'forge-personal-context.js'), '--summary', '--cwd', otherProject], {
+      cwd: otherProject, encoding: 'utf8', windowsHide: true,
+      env: { ...process.env, HOME: cleanHome, USERPROFILE: cleanHome, FORGE_HOME: data.forgeHome },
+    });
+    assert.strictEqual(summary.status, 0, summary.stdout + summary.stderr);
+    assert(Buffer.byteLength(summary.stdout, 'utf8') <= 4096 && summary.stdout.split('\n').length === 2, 'installed summary is not one bounded line');
+    const parsedSummary = JSON.parse(summary.stdout);
+    assert.deepStrictEqual([parsedSummary.status, parsedSummary.reason, parsedSummary.scope, parsedSummary.works], ['ok', 'no-bindings', 'summary', []]);
+    assert(!fs.existsSync(cleanHome), 'installed summary created a personal profile');
     const installedContract = require(path.join(scripts, 'forge-instructions.js')).renderBlock();
     assert(installedContract.includes('provider_called:false'), 'installed source lacks provider-call diagnostic');
     assert(installedContract.includes('instalação efetivamente lida'), 'installed source lacks installation-source diagnostic');
@@ -1215,6 +1232,8 @@ test('instruction sync preserves operator ownership, historical digests and malf
     fs.mkdirSync(data.projectRoot, { recursive: true });
     const names = { codex: 'AGENTS.md', claude: 'CLAUDE.md' };
     const original = '# Operator instructions\r\nPreserve these bytes.\r\n';
+    const personalContract = require('./forge-instructions.js').renderPersonalContract();
+    assert(personalContract.includes('--summary --cwd'));
     for (const name of Object.values(names)) fs.writeFileSync(path.join(data.projectRoot, name), original);
     const options = { ...data.options, runtime: 'both', provenance: null };
     const first = installer.install(options);
@@ -1225,6 +1244,7 @@ test('instruction sync preserves operator ownership, historical digests and malf
       assert(first.manifest.adapters[host].conflicts.some(row => row.destination === file && row.reason === 'user_owned'));
       assert(fs.readFileSync(file, 'utf8').startsWith(original), 'prefixo do operador alterado');
       assert(fs.readFileSync(file, 'utf8').includes('<!-- forge:interaction:start -->'));
+      assert.strictEqual(fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n').split(personalContract).length - 1, 1, `${name}: personal contract once`);
       assert(!Object.hasOwn(prior.ownership, key), 'span adotou arquivo inteiro');
       prior.ownership[key] = 'b'.repeat(64);
     }
@@ -1235,6 +1255,7 @@ test('instruction sync preserves operator ownership, historical digests and malf
       assert.strictEqual(second.manifest.ownership[ownership.keyFor(file)], 'b'.repeat(64));
       assert(second.manifest.adapters[host].conflicts.some(row => row.destination === file && row.reason === 'user_owned'));
       assert(fs.readFileSync(file, 'utf8').startsWith(original));
+      assert.strictEqual(fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n').split(personalContract).length - 1, 1, `${name}: personal contract once after update`);
     }
     const malformed = '# Operator\n<!-- forge:interaction:start -->\nUnclosed\n';
     const agents = path.join(data.projectRoot, 'AGENTS.md');

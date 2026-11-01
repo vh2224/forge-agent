@@ -204,6 +204,9 @@ try {
     const content = fs.readFileSync(path.join(target, name), 'utf8');
     assert(content.startsWith('External instructions\r\n'));
     assert(content.includes('forge-personal-context.js')); assert(content.includes('--snapshot'));
+    // Simple questions use the bounded summary; the snapshot stays the explicit diagnostic.
+    assert(content.includes('forge-personal-context.js" --summary --cwd'), `${name}: synchronized contract lacks --summary`);
+    assert(!content.includes('--snapshot --cwd "<diretório absoluto atual>" --json'), `${name}: old snapshot entry remains`);
   }
   const projection = renderer.render({ ...renderer.PRODUCTION_DISPATCH_DIALECT, repo: path.resolve(__dirname, '..'), userHome: f.home, forgeHome: f.options.env.FORGE_HOME, codexHome: path.join(f.home, '.codex'), projectRoot: target });
   assert(projection.artifacts.find(a => a.kind === 'instructions').content.includes(instructions.renderPersonalContract()));

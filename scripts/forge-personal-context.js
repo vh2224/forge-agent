@@ -238,6 +238,11 @@ function observe(project, capture) {
     return { ...capture, validity: hash === capture.hash ? 'current' : 'stale' };
   } catch (error) { return { ...capture, validity: error.code === 'ENOENT' ? 'missing' : 'unreadable', diagnostic: error.message }; }
 }
+// Older acceptance observations remain visible, but an explicit recapture of
+// the same decision supersedes their confidence without deleting history.
+function effectiveAcceptances(captures) {
+  return (captures || []).filter((capture, index, entries) => !entries.slice(index + 1).some(later => later.text === capture.text));
+}
 function inspectWork(project, binding) {
   const checkpoint = Object.fromEntries(Object.entries(binding.checkpoint).map(([field, entries]) => [field, entries.map(c => observe(project, c))]));
   const read = relative => {
@@ -278,16 +283,14 @@ function inspectWork(project, binding) {
       } catch (error) { terminal.reason = error.code === 'ENOENT' ? 'state-missing' : 'state-unreadable'; }
     }
   }
-  // Older acceptance observations remain visible, but an explicit recapture of
-  // the same decision supersedes their confidence without deleting history.
-  const effectiveAcceptances = (checkpoint.acceptances || []).filter((capture, index, entries) => !entries.slice(index + 1).some(later => later.text === capture.text));
-  const observations = Object.entries(checkpoint).flatMap(([field, entries]) => field === 'acceptances' ? effectiveAcceptances : entries);
+  const accepted = effectiveAcceptances(checkpoint.acceptances);
+  const observations = Object.entries(checkpoint).flatMap(([field, entries]) => field === 'acceptances' ? accepted : entries);
   // Loose-task SUMMARY is only terminal when explicitly captured as the final
   // result after reconciliation. Its presence alone never completes the work.
   const finalResult = (checkpoint.lastResult || []).find(c => c.resolved && c.validity === 'current');
   if (finalResult) completed = true;
   const unreliable = observations.some(c => c.validity !== 'current');
-  const pending = (checkpoint.pending || []).some(c => !c.resolved) || effectiveAcceptances.some(c => !c.resolved);
+  const pending = (checkpoint.pending || []).some(c => !c.resolved) || accepted.some(c => !c.resolved);
   const actionable = (checkpoint.nextAction || []).some(c => !c.resolved);
   const workStatus = completed && !pending && !actionable && !unreliable ? 'completed' : pending ? 'pending' : terminal.status !== 'ok' || terminal.reason ? 'unknown' : 'open';
   const action = unreliable ? { text: 'Reconcile changed or missing sources; preserve recorded acceptances.', validity: 'reconciliation-required' }
@@ -334,7 +337,7 @@ function selectPersonalWork(options = {}) {
     candidates: candidates.map(w => ({ id: w.id, kind: w.kind })), selected: candidates.length === 1 ? candidates[0] : null };
 }
 
-module.exports = { bindWork, saveCheckpoint, readPersonalSnapshot, selectPersonalWork };
+module.exports = { bindWork, saveCheckpoint, readPersonalSnapshot, selectPersonalWork, effectiveAcceptances };
 if (require.main === module) {
   const args = {};
   for (let i = 2; i < process.argv.length; i++) {
@@ -342,15 +345,23 @@ if (require.main === module) {
     if (!flag.startsWith('--')) continue;
     args[flag.slice(2)] = process.argv[i + 1] && !process.argv[i + 1].startsWith('--') ? process.argv[++i] : true;
   }
-  let result;
-  try {
-    const options = { project: args.project, cwd: args.cwd, id: args.id, intent: args.intent };
-    if (args.bind) result = bindWork(options);
-    else if (args.checkpoint) result = saveCheckpoint({ ...options, checkpoint: JSON.parse(fs.readFileSync(args.file, 'utf8')) });
-    else if (args.select) result = selectPersonalWork(options);
-    else if (args.snapshot) result = readPersonalSnapshot(options);
-    else result = failure('command-required');
-  } catch (error) { result = failure('invalid-arguments', error); }
-  process.stdout.write(JSON.stringify(result, null, 2) + '\n');
-  process.exitCode = result.status === 'ok' ? 0 : 1;
+  // The bounded summary owns its compact output and is decided before any
+  // producer or selector can run; calls without --summary keep their dispatch.
+  if (args.summary) {
+    const rendered = require('./forge-personal-summary').renderSummaryCommand(args);
+    process.stdout.write(rendered.json + '\n');
+    process.exitCode = rendered.exitCode;
+  } else {
+    let result;
+    try {
+      const options = { project: args.project, cwd: args.cwd, id: args.id, intent: args.intent };
+      if (args.bind) result = bindWork(options);
+      else if (args.checkpoint) result = saveCheckpoint({ ...options, checkpoint: JSON.parse(fs.readFileSync(args.file, 'utf8')) });
+      else if (args.select) result = selectPersonalWork(options);
+      else if (args.snapshot) result = readPersonalSnapshot(options);
+      else result = failure('command-required');
+    } catch (error) { result = failure('invalid-arguments', error); }
+    process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+    process.exitCode = result.status === 'ok' ? 0 : 1;
+  }
 }

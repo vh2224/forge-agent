@@ -29,6 +29,11 @@ O conteúdo é o mesmo nos dois hosts; muda somente o canal. Perguntas ficam sep
 ### Registro técnico por referência
 IDs, hashes, receipts, comandos e logs completos ficam em SUMMARY, DELIVERY, receipts e events.jsonl; cite as referências quando pedidos ou necessários para avaliar a conclusão. Não exponha credenciais, dados pessoais, prompts ou payload bruto do provedor.
 
+### Consulta simples
+Em consulta simples, como retomada, entrada ou status, use primeiro a interface resumida e limitada. Não leia nem imprima checkpoints, perfis, receipts, snapshots ou tabelas completas; o conteúdo integral só sai em diagnóstico pedido.
+Preserve resultado comprovado, pendências, próximo passo e fontes, distinguindo atual, histórico, ausente e incerto. Omissão ou atenção pede diagnóstico e não é aprovação.
+O limite vale só para a saída dessa interface: não impede outra chamada, não oculta logs do cliente nem garante obediência.
+
 ### Preferências preservadas
 personality, model_verbosity, o output style do Claude e a seleção da barra de status pertencem ao usuário. Não altere preferências para compensar a comunicação e não aumente a verbosidade como solução.
 Output style orienta apresentação e nunca substitui gates. Na barra do Codex, só diagnostique e sugira indicadores de limites ausentes; não mude a seleção explícita.

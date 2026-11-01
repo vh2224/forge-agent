@@ -41,6 +41,12 @@ UTF-8 (acréscimo de 4 374 bytes). A suíte declara um orçamento local de
 O contrato canônico tem 37 linhas. Esses números medem a distribuição textual,
 sem comprovar consumo pelo cliente ou compreensão humana.
 
+Medição local do resumo pessoal limitado (T-20261101004951-comunicacao-pessoal):
+o bloco gerenciado passou de 14 138 para 15 039 bytes UTF-8 (acréscimo de 901
+bytes), com o contrato pessoal usando `--summary` e a seção “Consulta simples” no
+contrato de comunicação, que passou de 37 para 42 linhas. O orçamento local de
+16 384 bytes continua o mesmo e não é um limite verificado do host.
+
 ## Relatório de capabilities (schema 2)
 
 `adapters/codex/capabilities.json`, no Forge home, informa qual core gerou o

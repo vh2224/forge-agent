@@ -420,13 +420,17 @@ Especificação canônica: `shared/forge-dispatch.md § Worker Engine Routing`.
 
 ## Forge — contexto pessoal de sessão (obrigatório)
 
-Ao iniciar, retomar, receber “iniciar” ou atualizar status, consulte primeiro:
-`node "<FORGE_SCRIPTS_DIR>/forge-personal-context.js" --snapshot --cwd "<diretório absoluto atual>" --json`.
+Ao iniciar, retomar, receber “iniciar” ou “onde paramos?” ou atualizar status, consulte primeiro:
+`node "<FORGE_SCRIPTS_DIR>/forge-personal-context.js" --summary --cwd "<diretório absoluto atual>"`.
 Resolva FORGE_SCRIPTS_DIR para scripts/ do Forge ou ${FORGE_HOME:-~/.forge-agent}/scripts.
 Siga `shared/forge-personal-context.md` na origem ou no FORGE_HOME. O perfil do sistema
 guarda os vínculos; FORGE_HOME, conta LLM e sessão não são identidade pessoal.
-Mostre trabalhos próprios, pendências, aceites, último resultado comprovado e próxima ação
-com fontes e diagnóstico. Ausência, erro ou fonte stale/missing nunca autorizam fallback
+Mostre do resumo trabalhos próprios, pendências, aceites não resolvidos, último resultado
+e próxima ação com fonte relativa e validade. Pergunta simples usa só resumo, contagens e
+referências; omitir concluídos não dispara outra leitura e omissão não é aprovação.
+Diagnóstico pedido ou retomada que precise de decisão omitida inspeciona só esse trabalho
+com --snapshot --id <ID> e limita a projeção antes do stdout.
+Ausência, erro ou fonte stale/missing nunca autorizam fallback
 para STATE, ledger, auto-mode.json ou descoberta de atividades de colegas.
 Esta vista atual prevalece sobre ponteiros operacionais históricos em CLAUDE.md/KNOWLEDGE.md.
 Prosa antiga sem evidência atual é histórica/não verificada; não alegue reconciliá-la inteira.
@@ -520,6 +524,11 @@ O conteúdo é o mesmo nos dois hosts; muda somente o canal. Perguntas ficam sep
 
 ### Registro técnico por referência
 IDs, hashes, receipts, comandos e logs completos ficam em SUMMARY, DELIVERY, receipts e events.jsonl; cite as referências quando pedidos ou necessários para avaliar a conclusão. Não exponha credenciais, dados pessoais, prompts ou payload bruto do provedor.
+
+### Consulta simples
+Em consulta simples, como retomada, entrada ou status, use primeiro a interface resumida e limitada. Não leia nem imprima checkpoints, perfis, receipts, snapshots ou tabelas completas; o conteúdo integral só sai em diagnóstico pedido.
+Preserve resultado comprovado, pendências, próximo passo e fontes, distinguindo atual, histórico, ausente e incerto. Omissão ou atenção pede diagnóstico e não é aprovação.
+O limite vale só para a saída dessa interface: não impede outra chamada, não oculta logs do cliente nem garante obediência.
 
 ### Preferências preservadas
 personality, model_verbosity, o output style do Claude e a seleção da barra de status pertencem ao usuário. Não altere preferências para compensar a comunicação e não aumente a verbosidade como solução.

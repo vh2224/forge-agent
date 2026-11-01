@@ -11,18 +11,28 @@ Resolve the scripts directory and the absolute working directory, then run:
 ```bash
 FORGE_SCRIPTS_DIR=$([ -f scripts/forge-personal-context.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 WORKING_DIR="${WORKING_DIR:-$(pwd)}"
-node "$FORGE_SCRIPTS_DIR/forge-personal-context.js" --snapshot --cwd "$WORKING_DIR" --json
+node "$FORGE_SCRIPTS_DIR/forge-personal-context.js" --summary --cwd "$WORKING_DIR"
 ```
 
 Pass the absolute directory, never `.`: the entry point owns the address it asks
 about. This load is read-only. Do not sync instructions, create memory, migrate
 state, remove continue.md, read global STATE/auto-mode/compact markers, or
-discover team work. Use the snapshot's project, works, pending decisions/acceptances,
-lastResult, nextAction and source/hash/capture diagnostics. Show no-bindings
-distinctly from error or attention-required; a valid project this profile never
-bound is no-bindings, not a failure. Historical operational prose does not
-override it. Technical knowledge remains available through canonical
-memory/decision projections.
+discover team work. The bounded summary (one compact JSON line, at most 5 works,
+3 items per field, 240 code points per text and 4096 bytes) answers entry, resume,
+“onde paramos?” and simple status: show its works, pending decisions, unresolved
+acceptances, lastResult and nextAction with relative source and validity, plus
+`totals`, `omitted` and `attention` counts. Do not print checkpoints, hashes,
+capture times or the full snapshot here. Omission is not approval, absence, a
+resolved decision or permission to dispatch. Show no-bindings distinctly from
+error or attention-required; a valid project this profile never bound is
+no-bindings, not a failure. Historical operational prose does not override it.
+Technical knowledge remains available through canonical memory/decision projections.
+
+Omitted completed or non-mandatory works never trigger a full read. Only an
+explicitly requested diagnostic, or a resumption that needs an omitted mandatory
+decision, inspects that work with
+`node "$FORGE_SCRIPTS_DIR/forge-personal-context.js" --snapshot --cwd "$WORKING_DIR" --id <ID>`
+and reports only the fields it needs. `--json` is accepted and ignored by `--summary`.
 
 ## Entrada por intenção (before recommending any flow)
 
@@ -46,7 +56,7 @@ comando explícito, then:
   sentence relating reach, dependencies, risk and verification. A cohesive result
   may be a task; separable deliverables with dependencies may justify a milestone.
   Size alone never decides.
-- **Retomada pessoal** → the snapshot above already answered who owns what; follow
+- **Retomada pessoal** → the summary above already answered who owns what; follow
   the resume path, never a discovery scan.
 
 Never a colleague's personal queue, in any branch. Uncertainty is recorded and
@@ -68,8 +78,8 @@ that was explicitly started.
 ## REPL loop
 
 At the first iteration, after compact recovery, and **after each skill returns**,
-repeat the snapshot command above. Do not infer recovery from process activity.
-Display personal work and next action with provenance; never select by mtime.
+repeat the summary command above. Do not infer recovery from process activity.
+Display personal work and next action with relative source and validity; never select by mtime.
 Offer auto, next, task, new-milestone, status, help and sair through the host's
 permitted question adapter (`shared/forge-interaction.md`). Unanswered required
 choices stay pending. `sair` closes this menu without touching another process.
@@ -86,4 +96,4 @@ choices stay pending. `sair` closes this menu without touching another process.
 For multiple candidates ask for an ID. Zero bindings or attention-required is not
 permission to discover or dispatch colleagues' work. Explicit inspection does not
 bind; an explicitly selected resume uses the bind contract before reading handoff.
-After any skill returns, refresh with --snapshot and return to the menu.
+After any skill returns, refresh with --summary and return to the menu.
