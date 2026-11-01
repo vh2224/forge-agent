@@ -16,7 +16,7 @@ function hash(bytes) { return crypto.createHash('sha256').update(bytes).digest('
 function nowOf(options) { return typeof options.now === 'function' ? options.now() : options.now ?? Date.now(); }
 function unitKey(unit) {
   const value = typeof unit === 'string' ? unit : unit?.key || (unit?.type && unit?.id ? unit.type + '/' + unit.id : '');
-  if (typeof value !== 'string' || !/^[a-z][a-z0-9-]{1,50}\/[a-zA-Z0-9][a-zA-Z0-9_-]{0,119}$/.test(value)) throw Error('Unidade inválida');
+  if (typeof value !== 'string' || !/^[a-z][a-z0-9-]{1,50}\/[a-zA-Z0-9][a-zA-Z0-9_-]{0,119}(?:\.\d{1,9})?$/.test(value)) throw Error('Unidade inválida');
   return value;
 }
 function reasonCode(reason) { return typeof reason === 'string' && /^[a-z][a-z0-9-]{0,100}$/.test(reason) ? reason : 'time-source-unreadable'; }
@@ -239,7 +239,7 @@ function observeBoundary(cwd, milestone, options = {}) {
   if (listing.status !== 'valid') return { status: 'invalid', reason_code: 'milestone-time-invalid' };
   const rows = warningRows(listing, current.version), last = rows.at(-1), classification = FORECAST_CLASSES.includes(forecast.status) ? forecast.status : 'unknown';
   const lastBoundary = rows.filter(r => r.kind === options.kind).at(-1);
-  if (lastBoundary?.boundary_key === key || last?.classification === classification) return { status: 'unchanged' };
+  if (lastBoundary?.boundary_key === key && lastBoundary.classification === classification || last?.classification === classification) return { status: 'unchanged' };
   const id = hash(JSON.stringify([milestone, current.version, options.kind, key, classification]));
   const existing = rows.find(r => r.id === id); if (existing) return { status: 'unchanged', record: existing };
   const warning = ['at-risk', 'exceeds'].includes(classification);

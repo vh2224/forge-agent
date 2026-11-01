@@ -80,8 +80,55 @@ function revisionBlobHash(cwd, revision, relative) {
     return { ok: true, hash: object };
   } catch { return { ok: false }; }
 }
-function capturedSourceHash(options, envelope, relative) {
-  const cache = options.deliveryCache, codeRoot = options.codeDir || options.cwd;
+// The physical code root is retained evidence, never the artifact owner by default:
+// an explicit caller root wins; schema-v2 deliveries use their revalidated execution
+// contract; schema-v1 deliveries need one agreed envelope root that is a real checkout.
+function deliveryRoots(options, input, envelopes) {
+  if (options.codeDir) return { codeDir: options.codeDir, contract: null };
+  const roots = require('./forge-code-roots');
+  try {
+    const owner = fs.realpathSync.native(options.cwd);
+    if (input.schema_version === 2) {
+      const contract = roots.validateContract(input.execution_contract, { owner, revalidate: true });
+      return { codeDir: contract.code_roots.find(r => r.id === contract.primary_root_id).path, contract };
+    }
+    const dirs = new Map();
+    for (const read of envelopes.values()) {
+      const dir = read.value?.code_dir;
+      if (typeof dir !== 'string' || !path.isAbsolute(dir)) continue;
+      const real = roots.realDirectory(dir); dirs.set(roots.key(real), real);
+    }
+    if (!dirs.size) return { codeDir: options.cwd, contract: null };
+    if (dirs.size !== 1) fail('delivery-code-root-mismatch');
+    const [real] = dirs.values();
+    if (roots.key(real) === roots.key(owner)) return { codeDir: options.cwd, contract: null };
+    roots.measureRoot({ id: 'primary', path: real });
+    return { codeDir: real, contract: null };
+  } catch (e) { fail(/^delivery-/.test(e.code || '') ? e.code : 'delivery-code-root-mismatch'); }
+}
+function sameRoot(left, right) {
+  try {
+    const roots = require('./forge-code-roots');
+    return roots.key(fs.realpathSync.native(left)) === roots.key(fs.realpathSync.native(right));
+  } catch { return false; }
+}
+// Multiroot envelopes bind one contract root; scope paths are mapped into it.
+function captureScope(options, envelope, scope) {
+  const contract = options.executionContract;
+  if (!contract) return { codeRoot: options.codeDir || options.cwd, scope };
+  const row = contract.code_roots.find(r => r.id === envelope?.root_id);
+  if (!row) fail('delivery-code-root-mismatch');
+  const mapped = [];
+  for (const value of scope) {
+    let resolved;
+    try { resolved = require('./forge-code-roots').resolvePath(contract, value, { legacy: contract.code_roots.length === 1 }); }
+    catch { fail('delivery-code-root-mismatch'); }
+    if (resolved.root_id === row.id) mapped.push(resolved.path);
+  }
+  return { codeRoot: row.path, scope: mapped };
+}
+function capturedSourceHash(options, envelope, relative, root) {
+  const cache = options.deliveryCache, codeRoot = root || options.codeDir || options.cwd;
   const entries = envelope.workspace.filter(r => r.path === relative);
   if (entries.length > 1) fail('delivery-workspace-conflicting-path');
   if (entries.length) {
@@ -98,14 +145,14 @@ function capturedSourceHash(options, envelope, relative) {
   }
   return cache.blobs.get(key);
 }
-function validateCurrentSources(options, envelope, scope) {
-  const cache = options.deliveryCache, codeRoot = options.codeDir || options.cwd;
+function validateCurrentSources(options, envelope, fullScope) {
+  const cache = options.deliveryCache, { codeRoot, scope } = captureScope(options, envelope, fullScope);
   if (!envelope || !Array.isArray(envelope.workspace) || !scope.length) fail('delivery-current-source-binding-missing');
-  if (path.resolve(envelope.code_dir || '') !== path.resolve(codeRoot)) fail('delivery-code-root-mismatch');
+  if (!sameRoot(envelope.code_dir, codeRoot)) fail('delivery-code-root-mismatch');
   for (const relative of scope) {
     const source = deliverySource(options, codeRoot, relative, phaseCost.MAX_BYTES);
     if (source.status !== 'valid') fail('delivery-current-source-changed');
-    const expected = capturedSourceHash(options, envelope, relative);
+    const expected = capturedSourceHash(options, envelope, relative, codeRoot);
     const key = codeRoot + '\0' + relative;
     if (!cache.hashes.has(key)) {
       if (cache.hashes.size >= 256) fail('delivery-revision-limit');
@@ -120,10 +167,11 @@ function validateCurrentSources(options, envelope, scope) {
 }
 // Historical source bindings describe the captured workspace. They do not compare
 // it to today's files, and cannot stand in for integrated verification/review.
-function historicalCapture(options, reference, read, scope, expected) {
-  const envelope = read.value, codeRoot = options.codeDir || options.cwd;
+function historicalCapture(options, reference, read, fullScope, expected) {
+  const envelope = read.value;
+  const { codeRoot, scope } = captureScope(options, envelope, fullScope);
   if (!Array.isArray(envelope?.workspace) || envelope.workspace.length > 256
-      || path.resolve(envelope.code_dir || '') !== path.resolve(codeRoot)) fail('delivery-current-source-binding-missing');
+      || !sameRoot(envelope.code_dir, codeRoot)) fail('delivery-current-source-binding-missing');
   const capturedAt = instant(envelope.captured_at);
   if (!Number.isFinite(capturedAt) || capturedAt > options.completionAt) fail('delivery-capture-time-invalid');
   const paths = new Set();
@@ -134,7 +182,7 @@ function historicalCapture(options, reference, read, scope, expected) {
     // are positive source evidence and require a concrete captured blob hash.
     return { path: row.path, hash: /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(row.hash) ? row.hash : null };
   }).filter(row => scope.includes(row.path));
-  const bindings = scope.map(relative => ({ path: relative, hash: capturedSourceHash(options, envelope, relative) }));
+  const bindings = scope.map(relative => ({ path: relative, hash: capturedSourceHash(options, envelope, relative, codeRoot) }));
   return { unit: require('./forge-delivery').unitKey(expected), reference, sha256: read.sha256,
     revision: /^(?:[a-f0-9]{40}|[a-f0-9]{64}|[a-z][a-z0-9.-]{0,99})$/.test(envelope.revision) ? envelope.revision : null,
     workspace, workspace_scope: 'declared-source-paths-only', captured_at: envelope.captured_at,
@@ -346,7 +394,9 @@ function validateDelivery(options, reference, expected, seen = new Set()) {
     if (!child?.unit || !child.delivery) fail('delivery-child-invalid');
     validateDelivery(options, child.delivery, child.unit, seen);
   }
-  const rebuilt = delivery.buildDelivery(input, { ownerRoot: options.cwd, codeDir: options.codeDir || options.cwd });
+  const roots = deliveryRoots(options, input, envelopes);
+  options = { ...options, codeDir: roots.codeDir, ...(roots.contract ? { executionContract: roots.contract } : {}) };
+  const rebuilt = delivery.buildDelivery(input, { ownerRoot: options.cwd, codeDir: roots.codeDir });
   if (rebuilt.delivery_fingerprint !== stored.value.delivery_fingerprint
       || delivery.finalizeOutput(stored.value).delivery_fingerprint !== stored.value.delivery_fingerprint) fail('delivery-projection-changed');
   const legacySlice = expected.type === 'slice' && input.expected_children?.length > 0;
@@ -363,6 +413,7 @@ function validateDelivery(options, reference, expected, seen = new Set()) {
   const inventory = delivery.inventoryPlan(plan.buffer.toString('utf8'), input.plan, expected);
   const scope = [...new Set([...(fields.writes || []), ...inventory.criteria.flatMap(c => [c.artifact_path, c.link_from, c.link_to].filter(Boolean))])];
   for (const [sourceReference, read] of envelopes) {
+    if (options.executionContract && !captureScope(options, read.value, scope).scope.length) continue;
     if (options.proofMode === 'current-source-strict') validateCurrentSources(options, read.value, scope);
     const capture = historicalCapture(options, sourceReference, read, scope, expected);
     options.proof.captures.push({ ...capture, current_source_conformity: options.proofMode === 'current-source-strict' ? 'matched' : 'not-evaluated' });

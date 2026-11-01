@@ -53,7 +53,7 @@ function timePaths(options) {
   if (!ids.isValid(milestone) || typeof milestone !== 'string' || /[\\/\0]/.test(milestone) || !['milestone', 'task'].includes(ids.entityKind(milestone))) fail('time-work-id-invalid');
   if (ids.entityKind(milestone) !== 'milestone') fail('time-work-kind-unsupported');
   const owner = path.resolve(options.cwd || '.'), forge = path.join(owner, '.gsd/forge'), directory = path.join(forge, 'time', milestone);
-  return { owner, forge, directory, contract: path.join(directory, 'contract.json'), amendments: path.join(directory, 'amendments'), journal: path.join(directory, 'journal.jsonl'), warnings: path.join(directory, 'warnings'), checkpoints: path.join(directory, 'checkpoints'), observations: path.join(directory, 'observations'), coverage: path.join(directory, 'coverage'), roadmap: path.join(owner, '.gsd/milestones', milestone, milestone + '-ROADMAP.md') };
+  return { owner, forge, directory, staging: path.join(forge, 'time-staging', milestone), contract: path.join(directory, 'contract.json'), amendments: path.join(directory, 'amendments'), journal: path.join(directory, 'journal.jsonl'), warnings: path.join(directory, 'warnings'), checkpoints: path.join(directory, 'checkpoints'), observations: path.join(directory, 'observations'), coverage: path.join(directory, 'coverage'), roadmap: path.join(owner, '.gsd/milestones', milestone, milestone + '-ROADMAP.md') };
 }
 function bounded(file, max, json = true) {
   noLinks(file); const real = fs.realpathSync.native(file);
@@ -197,14 +197,29 @@ function ensureDirectory(dir) {
 }
 // Immutable records use atomic hard-link publication (the same installation
 // primitive as forge-empirical-sources), since rename may overwrite history.
-function publishExclusive(file, value, limit) {
+// Staging lives outside every directory whose readers enumerate committed names,
+// so a process that dies mid-publication cannot invalidate intact history. Callers
+// hold the owner lock, so any leftover staging file is an interrupted publication
+// and is reconciled (removed) before the next one starts.
+const STAGING_NAME = /^[a-zA-Z0-9_-]+\.json\.\d+\.[0-9a-f-]{36}\.tmp$/;
+function reconcileStaging(staging) {
+  noLinks(staging, true);
+  let names; try { names = fs.readdirSync(staging); } catch (e) { if (['ENOENT', 'ENOTDIR'].includes(e.code)) return; throw e; }
+  for (const name of names.filter(n => STAGING_NAME.test(n))) {
+    const file = path.join(staging, name);
+    if (fs.lstatSync(file).isFile()) fs.unlinkSync(file);
+  }
+}
+function publishExclusive(file, value, limit, staging) {
   const buffer = Buffer.from(JSON.stringify(value) + '\n'); if (buffer.length > limit) fail('time-source-too-large');
   noLinks(file, true);
   const missingDirs = []; let dir = path.dirname(file);
   while (!fs.existsSync(dir)) { missingDirs.push(dir); dir = path.dirname(dir); }
-  const temporary = file + '.' + process.pid + '.' + crypto.randomUUID() + '.tmp'; let created = false;
+  for (dir = staging; !fs.existsSync(dir); dir = path.dirname(dir)) missingDirs.push(dir);
+  const temporary = path.join(staging, path.basename(file) + '.' + process.pid + '.' + crypto.randomUUID() + '.tmp'); let created = false;
   try {
-    ensureDirectory(path.dirname(file)); noLinks(temporary, true);
+    reconcileStaging(staging);
+    ensureDirectory(path.dirname(file)); ensureDirectory(staging); noLinks(temporary, true);
     const fd = fs.openSync(temporary, 'wx', 0o600); created = true;
     try { fs.writeFileSync(fd, buffer); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     noLinks(file, true); fs.linkSync(temporary, file);
@@ -227,7 +242,7 @@ function activateContract(options) {
     }
     if (current.status === 'invalid') fail(current.reason);
     noLinks(p.roadmap, true); if (fs.existsSync(p.roadmap)) fail('time-contract-roadmap-exists');
-    publishExclusive(p.contract, contract, MAX_CONTRACT); return validStored(options);
+    publishExclusive(p.contract, contract, MAX_CONTRACT, p.staging); return validStored(options);
   });
 }
 function amendmentAnswer(kind, patch) {
@@ -249,7 +264,7 @@ function amendContract(options) {
     if (kind === 'allocation') {
       if (require('./forge-code-roots').digest(bounded(p.roadmap, MAX_CONTRACT, false).buffer) !== patch.allocation.roadmap_sha256) fail('time-allocation-roadmap-mismatch');
     }
-    publishExclusive(path.join(p.amendments, String(row.version).padStart(4, '0') + '.json'), row, MAX_AMENDMENT); return validStored(options);
+    publishExclusive(path.join(p.amendments, String(row.version).padStart(4, '0') + '.json'), row, MAX_AMENDMENT, p.staging); return validStored(options);
   });
 }
 function journalValid(r) {
@@ -324,7 +339,7 @@ function record(options, type) {
     if (previous) { if (!same(previous, value)) fail('time-record-conflict'); return { status: 'valid', record: previous }; }
     if (type === 'checkpoints' && value.version !== current.version) fail('time-record-invalid');
     if (listing.records.length >= MAX_RECORDS) fail('time-record-limit');
-    publishExclusive(path.join(p[type], identity + '.json'), value, MAX_AMENDMENT); return { status: 'valid', record: value };
+    publishExclusive(path.join(p[type], identity + '.json'), value, MAX_AMENDMENT, p.staging); return { status: 'valid', record: value };
   });
 }
 function recordWarning(options) { return record(options, 'warnings'); }
@@ -352,7 +367,7 @@ function recordWorkerEvidence(options) {
     for (const type of Object.keys(listings)) {
       if (listings[type].records.length + pending.filter(([t]) => t === type).length > MAX_RECORDS) fail('time-record-limit');
     }
-    for (const [type, value] of pending) publishExclusive(path.join(p[type], value.id + '.json'), value, MAX_AMENDMENT);
+    for (const [type, value] of pending) publishExclusive(path.join(p[type], value.id + '.json'), value, MAX_AMENDMENT, p.staging);
     return { status: 'valid', published: pending.length, unchanged: rows.length - pending.length };
   });
 }

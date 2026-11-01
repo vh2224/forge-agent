@@ -127,9 +127,10 @@ function readTime(project, work) {
   }
 }
 
-// Exhausted, draining, checkpointed or an open warning is protected work.
-function timeProtected(time) {
-  return Boolean(time && (['exhausted', 'draining', 'checkpointed', 'warning'].includes(time.state) || time.decision_pending));
+// Exhausted, draining, checkpointed or an open warning is protected work. Completed
+// work keeps its time block as history and is protected only by a pending decision.
+function timeProtected(time, completed) {
+  return Boolean(time && ((!completed && ['exhausted', 'draining', 'checkpointed', 'warning'].includes(time.state)) || time.decision_pending));
 }
 
 // Closed copy of what the summary may know about one work; nothing else from
@@ -153,7 +154,7 @@ function prepareWork(work, project) {
   if (entry.workStatus !== 'completed') entry.nextAction = work.nextAction || null;
   const time = readTime(project, entry);
   if (time) entry.time = time;
-  entry.timeProtected = timeProtected(time);
+  entry.timeProtected = timeProtected(time, entry.workStatus === 'completed');
   entry.protected = entry.pending.length > 0 || entry.acceptances.length > 0 || entry.reliability !== 'current' || entry.timeProtected;
   return entry;
 }

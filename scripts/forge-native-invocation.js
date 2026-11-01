@@ -499,7 +499,8 @@ async function invokeNative(options, invoke) {
         provider_called: observedProvider ?? (invoked ? (typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown') : false),
         ...(supervised?.lifecycle?.host_identity ? { native_lifecycle: supervised.lifecycle } : {}) },
       provider_called: observedProvider ?? (invoked ? (typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown') : false),
-      diagnostic: { reason_code: telemetryApi.code(error.code, 'native-tool-callback-failed'), layer: error.stage || 'native-tool' },
+      diagnostic: { reason_code: telemetryApi.code(error.code, 'native-tool-callback-failed'), layer: require('./forge-milestone-time-admission').TRANSPORT_REFUSAL_CODES.includes(error.code)
+        ? 'milestone-time-admission' : 'native-tool' },
       hint: 'The native tool callback failed; inspect the host diagnostic channel.',
       ...(supervised?.lifecycle?.host_identity ? { lifecycle: supervised.lifecycle } : {}),
       ...hostIdentity(),
