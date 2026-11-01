@@ -77,3 +77,31 @@ to437d3c709908bb6d3babdfbb237e320847a65737edaaa54ca77ae8ccf7dbe662 for
 agents/forge-planner.md. All eight other active surface hashes and every historical
 snapshot stay unchanged. Mandatory planning guidance is consolidated within the
 existing context ceiling; optional budgets and allocation assertions are unchanged.
+
+## Bounded personal summary (T-20261101004951-comunicacao-pessoal)
+
+Measured before and after through forge-claude-renderer.render with the assertion
+formula above. The before values equal the owner's pre-edit measurement at revision
+`4cb0e8d`; the after values are the render-path hashes reported by
+forge-claude-renderer.test.js on the final source bytes. The drift set reported by
+forge-dispatch-source-guard.test.js before the update was exactly `commands`,
+`skills` and `claude-instructions`. Sources changed: `commands/forge.md` (boot and
+REPL use `forge-personal-context.js --summary`), `commands/forge-init.md` (new
+project template), `skills/forge-status/SKILL.md` (one sentence routing simple
+questions to the summary) and `CLAUDE.md`, whose managed block carries the updated
+`renderPersonalContract()` and the new “Consulta simples” section of
+`shared/forge-communication.md`.
+
+- commands: `e6507d881dc3125e96864a293832ca88d7ee65c233b0508efae4e01c68cfcaad` to `76a9f2a7e6fb02bec917bc24c669d02aacc06a92c1470de9245bdb00d4f8d4d3`.
+- skills: `75e3baa5d47466212359e6e022ed3a76781256b3b99d75c0eb6d83d9d30a6727` to `86b0ff8995ff391cc26191662a67f1a726b9dcec6b1a4ed7f98a91ad8decf0f9`.
+- claude-instructions: `7997a0ef19dcd6479b90fc48eaa732cd12a7337d54c6332ac11c6c6ddb257ffb` to `90e7c3511e37a7ec6cd972c59572b4aeda2294621c0a7bce8d34aa3b935f6dbb`.
+
+The other six active surfaces (`agents`, `dispatch-templates`, `hooks`, `mcp`,
+`claude-settings`, `configuration`) are unchanged, and the historical 4.18.1
+(`a58a005aea70eaa17c0ecfaf1cdf8965cdf9adb8c2678e756ac83ea74d926d9c`) and 4.19.0
+(`f2b3e910445d2557f50aa4ced9e1b31498debc6b1cdd1ed05b452d8141b4307f`) files stay
+byte-identical. The historical-to-current changed surface set is now `agents`,
+`commands`, `skills`, `dispatch-templates`, `claude-instructions` and
+`configuration`. Distribution does not establish host UI, model obedience or human acceptance.
+
+2026-11-01 — integração comunicação/painel: somente a superfície commands mudou nesta composição, para documentar adesão, bootstrap, perfil padrão e resultados separados do forge-update. Hash medido pelo renderer canônico com versão normalizada; golden ativo atualizado. Baselines históricos permanecem intactos.

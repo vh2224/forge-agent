@@ -17,7 +17,7 @@ public static class ForgeVerificationJob {
  [StructLayout(LayoutKind.Sequential)] struct PROCESS { public IntPtr process,thread; public uint pid,tid; }
  [StructLayout(LayoutKind.Sequential)] struct ACCOUNT { public long a,b,c,d; public uint faults,total,active,terminated; }
  [StructLayout(LayoutKind.Sequential)] struct SECURITY { public int size; public IntPtr descriptor; [MarshalAs(UnmanagedType.Bool)] public bool inherit; }
- public class Outcome { public bool started,joined,timedOut,overflow; public int status=127,nativeError; public uint pid,active; public string stdout="",stderr="",reason="job-start-failed"; }
+ public class Outcome { public bool started,joined,timedOut,overflow,autoRunDisabled; public int status=127,nativeError; public uint pid,active; public string stdout="",stderr="",reason="job-start-failed"; }
  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr CreateJobObject(IntPtr sa,string name);
  [DllImport("kernel32.dll",SetLastError=true)] static extern bool SetInformationJobObject(IntPtr job,int kind,ref EXT data,uint size);
  [DllImport("kernel32.dll",SetLastError=true)] static extern bool QueryInformationJobObject(IntPtr job,int kind,out ACCOUNT data,uint size,IntPtr returned);
@@ -49,7 +49,11 @@ public static class ForgeVerificationJob {
   }
  }
  public static Outcome Run(string command,string cwd,int timeout,int maxOutput,string name) {
+  return Run(command,cwd,timeout,maxOutput,name,false);
+ }
+ public static Outcome Run(string command,string cwd,int timeout,int maxOutput,string name,bool disableAutoRun) {
   Outcome result=new Outcome();IntPtr job=IntPtr.Zero,list=IntPtr.Zero,jobs=IntPtr.Zero,handles=IntPtr.Zero,input=IntPtr.Zero,output=IntPtr.Zero,error=IntPtr.Zero;PROCESS p=new PROCESS();bool initialized=false;
+  result.autoRunDisabled=disableAutoRun;
   try {
    job=CreateJobObject(IntPtr.Zero,name);int creationError=Marshal.GetLastWin32Error();Check(Valid(job),"job-create");
    if(creationError==183)throw new System.ComponentModel.Win32Exception(creationError,"job-name-collision");
@@ -67,8 +71,9 @@ public static class ForgeVerificationJob {
    STARTEX start=new STARTEX();start.start.cb=Marshal.SizeOf(typeof(STARTEX));start.start.flags=0x100;start.start.stdin=input;start.start.stdout=output;start.start.stderr=error;start.list=list;
    string app=Path.Combine(Environment.SystemDirectory,"cmd.exe");
    // /s removes only our outer quotes, preserving quoted executable/argument
-   // paths inside the original command. Existing autorun policy is unchanged.
-   Check(CreateProcess(app,new StringBuilder("\""+app+"\" /s /c \""+command+"\""),IntPtr.Zero,IntPtr.Zero,true,0x08080000,IntPtr.Zero,cwd,ref start,out p),"atomic-create");
+   // paths inside the original command. /d is an explicit per-call capability;
+   // the legacy default keeps its existing AutoRun policy.
+   Check(CreateProcess(app,new StringBuilder("\""+app+"\" "+(disableAutoRun?"/d ":"")+"/s /c \""+command+"\""),IntPtr.Zero,IntPtr.Zero,true,0x08080000,IntPtr.Zero,cwd,ref start,out p),"atomic-create");
    result.started=true;result.pid=p.pid;Stopwatch timer=Stopwatch.StartNew();
    for(;;) {
     result.active=Active(job);if(result.active==0) { result.joined=true;break; }
@@ -121,7 +126,12 @@ try {
  } else {
   $packet=[Console]::In.ReadToEnd() | ConvertFrom-Json
   [Reflection.Assembly]::Load([Convert]::FromBase64String($packet.assembly)) | Out-Null
-  $result=[ForgeVerificationJob]::Run([string]$packet.command,[string]$packet.cwd,[int]$packet.timeout,[int]$packet.maxOutput,[string]$packet.jobName)
+  $disableAutoRun=$false
+  if($packet.PSObject.Properties.Name -contains 'disableAutoRun') {
+   if($packet.disableAutoRun -isnot [bool]) { throw 'invalid-autorun-option' }
+   $disableAutoRun=$packet.disableAutoRun
+  }
+  $result=[ForgeVerificationJob]::Run([string]$packet.command,[string]$packet.cwd,[int]$packet.timeout,[int]$packet.maxOutput,[string]$packet.jobName,$disableAutoRun)
   @{schema=1;nonce=$packet.nonce;outcome=$result} | ConvertTo-Json -Depth 3 -Compress
  }
 } catch {

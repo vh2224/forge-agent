@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "base_revision": "3e25c611a54b2bdd23f11cb11eb474b3facc95e3",
-  "contract_sha256": "d409a0cc91b426bd0e407931a6168185d745080a4d5d56e77839e628189781b3",
+  "contract_sha256": "ac32504157a07a2445cfd0ba3061ee397a82695334021099e191365aefe11bbc",
   "skill_templates_before_sha256": "4aa6c4a06d2e8183782b97169db3b0ea22f1f891fbf235989afd0867e6249126",
   "rubric_elements": [
     "resultado",

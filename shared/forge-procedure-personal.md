@@ -2,11 +2,12 @@
 
 Load this mandatory procedure before boot and personal-selection actions.
 Read shared/forge-personal-context.md before invoking its adapter.
-Run forge-personal-context.js --snapshot --cwd with the physical project path.
-Snapshot and status are read-only; do not create bindings or migrate legacy state.
+Run forge-personal-context.js --summary --cwd with the physical project path.
+Use --snapshot only for an explicit diagnostic or attention needing an omitted decision.
+Summary, snapshot and status are read-only; do not create bindings or migrate legacy state.
 Identity comes from the system personal profile, never FORGE_HOME or LLM account.
-Report own work, pending decisions, acceptances, last evidenced result and next action.
-Keep source references and current diagnostics with each claim.
+From the summary, report own work, pending decisions, unresolved acceptances, last result and next action.
+Keep each claim's relative source and validity; omission or attention is never approval.
 Treat historical pointers without current evidence as unverified history.
 Do not enumerate colleagues' activities, shared ledgers or STATE as a personal queue.
 An absent store or a store for another project may legitimately return no-bindings.

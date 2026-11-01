@@ -44,7 +44,10 @@ desconhecido falha antes de qualquer escrita. `--no-model-probe` permanece
 aceito por compatibilidade e desabilita a sonda local de capability do CLI;
 use-o somente quando o operador já confirmou que o runtime está instalado.
 A instalação não faz chamadas de rede ou probes de login; `--with-app` é
-reservado para o app opcional.
+reservado para o app opcional. `--with-vscode-panel`/`-WithVscodePanel` e
+`--without-vscode-panel`/`-WithoutVscodePanel` controlam a adesão ao painel
+VS Code opcional (ver "Painel VS Code (opcional)"); os dois juntos falham antes
+de qualquer escrita.
 `--project-root`/`-ProjectRoot` define explicitamente onde `CLAUDE.md` e
 `AGENTS.md` serão projetados; sem ele, o diretório de trabalho atual é usado.
 
@@ -76,6 +79,67 @@ habilita a substituição explícita desses arquivos canônicos.
 copiar arquivos, escrever manifestos ou modificar homes. O manifesto registra
 quais arquivos pertencem ao core e a cada adapter para permitir auditoria e
 rollback manual.
+
+## Painel VS Code (opcional)
+
+O painel somente leitura de `extensions/forge-vscode` é instalado e atualizado
+pelo próprio instalador/forge-update, nunca sem adesão explícita:
+
+```text
+forge-update --apply --with-vscode-panel      # adere e instala
+forge-update --apply                          # mantém o painel atualizado
+forge-update --apply --without-vscode-panel   # desliga as atualizações do painel
+```
+
+- **Estado:** `<FORGE_HOME>/components.json`, `schema_version` 1, com
+  `vscode_panel {opted_in, target, since_version, installed}`; `target` é sempre
+  `vscode-stable-default-profile` e `installed` é `null` ou `{version,
+  vsix_sha256}`. O arquivo não guarda caminho, usuário, host, horário nem dado
+  pessoal; é gravado só em apply, por arquivo temporário e rename. Link, JSON
+  inválido ou campo fora do contrato viram `state-invalid` sem tocar no painel;
+  um flag explícito substitui esse estado.
+- **Destino:** só o perfil padrão do VS Code estável do usuário atual, pela CLI
+  `code` do PATH (no Windows, `bin\code.cmd` ao lado de `Code.exe`, executado por
+  `cmd.exe /d /s /c` dentro de um Job próprio, com prova de AutoRun desabilitado
+  apenas nessa chamada). Nenhuma chamada usa `--profile`,
+  `--user-data-dir` ou `--extensions-dir`. Insiders, VSCodium, Cursor, Windsurf,
+  Remote, WSL, snap e modo portátil dão diagnóstico explícito (`incompatible`).
+- **Integridade:** o VSIX `forge-vscode-<VERSION>.vsix` é determinístico (zip
+  stored com os seis arquivos do pacote) e é o mesmo componente `vscode-panel` do
+  pacote da release. Antes de instalar, os bytes são relidos do diretório
+  temporário e conferidos por sha256 e estrutura; depois de instalar,
+  `code --list-extensions --show-versions` precisa listar
+  `forge-agent.forge-vscode@<VERSION>`. Exit 0 sozinho não basta.
+- **Dry-run:** `--dry-run` e o preview do forge-update relatam `planned` com
+  versão e sha256 do VSIX gerado em memória, sem chamar a CLI e sem criar ou
+  alterar `components.json`.
+- **Backup:** no update, um `components.json` existente é copiado para o
+  backup da execução antes de qualquer escrita. Se somente esse backup opcional
+  falhar, o estado original fica intacto, o painel não executa nem altera sua
+  adesão e retorna `state-invalid/backup-failed`; o núcleo continua. Falha no
+  backup obrigatório do núcleo continua interrompendo a atualização.
+- **Status:** `not-requested`, `opted-out`, `deferred` (instalação completa sem
+  `--update`), `planned`, `installed`, `unchanged` e as falhas `cli-missing`,
+  `incompatible`, `cli-failed`, `verify-failed`, `package-invalid`,
+  `state-invalid` e `source-unsupported`. O JSON traz `components.core` e
+  `components.vscode_panel` separados; só `installed` e `unchanged` têm
+  `verified: true`.
+- **Exit code:** o código do núcleo é preservado. Uma falha do painel nunca muda
+  `ok` nem o exit code; aparece no JSON e no texto como
+  `⚠ Painel VS Code NÃO verificado: <status> (<reason>) — núcleo aplicado`.
+- **Saída:** `--without-vscode-panel` grava `opted_in: false` e não desinstala.
+  A remoção é manual: `code --uninstall-extension forge-agent.forge-vscode`.
+- **Primeira adesão a partir de um updater instalado anterior:** versões
+  antigas recusam a opção nova. Rode primeiro `forge-update --apply` (instala o
+  updater novo) e depois `forge-update --apply --with-vscode-panel`. Como
+  alternativa, use `--source local --repo <clone novo>`. Um checkout remoto que
+  não lista a opção, ou o bootstrap de compatibilidade, relata
+  `source-unsupported`, nunca sucesso.
+- **Modo local:** `--source local` instala o painel a partir do clone indicado,
+  com as mesmas verificações.
+- **Diagnóstico somente leitura:** `node scripts/forge-vscode-install.js --detect
+  --json` relata layout, versão da CLI e versão instalada, sem instalar e sem
+  caminhos.
 
 ## Diagnóstico e matriz offline
 

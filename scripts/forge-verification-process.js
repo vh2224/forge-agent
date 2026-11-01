@@ -23,7 +23,8 @@ function createWindowsRunner({ spawnSyncImpl = spawnSync } = {}) {
     let invocationAttempted = false;
     try {
     if (typeof command !== 'string' || !command || command.includes('\0') || !path.isAbsolute(options.cwd) || options.cwd.includes('\0')
-      || !Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > 2147453647) {
+      || !Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > 2147453647
+      || options.disableAutoRun !== undefined && typeof options.disableAutoRun !== 'boolean') {
       return failed('invalid-supervisor-input', { joined: true, started: false });
     }
     let sourceHash;
@@ -49,7 +50,8 @@ function createWindowsRunner({ spawnSyncImpl = spawnSync } = {}) {
     try {
       invocationAttempted = true;
       result = invoke('Run', JSON.stringify({ nonce, jobName, assembly: compiled.assembly,
-        command, cwd: options.cwd, timeout: options.timeoutMs, maxOutput: MAX_OUTPUT }), options, options.timeoutMs + 30000);
+        command, cwd: options.cwd, timeout: options.timeoutMs, maxOutput: MAX_OUTPUT,
+        ...(options.disableAutoRun === true ? { disableAutoRun: true } : {}) }), options, options.timeoutMs + 30000);
       packet = JSON.parse(result.stdout || '');
     } catch { return failed('supervisor-result-unavailable', { supervisorPid: result?.pid || null, jobName }); }
     const row = packet.outcome;
@@ -61,8 +63,10 @@ function createWindowsRunner({ spawnSyncImpl = spawnSync } = {}) {
       return failed('supervisor-result-invalid', { supervisorPid: result.pid || null, jobName });
     }
     if (!row.joined || row.active !== 0) return failed('job-join-unproved', { started: row.started, supervisorPid: result.pid || null, jobName });
+    if (options.disableAutoRun === true && row.autoRunDisabled !== true) return failed('autorun-disable-unproved', { joined: true, started: row.started, supervisorPid: result.pid || null, jobName });
     const cleanup = { platform: 'win32', status: 'joined', started: row.started, reason: row.reason,
-      supervisor_pid: result.pid || null, root_pid: row.pid || null, job_name: jobName, active_processes: 0 };
+      supervisor_pid: result.pid || null, root_pid: row.pid || null, job_name: jobName, active_processes: 0,
+      ...(options.disableAutoRun === true ? { autorun_disabled: true } : {}) };
     const outcome = { status: row.status, signal: null, stdout: Buffer.from(row.stdout, 'base64').toString('utf8'),
       stderr: Buffer.from(row.stderr, 'base64').toString('utf8'), cleanup, stop: row.timedOut || row.overflow || row.reason !== 'joined' };
     if (row.timedOut) outcome.error = Object.assign(new Error('verification command timeout after joined termination'), { code: 'ETIMEDOUT' });

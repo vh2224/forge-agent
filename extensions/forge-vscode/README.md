@@ -86,10 +86,32 @@ a view `forge.work`. Em workspace não confiável o painel só lê dados. Em
 workspace remoto a extensão roda do lado remoto e o núcleo precisa existir lá; em
 workspace virtual o estado é workspace não local.
 
+## Instalação e atualização pelo forge-update
+
+A instalação e atualização pelo forge-update é opcional e exige adesão
+explícita: `forge-update --apply --with-vscode-panel` (ou
+`install.ps1 -Update -WithVscodePanel`). A adesão fica registrada em
+`components.json` no Forge home, e os updates seguintes mantêm o painel na
+versão do produto sem repetir a opção. `--without-vscode-panel` desliga as
+atualizações do painel, mas não desinstala nada.
+
+- Destino: só o perfil padrão do VS Code estável do usuário atual, pela CLI
+  `code` do PATH. Insiders, VSCodium, Cursor, Windsurf, Remote, WSL, snap e modo
+  portátil não recebem nada; aparecem como diagnóstico explícito.
+- Sem Marketplace nem Open VSX: o VSIX é gerado de forma determinística a partir
+  destes arquivos, verificado por sha256 antes da instalação e confirmado depois
+  em `code --list-extensions --show-versions`.
+- A versão da extensão instalada é igual à do produto Forge; este `package.json`
+  continua `0.1.0` na fonte.
+- Estados relatados: `installed`, `unchanged`, `planned` (dry-run), `opted-out`,
+  `not-requested`, `deferred` e as falhas `cli-missing`, `incompatible`,
+  `cli-failed`, `verify-failed`, `package-invalid`, `state-invalid` e
+  `source-unsupported`. Uma falha do painel nunca muda o resultado do núcleo.
+- Depois de `installed`, recarregue a janela do VS Code.
+- Remoção manual: `code --uninstall-extension forge-agent.forge-vscode`.
+
 ## Pendências e limites
 
-- A instalação persistente no perfil do operador é uma etapa pendente, de
-  integração autorizada; este pacote é privado e nada é publicado nem instalado.
 - A navegação nativa do Codex para agentes continua condicional e aparece como
   texto.
 - O aceite visual e de compreensão permanece pendente para a rodada final.

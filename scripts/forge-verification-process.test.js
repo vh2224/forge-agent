@@ -14,7 +14,8 @@ function mockRunner(change = row => row) {
     if (args.at(-1) === 'Compile') return { status: 0, stdout: JSON.stringify({ schema: 1, assembly: 'YWJj' }) };
     const packet = JSON.parse(options.input);
     const outcome = change({ started: true, joined: true, active: 0, status: 0, timedOut: false, overflow: false,
-      reason: 'joined', stdout: Buffer.from('ok').toString('base64'), stderr: '', pid: 42 });
+      reason: 'joined', stdout: Buffer.from('ok').toString('base64'), stderr: '', pid: 42,
+      ...(packet.disableAutoRun === true ? { autoRunDisabled: true } : {}) });
     return { status: 0, pid: 41, stdout: JSON.stringify({ schema: 1, nonce: packet.nonce, outcome }) };
   } });
   return { calls, run };
@@ -36,6 +37,22 @@ for (const change of [row => ({ ...row, joined: false, active: 1 }), row => ({ .
   assert.strictEqual(result.stop, true); assert.strictEqual(result.cleanup.status, 'unproved');
 }
 {
+  const f = mockRunner();
+  const opted = f.run('fixture', { ...options, disableAutoRun: true });
+  assert.strictEqual(JSON.parse(f.calls[1].options.input).disableAutoRun, true);
+  assert.strictEqual(opted.cleanup.autorun_disabled, true);
+  const legacy = f.run('fixture', options);
+  assert.strictEqual(Object.hasOwn(JSON.parse(f.calls[2].options.input), 'disableAutoRun'), false);
+  assert.strictEqual(Object.hasOwn(legacy.cleanup, 'autorun_disabled'), false);
+  const unproved = mockRunner(row => ({ ...row, autoRunDisabled: false })).run('fixture', { ...options, disableAutoRun: true });
+  assert.strictEqual(unproved.status, null); assert.strictEqual(unproved.stop, true);
+  assert.strictEqual(unproved.cleanup.reason, 'autorun-disable-unproved');
+  const invalid = mockRunner();
+  assert.strictEqual(invalid.run('fixture', { ...options, disableAutoRun: 'true' }).cleanup.started, false);
+  assert.strictEqual(invalid.calls.length, 0);
+  console.log('PASS AutoRun capability is typed, opt-in, proved by the supervisor, and absent from legacy results');
+}
+{
   let calls = 0;
   const run = createWindowsRunner({ spawnSyncImpl() { calls++; return { status: 1, stdout: '{}' }; } });
   const result = run('fixture', options);
@@ -50,6 +67,15 @@ for (const change of [row => ({ ...row, joined: false, active: 1 }), row => ({ .
 if (process.platform === 'win32') {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-verification-job-'));
   try {
+    const isolatedShell = runWindowsCommand('echo %CMDCMDLINE%', { cwd: dir, env: process.env, timeoutMs: 5000, disableAutoRun: true });
+    assert.strictEqual(isolatedShell.status, 0);
+    assert.strictEqual(isolatedShell.cleanup.autorun_disabled, true);
+    assert.match(isolatedShell.stdout, /\s\/d\s+\/s\s+\/c\s/i);
+    const legacyShell = runWindowsCommand('echo %CMDCMDLINE%', { cwd: dir, env: process.env, timeoutMs: 5000 });
+    assert.strictEqual(legacyShell.status, 0);
+    assert.strictEqual(/\s\/d(?:\s|$)/i.test(legacyShell.stdout), false);
+    assert.strictEqual(Object.hasOwn(legacyShell.cleanup, 'autorun_disabled'), false);
+    console.log('PASS real Windows command line: requested /d is present, legacy default is unchanged; no registry edits');
     const child = path.join(dir, 'child.cjs'), beat = path.join(dir, 'heartbeat.txt');
     fs.writeFileSync(child, `const cp=require('child_process'),fs=require('fs');
 if(process.argv[2]==='writer'){fs.appendFileSync(process.argv[3],'start\\n');setInterval(()=>fs.appendFileSync(process.argv[3],'tick\\n'),20);}

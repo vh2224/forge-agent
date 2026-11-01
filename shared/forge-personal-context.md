@@ -7,7 +7,7 @@ The installed copy of this document is under the same Forge home's `shared/`.
 
 ## Read before discovery
 
-For interrupted or partial work, after the personal snapshot, inspect the explicitly
+For interrupted or partial work, after the personal summary, inspect the explicitly
 chosen ID with `node "<scripts>/forge-doctor.js" --diagnose-recovery TASK-001 --cwd "<project>"`.
 Use `--json` for the same observations in JSON. A milestone controller may be
 observed only with its explicit `--controller-key "<key>"`; standalone tasks do
@@ -28,19 +28,36 @@ Inspection does not authorize replay or grant attestations; existing authorities
 must revalidate every future action. Preserve current acceptances and leave
 unanswered required decisions pending.
 
-Run `node "<scripts>/forge-personal-context.js" --snapshot --cwd "<current directory>" --json`.
-This reads the OS profile's `.forge-personal/context.json`, independently of FORGE_HOME,
+For boot, resume, “onde paramos?” and simple status, run
+`node "<scripts>/forge-personal-context.js" --summary --cwd "<current directory>"`.
+It prints one compact JSON line built from the snapshot by allowlist; `--json` is
+accepted and ignored. The full `--snapshot --cwd "<current directory>"` (or one work
+with `--snapshot --id <ID>`) is reserved for an explicitly requested diagnostic or for
+attention that needs an omitted mandatory decision; report only the fields needed.
+Both read the OS profile's `.forge-personal/context.json`, independently of FORGE_HOME,
 session ID, LLM account and provider. No separate login or automatic legacy adoption exists.
 Only bound IDs may enter the personal operational context. A missing store means
 `no-bindings`; corrupt, unreadable, unsupported schema and changed evidence are distinct.
 Never recover those cases by reading global STATE, ledger, auto-mode markers or colleagues' runs.
-Reading the snapshot does not create directories, migrate, modify registry or remove continue.md.
+Reading does not create directories, migrate, modify registry or remove continue.md.
 
-Display each work's activity separately from workStatus and reliability, including
-pending decisions/UAT, recorded acceptances, lastResult, nextAction, sources, hashes
-and capture times. `stale`/`missing` observations remain historical evidence and
+Display from the summary each work's activity separately from workStatus and
+reliability, with pending decisions/UAT, unresolved acceptances, lastResult and
+nextAction, each with its relative source and validity (current, historical,
+missing or uncertain). Hashes, capture times, full history and absolute paths stay
+in the explicit `--snapshot` diagnostic. Historical/missing/uncertain observations
 require reconciliation; do not repeat them as certainty or reopen an acceptance.
-The snapshot takes precedence over old operational pointers in CLAUDE.md/KNOWLEDGE.md.
+
+Summary limits: at most 5 works, 3 items per field, 240 code points per text
+(ellipsis plus `truncated`) and 4096 bytes including the newline. Works are ordered
+pending or needs-reconciliation first, then open, unknown and completed, ties by
+ID; never by age or activity. Non-mandatory text and works are reduced first;
+pending decisions and unresolved acceptances are never dropped silently: `totals`
+count all of them and `attention` (`attention-required`, counts and the diagnostic
+command) reports any omitted or truncated one. Omission is not approval, absence,
+a resolved decision or permission to dispatch; omitted completed works do not
+trigger an additional read. Errors keep their closed reason, never `no-bindings`.
+The personal view takes precedence over old operational pointers in CLAUDE.md/KNOWLEDGE.md.
 Unverified prose is historical; this is not a semantic parser of every old document.
 Shared technical knowledge stays available through canonical memory/decision projections.
 The global ledger and dashboard are not a personal queue.

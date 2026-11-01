@@ -9,6 +9,7 @@ allowed-tools: Read, Glob, Bash
 Follow `shared/forge-personal-context.md` from the repository or FORGE_HOME.
 No initialization writes, instruction sync, auto-memory creation, global STATE
 fallback, run adoption or continue.md deletion are part of status.
+Pergunta simples em linguagem natural fora deste comando (como “onde paramos?”) usa o resumo limitado de `forge-personal-context.js --summary` (ver `shared/forge-personal-context.md`); `/forge-status` explícito mantém a vista pessoal abaixo.
 
 ```bash
 FORGE_SCRIPTS_DIR=$([ -f scripts/forge-status.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")

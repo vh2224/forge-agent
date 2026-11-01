@@ -327,12 +327,15 @@ Este projeto usa o workflow GSD para planejamento e execução autônoma.
 
 ## Início de sessão obrigatório
 
-Ao iniciar, retomar ou receber iniciar, consulte primeiro:
-`node "<FORGE_SCRIPTS_DIR>/forge-personal-context.js" --snapshot --cwd "<diretorio absoluto>" --json`.
+Ao iniciar, retomar, receber iniciar ou "onde paramos?", consulte primeiro o resumo limitado:
+`node "<FORGE_SCRIPTS_DIR>/forge-personal-context.js" --summary --cwd "<diretorio absoluto>"`.
+Diagnostico completo so quando pedido ou em attention:
+`node "<FORGE_SCRIPTS_DIR>/forge-personal-context.js" --snapshot --cwd "<diretorio absoluto>" --id <ID>`.
 Resolve scripts/ do Forge ou `${FORGE_HOME:-~/.forge-agent}/scripts`.
 Siga `shared/forge-personal-context.md` da origem ou FORGE_HOME.
-Mostre trabalho pessoal, pendencias, aceites, ultimo resultado e proxima acao
-com proveniencia. Ausencia/erro nunca recorre a STATE, ledger ou auto-mode da equipe.
+Mostre do resumo trabalho pessoal, pendencias, aceites nao resolvidos, ultimo resultado
+e proxima acao com fonte relativa e validade; omissao nao e aprovacao.
+Ausencia/erro nunca recorre a STATE, ledger ou auto-mode da equipe.
 Projeto valido sem vinculo e no-bindings, nao falha.
 Boot e somente leitura: nao adote legado, nao migre nem apague continue.md.
 Ponteiros operacionais historicos nao prevalecem sobre evidencia pessoal atual.
