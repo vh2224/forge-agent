@@ -62,3 +62,31 @@ explícito; nunca o escolha automaticamente:
 ```bash
 node -e "const p=require('path'),o=require('os'),h=process.env.FORGE_HOME||p.join(o.homedir(),'.forge-agent');process.exitCode=require(p.join(h,'scripts','forge-update.js')).run(process.argv.slice(1))" -- --source local --repo <clone> --apply --json
 ```
+
+## Painel VS Code opcional
+
+Encaminhe `--with-vscode-panel` somente com adesão explícita do operador.
+A adesão é persistida em `FORGE_HOME/components.json`; atualizações posteriores
+atualizam o painel sem repetir o flag. Encaminhe `--without-vscode-panel` somente
+quando o operador pedir para interromper esse gerenciamento; isso não desinstala
+a extensão. Os dois flags juntos são inválidos. Preserve as preferências existentes.
+
+O único destino suportado é o perfil padrão do VS Code estável do usuário atual.
+Não acrescente `--profile`, diretórios alternativos, variantes, ambientes remotos
+ou publicação no Marketplace. Falha em comprovar o destino impede apenas o painel.
+
+Use o mesmo launcher instalado acima, acrescentando o flag autorizado aos argumentos
+`--apply --json`. Para uma instalação antiga que ainda não aceita esses flags,
+primeiro atualize o núcleo com o launcher sem flags do painel. Depois execute novamente
+o launcher já atualizado com `--with-vscode-panel --apply --json`. Ambas as chamadas
+usam a release remota fixada e os backups canônicos; não substitua pela fonte local.
+
+Apresente separadamente o resultado do núcleo e o resultado `vscode_panel`.
+Saída zero do núcleo não comprova instalação do painel. Confirme o status, a versão,
+o hash do VSIX e a verificação da extensão registrada no perfil autorizado. Falhas
+do painel preservam o núcleo e a adesão para recuperação; não declare sucesso parcial
+como entrega completa. A repetição verifica versão e hash antes de dispensar reinstalação.
+
+Para simular, substitua `--apply` por `--dry-run`, preservando os flags autorizados.
+O dry-run não grava adesão nem chama a CLI do VS Code; destino, disponibilidade e
+instalação efetiva continuam não comprovados.

@@ -103,3 +103,5 @@ The other six active surfaces (`agents`, `dispatch-templates`, `hooks`, `mcp`,
 byte-identical. The historical-to-current changed surface set is now `agents`,
 `commands`, `skills`, `dispatch-templates`, `claude-instructions` and
 `configuration`. Distribution does not establish host UI, model obedience or human acceptance.
+
+2026-11-01 — integração comunicação/painel: somente a superfície commands mudou nesta composição, para documentar adesão, bootstrap, perfil padrão e resultados separados do forge-update. Hash medido pelo renderer canônico com versão normalizada; golden ativo atualizado. Baselines históricos permanecem intactos.
