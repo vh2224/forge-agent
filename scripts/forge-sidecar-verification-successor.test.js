@@ -22,14 +22,28 @@ async function main(){
     if(process.platform==='win32'){assert.equal(check.cleanup.status,'joined');assert.equal(check.cleanup.active_processes,0);}
     assert(observations.some(row=>row.state==='finished'&&row.exit_code===124&&row.index===1));
     console.log('PASS failed sidecar verification retains actual capture, stdout and process cleanup before publication refusal');
+    // Reproduce an owner diagnostic caller that omitted its external sink.
+    // Keep its real append; only a closed, live-attested surface may reconcile.
+    const eventsFile=path.join(f.owner,'.gsd/forge/events.jsonl'),beforeEvents=fs.readFileSync(eventsFile);
+    const diagnostic=require('./forge-verify').runRootVerification(f.contract,{commandsByRoot:r.verification.commandsByRoot,commandTimeoutMs:10000});
+    assert.equal(diagnostic.passed,true);
+    const appendedEvents=fs.readFileSync(eventsFile).subarray(beforeEvents.length);
+    const eventProof={originalBytes:beforeEvents,appendedBytes:appendedEvents,attestAppend:challenge=>{
+      assert.equal(challenge.appended_sha256,hash(appendedEvents));assert.equal(challenge.event_count,2);
+      return {observed:diagnostic.passed,reference:'fixture:actual-owner-diagnostic'};
+    }};
     const create=overrides=>successor.create({request:r,timeoutMs:10000,reference:'conversation:fixture-verification-timeout',
       assertAuthority:f.assertBoundary,assertBoundary:f.assertBoundary,attestStoppedWriter:()=>true,
+      ownerVerificationEvents:eventProof,
       attestFailure:challenge=>({observed:true,reason_code:'execution-verification-failed',exit_code:124,timed_out:true,
         reference:'fixture:actual-gate',root_id:'alpha',check_index:0,command_sha256:challenge.roots[0].command_sha256[0]}),...overrides});
     assert.throws(()=>create({assertAuthority:undefined}),/live-authority-required/);
     assert.throws(()=>create({attestStoppedWriter:()=>false}),/writer-not-stopped/);
     assert.throws(()=>create({timeoutMs:1000}),/increase-required/);
     assert.throws(()=>create({attestFailure:()=>({observed:true})}),/observation-required/);
+    assert.throws(()=>create({ownerVerificationEvents:undefined}),/events-proof-required/);
+    assert.throws(()=>create({ownerVerificationEvents:{...eventProof,attestAppend:()=>({observed:false})}}),/events-attestation-required/);
+    assert.throws(()=>create({ownerVerificationEvents:{...eventProof,appendedBytes:Buffer.from('{}\n')}}),/events-proof-required/);
     assert.throws(()=>create({request:{...r,linked_begin_key:'unsupported'}}),/scope-unsupported/);
     await assert.rejects(side.runUnitSidecar(r,{verificationSuccessor:{}}),/capability-required/);
     const cap=create(),view=successor.read(cap,r);
@@ -76,6 +90,8 @@ async function main(){
     await assert.rejects(side.publishReadyRecord(r,next,undefined,undefined,{verificationSuccessor:cap}),/live-ready-required/);
     assert.equal(next.phase,'ready');assert.equal(next.delivery_capture.passed,true);
     assert.equal(next.verification_successor.provider_called,false);
+    assert.equal(next.verification_successor.owner_event_reconciliation.event_count,2);
+    assert.deepEqual(fs.readFileSync(eventsFile),Buffer.concat([beforeEvents,appendedEvents]));
     assert.equal(next.verification_seal.command_timeout_ms,10000);
     assert.deepEqual(next.verification_seal.roots,parent.verification_seal.roots);
     assert.deepEqual(next.result,parent.result);assert.deepEqual(fs.readFileSync(f.receiptFile),parentBytes);
