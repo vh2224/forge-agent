@@ -5,6 +5,45 @@ const api = name => require('./' + name);
 const hash=v=>crypto.createHash('sha256').update(v).digest('hex');
 const fail=c=>{throw Object.assign(new Error(c),{code:c});};
 const nonEmpty=value=>typeof value==='string'&&value.trim().length>0;
+// A verification-only continuation never changes the original request, result,
+// manifest or seal. Authority is process-local; a serialized receipt is evidence.
+const verificationContinuations=new WeakMap();
+function createVerificationContinuation({request,returnedReceiptFile,verification,reference,assertAuthority,attestStoppedWriter}={}){
+  if(typeof assertAuthority!=='function'||typeof attestStoppedWriter!=='function'||!nonEmpty(reference))fail('verification-continuation-live-authority-required');
+  request=structuredClone(request);
+  if(request.linked_begin_key)fail('verification-continuation-linked-unsupported');
+  const roots=api('forge-code-roots'),execution=api('forge-task-execution'),side=api('forge-unit-sidecar');
+  const manifestFile=request.resultFile+'.manifest.json',manifestBytes=fs.readFileSync(manifestFile),manifest=JSON.parse(manifestBytes);
+  const receiptBytes=fs.readFileSync(returnedReceiptFile),record=JSON.parse(receiptBytes);
+  if(path.resolve(returnedReceiptFile)!==path.resolve(request.resultFile+'.receipt.json.'+hash(receiptBytes)+'.json')
+    ||record.kind!==(request.scope==='standalone-task'?'standalone-native-continuation':'milestone-native-continuation')
+    ||record.recovery_identity_sha256!==roots.digest(requestIdentity(request))
+    ||record.phase!=='executed'||record.result?.status!=='done'||!resultContract.validate(record.result).ok
+    ||record.manifest_sha256!==hash(manifestBytes)||record.dispatch_id!==request.dispatchId
+    ||record.fingerprint!==side.artifactFingerprint(request)||roots.digest(manifest.request)!==roots.digest(request))fail('verification-continuation-returned-binding');
+  const plan=fs.readFileSync(request.planFile,'utf8'),original=verificationPolicy(request,plan);
+  if(roots.digest(original.seal)!==roots.digest(manifest.verification_seal))fail('verification-continuation-original-seal');
+  // normalizeExecutionVerification enforces prefix-only extension and unchanged
+  // timeouts. Check effective commands too: no implicit plan/default is lost.
+  const seal=api('forge-verify').normalizeExecutionVerification(request.execution_contract,plan,request.verification||{},verification,original.identity);
+  if(seal.command_timeout_ms!==original.seal.command_timeout_ms)fail('verification-continuation-timeout-replacement');
+  let added=0;
+  for(const before of original.seal.roots){
+    const after=seal.roots.find(row=>row.root_id===before.root_id);
+    if(!after||before.commands.some((command,i)=>after.commands[i]!==command))fail('verification-continuation-command-replacement');
+    added+=after.commands.length-before.commands.length;
+  }
+  if(!added)fail('verification-continuation-append-required');
+  const check=()=>{
+    assertAuthority();if(attestStoppedWriter()!==true)fail('verification-continuation-writer-not-stopped');
+    if(hash(fs.readFileSync(manifestFile))!==hash(manifestBytes)||hash(fs.readFileSync(returnedReceiptFile))!==hash(receiptBytes)
+      ||hash(fs.readFileSync(request.planFile))!==manifest.plan_sha256||hash(fs.readFileSync(request.contextFile))!==manifest.context_sha256
+      ||roots.digest(execution.replayState(request.cwd,request.execution_contract))!==roots.digest(record.code_state))fail('verification-continuation-state-changed');
+  };
+  check();
+  const evidence={schema_version:1,reference,manifest_sha256:hash(manifestBytes),receipt_sha256:hash(receiptBytes),result_sha256:hash(JSON.stringify(record.result)),original_seal_sha256:original.seal.sha256,verification_seal:seal};
+  const capability=Object.freeze({});verificationContinuations.set(capability,{check,evidence,request_digest:roots.digest(request),manifest_digest:roots.digest(manifest),result_digest:roots.digest(record.result)});return capability;
+}
 // Diagnostics identify bounded positional checks, never copy root names,
 // commands, output, paths or worker-controlled error text into the exception.
 function verificationFailure(capture) {
@@ -397,7 +436,7 @@ function phaseNotifier(onPhase,r){
   return phase=>{try{onPhase(Object.freeze({schema_version:1,phase,dispatch_id:r.dispatchId,unit:r.unitType+'/'+r.taskId,
     worker_mode:'native',at:new Date().toISOString()}));}catch{/* observer errors never affect delivery */}};
 }
-function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linkedEntryOptions,savedManifest,persistDeliveryReceipt,leaseRenewal,documentaryContinuation,coveragePolicy,supplementalCoverage,onPhase,onCheck}={}){
+function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linkedEntryOptions,savedManifest,persistDeliveryReceipt,leaseRenewal,documentaryContinuation,coveragePolicy,supplementalCoverage,verificationContinuation,onPhase,onCheck}={}){
   if(typeof assertBoundary!=='function'||typeof assertAuthority!=='function')fail('live-controller-boundary-required');
   let r=structuredClone(request);
   const phase=phaseNotifier(onPhase,r);
@@ -429,6 +468,9 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
   const planHash=hash(plan),contextHash=hash(context);
   const inputs = savedManifest?.inputs || (taskPreparation ? Object.keys(taskPreparation.inputs).map(file=>['Task input',file]) : inputSections(r)).map(([label,file]) => ({label,file,sha256:hash(fs.readFileSync(file))}));
   const {identity:verificationIdentity,seal}=verificationPolicy(r,plan);
+  const verificationExtra=verificationContinuation===undefined?null:verificationContinuations.get(verificationContinuation);
+  if(verificationContinuation!==undefined&&(!verificationExtra||!savedManifest||documentary||coveragePolicy||supplementalCoverage
+    ||verificationExtra.request_digest!==roots.digest(wireRequest)||verificationExtra.manifest_digest!==roots.digest(savedManifest)))fail('verification-continuation-capability-required');
   const loc=side.locations(r),inventory=api('forge-delivery').inventoryPlan(plan,r.planFile,loc.rules[loc.delivery.input].unit);
   // Same derivation as the sidecar helpers: validated IDs only, never worker paths.
   const markerPath=standalone?null:loc.slice+'/'+r.sliceId+'-PLAN.md';
@@ -469,6 +511,8 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
   if(policy&&documentary)fail('documentary-policy-continuation-conflict');
   let initialReview=null;
   function guard(publishing=false){
+    if(verificationExtra)verificationExtra.check();
+    if(verificationExtra&&roots.digest(manifest)!==verificationExtra.manifest_digest)fail('verification-continuation-manifest-changed');
     if(supplement)supplement.check();
     if(policy&&fs.existsSync(manifestFile)&&roots.digest(JSON.parse(fs.readFileSync(manifestFile,'utf8')))!==roots.digest(manifest))fail('documentary-manifest-changed');
     if(documentary)documentary.check();
@@ -577,6 +621,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       return {manifest_file:manifestFile,manifest_sha256:hash(bytes),receipt_file:receiptFile};
     },
     returned(result){
+      if(verificationExtra)fail('verification-continuation-replay-only');
       if(supplement)fail('supplemental-replay-only');
       guard();
       if(!resultContract.validate(result).ok)fail('native-result-invalid');
@@ -588,18 +633,20 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
     },
     verify(result){
       guard();if(!resultContract.validate(result).ok||result.status!=='done')fail('native-result-not-done');
+      if(verificationExtra&&roots.digest(result)!==verificationExtra.result_digest)fail('verification-continuation-result-changed');
       if(policy&&(!initialReview||roots.digest(result)!==roots.digest(initialReview.derived)))fail('documentary-review-required');
       if(documentary&&roots.digest(result)!==roots.digest(documentary.derived))fail('documentary-result-changed');
       const delta=execution.verifyResult(r.cwd,prepared,result),loc=side.locations(r),resourceEvents=[];
       phase('verifying');
       const capture=verify.captureRootDelivery(r.execution_contract,plan,{...r.verification,unit:loc.rules[loc.delivery.input].unit,
-        verificationSeal:seal,verificationIdentity,resourceEventSink:line=>resourceEvents.push(line),
+        verificationSeal:verificationExtra?.evidence.verification_seal||seal,verificationIdentity,resourceEventSink:line=>resourceEvents.push(line),
         ...(typeof onCheck==='function'?{onCheck}:{})});
       // Retain actual command results before guards or criterion binding can
       // refuse. This private evidence is neither a ready receipt nor authority
       // to replay/skip verification. Its digest binds the original result and
       // exact manifest; failed attempts remain failed.
       const captured={schema_version:1,kind:'native-verification-capture',dispatch_id:r.dispatchId,
+        ...(verificationExtra?{verification_continuation:structuredClone(verificationExtra.evidence)}:{}),
         manifest_sha256:hash(fs.readFileSync(manifestFile)),result_sha256:hash(JSON.stringify(result)),capture};
       const captureBytes=JSON.stringify(captured)+'\n',retained=path.join(path.dirname(r.resultFile),'forge-verification-'+hash(captureBytes)+'.json');
       for(const root of [r.contextRoot,...r.execution_contract.code_roots.map(row=>row.path)])api('forge-xllm').validateResultFileTarget(retained,root);
@@ -638,6 +685,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       // Issue 282: owner marker last, CAS on the prepared preimage, never recaptured.
       if(markerPath){const marker=side.createTaskMarker(r,r.contextRoot,prepared.protected_owner[markerPath]);if(marker)artifacts.push(marker);}
       const record={kind:'native-execute-task',phase:'ready',dispatch_id:r.dispatchId,result,artifacts,route:r.route,response_sha256:hash(JSON.stringify(result)),
+        ...(verificationExtra?{verification_continuation:structuredClone(verificationExtra.evidence)}:{}),
         ...(supplement?{supplemental_coverage:structuredClone(supplement.evidence)}:{}),
         ...(renewal?{lease_reconciliation:renewal.evidence}:{}),
         fingerprint:side.artifactFingerprint(r),recovery_identity_sha256:roots.digest(requestIdentity(r,linkedEntryOptions)),
@@ -653,6 +701,13 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
     },
     replayReady(record){
       guard(true);
+      if(Boolean(record.verification_continuation)!==Boolean(verificationExtra)
+        ||verificationExtra&&roots.digest(record.verification_continuation)!==roots.digest(verificationExtra.evidence))fail('verification-continuation-replay-authority-required');
+      if(verificationExtra){
+        if(roots.digest(record.result)!==verificationExtra.result_digest||record.manifest_sha256!==verificationExtra.evidence.manifest_sha256)fail('verification-continuation-ready-binding');
+        const bytes=JSON.stringify(record),file=receiptFile+'.'+hash(bytes)+'.json';
+        if(!fs.existsSync(file)||fs.readFileSync(file,'utf8')!==bytes)fail('verification-continuation-ready-receipt-required');
+      }
       if(Boolean(record.supplemental_coverage)!==Boolean(supplement)
         ||supplement&&roots.digest(record.supplemental_coverage)!==roots.digest(supplement.evidence))fail('supplemental-replay-authority-required');
       for(const artifact of record.artifacts||[]){
@@ -792,4 +847,4 @@ async function replay({request,recovery,runtime,nativeOptions}) {
   const verified=successor(()=>session.verify(effectiveResult)),published=successor(()=>session.publish(effectiveResult));
   return {action:'replay',provider_called:false,result:{verified,published}};
 }
-module.exports={prepare,replay,requireExplicitVerify,criterionBindings,resultContract,packagePrompt,createLeaseRenewalReconciliation,reconcileLeaseRenewalSurface,createDocumentaryContinuation};
+module.exports={prepare,replay,requireExplicitVerify,criterionBindings,resultContract,packagePrompt,createLeaseRenewalReconciliation,reconcileLeaseRenewalSurface,createDocumentaryContinuation,createVerificationContinuation};
