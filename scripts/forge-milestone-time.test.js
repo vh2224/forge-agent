@@ -255,14 +255,13 @@ try {
   test('interrupted-publication-leaves-history-intact-and-resumes-under-owner-lock', () => {
     const { cwd, contract } = activate(), p = time.timePaths({ cwd, milestone: M });
     const staged = () => fs.existsSync(p.staging) ? fs.readdirSync(p.staging) : [];
-    // A separate process interrupted after staging the bytes and before the hard link
-    // commit; its staging file is never cleaned up (the owner lock is released).
+    // A separate process exits abruptly after staging and before the hard link.
+    // No finally runs: both staging and its dead owner mutex remain for recovery.
     const warning = { id: 'forecast-1', kind: 'at-risk', at: new Date(NOW).toISOString() };
-    const script = `const fs=require('fs'),unlink=fs.unlinkSync;fs.linkSync=()=>{throw Object.assign(new Error('killed'),{code:'EKILLED'})};`
-      + `fs.unlinkSync=f=>{if(!String(f).endsWith('.tmp'))unlink(f)};require(${JSON.stringify(require.resolve('./forge-milestone-time'))})`
+    const script = `const fs=require('fs');fs.linkSync=()=>process.exit(77);require(${JSON.stringify(require.resolve('./forge-milestone-time'))})`
       + `.recordWarning({cwd:${JSON.stringify(cwd)},milestone:${JSON.stringify(M)},record:${JSON.stringify(warning)}});`;
     const crashed = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8' });
-    assert.notStrictEqual(crashed.status, 0); assert.match(crashed.stderr, /EKILLED/);
+    assert.strictEqual(crashed.status, 77); assert.strictEqual(crashed.stderr, '');
     assert.strictEqual(staged().length, 1, 'the interrupted staging file exists outside committed directories');
     assert.ok(!fs.existsSync(p.warnings) || fs.readdirSync(p.warnings).length === 0);
     assert.strictEqual(time.readContract({ cwd, milestone: M }).status, 'valid');

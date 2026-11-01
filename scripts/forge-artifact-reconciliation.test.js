@@ -5,7 +5,54 @@ const path = require('path');
 const api = require('./forge-artifact-reconciliation');
 const unit = require('./forge-unit-sidecar');
 const { laboratory } = require('./forge-code-roots.test');
+function processMutexChecks() {
+  const { spawnSync } = require('child_process'), os = require('os'), roots = require('./forge-code-roots');
+  const lab = laboratory('publication-process-mutex'), owner = path.join(lab.dir, 'owner');
+  fs.mkdirSync(owner); fs.mkdirSync(path.join(owner, '.gsd'));
+  const physicalOwner = fs.realpathSync.native(owner);
+  const lockRoot = path.join(os.tmpdir(), 'forge-artifact-owner-' + roots.digest(roots.key(physicalOwner)));
+  const locks = path.join(lockRoot, '.gsd/.locks'), mutex = path.join(locks, 'publication');
+  try {
+    const live = api.lock({ owner });
+    try {
+      const metadataFile = path.join(mutex, 'metadata.json'), meta = JSON.parse(fs.readFileSync(metadataFile));
+      // An old timestamp is insufficient while the actual holder is alive.
+      fs.writeFileSync(metadataFile, JSON.stringify({ ...meta, renewed_at: 0, ttl_ms: 1 }));
+      let entered = false;
+      assert.throws(() => api.withOwnerLock(owner, () => { entered = true; }), e => e.code === 'LOCK_BUSY');
+      assert.strictEqual(entered, false);
+      assert.strictEqual(JSON.parse(fs.readFileSync(metadataFile)).owner_token, meta.owner_token);
+    } finally { assert.strictEqual(live.release().ok, true); }
+    assert.strictEqual(api.withOwnerLock(owner, () => 'ordinary-release'), 'ordinary-release');
+    const script = `require(${JSON.stringify(require.resolve('./forge-artifact-reconciliation'))})`
+      + `.withOwnerLock(${JSON.stringify(owner)},()=>process.exit(77));`;
+    const child = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', windowsHide: true });
+    assert.strictEqual(child.status, 77); assert.strictEqual(child.stderr, '');
+    const original = fs.readFileSync(path.join(mutex, 'metadata.json')), meta = JSON.parse(original);
+    assert.strictEqual(meta.holder_pid, child.pid);
+    assert.throws(() => process.kill(child.pid, 0), e => e.code === 'ESRCH');
+    assert.strictEqual(api.withOwnerLock(owner, () => 'dead-holder-recovered'), 'dead-holder-recovered');
+    assert(!fs.existsSync(mutex), 'the new owner released its own mutex normally');
+    const quarantines = fs.readdirSync(locks).filter(n => n.startsWith('publication.quarantine-dead-process-'));
+    assert.strictEqual(quarantines.length, 1);
+    const retained = path.join(locks, quarantines[0]);
+    assert.deepStrictEqual(fs.readFileSync(path.join(retained, 'metadata.json')), original);
+    assert(fs.readdirSync(retained).some(n => n.startsWith('owner-' + meta.owner_token + '.dead-')));
+    console.log('PASS publication mutex refuses live aged holder, recovers abrupt-exit ESRCH and retains exact quarantine evidence');
+  } finally {
+    // Only this fixture's canonical external mutex directory is removed.
+    if (fs.existsSync(lockRoot)) {
+      assert(!fs.lstatSync(lockRoot).isSymbolicLink());
+      const absolute = fs.realpathSync.native(lockRoot), temp = fs.realpathSync.native(os.tmpdir());
+      assert.strictEqual(path.dirname(absolute), temp);
+      assert.strictEqual(path.basename(absolute), 'forge-artifact-owner-' + roots.digest(roots.key(physicalOwner)));
+      fs.rmSync(absolute, { recursive: true, force: true });
+    }
+    lab.cleanup();
+  }
+}
 async function main() {
+  processMutexChecks();
   const lab = laboratory('broker'), owner = path.join(lab.dir, 'owner'), code = path.join(lab.dir, 'code');
   fs.mkdirSync(owner); fs.mkdirSync(code);
   const events = path.join(owner, '.gsd/forge/events.jsonl'), prefix = '{"event":"baseline"}\n';
