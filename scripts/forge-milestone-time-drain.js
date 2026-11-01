@@ -7,6 +7,15 @@ const crypto = require('crypto');
 const DRAIN_STATES = Object.freeze(['not-applicable', 'draining', 'drained', 'incomplete-unknown']);
 const WRITER_CLASSES = Object.freeze(['terminal', 'healthy', 'dead-requires-failure-consumption',
   'saved-response-requires-publication', 'unknown']);
+const CLAIM_STATES = Object.freeze(['absent', 'released', 'held', 'retained-reconciled', 'unknown']);
+// Published limits of what an inspection can observe. Checkpoint safety is a
+// statement about the observed physical roots and live adapters only.
+const OBSERVABILITY_LIMITS = Object.freeze([
+  'observed-physical-roots-only',
+  'native-batch-children-unobservable',
+  'unknown-process-probe-never-drains',
+  'host-adapters-required-for-live-proof',
+]);
 const MAX_WRITERS = 256, MAX_RECORDS = 4096, MAX_FILE = 1024 * 1024;
 const TERMINAL_KINDS = ['completed', 'failed-persisted', 'paused', 'expired-safe'];
 function fail(code) { throw Object.assign(new Error(code), { code }); }
@@ -16,6 +25,18 @@ function nowOf(options) {
   return now;
 }
 function hash(bytes) { return crypto.createHash('sha256').update(bytes).digest('hex'); }
+function digest(value) { return hash(JSON.stringify(value)); }
+const RETAINED_HASHES = Object.freeze(['claim_sha256', 'generation_sha256', 'contract_sha256', 'paths_sha256', 'begin_sha256',
+  'terminal_sha256', 'request_sha256', 'receipt_sha256', 'roots_sha256', 'code_sha256']);
+// Checkpoint evidence holds bounded IDs and digests only, never paths or bytes.
+function validRetained(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value) && value.schema_version === 1
+    && Object.keys(value).length === RETAINED_HASHES.length + 5
+    && ['run', 'unit'].every(key => typeof value[key] === 'string' && value[key].length <= 200)
+    && (value.slice === null || typeof value.slice === 'string' && value.slice.length <= 120)
+    && ['failure-consumed', 'published'].includes(value.reconciliation)
+    && RETAINED_HASHES.every(key => /^[a-f0-9]{64}$/.test(value[key] || ''));
+}
 function noLinks(file) {
   for (let cursor = path.resolve(file);;) {
     try { if (fs.lstatSync(cursor).isSymbolicLink()) fail('time-drain-source-link'); }
@@ -119,7 +140,114 @@ function classifyAttempt(cwd, milestone, row, options, sources) {
     state: 'failure-consumption-required', reason: 'existing-consume-failure-required' };
   return unknown('terminal-failure-unverified');
 }
-function inspectDrain(cwd, milestone, options = {}) {
+function physicalRoots(list) {
+  if (!Array.isArray(list) || !list.length || list.length > 16) fail('time-drain-roots-invalid');
+  const ids = new Set();
+  return list.map(root => {
+    if (!root || typeof root.root_id !== 'string' || !root.root_id || ids.has(root.root_id)
+        || typeof root.path !== 'string' || !path.isAbsolute(root.path)) fail('time-drain-roots-invalid');
+    ids.add(root.root_id); noLinks(root.path);
+    const real = fs.realpathSync.native(root.path), stat = fs.statSync(real, { bigint: true });
+    if (!stat.isDirectory()) fail('time-drain-roots-invalid');
+    return { root_id: root.root_id, path: real, dev: String(stat.dev), ino: String(stat.ino) };
+  }).sort((a, b) => a.root_id.localeCompare(b.root_id));
+}
+// A held fence may legitimately outlive its proven terminal writer: dirty work
+// kept under auto_commit:false, or a pre-provider refusal that wrote nothing.
+// Claim presence, a terminal event or a missing PID prove nothing. Exact current
+// claim/run/request/receipt bindings plus the trusted live owner adapter may
+// establish it. Nothing here releases, clears, resets or rewrites a claim.
+function retainedClaim(cwd, milestone, rawClaim, attempts, options, sources) {
+  const unknown = reason => ({ status: 'unknown', reason }), held = reason => ({ status: 'held', reason });
+  if (typeof options.reconcileRetainedClaim !== 'function') return held('retained-proof-not-offered');
+  if (typeof options.inspectAttempt !== 'function' || typeof options.processProbe !== 'function') return unknown('retained-host-inspector-required');
+  const roots = require('./forge-code-roots'), recovery = require('./forge-attempt-recovery');
+  let claim;
+  try {
+    claim = require('./forge-write-claim').validateHeldClaim(structuredClone(rawClaim));
+    if (claim.schema_version !== 2 || typeof claim.generation !== 'string' || !claim.generation.trim()) return unknown('retained-claim-generation-required');
+    roots.validateContract(claim.execution_contract, { owner: cwd, revalidate: true }); roots.claimGroups(claim);
+  } catch { return unknown('retained-claim-invalid'); }
+  // Unit names repeat across slices and attempts: bind the exact latest begin.
+  const own = attempts.filter(item => item.row.unit === claim.unit);
+  if (!own.length) return unknown('retained-writer-unbound');
+  if (own.some(item => item.classification.classification !== 'terminal')) return held('retained-writer-not-terminal');
+  const latest = Math.max(...own.map(item => item.row.start)), bound = own.filter(item => item.row.start === latest);
+  if (bound.length !== 1 || !bound[0].row.begin_key || !bound[0].row.end_key) return unknown('retained-writer-ambiguous');
+  const row = bound[0].row, begin = sources.record(cwd, 'transaction', row.begin_key), end = sources.record(cwd, 'transaction', row.end_key);
+  if (!begin || begin.action !== 'begin' || begin.phase !== 'committed' || begin.milestone !== milestone || begin.unit?.key !== claim.unit
+      || !end || end.phase !== 'committed' || end.milestone !== milestone || end.unit?.key !== claim.unit
+      || end.lease_generation !== begin.lease_generation || end.host_runtime !== begin.host_runtime) return unknown('retained-transaction-mismatch');
+  let context;
+  try { context = options.inspectAttempt({ cwd, begin: structuredClone(begin), references: {} }); } catch { return unknown('retained-attempt-evidence-missing'); }
+  if (!context || typeof context.receipt_path !== 'string' || !context.request || !Array.isArray(context.roots)) return unknown('retained-attempt-evidence-missing');
+  const receiptBytes = sources.read(context.receipt_path);
+  if (!receiptBytes) return unknown('retained-receipt-missing');
+  let identity;
+  try { identity = recovery.requestIdentity(recovery.canonicalRequest(context.request)); } catch { return unknown('retained-request-invalid'); }
+  const slice = begin.after?.state?.active_slice;
+  if (`${identity.unit_type}/${identity.task_id || identity.slice_id || identity.milestone_id}` !== claim.unit
+      || identity.milestone_id !== milestone || identity.host !== begin.host_runtime
+      || identity.slice_id && identity.slice_id !== slice || context.request.runId !== milestone
+      || roots.digest(context.request.claim ?? null) !== roots.digest(rawClaim)
+      || roots.digest(context.request.execution_contract ?? null) !== roots.digest(claim.execution_contract)) return unknown('retained-request-mismatch');
+  let probe = 'unknown', inspection;
+  try {
+    inspection = recovery.inspectReceipt(context.receipt_path, { request: context.request,
+      processProbe: receipt => { probe = options.processProbe(receipt); return probe; } });
+  } catch { return unknown('retained-receipt-unreadable'); }
+  if (inspection.receipt_sha256 !== hash(receiptBytes)) fail('time-drain-source-unstable');
+  const receipt = inspection.receipt;
+  if (receipt.recovery_identity_sha256 && receipt.recovery_identity_sha256 !== roots.digest(identity)
+      || receipt.fingerprint && receipt.fingerprint !== require('./forge-unit-sidecar').artifactFingerprint(context.request)
+      || !receipt.recovery_identity_sha256 && !receipt.fingerprint) return unknown('retained-receipt-identity-mismatch');
+  if (probe === 'alive' || probe === 'stopped' && inspection.process_stopped !== true) return held('retained-writer-live');
+  if (probe !== 'stopped' || inspection.process_stopped !== true) return unknown('retained-process-unknown');
+  let reconciliation, failure = null;
+  if (end.terminal_failure) {
+    failure = require('./forge-unit-controller').failureProjection(cwd, milestone).find(item => item.transaction.idempotency_key === end.idempotency_key);
+    if (!failure || failure.begin.idempotency_key !== begin.idempotency_key || end.terminal_failure.begin_key !== begin.idempotency_key
+        || failure.transaction.terminal_failure.safety.receipt_sha256 !== inspection.receipt_sha256) return unknown('retained-failure-unbound');
+    if (inspection.valid_saved_response || !['failed', 'abandoned'].includes(inspection.phase)) return held('retained-publication-required');
+    reconciliation = 'failure-consumed';
+  } else if (end.action === 'complete' && end.boundary?.kind === 'completed') {
+    if (inspection.phase !== 'ready') return held('retained-publication-required');
+    reconciliation = 'published';
+  } else return held('retained-terminal-unreconciled');
+  let live, code;
+  try {
+    live = physicalRoots(context.roots);
+    const required = [cwd, context.request.cwd, context.request.contextRoot || context.request.cwd, claim.execution_contract.owner,
+      ...claim.execution_contract.code_roots.map(root => root.path)].map(file => fs.realpathSync.native(file));
+    if (required.some(file => !live.some(root => root.path === file))) return unknown('retained-roots-incomplete');
+    code = roots.digest(require('./forge-task-execution').replayState(null, claim.execution_contract));
+  } catch { return unknown('retained-roots-invalid'); }
+  if (failure && roots.digest(live) !== roots.digest(failure.transaction.terminal_failure.safety.roots)) return unknown('retained-roots-changed');
+  // The owner adapter attests its own live observation; it never receives the
+  // expected digests, so an echo cannot mint the proof.
+  let proof;
+  try {
+    proof = options.reconcileRetainedClaim({ cwd, milestone, claim: structuredClone(rawClaim), begin: structuredClone(begin),
+      terminal: structuredClone(end), receipt_path: context.receipt_path, request: context.request, roots: structuredClone(live) });
+  } catch { return unknown('retained-proof-refused'); }
+  const expected = { run_id: milestone, unit: claim.unit, slice: identity.slice_id || null, begin_key: begin.idempotency_key,
+    claim_generation: claim.generation, receipt_sha256: inspection.receipt_sha256, reconciliation };
+  if (!proof || typeof proof !== 'object' || proof.writer_ended !== true || typeof proof.reference !== 'string' || !proof.reference.trim()
+      || Object.entries(expected).some(([key, value]) => proof[key] !== value)
+      || proof.claim_generation === begin.lease_generation || proof.claim_generation === end.lease_generation
+      || !Array.isArray(proof.roots) || proof.roots.length !== live.length
+      || live.some(root => !proof.roots.some(item => item?.root_id === root.root_id && item.reconciled === true && item.process_stopped === true))) {
+    return unknown('retained-proof-mismatch');
+  }
+  return { status: 'retained-reconciled', reason: 'retained-reconciled', evidence: { schema_version: 1, run: milestone,
+    unit: claim.unit, slice: expected.slice, reconciliation, claim_sha256: roots.digest(rawClaim),
+    generation_sha256: roots.digest(claim.generation), contract_sha256: roots.digest(claim.execution_contract),
+    paths_sha256: roots.digest(claim.paths), begin_sha256: roots.digest(begin), terminal_sha256: roots.digest(end),
+    request_sha256: roots.digest(identity), receipt_sha256: inspection.receipt_sha256,
+    roots_sha256: roots.digest(live), code_sha256: code } };
+}
+function inspectDrain(cwd, milestone, options = {}) { return inspect(cwd, milestone, options, false); }
+function inspect(cwd, milestone, options, belowCap) {
   const time = require('./forge-milestone-time'), input = { cwd, milestone }, now = nowOf(options);
   // timePaths validates identity even on an absent contract. Public projections
   // contain logical references only, never owner/session/receipt paths.
@@ -134,8 +262,9 @@ function inspectDrain(cwd, milestone, options = {}) {
   if (status.contract !== 'valid' || status.contract_version !== contract.version
       || !Number.isSafeInteger(status.clocks?.consumed_ms)) return { ...base, reason: 'milestone-clock-unknown', unknowns: ['milestone-clock-unknown'] };
   base.consumed_ms = status.clocks.consumed_ms; base.unknown_ms = status.clocks.unknown_ms;
-  if (base.consumed_ms < base.ceiling_ms) return { ...base, state: 'not-applicable', reason: 'not-exhausted', claim: 'not-inspected' };
-  const sources = sourceReader();
+  if (base.consumed_ms < base.ceiling_ms && !belowCap) return { ...base, state: 'not-applicable', reason: 'not-exhausted', claim: 'not-inspected' };
+  base.observability = OBSERVABILITY_LIMITS;
+  const sources = sourceReader(), attempts = [];
   try {
     const phase = require('./forge-phase-cost'), controller = require('./forge-unit-controller'), lease = require('./forge-unit-lease');
     const events = phase.analyzeEventIntervals(sources.read(path.join(cwd, '.gsd/milestones', milestone,
@@ -181,6 +310,7 @@ function inspectDrain(cwd, milestone, options = {}) {
         classification: 'unknown', state: 'inspection-required', reason: 'terminal-lease-retained' };
       base.writers.push({ unit: row.unit, begin_key: row.begin_key, source: row.source,
         ...classification, lease: { present: !!observed.lease, reason: observed.reason } });
+      attempts.push({ row, classification });
     }
     const runFile = path.join(cwd, '.gsd/forge/runs', milestone + '.json'), bytes = sources.read(runFile);
     const run = require('./forge-runs').get(cwd, milestone);
@@ -191,6 +321,12 @@ function inspectDrain(cwd, milestone, options = {}) {
     const rawClaim = bytes ? JSON.parse(bytes).write_claim : undefined;
     base.claim = rawClaim === null || rawClaim === undefined ? 'absent'
       : require('./forge-write-claim').isHeld(rawClaim) ? 'held' : 'released';
+    if (base.claim === 'held') {
+      const retained = retainedClaim(cwd, milestone, rawClaim, attempts, { ...options, now }, sources);
+      base.claim = retained.status; base.claim_reason = retained.reason;
+      if (retained.evidence) base.retained = retained.evidence;
+      if (retained.status === 'unknown') base.unknowns.push('claim-unknown');
+    }
     sources.recheck();
     const after = time.readContract(input);
     if (after.status !== 'valid' || after.version !== contract.version || after.sha256 !== contract.sha256) fail('time-drain-source-unstable');
@@ -234,12 +370,22 @@ function checkpointIfDrained(cwd, milestone, options = {}) {
     const record = prior || { kind: 'time-drain', version: contract.version, at: new Date(nowOf(options)).toISOString(),
       contract_sha256: contract.sha256, ceiling_ms: current.ceiling_ms, consumed_ms: current.consumed_ms,
       unknown_ms: current.unknown_ms, overshoot_ms: Math.max(0, current.consumed_ms - current.ceiling_ms),
-      drain: { state: 'drained', writers: current.writers, open_begins: 0, ambiguous_groups: 0, pending_transactions: 0, claim: current.claim },
+      drain: { state: 'drained', writers: current.writers, open_begins: 0, ambiguous_groups: 0, pending_transactions: 0, claim: current.claim,
+        ...(current.claim === 'retained-reconciled' ? { retained: current.retained } : {}) },
       decision_pending: true, pending_decision: { id, question }, next_action: id + ': ' + question };
+    // Replay keeps the original proof. A claim, source or root change after the
+    // checkpoint invalidates it; only a canonical later release may follow it.
+    const priorRetained = prior?.drain?.claim === 'retained-reconciled';
+    if (prior && (priorRetained ? !(current.claim === 'released' || current.claim === 'retained-reconciled'
+      && digest(current.retained) === digest(prior.drain.retained)) : current.claim === 'retained-reconciled')) {
+      return { status: 'not-drained', reason_code: 'time-drain-retained-changed', drain: current };
+    }
     if (record.kind !== 'time-drain' || record.contract_sha256 !== contract.sha256 || record.drain?.state !== 'drained'
         || !Array.isArray(record.drain.writers) || record.drain.writers.some(row => row.classification !== 'terminal')
         || record.drain.open_begins !== 0 || record.drain.ambiguous_groups !== 0 || record.drain.pending_transactions !== 0
-        || !['absent', 'released'].includes(record.drain.claim) || record.ceiling_ms !== contract.contract.ceiling_ms
+        || !['absent', 'released', 'retained-reconciled'].includes(record.drain.claim)
+        || (record.drain.claim === 'retained-reconciled') !== validRetained(record.drain.retained)
+        || record.ceiling_ms !== contract.contract.ceiling_ms
         || !Number.isSafeInteger(record.consumed_ms) || record.consumed_ms < record.ceiling_ms
         || !Number.isSafeInteger(record.unknown_ms) || record.unknown_ms < 0 || record.unknown_ms > record.consumed_ms
         || record.overshoot_ms !== record.consumed_ms - record.ceiling_ms || !Number.isFinite(Date.parse(record.at))
@@ -279,6 +425,18 @@ function checkpointIfDrained(cwd, milestone, options = {}) {
     return { status: 'checkpointed', record, reference, personal: personalStatus };
   } finally { if (runLock) runLock.release(); controllerLock.release(); }
 }
+// Budget resume rechecks a retained-reconciled checkpoint from current sources
+// with fresh live adapters, also after an extension lifted the cap. A changed
+// claim, receipt, root, code state or successor writer invalidates the proof.
+function verifyRetainedCheckpoint(cwd, milestone, record, options = {}) {
+  if (record?.drain?.claim !== 'retained-reconciled' || !validRetained(record.drain.retained)) return { ok: false, reason: 'retained-checkpoint-invalid' };
+  const current = inspect(cwd, milestone, options, true);
+  if (current.state !== 'drained') return { ok: false, reason: 'retained-drain-incomplete', claim: current.claim };
+  if (current.claim !== 'retained-reconciled' || digest(current.retained) !== digest(record.drain.retained)) {
+    return { ok: false, reason: 'retained-proof-changed', claim: current.claim };
+  }
+  return { ok: true, reason: 'retained-reconciled' };
+}
 function main(argv = process.argv.slice(2), io = process, liveOptions = {}) {
   let action; const options = {};
   try {
@@ -303,5 +461,6 @@ function main(argv = process.argv.slice(2), io = process, liveOptions = {}) {
   }
 }
 
-module.exports = { DRAIN_STATES, WRITER_CLASSES, inspectDrain, checkpointIfDrained, main };
+module.exports = { DRAIN_STATES, WRITER_CLASSES, CLAIM_STATES, OBSERVABILITY_LIMITS, inspectDrain, checkpointIfDrained,
+  verifyRetainedCheckpoint, main };
 if (require.main === module) process.exitCode = main();

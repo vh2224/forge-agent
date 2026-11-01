@@ -129,11 +129,26 @@ function next(state, input, orchestrate) {
   }
   return publicResult('next', state, state.lifecycle, delegated.reason_code || 'controller-refused', 'stop', delegated);
 }
+// The same persisted snapshot continues after an extension. A failure consumed
+// by this workflow is not skipped through next: the owner names the required
+// linked entry, and only an explicit entry delegates the existing reenter seam.
 function resumeBudget(state, input, orchestrate) {
   if (state.lifecycle !== 'blocked' || !state.time_block) return publicResult('resume-budget', state, 'blocked', 'budget-resume-invalid', 'stop', null);
   if (state.pending_questions?.some(row => row.status === 'pending')) return publicResult('resume-budget', state, 'blocked', 'pending-questions', 'stop', null);
-  const delegated = orchestrate.run('resume-budget', { ...delegateInput(input, state), time_block: state.time_block });
+  const consumed = state.consumed_failure;
+  if (input.entry && state.step_count >= state.max_steps) return publicResult('resume-budget', state, 'blocked', 'step-budget-exhausted', 'stop', null);
+  const delegated = orchestrate.run('resume-budget', { ...delegateInput(input, state), time_block: state.time_block,
+    ...(consumed ? { consumed_failure: { unit: consumed.unit, failure_key: consumed.failure_key, failure_checksum: consumed.failure_checksum } } : {}) });
+  if (delegated.details?.pending_questions) state.pending_questions = delegated.details.pending_questions;
   if (delegated.outcome !== 'completed') return publicResult('resume-budget', state, 'blocked', delegated.reason_code, 'stop', delegated);
+  if (delegated.reason_code === 'entry-ready') {
+    delete state.time_block;
+    state.current_unit = safeUnit(delegated.unit); state.lifecycle = 'dispatch_required'; state.step_count += 1;
+    state.last_entry_id = input.entry.entry_id;
+    const result = publicResult('resume-budget', state, 'dispatch_required', 'entry-ready', 'dispatch', delegated);
+    const { snapshot: _snapshot, ...decision } = result; state.last_decision = decision;
+    return result;
+  }
   state.lifecycle = 'idle'; delete state.time_block;
   return next(state, input, orchestrate);
 }
@@ -215,7 +230,7 @@ function advance(snapshot, commandValue, input = {}, dependencies = {}) {
   const controller = dependencies.orchestrate || orchestrateDefault;
   if (!controller || typeof controller.run !== 'function') throw error('invalid-controller', 'forge-orchestrate indisponível');
   const trusted = {};
-  for (const name of ['prefsReader', 'inventoryReader', 'now', 'failpoint', 'inspectAttempt', 'processProbe', 'replaySavedResponse', 'reconcileRoots', 'captureEntryBaseline', 'entryAuthority', 'questionStateAdapter', 'userHome', 'env']) {
+  for (const name of ['prefsReader', 'inventoryReader', 'now', 'failpoint', 'inspectAttempt', 'processProbe', 'replaySavedResponse', 'reconcileRoots', 'captureEntryBaseline', 'entryAuthority', 'questionStateAdapter', 'reconcileRetainedClaim', 'userHome', 'env']) {
     if (dependencies[name] !== undefined) trusted[name] = dependencies[name];
   }
   const orchestrate = { run: (operation, payload) => controller.run(operation, payload, trusted),

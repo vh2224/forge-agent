@@ -110,7 +110,29 @@ if (process.argv[2] === '--child') {
     assert.deepEqual(drain.WRITER_CLASSES, ['terminal', 'healthy', 'dead-requires-failure-consumption',
       'saved-response-requires-publication', 'unknown']);
     assert(Object.isFrozen(drain.DRAIN_STATES)); assert(Object.isFrozen(drain.WRITER_CLASSES));
-    for (const name of ['inspectDrain', 'checkpointIfDrained', 'main']) assert.equal(typeof drain[name], 'function');
+    assert.deepEqual(drain.CLAIM_STATES, ['absent', 'released', 'held', 'retained-reconciled', 'unknown']);
+    assert(Object.isFrozen(drain.CLAIM_STATES)); assert(Object.isFrozen(drain.OBSERVABILITY_LIMITS));
+    assert(drain.OBSERVABILITY_LIMITS.includes('native-batch-children-unobservable'));
+    for (const name of ['inspectDrain', 'checkpointIfDrained', 'verifyRetainedCheckpoint', 'main']) assert.equal(typeof drain[name], 'function');
+  });
+  test('retained-proof-never-accepts-malformed-unbound-or-unoffered-claims', () => {
+    const f = begin(fixture()); terminal(f, 'fail');
+    const proof = { reconcileRetainedClaim: () => ({ writer_ended: true, reference: 'echo' }) };
+    for (const raw of [{ paths: [] }, { released: false }, { schema_version: 2, generation: 'g', paths: [] }]) {
+      write(f.cwd, '.gsd/forge/runs/M001.json', { id: M, kind: 'milestone', write_claim: raw });
+      const before = snapshot(f.cwd);
+      assert.equal(inspect(f).claim, 'held', JSON.stringify(raw));
+      const offered = inspect(f, { ...adapter(f, 'stopped'), ...proof });
+      assert.equal(offered.claim, 'unknown', JSON.stringify(raw)); assert.equal(offered.state, 'incomplete-unknown');
+      assert.equal(offered.claim_reason, 'retained-claim-invalid'); assert(!offered.retained);
+      assert.equal(checkpoint(f, { ...adapter(f, 'stopped'), ...proof }).status, 'not-drained');
+      assert.deepEqual(snapshot(f.cwd), before);
+    }
+    const missing = inspect(f, { ...f.options, ...proof });
+    assert.equal(missing.claim, 'unknown'); assert.equal(missing.claim_reason, 'retained-host-inspector-required');
+    for (const record of [null, { drain: { claim: 'released' } }, { drain: { claim: 'retained-reconciled', retained: { schema_version: 1 } } }]) {
+      assert.equal(drain.verifyRetainedCheckpoint(f.cwd, M, record, adapter(f, 'stopped')).ok, false);
+    }
   });
   test('no-contract-and-below-cap-are-pure-not-applicable', () => {
     for (const contract of [false, true]) {

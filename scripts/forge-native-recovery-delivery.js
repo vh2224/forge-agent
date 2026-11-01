@@ -552,7 +552,10 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       if(error.code!=='EEXIST'||fs.readFileSync(file,'utf8')!==bytes)throw error;
     }
     persistDeliveryReceipt({file,sha256});
+    return {file,sha256};
   };
+  let refusedClosure=null;
+  const open=()=>{if(refusedClosure)fail('native-refusal-closed');};
   return {
     reviewDocumentary({returnedReceiptFile,attestReview,attestStoppedWriter}={}){
       guard(true);
@@ -619,7 +622,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
     },
     manifest(){return structuredClone(manifest);},
     start(){
-      guard();
+      open();guard();
       const bytes=JSON.stringify(manifest);
       try {fs.writeFileSync(manifestFile,bytes,{flag:'wx'});}catch(error){
         if(error.code!=='EEXIST'||fs.readFileSync(manifestFile,'utf8')!==bytes)throw error;
@@ -627,7 +630,54 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       phase('executing');
       return {manifest_file:manifestFile,manifest_sha256:hash(bytes),receipt_file:receiptFile};
     },
+    // Owner closure for a started first native attempt whose host callback never
+    // ran. Only the exact process-local invokeNative outcome carries the witness;
+    // serialized flags, saved results or a worker identity never mint a failure.
+    // Cleanup checks ownership and integrity only: budget readmission would be
+    // refused by the very cap that closed this attempt. Claim and lease remain
+    // for the existing consume-failure/reentry protocol.
+    refuseNotInvoked(outcome){
+      if(verificationExtra||artifactReview||supplement||documentary||policy||renewal||savedManifest)fail('native-refusal-first-attempt-only');
+      const witness=api('forge-native-invocation').notInvokedWitness(outcome);
+      if(!witness||outcome.ok!==false||outcome.provider_called!==false||outcome.result!=null||outcome.host_identity
+        ||outcome.lifecycle?.host_identity||outcome.reason_code!==witness.reason_code||witness.provider_called!==false||witness.host_callbacks!==0
+        ||witness.invocation_sha256!==roots.digest(JSON.stringify(nativeInvocation))||witness.request_sha256!==roots.digest(wireRequest))fail('native-refusal-witness-required');
+      guard();
+      const manifestBytes=fs.existsSync(manifestFile)?fs.readFileSync(manifestFile,'utf8'):null;
+      if(manifestBytes!==JSON.stringify(manifest))fail('native-refusal-manifest-required');
+      const held=api('forge-runs').get(r.contextRoot,r.runId);
+      if(!held||held.active!==true||!api('forge-write-claim').isHeld(held.write_claim)||roots.digest(held.write_claim)!==roots.digest(r.claim))fail('native-refusal-claim-changed');
+      // Preexisting dirty bytes are part of the original baseline; any delta is not.
+      for(const snapshot of prepared.snapshots){
+        const root=r.execution_contract.code_roots.find(row=>row.id===snapshot.root_id);
+        if(!root)fail('native-refusal-code-changed');
+        const live=api('forge-surgical-reset').captureAttemptSnapshot(root.path);
+        if(live.start_sha!==snapshot.start_sha||roots.digest(live.pre_dirty)!==roots.digest(snapshot.pre_dirty))fail('native-refusal-code-changed');
+      }
+      const record={kind:standalone?'standalone-native-continuation':'milestone-native-continuation',phase:'failed',dispatch_id:r.dispatchId,
+        fingerprint:side.artifactFingerprint(r),recovery_identity_sha256:roots.digest(requestIdentity(r,linkedEntryOptions)),
+        route:r.route,manifest_sha256:hash(manifestBytes),invocation_sha256:witness.invocation_sha256,
+        failure:{status:'not-invoked',reason_code:witness.reason_code,layer:witness.layer,provider_called:false,possible_writes:false,
+          reconciliation_required:false,host_callbacks:0,witness:'process-local-invocation-guard'},
+        code_state:execution.replayState(r.cwd,r.execution_contract)};
+      const bytes=JSON.stringify(record),dir=path.dirname(receiptFile),prefix=path.basename(receiptFile)+'.';
+      if(fs.existsSync(r.resultFile))fail('native-refusal-saved-result');
+      const names=fs.readdirSync(dir).filter(name=>name.startsWith(prefix)&&name.endsWith('.json'));
+      if(names.length>64)fail('native-refusal-receipt-limit');
+      for(const file of [receiptFile,...names.map(name=>path.join(dir,name))]){
+        if(!fs.existsSync(file))continue;
+        if(fs.lstatSync(file).isSymbolicLink()||fs.statSync(file).size>1024*1024)fail('native-refusal-receipt-conflict');
+        const existing=fs.readFileSync(file,'utf8');
+        if(existing===bytes)continue;
+        let parsed=null;try{parsed=JSON.parse(existing);}catch{}
+        fail(['executed','ready'].includes(parsed?.phase)?'native-refusal-saved-result':'native-refusal-receipt-conflict');
+      }
+      const persisted=persist(record);
+      refusedClosure={...persisted,record};
+      return {receipt_file:persisted.file,receipt_sha256:persisted.sha256,record:structuredClone(record),provider_called:false};
+    },
     returned(result){
+      open();
       if(verificationExtra)fail('verification-continuation-replay-only');
       if(artifactReview)fail('artifact-advisory-replay-only');
       if(supplement)fail('supplemental-replay-only');
@@ -640,7 +690,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
         code_state:execution.replayState(r.cwd,r.execution_contract)});
     },
     verify(result){
-      guard();if(!resultContract.validate(result).ok||result.status!=='done')fail('native-result-not-done');
+      open();guard();if(!resultContract.validate(result).ok||result.status!=='done')fail('native-result-not-done');
       if(verificationExtra&&roots.digest(result)!==verificationExtra.result_digest)fail('verification-continuation-result-changed');
       if(artifactReview&&roots.digest(result)!==artifactReview.result_digest)fail('artifact-advisory-result-changed');
       if(policy&&(!initialReview||roots.digest(result)!==roots.digest(initialReview.derived)))fail('documentary-review-required');
@@ -684,6 +734,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       return structuredClone({capture,delta,resourceEvents,bindings});
     },
     publish(result){
+      open();
       if(!verified||verified.resultHash!==roots.digest(result))fail('verified-result-required');
       guard();execution.verifyResult(r.cwd,prepared,result);
       for(const envelope of verified.capture.artifacts){
@@ -711,7 +762,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       return record;
     },
     replayReady(record){
-      guard(true);
+      open();guard(true);
       if(Boolean(record.verification_continuation)!==Boolean(verificationExtra)
         ||verificationExtra&&roots.digest(record.verification_continuation)!==roots.digest(verificationExtra.evidence))fail('verification-continuation-replay-authority-required');
       if(verificationExtra){

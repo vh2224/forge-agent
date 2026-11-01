@@ -46,12 +46,17 @@ function failureDiagnostic(cause, input, stage, transactionKey) {
 const PROTOCOL_VERSION = '1.0.0';
 const OPERATIONS = Object.freeze(['init', 'status', 'next', 'complete', 'consume-failure', 'reenter', 'resume-budget']);
 const OUTCOMES = Object.freeze(['needs_input', 'completed', 'blocked', 'no_work', 'failed']);
+// Named results of the owner budget-resume boundary, including the explicit
+// consumed-failure continuation that only a linked entry may take.
+const BUDGET_RESUME_REASON_CODES = Object.freeze(['budget-resume-ready', 'budget-resume-invalid',
+  'budget-checkpoint-required', 'budget-extension-required', 'budget-retained-claim-changed',
+  'linked-reentry-required', 'budget-entry-invalid']);
 const REASON_CODES = Object.freeze([
   'initialized', 'already-initialized', 'status-ready', 'selected', 'unit-selected',
   'no-next-unit', 'needs-input', 'needs-input-boundary', 'not-initialized',
   'prefs-invalid', 'lease-active', 'transaction-pending', 'invalid-request', 'failed',
   'handoff-ready', 'boundary-missing', 'boundary-not-transferable', 'response-invalid',
-  ...milestoneTime.TIME_REASON_CODES,
+  ...milestoneTime.TIME_REASON_CODES, ...BUDGET_RESUME_REASON_CODES,
 ]);
 
 function own(value, key) { return Object.prototype.hasOwnProperty.call(value || {}, key); }
@@ -486,16 +491,28 @@ function linkedOperation(operation, inputValue, options) {
 // live-attested decision. Reconcile current durable state before next can run.
 function resumeBudget(inputValue, options = {}) {
   const input = normalizeInput(inputValue), blocked = inputValue.time_block;
-  const refuse = reason => base('resume-budget', 'blocked', reason, input);
+  const refuse = (reason, details) => Object.assign(base('resume-budget', 'blocked', reason, input), details ? { details } : {});
   if (!blocked || blocked.milestone !== input.milestone) return refuse('budget-resume-invalid');
   const time = require('./forge-milestone-time'), current = time.readContract({ cwd: input.cwd, milestone: input.milestone });
   if (current.status !== 'valid') return refuse('milestone-time-invalid');
   const checkpoint = time.readCheckpoints({ cwd: input.cwd, milestone: input.milestone });
-  if (checkpoint.status !== 'valid' || !checkpoint.records.some(row => row.version === blocked.contract_version
-    && row.contract_sha256 === blocked.contract_sha256 && row.drain?.state === 'drained')) return refuse('budget-checkpoint-required');
+  const record = checkpoint.status === 'valid' ? checkpoint.records.find(row => row.version === blocked.contract_version
+    && row.contract_sha256 === blocked.contract_sha256 && row.drain?.state === 'drained') : null;
+  if (!record) return refuse('budget-checkpoint-required');
   if (!current.chain.some(row => row.version > blocked.contract_version && row.kind === 'extension')) return refuse('budget-extension-required');
   const status = milestoneTime.readTimeStatus(input.cwd, input.milestone, options);
   if (!Number.isSafeInteger(status.remaining_ms) || status.remaining_ms <= 0) return refuse('milestone-budget-exhausted');
+  // A linked entry already recorded for this entry_id is replayed by the
+  // controller itself, which revalidates authority, baseline, roots and lease.
+  const entry = inputValue.entry;
+  if (entry && typeof entry.entry_id === 'string' && forgeController.lookupRecord(input.cwd, 'transaction',
+    `linked-entry:${crypto.createHash('sha256').update(entry.entry_id, 'utf8').digest('hex')}`)) return linkedOperation('reenter', inputValue, options);
+  // The proof covered one exact claim, receipt, root set and code state. Fresh
+  // live adapters recheck it after restart; any drift or successor refuses.
+  if (record.drain.claim === 'retained-reconciled') {
+    const proof = require('./forge-milestone-time-drain').verifyRetainedCheckpoint(input.cwd, input.milestone, record, options);
+    if (!proof.ok) return refuse('budget-retained-claim-changed', { retained: { reason: proof.reason } });
+  }
   if (forgeController.pendingTransactions(input.cwd).length) return refuse('transaction-pending');
   if (status.open_writers.length) return refuse('milestone-budget-draining');
   const questions = require('./forge-pending-questions').listPendingQuestions({ cwd: input.cwd,
@@ -515,7 +532,24 @@ function resumeBudget(inputValue, options = {}) {
       if (!transaction || transaction.milestone === input.milestone) return refuse('lease-active');
     }
   }
-  return base('resume-budget', 'completed', 'budget-resume-ready', input);
+  // A failure this workflow consumed stays failure-deferred after an extension.
+  // next would skip it or select other work; only an explicit linked entry
+  // continues it, and the controller admits that entry again before any lease.
+  // The snapshot locator can only narrow this path, never authorize an entry.
+  const failures = forgeController.failureProjection(input.cwd, input.milestone);
+  const deferred = failures.filter(item => !item.entry), consumed = inputValue.consumed_failure;
+  const locator = item => ({ unit: item.begin.unit.key, slice: item.slice || null,
+    failure_key: item.transaction.idempotency_key, failure_checksum: checksum(item.transaction) });
+  if (consumed) {
+    const known = failures.find(item => item.transaction.idempotency_key === consumed.failure_key);
+    if (!known || consumed.failure_checksum !== checksum(known.transaction)) return refuse('budget-entry-invalid');
+    if (!known.entry && !entry) return refuse('linked-reentry-required', { failures: [locator(known)] });
+  }
+  if (!entry) return base('resume-budget', 'completed', 'budget-resume-ready', input);
+  const target = deferred.find(item => item.transaction.idempotency_key === entry.failure_key);
+  if (!target || entry.failure_checksum !== checksum(target.transaction) || unit(inputValue.unit)?.key !== target.begin.unit.key
+    || consumed && consumed.failure_key !== entry.failure_key) return refuse('budget-entry-invalid');
+  return linkedOperation('reenter', inputValue, options);
 }
 function run(operation, input, options) {
   if (!OPERATIONS.includes(operation)) throw error('invalid-request', `operation inválida: ${operation}`);
@@ -555,4 +589,4 @@ function main(argv = process.argv.slice(2), output = process.stdout.write.bind(p
   }
 }
 if (require.main === module) process.exitCode = main();
-module.exports = { PROTOCOL_VERSION, OPERATIONS, OUTCOMES, REASON_CODES, normalizeInput, normalizeHost, init, status, next, handoff, run, parseArgs, main, checksum, validatePending };
+module.exports = { PROTOCOL_VERSION, OPERATIONS, OUTCOMES, REASON_CODES, BUDGET_RESUME_REASON_CODES, normalizeInput, normalizeHost, init, status, next, handoff, run, parseArgs, main, checksum, validatePending };

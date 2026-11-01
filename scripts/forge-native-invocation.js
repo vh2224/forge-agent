@@ -374,6 +374,24 @@ function preflightNativeBinding(options) {
   return { ...verdict, args: hasPrompt ? verdict.args : null, preflight: true };
 }
 
+// Process-local zero-call witnesses keyed by the exact outcome object. Only the
+// supervised wrapper below mints one, when its own guard refused before the host
+// callback ran. JSON clones, spread copies and imported provider_called:false
+// flags carry none; a resumed journal never reaches this wrapper.
+const notInvokedWitnesses = new WeakMap();
+function notInvokedWitness(outcome) {
+  return outcome && typeof outcome === 'object' ? notInvokedWitnesses.get(outcome) || null : null;
+}
+function witnessNotInvoked(outcome, invocation, options, layer) {
+  const roots = require('./forge-code-roots');
+  const identity = options.telemetryIdentity && typeof options.telemetryIdentity === 'object'
+    ? (({ linkedEntryBinding: _ignored, ...wire }) => wire)(options.telemetryIdentity) : null;
+  notInvokedWitnesses.set(outcome, Object.freeze({ schema_version: 1, kind: 'native-not-invoked', reason_code: outcome.reason_code,
+    layer, provider_called: false, host_callbacks: 0, invocation_sha256: roots.digest(JSON.stringify(invocation)),
+    request_sha256: identity ? roots.digest(identity) : null }));
+  return outcome;
+}
+
 async function invokeNative(options, invoke) {
   const started = Date.now();
   const telemetryApi = require('./forge-attempt-telemetry');
@@ -390,6 +408,7 @@ async function invokeNative(options, invoke) {
     effort: invocation.telemetry.effort_resolved }, invocation.args,
     options.promptContext ?? (invocation.args.prompt || invocation.args.message), 'native-tool');
   let invoked = false;
+  let refused = null;
   let observedProvider;
   let supervised;
   // The host identity rides on the lifecycle only when the host adapter reported one.
@@ -421,20 +440,25 @@ async function invokeNative(options, invoke) {
       route: options.resolvedDispatch, terminal: options.terminalResult,
       dispatchId: options.telemetryIdentity?.dispatchId ?? null,
     }, observer => {
-      require('./forge-milestone-time-admission').assertOwnerTransportEntry(options);
+      try { require('./forge-milestone-time-admission').assertOwnerTransportEntry(options); }
+      catch (error) { refused = error; throw error; }
       invoked = true;
       return invoke(invocation.args, invocation, observer);
     });
     observedProvider = supervised.provider_called;
-    if (!supervised.ok) return { ...invocation, ok: false, result: null,
-      reason_code: supervised.reason_code === 'native-terminal-unobserved' && options.invalidTerminalReason
-        ? options.invalidTerminalReason : supervised.reason_code,
-      provider_called: supervised.provider_called, lifecycle: supervised.lifecycle, ...hostIdentity(),
-      final_evidence: { ...evidence, stage: 'invoked', provider_called: supervised.provider_called,
-        duration_ms: Date.now() - started, native_lifecycle: supervised.lifecycle },
-      diagnostic: { reason_code: supervised.reason_code,
-        layer: require('./forge-milestone-time-admission').TRANSPORT_REFUSAL_CODES.includes(supervised.reason_code)
-          ? 'milestone-time-admission' : 'native-lifecycle' } };
+    if (!supervised.ok) {
+      const layer = require('./forge-milestone-time-admission').TRANSPORT_REFUSAL_CODES.includes(supervised.reason_code)
+        ? 'milestone-time-admission' : 'native-lifecycle';
+      const outcome = { ...invocation, ok: false, result: null,
+        reason_code: supervised.reason_code === 'native-terminal-unobserved' && options.invalidTerminalReason
+          ? options.invalidTerminalReason : supervised.reason_code,
+        provider_called: supervised.provider_called, lifecycle: supervised.lifecycle, ...hostIdentity(),
+        final_evidence: { ...evidence, stage: 'invoked', provider_called: supervised.provider_called,
+          duration_ms: Date.now() - started, native_lifecycle: supervised.lifecycle },
+        diagnostic: { reason_code: supervised.reason_code, layer } };
+      return refused && !invoked && supervised.provider_called === false && supervised.reason_code === refused.code
+        && !supervised.lifecycle?.host_identity ? witnessNotInvoked(outcome, invocation, options, layer) : outcome;
+    }
     const result = supervised.result;
     await assertGuard('after-invoke');
     assertBoundary('after-invoke');
@@ -489,6 +513,7 @@ module.exports = {
   buildNativeInvocation,
   preflightNativeBinding,
   invokeNative,
+  notInvokedWitness,
   codexTaskName,
   humanTaskName,
 };

@@ -122,6 +122,44 @@ try {
   assert.throws(() => loop.advance(loop.create({ mode: 'auto', workflow_id: 'host-lock', host_runtime: 'claude' }), 'next', { ...input(setup('linux', 'claude')), host_runtime: 'codex' }), (error) => error.code === 'host-runtime-mismatch');
   assert.throws(() => loop.create({ mode: 'unknown', workflow_id: 'bad', host_runtime: 'claude' }), (error) => error.code === 'invalid-mode');
 
+  // T10: a budget resume after a consumed failure never delegates next. The
+  // owner names the linked entry; only an explicit entry continues the unit.
+  {
+    const calls = [], reconcileRetainedClaim = () => ({});
+    const blocked = { ...loop.create({ mode: 'auto', workflow_id: 'budget-linked', host_runtime: 'codex', max_steps: 3 }),
+      lifecycle: 'blocked', step_count: 1, time_block: { milestone, contract_version: 1, contract_sha256: 'c'.repeat(64) },
+      consumed_failure: { begin: { idempotency_key: 'b' }, unit: { type: 'execute-task', id: 'T01', key: 'execute-task/T01' },
+        failure_key: 'consume-failure:f', failure_checksum: 'd'.repeat(64) }, pending_questions: [] };
+    const fake = reply => ({ run: (operation, payload, trusted) => { calls.push({ operation, payload, trusted }); return reply(operation, payload); } });
+    const required = loop.advance(blocked, 'resume-budget', { cwd: '/fixture', milestone, reconcileRetainedClaim: 'json-is-not-an-adapter' },
+      { orchestrate: fake(() => ({ outcome: 'blocked', reason_code: 'linked-reentry-required', details: { failures: [] } })), reconcileRetainedClaim });
+    assert.strictEqual(required.reason_code, 'linked-reentry-required');
+    assert.strictEqual(required.snapshot.lifecycle, 'blocked'); assert.deepStrictEqual(required.snapshot.time_block, blocked.time_block);
+    assert.deepStrictEqual(calls.map(row => row.operation), ['resume-budget']);
+    assert.deepStrictEqual(calls[0].payload.consumed_failure, { unit: blocked.consumed_failure.unit,
+      failure_key: 'consume-failure:f', failure_checksum: 'd'.repeat(64) });
+    assert.strictEqual(calls[0].trusted.reconcileRetainedClaim, reconcileRetainedClaim, 'only the trusted dependency is an adapter');
+    calls.length = 0;
+    const entry = { entry_id: 'linked-1', authorization_ref: 'live', failure_key: 'consume-failure:f', failure_checksum: 'd'.repeat(64) };
+    const entered = loop.advance(blocked, 'resume-budget', { cwd: '/fixture', milestone, unit: blocked.consumed_failure.unit, entry },
+      { orchestrate: fake(() => ({ outcome: 'completed', reason_code: 'entry-ready', unit: blocked.consumed_failure.unit,
+        details: { transaction: { idempotency_key: 'linked-entry:x' } } })) });
+    assert.strictEqual(entered.outcome, 'dispatch_required'); assert.strictEqual(entered.reason_code, 'entry-ready');
+    assert.strictEqual(entered.snapshot.step_count, 2); assert.strictEqual(entered.snapshot.last_entry_id, 'linked-1');
+    assert.strictEqual(entered.snapshot.time_block, undefined); assert.deepStrictEqual(calls.map(row => row.operation), ['resume-budget']);
+    calls.length = 0;
+    const exhausted = loop.advance({ ...blocked, step_count: 3 }, 'resume-budget', { cwd: '/fixture', milestone, entry },
+      { orchestrate: fake(() => { throw Error('must not delegate'); }) });
+    assert.strictEqual(exhausted.reason_code, 'step-budget-exhausted'); assert.strictEqual(calls.length, 0);
+    const { consumed_failure: _consumed, ...normal } = blocked;
+    const resumed = loop.advance(normal, 'resume-budget', { cwd: '/fixture', milestone },
+      { orchestrate: fake(operation => operation === 'resume-budget' ? { outcome: 'completed', reason_code: 'budget-resume-ready' }
+        : { outcome: 'completed', reason_code: 'unit-selected', unit: { type: 'execute-task', id: 'T02', key: 'execute-task/T02' } }) });
+    assert.strictEqual(resumed.outcome, 'dispatch_required');
+    assert.deepStrictEqual(calls.map(row => row.operation), ['resume-budget', 'next'], 'normal boundary path still delegates next');
+    assert.strictEqual(calls[0].payload.consumed_failure, undefined);
+  }
+
   const source = fs.readFileSync(path.join(__dirname, 'forge-loop-controller.js'), 'utf8');
   assert.strictEqual(/child_process|\bspawn(?:Sync)?\s*\(/.test(source), false, 'controller must not spawn');
   console.log(`forge-loop-controller tests passed (${cases} host/platform vectors)`);
