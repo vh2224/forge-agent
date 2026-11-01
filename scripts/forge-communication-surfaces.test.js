@@ -12,7 +12,8 @@
 // messages or that a human understands them (that is the final UAT round).
 //
 // Reads repository sources; renders into memory. The only filesystem writes are
-// the Codex render's own temporary homes under os.tmpdir(), which are removed.
+// the Codex render's own temporary homes and the temp owners of the milestone
+// time admission block, all under os.tmpdir() and removed.
 //
 // Zero deps. Standalone runner, repo convention: exit != 0 on failure.
 
@@ -513,6 +514,120 @@ test('S04 discuss: one required decision per round retains stable pending IDs an
   assert(text.includes('Require an explicit answer for each ID before dependent work'));
   assert(text.includes('persist and close unanswered rounds under Economic wait'));
   assert(!text.includes('Ask ALL questions at once'));
+});
+
+// S01/T07 milestone time — distribution of the canonical pointer, the native
+// admission precheck and the time message templates. The precheck block is also
+// executed against real temp owners; the projection proves text distribution,
+// not that a host calls the guarded transport.
+const TIME_POINTER = '`shared/forge-milestone-time.md`';
+const TIME_SKILLS = ['forge-auto', 'forge-next'];
+const TIME_TEMPLATES = {
+  aviso: 'Prazo da milestone {M} {em risco|excede o saldo}: {consumido} de {teto}, saldo {saldo}, previsão {faixa}. Recomendo {alternativa} porque {motivo}. Opções, sem pré-seleção: estender o teto ({efeito}), reduzir escopo ({efeito}) ou seguir até o teto ({efeito}). Decisão pendente: {ID}. Sem resposta, o contrato atual continua valendo.',
+  teto: 'Teto de tempo da milestone {M} atingido: {consumido} de {teto}. Parou: {o que parou}. Writers em voo: {N}, terminando pela própria vigilância. Decisão pendente: {ID estável}.',
+  drain: 'Drain incompleto em {M}: {writers ou claim ainda em reconciliação}. Nenhum checkpoint foi salvo; a reconciliação segue o fluxo existente. Decisão pendente: {ID ou nenhuma}.',
+  checkpoint: 'Checkpoint de tempo salvo em {M}: estouro de {estouro} sobre o teto de {teto}. Decisão pendente: {time-cap-ID}: estender por emenda explícita ou encerrar como parcial. Para retomar depois da extensão: ',
+};
+const ADMIT = 'forge-milestone-time-admission.js" --admit-transport';
+function timeSection(text) { return between(text, '## Tempo da milestone\n', '## Bidirectional delivery'); }
+function assertTimeSkill(name, text) {
+  assert(text.includes(TIME_POINTER) && text.includes('${FORGE_HOME:-~/.forge-agent}/shared'), `${name}: time contract pointer missing`);
+  const section = timeSection(text);
+  const flatSection = flat(section);
+  for (const piece of ['`time_session`', 'forge-milestone-time.js" --presence session-start', 'session-end', ADMIT,
+    '[ "$TIME_ADMIT_EXIT" -eq 3 ] && stop', 'Saída 3 para antes de qualquer provider', 'O precheck só antecipa a recusa; a garantia fica no transporte',
+    '`milestoneTimeContext: { cwd: WORKING_DIR, milestone: RUN_ID, unit: TIME_UNIT }`', 'nunca `CODE_DIR`',
+    'Recusa de tempo não tem retry nem fallback', 'Task avulsa não recebe contexto de milestone',
+    '`refuseNotInvoked`', '`consume-failure`', 'Nunca fabrique resultado de worker', '`workerObservationReader`', '`createObservationReader`',
+    'uma decisão por rodada', 'Aviso dentro do teto e do escopo já autorizados é informativo',
+    '`forge-pending-questions.js --open`', '`--answer`', '`forge-milestone-time.js --extend --ceiling-ms <n>`', '`--decide continue-to-cap|reduce-scope`',
+    '`liveAdapter.getDecisionHandle`', '`time-decision-attestation-required`', 'Silêncio, timeout ou JSON importado nunca aprovam',
+    '--wait-start <wait_id> --class human --source-kind pending-question', '`--wait-end`',
+    '`--command resume-budget`', '`budget-resume-ready`', '`linked-reentry-required`', '(`reenter`)']) {
+    assert(flatSection.includes(flat(piece)), `${name}: time section lacks ${piece}`);
+  }
+  for (const [label, template] of Object.entries(TIME_TEMPLATES)) assert(section.includes(template), `${name}: ${label} template missing`);
+  const warning = section.indexOf(TIME_TEMPLATES.aviso);
+  assert(section.indexOf('Recomendo', warning) < section.indexOf('Opções, sem pré-seleção', warning), `${name}: recommendation must precede the options`);
+  // The precheck step precedes every native builder and invocation in the skill.
+  assert(text.indexOf(ADMIT) < text.indexOf('buildNativeInvocation'), `${name}: --admit-transport must precede the native invocation`);
+  const pointers = text.split('`milestoneTimeContext`').length - 1;
+  assert(pointers >= 2, `${name}: native callsites lack the milestone time context pointer`);
+  const adaptation = text.indexOf('**Native invocation adaptation**');
+  const supervised = text.indexOf('Para unidade de milestone, essa chamada passa pela invocação nativa supervisionada', adaptation);
+  assert(adaptation >= 0 && supervised > adaptation && supervised < text.indexOf('Wait for the result.', adaptation), `${name}: native adaptation lacks the supervised context`);
+  for (const line of normativeLines()) assert(!section.includes(line), `${name}: time section copies contract line ${line.slice(0, 50)}`);
+}
+
+test('S01/T07 time pointer: auto, next and status point to the canonical milestone time contract', () => {
+  assert(fs.existsSync(path.join(root, 'shared', 'forge-milestone-time.md')), 'canonical time contract missing');
+  for (const name of TIME_SKILLS) assertTimeSkill(name, skills[name]);
+  assert(skills['forge-auto'].includes(`${TIME_TEMPLATES.checkpoint}/forge-auto {RUN_ID}.`), 'forge-auto checkpoint resume target');
+  assert(skills['forge-next'].includes(`${TIME_TEMPLATES.checkpoint}/forge-next.`), 'forge-next checkpoint resume target');
+  const batch = between(skills['forge-auto'], '#### 4-P.', '**k) Re-enter the dispatch loop**');
+  assert(flat(batch).includes('passa pelo precheck `--admit-transport` de § Tempo da milestone com a unidade `execute-task/${ENTRY_ID}`'), 'batch entries lack the per-entry precheck');
+  const status = skills['forge-status'];
+  assert(status.includes(TIME_POINTER), 'forge-status: time contract pointer missing');
+  assert(flat(status).includes('O bloco de tempo da milestone vem do `forge-status.js`'), 'forge-status: time block source missing');
+  assert(flat(status).includes('é repassado verbatim e nenhuma decisão de extensão, redução ou continuação é inferida dele'), 'forge-status: no inferred decision');
+  const review = read('shared/forge-review.md');
+  assert.strictEqual(count(review, '"${BUDGET_ARGS[@]}"'), 7, 'review: definition plus six external legs carry the budget context');
+  assert(flat(review).includes('não há retry, não há fallback para outro revisor ou família'), 'review: time refusal must not fall back');
+  assert(flat(read('shared/forge-dispatch.md')).includes('O precheck `forge-milestone-time-admission.js --admit-transport` só antecipa a recusa; ele não é a garantia'), 'dispatch: precheck limitation missing');
+});
+
+test('S01/T07 time admission block: the documented precheck admits a contract-free owner and stops an exhausted one before any provider', () => {
+  const bash = process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : '/bin/bash';
+  assert(fs.existsSync(bash), 'the admission block needs bash to execute');
+  const time = require('./forge-milestone-time');
+  const questions = require('./forge-pending-questions');
+  const { digest } = require('./forge-code-roots');
+  const owner = () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-time-admission-block-'));
+    temps.push(dir); fs.mkdirSync(path.join(dir, '.gsd', 'forge'), { recursive: true }); return dir;
+  };
+  const free = owner(), exhausted = owner(), M = 'M001', now = Date.now();
+  const contract = { schema_version: 1, milestone: M, clock_policy: { id: 'forge-milestone-time-clock', version: 1 },
+    option: { id: 'balanced', options_sha256: 'a'.repeat(64), label: 'Entrega verificada' },
+    activated_at: new Date(now - 3600000).toISOString(), preselection_started_at: new Date(now - 3660000).toISOString(), ceiling_ms: 1000,
+    endpoint: { kind: 'verified-integrated-delivery', items: Object.fromEntries(time.ENDPOINT_ITEMS.map(key => [key, 'pending'])) },
+    allocation: null, linked_task: null, chain_forecast: null };
+  const opened = questions.openQuestions({ cwd: exhausted, milestone: M, unit: 'milestone-time/q1', decision_set: 'milestone-time-activation',
+    questions: [{ id: 'q1', question: 'Escolha?' }] });
+  questions.answer({ cwd: exhausted, identity: opened.identity_sha256, answers: [{ id: 'q1', answer: 'option:balanced', source: 'user-text' }] });
+  const live = { reference: 'live-1', status: 'resolved', answer: 'option:balanced', resolved_at: new Date(now - 1000).toISOString(),
+    source: 'user-text', question: { identity_sha256: opened.identity_sha256, id: 'q1' } };
+  time.activateContract({ cwd: exhausted, milestone: M, contract, handle: time.createDecisionAuthority(() => live)
+    .issue(live.reference, { milestone: M, kind: 'activation', request_sha256: digest(contract), expires_at: now + 60000 }, () => now) });
+  for (const name of TIME_SKILLS) {
+    const block = [...skills[name].matchAll(/```bash\n([\s\S]*?)```/g)].map(match => match[1]).find(text => text.includes(ADMIT));
+    assert(block, `${name}: admission block missing`);
+    const run = cwd => require('child_process').spawnSync(bash, ['-c', `stop() { exit 9; }; node() { "$NODE_BIN" "$@"; };\n${block}\necho continued`], {
+      encoding: 'utf8', timeout: 30000, env: { ...process.env, NODE_BIN: process.execPath.replace(/\\/g, '/'),
+        FORGE_SCRIPTS_DIR: path.join(root, 'scripts').replace(/\\/g, '/'), WORKING_DIR: cwd.replace(/\\/g, '/'), RUN_ID: M,
+        unit_type: 'execute-task', unit_id: 'T01' } });
+    const admitted = run(free);
+    assert.strictEqual(admitted.status, 0, `${name}: ${admitted.stderr}`);
+    assert.deepStrictEqual(JSON.parse(admitted.stdout.split('\n')[0]), { allowed: true, decision: 'no-contract' }, `${name}: contract-free admission`);
+    assert(admitted.stdout.includes('continued'), `${name}: contract-free work continues`);
+    const refused = run(exhausted);
+    assert.strictEqual(refused.status, 9, `${name}: exit 3 must stop: ${refused.stdout}${refused.stderr}`);
+    const result = JSON.parse(refused.stdout.split('\n')[0]);
+    assert.deepStrictEqual([result.allowed, result.reason_code, result.provider_called], [false, 'milestone-budget-exhausted', false], `${name}: refusal`);
+    assert(!refused.stdout.includes('continued'), `${name}: refused work must not continue`);
+  }
+});
+
+test('S01/T07 Codex projection: projected auto/next carry the time pointer, admission step and templates; status the pointer', () => {
+  const renderer = require('./forge-codex-renderer');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-communication-surfaces-time-'));
+  temps.push(temp);
+  const report = renderer.render({ repo: root, projectRoot: temp, codexHome: path.join(temp, 'host'),
+    forgeHome: path.join(temp, 'forge'), ...renderer.PRODUCTION_DISPATCH_DIALECT });
+  const projected = name => report.artifacts.find(item => item.source_id === 'skills' && item.source === `skills/${name}/SKILL.md`).content.replace(/\r\n/g, '\n');
+  for (const name of TIME_SKILLS) assertTimeSkill(`${name} (Codex)`, projected(name));
+  const status = projected('forge-status');
+  assert(status.includes(TIME_POINTER) && flat(status).includes('nenhuma decisão de extensão, redução ou continuação é inferida dele'), 'forge-status (Codex): time sentence missing');
 });
 
 for (const temp of temps) fs.rmSync(temp, { recursive: true, force: true });

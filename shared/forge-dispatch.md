@@ -3144,3 +3144,29 @@ boundary/lease, input hashes, invocation, code and protected metadata. It also r
 a fresh live `writerObservationAdapter` and process inspection for the saved native
 receipt. Replay accepts only the exact prior or already-published bytes, never new
 inference or a refreshed baseline. Imported receipt data is not live authority.
+
+## Contexto de tempo da milestone
+
+Contrato canônico: `shared/forge-milestone-time.md`. Toda chamada nativa comum de
+unidade de milestone descrita aqui (templates de unidade, plan-check, lote
+paralelo, re-dispatch do Retry Handler, extração de memória e a transição
+declarada `not-spawned`) passa pela invocação nativa supervisionada de
+`scripts/forge-native-invocation.js` com
+`milestoneTimeContext: { cwd: <owner físico>, milestone: <M>, unit: <tipo/id> }` e
+com a ferramenta e as capacidades realmente expostas pelo host, nunca pela
+ferramenta nativa bruta. A guarda roda dentro da supervisão, imediatamente antes
+do provider. Recusa de tempo (`milestone-budget-exhausted`,
+`milestone-budget-draining`, `milestone-time-invalid`, `milestone-clock-unknown`)
+volta com `provider_called:false`: sem retry, sem fallback de engine e sem evento
+`worker-engine-fallback`. A unidade já iniciada fecha pela recusa canônica do owner
+(`refuseNotInvoked` e depois `consume-failure`), nunca por resultado sintético.
+
+O sidecar de unidade (`forge-unit-sidecar --request`) rechecha a requisição retida
+antes de cada lançamento. As pernas externas de revisão recebem `--budget-owner`,
+`--budget-milestone` e `--budget-unit` (`shared/forge-review.md`). Os ramos diretos
+históricos `--mode execute|plan` deste arquivo não têm guarda de tempo interna:
+é uma limitação declarada, e numa milestone com contrato a entrega usa o sidecar de
+unidade. O precheck `forge-milestone-time-admission.js --admit-transport` só
+antecipa a recusa; ele não é a garantia. Task avulsa não recebe contexto de
+milestone. A guarda vale nos adaptadores e callbacks do Forge e não intercepta
+chamada bruta arbitrária do host.

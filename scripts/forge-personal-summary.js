@@ -2,7 +2,8 @@
 // forge-personal-summary — bounded, read-only personal context for simple
 // questions ("onde paramos?", entry, status). The full snapshot stays the
 // explicit diagnostic; this view is built field by field from it, never by
-// serializing the snapshot and removing private data afterwards.
+// serializing the snapshot and removing private data afterwards. A milestone
+// with a time contract also carries the closed summarizeTimeStatus block.
 //
 // Library exports:
 //   SUMMARY_LIMITS                → frozen { works, items, text, bytes }
@@ -108,14 +109,33 @@ function summarizeItem(capture, project, max, privateRoots) {
 }
 
 function rank(entry) {
-  if (entry.workStatus === 'pending' || entry.reliability === 'needs-reconciliation') return 0;
+  if (entry.workStatus === 'pending' || entry.reliability === 'needs-reconciliation' || entry.timeProtected) return 0;
   return RANK[entry.workStatus] || RANK.unknown;
+}
+
+// Closed time block (shared/forge-milestone-time.md): exactly the
+// summarizeTimeStatus projection, only for a milestone with a contract. A
+// contract-free milestone adds nothing, so its summary bytes are unchanged.
+function readTime(project, work) {
+  if (work.kind !== 'milestone' || typeof project !== 'string' || typeof work.id !== 'string' || !ids.isValid(work.id)) return null;
+  const admission = require('./forge-milestone-time-admission');
+  try {
+    const status = admission.readTimeStatus(project, work.id);
+    return status && status.contract !== 'absent' ? admission.summarizeTimeStatus(status) : null;
+  } catch {
+    return admission.summarizeTimeStatus({ contract: 'invalid', unknowns: ['time-source-unreadable'] });
+  }
+}
+
+// Exhausted, draining, checkpointed or an open warning is protected work.
+function timeProtected(time) {
+  return Boolean(time && (['exhausted', 'draining', 'checkpointed', 'warning'].includes(time.state) || time.decision_pending));
 }
 
 // Closed copy of what the summary may know about one work; nothing else from
 // the snapshot (checkpoint history, hashes, capture times, state, terminal
 // evidence or raw diagnostics) is reachable from here on.
-function prepareWork(work) {
+function prepareWork(work, project) {
   const checkpoint = work.checkpoint && typeof work.checkpoint === 'object' ? work.checkpoint : {};
   const list = value => (Array.isArray(value) ? value : []);
   const entry = {
@@ -131,7 +151,10 @@ function prepareWork(work) {
   };
   // Completed work never becomes actionable through historical next-action prose.
   if (entry.workStatus !== 'completed') entry.nextAction = work.nextAction || null;
-  entry.protected = entry.pending.length > 0 || entry.acceptances.length > 0 || entry.reliability !== 'current';
+  const time = readTime(project, entry);
+  if (time) entry.time = time;
+  entry.timeProtected = timeProtected(time);
+  entry.protected = entry.pending.length > 0 || entry.acceptances.length > 0 || entry.reliability !== 'current' || entry.timeProtected;
   return entry;
 }
 
@@ -159,6 +182,7 @@ function compose(prepared, plan) {
       if (hidden || truncated) affected = true;
       work[field] = { total: entry[field].length, items };
     }
+    if (entry.time) work.time = { ...entry.time };
     const diagnostic = (affected || entry.reliability !== 'current') && workDiagnostic(entry.id);
     if (diagnostic) work.diagnostic = diagnostic;
     return work;
@@ -219,7 +243,7 @@ function buildPersonalSummary(options = {}) {
     const snapshot = readPersonalSnapshot({ project: options.project, cwd: options.cwd, id: options.id,
       userHome: options.userHome, env: options.env });
     if (!snapshot || snapshot.status !== 'ok') return failureSummary(snapshot && snapshot.reason);
-    const entries = (Array.isArray(snapshot.works) ? snapshot.works : []).map(prepareWork)
+    const entries = (Array.isArray(snapshot.works) ? snapshot.works : []).map(work => prepareWork(work, snapshot.project))
       .sort((a, b) => rank(a) - rank(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     const totals = { works: entries.length, pending: 0, acceptances: 0 };
     for (const entry of entries) { totals.pending += entry.pending.length; totals.acceptances += entry.acceptances.length; }

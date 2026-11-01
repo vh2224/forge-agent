@@ -31,6 +31,7 @@ const EMOJI = '\u{1F600}';
 const TOP_KEYS = ['status', 'reason', 'scope', 'limits', 'totals', 'works', 'omitted', 'attention'];
 const WORK_KEYS = ['id', 'kind', 'workStatus', 'reliability', 'activity', 'nextAction', 'lastResult', 'pending', 'acceptances'];
 const ITEM_KEYS = ['text', 'source', 'validity', 'truncated', 'sourceOutside', 'reason'];
+const TIME_KEYS = ['state', 'ceiling_ms', 'consumed_ms', 'unknown_ms', 'remaining_ms', 'forecast', 'last_warning', 'unknown', 'decision_pending'];
 const LONE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 let failed = 0;
@@ -94,7 +95,11 @@ function assertShape(summary) {
   assert.strictEqual(summary.omitted.works, summary.totals.works - summary.works.length);
   for (const work of summary.works) {
     const keys = Object.keys(work);
-    assert.deepStrictEqual(keys.filter(key => key !== 'diagnostic'), WORK_KEYS);
+    assert.deepStrictEqual(keys.filter(key => key !== 'diagnostic' && key !== 'time'), WORK_KEYS);
+    if (work.time) {
+      assert.strictEqual(work.kind, 'milestone', 'only milestones carry time');
+      assert.deepStrictEqual(Object.keys(work.time), TIME_KEYS, 'closed summarizeTimeStatus block');
+    }
     for (const field of ['nextAction', 'lastResult']) if (work[field]) assertItem(work[field]);
     for (const field of ['pending', 'acceptances']) {
       assert.deepStrictEqual(Object.keys(work[field]), ['total', 'items']);
@@ -602,6 +607,155 @@ test('MH-11 boot block: the real bash block of commands/forge.md prints a bounde
   assert.strictEqual(parsed.scope, 'summary');
   assert.strictEqual(parsed.works[0].pending.items[0].text, 'Pendente do boot');
   assertPrivate(f, result.stdout);
+});
+
+// ── Milestone time block (shared/forge-milestone-time.md) ─────────────────────
+// Contracts are activated through the real owner API with a live answer; the
+// summary only reads them. Times are relative to the real clock.
+const timeApi = require('./forge-milestone-time');
+const admission = require('./forge-milestone-time-admission');
+const questions = require('./forge-pending-questions');
+const { digest } = require('./forge-code-roots');
+const HOUR = 3600000;
+let serial = 0;
+const isoAt = offset => new Date(Date.now() + offset).toISOString();
+function authorize(cwd, milestone, kind, request, answer) {
+  const id = `q${++serial}`;
+  const opened = questions.openQuestions({ cwd, milestone, unit: `milestone-time/${id}`, decision_set: `milestone-time-${kind}`,
+    questions: [{ id, question: 'Escolha?' }] });
+  questions.answer({ cwd, identity: opened.identity_sha256, answers: [{ id, answer, source: 'user-text' }] });
+  const now = Date.now();
+  const live = { reference: `live-${serial}`, status: 'resolved', answer, resolved_at: new Date(now - 1000).toISOString(),
+    source: 'user-text', question: { identity_sha256: opened.identity_sha256, id } };
+  return timeApi.createDecisionAuthority(() => live).issue(live.reference,
+    { milestone, kind, request_sha256: digest(request), expires_at: now + 60000 }, () => now);
+}
+function timeMilestone(f, milestone, state) {
+  f.work(milestone, 'milestone'); f.bind(milestone);
+  if (!state) return;
+  const ceiling = ['active', 'warning'].includes(state) ? 10 * HOUR : 1000;
+  const contract = { schema_version: 1, milestone, clock_policy: { id: 'forge-milestone-time-clock', version: 1 },
+    option: { id: 'balanced', options_sha256: 'a'.repeat(64), label: 'Entrega verificada' },
+    activated_at: isoAt(-HOUR), preselection_started_at: isoAt(-HOUR - 60000), ceiling_ms: ceiling,
+    endpoint: { kind: 'verified-integrated-delivery', items: Object.fromEntries(timeApi.ENDPOINT_ITEMS.map(key => [key, 'pending'])) },
+    allocation: null, linked_task: null, chain_forecast: null };
+  const options = { cwd: f.project, milestone };
+  timeApi.activateContract({ ...options, contract, handle: authorize(f.project, milestone, 'activation', contract, 'option:balanced') });
+  if (state === 'warning') timeApi.recordWarning({ ...options, record: { id: 'c'.repeat(64), version: 1, sequence: 1,
+    kind: 'slice-boundary', boundary_key: '[]', classification: 'exceeds', warning: true, at: isoAt(-1000) } });
+  if (state === 'checkpointed') timeApi.recordCheckpoint({ ...options, record: { kind: 'time-drain', version: 1, at: isoAt(-1000),
+    decision_pending: true, ceiling_ms: 1000, consumed_ms: HOUR, unknown_ms: HOUR, overshoot_ms: HOUR - 1000 } });
+  if (state === 'draining') fs.writeFileSync(path.join(f.project, '.gsd', 'milestones', milestone, `${milestone}-events.jsonl`),
+    JSON.stringify({ event: 'unit-began', milestone, unit: 'execute-task/T01', ts: isoAt(-HOUR / 2), host_runtime: 'codex', action: 'begin' }) + '\n');
+}
+function tree(root) {
+  const result = {};
+  (function visit(dir) {
+    for (const name of fs.readdirSync(dir).sort()) {
+      const file = path.join(dir, name), stat = fs.lstatSync(file);
+      result[path.relative(root, file)] = [stat.mtimeMs, stat.isFile() ? fs.readFileSync(file).toString('base64') : 'directory'];
+      if (stat.isDirectory()) visit(file);
+    }
+  })(root);
+  return result;
+}
+// The time block is closed: enum state/forecast, safe integers, booleans and
+// the stable 64-hex warning record ID. Everything else keeps assertPrivate.
+function assertTimePrivate(f, summary) {
+  const rest = JSON.parse(JSON.stringify(summary));
+  for (const work of rest.works) {
+    if (!work.time) continue;
+    const time = work.time;
+    assert(time.state === null || admission.TIME_STATES.includes(time.state), time.state);
+    assert(['fits', 'at-risk', 'exceeds', 'unknown'].includes(time.forecast), time.forecast);
+    for (const key of ['ceiling_ms', 'consumed_ms', 'unknown_ms', 'remaining_ms']) assert(time[key] === null || Number.isSafeInteger(time[key]), key);
+    assert(time.last_warning === null || /^[a-f0-9]{64}$/.test(time.last_warning));
+    assert(typeof time.unknown === 'boolean' && typeof time.decision_pending === 'boolean');
+    delete work.time;
+  }
+  assertPrivate(f, JSON.stringify(rest));
+}
+function protectedTasks(f, count) {
+  for (let index = 1; index <= count; index++) {
+    const id = `TASK-00${index}`, { source } = f.work(id); f.bind(id);
+    save(f, id, { pending: [{ text: `Pendência ${index}`, source }] });
+  }
+}
+
+for (const state of ['active', 'warning', 'exhausted', 'draining', 'checkpointed']) {
+  test(`time: ${state} milestone carries the closed summarizeTimeStatus block within 4096 bytes, read-only`, f => {
+    timeMilestone(f, 'M001', state);
+    const before = tree(f.root);
+    const summary = summarize(f);
+    assert.deepStrictEqual(tree(f.root), before, 'summary wrote or touched a file');
+    assertShape(summary);
+    const work = summary.works.find(row => row.id === 'M001');
+    assert(work && work.time, 'contract milestone listed with time');
+    assert.strictEqual(work.time.state, state);
+    const direct = admission.summarizeTimeStatus(admission.readTimeStatus(f.project, 'M001'));
+    assert.deepStrictEqual([work.time.state, work.time.ceiling_ms, work.time.last_warning, work.time.decision_pending],
+      [direct.state, direct.ceiling_ms, direct.last_warning, direct.decision_pending], 'same reader projection');
+    assert.strictEqual(work.time.unknown, true, 'unattributed time remains unknown');
+    if (state === 'checkpointed') assert.strictEqual(work.time.decision_pending, true);
+    if (state === 'warning') assert.strictEqual(work.time.last_warning, 'c'.repeat(64));
+    assertTimePrivate(f, summary);
+  });
+}
+
+test('time: exhausted, draining, checkpointed and open-warning milestones are protected and listed before ordinary work', f => {
+  protectedTasks(f, 5);
+  timeMilestone(f, 'M001', 'exhausted');
+  timeMilestone(f, 'M002', 'active');
+  const summary = summarize(f);
+  assertShape(summary);
+  const listed = summary.works.map(work => work.id);
+  assert(listed.includes('M001'), `protected time work listed: ${listed}`);
+  assert.strictEqual(summary.works.find(work => work.id === 'M001').time.state, 'exhausted');
+  assert(!listed.includes('M002'), 'an active contract is ordinary work behind protected work');
+  assert.strictEqual(summary.omitted.works, summary.totals.works - summary.works.length);
+  assert.strictEqual(summary.attention.works, 1, 'only the hidden protected task is counted');
+});
+
+test('time: the byte ladder never silently drops protected time work', f => {
+  const long = 'Pendência longa '.repeat(20);
+  for (let index = 1; index <= 5; index++) {
+    const id = `TASK-00${index}`, { source } = f.work(id); f.bind(id);
+    save(f, id, { pending: [1, 2, 3, 4].map(n => ({ text: `${long}${index}.${n}`, source })) });
+  }
+  for (const [id, state] of [['M001', 'checkpointed'], ['M002', 'draining'], ['M003', 'warning']]) timeMilestone(f, id, state);
+  const summary = summarize(f);
+  assertShape(summary);
+  const listed = summary.works.filter(work => work.time).map(work => work.id);
+  const hidden = 3 - listed.length;
+  assert(summary.attention, 'pressure requires attention');
+  assert(summary.attention.works >= hidden, 'every unlisted protected time work is counted in attention');
+  for (const work of summary.works.filter(row => row.time)) assert(['checkpointed', 'draining', 'warning'].includes(work.time.state));
+  assert(bytes(summary) + 1 <= SUMMARY_LIMITS.bytes);
+});
+
+test('time: contract-free milestone summary is byte-identical and has no time key', f => {
+  timeMilestone(f, 'M001');
+  const first = JSON.stringify(summarize(f));
+  fs.mkdirSync(path.join(f.project, '.gsd', 'forge', 'time'), { recursive: true });
+  const second = JSON.stringify(summarize(f));
+  assert.strictEqual(second, first, 'an empty time root changes no byte');
+  const summary = JSON.parse(first);
+  assertShape(summary);
+  assert.deepStrictEqual(Object.keys(summary.works[0]), WORK_KEYS, 'legacy work keys only');
+  const rendered = cli(f, SUMMARY_CLI, ['--cwd', f.project]);
+  assert.strictEqual(rendered.stdout, first + '\n', 'CLI bytes equal the library summary');
+});
+
+test('time: invalid contract is visible as unknown and does not break the summary', f => {
+  timeMilestone(f, 'M001');
+  const file = path.join(f.project, '.gsd', 'forge', 'time', 'M001', 'contract.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, '{"schema_version":1,"milestone":"M001"}\n');
+  const summary = summarize(f);
+  assertShape(summary);
+  assert.strictEqual(summary.status, 'ok');
+  const time = summary.works.find(work => work.id === 'M001').time;
+  assert.deepStrictEqual([time.state, time.unknown, time.forecast], [null, true, 'unknown']);
 });
 
 isolation.validateWorktreeIdentity = validateWorktreeIdentity;

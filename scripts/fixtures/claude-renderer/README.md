@@ -105,3 +105,26 @@ byte-identical. The historical-to-current changed surface set is now `agents`,
 `configuration`. Distribution does not establish host UI, model obedience or human acceptance.
 
 2026-11-01 — integração comunicação/painel: somente a superfície commands mudou nesta composição, para documentar adesão, bootstrap, perfil padrão e resultados separados do forge-update. Hash medido pelo renderer canônico com versão normalizada; golden ativo atualizado. Baselines históricos permanecem intactos.
+
+## Tempo de milestone (M-20261101111759-opcoes-prazo-milestones, S01/T07)
+
+Medido antes e depois por forge-claude-renderer.render com a fórmula acima, como
+forge-claude-renderer.test.js. O valor anterior é a medição do owner antes da edição
+na revisão `6fc732e` (os nove hashes ativos conferiam); o novo é o hash do caminho de
+render reportado por forge-claude-renderer.test.js sobre os bytes finais. O conjunto
+de deriva reportado por forge-dispatch-source-guard.test.js antes da atualização foi
+exatamente `skills`. Fontes alteradas: `skills/forge-auto/SKILL.md` e
+`skills/forge-next/SKILL.md` (seção “Tempo da milestone”: ponteiro para
+`shared/forge-milestone-time.md`, presença, admissão nativa, decisões atestadas,
+esperas e modelos de aviso, teto, drain e checkpoint, mais ponteiros junto às chamadas
+nativas) e `skills/forge-status/SKILL.md` (uma frase de repasse verbatim do bloco de
+tempo). O motivo é distribuir o contrato de tempo aos dois hosts.
+
+- skills: `86b0ff8995ff391cc26191662a67f1a726b9dcec6b1a4ed7f98a91ad8decf0f9` to `9c4e882a828d6546e30e51aa3330817bee74391cd5395047eaee56a8b3490b01`.
+
+Os outros oito hashes ativos (`agents`, `commands`, `dispatch-templates`, `hooks`,
+`mcp`, `claude-instructions`, `claude-settings`, `configuration`) não mudaram, e os
+arquivos históricos 4.18.1 (`a58a005aea70eaa17c0ecfaf1cdf8965cdf9adb8c2678e756ac83ea74d926d9c`)
+e 4.19.0 (`f2b3e910445d2557f50aa4ced9e1b31498debc6b1cdd1ed05b452d8141b4307f`) ficam
+byte a byte iguais. Distribuição não prova interceptação de chamada bruta do host,
+obediência do modelo nem aceite humano.

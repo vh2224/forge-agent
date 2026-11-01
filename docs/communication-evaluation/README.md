@@ -109,6 +109,24 @@ A S03/T07 editou `skills/forge-task/SKILL.md` e `skills/forge-next/SKILL.md` par
 
 Os valores anteriores são os bytes da revisão 06f7d5a; os novos são os bytes finais das skills nesta task. O re-pin registra proveniência, não melhora de comunicação nem comportamento real dos hosts.
 
+## Re-pin das citações de forge-next (tempo de milestone, S01/T07)
+
+A task S01/T07 de M-20261101111759-opcoes-prazo-milestones acrescentou a
+`skills/forge-next/SKILL.md` a seção “Tempo da milestone” (ponteiro para
+`shared/forge-milestone-time.md`, presença, admissão nativa, decisões atestadas e
+modelos de aviso, teto, drain e checkpoint) e ponteiros junto às chamadas nativas.
+O template parcial citado não mudou e continua literal na skill. Só os dois
+`source.sha256` das citações modelo-da-skill de forge-next mudaram, medidos como
+SHA-256 dos bytes do arquivo, a mesma regra do validador:
+
+| Amostra (campo) | Fonte | SHA-256 anterior | SHA-256 novo |
+|---|---|---|---|
+| entries[2].supporting.partial.after.source.sha256 | skills/forge-next/SKILL.md#parcial | 31cbaaecd02b708261b97c2141d9b0b673ab720c96977095a00571d2e0dc194c | 22bddaebd4367ce2cc8729cfdc7f14131de2c155be62226c3d24c45f626ed2c5 |
+| entries[6].supporting.partial.after.source.sha256 | skills/forge-next/SKILL.md#parcial | 31cbaaecd02b708261b97c2141d9b0b673ab720c96977095a00571d2e0dc194c | 22bddaebd4367ce2cc8729cfdc7f14131de2c155be62226c3d24c45f626ed2c5 |
+
+O valor anterior é o da revisão 6fc732e. Contrato, rótulos, rubricas, métricas, as
+citações de forge-task e o aceite humano pending-final-round ficam iguais.
+
 As preferências de apresentação estão **preservadas offline** pela evidência já concluída da T06, suíte node scripts/forge-presentation-prefs.test.js: homes temporários, bytes e mtime, renderers e instalador, diagnóstico somente leitura. O handoff T06 e sua entrega registram nove comandos aprovados, 49 testes do instalador e nenhum skip observado nessa rodada. T07 cita essa evidência anterior e não reexecuta a suíte inalterada. personality, model_verbosity, output style e seleções de barra explícitas não são alterados aqui. O antes e depois na instalação real continua como **runtime pendente**; o corpus não prova preservação em hosts instalados.
 
 Na **rodada final**, uma pessoa ainda deve comparar os quatro cenários nos dois hosts, verificar compreensão de resultado/fase/executor/próximo passo/decisão e avaliar aparência, canais e preferências na instalação real. Esses aceites ficam pending-final-round até evidência própria. Resultados técnicos, revisão, integração e aceite humano continuam fatos separados.

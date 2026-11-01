@@ -110,6 +110,87 @@ From `$ARGUMENTS`:
 - `auto` → tell the user: "Use `/forge-auto` para modo autônomo." and stop.
 - A valid work ID selects explicit resume in STEP MODE; invalid arguments stop.
 
+## Tempo da milestone
+
+Contrato canônico: `shared/forge-milestone-time.md` (no repositório ou em
+`$FORGE_SHARED_DIR`, instalado em `${FORGE_HOME:-~/.forge-agent}/shared`). Leia-o
+antes do dispatch de uma milestone com contrato de tempo; sem contrato, nada desta
+seção se aplica e o passo segue igual. Este texto não concede autoridade nem aplica
+a guarda: quem decide é o código citado no contrato.
+
+Presença: em toda chamada do adaptador de loop, inclua `time_session` no `--json`
+com a sessão do host; o owner grava a presença só quando há contrato. No início da
+sessão, antes do dispatch e fora de janela protegida, registre:
+```bash
+TIME_SESSION="${SESSION_ID:-${CLAUDE_SESSION_ID:-}}"
+[ -n "$TIME_SESSION" ] && node "$FORGE_SCRIPTS_DIR/forge-milestone-time.js" --presence session-start \
+  --session "$TIME_SESSION" --cwd "$WORKING_DIR" --milestone "$RUN_ID" --json
+```
+Ao encerrar o passo, o mesmo comando usa `session-end`. Resultado `no-contract` não é erro.
+
+Admissão nativa: antes de toda invocação nativa de unidade de milestone (a unidade
+do passo, plan-check, review-fix, extração de memória, pernas nativas de revisão,
+fallback e cada re-dispatch do Retry Handler), rode o precheck com a unidade real:
+```bash
+TIME_UNIT="${unit_type}/${unit_id}"
+node "$FORGE_SCRIPTS_DIR/forge-milestone-time-admission.js" --admit-transport \
+  --cwd "$WORKING_DIR" --milestone "$RUN_ID" --unit "$TIME_UNIT" --json
+TIME_ADMIT_EXIT=$?
+[ "$TIME_ADMIT_EXIT" -eq 3 ] && stop
+```
+Saída 3 para antes de qualquer provider: mostre a mensagem de teto e devolva o
+controle ao operador. O precheck só antecipa a recusa; a garantia fica no
+transporte. A invocação nativa supervisionada de `scripts/forge-native-invocation.js`
+recebe `milestoneTimeContext: { cwd: WORKING_DIR, milestone: RUN_ID, unit: TIME_UNIT }`
+(owner físico, nunca `CODE_DIR`) com a ferramenta e as capacidades realmente
+expostas pelo host; o sidecar de unidade rechecha a requisição retida; as pernas
+externas de revisão recebem o contexto de `shared/forge-review.md`. Recusa de tempo
+não tem retry nem fallback. Task avulsa não recebe contexto de milestone.
+
+Recusa na primeira invocação nativa de uma unidade já iniciada: feche pela API do
+owner (`refuseNotInvoked` da sessão de entrega nativa, com a testemunha local do
+processo e o manifesto imutável) e depois pelo comando `consume-failure` do
+adaptador. Nunca fabrique resultado de worker, não edite o snapshot e não force
+commit nem release para chegar ao checkpoint.
+
+Esforço observado: a cobertura de workers só é registrada quando o host embute o
+loop com `workerObservationReader` criado no processo por `createObservationReader`.
+O CLI JSON não fornece esse leitor; o esforço observado fica `desconhecido`,
+separado dos intervalos de unidade do controlador, que são só um proxy.
+
+Mensagens de tempo (pt-BR, uma decisão por rodada):
+- Aviso: `Prazo da milestone {M} {em risco|excede o saldo}: {consumido} de {teto}, saldo {saldo}, previsão {faixa}. Recomendo {alternativa} porque {motivo}. Opções, sem pré-seleção: estender o teto ({efeito}), reduzir escopo ({efeito}) ou seguir até o teto ({efeito}). Decisão pendente: {ID}. Sem resposta, o contrato atual continua valendo.`
+  Aviso dentro do teto e do escopo já autorizados é informativo e não abre pergunta obrigatória.
+- Teto: `Teto de tempo da milestone {M} atingido: {consumido} de {teto}. Parou: {o que parou}. Writers em voo: {N}, terminando pela própria vigilância. Decisão pendente: {ID estável}.`
+- Drain incompleto: `Drain incompleto em {M}: {writers ou claim ainda em reconciliação}. Nenhum checkpoint foi salvo; a reconciliação segue o fluxo existente. Decisão pendente: {ID ou nenhuma}.`
+- Checkpoint: `Checkpoint de tempo salvo em {M}: estouro de {estouro} sobre o teto de {teto}. Decisão pendente: {time-cap-ID}: estender por emenda explícita ou encerrar como parcial. Para retomar depois da extensão: /forge-next.`
+
+Decisões: extensão, redução de escopo e seguir até o teto só valem com resposta
+explícita do operador. Abra a pergunta com `forge-pending-questions.js --open`
+(`--milestone "$RUN_ID"`, `--unit milestone-time/<id>` e `--set` igual a
+`milestone-time-extension`, `milestone-time-scope-reduction` ou
+`milestone-time-continue-to-cap`), persista a resposta com `--answer` e só então
+chame `forge-milestone-time.js --extend --ceiling-ms <n>` ou
+`--decide continue-to-cap|reduce-scope`, com `--question-identity` e `--question-id`,
+pelo host que embute `main` com `liveAdapter.getDecisionHandle`. A CLI avulsa
+recusa com `time-decision-attestation-required`: a decisão continua pendente e a
+chamada não é repetida com outros argumentos. Silêncio, timeout ou JSON importado
+nunca aprovam.
+
+Espera humana: ao abrir pergunta obrigatória de milestone com contrato, registre
+`forge-milestone-time.js --wait-start <wait_id> --class human --source-kind pending-question --source-ref <identity_sha256>:<question_id>`
+com `--cwd "$WORKING_DIR" --milestone "$RUN_ID" --json`; ao resolvê-la, rode
+`--wait-end` com os mesmos argumentos. Nenhuma das duas roda dentro de janela
+protegida de writer.
+
+Retomada após extensão autorizada: com o mesmo snapshot do loop, chame o adaptador
+com `--command resume-budget`. `budget-resume-ready` segue para a unidade que o
+controlador selecionar; `linked-reentry-required` só continua por entrada vinculada
+explícita (`reenter`); `budget-extension-required`, `budget-checkpoint-required`,
+`budget-retained-claim-changed` ou `pending-questions` param e mostram a decisão
+pendente. Claim retido exige os adaptadores vivos do host; pelo CLI a prova não se
+renova e a retomada recusa.
+
 ## Bidirectional delivery
 
 After the resolver allowance gate, a Claude sidecar or any artifact unit on
@@ -1387,6 +1468,11 @@ explicit model to inherit agent frontmatter. Use a description that captures wha
   - `research-milestone M001: e-commerce platform`
 - For memory extraction: `extract memories from {unit_id}`
 
+Para unidade de milestone, essa chamada passa pela invocação nativa supervisionada
+de `scripts/forge-native-invocation.js` com `milestoneTimeContext` de
+§ Tempo da milestone, depois do precheck `--admit-transport`; a ferramenta nativa
+bruta não é chamada fora dela. Recusa de tempo segue aquela seção, sem retry.
+
 Wait for the result. If its named native outcome is `not-spawned`, apply the one-shot declared
 transition above and enter the loaded sidecar mirror; do not emit the native event below. Every
 other successful native result continues here. A throw still follows the Retry Handler and never
@@ -1649,7 +1735,8 @@ through an external JSON request to
 validate, persist a
 ready receipt, and call the same owner publisher. Set `publicationSafe:true`
 only with `ownerJoined`, `checkedAt`, and every protected snapshot listed as
-ended.
+ended. Para milestone, a extração nativa passa pelo precheck e pela invocação
+supervisionada com `milestoneTimeContext` da unidade de origem (§ Tempo da milestone).
 
 Native refusal and provider failure use that same acceptance command. Build the
 external request from owner-known `cwd`, `contextRoot`, `sourceUnitType`,
