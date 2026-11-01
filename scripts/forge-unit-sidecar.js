@@ -17,6 +17,20 @@ const { diagnostic } = require('./forge-sidecar-diagnostic');
 const memory = require('./forge-memory');
 const forgeIds = require('./forge-ids');
 const { MAX_FILE_BYTES: MAX_DELIVERY_BYTES } = require('./forge-delivery');
+// Only a ready object produced by this process's actual successor gate may
+// publish. A serialized ready/capture is evidence, never a live capability.
+const verificationSuccessorReady = new WeakMap();
+function assertVerificationSuccessorPublication(request, record, options) {
+  if (!record.verification_successor && record.verification_seal?.timeout_origin !== 'owner-verification-successor') return;
+  const cap = options?.verificationSuccessor;
+  if (!cap) fail('verification-successor-capability-required');
+  const value = require('./forge-sidecar-verification-successor').read(cap, request);
+  value.assertRecord(record);
+  const proof = verificationSuccessorReady.get(record), digest = require('./forge-code-roots').digest;
+  if (!proof || proof.cap !== cap || proof.record !== digest(record) || proof.request !== digest(request)) {
+    fail('verification-successor-live-ready-required');
+  }
+}
 
 const schema = xllm.loadSchemaFile('unit-artifacts.schema.json');
 // v1 stays exported unchanged for its consumers; new extractions select v2.
@@ -599,6 +613,7 @@ function verifyTaskMarker(request, artifact, preimageSha256) {
   return true;
 }
 function materialize(request, record, publicationGuard, publicationLock, options = {}) {
+  assertVerificationSuccessorPublication(request, record, options);
   if (record.kind === 'memory-extraction') fail('memory-publication-required', 'Use publishReadyRecord for memory extraction receipts.');
   if (record.result.status !== 'done') return record.result;
   const root = fs.realpathSync(request.contextRoot || request.cwd);
@@ -621,6 +636,8 @@ function materialize(request, record, publicationGuard, publicationLock, options
       }
       if(options.leaseRenewal!==undefined)expected=require('./forge-native-recovery-delivery')
         .reconcileLeaseRenewalSurface(options.leaseRenewal,record,expected);
+      if (options.verificationSuccessor !== undefined) expected = require('./forge-sidecar-verification-successor')
+        .read(options.verificationSuccessor, request).expectedOwner(record, expected);
       require('./forge-task-execution').assertProtected(root, expected);
     }
   }
@@ -1203,8 +1220,8 @@ function publishReviewFixFailure(request, loc, items, snapshot) {
   }
 }
 
-async function publishReadyRecord(request, record, publicationGuard, publicationLock) {
-  let result = await publishReadyRecordCore(request, record, publicationGuard, publicationLock);
+async function publishReadyRecord(request, record, publicationGuard, publicationLock, options = {}) {
+  let result = await publishReadyRecordCore(request, record, publicationGuard, publicationLock, options);
   if (record.telemetry?.observation) result = { ...result, transport_telemetry: {
     ...result.transport_telemetry,
     observation: require('./forge-sidecar-calibration').observation(record.telemetry.observation),
@@ -1212,16 +1229,17 @@ async function publishReadyRecord(request, record, publicationGuard, publication
   if (record.calibration_proposal && result.status === 'done'
       && !['deferred', 'quarantined', 'conflict'].includes(result.publication?.status)) {
     const outcome = await require('./forge-sidecar-calibration').commitAccepted(record.calibration_proposal, {
-      fingerprint: record.fingerprint, receipt: artifactAttemptFiles(request).receiptFile,
+      fingerprint: record.fingerprint, receipt: options.receiptFile || artifactAttemptFiles(request).receiptFile,
     });
     result = { ...result, transport_telemetry: { ...result.transport_telemetry, calibration_commit: outcome } };
   }
   return result;
 }
-async function publishReadyRecordCore(request, record, publicationGuard, publicationLock) {
+async function publishReadyRecordCore(request, record, publicationGuard, publicationLock, options = {}) {
+  assertVerificationSuccessorPublication(request, record, options);
   if (record.execution) require('./forge-task-execution').assertReplay(request, record);
   if (record.kind === 'review-fix') return publishReviewFixRecord(request, record);
-  if (record.kind !== 'memory-extraction') return materialize(request, record, publicationGuard, publicationLock);
+  if (record.kind !== 'memory-extraction') return materialize(request, record, publicationGuard, publicationLock, options);
   const extraction = record.extraction;
   if (extraction.status !== 'done') {
     const result = { status: extraction.status, extraction,
@@ -1755,6 +1773,7 @@ async function inspectSavedNativeExecution(r, runtime) {
 }
 
 async function runUnitSidecarCore(request, runtime, identity) {
+  let verificationSuccessor = null;
   let transportReturned = false;
   let partialFixResult = false;
   let recoveryReady = runtime.assertRecoveryReady;
@@ -1763,6 +1782,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
   let notifyPhase = () => {};
   let executingObserved = false;
   const enterTransport = () => {
+    if (verificationSuccessor) fail('verification-successor-no-inference');
     if (r.scope !== 'standalone-task' && r.milestoneId) require('./forge-milestone-time-admission').assertTransportEntry({
       cwd: r.contextRoot || r.cwd, milestone: r.milestoneId, unit: unitLabel(r, locations(r)), now: runtime.now });
     recoveryReady?.();
@@ -1843,6 +1863,13 @@ async function runUnitSidecarCore(request, runtime, identity) {
   const legacyFingerprint = artifactFingerprint(r);
   const fingerprint = memoryContract ? memoryRequestFingerprint(legacyFingerprint, memoryContract) : legacyFingerprint;
   let receiptFile = `${resultFile}.receipt.json`;
+  if (runtime.verificationSuccessor !== undefined) {
+    if (runtime.verification !== undefined) fail('verification-successor-policy-mixing');
+    verificationSuccessor = require('./forge-sidecar-verification-successor').read(runtime.verificationSuccessor, r);
+    resultFile = verificationSuccessor.resultFile;
+    receiptFile = verificationSuccessor.receiptFile;
+    verificationSuccessor.initialize();
+  }
   xllm.validateResultFileTarget(receiptFile, cwd);
   xllm.validateResultFileTarget(receiptFile, root);
   const eventsFile = target(root, '.gsd/forge/events.jsonl');
@@ -1859,7 +1886,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
   // Publication seam: one observer call, then the unchanged canonical publication.
   const publish = (record, publicationGuard) => {
     notifyPhase('publishing');
-    return publishReadyRecord(publicationRequest, record, publicationGuard);
+    return publishReadyRecord(publicationRequest, record, publicationGuard, undefined,
+      verificationSuccessor ? { verificationSuccessor: runtime.verificationSuccessor, receiptFile } : {});
   };
   const completed = result => notifyPhase(result?.status === 'partial' ? 'waiting'
     : result?.status === 'blocked' ? 'failed' : 'completed',
@@ -1879,6 +1907,12 @@ async function runUnitSidecarCore(request, runtime, identity) {
     } catch { /* the identity stays unknown; the canonical outcome is unchanged */ }
   }
   async function appendOwnedEvent(line, record) {
+    if (verificationSuccessor) {
+      verificationSuccessor.assertRecord(record);
+      record.verification_successor_events = [...(record.verification_successor_events || []), line];
+      json(receiptFile, record);
+      return;
+    }
     if (recoveryReady?.appendOwnerEvent) return recoveryReady.appendOwnerEvent(line);
     if (r.ownerBroker) return require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker)
       .append('.gsd/forge/events.jsonl', line);
@@ -1907,7 +1941,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
     const batch = lines.slice();
     await livenessQueue;
     const protectedOwner = record?.execution?.protected_owner || record?.recovery_baseline?.protected_owner;
-    if (recoveryReady?.appendOwnerEvent || r.ownerBroker || !protectedOwner) {
+    if (verificationSuccessor || recoveryReady?.appendOwnerEvent || r.ownerBroker || !protectedOwner) {
       for (const line of batch) await appendOwnedEvent(line, record);
     } else return appendProtectedOwnerEvents(root, receiptFile, record, batch);
   }
@@ -2016,6 +2050,14 @@ async function runUnitSidecarCore(request, runtime, identity) {
   }
   async function recordFailure(error, extra = null) {
     const code = error.code || 'sidecar-unit-failed';
+    if (verificationSuccessor) {
+      error.provider_called = false;
+      error.stage = 'publication';
+      json(resultFile, { status: 'adapter-failed', reason_code: code, layer: 'publication',
+        provider_called: false, dispatch_id: dispatchId, verification_successor: verificationSuccessor.info });
+      notifyPhase('failed', { reason_code: code });
+      return;
+    }
     const retained = require('./forge-claude-provisional').describe(error);
     let transaction = retained?.private_ref ? failureTransactions.get(error) : null;
     if (transaction?.complete) return;
@@ -2142,6 +2184,10 @@ async function runUnitSidecarCore(request, runtime, identity) {
   const verificationApi = require('./forge-verify');
   const verifySeal = record => {
     if (transport.mode !== 'execute' || !r.execution_contract) return;
+    if (record.verification_successor || verificationSuccessor) {
+      if (!verificationSuccessor) fail('verification-successor-capability-required');
+      verificationSuccessor.assertRecord(record);
+    }
     if (!record.verification_seal) {
       if (!nativeExecution && runtime.verification === undefined) return;
       if (!record.delivery_capture || runtime.verification !== undefined) fail('verification-provenance-insufficient');
@@ -2181,19 +2227,23 @@ async function runUnitSidecarCore(request, runtime, identity) {
       const api = require('./forge-task-execution');
       const saved = record.milestone_delivery;
       assertMilestoneDeliveryReplay(r, record);
-      api.assertProtected(root, saved.protected_owner);
+      api.assertProtected(root, verificationSuccessor
+        ? verificationSuccessor.expectedOwner(record, saved.protected_owner) : saved.protected_owner);
     }
-    if (r.execution_contract && !record.delivery_capture) {
+    if (r.execution_contract && (!record.delivery_capture || !record.delivery_capture.passed)) {
       const resourceEvents = [];
       notifyPhase('verifying');
       const deliveryCapture = require('./forge-verify').captureRootDelivery(r.execution_contract,
         fs.readFileSync(r.planFile, 'utf8'), { ...r.verification, verificationSeal: record.verification_seal, verificationIdentity, unit: loc.rules[loc.delivery.input].unit,
           resourceEventSink: line => resourceEvents.push(line),
           ...(typeof runtime.onVerificationCheck === 'function' ? { onCheck: runtime.onVerificationCheck } : {}) });
+      record = { ...record, delivery_capture: deliveryCapture };
+      // Retain stdout, cleanup and the actual failing check before throwing.
+      // A failed capture never satisfies replay: the gate runs again above.
+      if (!deferredEvents) json(receiptFile, record);
       if (deferredEvents) deferredEvents.push(...resourceEvents);
       else await appendOwnedEvents(resourceEvents, record);
       if (!deliveryCapture.passed) fail('execution-verification-failed');
-      record = { ...record, delivery_capture: deliveryCapture };
       if (record.execution) require('./forge-task-execution').assertReplay(r, record);
       if (!deferredEvents) json(receiptFile, record);
     }
@@ -2206,6 +2256,10 @@ async function runUnitSidecarCore(request, runtime, identity) {
       if (marker) ready.artifacts.push(marker);
     }
     if (!deferredEvents) json(receiptFile, ready);
+    if (verificationSuccessor) verificationSuccessorReady.set(ready, {
+      cap: runtime.verificationSuccessor, record: require('./forge-code-roots').digest(ready),
+      request: require('./forge-code-roots').digest(r),
+    });
     return ready;
   }
   if (existing) {
