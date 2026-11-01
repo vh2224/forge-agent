@@ -309,6 +309,7 @@ const GLOBAL_SUMMARY_LINES=[
   /^1\.\.\d+$/,
 ];
 const ADVISORY_LIMIT='Flags heurísticas mantidas visíveis; comportamento provado só por linhas nomeadas da execução local do próprio artefato, sem alegação de CI remoto ou UAT.';
+const isGlobalEvidenceLine=line=>GLOBAL_SUMMARY_LINES.some(pattern=>pattern.test(String(line).trim()));
 function advisoryArtifactBindings(item,criterion_id,match,qualified,artifactEnvelope,capture){
   const {row,index:row_index}=match,flags=Array.isArray(row.flags)?row.flags:[];
   if(row.exists!==true||row.substantive!==false||!flags.length||flags.some(flag=>!flag||typeof flag!=='object'||flag.level!=='substantive'
@@ -327,7 +328,7 @@ function advisoryArtifactBindings(item,criterion_id,match,qualified,artifactEnve
     if(artifactEnvelope.revision!==verification.revision||roots.digest(artifactEnvelope.workspace)!==roots.digest(verification.workspace))fail('artifact-evidence-stale');
     const line=evidence.stdout_line;
     if(!nonEmpty(line))fail('artifact-evidence-line-empty');
-    if(GLOBAL_SUMMARY_LINES.some(pattern=>pattern.test(line.trim())))fail('artifact-evidence-global-summary');
+    if(isGlobalEvidenceLine(line))fail('artifact-evidence-global-summary');
     if(typeof check.stdout!=='string'||!check.stdout.split(/\r?\n/).includes(line))fail('criterion-unobserved-evidence');
     bindings.push({criterion_id,root_id:item.root_id,coverage:'behavioral',source:{kind:'verification',check_index},observed_test_lines:[line],
       evidence_limit:'Named assertion observed in actual local execution of the artifact itself; no remote CI or UAT claim.',advisory_disposition:structuredClone(advisory_disposition)});
@@ -335,8 +336,10 @@ function advisoryArtifactBindings(item,criterion_id,match,qualified,artifactEnve
   bindings.push({criterion_id,root_id:item.root_id,coverage:'structural',source:{kind:'artifact',row_index,property:'exists'},advisory_disposition:structuredClone(advisory_disposition)});
   return bindings;
 }
-function criterionBindings(result,capture,unitKey,{inventory,contract,documentary,coveragePolicy}={}){
+function criterionBindings(result,capture,unitKey,{inventory,contract,documentary,coveragePolicy,artifactAdvisoryReview}={}){
   const bindings=[];
+  const artifactReview=artifactAdvisoryReview===undefined?null:api('forge-native-artifact-advisory').read(artifactAdvisoryReview);
+  if(artifactReview&&api('forge-code-roots').digest(result)!==artifactReview.result_digest)fail('artifact-advisory-result-changed');
   if(!capture?.passed||!result.must_haves_status?.length)fail('criterion-evidence-required');
   if(!inventory?.structured||inventory.diagnostics.length||!inventory.criteria.length)fail('criterion-inventory-required');
   const expected=new Map(inventory.criteria.map(c=>[c.id,c]));
@@ -360,7 +363,8 @@ function criterionBindings(result,capture,unitKey,{inventory,contract,documentar
       if(matches[0].row.substantive===true||!item.evidence?.length){
         bindings.push({criterion_id,root_id:item.root_id,coverage:'structural',source:{kind:'artifact',row_index:matches[0].index,property:'substantive'}});continue;
       }
-      bindings.push(...advisoryArtifactBindings(item,criterion_id,matches[0],qualified,envelope,capture));continue;
+      const reviewed=artifactReview?.bindings(criterion_id,item,matches[0],qualified,envelope,capture);
+      bindings.push(...(reviewed||advisoryArtifactBindings(item,criterion_id,matches[0],qualified,envelope,capture)));continue;
     }
     const policy=coveragePolicy?.criteria.find(row=>row.criterion_id===criterion_id);
     const reviewed=documentary?.criteria.filter(row=>row.criterion_id===criterion_id);
@@ -436,7 +440,7 @@ function phaseNotifier(onPhase,r){
   return phase=>{try{onPhase(Object.freeze({schema_version:1,phase,dispatch_id:r.dispatchId,unit:r.unitType+'/'+r.taskId,
     worker_mode:'native',at:new Date().toISOString()}));}catch{/* observer errors never affect delivery */}};
 }
-function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linkedEntryOptions,savedManifest,persistDeliveryReceipt,leaseRenewal,documentaryContinuation,coveragePolicy,supplementalCoverage,verificationContinuation,onPhase,onCheck}={}){
+function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linkedEntryOptions,savedManifest,persistDeliveryReceipt,leaseRenewal,documentaryContinuation,coveragePolicy,supplementalCoverage,verificationContinuation,artifactAdvisoryReview,onPhase,onCheck}={}){
   if(typeof assertBoundary!=='function'||typeof assertAuthority!=='function')fail('live-controller-boundary-required');
   let r=structuredClone(request);
   const phase=phaseNotifier(onPhase,r);
@@ -471,6 +475,8 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
   const verificationExtra=verificationContinuation===undefined?null:verificationContinuations.get(verificationContinuation);
   if(verificationContinuation!==undefined&&(!verificationExtra||!savedManifest||documentary||coveragePolicy||supplementalCoverage
     ||verificationExtra.request_digest!==roots.digest(wireRequest)||verificationExtra.manifest_digest!==roots.digest(savedManifest)))fail('verification-continuation-capability-required');
+  if(artifactAdvisoryReview!==undefined&&(!savedManifest||documentary||coveragePolicy||supplementalCoverage))fail('artifact-advisory-capability-required');
+  const artifactReview=artifactAdvisoryReview===undefined?null:api('forge-native-artifact-advisory').read(artifactAdvisoryReview,{request:wireRequest,manifest:savedManifest});
   const loc=side.locations(r),inventory=api('forge-delivery').inventoryPlan(plan,r.planFile,loc.rules[loc.delivery.input].unit);
   // Same derivation as the sidecar helpers: validated IDs only, never worker paths.
   const markerPath=standalone?null:loc.slice+'/'+r.sliceId+'-PLAN.md';
@@ -513,6 +519,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
   function guard(publishing=false){
     if(verificationExtra)verificationExtra.check();
     if(verificationExtra&&roots.digest(manifest)!==verificationExtra.manifest_digest)fail('verification-continuation-manifest-changed');
+    if(artifactReview){artifactReview.check();if(roots.digest(manifest)!==artifactReview.manifest_digest)fail('artifact-advisory-manifest-changed');}
     if(supplement)supplement.check();
     if(policy&&fs.existsSync(manifestFile)&&roots.digest(JSON.parse(fs.readFileSync(manifestFile,'utf8')))!==roots.digest(manifest))fail('documentary-manifest-changed');
     if(documentary)documentary.check();
@@ -622,6 +629,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
     },
     returned(result){
       if(verificationExtra)fail('verification-continuation-replay-only');
+      if(artifactReview)fail('artifact-advisory-replay-only');
       if(supplement)fail('supplemental-replay-only');
       guard();
       if(!resultContract.validate(result).ok)fail('native-result-invalid');
@@ -634,6 +642,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
     verify(result){
       guard();if(!resultContract.validate(result).ok||result.status!=='done')fail('native-result-not-done');
       if(verificationExtra&&roots.digest(result)!==verificationExtra.result_digest)fail('verification-continuation-result-changed');
+      if(artifactReview&&roots.digest(result)!==artifactReview.result_digest)fail('artifact-advisory-result-changed');
       if(policy&&(!initialReview||roots.digest(result)!==roots.digest(initialReview.derived)))fail('documentary-review-required');
       if(documentary&&roots.digest(result)!==roots.digest(documentary.derived))fail('documentary-result-changed');
       const delta=execution.verifyResult(r.cwd,prepared,result),loc=side.locations(r),resourceEvents=[];
@@ -647,6 +656,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       // exact manifest; failed attempts remain failed.
       const captured={schema_version:1,kind:'native-verification-capture',dispatch_id:r.dispatchId,
         ...(verificationExtra?{verification_continuation:structuredClone(verificationExtra.evidence)}:{}),
+        ...(artifactReview?{artifact_advisory_review:structuredClone(artifactReview.evidence)}:{}),
         manifest_sha256:hash(fs.readFileSync(manifestFile)),result_sha256:hash(JSON.stringify(result)),capture};
       const captureBytes=JSON.stringify(captured)+'\n',retained=path.join(path.dirname(r.resultFile),'forge-verification-'+hash(captureBytes)+'.json');
       for(const root of [r.contextRoot,...r.execution_contract.code_roots.map(row=>row.path)])api('forge-xllm').validateResultFileTarget(retained,root);
@@ -663,7 +673,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       }
       const unit=loc.rules[loc.delivery.input].unit;
       const inventory=api('forge-delivery').inventoryPlan(plan,r.planFile,unit);
-      const bindings=criterionBindings(result,capture,api('forge-delivery').unitKey(unit),{inventory,contract:r.execution_contract,documentary:(documentary||initialReview)?.evidence,coveragePolicy:policy});
+      const bindings=criterionBindings(result,capture,api('forge-delivery').unitKey(unit),{inventory,contract:r.execution_contract,documentary:(documentary||initialReview)?.evidence,coveragePolicy:policy,...(artifactReview?{artifactAdvisoryReview}:{})});
       // Canonical delivery validates coverage, criterion identity and actual captures.
       const publicationRequest={...r,verification:{...(r.verification||{}),bindings}};
       const artifacts=side.executeDeliveryArtifacts(publicationRequest,loc,result,r.contextRoot,r.cwd,capture);
@@ -686,6 +696,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       if(markerPath){const marker=side.createTaskMarker(r,r.contextRoot,prepared.protected_owner[markerPath]);if(marker)artifacts.push(marker);}
       const record={kind:'native-execute-task',phase:'ready',dispatch_id:r.dispatchId,result,artifacts,route:r.route,response_sha256:hash(JSON.stringify(result)),
         ...(verificationExtra?{verification_continuation:structuredClone(verificationExtra.evidence)}:{}),
+        ...(artifactReview?{artifact_advisory_review:structuredClone(artifactReview.evidence)}:{}),
         ...(supplement?{supplemental_coverage:structuredClone(supplement.evidence)}:{}),
         ...(renewal?{lease_reconciliation:renewal.evidence}:{}),
         fingerprint:side.artifactFingerprint(r),recovery_identity_sha256:roots.digest(requestIdentity(r,linkedEntryOptions)),
@@ -707,6 +718,12 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
         if(roots.digest(record.result)!==verificationExtra.result_digest||record.manifest_sha256!==verificationExtra.evidence.manifest_sha256)fail('verification-continuation-ready-binding');
         const bytes=JSON.stringify(record),file=receiptFile+'.'+hash(bytes)+'.json';
         if(!fs.existsSync(file)||fs.readFileSync(file,'utf8')!==bytes)fail('verification-continuation-ready-receipt-required');
+      }
+      if(Boolean(record.artifact_advisory_review)!==Boolean(artifactReview)||artifactReview&&roots.digest(record.artifact_advisory_review)!==roots.digest(artifactReview.evidence))fail('artifact-advisory-replay-authority-required');
+      if(artifactReview){
+        if(roots.digest(record.result)!==artifactReview.result_digest||record.manifest_sha256!==artifactReview.evidence.manifest_sha256)fail('artifact-advisory-ready-binding');
+        const bytes=JSON.stringify(record),file=receiptFile+'.'+hash(bytes)+'.json';
+        if(!fs.existsSync(file)||fs.readFileSync(file,'utf8')!==bytes)fail('artifact-advisory-ready-receipt-required');
       }
       if(Boolean(record.supplemental_coverage)!==Boolean(supplement)
         ||supplement&&roots.digest(record.supplemental_coverage)!==roots.digest(supplement.evidence))fail('supplemental-replay-authority-required');
@@ -847,4 +864,4 @@ async function replay({request,recovery,runtime,nativeOptions}) {
   const verified=successor(()=>session.verify(effectiveResult)),published=successor(()=>session.publish(effectiveResult));
   return {action:'replay',provider_called:false,result:{verified,published}};
 }
-module.exports={prepare,replay,requireExplicitVerify,criterionBindings,resultContract,packagePrompt,createLeaseRenewalReconciliation,reconcileLeaseRenewalSurface,createDocumentaryContinuation,createVerificationContinuation};
+module.exports={prepare,replay,requireExplicitVerify,criterionBindings,resultContract,packagePrompt,createLeaseRenewalReconciliation,reconcileLeaseRenewalSurface,createDocumentaryContinuation,createVerificationContinuation,isGlobalEvidenceLine};
