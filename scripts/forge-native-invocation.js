@@ -420,7 +420,11 @@ async function invokeNative(options, invoke) {
       identity: supervision.digest(JSON.stringify({ invocation, identity: options.telemetryIdentity || null })),
       route: options.resolvedDispatch, terminal: options.terminalResult,
       dispatchId: options.telemetryIdentity?.dispatchId ?? null,
-    }, observer => { invoked = true; return invoke(invocation.args, invocation, observer); });
+    }, observer => {
+      require('./forge-milestone-time-admission').assertOwnerTransportEntry(options);
+      invoked = true;
+      return invoke(invocation.args, invocation, observer);
+    });
     observedProvider = supervised.provider_called;
     if (!supervised.ok) return { ...invocation, ok: false, result: null,
       reason_code: supervised.reason_code === 'native-terminal-unobserved' && options.invalidTerminalReason
@@ -428,7 +432,9 @@ async function invokeNative(options, invoke) {
       provider_called: supervised.provider_called, lifecycle: supervised.lifecycle, ...hostIdentity(),
       final_evidence: { ...evidence, stage: 'invoked', provider_called: supervised.provider_called,
         duration_ms: Date.now() - started, native_lifecycle: supervised.lifecycle },
-      diagnostic: { reason_code: supervised.reason_code, layer: 'native-lifecycle' } };
+      diagnostic: { reason_code: supervised.reason_code,
+        layer: require('./forge-milestone-time-admission').TRANSPORT_REFUSAL_CODES.includes(supervised.reason_code)
+          ? 'milestone-time-admission' : 'native-lifecycle' } };
     const result = supervised.result;
     await assertGuard('after-invoke');
     assertBoundary('after-invoke');
@@ -469,7 +475,7 @@ async function invokeNative(options, invoke) {
         provider_called: observedProvider ?? (invoked ? (typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown') : false),
         ...(supervised?.lifecycle?.host_identity ? { native_lifecycle: supervised.lifecycle } : {}) },
       provider_called: observedProvider ?? (invoked ? (typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown') : false),
-      diagnostic: { reason_code: telemetryApi.code(error.code, 'native-tool-callback-failed'), layer: 'native-tool' },
+      diagnostic: { reason_code: telemetryApi.code(error.code, 'native-tool-callback-failed'), layer: error.stage || 'native-tool' },
       hint: 'The native tool callback failed; inspect the host diagnostic channel.',
       ...(supervised?.lifecycle?.host_identity ? { lifecycle: supervised.lifecycle } : {}),
       ...hostIdentity(),

@@ -263,6 +263,23 @@ try {
     const absent = owner(); assert.equal(spawnSync(process.execPath, [file, '--admit-transport', '--milestone', M,
       '--unit', 'execute-task/T01', '--cwd', absent, '--json']).status, 0);
   });
+  test('legacy-absent-contract-long-unicode-module-and-controller-identifiers', () => {
+    for (const id of ['T-' + 'x'.repeat(180), 'T-ação-Ω']) {
+      const cwd = owner(), unit = 'execute-task/' + id;
+      assert.deepEqual(admission.decideAdmission(cwd, { milestone: M, unit }), { allowed: true, decision: 'no-contract' });
+      assert.deepEqual(admission.assertTransportEntry({ cwd, milestone: M, unit }), { allowed: true, decision: 'no-contract' });
+      fs.mkdirSync(path.join(cwd, '.gsd/milestones/M001'), { recursive: true });
+      require('./forge-state').write(cwd, { milestone: M, kind: 'milestone', phase: 'execute-task',
+        active_slice: 'S01', active_task: id, next_action: 'execute', auto_mode: 'on' });
+      const began = controller.begin(cwd, { milestone: M, slice: 'S01', unit, host_runtime: 'codex',
+        owner_token: 'fixture', idempotency_key: 'legacy-id' }, { now: () => BASE + 1,
+        prefsReader: () => ({ ok: true, prefs: {} }), inventoryReader: () => ({ slices: [{ id: 'S01', tasks: [{ id }] }] }) });
+      assert.equal(began.ok, true, JSON.stringify(began));
+      assert(!JSON.stringify(began).includes('time_admission'));
+      const timed = setup();
+      assert.throws(() => admission.decideAdmission(timed, { milestone: M, unit, now: BASE + 1 }), /inválida/);
+    }
+  });
   test('summary-closed-under-hostile-input-and-maximal-numeric-fields', () => {
     const projected = admission.summarizeTimeStatus({ state: '/private', horizon: { ceiling_ms: Number.MAX_SAFE_INTEGER },
       clocks: { consumed_ms: Number.MAX_SAFE_INTEGER, unknown_ms: Number.MAX_SAFE_INTEGER }, remaining_ms: -Number.MAX_SAFE_INTEGER,

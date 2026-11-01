@@ -726,11 +726,6 @@ function begin(cwd, request, options) {
   return withMutex(cwd, 'unit-controller-transactions', () => beginInside(cwd, request, options));
 }
 function decideTimeAdmission(cwd, options) {
-  // Legacy unit IDs may exceed the time module's bounded vocabulary. The
-  // canonical absent-contract read must precede its stricter validation.
-  if (require('./forge-milestone-time').readContract({ cwd, milestone: options.milestone }).status === 'absent') {
-    return { allowed: true, decision: 'no-contract' };
-  }
   return require('./forge-milestone-time-admission').decideAdmission(cwd, options);
 }
 function beginInside(cwd, request, options) {

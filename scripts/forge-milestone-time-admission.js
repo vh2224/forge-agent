@@ -157,6 +157,11 @@ function summarizeTimeStatus(status) {
     decision_pending: status?.checkpoint?.decision_pending === true };
 }
 function decideAdmission(cwd, options = {}) {
+  // Legacy callers need no time-specific unit vocabulary without a contract.
+  // readContract still validates the owner/milestone and fails closed on damage.
+  if (require('./forge-milestone-time').readContract({ cwd, milestone: options.milestone }).status === 'absent') {
+    return { allowed: true, decision: 'no-contract' };
+  }
   const unit = unitKey(options.unit), now = nowOf(options);
   // A paused boundary continues owner bookkeeping only. Transport never passes
   // this key and therefore cannot inherit the continuation's exception.
@@ -180,10 +185,41 @@ function decideAdmission(cwd, options = {}) {
     ceiling_ms: details.ceiling_ms, at: new Date(now).toISOString() } };
 }
 function assertTransportEntry({ cwd, milestone, unit, now }) {
-  const result = decideAdmission(cwd, { milestone, unit, now, kind: 'begin' });
+  let result;
+  try { result = decideAdmission(cwd, { milestone, unit, now, kind: 'begin' }); }
+  catch { result = { allowed: false, reason_code: 'milestone-time-invalid' }; }
   if (!result.allowed) throw Object.assign(new Error('Entrada recusada pelo contrato de tempo da milestone'), {
-    code: result.reason_code, provider_called: false, stage: 'milestone-time-admission', details: result.details });
+    code: result.reason_code, provider_called: false, stage: 'milestone-time-admission', layer: 'milestone-time-admission', details: result.details });
   return result;
+}
+// Explicit owner context is operational input, never an authorization. When a
+// retained request exists, it determines the scope and cannot be overridden by
+// a context pointing at another (possibly contract-free) milestone or owner.
+function assertOwnerTransportEntry(options = {}) {
+  const request = options.request || options.telemetryIdentity;
+  const context = options.milestoneTimeContext;
+  const milestoneRequest = request && (request.scope === 'milestone'
+    || request.scope !== 'standalone-task' && request.milestoneId);
+  if (context === undefined && !milestoneRequest) return;
+  const invalid = () => { throw Object.assign(new Error('Contexto de tempo da milestone inválido'), {
+    code: 'milestone-time-invalid', provider_called: false, stage: 'milestone-time-admission', layer: 'milestone-time-admission' }); };
+  const retained = milestoneRequest ? { cwd: request.contextRoot || request.cwd, milestone: request.milestoneId,
+    unit: request.unitType + '/' + (request.taskId || request.sliceId || request.milestoneId) } : null;
+  const bound = context === undefined ? retained : context;
+  try {
+    if (!bound || typeof bound !== 'object' || Array.isArray(bound)
+        || Object.keys(bound).some(key => !['cwd', 'milestone', 'unit'].includes(key))
+        || !['cwd', 'milestone', 'unit'].every(key => typeof bound[key] === 'string' && bound[key])) invalid();
+    if (request?.scope && !['milestone', 'standalone-task'].includes(request.scope)) invalid();
+    if (context !== undefined && request && !milestoneRequest) invalid();
+    if (retained && (fs.realpathSync(bound.cwd) !== fs.realpathSync(retained.cwd)
+        || bound.milestone !== retained.milestone || bound.unit !== retained.unit)) invalid();
+    if (options.contextRoot && fs.realpathSync(bound.cwd) !== fs.realpathSync(options.contextRoot)) invalid();
+    return assertTransportEntry({ ...bound, now: options.now });
+  } catch (error) {
+    if (TRANSPORT_REFUSAL_CODES.includes(error.code)) throw error;
+    invalid();
+  }
 }
 function observeBoundary(cwd, milestone, options = {}) {
   const time = require('./forge-milestone-time'), input = { ...options, cwd, milestone, now: nowOf(options) };
@@ -247,5 +283,5 @@ function main(argv = process.argv.slice(2), io = process) {
   }
 }
 module.exports = { TIME_REASON_CODES, TRANSPORT_REFUSAL_CODES, ADMISSION_DECISIONS, TIME_STATES,
-  decideAdmission, assertTransportEntry, readTimeStatus, summarizeTimeStatus, observeBoundary, main };
+  decideAdmission, assertTransportEntry, assertOwnerTransportEntry, readTimeStatus, summarizeTimeStatus, observeBoundary, main };
 if (require.main === module) process.exitCode = main();

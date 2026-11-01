@@ -678,6 +678,41 @@ async function main() {
   const invocationSource = fs.readFileSync(path.join(__dirname, 'forge-native-invocation.js'), 'utf8');
   assert(invocationSource.includes('terminal: options.terminalResult') && invocationSource.includes('terminalResult'));
   console.log('PASS S03/T02 invokeNative observer: third argument only, frozen hostIdentity, host_identity on success and failure only when observed, old callbacks unchanged');
+  const flow = require('./forge-milestone-time-flow.test');
+  const admission = require('./forge-milestone-time-admission');
+  const timeFixture = flow.fixture();
+  try {
+    const request = { scope: 'milestone', contextRoot: timeFixture.cwd, cwd: timeFixture.cwd,
+      milestoneId: 'M001', unitType: 'execute-task', taskId: 'T01' };
+    const base = { hostRuntime: 'codex', resolvedDispatch: dispatch('gpt-6-sol', 'high', 'codex'),
+      activeCapabilities: codexCapabilities, agentType: 'forge-executor', prompt: 'scoped fixture',
+      telemetryIdentity: request, now: () => Date.parse('2026-11-01T12:00:00Z') + timeFixture.at };
+    let called = 0;
+    const callback = async () => { called++; return { status: 'done' }; };
+    for (const agentType of ['forge-executor', 'forge-reviewer', 'forge-advocate']) {
+      timeFixture.at = 1;
+      admission.assertOwnerTransportEntry(base);
+      const outcome = await invokeNative({ ...base, agentType, beforeInvoke: () => { timeFixture.at = 101; } }, callback);
+      assert.strictEqual(outcome.ok, false); assert.strictEqual(outcome.reason_code, 'milestone-budget-exhausted');
+      assert.strictEqual(outcome.provider_called, false);
+      assert.strictEqual(outcome.diagnostic.layer, 'milestone-time-admission');
+    }
+    assert.strictEqual(called, 0);
+    console.log('PASS T06 native first invocation and challenger/defense/rebuttal: selected below cap, actual callback refused beyond cap, zero host calls');
+    timeFixture.at = 1;
+    assert.strictEqual((await invokeNative(base, async () => { called++; timeFixture.at = 101; return { status: 'done' }; })).ok, true);
+    assert.strictEqual(called, 1, 'after-invoke and publication do not repeat admission');
+    const legacy = { ...base, telemetryIdentity: undefined };
+    assert.strictEqual((await invokeNative(legacy, callback)).ok, true);
+    const standalone = { ...base, telemetryIdentity: { ...request, scope: 'standalone-task', milestoneId: undefined } };
+    assert.strictEqual((await invokeNative(standalone, callback)).ok, true);
+    const foreign = await invokeNative({ ...base, milestoneTimeContext: { cwd: timeFixture.cwd, milestone: 'M002', unit: 'execute-task/T01' } }, callback);
+    assert.strictEqual(foreign.reason_code, 'milestone-time-invalid'); assert.strictEqual(foreign.provider_called, false);
+    const incomplete = await invokeNative({ ...base, telemetryIdentity: { ...request, milestoneId: undefined } }, callback);
+    assert.strictEqual(incomplete.reason_code, 'milestone-time-invalid'); assert.strictEqual(incomplete.provider_called, false);
+    assert.strictEqual(called, 3);
+    console.log('PASS T06 native after-invoke allowed, standalone and absent context legacy unchanged, foreign budget context fails before host callback');
+  } finally { fs.rmSync(timeFixture.cwd, { recursive: true, force: true }); }
   process.stdout.write('forge-native-invocation: ok\n');
 }
 

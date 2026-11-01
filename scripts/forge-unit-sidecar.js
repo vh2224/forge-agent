@@ -1763,6 +1763,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
   let notifyPhase = () => {};
   let executingObserved = false;
   const enterTransport = () => {
+    if (r.scope !== 'standalone-task' && r.milestoneId) require('./forge-milestone-time-admission').assertTransportEntry({
+      cwd: r.contextRoot || r.cwd, milestone: r.milestoneId, unit: unitLabel(r, locations(r)), now: runtime.now });
     recoveryReady?.();
     recoveryReady = null;
     if (!executingObserved) { executingObserved = true; notifyPhase('executing'); }
@@ -2043,7 +2045,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
         model_sent: error.provider_called === true || record.provider_called === true ? model : null,
         duration_ms: record.started_at ? Date.now() - Date.parse(record.started_at) : null } : {}),
       recovery: replayable ? 'replay-publication' : 'operator-required',
-      failed_at: new Date().toISOString(), ...(replayable ? {} : (extra || {})) };
+      failed_at: new Date().toISOString(), ...(replayable ? {} : (extra || {})),
+      ...(error.stage === 'milestone-time-admission' ? { layer: error.stage } : {}) };
     if (retained?.private_ref) {
       if (!transaction) {
         transaction = { record, failure, complete: false };
@@ -2849,7 +2852,9 @@ async function runUnitSidecarCore(request, runtime, identity) {
       reason_code: error.code || xllm.classifyErrorClass(error.message), provider_called: providerCalled });
     let extra = execution ? { reset_state_file: executionStateFile,
       possible_writes: providerCalled ? 'unknown' : false,
-      reconciliation_required: providerCalled !== false } : null;
+      reconciliation_required: providerCalled !== false }
+      : error.stage === 'milestone-time-admission' && transport.mode === 'execute' && providerCalled === false
+        ? { possible_writes: false, reconciliation_required: false } : null;
     const phase = fix ? JSON.parse(fs.readFileSync(receiptFile, 'utf8')).phase : null;
     if (fix && phase !== 'ready') {
       // Only an attempt that never reached a durable validated result is reset;
@@ -3114,7 +3119,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       transport = promptTransports.get(promptHash);
     }
     return { hostRuntime: route.host_runtime, resolvedDispatch: route,
-    telemetryIdentity: finalRequest(route), lifecycle: runtime.nativeLifecycle,
+    telemetryIdentity: finalRequest(route), lifecycle: runtime.nativeLifecycle, now: runtime.now,
     terminalResult: value => deliveryHelper ? deliveryHelper.resultContract.validate(value).ok
       : canonical.unitType === 'review-fix' && typeof value === 'string'
         // The review-fix prompt requires the textual worker-result block; the value
@@ -3237,6 +3242,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
             assertReady();
             runtime.assertBoundary();
             validateRecoveryRequest(next, { verification: runtime.verification, nativeInvocation: binding, linkedEntryOptions: runtime.linkedEntryOptions });
+            require('./forge-milestone-time-admission').assertOwnerTransportEntry({ request: next, now: runtime.now });
             assertReady.consumeInvocation(binding, { ...session.start(),
               original_receipt_sha256: hash(fs.readFileSync(recovery.receiptFile)) });
             invoked = binding;
@@ -3280,6 +3286,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
           return require('./forge-native-invocation').invokeNative(nativeOptions(route), (args, binding, observer) => {
             assertReady?.();
             asOriginal(routed, () => validateRecoveryRequest(routed, { verification: runtime.verification, nativeInvocation: binding }));
+            require('./forge-milestone-time-admission').assertOwnerTransportEntry({ request: next, now: runtime.now });
             assertReady?.consumeInvocation?.(binding);
             return callback(next, { ...binding, args }, {
               assertAuthority: () => {
