@@ -1,0 +1,437 @@
+#!/usr/bin/env node
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const phaseCost = require('./forge-phase-cost');
+const { unionDuration } = require('./forge-autonomy');
+const time = require('./forge-milestone-time');
+const { continuation } = require('./forge-pending-questions');
+const { readBoundedStableFile } = require('./forge-autonomy-sources');
+const CLASSES = Object.freeze(['unit-work', 'owner-session', 'human-wait', 'pause', 'ci-wait', 'external-wait', 'unknown']);
+const CONSUMES = Object.freeze(Object.fromEntries(CLASSES.map(k => [k, ['unit-work', 'owner-session', 'unknown'].includes(k)])));
+const CLOCK_POLICY = Object.freeze({ id: 'forge-milestone-time-clock', version: 1,
+  classes: CLASSES, priority: CLASSES, consumption: CONSUMES });
+const FORECAST_POLICY = Object.freeze({ id: 'forge-milestone-time-forecast', version: 1 });
+const MAX_JSON = 1024 * 1024;
+function fail(code) { throw Object.assign(new Error(code), { code }); }
+function hash(bytes) { return crypto.createHash('sha256').update(bytes).digest('hex'); }
+function instant(value) {
+  if (typeof value === 'number') return Number.isSafeInteger(value) ? value : NaN;
+  if (typeof value !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value)) return NaN;
+  const result = Date.parse(value); return Number.isFinite(result) && new Date(result).toISOString() === value ? result : NaN;
+}
+function unknown(reason, sources = []) { return { status: 'unknown', reason, policy: CLOCK_POLICY, sources }; }
+// All paths, including missing suffixes, stay under one explicit owner/code root.
+function safeFile(root, reference) {
+  if (typeof reference !== 'string' || !reference || path.isAbsolute(reference) || reference.includes('\\')
+      || reference.split('/').some(p => !p || p === '.' || p === '..') || /[\x00-\x1f:]/.test(reference)) fail('clock-path-invalid');
+  const file = path.resolve(root, reference), base = path.resolve(root);
+  if (!file.startsWith(base + path.sep)) fail('clock-path-invalid');
+  let cursor = file;
+  for (;;) {
+    try { if (fs.lstatSync(cursor).isSymbolicLink()) fail('clock-path-link'); }
+    catch (e) { if (e.code !== 'ENOENT') throw e; }
+    const parent = path.dirname(cursor); if (parent === cursor) break; cursor = parent;
+  }
+  return file;
+}
+function readSource(root, reference, limit = MAX_JSON, json = false) {
+  const file = safeFile(root, reference);
+  let stat; try { stat = fs.lstatSync(file); }
+  catch (e) { if (e.code === 'ENOENT') return { status: 'absent', path: reference, sha256: null, bytes: 0, records: 0 }; throw e; }
+  if (!stat.isFile()) fail('clock-source-invalid');
+  const read = readBoundedStableFile(file, limit, { expectedReal: fs.realpathSync.native(file) });
+  if (read.error) fail(read.error === 'source_too_large' ? 'clock-source-limit'
+    : read.error === 'source_unreadable' ? 'clock-source-unreadable' : 'clock-source-unstable');
+  let text; try { text = new TextDecoder('utf-8', { fatal: true }).decode(read.buffer); }
+  catch { fail('clock-source-encoding'); }
+  const result = { status: 'valid', path: reference, sha256: hash(read.buffer), bytes: read.buffer.length,
+    records: json ? 1 : text.split(/\r?\n/).filter(x => x.trim()).length, buffer: read.buffer };
+  if (json) { try { result.value = JSON.parse(text); } catch { fail('clock-source-json-invalid'); } }
+  return result;
+}
+function publicSource(source) { const { buffer, value, ...metadata } = source; return metadata; }
+function deliverySource(options, root, reference, limit = MAX_JSON, json = false) {
+  const key = path.resolve(root) + '\0' + reference, cache = options.deliveryCache;
+  let result = cache.files.get(key);
+  if (!result) {
+    const source = readSource(root, reference, limit, json);
+    cache.bytes += source.bytes;
+    if (cache.files.size >= 1024 || cache.bytes > 8 * MAX_JSON) fail('delivery-source-limit');
+    result = { root, reference, limit, source }; cache.files.set(key, result);
+  }
+  if (result.source.bytes > limit) fail('delivery-source-limit');
+  if (json && result.source.value === undefined && result.source.buffer) {
+    try { result.source.value = JSON.parse(result.source.buffer.toString('utf8')); } catch { fail('clock-source-json-invalid'); }
+  }
+  return result.source;
+}
+function revisionBlobHash(cwd, revision, relative) {
+  const { git } = require('./forge-git-process');
+  const options = { maxBuffer: 1024, env: { GIT_OPTIONAL_LOCKS: '0', GIT_NO_REPLACE_OBJECTS: '1' } };
+  try {
+    if (git(cwd, ['cat-file', '-t', revision], options).trim() !== 'commit') return { ok: false };
+    const object = git(cwd, ['rev-parse', '--verify', `${revision}:${relative}`], options).trim();
+    if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(object) || git(cwd, ['cat-file', '-t', object], options).trim() !== 'blob') return { ok: false };
+    return { ok: true, hash: object };
+  } catch { return { ok: false }; }
+}
+function validateCurrentSources(options, envelope, scope) {
+  const cache = options.deliveryCache, codeRoot = options.codeDir || options.cwd;
+  if (!envelope || !Array.isArray(envelope.workspace) || !scope.length) fail('delivery-current-source-binding-missing');
+  if (path.resolve(envelope.code_dir || '') !== path.resolve(codeRoot)) fail('delivery-code-root-mismatch');
+  for (const relative of scope) {
+    const source = deliverySource(options, codeRoot, relative, phaseCost.MAX_BYTES);
+    if (source.status !== 'valid') fail('delivery-current-source-changed');
+    const entries = envelope.workspace.filter(r => r.path === relative);
+    if (entries.length > 1) fail('delivery-workspace-conflicting-path');
+    let expected;
+    if (entries.length) {
+      if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(entries[0].hash)) fail('delivery-current-source-binding-missing');
+      expected = entries[0].hash;
+    } else {
+      if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(envelope.revision)) fail('delivery-current-source-binding-missing');
+      const key = codeRoot + '\0' + envelope.revision + '\0' + relative;
+      if (!cache.blobs.has(key)) {
+        if (cache.blobs.size >= 256) fail('delivery-revision-limit');
+        const read = (options.revisionBlobReader || revisionBlobHash)(codeRoot, envelope.revision, relative);
+        if (!read?.ok || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(read.hash)) fail('delivery-revision-unreadable');
+        cache.blobs.set(key, read.hash);
+      }
+      expected = cache.blobs.get(key);
+    }
+    const key = codeRoot + '\0' + relative;
+    if (!cache.hashes.has(key)) {
+      if (cache.hashes.size >= 256) fail('delivery-revision-limit');
+      const read = (options.currentHashReader || ((cwd, file) => require('./forge-vcs').hashPath(cwd, file,
+        { vcs: 'git', maxBuffer: 1024, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_NO_REPLACE_OBJECTS: '1' } })))(codeRoot, relative);
+      if (!read?.ok || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(read.hash)) fail('delivery-current-source-unreadable');
+      if (readSource(codeRoot, relative, phaseCost.MAX_BYTES).sha256 !== source.sha256) fail('clock-source-unstable');
+      cache.hashes.set(key, read.hash);
+    }
+    if (cache.hashes.get(key) !== expected) fail('delivery-current-source-changed');
+  }
+}
+function sourceReason(error) {
+  return /^(?:clock-|phase-cost-|time-|delivery-)/.test(error.code || '') ? error.code : 'clock-source-unreadable';
+}
+function observationOptions(options) {
+  return { ...options, cwd: path.resolve(options.cwd || '.'),
+    now: typeof options.now === 'function' ? options.now() : options.now ?? Date.now() };
+}
+
+// Pure input: {contract, now, events: analyzeEventIntervals(...), journal: [], pending: [source.ref]}.
+// Every boundary is explicit; presence never extends beyond its last observation.
+function computeClock(input) {
+  const { contract, events, journal = [], pending = [] } = input;
+  if (!time.validateContract(contract).valid) return unknown('time-contract-schema-invalid');
+  const start = instant(contract.activated_at), now = instant(input.now);
+  if (!Number.isFinite(now) || now < start) return unknown('clock-now-invalid');
+  if (!events || !Array.isArray(events.intervals) || !Array.isArray(events.open) || !Array.isArray(events.ambiguous)
+      || !Array.isArray(events.pauses) || !Array.isArray(journal)) return unknown('clock-input-invalid');
+  const spans = [], reasons = [];
+  function add(kind, a, b, reason) {
+    if (!Number.isFinite(a) || !Number.isFinite(b) || b < a) fail('clock-interval-invalid');
+    const left = Math.max(start, a), right = Math.min(now, b);
+    if (right > left) (reason ? reasons : spans).push({ start: left, end: right, class: kind, ...(reason ? { reason } : {}) });
+  }
+  try {
+    const units = events.intervals.filter(r => r.milestone === contract.milestone);
+    const open = events.open.filter(r => r.milestone === contract.milestone && r.start <= now);
+    const ambiguous = events.ambiguous.filter(r => r.milestone === contract.milestone);
+    for (const r of units) add('unit-work', r.start, r.end);
+    for (const r of open) add('unit-work', r.start, now);
+    for (const r of ambiguous) add('unknown', Math.min(...r.starts, r.end ?? now), Math.max(...r.starts, r.end ?? now), 'no-source');
+    const sessions = new Map(), waits = new Map();
+    let previousPresence = null;
+    for (const r of journal.slice().sort((a, b) => instant(a.at) - instant(b.at))) {
+      const at = instant(r.at); if (!Number.isFinite(at) || at > now) { if (!Number.isFinite(at)) fail('clock-journal-invalid'); continue; }
+      if (r.type === 'presence') {
+        if (r.session_sha256 !== null && !/^[a-f0-9]{64}$/.test(r.session_sha256)) fail('clock-session-invalid');
+        const previous = r.session_sha256 && sessions.get(r.session_sha256);
+        if (previous !== undefined && previous !== null && r.boundary !== 'session-start') add('owner-session', previous, at);
+        if (previousPresence && previousPresence.session !== r.session_sha256)
+          add('unknown', previousPresence.at, at, 'session-change');
+        if (r.session_sha256) {
+          if (r.boundary === 'session-end') sessions.delete(r.session_sha256);
+          else sessions.set(r.session_sha256, at);
+        } else sessions.clear();
+        previousPresence = { session: r.session_sha256, at };
+      } else if (r.type === 'wait-start') {
+        if (waits.has(r.wait_id) || !['human', 'pause', 'ci', 'external'].includes(r.class)
+            || !r.source || typeof r.source.ref !== 'string') fail('clock-wait-invalid');
+        waits.set(r.wait_id, r);
+      } else if (r.type === 'wait-end') {
+        const first = waits.get(r.wait_id);
+        if (!first || first.class !== r.class || first.source.kind !== r.source?.kind || first.source.ref !== r.source?.ref) fail('clock-wait-conflict');
+        const kind = first.class === 'pause' ? 'pause' : first.class + '-wait';
+        if (first.class === 'human' && first.source.kind !== 'pending-question') add('unknown', instant(first.at), at, 'wait-end-missing');
+        else add(kind, instant(first.at), at);
+        waits.delete(r.wait_id);
+      } else fail('clock-journal-invalid');
+    }
+    for (const first of waits.values()) {
+      const valid = first.class !== 'human' || first.source.kind === 'pending-question' && pending.includes(first.source.ref);
+      add(valid ? first.class === 'pause' ? 'pause' : first.class + '-wait' : 'unknown', instant(first.at), now,
+        valid ? null : 'wait-end-missing');
+    }
+    for (const pause of events.pauses.filter(r => r.milestone === contract.milestone)) {
+      const next = [...units, ...open].filter(r => r.unit === pause.unit && r.start >= pause.at).map(r => r.start);
+      add('pause', pause.at, next.length ? Math.min(...next) : now);
+    }
+    const points = new Map([[start, []], [now, []]]);
+    for (const span of [...spans, ...reasons]) {
+      for (const [at, delta] of [[span.start, 1], [span.end, -1]]) {
+        if (!points.has(at)) points.set(at, []);
+        points.get(at).push({ key: span.reason || span.class, reason: !!span.reason, delta });
+      }
+    }
+    const boundaries = [...points.keys()].sort((a, b) => a - b), activeClasses = new Map(), activeReasons = new Map();
+    const byClass = Object.fromEntries(CLASSES.map(k => [k, 0])), segments = [], gaps = [];
+    for (let i = 1; i < boundaries.length; i++) {
+      const a = boundaries[i - 1], b = boundaries[i];
+      for (const change of points.get(a)) {
+        const active = change.reason ? activeReasons : activeClasses;
+        active.set(change.key, (active.get(change.key) || 0) + change.delta);
+      }
+      const kind = CLASSES.find(k => activeClasses.get(k) > 0) || 'unknown';
+      byClass[kind] += b - a; segments.push({ start: a, end: b, class: kind });
+      if (kind === 'unknown') {
+        const reason = ['wait-end-missing', 'session-change', 'source-limit', 'no-source'].find(k => activeReasons.get(k) > 0) || 'no-source';
+        const last = gaps.at(-1); if (last && last.end === a && last.reason === reason) last.end = b;
+        else gaps.push({ start: a, end: b, reason });
+      }
+    }
+    // Union cross-check is also used for the public unit-work total, never the sum.
+    byClass['unit-work'] = unionDuration(spans.filter(r => r.class === 'unit-work'));
+    const consumed = CLASSES.filter(k => CONSUMES[k]).reduce((sum, k) => sum + byClass[k], 0);
+    const workerMs = [...units, ...open.map(r => ({ ...r, end: now }))]
+      .reduce((sum, r) => sum + Math.max(0, Math.min(now, r.end) - Math.max(start, r.start)), 0);
+    return { status: 'measured', policy: CLOCK_POLICY, now, elapsed: { since_activation_ms: now - start,
+      preselection_ms: start - instant(contract.preselection_started_at) },
+      consumption: { consumed_ms: consumed, unknown_ms: byClass.unknown, by_class: byClass },
+      effort: { worker_ms: workerMs, units: units.length, open_units: open.length,
+        ambiguous_units: ambiguous.length, complete: ambiguous.length === 0 && open.length === 0 },
+      waits: Object.fromEntries(CLASSES.filter(k => !CONSUMES[k]).map(k => [k, byClass[k]])), gaps, segments };
+  } catch (e) { return unknown(sourceReason(e)); }
+}
+
+function eventSource(options) {
+  const reference = `.gsd/milestones/${options.milestone}/${options.milestone}-events.jsonl`;
+  const source = readSource(options.cwd, reference, phaseCost.MAX_BYTES);
+  if (source.status === 'absent') return { source, events: phaseCost.analyzeEventIntervals(Buffer.alloc(0)) };
+  const analysis = phaseCost.measurePhaseCost(safeFile(options.cwd, reference));
+  if (analysis.source_sha256 !== source.sha256) fail('clock-source-unstable');
+  const events = phaseCost.analyzeEventIntervals(source.buffer);
+  if (events.milestones.some(milestone => milestone !== options.milestone)) fail('clock-event-milestone-mismatch');
+  return { source, events };
+}
+function readClock(options) {
+  const sources = [];
+  try {
+    options = observationOptions(options);
+    const paths = time.timePaths(options), contract = time.readContract(options);
+    if (contract.status === 'absent') return { status: 'no-contract', sources };
+    if (contract.status !== 'valid') return unknown(contract.reason, sources);
+    const base = readSource(paths.owner, `.gsd/forge/time/${options.milestone}/contract.json`, MAX_JSON, true);
+    sources.push(publicSource(base));
+    for (let version = 2; version <= contract.version; version++) {
+      const reference = `.gsd/forge/time/${options.milestone}/amendments/${String(version).padStart(4, '0')}.json`;
+      sources.push(publicSource(readSource(paths.owner, reference, 64 * 1024, true)));
+    }
+    const journal = time.readJournal(options);
+    if (journal.status !== 'valid') return unknown(journal.reason || 'clock-journal-invalid', sources);
+    const journalSource = readSource(paths.owner, `.gsd/forge/time/${options.milestone}/journal.jsonl`, phaseCost.MAX_BYTES);
+    if (journalSource.status !== 'absent' && hash(Buffer.from(journal.records.map(JSON.stringify).join('\n')))
+        !== hash(Buffer.from(journalSource.buffer.toString('utf8').trimEnd().split('\n').map(line => JSON.stringify(JSON.parse(line))).join('\n')))) fail('clock-source-unstable');
+    sources.push(publicSource(journalSource));
+    const observed = eventSource(options); sources.push(publicSource(observed.source));
+    const pending = [];
+    for (const r of journal.records.filter(r => r.type === 'wait-start' && r.class === 'human' && r.source.kind === 'pending-question')) {
+      const match = /^([a-f0-9]{64}):([a-zA-Z0-9_-]+)$/.exec(r.source.ref);
+      if (!match) continue;
+      try {
+        const state = continuation({ cwd: paths.owner, identity: match[1] });
+        const origin = readSource(paths.owner, `.gsd/forge/questions/${match[1]}.origin.json`, 256 * 1024, true);
+        const questionState = readSource(paths.owner, `.gsd/forge/questions/${match[1]}.json`, 256 * 1024, true);
+        if (origin.value?.identity?.milestone === options.milestone && state.pending_ids?.includes(match[2])) pending.push(r.source.ref);
+        sources.push(publicSource(origin), publicSource(questionState));
+      }
+      catch { /* Without a readable matching question an open wait is unknown. */ }
+    }
+    sources.push(...['.gsd/forge/events.jsonl', '.gsd/forge/receipts'].map(reference => ({ path: reference,
+      status: 'nested-not-counted', sha256: null, bytes: null, records: null, reason: 'already-contained-in-unit-intervals' })));
+    const result = computeClock({ contract: contract.contract, now: options.now, events: observed.events, journal: journal.records, pending });
+    // Contract/journal APIs are rechecked after collection, across amendment races.
+    const after = time.readContract(options);
+    if (after.status !== 'valid' || after.sha256 !== contract.sha256) fail('clock-source-unstable');
+    for (const source of sources.filter(r => r.status === 'valid' || r.status === 'absent')) {
+      if (readSource(paths.owner, source.path, phaseCost.MAX_BYTES).sha256 !== source.sha256) fail('clock-source-unstable');
+    }
+    return { ...result, sources };
+  } catch (e) { return unknown(sourceReason(e), sources); }
+}
+
+// Rebuild each canonical projection from its input, including child inputs. No
+// historical revision or green projection alone establishes current source bytes.
+function validateDelivery(options, reference, expected, seen = new Set()) {
+  if (seen.has(reference) || seen.size >= 64) fail('delivery-cycle-or-limit'); seen.add(reference);
+  const delivery = require('./forge-delivery');
+  const stored = deliverySource(options, options.cwd, reference, MAX_JSON, true);
+  if (stored.status !== 'valid') fail('delivery-missing');
+  const inputReference = reference.replace(/-DELIVERY\.json$/, '-DELIVERY-INPUT.json');
+  if (inputReference === reference) fail('delivery-path-invalid');
+  const inputRead = deliverySource(options, options.cwd, inputReference, MAX_JSON, true), input = inputRead.value;
+  if (!input || delivery.unitKey(input.unit) !== delivery.unitKey(expected)
+      || delivery.unitKey(stored.value?.unit) !== delivery.unitKey(expected)) fail('delivery-unit-mismatch');
+  for (const child of input.expected_children || []) {
+    if (!child?.unit || !child.delivery) fail('delivery-child-invalid');
+    validateDelivery(options, child.delivery, child.unit, seen);
+  }
+  const rebuilt = delivery.buildDelivery(input, { ownerRoot: options.cwd, codeDir: options.codeDir || options.cwd });
+  if (rebuilt.delivery_fingerprint !== stored.value.delivery_fingerprint
+      || delivery.finalizeOutput(stored.value).delivery_fingerprint !== stored.value.delivery_fingerprint) fail('delivery-projection-changed');
+  const legacySlice = expected.type === 'slice' && input.expected_children?.length > 0;
+  if (rebuilt.generated_by !== 'forge-delivery' || rebuilt.diagnostics.some(r => !(legacySlice && r === 'plan_legacy')) || !rebuilt.criteria.length
+      || rebuilt.criteria.some(c => c.status !== 'verificado' || c.pending.length)) fail('delivery-criteria-unproven');
+  const plan = deliverySource(options, options.cwd, input.plan, MAX_JSON);
+  const planText = plan.buffer.toString('utf8');
+  if (expected.type === 'slice') {
+    const tasks = require('./forge-status').parsePlanTasks(planText);
+    const children = input.expected_children || [];
+    if (tasks.length && (tasks.length !== children.length || tasks.some(task => !children.some(child => child.unit.type === 'task'
+        && child.unit.id === task.id && child.unit.slice === expected.id && child.unit.milestone === expected.milestone)))) fail('delivery-child-inventory-mismatch');
+    if (!rebuilt.plan.structured && !tasks.length) fail('delivery-child-inventory-missing');
+  }
+  const fields = rebuilt.plan.structured ? require('./forge-must-haves').parseExecutionFields(planText) : {};
+  const inventory = delivery.inventoryPlan(plan.buffer.toString('utf8'), input.plan, expected);
+  const scope = [...new Set([...(fields.writes || []), ...inventory.criteria.flatMap(c => [c.artifact_path, c.link_from, c.link_to].filter(Boolean))])];
+  const bindings = input.bindings || [];
+  for (const reference of new Set(bindings.map(binding => binding.source?.path))) {
+    if (!reference) fail('delivery-binding-invalid');
+    const envelope = deliverySource(options, options.cwd, reference, MAX_JSON, true).value;
+    validateCurrentSources(options, envelope, scope);
+  }
+  return rebuilt;
+}
+function readDeliveries(options) {
+  const proven = [], unproven = [], sources = [];
+  try {
+    options = observationOptions(options);
+    options.deliveryCache = { files: new Map(), hashes: new Map(), blobs: new Map(), bytes: 0 };
+    time.timePaths(options);
+    const observed = eventSource(options); sources.push(publicSource(observed.source));
+    const controller = require('./forge-unit-controller');
+    const rows = observed.source.status === 'absent' ? [] : controller.readEvents(safeFile(options.cwd, observed.source.path));
+    const after = deliverySource(options, options.cwd, observed.source.path, phaseCost.MAX_BYTES);
+    if (after.sha256 !== observed.source.sha256) fail('clock-source-unstable');
+    const slices = options.slices || [...new Set(rows.filter(r => r.unit?.startsWith('complete-slice/')).map(r => r.unit.split('/')[1]))];
+    if (!Array.isArray(slices) || slices.length > 256) fail('delivery-slice-limit');
+    for (const slice of [...new Set(slices)].sort()) {
+      if (!/^S\d{2,}$/.test(slice)) fail('delivery-slice-invalid');
+      try {
+        const unit = 'complete-slice/' + slice;
+        const event = rows.filter(r => r.milestone === options.milestone && r.unit === unit && r.event === 'unit-transition'
+          && r.action === 'complete' && r.outcome === 'succeeded').at(-1);
+        if (!event || typeof event.idempotency_key !== 'string') fail('delivery-completion-missing');
+        // Guard parent paths and sizes before calling canonical controller readers.
+        for (const kind of ['transaction', 'result', 'boundary']) {
+          const file = kind === 'transaction' ? controller.transactionFile(options.cwd, event.idempotency_key)
+            : kind === 'result' ? controller.resultFile(options.cwd, event.idempotency_key) : controller.boundaryFile(options.cwd, unit);
+          const ref = path.relative(options.cwd, file).split(path.sep).join('/');
+          const read = deliverySource(options, options.cwd, ref, MAX_JSON, true); if (read.status !== 'valid') fail('delivery-completion-record-missing');
+          if (!/^[a-f0-9]{64}$/.test(read.value?.storage_checksum)) fail('delivery-completion-checksum-missing');
+          // lookupRecord may also inspect a legacy copy. Bound and reject links
+          // in the record directory without implementing its storage parser.
+          const directory = path.dirname(file), directoryRef = path.relative(options.cwd, directory).split(path.sep).join('/');
+          safeFile(options.cwd, directoryRef);
+          const names = fs.readdirSync(directory);
+          if (names.length > 256) fail('delivery-record-limit');
+          let bytes = 0;
+          for (const name of names.filter(n => n.endsWith('.json'))) {
+            bytes += deliverySource(options, options.cwd, directoryRef + '/' + name, MAX_JSON).bytes;
+            if (bytes > phaseCost.MAX_BYTES) fail('delivery-record-limit');
+          }
+        }
+        const tx = controller.lookupRecord(options.cwd, 'transaction', event.idempotency_key);
+        const result = controller.lookupRecord(options.cwd, 'result', event.idempotency_key);
+        const boundary = controller.lookupRecord(options.cwd, 'boundary', unit);
+        // The controller adds sequence only when publishing the event stream.
+        const { sequence, ...publishedEvent } = event;
+        if (!tx || tx.action !== 'complete' || tx.phase !== 'committed' || tx.milestone !== options.milestone || tx.unit?.key !== unit
+            || result?.status !== 'succeeded' || result.unit !== unit || result.milestone !== options.milestone
+            || boundary?.kind !== 'completed' || boundary.outcome !== 'succeeded' || boundary.handoff_ready !== true
+            || boundary.milestone !== options.milestone || boundary.idempotency_key !== event.idempotency_key
+            || !Number.isFinite(instant(boundary.committed_at)) || !Number.isFinite(instant(tx.updated_at))
+            || !Number.isFinite(instant(tx.created_at)) || instant(tx.created_at) > instant(event.ts)
+            || instant(event.ts) > instant(boundary.committed_at) || instant(boundary.committed_at) > instant(tx.updated_at)
+            || !Number.isFinite(instant(options.now)) || instant(tx.updated_at) > instant(options.now)
+            || boundary.state_checksum !== tx.after.state_checksum
+            || !Number.isSafeInteger(sequence) || sequence < 1
+            || require('./forge-delivery').fingerprint(tx.event) !== require('./forge-delivery').fingerprint(publishedEvent)
+            || require('./forge-delivery').fingerprint(tx.result) !== require('./forge-delivery').fingerprint(result)
+            || require('./forge-delivery').fingerprint(tx.boundary) !== require('./forge-delivery').fingerprint(boundary)
+            || boundary.result_ref !== path.relative(options.cwd, controller.resultFile(options.cwd, event.idempotency_key)).split(path.sep).join('/')) fail('delivery-completion-unproven');
+        const reference = `.gsd/milestones/${options.milestone}/slices/${slice}/${slice}-DELIVERY.json`;
+        const projection = validateDelivery(options, reference, { type: 'slice', id: slice, milestone: options.milestone });
+        proven.push({ slice, reference, fingerprint: projection.delivery_fingerprint, completion_sha256: hash(event.idempotency_key) });
+      } catch (e) { unproven.push({ slice, reason: sourceReason(e) === 'clock-source-unreadable' ? 'delivery-completion-invalid' : sourceReason(e) }); }
+    }
+    for (const read of options.deliveryCache.files.values()) {
+      if (readSource(read.root, read.reference, read.limit).sha256 !== read.source.sha256) fail('clock-source-unstable');
+    }
+    return { status: 'observed', proven, unproven, sources };
+  } catch (e) { return { status: 'unknown', reason: sourceReason(e), proven: [], unproven, sources }; }
+}
+
+function computeForecast({ contract, clock, deliveries }) {
+  const base = { policy: FORECAST_POLICY, deliveries: deliveries?.proven || [], pending: [], burn_ratio: null,
+    projection: { low_ms: null, high_ms: null }, remaining_ms: null };
+  if (!time.validateContract(contract).valid) return { ...base, status: 'unknown', reason: 'time-contract-schema-invalid' };
+  if (!contract.allocation) return { ...base, status: 'unknown', reason: 'allocation-missing' };
+  if (clock?.status !== 'measured' || !Number.isSafeInteger(clock.consumption?.consumed_ms)
+      || clock.consumption.consumed_ms < 0) return { ...base, status: 'unknown', reason: 'clock-unknown' };
+  if (deliveries?.status !== 'observed' || !Array.isArray(deliveries.proven)) return { ...base, status: 'unknown', reason: 'deliveries-unknown' };
+  const proven = new Set(deliveries.proven.map(r => r.slice)), items = contract.allocation.items;
+  const pending = items.filter(r => r.kind !== 'preparation' && !(r.kind === 'slice' && proven.has(r.slice)));
+  const pendingMs = pending.reduce((sum, r) => sum + r.ms, 0), consumed = clock.consumption.consumed_ms;
+  const remaining = contract.ceiling_ms - consumed;
+  const output = { ...base, pending: pending.map(r => ({ ...r })), remaining_ms: remaining };
+  if (!proven.size) return { ...output, status: pendingMs > remaining ? 'exceeds' : 'unknown', reason: 'no-proven-delivery',
+    projection: { low_ms: pendingMs, high_ms: null } };
+  const allocated = items.filter(r => r.kind === 'preparation' || r.kind === 'slice' && proven.has(r.slice)).reduce((sum, r) => sum + r.ms, 0);
+  if (allocated <= 0) return { ...output, status: 'unknown', reason: 'proven-allocation-missing' };
+  const ratio = consumed / allocated, low = Math.min(pendingMs, pendingMs * ratio), high = Math.max(pendingMs, pendingMs * ratio);
+  return { ...output, burn_ratio: ratio, projection: { low_ms: low, high_ms: high },
+    status: high <= remaining ? 'fits' : low <= remaining ? 'at-risk' : 'exceeds', reason: 'evidence-based-projection' };
+}
+function readForecast(options) {
+  options = observationOptions(options);
+  const contract = time.readContract(options);
+  if (contract.status === 'absent') return { status: 'no-contract' };
+  if (contract.status !== 'valid') return { status: 'unknown', reason: contract.reason, policy: FORECAST_POLICY };
+  try {
+    if (contract.contract.allocation) {
+      const roadmap = readSource(options.cwd, `.gsd/milestones/${options.milestone}/${options.milestone}-ROADMAP.md`);
+      if (roadmap.sha256 !== contract.contract.allocation.roadmap_sha256) return { status: 'unknown', reason: 'allocation-roadmap-mismatch', policy: FORECAST_POLICY };
+    }
+    const clock = readClock(options), slices = contract.contract.allocation?.items.filter(r => r.kind === 'slice').map(r => r.slice);
+    return computeForecast({ contract: contract.contract, clock, deliveries: readDeliveries({ ...options, ...(slices ? { slices } : {}) }) });
+  } catch (e) { return { status: 'unknown', reason: sourceReason(e), policy: FORECAST_POLICY }; }
+}
+function main(argv = process.argv.slice(2), io = process, options = {}) {
+  let cwd = '.', milestone;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--cwd') cwd = argv[++i];
+    else if (argv[i] === '--milestone') milestone = argv[++i];
+    else if (argv[i] !== '--json') { io.stderr.write('Argumento inválido\n'); return 2; }
+  }
+  if (!milestone || !cwd) { io.stderr.write('Informe a milestone\n'); return 2; }
+  const input = { cwd, milestone, now: options.now ?? Date.now(), ...(options.codeDir ? { codeDir: options.codeDir } : {}) };
+  const result = { clock: readClock(input), forecast: readForecast(input) };
+  io.stdout.write(JSON.stringify(result) + '\n'); return 0;
+}
+module.exports = { CLOCK_POLICY, FORECAST_POLICY, computeClock, readClock, readDeliveries, computeForecast, readForecast, main };
+if (require.main === module) process.exitCode = main();

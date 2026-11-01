@@ -28,7 +28,7 @@ function identity(file) {
   if (!stat.isFile() || stat.isSymbolicLink()) fail('phase-cost-source-invalid');
   return [stat.dev, stat.ino, stat.birthtimeNs, stat.size, stat.mtimeNs, stat.ctimeNs].map(String).join('/');
 }
-function analyzeEvents(bytes) {
+function analyzeEventIntervals(bytes) {
   if (!Buffer.isBuffer(bytes) || bytes.length > MAX_BYTES) fail('phase-cost-input-limit');
   let text;
   try { text = new (require('util').TextDecoder)('utf-8', { fatal: true }).decode(bytes); }
@@ -36,6 +36,7 @@ function analyzeEvents(bytes) {
   const lines = text.split(/\r?\n/).filter(line => line.trim());
   if (lines.length > MAX_RECORDS) fail('phase-cost-input-limit');
   const active = new Map(), seen = new Map(), byPhase = Object.create(null), intervals = [];
+  const closed = [], ambiguous = [], pauses = [], milestones = new Set();
   const diagnostics = { ignored_records: 0, duplicate_records: 0, conflicting_ids: 0,
     ambiguous_begins: 0, unmatched_transitions: 0, unmatched_begins: 0, invalid_records: 0, negative_intervals: 0, nonterminal_transitions: 0,
     excluded_ambiguous_intervals: 0 };
@@ -67,29 +68,45 @@ function analyzeEvents(bytes) {
     const phase = row.unit.split('/')[0];
     if (!/^[a-z][a-z0-9-]{1,50}$/.test(phase)) fail('phase-cost-lifecycle-invalid');
     const key = JSON.stringify([row.milestone, row.unit, row.host_runtime || row.host || null]);
+    const details = { milestone: row.milestone, unit: row.unit, host: row.host_runtime || row.host || null, phase };
+    milestones.add(row.milestone);
     if (row.event === 'unit-began') {
       if (row.action !== 'begin') fail('phase-cost-lifecycle-invalid');
       if (active.has(key)) {
         diagnostics.ambiguous_begins++;
         const group = active.get(key); group.ambiguous = true; group.outstanding++;
-      } else active.set(key, { at, phase, outstanding: 1, ambiguous: false });
+        group.starts.push(at); group.begin_keys.push(row.idempotency_key || null);
+      } else active.set(key, { at, phase, ...details, begin_key: row.idempotency_key || null,
+        starts: [at], begin_keys: [row.idempotency_key || null], closures: [], outstanding: 1, ambiguous: false });
       continue;
     }
     if (row.action === 'running') { diagnostics.nonterminal_transitions++; continue; }
     if (!['complete', 'pause', 'fail', 'expired-safe'].includes(row.action)) fail('phase-cost-lifecycle-invalid');
+    if (row.action === 'pause') pauses.push({ ...details, at, end_key: row.idempotency_key || null });
     const begin = active.get(key);
     if (!begin) { diagnostics.unmatched_transitions++; continue; }
     if (begin.ambiguous) {
       diagnostics.excluded_ambiguous_intervals++;
-      if (--begin.outstanding === 0) active.delete(key);
+      begin.closures.push(at);
+      if (--begin.outstanding === 0) {
+        ambiguous.push({ ...details, starts: begin.starts, begin_keys: begin.begin_keys, end: at, closures: begin.closures });
+        active.delete(key);
+      }
       continue;
     }
     active.delete(key);
-    if (at < begin.at) { diagnostics.negative_intervals++; continue; }
+    if (at < begin.at) {
+      diagnostics.negative_intervals++;
+      ambiguous.push({ ...details, starts: begin.starts, begin_keys: begin.begin_keys, end: at,
+        closures: [at], reason: 'negative-interval' });
+      continue;
+    }
     const duration = at - begin.at;
     const stats = byPhase[phase] ||= { count: 0, duration_ms: 0, min_ms: duration, max_ms: duration };
     stats.count++; stats.duration_ms += duration; stats.min_ms = Math.min(stats.min_ms, duration); stats.max_ms = Math.max(stats.max_ms, duration);
     intervals.push([begin.at, at]);
+    closed.push({ ...details, start: begin.at, end: at, begin_key: begin.begin_key,
+      end_key: row.idempotency_key || null, action: row.action });
   }
   diagnostics.unmatched_begins = [...active.values()].reduce((sum, group) => sum + group.outstanding, 0);
   intervals.sort((a, b) => a[0] - b[0]);
@@ -101,17 +118,26 @@ function analyzeEvents(bytes) {
   }
   if (cursor) covered += cursor[1] - cursor[0];
   const aggregate = Object.values(byPhase).reduce((sum, row) => sum + row.duration_ms, 0);
-  return { schema_version: 1, source_sha256: crypto.createHash('sha256').update(bytes).digest('hex'), source_bytes: bytes.length,
+  const analysis = { schema_version: 1, source_sha256: crypto.createHash('sha256').update(bytes).digest('hex'), source_bytes: bytes.length,
     records: lines.length, begins, transitions, completed_pairs: intervals.length, by_phase: byPhase,
     aggregate_unit_ms: aggregate, observed_active_wall_ms: covered,
     observed_span_ms: intervals.length ? Math.max(...intervals.map(row => row[1])) - intervals[0][0] : null,
     diagnostics, fixed_overhead: { status: 'unknown', reason: 'events-do-not-separate-useful-work-from-fixed-cost' },
     actual_token_attribution: 'unknown', interpretation: 'aggregate-unit-time-is-not-wall-time-or-billing' };
+  const open = [];
+  for (const group of active.values()) {
+    const details = { milestone: group.milestone, unit: group.unit, host: group.host, phase: group.phase };
+    if (group.ambiguous) ambiguous.push({ ...details, starts: group.starts, begin_keys: group.begin_keys,
+      end: null, closures: group.closures });
+    else open.push({ ...details, start: group.at, begin_key: group.begin_key });
+  }
+  return { analysis, intervals: closed, open, ambiguous, pauses, milestones: [...milestones].sort() };
 }
+function analyzeEvents(bytes) { return analyzeEventIntervals(bytes).analysis; }
 function measurePhaseCost(file) {
   const before = identity(file), expectedReal = fs.realpathSync.native(file);
   const read = readBoundedStableFile(file, MAX_BYTES, { expectedReal });
   if (read.error || identity(file) !== before) fail('phase-cost-source-unstable');
   return analyzeEvents(read.buffer);
 }
-module.exports = { MAX_BYTES, analyzeEvents, measurePhaseCost };
+module.exports = { MAX_BYTES, analyzeEvents, analyzeEventIntervals, measurePhaseCost };

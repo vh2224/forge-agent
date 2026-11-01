@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "name": "parallel-overlap",
+      "input": { "now_ms": 12, "units": [["T01", 0, 8], ["T02", 4, 12]] },
+      "expect": { "elapsed": 12, "consumed": 12, "effort": 16, "unknown": 0 }
+    },
+    {
+      "name": "ambiguous-begins",
+      "input": { "now_ms": 12, "ambiguous": [[0, 2, 8]] },
+      "expect": { "elapsed": 12, "consumed": 12, "effort": 0, "unknown": 12, "ambiguous": 1 }
+    },
+    {
+      "name": "restart-gap",
+      "input": { "now_ms": 12, "presence": [[0, "a", "session-start"], [4, "a", "session-end"], [9, "b", "session-start"], [12, "b", "complete"]] },
+      "expect": { "elapsed": 12, "consumed": 12, "effort": 0, "unknown": 5, "gap_reason": "session-change" }
+    },
+    {
+      "name": "new-process-after-compaction",
+      "input": { "now_ms": 12, "units": [["T01", 0, 4], ["T02", 2, 7]], "presence": [[9, "b", "session-start"]] },
+      "expect": { "elapsed": 12, "consumed": 12, "effort": 9, "unknown": 5 }
+    },
+    {
+      "name": "pause",
+      "input": { "now_ms": 12, "units": [["T01", 0, 3]], "pauses": [["T01", 3]] },
+      "expect": { "elapsed": 12, "consumed": 3, "effort": 3, "unknown": 0, "wait": ["pause", 9] }
+    },
+    {
+      "name": "human-wait-closed",
+      "input": { "now_ms": 12, "units": [["T01", 0, 3]], "waits": [["human", 3, 10, "pending-question", "question-ref"]] },
+      "expect": { "elapsed": 12, "consumed": 5, "effort": 3, "unknown": 2, "wait": ["human-wait", 7] }
+    },
+    {
+      "name": "ci-wait",
+      "input": { "now_ms": 12, "units": [["T01", 0, 2]], "waits": [["ci", 2, 10, "ci", "run-1"]] },
+      "expect": { "elapsed": 12, "consumed": 4, "effort": 2, "unknown": 2, "wait": ["ci-wait", 8] }
+    },
+    {
+      "name": "simultaneous-owner-sessions",
+      "input": { "now_ms": 12, "presence": [[0, "a", "session-start"], [1, "b", "session-start"], [8, "a", "session-end"], [12, "b", "session-end"]] },
+      "expect": { "elapsed": 12, "consumed": 12, "effort": 0, "unknown": 0 }
+    },
+    {
+      "name": "open-worker-survives-process-restart",
+      "input": { "now_ms": 12, "units": [["T01", 2, null]] },
+      "expect": { "elapsed": 12, "consumed": 12, "effort": 10, "unknown": 2, "open": 1 }
+    },
+    {
+      "name": "open-human-wait-pending",
+      "input": { "now_ms": 12, "waits": [["human", 3, null, "pending-question", "question-ref"]], "pending": ["question-ref"] },
+      "expect": { "elapsed": 12, "consumed": 3, "effort": 0, "unknown": 3, "wait": ["human-wait", 9] }
+    },
+    {
+      "name": "open-human-wait-without-pending-source",
+      "input": { "now_ms": 12, "waits": [["human", 3, null, "pending-question", "question-ref"]] },
+      "expect": { "elapsed": 12, "consumed": 12, "effort": 0, "unknown": 12, "gap_reason": "wait-end-missing" }
+    },
+    {
+      "name": "priority-and-external-wait",
+      "input": { "now_ms": 12, "units": [["T01", 0, 2]], "presence": [[0, "a", "session-start"], [4, "a", "session-end"]], "waits": [["human", 0, 6, "pending-question", "q"], ["ci", 0, 8, "ci", "r"], ["external", 0, 10, "external", "e"]] },
+      "expect": { "elapsed": 12, "consumed": 6, "effort": 2, "unknown": 2, "wait": ["external-wait", 2] }
+    },
+    {
+      "name": "sessionless-presence-never-bridges",
+      "input": { "now_ms": 12, "presence": [[0, null, "next"], [12, null, "complete"]] },
+      "expect": { "elapsed": 12, "consumed": 12, "effort": 0, "unknown": 12 }
+    },
+    {
+      "name": "sessionless-breaks-existing-chain",
+      "input": { "now_ms": 12, "presence": [[0, "a", "session-start"], [5, null, "status"], [12, "a", "complete"]] },
+      "expect": { "elapsed": 12, "consumed": 12, "effort": 0, "unknown": 12, "gap_reason": "session-change" }
+    }
+  ]
+}
