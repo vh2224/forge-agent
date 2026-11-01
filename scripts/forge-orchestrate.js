@@ -10,6 +10,7 @@ const forgeState = require('./forge-state.js');
 const forgeStatus = require('./forge-status.js');
 const forgeController = require('./forge-unit-controller.js');
 const forgeRuntime = require('./forge-runtime.js');
+const milestoneTime = require('./forge-milestone-time-admission');
 
 // Closed summaries, not exception text: messages/paths/stack can contain private
 // context. Like sidecar diagnostics, this boundary retains only allowlisted data.
@@ -43,13 +44,14 @@ function failureDiagnostic(cause, input, stage, transactionKey) {
 }
 
 const PROTOCOL_VERSION = '1.0.0';
-const OPERATIONS = Object.freeze(['init', 'status', 'next', 'complete', 'consume-failure', 'reenter']);
+const OPERATIONS = Object.freeze(['init', 'status', 'next', 'complete', 'consume-failure', 'reenter', 'resume-budget']);
 const OUTCOMES = Object.freeze(['needs_input', 'completed', 'blocked', 'no_work', 'failed']);
 const REASON_CODES = Object.freeze([
   'initialized', 'already-initialized', 'status-ready', 'selected', 'unit-selected',
   'no-next-unit', 'needs-input', 'needs-input-boundary', 'not-initialized',
   'prefs-invalid', 'lease-active', 'transaction-pending', 'invalid-request', 'failed',
   'handoff-ready', 'boundary-missing', 'boundary-not-transferable', 'response-invalid',
+  ...milestoneTime.TIME_REASON_CODES,
 ]);
 
 function own(value, key) { return Object.prototype.hasOwnProperty.call(value || {}, key); }
@@ -77,7 +79,27 @@ function normalizeInput(value) {
     prefsReader: typeof input.prefsReader === 'function' ? input.prefsReader : undefined,
   };
   if (output.milestone !== null && (typeof output.milestone !== 'string' || !output.milestone.trim())) throw error('invalid-request', 'milestone inválido');
+  if (own(input, 'time_session')) output.time_session = typeof input.time_session === 'string' ? input.time_session : null;
   return output;
+}
+function recordTimePresence(input, boundary, options = {}) {
+  if (!input.milestone) return;
+  const time = require('./forge-milestone-time'), current = time.readContract({ cwd: input.cwd, milestone: input.milestone });
+  if (current.status === 'valid' && typeof input.time_session === 'string' && input.time_session.trim()) {
+    const now = typeof options.now === 'function' ? options.now() : options.now ?? Date.now();
+    time.appendJournal({ cwd: input.cwd, milestone: input.milestone, record: { type: 'presence', boundary,
+      session_sha256: crypto.createHash('sha256').update(input.time_session).digest('hex'), at: new Date(now).toISOString() } });
+  }
+}
+function publicTime(status) {
+  return { ...milestoneTime.summarizeTimeStatus(status), contract: status.contract, contract_version: status.contract_version,
+    open_writers: status.open_writers || [], unknowns: status.unknowns || [] };
+}
+function attachTimeRefusal(result, cause, input, options) {
+  if (!milestoneTime.TIME_REASON_CODES.includes(cause.code)) return result;
+  result.outcome = 'blocked';
+  result.details = { ...(result.details || {}), time: cause.details || publicTime(milestoneTime.readTimeStatus(input.cwd, input.milestone, options)) };
+  return result;
 }
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
@@ -151,6 +173,8 @@ function complete(inputValue, options) {
     }, { ...options, ...(input.prefsReader ? { prefsReader: input.prefsReader } : {}) });
     const output = base('complete', 'completed', committed.reason, input);
     output.unit = selected; output.boundary = committed.transaction.boundary;
+    try { recordTimePresence(input, 'complete', options); }
+    catch { output.details = { time: { presence: 'unknown', unknowns: ['time-presence-unrecorded'] } }; }
     return output;
   } catch (cause) {
     return base('complete', 'blocked', cause.code || 'completion-failed', input);
@@ -244,7 +268,43 @@ function status(inputValue) {
   else if (!model.works.length) { result.outcome = 'no_work'; result.reason_code = 'no-next-unit'; }
   return result;
 }
-function next(inputValue, options) {
+function next(inputValue, options = {}) {
+  const input = normalizeInput(inputValue);
+  if (!input.milestone) return nextInside(inputValue, options);
+  let status, boundary;
+  try {
+    status = milestoneTime.readTimeStatus(input.cwd, input.milestone, options);
+    if (status.contract !== 'absent') {
+      recordTimePresence(input, 'next', options);
+      boundary = milestoneTime.observeBoundary(input.cwd, input.milestone, { ...options, kind: 'slice-boundary' });
+    }
+  } catch (cause) {
+    const result = base('next', 'blocked', 'milestone-time-invalid', input);
+    result.details = { time: { state: null, unknown: true, unknowns: ['time-source-unreadable'] } }; return result;
+  }
+  if (status.contract === 'absent') return nextInside(inputValue, options);
+  const result = nextInside(inputValue, options);
+  // Blocked selections never reach begin, but are still forecast boundaries.
+  // A replay/paused continuation remains governed solely by the controller.
+  const observed = ['units-blocked', 'failure-deferred'].includes(result.reason_code)
+    ? milestoneTime.observeBoundary(input.cwd, input.milestone, { ...options, kind: 'blocked', reason: result.reason_code,
+      units: result.unit ? [result.unit] : [] }) : boundary;
+  status = milestoneTime.readTimeStatus(input.cwd, input.milestone, options);
+  const details = { ...publicTime(status), ...(result.details?.time || {}) };
+  const contract = require('./forge-milestone-time').readContract({ cwd: input.cwd, milestone: input.milestone });
+  if (contract.status === 'valid') details.contract_sha256 = contract.sha256;
+  details.diagnostic_command = `node scripts/forge-milestone-time-admission.js --status --milestone ${input.milestone} --json`;
+  if (observed?.status === 'recorded' && observed.record.warning) details.warning = observed.record;
+  if (Number.isSafeInteger(status.remaining_ms) && status.remaining_ms <= 0) {
+    details.checkpoint = require('./forge-milestone-time-drain').checkpointIfDrained(input.cwd, input.milestone, options);
+    if (['no_work', 'blocked'].includes(result.outcome) && !milestoneTime.TIME_REASON_CODES.includes(result.reason_code)) {
+      result.outcome = 'blocked'; result.reason_code = status.open_writers.length ? 'milestone-budget-draining' : 'milestone-budget-exhausted';
+    }
+  }
+  result.details = { ...(result.details || {}), time: details };
+  return result;
+}
+function nextInside(inputValue, options) {
   const input = normalizeInput(inputValue);
   // Older embedding tests supplied an executable preference reader together
   // with their inventory. JSON callers cannot create this trusted fixture seam.
@@ -327,7 +387,7 @@ function next(inputValue, options) {
     const result = base('next', code === 'lease-active' || code === 'transaction-pending' || code === 'prefs-invalid' ? 'blocked' : 'failed', code, input);
     result.unit = selectedUnit;
     result.diagnostic = failureDiagnostic(cause, input, stage, diagnosticKey);
-    return result;
+    return attachTimeRefusal(result, cause, input, options);
   }
 }
 function resumeResponse(input, options) {
@@ -383,7 +443,7 @@ function resumeResponse(input, options) {
     const code = cause.code || 'failed';
     const result = base('next', ['lease-active', 'transaction-pending'].includes(code) ? 'blocked' : 'failed', code, input);
     result.unit = unit(boundary.unit);
-    return result;
+    return attachTimeRefusal(result, cause, input, options);
   }
 }
 function handoff(inputValue) {
@@ -418,14 +478,51 @@ function linkedOperation(operation, inputValue, options) {
     if (cause.code === 'CONTROLLER_FAILPOINT') throw cause;
     const result = base(operation, 'blocked', cause.code || 'linked-operation-refused', input);
     if (cause.pending_questions) result.details = { pending_questions: cause.pending_questions };
-    return result;
+    return attachTimeRefusal(result, cause, input, options);
   }
+}
+// A named owner boundary for a budget-blocked loop. A serialized resume flag
+// cannot extend a contract: the canonical amendment must already contain its
+// live-attested decision. Reconcile current durable state before next can run.
+function resumeBudget(inputValue, options = {}) {
+  const input = normalizeInput(inputValue), blocked = inputValue.time_block;
+  const refuse = reason => base('resume-budget', 'blocked', reason, input);
+  if (!blocked || blocked.milestone !== input.milestone) return refuse('budget-resume-invalid');
+  const time = require('./forge-milestone-time'), current = time.readContract({ cwd: input.cwd, milestone: input.milestone });
+  if (current.status !== 'valid') return refuse('milestone-time-invalid');
+  const checkpoint = time.readCheckpoints({ cwd: input.cwd, milestone: input.milestone });
+  if (checkpoint.status !== 'valid' || !checkpoint.records.some(row => row.version === blocked.contract_version
+    && row.contract_sha256 === blocked.contract_sha256 && row.drain?.state === 'drained')) return refuse('budget-checkpoint-required');
+  if (!current.chain.some(row => row.version > blocked.contract_version && row.kind === 'extension')) return refuse('budget-extension-required');
+  const status = milestoneTime.readTimeStatus(input.cwd, input.milestone, options);
+  if (!Number.isSafeInteger(status.remaining_ms) || status.remaining_ms <= 0) return refuse('milestone-budget-exhausted');
+  if (forgeController.pendingTransactions(input.cwd).length) return refuse('transaction-pending');
+  if (status.open_writers.length) return refuse('milestone-budget-draining');
+  const questions = require('./forge-pending-questions').listPendingQuestions({ cwd: input.cwd,
+    filter: { type: 'milestone', id: input.milestone } });
+  if (questions.census.invalid || questions.census.excess || !['no-questions', 'no-matching-questions', null].includes(questions.empty_reason)) return refuse('pending-questions');
+  if (questions.questions.some(row => row.status === 'pending')) return refuse('pending-questions');
+  const leases = forgeController.dependencies.forgeLease;
+  const directory = leases.leasesDir(input.cwd);
+  if (fs.existsSync(directory)) {
+    if (fs.lstatSync(directory).isSymbolicLink()) return refuse('lease-active');
+    for (const name of fs.readdirSync(directory).filter(name => /^[a-f0-9]{64}\.json$/.test(name))) {
+      const file = path.join(directory, name);
+      if (fs.lstatSync(file).isSymbolicLink()) return refuse('lease-active');
+      const held = leases.readLease(file);
+      if (held.corrupt || !held.record || !leases.validRecord(held.record, held.record.unit)) return refuse('lease-active');
+      const transaction = held.record.request_id && forgeController.lookupRecord(input.cwd, 'transaction', held.record.request_id);
+      if (!transaction || transaction.milestone === input.milestone) return refuse('lease-active');
+    }
+  }
+  return base('resume-budget', 'completed', 'budget-resume-ready', input);
 }
 function run(operation, input, options) {
   if (!OPERATIONS.includes(operation)) throw error('invalid-request', `operation inválida: ${operation}`);
   if (operation === 'init') return init(input);
   if (operation === 'status') return status(input);
   if (operation === 'complete') return complete(input, options);
+  if (operation === 'resume-budget') return resumeBudget(input, options);
   if (operation === 'consume-failure' || operation === 'reenter') return linkedOperation(operation, input, options);
   return next(input, options);
 }

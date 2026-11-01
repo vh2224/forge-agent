@@ -185,7 +185,12 @@ function inspectDrain(cwd, milestone, options = {}) {
     const runFile = path.join(cwd, '.gsd/forge/runs', milestone + '.json'), bytes = sources.read(runFile);
     const run = require('./forge-runs').get(cwd, milestone);
     if (bytes && (!run || run.id !== milestone || run.kind !== 'milestone')) fail('time-drain-run-invalid');
-    base.claim = !bytes ? 'absent' : run.write_claim === null ? 'released' : 'held';
+    // Read the persisted slot: runs.get supplies compatibility defaults that
+    // would turn malformed empty strings into absence. Only the canonical
+    // release validator may establish that an existing claim ended.
+    const rawClaim = bytes ? JSON.parse(bytes).write_claim : undefined;
+    base.claim = rawClaim === null || rawClaim === undefined ? 'absent'
+      : require('./forge-write-claim').isHeld(rawClaim) ? 'held' : 'released';
     sources.recheck();
     const after = time.readContract(input);
     if (after.status !== 'valid' || after.version !== contract.version || after.sha256 !== contract.sha256) fail('time-drain-source-unstable');

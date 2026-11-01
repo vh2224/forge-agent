@@ -8,7 +8,7 @@ const runtime = require('./forge-runtime.js');
 
 const PROTOCOL_VERSION = runtime.PROTOCOL_VERSION;
 const MODES = Object.freeze(['auto', 'task']);
-const COMMANDS = Object.freeze(['next', 'pause', 'resume', 'status', 'complete', 'consume-failure', 'reenter']);
+const COMMANDS = Object.freeze(['next', 'pause', 'resume', 'status', 'complete', 'consume-failure', 'reenter', 'resume-budget']);
 const TERMINAL = new Set(['completed', 'blocked', 'failed']);
 
 function error(code, message) { const value = new Error(message); value.code = code; return value; }
@@ -122,7 +122,20 @@ function next(state, input, orchestrate) {
     return publicResult('next', state, 'completed', delegated.reason_code || 'no-next-unit', 'stop', delegated);
   }
   state.lifecycle = delegated.outcome === 'failed' ? 'failed' : 'blocked';
+  if (['milestone-budget-exhausted', 'milestone-budget-draining'].includes(delegated.reason_code)) {
+    const details = delegated.details?.time;
+    state.time_block = { milestone: delegated.milestone, contract_version: details?.contract_version,
+      contract_sha256: details?.contract_sha256 || null };
+  }
   return publicResult('next', state, state.lifecycle, delegated.reason_code || 'controller-refused', 'stop', delegated);
+}
+function resumeBudget(state, input, orchestrate) {
+  if (state.lifecycle !== 'blocked' || !state.time_block) return publicResult('resume-budget', state, 'blocked', 'budget-resume-invalid', 'stop', null);
+  if (state.pending_questions?.some(row => row.status === 'pending')) return publicResult('resume-budget', state, 'blocked', 'pending-questions', 'stop', null);
+  const delegated = orchestrate.run('resume-budget', { ...delegateInput(input, state), time_block: state.time_block });
+  if (delegated.outcome !== 'completed') return publicResult('resume-budget', state, 'blocked', delegated.reason_code, 'stop', delegated);
+  state.lifecycle = 'idle'; delete state.time_block;
+  return next(state, input, orchestrate);
 }
 function pause(state, input, orchestrate) {
   if (state.lifecycle === 'paused') return publicResult('pause', state, 'needs_input', 'already-paused', 'pause', null);
@@ -202,13 +215,14 @@ function advance(snapshot, commandValue, input = {}, dependencies = {}) {
   const controller = dependencies.orchestrate || orchestrateDefault;
   if (!controller || typeof controller.run !== 'function') throw error('invalid-controller', 'forge-orchestrate indisponível');
   const trusted = {};
-  for (const name of ['prefsReader', 'inventoryReader', 'now', 'failpoint', 'inspectAttempt', 'processProbe', 'replaySavedResponse', 'reconcileRoots', 'captureEntryBaseline', 'entryAuthority', 'questionStateAdapter']) {
+  for (const name of ['prefsReader', 'inventoryReader', 'now', 'failpoint', 'inspectAttempt', 'processProbe', 'replaySavedResponse', 'reconcileRoots', 'captureEntryBaseline', 'entryAuthority', 'questionStateAdapter', 'userHome', 'env']) {
     if (dependencies[name] !== undefined) trusted[name] = dependencies[name];
   }
   const orchestrate = { run: (operation, payload) => controller.run(operation, payload, trusted),
     ...(typeof controller.validatePending === 'function' ? { validatePending: (payload, decision) => controller.validatePending(payload, decision, trusted) } : {}) };
   if (command === 'consume-failure') return consumeFailure(state, input, orchestrate);
   if (command === 'reenter') return reenter(state, input, orchestrate);
+  if (command === 'resume-budget') return resumeBudget(state, input, orchestrate);
   if (command === 'next') return next(state, input, orchestrate);
   if (command === 'pause') return pause(state, input, orchestrate);
   if (command === 'resume') return resume(state, input, orchestrate);

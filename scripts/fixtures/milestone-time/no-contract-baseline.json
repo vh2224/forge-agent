@@ -1,0 +1,1345 @@
+{
+  "provenance": {
+    "revision": "b73ba3b825b38c6a9589d019072d63109deff326",
+    "reference_revision": "14260f8",
+    "controller_sha256": "19b64b7b540f1133e3900ac6e682dd7d115f74cc56de9eef2b28c12345c185ac",
+    "orchestrate_sha256": "98026cd8638c8f1b10306742653c20a118dd9ec775c6e013783a04b175c59652",
+    "clock": "2026-11-01T12:00:00.000Z",
+    "owner_token": "time-fixture-owner",
+    "lease_token": "baseline-generation",
+    "method": "Public adapter invoke; injected single clock and native lease tokenFactory; remove only lease_generation and storage_checksum",
+    "linked_reentry_method": "Executable reference replay of hash-verified 14260f8 controller/orchestrate blobs through public adapter, retaining the same temporary owner physical path/device/inode between baseline and current trace; all linked transaction security fields and raw event bytes compared without additional normalization. Linked raw physical identities are intentionally runtime-only."
+  },
+  "trace": {
+    "claude": {
+      "transactions": [
+        {
+          "protocol_version": "1.0.0",
+          "idempotency_key": "baseline-fail",
+          "action": "fail",
+          "unit": {
+            "type": "plan-slice",
+            "id": "S03",
+            "key": "plan-slice/S03"
+          },
+          "milestone": "M001",
+          "host_runtime": "claude",
+          "owner_digest": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+          "phase": "committed",
+          "created_at": "2026-11-01T12:00:00.006Z",
+          "updated_at": "2026-11-01T12:00:00.006Z",
+          "before": {
+            "state_checksum": "1422d6ccb8f22d1474857775d9aff2d35245998efb60d304a621e41046e2861f",
+            "state": {
+              "active_slice": "S03",
+              "active_task": "—",
+              "auto_mode": "off",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            }
+          },
+          "after": {
+            "state_checksum": "fb4162e8189f88540ccac3f9ef7f0d944280e17e03c7ece325074f3981114a32",
+            "state": {
+              "active_slice": "S03",
+              "active_task": "—",
+              "auto_mode": "off",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "blocked",
+              "recent_units": null
+            },
+            "state_patch": {
+              "phase": "blocked",
+              "active_task": "—",
+              "host_runtime": "claude",
+              "owner": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+              "heartbeat": "2026-11-01T12:00:00.006Z"
+            }
+          },
+          "result": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "baseline-fail",
+            "unit": "plan-slice/S03",
+            "milestone": "M001",
+            "status": "failed",
+            "reason_code": "fail",
+            "summary": "",
+            "output": null,
+            "committed_at": "2026-11-01T12:00:00.006Z"
+          },
+          "event": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "baseline-fail",
+            "ts": "2026-11-01T12:00:00.006Z",
+            "event": "unit-transition",
+            "action": "fail",
+            "unit": "plan-slice/S03",
+            "milestone": "M001",
+            "host_runtime": "claude",
+            "outcome": "failed",
+            "reason_code": "fail"
+          },
+          "boundary": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "baseline-fail",
+            "unit": "plan-slice/S03",
+            "milestone": "M001",
+            "kind": "failed-persisted",
+            "outcome": "failed",
+            "reason_code": "fail",
+            "result_ref": ".gsd/forge/results/result-v1-56de6cb7660d570bbe7701902b40c937fae71c043c17d9a25a7a510e20855ec9.json",
+            "result_checksum": "6d206a79ad65d814d01a3344f85689bcb65c088af832fc5331775d226607c19b",
+            "event_checksum": "891a682239c51051fe626f3d7f446881fa13a4e4c30bad2ed8ae20e1bb42237c",
+            "state_checksum": "fb4162e8189f88540ccac3f9ef7f0d944280e17e03c7ece325074f3981114a32",
+            "previous_host_runtime": "claude",
+            "handoff_ready": true,
+            "committed_at": "2026-11-01T12:00:00.006Z"
+          }
+        },
+        {
+          "protocol_version": "1.0.0",
+          "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S01:S01",
+          "action": "begin",
+          "unit": {
+            "type": "plan-slice",
+            "id": "S01",
+            "key": "plan-slice/S01"
+          },
+          "milestone": "M001",
+          "host_runtime": "claude",
+          "owner_digest": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+          "phase": "committed",
+          "created_at": "2026-11-01T12:00:00.001Z",
+          "updated_at": "2026-11-01T12:00:00.001Z",
+          "before": {
+            "state_checksum": "c5544056f151eba93c8f021fc6d750cf4bcf5123c99ec31dfba6df0a2d3950aa",
+            "state": {
+              "active_slice": "S01",
+              "active_task": "—",
+              "auto_mode": "on",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "idle",
+              "recent_units": null
+            }
+          },
+          "after": {
+            "state_checksum": "bb1081fb0b9492f6f0318de2590e78651e22b831990627e18ebd989b7dcfb748",
+            "state": {
+              "active_slice": "S01",
+              "active_task": "—",
+              "auto_mode": "on",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            },
+            "state_patch": {
+              "phase": "plan-slice",
+              "active_task": "—",
+              "host_runtime": "claude",
+              "owner": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+              "heartbeat": "2026-11-01T12:00:00.001Z",
+              "active_slice": "S01"
+            }
+          },
+          "result": null,
+          "event": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S01:S01",
+            "ts": "2026-11-01T12:00:00.001Z",
+            "event": "unit-began",
+            "action": "begin",
+            "unit": "plan-slice/S01",
+            "milestone": "M001",
+            "host_runtime": "claude",
+            "outcome": "running",
+            "reason_code": "begin"
+          },
+          "boundary": null
+        },
+        {
+          "protocol_version": "1.0.0",
+          "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S01:S01:complete",
+          "action": "complete",
+          "unit": {
+            "type": "plan-slice",
+            "id": "S01",
+            "key": "plan-slice/S01"
+          },
+          "milestone": "M001",
+          "host_runtime": "claude",
+          "owner_digest": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+          "phase": "committed",
+          "created_at": "2026-11-01T12:00:00.002Z",
+          "updated_at": "2026-11-01T12:00:00.002Z",
+          "before": {
+            "state_checksum": "bb1081fb0b9492f6f0318de2590e78651e22b831990627e18ebd989b7dcfb748",
+            "state": {
+              "active_slice": "S01",
+              "active_task": "—",
+              "auto_mode": "on",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            }
+          },
+          "after": {
+            "state_checksum": "bb1081fb0b9492f6f0318de2590e78651e22b831990627e18ebd989b7dcfb748",
+            "state": {
+              "active_slice": "S01",
+              "active_task": "—",
+              "auto_mode": "on",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            },
+            "state_patch": {
+              "phase": "plan-slice",
+              "active_task": "—",
+              "host_runtime": "claude",
+              "owner": null,
+              "heartbeat": "2026-11-01T12:00:00.002Z"
+            }
+          },
+          "result": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S01:S01:complete",
+            "unit": "plan-slice/S01",
+            "milestone": "M001",
+            "status": "succeeded",
+            "reason_code": "complete",
+            "summary": "",
+            "output": {
+              "status": "done"
+            },
+            "committed_at": "2026-11-01T12:00:00.002Z"
+          },
+          "event": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S01:S01:complete",
+            "ts": "2026-11-01T12:00:00.002Z",
+            "event": "unit-transition",
+            "action": "complete",
+            "unit": "plan-slice/S01",
+            "milestone": "M001",
+            "host_runtime": "claude",
+            "outcome": "succeeded",
+            "reason_code": "complete"
+          },
+          "boundary": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S01:S01:complete",
+            "unit": "plan-slice/S01",
+            "milestone": "M001",
+            "kind": "completed",
+            "outcome": "succeeded",
+            "reason_code": "complete",
+            "result_ref": ".gsd/forge/results/result-v1-0da9bf2c2e5bbd94fc7a5d1a02424f7416452e902617653a12dd0f6daef2a8d0.json",
+            "result_checksum": "fb94c1ca7f55ddd28a618c979c7d931f03d348763d822bbfa5d8a242cc576b68",
+            "event_checksum": "4edbcb30456098074074edc9663bc7788deb94d125e08fd3bd6df9cd86952c84",
+            "state_checksum": "bb1081fb0b9492f6f0318de2590e78651e22b831990627e18ebd989b7dcfb748",
+            "previous_host_runtime": "claude",
+            "handoff_ready": true,
+            "committed_at": "2026-11-01T12:00:00.002Z"
+          }
+        },
+        {
+          "protocol_version": "1.0.0",
+          "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S02:S02",
+          "action": "begin",
+          "unit": {
+            "type": "plan-slice",
+            "id": "S02",
+            "key": "plan-slice/S02"
+          },
+          "milestone": "M001",
+          "host_runtime": "claude",
+          "owner_digest": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+          "phase": "committed",
+          "created_at": "2026-11-01T12:00:00.003Z",
+          "updated_at": "2026-11-01T12:00:00.003Z",
+          "before": {
+            "state_checksum": "bb1081fb0b9492f6f0318de2590e78651e22b831990627e18ebd989b7dcfb748",
+            "state": {
+              "active_slice": "S01",
+              "active_task": "—",
+              "auto_mode": "on",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            }
+          },
+          "after": {
+            "state_checksum": "c4131a53b524c1d27a7f6ac1068c1d6ff614199678d026b6b30fca80b2f49e69",
+            "state": {
+              "active_slice": "S02",
+              "active_task": "—",
+              "auto_mode": "on",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            },
+            "state_patch": {
+              "phase": "plan-slice",
+              "active_task": "—",
+              "host_runtime": "claude",
+              "owner": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+              "heartbeat": "2026-11-01T12:00:00.003Z",
+              "active_slice": "S02"
+            }
+          },
+          "result": null,
+          "event": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S02:S02",
+            "ts": "2026-11-01T12:00:00.003Z",
+            "event": "unit-began",
+            "action": "begin",
+            "unit": "plan-slice/S02",
+            "milestone": "M001",
+            "host_runtime": "claude",
+            "outcome": "running",
+            "reason_code": "begin"
+          },
+          "boundary": null
+        },
+        {
+          "protocol_version": "1.0.0",
+          "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input",
+          "action": "pause",
+          "unit": {
+            "type": "plan-slice",
+            "id": "S02",
+            "key": "plan-slice/S02"
+          },
+          "milestone": "M001",
+          "host_runtime": "claude",
+          "owner_digest": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+          "phase": "committed",
+          "created_at": "2026-11-01T12:00:00.003Z",
+          "updated_at": "2026-11-01T12:00:00.003Z",
+          "before": {
+            "state_checksum": "c4131a53b524c1d27a7f6ac1068c1d6ff614199678d026b6b30fca80b2f49e69",
+            "state": {
+              "active_slice": "S02",
+              "active_task": "—",
+              "auto_mode": "on",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            }
+          },
+          "after": {
+            "state_checksum": "cbf268c56203dc1d2006e1e7be41d6a56c2472942e4d523499d71459a66bf9a0",
+            "state": {
+              "active_slice": "S02",
+              "active_task": "—",
+              "auto_mode": "off",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            },
+            "state_patch": {
+              "phase": "plan-slice",
+              "active_task": "—",
+              "host_runtime": "claude",
+              "owner": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+              "heartbeat": "2026-11-01T12:00:00.003Z",
+              "auto_mode": "off"
+            }
+          },
+          "result": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input",
+            "unit": "plan-slice/S02",
+            "milestone": "M001",
+            "status": "cancelled",
+            "reason_code": "pause",
+            "summary": "",
+            "output": null,
+            "committed_at": "2026-11-01T12:00:00.003Z"
+          },
+          "event": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input",
+            "ts": "2026-11-01T12:00:00.003Z",
+            "event": "unit-transition",
+            "action": "pause",
+            "unit": "plan-slice/S02",
+            "milestone": "M001",
+            "host_runtime": "claude",
+            "outcome": "cancelled",
+            "reason_code": "pause"
+          },
+          "boundary": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input",
+            "unit": "plan-slice/S02",
+            "milestone": "M001",
+            "kind": "paused",
+            "outcome": "cancelled",
+            "reason_code": "pause",
+            "result_ref": ".gsd/forge/results/result-v1-174e542e6cb43d1becf597115ce039db583389d86476271068da405ff3c19c66.json",
+            "result_checksum": "ef5af32691d8c96d3c1dd647be9c353f20418cae6e84f09d1f4abc3bf03c86c2",
+            "event_checksum": "dc4af26ac938ea536af28b0856c87b2fafba4f8129c89d09c566fd6ea3b1afc4",
+            "state_checksum": "cbf268c56203dc1d2006e1e7be41d6a56c2472942e4d523499d71459a66bf9a0",
+            "previous_host_runtime": "claude",
+            "handoff_ready": true,
+            "committed_at": "2026-11-01T12:00:00.003Z"
+          }
+        },
+        {
+          "protocol_version": "1.0.0",
+          "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S03:S03",
+          "action": "begin",
+          "unit": {
+            "type": "plan-slice",
+            "id": "S03",
+            "key": "plan-slice/S03"
+          },
+          "milestone": "M001",
+          "host_runtime": "claude",
+          "owner_digest": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+          "phase": "committed",
+          "created_at": "2026-11-01T12:00:00.005Z",
+          "updated_at": "2026-11-01T12:00:00.005Z",
+          "before": {
+            "state_checksum": "cbf268c56203dc1d2006e1e7be41d6a56c2472942e4d523499d71459a66bf9a0",
+            "state": {
+              "active_slice": "S02",
+              "active_task": "—",
+              "auto_mode": "off",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            }
+          },
+          "after": {
+            "state_checksum": "1422d6ccb8f22d1474857775d9aff2d35245998efb60d304a621e41046e2861f",
+            "state": {
+              "active_slice": "S03",
+              "active_task": "—",
+              "auto_mode": "off",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            },
+            "state_patch": {
+              "phase": "plan-slice",
+              "active_task": "—",
+              "host_runtime": "claude",
+              "owner": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+              "heartbeat": "2026-11-01T12:00:00.005Z",
+              "active_slice": "S03"
+            }
+          },
+          "result": null,
+          "event": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S03:S03",
+            "ts": "2026-11-01T12:00:00.005Z",
+            "event": "unit-began",
+            "action": "begin",
+            "unit": "plan-slice/S03",
+            "milestone": "M001",
+            "host_runtime": "claude",
+            "outcome": "running",
+            "reason_code": "begin"
+          },
+          "boundary": null
+        },
+        {
+          "protocol_version": "1.0.0",
+          "idempotency_key": "forge-orchestrate-resume:forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input",
+          "action": "begin",
+          "unit": {
+            "type": "plan-slice",
+            "id": "S02",
+            "key": "plan-slice/S02"
+          },
+          "milestone": "M001",
+          "host_runtime": "claude",
+          "owner_digest": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+          "phase": "committed",
+          "created_at": "2026-11-01T12:00:00.004Z",
+          "updated_at": "2026-11-01T12:00:00.004Z",
+          "before": {
+            "state_checksum": "cbf268c56203dc1d2006e1e7be41d6a56c2472942e4d523499d71459a66bf9a0",
+            "state": {
+              "active_slice": "S02",
+              "active_task": "—",
+              "auto_mode": "off",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            }
+          },
+          "after": {
+            "state_checksum": "cbf268c56203dc1d2006e1e7be41d6a56c2472942e4d523499d71459a66bf9a0",
+            "state": {
+              "active_slice": "S02",
+              "active_task": "—",
+              "auto_mode": "off",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            },
+            "state_patch": {
+              "phase": "plan-slice",
+              "active_task": "—",
+              "host_runtime": "claude",
+              "owner": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+              "heartbeat": "2026-11-01T12:00:00.004Z"
+            }
+          },
+          "result": null,
+          "event": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-resume:forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input",
+            "ts": "2026-11-01T12:00:00.004Z",
+            "event": "unit-began",
+            "action": "begin",
+            "unit": "plan-slice/S02",
+            "milestone": "M001",
+            "host_runtime": "claude",
+            "outcome": "running",
+            "reason_code": "begin"
+          },
+          "boundary": null
+        },
+        {
+          "protocol_version": "1.0.0",
+          "idempotency_key": "forge-orchestrate-resume:forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input:complete",
+          "action": "complete",
+          "unit": {
+            "type": "plan-slice",
+            "id": "S02",
+            "key": "plan-slice/S02"
+          },
+          "milestone": "M001",
+          "host_runtime": "claude",
+          "owner_digest": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+          "phase": "committed",
+          "created_at": "2026-11-01T12:00:00.004Z",
+          "updated_at": "2026-11-01T12:00:00.004Z",
+          "before": {
+            "state_checksum": "cbf268c56203dc1d2006e1e7be41d6a56c2472942e4d523499d71459a66bf9a0",
+            "state": {
+              "active_slice": "S02",
+              "active_task": "—",
+              "auto_mode": "off",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            }
+          },
+          "after": {
+            "state_checksum": "cbf268c56203dc1d2006e1e7be41d6a56c2472942e4d523499d71459a66bf9a0",
+            "state": {
+              "active_slice": "S02",
+              "active_task": "—",
+              "auto_mode": "off",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            },
+            "state_patch": {
+              "phase": "plan-slice",
+              "active_task": "—",
+              "host_runtime": "claude",
+              "owner": null,
+              "heartbeat": "2026-11-01T12:00:00.004Z"
+            }
+          },
+          "result": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-resume:forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input:complete",
+            "unit": "plan-slice/S02",
+            "milestone": "M001",
+            "status": "succeeded",
+            "reason_code": "complete",
+            "summary": "",
+            "output": {
+              "value": "yes"
+            },
+            "committed_at": "2026-11-01T12:00:00.004Z"
+          },
+          "event": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-resume:forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input:complete",
+            "ts": "2026-11-01T12:00:00.004Z",
+            "event": "unit-transition",
+            "action": "complete",
+            "unit": "plan-slice/S02",
+            "milestone": "M001",
+            "host_runtime": "claude",
+            "outcome": "succeeded",
+            "reason_code": "complete"
+          },
+          "boundary": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-resume:forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input:complete",
+            "unit": "plan-slice/S02",
+            "milestone": "M001",
+            "kind": "completed",
+            "outcome": "succeeded",
+            "reason_code": "complete",
+            "result_ref": ".gsd/forge/results/result-v1-77f4252495fc7610ae7c1dae42bee9d4b1740c3bc09dc5360541ad28c0442d47.json",
+            "result_checksum": "57faf446add8fc4134f86c2eacdb0e9c72d1fe7714ea183a690344cc72a92880",
+            "event_checksum": "6246dad7c0a7d9223665a890ecbbbf982e198a1b7d59f0ab964eb0302a4cbf31",
+            "state_checksum": "cbf268c56203dc1d2006e1e7be41d6a56c2472942e4d523499d71459a66bf9a0",
+            "previous_host_runtime": "claude",
+            "handoff_ready": true,
+            "committed_at": "2026-11-01T12:00:00.004Z"
+          }
+        }
+      ],
+      "events": "{\"protocol_version\":\"1.0.0\",\"idempotency_key\":\"forge-orchestrate-next:M001:plan-slice/S01:S01\",\"ts\":\"2026-11-01T12:00:00.001Z\",\"event\":\"unit-began\",\"action\":\"begin\",\"unit\":\"plan-slice/S01\",\"milestone\":\"M001\",\"host_runtime\":\"claude\",\"outcome\":\"running\",\"reason_code\":\"begin\",\"sequence\":1}\n{\"protocol_version\":\"1.0.0\",\"idempotency_key\":\"forge-orchestrate-next:M001:plan-slice/S01:S01:complete\",\"ts\":\"2026-11-01T12:00:00.002Z\",\"event\":\"unit-transition\",\"action\":\"complete\",\"unit\":\"plan-slice/S01\",\"milestone\":\"M001\",\"host_runtime\":\"claude\",\"outcome\":\"succeeded\",\"reason_code\":\"complete\",\"sequence\":2}\n{\"protocol_version\":\"1.0.0\",\"idempotency_key\":\"forge-orchestrate-next:M001:plan-slice/S02:S02\",\"ts\":\"2026-11-01T12:00:00.003Z\",\"event\":\"unit-began\",\"action\":\"begin\",\"unit\":\"plan-slice/S02\",\"milestone\":\"M001\",\"host_runtime\":\"claude\",\"outcome\":\"running\",\"reason_code\":\"begin\",\"sequence\":3}\n{\"protocol_version\":\"1.0.0\",\"idempotency_key\":\"forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input\",\"ts\":\"2026-11-01T12:00:00.003Z\",\"event\":\"unit-transition\",\"action\":\"pause\",\"unit\":\"plan-slice/S02\",\"milestone\":\"M001\",\"host_runtime\":\"claude\",\"outcome\":\"cancelled\",\"reason_code\":\"pause\",\"sequence\":4}\n{\"protocol_version\":\"1.0.0\",\"idempotency_key\":\"forge-orchestrate-resume:forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input\",\"ts\":\"2026-11-01T12:00:00.004Z\",\"event\":\"unit-began\",\"action\":\"begin\",\"unit\":\"plan-slice/S02\",\"milestone\":\"M001\",\"host_runtime\":\"claude\",\"outcome\":\"running\",\"reason_code\":\"begin\",\"sequence\":5}\n{\"protocol_version\":\"1.0.0\",\"idempotency_key\":\"forge-orchestrate-resume:forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input:complete\",\"ts\":\"2026-11-01T12:00:00.004Z\",\"event\":\"unit-transition\",\"action\":\"complete\",\"unit\":\"plan-slice/S02\",\"milestone\":\"M001\",\"host_runtime\":\"claude\",\"outcome\":\"succeeded\",\"reason_code\":\"complete\",\"sequence\":6}\n{\"protocol_version\":\"1.0.0\",\"idempotency_key\":\"forge-orchestrate-next:M001:plan-slice/S03:S03\",\"ts\":\"2026-11-01T12:00:00.005Z\",\"event\":\"unit-began\",\"action\":\"begin\",\"unit\":\"plan-slice/S03\",\"milestone\":\"M001\",\"host_runtime\":\"claude\",\"outcome\":\"running\",\"reason_code\":\"begin\",\"sequence\":7}\n{\"protocol_version\":\"1.0.0\",\"idempotency_key\":\"baseline-fail\",\"ts\":\"2026-11-01T12:00:00.006Z\",\"event\":\"unit-transition\",\"action\":\"fail\",\"unit\":\"plan-slice/S03\",\"milestone\":\"M001\",\"host_runtime\":\"claude\",\"outcome\":\"failed\",\"reason_code\":\"fail\",\"sequence\":8}\n"
+    },
+    "codex": {
+      "transactions": [
+        {
+          "protocol_version": "1.0.0",
+          "idempotency_key": "baseline-fail",
+          "action": "fail",
+          "unit": {
+            "type": "plan-slice",
+            "id": "S03",
+            "key": "plan-slice/S03"
+          },
+          "milestone": "M001",
+          "host_runtime": "codex",
+          "owner_digest": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+          "phase": "committed",
+          "created_at": "2026-11-01T12:00:00.006Z",
+          "updated_at": "2026-11-01T12:00:00.006Z",
+          "before": {
+            "state_checksum": "1422d6ccb8f22d1474857775d9aff2d35245998efb60d304a621e41046e2861f",
+            "state": {
+              "active_slice": "S03",
+              "active_task": "—",
+              "auto_mode": "off",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            }
+          },
+          "after": {
+            "state_checksum": "fb4162e8189f88540ccac3f9ef7f0d944280e17e03c7ece325074f3981114a32",
+            "state": {
+              "active_slice": "S03",
+              "active_task": "—",
+              "auto_mode": "off",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "blocked",
+              "recent_units": null
+            },
+            "state_patch": {
+              "phase": "blocked",
+              "active_task": "—",
+              "host_runtime": "codex",
+              "owner": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+              "heartbeat": "2026-11-01T12:00:00.006Z"
+            }
+          },
+          "result": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "baseline-fail",
+            "unit": "plan-slice/S03",
+            "milestone": "M001",
+            "status": "failed",
+            "reason_code": "fail",
+            "summary": "",
+            "output": null,
+            "committed_at": "2026-11-01T12:00:00.006Z"
+          },
+          "event": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "baseline-fail",
+            "ts": "2026-11-01T12:00:00.006Z",
+            "event": "unit-transition",
+            "action": "fail",
+            "unit": "plan-slice/S03",
+            "milestone": "M001",
+            "host_runtime": "codex",
+            "outcome": "failed",
+            "reason_code": "fail"
+          },
+          "boundary": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "baseline-fail",
+            "unit": "plan-slice/S03",
+            "milestone": "M001",
+            "kind": "failed-persisted",
+            "outcome": "failed",
+            "reason_code": "fail",
+            "result_ref": ".gsd/forge/results/result-v1-56de6cb7660d570bbe7701902b40c937fae71c043c17d9a25a7a510e20855ec9.json",
+            "result_checksum": "6d206a79ad65d814d01a3344f85689bcb65c088af832fc5331775d226607c19b",
+            "event_checksum": "12bfc6c073a69b6af935c584d9589e47936aaf3f2689f0e3afd95a7af6c2fadc",
+            "state_checksum": "fb4162e8189f88540ccac3f9ef7f0d944280e17e03c7ece325074f3981114a32",
+            "previous_host_runtime": "codex",
+            "handoff_ready": true,
+            "committed_at": "2026-11-01T12:00:00.006Z"
+          }
+        },
+        {
+          "protocol_version": "1.0.0",
+          "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S01:S01",
+          "action": "begin",
+          "unit": {
+            "type": "plan-slice",
+            "id": "S01",
+            "key": "plan-slice/S01"
+          },
+          "milestone": "M001",
+          "host_runtime": "codex",
+          "owner_digest": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+          "phase": "committed",
+          "created_at": "2026-11-01T12:00:00.001Z",
+          "updated_at": "2026-11-01T12:00:00.001Z",
+          "before": {
+            "state_checksum": "c5544056f151eba93c8f021fc6d750cf4bcf5123c99ec31dfba6df0a2d3950aa",
+            "state": {
+              "active_slice": "S01",
+              "active_task": "—",
+              "auto_mode": "on",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "idle",
+              "recent_units": null
+            }
+          },
+          "after": {
+            "state_checksum": "bb1081fb0b9492f6f0318de2590e78651e22b831990627e18ebd989b7dcfb748",
+            "state": {
+              "active_slice": "S01",
+              "active_task": "—",
+              "auto_mode": "on",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            },
+            "state_patch": {
+              "phase": "plan-slice",
+              "active_task": "—",
+              "host_runtime": "codex",
+              "owner": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+              "heartbeat": "2026-11-01T12:00:00.001Z",
+              "active_slice": "S01"
+            }
+          },
+          "result": null,
+          "event": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S01:S01",
+            "ts": "2026-11-01T12:00:00.001Z",
+            "event": "unit-began",
+            "action": "begin",
+            "unit": "plan-slice/S01",
+            "milestone": "M001",
+            "host_runtime": "codex",
+            "outcome": "running",
+            "reason_code": "begin"
+          },
+          "boundary": null
+        },
+        {
+          "protocol_version": "1.0.0",
+          "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S01:S01:complete",
+          "action": "complete",
+          "unit": {
+            "type": "plan-slice",
+            "id": "S01",
+            "key": "plan-slice/S01"
+          },
+          "milestone": "M001",
+          "host_runtime": "codex",
+          "owner_digest": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+          "phase": "committed",
+          "created_at": "2026-11-01T12:00:00.002Z",
+          "updated_at": "2026-11-01T12:00:00.002Z",
+          "before": {
+            "state_checksum": "bb1081fb0b9492f6f0318de2590e78651e22b831990627e18ebd989b7dcfb748",
+            "state": {
+              "active_slice": "S01",
+              "active_task": "—",
+              "auto_mode": "on",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            }
+          },
+          "after": {
+            "state_checksum": "bb1081fb0b9492f6f0318de2590e78651e22b831990627e18ebd989b7dcfb748",
+            "state": {
+              "active_slice": "S01",
+              "active_task": "—",
+              "auto_mode": "on",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            },
+            "state_patch": {
+              "phase": "plan-slice",
+              "active_task": "—",
+              "host_runtime": "codex",
+              "owner": null,
+              "heartbeat": "2026-11-01T12:00:00.002Z"
+            }
+          },
+          "result": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S01:S01:complete",
+            "unit": "plan-slice/S01",
+            "milestone": "M001",
+            "status": "succeeded",
+            "reason_code": "complete",
+            "summary": "",
+            "output": {
+              "status": "done"
+            },
+            "committed_at": "2026-11-01T12:00:00.002Z"
+          },
+          "event": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S01:S01:complete",
+            "ts": "2026-11-01T12:00:00.002Z",
+            "event": "unit-transition",
+            "action": "complete",
+            "unit": "plan-slice/S01",
+            "milestone": "M001",
+            "host_runtime": "codex",
+            "outcome": "succeeded",
+            "reason_code": "complete"
+          },
+          "boundary": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S01:S01:complete",
+            "unit": "plan-slice/S01",
+            "milestone": "M001",
+            "kind": "completed",
+            "outcome": "succeeded",
+            "reason_code": "complete",
+            "result_ref": ".gsd/forge/results/result-v1-0da9bf2c2e5bbd94fc7a5d1a02424f7416452e902617653a12dd0f6daef2a8d0.json",
+            "result_checksum": "fb94c1ca7f55ddd28a618c979c7d931f03d348763d822bbfa5d8a242cc576b68",
+            "event_checksum": "308781cb6e3c500e144ba9385deb84b72ecadbfe8ab576d1f8f662150ab59fcf",
+            "state_checksum": "bb1081fb0b9492f6f0318de2590e78651e22b831990627e18ebd989b7dcfb748",
+            "previous_host_runtime": "codex",
+            "handoff_ready": true,
+            "committed_at": "2026-11-01T12:00:00.002Z"
+          }
+        },
+        {
+          "protocol_version": "1.0.0",
+          "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S02:S02",
+          "action": "begin",
+          "unit": {
+            "type": "plan-slice",
+            "id": "S02",
+            "key": "plan-slice/S02"
+          },
+          "milestone": "M001",
+          "host_runtime": "codex",
+          "owner_digest": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+          "phase": "committed",
+          "created_at": "2026-11-01T12:00:00.003Z",
+          "updated_at": "2026-11-01T12:00:00.003Z",
+          "before": {
+            "state_checksum": "bb1081fb0b9492f6f0318de2590e78651e22b831990627e18ebd989b7dcfb748",
+            "state": {
+              "active_slice": "S01",
+              "active_task": "—",
+              "auto_mode": "on",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            }
+          },
+          "after": {
+            "state_checksum": "c4131a53b524c1d27a7f6ac1068c1d6ff614199678d026b6b30fca80b2f49e69",
+            "state": {
+              "active_slice": "S02",
+              "active_task": "—",
+              "auto_mode": "on",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            },
+            "state_patch": {
+              "phase": "plan-slice",
+              "active_task": "—",
+              "host_runtime": "codex",
+              "owner": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+              "heartbeat": "2026-11-01T12:00:00.003Z",
+              "active_slice": "S02"
+            }
+          },
+          "result": null,
+          "event": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S02:S02",
+            "ts": "2026-11-01T12:00:00.003Z",
+            "event": "unit-began",
+            "action": "begin",
+            "unit": "plan-slice/S02",
+            "milestone": "M001",
+            "host_runtime": "codex",
+            "outcome": "running",
+            "reason_code": "begin"
+          },
+          "boundary": null
+        },
+        {
+          "protocol_version": "1.0.0",
+          "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input",
+          "action": "pause",
+          "unit": {
+            "type": "plan-slice",
+            "id": "S02",
+            "key": "plan-slice/S02"
+          },
+          "milestone": "M001",
+          "host_runtime": "codex",
+          "owner_digest": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+          "phase": "committed",
+          "created_at": "2026-11-01T12:00:00.003Z",
+          "updated_at": "2026-11-01T12:00:00.003Z",
+          "before": {
+            "state_checksum": "c4131a53b524c1d27a7f6ac1068c1d6ff614199678d026b6b30fca80b2f49e69",
+            "state": {
+              "active_slice": "S02",
+              "active_task": "—",
+              "auto_mode": "on",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            }
+          },
+          "after": {
+            "state_checksum": "cbf268c56203dc1d2006e1e7be41d6a56c2472942e4d523499d71459a66bf9a0",
+            "state": {
+              "active_slice": "S02",
+              "active_task": "—",
+              "auto_mode": "off",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            },
+            "state_patch": {
+              "phase": "plan-slice",
+              "active_task": "—",
+              "host_runtime": "codex",
+              "owner": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+              "heartbeat": "2026-11-01T12:00:00.003Z",
+              "auto_mode": "off"
+            }
+          },
+          "result": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input",
+            "unit": "plan-slice/S02",
+            "milestone": "M001",
+            "status": "cancelled",
+            "reason_code": "pause",
+            "summary": "",
+            "output": null,
+            "committed_at": "2026-11-01T12:00:00.003Z"
+          },
+          "event": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input",
+            "ts": "2026-11-01T12:00:00.003Z",
+            "event": "unit-transition",
+            "action": "pause",
+            "unit": "plan-slice/S02",
+            "milestone": "M001",
+            "host_runtime": "codex",
+            "outcome": "cancelled",
+            "reason_code": "pause"
+          },
+          "boundary": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input",
+            "unit": "plan-slice/S02",
+            "milestone": "M001",
+            "kind": "paused",
+            "outcome": "cancelled",
+            "reason_code": "pause",
+            "result_ref": ".gsd/forge/results/result-v1-174e542e6cb43d1becf597115ce039db583389d86476271068da405ff3c19c66.json",
+            "result_checksum": "ef5af32691d8c96d3c1dd647be9c353f20418cae6e84f09d1f4abc3bf03c86c2",
+            "event_checksum": "760343d46c997f9d9c192a87dc48b839074096cd6bfa60cc84567d349af0c17f",
+            "state_checksum": "cbf268c56203dc1d2006e1e7be41d6a56c2472942e4d523499d71459a66bf9a0",
+            "previous_host_runtime": "codex",
+            "handoff_ready": true,
+            "committed_at": "2026-11-01T12:00:00.003Z"
+          }
+        },
+        {
+          "protocol_version": "1.0.0",
+          "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S03:S03",
+          "action": "begin",
+          "unit": {
+            "type": "plan-slice",
+            "id": "S03",
+            "key": "plan-slice/S03"
+          },
+          "milestone": "M001",
+          "host_runtime": "codex",
+          "owner_digest": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+          "phase": "committed",
+          "created_at": "2026-11-01T12:00:00.005Z",
+          "updated_at": "2026-11-01T12:00:00.005Z",
+          "before": {
+            "state_checksum": "cbf268c56203dc1d2006e1e7be41d6a56c2472942e4d523499d71459a66bf9a0",
+            "state": {
+              "active_slice": "S02",
+              "active_task": "—",
+              "auto_mode": "off",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            }
+          },
+          "after": {
+            "state_checksum": "1422d6ccb8f22d1474857775d9aff2d35245998efb60d304a621e41046e2861f",
+            "state": {
+              "active_slice": "S03",
+              "active_task": "—",
+              "auto_mode": "off",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            },
+            "state_patch": {
+              "phase": "plan-slice",
+              "active_task": "—",
+              "host_runtime": "codex",
+              "owner": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+              "heartbeat": "2026-11-01T12:00:00.005Z",
+              "active_slice": "S03"
+            }
+          },
+          "result": null,
+          "event": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-next:M001:plan-slice/S03:S03",
+            "ts": "2026-11-01T12:00:00.005Z",
+            "event": "unit-began",
+            "action": "begin",
+            "unit": "plan-slice/S03",
+            "milestone": "M001",
+            "host_runtime": "codex",
+            "outcome": "running",
+            "reason_code": "begin"
+          },
+          "boundary": null
+        },
+        {
+          "protocol_version": "1.0.0",
+          "idempotency_key": "forge-orchestrate-resume:forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input",
+          "action": "begin",
+          "unit": {
+            "type": "plan-slice",
+            "id": "S02",
+            "key": "plan-slice/S02"
+          },
+          "milestone": "M001",
+          "host_runtime": "codex",
+          "owner_digest": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+          "phase": "committed",
+          "created_at": "2026-11-01T12:00:00.004Z",
+          "updated_at": "2026-11-01T12:00:00.004Z",
+          "before": {
+            "state_checksum": "cbf268c56203dc1d2006e1e7be41d6a56c2472942e4d523499d71459a66bf9a0",
+            "state": {
+              "active_slice": "S02",
+              "active_task": "—",
+              "auto_mode": "off",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            }
+          },
+          "after": {
+            "state_checksum": "cbf268c56203dc1d2006e1e7be41d6a56c2472942e4d523499d71459a66bf9a0",
+            "state": {
+              "active_slice": "S02",
+              "active_task": "—",
+              "auto_mode": "off",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            },
+            "state_patch": {
+              "phase": "plan-slice",
+              "active_task": "—",
+              "host_runtime": "codex",
+              "owner": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+              "heartbeat": "2026-11-01T12:00:00.004Z"
+            }
+          },
+          "result": null,
+          "event": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-resume:forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input",
+            "ts": "2026-11-01T12:00:00.004Z",
+            "event": "unit-began",
+            "action": "begin",
+            "unit": "plan-slice/S02",
+            "milestone": "M001",
+            "host_runtime": "codex",
+            "outcome": "running",
+            "reason_code": "begin"
+          },
+          "boundary": null
+        },
+        {
+          "protocol_version": "1.0.0",
+          "idempotency_key": "forge-orchestrate-resume:forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input:complete",
+          "action": "complete",
+          "unit": {
+            "type": "plan-slice",
+            "id": "S02",
+            "key": "plan-slice/S02"
+          },
+          "milestone": "M001",
+          "host_runtime": "codex",
+          "owner_digest": "sha256:808b4129b2db992cdd223c7903d71ebd7f9308c1a09eeb3d10fa79e2a56f8a3d",
+          "phase": "committed",
+          "created_at": "2026-11-01T12:00:00.004Z",
+          "updated_at": "2026-11-01T12:00:00.004Z",
+          "before": {
+            "state_checksum": "cbf268c56203dc1d2006e1e7be41d6a56c2472942e4d523499d71459a66bf9a0",
+            "state": {
+              "active_slice": "S02",
+              "active_task": "—",
+              "auto_mode": "off",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            }
+          },
+          "after": {
+            "state_checksum": "cbf268c56203dc1d2006e1e7be41d6a56c2472942e4d523499d71459a66bf9a0",
+            "state": {
+              "active_slice": "S02",
+              "active_task": "—",
+              "auto_mode": "off",
+              "created": "2026-11-01T12:00:00.000Z",
+              "isolation_mode": "shared",
+              "kind": "milestone",
+              "milestone": "M001",
+              "next_action": "",
+              "notes": null,
+              "phase": "plan-slice",
+              "recent_units": null
+            },
+            "state_patch": {
+              "phase": "plan-slice",
+              "active_task": "—",
+              "host_runtime": "codex",
+              "owner": null,
+              "heartbeat": "2026-11-01T12:00:00.004Z"
+            }
+          },
+          "result": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-resume:forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input:complete",
+            "unit": "plan-slice/S02",
+            "milestone": "M001",
+            "status": "succeeded",
+            "reason_code": "complete",
+            "summary": "",
+            "output": {
+              "value": "yes"
+            },
+            "committed_at": "2026-11-01T12:00:00.004Z"
+          },
+          "event": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-resume:forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input:complete",
+            "ts": "2026-11-01T12:00:00.004Z",
+            "event": "unit-transition",
+            "action": "complete",
+            "unit": "plan-slice/S02",
+            "milestone": "M001",
+            "host_runtime": "codex",
+            "outcome": "succeeded",
+            "reason_code": "complete"
+          },
+          "boundary": {
+            "protocol_version": "1.0.0",
+            "idempotency_key": "forge-orchestrate-resume:forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input:complete",
+            "unit": "plan-slice/S02",
+            "milestone": "M001",
+            "kind": "completed",
+            "outcome": "succeeded",
+            "reason_code": "complete",
+            "result_ref": ".gsd/forge/results/result-v1-77f4252495fc7610ae7c1dae42bee9d4b1740c3bc09dc5360541ad28c0442d47.json",
+            "result_checksum": "57faf446add8fc4134f86c2eacdb0e9c72d1fe7714ea183a690344cc72a92880",
+            "event_checksum": "3d9419801c2b1b160a4d379081995b14417d78a95b40a264326f43c152e99436",
+            "state_checksum": "cbf268c56203dc1d2006e1e7be41d6a56c2472942e4d523499d71459a66bf9a0",
+            "previous_host_runtime": "codex",
+            "handoff_ready": true,
+            "committed_at": "2026-11-01T12:00:00.004Z"
+          }
+        }
+      ],
+      "events": "{\"protocol_version\":\"1.0.0\",\"idempotency_key\":\"forge-orchestrate-next:M001:plan-slice/S01:S01\",\"ts\":\"2026-11-01T12:00:00.001Z\",\"event\":\"unit-began\",\"action\":\"begin\",\"unit\":\"plan-slice/S01\",\"milestone\":\"M001\",\"host_runtime\":\"codex\",\"outcome\":\"running\",\"reason_code\":\"begin\",\"sequence\":1}\n{\"protocol_version\":\"1.0.0\",\"idempotency_key\":\"forge-orchestrate-next:M001:plan-slice/S01:S01:complete\",\"ts\":\"2026-11-01T12:00:00.002Z\",\"event\":\"unit-transition\",\"action\":\"complete\",\"unit\":\"plan-slice/S01\",\"milestone\":\"M001\",\"host_runtime\":\"codex\",\"outcome\":\"succeeded\",\"reason_code\":\"complete\",\"sequence\":2}\n{\"protocol_version\":\"1.0.0\",\"idempotency_key\":\"forge-orchestrate-next:M001:plan-slice/S02:S02\",\"ts\":\"2026-11-01T12:00:00.003Z\",\"event\":\"unit-began\",\"action\":\"begin\",\"unit\":\"plan-slice/S02\",\"milestone\":\"M001\",\"host_runtime\":\"codex\",\"outcome\":\"running\",\"reason_code\":\"begin\",\"sequence\":3}\n{\"protocol_version\":\"1.0.0\",\"idempotency_key\":\"forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input\",\"ts\":\"2026-11-01T12:00:00.003Z\",\"event\":\"unit-transition\",\"action\":\"pause\",\"unit\":\"plan-slice/S02\",\"milestone\":\"M001\",\"host_runtime\":\"codex\",\"outcome\":\"cancelled\",\"reason_code\":\"pause\",\"sequence\":4}\n{\"protocol_version\":\"1.0.0\",\"idempotency_key\":\"forge-orchestrate-resume:forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input\",\"ts\":\"2026-11-01T12:00:00.004Z\",\"event\":\"unit-began\",\"action\":\"begin\",\"unit\":\"plan-slice/S02\",\"milestone\":\"M001\",\"host_runtime\":\"codex\",\"outcome\":\"running\",\"reason_code\":\"begin\",\"sequence\":5}\n{\"protocol_version\":\"1.0.0\",\"idempotency_key\":\"forge-orchestrate-resume:forge-orchestrate-next:M001:plan-slice/S02:S02:needs-input:complete\",\"ts\":\"2026-11-01T12:00:00.004Z\",\"event\":\"unit-transition\",\"action\":\"complete\",\"unit\":\"plan-slice/S02\",\"milestone\":\"M001\",\"host_runtime\":\"codex\",\"outcome\":\"succeeded\",\"reason_code\":\"complete\",\"sequence\":6}\n{\"protocol_version\":\"1.0.0\",\"idempotency_key\":\"forge-orchestrate-next:M001:plan-slice/S03:S03\",\"ts\":\"2026-11-01T12:00:00.005Z\",\"event\":\"unit-began\",\"action\":\"begin\",\"unit\":\"plan-slice/S03\",\"milestone\":\"M001\",\"host_runtime\":\"codex\",\"outcome\":\"running\",\"reason_code\":\"begin\",\"sequence\":7}\n{\"protocol_version\":\"1.0.0\",\"idempotency_key\":\"baseline-fail\",\"ts\":\"2026-11-01T12:00:00.006Z\",\"event\":\"unit-transition\",\"action\":\"fail\",\"unit\":\"plan-slice/S03\",\"milestone\":\"M001\",\"host_runtime\":\"codex\",\"outcome\":\"failed\",\"reason_code\":\"fail\",\"sequence\":8}\n"
+    }
+  }
+}

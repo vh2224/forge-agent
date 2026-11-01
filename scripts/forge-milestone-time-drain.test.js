@@ -187,6 +187,42 @@ if (process.argv[2] === '--child') {
     assert.equal(checkpoint(f).status, 'not-drained'); assert.deepEqual(snapshot(f.cwd), before);
     fs.writeFileSync(file, '{broken'); assert.equal(inspect(f).state, 'incomplete-unknown');
   });
+  test('raw-claim-absence-released-and-malformed-values-stay-distinct', () => {
+    const f = fixture();
+    for (const raw of [undefined, null, false, '', [], 0, { paths: [] }, { released: {} }, { released: false }]) {
+      write(f.cwd, '.gsd/forge/runs/M001.json', { id: M, kind: 'milestone', write_claim: raw });
+      const absent = raw === undefined || raw === null, result = inspect(f);
+      assert.equal(result.claim, absent ? 'absent' : 'held', JSON.stringify(raw));
+      assert.equal(result.state, absent ? 'drained' : 'draining');
+    }
+  });
+  test('real-recordClaim-changed-file-commit-measured-release-drain-and-checkpoint', () => {
+    const f = fixture(), code = path.join(f.cwd, 'isolated-code'); fs.mkdirSync(code);
+    const git = args => {
+      const r = spawnSync('git', args, { cwd: code, encoding: 'utf8', timeout: 15000 });
+      assert.equal(r.status, 0, r.stderr); return r.stdout.trim();
+    };
+    git(['init', '-q']); git(['config', 'user.email', 'fixture@example.invalid']); git(['config', 'user.name', 'Fixture']);
+    write(code, 'claimed.txt', 'before\n'); git(['add', 'claimed.txt']); git(['commit', '-q', '-m', 'fixture baseline']);
+    const baseline = git(['rev-parse', 'HEAD']);
+    write(f.cwd, '.gsd/forge/runs/M001.json', { id: M, kind: 'milestone', active: true });
+    const claims = require('./forge-write-claim'), release = require('./forge-claim-release');
+    claims.recordClaim(f.cwd, M, { at: BASE, unit: 'execute-task/T01', source: 'plan-writes', code_dir: code,
+      paths: ['claimed.txt'], vcs_baseline: { vcs: 'git', id: baseline } });
+    const before = JSON.parse(fs.readFileSync(path.join(f.cwd, '.gsd/forge/runs/M001.json'))).write_claim;
+    assert(claims.isHeld(before)); assert.equal(inspect(f).claim, 'held');
+    write(code, 'claimed.txt', 'after\n');
+    assert.equal(release.releaseIfObservable(f.cwd, M, { now: BASE + 150 }).held, true);
+    git(['add', 'claimed.txt']); git(['commit', '-q', '-m', 'fixture delivered claim']);
+    const result = release.releaseIfObservable(f.cwd, M, { now: BASE + 150 });
+    assert.equal(result.reason, 'released-committed', JSON.stringify(result)); assert.equal(result.held, false);
+    const runFile = path.join(f.cwd, '.gsd/forge/runs/M001.json'), after = fs.readFileSync(runFile);
+    const raw = JSON.parse(after).write_claim;
+    assert(raw && raw.released); assert.deepEqual(raw.paths, before.paths); assert(!claims.isHeld(raw));
+    assert.equal(inspect(f).claim, 'released'); assert.equal(inspect(f).state, 'drained');
+    assert.equal(checkpoint(f).status, 'checkpointed');
+    assert.deepEqual(fs.readFileSync(runFile), after, 'drain/checkpoint changed the released claim');
+  });
   test('zero-forbidden-kill-lease-claim-failure-replay-and-attempt-mutations', () => {
     const f = begin(fixture()), claim = require('./forge-write-claim'), xllm = require('./forge-xllm');
     const targets = [[lease, 'acquire'], [lease, 'release'], [lease, 'heartbeat'], [claim, 'clearClaim'],

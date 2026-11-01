@@ -43,6 +43,7 @@ const REASON_CODES = Object.freeze([
   'lease-required', 'lease-owner-mismatch', 'transition-committed',
   'already-committed', 'handoff-ready', 'boundary-missing',
   'boundary-not-transferable', 'lease-active', 'invalid-request',
+  ...require('./forge-milestone-time-admission').TIME_REASON_CODES,
 ]);
 
 function own(value, key) { return Object.prototype.hasOwnProperty.call(value || {}, key); }
@@ -724,6 +725,14 @@ function begin(cwd, request, options) {
   resolvePrefs(cwd, options); // reject preferences before even creating a mutex
   return withMutex(cwd, 'unit-controller-transactions', () => beginInside(cwd, request, options));
 }
+function decideTimeAdmission(cwd, options) {
+  // Legacy unit IDs may exceed the time module's bounded vocabulary. The
+  // canonical absent-contract read must precede its stricter validation.
+  if (require('./forge-milestone-time').readContract({ cwd, milestone: options.milestone }).status === 'absent') {
+    return { allowed: true, decision: 'no-contract' };
+  }
+  return require('./forge-milestone-time-admission').decideAdmission(cwd, options);
+}
 function beginInside(cwd, request, options) {
   const input = object(request, 'request');
   const selection = input.unit ? { ok: true, milestone: input.milestone, unit: unitFromRequest(input), slice: input.slice || null }
@@ -756,6 +765,9 @@ function beginInside(cwd, request, options) {
   if (existing) return runTransaction(cwd, existing, ownerToken, input.generation, options);
   const otherPending = pendingTransactions(cwd);
   if (otherPending.length) throw new ControllerError('transaction-pending', 'recovery obrigatório antes de novo begin');
+  const admission = decideTimeAdmission(cwd,
+    { milestone: input.milestone, unit, key, now: options && options.now, kind: 'begin' });
+  if (!admission.allowed) throw new ControllerError(admission.reason_code, 'Entrada recusada pelo contrato de tempo da milestone', admission.details);
   preflightPaths(cwd, key, unit.key, input.milestone);
   const acquired = forgeLease.acquire(cwd, unit.key, {
     ownerToken,
@@ -771,6 +783,9 @@ function beginInside(cwd, request, options) {
   try {
     fail(options, 'before-make-transaction');
     transaction = makeTransaction(cwd, input, 'begin', unit, key, ownerToken, acquired.generation, hostRuntime, nowOf(options));
+    if (admission.record || admission.decision === 'boundary-continuation' && admission.details.contract !== 'absent') {
+      transaction.time_admission = admission.record || { decision: admission.decision, ...admission.details };
+    }
     saveTransaction(cwd, transaction, nowOf(options), options);
   } catch (error) {
     let durable;
@@ -1257,6 +1272,9 @@ function reenter(cwd, request, options = {}) {
       return { ok: true, reason: 'entry-ready', transaction: publicTransaction(existing, cwd), linked_entry: clone(linked), pending_questions: questions };
     }
     if (!existing) {
+      const admission = decideTimeAdmission(cwd,
+        { milestone: input.milestone, unit: failure.unit, key, now: options.now, kind: 'reenter' });
+      if (!admission.allowed) throw new ControllerError(admission.reason_code, 'Reentrada recusada pelo contrato de tempo da milestone', admission.details);
       if (failureProjection(cwd, input.milestone).some(item => item.transaction.idempotency_key === failure.idempotency_key && item.entry)) throw new ControllerError('entry-conflict', 'falha já possui entrada');
       const concurrent = discoverRecords(cwd, 'transaction').some(item => item.milestone === input.milestone && item.action === 'begin'
         && item.idempotency_key !== failure.terminal_failure.begin_key && forgeLease.observe(cwd, item.unit.key).lease);
@@ -1268,7 +1286,9 @@ function reenter(cwd, request, options = {}) {
       try {
         existing = makeTransaction(cwd, { milestone: failure.milestone, state_patch: { active_slice: failure.terminal_failure.slice || '—' } },
           'begin', failure.unit, key, input.owner_token, acquired.generation, linked.host_runtime, nowOf(options));
-        existing.linked_entry = linked; saveTransaction(cwd, existing, nowOf(options), options);
+        existing.linked_entry = linked;
+        if (admission.record) existing.time_admission = admission.record;
+        saveTransaction(cwd, existing, nowOf(options), options);
       } catch (error) {
         let durable;
         try { durable = lookupRecord(cwd, 'transaction', key); }
