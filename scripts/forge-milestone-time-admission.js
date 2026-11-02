@@ -121,8 +121,11 @@ function observeTime(cwd, milestone, options) {
   const consumed = consumption?.consumed_ms ?? null;
   const remaining = consumed === null ? null : contract.ceiling_ms - consumed;
   const atCap = remaining !== null && remaining <= 0;
+  // Read-only label projection: a delegated technical allocation is not a
+  // functional decision, so the last decided amendment keeps its label.
+  const lastDecided = read.chain.filter(row => !row.delegation).at(-1);
   const state = atCap ? writers.length ? 'draining' : checkpoint ? 'checkpointed' : 'exhausted'
-    : read.chain.at(-1)?.kind === 'extension' && remaining > 0 ? 'extended'
+    : lastDecided?.kind === 'extension' && remaining > 0 ? 'extended'
       : last?.warning === true && ['at-risk', 'exceeds'].includes(last.classification) ? 'warning' : 'active';
   const unknowns = [clock.status !== 'measured' && reasonCode(clock.reason),
     warnings.status === 'invalid' && reasonCode(warnings.reason), checkpoints.status === 'invalid' && reasonCode(checkpoints.reason),

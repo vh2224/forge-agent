@@ -492,6 +492,28 @@ try {
     assert.equal(clock.main(['--foreign'], io), 2);
     write(f.cwd, '.gsd/milestones/M001/M001-ROADMAP.md', 'changed'); assert.equal(clock.readForecast(f).reason, 'allocation-roadmap-mismatch');
   });
+  test('forecast-structural-allocation-survives-checked-box-and-legacy-keeps-raw-comparison', () => {
+    const section = { schema_version: 1, option_id: 'balanced', position_id: 'P0', options_sha256: 'a'.repeat(64), contract_sha256: 'e'.repeat(64),
+      allocation: [{ id: 'prep', kind: 'preparation', ms: 2, nodes: [] }, { id: 's1', kind: 'slice', slice: 'S01', ms: 10, nodes: ['N1'] }],
+      dependencies: [], deferred: [], linked_task: null };
+    const text = box => `# M001: Fixture — Roadmap\n\n- [${box}] **S01: Entrega** \`risk:low\` \`depends:[]\`\n\n## Alocação de tempo\n\n\`\`\`json\n${JSON.stringify(section)}\n\`\`\`\n`;
+    const identity = time.roadmapIdentity(text(' '));
+    for (const structured of [true, false]) {
+      const f = setup({ now_ms: 12, units: [['T01', 0, 7]] }), c = contract();
+      c.allocation = { roadmap_sha256: identity.sha256, ...(structured ? { structure_sha256: identity.structure_sha256 } : {}),
+        items: section.allocation.map(({ nodes, ...row }) => ({ ...row, nodes })) };
+      write(f.cwd, '.gsd/forge/time/M001/contract.json', c); write(f.cwd, '.gsd/milestones/M001/M001-ROADMAP.md', text(' '));
+      const same = clock.readForecast(f), clockBefore = clock.readClock(f); assert.equal(same.reason, 'no-proven-delivery');
+      write(f.cwd, '.gsd/milestones/M001/M001-ROADMAP.md', text('x'));
+      assert.notEqual(hash(fs.readFileSync(path.join(f.cwd, '.gsd/milestones/M001/M001-ROADMAP.md'))), identity.sha256);
+      const before = snapshot(f.cwd), checked = clock.readForecast(f);
+      if (structured) assert.deepEqual(checked, same, 'a checked box is the same structural allocation');
+      else assert.equal(checked.reason, 'allocation-roadmap-mismatch', 'without structure_sha256 the raw comparison is kept');
+      assert.deepEqual(clock.readClock(f), clockBefore); assert.deepEqual(snapshot(f.cwd), before);
+      for (const changed of [text('x').replace('"ms":10', '"ms":11'), text('x') + '\n## Alocação de tempo\n', 'changed'])
+        { write(f.cwd, '.gsd/milestones/M001/M001-ROADMAP.md', changed); assert.equal(clock.readForecast(f).reason, 'allocation-roadmap-mismatch'); }
+    }
+  });
   // T08: worker effort is observed invocation evidence only. Synthetic records
   // follow the persisted schema; acquisition is covered by the observations test.
   const workers = require('./forge-milestone-worker-observations');

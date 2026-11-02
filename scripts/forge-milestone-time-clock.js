@@ -538,8 +538,14 @@ function readForecast(options) {
   if (contract.status !== 'valid') return { status: 'unknown', reason: contract.reason, policy: FORECAST_POLICY };
   try {
     if (contract.contract.allocation) {
-      const roadmap = readSource(options.cwd, `.gsd/milestones/${options.milestone}/${options.milestone}-ROADMAP.md`);
-      if (roadmap.sha256 !== contract.contract.allocation.roadmap_sha256) return { status: 'unknown', reason: 'allocation-roadmap-mismatch', policy: FORECAST_POLICY };
+      const roadmap = readSource(options.cwd, `.gsd/milestones/${options.milestone}/${options.milestone}-ROADMAP.md`), allocation = contract.contract.allocation;
+      // With structure_sha256, the same structure (e.g. a checked box) is the same
+      // allocation; without it the raw comparison is kept.
+      let structural = false;
+      if (roadmap.sha256 !== allocation.roadmap_sha256 && allocation.structure_sha256 && roadmap.status === 'valid') {
+        try { structural = time.roadmapIdentity(roadmap.buffer).structure_sha256 === allocation.structure_sha256; } catch { structural = false; }
+      }
+      if (roadmap.sha256 !== allocation.roadmap_sha256 && !structural) return { status: 'unknown', reason: 'allocation-roadmap-mismatch', policy: FORECAST_POLICY };
     }
     const clock = readClock(options), slices = contract.contract.allocation?.items.filter(r => r.kind === 'slice').map(r => r.slice);
     return computeForecast({ contract: contract.contract, clock, deliveries: readHistoricalDeliveries({ ...options, ...(slices ? { slices } : {}) }) });
