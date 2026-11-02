@@ -5,6 +5,28 @@ const api = name => require('./' + name);
 const hash=v=>crypto.createHash('sha256').update(v).digest('hex');
 const fail=c=>{throw Object.assign(new Error(c),{code:c});};
 const nonEmpty=value=>typeof value==='string'&&value.trim().length>0;
+function isObservedTestLine(check,line){
+  if(typeof line!=='string'||!line)return false;
+  if(typeof check?.stdout==='string'&&check.stdout.split(/\r?\n/).includes(line))return true;
+  if(isGlobalEvidenceLine(line))return false;
+  return check?.stdout_truncated===true&&Array.isArray(check.observed_stdout_lines)
+    &&check.observed_stdout_lines.length<=64
+    &&check.observed_stdout_lines.every(value=>typeof value==='string'&&value&& !/[\r\n\0]/.test(value)&&Buffer.byteLength(value,'utf8')<=2048)
+    &&check.observed_stdout_lines.includes(line);
+}
+function evidenceRequests(result){
+  const requests=Object.create(null);
+  for(const item of result.must_haves_status||[])for(const row of item.evidence||[]){
+    // Retention is supplemental: an otherwise valid legacy witness in the
+    // ordinary stdout view must not acquire a stricter size/count requirement.
+    if(typeof row.stdout_line!=='string'||!row.stdout_line||/[\r\n\0]/.test(row.stdout_line)
+      ||Buffer.byteLength(row.stdout_line,'utf8')>2048)continue;
+    const commands=requests[row.root_id]||(requests[row.root_id]=Object.create(null));
+    const lines=commands[row.check]||(commands[row.check]=[]);
+    if(lines.length<64&&!lines.includes(row.stdout_line))lines.push(row.stdout_line);
+  }
+  return requests;
+}
 // A verification-only continuation never changes the original request, result,
 // manifest or seal. Authority is process-local; a serialized receipt is evidence.
 const verificationContinuations=new WeakMap();
@@ -329,7 +351,7 @@ function advisoryArtifactBindings(item,criterion_id,match,qualified,artifactEnve
     const line=evidence.stdout_line;
     if(!nonEmpty(line))fail('artifact-evidence-line-empty');
     if(isGlobalEvidenceLine(line))fail('artifact-evidence-global-summary');
-    if(typeof check.stdout!=='string'||!check.stdout.split(/\r?\n/).includes(line))fail('criterion-unobserved-evidence');
+    if(!isObservedTestLine(check,line))fail('criterion-unobserved-evidence');
     bindings.push({criterion_id,root_id:item.root_id,coverage:'behavioral',source:{kind:'verification',check_index},observed_test_lines:[line],
       evidence_limit:'Named assertion observed in actual local execution of the artifact itself; no remote CI or UAT claim.',advisory_disposition:structuredClone(advisory_disposition)});
   }
@@ -374,7 +396,7 @@ function criterionBindings(result,capture,unitKey,{inventory,contract,documentar
     for(const evidence of item.evidence){
       const envelope=capture.gate.roots.find(root=>root.root_id===evidence.root_id);
       const index=envelope?.result.checks.findIndex(check=>check.command===evidence.check)??-1;
-      if(index<0||!evidence.stdout_line||!envelope.result.checks[index].stdout.split(/\r?\n/).includes(evidence.stdout_line))fail('criterion-unobserved-evidence');
+      if(index<0||!isObservedTestLine(envelope.result.checks[index],evidence.stdout_line))fail('criterion-unobserved-evidence');
       bindings.push({criterion_id,root_id:evidence.root_id,coverage:'behavioral',source:{kind:'verification',check_index:index},observed_test_lines:[evidence.stdout_line],evidence_limit:'Named assertion observed in actual local verification output; no remote CI or UAT claim.'});
     }
   }
@@ -698,6 +720,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       const delta=execution.verifyResult(r.cwd,prepared,result),loc=side.locations(r),resourceEvents=[];
       phase('verifying');
       const capture=verify.captureRootDelivery(r.execution_contract,plan,{...r.verification,unit:loc.rules[loc.delivery.input].unit,
+        evidenceRequests:evidenceRequests(result),
         verificationSeal:verificationExtra?.evidence.verification_seal||seal,verificationIdentity,resourceEventSink:line=>resourceEvents.push(line),
         ...(typeof onCheck==='function'?{onCheck}:{})});
       // Retain actual command results before guards or criterion binding can
@@ -915,4 +938,4 @@ async function replay({request,recovery,runtime,nativeOptions}) {
   const verified=successor(()=>session.verify(effectiveResult)),published=successor(()=>session.publish(effectiveResult));
   return {action:'replay',provider_called:false,result:{verified,published}};
 }
-module.exports={prepare,replay,requireExplicitVerify,criterionBindings,resultContract,packagePrompt,createLeaseRenewalReconciliation,reconcileLeaseRenewalSurface,createDocumentaryContinuation,createVerificationContinuation,isGlobalEvidenceLine};
+module.exports={prepare,replay,requireExplicitVerify,criterionBindings,resultContract,packagePrompt,createLeaseRenewalReconciliation,reconcileLeaseRenewalSurface,createDocumentaryContinuation,createVerificationContinuation,isGlobalEvidenceLine,isObservedTestLine};
