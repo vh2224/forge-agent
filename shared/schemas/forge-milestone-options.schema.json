@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:forge:milestone-options:v1",
+  "title": "Worker milestone options proposal v1 (<M>-OPTIONS.json)",
+  "description": "Structure only: three positions with a preliminary DAG and no durations. The only worker numbers are phase counts and labelled judgments; the owner computes ranges, ceilings and the critical path. Semantic refusals (graph, gates, deferrals, linked task, identical positions - same nodes, phase kinds, activities, dependencies, deferrals and task split; phase counts and judgments alone never make a different strategy -, recommendation, text) are enforced by scripts/forge-milestone-options.js validateProposal. Serialized content must not exceed 131072 bytes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "milestone", "scope_items", "endpoint", "recommended", "recommendation_reason", "positions"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "milestone": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "scope_items": {
+      "type": "array", "minItems": 1, "maxItems": 64,
+      "items": { "$ref": "#/$defs/scopeItem" }
+    },
+    "endpoint": { "$ref": "#/$defs/endpoint" },
+    "recommended": {
+      "oneOf": [
+        { "type": "null" },
+        { "enum": ["curta", "media", "longa"] }
+      ]
+    },
+    "recommendation_reason": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string", "maxLength": 1000 }
+      ]
+    },
+    "positions": {
+      "type": "array", "minItems": 3, "maxItems": 3,
+      "items": { "$ref": "#/$defs/position" }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,119}$" },
+    "text": { "type": "string", "minLength": 1, "maxLength": 1000, "pattern": "^[^\\u0000-\\u001f\\u007f]*$" },
+    "label": { "type": "string", "minLength": 1, "maxLength": 60, "pattern": "^[^\\u0000-\\u001f\\u007f]*$" },
+    "textList": {
+      "type": "array", "maxItems": 32,
+      "items": { "$ref": "#/$defs/text" }
+    },
+    "nonEmptyTextList": {
+      "type": "array", "minItems": 1, "maxItems": 32,
+      "items": { "$ref": "#/$defs/text" }
+    },
+    "idList": {
+      "type": "array", "maxItems": 64, "uniqueItems": true,
+      "items": { "$ref": "#/$defs/id" }
+    },
+    "scopeItem": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "title", "indispensable", "source"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "title": { "$ref": "#/$defs/text" },
+        "indispensable": { "type": "boolean" },
+        "source": { "enum": ["SCOPE", "CONTEXT", "BRAINSTORM", "REQUIREMENTS"] }
+      }
+    },
+    "itemState": { "enum": ["included", "pending", "deferred", "not-applicable"] },
+    "endpoint": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "items"],
+      "properties": {
+        "kind": { "const": "verified-integrated-delivery" },
+        "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["publication", "installation", "manual-uat", "external-waits"],
+          "properties": {
+            "publication": { "$ref": "#/$defs/itemState" },
+            "installation": { "$ref": "#/$defs/itemState" },
+            "manual-uat": { "$ref": "#/$defs/itemState" },
+            "external-waits": { "$ref": "#/$defs/itemState" }
+          }
+        }
+      }
+    },
+    "phases": {
+      "description": "Measurable phase -> integer count of units of that phase in the node (1..999).",
+      "type": "object",
+      "propertyNames": { "enum": ["plan-milestone", "discuss-milestone", "research-milestone", "plan-slice", "research-slice", "execute-task", "complete-slice", "complete-milestone"] },
+      "additionalProperties": { "type": "integer", "minimum": 1, "maximum": 999 }
+    },
+    "rangeJudgment": {
+      "description": "Labelled TOTAL-duration judgment of the node; it replaces unmeasured phases and is never added to them.",
+      "type": "object", "additionalProperties": false,
+      "required": ["low_ms", "high_ms", "reason", "sources"],
+      "properties": {
+        "low_ms": { "type": "integer", "minimum": 1 },
+        "high_ms": { "type": "integer", "minimum": 1 },
+        "reason": { "$ref": "#/$defs/text" },
+        "sources": { "$ref": "#/$defs/nonEmptyTextList" }
+      }
+    },
+    "factorJudgment": {
+      "description": "Labelled multiplier over the historical base; alone it creates no duration.",
+      "type": "object", "additionalProperties": false,
+      "required": ["factor_low", "factor_high", "reason", "sources"],
+      "properties": {
+        "factor_low": { "type": "number", "minimum": 0.5, "maximum": 3 },
+        "factor_high": { "type": "number", "minimum": 0.5, "maximum": 3 },
+        "reason": { "$ref": "#/$defs/text" },
+        "sources": { "$ref": "#/$defs/nonEmptyTextList" }
+      }
+    },
+    "node": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "kind", "title", "phases", "activities", "judgment", "depends", "covers"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "enum": ["preparation", "slice", "integration", "review", "corrections"] },
+        "title": { "$ref": "#/$defs/text" },
+        "phases": { "$ref": "#/$defs/phases" },
+        "activities": { "$ref": "#/$defs/nonEmptyTextList" },
+        "judgment": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/rangeJudgment" },
+            { "$ref": "#/$defs/factorJudgment" }
+          ]
+        },
+        "depends": { "$ref": "#/$defs/idList" },
+        "covers": { "$ref": "#/$defs/idList" }
+      }
+    },
+    "parallelGroup": {
+      "description": "Declared independence only; the owner grants no parallel credit before real claims, isolation, transport and capacity exist.",
+      "type": "object", "additionalProperties": false,
+      "required": ["nodes", "independence", "isolation"],
+      "properties": {
+        "nodes": { "type": "array", "minItems": 2, "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "independence": { "$ref": "#/$defs/text" },
+        "isolation": { "$ref": "#/$defs/text" }
+      }
+    },
+    "deferral": {
+      "type": "object", "additionalProperties": false,
+      "required": ["scope_item", "reason", "consent"],
+      "properties": {
+        "scope_item": { "$ref": "#/$defs/id" },
+        "reason": { "$ref": "#/$defs/text" },
+        "consent": { "const": "required" }
+      }
+    },
+    "linkedTask": {
+      "description": "moved_scope names scope items; nodes names a subset of the position node IDs (kind slice only).",
+      "type": "object", "additionalProperties": false,
+      "required": ["moved_scope", "criteria", "nodes"],
+      "properties": {
+        "moved_scope": { "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "criteria": {
+          "type": "object", "additionalProperties": false,
+          "required": ["milestone", "task"],
+          "properties": {
+            "milestone": { "$ref": "#/$defs/nonEmptyTextList" },
+            "task": { "$ref": "#/$defs/nonEmptyTextList" }
+          }
+        },
+        "nodes": { "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } }
+      }
+    },
+    "position": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "label", "status", "reason", "strategy", "technical_choices", "deliverables", "nodes", "parallel_groups", "verifications", "review", "risks", "uncertainties", "deferrals", "linked_task"],
+      "properties": {
+        "id": { "enum": ["curta", "media", "longa"] },
+        "label": { "$ref": "#/$defs/label" },
+        "status": { "enum": ["viable", "infeasible"] },
+        "reason": { "type": "string", "maxLength": 1000 },
+        "strategy": { "$ref": "#/$defs/text" },
+        "technical_choices": { "$ref": "#/$defs/textList" },
+        "deliverables": { "$ref": "#/$defs/nonEmptyTextList" },
+        "nodes": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "$ref": "#/$defs/node" } },
+        "parallel_groups": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/parallelGroup" } },
+        "verifications": { "$ref": "#/$defs/nonEmptyTextList" },
+        "review": { "$ref": "#/$defs/nonEmptyTextList" },
+        "risks": { "$ref": "#/$defs/textList" },
+        "uncertainties": { "$ref": "#/$defs/textList" },
+        "deferrals": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/deferral" } },
+        "linked_task": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/linkedTask" }
+          ]
+        }
+      }
+    }
+  }
+}

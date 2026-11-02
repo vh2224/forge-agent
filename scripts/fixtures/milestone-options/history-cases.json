@@ -1,0 +1,181 @@
+{
+  "description": "Históricos sintéticos da S02/T02 (sem dado real). A suíte expande cada especificação em eventos unit-began/unit-transition do controller dentro de uma raiz temporária. kind: complete (durations_ms), fail, expired-safe, open, ambiguous, paused (segments_ms e gap_ms), invalid-line e padding (bytes acima do limite canônico).",
+  "milestone": "M001",
+  "cases": [
+    {
+      "name": "suficiente",
+      "input": {
+        "ledger": ["M101", "M102", "M001"],
+        "events": {
+          "M102": [
+            { "phase": "plan-milestone", "durations_ms": [300000, 360000, 420000] },
+            { "phase": "research-milestone", "durations_ms": [600000, 660000, 720000] },
+            { "phase": "plan-slice", "durations_ms": [180000, 240000, 300000] },
+            { "phase": "execute-task", "durations_ms": [600000, 900000, 1200000] },
+            { "phase": "complete-slice", "durations_ms": [120000, 150000, 180000] },
+            { "phase": "complete-milestone", "durations_ms": [240000, 300000, 360000] }
+          ],
+          "M101": [
+            { "phase": "plan-milestone", "durations_ms": [480000, 600000] },
+            { "phase": "research-milestone", "durations_ms": [780000, 900000] },
+            { "phase": "plan-slice", "durations_ms": [360000, 420000] },
+            { "phase": "execute-task", "durations_ms": [1500000, 1800000] },
+            { "phase": "complete-slice", "durations_ms": [210000, 240000] },
+            { "phase": "complete-milestone", "durations_ms": [420000, 480000] }
+          ],
+          "M103": [ { "phase": "execute-task", "durations_ms": [99999000] } ],
+          "M001": [ { "phase": "execute-task", "durations_ms": [88888000] } ]
+        }
+      },
+      "expect": {
+        "status": "available",
+        "sources": [ { "path": ".gsd/milestones/M102/M102-events.jsonl", "status": "available" }, { "path": ".gsd/milestones/M101/M101-events.jsonl", "status": "available" } ],
+        "observations": 30,
+        "phases": {
+          "plan-milestone": { "n": 5, "p50_ms": 420000, "p90_ms": 600000 },
+          "research-milestone": { "n": 5, "p50_ms": 720000, "p90_ms": 900000 },
+          "plan-slice": { "n": 5, "p50_ms": 300000, "p90_ms": 420000 },
+          "execute-task": { "n": 5, "p50_ms": 1200000, "p90_ms": 1800000 },
+          "complete-slice": { "n": 5, "p50_ms": 180000, "p90_ms": 240000 },
+          "complete-milestone": { "n": 5, "p50_ms": 360000, "p90_ms": 480000 }
+        },
+        "stripped_curta": { "status": "estimated", "low_ms": 16620000, "high_ms": 24420000, "confidence": "medium" }
+      }
+    },
+    {
+      "name": "escasso",
+      "input": {
+        "ledger": ["M101"],
+        "events": {
+          "M101": [
+            { "phase": "plan-milestone", "durations_ms": [300000, 600000] },
+            { "phase": "research-milestone", "durations_ms": [600000, 900000] },
+            { "phase": "plan-slice", "durations_ms": [180000, 420000] },
+            { "phase": "execute-task", "durations_ms": [600000, 1800000] },
+            { "phase": "complete-slice", "durations_ms": [120000, 240000] },
+            { "phase": "complete-milestone", "durations_ms": [240000, 480000] }
+          ]
+        }
+      },
+      "expect": {
+        "status": "available",
+        "observations": 12,
+        "phases": { "execute-task": { "n": 2, "p50_ms": 600000, "p90_ms": 1800000 }, "plan-milestone": { "n": 2, "p50_ms": 300000, "p90_ms": 600000 } },
+        "stripped_curta": { "status": "estimated", "low_ms": 8940000, "high_ms": 24420000, "confidence": "low" },
+        "judged_curta": { "status": "estimated", "low_ms": 7800000, "high_ms": 16800000, "confidence": "low" }
+      }
+    },
+    {
+      "name": "vazio",
+      "input": { "ledger": [], "events": {} },
+      "expect": { "status": "empty", "observations": 0, "sources": [] }
+    },
+    {
+      "name": "falhas-e-pausas",
+      "input": {
+        "ledger": ["M101"],
+        "events": {
+          "M101": [
+            { "phase": "execute-task", "durations_ms": [600000] },
+            { "kind": "paused", "phase": "execute-task", "segments_ms": [300000, 300000], "gap_ms": 36000000 },
+            { "kind": "fail", "phase": "execute-task", "duration_ms": 120000 },
+            { "kind": "expired-safe", "phase": "plan-slice", "duration_ms": 120000 },
+            { "kind": "open", "phase": "plan-slice" },
+            { "kind": "ambiguous", "phase": "complete-slice" }
+          ]
+        }
+      },
+      "expect": {
+        "status": "available",
+        "observations": 2,
+        "failures": 2,
+        "excluded": { "open": 1, "ambiguous": 1, "unfinished_paused": 0, "zero_duration": 0 },
+        "phases": { "execute-task": { "n": 2, "p50_ms": 600000, "p90_ms": 600000 }, "plan-slice": { "n": 0 } }
+      }
+    },
+    {
+      "name": "sem-pausa",
+      "input": {
+        "ledger": ["M101"],
+        "events": { "M101": [ { "phase": "execute-task", "durations_ms": [600000, 600000] } ] }
+      },
+      "expect": { "status": "available", "observations": 2, "phases": { "execute-task": { "n": 2, "p50_ms": 600000, "p90_ms": 600000 } } }
+    },
+    {
+      "name": "espera-sem-pausa",
+      "input": {
+        "ledger": ["M101"],
+        "events": { "M101": [ { "phase": "execute-task", "durations_ms": [36600000] } ] }
+      },
+      "expect": { "status": "available", "observations": 1, "phases": { "execute-task": { "n": 1, "p50_ms": 36600000, "p90_ms": 36600000 } } }
+    },
+    {
+      "name": "fonte-acima-do-limite",
+      "input": {
+        "ledger": ["M101", "M102"],
+        "events": {
+          "M102": [ { "phase": "execute-task", "durations_ms": [600000] }, { "kind": "padding", "bytes_over_limit": 4096 } ],
+          "M101": [ { "phase": "execute-task", "durations_ms": [900000] } ]
+        }
+      },
+      "expect": {
+        "status": "available",
+        "observations": 1,
+        "sources": [ { "path": ".gsd/milestones/M102/M102-events.jsonl", "status": "unavailable", "reason": "history-source-too-large", "sha256": null }, { "path": ".gsd/milestones/M101/M101-events.jsonl", "status": "available" } ],
+        "phases": { "execute-task": { "n": 1, "p50_ms": 900000, "p90_ms": 900000 } }
+      }
+    },
+    {
+      "name": "fonte-corrompida",
+      "input": {
+        "ledger": ["M101"],
+        "events": { "M101": [ { "phase": "execute-task", "durations_ms": [600000] }, { "kind": "invalid-line" } ] }
+      },
+      "expect": {
+        "status": "unavailable",
+        "observations": 0,
+        "sources": [ { "path": ".gsd/milestones/M101/M101-events.jsonl", "status": "unavailable", "reason": "history-source-invalid", "detail": "phase-cost-json-invalid" } ]
+      }
+    },
+    {
+      "name": "fonte-ausente",
+      "input": { "ledger": ["M101"], "events": {} },
+      "expect": {
+        "status": "unavailable",
+        "observations": 0,
+        "sources": [ { "path": ".gsd/milestones/M101/M101-events.jsonl", "status": "unavailable", "reason": "history-source-missing", "bytes": null } ]
+      }
+    },
+    {
+      "name": "compartilhado-tarefas",
+      "input": {
+        "ledger": [],
+        "events": {},
+        "shared": [
+          { "work": "TASK-001", "phase": "execute-task", "durations_ms": [600000, 1200000] },
+          { "work": "M001", "phase": "execute-task", "durations_ms": [77777000] },
+          { "work": "M101", "phase": "execute-task", "durations_ms": [66666000] }
+        ]
+      },
+      "expect": {
+        "status": "available",
+        "observations": 2,
+        "sources": [ { "path": ".gsd/forge/events.jsonl", "status": "available", "kind": "shared-tasks" } ],
+        "phases": { "execute-task": { "n": 2, "p50_ms": 600000, "p90_ms": 1200000 } }
+      }
+    },
+    {
+      "name": "compartilhado-acima-do-limite",
+      "input": {
+        "ledger": ["M101"],
+        "events": { "M101": [ { "phase": "execute-task", "durations_ms": [600000] } ] },
+        "shared": [ { "work": "TASK-001", "phase": "execute-task", "durations_ms": [600000] }, { "kind": "padding", "bytes_over_limit": 1024 } ]
+      },
+      "expect": {
+        "status": "available",
+        "observations": 1,
+        "sources": [ { "path": ".gsd/milestones/M101/M101-events.jsonl", "status": "available" }, { "path": ".gsd/forge/events.jsonl", "status": "unavailable", "reason": "history-source-too-large" } ]
+      }
+    }
+  ]
+}
