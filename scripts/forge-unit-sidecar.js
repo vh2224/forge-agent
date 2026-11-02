@@ -108,10 +108,20 @@ function sameUnit(value, expected) {
     && (value.milestone || null) === (expected.milestone || null)
     && (value.slice || null) === (expected.slice || null);
 }
+// Milestone time rules delegate to their single canonical validators (T02/T03);
+// both are lazy so unrelated units never load the time modules.
+function inspectTimeContent(content, rule) {
+  const options = rule.kind === 'milestone-options';
+  try {
+    return options ? require('./forge-milestone-options').inspectProposalContent(content, rule.milestone)
+      : require('./forge-milestone-roadmap-time').validateRoadmapContent(content, rule.expected);
+  } catch { return { valid: false, reason: options ? 'options-schema-invalid' : 'roadmap-time-content-invalid' }; }
+}
 function inspectDeliveryContent(content, rule) {
   if (rule.kind === 'standalone-preparation') {
     return require('./forge-task-preparation').validatePhaseContent(rule.phase, rule.taskId, content);
   }
+  if (rule.kind === 'milestone-options' || rule.kind === 'milestone-roadmap-time') return inspectTimeContent(content, rule).valid === true;
   let value;
   try { value = JSON.parse(content); } catch (_) { return false; }
   if (!value || typeof value !== 'object' || Array.isArray(value) || !(rule.kind === 'input' ? [1, 2] : [1]).includes(value.schema_version)
@@ -128,6 +138,11 @@ function inspectDeliveryContent(content, rule) {
 // Called only after the existing validator rejects; never changes acceptance.
 // Closed categories and field names keep provider content out of diagnostics.
 function deliveryFailureReason(content, rule) {
+  if (rule.kind === 'milestone-options' || rule.kind === 'milestone-roadmap-time') {
+    // Only the validator's closed reason code is reported, without its module prefix; never content or paths.
+    const code = String(inspectTimeContent(content, rule).reason || '').replace(rule.kind === 'milestone-options' ? /^options-/ : /^roadmap-time-/, '');
+    return `typed-${rule.kind}-${/^[a-z][a-z0-9-]{0,63}$/.test(code) ? code : 'content'}`;
+  }
   const category = ['input', 'delivery', 'standalone-preparation'].includes(rule.kind)
     ? rule.kind : 'verification';
   const reason = condition => `typed-${category}-${condition}`;
@@ -225,6 +240,7 @@ function locations(request) {
     'discuss-milestone': [`${milestone}/${m}-CONTEXT.md`],
     'discuss-slice': [`${slice}/${s}-CONTEXT.md`],
     'plan-milestone': [`${milestone}/${m}-ROADMAP.md`],
+    'estimate-milestone': [`${milestone}/${m}-OPTIONS.json`],
     'plan-check': [`${slice}/${s}-PLAN-CHECK.md`],
     'complete-slice': [`${slice}/${s}-SUMMARY.md`, `${slice}/${s}-UAT.md`],
     'complete-milestone': [`${milestone}/${m}-SUMMARY.md`],
@@ -257,7 +273,18 @@ function locations(request) {
     [delivery.artifact]: { kind: 'artifact', unit: deliveryUnit },
     ...Object.fromEntries(rootSources.map(row => [row.path, { kind: row.kind, unit: deliveryUnit }])),
   } : {};
+  const timeRule = unit === 'estimate-milestone' ? { kind: 'milestone-options', milestone: m }
+    : unit === 'plan-milestone' ? roadmapTimeRule(request) : null;
+  if (timeRule) rules[baseRequired[0]] = timeRule;
   return { required, allowed: [...required, ...deliveryOptional, ...optional], rules, delivery, milestone, slice };
+}
+// The physical owner (contextRoot, else cwd) decides, never a separate CODE_DIR.
+// roadmapRule returns null only for an unenrolled/legacy milestone or an attested
+// no-contract choice; pending, invalid and unreadable owners yield a refusing rule.
+function roadmapTimeRule(request) {
+  let owner = request.contextRoot || request.cwd;
+  try { owner = fs.realpathSync.native(owner); } catch { /* roadmapRule fails closed on an invalid owner */ }
+  return require('./forge-milestone-time-selection').roadmapRule(owner, request.milestoneId);
 }
 function milestonePlanFile(request) {
   locations(request);
@@ -2377,6 +2404,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
     const rendered = !(typeof r.prompt === 'string' && r.prompt.trim()) && !r.promptFile ? renderPrompt({
       unitType: r.unitType, cwd: root, codeDir: cwd, milestoneId: r.milestoneId, sliceId: r.sliceId,
       description: r.description, unitEffort: route.effort, autoCommit: false,
+      // Owner-captured estimate source manifest (T06 supplies it); verified by the renderer, never worker data.
+      ...(r.unitType === 'estimate-milestone' && r.producerBasis != null ? { producerBasis: r.producerBasis } : {}),
     }) : null;
     const base = transport.mode === 'plan' ? fs.readFileSync(r.promptFile, 'utf8')
       : typeof r.prompt === 'string' && r.prompt.trim() ? r.prompt
@@ -2825,7 +2854,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
       if (!verdict.ok) {
         const error = new Error('Invalid artifact result.');
         error.code = 'invalid-artifact-result';
-        error.diagnostic = diagnostic(verdict.reason);
+        // The closed diagnostic vocabulary has no time-rule entries: keep them validation failures, never adapter ones.
+        error.diagnostic = diagnostic(/^typed-milestone-/.test(verdict.reason) ? 'delivery-artifact-invalid' : verdict.reason);
         throw error;
       }
       if (!loc.preparation && r.unitType === 'plan-milestone' && result.status === 'done') {

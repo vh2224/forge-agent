@@ -23,7 +23,7 @@ const { loadProcedureContext } = require('./forge-procedure-context.js');
 const PROCEDURE_UNITS = new Set([
   'discuss-milestone', 'discuss-slice', 'research-milestone', 'research-slice',
   'plan-milestone', 'plan-slice', 'plan-check', 'complete-slice', 'complete-milestone',
-  'execute-task', 'execute-loose-task',
+  'execute-task', 'execute-loose-task', 'estimate-milestone',
 ]);
 
 // A marker is never provenance. Only freshly loaded metadata plus the exact
@@ -109,6 +109,7 @@ const TEMPLATE_FILES = Object.freeze({
   'discuss-slice': 'discuss-slice.md',
   'research-milestone': 'research-milestone.md',
   'research-slice': 'research-slice.md',
+  'estimate-milestone': 'estimate-milestone.md',
 });
 
 const ALLOWED_PLACEHOLDERS = new Set([
@@ -131,6 +132,8 @@ const ALLOWED_PLACEHOLDERS = new Set([
   'MUST_HAVES_CHECK_RESULTS',
   'routing_domains',
   'workspace_repos',
+  'TIME_SELECTION',
+  'PRODUCER_BASIS',
 ]);
 
 const PLACEHOLDER_RE = /\{([A-Za-z][A-Za-z0-9_.#-]*)\}/g;
@@ -145,6 +148,20 @@ const MEMORY_FRAGMENT_POINTER = '.gsd/memory/';
 const LEDGER_FRAGMENT_POINTER = '.gsd/ledger/';
 const NO_DOMAINS_NOTICE = '(none — omit domain:)';
 const SINGLE_REPO_NOTICE = '(single repo — omit repo:)';
+// Same bound as the owner's forge-milestone-time-selection.promptBlock output.
+const MAX_TIME_SELECTION_BYTES = 8 * 1024;
+// Inline allowance of the compact active-contract block: the unchanged 1500 optional-context limit minus
+// the measured plan-milestone baseline, with headroom. It is derived, never a second or raised budget.
+const TIME_SELECTION_INLINE_TOKENS = 700;
+// Documented fixed fallback for a partial install without the optional selection
+// module: it states nothing about the milestone; owner acceptance stays the gate.
+// Shown code-file rows keep the estimate prompt inside its optional budget; the basis reference covers all.
+const MAX_PRODUCER_BASIS_DOCUMENTS = 8, MAX_PRODUCER_BASIS_FILES = 256, PRODUCER_BASIS_SHOWN_FILES = 8;
+// Canonical relative-path bound of the owner's inputs validator (forge-milestone-options). Long honest paths shrink the
+// number of SHOWN rows (never truncate a hash or path) so the manifest keeps inside this derived token allowance.
+const MAX_PRODUCER_BASIS_PATH = 512, PRODUCER_BASIS_MAX_TOKENS = 420;
+const PRODUCER_BASIS_ABSENT = 'Not supplied: the owner captures and revalidates the source manifest; this prompt attests nothing.';
+const TIME_SELECTION_UNAVAILABLE ='Seleção de prazo indisponível nesta instalação (módulo forge-milestone-time-selection ausente): este bloco não informa contrato nem autorização; o aceite do owner decide se ## Alocação de tempo é exigida.';
 
 // Section names as they appear in CODING-STANDARDS.md, per injected placeholder.
 // CS_STRUCTURE concatenates three sections (see extractStandards).
@@ -166,6 +183,7 @@ const REQUIRED_IDS = Object.freeze({
   'discuss-slice': ['milestoneId', 'sliceId'],
   'research-milestone': ['milestoneId'],
   'research-slice': ['milestoneId', 'sliceId'],
+  'estimate-milestone': ['milestoneId'],
 });
 
 function isWithin(root, candidate) {
@@ -591,7 +609,7 @@ function validateRenderOptions(rawOptions) {
   if (options.sliceId != null) validateId(options.sliceId, SLICE_ID_RE, 'slice ID');
   if (options.taskId != null) validateTaskId(options.taskId);
 
-  if ((options.unitType === 'plan-milestone' || options.unitType === 'execute-loose-task' || options.unitType.startsWith('research-')) && !options.description) {
+  if ((['plan-milestone', 'estimate-milestone', 'execute-loose-task'].includes(options.unitType) || options.unitType.startsWith('research-')) && !options.description) {
     throw new Error(`description is required for ${options.unitType}`);
   }
   options.description = validateText(options.description || '', 'description', 32 * 1024);
@@ -688,6 +706,125 @@ function resolveWorkspaceRepos(cwd) {
   return s;
 }
 
+// Read-only owner block for {TIME_SELECTION}; it is data inside the template's DATA
+// envelope and never grants authority. `timeSelection` is the test/embedding override.
+function resolveTimeSelection(options) {
+  const bounded = value => {
+    const text = validateText(value, 'time_selection', MAX_TIME_SELECTION_BYTES);
+    if (!text.trim()) throw new Error('time_selection must not be empty');
+    return text;
+  };
+  if (options.timeSelection != null) return bounded(options.timeSelection);
+  let api;
+  try {
+    // Lazy optional sibling: only templates carrying the placeholder load it.
+    api = require('./forge-milestone-time-selection');
+  } catch (err) {
+    const absent = require('./forge-optional-require').isAbsentModuleError(err, './forge-milestone-time-selection');
+    if (!absent) throw err;
+    return TIME_SELECTION_UNAVAILABLE;
+  }
+  return bounded(compactTimeSelection(api.promptBlock(options.cwd, options.milestoneId), options));
+}
+
+// The owner's active-contract block is complete but verbose (up to 8 KiB). Rendered here it keeps every
+// identity, ceiling, endpoint, scope/task-split and allocation datum and drops only per-node titles and
+// indentation, pointing at the immutable options rendering for the rest. When even that exceeds the inline
+// allowance, the (large, derivable) `dependencies` edge list of the skeleton moves behind the owner's own
+// read-only command (a structured argv, said out loud); if that is still too large, long criteria and deferral
+// reasons move behind the same references. The final representation is measured: it never exceeds the
+// allowance (otherwise the render fails). Any block without the exact expected shape is delivered unchanged
+// (still bounded by the owner at 8 KiB).
+function compactTimeSelection(block, options) {
+  const lines = block.split('\n'), fence = lines.indexOf('```json');
+  if (!lines[0].startsWith('Seleção de prazo ativa') || fence < 1 || lines[lines.length - 1] !== '```' || lines.indexOf('```', fence + 1) !== lines.length - 1) return block;
+  let skeleton;
+  try { skeleton = JSON.parse(lines.slice(fence + 1, -1).join('\n')); } catch { return block; }
+  const node = /^ {2}- (\S+) \[([^\]]+)\](?: .*)?; depende de .*\.$/, kinds = new Map(), kept = [];
+  for (const line of lines.slice(0, fence)) {
+    const match = node.exec(line);
+    if (match) kinds.set(match[2], [...(kinds.get(match[2]) || []), match[1]]);
+    else if (line !== '- Divisão preliminar:') kept.push(line);
+  }
+  if (!/opções [a-f0-9]{64}/.test(block) || !Array.isArray(skeleton.dependencies)) return block;
+  const m = options.milestoneId, instruction = kept.pop(), at = kept.findIndex(line => line.startsWith('- Adiamentos consentidos:'));
+  const division = kinds.size ? [`- Nós por tipo (arestas em dependencies): ${[...kinds].map(([kind, ids]) => `${kind}: ${ids.join(',')}`).join('; ')}.`] : [];
+  kept.splice(at < 0 ? kept.length : at, 0, ...division);
+  kept.push(`- Títulos, critérios e detalhes completos: Read WORKING_DIR/.gsd/milestones/${m}/${m}-OPTIONS.md (imutável).`);
+  // Structured argv (executable + arguments as JSON strings): no shell quoting or path guessing; run it without a shell.
+  const argv = JSON.stringify(['node', path.join(__dirname, 'forge-milestone-time-selection.js'), '--prompt-block', '--cwd', options.cwd, '--milestone', m]);
+  const render = (lineList, note, shown) => [...lineList, ...note, instruction, '```json', JSON.stringify(shown), '```'].join('\n');
+  const inline = render(kept, [], skeleton);
+  if (countTokens(inline) <= TIME_SELECTION_INLINE_TOKENS) return inline;
+  const { dependencies, ...rest } = skeleton;
+  const edges = `- dependencies omitido do esqueleto (${dependencies.length} arestas): copie-o exatamente da saída do argv JSON (execute-o sem shell; somente leitura): ${argv}`;
+  const omitted = render(kept, [edges], rest);
+  if (countTokens(omitted) <= TIME_SELECTION_INLINE_TOKENS) return omitted;
+  // Last bounded stage: long descriptive criteria and deferral reasons move behind the same immutable references;
+  // ids, partition, authorization, ceiling, endpoint and the deferred/moved-scope ids stay inline.
+  const compact = kept.map(line => {
+    if (line.startsWith('- Adiamentos consentidos:')) return `- Adiamentos consentidos (ids no esqueleto; razões completas nas referências): ${skeleton.deferred.join(', ') || 'nenhum'}.`;
+    const criteria = /^ {2}- Critérios da (milestone|task): /.exec(line);
+    return criteria ? `  - Critérios da ${criteria[1]}: texto completo nas referências.` : line;
+  });
+  const bounded = render(compact, [edges], rest);
+  if (countTokens(bounded) > TIME_SELECTION_INLINE_TOKENS) throw new Error('time_selection cannot be bounded within the inline allowance');
+  return bounded;
+}
+
+// Narrow estimate-milestone input: the owner-captured source manifest (documents, investigated
+// CODE_DIR identity and code-file fingerprints) in the exact shape of the selection module's
+// estimate basis. It is informational DATA: authority, frozen-basis and freshness checks stay with
+// forge-milestone-time-selection (T03) and the controller (T06). A supplied manifest is only
+// delivered after the owner's own capture of the physical CODE_DIR yields the same basis reference,
+// so worker-generated hashes or approved JSON can never pass as owner attestation.
+function resolveProducerBasis(options) {
+  const refuse = reason => { throw new Error(`producer_basis ${reason}`); };
+  const basis = options.producerBasis;
+  if (basis == null) return PRODUCER_BASIS_ABSENT;
+  const plain = value => !!value && typeof value === 'object' && !Array.isArray(value);
+  const keys = (value, expected) => plain(value) && Object.keys(value).sort().join() === expected.join();
+  const hex = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+  const label = value => typeof value === 'string' && value.length > 0 && value.length <= 200 && !/[\u0000-\u001f\u007f]/.test(value);
+  // Same relative-path contract as the owner's inputs validator (<= 512); the 200-character label bound is for revision/workspace only.
+  const file = value => typeof value === 'string' && value.length > 0 && value.length <= MAX_PRODUCER_BASIS_PATH && !/[\u0000-\u001f\u007f]/.test(value) && !value.startsWith('/') && !/^[A-Za-z]:|\\/.test(value) && !value.split('/').some(part => part === '' || part === '..');
+  const rows = (list, max) => Array.isArray(list) && list.length <= max && list.every(row => keys(row, ['path', 'sha256']) && file(row.path) && hex(row.sha256));
+  if (!keys(basis, ['inputs', 'milestone', 'previous_options_sha256']) || !keys(basis.inputs, ['code_files', 'code_root', 'documents'])
+      || !keys(basis.inputs.code_root, ['identity_sha256', 'revision', 'workspace'])) refuse('has an unsupported shape');
+  const { inputs } = basis, root = inputs.code_root;
+  if (!rows(inputs.documents, MAX_PRODUCER_BASIS_DOCUMENTS) || !rows(inputs.code_files, MAX_PRODUCER_BASIS_FILES)
+      || !hex(root.identity_sha256) || !label(root.revision) || !label(root.workspace)
+      || !(basis.previous_options_sha256 === null || hex(basis.previous_options_sha256))) refuse('is invalid');
+  if (basis.milestone !== options.milestoneId) refuse('belongs to another milestone');
+  let api;
+  try { api = require('./forge-milestone-time-selection'); }
+  catch (err) {
+    if (!require('./forge-optional-require').isAbsentModuleError(err, './forge-milestone-time-selection')) throw err;
+    refuse('cannot be verified without the owner selection module');
+  }
+  // The owner recaptures the physical investigated root now (CODE_DIR, else the owner itself) from the
+  // supplied file list; a redirected or foreign root or any differing fingerprint changes the reference.
+  const state = api.readSelectionState(options.cwd, options.milestoneId, { code: { root: options.codeDir || options.cwd,
+    identity_sha256: root.identity_sha256, revision: root.revision, workspace: root.workspace, files: inputs.code_files.map(row => row.path) } });
+  if (!state || state.status !== 'estimate-required' || state.key_suffix !== api.estimateKeySuffix(basis)
+      || state.previous_options_sha256 !== basis.previous_options_sha256) refuse('does not match the owner capture of the investigated code');
+  const manifest = count => {
+    const shown = inputs.code_files.slice(0, count), hidden = inputs.code_files.length - shown.length;
+    return [
+      'Owner-captured at dispatch; informational only. The owner and controller revalidate it; this block attests and authorizes nothing.',
+      `basis reference: ${state.key_suffix}; previous options: ${basis.previous_options_sha256 || 'none'}`,
+      `code root: ${root.identity_sha256}; revision ${root.revision}; workspace ${root.workspace}`,
+      ...inputs.documents.map(row => `document ${row.path} ${row.sha256}`),
+      ...shown.map(row => `code ${row.path} ${row.sha256}`),
+      ...(hidden ? [`(+${hidden} more code files, all covered by the basis reference)`] : []),
+    ].join('\n');
+  };
+  // Whole rows only: fewer shown rows as honest paths get longer; the basis reference still covers every file.
+  let count = Math.min(PRODUCER_BASIS_SHOWN_FILES, inputs.code_files.length);
+  while (count > 0 && countTokens(manifest(count)) > PRODUCER_BASIS_MAX_TOKENS) count--;
+  return manifest(count);
+}
+
 function buildValues(options, template) {
   const scriptsDir = __dirname;
   const usesStandards = /\{CS_(?:LINT|STRUCTURE|RULES)\}/.test(template);
@@ -736,6 +873,8 @@ function buildValues(options, template) {
     MUST_HAVES_CHECK_RESULTS: options.mustHavesCheckResults,
     routing_domains: resolvedRoutingDomains,
     workspace_repos: resolvedWorkspaceRepos,
+    TIME_SELECTION: template.includes('{TIME_SELECTION}') ? resolveTimeSelection(options) : '',
+    PRODUCER_BASIS: template.includes('{PRODUCER_BASIS}') ? resolveProducerBasis(options) : '',
   };
 }
 
@@ -991,7 +1130,7 @@ Core options:
   --slice ID             Slice ID (S##)
   --task ID              Task ID (T## or timestamp form)
   --dispatch-id ID       Safe artifact ID; generated when omitted
-  --description TEXT     Required by plan/research milestone units
+  --description TEXT     Required by plan/estimate/research milestone units
   --unit-effort LEVEL    Resolved unit effort (default: low)
   --thinking VALUE       Resolved thinking value (default: adaptive)
   --auto-commit BOOL     true or false (default: false)
@@ -1047,6 +1186,8 @@ module.exports = {
   composeProcedurePrompt,
   separateProcedurePrompt,
   TEMPLATE_FILES,
+  PROCEDURE_UNITS,
+  REQUIRED_IDS,
   candidateTemplateRoots,
   resolveTemplate,
   extractStandards,
@@ -1058,7 +1199,9 @@ module.exports = {
   materializePrompt,
   cleanupPrompt,
   validateDispatchId,
-  _private: { truncateChars, truncateContext, boundStandards, standardsPointer, formatLedgerResult, LEDGER_FRAGMENT_POINTER, NO_DOMAINS_NOTICE, SINGLE_REPO_NOTICE, resolveRoutingDomains, resolveWorkspaceRepos },
+  _private: { truncateChars, truncateContext, boundStandards, standardsPointer, formatLedgerResult, LEDGER_FRAGMENT_POINTER, NO_DOMAINS_NOTICE, SINGLE_REPO_NOTICE, resolveRoutingDomains, resolveWorkspaceRepos,
+    resolveTimeSelection, MAX_TIME_SELECTION_BYTES, TIME_SELECTION_UNAVAILABLE, resolveProducerBasis, PRODUCER_BASIS_ABSENT, PRODUCER_BASIS_SHOWN_FILES,
+    TIME_SELECTION_INLINE_TOKENS, MAX_PRODUCER_BASIS_PATH, PRODUCER_BASIS_MAX_TOKENS },
 };
 
 if (require.main === module) {

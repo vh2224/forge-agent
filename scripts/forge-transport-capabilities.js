@@ -5,6 +5,8 @@
 const ARTIFACT_UNITS = Object.freeze([
   'research-milestone', 'research-slice', 'discuss-milestone', 'discuss-slice',
   'plan-milestone', 'complete-slice', 'complete-milestone', 'plan-check',
+  // Read-only milestone time options proposal (<M>-OPTIONS.json), validated on acceptance.
+  'estimate-milestone',
 ]);
 const UNIT_MODES = Object.freeze({
   ...Object.fromEntries(ARTIFACT_UNITS.map(unit => [unit, 'artifacts'])),

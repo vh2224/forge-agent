@@ -17,6 +17,7 @@ const MANDATORY_TOKEN_CEILINGS = Object.freeze({
   'complete-slice': 2150, 'complete-milestone': 2150,
   'discuss-milestone': 1300, 'discuss-slice': 1300,
   'research-milestone': 1300, 'research-slice': 1300,
+  'estimate-milestone': 1300,
 });
 // #239: fixed allocation for the reviewed mandatory planning-readiness paragraph.
 // This is not optional context and does not raise the unchanged baseline budget.
@@ -28,7 +29,7 @@ const PLANNING_READINESS_SUPPLEMENT = [
   'structural plan acceptance does not establish execution readiness.',
 ].join('\n') + '\n';
 const PLANNING_READINESS_TOKEN_LIMIT = 97;
-const PLANNING_PHASES = new Set(['plan-slice', 'plan-milestone', 'plan-check']);
+const PLANNING_PHASES = new Set(['plan-slice', 'plan-milestone', 'plan-check', 'estimate-milestone']);
 function optionalTokens(rendered, phase) {
   const procedure = loadProcedureContext({ cwd: root, phase });
   const optional = separateProcedurePrompt(rendered.prompt, procedure, rendered.procedure_context);
@@ -137,7 +138,14 @@ test(`aggregate static templates stay below ${MAX_STATIC_TEMPLATE_TOTAL_TOKENS} 
   const total = Object.values(TEMPLATE_FILES).reduce((sum, filename) => {
     return sum + countTokens(fs.readFileSync(path.join(templateDir, filename), 'utf8'));
   }, 0);
+  process.stdout.write(`    aggregate: ${total} tokens over ${Object.keys(TEMPLATE_FILES).length} templates\n`);
   assert.ok(total <= MAX_STATIC_TEMPLATE_TOTAL_TOKENS, `aggregate template budget is ${total} tokens`);
+});
+
+test('every renderer unit has an unchanged mandatory ceiling and planning units carry the readiness module', () => {
+  assert.deepStrictEqual(Object.keys(MANDATORY_TOKEN_CEILINGS).sort(), Object.keys(TEMPLATE_FILES).sort());
+  for (const phase of PLANNING_PHASES) assert.strictEqual(MANDATORY_TOKEN_CEILINGS[phase], 1300, phase);
+  assert.deepStrictEqual(loadProcedureContext({ cwd: root, phase: 'estimate-milestone' }).modules.map(item => item.id), ['core', 'planning']);
 });
 
 test(`baseline optional prompts stay below ${MAX_BASELINE_RENDERED_TOKENS} heuristic tokens`, () => {
