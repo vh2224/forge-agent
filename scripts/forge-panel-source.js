@@ -25,7 +25,7 @@ const STATE_REASONS = Object.freeze(Object.fromEntries([
 ].map(([reason, status, label]) => [reason, Object.freeze({ status, reason, label })])));
 const STATUS_LABELS = Object.freeze({ open: 'em aberto', pending: 'pendente', completed: 'concluído', unknown: 'desconhecido' });
 const FRESHNESS_LABELS = Object.freeze({ current: 'atual', stale: 'desatualizado', missing: 'ausente', invalid: 'inválido', unknown: 'desconhecido' });
-const WORK_PHASES = Object.freeze({ 'plan-milestone': 'planning', 'discuss-milestone': 'planning', 'plan-slice': 'planning',
+const WORK_PHASES = Object.freeze({ 'estimate-milestone': 'planning', 'plan-milestone': 'planning', 'discuss-milestone': 'planning', 'plan-slice': 'planning',
   'research-milestone': 'preparing', 'research-slice': 'preparing', 'execute-task': 'executing',
   'complete-slice': 'verifying', 'complete-milestone': 'verifying' });
 const PENDING_LABELS = Object.freeze({ 'owner-missing': 'fonte de pendências ausente', 'no-questions': 'nenhuma pergunta registrada',

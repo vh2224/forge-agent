@@ -75,6 +75,7 @@ const INVENTORY = [
   { key: 'repo_path', type: 'string', default: '', source: 'scripts/forge-statusline.js:339 (written by install.sh; absent → update check skipped)' },
   { key: 'node_path', type: 'string', default: '', source: 'app/Sources/ForgeKit/NodeLocatorSystem.swift systemProbe (PrefsLocator.stringPref("node_path"); ausente → descoberta automática)' },
   // — effort (template-extracted too; defaults = EFFORT_DEFAULTS) —
+  { key: 'effort.estimate-milestone', type: 'string', default: 'medium', source: 'scripts/forge-dispatch-resolve.js EFFORT_DEFAULTS[estimate-milestone]' },
   { key: 'effort.plan-milestone', type: 'string', default: 'medium', source: 'shared/forge-dispatch.md:1594 EFFORT_DEFAULTS' },
   { key: 'effort.plan-slice', type: 'string', default: 'medium', source: 'shared/forge-dispatch.md:1594 EFFORT_DEFAULTS' },
   { key: 'effort.discuss-milestone', type: 'string', default: 'medium', source: 'shared/forge-dispatch.md:1594 EFFORT_DEFAULTS' },
@@ -661,6 +662,15 @@ check('mechanical reader-grep: every pref key referenced in scripts/forge-*.js e
   assert(findings.length === 0,
     `reader references keys ABSENT from forge-prefs.schema.json:\n    ${findings.join('\n    ')}`);
   console.log(`  (mechanical guard: ${found.size} engine-read keys across ${files.length} scripts, all schema-resolved)`);
+});
+
+check('estimate-milestone effort schema and inventory preserve the medium planning default', () => {
+  const field = schema.properties.effort.properties['estimate-milestone'];
+  assert(field.type === 'string' && field.default === 'medium', 'effort type/default');
+  assert(JSON.stringify(field.enum) === JSON.stringify(['low', 'medium', 'high', 'xhigh', 'max']), 'full effort enum');
+  assert(field.description.includes('estimativa'), 'description in pt-BR');
+  assert(INVENTORY.some(row => row.key === 'effort.estimate-milestone' && row.source.includes('forge-dispatch-resolve')), 'reader source');
+  console.log('PASS estimate-milestone effort schema enum, medium default, pt-BR description and reader inventory');
 });
 
 // ── Report ───────────────────────────────────────────────────────────────────

@@ -112,11 +112,13 @@ const TIER_DEFAULTS = {
   // review-advocate deliberately stay out: review.*_model owns them (two
   // sources would recreate audit B). plan-check remains deferred until wired.
   'review-fix': 'standard',
+  'estimate-milestone': 'max',
   'plan-milestone': 'max',
   'plan-slice': 'heavy',
 };
 
 const EFFORT_DEFAULTS = {
+  'estimate-milestone': 'medium',
   'plan-milestone': 'medium',
   'plan-slice': 'medium',
   'discuss-milestone': 'medium',

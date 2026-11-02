@@ -66,6 +66,23 @@ try {
     assert(query('research-milestone').source.endsWith('-CONTEXT.md'));
     assert(query('plan-milestone').source.endsWith('-RESEARCH.md'));
   });
+  test('estimate-milestone memory uses CONTEXT SCOPE BRAINSTORM in order, never SUMMARY or ROADMAP, and rejects unknown units', () => {
+    const files = ['CONTEXT', 'SCOPE', 'BRAINSTORM'].map(name => `${base}/${milestone}-${name}.md`);
+    const saved = files.map(file => fs.existsSync(path.join(root, file)) ? fs.readFileSync(path.join(root, file)) : null);
+    try {
+      files.forEach(file => put(file, 'eligible pre-roadmap input'));
+      put(`${base}/${milestone}-SUMMARY.md`, 'posterior output');
+      for (const file of files) {
+        assert.equal(query('estimate-milestone').source, file);
+        fs.unlinkSync(path.join(root, file));
+      }
+      assert.equal(query('estimate-milestone').reason, 'eligible-input-missing');
+      assert.throws(() => query('unknown-estimate'), /unit-unsupported/);
+    } finally {
+      files.forEach((file, i) => { if (saved[i] !== null) put(file, saved[i]); });
+      fs.unlinkSync(path.join(root, base, `${milestone}-SUMMARY.md`));
+    }
+  });
   test('missing, empty, oversized and posterior-only sources never fall back to IDs/results', () => {
     fs.renameSync(path.join(root, plan), path.join(root, plan.replace('-PLAN', '-SUMMARY')));
     assert.equal(query().reason, 'eligible-input-missing');

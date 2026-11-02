@@ -69,6 +69,19 @@ try {
     assert(Object.isFrozen(panel.STATE_REASONS) && Object.isFrozen(panel.LIMITS));
     for (const key of ['ACTIVITY_LABELS', 'KIND_LABELS', 'EMPTY_LABELS']) assert(Object.isFrozen(agents[key]));
   });
+  check('estimate-milestone maps to planning with the same panel fields and read-only behavior', () => {
+    const options = root('estimate');
+    const state = bind(options, 'M001', 'plan-milestone');
+    const baseline = safe(read(options)).works[0];
+    bind(options, 'M001', 'estimate-milestone');
+    const before = tree(options.cwd);
+    const estimate = safe(read(options)).works[0];
+    assert.deepStrictEqual(estimate.phase, { ...baseline.phase, raw: 'estimate-milestone' });
+    assert.strictEqual(estimate.phase.value, 'planning');
+    assert.deepStrictEqual(Object.keys(estimate), Object.keys(baseline));
+    assert.deepStrictEqual(tree(options.cwd), before);
+    assert(fs.existsSync(state));
+  });
   const own = root('owner'); const state = bind(own); events(own);
   const proof = write(path.join(own.cwd, 'evidence/proof.md'), 'Original proof');
   assert.strictEqual(personal.saveCheckpoint({ ...own, id: 'M001', intent: 'checkpoint', checkpoint: {

@@ -23,6 +23,7 @@ const { readJsonl } = require('./forge-jsonl.js');
 
 // Canonical dispatch-table phase order (mirrors legacy skills/forge-status/SKILL.md § "Token usage").
 const PHASE_ORDER = [
+  'estimate-milestone',
   'plan-milestone',
   'discuss-milestone',
   'research-milestone',

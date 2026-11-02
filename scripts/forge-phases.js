@@ -94,7 +94,7 @@ function renderPhases(cwd) {
     notes.push('Nota: fases não roteáveis nunca passam pelo bloco routing; usam apenas tier_models.');
   }
   notes.push(
-    `Nota: plan-milestone tem tier fixo ${TIER_DEFAULTS['plan-milestone']}, mas seu modelo é configurável em tier_models.${TIER_DEFAULTS['plan-milestone']}.`,
+    `Nota: plan-milestone tem tier fixo ${TIER_DEFAULTS['plan-milestone']}, assim como estimate-milestone (${TIER_DEFAULTS['estimate-milestone']}); seu modelo é configurável em tier_models.${TIER_DEFAULTS['plan-milestone']}.`,
   );
   if (table.warnings.length) {
     const { plainText } = require('./forge-sidecar-identity');

@@ -248,6 +248,19 @@ test('metadata patches preserve each other across sequential durable updates', (
   });
 });
 
+test('write: estimate-milestone persists and unknown phase remains refused', () => {
+  withSandbox(dir => {
+    state.updateFields(dir, MILESTONE, { phase: 'estimate-milestone' });
+    assertEq(state.read(dir, MILESTONE).phase, 'estimate-milestone');
+    const before = fs.readFileSync(state.statePath(dir, MILESTONE), 'utf8');
+    let refused = false;
+    try { state.updateFields(dir, MILESTONE, { phase: 'unknown-estimate' }); }
+    catch (error) { refused = /invalid phase/.test(error.message); }
+    assert(refused, 'unknown phase must be refused');
+    assertEq(fs.readFileSync(state.statePath(dir, MILESTONE), 'utf8'), before);
+  });
+});
+
 // ── Summary ───────────────────────────────────────────────────────────────────
 console.log(`\n=== Result: ${passed} passed, ${failed} failed ===`);
 

@@ -270,5 +270,34 @@ process.stdout.write('forge-statusline-resources.test.js\n');
   }
 })();
 
+// Exercise phase glyphs through the real stdin renderer and dashboard formatter.
+(() => {
+  const dir = mkTmp('estimate');
+  const poolDir = mkTmp('estimate-pool');
+  const profile = mkTmp('estimate-profile');
+  try {
+    fs.writeFileSync(path.join(dir, '.gsd', 'STATE.md'), '**Active Milestone:** M999\n');
+    const env = { HOME: profile, USERPROFILE: profile, FORGE_HOME: path.join(profile, '.forge-agent') };
+    const { formatActivityLine } = require('./forge-dashboard');
+    for (const [phase, icon, dashboardIcon] of [
+      ['estimate-milestone', '\u{1f525}', '\u{1f525}'],
+      ['plan-milestone', '\u{1f525}', '\u{1f525}'],
+      ['execute-task', '\u26a1', '\u26a1'],
+      ['unknown-estimate', '\u2022', '\u00b7'],
+    ]) {
+      const worker = `${phase}/M999`;
+      fs.writeFileSync(path.join(dir, '.gsd', 'forge', 'auto-mode.json'), JSON.stringify({
+        active: true, started_at: Date.now(), worker, worker_started: Date.now(),
+      }));
+      const result = runStatusline(dir, poolDir, env);
+      assert(result.status === 0 && result.stdout.includes(`${icon}M999`),
+        `statusline ${phase} real JSON stdin renders ${icon}`, result.stdout + result.stderr);
+      const line = formatActivityLine({ unit: worker, ts: '2026-11-01T00:00:00Z' }, 'M999');
+      assert(line.startsWith(`- ${dashboardIcon} `),
+        `dashboard ${phase} without status renders ${dashboardIcon}`, line);
+    }
+  } finally { cleanup(dir); cleanup(poolDir); cleanup(profile); }
+})();
+
 process.stdout.write(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed === 0 ? 0 : 1);

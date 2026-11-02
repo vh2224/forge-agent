@@ -569,6 +569,24 @@ test('exact target grammar covers global, local, slice, and milestone without cr
   }
 });
 
+test('estimate-milestone belongs only to its milestone; task and slice targets stay unchanged', () => {
+  for (const [target, expected] of [
+    [{ type: 'milestone', id: 'M014' }, true],
+    [{ type: 'milestone', id: 'M999' }, false],
+    [{ type: 'slice', id: 'S02', milestone: 'M014' }, false],
+    [{ type: 'task', id: 'T01', milestone: 'M014', slice: 'S02' }, false],
+  ]) {
+    const f = fixture(target);
+    try {
+      const event = dispatch('estimate-milestone/M014', 'D-estimate', { milestone: 'M014', slice: 'S02' });
+      writeEvents(f, [event]);
+      writeResult(f, result(event.dispatch_id, '2026-09-24T10:00:00Z', '2026-09-24T10:00:01Z', 1));
+      const value = buildAutonomyReport(f.input).families.time.measures.execution_sum_ms.value;
+      assert.strictEqual(value !== null, expected);
+    } finally { f.cleanup(); }
+  }
+});
+
 test('global task rejects a dispatch carrying a foreign milestone', () => {
   const f = fixture();
   try {
