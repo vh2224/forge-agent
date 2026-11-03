@@ -369,6 +369,31 @@ function readSelectionState(cwd, milestone, options = {}) {
   try { const read = inspect(owner, milestone, { ...(object(options) ? options : {}), shallow: false }); return read === null ? null : read.state; }
   catch (e) { return invalidState(milestone, codeOf(e, 'time-source-unreadable')); }
 }
+// A contracted choice needs the slice review gate: a dependent slice starts only after its
+// predecessor is canonically completed AND reviewed, which never happens with review.mode
+// disabled. The incompatibility is therefore named before any contract is activated (and is
+// inspectable before the choice) instead of becoming a latent block. Effective preferences come
+// from the canonical reader or the controller's in-process reader seam, never from caller JSON.
+// No-contract, unenrolled and S01-only milestones never consult it.
+function contractCompatibility(cwd, milestone, options = {}) {
+  const answer = (status, reason, mode = null) => ({ status, reason, review_mode: mode });
+  try {
+    if (!milestoneId(milestone)) return answer('unknown', 'time-work-id-invalid');
+    const owner = ownerRoot(cwd);
+    const reader = object(options) && typeof options.prefsReader === 'function' ? options.prefsReader : dir => require('./forge-prefs').readPrefs(dir);
+    const resolved = reader(owner);
+    if (!resolved || resolved.ok !== true || !object(resolved.prefs)) return answer('unknown', 'review-prefs-invalid');
+    const raw = object(resolved.prefs.review) ? resolved.prefs.review.mode : undefined;
+    // The completer and review gate treat every value except 'disabled' as enabled.
+    const mode = raw === undefined ? 'enabled' : String(raw).toLowerCase();
+    return mode === 'disabled' ? answer('incompatible', 'review-disabled', mode) : answer('compatible', null, mode);
+  } catch { return answer('unknown', 'review-prefs-unreadable'); }
+}
+function reviewRefusal(owner, milestone, input) {
+  const review = contractCompatibility(owner, milestone, { prefsReader: input.prefsReader });
+  if (review.status === 'compatible') return null;
+  return refused(milestone, review.status === 'incompatible' ? 'time-review-disabled-incompatible' : 'time-review-mode-unknown');
+}
 
 // ---------------------------------------------------------------------------
 // Owner safe boundary
@@ -614,12 +639,15 @@ function resumeActivation(owner, milestone, read, input, now) {
   const s = read.selection, persisted = s.decisions[0].decision;
   // The same persisted request and question: a new decision is never created here.
   const row = { kind: 'activation', request: s.contract_request, expected: [persisted.answer], question: persisted.question };
+  // The recorded choice stays; only its contract activation waits for a compatible review mode.
+  const review = reviewRefusal(owner, milestone, input); if (review) return review;
   const live = liveHandle(owner, milestone, input.liveAdapter, row, now);
   if (live.decision.answer !== persisted.answer || live.decision.request_sha256 !== persisted.request_sha256) return refused(milestone, 'time-decision-answer-mismatch');
   return guarded(owner, milestone, () => {
     // The host callback ran outside the boundary: recheck the persisted state before publishing.
     const again = inspect(owner, milestone, { code: input.code });
     if (again === null || again.state.status !== 'activation-pending' || again.roadmapExists || again.state.selection_sha256 !== read.state.selection_sha256) return refused(milestone, 'time-options-stale');
+    const reviewAgain = reviewRefusal(owner, milestone, input); if (reviewAgain) return reviewAgain;
     const contract = time().activateContract({ cwd: owner, milestone, contract: s.contract_request, handle: live.handle, now });
     return { status: 'decided', milestone, choice: 'option', resumed: true, selection_sha256: read.state.selection_sha256, contract_sha256: contract.sha256 };
   });
@@ -643,12 +671,16 @@ function decide(input = {}) {
     if (state.status !== 'decision-pending') return refused(milestone, 'time-options-stale');
     if (state.round) return refused(milestone, 'time-option-pending');
     const plan = selectionPlan(read, milestone, now), handles = {};
+    // A contracted choice is refused by name before any host callback or write when review is disabled.
+    const contracted = plan.selection.choice !== 'no-contract';
+    if (contracted) { const review = reviewRefusal(owner, milestone, input); if (review) return review; }
     // Every handle is verified (read-only) before the first write.
     for (const row of plan.decisions) handles[row.kind] = liveHandle(owner, milestone, input.liveAdapter, row, now).handle;
     return guarded(owner, milestone, () => {
       // The handles were collected outside the boundary: a begin, lease or state change meanwhile defers or refuses.
       const again = inspect(owner, milestone, { code: input.code });
       if (again === null || again.state.status !== 'decision-pending' || again.state.round || !same(selectionPlan(again, milestone, now), plan)) return refused(milestone, 'time-options-stale');
+      if (contracted) { const review = reviewRefusal(owner, milestone, input); if (review) return review; }
       const recorded = time().recordSelection({ cwd: owner, milestone, selection: plan.selection, handles, now });
       failpoint(input, 'after-selection');
       if (plan.selection.choice === 'no-contract') return { status: 'decided', milestone, choice: 'no-contract', selection_sha256: recorded.selection_sha256, contract_sha256: null };
@@ -737,6 +769,57 @@ function roadmapRule(cwd, milestone) {
     return pendingRule(milestone, ['preselection', 'roadmap-preexisting'].includes(s.status) && !s.options_recorded ? 'options-required' : 'selection-required');
   } catch { return rule(milestone, { status: 'invalid', reason: 'roadmap-time-expected-invalid' }); }
 }
+// Read-only projection of the CURRENT delegated allocation of one slice for the task-node
+// binding (distinct from the immutable selected graph and from the empty promptBlock
+// skeleton). absent: genuine legacy / no-contract / unenrolled; ready: a selected active
+// contract with a conformant current roadmap; blocked: the owner state is not (yet) usable;
+// invalid: unreadable or malformed owner state. Everything is re-read from the owner here.
+function taskBindingContext(cwd, milestone, options = {}) {
+  const sliceId = object(options) ? options.sliceId : undefined;
+  const answer = (status, reason, extra) => ({ schema_version: 1, status, milestone: typeof milestone === 'string' ? milestone : null,
+    slice: typeof sliceId === 'string' ? sliceId : null, ...(reason ? { reason } : {}), ...(extra || {}) });
+  let owner;
+  try {
+    if (!milestoneId(milestone) || typeof sliceId !== 'string' || !/^S\d{2,}$/.test(sliceId)) return answer('invalid', 'time-work-id-invalid');
+    owner = ownerRoot(cwd);
+  } catch (e) { return answer('invalid', codeOf(e, 'time-source-unreadable')); }
+  try {
+    const read = inspect(owner, milestone, { shallow: false });
+    if (read === null) return answer('absent');
+    const state = read.state;
+    if (state.status === 'options-invalid') return answer('invalid', state.reason);
+    if (state.status !== 'decided') return answer('blocked', state.status);
+    if (!state.contract) return answer('absent');
+    if (!state.roadmap) return answer('blocked', 'roadmap-absent');
+    if (state.roadmap.status !== 'conformant') return answer('blocked', state.roadmap.status);
+    const p = time().timePaths({ cwd: owner, milestone }); noLinks(p.roadmap);
+    const buffer = readBounded(p.roadmap, MAX_ROADMAP_BYTES), identity = time().roadmapIdentity(buffer);
+    // The conformance read and this projection must describe the same roadmap bytes.
+    if (identity.sha256 !== state.roadmap.roadmap_sha256) return answer('blocked', 'roadmap-changed');
+    const inspected = rt().inspectRoadmapContent(decode(buffer)), section = inspected.section;
+    if (inspected.status !== 'valid' || !section) return answer('invalid', 'roadmap-time-section-missing');
+    const parts = new Map();
+    for (const r of section.refinements || []) for (const part of r.parts) parts.set(part, r.node);
+    const allocation = [];
+    for (const row of section.allocation) for (const id of row.nodes) {
+      allocation.push({ id, parent: parts.get(id) || id, part: parts.has(id), kind: row.kind, slice: row.kind === 'slice' ? row.slice : null, row: row.id });
+    }
+    const slices = inspected.slices.map(s => ({ id: s.id, dependencies: [...s.dependencies].sort() }));
+    const current = slices.find(s => s.id === sliceId);
+    if (!current) return answer('blocked', 'slice-unknown');
+    const allocated = allocation.filter(a => a.slice === sliceId);
+    if (!allocated.length) return answer('blocked', 'slice-unallocated');
+    const closure = new Set(), walk = id => { for (const d of slices.find(s => s.id === id)?.dependencies || []) if (!closure.has(d)) { closure.add(d); walk(d); } };
+    walk(sliceId);
+    const view = a => ({ id: a.id, slice: a.slice });
+    const edges = read.expected.edges.map(e => ({ from: e.from, to: e.to, dependent: allocation.filter(a => a.parent === e.from).map(view),
+      prerequisite: allocation.filter(a => a.parent === e.to).map(view) })).filter(e => e.dependent.some(a => a.slice === sliceId));
+    return answer('ready', null, { option_id: state.option_id, position_id: state.position_id, options_sha256: state.options_sha256,
+      sources: { selection_sha256: state.selection_sha256, contract_sha256: state.contract.sha256, contract_base_sha256: state.contract.base_sha256,
+        roadmap_sha256: identity.sha256, structure_sha256: identity.structure_sha256 },
+      allocated, slice_dependencies: current.dependencies, prerequisite_slices: [...closure].sort(), roadmap_slices: slices, edges });
+  } catch (e) { return answer('invalid', codeOf(e, 'time-source-unreadable')); }
+}
 function resumeCheck(cwd, milestone, block) {
   const answer = (code, state) => ({ ok: code === 'time-option-ready', reason_code: code, milestone: typeof milestone === 'string' ? milestone : null,
     options_sha256: state?.options_sha256 ?? null, status: state?.status ?? null });
@@ -813,5 +896,5 @@ function main(argv = process.argv.slice(2), io = process, liveAdapter) {
 
 module.exports = { TIME_OPTION_REASON_CODES, TIME_OPTION_RESUME_CODES, SELECTION_STATUSES, ROADMAP_STATUSES, ESTIMATE_UNIT,
   estimateKeySuffix, estimateBeginKey, readSelectionState, enroll, prepareBoundary, nextRound, answerRound, decide, promptBlock,
-  roadmapRule, resumeCheck, main };
+  roadmapRule, taskBindingContext, contractCompatibility, resumeCheck, main };
 if (require.main === module) process.exitCode = main();

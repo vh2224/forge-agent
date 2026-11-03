@@ -367,6 +367,12 @@ function readClock(options) {
   } catch (e) { return unknown(sourceReason(e), sources); }
 }
 
+// Declared source paths of one plan: its writes plus every criterion path.
+function declaredScope(planText, planReference, expected, structured) {
+  const fields = structured ? require('./forge-must-haves').parseExecutionFields(planText) : {};
+  const inventory = require('./forge-delivery').inventoryPlan(planText, planReference, expected);
+  return [...new Set([...(fields.writes || []), ...inventory.criteria.flatMap(c => [c.artifact_path, c.link_from, c.link_to].filter(Boolean))])];
+}
 // Rebuild immutable canonical history in both modes. Only strict mode also
 // establishes current source conformity; neither mode grants endpoint authority.
 function validateDelivery(options, reference, expected, seen = new Set()) {
@@ -409,9 +415,7 @@ function validateDelivery(options, reference, expected, seen = new Set()) {
         && child.unit.id === task.id && child.unit.slice === expected.id && child.unit.milestone === expected.milestone)))) fail('delivery-child-inventory-mismatch');
     if (!rebuilt.plan.structured && !tasks.length) fail('delivery-child-inventory-missing');
   }
-  const fields = rebuilt.plan.structured ? require('./forge-must-haves').parseExecutionFields(planText) : {};
-  const inventory = delivery.inventoryPlan(plan.buffer.toString('utf8'), input.plan, expected);
-  const scope = [...new Set([...(fields.writes || []), ...inventory.criteria.flatMap(c => [c.artifact_path, c.link_from, c.link_to].filter(Boolean))])];
+  const scope = declaredScope(planText, input.plan, expected, rebuilt.plan.structured);
   for (const [sourceReference, read] of envelopes) {
     if (options.executionContract && !captureScope(options, read.value, scope).scope.length) continue;
     if (options.proofMode === 'current-source-strict') validateCurrentSources(options, read.value, scope);
@@ -509,6 +513,70 @@ function readDeliveries(options) {
   } catch (e) { return { status: 'unknown', ...purpose, reason: sourceReason(e), proven: [], unproven, sources }; }
 }
 function readHistoricalDeliveries(options) { return readDeliveries({ ...options, proofMode: 'historical-delivery' }); }
+// Narrow read-only proof of ONE completed task for controller admission. The same canonical
+// rebuild and historical capture checks as the slice proof (captured_at finite and not after the
+// committed completion, physical owner/code roots and contract, every declared source path bound
+// to a concrete captured blob), plus: the task's own plan, a nonempty declared source inventory
+// fully covered by its root captures, and verification/artifact captures of one root agreeing on
+// revision, identity and source bindings. Today's sources are never compared, so a later
+// legitimate code change keeps the history; the caller supplies the committed completion instant.
+function readHistoricalTaskDelivery(options = {}) {
+  const purpose = { proof_kind: 'historical-delivery', current_source_conformity: 'not-evaluated', current_integrated_acceptance: 'not-evaluated' };
+  try {
+    options = observationOptions(options);
+    const { milestone, slice, task } = options;
+    if (typeof slice !== 'string' || !/^S\d{2,}$/.test(slice) || typeof task !== 'string' || !/^T\d+(?:\.\d+)?$/.test(task)) fail('delivery-task-invalid');
+    time.timePaths(options);
+    const completionAt = instant(options.completedAt);
+    if (!Number.isFinite(completionAt)) fail('delivery-completion-time-invalid');
+    Object.assign(options, { proofMode: 'historical-delivery', completionAt, proof: { units: [], captures: [] },
+      deliveryCache: { files: new Map(), hashes: new Map(), blobs: new Map(), bytes: 0 } });
+    const delivery = require('./forge-delivery'), roots = require('./forge-code-roots');
+    const expected = { type: 'task', id: task, slice, milestone }, key = delivery.unitKey(expected);
+    const base = `.gsd/milestones/${milestone}/slices/${slice}/tasks/${task}`, reference = `${base}/${task}-DELIVERY.json`;
+    const input = deliverySource(options, options.cwd, `${base}/${task}-DELIVERY-INPUT.json`, MAX_JSON, true).value;
+    if (input?.plan !== `${base}/${task}-PLAN.md`) fail('delivery-plan-foreign');
+    const projection = validateDelivery(options, reference, expected);
+    const stored = deliverySource(options, options.cwd, reference, MAX_JSON, true).value;
+    if (!Array.isArray(stored?.lineage) || !stored.lineage.includes(key) || !Number.isInteger(stored.depth)
+        || projection.diagnostics.length || !projection.criteria.some(c => delivery.unitKey(c.unit) === key)) fail('delivery-criteria-unproven');
+    const plan = deliverySource(options, options.cwd, input.plan, MAX_JSON);
+    const scope = declaredScope(plan.buffer.toString('utf8'), input.plan, expected, projection.plan.structured);
+    if (!scope.length) fail('delivery-source-inventory-missing');
+    const captures = options.proof.captures.filter(c => c.unit === key);
+    if (!captures.length) fail('delivery-source-capture-missing');
+    // Every declared path is bound by a capture of the root that owns it.
+    const contract = input.schema_version === 2 ? roots.validateContract(input.execution_contract, { owner: fs.realpathSync.native(options.cwd), revalidate: true }) : null;
+    const envelopeOf = capture => deliverySource(options, options.cwd, capture.reference, MAX_JSON, true).value;
+    const rootOf = capture => (contract ? envelopeOf(capture).root_id : 'primary');
+    for (const relative of scope) {
+      let root = 'primary', mapped = relative;
+      if (contract) {
+        try { const r = roots.resolvePath(contract, relative, { legacy: contract.code_roots.length === 1 }); root = r.root_id; mapped = r.path; }
+        catch { fail('delivery-code-root-mismatch'); }
+      }
+      if (!captures.some(c => rootOf(c) === root && c.source_bindings.some(b => b.path === mapped))) fail('delivery-source-inventory-incomplete');
+    }
+    // Captures of one root describe one workspace: identical identity, revision and scoped blobs,
+    // and the artifact capture never precedes the verification capture.
+    const groups = new Map();
+    for (const capture of captures) groups.set(rootOf(capture), [...(groups.get(rootOf(capture)) || []), capture]);
+    for (const group of groups.values()) {
+      const [first, ...rest] = group, identity = c => { const e = envelopeOf(c);
+        return JSON.stringify([c.revision, e.root_id ?? null, e.root_identity_sha256 ?? null, e.execution_contract_sha256 ?? null,
+          [...c.source_bindings].sort((a, b) => a.path.localeCompare(b.path))]); };
+      if (rest.some(c => identity(c) !== identity(first))) fail('delivery-capture-inconsistent');
+      const at = kind => group.filter(c => envelopeOf(c).kind === kind).map(c => instant(c.captured_at));
+      if (at('verification').length && at('artifact').length && Math.max(...at('verification')) > Math.min(...at('artifact'))) fail('delivery-capture-inconsistent');
+    }
+    for (const read of options.deliveryCache.files.values()) {
+      if (readSource(read.root, read.reference, read.limit).sha256 !== read.source.sha256) fail('clock-source-unstable');
+    }
+    return { status: 'proven', ...purpose, unit: key, reference, fingerprint: projection.delivery_fingerprint, completed_at: options.completedAt,
+      coverage: { criteria: projection.criteria.length, captures: captures.length, sources: scope.length },
+      captures: captures.map(c => ({ reference: c.reference, sha256: c.sha256, captured_at: c.captured_at, revision: c.revision })) };
+  } catch (e) { return { status: 'unproven', ...purpose, reason: sourceReason(e) }; }
+}
 
 function computeForecast({ contract, clock, deliveries }) {
   const base = { policy: FORECAST_POLICY, deliveries: deliveries?.proven || [], pending: [], burn_ratio: null,
@@ -563,5 +631,5 @@ function main(argv = process.argv.slice(2), io = process, options = {}) {
   const result = { clock: readClock(input), forecast: readForecast(input) };
   io.stdout.write(JSON.stringify(result) + '\n'); return 0;
 }
-module.exports = { CLOCK_POLICY, FORECAST_POLICY, DELIVERY_PROOF_MODES, computeClock, readClock, readDeliveries, readHistoricalDeliveries, computeForecast, readForecast, main };
+module.exports = { CLOCK_POLICY, FORECAST_POLICY, DELIVERY_PROOF_MODES, computeClock, readClock, readDeliveries, readHistoricalDeliveries, readHistoricalTaskDelivery, computeForecast, readForecast, main };
 if (require.main === module) process.exitCode = main();

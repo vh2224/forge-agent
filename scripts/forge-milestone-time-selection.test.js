@@ -59,9 +59,9 @@ function validCase(name) { const row = PROPOSALS.valid.find(c => c.name === name
 function docs(cwd, extra = '') { for (const k of ['SCOPE', 'CONTEXT', 'BRAINSTORM']) write(cwd, `.gsd/milestones/${M}/${M}-${k}.md`, `# ${k}\nEscopo sintético${extra}\n`); }
 // Controller records written through the controller's own atomic writer and read back by lookupRecord.
 function transaction(cwd, key, fields) {
-  const state = {}, unit = fields.unit;
+  const state = fields.state || {}, unit = fields.unit;
   const record = { protocol_version: '1.0.0', idempotency_key: key, action: fields.action, unit, milestone: fields.milestone, host_runtime: 'codex',
-    owner_digest: 'sha256:' + 'f'.repeat(64), lease_generation: 'fixture-generation', phase: fields.phase || 'committed', created_at: iso(fields.at), updated_at: iso(fields.at),
+    owner_digest: fields.owner_digest || 'sha256:' + 'f'.repeat(64), lease_generation: 'fixture-generation', phase: fields.phase || 'committed', created_at: iso(fields.at), updated_at: iso(fields.at),
     before: { state_checksum: sha(state), state }, after: { state_checksum: sha(state), state, state_patch: {} },
     result: fields.result ? { idempotency_key: key, unit: unit.key, milestone: fields.milestone, status: fields.result } : null,
     event: { idempotency_key: key, unit: unit.key, milestone: fields.milestone, action: fields.action } };
@@ -114,7 +114,9 @@ function liveAdapter(cwd, overrides = {}) {
       request_sha256: overrides.requestSha ? overrides.requestSha(request) : digest(request.request), expires_at: overrides.expires ?? clock + 60000 }, () => clock);
   } };
 }
-function decide(cwd, adapter = liveAdapter(cwd), extra = {}) { return selection.decide({ cwd, milestone: M, liveAdapter: adapter, now: NOW, ...extra }); }
+// Hermetic effective preferences (review enabled by default), never the operator's installed prefs.
+const hermeticPrefs = () => ({ ok: true, prefs: {} });
+function decide(cwd, adapter = liveAdapter(cwd), extra = {}) { return selection.decide({ cwd, milestone: M, liveAdapter: adapter, now: NOW, prefsReader: hermeticPrefs, ...extra }); }
 function chooseCurta(cwd, opts = {}) { answer(cwd, 'Escolher posição', opts); answer(cwd, 'Escopo completo (curta) (Recomendado)', opts); }
 function decidedCurta() {
   const cwd = enrolled(), { sha } = materializeFor(cwd); chooseCurta(cwd);
@@ -632,6 +634,21 @@ try {
     return controller.begin(cwd, { milestone, slice: 'S01', unit: 'execute-task/T01', host_runtime: 'codex', owner_token: 'fixture-' + key, idempotency_key: key },
       { now: () => NOW, prefsReader: () => ({ ok: true, prefs: {} }), inventoryReader: () => ({ slices: [{ id: 'S01', tasks: [{ id: 'T01' }] }] }) });
   }
+  // SYNTHETIC historical in-flight work: an execute-task begin admitted before this milestone's pending decision is
+  // written as an open, committed begin record (no completion) and read back through the controller's own canonical
+  // replay. The controller correctly refuses a NEW execute-task while the selection is decision-pending, so the
+  // production guard is neither bypassed nor patched here.
+  function historicalBegin(cwd, milestone, key) {
+    fs.mkdirSync(path.join(cwd, '.gsd/milestones', milestone), { recursive: true });
+    const state = { milestone, kind: 'milestone', phase: 'execute-task', active_slice: 'S01', active_task: 'T01', next_action: 'execute', auto_mode: 'on' };
+    require('./forge-state').write(cwd, state);
+    transaction(cwd, key, { action: 'begin', unit: unitOf('execute-task', 'T01'), milestone, at: NOW - 7200000, state, owner_digest: 'sha256:' + sha('fixture-' + key) });
+    const events = controller.eventsFile(cwd, milestone); fs.mkdirSync(path.dirname(events), { recursive: true });
+    fs.appendFileSync(events, JSON.stringify({ protocol_version: '1.0.0', idempotency_key: key, ts: iso(NOW - 7200000), event: 'unit-began', action: 'begin',
+      unit: 'execute-task/T01', milestone, host_runtime: 'codex', sequence: 1 }) + '\n');
+    return controller.begin(cwd, { milestone, slice: 'S01', unit: 'execute-task/T01', host_runtime: 'codex', owner_token: 'fixture-' + key, idempotency_key: key },
+      { now: () => NOW, prefsReader: () => ({ ok: true, prefs: {} }), inventoryReader: () => ({ slices: [{ id: 'S01', tasks: [{ id: 'T01' }] }] }) });
+  }
   function forbiddenWrites(cwd) {
     return [time.readSelection({ cwd, milestone: M }).status, time.readContract({ cwd, milestone: M }).status];
   }
@@ -645,7 +662,7 @@ try {
     // decide: a real same-milestone begin commits inside the live handle callback, after the early check.
     const cwd = enrolled(); materializeFor(cwd); chooseCurta(cwd);
     const adapter = liveAdapter(cwd), original = adapter.getDecisionHandle; let began = null;
-    adapter.getDecisionHandle = request => { if (!began) began = realBegin(cwd, M, 'interposed-begin'); return original(request); };
+    adapter.getDecisionHandle = request => { if (!began) began = historicalBegin(cwd, M, 'interposed-begin'); return original(request); };
     const questionsBefore = fs.readdirSync(path.join(cwd, '.gsd/forge/questions')).sort();
     const result = decide(cwd, adapter);
     assert.ok(began && began.ok, 'the adversary begin is real and committed: ' + JSON.stringify(began));
@@ -681,7 +698,7 @@ try {
     assert.strictEqual(held(prepare), false, 'the boundary is released afterwards');
     // A begin that committed before the boundary defers every writer without writing.
     const busy = enrolled(); materializeFor(busy);
-    realBegin(busy, M, 'committed-before');
+    historicalBegin(busy, M, 'committed-before');
     const before = snapshot(busy);
     assert.strictEqual(selection.nextRound({ cwd: busy, milestone: M }).status, 'deferred');
     assert.strictEqual(selection.prepareBoundary(busy, M, { now: NOW }).status, 'deferred');
@@ -1025,6 +1042,46 @@ try {
     assert.strictEqual(selection.roadmapRule(plain, M), null);
     const ok = sync(process.execPath, [SCRIPT, '--conformance', '--cwd', plain, '--milestone', M, '--json'], { encoding: 'utf8' });
     assert.deepStrictEqual([ok.status, JSON.parse(ok.stdout).rule], [0, null]);
+  });
+
+  test('task-binding-context-projects-the-current-refined-allocation-readonly', () => {
+    const { cwd } = decidedCurta();
+    const absent = selection.taskBindingContext(cwd, M, { sliceId: 'S02' });
+    assert.deepStrictEqual([absent.status, absent.reason], ['blocked', 'roadmap-absent']);
+    const allocation = ALLOCATION.map(row => row.id === 's2' ? { ...row, nodes: ['N2a', 'N2b'] } : row);
+    writeRoadmap(cwd, sectionFor(cwd, { allocation, refinements: [{ node: 'N2', parts: ['N2a', 'N2b'] }] }));
+    assert.strictEqual(selection.taskBindingContext(cwd, M, { sliceId: 'S02' }).reason, 'allocation-pending', 'the selection alone is not a current allocation');
+    assert.strictEqual(selection.prepareBoundary(cwd, M, { now: NOW + 1000 }).status, 'allocated');
+    const before = snapshot(cwd), ready = selection.taskBindingContext(cwd, M, { sliceId: 'S02' });
+    assert.deepStrictEqual([ready.status, ready.slice, ready.position_id], ['ready', 'S02', 'curta']);
+    assert.deepStrictEqual(ready.allocated.map(item => [item.id, item.parent, item.part, item.slice]), [['N2a', 'N2', true, 'S02'], ['N2b', 'N2', true, 'S02']]);
+    assert.deepStrictEqual([ready.slice_dependencies, ready.prerequisite_slices], [['S01'], ['S01']]);
+    assert.deepStrictEqual(ready.edges.map(edge => [edge.from, edge.to, edge.dependent, edge.prerequisite]),
+      [['N2', 'N1', [{ id: 'N2a', slice: 'S02' }, { id: 'N2b', slice: 'S02' }], [{ id: 'N1', slice: 'S01' }]]]);
+    assert.ok(Object.values(ready.sources).every(value => /^[a-f0-9]{64}$/.test(value)), 'exact source hashes');
+    assert.deepStrictEqual(selection.taskBindingContext(cwd, M, { sliceId: 'S02' }), ready, 'repeatable');
+    assert.deepStrictEqual(snapshot(cwd), before, 'the projection writes nothing');
+    // The old immutable promptBlock skeleton keeps its empty plan-milestone allocation.
+    assert.deepStrictEqual(skeletonOf(selection.promptBlock(cwd, M)).allocation, []);
+    for (const [options, status] of [[{ sliceId: 'S09' }, 'blocked'], [{ sliceId: '../S01' }, 'invalid'], [{}, 'invalid'], [null, 'invalid']]) {
+      assert.strictEqual(selection.taskBindingContext(cwd, M, options).status, status, JSON.stringify(options));
+    }
+    assert.strictEqual(selection.taskBindingContext(cwd, 'not-a-milestone', { sliceId: 'S02' }).status, 'invalid');
+    // Roadmap bytes edited behind a still-valid state, structural drift and unenrolled owners.
+    writeRoadmap(cwd, sectionFor(cwd, { allocation, refinements: [{ node: 'N2', parts: ['N2a', 'N2b'] }] }), { extraSlice: '- [ ] **S05: Extra** `risk:low` `depends:[S04]`\n' });
+    assert.strictEqual(selection.taskBindingContext(cwd, M, { sliceId: 'S02' }).status, 'blocked');
+    assert.strictEqual(selection.taskBindingContext(root(), M, { sliceId: 'S02' }).status, 'absent', 'genuine unenrolled milestone');
+    assert.strictEqual(selection.taskBindingContext(enrolled(), M, { sliceId: 'S02' }).status, 'blocked', 'enrolled without a decision');
+  });
+
+  test('task-binding-context-fails-closed-on-an-unvalidated-owner', () => {
+    const cwd = enrolled(), link = path.join(os.tmpdir(), 'forge-selection-binding-junction-' + process.pid);
+    roots.push(link);
+    fs.symlinkSync(fs.realpathSync.native(cwd), link, 'junction');
+    const before = snapshot(cwd), read = selection.taskBindingContext(link, M, { sliceId: 'S01' });
+    assert.strictEqual(read.status, 'invalid');
+    assert.ok(!JSON.stringify(read).includes(cwd), 'no path leaked');
+    assert.deepStrictEqual(snapshot(cwd), before);
   });
 } finally {
   for (const cwd of roots) { try { fs.rmSync(cwd, { recursive: true, force: true }); } catch { /* temporary root cleanup */ } }
