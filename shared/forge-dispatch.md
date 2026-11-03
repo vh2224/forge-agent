@@ -216,6 +216,7 @@ Where:
 | Unit Type | Estimated Duration (min) | Notes |
 |-----------|--------------------------|-------|
 | `plan-milestone` | 2–5 | Depends on milestone scope; complex boundary maps increase duration. |
+| `estimate-milestone` | unknown | Read-only forge-planner OPTIONS.json proposal before the roadmap; no duration inferred from this inventory. |
 | `plan-slice` | 1–3 | Typically fastest planning phase; few dependencies. |
 | `discuss-milestone` | 2–4 | Includes ambiguity scoring and user question rounds. |
 | `discuss-slice` | 1–3 | Focused on slice-level ambiguities; fewer questions than milestone. |
@@ -504,6 +505,14 @@ Fields:
 **Idempotency:** `S##-SYMBOL-CHECK.md` already exists → gate is a no-op (skip).
 
 **Advisory posture:** gate NEVER blocks `execute-task`. MISSING/AMBIGUOUS are documentation only. Future slices (e.g., S04-PRUNE) may consume this data to suggest import cleanup.
+
+### estimate-milestone
+
+Read-only `forge-planner` proposal for an enrolled new milestone before its roadmap.
+Use the executable `shared/templates/dispatch/estimate-milestone.md` template with
+`description`; return OPTIONS.json under the options schema. The owner materializes
+estimates and obtains the explicit live-attested selection before plan-milestone.
+This unit uses the same locked max tier as plan-milestone and grants no authority.
 
 ### plan-milestone
 
@@ -1316,7 +1325,7 @@ Applicability by `unit_type`:
 | `memory-extract` | resolved from `tier_models.light` | yes when the resolver selects a declared sidecar; native otherwise |
 | other preparation/closure units | resolved per unit | only when `forge-transport-capabilities.js` declares that exact unit; unsupported preparation routes refuse explicitly |
 
-`plan-milestone` is **never** covered by `workers:` (locked) — it stays on tier `max`/Fable regardless of prefs.
+`plan-milestone` and `estimate-milestone` are **never** covered by `workers:` (locked) — they stay on tier `max`, with the model resolved through `tier_models.max`.
 
 The `native` path passes the resolver result through
 `forge-native-invocation.js`; the adapter validates the actual host tool and
@@ -2113,7 +2122,7 @@ Materialization is **orchestrator-only** — codex never touches `.gsd/**`. Afte
 | `workers.timeout` | int (seconds) \| null | `null` (→ tier ceiling) | **Safety ceiling** per sidecar attempt, forwarded as `--timeout` via the resolver's `$WORKERS_TIMEOUT`. Absent/null → route tier ceiling (light/standard/heavy/max = 900/1800/3600/5400 s); explicit 1..86400 overrides; legacy `300` ignored with warning `legacy-300-ignored`; invalid → tier ceiling with warning. Source: `scripts/forge-worker-timeout.js resolveWorkerCeiling` (`WORKERS_TIMEOUT_SOURCE`). Liveness is the primary kill authority; reaching the ceiling with a live stream ends as `budget-exceeded-while-active` |
 | `workers.codex_model` | string (model id) | unset (`null`) | Legacy fallback for the sidecar `--model` when no routed Codex chain member leads; unset **and** no Codex chain → Codex CLI default. The flag itself is driven by `$SIDECAR_MODEL` (`sidecarModelFor`) |
 
-`plan-milestone` is intentionally **absent** from this table — it is never routed through `workers:` (locked; stays tier `max`/Fable). The scaffold that documents these keys (commented) ships in `forge-agent-prefs.jsonc § Workers Settings` (S05); the reader operates with the safe defaults above without it.
+`plan-milestone` and `estimate-milestone` are intentionally **absent** from this table — neither is routed through `workers:` (locked tier `max`, model through `tier_models.max`). The scaffold that documents these keys (commented) ships in `forge-agent-prefs.jsonc § Workers Settings` (S05); the reader operates with the safe defaults above without it.
 
 #### Domain metadata — format fixed by S02, emitted by S03
 

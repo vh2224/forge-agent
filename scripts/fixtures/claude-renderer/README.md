@@ -128,3 +128,33 @@ arquivos históricos 4.18.1 (`a58a005aea70eaa17c0ecfaf1cdf8965cdf9adb8c2678e756a
 e 4.19.0 (`f2b3e910445d2557f50aa4ced9e1b31498debc6b1cdd1ed05b452d8141b4307f`) ficam
 byte a byte iguais. Distribuição não prova interceptação de chamada bruta do host,
 obediência do modelo nem aceite humano.
+
+## Milestone time options (S02/T07, 2026-11-03)
+
+Measured through forge-claude-renderer.render with the exact normalized-dynamic
+SHA-256 formula documented above. Immutable owner pre-T07 capture: revision
+`0ee8dfdd9ffa0a4ca6dfafe928991a9125f6d573`, `scripts/fixtures/milestone-options/distribution-before.json`
+(SHA-256 `93fc65fb11e0b59104721da9281d9ac64ac789a2c8cbf19495fe46a8186cc8ff`).
+Sources: agents/forge-planner.md, agents/forge-worker.md, skills/forge-auto/SKILL.md,
+skills/forge-next/SKILL.md, skills/forge-new-milestone/SKILL.md, skills/forge-help/SKILL.md
+and shared/templates/dispatch/plan-slice.md. T05 already changed dispatch-templates
+and T04 changed configuration via effort.estimate-milestone before T07. These are
+intentional dependency changes; their old failed pin checks remain historical.
+
+- agents: `437d3c709908bb6d3babdfbb237e320847a65737edaaa54ca77ae8ccf7dbe662` to `64bbdc40320fe629f19c9e0ceb50256f03544d9d9b0385d416f1563b2abbd41a`.
+- skills: `9c4e882a828d6546e30e51aa3330817bee74391cd5395047eaee56a8b3490b01` to `3de92437ec378fa298349b408d1d3bf809ed95e35dcdaad0b9e54f24ef3f5000`.
+- dispatch-templates: `1d3003f9c370209188049ffa9f5377346990d3070341fe3f81ab26e641a54103` to `a304207c44a93bf68aa9fd220a888533d223c33a2ceea7e283154ef316f2a58e`.
+- configuration: `e8aa7391a8a71f70600274de8f7d49e19e1ea2206ee014b6504be4936b655271` to `c76a23d540a2602293ba45f8821419aa00d738eb08c538b85627596bcc560c3d`.
+
+Pre-T07 render (before updating the active pins):
+- dispatch-templates: `8fe26ee582718ff739d352cab1ae495f88b3044d167ed67e1666a51d2ef3d4de`.
+- configuration: `c76a23d540a2602293ba45f8821419aa00d738eb08c538b85627596bcc560c3d`.
+
+Exactly four active surfaces change. The other five and both historical goldens
+remain byte-identical. The dispatch registry has 248 retained classified calls
+before and after: zero added, zero removed, zero changed fingerprints. The
+removed forge-new-milestone inline planner was outside the registry scope; no
+call was fabricated to preserve a count. Smoke source changes only Section61;
+its distribution contract is executed separately in the communication suite.
+Full smoke remains an independent owner check. Projection does not prove client
+rendering, model comprehension, provider execution or human acceptance.

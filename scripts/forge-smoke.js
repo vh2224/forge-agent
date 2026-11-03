@@ -9598,10 +9598,12 @@ function smokeRoutingDomains() {
   const repo = path.dirname(SCRIPTS);
 
   const NEEDLE = 'ROUTING_DOMAINS';
+  // forge-new-milestone no longer carries an inline planner (S02/T07): its roadmap comes from
+  // the controller's plan-milestone unit, whose rendered template carries the placeholder.
   const EXPECTED = {
     'shared/forge-dispatch.md': 2,
     'skills/forge-task/SKILL.md': 1,
-    'skills/forge-new-milestone/SKILL.md': 1,
+    'skills/forge-new-milestone/SKILL.md': 0,
     'agents/forge-planner.md': 2,
   };
   const files = {
@@ -9633,10 +9635,13 @@ function smokeRoutingDomains() {
   }
 
   // (c) Inline-path mirrors derive via the canonical helper. The renderer now owns auto/next injection.
-  for (const name of ['skills/forge-task/SKILL.md', 'skills/forge-new-milestone/SKILL.md']) {
+  for (const name of ['skills/forge-task/SKILL.md']) {
     assert(contents[name].includes('forge-routing.js" --list-domains'),
       `(c) ${name} derives ROUTING_DOMAINS via forge-routing.js --list-domains`);
   }
+
+  assert(!/Agent\(\{\s*subagent_type:\s*["']forge-planner["']/.test(contents['skills/forge-new-milestone/SKILL.md']),
+    '(c) new milestone delegates roadmap planning to the controller after time selection');
 
   // (d) planner contract preserves open-set (never invent a domain key) and no-keyword-matching.
   const planner = contents['agents/forge-planner.md'];

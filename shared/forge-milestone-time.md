@@ -1,8 +1,8 @@
 # Contrato de tempo de milestone (v1)
 
 Fonte canônica do comportamento de tempo de milestone para os dois hosts (Claude e
-Codex). As skills `forge-auto`, `forge-next` e `forge-status` apontam para este
-arquivo (no repositório ou em `$FORGE_SHARED_DIR`, instalado em
+Codex). As skills `forge-auto`, `forge-next`, `forge-new-milestone` e `forge-status`
+apontam para este arquivo (no repositório ou em `$FORGE_SHARED_DIR`, instalado em
 `${FORGE_HOME:-~/.forge-agent}/shared`). Ele descreve o que o código faz; texto de
 skill, de contrato ou JSON importado não concede autoridade, não aprova extensão e
 não substitui a guarda executável.
@@ -215,6 +215,121 @@ não carrega testemunha; nunca se fabrica resultado de worker.
   `--admit-transport --cwd <owner> --milestone <M> --unit <tipo/id> --json`.
 - `node scripts/forge-milestone-time-drain.js --inspect|--checkpoint --cwd <owner> --milestone <M> --json`
   (saída 2 quando o drain não está completo).
+
+## Opções de prazo antes do roadmap (S02)
+
+Módulos: `scripts/forge-milestone-time-selection.js` (adesão, fronteira do owner,
+rodadas, decisão, bloco de prompt, regra do roadmap, projeção de vínculo e retomada),
+`scripts/forge-milestone-options.js` (validador, estimador, render e rodadas),
+`scripts/forge-milestone-roadmap-time.js` (conformidade pura) e o schema
+`shared/schemas/forge-milestone-options.schema.json`.
+
+### Adesão
+
+- Só milestone nova criada pelas entradas modernas entra no fluxo: `forge-new-milestone`,
+  e o bootstrap de milestone nova de `forge-auto` e `forge-next` gravam
+  `.gsd/forge/time/<M>/enrollment.json` (imutável) com
+  `forge-milestone-time-selection.js --enroll --source forge-new-milestone|forge-auto|forge-next --cwd <owner> --milestone <M>`
+  antes da primeira seleção. Recusa (saída 3) para a criação com diagnóstico.
+- Sem adesão nada muda: milestones atuais, milestones com roadmap e tasks avulsas
+  seguem a seleção, as transações, os eventos, os prompts e os aceites de antes. A
+  adesão é recusada quando o ROADMAP já existe (`time-options-roadmap-exists`).
+
+### Proposta, registro e política do estimador
+
+- Sem roadmap, o controlador seleciona `estimate-milestone/<M>` (somente leitura,
+  `forge-planner`, tier `max` travado como `plan-milestone`, effort `medium`). O
+  worker devolve só `<M>-OPTIONS.json` pelo schema v1: três posições (`curta`,
+  `media`, `longa`) com DAG preliminar, verificações, revisão, adiamentos com
+  consentimento e eventual task ligada, sem durações (só contagens de fase e
+  julgamento rotulado). Texto do worker é dado: `isPublicData` e envelope DATA.
+- O owner materializa, na fronteira segura do `next`, o registro imutável
+  `options/<options_sha256>.json` e renderiza `<M>-OPTIONS.md`. A identidade do
+  produtor (documentos, raiz física do código e arquivos investigados) é congelada
+  antes do begin; mudança de fonte antes da escolha pede nova estimativa com chave
+  nova; depois da escolha o registro é histórico.
+- Estimador v1, determinístico e sem constante de duração: p50/p90 por fase de
+  sucesso e razão de sobrecarga de milestones fechadas, execução serializada sem
+  crédito de paralelismo, faixa, teto proposto (topo da faixa defensável) e caminho
+  crítico. Histórico escasso com bounds atribuíveis completos dá faixa de confiança
+  baixa; sem base completa a posição fica `evidence-insufficient`, e `infeasible`
+  traz motivo; nenhuma das duas recebe número. Esperas não classificadas continuam
+  desconhecidas, nunca descontadas.
+
+### Rodadas e respostas canônicas
+
+- Uma decisão por rodada, duas ou três opções, recomendação primeiro e nada
+  pré-selecionado: `forge-milestone-time-selection.js --round` abre a rodada canônica
+  em `forge-pending-questions`; o host a apresenta por `forge-question-channel.js
+  --select` e `--present` e espera de forma econômica.
+- Respostas canônicas: `mode:position`, `mode:operator-ceiling`, `option:<id>`,
+  `operator-ceiling:<ms>` (texto livre de 1 minuto a 365 dias), `no-contract`,
+  `re-estimate`, `linked-task:create-and-start-after-proven-completion|create-without-auto-start|none`
+  e `reduce-scope:<itens>`. `--answer --round <ID> --response <texto> --source user-text|tool-answer`
+  grava somente a resposta explícita do operador; vazia, estrangeira, parcial ou
+  conflitante não avança.
+- `re-estimate` não ativa contrato nem cria task: a retomada segue para a estimativa
+  da base atual.
+
+### Decisão e modelo de integração do adaptador vivo
+
+- `--decide` só decide quando o host embute `main(argv, io, liveAdapter)`: o
+  `liveAdapter.getDecisionHandle(request)` do host pede ao resolvedor de
+  `createDecisionAuthority` um handle opaco e escopado para aquela pergunta. O
+  resolvedor vivo devolve somente a resposta que o host observou ao vivo, naquela
+  conversa, para aquela referência; nunca lê arquivo, JSON, flag ou prompt, e o
+  handle nunca é persistido.
+- A CLI avulsa recusa com `time-decision-attestation-required` sem escrita; a decisão
+  continua pendente e não se repete a chamada com outros argumentos.
+- A decisão confere cada resposta persistida, grava `selection.json` e ativa o
+  contrato pela API da S01. Queda entre os dois passos é `activation-pending` e retoma
+  de forma idempotente com autoridade viva nova.
+
+### Continuação `resume-time-option`
+
+- Enquanto não há decisão, `next` bloqueia com `time-option-pending`; o snapshot guarda
+  `time_option_block {milestone, options_sha256}`. Depois da decisão atestada,
+  `forge-long-workflow-adapter.js --command resume-time-option` com o mesmo snapshot
+  devolve `time-option-ready` (segue para `plan-milestone`) ou
+  `time-option-reestimate-ready`; `time-option-resume-invalid` e os demais códigos
+  param. Nada edita o snapshot nem fabrica checkpoint.
+
+### Seção de alocação, conformidade e alocação delegada
+
+- Com contrato ativo, o prompt de `plan-milestone` traz `{TIME_SELECTION}` (bloco do
+  owner em DATA) e o ROADMAP declara exatamente uma `## Alocação de tempo` com um
+  bloco `json`: opção, posição, hash das opções, hash do contrato BASE, alocação por
+  slice, integração, revisão e correções (positiva, até o teto, sem piso obrigatório),
+  dependências, adiados e a divisão com a task ligada inalterada, sem adiamento novo.
+- A conformidade é validada no aceite (sidecar, nativo e reconciliação), na seleção do
+  controlador e na fronteira do owner: `time-roadmap-nonconformant`,
+  `time-allocation-pending` e `time-scope-unallocated` bloqueiam.
+- A alocação conforme vira emenda `allocation` com `delegation` ligada à decisão de
+  ativação, sem pergunta humana redundante; realocações técnicas dentro da delegação
+  são append-only. A identidade estrutural do roadmap ignora caixas marcadas; mudança
+  estrutural posterior fica `scope-unallocated` até decisão explícita.
+
+### Vínculo das tasks à alocação vigente
+
+- O prompt de `plan-slice` traz `{TASK_NODE_BINDING}`: a projeção atual
+  `taskBindingContext` da slice (identificadores alocados, partes de refinamento,
+  arestas, dependências de slice e hashes), relida do owner físico, completa e sem
+  corte, e ao lado dela o mesmo `{TIME_SELECTION}`. Vazio para milestone sem adesão,
+  sem contrato ou só com contrato da S01; estado pendente, estrangeiro ou
+  ilegível recusa o render antes de qualquer provider.
+- Cada task publica `time_options_sha256`, `time_position_id` e `time_node`; com o
+  vínculo não há meta de 1 a 7 tasks. `depends` continua local; barreiras entre
+  slices vêm do DAG validado do roadmap e da prova histórica canônica.
+
+### Códigos e limites da S02
+
+- Códigos: `time-option-pending`, `time-options-invalid`, `time-roadmap-nonconformant`,
+  `time-allocation-pending`, `time-scope-unallocated`, `time-option-ready`,
+  `time-option-resume-invalid` e os bloqueios do DAG de tasks do controlador.
+- Sem crédito de paralelismo; histórico só de milestones fechadas, com leitor limitado
+  (até 64 fontes, 2 MiB por fonte) e sem truncamento silencioso.
+- Milestones sem adesão ou com roadmap existente ficam fora do fluxo; painel, dashboard,
+  statusline e app não ganham campos de tempo.
 
 ## Limites
 

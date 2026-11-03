@@ -64,6 +64,211 @@ function between(text, start, end) {
   return text.slice(from, to);
 }
 function taskCreateLines(text) { return text.split('\n').filter(line => line.includes('TaskCreate({')); }
+
+// S02/T07. These are source/distribution contracts, never observations of client
+// comprehension, live provider execution or human acceptance. Immutable values
+// below came from the owner's pre-T07 capture, independently of the current render.
+const crypto = require('crypto');
+const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+const baselineBytes = fs.readFileSync(path.join(root, 'scripts/fixtures/milestone-options/distribution-before.json'));
+const before = JSON.parse(baselineBytes);
+const goldenPath = 'scripts/fixtures/claude-renderer/claude-memory-v2.golden.json';
+const golden = JSON.parse(read(goldenPath));
+const planner = read('agents/forge-planner.md');
+const newMilestone = read('skills/forge-new-milestone/SKILL.md');
+const pinReadme = read('scripts/fixtures/claude-renderer/README.md');
+const sampleReadme = read('docs/communication-evaluation/README.md');
+const sampleBytes = fs.readFileSync(path.join(root, before.samples.file), 'utf8');
+const samples = JSON.parse(sampleBytes);
+const sourceGuard = require('./forge-dispatch-source-guard');
+const smoke = read('scripts/forge-smoke.js');
+const smokeStart = smoke.indexOf('// ── Section 61:');
+const smokeEnd = smoke.indexOf('// ── Section 62:', smokeStart);
+const section61 = smoke.slice(smokeStart, smokeEnd);
+const t07Labels = [];
+function t07(name, fn) {
+  test(`T07 distribution: ${name}`, () => {
+    fn();
+    const line = `ok - T07 distribution: ${name}`;
+    t07Labels.push(line);
+    console.log(line);
+  });
+}
+function atPointer(value, pointer) {
+  return pointer.split('/').slice(1).reduce((current, key) => current[key], value);
+}
+function checkPins() {
+  const renderer = require('./forge-claude-renderer');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-t07-pins-')); temps.push(temp);
+  const report = renderer.render({ repo: root, projectRoot: temp, claudeHome: path.join(temp, 'host'), forgeHome: path.join(temp, 'forge') });
+  assert.strictEqual(golden.surfaces.length, 9);
+  assert.deepStrictEqual(golden.surfaces.map(({ sha256, ...identity }) => identity),
+    before.active_golden_before.surfaces.map(({ sha256, ...identity }) => identity));
+  const old = new Map(before.active_golden_before.surfaces.map(row => [row.source_id, row.sha256]));
+  const changed = [];
+  for (const surface of golden.surfaces) {
+    const payload = report.artifacts.filter(row => row.source_id === surface.source_id).sort((a, b) => a.source.localeCompare(b.source))
+      .map(row => `${row.source}\0${row.content.replace(/version=\d+\.\d+\.\d+/g, 'version=<dynamic>')}`).join('\0');
+    assert.strictEqual(hash(payload), surface.sha256, `final measured ${surface.source_id}`);
+    if (old.get(surface.source_id) !== surface.sha256) {
+      changed.push(surface.source_id);
+      assert(pinReadme.includes(old.get(surface.source_id)) && pinReadme.includes(surface.sha256), `documented actual ${surface.source_id}`);
+    }
+  }
+  assert.deepStrictEqual(changed.sort(), [...before.allowed_active_changes].sort(), 'only four of nine active surfaces');
+  for (const historical of before.historical_goldens) assert.strictEqual(hash(fs.readFileSync(path.join(root, historical.path))), historical.sha256, historical.path);
+  // Every unrelated input captured by the owner still has its exact original bytes.
+  const allowed = new Set([goldenPath, 'agents/forge-planner.md', 'agents/forge-worker.md', 'skills/forge-auto/SKILL.md',
+    'skills/forge-next/SKILL.md', 'skills/forge-help/SKILL.md', 'skills/forge-new-milestone/SKILL.md',
+    'shared/templates/dispatch/plan-slice.md', before.samples.file, 'scripts/forge-dispatch-source-guard.js', 'scripts/forge-smoke.js']);
+  for (const source of before.sources) if (!allowed.has(source.path)) {
+    assert.strictEqual(hash(fs.readFileSync(path.join(root, source.path))), source.sha256, `unchanged source ${source.path}`);
+  }
+  assert(pinReadme.includes(before.provenance.source_revision));
+  assert(pinReadme.includes('T05') && pinReadme.includes('configuration') && pinReadme.includes('forge-claude-renderer.render'));
+}
+function checkSamples() {
+  const nextHash = hash(fs.readFileSync(path.join(root, 'skills/forge-next/SKILL.md')));
+  let restored = sampleBytes;
+  for (const old of before.samples.next_samples) {
+    const current = atPointer(samples, old.pointer);
+    assert.deepStrictEqual({ ...current.source, sha256: old.source.sha256 }, old.source, `${old.pointer} metadata`);
+    assert.strictEqual(current.text, old.text, 'quoted text is unchanged');
+    assert(skills['forge-next'].includes(current.text), 'quotation remains literal');
+    assert.strictEqual(current.source.sha256, nextHash);
+    assert(sampleReadme.includes(old.source.sha256) && sampleReadme.includes(nextHash), 'document actual source hashes');
+  }
+  // Restore only the two permitted SHA values and prove equality of ALL sample bytes.
+  restored = restored.split(nextHash).join(before.samples.next_samples[0].source.sha256);
+  assert.strictEqual(hash(restored), before.samples.sha256, 'only literal source.sha256 fields changed');
+}
+function checkRegistry() {
+  const audit = sourceGuard.audit({ root });
+  assert.strictEqual(audit.ok, true, JSON.stringify(audit));
+  const old = new Map(before.dispatch_registry.rows.map(row => [row.id, row]));
+  const current = sourceGuard.SOURCE_REGISTRY;
+  assert.strictEqual(current.length, 248, 'actual registry count (inline planner was outside registry scope)');
+  assert.strictEqual(current.length, before.dispatch_registry.rows.length, 'measured count delta zero');
+  const changed = [];
+  for (const row of current) {
+    const prior = old.get(row.id); assert(prior, `no silent new/removed call ${row.id}`);
+    assert.deepStrictEqual({ ...row, fingerprint: prior.fingerprint }, prior, `retained classification/reason ${row.id}`);
+    if (row.fingerprint !== prior.fingerprint) changed.push(row.id);
+  }
+  assert.deepStrictEqual(changed, [], 'actual measurement found no fingerprint drift; no artificial registry edit');
+  for (const id of changed) assert(pinReadme.includes(id), `document changed registry row ${id}`);
+}
+function checkSmoke() {
+  assert(smokeStart >= 0 && smokeEnd > smokeStart);
+  assert.strictEqual(hash(smoke.slice(0, smokeStart) + '<allowed-section61>\n' + smoke.slice(smokeEnd)), before.smoke.outside_section61_sha256,
+    'only section61 changed');
+  assert.notStrictEqual(hash(section61), before.smoke.section61_sha256);
+  assert.strictEqual(count(planner, 'ROUTING_DOMAINS'), 2);
+  assert.strictEqual(count(newMilestone, 'ROUTING_DOMAINS'), 0);
+  assert(/open-set/.test(planner) && /No keyword auto-detection/.test(planner));
+  // Execute JUST the exact shipping Section61 with its actual final sources. This
+  // is a distribution contract check, not a claim that the full smoke ran.
+  const passes = [];
+  require('vm').runInNewContext(`${section61}\nsmokeRoutingDomains();`, {
+    fs, path, SCRIPTS: path.join(root, 'scripts'), assert: (condition, message) => assert(condition, message),
+    process: { stdout: { write() {} } }, pass: message => passes.push(message), __filename: path.join(root, 'scripts/forge-smoke.js'),
+  });
+  assert.strictEqual(passes.length, 1);
+  assert(section61.includes("'skills/forge-new-milestone/SKILL.md': 0"));
+}
+function checkTimeSkill(name, text) {
+  assert(text.includes('--phase estimate-milestone'), `${name} STATE phase`);
+  const enrollment = `--enroll --source ${name}`;
+  assert(text.includes(enrollment), `${name} enrollment`);
+  assert(text.indexOf(enrollment) < text.indexOf('## Bidirectional delivery'), `${name} enrollment before dispatch`);
+  assert(text.includes('Milestone time enrollment failed') && text.includes('stop before'), `${name} enrollment refusal`);
+  assert(text.includes('estimate-milestone, plan-milestone, complete-slice'), `${name} artifacts`);
+  assert(text.includes('estimate-milestone|plan-milestone|plan-slice|research-*|discuss-*)'), `${name} readonly pattern`);
+  assert.strictEqual(count(text, 'case "$unit_type" in estimate-milestone|plan-milestone|plan-slice|research-*|discuss-*)'), 2, `${name} before/after guard`);
+  assert(text.includes('`estimate-milestone` → `.gsd/milestones/{M###}/{M###}-OPTIONS.json`'), `${name} memory source`);
+  assert(text.includes('| estimate-milestone | ⏱ |'), `${name} icon`);
+  assert(text.includes('case "$unit_type" in estimate-milestone|plan-milestone)'), `${name} description production`);
+  assert(text.includes('${UNIT_DESCRIPTION:+--description "$UNIT_DESCRIPTION"}'), `${name} render description`);
+}
+function checkChoiceSkill(name, text) {
+  const block = between(text, 'Opções de prazo (só milestone com adesão;', '## Bidirectional delivery');
+  for (const token of ['time-option-pending', '--round', '--answer', '--response', '--source user-text|tool-answer',
+    'forge-question-channel.js --select', '--present', '--decide', 'main(argv, io, liveAdapter)', 'liveAdapter.getDecisionHandle',
+    'time-decision-attestation-required', 'forge-long-workflow-adapter.js --command resume-time-option', 'mesmo snapshot', 'econômica',
+    'Nenhum JSON, flag', 'silêncio aprova', 'Evidência insuficiente:', 'Posição inviável:', 'Nenhuma posição viável:',
+    'Roadmap não conforme:', 'Escopo não alocado:', 'Decisão pendente:']) assert(block.includes(token), `${name}: ${token}`);
+  assert(block.includes('o próprio `next`') && block.includes('fronteira segura'), `${name} canonical materialization`);
+}
+
+t07('owner baseline proves scoped pins, samples, registry and smoke changes', () => {
+  assert.strictEqual(hash(baselineBytes), '93fc65fb11e0b59104721da9281d9ac64ac789a2c8cbf19495fe46a8186cc8ff', 'exact owner baseline bytes');
+  assert.strictEqual(before.provenance.source_revision, '0ee8dfdd9ffa0a4ca6dfafe928991a9125f6d573');
+  assert.strictEqual(before.provenance.not_post_change_verification, true);
+  checkPins(); checkSamples(); checkRegistry(); checkSmoke();
+});
+t07('planner estimate and allocation instructions preserve routing contracts', () => {
+  const estimate = between(planner, '## For milestone estimate (estimate-milestone)', '## For milestone planning');
+  for (const token of ['Read-only', 'OPTIONS.json', 'forge-milestone-options.schema.json', 'No durations', 'phase counts', 'labelled judgments',
+    'curta', 'media', 'longa', 'infeasible', 'consent: required', 'Indispensable tests, integration, review and corrections', 'independence and isolation',
+    'partial', 'single-line', 'isPublicData']) assert(estimate.includes(token), token);
+  const allocation = between(planner, 'Time allocation:', 'Write `M###-ROADMAP.md`');
+  for (const token of ['active contract', 'exactly one `## Alocação de tempo`', 'base contract hashes unchanged', 'every slice, integration, review and corrections',
+    'at most the ceiling', 'no floor', 'no new deferral', 'linked-task split']) assert(allocation.includes(token), token);
+  const binding = between(planner, 'Task count and binding:', 'Each `T##-PLAN.md`:');
+  for (const token of ['1-7 tasks', 'no numeric target or quota', 'one identifier per task', 'time_options_sha256', 'time_position_id', 'time_node',
+    'Every listed edge', 'Depends stays local', 'canonical historical task/slice proof', 'never merge identifiers']) assert(binding.includes(token), token);
+  assert.strictEqual(count(planner, 'ROUTING_DOMAINS'), 2);
+});
+t07('lifecycle and time contracts describe live authority and conformant allocation', () => {
+  const lifecycle = read('shared/forge-lifecycle.md'), time = read('shared/forge-milestone-time.md');
+  assert(lifecycle.includes('`plan-*` and `estimate-milestone`') && lifecycle.includes('forge-planner'));
+  for (const token of ['time-option-pending', 'resume-time-option', 'same snapshot']) assert(lifecycle.includes(token), token);
+  for (const token of ['### Adesão', '### Proposta, registro e política do estimador', '### Rodadas e respostas canônicas',
+    'liveAdapter.getDecisionHandle', 'observou ao vivo', 'nunca lê arquivo, JSON, flag ou prompt', 'CLI avulsa recusa',
+    'resume-time-option', 'BASE', 'sem piso obrigatório', 'append-only', 'scope-unallocated', 'sem crédito de paralelismo',
+    'TASK_NODE_BINDING', 'taskBindingContext', 'completa e sem', 'depends', '64 fontes', '2 MiB', 'não ganham campos de tempo']) {
+    assert(time.toLowerCase().includes(token.toLowerCase()), token);
+  }
+});
+t07('both host skills enroll before selection and support estimate artifacts', () => {
+  for (const name of ['forge-auto', 'forge-next']) checkTimeSkill(name, skills[name]);
+});
+t07('pending choice commands preserve explicit answers and live decision authority', () => {
+  for (const name of ['forge-auto', 'forge-next']) checkChoiceSkill(name, skills[name]);
+});
+t07('new milestone preserves preparation and delegates roadmap after choice', () => {
+  for (const step of ['## Step 1 ', '## Step 1.5 ', '## Step 2 ', '## Step 3 ', '## Step 4 ', '## Step 5 ']) assert(newMilestone.includes(step), step);
+  const creation = between(newMilestone, '## Step 5 ', '## Step 6 ');
+  for (const token of ['forge-state.js', '--phase estimate-milestone', 'mkdir -p "$WORKING_DIR/.gsd/forge"', '--enroll --source forge-new-milestone',
+    'forge-personal-context.js', '--intent create', 'skills/forge-next/SKILL.md', 'estimate-milestone', 'resume-time-option',
+    'No roadmap exists before the decision', 'report the pending', 'stop this step']) assert(creation.includes(token), token);
+  assert(!/Agent\(/.test(creation), 'no inline planner');
+  assert(creation.indexOf('--phase estimate-milestone') < creation.indexOf('--enroll') && creation.indexOf('--enroll') < creation.indexOf('--intent create'));
+  assert(newMilestone.includes('Only when `.gsd/milestones/{MILESTONE_ID}/{MILESTONE_ID}-ROADMAP.md` exists'));
+  assert(newMilestone.slice(newMilestone.indexOf('## Step 7 ')).includes('do not write or overwrite it here'));
+});
+t07('shared unit, tier, phase and agent lists agree on estimate milestone', () => {
+  for (const file of ['shared/forge-bidirectional-sidecar.md', 'shared/forge-dispatch.md', 'shared/forge-tiers.md', 'shared/forge-state.md',
+    'agents/forge-worker.md', 'skills/forge-help/SKILL.md']) assert(read(file).includes('estimate-milestone'), file);
+  assert(read('shared/forge-tiers.md').includes('| `estimate-milestone` | max |'));
+  const dispatch = read('shared/forge-dispatch.md');
+  assert(dispatch.includes('`plan-milestone` and `estimate-milestone` are **never** covered by `workers:`'));
+  assert(dispatch.includes('Read-only forge-planner OPTIONS.json'));
+  assert(read('shared/forge-state.md').includes('resume-time-option'));
+});
+t07('four active surface pins change while five and historical goldens stay intact', checkPins);
+t07('cited text and dispatch classifications survive measured fingerprint repins', () => { checkSamples(); checkRegistry(); checkSmoke(); });
+t07('real Codex projection retains enrolled choice and native read-only contracts', () => {
+  const renderer = require('./forge-codex-renderer');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-t07-codex-')); temps.push(temp);
+  const report = renderer.render({ repo: root, projectRoot: temp, codexHome: path.join(temp, 'host'), forgeHome: path.join(temp, 'forge'), ...renderer.PRODUCTION_DISPATCH_DIALECT });
+  const projected = name => report.artifacts.find(row => row.source_id === 'skills' && row.source === `skills/${name}/SKILL.md`).content.replace(/\r\n/g, '\n');
+  for (const name of ['forge-auto', 'forge-next']) { checkTimeSkill(name, projected(name)); checkChoiceSkill(name, projected(name)); }
+  const creation = between(projected('forge-new-milestone'), '## Step 5 ', '## Step 6 ');
+  assert(creation.includes('--enroll --source forge-new-milestone') && creation.includes('skills/forge-next/SKILL.md'));
+  assert(!/Agent\(/.test(creation));
+});
+
 // Normative lines of the contract: headings and every substantive sentence line.
 function normativeLines() {
   return contract.split('\n').map(line => line.trim()).filter(line => line.startsWith('#') || line.length >= 40);

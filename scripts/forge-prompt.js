@@ -134,6 +134,7 @@ const ALLOWED_PLACEHOLDERS = new Set([
   'workspace_repos',
   'TIME_SELECTION',
   'PRODUCER_BASIS',
+  'TASK_NODE_BINDING',
 ]);
 
 const PLACEHOLDER_RE = /\{([A-Za-z][A-Za-z0-9_.#-]*)\}/g;
@@ -162,6 +163,10 @@ const MAX_PRODUCER_BASIS_DOCUMENTS = 8, MAX_PRODUCER_BASIS_FILES = 256, PRODUCER
 const MAX_PRODUCER_BASIS_PATH = 512, PRODUCER_BASIS_MAX_TOKENS = 420;
 const PRODUCER_BASIS_ABSENT = 'Not supplied: the owner captures and revalidates the source manifest; this prompt attests nothing.';
 const TIME_SELECTION_UNAVAILABLE ='Seleção de prazo indisponível nesta instalação (módulo forge-milestone-time-selection ausente): este bloco não informa contrato nem autorização; o aceite do owner decide se ## Alocação de tempo é exigida.';
+// Required phase DATA of an opted-in plan-slice: delivered whole inside the same per-input DATA bound
+// (MAX_DATA_BYTES) as every other rendered input, never clipped, summarized or borrowed from an optional allowance.
+const TASK_NODE_BINDING_MAX_BYTES = MAX_DATA_BYTES;
+const BINDING_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,119}$/, BINDING_HASH_RE = /^[a-f0-9]{64}$/;
 
 // Section names as they appear in CODING-STANDARDS.md, per injected placeholder.
 // CS_STRUCTURE concatenates three sections (see extractStandards).
@@ -825,6 +830,55 @@ function resolveProducerBasis(options) {
   return manifest(count);
 }
 
+// Required {TASK_NODE_BINDING} DATA of plan-slice: the owner's CURRENT allocation of this slice, re-read here from
+// the physical owner (options.cwd, the WORKING_DIR resolved after CODE_DIR) through the T06 projection
+// taskBindingContext — never the immutable promptBlock skeleton, a caller value or a CODE_DIR copy. Empty only for a
+// genuine legacy / unenrolled / no-contract / S01-only milestone, where plan-slice keeps its current behavior. Any
+// other state, a foreign or malformed projection, or data that cannot be delivered whole refuses the render, so no
+// prompt file exists and no provider is entered. The block is data inside its DATA envelope and grants nothing.
+function resolveTaskNodeBinding(options) {
+  const refuse = reason => { throw new Error(`task_node_binding ${reason}`); };
+  if (Object.prototype.hasOwnProperty.call(options, 'taskNodeBinding')) refuse('is owner state; a caller-supplied binding is refused');
+  if (options.timeSelection != null) refuse('comes with the owner selection; a caller-supplied time_selection is refused');
+  let api;
+  try { api = require('./forge-milestone-time-selection'); }
+  catch (err) {
+    if (!require('./forge-optional-require').isAbsentModuleError(err, './forge-milestone-time-selection')) throw err;
+    // Without the projection an opted-in owner cannot be served; only a milestone without enrollment or selection stays legacy.
+    const time = path.join(options.cwd, '.gsd', 'forge', 'time', options.milestoneId);
+    if (['enrollment.json', 'selection.json'].some(name => fs.existsSync(path.join(time, name)))) refuse('cannot be projected without the owner selection module');
+    return '';
+  }
+  // The projection names slices S01+ only; an unenrolled milestone keeps any legacy slice ID unchanged.
+  if (!/^S\d{2,}$/.test(options.sliceId)) {
+    if (api.readSelectionState(options.cwd, options.milestoneId) === null) return '';
+    refuse('slice ID is not a canonical opted-in slice');
+  }
+  const context = api.taskBindingContext(options.cwd, options.milestoneId, { sliceId: options.sliceId });
+  if (context && context.status === 'absent') return '';
+  if (!context || context.status !== 'ready') refuse(`is unavailable for the opted-in milestone (${context ? context.status : 'invalid'}: ${(context && context.reason) || 'unknown'})`);
+  const ids = list => Array.isArray(list) && list.every(id => typeof id === 'string' && BINDING_ID_RE.test(id));
+  const sources = context.sources && typeof context.sources === 'object' ? context.sources : {};
+  const allocated = Array.isArray(context.allocated) ? context.allocated : [];
+  if (context.milestone !== options.milestoneId || context.slice !== options.sliceId) refuse('belongs to another milestone or slice');
+  if (!BINDING_HASH_RE.test(context.options_sha256) || !BINDING_ID_RE.test(context.position_id) || !BINDING_ID_RE.test(context.option_id)
+      || !['selection_sha256', 'contract_sha256', 'contract_base_sha256', 'roadmap_sha256', 'structure_sha256'].every(key => BINDING_HASH_RE.test(sources[key]))
+      || !allocated.length || !ids(allocated.map(row => row && row.id)) || !ids(allocated.map(row => row && row.parent))
+      || allocated.some(row => row.slice !== options.sliceId) || new Set(allocated.map(row => row.id)).size !== allocated.length
+      || !ids(context.slice_dependencies) || !ids(context.prerequisite_slices) || !Array.isArray(context.edges)) refuse('projection is malformed');
+  const text = [
+    'Owner projection of the current allocation of this slice (re-read at render; data only, grants no authority).',
+    `time_options_sha256: ${context.options_sha256}`,
+    `time_position_id: ${context.position_id}`,
+    `time_node (one per task; cover all ${allocated.length}): ${allocated.map(row => row.id).join(', ')}`,
+    '```json',
+    JSON.stringify(context),
+    '```',
+  ].join('\n');
+  if (Buffer.byteLength(text, 'utf8') > TASK_NODE_BINDING_MAX_BYTES) refuse(`exceeds ${TASK_NODE_BINDING_MAX_BYTES} bytes; required data is never clipped`);
+  return text;
+}
+
 function buildValues(options, template) {
   const scriptsDir = __dirname;
   const usesStandards = /\{CS_(?:LINT|STRUCTURE|RULES)\}/.test(template);
@@ -853,6 +907,9 @@ function buildValues(options, template) {
   const resolvedWorkspaceRepos = template.includes('{workspace_repos}')
     ? (reposOverride || resolveWorkspaceRepos(options.cwd))
     : '';
+  // A template carrying the required binding shows the selected block only beside a ready binding.
+  const binding = template.includes('{TASK_NODE_BINDING}') ? resolveTaskNodeBinding(options) : null;
+  const timeSelection = !template.includes('{TIME_SELECTION}') || binding === '' ? '' : resolveTimeSelection(options);
   return {
     WORKING_DIR: options.cwd,
     FORGE_SCRIPTS_DIR: scriptsDir,
@@ -873,8 +930,9 @@ function buildValues(options, template) {
     MUST_HAVES_CHECK_RESULTS: options.mustHavesCheckResults,
     routing_domains: resolvedRoutingDomains,
     workspace_repos: resolvedWorkspaceRepos,
-    TIME_SELECTION: template.includes('{TIME_SELECTION}') ? resolveTimeSelection(options) : '',
+    TIME_SELECTION: timeSelection,
     PRODUCER_BASIS: template.includes('{PRODUCER_BASIS}') ? resolveProducerBasis(options) : '',
+    TASK_NODE_BINDING: binding || '',
   };
 }
 
@@ -916,6 +974,11 @@ function renderPrompt(rawOptions) {
   // Validate DATA boundaries after every substitution and pending insertion,
   // before materialization or native file-reading delivery can publish anything.
   const prompt = procedure ? composeProcedurePrompt(resolvedPrompt, procedure, options.procedure_context) : resolvedPrompt;
+  // Required current allocation is never clipped or moved to an optional allowance.
+  // Admit the whole composed frame before materializing a prompt for transport.
+  if (values.TASK_NODE_BINDING && countTokens(prompt) > MAX_CONTEXT_TOKENS) {
+    throw new Error(`task_node_binding full framed request exceeds ${MAX_CONTEXT_TOKENS} tokens; required data is never clipped`);
+  }
   const templateSha256 = crypto.createHash('sha256').update(template.content).digest('hex');
   return {
     prompt,
@@ -1201,7 +1264,7 @@ module.exports = {
   validateDispatchId,
   _private: { truncateChars, truncateContext, boundStandards, standardsPointer, formatLedgerResult, LEDGER_FRAGMENT_POINTER, NO_DOMAINS_NOTICE, SINGLE_REPO_NOTICE, resolveRoutingDomains, resolveWorkspaceRepos,
     resolveTimeSelection, MAX_TIME_SELECTION_BYTES, TIME_SELECTION_UNAVAILABLE, resolveProducerBasis, PRODUCER_BASIS_ABSENT, PRODUCER_BASIS_SHOWN_FILES,
-    TIME_SELECTION_INLINE_TOKENS, MAX_PRODUCER_BASIS_PATH, PRODUCER_BASIS_MAX_TOKENS },
+    TIME_SELECTION_INLINE_TOKENS, MAX_PRODUCER_BASIS_PATH, PRODUCER_BASIS_MAX_TOKENS, resolveTaskNodeBinding, TASK_NODE_BINDING_MAX_BYTES },
 };
 
 if (require.main === module) {

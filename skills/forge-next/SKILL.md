@@ -85,9 +85,14 @@ WORKING_DIR=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).project 
 if [ "$RUN_KIND" = "milestone" ] && [ "$STATUS" = "activate-new" ]; then
   PER_MILESTONE_STATE="$WORKING_DIR/.gsd/milestones/$RUN_ID/$RUN_ID-STATE.md"
   if [ ! -f "$PER_MILESTONE_STATE" ]; then
-    mkdir -p "$WORKING_DIR/.gsd/milestones/$RUN_ID" || exit 1
-    if ! node "$FORGE_SCRIPTS_DIR/forge-state.js" --create "$RUN_ID" --phase plan-milestone --next-action "Plan milestone $RUN_ID" --cwd "$WORKING_DIR" > /dev/null; then
+    mkdir -p "$WORKING_DIR/.gsd/milestones/$RUN_ID" "$WORKING_DIR/.gsd/forge" || exit 1
+    if ! node "$FORGE_SCRIPTS_DIR/forge-state.js" --create "$RUN_ID" --phase estimate-milestone --next-action "Estimate time options for milestone $RUN_ID" --cwd "$WORKING_DIR" > /dev/null; then
       echo "Milestone bootstrap failed for $RUN_ID; stop before binding or dispatch." >&2
+      exit 1
+    fi
+    # New milestone only: time options enrollment before the first selection (§ Tempo da milestone).
+    if ! node "$FORGE_SCRIPTS_DIR/forge-milestone-time-selection.js" --enroll --source forge-next --cwd "$WORKING_DIR" --milestone "$RUN_ID"; then
+      echo "Milestone time enrollment failed for $RUN_ID; stop before selection or dispatch." >&2
       exit 1
     fi
   fi
@@ -191,6 +196,35 @@ explícita (`reenter`); `budget-extension-required`, `budget-checkpoint-required
 pendente. Claim retido exige os adaptadores vivos do host; pelo CLI a prova não se
 renova e a retomada recusa.
 
+Opções de prazo (só milestone com adesão; § Opções de prazo antes do roadmap do
+contrato): sem roadmap, o adaptador seleciona `estimate-milestone`, unidade de artefato
+somente leitura do `forge-planner`. Depois do aceite, o próprio `next` do adaptador
+materializa as opções na fronteira segura; enquanto não há escolha, ele devolve
+`blocked` com `time-option-pending`. Nesse bloqueio:
+1. Abra a rodada (o `next` já materializou o registro quando ela ainda não existe):
+   `node "$FORGE_SCRIPTS_DIR/forge-milestone-time-selection.js" --round --cwd "$WORKING_DIR" --milestone "$RUN_ID" --json`.
+2. Apresente essa única decisão pelo canal de `forge-question-channel.js --select`
+   e `--present` (recomendação primeiro, nada pré-selecionado) e faça a espera
+   econômica do contrato de interação; esta execução para sem resposta.
+3. Grave só a resposta explícita do operador com
+   `--answer --round <ID> --response "<texto exato do operador>" --source user-text|tool-answer`;
+   resposta vazia, estrangeira ou conflitante não avança. Nova rodada, mesmo fluxo.
+4. Registre a escolha com `--decide` pelo host que embute `main(argv, io, liveAdapter)`
+   com `liveAdapter.getDecisionHandle`. A CLI avulsa recusa com
+   `time-decision-attestation-required`: a decisão continua pendente.
+5. Continue com `forge-long-workflow-adapter.js --command resume-time-option` e o mesmo snapshot;
+   `time-option-ready` segue para `plan-milestone`, `time-option-reestimate-ready` para
+   a nova estimativa, e qualquer outro código para e mostra a pendência.
+Nenhum JSON, flag, `approved:true`, texto de prompt ou silêncio aprova uma opção.
+
+Mensagens das opções de prazo (pt-BR, uma decisão por rodada):
+- Decisão: `Decisão de prazo da milestone {M}: {pergunta}. Recomendo {opção} porque {motivo}. Escolha uma, sem pré-seleção: {opção 1} ({consequência}); {opção 2} ({consequência}){; opção 3}. Decisão pendente: {ID}. Sem resposta explícita, o roadmap não é planejado.`
+- Evidência insuficiente: `Prazo de {M} sem número para {posição}: evidência local insuficiente ({motivo}). Nenhum prazo foi inventado.`
+- Posição inviável: `Posição {posição} de {M} inviável: {motivo}. Ela não recebe prazo nem pode ser escolhida.`
+- Nenhuma posição viável: `Nenhuma posição de prazo viável para {M}: {motivo}. Escolha, sem pré-seleção: teto próprio ({efeito}) ou seguir sem contrato ({efeito}). Decisão pendente: {ID}.`
+- Roadmap não conforme: `Roadmap de {M} não confere com o prazo escolhido ({código}): {motivo}. O loop parou e nada fora da escolha foi aceito.`
+- Escopo não alocado: `Escopo de {M} sem alocação de tempo ({código}): {itens}. Mudança de estrutura depois da escolha exige decisão explícita. Decisão pendente: {ID ou nenhuma}.`
+
 ## Bidirectional delivery
 
 After the resolver allowance gate, a Claude sidecar or any artifact unit on
@@ -199,8 +233,15 @@ Codex uses `shared/forge-bidirectional-sidecar.md` and
 Branch C/D conditions below. Read that shared contract in full before dispatch;
 keep the controller-selected unit and snapshot. Supported artifact units are
 research-milestone, research-slice, discuss-milestone, discuss-slice,
-plan-milestone, complete-slice, complete-milestone and plan-check. Execution and
+estimate-milestone, plan-milestone, complete-slice, complete-milestone and plan-check.
+The sidecar request of estimate-milestone carries `description` as plan-milestone does. Execution and
 slice planning on Claude use the same entrypoint with their distinct contracts.
+
+Unit icon in progress reports:
+
+| Unit | Icon |
+|---|---|
+| estimate-milestone | ⏱ |
 Native delivery remains native. Unsupported auxiliary units stop specifically.
 After successful housekeeping, acknowledge the unit using the loop adapter's
 `complete` command before requesting `next`; never discard/reset its snapshot.
@@ -1173,8 +1214,14 @@ node "$FORGE_SCRIPTS_DIR/forge-procedure-context.js" --phase memory-selection --
 MEMORY_QUERY_META=$(node "$FORGE_SCRIPTS_DIR/forge-memory-query.js" --unit-type "$unit_type" --cwd "$WORKING_DIR" \
   --milestone "$MILESTONE_ID" --slice "$SLICE_ID" --task "$TASK_ID") || { echo "optional memory query unavailable; continuing without a query" >&2; MEMORY_QUERY_META='{"status":"unavailable","query_file":null}'; }
 MEMORY_QUERY_FILE=$(node -pe 'JSON.parse(process.argv[1]).query_file || ""' "$MEMORY_QUERY_META")
+UNIT_DESCRIPTION=""
+case "$unit_type" in estimate-milestone|plan-milestone)
+  UNIT_DESCRIPTION=$(head -n 1 "$WORKING_DIR/.gsd/milestones/$MILESTONE_ID/$MILESTONE_ID-SCOPE.md" 2>/dev/null | sed 's/^#* *//')
+  UNIT_DESCRIPTION="${UNIT_DESCRIPTION:-milestone $MILESTONE_ID}" ;;
+esac
 PROMPT_META=$(node "$FORGE_SCRIPTS_DIR/forge-prompt.js" --unit-type "$unit_type" --cwd "$WORKING_DIR" \
   --milestone "$MILESTONE_ID" --slice "$SLICE_ID" --task "$TASK_ID" \
+  ${UNIT_DESCRIPTION:+--description "$UNIT_DESCRIPTION"} \
   --dispatch-id "$DISPATCH_ID" --unit-effort "$unit_effort" --thinking "$THINKING_OPUS" \
   --auto-commit "$AUTO_COMMIT" --milestone-cleanup "$MILESTONE_CLEANUP" \
   --isolation-mode "$ISOLATION_MODE" --branch "$BRANCH" --code-dir "$WORKER_CWD" \
@@ -1418,14 +1465,14 @@ if [ "$HOST_RUNTIME" = "codex" ] && [ -n "$PLAN_PATH" ]; then
     --plan "$WORKING_DIR/$PLAN_PATH" --attempt "$NATIVE_DISPATCH_ID" 2>/dev/null || true)
 fi
 ```
-No host Codex, as unidades nativas somente leitura `plan-milestone`, `plan-slice`,
-`research-*` e `discuss-*` rodam dentro do guard de mutação em modo `code-only`.
+No host Codex, as unidades nativas somente leitura `estimate-milestone`, `plan-milestone`,
+`plan-slice`, `research-*` e `discuss-*` rodam dentro do guard de mutação em modo `code-only`.
 Antes do spawn, capture a baseline com um `--code-root` por raiz de código guardada
 e `READONLY_BASELINE` apontando para um arquivo novo fora dessas raízes e de `.gsd`;
 falha na captura impede o spawn.
 ```bash
 if [ "$HOST_RUNTIME" = "codex" ]; then
-  case "$unit_type" in plan-milestone|plan-slice|research-*|discuss-*)
+  case "$unit_type" in estimate-milestone|plan-milestone|plan-slice|research-*|discuss-*)
     node "$FORGE_SCRIPTS_DIR/forge-native-readonly-guard.js" --capture --owner "$WORKING_DIR" \
       --code-root "${CODE_DIR:-$WORKING_DIR}" --mode code-only --out "$READONLY_BASELINE" || stop ;;
   esac
@@ -1501,11 +1548,11 @@ componha o ID a partir de `task_name`, de `/root/` mais nome, de hook ou de pros
 (`/root/<nome>` só entra quando é o valor que a ferramenta devolveu), não infira
 atividade a partir de timers locais e não apresente sidecar como thread nativa.
 
-No host Codex, depois do retorno terminal de uma unidade `plan-*`, `research-*` ou
-`discuss-*` e antes de qualquer writer seguinte, verifique a mesma baseline:
+No host Codex, depois do retorno terminal de uma unidade `estimate-milestone`, `plan-*`,
+`research-*` ou `discuss-*` e antes de qualquer writer seguinte, verifique a mesma baseline:
 ```bash
 if [ "$HOST_RUNTIME" = "codex" ]; then
-  case "$unit_type" in plan-milestone|plan-slice|research-*|discuss-*)
+  case "$unit_type" in estimate-milestone|plan-milestone|plan-slice|research-*|discuss-*)
     node "$FORGE_SCRIPTS_DIR/forge-native-readonly-guard.js" --verify "$READONLY_BASELINE" --writer-stopped || stop ;;
   esac
 fi
@@ -1701,6 +1748,7 @@ Determine which summary file was just written:
 - `execute-task` → `.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}-SUMMARY.md`
 - `plan-slice` → `.gsd/milestones/{M###}/slices/{S##}/{S##}-PLAN.md`
 - `complete-slice` → `.gsd/milestones/{M###}/slices/{S##}/{S##}-SUMMARY.md`
+- `estimate-milestone` → `.gsd/milestones/{M###}/{M###}-OPTIONS.json`
 - `plan-milestone` → `.gsd/milestones/{M###}/{M###}-ROADMAP.md`
 - `complete-milestone` → `.gsd/milestones/{M###}/{M###}-SUMMARY.md`
 - other → use the result block only

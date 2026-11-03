@@ -1,6 +1,6 @@
 ---
 name: forge-new-milestone
-description: "Cria um novo milestone GSD. Fluxo: brainstorm, discuss, plan."
+description: "Cria um novo milestone GSD. Fluxo: brainstorm, discuss, opções de prazo e plano pelo controller."
 allowed-tools: Read, Write, Bash, Agent, Skill, AskUserQuestion, WebSearch, WebFetch
 ---
 
@@ -316,66 +316,57 @@ echo '{
 
 ---
 
-## Step 5 — Plan (delegate to sub-agent)
+## Step 5 — Time options and roadmap through the controller
 
-Read:
-- `.gsd/AUTO-MEMORY.md` first 80 lines (or skip if missing)
+The roadmap is never written inline here. A new milestone is enrolled in the time
+options flow (`shared/forge-milestone-time.md` § Opções de prazo antes do roadmap,
+no repositório ou em `${FORGE_HOME:-~/.forge-agent}/shared`) and its roadmap comes
+only from the controller after the operator's explicit, attested choice.
 
-Emita o banner de liveness (ver `shared/forge-dispatch.md § Spawn Liveness Banner`):
-`◆ Despachando forge-planner… (roda em subagente — sem output até retornar, ~2–5 min; esperado, não é travamento)`
-
-Derive the valid domain list for the header below:
+Create the per-milestone STATE with the first phase, make sure the owner `.gsd/forge`
+exists, enroll the milestone and bind it to your personal work:
 ```bash
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-routing.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
-routing_domains=$(node "$FORGE_SCRIPTS_DIR/forge-routing.js" --list-domains --cwd "$(pwd)" \
-  | node -e 'const a=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(a.length?a.join(", "):"(none — omit domain:)")')
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-state.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
+WORKING_DIR="$(pwd)"
+mkdir -p "$WORKING_DIR/.gsd/forge" || exit 1
+if ! node "$FORGE_SCRIPTS_DIR/forge-state.js" --create "$MILESTONE_ID" --phase estimate-milestone \
+    --next-action "Estimate time options for milestone $MILESTONE_ID" --cwd "$WORKING_DIR" > /dev/null; then
+  echo "Milestone STATE creation failed for $MILESTONE_ID; stop before enrollment." >&2
+  exit 1
+fi
+if ! node "$FORGE_SCRIPTS_DIR/forge-milestone-time-selection.js" --enroll --source forge-new-milestone \
+    --cwd "$WORKING_DIR" --milestone "$MILESTONE_ID"; then
+  echo "Milestone time enrollment failed for $MILESTONE_ID; stop before any selection." >&2
+  exit 1
+fi
 ```
+Before continuing, read `shared/forge-personal-context.md` and bind the new milestone:
+`node "<FORGE_SCRIPTS_DIR>/forge-personal-context.js" --bind --project "<WORKING_DIR>" --id "<MILESTONE_ID>" --intent create --json`.
+A nonzero result is partial creation: preserve the STATE and enrollment, report the
+ID and the explicit-resume recovery, and stop.
 
-Then delegate to `forge-planner` agent:
+Then follow the canonical controller flow of `skills/forge-next/SKILL.md` for this
+milestone, one unit at a time, without re-selecting or writing STATE by hand:
+1. `estimate-milestone` (read-only `forge-planner` proposal, accepted by the owner);
+2. the time option decision of its § Tempo da milestone (round, explicit operator
+   answer, `--decide` through the embedded live adapter, `--command resume-time-option`
+   with the same snapshot);
+3. `plan-milestone`, which writes `{MILESTONE_ID}-ROADMAP.md` with `## Alocação de tempo`
+   when a contract is active.
 
-```
-Plan milestone {MILESTONE_ID}: {MILESTONE_DESC}
-WORKING_DIR: {pwd}
-ROUTING_DOMAINS: {routing_domains}
-
-PROJECT:
-{content of .gsd/PROJECT.md}
-
-REQUIREMENTS:
-{content of .gsd/REQUIREMENTS.md}
-
-CONTEXT (discuss decisions):
-{content of {MILESTONE_ID}-CONTEXT.md}
-
-BRAINSTORM:
-{content of {MILESTONE_ID}-BRAINSTORM.md, or "(none — fast mode)"}
-
-SCOPE:
-{content of {MILESTONE_ID}-SCOPE.md, or "(none — fast mode)"}
-
-{If SESSION_ID:
-SESSION_CONVERSATION:
-{content of ## Conversation section from SESSION_FILE — provides rich context about what was discussed, considered, and rejected}
-}
-
-DECISIONS:
-{full .gsd/DECISIONS.md}
-
-TOP_MEMORIES:
-{first 80 lines of AUTO-MEMORY.md}
-
-Write {MILESTONE_ID}-ROADMAP.md with:
-- The smallest dependency-safe set of slices covering the full scope, ordered by risk (high first). There is no numeric minimum or target. Keep cohesive work together; justify each split by a concrete risk, dependency, independently verifiable outcome or context limit. Do not create slices merely for file types or lifecycle phases, or omit requirements to reduce the count. Preserve all plan, security, review and verification gates.
-- Each slice: title, description, risk tag, depends tag, demo sentence
-- A Boundary Map section showing what each slice produces/consumes
-Return ---GSD-WORKER-RESULT--- with list of slices created.
-```
+No roadmap exists before the decision. If the decision stays pending (no explicit
+answer, standalone `--decide` refused, or any other blocked code), report the pending
+decision ID and question, keep the STATE and enrollment, and stop this step: resuming
+is `/forge-next` (or `/forge-auto`) on this milestone, never a manual roadmap.
 
 ---
 
 ## Step 6 — Risk radar on high-risk slices (skip if FAST_MODE)
 
 **If FAST_MODE=true:** Skip to Step 7.
+
+Only when `.gsd/milestones/{MILESTONE_ID}/{MILESTONE_ID}-ROADMAP.md` exists (the
+controller flow of Step 5 reached `plan-milestone`). Without a roadmap, skip to Step 7.
 
 Read the ROADMAP and collect ALL slices tagged `risk:high` into a list. Then process each one **to completion before moving to the next**. Do NOT stop, summarize, or report to the user between slices — the loop must complete entirely before proceeding to Step 7.
 
@@ -397,50 +388,34 @@ After ALL slices have been processed (or if no `risk:high` slices exist), procee
 
 ---
 
-## Step 7 — Update state and report
+## Step 7 — Report
 
-Write `.gsd/milestones/{MILESTONE_ID}/{MILESTONE_ID}-STATE.md` (per-run state, via `scripts/forge-state.js` — never hand-edit or overwrite the root `.gsd/STATE.md`, which is a generated dashboard):
-```markdown
----
-milestone: {MILESTONE_ID}
-kind: milestone
-created: {ISO8601}
-last_updated: {ISO8601}
-isolation_mode: {isolation_mode from prefs}
----
-
-# {MILESTONE_ID} State
-
-**Active Slice:** none
-**Active Task:** none
-**Phase:** plan-slice (ready to plan first slice)
-**Auto-mode:** off
-**Next Action:** Plan first slice: run /forge-next or /forge-auto
-```
-Before reporting success (even without an active run), read `shared/forge-personal-context.md`
-and bind the new milestone:
-`node "<FORGE_SCRIPTS_DIR>/forge-personal-context.js" --bind --project "<WORKING_DIR>" --id "<MILESTONE_ID>" --intent create --json`.
-A nonzero result is partial creation: preserve milestone state, report ID and
-explicit-resume recovery, and stop. Capture nextAction with --checkpoint using
-this per-milestone STATE as source. Retain acceptances and any pending decisions.
+The per-milestone STATE was created by `forge-state.js` in Step 5 and is advanced
+only by the controller; do not write or overwrite it here, and never hand-edit the
+root `.gsd/STATE.md` (a generated dashboard). Capture nextAction with
+`forge-personal-context.js --checkpoint` using the per-milestone STATE as source.
+Retain acceptances and any pending decisions.
 
 Then run `node scripts/forge-dashboard.js --cwd .` to regenerate the root dashboard.
 
-Report to user:
+Report to user (pt-BR; with a pending time decision, the report says so and stops):
 ```
 ✓ Milestone {MILESTONE_ID} criado
 
 Título: {MILESTONE_DESC}
-Slices: {N} slices no roadmap
+Prazo: {opção escolhida | sem contrato | decisão pendente: {ID} — {pergunta curta}}
+Slices: {N slices no roadmap | roadmap ainda não planejado}
 Slices high-risk: {list or "none"}
 
 Arquivos criados:
-  .gsd/milestones/{MILESTONE_ID}/{MILESTONE_ID}-ROADMAP.md
   .gsd/milestones/{MILESTONE_ID}/{MILESTONE_ID}-CONTEXT.md
+  .gsd/milestones/{MILESTONE_ID}/{MILESTONE_ID}-STATE.md
+  [{MILESTONE_ID}-OPTIONS.md]     (opções de prazo)
+  [{MILESTONE_ID}-ROADMAP.md]     (só depois da decisão)
   [{MILESTONE_ID}-BRAINSTORM.md]  (se não for fast mode)
   [{MILESTONE_ID}-SCOPE.md]       (se skill disponível)
 
-Próximo: /gsd para planejar primeiro slice, ou /forge-auto para executar tudo.
+Próximo: /forge-next para seguir a escolha de prazo ou planejar o primeiro slice, ou /forge-auto para executar tudo.
 ```
 
 **Native questions:** Before conducting questions, read `shared/forge-interaction.md` (or `${FORGE_HOME:-~/.forge-agent}/shared/forge-interaction.md` in consumer projects). Apply its host adapter to every question example below and in loaded references; required unanswered decisions remain pending. Existing auto/headless deferment policies still apply.

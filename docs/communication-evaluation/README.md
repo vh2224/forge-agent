@@ -137,3 +137,17 @@ Verificação planejada desta avaliação:
 node scripts/forge-communication-evaluation.test.js
 node scripts/forge-doc-claims.test.js
 ~~~
+
+## Milestone time options (S02/T07, 2026-11-03)
+
+Only the two modelo-da-skill source.sha256 fields citing skills/forge-next/SKILL.md
+were re-pinned. Quoted text and all other sample bytes remain unchanged.
+Owner pre-T07 source revision: `0ee8dfdd9ffa0a4ca6dfafe928991a9125f6d573`; baseline
+`scripts/fixtures/milestone-options/distribution-before.json`.
+
+- Before: `22bddaebd4367ce2cc8729cfdc7f14131de2c155be62226c3d24c45f626ed2c5`.
+- After (SHA-256 of actual source bytes): `637e73b1e2cdae1c97dd75f67f4f0b42028be6684235e6215c9516a1d1e37d1b`.
+
+The source instruction changes enroll new milestones, present explicit choices
+and resume the same snapshot. This corpus remains source/distribution evidence,
+not a client observation or human acceptance.

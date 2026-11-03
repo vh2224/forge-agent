@@ -601,11 +601,17 @@ do not authorize a host or preference change.
 ## Supported contracts
 
 Both Claude and Codex sidecars support research-milestone, research-slice,
-discuss-milestone, discuss-slice, plan-milestone, plan-slice, execute-task,
+discuss-milestone, discuss-slice, estimate-milestone, plan-milestone, plan-slice, execute-task,
 complete-slice, complete-milestone, plan-check and memory-extract. Discussion remains
 noninteractive: required questions return partial to the parent. Research uses
 local file inspection; arbitrary research shell commands are unavailable in
 the Claude read-only profile.
+
+`estimate-milestone` is a read-only `forge-planner` artifact unit. Its request
+carries `description` like `plan-milestone`; the owner validates OPTIONS.json
+before publication. It uses the same locked max tier as milestone planning.
+Required questions return partial without a proposal. Selection and functional
+authority remain with the live owner (`shared/forge-milestone-time.md`).
 
 Review challenger, advocate and rebuttal use `forge-xllm.js --mode
 challenge|defend|rebuttal --engine <resolved engine> --host-runtime <actual host>

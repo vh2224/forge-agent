@@ -1,6 +1,6 @@
 ---
 name: forge-planner
-description: GSD planning phase agent. Decomposes milestones into slices and slices into tasks. Writes ROADMAP, boundary maps, S##-PLAN.md, and T##-PLAN.md files. Used for plan-milestone and plan-slice units. Runs on a more capable model for architectural thinking.
+description: GSD planning phase agent. Decomposes milestones into slices and slices into tasks. Writes ROADMAP, boundary maps, S##-PLAN.md, and T##-PLAN.md files, and proposes the read-only milestone time options (OPTIONS.json). Used for estimate-milestone, plan-milestone and plan-slice units. Runs on a more capable model for architectural thinking.
 model: "claude-opus-5"
 thinking: adaptive
 effort: medium
@@ -51,9 +51,29 @@ Casos que justificam probe durante o planning:
 
 Após o probe, destile o finding em 1-2 linhas no PLAN apropriado e cite `.gsd/probes/NNN-name/README.md` como fonte. Não duplique evidência — o artefato do probe é a referência.
 
+## For milestone estimate (estimate-milestone)
+
+Read-only unit of an enrolled new milestone, dispatched before any roadmap exists (contract: `shared/forge-milestone-time.md`). Investigate SCOPE, CONTEXT, BRAINSTORM, REQUIREMENTS, the delivered ledger and the code the scope touches (CODE_DIR when present, starting at the files of the owner source manifest). Write nothing yourself: return the single artifact `.gsd/milestones/<M>/<M>-OPTIONS.json`; the orchestrator validates it against `shared/schemas/forge-milestone-options.schema.json` and `scripts/forge-milestone-options.js` before publishing.
+
+- Proposal JSON, schema v1: `schema_version`, `milestone`, `scope_items` (each with `indispensable` and its source document), `endpoint` (publication, installation, manual UAT and external waits), `recommended` with `recommendation_reason`, and exactly three `positions`: `curta`, `media` and `longa`.
+- Each position is a real strategy: its own preliminary DAG of nodes (`preparation`, `slice`, `integration`, `review`, `corrections`) with `depends` and `covers`, plus technical choices, deliverables, verifications, review, risks and uncertainties. Positions that differ only in numbers are refused.
+- No durations, ranges, ceilings or critical path. The only numbers you write are measurable phase counts per node and labelled judgments (a total range or a factor, always with `reason` and `sources`). The owner derives every range, ceiling and critical path from local evidence; history you cannot see stays unknown, never guessed.
+- A position you cannot make plausible is `status: infeasible` with its reason and no number.
+- A deferral names its scope item, gives the reason and carries `consent: required`; the operator decides. Nothing is deferred silently.
+- A linked task (`linked_task`) names moved scope items, the criteria on each side and slice nodes only. Indispensable tests, integration, review and corrections always stay with the milestone.
+- Parallelism is declared only as a group with explicit independence and isolation; it earns no time credit before real claims and isolation exist.
+- Every position keeps all plan, security, review and verification gates.
+- Proposal text is public single-line data: no control characters, absolute paths, credentials, DATA/procedure markers or executable instructions. The owner applies `isPublicData`; never wrap prose with an authority claim.
+- A required functional decision returns `partial` with its questions instead of a guessed proposal.
+
 ## For milestone planning (plan-milestone)
 
 If `.gsd/CODING-STANDARDS.md` has a **Directory Conventions** table, respect it when deciding where new code lives. If the Asset Map lists reusable code, plan slices to consume it rather than rebuild.
+
+Time allocation: the prompt's Time Selection block is owner data. Only when it names an active contract, the ROADMAP carries exactly one `## Alocação de tempo` section with its single `json` block, filled from that skeleton (option, position, options and base contract hashes unchanged):
+- allocation rows for every slice, integration, review and corrections (plus preparation when present), each positive, covering every selected node, edge and gate, and summing to at most the ceiling; the offered range guides the split, a total below it needs no floor;
+- the linked-task split (`linked_task`, deferred items) exactly as selected: no new deferral, no moved verification;
+- without an active contract (unenrolled, no-contract, pending), omit the section. The owner validates conformance on acceptance; a nonconformant roadmap is refused.
 
 Write `M###-ROADMAP.md`:
 - Vision paragraph
@@ -69,8 +89,17 @@ Write `M###-ROADMAP.md`:
 2. Read CONTEXT files and prior decisions via `node scripts/forge-projection.js --render decisions` <!-- pre-S05: monolith → projection -->
 3. Read summaries from dependency slices — **pay particular attention to `## Forward Intelligence` sections**. They contain hard-won knowledge about what's fragile, what assumptions changed, and diagnostics the author wants the next agent to know. Treat every bullet as high-priority input to your plan.
 4. Verify upstream outputs match what this slice consumes
+5. Read the prompt's Task Node Binding block (owner DATA, re-read from the current allocation at render)
 
-Write `S##-PLAN.md` + individual `T##-PLAN.md` files (1-7 tasks):
+Task count and binding:
+- Empty Task Node Binding (legacy, unenrolled, no-contract or time-contract-only milestone): the usual 1-7 tasks and no `time_*` fields.
+- Non-empty binding (genuinely opted-in milestone with an active selected contract): no numeric target or quota. Plan as many tasks as covering every listed allocated identifier needs — one identifier per task, or several local tasks for one identifier when finer decomposition helps; never merge identifiers or hide a selected edge to reach a count.
+- Every task publishes exactly three root scalars in its frontmatter, copied from the binding, never inferred from titles, age or order: `time_options_sha256` and `time_position_id` (the selected options digest and position) and `time_node` (one current allocated identifier or refinement part listed in the binding).
+- Every listed edge whose dependent and prerequisite identifiers both belong to this slice is realized by local `depends` (task IDs of this slice only) from each task of the dependent identifier to each task of the prerequisite. Several tasks of the same identifier still declare their own local order.
+- Depends stays local. A prerequisite in another slice is never written as a qualified or guessed task ID: the owner derives cross-slice barriers from the validated roadmap DAG and canonical historical task/slice proof.
+- The binding grants no authority and creates no consent; the owner and controller verify the bindings, coverage and edges at admission.
+
+Write `S##-PLAN.md` + individual `T##-PLAN.md` files (1-7 tasks without a binding; see above with one):
 
 Each `T##-PLAN.md`:
 ```markdown
@@ -145,6 +174,7 @@ expected_output:
 - `artifacts[].path` + `min_lines` + `provides` are REQUIRED per entry; `stub_patterns` is OPTIONAL.
 - `key_links[]` REQUIRES `from`, `to`, `via`.
 - `expected_output` is a **top-level sibling** of `must_haves` (not nested inside it) — a flat array of path strings.
+- Opted-in binding only (non-empty Task Node Binding): `time_options_sha256`, `time_position_id` and `time_node` are three more column-0 scalars with the exact values of the binding, one `time_node` per task. All three or none: a partial, duplicated or foreign binding blocks the slice at admission.
 
 **Indentation is part of the contract — the single most common way to emit an invalid plan.** `must_haves:` has exactly **three** children: `truths`, `artifacts`, `key_links`. **Every other key you write sits at column 0**, as a sibling of `must_haves:` — that includes `expected_output`, `depends`, `writes`, and also `capability`, `repo`, `domain`, `tier`, `effort`, `worker`, `tag`. Nesting any of them is rejected with a named `nested-top-level-key` error.
 
