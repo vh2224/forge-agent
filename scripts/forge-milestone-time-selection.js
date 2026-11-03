@@ -441,6 +441,9 @@ function guarded(owner, milestone, fn) {
     return guard ? deferred(milestone, guard) : fn();
   } finally { handle.release(); }
 }
+// The same guarded boundary, exported for the S03 owner writers (linked task): a
+// result {status:'deferred', reason} is a named refusal, never a write.
+const ownerBoundary = guarded;
 function refused(milestone, reason) { return { status: 'refused', milestone: typeof milestone === 'string' ? milestone : null, reason }; }
 function deferred(milestone, reason) { return { status: 'deferred', milestone, reason }; }
 function enroll(cwd, milestone, options = {}) {
@@ -845,10 +848,20 @@ function cliMessage(action, result) {
   if (action === '--round') return result.status === 'open' ? ['Decisão ' + result.decision.id + ': ' + result.decision.question,
     ...result.decision.options.map((o, i) => (i + 1) + '. ' + o.label + ': ' + o.description), 'Sem resposta explícita, a decisão continua pendente.'].join('\n') : 'Nenhuma rodada aberta (' + result.state + ').';
   if (action === '--answer') return 'Resposta registrada: ' + result.answer + '.';
-  if (action === '--decide') return 'Decisão atestada: ' + result.choice + '.';
+  if (action === '--decide') return 'Decisão atestada: ' + result.choice + '.' + (result.linked_task ? ' Task ligada: ' + result.linked_task.status
+    + (result.linked_task.task_id ? ' (' + result.linked_task.task_id + ')' : '') + (result.linked_task.reason ? '; motivo ' + result.linked_task.reason : '') + '.' : '');
   if (action === '--enroll') return 'Adesão registrada.';
   if (action === '--conformance') return result.rule === null ? 'Sem regra de tempo para o roadmap.' : 'Conformidade do roadmap: ' + (result.roadmap?.status || result.rule.expected.status) + '.';
   return String(result);
+}
+// Late-loaded: the linked-task module is only needed after an embedded attested decision.
+function linkedCreation(options, liveAdapter) {
+  let selected;
+  try { selected = time().readSelection({ cwd: ownerRoot(options.cwd), milestone: options.milestone }); } catch { selected = null; }
+  const authorization = selected?.status === 'valid' ? selected.selection.linked_task_authorization : null;
+  if (!['create-and-start-after-proven-completion', 'create-without-auto-start'].includes(authorization)) return null;
+  const created = require('./forge-linked-task').createLinkedTask({ cwd: options.cwd, milestone: options.milestone, liveAdapter });
+  return { status: created.status, task_id: created.task_id ?? null, reason: created.reason ?? null };
 }
 function main(argv = process.argv.slice(2), io = process, liveAdapter) {
   const json = argv.includes('--json'), options = {};
@@ -870,7 +883,16 @@ function main(argv = process.argv.slice(2), io = process, liveAdapter) {
     if (action === '--decide') {
       // CLI arguments and persisted files cannot supply live authority: refuse before any read or write.
       if (typeof liveAdapter?.getDecisionHandle !== 'function') result = refused(options.milestone, 'time-decision-attestation-required');
-      else result = decide({ cwd: options.cwd, milestone: options.milestone, liveAdapter });
+      else {
+        result = decide({ cwd: options.cwd, milestone: options.milestone, liveAdapter });
+        // Only a decided option with a create-* linked-task authorization creates its task, with the same
+        // live adapter; every other outcome keeps today's output without the linked_task key.
+        const linked = result.status === 'decided' && result.choice === 'option' ? linkedCreation(options, liveAdapter) : null;
+        if (linked) {
+          result = { ...result, linked_task: linked, ...(['refused', 'partial'].includes(linked.status) ? { reason: linked.reason } : {}) };
+          if (!['created', 'unchanged', 'resumed'].includes(linked.status)) status = 3;
+        }
+      }
     } else if (action === '--enroll') result = enroll(options.cwd, options.milestone, { source: options.source });
     else if (action === '--status') result = { status: 'ok', state: readSelectionState(options.cwd, options.milestone) };
     else if (action === '--round') result = nextRound({ cwd: options.cwd, milestone: options.milestone });
@@ -896,5 +918,5 @@ function main(argv = process.argv.slice(2), io = process, liveAdapter) {
 
 module.exports = { TIME_OPTION_REASON_CODES, TIME_OPTION_RESUME_CODES, SELECTION_STATUSES, ROADMAP_STATUSES, ESTIMATE_UNIT,
   estimateKeySuffix, estimateBeginKey, readSelectionState, enroll, prepareBoundary, nextRound, answerRound, decide, promptBlock,
-  roadmapRule, taskBindingContext, contractCompatibility, resumeCheck, main };
+  roadmapRule, taskBindingContext, contractCompatibility, resumeCheck, ownerRoot, ownerBoundary, main };
 if (require.main === module) process.exitCode = main();

@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:forge:linked-task:v1",
+  "title": "Owner linked standalone task records v1: .gsd/forge/time/<M>/linked-task/link.json and the reverse index .gsd/forge/time-links/<T>.json",
+  "oneOf": [{ "$ref": "#/$defs/link" }, { "$ref": "#/$defs/index" }],
+  "$defs": {
+    "link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "kind", "milestone", "task_id", "creation_key", "created_at", "description", "options_sha256", "selection_sha256", "option_id", "position_id", "authorization", "contract_base_sha256", "linked_task", "dependency", "decision"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "kind": { "const": "forge-linked-task-link" },
+        "milestone": { "$ref": "#/$defs/milestone" },
+        "task_id": { "$ref": "#/$defs/task" },
+        "creation_key": { "$ref": "#/$defs/hash", "description": "Digest of policy, milestone, options_sha256, selection_sha256, position_id and authorization." },
+        "created_at": { "$ref": "#/$defs/instant" },
+        "description": { "type": "string", "maxLength": 200 },
+        "options_sha256": { "$ref": "#/$defs/hash" },
+        "selection_sha256": { "$ref": "#/$defs/hash" },
+        "option_id": { "$ref": "#/$defs/id" },
+        "position_id": { "$ref": "#/$defs/id" },
+        "authorization": { "$ref": "#/$defs/createAuthorization" },
+        "contract_base_sha256": { "$ref": "#/$defs/hash" },
+        "linked_task": {
+          "type": "object", "additionalProperties": false,
+          "required": ["position_id", "authorization", "moved_scope", "criteria", "horizon", "options_sha256"],
+          "properties": {
+            "position_id": { "$ref": "#/$defs/id" },
+            "authorization": { "$ref": "#/$defs/createAuthorization" },
+            "moved_scope": { "type": "array", "minItems": 1, "maxItems": 256, "items": { "$ref": "#/$defs/id" } },
+            "criteria": {
+              "type": "object", "additionalProperties": false, "required": ["milestone", "task"],
+              "properties": { "milestone": { "$ref": "#/$defs/textList" }, "task": { "$ref": "#/$defs/textList" } }
+            },
+            "horizon": {
+              "type": "object", "additionalProperties": false, "required": ["low_ms", "high_ms", "ceiling_ms"],
+              "properties": { "low_ms": { "$ref": "#/$defs/ms" }, "high_ms": { "$ref": "#/$defs/ms" }, "ceiling_ms": { "$ref": "#/$defs/ms" } }
+            },
+            "options_sha256": { "$ref": "#/$defs/hash" }
+          }
+        },
+        "dependency": {
+          "type": "object", "additionalProperties": false, "required": ["unit", "endpoint"],
+          "properties": {
+            "unit": { "type": "string", "pattern": "^complete-milestone/(?:M\\d+|M-\\d{14}(?:-[a-z0-9-]*)?)$" },
+            "endpoint": { "const": "verified-integrated-delivery" }
+          }
+        },
+        "decision": {
+          "type": "object", "additionalProperties": false,
+          "description": "Reference to the persisted explicit linked-task answer; the live opaque handle is never stored.",
+          "required": ["reference", "question", "answer", "request_sha256"],
+          "properties": {
+            "reference": { "$ref": "#/$defs/id" },
+            "question": {
+              "type": "object", "additionalProperties": false, "required": ["identity_sha256", "id"],
+              "properties": { "identity_sha256": { "$ref": "#/$defs/hash" }, "id": { "$ref": "#/$defs/id" } }
+            },
+            "answer": { "enum": ["linked-task:create-and-start-after-proven-completion", "linked-task:create-without-auto-start"] },
+            "request_sha256": { "$ref": "#/$defs/hash" }
+          }
+        }
+      }
+    },
+    "index": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "kind", "task_id", "milestone", "link_sha256", "creation_key"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "kind": { "const": "forge-linked-task-index" },
+        "task_id": { "$ref": "#/$defs/task" },
+        "milestone": { "$ref": "#/$defs/milestone" },
+        "link_sha256": { "$ref": "#/$defs/hash" },
+        "creation_key": { "$ref": "#/$defs/hash" }
+      }
+    },
+    "createAuthorization": { "enum": ["create-and-start-after-proven-completion", "create-without-auto-start"] },
+    "milestone": { "type": "string", "pattern": "^(?:M\\d+|M-\\d{14}(?:-[a-z0-9-]*)?|M-\\d{8}-\\d{6}(?:-[a-z0-9-]*)?)$" },
+    "task": { "type": "string", "pattern": "^(?:T-\\d{14}(?:-[a-z0-9-]*)?|(?:T|TASK)-\\d{8}-\\d{6}(?:-[a-z0-9-]*)?|TASK-\\d+|task-[a-z0-9-]+)$" },
+    "id": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,119}$" },
+    "hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "instant": { "type": "string", "format": "date-time" },
+    "ms": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "textList": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } }
+  }
+}

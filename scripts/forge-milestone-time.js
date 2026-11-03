@@ -675,6 +675,121 @@ function recordDelegatedAllocation(options) {
     publishExclusive(path.join(p.amendments, String(row.version).padStart(4, '0') + '.json'), row, MAX_AMENDMENT, p.staging); return validStored(options);
   });
 }
+// ---------------------------------------------------------------------------
+// Generic owner records (S03): one closed allowlist below .gsd/forge/time/<M>/
+// plus the reverse task index .gsd/forge/time-links/<T>.json. The writers reuse
+// withWriter (owner lock, no links, never creates .gsd or .gsd/forge) and
+// publishExclusive (exclusive hard link, staging outside the read folders), need
+// an active contract and public data, are idempotent for the same value and
+// refuse a different one. Readers are bounded, refuse links, require canonical
+// bytes and never throw. Every record is written after the contract activation,
+// so readContract keeps ignoring them exactly as before.
+// ---------------------------------------------------------------------------
+const OWNER_RECORD_PATHS = Object.freeze(['endpoint.json', 'linked-task/<name>.json', 'linked-task/checkpoints/<id>.json', 'linked-task/extensions/<id>.json', 'linked-task/journal.jsonl']);
+const MAX_OWNER_RECORD = 64 * 1024;
+const RECORD_FILE = /^[a-zA-Z0-9_-]{1,120}\.json$/;
+function codeOf(e) { return e?.code?.startsWith('time-') ? e.code : 'time-source-unreadable'; }
+// Maps a relative record path onto its file; anything outside the allowlist is refused.
+function ownerRecordFile(p, relative, kind = 'record') {
+  if (typeof relative !== 'string' || !relative || relative.length > 200 || /[\\\0:]|^\/|\/\/|(?:^|\/)\.\.?(?:\/|$)/.test(relative)) fail('time-record-path-invalid');
+  const parts = relative.split('/');
+  const allowed = kind === 'journal' ? relative === 'linked-task/journal.jsonl'
+    : kind === 'list' ? ['linked-task/checkpoints', 'linked-task/extensions'].includes(relative)
+      : relative === 'endpoint.json' || parts.length === 2 && parts[0] === 'linked-task' && /^[a-z][a-z0-9-]{0,63}\.json$/.test(parts[1])
+        || parts.length === 3 && parts[0] === 'linked-task' && ['checkpoints', 'extensions'].includes(parts[1]) && RECORD_FILE.test(parts[2]);
+  if (!allowed) fail('time-record-path-invalid');
+  return path.join(p.directory, ...parts);
+}
+// The reverse index accepts only a task ID; every other owner record only a milestone ID.
+function linkIndexFile(options) {
+  const ids = require('./forge-ids'), task = options.task;
+  if (typeof task !== 'string' || /[\\/\0]/.test(task) || !ids.isValid(task) || !['milestone', 'task'].includes(ids.entityKind(task))) fail('time-work-id-invalid');
+  if (ids.entityKind(task) !== 'task') fail('time-work-kind-unsupported');
+  return path.join(path.resolve(options.cwd || '.'), '.gsd/forge/time-links', task + '.json');
+}
+function recordValue(value) {
+  if (!object(value) || !publicData(value)) fail('time-record-invalid');
+  if (Buffer.byteLength(JSON.stringify(value) + '\n') > MAX_OWNER_RECORD) fail('time-source-too-large');
+  return value;
+}
+// null when absent; a present record must be canonical public JSON.
+function storedRecord(file) {
+  noLinks(file, true);
+  let read; try { read = bounded(file, MAX_OWNER_RECORD, false); } catch (e) { if (e.code === 'ENOENT') return null; throw e; }
+  let value; try { value = JSON.parse(read.content); } catch { fail('time-record-invalid'); }
+  if (!object(value) || !publicData(value) || read.content !== JSON.stringify(value) + '\n') fail('time-record-invalid');
+  return value;
+}
+function activeContract(options) {
+  const read = readContract(options);
+  if (read.status === 'absent') fail('time-contract-required');
+  if (read.status !== 'valid') fail(read.reason);
+  return read;
+}
+function publishRecordFile(p, file, value) {
+  const { digest } = require('./forge-code-roots'), previous = storedRecord(file);
+  if (previous) { if (!same(previous, value)) fail('time-record-conflict'); return { status: 'unchanged', sha256: digest(previous) }; }
+  publishExclusive(file, value, MAX_OWNER_RECORD, p.staging);
+  return { status: 'published', sha256: digest(storedRecord(file)) };
+}
+function publishOwnerRecord(options) {
+  const p = timePaths(options), file = ownerRecordFile(p, options.path), value = recordValue(options.record);
+  return withWriter(options, () => { activeContract(options); return { ...publishRecordFile(p, file, value), path: options.path }; });
+}
+function readOwnerRecord(options) {
+  try {
+    const file = ownerRecordFile(timePaths(options), options.path), value = storedRecord(file);
+    return value === null ? { status: 'absent' } : { status: 'valid', record: value, sha256: require('./forge-code-roots').digest(value) };
+  } catch (e) { return { status: 'invalid', reason: codeOf(e) }; }
+}
+function listOwnerRecords(options) {
+  try {
+    const dir = ownerRecordFile(timePaths(options), options.path, 'list'), names = directoryNames(dir), { digest } = require('./forge-code-roots');
+    if (names.length > MAX_RECORDS) fail('time-record-limit');
+    return { status: 'valid', records: names.map(name => {
+      if (!RECORD_FILE.test(name)) fail('time-record-invalid');
+      const value = storedRecord(path.join(dir, name)); if (value === null) fail('time-record-invalid');
+      return { id: name.slice(0, -5), record: value, sha256: digest(value) };
+    }) };
+  } catch (e) { return { status: 'invalid', reason: codeOf(e) }; }
+}
+// The owner journal uses exactly journalValid and journalRecords.
+function appendOwnerJournal(options) {
+  const p = timePaths(options), file = ownerRecordFile(p, 'linked-task/journal.jsonl', 'journal');
+  if (!journalValid(options.record)) fail('time-journal-record-invalid');
+  return withWriter(options, () => {
+    activeContract(options); noLinks(file, true);
+    let content = ''; try { content = bounded(file, MAX_JOURNAL, false).content; } catch (e) { if (e.code !== 'ENOENT') throw e; }
+    const line = JSON.stringify(options.record) + '\n';
+    if (Buffer.byteLength(line) - 1 > MAX_LINE) fail('time-journal-line-limit');
+    if (Buffer.byteLength(content + line) > MAX_JOURNAL) fail('time-source-too-large');
+    if (content && !content.endsWith('\n')) fail('time-journal-json-invalid');
+    const records = journalRecords(content + line);
+    ensureDirectory(path.dirname(file)); noLinks(file, true);
+    fs.appendFileSync(file, line, { mode: 0o600 }); return { status: 'valid', count: records.length };
+  });
+}
+function readOwnerJournal(options) {
+  try {
+    const file = ownerRecordFile(timePaths(options), 'linked-task/journal.jsonl', 'journal');
+    noLinks(file, true);
+    let read; try { read = bounded(file, MAX_JOURNAL, false); } catch (e) { if (e.code === 'ENOENT') return { status: 'absent', records: [] }; throw e; }
+    return { status: 'valid', records: journalRecords(read.content) };
+  } catch (e) { return { status: 'invalid', reason: codeOf(e) }; }
+}
+function publishTaskLink(options) {
+  const file = linkIndexFile(options), p = timePaths(options), value = recordValue(options.record);
+  if (value.task_id !== options.task || value.milestone !== options.milestone) fail('time-record-invalid');
+  return withWriter(options, () => { activeContract(options); return publishRecordFile(p, file, value); });
+}
+function readTaskLink(options) {
+  try {
+    const value = storedRecord(linkIndexFile(options));
+    if (value === null) return { status: 'absent' };
+    if (value.task_id !== options.task) fail('time-record-invalid');
+    return { status: 'valid', record: value, sha256: require('./forge-code-roots').digest(value) };
+  } catch (e) { return { status: 'invalid', reason: codeOf(e) }; }
+}
 function main(argv = process.argv.slice(2), io = process, liveAdapter) {
   const options = {}; let action, json = argv.includes('--json');
   try {
@@ -721,5 +836,6 @@ module.exports = { SCHEMA_VERSION, ENDPOINT_ITEMS, ITEM_STATES, AMENDMENT_KINDS,
   timePaths, readContract, validateContract, createDecisionAuthority, activateContract, amendContract, appendJournal, readJournal,
   recordWarning, listWarnings, recordCheckpoint, readCheckpoints, readObservations, readCoverage, recordWorkerEvidence,
   recordEnrollment, readEnrollment, recordOptions, readOptions, listOptions, recordSelection, readSelection, verifyDecision,
-  recordDelegatedAllocation, roadmapIdentity, main };
+  recordDelegatedAllocation, roadmapIdentity, OWNER_RECORD_PATHS, publishOwnerRecord, readOwnerRecord, listOwnerRecords,
+  appendOwnerJournal, readOwnerJournal, publishTaskLink, readTaskLink, main };
 if (require.main === module) process.exitCode = main();
