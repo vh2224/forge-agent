@@ -409,7 +409,7 @@ try {
     fs.writeFileSync(tx, txOriginal); const corrupt = JSON.parse(txOriginal); corrupt.phase = 'intent'; write(f.cwd, path.relative(f.cwd, tx), corrupt);
     assert.equal(read().proven.length, 0); fs.writeFileSync(tx, txOriginal);
     const boundary = controller.boundaryFile(f.cwd, 'complete-slice/S01'), savedBoundary = fs.readFileSync(boundary);
-    fs.unlinkSync(boundary); assert.equal(read().proven.length, 0); fs.writeFileSync(boundary, savedBoundary);
+    fs.unlinkSync(boundary); assert.equal(read().proven.length, 1, 'committed transaction retains the historical boundary'); fs.writeFileSync(boundary, savedBoundary);
     const plan = fs.readFileSync(path.join(f.cwd, f.planRef)); write(f.cwd, f.planRef, plan.toString() + 'changed\n');
     assert.equal(read().proven.length, 0); write(f.cwd, f.planRef, plan);
     write(f.cwd, f.deliveryRef, Buffer.alloc(1024 * 1024 + 1)); assert.equal(read().proven.length, 0);

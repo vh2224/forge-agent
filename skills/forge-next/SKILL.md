@@ -86,13 +86,13 @@ if [ "$RUN_KIND" = "milestone" ] && [ "$STATUS" = "activate-new" ]; then
   PER_MILESTONE_STATE="$WORKING_DIR/.gsd/milestones/$RUN_ID/$RUN_ID-STATE.md"
   if [ ! -f "$PER_MILESTONE_STATE" ]; then
     mkdir -p "$WORKING_DIR/.gsd/milestones/$RUN_ID" "$WORKING_DIR/.gsd/forge" || exit 1
-    if ! node "$FORGE_SCRIPTS_DIR/forge-state.js" --create "$RUN_ID" --phase estimate-milestone --next-action "Estimate time options for milestone $RUN_ID" --cwd "$WORKING_DIR" > /dev/null; then
-      echo "Milestone bootstrap failed for $RUN_ID; stop before binding or dispatch." >&2
-      exit 1
-    fi
-    # New milestone only: time options enrollment before the first selection (§ Tempo da milestone).
+    # New milestone only: enroll idempotently before durable STATE; retry is safe after either publication (§ Tempo da milestone).
     if ! node "$FORGE_SCRIPTS_DIR/forge-milestone-time-selection.js" --enroll --source forge-next --cwd "$WORKING_DIR" --milestone "$RUN_ID"; then
       echo "Milestone time enrollment failed for $RUN_ID; stop before selection or dispatch." >&2
+      exit 1
+    fi
+    if ! node "$FORGE_SCRIPTS_DIR/forge-state.js" --create "$RUN_ID" --phase estimate-milestone --next-action "Estimate time options for milestone $RUN_ID" --cwd "$WORKING_DIR" > /dev/null; then
+      echo "Milestone bootstrap failed for $RUN_ID; stop before binding or dispatch." >&2
       exit 1
     fi
   fi

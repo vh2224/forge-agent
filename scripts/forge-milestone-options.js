@@ -348,8 +348,23 @@ function percentile(sorted, q) { return sorted[Math.max(0, Math.ceil(q * sorted.
 function samplesOf(read, accept) {
   const result = { samples: Object.create(null), failures: 0, excluded: { open: read.open.length, ambiguous: read.ambiguous.length, unfinished_paused: 0, zero_duration: 0 } };
   const carry = new Map();
+  // Interval pairing proves a host's segment, not a cross-host continuation
+  // (nor its slice/attempt lineage). Never publish just the last segment as
+  // the cost of that logical success. Keep legacy same-host samples unchanged.
+  const logicalKey = row => JSON.stringify([row.milestone, row.unit]);
+  const hosts = new Map();
+  for (const row of [...read.intervals, ...read.open, ...read.ambiguous]) {
+    if (!accept(row)) continue;
+    const key = logicalKey(row);
+    if (!hosts.has(key)) hosts.set(key, new Set());
+    hosts.get(key).add(row.host);
+  }
   for (const row of [...read.intervals].sort((a, b) => a.start - b.start || a.end - b.end)) {
     if (!accept(row)) continue;
+    if (hosts.get(logicalKey(row)).size > 1) {
+      result.excluded.continuation_unknown = (result.excluded.continuation_unknown || 0) + 1;
+      continue;
+    }
     const key = JSON.stringify([row.milestone, row.unit, row.host]), duration = row.end - row.start;
     if (row.action === 'pause') { carry.set(key, (carry.get(key) || 0) + duration); continue; }
     const paused = carry.get(key) || 0; carry.delete(key);
@@ -421,7 +436,7 @@ function readHistory(options = {}) {
     if (read.bytes) history.total_bytes += read.bytes;
     if (read.row.status !== 'available') continue;
     history.failures += read.row.failures;
-    for (const k of Object.keys(history.excluded)) history.excluded[k] += read.row.excluded[k];
+    for (const [k, count] of Object.entries(read.row.excluded)) history.excluded[k] = (history.excluded[k] || 0) + count;
     for (const [phase, list] of Object.entries(read.samples)) { (pooled[phase] ||= []).push(...list); (contributors[phase] ||= []).push(candidate.relative); }
   }
   for (const phase of MEASURABLE_PHASES) {
@@ -437,6 +452,7 @@ function readHistory(options = {}) {
   if (!history.observations) history.limitations.push('Histórico sem amostras: só julgamento rotulado pode dar números, com confiança baixa');
   if (unavailable.length) history.limitations.push(unavailable.length + ' fonte(s) indisponível(is) com motivo; nada foi truncado nem zerado');
   if (history.omitted_sources) history.limitations.push(history.omitted_sources + ' fonte(s) além do limite de fontes não lida(s)');
+  if (history.excluded.continuation_unknown) history.limitations.push('Segmentos entre hosts sem prova da continuidade de slice e tentativa foram excluídos; custo completo desconhecido');
   history.limitations.push('Intervalos do controller incluem trabalho do owner; consumo não é tempo de parede');
   history.limitations.push('Só lacunas de pausa explícita são excluídas; esperas sem classificação (humana, CI, externa) seguem nas amostras e são desconhecidas');
   return history;

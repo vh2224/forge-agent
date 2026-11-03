@@ -800,8 +800,9 @@ function slicePlanFile(cwd, slice, ids) {
 // the delivery input and the output produced by the public builder (no hand-made verified JSON).
 const BLOB = 'b'.repeat(40);
 function taskDelivery(cwd, slice, task, options = {}) {
-  const delivery = require('./forge-delivery.js'), unit = { type: 'task', id: task, slice, milestone: TM }, key = delivery.unitKey(unit);
-  const base = `.gsd/milestones/${TM}/slices/${slice}/tasks/${task}`, rel = name => `${base}/${task}-${name}`, source = `src/${task}.js`;
+  const milestone = options.milestone || TM;
+  const delivery = require('./forge-delivery.js'), unit = { type: 'task', id: task, slice, milestone }, key = delivery.unitKey(unit);
+  const base = `.gsd/milestones/${milestone}/slices/${slice}/tasks/${task}`, rel = name => `${base}/${task}-${name}`, source = `src/${task}.js`;
   // bare: a genuine delivery whose plan declares no source path at all (no inventory to bind).
   const planText = options.bare
     ? `---\nid: ${task}\ndepends: []\n${bindingLines(cwd, slice, options.node)}must_haves:\n  truths:\n    - "${task} comportamento observável"\n    - "${task} segundo comportamento"\n  artifacts: []\n  key_links: []\nexpected_output: []\n---\n# ${task}\n`
@@ -833,18 +834,19 @@ function completeTask(cwd, slice, task, offset, completeKey) {
 // Genuine canonical slice closure: the review gate record, the slice delivery built by the public
 // builder over the exact slice plan and every child delivery, then the real complete-slice transition.
 function closeSlice(cwd, slice, tasks, offset, options = {}) {
-  const delivery = require('./forge-delivery.js'), base = `.gsd/milestones/${TM}/slices/${slice}`;
+  const milestone = options.milestone || TM;
+  const delivery = require('./forge-delivery.js'), base = `.gsd/milestones/${milestone}/slices/${slice}`;
   if (options.review !== false) writeFile(cwd, `${base}/${slice}-REVIEW.md`, `# ${slice} review\n\n**Outcome:** 0 resolved · 0 conceded · 0 open\n`);
   const planText = fs.readFileSync(path.join(cwd, ...`${base}/${slice}-PLAN.md`.split('/')), 'utf8');
-  const input = { schema_version: 1, unit: { type: 'slice', id: slice, milestone: TM }, plan: `${base}/${slice}-PLAN.md`, plan_fingerprint: delivery.sha256(planText), bindings: [],
-    expected_children: tasks.map(task => ({ unit: { type: 'task', id: task, slice, milestone: TM }, delivery: `${base}/tasks/${task}/${task}-DELIVERY.json` })),
+  const input = { schema_version: 1, unit: { type: 'slice', id: slice, milestone }, plan: `${base}/${slice}-PLAN.md`, plan_fingerprint: delivery.sha256(planText), bindings: [],
+    expected_children: tasks.map(task => ({ unit: { type: 'task', id: task, slice, milestone }, delivery: `${base}/tasks/${task}/${task}-DELIVERY.json` })),
     facts: options.facts || { review: { status: 'completed with 0 open', reference: `${slice}-REVIEW.md` } } };
   writeFile(cwd, `${base}/${slice}-DELIVERY-INPUT.json`, JSON.stringify(input));
   writeFile(cwd, `${base}/${slice}-DELIVERY.json`, JSON.stringify(delivery.buildDelivery(input, { ownerRoot: cwd, codeDir: cwd })));
   if (options.complete === false) return;
-  const key = `close-${slice}`, unit = `complete-slice/${slice}`;
-  const begun = explicitBegin(cwd, unit, key, { state_patch: { active_slice: slice }, slice }, timeOptions(offset));
-  controller.complete(cwd, { milestone: TM, unit, host_runtime: 'codex', owner_token: 'explicit-owner', generation: begun.generation,
+  const key = options.milestone ? `close-${milestone}-${slice}` : `close-${slice}`, unit = `complete-slice/${slice}`;
+  const begun = controller.begin(cwd, { milestone, unit, host_runtime: 'codex', owner_token: 'explicit-owner', idempotency_key: key, state_patch: { active_slice: slice }, slice }, timeOptions(offset));
+  controller.complete(cwd, { milestone, unit, host_runtime: 'codex', owner_token: 'explicit-owner', generation: begun.generation,
     idempotency_key: `${key}-done`, result: { status: 'succeeded' } }, timeOptions(offset + 500));
 }
 function taskProof(cwd, slice, task) {
@@ -1515,6 +1517,52 @@ function testCrossSliceBarriersAndDuplicateTaskIds() {
     assert.strictEqual(explicitBegin(cwd, 'execute-task/T01', 'S02-admitted', forSlice('S02'), timeOptions(12500)).reason, 'already-committed');
   } finally { cleanup(cwd); }
 }
+function testScopedSliceProofSurvivesOtherMilestone() {
+  const cwd = decidedRoot(), other = 'M992';
+  try {
+    conformantRoadmap(cwd, ['S01']);
+    assert.strictEqual(timeSelection.prepareBoundary(cwd, TM, { now: TNOW + 1000 }).status, 'allocated');
+    for (const slice of ['S01', 'S02']) { slicePlanFile(cwd, slice, [['T01', false]]); taskPlanFile(cwd, slice, 'T01', []); }
+    completeTask(cwd, 'S01', 'T01', 3000); taskDelivery(cwd, 'S01', 'T01');
+    slicePlanFile(cwd, 'S01', [['T01', true]]);
+    closeSlice(cwd, 'S01', ['T01'], 4000);
+    const txFile = controller.transactionFile(cwd, 'close-S01-done'), original = fs.readFileSync(txFile);
+    const proof = () => require('./forge-milestone-time-clock').readHistoricalDeliveries({ cwd, milestone: TM, slices: ['S01'], now: TNOW + 20000 });
+    assert.strictEqual(proof().proven.length, 1);
+    // B closes the SAME SliceID using genuine task capture, slice delivery/review,
+    // and committed controller transactions in the SAME physical owner.
+    fs.mkdirSync(path.join(cwd, '.gsd/milestones', other), { recursive: true });
+    state.write(cwd, { milestone: other, kind: 'milestone', phase: 'idle', active_slice: 'S01', active_task: '—', auto_mode: 'on', next_action: 'complete-slice' });
+    const base = `.gsd/milestones/${other}/slices/S01`;
+    writeFile(cwd, `.gsd/milestones/${other}/${other}-ROADMAP.md`, '# B\n\n- [x] **S01: B** `depends:[]`\n');
+    writeFile(cwd, `${base}/S01-PLAN.md`, '# S01\n\n- [x] T01: B task\n');
+    taskDelivery(cwd, 'S01', 'T01', { milestone: other });
+    const began = controller.begin(cwd, { milestone: other, unit: 'execute-task/T01', slice: 'S01', state_patch: { active_slice: 'S01' }, host_runtime: 'codex', owner_token: 'B', idempotency_key: 'B-task' }, timeOptions(8000));
+    controller.complete(cwd, { milestone: other, unit: 'execute-task/T01', host_runtime: 'codex', owner_token: 'B', generation: began.generation, idempotency_key: 'B-task-done', result: { status: 'succeeded' } }, timeOptions(8500));
+    closeSlice(cwd, 'S01', ['T01'], 9000, { milestone: other });
+    assert.strictEqual(controller.lookupRecord(cwd, 'boundary', 'complete-slice/S01').milestone, other);
+    assert.strictEqual(require('./forge-milestone-time-clock').readHistoricalDeliveries({ cwd, milestone: other, slices: ['S01'], now: TNOW + 20000 }).proven.length, 1);
+    assert.strictEqual(proof().proven.length, 1, JSON.stringify(proof()));
+    assert.deepStrictEqual(fs.readFileSync(txFile), original, 'A completion is never rewritten');
+    assert.strictEqual(controller.select(cwd, { milestone: TM }, timeOptions(20000)).unit.key, 'execute-task/T01');
+    const explicit = explicitBegin(cwd, 'execute-task/T01', 'A-S02-fresh-begin', { slice: 'S02', state_patch: { active_slice: 'S02' } }, timeOptions(14000));
+    assert.strictEqual(explicit.ok, true);
+    controller.complete(cwd, { milestone: TM, unit: 'execute-task/T01', host_runtime: 'codex', owner_token: 'explicit-owner', generation: explicit.generation,
+      idempotency_key: 'A-S02-explicit-done', result: { status: 'succeeded' } }, timeOptions(14500));
+    const failed = failedBegin(cwd, 'S02', 'T01', 'A-S02-after-handoff', 15000, 'A-S02-new-entry');
+    // A new entry is not replay: the guard must rebuild the historical slice proof.
+    assert.strictEqual(failed.reenter().reason, 'entry-ready');
+    const entryKey = `linked-entry:${require('crypto').createHash('sha256').update('A-S02-new-entry').digest('hex')}`;
+    const entry = controller.lookupRecord(cwd, 'transaction', entryKey);
+    controller.complete(cwd, { milestone: TM, unit: 'execute-task/T01', host_runtime: 'codex', owner_token: 'explicit-owner', generation: entry.lease_generation,
+      idempotency_key: 'A-S02-entry-done', result: { status: 'succeeded' } }, timeOptions(21000));
+    // Storage-checksum corruption still fails closed despite the unrelated ready slot.
+    const corrupt = JSON.parse(original); corrupt.boundary.milestone = other;
+    fs.writeFileSync(txFile, JSON.stringify(corrupt));
+    try { assert.strictEqual(proof().proven.length, 0); } finally { fs.writeFileSync(txFile, original); }
+    assert.strictEqual(proof().proven.length, 1);
+  } finally { cleanup(cwd); }
+}
 function assertThrowsDetails(fn, key) {
   try { fn(); } catch (error) {
     if (!error.details?.task_dag) throw new assert.AssertionError({ message: `expected a task_dag refusal, got ${error.code}: ${error.message}` });
@@ -1525,6 +1573,7 @@ function assertThrowsDetails(fn, key) {
 
 function main() {
   console.log(`forge-unit-controller tests on ${process.platform}`);
+  test('S02 review R60: scoped completed slice proof survives another milestone boundary', testScopedSliceProofSurvivesOtherMilestone);
   test('S02 task binding: readonly current-allocation projection, eight identifiers and every mutation negative', testTaskBindingContextAndEightIdentifiers);
   test('S02 task binding: cross-slice barriers, duplicate T01 identities and unplanned independent slices', testCrossSliceBarriersAndDuplicateTaskIds);
   test('S02 pure selection with and without time_options, roadmap blocks and scoped task DAG', testPureTimeOptionSelection);

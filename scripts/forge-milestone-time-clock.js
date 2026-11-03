@@ -455,9 +455,9 @@ function readDeliveries(options) {
           && r.action === 'complete' && r.outcome === 'succeeded').at(-1);
         if (!event || typeof event.idempotency_key !== 'string') fail('delivery-completion-missing');
         // Guard parent paths and sizes before calling canonical controller readers.
-        for (const kind of ['transaction', 'result', 'boundary']) {
+        for (const kind of ['transaction', 'result']) {
           const file = kind === 'transaction' ? controller.transactionFile(options.cwd, event.idempotency_key)
-            : kind === 'result' ? controller.resultFile(options.cwd, event.idempotency_key) : controller.boundaryFile(options.cwd, unit);
+            : controller.resultFile(options.cwd, event.idempotency_key);
           const ref = path.relative(options.cwd, file).split(path.sep).join('/');
           const read = deliverySource(options, options.cwd, ref, MAX_JSON, true); if (read.status !== 'valid') fail('delivery-completion-record-missing');
           if (!/^[a-f0-9]{64}$/.test(read.value?.storage_checksum)) fail('delivery-completion-checksum-missing');
@@ -475,13 +475,15 @@ function readDeliveries(options) {
         }
         const tx = controller.lookupRecord(options.cwd, 'transaction', event.idempotency_key);
         const result = controller.lookupRecord(options.cwd, 'result', event.idempotency_key);
-        const boundary = controller.lookupRecord(options.cwd, 'boundary', unit);
+        // The committed transaction retains its checksummed boundary. The public
+        // handoff slot is mutable and may now describe another milestone's S01.
+        const boundary = tx?.boundary;
         // The controller adds sequence only when publishing the event stream.
         const { sequence, ...publishedEvent } = event;
         if (!tx || tx.action !== 'complete' || tx.phase !== 'committed' || tx.milestone !== options.milestone || tx.unit?.key !== unit
             || result?.status !== 'succeeded' || result.unit !== unit || result.milestone !== options.milestone
             || boundary?.kind !== 'completed' || boundary.outcome !== 'succeeded' || boundary.handoff_ready !== true
-            || boundary.milestone !== options.milestone || boundary.idempotency_key !== event.idempotency_key
+            || boundary.milestone !== options.milestone || boundary.unit !== unit || boundary.idempotency_key !== event.idempotency_key
             || !Number.isFinite(instant(boundary.committed_at)) || !Number.isFinite(instant(tx.updated_at))
             || !Number.isFinite(instant(tx.created_at)) || instant(tx.created_at) > instant(event.ts)
             || instant(event.ts) > instant(boundary.committed_at) || instant(boundary.committed_at) > instant(tx.updated_at)
@@ -490,7 +492,6 @@ function readDeliveries(options) {
             || !Number.isSafeInteger(sequence) || sequence < 1
             || require('./forge-delivery').fingerprint(tx.event) !== require('./forge-delivery').fingerprint(publishedEvent)
             || require('./forge-delivery').fingerprint(tx.result) !== require('./forge-delivery').fingerprint(result)
-            || require('./forge-delivery').fingerprint(tx.boundary) !== require('./forge-delivery').fingerprint(boundary)
             || boundary.result_ref !== path.relative(options.cwd, controller.resultFile(options.cwd, event.idempotency_key)).split(path.sep).join('/')) fail('delivery-completion-unproven');
         const reference = `.gsd/milestones/${options.milestone}/slices/${slice}/${slice}-DELIVERY.json`;
         options.completionAt = instant(event.ts);

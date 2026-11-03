@@ -158,3 +158,13 @@ call was fabricated to preserve a count. Smoke source changes only Section61;
 its distribution contract is executed separately in the communication suite.
 Full smoke remains an independent owner check. Projection does not prove client
 rendering, model comprehension, provider execution or human acceptance.
+
+## S02 integrated review R61/R63 correction
+
+Measured with forge-claude-renderer.render after reordering the three modern
+bootstrap blocks: enrollment precedes durable STATE. From verified 7e91b8f,
+only the active skills pin changes: `3de92437ec378fa298349b408d1d3bf809ed95e35dcdaad0b9e54f24ef3f5000` to `1309f02bb58b79d61ba0bb1e897cdee4d37c232f488e1548106d4a999e57d061`.
+The other eight active hashes, immutable distribution-before fixture, historical
+goldens and all 248 registry classifications/fingerprints are unchanged. The
+pre-T07 comparison remains four of nine surfaces. Runtime restart tests are
+separate from distribution and do not establish client understanding or UAT.

@@ -86,6 +86,80 @@ const smokeStart = smoke.indexOf('// ── Section 61:');
 const smokeEnd = smoke.indexOf('// ── Section 62:', smokeStart);
 const section61 = smoke.slice(smokeStart, smokeEnd);
 const t07Labels = [];
+test('S02 review R61-R63: interrupted modern enrollment cannot select legacy planning', () => {
+  const { spawnSync } = require('child_process');
+  const selection = require('./forge-milestone-time-selection');
+  const controller = require('./forge-unit-controller');
+  const state = require('./forge-state');
+  const time = require('./forge-milestone-time');
+  const bash = process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : '/bin/bash';
+  const milestone = 'M991';
+  const prefsReader = () => ({ ok: true, prefs: { workflow: { skip_discuss: true, skip_research: true } } });
+  const blocks = [];
+  for (const name of ['forge-next', 'forge-auto']) {
+    const source = skills[name];
+    const start = source.indexOf('if [ "$RUN_KIND" = "milestone" ] && [ "$STATUS" = "activate-new" ]; then');
+    const end = source.indexOf('\nif [ -n "$PERSONAL_ARG" ]; then', start);
+    assert(start >= 0 && end > start);
+    blocks.push([name, source.slice(start, end)]);
+    if (name === 'forge-auto') {
+      const second = source.indexOf('if [ -n "$RUN_ID" ] && [ "$RUN_KIND" = "milestone" ]; then', end);
+      const close = source.indexOf('\n```', second);
+      assert(second >= 0 && close > second);
+      blocks.push([name + '-load', source.slice(second, close)]);
+    }
+  }
+  for (const [name, block] of blocks) {
+    assert(block.indexOf('--enroll') < block.indexOf('--create'), name + ': publication order');
+    for (const cut of ['before-enrollment', 'after-enrollment', 'before-state', 'after-state']) {
+      const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-bootstrap-restart-')); temps.push(cwd);
+      fs.mkdirSync(path.join(cwd, '.gsd/forge'), { recursive: true });
+      const dir = path.join(cwd, '.gsd/milestones', milestone); fs.mkdirSync(dir, { recursive: true });
+      for (const kind of ['SCOPE', 'CONTEXT', 'BRAINSTORM']) fs.writeFileSync(path.join(dir, `${milestone}-${kind}.md`), '# ' + kind + '\n');
+      const run = interruption => spawnSync(bash, ['-c', `
+node() {
+  case "$1" in
+    *forge-milestone-time-selection.js)
+      [ "$CUT" != before-enrollment ] || return 75
+      command "$REAL_NODE" "$@" || return $?
+      [ "$CUT" != after-enrollment ] || return 75 ;;
+    *forge-state.js)
+      [ "$CUT" != before-state ] || return 75
+      command "$REAL_NODE" "$@" || return $?
+      [ "$CUT" != after-state ] || return 75 ;;
+    *) command "$REAL_NODE" "$@" ;;
+  esac
+}
+${block}`], { cwd, encoding: 'utf8', timeout: 60000, env: { ...process.env, CUT: interruption,
+        REAL_NODE: process.execPath.replace(/\\/g, '/'), FORGE_SCRIPTS_DIR: __dirname.replace(/\\/g, '/'),
+        RUN_ID: milestone, RUN_KIND: 'milestone', STATUS: 'activate-new', WORKING_DIR: cwd.replace(/\\/g, '/') } });
+      const stopped = run(cut);
+      assert.strictEqual(stopped.status, 1, `${name}/${cut}: ${stopped.stderr}`);
+      const stateFile = path.join(dir, `${milestone}-STATE.md`);
+      assert.strictEqual(fs.existsSync(stateFile), cut === 'after-state');
+      const enrolled = time.readEnrollment({ cwd, milestone });
+      assert.strictEqual(enrolled.status, cut === 'before-enrollment' ? 'absent' : 'valid');
+      const enrollmentBytes = enrolled.status === 'valid' ? fs.readFileSync(time.timePaths({ cwd, milestone }).enrollment) : null;
+      const resumed = run(''); assert.strictEqual(resumed.status, 0, `${name}/${cut}: ${resumed.stderr}`);
+      assert.strictEqual(selection.readSelectionState(cwd, milestone).status, 'estimate-required');
+      assert.strictEqual(controller.select(cwd, { milestone }, { prefsReader }).unit.key, `estimate-milestone/${milestone}`);
+      assert.throws(() => controller.begin(cwd, { milestone, unit: `plan-milestone/${milestone}`, host_runtime: 'codex', owner_token: 'bootstrap', idempotency_key: 'early-plan' }, { prefsReader }), e => e.code === 'time-option-pending');
+      if (enrollmentBytes) assert.deepStrictEqual(fs.readFileSync(time.timePaths({ cwd, milestone }).enrollment), enrollmentBytes, 'idempotent replay');
+      assert.strictEqual(time.readSelection({ cwd, milestone }).status, 'absent', 'restart never answers a question');
+      assert.strictEqual(state.read(cwd, milestone).phase, 'estimate-milestone');
+    }
+    const legacy = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-bootstrap-legacy-')); temps.push(legacy);
+    fs.mkdirSync(path.join(legacy, '.gsd/forge'), { recursive: true });
+    fs.mkdirSync(path.join(legacy, '.gsd/milestones', milestone), { recursive: true });
+    state.write(legacy, { milestone, kind: 'milestone', phase: 'plan-milestone', active_slice: '—', active_task: '—', auto_mode: 'on', next_action: 'plan-milestone' });
+    const old = state.read(legacy, milestone);
+    // Existing genuine legacy STATE keeps selection on its legacy path.
+    assert.strictEqual(selection.readSelectionState(legacy, milestone), null);
+    assert.strictEqual(controller.select(legacy, { milestone }, { prefsReader }).unit.key, `plan-milestone/${milestone}`);
+    assert.deepStrictEqual(state.read(legacy, milestone), old);
+  }
+  console.log('ok - S02 review R61-R63: interrupted modern enrollment cannot select legacy planning');
+});
 function t07(name, fn) {
   test(`T07 distribution: ${name}`, () => {
     fn();

@@ -151,3 +151,11 @@ Owner pre-T07 source revision: `0ee8dfdd9ffa0a4ca6dfafe928991a9125f6d573`; basel
 The source instruction changes enroll new milestones, present explicit choices
 and resume the same snapshot. This corpus remains source/distribution evidence,
 not a client observation or human acceptance.
+
+## S02 integrated review R61/R63 correction
+
+From verified 7e91b8f, the two literal forge-next citation source hashes change
+from `637e73b1e2cdae1c97dd75f67f4f0b42028be6684235e6215c9516a1d1e37d1b` to `e8d04241493f4fa7c5a1db28e075487759fea1dd87dfafdbb750aa06aa723d0f` after the crash-safe bootstrap ordering edit.
+Quoted text and every other sample byte remain unchanged; the immutable
+distribution-before fixture is preserved. Runtime restart assertions are
+separate evidence from these source citations, with no human UAT claim.

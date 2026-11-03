@@ -150,6 +150,50 @@ function contractFor(record, option, ceiling, linked, chain) {
 function prepareFor(record) { const cwd = root(); time.recordEnrollment({ cwd, milestone: M, source: 'owner', now: NOW - 120000 }); time.recordOptions({ cwd, milestone: M, record }); return cwd; }
 
 try {
+  test('S02 review R62: cross-host pause history never truncates successful sample cost', () => {
+    const controller = require('./forge-unit-controller'), state = require('./forge-state');
+    const cwd = root(), milestone = 'M101', unit = 'plan-slice/S01', owner_token = 'history-owner';
+    const start = NOW - 3000000, prefsReader = () => ({ ok: true, prefs: { workflow: { skip_discuss: true, skip_research: true } } });
+    const at = n => ({ now: () => start + n, prefsReader });
+    fs.mkdirSync(path.join(cwd, '.gsd/milestones', milestone), { recursive: true });
+    state.write(cwd, { milestone, kind: 'milestone', phase: 'plan-slice', active_slice: 'S01', active_task: '—', auto_mode: 'on', next_action: 'plan-slice' });
+    const dir = path.join(cwd, '.gsd/milestones', milestone);
+    fs.writeFileSync(path.join(dir, `${milestone}-ROADMAP.md`), '# History\n\n- [ ] **S01: Work** `depends:[]`\n');
+    const first = controller.begin(cwd, { milestone, unit, owner_token, host_runtime: 'claude', idempotency_key: 'history-first' }, at(0));
+    controller.pause(cwd, { milestone, unit, owner_token, host_runtime: 'claude', generation: first.generation, idempotency_key: 'history-pause' }, at(600000));
+    assert.strictEqual(controller.handoff(cwd, { unit, next_host_runtime: 'codex' }, at(700000)).reason, 'handoff-ready');
+    const last = controller.begin(cwd, { milestone, unit, owner_token, host_runtime: 'codex', idempotency_key: 'history-continuation' }, at(900000));
+    controller.complete(cwd, { milestone, unit, owner_token, host_runtime: 'codex', generation: last.generation, idempotency_key: 'history-complete', result: { status: 'succeeded' } }, at(1500000));
+    fs.mkdirSync(path.join(cwd, '.gsd/ledger'), { recursive: true }); fs.writeFileSync(path.join(cwd, '.gsd/ledger', milestone + '.md'), '# Closed history\n');
+    const file = controller.eventsFile(cwd, milestone), original = fs.readFileSync(file), read = () => options.readHistory({ cwd, milestone: M });
+    const intervals = require('./forge-phase-cost').analyzeEventIntervals(original);
+    assert.deepStrictEqual(intervals.intervals.map(row => [row.host, row.end - row.start, row.action]), [['claude', 600000, 'pause'], ['codex', 600000, 'complete']]);
+    const history = read();
+    // The event interval API does not retain slice/attempt handoff proof. Unknown
+    // is honest even here, where the live producer really validated a handoff.
+    assert.deepStrictEqual([history.observations, history.phases['plan-slice'].n, history.phases['plan-slice'].p50_ms, history.phases['plan-slice'].p90_ms], [0, 0, null, null]);
+    assert.strictEqual(history.excluded.continuation_unknown, 2);
+    assert(history.limitations.some(text => text.includes('custo completo desconhecido')));
+    const unjudged = proposalOf({ transform: 'strip-judgments' });
+    const estimated = options.estimate(unjudged, history);
+    assert(estimated.positions.every(p => p.ceiling_ms === null), 'no false final-segment ceiling');
+    const rows = controller.readEvents(file);
+    // Foreign slice/attempt collisions cannot turn a final segment into a full sample.
+    for (const mutate of [
+      copy => { copy[2].slice = 'S99'; },
+      copy => { copy[2].idempotency_key = 'unrelated-retry'; },
+      copy => { copy.splice(1, 0, { ...copy[0], idempotency_key: 'ambiguous-first', ts: new Date(start + 1000).toISOString() }); },
+    ]) {
+      const copy = structuredClone(rows); mutate(copy); fs.writeFileSync(file, serialize(copy));
+      const negative = read(); assert.strictEqual(negative.phases['plan-slice'].n, 0); assert.strictEqual(negative.phases['plan-slice'].p90_ms, null);
+    }
+    const foreign = rows.slice(0, 2).map(row => ({ ...row, milestone: 'M102', idempotency_key: 'foreign-' + row.idempotency_key }));
+    fs.writeFileSync(file, serialize([...foreign, ...rows]));
+    assert.strictEqual(read().phases['plan-slice'].p90_ms, null, 'foreign pause cannot establish M101 continuation');
+    fs.writeFileSync(file, original);
+    assert.deepStrictEqual(read(), history);
+    console.log('ok - S02 review R62: cross-host pause history never truncates successful sample cost');
+  });
   test('exports-constants-and-import-purity', () => {
     for (const name of ['PROPOSAL_SCHEMA_VERSION', 'POSITION_IDS', 'MEASURABLE_PHASES', 'NODE_KINDS', 'ESTIMATE_POLICY', 'HISTORY_LIMITS', 'validateProposal', 'validateProposalContent',
       'inspectProposalContent', 'readHistory', 'estimate', 'materialize', 'renderOptionsMarkdown', 'selectionRounds', 'canonicalAnswer', 'parseOperatorCeiling', 'formatDuration', 'main']) assert.ok(options[name] !== undefined, name);
