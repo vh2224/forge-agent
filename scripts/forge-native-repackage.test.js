@@ -7,10 +7,17 @@ const { fixture } = require('./forge-native-recovery-delivery.test');
 const side = require('./forge-unit-sidecar');
 const roots = require('./forge-code-roots');
 const stateApi = require('./forge-xllm-state');
-async function scenario(linked = false, fileBacked = false) {
+async function scenario(linked = false, fileBacked = false, renewLease = false) {
   const f = await fixture({ standalone: !linked, corrected: true, linked });
   try {
     if (fileBacked) {
+      if (renewLease) {
+        const lease = require('./forge-unit-lease'), unit = f.request.unitType + '/' + f.request.taskId;
+        const file = lease.leaseFile(f.owner, unit);
+        if (!fs.existsSync(file)) assert(lease.acquire(f.owner, unit, {
+          ownerToken: roots.digest(f.dir), ttlMs: 1200000, hostRuntime: 'codex', session: 'fixture',
+        }).ok);
+      }
       const recovery = require('./forge-attempt-recovery'), previous = f.history;
       const identity = roots.digest(recovery.requestIdentity(recovery.canonicalRequest(f.request)));
       f.request.nativePromptFile = path.join(f.dir, 'unused-caller-file-hint.txt');
@@ -37,6 +44,22 @@ async function scenario(linked = false, fileBacked = false) {
     const interrupted = await side.recoverUnitSidecar(f.request, f.recovery, f.runtime);
     const original = stateApi.loadRecovery(f.stateFile), ipc = JSON.parse(fs.readFileSync(ipcFile));
     assert.equal(original.continuation.status, 'dispatch-possible');
+    const originalManifest = fs.readFileSync(ipc.manifest_file);
+    let originalLeaseBytes, renewedLeaseBytes, leaseFile;
+    if (renewLease) {
+      const lease = require('./forge-unit-lease'), unit = f.request.unitType + '/' + f.request.taskId;
+      leaseFile = lease.leaseFile(f.owner, unit);
+      originalLeaseBytes = fs.readFileSync(leaseFile);
+      const record = JSON.parse(originalLeaseBytes);
+      assert.equal(JSON.parse(originalManifest).prepared.protected_owner[path.relative(f.owner, leaseFile).replace(/\\/g, '/')], roots.digest(originalLeaseBytes));
+      assert(lease.heartbeat(f.owner, unit, record.owner_token, record.generation, { ttlMs: 1200000 }).ok);
+      renewedLeaseBytes = fs.readFileSync(leaseFile);
+      f.runtime.leaseRenewal = require('./forge-native-recovery-delivery').createLeaseRenewalReconciliation({
+        savedManifestFile: ipc.manifest_file, originalLeaseBytes,
+        ownerToken: record.owner_token, generation: record.generation,
+        attestStoppedWriter: () => true, assertAuthority: f.assertBoundary,
+      });
+    }
     if (fileBacked) {
       const promptFile = ipc.request.resultFile + '.native-prompt.txt', bytes = fs.readFileSync(promptFile);
       const inspectOriginal = () => require('./forge-native-repackage').inspect({
@@ -125,6 +148,14 @@ async function scenario(linked = false, fileBacked = false) {
     const retained = stateApi.loadRecovery(f.stateFile);
     assert.equal(retained.continuation.status, 'prepared');
     assert.deepEqual(retained.continuation_history, [original.continuation]);
+    if (renewLease) {
+      const capability = f.runtime.leaseRenewal;
+      f.runtime.leaseRenewal = JSON.parse(JSON.stringify(capability));
+      await assert.rejects(() => side.recoverUnitSidecar(f.request, f.recovery, f.runtime), /lease-renewal-capability-required/);
+      f.runtime.leaseRenewal = capability;
+      assert.deepEqual(stateApi.loadRecovery(f.stateFile).attempts, original.attempts);
+      assert.deepEqual(stateApi.loadRecovery(f.stateFile).reservations, original.reservations);
+    }
     await assert.rejects(() => side.recoverUnitSidecar(f.request, input, f.runtime), /native-repackage-evidence-invalid/);
     fs.writeFileSync(oldJournal, JSON.stringify({ ...JSON.parse(journalBytes), handle_sha256: 'a'.repeat(64) }));
     await assert.rejects(() => side.recoverUnitSidecar(f.request, f.recovery, f.runtime), /native-repackage-evidence-invalid/);
@@ -134,8 +165,9 @@ async function scenario(linked = false, fileBacked = false) {
     fs.unlinkSync(ipc.request.resultFile);
     let calls = 0, measured;
     f.runtime.onPackagedContext = value => { measured = value; };
-    f.runtime.invokeNative = async (request, binding, session) => {
+    f.runtime.invokeNative = async (request, binding, session, observer) => {
       calls++;
+      if (renewLease) assert(observer.hostIdentity('fixture-native-lease').ok);
       assert(binding.args.message.length < 1500);
       assert.equal(fs.readFileSync(request.resultFile + '.native-prompt.txt', 'utf8'), originalPrompt);
       const current = stateApi.loadRecovery(f.stateFile);
@@ -152,7 +184,7 @@ async function scenario(linked = false, fileBacked = false) {
     await assert.rejects(() => side.recoverUnitSidecar(f.request, f.recovery, f.runtime), /fixture-returned-interruption/);
     assert.equal(calls, 1);
     f.runtime.writerObservationAdapter = require('./forge-recovery-transition').createWriterObservationAdapter(challenge => ({ ...challenge,
-      binding_sha256: roots.digest(challenge), status: 'stopped', writer_identity: 'fixture-native', evidence_reference: 'fixture:awaited-return' }));
+      binding_sha256: roots.digest(challenge), status: 'stopped', writer_identity: renewLease ? 'fixture-native-lease' : 'fixture-native', evidence_reference: 'fixture:awaited-return' }));
     const promptFile = ipc.request.resultFile + '.native-prompt.txt', promptBytes = fs.readFileSync(promptFile);
     fs.renameSync(promptFile, promptFile + '.preserved');
     await assert.rejects(() => side.recoverUnitSidecar(f.request, f.recovery, f.runtime), /native-prompt-file-missing/);
@@ -166,9 +198,15 @@ async function scenario(linked = false, fileBacked = false) {
     assert.equal((await side.recoverUnitSidecar(f.request, f.recovery, f.runtime)).action, 'replay');
     assert.equal(calls, 1);
     assert.deepEqual(fs.readFileSync(oldJournal), journalBytes);
-    console.log('PASS '+(fileBacked?'already-file ':'')+(linked?'linked ':'')+'canonical uninvoked repackage: live census, immutable history, pre-consumption restart, exact payload, short binding and returned/publication replay');
+    assert.deepEqual(fs.readFileSync(ipc.manifest_file), originalManifest);
+    if (renewLease) {
+      const receipt = JSON.parse(fs.readFileSync(stateApi.loadRecovery(f.stateFile).continuation.delivery.receipt.file));
+      assert.equal(receipt.lease_reconciliation.original_sha256, roots.digest(originalLeaseBytes));
+      assert.deepEqual(fs.readFileSync(leaseFile), renewedLeaseBytes);
+    }
+    console.log('PASS '+(renewLease?'owned-lease-renewal ':'')+(fileBacked?'already-file ':'')+(linked?'linked ':'')+'canonical uninvoked repackage: live census, immutable history, pre-consumption restart, exact payload, short binding and returned/publication replay');
   } finally { f.cleanup(); }
 }
-async function main(){await scenario();await scenario(true);await scenario(false,true);await scenario(true,true);}
+async function main(){await scenario();await scenario(true);await scenario(false,true);await scenario(true,true);await scenario(false,true,true);await scenario(true,true,true);}
 if (require.main === module) (process.argv.includes('--linked')?scenario(true):main()).catch(error => { console.error(error); process.exitCode = 1; });
 module.exports = { main, scenario };

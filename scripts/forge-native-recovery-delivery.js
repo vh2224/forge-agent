@@ -911,7 +911,7 @@ async function replay({request,recovery,runtime,nativeOptions}) {
   const successor=action=>runtime.executionPlanGate===undefined||r.gates?.plan!=='skipped'||r.gates?.planSkipReason!=='auto-defer'
     ?action():api('forge-task-execution').withAutoPlanGateAdapterSync(runtime.executionPlanGate,r,action);
   const session=successor(()=>prepare({request:r,nativeInvocation:invocation,assertBoundary:runtime.assertBoundary,assertAuthority,
-    supplementalCoverage:runtime.supplementalCoverage,onPhase:runtime.onPhase,onCheck:runtime.onVerificationCheck,
+    supplementalCoverage:runtime.supplementalCoverage,leaseRenewal:runtime.leaseRenewal,onPhase:runtime.onPhase,onCheck:runtime.onVerificationCheck,
     linkedEntryOptions:runtime.linkedEntryOptions,savedManifest:manifest,persistDeliveryReceipt:receipt=>{
       inspect();
       const lock=api('forge-lock'),lockRoot=path.join(require('os').tmpdir(),'forge-recovery-'+roots.digest(path.resolve(recovery.stateFile)));

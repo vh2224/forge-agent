@@ -3308,6 +3308,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
           let persistedReceipt = null;
           const session = asSuccessorSync(next, () => deliveryHelper.prepare({ request: next, nativeInvocation: invocation,
             savedManifest: assertReady?.repackageManifest?.(runtime.nativeLifecycle?.journal?.file),
+            leaseRenewal: runtime.leaseRenewal,
             assertBoundary: runtime.assertBoundary, assertAuthority: assertReady?.assertAuthority,
             persistDeliveryReceipt: typeof assertReady?.persistDeliveryReceipt === 'function'
               ? receipt => { assertReady.persistDeliveryReceipt(receipt); persistedReceipt = receipt; } : undefined,
