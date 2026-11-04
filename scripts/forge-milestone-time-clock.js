@@ -310,8 +310,16 @@ function eventSource(options) {
   if (events.milestones.some(milestone => milestone !== options.milestone)) fail('clock-event-milestone-mismatch');
   return { source, events };
 }
+// Bounded live event-stream metadata for a frozen clock whose live consumption is unavailable (invalid
+// journal, limit, race): listed independently so observeTime/openWriters can recheck the stream and
+// keep the frozen consumption. An unreadable or oversized stream stays unlisted: writers are unknown.
+function liveEventMetadata(options, sources) {
+  const reference = `.gsd/milestones/${options.milestone}/${options.milestone}-events.jsonl`;
+  if (sources.some(r => r.path === reference)) return;
+  try { sources.push(publicSource(eventSource(options).source)); } catch { /* writer metadata stays unknown */ }
+}
 function readClock(options) {
-  const sources = [];
+  const sources = []; let terminal = null;
   try {
     options = observationOptions(options);
     const paths = time.timePaths(options), contract = time.readContract(options);
@@ -323,8 +331,16 @@ function readClock(options) {
       const reference = `.gsd/forge/time/${options.milestone}/amendments/${String(version).padStart(4, '0')}.json`;
       sources.push(publicSource(readSource(paths.owner, reference, 64 * 1024, true)));
     }
+    // Frozen-first: a valid immutable endpoint and its ownership are resolved before any live
+    // consumption is recomputed, so later journal/event growth or loss never overturns the snapshot.
+    terminal = terminalSnapshot(options, paths, sources);
+    if (terminal === INVALID_TERMINAL) return unknown('clock-endpoint-invalid', sources);
     const journal = time.readJournal(options);
-    if (journal.status !== 'valid') return unknown(journal.reason || 'clock-journal-invalid', sources);
+    if (journal.status !== 'valid') {
+      if (terminal) liveEventMetadata(options, sources);
+      return terminal ? frozenClock(terminal, contract, options, null, sources, journal.reason || 'clock-journal-invalid')
+        : unknown(journal.reason || 'clock-journal-invalid', sources);
+    }
     const journalSource = readSource(paths.owner, `.gsd/forge/time/${options.milestone}/journal.jsonl`, phaseCost.MAX_BYTES);
     if (journalSource.status !== 'absent' && hash(Buffer.from(journal.records.map(JSON.stringify).join('\n')))
         !== hash(Buffer.from(journalSource.buffer.toString('utf8').trimEnd().split('\n').map(line => JSON.stringify(JSON.parse(line))).join('\n')))) fail('clock-source-unstable');
@@ -363,8 +379,45 @@ function readClock(options) {
     for (const source of sources.filter(r => r.status === 'valid' || r.status === 'absent')) {
       if (readSource(paths.owner, source.path, phaseCost.MAX_BYTES).sha256 !== source.sha256) fail('clock-source-unstable');
     }
-    return { ...result, sources };
-  } catch (e) { return unknown(sourceReason(e), sources); }
+    return terminal ? frozenClock(terminal, contract, options, result, sources) : { ...result, sources };
+  } catch (e) {
+    if (terminal && terminal !== INVALID_TERMINAL) {
+      liveEventMetadata(options, sources);
+      try { return frozenClock(terminal, time.readContract(options), options, null, sources, sourceReason(e)); } catch { /* contract unreadable: unknown below */ }
+    }
+    return unknown(sourceReason(e), sources);
+  }
+}
+// Terminal horizon: a valid immutable endpoint.json of the current contract chain (bound to its
+// publication anchor by readEndpoint) stops consumption at its snapshot (effort, waits and gaps
+// included); elapsed time continues separately. Later amendments, journal records or events never
+// reopen it, even when the live sources outgrow their bounded reader or become unavailable: the
+// failure stays listed as bounded live-source metadata. A tampered, foreign, unanchored or
+// out-of-chain record leaves the clock unknown, and no record keeps today's output. The current
+// sources stay listed so observeTime/openWriters keep rechecking them.
+const INVALID_TERMINAL = Object.freeze({ invalid: true });
+function terminalSnapshot(options, paths) {
+  const read = require('./forge-milestone-endpoint').readEndpoint({ cwd: paths.owner, milestone: options.milestone });
+  if (read.status === 'absent') return null;
+  if (read.status !== 'valid') return INVALID_TERMINAL;
+  const at = instant(read.record.endpoint_at), now = instant(options.now);
+  if (!Number.isFinite(now) || now < at) return null;
+  const source = readSource(paths.owner, `.gsd/forge/time/${options.milestone}/endpoint.json`, 64 * 1024, true);
+  if (source.status !== 'valid' || require('./forge-code-roots').digest(source.value) !== read.sha256) fail('clock-source-unstable');
+  return { record: read.record, sha256: read.sha256, at, source };
+}
+function frozenClock(terminal, contract, options, result, sources, liveReason) {
+  const { record, at } = terminal, now = instant(options.now), start = instant(contract.contract.activated_at), snapshot = structuredClone(record.clock);
+  const reason = liveReason || (result.status === 'measured' ? null : result.reason || 'clock-live-unknown');
+  const elapsed = result?.status === 'measured' ? result.elapsed
+    : { since_activation_ms: now - start, preselection_ms: start - instant(contract.contract.preselection_started_at) };
+  return { status: 'measured', policy: CLOCK_POLICY, now, frozen: true,
+    endpoint: { at: record.endpoint_at, sha256: terminal.sha256 },
+    elapsed: { ...elapsed, after_endpoint_ms: now - at },
+    consumption: { consumed_ms: snapshot.consumed_ms, unknown_ms: snapshot.unknown_ms, by_class: snapshot.by_class },
+    effort: snapshot.effort, waits: snapshot.waits, gaps: snapshot.gaps, gap_count: snapshot.gap_count, gaps_truncated: snapshot.gaps_truncated,
+    sources: [...sources, ...(reason ? [{ path: 'live-consumption', status: 'unavailable', sha256: null, bytes: null, records: null, reason }] : []),
+      publicSource(terminal.source)] };
 }
 
 // Declared source paths of one plan: its writes plus every criterion path.
@@ -406,7 +459,12 @@ function validateDelivery(options, reference, expected, seen = new Set()) {
   if (rebuilt.delivery_fingerprint !== stored.value.delivery_fingerprint
       || delivery.finalizeOutput(stored.value).delivery_fingerprint !== stored.value.delivery_fingerprint) fail('delivery-projection-changed');
   const legacySlice = expected.type === 'slice' && input.expected_children?.length > 0;
-  if (rebuilt.generated_by !== 'forge-delivery' || rebuilt.diagnostics.some(r => !(legacySlice && r === 'plan_legacy')) || !rebuilt.criteria.length
+  // A milestone ROADMAP is an aggregate plan: only its own legacy marker and the legacy
+  // markers reported by its expected slice children are tolerated (endpoint proof only).
+  const aggregate = expected.type === 'milestone' && input.expected_children?.length > 0
+    ? new Set(['plan_legacy', ...input.expected_children.flatMap(c => ['child_plan_legacy_or_unstructured:', 'child_reported:plan_legacy:']
+      .map(prefix => prefix + delivery.unitKey(c.unit)))]) : null;
+  if (rebuilt.generated_by !== 'forge-delivery' || rebuilt.diagnostics.some(r => !(legacySlice && r === 'plan_legacy') && !aggregate?.has(r)) || !rebuilt.criteria.length
       || rebuilt.criteria.some(c => c.status !== 'verificado' || c.pending.length)) fail('delivery-criteria-unproven');
   if (expected.type === 'slice') {
     const tasks = require('./forge-status').parsePlanTasks(planText);
@@ -425,6 +483,58 @@ function validateDelivery(options, reference, expected, seen = new Set()) {
   options.proof.units.push({ unit: delivery.unitKey(expected), reference, delivery_sha256: stored.sha256,
     input_sha256: inputRead.sha256, plan_sha256: plan.sha256, criteria: rebuilt.criteria.filter(c => delivery.unitKey(c.unit) === delivery.unitKey(expected)).length });
   return rebuilt;
+}
+// The single canonical completion check of a scoped complete-slice or complete-milestone
+// unit: the last succeeded complete event of this milestone, its committed transaction,
+// succeeded result and the checksummed completed/handoff-ready boundary the transaction
+// retains, the published event identical but for sequence, and the order of the recorded
+// instants (created <= event <= committed <= updated <= now). Paths and sizes are bounded
+// before the canonical controller readers run.
+function canonicalCompletion(options, rows, unit) {
+  const controller = require('./forge-unit-controller');
+  const event = rows.filter(r => r.milestone === options.milestone && r.unit === unit && r.event === 'unit-transition'
+    && r.action === 'complete' && r.outcome === 'succeeded').at(-1);
+  if (!event || typeof event.idempotency_key !== 'string') fail('delivery-completion-missing');
+  // Guard parent paths and sizes before calling canonical controller readers.
+  for (const kind of ['transaction', 'result']) {
+    const file = kind === 'transaction' ? controller.transactionFile(options.cwd, event.idempotency_key)
+      : controller.resultFile(options.cwd, event.idempotency_key);
+    const ref = path.relative(options.cwd, file).split(path.sep).join('/');
+    const read = deliverySource(options, options.cwd, ref, MAX_JSON, true); if (read.status !== 'valid') fail('delivery-completion-record-missing');
+    if (!/^[a-f0-9]{64}$/.test(read.value?.storage_checksum)) fail('delivery-completion-checksum-missing');
+    // lookupRecord may also inspect a legacy copy. Bound and reject links
+    // in the record directory without implementing its storage parser.
+    const directory = path.dirname(file), directoryRef = path.relative(options.cwd, directory).split(path.sep).join('/');
+    safeFile(options.cwd, directoryRef);
+    const names = fs.readdirSync(directory);
+    if (names.length > 256) fail('delivery-record-limit');
+    let bytes = 0;
+    for (const name of names.filter(n => n.endsWith('.json'))) {
+      bytes += deliverySource(options, options.cwd, directoryRef + '/' + name, MAX_JSON).bytes;
+      if (bytes > phaseCost.MAX_BYTES) fail('delivery-record-limit');
+    }
+  }
+  const tx = controller.lookupRecord(options.cwd, 'transaction', event.idempotency_key);
+  const result = controller.lookupRecord(options.cwd, 'result', event.idempotency_key);
+  // The committed transaction retains its checksummed boundary. The public
+  // handoff slot is mutable and may now describe another milestone's S01.
+  const boundary = tx?.boundary;
+  // The controller adds sequence only when publishing the event stream.
+  const { sequence, ...publishedEvent } = event;
+  if (!tx || tx.action !== 'complete' || tx.phase !== 'committed' || tx.milestone !== options.milestone || tx.unit?.key !== unit
+      || result?.status !== 'succeeded' || result.unit !== unit || result.milestone !== options.milestone
+      || boundary?.kind !== 'completed' || boundary.outcome !== 'succeeded' || boundary.handoff_ready !== true
+      || boundary.milestone !== options.milestone || boundary.unit !== unit || boundary.idempotency_key !== event.idempotency_key
+      || !Number.isFinite(instant(boundary.committed_at)) || !Number.isFinite(instant(tx.updated_at))
+      || !Number.isFinite(instant(tx.created_at)) || instant(tx.created_at) > instant(event.ts)
+      || instant(event.ts) > instant(boundary.committed_at) || instant(boundary.committed_at) > instant(tx.updated_at)
+      || !Number.isFinite(instant(options.now)) || instant(tx.updated_at) > instant(options.now)
+      || boundary.state_checksum !== tx.after.state_checksum
+      || !Number.isSafeInteger(sequence) || sequence < 1
+      || require('./forge-delivery').fingerprint(tx.event) !== require('./forge-delivery').fingerprint(publishedEvent)
+      || require('./forge-delivery').fingerprint(tx.result) !== require('./forge-delivery').fingerprint(result)
+      || boundary.result_ref !== path.relative(options.cwd, controller.resultFile(options.cwd, event.idempotency_key)).split(path.sep).join('/')) fail('delivery-completion-unproven');
+  return { event, publishedEvent, tx, result, boundary };
 }
 function readDeliveries(options) {
   const proven = [], unproven = [], sources = [];
@@ -450,49 +560,7 @@ function readDeliveries(options) {
     for (const slice of [...new Set(slices)].sort()) {
       if (!/^S\d{2,}$/.test(slice)) fail('delivery-slice-invalid');
       try {
-        const unit = 'complete-slice/' + slice;
-        const event = rows.filter(r => r.milestone === options.milestone && r.unit === unit && r.event === 'unit-transition'
-          && r.action === 'complete' && r.outcome === 'succeeded').at(-1);
-        if (!event || typeof event.idempotency_key !== 'string') fail('delivery-completion-missing');
-        // Guard parent paths and sizes before calling canonical controller readers.
-        for (const kind of ['transaction', 'result']) {
-          const file = kind === 'transaction' ? controller.transactionFile(options.cwd, event.idempotency_key)
-            : controller.resultFile(options.cwd, event.idempotency_key);
-          const ref = path.relative(options.cwd, file).split(path.sep).join('/');
-          const read = deliverySource(options, options.cwd, ref, MAX_JSON, true); if (read.status !== 'valid') fail('delivery-completion-record-missing');
-          if (!/^[a-f0-9]{64}$/.test(read.value?.storage_checksum)) fail('delivery-completion-checksum-missing');
-          // lookupRecord may also inspect a legacy copy. Bound and reject links
-          // in the record directory without implementing its storage parser.
-          const directory = path.dirname(file), directoryRef = path.relative(options.cwd, directory).split(path.sep).join('/');
-          safeFile(options.cwd, directoryRef);
-          const names = fs.readdirSync(directory);
-          if (names.length > 256) fail('delivery-record-limit');
-          let bytes = 0;
-          for (const name of names.filter(n => n.endsWith('.json'))) {
-            bytes += deliverySource(options, options.cwd, directoryRef + '/' + name, MAX_JSON).bytes;
-            if (bytes > phaseCost.MAX_BYTES) fail('delivery-record-limit');
-          }
-        }
-        const tx = controller.lookupRecord(options.cwd, 'transaction', event.idempotency_key);
-        const result = controller.lookupRecord(options.cwd, 'result', event.idempotency_key);
-        // The committed transaction retains its checksummed boundary. The public
-        // handoff slot is mutable and may now describe another milestone's S01.
-        const boundary = tx?.boundary;
-        // The controller adds sequence only when publishing the event stream.
-        const { sequence, ...publishedEvent } = event;
-        if (!tx || tx.action !== 'complete' || tx.phase !== 'committed' || tx.milestone !== options.milestone || tx.unit?.key !== unit
-            || result?.status !== 'succeeded' || result.unit !== unit || result.milestone !== options.milestone
-            || boundary?.kind !== 'completed' || boundary.outcome !== 'succeeded' || boundary.handoff_ready !== true
-            || boundary.milestone !== options.milestone || boundary.unit !== unit || boundary.idempotency_key !== event.idempotency_key
-            || !Number.isFinite(instant(boundary.committed_at)) || !Number.isFinite(instant(tx.updated_at))
-            || !Number.isFinite(instant(tx.created_at)) || instant(tx.created_at) > instant(event.ts)
-            || instant(event.ts) > instant(boundary.committed_at) || instant(boundary.committed_at) > instant(tx.updated_at)
-            || !Number.isFinite(instant(options.now)) || instant(tx.updated_at) > instant(options.now)
-            || boundary.state_checksum !== tx.after.state_checksum
-            || !Number.isSafeInteger(sequence) || sequence < 1
-            || require('./forge-delivery').fingerprint(tx.event) !== require('./forge-delivery').fingerprint(publishedEvent)
-            || require('./forge-delivery').fingerprint(tx.result) !== require('./forge-delivery').fingerprint(result)
-            || boundary.result_ref !== path.relative(options.cwd, controller.resultFile(options.cwd, event.idempotency_key)).split(path.sep).join('/')) fail('delivery-completion-unproven');
+        const { event, boundary } = canonicalCompletion(options, rows, 'complete-slice/' + slice);
         const reference = `.gsd/milestones/${options.milestone}/slices/${slice}/${slice}-DELIVERY.json`;
         options.completionAt = instant(event.ts);
         options.proof = { units: [], captures: [] };
@@ -579,6 +647,200 @@ function readHistoricalTaskDelivery(options = {}) {
   } catch (e) { return { status: 'unproven', ...purpose, reason: sourceReason(e) }; }
 }
 
+// Positive, read-only proof of the verified-integrated-delivery endpoint of one contracted
+// milestone. Children are aggregated historically (never compared with today's sources, so a
+// later legitimate change does not deadlock); only the FRESH endpoint envelopes of every
+// physical root bind the current sources. Nothing is inferred from SUMMARY, checkboxes,
+// ledger, inactive runs, imported status or caller objects: every input is re-read here.
+const ENDPOINT_PROOF_POLICY = Object.freeze({ id: 'forge-milestone-endpoint-proof', version: 1, endpoint: 'verified-integrated-delivery',
+  completion: 'complete-milestone-canonical', children: 'historical-delivery', review: 'slice-closure', integrated: 'fresh-root-verification',
+  envelope: '.gsd/milestones/{milestone}/{milestone}-ENDPOINT-VERIFICATION-{root}-ENVELOPE.json',
+  commands: 'deduplicated-union-of-declared-verify', scope: 'union-of-declared-writes-outputs-and-criterion-paths',
+  limitations: Object.freeze(['fresh-verification-proves-exit-codes-of-the-declared-verify-union-not-every-behavior',
+    'behavioral-coverage-comes-from-the-historical-criteria', 'publication-ci-merge-release-installation-and-uat-are-separate-facts']) });
+const REVISION = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
+function endpointRefusal(code, extra = {}, status = 'unproven') { return Object.assign(new Error(code), { code, endpoint: status, extra }); }
+function endpointGit(cwd, args) {
+  const { git } = require('./forge-git-process');
+  return git(cwd, args, { maxBuffer: 4096, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_NO_REPLACE_OBJECTS: '1' } }).trim();
+}
+function readEndpointProof(options = {}) {
+  const base = { policy: ENDPOINT_PROOF_POLICY, milestone: typeof options?.milestone === 'string' ? options.milestone : null };
+  let plan = null;
+  const refuse = (code, extra, status) => { throw endpointRefusal(code, extra, status); };
+  // Damaged or forged history is a named refusal with its typed detail; a source that
+  // changes while it is being read stays unknown.
+  const mapped = (e, code) => (e.endpoint || e.code === 'clock-source-unstable' ? e : endpointRefusal(code, { detail: sourceReason(e) }));
+  try {
+    // Only the owner root, milestone and instant are inputs: caller roots, reader seams,
+    // proof objects or flags never reach the canonical readers.
+    const caller = options && typeof options === 'object' ? options : {};
+    if (typeof caller.cwd !== 'string' || !caller.cwd) refuse('endpoint-owner-invalid');
+    options = observationOptions({ cwd: caller.cwd, milestone: caller.milestone, now: caller.now });
+    try { time.timePaths(options); } catch { refuse('endpoint-milestone-invalid'); }
+    const M = options.milestone, owner = options.cwd, dir = `.gsd/milestones/${M}`;
+    const delivery = require('./forge-delivery'), roots = require('./forge-code-roots'), controller = require('./forge-unit-controller');
+    Object.assign(options, { proofMode: 'historical-delivery', deliveryCache: { files: new Map(), hashes: new Map(), blobs: new Map(), bytes: 0 } });
+    // milestone_cleanup archive/delete moves or removes these before any proof: a named refusal.
+    for (const ref of [dir, `${dir}/${M}-events.jsonl`, `${dir}/${M}-ROADMAP.md`]) {
+      try { fs.lstatSync(safeFile(owner, ref)); } catch (e) { if (e.code === 'ENOENT') refuse('endpoint-sources-missing', { detail: ref }); throw e; }
+    }
+    const contract = time.readContract(options);
+    if (contract.status === 'absent') refuse('endpoint-contract-missing');
+    if (contract.status !== 'valid' || contract.contract.endpoint.kind !== 'verified-integrated-delivery') refuse('endpoint-contract-invalid', { detail: contract.reason || 'endpoint-kind' });
+    const observed = eventSource(options);
+    const rows = controller.readEvents(safeFile(owner, observed.source.path));
+    if (deliverySource(options, owner, observed.source.path, phaseCost.MAX_BYTES).sha256 !== observed.source.sha256) fail('clock-source-unstable');
+    const unit = 'complete-milestone/' + M;
+    let completion;
+    try { completion = canonicalCompletion(options, rows, unit); }
+    catch (e) { throw e.code === 'delivery-completion-missing' ? endpointRefusal('endpoint-completion-missing') : mapped(e, 'endpoint-completion-unproven'); }
+    // Historical milestone delivery: canonical rebuild of the INPUT/ROADMAP and every child.
+    const reference = `${dir}/${M}-DELIVERY.json`, inputReference = `${dir}/${M}-DELIVERY-INPUT.json`, expected = { type: 'milestone', id: M };
+    Object.assign(options, { completionAt: instant(completion.event.ts), proof: { units: [], captures: [] } });
+    let projection;
+    try { projection = validateDelivery(options, reference, expected); }
+    catch (e) { throw e.code === 'delivery-missing' ? endpointRefusal('endpoint-delivery-missing') : mapped(e, 'endpoint-delivery-unproven'); }
+    const stored = deliverySource(options, owner, reference, MAX_JSON, true), inputRead = deliverySource(options, owner, inputReference, MAX_JSON, true);
+    const input = inputRead.value, roadmapRead = deliverySource(options, owner, `${dir}/${M}-ROADMAP.md`, MAX_JSON);
+    if (input.plan !== `${dir}/${M}-ROADMAP.md`) refuse('endpoint-delivery-unproven', { detail: 'delivery-plan-foreign' });
+    const slices = require('./forge-status').parseRoadmap(roadmapRead.buffer.toString('utf8')).slices.map(row => row.id);
+    const children = input.expected_children || [];
+    if (!slices.length || new Set(slices).size !== slices.length || children.length !== slices.length
+        || !slices.every(id => children.some(c => c?.unit?.type === 'slice' && c.unit.id === id && c.unit.milestone === M
+          && c.delivery === `${dir}/slices/${id}/${id}-DELIVERY.json`))) refuse('endpoint-child-inventory-mismatch');
+    // Applicable review: each slice closed by the controller's own canonical closure.
+    const reviews = [];
+    for (const slice of slices) {
+      const closure = controller.sliceClosure(owner, M, slice, options.now);
+      if (closure) refuse('endpoint-slice-unclosed', { slice, detail: closure.reason, proof: closure.proof });
+      const ref = `${dir}/slices/${slice}/${slice}-REVIEW.md`, review = deliverySource(options, owner, ref, MAX_JSON);
+      if (review.status !== 'valid') refuse('endpoint-slice-unclosed', { slice, detail: 'slice-unreviewed', proof: 'slice-review-missing' });
+      reviews.push({ slice, reference: ref, sha256: review.sha256 });
+    }
+    // Selection: an enrolled milestone needs its decided selection and a conformant roadmap;
+    // an S01 contract needs an allocation coherent with the current roadmap identity.
+    let identity = null; try { identity = time.roadmapIdentity(roadmapRead.buffer); } catch { identity = null; }
+    const state = require('./forge-milestone-time-selection').readSelectionState(owner, M);
+    let selection;
+    if (state === null) {
+      const allocation = contract.contract.allocation;
+      if (!allocation) refuse('endpoint-allocation-missing');
+      const structural = !!allocation.structure_sha256 && identity?.structure_sha256 === allocation.structure_sha256;
+      if (allocation.roadmap_sha256 !== roadmapRead.sha256 && !structural) refuse('endpoint-roadmap-nonconformant', { detail: 'allocation-roadmap-mismatch' });
+      selection = { status: 'not-enrolled', sha256: null };
+    } else {
+      if (state.status !== 'decided' || state.choice !== 'option' || state.contract?.sha256 !== contract.sha256) refuse('endpoint-selection-undecided', { detail: state.status || 'selection-unknown' });
+      if (state.roadmap?.status !== 'conformant') refuse('endpoint-roadmap-nonconformant', { detail: state.roadmap?.status || 'roadmap-missing' });
+      if (state.roadmap.roadmap_sha256 !== roadmapRead.sha256) fail('clock-source-unstable');
+      selection = { status: 'decided', sha256: state.selection_sha256 };
+    }
+    // Complete question census: unreadable, invalid or excess state is unknown, never zero.
+    let listed;
+    try { listed = require('./forge-pending-questions').listPendingQuestions({ cwd: owner, filter: { type: 'milestone', id: M } }); }
+    catch { refuse('endpoint-question-census-unknown', {}, 'unknown'); }
+    if (listed.census.invalid || listed.census.excess || !['no-questions', 'no-matching-questions', null].includes(listed.empty_reason)) {
+      refuse('endpoint-question-census-unknown', { detail: listed.empty_reason || 'census-incomplete' }, 'unknown');
+    }
+    const pending = listed.questions.filter(q => q.status === 'pending');
+    if (pending.length) refuse('endpoint-question-pending', { questions: pending.length });
+    // The integrated roots come only from the measured execution contract of the delivery.
+    if (input.schema_version !== 2) refuse('endpoint-verification-unavailable', { detail: 'execution-contract-missing' });
+    let measured;
+    try { measured = roots.validateContract(input.execution_contract, { owner: fs.realpathSync.native(owner), revalidate: true }); }
+    catch (e) { refuse('endpoint-verification-foreign', { detail: e.code || 'execution-contract-invalid' }); }
+    const contractSha = roots.digest(measured);
+    // Union of every structured plan in the proven history: declared scope plus expected
+    // outputs, and the deduplicated declared verify commands of each plan's primary root.
+    const plans = new Map(), verify = require('./forge-verify'), must = require('./forge-must-haves');
+    const visit = (child, depth) => {
+      if (depth > 4 || plans.size >= 256) fail('delivery-cycle-or-limit');
+      const childInput = deliverySource(options, owner, child.delivery.replace(/-DELIVERY\.json$/, '-DELIVERY-INPUT.json'), MAX_JSON, true).value;
+      const text = deliverySource(options, owner, childInput.plan, MAX_JSON).buffer.toString('utf8');
+      if (must.hasStructuredMustHaves(text) && !plans.has(childInput.plan)) plans.set(childInput.plan, { unit: child.unit, text });
+      for (const next of childInput.expected_children || []) visit(next, depth + 1);
+    };
+    for (const child of children) visit(child, 1);
+    const union = new Set(), commands = new Map(measured.code_roots.map(r => [r.id, []]));
+    for (const [planReference, row] of [...plans].sort(([a], [b]) => a.localeCompare(b))) {
+      const fields = must.parseExecutionFields(row.text);
+      for (const value of [...declaredScope(row.text, planReference, row.unit, true), ...(fields.expected_output || [])]) union.add(value);
+      const declared = verify.parsePlanVerify(row.text), rootId = String(fields.roots_schema) === '2' ? fields.primary_root_id : measured.primary_root_id;
+      if (!commands.has(rootId)) refuse('endpoint-verification-foreign', { detail: 'plan-root-unknown' });
+      const found = declared && declared.trim() ? verify.discoverCommands({ cwd: owner, taskPlanVerify: declared }) : null;
+      for (const command of found?.source === 'task-plan' ? found.commands : []) if (!commands.get(rootId).includes(command)) commands.get(rootId).push(command);
+    }
+    const empty = measured.code_roots.find(r => !commands.get(r.id).length);
+    if (empty) refuse('endpoint-verification-unavailable', { detail: 'commands-empty', root_id: empty.id });
+    if (!union.size) refuse('endpoint-scope-missing', { detail: 'scope-empty' });
+    plan = { execution_contract_sha256: contractSha, plan_fingerprint: projection.delivery_fingerprint,
+      roots: measured.code_roots.map(r => ({ root_id: r.id, commands: [...commands.get(r.id)] })) };
+    const scopeOptions = { ...options, executionContract: measured }, committedAt = instant(completion.boundary.committed_at);
+    const rootRows = [];
+    for (const root of measured.code_roots) {
+      const envelopeRef = ENDPOINT_PROOF_POLICY.envelope.replace(/\{milestone\}/g, M).replace('{root}', root.id);
+      const read = deliverySource(options, owner, envelopeRef, MAX_JSON, true), e = read.value;
+      if (read.status !== 'valid') refuse('endpoint-verification-missing', { root_id: root.id });
+      if (e?.schema_version !== 1 || e.kind !== 'verification' || delivery.unitKey(e.unit) !== delivery.unitKey(expected) || e.root_id !== root.id
+          || e.root_identity_sha256 !== root.identity_sha256 || e.execution_contract_sha256 !== contractSha
+          || e.plan_fingerprint !== projection.delivery_fingerprint || !REVISION.test(e.revision || '') || !sameRoot(e.code_dir, root.path)) {
+        refuse('endpoint-verification-foreign', { root_id: root.id });
+      }
+      const capturedAt = instant(e.captured_at);
+      if (!Number.isFinite(capturedAt) || capturedAt <= committedAt || capturedAt > options.now) refuse('endpoint-verification-stale', { root_id: root.id });
+      const checks = e.result?.checks, expectedCommands = commands.get(root.id);
+      if (e.result?.passed !== true || e.result.skipped || e.result.stopped || !Array.isArray(checks) || !checks.length
+          || checks.some(c => c?.exitCode !== 0 || c.skipped)) refuse('endpoint-verification-failed', { root_id: root.id });
+      if (checks.length !== expectedCommands.length || checks.some((c, i) => c.command !== expectedCommands[i])) {
+        refuse('endpoint-verification-foreign', { root_id: root.id, detail: 'commands-mismatch' });
+      }
+      // Post-capture drift: the checkout moved or a scoped file differs from the capture.
+      let head; try { head = endpointGit(root.path, ['rev-parse', '--verify', 'HEAD']); } catch { refuse('endpoint-revision-unreadable', { root_id: root.id }, 'unknown'); }
+      if (head !== e.revision) refuse('endpoint-source-drift', { root_id: root.id, detail: 'revision-moved' });
+      let scope;
+      try { scope = captureScope(scopeOptions, e, [...union]).scope; } catch { refuse('endpoint-scope-missing', { root_id: root.id, detail: 'scope-root-unresolved' }); }
+      if (scope.length > 256) refuse('endpoint-scope-limit', { root_id: root.id });
+      for (const relative of scope) {
+        if (deliverySource(options, root.path, relative, phaseCost.MAX_BYTES).status !== 'valid') refuse('endpoint-scope-missing', { root_id: root.id, path: relative });
+      }
+      if (scope.length) {
+        try { validateCurrentSources(scopeOptions, e, [...union]); }
+        catch (error) {
+          const code = error.code || '';
+          if (['delivery-current-source-changed', 'delivery-revision-unreadable'].includes(code)) refuse('endpoint-source-drift', { root_id: root.id, detail: code });
+          if (code === 'delivery-current-source-binding-missing') refuse('endpoint-scope-missing', { root_id: root.id, detail: code });
+          if (code === 'delivery-revision-limit') refuse('endpoint-scope-limit', { root_id: root.id });
+          if (code === 'delivery-code-root-mismatch') refuse('endpoint-verification-foreign', { root_id: root.id, detail: code });
+          throw error;
+        }
+      }
+      let branch = null; try { branch = endpointGit(root.path, ['symbolic-ref', '--quiet', '--short', 'HEAD']) || null; } catch { branch = null; }
+      rootRows.push({ root_id: root.id, root_identity_sha256: root.identity_sha256, revision: e.revision, branch, envelope_sha256: read.sha256,
+        checks: checks.length, scope: scope.map(relative => ({ path: relative, hash: capturedSourceHash(scopeOptions, e, relative, root.path) })) });
+    }
+    for (const read of options.deliveryCache.files.values()) {
+      if (readSource(read.root, read.reference, read.limit).sha256 !== read.source.sha256) fail('clock-source-unstable');
+    }
+    const after = time.readContract(options);
+    if (after.status !== 'valid' || after.sha256 !== contract.sha256) fail('clock-source-unstable');
+    const units = new Map(options.proof.units.map(row => [row.unit, row]));
+    return { status: 'proven', ...base, completion_key: completion.event.idempotency_key, proof: {
+      contract: { version: contract.version, sha256: contract.sha256, base_sha256: contract.chain[0].sha256 },
+      completion: { unit, transaction_sha256: delivery.fingerprint(completion.tx), result_sha256: delivery.fingerprint(completion.result),
+        boundary_sha256: delivery.fingerprint(completion.boundary), event_sha256: delivery.fingerprint(completion.publishedEvent),
+        completed_at: completion.event.ts, committed_at: completion.boundary.committed_at },
+      delivery: { reference, sha256: stored.sha256, input_sha256: inputRead.sha256, fingerprint: projection.delivery_fingerprint,
+        criteria: projection.criteria.length, children: children.map(c => ({ unit: delivery.unitKey(c.unit), reference: c.delivery,
+          sha256: units.get(delivery.unitKey(c.unit))?.delivery_sha256 ?? null })) },
+      selection, roadmap: { sha256: roadmapRead.sha256, structure_sha256: identity?.structure_sha256 ?? null },
+      reviews, roots: rootRows, questions: { pending: 0 } }, verification_plan: plan };
+  } catch (e) {
+    const status = e.endpoint || 'unknown', reason = e.endpoint ? e.code : sourceReason(e);
+    const verification = plan && /^endpoint-(?:verification|scope|source)-/.test(reason) ? { verification_plan: plan } : {};
+    return { status, ...base, reason, ...(e.extra || {}), ...verification };
+  }
+}
+
 function computeForecast({ contract, clock, deliveries }) {
   const base = { policy: FORECAST_POLICY, deliveries: deliveries?.proven || [], pending: [], burn_ratio: null,
     projection: { low_ms: null, high_ms: null }, remaining_ms: null };
@@ -632,5 +894,6 @@ function main(argv = process.argv.slice(2), io = process, options = {}) {
   const result = { clock: readClock(input), forecast: readForecast(input) };
   io.stdout.write(JSON.stringify(result) + '\n'); return 0;
 }
-module.exports = { CLOCK_POLICY, FORECAST_POLICY, DELIVERY_PROOF_MODES, computeClock, readClock, readDeliveries, readHistoricalDeliveries, readHistoricalTaskDelivery, computeForecast, readForecast, main };
+module.exports = { CLOCK_POLICY, FORECAST_POLICY, DELIVERY_PROOF_MODES, computeClock, readClock, readDeliveries, readHistoricalDeliveries, readHistoricalTaskDelivery, computeForecast, readForecast, main,
+  ENDPOINT_PROOF_POLICY, readEndpointProof };
 if (require.main === module) process.exitCode = main();

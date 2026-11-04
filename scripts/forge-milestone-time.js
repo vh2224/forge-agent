@@ -742,6 +742,63 @@ function readOwnerRecord(options) {
     return value === null ? { status: 'absent' } : { status: 'valid', record: value, sha256: require('./forge-code-roots').digest(value) };
   } catch (e) { return { status: 'invalid', reason: codeOf(e) }; }
 }
+// Anchored endpoint publication (S03/T02): the one place that writes an immutable anchor
+// below endpoint-anchors/<record sha>.json. The anchor path is outside the generic
+// allowlist, so publishOwnerRecord can never mint it. options.build runs INSIDE the single
+// owner lock (never nests it, never calls the host) after the contract check and returns
+// {record}: public, bounded, and equal to the recomputed proof for its milestone. The anchor is issued internally from a proof recomputed
+// from the canonical stores (build returns only {record}; a caller anchor refuses). The anchor is published first, then the record,
+// so an interrupted publication leaves at most an unreferenced anchor and never an
+// unanchored record; a replay of the same value completes it.
+const ENDPOINT_ANCHOR_DIR = 'endpoint-anchors';
+function endpointAnchorFile(p, sha256) {
+  if (typeof sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(sha256)) fail('time-record-path-invalid');
+  return path.join(p.directory, ENDPOINT_ANCHOR_DIR, sha256 + '.json');
+}
+function publishAnchoredEndpoint(options) {
+  const p = timePaths(options), file = ownerRecordFile(p, 'endpoint.json');
+  if (typeof options.build !== 'function') fail('time-record-invalid');
+  return withWriter(options, () => {
+    const contract = activeContract(options), { digest } = require('./forge-code-roots');
+    const built = options.build({ contract_sha256: contract.sha256, contract_version: contract.version });
+    if (!object(built)) fail('time-record-invalid');
+    if (built.anchor !== undefined) fail('time-record-invalid');
+    const value = recordValue(built.record), sha256 = digest(value), at = Date.parse(value.endpoint_at);
+    if (value.milestone !== options.milestone || !Number.isSafeInteger(at)) fail('time-record-invalid');
+    const previous = storedRecord(file);
+    if (previous && !same(previous, value)) fail('time-record-conflict');
+    // A record already stored mints nothing here: its anchor and snapshot witness must already exist.
+    if (previous) {
+      if (readEndpointAnchor({ ...options, sha256 }).status !== 'valid' || readEndpointSnapshot({ ...options, sha256 }).status !== 'valid') fail('time-record-invalid');
+      return { status: 'unchanged', sha256, path: 'endpoint.json', anchor: 'unchanged' };
+    }
+    // The proof and the snapshot are recomputed here from the canonical stores at the record's own
+    // instant: anchor and witness are issued internally and only for a record equal to them.
+    const endpoint = require('./forge-milestone-endpoint');
+    const anchor = recordValue(endpoint.issueAnchor(value,
+      require('./forge-milestone-time-clock').readEndpointProof({ cwd: p.owner, milestone: options.milestone, now: at }),
+      endpoint.deriveSnapshot(p.owner, options.milestone, at)));
+    const anchored = publishRecordFile(p, endpointAnchorFile(p, sha256), anchor);
+    publishRecordFile(p, endpointSnapshotFile(p, sha256), recordValue(endpoint.issueSnapshotWitness(value, anchor)));
+    return { ...publishRecordFile(p, file, value), path: 'endpoint.json', anchor: anchored.status };
+  });
+}
+function endpointSnapshotFile(p, sha256) {
+  if (typeof sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(sha256)) fail('time-record-path-invalid');
+  return path.join(p.directory, 'endpoint-snapshots', sha256 + '.json');
+}
+function readEndpointSnapshot(options) {
+  try {
+    const value = storedRecord(endpointSnapshotFile(timePaths(options), options.sha256));
+    return value === null ? { status: 'absent' } : { status: 'valid', witness: value };
+  } catch (e) { return { status: 'invalid', reason: codeOf(e) }; }
+}
+function readEndpointAnchor(options) {
+  try {
+    const value = storedRecord(endpointAnchorFile(timePaths(options), options.sha256));
+    return value === null ? { status: 'absent' } : { status: 'valid', anchor: value };
+  } catch (e) { return { status: 'invalid', reason: codeOf(e) }; }
+}
 function listOwnerRecords(options) {
   try {
     const dir = ownerRecordFile(timePaths(options), options.path, 'list'), names = directoryNames(dir), { digest } = require('./forge-code-roots');
@@ -836,6 +893,6 @@ module.exports = { SCHEMA_VERSION, ENDPOINT_ITEMS, ITEM_STATES, AMENDMENT_KINDS,
   timePaths, readContract, validateContract, createDecisionAuthority, activateContract, amendContract, appendJournal, readJournal,
   recordWarning, listWarnings, recordCheckpoint, readCheckpoints, readObservations, readCoverage, recordWorkerEvidence,
   recordEnrollment, readEnrollment, recordOptions, readOptions, listOptions, recordSelection, readSelection, verifyDecision,
-  recordDelegatedAllocation, roadmapIdentity, OWNER_RECORD_PATHS, publishOwnerRecord, readOwnerRecord, listOwnerRecords,
+  recordDelegatedAllocation, roadmapIdentity, OWNER_RECORD_PATHS, publishOwnerRecord, readOwnerRecord, publishAnchoredEndpoint, readEndpointAnchor, readEndpointSnapshot, listOwnerRecords,
   appendOwnerJournal, readOwnerJournal, publishTaskLink, readTaskLink, main };
 if (require.main === module) process.exitCode = main();

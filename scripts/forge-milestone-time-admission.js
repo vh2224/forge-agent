@@ -101,9 +101,15 @@ function observeTime(cwd, milestone, options) {
   }
   const clocks = require('./forge-milestone-time-clock');
   let clock = clocks.readClock(input), writers = [];
+  // A frozen endpoint keeps its terminal consumption when the live writer metadata is unavailable;
+  // writers are then explicitly unknown (never inferred as zero).
+  const writersUnknown = [];
   if (clock.status === 'measured') {
     try { writers = openWriters(cwd, milestone, now, clock); }
-    catch { clock = { status: 'unknown', reason: 'clock-source-unstable' }; }
+    catch {
+      if (clock.frozen) writersUnknown.push('open-writers-unknown');
+      else clock = { status: 'unknown', reason: 'clock-source-unstable' };
+    }
   }
   const warnings = time.listWarnings(input), checkpoints = time.readCheckpoints(input);
   const rows = warningRows(warnings, read.version), last = rows.at(-1) || null;
@@ -115,7 +121,11 @@ function observeTime(cwd, milestone, options) {
         const bytes = boundedSource(path.join(cwd, source.path), 2 * 1024 * 1024);
         if (bytes === null ? source.status !== 'absent' : hash(bytes) !== source.sha256) throw Error('source');
       }
-    } catch { clock = { status: 'unknown', reason: 'clock-source-unstable' }; writers = []; }
+    } catch {
+      writers = [];
+      if (clock.frozen) { if (!writersUnknown.length) writersUnknown.push('open-writers-unknown'); }
+      else clock = { status: 'unknown', reason: 'clock-source-unstable' };
+    }
   }
   const consumption = clock.status === 'measured' ? clock.consumption : null;
   const consumed = consumption?.consumed_ms ?? null;
@@ -124,13 +134,16 @@ function observeTime(cwd, milestone, options) {
   // Read-only label projection: a delegated technical allocation is not a
   // functional decision, so the last decided amendment keeps its label.
   const lastDecided = read.chain.filter(row => !row.delegation).at(-1);
-  const state = atCap ? writers.length ? 'draining' : checkpoint ? 'checkpointed' : 'exhausted'
+  // An unreadable writer census at the cap is never an empty one: it keeps the conservative draining label and no checkpoint.
+  const censusKnown = writersUnknown.length === 0;
+  const state = atCap ? writers.length || !censusKnown ? 'draining' : checkpoint ? 'checkpointed' : 'exhausted'
     : lastDecided?.kind === 'extension' && remaining > 0 ? 'extended'
       : last?.warning === true && ['at-risk', 'exceeds'].includes(last.classification) ? 'warning' : 'active';
   const unknowns = [clock.status !== 'measured' && reasonCode(clock.reason),
     warnings.status === 'invalid' && reasonCode(warnings.reason), checkpoints.status === 'invalid' && reasonCode(checkpoints.reason),
     forecast.status === 'unknown' && reasonCode(forecast.reason)].filter(Boolean);
   if (consumption?.unknown_ms > 0) unknowns.push('unattributed-time');
+  unknowns.push(...writersUnknown);
   const after = time.readContract(input);
   if (after.status !== 'valid' || after.sha256 !== read.sha256 || after.version !== read.version) {
     base.contract = 'invalid'; base.unknowns = ['time-source-unstable']; return { status: base, read: after, diagnostic };
@@ -145,7 +158,7 @@ function observeTime(cwd, milestone, options) {
     forecast: { status: FORECAST_CLASSES.includes(forecast.status) ? forecast.status : 'unknown', reason: reasonCode(forecast.reason),
       projection: forecast.projection || { low_ms: null, high_ms: null }, burn_ratio: forecast.burn_ratio ?? null },
     last_warning: last ? { id: last.id, classification: last.classification, warning: last.warning === true } : null,
-    open_writers: writers, checkpoint: atCap && !writers.length ? checkpointProjection(checkpoint) : null, unknowns: [...new Set(unknowns)]
+    open_writers: writers, checkpoint: atCap && !writers.length && censusKnown ? checkpointProjection(checkpoint) : null, unknowns: [...new Set(unknowns)]
   } };
 }
 function readTimeStatus(cwd, milestone, options = {}) { return observeTime(cwd, milestone, options).status; }
