@@ -534,7 +534,12 @@ try {
     assert.deepEqual(schema.$defs[def].required, [...F[key]], def); assert.deepEqual(Object.keys(value), [...F[key]], def);
   }
   assert.deepEqual(schema.properties.selection.properties.status.enum, [...endpoint.SELECTION_STATUSES]);
-  assert.deepEqual(schema.properties.time_state.properties.state.enum, [...admission.TIME_STATES, null]);
+  // The record's time_state is the pre-freeze snapshot: its six budget states (plus null) are the
+  // public TIME_STATES without the post-freeze endpoint-proven state, which the record never carries.
+  assert.deepEqual(schema.properties.time_state.properties.state.enum, [...endpoint.SNAPSHOT_TIME_STATES, null]);
+  assert.ok(Object.isFrozen(endpoint.SNAPSHOT_TIME_STATES));
+  assert.deepEqual([...endpoint.SNAPSHOT_TIME_STATES], admission.TIME_STATES.filter(s => s !== 'endpoint-proven'));
+  assert.ok(!endpoint.SNAPSHOT_TIME_STATES.includes('endpoint-proven') && admission.TIME_STATES.includes('endpoint-proven'));
   assert.deepEqual(schema.properties.time_state.properties.forecast.enum, [...endpoint.FORECASTS]);
   assert.deepEqual(schema.properties.clock.properties.by_class.required, [...clock.CLOCK_POLICY.classes]);
   assert.deepEqual(schema.properties.clock.properties.waits.required, clock.CLOCK_POLICY.classes.filter(k => !clock.CLOCK_POLICY.consumption[k]));
@@ -815,11 +820,14 @@ try {
     assert(snapshot.consumed_ms >= 1, 'the frozen consumption reached the cap');
     time.recordCheckpoint({ cwd: cc, milestone: M, record: { version: 1, decision_pending: true } });
     const healthy = admission.readTimeStatus(cc, M, { now });
-    assert.deepEqual([healthy.state, healthy.checkpoint?.decision_pending, healthy.unknowns.includes('open-writers-unknown'), healthy.open_writers], ['checkpointed', true, false, []], 'known empty census keeps the checkpoint');
+    // S03/T05: the frozen endpoint is the raw state; the budget label at the frozen consumption is budget_state.
+    assert.deepEqual([healthy.state, healthy.budget_state, healthy.checkpoint?.decision_pending, healthy.unknowns.includes('open-writers-unknown'), healthy.open_writers],
+      ['endpoint-proven', 'checkpointed', true, false, []], 'known empty census keeps the checkpoint');
+    // S03/T05: after a valid endpoint every new entry refuses as closed (before any provider), even at the cap.
     const refuse = () => {
       const decision = admission.decideAdmission(cc, { milestone: M, unit: 'execute-task/T09', now });
-      assert.deepEqual([decision.allowed, decision.reason_code], [false, 'milestone-budget-exhausted']);
-      assert.throws(() => admission.assertTransportEntry({ cwd: cc, milestone: M, unit: 'execute-task/T09', now }), e => e.code === 'milestone-budget-exhausted' && e.provider_called === false);
+      assert.deepEqual([decision.allowed, decision.reason_code], [false, 'milestone-endpoint-closed']);
+      assert.throws(() => admission.assertTransportEntry({ cwd: cc, milestone: M, unit: 'execute-task/T09', now }), e => e.code === 'milestone-endpoint-closed' && e.provider_called === false);
     };
     refuse();
     const savedMax = phaseCost.MAX_BYTES;
@@ -828,7 +836,7 @@ try {
       const limited = admission.readTimeStatus(cc, M, { now });
       assert.deepEqual([limited.contract, limited.clocks.consumed_ms, limited.clocks.unknown_ms], ['valid', snapshot.consumed_ms, snapshot.unknown_ms], 'terminal consumption preserved');
       assert(limited.remaining_ms <= 0 && limited.unknowns.includes('open-writers-unknown'));
-      assert.deepEqual([limited.state, limited.checkpoint], ['draining', null], 'neither a ready checkpoint nor an exhausted-as-zero state');
+      assert.deepEqual([limited.state, limited.budget_state, limited.checkpoint], ['endpoint-proven', 'draining', null], 'neither a ready checkpoint nor an exhausted-as-zero state');
       assert.equal(admission.summarizeTimeStatus(limited).unknown, true);
       refuse();
     } finally { phaseCost.MAX_BYTES = savedMax; }
@@ -838,10 +846,10 @@ try {
       const cli = spawnSync(process.execPath, [path.join(__dirname, 'forge-milestone-time-admission.js'), '--status', '--cwd', cc, '--milestone', M, '--json'], { encoding: 'utf8', timeout: 120000 });
       assert.equal(cli.status, 0, cli.stderr);
       const status = JSON.parse(cli.stdout);
-      assert.deepEqual([status.state, status.checkpoint, status.clocks.consumed_ms], ['draining', null, snapshot.consumed_ms]);
+      assert.deepEqual([status.state, status.budget_state, status.checkpoint, status.clocks.consumed_ms], ['endpoint-proven', 'draining', null, snapshot.consumed_ms]);
       assert(status.unknowns.includes('open-writers-unknown') && status.remaining_ms <= 0);
       const gate = spawnSync(process.execPath, [path.join(__dirname, 'forge-milestone-time-admission.js'), '--admit-transport', '--cwd', cc, '--milestone', M, '--unit', 'execute-task/T09', '--json'], { encoding: 'utf8', timeout: 120000 });
-      assert.equal(gate.status, 3); assert.equal(JSON.parse(gate.stdout).reason_code, 'milestone-budget-exhausted');
+      assert.equal(gate.status, 3); assert.equal(JSON.parse(gate.stdout).reason_code, 'milestone-endpoint-closed');
     });
     console.log('ok - T02 endpoint: unknown writer census never projects ready checkpoint at cap');
     pass('endpoint-at-cap-unknown-census-status');

@@ -30,6 +30,10 @@ const ENDPOINT_RECORD_FIELDS = Object.freeze({
   gap: Object.freeze(['start', 'end', 'reason']),
 });
 const SELECTION_STATUSES = Object.freeze(['decided', 'not-enrolled']);
+// time_state of the record is the snapshot taken BEFORE the freeze (deriveSnapshot rejects an
+// already-frozen clock): exactly the six pre-endpoint budget states (plus null), never the public
+// endpoint-proven state that only exists after this record froze the clock.
+const SNAPSHOT_TIME_STATES = Object.freeze(['active', 'warning', 'exhausted', 'draining', 'checkpointed', 'extended']);
 const FORECASTS = Object.freeze(['fits', 'at-risk', 'exceeds', 'unknown']);
 const GAP_REASONS = Object.freeze(['wait-end-missing', 'session-change', 'source-limit', 'no-source']);
 const HASH = /^[a-f0-9]{64}$/, REVISION = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/, ROOT_ID = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
@@ -137,7 +141,7 @@ function validateEndpointRecord(r) {
         && v.scope.every(s => exact(s, F.scope) && typeof s.path === 'string' && s.path.length > 0 && s.path.length <= 1024 && REVISION.test(s.hash)))
       && r.roots.some(v => v.scope.length > 0)
       && exact(r.questions, F.questions) && r.questions.pending === 0
-      && exact(r.time_state, F.time_state) && (r.time_state.state === null || require('./forge-milestone-time-admission').TIME_STATES.includes(r.time_state.state))
+      && exact(r.time_state, F.time_state) && (r.time_state.state === null || SNAPSHOT_TIME_STATES.includes(r.time_state.state))
       && r.time_state.contract_version === r.contract.version && ['ceiling_ms', 'consumed_ms', 'unknown_ms', 'remaining_ms'].every(k => nullable(r.time_state[k]))
       && FORECASTS.includes(r.time_state.forecast) && typeof r.time_state.unknown === 'boolean' && typeof r.time_state.decision_pending === 'boolean'
       && exact(r.clock, F.clock) && exact(r.clock.by_class, classes) && classes.every(k => count(r.clock.by_class[k]))
@@ -265,8 +269,11 @@ function deriveSnapshot(owner, milestone, now) {
   const measured = clock().readClock({ cwd: owner, milestone, now });
   if (measured.status !== 'measured' || measured.frozen) throw refusal('endpoint-clock-unknown', { detail: measured.reason || 'clock-frozen' });
   const admission = require('./forge-milestone-time-admission');
-  const status = admission.readTimeStatus(owner, milestone, { now }), summary = admission.summarizeTimeStatus(status);
-  if (status.contract !== 'valid' || summary.consumed_ms !== measured.consumption.consumed_ms) throw refusal('endpoint-clock-unknown', { detail: 'time-status-unstable' });
+  // The milestone-only canonical status: the snapshot records the milestone horizon alone, never a
+  // composed linked task/chain projection.
+  const status = admission.readMilestoneTimeStatus(owner, milestone, { now }), summary = admission.summarizeTimeStatus(status);
+  if (status.contract !== 'valid' || summary.consumed_ms !== measured.consumption.consumed_ms
+      || !SNAPSHOT_TIME_STATES.includes(summary.state)) throw refusal('endpoint-clock-unknown', { detail: 'time-status-unstable' });
   const gaps = measured.gaps.slice(0, MAX_GAPS).map(g => ({ start: g.start, end: g.end, reason: g.reason }));
   return { endpoint_at: new Date(now).toISOString(),
     time_state: { state: summary.state, contract_version: status.contract_version, ceiling_ms: summary.ceiling_ms, consumed_ms: summary.consumed_ms,
@@ -359,6 +366,6 @@ function main(argv = process.argv.slice(2), io = process) {
   io.stdout.write((json ? JSON.stringify(view) : message(action, view)) + '\n');
   return ACTIONS[action].includes(view.status) ? 0 : 3;
 }
-module.exports = { issueAnchor, issueSnapshotWitness, deriveSnapshot, ENDPOINT_SCHEMA_VERSION, ENDPOINT_RECORD_FIELDS, SELECTION_STATUSES, FORECASTS, GAP_REASONS, validateEndpointRecord,
+module.exports = { issueAnchor, issueSnapshotWitness, deriveSnapshot, ENDPOINT_SCHEMA_VERSION, ENDPOINT_RECORD_FIELDS, SELECTION_STATUSES, SNAPSHOT_TIME_STATES, FORECASTS, GAP_REASONS, validateEndpointRecord,
   writeEndpointVerification, recordEndpoint, readEndpoint, main };
 if (require.main === module) process.exitCode = main();

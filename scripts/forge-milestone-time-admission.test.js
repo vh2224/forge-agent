@@ -118,8 +118,13 @@ function delivered(cwd) {
 try {
   test('exports-frozen-vocabulary-and-inert-lazy-import', () => {
     assert.deepEqual(admission.TIME_REASON_CODES, ['milestone-budget-exhausted', 'milestone-budget-draining',
-      'milestone-time-invalid', 'milestone-clock-unknown', 'time-option-pending']);
-    assert.deepEqual(admission.TRANSPORT_REFUSAL_CODES, admission.TIME_REASON_CODES.slice(0, 4));
+      'milestone-time-invalid', 'milestone-clock-unknown', 'time-option-pending', 'milestone-endpoint-closed']);
+    // S03/T05: the four budget codes, the closed endpoint and exactly the linked task horizon literals.
+    const linkedCodes = require('./forge-linked-task-horizon').LINKED_TASK_TRANSPORT_CODES;
+    assert.deepEqual(admission.TRANSPORT_REFUSAL_CODES, [...admission.TIME_REASON_CODES.slice(0, 4), 'milestone-endpoint-closed',
+      'predecessor-incomplete', 'linked-task-not-started', 'linked-task-budget-exhausted', 'linked-task-budget-draining',
+      'linked-task-time-invalid', 'linked-task-clock-unknown', 'linked-task-chain-closed', 'linked-task-closed']);
+    assert.deepEqual(admission.TRANSPORT_REFUSAL_CODES.slice(5), [...linkedCodes]);
     for (const key of ['TIME_REASON_CODES', 'TRANSPORT_REFUSAL_CODES', 'ADMISSION_DECISIONS', 'TIME_STATES']) assert(Object.isFrozen(admission[key]));
     for (const name of ['decideAdmission', 'assertTransportEntry', 'readTimeStatus', 'summarizeTimeStatus', 'observeBoundary', 'main']) assert.equal(typeof admission[name], 'function');
     assert(admission.TIME_REASON_CODES.every(c => !/timeout|terminated|network/.test(c) && c !== 'budget-exceeded-while-active'));

@@ -332,7 +332,11 @@ async function suite() {
       assert.ok(!/timeout|terminated|network/.test(code), code);
       assert.ok(code !== 'budget-exceeded-while-active' && !code.startsWith('milestone-budget-'), code);
     }
-    assert.deepEqual(horizon.LINKED_TASK_TRANSPORT_CODES.filter(c => admission.TRANSPORT_REFUSAL_CODES.includes(c) || admission.TIME_REASON_CODES.includes(c)), [], 'distinct from the milestone vocabulary');
+    // S03/T05: the linked codes are exactly the tail of the admission transport refusals (so every
+    // transport consumer classifies them) and stay absent from the milestone TIME_REASON_CODES.
+    assert.deepEqual(horizon.LINKED_TASK_TRANSPORT_CODES.filter(c => admission.TIME_REASON_CODES.includes(c)), [], 'distinct from the milestone reason vocabulary');
+    assert.deepEqual(admission.TRANSPORT_REFUSAL_CODES.slice(-horizon.LINKED_TASK_TRANSPORT_CODES.length), [...horizon.LINKED_TASK_TRANSPORT_CODES], 'exactly the linked transport literals');
+    assert.ok(admission.TRANSPORT_REFUSAL_CODES.slice(0, -horizon.LINKED_TASK_TRANSPORT_CODES.length).every(c => admission.TIME_REASON_CODES.includes(c)), 'the remaining refusals are milestone codes');
     assert.equal(new Set(horizon.LINKED_TASK_TRANSPORT_CODES).size, 8);
     assert.deepEqual(horizon.TASK_UNIT_TYPES, [...['brainstorm', 'discuss', 'research', 'plan'].map(p => require('./forge-task-preparation').phaseContract(p).unitType), 'execute-task'],
       'task units are the real preparation unit types plus execution');

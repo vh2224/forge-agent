@@ -561,7 +561,9 @@ async function suite() {
       fs.writeFileSync(forgedFile, JSON.stringify(forged) + '\n');
       try {
         assert.equal(time.readContract({ cwd: D.owner, milestone: M }).status, 'valid', 'the forged row is structurally valid');
-        assert.equal(admission.readTimeStatus(D.owner, M, {}).state, 'extended', 'the raw status would look extended');
+        // The frozen endpoint is the raw state; its separately computed budget label would look extended.
+        const raw = admission.readTimeStatus(D.owner, M, {});
+        assert.deepEqual([raw.state, raw.budget_state], ['endpoint-proven', 'extended'], 'the raw budget would look extended');
         const p2 = lts.provePredecessor({ cwd: D.owner, task: D.task, ...D.prof });
         assert.deepEqual([p2.reason, p2.detail], ['endpoint-unproven', 'extension-unattested']);
       } finally { fs.rmSync(forgedFile); }

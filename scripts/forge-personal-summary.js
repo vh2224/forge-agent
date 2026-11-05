@@ -127,6 +127,37 @@ function readTime(project, work) {
   }
 }
 
+// Closed linked block (forge-linked-task-horizon summarizeLinkedStatus), only for a task with a
+// link record: lifecycle, task state/ceiling/consumption/balance, chain consumption/forecast and
+// decision_pending. No path, handle or raw record; a task without a link adds nothing (same bytes).
+function readLinked(project, work, profile) {
+  if (work.kind !== 'task' || typeof project !== 'string' || typeof work.id !== 'string' || !ids.isValid(work.id)
+      || ids.entityKind(work.id) !== 'task') return null;
+  const horizon = require('./forge-linked-task-horizon');
+  let summary;
+  try {
+    const status = horizon.readLinkedStatus({ cwd: project, task: work.id,
+      ...(profile && profile.userHome !== undefined ? { userHome: profile.userHome } : {}), ...(profile && profile.env !== undefined ? { env: profile.env } : {}) });
+    if (status === null) return null;
+    summary = horizon.summarizeLinkedStatus(status);
+  } catch { summary = null; }
+  const n = value => (Number.isSafeInteger(value) ? value : null);
+  const task = summary && summary.task, chain = summary && summary.chain;
+  return { lifecycle: summary && typeof summary.lifecycle === 'string' ? summary.lifecycle : 'invalid',
+    state: task && typeof task.state === 'string' ? task.state : 'unknown',
+    ceiling_ms: n(task && task.ceiling_ms), consumed_ms: n(task && task.consumed_ms), remaining_ms: n(task && task.remaining_ms),
+    chain: { consumed_ms: n(chain && chain.consumed_ms), forecast_low_ms: n(chain && chain.forecast_low_ms), forecast_high_ms: n(chain && chain.forecast_high_ms) },
+    decision_pending: Boolean(summary && summary.decision_pending === true) };
+}
+
+// A blocked, capped, draining or checkpointed linked task (or one with a pending decision or an
+// unreadable horizon) is protected work; a closed task keeps its block as history.
+function linkedProtected(linked) {
+  if (!linked) return false;
+  if (linked.decision_pending || linked.lifecycle === 'invalid' || linked.lifecycle === 'blocked') return true;
+  return linked.lifecycle === 'started' && ['exhausted', 'draining', 'checkpointed', 'unknown'].includes(linked.state);
+}
+
 // Exhausted, draining, checkpointed or an open warning is protected work. Completed
 // work keeps its time block as history and is protected only by a pending decision.
 function timeProtected(time, completed) {
@@ -136,7 +167,7 @@ function timeProtected(time, completed) {
 // Closed copy of what the summary may know about one work; nothing else from
 // the snapshot (checkpoint history, hashes, capture times, state, terminal
 // evidence or raw diagnostics) is reachable from here on.
-function prepareWork(work, project) {
+function prepareWork(work, project, profile) {
   const checkpoint = work.checkpoint && typeof work.checkpoint === 'object' ? work.checkpoint : {};
   const list = value => (Array.isArray(value) ? value : []);
   const entry = {
@@ -154,7 +185,9 @@ function prepareWork(work, project) {
   if (entry.workStatus !== 'completed') entry.nextAction = work.nextAction || null;
   const time = readTime(project, entry);
   if (time) entry.time = time;
-  entry.timeProtected = timeProtected(time, entry.workStatus === 'completed');
+  const linked = readLinked(project, entry, profile);
+  if (linked) entry.linked = linked;
+  entry.timeProtected = timeProtected(time, entry.workStatus === 'completed') || linkedProtected(linked);
   entry.protected = entry.pending.length > 0 || entry.acceptances.length > 0 || entry.reliability !== 'current' || entry.timeProtected;
   return entry;
 }
@@ -184,6 +217,7 @@ function compose(prepared, plan) {
       work[field] = { total: entry[field].length, items };
     }
     if (entry.time) work.time = { ...entry.time };
+    if (entry.linked) work.linked = { ...entry.linked, chain: { ...entry.linked.chain } };
     const diagnostic = (affected || entry.reliability !== 'current') && workDiagnostic(entry.id);
     if (diagnostic) work.diagnostic = diagnostic;
     return work;
@@ -244,7 +278,7 @@ function buildPersonalSummary(options = {}) {
     const snapshot = readPersonalSnapshot({ project: options.project, cwd: options.cwd, id: options.id,
       userHome: options.userHome, env: options.env });
     if (!snapshot || snapshot.status !== 'ok') return failureSummary(snapshot && snapshot.reason);
-    const entries = (Array.isArray(snapshot.works) ? snapshot.works : []).map(work => prepareWork(work, snapshot.project))
+    const entries = (Array.isArray(snapshot.works) ? snapshot.works : []).map(work => prepareWork(work, snapshot.project, { userHome: options.userHome, env: options.env }))
       .sort((a, b) => rank(a) - rank(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     const totals = { works: entries.length, pending: 0, acceptances: 0 };
     for (const entry of entries) { totals.pending += entry.pending.length; totals.acceptances += entry.acceptances.length; }

@@ -1599,7 +1599,9 @@ function nativeExecutionOptions(r, runtime, prompt) {
     activeCapabilities: runtime.activeCapabilities, agentType: 'forge-executor',
     taskName: r.nativeInvocation?.args?.task_name || r.taskName || r.dispatchId,
     forkTurns: 'none', effortBinding: r.effortBinding, prompt,
-    readback: runtime.readback, telemetryIdentity: r, telemetryRoute: r.route };
+    readback: runtime.readback, telemetryIdentity: r, telemetryRoute: r.route,
+    // The one injected owner clock also governs the common owner guard inside invokeNative.
+    ...(runtime.now !== undefined ? { now: runtime.now } : {}) };
 }
 function validateNativeExecutionBinding(r, runtime) {
   if (!r.execution_contract || !r.nativeInvocation?.ok) fail('native-execution-binding-required');
@@ -1701,8 +1703,18 @@ async function runNativeExecutionTransport(r, runtime, execution, options, proce
   const receiptFile = r.resultFile + '.receipt.json';
   const saved = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
   if (outcome.final_evidence) json(receiptFile, { ...saved, final_evidence: outcome.final_evidence });
-  if (!outcome.ok) throw Object.assign(new Error(outcome.reason_code), {
-    code: outcome.reason_code, provider_called: outcome.provider_called });
+  if (!outcome.ok) {
+    // A pre-provider refusal of the common owner guard keeps its typed stage and layer: linked task
+    // codes come from the task horizon, the others from the milestone horizon. Only the typed
+    // code, stage and layer travel; no raw payload, handle or lifecycle object is copied.
+    const admissionApi = require('./forge-milestone-time-admission');
+    const refused = outcome.provider_called === false && outcome.diagnostic?.layer === 'milestone-time-admission'
+      && admissionApi.TRANSPORT_REFUSAL_CODES.includes(outcome.reason_code);
+    const linkedCode = refused && require('./forge-linked-task-horizon').LINKED_TASK_TRANSPORT_CODES.includes(outcome.reason_code);
+    throw Object.assign(new Error(outcome.reason_code), {
+      code: outcome.reason_code, provider_called: outcome.provider_called,
+      ...(refused ? { stage: linkedCode ? 'linked-task-admission' : 'milestone-time-admission', layer: 'milestone-time-admission' } : {}) });
+  }
   if (r.nativePromptFile && fs.readFileSync(r.nativePromptFile, 'utf8') !== prompt) throw Object.assign(new Error('native-prompt-file-changed'), { code: 'native-prompt-file-changed', provider_called: true });
   const raw = outcome.result;
   const candidate = raw && typeof raw === 'object' && !Array.isArray(raw)
@@ -1799,6 +1811,13 @@ async function inspectSavedNativeExecution(r, runtime) {
   return { writer, executed: inspect() };
 }
 
+// A pre-provider refusal of the common owner guard: the milestone horizon (stage
+// milestone-time-admission) or the linked task horizon (stage linked-task-admission, same layer).
+function admissionRefusal(error) {
+  return error?.stage === 'milestone-time-admission'
+    || error?.stage === 'linked-task-admission' && error.layer === 'milestone-time-admission' && error.provider_called === false;
+}
+
 async function runUnitSidecarCore(request, runtime, identity) {
   let verificationSuccessor = null;
   let transportReturned = false;
@@ -1808,10 +1827,25 @@ async function runUnitSidecarCore(request, runtime, identity) {
   // reads: no durable write, no announcer stage, errors never reach the unit.
   let notifyPhase = () => {};
   let executingObserved = false;
+  // The common owner guard of a standalone task request (linked task horizon; an unlinked task
+  // returns without reading time state). It runs at every actual entry below and again at the
+  // adapter's last launch hook (the packaged context, immediately before the child, app-server
+  // turn or native callback), so time that elapses while the adapter packages is never admitted.
+  const admitTaskLaunch = () => {
+    if (r.scope === 'standalone-task') require('./forge-milestone-time-admission').assertOwnerTransportEntry({ request: r, now: runtime.now });
+  };
+  // The typed pre-provider refusal raised by this attempt's own last launch hook, kept so that an
+  // adapter that rewraps foreign exceptions of its packaging step cannot erase it (see the catch).
+  let packagingRefusal = null;
   const enterTransport = () => {
+    packagingRefusal = null;
     if (verificationSuccessor) fail('verification-successor-no-inference');
     if (r.scope !== 'standalone-task' && r.milestoneId) require('./forge-milestone-time-admission').assertTransportEntry({
       cwd: r.contextRoot || r.cwd, milestone: r.milestoneId, unit: unitLabel(r, locations(r)), now: runtime.now });
+    // The same common owner guard at every actual standalone entry (first launch, retry,
+    // native execution callback and recovery): a linked task outside its horizon refuses here,
+    // before any spawn.
+    else admitTaskLaunch();
     recoveryReady?.();
     recoveryReady = null;
     if (!executingObserved) { executingObserved = true; notifyPhase('executing'); }
@@ -2115,7 +2149,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         duration_ms: record.started_at ? Date.now() - Date.parse(record.started_at) : null } : {}),
       recovery: replayable ? 'replay-publication' : 'operator-required',
       failed_at: new Date().toISOString(), ...(replayable ? {} : (extra || {})),
-      ...(error.stage === 'milestone-time-admission' ? { layer: error.stage } : {}) };
+      ...(admissionRefusal(error) ? { layer: 'milestone-time-admission' } : {}) };
     if (retained?.private_ref) {
       if (!transaction) {
         transaction = { record, failure, complete: false };
@@ -2488,7 +2522,16 @@ async function runUnitSidecarCore(request, runtime, identity) {
       const saved = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
       json(receiptFile, { ...saved, final_evidence: packaged.final_evidence,
         ...(saved.execution ? { execution: { ...saved.execution, packaged_context: packaged } } : {}) });
-      return runtime.onPackagedContext?.(packaged);
+      const observed = runtime.onPackagedContext?.(packaged);
+      // Last launch hook: the adapters call it synchronously after packaging and before the
+      // spawn/turn/callback, so a refusal here is fail-closed (provider_called false). The refusal
+      // is recorded before it propagates: the Claude adapter catches it in its packaging step.
+      try { admitTaskLaunch(); }
+      catch (refusal) {
+        if (admissionRefusal(refusal) && refusal.provider_called === false) packagingRefusal = refusal;
+        throw refusal;
+      }
+      return observed;
     },
     hostRuntime: route.host_runtime, sidecarDeclared: true, model,
     effort: route.effort, timeoutSecs: ceilingFromRoute(route).seconds, resultFile, dispatchId,
@@ -2926,6 +2969,12 @@ async function runUnitSidecarCore(request, runtime, identity) {
     // A transport failure can leave a queued liveness append: settle it before
     // the failed receipt and the terminal event are written.
     await livenessQueue;
+    // The Claude adapter rewraps any exception of its packaging step (where the last launch hook
+    // runs, before its owned child) as its prompt I/O code. When this attempt's own hook refused,
+    // that wrap reports no prompt I/O failure: the original typed refusal (code, provider_called
+    // false, stage, layer) is restored. A prompt I/O failure without a recorded refusal stays as is.
+    if (packagingRefusal && error !== packagingRefusal && error?.provider_called !== true
+        && error?.code === require('./forge-claude-sidecar').CLAUDE_SIDECAR_REASON_CODES.PROMPT_IO) error = packagingRefusal;
     // A heartbeat proves a local process, not provider acceptance. A timeout
     // without adapter evidence stays unknown; an explicit pre-spawn refusal is false.
     providerCalled = typeof error.provider_called === 'boolean' ? error.provider_called
@@ -2937,7 +2986,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
     let extra = execution ? { reset_state_file: executionStateFile,
       possible_writes: providerCalled ? 'unknown' : false,
       reconciliation_required: providerCalled !== false }
-      : error.stage === 'milestone-time-admission' && transport.mode === 'execute' && providerCalled === false
+      : admissionRefusal(error) && transport.mode === 'execute' && providerCalled === false
         ? { possible_writes: false, reconciliation_required: false } : null;
     const phase = fix ? JSON.parse(fs.readFileSync(receiptFile, 'utf8')).phase : null;
     if (fix && phase !== 'ready') {

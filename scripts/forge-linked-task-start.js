@@ -303,16 +303,25 @@ function predecessorOf(owner, probe, input, progress = false) {
   if (frozen.status !== 'measured' || frozen.frozen !== true || frozen.endpoint?.sha256 !== read.sha256 || frozen.consumption?.consumed_ms !== read.record.clock.consumed_ms) {
     return { result: incomplete(probe, 'endpoint-unproven', 'clock-not-frozen') };
   }
-  const status = admission().readTimeStatus(owner, M, { now });
+  // Milestone-only canonical status (explicit seam): the predecessor needs the milestone horizon,
+  // never the linked projection that itself consults this proof.
+  const status = admission().readMilestoneTimeStatus(owner, M, { now });
   if (status.contract !== 'valid' || status.contract_version !== contract.version || status.clocks?.consumed_ms !== read.record.clock.consumed_ms) {
     return { result: incomplete(probe, 'endpoint-unproven', 'time-state-unknown') };
   }
-  if (['exhausted', 'draining', 'checkpointed'].includes(status.state)) return { result: incomplete(probe, 'milestone-budget-' + status.state, null) };
-  if (!['active', 'warning', 'extended'].includes(status.state)) return { result: incomplete(probe, 'endpoint-unproven', 'time-state-unknown') };
+  // The canonical status of this frozen endpoint is endpoint-proven with this exact proof; the
+  // budget at the frozen consumption travels separately as budget_state and alone decides the
+  // predecessor budget (endpoint-proven itself is never a budget allowance).
+  if (status.state !== 'endpoint-proven' || status.horizon?.endpoint_proof?.sha256 !== read.sha256) {
+    return { result: incomplete(probe, 'endpoint-unproven', 'time-state-unknown') };
+  }
+  const budget = status.budget_state;
+  if (['exhausted', 'draining', 'checkpointed'].includes(budget)) return { result: incomplete(probe, 'milestone-budget-' + budget, null) };
+  if (!['active', 'warning', 'extended'].includes(budget)) return { result: incomplete(probe, 'endpoint-unproven', 'time-state-unknown') };
   const historical = read.record.time_state;
-  return { endpoint: read, contract, status, result: { status: 'proven', milestone: M, task_id: probe.task_id, link_sha256: probe.link_sha256, endpoint_sha256: read.sha256,
+  return { endpoint: read, contract, status, budget, result: { status: 'proven', milestone: M, task_id: probe.task_id, link_sha256: probe.link_sha256, endpoint_sha256: read.sha256,
     endpoint_at: read.record.endpoint_at, historical: { state: historical.state, ceiling_ms: historical.ceiling_ms, consumed_ms: historical.consumed_ms, contract_version: historical.contract_version },
-    current: { state: status.state, ceiling_ms: status.horizon.ceiling_ms, remaining_ms: status.remaining_ms, contract_version: status.contract_version } } };
+    current: { state: budget, ceiling_ms: status.horizon.ceiling_ms, remaining_ms: status.remaining_ms, contract_version: status.contract_version } } };
 }
 // provePredecessor({cwd, task} | {cwd, milestone}, now): proven only from the actual records; never throws.
 function provePredecessor(input = {}) {
@@ -379,7 +388,7 @@ function buildHandoff(owner, probe, proof, now) {
     gates: { plan_gate: 'required', security_gate: 'required', claims: 'required', verification: 'required', independent_review: 'required',
       slice_reviews: e.reviews.map(r => ({ slice: r.slice, reference: r.reference, sha256: r.sha256 })) },
     clocks: { milestone: { frozen: true, endpoint_at: e.endpoint_at, consumed_ms: e.clock.consumed_ms, unknown_ms: e.clock.unknown_ms, endpoint_state: e.time_state.state,
-      endpoint_ceiling_ms: e.time_state.ceiling_ms, endpoint_contract_version: e.contract.version, current_state: proof.status.state,
+      endpoint_ceiling_ms: e.time_state.ceiling_ms, endpoint_contract_version: e.contract.version, current_state: proof.budget,
       current_ceiling_ms: proof.status.horizon.ceiling_ms, current_contract_version: proof.status.contract_version } },
     task_horizon: { low_ms: link.linked_task.horizon.low_ms, high_ms: link.linked_task.horizon.high_ms, ceiling_ms: link.linked_task.horizon.ceiling_ms },
     base_candidate: { roots: e.roots.map(r => ({ root_id: r.root_id, revision: r.revision, branch: r.branch, scope_sha256: digest(r.scope) })) } };

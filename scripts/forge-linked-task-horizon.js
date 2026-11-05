@@ -870,8 +870,9 @@ function readLinkedStatus(input = {}) {
       const proof = lifecycle().provePredecessor({ cwd: owner, task: probe.task_id, now, userHome: input.userHome, env: input.env });
       predecessor = { lifecycle: life.status, status: typeof proof.status === 'string' ? proof.status : 'invalid', reason: typeof proof.reason === 'string' && /^[a-z][a-z0-9-]{0,80}$/.test(proof.reason) ? proof.reason : null };
     }
-    // Milestone horizon: its own ceiling, its frozen (or live) consumption and its endpoint.
-    const ms = admission().readTimeStatus(owner, M, { now }), mclock = clocks().readClock({ cwd: owner, milestone: M, now }), endpoint = endpoints().readEndpoint({ cwd: owner, milestone: M });
+    // Milestone horizon: its own ceiling, its frozen (or live) consumption and its endpoint, read
+    // through the explicit milestone-only seam (never composes the linked horizons again).
+    const ms = admission().readMilestoneTimeStatus(owner, M, { now }), mclock = clocks().readClock({ cwd: owner, milestone: M, now }), endpoint = endpoints().readEndpoint({ cwd: owner, milestone: M });
     const frozen = mclock.status === 'measured' && mclock.frozen === true;
     const milestoneConsumed = frozen ? intOrNull(mclock.consumption?.consumed_ms) : intOrNull(ms.clocks?.consumed_ms);
     if (ms.contract !== 'valid') unknowns.add('milestone-time-invalid');

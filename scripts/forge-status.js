@@ -355,7 +355,7 @@ function timeBlock(id, status, summary) {
   const endpoint = status.horizon && status.horizon.endpoint && status.horizon.endpoint.items ? status.horizon.endpoint.items : null;
   const forecast = status.forecast || {};
   const projection = forecast.projection || {};
-  return {
+  const block = {
     contract: status.contract === 'valid' ? 'valid' : 'invalid',
     contract_version: timeMs(status.contract_version),
     state: summary.state,
@@ -401,6 +401,14 @@ function timeBlock(id, status, summary) {
     summary,
     diagnostic: `node scripts/forge-milestone-time-admission.js --status --milestone ${id} --json`,
   };
+  // New keys only for an endpoint or a linked milestone: the frozen proof, the separate task
+  // horizon (its own ceiling governs task operations) and the derived chain that governs nothing.
+  if (summary.endpoint) block.endpoint = { ...summary.endpoint };
+  if (summary.task) {
+    block.task = { ...summary.task };
+    block.chain = summary.chain ? { ...summary.chain } : null;
+  }
+  return block;
 }
 
 // null for tasks, unreadable IDs and contract-free milestones.
@@ -421,10 +429,36 @@ function readMilestoneTime(cwd, id) {
   }
 }
 
-function withMilestoneTime(root, work) {
+function withMilestoneTime(root, work, opts) {
+  if (work && work.kind === 'task') return withLinkedTask(root, work, opts);
   if (!work || work.kind !== 'milestone' || typeof root !== 'string' || !root) return work;
   const time = readMilestoneTime(root, work.id);
   return time ? { ...work, time } : work;
+}
+
+// ── Linked task horizon (read-only) ──────────────────────────────────────────
+// Only a task with a link record gains the closed `linked` block: exactly the
+// summarizeLinkedStatus projection of forge-linked-task-horizon (task, milestone
+// and chain horizons, which ceiling governs each operation, decision pending and
+// unknowns). An unlinked task reads no time state and keeps its exact model.
+function readLinkedTask(root, id, opts) {
+  if (typeof root !== 'string' || !root || typeof id !== 'string' || !ids.isValid(id) || ids.entityKind(id) !== 'task') return null;
+  const options = opts || {};
+  try {
+    const horizon = require('./forge-linked-task-horizon.js');
+    const status = horizon.readLinkedStatus({ cwd: root, task: id,
+      ...(options.userHome !== undefined ? { userHome: options.userHome } : {}), ...(options.env !== undefined ? { env: options.env } : {}) });
+    return status === null ? null : horizon.summarizeLinkedStatus(status);
+  } catch {
+    // An unreadable horizon stays visible as unknown, never as absent.
+    return { task_id: id, lifecycle: 'invalid', task: null, milestone: null, chain: null, decision_pending: false, unknown: true };
+  }
+}
+
+function withLinkedTask(root, work, opts) {
+  if (!work || typeof root !== 'string' || !root) return work;
+  const linked = readLinkedTask(root, work.id, opts);
+  return linked ? { ...work, linked } : work;
 }
 
 // ── collect ──────────────────────────────────────────────────────────────────
@@ -435,7 +469,7 @@ function collect(cwd, opts) {
   if (opts.scope !== 'workspace') {
     const snapshot = require('./forge-personal-context').readPersonalSnapshot({ ...opts, cwd, id: opts.milestoneId || opts.id, inspect: Boolean(opts.milestoneId || opts.id) });
     // Time is read from the snapshot's own project, never from a census.
-    const works = (snapshot.works || []).map((work) => withMilestoneTime(snapshot.project, work));
+    const works = (snapshot.works || []).map((work) => withMilestoneTime(snapshot.project, work, opts));
     return { ...snapshot, scope: snapshot.scope || (opts.milestoneId || opts.id ? 'inspection' : 'personal'), works, cwd, generated_at: new Date().toISOString(), warnings: snapshot.status === 'error' ? [snapshot.reason] : [] };
   }
   const warnings = [];
@@ -570,6 +604,8 @@ function collect(cwd, opts) {
   } catch {
     autonomousTasks = [];
   }
+  // Workspace scope: linked tasks gain the same closed block; unlinked entries stay identical.
+  autonomousTasks = autonomousTasks.map((task) => withLinkedTask(cwd, task, opts));
 
   return {
     scope: 'workspace',
@@ -633,6 +669,27 @@ const TIME_STATE_PT = {
   draining: 'em drain',
   checkpointed: 'em checkpoint',
   extended: 'estendido',
+  'endpoint-proven': 'marco final comprovado (consumo congelado)',
+};
+const TASK_STATE_PT = {
+  'not-started': 'não iniciada',
+  active: 'ativa',
+  exhausted: 'no teto',
+  draining: 'em drain',
+  checkpointed: 'em checkpoint',
+  extended: 'estendida',
+  completed: 'encerrada',
+  'chain-closed': 'cadeia encerrada',
+  unknown: 'desconhecido',
+};
+const LIFECYCLE_PT = {
+  blocked: 'bloqueada (predecessora não comprovada)',
+  'handoff-ready': 'handoff pronto',
+  open: 'aberta',
+  started: 'iniciada',
+  closed: 'encerrada',
+  'chain-closed': 'cadeia encerrada',
+  invalid: 'inválida',
 };
 const FORECAST_PT = { fits: 'cabe no saldo', 'at-risk': 'em risco', exceeds: 'excede o saldo', unknown: 'desconhecida' };
 const ENDPOINT_PT = { publication: 'publicação', installation: 'instalação', 'manual-uat': 'UAT manual', 'external-waits': 'esperas externas' };
@@ -685,8 +742,42 @@ function timeLines(time) {
   if (time.checkpoint) {
     lines.push(`Checkpoint: ${time.checkpoint.decision_pending ? 'decisão pendente' : 'sem decisão pendente'}; estouro ${fmtDuration(time.checkpoint.overshoot_ms)}`);
   }
+  if (time.endpoint) lines.push(`Marco final comprovado em ${time.endpoint.at}; consumo congelado nessa prova (${time.endpoint.sha256.slice(0, 12)})`);
+  if (time.task) {
+    lines.push(`Teto da milestone governa as operações da milestone; task ligada ${time.task.task_id || 'desconhecida'}: ${TASK_STATE_PT[time.task.state] || 'desconhecido'}, `
+      + `teto ${fmtDuration(time.task.ceiling_ms)} (governa as operações da task), consumido ${fmtDuration(time.task.consumed_ms)}, saldo ${saldoText(time.task.remaining_ms)}`);
+    if (time.chain) lines.push(chainText(time.chain));
+  }
   if (time.unknowns.length) lines.push(`Desconhecido: ${time.unknowns.join(', ')}`);
   lines.push(`Diagnóstico: ${time.diagnostic}`);
+  return lines;
+}
+
+function saldoText(remaining) {
+  return !Number.isFinite(remaining) ? 'desconhecido' : remaining > 0 ? fmtDuration(remaining) : `esgotado (estouro de ${fmtDuration(-remaining)})`;
+}
+
+function chainText(chain) {
+  const forecast = Number.isFinite(chain.forecast_low_ms)
+    ? `; previsão ${fmtDuration(chain.forecast_low_ms)} a ${Number.isFinite(chain.forecast_high_ms) ? fmtDuration(chain.forecast_high_ms) : 'desconhecido'}` : '';
+  return `Cadeia: teto derivado (soma, não governa nenhuma operação) ${fmtDuration(chain.cap_ms)}; consumido ${fmtDuration(chain.consumed_ms)}${forecast}; `
+    + `${chain.completed ? 'concluída (marco final e encerramento da task)' : 'não concluída'}`;
+}
+
+// Closed `linked` block of a linked task, pure over the projection.
+function linkedLines(linked) {
+  if (!linked.task) return [`Ciclo: ${LIFECYCLE_PT[linked.lifecycle] || 'inválido'}; horizonte ilegível (desconhecido)`];
+  const lines = [`Ciclo: ${LIFECYCLE_PT[linked.lifecycle] || 'inválido'}; estado da task: ${TASK_STATE_PT[linked.task.state] || 'desconhecido'}`];
+  lines.push(`Task: teto ${fmtDuration(linked.task.ceiling_ms)} (governa as operações da task${linked.task.extensions ? `; ${linked.task.extensions} extensão(ões)` : ''}); `
+    + `consumido ${fmtDuration(linked.task.consumed_ms)} (sem atribuição: ${fmtDuration(linked.task.unknown_ms)}); saldo ${saldoText(linked.task.remaining_ms)}`);
+  if (linked.milestone) {
+    lines.push(`Milestone ${linked.milestone_id || 'desconhecida'}: teto ${fmtDuration(linked.milestone.ceiling_ms)} (governa as operações da milestone); `
+      + `consumido ${fmtDuration(linked.milestone.consumed_ms)} (${linked.milestone.frozen ? 'congelado no marco final' : 'vivo'}); `
+      + `marco final ${linked.milestone.endpoint_proven ? 'comprovado' : 'não comprovado'}`);
+  }
+  if (linked.chain) lines.push(chainText(linked.chain));
+  lines.push(`Decisão pendente: ${linked.decision_pending ? 'sim' : 'não'}`);
+  if (linked.unknown) lines.push('Desconhecido: há valores sem fonte (exibidos como desconhecidos)');
   return lines;
 }
 
@@ -711,6 +802,10 @@ function renderTree(model, opts) {
       if (work.time) {
         lines.push('Tempo da milestone:');
         for (const line of timeLines(work.time)) lines.push(`- ${line}`);
+      }
+      if (work.linked) {
+        lines.push('Horizonte da task ligada:');
+        for (const line of linkedLines(work.linked)) lines.push(`- ${line}`);
       }
     }
     return lines.join('\n') + '\n';
@@ -788,6 +883,7 @@ function renderTree(model, opts) {
       else if (t.status === 'in_progress') icon = paint.active('▶');
       const statusPt = STATUS_PT[t.status] || t.status;
       lines.push(`${icon} ${paint.id(t.id)}: ${t.description} (${statusPt})`);
+      if (t.linked) for (const line of linkedLines(t.linked)) lines.push(`  - ${line}`);
     }
   }
 

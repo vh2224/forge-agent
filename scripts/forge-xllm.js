@@ -3417,9 +3417,15 @@ if (require.main === module) {
   // catch nothing and let every failure escape as an unhandled rejection — exit 0
   // with empty stdout, which is the silent-success shape this adapter exists to deny.
   const timeoutSecs = cliCeiling(args);
-  const budgetFlags = ['budget-owner', 'budget-milestone', 'budget-unit'];
+  // Budget identity: --budget-owner and --budget-unit with exactly one of --budget-milestone
+  // (milestone horizon) or --budget-task (linked task horizon). Both, or an incomplete set, reach
+  // the common owner guard as an invalid context and refuse before any transport. Without these
+  // flags the context stays absent exactly as before.
+  const budgetFlags = ['budget-owner', 'budget-milestone', 'budget-task', 'budget-unit'];
+  const taskBudget = args['budget-task'] !== undefined;
   const milestoneTimeContext = budgetFlags.some(key => args[key] !== undefined)
-    ? { cwd: args['budget-owner'], milestone: args['budget-milestone'], unit: args['budget-unit'] } : undefined;
+    ? { cwd: args['budget-owner'], ...(taskBudget ? { task: args['budget-task'] } : {}),
+      ...(!taskBudget || args['budget-milestone'] !== undefined ? { milestone: args['budget-milestone'] } : {}), unit: args['budget-unit'] } : undefined;
   let pending;
   if (mode === 'challenge') {
     pending = runChallenge({ diffCmd: args['diff-cmd'], cwd, contextRoot: args['context-root'], milestoneTimeContext, engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, announce, dispatchId: args['dispatch-id'] });
