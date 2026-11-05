@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:forge:linked-task-handoff:v1",
+  "title": "Forge linked task lifecycle records v1",
+  "description": "Immutable owner records below .gsd/forge/time/<M>/linked-task/: handoff.json (produced at the milestone closure after the proven endpoint), start-witness.json (independent witness of the complete start, published before it), start.json (published last by the reattested start), chain-closure.json (explicit attested chain closure) and closure.json (verified canonical task delivery). Public data only: no absolute path, credential, session or live handle. A record never grants authority. Validated by scripts/forge-linked-task-start.js.",
+  "oneOf": [
+    { "$ref": "#/$defs/handoff" },
+    { "$ref": "#/$defs/start" },
+    { "$ref": "#/$defs/start_witness" },
+    { "$ref": "#/$defs/chain_closure" },
+    { "$ref": "#/$defs/closure" }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "revision": { "type": "string", "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$" },
+    "instant": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}Z$" },
+    "milestone": { "type": "string", "pattern": "^(?:[Mm][0-9]+|M-[0-9]{14}(?:-[a-z0-9-]*)?|M-[0-9]{8}-[0-9]{6}(?:-[A-Za-z0-9-]*)?)(?![\\s\\S])" },
+    "task": { "type": "string", "pattern": "^(?:T-[0-9]{14}(?:-[a-z0-9-]*)?|T-[0-9]{8}-[0-9]{6}(?:-[A-Za-z0-9-]*)?|[Tt][Aa][Ss][Kk]-(?:[0-9]+|[0-9]{8}-[0-9]{6}(?:-[A-Za-z0-9-]*)?)|task-[a-z0-9-]+)(?![\\s\\S])" },
+    "line": { "type": "string", "maxLength": 1000, "pattern": "^[^\\u0000-\\u001f]*$", "description": "Single-line evidence sanitized by forge-linked-task.sanitizeEvidenceText." },
+    "question": {
+      "type": "object", "additionalProperties": false, "required": ["identity_sha256", "id"],
+      "properties": { "identity_sha256": { "$ref": "#/$defs/sha256" }, "id": { "type": "string", "maxLength": 120 } }
+    },
+    "handoff": {
+      "type": "object", "additionalProperties": false, "x-max-bytes": 16384,
+      "required": ["schema_version", "kind", "milestone", "task_id", "link_sha256", "endpoint_sha256", "produced_at", "authorization", "summary", "delivery", "roadmap",
+        "forward_intelligence", "decisions", "moved_scope", "criteria", "gates", "clocks", "task_horizon", "base_candidate"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "kind": { "const": "forge-linked-task-handoff" },
+        "milestone": { "$ref": "#/$defs/milestone" },
+        "task_id": { "$ref": "#/$defs/task" },
+        "link_sha256": { "$ref": "#/$defs/sha256" },
+        "endpoint_sha256": { "$ref": "#/$defs/sha256" },
+        "produced_at": { "$ref": "#/$defs/instant" },
+        "authorization": {
+          "type": "object", "additionalProperties": false, "required": ["scope", "reference", "question", "answer", "request_sha256"],
+          "description": "The persisted linked-task decision of the link (reference, question and answer); never a live handle.",
+          "properties": {
+            "scope": { "enum": ["create-and-start-after-proven-completion", "create-without-auto-start"] },
+            "reference": { "type": ["string", "null"], "maxLength": 120 },
+            "question": { "$ref": "#/$defs/question" },
+            "answer": { "type": "string" },
+            "request_sha256": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "summary": {
+          "type": "object", "additionalProperties": false, "required": ["reference", "sha256", "fingerprint"],
+          "properties": { "reference": { "type": "string" }, "sha256": { "$ref": "#/$defs/sha256" }, "fingerprint": { "$ref": "#/$defs/sha256" } }
+        },
+        "delivery": {
+          "type": "object", "additionalProperties": false, "required": ["reference", "sha256", "fingerprint"],
+          "properties": { "reference": { "type": "string" }, "sha256": { "$ref": "#/$defs/sha256" }, "fingerprint": { "$ref": "#/$defs/sha256" } }
+        },
+        "roadmap": {
+          "type": "object", "additionalProperties": false, "required": ["reference", "sha256", "structure_sha256"],
+          "properties": { "reference": { "type": "string" }, "sha256": { "$ref": "#/$defs/sha256" }, "structure_sha256": { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] } }
+        },
+        "forward_intelligence": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/line" } },
+        "decisions": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/line" } },
+        "moved_scope": {
+          "type": "array", "minItems": 1, "maxItems": 64,
+          "items": { "type": "object", "additionalProperties": false, "required": ["id", "title"],
+            "properties": { "id": { "type": "string" }, "title": { "oneOf": [{ "$ref": "#/$defs/line" }, { "type": "null" }] } } }
+        },
+        "criteria": {
+          "type": "object", "additionalProperties": false, "required": ["milestone", "task"],
+          "properties": { "milestone": { "type": "array", "items": { "$ref": "#/$defs/line" } }, "task": { "type": "array", "items": { "$ref": "#/$defs/line" } } }
+        },
+        "gates": {
+          "type": "object", "additionalProperties": false, "required": ["plan_gate", "security_gate", "claims", "verification", "independent_review", "slice_reviews"],
+          "properties": {
+            "plan_gate": { "const": "required" }, "security_gate": { "const": "required" }, "claims": { "const": "required" },
+            "verification": { "const": "required" }, "independent_review": { "const": "required" },
+            "slice_reviews": { "type": "array", "minItems": 1,
+              "items": { "type": "object", "additionalProperties": false, "required": ["slice", "reference", "sha256"],
+                "properties": { "slice": { "type": "string", "pattern": "^S\\d{2,}$" }, "reference": { "type": "string" }, "sha256": { "$ref": "#/$defs/sha256" } } } }
+          }
+        },
+        "clocks": {
+          "type": "object", "additionalProperties": false, "required": ["milestone"],
+          "properties": {
+            "milestone": {
+              "type": "object", "additionalProperties": false,
+              "description": "The historical endpoint state (frozen consumption) and the effective current cap are recorded separately; the start revalidates the current contract.",
+              "required": ["frozen", "endpoint_at", "consumed_ms", "unknown_ms", "endpoint_state", "endpoint_ceiling_ms", "endpoint_contract_version",
+                "current_state", "current_ceiling_ms", "current_contract_version"],
+              "properties": {
+                "frozen": { "const": true }, "endpoint_at": { "$ref": "#/$defs/instant" },
+                "consumed_ms": { "type": "integer", "minimum": 0 }, "unknown_ms": { "type": "integer", "minimum": 0 },
+                "endpoint_state": { "enum": ["active", "warning", "exhausted", "draining", "checkpointed", "extended", null] },
+                "endpoint_ceiling_ms": { "type": ["integer", "null"] }, "endpoint_contract_version": { "type": "integer", "minimum": 1 },
+                "current_state": { "enum": ["active", "warning", "extended"] },
+                "current_ceiling_ms": { "type": ["integer", "null"] }, "current_contract_version": { "type": "integer", "minimum": 1 }
+              }
+            }
+          }
+        },
+        "task_horizon": {
+          "type": "object", "additionalProperties": false, "required": ["low_ms", "high_ms", "ceiling_ms"],
+          "properties": { "low_ms": { "type": "integer", "minimum": 1 }, "high_ms": { "type": "integer", "minimum": 1 }, "ceiling_ms": { "type": "integer", "minimum": 1 } }
+        },
+        "base_candidate": {
+          "type": "object", "additionalProperties": false, "required": ["roots"],
+          "properties": { "roots": { "type": "array", "minItems": 1, "maxItems": 14,
+            "items": { "type": "object", "additionalProperties": false, "required": ["root_id", "revision", "branch", "scope_sha256"],
+              "properties": { "root_id": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$" }, "revision": { "$ref": "#/$defs/revision" },
+                "branch": { "type": ["string", "null"] }, "scope_sha256": { "$ref": "#/$defs/sha256" } } } } }
+        }
+      }
+    },
+    "start": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "kind", "milestone", "task_id", "link_sha256", "handoff_sha256", "endpoint_sha256", "brief_sha256", "block_sha256", "authority", "base", "isolation", "started_at"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "kind": { "const": "forge-linked-task-start" },
+        "milestone": { "$ref": "#/$defs/milestone" },
+        "task_id": { "$ref": "#/$defs/task" },
+        "link_sha256": { "$ref": "#/$defs/sha256" },
+        "handoff_sha256": { "$ref": "#/$defs/sha256" },
+        "endpoint_sha256": { "$ref": "#/$defs/sha256" },
+        "brief_sha256": { "$ref": "#/$defs/sha256" },
+        "block_sha256": { "$ref": "#/$defs/sha256" },
+        "authority": {
+          "type": "object", "additionalProperties": false, "required": ["mode", "reference", "question", "answer", "request_sha256"],
+          "description": "Reference of the live attested decision (chained: the original linked-task decision; explicit: linked-task:start bound to link and handoff).",
+          "properties": { "mode": { "enum": ["chained", "explicit"] }, "reference": { "type": ["string", "null"] }, "question": { "$ref": "#/$defs/question" },
+            "answer": { "type": "string" }, "request_sha256": { "$ref": "#/$defs/sha256" } }
+        },
+        "base": {
+          "type": "object", "additionalProperties": false, "required": ["kind", "roots"],
+          "properties": {
+            "kind": { "enum": ["milestone-branch", "integrated"] },
+            "roots": { "type": "array", "minItems": 1, "maxItems": 14,
+              "items": { "type": "object", "additionalProperties": false, "required": ["root_id", "head", "branch", "endpoint_revision", "target", "ancestry", "scope_sha256"],
+                "properties": { "root_id": { "type": "string" }, "head": { "$ref": "#/$defs/revision" }, "branch": { "type": ["string", "null"] },
+                  "endpoint_revision": { "$ref": "#/$defs/revision" }, "target": { "oneOf": [{ "$ref": "#/$defs/revision" }, { "type": "null" }] },
+                  "ancestry": { "enum": ["ancestor", "not-ancestor", "unknown"] }, "scope_sha256": { "$ref": "#/$defs/sha256" } } } }
+          }
+        },
+        "isolation": {
+          "type": "object", "additionalProperties": false, "required": ["mode", "branch", "attached_to", "worktree_count"],
+          "properties": { "mode": { "enum": ["shared", "branch", "worktree"] }, "branch": { "type": ["string", "null"] }, "attached_to": { "type": ["string", "null"] },
+            "worktree_count": { "type": "integer", "minimum": 0 } }
+        },
+        "started_at": { "$ref": "#/$defs/instant" }
+      }
+    },
+    "start_witness": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "kind", "milestone", "task_id", "link_sha256", "start_sha256", "start"],
+      "description": "Independent immutable witness published BEFORE start.json: the complete start record and its canonical digest. A start.json edited alone in any canonical field no longer equals it.",
+      "properties": {
+        "schema_version": { "const": 1 },
+        "kind": { "const": "forge-linked-task-start-witness" },
+        "milestone": { "$ref": "#/$defs/milestone" },
+        "task_id": { "$ref": "#/$defs/task" },
+        "link_sha256": { "$ref": "#/$defs/sha256" },
+        "start_sha256": { "$ref": "#/$defs/sha256" },
+        "start": { "$ref": "#/$defs/start" }
+      }
+    },
+    "chain_closure": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "kind", "milestone", "task_id", "link_sha256", "decision", "closed_at"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "kind": { "const": "forge-linked-task-chain-closure" },
+        "milestone": { "$ref": "#/$defs/milestone" },
+        "task_id": { "$ref": "#/$defs/task" },
+        "link_sha256": { "$ref": "#/$defs/sha256" },
+        "decision": {
+          "type": "object", "additionalProperties": false, "required": ["reference", "question", "answer", "request_sha256"],
+          "properties": { "reference": { "type": ["string", "null"] }, "question": { "$ref": "#/$defs/question" }, "answer": { "const": "linked-task:close-chain" },
+            "request_sha256": { "$ref": "#/$defs/sha256" } }
+        },
+        "closed_at": { "$ref": "#/$defs/instant" }
+      }
+    },
+    "closure": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "kind", "milestone", "task_id", "link_sha256", "start_sha256", "summary", "delivery", "closed_at", "fingerprint"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "kind": { "const": "forge-linked-task-closure" },
+        "milestone": { "$ref": "#/$defs/milestone" },
+        "task_id": { "$ref": "#/$defs/task" },
+        "link_sha256": { "$ref": "#/$defs/sha256" },
+        "start_sha256": { "$ref": "#/$defs/sha256" },
+        "summary": {
+          "type": "object", "additionalProperties": false, "required": ["reference", "sha256"],
+          "properties": { "reference": { "type": "string" }, "sha256": { "$ref": "#/$defs/sha256" } }
+        },
+        "delivery": {
+          "type": "object", "additionalProperties": false, "required": ["reference", "sha256", "input_sha256", "fingerprint", "criteria"],
+          "description": "The canonical .gsd/tasks/<T>/<T>-DELIVERY.json rebuilt by forge-delivery from its INPUT: zero diagnostics, complete expected inventory, every criterion verified.",
+          "properties": { "reference": { "type": "string" }, "sha256": { "$ref": "#/$defs/sha256" }, "input_sha256": { "$ref": "#/$defs/sha256" },
+            "fingerprint": { "$ref": "#/$defs/sha256" }, "criteria": { "type": "integer", "minimum": 1 } }
+        },
+        "closed_at": { "$ref": "#/$defs/instant" },
+        "fingerprint": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

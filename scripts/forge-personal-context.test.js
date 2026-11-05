@@ -75,6 +75,21 @@ async function main() {
       lastResult: [{ text: 'Implementation verified', source: a.source }],
     };
     assert.strictEqual(personal.saveCheckpoint({ ...f.options, id: 'TASK-001', intent: 'checkpoint', checkpoint }).status, 'ok');
+    // Conditional saves compare the actual targeted captures under the same mutex.
+    {
+      const raw = () => Object.values(JSON.parse(fs.readFileSync(storeFile)).projects)[0].bindings['TASK-001'].checkpoint;
+      const save = extra => personal.saveCheckpoint({ ...f.options, id: 'TASK-001', intent: 'checkpoint', checkpoint: { pending: checkpoint.pending }, ...extra });
+      const expected = { pending: raw().pending }, unrelated = raw().acceptances;
+      assert.strictEqual(save({ expectedCheckpoint: expected }).status, 'ok');
+      assert.deepStrictEqual(raw().acceptances, unrelated);
+      const bytes = fs.readFileSync(storeFile), mtime = fs.statSync(storeFile).mtimeMs;
+      for (const expectedCheckpoint of [{ pending: [] }, {}, { pending: [null] }]) {
+        assert.strictEqual(save({ expectedCheckpoint }).status, 'error');
+        assert.deepStrictEqual(fs.readFileSync(storeFile), bytes);
+        assert.strictEqual(fs.statSync(storeFile).mtimeMs, mtime);
+      }
+      assert.strictEqual(save().status, 'ok', 'the default API still replaces slots without a precondition');
+    }
     let work = personal.readPersonalSnapshot(f.options).works[0];
     assert.strictEqual(work.activity, 'inactive');
     assert.strictEqual(work.workStatus, 'pending');

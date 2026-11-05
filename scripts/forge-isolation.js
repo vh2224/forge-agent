@@ -963,9 +963,13 @@ function setupForRun(cwd, runId, opts) {
 // a mid-run worktree_root flip remains out of scope.
 const VALID_ISOLATION_MODES = new Set(['shared', 'branch', 'worktree']);
 
-function resolveCleanupMode(cwd, runId) {
-  let rec = null;
-  try { rec = runs.get(cwd, runId); } catch { rec = null; }
+function resolveCleanupMode(cwd, runId, snapshot) {
+  // Cleanup passes its bounded snapshot, including explicit null for an absent run.
+  // Other callers retain their historical lookup behavior.
+  let rec = snapshot === undefined ? null : snapshot;
+  if (snapshot === undefined) {
+    try { rec = runs.get(cwd, runId); } catch { rec = null; }
+  }
   if (rec && typeof rec.isolation_mode === 'string' && rec.isolation_mode.trim()) {
     const normalized = rec.isolation_mode.trim().toLowerCase();
     if (VALID_ISOLATION_MODES.has(normalized)) {
@@ -1012,8 +1016,28 @@ function resolveCleanupMode(cwd, runId) {
 }
 
 function cleanupForRun(cwd, runId, opts) {
-  let rec = null;
-  try { rec = runs.get(cwd, runId); } catch { rec = null; }
+  return runs.withRegistryFence(cwd, () => cleanupFenced(cwd, runId, opts));
+}
+
+function cleanupFenced(cwd, runId, opts) {
+  // Inspect the entire registry before reading even this run's payload. Unknown
+  // ownership cannot become an empty borrower set or a record-less fallback.
+  let census;
+  try { census = runs.listAllDetailed(cwd, { maxRuns: 512, maxBytes: 65536 }); } catch { census = null; }
+  const records = census && Array.isArray(census.parsed) ? census.parsed : null;
+  const known = records && Array.isArray(census.unparseable) && census.unparseable.length === 0 && records.length <= 512
+    && records.every(r => r && typeof r === 'object' && !Array.isArray(r) && typeof r.id === 'string' && r.id.length > 0
+      && typeof r.active === 'boolean' && (r.attached_to == null || typeof r.attached_to === 'string' && r.attached_to.length > 0)
+      && (r.worktrees == null || Array.isArray(r.worktrees) && r.worktrees.every(w => w && typeof w === 'object' && !Array.isArray(w)
+        && typeof w.path === 'string' && w.path.length > 0 && (w.repo == null || typeof w.repo === 'string' && w.repo.length > 0))))
+    && new Set(records.map(r => r.id)).size === records.length
+    && records.reduce((total, r) => total + (r.worktrees || []).length, 0) <= 2048;
+  if (!known) return {
+    mode: 'shared', mode_source: 'ownership-unknown', user_mode: null, elevated: null, elevation_reason: null,
+    vcs: (() => { try { return detectVcs(cwd); } catch { return 'none'; } })(),
+    repos: [{ path: cwd, status: 'skipped (ownership unknown)', reason: 'ownership-unknown' }],
+  };
+  const rec = records.find(r => r.id === runId) || null;
   if (rec && rec.attached_to) {
     // Borrowed worktrees belong to another (possibly still active) run. A clean
     // status does not make them disposable: cleanupWorktreeOne only protects
@@ -1046,14 +1070,11 @@ function cleanupForRun(cwd, runId, opts) {
   // attach to it, so we must scan the registry for active borrowers of
   // THIS runId before touching anything. Mirrors the 2026-06-10 worktree
   // cleanup data-loss incident, newly reachable because borrowing exists.
-  let activeBorrowers = [];
-  try {
-    activeBorrowers = runs.listActive(cwd).filter(r => r.id !== runId && r.attached_to === runId);
-  } catch { activeBorrowers = []; }
+  const activeBorrowers = records.filter(r => r.active === true && r.id !== runId && r.attached_to === runId);
 
   opts = opts || {};
   const prefs = readIsolationPrefs(cwd);
-  const cm = resolveCleanupMode(cwd, runId);
+  const cm = resolveCleanupMode(cwd, runId, rec);
   const mode = cm.mode;
   const result = {
     mode,

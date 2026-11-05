@@ -1126,6 +1126,18 @@ try {
     assert.ok(!fs.existsSync(p.directory) || fs.readdirSync(p.directory).length === 0);
     assert.strictEqual(enroll(cwd).status, 'valid'); assert.ok(!fs.existsSync(p.staging) || fs.readdirSync(p.staging).length === 0);
   });
+  test('handoff-binding-private-path-and-caller-proof-cannot-mint-publication', () => {
+    const { cwd } = activate();
+    for (const key of ['record', 'build', 'anchor', 'binding', 'proof']) {
+      rejectsUnchanged(cwd, 'time-record-invalid', () => time.publishLinkedTaskHandoff({ cwd, milestone: M, [key]: {} }));
+    }
+    for (const relative of ['linked-task-bindings/handoff.json', 'linked-task/bindings/handoff.json']) {
+      rejectsUnchanged(cwd, 'time-record-path-invalid', () => time.publishOwnerRecord({ cwd, milestone: M, path: relative, record: { schema_version: 1 } }));
+      assert.strictEqual(time.readOwnerRecord({ cwd, milestone: M, path: relative }).status, 'invalid');
+    }
+    assert.deepStrictEqual(time.readHandoffBinding({ cwd, milestone: M }), { status: 'absent' });
+    const empty = owner(); rejectsUnchanged(empty, 'time-contract-required', () => time.publishLinkedTaskHandoff({ cwd: empty, milestone: M }));
+  });
   console.log(`PASS milestone-time ${passed} named checks`);
 } finally {
   for (const cwd of roots) fs.rmSync(cwd, { recursive: true, force: true });

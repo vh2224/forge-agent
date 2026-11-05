@@ -205,11 +205,24 @@ function saveCheckpoint(options = {}) {
   if (!validId(options.id)) return failure('invalid-id');
   if (options.intent !== 'checkpoint' || !object(options.checkpoint)) return failure('intent-required');
   if (unanchoredProject(options)) return failure('project-unanchored');
+  // Optional compare-and-save protects only the slots this caller will replace.
+  const expected = options.expectedCheckpoint;
+  if (expected !== undefined && (!object(expected)
+      || Object.keys(expected).length !== Object.keys(options.checkpoint).length
+      || Object.keys(options.checkpoint).some(field => !CAPTURES.includes(field) || !Array.isArray(expected[field]) || !expected[field].every(validCapture)))) {
+    return failure('checkpoint-precondition-invalid');
+  }
   return mutate(options, store => {
     const address = resolveProject(store, options);
     const project = address && store.projects[address.key];
     const binding = project && project.bindings[options.id];
     if (!binding) return failure('not-bound');
+    // mutate has reread the actual store while holding its existing context mutex.
+    if (expected !== undefined && Object.keys(options.checkpoint).some(field => {
+      const current = binding.checkpoint[field] || [], prior = expected[field];
+      return current.length !== prior.length || current.some((capture, i) =>
+        ['text', 'source', 'hash', 'capturedAt', 'resolved'].some(key => capture[key] !== prior[i][key]));
+    })) return failure('checkpoint-conflict');
     const next = { ...binding.checkpoint };
     for (const [field, entries] of Object.entries(options.checkpoint)) {
       if (!CAPTURES.includes(field) || !Array.isArray(entries)) return failure('checkpoint-invalid');

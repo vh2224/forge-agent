@@ -742,6 +742,39 @@ function readOwnerRecord(options) {
     return value === null ? { status: 'absent' } : { status: 'valid', record: value, sha256: require('./forge-code-roots').digest(value) };
   } catch (e) { return { status: 'invalid', reason: codeOf(e) }; }
 }
+// This private path is deliberately outside ownerRecordFile's generic allowlist.
+function handoffBindingFile(p) { return path.join(p.directory, 'linked-task-bindings', 'handoff.json'); }
+function readHandoffBinding(options) {
+  try {
+    const binding = storedRecord(handoffBindingFile(timePaths(options)));
+    return binding === null ? { status: 'absent' } : { status: 'valid', binding };
+  } catch (e) { return { status: 'invalid', reason: codeOf(e) }; }
+}
+function publishLinkedTaskHandoff(options) {
+  if (['record', 'build', 'anchor', 'binding', 'proof'].some(k => Object.hasOwn(options, k))) fail('time-record-invalid');
+  return withWriter(options, p => {
+    activeContract(options);
+    const lifecycle = require('./forge-linked-task-start'), { digest } = require('./forge-code-roots');
+    // No caller record, proof or builder can mint this binding: derive again here.
+    const derived = lifecycle.deriveHandoffSnapshot({ ...options, cwd: p.owner });
+    const file = ownerRecordFile(p, 'linked-task/handoff.json'), previous = storedRecord(file);
+    const bindingFile = handoffBindingFile(p), priorBinding = storedRecord(bindingFile);
+    if (options.expected_snapshot_sha256 !== undefined && options.expected_snapshot_sha256 !== digest(lifecycle.handoffSourceProjection(derived))) fail('time-record-conflict');
+    let record = derived;
+    if (priorBinding) {
+      if (!exact(priorBinding, ['schema_version', 'kind', 'milestone', 'task_id', 'handoff_sha256', 'handoff']) || priorBinding.schema_version !== 1
+          || priorBinding.kind !== 'forge-linked-task-handoff-binding' || priorBinding.milestone !== options.milestone
+          || priorBinding.task_id !== derived.task_id || !lifecycle.handoffBindingMatches(priorBinding, priorBinding.handoff)
+          || !same(lifecycle.handoffSourceProjection(priorBinding.handoff), lifecycle.handoffSourceProjection(derived))) fail('time-record-conflict');
+      record = priorBinding.handoff;
+      if (previous && !same(previous, record)) fail('time-record-conflict');
+    } else if (previous) fail('time-record-invalid'); // Never retroactively bless an unbound public record.
+    else publishRecordFile(p, bindingFile, recordValue({ schema_version: 1, kind: 'forge-linked-task-handoff-binding', milestone: options.milestone,
+      task_id: record.task_id, handoff_sha256: digest(record), handoff: record }));
+    try { return { ...publishRecordFile(p, file, record), path: 'linked-task/handoff.json' }; }
+    catch (error) { error.published = true; throw error; }
+  });
+}
 // Anchored endpoint publication (S03/T02): the one place that writes an immutable anchor
 // below endpoint-anchors/<record sha>.json. The anchor path is outside the generic
 // allowlist, so publishOwnerRecord can never mint it. options.build runs INSIDE the single
@@ -893,6 +926,6 @@ module.exports = { SCHEMA_VERSION, ENDPOINT_ITEMS, ITEM_STATES, AMENDMENT_KINDS,
   timePaths, readContract, validateContract, createDecisionAuthority, activateContract, amendContract, appendJournal, readJournal,
   recordWarning, listWarnings, recordCheckpoint, readCheckpoints, readObservations, readCoverage, recordWorkerEvidence,
   recordEnrollment, readEnrollment, recordOptions, readOptions, listOptions, recordSelection, readSelection, verifyDecision,
-  recordDelegatedAllocation, roadmapIdentity, OWNER_RECORD_PATHS, publishOwnerRecord, readOwnerRecord, publishAnchoredEndpoint, readEndpointAnchor, readEndpointSnapshot, listOwnerRecords,
+  recordDelegatedAllocation, roadmapIdentity, OWNER_RECORD_PATHS, publishOwnerRecord, readOwnerRecord, publishLinkedTaskHandoff, readHandoffBinding, publishAnchoredEndpoint, readEndpointAnchor, readEndpointSnapshot, listOwnerRecords,
   appendOwnerJournal, readOwnerJournal, publishTaskLink, readTaskLink, main };
 if (require.main === module) process.exitCode = main();

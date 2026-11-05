@@ -131,7 +131,8 @@ const UNPARSEABLE_REASONS = ['json-parse-failed', 'read-failed'];
  * This returns both halves. `listAll` stays byte-compatible as a wrapper over `parsed`: additive by
  * READING, no migration, no SCHEMA-VERSION bump, every existing caller unchanged.
  */
-function listAllDetailed(cwd) {
+function listAllDetailed(cwd, limits) {
+  if (limits) return boundedCensus(cwd, limits);
   const dir = runsDir(cwd);
   if (!fs.existsSync(dir)) return { parsed: [], unparseable: [] };
   const parsed = [];
@@ -153,6 +154,50 @@ function listAllDetailed(cwd) {
     }
   }
   return { parsed, unparseable };
+}
+
+// Ownership callers must bound the directory and every entry before payload I/O.
+function boundedCensus(cwd, { maxRuns = 512, maxBytes = 64 * 1024 } = {}) {
+  const dir = runsDir(cwd), parsed = [], unparseable = [];
+  const unsafe = () => ({ parsed: [], unparseable: [{ reason: 'unsafe-registry' }] });
+  if (!Number.isSafeInteger(maxRuns) || maxRuns < 1 || maxRuns > 512 || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 64 * 1024) return unsafe();
+  let handle;
+  try {
+    const directory = fs.lstatSync(dir);
+    if (!directory.isDirectory() || directory.isSymbolicLink()) return unsafe();
+    handle = fs.opendirSync(dir);
+    const rows = []; let entry;
+    while ((entry = handle.readSync())) {
+      if (!entry.name.endsWith('.json')) continue;
+      if (rows.length >= maxRuns) return unsafe();
+      const file = path.join(dir, entry.name), stat = fs.lstatSync(file);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maxBytes) return unsafe();
+      rows.push({ file, stat, id: path.basename(entry.name, '.json') });
+    }
+    const stable = (a, b) => b.isFile() && !b.isSymbolicLink() && ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'].every(k => a[k] === b[k]);
+    for (const row of rows) if (!stable(row.stat, fs.lstatSync(row.file))) return unsafe();
+    for (const row of rows) {
+      if (!stable(row.stat, fs.lstatSync(row.file))) return unsafe();
+      const io = Object.create(fs);
+      io.openSync = file => {
+        if (!stable(row.stat, fs.lstatSync(file))) throw new Error('unstable registry entry');
+        return fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0) | (fs.constants.O_NOFOLLOW || 0));
+      };
+      io.fstatSync = fd => {
+        const stat = fs.fstatSync(fd);
+        if (!stable(row.stat, stat)) throw new Error('unstable registry entry');
+        return stat;
+      };
+      const read = require('./forge-autonomy-sources').readBoundedStableFile(row.file, maxBytes, { io, expectedReal: fs.realpathSync.native(row.file) });
+      if (read.error || !stable(row.stat, fs.lstatSync(row.file))) return unsafe();
+      try { parsed.push(withAddressDefaults(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(read.buffer)))); }
+      catch { unparseable.push({ id: row.id, reason: 'json-parse-failed' }); }
+    }
+    const after = fs.lstatSync(dir);
+    if (!after.isDirectory() || after.isSymbolicLink() || ['dev', 'ino', 'mtimeMs', 'ctimeMs'].some(k => directory[k] !== after[k])) return unsafe();
+    return { parsed, unparseable };
+  } catch (e) { return e.code === 'ENOENT' && !handle ? { parsed, unparseable } : unsafe(); }
+  finally { if (handle) handle.closeSync(); }
 }
 
 function listAll(cwd) {
@@ -208,12 +253,29 @@ function withRunLock(cwd, id, fn) {
   try { return fn(); } finally { handle.release(); }
 }
 
-function add(cwd, record) {
+const registryGuards = new WeakMap(), heldRegistries = new Set();
+function registryKey(cwd) {
+  const actual = fs.realpathSync.native(cwd);
+  return process.platform === 'win32' ? actual.toLowerCase() : actual;
+}
+function withRegistryFence(cwd, callback, guard) {
+  const key = registryKey(cwd);
+  const held = guard && registryGuards.get(guard);
+  if (held && held.key === key && lock.assertOwned(held.handle)) return callback(guard);
+  if (heldRegistries.has(key)) throw Object.assign(new Error('run ownership transfer in progress'), { code: 'EOWNERSHIPBUSY' });
+  const handle = lock.acquireProcessSync(cwd, 'runs-ownership', { retries: 1 });
+  const token = Object.freeze({}); registryGuards.set(token, { key, handle }); heldRegistries.add(key);
+  try { return callback(token); }
+  finally { registryGuards.delete(token); heldRegistries.delete(key); handle.release(); }
+}
+
+function add(cwd, record, guard) {
   if (!record || !record.id || !record.kind || (!record.session_id && !record.session)) {
     throw new Error('forge-runs.add: record requires id, kind and session_id or session');
   }
+  if (!fs.existsSync(path.join(cwd, '.gsd'))) ensureRunsDir(cwd);
+  return withRegistryFence(cwd, () => withRunLock(cwd, record.id, () => {
   ensureRunsDir(cwd);
-  return withRunLock(cwd, record.id, () => {
   const now = Date.now();
   const supplied = normalizeMetadataPatch(record);
   const full = Object.assign({}, supplied, {
@@ -264,18 +326,18 @@ function add(cwd, record) {
   writeAtomic(runFile(cwd, record.id), full);
   refreshLegacyAlias(cwd);
   return full;
-  });
+  }), guard);
 }
 
-function update(cwd, id, patch) {
-  return withRunLock(cwd, id, () => {
+function update(cwd, id, patch, guard) {
+  return withRegistryFence(cwd, () => withRunLock(cwd, id, () => {
     const current = get(cwd, id);
     if (!current) throw new Error(`forge-runs.update: run ${id} not found`);
     const next = Object.assign({}, current, normalizeMetadataPatch(patch));
     writeAtomic(runFile(cwd, id), next);
     refreshLegacyAlias(cwd);
     return next;
-  });
+  }), guard);
 }
 
 /**
@@ -300,11 +362,11 @@ function update(cwd, id, patch) {
  * anyway. The return shape is deliberately DIFFERENT from `update`'s (which
  * returns the record) so no caller can confuse the two.
  */
-function updateWith(cwd, id, mutator) {
+function updateWith(cwd, id, mutator, guard) {
   if (typeof mutator !== 'function') {
     throw new Error('forge-runs.updateWith: mutator must be a function');
   }
-  return withRunLock(cwd, id, () => {
+  return withRegistryFence(cwd, () => withRunLock(cwd, id, () => {
     const current = get(cwd, id);
     if (!current) throw new Error(`forge-runs.updateWith: run ${id} not found`);
     const patch = mutator(current);
@@ -313,15 +375,15 @@ function updateWith(cwd, id, mutator) {
     writeAtomic(runFile(cwd, id), next);
     refreshLegacyAlias(cwd);
     return { updated: true, record: next };
-  });
+  }), guard);
 }
 
-function remove(cwd, id) {
-  return withRunLock(cwd, id, () => {
+function remove(cwd, id, guard) {
+  return withRegistryFence(cwd, () => withRunLock(cwd, id, () => {
     const f = runFile(cwd, id);
     if (fs.existsSync(f)) fs.unlinkSync(f);
     refreshLegacyAlias(cwd);
-  });
+  }), guard);
 }
 
 function bumpHeartbeat(cwd, id, ts) {
@@ -595,7 +657,7 @@ Flags:
 if (require.main === module) cliMain();
 
 module.exports = {
-  listAll, listAllDetailed, listActive, get,
+  listAll, listAllDetailed, boundedCensus, withRegistryFence, listActive, get,
   add, update, updateWith, remove,
   bumpHeartbeat, cleanupStale,
   resolveBySessionId, oldestActive,
