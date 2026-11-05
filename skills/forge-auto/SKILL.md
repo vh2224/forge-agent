@@ -235,6 +235,33 @@ Mensagens das opções de prazo (pt-BR, uma decisão por rodada):
 - Nenhuma posição viável: `Nenhuma posição de prazo viável para {M}: {motivo}. Escolha, sem pré-seleção: teto próprio ({efeito}) ou seguir sem contrato ({efeito}). Decisão pendente: {ID}.`
 - Roadmap não conforme: `Roadmap de {M} não confere com o prazo escolhido ({código}): {motivo}. O loop parou e nada fora da escolha foi aceito.`
 - Escopo não alocado: `Escopo de {M} sem alocação de tempo ({código}): {itens}. Mudança de estrutura depois da escolha exige decisão explícita. Decisão pendente: {ID ou nenhuma}.`
+<!-- forge:linked-task:closure:start -->
+
+Task ligada e endpoint (S03; contrato canônico `shared/forge-milestone-time.md § Task ligada e endpoint (S03)`): só milestone com contrato; sem contrato, nada deste trecho se aplica e o loop segue igual. Este texto não concede autoridade: quem decide é o código citado no contrato.
+
+Decisão de prazo com task ligada: quando a opção escolhida traz task ligada autorizada (`create-and-start-after-proven-completion` ou `create-without-auto-start`), o mesmo `--decide` embutido do passo 4 também cria a task e devolve `linked_task {status, task_id, reason}`. `created`, `unchanged` e `resumed` seguem; `linked_task` `creation-pending` (saída 3) se resolve repetindo `--decide` pelo mesmo host que embute `main` com `liveAdapter.getDecisionHandle`. A repetição reatesta a mesma resposta persistida: não é consentimento novo nem pergunta nova. Outro status para e mostra o `reason`. A CLI avulsa `forge-linked-task.js --create` recusa com `linked-task-authorization-required` sem escrita. Com task ligada criada e `milestone_cleanup` igual a `archive` ou `delete`, avise sem alterar a preferência: `Aviso: milestone_cleanup={valor} move ou apaga as fontes de {M} antes do endpoint e impede a prova (endpoint-sources-missing); a task ligada {T} ficaria bloqueada. A preferência não foi alterada.`
+
+Fechamento com endpoint, nesta ordem e só nela:
+1. ACK real de `complete-milestone` pelo adaptador de loop (transação, resultado, fronteira e evento canônicos do controlador). SUMMARY, DELIVERY, ledger, checkbox, run inativo, claim liberado, seleção da task ou texto nunca são ACK nem endpoint.
+2. `node "$FORGE_SCRIPTS_DIR/forge-milestone-endpoint.js" --verify --cwd "$WORKING_DIR" --milestone "$RUN_ID" --json` (verificação nova do código integrado com os comandos derivados dos `verify:` declarados por raiz).
+3. `node "$FORGE_SCRIPTS_DIR/forge-milestone-endpoint.js" --record --cwd "$WORKING_DIR" --milestone "$RUN_ID" --json` (prova positiva; o relógio da milestone congela no endpoint).
+4. Com vínculo: `node "$FORGE_SCRIPTS_DIR/forge-linked-task-start.js" --handoff --cwd "$WORKING_DIR" --milestone "$RUN_ID" --json`.
+5. Em `create-and-start-after-proven-completion` (lifecycle `handoff-ready`): inicie a task por `/forge-task --resume {T}` ANTES da limpeza de isolamento da milestone; o worktree e a branch da milestone são a base `milestone-branch` do attach.
+6. Só depois do início real (lifecycle `started`) ou do encerramento explícito da cadeia roda a limpeza de isolamento da milestone.
+
+Recusa em 2, 3 ou 4 para a cadeia sem descongelar nada nem inventar prova. Com a cadeia bloqueada ou aguardando início explícito (lifecycle `blocked` ou `open`), a limpeza do worktree da milestone é adiada com motivo nomeado (`cadeia bloqueada: {código}` ou `aguardando início explícito da task ligada {T}`) até o início real ou o encerramento explícito da cadeia. `worktree_cleanup_on_complete` e `milestone_cleanup` não mudam e nenhum borrower falso é criado.
+
+Mensagens da cadeia (pt-BR, uma decisão por rodada):
+- Endpoint comprovado: `Endpoint de {M} comprovado: conclusão canônica e verificação nova do código integrado ({n} comandos aprovados). Relógio da milestone congelado no endpoint: {consumido} de {teto}.`
+- Endpoint não comprovado: `Endpoint de {M} não comprovado ({código}): {motivo}. O relógio não foi congelado e a task ligada {T} continua bloqueada. Decisão pendente: {ID ou nenhuma}.`
+- Relógio congelado: `Relógio de {M} congelado em {consumido} de {teto}; o tempo depois do endpoint não consome a milestone.`
+- Handoff: `Handoff de {M} para a task ligada {T} produzido. Próximo passo: {início encadeado agora | pedido explícito de início}.`
+- Início encadeado: `Início encadeado da task ligada {T} sobre a base {milestone-branch|integrated}. A limpeza de isolamento de {M} roda depois deste início.`
+- Cadeia bloqueada: `Cadeia {M} → {T} bloqueada: {motivo}. Limpeza do worktree de {M} adiada ({motivo nomeado}). Recomendo {alternativa} porque {motivo}. Opções, sem pré-seleção: estender a milestone por decisão explícita; encerrar a cadeia (linked-task:close-chain). Decisão pendente: {ID}.`
+
+Decisões da cadeia: início explícito (`linked-task:start`), encerramento da cadeia (`linked-task:close-chain`) e extensão da task (`linked-task:extend:<ms>`) só valem com resposta explícita persistida em `forge-pending-questions` (pergunta aberta por `prepareLinkedDecision` ou `prepareTaskExtension`, resposta gravada por `answerLinkedDecision` ou `answerTaskExtension`) e handle vivo do host (`liveAdapter.getDecisionHandle`, reatestado por `verifyDecision`). `--start`, `--continue`, `--close-chain` e `--extend` só rodam embutidos; a CLI avulsa recusa com `linked-task-authorization-required`, a decisão continua pendente e a chamada não é repetida com outros argumentos. Permissão permanente de routing ou de recovery, JSON importado, flag, SUMMARY, checkpoint, texto deste skill ou silêncio nunca respondem a essas decisões. Este texto distribui o procedimento; a execução pelo cliente instalado continua desconhecida.
+
+<!-- forge:linked-task:closure:end -->
 
 ## Bidirectional delivery
 
@@ -2291,6 +2318,10 @@ If NO alternative account is registered:
 
 **Fire push (call-site 3):** After printing the Final Report below, use Push helper with message `"Forge {RUN_ID} — milestone completa. {N} slices entregues."` (N = count of slices in the report table).
 
+<!-- forge:linked-task:cleanup-order:start -->
+Milestone com contrato e task ligada (§ Tempo da milestone, trecho Task ligada e endpoint): a limpeza de isolamento abaixo só roda depois de ACK real de `complete-milestone` → endpoint `--verify` → `--record` → `--handoff` → início da task por `/forge-task --resume {T}` (lifecycle `started`), ou depois do encerramento explícito da cadeia. Com a cadeia bloqueada ou aguardando início explícito, não rode a limpeza abaixo: ela fica adiada com o motivo nomeado no relatório (`Limpeza de isolamento de {M} adiada: {cadeia bloqueada: código | aguardando início explícito da task ligada {T}}.`) e volta a ser elegível no início real ou no encerramento explícito da cadeia. A política (`worktree_cleanup_on_complete`, `milestone_cleanup`) não muda. Milestone sem task ligada segue exatamente como abaixo.
+
+<!-- forge:linked-task:cleanup-order:end -->
 **Isolation cleanup** — runs ONLY here (milestone complete), never on pause/blocked/partial exits (the branch/worktree must survive for resume). No-op when `ISOLATION_MODE == shared`. In `branch` mode it checks the repo back out to the default branch (the `forge/{run}` branch is kept for PR/merge by the operator). In `worktree` mode it removes the worktree only if `worktree_cleanup_on_complete: true` in prefs:
 
 ```bash

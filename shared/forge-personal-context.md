@@ -127,3 +127,30 @@ Low-level runs, locks, reaper and census remain global for workspace coordinatio
 `forge-status --scope workspace` explicitly requests the old global diagnostic view;
 it neither establishes ownership nor supplies implicit personal candidates.
 This isolates operational context, not filesystem access or simultaneous editing rights.
+
+## Task ligada (S03)
+
+Contrato canônico: `shared/forge-milestone-time.md § Task ligada e endpoint (S03)`.
+
+- Pendência da task ligada: a criação na gravação da seleção atestada faz o vínculo
+  pessoal `create` e captura `pending` com fonte no `link.json` ("aguardando a conclusão
+  comprovada da milestone"). A task aparece no resumo e no status como pendência protegida.
+- Não seleção antes da prova: enquanto a predecessora não é comprovada (endpoint positivo
+  e handoff), a task nunca é selecionada como trabalho aberto: `--select` e
+  `--resolve-args` só escolhem trabalho `open` atual, e pendência não é permissão de despacho.
+- Transições reais do ciclo, aplicadas só pela API do owner: handoff encadeado resolve a
+  pendência do vínculo e abre "início encadeado aguarda reatestação viva"; handoff sem
+  início automático resolve a pendência e deixa a próxima ação "pedir explicitamente o
+  início (`linked-task:start`); nada começa sozinho"; o início (`start.json`) resolve as
+  pendências e a próxima ação passa a preparar o plano (sem PLAN, o estado continua
+  desconhecido, nunca `open` por inferência); o encerramento (`closure.json`) e o
+  encerramento da cadeia (`chain-closure.json`) gravam `lastResult` resolvido.
+- Bloqueada, no teto, em drain ou em checkpoint, a task ligada é trabalho protegido e a
+  decisão pendente aparece com ID estável.
+- Checkpoint, SUMMARY, handoff, resumo, texto de skill ou de contrato e JSON importado são
+  evidência, nunca consentimento. Início, encerramento da cadeia e extensão do horizonte
+  exigem resposta explícita persistida em `forge-pending-questions` e handle vivo conferido
+  por `verifyDecision`; permissão permanente de routing ou de recovery não responde a essas
+  perguntas.
+- Retomada explícita: `/forge-task --resume <T>` consulta o ciclo somente leitura antes do
+  `--bind --intent explicit-resume`; bloqueada, inválida ou com cadeia encerrada, para sem bind.

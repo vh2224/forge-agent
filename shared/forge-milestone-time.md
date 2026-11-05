@@ -29,7 +29,9 @@ costuras de `forge-orchestrate.js`, `forge-loop-controller.js`,
 - Leitores (`readContract`, `readJournal`, `listWarnings`, `readCheckpoints`,
   `readObservations`, `readCoverage`, `readClock`, `readForecast`, `readTimeStatus`)
   são limitados, recusam links e nunca carregam o lock. Importar os módulos é inerte.
-- Só milestones; `time-work-kind-unsupported` para task avulsa. Milestone com
+- Só milestones, exceto os registros da task ligada (§ Task ligada e endpoint (S03)),
+  que vivem sob a milestone dona do vínculo; `time-work-kind-unsupported` para task
+  avulsa, que continua sem orçamento de tempo próprio. Milestone com
   roadmap já existente fica fora do fluxo de ativação (`time-contract-roadmap-exists`).
 
 ## Schema
@@ -330,6 +332,215 @@ rodadas, decisão, bloco de prompt, regra do roadmap, projeção de vínculo e r
   (até 64 fontes, 2 MiB por fonte) e sem truncamento silencioso.
 - Milestones sem adesão ou com roadmap existente ficam fora do fluxo; painel, dashboard,
   statusline e app não ganham campos de tempo.
+
+## Task ligada e endpoint (S03)
+
+Módulos: `scripts/forge-linked-task.js` (vínculo, índice e criação),
+`scripts/forge-milestone-endpoint.js` (verificação nova, prova e registro do endpoint),
+`scripts/forge-linked-task-start.js` (predecessora, handoff, início, continuação e
+encerramentos) e `scripts/forge-linked-task-horizon.js` (relógio, admissão, drain,
+checkpoint, extensão e cadeia), mais as costuras de `forge-milestone-time-admission.js`,
+`forge-unit-sidecar.js`, `forge-task-preparation.js`, `forge-xllm.js`, `forge-status.js`
+e `forge-personal-summary.js`. Só milestone com contrato e opção com task ligada usa
+esta seção; task sem vínculo e milestone sem contrato não leem estado de tempo e
+ficam byte a byte iguais. Texto de skill ou deste contrato não concede autoridade.
+
+### Armazenamento e índice
+
+- Registros do vínculo em `.gsd/forge/time/<M>/linked-task/` do owner físico: `link.json`,
+  `handoff.json`, `start.json` (com a testemunha `start-witness.json`), `chain-closure.json`,
+  `closure.json`, `journal.jsonl`, `checkpoints/<versão>.json` e `extensions/<nnnn>.json`.
+  O endpoint fica em `.gsd/forge/time/<M>/endpoint.json`, com âncora e retrato próprios.
+- Índice reverso `.gsd/forge/time-links/<T>.json`: é o marcador autoritativo. O
+  frontmatter `linked_milestone`, `linked_link_sha256` e `linked_authorization` do BRIEF é
+  verificação cruzada; índice sem link, link sem índice, marcador divergente ou BRIEF sem
+  marcador com índice falham fechado (`linked-task-link-invalid` ou `linked-task-link-missing`),
+  nunca viram task sem vínculo.
+- Só o owner escreve, pela API genérica de registros de `forge-milestone-time.js` (lock do
+  owner, publicação exclusiva imutável, sem link, sem criar `.gsd`, `isPublicData`) e só com
+  contrato ativo. Escritas da milestone usam `ownerBoundary`; escritas da task ficam entre
+  janelas protegidas. Leitores são limitados e nunca lançam.
+
+### Schemas
+
+`shared/schemas/forge-linked-task.schema.json` (link e índice),
+`shared/schemas/forge-milestone-endpoint.schema.json` (endpoint),
+`shared/schemas/forge-linked-task-handoff.schema.json` (handoff, start, testemunha,
+encerramentos) e `shared/schemas/forge-linked-task-horizon.schema.json` (journal,
+checkpoint e extensão). Ordem de chaves exata; campo extra, absoluto, credencial,
+sessão bruta ou marcador DATA/forge-procedure recusa.
+
+### Criação na gravação da seleção
+
+- `create-and-start-after-proven-completion` e `create-without-auto-start` criam a task;
+  `none`, `no-contract` e opção sem task ligada nunca criam nada.
+- A criação roda no `main --decide` embutido de `forge-milestone-time-selection.js`, logo
+  depois de `decide` e com o mesmo adaptador vivo, com handle novo para a decisão
+  `linked-task` persistida, verificado antes e dentro de `ownerBoundary`. `decide()` não muda.
+- Ordem idempotente: link (chave e ID persistidos) → índice → BRIEF determinístico → run
+  inativo → vínculo pessoal `create` → checkpoint pendente com fonte no link. O resultado
+  sai em `linked_task {status, task_id, reason}`: `created`, `unchanged` ou `resumed`
+  seguem; `creation-pending` se resolve repetindo `--decide` pelo host que embute `main`
+  com `liveAdapter.getDecisionHandle`. A repetição reatesta a mesma resposta persistida;
+  não é consentimento novo nem pergunta nova. A CLI avulsa (`forge-linked-task.js --create`)
+  recusa com `linked-task-authorization-required` sem escrita.
+- A task criada fica visível como pendência pessoal (`pending`) e nunca é selecionada antes
+  da prova da predecessora.
+
+### Endpoint comprovado e congelamento
+
+- Endpoint = conclusão canônica de `complete-milestone` (transação, resultado, fronteira e
+  evento do controlador), entrega da milestone reconstruída com o histórico completo dos
+  filhos, slices revisadas, nenhuma pergunta funcional pendente e verificação NOVA do código
+  integrado cobrindo a união das escritas declaradas. SUMMARY, ledger, DELIVERY, checkbox,
+  run inativo, claim liberado, checkpoint por teto ou texto isolados nunca bastam.
+- Ordem no fechamento: ACK real de `complete-milestone` → `forge-milestone-endpoint.js --verify`
+  (envelopes novos `<M>-ENDPOINT-VERIFICATION-<root>-ENVELOPE.json` com comandos derivados da
+  união deduplicada dos `verify:` por raiz) → `--record` (prova positiva e `endpoint.json`
+  imutável). Sem `execution_contract` ou sem comando: `endpoint-verification-unavailable`.
+- Os filhos são agregados historicamente e nunca comparados com as fontes atuais (sem o
+  deadlock do modo estrito); a deriva posterior do escopo do endpoint é recusada.
+- Com `endpoint.json` válido o consumo da milestone congela no endpoint, com ou sem task
+  ligada: estado `endpoint-proven`, saldo pelo consumo congelado e `horizon.endpoint_proof`.
+  Extensão não reabre. Registro adulterado deixa o relógio desconhecido. Begin, reentrada e
+  entrada de transporte novos da milestone recusam com `milestone-endpoint-closed`.
+
+### Prova da predecessora
+
+Predecessora comprovada = vínculo íntegro, criação completa, endpoint válido na cadeia
+atual do contrato (depois dele só extensões atestadas), relógio congelado nesse endpoint,
+estado de orçamento fora de `exhausted`, `draining` e `checkpointed` e nenhuma cadeia
+encerrada. Motivos: `endpoint-unproven`, `milestone-budget-exhausted`,
+`milestone-budget-draining`, `milestone-budget-checkpointed` e `creation-pending`, sempre
+com as alternativas (estender a milestone por decisão explícita ou encerrar a cadeia).
+
+### Handoff, início, continuação e tipos de base
+
+- Estados do ciclo (`forge-linked-task-start.js --status`, leitura pura): `blocked`,
+  `handoff-ready` (encadeado), `open` (sem início automático), `started`, `closed`,
+  `chain-closed` e `invalid`; task sem vínculo devolve `null` sem ler estado de tempo.
+- Handoff: produzido pelo owner no fechamento (`--handoff`), limitado (16 KiB), saneado,
+  emoldurado como dado e ligado ao link, ao endpoint, ao SUMMARY, à entrega, ao roadmap,
+  às decisões, ao escopo movido, aos critérios, aos gates e aos relógios.
+- Início (`--start`): só pelo host que embute `main(argv, io, liveAdapter)` com
+  `liveAdapter.getDecisionHandle`. No encadeado, a decisão `linked-task` original é
+  reatestada ao vivo, sem pergunta redundante; em `create-without-auto-start`, só uma
+  decisão explícita `linked-task:start` persistida em `forge-pending-questions` (pergunta
+  canônica aberta por `prepareLinkedDecision`, resposta gravada por `answerLinkedDecision`).
+  A CLI avulsa recusa com `linked-task-authorization-required` antes de qualquer leitura.
+- Base comprovada antes de consumir: `milestone-branch` (attach canônico ao run da milestone,
+  HEAD igual à revisão do endpoint e mesma branch) ou `integrated` (HEAD igual ao commit do
+  alvo informado e escopo do endpoint com conteúdo idêntico; ancestralidade só registrada,
+  o que cobre squash). Escopo sujo, deriva (`linked-task-base-drift`) e base não comprovada
+  (`linked-task-base-unproven`) recusam sem apagar histórico nem descongelar.
+- Ordem do início: seção do BRIEF → resolução pessoal → ativação do run → testemunha →
+  `start.json` por último. Segundo início recusa (`linked-task-already-started`).
+- Continuação (`--continue`, embutida): reatesta sem escrever depois de reinício.
+
+### Consumo no BRIEF e nos prompts
+
+O início acrescenta ao BRIEF exatamente um bloco entre `<!-- forge:linked-handoff:start -->`
+e `<!-- forge:linked-handoff:end -->`, validado contra vínculo, handoff, endpoint e
+`start.json`. A preparação injeta o bloco consumido (`consumedHandoffBlock`) exatamente uma
+vez em cada uma das quatro fases (brainstorm, discuss, research e plan), sem duplicar quando
+o BRIEF já o traz; BRIEF, handoff ou start alterados recusam. Sem vínculo, prompt, pedido,
+fingerprint e resultado ficam iguais.
+
+### Horizontes e tetos
+
+- Teto da milestone governa as operações da milestone; teto da task (horizonte do vínculo
+  mais extensões atestadas) governa as operações da task; o teto da cadeia é soma derivada
+  (`cap_basis: derived-sum`, `governs: false`) e não governa nenhuma operação.
+- Política `forge-linked-task-clock` v1: a tabela de consumo da S01 aplicada às fontes da
+  task, do `start.json` ao `closure.json`; espera com fonte e pausa não consomem;
+  desconhecido consome e aparece como desconhecido, nunca como zero. Nenhum saldo vira
+  timeout de worker.
+
+### Códigos de admissão e transporte
+
+- `TRANSPORT_REFUSAL_CODES` (`forge-milestone-time-admission.js`): os quatro códigos de
+  orçamento da milestone (`milestone-budget-exhausted`, `milestone-budget-draining`,
+  `milestone-time-invalid` e `milestone-clock-unknown`), `milestone-endpoint-closed` e os códigos da task
+  (`LINKED_TASK_TRANSPORT_CODES`): `predecessor-incomplete`, `linked-task-not-started`,
+  `linked-task-budget-exhausted`, `linked-task-budget-draining`, `linked-task-time-invalid`,
+  `linked-task-clock-unknown`, `linked-task-chain-closed` e `linked-task-closed`.
+- Admissão em toda entrada real de provider da task: preparação (depois do replay `ready`,
+  antes da rota), execução, sidecar de unidade, closures nativos, recovery, resume e pernas
+  de revisão. Pedido `standalone-task` sem contexto delega ao horizonte com a unidade
+  `<tipo>/<task>`; o contexto `{cwd, task, unit}` aceita exatamente uma das chaves
+  `milestone` ou `task`. Recusa = parada antes do provider com `provider_called:false`,
+  estágio `linked-task-admission` e camada `milestone-time-admission`, sem retry, fallback
+  ou outro candidato.
+- Precheck: `forge-linked-task-horizon.js --admit --cwd <owner> --task <T> --unit <tipo>/<T> --json`
+  sai 0 admitido e 3 recusado; ele só antecipa a recusa, a guarda fica no transporte.
+- Pernas externas de revisão de task ligada: trio exclusivo `--budget-owner`,
+  `--budget-task` e `--budget-unit` com a unidade `execute-task/<T>`
+  (`shared/forge-review.md`); misturar com
+  `--budget-milestone` é contexto inválido (`milestone-time-invalid`). Task sem vínculo
+  continua com contexto vazio.
+
+### Drain, checkpoint e extensão
+
+- No teto da task, trabalho novo é bloqueado e writers saudáveis terminam pela própria
+  vigilância: sem kill, roubo de lease ou release de claim. `--inspect-drain` e
+  `--checkpoint` usam os adaptadores vivos do host (`inspectAttempt`, `processProbe`);
+  drain incompleto não grava nada. O checkpoint imutável traz o estouro e a decisão
+  pendente: estender o horizonte da task ou encerrar a cadeia.
+- Extensão: só a resposta explícita persistida `linked-task:extend:<ms>` (pergunta aberta por
+  `prepareTaskExtension`, resposta por `answerTaskExtension`) mais handle vivo novo
+  reatestado por `verifyDecision` dentro da fronteira de publicação (`--extend --ceiling-ms`
+  embutido). Permissão permanente de routing não é consentimento de extensão.
+
+### Encerramento da task e da cadeia
+
+- Encerramento da task (`--close`, ação do owner): depois da entrega canônica verificada da
+  task (DELIVERY reconstruído, todos os critérios verificados) e de toda limpeza que usa
+  provider; antes de arquivar ou apagar os artefatos da task. Grava `closure.json` e fecha o
+  relógio da task. SUMMARY sozinho não encerra (`linked-task-delivery-unproven`).
+- Encerramento da cadeia (`--close-chain`, embutido): só com a resposta explícita
+  `linked-task:close-chain` e handle vivo; revoga início e continuação.
+
+### Superfícies
+
+`forge-status` (escopos pessoal, inspeção e workspace) acrescenta o bloco fechado `linked`
+às works de task ligada e as chaves `task` e `chain` ao bloco `time` da milestone ligada;
+`forge-orchestrate status` e `forge-personal-summary` (4096 bytes) mostram o mesmo bloco.
+Task ligada bloqueada, no teto, em drain ou em checkpoint é trabalho protegido. A skill
+`forge-status` repassa verbatim e não infere decisão; `forge-auto`, `forge-next` e
+`forge-task` trazem as mensagens da cadeia. Works sem vínculo ficam iguais.
+
+### CLIs
+
+- `node scripts/forge-linked-task.js --status --milestone <M> | --task <T> | --create --milestone <M>`, sempre com `--cwd <owner>` e `--json`.
+- `node scripts/forge-milestone-endpoint.js --verify|--prove|--record|--show --cwd <owner> --milestone <M> [--timeout-ms <ms>] --json`.
+- `node scripts/forge-linked-task-start.js --status|--handoff|--close` (owner) e `--start|--continue|--close-chain` (só embutidos com adaptador vivo), com `--cwd <owner> --task <T>` (`--handoff` também com `--milestone <M>`), `--code-dir <dir>` ou `--root <id>=<dir>`, `--base-kind milestone-branch|integrated`, `--base-target <ref>` ou `--target <id>=<ref>`, `--isolation-mode`, `--attached-to <M>` e `--json`.
+- `node scripts/forge-linked-task-horizon.js --status|--admit --unit <tipo/T>|--presence|--wait-start|--wait-end|--inspect-drain|--checkpoint` e `--extend --ceiling-ms <ms>` (só embutido), com `--cwd <owner> --task <T>` e `--json`.
+- Saída 0 sucesso, 2 uso, 3 recusa. A recusa da CLI avulsa numa ação viva é o comportamento correto: a decisão continua pendente e a chamada não é repetida com outros argumentos.
+
+### Limites da S03
+
+- Adaptador vivo embutido obrigatório para decisões e início: sem ele, criação, início,
+  continuação, encerramento da cadeia e extensão ficam pendentes, nunca fabricados.
+- A guarda de transporte não reatesta autoridade ao vivo: ela confere os registros
+  imutáveis (start, horizonte) antes do provider; a autoridade foi reatestada no início.
+- Pernas de revisão sem contexto real de task ligada não têm a garantia do horizonte;
+  isso é declarado, não suposto.
+- `milestone_cleanup` `archive` ou `delete` antes do endpoint move ou apaga as fontes da
+  milestone e impede a prova (`endpoint-sources-missing`); o skill avisa na decisão de prazo
+  e não altera a preferência.
+- Filhos de lote nativo não são observáveis pelo drain e ficam desconhecidos.
+
+### Disponibilidade da S03
+
+- Implementado e testado offline: vínculo, criação, endpoint, congelamento, predecessora,
+  handoff, início, continuação, base, horizonte, admissão, guardas, drain, checkpoint,
+  extensão, encerramentos e superfícies (suítes com transportes simulados).
+- Distribuído: este contrato e as skills `forge-task`, `forge-auto`, `forge-next` e
+  `forge-status`, pelos renderers Claude e Codex.
+- Condicional: decisões e início dependem do adaptador vivo embutido pelo host; a garantia
+  das pernas de revisão depende do contexto real; o drain depende das sondas vivas.
+- Desconhecido: execução e compreensão pelo cliente instalado, instalação e aceite humano.
+  Projeção e distribuição não demonstram execução no cliente.
 
 ## Limites
 

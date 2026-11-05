@@ -25,6 +25,11 @@ lendo só `empty_reason` de `node "$FORGE_SCRIPTS_DIR/forge-agent-view.js" --per
 (por exemplo `no-bindings`); nunca liste agentes de outro trabalho, do ledger da
 equipe ou de `--scope workspace` no lugar da vista pessoal.
 O bloco de tempo da milestone vem do `forge-status.js` (contrato em `shared/forge-milestone-time.md`, no repositório ou em `${FORGE_HOME:-~/.forge-agent}/shared`), é repassado verbatim e nenhuma decisão de extensão, redução ou continuação é inferida dele.
+<!-- forge:linked-task:status:start -->
+Task ligada (S03; `shared/forge-milestone-time.md § Task ligada e endpoint (S03)`): o bloco `linked` de cada task ligada (`lifecycle`, `task`, `milestone`, `chain`, `decision_pending` e `unknown`) e os horizontes `task` e `chain` do bloco de tempo da milestone ligada vêm do `forge-status.js` e são repassados verbatim.
+O teto da task governa as operações da task, o da milestone governa as da milestone e o teto da cadeia é soma derivada que não governa nada (`governs: false`); previsão nunca vira teto. Valor sem fonte continua desconhecido, nunca zero.
+Nenhuma decisão de início, de encerramento da cadeia ou de extensão do horizonte é inferida desse bloco, e task sem vínculo não ganha campo novo.
+<!-- forge:linked-task:status:end -->
 Default is personal; ID is explicit inspection without
 binding; `--scope workspace` is an explicitly requested global diagnostic.
 Do not append team ledger/activities to personal output or infer completion from

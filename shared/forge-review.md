@@ -97,6 +97,44 @@ Recusa de tempo (`reason_code` `milestone-budget-exhausted`, `milestone-budget-d
 não é indisponibilidade de revisor: não há retry, não há fallback para outro revisor
 ou família e não se escreve `{S##}-REVIEW.md` limpo nem mínimo. O gate devolve a
 recusa à parada de tempo do chamador e a decisão pendente segue o contrato de tempo.
+<!-- forge:linked-task:review-budget:start -->
+
+Task ligada (S03, `shared/forge-milestone-time.md § Task ligada e endpoint (S03)`): é a
+única exceção ao contexto vazio da task avulsa. Na revisão de task ligada iniciada, o
+chamador define `LINKED_TASK_ID` com o ID da task e `BUDGET_UNIT=execute-task/{TASK_ID}`,
+com `MILESTONE_ID` vazio, e o contexto das pernas externas passa a ser o trio exclusivo
+`--budget-owner`, `--budget-task` e `--budget-unit` do adaptador de revisão (identidade
+`{cwd, task, unit}`, com o owner físico `WORKING_DIR`, nunca `CODE_DIR`). Rode este bloco
+logo depois do bloco acima; task sem vínculo deixa `LINKED_TASK_ID` vazio e continua com o
+contexto vazio, sem campo novo e com a saída de antes:
+```bash
+if [ -n "${LINKED_TASK_ID:-}" ]; then
+  if [ -n "$MILESTONE_ID" ]; then
+    echo "Contexto de orçamento misto (milestone e task ligada): recusado antes de qualquer perna." >&2
+    exit 2
+  fi
+  BUDGET_ARGS=()
+  [ -n "$BUDGET_UNIT" ] && BUDGET_ARGS=(--budget-owner "$WORKING_DIR" --budget-task "$LINKED_TASK_ID" --budget-unit "$BUDGET_UNIT")
+fi
+```
+Milestone e task ligada nunca se misturam: o bloco para antes de qualquer perna e o
+adaptador também recusa `--budget-task` junto de `--budget-milestone` como contexto
+inválido (`milestone-time-invalid`, saída 2, `provider_called:false`), antes de qualquer
+transporte. Na revisão de task ligada vale a mesma regra de recusa de tempo para toda
+recusa exportada em `TRANSPORT_REFUSAL_CODES` de `scripts/forge-milestone-time-admission.js`:
+`milestone-budget-exhausted`, `milestone-budget-draining`, `milestone-time-invalid`,
+`milestone-clock-unknown`, `milestone-endpoint-closed`, `predecessor-incomplete`,
+`linked-task-not-started`, `linked-task-budget-exhausted`, `linked-task-budget-draining`,
+`linked-task-time-invalid`, `linked-task-clock-unknown`, `linked-task-chain-closed` e
+`linked-task-closed`. A perna sai com código 2 e `provider_called:false`: é parada antes do
+provider, nunca indisponibilidade de revisor, nunca retry nem fallback para outro revisor
+ou família, nunca evento `worker-engine-fallback` e nunca `{TASK_ID}-REVIEW.md` limpo nem
+mínimo. A pendência volta ao horizonte da task (`skills/forge-task/SKILL.md`, revisão de
+task ligada). Perna sem esse contexto real não tem a garantia do horizonte; isso é
+declarado, não suposto. Este texto distribui o contrato; a execução e a compreensão pelo
+cliente instalado continuam desconhecidas.
+
+<!-- forge:linked-task:review-budget:end -->
 
 ## Step 0 — Read review prefs (via the canonical prefs CLI)
 

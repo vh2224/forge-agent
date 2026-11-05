@@ -3179,3 +3179,26 @@ unidade. O precheck `forge-milestone-time-admission.js --admit-transport` só
 antecipa a recusa; ele não é a garantia. Task avulsa não recebe contexto de
 milestone. A guarda vale nos adaptadores e callbacks do Forge e não intercepta
 chamada bruta arbitrária do host.
+<!-- forge:linked-task:dispatch-budget:start -->
+
+Task ligada (S03; `shared/forge-milestone-time.md § Task ligada e endpoint (S03)`): a
+requisição `standalone-task` de task ligada continua sem contexto de milestone; o sidecar
+de unidade, os closures nativos, o recovery e a preparação delegam ao horizonte da task
+com a unidade `<tipo>/<task>`. As pernas externas de revisão de task ligada recebem o trio
+exclusivo `--budget-owner`, `--budget-task` e `--budget-unit` (identidade
+`{cwd, task, unit}`, unidade `execute-task/{TASK_ID}`), montado pelo bloco ligado de
+`BUDGET_ARGS` em `shared/forge-review.md`; não há segundo modelo de autorização aqui.
+Misturar `--budget-task` com `--budget-milestone` é contexto inválido e recusa com
+`milestone-time-invalid` antes de qualquer transporte. Task sem vínculo continua com
+contexto vazio e a saída de antes. Toda recusa exportada em `TRANSPORT_REFUSAL_CODES`
+(`milestone-budget-exhausted`, `milestone-budget-draining`, `milestone-time-invalid`,
+`milestone-clock-unknown`, `milestone-endpoint-closed`, `predecessor-incomplete`,
+`linked-task-not-started`, `linked-task-budget-exhausted`, `linked-task-budget-draining`,
+`linked-task-time-invalid`, `linked-task-clock-unknown`, `linked-task-chain-closed`,
+`linked-task-closed`) é parada antes do provider com `provider_called:false`: nunca
+indisponibilidade de revisor, nunca retry, fallback de engine ou de revisor, evento
+`worker-engine-fallback` nem REVIEW limpo. Perna sem esse contexto real não tem a
+garantia do horizonte. Este texto distribui o contrato; ele não demonstra execução nem
+compreensão no cliente instalado, que continuam desconhecidas.
+
+<!-- forge:linked-task:dispatch-budget:end -->

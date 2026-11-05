@@ -86,6 +86,121 @@ const smokeStart = smoke.indexOf('// ── Section 61:');
 const smokeEnd = smoke.indexOf('// ── Section 62:', smokeStart);
 const section61 = smoke.slice(smokeStart, smokeEnd);
 const t07Labels = [];
+// S03/T06 attribution. T06 adds its linked-task text to the ten declared paths only inside
+// whole-line `<!-- forge:linked-task:<id>:start -->` … `:end -->` blocks. The S02 pins,
+// samples and frozen sources below are NOT re-pinned here (T07 owns that): they are
+// compared after removing exactly those blocks from the declared files, which proves that
+// every other distributed byte still equals the owner baseline. The raw drift itself is
+// measured and named by the T06 group further down, never hidden.
+const T06_DECLARED = Object.freeze(['skills/forge-task/SKILL.md', 'skills/forge-auto/SKILL.md', 'skills/forge-next/SKILL.md',
+  'skills/forge-status/SKILL.md', 'shared/forge-milestone-time.md', 'shared/forge-task-preparation.md', 'shared/forge-personal-context.md',
+  'shared/forge-review.md', 'shared/forge-dispatch.md', 'scripts/forge-communication-surfaces.test.js']);
+const LINKED_BLOCK_RE = /^<!-- forge:linked-task:([a-z0-9-]+):start -->\r?\n[\s\S]*?^<!-- forge:linked-task:\1:end -->\r?\n/gm;
+function withoutLinked(text) { return String(text).replace(LINKED_BLOCK_RE, ''); }
+function attributed(relative, content) { return T06_DECLARED.includes(relative) ? withoutLinked(content) : content; }
+function attributedBytes(relative, readRaw = rel => fs.readFileSync(path.join(root, rel))) {
+  const bytes = readRaw(relative);
+  return T06_DECLARED.includes(relative) ? Buffer.from(withoutLinked(bytes.toString('utf8')), 'utf8') : bytes;
+}
+// S03/T06-R1. Two genuine pin states are accepted, never a third value:
+// - attributed (before T07): each pin equals the measurement WITHOUT the linked blocks;
+// - raw re-pinned (T07): a pin equals the actual raw measurement of the current bytes.
+// In both states the attributed measurement must still equal the frozen pre-T06 values
+// below (the S02 pins measured at T06 start), so a raw re-pin can never hide a byte
+// changed outside the linked blocks. T07 owns the real pins; this suite writes none.
+const T06_ATTRIBUTED_PINS = Object.freeze({
+  agents: '64bbdc40320fe629f19c9e0ceb50256f03544d9d9b0385d416f1563b2abbd41a',
+  commands: 'e207fc1bebd540fc28426b6889a3336bd1c334566ead9212817a9be9affd37b6',
+  skills: '1309f02bb58b79d61ba0bb1e897cdee4d37c232f488e1548106d4a999e57d061',
+  'dispatch-templates': 'a304207c44a93bf68aa9fd220a888533d223c33a2ceea7e283154ef316f2a58e',
+  hooks: 'c149db9dd45bed13f05931987217d224a6f23d805dc6e8900e46b32893a41c48',
+  mcp: '462d2e1b8ad869aae1ec64cbd198dd176c0e648b4ff51199c8a120c272bed33a',
+  'claude-instructions': '90e7c3511e37a7ec6cd972c59572b4aeda2294621c0a7bce8d34aa3b935f6dbb',
+  'claude-settings': 'e0fcf0cb5eb91d88ed3363bdba5b41d231330b20289b98383284965c565d56e5',
+  configuration: 'c76a23d540a2602293ba45f8821419aa00d738eb08c538b85627596bcc560c3d',
+});
+// skills/forge-next/SKILL.md at T06 start (= its bytes without the linked blocks), the
+// source.sha256 the communication samples cite until T07 re-pins them to the raw bytes.
+const T06_ATTRIBUTED_NEXT_SHA = 'e8d04241493f4fa7c5a1db28e075487759fea1dd87dfafdbb750aa06aa723d0f';
+// skills/forge-task/SKILL.md at T06 start (= its bytes without the linked blocks); it is also
+// the owner-baseline source hash the two forge-task sample nodes cite until T07 re-pins them.
+const T06_ATTRIBUTED_TASK_SHA = 'd81556180d9bb16d45a8f81ba6b5faa12ece7f6601a510963f29eb50fe10679b';
+// T06-R1 (Repair2). The ACTUAL sample nodes citing the two linked skill sources: two forge-task
+// nodes and two forge-next nodes (README table of docs/communication-evaluation). T07 re-pins
+// the source.sha256 of ALL FOUR together; nothing else in samples.json may change.
+const T06_SAMPLE_SOURCES = Object.freeze([
+  Object.freeze({ file: 'skills/forge-task/SKILL.md', attributed: T06_ATTRIBUTED_TASK_SHA,
+    pointers: Object.freeze(['/entries/1/supporting/timeline/after', '/entries/5/supporting/timeline/after']) }),
+  Object.freeze({ file: 'skills/forge-next/SKILL.md', attributed: T06_ATTRIBUTED_NEXT_SHA,
+    pointers: Object.freeze(['/entries/2/supporting/partial/after', '/entries/6/supporting/partial/after']) }),
+]);
+// Exact [start, end) offsets of every JSON scalar by JSON pointer, so a SHA re-pin is
+// checked and restored at its own literal span only, never by replacing matching strings.
+function jsonValueSpans(text) {
+  const spans = new Map();
+  let i = 0;
+  const ws = () => { while (i < text.length && ' \t\r\n'.includes(text[i])) i++; };
+  const expect = char => { assert.strictEqual(text[i], char, `JSON ${char} at ${i}`); i++; };
+  const string = () => {
+    const start = i; expect('"');
+    while (text[i] !== '"') { assert(i < text.length, 'unterminated JSON string'); i += text[i] === '\\' ? 2 : 1; }
+    i++;
+    return [start, i];
+  };
+  const key = raw => JSON.parse(raw).replace(/~/g, '~0').replace(/\//g, '~1');
+  const value = pointer => {
+    ws();
+    if (text[i] === '{' || text[i] === '[') {
+      const object = text[i] === '{', close = object ? '}' : ']';
+      i++; ws();
+      if (text[i] === close) { i++; return; }
+      for (let index = 0; ; index++) {
+        ws();
+        if (object) { const [a, b] = string(); ws(); expect(':'); value(`${pointer}/${key(text.slice(a, b))}`); }
+        else value(`${pointer}/${index}`);
+        ws();
+        if (text[i] === ',') { i++; continue; }
+        expect(close); return;
+      }
+    }
+    if (text[i] === '"') { spans.set(pointer, string()); return; }
+    const start = i;
+    while (i < text.length && !',]} \t\r\n'.includes(text[i])) i++;
+    assert(i > start, `JSON value at ${start}`);
+    spans.set(pointer, [start, i]);
+  };
+  value(''); ws();
+  assert.strictEqual(i, text.length, 'one JSON document');
+  return spans;
+}
+// Every actual node of the parsed samples whose source cites one of the linked skill files.
+function linkedSampleNodes(parsed) {
+  const files = T06_SAMPLE_SOURCES.map(source => source.file);
+  const found = [];
+  const walk = (node, pointer) => {
+    if (!node || typeof node !== 'object') return;
+    if (!Array.isArray(node) && node.source && typeof node.source === 'object' && files.includes(node.source.file)) found.push({ pointer, node });
+    for (const [k, child] of Object.entries(node)) walk(child, `${pointer}/${String(k).replace(/~/g, '~0').replace(/\//g, '~1')}`);
+  };
+  walk(parsed, '');
+  return found;
+}
+// Replace the literal source.sha256 value of the given actual nodes, span by span.
+function withSampleShas(text, replacements) {
+  const spans = jsonValueSpans(text);
+  const edits = replacements.map(([pointer, sha]) => {
+    const span = spans.get(`${pointer}/source/sha256`);
+    assert(span, `sample node ${pointer} has a source.sha256`);
+    return [span, JSON.stringify(sha)];
+  }).sort((a, b) => b[0][0] - a[0][0]);
+  return edits.reduce((out, [[start, end], literal]) => out.slice(0, start) + literal + out.slice(end), text);
+}
+// The only surface whose raw measurement the linked blocks change (measured, see T06 drift note).
+const T06_RAW_DRIFT = Object.freeze(['skills']);
+function surfaceHash(artifacts, sourceId, raw) {
+  return hash(artifacts.filter(row => row.source_id === sourceId).sort((a, b) => a.source.localeCompare(b.source))
+    .map(row => `${row.source}\0${(raw ? row.content : attributed(row.source, row.content)).replace(/version=\d+\.\d+\.\d+/g, 'version=<dynamic>')}`).join('\0'));
+}
 test('S02 review R61-R63: interrupted modern enrollment cannot select legacy planning', () => {
   const { spawnSync } = require('child_process');
   const selection = require('./forge-milestone-time-selection');
@@ -171,22 +286,37 @@ function t07(name, fn) {
 function atPointer(value, pointer) {
   return pointer.split('/').slice(1).reduce((current, key) => current[key], value);
 }
-function checkPins() {
-  const renderer = require('./forge-claude-renderer');
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-t07-pins-')); temps.push(temp);
-  const report = renderer.render({ repo: root, projectRoot: temp, claudeHome: path.join(temp, 'host'), forgeHome: path.join(temp, 'forge') });
-  assert.strictEqual(golden.surfaces.length, 9);
-  assert.deepStrictEqual(golden.surfaces.map(({ sha256, ...identity }) => identity),
+// Fixture seams (T06-R1): the defaults are the real checked-in pins, README, render and
+// sources; the T06 group passes in-memory variants only, never writing any pin.
+function checkPins(fixture = {}) {
+  const pins = fixture.golden || golden;
+  const readme = fixture.pinReadme === undefined ? pinReadme : fixture.pinReadme;
+  let artifacts = fixture.artifacts;
+  if (!artifacts) {
+    const renderer = require('./forge-claude-renderer');
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-t07-pins-')); temps.push(temp);
+    artifacts = renderer.render({ repo: root, projectRoot: temp, claudeHome: path.join(temp, 'host'), forgeHome: path.join(temp, 'forge') }).artifacts;
+  }
+  assert.strictEqual(pins.surfaces.length, 9);
+  assert.deepStrictEqual(pins.surfaces.map(({ sha256, ...identity }) => identity),
     before.active_golden_before.surfaces.map(({ sha256, ...identity }) => identity));
   const old = new Map(before.active_golden_before.surfaces.map(row => [row.source_id, row.sha256]));
   const changed = [];
-  for (const surface of golden.surfaces) {
-    const payload = report.artifacts.filter(row => row.source_id === surface.source_id).sort((a, b) => a.source.localeCompare(b.source))
-      .map(row => `${row.source}\0${row.content.replace(/version=\d+\.\d+\.\d+/g, 'version=<dynamic>')}`).join('\0');
-    assert.strictEqual(hash(payload), surface.sha256, `final measured ${surface.source_id}`);
+  const repinned = [];
+  for (const surface of pins.surfaces) {
+    const attributedHash = surfaceHash(artifacts, surface.source_id, false);
+    const rawHash = surfaceHash(artifacts, surface.source_id, true);
+    // Strict historical attribution in BOTH pin states: outside the linked blocks every byte is the pre-T06 one.
+    assert.strictEqual(attributedHash, T06_ATTRIBUTED_PINS[surface.source_id], `attributed pre-T06 bytes ${surface.source_id}`);
+    assert(surface.sha256 === attributedHash || surface.sha256 === rawHash,
+      `final measured ${surface.source_id}: pin ${surface.sha256} is neither the attributed ${attributedHash} nor the raw ${rawHash}`);
+    if (surface.sha256 !== attributedHash) {
+      assert(T06_RAW_DRIFT.includes(surface.source_id), `raw re-pin only of the measured T06 drift: ${surface.source_id}`);
+      repinned.push(surface.source_id);
+    }
     if (old.get(surface.source_id) !== surface.sha256) {
       changed.push(surface.source_id);
-      assert(pinReadme.includes(old.get(surface.source_id)) && pinReadme.includes(surface.sha256), `documented actual ${surface.source_id}`);
+      assert(readme.includes(old.get(surface.source_id)) && readme.includes(surface.sha256), `documented actual ${surface.source_id}`);
     }
   }
   assert.deepStrictEqual(changed.sort(), [...before.allowed_active_changes].sort(), 'only four of nine active surfaces');
@@ -196,25 +326,68 @@ function checkPins() {
     'skills/forge-next/SKILL.md', 'skills/forge-help/SKILL.md', 'skills/forge-new-milestone/SKILL.md',
     'shared/templates/dispatch/plan-slice.md', before.samples.file, 'scripts/forge-dispatch-source-guard.js', 'scripts/forge-smoke.js']);
   for (const source of before.sources) if (!allowed.has(source.path)) {
-    assert.strictEqual(hash(fs.readFileSync(path.join(root, source.path))), source.sha256, `unchanged source ${source.path}`);
+    assert.strictEqual(hash(attributedBytes(source.path, fixture.readSource)), source.sha256, `unchanged source ${source.path}`);
   }
-  assert(pinReadme.includes(before.provenance.source_revision));
-  assert(pinReadme.includes('T05') && pinReadme.includes('configuration') && pinReadme.includes('forge-claude-renderer.render'));
+  assert(readme.includes(before.provenance.source_revision));
+  assert(readme.includes('T05') && readme.includes('configuration') && readme.includes('forge-claude-renderer.render'));
+  return { repinned };
 }
-function checkSamples() {
-  const nextHash = hash(fs.readFileSync(path.join(root, 'skills/forge-next/SKILL.md')));
-  let restored = sampleBytes;
-  for (const old of before.samples.next_samples) {
-    const current = atPointer(samples, old.pointer);
-    assert.deepStrictEqual({ ...current.source, sha256: old.source.sha256 }, old.source, `${old.pointer} metadata`);
-    assert.strictEqual(current.text, old.text, 'quoted text is unchanged');
-    assert(skills['forge-next'].includes(current.text), 'quotation remains literal');
-    assert.strictEqual(current.source.sha256, nextHash);
-    assert(sampleReadme.includes(old.source.sha256) && sampleReadme.includes(nextHash), 'document actual source hashes');
+function checkSamples(fixture = {}) {
+  const bytes = fixture.sampleBytes === undefined ? sampleBytes : fixture.sampleBytes;
+  const readme = fixture.sampleReadme === undefined ? sampleReadme : fixture.sampleReadme;
+  const sourceBytes = fixture.sourceBytes || {};
+  const parsed = JSON.parse(bytes);
+  const nodes = linkedSampleNodes(parsed);
+  const oldNext = new Map(before.samples.next_samples.map(row => [row.pointer, row]));
+  const baselineTask = before.sources.filter(row => row.path === 'skills/forge-task/SKILL.md').map(row => row.sha256);
+  assert.deepStrictEqual([...new Set(baselineTask)], [T06_ATTRIBUTED_TASK_SHA], 'owner baseline forge-task hash is the attributed pre-T06 one');
+  assert.deepStrictEqual(nodes.map(node => node.pointer).sort(), T06_SAMPLE_SOURCES.flatMap(source => source.pointers).sort(),
+    'exactly the two actual forge-task and two actual forge-next sample nodes cite the linked sources');
+  const restorations = [];
+  const result = { repinnedNodes: {} };
+  for (const source of T06_SAMPLE_SOURCES) {
+    const raw = sourceBytes[source.file] || fs.readFileSync(path.join(root, source.file));
+    const attributedHash = hash(attributedBytes(source.file, () => raw));
+    const rawHash = hash(raw);
+    const text = raw.toString('utf8').replace(/\r\n/g, '\n');
+    // Strict historical attribution in BOTH sample states: outside its linked blocks the source is the pre-T06 file.
+    assert.strictEqual(attributedHash, source.attributed, `${source.file} outside the linked blocks keeps its pre-T06 bytes`);
+    assert.notStrictEqual(rawHash, attributedHash, `${source.file}: the linked blocks really change the raw bytes`);
+    const cited = new Set();
+    for (const pointer of source.pointers) {
+      const current = atPointer(parsed, pointer);
+      assert.strictEqual(current.source.file, source.file, `${pointer} cites ${source.file}`);
+      // The owner-baseline value of this exact node (pre-S02 for forge-next, unchanged since for forge-task).
+      const old = oldNext.get(pointer);
+      const baselineHash = source.file === 'skills/forge-next/SKILL.md' ? old.source.sha256 : T06_ATTRIBUTED_TASK_SHA;
+      if (old) {
+        assert.deepStrictEqual({ ...current.source, sha256: old.source.sha256 }, old.source, `${pointer} metadata`);
+        assert.strictEqual(current.text, old.text, 'quoted text is unchanged');
+      }
+      assert.strictEqual(typeof current.text, 'string', `${pointer} quotes text`);
+      assert(text.includes(current.text), `${pointer}: quotation remains literal in ${source.file}`);
+      assert(current.source.sha256 === attributedHash || current.source.sha256 === rawHash,
+        `${pointer}: source.sha256 ${current.source.sha256} is neither the attributed ${attributedHash} nor the raw ${rawHash}`);
+      if (current.source.sha256 !== baselineHash) {
+        assert(readme.includes(baselineHash) && readme.includes(current.source.sha256), `document actual ${source.file} source hashes`);
+      }
+      cited.add(current.source.sha256);
+      restorations.push([pointer, baselineHash]);
+    }
+    assert.strictEqual(cited.size, 1, `every cited ${source.file} sample carries the same source hash`);
+    const [citedHash] = cited;
+    const state = citedHash === attributedHash ? 'attributed' : 'raw-repinned';
+    assert(result.state === undefined || result.state === state,
+      'forge-task and forge-next sample nodes are re-pinned together (T07 re-pins both), never one source alone');
+    result.state = state;
+    result.repinnedNodes[source.file] = state === 'raw-repinned' ? source.pointers.length : 0;
+    if (source.file === 'skills/forge-next/SKILL.md') result.nextHash = citedHash; else result.taskHash = citedHash;
   }
-  // Restore only the two permitted SHA values and prove equality of ALL sample bytes.
-  restored = restored.split(nextHash).join(before.samples.next_samples[0].source.sha256);
+  // Restore exactly the four actual source.sha256 spans to their owner-baseline values and
+  // prove equality of ALL other sample bytes (texts, labels, references, layout).
+  const restored = withSampleShas(bytes, restorations);
   assert.strictEqual(hash(restored), before.samples.sha256, 'only literal source.sha256 fields changed');
+  return result;
 }
 function checkRegistry() {
   const audit = sourceGuard.audit({ root });
@@ -907,6 +1080,557 @@ test('S01/T07 Codex projection: projected auto/next carry the time pointer, admi
   for (const name of TIME_SKILLS) assertTimeSkill(`${name} (Codex)`, projected(name));
   const status = projected('forge-status');
   assert(status.includes(TIME_POINTER) && flat(status).includes('nenhuma decisão de extensão, redução ou continuação é inferida dele'), 'forge-status (Codex): time sentence missing');
+});
+
+// ── S03/T06: linked task distribution ───────────────────────────────────────
+// Reads the actual Claude skill sources, the actual Claude and Codex renders and
+// the shared contracts; runs the documented shell blocks and the inert public
+// CLI entries of T01..T05 against temporary owners only. Distribution proof only:
+// no host, provider or client executes here, so client execution, comprehension,
+// installation and human acceptance stay unknown.
+const T06_SPANS = Object.freeze({
+  new_initialization: { bytes: 2367, sha256: '59fc7952aa70c103e4811b95b1c4de2f89f4124970a8544d525c3dd764dd672d' },
+  fresh_registration: { bytes: 1803, sha256: 'b0d14d5ba51b0096922338482ad357c77a193e5af4097616fbdc469681ee7874' },
+  brief_template_lf: { bytes: 1477, sha256: 'e37de53f5cd7513ca13c196a6081eb4d53a167156f739de2bb1bd8c6d4dc3310' },
+  request_builder_lf: { bytes: 1662, sha256: '473366130d2e9d1b67e4bf3154ea0021a305a3c2359f1aada02ac0a65eea80bb' },
+});
+const T06_BLOCKS = Object.freeze({ 'forge-task': ['resume', 'phase-admission', 'review-legs', 'close'], 'forge-auto': ['closure', 'cleanup-order'],
+  'forge-next': ['closure', 'cleanup-order'], 'forge-status': ['status'] });
+const T06_BASH = process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : '/bin/bash';
+const T06_TASK = 'T-20261105120000-linked-fixture';
+const linkedStart = require('./forge-linked-task-start');
+const linkedHorizon = require('./forge-linked-task-horizon');
+const timeAdmission = require('./forge-milestone-time-admission');
+let t06Rendered = null;
+function t06(label, fn) { test(`T06 linked distribution: ${label}`, fn); }
+function t06Projections() {
+  if (t06Rendered) return t06Rendered;
+  const claudeRenderer = require('./forge-claude-renderer');
+  const codexRenderer = require('./forge-codex-renderer');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-t06-linked-'));
+  try {
+    const claude = claudeRenderer.render({ repo: root, projectRoot: temp, claudeHome: path.join(temp, 'claude'), forgeHome: path.join(temp, 'forge-claude') });
+    const codex = codexRenderer.render({ repo: root, projectRoot: temp, codexHome: path.join(temp, 'codex'), forgeHome: path.join(temp, 'forge-codex'),
+      ...codexRenderer.PRODUCTION_DISPATCH_DIALECT });
+    const pick = (report, host, name) => {
+      const row = report.artifacts.find(item => item.source_id === 'skills' && item.source === `skills/${name}/SKILL.md`);
+      assert(row, `${host}: ${name} projection missing`);
+      return row.content.replace(/\r\n/g, '\n');
+    };
+    t06Rendered = {
+      claude: Object.fromEntries(ALL.map(name => [name, pick(claude, 'Claude', name)])),
+      codex: Object.fromEntries(ALL.map(name => [name, pick(codex, 'Codex', name)])),
+      claudeSurfaces: claude.artifacts.map(row => ({ source_id: row.source_id, source: row.source, content: row.content })),
+    };
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+  return t06Rendered;
+}
+function t06Views(name) {
+  const rendered = t06Projections();
+  return [['Claude source', skills[name]], ['Claude projection', rendered.claude[name]], ['Codex projection', rendered.codex[name]]];
+}
+function linkedBlock(text, id, label = '') {
+  const start = `<!-- forge:linked-task:${id}:start -->\n`, end = `<!-- forge:linked-task:${id}:end -->\n`;
+  assert.strictEqual(count(text, start), 1, `${label} linked block ${id}: one start marker`);
+  assert.strictEqual(count(text, end), 1, `${label} linked block ${id}: one end marker`);
+  const from = text.indexOf(start), to = text.indexOf(end);
+  assert(to > from, `${label} linked block ${id}: end follows start`);
+  return text.slice(from, to + end.length);
+}
+function includesAll(label, text, pieces) {
+  const flatText = flat(text);
+  for (const piece of pieces) assert(flatText.includes(flat(piece)), `${label}: missing ${piece}`);
+}
+function inOrder(label, text, pieces) {
+  let cursor = -1;
+  for (const piece of pieces) {
+    const at = text.indexOf(piece, cursor + 1);
+    assert(at > cursor, `${label}: ${piece} out of order or missing`);
+    cursor = at;
+  }
+}
+function stateBullet(block, state) {
+  const from = block.indexOf(`\n- \`${state}\``);
+  assert(from >= 0, `state ${state} missing`);
+  const to = block.indexOf('\n- `', from + 1);
+  return block.slice(from, to < 0 ? block.length : to);
+}
+function contractSection(text, heading) {
+  const from = text.indexOf(`\n${heading}\n`);
+  assert(from >= 0, `missing ${heading}`);
+  const to = text.indexOf('\n## ', from + heading.length + 2);
+  return text.slice(from, to < 0 ? text.length : to);
+}
+function bashBlocks(text) { return [...text.matchAll(/```bash\n([\s\S]*?)```/g)].map(match => match[1].replace(/^ {2}/gm, '')); }
+function runBash(script, env) {
+  assert(fs.existsSync(T06_BASH), 'the documented shell blocks need bash to execute');
+  return require('child_process').spawnSync(T06_BASH, ['-c', `stop() { exit 9; }; node() { "$NODE_BIN" "$@"; };\n${script}`], {
+    encoding: 'utf8', timeout: 60000, env: { ...process.env, NODE_BIN: process.execPath.replace(/\\/g, '/'),
+      FORGE_SCRIPTS_DIR: path.join(root, 'scripts').replace(/\\/g, '/'), ...env } });
+}
+function t06Owner(prefix) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `forge-t06-${prefix}-`));
+  temps.push(dir);
+  fs.mkdirSync(path.join(dir, '.gsd', 'tasks', T06_TASK), { recursive: true });
+  fs.mkdirSync(path.join(dir, '.gsd', 'forge'), { recursive: true });
+  return dir;
+}
+function inertMain(main, argv) {
+  const out = [];
+  const status = main(argv, { stdout: { write: chunk => { out.push(String(chunk)); } }, stderr: { write() {} } });
+  return { status, json: JSON.parse(out.join('').trim()) };
+}
+
+t06('resume-cycle-and-embedded-authority', () => {
+  for (const [label, text] of t06Views('forge-task')) {
+    const block = linkedBlock(text, 'resume', label);
+    const statusAt = text.indexOf('forge-linked-task-start.js" --status');
+    assert(statusAt > 0 && block.includes('forge-linked-task-start.js" --status --cwd "$WORKING_DIR" --task "$TASK_ID" --json'), `${label}: read-only status call`);
+    for (const later of ['--intent explicit-resume --json', '**Isolation setup (branch/worktree)**', '**Register in multi-run registry**', '## Dispatch loop']) {
+      const at = text.indexOf(later);
+      assert(at > statusAt, `${label}: the read-only lifecycle must precede ${later}`);
+    }
+    includesAll(label, block, ['Antes de qualquer vínculo pessoal, isolamento, registro ou despacho', '`.gsd/forge/time-links/{TASK_ID}.json`',
+      '`linked_milestone`', 'nunca vira task sem vínculo', 'O resultado `null`', 'a retomada segue exatamente como abaixo',
+      'permissão permanente de routing ou de recovery não é resposta de início, de encerramento da cadeia nem de extensão',
+      'não muda a criação nova, o template do BRIEF, o construtor de pedido, o registro do run, o borrower (`attached_to`) nem `worktree_cleanup_on_complete`']);
+    includesAll(`${label} invalid`, stateBullet(block, 'invalid'), ['pare sem bind, isolamento nem despacho', 'Task ligada {TASK_ID} inválida ({reason})', 'Alternativas']);
+    includesAll(`${label} blocked`, stateBullet(block, 'blocked'), ['pare sem bind, isolamento nem despacho', 'Task ligada {TASK_ID} bloqueada: {reason}',
+      'Alternativas, sem pré-seleção', 'estender a milestone por decisão explícita', 'encerrar a cadeia por decisão explícita (linked-task:close-chain)']);
+    const ready = stateBullet(block, 'handoff-ready');
+    includesAll(`${label} handoff-ready`, ready, ['Base `milestone-branch`', 'ATTACH_RUN="$LINKED_MILESTONE"', 'Base `integrated`', 'sem attach, o setup normal',
+      'nunca adivinhado', '`linked-task-base-unproven`', 'main(argv, io, liveAdapter)', '`liveAdapter.getDecisionHandle`', 'sem pergunta redundante',
+      'forge-linked-task-start.js" --start --cwd "$WORKING_DIR" --task "$TASK_ID"', '--base-kind "$LINKED_BASE_KIND"', '--code-dir "$CODE_DIR"',
+      'recusa com `linked-task-authorization-required` antes de qualquer leitura', 'pare, a decisão continua pendente',
+      'não é repetida com outros argumentos, outro engine ou outro host']);
+    inOrder(`${label} handoff-ready`, ready, ['ATTACH_RUN="$LINKED_MILESTONE"', 'Depois do isolamento e antes do Dispatch loop', '--start']);
+    includesAll(`${label} open`, stateBullet(block, 'open'), ['nada começa sozinho', 'pedido explícito do operador registrado em `forge-pending-questions`',
+      '`linked-task:start`', '`prepareLinkedDecision`', '`answerLinkedDecision`', 'Sem resposta', 'e pare']);
+    includesAll(`${label} started`, stateBullet(block, 'started'), ['`--continue`', 'adaptador vivo', '`linked-task-authorization-required`', 'pare sem repetir']);
+    includesAll(`${label} closed`, stateBullet(block, 'closed'), ['`chain-closed`', 'pare sem bind']);
+  }
+  // The documented status block, executed against real temporary owners through the T03 public CLI.
+  const script = bashBlocks(linkedBlock(skills['forge-task'], 'resume'))[0];
+  const probe = owner => runBash(`${script}\nprintf 'JSON=%s\\nSTATE=%s|%s\\n' "$LINKED_STATUS_JSON" "$LINKED_STATE" "$LINKED_MILESTONE"`,
+    { WORKING_DIR: owner.replace(/\\/g, '/'), TASK_ID: T06_TASK, RESUME_MODE: '1' });
+  const unlinked = t06Owner('unlinked');
+  fs.writeFileSync(path.join(unlinked, '.gsd', 'tasks', T06_TASK, `${T06_TASK}-BRIEF.md`), `---\nid: ${T06_TASK}\ndescription: fixture\n---\n\n# fixture\n`);
+  const plain = probe(unlinked);
+  assert.strictEqual(plain.status, 0, plain.stderr);
+  assert(plain.stdout.includes('JSON=null\n') && plain.stdout.includes('STATE=|\n'), `unlinked task stays unlinked: ${plain.stdout}`);
+  const marker = t06Owner('marker');
+  fs.writeFileSync(path.join(marker, '.gsd', 'tasks', T06_TASK, `${T06_TASK}-BRIEF.md`), `---\nid: ${T06_TASK}\nlinked_milestone: M001\n---\n\n# fixture\n`);
+  const missing = probe(marker);
+  assert(missing.stdout.includes('STATE=invalid|') && missing.stdout.includes('linked-task-link-missing'), `BRIEF marker without index fails closed: ${missing.stdout}`);
+  const malformed = t06Owner('index');
+  fs.mkdirSync(path.join(malformed, '.gsd', 'forge', 'time-links'), { recursive: true });
+  fs.writeFileSync(path.join(malformed, '.gsd', 'forge', 'time-links', `${T06_TASK}.json`), '{');
+  assert(probe(malformed).stdout.includes('STATE=invalid|'), 'malformed index fails closed, never unlinked');
+  for (const owner of [unlinked, marker, malformed]) assert(!fs.existsSync(path.join(owner, '.gsd', 'forge', 'time')), 'status is a pure read');
+});
+
+t06('endpoint-handoff-start-before-cleanup', () => {
+  for (const name of ['forge-auto', 'forge-next']) {
+    for (const [view, text] of t06Views(name)) {
+      const label = `${name} ${view}`;
+      const block = linkedBlock(text, 'closure', label);
+      assert(block === linkedBlock(skills[name], 'closure'), `${label}: closure block differs from the Claude source`);
+      includesAll(label, block, ['o mesmo `--decide` embutido do passo 4 também cria a task', '`create-and-start-after-proven-completion`', '`create-without-auto-start`',
+        '`linked_task {status, task_id, reason}`', '`creation-pending` (saída 3) se resolve repetindo `--decide`', 'não é consentimento novo nem pergunta nova',
+        '`forge-linked-task.js --create` recusa com `linked-task-authorization-required`',
+        '`milestone_cleanup` igual a `archive` ou `delete`', 'endpoint-sources-missing', 'A preferência não foi alterada',
+        'adiada com motivo nomeado', '`cadeia bloqueada: {código}`', '`aguardando início explícito da task ligada {T}`',
+        '`worktree_cleanup_on_complete` e `milestone_cleanup` não mudam e nenhum borrower falso é criado',
+        'SUMMARY, DELIVERY, ledger, checkbox, run inativo, claim liberado, seleção da task ou texto nunca são ACK nem endpoint']);
+      inOrder(`${label} closure order`, block, ['1. ACK real de `complete-milestone`', 'forge-milestone-endpoint.js" --verify', 'forge-milestone-endpoint.js" --record',
+        'forge-linked-task-start.js" --handoff', '`/forge-task --resume {T}` ANTES da limpeza de isolamento', '6. Só depois do início real']);
+      for (const template of ['Endpoint de {M} comprovado:', 'Endpoint de {M} não comprovado ({código}):', 'Relógio de {M} congelado em', 'Handoff de {M} para a task ligada {T} produzido',
+        'Início encadeado da task ligada {T}', 'Cadeia {M} → {T} bloqueada:']) assert(block.includes(template), `${label}: message ${template}`);
+      const blocked = block.slice(block.indexOf('Cadeia {M} → {T} bloqueada:'));
+      inOrder(`${label} blocked chain message`, blocked, ['Recomendo', 'Opções, sem pré-seleção', 'Decisão pendente']);
+      includesAll(label, block, ['`linked-task:start`', '`linked-task:close-chain`', '`linked-task:extend:<ms>`', '`verifyDecision`',
+        'Permissão permanente de routing ou de recovery, JSON importado, flag, SUMMARY, checkpoint, texto deste skill ou silêncio nunca respondem']);
+      const order = linkedBlock(text, 'cleanup-order', label);
+      const cleanupCommand = text.indexOf('forge-isolation.js" --cleanup --run');
+      assert(text.indexOf(block) < text.indexOf(order) && text.indexOf(order) < cleanupCommand, `${label}: deferral precedes the milestone isolation cleanup`);
+      includesAll(`${label} cleanup order`, order, ['não rode a limpeza abaixo', 'Limpeza de isolamento de {M} adiada:', 'aguardando início explícito da task ligada {T}',
+        'encerramento explícito da cadeia', 'A política (`worktree_cleanup_on_complete`, `milestone_cleanup`) não muda']);
+      inOrder(`${label} cleanup order`, order, ['ACK real de `complete-milestone`', '`--verify`', '`--record`', '`--handoff`', '`/forge-task --resume {T}`']);
+    }
+  }
+});
+
+t06('status-verbatim-no-decision', () => {
+  const summary = linkedHorizon.summarizeLinkedStatus({ status: 'ok', task_id: T06_TASK, milestone: 'M001', predecessor: { lifecycle: 'started' },
+    task_horizon: { state: 'active', ceiling_ms: 10, consumed_ms: 1, unknown_ms: 0, remaining_ms: 9, extensions: 0 }, milestone_horizon: { state: 'endpoint-proven' },
+    chain: { cap_ms: 20 }, decision_pending: false, unknowns: [] });
+  assert.strictEqual(linkedHorizon.summarizeLinkedStatus(null), null, 'unlinked work gains no linked field');
+  for (const [label, text] of t06Views('forge-status')) {
+    const block = linkedBlock(text, 'status', label);
+    for (const field of ['lifecycle', 'task', 'milestone', 'chain', 'decision_pending', 'unknown']) {
+      assert(Object.hasOwn(summary, field), `real summary lacks ${field}`);
+      assert(block.includes(`\`${field}\``), `${label}: relayed field ${field}`);
+    }
+    assert.strictEqual(summary.chain.governs, false);
+    includesAll(label, block, ['são repassados verbatim', 'o teto da cadeia é soma derivada que não governa nada (`governs: false`)', 'previsão nunca vira teto',
+      'Valor sem fonte continua desconhecido, nunca zero', 'Nenhuma decisão de início, de encerramento da cadeia ou de extensão do horizonte é inferida desse bloco',
+      'task sem vínculo não ganha campo novo', '`shared/forge-milestone-time.md § Task ligada e endpoint (S03)`']);
+    assert(text.includes('node "$FORGE_SCRIPTS_DIR/forge-status.js" $ARGUMENTS'), `${label}: status command unchanged`);
+  }
+});
+
+t06('canonical-storage-and-availability', () => {
+  const time = read('shared/forge-milestone-time.md');
+  const section = contractSection(time, '## Task ligada e endpoint (S03)');
+  inOrder('contract subsections', section, ['### Armazenamento e índice', '### Schemas', '### Criação na gravação da seleção', '### Endpoint comprovado e congelamento',
+    '### Prova da predecessora', '### Handoff, início, continuação e tipos de base', '### Consumo no BRIEF e nos prompts', '### Horizontes e tetos',
+    '### Códigos de admissão e transporte', '### Drain, checkpoint e extensão', '### Encerramento da task e da cadeia', '### Superfícies', '### CLIs',
+    '### Limites da S03', '### Disponibilidade da S03']);
+  for (const schema of ['forge-linked-task', 'forge-milestone-endpoint', 'forge-linked-task-handoff', 'forge-linked-task-horizon']) {
+    assert(section.includes(`shared/schemas/${schema}.schema.json`) && fs.existsSync(path.join(root, 'shared', 'schemas', `${schema}.schema.json`)), schema);
+  }
+  for (const code of timeAdmission.TRANSPORT_REFUSAL_CODES) assert(section.includes(`\`${code}\``), `contract lacks transport code ${code}`);
+  for (const state of linkedStart.LIFECYCLE_STATES) assert(section.includes(`\`${state}\``), `contract lacks lifecycle ${state}`);
+  for (const kind of linkedStart.BASE_KINDS) assert(section.includes(`\`${kind}\``), `contract lacks base kind ${kind}`);
+  includesAll('contract', section, ['`.gsd/forge/time-links/<T>.json`', 'nunca viram task sem vínculo', 'logo depois de `decide` e com o mesmo adaptador vivo',
+    'ACK real de `complete-milestone` → `forge-milestone-endpoint.js --verify`', '→ `--record`', 'o consumo da milestone congela no endpoint',
+    '`endpoint-unproven`', '`consumedHandoffBlock`', 'exatamente uma vez em cada uma das quatro fases', '`cap_basis: derived-sum`, `governs: false`',
+    'Teto da milestone governa as operações da milestone', 'teto da task (horizonte do vínculo', 'Nenhum saldo vira timeout de worker',
+    '`linked-task:extend:<ms>`', '`--close`', '`--close-chain`', '`forge-status`', '`forge-personal-summary`',
+    'node scripts/forge-linked-task-start.js --status|--handoff|--close', 'node scripts/forge-linked-task-horizon.js --status|--admit']);
+  const limits = section.slice(section.indexOf('### Limites da S03'), section.indexOf('### Disponibilidade da S03'));
+  includesAll('limits', limits, ['Adaptador vivo embutido obrigatório para decisões e início', 'A guarda de transporte não reatesta autoridade ao vivo',
+    'Pernas de revisão sem contexto real de task ligada não têm a garantia', '`milestone_cleanup` `archive` ou `delete` antes do endpoint',
+    'impede a prova (`endpoint-sources-missing`)', 'Filhos de lote nativo não são observáveis pelo drain e ficam desconhecidos']);
+  const availability = section.slice(section.indexOf('### Disponibilidade da S03'));
+  inOrder('availability', availability, ['Implementado e testado offline', 'Distribuído:', 'Condicional:', 'Desconhecido:']);
+  includesAll('availability', availability, ['dependem do adaptador vivo embutido pelo host', 'depende do contexto real', 'depende das sondas vivas',
+    'execução e compreensão pelo cliente instalado, instalação e aceite humano', 'Projeção e distribuição não demonstram execução no cliente']);
+  includesAll('old boundary', time, ['Só milestones, exceto os registros da task ligada (§ Task ligada e endpoint (S03))',
+    '`time-work-kind-unsupported` para task avulsa, que continua sem orçamento de tempo próprio']);
+  assert(!time.includes('- Só milestones; `time-work-kind-unsupported`'), 'the old only-milestones line gained the linked exception');
+});
+
+t06('preparation-personal-authority-boundaries', () => {
+  const prep = contractSection(read('shared/forge-task-preparation.md'), '## Task ligada (S03)');
+  includesAll('preparation', prep, ['Sem vínculo, nada muda', 'prompt, pedido, fingerprint, recibo e resultado de task sem vínculo', 'Admissão ligada antes da rota',
+    'reaproveita o recibo `ready`', 'Admissão de novo nas entradas reais', '`recoverStandaloneTask`', 'Segundo invoke nativo continua `native-handoff-already-invoked`',
+    'Bloco consumido exatamente uma vez', '(brainstorm, discuss, research e plan)', 'sem duplicar', '`forge-linked-task-horizon.js --admit`',
+    'Ele só antecipa a mensagem; a garantia é a admissão acima', 'Nem este contrato nem o texto do skill concedem autoridade',
+    'permissão permanente de routing ou de recovery continua sendo só autorização de rota, nunca consentimento funcional']);
+  inOrder('preparation order', prep, ['Admissão ligada antes da rota', 'resolve a rota', 'Admissão de novo nas entradas reais']);
+  const prepSource = read('scripts/forge-task-preparation.js');
+  for (const api of ['startStandaloneTaskPreparationCore', 'decideLinkedTaskEntry', 'consumedHandoffBlock', 'recoverStandaloneTask', 'buildPreparationPrompt']) {
+    assert(prepSource.includes(api), `preparation contract cites a real seam: ${api}`);
+  }
+  assert.strictEqual(typeof linkedStart.consumedHandoffBlock, 'function');
+  assert.strictEqual(typeof linkedHorizon.decideLinkedTaskEntry, 'function');
+  const personal = contractSection(read('shared/forge-personal-context.md'), '## Task ligada (S03)');
+  includesAll('personal', personal, ['Pendência da task ligada', 'vínculo pessoal `create`', '`pending` com fonte no `link.json`', 'Não seleção antes da prova',
+    'a task nunca é selecionada como trabalho aberto', 'pendência não é permissão de despacho', 'Transições reais do ciclo, aplicadas só pela API do owner',
+    '`linked-task:start`', '`start.json`', 'nunca `open` por inferência', '`closure.json`', '`chain-closure.json`', 'trabalho protegido',
+    'Checkpoint, SUMMARY, handoff, resumo, texto de skill ou de contrato e JSON importado são evidência, nunca consentimento',
+    'resposta explícita persistida em `forge-pending-questions` e handle vivo conferido por `verifyDecision`',
+    'permissão permanente de routing ou de recovery não responde a essas perguntas', 'consulta o ciclo somente leitura antes do `--bind --intent explicit-resume`']);
+  for (const [name, api] of [['prepareLinkedDecision', linkedStart.prepareLinkedDecision], ['answerLinkedDecision', linkedStart.answerLinkedDecision],
+    ['prepareTaskExtension', linkedHorizon.prepareTaskExtension], ['answerTaskExtension', linkedHorizon.answerTaskExtension]]) assert.strictEqual(typeof api, 'function', name);
+});
+
+t06('two-host-literals-main-exports-and-old-retention', () => {
+  const rendered = t06Projections();
+  const scripts = new Set();
+  for (const [name, ids] of Object.entries(T06_BLOCKS)) {
+    for (const id of ids) {
+      const source = linkedBlock(skills[name], id, name);
+      assert.strictEqual(linkedBlock(rendered.claude[name], id, `${name} Claude`), source, `${name}/${id}: Claude projection carries the source block`);
+      assert.strictEqual(linkedBlock(rendered.codex[name], id, `${name} Codex`), source, `${name}/${id}: Codex projection carries the source block`);
+      for (const match of source.matchAll(/(forge-[a-z0-9-]+\.js)"? --[a-z]/g)) scripts.add(match[1]);
+    }
+  }
+  for (const [file, id] of [['shared/forge-review.md', 'review-budget'], ['shared/forge-dispatch.md', 'dispatch-budget']]) {
+    for (const match of linkedBlock(read(file), id, file).matchAll(/(forge-[a-z0-9-]+\.js)"? --[a-z]/g)) scripts.add(match[1]);
+  }
+  for (const match of contractSection(read('shared/forge-milestone-time.md'), '## Task ligada e endpoint (S03)').matchAll(/(forge-[a-z0-9-]+\.js)"? --[a-z]/g)) scripts.add(match[1]);
+  assert.deepStrictEqual([...scripts].sort(), ['forge-linked-task-horizon.js', 'forge-linked-task-start.js', 'forge-linked-task.js', 'forge-milestone-endpoint.js'],
+    'actual CLI references of the linked sections');
+  for (const script of scripts) {
+    assert(fs.existsSync(path.join(root, 'scripts', script)), `${script} exists`);
+    assert.strictEqual(typeof require(`./${script}`).main, 'function', `${script} exports main`);
+  }
+  // Frozen unlinked spans: raw bytes of fresh creation, LF parity shapes of the BRIEF and the request builder.
+  const raw = fs.readFileSync(path.join(root, 'skills/forge-task/SKILL.md'), 'utf8');
+  const span = (from, to, extra = 0) => { const a = raw.indexOf(from), b = raw.indexOf(to, a); assert(a >= 0 && b > a, `span ${from}`); return Buffer.from(raw.slice(a, b + extra), 'utf8'); };
+  const fresh = span('**Register in multi-run registry**', '\nThis makes the task visible', 1);
+  const init = span('## Initialize task (skip if resume mode)', '## Cleanup orphaned tasks');
+  const lf = raw.replace(/\r\n/g, '\n');
+  const briefStart = lf.indexOf('```markdown\n', lf.indexOf('\n## Initialize task')), briefEnd = lf.indexOf('\n```\n', briefStart + 12);
+  const brief = Buffer.from(lf.slice(briefStart, briefEnd + 4), 'utf8');
+  const open = '<!-- forge:task-preparation-request:start -->', close = '<!-- forge:task-preparation-request:end -->';
+  const builder = Buffer.from(lf.slice(lf.indexOf(open), lf.indexOf(close) + close.length), 'utf8');
+  assert.strictEqual(count(lf, open), 1, 'one request builder');
+  for (const [key, bytes] of [['fresh_registration', fresh], ['new_initialization', init], ['brief_template_lf', brief], ['request_builder_lf', builder]]) {
+    assert.deepStrictEqual({ bytes: bytes.length, sha256: hash(bytes) }, T06_SPANS[key], `frozen ${key}`);
+    assert(!bytes.toString('utf8').includes('forge:linked-task:'), `${key} carries no linked text`);
+  }
+  // Old literals: outside the linked blocks every declared skill/shared byte still equals the owner baseline.
+  const pinState = checkPins(); const sampleState = checkSamples(); checkRegistry(); checkSmoke();
+  // Measured transient drift for T07 (recorded, not re-pinned): the raw skills surface differs only by the linked blocks.
+  // Once T07 re-pins that surface to its genuine raw measurement, no drift remains (checkPins proved the value).
+  const drift = [];
+  for (const surface of golden.surfaces) {
+    const rawHash = surfaceHash(rendered.claudeSurfaces, surface.source_id, true);
+    if (rawHash !== surface.sha256) drift.push(`${surface.source_id} ${surface.sha256} -> ${rawHash}`);
+  }
+  assert.deepStrictEqual(drift.map(row => row.split(' ')[0]), T06_RAW_DRIFT.filter(id => !pinState.repinned.includes(id)),
+    'only the skills surface drifts before T07');
+  for (const row of drift) console.log(`note - T06 measured transient drift for T07 (not re-pinned): ${row}`);
+  for (const id of pinState.repinned) console.log(`note - T06 attributed surface ${id} carries its genuine raw re-pin`);
+  if (sampleState.state === 'raw-repinned') {
+    console.log(`note - T06 samples cite the genuine raw forge-task hash ${sampleState.taskHash} and forge-next hash ${sampleState.nextHash}`);
+  }
+
+  // T06-R1 offline fixture, in memory only: the actual pre-repin state and a genuine
+  // future raw-repinned state both pass; wrong or unrelated pins, undocumented re-pins,
+  // source edits outside the linked blocks and sample text edits are all refused.
+  const surfaces = rendered.claudeSurfaces;
+  const refused = (label, fn) => assert.throws(fn, error => error instanceof assert.AssertionError, `${label} must be refused`);
+  const pinsWith = values => ({ ...golden, surfaces: golden.surfaces.map(row => ({ ...row, sha256: values[row.source_id] || T06_ATTRIBUTED_PINS[row.source_id] })) });
+  const rawSkills = surfaceHash(surfaces, 'skills', true);
+  assert.notStrictEqual(rawSkills, T06_ATTRIBUTED_PINS.skills, 'the linked blocks really change the raw skills surface');
+  const repinnedReadme = `${pinReadme}\n${rawSkills}\n`;
+  assert.deepStrictEqual(checkPins({ golden: pinsWith({}), artifacts: surfaces }).repinned, [], 'current attributed pins pass');
+  assert.deepStrictEqual(checkPins({ golden: pinsWith({ skills: rawSkills }), artifacts: surfaces, pinReadme: repinnedReadme }).repinned, ['skills'],
+    'genuine raw skills re-pin passes');
+  const wrong = hash('not a measured surface');
+  refused('wrong skills pin', () => checkPins({ golden: pinsWith({ skills: wrong }), artifacts: surfaces, pinReadme: `${repinnedReadme}${wrong}\n` }));
+  refused('unrelated surface re-pin', () => checkPins({ golden: pinsWith({ skills: rawSkills, hooks: wrong }), artifacts: surfaces,
+    pinReadme: `${repinnedReadme}${wrong}\n` }));
+  refused('undocumented raw re-pin', () => checkPins({ golden: pinsWith({ skills: rawSkills }), artifacts: surfaces }));
+  const editedSurfaces = surfaces.map(row => row.source === 'skills/forge-next/SKILL.md' ? { ...row, content: `${row.content}\nunrelated edit\n` } : row);
+  const editedRaw = surfaceHash(editedSurfaces, 'skills', true);
+  refused('source edit hidden by its own raw re-pin', () => checkPins({ golden: pinsWith({ skills: editedRaw }), artifacts: editedSurfaces,
+    pinReadme: `${repinnedReadme}${editedRaw}\n` }));
+  const readRaw = rel => fs.readFileSync(path.join(root, rel));
+  refused('frozen source edit outside the linked blocks', () => checkPins({ golden: pinsWith({ skills: rawSkills }), artifacts: surfaces, pinReadme: repinnedReadme,
+    readSource: rel => rel === 'skills/forge-task/SKILL.md' ? Buffer.concat([readRaw(rel), Buffer.from('\nunrelated edit\n')]) : readRaw(rel) }));
+  // Samples (Repair2): walk the ACTUAL four nodes (two forge-task, two forge-next) and set
+  // their source.sha256 spans only; every other byte of the real samples stays as checked in.
+  const [taskSource, nextSource] = T06_SAMPLE_SOURCES;
+  assert.deepStrictEqual(linkedSampleNodes(samples).map(node => node.pointer).sort(), [...taskSource.pointers, ...nextSource.pointers].sort(),
+    'fixture walks the actual cited sample nodes');
+  const sourceBytes = { [taskSource.file]: readRaw(taskSource.file), [nextSource.file]: readRaw(nextSource.file) };
+  const rawTask = hash(sourceBytes[taskSource.file]), rawNext = hash(sourceBytes[nextSource.file]);
+  assert.notStrictEqual(rawTask, T06_ATTRIBUTED_TASK_SHA, 'the linked blocks really change the raw forge-task bytes');
+  assert.notStrictEqual(rawNext, T06_ATTRIBUTED_NEXT_SHA, 'the linked blocks really change the raw forge-next bytes');
+  const setShas = (text, values) => withSampleShas(text, T06_SAMPLE_SOURCES.flatMap(source =>
+    source.file in values ? source.pointers.map(pointer => [pointer, values[source.file]]) : []));
+  const attributedOf = { [taskSource.file]: T06_ATTRIBUTED_TASK_SHA, [nextSource.file]: T06_ATTRIBUTED_NEXT_SHA };
+  const raws = { [taskSource.file]: rawTask, [nextSource.file]: rawNext };
+  const attributedSamples = setShas(sampleBytes, attributedOf);
+  const rawSamples = setShas(attributedSamples, raws);
+  // Prove the future state changes exactly TWO forge-task and TWO forge-next hashes and nothing else.
+  const shaPaths = T06_SAMPLE_SOURCES.flatMap(source => source.pointers.map(pointer => `${pointer}/source/sha256`));
+  const rawSpans = jsonValueSpans(rawSamples), attributedSpans = jsonValueSpans(attributedSamples);
+  assert.deepStrictEqual([...rawSpans.keys()], [...attributedSpans.keys()], 'same JSON structure');
+  const changedScalars = [...attributedSpans].filter(([pointer, [a, b]]) => {
+    const [c, d] = rawSpans.get(pointer); return attributedSamples.slice(a, b) !== rawSamples.slice(c, d);
+  }).map(([pointer]) => pointer);
+  assert.deepStrictEqual(changedScalars.sort(), [...shaPaths].sort(), 'future re-pin changes exactly the four actual source.sha256 values');
+  const parsedRaw = JSON.parse(rawSamples);
+  for (const source of T06_SAMPLE_SOURCES) {
+    assert.strictEqual(source.pointers.filter(pointer => atPointer(parsedRaw, pointer).source.sha256 === raws[source.file]).length, 2,
+      `future re-pin carries the raw hash on both ${source.file} nodes`);
+  }
+  const normalize = text => JSON.parse(withSampleShas(text, [...taskSource.pointers, ...nextSource.pointers].map(pointer => [pointer, 'x'])));
+  assert.deepStrictEqual(normalize(rawSamples), normalize(sampleBytes), 'every other parsed field and text is preserved');
+  const rawReadme = `${sampleReadme}\n${rawTask}\n${rawNext}\n`;
+  const ok = (label, fixture, state) => { const got = checkSamples({ sourceBytes, ...fixture }); assert.strictEqual(got.state, state, label); return got; };
+  ok('current attributed samples pass', { sampleBytes: attributedSamples }, 'attributed');
+  ok('actual checked-in samples pass', {}, sampleState.state);
+  const future = ok('genuine raw re-pin of all four task and next nodes passes', { sampleBytes: rawSamples, sampleReadme: rawReadme }, 'raw-repinned');
+  assert.deepStrictEqual(future.repinnedNodes, { [taskSource.file]: 2, [nextSource.file]: 2 }, 'two forge-task and two forge-next nodes re-pinned');
+  assert.deepStrictEqual([future.taskHash, future.nextHash], [rawTask, rawNext]);
+  const stale = { [taskSource.file]: hash('stale forge-task revision'), [nextSource.file]: before.samples.next_samples[0].source.sha256 };
+  const editAt = (text, pointer, fn) => { const [a, b] = jsonValueSpans(text).get(pointer); return text.slice(0, a) + fn(text.slice(a, b)) + text.slice(b); };
+  for (const source of T06_SAMPLE_SOURCES) {
+    const other = source === taskSource ? nextSource : taskSource;
+    const name = source.file.split('/')[1];
+    const both = value => setShas(rawSamples, { [source.file]: value });
+    refused(`${name} wrong sample hash`, () => checkSamples({ sourceBytes, sampleBytes: both(wrong), sampleReadme: `${rawReadme}${wrong}\n` }));
+    refused(`${name} stale sample hash`, () => checkSamples({ sourceBytes, sampleBytes: both(stale[source.file]), sampleReadme: `${rawReadme}${stale[source.file]}\n` }));
+    refused(`${name} cites the other source hash`, () => checkSamples({ sourceBytes, sampleBytes: both(raws[other.file]), sampleReadme: rawReadme }));
+    refused(`${name} only re-pinned (mixed sources)`, () => checkSamples({ sourceBytes, sampleBytes: setShas(attributedSamples, { [source.file]: raws[source.file] }),
+      sampleReadme: rawReadme }));
+    refused(`${name} inconsistent nodes`, () => checkSamples({ sourceBytes, sampleReadme: rawReadme,
+      sampleBytes: withSampleShas(rawSamples, [[source.pointers[0], attributedOf[source.file]]]) }));
+    refused(`${name} undocumented re-pin`, () => checkSamples({ sourceBytes, sampleBytes: rawSamples,
+      sampleReadme: `${sampleReadme}\n${raws[other.file]}\n` }));
+    refused(`${name} cited text edit`, () => checkSamples({ sourceBytes, sampleReadme: rawReadme,
+      sampleBytes: editAt(rawSamples, `${source.pointers[1]}/text`, literal => literal.replace(' ', '  ')) }));
+    refused(`${name} source metadata edit`, () => checkSamples({ sourceBytes, sampleReadme: rawReadme,
+      sampleBytes: editAt(rawSamples, `${source.pointers[0]}/source/reference`, literal => literal.replace('#', '#outra-')) }));
+    refused(`${name} label edit`, () => checkSamples({ sourceBytes, sampleReadme: rawReadme,
+      sampleBytes: editAt(rawSamples, `${source.pointers[0]}/label`, literal => `${literal.slice(0, -1)}-x"`) }));
+    const edited = Buffer.concat([sourceBytes[source.file], Buffer.from('\nunrelated edit\n')]);
+    const editedSources = { ...sourceBytes, [source.file]: edited };
+    refused(`${name} edit outside the linked blocks with current pins`, () => checkSamples({ sourceBytes: editedSources, sampleBytes: rawSamples, sampleReadme: rawReadme }));
+    refused(`${name} edit hidden by its own raw sample re-pin`, () => checkSamples({ sourceBytes: editedSources,
+      sampleBytes: setShas(rawSamples, { [source.file]: hash(edited) }), sampleReadme: `${rawReadme}${hash(edited)}\n` }));
+  }
+  refused('unrelated sample byte edit', () => checkSamples({ sourceBytes, sampleBytes: rawSamples.replace('"entries"', '"entries" '), sampleReadme: rawReadme }));
+  refused('unrelated node sha edit', () => checkSamples({ sourceBytes, sampleReadme: `${rawReadme}${wrong}\n`,
+    sampleBytes: withSampleShas(rawSamples, [['/entries/1/supporting/timeline/before', wrong]]) }));
+});
+
+t06('review-budget-trio-and-transport-refusal', () => {
+  const review = read('shared/forge-review.md'), dispatch = read('shared/forge-dispatch.md');
+  const reviewBlock = linkedBlock(review, 'review-budget', 'review'), dispatchBlock = linkedBlock(dispatch, 'dispatch-budget', 'dispatch');
+  for (const [label, block] of [['review', reviewBlock], ['dispatch', dispatchBlock]]) {
+    includesAll(label, block, ['`--budget-owner`', '`--budget-task`', '`--budget-unit`', '`{cwd, task, unit}`', 'execute-task/{TASK_ID}', '`--budget-milestone`',
+      'contexto inválido', '`milestone-time-invalid`', '`provider_called:false`', 'antes do provider', 'indisponibilidade de revisor', 'retry', 'fallback',
+      '`worker-engine-fallback`', 'ask sem vínculo', 'contexto vazio', 'não tem a garantia do horizonte']);
+    for (const code of timeAdmission.TRANSPORT_REFUSAL_CODES) assert(block.includes(`\`${code}\``), `${label}: refusal ${code}`);
+  }
+  includesAll('review', reviewBlock, ['nunca `{TASK_ID}-REVIEW.md` limpo nem', 'mínimo']);
+  includesAll('dispatch', dispatchBlock, ['REVIEW limpo', 'bloco ligado de `BUDGET_ARGS` em `shared/forge-review.md`', 'não há segundo modelo de autorização']);
+  assert.strictEqual(count(review, '"${BUDGET_ARGS[@]}"'), 7, 'the external legs still carry one shared context');
+  assert(read('scripts/forge-xllm.js').includes("const budgetFlags = ['budget-owner', 'budget-milestone', 'budget-task', 'budget-unit'];"), 'adapter flag vocabulary');
+  // The documented blocks, executed: milestone-only unchanged, unlinked empty, linked trio exact, mixed refused before any leg.
+  const base = bashBlocks(review.slice(review.indexOf('Na revisão de task avulsa ele fica vazio'), review.indexOf('<!-- forge:linked-task:review-budget:start -->')))[0];
+  const linked = bashBlocks(reviewBlock)[0];
+  assert(base.includes('BUDGET_ARGS=()') && !base.includes('LINKED_TASK_ID'), 'milestone block stays the pre-T06 block');
+  const args = env => runBash(`${base}\n${linked}\nprintf '%s\\n' "\${BUDGET_ARGS[@]}"`, { WORKING_DIR: '/owner', MILESTONE_ID: '', BUDGET_UNIT: '', LINKED_TASK_ID: '', ...env });
+  const lines = result => result.stdout.split('\n').filter(Boolean);
+  const unlinked = args({});
+  assert.strictEqual(unlinked.status, 0); assert.deepStrictEqual(lines(unlinked), [], 'unlinked review keeps the empty context');
+  const milestone = args({ MILESTONE_ID: 'M001', BUDGET_UNIT: 'complete-slice/S01' });
+  assert.deepStrictEqual(lines(milestone), ['--budget-owner', '/owner', '--budget-milestone', 'M001', '--budget-unit', 'complete-slice/S01']);
+  const task = args({ LINKED_TASK_ID: T06_TASK, BUDGET_UNIT: `execute-task/${T06_TASK}` });
+  assert.deepStrictEqual(lines(task), ['--budget-owner', '/owner', '--budget-task', T06_TASK, '--budget-unit', `execute-task/${T06_TASK}`]);
+  const mixed = args({ LINKED_TASK_ID: T06_TASK, MILESTONE_ID: 'M001', BUDGET_UNIT: `execute-task/${T06_TASK}` });
+  assert.strictEqual(mixed.status, 2, 'mixed milestone and linked task context stops before any leg');
+  assert.deepStrictEqual(lines(mixed), []);
+});
+
+t06('task-start-cli-boundary', () => {
+  for (const [label, text] of t06Views('forge-task')) {
+    const resume = linkedBlock(text, 'resume', label), close = linkedBlock(text, 'close', label);
+    includesAll(label, resume, ['--status', '--start', '`--continue`', 'main(argv, io, liveAdapter)']);
+    includesAll(`${label} close`, close, ['forge-linked-task-start.js" --close --cwd "$WORKING_DIR" --task "$TASK_ID" --code-dir "$CODE_DIR" --json',
+      '`--close` roda por último', 'da extração de memória e de toda outra limpeza que usa provider', 'antes de arquivar ou apagar os artefatos da task',
+      '`linked-task-delivery-unproven`', 'SUMMARY sozinho não encerra', 'não chama provider', 'nunca é removido pela task', '`worktree_cleanup_on_complete` não muda']);
+    inOrder(`${label} close order`, text, ['<!-- forge:linked-task:review-legs:start -->', '**Memory extraction:**', '<!-- forge:linked-task:close:start -->',
+      '**Cleanup task artifacts**', 'forge-isolation.js" --cleanup --run "$TASK_ID"']);
+  }
+  // The real T03 CLI entry without a live adapter refuses before any read or write, for every live action.
+  const owner = t06Owner('start-cli');
+  for (const action of ['--start', '--continue', '--close-chain']) {
+    const result = inertMain(linkedStart.main, [action, '--cwd', owner, '--task', T06_TASK, '--json']);
+    assert.deepStrictEqual([result.status, result.json.reason], [3, 'linked-task-authorization-required'], action);
+  }
+  const status = inertMain(linkedStart.main, ['--status', '--cwd', owner, '--task', T06_TASK, '--json']);
+  assert.deepStrictEqual([status.status, status.json], [0, null], 'unlinked status reads no time state');
+  assert(!fs.existsSync(path.join(owner, '.gsd', 'forge', 'time')), 'refusals wrote nothing');
+});
+
+t06('task-horizon-admission', () => {
+  const units = ['`plan-slice/{TASK_ID}` no brainstorm', '`discuss-milestone/{TASK_ID}` no discuss', '`research-milestone/{TASK_ID}` no research',
+    '`plan-milestone/{TASK_ID}` no plan', '`execute-task/{TASK_ID}` na execução'];
+  for (const [label, text] of t06Views('forge-task')) {
+    const block = linkedBlock(text, 'phase-admission', label);
+    const caller = between(text, '### Canonical preparation caller', '### Step 1 — Brainstorm');
+    assert(caller.includes(block), `${label}: admission rule lives in the caller used by every phase`);
+    includesAll(label, block, [...units, 'antes de cada fase de preparação', 'antes da execução do Step 5',
+      'forge-linked-task-horizon.js" --admit --cwd "$WORKING_DIR" --task "$TASK_ID" --unit "$LINKED_UNIT" --json', '[ "$LINKED_ADMIT_EXIT" -ne 0 ] && stop',
+      'saída 3 para antes de qualquer provider', 'sem retry, fallback, outro candidato nem execução inline', 'O precheck só antecipa a mensagem',
+      '`linked-task-budget-exhausted`', 'Teto de tempo da task ligada {TASK_ID} atingido', '`linked-task-budget-draining`', '`--inspect-drain`', '`--checkpoint`',
+      'Checkpoint de tempo da task ligada {TASK_ID}', 'estender o horizonte da task ou encerrar a cadeia', '`linked-task:extend:<ms>`', '`prepareTaskExtension`',
+      '`answerTaskExtension`', '`--extend --ceiling-ms <ms>`', '`liveAdapter.getDecisionHandle`', 'recusa com `linked-task-authorization-required`',
+      'permissão permanente de routing nunca estendem', 'Nenhum saldo vira timeout de worker', 'Task sem vínculo não roda este bloco']);
+    for (const unit of linkedHorizon.TASK_UNIT_TYPES) assert(block.includes(`\`${unit}/{TASK_ID}\``), `${label}: unit ${unit}`);
+  }
+  // The documented precheck, executed through the T04 CLI: an unlinked owner is admitted, a broken link stops before any provider.
+  const script = bashBlocks(linkedBlock(skills['forge-task'], 'phase-admission'))[0];
+  const run = (owner, env) => runBash(`${script}\necho continued`, { WORKING_DIR: owner.replace(/\\/g, '/'), TASK_ID: T06_TASK, LINKED_UNIT: `plan-slice/${T06_TASK}`, ...env });
+  const free = t06Owner('admit');
+  const skipped = run(free, { LINKED_MILESTONE: '' });
+  assert.deepStrictEqual([skipped.status, skipped.stdout], [0, 'continued\n'], 'unlinked tasks skip the precheck');
+  const admitted = run(free, { LINKED_MILESTONE: 'M001' });
+  assert.strictEqual(admitted.status, 0, admitted.stderr);
+  assert.deepStrictEqual(JSON.parse(admitted.stdout.split('\n')[0]), { allowed: true, decision: 'unlinked' });
+  const broken = t06Owner('admit-broken');
+  fs.mkdirSync(path.join(broken, '.gsd', 'forge', 'time-links'), { recursive: true });
+  fs.writeFileSync(path.join(broken, '.gsd', 'forge', 'time-links', `${T06_TASK}.json`), '{');
+  const refused = run(broken, { LINKED_MILESTONE: 'M001' });
+  assert.strictEqual(refused.status, 9, `exit 3 must stop: ${refused.stdout}`);
+  const verdict = JSON.parse(refused.stdout.split('\n')[0]);
+  assert.strictEqual(verdict.allowed, false);
+  assert(linkedHorizon.LINKED_TASK_TRANSPORT_CODES.includes(verdict.reason_code), `typed refusal: ${verdict.reason_code}`);
+  assert(!refused.stdout.includes('continued'), 'refused work must not continue');
+  const extend = inertMain(linkedHorizon.main, ['--extend', '--ceiling-ms', '60000', '--cwd', free, '--task', T06_TASK, '--json']);
+  assert.deepStrictEqual([extend.status, extend.json.reason], [3, 'linked-task-authorization-required'], 'standalone extension refuses');
+});
+
+t06('auto-positive-endpoint', () => {
+  for (const [label, text] of t06Views('forge-auto')) {
+    const block = linkedBlock(text, 'closure', label);
+    inOrder(label, block, ['ACK real de `complete-milestone` pelo adaptador de loop', 'nunca são ACK nem endpoint',
+      'node "$FORGE_SCRIPTS_DIR/forge-milestone-endpoint.js" --verify --cwd "$WORKING_DIR" --milestone "$RUN_ID" --json',
+      'node "$FORGE_SCRIPTS_DIR/forge-milestone-endpoint.js" --record --cwd "$WORKING_DIR" --milestone "$RUN_ID" --json']);
+    includesAll(label, block, ['verificação nova do código integrado', 'prova positiva', 'Recusa em 2, 3 ou 4 para a cadeia sem descongelar nada nem inventar prova']);
+  }
+  const usage = { stdout: { write() {} }, stderr: { write() {} } };
+  assert.strictEqual(require('./forge-milestone-endpoint').main(['--record', '--json'], usage), 2, 'endpoint CLI refuses an incomplete call');
+});
+
+t06('auto-handoff-start-cleanup-order', () => {
+  for (const [label, text] of t06Views('forge-auto')) {
+    const block = linkedBlock(text, 'closure', label), order = linkedBlock(text, 'cleanup-order', label);
+    inOrder(label, block, ['--record', 'node "$FORGE_SCRIPTS_DIR/forge-linked-task-start.js" --handoff --cwd "$WORKING_DIR" --milestone "$RUN_ID" --json',
+      '`/forge-task --resume {T}` ANTES da limpeza de isolamento da milestone', 'roda a limpeza de isolamento da milestone']);
+    includesAll(label, block, ['encerrar a cadeia (linked-task:close-chain)', 'adiada com motivo nomeado']);
+    const finalReport = text.slice(text.indexOf('## Final Report (milestone complete)'));
+    inOrder(`${label} final report`, finalReport, ['<!-- forge:linked-task:cleanup-order:start -->', '**Isolation cleanup**', 'forge-isolation.js" --cleanup --run']);
+    includesAll(label, order, ['ou depois do encerramento explícito da cadeia', 'volta a ser elegível no início real']);
+  }
+});
+
+t06('review-linked-budget-contract', () => {
+  const block = linkedBlock(read('shared/forge-review.md'), 'review-budget', 'review');
+  inOrder('review', block, ['`LINKED_TASK_ID`', 'BUDGET_UNIT=execute-task/{TASK_ID}', '`--budget-owner`, `--budget-task` e `--budget-unit`',
+    'Rode este bloco\nlogo depois do bloco acima', 'BUDGET_ARGS=(--budget-owner "$WORKING_DIR" --budget-task "$LINKED_TASK_ID" --budget-unit "$BUDGET_UNIT")']);
+  for (const [label, text] of t06Views('forge-task')) {
+    includesAll(label, linkedBlock(text, 'review-legs', label), ['`LINKED_TASK_ID="$TASK_ID"`', '`BUDGET_UNIT="execute-task/$TASK_ID"`', '`MILESTONE_ID` vazio',
+      'bloco ligado de `BUDGET_ARGS` de `shared/forge-review.md`', 'nunca `--budget-milestone`', 'não emite `review-agent-unavailable`',
+      'não tem retry nem fallback para outro revisor ou família', 'não produz `{TASK_ID}-REVIEW.md` limpo nem mínimo', 'o contexto continua vazio']);
+  }
+  assert.strictEqual(timeAdmission.TRANSPORT_REFUSAL_CODES.length, 13, 'actual exported refusal vocabulary after T05');
+});
+
+t06('dispatch-linked-budget-contract', () => {
+  const dispatch = read('shared/forge-dispatch.md');
+  const block = linkedBlock(dispatch, 'dispatch-budget', 'dispatch');
+  assert(dispatch.indexOf(block) > dispatch.indexOf('O sidecar de unidade (`forge-unit-sidecar --request`) rechecha'), 'linked rule extends the time guard paragraph');
+  inOrder('dispatch', block, ['`standalone-task`', 'delegam ao horizonte da task', '`--budget-owner`, `--budget-task` e `--budget-unit`', 'não há segundo modelo de autorização',
+    '`milestone-time-invalid` antes de qualquer transporte', 'Task sem vínculo continua com', 'é parada antes do provider com `provider_called:false`']);
+  includesAll('dispatch', block, ['nunca retry, fallback de engine ou de revisor', 'nem REVIEW limpo', 'não demonstra execução nem compreensão no cliente instalado']);
+});
+
+t06('real-two-host-projection-tests', () => {
+  const rendered = t06Projections();
+  for (const name of ALL) {
+    const source = skills[name];
+    for (const [host, projected] of [['Claude', rendered.claude[name]], ['Codex', rendered.codex[name]]]) {
+      const blocks = [...projected.matchAll(LINKED_BLOCK_RE)].map(match => match[0]);
+      assert.deepStrictEqual(blocks, [...source.matchAll(LINKED_BLOCK_RE)].map(match => match[0]), `${name} ${host}: the rendered projection carries exactly the source linked blocks`);
+      assert.deepStrictEqual(blocks.map(block => /forge:linked-task:([a-z0-9-]+):start/.exec(block)[1]), [...(T06_BLOCKS[name] || [])], `${name} ${host}: block inventory`);
+    }
+    assert(rendered.codex[name].startsWith('---') || rendered.codex[name].startsWith('<!-- forge-source:codex -->'), `${name}: Codex render, not a copy`);
+    assert(rendered.codex[name].includes('<!-- forge-source:codex -->'), `${name}: Codex origin marker`);
+  }
+  // The retained T01 phase literal checks of this suite still run against the real projections.
+  for (const name of TIME_SKILLS) assertTimeSkill(`${name} (Codex, T06)`, rendered.codex[name]);
+  console.log('note - T06 distribution only: Claude and Codex renders carry the linked text; client execution, comprehension, installation and human acceptance remain unknown.');
 });
 
 for (const temp of temps) fs.rmSync(temp, { recursive: true, force: true });
