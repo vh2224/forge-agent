@@ -106,8 +106,13 @@ observed 21.6% is not a guaranteed saving from consolidation.
 
 ## Deferred overlap
 
-`docs/milestone-time-options.md` remains deferred: no three time choices, runtime
-budgets or task-chain feature is implemented. The event-cost report is diagnostic
+`docs/milestone-time-options.md` is no longer deferred: its time options, milestone
+time governance, proven endpoint and linked task are implemented in milestone
+M-20261101111759-opcoes-prazo-milestones (S01 to S03). Operation is described in
+`docs/milestone-time-guide.md` and the canonical contract is
+`shared/forge-milestone-time.md`; the feature is listed under `## Não lançado` in
+`CHANGELOG.md`, and release, installation and human UAT remain separate facts.
+The event-cost report is diagnostic
 and does not select work or create an operational milestone. Likewise,
 `docs/forge-communication-panel-distribution.md` remains deferred; this change
 adds no panel installation or release-distribution feature. Human UAT and actual

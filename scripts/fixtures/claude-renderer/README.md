@@ -168,3 +168,31 @@ The other eight active hashes, immutable distribution-before fixture, historical
 goldens and all 248 registry classifications/fingerprints are unchanged. The
 pre-T07 comparison remains four of nine surfaces. Runtime restart tests are
 separate from distribution and do not establish client understanding or UAT.
+
+## Task ligada (M-20261101111759-opcoes-prazo-milestones, S03/T07)
+
+Medido por forge-claude-renderer.render com a fórmula acima (agrupar por source_id,
+ordenar por source com localeCompare, normalizar só `version=MAJOR.MINOR.PATCH`,
+unir source e conteúdo com NUL, SHA-256). Captura imutável do owner antes da T06:
+revisão `f0b5fb17b4c57348e18fbb96bf38e8fb6ef8ee2b`, copiada sem alteração para
+`scripts/fixtures/linked-task/distribution-before.json` (SHA-256
+`0464c29011c5b86a438d6e0f93ac07695957c0273e958018835a47c4ea4387d0`). Medição
+posterior do owner sobre o commit da T06 `a97856f221f56ab7038222c8fee115039f829f49`
+(mapa de fontes SHA-256 `d73ea5be335916e487011fe333847301d485101bd0c9d51158fd5c3911790a37`).
+
+Os nove hashes foram medidos antes e depois; só `skills` mudou:
+
+- skills: `1309f02bb58b79d61ba0bb1e897cdee4d37c232f488e1548106d4a999e57d061` to `4b1a158a3faedb66b0aab2033974917cedb4251d3352e90b5f019970330ae548`.
+
+Fontes do delta, todas declaradas pela T06 (blocos `forge:linked-task`):
+`skills/forge-auto/SKILL.md`, `skills/forge-next/SKILL.md`,
+`skills/forge-status/SKILL.md` e `skills/forge-task/SKILL.md`. Os demais arquivos
+declarados da T06 (`shared/*.md` e a suíte de superfícies) não entram em nenhuma das
+nove superfícies medidas. Os outros oito hashes ativos (`agents`, `commands`,
+`dispatch-templates`, `hooks`, `mcp`, `claude-instructions`, `claude-settings`,
+`configuration`) ficam iguais à captura, e os arquivos históricos 4.18.1
+(`a58a005aea70eaa17c0ecfaf1cdf8965cdf9adb8c2678e756ac83ea74d926d9c`) e 4.19.0
+(`f2b3e910445d2557f50aa4ced9e1b31498debc6b1cdd1ed05b452d8141b4307f`) ficam byte a
+byte iguais. O registro de despacho mantém as 248 linhas, classificações, motivos e
+fingerprints da captura: deriva medida zero, nenhuma linha editada. Distribuição não
+prova execução nem compreensão do cliente instalado, nem aceite humano.

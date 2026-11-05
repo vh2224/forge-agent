@@ -115,3 +115,27 @@ Na retomada, ler este documento completo, preservar a distinção entre conceito
 **Usuário, confirmação e acréscimo:** confirmou que a resposta capturou exatamente a ideia; explicou que tasks melhoraram muito na versão atual; propôs que uma alternativa curta possa separar a parte final numa task ligada, criada junto e encadeada imediatamente depois da milestone. Pediu preservar toda a discussão para retomar depois, pois a milestone importante e as issues existentes têm prioridade e a feature não pode ser implementada agora.
 
 **Assistente, registro:** preservou a discussão e a extensão da task ligada neste arquivo, com um apontador em `.gsd/sessions/ask-2026-10-30-prazos-milestone.md`. Acrescentou como recomendação a distinção entre prazo da milestone e prazo da cadeia completa. Salvou documentação local, sem commit, publicação remota ou início de implementação.
+
+## Estado da implementação
+
+Nota acrescentada depois do registro acima, que fica preservado como histórico
+(bytes originais intactos). A proposta foi implementada na milestone
+M-20261101111759-opcoes-prazo-milestones, em três slices:
+
+- S01 — tempo da milestone: contrato atestado, relógio, previsão, avisos, teto,
+  drain, checkpoint, extensão e retomada.
+- S02 — opções de prazo antes do roadmap: adesão, estimativa com três posições,
+  rodadas de decisão explícita, alocação delegada e vínculo das tasks.
+- S03 — task ligada e endpoint: criação junto com a escolha, endpoint comprovado
+  com congelamento do relógio, handoff, início encadeado ou explícito, horizonte
+  próprio da task e prazo da cadeia como soma derivada que não governa operação.
+
+Onde ler:
+
+- Guia operacional (pt-BR): `docs/milestone-time-guide.md`.
+- Contrato canônico distribuído aos dois hosts: `shared/forge-milestone-time.md`.
+- Entrega: entrada da feature em `## Não lançado` do `CHANGELOG.md`.
+
+Implementação, verificação local, revisão, CI, merge, release, instalação e aceite
+humano são fatos separados. Esta nota não afirma release, instalação nem teste
+manual; o UAT humano desta entrega foi dispensado e não foi realizado.

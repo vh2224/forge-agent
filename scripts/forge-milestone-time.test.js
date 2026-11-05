@@ -135,7 +135,20 @@ try {
   });
   test('proposal-document-sha256-preserved-owner-contribution', () => {
     const bytes = fs.readFileSync(path.join(__dirname, '../docs/milestone-time-options.md'));
-    assert.strictEqual(digest(bytes), 'aa2d8a09f8d129ba1370506a6fda375627ed145225cb64280358315b6abbbb48');
+    // The owner's original 12496 bytes stay as the exact prefix (same SHA-256 as SOURCE-PROPOSAL);
+    // only an appended implementation-status section follows, never a rewrite of the record.
+    const ORIGINAL_BYTES = 12496;
+    assert.ok(bytes.length > ORIGINAL_BYTES, 'implementation status appended after the original record');
+    assert.strictEqual(digest(bytes.subarray(0, ORIGINAL_BYTES)), 'aa2d8a09f8d129ba1370506a6fda375627ed145225cb64280358315b6abbbb48');
+    const suffix = bytes.subarray(ORIGINAL_BYTES).toString('utf8');
+    assert.ok(suffix.startsWith('\n## Estado da implementação\n'), 'the appended section starts right after the original bytes');
+    assert.strictEqual(suffix.split('\n## ').length, 2, 'exactly one appended section');
+    for (const reference of ['`docs/milestone-time-guide.md`', '`shared/forge-milestone-time.md`', '`CHANGELOG.md`']) {
+      assert.ok(suffix.includes(reference), reference);
+      const file = reference.slice(1, -1);
+      assert.ok(fs.existsSync(path.join(__dirname, '..', file)), file + ' exists');
+    }
+    assert.ok(suffix.includes('`## Não lançado`') && /dispensado e não foi realizado/.test(suffix), 'unreleased delivery and waived UAT stated');
   });
   test('declared-artifacts-exist-minimum-lines-and-no-module-stubs', () => {
     for (const [file, minimum] of [['shared/schemas/forge-milestone-time.schema.json', 60], ['scripts/forge-milestone-time.js', 260], ['scripts/forge-milestone-time.test.js', 220], ['docs/milestone-time-options.md', 100]]) {

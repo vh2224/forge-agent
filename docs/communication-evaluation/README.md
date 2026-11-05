@@ -159,3 +159,25 @@ from `637e73b1e2cdae1c97dd75f67f4f0b42028be6684235e6215c9516a1d1e37d1b` to `e8d0
 Quoted text and every other sample byte remain unchanged; the immutable
 distribution-before fixture is preserved. Runtime restart assertions are
 separate evidence from these source citations, with no human UAT claim.
+
+## Task ligada (S03/T07 de M-20261101111759-opcoes-prazo-milestones)
+
+A T06 acrescentou blocos `forge:linked-task` a `skills/forge-task/SKILL.md` e
+`skills/forge-next/SKILL.md`. Os textos citados continuam literais nas duas skills;
+só os quatro `source.sha256` das citações modelo-da-skill mudaram, para o SHA-256
+dos bytes reais de cada arquivo (a regra do validador). Os valores anteriores são
+os da captura do owner antes da T06 (revisão
+`f0b5fb17b4c57348e18fbb96bf38e8fb6ef8ee2b`, `scripts/fixtures/linked-task/distribution-before.json`)
+e conferem com os preimages imutáveis dessa revisão.
+
+| Amostra (campo) | Fonte | SHA-256 anterior | SHA-256 novo |
+|---|---|---|---|
+| entries[1].supporting.timeline.after.source.sha256 | skills/forge-task/SKILL.md#modelo-literal | d81556180d9bb16d45a8f81ba6b5faa12ece7f6601a510963f29eb50fe10679b | af9cf1d0b0b9f68ba751394f935e2c324050b226409f7bea9095700d13ea62ae |
+| entries[5].supporting.timeline.after.source.sha256 | skills/forge-task/SKILL.md#modelo-literal | d81556180d9bb16d45a8f81ba6b5faa12ece7f6601a510963f29eb50fe10679b | af9cf1d0b0b9f68ba751394f935e2c324050b226409f7bea9095700d13ea62ae |
+| entries[2].supporting.partial.after.source.sha256 | skills/forge-next/SKILL.md#parcial | e8d04241493f4fa7c5a1db28e075487759fea1dd87dfafdbb750aa06aa723d0f | d824741df528de5b38f35aec9e00e9df80349ae8ed4687e0bf6fdb1cb69dc59a |
+| entries[6].supporting.partial.after.source.sha256 | skills/forge-next/SKILL.md#parcial | e8d04241493f4fa7c5a1db28e075487759fea1dd87dfafdbb750aa06aa723d0f | d824741df528de5b38f35aec9e00e9df80349ae8ed4687e0bf6fdb1cb69dc59a |
+
+Repondo esses quatro valores, os bytes do arquivo voltam ao SHA-256 da captura
+(`3f4640b4c1383652e4890827d9e8456ae75c54f2493a9bdafa48931542fed10e`). Textos,
+rótulos, referências, rubricas e o aceite humano pending-final-round ficam iguais.
+É proveniência de fonte, não observação de cliente nem aceite humano.
