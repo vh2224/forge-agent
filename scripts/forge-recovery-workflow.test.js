@@ -586,7 +586,10 @@ async function main() {
         const savedResponse = JSON.parse(fs.readFileSync(receiptFile));
         assert.equal(savedResponse.phase, 'executed');
         assert.equal(savedResponse.provider_called, true);
-        assert.equal(savedResponse.delivery_capture, undefined, 'failed checks must be rerun, not cached as successful capture');
+        assert.equal(savedResponse.delivery_capture.passed, false, 'failed capture is retained for diagnosis, never verification success');
+        assert.equal(savedResponse.delivery_capture.gate.passed, false);
+        assert(savedResponse.delivery_capture.gate.roots.some(root => root.result.checks.some(check => check.exitCode !== 0 && !check.skipped)),
+          'retained capture includes the actual failed check');
         const planBytes = fs.readFileSync(execution.planFile);
         fs.appendFileSync(execution.planFile, '\nChanged input\n');
         await assert.rejects(unit.runUnitSidecar(execution), error =>
@@ -618,6 +621,7 @@ async function main() {
           const source = JSON.parse(fs.readFileSync(path.join(slice, `tasks/T01/T01-${kind}-${rootId}-ENVELOPE.json`)));
           assert.equal(source.root_id, rootId); assert.equal(source.result.passed, true);
         }
+        console.log('ok - owner-failed-capture-retained-and-reverified');
         console.log('PASS milestone execution: gate failure saves response; plan/code/protected-root drift refuses without inference; per-root real checks and single publication/replay');
         // Continue the controller fixture from its uncompleted task state.
         fs.unlinkSync(path.join(slice, 'tasks/T01/T01-SUMMARY.md'));

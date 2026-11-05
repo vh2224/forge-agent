@@ -335,6 +335,31 @@ async function suite() {
         assert.equal(controlBytes(view.model), controlStatusBytes, 'controls unchanged by an invalid linked horizon');
       } finally { fs.writeFileSync(startFile, startBytes); fs.utimesSync(startFile, startStat.atime, startStat.mtime); }
       assert.ok(fs.readFileSync(startFile).equals(startBytes));
+      // R44: a CANONICAL single-file edit of start.json (shorter consumption: started_at moved later, still before
+      // now) leaves its independent witness, BRIEF, handoff and endpoint untouched. Every reader projects the closed
+      // invalid/unknown state instead of a shortened consumption or an active state.
+      const forged = JSON.parse(startBytes.toString('utf8'));
+      forged.started_at = new Date(S + 45000).toISOString();
+      fs.writeFileSync(startFile, JSON.stringify(forged) + '\n');
+      try {
+        assert.equal(fs.readFileSync(startFile, 'utf8'), JSON.stringify(forged) + '\n');
+        const before = snap(F);
+        const view = at(S + 60000, () => withHome(F.home, () => {
+          const expectedInvalid = horizon.summarizeLinkedStatus(horizon.readLinkedStatus({ cwd: F.owner, task: T, now: S + 60000, ...prof }));
+          const model = status.collect(F.owner, { ...prof });
+          return { expectedInvalid, clock: horizon.readTaskClock({ cwd: F.owner, task: T, now: S + 60000 }), lifecycle: require('./forge-linked-task-start').linkedLifecycle(F.owner, T),
+            model, tree: status.renderTree(model), brief: summary.buildPersonalSummary({ project: F.owner, ...prof }) };
+        }));
+        assert.deepEqual(snap(F), before, 'canonical-edit projection reads are pure');
+        assert.deepEqual([view.lifecycle.status, view.lifecycle.reason], ['invalid', 'linked-task-record-start-witness']);
+        assert.equal(view.clock.status, 'invalid', 'the clock never computes a shortened consumption from an unwitnessed start');
+        assert.deepEqual(view.expectedInvalid, { task_id: T, lifecycle: 'invalid', task: null, milestone: null, chain: null, decision_pending: false, unknown: true });
+        assert.deepEqual(view.model.works.find(w => w.id === T).linked, view.expectedInvalid);
+        assert.ok(!view.tree.includes('estado da task: ativa'), 'never displayed as active from the adulterated timestamp');
+        assert.equal(view.brief.works.find(w => w.id === T).linked.state, 'unknown');
+      } finally { fs.writeFileSync(startFile, startBytes); fs.utimesSync(startFile, startStat.atime, startStat.mtime); }
+      assert.ok(fs.readFileSync(startFile).equals(startBytes));
+      process.stdout.write('ok - integrated-R44-canonical-start-witness-status\n');
     }
     // A real research attempt of the linked task, selected and bound below the cap through the
     // public preparation start; it is entered later, at the cap, to produce the genuine

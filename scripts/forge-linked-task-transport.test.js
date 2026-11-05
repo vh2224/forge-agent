@@ -786,6 +786,32 @@ async function suite() {
         assert.deepEqual([receipt.phase, receipt.failure.provider_called], ['failed', false]);
         assert.equal(hostCalls, 0, 'no host callback after the cap');
       }
+      // R43: a native handoff SELECTED below the cap before a close-chain question exists is still refused at the
+      // actual callback while that required decision is pending or accepted (zero host calls, pre-provider
+      // receipt); a declined decision is completed history and the control entry is admitted again.
+      {
+        clock = below;
+        const raw = prepRequest(F, 'codex', 'research', 'native-close-chain', caps);
+        const selected = await prep.startStandaloneTaskPreparation(raw, { now });
+        assert.equal(selected.action, 'invoke-native', JSON.stringify(selected).slice(0, 300));
+        const opened = lts.prepareLinkedDecision({ cwd: F.owner, task: F.task, action: 'close-chain' });
+        assert.equal(opened.status, 'open', JSON.stringify(opened));
+        const before = hostCalls;
+        const outcome = await selected.invoke(async () => { hostCalls++; return { status: 'done' }; });
+        assert.deepEqual([outcome.ok, outcome.reason_code, outcome.provider_called], [false, 'linked-task-time-invalid', false], JSON.stringify(outcome).slice(0, 300));
+        assert.equal(hostCalls, before, 'no host callback while the close-chain decision is pending');
+        const receipt = JSON.parse(fs.readFileSync(raw.resultFile + '.receipt.json', 'utf8'));
+        assert.deepEqual([receipt.phase, receipt.failure.reason_code, receipt.failure.provider_called], ['failed', 'linked-task-time-invalid', false]);
+        // The sidecar entries (enterTransport and the Claude packaging hook) call this same common guard: a pending
+        // close-chain question refuses before any provider with the preserved pending ID.
+        let refusedEntry = null;
+        try { horizon.assertLinkedTaskEntry({ cwd: F.owner, taskId: F.task, unit: 'research-milestone/' + F.task, now: clock }); } catch (e) { refusedEntry = e; }
+        assert.ok(refusedEntry, 'the sidecar entry guard refuses while the close-chain decision is pending');
+        assert.deepEqual([refusedEntry.code, refusedEntry.provider_called, refusedEntry.stage, refusedEntry.details.pending_ids], ['linked-task-time-invalid', false, 'linked-task-admission', [opened.question.id]]);
+        assert.equal(lts.answerLinkedDecision({ cwd: F.owner, task: F.task, action: 'close-chain', response: 'linked-task:keep-chain', source: 'user-text' }).status, 'answered');
+        assert.doesNotThrow(() => horizon.assertLinkedTaskEntry({ cwd: F.owner, taskId: F.task, unit: 'research-milestone/' + F.task, now: clock }), 'a declined decision does not block');
+        process.stdout.write('ok - integrated-R43-late-close-chain-admission transport selected-before-question\n');
+      }
       {
         clock = below;
         const raw = prepRequest(F, 'codex', 'brainstorm', 'native-admitted', caps);

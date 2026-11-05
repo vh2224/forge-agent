@@ -114,11 +114,12 @@ async function main() {
     assert.equal(api.measure(cyclic, 'structured', true).diagnostic, 'measurement-failed');
   });
   await test('native exact 9995-byte argument and structured request precede callback failure', async () => {
+    fs.mkdirSync(path.join(lab, '.gsd'), { recursive: true });
     const text = 'ação 🧪' + 'x'.repeat(9995 - Buffer.byteLength('ação 🧪'));
     let packaged, observed;
     const options = { ...nativeOptions(text), budgets: { coding_standards: 128 },
       telemetryIdentity: { unitType: 'execute-task', scope: 'milestone', phase: 'execute', dispatchId: 'native-fixture',
-        cwd: lab, planFile: path.join(lab, 'T01-PLAN.md') },
+        cwd: lab, contextRoot: lab, milestoneId: 'M001', taskId: 'T01', planFile: path.join(lab, 'T01-PLAN.md') },
       onPackagedContext: value => { packaged = value; } };
     const result = await native.invokeNative(options, args => {
       observed = args; assert(packaged, 'capture must precede tool callback'); throw timeout();

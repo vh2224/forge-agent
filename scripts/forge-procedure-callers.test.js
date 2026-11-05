@@ -23,8 +23,16 @@ const query = (unitType = 'execute-task', extra = {}) => resolveMemoryQuery({ cw
 
 // Adapt the actual documented argv, never evaluate shell/imported commands.
 function argv(command, values) {
+  const optionalDescription = '${UNIT_DESCRIPTION:+--description "$UNIT_DESCRIPTION"}';
+  const descriptionToken = '__FORGE_FIXTURE_DESCRIPTION_VALUE__';
+  if (command.includes(optionalDescription)) {
+    assert(Object.hasOwn(values, 'UNIT_DESCRIPTION'), 'unknown actual caller variable UNIT_DESCRIPTION');
+    command = command.split(optionalDescription).join(values.UNIT_DESCRIPTION ? `--description "${descriptionToken}"` : '');
+  }
   return [...command.replace(/\\\r?\n/g, ' ').matchAll(/"([^"]*)"|'([^']*)'|([^\s]+)/g)].map(match => {
     const token = match[1] ?? match[2] ?? match[3];
+    // Insert the complete literal value after lexing; never interpret its quotes, variables or shell syntax.
+    if (token === descriptionToken) return values.UNIT_DESCRIPTION;
     return token.replace(/\$\(pwd\)/g, root).replace(/\$\{PREFS\[token_budget\]\[([^\]]+)\]:-(\d+)\}/g,
       (_, key, fallback) => values[key] ?? fallback).replace(/\$([A-Za-z_][A-Za-z_0-9]*)/g, (_, key) => {
       assert(Object.hasOwn(values, key), `unknown actual caller variable ${key}`); return values[key];
@@ -40,8 +48,16 @@ function extract(skill, variable) {
 const values = { FORGE_SCRIPTS_DIR: __dirname, WORKING_DIR: root, WORKER_CWD: root,
   unit_type: 'execute-task', MILESTONE_ID: milestone, SLICE_ID: 'S01', TASK_ID: 'T100',
   DISPATCH_ID: 'fixture', unit_effort: 'medium', THINKING_OPUS: 'off', AUTO_COMMIT: 'false',
-  MILESTONE_CLEANUP: 'keep', ISOLATION_MODE: 'shared', BRANCH: '', MEMORY_QUERY_FILE: '', PENDING_CONTEXT_FILE: '' };
+  MILESTONE_CLEANUP: 'keep', ISOLATION_MODE: 'shared', BRANCH: '', MEMORY_QUERY_FILE: '', PENDING_CONTEXT_FILE: '', UNIT_DESCRIPTION: '' };
 try {
+  test('documented optional description expansion preserves one literal argument without shell evaluation', () => {
+    const command = '--unit-type "$unit_type" ${UNIT_DESCRIPTION:+--description "$UNIT_DESCRIPTION"}';
+    assert.deepEqual(argv(command, values), ['--unit-type', 'execute-task']);
+    const literal = 'task with spaces "$UNKNOWN" $(never-executed) ; & literal';
+    assert.deepEqual(argv(command, { ...values, UNIT_DESCRIPTION: literal }), ['--unit-type', 'execute-task', '--description', literal]);
+    assert.throws(() => argv('--unit-type "$UNKNOWN"', values), /unknown actual caller variable UNKNOWN/);
+    assert.throws(() => argv(command, { unit_type: 'execute-task' }), /unknown actual caller variable UNIT_DESCRIPTION/);
+  });
   const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '../shared/forge-procedures.json'), 'utf8'));
   put('shared/forge-procedures.json', JSON.stringify(manifest));
   for (const module of manifest.modules.filter(item => item.status === 'ready')) put(module.path, fs.readFileSync(path.join(__dirname, '..', module.path)));
@@ -135,6 +151,8 @@ try {
       const peek = boundary.peek(root, identity, { run: milestone });
       const actual = { ...values, DISPATCH_ID: `fixture-${name}`, MEMORY_QUERY_FILE: resolved.query_file, PENDING_CONTEXT_FILE: peek.pending_file };
       const args = argv(extract(skill, 'PROMPT_META'), actual);
+      assert(!args.includes('--description'), 'empty description omits the optional flag');
+      assert(!args.some(value => value.includes('${')), 'no unexpanded conditional fragments');
       assert(args.includes('--memory-query-file')); assert(!args.includes('--memory-query') || args[args.indexOf('--memory-query') + 1] === '');
       const rendered = json(args); const prompt = fs.readFileSync(rendered.prompt_path, 'utf8');
       assert(prompt.includes('T99/MEM013')); assert(prompt.includes('ultraviolet cache persistence sentinel'));
@@ -147,6 +165,20 @@ try {
       assert.equal(boundary.peek(root, identity, { run: milestone }).pending, false);
       json([path.join(__dirname, 'forge-prompt.js'), '--cleanup', actual.DISPATCH_ID, '--cwd', root]);
       assert(!fs.existsSync(rendered.prompt_path));
+    });
+    test(`${name}: extracted plan and estimate descriptions reach the real renderer with mandatory procedures`, () => {
+      for (const unitType of ['plan-milestone', 'estimate-milestone']) {
+        const description = 'ultraviolet milestone description with spaces';
+        const dispatch = `description-${name}-${unitType}`;
+        const args = argv(extract(skill, 'PROMPT_META'), { ...values, unit_type: unitType, DISPATCH_ID: dispatch, UNIT_DESCRIPTION: description });
+        assert.equal(args.filter(value => value === '--description').length, 1);
+        assert.equal(args[args.indexOf('--description') + 1], description);
+        const rendered = json(args), prompt = fs.readFileSync(rendered.prompt_path, 'utf8');
+        assert(prompt.includes(description));
+        assert(prompt.includes('<!-- forge-procedure:core -->'));
+        assert(prompt.includes('<!-- forge-procedure:planning -->'));
+        json([path.join(__dirname, 'forge-prompt.js'), '--cleanup', dispatch, '--cwd', root]);
+      }
     });
     test(`${name}: unavailable optional query and zero memory budget preserve real rendering without IDs fallback`, () => {
       fs.renameSync(path.join(root, plan), path.join(root, plan + '.held'));

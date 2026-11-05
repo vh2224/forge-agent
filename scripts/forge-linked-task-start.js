@@ -52,6 +52,8 @@ const HANDOFF_RECORD_FIELDS = Object.freeze({
   chain_closure: Object.freeze(['schema_version', 'kind', 'milestone', 'task_id', 'link_sha256', 'decision', 'closed_at']),
   closure: Object.freeze(['schema_version', 'kind', 'milestone', 'task_id', 'link_sha256', 'start_sha256', 'summary', 'delivery', 'closed_at', 'fingerprint']),
   closure_delivery: Object.freeze(['reference', 'sha256', 'input_sha256', 'fingerprint', 'criteria']),
+  // Optional verified task clock projection retained at the genuine closure (R45): the last key of a closure record.
+  closure_clock: Object.freeze(['policy', 'consumption', 'waits', 'overlap_ms', 'gaps', 'gap_count', 'journal_records', 'unknowns']),
 });
 const KINDS = Object.freeze({ handoff: 'forge-linked-task-handoff', start: 'forge-linked-task-start', 'start-witness': 'forge-linked-task-start-witness', 'chain-closure': 'forge-linked-task-chain-closure', closure: 'forge-linked-task-closure' });
 const RECORDS = Object.freeze(['handoff', 'start', 'chain-closure', 'closure']);
@@ -97,6 +99,7 @@ function linkedTask() { return require('./forge-linked-task'); }
 function endpoints() { return require('./forge-milestone-endpoint'); }
 function clocks() { return require('./forge-milestone-time-clock'); }
 function admission() { return require('./forge-milestone-time-admission'); }
+function horizonModule() { return require('./forge-linked-task-horizon'); }
 function questions() { return require('./forge-pending-questions'); }
 function runs() { return require('./forge-runs'); }
 function personal() { return require('./forge-personal-context'); }
@@ -214,8 +217,18 @@ function chainClosureValid(v) {
     && typedId(v.milestone, 'milestone') && typedId(v.task_id, 'task')
     && decisionValid(v.decision) && v.decision.answer === 'linked-task:close-chain' && instant(v.closed_at) && time().isPublicData(v);
 }
+// The retained clock of a closed task: bounded integers and typed reasons only. Its coherence with the closure
+// instants (partition of the horizon, consumption table) is checked by the horizon reader that consumes it.
+function closureClockValid(c) {
+  const F = HANDOFF_RECORD_FIELDS, ints = o => object(o) && Object.keys(o).length <= 16 && Object.entries(o).every(([k, n]) => /^[a-z][a-z-]{0,40}$/.test(k) && count(n));
+  return exact(c, F.closure_clock) && exact(c.policy, ['id', 'version']) && typeof c.policy.id === 'string' && /^[a-z][a-z0-9-]{0,60}$/.test(c.policy.id) && Number.isSafeInteger(c.policy.version) && c.policy.version > 0
+    && exact(c.consumption, ['consumed_ms', 'unknown_ms', 'by_class']) && count(c.consumption.consumed_ms) && count(c.consumption.unknown_ms) && ints(c.consumption.by_class)
+    && ints(c.waits) && count(c.overlap_ms) && Array.isArray(c.gaps) && c.gaps.length <= 64 && count(c.gap_count) && c.gap_count >= c.gaps.length
+    && c.gaps.every(g => exact(g, ['start', 'end', 'reason']) && count(g.start) && count(g.end) && g.end >= g.start && typeof g.reason === 'string' && /^[a-z][a-z0-9-]{0,40}$/.test(g.reason))
+    && count(c.journal_records) && Array.isArray(c.unknowns) && c.unknowns.length <= 16 && c.unknowns.every(u => typeof u === 'string' && /^[a-z][a-z0-9-]{0,80}$/.test(u));
+}
 function closureValid(v) {
-  return exact(v, HANDOFF_RECORD_FIELDS.closure) && v.schema_version === HANDOFF_SCHEMA_VERSION && v.kind === KINDS.closure && hash(v.link_sha256) && hash(v.start_sha256)
+  return (exact(v, HANDOFF_RECORD_FIELDS.closure) || exact(v, [...HANDOFF_RECORD_FIELDS.closure, 'clock']) && closureClockValid(v.clock)) && v.schema_version === HANDOFF_SCHEMA_VERSION && v.kind === KINDS.closure && hash(v.link_sha256) && hash(v.start_sha256)
     && typedId(v.milestone, 'milestone') && typedId(v.task_id, 'task')
     && exact(v.summary, ['reference', 'sha256']) && hash(v.summary.sha256) && exact(v.delivery, HANDOFF_RECORD_FIELDS.closure_delivery)
     && hash(v.delivery.sha256) && hash(v.delivery.input_sha256) && hash(v.delivery.fingerprint) && Number.isSafeInteger(v.delivery.criteria) && v.delivery.criteria > 0
@@ -240,6 +253,11 @@ function requireRecords(owner, probe) {
   for (const name of ['chain-closure', 'closure', 'start']) if (recs[name].status === 'invalid') fail('linked-task-state-invalid', name + '-' + recs[name].reason);
   return recs;
 }
+function startWitnessIntact(owner, probe, start) {
+  const witness = time().readOwnerRecord({ cwd: owner, milestone: probe.milestone, path: recordPath('start-witness') });
+  return witness.status === 'valid' && startWitnessValid(witness.record) && witness.record.milestone === probe.milestone && witness.record.task_id === probe.task_id
+    && witness.record.link_sha256 === probe.link_sha256 && witness.record.start_sha256 === start.sha256 && same(witness.record.start, start.record);
+}
 // linkedLifecycle(cwd, task): null for an unlinked task (no time state read); otherwise
 // one of LIFECYCLE_STATES from the immutable records. Pure read, never throws.
 function linkedLifecycle(cwd, task) {
@@ -250,6 +268,9 @@ function linkedLifecycle(cwd, task) {
     const recs = lifecycleRecords(owner, probe), base = { task_id: probe.task_id, milestone: probe.milestone, link_sha256: probe.link_sha256, authorization: probe.authorization };
     const bad = RECORDS.find(name => recs[name].status === 'invalid');
     if (bad) return { status: 'invalid', ...base, reason: 'linked-task-record-' + recs[bad].reason, record: bad };
+    // A start (and so a started or closed lifecycle) is exposed only while it equals its independently
+    // published witness: a canonical single-file edit is invalid for every reader (clock, status, summaries).
+    if (recs.start.status === 'valid' && !startWitnessIntact(owner, probe, recs.start)) return { status: 'invalid', ...base, reason: 'linked-task-record-start-witness', record: 'start' };
     const shas = Object.fromEntries(RECORDS.filter(n => recs[n].status === 'valid').map(n => [n.replace('-', '_') + '_sha256', recs[n].sha256]));
     const status = recs.closure.status === 'valid' ? 'closed' : recs['chain-closure'].status === 'valid' ? 'chain-closed' : recs.start.status === 'valid' ? 'started'
       : recs.handoff.status === 'valid' ? (probe.authorization === CHAINED ? 'handoff-ready' : 'open') : 'blocked';
@@ -1154,6 +1175,20 @@ function consumedHandoffBlock(cwd, task) {
   if (probe.status !== 'linked') fail('linked-task-state-invalid', probe.reason);
   return consumedEvidence(owner, probe).block;
 }
+// requireEntryDecisionsClear(cwd, task): bounded read-only gate for an actual provider entry of a started
+// linked task. A required close-chain decision of this link that is still pending, or already answered to close
+// the chain (closure not yet published), blocks the entry; an unreadable/excess census fails closed. It never
+// writes and returns null for an unlinked task (no time state is read). Throws the same named refusals as
+// continueLinkedTask: linked-task-decision-pending (with pending_ids), linked-task-authorization-revoked
+// (chain-closure-decided) or linked-task-question-census-unknown.
+function requireEntryDecisionsClear(cwd, task) {
+  const owner = ownerOf(cwd), probe = linkedTask().linkedTaskFor(owner, task);
+  if (probe === null) return null;
+  if (probe.status !== 'linked') fail('linked-task-state-invalid', probe.reason);
+  requireClosingNotDecided(owner, probe);
+  requireDecisionsClear(owner, probe);
+  return { task_id: probe.task_id, milestone: probe.milestone };
+}
 function startAuthorityPlan(probe, start) {
   if (start.authority.mode === 'chained') {
     const link = probe.link;
@@ -1289,11 +1324,16 @@ function closeLinkedTask(input = {}) {
     const result = selection().ownerBoundary(owner, probe.milestone, () => {
       const again = consumedEvidence(owner, probe), delivered = taskDeliveryProof(owner, probe.task_id, input.codeDir);
       if (again.startSha !== evidence.startSha || !same(delivered, proof)) fail('linked-task-delivery-unproven', 'changed-during-closure');
+      // The verified task clock at the instant of closure is retained in the immutable record, so a later census growth
+      // of unrelated question states can never reclassify the closed horizon. It is omitted only when it cannot be
+      // measured; the reader then keeps its conservative live computation.
+      const clock = horizonModule().closureClock({ cwd: owner, task: probe.task_id, now });
       const record = { schema_version: HANDOFF_SCHEMA_VERSION, kind: KINDS.closure, milestone: probe.milestone, task_id: probe.task_id, link_sha256: probe.link_sha256,
-        start_sha256: again.startSha, summary: delivered.summary, delivery: delivered.delivery, closed_at: new Date(now).toISOString(), fingerprint: delivered.delivery.fingerprint };
+        start_sha256: again.startSha, summary: delivered.summary, delivery: delivered.delivery, closed_at: new Date(now).toISOString(), fingerprint: delivered.delivery.fingerprint,
+        ...(clock ? { clock } : {}) };
       const current = time().readOwnerRecord({ cwd: owner, milestone: probe.milestone, path: recordPath('closure') });
       let published;
-      if (current.status === 'valid' && closureValid(current.record) && same({ ...current.record, closed_at: null }, { ...record, closed_at: null })) published = { status: 'unchanged', sha256: current.sha256 };
+      if (current.status === 'valid' && closureValid(current.record) && same({ ...current.record, closed_at: null, clock: null }, { ...record, closed_at: null, clock: null })) published = { status: 'unchanged', sha256: current.sha256 };
       else if (current.status === 'absent') { published = time().publishOwnerRecord({ cwd: owner, milestone: probe.milestone, path: recordPath('closure'), record }); wrote = true; }
       else fail('linked-task-closure-conflict', 'closure');
       point(input, 'after-closure');
@@ -1373,6 +1413,6 @@ function main(argv = process.argv.slice(2), io = process, liveAdapter) {
 
 module.exports = { HANDOFF_SCHEMA_VERSION, LIFECYCLE_STATES, START_REFUSALS, BASE_KINDS, PREDECESSOR_REASONS, LIFECYCLE_REFUSALS, LINKED_DECISION_ACTIONS,
   HANDOFF_MARKERS, HANDOFF_RECORD_FIELDS, linkedLifecycle, provePredecessor, produceHandoff, renderHandoffBlock, validateLinkedBase, startLinkedTask,
-  continueLinkedTask, consumedHandoffBlock, closeChain, closeLinkedTask, prepareLinkedDecision, answerLinkedDecision, recordLinkedDecisionRound,
+  continueLinkedTask, consumedHandoffBlock, requireEntryDecisionsClear, closeChain, closeLinkedTask, prepareLinkedDecision, answerLinkedDecision, recordLinkedDecisionRound,
   deriveHandoffSnapshot, handoffSourceProjection: stableHandoff, handoffBindingMatches, main };
 if (require.main === module) process.exitCode = main();

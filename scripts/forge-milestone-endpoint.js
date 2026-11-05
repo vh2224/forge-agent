@@ -48,7 +48,14 @@ function selection() { return require('./forge-milestone-time-selection'); }
 function roots() { return require('./forge-code-roots'); }
 function refusal(code, extra) { return Object.assign(new Error(code), { code, extra }); }
 function reasonOf(e) { const code = e?.code; return typeof code === 'string' && /^endpoint-[a-z0-9-]{1,80}$/.test(code) ? code : STORAGE_REASONS[code] || 'endpoint-operation-refused'; }
-function refused(milestone, e) { return { status: 'refused', milestone: typeof milestone === 'string' ? milestone : null, reason: reasonOf(e), ...(e?.extra || {}) }; }
+// Only a supported public typed milestone ID is ever echoed back: an unsafe argument is never reflected.
+function publicMilestone(v) {
+  try {
+    const ids = require('./forge-ids');
+    return typeof v === 'string' && !/[\\/\0]/.test(v) && ids.isValid(v) && ids.entityKind(v) === 'milestone' && time().isPublicData(v) ? v : null;
+  } catch { return null; }
+}
+function refused(milestone, e) { return { status: 'refused', milestone: publicMilestone(milestone), reason: reasonOf(e), ...(e?.extra || {}) }; }
 function object(v) { return !!v && typeof v === 'object' && !Array.isArray(v); }
 function exact(v, keys) { return object(v) && Object.keys(v).length === keys.length && keys.every(k => Object.hasOwn(v, k)); }
 function hash(v) { return typeof v === 'string' && HASH.test(v); }
@@ -357,11 +364,14 @@ function main(argv = process.argv.slice(2), io = process) {
   else if (action === '--record') result = recordEndpoint(input);
   else {
     let owner = null; try { owner = selection().ownerRoot(input); } catch { owner = null; }
-    result = !owner ? { status: 'refused', milestone: null, reason: 'endpoint-owner-invalid' }
+    // An unsupported milestone argument is refused by name before any read, like --verify and --record.
+    result = publicMilestone(input.milestone) === null ? { status: 'refused', milestone: null, reason: 'endpoint-milestone-invalid' } : !owner ? { status: 'refused', milestone: null, reason: 'endpoint-owner-invalid' }
       : action === '--prove' ? clock().readEndpointProof({ cwd: owner, milestone: input.milestone }) : readEndpoint({ cwd: owner, milestone: input.milestone });
   }
   // Public JSON only: relative references, digests and typed reasons, never an absolute path.
-  const view = time().isPublicData(result) ? result : { status: result.status, milestone: typeof result.milestone === 'string' ? result.milestone : null,
+  // The milestone is normalized on every non-null projection and the final object must itself be public.
+  const projected = Object.hasOwn(result, 'milestone') ? { ...result, milestone: publicMilestone(result.milestone) } : result;
+  const view = time().isPublicData(projected) ? projected : { status: result.status, milestone: publicMilestone(result.milestone),
     reason: typeof result.reason === 'string' && /^[a-z][a-z0-9-]{0,100}$/.test(result.reason) ? result.reason : 'endpoint-output-not-public' };
   io.stdout.write((json ? JSON.stringify(view) : message(action, view)) + '\n');
   return ACTIONS[action].includes(view.status) ? 0 : 3;

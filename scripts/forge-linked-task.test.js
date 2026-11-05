@@ -486,6 +486,19 @@ async function suite() {
       assert.strictEqual(spawnSync(process.execPath, [SCRIPT, '--bogus'], { encoding: 'utf8' }).status, 2);
       assert.strictEqual(spawnSync(process.execPath, [SELECTION_SCRIPT, '--decide', '--cwd', cli.owner, '--milestone', M, '--json'], { encoding: 'utf8' }).status, 3);
       assert.deepStrictEqual(snapshot(cli), cliBefore, 'standalone CLIs write nothing');
+      // R42: an unsafe or wrong-kind milestone argument keeps the named refusal but is never echoed, in JSON or text.
+      for (const unsafe of ['C:\\private\\record', 'token=synthetic-only', '/private/record', 'T-20261103120000-not-a-milestone']) {
+        for (const json of [true, false]) {
+          const out = spawnSync(process.execPath, [SCRIPT, '--create', '--cwd', cli.owner, '--milestone', unsafe, ...(json ? ['--json'] : [])], { encoding: 'utf8', env: { ...process.env, HOME: cli.home, USERPROFILE: cli.home } });
+          assert.strictEqual(out.status, 3, unsafe + ' ' + out.stderr);
+          assert.ok(!out.stdout.includes(unsafe) && !out.stdout.includes('private'), 'unsafe milestone echoed: ' + out.stdout);
+          if (json) assert.deepStrictEqual([JSON.parse(out.stdout).reason, JSON.parse(out.stdout).milestone], [REQUIRED, null]);
+        }
+      }
+      const echoed = spawnSync(process.execPath, [SCRIPT, '--create', '--cwd', cli.owner, '--milestone', M, '--json'], { encoding: 'utf8', env: { ...process.env, HOME: cli.home, USERPROFILE: cli.home } });
+      assert.strictEqual(JSON.parse(echoed.stdout).milestone, M, 'a supported typed milestone is still reported');
+      assert.deepStrictEqual(snapshot(cli), cliBefore, 'unsafe arguments write nothing');
+      line('integrated-R42-public-milestone-output');
       // The genuine live handle creates once; the handle is never persisted.
       const ok = copyOf(decidedStart), guard = ownerLockGuard(), adapter = liveAdapter(ok.owner);
       try {
@@ -551,6 +564,33 @@ async function suite() {
         assert.deepStrictEqual([replay.status, replay.reason, replay.detail], ['refused', 'linked-task-creation-conflict', 'checkpoint'], JSON.stringify(replay));
         assert.strictEqual(snap(), before, 'independent captures preserved exactly');
         assert.ok(before.includes('pergunta independente') && before.includes('ação independente'));
+      }
+      // R40: an independent winner committed AFTER the empty-slot snapshot but BEFORE the personal mutex is
+      // acquired by the conditional save is refused by name and its exact captures survive.
+      {
+        const f = copyOf(decidedStart), crashed = child(f, 'after-binding'), task = crashed.task_id;
+        const source = write(f.owner, 'NOTAS-CONCORRENTES.md', 'captura concorrente\n');
+        const snap = () => JSON.stringify(personal.readPersonalSnapshot({ project: f.owner, id: task, ...profile(f) }).works.find(w => w.id === task).checkpoint);
+        let raced = 0;
+        const replay = create(f, { failpoint: name => {
+          if (name !== 'before-checkpoint-save') return false;
+          raced++;
+          const winner = personal.saveCheckpoint({ project: f.owner, id: task, intent: 'checkpoint', ...profile(f),
+            checkpoint: { pending: [{ text: 'pergunta vencedora', source }], nextAction: [{ text: 'ação vencedora', source }] } });
+          assert.strictEqual(winner.status, 'ok', JSON.stringify(winner));
+          return false;
+        } });
+        assert.strictEqual(raced, 1, 'the personal-mutex acquisition seam was exercised once');
+        assert.deepStrictEqual([replay.status, replay.reason, replay.detail], ['refused', 'linked-task-creation-conflict', 'checkpoint'], JSON.stringify(replay));
+        const kept = snap();
+        assert.ok(kept.includes('pergunta vencedora') && kept.includes('ação vencedora'), 'concurrent winner preserved');
+        assert.ok(!kept.includes('Aguardando a conclusão comprovada'), 'no linked capture replaced the winner');
+        assert.strictEqual(snap(), kept);
+        // Without a racing winner the same conditional save still completes the resumed creation.
+        const clean = copyOf(decidedStart); child(clean, 'after-binding');
+        const resumed = create(clean, { failpoint: () => false });
+        assert.deepStrictEqual([resumed.status, resumed.steps_written], ['resumed', ['checkpoint']], JSON.stringify(resumed));
+        line('integrated-R40-creation-checkpoint-CAS');
       }
       // A foreign directory under the persisted ID is a collision, never adopted.
       const collided = copyOf(decidedStart), crashed = child(collided, 'after-index');

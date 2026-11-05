@@ -653,6 +653,37 @@ async function suite() {
     refusedExtension('serialized handle', 'linked-task-authorization-required', () => extend(E1, { getDecisionHandle: r => JSON.parse(JSON.stringify(liveAdapter(F.owner, { now: nowX }).getDecisionHandle(r))) }));
     refusedExtension('adapter failure', 'linked-task-authorization-required', () => extend(E1, liveAdapter(F.owner, { throws: true })));
     refusedExtension('changed answer', 'linked-task-authorization-revoked', () => extend(E1, liveAdapter(F.owner, { now: nowX, answer: 'linked-task:extend:' + E2 })));
+    // R47: an interruption after the immutable extension publication leaves the old cap's captures pending;
+    // retries (also after a genuine conditional-save conflict) complete ONLY that personal release, with no
+    // second extension, no higher ceiling and no new consent. The embedded main below performs the final recovery.
+    {
+      const ext1Ref = `.gsd/forge/time/${M}/linked-task/extensions/0001.json`;
+      const interrupted = extend(E1, liveAdapter(F.owner, { now: nowX }), { failpoint: name => name === 'after-extension' });
+      assert.deepEqual([interrupted.status, interrupted.reason, interrupted.detail], ['partial', 'linked-task-operation-failed', 'failpoint-after-extension'], JSON.stringify(interrupted));
+      const ext1Bytes = fs.readFileSync(file(F.owner, ext1Ref));
+      assert.equal(horizon.readLinkedStatus({ cwd: F.owner, task: T, now: nowX, ...F.prof }).task_horizon.ceiling_ms, E1, 'the published extension already governs');
+      assert.ok(workOf(F).checkpoint.pending.some(c => c.text === cp.next_action), 'the old cap capture is still pending after the interruption');
+      // Genuine conditional-save conflict: a concurrent independent winner commits before the release is saved.
+      const baseSave = personal.saveCheckpoint;
+      let raced = 0;
+      personal.saveCheckpoint = function (options) {
+        if (!raced++) {
+          const work = workOf(F), keep = (work.checkpoint.pending || []).map(c => ({ text: c.text, source: c.source, resolved: c.resolved }));
+          assert.equal(baseSave({ project: F.owner, ...F.prof, id: T, intent: 'checkpoint', checkpoint: { pending: [...keep, { text: 'Nota concorrente da extensão', source: independentSource }] } }).status, 'ok');
+        }
+        return baseSave.call(this, options);
+      };
+      let conflicted;
+      try { conflicted = extend(E1, liveAdapter(F.owner, { now: nowX })); } finally { personal.saveCheckpoint = baseSave; }
+      assert.deepEqual([conflicted.status, conflicted.reason, conflicted.detail], ['refused', 'linked-task-personal-conflict', 'checkpoint-conflict'], JSON.stringify(conflicted));
+      assert.ok(workOf(F).checkpoint.pending.some(c => c.text === 'Nota concorrente da extensão') && workOf(F).checkpoint.pending.some(c => c.text === cp.next_action), 'the competing winner is preserved and the release still pending');
+      assert.ok(fs.readFileSync(file(F.owner, ext1Ref)).equals(ext1Bytes), 'the immutable extension is never rewritten');
+      assert.equal(fs.readdirSync(file(F.owner, `.gsd/forge/time/${M}/linked-task/extensions`)).length, 1, 'no second extension');
+      // A fresh scope never recovers: an unrelated value keeps its ordinary named refusals and writes nothing.
+      refusedExtension('other value is not a recovery', 'linked-task-extension-request-required', () => extend(E1 + 1, liveAdapter(F.owner, { now: nowX })));
+      refusedExtension('recovery needs live authority', 'linked-task-authorization-required', () => horizon.extendTaskHorizon({ cwd: F.owner, task: T, ceilingMs: E1, now: nowX, ...F.prof }));
+      refusedExtension('recovery reattests the persisted answer', 'linked-task-authorization-required', () => extend(E1, liveAdapter(F.owner, { now: nowX, expires: nowX - 1 })));
+    }
     // The standalone CLI refuses before any read; only the embedded main with the live adapter extends.
     before = snap(F);
     const standalone = cli(F, ['--extend', '--cwd', F.owner, '--task', T, '--ceiling-ms', String(E1), '--json']);
@@ -665,6 +696,12 @@ async function suite() {
     finally { process.env.HOME = suiteHome; process.env.USERPROFILE = suiteHome; }
     const ext1 = JSON.parse(out.text);
     assert.deepEqual([ext1.status, ext1.sequence, ext1.previous_ceiling_ms, ext1.ceiling_ms, ext1.personal], ['extended', 1, C, E1, 'saved']);
+    // R47: the embedded recovery completed ONLY the personal release of the already published extension.
+    assert.equal(ext1.recovered, true);
+    assert.equal(fs.readdirSync(file(F.owner, `.gsd/forge/time/${M}/linked-task/extensions`)).length, 1, 'recovery never publishes a second extension');
+    assert.ok(!workOf(F).checkpoint.pending.some(c => c.text === cp.next_action) && !workOf(F).checkpoint.nextAction.some(c => c.text === cp.next_action), 'the old cap captures are released');
+    assert.ok(workOf(F).checkpoint.pending.some(c => c.text === 'Nota concorrente da extensão') && workOf(F).checkpoint.pending.some(isIndependent), 'independent captures survive the recovery');
+    process.stdout.write('ok - integrated-R47-published-extension-personal-replay\n');
     noAbsolute(F, ext1, 'embedded extension output');
     const r1 = json(F.owner, `.gsd/forge/time/${M}/linked-task/extensions/0001.json`);
     assert.ok(horizon.validateExtensionRecord(r1));
@@ -710,6 +747,73 @@ async function suite() {
     assert.equal(guard.seen.nested, 0);
     line('fresh scoped live decision alone extends immutable chained task horizon');
 
+    // R46: a completed non-authorizing extension choice (keep-horizon) is retained history; a later explicit
+    // request for the SAME ceiling opens a new decision generation bound to its own live authority.
+    {
+      const G = chainFixture(); G.endpoint();
+      assert.equal(lts.produceHandoff({ cwd: G.owner, milestone: M, ...G.prof }).status, 'produced');
+      assert.equal(startTask(G).status, 'started');
+      const GT = G.task, gnow = Date.now() + 5000, Cg = linked.linkedTaskFor(G.owner, GT).link.linked_task.horizon.ceiling_ms, V = Cg + 4321;
+      const gExtend = adapter => horizon.extendTaskHorizon({ cwd: G.owner, task: GT, ceilingMs: V, now: gnow, liveAdapter: adapter, ...G.prof });
+      const g1 = prepared(G, V, gnow, 'Manter o horizonte');
+      assert.deepEqual([g1.generation, g1.sequence], [1, 1]);
+      const declinedBefore = snap(G), declined = gExtend(liveAdapter(G.owner, { now: gnow }));
+      assert.deepEqual([declined.status, declined.reason], ['refused', 'linked-task-authorization-revoked'], JSON.stringify(declined));
+      unchanged(G, declinedBefore, 'a declined generation never authorizes');
+      const g2 = horizon.prepareTaskExtension({ cwd: G.owner, task: GT, ceilingMs: V, now: gnow });
+      assert.deepEqual([g2.status, g2.generation, g2.answer], ['open', 2, null], JSON.stringify(g2));
+      assert.ok(g2.question.id !== g1.question.id && g2.question.identity_sha256 !== g1.question.identity_sha256 && g2.question.id.endsWith('-g2'), 'a new question identity per generation');
+      assert.deepEqual(g2.expected, ['linked-task:extend:' + V]);
+      assert.deepEqual(horizon.prepareTaskExtension({ cwd: G.owner, task: GT, ceilingMs: V, now: gnow }).question, g2.question, 'an unanswered generation stays stable');
+      assert.equal(gExtend(liveAdapter(G.owner, { now: gnow })).reason, 'linked-task-extension-request-required', 'the unanswered new generation does not authorize');
+      const answeredG2 = horizon.answerTaskExtension({ cwd: G.owner, task: GT, ceilingMs: V, now: gnow, response: 'linked-task:extend:' + V, source: 'user-text' });
+      assert.deepEqual([answeredG2.status, answeredG2.question], ['answered', g2.question], JSON.stringify(answeredG2));
+      const stored = q => questions.continuation({ cwd: G.owner, identity: q.identity_sha256 }).questions.find(row => row.id === q.id);
+      assert.equal(stored(g1.question).answer, 'linked-task:keep-horizon', 'the declined generation remains history, never rewritten');
+      assert.equal(stored(g2.question).answer, 'linked-task:extend:' + V);
+      // A handle bound to the declined generation never extends: authority is the current generation.
+      const stale = gExtend(liveAdapter(G.owner, { now: gnow, raw: request => liveAdapter(G.owner, { now: gnow }).getDecisionHandle({ ...request, question: g1.question, expected: ['linked-task:extend:' + V] }) }));
+      assert.equal(stale.status, 'refused', JSON.stringify(stale));
+      const extended = gExtend(liveAdapter(G.owner, { now: gnow }));
+      assert.deepEqual([extended.status, extended.sequence, extended.previous_ceiling_ms, extended.ceiling_ms], ['extended', 1, Cg, V], JSON.stringify(extended));
+      const record = json(G.owner, `.gsd/forge/time/${M}/linked-task/extensions/0001.json`);
+      assert.ok(horizon.validateExtensionRecord(record));
+      assert.deepEqual([record.decision.question, record.decision.answer], [g2.question, 'linked-task:extend:' + V], 'the record binds the live generation');
+      assert.equal(horizon.readLinkedStatus({ cwd: G.owner, task: GT, now: gnow, ...G.prof }).task_horizon.ceiling_ms, V, 'the generation-2 extension is attested by every reader');
+      assert.equal(stored(g1.question).answer, 'linked-task:keep-horizon');
+      process.stdout.write('ok - integrated-R46-extension-decision-generations\n');
+
+      // R43: an entry selected below the cap BEFORE a close-chain decision was opened or answered is still refused
+      // at the actual provider entry (the same bounded read-only gate as start/continue), with zero writes.
+      const unitG = 'execute-task/' + GT, entry = () => horizon.decideLinkedTaskEntry({ cwd: G.owner, taskId: GT, unit: unitG, now: gnow });
+      assert.deepEqual([entry().allowed, entry().decision], [true, 'admitted'], 'selected below the cap before any close-chain question');
+      const closing = lts.prepareLinkedDecision({ cwd: G.owner, task: GT, action: 'close-chain' });
+      assert.equal(closing.status, 'open', JSON.stringify(closing));
+      const pendingBefore = snap(G), pending = entry();
+      assert.deepEqual([pending.allowed, pending.reason_code, pending.details.decision, pending.details.pending_ids], [false, 'linked-task-time-invalid', 'close-chain-pending', [closing.question.id]], JSON.stringify(pending));
+      assert.ok(horizon.LINKED_TASK_TRANSPORT_CODES.includes(pending.reason_code), 'classified in the canonical transport vocabulary');
+      let thrown = null; try { horizon.assertLinkedTaskEntry({ cwd: G.owner, taskId: GT, unit: unitG, now: gnow }); } catch (e) { thrown = e; }
+      assert.deepEqual([thrown.code, thrown.provider_called, thrown.stage, thrown.details.pending_ids], ['linked-task-time-invalid', false, 'linked-task-admission', [closing.question.id]]);
+      unchanged(G, pendingBefore, 'pending close-chain refusal writes nothing');
+      // Declined (keep-chain) is completed history: the entry is admitted again.
+      assert.equal(lts.answerLinkedDecision({ cwd: G.owner, task: GT, action: 'close-chain', response: 'linked-task:keep-chain', source: 'user-text' }).status, 'answered');
+      assert.deepEqual([entry().allowed, entry().decision], [true, 'admitted'], 'a declined close-chain decision does not block');
+      // Census fail-closed: 65 foreign question states make the decision census unknown, never "no questions".
+      const flood = foreignQuestions(G, 65);
+      try { const unknown = entry(); assert.deepEqual([unknown.allowed, unknown.reason_code], [false, 'linked-task-time-invalid'], JSON.stringify(unknown)); } finally { flood(); }
+      assert.equal(entry().allowed, true, 'the bounded census is readable again');
+      // A new generation answered to close the chain, closure not yet published: refused as the chain being closed.
+      const second = lts.prepareLinkedDecision({ cwd: G.owner, task: GT, action: 'close-chain' });
+      assert.deepEqual([second.status, second.generation], ['open', 2], JSON.stringify(second));
+      assert.equal(entry().reason_code, 'linked-task-time-invalid', 'the new generation is pending again');
+      assert.equal(lts.answerLinkedDecision({ cwd: G.owner, task: GT, action: 'close-chain', response: 'linked-task:close-chain', source: 'user-text' }).status, 'answered');
+      const decidedBefore = snap(G), decided = entry();
+      assert.deepEqual([decided.allowed, decided.reason_code, decided.details.decision], [false, 'linked-task-chain-closed', 'chain-closure-decided'], JSON.stringify(decided));
+      assert.ok(!fs.existsSync(file(G.owner, recordRef('chain-closure'))), 'no chain-closure.json was published: the persisted decision alone blocks');
+      unchanged(G, decidedBefore, 'accepted close-chain refusal writes nothing');
+      process.stdout.write('ok - integrated-R43-late-close-chain-admission\n');
+    }
+
     // =======================================================================
     // Truth 5: read-only bounded status separating milestone, task and the nongoverning chain.
     // =======================================================================
@@ -751,11 +855,25 @@ async function suite() {
     // =======================================================================
     taskDelivery(F);
     const independentWork = workOf(F);
+    // Both fixture-authored independent notes have now finished. Keep the earlier isIndependent
+    // predicate unchanged: R47 must continue proving that TWO distinct captures survived the race.
+    const resolvedSource = source => {
+      try { const resolved = fs.realpathSync.native(source); return process.platform === 'win32' ? resolved.toLowerCase() : resolved; }
+      catch { return null; }
+    };
+    const fixtureSource = resolvedSource(independentSource);
+    assert.ok(fixtureSource);
+    const finishedByIndependentWriter = c => [INDEPENDENT, 'Nota concorrente da extensão'].includes(c.text) && resolvedSource(c.source) === fixtureSource;
+    assert.deepEqual(independentWork.checkpoint.pending.filter(finishedByIndependentWriter).map(c => c.text).sort(),
+      [INDEPENDENT, 'Nota concorrente da extensão'].sort(), 'only the two fixture-authored notes finish here');
+    const preservedPending = independentWork.checkpoint.pending.filter(c => !finishedByIndependentWriter(c)).map(c => ({ text: c.text, source: c.source, resolved: c.resolved }));
     assert.equal(originalSave({ project: F.owner, ...F.prof, id: T, intent: 'checkpoint', checkpoint: {
-      pending: independentWork.checkpoint.pending.filter(c => !isIndependent(c)).map(c => ({ text: c.text, source: c.source, resolved: c.resolved })) } }).status, 'ok',
-      'the independent writer finishes its own capture');
+      pending: preservedPending } }).status, 'ok', 'the independent writer finishes only its own two captures');
+    assert.deepEqual(workOf(F).checkpoint.pending.map(c => ({ text: c.text, source: c.source, resolved: c.resolved })), preservedPending,
+      'every nonmatching pending capture is preserved');
     const nowY = nowX + 4000000;
-    assert.equal(horizon.readTaskClock({ cwd: F.owner, task: T, now: nowY }).consumption.consumed_ms, C + 4300000);
+    const liveAtClose = horizon.readTaskClock({ cwd: F.owner, task: T, now: nowY });
+    assert.equal(liveAtClose.consumption.consumed_ms, C + 4300000);
     let closedInCallback = null, afterClose = null;
     const closingAdapter = adapterOf(() => {
       closedInCallback = lts.closeLinkedTask({ cwd: F.owner, taskId: T, codeDir: F.code, now: nowY, ...F.prof });
@@ -771,6 +889,34 @@ async function suite() {
     const frozenA = horizon.readTaskClock({ cwd: F.owner, task: T, now: nowY }), frozenB = horizon.readTaskClock({ cwd: F.owner, task: T, now: nowY + 7200000 });
     assert.deepEqual([frozenA.frozen, frozenA.horizon.ended_at, frozenA.consumption], [true, iso(nowY), frozenB.consumption], 'the closed clock is frozen');
     assert.equal(frozenA.consumption.consumed_ms, C + 4300000);
+    // R45: the verified clock is retained in the immutable closure; unrelated later growth of the global question
+    // census (65 foreign states) never reclassifies a confirmed wait of the CLOSED horizon, which stays frozen.
+    {
+      const closureRef = recordRef('closure'), closureBytes = fs.readFileSync(file(F.owner, closureRef)), closed = JSON.parse(closureBytes.toString('utf8'));
+      assert.deepEqual(Object.keys(closed).slice(-2), ['fingerprint', 'clock'], 'the retained clock is the last closure key');
+      assert.deepEqual([closed.clock.consumption.consumed_ms, closed.clock.consumption.unknown_ms], [frozenA.consumption.consumed_ms, frozenA.consumption.unknown_ms]);
+      assert.deepEqual([closed.clock.consumption, closed.clock.waits, closed.clock.unknowns], [liveAtClose.consumption, liveAtClose.waits, liveAtClose.unknowns], 'the retained clock IS the live clock verified at the closure instant');
+      assert.ok(closed.clock.consumption.by_class['human-wait'] > 0, 'the closed horizon contains a confirmed non-consuming wait');
+      const handoffSchema = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'shared', 'schemas', 'forge-linked-task-handoff.schema.json'), 'utf8')).$defs.closure;
+      assert.deepEqual(handoffSchema.required, lts.HANDOFF_RECORD_FIELDS.closure, 'the retained clock is an optional last key');
+      assert.deepEqual(handoffSchema.properties.clock.required, lts.HANDOFF_RECORD_FIELDS.closure_clock);
+      const flood = foreignQuestions(F, 65);
+      try {
+        const grown = horizon.readTaskClock({ cwd: F.owner, task: T, now: nowY + 7200000 });
+        assert.equal(grown.status, 'measured', JSON.stringify(grown));
+        assert.deepEqual([grown.frozen, grown.consumption, grown.waits, grown.unknowns], [true, liveAtClose.consumption, liveAtClose.waits, liveAtClose.unknowns], 'census growth never reclassifies the closed horizon');
+        assert.ok(!grown.unknowns.includes('question-census-unknown'));
+      } finally { flood(); }
+      // A retained clock edited in canonical form (any inconsistency with the horizon partition) fails closed.
+      for (const edit of [c => { c.consumption.consumed_ms += 1000; }, c => { c.consumption.by_class['human-wait'] += 1000; }, c => { c.policy.version = 2; }]) {
+        const forged = JSON.parse(closureBytes.toString('utf8')); edit(forged.clock);
+        fs.writeFileSync(file(F.owner, closureRef), JSON.stringify(forged) + '\n');
+        try { assert.equal(horizon.readTaskClock({ cwd: F.owner, task: T, now: nowY + 1000 }).status, 'invalid', 'inconsistent retained clock'); }
+        finally { fs.writeFileSync(file(F.owner, closureRef), closureBytes); }
+      }
+      assert.equal(horizon.readTaskClock({ cwd: F.owner, task: T, now: nowY + 1000 }).status, 'measured');
+      process.stdout.write('ok - integrated-R45-frozen-clock-census-independence\n');
+    }
     before = snap(F);
     const frozenJournal = horizon.appendTaskJournal({ cwd: F.owner, task: T, record: { type: 'presence', session_sha256: null, boundary: 'status', at: iso(nowY - 1000) } });
     assert.deepEqual([frozenJournal.status, frozenJournal.reason], ['refused', 'linked-task-closed'], 'the journal is frozen');

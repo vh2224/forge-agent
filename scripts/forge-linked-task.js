@@ -368,7 +368,11 @@ function createSteps(owner, milestone, plan, input, now, progress) {
   if (!pendingCapture(work, path.join(owner, ...linkSource(milestone).split('/')))) {
     // saveCheckpoint replaces whole capture lists: independent captures are refused, never erased.
     if ((work.checkpoint?.pending || []).length || (work.checkpoint?.nextAction || []).length) fail('linked-task-creation-conflict', 'checkpoint');
-    const saved = personal().saveCheckpoint({ ...profile, id: task, intent: 'checkpoint', checkpoint: checkpointEntries(link) });
+    // The snapshot above is read outside the personal mutex: the conditional save re-checks, under that
+    // mutex, that both replaced slots are still empty, so a concurrent winner is refused and never erased.
+    point('before-checkpoint-save');
+    const saved = personal().saveCheckpoint({ ...profile, id: task, intent: 'checkpoint', checkpoint: checkpointEntries(link), expectedCheckpoint: { pending: [], nextAction: [] } });
+    if (saved.reason === 'checkpoint-conflict') fail('linked-task-creation-conflict', 'checkpoint');
     if (saved.status !== 'ok') fail('linked-task-personal-failed', saved.reason);
     progress.push('checkpoint');
   }
@@ -506,9 +510,20 @@ function main(argv = process.argv.slice(2), io = process, liveAdapter) {
         : createLinkedTask({ cwd: options.cwd, milestone: options.milestone, liveAdapter });
     } else if (action === '--task') result = linkedTaskFor(options.cwd, options.task);
     else result = readLinkedTask({ cwd: options.cwd, milestone: options.milestone });
-    const refusedStatus = result !== null && ['refused', 'partial', 'invalid'].includes(result.status);
-    const shown = result && result.link ? { ...result, link: undefined } : result;
-    io.stdout.write((json ? JSON.stringify(shown) : message(action, result)) + '\n');
+    let refusedStatus = result !== null && ['refused', 'partial', 'invalid'].includes(result.status);
+    // Public projection: milestone and task_id are echoed only as supported typed IDs (an unsafe argument is
+    // never reflected), and the final object must itself be public data; the null/unlinked result is untouched.
+    const typed = (v, ok) => (ok(v) && time().isPublicData(v) ? v : null);
+    let shown = result && result.link ? { ...result, link: undefined } : result;
+    if (shown !== null) {
+      if (Object.hasOwn(shown, 'milestone')) shown = { ...shown, milestone: typed(shown.milestone, milestoneId) };
+      if (Object.hasOwn(shown, 'task_id') && shown.task_id !== null) shown = { ...shown, task_id: typed(shown.task_id, taskId) };
+      if (!time().isPublicData(JSON.parse(JSON.stringify(shown)))) {
+        shown = { status: 'refused', milestone: null, task_id: null, reason: 'linked-task-output-not-public', steps_written: [] };
+        refusedStatus = true;
+      }
+    }
+    io.stdout.write((json ? JSON.stringify(shown) : message(action, shown)) + '\n');
     return refusedStatus ? 3 : 0;
   } catch (e) {
     const reason = codeOf(e, 'linked-task-refused'), status = reason === 'linked-task-usage' ? 2 : 3;

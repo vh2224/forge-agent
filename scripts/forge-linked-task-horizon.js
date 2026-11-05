@@ -59,6 +59,7 @@ const KINDS = Object.freeze({ checkpoint: 'forge-linked-task-checkpoint', extens
 const CHECKPOINT_ALTERNATIVES = Object.freeze(['extend-task-horizon', 'close-chain']);
 const CHECKPOINT_QUESTION = 'Estender o horizonte da task ligada por decisão explícita (linked-task:extend:<ms>) ou encerrar a cadeia (linked-task:close-chain)?';
 const LINKED_SET = 'milestone-time-linked-task';
+const MAX_EXTENSION_GENERATIONS = 8;
 const MAX_WRITERS = 64, MAX_EXTENSIONS = 64, MAX_GAPS = 256, MAX_RUN = 1024 * 1024, MAX_RECEIPT = 8 * 1024 * 1024;
 const HASH = /^[a-f0-9]{64}$/;
 const MESSAGES = Object.freeze({
@@ -190,10 +191,18 @@ function checkpointValid(v) {
 function checkpointDecisionId(linkSha, version) { return 'linked-task-cap-' + linkSha.slice(0, 12) + '-v' + version; }
 // The persisted counterpart of an extension decision: the explicit answered owner question of this
 // link (milestone M, task T, workflow T) in the linked-task set whose answer names the ceiling.
+// The question spec (any decision generation) an extension record was attested by; null if none matches.
+function specOfExtension(probe, row) {
+  for (let generation = 1; generation <= MAX_EXTENSION_GENERATIONS; generation++) {
+    const spec = extensionSpec(probe, row.sequence, row.ceiling_ms, generation);
+    if (row.decision.question.identity_sha256 === spec.identity && row.decision.question.id === spec.id) return spec;
+  }
+  return null;
+}
 function extensionAttested(owner, probe, row) {
   try {
-    const spec = extensionSpec(probe, row.sequence, row.ceiling_ms);
-    if (row.decision.question.identity_sha256 !== spec.identity || row.decision.question.id !== spec.id || row.decision.request_sha256 !== digest(spec.request)) return false;
+    const spec = specOfExtension(probe, row);
+    if (!spec || row.decision.request_sha256 !== digest(spec.request)) return false;
     const state = questions().continuation({ cwd: owner, identity: spec.identity });
     const stored = state.ok ? state.questions.find(q => q.id === spec.id) : null;
     return state.identity?.origin === 'owner' && state.identity.milestone === probe.milestone && state.identity.task === probe.task_id
@@ -328,6 +337,37 @@ function computeTaskClock({ start, end, journal, census, frozen = false }) {
   return { consumption: { consumed_ms: consumed, unknown_ms: byClass.unknown, by_class: byClass }, overlap_ms: raw - covered,
     waits: Object.fromEntries(CLASSES.filter(k => !CONSUMES[k]).map(k => [k, byClass[k]])), gaps, unknowns: [...unknowns] };
 }
+// The clock retained in the closure record, re-verified against the policy, the closure instants (the classes
+// partition the whole horizon) and the consumption table before it is trusted; any mismatch fails closed.
+function retainedClock(stored, startMs, endMs) {
+  const { CLOCK_POLICY } = clocks(), CLASSES = CLOCK_POLICY.priority, CONSUMES = CLOCK_POLICY.consumption, by = stored.consumption.by_class;
+  const waits = Object.fromEntries(CLASSES.filter(k => !CONSUMES[k]).map(k => [k, by[k]]));
+  const consumed = CLASSES.filter(k => CONSUMES[k]).reduce((sum, k) => sum + by[k], 0);
+  if (stored.policy.id !== TASK_CLOCK_POLICY.id || stored.policy.version !== TASK_CLOCK_POLICY.version
+      || Object.keys(by).length !== CLASSES.length || !CLASSES.every(k => Number.isSafeInteger(by[k]))
+      || CLASSES.reduce((sum, k) => sum + by[k], 0) !== endMs - startMs || consumed !== stored.consumption.consumed_ms || by.unknown !== stored.consumption.unknown_ms
+      || !same(waits, stored.waits)) fail('linked-task-time-invalid', 'closure-clock-invalid');
+  return { status: 'measured', frozen: true, retained: true, start_ms: startMs, end_ms: endMs, journal_records: stored.journal_records,
+    consumption: { consumed_ms: consumed, unknown_ms: by.unknown, by_class: { ...by } }, overlap_ms: stored.overlap_ms, waits,
+    gaps: stored.gaps.map(g => ({ start: g.start, end: g.end, reason: g.reason })), gap_count: stored.gap_count, unknowns: [...stored.unknowns] };
+}
+// closureClock({cwd, task, now}): bounded projection of the live clock of a started, not yet closed task at
+// `now`, retained by closeLinkedTask in the immutable closure record. null when it cannot be measured.
+function closureClock(input = {}) {
+  try {
+    if (!object(input)) return null;
+    const owner = ownerOf(input), now = nowOf(input), probe = probeOf(owner, taskOf(input));
+    if (probe === null) return null;
+    const life = lifecycleOf(owner, probe);
+    if (!life.start || life.closure) return null;
+    const clock = clockOf(owner, probe, life, now);
+    if (clock.status !== 'measured') return null;
+    return { policy: { id: TASK_CLOCK_POLICY.id, version: TASK_CLOCK_POLICY.version },
+      consumption: { consumed_ms: clock.consumption.consumed_ms, unknown_ms: clock.consumption.unknown_ms, by_class: { ...clock.consumption.by_class } },
+      waits: { ...clock.waits }, overlap_ms: clock.overlap_ms, gaps: clock.gaps.slice(0, 64).map(g => ({ start: g.start, end: g.end, reason: g.reason })),
+      gap_count: clock.gaps.length, journal_records: clock.journal_records, unknowns: [...clock.unknowns].slice(0, 16) };
+  } catch { return null; }
+}
 function clockOf(owner, probe, life, now) {
   if (!life.start) return { status: 'not-started' };
   const startMs = Date.parse(life.start.record.started_at);
@@ -336,6 +376,9 @@ function clockOf(owner, probe, life, now) {
   const journal = time().readOwnerJournal({ cwd: owner, milestone: probe.milestone });
   if (journal.status === 'invalid') fail('linked-task-time-invalid', 'journal-invalid');
   for (const r of journal.records) if (!instant(r.at) || Date.parse(r.at) < startMs) fail('linked-task-time-invalid', 'journal-outside-horizon');
+  // A closed horizon with a retained clock never consults today's question census: unrelated later growth of
+  // the global census cannot reclassify a past confirmed wait (the live horizon keeps its conservative handling).
+  if (frozen && life.closure.record.clock !== undefined) return retainedClock(life.closure.record.clock, startMs, end);
   const census = taskQuestions(owner, probe.task_id);
   const computed = computeTaskClock({ start: startMs, end, journal: journal.records, census, frozen });
   return { status: 'measured', frozen, start_ms: startMs, end_ms: end, journal_records: journal.records.length, ...computed };
@@ -347,8 +390,8 @@ function clockView(probe, life, clock, now) {
     task_id: probe.task_id, milestone: probe.milestone, start_sha256: life.start.sha256, frozen: clock.frozen,
     horizon: { started_at: life.start.record.started_at, ended_at: clock.frozen ? life.closure.record.closed_at : null, end: clock.frozen ? 'closure' : 'now' },
     now, elapsed_ms: clock.end_ms - clock.start_ms, consumption: clock.consumption, waits: clock.waits, overlap_ms: clock.overlap_ms,
-    gaps: clock.gaps.slice(0, MAX_GAPS).map(g => ({ start: isoOf(g.start), end: isoOf(g.end), reason: g.reason })), gap_count: clock.gaps.length,
-    gaps_truncated: clock.gaps.length > MAX_GAPS, effort: { worker: { status: 'unknown', reason: 'task-worker-evidence-unavailable' } },
+    gaps: clock.gaps.slice(0, MAX_GAPS).map(g => ({ start: isoOf(g.start), end: isoOf(g.end), reason: g.reason })), gap_count: clock.gap_count ?? clock.gaps.length,
+    gaps_truncated: (clock.gap_count ?? clock.gaps.length) > Math.min(clock.gaps.length, MAX_GAPS), effort: { worker: { status: 'unknown', reason: 'task-worker-evidence-unavailable' } },
     journal_records: clock.journal_records, unknowns: clock.unknowns };
 }
 // readTaskClock({cwd, task, now}): pure read; never throws.
@@ -423,6 +466,15 @@ function decideLinkedTaskEntry(input = {}) {
     // The consumed evidence (start, witness, handoff, endpoint and the BRIEF block) must still be exact.
     try { lifecycle().consumedHandoffBlock(owner, probe.task_id); }
     catch (e) { const code = codeOf(e); return refuse(code === 'linked-task-chain-closed' ? code : code === 'linked-task-not-started' ? code : 'linked-task-time-invalid', base); }
+    // A close-chain decision opened or answered after this entry was selected still blocks the actual provider
+    // entry (bounded read-only census; fail closed). Classified in the frozen transport vocabulary: an answered
+    // closing decision is the chain being closed; a pending/unknown one keeps its reason and pending IDs in details.
+    try { lifecycle().requireEntryDecisionsClear(owner, probe.task_id); }
+    catch (e) {
+      const code = codeOf(e);
+      return refuse(code === 'linked-task-authorization-revoked' ? 'linked-task-chain-closed' : 'linked-task-time-invalid',
+        { ...base, decision: typeof e.detail === 'string' ? e.detail : code, ...(Array.isArray(e.pending_ids) ? { pending_ids: e.pending_ids.slice(0, 16) } : {}) });
+    }
     const horizon = horizonOf(owner, probe, life.start), checkpoints = checkpointsOf(owner, probe, life.start, horizon);
     const clock = clockOf(owner, probe, life, now);
     const details = { ...base, start_sha256: life.start.sha256, ceiling_ms: horizon.ceiling_ms, base_ceiling_ms: horizon.base_ceiling_ms, extensions: horizon.extensions.length,
@@ -655,6 +707,15 @@ function checkpointSource(owner, milestone, source) {
   try { dirs.push(path.join(fs.realpathSync.native(owner), '.gsd', 'forge', 'time', milestone, 'linked-task', 'checkpoints')); } catch { /* owner already validated */ }
   return typeof source === 'string' && dirs.some(dir => samePath(path.dirname(source), dir));
 }
+// True only while the horizon's own checkpoint captures still await their release (read-only; any
+// unreadable state is false, so a repeated extension then keeps its ordinary "ceiling not increased" refusal).
+function releasePending(owner, probe, input) {
+  try {
+    const snapshot = personal().readPersonalSnapshot({ ...personalOptions(owner, input), id: probe.task_id });
+    const work = snapshot.status === 'ok' ? snapshot.works.find(w => w.id === probe.task_id) : null;
+    return !!work && ['pending', 'nextAction'].some(field => (work.checkpoint?.[field] || []).some(c => checkpointSource(owner, probe.milestone, c.source)));
+  } catch { return false; }
+}
 // After an attested extension the checkpoint decision is decided: only the horizon's own checkpoint
 // captures leave pending / nextAction (compare-and-save); every other capture stays untouched.
 function personalRelease(owner, probe, input) {
@@ -733,13 +794,16 @@ function checkpointTaskIfDrained(input = {}) {
 // Owner question of one explicit extension value: identity binds milestone M, task T and workflow
 // T in the linked-task set, so verifyDecision (milestone view) and the task clock (workflow view)
 // see the same decision. Each sequence and value is a NEW question; nothing is reused.
-function extensionSpec(probe, sequence, ceilingMs) {
-  if (!positive(sequence) || !positive(ceilingMs)) fail('linked-task-extension-invalid', 'value-invalid');
-  const id = 'linked-task-extend-' + probe.link_sha256.slice(0, 12) + '-s' + sequence + '-' + ceilingMs, unit = 'milestone-time/' + id;
+// Generation 1 keeps the original question id; after a COMPLETED non-authorizing choice (keep-horizon) a later
+// explicit request for the same value opens generation n as a NEW question (new id, unit and identity), so no
+// answered state is reused and the declined history is retained.
+function extensionSpec(probe, sequence, ceilingMs, generation = 1) {
+  if (!positive(sequence) || !positive(ceilingMs) || !positive(generation)) fail('linked-task-extension-invalid', 'value-invalid');
+  const id = 'linked-task-extend-' + probe.link_sha256.slice(0, 12) + '-s' + sequence + '-' + ceilingMs + (generation > 1 ? '-g' + generation : ''), unit = 'milestone-time/' + id;
   const identity = digest({ schema_version: 1, origin: 'owner', unit, milestone: probe.milestone, slice: null, task: probe.task_id, workflow_id: probe.task_id,
     dispatch_id: null, request_fingerprint: null, receipt_phase: null, decision_set: LINKED_SET });
   const request = { milestone: probe.milestone, task_id: probe.task_id, link_sha256: probe.link_sha256, ceiling_ms: ceilingMs };
-  return { id, unit, identity, sequence, ceiling_ms: ceilingMs, answer: 'linked-task:extend:' + ceilingMs, request,
+  return { id, unit, identity, sequence, generation, ceiling_ms: ceilingMs, answer: 'linked-task:extend:' + ceilingMs, request,
     text: { header: 'Extensão do horizonte da task ligada', question: 'Estender o horizonte da task ligada para ' + ceilingMs + ' ms? A decisão é explícita e nunca automática.',
       options: [{ label: 'Estender o horizonte da task', description: 'Novo teto da task: ' + ceilingMs + ' ms; o teto da milestone não muda.', answer: 'linked-task:extend:' + ceilingMs },
         { label: 'Manter o horizonte', description: 'Nada muda; o trabalho novo da task continua bloqueado no teto.', answer: 'linked-task:keep-horizon' }] } };
@@ -754,8 +818,22 @@ function persistedExtension(owner, spec) {
   if (!row || state.identity?.decision_set !== LINKED_SET || state.identity.task !== spec.request.task_id) return { status: 'pending', answer: null };
   return { status: 'answered', answer: row.answer };
 }
-function extensionTarget(owner, probe, ceilingMs, now) {
-  const state = horizonState(owner, probe, now);
+// Persisted generations of one extension value in order. The chain stops at the first generation that is
+// absent, still pending or answered with the authorizing choice: declined generations (keep-horizon) are
+// completed history and never rewritten.
+function extensionHistory(owner, probe, sequence, ceilingMs) {
+  const history = [];
+  for (let generation = 1; generation <= MAX_EXTENSION_GENERATIONS; generation++) {
+    const spec = extensionSpec(probe, sequence, ceilingMs, generation), persisted = persistedExtension(owner, spec);
+    if (persisted.status === 'absent') break;
+    history.push({ generation, spec, ...persisted });
+    if (persisted.status !== 'answered' || persisted.answer === spec.answer) break;
+  }
+  return history;
+}
+function extensionDeclined(entry) { return entry.status === 'answered' && entry.answer !== entry.spec.answer; }
+function extensionTarget(owner, probe, ceilingMs, now, known) {
+  const state = known || horizonState(owner, probe, now);
   requireOpen(state.life);
   if (!positive(ceilingMs) || ceilingMs <= state.horizon.ceiling_ms) fail('linked-task-extension-invalid', 'ceiling-not-increased');
   return { state, spec: extensionSpec(probe, state.horizon.extensions.length + 1, ceilingMs) };
@@ -769,15 +847,19 @@ function prepareTaskExtension(input = {}) {
     const owner = ownerOf(input), now = nowOf(input);
     probe = probeOf(owner, taskOf(input));
     if (probe === null) fail('linked-task-not-linked');
-    const { spec } = extensionTarget(owner, probe, input.ceilingMs, now);
+    const target = extensionTarget(owner, probe, input.ceilingMs, now);
     let listed;
     try { listed = questions().listPendingQuestions({ cwd: owner, filter: { type: 'milestone', id: probe.milestone } }); } catch { fail('linked-task-question-census-unknown'); }
     if (listed.census.invalid || listed.census.excess) fail('linked-task-question-census-unknown', 'census-incomplete');
+    // An unanswered generation stays stable; only a completed declined one is followed by a new explicit generation.
+    const latest = extensionHistory(owner, probe, target.spec.sequence, target.spec.ceiling_ms).at(-1) || null;
+    if (latest && extensionDeclined(latest) && latest.generation >= MAX_EXTENSION_GENERATIONS) fail('linked-task-extension-invalid', 'generation-limit');
+    const spec = latest && extensionDeclined(latest) ? extensionSpec(probe, target.spec.sequence, target.spec.ceiling_ms, latest.generation + 1) : latest ? latest.spec : target.spec;
     const opened = questions().openQuestions({ cwd: owner, milestone: probe.milestone, task: probe.task_id, workflow_id: probe.task_id, unit: spec.unit,
       decision_set: LINKED_SET, questions: [{ id: spec.id, question: spec.text.question }] });
     if (opened.identity_sha256 !== spec.identity) fail('linked-task-extension-invalid', 'identity-mismatch');
     const persisted = persistedExtension(owner, spec);
-    return { status: persisted.status === 'answered' ? 'answered' : 'open', task_id: probe.task_id, milestone: probe.milestone, kind: 'linked-task', sequence: spec.sequence,
+    return { status: persisted.status === 'answered' ? 'answered' : 'open', task_id: probe.task_id, milestone: probe.milestone, kind: 'linked-task', sequence: spec.sequence, generation: spec.generation,
       request: spec.request, request_sha256: digest(spec.request), expected: [spec.answer], question: { identity_sha256: spec.identity, id: spec.id }, answer: persisted.answer,
       decision: { id: spec.id, header: spec.text.header, question: spec.text.question, options: spec.text.options.map(o => ({ label: o.label, description: o.description })) } };
   } catch (e) { return writeAnswer(probe, e, false); }
@@ -791,10 +873,14 @@ function answerTaskExtension(input = {}) {
     const owner = ownerOf(input), now = nowOf(input);
     probe = probeOf(owner, taskOf(input));
     if (probe === null) fail('linked-task-not-linked');
-    const { spec } = extensionTarget(owner, probe, input.ceilingMs, now);
-    const option = spec.text.options.find(o => o.label === input.response || o.answer === input.response);
+    const { spec: base } = extensionTarget(owner, probe, input.ceilingMs, now);
+    const option = base.text.options.find(o => o.label === input.response || o.answer === input.response);
     if (!option) fail('linked-task-extension-invalid', 'answer-invalid');
-    if (persistedExtension(owner, spec).status === 'absent') fail('linked-task-extension-request-required', 'question-not-open');
+    // Only the current generation can be answered; a completed one is history and never reopened.
+    const latest = extensionHistory(owner, probe, base.sequence, base.ceiling_ms).at(-1);
+    if (!latest) fail('linked-task-extension-request-required', 'question-not-open');
+    if (latest.status === 'answered' && latest.answer !== option.answer) fail('linked-task-extension-invalid', 'decision-answered');
+    const spec = latest.spec;
     questions().answer({ cwd: owner, identity: spec.identity, answers: [{ id: spec.id, answer: option.answer, source: input.source }], ...(input.channel ? { channel: input.channel } : {}) });
     return { status: 'answered', task_id: probe.task_id, answer: option.answer, question: { identity_sha256: spec.identity, id: spec.id } };
   } catch (e) { return writeAnswer(probe, e, false); }
@@ -806,6 +892,33 @@ function verifyExtension(owner, probe, handle, spec, now) {
   if (decision.question?.identity_sha256 !== spec.identity || decision.question.id !== spec.id || decision.request_sha256 !== digest(spec.request)) fail('linked-task-authorization-required', 'scope-mismatch');
   return decision;
 }
+// Idempotent recovery of the head extension (same ceiling) already immutably published: horizonOf has
+// validated its chain and persisted attested decision; the original decision is reattested live (the same
+// persisted answer, no new consent, no higher ceiling) and ONLY the pending personal release is completed.
+// A checkpoint of the new generation owns the current pending decision and is never released here.
+function recoverPublishedExtension(owner, probe, input, now, first, head) {
+  const ref = 'linked-task/extensions/' + String(head.sequence).padStart(4, '0') + '.json';
+  const read = time().readOwnerRecord({ cwd: owner, milestone: probe.milestone, path: ref });
+  if (read.status !== 'valid' || read.sha256 !== head.sha256) fail('linked-task-extension-conflict', 'head-changed');
+  const spec = specOfExtension(probe, read.record);
+  if (!spec) fail('linked-task-extension-invalid', 'decision-unbound');
+  let handle;
+  try {
+    handle = input.liveAdapter.getDecisionHandle({ cwd: owner, milestone: probe.milestone, task: probe.task_id, kind: 'linked-task', request: structuredClone(spec.request),
+      request_sha256: digest(spec.request), question: { identity_sha256: spec.identity, id: spec.id }, expected: [spec.answer] });
+  } catch { fail('linked-task-authorization-required', 'adapter-failed'); }
+  verifyExtension(owner, probe, handle, spec, now);
+  return taskBoundary(owner, probe, () => {
+    const again = horizonState(owner, probe, now);
+    requireOpen(again.life);
+    if (again.life.start.sha256 !== first.life.start.sha256 || again.horizon.head_sha256 !== head.sha256) fail('linked-task-extension-conflict', 'generation-changed');
+    verifyExtension(owner, probe, handle, spec, now);
+    const personalStatus = again.checkpoints.current ? 'unchanged' : personalRelease(owner, probe, input);
+    return { status: personalStatus === 'saved' ? 'extended' : 'unchanged', recovered: true, task_id: probe.task_id, milestone: probe.milestone, sequence: head.sequence,
+      previous_ceiling_ms: read.record.previous_ceiling_ms, ceiling_ms: head.ceiling_ms, extension_sha256: head.sha256,
+      reference: '.gsd/forge/time/' + probe.milestone + '/' + ref, personal: personalStatus };
+  });
+}
 // extendTaskHorizon({cwd, task, ceilingMs, liveAdapter, now}): only a fresh live handle for the
 // explicit persisted answer linked-task:extend:<ms> publishes the next chained immutable extension.
 function extendTaskHorizon(input = {}) {
@@ -816,10 +929,18 @@ function extendTaskHorizon(input = {}) {
     const owner = ownerOf(input), now = nowOf(input);
     probe = probeOf(owner, taskOf(input));
     if (probe === null) fail('linked-task-not-linked');
-    const { state, spec } = extensionTarget(owner, probe, input.ceilingMs, now);
-    const persisted = persistedExtension(owner, spec);
-    if (persisted.status !== 'answered') fail('linked-task-extension-request-required', persisted.status);
-    if (persisted.answer !== spec.answer) fail('linked-task-authorization-revoked', 'extension-declined');
+    const first = horizonState(owner, probe, now);
+    requireOpen(first.life);
+    // Recovery of an already committed matching extension: only its pending personal release is completed.
+    const head = first.horizon.extensions.at(-1);
+    if (head && input.ceilingMs === head.ceiling_ms && !first.checkpoints.current && releasePending(owner, probe, input)) return recoverPublishedExtension(owner, probe, input, now, first, head);
+    const { state, spec: base } = extensionTarget(owner, probe, input.ceilingMs, now, first);
+    // Authority binds the CURRENT generation: a declined earlier generation never authorizes.
+    const current = extensionHistory(owner, probe, base.sequence, base.ceiling_ms).at(-1);
+    if (!current) fail('linked-task-extension-request-required', 'absent');
+    if (current.status !== 'answered') fail('linked-task-extension-request-required', current.status);
+    const spec = current.spec;
+    if (current.answer !== spec.answer) fail('linked-task-authorization-revoked', 'extension-declined');
     let handle;
     try {
       handle = input.liveAdapter.getDecisionHandle({ cwd: owner, milestone: probe.milestone, task: probe.task_id, kind: 'linked-task', request: structuredClone(spec.request),
@@ -1013,6 +1134,6 @@ function main(argv = process.argv.slice(2), io = process, liveAdapter) {
 
 module.exports = { HORIZON_SCHEMA_VERSION, TASK_CLOCK_POLICY, LINKED_TASK_TRANSPORT_CODES, TASK_STATES, TASK_DRAIN_STATES, TASK_WRITER_CLASSES, TASK_CLAIM_STATES,
   HORIZON_REFUSALS, HORIZON_RECORD_FIELDS, TASK_UNIT_TYPES, readTaskClock, decideLinkedTaskEntry, assertLinkedTaskEntry, appendTaskJournal, inspectTaskDrain,
-  checkpointTaskIfDrained, extendTaskHorizon, prepareTaskExtension, answerTaskExtension, readLinkedStatus, summarizeLinkedStatus, validateCheckpointRecord: checkpointValid,
+  checkpointTaskIfDrained, closureClock, extendTaskHorizon, prepareTaskExtension, answerTaskExtension, readLinkedStatus, summarizeLinkedStatus, validateCheckpointRecord: checkpointValid,
   validateExtensionRecord: extensionValid, main };
 if (require.main === module) process.exitCode = main();

@@ -1414,12 +1414,14 @@ async function suite() {
           restoring(A.owner, [recordRef('start')], () => {
             const st = json(A.owner, recordRef('start')); edit(st); write(A.owner, recordRef('start'), st);
             assert.equal(fs.readFileSync(file(A.owner, recordRef('start')), 'utf8'), JSON.stringify(st) + '\n', label + ': still canonical bytes');
-            assert.equal(lts.linkedLifecycle(A.owner, A.task).status, 'started', label + ': the record alone is schema-valid');
+            const lifecycle = lts.linkedLifecycle(A.owner, A.task);
+            assert.deepEqual([lifecycle.status, lifecycle.reason], ['invalid', 'linked-task-record-start-witness'], label + ': schema-valid but unwitnessed start is never exposed as started');
+            assert.equal(lifecycle.start_sha256, undefined, label + ': the unwitnessed start record is not exposed');
             refuses(label);
             assert.ok(fs.readFileSync(file(A.owner, witnessRef)).equals(witnessBytes), label + ': the original witness is byte-identical');
           });
         }
-        restoring(A.owner, [witnessRef], () => {
+        assert.equal(lts.linkedLifecycle(A.owner, A.task).status, 'started', 'the genuine start is witnessed again after each restore');        restoring(A.owner, [witnessRef], () => {
           const w = json(A.owner, witnessRef); w.start.started_at = iso(Date.parse(w.start.started_at) + 1000); w.start_sha256 = digest(w.start); write(A.owner, witnessRef, w);
           refuses('forged witness');
         });
@@ -1608,7 +1610,7 @@ async function suite() {
             const st = json(A.owner, startRef); edit(st); write(A.owner, startRef, st);
             assert.ok(!fs.readFileSync(file(A.owner, startRef)).equals(startBytes), label + ': the start really changed');
             assert.equal(fs.readFileSync(file(A.owner, startRef), 'utf8'), JSON.stringify(st) + '\n', label + ': still canonical bytes');
-            assert.equal(lts.linkedLifecycle(A.owner, A.task).status, 'started', label + ': the record alone is schema-valid');
+            assert.deepEqual([lts.linkedLifecycle(A.owner, A.task).status, lts.linkedLifecycle(A.owner, A.task).reason], ['invalid', 'linked-task-record-start-witness'], label + ': the unwitnessed start is invalid');
             const edited = snap(A);
             const intact = what => {
               for (const [ref, bytes] of Object.entries(originals)) assert.ok(fs.readFileSync(file(A.owner, ref)).equals(bytes), label + ' ' + what + ': ' + ref + ' is byte-identical');
@@ -1651,7 +1653,9 @@ async function suite() {
       assert.deepEqual([closed.status, closed.fingerprint, closed.criteria], ['unchanged', built.delivery_fingerprint, built.criteria.length], JSON.stringify(closed));
       assert.ok(fs.readFileSync(file(A.owner, recordRef('closure'))).equals(crashedClosure), 'recovery keeps the published closure byte-identical');
       const closure = json(A.owner, recordRef('closure'));
-      assert.deepEqual(Object.keys(closure), lts.HANDOFF_RECORD_FIELDS.closure); noAbsolute(A, closure, 'closure');
+      // The closure keeps its fixed keys; the verified task clock (R45) is the optional LAST key.
+      assert.deepEqual(Object.keys(closure).filter(k => k !== 'clock'), lts.HANDOFF_RECORD_FIELDS.closure); noAbsolute(A, closure, 'closure');
+      assert.ok(Object.keys(closure).at(-1) === 'clock' && JSON.stringify(Object.keys(closure.clock)) === JSON.stringify(lts.HANDOFF_RECORD_FIELDS.closure_clock), 'the closure retains the verified clock projection');
       assert.deepEqual([closure.start_sha256, closure.fingerprint, closure.delivery.reference, closure.delivery.sha256],
         [digest(json(A.owner, recordRef('start'))), built.delivery_fingerprint, prefix + '-DELIVERY.json', sha(fs.readFileSync(file(A.owner, prefix + '-DELIVERY.json')))]);
       assert.ok(instant(closure.closed_at));

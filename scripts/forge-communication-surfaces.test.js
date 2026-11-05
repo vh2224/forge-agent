@@ -1405,7 +1405,10 @@ t06('two-host-literals-main-exports-and-old-retention', () => {
   refused('wrong skills pin', () => checkPins({ golden: pinsWith({ skills: wrong }), artifacts: surfaces, pinReadme: `${repinnedReadme}${wrong}\n` }));
   refused('unrelated surface re-pin', () => checkPins({ golden: pinsWith({ skills: rawSkills, hooks: wrong }), artifacts: surfaces,
     pinReadme: `${repinnedReadme}${wrong}\n` }));
-  refused('undocumented raw re-pin', () => checkPins({ golden: pinsWith({ skills: rawSkills }), artifacts: surfaces }));
+  const undocumentedSkillsReadme = pinReadme.split(rawSkills).join('');
+  assert(!undocumentedSkillsReadme.includes(rawSkills), 'negative fixture does not document the current raw hash');
+  refused('undocumented raw re-pin', () => checkPins({ golden: pinsWith({ skills: rawSkills }), artifacts: surfaces,
+    pinReadme: undocumentedSkillsReadme }));
   const editedSurfaces = surfaces.map(row => row.source === 'skills/forge-next/SKILL.md' ? { ...row, content: `${row.content}\nunrelated edit\n` } : row);
   const editedRaw = surfaceHash(editedSurfaces, 'skills', true);
   refused('source edit hidden by its own raw re-pin', () => checkPins({ golden: pinsWith({ skills: editedRaw }), artifacts: editedSurfaces,
@@ -1463,8 +1466,10 @@ t06('two-host-literals-main-exports-and-old-retention', () => {
       sampleReadme: rawReadme }));
     refused(`${name} inconsistent nodes`, () => checkSamples({ sourceBytes, sampleReadme: rawReadme,
       sampleBytes: withSampleShas(rawSamples, [[source.pointers[0], attributedOf[source.file]]]) }));
+    const undocumentedSampleReadme = `${sampleReadme.split(raws[source.file]).join('')}\n${raws[other.file]}\n`;
+    assert(!undocumentedSampleReadme.includes(raws[source.file]), `${name} negative fixture does not document its raw hash`);
     refused(`${name} undocumented re-pin`, () => checkSamples({ sourceBytes, sampleBytes: rawSamples,
-      sampleReadme: `${sampleReadme}\n${raws[other.file]}\n` }));
+      sampleReadme: undocumentedSampleReadme }));
     refused(`${name} cited text edit`, () => checkSamples({ sourceBytes, sampleReadme: rawReadme,
       sampleBytes: editAt(rawSamples, `${source.pointers[1]}/text`, literal => literal.replace(' ', '  ')) }));
     refused(`${name} source metadata edit`, () => checkSamples({ sourceBytes, sampleReadme: rawReadme,

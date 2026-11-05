@@ -248,7 +248,12 @@ async function extraCases() {
   assert(fs.readFileSync(failing.r.resultFile + '.recovery.json').equals(executedState));
   assert.strictEqual(receipt(failing).phase, 'executed'); label('executed-replay-prompt-unchanged-history');
   fs.writeFileSync(failing.r.nativePromptFile, executedPrompt);
-  const record = receipt(failing); delete record.verification_seal; write(failing.r.resultFile + '.receipt.json', record);
+  const record = receipt(failing);
+  assert.strictEqual(record.delivery_capture.passed, false, 'failed capture is retained for diagnosis');
+  delete record.verification_seal; write(failing.r.resultFile + '.receipt.json', record);
+  await refuse(failing, failing.runtime, /verification-provenance-insufficient/, 1); label('legacy-failed-capture-without-seal-refused');
+  assert.strictEqual(receipt(failing).delivery_capture.passed, false, 'provenance refusal preserves failed capture');
+  delete record.delivery_capture; write(failing.r.resultFile + '.receipt.json', record);
   await refuse(failing, failing.runtime, /verification-provenance-insufficient/, 1); label('legacy-without-capture-refused');
   const replay = nativeFixture(); await unit.runUnitSidecar(replay.r, replay.runtime);
   for (const [name, mutate, file] of [
@@ -277,6 +282,7 @@ async function extraCases() {
   assert.strictEqual((await unit.runUnitSidecar(replay.r, replay.runtime)).status, 'done');
   assert.strictEqual(receipt(replay).verification_seal, undefined); label('legacy-complete-capture-preserved');
   await assert.rejects(() => unit.runUnitSidecar(replay.r, { ...replay.runtime, verification: replay.r.verification }), /verification-provenance-insufficient/); label('legacy-runtime-override-refused');
+  console.log('ok - owner-native-incomplete-capture-provenance');
   for (const [name, change] of Object.entries({
     'invalid-status': value => ({ ...value, status: 'ready' }),
     'missing-delta': value => ({ ...value, files_changed: [] }),

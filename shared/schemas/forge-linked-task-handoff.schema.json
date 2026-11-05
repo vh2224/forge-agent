@@ -199,7 +199,26 @@
             "fingerprint": { "$ref": "#/$defs/sha256" }, "criteria": { "type": "integer", "minimum": 1 } }
         },
         "closed_at": { "$ref": "#/$defs/instant" },
-        "fingerprint": { "$ref": "#/$defs/sha256" }
+        "fingerprint": { "$ref": "#/$defs/sha256" },
+        "clock": {
+          "type": "object", "additionalProperties": false,
+          "description": "Optional (last key). The verified task clock retained at the genuine closure so the closed horizon never depends on later question-census growth: the classes partition [started_at, closed_at] and the consumption table of the task clock policy is re-verified by the reader.",
+          "required": ["policy", "consumption", "waits", "overlap_ms", "gaps", "gap_count", "journal_records", "unknowns"],
+          "properties": {
+            "policy": { "type": "object", "additionalProperties": false, "required": ["id", "version"],
+              "properties": { "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,60}$" }, "version": { "type": "integer", "minimum": 1 } } },
+            "consumption": { "type": "object", "additionalProperties": false, "required": ["consumed_ms", "unknown_ms", "by_class"],
+              "properties": { "consumed_ms": { "type": "integer", "minimum": 0 }, "unknown_ms": { "type": "integer", "minimum": 0 },
+                "by_class": { "type": "object", "maxProperties": 16, "additionalProperties": { "type": "integer", "minimum": 0 } } } },
+            "waits": { "type": "object", "maxProperties": 16, "additionalProperties": { "type": "integer", "minimum": 0 } },
+            "overlap_ms": { "type": "integer", "minimum": 0 },
+            "gaps": { "type": "array", "maxItems": 64, "items": { "type": "object", "additionalProperties": false, "required": ["start", "end", "reason"],
+              "properties": { "start": { "type": "integer", "minimum": 0 }, "end": { "type": "integer", "minimum": 0 }, "reason": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,40}$" } } } },
+            "gap_count": { "type": "integer", "minimum": 0 },
+            "journal_records": { "type": "integer", "minimum": 0 },
+            "unknowns": { "type": "array", "maxItems": 16, "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,80}$" } }
+          }
+        }
       }
     }
   }

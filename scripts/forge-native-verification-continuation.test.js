@@ -18,7 +18,7 @@ async function main(){
     const result=f.result();
     for(const item of result.must_haves_status)if(item.kind!=='artifact')item.evidence.push({root_id:'alpha',check:'node extra.cjs',stdout_line:'PASS supplemental assertion'});
     first.returned(result);
-    assert.throws(()=>first.verify(result),{code:'criterion-unobserved-evidence'});
+    assert.throws(()=>first.verify(result),{code:'verification-evidence-request-invalid'});
     const manifestFile=request.resultFile+'.manifest.json',manifestBytes=fs.readFileSync(manifestFile),savedManifest=JSON.parse(manifestBytes);
     const returnedReceiptFile=receipts.at(-1).file,receiptBytes=fs.readFileSync(returnedReceiptFile);
     const verification={commandsByRoot:{alpha:['node check.cjs','node extra.cjs']}};

@@ -2251,7 +2251,9 @@ async function runUnitSidecarCore(request, runtime, identity) {
     }
     if (!record.verification_seal) {
       if (!nativeExecution && runtime.verification === undefined) return;
-      if (!record.delivery_capture || runtime.verification !== undefined) fail('verification-provenance-insufficient');
+      // Only a completed successful legacy capture can stand in for its absent seal.
+      // Failed captures are retained for diagnosis and still require sealed policy.
+      if (record.delivery_capture?.passed !== true || runtime.verification !== undefined) fail('verification-provenance-insufficient');
       return;
     }
     verificationApi.assertExecutionVerification(record.verification_seal, r.execution_contract, fs.readFileSync(r.planFile, 'utf8'), verificationIdentity);

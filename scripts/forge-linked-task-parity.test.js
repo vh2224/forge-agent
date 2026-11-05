@@ -99,6 +99,17 @@ function swap(value, from, to) {
   if (object(value)) return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, swap(v, from, to)]));
   return value;
 }
+// Platform-independent comparison projection (R39). forge-personal-context canonical() lowercases source
+// paths only on win32, so the immutable Windows capture stores the fixture personal task components in
+// lowercase while POSIX preserves T-...-BRIEF.md / -PLAN.md. Only this fixture's own task id and its two
+// artifact names are folded; arbitrary paths are never lowercased. Applied to stored and current traces alike.
+const PERSONAL_FIXTURE_PATH = /t-20261103120000-parity-personal(?:-(?:brief|plan)\.md)?/gi;
+function personalCaseProjection(value) {
+  if (typeof value === 'string') return value.replace(PERSONAL_FIXTURE_PATH, match => match.toLowerCase());
+  if (Array.isArray(value)) return value.map(personalCaseProjection);
+  if (object(value)) return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, personalCaseProjection(v)]));
+  return value;
+}
 function textDigest(value) { return typeof value === 'string' ? { sha256: sha256(value), bytes: Buffer.byteLength(value) } : null; }
 
 // ---------------------------------------------------------------------------
@@ -431,8 +442,28 @@ async function parityCheck() {
   const stored = readDocument(FIXTURE);
   assert.strictEqual(stored.status, 'valid', 'baseline fixture must exist and be valid: ' + (stored.reason || stored.status));
   const expected = stored.document.trace;
-  assert.strictEqual(traceDigest(trace), stored.document.trace_sha256, 'unlinked trace differs from the owner baseline at ' + firstDifference(trace, expected));
-  assert.strictEqual(JSON.stringify(trace), JSON.stringify(expected));
+  // The stored bytes and digest stay immutable; only the comparison is projected (see personalCaseProjection).
+  const projectedTrace = personalCaseProjection(trace), projectedExpected = personalCaseProjection(expected);
+  assert.strictEqual(traceDigest(projectedTrace), traceDigest(projectedExpected), 'unlinked trace differs from the owner baseline at ' + firstDifference(projectedTrace, projectedExpected));
+  assert.strictEqual(JSON.stringify(projectedTrace), JSON.stringify(projectedExpected));
+  // The raw stored digest still binds the immutable captured bytes.
+  assert.strictEqual(traceDigest(expected), stored.document.trace_sha256);
+  personalCaseProjectionChecks(assert);
+}
+function personalCaseProjectionChecks(assert) {
+  const id = 'T-20261103120000-parity-personal', low = id.toLowerCase();
+  const windows = { source: '<root>/personal-owner/.gsd/tasks/' + low + '/' + low + '-brief.md', plan: low + '-plan.md' };
+  const posix = { source: '<root>/personal-owner/.gsd/tasks/' + id + '/' + id + '-BRIEF.md', plan: id + '-PLAN.md' };
+  assert.notDeepStrictEqual(windows, posix);
+  assert.deepStrictEqual(personalCaseProjection(windows), personalCaseProjection(posix));
+  assert.strictEqual(personalCaseProjection(posix).source, windows.source);
+  // Arbitrary paths and other task ids keep their case: no broad lowercasing.
+  const other = { a: '<root>/Personal-Owner/.gsd/tasks/T-20261103120000-other/T-20261103120000-other-BRIEF.md', b: 'KEEP/Case.md' };
+  assert.deepStrictEqual(personalCaseProjection(other), other);
+  assert.notDeepStrictEqual(personalCaseProjection({ a: 'T-20261103120000-parity-execute' }), { a: 'T-20261103120000-parity-execute'.toLowerCase() });
+  // A real behavioural difference is still a difference after projection.
+  assert.notDeepStrictEqual(personalCaseProjection({ source: low + '-brief.md' }), personalCaseProjection({ source: low + '-brief.txt' }));
+  process.stdout.write('ok - integrated-R39-personal-path-case-projection\n');
 }
 async function main(argv = process.argv.slice(2), io = process) {
   if (argv.includes('--capture-baseline')) {

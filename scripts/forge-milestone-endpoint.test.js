@@ -519,8 +519,22 @@ try {
     ['--show', '--cwd', cwd, '--milestone', M, '--timeout-ms', '10'], ['--verify', '--cwd', cwd, '--milestone', M, '--timeout-ms', '0']]) {
     const usage = cli(...args); assert.equal(usage.status, 2, args.join(' ')); assert.match(usage.stderr, /^Uso: /);
   }
+  // R42: unsafe or wrong-kind milestone arguments keep their named refusal but are never echoed in public output.
+  for (const action of ['--record', '--prove', '--show', '--verify']) {
+    for (const unsafe of ['C:\\private\\record', 'token=synthetic-only', '/private/record', 'T-20261103120000-not-a-milestone']) {
+      for (const json of [true, false]) {
+        const out = cli(action, '--cwd', cwd, '--milestone', unsafe, ...(json ? ['--json'] : []));
+        assert.equal(out.status, 3, action + ' ' + unsafe + ' ' + out.stderr);
+        assert(!out.stdout.includes(unsafe) && !out.stdout.includes('private'), 'unsafe milestone echoed by ' + action + ': ' + out.stdout);
+        if (json) { const view = JSON.parse(out.stdout); assert(time.isPublicData(view)); assert.equal(view.milestone, null); assert.equal(view.reason, 'endpoint-milestone-invalid'); }
+      }
+    }
+  }
+  assert.equal(JSON.parse(cli('--show', '--cwd', cwd, '--milestone', M, '--json').stdout).status, 'valid', 'supported typed milestone output is preserved');
+  assert(fs.readFileSync(file(cwd, RECORD)).equals(recordBytes), 'unsafe arguments write nothing');
   pass('verify-record-read-cli');
   console.log('ok - T02 endpoint: verify record read and CLI use immutable owner publication with typed refusals');
+  console.log('ok - integrated-R42-public-milestone-output');
 
   // ---- Truth 5: schema, public data, 64 KiB bound and validator agree.
   const schema = JSON.parse(fs.readFileSync(SCHEMA, 'utf8')), F = endpoint.ENDPOINT_RECORD_FIELDS;
