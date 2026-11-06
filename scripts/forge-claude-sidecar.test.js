@@ -2243,6 +2243,57 @@ test('resume: argv equals the start argv except --resume <id> and the fixed -p i
   assert.strictEqual(fs.existsSync(file), false, 'session removed after the resume');
 });
 
+// #330: the read-only owner directory rides the real child argv as ONE --add-dir
+// pair; same-cwd and absent owners add nothing, and the rest of the argv keeps
+// its values and order. buildClaudeArgs stays private: only the recorded spawn.
+test('SEC330 argv: external owner is one --add-dir pair; same-cwd/absent add none; other argv unchanged', async () => {
+  const owner = path.join(ROOT, 'SEC330 external owner with spaces');
+  fs.mkdirSync(owner, { recursive: true });
+  const readOnlyPlan = { readOnly: true, effort: 'medium' };
+  const runs = {};
+  for (const [label, extra] of [['absent', {}], ['same-cwd', { contextRoot: WORKSPACE }], ['external', { contextRoot: owner }]]) {
+    runs[label] = await runSession(SESSION_OK_FIXTURE, { ...readOnlyPlan, ...extra });
+    assert.strictEqual(runs[label].error, null, `${label}: ${runs[label].error && runs[label].error.code}`);
+    assert.strictEqual(runs[label].records.length, 1, `${label}: exactly one inference spawn`);
+  }
+  const args = (label) => runs[label].records[0].args;
+  const addDirs = (list) => list.reduce((found, arg, index) => arg === '--add-dir' ? [...found, index] : found, []);
+
+  // SEC330-1: exactly one pair, the exact owner as a single argument (spaces kept).
+  const external = args('external');
+  assert.deepStrictEqual(addDirs(external).length, 1, 'SEC330-1: exactly one --add-dir pair');
+  const at = addDirs(external)[0];
+  assert.strictEqual(external[at + 1], path.resolve(owner), 'SEC330-1: exact owner directory');
+  ok(external[at + 1].includes(' '), 'SEC330-1: the owner with spaces stays one argument');
+  // Current executable order: --model, --add-dir (when present), --effort.
+  assert.deepStrictEqual(external.slice(at - 2, at + 4),
+    ['--model', FIXTURE_MODEL, '--add-dir', path.resolve(owner), '--effort', 'medium'], 'SEC330-1: model/add-dir/effort order');
+
+  // SEC330-2: absent and same-cwd owners emit no --add-dir and share one argv.
+  assert.deepStrictEqual(addDirs(args('absent')), [], 'SEC330-2: absent owner adds no --add-dir');
+  assert.deepStrictEqual(addDirs(args('same-cwd')), [], 'SEC330-2: same-cwd owner adds no --add-dir');
+  assert.deepStrictEqual(withoutSession(args('same-cwd')), withoutSession(args('absent')), 'SEC330-2: same-cwd keeps the baseline argv');
+  // SEC330-2: removing only the owner pair leaves every other value and position.
+  const stripped = external.slice();
+  stripped.splice(at, 2);
+  assert.deepStrictEqual(withoutSession(stripped), withoutSession(args('absent')),
+    'SEC330-2: model/effort/schema/tools/permissions/settings keep values and order');
+  for (const flag of ['--json-schema', '--settings', '--setting-sources', '--mcp-config', '--no-session-persistence']) {
+    ok(external.includes(flag), `SEC330-2: ${flag} still present`);
+  }
+
+  // SEC330-3: read-only tools only; no write grant or permission mode appears.
+  for (const label of Object.keys(runs)) {
+    const list = args(label);
+    assert.strictEqual(list[list.indexOf('--tools') + 1], 'Read,Glob,Grep', `SEC330-3: ${label} --tools`);
+    assert.strictEqual(list[list.indexOf('--allowedTools') + 1], 'Read,Glob,Grep', `SEC330-3: ${label} --allowedTools`);
+    assert.strictEqual(list.filter((arg) => arg === '--allowedTools').length, 1, `SEC330-3: ${label} one allow list`);
+    ok(!list.includes('--permission-mode'), `SEC330-3: ${label} no acceptEdits`);
+    ok(!list.some((arg) => /^(?:Read|Glob|Grep|Edit|Write|Bash)(?:,|$)/.test(arg) && /Edit|Write|Bash/.test(arg)),
+      `SEC330-3: ${label} no tool list grants a write tool`);
+  }
+});
+
 test('resume: invalid ref, other account, other config dir, other cwd and ineligible phase refuse before any spawn', async () => {
   const home = sessionHome();
   const otherHome = sessionHome();

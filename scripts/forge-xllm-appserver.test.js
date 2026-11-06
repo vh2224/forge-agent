@@ -258,6 +258,13 @@ const fs = require('fs');
 const mode = process.env.FORGE_MOCK_MODE || 'execute';
 let initialized = false;
 function send(value) { process.stdout.write(JSON.stringify(value) + '\n'); }
+// Request capture only (#330 parity): it never changes the measured replies.
+const capture = process.env.FORGE_MOCK_CAPTURE;
+const requests = { threadParams: null, turnParams: null };
+function record(key, params) {
+  requests[key] = params || {};
+  if (capture) fs.writeFileSync(capture, JSON.stringify(requests, null, 2));
+}
 const TASK_PLAN = [
   '---',
   'id: T01',
@@ -306,9 +313,11 @@ process.stdin.on('data', chunk => {
     } else if (message.method === 'initialized') initialized = true;
     else if (message.method === 'thread/start') {
       if (!initialized) process.exit(92);
+      record('threadParams', message.params);
       send({ id: message.id, result: { thread: { id: 't1', cliVersion: '0.144.4' } } });
     } else if (message.method === 'turn/start') {
       if (!initialized) process.exit(93);
+      record('turnParams', message.params);
       send({ id: message.id, result: { turn: { id: 'turn-1' } } });
       send({ method: 'item/completed', params: { item: { type: 'agentMessage', phase: 'final_answer', text: answer() } } });
       send({ method: 'turn/completed', params: { turn: { id: 'turn-1', status: 'completed' } } });
@@ -349,6 +358,15 @@ function withMock(mock, scenario, capture, action) {
     for (const [key, value] of Object.entries({ FORGE_XLLM_CODEX_BIN: previous.bin, FORGE_MOCK_SCENARIO: previous.scenario, FORGE_MOCK_CAPTURE: previous.capture })) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
     }
+  });
+}
+
+// Selects the real-shape mock's answer (execute or plan) for one action only.
+function withMode(mode, action) {
+  const previous = process.env.FORGE_MOCK_MODE;
+  process.env.FORGE_MOCK_MODE = mode;
+  return Promise.resolve().then(action).finally(() => {
+    if (previous === undefined) delete process.env.FORGE_MOCK_MODE; else process.env.FORGE_MOCK_MODE = previous;
   });
 }
 
@@ -1423,13 +1441,6 @@ async function testTransportField(mock, realMock, root) {
   // ── positive: execute, real shape ──────────────────────────────────────────
   const repo = fixtureRepo(root);
   const resultFile = path.join(root, 'transport-result.json');
-  const withMode = (mode, action) => {
-    const previous = process.env.FORGE_MOCK_MODE;
-    process.env.FORGE_MOCK_MODE = mode;
-    return Promise.resolve().then(action).finally(() => {
-      if (previous === undefined) delete process.env.FORGE_MOCK_MODE; else process.env.FORGE_MOCK_MODE = previous;
-    });
-  };
   const result = await withMock(realMock, 'conforming', path.join(root, 'transport-capture.json'),
     () => withMode('execute', () => runExecute(executeOptions(repo, planFile(root), resultFile, 'transport-model'))));
   assert.strictEqual(result.appserver.transport, 'app-server');
@@ -1482,6 +1493,62 @@ async function testTransportField(mock, realMock, root) {
     { transport: 'unknown', transport_reason: 'no-result-file' });
 }
 
+/**
+ * #330 / SEC330-4 — the Claude-only contextRoot forwarding must not reach the
+ * Codex plan branch. Public runPlan with and without an explicit external owner
+ * sends identical thread/turn requests, returns the same transport and never
+ * activates the owner context observation (observeSession/consumeBoundary).
+ * A runExecute positive control first proves the spies observe a live seam.
+ */
+async function testPlanContextRootParity(realMock, root) {
+  const contextCodex = require('./forge-context-codex');
+  const original = { observeSession: contextCodex.observeSession, consumeBoundary: contextCodex.consumeBoundary };
+  const calls = [];
+  contextCodex.observeSession = function (...args) { calls.push(['observeSession', args[0] && args[0].cwd]); return original.observeSession.apply(this, args); };
+  contextCodex.consumeBoundary = function (...args) { calls.push(['consumeBoundary', args[0] && args[0].cwd]); return original.consumeBoundary.apply(this, args); };
+  try {
+    // Positive control: execute with an owner reaches the observed seam.
+    const controlOwner = path.join(root, 'SEC330 control owner');
+    fs.mkdirSync(path.join(controlOwner, '.gsd', 'forge'), { recursive: true });
+    await withMock(realMock, 'conforming', path.join(root, 'sec330-control-capture.json'),
+      () => withMode('execute', () => runExecute({ ...executeOptions(fixtureRepo(root), planFile(root),
+        path.join(root, 'sec330-control-result.json'), 'sec330-model'), contextRoot: controlOwner })));
+    assert(calls.some(([name]) => name === 'observeSession'), 'SEC330-4: the spy observes the live execute seam');
+    calls.length = 0;
+
+    const repo = fixtureRepo(root);
+    const owner = fs.realpathSync(fs.mkdtempSync(path.join(root, 'SEC330 plan owner ')));
+    fs.mkdirSync(path.join(owner, '.gsd', 'forge'), { recursive: true });
+    const contextFile = path.join(root, 'sec330-plan-context.md');
+    fs.writeFileSync(contextFile, '# Plan context\n\nPlan this fixture slice.\n');
+    const runs = {};
+    for (const [label, extra] of [['absent', {}], ['external', { contextRoot: owner }]]) {
+      const capture = path.join(root, `sec330-plan-${label}-capture.json`);
+      const result = await withMock(realMock, 'conforming', capture,
+        () => withMode('plan', () => require('./forge-xllm').runPlan({ cwd: repo, planContextFile: contextFile,
+          resultFile: path.join(root, `sec330-plan-${label}-result.json`), timeoutSecs: 5, dispatchId: 'S01-sec330', ...extra })));
+      runs[label] = { result, wire: JSON.parse(fs.readFileSync(capture, 'utf8')) };
+    }
+    for (const [label, { result, wire }] of Object.entries(runs)) {
+      assert.strictEqual(result.status, 'done', `SEC330-4: ${label} plan result`);
+      assert.deepStrictEqual(result.appserver, { transport: 'app-server', transport_version: '0.144.4' },
+        `SEC330-4: ${label} keeps the app-server envelope without context health/boundary`);
+      assert.ok(wire.threadParams && wire.turnParams, `SEC330-4: ${label} captured thread/turn requests`);
+      assert.deepStrictEqual(wire.turnParams.sandboxPolicy, { type: 'readOnly', networkAccess: false },
+        `SEC330-4: ${label} plan stays read-only on the wire`);
+    }
+    assert.deepStrictEqual(runs.external.wire, runs.absent.wire, 'SEC330-4: contextRoot changes no app-server request');
+    const wireText = JSON.stringify(runs.external.wire);
+    assert.ok(!wireText.includes(JSON.stringify(owner).slice(1, -1)) && !wireText.includes(path.basename(owner)),
+      'SEC330-4: the owner never reaches the Codex wire');
+    assert.deepStrictEqual(calls, [], 'SEC330-4: plan never activates observeSession/consumeBoundary');
+    assert.ok(!fs.existsSync(path.join(owner, '.gsd', 'forge', 'context')), 'SEC330-4: no owner context state is written');
+  } finally {
+    contextCodex.observeSession = original.observeSession;
+    contextCodex.consumeBoundary = original.consumeBoundary;
+  }
+}
+
 async function main() {
   const root = tempDir('forge-xllm-appserver-test-');
   const mock = writeMock(root);
@@ -1518,6 +1585,8 @@ async function main() {
     await testResultFileContract(mock, root);
     await testSvnTurnCarriesExplicitSandboxPolicy(mock, root);
     await testTransportField(mock, realMock, root);
+    await testPlanContextRootParity(realMock, root);
+    process.stdout.write('PASS SEC330-4 Codex plan: same app-server requests with/without contextRoot, no owner context observation\n');
     testNonGitWriteProbeStaysRegistered();
     await testCrossRootProbe();
     process.stdout.write('forge-xllm-appserver.test.js: ok\n');
