@@ -85,6 +85,14 @@ const smoke = read('scripts/forge-smoke.js');
 const smokeStart = smoke.indexOf('// ── Section 61:');
 const smokeEnd = smoke.indexOf('// ── Section 62:', smokeStart);
 const section61 = smoke.slice(smokeStart, smokeEnd);
+// T07 originally changed only Section61. Later explicitly scoped CI fixes to
+// the smoke harness are a separate exact postimage, not a regenerated owner
+// baseline. Preserve the historical fingerprint and reject any other drift.
+const POST_CLOSURE_CI_SMOKE = Object.freeze({
+  source_revision: '15820b3626b52d311ed4d014ea8a97abc672e15a',
+  outside_section61_sha256: '11144be92ecb59e0be7a298238971578aa061a5c7ae48b7095833991eb91797e',
+  reference: 'https://github.com/vh2224/forge-agent/issues/339#issuecomment-6674714308',
+});
 const t07Labels = [];
 // S03/T06 attribution. T06 adds its linked-task text to the ten declared paths only inside
 // whole-line `<!-- forge:linked-task:<id>:start -->` … `:end -->` blocks. The S02 pins,
@@ -405,10 +413,18 @@ function checkRegistry() {
   assert.deepStrictEqual(changed, [], 'actual measurement found no fingerprint drift; no artificial registry edit');
   for (const id of changed) assert(pinReadme.includes(id), `document changed registry row ${id}`);
 }
+function assertSmokeScope(text) {
+  const start = text.indexOf('// ── Section 61:'), end = text.indexOf('// ── Section 62:', start);
+  assert(start >= 0 && end > start, 'smoke scope markers remain present');
+  const actual = hash(text.slice(0, start) + '<allowed-section61>\n' + text.slice(end));
+  assert(actual === before.smoke.outside_section61_sha256 || actual === POST_CLOSURE_CI_SMOKE.outside_section61_sha256,
+    'unrecognized smoke changes outside Section61 and the exact post-closure CI scope');
+}
 function checkSmoke() {
   assert(smokeStart >= 0 && smokeEnd > smokeStart);
-  assert.strictEqual(hash(smoke.slice(0, smokeStart) + '<allowed-section61>\n' + smoke.slice(smokeEnd)), before.smoke.outside_section61_sha256,
-    'only section61 changed');
+  assertSmokeScope(smoke);
+  assert.throws(() => assertSmokeScope(smoke + '\n// unexpected out-of-scope change\n'), /unrecognized smoke changes/,
+    'an unenumerated change still fails the real smoke scope guard');
   assert.notStrictEqual(hash(section61), before.smoke.section61_sha256);
   assert.strictEqual(count(planner, 'ROUTING_DOMAINS'), 2);
   assert.strictEqual(count(newMilestone, 'ROUTING_DOMAINS'), 0);
