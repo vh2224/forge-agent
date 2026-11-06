@@ -1,0 +1,150 @@
+{
+  "schema_version": 1,
+  "kind": "issue-341-measured-distribution-delta",
+  "issue": "https://github.com/vh2224/forge-agent/issues/341",
+  "unit": "M-20261106040502-review-fix-limites/S01/T05",
+  "provenance": {
+    "base_revision": "563ac2752722ac7c29848f62520c8446185bc15c",
+    "base_revision_short": "563ac27",
+    "before_policy": "Every before value is copied from evidence already versioned at the base revision: the active golden pins, the immutable milestone-options and linked-task captures, the OWNER_POST_T06 and T06_ATTRIBUTED_* constants of the suites, the four sample source.sha256 values and the guard registry. None is recomputed from disk and no capture is regenerated.",
+    "after_policy": "Every after value was measured on the final T05 bytes: surface pins from the actual value reported by forge-claude-renderer.test.js, attributed values from the actual value reported by forge-communication-surfaces.test.js and forge-dispatch-source-guard.test.js, file hashes by sha256sum over the LF working-tree bytes (.gitattributes eol=lf).",
+    "render_method": "forge-claude-renderer.render; group by source_id; sort by source with localeCompare; source + NUL + content with version=MAJOR.MINOR.PATCH normalized to version=<dynamic>; NUL join; UTF-8 SHA-256 (golden algorithm of forge-claude-renderer.test.js)",
+    "attributed_method": "same formula after removing the whole-line forge:linked-task blocks of the S03/T06 declared paths (attributed/attributedBytes of forge-communication-surfaces.test.js)",
+    "measured_environment": "local win32 worktree, Node v24.14.1, offline",
+    "not_post_change_ci": true,
+    "scope_note": "Distribution proof only. No CI, smoke, merge, release, installation, client or provider behavior, nor human acceptance is claimed."
+  },
+  "declared_paths": [
+    "agents/forge-advocate.md",
+    "agents/forge-reviewer.md",
+    "forge-prefs.schema.json",
+    "shared/forge-procedure-review.md",
+    "shared/forge-procedures.json",
+    "skills/forge-auto/SKILL.md",
+    "skills/forge-next/SKILL.md",
+    "skills/forge-task/SKILL.md"
+  ],
+  "pin_files": [
+    "scripts/fixtures/claude-renderer/claude-memory-v2.golden.json",
+    "docs/communication-evaluation/samples.json"
+  ],
+  "files": {
+    "agents/forge-advocate.md": {
+      "task": "T03",
+      "before": "0aacde2289033f8701a8898b95d2bdce29154e5160f632f5a2be7c98b7372538",
+      "before_from": "milestone-options and linked-task captures, sources",
+      "after": "3cb47445f6bc4ddbd8a2ade71ce553f2d1eb5b60e59b3166f7251cc2c989471f"
+    },
+    "agents/forge-reviewer.md": {
+      "task": "T03",
+      "before": "db504dbbe3ba34f28090222af12f9bc0c0e5a07d8582bcfe17197f9c4b0e3dc8",
+      "before_from": "milestone-options and linked-task captures, sources",
+      "after": "d2d92895ae7b9a5fb6faa56fa4a3c256d337941bbf1c7386bcab555bd9c5ddf9"
+    },
+    "forge-prefs.schema.json": {
+      "task": "T01",
+      "before": "f7c62739df9a20fbfe06be08cdcd88700c9eec20fced2cc6e2d4f0e36f0fb260",
+      "before_from": "milestone-options and linked-task captures, sources",
+      "after": "ed2a7611aa65b1aa918cccfec24e365d32a61739323a86ccfa41fccbbed7ac2b"
+    },
+    "shared/forge-procedure-review.md": {
+      "task": "T03",
+      "before": "ae657aceae8d212d254daf46d293308a7e5bc64152d7798f2a50ddc381c28030",
+      "before_from": "linked-task capture, sources",
+      "after": "9b382d9c5f6074adb8605782614ade3047c6ffa18095d0abdd903474eb2839a2"
+    },
+    "shared/forge-procedures.json": {
+      "task": "T03",
+      "before": "fbb066b05d5d57823528381355d8fdfc48788fd67736e0dfd8ed4fb75b3d2847",
+      "before_from": "linked-task capture, sources",
+      "after": "2fac89deff0f797988b4c02c1a5fca348a39b0261165a5b6d0002c12001e3fef"
+    },
+    "skills/forge-auto/SKILL.md": {
+      "task": "T05",
+      "before": "5a90d205b3295aa4f3f3d331ae8229432257541142777529d513617a173a5c62",
+      "before_from": "OWNER_POST_T06.contributors after (forge-dispatch-source-guard.test.js)",
+      "after": "11bb75ddae971bbaa0deb2c5271a08a1df3896a132cb3b69bd5a4f554b108d8f",
+      "attributed_before": "e39798174f5cba4ce10dd254385cf6726180b077cbee89e382ae6b9348e1e05a",
+      "attributed_before_from": "linked-task capture, sources (pre-T06 bytes)",
+      "attributed_after": "e248e1a60e0dfccc43b0d0fd0b2f8df78d8d1443571a730e664d843ad62deaa3"
+    },
+    "skills/forge-next/SKILL.md": {
+      "task": "T05",
+      "before": "d824741df528de5b38f35aec9e00e9df80349ae8ed4687e0bf6fdb1cb69dc59a",
+      "before_from": "OWNER_POST_T06.contributors after; the two forge-next sample source.sha256 values",
+      "after": "61d13a04a7cfd6c3f8543fadf6de12ac8d27e856e23a7946028a965bd34755a1",
+      "attributed_before": "e8d04241493f4fa7c5a1db28e075487759fea1dd87dfafdbb750aa06aa723d0f",
+      "attributed_before_from": "T06_ATTRIBUTED_NEXT_SHA; linked-task capture, sources",
+      "attributed_after": "fad7ae40c8495226402cce4fbf0c849e1823450172e130195503af6e072cadee"
+    },
+    "skills/forge-task/SKILL.md": {
+      "task": "T05",
+      "before": "af9cf1d0b0b9f68ba751394f935e2c324050b226409f7bea9095700d13ea62ae",
+      "before_from": "OWNER_POST_T06.contributors after; the two forge-task sample source.sha256 values",
+      "after": "2f3a10c2e2d906b77778077af83d00bb6578f124d92cee4b40b638e787593754",
+      "attributed_before": "d81556180d9bb16d45a8f81ba6b5faa12ece7f6601a510963f29eb50fe10679b",
+      "attributed_before_from": "T06_ATTRIBUTED_TASK_SHA; milestone-options and linked-task captures, sources",
+      "attributed_after": "f85dce7a8bed7c53fd1253183c520f6017e52902b0e2d083ae0a587224269329"
+    }
+  },
+  "surfaces": {
+    "agents": {
+      "members": ["agents/forge-advocate.md", "agents/forge-reviewer.md"],
+      "before": "64bbdc40320fe629f19c9e0ceb50256f03544d9d9b0385d416f1563b2abbd41a",
+      "before_from": "active golden at the base; T06_ATTRIBUTED_PINS; linked-task capture active_golden_before",
+      "after": "30d0fb3fecdb88a4d2ac76dbb5a1ee6669aa3455f1fa41461137f89a164921c0"
+    },
+    "skills": {
+      "members": ["skills/forge-auto/SKILL.md", "skills/forge-next/SKILL.md", "skills/forge-task/SKILL.md"],
+      "before": "4b1a158a3faedb66b0aab2033974917cedb4251d3352e90b5f019970330ae548",
+      "before_from": "active golden at the base; OWNER_POST_T06.surfaces",
+      "after": "bcb38a84d24878be82872ebfd78f0b6461e1b11bdabcd5829e4181692b15aab4",
+      "attributed_before": "1309f02bb58b79d61ba0bb1e897cdee4d37c232f488e1548106d4a999e57d061",
+      "attributed_before_from": "T06_ATTRIBUTED_PINS; linked-task capture active_golden_before",
+      "attributed_after": "78559130c1c543be186ebd14ab2a448c4612e080ff76dbabbe3e915bf10d7819"
+    },
+    "configuration": {
+      "members": ["forge-prefs.schema.json"],
+      "before": "c76a23d540a2602293ba45f8821419aa00d738eb08c538b85627596bcc560c3d",
+      "before_from": "active golden at the base; T06_ATTRIBUTED_PINS; linked-task capture active_golden_before",
+      "after": "e3f1fdcfe1b6404d242fec5e1925a6e424d9f9fc8bcaec23d7f6711ee0d2e280"
+    }
+  },
+  "unchanged_surfaces": ["commands", "dispatch-templates", "hooks", "mcp", "claude-instructions", "claude-settings"],
+  "samples": {
+    "file": "docs/communication-evaluation/samples.json",
+    "nodes": [
+      {
+        "pointer": "/entries/1/supporting/timeline/after",
+        "file": "skills/forge-task/SKILL.md",
+        "before": "af9cf1d0b0b9f68ba751394f935e2c324050b226409f7bea9095700d13ea62ae",
+        "after": "2f3a10c2e2d906b77778077af83d00bb6578f124d92cee4b40b638e787593754"
+      },
+      {
+        "pointer": "/entries/5/supporting/timeline/after",
+        "file": "skills/forge-task/SKILL.md",
+        "before": "af9cf1d0b0b9f68ba751394f935e2c324050b226409f7bea9095700d13ea62ae",
+        "after": "2f3a10c2e2d906b77778077af83d00bb6578f124d92cee4b40b638e787593754"
+      },
+      {
+        "pointer": "/entries/2/supporting/partial/after",
+        "file": "skills/forge-next/SKILL.md",
+        "before": "d824741df528de5b38f35aec9e00e9df80349ae8ed4687e0bf6fdb1cb69dc59a",
+        "after": "61d13a04a7cfd6c3f8543fadf6de12ac8d27e856e23a7946028a965bd34755a1"
+      },
+      {
+        "pointer": "/entries/6/supporting/partial/after",
+        "file": "skills/forge-next/SKILL.md",
+        "before": "d824741df528de5b38f35aec9e00e9df80349ae8ed4687e0bf6fdb1cb69dc59a",
+        "after": "61d13a04a7cfd6c3f8543fadf6de12ac8d27e856e23a7946028a965bd34755a1"
+      }
+    ]
+  },
+  "registry": {
+    "count": 248,
+    "added": [],
+    "removed": [],
+    "drifted_rows": [],
+    "method": "forge-dispatch-source-guard discover/audit over the final bytes: real disk discovery equals the frozen registry in both directions; forge-dispatch-source-guard.js left untouched"
+  }
+}

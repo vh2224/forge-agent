@@ -1003,6 +1003,25 @@ Imprima o veredicto ao operador e **siga**. O sinal é advisory: **nunca** bloqu
        exit 1
      fi
      ```
+
+     Política executável de review-fix (`shared/forge-review.md § Política executável de review-fix`, `review-fix-policy-v1`) na fronteira `slice`; a triagem do Step 9 segue a regra própria descrita no gate de triagem abaixo:
+     1. Classifique os concedidos antes do ciclo. Monte o `verdict` de cada R# a partir do Step 5 (ou do retorno do Engine workflow) e decida pela CLI, nunca pela prosa:
+        ```bash
+        node "$FORGE_SCRIPTS_DIR/forge-review-policy.js" --classify --input "$RF_VERDICTS_FILE"
+        ```
+     2. Com `ask_in_auto: pause`, faça antes as perguntas do Step 7b: cada resposta `Refatorar agora` entra no mesmo ciclo com `basis: operator-decision`. Com `defer` não há resposta e o item segue para o Step 9.
+     3. Concedido que não é fix-now não entra no request. Publique a deferência dele, `**Correção:** não aplicada — deferida para triagem final (<motivo>)`, em vez de despachá-lo:
+        ```bash
+        node "$FORGE_SCRIPTS_DIR/forge-review-fix.js" --defer "$RF_DEFER_REQUEST"
+        ```
+     4. Um ciclo é um único request agrupado (concedidos fix-now com `basis: dual-verdict` mais as respostas `Refatorar agora`) com um único `dispatchId`, gerado uma vez e reutilizado no replay; o request de `--prepare-native` leva esse `dispatchId`. O claim gate abaixo usa só os itens desse request. No máximo 2 ciclos por slice, dentro do orçamento medido de 50%.
+     5. A admissão roda dentro do despacho (adaptador sidecar ou `--prepare-native`), nunca no lugar dele. Uma recusa nomeada (`review-fix-cycle-limit`, `review-fix-budget-exhausted`, `review-fix-not-fix-now`, `review-fix-policy-invalid`) não lança nada: sem retry, sem bypass, sem correção inline e sem outro worker. Os itens ficam `não aplicada — deferida para triagem final (<código>)` e vão para o Step 9. Em `review-fix-not-fix-now`, reconstrua o request só com os itens admissíveis e repita o claim gate.
+     6. Depois de cada decisão, admitida ou recusada, repasse verbatim a linha `⚖` desta leitura somente leitura (`RF_MILESTONE_ID` = `${RUN_ID:-{M###}}`):
+        ```bash
+        node "$FORGE_SCRIPTS_DIR/forge-review-policy.js" --status --cwd "$WORKING_DIR" --milestone "$RF_MILESTONE_ID" --slice "$RF_UNIT_ID"
+        ```
+     7. Depois do fix roda só a verificação dirigida dos itens corrigidos (`verify_paths`, comandos ligados aos itens e regressão dirigida), sem nova revisão. Falha deixa o item `falhou — deferida para triagem final`; achado ou regressão nova vai para a triagem final com a evidência.
+
      Set `RF_UNIT_ID` to `{S##}` for Step 7a and `{M###}-triage` for Step 9. Only after this runtime gate, run the cross-run claim gate exactly as `shared/forge-review.md § Step 7a` prescribes (it in turn references `shared/forge-claim-gate.md § Step 1` for the `--conceded` claim derivation — the path derivation is not repeated here). With the claim-gate decision `proceed`: when `WORKER_MODE == sidecar` (engine claude|codex) run `shared/forge-review.md § Sidecar review-fix branch` from `RF_ROUTE_JSON_SAVED` (boundary `slice` or `milestone-triage`; the adapter publishes the per-R# lines, a failure defers the items without blocking and without fallback); when `WORKER_MODE == native` first run `forge-review-fix.js --prepare-native` exactly as
 `shared/forge-review.md § Mandatory native preparation (before build/invoke)` prescribes,
 with explicit VCS and items including `verify_paths`. Stop the fixer before build/invoke
@@ -1019,6 +1038,8 @@ allows only `auto_commit:false`. Native SVN preparation uses the bounded claim-c
    - **Política deste modo (`MODE = auto`):** advogado indisponível — **só depois** de a salvage do `DEFENSE_FILE` não render nenhum veredito (`shared/forge-review.md § Step 3`) — ⇒ objeções ficam `open` cruas, Rebuttal é PULADO, e cada uma é deferida (`**Decisão:** deferido → triagem no fim da milestone`) — o loop **não pausa**, e a triagem final da milestone as apresenta ao operador. Challenger indisponível ⇒ `{S##}-REVIEW.md` mínimo registrando a indisponibilidade (proibido renderizar como limpo — ausência de review não é aprovação) e segue para `complete-slice`.
 
 > Fires ONLY when the derived unit is `complete-slice`. Boundary is per-slice; standalone `/forge-task` keeps its own step-5.5 review. After the gate, dispatch `forge-completer` normally.
+>
+> Em milestone, a revisão dialética roda só aqui, uma vez por slice (`shared/forge-review.md § Política executável de review-fix → Fronteira de revisão`); revisão por task dentro da milestone exige `review.milestone_task_review: true`. Uma perna recusada com `review-per-task-in-milestone` ou `review-already-completed` (exit 2, `provider_called:false`) para antes do provider: não é indisponibilidade de revisor, não tem retry nem fallback para outro revisor ou família e não produz `{S##}-REVIEW.md` limpo nem mínimo.
 
 **Slice git guard (around complete-slice):** `complete-slice` never integrates a branch — no unit of the loop does; integration is the operator's act on the delivered `forge/{run}` branch (`agents/forge-completer.md § Git boundary — complete-slice`). Snapshot the checkout **before** dispatching, verify **after** the worker returns:
 
@@ -1033,10 +1054,10 @@ The snapshot is written to `.gsd/forge/` on purpose — shell variables do not s
 
 **Review triage gate (before complete-milestone):** If `unit_type == complete-milestone`, run the **milestone-final triage** (`shared/forge-review.md § Step 9`) BEFORE dispatching `forge-completer` — i.e., before the milestone is finalized "de fato" (final close-out, LEDGER entry, cleanup):
 
-1. Scan all `{S##}-REVIEW.md` under `.gsd/milestones/{M###}/slices/*/` for pending items: `Decisão: deferido → triagem no fim da milestone`, `Correção: falhou — deferida para triagem final`, or legacy `Decisão: deferido (auto-mode)`.
+1. Scan all `{S##}-REVIEW.md` under `.gsd/milestones/{M###}/slices/*/` for pending items: `Decisão: deferido → triagem no fim da milestone`, `Correção: falhou — deferida para triagem final`, `Correção: não aplicada — deferida para triagem final (<motivo>)` (concedido sem fix-now ou recusado por teto, orçamento ou política), or legacy `Decisão: deferido (auto-mode)`.
 2. Zero pending → skip silently and dispatch `complete-milestone` normally.
 3. Otherwise **fire push (call-site 2):** use Push helper with message `"Forge {RUN_ID} — {N} item(ns) de review aguardam sua triagem antes de fechar a milestone."` (N = count of pending items). Then print the digest table (slice · R# · path:line · objeção · status) and triage each item via `AskUserQuestion` (batched up to 4, header `Review M###`): `Manter abordagem atual` / `Refatorar agora` / `Criar follow-up`.
-4. `Refatorar agora` items → ONE `review-fix/{M###}-triage` dispatch to `forge-executor` (nothing has been integrated at this point — the fix commits on the still-checked-out `forge/{run}` branch). **Before dispatching**, set `RF_UNIT_ID={M###}-triage`, run the canonical review-fix resolver/export/allowance gate above, then run the cross-run claim gate exactly as `shared/forge-review.md § Step 9` prescribes (it references `shared/forge-claim-gate.md § Step 1` for the `--conceded` claim derivation of the triage items — not repeated here); launch only after both gates allow it. Write every decision back into the R#'s `**Decisão:**` line; `Criar follow-up` items create an item per `shared/forge-review.md § Item capture` (source `review/{S##}/{R#}`, status `inbox`, provenance from the digest row) and append ONLY the pointer line `- {I-id} — {title}` to `.gsd/KNOWLEDGE.md § Review follow-ups` (create the section if missing — this survives `milestone_cleanup`; the item is the single destination for full content).
+4. `Refatorar agora` items → ONE `review-fix/{M###}-triage` dispatch to `forge-executor` (nothing has been integrated at this point — the fix commits on the still-checked-out `forge/{run}` branch). **Before dispatching**, set `RF_UNIT_ID={M###}-triage`, run the canonical review-fix resolver/export/allowance gate above, then run the cross-run claim gate exactly as `shared/forge-review.md § Step 9` prescribes (it references `shared/forge-claim-gate.md § Step 1` for the `--conceded` claim derivation of the triage items — not repeated here); launch only after both gates allow it. Esta é a decisão explícita do operador: a fronteira `milestone-triage` fica fora do filtro corrigir-agora e do teto por slice, é admitida com `counted:false` e registrada, continua num único despacho agrupado e, depois dele, roda só a verificação dirigida (§ Política executável de review-fix). Write every decision back into the R#'s `**Decisão:**` line; `Criar follow-up` items create an item per `shared/forge-review.md § Item capture` (source `review/{S##}/{R#}`, status `inbox`, provenance from the digest row) and append ONLY the pointer line `- {I-id} — {title}` to `.gsd/KNOWLEDGE.md § Review follow-ups` (create the section if missing — this survives `milestone_cleanup`; the item is the single destination for full content).
 5. Append the `review-triage` event to `events.jsonl`. The triage **never blocks** the milestone close-out.
 
 > **This gate is the explicit exception to the AUTONOMY RULE** — at this point every slice is done; asking the operator here is the designed arbitration moment that `defer` postponed to. It does not fire on pause/blocked/partial exits — only when the derived unit is `complete-milestone`.

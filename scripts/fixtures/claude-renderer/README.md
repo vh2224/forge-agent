@@ -196,3 +196,30 @@ nove superfícies medidas. Os outros oito hashes ativos (`agents`, `commands`,
 byte iguais. O registro de despacho mantém as 248 linhas, classificações, motivos e
 fingerprints da captura: deriva medida zero, nenhuma linha editada. Distribuição não
 prova execução nem compreensão do cliente instalado, nem aceite humano.
+
+## Review-fix com limites executáveis (#341, M-20261106040502-review-fix-limites, S01/T05)
+
+Medido por forge-claude-renderer.render com a mesma fórmula acima, sobre os bytes finais da
+T05. A base é a revisão `563ac2752722ac7c29848f62520c8446185bc15c` (563ac27). Os valores
+anteriores são os pins ativos versionados nessa base, que também conferem com a captura da
+task ligada acima e com as constantes T06 das suítes; nenhum foi recalculado do disco. Os
+valores novos são o `actual` medido pelas próprias suítes. O delta completo, com os caminhos
+declarados e a proveniência, fica em `scripts/fixtures/review-policy/distribution-delta.json`.
+
+- agents: `64bbdc40320fe629f19c9e0ceb50256f03544d9d9b0385d416f1563b2abbd41a` to `30d0fb3fecdb88a4d2ac76dbb5a1ee6669aa3455f1fa41461137f89a164921c0` (T03: `agents/forge-advocate.md`, `agents/forge-reviewer.md`).
+- skills: `4b1a158a3faedb66b0aab2033974917cedb4251d3352e90b5f019970330ae548` to `bcb38a84d24878be82872ebfd78f0b6461e1b11bdabcd5829e4181692b15aab4` (T05: `skills/forge-auto/SKILL.md`, `skills/forge-next/SKILL.md`, `skills/forge-task/SKILL.md`).
+- configuration: `c76a23d540a2602293ba45f8821419aa00d738eb08c538b85627596bcc560c3d` to `e3f1fdcfe1b6404d242fec5e1925a6e424d9f9fc8bcaec23d7f6711ee0d2e280` (T01: `forge-prefs.schema.json`, pref `review.milestone_task_review`).
+
+Medição atribuída (sem os blocos `forge:linked-task` da T06), que as camadas históricas
+conferem: skills `1309f02bb58b79d61ba0bb1e897cdee4d37c232f488e1548106d4a999e57d061` to
+`78559130c1c543be186ebd14ab2a448c4612e080ff76dbabbe3e915bf10d7819`; `agents` e `configuration` não têm bloco ligado, então o valor
+atribuído é o próprio pin.
+
+Os outros seis hashes ativos (`commands`, `dispatch-templates`, `hooks`, `mcp`,
+`claude-instructions`, `claude-settings`) ficam byte a byte iguais, assim como os goldens
+históricos 4.18.1 (`a58a005aea70eaa17c0ecfaf1cdf8965cdf9adb8c2678e756ac83ea74d926d9c`) e
+4.19.0 (`f2b3e910445d2557f50aa4ced9e1b31498debc6b1cdd1ed05b452d8141b4307f`) e as capturas
+`distribution-before.json` (milestone-options e linked-task). O registro de despacho
+continua com 248 linhas, nenhuma nova ou removida e deriva de fingerprint medida zero:
+`scripts/forge-dispatch-source-guard.js` não foi alterado. Distribuição não prova CI,
+smoke, merge, release, instalação, execução nem compreensão do cliente, nem aceite humano.

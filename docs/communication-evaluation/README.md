@@ -181,3 +181,30 @@ Repondo esses quatro valores, os bytes do arquivo voltam ao SHA-256 da captura
 (`3f4640b4c1383652e4890827d9e8456ae75c54f2493a9bdafa48931542fed10e`). Textos,
 rótulos, referências, rubricas e o aceite humano pending-final-round ficam iguais.
 É proveniência de fonte, não observação de cliente nem aceite humano.
+
+## Review-fix com limites executáveis (#341, S01/T05 de M-20261106040502-review-fix-limites)
+
+A T05 espelhou a política `review-fix-policy-v1` nas skills `forge-task` (Step 5.5) e
+`forge-next` (gate de revisão e triagem). Os textos citados continuam literais nas duas
+skills; só os mesmos quatro `source.sha256` mudam, de novo para o SHA-256 dos bytes reais de
+cada arquivo. O valor anterior é o versionado na base `563ac2752722ac7c29848f62520c8446185bc15c`
+(o valor novo da tabela da T07 acima); o novo foi medido sobre os bytes finais da T05. O delta
+completo, com proveniência, fica em `scripts/fixtures/review-policy/distribution-delta.json`.
+
+| Amostra (campo) | Fonte | SHA-256 anterior (#341) | SHA-256 novo (#341) |
+|---|---|---|---|
+| entries[1].supporting.timeline.after.source.sha256 | skills/forge-task/SKILL.md#modelo-literal | af9cf1d0b0b9f68ba751394f935e2c324050b226409f7bea9095700d13ea62ae | 2f3a10c2e2d906b77778077af83d00bb6578f124d92cee4b40b638e787593754 |
+| entries[5].supporting.timeline.after.source.sha256 | skills/forge-task/SKILL.md#modelo-literal | af9cf1d0b0b9f68ba751394f935e2c324050b226409f7bea9095700d13ea62ae | 2f3a10c2e2d906b77778077af83d00bb6578f124d92cee4b40b638e787593754 |
+| entries[2].supporting.partial.after.source.sha256 | skills/forge-next/SKILL.md#parcial | d824741df528de5b38f35aec9e00e9df80349ae8ed4687e0bf6fdb1cb69dc59a | 61d13a04a7cfd6c3f8543fadf6de12ac8d27e856e23a7946028a965bd34755a1 |
+| entries[6].supporting.partial.after.source.sha256 | skills/forge-next/SKILL.md#parcial | d824741df528de5b38f35aec9e00e9df80349ae8ed4687e0bf6fdb1cb69dc59a | 61d13a04a7cfd6c3f8543fadf6de12ac8d27e856e23a7946028a965bd34755a1 |
+
+Sem os blocos `forge:linked-task` da T06 (medição atribuída que as camadas históricas
+conferem), `skills/forge-task/SKILL.md` passa de `d81556180d9bb16d45a8f81ba6b5faa12ece7f6601a510963f29eb50fe10679b`
+a `f85dce7a8bed7c53fd1253183c520f6017e52902b0e2d083ae0a587224269329`, e
+`skills/forge-next/SKILL.md` de `e8d04241493f4fa7c5a1db28e075487759fea1dd87dfafdbb750aa06aa723d0f`
+a `fad7ae40c8495226402cce4fbf0c849e1823450172e130195503af6e072cadee`.
+
+Repondo esses quatro valores pelos anteriores da #341, o arquivo volta aos bytes da base; e,
+repondo os da tabela da T07, à captura acima. Textos, rótulos, referências, rubricas e o
+aceite humano pending-final-round ficam iguais. É proveniência de fonte, não observação de
+cliente, CI nem aceite humano.
