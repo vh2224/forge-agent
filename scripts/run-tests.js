@@ -214,7 +214,11 @@ const KEYCHAIN_DISABLED_ENV = { FORGE_KEYCHAIN_DISABLED: '1' };
 
 function childEnv(root, filename) {
   const base = root ? isolatedEnv(root, filename) : { ...process.env };
-  return { ...base, ...KEYCHAIN_DISABLED_ENV };
+  // macOS exposes /var through a symlink. Fixtures exercise strict no-link
+  // owner guards, so give children the physical temporary directory instead
+  // of weakening those production guards for test paths.
+  const temp = fs.realpathSync.native(os.tmpdir());
+  return { ...base, TMPDIR: temp, TMP: temp, TEMP: temp, ...KEYCHAIN_DISABLED_ENV };
 }
 
 function isolatedEnv(root, filename) {
@@ -514,7 +518,7 @@ function main(argv) {
 
   const isolatedRoot = options.inheritHome
     ? null
-    : fs.mkdtempSync(path.join(os.tmpdir(), 'forge-tests-'));
+    : fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-tests-')));
   const failures = [];
   const suiteRecords = [];
   let executed = 0;

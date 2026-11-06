@@ -18,10 +18,15 @@ async function main(){
     assert.equal(calls,1);assert.equal(parent.phase,'executed');assert.equal(parent.result.status,'done');
     assert.equal(parent.delivery_capture.passed,false);
     const check=parent.delivery_capture.gate.roots[0].result.checks[0];
-    assert.equal(check.exitCode,124);assert(check.cleanup,'actual process cleanup retained');
-    if(process.platform==='win32'){assert.equal(check.cleanup.status,'joined');assert.equal(check.cleanup.active_processes,0);}
+    assert.equal(check.exitCode,124);
+    if(process.platform==='win32'){
+      assert(check.cleanup,'actual Windows process cleanup retained');
+      assert.equal(check.cleanup.status,'joined');assert.equal(check.cleanup.active_processes,0);
+    }else{
+      assert.match(check.stderr,/timeout after 1000ms/,'actual synchronous POSIX timeout retained');
+    }
     assert(observations.some(row=>row.state==='finished'&&row.exit_code===124&&row.index===1));
-    console.log('PASS failed sidecar verification retains actual capture, stdout and process cleanup before publication refusal');
+    console.log('PASS failed sidecar verification retains actual capture, stdout and platform timeout diagnostics before publication refusal');
     // Reproduce an owner diagnostic caller that omitted its external sink.
     // Keep its real append; only a closed, live-attested surface may reconcile.
     const eventsFile=path.join(f.owner,'.gsd/forge/events.jsonl'),beforeEvents=fs.readFileSync(eventsFile);

@@ -107,7 +107,14 @@ const PERSONAL_FIXTURE_PATH = /t-20261103120000-parity-personal(?:-(?:brief|plan
 function personalCaseProjection(value) {
   if (typeof value === 'string') return value.replace(PERSONAL_FIXTURE_PATH, match => match.toLowerCase());
   if (Array.isArray(value)) return value.map(personalCaseProjection);
-  if (object(value)) return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, personalCaseProjection(v)]));
+  if (object(value)) {
+    const out = Object.fromEntries(Object.entries(value).map(([k, v]) => [k, personalCaseProjection(v)]));
+    // The resolver sorts physical paths, whose relative prefix order differs
+    // between Windows and POSIX. Provenance is a set keyed by source path:
+    // compare its normalized order, retaining every path, physical path/hash.
+    if (Array.isArray(out.resolution_sources)) out.resolution_sources.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+    return out;
+  }
   return value;
 }
 function textDigest(value) { return typeof value === 'string' ? { sha256: sha256(value), bytes: Buffer.byteLength(value) } : null; }
@@ -463,6 +470,16 @@ function personalCaseProjectionChecks(assert) {
   assert.notDeepStrictEqual(personalCaseProjection({ a: 'T-20261103120000-parity-execute' }), { a: 'T-20261103120000-parity-execute'.toLowerCase() });
   // A real behavioural difference is still a difference after projection.
   assert.notDeepStrictEqual(personalCaseProjection({ source: low + '-brief.md' }), personalCaseProjection({ source: low + '-brief.txt' }));
+  const sources = [{ path: '<root>/home/prefs', physical_path: null, sha256: null },
+    { path: '<forge>/prefs', physical_path: '<forge>/prefs', sha256: 'one' }];
+  assert.deepStrictEqual(personalCaseProjection({ resolution_sources: sources }),
+    personalCaseProjection({ resolution_sources: sources.slice().reverse() }));
+  assert.notDeepStrictEqual(personalCaseProjection({ resolution_sources: sources }),
+    personalCaseProjection({ resolution_sources: [sources[0], { ...sources[1], sha256: 'changed' }] }));
+  assert.notDeepStrictEqual(personalCaseProjection({ resolution_sources: sources }),
+    personalCaseProjection({ resolution_sources: sources.slice(1) }));
+  assert.notDeepStrictEqual(personalCaseProjection({ other: sources }),
+    personalCaseProjection({ other: sources.slice().reverse() }));
   process.stdout.write('ok - integrated-R39-personal-path-case-projection\n');
 }
 async function main(argv = process.argv.slice(2), io = process) {
