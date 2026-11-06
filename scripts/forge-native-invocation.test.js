@@ -780,6 +780,18 @@ async function main() {
     assert.deepStrictEqual(refusals.map(row => [row.reason_code, row.leg]), [['review-per-task-in-milestone', 'forge-reviewer'],
       ['review-already-completed', 'forge-reviewer'], ['review-per-task-in-milestone', 'forge-advocate'], ['review-already-completed', 'forge-advocate']]);
     timeFixture.at = 1;
+    for (const key of ['agentType', 'agent_type', 'subagentType', 'subagent_type']) {
+      for (const leg of ['forge-reviewer', 'forge-advocate']) {
+        const aliased = { ...legBase, agentType: undefined, agent_type: undefined, subagentType: undefined, subagent_type: undefined, [key]: leg };
+        const before = hostCalls;
+        legRefused(await invokeNative({ ...aliased, milestoneTimeContext: legContext('execute-task/T03') }, hostCallback), 'review-per-task-in-milestone');
+        fs.mkdirSync(path.dirname(reviewFile), { recursive: true }); fs.writeFileSync(reviewFile, '# S01 review\n');
+        legRefused(await invokeNative({ ...aliased, milestoneTimeContext: legContext('complete-slice/S01') }, hostCallback), 'review-already-completed');
+        fs.rmSync(reviewFile);
+        assert.strictEqual(hostCalls, before, `${key} ${leg}: zero host callbacks on refusal`);
+      }
+    }
+    timeFixture.at = 1;
     for (const options of [{ ...legBase, agentType: 'forge-executor', milestoneTimeContext: legContext('execute-task/T03') },
       { ...base, agentType: 'forge-reviewer' }, { ...legBase, agentType: 'forge-advocate' }]) {
       assert.strictEqual((await invokeNative(options, hostCallback)).ok, true, 'executor, telemetryIdentity only and absent context unchanged');

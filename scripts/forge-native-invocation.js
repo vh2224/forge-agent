@@ -396,8 +396,10 @@ function witnessNotInvoked(outcome, invocation, options, layer) {
 // explicit milestone milestoneTimeContext; the time admission runs first and prevails.
 function assertNativeReviewLeg(options) {
   const policy = require('./forge-review-policy');
-  if (!policy.REVIEW_LEG_AGENTS.includes(options.agentType)) return;
-  policy.assertReviewLeg({ context: options.milestoneTimeContext, agentType: options.agentType, now: options.now });
+  // Same alias chain as buildNativeInvocation, so every supported key reaches the guard.
+  const agentType = text(options.agentType || options.agent_type || options.subagentType || options.subagent_type);
+  if (!policy.REVIEW_LEG_AGENTS.includes(agentType)) return;
+  policy.assertReviewLeg({ context: options.milestoneTimeContext, agentType, now: options.now });
 }
 // Layer of a refusal: time codes keep theirs; only the guard's own refusal is review-policy.
 function refusalLayer(code, refused, fallback) {
