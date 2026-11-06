@@ -7,12 +7,14 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "verdict", "rationale"],
+        "required": ["id", "verdict", "rationale", "reachable", "in_scope"],
         "additionalProperties": false,
         "properties": {
           "id": { "type": "string" },
           "verdict": { "type": "string", "enum": [] },
-          "rationale": { "type": "string" }
+          "rationale": { "type": "string" },
+          "reachable": { "type": "string", "enum": ["yes", "no", "unknown"], "description": "This leg's assessment of reachability in normal use" },
+          "in_scope": { "type": "string", "enum": ["yes", "no", "unknown"], "description": "This leg's assessment of scope" }
         }
       }
     }

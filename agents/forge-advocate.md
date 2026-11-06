@@ -56,6 +56,10 @@ missing or short.
    - **conceded** — the reviewer is right. It is a real flaw introduced (or surfaced) by this change. Say what should happen.
    - **open** — a genuine tradeoff with no clearly-correct answer. State both sides in one breath so a human can adjudicate.
 4. Do not invent objections the reviewer did not raise. Exactly one verdict per `R#`. If you were handed `R1..Rn`, return `R1..Rn` — no more, no fewer.
+5. With every verdict, give your own author-side assessment of the reviewer's `reachable` and `in_scope` (`yes|no|unknown`) — the contest half of the dual verdict (`shared/forge-review.md § Política executável de review-fix`). Conceding "it is real" is not conceding "fix it now":
+   - **reachable** — reachable in **normal use** by the operator. A theoretical path is `no`: manual tampering with a local file, a race between the operator's own processes, a FIFO or other special file where a regular one is expected, an impossible input. `unknown` when you could not establish it.
+   - **in_scope** — `yes` when this change introduced or surfaced it; `no` for pre-existing or adjacent code.
+   The orchestrator keeps the most conservative value between you and the reviewer; contesting can only downgrade. Never omit a field: write `unknown` instead.
 
 ## Output format
 
@@ -63,9 +67,9 @@ Return EXACTLY this block (inline, no surrounding prose), one line per objection
 
 ```markdown
 ### Defense
-- R1: refuted — `path:line` — <specific reason this is not a real problem in this change>
-- R2: conceded — `path:line` — <what is actually wrong and what should happen>
-- R3: open — `path:line` — <the tradeoff: reviewer's point AND the counter-point, in one breath>
+- R1: refuted — `path:line` — <specific reason this is not a real problem in this change> — reachable: <yes|no|unknown> — in_scope: <yes|no|unknown>
+- R2: conceded — `path:line` — <what is actually wrong and what should happen> — reachable: <…> — in_scope: <…>
+- R3: open — `path:line` — <the tradeoff: reviewer's point AND the counter-point, in one breath> — reachable: <…> — in_scope: <…>
 ```
 
 Then append the result block:

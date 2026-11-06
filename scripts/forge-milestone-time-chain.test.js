@@ -714,6 +714,15 @@ function guideGroup() {
 const PLANNING_PREFIX_SHA = 'c429aae73e3a80cccef63fab2eca388764ee5b1306c1d2fbc1ec5a803a97fbb8';
 const CHANGELOG_PRE_SHA = '1b8a571086f8e8a3770f418f46aeedb22d074c382ccf3495b75a63612029be2c';
 const PANEL_SENTENCE = 'Likewise,\n`docs/forge-communication-panel-distribution.md` remains deferred; this change\nadds no panel installation or release-distribution feature.';
+// Declared #341 delta: the new entry is measured independently; the pre-T07
+// history pin below remains unchanged. Unknown entries/text still fail closed.
+const REVIEW_FIX_341_ENTRY_SHA = '5c6ee47a8ee14b6e4488cf5929851fa347b03641733040a59c1fa4a2c814968b';
+function withoutReviewFix341Entry(changelog) {
+  const entries = changelog.split('\n').filter(line => line.startsWith("- Review-fix com limites executáveis (#341, M-20261106040502-review-fix-limites):"));
+  assert.equal(entries.length, 1, 'one declared review-fix entry');
+  assert.equal(sha(Buffer.from(entries[0] + '\n', 'utf8')), REVIEW_FIX_341_ENTRY_SHA, 'declared review-fix entry matches measured bytes');
+  return changelog.replace(entries[0] + '\n', '');
+}
 function documentationGroup() {
   const planning = read('docs/planning-cost-diagnosis.md');
   const at = planning.indexOf('## Deferred overlap\n');
@@ -730,7 +739,11 @@ function documentationGroup() {
   const entry = changelog.split('\n')[2];
   for (const topic of ['opções de prazo', 'governança de tempo', 'endpoint comprovado', 'task ligada', '`docs/milestone-time-guide.md`']) assert.ok(entry.includes(topic), topic);
   assert.ok(entry.includes('release, instalação e execução no cliente instalado não estão demonstradas') && entry.includes('UAT humano foi dispensado, não realizado'));
-  assert.equal(sha(Buffer.from(changelog.replace(entry + '\n', ''), 'utf8')), CHANGELOG_PRE_SHA, 'only the feature entry was added; history unchanged');
+  const assertHistory = text => assert.equal(sha(Buffer.from(withoutReviewFix341Entry(text).replace(entry + '\n', ''), 'utf8')), CHANGELOG_PRE_SHA, 'only the declared feature entries were added; history unchanged');
+  assertHistory(changelog);
+  assert.throws(() => assertHistory(changelog + '\n- Unknown feature entry.\n'), /history unchanged/, 'unknown extra entry is not accepted');
+  assert.throws(() => assertHistory(changelog.replace('orçamento de 50%', 'orçamento de 51%')), /measured bytes/, 'unmeasured review-fix entry is not accepted');
+  assert.throws(() => assertHistory(changelog.replace('- Contexto pessoal:', '- Contexto pessoal adulterado:')), /history unchanged/, 'previous history is still immutable');
   ok('chain-documentation-update-preserves-panel-qualification-and-unreleased-feature-scope');
 }
 // T07 worker inventory: the fourteen local verification commands, and the owner operations

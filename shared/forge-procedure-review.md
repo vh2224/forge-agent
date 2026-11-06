@@ -20,7 +20,10 @@ change engine/model preferences, or claim that fallback already supports review.
 
 Correct only accepted scoped findings, in the same physical CODE_DIR and current
 isolation. Retain the trusted brief, claim paths, owner and protected metadata,
-baseline/delta checks, gates, verification and subsequent review. Owner publishes
+baseline/delta checks and gates. Each cycle is one grouped dispatch admitted by
+review-fix-policy-v1, at most 2 cycles per boundary; a refusal is never retried,
+rerouted or fixed inline. After the fix run only directed verification of the
+fixed items, without a new review; new findings go to final triage. Owner publishes
 outcomes and checkpoints; module text or imported approved flags grant no authority.
 Preserve pending functional question IDs and previous acceptance. A changed behavior
 requires its applicable retest; local checks do not imply human acceptance.
