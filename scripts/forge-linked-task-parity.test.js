@@ -83,7 +83,12 @@ function normalizer(pairs) {
   // The resolver fingerprints every runtime module of the Forge scripts directory in
   // route.resolution_sources; that resolver provenance changes with any script edit and is
   // not unlinked-task behavior, so only the preference-layer sources are kept.
-  const sources = rows => rows.filter(row => !(object(row) && typeof row.path === 'string' && row.path.startsWith('<forge>/scripts/')));
+  // Preserve the immutable capture's root-before-forge order BEFORE callers
+  // derive artifact fingerprints. Absolute-path sorting puts /home before /tmp
+  // on POSIX, whereas the Windows capture put its temporary HOME first.
+  const sourceKey = row => row.path.replace(/^<root>/, '0').replace(/^<forge>/, '1');
+  const sources = rows => rows.filter(row => !(object(row) && typeof row.path === 'string' && row.path.startsWith('<forge>/scripts/')))
+    .sort((a, b) => sourceKey(a) < sourceKey(b) ? -1 : sourceKey(a) > sourceKey(b) ? 1 : 0);
   const walk = value => {
     if (typeof value === 'string') return text(value);
     if (Array.isArray(value)) return value.map(walk);
@@ -480,6 +485,15 @@ function personalCaseProjectionChecks(assert) {
     personalCaseProjection({ resolution_sources: sources.slice(1) }));
   assert.notDeepStrictEqual(personalCaseProjection({ other: sources }),
     personalCaseProjection({ other: sources.slice().reverse() }));
+  const normalize = normalizer([]), fingerprint = require('./forge-unit-sidecar').artifactFingerprint;
+  const windowsRequest = { resolution_sources: sources }, posixRequest = { resolution_sources: sources.slice().reverse() };
+  assert.notStrictEqual(fingerprint(windowsRequest), fingerprint(posixRequest), 'control: raw provenance order changes the real fingerprint');
+  assert.deepStrictEqual(normalize(posixRequest), windowsRequest, 'normalization retains the historical Windows order');
+  assert.strictEqual(fingerprint(normalize(windowsRequest)), fingerprint(normalize(posixRequest)),
+    'source order must normalize before deriving the real artifact fingerprint');
+  assert.notStrictEqual(fingerprint(normalize(windowsRequest)),
+    fingerprint(normalize({ resolution_sources: [sources[0], { ...sources[1], sha256: 'changed' }] })));
+  assert.notStrictEqual(fingerprint(normalize(windowsRequest)), fingerprint(normalize({ resolution_sources: sources.slice(1) })));
   process.stdout.write('ok - integrated-R39-personal-path-case-projection\n');
 }
 async function main(argv = process.argv.slice(2), io = process) {
