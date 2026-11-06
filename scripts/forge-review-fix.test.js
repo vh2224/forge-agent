@@ -14,6 +14,44 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const rf = require('./forge-review-fix.js');
+const policy = require('./forge-review-policy');
+
+function fixNow(items) {
+  return items.map(item => ({ ...item, verdict: { resolution: 'conceded', severity: 'high', reachable: 'yes',
+    reproduced: 'yes', in_scope: 'yes' } }));
+}
+
+function identifiedRequest(request) {
+  request.dispatchId ||= `native-fixture-${crypto.randomUUID()}`;
+  request.reviewFix.items = fixNow(request.reviewFix.items);
+  return request;
+}
+
+// Historical accept tests exercise their original VCS evidence after an actual
+// admission. Only the parent-written event is added to their pre-worker snapshot.
+function acceptLegacyFixture(request) {
+  if (request.nativePreparation || request.reviewFix.boundary === 'milestone-triage') return rf.acceptNativeReviewFix(request);
+  identifiedRequest(request);
+  const loc = require('./forge-unit-sidecar').locations({ ...request, unitType: 'review-fix' });
+  const items = rf.normalizeItems(request.reviewFix.items);
+  const brief = rf.buildBrief({ boundary: loc.reviewFix.boundary, unitLabel: loc.reviewFix.unitLabel,
+    items, claimPaths: request.reviewFix.claimPaths, route: request.route });
+  const root = request.contextRoot || request.cwd;
+  const decision = policy.admitCorrection({ owner: root, boundary: loc.reviewFix.boundary,
+    ...(loc.reviewFix.boundary === 'task' ? { task: request.taskId } : { milestone: request.milestoneId, slice: request.sliceId }),
+    dispatch_id: request.dispatchId, brief, items: request.reviewFix.items });
+  assert(decision.allowed, JSON.stringify(decision));
+  if (path.resolve(root) === path.resolve(request.cwd) && Array.isArray(request.preDirty)) {
+    const eventPath = '.gsd/forge/events.jsonl';
+    request.preDirty = request.preDirty.filter(entry => entry.path !== eventPath).concat(
+      require('./forge-xllm').captureDirtySnapshot(request.cwd).filter(entry => entry.path === eventPath));
+  }
+  return rf.acceptNativeReviewFix(request);
+}
+
+function prepareFixture(request) {
+  return rf.prepareNativeReviewFix(identifiedRequest(request));
+}
 
 const SKIP_SVN = Symbol('svn-toolchain-unavailable');
 let skipped = 0;
@@ -259,7 +297,7 @@ test('native acceptance: valid SHA accepted per item; invalid SHA and outside-cl
     reviewFix: { boundary: 'slice', decision: 'proceed', claimPaths: ['src/a.js', 'src/b.js'],
       items: [{ r: 'R1', path: 'src/a.js' }, { r: 'R2', path: 'src/b.js' }] },
     rawResult: { status: 'done', commit_sha: sha, items: [{ r: 'R1', outcome: 'fixed', note: '' }, { r: 'R2', outcome: 'fixed', note: '' }] } };
-  const accepted = rf.acceptNativeReviewFix(request);
+  const accepted = acceptLegacyFixture(request);
   assert.deepStrictEqual(accepted.items.map(i => [i.r, i.outcome, i.verified]), [['R1', 'fixed', true], ['R2', 'unverified', false]],
     'a changed file never implies every item was fixed');
   assert.strictEqual(accepted.commit_sha, sha);
@@ -267,17 +305,17 @@ test('native acceptance: valid SHA accepted per item; invalid SHA and outside-cl
   // A claimed commit cannot conceal an additional uncommitted outside write.
   fs.writeFileSync(path.join(dir, rel), REVIEW);
   fs.writeFileSync(path.join(dir, 'outside.js'), 'worker outside after commit\n');
-  assert.strictEqual(code(() => rf.acceptNativeReviewFix(request)), 'review-fix-outside-claim');
+  assert.strictEqual(code(() => acceptLegacyFixture(request)), 'review-fix-outside-claim');
   assert.match(fs.readFileSync(path.join(dir, rel), 'utf8'), /deferida/);
   fs.unlinkSync(path.join(dir, 'outside.js'));
   fs.writeFileSync(path.join(dir, rel), REVIEW);
-  assert.strictEqual(code(() => rf.acceptNativeReviewFix({ ...request, rawResult: { ...request.rawResult, commit_sha: 'deadbeef' } })),
+  assert.strictEqual(code(() => acceptLegacyFixture({ ...request, rawResult: { ...request.rawResult, commit_sha: 'deadbeef' } })),
     'review-fix-native-unverified');
-  assert.strictEqual(code(() => rf.acceptNativeReviewFix({ ...request, rawResult: { ...request.rawResult, items: [] } })),
+  assert.strictEqual(code(() => acceptLegacyFixture({ ...request, rawResult: { ...request.rawResult, items: [] } })),
     'review-fix-native-unverified');
-  assert.strictEqual(code(() => rf.acceptNativeReviewFix({ ...request, constraints: { auto_commit: false } })),
+  assert.strictEqual(code(() => acceptLegacyFixture({ ...request, constraints: { auto_commit: false } })),
     'review-fix-native-unverified', 'a native commit under auto_commit:false is not accepted');
-  assert.strictEqual(code(() => rf.acceptNativeReviewFix({ ...request, reviewFix: { ...request.reviewFix, decision: undefined } })),
+  assert.strictEqual(code(() => acceptLegacyFixture({ ...request, reviewFix: { ...request.reviewFix, decision: undefined } })),
     'review-fix-claim-mismatch');
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -296,11 +334,11 @@ test('native without commit rejects new outside changes and preserves unchanged 
     rawResult: { status: 'done', items: [{ r: 'R1', outcome: 'fixed', note: '' }] } };
   try {
     fs.writeFileSync(path.join(dir, 'src/a.js'), 'fixed\n');
-    assert.strictEqual(code(() => rf.acceptNativeReviewFix({ ...request, preDirty: undefined })), 'review-fix-native-snapshot-missing');
+    assert.strictEqual(code(() => acceptLegacyFixture({ ...request, preDirty: undefined })), 'review-fix-native-snapshot-missing');
     // Failure publication itself is orchestrator-owned: refresh only metadata in the fixture.
     fs.writeFileSync(path.join(dir, rel), REVIEW);
     fs.writeFileSync(path.join(dir, 'new-outside.js'), 'new worker file\n');
-    try { rf.acceptNativeReviewFix(request); assert.fail('outside write accepted'); }
+    try { acceptLegacyFixture(request); assert.fail('outside write accepted'); }
     catch (error) {
       assert.strictEqual(error.code, 'review-fix-outside-claim');
       assert(error.result.files_changed.includes('new-outside.js'));
@@ -310,11 +348,11 @@ test('native without commit rejects new outside changes and preserves unchanged 
     assert.strictEqual(fs.readFileSync(path.join(dir, 'outside.js'), 'utf8'), 'operator dirty\n');
     fs.unlinkSync(path.join(dir, 'new-outside.js'));
     fs.writeFileSync(path.join(dir, rel), REVIEW);
-    const accepted = rf.acceptNativeReviewFix(request);
+    const accepted = acceptLegacyFixture(request);
     assert.strictEqual(accepted.items[0].verified, true);
     assert.deepStrictEqual(accepted.files_changed, ['src/a.js']);
     const unchangedSnapshot = xllm.captureDirtySnapshot(dir);
-    const unchanged = rf.acceptNativeReviewFix({ ...request, preDirty: unchangedSnapshot });
+    const unchanged = acceptLegacyFixture({ ...request, preDirty: unchangedSnapshot });
     assert.strictEqual(unchanged.items[0].verified, false, 'unchanged in-claim dirty bytes are not authored evidence');
 
     assert.strictEqual(fs.readFileSync(path.join(dir, 'outside.js'), 'utf8'), 'operator dirty\n');
@@ -332,7 +370,7 @@ test('native committed preexisting dirty bytes are not evidence of a new fix', (
     const preDirty = require('./forge-xllm').captureDirtySnapshot(dir);
     git(dir, 'add', 'src/a.js');
     git(dir, 'commit', '-qm', 'worker merely commits preexisting bytes');
-    const accepted = rf.acceptNativeReviewFix({ cwd: dir, contextRoot: dir, milestoneId: 'M001', sliceId: 'S01',
+    const accepted = acceptLegacyFixture({ cwd: dir, contextRoot: dir, milestoneId: 'M001', sliceId: 'S01',
       startSha, preDirty, constraints: { auto_commit: true },
       reviewFix: { boundary: 'slice', decision: 'proceed', claimPaths: ['src/a.js'], items: [{ r: 'R1', path: 'src/a.js' }] },
       rawResult: { status: 'done', commit_sha: git(dir, 'rev-parse', 'HEAD'), items: [{ r: 'R1', outcome: 'fixed', note: '' }] } });
@@ -373,7 +411,7 @@ test('triage repeated R# is correlated by review file through prompt, result and
     assert.match(fs.readFileSync(path.join(root, second), 'utf8'), /follow-up/);
     const preDirty = require('./forge-xllm').captureDirtySnapshot(root);
     fs.writeFileSync(path.join(root, 'src/a.js'), 'native fixed\n');
-    const native = rf.acceptNativeReviewFix({ cwd: root, contextRoot: root, milestoneId: 'M001',
+    const native = acceptLegacyFixture({ cwd: root, contextRoot: root, milestoneId: 'M001',
       startSha: git(root, 'rev-parse', 'HEAD'), preDirty, constraints: { auto_commit: false },
       reviewFix: { boundary: 'milestone-triage', decision: 'proceed', items, claimPaths: brief.claim_paths },
       rawResult: result });
@@ -399,7 +437,7 @@ test('native non-done results defer real deltas under both commit policies', () 
         reviewFix: { boundary: 'slice', decision: 'proceed', claimPaths: ['src/a.js'], items: [{ r: 'R1', path: 'src/a.js' }] },
         rawResult: { status, commit_sha: autoCommit ? git(dir, 'rev-parse', 'HEAD') : null,
           items: [{ r: 'R1', outcome: 'fixed', note: 'unfinished' }] } };
-      assert.throws(() => rf.acceptNativeReviewFix(request), error => {
+      assert.throws(() => acceptLegacyFixture(request), error => {
         assert.strictEqual(error.code, 'review-fix-native-unverified');
         assert.strictEqual(error.result.status, 'failure');
         assert.strictEqual(error.result.commit_sha, null);
@@ -439,7 +477,14 @@ test('native prompts supply the complete result contract accepted for repeated r
     const source = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
     const prepare = source.indexOf('--prepare-native');
     assert(prepare >= 0, `${file}: mandatory executable preparation`);
-    const contract = source.slice(prepare, prepare + 1600);
+    // A policy reference can precede the executable preparation instructions.
+    // Select their named section/paragraph, without clipping the result contract.
+    const heading = '### Mandatory native preparation (before build/invoke)';
+    const sectionStart = source.indexOf(heading);
+    const sectionEnd = sectionStart < 0 ? -1 : source.indexOf('\n### ', sectionStart + heading.length);
+    const contract = sectionStart >= 0 ? source.slice(sectionStart, sectionEnd < 0 ? source.length : sectionEnd)
+      : source.split(/\r?\n\s*\r?\n/).find(paragraph => paragraph.includes('--prepare-native') && paragraph.includes('nativePreparation') && paragraph.includes('build/invoke')) || '';
+    assert(contract.includes('--prepare-native'), file + ': executable preparation section');
     for (const required of ['build/invoke', 'nativePreparation', 'verify_paths', 'auto_commit']) assert(contract.includes(required), `${file}: ${required}`);
   }
   for (const file of ['shared/forge-review.md', 'skills/forge-task/SKILL.md']) {
@@ -460,7 +505,7 @@ test('native prompts supply the complete result contract accepted for repeated r
     const startSha = git(dir, 'rev-parse', 'HEAD');
     const preDirty = require('./forge-xllm').captureDirtySnapshot(dir);
     fs.writeFileSync(path.join(dir, 'src/a.js'), 'fixed\n');
-    const accepted = rf.acceptNativeReviewFix({ cwd: dir, contextRoot: dir, milestoneId: 'M001', startSha, preDirty,
+    const accepted = acceptLegacyFixture({ cwd: dir, contextRoot: dir, milestoneId: 'M001', startSha, preDirty,
       constraints: { auto_commit: false }, reviewFix: { boundary: 'milestone-triage', decision: 'proceed', items, claimPaths: ['src/a.js', 'src/b.js'] },
       rawResult: { status: 'done', commit_sha: null, items: [{ r: 'R1', review_file: files[0], outcome: 'fixed', note: 'checked' },
         { r: 'R1', review_file: files[1], outcome: 'skipped', note: 'unchanged' }] } });
@@ -512,12 +557,12 @@ function svnFixture(check) {
   write('src/a.js', 'base\n'); write('src/a.test.js', 'base test\n'); write('src/other.js', 'base other\n');
   command('add', 'src'); command('propset', 'svn:ignore', '.gsd', '.'); command('commit', '-m', 'base fixture'); command('update');
   const reviewFile = '.gsd/tasks/T-20261002000000-fixture/T-20261002000000-fixture-REVIEW.md'; write(reviewFile, REVIEW);
-  const request = { cwd: lab.wc, contextRoot: lab.wc, vcs: 'svn', taskId: 'T-20261002000000-fixture', constraints: { auto_commit: false },
+  const request = { dispatchId: 'svn-native-fixture', cwd: lab.wc, contextRoot: lab.wc, vcs: 'svn', taskId: 'T-20261002000000-fixture', constraints: { auto_commit: false },
     reviewFix: { boundary: 'task', decision: 'proceed', claimPaths: ['src/a.js', 'src/a.test.js'],
       items: [{ r: 'R1', path: 'src/a.js', verify_paths: ['src/a.test.js'] }] },
     rawResult: { status: 'done', items: [{ r: 'R1', outcome: 'fixed', note: 'fixture' }] } };
   let completed = false;
-  try { check({ lab, command, write, request, reviewFile }); completed = true; }
+  try { identifiedRequest(request); check({ lab, command, write, request, reviewFile }); completed = true; }
   finally { if (completed) svnLab.cleanupChildren(lab); else process.stderr.write(`Preserved failing SVN lab: ${lab.root}\n`); }
 }
 
@@ -546,7 +591,7 @@ test('SVN preparation preserves concrete limit/timeout diagnostic before any wri
       const diagnostic = { stage: 'inventory', budget_ms: 60000, content_bytes_read: 0, elapsed_ms: 12 };
       vcs.captureDirty = () => ({ vcs: 'svn', ok: false, entries: [], error: cause, diagnostic });
       let error;
-      try { rf.prepareNativeReviewFix(request); } catch (caught) { error = caught; }
+      try { prepareFixture(request); } catch (caught) { error = caught; }
       assert(error); assert.strictEqual(error.code, 'review-fix-native-snapshot-invalid');
       assert.strictEqual(error.cause_code, cause); assert.deepStrictEqual(error.diagnostic, diagnostic);
       assert.strictEqual(request.nativePreparation, undefined);
@@ -555,15 +600,15 @@ test('SVN preparation preserves concrete limit/timeout diagnostic before any wri
 }));
 
 test('SVN test-only and invented files_changed never prove the primary fix', () => svnFixture(({ write, request }) => {
-  request.nativePreparation = rf.prepareNativeReviewFix(request);
+  request.nativePreparation = prepareFixture(request);
   write('src/a.test.js', 'only test\n'); request.rawResult.files_changed = ['src/a.js'];
-  const result = rf.acceptNativeReviewFix(request); assert.strictEqual(result.items[0].verified, false);
+  const result = acceptLegacyFixture(request); assert.strictEqual(result.items[0].verified, false);
   assert.strictEqual(result.items[0].outcome, 'unverified');
 }));
 
 test('SVN preflight refuses malformed paths, mismatched backend/root/claim and policy before any invocation', () => svnFixture(({ lab, request }) => {
   let invocations = 0;
-  const launch = candidate => { rf.prepareNativeReviewFix(candidate); invocations += 1; };
+  const launch = candidate => { prepareFixture(candidate); invocations += 1; };
   assert.strictEqual(code(() => launch({ ...request, vcs: 'git' })), 'review-fix-vcs-mismatch');
   assert.strictEqual(code(() => launch({ ...request, codeDir: lab.evidence })), 'review-fix-code-dir-mismatch');
   assert.strictEqual(code(() => launch({ ...request, constraints: { auto_commit: true } })), 'review-fix-svn-auto-commit-unsupported');
@@ -586,7 +631,7 @@ test('SVN preflight refuses malformed paths, mismatched backend/root/claim and p
 
 for (const scenario of ['policy', 'sha', 'missing preparation', 'old snapshot', 'incomplete snapshot', 'changed baseline', 'changed brief']) {
   test(`SVN acceptance fails closed: ${scenario}`, () => svnFixture(({ write, request }) => {
-    request.nativePreparation = rf.prepareNativeReviewFix(request); write('src/a.js', 'fixed\n');
+    request.nativePreparation = prepareFixture(request); write('src/a.js', 'fixed\n');
     let expected;
     if (scenario === 'policy') { request.constraints.auto_commit = true; expected = 'review-fix-svn-auto-commit-unsupported'; }
     if (scenario === 'sha') { request.rawResult.commit_sha = 'abcdef123'; expected = 'review-fix-svn-unexpected-sha'; }
@@ -595,7 +640,7 @@ for (const scenario of ['policy', 'sha', 'missing preparation', 'old snapshot', 
     if (scenario === 'incomplete snapshot') { request.nativePreparation.svnSnapshot.coverage.complete = false; expected = 'review-fix-native-snapshot-invalid'; }
     if (scenario === 'changed baseline') { request.nativePreparation.svnSnapshot.baseline.inventory[0].revision = '999'; expected = 'review-fix-native-snapshot-invalid'; }
     if (scenario === 'changed brief') { request.reviewFix.items[0].claim = 'another finding'; expected = 'review-fix-native-preparation-invalid'; }
-    assert.strictEqual(code(() => rf.acceptNativeReviewFix(request)), expected);
+    assert.strictEqual(code(() => acceptLegacyFixture(request)), expected);
   }));
 }
 
@@ -603,7 +648,7 @@ for (const scenario of ['new outside', 'dirty modified', 'dirty removed', 'dirty
   test(`SVN observes and refuses ${scenario}`, () => svnFixture(({ lab, command, write, request }) => {
     write('src/dirty/nested/operator.js', 'operator\n'); write('.gsd/hidden/old.md', 'metadata\n');
     if (scenario === 'dirty reverted') write('src/other.js', 'operator dirty\n');
-    request.nativePreparation = rf.prepareNativeReviewFix(request);
+    request.nativePreparation = prepareFixture(request);
     write('src/a.js', 'fixed\n');
     if (scenario === 'new outside') write('src/new.js', 'extra\n');
     if (scenario === 'dirty modified') write('src/dirty/nested/operator.js', 'changed\n');
@@ -614,20 +659,20 @@ for (const scenario of ['new outside', 'dirty modified', 'dirty removed', 'dirty
     if (scenario === 'metadata modified') write('.gsd/hidden/old.md', 'changed\n');
     if (scenario === 'metadata removed') fs.unlinkSync(path.join(lab.wc, '.gsd/hidden/old.md'));
     const expected = scenario.startsWith('metadata') ? 'review-fix-protected-metadata' : 'review-fix-outside-claim';
-    assert.strictEqual(code(() => rf.acceptNativeReviewFix(request)), expected);
+    assert.strictEqual(code(() => acceptLegacyFixture(request)), expected);
   }));
 }
 
 test('SVN refuses concurrent REVIEW publication without overwriting it', () => svnFixture(({ lab, write, request, reviewFile }) => {
-  request.nativePreparation = rf.prepareNativeReviewFix(request); write('src/a.js', 'fixed\n'); write(reviewFile, 'concurrent review\n');
-  assert.strictEqual(code(() => rf.acceptNativeReviewFix(request)), 'review-fix-review-conflict');
+  request.nativePreparation = prepareFixture(request); write('src/a.js', 'fixed\n'); write(reviewFile, 'concurrent review\n');
+  assert.strictEqual(code(() => acceptLegacyFixture(request)), 'review-fix-review-conflict');
   assert.strictEqual(fs.readFileSync(path.join(lab.wc, reviewFile), 'utf8'), 'concurrent review\n');
 }));
 
 test('SVN preparation refuses links in protected metadata before a writer', () => svnFixture(({ lab, request }) => {
   fs.symlinkSync(lab.evidence, path.join(lab.wc, '.gsd', 'opaque'), process.platform === 'win32' ? 'junction' : 'dir');
   let invocations = 0;
-  assert.strictEqual(code(() => { rf.prepareNativeReviewFix(request); invocations += 1; }), 'review-fix-protected-metadata');
+  assert.strictEqual(code(() => { prepareFixture(request); invocations += 1; }), 'review-fix-protected-metadata');
   assert.strictEqual(invocations, 0);
   fs.unlinkSync(path.join(lab.wc, '.gsd', 'opaque'));
 }));
@@ -636,7 +681,16 @@ for (const scenario of ['preserved', 'created', 'changed', 'removed', 'metadata 
   test(`SVN native opaque link: ${scenario}`, () => svnFixture(({ lab, write, request }) => {
     const type = process.platform === 'win32' ? 'junction' : 'dir', link = path.join(lab.wc, 'src/dependency');
     fs.symlinkSync(lab.evidence, link, type);
-    request.nativePreparation = rf.prepareNativeReviewFix(request); write('src/a.js', 'fixed\n');
+    if (scenario === 'metadata root replaced') {
+      // Keep the actual admission in the independent owner so this regression
+      // still reaches the VCS metadata guard after replacing CODE_DIR/.gsd.
+      request.contextRoot = lab.evidence;
+      const reviewFile = require('./forge-unit-sidecar').locations({ ...request, unitType: 'review-fix' }).reviewFix.reviewFiles[0];
+      const ownerReview = path.join(lab.evidence, reviewFile);
+      fs.mkdirSync(path.dirname(ownerReview), { recursive: true });
+      fs.writeFileSync(ownerReview, REVIEW);
+    }
+    request.nativePreparation = prepareFixture(request); write('src/a.js', 'fixed\n');
     if (scenario === 'created') fs.symlinkSync(lab.evidence, path.join(lab.wc, 'src/new-dependency'), type);
     if (scenario === 'changed') { fs.unlinkSync(link); fs.symlinkSync(path.join(lab.wc, 'src'), link, type); }
     if (scenario === 'removed') fs.unlinkSync(link);
@@ -648,8 +702,8 @@ for (const scenario of ['preserved', 'created', 'changed', 'removed', 'metadata 
       assert(actual.startsWith(labRoot + path.sep), 'delete stays inside owned WC fixture');
       fs.rmSync(metadata, { recursive: true }); fs.symlinkSync(lab.evidence, metadata, type);
     }
-    if (scenario === 'preserved') assert(rf.acceptNativeReviewFix(request).items[0].verified);
-    else assert.strictEqual(code(() => rf.acceptNativeReviewFix(request)), scenario.startsWith('metadata') ? 'review-fix-protected-metadata' : 'review-fix-outside-claim');
+    if (scenario === 'preserved') assert(acceptLegacyFixture(request).items[0].verified);
+    else assert.strictEqual(code(() => acceptLegacyFixture(request)), scenario.startsWith('metadata') ? 'review-fix-protected-metadata' : 'review-fix-outside-claim');
     for (const relative of ['src/dependency', 'src/new-dependency', '.gsd/new-link', '.gsd']) {
       const absolute = path.join(lab.wc, relative);
       try { if (fs.lstatSync(absolute).isSymbolicLink()) fs.unlinkSync(absolute); } catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -658,18 +712,18 @@ for (const scenario of ['preserved', 'created', 'changed', 'removed', 'metadata 
 }
 
 test('SVN native evidence is bound to the preparation; swapping a valid snapshot is refused', () => svnFixture(({ write, request }) => {
-  request.nativePreparation = rf.prepareNativeReviewFix(request); write('src/a.js', 'fixed\n');
-  const replacement = rf.prepareNativeReviewFix(request);
+  request.nativePreparation = prepareFixture(request); write('src/a.js', 'fixed\n');
+  const replacement = prepareFixture(request);
   request.nativePreparation.svnSnapshot = replacement.svnSnapshot;
-  assert.strictEqual(code(() => rf.acceptNativeReviewFix(request)), 'review-fix-native-preparation-invalid');
+  assert.strictEqual(code(() => acceptLegacyFixture(request)), 'review-fix-native-preparation-invalid');
 }));
 
 test('SVN native acceptance refuses actual BASE movement and a missing material baseline', () => svnFixture(({ write, command, request }) => {
-  request.nativePreparation = rf.prepareNativeReviewFix(request); write('src/a.js', 'fixed\n');
+  request.nativePreparation = prepareFixture(request); write('src/a.js', 'fixed\n');
   const withoutBaseline = JSON.parse(JSON.stringify(request)); delete withoutBaseline.nativePreparation.svnSnapshot.baseline;
-  assert.strictEqual(code(() => rf.acceptNativeReviewFix(withoutBaseline)), 'review-fix-native-snapshot-invalid');
+  assert.strictEqual(code(() => acceptLegacyFixture(withoutBaseline)), 'review-fix-native-snapshot-invalid');
   write('src/other.js', 'new repository version\n'); command('commit', '-m', 'advance fixture BASE', 'src/other.js'); command('update');
-  assert.strictEqual(code(() => rf.acceptNativeReviewFix(request)), 'review-fix-baseline-moved');
+  assert.strictEqual(code(() => acceptLegacyFixture(request)), 'review-fix-baseline-moved');
 }));
 
 
@@ -678,17 +732,17 @@ test('R1 literal route segments remain literal through claim and SVN native acce
   request.reviewFix.claimPaths = ['app/[...slug]/{test}.js', 'app/[id]/page.tsx'];
   const matcher = require('./forge-parallelism').globToRegex;
   for (const literal of request.reviewFix.claimPaths) { assert(matcher(literal).test(literal)); assert(!matcher(literal).test(literal.replace(/[\[\]{}]/g, ''))); }
-  request.nativePreparation = rf.prepareNativeReviewFix(request);
+  request.nativePreparation = prepareFixture(request);
   write('app/[id]/page.tsx', 'fixed'); write('app/[...slug]/{test}.js', 'test');
-  assert(rf.acceptNativeReviewFix(request).items[0].verified);
+  assert(acceptLegacyFixture(request).items[0].verified);
 }));
 
 test('R2 missing complementary parents are structural only', () => svnFixture(({ write, request }) => {
   request.reviewFix.items[0].verify_paths = ['tests/nested/a.test.js'];
   request.reviewFix.claimPaths = ['src/a.js', 'tests/nested/a.test.js'];
-  request.nativePreparation = rf.prepareNativeReviewFix(request);
+  request.nativePreparation = prepareFixture(request);
   write('src/a.js', 'fixed'); write('tests/nested/a.test.js', 'test');
-  assert(rf.acceptNativeReviewFix(request).items[0].verified);
+  assert(acceptLegacyFixture(request).items[0].verified);
 }));
 
 for (const scenario of ['unclaimed child', 'directory property', 'directory replacement']) {
@@ -696,13 +750,13 @@ for (const scenario of ['unclaimed child', 'directory property', 'directory repl
     request.reviewFix.items[0].verify_paths = ['tests/nested/a.test.js'];
     request.reviewFix.claimPaths = ['src/a.js', 'tests/nested/a.test.js'];
     if (scenario === 'directory replacement') { write('tests/original', 'base'); command('add', 'tests'); command('commit', '-m', 'directory base'); command('update'); }
-    request.nativePreparation = rf.prepareNativeReviewFix(request);
+    request.nativePreparation = prepareFixture(request);
     write('src/a.js', 'fixed');
     if (scenario === 'directory replacement') { command('delete', 'tests'); }
     write('tests/nested/a.test.js', 'test');
     if (scenario === 'unclaimed child') write('tests/nested/unclaimed.js', 'outside');
     if (scenario === 'directory property') { command('add', 'tests'); command('propset', 'fixture:prop', 'value', 'tests'); }
-    assert.strictEqual(code(() => rf.acceptNativeReviewFix(request)), scenario === 'directory replacement'
+    assert.strictEqual(code(() => acceptLegacyFixture(request)), scenario === 'directory replacement'
       ? 'review-fix-native-snapshot-invalid' : 'review-fix-outside-claim');
   }));
 }
@@ -710,20 +764,20 @@ for (const scenario of ['unclaimed child', 'directory property', 'directory repl
 for (const separate of [true, false]) {
   test('R3 exact native replay with ' + (separate ? 'separate' : 'same') + ' SVN context root', () => svnFixture(({ lab, write, request, reviewFile }) => {
     if (separate) { request.contextRoot = lab.evidence; const dest = path.join(lab.evidence, reviewFile); fs.mkdirSync(path.dirname(dest), { recursive: true }); fs.writeFileSync(dest, REVIEW); }
-    request.nativePreparation = rf.prepareNativeReviewFix(request); write('src/a.js', 'fixed');
-    const first = rf.acceptNativeReviewFix(request);
-    assert.deepStrictEqual(rf.acceptNativeReviewFix(request), first);
+    request.nativePreparation = prepareFixture(request); write('src/a.js', 'fixed');
+    const first = acceptLegacyFixture(request);
+    assert.deepStrictEqual(acceptLegacyFixture(request), first);
     const target = path.join(request.contextRoot, reviewFile); fs.appendFileSync(target, '\nconcurrent unrelated edit\n');
-    assert.strictEqual(code(() => rf.acceptNativeReviewFix(request)), 'review-fix-review-conflict');
+    assert.strictEqual(code(() => acceptLegacyFixture(request)), 'review-fix-review-conflict');
   }));
 }
 
 test('R4 preserved scheduled addition and newly scheduled complementary file are local state', () => svnFixture(({ write, command, request }) => {
   write('src/operator.js', 'operator'); command('add', 'src/operator.js');
   request.reviewFix.items[0].verify_paths = ['src/new.test.js']; request.reviewFix.claimPaths = ['src/a.js', 'src/new.test.js'];
-  request.nativePreparation = rf.prepareNativeReviewFix(request);
+  request.nativePreparation = prepareFixture(request);
   write('src/a.js', 'fixed'); write('src/new.test.js', 'test'); command('add', 'src/new.test.js');
-  assert(rf.acceptNativeReviewFix(request).items[0].verified);
+  assert(acceptLegacyFixture(request).items[0].verified);
   assert.match(command('status', 'src/operator.js'), /^A/);
 }));
 
@@ -736,24 +790,24 @@ test('R3 Git replay uses exact retained bytes and legacy v1 still accepts its fi
     const request = { cwd: dir, contextRoot: lab.evidence, vcs: 'git', milestoneId: 'M001', sliceId: 'S01', constraints: { auto_commit: false },
       reviewFix: { boundary: 'slice', decision: 'proceed', claimPaths: ['src/a.js'], items: [{ r: 'R1', path: 'src/a.js' }] },
       rawResult: { status: 'done', items: [{ r: 'R1', outcome: 'fixed', note: 'fixture' }] } };
-    request.nativePreparation = rf.prepareNativeReviewFix(request);
+    request.nativePreparation = prepareFixture(request);
     delete request.nativePreparation.reviewContents; // Exact v1 preparation retained before this fix.
     fs.writeFileSync(path.join(dir, 'src/a.js'), 'fixed');
-    const first = rf.acceptNativeReviewFix(request);
-    assert.deepStrictEqual(rf.acceptNativeReviewFix(JSON.parse(JSON.stringify(request))), first);
+    const first = acceptLegacyFixture(request);
+    assert.deepStrictEqual(acceptLegacyFixture(JSON.parse(JSON.stringify(request))), first);
     const published = fs.readFileSync(target, 'utf8'), readFile = fs.readFileSync, canonicalTarget = fs.realpathSync.native(target);
     let reads = 0;
     fs.readFileSync = function(file, ...args) {
       if (path.resolve(String(file)) === path.resolve(canonicalTarget) && ++reads === 2) fs.appendFileSync(target, '\nrace before publication');
       return readFile.call(fs, file, ...args);
     };
-    try { assert.strictEqual(code(() => rf.acceptNativeReviewFix(request)), 'review-fix-review-conflict'); }
+    try { assert.strictEqual(code(() => acceptLegacyFixture(request)), 'review-fix-review-conflict'); }
     finally { fs.readFileSync = readFile; fs.writeFileSync(target, published); }
     request.nativePreparation.reviewContents[reviewFile] += 'tampered';
-    assert.strictEqual(code(() => rf.acceptNativeReviewFix(request)), 'review-fix-review-conflict');
+    assert.strictEqual(code(() => acceptLegacyFixture(request)), 'review-fix-review-conflict');
     request.nativePreparation.reviewContents[reviewFile] = REVIEW;
     fs.appendFileSync(target, '\nunrelated concurrent change');
-    assert.strictEqual(code(() => rf.acceptNativeReviewFix(request)), 'review-fix-review-conflict');
+    assert.strictEqual(code(() => acceptLegacyFixture(request)), 'review-fix-review-conflict');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }));
 
@@ -793,22 +847,22 @@ test('bounded native WDMA-shaped review never inspects unrelated trees or simula
     fs.realpathSync.native = function(target, ...args) { inspect('realpathSync.native', target); return nativeRealpath(target, ...args); };
     vcs.captureDirty = (cwd, options) => { assert(options.reviewObservation, 'default preparation supplies scope'); return capture(cwd, { ...options, runner }); };
     vcs.postChanges = (cwd, before, options) => post(cwd, before, { ...options, runner });
-    request.nativePreparation = rf.prepareNativeReviewFix(request);
+    request.nativePreparation = prepareFixture(request);
     const observation = request.nativePreparation.svnSnapshot.coverage.observation;
     assert(observation.roots.some(entry => entry.path === (process.platform === 'win32' ? store.toLowerCase() : store) && entry.mode === 'tree'));
     assert(observation.roots.some(entry => entry.path === '.gsd' && entry.mode === 'tree'));
     assert(!observation.roots.some(entry => !entry.path && entry.mode === 'tree'));
     write(`${store}/review.js`, 'fixed'); write(`${store}/review.test.js`, 'fixed test');
-    const accepted = rf.acceptNativeReviewFix(request);
+    const accepted = acceptLegacyFixture(request);
     assert(accepted.items[0].verified); assert.deepStrictEqual(accepted.observation, observation);
     assert.match(accepted.observation.outside_scope_limitation, /not observed.*no per-call OS write sandbox/);
-    assert.deepStrictEqual(rf.acceptNativeReviewFix(request), accepted, 'exact parent REVIEW replay');
+    assert.deepStrictEqual(acceptLegacyFixture(request), accepted, 'exact parent REVIEW replay');
     for (const protectedWrite of [false, true]) {
-      write(reviewFile, REVIEW); request.nativePreparation = rf.prepareNativeReviewFix(request);
+      write(reviewFile, REVIEW); request.nativePreparation = prepareFixture(request);
       write(`${store}/review.js`, 'another fix ' + protectedWrite);
       const bad = protectedWrite ? '.gsd/hidden/secret.md' : `${store}/unclaimed.js`;
       write(bad, 'unauthorized');
-      assert.strictEqual(code(() => rf.acceptNativeReviewFix(request)), protectedWrite ? 'review-fix-protected-metadata' : 'review-fix-outside-claim');
+      assert.strictEqual(code(() => acceptLegacyFixture(request)), protectedWrite ? 'review-fix-protected-metadata' : 'review-fix-outside-claim');
       fs.unlinkSync(path.join(lab.wc, bad));
     }
     assert(inspections.length > 0 && commands.length > 0);
@@ -822,7 +876,7 @@ test('bounded native WDMA-shaped review never inspects unrelated trees or simula
 test('bounded native root-file scope, missing containers and scope tampering never widen', () => svnFixture(({ write, request }) => {
   request.reviewFix.items = [{ r: 'R1', path: 'root.js', verify_paths: ['new/deep/root.test.js'] }];
   request.reviewFix.claimPaths = ['new/deep/root.test.js', 'root.js'];
-  request.nativePreparation = rf.prepareNativeReviewFix(request);
+  request.nativePreparation = prepareFixture(request);
   const observation = request.nativePreparation.svnSnapshot.coverage.observation;
   assert(observation.roots.some(entry => entry.path === 'root.js' && entry.mode === 'file'));
   assert(observation.roots.some(entry => entry.path === 'new/deep' && entry.mode === 'tree'));
@@ -831,8 +885,8 @@ test('bounded native root-file scope, missing containers and scope tampering nev
   write('root.js', 'fix'); write('new/deep/root.test.js', 'test');
   const forged = JSON.parse(JSON.stringify(request));
   forged.nativePreparation.svnSnapshot.coverage.observation.roots.push({ path: '', mode: 'tree' });
-  assert.strictEqual(code(() => rf.acceptNativeReviewFix(forged)), 'review-fix-native-snapshot-invalid');
-  assert(rf.acceptNativeReviewFix(request).items[0].verified);
+  assert.strictEqual(code(() => acceptLegacyFixture(forged)), 'review-fix-native-snapshot-invalid');
+  assert(acceptLegacyFixture(request).items[0].verified);
 }));
 
 test('bounded native refuses generated and directory claims before capture or writer', () => svnFixture(({ request }) => {
@@ -841,7 +895,7 @@ test('bounded native refuses generated and directory claims before capture or wr
     vcs.captureDirty = () => { captures += 1; throw new Error('unexpected capture'); };
     for (const file of ['node_modules/x.js', 'src/.cache/x.js', 'src/.gsd/private.md', 'dist/x.js', 'src']) {
       const candidate = { ...request, reviewFix: { ...request.reviewFix, claimPaths: [file], items: [{ r: 'R1', path: file }] } };
-      assert.throws(() => { rf.prepareNativeReviewFix(candidate); writers += 1; }, /svn-review-scope-invalid/);
+      assert.throws(() => { prepareFixture(candidate); writers += 1; }, /svn-review-scope-invalid/);
     }
     assert.strictEqual(captures, 0); assert.strictEqual(writers, 0);
   } finally { vcs.captureDirty = original; }
@@ -849,14 +903,14 @@ test('bounded native refuses generated and directory claims before capture or wr
 
 test('bounded native protects source-contained metadata and refuses its links before SVN content capture', () => svnFixture(({ lab, write, request }) => {
   write('src/.gsd/private.md', 'protected');
-  request.nativePreparation = rf.prepareNativeReviewFix(request); write('src/a.js', 'fix'); write('src/.gsd/private.md', 'altered');
-  assert.strictEqual(code(() => rf.acceptNativeReviewFix(request)), 'review-fix-protected-metadata');
+  request.nativePreparation = prepareFixture(request); write('src/a.js', 'fix'); write('src/.gsd/private.md', 'altered');
+  assert.strictEqual(code(() => acceptLegacyFixture(request)), 'review-fix-protected-metadata');
   fs.symlinkSync(lab.evidence, path.join(lab.wc, 'src/.gsd/linked'), process.platform === 'win32' ? 'junction' : 'dir');
   const capture = vcs.captureDirty;
   let commands = 0;
   try {
     vcs.captureDirty = (cwd, options) => capture(cwd, { ...options, runner: () => { commands += 1; throw new Error('unexpected SVN'); } });
-    assert.strictEqual(code(() => rf.prepareNativeReviewFix(request)), 'review-fix-protected-metadata');
+    assert.strictEqual(code(() => prepareFixture(request)), 'review-fix-protected-metadata');
     assert.strictEqual(commands, 0);
   } finally { vcs.captureDirty = capture; fs.unlinkSync(path.join(lab.wc, 'src/.gsd/linked')); }
 }));
@@ -865,16 +919,150 @@ for (const initiallyMissing of [true, false]) for (const withChild of [true, fal
   test(`bounded root file type guard: ${initiallyMissing ? 'missing' : 'regular'} becomes ${withChild ? 'nonempty' : 'empty'} directory`, () => svnFixture(({ lab, write, request, reviewFile }) => {
     request.reviewFix.items = [{ r: 'R1', path: 'root.js' }]; request.reviewFix.claimPaths = ['root.js'];
     if (!initiallyMissing) write('root.js', 'regular file');
-    request.nativePreparation = rf.prepareNativeReviewFix(request);
+    request.nativePreparation = prepareFixture(request);
     const priorReview = fs.readFileSync(path.join(lab.wc, reviewFile), 'utf8');
     if (!initiallyMissing) fs.unlinkSync(path.join(lab.wc, 'root.js'));
     fs.mkdirSync(path.join(lab.wc, 'root.js'));
     if (withChild) write('root.js/unclaimed.js', 'outside exact file claim');
-    assert.strictEqual(code(() => rf.acceptNativeReviewFix(request)), 'svn-review-scope-invalid');
+    assert.strictEqual(code(() => acceptLegacyFixture(request)), 'svn-review-scope-invalid');
     assert(!/\*\*Outcome:\*\* aplicada/.test(fs.readFileSync(path.join(lab.wc, reviewFile), 'utf8')));
     assert(priorReview.includes('R1'));
   }));
 }
+
+function admissionFixture(check) {
+  const dir = repo();
+  const reviewFile = '.gsd/milestones/M001/slices/S01/S01-REVIEW.md';
+  fs.mkdirSync(path.dirname(path.join(dir, reviewFile)), { recursive: true });
+  fs.writeFileSync(path.join(dir, reviewFile), REVIEW);
+  const request = identifiedRequest({ cwd: dir, contextRoot: dir, vcs: 'git', milestoneId: 'M001', sliceId: 'S01',
+    constraints: { auto_commit: false }, reviewFix: { boundary: 'slice', decision: 'proceed', claimPaths: ['src/a.js', 'src/b.js'],
+      items: [{ r: 'R1', path: 'src/a.js' }, { r: 'R2', path: 'src/b.js' }] } });
+  const eventFile = path.join(dir, '.gsd/forge/events.jsonl');
+  try { check({ dir, request, reviewFile, eventFile }); }
+  finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+test('policy fields preserve normalized items, brief and legacy reviewFixIdentity', () => {
+  const raw = [{ r: 'R1', path: 'src/a.js' }];
+  const enriched = fixNow(raw).map(item => ({ ...item, basis: 'operator-decision' }));
+  const brief = items => rf.buildBrief({ boundary: 'slice', unitLabel: 'review-fix/S01', items: rf.normalizeItems(items),
+    claimPaths: ['src/a.js'], route: {} });
+  assert.deepStrictEqual(rf.normalizeItems(raw), rf.normalizeItems(enriched));
+  assert.deepStrictEqual(brief(raw), brief(enriched));
+});
+
+test('native prepare admits once, embeds stable admission and binds it to preparation identity', () => admissionFixture(({ request, eventFile }) => {
+  const first = rf.prepareNativeReviewFix(request), events = fs.readFileSync(eventFile);
+  const second = rf.prepareNativeReviewFix(request);
+  assert.strictEqual(first.admission.allowed, true);
+  assert.strictEqual(first.admission.cycle, 1);
+  assert.deepStrictEqual(second.admission, first.admission);
+  assert.strictEqual(second.identity, first.identity);
+  assert(fs.readFileSync(eventFile).equals(events));
+  first.admission.cycle = 2;
+  assert.strictEqual(code(() => rf.acceptNativeReviewFix({ ...request, nativePreparation: first,
+    rawResult: { status: 'done', items: [] } })), 'review-fix-native-preparation-invalid');
+}));
+
+test('native admission refusal precedes capture; missing dispatch and third cycle defer with decision JSON', () => admissionFixture(({ request, dir, reviewFile, eventFile }) => {
+  const vcsApi = require('./forge-vcs'), xllm = require('./forge-xllm');
+  const capture = vcsApi.captureDirty, baseline = vcsApi.baselineId, dirty = xllm.captureDirtySnapshot;
+  let captures = 0;
+  const denyCapture = () => { captures++; throw new Error('capture must not run'); };
+  const assertRefusal = (input, expected) => {
+    try { rf.prepareNativeReviewFix(input); assert.fail('admission should refuse'); }
+    catch (error) { assert.strictEqual(error.code, expected); assert.strictEqual(error.result.allowed, false);
+      assert.strictEqual(error.provider_called, false); assert.strictEqual(error.stage, 'review-fix-admission'); }
+  };
+  try {
+    vcsApi.captureDirty = vcsApi.baselineId = xllm.captureDirtySnapshot = denyCapture;
+    assertRefusal({ ...request, dispatchId: undefined }, 'review-fix-policy-invalid');
+  } finally { vcsApi.captureDirty = capture; vcsApi.baselineId = baseline; xllm.captureDirtySnapshot = dirty; }
+  assert.strictEqual(captures, 0);
+  fs.writeFileSync(path.join(dir, reviewFile), REVIEW);
+  rf.prepareNativeReviewFix(request);
+  rf.prepareNativeReviewFix({ ...request, dispatchId: 'native-second' });
+  try {
+    vcsApi.captureDirty = vcsApi.baselineId = xllm.captureDirtySnapshot = denyCapture;
+    assertRefusal({ ...request, dispatchId: 'native-third' }, 'review-fix-cycle-limit');
+  } finally { vcsApi.captureDirty = capture; vcsApi.baselineId = baseline; xllm.captureDirtySnapshot = dirty; }
+  assert.strictEqual(captures, 0);
+  assert.match(fs.readFileSync(path.join(dir, reviewFile), 'utf8'), /não aplicada — deferida para triagem final \(review-fix-cycle-limit\)/);
+  const rows = fs.readFileSync(eventFile, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.strictEqual(rows.filter(row => row.counted).length, 2);
+  const file = path.join(os.tmpdir(), `forge-native-refusal-${crypto.randomUUID()}.json`);
+  try {
+    fs.writeFileSync(file, JSON.stringify({ ...request, dispatchId: 'native-cli-third' }));
+    const result = spawnSync(process.execPath, [path.join(__dirname, 'forge-review-fix.js'), '--prepare-native', file], { encoding: 'utf8' });
+    assert.strictEqual(result.status, 1);
+    assert.strictEqual(JSON.parse(result.stdout).reason_code, 'review-fix-cycle-limit');
+  } finally { fs.unlinkSync(file); }
+}));
+
+test('not-fix-now refusal defers only its refused R# before native capture', () => admissionFixture(({ request, dir, reviewFile }) => {
+  request.reviewFix.items[1].verdict.severity = 'medium';
+  let caught;
+  try { rf.prepareNativeReviewFix(request); } catch (error) { caught = error; }
+  assert.strictEqual(caught.code, 'review-fix-not-fix-now');
+  assert.deepStrictEqual(caught.result.refused_items.map(item => item.r), ['R2']);
+  const text = fs.readFileSync(path.join(dir, reviewFile), 'utf8');
+  assert(!text.split('### R2')[0].includes('**Correção:**'));
+  assert.match(text.split('### R2')[1], /review-fix-not-fix-now: severity-below-high/);
+}));
+
+test('native accept requires recorded matching admission and preserves review when absent', () => admissionFixture(({ request, dir, reviewFile, eventFile }) => {
+  const before = fs.readFileSync(path.join(dir, reviewFile));
+  assert.strictEqual(code(() => rf.acceptNativeReviewFix(request)), 'review-fix-admission-required');
+  assert(fs.readFileSync(path.join(dir, reviewFile)).equals(before));
+  const preparation = rf.prepareNativeReviewFix(request);
+  fs.writeFileSync(path.join(dir, 'src/a.js'), 'fixed\n');
+  const rawResult = { status: 'done', items: [{ r: 'R1', outcome: 'fixed' }, { r: 'R2', outcome: 'skipped' }] };
+  const events = fs.readFileSync(eventFile); fs.writeFileSync(eventFile, '');
+  assert.strictEqual(code(() => rf.acceptNativeReviewFix({ ...request, nativePreparation: preparation, rawResult })), 'review-fix-admission-required');
+  assert(fs.readFileSync(path.join(dir, reviewFile)).equals(before));
+  fs.writeFileSync(eventFile, events);
+  const accepted = rf.acceptNativeReviewFix({ ...request, nativePreparation: preparation, rawResult });
+  assert.strictEqual(accepted.items[0].verified, true);
+  assert(fs.readFileSync(eventFile).equals(events), 'accept consumes no cycle');
+}));
+
+test('defer API and CLI are atomic, bounded, parent-derived and idempotent', () => admissionFixture(({ request, dir, reviewFile }) => {
+  for (const boundary of ['slice', 'task']) assert.strictEqual(rf.outcomeLine(boundary, {
+    deferred: { reason_code: 'review-fix-cycle-limit', detail: 'ciclo 2' } }),
+  '**Correção:** não aplicada — deferida para triagem final (review-fix-cycle-limit: ciclo 2)');
+  for (const detail of ['bad\nline', 'bad\rline', 'x'.repeat(201)]) {
+    assert.strictEqual(code(() => rf.outcomeLine('slice', { deferred: { reason_code: 'review-fix-cycle-limit', detail } })), 'review-fix-defer-invalid');
+  }
+  const snapshot = { [reviewFile]: sha256(fs.readFileSync(path.join(dir, reviewFile))) };
+  const publication = { request, reasonCode: 'review-fix-cycle-limit', expectedHashes: snapshot };
+  assert.deepStrictEqual(rf.publishDeferredOutcomes(publication).written, [reviewFile]);
+  const bytes = fs.readFileSync(path.join(dir, reviewFile));
+  assert.deepStrictEqual(rf.publishDeferredOutcomes(publication).written, []);
+  assert(fs.readFileSync(path.join(dir, reviewFile)).equals(bytes));
+  assert.strictEqual(code(() => rf.publishDeferredOutcomes({ ...publication, items: [{ r: 'R9' }] })), 'review-fix-defer-invalid');
+  const file = path.join(os.tmpdir(), `forge-defer-${crypto.randomUUID()}.json`);
+  try {
+    fs.writeFileSync(file, JSON.stringify({ ...request, deferral: { reason_code: 'review-fix-cycle-limit', review_snapshot: snapshot } }));
+    for (let n = 0; n < 2; n++) {
+      const result = spawnSync(process.execPath, [path.join(__dirname, 'forge-review-fix.js'), '--defer', file], { encoding: 'utf8' });
+      assert.strictEqual(result.status, 0, result.stderr);
+      assert.strictEqual(JSON.parse(result.stdout).status, 'deferred');
+    }
+    assert(fs.readFileSync(path.join(dir, reviewFile)).equals(bytes));
+    fs.writeFileSync(path.join(dir, reviewFile), bytes.toString('utf8').replaceAll('review-fix-cycle-limit', 'review-fix-budget-exhausted') + '\nconcurrent');
+    assert.strictEqual(code(() => rf.publishDeferredOutcomes(publication)), 'review-fix-review-conflict');
+  } finally { fs.unlinkSync(file); }
+}));
+
+test('declared T02 artifacts: both consumers and three suites are substantive', () => {
+  for (const [file, minimum] of [['forge-review-fix.js', 990], ['forge-unit-sidecar.js', 3525],
+    ['forge-review-fix.test.js', 980], ['forge-unit-sidecar.test.js', 2330], ['forge-bidirectional-sidecar.test.js', 1655]]) {
+    const source = fs.readFileSync(path.join(__dirname, file), 'utf8');
+    assert(source.split(/\r?\n/).length >= minimum, `${file} minimum ${minimum}`);
+    if (!file.endsWith('.test.js')) assert(!/\b(?:TODO|TBD|FIXME)\b/.test(source), `${file} has no stubs`);
+  }
+});
 
 process.stdout.write(`\nforge-review-fix: ${passed} passed, ${failed} failed, ${skipped} skipped\n`);
 if (failed) process.exitCode = 1;

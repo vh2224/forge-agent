@@ -396,8 +396,30 @@ function verifyAgainstObserved(result, claimPaths, options) {
   return { items, verified_paths: sortedPaths(items.filter(item => item.verified).map(item => item.path)) };
 }
 
+// Deferral reasons are single-line bounded data: a review-fix-* code and an
+// optional detail drawn from a closed character set (no markup, no newline).
+const DEFER_REASON_RE = /^review-fix-[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const DEFER_DETAIL_RE = /^[\p{L}\p{N} ,.:;_/#+=-]{1,200}$/u;
+function deferredReason(value) {
+  const v = value && typeof value === 'object' ? value : {};
+  if (typeof v.reason_code !== 'string' || v.reason_code.length > 64 || !DEFER_REASON_RE.test(v.reason_code)) {
+    throw refusal('review-fix-defer-invalid', 'reason_code must be a bounded review-fix-* code');
+  }
+  if (v.detail === undefined || v.detail === null || v.detail === '') return { reason_code: v.reason_code, detail: null };
+  if (typeof v.detail !== 'string' || !DEFER_DETAIL_RE.test(v.detail) || !v.detail.trim()) {
+    throw refusal('review-fix-defer-invalid', 'detail must be a single bounded line');
+  }
+  return { reason_code: v.reason_code, detail: v.detail.trim() };
+}
+
 function outcomeLine(boundary, outcome) {
   const value = outcome || {};
+  // Not applied, never "aplicada" nor "falhou": the item waits for the final triage.
+  if (value.deferred !== undefined) {
+    if (!['slice', 'task'].includes(boundary)) throw refusal('review-fix-defer-boundary-invalid');
+    const deferred = deferredReason(value.deferred);
+    return `**Correção:** não aplicada — deferida para triagem final (${deferred.reason_code}${deferred.detail ? `: ${deferred.detail}` : ''})`;
+  }
   const reason = value.commitReason || 'sem commit do pai';
   if (boundary === 'milestone-triage') {
     if (!value.verified) return '**Decisão:** refatorar — dispatch falhou, virou follow-up';
@@ -490,6 +512,145 @@ function applyReviewOutcomes(input) {
     }
   }
   return { written, unchanged: planned.filter(entry => entry.next === entry.content).map(entry => entry.reviewFile) };
+}
+
+/**
+ * Publish `não aplicada — deferida para triagem final (<code>[: <detail>])` lines
+ * (slice and task only) into the REVIEW.md files the parent derives from the
+ * request. Every target is validated before any write, the snapshot guard is
+ * retained (captured now when the caller supplies none) and re-publishing the
+ * same lines leaves the bytes unchanged. `items` narrows the publication to
+ * named R# (with an optional per-item detail or `reasons` list); otherwise
+ * every item of the request is deferred.
+ * @param {{request:object, reasonCode:string, detail?:string, items?:object[], expectedHashes?:object}} input
+ */
+function publishDeferredOutcomes(input) {
+  const value = input || {};
+  const request = value.request || {};
+  const unit = require('./forge-unit-sidecar');
+  const loc = unit.locations({ ...request, unitType: 'review-fix' });
+  const boundary = loc.reviewFix.boundary;
+  if (!['slice', 'task'].includes(boundary)) throw refusal('review-fix-defer-boundary-invalid');
+  const reason = deferredReason({ reason_code: value.reasonCode, detail: value.detail });
+  const items = normalizeItems(request.reviewFix && request.reviewFix.items);
+  let selected = items.map(item => ({ item, detail: reason.detail }));
+  if (value.items !== undefined) {
+    if (!Array.isArray(value.items) || value.items.length === 0 || value.items.length > MAX_ITEMS) {
+      throw refusal('review-fix-defer-invalid', 'items must name between 1 and 64 request items');
+    }
+    const seen = new Set();
+    selected = value.items.map((entry) => {
+      const named = entry && typeof entry === 'object' && !Array.isArray(entry) && typeof entry.r === 'string'
+        ? correlateReviewItem({ r: entry.r, review_file: typeof entry.review_file === 'string' ? entry.review_file : null }, items) : null;
+      if (!named) throw refusal('review-fix-defer-invalid', 'deferred item is not part of the request');
+      const key = reviewItemKey(named);
+      if (seen.has(key)) throw refusal('review-fix-defer-invalid', `duplicate ${named.r}`);
+      seen.add(key);
+      const detail = entry.detail !== undefined ? entry.detail
+        : Array.isArray(entry.reasons) && entry.reasons.length ? entry.reasons.join(', ') : reason.detail;
+      return { item: named, detail: deferredReason({ reason_code: reason.reason_code, detail }).detail };
+    });
+  }
+  const root = fs.realpathSync.native(request.contextRoot || request.cwd);
+  let expectedHashes = value.expectedHashes;
+  if (expectedHashes === undefined) {
+    expectedHashes = {};
+    for (const reviewFile of loc.reviewFix.reviewFiles) {
+      try { expectedHashes[reviewFile] = hash(fs.readFileSync(unit.target(root, reviewFile))); }
+      catch { throw refusal('review-fix-review-item-missing', `${reviewFile} is not readable`); }
+    }
+  } else if (!expectedHashes || typeof expectedHashes !== 'object'
+      || JSON.stringify(Object.keys(expectedHashes).sort()) !== JSON.stringify([...loc.reviewFix.reviewFiles].sort())
+      || Object.values(expectedHashes).some(entry => typeof entry !== 'string' || !/^[a-f0-9]{64}$/.test(entry))) {
+    throw refusal('review-fix-defer-invalid', 'snapshot must cover exactly the parent-derived REVIEW files');
+  }
+  const outcomes = selected.map(({ item, detail }) => ({ r: item.r, reviewFile: reviewFileFor(loc.reviewFix, item),
+    line: outcomeLine(boundary, { deferred: { reason_code: reason.reason_code, detail } }) }));
+  const published = applyReviewOutcomes({ root, resolveTarget: unit.target, expectedHashes, outcomes });
+  return { status: 'deferred', boundary, unit: loc.reviewFix.unitLabel, reason_code: reason.reason_code,
+    items: outcomes.map(outcome => ({ r: outcome.r, line: outcome.line })), written: published.written, unchanged: published.unchanged };
+}
+
+// Items a refused admission defers: the refused R# of a not-fix-now decision,
+// otherwise every item of the request (undefined selects all).
+function deferralItems(decision) {
+  const value = decision || {};
+  if (value.reason_code !== 'review-fix-not-fix-now' || !Array.isArray(value.refused_items) || !value.refused_items.length) return undefined;
+  return value.refused_items.map(item => ({ r: item.r, ...(item.review_file ? { review_file: item.review_file } : {}),
+    ...(Array.isArray(item.reasons) ? { reasons: item.reasons } : {}) }));
+}
+
+// Policy scope of a review-fix request (review-fix-policy-v1 boundary input).
+function admissionScope(request, boundary) {
+  const r = request || {};
+  return boundary === 'slice' ? { boundary, milestone: r.milestoneId, slice: r.sliceId }
+    : boundary === 'task' ? { boundary, task: r.taskId } : { boundary, milestone: r.milestoneId };
+}
+
+// The admission is the last gate of the native path: after request validation,
+// before the REVIEW snapshot, any VCS capture, build or invoke. A refusal leaves
+// no preparation; the affected items are deferred best-effort and the decision
+// travels in error.result.
+function admitNativeCorrection(request, loc, brief, root) {
+  const decision = require('./forge-review-policy').admitCorrection({ owner: root,
+    ...admissionScope(request, loc.reviewFix.boundary), dispatch_id: request.dispatchId, brief,
+    items: request.reviewFix.items, ...(request.reviewFixRecoveryOf !== undefined ? { recovery_of: request.reviewFixRecoveryOf } : {}) });
+  if (decision.allowed) {
+    // Retain the immutable admission reference rather than current status or
+    // replay telemetry: preparing the same dispatch keeps the same identity.
+    return { allowed: true, decision: decision.decision, identity: decision.identity,
+      correction_identity: decision.correction_identity, dispatch_id: decision.dispatch_id,
+      ...(decision.recovery_of ? { recovery_of: decision.recovery_of } : {}), cycle: decision.cycle };
+  }
+  throw correctionAdmissionError({ request, decision });
+}
+
+// The two parent launch paths publish the same bounded deferral and typed
+// refusal. A sidecar supplies its pre-admission REVIEW snapshot; native
+// preparation reaches this point before taking a snapshot of its own.
+function correctionAdmissionError({ request, decision, expectedHashes }) {
+  const code = decision.reason_code || 'review-fix-policy-invalid';
+  let deferral = { status: 'not-applicable' };
+  if (['slice', 'task'].includes(request.reviewFix.boundary)) {
+    try {
+      const published = publishDeferredOutcomes({ request, reasonCode: code, items: deferralItems(decision), expectedHashes });
+      deferral = { status: 'published', items: published.items.map(item => item.r) };
+    } catch (error) { deferral = { status: 'failed', reason_code: error.code || 'review-fix-defer-failed' }; }
+  }
+  const error = refusal(code);
+  Object.assign(error, { provider_called: false, stage: 'review-fix-admission', layer: 'review-fix-admission',
+    admission: decision, deferral, result: { ...decision, deferral } });
+  return error;
+}
+
+// The accept publishes only for a recorded admitted decision of this dispatch:
+// the identity embedded in the preparation, else dispatchId + brief identity.
+// A recovery successor is bound to its recorded parent with the same correction.
+function assertRecordedAdmission(request, loc, brief, root, preparation) {
+  const policy = require('./forge-review-policy');
+  const scope = admissionScope(request, loc.reviewFix.boundary);
+  const embedded = preparation ? preparation.admission : undefined;
+  const dispatchId = request.dispatchId !== undefined ? request.dispatchId : embedded && embedded.dispatch_id;
+  const recoveryOf = request.reviewFixRecoveryOf !== undefined ? request.reviewFixRecoveryOf : embedded && embedded.recovery_of;
+  const required = detail => Object.assign(refusal('review-fix-admission-required', detail), { provider_called: false });
+  if (typeof dispatchId !== 'string' || !dispatchId) throw required('dispatchId is required');
+  if (preparation && (!embedded || embedded.allowed !== true || embedded.decision !== 'admitted' || embedded.dispatch_id !== dispatchId
+      || (embedded.recovery_of || null) !== (recoveryOf || null))) throw required('preparation carries no matching admission');
+  let recorded = null;
+  try {
+    if (recoveryOf) {
+      const decision = policy.admitCorrection({ owner: root, ...scope, dispatch_id: dispatchId, brief,
+        items: request.reviewFix.items, recovery_of: recoveryOf });
+      if (decision.allowed && ['recovery', 'replay'].includes(decision.mode)) recorded = decision;
+    } else {
+      const found = policy.findAdmission(embedded ? { owner: root, ...scope, identity: embedded.identity }
+        : { owner: root, ...scope, dispatch_id: dispatchId, brief_identity: brief.identity });
+      if (found && found.decision === 'admitted' && found.dispatch_id === dispatchId
+          && (!embedded || found.brief_identity === (preparation.brief && preparation.brief.identity))) recorded = found;
+    }
+  } catch { recorded = null; } // unreadable history fails closed
+  if (!recorded) throw required('no recorded admitted decision for this dispatch');
+  return recorded;
 }
 
 /**
@@ -617,7 +778,9 @@ function nativePreparationIdentity(preparation) {
     snapshot_fingerprint: preparation.svnSnapshot?.coverage?.fingerprint || null,
     baseline_fingerprint: preparation.svnSnapshot?.baseline?.fingerprint || null,
     coverage_policy: preparation.svnSnapshot?.coverage?.policy || null,
-    ...(preparation.svnSnapshot?.coverage?.observation ? { observation: preparation.svnSnapshot.coverage.observation } : {}) }));
+    ...(preparation.svnSnapshot?.coverage?.observation ? { observation: preparation.svnSnapshot.coverage.observation } : {}),
+    // Additive: preparations recorded before the admission keep their identity.
+    ...(preparation.admission !== undefined ? { admission: preparation.admission } : {}) }));
 }
 
 function assertNativePreparation(preparation, cwd, root, brief, reviewFiles, backend, autoCommit) {
@@ -665,16 +828,20 @@ function prepareNativeReviewFix(request) {
   assertClaimTargetsPhysical(cwd, claim.paths);
   const brief = buildBrief({ boundary: loc.reviewFix.boundary, unitLabel: loc.reviewFix.unitLabel,
     items, claimPaths: claim.paths, route: r.route });
+  // SVN scope derivation and claim file types are request validation (no capture).
+  const reviewObservation = r.vcs === 'svn' ? vcs.deriveSvnReviewObservation(claim.paths) : null;
+  if (r.vcs === 'svn') assertSvnClaimFileTypes(cwd, claim.paths);
+  // Last gate: admitted (or refused with the deferral) before the REVIEW
+  // snapshot, any VCS capture, build or invoke.
+  const admission = admitNativeCorrection(r, loc, brief, root);
   const reviewSnapshot = {}, reviewContents = {};
   for (const reviewFile of loc.reviewFix.reviewFiles) {
     try { const bytes = fs.readFileSync(unit.target(root, reviewFile)); reviewSnapshot[reviewFile] = hash(bytes); reviewContents[reviewFile] = bytes.toString('utf8'); }
     catch { throw refusal('review-fix-review-item-missing'); }
   }
   const preparation = { version: 1, vcs: r.vcs, code_dir: cwd, context_root: root, brief, reviewSnapshot, reviewContents,
-    auto_commit: r.constraints?.auto_commit === true };
+    auto_commit: r.constraints?.auto_commit === true, admission };
   if (r.vcs === 'svn') {
-    const reviewObservation = vcs.deriveSvnReviewObservation(claim.paths);
-    assertSvnClaimFileTypes(cwd, claim.paths);
     const snapshot = vcs.captureDirty(cwd, { vcs: 'svn', strict: true, reviewObservation });
     if (snapshot.error === 'svn-protected-metadata-link') throw refusal('review-fix-protected-metadata');
     if (!snapshot.ok || !vcs.validateSvnStrictSnapshot(snapshot)) {
@@ -738,6 +905,12 @@ function acceptNativeReviewFix(request, options) {
   const preparation = r.nativePreparation;
   const expectedHashes = preparation ? preparation.reviewSnapshot : r.reviewSnapshot;
   if (!r.reviewFix || r.reviewFix.decision !== 'proceed') throw refusal('review-fix-claim-mismatch', 'claim gate decision must be proceed');
+  // Slice and task publish only for a recorded admitted decision; refused here,
+  // before any observation or REVIEW.md write. milestone-triage is unchanged.
+  if (['slice', 'task'].includes(loc.reviewFix.boundary)) {
+    assertRecordedAdmission(r, loc, buildBrief({ boundary: loc.reviewFix.boundary, unitLabel: loc.reviewFix.unitLabel, items,
+      claimPaths: claim.paths, route: r.route }), root, preparation);
+  }
   const raw = r.rawResult || {};
   const status = raw.status;
   const sha = typeof (raw.commit_sha ?? raw.sha) === 'string' ? (raw.commit_sha ?? raw.sha).trim().toLowerCase() : '';
@@ -917,14 +1090,25 @@ module.exports = {
   prepareNativeReviewFix, deriveClaim, reviewFixIdentity, buildBrief, buildReviewFixPrompt,
   inspectReviewFixResult, validateReviewFixResult, verifyAgainstObserved, outcomeLine, setOutcomeInContent,
   applyReviewOutcomes, assertReviewSnapshot, commitMessage, reconcileCommit, commitVerified, verifiedGitBlobs, acceptNativeReviewFix, unitIdFor,
-  reviewFileFor,
+  reviewFileFor, publishDeferredOutcomes, deferralItems, admissionScope, correctionAdmissionError,
 };
+
+// `--defer <request.json>`: the request carries `deferral: {reason_code, detail?,
+// items?, review_snapshot?}`; lines go only to the parent-derived REVIEW.md files.
+function deferFromRequest(request) {
+  const deferral = request && request.deferral && typeof request.deferral === 'object' && !Array.isArray(request.deferral) ? request.deferral : null;
+  if (!deferral) throw refusal('review-fix-defer-invalid', 'deferral is required');
+  if (Object.keys(deferral).some(key => !['reason_code', 'detail', 'items', 'review_snapshot'].includes(key))) throw refusal('review-fix-defer-invalid', 'unknown deferral field');
+  return publishDeferredOutcomes({ request, reasonCode: deferral.reason_code, detail: deferral.detail, items: deferral.items,
+    expectedHashes: deferral.review_snapshot });
+}
 
 if (require.main === module) {
   try {
-    if (!['--accept-native', '--prepare-native'].includes(process.argv[2]) || !process.argv[3]) throw refusal('request-file-required');
+    if (!['--accept-native', '--prepare-native', '--defer'].includes(process.argv[2]) || !process.argv[3]) throw refusal('request-file-required');
     const request = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
-    const result = process.argv[2] === '--prepare-native' ? prepareNativeReviewFix(request) : acceptNativeReviewFix(request);
+    const result = process.argv[2] === '--prepare-native' ? prepareNativeReviewFix(request)
+      : process.argv[2] === '--defer' ? deferFromRequest(request) : acceptNativeReviewFix(request);
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } catch (error) {
     if (error.result) process.stdout.write(`${JSON.stringify(error.result)}\n`);

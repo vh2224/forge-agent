@@ -759,9 +759,52 @@ const OWNER_POST_T06 = Object.freeze({
 const LINKED_BLOCK_RE = /^<!-- forge:linked-task:([a-z0-9-]+):start -->\r?\n[\s\S]*?^<!-- forge:linked-task:\1:end -->\r?\n/gm;
 // T07 itself re-pins only these two files; every other captured source keeps its bytes.
 const T07_PIN_FILES = Object.freeze(['scripts/fixtures/claude-renderer/claude-memory-v2.golden.json', 'docs/communication-evaluation/samples.json']);
+// #341 (M-20261106040502-review-fix-limites S01/T05). A measured delta is layered over the
+// proof below: the capture, OWNER_POST_T06 and every historical value stay as they are; a
+// surface or path declared by the delta must carry a before equal to that historical value and
+// an after equal to the current measurement. Everything outside the delta keeps its assertion.
+const DELTA_341_PATH = path.join(__dirname, 'fixtures', 'review-policy', 'distribution-delta.json');
 
 function sha256(bytes) {
   return crypto.createHash('sha256').update(bytes).digest('hex');
+}
+
+// The #341 row of a declared surface, file or sample node, or null outside the delta.
+function delta341Row(delta, kind, key) {
+  return delta && delta[kind] && Object.prototype.hasOwnProperty.call(delta[kind], key) ? delta[kind][key] : null;
+}
+
+// Pins and captured sources of the linked-task proof. The defaults read the real bytes; the
+// #341 negative fixtures only pass in-memory golden, README, delta or file variants.
+function assertLinkedPinsAndSources({ before, declared, delta, golden, measured, readme,
+  readRaw = (relative) => fs.readFileSync(path.join(ROOT, relative)) }) {
+  // Pins: only the attributed surface is re-pinned, to the owner-measured value (#341: plus its declared surfaces).
+  for (const surface of golden.surfaces) {
+    const prior = before.active_golden_before.surfaces.find((row) => row.source_id === surface.source_id).sha256;
+    const ownerAfter = OWNER_POST_T06.surfaces[surface.source_id] || prior;
+    const row341 = delta341Row(delta, 'surfaces', surface.source_id);
+    if (row341) {
+      assert.strictEqual(row341.before, ownerAfter, `${surface.source_id}: #341 before is the owner after pin`);
+      assert.strictEqual(row341.attributed_before || row341.before, prior, `${surface.source_id}: #341 attributed before is the capture`);
+    }
+    const expected = row341 ? row341.after : ownerAfter;
+    assert.strictEqual(surface.sha256, expected, `active pin ${surface.source_id}`);
+    assert.strictEqual(measured.get(surface.source_id), expected, `measured ${surface.source_id}`);
+    if (expected !== prior) assert(readme.includes(prior) && readme.includes(expected), `README records ${surface.source_id} before/after`);
+    if (row341) assert(readme.includes(row341.before), `README records the #341 before of ${surface.source_id}`);
+  }
+  assert(readme.includes(LINKED_BEFORE_REVISION) && readme.includes(LINKED_BEFORE_SHA) && readme.includes(OWNER_POST_T06.commit));
+  for (const historical of before.historical_goldens) {
+    assert.strictEqual(sha256(readRaw(historical.path)), historical.sha256, `${historical.path} frozen`);
+  }
+
+  // Every other captured source keeps its exact bytes (#341: a declared path moves from the capture to its measured after).
+  for (const source of before.sources) {
+    if (declared.has(source.path) || T07_PIN_FILES.includes(source.path)) continue;
+    const row341 = delta341Row(delta, 'files', source.path);
+    if (row341) assert.strictEqual(row341.before, source.sha256, `${source.path}: #341 before is the capture`);
+    assert.strictEqual(sha256(readRaw(source.path)), row341 ? row341.after : source.sha256, `unchanged source ${source.path}`);
+  }
 }
 
 test('linked-task scoped pins follow the owner pre-T06 capture and the measured source map only', () => {
@@ -775,6 +818,10 @@ test('linked-task scoped pins follow the owner pre-T06 capture and the measured 
   assert.deepStrictEqual(before.preexisting_drift.active_surfaces, []);
   const declared = new Set(before.declared_T06_paths);
   assert.strictEqual(declared.size, 10);
+  const delta = JSON.parse(fs.readFileSync(DELTA_341_PATH, 'utf8'));
+  assert.strictEqual(delta.kind, 'issue-341-measured-distribution-delta');
+  assert.strictEqual(delta.provenance.base_revision, '563ac2752722ac7c29848f62520c8446185bc15c');
+  const declared341 = new Set(delta.declared_paths);
 
   // Nine surfaces measured by the canonical formula; identities equal the capture.
   const golden = JSON.parse(fs.readFileSync(GOLDEN_PATH, 'utf8'));
@@ -801,43 +848,47 @@ test('linked-task scoped pins follow the owner pre-T06 capture and the measured 
       .filter((member) => sha256(fs.readFileSync(path.join(ROOT, member.source))) !== member.sha256)
       .map((member) => member.source);
     for (const member of changedMembers) {
-      assert(declared.has(member), `drift of ${surface.source_id} is attributed to a declared T06 path: ${member}`);
+      assert(declared.has(member) || declared341.has(member), `drift of ${surface.source_id} is attributed to a declared T06 path: ${member}`);
       contributors.add(member);
     }
     const drifted = measured.get(surface.source_id) !== surface.sha256;
     assert.strictEqual(drifted, changedMembers.length > 0, `${surface.source_id}: measured drift iff a member source changed`);
     if (drifted) affected.push(surface.source_id);
   }
-  assert.deepStrictEqual(affected, Object.keys(OWNER_POST_T06.surfaces), 'measured affected surfaces equal the owner after map');
-  assert.deepStrictEqual([...contributors].sort(), Object.keys(OWNER_POST_T06.contributors).sort());
+  // #341: the affected surfaces are the owner after map plus exactly the surfaces the delta declares.
+  const captureOrder = before.active_golden_before.surfaces.map((surface) => surface.source_id);
+  assert.deepStrictEqual(affected, captureOrder.filter((id) => id in OWNER_POST_T06.surfaces || delta341Row(delta, 'surfaces', id)),
+    'measured affected surfaces equal the owner after map plus the declared #341 surfaces');
+  assert.deepStrictEqual(affected.filter((id) => !delta341Row(delta, 'surfaces', id)),
+    Object.keys(OWNER_POST_T06.surfaces).filter((id) => !delta341Row(delta, 'surfaces', id)), 'outside the #341 delta the owner after map is unchanged');
+  const members341 = Object.values(delta.surfaces).flatMap((row) => row.members);
+  assert.deepStrictEqual([...contributors].sort(), [...new Set([...Object.keys(OWNER_POST_T06.contributors), ...members341])].sort());
   for (const [file, [beforeSha, afterSha]] of Object.entries(OWNER_POST_T06.contributors)) {
     const raw = fs.readFileSync(path.join(ROOT, file));
-    assert.strictEqual(sha256(raw), afterSha, `${file} equals the owner after measurement`);
     assert.strictEqual(before.sources.find((row) => row.path === file).sha256, beforeSha, `${file} before value is the capture`);
+    const withoutLinked = sha256(Buffer.from(raw.toString('utf8').replace(LINKED_BLOCK_RE, ''), 'utf8'));
+    const row341 = delta341Row(delta, 'files', file);
+    if (row341) {
+      // #341 starts from the owner after measurement and from the pre-T06 bytes outside the linked blocks.
+      assert.strictEqual(row341.before, afterSha, `${file}: #341 before is the owner after measurement`);
+      assert.strictEqual(row341.attributed_before, beforeSha, `${file}: #341 attributed before is the capture`);
+      assert.strictEqual(sha256(raw), row341.after, `${file} equals the #341 measured after`);
+      assert.strictEqual(withoutLinked, row341.attributed_after, `${file}: outside the linked blocks only the measured #341 change`);
+      continue;
+    }
+    assert.strictEqual(sha256(raw), afterSha, `${file} equals the owner after measurement`);
     // The whole delta is the T06 linked blocks: removing them restores the pre-T06 bytes.
-    assert.strictEqual(sha256(Buffer.from(raw.toString('utf8').replace(LINKED_BLOCK_RE, ''), 'utf8')), beforeSha,
-      `${file}: only forge:linked-task blocks changed`);
+    assert.strictEqual(withoutLinked, beforeSha, `${file}: only forge:linked-task blocks changed`);
+  }
+  for (const [file, row341] of Object.entries(delta.files)) {
+    if (file in OWNER_POST_T06.contributors) continue;
+    assert(!declared.has(file), `${file}: a non-T06 #341 path`);
+    assert.strictEqual(sha256(fs.readFileSync(path.join(ROOT, file))), row341.after, `${file} equals the #341 measured after`);
   }
 
-  // Pins: only the attributed surface is re-pinned, to the owner-measured value.
+  // Pins and every other captured source: shared with the #341 negative fixtures below.
   const readme = fs.readFileSync(path.join(__dirname, 'fixtures', 'claude-renderer', 'README.md'), 'utf8');
-  for (const surface of golden.surfaces) {
-    const prior = before.active_golden_before.surfaces.find((row) => row.source_id === surface.source_id).sha256;
-    const expected = OWNER_POST_T06.surfaces[surface.source_id] || prior;
-    assert.strictEqual(surface.sha256, expected, `active pin ${surface.source_id}`);
-    assert.strictEqual(measured.get(surface.source_id), expected, `measured ${surface.source_id}`);
-    if (expected !== prior) assert(readme.includes(prior) && readme.includes(expected), `README records ${surface.source_id} before/after`);
-  }
-  assert(readme.includes(LINKED_BEFORE_REVISION) && readme.includes(LINKED_BEFORE_SHA) && readme.includes(OWNER_POST_T06.commit));
-  for (const historical of before.historical_goldens) {
-    assert.strictEqual(sha256(fs.readFileSync(path.join(ROOT, historical.path))), historical.sha256, `${historical.path} frozen`);
-  }
-
-  // Every other captured source keeps its exact bytes.
-  for (const source of before.sources) {
-    if (declared.has(source.path) || T07_PIN_FILES.includes(source.path)) continue;
-    assert.strictEqual(sha256(fs.readFileSync(path.join(ROOT, source.path))), source.sha256, `unchanged source ${source.path}`);
-  }
+  assertLinkedPinsAndSources({ before, declared, delta, golden, measured, readme });
 
   // Samples: only the four source.sha256 values move to the raw bytes of their source.
   const sampleText = fs.readFileSync(path.join(ROOT, before.samples.file), 'utf8');
@@ -846,6 +897,8 @@ test('linked-task scoped pins follow the owner pre-T06 capture and the measured 
   const allowed = before.samples.normalization.allowed_json_pointers;
   assert.strictEqual(allowed.length, 4);
   let restored = sampleText;
+  const nodes341 = new Map(delta.samples.nodes.map((row) => [row.pointer, row]));
+  assert.strictEqual(nodes341.size, 4);
   for (const prior of before.samples.all_task_next_samples) {
     const node = prior.pointer.split('/').slice(1).reduce((value, key) => value[key], samples);
     assert(allowed.includes(`${prior.pointer}/source/sha256`));
@@ -853,19 +906,74 @@ test('linked-task scoped pins follow the owner pre-T06 capture and the measured 
     assert.strictEqual(node.label, prior.label);
     assert.deepStrictEqual({ ...node.source, sha256: prior.source.sha256 }, prior.source, `${prior.pointer} metadata`);
     const [, afterSha] = OWNER_POST_T06.contributors[prior.source.file];
-    assert.strictEqual(node.source.sha256, afterSha, `${prior.pointer} cites the raw source bytes`);
+    // #341: a declared node moves from the owner after measurement to the measured raw bytes of its source.
+    const node341 = nodes341.get(prior.pointer) || null;
+    if (node341) {
+      assert.strictEqual(node341.file, prior.source.file, `${prior.pointer}: #341 node cites the same source`);
+      assert.strictEqual(node341.before, afterSha, `${prior.pointer}: #341 before is the owner after measurement`);
+      assert.strictEqual(node341.after, sha256(fs.readFileSync(path.join(ROOT, prior.source.file))), `${prior.pointer}: #341 after is the raw source bytes`);
+      assert(sampleReadme.includes(node341.before) && sampleReadme.includes(node341.after), `samples README records the #341 ${prior.pointer}`);
+    }
+    const cited = node341 ? node341.after : afterSha;
+    assert.strictEqual(node.source.sha256, cited, `${prior.pointer} cites the raw source bytes`);
     assert(fs.readFileSync(path.join(ROOT, prior.source.file), 'utf8').includes(node.text), `${prior.pointer} text present`);
     assert(sampleReadme.includes(prior.source.sha256) && sampleReadme.includes(afterSha), `samples README records ${prior.pointer}`);
-    restored = restored.replace(`"sha256": "${afterSha}"`, `"sha256": "${prior.source.sha256}"`);
+    restored = restored.replace(`"sha256": "${cited}"`, `"sha256": "${prior.source.sha256}"`);
   }
+  assert.deepStrictEqual([...nodes341.keys()].filter((pointer) => !before.samples.all_task_next_samples.some((prior) => prior.pointer === pointer)), [],
+    '#341 declares no other sample node');
   assert.strictEqual(sha256(Buffer.from(restored, 'utf8')), before.samples.sha256, 'only the four source.sha256 values changed');
 
   // Registry: measured drift zero, so every row/classification/reason/fingerprint is the capture.
   const auditResult = guard.audit({ root: ROOT });
   assert.strictEqual(auditResult.ok, true, JSON.stringify(auditResult));
   assert.strictEqual(guard.SOURCE_REGISTRY.length, before.dispatch_registry.audit_before.registered_count);
-  assert.deepStrictEqual(guard.SOURCE_REGISTRY.map((row) => ({ ...row })), before.dispatch_registry.registry_exact);
+  // #341: the delta declares the measured registry change; drifted rows swap only id and fingerprint.
+  assert.strictEqual(delta.registry.count, before.dispatch_registry.audit_before.registered_count, '#341 keeps the registry count');
+  assert.deepStrictEqual([delta.registry.added, delta.registry.removed], [[], []], '#341 adds or removes no registered call');
+  const drift341 = new Map(delta.registry.drifted_rows.map((row) => [row.before_id, row]));
+  const registryExact = before.dispatch_registry.registry_exact.map((row) => {
+    const drift = drift341.get(row.id);
+    if (!drift) return row;
+    assert.strictEqual(drift.before_fingerprint, row.fingerprint, `${row.id}: #341 drift starts from the captured fingerprint`);
+    return { ...row, id: drift.after_id, fingerprint: drift.after_fingerprint };
+  });
+  assert.strictEqual(drift341.size, delta.registry.drifted_rows.length, '#341 drift rows are distinct');
+  assert.deepStrictEqual(guard.SOURCE_REGISTRY.map((row) => ({ ...row })), registryExact);
   process.stdout.write('ok - chain-distribution-pins-follow-owner-pre-t06-baseline-and-measured-source-map-only\n');
+});
+
+test('#341 linked-task layer refuses edits outside the delta, wrong pins, bad delta before values and undocumented re-pins', () => {
+  const before = JSON.parse(fs.readFileSync(LINKED_BEFORE_PATH));
+  const declared = new Set(before.declared_T06_paths);
+  const delta = JSON.parse(fs.readFileSync(DELTA_341_PATH, 'utf8'));
+  const golden = JSON.parse(fs.readFileSync(GOLDEN_PATH, 'utf8'));
+  const report = claudeRenderer.render({
+    repo: ROOT,
+    projectRoot: path.join(ROOT, 'scripts', '.guard-golden-project'),
+    claudeHome: path.join(ROOT, 'scripts', '.guard-golden-claude'),
+    forgeHome: path.join(ROOT, 'scripts', '.guard-golden-forge'),
+  });
+  const measured = surfaceHashes(report, golden);
+  const readme = fs.readFileSync(path.join(__dirname, 'fixtures', 'claude-renderer', 'README.md'), 'utf8');
+  const base = { before, declared, delta, golden, measured, readme };
+  assertLinkedPinsAndSources(base);
+  // In-memory variants only: no pin, README, capture or source file is written.
+  const refused = (label, overrides) => assert.throws(() => assertLinkedPinsAndSources({ ...base, ...overrides }),
+    (error) => error instanceof assert.AssertionError, `${label} must be refused`);
+  const variant = (mutate) => { const copy = JSON.parse(JSON.stringify(delta)); mutate(copy); return copy; };
+  const readRaw = (relative) => fs.readFileSync(path.join(ROOT, relative));
+  const edited = (target) => (relative) => (relative === target ? Buffer.concat([readRaw(relative), Buffer.from('\nedit outside the measured delta\n')]) : readRaw(relative));
+  const wrong = sha256('not a measured #341 value');
+  refused('captured source edit outside the delta', { readRaw: edited('commands/forge.md') });
+  refused('declared #341 path edited after its measurement', { readRaw: edited('shared/forge-procedures.json') });
+  refused('wrong active pin', { golden: { ...golden, surfaces: golden.surfaces.map((row) => (row.source_id === 'agents' ? { ...row, sha256: wrong } : row)) },
+    readme: `${readme}\n${wrong}\n` });
+  refused('bad delta surface before', { delta: variant((copy) => { copy.surfaces.skills.before = wrong; }) });
+  refused('bad delta file before', { delta: variant((copy) => { copy.files['shared/forge-procedure-review.md'].before = wrong; }) });
+  refused('re-pin not declared by the delta', { delta: variant((copy) => { delete copy.surfaces.configuration; }) });
+  refused('undocumented re-pin', { readme: readme.split(delta.surfaces.agents.after).join('') });
+  process.stdout.write('ok - issue-341-linked-task-layer-refuses-out-of-delta-edits-wrong-pins-and-undocumented-repins\n');
 });
 
 test('guard CLI returns parseable JSON and release-gate status', () => {

@@ -1618,6 +1618,25 @@ Executor e modelo vêm do roteamento do challenger já resolvido no Step 0 de `s
 - The `model:` of `forge-advocate`/`forge-reviewer` comes exclusively from resolved `$ADVOCATE_ALIAS`/`$CHALLENGER_MODEL`; literals are a violation detected by `forge-review-audit.js`.
 - **Resolve** via the Step 5 truth table; write the dialogue to `{TASK_ID}-REVIEW.md` (Step 6 template, `## Pattern hits` from `PATTERN_HITS`). The header carries the `**Pairing:**` line (`$PAIRING_LINE`, assembled in Step 0 of the shared spec) exactly as in `S##-REVIEW.md` — boundary-agnostic, no task-specific variant.
 - **Scope disclosure (SVN only).** When `$SCOPE_REPORT` is non-empty, append a `## Escopo do diff (SVN)` section stating `reason`, the reviewed paths (`scoped`) and — explicitly — the `excluded` ones. Silent truncation reads as "everything was reviewed"; a `reason` of `unscoped:*` means the manifest did not apply and the whole working copy was read, which the operator must be able to see.
+- **Política executável de review-fix** (`shared/forge-review.md § Política executável de review-fix`, `review-fix-policy-v1`, fronteira `task`, `RF_UNIT_ID="{TASK_ID}"`): vale antes e em volta do Step 7a abaixo.
+  1. Classifique os concedidos antes do ciclo. Monte o `verdict` de cada R# a partir do Step 5 e decida pela CLI, nunca pela prosa:
+     ```bash
+     node "$FORGE_SCRIPTS_DIR/forge-review-policy.js" --classify --input "$RF_VERDICTS_FILE"
+     ```
+  2. Faça antes as perguntas do Step 7b (OPEN items abaixo): cada resposta `Refatorar agora` entra no mesmo ciclo com `basis: operator-decision`, nunca num despacho próprio por item.
+  3. Concedido que não é fix-now não entra no request. Publique a deferência dele, `**Correção:** não aplicada — deferida para triagem final (<motivo>)`, em vez de despachá-lo:
+     ```bash
+     node "$FORGE_SCRIPTS_DIR/forge-review-fix.js" --defer "$RF_DEFER_REQUEST"
+     ```
+     A task avulsa não tem Step 9: cada item deferido, ou recusado na admissão, vira também item por `shared/forge-review.md § Item capture` (`source: review/{TASK_ID}/{R#}`, `origin: auto`, `status: inbox`, sem `milestone`), com o motivo e o veredito duplo no `body`.
+  4. Um ciclo é um único request agrupado (concedidos fix-now com `basis: dual-verdict` mais as respostas `Refatorar agora`) com um único `dispatchId`; no ramo nativo o request de `--prepare-native` leva o `$RF_NATIVE_DISPATCH_ID` gerado abaixo como `dispatchId`. O claim gate usa só os itens desse request. No máximo 2 ciclos nesta task; o tempo de execute da task avulsa é desconhecido, então só o teto governa.
+  5. A admissão roda dentro do despacho (adaptador sidecar ou `--prepare-native`), nunca no lugar dele. Uma recusa nomeada (`review-fix-cycle-limit`, `review-fix-budget-exhausted`, `review-fix-not-fix-now`, `review-fix-policy-invalid`) não lança nada: sem retry, sem bypass, sem correção inline e sem outro worker; os itens ficam `não aplicada — deferida para triagem final (<código>)` e viram itens como no passo 3. Em `review-fix-not-fix-now`, reconstrua o request só com os itens admissíveis e repita o claim gate.
+  6. Depois de cada decisão, admitida ou recusada, repasse verbatim a linha `⚖` desta leitura somente leitura:
+     ```bash
+     node "$FORGE_SCRIPTS_DIR/forge-review-policy.js" --status --cwd "$WORKING_DIR" --task "$RF_UNIT_ID"
+     ```
+  7. Depois do fix roda só a verificação dirigida dos itens corrigidos (`verify_paths`, comandos ligados aos itens e regressão dirigida), sem nova revisão. Falha deixa o item `falhou — deferida para triagem final`; achado ou regressão nova vira item com a evidência.
+  8. Esta revisão da task avulsa não muda: sem contexto de milestone a guarda de perna não atua. Em milestone, a revisão dialética só roda no `complete-slice`; uma perna recusada com `review-per-task-in-milestone` ou `review-already-completed` (exit 2, `provider_called:false`) não é indisponibilidade de revisor, não tem retry nem fallback e não produz REVIEW limpo nem mínimo.
 - **CONCEDED items → fix now (Step 7a):** consume the full gated contract from `shared/forge-review.md § Step 7a`, not the former alias-only shortcut. The same block is used when an OPEN item is answered `Refatorar agora`.
 
   ```bash
@@ -1710,7 +1729,7 @@ Executor e modelo vêm do roteamento do challenger já resolvido no Step 0 de `s
     --dispatch-id "$RF_NATIVE_DISPATCH_ID" \
     --events "$WORKING_DIR/.gsd/forge/events.jsonl"
   ```
-- **OPEN items (Step 7b):** for each, `AskUserQuestion` live (`Manter` / `Refatorar agora` — dispatches a `review-fix` unit / `Criar follow-up`) and record the decision.
+- **OPEN items (Step 7b):** before the Step 7a cycle is dispatched, for each, `AskUserQuestion` live (`Manter` / `Refatorar agora` — joins the cycle's single grouped `review-fix` request with `basis: operator-decision`, never a per-item dispatch / `Criar follow-up`) and record the decision.
   - `Criar follow-up` → create an item per `shared/forge-review.md § Item capture`: `source: review/{TASK_ID}/{R#}`, `origin: auto`, `status: inbox`, `file`/`sha` from the objection's `path:line` + HEAD sha.
   - **Omit** `milestone` — a loose task has none, and inventing one is a RISK violation.
   - Append ONLY the pointer line `- {I-id} — {title}` to `.gsd/KNOWLEDGE.md § Review follow-ups` (create the section if missing).

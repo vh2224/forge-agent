@@ -747,6 +747,60 @@ async function main() {
       assert.strictEqual(called, 9);
     } finally { fs.rmSync(memoryAgent.dir, { recursive: true, force: true }); }
     console.log('PASS T10 both hosts: late guard refusal mints a frozen process-local zero-call witness bound to invocation and request; clones, flags, invoked or failed callbacks never do');
+    // #341 review-leg guard in the supervised callback: after the time admission, before the host.
+    const legContext = unit => ({ cwd: timeFixture.cwd, milestone: 'M001', unit });
+    const legBase = { ...base, telemetryIdentity: undefined };
+    let hostCalls = 0;
+    const hostCallback = async () => { hostCalls++; return { status: 'done' }; };
+    const legRefused = (outcome, code) => {
+      assert.strictEqual(outcome.ok, false); assert.strictEqual(outcome.reason_code, code);
+      assert.strictEqual(outcome.provider_called, false);
+      assert.deepStrictEqual(outcome.diagnostic, { reason_code: code, layer: 'review-policy' });
+      const witness = notInvokedWitness(outcome);
+      assert(witness && witness.layer === 'review-policy' && witness.host_callbacks === 0 && witness.reason_code === code);
+      assert(!JSON.stringify(outcome.diagnostic).includes(timeFixture.cwd));
+    };
+    const reviewFile = path.join(timeFixture.cwd, '.gsd/milestones/M001/slices/S01/S01-REVIEW.md');
+    for (const agentType of ['forge-reviewer', 'forge-advocate']) {
+      timeFixture.at = 1;
+      legRefused(await invokeNative({ ...legBase, agentType, milestoneTimeContext: legContext('execute-task/T03') }, hostCallback), 'review-per-task-in-milestone');
+      assert.strictEqual((await invokeNative({ ...legBase, agentType, milestoneTimeContext: legContext('complete-slice/S01') }, hostCallback)).ok, true,
+        'complete-slice before its REVIEW.md reaches the host');
+      fs.mkdirSync(path.dirname(reviewFile), { recursive: true }); fs.writeFileSync(reviewFile, '# S01 review\n');
+      legRefused(await invokeNative({ ...legBase, agentType, milestoneTimeContext: legContext('complete-slice/S01') }, hostCallback), 'review-already-completed');
+      fs.rmSync(reviewFile);
+      timeFixture.at = 101;
+      const timed = await invokeNative({ ...legBase, agentType, milestoneTimeContext: legContext('execute-task/T03') }, hostCallback);
+      assert.strictEqual(timed.reason_code, 'milestone-budget-exhausted', 'time admission prevails over the guard');
+      assert.strictEqual(timed.diagnostic.layer, 'milestone-time-admission'); assert.strictEqual(timed.provider_called, false);
+    }
+    assert.strictEqual(hostCalls, 2, 'only the two complete-slice legs before completion reached the host');
+    const refusals = fs.readFileSync(path.join(timeFixture.cwd, '.gsd/forge/events.jsonl'), 'utf8').split(/\r?\n/).filter(Boolean)
+      .map(line => JSON.parse(line)).filter(row => row.event === 'review-leg-refusal');
+    assert.deepStrictEqual(refusals.map(row => [row.reason_code, row.leg]), [['review-per-task-in-milestone', 'forge-reviewer'],
+      ['review-already-completed', 'forge-reviewer'], ['review-per-task-in-milestone', 'forge-advocate'], ['review-already-completed', 'forge-advocate']]);
+    timeFixture.at = 1;
+    for (const key of ['agentType', 'agent_type', 'subagentType', 'subagent_type']) {
+      for (const leg of ['forge-reviewer', 'forge-advocate']) {
+        const aliased = { ...legBase, agentType: undefined, agent_type: undefined, subagentType: undefined, subagent_type: undefined, [key]: leg };
+        const before = hostCalls;
+        legRefused(await invokeNative({ ...aliased, milestoneTimeContext: legContext('execute-task/T03') }, hostCallback), 'review-per-task-in-milestone');
+        fs.mkdirSync(path.dirname(reviewFile), { recursive: true }); fs.writeFileSync(reviewFile, '# S01 review\n');
+        legRefused(await invokeNative({ ...aliased, milestoneTimeContext: legContext('complete-slice/S01') }, hostCallback), 'review-already-completed');
+        fs.rmSync(reviewFile);
+        assert.strictEqual(hostCalls, before, `${key} ${leg}: zero host callbacks on refusal`);
+      }
+    }
+    timeFixture.at = 1;
+    for (const options of [{ ...legBase, agentType: 'forge-executor', milestoneTimeContext: legContext('execute-task/T03') },
+      { ...base, agentType: 'forge-reviewer' }, { ...legBase, agentType: 'forge-advocate' }]) {
+      assert.strictEqual((await invokeNative(options, hostCallback)).ok, true, 'executor, telemetryIdentity only and absent context unchanged');
+    }
+    fs.writeFileSync(path.join(timeFixture.cwd, '.gsd/forge-prefs.jsonc'), JSON.stringify({ review: { milestone_task_review: true } }));
+    assert.strictEqual((await invokeNative({ ...legBase, agentType: 'forge-reviewer', milestoneTimeContext: legContext('execute-task/T03') }, hostCallback)).ok, true,
+      'review.milestone_task_review true lets the task leg proceed');
+    assert.strictEqual(hostCalls, 6);
+    console.log('PASS #341 native review legs: per-task and already-completed refused in the supervised callback after time admission, zero host calls, review-policy layer; executor, telemetry-only, absent context and pref unchanged');
   } finally { fs.rmSync(timeFixture.cwd, { recursive: true, force: true }); }
   process.stdout.write('forge-native-invocation: ok\n');
 }

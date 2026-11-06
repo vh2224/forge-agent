@@ -708,6 +708,25 @@ Imprima o veredicto ao operador e **siga**. O sinal é advisory: **nunca** bloqu
        exit 2
      fi
      ```
+
+     Política executável de review-fix (`shared/forge-review.md § Política executável de review-fix`, `review-fix-policy-v1`) na fronteira `slice`; a triagem do Step 9 segue a regra própria descrita no gate de triagem abaixo:
+     1. Classifique os concedidos antes do ciclo. Monte o `verdict` de cada R# a partir do Step 5 (ou do retorno do Engine workflow) e decida pela CLI, nunca pela prosa:
+        ```bash
+        node "$FORGE_SCRIPTS_DIR/forge-review-policy.js" --classify --input "$RF_VERDICTS_FILE"
+        ```
+     2. Faça antes as perguntas do Step 7b: cada resposta `Refatorar agora` entra no mesmo ciclo com `basis: operator-decision`, nunca num despacho próprio por item.
+     3. Concedido que não é fix-now não entra no request. Publique a deferência dele, `**Correção:** não aplicada — deferida para triagem final (<motivo>)`, em vez de despachá-lo:
+        ```bash
+        node "$FORGE_SCRIPTS_DIR/forge-review-fix.js" --defer "$RF_DEFER_REQUEST"
+        ```
+     4. Um ciclo é um único request agrupado (concedidos fix-now com `basis: dual-verdict` mais as respostas `Refatorar agora`) com um único `dispatchId`, gerado uma vez e reutilizado no replay; o request de `--prepare-native` leva esse `dispatchId`. O claim gate abaixo usa só os itens desse request. No máximo 2 ciclos por slice, dentro do orçamento medido de 50%.
+     5. A admissão roda dentro do despacho (adaptador sidecar ou `--prepare-native`), nunca no lugar dele. Uma recusa nomeada (`review-fix-cycle-limit`, `review-fix-budget-exhausted`, `review-fix-not-fix-now`, `review-fix-policy-invalid`) não lança nada: sem retry, sem bypass, sem correção inline e sem outro worker. Os itens ficam `não aplicada — deferida para triagem final (<código>)` e vão para o Step 9. Em `review-fix-not-fix-now`, reconstrua o request só com os itens admissíveis e repita o claim gate.
+     6. Depois de cada decisão, admitida ou recusada, repasse verbatim a linha `⚖` desta leitura somente leitura (`RF_MILESTONE_ID` = `${RUN_ID:-{M###}}`):
+        ```bash
+        node "$FORGE_SCRIPTS_DIR/forge-review-policy.js" --status --cwd "$WORKING_DIR" --milestone "$RF_MILESTONE_ID" --slice "$RF_UNIT_ID"
+        ```
+     7. Depois do fix roda só a verificação dirigida dos itens corrigidos (`verify_paths`, comandos ligados aos itens e regressão dirigida), sem nova revisão. Falha deixa o item `falhou — deferida para triagem final`; achado ou regressão nova vai para a triagem final com a evidência.
+
      Only after this allowed verdict, run the cross-run claim gate per that same shared section + `shared/forge-claim-gate.md` (`--unit "review-fix/{S##}"`, `--conceded` from the CONCEDED `path:line` items, and its decision table, never restated here). With `RF_WORKER_MODE == sidecar` (engine claude|codex) and decision `proceed`, run `shared/forge-review.md § Sidecar review-fix branch` (boundary `slice`, or `milestone-triage` for Step 9) from `RF_ROUTE_JSON_SAVED`; the adapter publishes the per-R# lines and a failure defers the items to Step 9. With `RF_WORKER_MODE == native`, first run `forge-review-fix.js --prepare-native` exactly as
 `shared/forge-review.md § Mandatory native preparation (before build/invoke)` prescribes,
 with explicit VCS and items including `verify_paths`. Stop the fixer before build/invoke
@@ -724,6 +743,8 @@ allows only `auto_commit:false`. Native SVN preparation uses the bounded claim-c
    - **Política deste modo (`MODE = interactive`):** advogado indisponível — **só depois** de a salvage do `DEFENSE_FILE` não render nenhum veredito (`shared/forge-review.md § Step 3`) — ⇒ objeções sobem **cruas** ao humano via `AskUserQuestion` (Step 7b), sem veredito fabricado, com Rebuttal PULADO e a ressalva de adversarialidade reduzida no artefato. Challenger indisponível ⇒ `{S##}-REVIEW.md` mínimo registrando a indisponibilidade (proibido renderizar como limpo — ausência de review não é aprovação).
 
 > Fires ONLY when the derived unit is `complete-slice`. Boundary is per-slice; standalone `/forge-task` keeps its own step-5.5 review. After the gate, dispatch `forge-completer` normally.
+>
+> Em milestone, a revisão dialética roda só aqui, uma vez por slice (`shared/forge-review.md § Política executável de review-fix → Fronteira de revisão`); revisão por task dentro da milestone exige `review.milestone_task_review: true`. Uma perna recusada com `review-per-task-in-milestone` ou `review-already-completed` (exit 2, `provider_called:false`) para antes do provider: não é indisponibilidade de revisor, não tem retry nem fallback para outro revisor ou família e não produz `{S##}-REVIEW.md` limpo nem mínimo.
 
 **Slice git guard (around complete-slice):** `complete-slice` never integrates a branch — no unit of the loop does; integration is the operator's act on the delivered `forge/{run}` branch (`agents/forge-completer.md § Git boundary — complete-slice`). Snapshot the checkout **before** dispatching, verify **after** the worker returns:
 
@@ -737,6 +758,8 @@ node "$FORGE_SCRIPTS_DIR/forge-slice-git-guard.js" --verify --cwd "$CODE_DIR" --
 The snapshot is written to `.gsd/forge/` on purpose — shell variables do not survive between Bash calls. `--gsd-dir` and `--run` are **not optional here** (item #112): `--cwd` is the `CODE_DIR`, so without `--gsd-dir` the baseline lands inside the worktree — against the `.gsd/**`-stays-in-the-workspace convention, and as an untracked file that can make `cleanupWorktreeOne` report `skipped (dirty)`; and without `--run` two runs closing the same `{S##}` in one workspace share a file, so one run's baseline answers for the other. The baseline is **spent by the verify** — call `--snapshot` immediately before every dispatch, never once for several verifies, or the second one reports `inconclusive` (never `clean`). Exit `3` = violation (moved checkout, advanced default branch, or new merge commit): print it LOUDLY to the operator with the offending detail, append a `slice-git-violation` event, and **do not push** — nothing is pushed yet, so `git reset --hard` on the default branch still recovers it. Verdict `inconclusive` means nothing was measurable (no git repo, unresolved default branch) and **must not** be read as clean. The guard never blocks the loop; it reports.
 
 **Review triage gate (before complete-milestone):** If `unit_type == complete-milestone`, run the milestone-final triage (`shared/forge-review.md § Step 9`) BEFORE dispatching `forge-completer`. In pure forge-next sessions OPEN items were already decided live per-slice, so this usually finds nothing and skips silently — it exists for mixed sessions (slices run under `forge-auto` with `ask_in_auto: defer`, milestone closed via `forge-next`): scan all `{S##}-REVIEW.md` for pending `deferido`/`falhou — deferida` items, triage each via `AskUserQuestion`, dispatch ONE `review-fix/{M###}-triage` for the `Refatorar agora` items (`Criar follow-up` items create an item per `shared/forge-review.md § Item capture`, source `review/{S##}/{R#}`, plus the pointer line in `.gsd/KNOWLEDGE.md § Review follow-ups`), write decisions back, append the `review-triage` event. Never blocks the close-out.
+
+Na coleta, conte também `Correção: não aplicada — deferida para triagem final (<motivo>)` (concedido sem fix-now ou recusado por teto, orçamento ou política — `shared/forge-review.md § Política executável de review-fix`). O despacho `review-fix/{M###}-triage` é a decisão explícita do operador: fica fora do filtro corrigir-agora e do teto por slice, é admitido com `counted:false` e registrado, continua num único despacho agrupado e, depois dele, roda só a verificação dirigida.
 
 **Plan-check gate (between plan-slice and first execute-task):**
 

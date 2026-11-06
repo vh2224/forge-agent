@@ -209,6 +209,27 @@ function surfaceHash(artifacts, sourceId, raw) {
   return hash(artifacts.filter(row => row.source_id === sourceId).sort((a, b) => a.source.localeCompare(b.source))
     .map(row => `${row.source}\0${(raw ? row.content : attributed(row.source, row.content)).replace(/version=\d+\.\d+\.\d+/g, 'version=<dynamic>')}`).join('\0'));
 }
+// #341 (M-20261106040502-review-fix-limites S01/T05). A measured distribution delta is layered
+// over the S02/T07 and S03/T06 proofs: the historical constants and captures above stay as they
+// are; a surface or path declared by the delta must carry a `before` equal to that historical
+// value and an `after` equal to the current measurement; everything outside the delta keeps its
+// historical assertion unchanged. Distribution proof only (no CI, client or human acceptance).
+const DELTA_341_PATH = 'scripts/fixtures/review-policy/distribution-delta.json';
+const delta341 = JSON.parse(read(DELTA_341_PATH));
+const SHA_RE = /^[0-9a-f]{64}$/;
+function deltaRow(delta, kind, key) {
+  return delta && delta[kind] && Object.prototype.hasOwnProperty.call(delta[kind], key) ? delta[kind][key] : null;
+}
+// Attributed (linked blocks removed) value expected now: the historical value itself, or the
+// delta's measured after once its before is proven to be exactly that historical value.
+function attributedNow(kind, key, historical, delta = delta341) {
+  const row = deltaRow(delta, kind, key);
+  if (!row) return historical;
+  assert.strictEqual(row.attributed_before || row.before, historical, `#341 delta ${kind} ${key}: before is the versioned historical value`);
+  const after = row.attributed_after || row.after;
+  assert(SHA_RE.test(after), `#341 delta ${kind} ${key}: measured after`);
+  return after;
+}
 test('S02 review R61-R63: interrupted modern enrollment cannot select legacy planning', () => {
   const { spawnSync } = require('child_process');
   const selection = require('./forge-milestone-time-selection');
@@ -299,6 +320,7 @@ function atPointer(value, pointer) {
 function checkPins(fixture = {}) {
   const pins = fixture.golden || golden;
   const readme = fixture.pinReadme === undefined ? pinReadme : fixture.pinReadme;
+  const delta = fixture.delta === undefined ? delta341 : fixture.delta;
   let artifacts = fixture.artifacts;
   if (!artifacts) {
     const renderer = require('./forge-claude-renderer');
@@ -314,13 +336,19 @@ function checkPins(fixture = {}) {
   for (const surface of pins.surfaces) {
     const attributedHash = surfaceHash(artifacts, surface.source_id, false);
     const rawHash = surfaceHash(artifacts, surface.source_id, true);
-    // Strict historical attribution in BOTH pin states: outside the linked blocks every byte is the pre-T06 one.
-    assert.strictEqual(attributedHash, T06_ATTRIBUTED_PINS[surface.source_id], `attributed pre-T06 bytes ${surface.source_id}`);
+    // Strict historical attribution in BOTH pin states: outside the linked blocks every byte is the pre-T06 one
+    // (#341: a declared surface instead equals its measured delta after, whose before is that pre-T06 value).
+    assert.strictEqual(attributedHash, attributedNow('surfaces', surface.source_id, T06_ATTRIBUTED_PINS[surface.source_id], delta), `attributed pre-T06 bytes ${surface.source_id}`);
     assert(surface.sha256 === attributedHash || surface.sha256 === rawHash,
       `final measured ${surface.source_id}: pin ${surface.sha256} is neither the attributed ${attributedHash} nor the raw ${rawHash}`);
     if (surface.sha256 !== attributedHash) {
       assert(T06_RAW_DRIFT.includes(surface.source_id), `raw re-pin only of the measured T06 drift: ${surface.source_id}`);
       repinned.push(surface.source_id);
+    }
+    const row341 = deltaRow(delta, 'surfaces', surface.source_id);
+    if (row341) {
+      assert(surface.sha256 === row341.after || surface.sha256 === row341.attributed_after, `#341 pin ${surface.source_id} is a measured delta after`);
+      assert(readme.includes(row341.before) && readme.includes(surface.sha256), `#341 documented before/after ${surface.source_id}`);
     }
     if (old.get(surface.source_id) !== surface.sha256) {
       changed.push(surface.source_id);
@@ -334,7 +362,7 @@ function checkPins(fixture = {}) {
     'skills/forge-next/SKILL.md', 'skills/forge-help/SKILL.md', 'skills/forge-new-milestone/SKILL.md',
     'shared/templates/dispatch/plan-slice.md', before.samples.file, 'scripts/forge-dispatch-source-guard.js', 'scripts/forge-smoke.js']);
   for (const source of before.sources) if (!allowed.has(source.path)) {
-    assert.strictEqual(hash(attributedBytes(source.path, fixture.readSource)), source.sha256, `unchanged source ${source.path}`);
+    assert.strictEqual(hash(attributedBytes(source.path, fixture.readSource)), attributedNow('files', source.path, source.sha256, delta), `unchanged source ${source.path}`);
   }
   assert(readme.includes(before.provenance.source_revision));
   assert(readme.includes('T05') && readme.includes('configuration') && readme.includes('forge-claude-renderer.render'));
@@ -344,6 +372,7 @@ function checkSamples(fixture = {}) {
   const bytes = fixture.sampleBytes === undefined ? sampleBytes : fixture.sampleBytes;
   const readme = fixture.sampleReadme === undefined ? sampleReadme : fixture.sampleReadme;
   const sourceBytes = fixture.sourceBytes || {};
+  const delta = fixture.delta === undefined ? delta341 : fixture.delta;
   const parsed = JSON.parse(bytes);
   const nodes = linkedSampleNodes(parsed);
   const oldNext = new Map(before.samples.next_samples.map(row => [row.pointer, row]));
@@ -358,8 +387,9 @@ function checkSamples(fixture = {}) {
     const attributedHash = hash(attributedBytes(source.file, () => raw));
     const rawHash = hash(raw);
     const text = raw.toString('utf8').replace(/\r\n/g, '\n');
-    // Strict historical attribution in BOTH sample states: outside its linked blocks the source is the pre-T06 file.
-    assert.strictEqual(attributedHash, source.attributed, `${source.file} outside the linked blocks keeps its pre-T06 bytes`);
+    // Strict historical attribution in BOTH sample states: outside its linked blocks the source is the pre-T06 file
+    // (#341: or the measured delta after of that declared file, whose before is the pre-T06 value).
+    assert.strictEqual(attributedHash, attributedNow('files', source.file, source.attributed, delta), `${source.file} outside the linked blocks keeps its pre-T06 bytes`);
     assert.notStrictEqual(rawHash, attributedHash, `${source.file}: the linked blocks really change the raw bytes`);
     const cited = new Set();
     for (const pointer of source.pointers) {
@@ -379,6 +409,12 @@ function checkSamples(fixture = {}) {
       if (current.source.sha256 !== baselineHash) {
         assert(readme.includes(baselineHash) && readme.includes(current.source.sha256), `document actual ${source.file} source hashes`);
       }
+      const node341 = delta && delta.samples ? delta.samples.nodes.find(row => row.pointer === pointer) : null;
+      if (node341 && current.source.sha256 === rawHash) {
+        assert.strictEqual(node341.file, source.file, `#341 sample ${pointer} cites ${source.file}`);
+        assert.strictEqual(current.source.sha256, node341.after, `#341 sample ${pointer} cites the measured after`);
+        assert(readme.includes(node341.before) && readme.includes(node341.after), `#341 documented sample ${pointer}`);
+      }
       cited.add(current.source.sha256);
       restorations.push([pointer, baselineHash]);
     }
@@ -397,7 +433,8 @@ function checkSamples(fixture = {}) {
   assert.strictEqual(hash(restored), before.samples.sha256, 'only literal source.sha256 fields changed');
   return result;
 }
-function checkRegistry() {
+function checkRegistry(fixture = {}) {
+  const delta = fixture.delta === undefined ? delta341 : fixture.delta;
   const audit = sourceGuard.audit({ root });
   assert.strictEqual(audit.ok, true, JSON.stringify(audit));
   const old = new Map(before.dispatch_registry.rows.map(row => [row.id, row]));
@@ -412,6 +449,12 @@ function checkRegistry() {
   }
   assert.deepStrictEqual(changed, [], 'actual measurement found no fingerprint drift; no artificial registry edit');
   for (const id of changed) assert(pinReadme.includes(id), `document changed registry row ${id}`);
+  if (delta) {
+    // #341: the delta declares exactly the measured registry change (count kept, none added, removed or drifted).
+    assert.strictEqual(current.length, delta.registry.count, '#341 delta keeps the registry count');
+    assert.deepStrictEqual([delta.registry.added, delta.registry.removed], [[], []], '#341 adds or removes no registered call');
+    assert.deepStrictEqual(delta.registry.drifted_rows.map(row => row.after_id), changed, '#341 declares exactly the measured fingerprint drift');
+  }
 }
 function assertSmokeScope(text) {
   const start = text.indexOf('// ── Section 61:'), end = text.indexOf('// ── Section 62:', start);
@@ -1410,7 +1453,9 @@ t06('two-host-literals-main-exports-and-old-retention', () => {
   // source edits outside the linked blocks and sample text edits are all refused.
   const surfaces = rendered.claudeSurfaces;
   const refused = (label, fn) => assert.throws(fn, error => error instanceof assert.AssertionError, `${label} must be refused`);
-  const pinsWith = values => ({ ...golden, surfaces: golden.surfaces.map(row => ({ ...row, sha256: values[row.source_id] || T06_ATTRIBUTED_PINS[row.source_id] })) });
+  // #341: the "current attributed" pin of a delta surface is its measured attributed after (before = T06 value).
+  const pinsWith = values => ({ ...golden, surfaces: golden.surfaces.map(row => ({ ...row,
+    sha256: values[row.source_id] || attributedNow('surfaces', row.source_id, T06_ATTRIBUTED_PINS[row.source_id]) })) });
   const rawSkills = surfaceHash(surfaces, 'skills', true);
   assert.notStrictEqual(rawSkills, T06_ATTRIBUTED_PINS.skills, 'the linked blocks really change the raw skills surface');
   const repinnedReadme = `${pinReadme}\n${rawSkills}\n`;
@@ -1443,7 +1488,8 @@ t06('two-host-literals-main-exports-and-old-retention', () => {
   assert.notStrictEqual(rawNext, T06_ATTRIBUTED_NEXT_SHA, 'the linked blocks really change the raw forge-next bytes');
   const setShas = (text, values) => withSampleShas(text, T06_SAMPLE_SOURCES.flatMap(source =>
     source.file in values ? source.pointers.map(pointer => [pointer, values[source.file]]) : []));
-  const attributedOf = { [taskSource.file]: T06_ATTRIBUTED_TASK_SHA, [nextSource.file]: T06_ATTRIBUTED_NEXT_SHA };
+  const attributedOf = { [taskSource.file]: attributedNow('files', taskSource.file, T06_ATTRIBUTED_TASK_SHA),
+    [nextSource.file]: attributedNow('files', nextSource.file, T06_ATTRIBUTED_NEXT_SHA) };
   const raws = { [taskSource.file]: rawTask, [nextSource.file]: rawNext };
   const attributedSamples = setShas(sampleBytes, attributedOf);
   const rawSamples = setShas(attributedSamples, raws);
@@ -1652,6 +1698,91 @@ t06('real-two-host-projection-tests', () => {
   // The retained T01 phase literal checks of this suite still run against the real projections.
   for (const name of TIME_SKILLS) assertTimeSkill(`${name} (Codex, T06)`, rendered.codex[name]);
   console.log('note - T06 distribution only: Claude and Codex renders carry the linked text; client execution, comprehension, installation and human acceptance remain unknown.');
+});
+
+// ── #341 (M-20261106040502-review-fix-limites S01/T05): measured distribution delta ──
+// The delta's before values must be the versioned historical ones and its after values the
+// current measurement; the six other surfaces, the historical goldens and every captured byte
+// outside the delta stay as they were. In-memory variants only: no pin or fixture is written.
+test('#341 distribution delta: versioned before, measured after, untouched surfaces byte-identical, out-of-delta edits refused', () => {
+  const delta = delta341;
+  assert.strictEqual(delta.kind, 'issue-341-measured-distribution-delta');
+  assert.strictEqual(delta.provenance.base_revision, '563ac2752722ac7c29848f62520c8446185bc15c');
+  assert.strictEqual(delta.provenance.not_post_change_ci, true);
+  for (const key of ['before_policy', 'after_policy', 'render_method', 'attributed_method']) assert(delta.provenance[key], `provenance ${key}`);
+  const renderer = require('./forge-claude-renderer');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-341-pins-')); temps.push(temp);
+  const artifacts = renderer.render({ repo: root, projectRoot: temp, claudeHome: path.join(temp, 'host'), forgeHome: path.join(temp, 'forge') }).artifacts;
+
+  // Surfaces: exactly agents, skills and configuration move; the other six keep the pre-#341 pin and render.
+  assert.deepStrictEqual(Object.keys(delta.surfaces).sort(), ['agents', 'configuration', 'skills']);
+  assert.deepStrictEqual([...Object.keys(delta.surfaces), ...delta.unchanged_surfaces].sort(), golden.surfaces.map(row => row.source_id).sort());
+  for (const row of golden.surfaces) {
+    const raw = surfaceHash(artifacts, row.source_id, true);
+    assert.strictEqual(row.sha256, raw, `active pin ${row.source_id} is the measured render`);
+    const declared = deltaRow(delta, 'surfaces', row.source_id);
+    if (!declared) {
+      assert.strictEqual(row.sha256, T06_ATTRIBUTED_PINS[row.source_id], `${row.source_id} is byte-identical to its pre-#341 pin`);
+      continue;
+    }
+    assert.strictEqual(declared.after, raw, `${row.source_id}: delta after is the measured raw render`);
+    assert.strictEqual(surfaceHash(artifacts, row.source_id, false), attributedNow('surfaces', row.source_id, T06_ATTRIBUTED_PINS[row.source_id]),
+      `${row.source_id}: measured attributed after, before is the T06 value`);
+    assert.notStrictEqual(declared.before, declared.after, `${row.source_id} really moved`);
+    assert(pinReadme.includes(declared.before) && pinReadme.includes(declared.after), `${row.source_id} before/after documented`);
+    for (const member of declared.members) {
+      assert(delta.declared_paths.includes(member), `${member} is a declared #341 path`);
+      assert(artifacts.some(item => item.source_id === row.source_id && item.source === member), `${member} renders into ${row.source_id}`);
+    }
+  }
+  for (const historical of before.historical_goldens) assert.strictEqual(hash(fs.readFileSync(path.join(root, historical.path))), historical.sha256, historical.path);
+
+  // Files: before is the capture (attributed for the T06 skills), after is the measured current bytes.
+  const captured = new Map(before.sources.map(row => [row.path, row.sha256]));
+  const s02Allowed = ['skills/forge-auto/SKILL.md', 'skills/forge-next/SKILL.md'];
+  assert.deepStrictEqual(Object.keys(delta.files).sort(), [...delta.declared_paths].sort());
+  for (const [file, row] of Object.entries(delta.files)) {
+    assert.strictEqual(hash(fs.readFileSync(path.join(root, file))), row.after, `${file}: after is the measured raw bytes`);
+    if (captured.has(file) && !s02Allowed.includes(file)) assert.strictEqual(captured.get(file), row.attributed_before || row.before, `${file}: before is the capture`);
+    if (row.attributed_after) assert.strictEqual(hash(attributedBytes(file)), row.attributed_after, `${file}: measured attributed after`);
+  }
+  assert.strictEqual(delta.files['skills/forge-task/SKILL.md'].attributed_before, T06_ATTRIBUTED_TASK_SHA);
+  assert.strictEqual(delta.files['skills/forge-next/SKILL.md'].attributed_before, T06_ATTRIBUTED_NEXT_SHA);
+
+  // Samples: exactly the four actual nodes, citing the measured raw bytes, documented before/after.
+  assert.strictEqual(delta.samples.file, before.samples.file);
+  assert.deepStrictEqual(delta.samples.nodes.map(node => node.pointer).sort(), T06_SAMPLE_SOURCES.flatMap(source => source.pointers).sort());
+  for (const node of delta.samples.nodes) {
+    assert.strictEqual(atPointer(samples, node.pointer).source.sha256, node.after, `${node.pointer} cites the measured after`);
+    assert.strictEqual(node.after, delta.files[node.file].after, `${node.pointer}: after is the raw ${node.file}`);
+    assert.strictEqual(node.before, delta.files[node.file].before, `${node.pointer}: before is the base raw ${node.file}`);
+    assert(sampleReadme.includes(node.before) && sampleReadme.includes(node.after), `${node.pointer} documented`);
+  }
+
+  // The real state passes every layered historical check.
+  checkPins({ artifacts }); checkSamples(); checkRegistry();
+
+  // Negative fixtures: edits outside the delta, wrong or undeclared pins and undocumented re-pins are refused.
+  const refused = (label, fn) => assert.throws(fn, error => error instanceof assert.AssertionError, `${label} must be refused`);
+  const variant = mutate => { const copy = JSON.parse(JSON.stringify(delta)); mutate(copy); return copy; };
+  const readRaw = rel => fs.readFileSync(path.join(root, rel));
+  const edited = target => rel => (rel === target ? Buffer.concat([readRaw(rel), Buffer.from('\nedit outside the measured delta\n')]) : readRaw(rel));
+  const wrong = hash('not a measured #341 value');
+  refused('captured source edit outside the delta', () => checkPins({ artifacts, readSource: edited('commands/forge.md') }));
+  refused('declared path edited after its measurement', () => checkPins({ artifacts, readSource: edited('agents/forge-reviewer.md') }));
+  refused('untouched surface edit', () => checkPins({ artifacts: artifacts.map(item => item.source_id === 'hooks' ? { ...item, content: `${item.content}\n// edit\n` } : item) }));
+  refused('wrong active pin', () => checkPins({ artifacts, golden: { ...golden, surfaces: golden.surfaces.map(row => row.source_id === 'agents' ? { ...row, sha256: wrong } : row) },
+    pinReadme: `${pinReadme}\n${wrong}\n` }));
+  refused('bad delta before pin', () => checkPins({ artifacts, delta: variant(copy => { copy.surfaces.configuration.before = wrong; }) }));
+  refused('bad delta file before', () => checkPins({ artifacts, delta: variant(copy => { copy.files['forge-prefs.schema.json'].before = wrong; }) }));
+  refused('undeclared re-pin (surface missing from the delta)', () => checkPins({ artifacts, delta: variant(copy => { delete copy.surfaces.configuration; }) }));
+  refused('extra surface claimed by the delta', () => checkPins({ artifacts, delta: variant(copy => { copy.surfaces.hooks = { before: T06_ATTRIBUTED_PINS.hooks, after: wrong }; }) }));
+  refused('undocumented re-pin', () => checkPins({ artifacts, pinReadme: pinReadme.split(delta.surfaces.configuration.after).join('') }));
+  refused('wrong sample after', () => checkSamples({ delta: variant(copy => { copy.samples.nodes[0].after = wrong; }) }));
+  refused('undocumented sample re-pin', () => checkSamples({ sampleReadme: sampleReadme.split(delta.files['skills/forge-task/SKILL.md'].after).join('') }));
+  refused('registry count changed', () => checkRegistry({ delta: variant(copy => { copy.registry.count = 249; }) }));
+  refused('fabricated registry drift', () => checkRegistry({ delta: variant(copy => { copy.registry.drifted_rows = [{ after_id: before.dispatch_registry.rows[0].id }]; }) }));
+  console.log('note - #341 distribution only: agents, skills and configuration re-pinned to measured values; client execution, CI, installation and human acceptance remain unknown.');
 });
 
 for (const temp of temps) fs.rmSync(temp, { recursive: true, force: true });

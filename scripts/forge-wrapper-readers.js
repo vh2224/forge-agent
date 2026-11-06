@@ -203,6 +203,13 @@ const WRAPPER_DIR_READERS = Object.freeze([
     verdict: 'safe-by-construction',
     why: 'The specific lease directory and hash.json filename filter never enumerate the milestone wrapper root; invalid or symlinked lease records still refuse.',
   },
+  {
+    file: 'forge-review-policy.js',
+    dirs: Object.freeze(['.gsd/milestones']),
+    evidence: 'forge-review-policy.js:slicesOf joins .gsd/milestones/<validated caller milestone>/slices before its only readdirSync; names pass SLICE_ID_RE, with recorded slice events as the other source.',
+    verdict: 'safe-by-construction',
+    why: 'The specific validated milestone selects its slices directory before enumeration; the SLICE_ID_RE filter never enumerates the .gsd/milestones or .gsd/tasks wrapper roots or consumes grouped containers as units.',
+  },
 ].map(Object.freeze));
 
 function unlearnedReaders() {

@@ -876,7 +876,7 @@ const challengeSchema = {
   type: 'object', required: ['objections'], additionalProperties: false,
   properties: { objections: { type: 'array', items: {
     type: 'object',
-    required: ['id', 'path_line', 'claim', 'suggested_fix', 'challenge', 'severity'],
+    required: ['id', 'path_line', 'claim', 'suggested_fix', 'challenge', 'severity', 'reachable', 'reproduced', 'in_scope'],
     additionalProperties: false,
     properties: {
       id: { type: 'string', description: 'Stable id R1, R2, ... severity-then-order' },
@@ -884,7 +884,10 @@ const challengeSchema = {
       claim: { type: 'string', description: 'Full text of the issue' },
       suggested_fix: { type: 'string' },
       challenge: { type: 'string', description: 'The one question that decides whether this is real' },
-      severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] }
+      severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
+      reachable: { type: 'string', enum: ['yes', 'no', 'unknown'], description: 'Reachable in normal use; theoretical is no' },
+      reproduced: { type: 'string', enum: ['yes', 'no', 'unknown'], description: 'Actually reproduced; recorded only' },
+      in_scope: { type: 'string', enum: ['yes', 'no', 'unknown'], description: 'Inside the scope of the reviewed change' }
     } } } }
 }
 
@@ -902,7 +905,8 @@ if (challenge.objections.length === 0) return { outcome: 'ok', no_flags: true, i
 
 const objText = challenge.objections.map(function (o) {
   return o.id + ' `' + o.path_line + '` [' + o.severity + '] — ' + o.claim +
-    ' — suggested fix: ' + o.suggested_fix + ' — challenge: ' + o.challenge
+    ' — suggested fix: ' + o.suggested_fix + ' — challenge: ' + o.challenge +
+    ' — reachable: ' + o.reachable + ' — reproduced: ' + o.reproduced + ' — in_scope: ' + o.in_scope
 }).join('\n')
 
 // inline por necessidade — o sandbox do Workflow não tem require/fs; Section 52 guarda o sync com shared/schemas/*.json
@@ -910,11 +914,13 @@ const verdictSchema = function (allowed) {
   return {
     type: 'object', required: ['verdicts'], additionalProperties: false,
     properties: { verdicts: { type: 'array', items: {
-      type: 'object', required: ['id', 'verdict', 'rationale'], additionalProperties: false,
+      type: 'object', required: ['id', 'verdict', 'rationale', 'reachable', 'in_scope'], additionalProperties: false,
       properties: {
         id: { type: 'string' },
         verdict: { type: 'string', enum: allowed },
-        rationale: { type: 'string' }
+        rationale: { type: 'string' },
+        reachable: { type: 'string', enum: ['yes', 'no', 'unknown'], description: "This leg's assessment of reachability in normal use" },
+        in_scope: { type: 'string', enum: ['yes', 'no', 'unknown'], description: "This leg's assessment of scope" }
       } } } }
   }
 }
@@ -971,6 +977,7 @@ for (let i = 0; i < n; i++) {
 }
 
 // Step 5 truth table — deterministic, in-script
+// Dual-verdict fields are carried verbatim; a placeholder leg did not report (no contest).
 const items = challenge.objections.map(function (o) {
   const d = defById[o.id], r = rebById[o.id]
   let resolution
@@ -979,8 +986,9 @@ const items = challenge.objections.map(function (o) {
   else resolution = 'open'   // OPEN: rebuttal maintained (advocate refuted/open) — ver truth table Step 5
   return { id: o.id, path_line: o.path_line, severity: o.severity, claim: o.claim,
     suggested_fix: o.suggested_fix, challenge: o.challenge,
-    defense: { verdict: d.verdict, rationale: d.rationale },
-    rebuttal: { verdict: r.verdict, rationale: r.rationale }, resolution }
+    reachable: o.reachable, reproduced: o.reproduced, in_scope: o.in_scope,
+    defense: { verdict: d.verdict, rationale: d.rationale, reachable: d.reachable, in_scope: d.in_scope },
+    rebuttal: { verdict: r.verdict, rationale: r.rationale, reachable: r.reachable, in_scope: r.in_scope }, resolution }
 })
 return { outcome: 'ok', no_flags: false, items, warnings: defWarnings.length ? defWarnings : undefined }
 ```
@@ -993,12 +1001,19 @@ return { outcome: 'ok', no_flags: false, items, warnings: defWarnings.length ? d
   no_flags?: boolean,       // true when objections array was empty
   items: [{
     id, path_line, severity, claim, suggested_fix, challenge,
-    defense:  { verdict: 'refuted'|'conceded'|'open',     rationale },
-    rebuttal: { verdict: 'maintained'|'withdrawn'|'conceded', rationale },
+    reachable, reproduced, in_scope,   // challenger: 'yes'|'no'|'unknown'
+    defense:  { verdict: 'refuted'|'conceded'|'open',     rationale, reachable?, in_scope? },
+    rebuttal: { verdict: 'maintained'|'withdrawn'|'conceded', rationale, reachable?, in_scope? },
     resolution: 'conceded' | 'resolved' | 'open'
   }]
 }
 ```
+
+Os campos do veredito duplo viajam sem interpretação: `reachable`, `reproduced` e
+`in_scope` do challenger, e `reachable`/`in_scope` da defesa e da réplica como
+contestação (ausentes quando a perna não respondeu e o script usou o placeholder).
+O orquestrador monta o `verdict` de cada item conforme § Política executável de
+review-fix e nunca decide "corrigir agora" pela prosa.
 
 **Render by the orchestrator** (same Step 6 template):
 - `no_flags: true` → write a clean `{S##}-REVIEW.md` ("Reviewer found nothing to challenge.").
@@ -1028,13 +1043,15 @@ The artifact is the **dialogue**, not a flag dump. Auditable, durable with the m
 - **Objeção:** <claim> — _<challenge question>_
 - **Defesa:** <advocate rationale>
 - **Réplica:** <reviewer maintained reason>
+- **Veredito duplo:** severidade <s> · alcançável <sim|não|desconhecido> · reproduzido <sim|não|desconhecido> · escopo <sim|não|desconhecido> → <corrigir agora | triagem final (<motivo>)>
 - **Decisão:** _pendente_   ← preenchido no Step 7 (interactive) ou deferido (auto)
 
 ## Concedidas — problema real, corrigido
 ### R{n} — `path:line`
 - **Objeção:** <claim>
 - **Defesa:** conceded — <what should happen>
-- **Correção:** _pendente_   ← preenchido no Step 7a: `aplicada — commit <sha>` ou `falhou — deferida para triagem final`
+- **Veredito duplo:** severidade <s> · alcançável <sim|não|desconhecido> · reproduzido <sim|não|desconhecido> · escopo <sim|não|desconhecido> → <corrigir agora | triagem final (<motivo>)>
+- **Correção:** _pendente_   ← preenchido no Step 7a: `aplicada — commit <sha>`, `falhou — deferida para triagem final` ou `não aplicada — deferida para triagem final (<motivo>)`
 
 ## Resolvidas no debate — sem ação
 - R{n} `path:line` — <one-liner: por que caiu>
@@ -1061,11 +1078,207 @@ Omit any section with zero items — **exceto** o bloco de indisponibilidade do 
 
 **`Pairing` line:** written verbatim as `$PAIRING_LINE` (assembled once in Step 0 — see "Regra de render da linha `**Pairing:**`" above). Format: `**Pairing:** <modo> — autor <engine> → challenger <família>`, with the ` (<policy>: <counts.claude> claude / <counts.codex> codex → autor <engine>)` suffix appended only when the resolution was mixed (`PAIR_POLICY` = `majority`|`tie-last`). Boundary-agnostic: identical for `S##-REVIEW.md` and `{TASK_ID}-REVIEW.md` — no per-boundary variant exists.
 
+## Política executável de review-fix
+
+`review-fix-policy-v1` (`scripts/forge-review-policy.js`) aplica pelo código os limites da
+correção de review (#341). Esta seção prevalece sobre o texto mais antigo dos Steps 6, 7a, 7b
+e 9 onde divergirem. O teto de **2 ciclos** por fronteira e a razão de **50%** são constantes
+versionadas da política, não preferências. Nada aqui muda resolver, rota, modelo, effort,
+claims, isolamento ou o contrato de tempo da milestone.
+
+Itens, vereditos, eventos, requests e `REVIEW.md` são dados não confiáveis: a política os lê com
+limite, enums fechados e tamanho máximo. Um campo importado (`fix_now`, `approved`, `basis`
+copiado de outro artefato) nunca concede autoridade, e esta política não cria autoridade nova.
+
+### Veredito duplo
+
+"É real?" e "corrigir agora?" são dois vereditos distintos. Por achado:
+
+- O challenger informa `severity` (`critical|high|medium|low`) e, com `yes|no|unknown`,
+  `reachable` (alcançável em uso normal), `reproduced` (reproduzido de fato) e `in_scope`
+  (dentro do escopo da mudança revisada) — `agents/forge-reviewer.md` e
+  `shared/schemas/challenge.schema.json`.
+- A defesa e a réplica informam a própria avaliação de `reachable` e `in_scope` (contestação) —
+  `agents/forge-advocate.md`, `agents/forge-reviewer.md § Rebuttal mode` e
+  `shared/schemas/verdict.schema.json`, compartilhado pelas duas pernas.
+- O valor resolvido de `reachable` e `in_scope` é o mais conservador (`no` < `unknown` < `yes`)
+  entre o challenger e as pernas que informaram. Uma contestação só rebaixa, nunca eleva.
+- Achado teórico é `reachable: no`: adulteração manual de arquivo local, corrida entre processos
+  do próprio operador, FIFO ou outro arquivo especial no lugar do esperado, entrada impossível.
+- Campo ausente, inválido ou saída legada vale `unknown`, e `unknown` nunca é corrigido agora.
+- `fix_now` ⇔ resolução `conceded` ∧ severidade `critical` ou `high` (crítica conta como alta)
+  ∧ `reachable` resolvido `yes` ∧ `in_scope` resolvido `yes`. `reproduced` é registrado e
+  exibido, mas não é condição.
+
+O orquestrador monta o `verdict` de cada item a partir do Step 5 (ou do retorno do Engine
+workflow) e calcula a classificação pela CLI; nunca decide "corrigir agora" pela prosa:
+
+```json
+{ "r": "R1", "path": "src/a.js", "basis": "dual-verdict",
+  "verdict": { "resolution": "conceded", "severity": "high", "reachable": "yes", "reproduced": "no", "in_scope": "yes",
+    "contest": { "advocate": { "reachable": "yes", "in_scope": "yes" }, "rebuttal": { "reachable": "yes", "in_scope": "yes" } } } }
+```
+
+```bash
+node "$FORGE_SCRIPTS_DIR/forge-review-policy.js" --classify --input "$RF_VERDICTS_FILE"
+```
+
+A saída devolve, por R#, `fix_now`, `admissible`, os valores resolvidos e os motivos fechados
+(`not-conceded`, `resolution-unknown`, `severity-below-high`, `severity-unknown`,
+`not-reachable`, `reachable-unknown`, `out-of-scope`, `scope-unknown`). O Step 6 escreve a linha
+`**Veredito duplo:**` com esses valores. `verdict` e `basis` viajam nos itens do request, mas
+nunca entram na forma normalizada do item, no brief nem na identidade do review-fix: receipts
+e replays anteriores continuam válidos.
+
+### Ciclo agrupado
+
+Um ciclo é **um único despacho agrupado** e admitido. Antes do despacho:
+
+1. Faça antes as perguntas do Step 7b (interactive, `pause` ou `gate`) para que as respostas
+   `Refatorar agora` entrem no mesmo ciclo. Com `defer`, não há resposta e o item segue para o
+   Step 9.
+2. Reúna num único request os concedidos com `fix_now: true` (`basis: dual-verdict`) e os itens
+   `Refatorar agora` (`basis: operator-decision`). Essa base é declarada pelo chamador e
+   registrada no evento: dispensa o filtro corrigir-agora, mas conta no ciclo e respeita teto e
+   orçamento.
+3. Concedido que não é fix-now não entra no request. Publique a deferência dele em vez de
+   despachá-lo:
+
+   ```bash
+   node "$FORGE_SCRIPTS_DIR/forge-review-fix.js" --defer "$RF_DEFER_REQUEST"
+   ```
+
+   `$RF_DEFER_REQUEST` é o request nativo da mesma fronteira (`cwd`, `contextRoot`, ids,
+   `reviewFix.items` com os itens deferidos) mais `deferral: {reason_code, detail?, items?,
+   review_snapshot?}`, com `reason_code` `review-fix-not-fix-now` e os motivos como detalhe de
+   uma linha. O adaptador grava, atômica e idempotentemente, só nos `REVIEW.md` derivados pelo
+   pai: `**Correção:** não aplicada — deferida para triagem final (<motivo>)`. Nunca grava
+   "aplicada" nem "falhou" para esses itens.
+4. Use um único `dispatchId` por ciclo, gerado uma vez e reutilizado no replay do mesmo
+   request. O request de `--prepare-native` exige `dispatchId`; o do sidecar já o carrega.
+5. O claim gate do Step 7a é construído só com os itens do request do ciclo.
+
+### Admissão no último portão
+
+A admissão roda dentro dos consumidores reais, depois dos gates de runtime, claim e validação
+da preparação, e antes de qualquer lançamento:
+
+- **Sidecar** (claude e codex): o adaptador da unidade admite depois da validação do request e
+  das checagens de permissão e selo, e antes do reset, do receipt, dos eventos e do provider.
+- **Nativo:** `--prepare-native` admite antes do snapshot do `REVIEW.md` e de qualquer captura
+  VCS, build ou invocação; a decisão fica em `nativePreparation.admission`. Nas fronteiras
+  `slice` e `task`, `--accept-native` só publica com decisão admitida registrada para o
+  despacho; sem ela recusa `review-fix-admission-required` e não publica nada.
+- **Outro caminho de lançamento** sem esses consumidores chama a admissão pública antes de
+  lançar e não lança na recusa: `forge-review-policy.js --admit --request <request nativo>`
+  (exit 0 admitido, 3 recusado, 2 uso; um JSON no stdout).
+
+Ordem da decisão:
+
+1. Entrada ou histórico ilegível ou inválido → `review-fix-policy-invalid` (falha fechada).
+2. Replay da mesma identidade de despacho → devolve a decisão registrada, sem evento novo.
+3. Recovery (`reviewFixRecoveryOf` do sucessor) → devolve a decisão do pai, sem ciclo novo.
+4. `milestone-triage` → admitida fora do filtro e do teto (`counted:false`), registrada.
+5. Ciclos consumidos ≥ 2 → `review-fix-cycle-limit`.
+6. Orçamento medido com razão ≥ 50% → `review-fix-budget-exhausted`.
+7. Item `dual-verdict` que não é fix-now → `review-fix-not-fix-now` com `refused_items`. O
+   request inteiro é recusado: reconstrua-o só com os itens admissíveis e repita o claim gate.
+8. Admitida: ciclo `n/2`.
+
+Contagem e orçamento:
+
+- Um ciclo é um despacho admitido e conta mesmo que falhe depois. Recusa não conta. Replay,
+  recovery e o accept da mesma preparação não criam ciclo. Despacho `review-fix` legado da
+  mesma fronteira, sem evento de admissão, conta como ciclo consumido.
+- A chave é o owner físico (`WORKING_DIR`, nunca `CODE_DIR`) mais a fronteira: `slice` é
+  milestone + slice, `task` é o id da task avulsa. A mesma `S03` de outra milestone e a task
+  avulsa têm contagens próprias.
+- `execute` é a soma dos intervalos fechados de `execute-task` da slice, atribuídos pelo registro
+  do controller; `review-fix` é a soma início → terminal dos despachos da fronteira. Intervalo
+  aberto, ambíguo, negativo ou não atribuível, ou despacho sem terminal, torna o orçamento
+  `unknown`. Desconhecido nunca vira zero: nesse caso só o teto governa e a linha mostra
+  `desconhecido`. Na task avulsa o tempo de execute é sempre desconhecido.
+- Ciclo admitido nunca é interrompido pelo orçamento; o estouro aparece no status.
+
+Toda decisão, admitida ou recusada, gera um evento `review-fix-admission` no
+`.gsd/forge/events.jsonl` do owner, gravado pelo processo pai antes do receipt, do snapshot
+protegido e do provider; o worker nunca o grava. O evento não carrega caminho absoluto, claim
+nem texto de item.
+
+Recusa de admissão não é falha de provider nem indisponibilidade de revisor: sem retry, sem
+fallback para outro engine ou caminho, sem correção inline pelo orquestrador e sem outro worker.
+Os itens afetados recebem `**Correção:** não aplicada — deferida para triagem final (<código>)`
+e seguem o destino abaixo.
+
+Mostre ao operador, depois de cada decisão, a linha de status (somente leitura) e a recusa
+nomeada quando houver:
+
+```bash
+node "$FORGE_SCRIPTS_DIR/forge-review-policy.js" --status --cwd "$WORKING_DIR" --milestone "$RF_MILESTONE_ID" --slice "$RF_UNIT_ID"
+```
+
+Na task avulsa use `--task "$RF_UNIT_ID"` no lugar de `--milestone`/`--slice`. Repasse a linha
+verbatim: `⚖ Review <S##|TASK_ID>: ciclo <n>/2 · review-fix <X> / execute <Y> (<Z>% | desconhecido)`.
+
+### Verificação dirigida, sem nova revisão
+
+Depois do fix roda só a verificação dos itens corrigidos: os `verify_paths` de cada item, os
+comandos de verificação ligados aos itens e uma regressão dirigida ao que o fix tocou. Não há
+nova revisão dialética nem nova perna de challenge, defesa ou réplica sobre a correção.
+
+- Falha de verificação deixa o item não verificado (`**Correção:** falhou — deferida para
+  triagem final`). Ele só volta se o ciclo seguinte for admitido; senão vai para a triagem.
+- Achado ou regressão nova nascida do fix vai para a triagem final com a evidência, nunca para
+  um ciclo automático.
+
+### Destino dos achados
+
+Nenhum achado se perde e nenhum é declarado corrigido sem verificação:
+
+- **Slice:** o Step 9 coleta `**Correção:** não aplicada — deferida para triagem final
+  (<motivo>)` junto com os marcadores anteriores, inclusive itens recusados por teto ou
+  orçamento.
+- **Task avulsa** (sem Step 9): cada item deferido vira item por **§ Item capture**, source
+  `review/{TASK_ID}/{R#}`, status `inbox`, com o motivo e o veredito duplo no `body`.
+- **`milestone-triage`:** o Step 9 continua em um único despacho agrupado, fora do filtro
+  corrigir-agora e do teto por slice, e a decisão é registrada.
+
+### Fronteira de revisão
+
+Em milestone, a revisão dialética roda uma vez por slice, no `complete-slice`. Revisão por task
+dentro de milestone só roda com `review.milestone_task_review: true` (boolean, default `false`;
+só no schema de prefs — nenhuma preferência do operador é editada). A revisão da task avulsa
+(Step 5.5 de `forge-task`) não muda.
+
+O adaptador de revisão (contexto `--budget-owner`/`--budget-milestone`/`--budget-unit`) e a
+invocação nativa supervisionada (`milestoneTimeContext`) aplicam uma guarda antes do provider:
+
+- unidade diferente de `complete-slice/S##` → `review-per-task-in-milestone`, salvo o pref;
+- nova perna para slice já revisada (`{S##}-REVIEW.md` existente ou evento `review` da slice)
+  → `review-already-completed`. Retry da mesma revisão antes da conclusão continua permitido.
+
+A recusa sai com código 2 e `provider_called:false`, `stage`/`layer` `review-policy`, e grava em
+best-effort o evento `review-leg-refusal`. Roda depois da admissão de tempo: as recusas de tempo
+prevalecem e os códigos não se misturam. Não é indisponibilidade de revisor: sem retry, sem
+fallback para outro revisor ou família e sem `{S##}-REVIEW.md` limpo nem mínimo. Contexto de
+task (`--budget-task`) ou ausente não muda nada.
+
+**Limites declarados:** o Engine workflow e a réplica por `SendMessage` não têm esse seam
+pré-provider; perna sem contexto de milestone declarado também não tem a garantia. Isso é
+declarado, não suposto, e o teto da correção continua limitando o custo. `basis:
+operator-decision` e `reviewFixRecoveryOf` são declarados pelo chamador, sem atestação nova; o
+risco residual fica limitado pela identidade da correção, pelo teto e pelo evento.
+
 ## Step 7a — Conceded fix dispatch (both modes)
 
 A CONCEDED objection is a problem **both agents agree is real** — the confrontation already settled it. Recording it for a human to maybe-read later defeats the purpose of the debate. Fix it now, while the boundary diff is still intact (run branch `forge/{run}` unmerged / task uncommitted scope).
 
 Skip if `fixConceded == false` (pref opt-out → conceded items fall through to Step 7b posture as before) or there are zero CONCEDED items.
+
+Fix now applies only to what **§ Política executável de review-fix** admits: one grouped request
+per cycle with the fix-now conceded items plus the `Refatorar agora` answers, at most 2 cycles per
+boundary, within the measured 50% budget. Every other conceded item is deferred with
+`--defer` and reaches the final triage; it is never dispatched here.
 
 ### Runtime resolver gate (before the claim gate and fixer launch)
 
@@ -1168,8 +1381,10 @@ proceeds to `complete-slice` regardless, with the affected items marked as above
 After the runtime/isolation/claim gates return `proceed`, write the parent-owned
 `RF_NATIVE_REQUEST` outside CODE_DIR with `cwd: CODE_DIR`, `contextRoot: WORKING_DIR`,
 explicit `vcs` from `forge-vcs --detect`, the saved `route`, boundary task/slice/triage
-IDs, `constraints.auto_commit`, and `reviewFix: {boundary, decision: "proceed", items,
-claimPaths}`. Preserve each item's optional `verify_paths`. Run:
+IDs, the cycle's single `dispatchId` (required), `constraints.auto_commit`, and
+`reviewFix: {boundary, decision: "proceed", items, claimPaths}`. Preserve each item's
+optional `verify_paths`, `verdict` and `basis` (§ Política executável de review-fix);
+the preparation admits the cycle before any capture and a refusal stops here. Run:
 
 ```bash
 node "$FORGE_SCRIPTS_DIR/forge-review-fix.js" --prepare-native "$RF_NATIVE_REQUEST" > "$RF_NATIVE_PREPARATION"
@@ -1284,9 +1499,9 @@ engine.
    never as re-typed flags. `RF_BOUNDARY` is `slice`, `task` or `milestone-triage`; `RF_UNIT_ID` is
    `{S##}`, `{TASK_ID}` or `{M###}`; the milestone resolver context uses the milestone
    ID, while the adapter derives the distinct operational label `review-fix/{M###}-triage`.
-   `$ITEMS_JSON` holds the conceded items (`r`,
-   `path`/`path_line`, `claim`, `action`, `context`, plus `review_file` per item at the triage
-   boundary); `$RF_CLAIM_PATHS_FILE` holds exactly the `paths` the claim gate returned with `proceed`;
+   `$ITEMS_JSON` holds the cycle's grouped items (`r`,
+   `path`/`path_line`, `claim`, `action`, `context`, `verdict`/`basis` per § Política executável
+   de review-fix, plus `review_file` per item at the triage boundary); `$RF_CLAIM_PATHS_FILE` holds exactly the `paths` the claim gate returned with `proceed`;
    `RF_AUTO_COMMIT` is the operator's `auto_commit`; `RF_WRITABLE_ROOTS_JSON` is set only for
    multi-repo attribution. Run it in the background with the polling, heartbeat and orphan detection
    of `shared/forge-bidirectional-sidecar.md § Execução em background` and relay every
@@ -1314,6 +1529,12 @@ RF_SIDECAR_EXIT=$?
    the items stay/are marked `falhou — deferida para triagem final` and join Step 9. Never blocks the
    slice, never relaunches: a `ready` receipt is replayed by re-running the same request (zero provider
    turns); `failed` returns the recorded failure; `started` refuses with `sidecar-attempt-interrupted`.
+4. An admission refusal (`review-fix-cycle-limit`, `review-fix-budget-exhausted`, `review-fix-not-fix-now`,
+   `review-fix-policy-invalid`) exits non-zero before any receipt or provider call, with
+   `provider_called:false` and stage `review-fix-admission`. The adapter already published
+   `não aplicada — deferida para triagem final (<código>)` on the affected items; they join Step 9 (or
+   become items at the task boundary). It is not a provider failure: no retry, no other engine, no
+   inline fix. For `review-fix-not-fix-now`, rebuild the request with the admissible items only.
 
 The same branch serves Step 7b (`Refatorar agora`) and Step 9 with boundary `milestone-triage`
 (`RF_UNIT_ID={M###}`, one `review_file` per item) and the standalone task review with
@@ -1335,14 +1556,18 @@ command list from that validated policy. Legacy requests that declare no
 verification remain compatible but gain no shell permission; the minimal request
 example above alone does not establish verification readiness. Managed denies
 remain authoritative even with a valid policy.
-- **No re-review.** The fix commit is NOT re-run through the reviewer (deliberate — prevents review ping-pong). The fix lands on the run branch `forge/{run}` and reaches the default branch only when the operator integrates that branch — there is no `complete-slice` merge; no unit of the loop integrates.
+- **Verificação dirigida, sem nova revisão.** The fix is verified, never reviewed again (deliberate — prevents review ping-pong): only the fixed items' `verify_paths`, the verification commands bound to those items and a regression check aimed at what the fix touched (§ Política executável de review-fix → Verificação dirigida). A failed check leaves the item unverified (`falhou — deferida para triagem final`); a new finding or regression born from the fix goes to the final triage with its evidence. The fix lands on the run branch `forge/{run}` and reaches the default branch only when the operator integrates that branch — there is no `complete-slice` merge; no unit of the loop integrates.
 
 ## Step 7b — Posture (handle OPEN items)
+
+Ask these questions **before** the Step 7a cycle is dispatched: every `Refatorar agora` answer joins
+the cycle's single grouped request with `basis: operator-decision` (§ Política executável de
+review-fix). Neither an answer nor the gate ever launches a review-fix of its own per item.
 
 **`MODE == interactive` (forge-next / forge-task):**
 - For each **OPEN** item, ask the human via `AskUserQuestion` — one question per item (or batched up to 4), header `Review`, options:
   - `Manter abordagem atual` — accept as-is (reviewer's concern noted, not acted on)
-  - `Refatorar agora` — dispatch a `review-fix` unit (same shape as Step 7a) for the accepted items
+  - `Refatorar agora` — add the item to the cycle's grouped `review-fix` request (Step 7a shape, `basis: operator-decision`); it still counts toward the 2-cycle cap and the budget
   - `Criar follow-up` — create an item per **§ Item capture** (source `review/{S##}/{R#}` or `review/{TASK_ID}/{R#}`, status `inbox`, `file`/`sha` from the finding, `body` = objeção + defesa one-liners) and append the pointer line to `.gsd/KNOWLEDGE.md § Review follow-ups` (create the section if missing)
   Write the chosen decision into the `**Decisão:**` line of that R# in `{S##}-REVIEW.md`; when the choice was `Criar follow-up`, the line records the item ID: `**Decisão:** follow-up → {I-id} — {title}`.
 - **CONCEDED** items with `fixConceded == false`: list them and ask once whether to address now (follow-up task) or record-and-continue. Default record-and-continue.
@@ -1360,7 +1585,7 @@ remain authoritative even with a valid policy.
     --question "$OBJECTION_SUMMARY" \
     --context "$OBJECTION_DETAIL" \
     --option "keep:Manter abordagem atual:Objeção registrada, sem ação" \
-    --option "fix:Refatorar agora:Despacha um review-fix para este item" \
+    --option "fix:Refatorar agora:Inclui o item no review-fix agrupado do ciclo" \
     --option "followup:Criar follow-up:Cria item no backlog (.gsd/items/) e segue" \
     --default followup \
     --timeout "${GATE_TIMEOUT_MS:-1800000}" \
@@ -1369,7 +1594,7 @@ remain authoritative even with a valid policy.
   SOURCE=$(printf '%s' "$RES" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).source||'')}catch{console.log('')}})")
   ```
 
-  - `fix` → dispatch a `review-fix` unit for that item (same shape as Step 7a).
+  - `fix` → add the item to the cycle's single grouped request (Step 7a shape, `basis: operator-decision`); never a per-item dispatch. A refused admission defers it to Step 9.
   - `keep` → write the decision into the `**Decisão:**` line, no item created.
   - `followup` (chosen OR `source == timeout-default`) → create an item per **§ Item capture** (source `review/{S##}/{R#}` or `review/{TASK_ID}/{R#}`, status `inbox`); when `source == timeout-default`, the item `body` notes `via gate — expirou`. **Nobody answering must never silently close an item — the timeout path still captures.**
 
@@ -1482,11 +1707,12 @@ Consumer: `forge-auto` / `forge-next`, when the derived unit is `complete-milest
 1. **Collect.** Scan every `{S##}-REVIEW.md` in `.gsd/milestones/{M###}/slices/*/` for items still pending:
    - `**Decisão:** deferido → triagem no fim da milestone` (OPEN, deferred by Step 7b)
    - `**Correção:** falhou — deferida para triagem final` (CONCEDED whose fix failed)
+   - `**Correção:** não aplicada — deferida para triagem final (<motivo>)` (CONCEDED not fixed on the spot: not fix-now by the dual verdict, or refused by the cycle cap, the budget or the policy — § Política executável de review-fix)
    - Legacy `**Decisão:** deferido (auto-mode)` (pre-triage artifacts — still honored)
 2. **If zero pending items** → skip silently, dispatch `complete-milestone` normally.
-3. **Digest.** Print a digest table to the user — one row per item: `slice · R# · path:line · objeção (one-liner) · status (aberta | concedida-sem-fix)`.
+3. **Digest.** Print a digest table to the user — one row per item: `slice · R# · path:line · objeção (one-liner) · status (aberta | concedida-sem-fix | concedida-deferida (<motivo>))`.
 4. **Triage.** For each item (batched up to 4 per `AskUserQuestion`, header `Review M###`): `Manter abordagem atual` / `Refatorar agora` / `Criar follow-up`.
-5. **Act.** All `Refatorar agora` items → ONE `review-fix` dispatch (Step 7a shape, `UNIT: review-fix/{M###}-triage`, items grouped in a single prompt; the slices have NOT been integrated at this point — the fix commits on the still-checked-out `forge/{run}` branch). On throw → mark those items `**Decisão:** refatorar — dispatch falhou, virou follow-up` and continue.
+5. **Act.** All `Refatorar agora` items → ONE `review-fix` dispatch (Step 7a shape, `UNIT: review-fix/{M###}-triage`, items grouped in a single prompt; the slices have NOT been integrated at this point — the fix commits on the still-checked-out `forge/{run}` branch). This is the operator's explicit decision: the `milestone-triage` boundary stays outside the fix-now filter and the per-slice cycle cap, is admitted with `counted:false` and recorded (§ Política executável de review-fix); after it, only directed verification runs. On throw → mark those items `**Decisão:** refatorar — dispatch falhou, virou follow-up` and continue.
 
    **The runtime resolver gate runs here first.** Reuse Step 7a's full
    `review-fix` resolver block with canonical `--host-runtime claude`; consume
@@ -1525,3 +1751,4 @@ When `style == flags`: run Step 2 only — routed by `challenger` (so `codex`/`g
 - `shared/forge-plan-gate.md § Deferir resolution` — the sibling consumer of **§ Item capture** for plan-gate deferrals (does not restate the invocation)
 - Artifact: `.gsd/milestones/{M###}/slices/{S##}/{S##}-REVIEW.md` (durable with the milestone; cleaned by `milestone_cleanup`)
 - Artifact: `.gsd/items/*.md` (work items created by this spec; durable — never cleaned by `milestone_cleanup`)
+- `scripts/forge-review-policy.js` — `review-fix-policy-v1`: dual-verdict classification (`--classify`), public admission (`--admit`), read-only status line (`--status`) and the pre-provider review-leg guard used by **§ Política executável de review-fix**

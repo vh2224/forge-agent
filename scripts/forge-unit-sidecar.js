@@ -2414,9 +2414,10 @@ async function runUnitSidecarCore(request, runtime, identity) {
     : r.unitType === 'execute-task' && !loc.execution ? `${loc.slice}/${r.sliceId}-PLAN.md` : null;
   const bookkeepingText = bookkeeping && fs.readFileSync(target(root, bookkeeping), 'utf8');
   if (bookkeeping) before[bookkeeping] = hash(bookkeepingText);
-  // Review-fix: boundary and claim are validated, then the surgical-reset state
-  // is captured, all BEFORE the started receipt. A refusal here leaves no
-  // receipt and never reaches a provider.
+  // Review-fix: boundary and claim are validated here (write-free); the policy
+  // admission and then the surgical-reset state follow the permission checks,
+  // all BEFORE the started receipt. A refusal leaves no receipt and never
+  // reaches a provider.
   const fix = transport.mode === 'fix' ? prepareReviewFix(r, loc, { cwd, root, resultFile, route, dispatchId }) : null;
   const executionApi = loc.execution ? require('./forge-task-execution') : null;
   const execution = executionApi ? executionApi.prepare({ ...r, ...(nativeBinding ? { nativeInvocation: nativeBinding } : {}) }, root, cwd) : null;
@@ -2465,6 +2466,11 @@ async function runUnitSidecarCore(request, runtime, identity) {
   // Legacy requests without a root contract gain no shell permission.
   const permissionPolicy = permissionRequested && verificationSeal
     ? require('./forge-claude-permissions').createPolicy({ seal: verificationSeal, contract: r.execution_contract, identity: verificationIdentity, cwd }) : null;
+  // Review-fix policy admission (last gate), then the reset state.
+  if (fix) {
+    admitReviewFix(r, loc, fix, { root, dispatchId });
+    createReviewFixResetState(fix, { dispatchId });
+  }
   const startedAt = new Date().toISOString();
   // Exclusive creation arbitrates concurrent invocations of the same attempt.
   fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'started', fingerprint, dispatch_id: dispatchId, before, started_at: startedAt,
@@ -3035,8 +3041,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
   }
 }
 
-// Validate the review-fix request against the claim the parent can re-derive,
-// then capture the surgical-reset state beside the result channel.
+// Validate the review-fix request against the claim the parent can re-derive.
+// Write-free: the surgical-reset state is created only after the admission.
 function prepareReviewFix(request, loc, context) {
   const reviewFix = require('./forge-review-fix');
   const spec = request.reviewFix;
@@ -3058,7 +3064,6 @@ function prepareReviewFix(request, loc, context) {
   xllm.validateResultFileTarget(stateFile, context.root);
   const writable = Array.isArray(request.writableRoots) ? request.writableRoots.map(root => fs.realpathSync(root)) : [];
   const repoRoots = [context.cwd, ...writable];
-  require('./forge-surgical-reset').initState(stateFile, { cwd: context.cwd, attempt: context.dispatchId, repoRoots });
   const brief = reviewFix.buildBrief({ boundary: loc.reviewFix.boundary, unitLabel: loc.reviewFix.unitLabel,
     items, claimPaths: supplied, route: context.route });
   // REVIEW.md bytes before the provider turn: publication (and any replay)
@@ -3069,6 +3074,28 @@ function prepareReviewFix(request, loc, context) {
     catch { fail('review-fix-review-item-missing', `${reviewFile} is not readable; no worker was launched.`); }
   }
   return { items, brief, stateFile, repoRoots, cwd: context.cwd, reviewSnapshot };
+}
+
+// review-fix-policy-v1 admission: the last gate after validation and the
+// permission/seal checks, before the reset state, the started receipt, the
+// events and the provider. Replay and recovery return the recorded decision
+// without a new cycle. A refusal leaves no receipt: the affected items get the
+// deferral line (snapshot guarded) and the error carries the named code.
+function admitReviewFix(request, loc, fix, context) {
+  const reviewFix = require('./forge-review-fix');
+  const decision = require('./forge-review-policy').admitCorrection({ owner: context.root,
+    ...reviewFix.admissionScope(request, loc.reviewFix.boundary), dispatch_id: context.dispatchId, brief: fix.brief,
+    items: request.reviewFix.items, ...(request.reviewFixRecoveryOf !== undefined ? { recovery_of: request.reviewFixRecoveryOf } : {}) });
+  if (decision.allowed) return decision;
+  throw reviewFix.correctionAdmissionError({
+    request, decision,
+    expectedHashes: fix.reviewSnapshot,
+  });
+}
+
+function createReviewFixResetState(fix, context) {
+  require('./forge-surgical-reset').initState(fix.stateFile, { cwd: fix.cwd, attempt: context.dispatchId, repoRoots: fix.repoRoots });
+  return fix;
 }
 
 function reviewFixItemsTotal(request) {
@@ -3350,7 +3377,10 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       const next = deliveryHelper ? finalRequest(route) : { ...executionRequest, recoveryStateFile: recovery.stateFile, route: ceiling
         ? { ...route, workers_timeout: ceiling.seconds, workers_timeout_source: ceiling.source } : route,
         dispatchId: recoveryDispatchId(request.dispatchId), resultFile: `${request.resultFile}.recovery-${crypto.randomUUID()}.json`,
-        ...(resume != null ? { claudeResume: resume.session, resumedFrom: resume.resumed_from } : {}) };
+        ...(resume != null ? { claudeResume: resume.session, resumedFrom: resume.resumed_from } : {}),
+        // The successor carries only its actual parent: the admission returns the
+        // parent's recorded decision for the same correction, never a new cycle.
+        ...(canonical.unitType === 'review-fix' ? { reviewFixRecoveryOf: request.dispatchId } : {}) };
       if (route.worker_mode === 'native') {
         if (deliveryHelper) {
           // The successor has a new dispatch: an auto-deferred one needs the

@@ -693,6 +693,12 @@ Review gate dialético antes de complete-slice (branch ainda não-mergeado): cha
 - **Default:** `true`
 - **Descrição:** true = objeções concedidas (ambos concordam que o problema é real) disparam um review-fix imediato pelo forge-executor na branch do run, ainda não integrada (sem re-review, evita ping-pong). false = concedidas apenas registradas.
 
+### `review.milestone_task_review`
+
+- **Tipo:** boolean
+- **Default:** `false`
+- **Descrição:** false = em milestone, a revisão dialética roda só uma vez por slice, no complete-slice; uma perna de revisão com contexto de milestone e unidade diferente de complete-slice/S## é recusada antes do provider com review-per-task-in-milestone. true = opt-in explícito que permite revisão por task dentro de milestone. A revisão da task avulsa (forge-task Step 5.5) não depende desta chave. Lida por scripts/forge-review-policy.js (assertReviewLeg).
+
 ### `review.challenger`
 
 - **Tipo:** string

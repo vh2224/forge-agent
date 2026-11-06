@@ -125,7 +125,7 @@ test('temporary Claude and Codex installs carry delivery helper, contract and op
   // Review-fix sidecar, model policy and review effort: the new helpers are part
   // of the installed inventory, their tests are not, and every host projection
   // carries the same executable review-fix sidecar branch.
-  for (const helper of ['forge-model-policy.js', 'forge-review-fix.js', 'forge-review-effort.js']) {
+  for (const helper of ['forge-model-policy.js', 'forge-review-fix.js', 'forge-review-effort.js', 'forge-review-policy.js']) {
     assert(fs.existsSync(path.join(options.forgeHome, 'scripts', helper)), `${helper} missing from the installed inventory`);
     assert(!fs.existsSync(path.join(options.forgeHome, 'scripts', helper.replace(/\.js$/, '.test.js'))),
       `${helper} test leaked into the installed inventory`);
@@ -141,6 +141,46 @@ test('temporary Claude and Codex installs carry delivery helper, contract and op
     const review = fs.readFileSync(path.join(options.forgeHome, 'shared', 'forge-review.md'), 'utf8');
     assert.match(review, /forge-unit-sidecar\.js" --request/, `${host} install lacks the review-fix sidecar delivery`);
     assert.match(review, /forge-review-fix\.js" --accept-native/, `${host} install lacks native review-fix acceptance`);
+  }
+
+  // #341 review-fix-policy-v1: the installed spec documents the admission, and both host
+  // projections of the three orchestration skills classify, defer, group one cycle with a
+  // dispatchId, relay the ⚖ status line and collect the new marker. Distribution only: this
+  // does not show a host or model following the text.
+  assert(!fs.existsSync(path.join(options.forgeHome, 'scripts', 'forge-review-policy-distribution.test.js')),
+    'policy distribution suite leaked into the installed inventory');
+  const installedReview = fs.readFileSync(path.join(options.forgeHome, 'shared', 'forge-review.md'), 'utf8');
+  for (const token of ['## Política executável de review-fix', '### Admissão no último portão', 'forge-review-policy.js --admit --request',
+    '`review-fix-cycle-limit`', '`review-fix-budget-exhausted`', '`review-fix-not-fix-now`', '`review-fix-policy-invalid`', '`review-fix-admission`']) {
+    assert(installedReview.includes(token), `installed forge-review.md lacks the admission contract: ${token}`);
+  }
+  const MARKER = 'não aplicada — deferida para triagem final';
+  for (const [host, home] of [['Claude', options.claudeHome], ['Codex', options.codexHome]]) {
+    for (const skill of ['forge-task', 'forge-auto', 'forge-next']) {
+      const projected = fs.readFileSync(path.join(home, 'skills', skill, 'SKILL.md'), 'utf8').replace(/\r\n/g, '\n');
+      const label = `${host}/${skill}`;
+      assert.match(projected, /forge-review-policy\.js" --classify --input "\$RF_VERDICTS_FILE"/, `${label} lacks --classify before the cycle`);
+      assert.match(projected, /forge-review-policy\.js" --status --cwd "\$WORKING_DIR"/, `${label} lacks the ⚖ status line`);
+      assert.match(projected, /forge-review-fix\.js" --defer "\$RF_DEFER_REQUEST"/, `${label} lacks the deferral of non fix-now items`);
+      for (const token of [MARKER, 'Um ciclo é um único request agrupado', '`dispatchId`', '`--prepare-native`', '`Refatorar agora`',
+        'basis: operator-decision', 'repasse verbatim a linha `⚖`', 'verificação dirigida', 'sem nova revisão',
+        '`review-fix-cycle-limit`', 'sem retry, sem bypass, sem correção inline e sem outro worker', '`review-per-task-in-milestone`']) {
+        assert(projected.includes(token), `${label} lacks: ${token}`);
+      }
+      assert.doesNotMatch(projected, /review-fix` unit for (?:that|this|each) item|Refatorar agora` — dispatches a `review-fix` unit|Despacha um review-fix para este item/,
+        `${label} still dispatches review-fix per item in the gate`);
+    }
+    for (const skill of ['forge-auto', 'forge-next']) {
+      const projected = fs.readFileSync(path.join(home, 'skills', skill, 'SKILL.md'), 'utf8').replace(/\r\n/g, '\n');
+      const triage = projected.slice(projected.indexOf('**Review triage gate (before complete-milestone):**'), projected.indexOf('**Plan-check gate'));
+      assert(triage.includes(`Correção: ${MARKER} (<motivo>)`), `${host}/${skill} Step 9 does not collect the new marker`);
+      assert(triage.includes('`counted:false`'), `${host}/${skill} triage is not recorded outside the cycle cap`);
+      assert(projected.includes('--milestone "$RF_MILESTONE_ID" --slice "$RF_UNIT_ID"'), `${host}/${skill} status is not scoped to the slice`);
+      assert(projected.includes('`review.milestone_task_review: true`'), `${host}/${skill} lacks the milestone review boundary`);
+    }
+    const task = fs.readFileSync(path.join(home, 'skills', 'forge-task', 'SKILL.md'), 'utf8').replace(/\r\n/g, '\n');
+    assert(task.includes('--task "$RF_UNIT_ID"') && task.includes('`source: review/{TASK_ID}/{R#}`') && task.includes('§ Item capture'),
+      `${host}/forge-task deferred items do not become items`);
   }
 
   const installedSidecar = require(path.join(options.forgeHome, 'scripts', 'forge-unit-sidecar.js'));

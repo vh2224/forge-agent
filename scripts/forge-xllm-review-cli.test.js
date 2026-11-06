@@ -91,6 +91,32 @@ function run(f, mode = 'defend', scenario = 'success', extra = []) {
   return result;
 }
 
+// #341 review-leg guard: the owner of a declared milestone context, written only in the
+// temporary fixture (never a real project). The guard reads its prefs, REVIEW.md and events.
+function milestoneOwner(f) {
+  fs.mkdirSync(path.join(f.cwd, '.gsd', 'forge'), { recursive: true });
+  fs.mkdirSync(path.join(f.cwd, '.gsd', 'milestones', 'M001', 'slices', 'S01'), { recursive: true });
+  return f.cwd;
+}
+function budget(owner, unit, scope = ['--budget-milestone', 'M001']) {
+  return ['--budget-owner', owner, ...scope, '--budget-unit', unit];
+}
+function ownerEvents(owner, event) {
+  const file = path.join(owner, '.gsd', 'forge', 'events.jsonl');
+  return fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean)
+    .map(line => JSON.parse(line)).filter(row => row.event === event) : [];
+}
+function legRefusal(result, code, owner) {
+  const row = failure(result);
+  assert.deepStrictEqual(Object.keys(row).sort(), ['diagnostic', 'layer', 'model_observed', 'provider_called', 'reason_code']);
+  assert.strictEqual(row.reason_code, code); assert.strictEqual(row.layer, 'review-policy');
+  assert.strictEqual(row.provider_called, false); assert.strictEqual(row.model_observed, null);
+  // Named code only: no guard message, owner path or stack crosses stderr.
+  assert(!result.stderr.includes('Revisão') && !result.stderr.includes(owner) && !/\bat .+:\d+:\d+/.test(result.stderr), result.stderr);
+  assert.match(result.stderr, new RegExp(`recusado .*causa=${code}.*provider_called=false`));
+  return row;
+}
+
 function failure(result) {
   assert.strictEqual(result.status, 2);
   assert.strictEqual(result.stdout, '');
@@ -337,6 +363,74 @@ async function main() {
       assert(procedure.includes('requires explicit failure/handoff'));
       assert(procedure.includes('Elapsed duration alone does not prove timeout'));
       assert(!/S03|S04|58376|claude-opus-5-5/.test(procedure), 'distributed procedure has no incident narrative');
+    });
+    await test('#341 milestone review leg outside complete-slice refuses before the adapter: exit 2, review-policy, provider_called false, event, no retry', () => {
+      for (const mode of ['challenge', 'defend', 'rebuttal']) {
+        const f = fixture(); const owner = milestoneOwner(f);
+        legRefusal(run(f, mode, 'success', budget(owner, 'execute-task/T03')), 'review-per-task-in-milestone', owner);
+        assert(!fs.existsSync(f.capture), `${mode}: adapter never called`);
+        const events = ownerEvents(owner, 'review-leg-refusal');
+        assert.strictEqual(events.length, 1, `${mode}: one refusal event, no retry`);
+        assert.deepStrictEqual({ ...events[0], ts: null }, { ts: null, event: 'review-leg-refusal',
+          reason_code: 'review-per-task-in-milestone', milestone: 'M001', unit: 'execute-task/T03', leg: mode });
+      }
+    });
+    await test('#341 review.milestone_task_review true in the owner prefs lets the task leg proceed unchanged', () => {
+      for (const mode of ['challenge', 'defend', 'rebuttal']) {
+        const f = fixture(); const owner = milestoneOwner(f);
+        fs.writeFileSync(path.join(owner, '.gsd', 'forge-prefs.jsonc'), JSON.stringify({ review: { milestone_task_review: true } }));
+        const result = run(f, mode, 'success', budget(owner, 'execute-task/T03'));
+        assert.strictEqual(result.status, 0, result.stderr);
+        assert(fs.existsSync(f.capture)); assert.deepStrictEqual(ownerEvents(owner, 'review-leg-refusal'), []);
+      }
+    });
+    await test('#341 complete-slice leg passes before completion and refuses review-already-completed once S01-REVIEW.md exists', () => {
+      const f = fixture(); const owner = milestoneOwner(f);
+      const first = run(f, 'challenge', 'success', budget(owner, 'complete-slice/S01'));
+      assert.strictEqual(first.status, 0, first.stderr); assert(fs.existsSync(f.capture));
+      fs.unlinkSync(f.capture);
+      const retry = run(f, 'defend', 'success', budget(owner, 'complete-slice/S01'));
+      assert.strictEqual(retry.status, 0, 'a retry before completion still runs'); fs.unlinkSync(f.capture);
+      fs.writeFileSync(path.join(owner, '.gsd', 'milestones', 'M001', 'slices', 'S01', 'S01-REVIEW.md'), '# S01 review\n');
+      for (const mode of ['challenge', 'defend', 'rebuttal']) {
+        legRefusal(run(f, mode, 'success', budget(owner, 'complete-slice/S01')), 'review-already-completed', owner);
+        assert(!fs.existsSync(f.capture), `${mode}: adapter never called`);
+      }
+    });
+    await test('#341 task context and absent context keep the review leg unchanged', () => {
+      const task = 'T-20261106120000-review-leg-fixture';
+      for (const mode of ['challenge', 'defend', 'rebuttal']) {
+        const f = fixture(); const owner = milestoneOwner(f);
+        const scoped = run(f, mode, 'success', budget(owner, `execute-task/${task}`, ['--budget-task', task]));
+        assert.strictEqual(scoped.status, 0, scoped.stderr); assert(fs.existsSync(f.capture)); fs.unlinkSync(f.capture);
+        const plain = run(f, mode);
+        assert.strictEqual(plain.status, 0, plain.stderr); assert(fs.existsSync(f.capture));
+        assert.deepStrictEqual(ownerEvents(owner, 'review-leg-refusal'), []);
+      }
+    });
+    await test('#341 an exhausted milestone time contract prevails over the review-leg guard before the adapter', () => {
+      const timeFixture = require('./forge-milestone-time-flow.test').fixture();
+      try {
+        for (const mode of ['challenge', 'defend', 'rebuttal']) {
+          const f = fixture();
+          const row = failure(run(f, mode, 'success', budget(timeFixture.cwd, 'execute-task/T03')));
+          assert.match(row.reason_code, /^milestone-budget-(exhausted|draining)$/);
+          assert.strictEqual(row.layer, 'milestone-time-admission'); assert.strictEqual(row.provider_called, false);
+          assert(!fs.existsSync(f.capture));
+        }
+        assert.deepStrictEqual(ownerEvents(timeFixture.cwd, 'review-leg-refusal'), [], 'the guard is never reached');
+      } finally { fs.rmSync(timeFixture.cwd, { recursive: true, force: true }); }
+    });
+    await test('#341 reviewFailureDiagnostic keeps only the closed review-policy codes and layer, never message or details', () => {
+      for (const code of ['review-per-task-in-milestone', 'review-already-completed']) {
+        const row = reviewFailureDiagnostic(Object.assign(new Error(secret + ' C:/Users/private'), { code, provider_called: false,
+          stage: 'review-policy', layer: 'review-policy', details: { milestone: secret }, stack: secret }));
+        assert.strictEqual(row.reason_code, code); assert.strictEqual(row.layer, 'review-policy');
+        assert.strictEqual(row.provider_called, false); assert(!JSON.stringify(row).includes(secret));
+      }
+      assert.strictEqual(reviewFailureDiagnostic({ code: 'review-fix-policy-invalid', layer: 'review-policy' }).layer, 'review-policy');
+      const foreign = reviewFailureDiagnostic({ code: 'review-fix-policy-invalid', layer: secret });
+      assert.strictEqual(foreign.reason_code, 'adapter-failed'); assert(!('layer' in foreign));
     });
     process.stdout.write(`\n${passed} passed, 0 failed; synthetic adapter only, no provider/UAT\n`);
   } finally {
