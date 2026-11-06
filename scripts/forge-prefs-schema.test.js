@@ -162,6 +162,7 @@ const INVENTORY = [
   { key: 'review.rounds', type: 'integer', default: 1, source: 'shared/forge-review.md:16 "review.rounds, default 1"' },
   { key: 'review.ask_in_auto', type: 'string', default: 'defer', source: 'shared/forge-review.md § Step 7b auto branch (defer default)' },
   { key: 'review.fix_conceded', type: 'boolean', default: true, source: 'shared/forge-review.md § resolution table (fix_conceded default true)' },
+  { key: 'review.milestone_task_review', type: 'boolean', default: false, source: 'scripts/forge-review-policy.js assertReviewLeg (opt-in; ausente ou não-true → só complete-slice/S## revisa em milestone)' },
   { key: 'review.challenger', type: 'string', default: 'claude', source: 'shared/forge-review.md:75 "whitelist claude|codex|gemini, default claude"' },
   { key: 'review.advocate', type: 'string', default: 'claude', source: 'shared/forge-review.md § Step 0 (advocate default claude)' },
   { key: 'review.challenger_model', type: ['string', 'null'], default: null, source: 'shared/forge-review.md:76 "challengerModel — default null (unset)"' },

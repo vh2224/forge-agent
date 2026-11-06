@@ -1,0 +1,96 @@
+{
+  "description": "Matriz sintética do veredito duplo (review-fix-policy-v1). Cada caso nomeado traz o veredito cru e a expectativa de classifyFinding. Nenhum dado real.",
+  "cases": [
+    {
+      "name": "critica-concedida-alcancavel-no-escopo-conta-como-alta",
+      "verdict": { "resolution": "conceded", "severity": "critical", "reachable": "yes", "reproduced": "no", "in_scope": "yes" },
+      "expect": { "fix_now": true, "admissible": true, "resolved": { "resolution": "conceded", "severity": "critical", "reachable": "yes", "reproduced": "no", "in_scope": "yes" }, "reasons": [] }
+    },
+    {
+      "name": "alta-concedida-alcancavel-no-escopo",
+      "verdict": { "resolution": "conceded", "severity": "high", "reachable": "yes", "reproduced": "yes", "in_scope": "yes" },
+      "expect": { "fix_now": true, "admissible": true, "resolved": { "resolution": "conceded", "severity": "high", "reachable": "yes", "reproduced": "yes", "in_scope": "yes" }, "reasons": [] }
+    },
+    {
+      "name": "reproducao-desconhecida-e-so-registrada",
+      "verdict": { "resolution": "conceded", "severity": "high", "reachable": "yes", "in_scope": "yes" },
+      "expect": { "fix_now": true, "admissible": true, "resolved": { "resolution": "conceded", "severity": "high", "reachable": "yes", "reproduced": "unknown", "in_scope": "yes" }, "reasons": [] }
+    },
+    {
+      "name": "media-concedida-nunca-corrige-agora",
+      "verdict": { "resolution": "conceded", "severity": "medium", "reachable": "yes", "reproduced": "yes", "in_scope": "yes" },
+      "expect": { "fix_now": false, "admissible": false, "resolved": { "resolution": "conceded", "severity": "medium", "reachable": "yes", "reproduced": "yes", "in_scope": "yes" }, "reasons": ["severity-below-high"] }
+    },
+    {
+      "name": "baixa-concedida-nunca-corrige-agora",
+      "verdict": { "resolution": "conceded", "severity": "low", "reachable": "yes", "reproduced": "no", "in_scope": "yes" },
+      "expect": { "fix_now": false, "admissible": false, "resolved": { "resolution": "conceded", "severity": "low", "reachable": "yes", "reproduced": "no", "in_scope": "yes" }, "reasons": ["severity-below-high"] }
+    },
+    {
+      "name": "alta-teorica-nao-alcancavel-em-uso-normal",
+      "verdict": { "resolution": "conceded", "severity": "high", "reachable": "no", "reproduced": "no", "in_scope": "yes" },
+      "expect": { "fix_now": false, "admissible": false, "resolved": { "resolution": "conceded", "severity": "high", "reachable": "no", "reproduced": "no", "in_scope": "yes" }, "reasons": ["not-reachable"] }
+    },
+    {
+      "name": "alta-fora-do-escopo",
+      "verdict": { "resolution": "conceded", "severity": "critical", "reachable": "yes", "reproduced": "yes", "in_scope": "no" },
+      "expect": { "fix_now": false, "admissible": false, "resolved": { "resolution": "conceded", "severity": "critical", "reachable": "yes", "reproduced": "yes", "in_scope": "no" }, "reasons": ["out-of-scope"] }
+    },
+    {
+      "name": "alta-com-alcancavel-e-escopo-desconhecidos",
+      "verdict": { "resolution": "conceded", "severity": "high", "reachable": "unknown", "reproduced": "unknown", "in_scope": "unknown" },
+      "expect": { "fix_now": false, "admissible": false, "resolved": { "resolution": "conceded", "severity": "high", "reachable": "unknown", "reproduced": "unknown", "in_scope": "unknown" }, "reasons": ["reachable-unknown", "scope-unknown"] }
+    },
+    {
+      "name": "veredito-vazio-tudo-desconhecido",
+      "verdict": {},
+      "expect": { "fix_now": false, "admissible": false, "resolved": { "resolution": "unknown", "severity": "unknown", "reachable": "unknown", "reproduced": "unknown", "in_scope": "unknown" }, "reasons": ["resolution-unknown", "severity-unknown", "reachable-unknown", "scope-unknown"] }
+    },
+    {
+      "name": "saida-legada-sem-campos-novos",
+      "verdict": { "resolution": "conceded", "severity": "high" },
+      "expect": { "fix_now": false, "admissible": false, "resolved": { "resolution": "conceded", "severity": "high", "reachable": "unknown", "reproduced": "unknown", "in_scope": "unknown" }, "reasons": ["reachable-unknown", "scope-unknown"] }
+    },
+    {
+      "name": "valor-invalido-do-challenger-vale-desconhecido",
+      "verdict": { "resolution": "conceded", "severity": "High", "reachable": "maybe", "reproduced": 1, "in_scope": "yes" },
+      "expect": { "fix_now": false, "admissible": false, "resolved": { "resolution": "conceded", "severity": "unknown", "reachable": "unknown", "reproduced": "unknown", "in_scope": "yes" }, "reasons": ["severity-unknown", "reachable-unknown"] }
+    },
+    {
+      "name": "contestacao-do-advocate-rebaixa-alcancavel-de-yes-para-no",
+      "verdict": { "resolution": "conceded", "severity": "high", "reachable": "yes", "reproduced": "no", "in_scope": "yes", "contest": { "advocate": { "reachable": "no" } } },
+      "expect": { "fix_now": false, "admissible": false, "resolved": { "resolution": "conceded", "severity": "high", "reachable": "no", "reproduced": "no", "in_scope": "yes" }, "reasons": ["not-reachable"] }
+    },
+    {
+      "name": "contestacao-do-rebuttal-rebaixa-escopo-para-desconhecido",
+      "verdict": { "resolution": "conceded", "severity": "critical", "reachable": "yes", "reproduced": "yes", "in_scope": "yes", "contest": { "advocate": { "in_scope": "yes" }, "rebuttal": { "in_scope": "unknown" } } },
+      "expect": { "fix_now": false, "admissible": false, "resolved": { "resolution": "conceded", "severity": "critical", "reachable": "yes", "reproduced": "yes", "in_scope": "unknown" }, "reasons": ["scope-unknown"] }
+    },
+    {
+      "name": "contestacao-nunca-eleva-o-valor-do-challenger",
+      "verdict": { "resolution": "conceded", "severity": "high", "reachable": "no", "reproduced": "no", "in_scope": "unknown", "contest": { "advocate": { "reachable": "yes", "in_scope": "yes" }, "rebuttal": { "reachable": "yes", "in_scope": "yes" } } },
+      "expect": { "fix_now": false, "admissible": false, "resolved": { "resolution": "conceded", "severity": "high", "reachable": "no", "reproduced": "no", "in_scope": "unknown" }, "reasons": ["not-reachable", "scope-unknown"] }
+    },
+    {
+      "name": "contestacao-ausente-significa-perna-que-nao-informou",
+      "verdict": { "resolution": "conceded", "severity": "high", "reachable": "yes", "reproduced": "unknown", "in_scope": "yes", "contest": { "advocate": {} } },
+      "expect": { "fix_now": true, "admissible": true, "resolved": { "resolution": "conceded", "severity": "high", "reachable": "yes", "reproduced": "unknown", "in_scope": "yes" }, "reasons": [] }
+    },
+    {
+      "name": "objecao-aberta-nao-e-concedida",
+      "verdict": { "resolution": "open", "severity": "critical", "reachable": "yes", "reproduced": "yes", "in_scope": "yes" },
+      "expect": { "fix_now": false, "admissible": false, "resolved": { "resolution": "open", "severity": "critical", "reachable": "yes", "reproduced": "yes", "in_scope": "yes" }, "reasons": ["not-conceded"] }
+    },
+    {
+      "name": "objecao-refutada-resolvida-nao-e-concedida",
+      "verdict": { "resolution": "resolved", "severity": "high", "reachable": "yes", "reproduced": "no", "in_scope": "yes" },
+      "expect": { "fix_now": false, "admissible": false, "resolved": { "resolution": "resolved", "severity": "high", "reachable": "yes", "reproduced": "no", "in_scope": "yes" }, "reasons": ["not-conceded"] }
+    },
+    {
+      "name": "decisao-do-operador-dispensa-o-filtro-mas-registra-a-classificacao",
+      "basis": "operator-decision",
+      "verdict": { "resolution": "open", "severity": "medium", "reachable": "yes", "reproduced": "no", "in_scope": "yes" },
+      "expect": { "fix_now": false, "admissible": true, "resolved": { "resolution": "open", "severity": "medium", "reachable": "yes", "reproduced": "no", "in_scope": "yes" }, "reasons": ["not-conceded", "severity-below-high"] }
+    }
+  ]
+}
