@@ -325,6 +325,53 @@ try {
   fs.rmSync(root, { recursive: true, force: true });
 }
 
+// #341 dual verdict on the external leg: optional closed fields in the validators, carried
+// by the normalizers only when present (legacy output byte-identical), asked by the prompts
+// and required by the schema files sent to the transport. Pure; no provider.
+{
+  const xllm = require('./forge-xllm.js');
+  const objection = { id: 'R1', path_line: 'src/a.js:10', claim: 'c', suggested_fix: 'f', challenge: 'q', severity: 'high' };
+  const fields = { reachable: 'yes', reproduced: 'no', in_scope: 'unknown' };
+  assert.ok(xllm.validateObjections({ objections: [objection] }), 'legacy objection without the fields stays valid');
+  assert.ok(xllm.validateObjections({ objections: [{ ...objection, ...fields }] }), 'all three fields valid');
+  assert.ok(xllm.validateObjections({ objections: [{ ...objection, reachable: 'no' }] }), 'a subset of the fields is valid');
+  for (const key of Object.keys(fields)) {
+    for (const bad of ['maybe', 'YES', '', null, true, 1]) {
+      assert.ok(!xllm.validateObjections({ objections: [{ ...objection, [key]: bad }] }), `${key}=${JSON.stringify(bad)} rejected`);
+    }
+  }
+  const legacyChallenge = xllm.normalizeChallenge({ objections: [objection] });
+  assert.strictEqual(JSON.stringify(legacyChallenge), JSON.stringify({ objections: [{ id: 'R1', severity: 'high', file: 'src/a.js',
+    line: 10, issue: 'c', fix: 'f', challenge: 'q' }] }), 'legacy challenge normalization byte-identical');
+  assert.deepStrictEqual(xllm.normalizeChallenge({ objections: [{ ...objection, ...fields }] }).objections[0],
+    { ...legacyChallenge.objections[0], ...fields });
+  assert.deepStrictEqual(Object.keys(xllm.normalizeChallenge({ objections: [{ ...objection, in_scope: 'no' }] }).objections[0]).slice(-1), ['in_scope']);
+  const rebuttal = { id: 'R1', verdict: 'maintained', rationale: 'r' };
+  assert.ok(xllm.validateVerdicts({ verdicts: [rebuttal] }), 'legacy rebuttal valid');
+  assert.ok(xllm.validateVerdicts({ verdicts: [{ ...rebuttal, reachable: 'no', in_scope: 'yes' }] }));
+  assert.ok(!xllm.validateVerdicts({ verdicts: [{ ...rebuttal, reachable: 'sometimes' }] }), 'out-of-enum reachable rejected');
+  assert.ok(!xllm.validateVerdicts({ verdicts: [{ ...rebuttal, in_scope: false }] }), 'non-string in_scope rejected');
+  assert.strictEqual(JSON.stringify(xllm.normalizeRebuttal({ verdicts: [rebuttal] })),
+    JSON.stringify({ verdicts: [{ id: 'R1', verdict: 'maintained', reason: 'r' }] }), 'legacy rebuttal byte-identical');
+  assert.deepStrictEqual(xllm.normalizeRebuttal({ verdicts: [{ ...rebuttal, reachable: 'unknown', in_scope: 'no' }] }).verdicts[0],
+    { id: 'R1', verdict: 'maintained', reason: 'r', reachable: 'unknown', in_scope: 'no' });
+  const challengePrompt = xllm.buildChallengePrompt('diff');
+  for (const text of ['"reachable", "reproduced", "in_scope"', 'NORMAL USE', 'theoretical', 'impossible input', 'static trace only']) {
+    assert.ok(challengePrompt.includes(text), `challenge prompt asks ${text}`);
+  }
+  const rebuttalPrompt = xllm.buildRebuttalPrompt('input');
+  assert.ok(rebuttalPrompt.includes('"rationale", "reachable", "in_scope"') && rebuttalPrompt.includes('NORMAL USE'));
+  const sentChallenge = xllm.challengeSchema.properties.objections.items;
+  assert.deepStrictEqual(sentChallenge, xllm.loadSchemaFile('challenge.schema.json').properties.objections.items, 'transport schema is the file');
+  for (const key of Object.keys(fields)) {
+    assert.ok(sentChallenge.required.includes(key)); assert.deepStrictEqual(sentChallenge.properties[key].enum, ['yes', 'no', 'unknown']);
+  }
+  const sentVerdict = xllm.verdictSchema(['maintained', 'withdrawn']).properties.verdicts.items;
+  for (const key of ['reachable', 'in_scope']) assert.ok(sentVerdict.required.includes(key) && sentVerdict.properties[key].enum.length === 3);
+  assert.strictEqual(sentVerdict.additionalProperties, false);
+  console.log('forge-xllm dual verdict passed (validators legacy/valid/invalid, normalizers legacy byte-identical, prompts, schema files)');
+}
+
 // S05/T05: the unit owner's `claudeSession` reaches the Claude adapter as
 // `session` only for execute and plan. fix, review legs and direct calls
 // without the option keep the legacy argv (no `session` key at all).

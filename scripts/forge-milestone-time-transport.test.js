@@ -305,7 +305,8 @@ async function reviewEntries(f) {
     client.startAppServerTurn = () => { calls++; throw Object.assign(Error('fixture provider reached'), { code: 'fixture-provider-reached' }); };
     cp.spawn = () => { spawns++; throw Error('unexpected provider spawn'); };
     try {
-    const context = { cwd: f.owner, milestone: M, unit: 'review-slice/S01' };
+    // The milestone review gate unit is complete-slice/S## (#341 review-leg guard).
+    const context = { cwd: f.owner, milestone: M, unit: 'complete-slice/S01' };
     f.at = 1; admission.assertOwnerTransportEntry({ milestoneTimeContext: context, now: () => BASE + f.at });
     f.at = 101;
     const input = write(f.dir, 'review-input.json', { objections: [] });
@@ -339,7 +340,7 @@ async function reviewEntries(f) {
         '--mode', mode, '--engine', 'codex', '--host-runtime', 'claude', '--sidecar-declared',
         '--model', 'gpt-6-sol', '--effort', 'medium', '--cwd', cliFixture.a, '--context-root', cliFixture.owner,
         '--diff-cmd', 'git diff', '--input', input, '--budget-owner', cliFixture.owner,
-        '--budget-milestone', M, '--budget-unit', 'review-slice/S01'], { encoding: 'utf8', timeout: 20000 });
+        '--budget-milestone', M, '--budget-unit', 'complete-slice/S01'], { encoding: 'utf8', timeout: 20000 });
       assert.equal(result.status, 2, result.stderr); assert.equal(result.stdout, '');
       assert(/milestone-budget-(exhausted|draining)/.test(result.stderr), result.stderr);
       assert(!result.stderr.includes('provider-spawn-forbidden'), result.stderr);

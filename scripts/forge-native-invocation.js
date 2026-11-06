@@ -392,6 +392,19 @@ function witnessNotInvoked(outcome, invocation, options, layer) {
   return outcome;
 }
 
+// Pre-provider review-leg guard (#341, D7) for forge-reviewer/forge-advocate, only with an
+// explicit milestone milestoneTimeContext; the time admission runs first and prevails.
+function assertNativeReviewLeg(options) {
+  const policy = require('./forge-review-policy');
+  if (!policy.REVIEW_LEG_AGENTS.includes(options.agentType)) return;
+  policy.assertReviewLeg({ context: options.milestoneTimeContext, agentType: options.agentType, now: options.now });
+}
+// Layer of a refusal: time codes keep theirs; only the guard's own refusal is review-policy.
+function refusalLayer(code, refused, fallback) {
+  if (require('./forge-milestone-time-admission').TRANSPORT_REFUSAL_CODES.includes(code)) return 'milestone-time-admission';
+  return refused && refused.layer === 'review-policy' && refused.code === code ? 'review-policy' : fallback;
+}
+
 async function invokeNative(options, invoke) {
   const started = Date.now();
   const telemetryApi = require('./forge-attempt-telemetry');
@@ -440,15 +453,16 @@ async function invokeNative(options, invoke) {
       route: options.resolvedDispatch, terminal: options.terminalResult,
       dispatchId: options.telemetryIdentity?.dispatchId ?? null,
     }, observer => {
-      try { require('./forge-milestone-time-admission').assertOwnerTransportEntry(options); }
-      catch (error) { refused = error; throw error; }
+      try {
+        require('./forge-milestone-time-admission').assertOwnerTransportEntry(options);
+        assertNativeReviewLeg(options);
+      } catch (error) { refused = error; throw error; }
       invoked = true;
       return invoke(invocation.args, invocation, observer);
     });
     observedProvider = supervised.provider_called;
     if (!supervised.ok) {
-      const layer = require('./forge-milestone-time-admission').TRANSPORT_REFUSAL_CODES.includes(supervised.reason_code)
-        ? 'milestone-time-admission' : 'native-lifecycle';
+      const layer = refusalLayer(supervised.reason_code, refused, 'native-lifecycle');
       const outcome = { ...invocation, ok: false, result: null,
         reason_code: supervised.reason_code === 'native-terminal-unobserved' && options.invalidTerminalReason
           ? options.invalidTerminalReason : supervised.reason_code,
@@ -499,8 +513,8 @@ async function invokeNative(options, invoke) {
         provider_called: observedProvider ?? (invoked ? (typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown') : false),
         ...(supervised?.lifecycle?.host_identity ? { native_lifecycle: supervised.lifecycle } : {}) },
       provider_called: observedProvider ?? (invoked ? (typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown') : false),
-      diagnostic: { reason_code: telemetryApi.code(error.code, 'native-tool-callback-failed'), layer: require('./forge-milestone-time-admission').TRANSPORT_REFUSAL_CODES.includes(error.code)
-        ? 'milestone-time-admission' : 'native-tool' },
+      diagnostic: { reason_code: telemetryApi.code(error.code, 'native-tool-callback-failed'),
+        layer: refusalLayer(error.code, refused, 'native-tool') },
       hint: 'The native tool callback failed; inspect the host diagnostic channel.',
       ...(supervised?.lifecycle?.host_identity ? { lifecycle: supervised.lifecycle } : {}),
       ...hostIdentity(),

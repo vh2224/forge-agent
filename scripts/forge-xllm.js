@@ -270,12 +270,30 @@ function reviewFailureDiagnostic(error = {}) {
     'thinking-mode-unknown', 'agy-output-empty', ...Object.values(AGY_REASON_CODES), ...appServerLivenessCodes(),
     ...appServerTerminalCodes(), ...appServerInputCodes(),
     ...timeRefusalCodes];
-  return { reason_code: knownCodes.includes(error.code) ? error.code : 'adapter-failed',
+  // Review-leg guard (#341): the two closed codes, plus the guard's own fail-closed code
+  // only when it carries the review-policy layer. Never the guard message or details.
+  const reviewPolicy = reviewLegPolicyCode(error);
+  return { reason_code: knownCodes.includes(error.code) || reviewPolicy ? error.code : 'adapter-failed',
     ...(timeRefusalCodes.includes(error.code) ? { layer: 'milestone-time-admission' } : {}),
+    ...(reviewPolicy ? { layer: 'review-policy' } : {}),
     diagnostic: safeDiagnostic,
     provider_called: typeof error.provider_called === 'boolean' ? error.provider_called : null,
     model_observed: safeDiagnostic.model_observed || null,
     ...pendingOwnership(error) };
+}
+
+function reviewLegPolicyCode(error) {
+  const { REVIEW_LEG_CODES } = require('./forge-review-policy');
+  return REVIEW_LEG_CODES.includes(error.code)
+    || error.code === 'review-fix-policy-invalid' && error.layer === 'review-policy';
+}
+
+// Pre-provider review-leg guard (#341, D7). Runs after the milestone time admission (its
+// codes prevail) and before `attempted`/transport. Acts only with a declared milestone
+// context; a task context or no context changes nothing. A refusal is never a reviewer
+// outage: no retry, no fallback, no clean REVIEW.
+function assertReviewLegEntry(mode, opts) {
+  require('./forge-review-policy').assertReviewLeg({ context: opts.milestoneTimeContext, mode, now: opts.now });
 }
 
 // Only an unconfirmed agy exit carries pending ownership: a boolean and a positive integer pid.
@@ -545,8 +563,25 @@ function validateObjections(obj) {
     if (typeof item.suggested_fix !== 'string') return false;
     if (typeof item.challenge !== 'string') return false;
     if (!SEVERITY_ENUM.includes(item.severity)) return false;
+    if (!dualVerdictFieldsValid(item, CHALLENGE_VERDICT_FIELDS)) return false;
   }
   return true;
+}
+
+// Dual-verdict fields (#341). The schema files sent to the transport require them; the
+// validators keep them optional so a legacy answer without them stays valid (the policy
+// reads an absent field as unknown), and closed to yes|no|unknown when present.
+const CHALLENGE_VERDICT_FIELDS = Object.freeze(['reachable', 'reproduced', 'in_scope']);
+const CONTEST_VERDICT_FIELDS = Object.freeze(['reachable', 'in_scope']);
+function dualVerdictFieldsValid(item, fields) {
+  const { TRISTATE } = require('./forge-review-policy');
+  return fields.every(key => !Object.prototype.hasOwnProperty.call(item, key) || TRISTATE.includes(item[key]));
+}
+// Carried only when present, after validation, so a legacy result stays byte-identical.
+function presentDualVerdictFields(item, fields) {
+  const carried = {};
+  for (const key of fields) if (Object.prototype.hasOwnProperty.call(item, key)) carried[key] = item[key];
+  return carried;
 }
 
 /**
@@ -562,6 +597,7 @@ function validateVerdicts(obj, allowed) {
     if (typeof item.id !== 'string' || !item.id) return false;
     if (!enumeration.includes(item.verdict)) return false;
     if (typeof item.rationale !== 'string') return false;
+    if (!dualVerdictFieldsValid(item, CONTEST_VERDICT_FIELDS)) return false;
   }
   return true;
 }
@@ -644,10 +680,17 @@ function buildChallengePrompt(diffText) {
     'structured findings only. Assign each finding a stable id (R1, R2, ... in',
     'severity-then-order sequence). For each finding include: id, path_line',
     '("path:line"), claim (full issue text), suggested_fix, challenge (the one',
-    'question that decides whether this is real), severity (critical|high|medium|low).',
+    'question that decides whether this is real), severity (critical|high|medium|low),',
+    'and the dual-verdict fields, each "yes"|"no"|"unknown" (never omit one; write "unknown"):',
+    ' reachable  — reachable in NORMAL USE of the tool by its operator. A theoretical finding is',
+    '              "no": manual tampering with a local file, a race between the operator\'s own',
+    '              processes, a FIFO or special file where a regular one is expected, an impossible input.',
+    ' reproduced — "yes" only when you actually reproduced it; "no" for a static trace only.',
+    '              It is recorded, never a condition for fixing.',
+    ' in_scope   — "yes" when this change introduced or surfaced it; "no" for pre-existing code.',
     '',
     'Respond with ONLY a single JSON object of the exact shape:',
-    '{ "objections": [ { "id", "path_line", "claim", "suggested_fix", "challenge", "severity" } ] }',
+    '{ "objections": [ { "id", "path_line", "claim", "suggested_fix", "challenge", "severity", "reachable", "reproduced", "in_scope" } ] }',
     'No prose outside the JSON. Empty objections array is a valid outcome if the diff has no issues.',
     '',
     '--- DIFF START ---',
@@ -683,8 +726,14 @@ function buildDefendPrompt(inputText) {
     '',
     'Conceding every objection and refuting every objection are both failure modes.',
     '',
+    'With every verdict give your own assessment of the reviewer\'s reachable and in_scope,',
+    'each "yes"|"no"|"unknown". Conceding "it is real" is not conceding "fix it now":',
+    ' reachable — reachable in NORMAL USE; a theoretical path (manual tampering with a local file,',
+    '             a race between the operator\'s own processes, a FIFO, an impossible input) is "no".',
+    ' in_scope  — "yes" when this change introduced or surfaced it; "no" for pre-existing code.',
+    '',
     'Respond with ONLY a single JSON object of the exact shape:',
-    '{ "verdicts": [ { "id", "verdict": "refuted"|"conceded"|"open", "rationale" } ] }',
+    '{ "verdicts": [ { "id", "verdict": "refuted"|"conceded"|"open", "rationale", "reachable", "in_scope" } ] }',
     'One entry per objection, reusing the objection ids exactly. No prose outside the JSON.',
     '',
     '--- OBJECTIONS START ---',
@@ -700,9 +749,12 @@ function buildRebuttalPrompt(inputText) {
     'You are re-litigating your own prior review objections after seeing the author\'s',
     'defense. For each objection, decide ONLY "maintained" (defense did not hold) or',
     '"withdrawn" (defense holds). No other verdict values are allowed.',
+    'With every verdict restate your current reachable and in_scope ("yes"|"no"|"unknown",',
+    'same definitions as the challenge: reachable in NORMAL USE, a theoretical path is "no";',
+    'in_scope "yes" only when this change introduced or surfaced it) in light of the defense.',
     '',
     'Respond with ONLY a single JSON object of the exact shape:',
-    '{ "verdicts": [ { "id", "verdict": "maintained"|"withdrawn", "rationale" } ] }',
+    '{ "verdicts": [ { "id", "verdict": "maintained"|"withdrawn", "rationale", "reachable", "in_scope" } ] }',
     'No prose outside the JSON.',
     '',
     '--- OBJECTIONS + DEFENSES START ---',
@@ -1783,6 +1835,7 @@ function normalizeChallenge(obj) {
         issue: o.claim,
         fix: o.suggested_fix,
         challenge: o.challenge,
+        ...presentDualVerdictFields(o, CHALLENGE_VERDICT_FIELDS),
       };
     }),
   };
@@ -1794,6 +1847,7 @@ function normalizeRebuttal(obj) {
       id: v.id,
       verdict: v.verdict,
       reason: v.rationale,
+      ...presentDualVerdictFields(v, CONTEST_VERDICT_FIELDS),
     })),
   };
 }
@@ -1808,6 +1862,7 @@ function normalizeDefense(obj) {
       id: v.id,
       verdict: v.verdict,
       rationale: v.rationale,
+      ...presentDualVerdictFields(v, CONTEST_VERDICT_FIELDS),
     })),
   };
 }
@@ -2103,6 +2158,7 @@ async function runChallengeCore(opts) {
   const procedure = loadReviewProcedure('challenge', opts);
   const prompt = composeProcedurePrompt(buildChallengePrompt(diffText), procedure);
   require('./forge-milestone-time-admission').assertOwnerTransportEntry(opts);
+  assertReviewLegEntry('challenge', opts);
   opts._sidecarIdentity.attempted = true;
   let transportTelemetry = null;
   const rawContent = await invokeEngine(engine, {
@@ -2170,6 +2226,7 @@ async function runDefendCore(opts) {
   const procedure = loadReviewProcedure('defend', opts);
   const prompt = composeProcedurePrompt(buildDefendPrompt(inputText), procedure);
   require('./forge-milestone-time-admission').assertOwnerTransportEntry(opts);
+  assertReviewLegEntry('defend', opts);
   opts._sidecarIdentity.attempted = true;
   let transportTelemetry = null;
   const rawContent = await invokeEngine(engine, {
@@ -2229,6 +2286,7 @@ async function runRebuttalCore(opts) {
   const procedure = loadReviewProcedure('rebuttal', opts);
   const prompt = composeProcedurePrompt(buildRebuttalPrompt(inputText), procedure);
   require('./forge-milestone-time-admission').assertOwnerTransportEntry(opts);
+  assertReviewLegEntry('rebuttal', opts);
   opts._sidecarIdentity.attempted = true;
   let transportTelemetry = null;
   const rawContent = await invokeEngine(engine, {
@@ -3193,6 +3251,10 @@ module.exports = {
   runRebuttal,
   buildDefendPrompt,
   normalizeDefense,
+  buildChallengePrompt,
+  buildRebuttalPrompt,
+  normalizeChallenge,
+  normalizeRebuttal,
   DEFEND_VERDICT_ENUM,
   runExecute,
   runFix,
