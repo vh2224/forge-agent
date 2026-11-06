@@ -477,7 +477,14 @@ test('native prompts supply the complete result contract accepted for repeated r
     const source = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
     const prepare = source.indexOf('--prepare-native');
     assert(prepare >= 0, `${file}: mandatory executable preparation`);
-    const contract = source.slice(prepare, prepare + 1600);
+    // A policy reference can precede the executable preparation instructions.
+    // Select their named section/paragraph, without clipping the result contract.
+    const heading = '### Mandatory native preparation (before build/invoke)';
+    const sectionStart = source.indexOf(heading);
+    const sectionEnd = sectionStart < 0 ? -1 : source.indexOf('\n### ', sectionStart + heading.length);
+    const contract = sectionStart >= 0 ? source.slice(sectionStart, sectionEnd < 0 ? source.length : sectionEnd)
+      : source.split(/\r?\n\s*\r?\n/).find(paragraph => paragraph.includes('--prepare-native') && paragraph.includes('nativePreparation') && paragraph.includes('build/invoke')) || '';
+    assert(contract.includes('--prepare-native'), file + ': executable preparation section');
     for (const required of ['build/invoke', 'nativePreparation', 'verify_paths', 'auto_commit']) assert(contract.includes(required), `${file}: ${required}`);
   }
   for (const file of ['shared/forge-review.md', 'skills/forge-task/SKILL.md']) {

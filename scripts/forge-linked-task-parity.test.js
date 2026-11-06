@@ -440,6 +440,62 @@ async function captureUtilityChecks() {
     assert.deepStrictEqual(CAPTURE_GUARDS.map(r => r.path), ['scripts/forge-milestone-time.js', 'scripts/forge-milestone-time-selection.js']);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
+// #341 changes the full procedure manifest even for preparation phases whose
+// procedure content is unchanged. Preserve the original capture and declare only
+// its 24 manifest references and 16 derived artifact fingerprints as measured.
+function reviewPolicyExpected(expected, delta) {
+  const assert = require('assert');
+  assert.strictEqual(delta.kind, 'issue-341-measured-distribution-delta');
+  assert.strictEqual(delta.provenance.base_revision, '563ac2752722ac7c29848f62520c8446185bc15c');
+  const record = delta.unlinked_task_parity, manifest = delta.files['shared/forge-procedures.json'];
+  assert.strictEqual(record.fixture, 'scripts/fixtures/linked-task/unlinked-baseline.json');
+  assert.strictEqual(sha256(fs.readFileSync(FIXTURE)), record.fixture_sha256, 'immutable capture bytes retained');
+  assert.strictEqual(sourceHash('shared/forge-procedures.json'), manifest.after, 'only the measured manifest is accepted');
+  const allowed = new Set();
+  for (const phase of PHASES) for (const host of HOSTS) for (const mode of ['sidecar', 'native']) {
+    const base = '$.phases.' + phase + '.' + host + '.' + mode;
+    allowed.add(base + '.delivery_request.procedure_context.manifest_sha256');
+    allowed.add(base + '.artifact_fingerprint');
+    if (mode === 'sidecar') allowed.add(base + '.start.delivery_request.procedure_context.manifest_sha256');
+  }
+  assert.strictEqual(record.changes.length, 40);
+  assert.strictEqual(new Set(record.changes.map(row => row.path)).size, 40, 'no duplicate delta paths');
+  assert.deepStrictEqual(new Set(record.changes.map(row => row.path)), allowed, 'exact declared provenance paths');
+  const after = JSON.parse(JSON.stringify(expected));
+  for (const row of record.changes) {
+    assert.deepStrictEqual(Object.keys(row).sort(), ['after', 'before', 'path']);
+    assert.match(row.before, /^[a-f0-9]{64}$/); assert.match(row.after, /^[a-f0-9]{64}$/);
+    assert.notStrictEqual(row.before, row.after);
+    const keys = row.path.slice(2).split('.'), key = keys.pop();
+    const parent = keys.reduce((node, part) => node[part], after);
+    assert.strictEqual(parent[key], row.before, row.path + ': original captured value retained');
+    if (key === 'manifest_sha256') assert.deepStrictEqual([row.before, row.after], [manifest.before, manifest.after]);
+    parent[key] = row.after;
+  }
+  return after;
+}
+function reviewPolicyDeltaChecks(trace, expected, delta) {
+  const assert = require('assert'), clone = value => JSON.parse(JSON.stringify(value));
+  const check = (current, proposed = delta) => assert.deepStrictEqual(current, reviewPolicyExpected(expected, proposed));
+  check(trace);
+  const variants = [
+    ['missing path', d => { d.unlinked_task_parity.changes.pop(); }],
+    ['duplicate path', d => { d.unlinked_task_parity.changes[1] = d.unlinked_task_parity.changes[0]; }],
+    ['unknown path', d => { d.unlinked_task_parity.changes[0].path = '$.end_to_end.claude.result.status'; }],
+    ['wrong before', d => { d.unlinked_task_parity.changes[0].before = '0'.repeat(64); }],
+    ['wrong after', d => { d.unlinked_task_parity.changes[0].after = '0'.repeat(64); }],
+    ['wrong capture pin', d => { d.unlinked_task_parity.fixture_sha256 = '0'.repeat(64); }],
+    ['unknown manifest', d => { d.files['shared/forge-procedures.json'].after = '0'.repeat(64); }],
+  ];
+  for (const [name, mutate] of variants) { const changed = clone(delta); mutate(changed); assert.throws(() => check(trace, changed), undefined, name); }
+  for (const [name, mutate] of [
+    ['behavior drift', t => { t.end_to_end.claude.result.status = 'blocked'; }],
+    ['fingerprint drift', t => { t.phases.brainstorm.claude.sidecar.artifact_fingerprint = '0'.repeat(64); }],
+    ['manifest drift', t => { t.phases.brainstorm.claude.sidecar.delivery_request.procedure_context.manifest_sha256 = '0'.repeat(64); }],
+  ]) { const changed = clone(trace); mutate(changed); assert.throws(() => check(changed), undefined, name); }
+  process.stdout.write('ok - issue-341-parity-declared-delta: 40 leaves; 10 negative controls; immutable capture retained\n');
+}
+
 async function parityCheck() {
   const assert = require('assert');
   const trace = await computeTrace();
@@ -455,7 +511,10 @@ async function parityCheck() {
   assert.strictEqual(stored.status, 'valid', 'baseline fixture must exist and be valid: ' + (stored.reason || stored.status));
   const expected = stored.document.trace;
   // The stored bytes and digest stay immutable; only the comparison is projected (see personalCaseProjection).
-  const projectedTrace = personalCaseProjection(trace), projectedExpected = personalCaseProjection(expected);
+  const projectedTrace = personalCaseProjection(trace), historicalExpected = personalCaseProjection(expected);
+  const delta = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/review-policy/distribution-delta.json'), 'utf8'));
+  const projectedExpected = reviewPolicyExpected(historicalExpected, delta);
+  reviewPolicyDeltaChecks(projectedTrace, historicalExpected, delta);
   assert.strictEqual(traceDigest(projectedTrace), traceDigest(projectedExpected), 'unlinked trace differs from the owner baseline at ' + firstDifference(projectedTrace, projectedExpected));
   assert.strictEqual(JSON.stringify(projectedTrace), JSON.stringify(projectedExpected));
   // The raw stored digest still binds the immutable captured bytes.
