@@ -17,6 +17,20 @@ const { diagnostic } = require('./forge-sidecar-diagnostic');
 const memory = require('./forge-memory');
 const forgeIds = require('./forge-ids');
 const { MAX_FILE_BYTES: MAX_DELIVERY_BYTES } = require('./forge-delivery');
+// Only a ready object produced by this process's actual successor gate may
+// publish. A serialized ready/capture is evidence, never a live capability.
+const verificationSuccessorReady = new WeakMap();
+function assertVerificationSuccessorPublication(request, record, options) {
+  if (!record.verification_successor && record.verification_seal?.timeout_origin !== 'owner-verification-successor') return;
+  const cap = options?.verificationSuccessor;
+  if (!cap) fail('verification-successor-capability-required');
+  const value = require('./forge-sidecar-verification-successor').read(cap, request);
+  value.assertRecord(record);
+  const proof = verificationSuccessorReady.get(record), digest = require('./forge-code-roots').digest;
+  if (!proof || proof.cap !== cap || proof.record !== digest(record) || proof.request !== digest(request)) {
+    fail('verification-successor-live-ready-required');
+  }
+}
 
 const schema = xllm.loadSchemaFile('unit-artifacts.schema.json');
 // v1 stays exported unchanged for its consumers; new extractions select v2.
@@ -94,10 +108,20 @@ function sameUnit(value, expected) {
     && (value.milestone || null) === (expected.milestone || null)
     && (value.slice || null) === (expected.slice || null);
 }
+// Milestone time rules delegate to their single canonical validators (T02/T03);
+// both are lazy so unrelated units never load the time modules.
+function inspectTimeContent(content, rule) {
+  const options = rule.kind === 'milestone-options';
+  try {
+    return options ? require('./forge-milestone-options').inspectProposalContent(content, rule.milestone)
+      : require('./forge-milestone-roadmap-time').validateRoadmapContent(content, rule.expected);
+  } catch { return { valid: false, reason: options ? 'options-schema-invalid' : 'roadmap-time-content-invalid' }; }
+}
 function inspectDeliveryContent(content, rule) {
   if (rule.kind === 'standalone-preparation') {
     return require('./forge-task-preparation').validatePhaseContent(rule.phase, rule.taskId, content);
   }
+  if (rule.kind === 'milestone-options' || rule.kind === 'milestone-roadmap-time') return inspectTimeContent(content, rule).valid === true;
   let value;
   try { value = JSON.parse(content); } catch (_) { return false; }
   if (!value || typeof value !== 'object' || Array.isArray(value) || !(rule.kind === 'input' ? [1, 2] : [1]).includes(value.schema_version)
@@ -114,6 +138,11 @@ function inspectDeliveryContent(content, rule) {
 // Called only after the existing validator rejects; never changes acceptance.
 // Closed categories and field names keep provider content out of diagnostics.
 function deliveryFailureReason(content, rule) {
+  if (rule.kind === 'milestone-options' || rule.kind === 'milestone-roadmap-time') {
+    // Only the validator's closed reason code is reported, without its module prefix; never content or paths.
+    const code = String(inspectTimeContent(content, rule).reason || '').replace(rule.kind === 'milestone-options' ? /^options-/ : /^roadmap-time-/, '');
+    return `typed-${rule.kind}-${/^[a-z][a-z0-9-]{0,63}$/.test(code) ? code : 'content'}`;
+  }
   const category = ['input', 'delivery', 'standalone-preparation'].includes(rule.kind)
     ? rule.kind : 'verification';
   const reason = condition => `typed-${category}-${condition}`;
@@ -211,6 +240,7 @@ function locations(request) {
     'discuss-milestone': [`${milestone}/${m}-CONTEXT.md`],
     'discuss-slice': [`${slice}/${s}-CONTEXT.md`],
     'plan-milestone': [`${milestone}/${m}-ROADMAP.md`],
+    'estimate-milestone': [`${milestone}/${m}-OPTIONS.json`],
     'plan-check': [`${slice}/${s}-PLAN-CHECK.md`],
     'complete-slice': [`${slice}/${s}-SUMMARY.md`, `${slice}/${s}-UAT.md`],
     'complete-milestone': [`${milestone}/${m}-SUMMARY.md`],
@@ -243,7 +273,18 @@ function locations(request) {
     [delivery.artifact]: { kind: 'artifact', unit: deliveryUnit },
     ...Object.fromEntries(rootSources.map(row => [row.path, { kind: row.kind, unit: deliveryUnit }])),
   } : {};
+  const timeRule = unit === 'estimate-milestone' ? { kind: 'milestone-options', milestone: m }
+    : unit === 'plan-milestone' ? roadmapTimeRule(request) : null;
+  if (timeRule) rules[baseRequired[0]] = timeRule;
   return { required, allowed: [...required, ...deliveryOptional, ...optional], rules, delivery, milestone, slice };
+}
+// The physical owner (contextRoot, else cwd) decides, never a separate CODE_DIR.
+// roadmapRule returns null only for an unenrolled/legacy milestone or an attested
+// no-contract choice; pending, invalid and unreadable owners yield a refusing rule.
+function roadmapTimeRule(request) {
+  let owner = request.contextRoot || request.cwd;
+  try { owner = fs.realpathSync.native(owner); } catch { /* roadmapRule fails closed on an invalid owner */ }
+  return require('./forge-milestone-time-selection').roadmapRule(owner, request.milestoneId);
 }
 function milestonePlanFile(request) {
   locations(request);
@@ -599,6 +640,7 @@ function verifyTaskMarker(request, artifact, preimageSha256) {
   return true;
 }
 function materialize(request, record, publicationGuard, publicationLock, options = {}) {
+  assertVerificationSuccessorPublication(request, record, options);
   if (record.kind === 'memory-extraction') fail('memory-publication-required', 'Use publishReadyRecord for memory extraction receipts.');
   if (record.result.status !== 'done') return record.result;
   const root = fs.realpathSync(request.contextRoot || request.cwd);
@@ -621,6 +663,8 @@ function materialize(request, record, publicationGuard, publicationLock, options
       }
       if(options.leaseRenewal!==undefined)expected=require('./forge-native-recovery-delivery')
         .reconcileLeaseRenewalSurface(options.leaseRenewal,record,expected);
+      if (options.verificationSuccessor !== undefined) expected = require('./forge-sidecar-verification-successor')
+        .read(options.verificationSuccessor, request).expectedOwner(record, expected);
       require('./forge-task-execution').assertProtected(root, expected);
     }
   }
@@ -1203,8 +1247,8 @@ function publishReviewFixFailure(request, loc, items, snapshot) {
   }
 }
 
-async function publishReadyRecord(request, record, publicationGuard, publicationLock) {
-  let result = await publishReadyRecordCore(request, record, publicationGuard, publicationLock);
+async function publishReadyRecord(request, record, publicationGuard, publicationLock, options = {}) {
+  let result = await publishReadyRecordCore(request, record, publicationGuard, publicationLock, options);
   if (record.telemetry?.observation) result = { ...result, transport_telemetry: {
     ...result.transport_telemetry,
     observation: require('./forge-sidecar-calibration').observation(record.telemetry.observation),
@@ -1212,16 +1256,17 @@ async function publishReadyRecord(request, record, publicationGuard, publication
   if (record.calibration_proposal && result.status === 'done'
       && !['deferred', 'quarantined', 'conflict'].includes(result.publication?.status)) {
     const outcome = await require('./forge-sidecar-calibration').commitAccepted(record.calibration_proposal, {
-      fingerprint: record.fingerprint, receipt: artifactAttemptFiles(request).receiptFile,
+      fingerprint: record.fingerprint, receipt: options.receiptFile || artifactAttemptFiles(request).receiptFile,
     });
     result = { ...result, transport_telemetry: { ...result.transport_telemetry, calibration_commit: outcome } };
   }
   return result;
 }
-async function publishReadyRecordCore(request, record, publicationGuard, publicationLock) {
+async function publishReadyRecordCore(request, record, publicationGuard, publicationLock, options = {}) {
+  assertVerificationSuccessorPublication(request, record, options);
   if (record.execution) require('./forge-task-execution').assertReplay(request, record);
   if (record.kind === 'review-fix') return publishReviewFixRecord(request, record);
-  if (record.kind !== 'memory-extraction') return materialize(request, record, publicationGuard, publicationLock);
+  if (record.kind !== 'memory-extraction') return materialize(request, record, publicationGuard, publicationLock, options);
   const extraction = record.extraction;
   if (extraction.status !== 'done') {
     const result = { status: extraction.status, extraction,
@@ -1554,7 +1599,9 @@ function nativeExecutionOptions(r, runtime, prompt) {
     activeCapabilities: runtime.activeCapabilities, agentType: 'forge-executor',
     taskName: r.nativeInvocation?.args?.task_name || r.taskName || r.dispatchId,
     forkTurns: 'none', effortBinding: r.effortBinding, prompt,
-    readback: runtime.readback, telemetryIdentity: r, telemetryRoute: r.route };
+    readback: runtime.readback, telemetryIdentity: r, telemetryRoute: r.route,
+    // The one injected owner clock also governs the common owner guard inside invokeNative.
+    ...(runtime.now !== undefined ? { now: runtime.now } : {}) };
 }
 function validateNativeExecutionBinding(r, runtime) {
   if (!r.execution_contract || !r.nativeInvocation?.ok) fail('native-execution-binding-required');
@@ -1656,8 +1703,18 @@ async function runNativeExecutionTransport(r, runtime, execution, options, proce
   const receiptFile = r.resultFile + '.receipt.json';
   const saved = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
   if (outcome.final_evidence) json(receiptFile, { ...saved, final_evidence: outcome.final_evidence });
-  if (!outcome.ok) throw Object.assign(new Error(outcome.reason_code), {
-    code: outcome.reason_code, provider_called: outcome.provider_called });
+  if (!outcome.ok) {
+    // A pre-provider refusal of the common owner guard keeps its typed stage and layer: linked task
+    // codes come from the task horizon, the others from the milestone horizon. Only the typed
+    // code, stage and layer travel; no raw payload, handle or lifecycle object is copied.
+    const admissionApi = require('./forge-milestone-time-admission');
+    const refused = outcome.provider_called === false && outcome.diagnostic?.layer === 'milestone-time-admission'
+      && admissionApi.TRANSPORT_REFUSAL_CODES.includes(outcome.reason_code);
+    const linkedCode = refused && require('./forge-linked-task-horizon').LINKED_TASK_TRANSPORT_CODES.includes(outcome.reason_code);
+    throw Object.assign(new Error(outcome.reason_code), {
+      code: outcome.reason_code, provider_called: outcome.provider_called,
+      ...(refused ? { stage: linkedCode ? 'linked-task-admission' : 'milestone-time-admission', layer: 'milestone-time-admission' } : {}) });
+  }
   if (r.nativePromptFile && fs.readFileSync(r.nativePromptFile, 'utf8') !== prompt) throw Object.assign(new Error('native-prompt-file-changed'), { code: 'native-prompt-file-changed', provider_called: true });
   const raw = outcome.result;
   const candidate = raw && typeof raw === 'object' && !Array.isArray(raw)
@@ -1754,7 +1811,15 @@ async function inspectSavedNativeExecution(r, runtime) {
   return { writer, executed: inspect() };
 }
 
+// A pre-provider refusal of the common owner guard: the milestone horizon (stage
+// milestone-time-admission) or the linked task horizon (stage linked-task-admission, same layer).
+function admissionRefusal(error) {
+  return error?.stage === 'milestone-time-admission'
+    || error?.stage === 'linked-task-admission' && error.layer === 'milestone-time-admission' && error.provider_called === false;
+}
+
 async function runUnitSidecarCore(request, runtime, identity) {
+  let verificationSuccessor = null;
   let transportReturned = false;
   let partialFixResult = false;
   let recoveryReady = runtime.assertRecoveryReady;
@@ -1762,7 +1827,25 @@ async function runUnitSidecarCore(request, runtime, identity) {
   // reads: no durable write, no announcer stage, errors never reach the unit.
   let notifyPhase = () => {};
   let executingObserved = false;
+  // The common owner guard of a standalone task request (linked task horizon; an unlinked task
+  // returns without reading time state). It runs at every actual entry below and again at the
+  // adapter's last launch hook (the packaged context, immediately before the child, app-server
+  // turn or native callback), so time that elapses while the adapter packages is never admitted.
+  const admitTaskLaunch = () => {
+    if (r.scope === 'standalone-task') require('./forge-milestone-time-admission').assertOwnerTransportEntry({ request: r, now: runtime.now });
+  };
+  // The typed pre-provider refusal raised by this attempt's own last launch hook, kept so that an
+  // adapter that rewraps foreign exceptions of its packaging step cannot erase it (see the catch).
+  let packagingRefusal = null;
   const enterTransport = () => {
+    packagingRefusal = null;
+    if (verificationSuccessor) fail('verification-successor-no-inference');
+    if (r.scope !== 'standalone-task' && r.milestoneId) require('./forge-milestone-time-admission').assertTransportEntry({
+      cwd: r.contextRoot || r.cwd, milestone: r.milestoneId, unit: unitLabel(r, locations(r)), now: runtime.now });
+    // The same common owner guard at every actual standalone entry (first launch, retry,
+    // native execution callback and recovery): a linked task outside its horizon refuses here,
+    // before any spawn.
+    else admitTaskLaunch();
     recoveryReady?.();
     recoveryReady = null;
     if (!executingObserved) { executingObserved = true; notifyPhase('executing'); }
@@ -1841,6 +1924,13 @@ async function runUnitSidecarCore(request, runtime, identity) {
   const legacyFingerprint = artifactFingerprint(r);
   const fingerprint = memoryContract ? memoryRequestFingerprint(legacyFingerprint, memoryContract) : legacyFingerprint;
   let receiptFile = `${resultFile}.receipt.json`;
+  if (runtime.verificationSuccessor !== undefined) {
+    if (runtime.verification !== undefined) fail('verification-successor-policy-mixing');
+    verificationSuccessor = require('./forge-sidecar-verification-successor').read(runtime.verificationSuccessor, r);
+    resultFile = verificationSuccessor.resultFile;
+    receiptFile = verificationSuccessor.receiptFile;
+    verificationSuccessor.initialize();
+  }
   xllm.validateResultFileTarget(receiptFile, cwd);
   xllm.validateResultFileTarget(receiptFile, root);
   const eventsFile = target(root, '.gsd/forge/events.jsonl');
@@ -1857,7 +1947,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
   // Publication seam: one observer call, then the unchanged canonical publication.
   const publish = (record, publicationGuard) => {
     notifyPhase('publishing');
-    return publishReadyRecord(publicationRequest, record, publicationGuard);
+    return publishReadyRecord(publicationRequest, record, publicationGuard, undefined,
+      verificationSuccessor ? { verificationSuccessor: runtime.verificationSuccessor, receiptFile } : {});
   };
   const completed = result => notifyPhase(result?.status === 'partial' ? 'waiting'
     : result?.status === 'blocked' ? 'failed' : 'completed',
@@ -1877,6 +1968,12 @@ async function runUnitSidecarCore(request, runtime, identity) {
     } catch { /* the identity stays unknown; the canonical outcome is unchanged */ }
   }
   async function appendOwnedEvent(line, record) {
+    if (verificationSuccessor) {
+      verificationSuccessor.assertRecord(record);
+      record.verification_successor_events = [...(record.verification_successor_events || []), line];
+      json(receiptFile, record);
+      return;
+    }
     if (recoveryReady?.appendOwnerEvent) return recoveryReady.appendOwnerEvent(line);
     if (r.ownerBroker) return require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker)
       .append('.gsd/forge/events.jsonl', line);
@@ -1905,7 +2002,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
     const batch = lines.slice();
     await livenessQueue;
     const protectedOwner = record?.execution?.protected_owner || record?.recovery_baseline?.protected_owner;
-    if (recoveryReady?.appendOwnerEvent || r.ownerBroker || !protectedOwner) {
+    if (verificationSuccessor || recoveryReady?.appendOwnerEvent || r.ownerBroker || !protectedOwner) {
       for (const line of batch) await appendOwnedEvent(line, record);
     } else return appendProtectedOwnerEvents(root, receiptFile, record, batch);
   }
@@ -2014,6 +2111,14 @@ async function runUnitSidecarCore(request, runtime, identity) {
   }
   async function recordFailure(error, extra = null) {
     const code = error.code || 'sidecar-unit-failed';
+    if (verificationSuccessor) {
+      error.provider_called = false;
+      error.stage = 'publication';
+      json(resultFile, { status: 'adapter-failed', reason_code: code, layer: 'publication',
+        provider_called: false, dispatch_id: dispatchId, verification_successor: verificationSuccessor.info });
+      notifyPhase('failed', { reason_code: code });
+      return;
+    }
     const retained = require('./forge-claude-provisional').describe(error);
     let transaction = retained?.private_ref ? failureTransactions.get(error) : null;
     if (transaction?.complete) return;
@@ -2043,7 +2148,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
         model_sent: error.provider_called === true || record.provider_called === true ? model : null,
         duration_ms: record.started_at ? Date.now() - Date.parse(record.started_at) : null } : {}),
       recovery: replayable ? 'replay-publication' : 'operator-required',
-      failed_at: new Date().toISOString(), ...(replayable ? {} : (extra || {})) };
+      failed_at: new Date().toISOString(), ...(replayable ? {} : (extra || {})),
+      ...(admissionRefusal(error) ? { layer: 'milestone-time-admission' } : {}) };
     if (retained?.private_ref) {
       if (!transaction) {
         transaction = { record, failure, complete: false };
@@ -2139,9 +2245,15 @@ async function runUnitSidecarCore(request, runtime, identity) {
   const verificationApi = require('./forge-verify');
   const verifySeal = record => {
     if (transport.mode !== 'execute' || !r.execution_contract) return;
+    if (record.verification_successor || verificationSuccessor) {
+      if (!verificationSuccessor) fail('verification-successor-capability-required');
+      verificationSuccessor.assertRecord(record);
+    }
     if (!record.verification_seal) {
       if (!nativeExecution && runtime.verification === undefined) return;
-      if (!record.delivery_capture || runtime.verification !== undefined) fail('verification-provenance-insufficient');
+      // Only a completed successful legacy capture can stand in for its absent seal.
+      // Failed captures are retained for diagnosis and still require sealed policy.
+      if (record.delivery_capture?.passed !== true || runtime.verification !== undefined) fail('verification-provenance-insufficient');
       return;
     }
     verificationApi.assertExecutionVerification(record.verification_seal, r.execution_contract, fs.readFileSync(r.planFile, 'utf8'), verificationIdentity);
@@ -2178,19 +2290,23 @@ async function runUnitSidecarCore(request, runtime, identity) {
       const api = require('./forge-task-execution');
       const saved = record.milestone_delivery;
       assertMilestoneDeliveryReplay(r, record);
-      api.assertProtected(root, saved.protected_owner);
+      api.assertProtected(root, verificationSuccessor
+        ? verificationSuccessor.expectedOwner(record, saved.protected_owner) : saved.protected_owner);
     }
-    if (r.execution_contract && !record.delivery_capture) {
+    if (r.execution_contract && (!record.delivery_capture || !record.delivery_capture.passed)) {
       const resourceEvents = [];
       notifyPhase('verifying');
       const deliveryCapture = require('./forge-verify').captureRootDelivery(r.execution_contract,
         fs.readFileSync(r.planFile, 'utf8'), { ...r.verification, verificationSeal: record.verification_seal, verificationIdentity, unit: loc.rules[loc.delivery.input].unit,
           resourceEventSink: line => resourceEvents.push(line),
           ...(typeof runtime.onVerificationCheck === 'function' ? { onCheck: runtime.onVerificationCheck } : {}) });
+      record = { ...record, delivery_capture: deliveryCapture };
+      // Retain stdout, cleanup and the actual failing check before throwing.
+      // A failed capture never satisfies replay: the gate runs again above.
+      if (!deferredEvents) json(receiptFile, record);
       if (deferredEvents) deferredEvents.push(...resourceEvents);
       else await appendOwnedEvents(resourceEvents, record);
       if (!deliveryCapture.passed) fail('execution-verification-failed');
-      record = { ...record, delivery_capture: deliveryCapture };
       if (record.execution) require('./forge-task-execution').assertReplay(r, record);
       if (!deferredEvents) json(receiptFile, record);
     }
@@ -2203,6 +2319,10 @@ async function runUnitSidecarCore(request, runtime, identity) {
       if (marker) ready.artifacts.push(marker);
     }
     if (!deferredEvents) json(receiptFile, ready);
+    if (verificationSuccessor) verificationSuccessorReady.set(ready, {
+      cap: runtime.verificationSuccessor, record: require('./forge-code-roots').digest(ready),
+      request: require('./forge-code-roots').digest(r),
+    });
     return ready;
   }
   if (existing) {
@@ -2320,6 +2440,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
     const rendered = !(typeof r.prompt === 'string' && r.prompt.trim()) && !r.promptFile ? renderPrompt({
       unitType: r.unitType, cwd: root, codeDir: cwd, milestoneId: r.milestoneId, sliceId: r.sliceId,
       description: r.description, unitEffort: route.effort, autoCommit: false,
+      // Owner-captured estimate source manifest (T06 supplies it); verified by the renderer, never worker data.
+      ...(r.unitType === 'estimate-milestone' && r.producerBasis != null ? { producerBasis: r.producerBasis } : {}),
     }) : null;
     const base = transport.mode === 'plan' ? fs.readFileSync(r.promptFile, 'utf8')
       : typeof r.prompt === 'string' && r.prompt.trim() ? r.prompt
@@ -2402,7 +2524,16 @@ async function runUnitSidecarCore(request, runtime, identity) {
       const saved = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
       json(receiptFile, { ...saved, final_evidence: packaged.final_evidence,
         ...(saved.execution ? { execution: { ...saved.execution, packaged_context: packaged } } : {}) });
-      return runtime.onPackagedContext?.(packaged);
+      const observed = runtime.onPackagedContext?.(packaged);
+      // Last launch hook: the adapters call it synchronously after packaging and before the
+      // spawn/turn/callback, so a refusal here is fail-closed (provider_called false). The refusal
+      // is recorded before it propagates: the Claude adapter catches it in its packaging step.
+      try { admitTaskLaunch(); }
+      catch (refusal) {
+        if (admissionRefusal(refusal) && refusal.provider_called === false) packagingRefusal = refusal;
+        throw refusal;
+      }
+      return observed;
     },
     hostRuntime: route.host_runtime, sidecarDeclared: true, model,
     effort: route.effort, timeoutSecs: ceilingFromRoute(route).seconds, resultFile, dispatchId,
@@ -2768,7 +2899,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
       if (!verdict.ok) {
         const error = new Error('Invalid artifact result.');
         error.code = 'invalid-artifact-result';
-        error.diagnostic = diagnostic(verdict.reason);
+        // The closed diagnostic vocabulary has no time-rule entries: keep them validation failures, never adapter ones.
+        error.diagnostic = diagnostic(/^typed-milestone-/.test(verdict.reason) ? 'delivery-artifact-invalid' : verdict.reason);
         throw error;
       }
       if (!loc.preparation && r.unitType === 'plan-milestone' && result.status === 'done') {
@@ -2839,6 +2971,12 @@ async function runUnitSidecarCore(request, runtime, identity) {
     // A transport failure can leave a queued liveness append: settle it before
     // the failed receipt and the terminal event are written.
     await livenessQueue;
+    // The Claude adapter rewraps any exception of its packaging step (where the last launch hook
+    // runs, before its owned child) as its prompt I/O code. When this attempt's own hook refused,
+    // that wrap reports no prompt I/O failure: the original typed refusal (code, provider_called
+    // false, stage, layer) is restored. A prompt I/O failure without a recorded refusal stays as is.
+    if (packagingRefusal && error !== packagingRefusal && error?.provider_called !== true
+        && error?.code === require('./forge-claude-sidecar').CLAUDE_SIDECAR_REASON_CODES.PROMPT_IO) error = packagingRefusal;
     // A heartbeat proves a local process, not provider acceptance. A timeout
     // without adapter evidence stays unknown; an explicit pre-spawn refusal is false.
     providerCalled = typeof error.provider_called === 'boolean' ? error.provider_called
@@ -2849,7 +2987,9 @@ async function runUnitSidecarCore(request, runtime, identity) {
       reason_code: error.code || xllm.classifyErrorClass(error.message), provider_called: providerCalled });
     let extra = execution ? { reset_state_file: executionStateFile,
       possible_writes: providerCalled ? 'unknown' : false,
-      reconciliation_required: providerCalled !== false } : null;
+      reconciliation_required: providerCalled !== false }
+      : admissionRefusal(error) && transport.mode === 'execute' && providerCalled === false
+        ? { possible_writes: false, reconciliation_required: false } : null;
     const phase = fix ? JSON.parse(fs.readFileSync(receiptFile, 'utf8')).phase : null;
     if (fix && phase !== 'ready') {
       // Only an attempt that never reached a durable validated result is reset;
@@ -3114,7 +3254,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       transport = promptTransports.get(promptHash);
     }
     return { hostRuntime: route.host_runtime, resolvedDispatch: route,
-    telemetryIdentity: finalRequest(route), lifecycle: runtime.nativeLifecycle,
+    telemetryIdentity: finalRequest(route), lifecycle: runtime.nativeLifecycle, now: runtime.now,
     terminalResult: value => deliveryHelper ? deliveryHelper.resultContract.validate(value).ok
       : canonical.unitType === 'review-fix' && typeof value === 'string'
         // The review-fix prompt requires the textual worker-result block; the value
@@ -3219,6 +3359,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
           let persistedReceipt = null;
           const session = asSuccessorSync(next, () => deliveryHelper.prepare({ request: next, nativeInvocation: invocation,
             savedManifest: assertReady?.repackageManifest?.(runtime.nativeLifecycle?.journal?.file),
+            leaseRenewal: runtime.leaseRenewal,
             assertBoundary: runtime.assertBoundary, assertAuthority: assertReady?.assertAuthority,
             persistDeliveryReceipt: typeof assertReady?.persistDeliveryReceipt === 'function'
               ? receipt => { assertReady.persistDeliveryReceipt(receipt); persistedReceipt = receipt; } : undefined,
@@ -3237,6 +3378,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
             assertReady();
             runtime.assertBoundary();
             validateRecoveryRequest(next, { verification: runtime.verification, nativeInvocation: binding, linkedEntryOptions: runtime.linkedEntryOptions });
+            require('./forge-milestone-time-admission').assertOwnerTransportEntry({ request: next, now: runtime.now });
             assertReady.consumeInvocation(binding, { ...session.start(),
               original_receipt_sha256: hash(fs.readFileSync(recovery.receiptFile)) });
             invoked = binding;
@@ -3280,6 +3422,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
           return require('./forge-native-invocation').invokeNative(nativeOptions(route), (args, binding, observer) => {
             assertReady?.();
             asOriginal(routed, () => validateRecoveryRequest(routed, { verification: runtime.verification, nativeInvocation: binding }));
+            require('./forge-milestone-time-admission').assertOwnerTransportEntry({ request: next, now: runtime.now });
             assertReady?.consumeInvocation?.(binding);
             return callback(next, { ...binding, args }, {
               assertAuthority: () => {

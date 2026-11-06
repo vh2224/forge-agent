@@ -250,6 +250,7 @@ function appServerInputCodes() {
 // A local process/elapsed duration does not establish a remote provider call.
 function reviewFailureDiagnostic(error = {}) {
   const safeDiagnostic = diagnostic(error.diagnostic?.reason, error.diagnostic);
+  const timeRefusalCodes = require('./forge-milestone-time-admission').TRANSPORT_REFUSAL_CODES;
   const knownCodes = [...Object.values(CLAUDE_SIDECAR_REASON_CODES),
     'procedure-manifest-missing', 'procedure-manifest-invalid', 'procedure-file-unreadable',
     'procedure-module-pending', 'procedure-integrity-mismatch', 'procedure-phase-unmapped',
@@ -267,8 +268,10 @@ function reviewFailureDiagnostic(error = {}) {
     'native-effort-binding-mismatch', 'thinking-transport-unsupported', 'thinking-mode-undocumented',
     'thinking-disabled-incompatible', 'thinking-enabled-incompatible', 'thinking-between-tools-incompatible',
     'thinking-mode-unknown', 'agy-output-empty', ...Object.values(AGY_REASON_CODES), ...appServerLivenessCodes(),
-    ...appServerTerminalCodes(), ...appServerInputCodes()];
+    ...appServerTerminalCodes(), ...appServerInputCodes(),
+    ...timeRefusalCodes];
   return { reason_code: knownCodes.includes(error.code) ? error.code : 'adapter-failed',
+    ...(timeRefusalCodes.includes(error.code) ? { layer: 'milestone-time-admission' } : {}),
     diagnostic: safeDiagnostic,
     provider_called: typeof error.provider_called === 'boolean' ? error.provider_called : null,
     model_observed: safeDiagnostic.model_observed || null,
@@ -2099,6 +2102,7 @@ async function runChallengeCore(opts) {
   const diffText = acquireDiff(opts.diffCmd, cwd);
   const procedure = loadReviewProcedure('challenge', opts);
   const prompt = composeProcedurePrompt(buildChallengePrompt(diffText), procedure);
+  require('./forge-milestone-time-admission').assertOwnerTransportEntry(opts);
   opts._sidecarIdentity.attempted = true;
   let transportTelemetry = null;
   const rawContent = await invokeEngine(engine, {
@@ -2165,6 +2169,7 @@ async function runDefendCore(opts) {
 
   const procedure = loadReviewProcedure('defend', opts);
   const prompt = composeProcedurePrompt(buildDefendPrompt(inputText), procedure);
+  require('./forge-milestone-time-admission').assertOwnerTransportEntry(opts);
   opts._sidecarIdentity.attempted = true;
   let transportTelemetry = null;
   const rawContent = await invokeEngine(engine, {
@@ -2223,6 +2228,7 @@ async function runRebuttalCore(opts) {
 
   const procedure = loadReviewProcedure('rebuttal', opts);
   const prompt = composeProcedurePrompt(buildRebuttalPrompt(inputText), procedure);
+  require('./forge-milestone-time-admission').assertOwnerTransportEntry(opts);
   opts._sidecarIdentity.attempted = true;
   let transportTelemetry = null;
   const rawContent = await invokeEngine(engine, {
@@ -3411,13 +3417,22 @@ if (require.main === module) {
   // catch nothing and let every failure escape as an unhandled rejection — exit 0
   // with empty stdout, which is the silent-success shape this adapter exists to deny.
   const timeoutSecs = cliCeiling(args);
+  // Budget identity: --budget-owner and --budget-unit with exactly one of --budget-milestone
+  // (milestone horizon) or --budget-task (linked task horizon). Both, or an incomplete set, reach
+  // the common owner guard as an invalid context and refuse before any transport. Without these
+  // flags the context stays absent exactly as before.
+  const budgetFlags = ['budget-owner', 'budget-milestone', 'budget-task', 'budget-unit'];
+  const taskBudget = args['budget-task'] !== undefined;
+  const milestoneTimeContext = budgetFlags.some(key => args[key] !== undefined)
+    ? { cwd: args['budget-owner'], ...(taskBudget ? { task: args['budget-task'] } : {}),
+      ...(!taskBudget || args['budget-milestone'] !== undefined ? { milestone: args['budget-milestone'] } : {}), unit: args['budget-unit'] } : undefined;
   let pending;
   if (mode === 'challenge') {
-    pending = runChallenge({ diffCmd: args['diff-cmd'], cwd, contextRoot: args['context-root'], engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, announce, dispatchId: args['dispatch-id'] });
+    pending = runChallenge({ diffCmd: args['diff-cmd'], cwd, contextRoot: args['context-root'], milestoneTimeContext, engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, announce, dispatchId: args['dispatch-id'] });
   } else if (mode === 'defend') {
-    pending = runDefend({ inputFile: args.input, diffCmd: args['diff-cmd'], cwd, contextRoot: args['context-root'], engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, announce, dispatchId: args['dispatch-id'] });
+    pending = runDefend({ inputFile: args.input, diffCmd: args['diff-cmd'], cwd, contextRoot: args['context-root'], milestoneTimeContext, engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, announce, dispatchId: args['dispatch-id'] });
   } else {
-    pending = runRebuttal({ inputFile: args.input, cwd, contextRoot: args['context-root'], engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, announce, dispatchId: args['dispatch-id'] });
+    pending = runRebuttal({ inputFile: args.input, cwd, contextRoot: args['context-root'], milestoneTimeContext, engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, announce, dispatchId: args['dispatch-id'] });
   }
   pending
     .then((result) => {

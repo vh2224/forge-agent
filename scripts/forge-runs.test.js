@@ -421,6 +421,72 @@ test('--heartbeat without --worker and without --clear is a loud error, never a 
   });
 });
 
+test('registry fence protects different run writers and permits only its live opaque scope', () => {
+  withSandbox(dir => {
+    fs.mkdirSync(path.join(dir, '.gsd'));
+    runs.add(dir, { id: 'M001', kind: 'milestone', session_id: 'fence' });
+    runs.add(dir, { id: 'M002', kind: 'milestone', session_id: 'other' });
+    const before = fs.readFileSync(runs.runFile(dir, 'M002'));
+    let expired;
+    runs.withRegistryFence(dir, guard => {
+      expired = guard;
+      for (const write of [() => runs.add(dir, { id: 'M003', kind: 'milestone', session_id: 'new' }),
+        () => runs.update(dir, 'M002', { active: false }), () => runs.updateWith(dir, 'M002', () => ({ active: false })),
+        () => runs.remove(dir, 'M002'), () => runs.update(dir, 'M002', {}, {})]) {
+        let error; try { write(); } catch (e) { error = e; }
+        assertEq(error && error.code, 'EOWNERSHIPBUSY');
+      }
+      assert(fs.readFileSync(runs.runFile(dir, 'M002')).equals(before));
+      const child = spawnSync(process.execPath, ['-e', 'try { require(process.argv[1]).update(process.argv[2], "M002", {active:false}); process.exitCode=9; } catch(e) { console.log(e.code); }', require.resolve('./forge-runs'), dir],
+        { encoding: 'utf8', timeout: 10000, windowsHide: true });
+      assertEq(child.status, 0, child.stderr); assert(/LOCK_BUSY/.test(child.stdout), child.stdout);
+      assert(fs.readFileSync(runs.runFile(dir, 'M002')).equals(before));
+      assertEq(runs.updateWith(dir, 'M001', () => ({ active: false }), guard).updated, true);
+    });
+    runs.withRegistryFence(dir, () => {
+      let error; try { runs.update(dir, 'M002', {}, expired); } catch (e) { error = e; }
+      assertEq(error && error.code, 'EOWNERSHIPBUSY', 'expired tokens do not enter a later fence');
+    });
+    assertEq(runs.update(dir, 'M002', { active: false }).active, false, 'writers resume after release');
+  });
+});
+
+test('bounded ownership census rejects count size type and swaps before payload I/O', () => {
+  withSandbox(dir => {
+    const registry = runs.runsDir(dir); fs.mkdirSync(registry, { recursive: true });
+    const first = path.join(registry, 'M001.json'), second = path.join(registry, 'M002.json');
+    const good = JSON.stringify({ id: 'M001', worktrees: [] });
+    fs.writeFileSync(first, good);
+    assertEq(runs.boundedCensus(dir, { maxRuns: 1, maxBytes: 128 }).parsed.length, 1);
+    const rejectWithoutPayload = mutate => {
+      mutate(); let touched = 0;
+      const read = fs.readFileSync, open = fs.openSync;
+      const matches = p => typeof p === 'string' && path.dirname(path.resolve(p)) === path.resolve(registry);
+      fs.readFileSync = function (p) { if (matches(p)) touched++; return read.apply(this, arguments); };
+      fs.openSync = function (p) { if (matches(p)) touched++; return open.apply(this, arguments); };
+      let result; try { result = runs.boundedCensus(dir, { maxRuns: 1, maxBytes: 128 }); }
+      finally { fs.readFileSync = read; fs.openSync = open; }
+      assertEq(result.parsed, []); assert(result.unparseable.length > 0); assertEq(touched, 0);
+      if (fs.existsSync(second)) fs.rmSync(second, { recursive: true, force: true });
+      if (fs.existsSync(first)) fs.rmSync(first, { recursive: true, force: true }); fs.writeFileSync(first, good);
+    };
+    rejectWithoutPayload(() => fs.writeFileSync(second, '{}'));
+    rejectWithoutPayload(() => fs.writeFileSync(first, Buffer.alloc(129, 0x78)));
+    rejectWithoutPayload(() => { fs.unlinkSync(first); fs.mkdirSync(first); });
+    // Swap the real file to a directory after the metadata pass, before the stable reader opens it.
+    const native = fs.realpathSync.native, open = fs.openSync; let swapped = 0, opens = 0;
+    fs.realpathSync.native = function (p) { const result = native.apply(this, arguments); if (p === first && !swapped++) { fs.unlinkSync(first); fs.mkdirSync(first); } return result; };
+    fs.openSync = function (p) { if (p === first) opens++; return open.apply(this, arguments); };
+    let result;
+    try { result = runs.boundedCensus(dir, { maxRuns: 1, maxBytes: 128 }); }
+    finally { fs.realpathSync.native = native; fs.openSync = open; }
+    assertEq(result.parsed, []); assert(result.unparseable.length > 0); assertEq(opens, 0); assertEq(swapped, 1);
+    fs.rmdirSync(first); fs.writeFileSync(first, good);
+    assertEq(runs.listAllDetailed(dir, { maxRuns: 1, maxBytes: 128 }).parsed[0].id, 'M001');
+    console.log('ok - ownership registry census rejects unsafe input before reading payload');
+  });
+});
+
 // ── Summary ───────────────────────────────────────────────────────────────────
 console.log(`\n=== Result: ${passed} passed, ${failed} failed ===`);
 

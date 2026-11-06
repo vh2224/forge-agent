@@ -165,6 +165,7 @@ function tierIcon(unitType) {
     'complete-slice':    '🪶',
     'complete-milestone':'🪶',
     'execute-task':      '⚡',
+    'estimate-milestone':'🔥',
     'plan-milestone':    '🔥',
     'plan-slice':        '🔥',
     'discuss-milestone': '🔥',

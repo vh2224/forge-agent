@@ -270,7 +270,7 @@ function fullIso(value) {
 function unitNames(target) {
   if (target.type === 'task') return new Set([`execute-task/${target.id}`, `review-fix/${target.id}`]);
   if (target.type === 'slice') return new Set([target.id, `plan-slice/${target.id}`, `complete-slice/${target.id}`]);
-  return new Set([target.id, `plan-milestone/${target.id}`, `complete-milestone/${target.id}`]);
+  return new Set([target.id, `estimate-milestone/${target.id}`, `plan-milestone/${target.id}`, `complete-milestone/${target.id}`]);
 }
 
 function unitMatchesTarget(event, target) {

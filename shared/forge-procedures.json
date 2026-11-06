@@ -402,6 +402,29 @@
       ]
     },
     {
+      "id": "estimate-milestone",
+      "modules": [
+        "planning"
+      ],
+      "consumers": [
+        "scripts/forge-prompt.js",
+        "scripts/forge-unit-sidecar.js"
+      ],
+      "owner": "T02",
+      "preconditions": [
+        "Matching scope, decisions and research are available",
+        "Required functional decisions have explicit answers before dependent planning"
+      ],
+      "postconditions": [
+        "Phase-specific artifacts and full must-haves pass the applicable plan gate"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-prompt.test.js",
+        "scripts/forge-estimate-unit-inventory.test.js"
+      ]
+    },
+    {
       "id": "plan-slice",
       "modules": [
         "planning"

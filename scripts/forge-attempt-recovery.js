@@ -9,7 +9,8 @@ const { validateSessionRef, sessionDigest, removeSession } = require('./forge-cl
 // A preserved Claude session (S05) is resumed at most once per unit; these stops
 // are terminal for the session, so recoverAttempt removes its artifacts.
 const RESUME_RESERVATION = 'same-session-resume';
-const RESUME_PRE_SPAWN_REFUSALS = Object.freeze(['claude-resume-account-mismatch', 'claude-resume-config-mismatch', 'claude-session-invalid']);
+const RESUME_PRE_SPAWN_REFUSALS = Object.freeze(['claude-resume-account-mismatch', 'claude-resume-config-mismatch', 'claude-session-invalid',
+  ...require('./forge-milestone-time-admission').TRANSPORT_REFUSAL_CODES]);
 const SILENCE_CODES = Object.freeze(['claude-anomalous-silence', 'appserver-anomalous-silence']);
 const SESSION_TERMINAL_STOPS = Object.freeze(['budget-exceeded-resume-exhausted', 'budget-exceeded-resume-refused']);
 // S04/T02: the app-server asked for a human answer and the client stopped the turn.
@@ -327,6 +328,9 @@ function createRecovery(options) {
       if (!input.inspection || input.inspection.process_stopped !== true || input.inspection.receipt_checked !== true) fail('recovery-process-receipt-inspection-required');
       if (input.inspection.valid_saved_response === true) return { action: 'replay', provider_called: false };
       if (input.inspection.writer_possible !== false && input.inspection.roots_reconciled !== true) fail('recovery-writer-reconciliation-required');
+      if (require('./forge-milestone-time-admission').TRANSPORT_REFUSAL_CODES.includes(state.attempts.at(-1)?.reason_code)) {
+        return { action: 'stop', reason_code: state.attempts.at(-1).reason_code, provider_called: false };
+      }
       // S04/T02: the turn stopped on a request for human input. Explicit answers
       // close the questions, but neither they nor a standing exception, a candidate
       // set or a correction re-enter the provider here: the answered continuation
@@ -636,6 +640,7 @@ function captureFailure(options) {
       ? JSON.parse(fs.readFileSync(options.receiptFile, 'utf8')).authorization_reference : undefined,
     ...(options.request.route ? { request: canonicalRequest(options.request) } : {}),
     state, persist: value => stateApi.saveRecovery(options.stateFile, value) });
+  const timeRefusal = require('./forge-milestone-time-admission').TRANSPORT_REFUSAL_CODES.includes(code);
   const provider = [true, false].includes(error.provider_called) ? error.provider_called : 'unknown';
   // Evaluated first: a live stream at the safety ceiling is neither a timeout
   // nor a destination failure.
@@ -655,7 +660,8 @@ function captureFailure(options) {
   session.record({ failure_class: inputRequired ? 'unknown' : activeBudget ? 'active-budget' : silence ? 'silence' : timeout ? 'timeout' : service ? 'service' : provider === false ? 'caller' : 'unknown',
     ...(inputRequired ? { inbound_requests: inbound } : {}),
     observation: error.diagnostic?.observation, service_failure_proven: service, ...(activeBudget || cleanupPending && sessionRef ? { session: sessionRef } : {}),
-    ...(cleanupPending && sessionRef ? { session_cleanup_pending: true } : {}), reason_code: code, layer: options.layer || error.stage || 'unknown', route: options.route,
+    ...(cleanupPending && sessionRef ? { session_cleanup_pending: true } : {}), reason_code: code,
+    layer: timeRefusal ? 'milestone-time-admission' : options.layer || error.stage || 'unknown', route: options.route,
     request_sha256: observed.request.sha256, caller_request_sha256: callerRequestHash(options.request), context_sha256: context.sha256,
     request_bytes: observed.request.bytes, context_bytes: context.bytes,
     context_measurement: context.method, measurement_diagnostic: context.diagnostic,

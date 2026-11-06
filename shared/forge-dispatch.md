@@ -216,6 +216,7 @@ Where:
 | Unit Type | Estimated Duration (min) | Notes |
 |-----------|--------------------------|-------|
 | `plan-milestone` | 2–5 | Depends on milestone scope; complex boundary maps increase duration. |
+| `estimate-milestone` | unknown | Read-only forge-planner OPTIONS.json proposal before the roadmap; no duration inferred from this inventory. |
 | `plan-slice` | 1–3 | Typically fastest planning phase; few dependencies. |
 | `discuss-milestone` | 2–4 | Includes ambiguity scoring and user question rounds. |
 | `discuss-slice` | 1–3 | Focused on slice-level ambiguities; fewer questions than milestone. |
@@ -504,6 +505,14 @@ Fields:
 **Idempotency:** `S##-SYMBOL-CHECK.md` already exists → gate is a no-op (skip).
 
 **Advisory posture:** gate NEVER blocks `execute-task`. MISSING/AMBIGUOUS are documentation only. Future slices (e.g., S04-PRUNE) may consume this data to suggest import cleanup.
+
+### estimate-milestone
+
+Read-only `forge-planner` proposal for an enrolled new milestone before its roadmap.
+Use the executable `shared/templates/dispatch/estimate-milestone.md` template with
+`description`; return OPTIONS.json under the options schema. The owner materializes
+estimates and obtains the explicit live-attested selection before plan-milestone.
+This unit uses the same locked max tier as plan-milestone and grants no authority.
 
 ### plan-milestone
 
@@ -1316,7 +1325,7 @@ Applicability by `unit_type`:
 | `memory-extract` | resolved from `tier_models.light` | yes when the resolver selects a declared sidecar; native otherwise |
 | other preparation/closure units | resolved per unit | only when `forge-transport-capabilities.js` declares that exact unit; unsupported preparation routes refuse explicitly |
 
-`plan-milestone` is **never** covered by `workers:` (locked) — it stays on tier `max`/Fable regardless of prefs.
+`plan-milestone` and `estimate-milestone` are **never** covered by `workers:` (locked) — they stay on tier `max`, with the model resolved through `tier_models.max`.
 
 The `native` path passes the resolver result through
 `forge-native-invocation.js`; the adapter validates the actual host tool and
@@ -2113,7 +2122,7 @@ Materialization is **orchestrator-only** — codex never touches `.gsd/**`. Afte
 | `workers.timeout` | int (seconds) \| null | `null` (→ tier ceiling) | **Safety ceiling** per sidecar attempt, forwarded as `--timeout` via the resolver's `$WORKERS_TIMEOUT`. Absent/null → route tier ceiling (light/standard/heavy/max = 900/1800/3600/5400 s); explicit 1..86400 overrides; legacy `300` ignored with warning `legacy-300-ignored`; invalid → tier ceiling with warning. Source: `scripts/forge-worker-timeout.js resolveWorkerCeiling` (`WORKERS_TIMEOUT_SOURCE`). Liveness is the primary kill authority; reaching the ceiling with a live stream ends as `budget-exceeded-while-active` |
 | `workers.codex_model` | string (model id) | unset (`null`) | Legacy fallback for the sidecar `--model` when no routed Codex chain member leads; unset **and** no Codex chain → Codex CLI default. The flag itself is driven by `$SIDECAR_MODEL` (`sidecarModelFor`) |
 
-`plan-milestone` is intentionally **absent** from this table — it is never routed through `workers:` (locked; stays tier `max`/Fable). The scaffold that documents these keys (commented) ships in `forge-agent-prefs.jsonc § Workers Settings` (S05); the reader operates with the safe defaults above without it.
+`plan-milestone` and `estimate-milestone` are intentionally **absent** from this table — neither is routed through `workers:` (locked tier `max`, model through `tier_models.max`). The scaffold that documents these keys (commented) ships in `forge-agent-prefs.jsonc § Workers Settings` (S05); the reader operates with the safe defaults above without it.
 
 #### Domain metadata — format fixed by S02, emitted by S03
 
@@ -3144,3 +3153,52 @@ boundary/lease, input hashes, invocation, code and protected metadata. It also r
 a fresh live `writerObservationAdapter` and process inspection for the saved native
 receipt. Replay accepts only the exact prior or already-published bytes, never new
 inference or a refreshed baseline. Imported receipt data is not live authority.
+
+## Contexto de tempo da milestone
+
+Contrato canônico: `shared/forge-milestone-time.md`. Toda chamada nativa comum de
+unidade de milestone descrita aqui (templates de unidade, plan-check, lote
+paralelo, re-dispatch do Retry Handler, extração de memória e a transição
+declarada `not-spawned`) passa pela invocação nativa supervisionada de
+`scripts/forge-native-invocation.js` com
+`milestoneTimeContext: { cwd: <owner físico>, milestone: <M>, unit: <tipo/id> }` e
+com a ferramenta e as capacidades realmente expostas pelo host, nunca pela
+ferramenta nativa bruta. A guarda roda dentro da supervisão, imediatamente antes
+do provider. Recusa de tempo (`milestone-budget-exhausted`,
+`milestone-budget-draining`, `milestone-time-invalid`, `milestone-clock-unknown`)
+volta com `provider_called:false`: sem retry, sem fallback de engine e sem evento
+`worker-engine-fallback`. A unidade já iniciada fecha pela recusa canônica do owner
+(`refuseNotInvoked` e depois `consume-failure`), nunca por resultado sintético.
+
+O sidecar de unidade (`forge-unit-sidecar --request`) rechecha a requisição retida
+antes de cada lançamento. As pernas externas de revisão recebem `--budget-owner`,
+`--budget-milestone` e `--budget-unit` (`shared/forge-review.md`). Os ramos diretos
+históricos `--mode execute|plan` deste arquivo não têm guarda de tempo interna:
+é uma limitação declarada, e numa milestone com contrato a entrega usa o sidecar de
+unidade. O precheck `forge-milestone-time-admission.js --admit-transport` só
+antecipa a recusa; ele não é a garantia. Task avulsa não recebe contexto de
+milestone. A guarda vale nos adaptadores e callbacks do Forge e não intercepta
+chamada bruta arbitrária do host.
+<!-- forge:linked-task:dispatch-budget:start -->
+
+Task ligada (S03; `shared/forge-milestone-time.md § Task ligada e endpoint (S03)`): a
+requisição `standalone-task` de task ligada continua sem contexto de milestone; o sidecar
+de unidade, os closures nativos, o recovery e a preparação delegam ao horizonte da task
+com a unidade `<tipo>/<task>`. As pernas externas de revisão de task ligada recebem o trio
+exclusivo `--budget-owner`, `--budget-task` e `--budget-unit` (identidade
+`{cwd, task, unit}`, unidade `execute-task/{TASK_ID}`), montado pelo bloco ligado de
+`BUDGET_ARGS` em `shared/forge-review.md`; não há segundo modelo de autorização aqui.
+Misturar `--budget-task` com `--budget-milestone` é contexto inválido e recusa com
+`milestone-time-invalid` antes de qualquer transporte. Task sem vínculo continua com
+contexto vazio e a saída de antes. Toda recusa exportada em `TRANSPORT_REFUSAL_CODES`
+(`milestone-budget-exhausted`, `milestone-budget-draining`, `milestone-time-invalid`,
+`milestone-clock-unknown`, `milestone-endpoint-closed`, `predecessor-incomplete`,
+`linked-task-not-started`, `linked-task-budget-exhausted`, `linked-task-budget-draining`,
+`linked-task-time-invalid`, `linked-task-clock-unknown`, `linked-task-chain-closed`,
+`linked-task-closed`) é parada antes do provider com `provider_called:false`: nunca
+indisponibilidade de revisor, nunca retry, fallback de engine ou de revisor, evento
+`worker-engine-fallback` nem REVIEW limpo. Perna sem esse contexto real não tem a
+garantia do horizonte. Este texto distribui o contrato; ele não demonstra execução nem
+compreensão no cliente instalado, que continuam desconhecidas.
+
+<!-- forge:linked-task:dispatch-budget:end -->

@@ -33,6 +33,22 @@ function test(name, fn) {
 
 process.stdout.write('\n=== forge-tokens.js — contract tests ===\n\n');
 
+test('aggregate orders estimate-milestone before plan-milestone and preserves other phase totals', () => {
+  const fs = require('fs'), os = require('os');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-tokens-estimate-'));
+  try {
+    fs.mkdirSync(path.join(dir, '.gsd', 'forge'), { recursive: true });
+    const phases = ['execute-task', 'plan-milestone', 'estimate-milestone', 'unknown-phase'];
+    const rows = phases.map((phase, i) => ({ event: 'dispatch', unit: `${phase}/M001`, milestone: 'M001',
+      dispatch_id: `estimate-${i}`, input_tokens: i + 1, output_tokens: 2, ts: '2026-11-01T00:00:00Z' }));
+    fs.writeFileSync(path.join(dir, '.gsd', 'forge', 'events.jsonl'), rows.map(JSON.stringify).join('\n') + '\n');
+    const aggregate = require('./forge-tokens').aggregate(dir, { milestoneId: 'M001' });
+    assert.deepStrictEqual(Object.keys(aggregate.by_phase), ['estimate-milestone', 'plan-milestone', 'execute-task', 'unknown-phase']);
+    phases.forEach((phase, i) => assert.deepStrictEqual(aggregate.by_phase[phase], { count: 1, input: i + 1, output: 2 }));
+    assert.strictEqual(aggregate.total_input, 10);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('--inline emits the raw integer only', () => {
   const res = run(['--inline', 'abcde']);
   assert.strictEqual(res.status, 0);

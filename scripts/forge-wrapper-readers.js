@@ -182,6 +182,27 @@ const WRAPPER_DIR_READERS = Object.freeze([
     verdict: 'safe-by-construction',
     why: 'Both enumerations stop above the wrapper roots: the classify() readdir lists .gsd itself and only tests membership of the specific names \'milestones\'/\'tasks\', and the discovery walk filters out dotted directories before descending, so neither ever consumes a milestone or task wrapper entry.',
   },
+  {
+    file: 'forge-linked-task.js',
+    dirs: Object.freeze(['.gsd/tasks']),
+    evidence: 'forge-linked-task.js:briefState enumerates only .gsd/tasks/<selected validated task>; noLinks checks its ancestors before the exact BRIEF ownership/collision check.',
+    verdict: 'safe-by-construction',
+    why: 'The specific validated task id selects the directory before readdirSync; it never enumerates the .gsd/tasks wrapper root or treats a grouped container as a task.',
+  },
+  {
+    file: 'forge-native-recovery-delivery.js',
+    dirs: Object.freeze(['.gsd/milestones']),
+    evidence: 'forge-native-recovery-delivery.js:687 enumerates the validated TEMP receipt parent, filtered by the selected receipt basename prefix and .json; milestone paths select explicit research files.',
+    verdict: 'safe-by-construction',
+    why: 'The specific receipt directory and basename/.json filter never enumerate .gsd/milestones; wrapper entries cannot become returned receipt candidates.',
+  },
+  {
+    file: 'forge-orchestrate.js',
+    dirs: Object.freeze(['.gsd/milestones']),
+    evidence: 'forge-orchestrate.js:652 enumerates leases.leasesDir(cwd), which is .gsd/forge/leases, and filters SHA256 .json filenames; milestone paths select one explicit id.',
+    verdict: 'safe-by-construction',
+    why: 'The specific lease directory and hash.json filename filter never enumerate the milestone wrapper root; invalid or symlinked lease records still refuse.',
+  },
 ].map(Object.freeze));
 
 function unlearnedReaders() {

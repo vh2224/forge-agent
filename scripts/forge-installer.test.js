@@ -1089,8 +1089,11 @@ test('procedure runtime: both temporary hosts deliver closure, real callers and 
       }
     }
     const prep = require(path.join(data.forgeHome, 'scripts/forge-task-preparation.js'));
+    // The typed handoff lookup refuses non-canonical task IDs, so the synthetic
+    // fixture uses the installed canonical ID helper instead of a literal.
+    const fixtureTaskId = require(path.join(data.forgeHome, 'scripts/forge-ids.js')).makeTaskId('fixture');
     for (const phase of ['brainstorm', 'discuss', 'research', 'plan']) {
-      const built = prep.buildPreparationPrompt({ phase, cwd: data.projectRoot, taskId: 'T-fixture', inputs: { brief: 'synthetic' } });
+      const built = prep.buildPreparationPrompt({ phase, cwd: data.projectRoot, taskId: fixtureTaskId, inputs: { brief: 'synthetic' } });
       const context = installed.loadProcedureContext({ cwd: data.projectRoot, forgeHome: data.forgeHome, phase: `task-${phase}` });
       assert(built.includes(context.content), `${phase}: missing effective preparation content`);
     }

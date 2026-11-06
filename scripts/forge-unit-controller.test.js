@@ -537,8 +537,1058 @@ function testOwnTemporaryCleanupAndPathDiagnostics() {
   } finally { cleanup(fixture.cwd); }
 }
 
+// --- S02/T06: time options in pure selection and in the shared mutating guard ---------
+const timeSelection = require('./forge-milestone-time-selection.js');
+const milestoneTime = require('./forge-milestone-time.js');
+const pendingQuestions = require('./forge-pending-questions.js');
+const { digest } = require('./forge-code-roots.js');
+const PROPOSALS = require('./fixtures/milestone-options/proposals.json');
+const TM = PROPOSALS.milestone, TNOW = Date.parse('2026-11-02T12:00:00.000Z');
+let timeSerial = 0;
+
+function testPureTimeOptionSelection() {
+  const current = { milestone: 'M1', active_slice: 'S01' };
+  const slice = { id: 'S01', plan_exists: true, research_exists: true, tasks: [{ id: 'T08', checked: false }, { id: 'T10', checked: false }] };
+  const inventory = { roadmap_exists: true, context_exists: true, research_exists: true, slices: [slice] };
+  const choose = changes => controller.selectNextUnit({ state: current, inventory: { ...inventory, ...changes }, prefs: {} });
+  // Without time_options every branch is the legacy order.
+  assert.strictEqual(choose({ roadmap_exists: false }).unit.type, 'plan-milestone');
+  assert.strictEqual(choose({}).unit.id, 'T08', 'legacy keeps the checklist order');
+  const estimate = choose({ roadmap_exists: false, time_options: { status: 'estimate-required', key_suffix: 'a'.repeat(24) } });
+  assert.deepStrictEqual([estimate.unit.key, estimate.key_suffix], ['estimate-milestone/M1', 'a'.repeat(24)]);
+  for (const status of ['materialization-required', 'decision-pending', 'activation-pending']) {
+    const timeOptions = { status, options_sha256: 'b'.repeat(64) };
+    assert.deepStrictEqual(choose({ roadmap_exists: false, time_options: timeOptions }), { ok: false, reason: 'time-option-pending', done: false, milestone: 'M1', time_options: timeOptions }, status);
+  }
+  assert.strictEqual(choose({ roadmap_exists: false, time_options: { status: 'options-invalid' } }).reason, 'time-options-invalid');
+  assert.strictEqual(choose({ roadmap_exists: false, time_options: { status: 'decided', contract: null } }).unit.type, 'plan-milestone');
+  for (const [roadmap, reason] of [['nonconformant', 'time-roadmap-nonconformant'], ['allocation-pending', 'time-allocation-pending'], ['scope-unallocated', 'time-scope-unallocated']]) {
+    const blocked = choose({ context_exists: false, research_exists: false, time_options: { status: 'decided', contract: {}, roadmap: { status: roadmap } } });
+    assert.deepStrictEqual([blocked.ok, blocked.reason, blocked.done], [false, reason, false], 'blocks before discuss, research and slices');
+  }
+  for (const timeOptions of [{ status: 'decided', contract: {}, roadmap: { status: 'conformant' } }, undefined]) {
+    assert.strictEqual(choose({ context_exists: false, ...(timeOptions ? { time_options: timeOptions } : {}) }).unit.type, 'discuss-milestone', 'current plan/discuss/research order');
+  }
+  // An enrolled milestone with a ROADMAP but no attested choice is never legacy, whatever the inventory claims.
+  for (const roadmap_exists of [true, false]) {
+    const rogue = choose({ roadmap_exists, time_options: { status: 'roadmap-preexisting', options_recorded: 0 } });
+    assert.deepStrictEqual([rogue.ok, rogue.reason, rogue.done], [false, 'time-roadmap-selection-missing', false], 'roadmap-preexisting blocks');
+  }
+  // Scoped DAG: an inverted checklist never replaces the dependency map.
+  const dag = (rows, extra = {}) => ({ task_dag: true, slices: [{ ...slice, ...extra, task_dag: { status: 'valid', reasons: [], tasks: rows } }] });
+  assert.strictEqual(choose(dag([{ id: 'T08', depends: ['T10'], completion: 'unproven' }, { id: 'T10', depends: [], completion: 'unproven' }])).unit.id, 'T10');
+  const checkedOnly = choose(dag([{ id: 'T08', depends: ['T10'], completion: 'unproven' }, { id: 'T10', depends: [], completion: 'unproven' }],
+    { tasks: [{ id: 'T08', checked: false }, { id: 'T10', checked: true }] }));
+  assert.deepStrictEqual([checkedOnly.reason, checkedOnly.slice], ['time-task-dependency-pending', 'S01'], 'a checked box is not a proven predecessor');
+  assert.strictEqual(choose(dag([{ id: 'T08', depends: ['T10'], completion: 'unproven' }, { id: 'T10', depends: [], completion: 'proven' }],
+    { tasks: [{ id: 'T08', checked: false }, { id: 'T10', checked: true }] })).unit.id, 'T08');
+  for (const [status, reason] of [['unknown', 'time-task-dependency-unknown'], ['cycle', 'time-task-dependency-cycle'], ['ambiguous', 'time-task-identity-ambiguous']]) {
+    const refused = choose({ task_dag: true, slices: [{ ...slice, task_dag: { status, reasons: ['fixture'], tasks: [] } }] });
+    assert.deepStrictEqual([refused.ok, refused.reason, refused.task_dag.status], [false, reason, status]);
+  }
+}
+
+// Owner fixtures through the canonical T01/T03 APIs; controller records via its own writer.
+function timeRoot() {
+  const cwd = temp();
+  for (const k of ['SCOPE', 'CONTEXT', 'BRAINSTORM']) writeFile(cwd, `.gsd/milestones/${TM}/${TM}-${k}.md`, `# ${k}\nEscopo sintético\n`);
+  fs.mkdirSync(path.join(cwd, '.gsd', 'forge'), { recursive: true });
+  state.write(cwd, { milestone: TM, kind: 'milestone', phase: 'idle', active_slice: '—', active_task: '—', auto_mode: 'on', next_action: 'plan-milestone' });
+  return cwd;
+}
+function writeFile(cwd, relative, content) {
+  const file = path.join(cwd, ...relative.split('/')); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, content); return file;
+}
+function enrolledRoot() {
+  const cwd = timeRoot();
+  assert.strictEqual(timeSelection.enroll(cwd, TM, { source: 'owner', now: TNOW - 3600000 }).status, 'enrolled');
+  return cwd;
+}
+const timePrefs = () => ({ ok: true, prefs: { workflow: { skip_discuss: true, skip_research: true } } });
+function timeOptions(offset = 0, extra = {}) { return { prefsReader: timePrefs, now: () => TNOW + offset, ...extra }; }
+function estimateCompleted(cwd) {
+  const before = timeSelection.readSelectionState(cwd, TM);
+  const key = timeSelection.estimateBeginKey(TM, before.key_suffix), unit = `estimate-milestone/${TM}`;
+  const begun = controller.begin(cwd, { milestone: TM, unit, host_runtime: 'codex', owner_token: 'estimate-owner', idempotency_key: key }, timeOptions(-1800000));
+  controller.complete(cwd, { milestone: TM, unit, host_runtime: 'codex', owner_token: 'estimate-owner', generation: begun.generation,
+    idempotency_key: `${key}:complete`, result: { status: 'succeeded' } }, timeOptions(-1700000));
+  writeFile(cwd, `.gsd/milestones/${TM}/${TM}-OPTIONS.json`, JSON.stringify(PROPOSALS.base, null, 2));
+  return key;
+}
+function answerRound(cwd, label) {
+  const opened = timeSelection.nextRound({ cwd, milestone: TM });
+  assert.strictEqual(opened.status, 'open', JSON.stringify(opened));
+  assert.strictEqual(timeSelection.answerRound({ cwd, milestone: TM, round: opened.question_id, response: label, source: 'user-text' }).status, 'answered');
+}
+function live(cwd) {
+  return { getDecisionHandle(request) {
+    const read = pendingQuestions.continuation({ cwd, identity: request.question.identity_sha256 });
+    const row = read.ok ? read.questions.find(q => q.id === request.question.id) : null;
+    const record = { reference: 'fixture-' + request.question.id, status: 'resolved', answer: row && row.answer, source: 'user-text',
+      resolved_at: new Date(TNOW - 1000).toISOString(), question: { ...request.question } };
+    return milestoneTime.createDecisionAuthority(() => record).issue(record.reference, { milestone: request.milestone, kind: request.kind,
+      request_sha256: digest(request.request), expires_at: TNOW + 60000 }, () => TNOW);
+  } };
+}
+function decidedRoot(options = {}) {
+  const cwd = enrolledRoot();
+  estimateCompleted(cwd);
+  assert.strictEqual(timeSelection.prepareBoundary(cwd, TM, { now: TNOW - 600000 }).status, 'materialized');
+  answerRound(cwd, 'Escolher posição'); answerRound(cwd, 'Escopo completo (curta) (Recomendado)');
+  const decided = timeSelection.decide({ cwd, milestone: TM, liveAdapter: live(cwd), now: TNOW, prefsReader: options.prefsReader || timePrefs,
+    ...(options.failpoint ? { failpoint: options.failpoint } : {}) });
+  if (!options.failpoint) assert.strictEqual(decided.status, 'decided', JSON.stringify(decided));
+  return cwd;
+}
+const ALLOCATION = [{ id: 'prep', kind: 'preparation', ms: 600000, nodes: ['PREP'] }, { id: 's1', kind: 'slice', slice: 'S01', ms: 1800000, nodes: ['N1'] },
+  { id: 's2', kind: 'slice', slice: 'S02', ms: 1200000, nodes: ['N2'] }, { id: 's3', kind: 'slice', slice: 'S03', ms: 1200000, nodes: ['N3'] },
+  { id: 's4', kind: 'slice', slice: 'S04', ms: 1200000, nodes: ['N4'] }, { id: 'int', kind: 'integration', ms: 600000, nodes: ['INT'] },
+  { id: 'rev', kind: 'review', ms: 600000, nodes: ['REV'] }, { id: 'cor', kind: 'corrections', ms: 600000, nodes: ['COR'] }];
+function conformantRoadmap(cwd, checked = [], s02Depends = 'S01') {
+  const skeleton = JSON.parse(/```json\n([\s\S]*?)\n```/.exec(timeSelection.promptBlock(cwd, TM))[1]);
+  const box = id => (checked.includes(id) ? 'x' : ' ');
+  writeFile(cwd, `.gsd/milestones/${TM}/${TM}-ROADMAP.md`, `# ${TM}: Fixture — Roadmap\n\n## Slices\n\n- [${box('S01')}] **S01: Contrato** \`risk:low\` \`depends:[]\`\n`
+    + `- [${box('S02')}] **S02: Seleção** \`risk:low\` \`depends:[${s02Depends}]\`\n- [${box('S03')}] **S03: Resumo** \`risk:low\` \`depends:[]\`\n- [ ] **S04: Relatório** \`risk:low\` \`depends:[S02]\`\n\n`
+    + `## Alocação de tempo\n\n\`\`\`json\n${JSON.stringify({ ...skeleton, allocation: ALLOCATION }, null, 2)}\n\`\`\`\n`);
+}
+function explicitBegin(cwd, unit, key, extra = {}, options = timeOptions()) {
+  return controller.begin(cwd, { milestone: TM, unit, host_runtime: 'codex', owner_token: 'explicit-owner', idempotency_key: key, ...extra }, options);
+}
+function refusedWithoutWrites(cwd, unit, key, code, extra, options) {
+  const before = fs.existsSync(controller.transactionDir(cwd)) ? fs.readdirSync(controller.transactionDir(cwd)).length : 0;
+  assert.throws(() => explicitBegin(cwd, unit, key, extra, options), error => error.code === code, `${unit}/${key} -> ${code}`);
+  assert.strictEqual(controller.lookupRecord(cwd, 'transaction', key), null, 'no transaction');
+  assert.strictEqual(fs.existsSync(controller.transactionDir(cwd)) ? fs.readdirSync(controller.transactionDir(cwd)).length : 0, before, 'no new record');
+  assert.strictEqual(lease.observe(cwd, unit).lease, null, 'no lease');
+}
+// Forged caller data: an injected inventory claiming a decided selection with a roadmap.
+const forgedInventory = { inventoryReader: () => ({ roadmap_exists: false, time_options: { status: 'decided', contract: null } }) };
+
+function testTimeOptionGuardEveryState() {
+  const roots = [];
+  try {
+    // Unenrolled: inventory keeps exactly its legacy keys and the guard is a no-op.
+    const legacy = timeRoot(); roots.push(legacy);
+    assert.deepStrictEqual(Object.keys(controller.discoverInventory(legacy, TM, state.read(legacy, TM))),
+      ['roadmap_exists', 'context_exists', 'research_exists', 'active_slice', 'slices', 'dependency_validation', 'milestone_complete']);
+    assert.strictEqual(explicitBegin(legacy, `plan-milestone/${TM}`, 'legacy-plan').ok, true);
+    // estimate-required: only the estimate of the current basis with its exact key.
+    const cwd = enrolledRoot(); roots.push(cwd);
+    const required = timeSelection.readSelectionState(cwd, TM), key = timeSelection.estimateBeginKey(TM, required.key_suffix);
+    const inventory = controller.discoverInventory(cwd, TM, state.read(cwd, TM));
+    assert.deepStrictEqual([inventory.time_options.status, inventory.time_options.key_suffix], ['estimate-required', required.key_suffix]);
+    const selected = controller.select(cwd, { milestone: TM }, timeOptions());
+    assert.deepStrictEqual([selected.unit.key, selected.key_suffix], [`estimate-milestone/${TM}`, required.key_suffix]);
+    refusedWithoutWrites(cwd, `plan-milestone/${TM}`, 'early-plan', 'time-option-pending');
+    refusedWithoutWrites(cwd, `plan-milestone/${TM}`, 'early-plan-forged', 'time-option-pending', {}, timeOptions(0, forgedInventory));
+    refusedWithoutWrites(cwd, `estimate-milestone/${TM}`, `${key}x`, 'time-option-pending');
+    refusedWithoutWrites(cwd, 'execute-task/T01', 'early-task', 'time-option-pending', { state_patch: { active_slice: 'S01' }, slice: 'S01' });
+    const begun = explicitBegin(cwd, `estimate-milestone/${TM}`, key, {}, timeOptions(-1800000));
+    assert.strictEqual(begun.ok, true);
+    // Replay of the committed begin stays idempotent, before the guard.
+    assert.strictEqual(explicitBegin(cwd, `estimate-milestone/${TM}`, key, {}, timeOptions(-1790000)).reason, 'already-committed');
+    controller.complete(cwd, { milestone: TM, unit: `estimate-milestone/${TM}`, host_runtime: 'codex', owner_token: 'explicit-owner', generation: begun.generation,
+      idempotency_key: `${key}:complete`, result: { status: 'succeeded' } }, timeOptions(-1700000));
+    writeFile(cwd, `.gsd/milestones/${TM}/${TM}-OPTIONS.json`, JSON.stringify(PROPOSALS.base, null, 2));
+    // materialization-required: nothing new is admitted, the old begin still replays.
+    assert.strictEqual(timeSelection.readSelectionState(cwd, TM).status, 'materialization-required');
+    refusedWithoutWrites(cwd, `plan-milestone/${TM}`, 'mat-plan', 'time-option-pending', {}, timeOptions(0, forgedInventory));
+    assert.strictEqual(explicitBegin(cwd, `estimate-milestone/${TM}`, key, {}, timeOptions(-1600000)).reason, 'already-committed');
+    // decision-pending: plan-milestone and every dependent unit refused, even with forged inventory/snapshot.
+    assert.strictEqual(timeSelection.prepareBoundary(cwd, TM, { now: TNOW - 600000 }).status, 'materialized');
+    assert.strictEqual(timeSelection.readSelectionState(cwd, TM).status, 'decision-pending');
+    refusedWithoutWrites(cwd, `plan-milestone/${TM}`, 'pending-plan', 'time-option-pending', {}, timeOptions(0, forgedInventory));
+    refusedWithoutWrites(cwd, `estimate-milestone/${TM}`, 'pending-estimate', 'time-option-pending');
+    // activation-pending (crash after the selection): still pending.
+    const activation = decidedRoot({ failpoint: name => name === 'after-selection' }); roots.push(activation);
+    assert.strictEqual(timeSelection.readSelectionState(activation, TM).status, 'activation-pending');
+    refusedWithoutWrites(activation, `plan-milestone/${TM}`, 'activation-plan', 'time-option-pending', {}, timeOptions(0, forgedInventory));
+    // options-invalid (a selection whose answers do not exist) fails closed.
+    const invalid = enrolledRoot(); roots.push(invalid);
+    fs.copyFileSync(milestoneTime.timePaths({ cwd: activation, milestone: TM }).selection, milestoneTime.timePaths({ cwd: invalid, milestone: TM }).selection);
+    assert.strictEqual(timeSelection.readSelectionState(invalid, TM).status, 'options-invalid');
+    refusedWithoutWrites(invalid, `plan-milestone/${TM}`, 'invalid-plan', 'time-options-invalid', {}, timeOptions(0, forgedInventory));
+    // decided without roadmap: only plan-milestone; estimate and tasks are not admitted.
+    const decided = decidedRoot(); roots.push(decided);
+    refusedWithoutWrites(decided, `estimate-milestone/${TM}`, 'decided-estimate', 'time-unit-not-admitted');
+    refusedWithoutWrites(decided, 'execute-task/T01', 'decided-task', 'time-unit-not-admitted', { state_patch: { active_slice: 'S01' }, slice: 'S01' });
+    assert.strictEqual(explicitBegin(decided, `plan-milestone/${TM}`, 'decided-plan', {}, timeOptions(1000)).ok, true);
+  } finally { for (const cwd of roots) cleanup(cwd); }
+}
+
+function testTimeOptionGuardRoadmapAndBudgetPriority() {
+  const cwd = decidedRoot();
+  try {
+    writeFile(cwd, `.gsd/milestones/${TM}/${TM}-ROADMAP.md`, `# ${TM}\n\n- [ ] **S01: Contrato** \`depends:[]\`\n`);
+    const slice = { state_patch: { active_slice: 'S01' }, slice: 'S01' };
+    refusedWithoutWrites(cwd, 'plan-slice/S01', 'nonconformant-slice', 'time-roadmap-nonconformant', slice);
+    // Budget refusal keeps its priority over the S02 refusal (both apply after the ceiling).
+    const ceiling = milestoneTime.readContract({ cwd, milestone: TM }).contract.ceiling_ms;
+    refusedWithoutWrites(cwd, 'plan-slice/S01', 'exhausted-slice', 'milestone-budget-exhausted', slice, timeOptions(ceiling + 60000));
+    conformantRoadmap(cwd);
+    refusedWithoutWrites(cwd, 'plan-slice/S01', 'allocation-slice', 'time-allocation-pending', slice);
+    assert.strictEqual(timeSelection.prepareBoundary(cwd, TM, { now: TNOW + 1000 }).status, 'allocated');
+    assert.strictEqual(explicitBegin(cwd, 'plan-slice/S01', 'conformant-slice', slice, timeOptions(2000)).ok, true);
+  } finally { cleanup(cwd); }
+}
+
+// R46: a ROADMAP written after enrollment but before an attested choice is not legacy.
+const ROGUE_ROADMAP = `# ${TM}\n\n- [ ] **S01: Contrato** \`depends:[]\`\n`;
+function testRogueRoadmapAfterEnrollment() {
+  const legacy = timeRoot(), cwd = enrolledRoot();
+  try {
+    const s01 = { state_patch: { active_slice: 'S01' }, slice: 'S01' };
+    // Genuine legacy control: no enrollment, a ROADMAP keeps the legacy admission.
+    writeFile(legacy, `.gsd/milestones/${TM}/${TM}-ROADMAP.md`, ROGUE_ROADMAP);
+    assert.strictEqual(timeSelection.readSelectionState(legacy, TM), null);
+    assert.strictEqual(explicitBegin(legacy, 'plan-slice/S01', 'legacy-roadmap', s01).ok, true);
+    // Enrolled with an estimate pending, then the ROADMAP appears without any attested choice.
+    const key = timeSelection.estimateBeginKey(TM, timeSelection.readSelectionState(cwd, TM).key_suffix);
+    writeFile(cwd, `.gsd/milestones/${TM}/${TM}-ROADMAP.md`, ROGUE_ROADMAP);
+    assert.strictEqual(timeSelection.readSelectionState(cwd, TM).status, 'roadmap-preexisting');
+    const next = controller.select(cwd, { milestone: TM }, timeOptions());
+    assert.deepStrictEqual([next.ok, next.reason], [false, 'time-roadmap-selection-missing']);
+    const legacyInventory = { inventoryReader: () => ({ roadmap_exists: true, time_options: null }) };
+    for (const [unit, id, extra] of [['plan-slice/S01', 'rogue-plan', s01], ['execute-task/T01', 'rogue-task', s01], [`estimate-milestone/${TM}`, key, {}]]) {
+      refusedWithoutWrites(cwd, unit, id, 'time-roadmap-selection-missing', extra);
+      refusedWithoutWrites(cwd, unit, `${id}-forged`, 'time-roadmap-selection-missing', extra, timeOptions(0, legacyInventory));
+    }
+  } finally { cleanup(legacy); cleanup(cwd); }
+}
+function testRogueRoadmapBlocksReentry() {
+  const cwd = enrolledRoot();
+  try {
+    const key = timeSelection.estimateBeginKey(TM, timeSelection.readSelectionState(cwd, TM).key_suffix), unit = `estimate-milestone/${TM}`;
+    // A failure needs a slice in its begin state to pass the ancestry check; the estimate unit itself is still the admitted one.
+    const begun = explicitBegin(cwd, unit, key, { state_patch: { active_slice: 'S01' }, slice: 'S01' }, timeOptions(-1800000));
+    assert.strictEqual(begun.ok, true);
+    const recovery = require('./forge-attempt-recovery.js');
+    const request = { cwd, contextRoot: cwd, milestoneId: TM, sliceId: null, taskId: null, scope: 'milestone', phase: 'estimate', unitType: 'estimate-milestone',
+      roadmapFile: path.join(cwd, `.gsd/milestones/${TM}/${TM}-SCOPE.md`), route: { host_runtime: 'codex', resolved_worker_engine: 'codex' } };
+    const receipt = writeFile(cwd, 'receipt.json', JSON.stringify({ phase: 'failed', recovery_identity_sha256: digest(recovery.requestIdentity(request)),
+      failure: { reason_code: 'claude-timeout', provider_called: 'unknown' } }));
+    const live = timeOptions(-1700000, { processProbe: () => 'stopped',
+      inspectAttempt: () => ({ receipt_path: receipt, request, roots: [{ root_id: 'primary', path: cwd }], pending_questions: [] }),
+      reconcileRoots: ({ root }) => ({ root_id: root.root_id, process_stopped: true, reconciled: true }),
+      captureEntryBaseline: () => ({ sha256: 'a'.repeat(64), roots: [{ root_id: 'primary', path: cwd }] }),
+      entryAuthority: recovery.createAuthority(reference => ({ reference, status: 'resolved', answer: 'authorize', resolved_at: new Date().toISOString() })) });
+    const consumed = controller.consumeFailure(cwd, { begin_key: key, unit, milestone: TM, host_runtime: 'codex', owner_token: 'explicit-owner', generation: begun.generation }, live);
+    assert.strictEqual(consumed.reason, 'failure-consumed');
+    writeFile(cwd, `.gsd/milestones/${TM}/${TM}-ROADMAP.md`, ROGUE_ROADMAP);
+    const entry = { entry_id: 'rogue-entry', failure_key: consumed.failure_key, failure_checksum: consumed.failure_checksum, authorization_ref: 'conversation:fixture' };
+    assert.throws(() => controller.reenter(cwd, { milestone: TM, unit, host_runtime: 'codex', owner_token: 'explicit-owner', entry }, live),
+      error => error.code === 'time-roadmap-selection-missing');
+    assert.strictEqual(controller.lookupRecord(cwd, 'transaction', `linked-entry:${require('crypto').createHash('sha256').update('rogue-entry').digest('hex')}`), null);
+    assert.strictEqual(lease.observe(cwd, unit).lease, null);
+  } finally { cleanup(cwd); }
+}
+
+// Opt-in TaskPlan binding: exact selected options digest, position and one allocated node/part (owner state, never caller JSON).
+const NODE_OF = { S01: 'N1', S02: 'N2', S03: 'N3', S04: 'N4' };
+function bindingLines(cwd, slice, node = NODE_OF[slice]) {
+  const selected = timeSelection.readSelectionState(cwd, TM);
+  return `time_options_sha256: ${selected.options_sha256}\ntime_position_id: ${selected.position_id}\ntime_node: ${node}\n`;
+}
+function taskPlanFile(cwd, slice, id, depends, node) {
+  writeFile(cwd, `.gsd/milestones/${TM}/slices/${slice}/tasks/${id}/${id}-PLAN.md`, `---\nid: ${id}\ndepends: [${depends.join(', ')}]\n${bindingLines(cwd, slice, node)}---\n# ${id}\n`);
+}
+function slicePlanFile(cwd, slice, ids) {
+  writeFile(cwd, `.gsd/milestones/${TM}/slices/${slice}/${slice}-PLAN.md`, `# ${slice}\n\n## Tasks\n${ids.map(([id, checked]) => `- [${checked ? 'x' : ' '}] **${id}: Trabalho**`).join('\n')}\n`);
+}
+// Genuine canonical historical proof: a structured multi-criterion plan with declared writes, the
+// captured verification and artifact envelopes of one workspace (concrete blob per declared path),
+// the delivery input and the output produced by the public builder (no hand-made verified JSON).
+const BLOB = 'b'.repeat(40);
+function taskDelivery(cwd, slice, task, options = {}) {
+  const milestone = options.milestone || TM;
+  const delivery = require('./forge-delivery.js'), unit = { type: 'task', id: task, slice, milestone }, key = delivery.unitKey(unit);
+  const base = `.gsd/milestones/${milestone}/slices/${slice}/tasks/${task}`, rel = name => `${base}/${task}-${name}`, source = `src/${task}.js`;
+  // bare: a genuine delivery whose plan declares no source path at all (no inventory to bind).
+  const planText = options.bare
+    ? `---\nid: ${task}\ndepends: []\n${bindingLines(cwd, slice, options.node)}must_haves:\n  truths:\n    - "${task} comportamento observável"\n    - "${task} segundo comportamento"\n  artifacts: []\n  key_links: []\nexpected_output: []\n---\n# ${task}\n`
+    : `---\nid: ${task}\ndepends: []\n${bindingLines(cwd, slice, options.node)}writes:\n  - "${source}"\nmust_haves:\n  truths:\n    - "${task} comportamento observável"\n`
+    + `    - "${task} segundo comportamento"\n  artifacts:\n    - path: "${source}"\n      provides: "${task} source"\n      min_lines: 1\n  key_links: []\nexpected_output:\n  - "${source}"\n---\n# ${task}\n`;
+  writeFile(cwd, rel('PLAN.md'), planText);
+  const at = new Date(TNOW).toISOString();
+  const context = { schema_version: 1, unit, plan_fingerprint: delivery.sha256(planText), code_dir: cwd, revision: 'abc123',
+    workspace: [{ path: source, hash: BLOB }], environment: 'node-test', captured_at: at };
+  const checks = [{ command: 'node check.js one', exitCode: options.exitCode || 0 }, { command: 'node check.js two', exitCode: 0 }];
+  writeFile(cwd, rel('VERIFY-ENVELOPE.json'), JSON.stringify({ ...context, kind: 'verification', result: { passed: !options.exitCode, checks } }));
+  writeFile(cwd, rel('ARTIFACT-ENVELOPE.json'), JSON.stringify({ ...context, kind: 'artifact', result: { passed: true, rows: [{ path: source, exists: true }] } }));
+  const input = { schema_version: 1, unit, plan: rel('PLAN.md'), plan_fingerprint: delivery.sha256(planText), bindings: [
+    { criterion_id: `${key}:truth:0`, coverage: 'behavioral', source: { kind: 'verification', path: rel('VERIFY-ENVELOPE.json'), check_index: 0 } },
+    { criterion_id: `${key}:truth:1`, coverage: 'behavioral', source: { kind: 'verification', path: rel('VERIFY-ENVELOPE.json'), check_index: 1 } },
+    ...(options.bare ? [] : [{ criterion_id: `${key}:artifact:0`, coverage: 'structural', source: { kind: 'artifact', path: rel('ARTIFACT-ENVELOPE.json'), row_index: 0, property: 'exists' } }])] };
+  writeFile(cwd, rel('DELIVERY-INPUT.json'), JSON.stringify(input));
+  const built = delivery.buildDelivery(input, { ownerRoot: cwd, codeDir: cwd });
+  if (!options.exitCode) assert.ok(built.criteria.length === (options.bare ? 2 : 3) && built.criteria.every(item => item.status === 'verificado'), JSON.stringify(built.diagnostics));
+  return writeFile(cwd, rel('DELIVERY.json'), JSON.stringify(built));
+}
+function completeTask(cwd, slice, task, offset, completeKey) {
+  const key = `dag-${slice}-${task}`, unit = `execute-task/${task}`;
+  const begun = explicitBegin(cwd, unit, key, { state_patch: { active_slice: slice }, slice }, timeOptions(offset));
+  // The completion key is the caller's choice; lineage, not its spelling, binds it to the begin.
+  controller.complete(cwd, { milestone: TM, unit, host_runtime: 'codex', owner_token: 'explicit-owner', generation: begun.generation,
+    idempotency_key: completeKey || `${key}-finish-${task}`, result: { status: 'succeeded' } }, timeOptions(offset + 500));
+}
+// Genuine canonical slice closure: the review gate record, the slice delivery built by the public
+// builder over the exact slice plan and every child delivery, then the real complete-slice transition.
+function closeSlice(cwd, slice, tasks, offset, options = {}) {
+  const milestone = options.milestone || TM;
+  const delivery = require('./forge-delivery.js'), base = `.gsd/milestones/${milestone}/slices/${slice}`;
+  if (options.review !== false) writeFile(cwd, `${base}/${slice}-REVIEW.md`, `# ${slice} review\n\n**Outcome:** 0 resolved · 0 conceded · 0 open\n`);
+  const planText = fs.readFileSync(path.join(cwd, ...`${base}/${slice}-PLAN.md`.split('/')), 'utf8');
+  const input = { schema_version: 1, unit: { type: 'slice', id: slice, milestone }, plan: `${base}/${slice}-PLAN.md`, plan_fingerprint: delivery.sha256(planText), bindings: [],
+    expected_children: tasks.map(task => ({ unit: { type: 'task', id: task, slice, milestone }, delivery: `${base}/tasks/${task}/${task}-DELIVERY.json` })),
+    facts: options.facts || { review: { status: 'completed with 0 open', reference: `${slice}-REVIEW.md` } } };
+  writeFile(cwd, `${base}/${slice}-DELIVERY-INPUT.json`, JSON.stringify(input));
+  writeFile(cwd, `${base}/${slice}-DELIVERY.json`, JSON.stringify(delivery.buildDelivery(input, { ownerRoot: cwd, codeDir: cwd })));
+  if (options.complete === false) return;
+  const key = options.milestone ? `close-${milestone}-${slice}` : `close-${slice}`, unit = `complete-slice/${slice}`;
+  const begun = controller.begin(cwd, { milestone, unit, host_runtime: 'codex', owner_token: 'explicit-owner', idempotency_key: key, state_patch: { active_slice: slice }, slice }, timeOptions(offset));
+  controller.complete(cwd, { milestone, unit, host_runtime: 'codex', owner_token: 'explicit-owner', generation: begun.generation,
+    idempotency_key: `${key}-done`, result: { status: 'succeeded' } }, timeOptions(offset + 500));
+}
+function taskProof(cwd, slice, task) {
+  return controller.discoverInventory(cwd, TM, state.read(cwd, TM), timeOptions()).slices.find(item => item.id === slice).task_dag.tasks.find(item => item.id === task).completion;
+}
+function testHistoricalProofTamperAndLineage() {
+  const cwd = decidedRoot();
+  try {
+    conformantRoadmap(cwd);
+    assert.strictEqual(timeSelection.prepareBoundary(cwd, TM, { now: TNOW + 1000 }).status, 'allocated');
+    slicePlanFile(cwd, 'S01', [['T08', false], ['T10', false]]); taskPlanFile(cwd, 'S01', 'T08', ['T10']); taskPlanFile(cwd, 'S01', 'T10', []);
+    const s01 = { state_patch: { active_slice: 'S01' }, slice: 'S01' };
+    // A genuine delivery without a committed completion stays blocked.
+    taskDelivery(cwd, 'S01', 'T10');
+    assert.strictEqual(taskProof(cwd, 'S01', 'T10'), 'unproven');
+    refusedWithoutWrites(cwd, 'execute-task/T08', 'T08-delivery-only', 'time-task-dependency-pending', s01);
+    // Independent completion key through the real begin/complete: lineage proves it.
+    completeTask(cwd, 'S01', 'T10', 3000, 'finish-T10');
+    assert.strictEqual(taskProof(cwd, 'S01', 'T10'), 'proven');
+    assert.strictEqual(controller.select(cwd, { milestone: TM }, timeOptions()).unit.key, 'execute-task/T08');
+    // Replay of the same completion stays idempotent and the proof is unchanged.
+    const begun = controller.lookupRecord(cwd, 'transaction', 'dag-S01-T10');
+    const replay = controller.complete(cwd, { milestone: TM, unit: 'execute-task/T10', host_runtime: 'codex', owner_token: 'explicit-owner', generation: begun.lease_generation,
+      idempotency_key: 'finish-T10', result: { status: 'succeeded' } }, timeOptions(3500));
+    assert.strictEqual(replay.ok, true);
+    assert.strictEqual(taskProof(cwd, 'S01', 'T10'), 'proven');
+    // Legitimate later code changes never invalidate completed history.
+    writeFile(cwd, 'scripts/unrelated.js', 'module.exports = 2;\n');
+    assert.strictEqual(taskProof(cwd, 'S01', 'T10'), 'proven');
+    const dir = `.gsd/milestones/${TM}/slices/S01/tasks/T10`, read = name => fs.readFileSync(path.join(cwd, dir, `T10-${name}`), 'utf8');
+    const delivery = require('./forge-delivery.js');
+    const forge = (name, edit) => { const value = JSON.parse(read(name)); edit(value); return JSON.stringify(value); };
+    const put = (name, text) => writeFile(cwd, `${dir}/T10-${name}`, text);
+    const names = ['DELIVERY.json', 'VERIFY-ENVELOPE.json', 'PLAN.md', 'DELIVERY-INPUT.json'];
+    const tampers = {
+      'forged status re-fingerprinted': () => put('DELIVERY.json', JSON.stringify(delivery.finalizeOutput(JSON.parse(forge('DELIVERY.json', v => { v.criteria[0].status = 'verificado'; v.criteria[0].pending = []; v.criteria[0].evidence = []; }))))),
+      'evidence flipped': () => put('VERIFY-ENVELOPE.json', forge('VERIFY-ENVELOPE.json', v => { v.result.checks[0].exitCode = 1; v.result.passed = false; })),
+      'plan edited': () => put('PLAN.md', `${read('PLAN.md')}\nextra\n`),
+      'input retargeted': () => put('DELIVERY-INPUT.json', forge('DELIVERY-INPUT.json', v => { v.unit.id = 'T11'; })),
+      'foreign root': () => put('VERIFY-ENVELOPE.json', forge('VERIFY-ENVELOPE.json', v => { v.code_dir = os.tmpdir(); })),
+      'input missing': () => fs.rmSync(path.join(cwd, dir, 'T10-DELIVERY-INPUT.json')),
+    };
+    let index = 0;
+    for (const [label, tamper] of Object.entries(tampers)) {
+      const saved = Object.fromEntries(names.map(name => [name, read(name)]));
+      tamper();
+      assert.strictEqual(taskProof(cwd, 'S01', 'T10'), 'unproven', label);
+      assert.strictEqual(controller.select(cwd, { milestone: TM }, timeOptions()).unit.key, 'execute-task/T10', `next ${label}`);
+      refusedWithoutWrites(cwd, 'execute-task/T08', `T08-tamper-${index++}`, 'time-task-dependency-pending', s01);
+      for (const [name, text] of Object.entries(saved)) put(name, text);
+      assert.strictEqual(taskProof(cwd, 'S01', 'T10'), 'proven', `restored ${label}`);
+    }
+    // A genuine completion with a failing capture never proves.
+    taskDelivery(cwd, 'S01', 'T10', { exitCode: 1 });
+    assert.strictEqual(taskProof(cwd, 'S01', 'T10'), 'unproven');
+    // Foreign scope: the same delivery in another slice has no completion of its own.
+    slicePlanFile(cwd, 'S03', [['T10', false]]); taskPlanFile(cwd, 'S03', 'T10', []); taskDelivery(cwd, 'S03', 'T10');
+    assert.strictEqual(taskProof(cwd, 'S03', 'T10'), 'unproven');
+  } finally { cleanup(cwd); }
+}
+
+// R53: captured metadata the rebuilt delivery fingerprint does not cover (capture time, declared-source
+// bindings, consistency between the verification and artifact captures of one workspace).
+function captureTampers(cwd, dir, task) {
+  const file = name => path.join(cwd, dir, `${task}-${name}`);
+  const edit = (name, change) => { const value = JSON.parse(fs.readFileSync(file(name), 'utf8')); change(value); fs.writeFileSync(file(name), JSON.stringify(value)); };
+  const both = change => { edit('VERIFY-ENVELOPE.json', change); edit('ARTIFACT-ENVELOPE.json', change); };
+  return {
+    'capture after the committed completion': () => both(v => { v.captured_at = new Date(TNOW + 86400000).toISOString(); }),
+    'capture time malformed': () => both(v => { v.captured_at = 'ontem'; }),
+    'declared source binding missing': () => both(v => { v.workspace = []; }),
+    'undeclared path in place of the declared one': () => both(v => { v.workspace = [{ path: 'src/other.js', hash: BLOB }]; }),
+    'source binding changed in one capture': () => edit('VERIFY-ENVELOPE.json', v => { v.workspace[0].hash = 'd'.repeat(40); }),
+    'artifact captured before verification': () => edit('ARTIFACT-ENVELOPE.json', v => { v.captured_at = new Date(TNOW - 60000).toISOString(); }),
+  };
+}
+const CAPTURE_FILES = ['DELIVERY.json', 'DELIVERY-INPUT.json', 'PLAN.md', 'VERIFY-ENVELOPE.json', 'ARTIFACT-ENVELOPE.json'];
+function completionTs(cwd, key) { return controller.readEvents(controller.eventsFile(cwd, TM)).find(item => item.idempotency_key === key).ts; }
+function testHistoricalCaptureMetadataAndInventory() {
+  const cwd = decidedRoot();
+  try {
+    conformantRoadmap(cwd);
+    assert.strictEqual(timeSelection.prepareBoundary(cwd, TM, { now: TNOW + 1000 }).status, 'allocated');
+    slicePlanFile(cwd, 'S01', [['T08', false], ['T10', false]]); taskPlanFile(cwd, 'S01', 'T08', ['T10']); taskPlanFile(cwd, 'S01', 'T10', []);
+    const s01 = { state_patch: { active_slice: 'S01' }, slice: 'S01' };
+    completeTask(cwd, 'S01', 'T10', 3000, 'finish-T10');
+    taskDelivery(cwd, 'S01', 'T10');
+    const clock = require('./forge-milestone-time-clock.js'), delivery = require('./forge-delivery.js');
+    const request = { cwd, milestone: TM, slice: 'S01', task: 'T10', completedAt: completionTs(cwd, 'finish-T10') };
+    // Positive: structured multi-criterion plan, declared writes and the two real captures of one workspace.
+    const before = treeSnapshot(cwd);
+    const proof = clock.readHistoricalTaskDelivery(request);
+    assert.deepStrictEqual([proof.status, proof.coverage, proof.current_source_conformity, proof.captures.length], ['proven', { criteria: 3, captures: 2, sources: 1 }, 'not-evaluated', 2]);
+    assert.strictEqual(treeSnapshot(cwd), before, 'readonly proof');
+    assert.strictEqual(taskProof(cwd, 'S01', 'T10'), 'proven');
+    assert.strictEqual(controller.select(cwd, { milestone: TM }, timeOptions()).unit.key, 'execute-task/T08');
+    // The capture never postdates the committed completion instant; a malformed instant proves nothing.
+    assert.strictEqual(clock.readHistoricalTaskDelivery({ ...request, completedAt: new Date(TNOW - 1).toISOString() }).reason, 'delivery-capture-time-invalid');
+    assert.strictEqual(clock.readHistoricalTaskDelivery({ ...request, completedAt: 'agora' }).reason, 'delivery-completion-time-invalid');
+    assert.strictEqual(clock.readHistoricalTaskDelivery({ ...request, task: '../T10' }).reason, 'delivery-task-invalid');
+    // Legitimate later code changes never invalidate the history (today's bytes are not compared).
+    writeFile(cwd, 'src/T10.js', 'module.exports = "later";\n');
+    assert.strictEqual(clock.readHistoricalTaskDelivery(request).status, 'proven');
+    const dir = `.gsd/milestones/${TM}/slices/S01/tasks/T10`, file = name => path.join(cwd, dir, `T10-${name}`);
+    const stored = () => JSON.parse(fs.readFileSync(file('DELIVERY.json'), 'utf8')).delivery_fingerprint;
+    let index = 0;
+    for (const [label, tamper] of Object.entries(captureTampers(cwd, dir, 'T10'))) {
+      const saved = Object.fromEntries(CAPTURE_FILES.map(name => [name, fs.readFileSync(file(name))]));
+      tamper();
+      try {
+        // Metadata tampering keeps the rebuilt fingerprint: it must not pass merely because of that.
+        const rebuilt = delivery.buildDelivery(JSON.parse(fs.readFileSync(file('DELIVERY-INPUT.json'), 'utf8')), { ownerRoot: cwd, codeDir: cwd });
+        assert.strictEqual(rebuilt.delivery_fingerprint, stored(), `${label}: fingerprint unchanged`);
+        const refused = clock.readHistoricalTaskDelivery(request);
+        assert.strictEqual(refused.status, 'unproven', label);
+        assert.match(refused.reason, /^delivery-/, label);
+        assert.strictEqual(taskProof(cwd, 'S01', 'T10'), 'unproven', label);
+        assert.strictEqual(controller.select(cwd, { milestone: TM }, timeOptions()).unit.key, 'execute-task/T10', `next ${label}`);
+        refusedWithoutWrites(cwd, 'execute-task/T08', `T08-capture-${index++}`, 'time-task-dependency-pending', s01);
+      } finally { for (const [name, bytes] of Object.entries(saved)) fs.writeFileSync(file(name), bytes); }
+      assert.strictEqual(taskProof(cwd, 'S01', 'T10'), 'proven', `restored ${label}`);
+    }
+    // A genuine delivery whose plan declares no source path has no inventory to bind.
+    taskDelivery(cwd, 'S01', 'T10', { bare: true });
+    assert.strictEqual(clock.readHistoricalTaskDelivery(request).reason, 'delivery-source-inventory-missing');
+    refusedWithoutWrites(cwd, 'execute-task/T08', 'T08-capture-bare', 'time-task-dependency-pending', s01);
+    taskDelivery(cwd, 'S01', 'T10');
+    assert.strictEqual(taskProof(cwd, 'S01', 'T10'), 'proven');
+  } finally { cleanup(cwd); }
+}
+// R54: the published begin and completion events are bound symmetrically to the committed
+// transactions (only the stream sequence removed), with finite ordered safe-integer sequences.
+function testCompletionEventLineage() {
+  const cwd = decidedRoot();
+  try {
+    conformantRoadmap(cwd);
+    assert.strictEqual(timeSelection.prepareBoundary(cwd, TM, { now: TNOW + 1000 }).status, 'allocated');
+    slicePlanFile(cwd, 'S01', [['T08', false], ['T10', false]]); taskPlanFile(cwd, 'S01', 'T08', ['T10']); taskPlanFile(cwd, 'S01', 'T10', []);
+    completeTask(cwd, 'S01', 'T10', 3000, 'finish-T10');
+    taskDelivery(cwd, 'S01', 'T10');
+    assert.strictEqual(taskProof(cwd, 'S01', 'T10'), 'proven', 'real committed begin/completion positive');
+    const file = controller.eventsFile(cwd, TM), original = fs.readFileSync(file, 'utf8');
+    const editEvent = (key, change) => {
+      const rows = original.split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
+      change(rows.find(row => row.idempotency_key === key));
+      fs.writeFileSync(file, rows.map(row => JSON.stringify(row)).join('\n') + '\n');
+    };
+    const cases = [
+      ['begin unit (scope) edited', 'dag-S01-T10', row => { row.unit = 'execute-task/T11'; }],
+      ['begin host edited', 'dag-S01-T10', row => { row.host_runtime = 'claude'; }],
+      ['begin action edited', 'dag-S01-T10', row => { row.action = 'complete'; }],
+      ['begin milestone edited', 'dag-S01-T10', row => { row.milestone = 'M-OUTRA'; }],
+      ['begin event name edited', 'dag-S01-T10', row => { row.event = 'unit-transition'; }],
+      ['begin event missing', 'dag-S01-T10', row => { row.idempotency_key = 'dag-S01-T10-renamed'; }],
+      ['begin sequence not an integer', 'dag-S01-T10', row => { row.sequence = String(row.sequence); }],
+      ['begin sequence zero', 'dag-S01-T10', row => { row.sequence = 0; }],
+      ['begin sequence after the completion', 'dag-S01-T10', row => { row.sequence = 9999; }],
+      ['completion sequence fractional', 'finish-T10', row => { row.sequence += 0.5; }],
+      ['completion sequence unsafe', 'finish-T10', row => { row.sequence = Number.MAX_SAFE_INTEGER + 2; }],
+      ['completion outcome edited', 'finish-T10', row => { row.outcome = 'failed'; }],
+    ];
+    for (const [label, key, change] of cases) {
+      editEvent(key, change);
+      try { assert.strictEqual(taskProof(cwd, 'S01', 'T10'), 'unproven', label); }
+      finally { fs.writeFileSync(file, original); }
+      assert.strictEqual(taskProof(cwd, 'S01', 'T10'), 'proven', `restored ${label}`);
+    }
+    // The same refusal at next and at an explicit begin of the dependent, with zero writes.
+    editEvent('dag-S01-T10', row => { row.host_runtime = 'claude'; });
+    try {
+      assert.strictEqual(controller.select(cwd, { milestone: TM }, timeOptions()).unit.key, 'execute-task/T10');
+      refusedWithoutWrites(cwd, 'execute-task/T08', 'T08-begin-host-edited', 'time-task-dependency-pending', { state_patch: { active_slice: 'S01' }, slice: 'S01' });
+    } finally { fs.writeFileSync(file, original); }
+    assert.strictEqual(controller.select(cwd, { milestone: TM }, timeOptions()).unit.key, 'execute-task/T08');
+  } finally { cleanup(cwd); }
+}
+// R55: review.mode disabled is a named incompatibility before a contracted activation and for every
+// new admission after it; no-contract and unenrolled milestones keep their normal behavior.
+function testReviewModeIncompatibleWithContract() {
+  const disabled = () => ({ ok: true, prefs: { workflow: { skip_discuss: true, skip_research: true }, review: { mode: 'disabled' } } });
+  const roots = [];
+  try {
+    const cwd = enrolledRoot(); roots.push(cwd);
+    estimateCompleted(cwd);
+    assert.strictEqual(timeSelection.prepareBoundary(cwd, TM, { now: TNOW - 600000 }).status, 'materialized');
+    answerRound(cwd, 'Escolher posição'); answerRound(cwd, 'Escopo completo (curta) (Recomendado)');
+    assert.deepStrictEqual(timeSelection.contractCompatibility(cwd, TM, { prefsReader: disabled }), { status: 'incompatible', reason: 'review-disabled', review_mode: 'disabled' });
+    assert.deepStrictEqual(timeSelection.contractCompatibility(cwd, TM, { prefsReader: timePrefs }), { status: 'compatible', reason: null, review_mode: 'enabled' });
+    assert.strictEqual(timeSelection.contractCompatibility(cwd, TM, { prefsReader: () => ({ ok: false, errors: [] }) }).status, 'unknown');
+    // The contracted choice is refused by name before any host callback or write.
+    let called = 0;
+    const counting = { getDecisionHandle: request => { called++; return live(cwd).getDecisionHandle(request); } };
+    const before = treeSnapshot(cwd);
+    const refused = timeSelection.decide({ cwd, milestone: TM, liveAdapter: counting, now: TNOW, prefsReader: disabled });
+    assert.deepStrictEqual([refused.status, refused.reason, called], ['refused', 'time-review-disabled-incompatible', 0]);
+    assert.strictEqual(timeSelection.decide({ cwd, milestone: TM, liveAdapter: counting, now: TNOW, prefsReader: () => ({ ok: false, errors: [] }) }).reason, 'time-review-mode-unknown');
+    assert.strictEqual(treeSnapshot(cwd), before, 'no selection, contract or question written');
+    assert.strictEqual(timeSelection.readSelectionState(cwd, TM).status, 'decision-pending');
+    // Restoring a compatible mode activates the same recorded answers, without a new question.
+    assert.strictEqual(timeSelection.decide({ cwd, milestone: TM, liveAdapter: live(cwd), now: TNOW, prefsReader: timePrefs }).status, 'decided');
+    // After activation: a new admission is refused with zero writes; an admitted begin still replays.
+    refusedWithoutWrites(cwd, `plan-milestone/${TM}`, 'review-off-plan', 'time-review-disabled-incompatible', {}, timeOptions(1000, { prefsReader: disabled }));
+    assert.strictEqual(explicitBegin(cwd, `plan-milestone/${TM}`, 'review-on-plan', {}, timeOptions(2000)).ok, true);
+    assert.strictEqual(explicitBegin(cwd, `plan-milestone/${TM}`, 'review-on-plan', {}, timeOptions(2500, { prefsReader: disabled })).reason, 'already-committed');
+    // activation-pending recovery waits too, then resumes with the compatible mode.
+    const pending = decidedRoot({ failpoint: name => name === 'after-selection' }); roots.push(pending);
+    assert.strictEqual(timeSelection.readSelectionState(pending, TM).status, 'activation-pending');
+    assert.strictEqual(timeSelection.decide({ cwd: pending, milestone: TM, liveAdapter: live(pending), now: TNOW, prefsReader: disabled }).reason, 'time-review-disabled-incompatible');
+    assert.strictEqual(timeSelection.readSelectionState(pending, TM).status, 'activation-pending');
+    assert.strictEqual(timeSelection.decide({ cwd: pending, milestone: TM, liveAdapter: live(pending), now: TNOW, prefsReader: timePrefs }).resumed, true);
+    // Unenrolled and attested no-contract milestones keep their behavior with review disabled.
+    const legacy = timeRoot(); roots.push(legacy);
+    assert.strictEqual(explicitBegin(legacy, `plan-milestone/${TM}`, 'legacy-review-off', {}, timeOptions(0, { prefsReader: disabled })).ok, true);
+    const none = enrolledRoot(); roots.push(none);
+    estimateCompleted(none);
+    assert.strictEqual(timeSelection.prepareBoundary(none, TM, { now: TNOW - 600000 }).status, 'materialized');
+    answerRound(none, 'Sem contrato');
+    assert.strictEqual(timeSelection.decide({ cwd: none, milestone: TM, liveAdapter: live(none), now: TNOW, prefsReader: disabled }).choice, 'no-contract');
+    assert.strictEqual(explicitBegin(none, `plan-milestone/${TM}`, 'none-review-off', {}, timeOptions(1000, { prefsReader: disabled })).ok, true);
+  } finally { for (const cwd of roots) cleanup(cwd); }
+}
+
+function testScopedTaskDagGuardAndReentry() {
+  const cwd = decidedRoot();
+  try {
+    conformantRoadmap(cwd);
+    assert.strictEqual(timeSelection.prepareBoundary(cwd, TM, { now: TNOW + 1000 }).status, 'allocated');
+    slicePlanFile(cwd, 'S01', [['T08', false], ['T10', false]]); taskPlanFile(cwd, 'S01', 'T08', ['T10']); taskPlanFile(cwd, 'S01', 'T10', []);
+    const s01 = { state_patch: { active_slice: 'S01' }, slice: 'S01' };
+    // Inverted list: selection admits T10; an explicit begin of T08 before T10 is refused.
+    const inventory = controller.discoverInventory(cwd, TM, state.read(cwd, TM));
+    assert.deepStrictEqual([inventory.task_dag, inventory.slices[0].task_dag.status], [true, 'valid']);
+    refusedWithoutWrites(cwd, 'execute-task/T08', 'T08-before-T10', 'time-task-dependency-pending', s01);
+    // A checked box and a SUMMARY alone never prove the predecessor.
+    slicePlanFile(cwd, 'S01', [['T08', false], ['T10', true]]); writeFile(cwd, `.gsd/milestones/${TM}/slices/S01/tasks/T10/T10-SUMMARY.md`, '# T10\n');
+    refusedWithoutWrites(cwd, 'execute-task/T08', 'T08-summary-only', 'time-task-dependency-pending', s01);
+    completeTask(cwd, 'S01', 'T10', 3000);
+    refusedWithoutWrites(cwd, 'execute-task/T08', 'T08-no-delivery', 'time-task-dependency-pending', s01);
+    const deliveryPath = taskDelivery(cwd, 'S01', 'T10');
+    // Same task IDs in S03 do not collide with S01's proof.
+    slicePlanFile(cwd, 'S03', [['T08', false], ['T10', false]]); taskPlanFile(cwd, 'S03', 'T08', ['T10']); taskPlanFile(cwd, 'S03', 'T10', []);
+    refusedWithoutWrites(cwd, 'execute-task/T08', 'S03-T08', 'time-task-dependency-pending', { state_patch: { active_slice: 'S03' }, slice: 'S03' });
+    // A present but malformed or repeated depends declaration never becomes an empty list (T08 would turn into a root).
+    const planOf = text => writeFile(cwd, `.gsd/milestones/${TM}/slices/S01/tasks/T08/T08-PLAN.md`, `---\nid: T08\n${text}---\n# T08\n`);
+    for (const [label, text] of [['scalar', 'depends: T10\n'], ['broken-inline', 'depends: [T10\n'], ['duplicate', 'depends: [T10]\ndepends: []\n']]) {
+      planOf(text);
+      const blockedNext = controller.select(cwd, { milestone: TM }, timeOptions());
+      assert.deepStrictEqual([blockedNext.ok, blockedNext.reason], [false, 'time-task-dependency-unknown'], `next ${label}`);
+      refusedWithoutWrites(cwd, 'execute-task/T08', `T08-malformed-${label}`, 'time-task-dependency-unknown', s01);
+    }
+    taskPlanFile(cwd, 'S01', 'T08', ['T10']);
+    // T08 begins once the scoped completion and verified delivery exist; then fails and is consumed.
+    const begun = explicitBegin(cwd, 'execute-task/T08', 'T08-begin', s01, timeOptions(5000));
+    assert.strictEqual(begun.ok, true);
+    const recovery = require('./forge-attempt-recovery.js');
+    const request = { cwd, contextRoot: cwd, milestoneId: TM, sliceId: 'S01', taskId: 'T08', scope: 'milestone', phase: 'execute', unitType: 'execute-task',
+      roadmapFile: path.join(cwd, `.gsd/milestones/${TM}/${TM}-ROADMAP.md`), route: { host_runtime: 'codex', resolved_worker_engine: 'codex' } };
+    const receipt = writeFile(cwd, 'receipt.json', JSON.stringify({ phase: 'failed', recovery_identity_sha256: digest(recovery.requestIdentity(request)),
+      failure: { reason_code: 'claude-timeout', provider_called: 'unknown' } }));
+    const live = timeOptions(6000, { processProbe: () => 'stopped',
+      inspectAttempt: () => ({ receipt_path: receipt, request, roots: [{ root_id: 'primary', path: cwd }], pending_questions: [] }),
+      reconcileRoots: ({ root }) => ({ root_id: root.root_id, process_stopped: true, reconciled: true }),
+      captureEntryBaseline: () => ({ sha256: 'a'.repeat(64), roots: [{ root_id: 'primary', path: cwd }] }),
+      entryAuthority: recovery.createAuthority(reference => ({ reference, status: 'resolved', answer: 'authorize', resolved_at: new Date().toISOString() })) });
+    const consumed = controller.consumeFailure(cwd, { begin_key: 'T08-begin', unit: 'execute-task/T08', milestone: TM, host_runtime: 'codex', owner_token: 'explicit-owner',
+      generation: begun.generation }, live);
+    assert.strictEqual(consumed.reason, 'failure-consumed');
+    const entry = { entry_id: 'T08-entry', failure_key: consumed.failure_key, failure_checksum: consumed.failure_checksum, authorization_ref: 'conversation:fixture' };
+    const reenter = () => controller.reenter(cwd, { milestone: TM, unit: 'execute-task/T08', host_runtime: 'codex', owner_token: 'explicit-owner', entry }, live);
+    // A malformed or repeated depends declaration refuses reentry too, before any lease or transaction.
+    const entryKey = `linked-entry:${require('crypto').createHash('sha256').update('T08-entry').digest('hex')}`;
+    for (const [label, text] of [['scalar', 'depends: T10\n'], ['broken-inline', 'depends: [T10\n'], ['duplicate', 'depends: [T10]\ndepends: []\n']]) {
+      planOf(text);
+      assert.throws(reenter, error => error.code === 'time-task-dependency-unknown', `reentry ${label}`);
+      assert.strictEqual(controller.lookupRecord(cwd, 'transaction', entryKey), null, `reentry ${label}: no transaction`);
+      assert.strictEqual(lease.observe(cwd, 'execute-task/T08').lease, null, `reentry ${label}: no lease`);
+    }
+    taskPlanFile(cwd, 'S01', 'T08', ['T10']);
+    // Reentry with the predecessor proof gone is refused before any lease or transaction.
+    fs.renameSync(deliveryPath, deliveryPath + '.away');
+    assert.throws(reenter, error => error.code === 'time-task-dependency-pending');
+    assert.strictEqual(controller.lookupRecord(cwd, 'transaction', `linked-entry:${require('crypto').createHash('sha256').update('T08-entry').digest('hex')}`), null);
+    assert.strictEqual(lease.observe(cwd, 'execute-task/T08').lease, null);
+    fs.renameSync(deliveryPath + '.away', deliveryPath);
+    // A tampered captured envelope (status in DELIVERY.json left intact) refuses reentry too.
+    const envelopePath = deliveryPath.replace('-DELIVERY.json', '-VERIFY-ENVELOPE.json'), envelopeText = fs.readFileSync(envelopePath, 'utf8');
+    fs.writeFileSync(envelopePath, envelopeText.replace('"exitCode":0', '"exitCode":1'));
+    assert.throws(reenter, error => error.code === 'time-task-dependency-pending');
+    assert.strictEqual(lease.observe(cwd, 'execute-task/T08').lease, null);
+    fs.writeFileSync(envelopePath, envelopeText);
+    // R53 at a new reentry: future/malformed capture time and missing/changed source bindings refuse with zero writes.
+    const t10Dir = `.gsd/milestones/${TM}/slices/S01/tasks/T10`, t10File = name => path.join(cwd, t10Dir, `T10-${name}`);
+    for (const [label, tamper] of Object.entries(captureTampers(cwd, t10Dir, 'T10'))) {
+      const saved = Object.fromEntries(CAPTURE_FILES.map(name => [name, fs.readFileSync(t10File(name))]));
+      tamper();
+      try {
+        assert.throws(reenter, error => error.code === 'time-task-dependency-pending', `reentry ${label}`);
+        assert.strictEqual(controller.lookupRecord(cwd, 'transaction', entryKey), null, `reentry ${label}: no transaction`);
+        assert.strictEqual(lease.observe(cwd, 'execute-task/T08').lease, null, `reentry ${label}: no lease`);
+      } finally { for (const [name, bytes] of Object.entries(saved)) fs.writeFileSync(t10File(name), bytes); }
+    }
+    // A missing or unallocated task-node binding (same choice, roadmap and contract) refuses reentry too, with zero writes.
+    const t08Plan = path.join(cwd, `.gsd/milestones/${TM}/slices/S01/tasks/T08/T08-PLAN.md`), t08Saved = fs.readFileSync(t08Plan, 'utf8');
+    for (const [label, edit] of [['binding removed', text => text.replace(/^time_.*\n/gm, '')], ['unallocated node', text => text.replace(/time_node: .*/, 'time_node: N9')]]) {
+      fs.writeFileSync(t08Plan, edit(t08Saved));
+      assert.throws(reenter, error => error.code === 'time-scope-unallocated', `reentry ${label}`);
+      assert.strictEqual(controller.lookupRecord(cwd, 'transaction', entryKey), null, `reentry ${label}: no transaction`);
+      assert.strictEqual(lease.observe(cwd, 'execute-task/T08').lease, null, `reentry ${label}: no lease`);
+    }
+    fs.writeFileSync(t08Plan, t08Saved);
+    const entered = reenter();
+    assert.strictEqual(entered.reason, 'entry-ready');
+    // A committed entry replays without consulting the guard again.
+    fs.renameSync(deliveryPath, deliveryPath + '.away');
+    assert.strictEqual(reenter().reason, 'entry-ready');
+    fs.renameSync(deliveryPath + '.away', deliveryPath);
+    // R54: a genuine completion after the linked reentry (independent key) proves T08 through the
+    // reentry's own committed begin/completion events; the failed first begin never pairs with it.
+    assert.strictEqual(taskProof(cwd, 'S01', 'T08'), 'unproven');
+    const entryRecord = controller.lookupRecord(cwd, 'transaction', entryKey);
+    assert.notStrictEqual(entryRecord.lease_generation, begun.generation);
+    controller.complete(cwd, { milestone: TM, unit: 'execute-task/T08', host_runtime: entryRecord.host_runtime, owner_token: 'explicit-owner',
+      generation: entryRecord.lease_generation, idempotency_key: 'finish-T08-after-reentry', result: { status: 'succeeded' } }, timeOptions(7000));
+    taskDelivery(cwd, 'S01', 'T08');
+    assert.strictEqual(taskProof(cwd, 'S01', 'T08'), 'proven', 'completion after linked reentry');
+  } finally { cleanup(cwd); }
+}
+
+// Begin a task, fail it and consume the failure so reentry can be exercised against the current owner plans.
+function failedBegin(cwd, slice, task, beginKey, offset, entryId) {
+  const recovery = require('./forge-attempt-recovery.js'), unit = `execute-task/${task}`;
+  const begun = explicitBegin(cwd, unit, beginKey, { state_patch: { active_slice: slice }, slice }, timeOptions(offset));
+  assert.strictEqual(begun.ok, true);
+  const request = { cwd, contextRoot: cwd, milestoneId: TM, sliceId: slice, taskId: task, scope: 'milestone', phase: 'execute', unitType: 'execute-task',
+    roadmapFile: path.join(cwd, `.gsd/milestones/${TM}/${TM}-ROADMAP.md`), route: { host_runtime: 'codex', resolved_worker_engine: 'codex' } };
+  const receipt = writeFile(cwd, `receipt-${task}.json`, JSON.stringify({ phase: 'failed', recovery_identity_sha256: digest(recovery.requestIdentity(request)),
+    failure: { reason_code: 'claude-timeout', provider_called: 'unknown' } }));
+  const live = timeOptions(offset + 1000, { processProbe: () => 'stopped',
+    inspectAttempt: () => ({ receipt_path: receipt, request, roots: [{ root_id: 'primary', path: cwd }], pending_questions: [] }),
+    reconcileRoots: ({ root }) => ({ root_id: root.root_id, process_stopped: true, reconciled: true }),
+    captureEntryBaseline: () => ({ sha256: 'a'.repeat(64), roots: [{ root_id: 'primary', path: cwd }] }),
+    entryAuthority: recovery.createAuthority(reference => ({ reference, status: 'resolved', answer: 'authorize', resolved_at: new Date().toISOString() })) });
+  const consumed = controller.consumeFailure(cwd, { begin_key: beginKey, unit, milestone: TM, host_runtime: 'codex', owner_token: 'explicit-owner', generation: begun.generation }, live);
+  assert.strictEqual(consumed.reason, 'failure-consumed');
+  const entry = { entry_id: entryId, failure_key: consumed.failure_key, failure_checksum: consumed.failure_checksum, authorization_ref: 'conversation:fixture' };
+  return { reenter: () => controller.reenter(cwd, { milestone: TM, unit, host_runtime: 'codex', owner_token: 'explicit-owner', entry }, live),
+    refuses(code, label) {
+      assert.throws(this.reenter, error => error.code === code, `reentry ${label}`);
+      assert.strictEqual(controller.lookupRecord(cwd, 'transaction', `linked-entry:${require('crypto').createHash('sha256').update(entryId).digest('hex')}`), null, `reentry ${label}: no transaction`);
+      assert.strictEqual(lease.observe(cwd, unit).lease, null, `reentry ${label}: no lease`);
+    } };
+}
+function testCompleteDependsDeclarations() {
+  const cwd = decidedRoot();
+  try {
+    conformantRoadmap(cwd);
+    assert.strictEqual(timeSelection.prepareBoundary(cwd, TM, { now: TNOW + 1000 }).status, 'allocated');
+    // T08 and T10 realize the same allocated node N1: only the LOCAL depends edge orders them.
+    slicePlanFile(cwd, 'S01', [['T08', false], ['T10', false]]); taskPlanFile(cwd, 'S01', 'T10', []);
+    const s01 = { state_patch: { active_slice: 'S01' }, slice: 'S01' }, t08 = `.gsd/milestones/${TM}/slices/S01/tasks/T08/T08-PLAN.md`;
+    const planOf = text => writeFile(cwd, t08, `---\nid: T08\n${text}${bindingLines(cwd, 'S01')}---\n# T08\n`);
+    const declared = () => controller.discoverInventory(cwd, TM, state.read(cwd, TM)).slices[0].task_dag;
+    // Supported forms keep their meaning: inline, block (LF and CRLF), empty and missing.
+    for (const [label, text, expected] of [['inline', 'depends: [T10]\n', ['T10']], ['block', 'depends:\n  - T10\n', ['T10']], ['crlf block', 'depends:\r\n  - T10\r\n', ['T10']],
+      ['empty inline', 'depends: []\n', []], ['empty value', 'depends:\n', []], ['missing', '', []]]) {
+      planOf(text);
+      const dag = declared();
+      assert.deepStrictEqual([dag.status, dag.tasks.find(item => item.id === 'T08').depends], ['valid', expected], label);
+    }
+    // An incomplete declaration never turns T08 into a root, through next and explicit begin.
+    const malformed = [['multiline scalar', 'depends:\n  T10\n'], ['broken block', 'depends:\n  - T10\n  garbage\n'], ['mixed block', 'depends:\n  - T10\n  T11\n'],
+      ['blank inside block', 'depends:\n  - T10\n\n  - T11\n'], ['leading blank before block', 'depends:\n\n  - T10\n'], ['inline with continuation', 'depends: [T10]\n  - T10\n'],
+      ['empty with continuation', 'depends: []\n  T10\n'], ['empty item', 'depends: [T10,,T11]\n'], ['scalar', 'depends: T10\n'], ['duplicate', 'depends: [T10]\ndepends: []\n']];
+    malformed.forEach(([label, text], index) => {
+      planOf(text);
+      const next = controller.select(cwd, { milestone: TM }, timeOptions());
+      assert.deepStrictEqual([next.ok, next.reason], [false, 'time-task-dependency-unknown'], `next ${label}`);
+      refusedWithoutWrites(cwd, 'execute-task/T08', `T08-incomplete-${index}`, 'time-task-dependency-unknown', s01);
+    });
+    // The valid list still waits for T10, then admits T08 after its proven completion; reentry refuses every malformed form.
+    planOf('depends:\n  - T10\n');
+    refusedWithoutWrites(cwd, 'execute-task/T08', 'T08-same-node-pending', 'time-task-dependency-pending', s01);
+    completeTask(cwd, 'S01', 'T10', 3000); taskDelivery(cwd, 'S01', 'T10');
+    assert.strictEqual(controller.select(cwd, { milestone: TM }, timeOptions()).unit.key, 'execute-task/T08');
+    const failed = failedBegin(cwd, 'S01', 'T08', 'T08-begin', 5000, 'T08-entry');
+    malformed.forEach(([label, text]) => { planOf(text); failed.refuses('time-task-dependency-unknown', label); });
+    planOf('depends:\n  - T10\n');
+    assert.strictEqual(failed.reenter().reason, 'entry-ready');
+  } finally { cleanup(cwd); }
+}
+function testIntermediatePlanLinksRefuse() {
+  const cwd = decidedRoot(), foreign = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-foreign-plan-'));
+  try {
+    conformantRoadmap(cwd);
+    assert.strictEqual(timeSelection.prepareBoundary(cwd, TM, { now: TNOW + 1000 }).status, 'allocated');
+    slicePlanFile(cwd, 'S01', [['T08', false]]); taskPlanFile(cwd, 'S01', 'T08', []);
+    const s01 = { state_patch: { active_slice: 'S01' }, slice: 'S01' }, tasks = path.join(cwd, `.gsd/milestones/${TM}/slices/S01/tasks`), t08 = path.join(tasks, 'T08');
+    // A junction at the intermediate task directory points at a foreign regular plan with the three matching scalars.
+    const regular = fs.readFileSync(path.join(t08, 'T08-PLAN.md'), 'utf8');
+    fs.writeFileSync(path.join(foreign, 'T08-PLAN.md'), regular);
+    const swap = (link, real, target) => { fs.renameSync(link, real); fs.symlinkSync(target, link, 'junction'); };
+    const unswap = (link, real) => { fs.rmSync(link, { recursive: true, force: true }); fs.renameSync(real, link); };
+    const cases = [['task directory junction', t08, t08 + '.real', foreign, 'task-plan-link:T08'],
+      ['tasks directory junction', tasks, tasks + '.real', tasks + '.real', 'task-plan-link:T08']];
+    for (const [label, link, real, target, reason] of cases) {
+      swap(link, real, target);
+      try {
+        const next = controller.select(cwd, { milestone: TM }, timeOptions());
+        assert.deepStrictEqual([next.ok, next.reason], [false, 'time-task-dependency-unknown'], `next ${label}`);
+        refusedWithoutWrites(cwd, 'execute-task/T08', `T08-link-${label}`, 'time-task-dependency-unknown', s01);
+        const dag = controller.discoverInventory(cwd, TM, state.read(cwd, TM)).slices[0].task_dag;
+        assert.deepStrictEqual(dag.reasons, [reason], label);
+      } finally { unswap(link, real); }
+    }
+    // The real plan admits the begin; after its failure, reentry refuses every linked plan with zero writes.
+    const failed = failedBegin(cwd, 'S01', 'T08', 'T08-begin', 5000, 'T08-entry');
+    for (const [label, link, real, target] of cases) {
+      swap(link, real, target);
+      try { failed.refuses('time-task-dependency-unknown', label); } finally { unswap(link, real); }
+    }
+    // The actual regular file is admitted again.
+    assert.strictEqual(failed.reenter().reason, 'entry-ready');
+  } finally { cleanup(cwd); fs.rmSync(foreign, { recursive: true, force: true }); }
+}
+function testCompletedLocalSubtasksProveDependencies() {
+  const clock = require('./forge-milestone-time-clock.js'), cwd = decidedRoot();
+  try {
+    conformantRoadmap(cwd);
+    assert.strictEqual(timeSelection.prepareBoundary(cwd, TM, { now: TNOW + 1000 }).status, 'allocated');
+    // The existing local grammar: T03.1 completes through the normal controller and unlocks its dependent.
+    slicePlanFile(cwd, 'S01', [['T03.1', false], ['T04', false]]); taskPlanFile(cwd, 'S01', 'T03.1', []); taskPlanFile(cwd, 'S01', 'T04', ['T03.1']);
+    const s01 = { state_patch: { active_slice: 'S01' }, slice: 'S01' };
+    assert.strictEqual(controller.select(cwd, { milestone: TM }, timeOptions()).unit.key, 'execute-task/T03.1');
+    refusedWithoutWrites(cwd, 'execute-task/T04', 'T04-before-T03.1', 'time-task-dependency-pending', s01);
+    completeTask(cwd, 'S01', 'T03.1', 3000);
+    refusedWithoutWrites(cwd, 'execute-task/T04', 'T04-no-delivery', 'time-task-dependency-pending', s01);
+    taskDelivery(cwd, 'S01', 'T03.1');
+    assert.strictEqual(taskProof(cwd, 'S01', 'T03.1'), 'proven');
+    slicePlanFile(cwd, 'S01', [['T03.1', true], ['T04', false]]);
+    assert.strictEqual(controller.select(cwd, { milestone: TM }, timeOptions()).unit.key, 'execute-task/T04');
+    const failed = failedBegin(cwd, 'S01', 'T04', 'T04-begin', 5000, 'T04-entry');
+    assert.strictEqual(failed.reenter().reason, 'entry-ready');
+    // Unsafe or path-like identifiers stay invalid; supported ones pass the identifier check (T1 has no files here).
+    const completedAt = new Date(TNOW + 3000).toISOString();
+    const reasonOf = task => clock.readHistoricalTaskDelivery({ cwd, milestone: TM, slice: 'S01', task, completedAt }).reason;
+    for (const task of ['../T01', 'T01/..', 'T01/T02', 'T01\\T02', ' T01', 'T01 ', 'T01\n', 'T.1', 'T1.', 'T03..1', 'T03.1.2', 'T03.1/../T04', '']) {
+      assert.strictEqual(reasonOf(task), 'delivery-task-invalid', JSON.stringify(task));
+    }
+    for (const task of ['T1', 'T03.1', 'T01']) assert.notStrictEqual(reasonOf(task), 'delivery-task-invalid', task);
+  } finally { cleanup(cwd); }
+}
+
+// --- task-to-selected-node binding (R49) --------------------------------------------
+function treeSnapshot(dir) {
+  const rows = [];
+  (function walk(current) {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const file = path.join(current, entry.name);
+      if (entry.isDirectory()) walk(file); else { const stat = fs.statSync(file); rows.push([path.relative(dir, file), stat.size, stat.mtimeMs]); }
+    }
+  })(dir);
+  return JSON.stringify(rows);
+}
+const PARTS = { N1: ['N1a', 'N1b', 'N1c'], N2: ['N2a', 'N2b', 'N2c'] };
+// One slice realizing eight allocated identifiers: refinement parts of N1 and N2 plus N3 and N4.
+function refinedRoadmap(cwd) {
+  const skeleton = JSON.parse(/```json\n([\s\S]*?)\n```/.exec(timeSelection.promptBlock(cwd, TM))[1]);
+  const allocation = [{ id: 'prep', kind: 'preparation', ms: 600000, nodes: ['PREP'] },
+    { id: 's1', kind: 'slice', slice: 'S01', ms: 3600000, nodes: [...PARTS.N1, ...PARTS.N2, 'N3', 'N4'] },
+    { id: 'int', kind: 'integration', ms: 600000, nodes: ['INT'] }, { id: 'rev', kind: 'review', ms: 600000, nodes: ['REV'] }, { id: 'cor', kind: 'corrections', ms: 600000, nodes: ['COR'] }];
+  const refinements = Object.entries(PARTS).map(([node, parts]) => ({ node, parts }));
+  writeFile(cwd, `.gsd/milestones/${TM}/${TM}-ROADMAP.md`, `# ${TM}: Fixture — Roadmap\n\n## Slices\n\n- [ ] **S01: Contrato** \`risk:low\` \`depends:[]\`\n\n`
+    + `## Alocação de tempo\n\n\`\`\`json\n${JSON.stringify({ ...skeleton, allocation, refinements }, null, 2)}\n\`\`\`\n`);
+}
+const EIGHT = [['T01', 'N1a', []], ['T02', 'N1b', []], ['T03', 'N1c', []], ['T04', 'N2a', ['T01', 'T02', 'T03']], ['T05', 'N2b', ['T01', 'T02', 'T03']],
+  ['T06', 'N2c', ['T01', 'T02', 'T03']], ['T10', 'N2c', ['T01', 'T02', 'T03']], ['T07', 'N3', []], ['T08', 'N4', ['T04', 'T05', 'T06', 'T10']]];
+function eightPlans(cwd, edit = {}) {
+  // A delivered (checked) task keeps its canonical historical plan bytes.
+  for (const [id, node, depends] of EIGHT) if (!(edit.checked || []).includes(id)) taskPlanFile(cwd, 'S01', id, edit[id]?.depends || depends, edit[id]?.node || node);
+  slicePlanFile(cwd, 'S01', EIGHT.filter(([id]) => !(edit.omit || []).includes(id)).map(([id]) => [id, (edit.checked || []).includes(id)]));
+}
+function testTaskBindingContextAndEightIdentifiers() {
+  const legacy = timeRoot(), pending = enrolledRoot(), cwd = decidedRoot();
+  try {
+    // absent: genuine unenrolled; blocked: enrolled without a decision; invalid: malformed identity.
+    assert.deepStrictEqual(timeSelection.taskBindingContext(legacy, TM, { sliceId: 'S01' }).status, 'absent');
+    assert.deepStrictEqual(['blocked', 'estimate-required'], [timeSelection.taskBindingContext(pending, TM, { sliceId: 'S01' }).status, timeSelection.taskBindingContext(pending, TM, { sliceId: 'S01' }).reason]);
+    assert.strictEqual(timeSelection.taskBindingContext(cwd, TM, { sliceId: '../S01' }).status, 'invalid');
+    assert.strictEqual(timeSelection.taskBindingContext(cwd, TM, {}).status, 'invalid');
+    assert.strictEqual(timeSelection.taskBindingContext(cwd, TM, { sliceId: 'S01' }).reason, 'roadmap-absent');
+    refinedRoadmap(cwd);
+    assert.strictEqual(timeSelection.taskBindingContext(cwd, TM, { sliceId: 'S01' }).reason, 'allocation-pending', 'the immutable selection alone is not a current allocation');
+    assert.strictEqual(timeSelection.prepareBoundary(cwd, TM, { now: TNOW + 1000 }).status, 'allocated');
+    const before = treeSnapshot(cwd), selected = JSON.stringify(timeSelection.readSelectionState(cwd, TM));
+    const context = timeSelection.taskBindingContext(cwd, TM, { sliceId: 'S01' });
+    assert.deepStrictEqual([context.status, context.slice, context.option_id, context.position_id], ['ready', 'S01', 'curta', 'curta']);
+    assert.deepStrictEqual(context.allocated.map(item => [item.id, item.parent, item.part, item.slice]),
+      [...PARTS.N1.map(id => [id, 'N1', true, 'S01']), ...PARTS.N2.map(id => [id, 'N2', true, 'S01']), ['N3', 'N3', false, 'S01'], ['N4', 'N4', false, 'S01']]);
+    assert.strictEqual(context.allocated.length, 8);
+    assert.deepStrictEqual([context.slice_dependencies, context.prerequisite_slices, context.roadmap_slices], [[], [], [{ id: 'S01', dependencies: [] }]]);
+    assert.deepStrictEqual(context.edges.map(edge => `${edge.from}>${edge.to}`).sort(), ['N1>PREP', 'N2>N1', 'N3>PREP', 'N4>N2']);
+    const edge = context.edges.find(item => item.from === 'N4');
+    assert.deepStrictEqual([edge.dependent, edge.prerequisite.map(item => item.id)], [[{ id: 'N4', slice: 'S01' }], PARTS.N2]);
+    for (const key of ['selection_sha256', 'contract_sha256', 'contract_base_sha256', 'roadmap_sha256', 'structure_sha256']) assert.match(context.sources[key], /^[a-f0-9]{64}$/, key);
+    assert.match(context.options_sha256, /^[a-f0-9]{64}$/);
+    // The old immutable skeleton keeps its empty plan-milestone allocation; the projection never rewrites it.
+    assert.deepStrictEqual(JSON.parse(/```json\n([\s\S]*?)\n```/.exec(timeSelection.promptBlock(cwd, TM))[1]).allocation, []);
+    assert.deepStrictEqual(timeSelection.taskBindingContext(cwd, TM, { sliceId: 'S01' }), context, 'repeatable');
+    assert.strictEqual(timeSelection.taskBindingContext(cwd, TM, { sliceId: 'S09' }).reason, 'slice-unknown');
+    assert.deepStrictEqual([treeSnapshot(cwd), JSON.stringify(timeSelection.readSelectionState(cwd, TM))], [before, selected], 'readonly projection');
+
+    // Positive: eight identifiers, one node refined by several tasks, the selected edges realized by real task depends.
+    eightPlans(cwd);
+    const s01 = { state_patch: { active_slice: 'S01' }, slice: 'S01' };
+    const inventory = controller.discoverInventory(cwd, TM, state.read(cwd, TM));
+    assert.deepStrictEqual([inventory.slices[0].task_dag.status, inventory.slices[0].task_dag.tasks.length], ['valid', 9]);
+    assert.strictEqual(controller.select(cwd, { milestone: TM }, timeOptions()).unit.id, 'T01');
+    refusedWithoutWrites(cwd, 'execute-task/T08', 'T08-eight-before', 'time-task-dependency-pending', s01);
+    const done = [];
+    for (const [index, id] of ['T01', 'T02', 'T03'].entries()) { completeTask(cwd, 'S01', id, 3000 + index * 1000); taskDelivery(cwd, 'S01', id, { node: PARTS.N1[index] }); done.push(id); }
+    eightPlans(cwd, { checked: done });
+    assert.strictEqual(controller.select(cwd, { milestone: TM }, timeOptions()).unit.id, 'T04');
+    refusedWithoutWrites(cwd, 'execute-task/T08', 'T08-eight-after', 'time-task-dependency-pending', s01);
+
+    // Negatives with unchanged choice, roadmap and contract: every mutation refuses next and explicit begin with zero writes.
+    const roadmap = fs.readFileSync(path.join(cwd, `.gsd/milestones/${TM}/${TM}-ROADMAP.md`), 'utf8'), baseState = JSON.stringify(timeSelection.readSelectionState(cwd, TM));
+    const planFile = id => path.join(cwd, `.gsd/milestones/${TM}/slices/S01/tasks/${id}/${id}-PLAN.md`);
+    const rewrite = (id, edit) => { const text = fs.readFileSync(planFile(id), 'utf8'); fs.writeFileSync(planFile(id), edit(text)); return text; };
+    const selected8 = timeSelection.readSelectionState(cwd, TM);
+    const negatives = [
+      ['required edge removed', { T08: { depends: ['T04', 'T05', 'T06'] } }, 'time-task-dependency-unknown'],
+      ['required edge inverted', { T10: { depends: ['T01', 'T02', 'T03', 'T08'] }, T08: { depends: ['T04', 'T05', 'T06'] } }, 'time-task-dependency-unknown'],
+      ['part edge removed', { T04: { depends: [] } }, 'time-task-dependency-unknown'],
+      ['unallocated node', { T07: { node: 'N9' } }, 'time-scope-unallocated'],
+      ['refined parent is not an allocated identifier', { T07: { node: 'N1' } }, 'time-scope-unallocated'],
+      ['uncovered identifier', { omit: ['T07'] }, 'time-scope-unallocated'],
+    ];
+    for (const [label, edit, code] of negatives) {
+      eightPlans(cwd, { ...edit, checked: done });
+      const blocked = controller.select(cwd, { milestone: TM }, timeOptions());
+      assert.deepStrictEqual([blocked.ok, blocked.reason], [false, code], `next ${label}`);
+      refusedWithoutWrites(cwd, 'execute-task/T07', `neg-${label.replace(/\W+/g, '-')}`, code, s01);
+      assert.deepStrictEqual([fs.readFileSync(path.join(cwd, `.gsd/milestones/${TM}/${TM}-ROADMAP.md`), 'utf8'), JSON.stringify(timeSelection.readSelectionState(cwd, TM))], [roadmap, baseState], label);
+    }
+    const sha = selected8.options_sha256;
+    const metadata = [
+      ['missing binding', text => text.replace(/^time_.*\n/gm, '')],
+      ['foreign digest', text => text.replace(sha, 'f'.repeat(64))],
+      ['foreign position', text => text.replace('time_position_id: curta', 'time_position_id: outra')],
+      ['duplicate node', text => text.replace(/time_node: N3\n/, 'time_node: N3\ntime_node: N4\n')],
+      ['partial binding', text => text.replace(/time_options_sha256: .*\n/, '')],
+      ['malformed value', text => text.replace('time_node: N3', 'time_node: "N3 # x"')],
+    ];
+    eightPlans(cwd, { checked: done });
+    for (const [label, edit] of metadata) {
+      const original = rewrite('T07', edit);
+      const blocked = controller.select(cwd, { milestone: TM }, timeOptions());
+      assert.deepStrictEqual([blocked.ok, blocked.reason], [false, 'time-scope-unallocated'], `next ${label}`);
+      refusedWithoutWrites(cwd, 'execute-task/T07', `neg-meta-${label.replace(/\W+/g, '-')}`, 'time-scope-unallocated', s01);
+      fs.writeFileSync(planFile('T07'), original);
+    }
+    eightPlans(cwd, { checked: done });
+    assert.strictEqual(controller.select(cwd, { milestone: TM }, timeOptions()).unit.id, 'T04', 'restored plans admit again');
+  } finally { cleanup(legacy); cleanup(pending); cleanup(cwd); }
+}
+function testCrossSliceBarriersAndDuplicateTaskIds() {
+  const cwd = decidedRoot();
+  try {
+    // Checkboxes alone satisfy the roadmap-level slice guard; the task barrier asks for the real proof.
+    conformantRoadmap(cwd, ['S01', 'S02']);
+    assert.strictEqual(timeSelection.prepareBoundary(cwd, TM, { now: TNOW + 1000 }).status, 'allocated');
+    const forSlice = slice => ({ state_patch: { active_slice: slice }, slice });
+    const context = timeSelection.taskBindingContext(cwd, TM, { sliceId: 'S04' });
+    assert.deepStrictEqual([context.status, context.slice_dependencies, context.prerequisite_slices], ['ready', ['S02'], ['S01', 'S02']]);
+    assert.deepStrictEqual(context.edges.map(edge => `${edge.from}>${edge.to}`).sort(), ['N4>N2']);
+    // The same local T01 in every slice; independent S03 is never blocked by unplanned or unproven slices.
+    for (const slice of ['S01', 'S03', 'S04']) { slicePlanFile(cwd, slice, [['T01', false]]); taskPlanFile(cwd, slice, 'T01', []); }
+    refusedWithoutWrites(cwd, 'execute-task/T01', 'S04-prereq-unplanned', 'time-task-dependency-pending', forSlice('S04'));
+    assert.ok(assertThrowsDetails(() => explicitBegin(cwd, 'execute-task/T01', 'S04-prereq-unplanned-2', forSlice('S04'), timeOptions()), 'barrier').some(item => item.slice === 'S02' && item.reason === 'slice-unplanned'));
+    completeTask(cwd, 'S03', 'T01', 3000);
+    taskDelivery(cwd, 'S03', 'T01');
+    assert.strictEqual(taskProof(cwd, 'S03', 'T01'), 'proven', 'S03/T01 proof is independent of S01/T01');
+    assert.strictEqual(taskProof(cwd, 'S01', 'T01'), 'unproven');
+    slicePlanFile(cwd, 'S02', [['T01', false]]); taskPlanFile(cwd, 'S02', 'T01', []);
+    // S02/T01 waits for the real predecessor proof of S01/T01, never for S03/T01's.
+    refusedWithoutWrites(cwd, 'execute-task/T01', 'S02-before-S01', 'time-task-dependency-pending', forSlice('S02'));
+    completeTask(cwd, 'S01', 'T01', 5000);
+    taskDelivery(cwd, 'S01', 'T01');
+    assert.strictEqual(taskProof(cwd, 'S01', 'T01'), 'proven');
+    // Task proof alone is not the slice: the unchecked slice without SUMMARY still blocks the dependent slice.
+    const barrierOf = (offset = 0) => assertThrowsDetails(() => explicitBegin(cwd, 'execute-task/T01', `S02-barrier-${Math.random()}`, forSlice('S02'), timeOptions(offset)), 'barrier');
+    const slicesOf = barrier => barrier.map(item => [item.slice, item.task, item.reason, item.proof]);
+    assert.deepStrictEqual(slicesOf(barrierOf()), [['S01', null, 'slice-incomplete', 'delivery-completion-missing']]);
+    // R52: checked box, SUMMARY and every task proven still do not close the slice without its canonical closure.
+    slicePlanFile(cwd, 'S01', [['T01', true]]); writeFile(cwd, `.gsd/milestones/${TM}/slices/S01/S01-SUMMARY.md`, '# S01\n');
+    assert.strictEqual(timeSelection.taskBindingContext(cwd, TM, { sliceId: 'S02' }).status, 'ready', 'a checkbox keeps the allocation');
+    assert.strictEqual(taskProof(cwd, 'S01', 'T01'), 'proven');
+    assert.deepStrictEqual(slicesOf(barrierOf()), [['S01', null, 'slice-incomplete', 'delivery-completion-missing']], 'checked + SUMMARY + all tasks done');
+    refusedWithoutWrites(cwd, 'execute-task/T01', 'S02-summary-only', 'time-task-dependency-pending', forSlice('S02'), timeOptions(1000));
+    // A genuine slice delivery without the committed complete-slice transition still blocks.
+    closeSlice(cwd, 'S01', ['T01'], 0, { complete: false });
+    assert.deepStrictEqual(slicesOf(barrierOf(1000)), [['S01', null, 'slice-incomplete', 'delivery-completion-missing']], 'delivery without completion');
+    // The genuine closure: review record, verified historical slice delivery and committed complete-slice.
+    closeSlice(cwd, 'S01', ['T01'], 6000);
+    const later = timeOptions(9000);
+    const s02Dag = () => controller.discoverInventory(cwd, TM, state.read(cwd, TM), later).slices.find(item => item.id === 'S02').task_dag;
+    assert.deepStrictEqual([s02Dag().status, s02Dag().tasks[0].barrier], ['valid', []], 'closed and reviewed S01 clears the S02 barrier');
+    // Negatives on the closed slice: each tamper refuses with zero writes and its typed proof, then is restored.
+    const base = `.gsd/milestones/${TM}/slices/S01`, file = name => path.join(cwd, ...`${base}/${name}`.split('/'));
+    const tamperedSlice = (label, tamper, reason, proof) => {
+      const names = ['S01-DELIVERY.json', 'S01-DELIVERY-INPUT.json', 'S01-PLAN.md', 'S01-REVIEW.md', 'tasks/T01/T01-DELIVERY.json'];
+      const saved = Object.fromEntries(names.filter(name => fs.existsSync(file(name))).map(name => [name, fs.readFileSync(file(name))]));
+      tamper();
+      try {
+        const barrier = assertThrowsDetails(() => explicitBegin(cwd, 'execute-task/T01', `S02-${label.replace(/\W+/g, '-')}`, forSlice('S02'), later), 'barrier');
+        const row = barrier.find(item => item.slice === 'S01' && item.task === null);
+        assert.ok(row && row.reason === reason && (!proof || row.proof === proof), `${label}: ${JSON.stringify(barrier)}`);
+        refusedWithoutWrites(cwd, 'execute-task/T01', `S02-${label.replace(/\W+/g, '-')}-z`, 'time-task-dependency-pending', forSlice('S02'), later);
+      } finally {
+        for (const name of names) if (!saved[name] && fs.existsSync(file(name))) fs.rmSync(file(name));
+        for (const [name, bytes] of Object.entries(saved)) fs.writeFileSync(file(name), bytes);
+      }
+    };
+    const delivery = require('./forge-delivery.js');
+    const edit = (name, change) => { const value = JSON.parse(fs.readFileSync(file(name), 'utf8')); change(value); fs.writeFileSync(file(name), JSON.stringify(value)); };
+    tamperedSlice('forged slice status re-fingerprinted', () => {
+      const value = JSON.parse(fs.readFileSync(file('S01-DELIVERY.json'), 'utf8')); value.diagnostics = []; value.criteria[0].note = 'forged';
+      fs.writeFileSync(file('S01-DELIVERY.json'), JSON.stringify(delivery.finalizeOutput(value)));
+    }, 'slice-incomplete', 'delivery-projection-changed');
+    tamperedSlice('slice input missing', () => fs.rmSync(file('S01-DELIVERY-INPUT.json')), 'slice-incomplete');
+    tamperedSlice('current slice plan gains an unknown child', () => slicePlanFile(cwd, 'S01', [['T01', true], ['T09', true]]), 'slice-incomplete');
+    tamperedSlice('child inventory dropped', () => {
+      edit('S01-DELIVERY-INPUT.json', v => { v.expected_children = []; });
+      fs.writeFileSync(file('S01-DELIVERY.json'), JSON.stringify(delivery.buildDelivery(JSON.parse(fs.readFileSync(file('S01-DELIVERY-INPUT.json'), 'utf8')), { ownerRoot: cwd, codeDir: cwd })));
+    }, 'slice-incomplete');
+    tamperedSlice('foreign slice delivery', () => edit('S01-DELIVERY.json', v => { v.unit.id = 'S03'; }), 'slice-incomplete');
+    tamperedSlice('child task delivery forged', () => edit('tasks/T01/T01-DELIVERY.json', v => { v.criteria[0].status = 'verificado'; v.criteria[0].evidence = []; }), 'slice-incomplete');
+    tamperedSlice('review record missing', () => fs.rmSync(file('S01-REVIEW.md')), 'slice-unreviewed', 'slice-review-missing');
+    tamperedSlice('review record empty', () => fs.writeFileSync(file('S01-REVIEW.md'), ''), 'slice-unreviewed', 'slice-review-invalid');
+    for (const [label, facts, proof] of [['review fact missing', {}, 'slice-review-fact-missing'],
+      ['review fact foreign', { review: { status: 'completed', reference: 'S03-REVIEW.md' } }, 'slice-review-fact-foreign']]) {
+      tamperedSlice(label, () => {
+        edit('S01-DELIVERY-INPUT.json', v => { v.facts = facts; });
+        fs.writeFileSync(file('S01-DELIVERY.json'), JSON.stringify(delivery.buildDelivery(JSON.parse(fs.readFileSync(file('S01-DELIVERY-INPUT.json'), 'utf8')), { ownerRoot: cwd, codeDir: cwd })));
+      }, 'slice-unreviewed', proof);
+    }
+    // Legitimate later code changes never invalidate the completed slice history.
+    writeFile(cwd, 'scripts/unrelated-later.js', 'module.exports = 3;\n');
+    // Proof removed or tampered: refused again with zero writes.
+    const taskDeliveryFile = path.join(cwd, `.gsd/milestones/${TM}/slices/S01/tasks/T01/T01-DELIVERY.json`);
+    fs.renameSync(taskDeliveryFile, taskDeliveryFile + '.away');
+    refusedWithoutWrites(cwd, 'execute-task/T01', 'S02-proof-gone', 'time-task-dependency-pending', forSlice('S02'), later);
+    fs.renameSync(taskDeliveryFile + '.away', taskDeliveryFile);
+    // The selected N2>N1 edge needs a real S01 task realizing N1 (binding removed there refuses the dependent).
+    const s01Plan = path.join(cwd, `.gsd/milestones/${TM}/slices/S01/tasks/T01/T01-PLAN.md`), saved = fs.readFileSync(s01Plan);
+    fs.writeFileSync(s01Plan, saved.toString('utf8').replace(/^time_node: .*\n/m, ''));
+    refusedWithoutWrites(cwd, 'execute-task/T01', 'S02-prereq-unbound', 'time-task-dependency-unknown', forSlice('S02'), later);
+    fs.writeFileSync(s01Plan, saved);
+    // Removing the slice dependency from the real roadmap breaks conformance: the dependent never starts.
+    conformantRoadmap(cwd, ['S01', 'S02'], '');
+    assert.throws(() => explicitBegin(cwd, 'execute-task/T01', 'S02-no-slice-edge', forSlice('S02'), later),
+      error => ['time-roadmap-nonconformant', 'time-scope-unallocated'].includes(error.code));
+    conformantRoadmap(cwd, ['S01', 'S02']);
+    const admitted = explicitBegin(cwd, 'execute-task/T01', 'S02-admitted', forSlice('S02'), timeOptions(12000));
+    assert.strictEqual(admitted.ok, true, 'S02/T01 starts once S01 tasks, deliveries, slice closure and review exist');
+    // The admitted begin replays idempotently even after the review record disappears.
+    fs.rmSync(file('S01-REVIEW.md'));
+    assert.strictEqual(explicitBegin(cwd, 'execute-task/T01', 'S02-admitted', forSlice('S02'), timeOptions(12500)).reason, 'already-committed');
+  } finally { cleanup(cwd); }
+}
+function testScopedSliceProofSurvivesOtherMilestone() {
+  const cwd = decidedRoot(), other = 'M992';
+  try {
+    conformantRoadmap(cwd, ['S01']);
+    assert.strictEqual(timeSelection.prepareBoundary(cwd, TM, { now: TNOW + 1000 }).status, 'allocated');
+    for (const slice of ['S01', 'S02']) { slicePlanFile(cwd, slice, [['T01', false]]); taskPlanFile(cwd, slice, 'T01', []); }
+    completeTask(cwd, 'S01', 'T01', 3000); taskDelivery(cwd, 'S01', 'T01');
+    slicePlanFile(cwd, 'S01', [['T01', true]]);
+    closeSlice(cwd, 'S01', ['T01'], 4000);
+    const txFile = controller.transactionFile(cwd, 'close-S01-done'), original = fs.readFileSync(txFile);
+    const proof = () => require('./forge-milestone-time-clock').readHistoricalDeliveries({ cwd, milestone: TM, slices: ['S01'], now: TNOW + 20000 });
+    assert.strictEqual(proof().proven.length, 1);
+    // B closes the SAME SliceID using genuine task capture, slice delivery/review,
+    // and committed controller transactions in the SAME physical owner.
+    fs.mkdirSync(path.join(cwd, '.gsd/milestones', other), { recursive: true });
+    state.write(cwd, { milestone: other, kind: 'milestone', phase: 'idle', active_slice: 'S01', active_task: '—', auto_mode: 'on', next_action: 'complete-slice' });
+    const base = `.gsd/milestones/${other}/slices/S01`;
+    writeFile(cwd, `.gsd/milestones/${other}/${other}-ROADMAP.md`, '# B\n\n- [x] **S01: B** `depends:[]`\n');
+    writeFile(cwd, `${base}/S01-PLAN.md`, '# S01\n\n- [x] T01: B task\n');
+    taskDelivery(cwd, 'S01', 'T01', { milestone: other });
+    const began = controller.begin(cwd, { milestone: other, unit: 'execute-task/T01', slice: 'S01', state_patch: { active_slice: 'S01' }, host_runtime: 'codex', owner_token: 'B', idempotency_key: 'B-task' }, timeOptions(8000));
+    controller.complete(cwd, { milestone: other, unit: 'execute-task/T01', host_runtime: 'codex', owner_token: 'B', generation: began.generation, idempotency_key: 'B-task-done', result: { status: 'succeeded' } }, timeOptions(8500));
+    closeSlice(cwd, 'S01', ['T01'], 9000, { milestone: other });
+    assert.strictEqual(controller.lookupRecord(cwd, 'boundary', 'complete-slice/S01').milestone, other);
+    assert.strictEqual(require('./forge-milestone-time-clock').readHistoricalDeliveries({ cwd, milestone: other, slices: ['S01'], now: TNOW + 20000 }).proven.length, 1);
+    assert.strictEqual(proof().proven.length, 1, JSON.stringify(proof()));
+    assert.deepStrictEqual(fs.readFileSync(txFile), original, 'A completion is never rewritten');
+    assert.strictEqual(controller.select(cwd, { milestone: TM }, timeOptions(20000)).unit.key, 'execute-task/T01');
+    const explicit = explicitBegin(cwd, 'execute-task/T01', 'A-S02-fresh-begin', { slice: 'S02', state_patch: { active_slice: 'S02' } }, timeOptions(14000));
+    assert.strictEqual(explicit.ok, true);
+    controller.complete(cwd, { milestone: TM, unit: 'execute-task/T01', host_runtime: 'codex', owner_token: 'explicit-owner', generation: explicit.generation,
+      idempotency_key: 'A-S02-explicit-done', result: { status: 'succeeded' } }, timeOptions(14500));
+    const failed = failedBegin(cwd, 'S02', 'T01', 'A-S02-after-handoff', 15000, 'A-S02-new-entry');
+    // A new entry is not replay: the guard must rebuild the historical slice proof.
+    assert.strictEqual(failed.reenter().reason, 'entry-ready');
+    const entryKey = `linked-entry:${require('crypto').createHash('sha256').update('A-S02-new-entry').digest('hex')}`;
+    const entry = controller.lookupRecord(cwd, 'transaction', entryKey);
+    controller.complete(cwd, { milestone: TM, unit: 'execute-task/T01', host_runtime: 'codex', owner_token: 'explicit-owner', generation: entry.lease_generation,
+      idempotency_key: 'A-S02-entry-done', result: { status: 'succeeded' } }, timeOptions(21000));
+    // Storage-checksum corruption still fails closed despite the unrelated ready slot.
+    const corrupt = JSON.parse(original); corrupt.boundary.milestone = other;
+    fs.writeFileSync(txFile, JSON.stringify(corrupt));
+    try { assert.strictEqual(proof().proven.length, 0); } finally { fs.writeFileSync(txFile, original); }
+    assert.strictEqual(proof().proven.length, 1);
+  } finally { cleanup(cwd); }
+}
+function assertThrowsDetails(fn, key) {
+  try { fn(); } catch (error) {
+    if (!error.details?.task_dag) throw new assert.AssertionError({ message: `expected a task_dag refusal, got ${error.code}: ${error.message}` });
+    return error.details.task_dag[key];
+  }
+  throw new assert.AssertionError({ message: 'expected a refusal' });
+}
+
 function main() {
   console.log(`forge-unit-controller tests on ${process.platform}`);
+  test('S02 review R60: scoped completed slice proof survives another milestone boundary', testScopedSliceProofSurvivesOtherMilestone);
+  test('S02 task binding: readonly current-allocation projection, eight identifiers and every mutation negative', testTaskBindingContextAndEightIdentifiers);
+  test('S02 task binding: cross-slice barriers, duplicate T01 identities and unplanned independent slices', testCrossSliceBarriersAndDuplicateTaskIds);
+  test('S02 pure selection with and without time_options, roadmap blocks and scoped task DAG', testPureTimeOptionSelection);
+  test('S02 guard: every selection state, forged inventory, replay and zero lease/transaction', testTimeOptionGuardEveryState);
+  test('S02 guard: roadmap conformance blocks dependents with budget priority', testTimeOptionGuardRoadmapAndBudgetPriority);
+  test('S02 guard: scoped task DAG on explicit begin and on reentry', testScopedTaskDagGuardAndReentry);
+  test('S02 guard: historical canonical proof, independent completion key and tamper negatives', testHistoricalProofTamperAndLineage);
+  test('S02 guard R53: captured time, declared-source bindings and capture consistency bound to the committed completion', testHistoricalCaptureMetadataAndInventory);
+  test('S02 guard R54: begin and completion events bound symmetrically with finite ordered sequences', testCompletionEventLineage);
+  test('S02 guard R55: review disabled is a named incompatibility before activation and for new admissions; legacy/no-contract unchanged', testReviewModeIncompatibleWithContract);
+  test('S02 guard R57: complete depends declarations reject malformed blocks before admission', testCompleteDependsDeclarations);
+  test('S02 guard R58: intermediate plan links refuse before admission', testIntermediatePlanLinksRefuse);
+  test('S02 guard R59: completed local subtasks prove dependencies safely', testCompletedLocalSubtasksProveDependencies);
+  test('S02 guard: ROADMAP written after enrollment without a choice is not legacy', testRogueRoadmapAfterEnrollment);
+  test('S02 guard: rogue ROADMAP refuses reentry before lease or transaction', testRogueRoadmapBlocksReentry);
   test('pure deterministic selection', testPureSelection);
   test('phase ordering, canonical skip preferences and stale slice selection', testSelectionPhasesAndCanonicalPrefs);
   test('artifact discovery selects without leases or STATE writes', testSelectionDiscoversArtifactsWithoutWriting);

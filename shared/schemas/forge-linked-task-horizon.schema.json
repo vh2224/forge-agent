@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:forge:linked-task-horizon:v1",
+  "title": "Forge linked task horizon records v1",
+  "description": "Owner records of the linked task horizon below .gsd/forge/time/<M>/linked-task/: journal.jsonl (presence, wait-start and wait-end lines of the started task, frozen at the closure), checkpoints/<version>.json (immutable checkpoint after a complete drain at the task cap, with overshoot and the pending decision) and extensions/<nnnn>.json (immutable attested extension chained by previous_sha256; the ceiling only increases). Written only through the T01 owner record API with an active contract, inside the owner boundary and between the task's protected windows. Public data only: no absolute path, credential, session or live handle. A record never grants authority. Validated by scripts/forge-linked-task-horizon.js.",
+  "oneOf": [
+    { "$ref": "#/$defs/journal_presence" },
+    { "$ref": "#/$defs/journal_wait" },
+    { "$ref": "#/$defs/checkpoint" },
+    { "$ref": "#/$defs/extension" }
+  ],
+  "x-clock-policy": { "id": "forge-linked-task-clock", "version": 1, "consumption": "forge-milestone-time-clock CLOCK_POLICY.consumption" },
+  "x-transport-codes": ["predecessor-incomplete", "linked-task-not-started", "linked-task-budget-exhausted", "linked-task-budget-draining",
+    "linked-task-time-invalid", "linked-task-clock-unknown", "linked-task-chain-closed", "linked-task-closed"],
+  "x-task-states": ["not-started", "active", "exhausted", "draining", "checkpointed", "extended", "completed", "chain-closed", "unknown"],
+  "x-drain-states": ["not-applicable", "draining", "drained", "incomplete-unknown"],
+  "x-writer-classes": ["terminal", "healthy", "dead-requires-failure-consumption", "saved-response-requires-publication", "unknown"],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "instant": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}Z$" },
+    "ms": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "count_ms": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "milestone": { "type": "string", "pattern": "^(?:[Mm][0-9]+|M-[0-9]{14}(?:-[a-z0-9-]*)?|M-[0-9]{8}-[0-9]{6}(?:-[A-Za-z0-9-]*)?)(?![\\s\\S])" },
+    "task": { "type": "string", "pattern": "^(?:T-[0-9]{14}(?:-[a-z0-9-]*)?|T-[0-9]{8}-[0-9]{6}(?:-[A-Za-z0-9-]*)?|[Tt][Aa][Ss][Kk]-(?:[0-9]+|[0-9]{8}-[0-9]{6}(?:-[A-Za-z0-9-]*)?)|task-[a-z0-9-]+)(?![\\s\\S])" },
+    "record_id": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,119}$" },
+    "journal_presence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "session_sha256", "boundary", "at"],
+      "description": "Owner presence of the started task; the session is only a digest.",
+      "properties": {
+        "type": { "const": "presence" },
+        "session_sha256": { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+        "boundary": { "enum": ["session-start", "next", "complete", "status", "session-end"] },
+        "at": { "$ref": "#/$defs/instant" }
+      }
+    },
+    "journal_wait": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "wait_id", "class", "source", "at"],
+      "description": "A wait of the started task. A human wait only stops consumption with a pending-question source of the task workflow or task unit (<identity_sha256>:<question id>).",
+      "properties": {
+        "type": { "enum": ["wait-start", "wait-end"] },
+        "wait_id": { "$ref": "#/$defs/record_id" },
+        "class": { "enum": ["human", "pause", "ci", "external"] },
+        "source": {
+          "type": "object", "additionalProperties": false, "required": ["kind", "ref"],
+          "properties": { "kind": { "$ref": "#/$defs/record_id" }, "ref": { "type": "string", "minLength": 1, "maxLength": 1000 } }
+        },
+        "at": { "$ref": "#/$defs/instant" }
+      }
+    },
+    "decision": {
+      "type": "object", "additionalProperties": false,
+      "required": ["reference", "question", "answer", "request_sha256"],
+      "description": "The persisted explicit owner answer verified with a fresh live handle; never the handle itself.",
+      "properties": {
+        "reference": { "oneOf": [{ "type": "string", "maxLength": 120 }, { "type": "null" }] },
+        "question": {
+          "type": "object", "additionalProperties": false, "required": ["identity_sha256", "id"],
+          "properties": { "identity_sha256": { "$ref": "#/$defs/sha256" }, "id": { "type": "string", "maxLength": 120 } }
+        },
+        "answer": { "type": "string", "pattern": "^linked-task:extend:[1-9][0-9]*$" },
+        "request_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "writer": {
+      "type": "object", "additionalProperties": false,
+      "required": ["unit", "classification", "reason"],
+      "properties": {
+        "unit": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,50}/[A-Za-z0-9][A-Za-z0-9_-]{0,119}$" },
+        "classification": { "const": "terminal" },
+        "reason": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" }
+      }
+    },
+    "drain": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "claim", "writers"],
+      "properties": {
+        "state": { "const": "drained" },
+        "claim": { "enum": ["absent", "released"] },
+        "writers": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/writer" } }
+      }
+    },
+    "pending_decision": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "question", "alternatives"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^linked-task-cap-[a-f0-9]{12}-v[1-9][0-9]*$" },
+        "question": { "type": "string", "maxLength": 1000 },
+        "alternatives": { "const": ["extend-task-horizon", "close-chain"] }
+      }
+    },
+    "checkpoint": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "kind", "milestone", "task_id", "link_sha256", "start_sha256", "version", "horizon_sha256", "policy",
+        "ceiling_ms", "consumed_ms", "unknown_ms", "overshoot_ms", "drain", "decision_pending", "pending_decision", "next_action", "at"],
+      "description": "Published only after a complete drain observed by the live host adapters; nothing was killed, no lease stolen and no claim released. version = 1 + number of extensions; horizon_sha256 = start (version 1) or the extension that set the ceiling.",
+      "properties": {
+        "schema_version": { "const": 1 },
+        "kind": { "const": "forge-linked-task-checkpoint" },
+        "milestone": { "$ref": "#/$defs/milestone" },
+        "task_id": { "$ref": "#/$defs/task" },
+        "link_sha256": { "$ref": "#/$defs/sha256" },
+        "start_sha256": { "$ref": "#/$defs/sha256" },
+        "version": { "type": "integer", "minimum": 1 },
+        "horizon_sha256": { "$ref": "#/$defs/sha256" },
+        "policy": {
+          "type": "object", "additionalProperties": false, "required": ["id", "version"],
+          "properties": { "id": { "const": "forge-linked-task-clock" }, "version": { "const": 1 } }
+        },
+        "ceiling_ms": { "$ref": "#/$defs/ms" },
+        "consumed_ms": { "$ref": "#/$defs/count_ms" },
+        "unknown_ms": { "$ref": "#/$defs/count_ms" },
+        "overshoot_ms": { "$ref": "#/$defs/count_ms" },
+        "drain": { "$ref": "#/$defs/drain" },
+        "decision_pending": { "const": true },
+        "pending_decision": { "$ref": "#/$defs/pending_decision" },
+        "next_action": { "type": "string", "maxLength": 1200 },
+        "at": { "$ref": "#/$defs/instant" }
+      }
+    },
+    "extension": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "kind", "milestone", "task_id", "link_sha256", "start_sha256", "sequence", "previous_sha256",
+        "previous_ceiling_ms", "ceiling_ms", "decision", "extended_at"],
+      "description": "Attested extension of the task horizon (answer linked-task:extend:<ceiling_ms>, request {milestone, task_id, link_sha256, ceiling_ms}). previous_sha256 is start.json for sequence 1 and the previous extension afterwards; ceiling_ms > previous_ceiling_ms. The milestone ceiling never changes here.",
+      "properties": {
+        "schema_version": { "const": 1 },
+        "kind": { "const": "forge-linked-task-extension" },
+        "milestone": { "$ref": "#/$defs/milestone" },
+        "task_id": { "$ref": "#/$defs/task" },
+        "link_sha256": { "$ref": "#/$defs/sha256" },
+        "start_sha256": { "$ref": "#/$defs/sha256" },
+        "sequence": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "previous_sha256": { "$ref": "#/$defs/sha256" },
+        "previous_ceiling_ms": { "$ref": "#/$defs/ms" },
+        "ceiling_ms": { "$ref": "#/$defs/ms" },
+        "decision": { "$ref": "#/$defs/decision" },
+        "extended_at": { "$ref": "#/$defs/instant" }
+      }
+    }
+  }
+}

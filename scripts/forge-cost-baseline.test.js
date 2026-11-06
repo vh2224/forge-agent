@@ -26,10 +26,11 @@ function test(name, fn) {
 
 process.stdout.write('\n=== Forge cost-baseline regression tests ===\n\n');
 
-test('measureBaseline covers all 11 unit types with rendered_tokens > 0', () => {
+test('measureBaseline covers all 12 unit types with rendered_tokens > 0', () => {
   const result = measureBaseline(root, {});
   const unitTypes = Object.keys(TEMPLATE_FILES);
-  assert.strictEqual(unitTypes.length, 11, `expected 11 unit types, got ${unitTypes.length}`);
+  assert.strictEqual(unitTypes.length, 12, `expected 12 unit types, got ${unitTypes.length}`);
+  assert.ok(unitTypes.includes('estimate-milestone'), 'the read-only estimate unit is measured');
   assert.deepStrictEqual(Object.keys(result.by_unit_type).sort(), unitTypes.sort());
   for (const unitType of unitTypes) {
     const row = result.by_unit_type[unitType];
@@ -82,7 +83,7 @@ test('CLI --json exits 0 with parseable JSON', () => {
   assert.strictEqual(proc.status, 0, proc.stderr);
   const parsed = JSON.parse(proc.stdout);
   assert.ok(parsed.by_unit_type);
-  assert.strictEqual(Object.keys(parsed.by_unit_type).length, 11);
+  assert.strictEqual(Object.keys(parsed.by_unit_type).length, 12);
 });
 
 test('CLI --markdown exits 0 with a markdown table', () => {

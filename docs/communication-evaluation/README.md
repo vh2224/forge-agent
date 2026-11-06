@@ -109,6 +109,24 @@ A S03/T07 editou `skills/forge-task/SKILL.md` e `skills/forge-next/SKILL.md` par
 
 Os valores anteriores são os bytes da revisão 06f7d5a; os novos são os bytes finais das skills nesta task. O re-pin registra proveniência, não melhora de comunicação nem comportamento real dos hosts.
 
+## Re-pin das citações de forge-next (tempo de milestone, S01/T07)
+
+A task S01/T07 de M-20261101111759-opcoes-prazo-milestones acrescentou a
+`skills/forge-next/SKILL.md` a seção “Tempo da milestone” (ponteiro para
+`shared/forge-milestone-time.md`, presença, admissão nativa, decisões atestadas e
+modelos de aviso, teto, drain e checkpoint) e ponteiros junto às chamadas nativas.
+O template parcial citado não mudou e continua literal na skill. Só os dois
+`source.sha256` das citações modelo-da-skill de forge-next mudaram, medidos como
+SHA-256 dos bytes do arquivo, a mesma regra do validador:
+
+| Amostra (campo) | Fonte | SHA-256 anterior | SHA-256 novo |
+|---|---|---|---|
+| entries[2].supporting.partial.after.source.sha256 | skills/forge-next/SKILL.md#parcial | 31cbaaecd02b708261b97c2141d9b0b673ab720c96977095a00571d2e0dc194c | 22bddaebd4367ce2cc8729cfdc7f14131de2c155be62226c3d24c45f626ed2c5 |
+| entries[6].supporting.partial.after.source.sha256 | skills/forge-next/SKILL.md#parcial | 31cbaaecd02b708261b97c2141d9b0b673ab720c96977095a00571d2e0dc194c | 22bddaebd4367ce2cc8729cfdc7f14131de2c155be62226c3d24c45f626ed2c5 |
+
+O valor anterior é o da revisão 6fc732e. Contrato, rótulos, rubricas, métricas, as
+citações de forge-task e o aceite humano pending-final-round ficam iguais.
+
 As preferências de apresentação estão **preservadas offline** pela evidência já concluída da T06, suíte node scripts/forge-presentation-prefs.test.js: homes temporários, bytes e mtime, renderers e instalador, diagnóstico somente leitura. O handoff T06 e sua entrega registram nove comandos aprovados, 49 testes do instalador e nenhum skip observado nessa rodada. T07 cita essa evidência anterior e não reexecuta a suíte inalterada. personality, model_verbosity, output style e seleções de barra explícitas não são alterados aqui. O antes e depois na instalação real continua como **runtime pendente**; o corpus não prova preservação em hosts instalados.
 
 Na **rodada final**, uma pessoa ainda deve comparar os quatro cenários nos dois hosts, verificar compreensão de resultado/fase/executor/próximo passo/decisão e avaliar aparência, canais e preferências na instalação real. Esses aceites ficam pending-final-round até evidência própria. Resultados técnicos, revisão, integração e aceite humano continuam fatos separados.
@@ -119,3 +137,47 @@ Verificação planejada desta avaliação:
 node scripts/forge-communication-evaluation.test.js
 node scripts/forge-doc-claims.test.js
 ~~~
+
+## Milestone time options (S02/T07, 2026-11-03)
+
+Only the two modelo-da-skill source.sha256 fields citing skills/forge-next/SKILL.md
+were re-pinned. Quoted text and all other sample bytes remain unchanged.
+Owner pre-T07 source revision: `0ee8dfdd9ffa0a4ca6dfafe928991a9125f6d573`; baseline
+`scripts/fixtures/milestone-options/distribution-before.json`.
+
+- Before: `22bddaebd4367ce2cc8729cfdc7f14131de2c155be62226c3d24c45f626ed2c5`.
+- After (SHA-256 of actual source bytes): `637e73b1e2cdae1c97dd75f67f4f0b42028be6684235e6215c9516a1d1e37d1b`.
+
+The source instruction changes enroll new milestones, present explicit choices
+and resume the same snapshot. This corpus remains source/distribution evidence,
+not a client observation or human acceptance.
+
+## S02 integrated review R61/R63 correction
+
+From verified 7e91b8f, the two literal forge-next citation source hashes change
+from `637e73b1e2cdae1c97dd75f67f4f0b42028be6684235e6215c9516a1d1e37d1b` to `e8d04241493f4fa7c5a1db28e075487759fea1dd87dfafdbb750aa06aa723d0f` after the crash-safe bootstrap ordering edit.
+Quoted text and every other sample byte remain unchanged; the immutable
+distribution-before fixture is preserved. Runtime restart assertions are
+separate evidence from these source citations, with no human UAT claim.
+
+## Task ligada (S03/T07 de M-20261101111759-opcoes-prazo-milestones)
+
+A T06 acrescentou blocos `forge:linked-task` a `skills/forge-task/SKILL.md` e
+`skills/forge-next/SKILL.md`. Os textos citados continuam literais nas duas skills;
+só os quatro `source.sha256` das citações modelo-da-skill mudaram, para o SHA-256
+dos bytes reais de cada arquivo (a regra do validador). Os valores anteriores são
+os da captura do owner antes da T06 (revisão
+`f0b5fb17b4c57348e18fbb96bf38e8fb6ef8ee2b`, `scripts/fixtures/linked-task/distribution-before.json`)
+e conferem com os preimages imutáveis dessa revisão.
+
+| Amostra (campo) | Fonte | SHA-256 anterior | SHA-256 novo |
+|---|---|---|---|
+| entries[1].supporting.timeline.after.source.sha256 | skills/forge-task/SKILL.md#modelo-literal | d81556180d9bb16d45a8f81ba6b5faa12ece7f6601a510963f29eb50fe10679b | af9cf1d0b0b9f68ba751394f935e2c324050b226409f7bea9095700d13ea62ae |
+| entries[5].supporting.timeline.after.source.sha256 | skills/forge-task/SKILL.md#modelo-literal | d81556180d9bb16d45a8f81ba6b5faa12ece7f6601a510963f29eb50fe10679b | af9cf1d0b0b9f68ba751394f935e2c324050b226409f7bea9095700d13ea62ae |
+| entries[2].supporting.partial.after.source.sha256 | skills/forge-next/SKILL.md#parcial | e8d04241493f4fa7c5a1db28e075487759fea1dd87dfafdbb750aa06aa723d0f | d824741df528de5b38f35aec9e00e9df80349ae8ed4687e0bf6fdb1cb69dc59a |
+| entries[6].supporting.partial.after.source.sha256 | skills/forge-next/SKILL.md#parcial | e8d04241493f4fa7c5a1db28e075487759fea1dd87dfafdbb750aa06aa723d0f | d824741df528de5b38f35aec9e00e9df80349ae8ed4687e0bf6fdb1cb69dc59a |
+
+Repondo esses quatro valores, os bytes do arquivo voltam ao SHA-256 da captura
+(`3f4640b4c1383652e4890827d9e8456ae75c54f2493a9bdafa48931542fed10e`). Textos,
+rótulos, referências, rubricas e o aceite humano pending-final-round ficam iguais.
+É proveniência de fonte, não observação de cliente nem aceite humano.

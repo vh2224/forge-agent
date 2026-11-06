@@ -134,6 +134,13 @@
 
 Default de effort (intensidade de raciocínio) por fase (unit_type). Eixo ortogonal ao tier: o tier escolhe QUAL modelo, o effort escolhe o quão fundo ele pensa. Escala ordenada: low < medium < high < xhigh < max. Sobreposto por effort: no frontmatter do T##-PLAN.md e clampado pela política versionada por modelo (scripts/forge-model-policy.js): claude-sonnet-5-5 e claude-sonnet-5 aceitam até max; claude-sonnet-4-6 documenta low/medium/high/max e recusa xhigh (effort-unsupported-by-model), nunca rebaixado em silêncio; claude-haiku-4-5 e ids sonnet/haiku sem entrada preservam o teto histórico medium. Effort é independente do modo de thinking (ver thinking). Pedido, resolvido e enviado são registrados separadamente; o valor aplicado pelo provedor permanece desconhecido sem readback.
 
+### `effort.estimate-milestone`
+
+- **Tipo:** string
+- **Default:** `"medium"`
+- **Valores permitidos:** `low`, `medium`, `high`, `xhigh`, `max`
+- **Descrição:** Effort da fase estimate-milestone (estimativa de opções de prazo antes do roadmap).
+
 ### `effort.plan-milestone`
 
 - **Tipo:** string

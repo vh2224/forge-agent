@@ -37,6 +37,8 @@ function resolveMemoryQuery(options = {}) {
         : unit === 'research-slice'
           ? [`${sliceBase}/${slice}-CONTEXT.md`, `${base}/${milestone}-ROADMAP.md`]
           : [`${base}/${milestone}-ROADMAP.md`];
+  } else if (unit === 'estimate-milestone') {
+    candidates = [`${base}/${milestone}-CONTEXT.md`, `${base}/${milestone}-SCOPE.md`, `${base}/${milestone}-BRAINSTORM.md`];
   } else if (['plan-milestone', 'research-milestone', 'discuss-milestone', 'complete-milestone'].includes(unit)) {
     candidates = unit === 'plan-milestone' || unit === 'complete-milestone'
       ? [`${base}/${milestone}-RESEARCH.md`, `${base}/${milestone}-CONTEXT.md`, `${base}/${milestone}-SCOPE.md`]

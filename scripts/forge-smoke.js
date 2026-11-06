@@ -183,7 +183,7 @@ const scaffoldResult = runScript('forge-prefs.js', ['--scaffold', '--schema-ref'
 const SCAFFOLD = scaffoldResult.stdout;
 
 function mkTmp(label) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `forge-smoke-${label}-`));
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), `forge-smoke-${label}-`)));
   fs.mkdirSync(path.join(dir, '.gsd', 'forge'), { recursive: true });
   return dir;
 }
@@ -8166,6 +8166,9 @@ function smokePrefsCutoverGuards() {
     // something the cutover can rewrite without changing the key and breaking
     // the match. Audited here rather than missed by the scan.
     'scripts/fixtures/index-green/allowed-misses.json',
+    // Immutable historical provenance records the legacy preference names;
+    // this exact data fixture is not a production preference reader.
+    'scripts/fixtures/linked-task/unlinked-baseline.json',
   ]);
   const untrackedProbe = path.join(REPO, '.forge-smoke-untracked-prefs-probe');
   fs.writeFileSync(untrackedProbe, 'forge-agent-prefs.md\n', 'utf8');
@@ -9407,7 +9410,10 @@ function smokeCleanupRegistryMode() {
   const helperBody = source.slice(helperStart, helperEnd === -1 ? undefined : helperEnd);
   assert(source.includes("require('./forge-runs.js')"), '(d) isolation requires forge-runs.js', source);
   assert(/runs\.get\(cwd, runId\)/.test(helperBody), '(d) resolveCleanupMode reads runs.get(cwd, runId)', helperBody);
-  assert(/resolveCleanupMode\(cwd, runId\)/.test(cleanupBody), '(d) cleanupForRun uses resolveCleanupMode', cleanupBody);
+  assert(/runs\.withRegistryFence\(cwd, \(\) => cleanupFenced\(cwd, runId, opts\)\)/.test(cleanupBody),
+    '(d) cleanupForRun enters the registry fence before cleanup', cleanupBody);
+  assert(/resolveCleanupMode\(cwd, runId, rec\)/.test(cleanupBody),
+    '(d) fenced cleanup uses resolveCleanupMode with the validated record', cleanupBody);
   assert(!/const eff = resolveEffectiveMode\(cwd\)/.test(cleanupBody), '(d) cleanupForRun has no direct effective-mode selector', cleanupBody);
   assert(/source:\s*'registry'/.test(helperBody), '(d) helper labels registry source', helperBody);
   assert(/source:\s*'fallback-resolve'/.test(helperBody), '(d) helper labels fallback source', helperBody);
@@ -9598,10 +9604,12 @@ function smokeRoutingDomains() {
   const repo = path.dirname(SCRIPTS);
 
   const NEEDLE = 'ROUTING_DOMAINS';
+  // forge-new-milestone no longer carries an inline planner (S02/T07): its roadmap comes from
+  // the controller's plan-milestone unit, whose rendered template carries the placeholder.
   const EXPECTED = {
     'shared/forge-dispatch.md': 2,
     'skills/forge-task/SKILL.md': 1,
-    'skills/forge-new-milestone/SKILL.md': 1,
+    'skills/forge-new-milestone/SKILL.md': 0,
     'agents/forge-planner.md': 2,
   };
   const files = {
@@ -9633,10 +9641,13 @@ function smokeRoutingDomains() {
   }
 
   // (c) Inline-path mirrors derive via the canonical helper. The renderer now owns auto/next injection.
-  for (const name of ['skills/forge-task/SKILL.md', 'skills/forge-new-milestone/SKILL.md']) {
+  for (const name of ['skills/forge-task/SKILL.md']) {
     assert(contents[name].includes('forge-routing.js" --list-domains'),
       `(c) ${name} derives ROUTING_DOMAINS via forge-routing.js --list-domains`);
   }
+
+  assert(!/Agent\(\{\s*subagent_type:\s*["']forge-planner["']/.test(contents['skills/forge-new-milestone/SKILL.md']),
+    '(c) new milestone delegates roadmap planning to the controller after time selection');
 
   // (d) planner contract preserves open-set (never invent a domain key) and no-keyword-matching.
   const planner = contents['agents/forge-planner.md'];
@@ -15940,11 +15951,17 @@ function smokeMemoryIndexCommandRendered() {
     // index fact line or the index artifact's own header. If someone later
     // injects index content here, both asserts below turn red — that is the
     // design (T03 must-have #4).
-    const sectionMatch = sliceTemplate.match(/## Memory Index[\s\S]*?(?=\n## Instructions)/);
+    const memorySection = text => text.match(/## Memory Index[\s\S]*?(?=\n## |$)/);
+    const sectionMatch = memorySection(sliceTemplate);
     assert(!!sectionMatch, '(d) shared/templates/dispatch/plan-slice.md carries a ## Memory Index section');
     const sectionTokens = sectionMatch ? countTokens(sectionMatch[0]) : Infinity;
     assert(sectionTokens <= 150,
       `(d D3) the ## Memory Index section measures <= 150 tokens (command, not content) — measured ${sectionTokens}`);
+    const unrelated = '\n## Unrelated section\n' + 'different context '.repeat(200);
+    assert(!!sectionMatch && countTokens(memorySection(sectionMatch[0] + unrelated)[0]) === sectionTokens,
+      '(d D3 control) a later sibling section does not enter the Memory Index token count');
+    assert(!!sectionMatch && countTokens(memorySection(sectionMatch[0] + '\n' + 'index fact '.repeat(200) + unrelated)[0]) > 150,
+      '(d D3 control) inlining index content still exceeds the unchanged 150-token ceiling');
     assert(!slice.prompt.includes('# Índice de memória por arquivo-fonte'),
       '(d D3) rendered plan-slice prompt does NOT contain the memory-index artifact\'s own header');
     assert(!/—\s*origem:\s*/.test(slice.prompt),

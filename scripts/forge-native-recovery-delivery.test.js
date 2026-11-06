@@ -18,23 +18,31 @@ async function fixture(options = {}) {
   const base = path.join(f.owner, standalone ? '.gsd/tasks/' + taskId : '.gsd/milestones/M901/slices/S01');
   const planFile = path.join(base, standalone ? taskId + '-PLAN.md' : 'tasks/T01/T01-PLAN.md');
   const command = 'node check.cjs';
+  const artifactName = options.generatedArtifact ? 'same.md' : 'same.txt';
   for (const root of f.contract.code_roots) write(path.join(root.path,'check.cjs'),
-    options.existenceOnly ? "require('assert').ok(require('fs').existsSync('same.txt'));console.log('PASS claimed root content');" :
-      "require('assert').equal(require('fs').readFileSync('same.txt','utf8'),'after\\n');console.log('PASS claimed root content');");
+    (options.existenceOnly ? "require('assert').ok(require('fs').existsSync('same.txt'));console.log('PASS claimed root content');" :
+      "require('assert').equal(require('fs').readFileSync('same.txt','utf8'),'after\\n');console.log('PASS claimed root content');").replaceAll('same.txt', artifactName));
   const plan = require('./forge-code-roots.test').plan(f.contract).replace('id: T-roots','id: ' + taskId)
     .replace('must_haves:', 'verify:\n  - ' + JSON.stringify(command) + '\nmust_haves:')
     .replace('  key_links: []', "  key_links:\n    - from: 'alpha::same.txt'\n      to: 'beta::same.txt'\n      via: 'Both roots change together.'")
-    .replaceAll('min_lines: 1',options.existenceOnly?'min_lines: 10':'min_lines: 1');
+    .replaceAll('min_lines: 1',options.existenceOnly?'min_lines: 10':'min_lines: 1')
+    .replaceAll('same.txt', artifactName);
   write(planFile, plan);
   if (!standalone) {
     write(path.join(base,'S01-PLAN.md'),'# Slice\n- [ ] **T01** — fixture\n');
     write(f.roadmap,'# Roadmap\n- [ ] **S01: Recovery** `depends:[]`\n');
   }
-  const claim = { schema_version: 2, generation: crypto.randomUUID(), execution_contract: f.contract,
-    paths: f.contract.code_roots.map(row => ({root_id:row.id,path:'same.txt'})) };
-  require('./forge-runs').add(f.owner,{id:'fixture-run',kind:standalone?'task':'milestone',session_id:'fixture',write_claim:claim});
+  // Opt-in T10 variant: the milestone run holds a canonically recorded claim.
+  const runId = options.runId || 'fixture-run';
+  let claim = { schema_version: 2, generation: crypto.randomUUID(), execution_contract: f.contract,
+    paths: f.contract.code_roots.map(row => ({root_id:row.id,path:artifactName})) };
+  if (options.recordedClaim) {
+    require('./forge-runs').add(f.owner,{id:runId,kind:standalone?'task':'milestone',session_id:'fixture'});
+    claim = require('./forge-write-claim').recordClaim(f.owner,runId,{schema_version:2,source:'plan-writes',unit:'execute-task/'+taskId,
+      execution_contract:f.contract,paths:claim.paths});
+  } else require('./forge-runs').add(f.owner,{id:runId,kind:standalone?'task':'milestone',session_id:'fixture',write_claim:claim});
   let r = {unitType:'execute-task',scope:'milestone',phase:'execute',milestoneId:'M901',sliceId:'S01',taskId:'T01',
-    cwd:f.a,contextRoot:f.owner,planFile,roadmapFile:f.roadmap,execution_contract:f.contract,claim,runId:'fixture-run',
+    cwd:f.a,contextRoot:f.owner,planFile,roadmapFile:f.roadmap,execution_contract:f.contract,claim,runId,
     gates:{plan:'skipped',planSkipReason:'interactive-off',claim:'proceed',security:'passed'},
     contextFile:path.join(base,'S01-CONTEXT.md'),securityFile:planFile.replace('-PLAN.md','-SECURITY.md'),
     researchFile:path.join(base,'S01-RESEARCH.md'),workflowId:'fixture',dispatchId:options.dispatchId || 'ordinary-execute',
@@ -69,7 +77,8 @@ async function fixture(options = {}) {
   } else {
   const controller=require('./forge-unit-controller');
   require('./forge-state').write(f.owner,{milestone:'M901',kind:'milestone',phase:'idle',active_slice:'S01',active_task:'—',auto_mode:'on'});
-  const begin=controller.begin(f.owner,{milestone:'M901',unit:{type:'execute-task',id:'T01',key:'execute-task/T01'},slice:'S01',owner_token:'fixture-owner',host_runtime:'codex',idempotency_key:'fixture-begin',ttl_ms:300000});
+  if (options.beforeBegin) options.beforeBegin(f);
+  const begin=controller.begin(f.owner,{milestone:'M901',unit:{type:'execute-task',id:'T01',key:'execute-task/T01'},slice:'S01',owner_token:'fixture-owner',host_runtime:'codex',idempotency_key:'fixture-begin',ttl_ms:300000},options.beginOptions);
   const beginRecord=controller.lookupRecord(f.owner,'transaction','fixture-begin');
   f.assertBoundary=()=>{
     if(f.boundaryRejected)throw new Error('fixture-boundary-lost');
@@ -138,7 +147,7 @@ async function fixture(options = {}) {
   f.result=()=>{
     const unit=side.locations(r).rules[side.locations(r).delivery.input].unit;
     const inventory=require('./forge-delivery').inventoryPlan(plan,planFile,unit);
-    return {status:'done',summary:'Both fixture files updated.',files_changed:['alpha::same.txt','beta::same.txt'],
+    return {status:'done',summary:'Both fixture files updated.',files_changed:f.contract.code_roots.map(row=>row.id+'::'+artifactName),
       must_haves_status:inventory.criteria.map(c=>({kind:c.origin,index:c.index,item:c.text,note:'Observed locally.',status:'met',
         root_id:c.origin==='artifact'?roots.resolvePath(f.contract,c.artifact_path).root_id:'',
         evidence:c.origin==='artifact'?[]:f.contract.code_roots.map(row=>({root_id:row.id,check:command,stdout_line:'PASS claimed root content'}))}))};

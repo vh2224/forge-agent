@@ -76,6 +76,66 @@ sidecar: its `forge-xllm.js` invocation passes both
 `--host-runtime "$HOST_RUNTIME"` and `--sidecar-declared`. The declaration is
 never inferred from using an external adapter.
 
+Contexto de tempo da milestone (`shared/forge-milestone-time.md`): numa revisão
+de milestone, o chamador define o contexto real de orçamento antes do Step 2, com o
+owner físico (`WORKING_DIR`, nunca `CODE_DIR`), a milestone e a unidade corrente do
+loop (`complete-slice/{S##}` no gate por slice, `complete-milestone/{M###}` no Step 9).
+Na revisão de task avulsa ele fica vazio: escopo avulso continua avulso.
+```bash
+BUDGET_ARGS=()
+if [ -n "$MILESTONE_ID" ] && [ -n "$BUDGET_UNIT" ]; then
+  BUDGET_ARGS=(--budget-owner "$WORKING_DIR" --budget-milestone "$MILESTONE_ID" --budget-unit "$BUDGET_UNIT")
+fi
+```
+Toda perna externa de challenge, defense e rebuttal abaixo passa `"${BUDGET_ARGS[@]}"`;
+o adaptador rechecha a admissão com o relógio atual antes de iniciar o provider.
+As pernas nativas (`forge-reviewer`, `forge-advocate` e os fallbacks deles) passam
+pela invocação nativa supervisionada de `scripts/forge-native-invocation.js` com
+`milestoneTimeContext` igual a esse contexto e com a ferramenta realmente exposta.
+Recusa de tempo (`reason_code` `milestone-budget-exhausted`, `milestone-budget-draining`,
+`milestone-time-invalid` ou `milestone-clock-unknown`, com `provider_called:false`)
+não é indisponibilidade de revisor: não há retry, não há fallback para outro revisor
+ou família e não se escreve `{S##}-REVIEW.md` limpo nem mínimo. O gate devolve a
+recusa à parada de tempo do chamador e a decisão pendente segue o contrato de tempo.
+<!-- forge:linked-task:review-budget:start -->
+
+Task ligada (S03, `shared/forge-milestone-time.md § Task ligada e endpoint (S03)`): é a
+única exceção ao contexto vazio da task avulsa. Na revisão de task ligada iniciada, o
+chamador define `LINKED_TASK_ID` com o ID da task e `BUDGET_UNIT=execute-task/{TASK_ID}`,
+com `MILESTONE_ID` vazio, e o contexto das pernas externas passa a ser o trio exclusivo
+`--budget-owner`, `--budget-task` e `--budget-unit` do adaptador de revisão (identidade
+`{cwd, task, unit}`, com o owner físico `WORKING_DIR`, nunca `CODE_DIR`). Rode este bloco
+logo depois do bloco acima; task sem vínculo deixa `LINKED_TASK_ID` vazio e continua com o
+contexto vazio, sem campo novo e com a saída de antes:
+```bash
+if [ -n "${LINKED_TASK_ID:-}" ]; then
+  if [ -n "$MILESTONE_ID" ]; then
+    echo "Contexto de orçamento misto (milestone e task ligada): recusado antes de qualquer perna." >&2
+    exit 2
+  fi
+  BUDGET_ARGS=()
+  [ -n "$BUDGET_UNIT" ] && BUDGET_ARGS=(--budget-owner "$WORKING_DIR" --budget-task "$LINKED_TASK_ID" --budget-unit "$BUDGET_UNIT")
+fi
+```
+Milestone e task ligada nunca se misturam: o bloco para antes de qualquer perna e o
+adaptador também recusa `--budget-task` junto de `--budget-milestone` como contexto
+inválido (`milestone-time-invalid`, saída 2, `provider_called:false`), antes de qualquer
+transporte. Na revisão de task ligada vale a mesma regra de recusa de tempo para toda
+recusa exportada em `TRANSPORT_REFUSAL_CODES` de `scripts/forge-milestone-time-admission.js`:
+`milestone-budget-exhausted`, `milestone-budget-draining`, `milestone-time-invalid`,
+`milestone-clock-unknown`, `milestone-endpoint-closed`, `predecessor-incomplete`,
+`linked-task-not-started`, `linked-task-budget-exhausted`, `linked-task-budget-draining`,
+`linked-task-time-invalid`, `linked-task-clock-unknown`, `linked-task-chain-closed` e
+`linked-task-closed`. A perna sai com código 2 e `provider_called:false`: é parada antes do
+provider, nunca indisponibilidade de revisor, nunca retry nem fallback para outro revisor
+ou família, nunca evento `worker-engine-fallback` e nunca `{TASK_ID}-REVIEW.md` limpo nem
+mínimo. A pendência volta ao horizonte da task (`skills/forge-task/SKILL.md`, revisão de
+task ligada). Perna sem esse contexto real não tem a garantia do horizonte; isso é
+declarado, não suposto. Este texto distribui o contrato; a execução e a compreensão pelo
+cliente instalado continuam desconhecidas.
+
+<!-- forge:linked-task:review-budget:end -->
+
 ## Step 0 — Read review prefs (via the canonical prefs CLI)
 
 Resolve prefs once through the S01 engine CLI (`scripts/forge-prefs.js --resolved`, the canonical per-unit helper defined in `shared/forge-dispatch.md § Per-unit prefs resolution`) — it reads the JSONC catalog per layer, and legacy Markdown without JSONC hard-stops with the canonical repair message in `shared/forge-prefs-cutover.md`, so no `files=[…]` 3-file cascade merge is re-implemented here. Read every `review.*` knob off `.prefs`, applying the SAME whitelist/clamp + default each had inline. The single `REVIEW_CFG` JSON below preserves the exact shape downstream steps consume:
@@ -604,9 +664,9 @@ Invoke the adapter (parsing is **not** reimplemented — the adapter of S01 alre
 
 ```bash
 if [ -n "$CHALLENGER_MODEL" ]; then
-  node scripts/forge-xllm.js --mode challenge --engine "$XLLM_ENGINE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --diff-cmd "{DIFF_CMD}" --cwd {WORKING_DIR} --model "$CHALLENGER_MODEL"
+  node scripts/forge-xllm.js --mode challenge --engine "$XLLM_ENGINE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --diff-cmd "{DIFF_CMD}" --cwd {WORKING_DIR} "${BUDGET_ARGS[@]}" --model "$CHALLENGER_MODEL"
 else
-  node scripts/forge-xllm.js --mode challenge --engine "$XLLM_ENGINE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --diff-cmd "{DIFF_CMD}" --cwd {WORKING_DIR}
+  node scripts/forge-xllm.js --mode challenge --engine "$XLLM_ENGINE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --diff-cmd "{DIFF_CMD}" --cwd {WORKING_DIR} "${BUDGET_ARGS[@]}"
 fi
 XLLM_EXIT=$?
 ```
@@ -628,9 +688,9 @@ Render the objections into a temp file (the same `OBJECTIONS` contract Step 2 pr
 ```bash
 XLLM_ENGINE_ADVOCATE=$([ "$RESOLVED_ADVOCATE" = "gemini" ] && echo agy || echo codex)
 if [ -n "$ADVOCATE_MODEL_EXTERNAL" ]; then
-  node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode defend --engine "$XLLM_ENGINE_ADVOCATE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --input "$DEFENSE_INPUT" --diff-cmd "{DIFF_CMD}" --cwd {WORKING_DIR} --model "$ADVOCATE_MODEL_EXTERNAL"
+  node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode defend --engine "$XLLM_ENGINE_ADVOCATE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --input "$DEFENSE_INPUT" --diff-cmd "{DIFF_CMD}" --cwd {WORKING_DIR} "${BUDGET_ARGS[@]}" --model "$ADVOCATE_MODEL_EXTERNAL"
 else
-  node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode defend --engine "$XLLM_ENGINE_ADVOCATE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --input "$DEFENSE_INPUT" --diff-cmd "{DIFF_CMD}" --cwd {WORKING_DIR}
+  node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode defend --engine "$XLLM_ENGINE_ADVOCATE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --input "$DEFENSE_INPUT" --diff-cmd "{DIFF_CMD}" --cwd {WORKING_DIR} "${BUDGET_ARGS[@]}"
 fi
 XLLM_DEFEND_EXIT=$?
 ```
@@ -753,9 +813,9 @@ Write the OBJECTIONS + DEFENSE dialogue to a temp file (the adapter reads the re
 
 ```bash
 if [ -n "$CHALLENGER_MODEL" ]; then
-  node scripts/forge-xllm.js --mode rebuttal --engine "$XLLM_ENGINE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --input "$REBUTTAL_INPUT" --cwd {WORKING_DIR} --model "$CHALLENGER_MODEL"
+  node scripts/forge-xllm.js --mode rebuttal --engine "$XLLM_ENGINE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --input "$REBUTTAL_INPUT" --cwd {WORKING_DIR} "${BUDGET_ARGS[@]}" --model "$CHALLENGER_MODEL"
 else
-  node scripts/forge-xllm.js --mode rebuttal --engine "$XLLM_ENGINE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --input "$REBUTTAL_INPUT" --cwd {WORKING_DIR}
+  node scripts/forge-xllm.js --mode rebuttal --engine "$XLLM_ENGINE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --input "$REBUTTAL_INPUT" --cwd {WORKING_DIR} "${BUDGET_ARGS[@]}"
 fi
 XLLM_EXIT=$?
 ```

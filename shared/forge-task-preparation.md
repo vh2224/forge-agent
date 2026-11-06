@@ -213,3 +213,34 @@ Cada sidecar de recuperação recebe o tier safety ceiling (ceilingFromRoute), n
 Só destino não tentado, com autoridade viva e capacidades reais, é elegível; a ausência de
 prazo não autoriza fallback nem execução inline. O término vem da lista finita de candidatos.
 O registro não substitui evidência histórica ausente nem libera automaticamente um caso real.
+
+## Task ligada (S03)
+
+Contrato canônico: `shared/forge-milestone-time.md § Task ligada e endpoint (S03)`. Esta
+seção descreve o que o código da preparação já faz para uma task ligada a uma milestone
+com contrato; ela não concede autoridade nem substitui a guarda executável.
+
+- **Sem vínculo, nada muda.** A sonda sem vínculo retorna antes de qualquer leitura de
+  estado de tempo; prompt, pedido, fingerprint, recibo e resultado de task sem vínculo
+  ficam idênticos ao baseline do owner (`forge-linked-task-parity.test.js`).
+- **Admissão ligada antes da rota.** `startStandaloneTaskPreparationCore` reaproveita o
+  recibo `ready` e valida a continuação; só então, para task ligada, consulta o horizonte
+  da task (`decideLinkedTaskEntry`) e, admitida, resolve a rota. A recusa devolve
+  `refused` com estágio `linked-task-admission`, `provider_called:false` e nenhum recibo novo.
+- **Admissão de novo nas entradas reais.** O closure nativo de uso único, a retomada
+  (`recoverStandaloneTask`) e o sidecar de unidade rechecam o horizonte na entrada real,
+  mesmo quando a seleção ou a reserva aconteceram abaixo do teto (seleção antes, despacho
+  depois). Segundo invoke nativo continua `native-handoff-already-invoked`.
+- **Bloco consumido exatamente uma vez.** Para task ligada iniciada, `buildPreparationPrompt`
+  traz o bloco de `consumedHandoffBlock` exatamente uma vez em cada uma das quatro fases
+  (brainstorm, discuss, research e plan), sem duplicar quando o `## Task Brief` do prompt
+  pai já o contém. Task ligada não iniciada, BRIEF adulterado ou handoff alterado recusam
+  antes do provider.
+- **Precheck do skill.** Antes de cada fase o skill roda
+  `forge-linked-task-horizon.js --admit` com a unidade `<unidade da tabela>/<TASK_ID>`
+  (`plan-slice`, `discuss-milestone`, `research-milestone` ou `plan-milestone`). Ele só
+  antecipa a mensagem; a garantia é a admissão acima.
+- **Autoridade.** Nem este contrato nem o texto do skill concedem autoridade. Início,
+  continuação, encerramento da cadeia e extensão do horizonte exigem a resposta explícita
+  persistida e o handle vivo do host; permissão permanente de routing ou de recovery
+  continua sendo só autorização de rota, nunca consentimento funcional.

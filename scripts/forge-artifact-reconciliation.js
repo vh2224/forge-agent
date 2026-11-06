@@ -40,8 +40,10 @@ function lock(manifest) {
   const directory = lockRoot(manifest.owner);
   if (manifest.lock_root && manifest.lock_root !== directory) fail('reconciliation-lock-identity');
   fs.mkdirSync(path.join(directory, '.gsd'), { recursive: true });
-  const handle = require('./forge-lock').acquireSync(directory, 'publication',
-    { retries: 1, allowStaleRecovery: false });
+  // This synchronous critical section belongs to the actual owner/broker
+  // process. Recover only its proven death, never an old clock or a live PID.
+  const handle = require('./forge-lock').acquireProcessSync(directory, 'publication',
+    { retries: 1 });
   const guard = Object.freeze({ release() { heldLocks.delete(guard); return handle.release(); } });
   heldLocks.set(guard, manifest.owner);
   return guard;

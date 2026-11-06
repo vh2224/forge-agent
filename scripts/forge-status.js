@@ -16,6 +16,9 @@
 //      try/catch. Malformed/truncated input degrades to empty/partial results,
 //      never throws.
 //   5. No network, no external deps: Node stdlib + repo libs only.
+//   6. Milestone time (shared/forge-milestone-time.md): collect adds `time` only
+//      to milestones with a contract, via the pure readers readTimeStatus and
+//      summarizeTimeStatus; renderTree only formats model.time.
 //
 // Dashboard writes, status reads.
 
@@ -325,6 +328,139 @@ function resolveFocus(cwd, milestoneId, activeRuns) {
   return { focused: null, note: null, error: null };
 }
 
+// ── Milestone time (read-only) ───────────────────────────────────────────────
+// Only a milestone with a time contract gains a `time` block; contract-free work
+// keeps the exact legacy model and render. readTimeStatus/summarizeTimeStatus
+// (forge-milestone-time-admission) are pure readers, required lazily because the
+// clock module itself requires this file. Owner writers (warnings, journal,
+// checkpoints, amendments) are never reachable from here.
+const TIME_REASON = /^[a-z][a-z0-9-]{0,100}$/;
+const WORKER_EFFORT = new Set(['complete', 'partial', 'unknown']);
+
+function timeMs(value) {
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+function timeReason(value) {
+  return typeof value === 'string' && TIME_REASON.test(value) ? value : null;
+}
+
+// Closed projection: no paths, sources, sessions or raw records, only the
+// fields the status and personal views render.
+function timeBlock(id, status, summary) {
+  const clocks = status.clocks || {};
+  const effort = clocks.effort && typeof clocks.effort === 'object' ? clocks.effort : null;
+  const worker = effort && effort.worker && typeof effort.worker === 'object' ? effort.worker : null;
+  const coverage = worker && worker.coverage ? worker.coverage : {};
+  const endpoint = status.horizon && status.horizon.endpoint && status.horizon.endpoint.items ? status.horizon.endpoint.items : null;
+  const forecast = status.forecast || {};
+  const projection = forecast.projection || {};
+  const block = {
+    contract: status.contract === 'valid' ? 'valid' : 'invalid',
+    contract_version: timeMs(status.contract_version),
+    state: summary.state,
+    horizon: status.horizon ? {
+      ceiling_ms: summary.ceiling_ms,
+      endpoint: endpoint ? Object.fromEntries(['publication', 'installation', 'manual-uat', 'external-waits']
+        .map((key) => [key, timeReason(endpoint[key])])) : null,
+    } : null,
+    elapsed_ms: timeMs(clocks.elapsed_ms),
+    consumed_ms: summary.consumed_ms,
+    unknown_ms: summary.unknown_ms,
+    remaining_ms: summary.remaining_ms,
+    forecast: {
+      status: summary.forecast,
+      reason: timeReason(forecast.reason),
+      low_ms: Number.isFinite(projection.low_ms) ? Math.round(projection.low_ms) : null,
+      high_ms: Number.isFinite(projection.high_ms) ? Math.round(projection.high_ms) : null,
+    },
+    // The forecast reads historical deliveries; that is never current
+    // integrated acceptance of the milestone endpoint.
+    progress: { proof_kind: 'historical-delivery', current_integrated_acceptance: 'not-evaluated' },
+    effort: effort ? {
+      unit_interval_sum_ms: timeMs(effort.unit_interval_sum_ms),
+      basis: 'controller-unit-intervals',
+      unit_complete: effort.unit_complete === true,
+      worker: {
+        status: worker && WORKER_EFFORT.has(worker.status) ? worker.status : 'unknown',
+        reason: worker ? timeReason(worker.reason) : 'worker-evidence-absent',
+        worker_ms: worker ? timeMs(worker.worker_ms) : null,
+        observed_worker_ms: worker ? timeMs(worker.observed_worker_ms) : null,
+        invocations: worker ? timeMs(worker.invocations) : null,
+        coverage: { units: timeMs(coverage.units), covered: timeMs(coverage.covered), partial: timeMs(coverage.partial), unobserved: timeMs(coverage.unobserved) },
+      },
+    } : null,
+    last_warning: status.last_warning && summary.last_warning ? {
+      id: summary.last_warning,
+      classification: timeReason(status.last_warning.classification),
+      warning: status.last_warning.warning === true,
+    } : null,
+    open_writers: Array.isArray(status.open_writers) ? status.open_writers.length : 0,
+    checkpoint: status.checkpoint ? { decision_pending: summary.decision_pending, overshoot_ms: timeMs(status.checkpoint.overshoot_ms) } : null,
+    unknowns: (Array.isArray(status.unknowns) ? status.unknowns : []).map(timeReason).filter(Boolean).slice(0, 16),
+    summary,
+    diagnostic: `node scripts/forge-milestone-time-admission.js --status --milestone ${id} --json`,
+  };
+  // New keys only for an endpoint or a linked milestone: the frozen proof, the separate task
+  // horizon (its own ceiling governs task operations) and the derived chain that governs nothing.
+  if (summary.endpoint) block.endpoint = { ...summary.endpoint };
+  if (summary.task) {
+    block.task = { ...summary.task };
+    block.chain = summary.chain ? { ...summary.chain } : null;
+  }
+  return block;
+}
+
+// null for tasks, unreadable IDs and contract-free milestones.
+function readMilestoneTime(cwd, id) {
+  if (typeof id !== 'string' || !ids.isValid(id) || ids.entityKind(id) !== 'milestone') return null;
+  let admission;
+  try {
+    admission = require('./forge-milestone-time-admission.js');
+    const status = admission.readTimeStatus(cwd, id);
+    if (!status || status.contract === 'absent') return null;
+    return timeBlock(id, status, admission.summarizeTimeStatus(status));
+  } catch {
+    // A contract that cannot be read stays visible as unknown, never absent.
+    const status = { contract: 'invalid', unknowns: ['time-source-unreadable'] };
+    const summary = admission ? admission.summarizeTimeStatus(status) : { state: null, ceiling_ms: null, consumed_ms: null,
+      unknown_ms: null, remaining_ms: null, forecast: 'unknown', last_warning: null, unknown: true, decision_pending: false };
+    return timeBlock(id, status, summary);
+  }
+}
+
+function withMilestoneTime(root, work, opts) {
+  if (work && work.kind === 'task') return withLinkedTask(root, work, opts);
+  if (!work || work.kind !== 'milestone' || typeof root !== 'string' || !root) return work;
+  const time = readMilestoneTime(root, work.id);
+  return time ? { ...work, time } : work;
+}
+
+// ── Linked task horizon (read-only) ──────────────────────────────────────────
+// Only a task with a link record gains the closed `linked` block: exactly the
+// summarizeLinkedStatus projection of forge-linked-task-horizon (task, milestone
+// and chain horizons, which ceiling governs each operation, decision pending and
+// unknowns). An unlinked task reads no time state and keeps its exact model.
+function readLinkedTask(root, id, opts) {
+  if (typeof root !== 'string' || !root || typeof id !== 'string' || !ids.isValid(id) || ids.entityKind(id) !== 'task') return null;
+  const options = opts || {};
+  try {
+    const horizon = require('./forge-linked-task-horizon.js');
+    const status = horizon.readLinkedStatus({ cwd: root, task: id,
+      ...(options.userHome !== undefined ? { userHome: options.userHome } : {}), ...(options.env !== undefined ? { env: options.env } : {}) });
+    return status === null ? null : horizon.summarizeLinkedStatus(status);
+  } catch {
+    // An unreadable horizon stays visible as unknown, never as absent.
+    return { task_id: id, lifecycle: 'invalid', task: null, milestone: null, chain: null, decision_pending: false, unknown: true };
+  }
+}
+
+function withLinkedTask(root, work, opts) {
+  if (!work || typeof root !== 'string' || !root) return work;
+  const linked = readLinkedTask(root, work.id, opts);
+  return linked ? { ...work, linked } : work;
+}
+
 // ── collect ──────────────────────────────────────────────────────────────────
 // Assembles the full status model per S01-PLAN.md § Shared contract. Pure-read,
 // torn-read tolerant end to end. opts = { milestoneId }.
@@ -332,7 +468,9 @@ function collect(cwd, opts) {
   opts = opts || {};
   if (opts.scope !== 'workspace') {
     const snapshot = require('./forge-personal-context').readPersonalSnapshot({ ...opts, cwd, id: opts.milestoneId || opts.id, inspect: Boolean(opts.milestoneId || opts.id) });
-    return { ...snapshot, scope: snapshot.scope || (opts.milestoneId || opts.id ? 'inspection' : 'personal'), works: snapshot.works || [], cwd, generated_at: new Date().toISOString(), warnings: snapshot.status === 'error' ? [snapshot.reason] : [] };
+    // Time is read from the snapshot's own project, never from a census.
+    const works = (snapshot.works || []).map((work) => withMilestoneTime(snapshot.project, work, opts));
+    return { ...snapshot, scope: snapshot.scope || (opts.milestoneId || opts.id ? 'inspection' : 'personal'), works, cwd, generated_at: new Date().toISOString(), warnings: snapshot.status === 'error' ? [snapshot.reason] : [] };
   }
   const warnings = [];
   const now = Date.now();
@@ -456,6 +594,8 @@ function collect(cwd, opts) {
       progress: { done: doneCount, total: slices.length },
       slices,
     };
+    const time = readMilestoneTime(cwd, focusedId);
+    if (time) milestoneModel.time = time;
   }
 
   let autonomousTasks = [];
@@ -464,6 +604,8 @@ function collect(cwd, opts) {
   } catch {
     autonomousTasks = [];
   }
+  // Workspace scope: linked tasks gain the same closed block; unlinked entries stay identical.
+  autonomousTasks = autonomousTasks.map((task) => withLinkedTask(cwd, task, opts));
 
   return {
     scope: 'workspace',
@@ -519,6 +661,126 @@ function makePaint(enabled) {
   };
 }
 
+// Time block rendering — pure over model.time, shared by every scope.
+const TIME_STATE_PT = {
+  active: 'ativo',
+  warning: 'aviso',
+  exhausted: 'esgotado',
+  draining: 'em drain',
+  checkpointed: 'em checkpoint',
+  extended: 'estendido',
+  'endpoint-proven': 'marco final comprovado (consumo congelado)',
+};
+const TASK_STATE_PT = {
+  'not-started': 'não iniciada',
+  active: 'ativa',
+  exhausted: 'no teto',
+  draining: 'em drain',
+  checkpointed: 'em checkpoint',
+  extended: 'estendida',
+  completed: 'encerrada',
+  'chain-closed': 'cadeia encerrada',
+  unknown: 'desconhecido',
+};
+const LIFECYCLE_PT = {
+  blocked: 'bloqueada (predecessora não comprovada)',
+  'handoff-ready': 'handoff pronto',
+  open: 'aberta',
+  started: 'iniciada',
+  closed: 'encerrada',
+  'chain-closed': 'cadeia encerrada',
+  invalid: 'inválida',
+};
+const FORECAST_PT = { fits: 'cabe no saldo', 'at-risk': 'em risco', exceeds: 'excede o saldo', unknown: 'desconhecida' };
+const ENDPOINT_PT = { publication: 'publicação', installation: 'instalação', 'manual-uat': 'UAT manual', 'external-waits': 'esperas externas' };
+const ENDPOINT_STATE_PT = { included: 'incluída', pending: 'pendente', completed: 'concluída', deferred: 'adiada', 'not-applicable': 'não se aplica' };
+
+function fmtDuration(ms) {
+  if (!Number.isFinite(ms)) return 'desconhecido';
+  const value = Math.max(0, Math.round(ms));
+  if (value < 60_000) return `${Math.floor(value / 1000)}s`;
+  if (value < 3_600_000) return `${Math.floor(value / 60_000)}min`;
+  const minutes = Math.floor(value / 60_000);
+  return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, '0')}min`;
+}
+
+function workerEffortText(worker) {
+  const coverage = worker.coverage || {};
+  const covered = `${Number.isInteger(coverage.covered) ? coverage.covered : '?'}/${Number.isInteger(coverage.units) ? coverage.units : '?'} unidades cobertas`;
+  if (worker.status === 'complete') return `${fmtDuration(worker.worker_ms)} (cobertura completa, ${covered})`;
+  if (worker.status === 'partial') return `parcial, ao menos ${fmtDuration(worker.observed_worker_ms)} observados (${covered})`;
+  return `desconhecido (${covered}; ${worker.reason || 'sem evidência observada'})`;
+}
+
+function timeLines(time) {
+  if (time.contract !== 'valid') {
+    return [
+      `Contrato de tempo inválido; estado desconhecido (${time.unknowns.join(', ') || 'motivo desconhecido'})`,
+      `Diagnóstico: ${time.diagnostic}`,
+    ];
+  }
+  const lines = [`Estado: ${TIME_STATE_PT[time.state] || 'desconhecido'}`];
+  const endpoint = time.horizon && time.horizon.endpoint
+    ? Object.entries(time.horizon.endpoint).map(([key, value]) => `${ENDPOINT_PT[key]}: ${ENDPOINT_STATE_PT[value] || 'desconhecido'}`).join(', ')
+    : 'desconhecido';
+  lines.push(`Horizonte: teto ${fmtDuration(time.horizon && time.horizon.ceiling_ms)}; marco final: entrega integrada verificada (${endpoint})`);
+  lines.push(`Consumido: ${fmtDuration(time.consumed_ms)} (sem atribuição: ${fmtDuration(time.unknown_ms)}); decorrido desde a ativação: ${fmtDuration(time.elapsed_ms)}`);
+  const remaining = time.remaining_ms;
+  lines.push(`Saldo: ${!Number.isFinite(remaining) ? 'desconhecido' : remaining > 0 ? fmtDuration(remaining) : `esgotado (estouro de ${fmtDuration(-remaining)})`}`);
+  const range = Number.isFinite(time.forecast.low_ms)
+    ? ` (restante estimado ${fmtDuration(time.forecast.low_ms)} a ${Number.isFinite(time.forecast.high_ms) ? fmtDuration(time.forecast.high_ms) : 'desconhecido'})` : '';
+  lines.push(`Previsão: ${FORECAST_PT[time.forecast.status] || FORECAST_PT.unknown}${range}; base: entregas históricas (historical-delivery), sem aceite integrado atual`);
+  if (time.effort) {
+    lines.push(`Esforço: intervalos de unidade do controlador (proxy, não é esforço de worker) ${fmtDuration(time.effort.unit_interval_sum_ms)}; esforço observado de workers: ${workerEffortText(time.effort.worker)}`);
+  } else {
+    lines.push('Esforço: desconhecido');
+  }
+  if (time.last_warning) {
+    lines.push(`Último aviso: ${FORECAST_PT[time.last_warning.classification] || 'desconhecido'} (${time.last_warning.id.slice(0, 12)})`);
+  }
+  if (time.open_writers > 0) lines.push(`Writers em voo: ${time.open_writers}, terminando pela própria vigilância`);
+  if (time.checkpoint) {
+    lines.push(`Checkpoint: ${time.checkpoint.decision_pending ? 'decisão pendente' : 'sem decisão pendente'}; estouro ${fmtDuration(time.checkpoint.overshoot_ms)}`);
+  }
+  if (time.endpoint) lines.push(`Marco final comprovado em ${time.endpoint.at}; consumo congelado nessa prova (${time.endpoint.sha256.slice(0, 12)})`);
+  if (time.task) {
+    lines.push(`Teto da milestone governa as operações da milestone; task ligada ${time.task.task_id || 'desconhecida'}: ${TASK_STATE_PT[time.task.state] || 'desconhecido'}, `
+      + `teto ${fmtDuration(time.task.ceiling_ms)} (governa as operações da task), consumido ${fmtDuration(time.task.consumed_ms)}, saldo ${saldoText(time.task.remaining_ms)}`);
+    if (time.chain) lines.push(chainText(time.chain));
+  }
+  if (time.unknowns.length) lines.push(`Desconhecido: ${time.unknowns.join(', ')}`);
+  lines.push(`Diagnóstico: ${time.diagnostic}`);
+  return lines;
+}
+
+function saldoText(remaining) {
+  return !Number.isFinite(remaining) ? 'desconhecido' : remaining > 0 ? fmtDuration(remaining) : `esgotado (estouro de ${fmtDuration(-remaining)})`;
+}
+
+function chainText(chain) {
+  const forecast = Number.isFinite(chain.forecast_low_ms)
+    ? `; previsão ${fmtDuration(chain.forecast_low_ms)} a ${Number.isFinite(chain.forecast_high_ms) ? fmtDuration(chain.forecast_high_ms) : 'desconhecido'}` : '';
+  return `Cadeia: teto derivado (soma, não governa nenhuma operação) ${fmtDuration(chain.cap_ms)}; consumido ${fmtDuration(chain.consumed_ms)}${forecast}; `
+    + `${chain.completed ? 'concluída (marco final e encerramento da task)' : 'não concluída'}`;
+}
+
+// Closed `linked` block of a linked task, pure over the projection.
+function linkedLines(linked) {
+  if (!linked.task) return [`Ciclo: ${LIFECYCLE_PT[linked.lifecycle] || 'inválido'}; horizonte ilegível (desconhecido)`];
+  const lines = [`Ciclo: ${LIFECYCLE_PT[linked.lifecycle] || 'inválido'}; estado da task: ${TASK_STATE_PT[linked.task.state] || 'desconhecido'}`];
+  lines.push(`Task: teto ${fmtDuration(linked.task.ceiling_ms)} (governa as operações da task${linked.task.extensions ? `; ${linked.task.extensions} extensão(ões)` : ''}); `
+    + `consumido ${fmtDuration(linked.task.consumed_ms)} (sem atribuição: ${fmtDuration(linked.task.unknown_ms)}); saldo ${saldoText(linked.task.remaining_ms)}`);
+  if (linked.milestone) {
+    lines.push(`Milestone ${linked.milestone_id || 'desconhecida'}: teto ${fmtDuration(linked.milestone.ceiling_ms)} (governa as operações da milestone); `
+      + `consumido ${fmtDuration(linked.milestone.consumed_ms)} (${linked.milestone.frozen ? 'congelado no marco final' : 'vivo'}); `
+      + `marco final ${linked.milestone.endpoint_proven ? 'comprovado' : 'não comprovado'}`);
+  }
+  if (linked.chain) lines.push(chainText(linked.chain));
+  lines.push(`Decisão pendente: ${linked.decision_pending ? 'sim' : 'não'}`);
+  if (linked.unknown) lines.push('Desconhecido: há valores sem fonte (exibidos como desconhecidos)');
+  return lines;
+}
+
 function renderTree(model, opts) {
   if (model && model.scope !== 'workspace' && Array.isArray(model.works)) {
     const labels = { pending: 'Pendência', acceptances: 'Aceite registrado', lastResult: 'Resultado registrado', handoff: 'Continuidade', nextAction: 'Próxima ação' };
@@ -537,6 +799,14 @@ function renderTree(model, opts) {
       }
       if (work.nextAction && work.nextAction.source) lines.push(`Fonte da próxima ação: ${work.nextAction.source}`);
       if (work.terminalEvidence.source) lines.push(`Fonte atual: ${work.terminalEvidence.source}`);
+      if (work.time) {
+        lines.push('Tempo da milestone:');
+        for (const line of timeLines(work.time)) lines.push(`- ${line}`);
+      }
+      if (work.linked) {
+        lines.push('Horizonte da task ligada:');
+        for (const line of linkedLines(work.linked)) lines.push(`- ${line}`);
+      }
     }
     return lines.join('\n') + '\n';
   }
@@ -575,6 +845,12 @@ function renderTree(model, opts) {
     lines.push(`**Nota:** ${model.runs.note}`);
   }
 
+  if (m.time) {
+    lines.push('');
+    lines.push(paint.header('### Tempo da milestone'));
+    for (const line of timeLines(m.time)) lines.push(`- ${line}`);
+  }
+
   lines.push('');
   lines.push(paint.header('### Slices'));
   if (Array.isArray(m.slices) && m.slices.length > 0) {
@@ -607,6 +883,7 @@ function renderTree(model, opts) {
       else if (t.status === 'in_progress') icon = paint.active('▶');
       const statusPt = STATUS_PT[t.status] || t.status;
       lines.push(`${icon} ${paint.id(t.id)}: ${t.description} (${statusPt})`);
+      if (t.linked) for (const line of linkedLines(t.linked)) lines.push(`  - ${line}`);
     }
   }
 
@@ -964,6 +1241,7 @@ module.exports = {
   resolveFocus,
   collect,
   renderTree,
+  timeLines,
   renderTokensBlock,
   formatTokenMeasurement,
   runWatch,

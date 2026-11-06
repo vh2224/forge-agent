@@ -8,8 +8,20 @@ const runtime = require('./forge-runtime.js');
 
 const PROTOCOL_VERSION = runtime.PROTOCOL_VERSION;
 const MODES = Object.freeze(['auto', 'task']);
-const COMMANDS = Object.freeze(['next', 'pause', 'resume', 'status', 'complete', 'consume-failure', 'reenter']);
+const COMMANDS = Object.freeze(['next', 'pause', 'resume', 'status', 'complete', 'consume-failure', 'reenter', 'resume-budget', 'resume-time-option']);
 const TERMINAL = new Set(['completed', 'blocked', 'failed']);
+// S02 owner blocks that the named resume-time-option command may continue: the
+// pending/invalid selection, roadmap conformance, the scoped task DAG and a review
+// mode incompatible with the active contract. Budget blocks keep their own
+// resume-budget continuation.
+const TIME_OPTION_BLOCKS = new Set([
+  'time-option-pending', 'time-options-invalid',
+  'time-roadmap-nonconformant', 'time-allocation-pending', 'time-scope-unallocated',
+  'time-unit-not-admitted', 'time-task-dependency-pending', 'time-task-dependency-unknown',
+  'time-task-dependency-cycle', 'time-task-identity-ambiguous', 'time-roadmap-selection-missing',
+  'time-review-disabled-incompatible', 'time-review-mode-unknown',
+]);
+const HASH = /^[a-f0-9]{64}$/;
 
 function error(code, message) { const value = new Error(message); value.code = code; return value; }
 function own(value, key) { return Object.prototype.hasOwnProperty.call(value || {}, key); }
@@ -122,7 +134,49 @@ function next(state, input, orchestrate) {
     return publicResult('next', state, 'completed', delegated.reason_code || 'no-next-unit', 'stop', delegated);
   }
   state.lifecycle = delegated.outcome === 'failed' ? 'failed' : 'blocked';
+  if (['milestone-budget-exhausted', 'milestone-budget-draining'].includes(delegated.reason_code)) {
+    const details = delegated.details?.time;
+    state.time_block = { milestone: delegated.milestone, contract_version: details?.contract_version,
+      contract_sha256: details?.contract_sha256 || null };
+  }
+  if (state.lifecycle === 'blocked' && TIME_OPTION_BLOCKS.has(delegated.reason_code) && delegated.milestone) {
+    const options = delegated.details?.time_options?.options_sha256;
+    state.time_option_block = { milestone: delegated.milestone, options_sha256: HASH.test(options || '') ? options : null };
+  }
   return publicResult('next', state, state.lifecycle, delegated.reason_code || 'controller-refused', 'stop', delegated);
+}
+// The same persisted snapshot continues after the operator's attested choice.
+// The block is a locator; the owner's resumeCheck decides and nothing is edited
+// or checkpointed here. Ready clears the block and delegates next once.
+function resumeTimeOption(state, input, orchestrate) {
+  if (state.lifecycle !== 'blocked' || !state.time_option_block) return publicResult('resume-time-option', state, 'blocked', 'time-option-resume-invalid', 'stop', null);
+  const delegated = orchestrate.run('resume-time-option', { ...delegateInput(input, state), time_option_block: state.time_option_block });
+  if (delegated.outcome !== 'completed') return publicResult('resume-time-option', state, 'blocked', delegated.reason_code || 'time-option-resume-invalid', 'stop', delegated);
+  state.lifecycle = 'idle'; delete state.time_option_block;
+  return next(state, input, orchestrate);
+}
+// The same persisted snapshot continues after an extension. A failure consumed
+// by this workflow is not skipped through next: the owner names the required
+// linked entry, and only an explicit entry delegates the existing reenter seam.
+function resumeBudget(state, input, orchestrate) {
+  if (state.lifecycle !== 'blocked' || !state.time_block) return publicResult('resume-budget', state, 'blocked', 'budget-resume-invalid', 'stop', null);
+  if (state.pending_questions?.some(row => row.status === 'pending')) return publicResult('resume-budget', state, 'blocked', 'pending-questions', 'stop', null);
+  const consumed = state.consumed_failure;
+  if (input.entry && state.step_count >= state.max_steps) return publicResult('resume-budget', state, 'blocked', 'step-budget-exhausted', 'stop', null);
+  const delegated = orchestrate.run('resume-budget', { ...delegateInput(input, state), time_block: state.time_block,
+    ...(consumed ? { consumed_failure: { unit: consumed.unit, failure_key: consumed.failure_key, failure_checksum: consumed.failure_checksum } } : {}) });
+  if (delegated.details?.pending_questions) state.pending_questions = delegated.details.pending_questions;
+  if (delegated.outcome !== 'completed') return publicResult('resume-budget', state, 'blocked', delegated.reason_code, 'stop', delegated);
+  if (delegated.reason_code === 'entry-ready') {
+    delete state.time_block;
+    state.current_unit = safeUnit(delegated.unit); state.lifecycle = 'dispatch_required'; state.step_count += 1;
+    state.last_entry_id = input.entry.entry_id;
+    const result = publicResult('resume-budget', state, 'dispatch_required', 'entry-ready', 'dispatch', delegated);
+    const { snapshot: _snapshot, ...decision } = result; state.last_decision = decision;
+    return result;
+  }
+  state.lifecycle = 'idle'; delete state.time_block;
+  return next(state, input, orchestrate);
 }
 function pause(state, input, orchestrate) {
   if (state.lifecycle === 'paused') return publicResult('pause', state, 'needs_input', 'already-paused', 'pause', null);
@@ -202,13 +256,15 @@ function advance(snapshot, commandValue, input = {}, dependencies = {}) {
   const controller = dependencies.orchestrate || orchestrateDefault;
   if (!controller || typeof controller.run !== 'function') throw error('invalid-controller', 'forge-orchestrate indisponível');
   const trusted = {};
-  for (const name of ['prefsReader', 'inventoryReader', 'now', 'failpoint', 'inspectAttempt', 'processProbe', 'replaySavedResponse', 'reconcileRoots', 'captureEntryBaseline', 'entryAuthority', 'questionStateAdapter']) {
+  for (const name of ['prefsReader', 'inventoryReader', 'now', 'failpoint', 'inspectAttempt', 'processProbe', 'replaySavedResponse', 'reconcileRoots', 'captureEntryBaseline', 'entryAuthority', 'questionStateAdapter', 'reconcileRetainedClaim', 'userHome', 'env', 'workerObservationReader']) {
     if (dependencies[name] !== undefined) trusted[name] = dependencies[name];
   }
   const orchestrate = { run: (operation, payload) => controller.run(operation, payload, trusted),
     ...(typeof controller.validatePending === 'function' ? { validatePending: (payload, decision) => controller.validatePending(payload, decision, trusted) } : {}) };
   if (command === 'consume-failure') return consumeFailure(state, input, orchestrate);
   if (command === 'reenter') return reenter(state, input, orchestrate);
+  if (command === 'resume-budget') return resumeBudget(state, input, orchestrate);
+  if (command === 'resume-time-option') return resumeTimeOption(state, input, orchestrate);
   if (command === 'next') return next(state, input, orchestrate);
   if (command === 'pause') return pause(state, input, orchestrate);
   if (command === 'resume') return resume(state, input, orchestrate);

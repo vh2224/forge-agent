@@ -57,7 +57,7 @@ isolation_mode: shared
 |---|---|---|
 | `**Active Slice:**` | yes | `S##` or `—` if no slice scoped yet |
 | `**Active Task:**` | yes | `T##` or `—` |
-| `**Phase:**` | yes | One of: `idle`, `plan-milestone`, `discuss-milestone`, `research-milestone`, `plan-slice`, `research-slice`, `execute-task`, `complete-slice`, `complete-milestone`, `resume`, `blocked` |
+| `**Phase:**` | yes | One of: `idle`, `estimate-milestone`, `plan-milestone`, `discuss-milestone`, `research-milestone`, `plan-slice`, `research-slice`, `execute-task`, `complete-slice`, `complete-milestone`, `resume`, `blocked` |
 | `**Auto-mode:**` | yes | `on` \| `off` |
 | `**Next Action:**` | yes | Free-form one-paragraph imperative |
 
@@ -560,7 +560,7 @@ the caller's home directory.
 `selectNextUnit(input)` is pure after the orchestrator supplies `state`, the
 roadmap inventory and resolved preferences. The ordered decision is:
 
-1. missing roadmap → `plan-milestone`;
+1. missing roadmap → `estimate-milestone` only for a new enrolled milestone that needs options; pending choice → `time-option-pending`; attested choice → `plan-milestone`. Without enrollment the existing `plan-milestone` behavior remains;
 2. missing milestone context → `discuss-milestone` unless skip is resolved;
 3. missing milestone research → `research-milestone` unless skip is resolved;
 4. missing active slice plan/research → `plan-slice` or `research-slice`;
@@ -573,6 +573,11 @@ The controller reads the canonical preference resolver and status/roadmap
 parser. It does not copy their defaults, regular expressions, model tables or
 provider branches. A preference parse error is loud-stop: no lease, intent,
 STATE, event or result is created.
+
+New milestone bootstraps create phase `estimate-milestone` through `forge-state.js`
+and enroll before first selection. `init` alone stays legacy. The named
+`resume-time-option` command resumes the same snapshot after an explicitly answered,
+live-attested selection; it never hand-edits STATE or fabricates completion.
 
 ### Transaction protocol
 

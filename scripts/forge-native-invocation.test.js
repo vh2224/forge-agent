@@ -678,6 +678,76 @@ async function main() {
   const invocationSource = fs.readFileSync(path.join(__dirname, 'forge-native-invocation.js'), 'utf8');
   assert(invocationSource.includes('terminal: options.terminalResult') && invocationSource.includes('terminalResult'));
   console.log('PASS S03/T02 invokeNative observer: third argument only, frozen hostIdentity, host_identity on success and failure only when observed, old callbacks unchanged');
+  const flow = require('./forge-milestone-time-flow.test');
+  const admission = require('./forge-milestone-time-admission');
+  const timeFixture = flow.fixture();
+  try {
+    const request = { scope: 'milestone', contextRoot: timeFixture.cwd, cwd: timeFixture.cwd,
+      milestoneId: 'M001', unitType: 'execute-task', taskId: 'T01' };
+    const base = { hostRuntime: 'codex', resolvedDispatch: dispatch('gpt-6-sol', 'high', 'codex'),
+      activeCapabilities: codexCapabilities, agentType: 'forge-executor', prompt: 'scoped fixture',
+      telemetryIdentity: request, now: () => Date.parse('2026-11-01T12:00:00Z') + timeFixture.at };
+    let called = 0;
+    const callback = async () => { called++; return { status: 'done' }; };
+    for (const agentType of ['forge-executor', 'forge-reviewer', 'forge-advocate']) {
+      timeFixture.at = 1;
+      admission.assertOwnerTransportEntry(base);
+      const outcome = await invokeNative({ ...base, agentType, beforeInvoke: () => { timeFixture.at = 101; } }, callback);
+      assert.strictEqual(outcome.ok, false); assert.strictEqual(outcome.reason_code, 'milestone-budget-exhausted');
+      assert.strictEqual(outcome.provider_called, false);
+      assert.strictEqual(outcome.diagnostic.layer, 'milestone-time-admission');
+    }
+    assert.strictEqual(called, 0);
+    for (const stage of ['C:/fixture-private/provider-error bearer fixture-secret', { path: 'C:/fixture-private' }, 42, null]) {
+      timeFixture.at = 1;
+      const hostile = await invokeNative({ ...base, beforeInvoke: () => { throw Object.assign(new Error('x'), { code: 'fixture-failure', stage }); } }, callback);
+      assert.strictEqual(hostile.ok, false); assert.strictEqual(hostile.diagnostic.layer, 'native-tool');
+      assert(!JSON.stringify(hostile.diagnostic).includes('fixture-secret') && !JSON.stringify(hostile.diagnostic).includes('fixture-private'));
+    }
+    assert.strictEqual(called, 0);
+    console.log('PASS T06 native first invocation and challenger/defense/rebuttal: selected below cap, actual callback refused beyond cap, zero host calls');
+    timeFixture.at = 1;
+    assert.strictEqual((await invokeNative(base, async () => { called++; timeFixture.at = 101; return { status: 'done' }; })).ok, true);
+    assert.strictEqual(called, 1, 'after-invoke and publication do not repeat admission');
+    const legacy = { ...base, telemetryIdentity: undefined };
+    assert.strictEqual((await invokeNative(legacy, callback)).ok, true);
+    const standalone = { ...base, telemetryIdentity: { ...request, scope: 'standalone-task', milestoneId: undefined } };
+    assert.strictEqual((await invokeNative(standalone, callback)).ok, true);
+    const foreign = await invokeNative({ ...base, milestoneTimeContext: { cwd: timeFixture.cwd, milestone: 'M002', unit: 'execute-task/T01' } }, callback);
+    assert.strictEqual(foreign.reason_code, 'milestone-time-invalid'); assert.strictEqual(foreign.provider_called, false);
+    const incomplete = await invokeNative({ ...base, telemetryIdentity: { ...request, milestoneId: undefined } }, callback);
+    assert.strictEqual(incomplete.reason_code, 'milestone-time-invalid'); assert.strictEqual(incomplete.provider_called, false);
+    assert.strictEqual(called, 3);
+    console.log('PASS T06 native after-invoke allowed, standalone and absent context legacy unchanged, foreign budget context fails before host callback');
+    const { notInvokedWitness } = require('./forge-native-invocation.js');
+    const { digest } = require('./forge-code-roots');
+    const memoryAgent = agentFixture('forge-memory', 'medium');
+    try {
+      const claudeBase = { hostRuntime: 'claude', resolvedDispatch: dispatch('claude-sonnet-5', 'medium', 'claude', 'sonnet'),
+        activeCapabilities: claudeCapabilities, agentType: 'forge-memory', prompt: 'scoped fixture', telemetryIdentity: request,
+        effortBinding: { transport: 'agent-frontmatter', agentPath: memoryAgent.filename, sourceFingerprint: memoryAgent.fingerprint },
+        now: base.now };
+      for (const options of [base, claudeBase]) {
+        timeFixture.at = 101;
+        const refusedOutcome = await invokeNative(options, callback);
+        const witness = notInvokedWitness(refusedOutcome);
+        assert(witness && Object.isFrozen(witness), options.hostRuntime);
+        assert.deepStrictEqual({ ...witness }, { schema_version: 1, kind: 'native-not-invoked', reason_code: refusedOutcome.reason_code,
+          layer: 'milestone-time-admission', provider_called: false, host_callbacks: 0,
+          invocation_sha256: digest(JSON.stringify(buildNativeInvocation(options))), request_sha256: digest(request) });
+        for (const copy of [JSON.parse(JSON.stringify(refusedOutcome)), { ...refusedOutcome }, { ok: false, provider_called: false, reason_code: refusedOutcome.reason_code }]) {
+          assert.strictEqual(notInvokedWitness(copy), null, 'serialized or copied outcome carries no witness');
+        }
+        timeFixture.at = 1;
+        assert.strictEqual(notInvokedWitness(await invokeNative(options, callback)), null, 'invoked success has no witness');
+        const failedAfterCall = await invokeNative(options, async () => { called++; throw Object.assign(Error('fixture'), { code: 'fixture-host-failure', provider_called: false }); });
+        assert.strictEqual(failedAfterCall.ok, false); assert.strictEqual(notInvokedWitness(failedAfterCall), null, 'entered callback never mints zero-call proof');
+        assert.strictEqual(notInvokedWitness(await invokeNative({ ...options, telemetryIdentity: undefined }, callback)), null);
+      }
+      assert.strictEqual(called, 9);
+    } finally { fs.rmSync(memoryAgent.dir, { recursive: true, force: true }); }
+    console.log('PASS T10 both hosts: late guard refusal mints a frozen process-local zero-call witness bound to invocation and request; clones, flags, invoked or failed callbacks never do');
+  } finally { fs.rmSync(timeFixture.cwd, { recursive: true, force: true }); }
   process.stdout.write('forge-native-invocation: ok\n');
 }
 

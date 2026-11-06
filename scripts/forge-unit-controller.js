@@ -30,6 +30,8 @@ const forgeRuntime = require('./forge-runtime.js');
 const forgeIds = require('./forge-ids.js');
 const forgeLease = require('./forge-unit-lease.js');
 const forgeStatus = require('./forge-status.js');
+// Inert import: the selection module loads only core modules until it is called.
+const timeSelection = require('./forge-milestone-time-selection.js');
 
 const PROTOCOL_VERSION = '1.0.0';
 const BOUNDARY_KINDS = Object.freeze(['completed', 'paused', 'failed-persisted', 'expired-safe']);
@@ -38,12 +40,24 @@ const PHASES = Object.freeze([
   'intent', 'result-published', 'event-published', 'boundary-pending',
   'state-published', 'lease-release-pending', 'lease-released', 'boundary-ready', 'committed',
 ]);
+// Admission refusals of enrolled milestones (S02): a unit outside the selection
+// state, the scoped task DAG of a milestone with an active contract, and an active
+// contract whose required slice review gate is disabled.
+const TIME_ADMISSION_CODES = Object.freeze(['time-unit-not-admitted', 'time-task-dependency-pending',
+  'time-task-dependency-unknown', 'time-task-dependency-cycle', 'time-task-identity-ambiguous', 'time-roadmap-selection-missing',
+  'time-review-disabled-incompatible', 'time-review-mode-unknown']);
 const REASON_CODES = Object.freeze([
   'selected', 'no-next-unit', 'prefs-invalid', 'transaction-pending',
   'lease-required', 'lease-owner-mismatch', 'transition-committed',
   'already-committed', 'handoff-ready', 'boundary-missing',
   'boundary-not-transferable', 'lease-active', 'invalid-request',
+  ...require('./forge-milestone-time-admission').TIME_REASON_CODES,
+  ...timeSelection.TIME_OPTION_REASON_CODES, ...timeSelection.TIME_OPTION_RESUME_CODES, ...TIME_ADMISSION_CODES,
 ]);
+const ROADMAP_TIME_BLOCKS = Object.freeze({ nonconformant: 'time-roadmap-nonconformant',
+  'allocation-pending': 'time-allocation-pending', 'scope-unallocated': 'time-scope-unallocated' });
+const TASK_DAG_BLOCKS = Object.freeze({ unknown: 'time-task-dependency-unknown', cycle: 'time-task-dependency-cycle',
+  ambiguous: 'time-task-identity-ambiguous', unallocated: 'time-scope-unallocated' });
 
 function own(value, key) { return Object.prototype.hasOwnProperty.call(value || {}, key); }
 function nowOf(options) { return options && typeof options.now === 'function' ? options.now() : Date.now(); }
@@ -337,7 +351,22 @@ function selectNextUnit(input) {
   const prefs = data.prefs || {};
   if (!current || !current.milestone) return { ok: false, reason: 'no-next-unit', done: true };
   const milestone = current.milestone;
-  if (!inventory.roadmap_exists) return selected('plan-milestone', milestone, milestone, current);
+  // time_options exists only for an enrolled/selected milestone (S02). Without it
+  // every branch below is the unchanged legacy order.
+  const timeOptions = own(inventory, 'time_options') ? inventory.time_options : null;
+  const timeBlock = reason => ({ ok: false, reason, done: false, milestone, time_options: timeOptions });
+  // Enrollment refuses an existing ROADMAP, so one without an attested choice was written afterwards: never legacy.
+  if (timeOptions?.status === 'roadmap-preexisting') return timeBlock('time-roadmap-selection-missing');
+  if (!inventory.roadmap_exists) {
+    if (timeOptions?.status === 'estimate-required') {
+      return selected('estimate-milestone', milestone, milestone, current, null, { key_suffix: timeOptions.key_suffix });
+    }
+    if (timeOptions?.status === 'options-invalid') return timeBlock('time-options-invalid');
+    if (timeOptions && timeOptions.status !== 'decided') return timeBlock('time-option-pending');
+    return selected('plan-milestone', milestone, milestone, current);
+  }
+  if (timeOptions?.status === 'options-invalid') return timeBlock('time-options-invalid');
+  if (timeOptions && ROADMAP_TIME_BLOCKS[timeOptions.roadmap?.status]) return timeBlock(ROADMAP_TIME_BLOCKS[timeOptions.roadmap.status]);
   const skipDiscuss = preferenceBoolean(prefs, ['skip_discuss', 'workflow.skip_discuss', 'planning.skip_discuss', 'skip.discuss'], false);
   const skipResearch = preferenceBoolean(prefs, ['skip_research', 'workflow.skip_research', 'planning.skip_research', 'skip.research'], false);
   const skipSliceResearch = preferenceBoolean(prefs, ['skip_slice_research', 'workflow.skip_research', 'planning.skip_research', 'skip.research'], false);
@@ -358,15 +387,32 @@ function selectNextUnit(input) {
     if (reasons.length) { blocked.push({ slice: slice.id, reasons }); continue; }
     if (!slice.plan_exists) return selected('plan-slice', slice.id, milestone, current, slice.id);
     if (!slice.research_exists && !skipSliceResearch) return selected('research-slice', slice.id, milestone, current, slice.id);
-    const task = (slice.tasks || []).find(item => !item.checked);
-    if (task) return selected('execute-task', task.id, milestone, current, slice.id);
+    if (inventory.task_dag === true) {
+      // Opt-in milestone with an active contract: the scoped task DAG, not the
+      // checklist order, decides which unchecked task is admissible.
+      const pendingTasks = (slice.tasks || []).filter(item => !item.checked);
+      const dag = slice.task_dag || { status: 'unknown', reasons: ['task-dag-missing'], tasks: [] };
+      if (pendingTasks.length && dag.status !== 'valid') {
+        return { ...timeBlock(TASK_DAG_BLOCKS[dag.status] || 'time-task-dependency-unknown'), slice: slice.id, task_dag: dag };
+      }
+      const proven = new Set(dag.tasks.filter(item => item.completion === 'proven').map(item => item.id));
+      const ready = pendingTasks.find(item => {
+        const row = dag.tasks.find(candidate => candidate.id === item.id);
+        return (row?.depends || []).every(id => proven.has(id)) && (row?.barrier || []).length === 0;
+      });
+      if (ready) return selected('execute-task', ready.id, milestone, current, slice.id);
+      if (pendingTasks.length) return { ...timeBlock('time-task-dependency-pending'), slice: slice.id, task_dag: dag };
+    } else {
+      const task = (slice.tasks || []).find(item => !item.checked);
+      if (task) return selected('execute-task', task.id, milestone, current, slice.id);
+    }
     if (!slice.summary_exists) return selected('complete-slice', slice.id, milestone, current, slice.id);
   }
   if (pending.length) return { ok: false, reason: 'units-blocked', done: false, milestone, blocked };
   if (!inventory.milestone_complete) return selected('complete-milestone', milestone, milestone, current);
   return { ok: false, reason: 'no-next-unit', done: true, milestone };
 }
-function selected(type, id, milestone, state, slice) {
+function selected(type, id, milestone, state, slice, extra) {
   const unit = forgeRuntime.normalizeUnit({ type, id, state: 'queued' });
   return {
     ok: true,
@@ -375,6 +421,7 @@ function selected(type, id, milestone, state, slice) {
     slice: slice || null,
     unit: { type: unit.type, id: unit.id, key: forgeLease.normalizeUnitKey(unit) },
     state_checksum: sha(logicalState(state)),
+    ...(extra || {}),
   };
 }
 
@@ -382,7 +429,7 @@ function firstExisting(dir, predicate) {
   if (!fs.existsSync(dir)) return null;
   return fs.readdirSync(dir).sort().find(predicate) || null;
 }
-function discoverInventory(cwd, milestone, current) {
+function discoverInventory(cwd, milestone, current, options) {
   const milestoneDir = path.join(cwd, '.gsd', 'milestones', milestone);
   const roadmapName = firstExisting(milestoneDir, name => name.endsWith('-ROADMAP.md'));
   const roadmapFile = roadmapName ? path.join(milestoneDir, roadmapName) : null;
@@ -427,7 +474,7 @@ function discoverInventory(cwd, milestone, current) {
   const milestoneClosed = fs.existsSync(ledgerFragment)
     || (fs.existsSync(ledgerGlobal) && ledgerHeading.test(fs.readFileSync(ledgerGlobal, 'utf8')))
     || closeCommitted();
-  return {
+  const inventory = {
     roadmap_exists: !!roadmapFile,
     context_exists: !!firstExisting(milestoneDir, name => name.endsWith('-CONTEXT.md')),
     research_exists: !!firstExisting(milestoneDir, name => name.endsWith('-RESEARCH.md')),
@@ -436,6 +483,328 @@ function discoverInventory(cwd, milestone, current) {
     dependency_validation: true,
     milestone_complete: roadmapComplete && milestoneClosed,
   };
+  // Without enrollment or selection readSelectionState is null and the inventory
+  // keeps exactly its legacy keys.
+  const timeOptions = readTimeOptions(cwd, milestone, options);
+  if (timeOptions !== null) {
+    inventory.time_options = timeOptions;
+    if (taskDagApplies(timeOptions)) {
+      inventory.task_dag = true;
+      const records = discoverRecords(cwd, 'transaction');
+      for (const slice of slices) if (slice.plan_exists) slice.task_dag = taskDag(cwd, milestone, slice.id, slice.tasks, records, nowOf(options));
+    }
+  }
+  return inventory;
+}
+
+// --- S02: owner selection state and the scoped task DAG -------------------------
+// The real owner state is read here and in the mutating guard; caller JSON,
+// an injected inventory or a loop snapshot never supplies it.
+function readTimeOptions(cwd, milestone, options) {
+  const code = options && options.timeOptionsCode;
+  return timeSelection.readSelectionState(cwd, milestone, code ? { code } : {});
+}
+function taskDagApplies(state) { return state?.status === 'decided' && !!state.contract; }
+function taskPlanFile(cwd, milestone, slice, task) {
+  return path.join(cwd, '.gsd', 'milestones', milestone, 'slices', slice, 'tasks', task, `${task}-PLAN.md`);
+}
+// A predecessor is complete only with the controller's own committed completion
+// of that exact milestone/slice/task scope plus a verified historical delivery.
+// A checked box or a SUMMARY file alone proves nothing.
+function scopedCompletion(cwd, milestone, slice, task, records) {
+  const unitKey = `execute-task/${task}`;
+  let events = null, completedAt = null;
+  // Unreadable or divergent records never prove a predecessor (fail closed).
+  try { if (!records.some(isCompletion)) return false; } catch { return false; }
+  return deliveryProven(cwd, milestone, slice, task, completedAt);
+  // The completion is bound to its begin by durable lineage (milestone, unit, owner
+  // digest, host and lease generation), never by the caller's key spelling.
+  function sameLineage(left, right) {
+    return left.milestone === milestone && right.milestone === milestone && left.unit?.key === unitKey && right.unit?.key === unitKey
+      && typeof left.owner_digest === 'string' && left.owner_digest === right.owner_digest
+      && left.host_runtime === right.host_runtime && typeof left.lease_generation === 'string' && left.lease_generation === right.lease_generation;
+  }
+  // The published event without its stream sequence must be exactly the committed transaction's event.
+  function published(transaction) {
+    const event = events.find(item => item.idempotency_key === transaction.idempotency_key);
+    if (!event || !Number.isSafeInteger(event.sequence) || event.sequence < 1) return null;
+    const content = { ...event }; delete content.sequence;
+    return sha(content) === sha(transaction.event) ? event : null;
+  }
+  function isCompletion(tx) {
+    if (tx.action !== 'complete' || tx.phase !== 'committed' || tx.milestone !== milestone || tx.unit?.key !== unitKey
+      || tx.result?.status !== 'succeeded' || tx.boundary?.kind !== 'completed' || tx.boundary.handoff_ready !== true
+      || typeof tx.idempotency_key !== 'string') return false;
+    // Foreign, absent or ambiguous lineage never proves anything.
+    const begins = records.filter(item => item.action === 'begin' && item.phase === 'committed' && sameLineage(item, tx)
+      && item.after?.state?.active_slice === slice);
+    const completions = records.filter(item => item.action === 'complete' && item.phase === 'committed' && item.result?.status === 'succeeded' && sameLineage(item, tx));
+    if (begins.length !== 1 || completions.length !== 1) return false;
+    events = events || readEvents(eventsFile(cwd, milestone));
+    // Both ends symmetrically: the begin and the completion events are the committed ones, in order.
+    const event = published(tx), beginEvent = published(begins[0]);
+    if (!event || !beginEvent || !(beginEvent.sequence < event.sequence)) return false;
+    if (beginEvent.event !== 'unit-began' || beginEvent.action !== 'begin' || event.outcome !== 'succeeded') return false;
+    completedAt = event.ts;
+    return true;
+  }
+}
+// Historical proof through the clock's canonical capture validator: the input, the exact plan,
+// the captured envelopes and their recorded workspace/roots, bounded by the committed completion.
+// Today's source is never rerun or compared, so a completed task stays proven across later changes.
+function deliveryProven(cwd, milestone, slice, task, completedAt) {
+  try {
+    return require('./forge-milestone-time-clock').readHistoricalTaskDelivery({ cwd, milestone, slice, task, completedAt }).status === 'proven';
+  } catch { return false; }
+}
+// One bounded stable TaskPlan body per task. Every component from the physical owner .gsd down to
+// the plan must be a real directory/file (no symlink or junction), so a foreign linked plan never
+// supplies dependencies or bindings. The expected real path is rebuilt from the owner, never taken
+// from the file's own resolution.
+const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/, LOCAL_TASK_ID = /^T\d+(?:\.\d+)?$/, TASK_PLAN_MAX_BYTES = 1024 * 1024;
+function readTaskPlan(cwd, milestone, slice, task) {
+  if (typeof task !== 'string' || !LOCAL_TASK_ID.test(task) || ![milestone, slice].every(item => typeof item === 'string' && SAFE_SEGMENT.test(item))) return { status: 'invalid', reason: 'path-invalid' };
+  const segments = ['.gsd', 'milestones', milestone, 'slices', slice, 'tasks', task, `${task}-PLAN.md`];
+  let cursor = cwd, expected;
+  try { expected = fs.realpathSync.native(cwd); } catch { return { status: 'invalid', reason: 'owner-unreadable' }; }
+  for (const [index, segment] of segments.entries()) {
+    cursor = path.join(cursor, segment); expected = path.join(expected, segment);
+    let stat;
+    try { stat = fs.lstatSync(cursor); } catch (error) { return error.code === 'ENOENT' ? { status: 'missing' } : { status: 'invalid', reason: 'path-unreadable' }; }
+    if (stat.isSymbolicLink()) return { status: 'invalid', reason: 'link' };
+    if (index === segments.length - 1 ? !stat.isFile() : !stat.isDirectory()) return { status: 'invalid', reason: 'not-regular' };
+  }
+  const read = require('./forge-autonomy-sources').readBoundedStableFile(cursor, TASK_PLAN_MAX_BYTES, { expectedReal: expected });
+  if (read.error) return { status: 'invalid', reason: read.error === 'source_too_large' ? 'too-large' : 'unstable' };
+  let text;
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(read.buffer); } catch { return { status: 'invalid', reason: 'encoding' }; }
+  const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  return { status: 'valid', frontmatter: match ? match[1].replace(/\r\n/g, '\n') : null };
+}
+// The complete present `depends` declaration must be a supported inline list, a valid block list
+// or a genuinely empty value; a scalar, multiline scalar, broken/mixed block, stray indented
+// continuation or repeated key is malformed (null). A missing declaration is a root.
+function dependsOf(frontmatter) {
+  const lines = frontmatter.split('\n'), at = lines.flatMap((line, index) => /^depends[ \t]*:/.test(line) ? [index] : []);
+  if (!at.length) return { depends: [] };
+  if (at.length > 1) return null;
+  const head = lines[at[0]].replace(/^depends[ \t]*:/, '').trim(), tail = [];
+  for (let index = at[0] + 1; index < lines.length && /^(?:[ \t]|$)/.test(lines[index]); index++) tail.push(lines[index]);
+  while (tail.length && !tail[tail.length - 1].trim()) tail.pop();
+  const unquote = value => value.trim().replace(/^["']|["']$/g, '');
+  let items = [];
+  if (head) {
+    const inline = head.match(/^\[([^\]]*)\]$/);
+    if (!inline || tail.length) return null;
+    if (inline[1].trim()) items = inline[1].split(',').map(unquote);
+  } else {
+    for (const line of tail) {
+      const item = line.match(/^[ \t]+-[ \t]+(\S.*?)\s*$/);
+      if (!item) return null;
+      items.push(unquote(item[1]));
+    }
+  }
+  const parsed = require('./forge-parallelism').parseListField(frontmatter, 'depends');
+  if (items.some(item => !item) || !Array.isArray(parsed) || JSON.stringify(parsed) !== JSON.stringify(items)) return null;
+  return { depends: items };
+}
+// Dependencies come from the real task plans of one slice; IDs are scoped to
+// that milestone/slice, so the same task ID elsewhere never satisfies them.
+function taskDag(cwd, milestone, slice, tasks, records, now) {
+  const ids = (tasks || []).map(item => item.id);
+  if (new Set(ids).size !== ids.length) return { status: 'ambiguous', reasons: ['task-id-duplicate'], tasks: [] };
+  const rows = [], plans = new Map();
+  for (const id of ids) {
+    const plan = readTaskPlan(cwd, milestone, slice, id);
+    if (plan.status === 'invalid') return { status: 'unknown', reasons: [`task-plan-${plan.reason}:${id}`], tasks: [] };
+    if (plan.status !== 'valid' || plan.frontmatter === null) return { status: 'unknown', reasons: [`task-plan-missing:${id}`], tasks: [] };
+    plans.set(id, plan);
+    const declared = dependsOf(plan.frontmatter);
+    if (!declared) return { status: 'unknown', reasons: [`dependency-malformed:${id}`], tasks: [] };
+    const depends = [...new Set(declared.depends)];
+    const unknown = depends.find(dependency => !ids.includes(dependency));
+    if (unknown) return { status: 'unknown', reasons: [`dependency-unknown:${id}:${unknown}`], tasks: [] };
+    rows.push({ id, depends });
+  }
+  const visiting = new Set(), done = new Set();
+  const cyclic = id => {
+    if (done.has(id)) return false;
+    if (visiting.has(id)) return true;
+    visiting.add(id);
+    const found = rows.find(row => row.id === id).depends.some(cyclic);
+    visiting.delete(id); done.add(id);
+    return found;
+  };
+  const cycle = rows.find(row => cyclic(row.id));
+  if (cycle) return { status: 'cycle', reasons: [`dependency-cycle:${cycle.id}`], tasks: [] };
+  const bound = bindTasks(cwd, milestone, slice, rows, records, now, plans);
+  if (bound.status !== 'valid') return { status: bound.status, reasons: bound.reasons, tasks: [] };
+  return { status: 'valid', reasons: [], tasks: rows.map(row => ({ ...row, barrier: bound.barrier,
+    completion: scopedCompletion(cwd, milestone, slice, row.id, records) ? 'proven' : 'unproven' })) };
+}
+// --- Task-to-selected-node binding (opt-in contract milestones only) --------------
+// Each owner-published TaskPlan of a planned slice declares three root scalars naming the
+// exact selected options digest, position and ONE currently allocated node or authorized
+// refinement part. The allocation, selected edges and slice DAG are re-read from the owner
+// through selection.taskBindingContext; local `depends` keeps its local TaskID meaning.
+const BINDING_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,119}$/, BINDING_HASH = /^[a-f0-9]{64}$/;
+function taskBindingOf(plan) {
+  try {
+    if (plan.status === 'invalid') return { status: 'invalid', reason: plan.reason === 'link' ? 'binding-link' : `binding-plan-${plan.reason}` };
+    if (plan.status !== 'valid') return { status: 'invalid', reason: 'binding-unreadable' };
+    if (plan.frontmatter === null) return { status: 'absent', reason: 'binding-missing' };
+    const lines = plan.frontmatter.split(/\r?\n/), values = {};
+    let present = 0;
+    for (const [key, pattern] of [['time_options_sha256', BINDING_HASH], ['time_position_id', BINDING_ID], ['time_node', BINDING_ID]]) {
+      const declared = lines.filter(line => line.startsWith(key) && /^[ \t]*:/.test(line.slice(key.length)));
+      if (!declared.length) continue;
+      present++;
+      const raw = declared[0].slice(declared[0].indexOf(':') + 1).trim().replace(/^(['"])(.*)\1$/, '$2');
+      if (declared.length > 1 || !pattern.test(raw)) return { status: 'invalid', reason: `binding-malformed:${key}` };
+      values[key] = raw;
+    }
+    if (!present) return { status: 'absent', reason: 'binding-missing' };
+    if (present !== 3) return { status: 'invalid', reason: 'binding-incomplete' };
+    return { status: 'valid', options_sha256: values.time_options_sha256, position_id: values.time_position_id, node: values.time_node };
+  } catch { return { status: 'invalid', reason: 'binding-unreadable' }; }
+}
+function bindTasks(cwd, milestone, slice, rows, records, now, plans) {
+  const context = timeSelection.taskBindingContext(cwd, milestone, { sliceId: slice });
+  if (context.status === 'absent') return { status: 'valid', barrier: [] };
+  if (context.status !== 'ready') return { status: 'unknown', reasons: [`binding-context-${context.status}:${context.reason}`] };
+  const unallocated = reason => ({ status: 'unallocated', reasons: [reason] });
+  const unknown = reason => ({ status: 'unknown', reasons: [reason] });
+  const matches = read => read.status === 'valid' && read.options_sha256 === context.options_sha256 && read.position_id === context.position_id;
+  const own = new Set(context.allocated.map(item => item.id)), nodeOf = new Map();
+  for (const row of rows) {
+    const read = taskBindingOf(plans.get(row.id));
+    if (read.status !== 'valid') return unallocated(`${read.reason}:${row.id}`);
+    if (!matches(read)) return unallocated(`binding-foreign:${row.id}`);
+    if (!own.has(read.node)) return unallocated(`binding-node-unallocated:${row.id}:${read.node}`);
+    nodeOf.set(row.id, read.node);
+  }
+  const covered = new Set(nodeOf.values()), uncovered = [...own].sort().find(id => !covered.has(id));
+  if (uncovered) return unallocated(`allocation-uncovered:${uncovered}`);
+  const dependsOf = new Map(rows.map(row => [row.id, row.depends]));
+  const reaches = (from, to, seen = new Set()) => dependsOf.get(from).some(next => next === to || (!seen.has(next) && seen.add(next) && reaches(next, to, seen)));
+  const tasksOf = id => rows.filter(row => nodeOf.get(row.id) === id).map(row => row.id);
+  const cross = [];
+  for (const edge of context.edges) for (const from of edge.dependent.filter(item => item.slice === slice)) for (const to of edge.prerequisite) {
+    if (to.slice === null) continue; // lifecycle rows (preparation/integration/review) keep their owner gates
+    if (to.slice !== slice) {
+      if (!context.prerequisite_slices.includes(to.slice)) return unknown(`edge-slice-unreachable:${edge.from}>${edge.to}:${to.slice}`);
+      cross.push({ edge, to });
+      continue;
+    }
+    for (const dependent of tasksOf(from.id)) for (const prerequisite of tasksOf(to.id)) {
+      if (!reaches(dependent, prerequisite)) return unknown(`edge-unrealized:${edge.from}>${edge.to}:${dependent}:${prerequisite}`);
+    }
+  }
+  // Barriers: every task of the validated prerequisite slice closure needs scoped completion plus
+  // historical delivery and the slice its own canonical closure; unrelated future slices are never blocked.
+  const milestoneDir = path.join(cwd, '.gsd', 'milestones', milestone);
+  const barrier = [];
+  for (const prerequisite of context.prerequisite_slices) {
+    const dir = path.join(milestoneDir, 'slices', prerequisite), plan = path.join(dir, `${prerequisite}-PLAN.md`);
+    const tasks = fs.existsSync(plan) ? forgeStatus.parsePlanTasks(fs.readFileSync(plan, 'utf8')) : [];
+    if (!tasks.length) { barrier.push({ slice: prerequisite, task: null, reason: 'slice-unplanned' }); continue; }
+    if (new Set(tasks.map(item => item.id)).size !== tasks.length) return unknown(`task-id-duplicate:${prerequisite}`);
+    const closure = sliceClosure(cwd, milestone, prerequisite, now);
+    if (closure) barrier.push({ slice: prerequisite, task: null, reason: closure.reason, proof: closure.proof });
+    for (const task of tasks) if (!scopedCompletion(cwd, milestone, prerequisite, task.id, records)) barrier.push({ slice: prerequisite, task: task.id, reason: 'task-unproven' });
+    for (const { edge, to } of cross.filter(item => item.to.slice === prerequisite)) {
+      const realized = tasks.some(task => { const read = taskBindingOf(readTaskPlan(cwd, milestone, prerequisite, task.id)); return matches(read) && read.node === to.id; });
+      if (!realized) return unknown(`edge-prerequisite-unrealized:${edge.from}>${edge.to}:${prerequisite}:${to.id}`);
+    }
+  }
+  return { status: 'valid', barrier };
+}
+// A prerequisite slice is closed only by its canonical committed complete-slice record set
+// (transaction, result, boundary and event) plus its verified historical SliceDELIVERY rebuilt
+// from the input, the exact slice plan, the expected-child inventory and the captured envelopes
+// (forge-milestone-time-clock.readHistoricalDeliveries), and by the review gate's own record
+// bound into that fingerprinted delivery. A checkbox, a SUMMARY or task proofs alone never close it.
+// Returns null when closed, else the typed barrier reason.
+function sliceClosure(cwd, milestone, slice, now) {
+  const incomplete = proof => ({ reason: 'slice-incomplete', proof });
+  const base = `.gsd/milestones/${milestone}/slices/${slice}`;
+  let read;
+  try { read = require('./forge-milestone-time-clock').readHistoricalDeliveries({ cwd, milestone, slices: [slice], now }); }
+  catch { return incomplete('slice-closure-unreadable'); }
+  if (read.status !== 'observed') return incomplete(read.reason || 'slice-closure-unknown');
+  const proven = read.proven.find(row => row.slice === slice);
+  if (!proven) return incomplete(read.unproven.find(row => row.slice === slice)?.reason || 'delivery-completion-missing');
+  // Read the projection the proof just rebuilt; it must name this slice's own plan.
+  let stored;
+  try {
+    const file = path.join(cwd, ...proven.reference.split('/'));
+    if (fs.lstatSync(file).isSymbolicLink() || fs.statSync(file).size > require('./forge-delivery').MAX_FILE_BYTES) return incomplete('slice-delivery-unreadable');
+    stored = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch { return incomplete('slice-delivery-unreadable'); }
+  if (stored?.delivery_fingerprint !== proven.fingerprint) return incomplete('slice-delivery-unstable');
+  if (String(stored.plan?.reference || '').replace(/\\/g, '/') !== `${base}/${slice}-PLAN.md`) return incomplete('slice-delivery-plan-foreign');
+  // Review: the gate runs before complete-slice and records <S>-REVIEW.md; the completer binds it
+  // as the review fact of the delivery input, so the fingerprinted history names the record.
+  const unreviewed = proof => ({ reason: 'slice-unreviewed', proof });
+  const fact = (stored.facts || []).find(item => item?.name === 'review');
+  const reference = typeof fact?.reference === 'string' ? fact.reference.trim().replace(/\\/g, '/') : '';
+  if (!fact || fact.status === 'não informado/pendente' || !reference) return unreviewed('slice-review-fact-missing');
+  if (![`${slice}-REVIEW.md`, `./${slice}-REVIEW.md`, `${base}/${slice}-REVIEW.md`].includes(reference)) return unreviewed('slice-review-fact-foreign');
+  try {
+    const file = path.join(cwd, ...`${base}/${slice}-REVIEW.md`.split('/'));
+    for (let cursor = file; path.resolve(cursor) !== path.resolve(cwd) && cursor !== path.dirname(cursor); cursor = path.dirname(cursor)) {
+      if (fs.lstatSync(cursor).isSymbolicLink()) return unreviewed('slice-review-link');
+    }
+    const stat = fs.statSync(file);
+    if (!stat.isFile() || stat.size === 0 || stat.size > 1024 * 1024) return unreviewed('slice-review-invalid');
+  } catch { return unreviewed('slice-review-missing'); }
+  return null;
+}
+// The shared begin/reenter guard: called under the controller mutex after a
+// committed begin was replayed and beside budget admission, before any lease
+// or transaction. Budget refusals keep their priority (checked first).
+function assertTimeOptionAdmission(cwd, milestone, unit, key, slice, options, linked = {}) {
+  const state = readTimeOptions(cwd, milestone, options);
+  if (state === null) return null;
+  const refuse = (code, extra) => {
+    throw new ControllerError(code, 'entrada recusada pela seleção de prazo da milestone', { time_options: clone(state), ...(extra || {}) });
+  };
+  if (state.status === 'options-invalid') refuse('time-options-invalid');
+  if (state.status === 'roadmap-preexisting') refuse('time-roadmap-selection-missing');
+  if (state.status === 'estimate-required') {
+    let expected = null;
+    try { expected = timeSelection.estimateBeginKey(milestone, state.key_suffix); } catch { refuse('time-options-invalid'); }
+    // Only the estimate of the current owner basis; a reentry continues that same begin.
+    if (unit.type === 'estimate-milestone' && unit.id === milestone && (key === expected || linked.beginKey === expected)) return { status: state.status };
+    refuse('time-option-pending');
+  }
+  if (state.status !== 'decided') refuse('time-option-pending');
+  // An active contract needs the slice review gate for every new admission; a review mode
+  // disabled after activation is named here instead of becoming a latent cross-slice block.
+  if (state.contract) {
+    const review = timeSelection.contractCompatibility(cwd, milestone, { prefsReader: options && options.prefsReader });
+    if (review.status !== 'compatible') refuse(review.status === 'incompatible' ? 'time-review-disabled-incompatible' : 'time-review-mode-unknown', { review });
+  }
+  if (unit.type === 'estimate-milestone') refuse('time-unit-not-admitted');
+  const milestoneDir = path.join(cwd, '.gsd', 'milestones', milestone);
+  if (!firstExisting(milestoneDir, name => name.endsWith('-ROADMAP.md'))) {
+    if (unit.type === 'plan-milestone' && unit.id === milestone) return { status: state.status };
+    refuse('time-unit-not-admitted');
+  }
+  if (ROADMAP_TIME_BLOCKS[state.roadmap?.status]) refuse(ROADMAP_TIME_BLOCKS[state.roadmap.status]);
+  if (taskDagApplies(state) && unit.type === 'execute-task') {
+    if (!slice) refuse('time-task-identity-ambiguous', { task_dag: { slice: null, task: unit.id } });
+    const plan = path.join(milestoneDir, 'slices', slice, `${slice}-PLAN.md`);
+    const tasks = fs.existsSync(plan) ? forgeStatus.parsePlanTasks(fs.readFileSync(plan, 'utf8')) : [];
+    const dag = taskDag(cwd, milestone, slice, tasks, discoverRecords(cwd, 'transaction'), nowOf(options));
+    if (dag.status !== 'valid') refuse(TASK_DAG_BLOCKS[dag.status] || 'time-task-dependency-unknown', { task_dag: { slice, task: unit.id, ...dag } });
+    const row = dag.tasks.find(item => item.id === unit.id);
+    if (!row) refuse('time-task-dependency-unknown', { task_dag: { slice, task: unit.id, status: 'unknown', reasons: ['task-not-planned'] } });
+    const pending = row.depends.filter(id => dag.tasks.find(item => item.id === id)?.completion !== 'proven');
+    const barrier = row.barrier || [];
+    if (pending.length || barrier.length) refuse('time-task-dependency-pending', { task_dag: { slice, task: unit.id, status: 'valid', pending, ...(barrier.length ? { barrier } : {}) } });
+  }
+  return { status: state.status };
 }
 function select(cwd, request, options) {
   const input = object(request, 'request');
@@ -446,7 +815,7 @@ function select(cwd, request, options) {
   const id_kind = forgeIds.entityKind(milestone) || 'milestone';
   const current = forgeState.read(cwd, milestone);
   if (!current) throw new ControllerError('invalid-request', `STATE ausente para ${milestone}`);
-  const inventory = options && typeof options.inventoryReader === 'function' ? options.inventoryReader(cwd, milestone, current) : discoverInventory(cwd, milestone, current);
+  const inventory = options && typeof options.inventoryReader === 'function' ? options.inventoryReader(cwd, milestone, current) : discoverInventory(cwd, milestone, current, options);
   inventory.deferred_slices = failureProjection(cwd, milestone).filter(item => !item.entry).map(item => item.slice).filter(Boolean);
   return { ...selectNextUnit({ state: current, inventory, prefs: prefsResult.prefs }), id_kind };
 }
@@ -724,6 +1093,9 @@ function begin(cwd, request, options) {
   resolvePrefs(cwd, options); // reject preferences before even creating a mutex
   return withMutex(cwd, 'unit-controller-transactions', () => beginInside(cwd, request, options));
 }
+function decideTimeAdmission(cwd, options) {
+  return require('./forge-milestone-time-admission').decideAdmission(cwd, options);
+}
 function beginInside(cwd, request, options) {
   const input = object(request, 'request');
   const selection = input.unit ? { ok: true, milestone: input.milestone, unit: unitFromRequest(input), slice: input.slice || null }
@@ -756,6 +1128,12 @@ function beginInside(cwd, request, options) {
   if (existing) return runTransaction(cwd, existing, ownerToken, input.generation, options);
   const otherPending = pendingTransactions(cwd);
   if (otherPending.length) throw new ControllerError('transaction-pending', 'recovery obrigatório antes de novo begin');
+  const admission = decideTimeAdmission(cwd,
+    { milestone: input.milestone, unit, key, now: options && options.now, kind: 'begin' });
+  if (!admission.allowed) throw new ControllerError(admission.reason_code, 'Entrada recusada pelo contrato de tempo da milestone', admission.details);
+  // After replay and beside budget admission: an explicit unit, an injected
+  // inventory or a stale snapshot cannot bypass the owner's S02 state.
+  assertTimeOptionAdmission(cwd, input.milestone, unit, key, availabilitySlice, options);
   preflightPaths(cwd, key, unit.key, input.milestone);
   const acquired = forgeLease.acquire(cwd, unit.key, {
     ownerToken,
@@ -771,6 +1149,9 @@ function beginInside(cwd, request, options) {
   try {
     fail(options, 'before-make-transaction');
     transaction = makeTransaction(cwd, input, 'begin', unit, key, ownerToken, acquired.generation, hostRuntime, nowOf(options));
+    if (admission.record || admission.decision === 'boundary-continuation' && admission.details.contract !== 'absent') {
+      transaction.time_admission = admission.record || { decision: admission.decision, ...admission.details };
+    }
     saveTransaction(cwd, transaction, nowOf(options), options);
   } catch (error) {
     let durable;
@@ -1257,6 +1638,12 @@ function reenter(cwd, request, options = {}) {
       return { ok: true, reason: 'entry-ready', transaction: publicTransaction(existing, cwd), linked_entry: clone(linked), pending_questions: questions };
     }
     if (!existing) {
+      const admission = decideTimeAdmission(cwd,
+        { milestone: input.milestone, unit: failure.unit, key, now: options.now, kind: 'reenter' });
+      if (!admission.allowed) throw new ControllerError(admission.reason_code, 'Reentrada recusada pelo contrato de tempo da milestone', admission.details);
+      // Only a new entry is readmitted against the real owner state; a committed one replays above.
+      assertTimeOptionAdmission(cwd, input.milestone, failure.unit, key, failure.terminal_failure.slice, options,
+        { beginKey: failure.terminal_failure.begin_key });
       if (failureProjection(cwd, input.milestone).some(item => item.transaction.idempotency_key === failure.idempotency_key && item.entry)) throw new ControllerError('entry-conflict', 'falha já possui entrada');
       const concurrent = discoverRecords(cwd, 'transaction').some(item => item.milestone === input.milestone && item.action === 'begin'
         && item.idempotency_key !== failure.terminal_failure.begin_key && forgeLease.observe(cwd, item.unit.key).lease);
@@ -1268,7 +1655,9 @@ function reenter(cwd, request, options = {}) {
       try {
         existing = makeTransaction(cwd, { milestone: failure.milestone, state_patch: { active_slice: failure.terminal_failure.slice || '—' } },
           'begin', failure.unit, key, input.owner_token, acquired.generation, linked.host_runtime, nowOf(options));
-        existing.linked_entry = linked; saveTransaction(cwd, existing, nowOf(options), options);
+        existing.linked_entry = linked;
+        if (admission.record) existing.time_admission = admission.record;
+        saveTransaction(cwd, existing, nowOf(options), options);
       } catch (error) {
         let durable;
         try { durable = lookupRecord(cwd, 'transaction', key); }
@@ -1380,13 +1769,13 @@ function cliMain() {
 if (require.main === module) cliMain();
 
 module.exports = {
-  PROTOCOL_VERSION, BOUNDARY_KINDS, ACTIONS, PHASES, REASON_CODES, ControllerError,
+  PROTOCOL_VERSION, BOUNDARY_KINDS, ACTIONS, PHASES, REASON_CODES, TIME_ADMISSION_CODES, ControllerError,
   selectNextUnit, discoverInventory, select, begin, transition, persistResult,
   complete, pause, fail: failUnit, expireSafe, resume, handoff,
   pendingTransactions, projectLogicalHistory, logicalState, resolvePrefs,
   transactionDir, resultDir, boundaryDir, eventsFile, transactionFile,
   resultFile, boundaryFile, readEvents, readJson, writeAtomic,
   lookupRecord, preflightPaths,
-  consumeFailure, reenter, failureProjection, validateLinkedEntry, validateTerminalLinkedEntry,
+  consumeFailure, reenter, failureProjection, validateLinkedEntry, validateTerminalLinkedEntry, sliceClosure,
   dependencies: { forgeState, forgeRuns, forgePrefs, forgeRuntime, forgeIds, forgeLease },
 };

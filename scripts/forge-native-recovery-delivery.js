@@ -5,6 +5,67 @@ const api = name => require('./' + name);
 const hash=v=>crypto.createHash('sha256').update(v).digest('hex');
 const fail=c=>{throw Object.assign(new Error(c),{code:c});};
 const nonEmpty=value=>typeof value==='string'&&value.trim().length>0;
+function isObservedTestLine(check,line){
+  if(typeof line!=='string'||!line)return false;
+  if(typeof check?.stdout==='string'&&check.stdout.split(/\r?\n/).includes(line))return true;
+  if(isGlobalEvidenceLine(line))return false;
+  return check?.stdout_truncated===true&&Array.isArray(check.observed_stdout_lines)
+    &&check.observed_stdout_lines.length<=64
+    &&check.observed_stdout_lines.every(value=>typeof value==='string'&&value&& !/[\r\n\0]/.test(value)&&Buffer.byteLength(value,'utf8')<=2048)
+    &&check.observed_stdout_lines.includes(line);
+}
+function evidenceRequests(result){
+  const requests=Object.create(null);
+  for(const item of result.must_haves_status||[])for(const row of item.evidence||[]){
+    // Retention is supplemental: an otherwise valid legacy witness in the
+    // ordinary stdout view must not acquire a stricter size/count requirement.
+    if(typeof row.stdout_line!=='string'||!row.stdout_line||/[\r\n\0]/.test(row.stdout_line)
+      ||Buffer.byteLength(row.stdout_line,'utf8')>2048)continue;
+    const commands=requests[row.root_id]||(requests[row.root_id]=Object.create(null));
+    const lines=commands[row.check]||(commands[row.check]=[]);
+    if(lines.length<64&&!lines.includes(row.stdout_line))lines.push(row.stdout_line);
+  }
+  return requests;
+}
+// A verification-only continuation never changes the original request, result,
+// manifest or seal. Authority is process-local; a serialized receipt is evidence.
+const verificationContinuations=new WeakMap();
+function createVerificationContinuation({request,returnedReceiptFile,verification,reference,assertAuthority,attestStoppedWriter}={}){
+  if(typeof assertAuthority!=='function'||typeof attestStoppedWriter!=='function'||!nonEmpty(reference))fail('verification-continuation-live-authority-required');
+  request=structuredClone(request);
+  if(request.linked_begin_key)fail('verification-continuation-linked-unsupported');
+  const roots=api('forge-code-roots'),execution=api('forge-task-execution'),side=api('forge-unit-sidecar');
+  const manifestFile=request.resultFile+'.manifest.json',manifestBytes=fs.readFileSync(manifestFile),manifest=JSON.parse(manifestBytes);
+  const receiptBytes=fs.readFileSync(returnedReceiptFile),record=JSON.parse(receiptBytes);
+  if(path.resolve(returnedReceiptFile)!==path.resolve(request.resultFile+'.receipt.json.'+hash(receiptBytes)+'.json')
+    ||record.kind!==(request.scope==='standalone-task'?'standalone-native-continuation':'milestone-native-continuation')
+    ||record.recovery_identity_sha256!==roots.digest(requestIdentity(request))
+    ||record.phase!=='executed'||record.result?.status!=='done'||!resultContract.validate(record.result).ok
+    ||record.manifest_sha256!==hash(manifestBytes)||record.dispatch_id!==request.dispatchId
+    ||record.fingerprint!==side.artifactFingerprint(request)||roots.digest(manifest.request)!==roots.digest(request))fail('verification-continuation-returned-binding');
+  const plan=fs.readFileSync(request.planFile,'utf8'),original=verificationPolicy(request,plan);
+  if(roots.digest(original.seal)!==roots.digest(manifest.verification_seal))fail('verification-continuation-original-seal');
+  // normalizeExecutionVerification enforces prefix-only extension and unchanged
+  // timeouts. Check effective commands too: no implicit plan/default is lost.
+  const seal=api('forge-verify').normalizeExecutionVerification(request.execution_contract,plan,request.verification||{},verification,original.identity);
+  if(seal.command_timeout_ms!==original.seal.command_timeout_ms)fail('verification-continuation-timeout-replacement');
+  let added=0;
+  for(const before of original.seal.roots){
+    const after=seal.roots.find(row=>row.root_id===before.root_id);
+    if(!after||before.commands.some((command,i)=>after.commands[i]!==command))fail('verification-continuation-command-replacement');
+    added+=after.commands.length-before.commands.length;
+  }
+  if(!added)fail('verification-continuation-append-required');
+  const check=()=>{
+    assertAuthority();if(attestStoppedWriter()!==true)fail('verification-continuation-writer-not-stopped');
+    if(hash(fs.readFileSync(manifestFile))!==hash(manifestBytes)||hash(fs.readFileSync(returnedReceiptFile))!==hash(receiptBytes)
+      ||hash(fs.readFileSync(request.planFile))!==manifest.plan_sha256||hash(fs.readFileSync(request.contextFile))!==manifest.context_sha256
+      ||roots.digest(execution.replayState(request.cwd,request.execution_contract))!==roots.digest(record.code_state))fail('verification-continuation-state-changed');
+  };
+  check();
+  const evidence={schema_version:1,reference,manifest_sha256:hash(manifestBytes),receipt_sha256:hash(receiptBytes),result_sha256:hash(JSON.stringify(record.result)),original_seal_sha256:original.seal.sha256,verification_seal:seal};
+  const capability=Object.freeze({});verificationContinuations.set(capability,{check,evidence,request_digest:roots.digest(request),manifest_digest:roots.digest(manifest),result_digest:roots.digest(record.result)});return capability;
+}
 // Diagnostics identify bounded positional checks, never copy root names,
 // commands, output, paths or worker-controlled error text into the exception.
 function verificationFailure(capture) {
@@ -270,6 +331,7 @@ const GLOBAL_SUMMARY_LINES=[
   /^1\.\.\d+$/,
 ];
 const ADVISORY_LIMIT='Flags heurísticas mantidas visíveis; comportamento provado só por linhas nomeadas da execução local do próprio artefato, sem alegação de CI remoto ou UAT.';
+const isGlobalEvidenceLine=line=>GLOBAL_SUMMARY_LINES.some(pattern=>pattern.test(String(line).trim()));
 function advisoryArtifactBindings(item,criterion_id,match,qualified,artifactEnvelope,capture){
   const {row,index:row_index}=match,flags=Array.isArray(row.flags)?row.flags:[];
   if(row.exists!==true||row.substantive!==false||!flags.length||flags.some(flag=>!flag||typeof flag!=='object'||flag.level!=='substantive'
@@ -288,16 +350,18 @@ function advisoryArtifactBindings(item,criterion_id,match,qualified,artifactEnve
     if(artifactEnvelope.revision!==verification.revision||roots.digest(artifactEnvelope.workspace)!==roots.digest(verification.workspace))fail('artifact-evidence-stale');
     const line=evidence.stdout_line;
     if(!nonEmpty(line))fail('artifact-evidence-line-empty');
-    if(GLOBAL_SUMMARY_LINES.some(pattern=>pattern.test(line.trim())))fail('artifact-evidence-global-summary');
-    if(typeof check.stdout!=='string'||!check.stdout.split(/\r?\n/).includes(line))fail('criterion-unobserved-evidence');
+    if(isGlobalEvidenceLine(line))fail('artifact-evidence-global-summary');
+    if(!isObservedTestLine(check,line))fail('criterion-unobserved-evidence');
     bindings.push({criterion_id,root_id:item.root_id,coverage:'behavioral',source:{kind:'verification',check_index},observed_test_lines:[line],
       evidence_limit:'Named assertion observed in actual local execution of the artifact itself; no remote CI or UAT claim.',advisory_disposition:structuredClone(advisory_disposition)});
   }
   bindings.push({criterion_id,root_id:item.root_id,coverage:'structural',source:{kind:'artifact',row_index,property:'exists'},advisory_disposition:structuredClone(advisory_disposition)});
   return bindings;
 }
-function criterionBindings(result,capture,unitKey,{inventory,contract,documentary,coveragePolicy}={}){
+function criterionBindings(result,capture,unitKey,{inventory,contract,documentary,coveragePolicy,artifactAdvisoryReview}={}){
   const bindings=[];
+  const artifactReview=artifactAdvisoryReview===undefined?null:api('forge-native-artifact-advisory').read(artifactAdvisoryReview);
+  if(artifactReview&&api('forge-code-roots').digest(result)!==artifactReview.result_digest)fail('artifact-advisory-result-changed');
   if(!capture?.passed||!result.must_haves_status?.length)fail('criterion-evidence-required');
   if(!inventory?.structured||inventory.diagnostics.length||!inventory.criteria.length)fail('criterion-inventory-required');
   const expected=new Map(inventory.criteria.map(c=>[c.id,c]));
@@ -321,7 +385,8 @@ function criterionBindings(result,capture,unitKey,{inventory,contract,documentar
       if(matches[0].row.substantive===true||!item.evidence?.length){
         bindings.push({criterion_id,root_id:item.root_id,coverage:'structural',source:{kind:'artifact',row_index:matches[0].index,property:'substantive'}});continue;
       }
-      bindings.push(...advisoryArtifactBindings(item,criterion_id,matches[0],qualified,envelope,capture));continue;
+      const reviewed=artifactReview?.bindings(criterion_id,item,matches[0],qualified,envelope,capture);
+      bindings.push(...(reviewed||advisoryArtifactBindings(item,criterion_id,matches[0],qualified,envelope,capture)));continue;
     }
     const policy=coveragePolicy?.criteria.find(row=>row.criterion_id===criterion_id);
     const reviewed=documentary?.criteria.filter(row=>row.criterion_id===criterion_id);
@@ -331,7 +396,7 @@ function criterionBindings(result,capture,unitKey,{inventory,contract,documentar
     for(const evidence of item.evidence){
       const envelope=capture.gate.roots.find(root=>root.root_id===evidence.root_id);
       const index=envelope?.result.checks.findIndex(check=>check.command===evidence.check)??-1;
-      if(index<0||!evidence.stdout_line||!envelope.result.checks[index].stdout.split(/\r?\n/).includes(evidence.stdout_line))fail('criterion-unobserved-evidence');
+      if(index<0||!isObservedTestLine(envelope.result.checks[index],evidence.stdout_line))fail('criterion-unobserved-evidence');
       bindings.push({criterion_id,root_id:evidence.root_id,coverage:'behavioral',source:{kind:'verification',check_index:index},observed_test_lines:[evidence.stdout_line],evidence_limit:'Named assertion observed in actual local verification output; no remote CI or UAT claim.'});
     }
   }
@@ -397,7 +462,7 @@ function phaseNotifier(onPhase,r){
   return phase=>{try{onPhase(Object.freeze({schema_version:1,phase,dispatch_id:r.dispatchId,unit:r.unitType+'/'+r.taskId,
     worker_mode:'native',at:new Date().toISOString()}));}catch{/* observer errors never affect delivery */}};
 }
-function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linkedEntryOptions,savedManifest,persistDeliveryReceipt,leaseRenewal,documentaryContinuation,coveragePolicy,supplementalCoverage,onPhase,onCheck}={}){
+function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linkedEntryOptions,savedManifest,persistDeliveryReceipt,leaseRenewal,documentaryContinuation,coveragePolicy,supplementalCoverage,verificationContinuation,artifactAdvisoryReview,onPhase,onCheck}={}){
   if(typeof assertBoundary!=='function'||typeof assertAuthority!=='function')fail('live-controller-boundary-required');
   let r=structuredClone(request);
   const phase=phaseNotifier(onPhase,r);
@@ -429,6 +494,11 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
   const planHash=hash(plan),contextHash=hash(context);
   const inputs = savedManifest?.inputs || (taskPreparation ? Object.keys(taskPreparation.inputs).map(file=>['Task input',file]) : inputSections(r)).map(([label,file]) => ({label,file,sha256:hash(fs.readFileSync(file))}));
   const {identity:verificationIdentity,seal}=verificationPolicy(r,plan);
+  const verificationExtra=verificationContinuation===undefined?null:verificationContinuations.get(verificationContinuation);
+  if(verificationContinuation!==undefined&&(!verificationExtra||!savedManifest||documentary||coveragePolicy||supplementalCoverage
+    ||verificationExtra.request_digest!==roots.digest(wireRequest)||verificationExtra.manifest_digest!==roots.digest(savedManifest)))fail('verification-continuation-capability-required');
+  if(artifactAdvisoryReview!==undefined&&(!savedManifest||documentary||coveragePolicy||supplementalCoverage))fail('artifact-advisory-capability-required');
+  const artifactReview=artifactAdvisoryReview===undefined?null:api('forge-native-artifact-advisory').read(artifactAdvisoryReview,{request:wireRequest,manifest:savedManifest});
   const loc=side.locations(r),inventory=api('forge-delivery').inventoryPlan(plan,r.planFile,loc.rules[loc.delivery.input].unit);
   // Same derivation as the sidecar helpers: validated IDs only, never worker paths.
   const markerPath=standalone?null:loc.slice+'/'+r.sliceId+'-PLAN.md';
@@ -469,6 +539,9 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
   if(policy&&documentary)fail('documentary-policy-continuation-conflict');
   let initialReview=null;
   function guard(publishing=false){
+    if(verificationExtra)verificationExtra.check();
+    if(verificationExtra&&roots.digest(manifest)!==verificationExtra.manifest_digest)fail('verification-continuation-manifest-changed');
+    if(artifactReview){artifactReview.check();if(roots.digest(manifest)!==artifactReview.manifest_digest)fail('artifact-advisory-manifest-changed');}
     if(supplement)supplement.check();
     if(policy&&fs.existsSync(manifestFile)&&roots.digest(JSON.parse(fs.readFileSync(manifestFile,'utf8')))!==roots.digest(manifest))fail('documentary-manifest-changed');
     if(documentary)documentary.check();
@@ -501,7 +574,10 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       if(error.code!=='EEXIST'||fs.readFileSync(file,'utf8')!==bytes)throw error;
     }
     persistDeliveryReceipt({file,sha256});
+    return {file,sha256};
   };
+  let refusedClosure=null;
+  const open=()=>{if(refusedClosure)fail('native-refusal-closed');};
   return {
     reviewDocumentary({returnedReceiptFile,attestReview,attestStoppedWriter}={}){
       guard(true);
@@ -568,7 +644,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
     },
     manifest(){return structuredClone(manifest);},
     start(){
-      guard();
+      open();guard();
       const bytes=JSON.stringify(manifest);
       try {fs.writeFileSync(manifestFile,bytes,{flag:'wx'});}catch(error){
         if(error.code!=='EEXIST'||fs.readFileSync(manifestFile,'utf8')!==bytes)throw error;
@@ -576,7 +652,56 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       phase('executing');
       return {manifest_file:manifestFile,manifest_sha256:hash(bytes),receipt_file:receiptFile};
     },
+    // Owner closure for a started first native attempt whose host callback never
+    // ran. Only the exact process-local invokeNative outcome carries the witness;
+    // serialized flags, saved results or a worker identity never mint a failure.
+    // Cleanup checks ownership and integrity only: budget readmission would be
+    // refused by the very cap that closed this attempt. Claim and lease remain
+    // for the existing consume-failure/reentry protocol.
+    refuseNotInvoked(outcome){
+      if(verificationExtra||artifactReview||supplement||documentary||policy||renewal||savedManifest)fail('native-refusal-first-attempt-only');
+      const witness=api('forge-native-invocation').notInvokedWitness(outcome);
+      if(!witness||outcome.ok!==false||outcome.provider_called!==false||outcome.result!=null||outcome.host_identity
+        ||outcome.lifecycle?.host_identity||outcome.reason_code!==witness.reason_code||witness.provider_called!==false||witness.host_callbacks!==0
+        ||witness.invocation_sha256!==roots.digest(JSON.stringify(nativeInvocation))||witness.request_sha256!==roots.digest(wireRequest))fail('native-refusal-witness-required');
+      guard();
+      const manifestBytes=fs.existsSync(manifestFile)?fs.readFileSync(manifestFile,'utf8'):null;
+      if(manifestBytes!==JSON.stringify(manifest))fail('native-refusal-manifest-required');
+      const held=api('forge-runs').get(r.contextRoot,r.runId);
+      if(!held||held.active!==true||!api('forge-write-claim').isHeld(held.write_claim)||roots.digest(held.write_claim)!==roots.digest(r.claim))fail('native-refusal-claim-changed');
+      // Preexisting dirty bytes are part of the original baseline; any delta is not.
+      for(const snapshot of prepared.snapshots){
+        const root=r.execution_contract.code_roots.find(row=>row.id===snapshot.root_id);
+        if(!root)fail('native-refusal-code-changed');
+        const live=api('forge-surgical-reset').captureAttemptSnapshot(root.path);
+        if(live.start_sha!==snapshot.start_sha||roots.digest(live.pre_dirty)!==roots.digest(snapshot.pre_dirty))fail('native-refusal-code-changed');
+      }
+      const record={kind:standalone?'standalone-native-continuation':'milestone-native-continuation',phase:'failed',dispatch_id:r.dispatchId,
+        fingerprint:side.artifactFingerprint(r),recovery_identity_sha256:roots.digest(requestIdentity(r,linkedEntryOptions)),
+        route:r.route,manifest_sha256:hash(manifestBytes),invocation_sha256:witness.invocation_sha256,
+        failure:{status:'not-invoked',reason_code:witness.reason_code,layer:witness.layer,provider_called:false,possible_writes:false,
+          reconciliation_required:false,host_callbacks:0,witness:'process-local-invocation-guard'},
+        code_state:execution.replayState(r.cwd,r.execution_contract)};
+      const bytes=JSON.stringify(record),dir=path.dirname(receiptFile),prefix=path.basename(receiptFile)+'.';
+      if(fs.existsSync(r.resultFile))fail('native-refusal-saved-result');
+      const names=fs.readdirSync(dir).filter(name=>name.startsWith(prefix)&&name.endsWith('.json'));
+      if(names.length>64)fail('native-refusal-receipt-limit');
+      for(const file of [receiptFile,...names.map(name=>path.join(dir,name))]){
+        if(!fs.existsSync(file))continue;
+        if(fs.lstatSync(file).isSymbolicLink()||fs.statSync(file).size>1024*1024)fail('native-refusal-receipt-conflict');
+        const existing=fs.readFileSync(file,'utf8');
+        if(existing===bytes)continue;
+        let parsed=null;try{parsed=JSON.parse(existing);}catch{}
+        fail(['executed','ready'].includes(parsed?.phase)?'native-refusal-saved-result':'native-refusal-receipt-conflict');
+      }
+      const persisted=persist(record);
+      refusedClosure={...persisted,record};
+      return {receipt_file:persisted.file,receipt_sha256:persisted.sha256,record:structuredClone(record),provider_called:false};
+    },
     returned(result){
+      open();
+      if(verificationExtra)fail('verification-continuation-replay-only');
+      if(artifactReview)fail('artifact-advisory-replay-only');
       if(supplement)fail('supplemental-replay-only');
       guard();
       if(!resultContract.validate(result).ok)fail('native-result-invalid');
@@ -587,19 +712,24 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
         code_state:execution.replayState(r.cwd,r.execution_contract)});
     },
     verify(result){
-      guard();if(!resultContract.validate(result).ok||result.status!=='done')fail('native-result-not-done');
+      open();guard();if(!resultContract.validate(result).ok||result.status!=='done')fail('native-result-not-done');
+      if(verificationExtra&&roots.digest(result)!==verificationExtra.result_digest)fail('verification-continuation-result-changed');
+      if(artifactReview&&roots.digest(result)!==artifactReview.result_digest)fail('artifact-advisory-result-changed');
       if(policy&&(!initialReview||roots.digest(result)!==roots.digest(initialReview.derived)))fail('documentary-review-required');
       if(documentary&&roots.digest(result)!==roots.digest(documentary.derived))fail('documentary-result-changed');
       const delta=execution.verifyResult(r.cwd,prepared,result),loc=side.locations(r),resourceEvents=[];
       phase('verifying');
       const capture=verify.captureRootDelivery(r.execution_contract,plan,{...r.verification,unit:loc.rules[loc.delivery.input].unit,
-        verificationSeal:seal,verificationIdentity,resourceEventSink:line=>resourceEvents.push(line),
+        evidenceRequests:evidenceRequests(result),
+        verificationSeal:verificationExtra?.evidence.verification_seal||seal,verificationIdentity,resourceEventSink:line=>resourceEvents.push(line),
         ...(typeof onCheck==='function'?{onCheck}:{})});
       // Retain actual command results before guards or criterion binding can
       // refuse. This private evidence is neither a ready receipt nor authority
       // to replay/skip verification. Its digest binds the original result and
       // exact manifest; failed attempts remain failed.
       const captured={schema_version:1,kind:'native-verification-capture',dispatch_id:r.dispatchId,
+        ...(verificationExtra?{verification_continuation:structuredClone(verificationExtra.evidence)}:{}),
+        ...(artifactReview?{artifact_advisory_review:structuredClone(artifactReview.evidence)}:{}),
         manifest_sha256:hash(fs.readFileSync(manifestFile)),result_sha256:hash(JSON.stringify(result)),capture};
       const captureBytes=JSON.stringify(captured)+'\n',retained=path.join(path.dirname(r.resultFile),'forge-verification-'+hash(captureBytes)+'.json');
       for(const root of [r.contextRoot,...r.execution_contract.code_roots.map(row=>row.path)])api('forge-xllm').validateResultFileTarget(retained,root);
@@ -616,7 +746,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       }
       const unit=loc.rules[loc.delivery.input].unit;
       const inventory=api('forge-delivery').inventoryPlan(plan,r.planFile,unit);
-      const bindings=criterionBindings(result,capture,api('forge-delivery').unitKey(unit),{inventory,contract:r.execution_contract,documentary:(documentary||initialReview)?.evidence,coveragePolicy:policy});
+      const bindings=criterionBindings(result,capture,api('forge-delivery').unitKey(unit),{inventory,contract:r.execution_contract,documentary:(documentary||initialReview)?.evidence,coveragePolicy:policy,...(artifactReview?{artifactAdvisoryReview}:{})});
       // Canonical delivery validates coverage, criterion identity and actual captures.
       const publicationRequest={...r,verification:{...(r.verification||{}),bindings}};
       const artifacts=side.executeDeliveryArtifacts(publicationRequest,loc,result,r.contextRoot,r.cwd,capture);
@@ -627,6 +757,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       return structuredClone({capture,delta,resourceEvents,bindings});
     },
     publish(result){
+      open();
       if(!verified||verified.resultHash!==roots.digest(result))fail('verified-result-required');
       guard();execution.verifyResult(r.cwd,prepared,result);
       for(const envelope of verified.capture.artifacts){
@@ -638,6 +769,8 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       // Issue 282: owner marker last, CAS on the prepared preimage, never recaptured.
       if(markerPath){const marker=side.createTaskMarker(r,r.contextRoot,prepared.protected_owner[markerPath]);if(marker)artifacts.push(marker);}
       const record={kind:'native-execute-task',phase:'ready',dispatch_id:r.dispatchId,result,artifacts,route:r.route,response_sha256:hash(JSON.stringify(result)),
+        ...(verificationExtra?{verification_continuation:structuredClone(verificationExtra.evidence)}:{}),
+        ...(artifactReview?{artifact_advisory_review:structuredClone(artifactReview.evidence)}:{}),
         ...(supplement?{supplemental_coverage:structuredClone(supplement.evidence)}:{}),
         ...(renewal?{lease_reconciliation:renewal.evidence}:{}),
         fingerprint:side.artifactFingerprint(r),recovery_identity_sha256:roots.digest(requestIdentity(r,linkedEntryOptions)),
@@ -652,7 +785,20 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       return record;
     },
     replayReady(record){
-      guard(true);
+      open();guard(true);
+      if(Boolean(record.verification_continuation)!==Boolean(verificationExtra)
+        ||verificationExtra&&roots.digest(record.verification_continuation)!==roots.digest(verificationExtra.evidence))fail('verification-continuation-replay-authority-required');
+      if(verificationExtra){
+        if(roots.digest(record.result)!==verificationExtra.result_digest||record.manifest_sha256!==verificationExtra.evidence.manifest_sha256)fail('verification-continuation-ready-binding');
+        const bytes=JSON.stringify(record),file=receiptFile+'.'+hash(bytes)+'.json';
+        if(!fs.existsSync(file)||fs.readFileSync(file,'utf8')!==bytes)fail('verification-continuation-ready-receipt-required');
+      }
+      if(Boolean(record.artifact_advisory_review)!==Boolean(artifactReview)||artifactReview&&roots.digest(record.artifact_advisory_review)!==roots.digest(artifactReview.evidence))fail('artifact-advisory-replay-authority-required');
+      if(artifactReview){
+        if(roots.digest(record.result)!==artifactReview.result_digest||record.manifest_sha256!==artifactReview.evidence.manifest_sha256)fail('artifact-advisory-ready-binding');
+        const bytes=JSON.stringify(record),file=receiptFile+'.'+hash(bytes)+'.json';
+        if(!fs.existsSync(file)||fs.readFileSync(file,'utf8')!==bytes)fail('artifact-advisory-ready-receipt-required');
+      }
       if(Boolean(record.supplemental_coverage)!==Boolean(supplement)
         ||supplement&&roots.digest(record.supplemental_coverage)!==roots.digest(supplement.evidence))fail('supplemental-replay-authority-required');
       for(const artifact of record.artifacts||[]){
@@ -765,7 +911,7 @@ async function replay({request,recovery,runtime,nativeOptions}) {
   const successor=action=>runtime.executionPlanGate===undefined||r.gates?.plan!=='skipped'||r.gates?.planSkipReason!=='auto-defer'
     ?action():api('forge-task-execution').withAutoPlanGateAdapterSync(runtime.executionPlanGate,r,action);
   const session=successor(()=>prepare({request:r,nativeInvocation:invocation,assertBoundary:runtime.assertBoundary,assertAuthority,
-    supplementalCoverage:runtime.supplementalCoverage,onPhase:runtime.onPhase,onCheck:runtime.onVerificationCheck,
+    supplementalCoverage:runtime.supplementalCoverage,leaseRenewal:runtime.leaseRenewal,onPhase:runtime.onPhase,onCheck:runtime.onVerificationCheck,
     linkedEntryOptions:runtime.linkedEntryOptions,savedManifest:manifest,persistDeliveryReceipt:receipt=>{
       inspect();
       const lock=api('forge-lock'),lockRoot=path.join(require('os').tmpdir(),'forge-recovery-'+roots.digest(path.resolve(recovery.stateFile)));
@@ -792,4 +938,4 @@ async function replay({request,recovery,runtime,nativeOptions}) {
   const verified=successor(()=>session.verify(effectiveResult)),published=successor(()=>session.publish(effectiveResult));
   return {action:'replay',provider_called:false,result:{verified,published}};
 }
-module.exports={prepare,replay,requireExplicitVerify,criterionBindings,resultContract,packagePrompt,createLeaseRenewalReconciliation,reconcileLeaseRenewalSurface,createDocumentaryContinuation};
+module.exports={prepare,replay,requireExplicitVerify,criterionBindings,resultContract,packagePrompt,createLeaseRenewalReconciliation,reconcileLeaseRenewalSurface,createDocumentaryContinuation,createVerificationContinuation,isGlobalEvidenceLine,isObservedTestLine};

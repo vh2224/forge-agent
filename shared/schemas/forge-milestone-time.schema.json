@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:forge:milestone-time:v1",
+  "title": "Owner milestone time contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "milestone", "clock_policy", "option", "activated_at", "preselection_started_at", "ceiling_ms", "endpoint", "allocation", "linked_task", "chain_forecast", "decision"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "milestone": { "$ref": "#/$defs/milestone" },
+    "clock_policy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": { "id": { "const": "forge-milestone-time-clock" }, "version": { "const": 1 } }
+    },
+    "option": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "options_sha256", "label"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "options_sha256": { "$ref": "#/$defs/hash" },
+        "label": { "$ref": "#/$defs/text" },
+        "position_id": { "$ref": "#/$defs/id" }
+      }
+    },
+    "activated_at": { "$ref": "#/$defs/instant" },
+    "preselection_started_at": { "$ref": "#/$defs/instant" },
+    "ceiling_ms": { "$ref": "#/$defs/ms" },
+    "endpoint": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "items"],
+      "properties": {
+        "kind": { "const": "verified-integrated-delivery", "default": "verified-integrated-delivery" },
+        "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["publication", "installation", "manual-uat", "external-waits"],
+          "properties": {
+            "publication": { "$ref": "#/$defs/itemState" },
+            "installation": { "$ref": "#/$defs/itemState" },
+            "manual-uat": { "$ref": "#/$defs/itemState" },
+            "external-waits": { "$ref": "#/$defs/itemState" }
+          }
+        }
+      }
+    },
+    "allocation": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["roadmap_sha256", "items"],
+          "properties": {
+            "roadmap_sha256": { "$ref": "#/$defs/hash" },
+            "structure_sha256": {
+              "$ref": "#/$defs/hash",
+              "description": "Optional structural identity of the ROADMAP (roadmapIdentity); absent in S01 allocations."
+            },
+            "items": {
+              "type": "array", "minItems": 1, "maxItems": 256,
+              "items": {
+                "type": "object", "additionalProperties": false,
+                "required": ["id", "kind", "ms"],
+                "properties": {
+                  "id": { "$ref": "#/$defs/id" },
+                  "kind": { "enum": ["preparation", "slice", "integration", "review", "corrections"] },
+                  "slice": { "type": "string", "pattern": "^S[0-9]{2,}$" },
+                  "ms": { "$ref": "#/$defs/ms" },
+                  "nodes": {
+                    "description": "Optional selected option nodes (or refined parts) mapped to this item.",
+                    "$ref": "#/$defs/idList"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "linked_task": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["position_id", "authorization", "moved_scope", "criteria", "horizon", "options_sha256"],
+          "properties": {
+            "position_id": { "$ref": "#/$defs/id" },
+            "authorization": { "enum": ["create-and-start-after-proven-completion", "create-without-auto-start", "none"] },
+            "moved_scope": { "allOf": [{ "$ref": "#/$defs/idList" }, { "minItems": 1 }] },
+            "criteria": {
+              "type": "object", "additionalProperties": false,
+              "required": ["milestone", "task"],
+              "properties": {
+                "milestone": { "$ref": "#/$defs/textList" },
+                "task": { "$ref": "#/$defs/textList" }
+              }
+            },
+            "horizon": { "$ref": "#/$defs/horizon" },
+            "options_sha256": {
+              "$ref": "#/$defs/hash",
+              "description": "Must equal option.options_sha256."
+            }
+          }
+        }
+      ]
+    },
+    "chain_forecast": {
+      "description": "Only with a non-null linked_task; low_ms <= high_ms.",
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["low_ms", "high_ms", "basis"],
+          "properties": {
+            "low_ms": { "$ref": "#/$defs/ms" },
+            "high_ms": { "$ref": "#/$defs/ms" },
+            "basis": { "enum": ["milestone-plus-linked-task"] }
+          }
+        }
+      ]
+    },
+    "decision": { "$ref": "#/$defs/decision" }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "id": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,119}$" },
+    "idList": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+    "text": { "type": "string", "minLength": 1, "maxLength": 1000 },
+    "textList": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "$ref": "#/$defs/text" } },
+    "horizon": {
+      "type": "object", "additionalProperties": false,
+      "description": "Positive integers with low_ms <= high_ms <= ceiling_ms.",
+      "required": ["low_ms", "high_ms", "ceiling_ms"],
+      "properties": {
+        "low_ms": { "$ref": "#/$defs/ms" },
+        "high_ms": { "$ref": "#/$defs/ms" },
+        "ceiling_ms": { "$ref": "#/$defs/ms" }
+      }
+    },
+    "instant": { "type": "string", "format": "date-time" },
+    "ms": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "milestone": {
+      "type": "string",
+      "description": "Also validated by forge-ids.isValid and entityKind(milestone).",
+      "pattern": "^([Mm][0-9]+|M-[0-9]{14}(-[a-z0-9-]*)?|M-[0-9]{8}-[0-9]{6}(-[a-zA-Z0-9-]*)?)$"
+    },
+    "itemState": { "enum": ["included", "pending", "completed", "deferred", "not-applicable"] },
+    "decision": {
+      "type": "object", "additionalProperties": false,
+      "required": ["reference", "question", "answer", "source", "resolved_at", "request_sha256"],
+      "properties": {
+        "reference": { "$ref": "#/$defs/id" },
+        "question": {
+          "type": "object", "additionalProperties": false,
+          "required": ["identity_sha256", "id"],
+          "properties": { "identity_sha256": { "$ref": "#/$defs/hash" }, "id": { "$ref": "#/$defs/id" } }
+        },
+        "answer": { "$ref": "#/$defs/text" },
+        "source": { "enum": ["user-text", "tool-answer"] },
+        "resolved_at": { "$ref": "#/$defs/instant" },
+        "request_sha256": { "$ref": "#/$defs/hash" }
+      }
+    }
+  }
+}

@@ -59,12 +59,32 @@ dependencies and batches, after phase selection and before dispatch. A live
 controller lease must never be retargeted to a different task or slice by a
 second picker; stop on a mismatch and preserve the snapshot for recovery.
 
-For the selected unit, set `agent_name` by family: `plan-*` uses `forge-planner`,
-`discuss-*` uses `forge-discusser`, `research-*` uses `forge-researcher`,
-`execute-task` uses `forge-executor`, and `complete-*` uses `forge-completer`.
-Model/engine/effort still come from `forge-dispatch-resolve.js`; these agent names
-do not select a host, delivery mode or model.
+For the selected unit, set `agent_name` by family: `plan-*` and `estimate-milestone`
+use `forge-planner`, `discuss-*` uses `forge-discusser`, `research-*` uses
+`forge-researcher`, `execute-task` uses `forge-executor`, and `complete-*` uses
+`forge-completer`. Model/engine/effort still come from `forge-dispatch-resolve.js`;
+these agent names do not select a host, delivery mode or model.
 Standalone `/forge-task` remains outside milestone selection.
+
+## Milestone time option choice
+
+Only a milestone enrolled at creation enters this flow (`shared/forge-milestone-time.md`
+§ Opções de prazo antes do roadmap). Without a roadmap the controller selects
+`estimate-milestone` (read-only, `forge-planner`) before `plan-milestone`; the plan,
+discuss and research order is otherwise unchanged. `next` first materializes an
+accepted proposal at its safe owner boundary. While the owner's options have no
+explicit attested decision, `next` returns `outcome: blocked` with
+`reason_code: time-option-pending` and the owner state in `details.time_options`;
+the round itself is opened by `forge-milestone-time-selection.js --round`. The loop keeps a
+`time_option_block {milestone, options_sha256}` locator in its own snapshot. `blocked`
+is terminal for the iteration: the host presents the round, persists the operator's
+explicit answer and records the decision through the embedded live adapter, then
+calls the adapter with `--command resume-time-option` and the same snapshot.
+`resume-time-option` rereads the owner selection (`resumeCheck`): `time-option-ready`
+continues to the unit the controller selects (normally `plan-milestone`);
+`time-option-reestimate-ready` continues to the estimate of the current owner basis;
+anything else stays blocked and stops. The snapshot is never edited, no checkpoint
+is fabricated and a serialized flag or imported JSON never decides.
 
 ## Personal status payload (2.0.0)
 

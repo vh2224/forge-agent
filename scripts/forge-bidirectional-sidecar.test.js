@@ -117,8 +117,11 @@ function request(cwd, unitType, engine = 'claude', codexModel = 'gpt-6-luna') {
   write(r.promptFile, '# Selected unit\nHonor the operator constraints.');
   return r;
 }
+// estimate-milestone returns the shared T02 fixture proposal, validated on acceptance.
+const PROPOSALS = require('./fixtures/milestone-options/proposals.json');
 function artifactContent(r, p, loc) {
   const rule = loc.rules[p];
+  if (rule && rule.kind === 'milestone-options') return JSON.stringify({ ...PROPOSALS.base, milestone: rule.milestone }, null, 2);
   if (rule && rule.kind === 'input') return JSON.stringify({ schema_version: 1, unit: rule.unit,
     plan: 'fixture-plan.md', plan_fingerprint: 'fixture-sha', bindings: [], expected_children: [] });
   if (rule && rule.kind === 'delivery') return JSON.stringify({ schema_version: 1, generated_by: 'forge-delivery',

@@ -25,7 +25,7 @@ Always end your response with this block so the orchestrator can parse your resu
 
 ```
 ---GSD-WORKER-RESULT---
-unit_type: <execute-task|plan-slice|research-slice|discuss-milestone|research-milestone|plan-milestone|complete-slice|complete-milestone>
+unit_type: <execute-task|plan-slice|research-slice|discuss-milestone|research-milestone|estimate-milestone|plan-milestone|complete-slice|complete-milestone>
 unit_id: <T01|S01|M001|etc>
 status: <done|blocked|partial>
 blocker: <description if status=blocked, else empty>

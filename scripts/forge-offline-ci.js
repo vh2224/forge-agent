@@ -54,7 +54,8 @@ function buildPlan(options = {}) {
 function run(options = {}, dependencies = {}) {
   const spawn = dependencies.spawnSync || spawnSync;
   const plan = buildPlan(options);
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-offline-ci Ω-'));
+  const temp = fs.realpathSync.native(os.tmpdir());
+  const tempRoot = fs.mkdtempSync(path.join(temp, 'forge-offline-ci Ω-'));
   const results = [];
   try {
     for (const entry of plan) {
@@ -63,6 +64,9 @@ function run(options = {}, dependencies = {}) {
       fs.mkdirSync(home, { recursive: true });
       const env = {
         ...scrubEnvironment(options.env || process.env),
+        TMPDIR: temp,
+        TMP: temp,
+        TEMP: temp,
         HOME: home,
         USERPROFILE: home,
         XDG_CONFIG_HOME: path.join(home, '.config'),

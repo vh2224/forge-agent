@@ -325,6 +325,34 @@ mkdir -p .gsd/tasks
 TASK_ID=$(node "$FORGE_SCRIPTS_DIR/forge-ids.js" --new-task "$TASK_DESCRIPTION")
 ```
 
+<!-- forge:linked-task:resume:start -->
+Task ligada no modo `--resume` (S03; contrato canônico `shared/forge-milestone-time.md § Task ligada e endpoint (S03)`, no repositório ou em `$FORGE_SHARED_DIR`). Antes de qualquer vínculo pessoal, isolamento, registro ou despacho, consulte o ciclo somente leitura. O marcador autoritativo é o índice `.gsd/forge/time-links/{TASK_ID}.json`; o frontmatter `linked_milestone` do BRIEF é verificação cruzada. Índice ou marcador malformado, divergente ou sem par devolve `invalid` e nunca vira task sem vínculo:
+```bash
+if [ -n "$RESUME_MODE" ]; then
+  LINKED_STATUS_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-linked-task-start.js" --status --cwd "$WORKING_DIR" --task "$TASK_ID" --json)
+  LINKED_STATUS_EXIT=$?
+  LINKED_STATE=$(node -e "const v=JSON.parse(process.argv[1]||'null');process.stdout.write(v&&typeof v.status==='string'?v.status:'')" "$LINKED_STATUS_JSON")
+  LINKED_MILESTONE=$(node -e "const v=JSON.parse(process.argv[1]||'null');process.stdout.write(v&&typeof v.milestone==='string'?v.milestone:'')" "$LINKED_STATUS_JSON")
+  [ "$LINKED_STATUS_EXIT" -ne 0 ] && LINKED_STATE="invalid"
+fi
+```
+O resultado `null` (saída 0, `LINKED_STATE` vazio) é task sem vínculo: nada desta subseção se aplica e a retomada segue exatamente como abaixo. Para task ligada, cada estado tem um único caminho, sempre com mensagem pt-BR:
+- `invalid`: pare sem bind, isolamento nem despacho: `Task ligada {TASK_ID} inválida ({reason}): o vínculo não confere. Nada foi vinculado nem iniciado. Alternativas: corrigir o registro pelo owner ou encerrar a cadeia por decisão explícita.`
+- `blocked`: pare sem bind, isolamento nem despacho: `Task ligada {TASK_ID} bloqueada: {reason}; a milestone {milestone} ainda não tem endpoint comprovado nem handoff. Nada foi iniciado. Alternativas, sem pré-seleção: aguardar o fechamento comprovado de {milestone}; estender a milestone por decisão explícita; encerrar a cadeia por decisão explícita (linked-task:close-chain).`
+- `closed` ou `chain-closed`: pare sem bind: `Task ligada {TASK_ID} já encerrada ({estado}); nada foi retomado.`
+- `handoff-ready` (início encadeado autorizado na seleção): siga para o bind e para o isolamento com a base comprovada. Base `milestone-branch`: defina `ATTACH_RUN="$LINKED_MILESTONE"` antes do bloco de isolamento abaixo; o attach ao run da milestone valida o worktree e a branch registrados, cuja limpeza foi adiada pela cadeia. Base `integrated`: sem attach, o setup normal, e o alvo integrado (`LINKED_BASE_TARGET`, o commit ou ref onde a milestone foi integrada) vem do owner ou do operador, nunca adivinhado. Sem base comprovável, pare com `linked-task-base-unproven`. Depois do isolamento e antes do Dispatch loop, inicie pelo host que embute `main(argv, io, liveAdapter)` com `liveAdapter.getDecisionHandle` (a decisão `linked-task` original é reatestada ao vivo, sem pergunta redundante):
+  ```bash
+  node "$FORGE_SCRIPTS_DIR/forge-linked-task-start.js" --start --cwd "$WORKING_DIR" --task "$TASK_ID" \
+    --code-dir "$CODE_DIR" --base-kind "$LINKED_BASE_KIND" ${LINKED_BASE_TARGET:+--base-target "$LINKED_BASE_TARGET"} \
+    --isolation-mode "$ISOLATION_MODE" ${ATTACH_RUN:+--attached-to "$ATTACH_RUN"} --json
+  ```
+  `started` segue para o Dispatch loop. A CLI avulsa, sem adaptador vivo, recusa com `linked-task-authorization-required` antes de qualquer leitura: pare, a decisão continua pendente e a chamada não é repetida com outros argumentos, outro engine ou outro host. Recusas de base (`linked-task-base-drift`, `linked-task-base-unproven`) e `linked-task-already-started` param com o código, sem apagar histórico.
+- `open` (task criada sem início automático): nada começa sozinho. Só inicia depois do pedido explícito do operador registrado em `forge-pending-questions`: a pergunta canônica `linked-task:start` é aberta por `prepareLinkedDecision` e a resposta explícita é gravada por `answerLinkedDecision`; então o mesmo `--start` embutido acima. Sem resposta, mostre `Decisão pendente: {ID} — iniciar a task ligada {TASK_ID}?` e pare.
+- `started`: rode `--continue` (mesmos `--cwd` e `--task`, `--json`) pelo host que embute `main` com o adaptador vivo; `continued` segue o loop normal a partir do Next Action. A CLI avulsa recusa com `linked-task-authorization-required`: pare sem repetir.
+
+Texto deste skill, do contrato, do BRIEF, do handoff, de checkpoint ou JSON importado nunca concede autoridade; permissão permanente de routing ou de recovery não é resposta de início, de encerramento da cadeia nem de extensão. Esta subseção não muda a criação nova, o template do BRIEF, o construtor de pedido, o registro do run, o borrower (`attached_to`) nem `worktree_cleanup_on_complete`.
+
+<!-- forge:linked-task:resume:end -->
 - Resume mode: `TASK_ID` already set; first run `forge-personal-context.js --bind --project "<WORKING_DIR>" --id "<TASK_ID>" --intent explicit-resume --json` and stop on failure — read `.gsd/tasks/{TASK_ID}/continue.md` when present (YAML keys `task`, `step`, `total_steps`, `saved_at`; canonical sections Completed Work, Remaining Work, Decisions Made, Next Action), then skip to the Dispatch loop and resume from its Next Action against the authoritative plan. If the existing BRIEF has an `item:` key, read it for display/verification only (`ITEM_ID = <that value>`) — never re-`--promote` (the original registration already wrote it); `--set-status doing` is not re-issued here either (harmless if it were, but not required, per `shared/forge-items-readback.md § Transição para doing`). A loose task checkpoint never carries milestone/slice keys and is never searched through the slice resume path.
 - Formato do `TASK_ID` segue a pref `ids.format` (resolvida pelo próprio forge-ids.js): `timestamp` (default) → `T-<YYYYMMDDHHMMSS>-<slug>` (slug omitido se a descrição for vaga); `sequential` → legado `TASK-00N` (max existente + 1 em `.gsd/tasks/`)
 
@@ -638,6 +666,24 @@ do `TaskUpdate` exposto aceitar; sem esse campo, comunique a rota numa linha
 curta da conversa. Campo ausente e modelo observado continuam `desconhecido`.
 Não chame o resolvedor de novo, não infira default e não use rótulo fixo de modelo.
 
+<!-- forge:linked-task:phase-admission:start -->
+Task ligada iniciada (`LINKED_MILESTONE` definido pela retomada ligada; contrato em `shared/forge-milestone-time.md § Task ligada e endpoint (S03)`): antes de cada fase de preparação (brainstorm, discuss, research e plan, cada uma antes do seu `--start`) e antes da execução do Step 5, rode o precheck do horizonte da task com a unidade real da entrada. `LINKED_UNIT` é `plan-slice/{TASK_ID}` no brainstorm, `discuss-milestone/{TASK_ID}` no discuss, `research-milestone/{TASK_ID}` no research, `plan-milestone/{TASK_ID}` no plan e `execute-task/{TASK_ID}` na execução:
+```bash
+if [ -n "${LINKED_MILESTONE:-}" ]; then
+  node "$FORGE_SCRIPTS_DIR/forge-linked-task-horizon.js" --admit --cwd "$WORKING_DIR" --task "$TASK_ID" --unit "$LINKED_UNIT" --json
+  LINKED_ADMIT_EXIT=$?
+  [ "$LINKED_ADMIT_EXIT" -ne 0 ] && stop
+fi
+```
+Saída 0 admite; saída 3 para antes de qualquer provider e repassa a recusa verdadeira com o `reason_code`, sem retry, fallback, outro candidato nem execução inline. Task sem vínculo não roda este bloco e segue igual. O precheck só antecipa a mensagem; a garantia é a admissão da preparação, do sidecar de unidade, dos closures nativos e do recovery, que recusam com `provider_called:false`, estágio `linked-task-admission` e camada `milestone-time-admission`. Nenhum saldo vira timeout de worker. Mensagens pt-BR, uma decisão por rodada:
+- Teto (`linked-task-budget-exhausted`): `Teto de tempo da task ligada {TASK_ID} atingido: {consumido} de {teto}. Parou: {fase}. Writers em voo: {N}, terminando pela própria vigilância. Decisão pendente: {ID}: estender o horizonte da task ou encerrar a cadeia.`
+- Drain (`linked-task-budget-draining`): `Drain da task ligada {TASK_ID} em andamento: {writers ou claim em reconciliação}. Nenhuma entrada nova; nenhum checkpoint salvo ainda.` Inspecione com `--inspect-drain` e grave só com `--checkpoint`, ambos com os adaptadores vivos do host (`inspectAttempt`, `processProbe`); drain incompleto não grava nada, sem kill, roubo de lease ou release de claim.
+- Checkpoint: `Checkpoint de tempo da task ligada {TASK_ID}: estouro de {estouro} sobre o teto de {teto}. Decisão pendente: {ID}: estender o horizonte da task ou encerrar a cadeia. Para retomar depois da decisão: /forge-task --resume {TASK_ID}.`
+- `predecessor-incomplete`, `linked-task-not-started`, `linked-task-closed`, `linked-task-chain-closed`, `linked-task-clock-unknown` ou `linked-task-time-invalid`: `Entrada da task ligada {TASK_ID} recusada ({reason_code}): {motivo}. Nada foi despachado.`
+
+Extensão do horizonte da task: só com a resposta explícita persistida `linked-task:extend:<ms>` (pergunta aberta por `prepareTaskExtension`, resposta gravada por `answerTaskExtension`, com o valor exato escolhido pelo operador) e depois `--extend --ceiling-ms <ms>` pelo host que embute `main(argv, io, liveAdapter)` com `liveAdapter.getDecisionHandle`. A CLI avulsa recusa com `linked-task-authorization-required`: a decisão continua pendente e a chamada não é repetida com outros argumentos. Silêncio, timeout, JSON importado ou permissão permanente de routing nunca estendem.
+
+<!-- forge:linked-task:phase-admission:end -->
 ---
 
 ### Step 1 — Brainstorm
@@ -1676,6 +1722,10 @@ Executor e modelo vêm do roteamento do challenger já resolvido no Step 0 de `s
 - **Política deste modo (`MODE = interactive`):** advogado indisponível ⇒ objeções sobem **cruas** ao humano via `AskUserQuestion`, sem veredito fabricado, com Rebuttal PULADO e a ressalva de adversarialidade reduzida no artefato. Challenger indisponível ⇒ `{TASK_ID}-REVIEW.md` mínimo registrando a indisponibilidade (proibido renderizar como limpo — ausência de review não é aprovação).
 - `style: flags` → single-pass: run the challenge only, write `## ⚠ Review Flags` (+ pattern hits) into `{TASK_ID}-REVIEW.md`. No defense/rebuttal/Ask.
 
+<!-- forge:linked-task:review-legs:start -->
+Revisão de task ligada iniciada (`LINKED_MILESTONE` definido): antes da primeira perna, defina `LINKED_TASK_ID="$TASK_ID"`, `BUDGET_UNIT="execute-task/$TASK_ID"` e `MILESTONE_ID` vazio, e monte o contexto pelo bloco ligado de `BUDGET_ARGS` de `shared/forge-review.md`. Toda perna externa de challenge, defense e rebuttal recebe o trio exclusivo `--budget-owner "$WORKING_DIR"`, `--budget-task "$LINKED_TASK_ID"` e `--budget-unit "$BUDGET_UNIT"`; nunca `--budget-milestone`, cuja mistura é recusada como `milestone-time-invalid`. Task sem vínculo deixa `LINKED_TASK_ID` vazio e o contexto continua vazio, como antes. Uma recusa de transporte (`reason_code` de `TRANSPORT_REFUSAL_CODES`, `provider_called:false`) é parada antes do provider: não é indisponibilidade de revisor, não emite `review-agent-unavailable`, não tem retry nem fallback para outro revisor ou família e não produz `{TASK_ID}-REVIEW.md` limpo nem mínimo. Registre a recusa, mostre a mensagem de teto da task ligada acima e pare; a decisão pendente segue o horizonte da task.
+
+<!-- forge:linked-task:review-legs:end -->
 **Append a pointer** to `{TASK_ID}-SUMMARY.md`:
 ```markdown
 ## Review
@@ -1786,6 +1836,18 @@ EOF
 ```
 Keep each entry under 10 lines. This is the only task artifact that persists regardless of `task_cleanup` setting.
 
+<!-- forge:linked-task:close:start -->
+Encerramento da task ligada (`LINKED_MILESTONE` definido; contrato em `shared/forge-milestone-time.md § Task ligada e endpoint (S03)`): `--close` roda por último, depois da revisão, da extração de memória e de toda outra limpeza que usa provider, depois da entrega canônica verificada (`{TASK_ID}-DELIVERY.json` reconstruído) e do ledger, e antes de arquivar ou apagar os artefatos da task:
+```bash
+if [ -n "${LINKED_MILESTONE:-}" ]; then
+  node "$FORGE_SCRIPTS_DIR/forge-linked-task-start.js" --close --cwd "$WORKING_DIR" --task "$TASK_ID" --code-dir "$CODE_DIR" --json
+  LINKED_CLOSE_EXIT=$?
+  [ "$LINKED_CLOSE_EXIT" -ne 0 ] && stop
+fi
+```
+`closed` ou `unchanged` seguem; qualquer recusa (por exemplo `linked-task-delivery-unproven`, porque SUMMARY sozinho não encerra) para antes de arquivar ou apagar, preservando os artefatos para a prova. O encerramento grava `closure.json`, fecha o relógio da task e não chama provider; depois dele nenhuma perna de provider desta task roda. Mensagem: `Task ligada {TASK_ID} encerrada: relógio da task fechado em {consumido} de {teto}. Conclusão da cadeia: {chain.completed do forge-status, ou desconhecido}.` A limpeza de isolamento abaixo segue a política atual: um worktree emprestado da milestone (`attached_to`) nunca é removido pela task, e `worktree_cleanup_on_complete` não muda.
+
+<!-- forge:linked-task:close:end -->
 **Cleanup task artifacts** — based on `task_cleanup` from PREFS (default: `keep`):
 - `keep`: do nothing — all files remain in `.gsd/tasks/{TASK_ID}/`
 - `archive`: move the task directory to archive:

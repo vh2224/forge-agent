@@ -1613,6 +1613,104 @@ test("F4: source guard — the backup fd opens 'r+' (fsync needs write access on
     'the byte-compare of .bak against the original is the real proof the backup landed — the fsync is not a substitute and the compare must never be removed');
 });
 
+test('cleanup holds the owner registry fence through the final physical removal', () => {
+  withSandbox(WORKTREE_PREFS, ({ base, ws }) => {
+    const repo = makeRepo(base, 'fenced'), runId = 'M-FENCED', borrower = 'TASK-999';
+    const wt = oldConventionPath(repo, runId); fs.mkdirSync(path.dirname(wt), { recursive: true });
+    git(['worktree', 'add', '-q', wt, '-b', 'forge/' + runId], repo);
+    writeRun(ws, runId, { isolation_mode: 'worktree', worktrees: [{ repo, path: wt }] });
+    runsRegistry.add(ws, { id: borrower, kind: 'task', session_id: 'cleanup-window', active: false });
+    runsRegistry.withRegistryFence(ws, () => {
+      let error; try { cleanupForRun(ws, runId); } catch (e) { error = e; }
+      assertEq(error && error.code, 'EOWNERSHIPBUSY'); assert(fs.existsSync(wt));
+    });
+    const repoApi = require('./forge-repos'), discover = repoApi.discoverRepos;
+    let refused = 0;
+    repoApi.discoverRepos = function (cwd) {
+      if (cwd === ws) {
+        let error;
+        try { runsRegistry.updateWith(ws, borrower, () => ({ active: true, attached_to: runId, worktrees: [{ repo, path: wt }] })); }
+        catch (e) { error = e; }
+        assertEq(error && error.code, 'EOWNERSHIPBUSY'); refused++;
+      }
+      return discover.apply(this, arguments);
+    };
+    let result; try { result = cleanupForRun(ws, runId); } finally { repoApi.discoverRepos = discover; }
+    assertEq(refused, 1); assertEq(statusesOf(result), ['removed']); assert(!fs.existsSync(wt));
+    assertEq(runsRegistry.get(ws, borrower).active, false, 'cleanup cannot strand a newly activated borrower');
+    assertEq(runsRegistry.update(ws, borrower, { task_description: 'after release' }).task_description, 'after release');
+  });
+});
+
+test('cleanup refuses unsafe own and foreign registry records before cleanup effects', () => {
+  for (const target of ['foreign', 'own']) {
+    for (const kind of ['malformed', 'oversized', 'directory', 'ambiguous']) {
+      withSandbox(WORKTREE_PREFS, ({ base, ws }) => {
+        const runId = 'M-BOUNDED', repo = makeRepo(base, 'bounded');
+        const wt = oldConventionPath(repo, runId); fs.mkdirSync(path.dirname(wt), { recursive: true });
+        git(['worktree', 'add', '-q', wt, '-b', 'forge/' + runId], repo);
+        writeRun(ws, runId, { isolation_mode: 'worktree', worktrees: [{ repo, path: wt }] });
+        const ownFile = runsRegistry.runFile(ws, runId), ownBytes = fs.readFileSync(ownFile);
+        const bad = target === 'own' ? ownFile : runsRegistry.runFile(ws, 'TASK-BOUNDED');
+        if (kind === 'directory') { if (fs.existsSync(bad)) fs.unlinkSync(bad); fs.mkdirSync(bad); }
+        else fs.writeFileSync(bad, kind === 'malformed' ? '{' : kind === 'oversized' ? Buffer.alloc(65537, 0x78)
+          : JSON.stringify({ id: target === 'own' ? runId : 'TASK-BOUNDED', active: true, attached_to: { unknown: runId } }));
+        const registry = runsRegistry.runsDir(ws), registryView = () => fs.readdirSync(registry).sort().map(name => {
+          const file = path.join(registry, name), stat = fs.lstatSync(file);
+          return [name, stat.isFile() ? fs.readFileSync(file).toString('base64') : 'directory', stat.size, stat.mtimeMs];
+        });
+        const before = registryView(), worktrees = git(['worktree', 'list', '--porcelain'], repo);
+        const readme = fs.readFileSync(path.join(wt, 'README.md'));
+        assertEq(git(['status', '--porcelain'], wt), '', 'the real lender tree is clean and eligible for removal');
+        const repoApi = require('./forge-repos'), discover = repoApi.discoverRepos;
+        const saved = { get: runsRegistry.get, listActive: runsRegistry.listActive, listAllDetailed: runsRegistry.listAllDetailed,
+          openSync: fs.openSync, readFileSync: fs.readFileSync, createReadStream: fs.createReadStream };
+        let payloadAccesses = 0, unboundedReads = 0, discoveries = 0, censuses = 0;
+        const registryPayload = p => typeof p === 'string' && path.dirname(path.resolve(p)) === path.resolve(registry) && p.endsWith('.json');
+        runsRegistry.get = function (cwd) { if (cwd === ws) { unboundedReads++; throw new Error('unbounded own read'); } return saved.get.apply(this, arguments); };
+        runsRegistry.listActive = function (cwd) { if (cwd === ws) { unboundedReads++; throw new Error('unbounded borrower read'); } return saved.listActive.apply(this, arguments); };
+        runsRegistry.listAllDetailed = function (cwd, limits) {
+          if (cwd === ws) { censuses++; assertEq(limits, { maxRuns: 512, maxBytes: 65536 }); }
+          return saved.listAllDetailed.apply(this, arguments);
+        };
+        repoApi.discoverRepos = function (cwd) { if (cwd === ws) discoveries++; return discover.apply(this, arguments); };
+        for (const method of ['openSync', 'readFileSync', 'createReadStream']) fs[method] = function (p) {
+          if (registryPayload(p)) payloadAccesses++; return saved[method].apply(this, arguments);
+        };
+        let refused;
+        try { refused = cleanupForRun(ws, runId); }
+        finally {
+          Object.assign(runsRegistry, { get: saved.get, listActive: saved.listActive, listAllDetailed: saved.listAllDetailed });
+          repoApi.discoverRepos = discover;
+          for (const method of ['openSync', 'readFileSync', 'createReadStream']) fs[method] = saved[method];
+        }
+        assertEq([refused.mode_source, statusesOf(refused), refused.repos[0].reason],
+          ['ownership-unknown', ['skipped (ownership unknown)'], 'ownership-unknown'], target + ' ' + kind);
+        assertEq(Object.keys(refused).sort(), ['mode', 'mode_source', 'user_mode', 'elevated', 'elevation_reason', 'vcs', 'repos'].sort(), 'legacy cleanup envelope');
+        assertEq([unboundedReads, discoveries, censuses], [0, 0, 1], 'one bounded snapshot precedes own lookup and cleanup');
+        if (kind === 'oversized' || kind === 'directory') assertEq(payloadAccesses, 0, 'size/type refusal precedes all registry payload opens');
+        assertEq(registryView(), before, 'no run record removed, rewritten or touched');
+        assertEq(git(['worktree', 'list', '--porcelain'], repo), worktrees, 'no Git worktree metadata cleanup');
+        assert(fs.existsSync(wt) && fs.readFileSync(path.join(wt, 'README.md')).equals(readme), 'real lender tree remains intact');
+        // Repair only this attacked fixture entry; the clean lender now cleans up normally.
+        fs.rmSync(bad, { recursive: true, force: true });
+        if (target === 'own') fs.writeFileSync(ownFile, ownBytes);
+        const healthy = registryView(); unboundedReads = 0;
+        runsRegistry.get = function (cwd) { if (cwd === ws) { unboundedReads++; throw new Error('unbounded mode lookup'); } return saved.get.apply(this, arguments); };
+        runsRegistry.listActive = function (cwd) { if (cwd === ws) { unboundedReads++; throw new Error('unbounded borrower lookup'); } return saved.listActive.apply(this, arguments); };
+        let cleaned;
+        try { cleaned = cleanupForRun(ws, runId); }
+        finally { runsRegistry.get = saved.get; runsRegistry.listActive = saved.listActive; }
+        assertEq([cleaned.mode, cleaned.mode_source, statusesOf(cleaned), unboundedReads], ['worktree', 'registry', ['removed'], 0]);
+        assert(!fs.existsSync(wt), 'positive cleanup removes the actual clean lender worktree');
+        assertEq(listWorktreesForBranch(repo, 'forge/' + runId).length, 0);
+        assertEq(registryView(), healthy, 'successful cleanup also retains every registry record');
+      });
+    }
+  }
+  console.log('ok - cleanup refuses unknown bounded registry and preserves real lender worktrees');
+});
+
 // ── Summary ─────────────────────────────────────────────────────────────────
 console.log(`\n=== Result: ${passed} passed, ${failed} failed ===`);
 

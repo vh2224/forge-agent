@@ -25,7 +25,7 @@ const { normalizeHostRuntime } = require('./forge-runtime.js');
 
 const VALID_PHASES = new Set([
   'idle',
-  'plan-milestone', 'discuss-milestone', 'research-milestone',
+  'estimate-milestone', 'plan-milestone', 'discuss-milestone', 'research-milestone',
   'plan-slice', 'research-slice', 'execute-task',
   'complete-slice', 'complete-milestone',
   'resume', 'blocked',

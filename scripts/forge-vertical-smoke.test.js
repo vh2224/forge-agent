@@ -11,7 +11,7 @@ const { spawnSync } = require('child_process');
 const compare = require('./forge-semantic-compare');
 
 const ADAPTER = path.join(__dirname, 'forge-vertical-adapter.js');
-const MILESTONE = 'M-smoke-vertical';
+const MILESTONE = 'M001';
 const PLATFORMS = ['win32', 'darwin', 'linux'];
 const HOSTS = ['claude', 'codex'];
 const INVENTORY = {
@@ -44,7 +44,7 @@ function runPair(platform, from, to) {
   const idempotencyKey = `smoke-${platform}`;
   const paused = worker(from, 'next', { ...base, inventory: INVENTORY, needs_input: true,
     idempotency_key: idempotencyKey }, platform);
-  assert.strictEqual(paused.result.outcome, 'needs_input');
+  assert.strictEqual(paused.result.outcome, 'needs_input', JSON.stringify({ outcome: paused.result.outcome, reason_code: paused.result.reason_code, layer: paused.result.diagnostic?.layer ?? null, stage: paused.result.diagnostic?.stage ?? null }));
   assert(paused.result.boundary && paused.result.boundary.unit, 'needs_input boundary missing');
 
   const ready = worker(to, 'handoff', { ...base, boundary: paused.result.boundary,

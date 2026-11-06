@@ -70,11 +70,33 @@ function inspect(options, state, request, resumePrepared = false) {
           // bytes; wire equivalence above never rewrites that identity/hash.
           || require('./forge-native-supervision').digest(JSON.stringify({ invocation: rebuilt, identity: ipc.request })) !== journal.identity
           || digest({ ...invocation.args, message: ipc.args.message }) !== digest(ipc.args)) fail();
+      const file = manifest.request.resultFile + '.native-prompt.txt';
+      let prompt = ipc.args.message;
+      const pointer = /^Read the complete authorized execution prompt from file: ("(?:[^"\\]|\\.)*")\. Verify SHA-256 ([a-f0-9]{64}), then follow its full contents\. Do not omit any section\. Return the required execution JSON\.$/.exec(prompt);
+      if (pointer) {
+        // Only the sealed producer manifest selects the file. The pointer is
+        // compared as data; it must never grant access to another target.
+        try {
+          const contract = manifest.request.execution_contract;
+          const xllm = require('./forge-xllm');
+          let target = xllm.validateResultFileTarget(file, contract.owner);
+          for (const root of contract.code_roots) target = xllm.validateResultFileTarget(target, root.path);
+          if (key(JSON.parse(pointer[1])) !== key(target)) fail();
+          // Memory-safety bound for retained input, never clipping or enlarging
+          // a model/context budget. Preserve all bytes, including a UTF8 BOM.
+          const read = require('./forge-autonomy-sources').readBoundedStableFile(target, 16 * 1024 * 1024, { expectedReal: target });
+          if (read.error || digest(read.buffer) !== pointer[2]) fail();
+          prompt = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(read.buffer);
+          if (!Buffer.from(prompt, 'utf8').equals(read.buffer)) fail();
+        } catch (_) { fail(); }
+      }
       const mapped = require('./forge-native-prompt-file').prepare({
-        file: manifest.request.resultFile + '.native-prompt.txt', prompt: ipc.args.message,
+        file, prompt,
         contract: manifest.request.execution_contract, deferWrite: true });
+      if (pointer && mapped.message !== ipc.args.message) fail();
       if (invocation.args.message !== mapped.message) fail();
-      mapped.materialize();
+      if (pointer) mapped.assertExisting();
+      else mapped.materialize();
       mapped.assertUnchanged();
     }, journalFile: input.journalFile };
 }

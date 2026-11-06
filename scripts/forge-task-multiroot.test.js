@@ -99,17 +99,49 @@ async function scenario(vcs, moduleDir = __dirname) {
     fs.unlinkSync(decisions);
     const events = path.join(f.owner, '.gsd/forge/events.jsonl'), validEvents = fs.readFileSync(events);
     const eventIdentity = fs.realpathSync.native(events);
-    const read = fs.readFileSync;
-    let raced = false;
+    // Race injection at the actual protected append seam (no stack/caller-name selector): the
+    // module's own synchronous owner lock (forge-artifact-reconciliation.withOwnerLock, the one
+    // the protected caller append runs under) brackets the window. Inside it the owner snapshot
+    // is read through descriptors, so the first readFileSync of the events file is the caller's
+    // pre-append comparison, after owner validation: a concurrent unsigned append lands exactly there.
+    const reconciliation = require(path.join(moduleDir, 'forge-artifact-reconciliation'));
+    const read = fs.readFileSync, ownerLock = reconciliation.withOwnerLock;
+    let raced = false, lockDepth = 0, lockedEventReads = 0;
+    reconciliation.withOwnerLock = function (...args) { lockDepth++; try { return ownerLock.apply(this, args); } finally { lockDepth--; } };
     fs.readFileSync = function(file, ...args) {
-      if (!raced && new Error().stack.includes('appendOwnedEvent') && typeof file === 'string' && fs.realpathSync.native(file) === eventIdentity) {
-        raced = true; fs.appendFileSync(events, '{"event":"unsigned-race"}\n');
+      if (lockDepth > 0 && typeof file === 'string' && fs.existsSync(file) && fs.realpathSync.native(file) === eventIdentity) {
+        lockedEventReads++;
+        if (!raced) { raced = true; fs.appendFileSync(events, '{"event":"unsigned-race"}\n'); }
       }
       return read.call(this, file, ...args);
     };
-    try { await assert.rejects(unit.runUnitSidecar(execute), /execution-owner-event-raced/); }
-    finally { fs.readFileSync = read; }
-    assert(raced, 'race occurs between owner validation and caller append');
+    // The drift attempt above already retained its passed capture, so replaying it performs no
+    // owner event append (no race window exists there). The race therefore runs on a genuine
+    // fresh attempt of the same held claim, whose protected owner appends are real.
+    const race = { ...execute, dispatchId: `${vcs}-race`, resultFile: path.join(f.dir, 'race-result.json') };
+    const receiptPath = `${race.resultFile}.receipt.json`;
+    const snapshotOwner = () => require(path.join(moduleDir, 'forge-task-execution')).protectedSnapshot(f.owner);
+    const ownerBefore = snapshotOwner();
+    try { await assert.rejects(unit.runUnitSidecar(race), /execution-owner-event-raced/); }
+    finally { fs.readFileSync = read; reconciliation.withOwnerLock = ownerLock; }
+    // The fresh attempt legitimately invoked the (fake, local) provider once; the race landed at
+    // its later protected owner append, which refused the unsigned bytes.
+    const providerCallsAfterRace = 'call\ncall\n';
+    assert.strictEqual(fs.readFileSync(calls, 'utf8'), providerCallsAfterRace);
+    const ownerAfter = snapshotOwner();
+    assert.deepStrictEqual(Object.keys({ ...ownerAfter, ...ownerBefore }).filter(k => ownerAfter[k] !== ownerBefore[k]), ['.gsd/forge/events.jsonl'],
+      'the raced attempt changed no owner state besides the event stream it refused to sign');
+    assert(raced && lockedEventReads >= 1, 'race injected inside the protected owner append, between owner validation and caller append');
+    // The unsigned bytes are refused, never adopted: no protected snapshot advances to them and
+    // nothing is published from the raced attempt.
+    const racedBytes = fs.readFileSync(events), racedHash = require('crypto').createHash('sha256').update(racedBytes).digest('hex');
+    assert(racedBytes.toString('utf8').includes('unsigned-race'));
+    const raceReceipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
+    const adopted = [raceReceipt.execution?.protected_owner, raceReceipt.recovery_baseline?.protected_owner, raceReceipt.milestone_delivery?.protected_owner]
+      .filter(Boolean).map(row => row['.gsd/forge/events.jsonl']);
+    assert(!adopted.includes(racedHash), 'the raced unsigned bytes are never adopted as the protected owner state');
+    assert.strictEqual(fs.existsSync(path.join(f.owner, `${task}-SUMMARY.md`)), false, 'the raced attempt publishes nothing');
+    assert.strictEqual(fs.existsSync(path.join(f.owner, `${task}-DELIVERY.json`)), false, 'the raced attempt publishes no delivery');
     fs.writeFileSync(events, validEvents);
     const result = await unit.runUnitSidecar(execute);
     assert.strictEqual(result.status, 'done');
@@ -123,16 +155,17 @@ async function scenario(vcs, moduleDir = __dirname) {
       assert.strictEqual(envelope.root_identity_sha256, root.identity_sha256);
       assert.strictEqual(envelope.code_dir, root.path); assert.strictEqual(envelope.result.checks[0].exitCode, 0);
     }
+    // Idempotent replays never call the provider again.
     await unit.runUnitSidecar(execute);
-    assert.strictEqual(fs.readFileSync(calls, 'utf8'), 'call\n');
+    assert.strictEqual(fs.readFileSync(calls, 'utf8'), providerCallsAfterRace);
     write(decisions, 'unproved replay drift');
     await assert.rejects(unit.runUnitSidecar(execute), /execution-protected-metadata/);
     fs.unlinkSync(decisions);
     await unit.runUnitSidecar(execute);
-    assert.strictEqual(fs.readFileSync(calls, 'utf8'), 'call\n');
+    assert.strictEqual(fs.readFileSync(calls, 'utf8'), providerCallsAfterRace);
     write(path.join(f.b, 'same.txt'), 'concurrent\n');
     await assert.rejects(unit.runUnitSidecar(execute), /execution-replay-code-changed/);
-    assert.strictEqual(fs.readFileSync(calls, 'utf8'), 'call\n');
+    assert.strictEqual(fs.readFileSync(calls, 'utf8'), providerCallsAfterRace);
     console.log(`PASS ${vcs}: external owner, two same-basename physical roots, preparation/plan/claims/real fake process/verification/delivery/idempotent replay/drift`);
     f.cleanup();
   } finally {

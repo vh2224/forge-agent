@@ -85,8 +85,13 @@ WORKING_DIR=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).project 
 if [ "$RUN_KIND" = "milestone" ] && [ "$STATUS" = "activate-new" ]; then
   PER_MILESTONE_STATE="$WORKING_DIR/.gsd/milestones/$RUN_ID/$RUN_ID-STATE.md"
   if [ ! -f "$PER_MILESTONE_STATE" ]; then
-    mkdir -p "$WORKING_DIR/.gsd/milestones/$RUN_ID" || exit 1
-    if ! node "$FORGE_SCRIPTS_DIR/forge-state.js" --create "$RUN_ID" --phase plan-milestone --next-action "Plan milestone $RUN_ID" --cwd "$WORKING_DIR" > /dev/null; then
+    mkdir -p "$WORKING_DIR/.gsd/milestones/$RUN_ID" "$WORKING_DIR/.gsd/forge" || exit 1
+    # New milestone only: enroll idempotently before durable STATE; retry is safe after either publication (§ Tempo da milestone).
+    if ! node "$FORGE_SCRIPTS_DIR/forge-milestone-time-selection.js" --enroll --source forge-next --cwd "$WORKING_DIR" --milestone "$RUN_ID"; then
+      echo "Milestone time enrollment failed for $RUN_ID; stop before selection or dispatch." >&2
+      exit 1
+    fi
+    if ! node "$FORGE_SCRIPTS_DIR/forge-state.js" --create "$RUN_ID" --phase estimate-milestone --next-action "Estimate time options for milestone $RUN_ID" --cwd "$WORKING_DIR" > /dev/null; then
       echo "Milestone bootstrap failed for $RUN_ID; stop before binding or dispatch." >&2
       exit 1
     fi
@@ -110,6 +115,143 @@ From `$ARGUMENTS`:
 - `auto` → tell the user: "Use `/forge-auto` para modo autônomo." and stop.
 - A valid work ID selects explicit resume in STEP MODE; invalid arguments stop.
 
+## Tempo da milestone
+
+Contrato canônico: `shared/forge-milestone-time.md` (no repositório ou em
+`$FORGE_SHARED_DIR`, instalado em `${FORGE_HOME:-~/.forge-agent}/shared`). Leia-o
+antes do dispatch de uma milestone com contrato de tempo; sem contrato, nada desta
+seção se aplica e o passo segue igual. Este texto não concede autoridade nem aplica
+a guarda: quem decide é o código citado no contrato.
+
+Presença: em toda chamada do adaptador de loop, inclua `time_session` no `--json`
+com a sessão do host; o owner grava a presença só quando há contrato. No início da
+sessão, antes do dispatch e fora de janela protegida, registre:
+```bash
+TIME_SESSION="${SESSION_ID:-${CLAUDE_SESSION_ID:-}}"
+[ -n "$TIME_SESSION" ] && node "$FORGE_SCRIPTS_DIR/forge-milestone-time.js" --presence session-start \
+  --session "$TIME_SESSION" --cwd "$WORKING_DIR" --milestone "$RUN_ID" --json
+```
+Ao encerrar o passo, o mesmo comando usa `session-end`. Resultado `no-contract` não é erro.
+
+Admissão nativa: antes de toda invocação nativa de unidade de milestone (a unidade
+do passo, plan-check, review-fix, extração de memória, pernas nativas de revisão,
+fallback e cada re-dispatch do Retry Handler), rode o precheck com a unidade real:
+```bash
+TIME_UNIT="${unit_type}/${unit_id}"
+node "$FORGE_SCRIPTS_DIR/forge-milestone-time-admission.js" --admit-transport \
+  --cwd "$WORKING_DIR" --milestone "$RUN_ID" --unit "$TIME_UNIT" --json
+TIME_ADMIT_EXIT=$?
+[ "$TIME_ADMIT_EXIT" -eq 3 ] && stop
+```
+Saída 3 para antes de qualquer provider: mostre a mensagem de teto e devolva o
+controle ao operador. O precheck só antecipa a recusa; a garantia fica no
+transporte. A invocação nativa supervisionada de `scripts/forge-native-invocation.js`
+recebe `milestoneTimeContext: { cwd: WORKING_DIR, milestone: RUN_ID, unit: TIME_UNIT }`
+(owner físico, nunca `CODE_DIR`) com a ferramenta e as capacidades realmente
+expostas pelo host; o sidecar de unidade rechecha a requisição retida; as pernas
+externas de revisão recebem o contexto de `shared/forge-review.md`. Recusa de tempo
+não tem retry nem fallback. Task avulsa não recebe contexto de milestone.
+
+Recusa na primeira invocação nativa de uma unidade já iniciada: feche pela API do
+owner (`refuseNotInvoked` da sessão de entrega nativa, com a testemunha local do
+processo e o manifesto imutável) e depois pelo comando `consume-failure` do
+adaptador. Nunca fabrique resultado de worker, não edite o snapshot e não force
+commit nem release para chegar ao checkpoint.
+
+Esforço observado: a cobertura de workers só é registrada quando o host embute o
+loop com `workerObservationReader` criado no processo por `createObservationReader`.
+O CLI JSON não fornece esse leitor; o esforço observado fica `desconhecido`,
+separado dos intervalos de unidade do controlador, que são só um proxy.
+
+Mensagens de tempo (pt-BR, uma decisão por rodada):
+- Aviso: `Prazo da milestone {M} {em risco|excede o saldo}: {consumido} de {teto}, saldo {saldo}, previsão {faixa}. Recomendo {alternativa} porque {motivo}. Opções, sem pré-seleção: estender o teto ({efeito}), reduzir escopo ({efeito}) ou seguir até o teto ({efeito}). Decisão pendente: {ID}. Sem resposta, o contrato atual continua valendo.`
+  Aviso dentro do teto e do escopo já autorizados é informativo e não abre pergunta obrigatória.
+- Teto: `Teto de tempo da milestone {M} atingido: {consumido} de {teto}. Parou: {o que parou}. Writers em voo: {N}, terminando pela própria vigilância. Decisão pendente: {ID estável}.`
+- Drain incompleto: `Drain incompleto em {M}: {writers ou claim ainda em reconciliação}. Nenhum checkpoint foi salvo; a reconciliação segue o fluxo existente. Decisão pendente: {ID ou nenhuma}.`
+- Checkpoint: `Checkpoint de tempo salvo em {M}: estouro de {estouro} sobre o teto de {teto}. Decisão pendente: {time-cap-ID}: estender por emenda explícita ou encerrar como parcial. Para retomar depois da extensão: /forge-next.`
+
+Decisões: extensão, redução de escopo e seguir até o teto só valem com resposta
+explícita do operador. Abra a pergunta com `forge-pending-questions.js --open`
+(`--milestone "$RUN_ID"`, `--unit milestone-time/<id>` e `--set` igual a
+`milestone-time-extension`, `milestone-time-scope-reduction` ou
+`milestone-time-continue-to-cap`), persista a resposta com `--answer` e só então
+chame `forge-milestone-time.js --extend --ceiling-ms <n>` ou
+`--decide continue-to-cap|reduce-scope`, com `--question-identity` e `--question-id`,
+pelo host que embute `main` com `liveAdapter.getDecisionHandle`. A CLI avulsa
+recusa com `time-decision-attestation-required`: a decisão continua pendente e a
+chamada não é repetida com outros argumentos. Silêncio, timeout ou JSON importado
+nunca aprovam.
+
+Espera humana: ao abrir pergunta obrigatória de milestone com contrato, registre
+`forge-milestone-time.js --wait-start <wait_id> --class human --source-kind pending-question --source-ref <identity_sha256>:<question_id>`
+com `--cwd "$WORKING_DIR" --milestone "$RUN_ID" --json`; ao resolvê-la, rode
+`--wait-end` com os mesmos argumentos. Nenhuma das duas roda dentro de janela
+protegida de writer.
+
+Retomada após extensão autorizada: com o mesmo snapshot do loop, chame o adaptador
+com `--command resume-budget`. `budget-resume-ready` segue para a unidade que o
+controlador selecionar; `linked-reentry-required` só continua por entrada vinculada
+explícita (`reenter`); `budget-extension-required`, `budget-checkpoint-required`,
+`budget-retained-claim-changed` ou `pending-questions` param e mostram a decisão
+pendente. Claim retido exige os adaptadores vivos do host; pelo CLI a prova não se
+renova e a retomada recusa.
+
+Opções de prazo (só milestone com adesão; § Opções de prazo antes do roadmap do
+contrato): sem roadmap, o adaptador seleciona `estimate-milestone`, unidade de artefato
+somente leitura do `forge-planner`. Depois do aceite, o próprio `next` do adaptador
+materializa as opções na fronteira segura; enquanto não há escolha, ele devolve
+`blocked` com `time-option-pending`. Nesse bloqueio:
+1. Abra a rodada (o `next` já materializou o registro quando ela ainda não existe):
+   `node "$FORGE_SCRIPTS_DIR/forge-milestone-time-selection.js" --round --cwd "$WORKING_DIR" --milestone "$RUN_ID" --json`.
+2. Apresente essa única decisão pelo canal de `forge-question-channel.js --select`
+   e `--present` (recomendação primeiro, nada pré-selecionado) e faça a espera
+   econômica do contrato de interação; esta execução para sem resposta.
+3. Grave só a resposta explícita do operador com
+   `--answer --round <ID> --response "<texto exato do operador>" --source user-text|tool-answer`;
+   resposta vazia, estrangeira ou conflitante não avança. Nova rodada, mesmo fluxo.
+4. Registre a escolha com `--decide` pelo host que embute `main(argv, io, liveAdapter)`
+   com `liveAdapter.getDecisionHandle`. A CLI avulsa recusa com
+   `time-decision-attestation-required`: a decisão continua pendente.
+5. Continue com `forge-long-workflow-adapter.js --command resume-time-option` e o mesmo snapshot;
+   `time-option-ready` segue para `plan-milestone`, `time-option-reestimate-ready` para
+   a nova estimativa, e qualquer outro código para e mostra a pendência.
+Nenhum JSON, flag, `approved:true`, texto de prompt ou silêncio aprova uma opção.
+
+Mensagens das opções de prazo (pt-BR, uma decisão por rodada):
+- Decisão: `Decisão de prazo da milestone {M}: {pergunta}. Recomendo {opção} porque {motivo}. Escolha uma, sem pré-seleção: {opção 1} ({consequência}); {opção 2} ({consequência}){; opção 3}. Decisão pendente: {ID}. Sem resposta explícita, o roadmap não é planejado.`
+- Evidência insuficiente: `Prazo de {M} sem número para {posição}: evidência local insuficiente ({motivo}). Nenhum prazo foi inventado.`
+- Posição inviável: `Posição {posição} de {M} inviável: {motivo}. Ela não recebe prazo nem pode ser escolhida.`
+- Nenhuma posição viável: `Nenhuma posição de prazo viável para {M}: {motivo}. Escolha, sem pré-seleção: teto próprio ({efeito}) ou seguir sem contrato ({efeito}). Decisão pendente: {ID}.`
+- Roadmap não conforme: `Roadmap de {M} não confere com o prazo escolhido ({código}): {motivo}. O loop parou e nada fora da escolha foi aceito.`
+- Escopo não alocado: `Escopo de {M} sem alocação de tempo ({código}): {itens}. Mudança de estrutura depois da escolha exige decisão explícita. Decisão pendente: {ID ou nenhuma}.`
+<!-- forge:linked-task:closure:start -->
+
+Task ligada e endpoint (S03; contrato canônico `shared/forge-milestone-time.md § Task ligada e endpoint (S03)`): só milestone com contrato; sem contrato, nada deste trecho se aplica e o loop segue igual. Este texto não concede autoridade: quem decide é o código citado no contrato.
+
+Decisão de prazo com task ligada: quando a opção escolhida traz task ligada autorizada (`create-and-start-after-proven-completion` ou `create-without-auto-start`), o mesmo `--decide` embutido do passo 4 também cria a task e devolve `linked_task {status, task_id, reason}`. `created`, `unchanged` e `resumed` seguem; `linked_task` `creation-pending` (saída 3) se resolve repetindo `--decide` pelo mesmo host que embute `main` com `liveAdapter.getDecisionHandle`. A repetição reatesta a mesma resposta persistida: não é consentimento novo nem pergunta nova. Outro status para e mostra o `reason`. A CLI avulsa `forge-linked-task.js --create` recusa com `linked-task-authorization-required` sem escrita. Com task ligada criada e `milestone_cleanup` igual a `archive` ou `delete`, avise sem alterar a preferência: `Aviso: milestone_cleanup={valor} move ou apaga as fontes de {M} antes do endpoint e impede a prova (endpoint-sources-missing); a task ligada {T} ficaria bloqueada. A preferência não foi alterada.`
+
+Fechamento com endpoint, nesta ordem e só nela:
+1. ACK real de `complete-milestone` pelo adaptador de loop (transação, resultado, fronteira e evento canônicos do controlador). SUMMARY, DELIVERY, ledger, checkbox, run inativo, claim liberado, seleção da task ou texto nunca são ACK nem endpoint.
+2. `node "$FORGE_SCRIPTS_DIR/forge-milestone-endpoint.js" --verify --cwd "$WORKING_DIR" --milestone "$RUN_ID" --json` (verificação nova do código integrado com os comandos derivados dos `verify:` declarados por raiz).
+3. `node "$FORGE_SCRIPTS_DIR/forge-milestone-endpoint.js" --record --cwd "$WORKING_DIR" --milestone "$RUN_ID" --json` (prova positiva; o relógio da milestone congela no endpoint).
+4. Com vínculo: `node "$FORGE_SCRIPTS_DIR/forge-linked-task-start.js" --handoff --cwd "$WORKING_DIR" --milestone "$RUN_ID" --json`.
+5. Em `create-and-start-after-proven-completion` (lifecycle `handoff-ready`): inicie a task por `/forge-task --resume {T}` ANTES da limpeza de isolamento da milestone; o worktree e a branch da milestone são a base `milestone-branch` do attach.
+6. Só depois do início real (lifecycle `started`) ou do encerramento explícito da cadeia roda a limpeza de isolamento da milestone.
+
+Recusa em 2, 3 ou 4 para a cadeia sem descongelar nada nem inventar prova. Com a cadeia bloqueada ou aguardando início explícito (lifecycle `blocked` ou `open`), a limpeza do worktree da milestone é adiada com motivo nomeado (`cadeia bloqueada: {código}` ou `aguardando início explícito da task ligada {T}`) até o início real ou o encerramento explícito da cadeia. `worktree_cleanup_on_complete` e `milestone_cleanup` não mudam e nenhum borrower falso é criado.
+
+Mensagens da cadeia (pt-BR, uma decisão por rodada):
+- Endpoint comprovado: `Endpoint de {M} comprovado: conclusão canônica e verificação nova do código integrado ({n} comandos aprovados). Relógio da milestone congelado no endpoint: {consumido} de {teto}.`
+- Endpoint não comprovado: `Endpoint de {M} não comprovado ({código}): {motivo}. O relógio não foi congelado e a task ligada {T} continua bloqueada. Decisão pendente: {ID ou nenhuma}.`
+- Relógio congelado: `Relógio de {M} congelado em {consumido} de {teto}; o tempo depois do endpoint não consome a milestone.`
+- Handoff: `Handoff de {M} para a task ligada {T} produzido. Próximo passo: {início encadeado agora | pedido explícito de início}.`
+- Início encadeado: `Início encadeado da task ligada {T} sobre a base {milestone-branch|integrated}. A limpeza de isolamento de {M} roda depois deste início.`
+- Cadeia bloqueada: `Cadeia {M} → {T} bloqueada: {motivo}. Limpeza do worktree de {M} adiada ({motivo nomeado}). Recomendo {alternativa} porque {motivo}. Opções, sem pré-seleção: estender a milestone por decisão explícita; encerrar a cadeia (linked-task:close-chain). Decisão pendente: {ID}.`
+
+Decisões da cadeia: início explícito (`linked-task:start`), encerramento da cadeia (`linked-task:close-chain`) e extensão da task (`linked-task:extend:<ms>`) só valem com resposta explícita persistida em `forge-pending-questions` (pergunta aberta por `prepareLinkedDecision` ou `prepareTaskExtension`, resposta gravada por `answerLinkedDecision` ou `answerTaskExtension`) e handle vivo do host (`liveAdapter.getDecisionHandle`, reatestado por `verifyDecision`). `--start`, `--continue`, `--close-chain` e `--extend` só rodam embutidos; a CLI avulsa recusa com `linked-task-authorization-required`, a decisão continua pendente e a chamada não é repetida com outros argumentos. Permissão permanente de routing ou de recovery, JSON importado, flag, SUMMARY, checkpoint, texto deste skill ou silêncio nunca respondem a essas decisões. Este texto distribui o procedimento; a execução pelo cliente instalado continua desconhecida.
+
+<!-- forge:linked-task:closure:end -->
+
 ## Bidirectional delivery
 
 After the resolver allowance gate, a Claude sidecar or any artifact unit on
@@ -118,8 +260,15 @@ Codex uses `shared/forge-bidirectional-sidecar.md` and
 Branch C/D conditions below. Read that shared contract in full before dispatch;
 keep the controller-selected unit and snapshot. Supported artifact units are
 research-milestone, research-slice, discuss-milestone, discuss-slice,
-plan-milestone, complete-slice, complete-milestone and plan-check. Execution and
+estimate-milestone, plan-milestone, complete-slice, complete-milestone and plan-check.
+The sidecar request of estimate-milestone carries `description` as plan-milestone does. Execution and
 slice planning on Claude use the same entrypoint with their distinct contracts.
+
+Unit icon in progress reports:
+
+| Unit | Icon |
+|---|---|
+| estimate-milestone | ⏱ |
 Native delivery remains native. Unsupported auxiliary units stop specifically.
 After successful housekeeping, acknowledge the unit using the loop adapter's
 `complete` command before requesting `next`; never discard/reset its snapshot.
@@ -1092,8 +1241,14 @@ node "$FORGE_SCRIPTS_DIR/forge-procedure-context.js" --phase memory-selection --
 MEMORY_QUERY_META=$(node "$FORGE_SCRIPTS_DIR/forge-memory-query.js" --unit-type "$unit_type" --cwd "$WORKING_DIR" \
   --milestone "$MILESTONE_ID" --slice "$SLICE_ID" --task "$TASK_ID") || { echo "optional memory query unavailable; continuing without a query" >&2; MEMORY_QUERY_META='{"status":"unavailable","query_file":null}'; }
 MEMORY_QUERY_FILE=$(node -pe 'JSON.parse(process.argv[1]).query_file || ""' "$MEMORY_QUERY_META")
+UNIT_DESCRIPTION=""
+case "$unit_type" in estimate-milestone|plan-milestone)
+  UNIT_DESCRIPTION=$(head -n 1 "$WORKING_DIR/.gsd/milestones/$MILESTONE_ID/$MILESTONE_ID-SCOPE.md" 2>/dev/null | sed 's/^#* *//')
+  UNIT_DESCRIPTION="${UNIT_DESCRIPTION:-milestone $MILESTONE_ID}" ;;
+esac
 PROMPT_META=$(node "$FORGE_SCRIPTS_DIR/forge-prompt.js" --unit-type "$unit_type" --cwd "$WORKING_DIR" \
   --milestone "$MILESTONE_ID" --slice "$SLICE_ID" --task "$TASK_ID" \
+  ${UNIT_DESCRIPTION:+--description "$UNIT_DESCRIPTION"} \
   --dispatch-id "$DISPATCH_ID" --unit-effort "$unit_effort" --thinking "$THINKING_OPUS" \
   --auto-commit "$AUTO_COMMIT" --milestone-cleanup "$MILESTONE_CLEANUP" \
   --isolation-mode "$ISOLATION_MODE" --branch "$BRANCH" --code-dir "$WORKER_CWD" \
@@ -1337,14 +1492,14 @@ if [ "$HOST_RUNTIME" = "codex" ] && [ -n "$PLAN_PATH" ]; then
     --plan "$WORKING_DIR/$PLAN_PATH" --attempt "$NATIVE_DISPATCH_ID" 2>/dev/null || true)
 fi
 ```
-No host Codex, as unidades nativas somente leitura `plan-milestone`, `plan-slice`,
-`research-*` e `discuss-*` rodam dentro do guard de mutação em modo `code-only`.
+No host Codex, as unidades nativas somente leitura `estimate-milestone`, `plan-milestone`,
+`plan-slice`, `research-*` e `discuss-*` rodam dentro do guard de mutação em modo `code-only`.
 Antes do spawn, capture a baseline com um `--code-root` por raiz de código guardada
 e `READONLY_BASELINE` apontando para um arquivo novo fora dessas raízes e de `.gsd`;
 falha na captura impede o spawn.
 ```bash
 if [ "$HOST_RUNTIME" = "codex" ]; then
-  case "$unit_type" in plan-milestone|plan-slice|research-*|discuss-*)
+  case "$unit_type" in estimate-milestone|plan-milestone|plan-slice|research-*|discuss-*)
     node "$FORGE_SCRIPTS_DIR/forge-native-readonly-guard.js" --capture --owner "$WORKING_DIR" \
       --code-root "${CODE_DIR:-$WORKING_DIR}" --mode code-only --out "$READONLY_BASELINE" || stop ;;
   esac
@@ -1387,6 +1542,11 @@ explicit model to inherit agent frontmatter. Use a description that captures wha
   - `research-milestone M001: e-commerce platform`
 - For memory extraction: `extract memories from {unit_id}`
 
+Para unidade de milestone, essa chamada passa pela invocação nativa supervisionada
+de `scripts/forge-native-invocation.js` com `milestoneTimeContext` de
+§ Tempo da milestone, depois do precheck `--admit-transport`; a ferramenta nativa
+bruta não é chamada fora dela. Recusa de tempo segue aquela seção, sem retry.
+
 Wait for the result. If its named native outcome is `not-spawned`, apply the one-shot declared
 transition above and enter the loaded sidecar mirror; do not emit the native event below. Every
 other successful native result continues here. A throw still follows the Retry Handler and never
@@ -1415,11 +1575,11 @@ componha o ID a partir de `task_name`, de `/root/` mais nome, de hook ou de pros
 (`/root/<nome>` só entra quando é o valor que a ferramenta devolveu), não infira
 atividade a partir de timers locais e não apresente sidecar como thread nativa.
 
-No host Codex, depois do retorno terminal de uma unidade `plan-*`, `research-*` ou
-`discuss-*` e antes de qualquer writer seguinte, verifique a mesma baseline:
+No host Codex, depois do retorno terminal de uma unidade `estimate-milestone`, `plan-*`,
+`research-*` ou `discuss-*` e antes de qualquer writer seguinte, verifique a mesma baseline:
 ```bash
 if [ "$HOST_RUNTIME" = "codex" ]; then
-  case "$unit_type" in plan-milestone|plan-slice|research-*|discuss-*)
+  case "$unit_type" in estimate-milestone|plan-milestone|plan-slice|research-*|discuss-*)
     node "$FORGE_SCRIPTS_DIR/forge-native-readonly-guard.js" --verify "$READONLY_BASELINE" --writer-stopped || stop ;;
   esac
 fi
@@ -1615,6 +1775,7 @@ Determine which summary file was just written:
 - `execute-task` → `.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}-SUMMARY.md`
 - `plan-slice` → `.gsd/milestones/{M###}/slices/{S##}/{S##}-PLAN.md`
 - `complete-slice` → `.gsd/milestones/{M###}/slices/{S##}/{S##}-SUMMARY.md`
+- `estimate-milestone` → `.gsd/milestones/{M###}/{M###}-OPTIONS.json`
 - `plan-milestone` → `.gsd/milestones/{M###}/{M###}-ROADMAP.md`
 - `complete-milestone` → `.gsd/milestones/{M###}/{M###}-SUMMARY.md`
 - other → use the result block only
@@ -1649,7 +1810,8 @@ through an external JSON request to
 validate, persist a
 ready receipt, and call the same owner publisher. Set `publicationSafe:true`
 only with `ownerJoined`, `checkedAt`, and every protected snapshot listed as
-ended.
+ended. Para milestone, a extração nativa passa pelo precheck e pela invocação
+supervisionada com `milestoneTimeContext` da unidade de origem (§ Tempo da milestone).
 
 Native refusal and provider failure use that same acceptance command. Build the
 external request from owner-known `cwd`, `contextRoot`, `sourceUnitType`,
@@ -1714,6 +1876,10 @@ request (`held: true`) echoes one line and the flow **continues** — the delibe
 pre-dispatch gate, which is enforcing. The `claim-release` event is written **by the module**
 (`shared/forge-dispatch.md § Event claim-release`), never narrated here.
 
+<!-- forge:linked-task:cleanup-order:start -->
+Milestone com contrato e task ligada (§ Tempo da milestone, trecho Task ligada e endpoint): a limpeza de isolamento abaixo só roda depois de ACK real de `complete-milestone` → endpoint `--verify` → `--record` → `--handoff` → início da task por `/forge-task --resume {T}` (lifecycle `started`), ou depois do encerramento explícito da cadeia. Com a cadeia bloqueada ou aguardando início explícito, não rode a limpeza abaixo: ela fica adiada com o motivo nomeado na linha de progresso (`Limpeza de isolamento de {M} adiada: {cadeia bloqueada: código | aguardando início explícito da task ligada {T}}.`) e volta a ser elegível no início real ou no encerramento explícito da cadeia. A política (`worktree_cleanup_on_complete`, `milestone_cleanup`) não muda. Milestone sem task ligada segue exatamente como abaixo.
+
+<!-- forge:linked-task:cleanup-order:end -->
 **e) Isolation cleanup (complete-milestone only)** — if the unit just processed was `complete-milestone` with `status: done`, release the isolation. No-op when `ISOLATION_MODE == shared`; `branch` mode checks the repo back out to the default branch (the `forge/{run}` branch is kept for PR/merge); `worktree` mode removes the worktree only if `worktree_cleanup_on_complete: true` in prefs. Never run this on partial/blocked — the branch/worktree must survive for resume:
 ```bash
 node "$FORGE_SCRIPTS_DIR/forge-isolation.js" --cleanup --run "$ISO_RUN" --cwd "$WORKING_DIR" || true

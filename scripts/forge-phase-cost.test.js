@@ -1,10 +1,15 @@
 'use strict';
 const assert = require('assert/strict'), fs = require('fs'), os = require('os'), path = require('path');
-const { analyzeEvents, measurePhaseCost, MAX_BYTES } = require('./forge-phase-cost');
+const { analyzeEvents, analyzeEventIntervals, measurePhaseCost, MAX_BYTES } = require('./forge-phase-cost');
 const row = (event, unit, seconds, id) => ({ event, unit, milestone: 'M-fixture', host_runtime: 'codex',
   action: event === 'unit-began' ? 'begin' : 'complete',
   ts: new Date(Date.UTC(2026, 0, 1, 0, 0, seconds)).toISOString(), ...(id ? { idempotency_key: id } : {}) });
-const analyze = rows => analyzeEvents(Buffer.from(rows.map(JSON.stringify).join('\n') + '\n'));
+const analyze = rows => {
+  const bytes = Buffer.from(rows.map(JSON.stringify).join('\n') + '\n');
+  const result = analyzeEvents(bytes);
+  assert.deepStrictEqual(result, analyzeEventIntervals(bytes).analysis);
+  return result;
+};
 {
   const result = analyze([row('unit-began', 'research-milestone/M-fixture', 0), row('unit-began', 'execute-task/T01', 5),
     row('unit-transition', 'research-milestone/M-fixture', 10), row('unit-transition', 'execute-task/T01', 20),
@@ -79,3 +84,32 @@ try {
   catch (error) { if (!['EPERM', 'EACCES'].includes(error.code)) throw error; }
 } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 console.log('PASS phase cost: measured overlap and gaps, repeated IDs, ambiguity, corruption, private-text exclusion, immutable input and unknown attribution');
+{
+  const begin = row('unit-began', 'execute-task/T01', 1, 'begin');
+  const end = { ...row('unit-transition', 'execute-task/T01', 5, 'end'), action: 'pause' };
+  const bytes = rows => Buffer.from(rows.map(JSON.stringify).join('\n') + '\n');
+  const closed = analyzeEventIntervals(bytes([begin, end]));
+  assert.deepStrictEqual(closed.analysis, analyzeEvents(bytes([begin, end])));
+  assert.deepStrictEqual(closed.intervals, [{ milestone: 'M-fixture', unit: 'execute-task/T01', host: 'codex',
+    phase: 'execute-task', start: Date.parse(begin.ts), end: Date.parse(end.ts), begin_key: 'begin', end_key: 'end', action: 'pause' }]);
+  assert.equal(closed.pauses[0].at, Date.parse(end.ts));
+  assert.equal(closed.pauses[0].unit, begin.unit);
+  const opened = analyzeEventIntervals(bytes([begin]));
+  assert.equal(opened.open[0].begin_key, 'begin'); assert.equal(opened.open[0].start, Date.parse(begin.ts));
+  const second = row('unit-began', 'execute-task/T01', 2, 'second');
+  const ambiguous = analyzeEventIntervals(bytes([begin, second, end]));
+  assert.equal(ambiguous.ambiguous[0].end, null);
+  assert.deepStrictEqual(ambiguous.ambiguous[0].closures, [Date.parse(end.ts)]);
+  const all = analyzeEventIntervals(bytes([begin, second, end, row('unit-transition', begin.unit, 6, 'last')]));
+  assert.equal(all.ambiguous[0].end, Date.parse(row('unit-transition', begin.unit, 6).ts));
+  assert.deepStrictEqual(all.ambiguous[0].starts, [Date.parse(begin.ts), Date.parse(second.ts)]);
+  assert.equal(all.intervals.length, 0);
+  const negative = analyzeEventIntervals(bytes([begin, row('unit-transition', begin.unit, 0)]));
+  assert.equal(negative.ambiguous[0].reason, 'negative-interval');
+  assert.deepStrictEqual(analyzeEventIntervals(Buffer.alloc(0)).analysis, analyzeEvents(Buffer.alloc(0)));
+  for (const raw of [Buffer.alloc(MAX_BYTES + 1), Buffer.from('[]'), Buffer.from([0xff]),
+    Buffer.from(' '.repeat(32769) + '{}'), Buffer.from('{}\n'.repeat(50001))]) {
+    assert.throws(() => analyzeEventIntervals(raw)); assert.throws(() => analyzeEvents(raw));
+  }
+}
+console.log('PASS additive-interval-analysis: all successful historical fixtures retain deep equality; closed/open/ambiguous/negative/pause metadata and parser limits preserved');

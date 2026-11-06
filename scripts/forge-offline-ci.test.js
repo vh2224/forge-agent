@@ -4,6 +4,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { spawnSync } = require('child_process');
 const gate = require('./forge-offline-ci.js');
 
@@ -36,6 +37,44 @@ const clean = gate.scrubEnvironment({ PATH: 'safe', ANTHROPIC_API_KEY: 'paid', O
 assert.strictEqual(clean.PATH, 'safe');
 for (const key of ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GH_TOKEN', 'CUSTOM_SECRET', 'AWS_ACCESS_KEY_ID']) assert.strictEqual(clean[key], undefined);
 assert.strictEqual(clean.FORGE_CI_OFFLINE, '1');
+
+// Exercise the macOS /var-style alias with a real link on every platform.
+// The harness canonicalizes temporary fixture roots; runtime guards stay strict.
+const physicalTemp = fs.realpathSync.native(os.tmpdir());
+const fixture = fs.mkdtempSync(path.join(physicalTemp, 'forge-ci-temp-alias-'));
+const target = path.join(fixture, 'physical'), alias = path.join(fixture, 'alias');
+fs.mkdirSync(target);
+fs.symlinkSync(target, alias, process.platform === 'win32' ? 'junction' : 'dir');
+const tempKeys = ['TMPDIR', 'TMP', 'TEMP'];
+const previousTemp = Object.fromEntries(tempKeys.map(key => [key, process.env[key]]));
+try {
+  for (const key of tempKeys) process.env[key] = alias;
+  assert.strictEqual(os.tmpdir(), alias);
+  const runner = require('./run-tests');
+  for (const inherit of [false, true]) {
+    const env = runner.childEnv(inherit ? null : target, 'fixture.test.js');
+    for (const key of tempKeys) assert.strictEqual(env[key], fs.realpathSync.native(target));
+    assert.strictEqual(env.FORGE_KEYCHAIN_DISABLED, '1');
+    const observed = spawnSync(process.execPath, ['-e', 'process.stdout.write(require("os").tmpdir())'], { env, encoding: 'utf8' });
+    assert.strictEqual(observed.status, 0, observed.stderr);
+    assert.strictEqual(observed.stdout, fs.realpathSync.native(target));
+  }
+  let calls = 0;
+  const report = gate.run({ host: 'both', platform: 'darwin' }, { spawnSync(executable, argv, options) {
+    calls++;
+    assert.strictEqual(options.env.TMPDIR, fs.realpathSync.native(target));
+    assert.strictEqual(options.env.TMP, options.env.TMPDIR);
+    assert.strictEqual(options.env.TEMP, options.env.TMPDIR);
+    assert.strictEqual(fs.realpathSync.native(options.env.HOME), options.env.HOME);
+    assert.strictEqual(options.env.FORGE_KEYCHAIN_DISABLED, '1');
+    return { status: 0, stdout: '', stderr: '' };
+  } });
+  assert(report.ok); assert.strictEqual(calls, gate.MATRIX.suites.length);
+} finally {
+  for (const key of tempKeys) if (previousTemp[key] === undefined) delete process.env[key]; else process.env[key] = previousTemp[key];
+  fs.unlinkSync(alias);
+  fs.rmSync(fixture, { recursive: true, force: true });
+}
 
 for (const args of [['--version'], ['--help'], ['--host', 'claude'], ['--host', 'codex']]) {
   const child = spawnSync(process.execPath, [FAKE, ...args], { encoding: 'utf8', shell: false, timeout: 3000 });

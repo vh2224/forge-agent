@@ -122,6 +122,91 @@ try {
   assert.throws(() => loop.advance(loop.create({ mode: 'auto', workflow_id: 'host-lock', host_runtime: 'claude' }), 'next', { ...input(setup('linux', 'claude')), host_runtime: 'codex' }), (error) => error.code === 'host-runtime-mismatch');
   assert.throws(() => loop.create({ mode: 'unknown', workflow_id: 'bad', host_runtime: 'claude' }), (error) => error.code === 'invalid-mode');
 
+  // T10: a budget resume after a consumed failure never delegates next. The
+  // owner names the linked entry; only an explicit entry continues the unit.
+  {
+    const calls = [], reconcileRetainedClaim = () => ({});
+    const blocked = { ...loop.create({ mode: 'auto', workflow_id: 'budget-linked', host_runtime: 'codex', max_steps: 3 }),
+      lifecycle: 'blocked', step_count: 1, time_block: { milestone, contract_version: 1, contract_sha256: 'c'.repeat(64) },
+      consumed_failure: { begin: { idempotency_key: 'b' }, unit: { type: 'execute-task', id: 'T01', key: 'execute-task/T01' },
+        failure_key: 'consume-failure:f', failure_checksum: 'd'.repeat(64) }, pending_questions: [] };
+    const fake = reply => ({ run: (operation, payload, trusted) => { calls.push({ operation, payload, trusted }); return reply(operation, payload); } });
+    const required = loop.advance(blocked, 'resume-budget', { cwd: '/fixture', milestone, reconcileRetainedClaim: 'json-is-not-an-adapter' },
+      { orchestrate: fake(() => ({ outcome: 'blocked', reason_code: 'linked-reentry-required', details: { failures: [] } })), reconcileRetainedClaim });
+    assert.strictEqual(required.reason_code, 'linked-reentry-required');
+    assert.strictEqual(required.snapshot.lifecycle, 'blocked'); assert.deepStrictEqual(required.snapshot.time_block, blocked.time_block);
+    assert.deepStrictEqual(calls.map(row => row.operation), ['resume-budget']);
+    assert.deepStrictEqual(calls[0].payload.consumed_failure, { unit: blocked.consumed_failure.unit,
+      failure_key: 'consume-failure:f', failure_checksum: 'd'.repeat(64) });
+    assert.strictEqual(calls[0].trusted.reconcileRetainedClaim, reconcileRetainedClaim, 'only the trusted dependency is an adapter');
+    calls.length = 0;
+    const entry = { entry_id: 'linked-1', authorization_ref: 'live', failure_key: 'consume-failure:f', failure_checksum: 'd'.repeat(64) };
+    const entered = loop.advance(blocked, 'resume-budget', { cwd: '/fixture', milestone, unit: blocked.consumed_failure.unit, entry },
+      { orchestrate: fake(() => ({ outcome: 'completed', reason_code: 'entry-ready', unit: blocked.consumed_failure.unit,
+        details: { transaction: { idempotency_key: 'linked-entry:x' } } })) });
+    assert.strictEqual(entered.outcome, 'dispatch_required'); assert.strictEqual(entered.reason_code, 'entry-ready');
+    assert.strictEqual(entered.snapshot.step_count, 2); assert.strictEqual(entered.snapshot.last_entry_id, 'linked-1');
+    assert.strictEqual(entered.snapshot.time_block, undefined); assert.deepStrictEqual(calls.map(row => row.operation), ['resume-budget']);
+    calls.length = 0;
+    const exhausted = loop.advance({ ...blocked, step_count: 3 }, 'resume-budget', { cwd: '/fixture', milestone, entry },
+      { orchestrate: fake(() => { throw Error('must not delegate'); }) });
+    assert.strictEqual(exhausted.reason_code, 'step-budget-exhausted'); assert.strictEqual(calls.length, 0);
+    const { consumed_failure: _consumed, ...normal } = blocked;
+    const resumed = loop.advance(normal, 'resume-budget', { cwd: '/fixture', milestone },
+      { orchestrate: fake(operation => operation === 'resume-budget' ? { outcome: 'completed', reason_code: 'budget-resume-ready' }
+        : { outcome: 'completed', reason_code: 'unit-selected', unit: { type: 'execute-task', id: 'T02', key: 'execute-task/T02' } }) });
+    assert.strictEqual(resumed.outcome, 'dispatch_required');
+    assert.deepStrictEqual(calls.map(row => row.operation), ['resume-budget', 'next'], 'normal boundary path still delegates next');
+    assert.strictEqual(calls[0].payload.consumed_failure, undefined);
+  }
+
+  // S02/T06: time-option-pending stores a locator block; only the named
+  // resume-time-option continues the SAME snapshot, after the owner's check.
+  for (const host of ['claude', 'codex']) {
+    const calls = [], sha = 'e'.repeat(64);
+    let ready = false;
+    const fake = { run: (operation, payload) => {
+      calls.push({ operation, payload });
+      if (operation === 'resume-time-option') return ready ? { outcome: 'completed', reason_code: 'time-option-ready' }
+        : { outcome: 'blocked', reason_code: 'time-option-pending', details: { time_options: { status: 'decision-pending', options_sha256: sha } } };
+      if (ready) return { outcome: 'completed', reason_code: 'unit-selected', unit: { type: 'plan-milestone', id: milestone, key: `plan-milestone/${milestone}` },
+        details: { transaction: { idempotency_key: 'begin-plan' } } };
+      return { outcome: 'blocked', reason_code: 'time-option-pending', milestone, details: { time_options: { status: 'decision-pending', options_sha256: sha } } };
+    } };
+    const initial = loop.create({ mode: 'auto', workflow_id: `time-option-${host}`, host_runtime: host, max_steps: 5 });
+    const blocked = loop.advance(initial, 'next', { cwd: '/fixture', milestone }, { orchestrate: fake });
+    assert.deepStrictEqual([blocked.outcome, blocked.reason_code, blocked.snapshot.lifecycle], ['blocked', 'time-option-pending', 'blocked']);
+    assert.deepStrictEqual(blocked.snapshot.time_option_block, { milestone, options_sha256: sha });
+    assert.strictEqual(loop.advance(blocked.snapshot, 'next', { cwd: '/fixture', milestone }, { orchestrate: fake }).reason_code, 'workflow-terminal', 'next alone never continues');
+    // Pending: the block is kept and nothing is dispatched.
+    calls.length = 0;
+    const pending = loop.advance(blocked.snapshot, 'resume-time-option', { cwd: '/fixture', milestone, approved: true,
+      time_option_block: { milestone, options_sha256: 'f'.repeat(64) } }, { orchestrate: fake });
+    assert.deepStrictEqual([pending.outcome, pending.reason_code, pending.snapshot.lifecycle, pending.snapshot.step_count], ['blocked', 'time-option-pending', 'blocked', 0]);
+    assert.deepStrictEqual(pending.snapshot.time_option_block, blocked.snapshot.time_option_block);
+    assert.deepStrictEqual(calls.map(row => row.operation), ['resume-time-option']);
+    assert.deepStrictEqual(calls[0].payload.time_option_block, { milestone, options_sha256: sha }, 'the snapshot block, never caller JSON, is delegated');
+    // Ready: the block is cleared, the same snapshot goes idle and next dispatches once.
+    ready = true; calls.length = 0;
+    const resumed = loop.advance(blocked.snapshot, 'resume-time-option', { cwd: '/fixture', milestone }, { orchestrate: fake });
+    assert.deepStrictEqual([resumed.outcome, resumed.unit.key, resumed.snapshot.step_count, resumed.snapshot.time_option_block, resumed.snapshot.workflow_id],
+      ['dispatch_required', `plan-milestone/${milestone}`, 1, undefined, `time-option-${host}`]);
+    assert.deepStrictEqual(calls.map(row => row.operation), ['resume-time-option', 'next']);
+    // Invalid without a blocked lifecycle and block: no delegation at all.
+    calls.length = 0;
+    for (const snapshot of [initial, { ...blocked.snapshot, time_option_block: undefined }, { ...blocked.snapshot, lifecycle: 'idle' }]) {
+      const invalid = loop.advance(snapshot, 'resume-time-option', { cwd: '/fixture', milestone }, { orchestrate: fake });
+      assert.deepStrictEqual([invalid.outcome, invalid.reason_code], ['blocked', 'time-option-resume-invalid']);
+    }
+    assert.strictEqual(calls.length, 0);
+    // A budget block keeps its own continuation; a refused option code is named.
+    const refused = loop.advance(blocked.snapshot, 'resume-time-option', { cwd: '/fixture', milestone },
+      { orchestrate: { run: () => ({ outcome: 'blocked', reason_code: 'time-options-invalid' }) } });
+    assert.strictEqual(refused.reason_code, 'time-options-invalid');
+    assert.strictEqual(loop.advance(blocked.snapshot, 'resume-budget', { cwd: '/fixture', milestone }, { orchestrate: fake }).reason_code, 'budget-resume-invalid');
+  }
+  assert.ok(loop.COMMANDS.includes('resume-time-option'));
+
   const source = fs.readFileSync(path.join(__dirname, 'forge-loop-controller.js'), 'utf8');
   assert.strictEqual(/child_process|\bspawn(?:Sync)?\s*\(/.test(source), false, 'controller must not spawn');
   console.log(`forge-loop-controller tests passed (${cases} host/platform vectors)`);

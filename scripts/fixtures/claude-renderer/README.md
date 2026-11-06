@@ -105,3 +105,94 @@ byte-identical. The historical-to-current changed surface set is now `agents`,
 `configuration`. Distribution does not establish host UI, model obedience or human acceptance.
 
 2026-11-01 — integração comunicação/painel: somente a superfície commands mudou nesta composição, para documentar adesão, bootstrap, perfil padrão e resultados separados do forge-update. Hash medido pelo renderer canônico com versão normalizada; golden ativo atualizado. Baselines históricos permanecem intactos.
+
+## Tempo de milestone (M-20261101111759-opcoes-prazo-milestones, S01/T07)
+
+Medido antes e depois por forge-claude-renderer.render com a fórmula acima, como
+forge-claude-renderer.test.js. O valor anterior é a medição do owner antes da edição
+na revisão `6fc732e` (os nove hashes ativos conferiam); o novo é o hash do caminho de
+render reportado por forge-claude-renderer.test.js sobre os bytes finais. O conjunto
+de deriva reportado por forge-dispatch-source-guard.test.js antes da atualização foi
+exatamente `skills`. Fontes alteradas: `skills/forge-auto/SKILL.md` e
+`skills/forge-next/SKILL.md` (seção “Tempo da milestone”: ponteiro para
+`shared/forge-milestone-time.md`, presença, admissão nativa, decisões atestadas,
+esperas e modelos de aviso, teto, drain e checkpoint, mais ponteiros junto às chamadas
+nativas) e `skills/forge-status/SKILL.md` (uma frase de repasse verbatim do bloco de
+tempo). O motivo é distribuir o contrato de tempo aos dois hosts.
+
+- skills: `86b0ff8995ff391cc26191662a67f1a726b9dcec6b1a4ed7f98a91ad8decf0f9` to `9c4e882a828d6546e30e51aa3330817bee74391cd5395047eaee56a8b3490b01`.
+
+Os outros oito hashes ativos (`agents`, `commands`, `dispatch-templates`, `hooks`,
+`mcp`, `claude-instructions`, `claude-settings`, `configuration`) não mudaram, e os
+arquivos históricos 4.18.1 (`a58a005aea70eaa17c0ecfaf1cdf8965cdf9adb8c2678e756ac83ea74d926d9c`)
+e 4.19.0 (`f2b3e910445d2557f50aa4ced9e1b31498debc6b1cdd1ed05b452d8141b4307f`) ficam
+byte a byte iguais. Distribuição não prova interceptação de chamada bruta do host,
+obediência do modelo nem aceite humano.
+
+## Milestone time options (S02/T07, 2026-11-03)
+
+Measured through forge-claude-renderer.render with the exact normalized-dynamic
+SHA-256 formula documented above. Immutable owner pre-T07 capture: revision
+`0ee8dfdd9ffa0a4ca6dfafe928991a9125f6d573`, `scripts/fixtures/milestone-options/distribution-before.json`
+(SHA-256 `93fc65fb11e0b59104721da9281d9ac64ac789a2c8cbf19495fe46a8186cc8ff`).
+Sources: agents/forge-planner.md, agents/forge-worker.md, skills/forge-auto/SKILL.md,
+skills/forge-next/SKILL.md, skills/forge-new-milestone/SKILL.md, skills/forge-help/SKILL.md
+and shared/templates/dispatch/plan-slice.md. T05 already changed dispatch-templates
+and T04 changed configuration via effort.estimate-milestone before T07. These are
+intentional dependency changes; their old failed pin checks remain historical.
+
+- agents: `437d3c709908bb6d3babdfbb237e320847a65737edaaa54ca77ae8ccf7dbe662` to `64bbdc40320fe629f19c9e0ceb50256f03544d9d9b0385d416f1563b2abbd41a`.
+- skills: `9c4e882a828d6546e30e51aa3330817bee74391cd5395047eaee56a8b3490b01` to `3de92437ec378fa298349b408d1d3bf809ed95e35dcdaad0b9e54f24ef3f5000`.
+- dispatch-templates: `1d3003f9c370209188049ffa9f5377346990d3070341fe3f81ab26e641a54103` to `a304207c44a93bf68aa9fd220a888533d223c33a2ceea7e283154ef316f2a58e`.
+- configuration: `e8aa7391a8a71f70600274de8f7d49e19e1ea2206ee014b6504be4936b655271` to `c76a23d540a2602293ba45f8821419aa00d738eb08c538b85627596bcc560c3d`.
+
+Pre-T07 render (before updating the active pins):
+- dispatch-templates: `8fe26ee582718ff739d352cab1ae495f88b3044d167ed67e1666a51d2ef3d4de`.
+- configuration: `c76a23d540a2602293ba45f8821419aa00d738eb08c538b85627596bcc560c3d`.
+
+Exactly four active surfaces change. The other five and both historical goldens
+remain byte-identical. The dispatch registry has 248 retained classified calls
+before and after: zero added, zero removed, zero changed fingerprints. The
+removed forge-new-milestone inline planner was outside the registry scope; no
+call was fabricated to preserve a count. Smoke source changes only Section61;
+its distribution contract is executed separately in the communication suite.
+Full smoke remains an independent owner check. Projection does not prove client
+rendering, model comprehension, provider execution or human acceptance.
+
+## S02 integrated review R61/R63 correction
+
+Measured with forge-claude-renderer.render after reordering the three modern
+bootstrap blocks: enrollment precedes durable STATE. From verified 7e91b8f,
+only the active skills pin changes: `3de92437ec378fa298349b408d1d3bf809ed95e35dcdaad0b9e54f24ef3f5000` to `1309f02bb58b79d61ba0bb1e897cdee4d37c232f488e1548106d4a999e57d061`.
+The other eight active hashes, immutable distribution-before fixture, historical
+goldens and all 248 registry classifications/fingerprints are unchanged. The
+pre-T07 comparison remains four of nine surfaces. Runtime restart tests are
+separate from distribution and do not establish client understanding or UAT.
+
+## Task ligada (M-20261101111759-opcoes-prazo-milestones, S03/T07)
+
+Medido por forge-claude-renderer.render com a fórmula acima (agrupar por source_id,
+ordenar por source com localeCompare, normalizar só `version=MAJOR.MINOR.PATCH`,
+unir source e conteúdo com NUL, SHA-256). Captura imutável do owner antes da T06:
+revisão `f0b5fb17b4c57348e18fbb96bf38e8fb6ef8ee2b`, copiada sem alteração para
+`scripts/fixtures/linked-task/distribution-before.json` (SHA-256
+`0464c29011c5b86a438d6e0f93ac07695957c0273e958018835a47c4ea4387d0`). Medição
+posterior do owner sobre o commit da T06 `a97856f221f56ab7038222c8fee115039f829f49`
+(mapa de fontes SHA-256 `d73ea5be335916e487011fe333847301d485101bd0c9d51158fd5c3911790a37`).
+
+Os nove hashes foram medidos antes e depois; só `skills` mudou:
+
+- skills: `1309f02bb58b79d61ba0bb1e897cdee4d37c232f488e1548106d4a999e57d061` to `4b1a158a3faedb66b0aab2033974917cedb4251d3352e90b5f019970330ae548`.
+
+Fontes do delta, todas declaradas pela T06 (blocos `forge:linked-task`):
+`skills/forge-auto/SKILL.md`, `skills/forge-next/SKILL.md`,
+`skills/forge-status/SKILL.md` e `skills/forge-task/SKILL.md`. Os demais arquivos
+declarados da T06 (`shared/*.md` e a suíte de superfícies) não entram em nenhuma das
+nove superfícies medidas. Os outros oito hashes ativos (`agents`, `commands`,
+`dispatch-templates`, `hooks`, `mcp`, `claude-instructions`, `claude-settings`,
+`configuration`) ficam iguais à captura, e os arquivos históricos 4.18.1
+(`a58a005aea70eaa17c0ecfaf1cdf8965cdf9adb8c2678e756ac83ea74d926d9c`) e 4.19.0
+(`f2b3e910445d2557f50aa4ced9e1b31498debc6b1cdd1ed05b452d8141b4307f`) ficam byte a
+byte iguais. O registro de despacho mantém as 248 linhas, classificações, motivos e
+fingerprints da captura: deriva medida zero, nenhuma linha editada. Distribuição não
+prova execução nem compreensão do cliente instalado, nem aceite humano.

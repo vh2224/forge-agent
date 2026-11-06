@@ -134,7 +134,7 @@ Read the current model for each agent from the resolved JSONC catalog (`node scr
 |--------|-------------|----------|
 | `forge-discusser` | **[Phase → Agent Routing: discuss-milestone model]** | discuss-milestone, discuss-slice |
 | `forge-researcher` | **[Phase → Agent Routing: research-milestone model]** | research-milestone, research-slice |
-| `forge-planner` | **[Phase → Agent Routing: plan-milestone model]** | plan-milestone, plan-slice |
+| `forge-planner` | **[Phase → Agent Routing: plan-milestone model]** | estimate-milestone (read-only OPTIONS.json), plan-milestone, plan-slice |
 | `forge-executor` | **[Phase → Agent Routing: execute-task model]** | execute-task |
 | `forge-completer` | **[Phase → Agent Routing: complete-slice model]** | complete-slice, complete-milestone |
 | `forge-memory` | **[Phase → Agent Routing: memory-extract model]** | extração de memórias pós-unidade |

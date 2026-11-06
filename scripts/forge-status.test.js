@@ -1286,6 +1286,241 @@ test('--watch=0.05 in-process: collect()+renderTree() reflects an external STATE
   assert(r2.includes('Changed'), 'new next_action rendered');
 });
 
+// ── 12. Milestone time block (shared/forge-milestone-time.md) ─────────────────
+// Real owner APIs build each contract state in a temp owner; collect/renderTree
+// only read it. Times are relative to the real clock because collect reads now.
+console.log('12. Milestone time block (read-only)');
+
+const timeApi = require('./forge-milestone-time.js');
+const admissionApi = require('./forge-milestone-time-admission.js');
+const questionsApi = require('./forge-pending-questions.js');
+const { digest: timeDigest } = require('./forge-code-roots.js');
+const TIME_M = 'M-20260101120000-alpha';
+const HOUR = 3_600_000;
+let timeSerial = 0;
+
+function timeIso(offset) { return new Date(Date.now() + offset).toISOString(); }
+
+function timeAuthorize(cwd, kind, request, answer) {
+  const id = `q${++timeSerial}`;
+  const opened = questionsApi.openQuestions({ cwd, milestone: TIME_M, unit: `milestone-time/${id}`,
+    decision_set: `milestone-time-${kind}`, questions: [{ id, question: 'Escolha?' }] });
+  questionsApi.answer({ cwd, identity: opened.identity_sha256, answers: [{ id, answer, source: 'user-text' }] });
+  const now = Date.now();
+  const live = { reference: `live-${timeSerial}`, status: 'resolved', answer, resolved_at: new Date(now - 1000).toISOString(),
+    source: 'user-text', question: { identity_sha256: opened.identity_sha256, id } };
+  return timeApi.createDecisionAuthority(() => live).issue(live.reference,
+    { milestone: TIME_M, kind, request_sha256: timeDigest(request), expires_at: now + 60_000 }, () => now);
+}
+
+function activateTime(cwd, ceiling) {
+  const contract = { schema_version: 1, milestone: TIME_M, clock_policy: { id: 'forge-milestone-time-clock', version: 1 },
+    option: { id: 'balanced', options_sha256: 'a'.repeat(64), label: 'Entrega verificada' },
+    activated_at: timeIso(-HOUR), preselection_started_at: timeIso(-HOUR - 60_000), ceiling_ms: ceiling,
+    endpoint: { kind: 'verified-integrated-delivery', items: { publication: 'included', installation: 'pending',
+      'manual-uat': 'not-applicable', 'external-waits': 'included' } },
+    allocation: null, linked_task: null, chain_forecast: null };
+  return timeApi.activateContract({ cwd, milestone: TIME_M, contract, handle: timeAuthorize(cwd, 'activation', contract, 'option:balanced') });
+}
+
+function timeOwner() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-status-time-'));
+  tmpDirs.push(dir);
+  fs.mkdirSync(path.join(dir, '.gsd', 'forge'), { recursive: true });
+  fs.mkdirSync(path.join(dir, '.svn'));
+  return dir;
+}
+
+// The contract is activated before the roadmap exists, as in the real flow.
+function timeMilestone(dir) {
+  const mDir = path.join(dir, '.gsd', 'milestones', TIME_M);
+  fs.mkdirSync(path.join(mDir, 'slices', 'S02'), { recursive: true });
+  fs.writeFileSync(path.join(mDir, `${TIME_M}-ROADMAP.md`), ROADMAP_TEXT, 'utf8');
+  fs.writeFileSync(path.join(mDir, `${TIME_M}-STATE.md`), stateText(TIME_M), 'utf8');
+  fs.writeFileSync(path.join(mDir, 'slices', 'S02', 'S02-PLAN.md'), PLAN_TEXT, 'utf8');
+  return dir;
+}
+
+function openWriter(dir) {
+  fs.writeFileSync(path.join(dir, '.gsd', 'milestones', TIME_M, `${TIME_M}-events.jsonl`), JSON.stringify({
+    event: 'unit-began', milestone: TIME_M, unit: 'execute-task/T02', ts: timeIso(-HOUR / 2), host_runtime: 'codex', action: 'begin' }) + '\n');
+}
+
+const TIME_STATES = {
+  active(dir) { activateTime(dir, 10 * HOUR); },
+  warning(dir) {
+    activateTime(dir, 10 * HOUR);
+    timeApi.recordWarning({ cwd: dir, milestone: TIME_M, record: { id: 'b'.repeat(64), version: 1, sequence: 1,
+      kind: 'slice-boundary', boundary_key: '[]', classification: 'at-risk', warning: true, at: timeIso(-1000),
+      cause: 'evidence-based-projection', consumed_ms: null, remaining_ms: null, alternatives: ['extend', 'reduce-scope', 'continue-to-cap'] } });
+  },
+  exhausted(dir) { activateTime(dir, 1000); },
+  draining(dir) { activateTime(dir, 1000); },
+  checkpointed(dir) {
+    activateTime(dir, 1000);
+    timeApi.recordCheckpoint({ cwd: dir, milestone: TIME_M, record: { kind: 'time-drain', version: 1, at: timeIso(-1000),
+      decision_pending: true, ceiling_ms: 1000, consumed_ms: HOUR, unknown_ms: HOUR, overshoot_ms: HOUR - 1000 } });
+  },
+  extended(dir) {
+    activateTime(dir, 1000);
+    const request = { kind: 'extension', reason: 'Decisão explícita de fixture', patch: { ceiling_ms: 10 * HOUR } };
+    timeApi.amendContract({ cwd: dir, milestone: TIME_M, ...request, handle: timeAuthorize(dir, 'extension', request, `extend:${10 * HOUR}`) });
+  },
+};
+
+function timeFixture(state) {
+  const dir = timeOwner();
+  TIME_STATES[state](dir);
+  timeMilestone(dir);
+  if (state === 'draining') openWriter(dir);
+  return dir;
+}
+
+function treeSnapshot(root) {
+  const result = {};
+  (function visit(dir) {
+    for (const name of fs.readdirSync(dir).sort()) {
+      const file = path.join(dir, name);
+      const stat = fs.lstatSync(file);
+      result[path.relative(root, file)] = [stat.mtimeMs, stat.isFile() ? fs.readFileSync(file).toString('base64') : 'directory'];
+      if (stat.isDirectory()) visit(file);
+    }
+  })(root);
+  return result;
+}
+
+const STATE_PT = { active: 'ativo', warning: 'aviso', exhausted: 'esgotado', draining: 'em drain', checkpointed: 'em checkpoint', extended: 'estendido' };
+const SUMMARY_KEYS = ['state', 'ceiling_ms', 'consumed_ms', 'unknown_ms', 'remaining_ms', 'forecast', 'last_warning', 'unknown', 'decision_pending'];
+
+for (const state of Object.keys(TIME_STATES)) {
+  test(`time block: workspace collect/renderTree show state ${state} without writing`, () => {
+    const dir = timeFixture(state);
+    const before = treeSnapshot(dir);
+    const model = status.collect(dir, { scope: 'workspace', milestoneId: TIME_M });
+    const out = status.renderTree(model);
+    assertEq(treeSnapshot(dir), before, 'collect+renderTree changed bytes or mtime');
+    const time = model.milestone.time;
+    assert(time, 'contract milestone carries a time block');
+    assertEq(time.state, state, 'state from readTimeStatus');
+    assertEq(time.contract, 'valid', 'contract validity');
+    assertEq(Object.keys(time.summary), SUMMARY_KEYS, 'summary is the closed summarizeTimeStatus block');
+    const direct = admissionApi.summarizeTimeStatus(admissionApi.readTimeStatus(dir, TIME_M));
+    assertEq([time.summary.state, time.summary.ceiling_ms, time.summary.last_warning], [direct.state, direct.ceiling_ms, direct.last_warning], 'same reader projection');
+    assert(out.includes('### Tempo da milestone'), 'time section rendered');
+    assert(out.includes(`- Estado: ${STATE_PT[state]}`), `state rendered in pt-BR: ${out}`);
+    assert(out.includes('- Horizonte: teto ') && out.includes('marco final: entrega integrada verificada (publicação: incluída, instalação: pendente, UAT manual: não se aplica, esperas externas: incluída)'), 'horizon and endpoint');
+    assert(/- Consumido: \S/.test(out) && out.includes('- Saldo: ') && out.includes('- Previsão: '), 'consumed, balance and forecast');
+    assert(out.includes('base: entregas históricas (historical-delivery), sem aceite integrado atual'), 'historical progress is not current acceptance');
+    assert(out.includes('intervalos de unidade do controlador (proxy, não é esforço de worker)'), 'unit proxy labeled separately');
+    assert(out.includes('esforço observado de workers: desconhecido'), 'worker effort without observations stays unknown');
+    assert(out.includes('- Desconhecido: ') && out.includes('unattributed-time'), 'unknown time shown as unknown');
+    assert(out.includes(`- Diagnóstico: node scripts/forge-milestone-time-admission.js --status --milestone ${TIME_M} --json`), 'diagnostic command');
+    assert(!out.includes(dir) && !JSON.stringify(time).includes(dir.replace(/\\/g, '\\\\')), 'no absolute owner path in the time block');
+    const stripped = status.renderTree(model, { color: true }).replace(/\x1b\[[0-9;]*m/g, '');
+    assertEq(stripped, out, 'colored render strips to the plain render');
+    if (state === 'exhausted') assert(out.includes('- Saldo: esgotado (estouro de '), 'overshoot shown');
+    if (state === 'draining') assert(out.includes('- Writers em voo: 1, terminando pela própria vigilância'), 'open writer');
+    if (state === 'checkpointed') assert(out.includes('- Checkpoint: decisão pendente; estouro '), 'checkpoint decision pending');
+    if (state === 'warning') assert(out.includes('- Último aviso: em risco (bbbbbbbbbbbb)'), 'open warning');
+    if (state === 'extended') assert(time.contract_version === 2 && /- Saldo: \d/.test(out), 'extension restores a positive balance');
+  });
+}
+
+test('time block: renderTree has no disk access (pure over model.time)', () => {
+  const dir = timeFixture('checkpointed');
+  const model = JSON.parse(JSON.stringify(status.collect(dir, { scope: 'workspace', milestoneId: TIME_M })));
+  fs.rmSync(dir, { recursive: true, force: true });
+  const names = ['readFileSync', 'readdirSync', 'statSync', 'lstatSync', 'existsSync', 'openSync', 'realpathSync'];
+  const saved = Object.fromEntries(names.map((name) => [name, fs[name]]));
+  let out;
+  try {
+    for (const name of names) fs[name] = () => { throw new Error(`renderTree touched fs.${name}`); };
+    out = status.renderTree(model);
+  } finally { Object.assign(fs, saved); }
+  assert(out.includes('- Estado: em checkpoint'), 'render from the detached model');
+});
+
+test('time block: contract-free milestone keeps the legacy model and render byte for byte', () => {
+  const { dir, milestoneId } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  fs.mkdirSync(path.join(dir, '.gsd', 'forge', 'time'), { recursive: true });
+  const before = treeSnapshot(dir);
+  const model = status.collect(dir, { scope: 'workspace', milestoneId });
+  assertEq(Object.keys(model.milestone), ['id', 'title', 'phase', 'active_slice', 'active_task', 'auto_mode', 'next_action', 'progress', 'slices'], 'legacy milestone keys only');
+  const out = status.renderTree(model);
+  assert(!out.includes('Tempo da milestone'), 'no time section');
+  const legacy = JSON.parse(JSON.stringify(model));
+  assertEq(status.renderTree(legacy), out, 'render is a function of the legacy model alone');
+  assertEq(treeSnapshot(dir), before, 'no write for a contract-free milestone');
+});
+
+test('time block: invalid contract stays visible as unknown without breaking status', () => {
+  const dir = timeMilestone(timeOwner());
+  const file = path.join(dir, '.gsd', 'forge', 'time', TIME_M, 'contract.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ schema_version: 1, milestone: TIME_M }) + '\n');
+  const model = status.collect(dir, { scope: 'workspace', milestoneId: TIME_M });
+  assertEq(model.milestone.time.contract, 'invalid', 'invalid contract kept visible');
+  assertEq(model.milestone.time.state, null, 'state unknown');
+  assertEq(model.milestone.time.summary.unknown, true, 'summary unknown');
+  assert(model.milestone.slices.length === 3, 'rest of the status intact');
+  const out = status.renderTree(model);
+  assert(out.includes('- Contrato de tempo inválido; estado desconhecido (time-contract-schema-invalid)'), out);
+  assert(out.includes('### Slices'), 'tree still rendered');
+});
+
+test('time block: personal and inspection scopes add time only to the contract milestone', () => {
+  const dir = timeFixture('exhausted');
+  const home = path.join(dir, 'home');
+  fs.mkdirSync(home);
+  const personal = require('./forge-personal-context.js');
+  fs.mkdirSync(path.join(dir, '.gsd', 'tasks', 'TASK-001'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.gsd', 'tasks', 'TASK-001', 'TASK-001-PLAN.md'), '---\nstatus: RUNNING\n---\nPlan\n');
+  for (const id of [TIME_M, 'TASK-001']) assertEq(personal.bindWork({ project: dir, cwd: dir, userHome: home, id, intent: 'create' }).status, 'ok', `bind ${id}`);
+  const before = treeSnapshot(dir);
+  const snapshot = personal.readPersonalSnapshot({ cwd: dir, userHome: home });
+  const model = status.collect(dir, { userHome: home });
+  assertEq(model.scope, 'personal', 'personal scope');
+  const timed = model.works.find((work) => work.id === TIME_M);
+  const task = model.works.find((work) => work.id === 'TASK-001');
+  assertEq(timed.time.state, 'exhausted', 'personal milestone time');
+  assertEq(task, snapshot.works.find((work) => work.id === 'TASK-001'), 'task work unchanged');
+  const { time: _time, ...rest } = timed;
+  assertEq(rest, snapshot.works.find((work) => work.id === TIME_M), 'milestone work otherwise unchanged');
+  const out = status.renderTree(model);
+  assert(out.includes('Tempo da milestone:\n- Estado: esgotado'), out);
+  const inspected = status.collect(dir, { userHome: home, milestoneId: TIME_M });
+  assertEq(inspected.scope, 'inspection', 'inspection scope');
+  assertEq(inspected.works[0].time.state, 'exhausted', 'inspection time');
+  assertEq(treeSnapshot(dir), before, 'personal/inspection reads wrote nothing');
+});
+
+test('time block: contract-free personal works equal the snapshot works', () => {
+  const dir = timeMilestone(timeOwner());
+  const home = path.join(dir, 'home');
+  fs.mkdirSync(home);
+  const personal = require('./forge-personal-context.js');
+  assertEq(personal.bindWork({ project: dir, cwd: dir, userHome: home, id: TIME_M, intent: 'create' }).status, 'ok', 'bind');
+  const model = status.collect(dir, { userHome: home });
+  assertEq(model.works, personal.readPersonalSnapshot({ cwd: dir, userHome: home }).works, 'no time key without a contract');
+  assert(!status.renderTree(model).includes('Tempo da milestone'), 'no time section');
+});
+
+test('time block: forge-orchestrate status exposes details.works[].time unchanged', () => {
+  const dir = timeFixture('draining');
+  const home = path.join(dir, 'home');
+  fs.mkdirSync(home);
+  const before = treeSnapshot(dir);
+  const res = spawnSync(process.execPath, [path.join(__dirname, 'forge-orchestrate.js'), '--status', '--json', JSON.stringify({ cwd: dir, milestone: TIME_M })],
+    { encoding: 'utf8', windowsHide: true, env: { ...process.env, HOME: home, USERPROFILE: home } });
+  assert(res.status === 0, res.stderr);
+  const result = JSON.parse(res.stdout);
+  const work = result.details.works.find((row) => row.id === TIME_M);
+  assert(work && work.time, `details.works[].time present: ${res.stdout.slice(0, 400)}`);
+  assertEq(work.time.state, 'draining', 'orchestrate status state');
+  assertEq(work.time.open_writers, 1, 'open writer count');
+  assertEq(treeSnapshot(dir), before, 'orchestrate status wrote nothing');
+});
+
 // ── Cleanup ────────────────────────────────────────────────────────────────────
 for (const dir of tmpDirs) {
   try {

@@ -559,6 +559,13 @@ function runVerificationCommands(options) {
   }
 
   const timeoutMs = options.commandTimeoutMs || DEFAULT_COMMAND_TIMEOUT_MS;
+  const requestedByCommand = options.evidenceRequests?.[options.checkRootId];
+  if (requestedByCommand !== undefined && (!requestedByCommand || typeof requestedByCommand !== 'object'
+    || Array.isArray(requestedByCommand) || Object.keys(requestedByCommand).length > commands.length
+    || Object.entries(requestedByCommand).some(([command, lines]) => !commands.includes(command) || !Array.isArray(lines)
+      || lines.length > 64 || lines.some(line => typeof line !== 'string' || !line || /[\r\n\0]/.test(line) || Buffer.byteLength(line, 'utf8') > 2048)))) {
+    throw Object.assign(new Error('verification-evidence-request-invalid'), { code: 'verification-evidence-request-invalid' });
+  }
   const checks = [];
   let stopped = null;
   const progress = checkProgress(options, commands.length);
@@ -677,6 +684,14 @@ function runVerificationCommands(options) {
       stderr,
       durationMs,
     };
+    // Preserve only requested, actually observed assertion witnesses when the
+    // ordinary stdout view is truncated. The raw process/output bound is intact.
+    const requested = options.evidenceRequests?.[options.checkRootId]?.[command];
+    if (requested?.length && Buffer.byteLength(result.stdout || '', 'utf8') > MAX_OUTPUT_BYTES) {
+      const observed = new Set((result.stdout || '').split(/\r?\n/));
+      check.stdout_truncated = true;
+      check.observed_stdout_lines = requested.filter(line => observed.has(line));
+    }
     if (checkSkipped) check.skipped = checkSkipped;
     if (result.cleanup) check.cleanup = result.cleanup;
     checks.push(check);
@@ -989,6 +1004,22 @@ function assertExecutionVerification(seal, contract, planText, identity) {
 function runRootVerification(contract, options = {}) {
   const roots = require('./forge-code-roots');
   const measured = roots.validateContract(contract, { revalidate: true });
+  if (options.evidenceRequests !== undefined) {
+    const invalid = () => { throw Object.assign(new Error('verification-evidence-request-invalid'), { code: 'verification-evidence-request-invalid' }); };
+    const requests = options.evidenceRequests;
+    if (!requests || typeof requests !== 'object' || Array.isArray(requests)
+      || Object.keys(requests).some(id => !measured.code_roots.some(root => root.id === id))) invalid();
+    for (const [id, commands] of Object.entries(requests)) {
+      const allowed = options.verificationSeal?.roots.find(root => root.root_id === id)?.commands
+        || options.commandsByRoot?.[id] || options.preferenceCommands;
+      if (!commands || typeof commands !== 'object' || Array.isArray(commands) || !Array.isArray(allowed)
+        || Object.keys(commands).length > allowed.length) invalid();
+      for (const [command, lines] of Object.entries(commands)) {
+        if (!allowed.includes(command) || !Array.isArray(lines) || lines.length > 64
+          || lines.some(line => typeof line !== 'string' || !line || /[\r\n\0]/.test(line) || Buffer.byteLength(line, 'utf8') > 2048)) invalid();
+      }
+    }
+  }
   const results = measured.code_roots.map(root => {
     const sealed = options.verificationSeal?.roots.find(row => row.root_id === root.id);
     const snapshot = require('./forge-surgical-reset').captureAttemptSnapshot(root.path);

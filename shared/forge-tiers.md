@@ -30,6 +30,7 @@ unless overridden (see [Override Precedence](#override-precedence)).
 | `execute-task` | standard | Code implementation; default standard, can be overridden via frontmatter |
 | `review-fix` | standard | Surgical edit of conceded review objections on the unmerged run branch, under an explicit "only the conceded items" constraint — more delicate than routine execute-task, doesn't need heavy reasoning |
 | `plan-milestone` | max | Full decomposition into slices and tasks; 1 unit per milestone — frontier reasoning justifies the 2x premium |
+| `estimate-milestone` | max | Read-only proposal of three real time-option strategies before the roadmap; locked like plan-milestone, effort medium |
 | `plan-slice` | heavy | Task-level decomposition with dependency analysis and acceptance criteria. Escalates to `max` when the slice is tagged `risk:high` in ROADMAP (see [Override Precedence](#override-precedence)) |
 
 ### Domain-routable vs tier_models-only
@@ -37,7 +38,7 @@ unless overridden (see [Override Precedence](#override-precedence)).
 `execute-task` (mapped to `executor`) and `plan-slice` (mapped to `planner`) are
 the only unit types captured by the `routing` block. The other eight unit types
 always resolve through `tier_models.<tier>`. `plan-milestone` has a fixed `max`
-tier, but its model remains configurable through `tier_models.max`. For the
+tier, as does `estimate-milestone`; their models remain configurable through `tier_models.max`. For the
 live workspace resolution, including domain inheritance, run `/forge-prefs phases`.
 
 `routing.<domain>.<role>.<tier>` is a literal list of IDs: `tier_models.<tier>` does not affect it. To change a Claude fallback in a routing chain, edit that chain's Claude member, not `tier_models`.

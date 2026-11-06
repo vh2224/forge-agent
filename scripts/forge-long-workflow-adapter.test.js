@@ -59,6 +59,22 @@ for (const host of ['claude', 'codex']) {
 }
 assert.deepStrictEqual(refusals.claude, refusals.codex, 'the refusal must not depend on the host');
 
+// T08: only an in-process dependency can carry the live worker observation
+// reader to owner completion; the same name inside JSON input stays inert data.
+for (const host of ['claude', 'codex']) {
+  const seen = [], reader = Object.freeze({});
+  const api = { run(operation, input, trusted) { seen.push({ operation, input, trusted }); return { outcome: 'completed', reason_code: 'unit-selected',
+    unit: { type: 'execute-task', id: 'T01', key: 'execute-task/T01' }, details: { transaction: { idempotency_key: 'begin-T01' } } }; } };
+  const selected = adapter.invoke(host, 'auto', 'next', { workflow_id: 'observer', milestone: 'M1' }, null, { orchestrate: api });
+  adapter.invoke(host, 'auto', 'complete', { workflow_id: 'observer', milestone: 'M1', result: { status: 'done' } },
+    selected.result.snapshot, { orchestrate: api, workerObservationReader: reader });
+  adapter.invoke(host, 'auto', 'complete', { workflow_id: 'observer', milestone: 'M1', result: { status: 'done' }, workerObservationReader: { approved: true } },
+    selected.result.snapshot, { orchestrate: api });
+  assert.deepStrictEqual(seen.map(row => row.operation), ['next', 'complete', 'complete']);
+  assert.strictEqual(seen[1].trusted.workerObservationReader, reader);
+  assert.strictEqual(seen[2].trusted.workerObservationReader, undefined, 'JSON input is not a trusted reader');
+}
+
 const source = require('fs').readFileSync(require('path').join(__dirname, 'forge-long-workflow-adapter.js'), 'utf8');
 {
   const fixtures = require('./forge-loop-failure.test'), f = fixtures.fixture();

@@ -739,6 +739,135 @@ test('Claude historical repin is preserved and current memory/instruction report
   assert.notStrictEqual(historical.surfaces.find((surface) => surface.source_id === 'skills').sha256, PRE_REPIN_SKILLS_SHA);
 });
 
+// S03/T07 (M-20261101111759-opcoes-prazo-milestones). Expected values come from the
+// owner's evidence, never from the renderer under test: the immutable pre-T06 capture
+// (copied byte for byte) and the owner's post-T06 measurement (commit a97856f). The
+// current render is only the measured side of the comparison.
+const LINKED_BEFORE_PATH = path.join(__dirname, 'fixtures', 'linked-task', 'distribution-before.json');
+const LINKED_BEFORE_SHA = '0464c29011c5b86a438d6e0f93ac07695957c0273e958018835a47c4ea4387d0';
+const LINKED_BEFORE_REVISION = 'f0b5fb17b4c57348e18fbb96bf38e8fb6ef8ee2b';
+const OWNER_POST_T06 = Object.freeze({
+  commit: 'a97856f221f56ab7038222c8fee115039f829f49',
+  surfaces: Object.freeze({ skills: '4b1a158a3faedb66b0aab2033974917cedb4251d3352e90b5f019970330ae548' }),
+  contributors: Object.freeze({
+    'skills/forge-auto/SKILL.md': ['e39798174f5cba4ce10dd254385cf6726180b077cbee89e382ae6b9348e1e05a', '5a90d205b3295aa4f3f3d331ae8229432257541142777529d513617a173a5c62'],
+    'skills/forge-next/SKILL.md': ['e8d04241493f4fa7c5a1db28e075487759fea1dd87dfafdbb750aa06aa723d0f', 'd824741df528de5b38f35aec9e00e9df80349ae8ed4687e0bf6fdb1cb69dc59a'],
+    'skills/forge-status/SKILL.md': ['18aa8948fc904b5f10892587e44cd299150b9488f3e3dcf5ebb4d7d8288fa726', '7e0b214a9ae5fc831179f5347f35288c2fd972d0c6fc9a3b00d6ed315e9b1817'],
+    'skills/forge-task/SKILL.md': ['d81556180d9bb16d45a8f81ba6b5faa12ece7f6601a510963f29eb50fe10679b', 'af9cf1d0b0b9f68ba751394f935e2c324050b226409f7bea9095700d13ea62ae'],
+  }),
+});
+const LINKED_BLOCK_RE = /^<!-- forge:linked-task:([a-z0-9-]+):start -->\r?\n[\s\S]*?^<!-- forge:linked-task:\1:end -->\r?\n/gm;
+// T07 itself re-pins only these two files; every other captured source keeps its bytes.
+const T07_PIN_FILES = Object.freeze(['scripts/fixtures/claude-renderer/claude-memory-v2.golden.json', 'docs/communication-evaluation/samples.json']);
+
+function sha256(bytes) {
+  return crypto.createHash('sha256').update(bytes).digest('hex');
+}
+
+test('linked-task scoped pins follow the owner pre-T06 capture and the measured source map only', () => {
+  const beforeBytes = fs.readFileSync(LINKED_BEFORE_PATH);
+  assert.strictEqual(sha256(beforeBytes), LINKED_BEFORE_SHA, 'fixture is the exact owner capture');
+  const before = JSON.parse(beforeBytes);
+  assert.strictEqual(before.kind, 'owner-captured-pre-S03-T06-distribution-baseline');
+  assert.strictEqual(before.provenance.source_revision, LINKED_BEFORE_REVISION);
+  assert.strictEqual(before.provenance.not_post_change_verification, true);
+  assert.strictEqual(before.provenance.pre_T06_writer, true);
+  assert.deepStrictEqual(before.preexisting_drift.active_surfaces, []);
+  const declared = new Set(before.declared_T06_paths);
+  assert.strictEqual(declared.size, 10);
+
+  // Nine surfaces measured by the canonical formula; identities equal the capture.
+  const golden = JSON.parse(fs.readFileSync(GOLDEN_PATH, 'utf8'));
+  assert.deepStrictEqual(golden.surfaces.map(({ sha256: _, ...identity }) => identity),
+    before.active_golden_before.surfaces.map(({ sha256: _, ...identity }) => identity));
+  const report = claudeRenderer.render({
+    repo: ROOT,
+    projectRoot: path.join(ROOT, 'scripts', '.guard-golden-project'),
+    claudeHome: path.join(ROOT, 'scripts', '.guard-golden-claude'),
+    forgeHome: path.join(ROOT, 'scripts', '.guard-golden-forge'),
+  });
+  const measured = surfaceHashes(report, golden);
+
+  // Source map: every member of every surface, captured bytes versus current bytes.
+  const renderBefore = new Map(before.render_before.map((row) => [row.source_id, row]));
+  const affected = [];
+  const contributors = new Set();
+  for (const surface of before.active_golden_before.surfaces) {
+    const row = renderBefore.get(surface.source_id);
+    assert(row, `capture has the members of ${surface.source_id}`);
+    assert.strictEqual(row.pinned_before, surface.sha256);
+    assert.strictEqual(row.rendered_before, surface.sha256, `capture rendered ${surface.source_id} equal to its pin`);
+    const changedMembers = row.source_members
+      .filter((member) => sha256(fs.readFileSync(path.join(ROOT, member.source))) !== member.sha256)
+      .map((member) => member.source);
+    for (const member of changedMembers) {
+      assert(declared.has(member), `drift of ${surface.source_id} is attributed to a declared T06 path: ${member}`);
+      contributors.add(member);
+    }
+    const drifted = measured.get(surface.source_id) !== surface.sha256;
+    assert.strictEqual(drifted, changedMembers.length > 0, `${surface.source_id}: measured drift iff a member source changed`);
+    if (drifted) affected.push(surface.source_id);
+  }
+  assert.deepStrictEqual(affected, Object.keys(OWNER_POST_T06.surfaces), 'measured affected surfaces equal the owner after map');
+  assert.deepStrictEqual([...contributors].sort(), Object.keys(OWNER_POST_T06.contributors).sort());
+  for (const [file, [beforeSha, afterSha]] of Object.entries(OWNER_POST_T06.contributors)) {
+    const raw = fs.readFileSync(path.join(ROOT, file));
+    assert.strictEqual(sha256(raw), afterSha, `${file} equals the owner after measurement`);
+    assert.strictEqual(before.sources.find((row) => row.path === file).sha256, beforeSha, `${file} before value is the capture`);
+    // The whole delta is the T06 linked blocks: removing them restores the pre-T06 bytes.
+    assert.strictEqual(sha256(Buffer.from(raw.toString('utf8').replace(LINKED_BLOCK_RE, ''), 'utf8')), beforeSha,
+      `${file}: only forge:linked-task blocks changed`);
+  }
+
+  // Pins: only the attributed surface is re-pinned, to the owner-measured value.
+  const readme = fs.readFileSync(path.join(__dirname, 'fixtures', 'claude-renderer', 'README.md'), 'utf8');
+  for (const surface of golden.surfaces) {
+    const prior = before.active_golden_before.surfaces.find((row) => row.source_id === surface.source_id).sha256;
+    const expected = OWNER_POST_T06.surfaces[surface.source_id] || prior;
+    assert.strictEqual(surface.sha256, expected, `active pin ${surface.source_id}`);
+    assert.strictEqual(measured.get(surface.source_id), expected, `measured ${surface.source_id}`);
+    if (expected !== prior) assert(readme.includes(prior) && readme.includes(expected), `README records ${surface.source_id} before/after`);
+  }
+  assert(readme.includes(LINKED_BEFORE_REVISION) && readme.includes(LINKED_BEFORE_SHA) && readme.includes(OWNER_POST_T06.commit));
+  for (const historical of before.historical_goldens) {
+    assert.strictEqual(sha256(fs.readFileSync(path.join(ROOT, historical.path))), historical.sha256, `${historical.path} frozen`);
+  }
+
+  // Every other captured source keeps its exact bytes.
+  for (const source of before.sources) {
+    if (declared.has(source.path) || T07_PIN_FILES.includes(source.path)) continue;
+    assert.strictEqual(sha256(fs.readFileSync(path.join(ROOT, source.path))), source.sha256, `unchanged source ${source.path}`);
+  }
+
+  // Samples: only the four source.sha256 values move to the raw bytes of their source.
+  const sampleText = fs.readFileSync(path.join(ROOT, before.samples.file), 'utf8');
+  const samples = JSON.parse(sampleText);
+  const sampleReadme = fs.readFileSync(path.join(ROOT, 'docs', 'communication-evaluation', 'README.md'), 'utf8');
+  const allowed = before.samples.normalization.allowed_json_pointers;
+  assert.strictEqual(allowed.length, 4);
+  let restored = sampleText;
+  for (const prior of before.samples.all_task_next_samples) {
+    const node = prior.pointer.split('/').slice(1).reduce((value, key) => value[key], samples);
+    assert(allowed.includes(`${prior.pointer}/source/sha256`));
+    assert.strictEqual(node.text, prior.text, `${prior.pointer} quoted text is literal`);
+    assert.strictEqual(node.label, prior.label);
+    assert.deepStrictEqual({ ...node.source, sha256: prior.source.sha256 }, prior.source, `${prior.pointer} metadata`);
+    const [, afterSha] = OWNER_POST_T06.contributors[prior.source.file];
+    assert.strictEqual(node.source.sha256, afterSha, `${prior.pointer} cites the raw source bytes`);
+    assert(fs.readFileSync(path.join(ROOT, prior.source.file), 'utf8').includes(node.text), `${prior.pointer} text present`);
+    assert(sampleReadme.includes(prior.source.sha256) && sampleReadme.includes(afterSha), `samples README records ${prior.pointer}`);
+    restored = restored.replace(`"sha256": "${afterSha}"`, `"sha256": "${prior.source.sha256}"`);
+  }
+  assert.strictEqual(sha256(Buffer.from(restored, 'utf8')), before.samples.sha256, 'only the four source.sha256 values changed');
+
+  // Registry: measured drift zero, so every row/classification/reason/fingerprint is the capture.
+  const auditResult = guard.audit({ root: ROOT });
+  assert.strictEqual(auditResult.ok, true, JSON.stringify(auditResult));
+  assert.strictEqual(guard.SOURCE_REGISTRY.length, before.dispatch_registry.audit_before.registered_count);
+  assert.deepStrictEqual(guard.SOURCE_REGISTRY.map((row) => ({ ...row })), before.dispatch_registry.registry_exact);
+  process.stdout.write('ok - chain-distribution-pins-follow-owner-pre-t06-baseline-and-measured-source-map-only\n');
+});
+
 test('guard CLI returns parseable JSON and release-gate status', () => {
   const clean = spawnSync(process.execPath, [path.join(__dirname, 'forge-dispatch-source-guard.js'), ROOT], {
     cwd: ROOT,

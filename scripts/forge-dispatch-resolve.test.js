@@ -505,6 +505,32 @@ withHermeticHome((cliEnv) => {
     cleanup(f);
   });
 
+  runCase('estimate-milestone keeps non-routable planning defaults and explicit effort overrides', () => {
+    const f = mkFixture({ prefsJsonc: JSON.stringify({
+      tier_models: { max: ['gpt-6.1-sol', 'claude-opus-5'] },
+      routing: { default: { planner: { max: ['claude-fable-5'] } } },
+    }) });
+    const estimate = dispatch(f, { unitType: 'estimate-milestone' });
+    const planning = dispatch(f, { unitType: 'plan-milestone' });
+    assertEqual(TIER_DEFAULTS['estimate-milestone'], 'max', 'estimate-milestone default tier max');
+    assertEqual(EFFORT_DEFAULTS['estimate-milestone'], 'medium', 'estimate-milestone default effort medium');
+    assertEqual(estimate.tier, 'max', 'estimate-milestone resolved tier max');
+    assertEqual(estimate.effort, 'medium', 'estimate-milestone resolved effort medium');
+    assertEqual(estimate.route_source, 'tier_models', 'estimate-milestone routing uses tier_models');
+    assertEqual(require('./forge-routing').mapPhase('estimate-milestone'), null, 'estimate-milestone mapPhase is null');
+    const routing = require('./forge-routing');
+    const route = routing.resolveRoute({ unitType: 'estimate-milestone', tier: 'max', cwd: f.dir });
+    assert(route.reason.includes('phase-not-routable'), 'estimate-milestone is phase-not-routable', route.reason);
+    for (const key of ['model', 'chain', 'chain_len', 'workers_timeout', 'workers_timeout_source']) {
+      nodeAssert.deepStrictEqual(estimate[key], planning[key], key);
+    }
+    pass('estimate-milestone retains plan-milestone model chain and tier worker ceiling');
+    fs.writeFileSync(path.join(f.dir, '.gsd', 'forge-prefs.jsonc'), JSON.stringify({ effort: { 'estimate-milestone': 'high' } }));
+    assertEqual(dispatch(f, { unitType: 'estimate-milestone' }).effort, 'high', 'estimate-milestone prefs effort override applied');
+    assertEqual(dispatch(f, { unitType: 'plan-milestone' }).effort, 'medium', 'existing plan-milestone effort unchanged');
+    cleanup(f);
+  });
+
   runCase('artifact tier preserves the configured GPT model', () => {
     const f = mkFixture({ prefsJsonc: '{"tier_models":{"max":"gpt-5.6-sol"}}' });
     const r = dispatch(f, { unitType: 'plan-milestone' });
