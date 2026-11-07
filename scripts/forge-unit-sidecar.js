@@ -387,6 +387,23 @@ function validateRecoveryRequest(raw, options = {}) {
   if (request.cwd && request.resultFile) artifactAttemptFiles(request);
   return transport;
 }
+// Issue 328: claudePermissions is a Claude-only transport option. A fresh
+// recovery destination copy for a non-Claude engine omits it only when the
+// original already satisfies the rule above (pure re-evaluation, no authority).
+// Every other value, origin or destination is returned unchanged and is still
+// decided by validateRecoveryRequest/runUnitSidecarCore. Inputs never mutate.
+function projectTransportOptions(value, original) {
+  if (value?.claudePermissions !== 'verification') return value;
+  const engine = value.route?.resolved_worker_engine;
+  if (typeof engine !== 'string' || !engine || engine === 'claude') return value;
+  const source = require('./forge-attempt-recovery').canonicalRequest(original);
+  const mode = capability(source.route?.resolved_worker_engine, source.unitType,
+    source.scope === 'milestone' ? {} : source).mode;
+  if (source.claudePermissions !== 'verification' || source.route?.resolved_worker_engine !== 'claude'
+      || !['execute', 'fix'].includes(mode) || !source.execution_contract) return value;
+  const { claudePermissions: transportOnly, ...projected } = value;
+  return projected;
+}
 function baselineDigest(state) {
   const { reconciliation, ...baseline } = state;
   return require('./forge-code-roots').digest(baseline);
@@ -3215,8 +3232,8 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     ? require('./forge-native-recovery-delivery') : null;
   let retainedRequest = null;
   const finalRequest = route => {
-    const current = { ...executionRequest, route, recoveryStateFile: recovery.stateFile,
-      dispatchId: recoveryDispatchId(request.dispatchId, continuationId), resultFile: `${request.resultFile}.recovery-${continuationId}.json` };
+    const current = projectTransportOptions({ ...executionRequest, route, recoveryStateFile: recovery.stateFile,
+      dispatchId: recoveryDispatchId(request.dispatchId, continuationId), resultFile: `${request.resultFile}.recovery-${continuationId}.json` }, executionRequest);
     return retainedRequest ? require('./forge-native-repackage').preserveRequest(current, retainedRequest) : current;
   };
   // This selects transport only; authority and the exact invocation hash are
@@ -3359,7 +3376,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       const invocation = route.worker_mode === 'native'
         ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(route)) : { ok: true };
       if (!invocation.ok) return invocation;
-      const candidate = { ...executionRequest, route };
+      const candidate = projectTransportOptions({ ...executionRequest, route }, executionRequest);
       try { asOriginal(candidate, () => validateRecoveryRequest(candidate, { verification: runtime.verification, nativeInvocation: invocation })); }
       catch (error) { return { ok: false, reason_code: error.code || 'unit-contract-refused', provider_called: false }; }
       return invocation;
@@ -3377,16 +3394,16 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     // a Claude sidecar route may carry it; runUnitSidecarCore revalidates the ref.
     invoke: async (route, invocation, _ceiling, assertReady, reservationHash, resume) => {
       if (resume != null && (route.worker_mode !== 'sidecar' || route.resolved_worker_engine !== 'claude')) fail('recovery-resume-route-invalid');
-      const routed = { ...executionRequest, route };
+      const routed = projectTransportOptions({ ...executionRequest, route }, executionRequest);
       asOriginal(routed, () => validateRecoveryRequest(routed, { verification: runtime.verification, nativeInvocation: invocation }));
       const ceiling = route.worker_mode === 'sidecar' ? ceilingFromRoute(route) : null;
-      const next = deliveryHelper ? finalRequest(route) : { ...executionRequest, recoveryStateFile: recovery.stateFile, route: ceiling
+      const next = deliveryHelper ? finalRequest(route) : projectTransportOptions({ ...executionRequest, recoveryStateFile: recovery.stateFile, route: ceiling
         ? { ...route, workers_timeout: ceiling.seconds, workers_timeout_source: ceiling.source } : route,
         dispatchId: recoveryDispatchId(request.dispatchId), resultFile: `${request.resultFile}.recovery-${crypto.randomUUID()}.json`,
         ...(resume != null ? { claudeResume: resume.session, resumedFrom: resume.resumed_from } : {}),
         // The successor carries only its actual parent: the admission returns the
         // parent's recorded decision for the same correction, never a new cycle.
-        ...(canonical.unitType === 'review-fix' ? { reviewFixRecoveryOf: request.dispatchId } : {}) };
+        ...(canonical.unitType === 'review-fix' ? { reviewFixRecoveryOf: request.dispatchId } : {}) }, executionRequest);
       if (route.worker_mode === 'native') {
         if (deliveryHelper) {
           // The successor has a new dispatch: an auto-deferred one needs the
@@ -3488,7 +3505,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
   });
 }
 module.exports = { appendProtectedOwnerEvents, preflightExecutionVerification, schema, memorySchema, memorySchemaV2, NEW_MEMORY_SCHEMA_VERSION, memoryExtractionSchema, memoryResponseSchema,
-  memoryTransportSchema, memoryEvidenceContract, MEMORY_QUALITY_CONTRACT, locations, milestonePlanFile, validateRecoveryRequest, captureMilestoneBaseline, reconcileMilestoneAttempt, validateArtifacts, inspectArtifacts, inspectDeliveryContent, executeDeliveryArtifacts, MAX_ARTIFACT_BYTES,
+  memoryTransportSchema, memoryEvidenceContract, MEMORY_QUALITY_CONTRACT, locations, milestonePlanFile, validateRecoveryRequest, projectTransportOptions, captureMilestoneBaseline, reconcileMilestoneAttempt, validateArtifacts, inspectArtifacts, inspectDeliveryContent, executeDeliveryArtifacts, MAX_ARTIFACT_BYTES,
   MAX_ARTIFACT_PAYLOAD_BYTES, target, markChecked, createTaskMarker, verifyTaskMarker, materialize, memoryPrompt, memorySourceContext,
   publishReadyRecord, nativeMemoryFingerprint, acceptNativeMemoryResult, candidateFromNativeResult, runNativeMemory,
   routeIdentity, artifactFingerprint, artifactAttemptFiles, beginArtifactAttempt, replayArtifactAttempt, reconcileLegacyReviewFix,

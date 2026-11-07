@@ -899,8 +899,9 @@ async function replay({request,recovery,runtime,nativeOptions}) {
   if(hash(manifestBytes)!==binding.manifest_sha256)fail('milestone-replay-manifest-binding');
   const manifest=JSON.parse(manifestBytes), record=JSON.parse(receiptBytes), wireRequest=manifest.request;
   const r=wireRequest.linked_begin_key?recoveryApi.bindLinkedRequest(wireRequest,runtime.linkedEntryOptions):wireRequest;
-  const expectedRequest={...request,route:r.route,recoveryStateFile:recovery.stateFile,
-    dispatchId:api('forge-recovery-dispatch-id').recoveryDispatchId(request.dispatchId,recovery.resumeReservation.sha256),resultFile:expected};
+  // Issue 328: rebuild the same projected successor that finalRequest produced.
+  const expectedRequest=api('forge-unit-sidecar').projectTransportOptions({...request,route:r.route,recoveryStateFile:recovery.stateFile,
+    dispatchId:api('forge-recovery-dispatch-id').recoveryDispatchId(request.dispatchId,recovery.resumeReservation.sha256),resultFile:expected},request);
   delete expectedRequest.linkedEntryBinding;
   if(roots.digest(wireRequest)!==roots.digest(expectedRequest)||record.manifest_sha256!==binding.manifest_sha256
       || record.dispatch_id!==r.dispatchId||record.fingerprint!==api('forge-unit-sidecar').artifactFingerprint(r)

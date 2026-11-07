@@ -2027,7 +2027,7 @@ async function memoryEvidenceContracts() {
   }
 }
 
-async function reviewFixRecoveryContracts(standalone=false,contractBearing=false) {
+async function reviewFixRecoveryContracts(standalone=false,contractBearing=false,permission=false) {
   const fs = require('fs'), path = require('path'), crypto = require('crypto');
   const fixtures = require('./forge-code-roots.test'), roots = require('./forge-code-roots');
   const recovery = require('./forge-attempt-recovery'), xllm = require('./forge-xllm'), runs = require('./forge-runs');
@@ -2050,6 +2050,10 @@ async function reviewFixRecoveryContracts(standalone=false,contractBearing=false
     gates: { claim: 'proceed', security: 'not-applicable' } };
   runs.add(lab.owner, { id: executionAuthority.runId, kind: 'milestone', session_id: 'fixture', write_claim: executionAuthority.claim });
   if(contractBearing)Object.assign(request,executionAuthority);
+  // Issue 328: the historical Claude fix carries the legitimate option and a
+  // sealed single-root command before any producer creates its receipt.
+  if(permission)Object.assign(request,{ claudePermissions: 'verification', verification: { preferenceCommands: ['node check.js'] } });
+  const { claudePermissions: omittedPermission, ...withoutPermission } = request;
   const receiptFile = request.resultFile + '.receipt.json', stateFile = request.resultFile + '.recovery.json';
   let nativeCalls = 0, nativeMode = 'object', textual = null;
   const textualReport = { status: 'done', items: [{ r: 'R1', outcome: 'fixed', note: 'fixture' }] };
@@ -2061,7 +2065,7 @@ async function reviewFixRecoveryContracts(standalone=false,contractBearing=false
         transport_telemetry: { model_observed: 'fix-fixture-model' } };
     };
     const collisionRequest = { ...request, dispatchId: 'fix-archive-collision', resultFile: path.join(lab.dir, 'collision.json') };
-    const permissionRequest = { ...request, dispatchId: 'fix-missing-permission', resultFile: path.join(lab.dir, 'permission.json'), verification: {} };
+    const permissionRequest = { ...withoutPermission, dispatchId: 'fix-missing-permission', resultFile: path.join(lab.dir, 'permission.json'), verification: {} };
     assert.strictEqual(request.route.resolved_worker_engine, 'claude');
     await assert.rejects(sidecar.runUnitSidecar(permissionRequest), error => error.code === 'claude-verification-permission-required');
     assert(!fs.existsSync(permissionRequest.resultFile + '.receipt.json'));
@@ -2129,6 +2133,11 @@ async function reviewFixRecoveryContracts(standalone=false,contractBearing=false
       invokeNative: async (next, binding, guards) => {
         nativeCalls++;
         assert.strictEqual(next.reviewFixRecoveryOf, request.dispatchId);
+        if (permission) {
+          assert(!Object.hasOwn(next, 'claudePermissions'), 'native review-fix successor carries no Claude-only option');
+          assert.deepStrictEqual(next.verification, request.verification);
+          assert.strictEqual(binding.args.reasoning_effort, next.route.effort);
+        }
         const admissionBefore = fs.readFileSync(path.join(lab.owner, '.gsd/forge/events.jsonl'));
         assert.strictEqual(binding.args.model, 'gpt-6-sol');
         assert(binding.args.message.includes('same.txt'));
@@ -2212,6 +2221,12 @@ async function reviewFixRecoveryContracts(standalone=false,contractBearing=false
     assert(fs.readFileSync(baselineFile).equals(baselineBytes));
     assert.strictEqual(JSON.parse(fs.readFileSync(stateFile)).roots_sha256, roots.digest(contractBearing?contract:{ cwd: request.cwd }));
     console.log('PASS '+(standalone?'standalone':'legacy')+(contractBearing?' contract-bearing':'')+' review-fix: real failed/reset producer, exact dirty restoration, held claim, pending questions, native prompt and public prepare/accept; historical bytes unchanged');
+    if (permission) {
+      assert.strictEqual(receipt.fingerprint, sidecar.artifactFingerprint(request));
+      assert.notStrictEqual(receipt.fingerprint, sidecar.artifactFingerprint(withoutPermission));
+      assert.throws(() => sidecar.reconcileLegacyReviewFix(withoutPermission, receipt, contract), /review-fix-recovery-binding/);
+      console.log('PASS issue328 review-fix seam: legacy Claude fix keeps its historical fingerprint binding and its native successor carries no claudePermissions');
+    }
   } finally { xllm.runFix = originalRunFix; lab.cleanup(); }
 }
 
@@ -2322,7 +2337,8 @@ async function runScenarios() {
   process.env.FORGE_HOME = path.resolve(__dirname, '..');
   try {
     if (!selectedScenario || selectedScenario === '--review-fix-admission') await reviewFixAdmissionContracts();
-    if (!selectedScenario || selectedScenario === '--review-fix-recovery') {for(const standalone of [false,true])for(const contractBearing of [false,true])await reviewFixRecoveryContracts(standalone,contractBearing);}
+    if (!selectedScenario || selectedScenario === '--review-fix-recovery') {for(const standalone of [false,true])for(const contractBearing of [false,true])await reviewFixRecoveryContracts(standalone,contractBearing);
+      await reviewFixRecoveryContracts(false,true,true);}
     if (!selectedScenario || selectedScenario === '--delivery-publication-limits') await deliveryPublicationLimits();
     if (!selectedScenario || selectedScenario === '--recovery-contracts') await recoveryContracts();
     if (!selectedScenario || selectedScenario === '--pre-spawn-sidecar') await preSpawnRecoveryContracts();
