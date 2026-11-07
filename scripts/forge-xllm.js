@@ -3131,9 +3131,13 @@ async function runPlanCore(opts) {
     // Claude-only keys: planOptions also feeds the app-server branch unchanged.
     // The plan unit's session opt-in comes only from its owner (S05); review
     // legs never call runPlanCore and never receive `session`.
+    // #330: the owner-supplied contextRoot reaches only this read-only Claude call
+    // (buildClaudeArgs turns it into `--add-dir <owner>`); absent stays absent, and
+    // planOptions keeps it away from the app-server's context observation.
     try {
       const claudeOutput = await invokeClaudeJson({ ...planOptions, onLiveness: opts.onLiveness,
-      localProofIgnore: opts.localProofIgnore, ...(opts.claudeSession ? { session: opts.claudeSession } : {}) }, validatePlanResult);
+      localProofIgnore: opts.localProofIgnore, ...(opts.contextRoot ? { contextRoot: opts.contextRoot } : {}),
+      ...(opts.claudeSession ? { session: opts.claudeSession } : {}) }, validatePlanResult);
       acceptClaudePlanOutput(claudeOutput);
     } catch (error) {
       if (require('./forge-claude-provisional').describe(error)?.private_ref) {
