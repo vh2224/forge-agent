@@ -643,6 +643,29 @@ by owner publication through the canonical fragment transaction. Missing auth,
 unsupported native model/effort, invalid output and publication failures remain
 nonblocking for the completed source unit and never switch engines silently.
 
+**Codex read-only artifact context (#350):** the Codex artifacts turn appends a
+delivery contract that forbids running commands and runs with the app-server
+sandbox `{type: readOnly, networkAccess: false}`, so the worker has no tool to read
+owner files, run commands, investigate code, run verification or generate delivery
+input. A new dispatch of such a profile is refused before any owner read, receipt,
+`solicitado` announcement or provider call with `codex-readonly-context-unsupported`
+(`stage: capability`, `provider_called: false`); the diagnostic names only the profile
+and its needs. Refused profiles: every milestone artifacts unit (`research-milestone`,
+`research-slice`, `discuss-milestone`, `discuss-slice`, `plan-milestone`,
+`estimate-milestone`, `plan-check`, `complete-slice`, `complete-milestone`) and the
+standalone `research` phase, which needs code investigation. An explicit `prompt` or
+`promptFile`, or a claim of complete context, does not change the classification,
+which comes only from engine, worker mode, transport mode, scope, phase and unit type
+(`CODEX_READONLY_ARTIFACT_PROFILES` in `scripts/forge-transport-capabilities.js`; an
+unknown profile is refused as `unclassified`). Owner-packaged and still admitted: the
+standalone `brainstorm`, `discuss` and `plan` phases, whose canonical caller inlines
+their inputs into the composed prompt. A saved `ready` (or `failed`) receipt replays
+first, without new inference. Claude (`Read,Glob,Grep`), native workers and the plan,
+execute, review-fix and memory transports are unchanged. Nothing is packaged by this
+rule, and no route, preference, sandbox or permission changes; choosing another
+engine stays with the existing routing and recovery policy. Verified offline with
+simulated transports only; no live provider reproduction.
+
 Install/synchronize the updated Forge sources on **both** hosts. Updating only
 the guard or copying one adapter leaves stale skills and incomplete delivery.
 

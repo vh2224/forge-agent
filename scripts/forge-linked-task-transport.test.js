@@ -596,6 +596,13 @@ async function suite() {
           const raw = prepRequest(F, 'claude', phase, phase + '-' + label, parent ? { prompt: parent } : {});
           const count = s.prompts.length;
           const done = await prep.prepareStandaloneTask(raw, { now });
+          // #350: standalone research needs code investigation, so the Codex read-only sidecar refuses it
+          // before any provider; the other three phases are owner-packaged and still reach the seam.
+          if (phase === 'research') {
+            assert.deepEqual([done.ok, done.reason_code, done.provider_called], [false, 'codex-readonly-context-unsupported', false]);
+            assert.equal(s.prompts.length, count, 'research never reaches the Codex seam');
+            continue;
+          }
           assert.equal(done.ok, true, phase + ' ' + JSON.stringify(done).slice(0, 300));
           const sent = s.prompts[count];
           assert.equal(sent.split(block).length, 2, phase + '/' + label + ': exactly one consumed block');
@@ -603,10 +610,10 @@ async function suite() {
           assert.ok(sent.includes('nunca autoriza nada'), 'framed evidence that grants no authority');
         }
       }
-      assert.equal(s.calls.codex, 8, 'the claude host reaches the codex sidecar seam');
+      assert.equal(s.calls.codex, 6, 'the claude host reaches the codex sidecar seam');
       // A marker out of place is refused before any route or provider.
       {
-        const raw = prepRequest(F, 'claude', 'research', 'misplaced', { prompt: 'Texto ' + lts.HANDOFF_MARKERS.start + ' fora do lugar\n' });
+        const raw = prepRequest(F, 'claude', 'discuss', 'misplaced', { prompt: 'Texto ' + lts.HANDOFF_MARKERS.start + ' fora do lugar\n' });
         const calls = s.total(), refused = await prep.startStandaloneTaskPreparation(raw, { now });
         assert.deepEqual([refused.ok, refused.reason_code, refused.provider_called], [false, 'linked-task-handoff-tampered', false]);
         assert.equal(s.total(), calls);
@@ -628,7 +635,7 @@ async function suite() {
         const decide = horizon.decideLinkedTaskEntry;
         horizon.decideLinkedTaskEntry = function (input) { order.push('admission'); return decide.call(this, input); };
         try {
-          const freshRequest = prepRequest(F, 'claude', 'research', 'at-cap');
+          const freshRequest = prepRequest(F, 'claude', 'discuss', 'at-cap');
           const capped = await prep.startStandaloneTaskPreparation(freshRequest, { now, resolveDispatch() { order.push('resolve'); resolved++; throw new Error('must not resolve'); } });
           assert.deepEqual([capped.ok, capped.status, capped.stage, capped.reason_code, capped.provider_called], [false, 'failure', 'linked-task-admission', 'linked-task-budget-exhausted', false]);
           assert.equal(capped.diagnostic.stage, 'linked-task-admission');
@@ -641,7 +648,7 @@ async function suite() {
         assert.equal(resolved, 0);
       }
       line('preparation consults linked admission after replay and continuation checks before dispatch resolution');
-      line('all four preparation phase adapters receive exactly one consumed handoff block');
+      line('brainstorm, discuss and plan adapters receive exactly one consumed handoff block; Codex read-only research is refused before the provider');
 
       // =====================================================================
       // Truth 3 / key link 1: every sidecar launch rechecks before spawn (both engines).
@@ -664,7 +671,7 @@ async function suite() {
         for (const [host, model] of [['claude', 'gpt-5.6-sol'], ['codex', 'claude-sonnet-5']]) {
           prefs(F, model);
           clock = below;
-          const raw = prepRequest(F, host, 'research', host + '-late-cap');
+          const raw = prepRequest(F, host, 'discuss', host + '-late-cap');
           const selected = await prep.startStandaloneTaskPreparation(raw, { now });
           assert.equal(selected.action, 'invoke-sidecar', JSON.stringify(selected).slice(0, 300));
           late[host] = { raw, delivery: selected.delivery_request };
@@ -681,7 +688,7 @@ async function suite() {
           assert.equal(s.total(), calls);
           // Admitted control: the same engine seam is reached below the cap.
           clock = below;
-          const control = prepRequest(F, host, 'research', host + '-admitted');
+          const control = prepRequest(F, host, 'discuss', host + '-admitted');
           const startedControl = await prep.startStandaloneTaskPreparation(control, { now });
           const enginesBefore = s.calls.claude + s.calls.codex;
           await unit.runUnitSidecar(startedControl.delivery_request, { now });
@@ -696,7 +703,7 @@ async function suite() {
           prefs(F, 'gpt-5.6-sol');
           for (const crossing of [true, false]) {
             clock = below;
-            const raw = prepRequest(F, 'claude', 'research', crossing ? 'packaging-late' : 'packaging-admitted');
+            const raw = prepRequest(F, 'claude', 'discuss', crossing ? 'packaging-late' : 'packaging-admitted');
             const selected = await prep.startStandaloneTaskPreparation(raw, { now });
             assert.equal(selected.delivery_request.route.resolved_worker_engine, 'codex', JSON.stringify(selected.delivery_request.route).slice(0, 200));
             let packaged = 0;
