@@ -366,8 +366,16 @@ test('documented --status argv prints the visible line for a temporary owner; do
       ['R3', false, true, ['not-conceded', 'severity-below-high', 'reachable-unknown', 'scope-unknown']]]);
 }));
 
-test('CHANGELOG: #341 entry right after the first entry under Não lançado, without CI/merge/release/installation/UAT claims', () => {
-  const lines = read('CHANGELOG.md').split('\n');
+// Admit only the measured #350 note before checking the original #341 order.
+function withoutReadonly350Entry(changelog) {
+  const entries = changelog.split('\n').filter(line => line.startsWith('- Contexto de artefatos no Codex somente leitura (#350):'));
+  assert.strictEqual(entries.length, 1, 'one declared #350 entry');
+  assert.strictEqual(sha256(entries[0] + '\n'), 'f020516ccf39b0986d43f9ca26a4fc9d861f6c7919176b10d80b1b422ec40f82', 'declared #350 entry matches measured bytes');
+  return changelog.replace(entries[0] + '\n', '');
+}
+
+test('CHANGELOG: #341 entry right after the original first entry under Não lançado, without CI/merge/release/installation/UAT claims', () => {
+  const lines = withoutReadonly350Entry(read('CHANGELOG.md')).split('\n');
   assert.strictEqual(lines[0], '## Não lançado');
   assert(lines[2].startsWith('- Prazos de milestone (M-20261101111759-opcoes-prazo-milestones):'), 'the first entry stays first');
   const entry = lines[3];
@@ -378,6 +386,15 @@ test('CHANGELOG: #341 entry right after the first entry under Não lançado, wit
   }
   assert(entry.includes('CI, merge, release e instalação não estão demonstrados, e o UAT humano não foi realizado.'));
   assert.strictEqual(lines.filter(line => line.includes('(#341')).length, 1, 'one entry');
+});
+
+test('CHANGELOG: the admitted #350 note rejects changed, missing and duplicate entries', () => {
+  const changelog = read('CHANGELOG.md');
+  const entry = changelog.split('\n').find(line => line.startsWith('- Contexto de artefatos no Codex somente leitura (#350):'));
+  assert(entry, '#350 note exists');
+  assert.throws(() => withoutReadonly350Entry(changelog.replace('codex-readonly-context-unsupported', 'codex-readonly-context-tampered')), /measured bytes/);
+  assert.throws(() => withoutReadonly350Entry(changelog.replace(entry + '\n', '')), /one declared #350 entry/);
+  assert.throws(() => withoutReadonly350Entry(changelog + entry + '\n'), /one declared #350 entry/);
 });
 
 (async () => {

@@ -500,6 +500,7 @@ async function startStandaloneTaskPreparationCore(rawRequest, deps = {}) {
   try {
     route = resolveDispatch(resolverOptions(request, request.contract));
     route = validateRoute(route, request.contract, request);
+    transportApi.assertReadOnlyArtifactContext({ engine: route.resolved_worker_engine, workerMode: route.worker_mode, mode: 'artifacts', scope: request.scope, phase: request.phase, unitType: request.contract.unitType });
   } catch (error) {
     return refused(error.stage || 'resolution', error.code || 'preparation-resolution-failed', route);
   }

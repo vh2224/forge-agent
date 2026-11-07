@@ -912,7 +912,35 @@ async function reviewFixMatrix() {
     assert.strictEqual(require('./forge-transport-capabilities').capability(engine, 'review-fix').mode, 'fix');
   }
   assert.throws(() => xllm.assertEngineSupportsMode('fix', 'agy'), error => error.code === 'unsupported-sidecar-unit');
+  // #350: the Codex read-only artifacts turn cannot read owner files, run commands or
+  // generate delivery input, so every milestone artifact unit is refused before any receipt,
+  // announce('solicitado') or provider call. No prompt shape is a bypass.
+  const READONLY_SENTINEL = 'SENTINEL-350-COMPLETE-CONTEXT-ASSERTED';
+  async function assertCodexReadOnlyRefusal(r, label) {
+    let codexCalls = 0;
+    xllm.invokeCodexAppServer = async () => { codexCalls++; return { finalText: '{}' }; };
+    const stages = [];
+    await assert.rejects(() => unit.runUnitSidecar(r, { announce: (stage, fields) => stages.push({ stage, ...fields }) }), error => {
+      assert.strictEqual(error.code, 'codex-readonly-context-unsupported', label);
+      assert.strictEqual(error.provider_called, false, label);
+      assert.strictEqual(error.stage, 'capability', label);
+      assert(error.message.includes(`milestone:${r.unitType}`), label);
+      assert(!error.message.includes(READONLY_SENTINEL), label);
+      return true;
+    }, label);
+    assert.strictEqual(codexCalls, 0, label);
+    assert.strictEqual(fs.existsSync(`${r.resultFile}.receipt.json`), false, label);
+    assert.strictEqual(fs.existsSync(r.resultFile), false, label);
+    assert(stages.some(item => item.stage === 'recusado' && item.reason_code === 'codex-readonly-context-unsupported' && item.provider_called === false), label);
+    assert(!stages.some(item => item.stage === 'solicitado'), label);
+  }
   for (const engine of ['claude', 'codex']) for (const type of ARTIFACT_UNITS) {
+    if (engine === 'codex') {
+      const r = request(setup(), type, engine);
+      assert.strictEqual(r.route.model_resolved, 'gpt-6-luna');
+      await assertCodexReadOnlyRefusal(r, type);
+      continue;
+    }
     const cwd = setup(), r = request(cwd, type, engine), p = payload(r);
     assert.strictEqual(r.route.effort, 'medium');
     if (engine === 'codex') assert.strictEqual(r.route.model_resolved, 'gpt-6-luna');
@@ -952,20 +980,37 @@ async function reviewFixMatrix() {
     write(path.join(cwd, p.artifacts[0].path), 'another writer');
     await rejects(() => unit.runUnitSidecar(r), 'artifact-conflict');
   }
-  for (const type of ['complete-slice', 'complete-milestone']) {
-    const cwd = setup(), r = request(cwd, type, 'codex', 'gpt-5.6-sol'), p = payload(r);
-    write(path.join(cwd, 'payload.json'), p);
-    let calls = 0;
-    xllm.invokeCodexAppServer = async options => {
-      calls++;
-      assert.strictEqual(options.model, 'gpt-5.6-sol');
-      assert.strictEqual(options.effort, 'medium');
-      assert.strictEqual(options.sandbox, 'read-only');
-      return { finalText: JSON.stringify(p) };
-    };
-    assert.strictEqual((await unit.runUnitSidecar(r)).status, 'done');
-    assert.strictEqual(calls, 1);
+  // Complete-slice: no prompt shape and no claim of completeness admits the profile, and the
+  // refusal comes before any owner source read (the slice PLAN and task SUMMARY may be absent).
+  for (const variant of ['rendered', 'prompt', 'promptFile', 'absent-sources']) {
+    const cwd = setup(), r = request(cwd, 'complete-slice', 'codex', 'gpt-5.6-sol');
+    if (variant === 'rendered') delete r.promptFile;
+    if (variant === 'prompt') r.prompt = `COMPLETE CONTEXT ASSERTED ${READONLY_SENTINEL}`;
+    if (variant === 'promptFile') write(r.promptFile, `COMPLETE CONTEXT ASSERTED ${READONLY_SENTINEL}`);
+    if (variant === 'absent-sources') {
+      fs.rmSync(path.join(cwd, '.gsd/milestones/M001/slices/S01/S01-PLAN.md'), { force: true });
+      fs.rmSync(path.join(cwd, '.gsd/milestones/M001/slices/S01/tasks'), { recursive: true, force: true });
+      assert.strictEqual(fs.existsSync(path.join(cwd, '.gsd/milestones/M001/slices/S01/S01-PLAN.md')), false);
+    }
+    await assertCodexReadOnlyRefusal(r, `complete-slice/${variant}`);
   }
+  // A saved ready receipt (created before #350) still replays first: no new inference.
+  {
+    const cwd = setup(), r = request(cwd, 'complete-slice', 'codex', 'gpt-5.6-sol'), p = payload(r);
+    assert.strictEqual(unit.beginArtifactAttempt(r).state, 'started');
+    await unit.acceptArtifactResult(r, p, { providerCalled: true });
+    assert.strictEqual(JSON.parse(fs.readFileSync(`${r.resultFile}.receipt.json`, 'utf8')).phase, 'ready');
+    let calls = 0;
+    xllm.invokeCodexAppServer = async () => { calls++; return { finalText: '{}' }; };
+    const stages = [];
+    const replayed = await unit.runUnitSidecar(r, { announce: (stage, fields) => stages.push({ stage, ...fields }) });
+    assert.strictEqual(replayed.status, 'done');
+    assert.strictEqual(calls, 0);
+    assert(stages.some(item => item.stage === 'reaproveitado' && item.provider_called === false), JSON.stringify(stages));
+    assert(!stages.some(item => item.stage === 'solicitado' || item.stage === 'recusado'), JSON.stringify(stages));
+    for (const a of p.artifacts) assert.strictEqual(fs.readFileSync(path.join(cwd, a.path), 'utf8'), a.content);
+  }
+  console.log('PASS Codex read-only milestone artifact profiles refuse before receipt/provider; ready receipts replay');
   for (const [kind, makeRequest] of [
     ['closure', dir => request(dir, 'complete-slice', 'codex')],
     ['memory', dir => memoryRequest(dir, 'codex', 'T-20260924010101-route-mismatch', 'M001')],

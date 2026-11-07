@@ -2400,6 +2400,9 @@ async function runUnitSidecarCore(request, runtime, identity) {
     }
     fail('sidecar-attempt-interrupted', 'Inspect the recorded heartbeat/process and recover this attempt before retrying with a new dispatch id. No worker was relaunched.');
   }
+  // #350: after saved-receipt replay, before owner reads, receipt, announce and provider: a Codex
+  // read-only artifacts profile that cannot receive its inputs is refused (identity only, no prompt).
+  require('./forge-transport-capabilities').assertReadOnlyArtifactContext({ engine: route.resolved_worker_engine, workerMode: route.worker_mode, mode: transport.mode, scope: r.scope, phase: r.phase, unitType: r.unitType });
   const before = Object.fromEntries(loc.allowed.map(p => [p, fileHash(target(root, p))]));
   // Pre-capture every existing task target. New targets have a null baseline;
   // a concurrently created plan is a conflict, not permission to overwrite it.
