@@ -12,6 +12,10 @@ const contract = roots.singleContract(lab.owner, lab.a);
 const identity = { dispatch_id: 'fixture-226', fingerprint: 'a'.repeat(64), recovery_identity_sha256: 'b'.repeat(64) };
 const commands = ['node --check scripts/main.js', 'node --check scripts/main.test.js',
   'node scripts/main.test.js', 'node scripts/publish.test.js', 'node scripts/gate.test.js'];
+// forge-xllm destructures invokeClaudeSidecar at module load, so it keeps the
+// first transport wrapper installed by a unit test. Every unit-level wrapper
+// records into this one collection, cleared by each test that observes it.
+const transportCalls = [];
 function make(list = commands) {
   const seal = verify.normalizeExecutionVerification(contract, '', { preferenceCommands: list }, {}, identity);
   return permissions.createPolicy({ seal, contract, identity, cwd: lab.a });
@@ -177,7 +181,8 @@ test('canonical unit owner seals opt-in commands through xllm to final argv; uns
   process.env.CODEX_HOME = path.join(unitLab.dir, '.codex');
   process.env.CLAUDE_CONFIG_DIR = path.join(unitLab.dir, '.claude');
   process.env.FORGE_HOME = path.resolve(__dirname, '..');
-  const handed = [];
+  const handed = transportCalls;
+  handed.length = 0;
   adapter.invokeClaudeSidecar = opts => {
     handed.push(opts);
     return realInvoke({ ...opts, probeRunner: () => ({ status: 0, stdout: '2.1.310 (Claude Code)' }),
@@ -223,6 +228,80 @@ test('canonical unit owner seals opt-in commands through xllm to final argv; uns
     await assert.rejects(unit.runUnitSidecar(bad), error => error.code === 'claude-permission-command-unsupported');
     assert.strictEqual(records.length, 0);
   } finally {
+    adapter.invokeClaudeSidecar = realInvoke;
+    for (const [key, value] of Object.entries(previousEnv)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    if (previousBin === undefined) delete process.env.FORGE_XLLM_CLAUDE_BIN; else process.env.FORGE_XLLM_CLAUDE_BIN = previousBin;
+    fs.rmSync(unitLab.dir, { recursive: true, force: true });
+  }
+});
+// Issue 328: a Claude destination keeps the legitimate option. Only the
+// recovery controller selection is substituted; validateInvocation and invoke
+// are the real recoverUnitSidecar adapters down to the Claude transport argv.
+test('issue 328: Claude to Claude recovery keeps the legitimate option', async () => {
+  const fixtures = require('./forge-code-roots.test'), runs = require('./forge-runs');
+  const recovery = require('./forge-attempt-recovery'), recoverAttempt = recovery.recoverAttempt;
+  const unitLab = fixtures.fixture(), unitContract = roots.singleContract(unitLab.owner, unitLab.a);
+  const realInvoke = adapter.invokeClaudeSidecar, previousBin = process.env.FORGE_XLLM_CLAUDE_BIN;
+  const previousEnv = Object.fromEntries(['HOME', 'USERPROFILE', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'FORGE_HOME'].map(k => [k, process.env[k]]));
+  process.env.HOME = process.env.USERPROFILE = unitLab.dir;
+  process.env.CODEX_HOME = path.join(unitLab.dir, '.codex');
+  process.env.CLAUDE_CONFIG_DIR = path.join(unitLab.dir, '.claude');
+  process.env.FORGE_HOME = path.resolve(__dirname, '..');
+  const handed = transportCalls;
+  handed.length = 0;
+  adapter.invokeClaudeSidecar = opts => {
+    handed.push(opts);
+    return realInvoke({ ...opts, probeRunner: () => ({ status: 0, stdout: '2.1.310 (Claude Code)' }),
+      sessionRemover: () => ({ ok: true }) });
+  };
+  const unit = require('./forge-unit-sidecar');
+  const base = path.join(unitLab.owner, '.gsd/milestones/M001/slices/S01');
+  fs.mkdirSync(path.join(base, 'tasks/T01'), { recursive: true });
+  const planFile = path.join(base, 'tasks/T01/T01-PLAN.md');
+  fs.writeFileSync(planFile, fixtures.plan(unitContract));
+  fs.writeFileSync(path.join(base, 'S01-PLAN.md'), '# Slice\n- [ ] **T01** fixture\n');
+  fs.writeFileSync(path.join(unitLab.owner, '.gsd/forge-prefs.jsonc'), JSON.stringify({ tier_models:
+    Object.fromEntries(['light', 'standard', 'heavy', 'max'].map(tier => [tier, ['claude-sonnet-5']])) }));
+  const request = { unitType: 'execute-task', scope: 'milestone', phase: 'execute', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01',
+    cwd: unitLab.a, contextRoot: unitLab.owner, execution_contract: unitContract, planFile,
+    workflowId: 'permissions-recovery-fixture', dispatchId: 'permissions-recovery-fixture', resultFile: path.join(unitLab.dir, 'recovery.json'),
+    prompt: 'Fixture only.', verification: { preferenceCommands: commands }, claudePermissions: 'verification' };
+  try {
+    process.env.FORGE_XLLM_CLAUDE_BIN = executable;
+    request.route = require('./forge-dispatch-resolve').resolveDispatch({ cwd: request.contextRoot,
+      unitType: request.unitType, milestoneId: request.milestoneId, unitId: request.taskId,
+      planPath: request.planFile, hostRuntime: 'codex' });
+    assert.strictEqual(request.route.resolved_worker_engine, 'claude');
+    assert.strictEqual(request.route.worker_mode, 'sidecar');
+    request.runId = 'permissions-recovery-fixture';
+    request.claim = { schema_version: 2, generation: require('crypto').randomUUID(), execution_contract: unitContract,
+      paths: [{ root_id: 'primary', path: 'same.txt' }] };
+    request.gates = { plan: 'skipped', planSkipReason: 'interactive-off', claim: 'proceed', security: 'not-applicable' };
+    runs.add(unitLab.owner, { id: request.runId, kind: 'milestone', session_id: 'fixture', write_claim: request.claim });
+    const before = JSON.stringify(request);
+    recovery.recoverAttempt = async options => {
+      const verdict = await options.validateInvocation(request.route);
+      assert.strictEqual(verdict.ok, true, JSON.stringify(verdict));
+      return options.invoke(request.route, verdict, null, undefined, 'issue328-fixture');
+    };
+    records.length = 0;
+    // The fixture deliberately does not satisfy the task outputs. It proves
+    // packaging of the recovered successor, not publication or provider authorization.
+    try { await unit.recoverUnitSidecar(request, { stateFile: request.resultFile + '.recovery.json',
+      receiptFile: request.resultFile + '.receipt.json' }, {}); } catch (error) {
+      assert(handed.length > 0, error.stack);
+    }
+    assert.strictEqual(handed.length, 1);
+    assert.deepStrictEqual(handed[0].permissionPolicy.rules, commands.map(c => `Bash(${c})`));
+    assert.notStrictEqual(handed[0].permissionIdentity.dispatch_id, request.dispatchId);
+    assert.strictEqual(handed[0].permissionPolicy.identity.dispatch_id, handed[0].permissionIdentity.dispatch_id);
+    assert.strictEqual(records.length, 1);
+    const args = records[0].args;
+    assert.deepStrictEqual(args.slice(args.indexOf('--allowedTools') + 1, args.indexOf('-p')), commands.map(c => `Bash(${c})`));
+    assert.strictEqual(JSON.stringify(request), before);
+    console.log('PASS issue328 Claude to Claude: the recovery successor keeps the legitimate option and the Claude transport receives the sealed rules');
+  } finally {
+    recovery.recoverAttempt = recoverAttempt;
     adapter.invokeClaudeSidecar = realInvoke;
     for (const [key, value] of Object.entries(previousEnv)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     if (previousBin === undefined) delete process.env.FORGE_XLLM_CLAUDE_BIN; else process.env.FORGE_XLLM_CLAUDE_BIN = previousBin;

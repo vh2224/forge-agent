@@ -197,6 +197,166 @@ async function persistedAnsweredContinuation(){
   console.log('PASS persisted answers: late required ID retained, explicit answer reattested, old manifest refused, fresh same-unit dispatch publishes without restoring question files');
  }finally{f.cleanup();}
 }
-async function main(){await linkedLifecycle();await retainedCapture();await retainedReturnedRefusal();await persistedAnsweredContinuation();}
+// Issue 328: the Claude-only transport option of a failed Claude writer never
+// reaches a native successor, while the historical original stays exact.
+const stateApi=require('./forge-xllm-state'),transitions=require('./forge-recovery-transition'),xllm=require('./forge-xllm');
+function sidecarGuard(){
+ const saved={runExecute:xllm.runExecute,invokeClaudeTransport:xllm.invokeClaudeTransport},guard={calls:0};
+ for(const name of Object.keys(saved))xllm[name]=async()=>{guard.calls++;throw new Error('issue328 Claude sidecar transport must not run');};
+ guard.restore=()=>Object.assign(xllm,saved);
+ return guard;
+}
+const withoutOption=request=>{const {claudePermissions:omitted,...rest}=request;return rest;};
+const identityOf=request=>roots.digest(recovery.requestIdentity(recovery.canonicalRequest(request)));
+const deliveryFile=f=>path.join(f.owner,side.locations(f.request).required[0]);
+const SLICE_PLAN='.gsd/milestones/M901/slices/S01/S01-PLAN.md';
+async function issue328Delivery(){
+ const f=await fixtures.fixture({beforeBegin:f=>{f.request.claudePermissions='verification';}});
+ const guard=sidecarGuard();
+ try{
+  assert.equal(f.request.route.resolved_worker_engine,'claude');assert.equal(f.request.route.worker_mode,'sidecar');
+  const receiptBytes=fs.readFileSync(f.receiptFile),receipt=JSON.parse(receiptBytes);
+  const input=JSON.parse(JSON.stringify(f.request)),inputJson=JSON.stringify(input);
+  assert.equal(receipt.fingerprint,side.artifactFingerprint(f.request));
+  assert.notEqual(receipt.fingerprint,side.artifactFingerprint(withoutOption(f.request)));
+  assert.equal(f.initial.attempts[0].caller_request_sha256,recovery.callerRequestHash(f.request));
+  assert.equal(f.initial.request_identity_sha256,identityOf(f.request));
+  let calls=0,observed=null;
+  f.runtime.invokeNative=async(next,binding,session)=>{
+   calls++;observed=next;
+   assert(!Object.hasOwn(next,'claudePermissions'),'native successor carries no Claude-only option');
+   for(const key of Object.keys(input).filter(k=>!['claudePermissions','route','dispatchId','resultFile'].includes(k)))
+    assert.deepEqual(next[key],input[key],key);
+   assert.deepEqual(Object.keys(next).sort(),[...Object.keys(withoutOption(input)),'recoveryStateFile'].sort());
+   assert.equal(next.route.resolved_worker_engine,'codex');assert.equal(next.route.worker_mode,'native');
+   assert.equal(next.route.tier,f.request.route.tier);assert.equal(next.route.effort,f.request.route.effort);
+   const model=next.route.model_resolved||next.route.model;
+   assert.equal(binding.args.model,model);assert(capabilities.models.includes(model),model);
+   assert.equal(binding.args.reasoning_effort,next.route.effort);
+   assert.equal(identityOf(next),identityOf(f.request));
+   assert.equal(session.manifest().verification_seal.command_timeout_ms,300000);
+   for(const root of f.contract.code_roots)fs.writeFileSync(path.join(root.path,'same.txt'),'after\n');
+   return f.result();
+  };
+  const result=await side.recoverUnitSidecar(input,f.recovery,f.runtime);
+  assert.equal(calls,1);assert.equal(guard.calls,0);
+  assert.equal(result.result.published.result.status,'done');
+  assert.equal(fs.readFileSync(path.join(f.owner,SLICE_PLAN),'utf8'),'# Slice\n- [x] **T01** — fixture\n');
+  assert(fs.existsSync(deliveryFile(f)),'DELIVERY published');
+  const state=stateApi.loadRecovery(f.stateFile);
+  const manifest=JSON.parse(fs.readFileSync(state.continuation.delivery.manifest_file));
+  assert(!Object.hasOwn(manifest.request,'claudePermissions'),'delivery manifest carries no Claude-only option');
+  assert.equal(manifest.request.dispatchId,observed.dispatchId);
+  assert.deepEqual(manifest.request.route,JSON.parse(JSON.stringify(observed.route)));
+  assert.equal(state.continuation.status,'returned');
+  assert.equal(state.continuation.reservation_sha256,f.recovery.resumeReservation.sha256);
+  assert.deepEqual(state.attempts,f.initial.attempts);assert.deepEqual(state.reservations,f.initial.reservations);
+  assert.deepEqual(fs.readFileSync(f.receiptFile),receiptBytes);assert.equal(JSON.stringify(input),inputJson);
+  console.log('PASS issue328 destination projection: native successor and manifest omit only claudePermissions; contract, claim, gates, verification, tier, effort and explicit model unchanged');
+  console.log('PASS issue328 native publication: public recoverUnitSidecar reaches one native lab callback, real verify and publish, zero Claude sidecar calls');
+  f.runtime.writerObservationAdapter=transitions.createWriterObservationAdapter(challenge=>({...challenge,
+   binding_sha256:roots.digest(challenge),status:'stopped',writer_identity:'fixture-native',evidence_reference:'fixture:awaited-return'}));
+  const files=result.result.published.artifacts.map(a=>path.join(f.owner,a.path));
+  const stamp=()=>files.map(file=>[fs.readFileSync(file,'utf8'),fs.statSync(file).mtimeMs]),settled=stamp();
+  const replayed=await side.recoverUnitSidecar(JSON.parse(inputJson),f.recovery,f.runtime);
+  assert.equal(replayed.action,'replay');assert.equal(replayed.provider_called,false);
+  assert.equal(calls,1);assert.equal(guard.calls,0);
+  assert.deepEqual(stamp(),settled,'replay writes no published bytes');
+  console.log('PASS issue328 replay: the projected successor manifest replays without a second callback or new published bytes');
+  await assert.rejects(()=>side.recoverUnitSidecar({...f.request,route:observed.route},f.recovery,f.runtime),{code:'claude-permission-policy-invalid'});
+  assert.equal(calls,1);assert.equal(guard.calls,0);
+  const closing=stateApi.loadRecovery(f.stateFile);
+  assert.deepEqual(fs.readFileSync(f.receiptFile),receiptBytes);
+  assert.deepEqual(closing.attempts,f.initial.attempts);assert.deepEqual(closing.reservations,f.initial.reservations);
+  assert.equal(closing.request_identity_sha256,f.initial.request_identity_sha256);
+  assert.equal(JSON.stringify(input),inputJson);assert.equal(JSON.stringify(f.request),inputJson);
+  console.log('PASS issue328 original preserved: exact Claude request, failed receipt bytes, fingerprint, caller hash, identity, attempts and reservations unchanged through delivery and replay');
+ }finally{guard.restore();f.cleanup();}
+}
+async function issue328Refusal(option,run){
+ const f=await fixtures.fixture({beforeBegin:f=>{f.request.claudePermissions=option;}});
+ const guard=sidecarGuard();
+ try{
+  let calls=0;
+  f.runtime.invokeNative=async()=>{calls++;throw new Error('issue328 refused destination must not run');};
+  const receiptBytes=fs.readFileSync(f.receiptFile);
+  await run(f);
+  assert.equal(calls,0);assert.equal(guard.calls,0);
+  assert.deepEqual(fs.readFileSync(f.receiptFile),receiptBytes);
+  const state=stateApi.loadRecovery(f.stateFile);
+  assert.deepEqual(state.attempts,f.initial.attempts);assert.deepEqual(state.reservations,f.initial.reservations);
+  assert(!state.continuation,'no prepared continuation');
+  assert(!fs.existsSync(deliveryFile(f)),'no DELIVERY');
+  assert.equal(fs.readFileSync(path.join(f.owner,SLICE_PLAN),'utf8'),'# Slice\n- [ ] **T01** — fixture\n');
+ }finally{guard.restore();f.cleanup();}
+}
+async function issue328Refusals(){
+ await issue328Refusal('all',async f=>{
+  const stateBytes=fs.readFileSync(f.stateFile);
+  for(const request of [f.request,{...f.request,claudePermissions:true},{...f.request,claudePermissions:null}])
+   await assert.rejects(()=>side.recoverUnitSidecar(JSON.parse(JSON.stringify(request)),f.recovery,f.runtime),{code:'claude-permission-policy-invalid'});
+  assert.deepEqual(fs.readFileSync(f.stateFile),stateBytes);
+ });
+ console.log('PASS issue328 malformed and foreign options: original-bound invalid values and a non-Claude original refuse with claude-permission-policy-invalid before any callback');
+ await issue328Refusal('verification',async f=>{
+  recovery.createRecovery({unit:'execute-task/T01',roots_sha256:roots.digest(f.contract),request:f.request,
+   state:stateApi.loadRecovery(f.stateFile),clock:()=>f.now,persist:v=>stateApi.saveRecovery(f.stateFile,v)})
+   .questions([{id:'issue328-required',question:'Required choice?'}]);
+  const outcome=await side.recoverUnitSidecar(JSON.parse(JSON.stringify(f.request)),f.recovery,f.runtime);
+  assert.equal(outcome.action,'pending-questions');
+  assert(outcome.questions.some(q=>q.id==='issue328-required'&&q.status==='pending'),'pending ID returned');
+ });
+ console.log('PASS issue328 pending question: a required pending question stops the option-bearing recovery before any callback or continuation');
+ await issue328Refusal('verification',async f=>{
+  f.runtime.activeCapabilities={...capabilities,models:[]};
+  let error=null;
+  try{await side.recoverUnitSidecar(JSON.parse(JSON.stringify(f.request)),f.recovery,f.runtime);}catch(e){error=e;}
+  assert(error&&typeof error.code==='string'&&error.code,'adapter refusal code');
+  assert.notEqual(error.code,'claude-permission-policy-invalid');
+ });
+ console.log('PASS issue328 incompatible destination: the native adapter refusal keeps history and reservations and fabricates no continuation or publication');
+}
+function issue328ProjectionTable(){
+ const freeze=value=>{if(value&&typeof value==='object'){Object.freeze(value);for(const v of Object.values(value))freeze(v);}return value;};
+ const claude={host_runtime:'codex',resolved_worker_engine:'claude',worker_mode:'sidecar',tier:'heavy',effort:'high',model:'claude-sonnet-5'};
+ const codex={host_runtime:'codex',resolved_worker_engine:'codex',worker_mode:'native',tier:'heavy',effort:'high',model:'gpt-5.6-sol'};
+ const base={unitType:'execute-task',milestoneId:'M1',sliceId:'S01',taskId:'T01',cwd:'/fixture/code',contextRoot:'/fixture/owner',
+  dispatchId:'issue328',resultFile:'/fixture/result.json',execution_contract:{schema_version:2,primary_root_id:'primary'},
+  claim:{schema_version:2,generation:'g'},gates:{claim:'proceed',security:'passed'},verification:{commandTimeoutMs:300000},
+  claudePermissions:'verification',route:claude};
+ const fix={...base,unitType:'review-fix',reviewFix:{decision:'proceed',items:[]}};
+ const standalone={...base,scope:'standalone-task',phase:'execute',taskId:'T-20261107000000-fixture'};
+ delete standalone.milestoneId;delete standalone.sliceId;
+ const project=side.projectTransportOptions;
+ const omitted=(original,value=freeze({...original,route:codex}))=>{
+  const before=JSON.stringify(value),out=project(value,freeze(JSON.parse(JSON.stringify(original))));
+  assert.notEqual(out,value);assert(!Object.hasOwn(out,'claudePermissions'));
+  assert.deepEqual(Object.keys(out),Object.keys(value).filter(k=>k!=='claudePermissions'));
+  for(const key of Object.keys(out))assert.equal(out[key],value[key],key);
+  assert.equal(JSON.stringify(value),before);
+  const again=project(value,original);assert.deepEqual(again,out);
+  assert.equal(recovery.callerRequestHash(again),recovery.callerRequestHash(out));
+ };
+ const unchanged=(original,value)=>{
+  freeze(value);const before=JSON.stringify(value);
+  assert.equal(project(value,freeze(JSON.parse(JSON.stringify(original)))),value);assert.equal(JSON.stringify(value),before);
+ };
+ omitted(base);omitted(fix);omitted(standalone);
+ unchanged(base,{...base,route:claude});
+ unchanged(base,{...base,route:{...claude,host_runtime:'claude',worker_mode:'native'}});
+ unchanged(base,{...base,route:{...codex,resolved_worker_engine:undefined}});
+ unchanged(base,{...base,route:{...codex,resolved_worker_engine:''}});
+ for(const option of ['all',true,null,'Verification',['verification'],{}]){
+  unchanged(base,{...base,route:codex,claudePermissions:option});
+  unchanged({...base,claudePermissions:option},{...base,route:codex});
+ }
+ unchanged({...base,route:codex},{...base,route:codex});
+ unchanged({...base,unitType:'plan-slice'},{...base,unitType:'plan-slice',route:codex});
+ unchanged({...base,execution_contract:undefined},{...base,route:codex});
+ unchanged(base,withoutOption({...base,route:codex}));
+ console.log('PASS issue328 projection rule: only an exact verification option of a Claude writer original is omitted for a non-Claude destination; inputs never mutate');
+}
+async function main(){await linkedLifecycle();await retainedCapture();await retainedReturnedRefusal();await persistedAnsweredContinuation();
+ await issue328Delivery();await issue328Refusals();issue328ProjectionTable();}
 if(require.main===module)(process.argv.includes('--answered')?persistedAnsweredContinuation():main()).catch(e=>{console.error(e);process.exitCode=1;});
 module.exports={main};
