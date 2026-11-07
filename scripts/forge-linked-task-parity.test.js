@@ -474,9 +474,25 @@ function reviewPolicyExpected(expected, delta) {
   }
   return after;
 }
+// #350: the Codex read-only sidecar refuses standalone research (code investigation) before any
+// receipt or provider. The immutable capture keeps its admitted start; only this one declared
+// cell's start is projected to the refusal, and the captured original is checked first.
+const ISSUE_350_CELL = Object.freeze({ phase: 'research', host: 'claude', mode: 'sidecar' });
+const ISSUE_350_PROBLEM = 'research/claude/sidecar start stop:codex-readonly-context-unsupported';
+function issue350Expected(expected) {
+  const assert = require('assert');
+  const after = JSON.parse(JSON.stringify(expected));
+  const cell = after.phases[ISSUE_350_CELL.phase][ISSUE_350_CELL.host][ISSUE_350_CELL.mode], original = cell.start;
+  assert.deepStrictEqual([original.ok, original.action, original.reason_code, original.provider_called,
+    original.route.resolved_worker_engine, original.route.worker_mode], [true, 'invoke-sidecar', 'sidecar-invocation-ready', false, 'codex', 'sidecar'],
+  'the captured cell is the admitted Codex sidecar research start');
+  cell.start = { ok: false, action: 'stop', status: 'failure', reason_code: 'codex-readonly-context-unsupported', provider_called: false,
+    route: original.route, diagnostic: { version: 1, stage: 'capability', reason: 'capability-refused' }, invoke: 'undefined' };
+  return after;
+}
 function reviewPolicyDeltaChecks(trace, expected, delta) {
   const assert = require('assert'), clone = value => JSON.parse(JSON.stringify(value));
-  const check = (current, proposed = delta) => assert.deepStrictEqual(current, reviewPolicyExpected(expected, proposed));
+  const check = (current, proposed = delta) => assert.deepStrictEqual(current, issue350Expected(reviewPolicyExpected(expected, proposed)));
   check(trace);
   const variants = [
     ['missing path', d => { d.unlinked_task_parity.changes.pop(); }],
@@ -502,8 +518,9 @@ async function parityCheck() {
   // Two independent traces in fresh temporary roots are identical: the projection is deterministic.
   const second = await computeTrace();
   assert.strictEqual(JSON.stringify(second), JSON.stringify(trace), 'unlinked trace is not deterministic at ' + firstDifference(second, trace));
-  // Every unlinked phase, both hosts and both routes are present, healthy and never called a provider.
-  assert.deepStrictEqual(traceProblems(trace), []);
+  // Every unlinked phase, both hosts and both routes are present, healthy and never called a provider;
+  // the only refused start is the declared #350 Codex read-only research cell.
+  assert.deepStrictEqual(traceProblems(trace), [ISSUE_350_PROBLEM]);
   assert.deepStrictEqual(Object.keys(trace.phases), [...PHASES]);
   for (const phase of PHASES) assert.deepStrictEqual(Object.keys(trace.phases[phase]), [...HOSTS]);
   // The normal mode only reads the owner baseline; it never captures or rewrites it.
@@ -513,7 +530,7 @@ async function parityCheck() {
   // The stored bytes and digest stay immutable; only the comparison is projected (see personalCaseProjection).
   const projectedTrace = personalCaseProjection(trace), historicalExpected = personalCaseProjection(expected);
   const delta = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/review-policy/distribution-delta.json'), 'utf8'));
-  const projectedExpected = reviewPolicyExpected(historicalExpected, delta);
+  const projectedExpected = issue350Expected(reviewPolicyExpected(historicalExpected, delta));
   reviewPolicyDeltaChecks(projectedTrace, historicalExpected, delta);
   assert.strictEqual(traceDigest(projectedTrace), traceDigest(projectedExpected), 'unlinked trace differs from the owner baseline at ' + firstDifference(projectedTrace, projectedExpected));
   assert.strictEqual(JSON.stringify(projectedTrace), JSON.stringify(projectedExpected));

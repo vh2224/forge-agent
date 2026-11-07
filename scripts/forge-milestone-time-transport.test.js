@@ -123,12 +123,25 @@ async function main() {
   xllm.terminateOwnedProcessTree = () => { kills++; throw Error('unexpected process termination'); };
   try {
     f.at = 101;
-    for (const [engine, unit, seam] of [['claude', 'research-milestone', 'invokeClaudeTransport'], ['codex', 'research-milestone', 'invokeCodexAppServer'],
+    for (const [engine, unit, seam] of [['claude', 'research-milestone', 'invokeClaudeTransport'],
       ['claude', 'plan-slice', 'runPlan'], ['codex', 'execute-task', 'runExecute']]) {
       await test('controller begin below cap then ' + seam + ' refused beyond cap with failed receipt and recovery stop', async () => {
         await stopped(f, request(f, engine, unit)); assert.equal(providers, 0); assert.equal(spawns, 0); assert.equal(kills, 0);
       });
     }
+    // #350: the Codex read-only research-milestone profile is refused by the context admission
+    // before the time guard, below and beyond the cap: no receipt and no provider.
+    await test('Codex read-only research-milestone is refused by context admission before the time guard', async () => {
+      for (const at of [1, 101]) {
+        f.at = at; const stages = [], r = request(f, 'codex', 'research-milestone'), before = providers;
+        await assert.rejects(sidecar.runUnitSidecar(r, runtime(f, stages)), error =>
+          error.code === 'codex-readonly-context-unsupported' && error.provider_called === false);
+        assert.equal(providers, before); assert.equal(fs.existsSync(r.resultFile + '.receipt.json'), false);
+        assert(stages.some(row => row.stage === 'recusado' && row.reason_code === 'codex-readonly-context-unsupported'));
+        assert(!stages.some(row => row.stage === 'solicitado'));
+      }
+      f.at = 101; assert.equal(spawns, 0); assert.equal(kills, 0);
+    });
     await test('every transport entry rechecks before recoveryReady; saved ready replay and publication remain allowed beyond cap', async () => {
       f.at = 1; const r = request(f, 'claude'); let ready = 0;
       xllm.invokeClaudeTransport = async options => {
@@ -146,7 +159,7 @@ async function main() {
     await test('below cap and no-contract legacy each call the same stub provider exactly once', async () => {
       for (const current of [f, fixture(false)]) {
         current.at = current === f ? 1 : 10000;
-        for (const [engine, unit] of [['claude', 'research-milestone'], ['codex', 'research-milestone'],
+        for (const [engine, unit] of [['claude', 'research-milestone'],
           ['claude', 'plan-slice'], ['codex', 'execute-task']]) {
         const r = request(current, engine, unit);
         const before = providers;

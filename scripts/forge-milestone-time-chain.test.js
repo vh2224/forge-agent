@@ -573,7 +573,7 @@ async function hostChain(host) {
     assert.ok(f.clock() - startedAt < taskCeiling / 2, 'preparation happens below the task cap');
     const now = () => f.clock();
     preparationPrefs(f, sidecarModel(f));
-    const sidecarRequest = prepRequest(f, T, 'research', host + '-sidecar');
+    const sidecarRequest = prepRequest(f, T, 'discuss', host + '-sidecar');
     const count = s.prompts.length;
     const prepared = await prep.prepareStandaloneTask(sidecarRequest, { now });
     assert.equal(prepared.ok, true, JSON.stringify(prepared).slice(0, 400));
@@ -588,7 +588,7 @@ async function hostChain(host) {
     assert.equal(JSON.stringify(nativeSeen[0]).split(JSON.stringify(block).slice(1, -1)).length, 2, 'the native callback received the consumed block exactly once');
     // Late cap: both entries selected below the task cap, the injected clock crosses it before the provider.
     preparationPrefs(f, sidecarModel(f));
-    const selectedSidecar = await prep.startStandaloneTaskPreparation(prepRequest(f, T, 'research', host + '-late-sidecar'), { now });
+    const selectedSidecar = await prep.startStandaloneTaskPreparation(prepRequest(f, T, 'discuss', host + '-late-sidecar'), { now });
     assert.equal(selectedSidecar.action, 'invoke-sidecar', JSON.stringify(selectedSidecar).slice(0, 300));
     const selectedNative = await prep.startStandaloneTaskPreparation(nativeRequest(f, T, host + '-late-native'), { now });
     assert.equal(selectedNative.action, 'invoke-native', JSON.stringify(selectedNative).slice(0, 300));
@@ -646,7 +646,7 @@ async function hostChain(host) {
     } finally { Object.assign(time, originals); }
     preparationPrefs(f, sidecarModel(f));
     const plainCount = s.prompts.length;
-    const plainPrepared = await prep.prepareStandaloneTask(prepRequest(f, plain, 'research', host + '-plain'), { now });
+    const plainPrepared = await prep.prepareStandaloneTask(prepRequest(f, plain, 'discuss', host + '-plain'), { now });
     assert.equal(plainPrepared.ok, true, JSON.stringify(plainPrepared).slice(0, 300));
     assert.equal(s.prompts.length, plainCount + 1);
     assert.ok(!s.prompts[plainCount].includes(lts.HANDOFF_MARKERS.start), 'unlinked preparation carries no handoff block');
@@ -723,6 +723,14 @@ function withoutReviewFix341Entry(changelog) {
   assert.equal(sha(Buffer.from(entries[0] + '\n', 'utf8')), REVIEW_FIX_341_ENTRY_SHA, 'declared review-fix entry matches measured bytes');
   return changelog.replace(entries[0] + '\n', '');
 }
+// The only additional admitted history delta is the measured #350 release note.
+const READONLY_350_ENTRY_SHA = 'f020516ccf39b0986d43f9ca26a4fc9d861f6c7919176b10d80b1b422ec40f82';
+function withoutReadonly350Entry(changelog) {
+  const entries = changelog.split('\n').filter(line => line.startsWith('- Contexto de artefatos no Codex somente leitura (#350):'));
+  assert.equal(entries.length, 1, 'one declared #350 entry');
+  assert.equal(sha(Buffer.from(entries[0] + '\n', 'utf8')), READONLY_350_ENTRY_SHA, 'declared #350 entry matches measured bytes');
+  return changelog.replace(entries[0] + '\n', '');
+}
 function documentationGroup() {
   const planning = read('docs/planning-cost-diagnosis.md');
   const at = planning.indexOf('## Deferred overlap\n');
@@ -735,15 +743,17 @@ function documentationGroup() {
   for (const reference of ['`docs/milestone-time-guide.md`', '`shared/forge-milestone-time.md`', '`CHANGELOG.md`']) assert.ok(overlap.includes(reference), reference);
   assert.ok(overlap.includes('Human UAT and actual\nfuture latency improvements require their own evidence.'));
   const changelog = read('CHANGELOG.md');
-  assert.ok(changelog.startsWith('## Não lançado\n\n- Prazos de milestone (M-20261101111759-opcoes-prazo-milestones):'), 'feature entry first under Não lançado');
-  const entry = changelog.split('\n')[2];
+  const priorFeatureScope = withoutReadonly350Entry(changelog);
+  assert.ok(priorFeatureScope.startsWith('## Não lançado\n\n- Prazos de milestone (M-20261101111759-opcoes-prazo-milestones):'), 'feature entry first under Não lançado');
+  const entry = priorFeatureScope.split('\n')[2];
   for (const topic of ['opções de prazo', 'governança de tempo', 'endpoint comprovado', 'task ligada', '`docs/milestone-time-guide.md`']) assert.ok(entry.includes(topic), topic);
   assert.ok(entry.includes('release, instalação e execução no cliente instalado não estão demonstradas') && entry.includes('UAT humano foi dispensado, não realizado'));
-  const assertHistory = text => assert.equal(sha(Buffer.from(withoutReviewFix341Entry(text).replace(entry + '\n', ''), 'utf8')), CHANGELOG_PRE_SHA, 'only the declared feature entries were added; history unchanged');
+  const assertHistory = text => assert.equal(sha(Buffer.from(withoutReviewFix341Entry(withoutReadonly350Entry(text)).replace(entry + '\n', ''), 'utf8')), CHANGELOG_PRE_SHA, 'only the declared feature entries were added; history unchanged');
   assertHistory(changelog);
   assert.throws(() => assertHistory(changelog + '\n- Unknown feature entry.\n'), /history unchanged/, 'unknown extra entry is not accepted');
   assert.throws(() => assertHistory(changelog.replace('orçamento de 50%', 'orçamento de 51%')), /measured bytes/, 'unmeasured review-fix entry is not accepted');
   assert.throws(() => assertHistory(changelog.replace('- Contexto pessoal:', '- Contexto pessoal adulterado:')), /history unchanged/, 'previous history is still immutable');
+  assert.throws(() => assertHistory(changelog.replace('codex-readonly-context-unsupported', 'codex-readonly-context-tampered')), /measured bytes/, 'unmeasured #350 entry is not accepted');
   ok('chain-documentation-update-preserves-panel-qualification-and-unreleased-feature-scope');
 }
 // T07 worker inventory: the fourteen local verification commands, and the owner operations
