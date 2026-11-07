@@ -95,6 +95,7 @@ async function main() {
     await crashBeforeMarker();
     await partialCrashReplay();
     await conflictDuringDispatch();
+    await retainedRefusedResponse();
     await conflictBeforePublication();
     await executedReplayManualMark();
     await alreadyCheckedBeforeCapture();
@@ -187,6 +188,12 @@ async function publicationAndSelection() {
     assert.strictEqual(transportCalls, 1);
     const ready = f.receipt();
     assert.strictEqual(ready.phase, 'ready');
+    const anchorBytes = fs.readFileSync(`${f.request.resultFile}.returned.json`);
+    assert.deepStrictEqual(JSON.parse(anchorBytes).result,
+      { status: 'done', summary: 'Marker fixture', files_changed: ['alpha::same.txt', 'beta::same.txt'], must_haves_status: [] });
+    assert.strictEqual(ready.returned_response.sha256, sha(anchorBytes));
+    assert.strictEqual(ready.returned_response.bytes, anchorBytes.length);
+    console.log('PASS issue337 sidecar valid path: ready receipt carries returned_response bound to the retained bytes');
     const paths = ready.artifacts.map(item => item.path);
     const unit = '.gsd/milestones/M001/slices/S01/tasks/T01/T01';
     for (const expected of [`${unit}-SUMMARY.md`, `${unit}-DELIVERY-INPUT.json`, `${unit}-DELIVERY.json`,
@@ -296,6 +303,82 @@ async function conflictDuringDispatch() {
     assert.strictEqual(f.read(SLICE_PLAN_PATH), edited, 'no recapture overwrites the operator edit');
     console.log('PASS conflict during dispatch: unrelated S01-PLAN edit fails closed with execution-protected-metadata and keeps operator bytes without recapture');
   } finally { workerHook = null; f.cleanup(); }
+}
+
+// Issue 337: a done response refused by the integrity guard stays privately
+// retained beside resultFile; the refusal, its history and every gate remain.
+async function retainedRefusedResponse() {
+  const f = setup('retained-refusal');
+  const edited = `${SLICE_PLAN}\nNota do caller durante o dispatch 337.\n`;
+  const sentinel = `issue337-summary-${crypto.randomUUID()}`, rawSentinel = `issue337-raw-${crypto.randomUUID()}`;
+  const returned = { status: 'done', summary: sentinel, files_changed: ['alpha::same.txt', 'beta::same.txt'],
+    must_haves_status: [], transport_telemetry: { raw_provider_field: rawSentinel } };
+  const stub = xllm.runExecute;
+  const unit = '.gsd/milestones/M001/slices/S01/tasks/T01/T01';
+  const eventsFile = path.join(f.lab.owner, '.gsd/forge/events.jsonl');
+  let eventsBeforeDrift = null;
+  try {
+    transportCalls = 0;
+    xllm.runExecute = async () => {
+      transportCalls++;
+      fs.writeFileSync(path.join(f.lab.a, 'same.txt'), 'worker alpha\n');
+      fs.writeFileSync(path.join(f.lab.b, 'same.txt'), 'worker beta\n');
+      eventsBeforeDrift = fs.readFileSync(eventsFile);
+      f.write(SLICE_PLAN_PATH, edited);
+      fs.writeFileSync(f.request.resultFile, JSON.stringify(returned, null, 2) + '\n');
+      return structuredClone(returned);
+    };
+    await assert.rejects(sidecar.runUnitSidecar(f.request), error => error.code === 'execution-protected-metadata');
+    const anchorFile = `${f.request.resultFile}.returned.json`;
+    const anchorBytes = fs.readFileSync(anchorFile);
+    const anchor = JSON.parse(anchorBytes);
+    const receipt = f.receipt();
+    assert.deepStrictEqual(Object.keys(anchor).sort(), ['dispatch_id', 'request_fingerprint', 'result', 'trust', 'version']);
+    assert.deepStrictEqual(anchor.result, returned);
+    assert.strictEqual(JSON.stringify(anchor.result), JSON.stringify(returned));
+    assert.strictEqual(anchor.dispatch_id, f.request.dispatchId);
+    assert.strictEqual(anchor.request_fingerprint, receipt.fingerprint);
+    assert.strictEqual(receipt.phase, 'failed');
+    assert.strictEqual(receipt.failure.reason_code, 'execution-protected-metadata');
+    assert.deepStrictEqual(Object.keys(receipt.returned_response).sort(), ['bytes', 'channel', 'sha256', 'unit_validation', 'version']);
+    assert.strictEqual(receipt.returned_response.sha256, sha(anchorBytes));
+    assert.strictEqual(receipt.returned_response.bytes, anchorBytes.length);
+    for (const key of ['result', 'milestone_delivery', 'telemetry']) assert.strictEqual(receipt[key], undefined, key);
+    const failure = JSON.parse(fs.readFileSync(f.request.resultFile, 'utf8'));
+    assert.strictEqual(failure.status, 'adapter-failed');
+    assert.strictEqual(failure.reason_code, 'execution-protected-metadata');
+    assert.deepStrictEqual(failure.returned_response, receipt.returned_response);
+    const eventsBytes = fs.readFileSync(eventsFile, 'utf8');
+    for (const text of [fs.readFileSync(f.request.resultFile, 'utf8'), fs.readFileSync(f.receiptFile, 'utf8'), eventsBytes]) {
+      assert(!text.includes(sentinel) && !text.includes(rawSentinel), 'only the hash reference leaves the private anchor');
+    }
+    assert(fs.existsSync(`${f.request.resultFile}.recovery.json`), 'recovery capture kept');
+    // The failed event goes through appendProtectedOwnerEvents, which refuses
+    // under the caller drift; recordFailure keeps that best-effort rule, so the
+    // owner history keeps the exact pre-drift bytes and no failed line is forged.
+    const unitEvents = eventsBytes.split('\n').filter(Boolean).map(line => JSON.parse(line))
+      .filter(entry => entry.event === 'sidecar-unit' && entry.dispatch_id === f.request.dispatchId);
+    assert.deepStrictEqual(unitEvents.map(entry => entry.status), ['started'], 'only the started event precedes the drift');
+    assert(Buffer.isBuffer(eventsBeforeDrift) && fs.readFileSync(eventsFile).equals(eventsBeforeDrift),
+      'owner events keep the pre-drift bytes; no failed event is appended over the drift');
+    const roots = require('./forge-code-roots');
+    for (const file of [anchorFile, f.receiptFile]) for (const root of [f.lab.owner, f.lab.a, f.lab.b]) {
+      assert(!roots.within(fs.realpathSync.native(root), fs.realpathSync.native(file)), `${file} outside ${root}`);
+    }
+    console.log('PASS issue337 sidecar refusal retention: execution-protected-metadata keeps the failed history and the exact returned done object in resultFile.returned.json, referenced only by sha256');
+
+    assert.strictEqual(f.read(SLICE_PLAN_PATH), edited, 'caller drift stays in place, no marker or restore');
+    for (const suffix of ['-SUMMARY.md', '-DELIVERY.json']) assert(!fs.existsSync(path.join(f.lab.owner, unit + suffix)), suffix);
+    assert.strictEqual(f.next().unit.id, 'T01', 'the controller still selects T01');
+    const receiptBytes = fs.readFileSync(f.receiptFile);
+    await assert.rejects(sidecar.runUnitSidecar(f.request), error => error.code === 'execution-protected-metadata');
+    assert.strictEqual(transportCalls, 1, 'no second inference');
+    assert(fs.readFileSync(f.receiptFile).equals(receiptBytes), 'failed receipt bytes preserved');
+    assert(fs.readFileSync(anchorFile).equals(anchorBytes), 'anchor bytes preserved');
+    assert(fs.readFileSync(eventsFile).equals(eventsBeforeDrift), 'replay appends no owner event');
+    assert.strictEqual(f.receipt().phase, 'failed');
+    console.log('PASS issue337 sidecar no acceptance: no executed/ready receipt, task marker, SUMMARY/DELIVERY, telemetry copy or second transport; replay rethrows the recorded refusal');
+  } finally { xllm.runExecute = stub; f.cleanup(); }
 }
 
 async function conflictBeforePublication() {

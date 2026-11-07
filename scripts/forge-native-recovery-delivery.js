@@ -481,7 +481,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
   if(leaseRenewal!==undefined&&(!renewal||!savedManifest||renewal.manifest_digest!==roots.digest(savedManifest)))fail('lease-renewal-capability-required');
   side.validateRecoveryRequest(r,{nativeInvocation,linkedEntryOptions});
   if(r.linked_begin_key)r=api('forge-attempt-recovery').bindLinkedRequest(wireRequest,linkedEntryOptions);
-  requestIdentity(r,linkedEntryOptions);
+  const preparedRecoveryIdentity=roots.digest(requestIdentity(r,linkedEntryOptions));
   const plan=fs.readFileSync(r.planFile,'utf8'),context=fs.readFileSync(r.contextFile);
   requireExplicitVerify(plan,r);
   const checked=roots.validatePlan(plan,r.execution_contract);
@@ -575,6 +575,23 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
     }
     persistDeliveryReceipt({file,sha256});
     return {file,sha256};
+  };
+  // Private diagnostic retention of a contract-valid done result refused by the
+  // integrity guard. Never a receipt, publication, acceptance or replay source;
+  // any retention error is swallowed so the original refusal propagates as is.
+  const retainRefusedReturn=(result,error)=>{
+    try{
+      if(error?.code!=='execution-protected-metadata'||result?.status!=='done'||!resultContract.validate(result).ok)return;
+      const envelope={schema_version:1,kind:'native-returned-response-retained',accepted:false,
+        trust:'worker-normalized; integrity-refused; not accepted; no receipt, publication or replay authority',
+        refusal:{reason_code:error.code},dispatch_id:r.dispatchId,fingerprint:side.artifactFingerprint(r),
+        recovery_identity_sha256:preparedRecoveryIdentity,route:r.route,manifest_sha256:hash(fs.readFileSync(manifestFile)),result};
+      const bytes=JSON.stringify(envelope)+'\n',file=path.join(path.dirname(r.resultFile),'forge-returned-'+hash(bytes)+'.json');
+      for(const root of [r.contextRoot,...r.execution_contract.code_roots.map(row=>row.path)])api('forge-xllm').validateResultFileTarget(file,root);
+      try{fs.writeFileSync(file,bytes,{flag:'wx',mode:0o600});}
+      catch(writeError){if(writeError.code!=='EEXIST'||!fs.lstatSync(file).isFile()||fs.lstatSync(file).isSymbolicLink()
+        ||fs.readFileSync(file,'utf8')!==bytes)throw writeError;}
+    }catch{/* retention never replaces the original refusal */}
   };
   let refusedClosure=null;
   const open=()=>{if(refusedClosure)fail('native-refusal-closed');};
@@ -703,7 +720,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       if(verificationExtra)fail('verification-continuation-replay-only');
       if(artifactReview)fail('artifact-advisory-replay-only');
       if(supplement)fail('supplemental-replay-only');
-      guard();
+      try{guard();}catch(error){retainRefusedReturn(result,error);throw error;}
       if(!resultContract.validate(result).ok)fail('native-result-invalid');
       persist({kind:standalone?'standalone-native-continuation':'milestone-native-continuation',phase:'executed',dispatch_id:r.dispatchId,
         ...(renewal?{lease_reconciliation:renewal.evidence}:{}),
