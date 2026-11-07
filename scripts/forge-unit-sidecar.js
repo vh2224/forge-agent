@@ -2211,7 +2211,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
   // Local-only evidence, not a delivery or a replay authorization. Persist before
   // unit validation can reject a transport-normalized response and overwrite its
   // result channel. Exclusive creation prevents a later attempt replacing it.
-  async function preserveReturnedResponse(result) {
+  async function preserveReturnedResponse(result, { recordTelemetry = true } = {}) {
     const file = `${resultFile}.returned.json`;
     const envelope = { version: 1, dispatch_id: dispatchId, request_fingerprint: fingerprint,
       result, trust: 'transport-normalized; unit-validation-pending' };
@@ -2224,7 +2224,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
     const record = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
     record.returned_response = { version: 1, sha256: hash(bytes), bytes: bytes.length,
       channel: 'resultFile.returned.json', unit_validation: 'pending' };
-    if (result.transport_telemetry) record.telemetry = result.transport_telemetry;
+    if (recordTelemetry && result.transport_telemetry) record.telemetry = result.transport_telemetry;
     json(receiptFile, record);
   }
   function writeProvisionalAnchor(file, bytes) {
@@ -2799,6 +2799,9 @@ async function runUnitSidecarCore(request, runtime, identity) {
         return result;
       }
       if (r.execution_contract && result.status === 'done') {
+        // Retain the returned object privately before integrity checks can refuse it;
+        // receipts gain only the hash reference. Not an acceptance or replay source.
+        await preserveReturnedResponse(result, { recordTelemetry: false });
         const api = require('./forge-task-execution');
         const saved = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
         api.assertProtected(root, saved.recovery_baseline.protected_owner);

@@ -76,7 +76,11 @@ async function retainedCapture(){
    assertAuthority:f.assertBoundary,persistDeliveryReceipt:r=>receipts.push(r)});
   session.start();for(const root of f.contract.code_roots)fs.writeFileSync(path.join(root.path,'same.txt'),'after\n');
   const invalid=f.result();invalid.must_haves_status[0].evidence[0].stdout_line='PASS fabricated assertion';
-  session.returned(invalid);assert.throws(()=>session.verify(invalid),/criterion-unobserved-evidence/);
+  session.returned(invalid);
+  assert.equal(receipts.length,1);assert.equal(JSON.parse(fs.readFileSync(receipts[0].file,'utf8')).phase,'executed');
+  assert.equal(fs.readdirSync(path.dirname(request.resultFile)).filter(n=>n.startsWith('forge-returned-')).length,0);
+  console.log('PASS issue337 native valid path: an accepted return persists its executed receipt without a retention file');
+  assert.throws(()=>session.verify(invalid),/criterion-unobserved-evidence/);
   assert.throws(()=>session.publish(invalid),/verified-result-required/);
   assert(path.basename(request.resultFile).length>=103,'realistic recovery basename exercises the former256-character capture name');
   const prefix='forge-verification-';
@@ -96,6 +100,70 @@ async function retainedCapture(){
    const r=f.result();change(r);assert.throws(()=>bind(r));
   }
   console.log('PASS verification retention: actual successful commands survive binding refusal; raw result hashes, incomplete/duplicate/foreign/empty labels and no-publication guards preserved');
+ }finally{f.cleanup();}
+}
+// Issue 337: a contract-valid done result refused by the integrity guard is
+// retained privately; the refusal, its precedence and every gate are unchanged.
+async function retainedReturnedRefusal(){
+ const f=await fixtures.fixture();
+ try{
+  const sha=v=>require('crypto').createHash('sha256').update(v).digest('hex');
+  const execution=require('./forge-task-execution');
+  const handoff=await side.recoverUnitSidecar(f.request,f.recovery,f.runtime),request=handoff.result.request;
+  const nativeInvocation=invocation(request),receipts=[];
+  const session=delivery.prepare({request,nativeInvocation,assertBoundary:f.assertBoundary,assertAuthority:f.assertBoundary,
+   persistDeliveryReceipt:r=>receipts.push(r)});
+  session.start();
+  for(const root of f.contract.code_roots)fs.writeFileSync(path.join(root.path,'same.txt'),'after\n');
+  const slicePlan=path.join(f.owner,'.gsd/milestones/M901/slices/S01/S01-PLAN.md');
+  fs.appendFileSync(slicePlan,'caller drift line for issue 337\n');
+  const dir=path.dirname(request.resultFile),retainedNames=()=>fs.readdirSync(dir).filter(n=>n.startsWith('forge-returned-'));
+  const planBytes=fs.readFileSync(slicePlan),stateBytes=fs.existsSync(f.stateFile)?fs.readFileSync(f.stateFile):null;
+  const claimDigest=()=>roots.digest(require('./forge-runs').get(f.owner,request.runId).write_claim);
+  const claimBefore=claimDigest(),ownerBefore=roots.digest(execution.protectedSnapshot(f.owner));
+  const refused={code:'execution-protected-metadata'};
+  const extra={...f.result(),unexpected:true},partial={...f.result(),status:'partial'};
+  assert.throws(()=>session.returned(extra),refused);assert.throws(()=>session.returned(partial),refused);
+  assert.equal(retainedNames().length,0,'invalid or partial results are never retained');
+  const result=f.result(),raw=JSON.stringify(result);
+  assert.throws(()=>session.returned(result),refused);
+  const names=retainedNames();assert.equal(names.length,1);assert.match(names[0],/^forge-returned-[a-f0-9]{64}\.json$/);
+  const file=path.join(dir,names[0]),bytes=fs.readFileSync(file),envelope=JSON.parse(bytes);
+  assert.equal(names[0],'forge-returned-'+sha(bytes)+'.json');
+  assert.deepEqual(Object.keys(envelope),['schema_version','kind','accepted','trust','refusal','dispatch_id','fingerprint',
+   'recovery_identity_sha256','route','manifest_sha256','result']);
+  assert.equal(envelope.kind,'native-returned-response-retained');assert.equal(envelope.accepted,false);
+  assert.deepEqual(envelope.refusal,{reason_code:'execution-protected-metadata'});
+  assert.equal(envelope.dispatch_id,request.dispatchId);assert.equal(envelope.fingerprint,side.artifactFingerprint(request));
+  assert.equal(envelope.recovery_identity_sha256,roots.digest(recovery.requestIdentity(recovery.canonicalRequest(request))));
+  assert.deepEqual(envelope.route,request.route);
+  assert.equal(envelope.manifest_sha256,sha(fs.readFileSync(request.resultFile+'.manifest.json')));
+  assert.equal(JSON.stringify(envelope.result),raw);
+  for(const text of [nativeInvocation.args?.message,nativeInvocation.args?.prompt,'Isolated recovery issue regression',request.prompt].filter(Boolean))
+   assert(!bytes.toString('utf8').includes(text),'no prompt text is retained');
+  for(const root of [f.owner,...f.contract.code_roots.map(r=>r.path)])
+   assert(!roots.within(fs.realpathSync.native(root),fs.realpathSync.native(file)),'retention stays outside '+root);
+  console.log('PASS issue337 native refusal retention: execution-protected-metadata retains one unaccepted forge-returned envelope with the exact result, dispatch, fingerprint, recovery identity, route and manifest');
+
+  assert.throws(()=>session.returned(f.result()),refused);
+  assert.deepEqual(retainedNames(),names);assert.deepEqual(fs.readFileSync(file),bytes);
+  const foreign=Buffer.from('foreign fixture bytes\n');
+  fs.writeFileSync(file,foreign);
+  assert.throws(()=>session.returned(f.result()),refused);
+  assert.deepEqual(fs.readFileSync(file),foreign,'foreign target bytes are never overwritten');
+  fs.writeFileSync(file,bytes);
+  console.log('PASS issue337 native precedence: invalid or partial results keep the same refusal without retention; repeated refusal is idempotent and foreign target bytes never replace the refusal');
+
+  assert.equal(receipts.length,0);
+  const receiptPrefix=path.basename(request.resultFile)+'.receipt.json.';
+  assert.equal(fs.readdirSync(dir).filter(n=>n.startsWith(receiptPrefix)).length,0);
+  assert(!fs.existsSync(path.join(f.owner,side.locations(request).required[0])),'no DELIVERY');
+  assert.deepEqual(fs.readFileSync(slicePlan),planBytes,'caller drift stays, no marker or restore');
+  if(stateBytes)assert.deepEqual(fs.readFileSync(f.stateFile),stateBytes);else assert(!fs.existsSync(f.stateFile));
+  assert.equal(claimDigest(),claimBefore);
+  assert.equal(roots.digest(execution.protectedSnapshot(f.owner)),ownerBefore);
+  assert.throws(()=>session.publish(result),/verified-result-required/);
+  console.log('PASS issue337 native no acceptance: no receipt, publication, marker, DELIVERY, claim, state or owner metadata change from retention');
  }finally{f.cleanup();}
 }
 async function persistedAnsweredContinuation(){
@@ -129,6 +197,6 @@ async function persistedAnsweredContinuation(){
   console.log('PASS persisted answers: late required ID retained, explicit answer reattested, old manifest refused, fresh same-unit dispatch publishes without restoring question files');
  }finally{f.cleanup();}
 }
-async function main(){await linkedLifecycle();await retainedCapture();await persistedAnsweredContinuation();}
+async function main(){await linkedLifecycle();await retainedCapture();await retainedReturnedRefusal();await persistedAnsweredContinuation();}
 if(require.main===module)(process.argv.includes('--answered')?persistedAnsweredContinuation():main()).catch(e=>{console.error(e);process.exitCode=1;});
 module.exports={main};
