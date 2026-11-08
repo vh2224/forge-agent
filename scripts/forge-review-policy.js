@@ -246,7 +246,8 @@ function validAdmissionRecord(row) {
 }
 function timeOf(value) { const at = typeof value === 'string' ? Date.parse(value) : NaN; return Number.isFinite(at) ? at : null; }
 // started → terminal of the sidecar attempt; anything else is unmeasured.
-function measuredAttempt(rows, dispatchId, unitLabel) {
+// Issue 342: the absolute window is shared with the milestone-options history.
+function attemptWindow(rows, dispatchId, unitLabel) {
   let start = null, end = null;
   for (const row of rows) {
     if (row.event !== 'sidecar-unit' || row.dispatch_id !== dispatchId || row.unit !== unitLabel) continue;
@@ -255,7 +256,11 @@ function measuredAttempt(rows, dispatchId, unitLabel) {
     if (row.status === 'started' && start === null) start = at;
     else if (TERMINAL_STATUSES.includes(row.status) && start !== null && end === null) end = at;
   }
-  return start !== null && end !== null && end >= start ? end - start : null;
+  return start !== null && end !== null && end >= start ? { start, end } : null;
+}
+function measuredAttempt(rows, dispatchId, unitLabel) {
+  const w = attemptWindow(rows, dispatchId, unitLabel);
+  return w ? w.end - w.start : null;
 }
 function dispatchBelongs(row, scope) {
   if (row.event !== 'dispatch' || row.unit !== scope.unit_label) return false;
@@ -344,6 +349,65 @@ function readHistory(owner, input, options = {}) {
   return { status: 'valid', scope, malformed_lines: parsed.malformed, admissions, admitted: [...admitted.values()], consumed,
     counted: counted.length, legacy: { count: legacyIds.size + legacyWithoutId, dispatch_ids: [...legacyIds].sort(), without_id: legacyWithoutId },
     continuations: [...continuationIds].sort(), budget };
+}
+
+// Issue 342: scope of one review-fix dispatch row, proven only by its own fields.
+function reviewFixScope(row) {
+  const label = row.unit.slice('review-fix/'.length);
+  const milestone = typeof row.milestone === 'string' && row.milestone ? row.milestone : null;
+  let input;
+  if (milestone === null) input = { boundary: 'task', task: label };
+  else if (SLICE_ID_RE.test(label)) input = { boundary: 'slice', milestone, slice: label };
+  else if (label === `${milestone}-triage`) input = { boundary: 'milestone-triage', milestone };
+  else return null;
+  let scope;
+  try { scope = scopeOf(input); } catch { return null; }
+  if (!dispatchBelongs(row, scope)) return null;
+  const slice = row.slice === undefined || row.slice === null || row.slice === '' ? null : row.slice;
+  return slice !== null && slice !== scope.slice ? null : scope;
+}
+/**
+ * Issue 342: one bounded (16 MiB) stable read of the owner global log. Returns the
+ * measured review-fix windows whose scope the dispatch proves, plus named counts of
+ * what cannot be measured or attributed. Read-only; it never assigns attempts to samples.
+ */
+function reviewFixAttempts(owner) {
+  const real = ownerReal(owner);
+  const read = boundedRead(ownerEventsFile(real), MAX_OWNER_EVENTS_BYTES);
+  if (read === null) return { status: 'absent' };
+  if (read.error) return { status: 'unavailable', reason: read.error };
+  const parsed = parseLines(read.buffer);
+  if (parsed.error) return { status: 'unavailable', reason: parsed.error };
+  const rows = parsed.rows, counts = { unmeasured: 0, missing_dispatch: 0, invalid_scope: 0, ambiguous: 0 };
+  const byId = new Map(), dispatched = new Set();
+  for (const row of rows) {
+    if (row.event !== 'dispatch' || typeof row.unit !== 'string' || !row.unit.startsWith('review-fix/')) continue;
+    if (typeof row.dispatch_id === 'string') dispatched.add(row.dispatch_id);
+    const id = typeof row.dispatch_id === 'string' && DISPATCH_ID_RE.test(row.dispatch_id) ? row.dispatch_id : null;
+    // A legacy dispatch without an id can never be paired with a measured attempt.
+    if (id === null) { counts.unmeasured++; continue; }
+    if (!byId.has(id)) byId.set(id, { scopes: new Map(), invalid: 0 });
+    const entry = byId.get(id), scope = reviewFixScope(row);
+    if (scope) entry.scopes.set(scope.key, scope); else entry.invalid++;
+  }
+  const attempts = [];
+  for (const [id, entry] of byId) {
+    if (entry.scopes.size > 1 || entry.scopes.size === 1 && entry.invalid) { counts.ambiguous++; continue; }
+    if (!entry.scopes.size) { counts.invalid_scope++; continue; }
+    const scope = [...entry.scopes.values()][0], window = attemptWindow(rows, id, scope.unit_label);
+    if (window === null) { counts.unmeasured++; continue; }
+    attempts.push({ dispatch_id: id, boundary: scope.boundary, key: scope.key, milestone: scope.milestone || null, slice: scope.slice || null,
+      task: scope.task || null, start: window.start, end: window.end });
+  }
+  const orphans = new Set();
+  for (const row of rows) {
+    if (row.event === 'sidecar-unit' && typeof row.unit === 'string' && row.unit.startsWith('review-fix/')
+      && typeof row.dispatch_id === 'string' && row.dispatch_id && !dispatched.has(row.dispatch_id)) orphans.add(row.dispatch_id);
+  }
+  counts.missing_dispatch = orphans.size;
+  attempts.sort((a, b) => a.start - b.start || a.end - b.end || (a.dispatch_id < b.dispatch_id ? -1 : a.dispatch_id > b.dispatch_id ? 1 : 0));
+  return { status: 'available', sha256: sha256(read.buffer), bytes: read.buffer.length, max_bytes: MAX_OWNER_EVENTS_BYTES,
+    malformed_lines: parsed.malformed, attempts, counts };
 }
 
 // ── Decision ────────────────────────────────────────────────────────────────
@@ -690,6 +754,6 @@ function main(argv = process.argv.slice(2), io = process) {
 
 module.exports = { POLICY_VERSION, CYCLE_LIMIT, BUDGET_RATIO, ADMISSION_EVENT, LEG_REFUSAL_EVENT, REFUSAL_CODES, REVIEW_LEG_CODES,
   REVIEW_LEG_AGENTS, TRISTATE, BASES, ITEM_REASONS, BOUNDARIES, MAX_OWNER_EVENTS_BYTES,
-  classifyFinding, itemVerdicts, boundaryKey, readHistory, decideAdmission, admitCorrection, findAdmission, readStatus,
+  classifyFinding, itemVerdicts, boundaryKey, readHistory, reviewFixAttempts, decideAdmission, admitCorrection, findAdmission, readStatus,
   renderStatusLine, formatDuration, assertReviewLeg, admissionFromRequest, main };
 if (require.main === module) process.exitCode = main();

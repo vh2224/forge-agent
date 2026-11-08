@@ -330,6 +330,15 @@ rodadas, decisão, bloco de prompt, regra do roadmap, projeção de vínculo e r
   `time-option-resume-invalid` e os bloqueios do DAG de tasks do controlador.
 - Sem crédito de paralelismo; histórico só de milestones fechadas, com leitor limitado
   (até 64 fontes, 2 MiB por fonte) e sem truncamento silencioso.
+- Review-fix separado (#342): as tentativas `dispatch` + `sidecar-unit` started→terminal
+  do log global do owner (`.gsd/forge/events.jsonl`, leitor próprio de 16 MiB,
+  independente dos 2 MiB por fonte) descontam só a interseção provada com os segmentos
+  ativos de uma amostra de `execute-task`/`complete-slice` da mesma slice (transação
+  `begin` comprometida com `active_slice`) ou da mesma task standalone. Cada tentativa
+  ajusta no máximo uma amostra e nenhum milissegundo conta duas vezes. O custo fica à
+  parte em `history.review_fix`, fora de faixas e nós. Prova ausente, ambígua,
+  estrangeira ou sem medição não desconta; espera sem classificação continua
+  desconhecida.
 - Milestones sem adesão ou com roadmap existente ficam fora do fluxo; painel, dashboard,
   statusline e app não ganham campos de tempo.
 
