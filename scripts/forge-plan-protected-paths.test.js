@@ -152,7 +152,7 @@ try {
     const outside = path.join(migrationFixture.owner, 'foreign.md').replace(/\\/g, '/');
     assert.throws(() => roots.normalizeAbsolutePaths(substitute('writes[0]', outside), migrationFixture.contract), error => error.code === 'absolute-path-ambiguous');
     assert.throws(() => roots.normalizeAbsolutePaths(absolute, { ...migrationFixture.contract, primary_root_id: 'foreign' }));
-    const checked = cli(absolute); assert.equal(checked.status, 2); assert.equal(checked.data.valid, false); assert(checked.data.errors.some(message => message.includes('root-relative-path-required')));
+    const checked = cli(absolute); assert.equal(checked.status, 2); assert.equal(checked.data.valid, false); assert(checked.data.errors.some(message => message.includes(absoluteCode)));
     const contractFile = path.join(migrationFixture.owner, 'contract.json'), goodFile = path.join(migrationFixture.owner, 'absolute-plan.md'), badFile = path.join(migrationFixture.owner, 'protected-plan.md');
     fs.writeFileSync(contractFile, JSON.stringify(migrationFixture.contract)); fs.writeFileSync(goodFile, absolute);
     fs.writeFileSync(badFile, substitute('artifacts[0].path', 'alpha::.gsd/report.md'));

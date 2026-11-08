@@ -210,11 +210,12 @@ test('degree 2 resolves via RunRecord.cwd even when the run directory itself doe
   fs.mkdirSync(path.join(runsHost, '.gsd', 'forge', 'runs'), { recursive: true });
 
   const SESSION = 'sess-worktree-1';
-  const RUN_ID = 'M-owner-worktree-test';
+  const RUN_ID = 'M-20261108000001-owner-worktree';
   runs.add(runsHost, {
     id: RUN_ID,
     kind: 'milestone',
     session_id: SESSION,
+    host_runtime: 'claude', // RunRecord lookup requires this real hook host plus session.
     cwd: wsRoot, // RunRecord.cwd — the ORIGINAL owned workspace, per forge-runs.js add()
     worker: 'execute-task/T06',
     worker_slice: 'S01',
@@ -236,6 +237,44 @@ test('degree 2 resolves via RunRecord.cwd even when the run directory itself doe
   } finally { cleanup(wsRoot); cleanup(runsHost); }
 });
 
+test('physical project discovery is independent of session while RunRecord redirection requires exact host/session ownership', () => {
+  const project = mkdtemp('forge-owner-discovery-');
+  const runsHost = mkdtemp('forge-owner-identity-');
+  fs.mkdirSync(path.join(project, '.gsd', 'milestones'), { recursive: true });
+  fs.mkdirSync(path.join(runsHost, '.gsd', 'forge', 'runs'), { recursive: true });
+  const session = 'sess-explicit-discovery';
+  const id = 'M-20261108000004-owner-discovery';
+  const recordFile = path.join(runsHost, '.gsd', 'forge', 'runs', id + '.json');
+  try {
+    // Degree 1 is physical discovery, not a takeover or RunRecord lookup.
+    assert.strictEqual(require('./forge-hook.js').resolveOwnerDir(project, 'foreign-session'), project);
+    runs.add(runsHost, { id, kind: 'milestone', session_id: session, cwd: project, host_runtime: null });
+    for (const host of [null, 'codex']) {
+      const record = JSON.parse(fs.readFileSync(recordFile, 'utf8'));
+      if (host === null) delete record.host_runtime; else record.host_runtime = host;
+      fs.writeFileSync(recordFile, JSON.stringify(record));
+      const before = fs.readFileSync(recordFile);
+      const projectBefore = censusRecursive(project);
+      const hostBefore = censusRecursive(runsHost);
+      assert.strictEqual(require('./forge-hook.js').resolveOwnerDir(runsHost, session), null, 'unknown/other host cannot redirect evidence');
+      const result = runHookPost(runsHost, session);
+      assert.strictEqual(result.status, 0, result.stderr);
+      assert.deepStrictEqual(censusRecursive(project), projectBefore, 'unknown owner creates nothing at the referenced project');
+      assert.deepStrictEqual(censusRecursive(runsHost), hostBefore, 'unknown owner creates nothing at the runs host');
+      assert.deepStrictEqual(fs.readFileSync(recordFile), before, 'readonly discovery does not heal the run');
+    }
+    const exact = JSON.parse(fs.readFileSync(recordFile, 'utf8')); exact.host_runtime = 'claude';
+    fs.writeFileSync(recordFile, JSON.stringify(exact));
+    const exactBefore = fs.readFileSync(recordFile);
+    assert.strictEqual(require('./forge-hook.js').resolveOwnerDir(runsHost, 'different-session'), null);
+    assert.strictEqual(require('./forge-hook.js').resolveOwnerDir(runsHost, session), project);
+    assert.deepStrictEqual(fs.readFileSync(recordFile), exactBefore);
+    const invalid = { ...exact, id: 'M-not-a-canonical-id' };
+    fs.writeFileSync(recordFile, JSON.stringify(invalid));
+    assert.strictEqual(require('./forge-hook.js').resolveOwnerDir(runsHost, session), null, 'invalid run identity cannot redirect evidence');
+  } finally { cleanup(project); cleanup(runsHost); }
+});
+
 test('MEASURED (not asserted clean): a CODE_DIR with zero .gsd anywhere in its own ancestry cannot be resolved by either degree today', () => {
   const wsRoot = mkdtemp('forge-owner-ws2-');
   fs.mkdirSync(path.join(wsRoot, '.gsd', 'milestones'), { recursive: true });
@@ -245,7 +284,7 @@ test('MEASURED (not asserted clean): a CODE_DIR with zero .gsd anywhere in its o
   fs.mkdirSync(codeDir, { recursive: true });
   const SESSION = 'sess-worktree-2';
   runs.add(wsRoot, {
-    id: 'M-owner-worktree-test-2', kind: 'milestone', session_id: SESSION,
+    id: 'M-20261108000002-owner-worktree', kind: 'milestone', session_id: SESSION,
     cwd: wsRoot, worker: 'execute-task/T06', worker_slice: 'S01',
   });
   try {
@@ -268,9 +307,9 @@ test('unitId resolves to the real run, not the adhoc sentinel, when cwd is a sub
   fs.mkdirSync(path.join(root, '.gsd', 'milestones'), { recursive: true });
   fs.mkdirSync(path.join(root, '.gsd', 'forge', 'runs'), { recursive: true });
   const SESSION = 'sess-unitctx-1';
-  const RUN_ID = 'M-owner-unitctx-test';
+  const RUN_ID = 'M-20261108000003-owner-unitctx';
   runs.add(root, {
-    id: RUN_ID, kind: 'milestone', session_id: SESSION, cwd: root,
+    id: RUN_ID, kind: 'milestone', session_id: SESSION, host_runtime: 'claude', cwd: root,
     worker: 'execute-task/T09', worker_slice: 'S01',
   });
   const sub = path.join(root, 'scripts');

@@ -94,6 +94,7 @@ function seedRun(root, extra) {
     id: MILESTONE,
     kind: 'milestone',
     session_id: SESSION,
+    host_runtime: 'claude', // This fixture represents the Claude hook owner.
     cwd: root,
   }, extra || {}));
 }
