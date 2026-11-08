@@ -13,7 +13,7 @@ const smoke = fs.readFileSync(path.join(__dirname, 'forge-smoke.js'), 'utf8');
 const first = smoke.indexOf('function writeMockTurnInterrupt(dir)');
 const last = smoke.indexOf('async function smokeTurnInterrupt()', first);
 assert(first >= 0 && last > first, 'canonical Section98 helper bounds exist');
-const helpers = vm.runInNewContext(smoke.slice(first, last) + '\n({writeMockTurnInterrupt,writeTurnInterruptDriver,t02WaitForFile,t02ObserveScenarioDeath,t02ReadLog,t02Alive})',
+const helpers = vm.runInNewContext(smoke.slice(first, last) + '\n({writeMockTurnInterrupt,writeTurnInterruptDriver,t02WaitForFile,t02WatchDeath,t02ObserveScenarioDeath,t02ReadLog,t02Alive})',
   { fs, path, process, require, Buffer, Date, Promise, setTimeout, clearTimeout });
 
 async function main() {
@@ -64,6 +64,9 @@ async function main() {
     assert.equal(await helpers.t02ObserveScenarioDeath(live.pid, new Promise(() => {}), 40), null, 'the scenario watchdog also bounds an unresolved driver');
     assert(Date.now() - boundedAt < 1500, 'the observer respects its finite scenario cap');
     assert.equal(helpers.t02Alive(live.pid), true);
+    const liveClosed = new Promise(resolve => live.once('close', resolve));
+    live.kill(); await liveClosed;
+    assert.notEqual(await helpers.t02WatchDeath(live.pid, 4000), null, 'the extracted failure-cleanup helper is callable and confirms an actual joined process');
     console.log('PASS Section98 live-process negative and unresolved-driver watchdog never invent a death');
   } finally {
     if (driver && !driverClosed) { const closed = new Promise(resolve => driver.once('close', resolve)); driver.kill(); await closed; }

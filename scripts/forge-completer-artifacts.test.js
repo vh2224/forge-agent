@@ -82,6 +82,14 @@ test('SVN-359 scoped audit resolves nested projects, literal at signs and exclud
       assert.deepStrictEqual(cli.stdout.trim().split(/\r?\n/), ['new.txt', 'tracked.txt']);
     }
     assert.deepStrictEqual(actualAddedModified(wc).paths, names.flatMap(name => [name + '/new.txt', name + '/tracked.txt']).sort(), 'root audit remains whole working copy');
+    const other = path.join(rootDir, 'other');
+    execFileSync('svn', ['checkout', url, other, '--quiet']);
+    fs.writeFileSync(path.join(other, 'project-extra', 'tracked.txt'), 'remote conflicting line\n');
+    execFileSync('svn', ['commit', path.join(other, 'project-extra'), '-m', 'synthetic sibling conflict', '--quiet']);
+    execFileSync('svn', ['update', wc, '--accept', 'postpone', '--quiet']);
+    assert.strictEqual(vcs.workingStatus(wc, { vcs: 'svn' }).ok, false, 'whole WC remains unavailable for a real sibling conflict');
+    assert.deepStrictEqual(actualAddedModified(path.join(wc, 'project')), { vcs: 'svn', ok: true, paths: ['new.txt', 'tracked.txt'], scope: 'working-copy' }, 'strict parsing of an unrelated sibling must not block the requested project');
+    assert.strictEqual(actualAddedModified(path.join(wc, 'project-extra')).ok, false, 'a conflict inside the requested project still fails closed');
     const ignore = require('./forge-ignore.js');
     ignore.__setExecFileSync(() => path.join(rootDir, 'foreign'));
     fs.mkdirSync(path.join(rootDir, 'foreign'));

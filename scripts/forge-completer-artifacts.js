@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
-const { execFileSync } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const { svnWcRoot } = require('./forge-ignore.js');
@@ -47,7 +47,16 @@ function svnProjectStatus(cwd) {
       return { ok: false, entries: [], error: 'svn-project-outside-working-copy' };
     }
   } catch { return { ok: false, entries: [], error: 'svn-project-scope-unavailable' }; }
-  const status = vcsApi.workingStatus(root, { vcs: 'svn' });
+  const target = (path.relative(root, project) || '.').split(path.sep).join('/') + '@';
+  // Scope the read-only query before the strict status parser classifies entries.
+  // An unsupported/conflicted sibling must not prevent this project's report.
+  // The raw primitive still runs at the WC root with its original root guard.
+  const status = vcsApi.workingStatus(root, { vcs: 'svn', runner(command, args, options) {
+    if (command !== 'svn' || args[0] !== '--non-interactive' || args[1] !== 'status') {
+      throw new Error('svn-project-status-command-unexpected');
+    }
+    return spawnSync(command, [...args, '--', target], options);
+  } });
   if (!status.ok) return status;
   const entries = [];
   for (const entry of status.entries) {
