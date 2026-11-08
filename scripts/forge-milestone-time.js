@@ -750,6 +750,38 @@ function readHandoffBinding(options) {
     return binding === null ? { status: 'absent' } : { status: 'valid', binding };
   } catch (e) { return { status: 'invalid', reason: codeOf(e) }; }
 }
+// Closure publication evidence is outside the generic owner-record allowlist.
+// Its only issuer re-derives the verified task delivery and start under this
+// writer lock; caller records/proofs and legacy unbound closures cannot mint it.
+function closureWitnessFile(p) { return path.join(p.directory, 'linked-task-bindings', 'closure.json'); }
+function readLinkedTaskClosureWitness(options) {
+  try { const record = storedRecord(closureWitnessFile(timePaths(options)));
+    return record === null ? { status: 'absent' } : { status: 'valid', record, sha256: require('./forge-code-roots').digest(record) };
+  } catch (e) { return { status: 'invalid', reason: codeOf(e) }; }
+}
+function publishLinkedTaskClosureWitness(options) {
+  if (['record', 'build', 'anchor', 'binding', 'proof', 'witness'].some(k => Object.hasOwn(options, k))) fail('time-record-invalid');
+  return withWriter(options, p => {
+    activeContract(options);
+    const lifecycle = require('./forge-linked-task-start'), { digest } = require('./forge-code-roots');
+    const privateFile = closureWitnessFile(p), prior = storedRecord(privateFile), previous = storedRecord(ownerRecordFile(p, 'linked-task/closure.json'));
+    if (previous && !prior) fail('time-record-invalid'); // No retroactive authority from a legacy record's shape.
+    if (prior) {
+      if (!lifecycle.closureWitnessValid(prior) || prior.milestone !== options.milestone || prior.task_id !== options.taskId
+          || previous && !same(previous, prior.closure)) fail('time-record-conflict');
+      const basis = lifecycle.deriveClosureBasis({ cwd: p.owner, milestone: options.milestone, taskId: options.taskId });
+      if (prior.closure.start_sha256 !== basis.start_sha256 || prior.link_sha256 !== basis.link_sha256
+          || options.expected_closure_sha256 !== undefined && options.expected_closure_sha256 !== prior.closure_sha256) fail('time-record-conflict');
+      return { status: 'unchanged', sha256: digest(prior) };
+    }
+    const record = lifecycle.deriveClosureSnapshot({ cwd: p.owner, milestone: options.milestone, taskId: options.taskId, codeDir: options.codeDir, now: options.now });
+    if (options.expected_closure_sha256 !== undefined && options.expected_closure_sha256 !== digest(record)) fail('time-record-conflict');
+    const witness = recordValue({ schema_version: 1, kind: 'forge-linked-task-closure-witness', milestone: record.milestone,
+      task_id: record.task_id, link_sha256: record.link_sha256, closure_sha256: digest(record), closure: record });
+    if (!lifecycle.closureWitnessValid(witness)) fail('time-record-invalid');
+    return publishRecordFile(p, privateFile, witness);
+  });
+}
 function publishLinkedTaskHandoff(options) {
   if (['record', 'build', 'anchor', 'binding', 'proof'].some(k => Object.hasOwn(options, k))) fail('time-record-invalid');
   return withWriter(options, p => {
@@ -926,6 +958,6 @@ module.exports = { SCHEMA_VERSION, ENDPOINT_ITEMS, ITEM_STATES, AMENDMENT_KINDS,
   timePaths, readContract, validateContract, createDecisionAuthority, activateContract, amendContract, appendJournal, readJournal,
   recordWarning, listWarnings, recordCheckpoint, readCheckpoints, readObservations, readCoverage, recordWorkerEvidence,
   recordEnrollment, readEnrollment, recordOptions, readOptions, listOptions, recordSelection, readSelection, verifyDecision,
-  recordDelegatedAllocation, roadmapIdentity, OWNER_RECORD_PATHS, publishOwnerRecord, readOwnerRecord, publishLinkedTaskHandoff, readHandoffBinding, publishAnchoredEndpoint, readEndpointAnchor, readEndpointSnapshot, listOwnerRecords,
+  recordDelegatedAllocation, roadmapIdentity, OWNER_RECORD_PATHS, publishOwnerRecord, readOwnerRecord, publishLinkedTaskHandoff, readHandoffBinding, publishLinkedTaskClosureWitness, readLinkedTaskClosureWitness, publishAnchoredEndpoint, readEndpointAnchor, readEndpointSnapshot, listOwnerRecords,
   appendOwnerJournal, readOwnerJournal, publishTaskLink, readTaskLink, main };
 if (require.main === module) process.exitCode = main();

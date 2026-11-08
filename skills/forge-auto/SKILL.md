@@ -461,15 +461,15 @@ Branch on `$STATUS`:
 - **`none`** - display the personal reason and stop without mutation. Legacy/global fallback is forbidden.
 - **`activate-new`** — register the new run:
   ```bash
-  SESSION_ID="${CLAUDE_SESSION_ID:-$(node -e "process.stdout.write(require('crypto').randomBytes(8).toString('hex'))")}"
-  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --add --id "$RUN_ID" --kind "$RUN_KIND" --session "$SESSION_ID" --isolation-mode "$ISOLATION_MODE" --account "${FORGE_ACCOUNT:-}" --worktrees "$WORKTREES_JSON" --branch "${RUN_BRANCH:-}" --cwd "$WORKING_DIR" > /dev/null || { echo "Run registration/update failed; stop before dispatch." >&2; exit 1; }
+  SESSION_ID=$(node "$FORGE_SCRIPTS_DIR/forge-runs.js" --owner-session --host-runtime claude --expected-owner-session '${CLAUDE_SESSION_ID}') || { echo "owner-session-unavailable: current Claude host identity was not attested; stop before registration." >&2; exit 2; }
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --add --observed-owner --host-runtime claude --expected-owner-session '${CLAUDE_SESSION_ID}' --id "$RUN_ID" --kind "$RUN_KIND" --session "$SESSION_ID" --isolation-mode "$ISOLATION_MODE" --account "${FORGE_ACCOUNT:-}" --worktrees "$WORKTREES_JSON" --branch "${RUN_BRANCH:-}" --cwd "$WORKING_DIR" > /dev/null || { echo "Run registration/update failed; stop before dispatch." >&2; exit 1; }
   echo "$MSG"
   ```
   Then continue to legacy activation (which writes auto-mode-started.txt + alias).
 - **`resume`** — emit `$MSG`, set `RUN_ID` (already set). Update the existing registry entry with the new session_id (the previous orchestrator process exited; this is a fresh session that needs to own heartbeat updates) and the freshly-resolved isolation mode:
   ```bash
-  SESSION_ID="${CLAUDE_SESSION_ID:-$(node -e "process.stdout.write(require('crypto').randomBytes(8).toString('hex'))")}"
-  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json "{\"session_id\":\"$SESSION_ID\",\"active\":true,\"isolation_mode\":\"$ISOLATION_MODE\",\"worktrees\":$WORKTREES_JSON,\"branch\":\"$RUN_BRANCH\"}" --cwd "$WORKING_DIR" > /dev/null || { echo "Run registration/update failed; stop before dispatch." >&2; exit 1; }
+  SESSION_ID=$(node "$FORGE_SCRIPTS_DIR/forge-runs.js" --owner-session --host-runtime claude --expected-owner-session '${CLAUDE_SESSION_ID}') || { echo "owner-session-unavailable: current Claude host identity was not attested; stop before registration." >&2; exit 2; }
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update --observed-owner --host-runtime claude --expected-owner-session '${CLAUDE_SESSION_ID}' "$RUN_ID" --json "{\"session_id\":\"$SESSION_ID\",\"active\":true,\"isolation_mode\":\"$ISOLATION_MODE\",\"worktrees\":$WORKTREES_JSON,\"branch\":\"$RUN_BRANCH\"}" --cwd "$WORKING_DIR" > /dev/null || { echo "Run registration/update failed; stop before dispatch." >&2; exit 1; }
   ```
   `branch` is refreshed here for the same reason `isolation_mode` is: it is what the
   setup just resolved, and a record created before the field existed carries `null`.

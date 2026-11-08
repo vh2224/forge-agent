@@ -163,6 +163,28 @@ function rewriteDispatchDialect(text, options) {
   return `${original.slice(0, block.start)}${rewritten}${original.slice(block.end)}`;
 }
 
+function rewriteOwnerActivation(text, hostRuntime = 'codex') {
+  if (hostRuntime !== 'codex') return text;
+  let found = 0;
+  let rewritten = String(text).replace(/^([ \t]*)SESSION_ID=([^\r\n]*)/gm, (line, indent, expression) => {
+    if (expression.includes('--owner-session --host-runtime claude')) {
+      found++;
+      return line.replace('--host-runtime claude', '--host-runtime codex').replace(/ --expected-owner-session '\$\{CLAUDE_SESSION_ID\}'/, '');
+    }
+    if (!expression.includes('CLAUDE_SESSION_ID') || !expression.includes('randomBytes(8)')) return line;
+    found++;
+    return indent + 'SESSION_ID=$(node "$FORGE_SCRIPTS_DIR/forge-runs.js" --owner-session --host-runtime codex) || { echo "owner-session-unavailable: Codex did not expose its current thread/session identity; stop before registration." >&2; exit 2; }';
+  });
+  if (!found) return text;
+  if (rewritten.includes('--observed-owner --host-runtime claude')) return rewritten
+    .replaceAll('--observed-owner --host-runtime claude', '--observed-owner --host-runtime codex')
+    .replace(/ --expected-owner-session '\$\{CLAUDE_SESSION_ID\}'/g, '');
+  // These are the real activation/resume lines of the canonical skills, also
+  // outside the worker-dispatch fence. Other documents/callers stay untouched.
+  return rewritten.replace(/(node[ \t]+"[^"\r\n]*forge-runs\.js"[ \t]+--(?:add|update))(?=[ \t])/g,
+    '$1 --observed-owner --host-runtime codex');
+}
+
 function norm(value) { return String(value).replace(/\r\n/g, '\n').replace(/\r/g, '\n'); }
 function tomlOrigin(kind) { return `${TOML_ORIGIN}-${kind} version=${VERSION}`; }
 // YAML frontmatter must remain on line 1, so the marker sits below the closing
@@ -441,7 +463,7 @@ function render(options = {}) {
       requiredPhases: sourceProcedures.map(procedure => procedure.phase) }).find(context => context.phase === 'distribution') : null;
   const add = (sourceId, source, destination, content, kind) => artifacts.push({ source_id: sourceId, source, destination, content: norm(content), newline: 'lf', kind });
   // Reuse the canonical trusted-authority contract from forge-interaction; never mint consent here.
-  const rewriteMarkdown = (content) => interaction.project(rewriteDispatchDialect(content, {
+  const rewriteMarkdown = (content) => interaction.project(rewriteDispatchDialect(rewriteOwnerActivation(content, options.hostRuntime || RUNTIME), {
     agentInvocation: options.agentInvocation,
     hostRuntime: options.hostRuntime,
   }));
@@ -641,6 +663,7 @@ module.exports = {
   scanDispatchMarkers,
   locateDispatchBlock,
   rewriteDispatchDialect,
+  rewriteOwnerActivation,
   REPORT_SCHEMA_VERSION,
   REPORT_RELATIVE,
   REPORT_MAX_BYTES,

@@ -1854,6 +1854,16 @@ async function runUnitSidecarCore(request, runtime, identity) {
   // The typed pre-provider refusal raised by this attempt's own last launch hook, kept so that an
   // adapter that rewraps foreign exceptions of its packaging step cannot erase it (see the catch).
   let packagingRefusal = null;
+  const admitFinalLaunch = () => {
+    try {
+      if (r.scope !== 'standalone-task' && r.milestoneId) require('./forge-milestone-time-admission').assertTransportEntry({
+        cwd: r.contextRoot || r.cwd, milestone: r.milestoneId, unit: unitLabel(r, locations(r)), now: runtime.now });
+      else admitTaskLaunch();
+    } catch (refusal) {
+      if (admissionRefusal(refusal) && refusal.provider_called === false) packagingRefusal = refusal;
+      throw refusal;
+    }
+  };
   const enterTransport = () => {
     packagingRefusal = null;
     if (verificationSuccessor) fail('verification-successor-no-inference');
@@ -2551,16 +2561,13 @@ async function runUnitSidecarCore(request, runtime, identity) {
       json(receiptFile, { ...saved, final_evidence: packaged.final_evidence,
         ...(saved.execution ? { execution: { ...saved.execution, packaged_context: packaged } } : {}) });
       const observed = runtime.onPackagedContext?.(packaged);
-      // Last launch hook: the adapters call it synchronously after packaging and before the
-      // spawn/turn/callback, so a refusal here is fail-closed (provider_called false). The refusal
-      // is recorded before it propagates: the Claude adapter catches it in its packaging step.
-      try { admitTaskLaunch(); }
-      catch (refusal) {
-        if (admissionRefusal(refusal) && refusal.provider_called === false) packagingRefusal = refusal;
-        throw refusal;
-      }
+      // Packaging admission remains useful, but Claude still prepares provisional
+      // retention and calibration afterwards. Its final spawn hook rechecks the same
+      // live owner boundary after all of that work, immediately before spawn.
+      admitFinalLaunch();
       return observed;
     },
+    onBeforeSpawn: admitFinalLaunch,
     hostRuntime: route.host_runtime, sidecarDeclared: true, model,
     effort: route.effort, timeoutSecs: ceilingFromRoute(route).seconds, resultFile, dispatchId,
     constraints: r.constraints || { auto_commit: false, deploy: false },

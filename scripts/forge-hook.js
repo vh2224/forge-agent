@@ -22,17 +22,23 @@ const phase = process.argv[2] || 'post'; // 'pre', 'post', 'subagent-start', 'su
 // ── Resolve scripts dir — works both in dev (sibling) and installed (~/.claude/scripts/) ──
 // Installed: this file lives at ~/.claude/forge-hook.js, scripts at ~/.claude/scripts/
 // Dev: this file lives at scripts/forge-hook.js, runs.js at scripts/forge-runs.js (sibling)
-let runs = null;
-let filelock = null;
-try {
-  runs     = require(path.join(__dirname, 'scripts', 'forge-runs.js'));
-  filelock = require(path.join(__dirname, 'scripts', 'forge-filelock.js'));
-} catch {
+function loadCoreModule(name) {
+  // Source/core scripts remain coupled to sibling modules. Installed Claude
+  // projections have no runtime scripts; bootstrap the shared path resolver.
+  if (path.basename(__dirname) === 'scripts') {
+    try { return require(path.join(__dirname, name)); } catch {}
+  }
   try {
-    runs     = require(path.join(__dirname, 'forge-runs.js'));
-    filelock = require(path.join(__dirname, 'forge-filelock.js'));
-  } catch { runs = null; filelock = null; }
+    const configured = typeof process.env.FORGE_HOME === 'string' && process.env.FORGE_HOME.trim();
+    const names = process.platform === 'win32' ? ['USERPROFILE', 'HOME'] : ['HOME', 'USERPROFILE'];
+    const userHome = names.map(key => (process.env[key] || '').trim()).find(Boolean) || os.homedir();
+    const bootstrap = path.resolve(configured || path.join(userHome, '.forge-agent'), 'scripts', 'forge-home.js');
+    const home = require(bootstrap).resolveForgePaths();
+    return require(path.join(home.shared.scripts, name));
+  } catch { return null; }
 }
+let runs = loadCoreModule('forge-runs.js');
+let filelock = loadCoreModule('forge-filelock.js');
 
 // ── Evidence-path module (S01/T01) — same dev/installed dual-path resolution ──
 // Owner of the evidence file-name shape and of the NAMED axis sentinels. A
@@ -144,51 +150,26 @@ function sanitizeRunId(id) {
 
 // Resolve the run owning this hook fire. Multi-run safe.
 //
-// Strategy (v1.14.1+):
-//   1. Direct session_id match against runs/*.json — best case
-//   2. Single-active-run heal: if no match but exactly 1 active run exists,
-//      claim it by updating its session_id to ours. The skill activation
-//      seeds session_id with a random hex fallback (CLAUDE_SESSION_ID env
-//      var isn't reliably set) so the FIRST hook fire of a session always
-//      mismatches — this self-heals on that first fire.
-//   3. Multi-active no-match: ambiguous, can't disambiguate without
-//      session_id correlation. Return null and let caller fall back.
-//
-// Returns the resolved run record, or null when no resolution possible.
-const resolveRunForSession = (cwd, sessionId) => {
-  if (!runs || !sessionId) return null;
-  try {
-    const direct = runs.resolveBySessionId(cwd, sessionId);
-    if (direct) return direct;
-    const active = runs.listActive(cwd);
-    if (active.length === 1) {
-      // Heal: claim the lone active run with this session_id
-      runs.update(cwd, active[0].id, { session_id: sessionId });
-      return Object.assign({}, active[0], { session_id: sessionId });
-    }
-  } catch { /* fall through to null */ }
-  return null;
+// Session resolution is read-only and requires one exact host/session match.
+// This module is a Claude Code hook; the host axis is observed from that
+// carrier, never copied from the hook payload or inferred from an active run.
+const resolveRunForSession = (cwd, sessionId, hostRuntime = 'claude') => {
+  if (!runs) return null;
+  try { return runs.resolveBySessionOwner(cwd, { sessionId, hostRuntime }); }
+  catch { return null; }
 };
 
-// Bump last_heartbeat on the run owning this session.
-// Multi-run path (M004+): resolves run, updates runs/{id}.json via forge-runs.js
-// (which auto-refreshes the legacy auto-mode.json alias).
-// Legacy fallback: writes directly to auto-mode.json (pre-M004 workspaces without runs/).
+// Registry updates are conditional under its mutator lock. On no-match or
+// failure, a registry alias remains a pure projection and is never healed.
+// True pre-registry legacy data needs its own already matching identity.
 const bumpHeartbeat = (cwd, sessionId) => {
-  const r = resolveRunForSession(cwd, sessionId);
-  if (r) {
-    try { runs.bumpHeartbeat(cwd, r.id); return; }
-    catch { /* fall through to legacy */ }
-  }
-  // Legacy: pre-M004 single-run, no runs/ directory or no session match (+ multi-active)
+  if (!runs) return;
+  const owner = { sessionId, hostRuntime: 'claude' };
   try {
-    const autoFile = path.join(cwd, '.gsd', 'forge', 'auto-mode.json');
-    const auto = JSON.parse(fs.readFileSync(autoFile, 'utf8'));
-    if (auto && auto.active === true) {
-      auto.last_heartbeat = Date.now();
-      fs.writeFileSync(autoFile, JSON.stringify(auto), 'utf8');
-    }
-  } catch { /* no auto mode or unreadable — ignore */ }
+    const record = resolveRunForSession(cwd, sessionId);
+    if (record) { runs.bumpOwnedHeartbeat(cwd, record.id, owner); return; }
+    runs.bumpLegacyOwnedHeartbeat(cwd, owner);
+  } catch { /* uncertainty never authorizes an alias or ownership write */ }
 };
 
 // Resolve the directory that OWNS this hook fire — never the raw cwd.
@@ -394,24 +375,7 @@ const validateForgeSubagentResult = (data) => {
   }
 
   const message = String(data && data.last_assistant_message || '');
-  let workerResult = null;
-  // Core/development scripts remain coupled to their sibling classifier. The
-  // Claude projections have no runtime scripts: the installer retires those.
-  if (path.basename(__dirname) === 'scripts') {
-    try { workerResult = require(path.join(__dirname, 'forge-worker-result.js')); } catch {}
-  }
-  if (!workerResult) {
-    try {
-      // Bootstrap only locates the canonical home resolver; that resolver owns
-      // the final scripts path, including explicit FORGE_HOME precedence.
-      const configured = typeof process.env.FORGE_HOME === 'string' && process.env.FORGE_HOME.trim();
-      const names = process.platform === 'win32' ? ['USERPROFILE', 'HOME'] : ['HOME', 'USERPROFILE'];
-      const userHome = names.map(name => (process.env[name] || '').trim()).find(Boolean) || os.homedir();
-      const bootstrap = path.resolve(configured || path.join(userHome, '.forge-agent'), 'scripts', 'forge-home.js');
-      const home = require(bootstrap).resolveForgePaths();
-      workerResult = require(path.join(home.shared.scripts, 'forge-worker-result.js'));
-    } catch {}
-  }
+  const workerResult = loadCoreModule('forge-worker-result.js');
   if (!workerResult) return { ok: true, reason: 'result-classifier-unavailable', tracked: true,
     hasBlock: message.includes('---GSD-WORKER-RESULT---'), hasValidResult: false };
   const classified = workerResult.classifyReturn(message);
@@ -580,7 +544,32 @@ process.stdin.on('end', () => {
     // differs from the committed .gsd/SCHEMA-VERSION, inject a loud notice so
     // the user runs /forge-update before a milestone close silently drops a
     // ledger entry into a now-ignored monolith. Never blocks the session.
+function publishClaudeOwnerEnvironment(data) {
+  // SessionStart supplies this native payload and env-file channel. The skill
+  // independently cross-checks its native current-session substitution later.
+  const id = data && data.session_id, target = process.env.CLAUDE_ENV_FILE;
+  if (data?.hook_event_name !== 'SessionStart' || typeof id !== 'string'
+      || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/.test(id)
+      || typeof target !== 'string' || !path.isAbsolute(target)) return false;
+  let descriptor;
+  try {
+    const parent = path.dirname(target), physical = fs.realpathSync.native(parent);
+    const key = value => process.platform === 'win32' ? value.toLowerCase() : value;
+    if (key(path.resolve(parent)) !== key(physical)) return false;
+    let existing;
+    try { existing = fs.lstatSync(target); } catch (error) { if (error.code !== 'ENOENT') return false; }
+    if (existing && (!existing.isFile() || existing.isSymbolicLink() || existing.size > 65536)) return false;
+    descriptor = fs.openSync(target, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | (fs.constants.O_NOFOLLOW || 0), 0o600);
+    const opened = fs.fstatSync(descriptor), current = fs.lstatSync(target);
+    if (!opened.isFile() || current.isSymbolicLink() || current.dev !== opened.dev || current.ino !== opened.ino || opened.size > 65536) return false;
+    fs.writeSync(descriptor, "\nexport FORGE_CLAUDE_OWNER_SESSION_ID='" + id + "'\nexport FORGE_CLAUDE_OWNER_SOURCE='claude-sessionstart-env-v1'\n");
+    return true;
+  } catch { return false; }
+  finally { if (descriptor !== undefined) fs.closeSync(descriptor); }
+}
+
     if (phase === 'session-start') {
+      publishClaudeOwnerEnvironment(data);
       try {
         if (!fs.existsSync(path.join(cwd, '.gsd'))) return; // not a forge project — stay silent
         const doctor = loadDoctor();
@@ -724,7 +713,7 @@ process.stdin.on('end', () => {
 
     // ── Stop: block Claude from stopping when a fresh Forge run is active ────
     // Guards run in order; any allow path returns immediately.
-    // Resolution is READ-ONLY (resolveBySessionId only) — never resolveRunForSession (has heal).
+    // Stop policy keeps its separate read-only lookup; it performs no heartbeat or owner transfer.
     // Counter lives in os.tmpdir() — max 3 consecutive blocks, then allow + reset.
     if (phase === 'stop') {
       try {

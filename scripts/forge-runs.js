@@ -220,6 +220,83 @@ function resolveBySessionId(cwd, sessionId) {
   return listActive(cwd).find(r => r.session_id === sessionId) || null;
 }
 
+// Host identity is observed only from this process, never selected from a run.
+function observeHostSession(hostRuntime, expectedSession) {
+  if (hostRuntime === 'claude') {
+    const value = process.env.FORGE_CLAUDE_OWNER_SESSION_ID;
+    return process.env.FORGE_CLAUDE_OWNER_SOURCE === 'claude-sessionstart-env-v1'
+      && typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/.test(value)
+      && expectedSession === value ? { sessionId: value, hostRuntime: 'claude', source: 'claude-sessionstart-env-v1' } : null;
+  }
+  if (hostRuntime !== 'codex') return null;
+  for (const source of ['CODEX_THREAD_ID', 'CODEX_SESSION_ID']) {
+    const value = process.env[source];
+    if (typeof value === 'string' && value.trim() && value.length <= 1024 && !/[\r\n\0]/.test(value)) return { sessionId: value, hostRuntime: 'codex', source };
+  }
+  return null;
+}
+
+function validSessionOwner(owner) {
+  return !!owner && typeof owner.sessionId === 'string' && owner.sessionId.trim() !== '' && ['claude', 'codex'].includes(owner.hostRuntime);
+}
+
+function matchesSessionOwner(record, owner) {
+  return validSessionOwner(owner) && record?.active === true && record.session_id === owner.sessionId && record.host_runtime === owner.hostRuntime;
+}
+
+function resolveBySessionOwner(cwd, owner) {
+  if (!validSessionOwner(owner)) return null;
+  const census = boundedCensus(cwd);
+  if (census.unparseable.length) return null;
+  const matches = census.parsed.filter(record => matchesSessionOwner(record, owner));
+  return matches.length === 1 && typeof matches[0].id === 'string' && ids.isValid(matches[0].id) ? matches[0] : null;
+}
+
+function bumpOwnedHeartbeat(cwd, id, owner, timestamp, guard) {
+  const now = timestamp === undefined ? Date.now() : timestamp;
+  if (!validSessionOwner(owner) || !ids.isValid(id) || !Number.isSafeInteger(now) || now <= 0) return { updated: false, record: null };
+  // The trusted caller supplies its observed host/session, not a serialized
+  // authorization. Recheck both axes and uniqueness INSIDE the existing mutex.
+  return updateWith(cwd, id, current => {
+    if (!matchesSessionOwner(current, owner) || resolveBySessionOwner(cwd, owner)?.id !== id) return null;
+    if (Number.isFinite(current.last_heartbeat) && now <= current.last_heartbeat) return null;
+    return { last_heartbeat: now };
+  }, guard);
+}
+
+function registryPresent(cwd) {
+  try { fs.lstatSync(runsDir(cwd)); return true; }
+  catch (error) { return error.code !== 'ENOENT'; }
+}
+
+function legacyOwnedRecord(cwd, owner) {
+  if (!validSessionOwner(owner) || registryPresent(cwd)) return null;
+  try {
+    const root = fs.realpathSync.native(cwd), file = path.join(root, '.gsd', 'forge', ALIAS_FILE);
+    for (const relative of ['.gsd', '.gsd/forge', '.gsd/forge/' + ALIAS_FILE]) {
+      const stat = fs.lstatSync(path.join(root, relative));
+      if (stat.isSymbolicLink() || (relative.endsWith(ALIAS_FILE) ? !stat.isFile() || stat.size > 65536 : !stat.isDirectory())) return null;
+    }
+    const read = require('./forge-autonomy-sources').readBoundedStableFile(file, 65536, { expectedReal: fs.realpathSync.native(file) });
+    if (read.error) return null;
+    const record = JSON.parse(read.buffer.toString('utf8'));
+    return matchesSessionOwner(record, owner) ? record : null;
+  } catch { return null; }
+}
+
+function bumpLegacyOwnedHeartbeat(cwd, owner, timestamp) {
+  const now = timestamp === undefined ? Date.now() : timestamp;
+  if (!Number.isSafeInteger(now) || now <= 0 || !legacyOwnedRecord(cwd, owner)) return false;
+  // add/update share this fence: a newly created registry cannot race a legacy
+  // alias write. An absent/mismatched identity never creates even the mutex.
+  return withRegistryFence(cwd, () => {
+    const record = legacyOwnedRecord(cwd, owner);
+    if (!record || Number.isFinite(record.last_heartbeat) && now <= record.last_heartbeat) return false;
+    writeAtomic(path.join(cwd, '.gsd', 'forge', ALIAS_FILE), { ...record, last_heartbeat: now });
+    return true;
+  });
+}
+
 function oldestActive(cwd) {
   const active = listActive(cwd);
   if (active.length === 0) return null;
@@ -543,7 +620,13 @@ Flags:
   }
 
   try {
-    if (args.list) {
+    const observedOwner = args['observed-owner'] ? observeHostSession(args['host-runtime'], args['expected-owner-session']) : null;
+    if (args['observed-owner'] && (!observedOwner || args.session && args.session !== observedOwner.sessionId)) throw new Error('owner-session-unavailable-or-mismatch');
+    if (args['owner-session']) {
+      const observed = observeHostSession(args['host-runtime'], args['expected-owner-session']);
+      if (!observed) throw new Error('owner-session-unavailable');
+      process.stdout.write(observed.sessionId + '\n');
+    } else if (args.list) {
       process.stdout.write(JSON.stringify(listAll(cwd), null, 2) + '\n');
     } else if (args['list-active']) {
       process.stdout.write(JSON.stringify(listActive(cwd), null, 2) + '\n');
@@ -569,7 +652,8 @@ Flags:
       const r = add(cwd, {
         id: args.id,
         kind: args.kind,
-        session_id: args.session,
+        session_id: observedOwner ? observedOwner.sessionId : args.session,
+        ...(observedOwner ? { host_runtime: observedOwner.hostRuntime, owner_session_source: observedOwner.source } : {}),
         isolation_mode: args['isolation-mode'] || 'shared',
         task_description: args['task-description'],
         account: (typeof args.account === 'string') ? args.account : (process.env.FORGE_ACCOUNT || null),
@@ -584,7 +668,17 @@ Flags:
       process.stdout.write(JSON.stringify(r, null, 2) + '\n');
     } else if (args.update) {
       const patch = args.json ? JSON.parse(args.json) : {};
-      const r = update(cwd, args.update, patch);
+      let r;
+      if (observedOwner) {
+        // A real current session may resume its own binding. A seed or foreign
+        // owner is not transferred here; explicit transfer needs separate proof.
+        const changed = updateWith(cwd, args.update, current => {
+          if (!matchesSessionOwner(current, observedOwner) || resolveBySessionOwner(cwd, observedOwner)?.id !== args.update) return null;
+          return { ...patch, session_id: observedOwner.sessionId, host_runtime: observedOwner.hostRuntime, owner_session_source: observedOwner.source };
+        });
+        if (!changed.updated) throw new Error('owner-session-binding-unknown-or-mismatch');
+        r = changed.record;
+      } else r = update(cwd, args.update, patch);
       process.stdout.write(JSON.stringify(r, null, 2) + '\n');
     } else if (args.remove) {
       remove(cwd, args.remove);
@@ -660,7 +754,7 @@ module.exports = {
   listAll, listAllDetailed, boundedCensus, withRegistryFence, listActive, get,
   add, update, updateWith, remove,
   bumpHeartbeat, cleanupStale,
-  resolveBySessionId, oldestActive,
+  observeHostSession, resolveBySessionId, resolveBySessionOwner, bumpOwnedHeartbeat, bumpLegacyOwnedHeartbeat, oldestActive,
   refreshLegacyAlias, migrateLegacyState,
   withAddressDefaults,
   runsDir, runFile, writeAtomic, withRunLock, normalizeMetadataPatch,

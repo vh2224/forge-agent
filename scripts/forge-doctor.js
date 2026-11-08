@@ -612,6 +612,60 @@ function checkMemoryQuarantine(cwd) {
   };
 }
 
+
+// Explicit read-only diagnostic, not native-tool capability detection or a
+// controller gate. The resolver and observed agent bytes keep their authority.
+function checkNativeBinding(cwd, options = {}) {
+  const families = { 'plan-milestone': 'forge-planner', 'plan-slice': 'forge-planner', 'execute-task': 'forge-executor' };
+  const unitType = options.unitType, host = options.hostRuntime;
+  const report = { check: 'native-binding', ok: false, status: 'unknown', reason_code: 'native-binding-input-invalid',
+    unit_type: Object.hasOwn(families, unitType) ? unitType : null, agent_type: Object.hasOwn(families, unitType) ? families[unitType] : null,
+    host_runtime: ['claude', 'codex'].includes(host) ? host : null, worker_mode: null, runtime_authorized: null,
+    model_requested: null, model_resolved: null, effort_requested: null, effort_resolved: null, effort_reason: null,
+    effort_observed: null, source_sha256: null, native_tool_availability: 'unknown', provider_called: false,
+    effect: 'read-only-binding-diagnosis', message: 'Informe unidade e host explícitos para diagnosticar somente o binding.' };
+  if (!report.unit_type || !report.host_runtime) return report;
+  const safe = value => typeof value === 'string' && /^[a-z0-9][a-z0-9_.:|\-]{0,159}$/i.test(value)
+    && !/(?:token|credential|password|secret)/i.test(value) ? value : null;
+  let route;
+  try {
+    const input = { cwd: path.resolve(cwd || process.cwd()), unitType, hostRuntime: host };
+    for (const key of ['unitId','milestoneId','planPath','roadmapPath','workerMode','workerEngine','sidecarDeclared']) {
+      if (options[key] !== undefined) input[key] = options[key];
+    }
+    route = require('./forge-dispatch-resolve').resolveDispatch(input);
+  } catch { return { ...report, reason_code: 'native-binding-resolution-failed', message: 'Não foi possível resolver a unidade; nenhum binding ou ferramenta foi declarado compatível.' }; }
+  Object.assign(report, { worker_mode: route.worker_mode || null, runtime_authorized: route.dispatch_allowed === true,
+    model_requested: safe(route.model_requested), model_resolved: safe(route.model_resolved || route.model),
+    effort_requested: safe(route.effort_requested), effort_resolved: safe(route.effort), effort_reason: safe(route.effort_reason) });
+  if (route.config_ok !== true || route.dispatch_allowed !== true) return { ...report,
+    reason_code: safe(route.dispatch_reason_code) || 'resolved-dispatch-refused', message: 'A resolução não autoriza a rota; nenhum modelo, esforço ou transporte foi substituído.' };
+  if (route.host_runtime !== 'claude' || route.resolved_worker_engine !== 'claude' || route.worker_mode !== 'native') {
+    return { ...report, ok: true, status: 'not-applicable', reason_code: 'native-agent-binding-not-applicable',
+      message: 'Esta rota não usa frontmatter de agente Claude nativo; a disponibilidade real do transporte continua desconhecida.' };
+  }
+  if (typeof options.agentPath !== 'string' || !options.agentPath.trim()) return { ...report,
+    reason_code: 'native-effort-binding-evidence-missing', message: 'Forneça o arquivo de agente efetivamente selecionado pelo host; nenhuma definição foi presumida.' };
+  let file, fingerprint, observed;
+  try {
+    file = path.resolve(cwd || process.cwd(), options.agentPath);
+    const stat = fs.statSync(file); if (!stat.isFile() || stat.size > 256 * 1024) throw Error('invalid binding source');
+    fingerprint = options.agentSha256 === undefined
+      ? require('crypto').createHash('sha256').update(fs.readFileSync(file)).digest('hex') : options.agentSha256;
+    observed = require('./forge-native-invocation').observeClaudeAgentBinding({ agentType: families[unitType], agentPath: file, sourceFingerprint: fingerprint });
+  } catch { return { ...report, reason_code: 'native-effort-binding-source-unreadable', message: 'O arquivo de agente indicado não pôde ser observado de forma limitada e somente leitura.' }; }
+  if (!observed.ok) return { ...report, reason_code: safe(observed.reason_code) || 'native-effort-binding-evidence-missing',
+    message: 'A observação do arquivo de agente foi recusada; nenhum binding foi aceito.' };
+  const efforts = require('./forge-model-policy').EFFORT_SCALE;
+  if (!efforts.includes(observed.effort)) return { ...report, reason_code: 'native-effort-binding-evidence-missing',
+    message: 'O esforço declarado pelo agente não pertence ao contrato reconhecido; o valor bruto não é exposto.' };
+  Object.assign(report, { effort_observed: observed.effort, source_sha256: observed.source_fingerprint });
+  if (observed.effort !== route.effort) return { ...report, status: 'incompatible', reason_code: 'native-effort-binding-mismatch',
+    message: 'O esforço resolvido diverge do arquivo de agente observado. A rota foi preservada; revise a incompatibilidade antes de iniciar a unidade. Este diagnóstico não inicia nem altera leases.' };
+  return { ...report, ok: true, status: 'compatible-binding', reason_code: 'native-agent-binding-compatible',
+    message: 'Somente o binding de esforço coincide com os bytes observados. A ferramenta nativa e o despacho real ainda não foram validados.' };
+}
+
 // ── module.exports ────────────────────────────────────────────────────────────
 module.exports = {
   CURRENT_SCHEMA,
@@ -620,6 +674,7 @@ module.exports = {
   checkProjectionVersioned,
   checkPlanRepoDeclared,
   checkCapabilities,
+  checkNativeBinding,
   checkWorkspaceConsistency,
   checkRunOverlap,
   checkResources,
@@ -840,6 +895,30 @@ function formatResults(results) {
 function cliMain() {
   const args = parseArgs(process.argv.slice(2));
 
+
+  // A named exclusive diagnostic accepts explicit unit context. It never
+  // observes or fabricates active tool capabilities, dispatches or opens leases.
+  if ('diagnose-native-binding' in args) {
+    const allowed = new Set(['diagnose-native-binding','runtime','cwd','agent','agent-sha256','unit-id','milestone','plan','roadmap','worker-mode','json']);
+    const argv = process.argv.slice(2), seen = new Set(); let invalid = false;
+    for (let i = 0; i < argv.length; i++) {
+      const flag = argv[i];
+      if (!flag.startsWith('--') || !allowed.has(flag.slice(2)) || seen.has(flag)) { invalid = true; break; }
+      seen.add(flag);
+      if (flag !== '--json' && (!argv[++i] || argv[i].startsWith('--'))) { invalid = true; break; }
+    }
+    if (invalid || !['plan-milestone','plan-slice','execute-task'].includes(args['diagnose-native-binding'])
+      || !['claude','codex'].includes(args.runtime) || ('json' in args && args.json !== true)) {
+      process.stderr.write('forge-doctor: --diagnose-native-binding exige unidade e --runtime explícitos; aceita somente contexto, arquivo de agente e --json.\n');
+      process.exitCode = 2; return;
+    }
+    const report = checkNativeBinding(args.cwd, { unitType: args['diagnose-native-binding'], hostRuntime: args.runtime,
+      agentPath: args.agent, agentSha256: args['agent-sha256'], unitId: args['unit-id'], milestoneId: args.milestone,
+      planPath: args.plan, roadmapPath: args.roadmap, workerMode: args['worker-mode'] });
+    process.stdout.write(args.json ? JSON.stringify(report) + '\n' : report.message + '\n');
+    process.exitCode = report.ok ? 0 : 1; return;
+  }
+
   // Exclusive read-only mode: reject conflicts before any existing dispatch.
   if ('diagnose-recovery' in args || 'controller-key' in args) {
     const diagnostic = require('./forge-recovery-diagnostic');
@@ -879,6 +958,11 @@ Flags:
                                  all
   --runtime <name>               capabilities host: claude | codex | both
   --json                         emit deterministic JSON for capability checks
+  --diagnose-native-binding <plan-milestone|plan-slice|execute-task>
+    --runtime <claude|codex> [--agent <file>] [--agent-sha256 <digest>]
+    [--plan <file>] [--roadmap <file>] [--unit-id <id>] [--milestone <id>]
+    [--worker-mode <native|sidecar>] [--cwd <dir>] [--json]
+                                 read-only binding diagnosis; tool availability unknown
   --diagnose-recovery <id>        diagnóstico somente leitura; texto pt-BR ou --json
     [--controller-key <key>]      controller por chave explícita, só milestones
                                  exclusivo; não autoriza ações nem atestações

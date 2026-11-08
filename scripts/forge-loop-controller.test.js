@@ -60,9 +60,9 @@ try {
     assert.strictEqual(paused.outcome, 'needs_input');
     assert.strictEqual(paused.lifecycle, 'paused');
     assert(paused.boundary && paused.boundary.idempotency_key);
-    const resumed = loop.advance(paused.snapshot, 'resume', { ...input(cwd), host_runtime: host === 'claude' ? 'codex' : 'claude', response: { choice: 'continue' } });
-    assert.strictEqual(resumed.outcome, 'resumed');
-    assert.strictEqual(resumed.lifecycle, 'idle');
+    const resumed = loop.advance(paused.snapshot, 'resume', { ...input(cwd), host_runtime: host === 'claude' ? 'codex' : 'claude', resume_intent: 'execute' });
+    assert.strictEqual(resumed.outcome, 'dispatch_required');
+    assert.strictEqual(resumed.lifecycle, 'dispatch_required');
     assert.strictEqual(resumed.host_runtime, host === 'claude' ? 'codex' : 'claude');
     assert.strictEqual(JSON.stringify(resumed).includes(vectors.crlf_description), false);
   }
@@ -84,10 +84,11 @@ try {
   const taskCwd = setup('darwin', 'codex');
   const task = loop.advance(loop.create({ mode: 'task', workflow_id: 'task-one', host_runtime: 'codex' }), 'pause', input(taskCwd, 'task-owner', 'task-one'));
   assert.strictEqual(task.lifecycle, 'paused');
-  const taskDone = loop.advance(task.snapshot, 'resume', { ...input(taskCwd, 'task-owner', 'task-one'), response: { value: 'done' } });
-  assert.strictEqual(taskDone.lifecycle, 'completed');
-  assert.strictEqual(taskDone.action, 'stop');
-  assert.strictEqual(loop.advance(taskDone.snapshot, 'next', input(taskCwd)).reason_code, 'workflow-terminal');
+  const taskDone = loop.advance(task.snapshot, 'resume', { ...input(taskCwd, 'task-owner', 'task-one'), resume_intent: 'execute' });
+  assert.strictEqual(taskDone.lifecycle, 'dispatch_required');
+  assert.strictEqual(taskDone.action, 'dispatch');
+  assert.strictEqual(taskDone.snapshot.step_count, task.snapshot.step_count);
+  assert.strictEqual(loop.advance(taskDone.snapshot, 'complete', { ...input(taskCwd, 'task-owner', 'task-one'), result: { status: 'done' } }).reason_code, 'execution-resume-delivery-required');
 
   // A STANDALONE task (no milestone) has no selectable unit in this layer and is
   // refused by name — not by a generic invalid-request thrown from the delegate.
