@@ -97,6 +97,25 @@ function separateProcedurePrompt(text, procedure, provenance) {
   return composeProcedurePrompt(text, procedure, provenance).replace(procedure.content, '');
 }
 
+
+// Budget attribution only. Delivery callers keep separateProcedurePrompt so
+// the required result contract is never stripped from a transport request.
+// renderPrompt appends this exact top-level frame immediately before the
+// canonical procedure. Match its suffix, never an arbitrary occurrence inside
+// optional DATA, and preserve every unchanged optional/procedure/full ceiling.
+function separateOptionalPromptContext(text, procedure, provenance) {
+  const value = String(text);
+  const instruction = require('./forge-worker-result').resultStatusInstruction();
+  const suffix = '\n\n' + instruction + '\n\n\n';
+  const context = separateProcedurePrompt(value, procedure, provenance);
+  if (!value.includes(procedure.content) || !context.endsWith(suffix)) {
+    const error = new Error('Required result-status frame is missing or changed');
+    error.code = 'result-status-frame-invalid';
+    throw error;
+  }
+  return context.slice(0, -suffix.length) + '\n';
+}
+
 const TEMPLATE_FILES = Object.freeze({
   'execute-task': 'execute-task.md',
   'execute-loose-task': 'execute-loose-task.md',
@@ -1249,6 +1268,7 @@ function cliMain(argv) {
 module.exports = {
   composeProcedurePrompt,
   separateProcedurePrompt,
+  separateOptionalPromptContext,
   TEMPLATE_FILES,
   PROCEDURE_UNITS,
   REQUIRED_IDS,

@@ -1432,11 +1432,11 @@ function decidedLinkedOwner(label, extra, long = false) {
 }
 function optionalTokensOf(rendered, codeDir, phase) {
   const procedure = loadProcedureContext({ cwd: codeDir, phase });
-  return countTokens(require('./forge-prompt.js').separateProcedurePrompt(rendered.prompt, procedure, rendered.procedure_context));
+  return countTokens(require('./forge-prompt.js').separateOptionalPromptContext(rendered.prompt, procedure, rendered.procedure_context));
 }
 
 // A genuine decided owner (separate from CODE_DIR) rendered through the real renderer; the ACTUAL full
-// rendered optional context is measured against the unchanged limit: nothing subtracted, no ledger allowance.
+// rendered optional context excludes only validated mandatory frames; the optional limit and ledger allowance stay unchanged.
 function renderLargeSelection(label, extra, long = false) {
   const owner = decidedLinkedOwner(label + '-owner', extra, long), codeDir = tempWorkspace(label + '-code');
   assert.notStrictEqual(fs.realpathSync.native(owner), fs.realpathSync.native(codeDir));
