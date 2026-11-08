@@ -91,6 +91,54 @@ try {
     assert.ifError(result.error); assert.equal(result.status, 0, result.stderr); assert.equal(result.stderr, '');
   }
   console.log('PASS #348 both fresh-process module load orders retain canonical parser/path exports without circular dependency warnings');
+
+  // R1: normal parsing is strict, while the named migration may first decode
+  // structure after validating its real execution contract. The old migration
+  // positive in forge-code-roots.test.js remains unchanged and runs separately.
+  const migrationFixture = require('./forge-code-roots.test').fixture();
+  try {
+    const make = require('./forge-code-roots.test').plan;
+    const absolute = make(migrationFixture.contract, true);
+    const sourcePath = path.join(migrationFixture.a, 'same.txt').replace(/\\/g, '/');
+    const bodyHash = roots.digest(absolute);
+    assert.throws(() => must.parseMustHaves(absolute), error => error.code === 'root-relative-path-required');
+    assert.throws(() => must.parseMustHaves(absolute, { skipPathPolicy: true }), error => error.code === 'root-relative-path-required');
+    assert.equal(must.parseMustHavesStructure(absolute).artifacts.length, 2);
+    const migrated = roots.normalizeAbsolutePaths(absolute, migrationFixture.contract);
+    assert.equal(migrated.mapping.length, 2); assert.equal(migrated.original_sha256, bodyHash);
+    assert.deepEqual(must.parseMustHaves(migrated.content).truths, must.parseMustHavesStructure(absolute).truths);
+    assert.equal(roots.validatePlan(migrated.content, migrationFixture.contract).outputs.length, 2);
+    const substitute = (field, value) => {
+      if (field === 'writes[0]') return absolute.replace('writes:\n  - ' + quote(sourcePath), 'writes:\n  - ' + quote(value));
+      if (field === 'expected_output[0]') return absolute.replace('expected_output:\n  - ' + quote(sourcePath), 'expected_output:\n  - ' + quote(value));
+      if (field === 'artifacts[0].path') return absolute.replace('    - path: ' + quote(sourcePath), '    - path: ' + quote(value));
+      const from = field === 'key_links[0].from' ? value : sourcePath;
+      const to = field === 'key_links[0].to' ? value : sourcePath;
+      return absolute.replace('  key_links: []', '  key_links:\n    - from: ' + quote(from) + '\n      to: ' + quote(to) + '\n      via: Preserve structural migration contract');
+    };
+    let denied = 0;
+    for (const field of fields) for (const relative of ['.gsd/report.md','.GIT/config','docs/.SvN/entries','docs\\.gSd\\report.md']) {
+      const absoluteProtected = path.join(migrationFixture.a, relative).replace(/\\/g, '/');
+      for (const value of [absoluteProtected, 'alpha::' + relative]) {
+        const input = substitute(field, value);
+        assert.notEqual(input, absolute, 'the protected declaration reached ' + field);
+        assert.throws(() => roots.normalizeAbsolutePaths(input, migrationFixture.contract), error => error.code === 'root-path-protected', field + ': protected migration path'); denied++;
+      }
+    }
+    const outside = path.join(migrationFixture.owner, 'foreign.md').replace(/\\/g, '/');
+    assert.throws(() => roots.normalizeAbsolutePaths(substitute('writes[0]', outside), migrationFixture.contract), error => error.code === 'absolute-path-ambiguous');
+    assert.throws(() => roots.normalizeAbsolutePaths(absolute, { ...migrationFixture.contract, primary_root_id: 'foreign' }));
+    const checked = cli(absolute); assert.equal(checked.status, 2); assert.equal(checked.data.valid, false); assert(checked.data.errors.some(message => message.includes('root-relative-path-required')));
+    const contractFile = path.join(migrationFixture.owner, 'contract.json'), goodFile = path.join(migrationFixture.owner, 'absolute-plan.md'), badFile = path.join(migrationFixture.owner, 'protected-plan.md');
+    fs.writeFileSync(contractFile, JSON.stringify(migrationFixture.contract)); fs.writeFileSync(goodFile, absolute);
+    fs.writeFileSync(badFile, substitute('artifacts[0].path', 'alpha::.gsd/report.md'));
+    const migrateCli = file => spawnSync(process.execPath, [path.join(__dirname, 'forge-code-roots.js'), '--contract', contractFile, '--plan', file, '--normalize'], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+    const good = migrateCli(goodFile); assert.equal(good.status, 0, good.stderr); assert.equal(JSON.parse(good.stdout).mapping.length, 2);
+    const bad = migrateCli(badFile); assert.equal(bad.status, 2); assert.equal(JSON.parse(bad.stderr).reason_code, 'root-path-protected');
+    assert.equal(roots.digest(absolute), bodyHash);
+    console.log('PASS #348 R1 authorized absolute migration retains strict parser/CLI and full normalized path policy (' + denied + ' protected negatives)');
+  } finally { migrationFixture.cleanup(); }
+
 } finally {
   assert.equal(fs.realpathSync.native(lab), lab);
   assert.equal(path.dirname(lab), base);

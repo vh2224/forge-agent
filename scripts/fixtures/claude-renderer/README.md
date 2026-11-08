@@ -234,3 +234,19 @@ Measured from base `ad62d774fc37ec6fcf5a85347d69eaf5c8a8c675` using the pure Cla
 | hooks | `c149db9dd45bed13f05931987217d224a6f23d805dc6e8900e46b32893a41c48` | `228bceb55413320b8f3b47564711989f454a841d9946ebdfde92f690b733ad1e` |
 
 The exact source and attributed hashes are recorded in `scripts/fixtures/entry-contracts/distribution-delta.json`; #341 remains an immutable earlier layer. Distribution proof does not establish provider/client execution or human acceptance.
+
+## Product artifact path contract (#348)
+
+Measured by the pure Claude renderer over the composed #348/#353 candidate based on
+`c91dfc77231a176892df72f56c0eefefbbd430be` (entry contracts plus required-result budget attribution).
+The immutable #347 fixture retains SHA-256 `ffb4476cd2ef7b7b8e44676a392e9a11607015fc38d349be9ae2a5fa0a8558a2`.
+Only the agents surface changes, through `agents/forge-planner.md`:
+
+- agents: `91dd5d2a3ece86df030fcf5e374041c3bb496da040baf3f3a2830445061c8c5e` to `5a340f4af8ad04071f5d3f39573f72e849c5e97a40e33364da787a14d2ef8de2`.
+- planner file: `45ceadf4a8299115a9a492a9beab4e4c83e29748ca68af03763144b5e904e4cb` to `21be82c7121303e915e0e1a4b490f6ced8c72baefeef55d4a231143cda278400`.
+
+The other eight active surface pins, all member identities, #341/#347 deltas and
+owner/historical captures remain unchanged. The bounded source/render evidence is
+recorded in `scripts/fixtures/artifact-contracts/distribution-delta.json`.
+This proves distribution only; it does not establish CI, release, installation,
+provider/client behavior or human acceptance.

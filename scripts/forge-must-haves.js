@@ -436,7 +436,9 @@ function assertProductPlanPaths(frontmatter, parsed) {
  * @param {string} content  Full plan file content
  * @returns {{ truths: string[], artifacts: object[], key_links: object[], expected_output: string[], domain: string|null, capability: string|null }}
  */
-function parseMustHaves(content) {
+// Structural decoding only: this result is not product-path admission. The
+// normalizer uses it only after validating the physical execution contract.
+function parseMustHavesStructure(content) {
   if (!hasStructuredMustHaves(content)) {
     throw new Error('plan is legacy — use hasStructuredMustHaves to pre-check');
   }
@@ -605,7 +607,13 @@ function parseMustHaves(content) {
     domain,
     capability,
   };
-  assertProductPlanPaths(fm, parsed);
+  return parsed;
+}
+
+// The ordinary API and --check remain strict. No option can bypass admission.
+function parseMustHaves(content) {
+  const parsed = parseMustHavesStructure(content);
+  assertProductPlanPaths(extractFrontmatter(content), parsed);
   return parsed;
 }
 
@@ -674,7 +682,7 @@ function parseExecutionFields(content) {
   return result;
 }
 
-module.exports = { hasStructuredMustHaves, parseMustHaves, parseExecutionFields, resolveCapability, stripInlineComment };
+module.exports = { hasStructuredMustHaves, parseMustHaves, parseMustHavesStructure, parseExecutionFields, resolveCapability, stripInlineComment };
 
 // ── CLI entrypoint ────────────────────────────────────────────────────────────
 

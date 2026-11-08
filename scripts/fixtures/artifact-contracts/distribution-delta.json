@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "issue": 348,
+  "provenance": {
+    "base_revision": "c91dfc77231a176892df72f56c0eefefbbd430be",
+    "previous_delta": "scripts/fixtures/entry-contracts/distribution-delta.json",
+    "method": "measured LF planner source and pure Claude render after composed #347/#348/#353; distribution proof only"
+  },
+  "surfaces": {
+    "agents": {
+      "before": "91dd5d2a3ece86df030fcf5e374041c3bb496da040baf3f3a2830445061c8c5e",
+      "after": "5a340f4af8ad04071f5d3f39573f72e849c5e97a40e33364da787a14d2ef8de2",
+      "attributed_before": "91dd5d2a3ece86df030fcf5e374041c3bb496da040baf3f3a2830445061c8c5e",
+      "attributed_after": "5a340f4af8ad04071f5d3f39573f72e849c5e97a40e33364da787a14d2ef8de2"
+    }
+  },
+  "files": {
+    "agents/forge-planner.md": {
+      "before": "45ceadf4a8299115a9a492a9beab4e4c83e29748ca68af03763144b5e904e4cb",
+      "after": "21be82c7121303e915e0e1a4b490f6ced8c72baefeef55d4a231143cda278400",
+      "attributed_before": "45ceadf4a8299115a9a492a9beab4e4c83e29748ca68af03763144b5e904e4cb",
+      "attributed_after": "21be82c7121303e915e0e1a4b490f6ced8c72baefeef55d4a231143cda278400"
+    }
+  },
+  "unchanged_surfaces": [
+    "claude-instructions",
+    "claude-settings",
+    "commands",
+    "configuration",
+    "dispatch-templates",
+    "hooks",
+    "mcp",
+    "skills"
+  ]
+}
