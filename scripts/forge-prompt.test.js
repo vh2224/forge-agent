@@ -396,6 +396,7 @@ test('renders all unit templates with no contract placeholder left behind', () =
     const result = renderPrompt(baseOptions(cwd, unitType));
     assert.ok(result.prompt.includes('WORKING_DIR:'));
     assert.ok(result.prompt.endsWith('\n'));
+    assert.ok(result.prompt.includes(require('./forge-worker-result').resultStatusInstruction()), `${unitType} must declare the closed result status enum`);
     assert.ok(!/\{(?:WORKING_DIR|M###|S##|T##|auto_commit|milestone_cleanup|unit_effort|THINKING_OPUS|CS_LINT|CS_STRUCTURE|CS_RULES|TOP_MEMORIES|description|PLAN_CHECK_MODE|MUST_HAVES_CHECK_RESULTS)\}/.test(result.prompt.replace(loadProcedureContext({ cwd, phase: unitType }).content, '')));
     assert.strictEqual(result.input_tokens, countTokens(result.prompt));
     const mandatory = result.procedure_context ? loadProcedureContext({ cwd, phase: unitType }).content : '';
@@ -1431,11 +1432,11 @@ function decidedLinkedOwner(label, extra, long = false) {
 }
 function optionalTokensOf(rendered, codeDir, phase) {
   const procedure = loadProcedureContext({ cwd: codeDir, phase });
-  return countTokens(require('./forge-prompt.js').separateProcedurePrompt(rendered.prompt, procedure, rendered.procedure_context));
+  return countTokens(require('./forge-prompt.js').separateOptionalPromptContext(rendered.prompt, procedure, rendered.procedure_context));
 }
 
 // A genuine decided owner (separate from CODE_DIR) rendered through the real renderer; the ACTUAL full
-// rendered optional context is measured against the unchanged limit: nothing subtracted, no ledger allowance.
+// rendered optional context excludes only validated mandatory frames; the optional limit and ledger allowance stay unchanged.
 function renderLargeSelection(label, extra, long = false) {
   const owner = decidedLinkedOwner(label + '-owner', extra, long), codeDir = tempWorkspace(label + '-code');
   assert.notStrictEqual(fs.realpathSync.native(owner), fs.realpathSync.native(codeDir));

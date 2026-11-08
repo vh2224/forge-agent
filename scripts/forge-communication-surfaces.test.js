@@ -222,13 +222,170 @@ function deltaRow(delta, kind, key) {
 }
 // Attributed (linked blocks removed) value expected now: the historical value itself, or the
 // delta's measured after once its before is proven to be exactly that historical value.
-function attributedNow(kind, key, historical, delta = delta341) {
+
+// #347 is a subsequent measured layer. These before anchors were read from the
+// named base commit, not recomputed from current sources or old owner captures.
+const ENTRY_347_PATH = path.join(root, 'scripts/fixtures/entry-contracts/distribution-delta.json');
+const ENTRY_347 = JSON.parse(fs.readFileSync(ENTRY_347_PATH, 'utf8'));
+const ENTRY_347_MEMBERS = Object.freeze({
+  "agents": [
+    "agents/forge-advocate.md",
+    "agents/forge-completer.md",
+    "agents/forge-discusser.md",
+    "agents/forge-executor.md",
+    "agents/forge-plan-checker.md",
+    "agents/forge-planner.md",
+    "agents/forge-researcher.md",
+    "agents/forge-reviewer.md",
+    "agents/forge-worker.md"
+  ],
+  "hooks": [
+    "scripts/forge-hook.js"
+  ]
+});
+const ENTRY_347_RENDER_MEMBERS = Object.freeze({
+  "agents": [
+    "agents/forge-advocate.md",
+    "agents/forge-completer.md",
+    "agents/forge-discusser.md",
+    "agents/forge-executor.md",
+    "agents/forge-memory.md",
+    "agents/forge-plan-checker.md",
+    "agents/forge-planner.md",
+    "agents/forge-researcher.md",
+    "agents/forge-reviewer.md",
+    "agents/forge-worker.md"
+  ],
+  "hooks": [
+    "scripts/forge-hook.js",
+    "scripts/forge-hook.js"
+  ]
+});
+const ENTRY_347_FILES = Object.freeze([
+  "agents/forge-advocate.md",
+  "agents/forge-completer.md",
+  "agents/forge-discusser.md",
+  "agents/forge-executor.md",
+  "agents/forge-plan-checker.md",
+  "agents/forge-planner.md",
+  "agents/forge-researcher.md",
+  "agents/forge-reviewer.md",
+  "agents/forge-worker.md",
+  "scripts/forge-hook.js",
+  "shared/forge-dispatch.md"
+]);
+const ENTRY_347_BEFORE_FILES = Object.freeze({
+  "agents/forge-advocate.md": {
+    "before": "3cb47445f6bc4ddbd8a2ade71ce553f2d1eb5b60e59b3166f7251cc2c989471f",
+    "attributed_before": "3cb47445f6bc4ddbd8a2ade71ce553f2d1eb5b60e59b3166f7251cc2c989471f"
+  },
+  "agents/forge-completer.md": {
+    "before": "576c9be21fdab8d128302cd72582dec72f2d3560b142736fcecdfd8710c11a4c",
+    "attributed_before": "576c9be21fdab8d128302cd72582dec72f2d3560b142736fcecdfd8710c11a4c"
+  },
+  "agents/forge-discusser.md": {
+    "before": "cf015bf24fb5c3472787d01222f9afa7fb52d166d82a1fd337488a70cebd4979",
+    "attributed_before": "cf015bf24fb5c3472787d01222f9afa7fb52d166d82a1fd337488a70cebd4979"
+  },
+  "agents/forge-executor.md": {
+    "before": "40cc7485dc0b67815db6ffdbd3a43b14671d85010c647e795863426cc5aba0dc",
+    "attributed_before": "40cc7485dc0b67815db6ffdbd3a43b14671d85010c647e795863426cc5aba0dc"
+  },
+  "agents/forge-plan-checker.md": {
+    "before": "d31f7b7025cdd24a7a42c476204a54b684f083417c57df95244782c05802ffcb",
+    "attributed_before": "d31f7b7025cdd24a7a42c476204a54b684f083417c57df95244782c05802ffcb"
+  },
+  "agents/forge-planner.md": {
+    "before": "e97cb09294ef4cea8afc79896a8854836a78122bb5c4451b24fa37daf3fbd02e",
+    "attributed_before": "e97cb09294ef4cea8afc79896a8854836a78122bb5c4451b24fa37daf3fbd02e"
+  },
+  "agents/forge-researcher.md": {
+    "before": "40cc2294610659f9de44538e00c9f3cc22a52c27bd7768e68c8a767234db8947",
+    "attributed_before": "40cc2294610659f9de44538e00c9f3cc22a52c27bd7768e68c8a767234db8947"
+  },
+  "agents/forge-reviewer.md": {
+    "before": "d2d92895ae7b9a5fb6faa56fa4a3c256d337941bbf1c7386bcab555bd9c5ddf9",
+    "attributed_before": "d2d92895ae7b9a5fb6faa56fa4a3c256d337941bbf1c7386bcab555bd9c5ddf9"
+  },
+  "agents/forge-worker.md": {
+    "before": "5924147d58486e2bb16bf16811730a80f20b964c89d553ae39b6ca27cb23e29f",
+    "attributed_before": "5924147d58486e2bb16bf16811730a80f20b964c89d553ae39b6ca27cb23e29f"
+  },
+  "scripts/forge-hook.js": {
+    "before": "6d95cf27d00e39d7f20487bd30695436a81cbcc8ef6b5bf9340f2fa5178edfd0",
+    "attributed_before": "6d95cf27d00e39d7f20487bd30695436a81cbcc8ef6b5bf9340f2fa5178edfd0"
+  },
+  "shared/forge-dispatch.md": {
+    "before": "04c89ff6107ee798a00c7ab52a1ac644356d0c3269a7965e9b4fe73f6b37cafe",
+    "attributed_before": "e53e8989da10f313ba3d8183a43341b814c3b57c4d08b7b5395e9626ab307373"
+  }
+});
+const ENTRY_347_BEFORE_SURFACES = Object.freeze({
+  "agents": {
+    "before": "30d0fb3fecdb88a4d2ac76dbb5a1ee6669aa3455f1fa41461137f89a164921c0",
+    "attributed_before": "30d0fb3fecdb88a4d2ac76dbb5a1ee6669aa3455f1fa41461137f89a164921c0"
+  },
+  "hooks": {
+    "before": "c149db9dd45bed13f05931987217d224a6f23d805dc6e8900e46b32893a41c48",
+    "attributed_before": "c149db9dd45bed13f05931987217d224a6f23d805dc6e8900e46b32893a41c48"
+  }
+});
+const ENTRY_347_UNCHANGED = Object.freeze(["claude-instructions","claude-settings","commands","configuration","dispatch-templates","mcp","skills"]);
+function entry347Row(delta, kind, key) {
+  return delta && delta[kind] && Object.hasOwn(delta[kind], key) ? delta[kind][key] : null;
+}
+function entry347After(kind, key, prior, delta = ENTRY_347, attributed = false) {
+  const row = entry347Row(delta, kind, key);
+  if (!row) return prior;
+  const beforeKey = attributed ? 'attributed_before' : 'before';
+  const afterKey = attributed ? 'attributed_after' : 'after';
+  assert.strictEqual(row[beforeKey], prior, '#347 ' + kind + ' ' + key + ': before follows the preceding layer');
+  assert.match(row[afterKey], /^[0-9a-f]{64}$/, '#347 measured after');
+  return row[afterKey];
+}
+function validateEntry347(delta, earlier, { measure, readRaw, readme, renderMembers }) {
+  assert.deepStrictEqual(Object.keys(delta).sort(), ['schema_version', 'issue', 'provenance', 'surfaces', 'files', 'unchanged_surfaces'].sort(), '#347 closed delta shape');
+  assert.strictEqual(delta.schema_version, 1); assert.strictEqual(delta.issue, 347);
+  assert.strictEqual(delta.provenance.base_revision, 'ad62d774fc37ec6fcf5a85347d69eaf5c8a8c675', '#347 named base revision');
+  assert.strictEqual(typeof delta.provenance.method, 'string'); assert(delta.provenance.method.length > 0);
+  assert.deepStrictEqual(Object.keys(delta.surfaces).sort(), ['agents', 'hooks'], '#347 exact affected surfaces');
+  assert.deepStrictEqual(Object.keys(delta.files).sort(), [...ENTRY_347_FILES].sort(), '#347 exact changed files');
+  assert.deepStrictEqual([...delta.unchanged_surfaces].sort(), [...ENTRY_347_UNCHANGED], '#347 exact untouched surfaces');
+  assert.deepStrictEqual(Object.keys(renderMembers).sort(), ['agents', 'hooks'], '#347 exact rendered member groups');
+  for (const [id, expected] of Object.entries(ENTRY_347_RENDER_MEMBERS)) assert.deepStrictEqual([...renderMembers[id]].sort(), [...expected].sort(), '#347 exact rendered members ' + id);
+  for (const [kind, anchors] of [['surfaces', ENTRY_347_BEFORE_SURFACES], ['files', ENTRY_347_BEFORE_FILES]]) {
+    for (const [key, anchor] of Object.entries(anchors)) {
+      const row = delta[kind][key];
+      assert.deepStrictEqual(Object.keys(row).sort(), ['before', 'after', 'attributed_before', 'attributed_after'].sort(), '#347 closed row ' + key);
+      for (const field of ['before','after','attributed_before','attributed_after']) assert.match(row[field], /^[0-9a-f]{64}$/, '#347 hash ' + key + '/' + field);
+      assert.strictEqual(row.before, anchor.before, '#347 immutable base raw ' + key);
+      assert.strictEqual(row.attributed_before, anchor.attributed_before, '#347 immutable base attributed ' + key);
+      const previous = earlier[kind] && earlier[kind][key];
+      if (previous) {
+        assert.strictEqual(row.before, previous.after, '#347 raw chain after #341 ' + key);
+        assert.strictEqual(row.attributed_before, previous.attributed_after || previous.after, '#347 attributed chain after #341 ' + key);
+      }
+      assert.notStrictEqual(row.before, row.after, '#347 actual change ' + key);
+      if (kind === 'surfaces') {
+        assert.strictEqual(row.after, row.attributed_after, '#347 surfaces have no linked blocks ' + key);
+        assert.strictEqual(measure(key), row.after, '#347 measured surface ' + key);
+        assert(readme.includes(row.before) && readme.includes(row.after), '#347 README records ' + key + ' before/after');
+      } else {
+        const raw = readRaw(key);
+        assert.strictEqual(hash(raw), row.after, '#347 measured file ' + key);
+        assert.strictEqual(hash(Buffer.from(raw.toString('utf8').replace(LINKED_BLOCK_RE, ''), 'utf8')), row.attributed_after, '#347 measured attributed file ' + key);
+      }
+    }
+  }
+}
+
+function attributedNow(kind, key, historical, delta = delta341, entryDelta = ENTRY_347) {
   const row = deltaRow(delta, kind, key);
-  if (!row) return historical;
+  if (!row) return entry347After(kind, key, historical, entryDelta, true);
   assert.strictEqual(row.attributed_before || row.before, historical, `#341 delta ${kind} ${key}: before is the versioned historical value`);
   const after = row.attributed_after || row.after;
   assert(SHA_RE.test(after), `#341 delta ${kind} ${key}: measured after`);
-  return after;
+  return entry347After(kind, key, after, entryDelta, true);
 }
 test('S02 review R61-R63: interrupted modern enrollment cannot select legacy planning', () => {
   const { spawnSync } = require('child_process');
@@ -318,6 +475,7 @@ function atPointer(value, pointer) {
 // Fixture seams (T06-R1): the defaults are the real checked-in pins, README, render and
 // sources; the T06 group passes in-memory variants only, never writing any pin.
 function checkPins(fixture = {}) {
+  const entryDelta = fixture.entryDelta === undefined ? ENTRY_347 : fixture.entryDelta;
   const pins = fixture.golden || golden;
   const readme = fixture.pinReadme === undefined ? pinReadme : fixture.pinReadme;
   const delta = fixture.delta === undefined ? delta341 : fixture.delta;
@@ -327,6 +485,9 @@ function checkPins(fixture = {}) {
     const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-t07-pins-')); temps.push(temp);
     artifacts = renderer.render({ repo: root, projectRoot: temp, claudeHome: path.join(temp, 'host'), forgeHome: path.join(temp, 'forge') }).artifacts;
   }
+  validateEntry347(entryDelta, delta, { measure: id => surfaceHash(artifacts, id, true),
+    renderMembers: Object.fromEntries(['agents', 'hooks'].map(id => [id, artifacts.filter(item => item.source_id === id).map(item => item.source)])),
+    readRaw: fixture.readSource || (rel => fs.readFileSync(path.join(root, rel))), readme });
   assert.strictEqual(pins.surfaces.length, 9);
   assert.deepStrictEqual(pins.surfaces.map(({ sha256, ...identity }) => identity),
     before.active_golden_before.surfaces.map(({ sha256, ...identity }) => identity));
@@ -338,7 +499,7 @@ function checkPins(fixture = {}) {
     const rawHash = surfaceHash(artifacts, surface.source_id, true);
     // Strict historical attribution in BOTH pin states: outside the linked blocks every byte is the pre-T06 one
     // (#341: a declared surface instead equals its measured delta after, whose before is that pre-T06 value).
-    assert.strictEqual(attributedHash, attributedNow('surfaces', surface.source_id, T06_ATTRIBUTED_PINS[surface.source_id], delta), `attributed pre-T06 bytes ${surface.source_id}`);
+    assert.strictEqual(attributedHash, attributedNow('surfaces', surface.source_id, T06_ATTRIBUTED_PINS[surface.source_id], delta, entryDelta), `attributed pre-T06 bytes ${surface.source_id}`);
     assert(surface.sha256 === attributedHash || surface.sha256 === rawHash,
       `final measured ${surface.source_id}: pin ${surface.sha256} is neither the attributed ${attributedHash} nor the raw ${rawHash}`);
     if (surface.sha256 !== attributedHash) {
@@ -347,7 +508,7 @@ function checkPins(fixture = {}) {
     }
     const row341 = deltaRow(delta, 'surfaces', surface.source_id);
     if (row341) {
-      assert(surface.sha256 === row341.after || surface.sha256 === row341.attributed_after, `#341 pin ${surface.source_id} is a measured delta after`);
+      assert(surface.sha256 === entry347After('surfaces', surface.source_id, row341.after, entryDelta) || surface.sha256 === entry347After('surfaces', surface.source_id, row341.attributed_after || row341.after, entryDelta, true), `#341 pin ${surface.source_id} is a measured delta after`);
       assert(readme.includes(row341.before) && readme.includes(surface.sha256), `#341 documented before/after ${surface.source_id}`);
     }
     if (old.get(surface.source_id) !== surface.sha256) {
@@ -355,14 +516,14 @@ function checkPins(fixture = {}) {
       assert(readme.includes(old.get(surface.source_id)) && readme.includes(surface.sha256), `documented actual ${surface.source_id}`);
     }
   }
-  assert.deepStrictEqual(changed.sort(), [...before.allowed_active_changes].sort(), 'only four of nine active surfaces');
+  assert.deepStrictEqual(changed.sort(), [...new Set([...before.allowed_active_changes, ...Object.keys(entryDelta.surfaces)])].sort(), 'historical changes plus exactly the #347 surfaces');
   for (const historical of before.historical_goldens) assert.strictEqual(hash(fs.readFileSync(path.join(root, historical.path))), historical.sha256, historical.path);
   // Every unrelated input captured by the owner still has its exact original bytes.
   const allowed = new Set([goldenPath, 'agents/forge-planner.md', 'agents/forge-worker.md', 'skills/forge-auto/SKILL.md',
     'skills/forge-next/SKILL.md', 'skills/forge-help/SKILL.md', 'skills/forge-new-milestone/SKILL.md',
     'shared/templates/dispatch/plan-slice.md', before.samples.file, 'scripts/forge-dispatch-source-guard.js', 'scripts/forge-smoke.js']);
   for (const source of before.sources) if (!allowed.has(source.path)) {
-    assert.strictEqual(hash(attributedBytes(source.path, fixture.readSource)), attributedNow('files', source.path, source.sha256, delta), `unchanged source ${source.path}`);
+    assert.strictEqual(hash(attributedBytes(source.path, fixture.readSource)), attributedNow('files', source.path, source.sha256, delta, entryDelta), `unchanged source ${source.path}`);
   }
   assert(readme.includes(before.provenance.source_revision));
   assert(readme.includes('T05') && readme.includes('configuration') && readme.includes('forge-claude-renderer.render'));
@@ -1722,10 +1883,10 @@ test('#341 distribution delta: versioned before, measured after, untouched surfa
     assert.strictEqual(row.sha256, raw, `active pin ${row.source_id} is the measured render`);
     const declared = deltaRow(delta, 'surfaces', row.source_id);
     if (!declared) {
-      assert.strictEqual(row.sha256, T06_ATTRIBUTED_PINS[row.source_id], `${row.source_id} is byte-identical to its pre-#341 pin`);
+      assert.strictEqual(row.sha256, entry347After('surfaces', row.source_id, T06_ATTRIBUTED_PINS[row.source_id]), `${row.source_id}: pre-#341 pin followed by the measured #347 layer`);
       continue;
     }
-    assert.strictEqual(declared.after, raw, `${row.source_id}: delta after is the measured raw render`);
+    assert.strictEqual(entry347After('surfaces', row.source_id, declared.after), raw, `${row.source_id}: #341 intermediate after followed by the measured #347 layer`);
     assert.strictEqual(surfaceHash(artifacts, row.source_id, false), attributedNow('surfaces', row.source_id, T06_ATTRIBUTED_PINS[row.source_id]),
       `${row.source_id}: measured attributed after, before is the T06 value`);
     assert.notStrictEqual(declared.before, declared.after, `${row.source_id} really moved`);
@@ -1742,9 +1903,9 @@ test('#341 distribution delta: versioned before, measured after, untouched surfa
   const s02Allowed = ['skills/forge-auto/SKILL.md', 'skills/forge-next/SKILL.md'];
   assert.deepStrictEqual(Object.keys(delta.files).sort(), [...delta.declared_paths].sort());
   for (const [file, row] of Object.entries(delta.files)) {
-    assert.strictEqual(hash(fs.readFileSync(path.join(root, file))), row.after, `${file}: after is the measured raw bytes`);
+    assert.strictEqual(hash(fs.readFileSync(path.join(root, file))), entry347After('files', file, row.after), `${file}: #341 intermediate after followed by the measured #347 layer`);
     if (captured.has(file) && !s02Allowed.includes(file)) assert.strictEqual(captured.get(file), row.attributed_before || row.before, `${file}: before is the capture`);
-    if (row.attributed_after) assert.strictEqual(hash(attributedBytes(file)), row.attributed_after, `${file}: measured attributed after`);
+    if (row.attributed_after) assert.strictEqual(hash(attributedBytes(file)), entry347After('files', file, row.attributed_after, ENTRY_347, true), `${file}: #341 attributed intermediate followed by #347`);
   }
   assert.strictEqual(delta.files['skills/forge-task/SKILL.md'].attributed_before, T06_ATTRIBUTED_TASK_SHA);
   assert.strictEqual(delta.files['skills/forge-next/SKILL.md'].attributed_before, T06_ATTRIBUTED_NEXT_SHA);
@@ -1783,6 +1944,35 @@ test('#341 distribution delta: versioned before, measured after, untouched surfa
   refused('registry count changed', () => checkRegistry({ delta: variant(copy => { copy.registry.count = 249; }) }));
   refused('fabricated registry drift', () => checkRegistry({ delta: variant(copy => { copy.registry.drifted_rows = [{ after_id: before.dispatch_registry.rows[0].id }]; }) }));
   console.log('note - #341 distribution only: agents, skills and configuration re-pinned to measured values; client execution, CI, installation and human acceptance remain unknown.');
+});
+
+
+test('#347 distribution delta: exact chain, members and tamper refusals', () => {
+  const renderer = require('./forge-claude-renderer');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-347-pins-')); temps.push(temp);
+  const artifacts = renderer.render({ repo: root, projectRoot: temp, claudeHome: path.join(temp, 'host'), forgeHome: path.join(temp, 'forge') }).artifacts;
+  checkPins({ artifacts });
+  for (const [id, members] of Object.entries(ENTRY_347_MEMBERS)) {
+    for (const member of members) assert(artifacts.some(item => item.source_id === id && item.source === member), '#347 member rendered: ' + member);
+    if (id === 'agents') assert(!members.includes('agents/forge-memory.md'), '#347 memory remains outside the change');
+  }
+  const wrong = hash('not a measured #347 value');
+  const variant = mutate => { const copy = JSON.parse(JSON.stringify(ENTRY_347)); mutate(copy); return copy; };
+  const refused = (label, fixture) => assert.throws(() => checkPins({ artifacts, ...fixture }), error => error instanceof assert.AssertionError, '#347 ' + label + ' must be refused');
+  refused('foreign before', { entryDelta: variant(d => { d.surfaces.agents.before = wrong; }) });
+  refused('coherent invented after', { entryDelta: variant(d => { d.surfaces.agents.after = wrong; d.surfaces.agents.attributed_after = wrong; }) });
+  refused('extra surface', { entryDelta: variant(d => { d.surfaces.commands = { ...d.surfaces.agents }; }) });
+  refused('omitted surface', { entryDelta: variant(d => { delete d.surfaces.hooks; }) });
+  refused('extra file', { entryDelta: variant(d => { d.files['commands/forge.md'] = { ...d.files[ENTRY_347_FILES[0]] }; }) });
+  refused('omitted file', { entryDelta: variant(d => { delete d.files[ENTRY_347_FILES[0]]; }) });
+  refused('extra rendered member', { artifacts: [...artifacts, { ...artifacts.find(item => item.source_id === 'agents'), source: 'agents/foreign.md' }] });
+  refused('omitted rendered member', { artifacts: artifacts.filter(item => item.source !== ENTRY_347_MEMBERS.agents[0]) });
+  refused('wrong file before', { entryDelta: variant(d => { d.files[ENTRY_347_FILES[0]].before = wrong; }) });
+  refused('invented file after', { entryDelta: variant(d => { d.files[ENTRY_347_FILES[0]].after = wrong; d.files[ENTRY_347_FILES[0]].attributed_after = wrong; }) });
+  refused('file edited after measurement', { readSource: rel => { const raw = fs.readFileSync(path.join(root, rel)); return rel === ENTRY_347_FILES[0] ? Buffer.concat([raw, Buffer.from('\nforeign edit\n')]) : raw; } });
+  refused('wrong active pin', { golden: { ...golden, surfaces: golden.surfaces.map(row => row.source_id === 'agents' ? { ...row, sha256: wrong } : row) } });
+  refused('undocumented current pin', { pinReadme: pinReadme.split(ENTRY_347.surfaces.agents.after).join('') });
+  refused('undocumented intermediate pin', { pinReadme: pinReadme.split(ENTRY_347.surfaces.agents.before).join('') });
 });
 
 for (const temp of temps) fs.rmSync(temp, { recursive: true, force: true });

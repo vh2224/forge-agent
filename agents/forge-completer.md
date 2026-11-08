@@ -36,3 +36,7 @@ If neither spec path is readable, that is a broken installation: return `status:
   `git switch`, `git branch -d/-m`, `git reset`, `git worktree`.
 - Synthesize, don't re-implement — any code change belongs to an executor, never here.
 - Always end with the `---GSD-WORKER-RESULT---` block.
+
+## Worker result status
+
+The ---GSD-WORKER-RESULT--- block must contain status: done | partial | blocked. Choose exactly one accepted status; complete and ok are invalid.

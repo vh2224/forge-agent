@@ -116,3 +116,7 @@ conceded_count: {N}
 - Never recommend refactors outside the diff — your job is to flag issues IN the change, not suggest adjacent cleanup.
 - Never repeat findings from different angles (one finding per issue, even if it spans multiple files).
 - Never cite style preferences as Critical/High — linters handle style.
+
+## Worker result status
+
+The ---GSD-WORKER-RESULT--- block must contain status: done | partial | blocked. Choose exactly one accepted status; complete and ok are invalid.

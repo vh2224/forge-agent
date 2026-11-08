@@ -450,3 +450,7 @@ List every file created or modified. The orchestrator uses `files_changed` to up
 ## Planos com várias raízes de código
 
 Antes de emitir ready, use forge-code-roots.validatePlan e o preflightPlan de forge-task-preparation com a rota real de execute-task. O contrato execution_contract v2 contém owner externo, primary_root_id e code_roots físicos Git/SVN; IDs não são basenames nem URLs. Declare roots_schema: 2 e code_roots no PLAN, depends: [], writes, expected_output e must_haves com truths/artifacts/key_links no mesmo nível. Paths são root_id::relativo. Absolutos só migram por normalizeAbsolutePaths, sem alterar critérios, quando cada path pertence a exatamente uma raiz autorizada. Guarde hashes antes/depois e mapping. Schema incompleto, alias, nesting, traversal ou capability ausente recusam ready. dispatch_allowed isolado não prova execução.
+
+## Worker result status
+
+The ---GSD-WORKER-RESULT--- block must contain status: done | partial | blocked. Choose exactly one accepted status; complete and ok are invalid.

@@ -2737,7 +2737,7 @@ SHAPE=$(printf '%s' "$CLASSIFY" | node -pe "JSON.parse(require('fs').readFileSyn
 | `shape` | Meaning | Route |
 |---------|---------|-------|
 | `complete` | Marker present, `status` in the closed enum | Normal path — Layer 0 does not fire |
-| `status-missing` | Marker present, no status in the enum (the block itself was cut) | Layer 0 |
+| `status-missing` | Marker present, status absent or outside the closed enum (`done`, `partial`, `blocked`; `complete` and `ok` are invalid) | Layer 0 |
 | `absent` | No marker anywhere in the return | Layer 0 |
 | `empty` | No non-whitespace return at all | Layer 0 |
 
@@ -2782,7 +2782,7 @@ Each rung is tried in order; the first that yields a status wins, and the run re
 
 Ask for the **complete** answer, and forbid only the expensive part:
 
-> Re-emit your COMPLETE final answer in ONE message: every inline deliverable your agent instructions require, followed by the `---GSD-WORKER-RESULT---` block. Do not re-run tools or redo investigation — restate the conclusions you already reached. A message containing only the result block discards your work: the orchestrator reads this message and nothing else.
+> Re-emit your COMPLETE final answer in ONE message: every inline deliverable your agent instructions require, followed by the `---GSD-WORKER-RESULT---` block. The block must contain `status: done | partial | blocked`; choose exactly one accepted status (`complete` and `ok` are invalid). Do not re-run tools or redo investigation — restate the conclusions you already reached. A message containing only the result block discards your work: the orchestrator reads this message and nothing else.
 
 Wording is load-bearing and the failure it avoids was measured. An earlier version said "emit the missing structured block", which a compliant agent obeys literally — it emits the block **alone**. For agents whose deliverable is inline prose in that same message (`forge-advocate` verdicts, `forge-reviewer` findings), the orchestrator then reads a scoreboard with the payload stripped off. M018 lost six advocate defenses that way, three returning exactly `refuted=3 conceded=2 open=1` and nothing else. Keep the two clauses together: *complete answer* **and** *no re-running tools*.
 

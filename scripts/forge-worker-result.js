@@ -60,6 +60,10 @@ const END_MARKER    = '---END-RESULT---';
 // verdict the orchestrator then acts on.
 const STATUS_VALUES = new Set(['done', 'partial', 'blocked']);
 
+function resultStatusInstruction() {
+  return `The ---GSD-WORKER-RESULT--- block must contain status: ${[...STATUS_VALUES].join(' | ')}. Choose exactly one accepted status; complete and ok are invalid.`;
+}
+
 // Tail shown to the operator so they can see where the message stopped. Bounded
 // because this lands in a JSON payload that gets echoed into a terminal.
 const TAIL_CHARS = 240;
@@ -511,6 +515,7 @@ module.exports = {
   RESULT_MARKER,
   END_MARKER,
   STATUS_VALUES,
+  resultStatusInstruction,
 };
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
