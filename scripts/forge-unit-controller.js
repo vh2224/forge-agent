@@ -1766,8 +1766,6 @@ function cliMain() {
   }
 }
 
-if (require.main === module) cliMain();
-
 module.exports = {
   PROTOCOL_VERSION, BOUNDARY_KINDS, ACTIONS, PHASES, REASON_CODES, TIME_ADMISSION_CODES, ControllerError,
   selectNextUnit, discoverInventory, select, begin, transition, persistResult,
@@ -1779,3 +1777,7 @@ module.exports = {
   consumeFailure, reenter, failureProjection, validateLinkedEntry, validateTerminalLinkedEntry, sliceClosure,
   dependencies: { forgeState, forgeRuns, forgePrefs, forgeRuntime, forgeIds, forgeLease },
 };
+
+// Time-selection producer proofs can require this module during CLI selection.
+// Publish the same API as require() callers before entering that circular path.
+if (require.main === module) cliMain();

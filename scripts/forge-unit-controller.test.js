@@ -605,6 +605,38 @@ function enrolledRoot() {
   return cwd;
 }
 const timePrefs = () => ({ ok: true, prefs: { workflow: { skip_discuss: true, skip_research: true } } });
+function testEnrolledCliSelectionParity() {
+  const cwd = enrolledRoot();
+  try {
+    writeFile(cwd, '.gsd/forge-prefs.jsonc', JSON.stringify(timePrefs().prefs));
+    const snapshot = () => {
+      const rows = [];
+      const visit = directory => {
+        for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+          const file = path.join(directory, entry.name);
+          if (entry.isDirectory()) visit(file);
+          else rows.push([path.relative(cwd, file), fs.readFileSync(file).toString('base64')]);
+        }
+      };
+      visit(path.join(cwd, '.gsd'));
+      return rows;
+    };
+    const before = snapshot();
+    const expected = controller.select(cwd, { milestone: TM }, { prefsReader: timePrefs });
+    assert.strictEqual(expected.ok, true);
+    assert.strictEqual(expected.unit.type, 'estimate-milestone');
+    const cli = spawnSync(process.execPath, [path.join(__dirname, 'forge-unit-controller.js'), '--select', TM, '--cwd', cwd], {
+      encoding: 'utf8', timeout: 30000,
+      env: { ...process.env, HOME: cwd, USERPROFILE: cwd, FORGE_HOME: path.join(cwd, '.forge-agent') },
+    });
+    assert.strictEqual(cli.status, 0, cli.stderr);
+    const actual = JSON.parse(cli.stdout);
+    assert.deepStrictEqual(actual.unit, expected.unit);
+    assert.strictEqual(actual.ok, true);
+    assert(!cli.stderr.includes('circular dependency'), 'CLI exports are available to the time-selection proof');
+    assert.deepStrictEqual(snapshot(), before, 'API and CLI selection create no lease, transaction or artifact');
+  } finally { cleanup(cwd); }
+}
 function timeOptions(offset = 0, extra = {}) { return { prefsReader: timePrefs, now: () => TNOW + offset, ...extra }; }
 function estimateCompleted(cwd) {
   const before = timeSelection.readSelectionState(cwd, TM);
@@ -1573,6 +1605,7 @@ function assertThrowsDetails(fn, key) {
 
 function main() {
   console.log(`forge-unit-controller tests on ${process.platform}`);
+  test('fresh enrolled milestone CLI matches API before OPTIONS and selection is read-only', testEnrolledCliSelectionParity);
   test('S02 review R60: scoped completed slice proof survives another milestone boundary', testScopedSliceProofSurvivesOtherMilestone);
   test('S02 task binding: readonly current-allocation projection, eight identifiers and every mutation negative', testTaskBindingContextAndEightIdentifiers);
   test('S02 task binding: cross-slice barriers, duplicate T01 identities and unplanned independent slices', testCrossSliceBarriersAndDuplicateTaskIds);
