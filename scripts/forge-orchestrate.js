@@ -378,7 +378,51 @@ function withPrepared(result, prepared) {
   if (prepared) result.details = { ...(result.details || {}), time_options: { ...(result.details?.time_options || {}), boundary: prepared } };
   return result;
 }
+// A pause is a transition of the CURRENT dispatch, never a new selection.
+// The supplied binding is a locator only; canonical begin/lease/owner records
+// establish identity. A distinct bounded key follows each resumed generation.
+function pauseCurrent(inputValue, options = {}) {
+  const input = normalizeInput(inputValue), locator = inputValue.pause_current;
+  const selected = unit(locator?.unit), binding = locator?.transaction;
+  const refused = reason => Object.assign(base('next', 'blocked', reason, input), { unit: selected });
+  if (!selected || !binding || typeof binding.idempotency_key !== 'string' || !binding.begin_checksum || !binding.generation)
+    return refused('unit-identity-mismatch');
+  const begun = forgeController.lookupRecord(input.cwd, 'transaction', binding.idempotency_key);
+  const ownerDigest = 'sha256:' + crypto.createHash('sha256').update(input.owner_token.normalize('NFC').trim()).digest('hex');
+  if (!begun || begun.action !== 'begin' || begun.phase !== 'committed' || begun.unit.key !== selected.key
+      || begun.milestone !== input.milestone || begun.host_runtime !== input.host_runtime || begun.owner_digest !== ownerDigest
+      || begun.lease_generation !== binding.generation || checksum(begun) !== binding.begin_checksum
+      || binding.unit !== begun.unit.key || binding.milestone !== begun.milestone || binding.host_runtime !== begun.host_runtime
+      || binding.owner_digest !== begun.owner_digest) return refused('unit-identity-mismatch');
+  const key = 'forge-orchestrate-pause:' + checksum({ milestone: begun.milestone, unit: begun.unit.key,
+    begin_key: begun.idempotency_key, generation: begun.lease_generation });
+  const txOptions = { ...options, ...(input.prefsReader ? { prefsReader: input.prefsReader } : {}) };
+  try {
+    let paused = forgeController.lookupRecord(input.cwd, 'transaction', key);
+    if (paused) {
+      if (paused.action !== 'pause' || paused.unit.key !== begun.unit.key || paused.milestone !== begun.milestone
+          || paused.host_runtime !== begun.host_runtime || paused.owner_digest !== begun.owner_digest
+          || paused.lease_generation !== begun.lease_generation) return refused('unit-identity-mismatch');
+      if (paused.phase !== 'committed') forgeController.resume(input.cwd, { idempotency_key: key,
+        owner_token: input.owner_token, generation: begun.lease_generation }, txOptions);
+    } else {
+      forgeController.pause(input.cwd, { milestone: begun.milestone, unit: begun.unit.key, host_runtime: begun.host_runtime,
+        owner_token: input.owner_token, generation: begun.lease_generation, idempotency_key: key,
+        result: { status: 'cancelled' } }, txOptions);
+    }
+    paused = forgeController.lookupRecord(input.cwd, 'transaction', key);
+    const boundary = forgeController.lookupRecord(input.cwd, 'boundary', begun.unit.key);
+    if (paused?.phase !== 'committed' || !boundary || boundary.idempotency_key !== key) return refused('boundary-not-transferable');
+    // Handoff rechecks durable result/event checksums and requires ZERO lease.
+    // Thus a stale snapshot cannot report paused over a newer resumed writer.
+    forgeController.handoff(input.cwd, { unit: begun.unit.key, next_host_runtime: input.host_runtime }, txOptions);
+    const result = base('next', 'needs_input', 'needs-input', input); result.unit = selected;
+    result.boundary = boundary; result.state = publicState(forgeState.read(input.cwd, input.milestone));
+    return result;
+  } catch (cause) { return refused(cause.code || 'pause-refused'); }
+}
 function next(inputValue, options = {}) {
+  if (own(inputValue, 'pause_current')) return pauseCurrent(inputValue, options);
   const input = normalizeInput(inputValue);
   if (!input.milestone) return nextInside(inputValue, options);
   // Before any time read or selection: the boundary output is what they observe.

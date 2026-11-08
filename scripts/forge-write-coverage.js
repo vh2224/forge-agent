@@ -60,7 +60,7 @@ const fs = require('fs');
 const path = require('path');
 
 const { pathsOverlap, normalizePath, parseTaskFrontmatter } = require('./forge-parallelism.js');
-const { hasStructuredMustHaves, parseMustHaves } = require('./forge-must-haves.js');
+const { hasStructuredMustHaves, parseMustHavesStructure } = require('./forge-must-haves.js');
 const { writtenByUnit, listUnitRefs, commitsForRef, unitKeyFor } = require('./forge-unit-delta.js');
 const { resolveEvidenceFiles } = require('./forge-evidence-path.js');
 const { entityKind } = require('./forge-ids.js');
@@ -262,7 +262,10 @@ function declaredFor(cwd, unit) {
   }
   let expected = [];
   try {
-    expected = parseMustHaves(unit.content).expected_output || [];
+    // Historical observation must retain valid old declarations, including
+    // .gsd-only plans that the current product-admission policy rightly rejects.
+    // Structural validity still applies; this reader never admits a writer.
+    expected = parseMustHavesStructure(unit.content).expected_output || [];
   } catch (e) {
     return { declared: [], legacy: true, detail: e.message };
   }

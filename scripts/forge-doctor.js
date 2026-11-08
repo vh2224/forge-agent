@@ -635,6 +635,10 @@ function checkNativeBinding(cwd, options = {}) {
     }
     route = require('./forge-dispatch-resolve').resolveDispatch(input);
   } catch { return { ...report, reason_code: 'native-binding-resolution-failed', message: 'Não foi possível resolver a unidade; nenhum binding ou ferramenta foi declarado compatível.' }; }
+  // A fallback route is not evidence of the operator's current preferences.
+  // Fail before reporting authorization, model/effort or observing a binding.
+  if (route.prefs_ok !== true) return { ...report, reason_code: 'native-binding-preferences-invalid',
+    message: 'As preferências não puderam ser validadas; a rota e o binding atuais permanecem desconhecidos. Nenhum modelo ou esforço foi substituído.' };
   Object.assign(report, { worker_mode: route.worker_mode || null, runtime_authorized: route.dispatch_allowed === true,
     model_requested: safe(route.model_requested), model_resolved: safe(route.model_resolved || route.model),
     effort_requested: safe(route.effort_requested), effort_resolved: safe(route.effort), effort_reason: safe(route.effort_reason) });

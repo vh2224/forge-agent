@@ -320,14 +320,7 @@ function withMutex(cwd, name, fn) {
   finally { if (ownerBoundary) ownerActivityLocks.delete(key); handle.release(); }
 }
 
-function recordOwnerBoundaryActivity(cwd, runId, hostRuntime) {
-  // The calling controller holds the real transaction mutex. Canonical new
-  // begins cannot race this census, and registry writers share their own fence.
-  const held = ownerActivityLocks.get(path.resolve(cwd));
-  if (!held || !forgeLock.assertOwned(held) || hostRuntime !== 'codex') return false;
-  const observed = forgeRuns.observeHostSession(hostRuntime);
-  if (!observed) return false;
-  const noLeases = () => {
+function noOwnerLeases(cwd) {
     const directory = path.join(cwd, '.gsd', 'forge', 'leases'); let handle;
     try {
       const stat = fs.lstatSync(directory);
@@ -335,7 +328,24 @@ function recordOwnerBoundaryActivity(cwd, runId, hostRuntime) {
       handle = fs.opendirSync(directory); return handle.readSync() === null;
     } catch (error) { return error.code === 'ENOENT' && !handle; }
     finally { if (handle) handle.closeSync(); }
-  };
+}
+
+// The owner resume caller shares the controller's real publication fence and
+// exact fail-closed lease census. No raw mutex capability escapes this seam.
+function withOwnerBoundary(cwd, callback, options) {
+  resolvePrefs(cwd, options);
+  if (typeof callback !== 'function') throw new ControllerError('invalid-request', 'owner boundary callback required');
+  return withMutex(cwd, 'unit-controller-transactions', () => callback({ noLeases: () => noOwnerLeases(cwd) }));
+}
+
+function recordOwnerBoundaryActivity(cwd, runId, hostRuntime) {
+  // The calling controller holds the real transaction mutex. Canonical new
+  // begins cannot race this census, and registry writers share their own fence.
+  const held = ownerActivityLocks.get(path.resolve(cwd));
+  if (!held || !forgeLock.assertOwned(held) || hostRuntime !== 'codex') return false;
+  const observed = forgeRuns.observeHostSession(hostRuntime);
+  if (!observed) return false;
+  const noLeases = () => noOwnerLeases(cwd);
   // Any lease/debris/unknown state suppresses activity recording; age never
   // authorizes a write. In particular, no native protected window is changed.
   if (!noLeases()) return false;
@@ -1805,7 +1815,7 @@ module.exports = {
   PROTOCOL_VERSION, BOUNDARY_KINDS, ACTIONS, PHASES, REASON_CODES, TIME_ADMISSION_CODES, ControllerError,
   selectNextUnit, discoverInventory, select, begin, transition, persistResult,
   complete, pause, fail: failUnit, expireSafe, resume, handoff,
-  pendingTransactions, projectLogicalHistory, logicalState, resolvePrefs,
+  withOwnerBoundary, pendingTransactions, projectLogicalHistory, logicalState, resolvePrefs,
   transactionDir, resultDir, boundaryDir, eventsFile, transactionFile,
   resultFile, boundaryFile, readEvents, readJson, writeAtomic,
   lookupRecord, preflightPaths,

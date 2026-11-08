@@ -250,3 +250,34 @@ owner/historical captures remain unchanged. The bounded source/render evidence i
 recorded in `scripts/fixtures/artifact-contracts/distribution-delta.json`.
 This proves distribution only; it does not establish CI, release, installation,
 provider/client behavior or human acceptance.
+
+## Identity and lifecycle distribution
+
+Measured from artifact base `20ae504cbd4e546aaa49f9643955ded1062e67ce` plus the scoped identity producer diff.
+The three earlier delta files remain byte-identical. Only skills/hooks change;
+all rendered member identities and the other seven active pins stay unchanged.
+
+- hooks raw: `228bceb55413320b8f3b47564711989f454a841d9946ebdfde92f690b733ad1e` to `b7c42a1e5f13383c13d6099655bbd05481bf584c19d90ecf74a4bdefb99d5c36`; attributed: `228bceb55413320b8f3b47564711989f454a841d9946ebdfde92f690b733ad1e` to `b7c42a1e5f13383c13d6099655bbd05481bf584c19d90ecf74a4bdefb99d5c36`.
+- skills raw: `bcb38a84d24878be82872ebfd78f0b6461e1b11bdabcd5829e4181692b15aab4` to `ea8df89a439017a632388a99e813136c5c9277996d530494723ae144cef63f5c`; attributed: `78559130c1c543be186ebd14ab2a448c4612e080ff76dbabbe3e915bf10d7819` to `7f84746e6e9f73905ea343f1eb4c0c750e1af5016424399f14ae40fe02e808a4`.
+
+The historical T06 fresh-registration span retains its before anchor
+`b0d14d5ba51b0096922338482ad357c77a193e5af4097616fbdc469681ee7874` (1803 bytes); the attested-owner
+registration change measures `2bb749560c1dc907d9f1db882e78033ebe883c9b58a8609b6ea5cb4820ec52c7` (2037 bytes).
+The other three historical spans remain unchanged.
+
+The exact three source members and two sample citations are recorded in
+`scripts/fixtures/identity-lifecycle/distribution-delta.json`. This establishes
+distribution only; CI, review, release, installation and human acceptance remain
+separate facts.
+
+
+## Identity after maintenance correction 090bd42f9eb4
+
+Source/render remeasurement following maintenance corrections. Existing review receipts and historical captures remain separate.
+
+- hooks raw after: `b7c42a1e5f13383c13d6099655bbd05481bf584c19d90ecf74a4bdefb99d5c36`; attributed after: `b7c42a1e5f13383c13d6099655bbd05481bf584c19d90ecf74a4bdefb99d5c36`.
+- skills raw after: `f0d6e8f36cadc8c4f4c66d5e9a5b4da486b2843434af49d68d6875109d982f7c`; attributed after: `9655fa67054b852bcd29319efdff465b5a677ebdbf50a26eee9124befaea93d7`.
+
+Fresh-registration after: `2bb749560c1dc907d9f1db882e78033ebe883c9b58a8609b6ea5cb4820ec52c7` (2037 bytes).
+Immutable fixture348 SHA256: `d0d50a7cace922a0a5d4edb8668c64429d32c81c40d20eaf9d175d31ad95993f`.
+Exactly the same three source files and two surfaces remain in this layer. No CI, release, installation or human acceptance is asserted.

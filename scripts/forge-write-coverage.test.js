@@ -298,11 +298,29 @@ test('R2 --markdown emite só o relatório, com thresholds e reconciliação por
 
 test('R3 no-code-writes: declarado 100% .gsd/** sai nomeado, com detalhe gsd-only', () => {
   const root = newRepo('gsdonly');
-  writeUnitPlan(root, M_GO, 'S01', 'T02', { writes: ['.gsd/milestones/x/S01-SUMMARY.md'], expected: [] });
+  const dir = writeUnitPlan(root, M_GO, 'S01', 'T02', { writes: ['.gsd/milestones/x/S01-SUMMARY.md'], expected: [] });
+  const planFile = path.join(dir, 'T02-PLAN.md'), before = fs.readFileSync(planFile);
+  const must = require('./forge-must-haves');
+  require('assert/strict').throws(() => must.parseMustHaves(before.toString('utf8')), error => error.code === 'root-path-protected');
+  assertEqual(must.parseMustHavesStructure(before.toString('utf8')).artifacts.length, 1, 'historical structure stays readable');
   const rep = observe(measureCoverage(root, {}));
+  assert(fs.readFileSync(planFile).equals(before), 'read-only observation preserves historical plan bytes');
+  require('assert/strict').throws(() => must.parseMustHaves(before.toString('utf8')), error => error.code === 'root-path-protected');
   const s = rep.skipped.find((x) => x.reason === 'no-code-writes');
   assert(s, 'razão produzida');
   assertEqual(s.detail, DECLARED_DETAILS.GSD_ONLY, 'sub-razão distinguida');
+});
+
+test('historical observation still rejects malformed structured must_haves', () => {
+  const root = newRepo('malformed-structured');
+  const dir = writeUnitPlan(root, M_GO, 'S01', 'T02', { writes: ['src/a.ts'], expected: ['src/a.ts'] });
+  const file = path.join(dir, 'T02-PLAN.md');
+  const malformed = fs.readFileSync(file, 'utf8').replace('      provides: "algo"\n', '');
+  assert(!malformed.includes('      provides: "algo"'), 'the fixture really lacks a required artifact field');
+  fs.writeFileSync(file, malformed);
+  const rep = observe(measureCoverage(root, {}));
+  assert(rep.skipped.some(row => row.reason === 'legacy-plan-schema' && /provides/.test(row.detail)), 'schema corruption is not promoted to measured coverage');
+  assertEqual(fs.readFileSync(file, 'utf8'), malformed, 'schema-negative observation is read-only');
 });
 
 test('R3 no-code-writes: lado declarado VAZIO sai como contradição medida, nunca absorvida', () => {

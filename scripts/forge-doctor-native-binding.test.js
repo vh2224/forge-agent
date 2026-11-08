@@ -22,11 +22,36 @@ function fixture({unit='plan-milestone',effort='medium',frontmatter,highRisk=fal
 }
 function test(name,fn){fn();passed++;console.log('PASS '+name);}
 function inspect(f,extra={}){const before=tree(f.cwd);const out=doctor.checkNativeBinding(f.cwd,{...f.options,...extra});assert.deepStrictEqual(tree(f.cwd),before,'diagnostic writes no context/lease/controller data');assert.equal(out.native_tool_availability,'unknown');assert.equal(out.provider_called,false);assert.equal(out.effect,'read-only-binding-diagnosis');assert(!JSON.stringify(out).includes(f.cwd));return out;}
-function cli(f,extras=[]){
+function cli(f,extras=[],nodeArgs=[]){
  const args=[path.join(__dirname,'forge-doctor.js'),'--diagnose-native-binding',f.options.unitType,'--runtime',f.options.hostRuntime,'--worker-mode',f.options.workerMode,'--cwd',f.cwd,'--agent',f.options.agentPath,'--json'];
  for(const[key,flag]of [['unitId','--unit-id'],['planPath','--plan'],['roadmapPath','--roadmap']])if(f.options[key])args.push(flag,f.options[key]);
- return cp.spawnSync(process.execPath,[...args,...extras],{encoding:'utf8',windowsHide:true,timeout:30000,env:{...process.env}});
+ return cp.spawnSync(process.execPath,[...nodeArgs,...args,...extras],{encoding:'utf8',windowsHide:true,timeout:30000,env:{...process.env}});
 }
+const resolver=require('./forge-dispatch-resolve');
+const sourceFiles=['scripts/forge-doctor.js','scripts/forge-doctor-native-binding.test.js','scripts/forge-dispatch-resolve.js','scripts/forge-prefs.js','agents/forge-planner.md','agents/forge-executor.md'];
+const sourceSnapshot=()=>Object.fromEntries(sourceFiles.map(file=>[file,hash(fs.readFileSync(path.join(repo,file)))]));
+const sourceBefore=sourceSnapshot();
+const prefsSentinel='PRIVATE-PREFS-ERROR-SENTINEL';
+function assertPrefsUnknown(out,f,reason='native-binding-preferences-invalid'){
+ assert.equal(out.ok,false);assert.equal(out.status,'unknown');assert.equal(out.reason_code,reason);
+ for(const key of ['worker_mode','runtime_authorized','model_requested','model_resolved','effort_requested','effort_resolved','effort_reason','effort_observed','source_sha256'])assert.equal(out[key],null,key+' cannot come from fallback defaults or an unobserved binding');
+ assert.equal(out.provider_called,false);assert.equal(out.native_tool_availability,'unknown');assert.equal(out.effect,'read-only-binding-diagnosis');
+ assert(!Object.hasOwn(out,'prefs_errors'));assert(!JSON.stringify(out).includes(prefsSentinel));assert(!JSON.stringify(out).includes(f.cwd));
+}
+function withUnreadablePrefs(f,fn,persistent=false){
+ const target=path.resolve(f.cwd,'.gsd/forge-prefs.jsonc'),read=fs.readFileSync;
+ let failed=false;
+ fs.readFileSync=function(file,...args){if(typeof file==='string'&&path.resolve(file)===target&&(persistent||!failed)){failed=true;throw Object.assign(Error(prefsSentinel+' '+target),{code:'EACCES'});}return read.call(this,file,...args);};
+ try{return fn();}finally{fs.readFileSync=read;}
+}
+function actualRoute(f){return resolver.resolveDispatch({cwd:f.cwd,...f.options});}
+function unreadablePreload(f,persistent=false){
+ const file=path.join(lab,'unreadable-'+seq+(persistent?'-persistent':'')+'.cjs');
+ const target=path.resolve(f.cwd,'.gsd/forge-prefs.jsonc');
+ fs.writeFileSync(file,"const fs=require('fs'),path=require('path'),read=fs.readFileSync;const target="+JSON.stringify(target)+",sentinel="+JSON.stringify(prefsSentinel)+",persistent="+JSON.stringify(persistent)+";let failed=false;fs.readFileSync=function(file,...args){if(typeof file==='string'&&path.resolve(file)===target&&(persistent||!failed)){failed=true;throw Object.assign(Error(sentinel+' '+target),{code:'EACCES'});}return read.call(this,file,...args);};\n");
+ return file;
+}
+
 try{
  for(const [name,spec,wanted,reason]of [
   ['milestone preference xhigh',{unit:'plan-milestone',effort:'xhigh'},'xhigh','prefs.effort:plan-milestone'],
@@ -66,8 +91,35 @@ try{
  test('library requires explicit host and one of the diagnosed unit identities',()=>{
   const f=fixture();assert.equal(inspect(f,{hostRuntime:undefined}).reason_code,'native-binding-input-invalid');const bad=inspect(f,{unitType:'__proto__'});assert.equal(bad.unit_type,null);assert.equal(bad.agent_type,null);
  });
+ test('malformed preference bytes make actual resolver fallback unknown to doctor and public CLI',()=>{
+  const f=fixture(),file=path.join(f.cwd,'.gsd/forge-prefs.jsonc');fs.writeFileSync(file,'{"'+prefsSentinel+'":');
+  const before=tree(f.cwd),route=actualRoute(f);assert.equal(route.prefs_ok,false);assert(route.prefs_errors.length>0,'actual JSONC reader reports the invalid layer');
+  assertPrefsUnknown(doctor.checkNativeBinding(f.cwd,f.options),f);
+  const run=cli(f);assert.equal(run.status,1,run.stderr);assertPrefsUnknown(JSON.parse(run.stdout),f);assert(!run.stderr.includes(prefsSentinel));assert(!run.stderr.includes(f.cwd));
+  assert.deepStrictEqual(tree(f.cwd),before,'malformed preferences and project remain byte-identical');
+ });
+ test('transient preference read failure reaches actual reader/resolver and refuses doctor plus CLI before binding observation',()=>{
+  const f=fixture(),before=tree(f.cwd);
+  withUnreadablePrefs(f,()=>{const route=actualRoute(f);assert.equal(route.prefs_ok,false);assert(route.prefs_errors.some(error=>error.message.includes(prefsSentinel)),'real reader retained the injected filesystem failure privately');assertPrefsUnknown(doctor.checkNativeBinding(f.cwd,f.options),f);});
+  const preload=unreadablePreload(f),run=cli(f,[],['--require',preload]);assert.equal(run.status,1,run.stderr);assertPrefsUnknown(JSON.parse(run.stdout),f);assert(!run.stderr.includes(prefsSentinel));assert(!run.stderr.includes(f.cwd));
+  assert.deepStrictEqual(tree(f.cwd),before,'read failure produces no preferences/project mutation');
+ });
+ test('persistent preference read failure leaves resolution unknown and never publishes raw filesystem errors',()=>{
+  const f=fixture(),before=tree(f.cwd);
+  withUnreadablePrefs(f,()=>{assert.throws(()=>actualRoute(f),error=>error.code==='EACCES');assertPrefsUnknown(doctor.checkNativeBinding(f.cwd,f.options),f,'native-binding-resolution-failed');},true);
+  const run=cli(f,[],['--require',unreadablePreload(f,true)]);assert.equal(run.status,1,run.stderr);assertPrefsUnknown(JSON.parse(run.stdout),f,'native-binding-resolution-failed');assert(!run.stderr.includes(prefsSentinel));assert(!run.stderr.includes(f.cwd));
+  assert.deepStrictEqual(tree(f.cwd),before,'failed resolution never changes preferences or context');
+ });
+ test('missing preference validity evidence remains unknown and healthy actual route keeps its explicit model and effort',()=>{
+  const f=fixture({effort:'xhigh'}),before=tree(f.cwd),route=actualRoute(f);assert.equal(route.prefs_ok,true);assert.equal(route.model_resolved,'claude-opus-5-5');assert.equal(route.effort,'xhigh');
+  const resolve=resolver.resolveDispatch;
+  try{resolver.resolveDispatch=function(...args){const current=resolve.apply(this,args);const copy={...current};delete copy.prefs_ok;return copy;};assertPrefsUnknown(doctor.checkNativeBinding(f.cwd,f.options),f);}finally{resolver.resolveDispatch=resolve;}
+  const out=inspect(f);assert.equal(out.reason_code,'native-effort-binding-mismatch');assert.equal(out.model_resolved,route.model_resolved);assert.equal(out.effort_resolved,route.effort);assert.equal(out.runtime_authorized,route.dispatch_allowed);assert.deepStrictEqual(tree(f.cwd),before);
+ });
+
  console.log('\n'+passed+' passed, 0 failed');
 }finally{
+ assert.deepStrictEqual(sourceSnapshot(),sourceBefore,'native binding diagnosis does not rewrite its sources or agent bindings');
  for(const[key,value]of Object.entries(prior)){if(value===undefined)delete process.env[key];else process.env[key]=value;}
  const parent=fs.realpathSync.native(os.tmpdir()),actual=fs.realpathSync.native(lab);assert(actual.startsWith(parent+path.sep));fs.rmSync(actual,{recursive:true,force:true});
 }

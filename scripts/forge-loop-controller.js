@@ -183,10 +183,13 @@ function pause(state, input, orchestrate) {
   if (TERMINAL.has(state.lifecycle)) return publicResult('pause', state, state.lifecycle, 'workflow-terminal', 'stop', null);
   const refusedPause = taskScopeRefusal(state, input, 'pause');
   if (refusedPause) return refusedPause;
-  const delegated = orchestrate.run('next', { ...delegateInput(input, state), needs_input: true });
+  const current = state.lifecycle === 'dispatch_required' ? state.last_decision?.controller_result?.details?.transaction : null;
+  if (state.lifecycle === 'dispatch_required' && !current) return publicResult('pause', state, 'blocked', 'unit-identity-mismatch', 'stop', null);
+  const delegated = orchestrate.run('next', { ...delegateInput(input, state), ...(current
+    ? { pause_current: { unit: state.current_unit, transaction: current } }
+    : { needs_input: true }) });
   if (delegated.outcome !== 'needs_input' || !delegated.boundary) {
-    state.lifecycle = delegated.outcome === 'failed' ? 'failed' : 'blocked';
-    return publicResult('pause', state, state.lifecycle, delegated.reason_code || 'pause-refused', 'stop', delegated);
+    return publicResult('pause', state, delegated.outcome === 'failed' ? 'failed' : 'blocked', delegated.reason_code || 'pause-refused', 'stop', delegated);
   }
   state.lifecycle = 'paused'; state.current_unit = safeUnit(delegated.unit); state.boundary = delegated.boundary;
   return publicResult('pause', state, 'needs_input', delegated.reason_code || 'needs-input', 'pause', delegated);

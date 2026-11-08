@@ -208,3 +208,26 @@ Repondo esses quatro valores pelos anteriores da #341, o arquivo volta aos bytes
 repondo os da tabela da T07, à captura acima. Textos, rótulos, referências, rubricas e o
 aceite humano pending-final-round ficam iguais. É proveniência de fonte, não observação de
 cliente, CI nem aceite humano.
+
+## Identity and lifecycle citation update
+
+Artifact base: `20ae504cbd4e546aaa49f9643955ded1062e67ce`. Only the two forge-task timeline-after
+`source.sha256` literals change from `2f3a10c2e2d906b77778077af83d00bb6578f124d92cee4b40b638e787593754`
+to `109262eb2c60a498b7775527988b1b1b5a3b57b4a6ce3d890b83282f333dc854`. Quotes, labels, metadata, layout and
+forge-next citations stay byte-identical. Full samples.json SHA-256:
+`c0a3cdd57bc64ea98691f216712665013a52ee570fdf233ffe6c8c13b1e449ff` to `0a0d5ccb39fc880642d6a338153ed0e91bc72f39f978bda94ddcddb9ce242f3c`.
+The retained attribution-state proof removes only the historical linked blocks;
+that task source measures `f85dce7a8bed7c53fd1253183c520f6017e52902b0e2d083ae0a587224269329`
+before and `e6114c0603df23f99697e6264d13d496427ef139f86f99c033209173b8bcedb5` after this update.
+The checked-in citations use the raw after hash above.
+The bounded update is recorded in `scripts/fixtures/identity-lifecycle/distribution-delta.json`;
+it proves source attribution and distribution, not client execution or acceptance.
+
+
+## Identity citation after maintenance correction 090bd42f9eb4
+
+Only the existing two forge-task timeline-after source.sha256 literal spans are eligible for this remeasurement. Quotes, labels, metadata, layout and forge-next nodes retain the immutable sample restoration proof.
+
+Raw task after: `109262eb2c60a498b7775527988b1b1b5a3b57b4a6ce3d890b83282f333dc854`; attributed task after: `e6114c0603df23f99697e6264d13d496427ef139f86f99c033209173b8bcedb5`.
+Full samples before: `c0a3cdd57bc64ea98691f216712665013a52ee570fdf233ffe6c8c13b1e449ff`; after: `0a0d5ccb39fc880642d6a338153ed0e91bc72f39f978bda94ddcddb9ce242f3c`.
+This records source attribution following maintenance corrections; review, client behavior and acceptance remain separate facts.

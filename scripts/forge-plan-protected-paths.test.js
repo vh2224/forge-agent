@@ -92,6 +92,29 @@ try {
   }
   console.log('PASS #348 both fresh-process module load orders retain canonical parser/path exports without circular dependency warnings');
 
+  // Absolute-path refusal vocabulary is portable but distinguishes syntax:
+  // POSIX/UNC leading slash is root-path-invalid; a drive colon requires a
+  // root-relative path. Exercise BOTH on every host instead of assuming its
+  // native fixture has a Windows drive. Admission remains strict in both APIs.
+  const absoluteKinds = [
+    ['/portable/absolute.ts', 'root-path-invalid'],
+    ['C:/portable/absolute.ts', 'root-relative-path-required'],
+    ['C:\\portable\\absolute.ts', 'root-relative-path-required'],
+  ];
+  for (const [absolutePath, expectedCode] of absoluteKinds) {
+    for (const rooted of [false, true]) {
+      for (const field of fields) {
+        const content = plan(rooted, field, absolutePath);
+        for (const options of [undefined, { skipPathPolicy: true }]) assert.throws(
+          () => must.parseMustHaves(content, options), error => error.code === expectedCode && error.message.includes(field));
+        const checked = cli(content);
+        assert.equal(checked.status, 2); assert.equal(checked.data.valid, false); assert.equal(checked.data.legacy, false);
+        assert(checked.data.errors.some(message => message.includes(expectedCode) && message.includes(field)));
+      }
+    }
+  }
+  console.log('PASS #348 portable POSIX and Windows absolute-path negatives keep exact codes through parser and actual CLI');
+
   // R1: normal parsing is strict, while the named migration may first decode
   // structure after validating its real execution contract. The old migration
   // positive in forge-code-roots.test.js remains unchanged and runs separately.
@@ -101,8 +124,9 @@ try {
     const absolute = make(migrationFixture.contract, true);
     const sourcePath = path.join(migrationFixture.a, 'same.txt').replace(/\\/g, '/');
     const bodyHash = roots.digest(absolute);
-    assert.throws(() => must.parseMustHaves(absolute), error => error.code === 'root-relative-path-required');
-    assert.throws(() => must.parseMustHaves(absolute, { skipPathPolicy: true }), error => error.code === 'root-relative-path-required');
+    const absoluteCode = /^[A-Za-z]:/.test(sourcePath) ? 'root-relative-path-required' : 'root-path-invalid';
+    assert.throws(() => must.parseMustHaves(absolute), error => error.code === absoluteCode);
+    assert.throws(() => must.parseMustHaves(absolute, { skipPathPolicy: true }), error => error.code === absoluteCode);
     assert.equal(must.parseMustHavesStructure(absolute).artifacts.length, 2);
     const migrated = roots.normalizeAbsolutePaths(absolute, migrationFixture.contract);
     assert.equal(migrated.mapping.length, 2); assert.equal(migrated.original_sha256, bodyHash);

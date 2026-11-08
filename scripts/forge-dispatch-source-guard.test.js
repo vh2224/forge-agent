@@ -778,6 +778,206 @@ function delta341Row(delta, kind, key) {
 
 
 
+
+function jsonValueSpans(text) {
+  const spans = new Map();
+  let i = 0;
+  const ws = () => { while (i < text.length && ' \t\r\n'.includes(text[i])) i++; };
+  const expect = char => { assert.strictEqual(text[i], char, `JSON ${char} at ${i}`); i++; };
+  const string = () => {
+    const start = i; expect('"');
+    while (text[i] !== '"') { assert(i < text.length, 'unterminated JSON string'); i += text[i] === '\\' ? 2 : 1; }
+    i++;
+    return [start, i];
+  };
+  const key = raw => JSON.parse(raw).replace(/~/g, '~0').replace(/\//g, '~1');
+  const value = pointer => {
+    ws();
+    if (text[i] === '{' || text[i] === '[') {
+      const object = text[i] === '{', close = object ? '}' : ']';
+      i++; ws();
+      if (text[i] === close) { i++; return; }
+      for (let index = 0; ; index++) {
+        ws();
+        if (object) { const [a, b] = string(); ws(); expect(':'); value(`${pointer}/${key(text.slice(a, b))}`); }
+        else value(`${pointer}/${index}`);
+        ws();
+        if (text[i] === ',') { i++; continue; }
+        expect(close); return;
+      }
+    }
+    if (text[i] === '"') { spans.set(pointer, string()); return; }
+    const start = i;
+    while (i < text.length && !',]} \t\r\n'.includes(text[i])) i++;
+    assert(i > start, `JSON value at ${start}`);
+    spans.set(pointer, [start, i]);
+  };
+  value(''); ws();
+  assert.strictEqual(i, text.length, 'one JSON document');
+  return spans;
+}
+
+function withSampleShas(text, replacements) {
+  const spans = jsonValueSpans(text);
+  const edits = replacements.map(([pointer, sha]) => {
+    const span = spans.get(`${pointer}/source/sha256`);
+    assert(span, `sample node ${pointer} has a source.sha256`);
+    return [span, JSON.stringify(sha)];
+  }).sort((a, b) => b[0][0] - a[0][0]);
+  return edits.reduce((out, [[start, end], literal]) => out.slice(0, start) + literal + out.slice(end), text);
+}
+
+// This terminal layer preserves the three immutable earlier distribution deltas.
+const IDENTITY_PATH = 'scripts/fixtures/identity-lifecycle/distribution-delta.json';
+const IDENTITY = JSON.parse(fs.readFileSync(path.join(ROOT, IDENTITY_PATH), 'utf8'));
+const IDENTITY_BASE = '20ae504cbd4e546aaa49f9643955ded1062e67ce';
+const IDENTITY_BEFORE = {
+  "surfaces": {
+    "hooks": {
+      "before": "228bceb55413320b8f3b47564711989f454a841d9946ebdfde92f690b733ad1e",
+      "attributed_before": "228bceb55413320b8f3b47564711989f454a841d9946ebdfde92f690b733ad1e"
+    },
+    "skills": {
+      "before": "bcb38a84d24878be82872ebfd78f0b6461e1b11bdabcd5829e4181692b15aab4",
+      "attributed_before": "78559130c1c543be186ebd14ab2a448c4612e080ff76dbabbe3e915bf10d7819"
+    }
+  },
+  "files": {
+    "scripts/forge-hook.js": {
+      "before": "1ab156ae4fd74c01c656ce3b378691a2ab126d39343f38d8a19e43ac1ef0a946",
+      "attributed_before": "1ab156ae4fd74c01c656ce3b378691a2ab126d39343f38d8a19e43ac1ef0a946"
+    },
+    "skills/forge-auto/SKILL.md": {
+      "before": "11bb75ddae971bbaa0deb2c5271a08a1df3896a132cb3b69bd5a4f554b108d8f",
+      "attributed_before": "e248e1a60e0dfccc43b0d0fd0b2f8df78d8d1443571a730e664d843ad62deaa3"
+    },
+    "skills/forge-task/SKILL.md": {
+      "before": "2f3a10c2e2d906b77778077af83d00bb6578f124d92cee4b40b638e787593754",
+      "attributed_before": "f85dce7a8bed7c53fd1253183c520f6017e52902b0e2d083ae0a587224269329"
+    }
+  }
+};
+const IDENTITY_MEMBERS = {
+  "hooks": [
+    "scripts/forge-hook.js",
+    "scripts/forge-hook.js"
+  ],
+  "skills": [
+    "skills/forge-accounts/SKILL.md",
+    "skills/forge-add-slice/SKILL.md",
+    "skills/forge-add-task/SKILL.md",
+    "skills/forge-ask/SKILL.md",
+    "skills/forge-auto/SKILL.md",
+    "skills/forge-brainstorm/SKILL.md",
+    "skills/forge-codebase/SKILL.md",
+    "skills/forge-config/SKILL.md",
+    "skills/forge-curate/SKILL.md",
+    "skills/forge-discuss/SKILL.md",
+    "skills/forge-doctor/SKILL.md",
+    "skills/forge-explain/SKILL.md",
+    "skills/forge-help/SKILL.md",
+    "skills/forge-mcps/SKILL.md",
+    "skills/forge-memories/SKILL.md",
+    "skills/forge-new-milestone/SKILL.md",
+    "skills/forge-next/SKILL.md",
+    "skills/forge-pause/SKILL.md",
+    "skills/forge-prefs/SKILL.md",
+    "skills/forge-probe/SKILL.md",
+    "skills/forge-responsive/SKILL.md",
+    "skills/forge-risk-radar/SKILL.md",
+    "skills/forge-scope-clarity/SKILL.md",
+    "skills/forge-security/SKILL.md",
+    "skills/forge-skills/SKILL.md",
+    "skills/forge-status/SKILL.md",
+    "skills/forge-sweep/SKILL.md",
+    "skills/forge-task/SKILL.md",
+    "skills/forge-ui-review/SKILL.md"
+  ]
+};
+const IDENTITY_PRIOR_DELTAS = {
+  "scripts/fixtures/review-policy/distribution-delta.json": "878d8e22adb78fc610bcbff4c4b5ab18e06598d377b4ff3ed38b2a681b0a8309",
+  "scripts/fixtures/entry-contracts/distribution-delta.json": "ffb4476cd2ef7b7b8e44676a392e9a11607015fc38d349be9ae2a5fa0a8558a2",
+  "scripts/fixtures/artifact-contracts/distribution-delta.json": "d0d50a7cace922a0a5d4edb8668c64429d32c81c40d20eaf9d175d31ad95993f"
+};
+const IDENTITY_SAMPLE_BEFORE = 'c0a3cdd57bc64ea98691f216712665013a52ee570fdf233ffe6c8c13b1e449ff';
+const IDENTITY_SAMPLE_POINTERS = ["/entries/1/supporting/timeline/after","/entries/5/supporting/timeline/after"];
+function identityAfter(kind, key, prior, delta = IDENTITY, attributed = false) {
+  const row = delta && delta[kind] && Object.hasOwn(delta[kind], key) ? delta[kind][key] : null;
+  if (!row) return prior;
+  assert.strictEqual(row[attributed ? 'attributed_before' : 'before'], prior, 'identity follows preceding ' + kind + ' ' + key);
+  return row[attributed ? 'attributed_after' : 'after'];
+}
+function identitySampleAfter(pointer, prior, delta = IDENTITY) {
+  const row = delta.samples.nodes.find(node => node.pointer === pointer);
+  if (!row) return prior;
+  assert.strictEqual(row.before, prior, 'identity sample follows #341 ' + pointer);
+  return row.after;
+}
+function identitySpanAfter(key, prior, delta = IDENTITY) {
+  const row = delta.retained_spans[key];
+  if (!row) return prior;
+  assert.deepStrictEqual(row.before, prior, 'identity retains historical span ' + key);
+  return row.after;
+}
+function validateIdentitySamples(delta, { sampleText, sampleReadme, readRaw }) {
+  const sample = delta.samples;
+  assert.deepStrictEqual(Object.keys(sample).sort(), ['file','before','after','nodes'].sort(), 'identity closed sample shape');
+  assert.strictEqual(sample.file, 'docs/communication-evaluation/samples.json');
+  assert.strictEqual(sample.before, IDENTITY_SAMPLE_BEFORE, 'identity independent full sample before');
+  assert.strictEqual(sample.after, sha256(sampleText), 'identity actual full sample after');
+  assert.deepStrictEqual(sample.nodes.map(n => n.pointer), IDENTITY_SAMPLE_POINTERS, 'identity exactly two sample nodes');
+  const parsed = JSON.parse(sampleText), replacements = [];
+  for (const node of sample.nodes) {
+    assert.deepStrictEqual(Object.keys(node).sort(), ['pointer','file','before','after'].sort(), 'identity closed sample node');
+    assert.strictEqual(node.file, 'skills/forge-task/SKILL.md');
+    assert.strictEqual(node.before, IDENTITY_BEFORE.files[node.file].before);
+    assert.strictEqual(node.after, delta.files[node.file].after);
+    assert.strictEqual(node.after, sha256(readRaw(node.file)), 'identity sample actual source');
+    const value = node.pointer.split('/').slice(1).reduce((v,k) => v[k], parsed);
+    assert.strictEqual(value.source.file, node.file); assert.strictEqual(value.source.sha256, node.after);
+    assert(sampleReadme.includes(node.before) && sampleReadme.includes(node.after), 'identity documented sample before/after');
+    replacements.push([node.pointer, node.before]);
+  }
+  assert.strictEqual(sha256(withSampleShas(sampleText, replacements)), IDENTITY_SAMPLE_BEFORE, 'identity only two literal hash spans change; quotes/metadata/layout are immutable');
+  assert(sampleReadme.includes(IDENTITY_BASE) && sampleReadme.includes(sample.before) && sampleReadme.includes(sample.after), 'identity samples README records base and full digests');
+}
+function validateIdentity(delta, { measure, measureAttributed, readRaw, readme, renderMembers, sampleText, sampleReadme }) {
+  assert.deepStrictEqual(Object.keys(delta).sort(), ['schema_version','kind','provenance','surfaces','files','retained_spans','samples','unchanged_surfaces'].sort(), 'identity closed delta shape');
+  assert.strictEqual(delta.schema_version, 1); assert.strictEqual(delta.kind, 'identity-lifecycle-measured-distribution-delta');
+  assert.strictEqual(delta.provenance.base_revision, IDENTITY_BASE);
+  assert.strictEqual(delta.provenance.previous_delta, 'scripts/fixtures/artifact-contracts/distribution-delta.json');
+  assert.strictEqual(typeof delta.provenance.method, 'string'); assert(delta.provenance.method.length > 0);
+  for (const [file,digest] of Object.entries(IDENTITY_PRIOR_DELTAS)) assert.strictEqual(sha256(readRaw(file)), digest, 'identity earlier fixture immutable ' + file);
+  assert.deepStrictEqual(Object.keys(delta.surfaces), ["hooks","skills"], 'identity exact surfaces');
+  assert.deepStrictEqual(Object.keys(delta.files), ["scripts/forge-hook.js","skills/forge-auto/SKILL.md","skills/forge-task/SKILL.md"], 'identity exact measured files');
+  assert.deepStrictEqual([...delta.unchanged_surfaces].sort(), ["agents","claude-instructions","claude-settings","commands","configuration","dispatch-templates","mcp"], 'identity seven untouched surfaces');
+  for (const id of Object.keys(IDENTITY_MEMBERS)) assert.deepStrictEqual([...renderMembers[id]].sort(), IDENTITY_MEMBERS[id], 'identity exact rendered members ' + id);
+  for (const kind of ['surfaces','files']) for (const [key,row] of Object.entries(delta[kind])) {
+    assert.deepStrictEqual(Object.keys(row).sort(), ['before','after','attributed_before','attributed_after'].sort(), 'identity closed measured row');
+    for (const digest of Object.values(row)) assert.match(digest, /^[a-f0-9]{64}$/);
+    for (const field of ['before','attributed_before']) assert.strictEqual(row[field], IDENTITY_BEFORE[kind][key][field], 'identity independent before ' + key);
+    assert.notStrictEqual(row.before, row.after, 'identity actual changed member');
+    const raw = kind === 'surfaces' ? measure(key) : sha256(readRaw(key));
+    const attributed = kind === 'surfaces' ? measureAttributed(key) : sha256(Buffer.from(readRaw(key).toString('utf8').replace(LINKED_BLOCK_RE, ''), 'utf8'));
+    assert.strictEqual(row.after, raw, 'identity actual raw ' + key);
+    assert.strictEqual(row.attributed_after, attributed, 'identity actual attributed ' + key);
+    if (kind === 'surfaces') assert(readme.includes(row.before) && readme.includes(row.after) && readme.includes(row.attributed_before) && readme.includes(row.attributed_after), 'identity documented surface ' + key);
+  }
+  assert(readme.includes(IDENTITY_BASE), 'identity README real base');
+  assert.deepStrictEqual(Object.keys(delta.retained_spans), ['fresh_registration'], 'identity exact changed historical span');
+  const spanRow = delta.retained_spans.fresh_registration;
+  assert.deepStrictEqual(Object.keys(spanRow).sort(), ['file','before','after'].sort());
+  assert.strictEqual(spanRow.file, 'skills/forge-task/SKILL.md');
+  assert.deepStrictEqual(spanRow.before, {"bytes":1803,"sha256":"b0d14d5ba51b0096922338482ad357c77a193e5af4097616fbdc469681ee7874"}, 'identity independent historical fresh-registration anchor');
+  for (const value of [spanRow.before, spanRow.after]) { assert.deepStrictEqual(Object.keys(value).sort(), ['bytes','sha256']); assert(Number.isInteger(value.bytes) && value.bytes > 0); assert.match(value.sha256, /^[a-f0-9]{64}$/); }
+  const taskText = readRaw(spanRow.file).toString('utf8'), start = taskText.indexOf('**Register in multi-run registry**'), end = taskText.indexOf('\nThis makes the task visible', start);
+  assert(start >= 0 && end > start);
+  const span = Buffer.from(taskText.slice(start, end + 1));
+  assert.deepStrictEqual(spanRow.after, { bytes: span.length, sha256: sha256(span) }, 'identity actual fresh-registration postimage');
+  assert(readme.includes(spanRow.before.sha256) && readme.includes(spanRow.after.sha256), 'identity documents bounded historical span delta');
+  validateIdentitySamples(delta, { sampleText, sampleReadme, readRaw });
+}
+
 // #348 follows the immutable #347 layer. Only planner guidance changes this
 // rendered surface; #353 and the mandatory budget-attribution repair do not.
 const ARTIFACT_348_PATH = path.join(ROOT, 'scripts/fixtures/artifact-contracts/distribution-delta.json');
@@ -788,9 +988,9 @@ const ARTIFACT_348_PRIOR_PLANNER = '45ceadf4a8299115a9a492a9beab4e4c83e29748ca68
 const ARTIFACT_348_PREVIOUS_DELTA_SHA = 'ffb4476cd2ef7b7b8e44676a392e9a11607015fc38d349be9ae2a5fa0a8558a2';
 function artifact348After(kind, key, prior, delta = ARTIFACT_348, attributed = false) {
   const row = delta && delta[kind] && Object.hasOwn(delta[kind], key) ? delta[kind][key] : null;
-  if (!row) return prior;
+  if (!row) return identityAfter(kind, key, prior, IDENTITY, attributed);
   assert.strictEqual(row[attributed ? 'attributed_before' : 'before'], prior, '#348 follows preceding ' + kind + ' ' + key);
-  return row[attributed ? 'attributed_after' : 'after'];
+  return identityAfter(kind, key, row[attributed ? 'attributed_after' : 'after'], IDENTITY, attributed);
 }
 function validateArtifact348(delta, previous, { measure, readRaw, readme }) {
   assert.deepStrictEqual(Object.keys(delta).sort(), ['schema_version','issue','provenance','surfaces','files','unchanged_surfaces'].sort(), '#348 closed delta shape');
@@ -976,8 +1176,14 @@ function validateEntry347(delta, earlier, { measure, readRaw, readme, renderMemb
 
 // Pins and captured sources of the linked-task proof. The defaults read the real bytes; the
 // #341 negative fixtures only pass in-memory golden, README, delta or file variants.
-function assertLinkedPinsAndSources({ before, declared, delta, golden, measured, readme, artifacts, entryDelta = ENTRY_347, artifactDelta = ARTIFACT_348,
+function assertLinkedPinsAndSources({ before, declared, delta, golden, measured, readme, artifacts, entryDelta = ENTRY_347, artifactDelta = ARTIFACT_348, identityDelta = IDENTITY,
+  identitySampleText = fs.readFileSync(path.join(ROOT, 'docs/communication-evaluation/samples.json'), 'utf8'),
+  identitySampleReadme = fs.readFileSync(path.join(ROOT, 'docs/communication-evaluation/README.md'), 'utf8'),
   readRaw = (relative) => fs.readFileSync(path.join(ROOT, relative)) }) {
+  validateIdentity(identityDelta, { measure: id => measured.get(id),
+    measureAttributed: id => sha256(artifacts.filter(a => a.source_id === id).sort((a,b) => a.source.localeCompare(b.source)).map(a => a.source + '\0' + a.content.replace(LINKED_BLOCK_RE, '').replace(/version=\d+\.\d+\.\d+/g, 'version=<dynamic>')).join('\0')),
+    readRaw, readme, renderMembers: Object.fromEntries(['hooks','skills'].map(id => [id, artifacts.filter(a => a.source_id === id).map(a => a.source)])),
+    sampleText: identitySampleText, sampleReadme: identitySampleReadme });
   validateEntry347(entryDelta, delta, { measure: id => measured.get(id), readRaw, readme, artifactDelta,
     renderMembers: Object.fromEntries(['agents', 'hooks'].map(id => [id, artifacts.filter(item => item.source_id === id).map(item => item.source)])) });
   // Pins: every new layer starts at the independently retained preceding value.
@@ -1113,10 +1319,10 @@ test('linked-task scoped pins follow the owner pre-T06 capture and the measured 
     if (node341) {
       assert.strictEqual(node341.file, prior.source.file, `${prior.pointer}: #341 node cites the same source`);
       assert.strictEqual(node341.before, afterSha, `${prior.pointer}: #341 before is the owner after measurement`);
-      assert.strictEqual(node341.after, sha256(fs.readFileSync(path.join(ROOT, prior.source.file))), `${prior.pointer}: #341 after is the raw source bytes`);
+      assert.strictEqual(identitySampleAfter(prior.pointer, node341.after), sha256(fs.readFileSync(path.join(ROOT, prior.source.file))), `${prior.pointer}: #341 after is the raw source bytes`);
       assert(sampleReadme.includes(node341.before) && sampleReadme.includes(node341.after), `samples README records the #341 ${prior.pointer}`);
     }
-    const cited = node341 ? node341.after : afterSha;
+    const cited = identitySampleAfter(prior.pointer, node341 ? node341.after : afterSha);
     assert.strictEqual(node.source.sha256, cited, `${prior.pointer} cites the raw source bytes`);
     assert(fs.readFileSync(path.join(ROOT, prior.source.file), 'utf8').includes(node.text), `${prior.pointer} text present`);
     assert(sampleReadme.includes(prior.source.sha256) && sampleReadme.includes(afterSha), `samples README records ${prior.pointer}`);
@@ -1213,6 +1419,50 @@ test('#341 linked-task layer refuses edits outside the delta, wrong pins, bad de
   refused348('prior fixture rewritten', { readRaw: edit348('scripts/fixtures/entry-contracts/distribution-delta.json') });
   refused348('stale pin', { golden: { ...golden, surfaces: golden.surfaces.map(row => row.source_id === 'agents' ? { ...row, sha256: ARTIFACT_348.surfaces.agents.before } : row) } });
   refused348('stale docs', { readme: readme.split(ARTIFACT_348.surfaces.agents.after).join('') });
+
+
+  // Strong terminal-layer negatives retain every historical negative above.
+  const identityVariant = mutate => { const copy = JSON.parse(JSON.stringify(IDENTITY)); mutate(copy); return copy; };
+  const refuseIdentity = (label, overrides) => assert.throws(() => assertLinkedPinsAndSources({ ...base, ...overrides }), e => e instanceof assert.AssertionError, 'identity ' + label + ' must be refused');
+  const wrongIdentity = sha256('unmeasured identity value');
+  const identityRead = rel => fs.readFileSync(path.join(ROOT, rel));
+  const identityEdit = target => rel => rel === target ? Buffer.concat([identityRead(rel), Buffer.from('\nforeign identity edit\n')]) : identityRead(rel);
+  for (const field of ['before','attributed_before','after','attributed_after']) {
+    refuseIdentity('foreign surface ' + field, { identityDelta: identityVariant(d => { d.surfaces.skills[field] = wrongIdentity; }) });
+    refuseIdentity('foreign file ' + field, { identityDelta: identityVariant(d => { d.files['skills/forge-task/SKILL.md'][field] = wrongIdentity; }) });
+  }
+  refuseIdentity('extra surface', { identityDelta: identityVariant(d => { d.surfaces.commands = { ...d.surfaces.skills }; }) });
+  refuseIdentity('omitted surface', { identityDelta: identityVariant(d => { delete d.surfaces.skills; }) });
+  refuseIdentity('extra file', { identityDelta: identityVariant(d => { d.files['commands/forge.md'] = { ...d.files['skills/forge-task/SKILL.md'] }; }) });
+  refuseIdentity('omitted file', { identityDelta: identityVariant(d => { delete d.files['skills/forge-task/SKILL.md']; }) });
+  refuseIdentity('extra retained span', { identityDelta: identityVariant(d => { d.retained_spans.foreign = { ...d.retained_spans.fresh_registration }; }) });
+  refuseIdentity('omitted retained span', { identityDelta: identityVariant(d => { delete d.retained_spans.fresh_registration; }) });
+  for (const field of ['before','after']) refuseIdentity('foreign retained span ' + field, { identityDelta: identityVariant(d => { d.retained_spans.fresh_registration[field].sha256 = wrongIdentity; }) });
+  refuseIdentity('extra untouched surface', { identityDelta: identityVariant(d => { d.unchanged_surfaces.push('imaginary'); }) });
+  refuseIdentity('extra rendered member', { artifacts: [...report.artifacts, { ...report.artifacts.find(a => a.source_id === 'skills'), source:'skills/foreign/SKILL.md' }] });
+  refuseIdentity('omitted rendered member', { artifacts: report.artifacts.filter(a => a.source !== IDENTITY_MEMBERS.skills[0]) });
+  for (const file of Object.keys(IDENTITY.files)) refuseIdentity('postmeasure ' + file, { readRaw: identityEdit(file) });
+  refuseIdentity('outside measured sources', { readRaw: identityEdit('commands/forge.md') });
+  for (const file of Object.keys(IDENTITY_PRIOR_DELTAS)) refuseIdentity('earlier fixture ' + file, { readRaw: identityEdit(file) });
+  refuseIdentity('stale active pin', { golden: { ...golden, surfaces: golden.surfaces.map(row => row.source_id === 'hooks' ? { ...row, sha256: IDENTITY.surfaces.hooks.before } : row) } });
+  for (const field of ['before','after']) refuseIdentity('undocumented pin ' + field, { readme: readme.split(IDENTITY.surfaces.hooks[field]).join('') });
+  refuseIdentity('extra sample node', { identityDelta: identityVariant(d => { d.samples.nodes.push({ ...d.samples.nodes[0], pointer:'/foreign' }); }) });
+  refuseIdentity('omitted sample node', { identityDelta: identityVariant(d => { d.samples.nodes.pop(); }) });
+  refuseIdentity('foreign sample pointer', { identityDelta: identityVariant(d => { d.samples.nodes[0].pointer = '/entries/2/supporting/partial/after'; }) });
+  refuseIdentity('foreign sample file', { identityDelta: identityVariant(d => { d.samples.nodes[0].file = 'skills/forge-next/SKILL.md'; }) });
+  for (const field of ['before','after']) {
+    refuseIdentity('wrong sample full ' + field, { identityDelta: identityVariant(d => { d.samples[field] = wrongIdentity; }) });
+    refuseIdentity('wrong sample node ' + field, { identityDelta: identityVariant(d => { d.samples.nodes[0][field] = wrongIdentity; }) });
+  }
+  const identitySampleText = fs.readFileSync(path.join(ROOT, 'docs/communication-evaluation/samples.json'), 'utf8');
+  const identitySampleDoc = fs.readFileSync(path.join(ROOT, 'docs/communication-evaluation/README.md'), 'utf8');
+  const identityTampered = identitySampleText.replace('"entries"', '"entries" ');
+  refuseIdentity('sample bytes coherently repinned', { identitySampleText: identityTampered, identityDelta: identityVariant(d => { d.samples.after = sha256(identityTampered); }) });
+  const identityQuoteTampered = identitySampleText.replace('"text": "', '"text": "foreign ');
+  refuseIdentity('quoted material coherently repinned', { identitySampleText: identityQuoteTampered, identityDelta: identityVariant(d => { d.samples.after = sha256(identityQuoteTampered); }) });
+  refuseIdentity('stale sample citation', { identitySampleText: withSampleShas(identitySampleText, [[IDENTITY_SAMPLE_POINTERS[0], IDENTITY.files['skills/forge-task/SKILL.md'].before]]) });
+  refuseIdentity('unrelated sample node edit', { identitySampleText: withSampleShas(identitySampleText, [['/entries/2/supporting/partial/after', wrongIdentity]]) });
+  refuseIdentity('undocumented samples', { identitySampleReadme: identitySampleDoc.split(IDENTITY.files['skills/forge-task/SKILL.md'].after).join('') });
 
   process.stdout.write('ok - issue-347-linked-task-layer-chains-exact-members-and-refuses-tampering\n');
 });

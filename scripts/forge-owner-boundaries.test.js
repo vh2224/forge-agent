@@ -131,6 +131,14 @@ async function main() {
   assert.equal(runs.get(activation.target, id).owner_session_source, 'CODEX_THREAD_ID');
   const absent = activate(withoutIdentity(), 'missing-activation'); assert.notEqual(absent.child.status, 0);
   assert(!fs.existsSync(runs.runsDir(absent.target)), 'no host session means no run registration and no random identity');
+  // R1: execute the actual projected resume command as well as activation.
+  // This positive would otherwise silently become a legacy-negative test when
+  // --update is separated from its value and the parser targets true.json.
+  const sameOwnerResume = spawnSync(bash, ['-c', 'set -e\n' + sessionLine + '\n' + updateLine], { cwd: activation.target, encoding: 'utf8', timeout: 30000, windowsHide: true,
+    env: { ...process.env, FORGE_SCRIPTS_DIR: __dirname.replace(/\\/g, '/'), WORKING_DIR: activation.target.replace(/\\/g, '/'), RUN_ID: id, ISOLATION_MODE: 'shared', WORKTREES_JSON: '[]', RUN_BRANCH: '' } });
+  assert.ifError(sameOwnerResume.error); assert.equal(sameOwnerResume.status, 0, sameOwnerResume.stderr);
+  assert.equal(runs.get(activation.target, id).session_id, session);
+  assert(!fs.existsSync(runs.runFile(activation.target, 'true')), 'resume must address selected RUN_ID');
   runs.update(activation.target, id, { session_id: 'legacy-random-seed' }); const oldLegacy = recordHash(activation.target);
   const resume = spawnSync(bash, ['-c', 'set -e\n' + sessionLine + '\n' + updateLine], { cwd: activation.target, encoding: 'utf8', timeout: 30000, windowsHide: true,
     env: { ...process.env, FORGE_SCRIPTS_DIR: __dirname.replace(/\\/g, '/'), WORKING_DIR: activation.target.replace(/\\/g, '/'), RUN_ID: id, ISOLATION_MODE: 'shared', WORKTREES_JSON: '[]', RUN_BRANCH: '' } });
@@ -170,6 +178,127 @@ async function main() {
   assert.equal(runs.get(currentClaude.target, id).session_id, 'claude-current-336');
   assert.equal(runs.get(currentClaude.target, id).host_runtime, 'claude');
   assert.equal(runs.get(currentClaude.target, id).owner_session_source, 'claude-sessionstart-env-v1');
+  const claudeUpdateLine = claudeAuto.split('\n').find(line => line.includes('forge-runs.js" --update '));
+  const claudeResumeScript = (claudeSessionLine + '\n' + claudeUpdateLine).replaceAll('${CLAUDE_SESSION_ID}', 'claude-current-336');
+  const claudeResume = spawnSync(bash, ['-c', 'set -e\nsource "$FIXTURE_ENV_FILE"\n' + claudeResumeScript], { cwd: currentClaude.target, encoding: 'utf8', timeout: 30000, windowsHide: true,
+    env: { ...withoutIdentity(), FORGE_HOME: root, HOME: installedHome, USERPROFILE: installedHome,
+      FIXTURE_ENV_FILE: path.join(lab, 'claude-actual-activation.env').replace(/\\/g, '/'),
+      FORGE_SCRIPTS_DIR: __dirname.replace(/\\/g, '/'), WORKING_DIR: currentClaude.target.replace(/\\/g, '/'), RUN_ID: id,
+      ISOLATION_MODE: 'shared', WORKTREES_JSON: '[]', RUN_BRANCH: '' } });
+  assert.ifError(claudeResume.error); assert.equal(claudeResume.status, 0, claudeResume.stderr);
+  assert.equal(runs.get(currentClaude.target, id).session_id, 'claude-current-336');
+  assert(!fs.existsSync(runs.runFile(currentClaude.target, 'true')), 'Claude resume must address selected RUN_ID');
+  console.log('PASS #336 R1 actual rendered resume commands succeed for the same owner in both hosts and address the selected run');
+
+  // The explicit-target updater does not perform the implicit hook lookup.
+  runs.add(activation.target, { id:'M002', kind:'milestone', session_id:session, host_runtime:'codex' });
+  // activation.target was intentionally changed to a legacy seed earlier;
+  // restore the original observed owner only as explicit fixture setup.
+  runs.update(activation.target,id,{session_id:session,host_runtime:'codex',owner_session_source:'CODEX_THREAD_ID',active:true});
+  const multiOwnerActual = spawnSync(bash,['-c','set -e\n'+sessionLine+'\n'+updateLine],{cwd:activation.target,encoding:'utf8',windowsHide:true,
+    env:{...process.env,FORGE_SCRIPTS_DIR:__dirname.replace(/\\/g,'/'),WORKING_DIR:activation.target.replace(/\\/g,'/'),RUN_ID:id,ISOLATION_MODE:'shared',WORKTREES_JSON:'[]',RUN_BRANCH:''}});
+  assert.equal(multiOwnerActual.status,0,multiOwnerActual.stderr);
+  assert.equal(runs.resolveBySessionOwner(activation.target,runs.observeHostSession('codex')),null,'implicit hooks still refuse two active bindings');
+
+  function ownerFixture(runtime,label) {
+    const target=setup(runtime==='codex'?session:'claude-current-336');
+    runs.update(target,id,{host_runtime:runtime,owner_session_source:runtime==='codex'?'CODEX_THREAD_ID':'claude-sessionstart-env-v1'});
+    const begin=controller.begin(target,request({host_runtime:runtime,idempotency_key:label+'-begin'}),options);
+    assert.equal(begin.ok,true); complete(target,begin,{host_runtime:runtime,idempotency_key:label+'-complete'});
+    return target;
+  }
+  function resumeEnv(runtime,target) {
+    return {...(runtime==='codex'?process.env:withoutIdentity()),FORGE_HOME:root,HOME:installedHome,USERPROFILE:installedHome,
+      FIXTURE_ENV_FILE:path.join(lab,'claude-actual-activation.env').replace(/\\/g,'/'),FORGE_SCRIPTS_DIR:__dirname.replace(/\\/g,'/'),
+      WORKING_DIR:target.replace(/\\/g,'/'),RUN_ID:id};
+  }
+  function actualOwnerResume(runtime,target,kind) {
+    const projected=runtime==='codex'?auto:claudeAuto;
+    const inspectLine=projected.split('\n').find(line=>line.trim().startsWith('OWNER_RESUME=$(node'));
+    const shaLine=projected.split('\n').find(line=>line.trim().startsWith('OWNER_RESUME_SHA='));
+    const op=projected.split('\n').find(line=>line.includes('forge-runs.js" --resume-owner ') && line.includes('--confirm-owner-stopped')===(kind==='transfer'));
+    assert(inspectLine&&shaLine&&op,'actual projected owner-resume caller exists');
+    let script=[inspectLine,shaLine,op].join('\n');
+    if(runtime==='claude')script='source "$FIXTURE_ENV_FILE"\n'+script.replaceAll('${CLAUDE_SESSION_ID}','claude-current-336');
+    return spawnSync(bash,['-c','set -e\n'+script],{cwd:target,encoding:'utf8',timeout:30000,windowsHide:true,env:resumeEnv(runtime,target)});
+  }
+  for(const runtime of ['codex','claude']) {
+    const same=ownerFixture(runtime,'reactivate-'+runtime);runs.update(same,id,{active:false});
+    const before=recordHash(same);const reactivated=actualOwnerResume(runtime,same,'reactivate');
+    assert.equal(reactivated.status,0,reactivated.stderr);assert.notEqual(recordHash(same),before);
+    const sameRecord=runs.get(same,id);assert.equal(sameRecord.active,true);assert.equal(sameRecord.owner_resume_history.at(-1).kind,'same-owner-reactivation');
+    assert.equal(sameRecord.owner_resume_history.at(-1).previous_owner_stopped_attested,false,'same owner never attests its own death');
+    const foreign=ownerFixture(runtime,'transfer-'+runtime);
+    runs.update(foreign,id,{session_id:'prior-owner-with-ended-tenure',active:false});
+    const saved=recordHash(foreign), env=resumeEnv(runtime,foreign), expected=runtime==='claude'?['--expected-owner-session','claude-current-336']:[];
+    if(runtime==='claude'){env.FORGE_CLAUDE_OWNER_SESSION_ID='claude-current-336';env.FORGE_CLAUDE_OWNER_SOURCE='claude-sessionstart-env-v1';}
+    const cli=(args)=>spawnSync(process.execPath,[path.join(__dirname,'forge-runs.js'),...args,'--observed-owner','--host-runtime',runtime,...expected,'--cwd',foreign],{encoding:'utf8',env,windowsHide:true});
+    const inspection=cli(['--inspect-owner-resume',id]);assert.equal(inspection.status,0,inspection.stderr);const snapshot=JSON.parse(inspection.stdout).record_sha256;
+    const denied=cli(['--resume-owner',id,'--expected-record-sha256',snapshot,'--confirm-workspace-quiescent']);
+    assert.notEqual(denied.status,0);assert(denied.stderr.includes('owner-resume-owner-stop-attestation-required'));assert.equal(recordHash(foreign),saved,'inactive is not prior-owner termination');
+    const imported=cli(['--resume-owner',id,'--expected-record-sha256',snapshot,'--json','{"approved":true,"confirmOwnerStopped":true,"confirmWorkspaceQuiescent":true}']);
+    assert.notEqual(imported.status,0);assert.equal(recordHash(foreign),saved);
+    // Trusted fixture host explicitly attests an ended prior tenure and no
+    // process/receipt/root writer. These are fixture attestations, not OS proof.
+    const transferred=actualOwnerResume(runtime,foreign,'transfer');assert.equal(transferred.status,0,transferred.stderr);
+    const record=runs.get(foreign,id);assert.equal(record.session_id,runtime==='codex'?session:'claude-current-336');
+    assert.equal(record.owner_resume_history.at(-1).kind,'stopped-owner-transfer');assert.equal(record.owner_resume_history.at(-1).os_process_death_proven,false);
+    const stale=cli(['--resume-owner',id,'--expected-record-sha256',snapshot,'--confirm-owner-stopped','--confirm-workspace-quiescent']);
+    assert.notEqual(stale.status,0);assert(stale.stderr.includes('owner-resume-snapshot-changed'));
+  }
+  identity();
+  const negativeFixture=(label,patch={})=>{const target=ownerFixture('codex','negative-'+label);runs.update(target,id,{session_id:'prior-ended-'+label,active:false,...patch});return target;};
+  const resumeOptions=target=>({hostRuntime:'codex',expectedRecordSha256:runs.inspectOwnerResume(target,id,{hostRuntime:'codex'}).record_sha256,confirmOwnerStopped:true,confirmWorkspaceQuiescent:true});
+  const untouched=(target,options,reason)=>{const before=recordHash(target);assert.throws(()=>runs.resumeOwner(target,id,options),e=>e.code===reason,reason);assert.equal(recordHash(target),before,reason+' preserves registry');};
+  const held=negativeFixture('lease'), heldOptions=resumeOptions(held);
+  const acquired=lease.acquire(held,'execute-task/T88',{ownerToken:'active-writer-owner',hostRuntime:'codex',session:'active-worker',requestId:'active-worker-request'});
+  assert.equal(acquired.ok,true);
+  untouched(held,heldOptions,'owner-resume-lease-present');
+  const leaseFile=lease.leaseFile(held,'execute-task/T88'),leaseBytes=fs.readFileSync(leaseFile);
+  assert.equal(lease.release(held,'execute-task/T88','active-writer-owner',acquired.generation).ok,true);
+  assert.equal(leaseBytes.length>0,true,'actual active lease was preserved until its owner released it');
+  const staleLease=negativeFixture('expired-lease');const expired=lease.acquire(staleLease,'execute-task/T89',{ownerToken:'expired-owner',hostRuntime:'codex',now:()=>1,ttlMs:2,graceMs:1});assert.equal(expired.ok,true);
+  assert.equal(lease.readLease(lease.leaseFile(staleLease,'execute-task/T89')).record.expires_at,3,'the negative uses a genuinely expired retained lease');
+  untouched(staleLease,resumeOptions(staleLease),'owner-resume-lease-present');
+  for(const[patch,reason]of [[{write_claim:{at:1,unit:'execute-task/T01',paths:['src/a.js'],released:null}},'owner-resume-claim-held'],[{write_claim:false},'owner-resume-claim-held'],[{worker:'execute-task/T88',worker_started:1},'owner-resume-worker-unreconciled']]){
+    const target=negativeFixture(reason,patch);untouched(target,resumeOptions(target),reason);
+  }
+  const legacy=negativeFixture('legacy',{owner_session_source:null}), legacyHash=recordHash(legacy);
+  assert.throws(()=>runs.inspectOwnerResume(legacy,id,{hostRuntime:'codex'}),/owner-resume-binding-unknown/);assert.equal(recordHash(legacy),legacyHash);
+  const livePrior=negativeFixture('active-prior',{active:true}), liveOpts=resumeOptions(livePrior);delete liveOpts.confirmOwnerStopped;
+  untouched(livePrior,liveOpts,'owner-resume-owner-stop-attestation-required');
+  const sameInactive=ownerFixture('codex','workspace-attestation');runs.update(sameInactive,id,{active:false});
+  untouched(sameInactive,{hostRuntime:'codex',expectedRecordSha256:runs.inspectOwnerResume(sameInactive,id,{hostRuntime:'codex'}).record_sha256},'owner-resume-workspace-quiescent-attestation-required');
+  const lockTarget=negativeFixture('file-lock');fs.mkdirSync(path.join(lockTarget,'.gsd/forge/file-locks'),{recursive:true});fs.writeFileSync(path.join(lockTarget,'.gsd/forge/file-locks/unknown.json'),'{}');
+  untouched(lockTarget,resumeOptions(lockTarget),'owner-resume-file-lock-present');
+  const debris=negativeFixture('transaction-debris');fs.writeFileSync(path.join(controller.transactionDir(debris),'unknown.tmp'),'unknown');
+  untouched(debris,resumeOptions(debris),'owner-resume-transactions-unknown');
+  const noBoundary=setup('prior-legacy-with-binding');runs.update(noBoundary,id,{owner_session_source:'CODEX_THREAD_ID',active:false});
+  untouched(noBoundary,resumeOptions(noBoundary),'owner-resume-boundary-required');
+  const pendingTarget=negativeFixture('pending');
+  const pending=controller.begin(pendingTarget,request({unit:'execute-task/T03',idempotency_key:'pending-begin'}),options);assert.equal(pending.ok,true);
+  assert.throws(()=>controller.pause(pendingTarget,request({unit:'execute-task/T03',owner_token:pending.owner_token,generation:pending.generation,idempotency_key:'pending-pause'}),{...options,failpoint:point=>point==='after-intent'}),e=>e.code==='CONTROLLER_FAILPOINT');
+  assert.equal(lease.release(pendingTarget,'execute-task/T03',pending.owner_token,pending.generation).ok,true,'fixture owner releases its own lease after controlled interruption');
+  untouched(pendingTarget,resumeOptions(pendingTarget),'owner-resume-transaction-pending');
+  const raced=negativeFixture('snapshot-race'), staleOptions=resumeOptions(raced);runs.update(raced,id,{last_heartbeat:Date.now()+1});
+  untouched(raced,staleOptions,'owner-resume-snapshot-changed');
+  const mutexTarget=negativeFixture('mutex-race'),mutexOptions=resumeOptions(mutexTarget), lock=require('./forge-lock');
+  const controllerMutex=lock.acquireProcessSync(mutexTarget,'unit-controller-transactions',{retries:1});
+  try {
+    const prior=recordHash(mutexTarget), blocked=spawnSync(process.execPath,[path.join(__dirname,'forge-runs.js'),'--resume-owner',id,'--observed-owner','--host-runtime','codex','--expected-record-sha256',mutexOptions.expectedRecordSha256,'--confirm-owner-stopped','--confirm-workspace-quiescent','--cwd',mutexTarget],{encoding:'utf8',env:process.env,timeout:5000,windowsHide:true});
+    assert.notEqual(blocked.status,0);assert.equal(recordHash(mutexTarget),prior,'controller-held publication fence excludes concurrent resume');
+  } finally {controllerMutex.release();}
+  const preserved=negativeFixture('questions',{pending_questions:[{id:'decision-live',status:'pending',question:'existing decision'}]});
+  const receipt=path.join(preserved,'.gsd','retained.receipt.json');fs.writeFileSync(receipt,'{"phase":"published","fixture":"already-reconciled"}\n');const receiptHash=sha(fs.readFileSync(receipt));
+  const transferred=runs.resumeOwner(preserved,id,resumeOptions(preserved));assert.equal(transferred.status,'transferred');
+  assert.deepEqual(transferred.record.pending_questions,[{id:'decision-live',status:'pending',question:'existing decision'}]);assert.equal(sha(fs.readFileSync(receipt)),receiptHash);
+  process.env.CODEX_THREAD_ID='prior-ended-questions';
+  const former=runs.observeHostSession('codex'), afterTransfer=recordHash(preserved);assert.equal(runs.bumpOwnedHeartbeat(preserved,id,former).updated,false);
+  const oldUpdate=spawnSync(process.execPath,[path.join(__dirname,'forge-runs.js'),'--update',id,'--observed-owner','--host-runtime','codex','--json','{"active":true}','--cwd',preserved],{encoding:'utf8',env:process.env,windowsHide:true});
+  assert.notEqual(oldUpdate.status,0);assert.equal(recordHash(preserved),afterTransfer,'former owner cannot use ordinary update or heartbeat');identity();
+  console.log('PASS #336 R2 real active/expired leases, controller mutex and snapshot races, retained worker/claim, unknown legacy binding and preserved pending questions/receipt all retain their gates');
+  console.log('PASS #336 R2 actual rendered reactivation/transfer in both hosts, inactive foreign refusal, imported JSON refusal, stale snapshot and explicit multi-run target');
+
   for (const scenario of [
     { label: 'claude-no-channel', bridge: false }, { label: 'claude-no-source', source: false },
     { label: 'claude-stale-parent', native: 'current-child', payload: 'stale-parent' },
