@@ -394,7 +394,29 @@ const validateForgeSubagentResult = (data) => {
   }
 
   const message = String(data && data.last_assistant_message || '');
-  const hasBlock = message.includes('---GSD-WORKER-RESULT---');
+  let workerResult = null;
+  // Core/development scripts remain coupled to their sibling classifier. The
+  // Claude projections have no runtime scripts: the installer retires those.
+  if (path.basename(__dirname) === 'scripts') {
+    try { workerResult = require(path.join(__dirname, 'forge-worker-result.js')); } catch {}
+  }
+  if (!workerResult) {
+    try {
+      // Bootstrap only locates the canonical home resolver; that resolver owns
+      // the final scripts path, including explicit FORGE_HOME precedence.
+      const configured = typeof process.env.FORGE_HOME === 'string' && process.env.FORGE_HOME.trim();
+      const names = process.platform === 'win32' ? ['USERPROFILE', 'HOME'] : ['HOME', 'USERPROFILE'];
+      const userHome = names.map(name => (process.env[name] || '').trim()).find(Boolean) || os.homedir();
+      const bootstrap = path.resolve(configured || path.join(userHome, '.forge-agent'), 'scripts', 'forge-home.js');
+      const home = require(bootstrap).resolveForgePaths();
+      workerResult = require(path.join(home.shared.scripts, 'forge-worker-result.js'));
+    } catch {}
+  }
+  if (!workerResult) return { ok: true, reason: 'result-classifier-unavailable', tracked: true,
+    hasBlock: message.includes('---GSD-WORKER-RESULT---'), hasValidResult: false };
+  const classified = workerResult.classifyReturn(message);
+  const hasBlock = classified.marker_count > 0;
+  const hasValidResult = classified.shape === 'complete';
 
   // Claude Code sets stop_hook_active on the continuation caused by a blocking
   // stop hook.  Fail open then, even if the worker ignored the feedback, so a
@@ -407,14 +429,15 @@ const validateForgeSubagentResult = (data) => {
   // stamped into the artifact meant to tell them apart.  `hasBlock` now rides
   // along on every return so the caller can fail open AND say what happened.
   if (data && data.stop_hook_active === true) {
-    return { ok: true, reason: 'retry-escape', tracked: true, hasBlock };
+    return { ok: true, reason: 'retry-escape', tracked: true, hasBlock, hasValidResult };
   }
 
-  if (!hasBlock) {
+  if (!hasValidResult) {
     return {
       ok: false,
       tracked: true,
-      hasBlock: false,
+      hasBlock,
+      hasValidResult,
       // The wording matters more than it looks. The previous text said "only
       // inspect your current result and emit the missing structured block",
       // which a compliant agent obeys literally: it emits the result block
@@ -429,13 +452,14 @@ const validateForgeSubagentResult = (data) => {
       reason: [
         `Forge contract missing for ${agentType}.`,
         'Re-emit your COMPLETE final answer in ONE message: every inline deliverable your agent instructions require (per-objection verdicts, findings, summary prose), followed by the ---GSD-WORKER-RESULT--- block.',
+        workerResult.resultStatusInstruction(),
         'Do not re-run tools or redo investigation — restate the conclusions you already reached.',
         'A message containing only the result block discards your work: the orchestrator reads this message and nothing else.',
       ].join(' '),
     };
   }
 
-  return { ok: true, reason: 'valid', tracked: true, hasBlock: true };
+  return { ok: true, reason: 'valid', tracked: true, hasBlock: true, hasValidResult: true };
 };
 
 // Durable record of a worker that stopped without its contract.
@@ -629,7 +653,7 @@ process.stdin.on('end', () => {
       // Failed open on the repair pass and STILL no contract.  The stop is
       // allowed (no infinite loop), but it is not reported as `done`: the
       // orchestrator's missing-result branch keys off exactly this distinction.
-      const escaped = contract.tracked === true && contract.hasBlock === false;
+      const escaped = contract.tracked === true && contract.hasValidResult === false;
       if (escaped) recordContractMiss(cwd, data, 'escaped', agentType);
 
       fs.writeFileSync(liveFile, JSON.stringify({

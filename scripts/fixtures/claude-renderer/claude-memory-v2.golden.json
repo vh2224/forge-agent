@@ -7,7 +7,7 @@
     {
       "source_id": "agents",
       "target": "agents",
-      "sha256": "30d0fb3fecdb88a4d2ac76dbb5a1ee6669aa3455f1fa41461137f89a164921c0"
+      "sha256": "91dd5d2a3ece86df030fcf5e374041c3bb496da040baf3f3a2830445061c8c5e"
     },
     {
       "source_id": "commands",
@@ -27,7 +27,7 @@
     {
       "source_id": "hooks",
       "target": "hooks/forge-hook.js",
-      "sha256": "c149db9dd45bed13f05931987217d224a6f23d805dc6e8900e46b32893a41c48"
+      "sha256": "228bceb55413320b8f3b47564711989f454a841d9946ebdfde92f690b733ad1e"
     },
     {
       "source_id": "mcp",

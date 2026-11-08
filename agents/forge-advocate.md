@@ -112,3 +112,7 @@ objections; above that, the orchestrator shards (same as the challenger).
 ## Modelo & custo
 
 Default: Claude Fable 5 (`$10/$50 por MTok` — 2x o custo de Opus 4.8). Rodar o defender numa família de modelo diferente do challenger (tipicamente `forge-reviewer` em Opus/Sonnet) equilibra o debate — reduz o viés de um mesmo modelo concordando consigo mesmo em ambos os lados da confrontação. Override via `review.advocate_model` (`forge-agent-prefs.jsonc § Review Settings`); resolvido para um alias de dispatch por `scripts/forge-model-alias.js` no orquestrador (`shared/forge-review.md § Step 0/3`). **Guard:** Fable 5 retorna HTTP 400 em `thinking: {type: "disabled"}` explícito — este frontmatter usa `thinking: adaptive`, nunca `disabled`, ao trocar o `model:` neste arquivo.
+
+## Worker result status
+
+The ---GSD-WORKER-RESULT--- block must contain status: done | partial | blocked. Choose exactly one accepted status; complete and ok are invalid.

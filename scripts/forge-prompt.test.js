@@ -396,6 +396,7 @@ test('renders all unit templates with no contract placeholder left behind', () =
     const result = renderPrompt(baseOptions(cwd, unitType));
     assert.ok(result.prompt.includes('WORKING_DIR:'));
     assert.ok(result.prompt.endsWith('\n'));
+    assert.ok(result.prompt.includes(require('./forge-worker-result').resultStatusInstruction()), `${unitType} must declare the closed result status enum`);
     assert.ok(!/\{(?:WORKING_DIR|M###|S##|T##|auto_commit|milestone_cleanup|unit_effort|THINKING_OPUS|CS_LINT|CS_STRUCTURE|CS_RULES|TOP_MEMORIES|description|PLAN_CHECK_MODE|MUST_HAVES_CHECK_RESULTS)\}/.test(result.prompt.replace(loadProcedureContext({ cwd, phase: unitType }).content, '')));
     assert.strictEqual(result.input_tokens, countTokens(result.prompt));
     const mandatory = result.procedure_context ? loadProcedureContext({ cwd, phase: unitType }).content : '';

@@ -973,7 +973,8 @@ function renderPrompt(rawOptions) {
     : pendingPrompt;
   // Validate DATA boundaries after every substitution and pending insertion,
   // before materialization or native file-reading delivery can publish anything.
-  const prompt = procedure ? composeProcedurePrompt(resolvedPrompt, procedure, options.procedure_context) : resolvedPrompt;
+  const resultPrompt = `${resolvedPrompt.replace(/\s+$/, '')}\n\n${require('./forge-worker-result').resultStatusInstruction()}\n`;
+  const prompt = procedure ? composeProcedurePrompt(resultPrompt, procedure, options.procedure_context) : resultPrompt;
   // Required current allocation is never clipped or moved to an optional allowance.
   // Admit the whole composed frame before materializing a prompt for transport.
   if (values.TASK_NODE_BINDING && countTokens(prompt) > MAX_CONTEXT_TOKENS) {

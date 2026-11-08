@@ -223,3 +223,14 @@ históricos 4.18.1 (`a58a005aea70eaa17c0ecfaf1cdf8965cdf9adb8c2678e756ac83ea74d9
 continua com 248 linhas, nenhuma nova ou removida e deriva de fingerprint medida zero:
 `scripts/forge-dispatch-source-guard.js` não foi alterado. Distribuição não prova CI,
 smoke, merge, release, instalação, execução nem compreensão do cliente, nem aceite humano.
+
+## Entry result contract (#347)
+
+Measured from base `ad62d774fc37ec6fcf5a85347d69eaf5c8a8c675` using the pure Claude renderer, without writing host projections. The nine result-block agents receive the classifier-derived status instruction; the hook uses the same enum and preserves the bounded second-pass escape. Seven other surfaces and all historical captures remain unchanged.
+
+| Surface | Before | After |
+| --- | --- | --- |
+| agents | `30d0fb3fecdb88a4d2ac76dbb5a1ee6669aa3455f1fa41461137f89a164921c0` | `91dd5d2a3ece86df030fcf5e374041c3bb496da040baf3f3a2830445061c8c5e` |
+| hooks | `c149db9dd45bed13f05931987217d224a6f23d805dc6e8900e46b32893a41c48` | `228bceb55413320b8f3b47564711989f454a841d9946ebdfde92f690b733ad1e` |
+
+The exact source and attributed hashes are recorded in `scripts/fixtures/entry-contracts/distribution-delta.json`; #341 remains an immutable earlier layer. Distribution proof does not establish provider/client execution or human acceptance.
