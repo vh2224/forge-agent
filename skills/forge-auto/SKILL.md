@@ -461,19 +461,38 @@ Branch on `$STATUS`:
 - **`none`** - display the personal reason and stop without mutation. Legacy/global fallback is forbidden.
 - **`activate-new`** — register the new run:
   ```bash
-  SESSION_ID="${CLAUDE_SESSION_ID:-$(node -e "process.stdout.write(require('crypto').randomBytes(8).toString('hex'))")}"
-  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --add --id "$RUN_ID" --kind "$RUN_KIND" --session "$SESSION_ID" --isolation-mode "$ISOLATION_MODE" --account "${FORGE_ACCOUNT:-}" --worktrees "$WORKTREES_JSON" --branch "${RUN_BRANCH:-}" --cwd "$WORKING_DIR" > /dev/null || { echo "Run registration/update failed; stop before dispatch." >&2; exit 1; }
+  SESSION_ID=$(node "$FORGE_SCRIPTS_DIR/forge-runs.js" --owner-session --host-runtime claude --expected-owner-session '${CLAUDE_SESSION_ID}') || { echo "owner-session-unavailable: current Claude host identity was not attested; stop before registration." >&2; exit 2; }
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --add --observed-owner --host-runtime claude --expected-owner-session '${CLAUDE_SESSION_ID}' --id "$RUN_ID" --kind "$RUN_KIND" --session "$SESSION_ID" --isolation-mode "$ISOLATION_MODE" --account "${FORGE_ACCOUNT:-}" --worktrees "$WORKTREES_JSON" --branch "${RUN_BRANCH:-}" --cwd "$WORKING_DIR" > /dev/null || { echo "Run registration/update failed; stop before dispatch." >&2; exit 1; }
   echo "$MSG"
   ```
   Then continue to legacy activation (which writes auto-mode-started.txt + alias).
-- **`resume`** — emit `$MSG`, set `RUN_ID` (already set). Update the existing registry entry with the new session_id (the previous orchestrator process exited; this is a fresh session that needs to own heartbeat updates) and the freshly-resolved isolation mode:
+- **`resume`** — emit `$MSG`, keep the explicitly selected `RUN_ID` and observe the current host session. Inspect the target before changing its owner:
   ```bash
-  SESSION_ID="${CLAUDE_SESSION_ID:-$(node -e "process.stdout.write(require('crypto').randomBytes(8).toString('hex'))")}"
-  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json "{\"session_id\":\"$SESSION_ID\",\"active\":true,\"isolation_mode\":\"$ISOLATION_MODE\",\"worktrees\":$WORKTREES_JSON,\"branch\":\"$RUN_BRANCH\"}" --cwd "$WORKING_DIR" > /dev/null || { echo "Run registration/update failed; stop before dispatch." >&2; exit 1; }
+  OWNER_RESUME=$(node "$FORGE_SCRIPTS_DIR/forge-runs.js" --inspect-owner-resume "$RUN_ID" --observed-owner --host-runtime claude --expected-owner-session '${CLAUDE_SESSION_ID}' --cwd "$WORKING_DIR") || exit 1
+  OWNER_RESUME_STATUS=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).status)" "$OWNER_RESUME")
+  OWNER_RESUME_SHA=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).record_sha256)" "$OWNER_RESUME")
+  ```
+  `same-owner-active` proceeds directly to the strict update below, even if this session owns another run: this command has an explicit target. Hooks without a target still refuse ambiguous ownership.
+
+  `same-owner-inactive` is a reactivation, not a transfer: do not attest that the current owner died. The trusted host first inspects its processes, receipts and every possible writer root; replay/publish saved results or perform the existing reconciliation when needed. Only after observing workspace quiescence, run the following actual operation and then the strict update below:
+  ```bash
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --resume-owner "$RUN_ID" --observed-owner --host-runtime claude --expected-owner-session '${CLAUDE_SESSION_ID}' --expected-record-sha256 "$OWNER_RESUME_SHA" --confirm-workspace-quiescent --cwd "$WORKING_DIR" || exit 1
+  ```
+  `transfer-required` needs the prior owner's actual end and the same process/receipt/root reconciliation. Reuse existing explicit authorization, but do not infer facts from authorization, inactive, mtime, an empty active-run list, imported JSON or this skill. If the host cannot establish those facts, preserve the run and report `owner-resume-owner-stop-attestation-required` or `owner-resume-workspace-quiescent-attestation-required`; do not dispatch or clear claims/questions/receipts. Only after the trusted host actually establishes both facts, use this operation instead of the reactivation command:
+  ```bash
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --resume-owner "$RUN_ID" --observed-owner --host-runtime claude --expected-owner-session '${CLAUDE_SESSION_ID}' --expected-record-sha256 "$OWNER_RESUME_SHA" --confirm-owner-stopped --confirm-workspace-quiescent --cwd "$WORKING_DIR" || exit 1
+  ```
+  These flags are caller attestations, in the same trust model as claim recovery; they are not automatic OS evidence. The operation rechecks the exact run snapshot, canonical handoff/history, leases, pending transactions, retained claim and file locks under the controller/registry fences. A stale snapshot requires fresh inspection and revalidation of the facts; it is never silently retried. Unknown legacy binding or absent canonical boundary is preserved/refused, not healed or adopted. The prior process may still exist only after its real ownership tenure and possible writers have ended; no in-flight owner is transferred.
+
+  After the selected operation succeeds (or `same-owner-active`), refresh only the metadata resolved for this run:
+
+  ```bash
+  SESSION_ID=$(node "$FORGE_SCRIPTS_DIR/forge-runs.js" --owner-session --host-runtime claude --expected-owner-session '${CLAUDE_SESSION_ID}') || { echo "owner-session-unavailable: current Claude host identity was not attested; stop before registration." >&2; exit 2; }
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --observed-owner --host-runtime claude --expected-owner-session '${CLAUDE_SESSION_ID}' --json "{\"session_id\":\"$SESSION_ID\",\"active\":true,\"isolation_mode\":\"$ISOLATION_MODE\",\"worktrees\":$WORKTREES_JSON,\"branch\":\"$RUN_BRANCH\"}" --cwd "$WORKING_DIR" > /dev/null || { echo "Run registration/update failed; stop before dispatch." >&2; exit 1; }
   ```
   `branch` is refreshed here for the same reason `isolation_mode` is: it is what the
   setup just resolved, and a record created before the field existed carries `null`.
-  Re-recording it on resume heals those without a migration pass. In `shared` mode
+  Refreshing this address metadata after ownership is established fills those fields without a migration pass. In `shared` mode
   `$RUN_BRANCH` is empty and the field is written on disk as `""` (this interpolation
   bypasses `add()`'s `|| null`) — `forge-runs.js`'s `withAddressDefaults` normalizes
   `''` to `null` on every read (`get()`/`listAll()`), so it is read back as "no

@@ -51,11 +51,12 @@ const HANDOFF_RECORD_FIELDS = Object.freeze({
   isolation: Object.freeze(['mode', 'branch', 'attached_to', 'worktree_count']),
   chain_closure: Object.freeze(['schema_version', 'kind', 'milestone', 'task_id', 'link_sha256', 'decision', 'closed_at']),
   closure: Object.freeze(['schema_version', 'kind', 'milestone', 'task_id', 'link_sha256', 'start_sha256', 'summary', 'delivery', 'closed_at', 'fingerprint']),
+  closure_witness: Object.freeze(['schema_version', 'kind', 'milestone', 'task_id', 'link_sha256', 'closure_sha256', 'closure']),
   closure_delivery: Object.freeze(['reference', 'sha256', 'input_sha256', 'fingerprint', 'criteria']),
   // Optional verified task clock projection retained at the genuine closure (R45): the last key of a closure record.
   closure_clock: Object.freeze(['policy', 'consumption', 'waits', 'overlap_ms', 'gaps', 'gap_count', 'journal_records', 'unknowns']),
 });
-const KINDS = Object.freeze({ handoff: 'forge-linked-task-handoff', start: 'forge-linked-task-start', 'start-witness': 'forge-linked-task-start-witness', 'chain-closure': 'forge-linked-task-chain-closure', closure: 'forge-linked-task-closure' });
+const KINDS = Object.freeze({ handoff: 'forge-linked-task-handoff', start: 'forge-linked-task-start', 'start-witness': 'forge-linked-task-start-witness', 'chain-closure': 'forge-linked-task-chain-closure', closure: 'forge-linked-task-closure', 'closure-witness': 'forge-linked-task-closure-witness' });
 const RECORDS = Object.freeze(['handoff', 'start', 'chain-closure', 'closure']);
 const LINKED_SET = 'milestone-time-linked-task', CHAINED = 'create-and-start-after-proven-completion', EXPLICIT = 'create-without-auto-start';
 // A declined decision (defer / keep-chain) stays as history; the next explicit request opens the next generation.
@@ -234,6 +235,22 @@ function closureValid(v) {
     && hash(v.delivery.sha256) && hash(v.delivery.input_sha256) && hash(v.delivery.fingerprint) && Number.isSafeInteger(v.delivery.criteria) && v.delivery.criteria > 0
     && instant(v.closed_at) && v.fingerprint === v.delivery.fingerprint && time().isPublicData(v);
 }
+// The closure is historical authority only while it equals this separately published
+// immutable witness. A canonical edit to closure.json alone is never authoritative;
+// legacy closures without a witness refuse rather than adopting today's delivery.
+function closureWitnessValid(v) {
+  return exact(v, HANDOFF_RECORD_FIELDS.closure_witness) && v.schema_version === HANDOFF_SCHEMA_VERSION && v.kind === KINDS['closure-witness']
+    && typedId(v.milestone, 'milestone') && typedId(v.task_id, 'task') && hash(v.link_sha256) && hash(v.closure_sha256)
+    && closureValid(v.closure) && digest(v.closure) === v.closure_sha256 && v.closure.milestone === v.milestone
+    && v.closure.task_id === v.task_id && v.closure.link_sha256 === v.link_sha256 && time().isPublicData(v);
+}
+function closureWitness(owner, probe) {
+  const read = time().readLinkedTaskClosureWitness({ cwd: owner, milestone: probe.milestone });
+  if (read.status === 'absent') return read;
+  const w = read.record;
+  return read.status === 'valid' && closureWitnessValid(w) && w.milestone === probe.milestone && w.task_id === probe.task_id && w.link_sha256 === probe.link_sha256
+    ? read : { status: 'invalid' };
+}
 const VALIDATORS = Object.freeze({ handoff: handoffValid, start: startValid, 'chain-closure': chainClosureValid, closure: closureValid });
 // Every lifecycle record of one link: absent, valid (and bound to this exact link) or invalid.
 function lifecycleRecords(owner, probe) {
@@ -246,6 +263,12 @@ function lifecycleRecords(owner, probe) {
     out[name] = r.milestone !== probe.milestone || r.task_id !== probe.task_id || r.link_sha256 !== probe.link_sha256
       ? { status: 'invalid', reason: 'foreign', record: r, sha256: read.sha256 } : { status: 'valid', record: r, sha256: read.sha256 };
   }
+  const witness = closureWitness(owner, probe);
+  if (out.closure.status === 'valid' && (witness.status !== 'valid' || witness.record.closure_sha256 !== out.closure.sha256
+      || !same(witness.record.closure, out.closure.record))) out.closure = { status: 'invalid', reason: 'closure-witness' };
+  if (witness.status === 'invalid') out.closure = { status: 'invalid', reason: 'closure-witness' };
+  if (witness.status === 'valid' && (out.start.status !== 'valid' || witness.record.closure.start_sha256 !== out.start.sha256))
+    out.closure = { status: 'invalid', reason: 'closure-witness-start' };
   return out;
 }
 function requireRecords(owner, probe) {
@@ -1295,6 +1318,20 @@ function taskDeliveryProof(owner, task, codeDir) {
   return { summary: { reference: refs.summary, sha256: sha256(summary) },
     delivery: { reference: refs.output, sha256: sha256(outputBytes), input_sha256: sha256(inputBytes), fingerprint: rebuilt.delivery_fingerprint, criteria: rebuilt.criteria.length } };
 }
+// The private witness publisher derives these from canonical sources itself. No caller
+// record, proof or callback can retroactively bless an unbound public closure.
+function deriveClosureBasis(input = {}) {
+  const owner = ownerOf(input), probe = probeTask(owner, input.taskId ?? input.task), evidence = consumedEvidence(owner, probe);
+  if (input.milestone !== undefined && probe.milestone !== input.milestone) fail('linked-task-closure-conflict', 'milestone');
+  return { milestone: probe.milestone, task_id: probe.task_id, link_sha256: probe.link_sha256, start_sha256: evidence.startSha };
+}
+function deriveClosureSnapshot(input = {}) {
+  const owner = ownerOf(input), basis = deriveClosureBasis(input), now = nowOf(input), delivered = taskDeliveryProof(owner, basis.task_id, input.codeDir);
+  const clock = horizonModule().closureClock({ cwd: owner, task: basis.task_id, now });
+  return { schema_version: HANDOFF_SCHEMA_VERSION, kind: KINDS.closure, milestone: basis.milestone, task_id: basis.task_id, link_sha256: basis.link_sha256,
+    start_sha256: basis.start_sha256, summary: delivered.summary, delivery: delivered.delivery, closed_at: new Date(now).toISOString(),
+    fingerprint: delivered.delivery.fingerprint, ...(clock ? { clock } : {}) };
+}
 // closeLinkedTask({cwd, taskId, codeDir, now, userHome, env}): owner action after the verified delivery.
 function closeLinkedTask(input = {}) {
   let probe = null, wrote = false;
@@ -1319,6 +1356,25 @@ function closeLinkedTask(input = {}) {
       if (result.status === 'deferred') fail('linked-task-boundary-deferred', result.reason);
       return result;
     }
+    // A crash may leave only the witness. Its complete verified record is the
+    // original publication evidence; recovery never consults mutable task delivery.
+    const retained = closureWitness(owner, probe);
+    if (retained.status === 'valid') {
+      personalPlan(owner, probe, input, entries);
+      const recovered = selection().ownerBoundary(owner, probe.milestone, () => {
+        const again = consumedEvidence(owner, probe), current = closureWitness(owner, probe);
+        if (current.status !== 'valid' || !same(current.record, retained.record) || again.startSha !== evidence.startSha
+            || current.record.closure.start_sha256 !== again.startSha || again.block !== evidence.block) fail('linked-task-closure-conflict', 'witness-changed');
+        const published = time().publishOwnerRecord({ cwd: owner, milestone: probe.milestone, path: recordPath('closure'), record: current.record.closure });
+        if (published.status === 'published') wrote = true;
+        point(input, 'after-closure');
+        if (personalApply(owner, probe, input, entries)) wrote = true;
+        return { status: published.status === 'published' ? 'closed' : 'unchanged', task_id: probe.task_id, milestone: probe.milestone,
+          closure_sha256: published.sha256, fingerprint: current.record.closure.fingerprint, criteria: current.record.closure.delivery.criteria };
+      });
+      if (recovered.status === 'deferred') fail('linked-task-boundary-deferred', recovered.reason);
+      return recovered;
+    }
     const proof = taskDeliveryProof(owner, probe.task_id, input.codeDir);
     personalPlan(owner, probe, input, entries);
     const result = selection().ownerBoundary(owner, probe.milestone, () => {
@@ -1331,6 +1387,10 @@ function closeLinkedTask(input = {}) {
       const record = { schema_version: HANDOFF_SCHEMA_VERSION, kind: KINDS.closure, milestone: probe.milestone, task_id: probe.task_id, link_sha256: probe.link_sha256,
         start_sha256: again.startSha, summary: delivered.summary, delivery: delivered.delivery, closed_at: new Date(now).toISOString(), fingerprint: delivered.delivery.fingerprint,
         ...(clock ? { clock } : {}) };
+      const witnessed = time().publishLinkedTaskClosureWitness({ cwd: owner, milestone: probe.milestone, taskId: probe.task_id,
+        codeDir: input.codeDir, now, expected_closure_sha256: digest(record) });
+      if (witnessed.status === 'published') wrote = true;
+      point(input, 'after-closure-witness');
       const current = time().readOwnerRecord({ cwd: owner, milestone: probe.milestone, path: recordPath('closure') });
       let published;
       if (current.status === 'valid' && closureValid(current.record) && same({ ...current.record, closed_at: null, clock: null }, { ...record, closed_at: null, clock: null })) published = { status: 'unchanged', sha256: current.sha256 };
@@ -1412,7 +1472,7 @@ function main(argv = process.argv.slice(2), io = process, liveAdapter) {
 }
 
 module.exports = { HANDOFF_SCHEMA_VERSION, LIFECYCLE_STATES, START_REFUSALS, BASE_KINDS, PREDECESSOR_REASONS, LIFECYCLE_REFUSALS, LINKED_DECISION_ACTIONS,
-  HANDOFF_MARKERS, HANDOFF_RECORD_FIELDS, linkedLifecycle, provePredecessor, produceHandoff, renderHandoffBlock, validateLinkedBase, startLinkedTask,
+  HANDOFF_MARKERS, HANDOFF_RECORD_FIELDS, closureWitnessValid, deriveClosureBasis, deriveClosureSnapshot, linkedLifecycle, provePredecessor, produceHandoff, renderHandoffBlock, validateLinkedBase, startLinkedTask,
   continueLinkedTask, consumedHandoffBlock, requireEntryDecisionsClear, closeChain, closeLinkedTask, prepareLinkedDecision, answerLinkedDecision, recordLinkedDecisionRound,
   deriveHandoffSnapshot, handoffSourceProjection: stableHandoff, handoffBindingMatches, main };
 if (require.main === module) process.exitCode = main();

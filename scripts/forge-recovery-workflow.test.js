@@ -117,7 +117,7 @@ async function runGroups(transitionOnly) {
   }
 }
 // Set isolation before loading modules which may cache preference sources.
-if (!['--isolated', '--restart-fixture', '--milestone-restart', '--transition-case', '--integration-only', '--transition-restart'].includes(process.argv[2])) {
+if (!['--isolated', '--restart-fixture', '--milestone-restart', '--transition-case', '--integration-only', '--transition-restart', '--context-native-restart', '--context-exhaustion-restart'].includes(process.argv[2])) {
   runGroups(process.argv[2] === '--transition-only').catch(error => { console.error(error); process.exitCode = 1; });
 } else {
 const prep = require('./forge-task-preparation');
@@ -195,9 +195,24 @@ async function restart(file) {
     started_at: initial.started_at, sidecar_ceiling: result.sidecar_ceiling, worker_mode: result.route.worker_mode }));
 }
 async function transitionRestart(file) {
+  // Context exercises two distinct operations. Each retains120000ms; the
+  // accumulated nested envelope is now at most240000ms, under the unchanged
+  // global300000ms group watchdog. Serialized state crosses the boundary.
+  const contextPhase = process.argv[2] === '--context-native-restart' ? 'native'
+    : process.argv[2] === '--context-exhaustion-restart' ? 'exhaustion' : null;
   const h = require('./forge-recovery-transition.test');
   const f = JSON.parse(fs.readFileSync(file)); f.binding = h.authority(f);
   f.originalReceipt = Buffer.from(f.originalReceipt); if (f.originalEvents) f.originalEvents = Buffer.from(f.originalEvents);
+  let priorNative;
+  if (contextPhase) {
+    assert.equal(f.standalone, undefined); assert.equal(f.signed, undefined);
+    assert.equal(f.expectedModel, 'gpt-6-astra'); assert.equal(f.expectedEffort, 'max');
+  }
+  if (contextPhase === 'exhaustion') {
+    priorNative = JSON.parse(fs.readFileSync(file + '.native-proof'));
+    assert.equal(priorNative.action, 'invoke'); assert.equal(priorNative.calls, 1);
+    assert.notEqual(priorNative.pid, process.pid, 'exhaustion must load the native successor from another OS process');
+  }
   let calls = 0;
   const runtime = { invokeNative: async (requestOrArgs, invocation) => {
     calls++;
@@ -207,21 +222,25 @@ async function transitionRestart(file) {
     return f.standalone ? `---GSD-WORKER-RESULT---\nstatus: partial\nresult_json: ${JSON.stringify({
       status: 'partial', summary: 'Synthetic new attempt, no publication.', questions: [], artifacts: [] })}\n---END-RESULT---` : { fixture: true };
   } };
-  if (f.questionEvidence) {
+  if (f.questionEvidence && contextPhase !== 'exhaustion') {
     const evidence = f.questionEvidence; delete f.questionEvidence;
     await assert.rejects(h.recoverPublic(f, { resumeReservation: { sha256: f.reservation } }, runtime), /question-history-unproved/);
     assert.equal(calls, 0); f.questionEvidence = evidence;
   }
-  const result = await h.recoverPublic(f, f.reservation ? { resumeReservation: { sha256: f.reservation } } : {}, runtime);
+  const result = contextPhase === 'exhaustion' ? priorNative
+    : await h.recoverPublic(f, f.reservation ? { resumeReservation: { sha256: f.reservation } } : {}, runtime);
   if (f.signed) {
     assert.equal(result.action, 'replay'); assert.equal(result.result.provider_called, false); assert.equal(calls, 0);
     assert(fs.existsSync(path.join(f.request.contextRoot, unit.locations(f.request).required[0])));
   } else {
+    if (contextPhase !== 'exhaustion') {
     assert.equal(result.action, 'invoke'); assert.equal(calls, 1); assert.equal(result.sidecar_ceiling, null); assert(!Object.hasOwn(result, 'sidecar_remaining_ms'));
     assert(!fs.existsSync(path.join(f.request.contextRoot, unit.locations(f.request).required[0])), 'disposition cannot publish the old candidate');
     const saved = h.assertHistoryPreserved(f);
     assert.equal(saved.reservations.length, 1); assert.equal(saved.transitions.length, 1);
     if (f.questionEvidence) assert.deepEqual(saved.pending_questions, f.questionEvidence);
+    }
+    if (contextPhase !== 'native') {
     // v2 (no cumulative clock): once the native destination is tried, each untried
     // sidecar of the finite chain is still eligible with the tier ceiling; the
     // recovery terminates with recovery-candidates-exhausted, never by a clock.
@@ -240,7 +259,7 @@ async function transitionRestart(file) {
       }
     } finally { xllm.invokeClaudeTransport = transport; }
     const ceilings = require('./forge-worker-timeout');
-    assert.equal(calls, 1, 'native destination is not retried');
+    assert.equal(calls, contextPhase === 'exhaustion' ? 0 : 1, 'native destination is not retried');
     assert.equal(outcomes.at(-1).action, 'stop'); assert.equal(outcomes.at(-1).reason_code, 'recovery-candidates-exhausted');
     assert(!outcomes.some(row => row.reason_code === 'recovery-deadline-exhausted'), JSON.stringify(outcomes));
     if (f.standalone) {
@@ -266,9 +285,10 @@ async function transitionRestart(file) {
     if (heldEvents) assert(grownEvents.subarray(0, heldEvents.length).equals(heldEvents), 'owner events are append-only');
     if (heldEvents) f.originalEvents = grownEvents;
     h.assertHistoryPreserved(f); f.originalEvents = heldEvents;
+    }
   }
   assert.deepEqual(fs.readFileSync(f.receiptFile), f.originalReceipt);
-  write(file + '.proof', JSON.stringify({ pid: process.pid, calls, action: result.action }));
+  write(file + (contextPhase === 'native' ? '.native-proof' : '.proof'), JSON.stringify({ pid: process.pid, calls, action: result.action, ...(priorNative ? { native_pid: priorNative.pid, native_calls: priorNative.calls } : {}) }));
 }
 async function transitionWorkflow(selected) {
   const h = require('./forge-recovery-transition.test'), transition = require('./forge-recovery-transition');
@@ -399,7 +419,12 @@ async function transitionWorkflow(selected) {
     h.assertHistoryPreserved(f);
     const saved = path.join(f.dir, 'context-transition-restart.json');
     write(saved, JSON.stringify({ ...f, binding: undefined, cleanup: undefined, originalReceipt: [...f.originalReceipt] }));
-    child([__filename, '--transition-restart', saved], process.env);
+    child([__filename, '--context-native-restart', saved], process.env);
+    child([__filename, '--context-exhaustion-restart', saved], process.env);
+    const nativeProof = JSON.parse(fs.readFileSync(saved + '.native-proof')), exhaustionProof = JSON.parse(fs.readFileSync(saved + '.proof'));
+    assert.equal(nativeProof.calls, 1); assert.equal(exhaustionProof.calls, 0); assert.equal(exhaustionProof.native_calls, 1);
+    assert.notEqual(nativeProof.pid, process.pid); assert.notEqual(exhaustionProof.pid, process.pid);
+    assert.equal(exhaustionProof.native_pid, nativeProof.pid); assert.notEqual(nativeProof.pid, exhaustionProof.pid);
     const state = h.assertHistoryPreserved(f), record = JSON.parse(fs.readFileSync(state.transitions[0].path));
     assert.equal(record.resolution.original.tier, 'heavy'); assert.equal(record.resolution.original.effort, 'high');
     assert.equal(record.resolution.effective.tier, 'max'); assert.equal(record.resolution.effective.effort, 'max');
@@ -409,7 +434,7 @@ async function transitionWorkflow(selected) {
   } finally { f.cleanup(); }
 }
 async function main() {
-  if (process.argv[2] === '--transition-restart') return transitionRestart(process.argv[3]);
+  if (['--transition-restart', '--context-native-restart', '--context-exhaustion-restart'].includes(process.argv[2])) return transitionRestart(process.argv[3]);
   if (process.argv[2] === '--transition-only') return transitionWorkflow();
   if (process.argv[2] === '--restart-fixture') return restart(process.argv[3]);
   if (process.argv[2] === '--milestone-restart') {

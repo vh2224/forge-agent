@@ -869,10 +869,11 @@ try {
     pass('endpoint-at-cap-unknown-census-status');
   }
 
-  // ---- Truth 7 (part): only sliceClosure is a new controller export; clock adds two.
+  // ---- Truth 7 (part): endpoint adds sliceClosure; ownership adds withOwnerBoundary; clock adds two.
+  assert.equal(typeof controller.withOwnerBoundary, 'function', 'the reviewed owner boundary remains an actual callable seam');
   assert.deepEqual(Object.keys(controller), ['PROTOCOL_VERSION', 'BOUNDARY_KINDS', 'ACTIONS', 'PHASES', 'REASON_CODES', 'TIME_ADMISSION_CODES', 'ControllerError',
     'selectNextUnit', 'discoverInventory', 'select', 'begin', 'transition', 'persistResult', 'complete', 'pause', 'fail', 'expireSafe', 'resume', 'handoff',
-    'pendingTransactions', 'projectLogicalHistory', 'logicalState', 'resolvePrefs', 'transactionDir', 'resultDir', 'boundaryDir', 'eventsFile', 'transactionFile',
+    'withOwnerBoundary', 'pendingTransactions', 'projectLogicalHistory', 'logicalState', 'resolvePrefs', 'transactionDir', 'resultDir', 'boundaryDir', 'eventsFile', 'transactionFile',
     'resultFile', 'boundaryFile', 'readEvents', 'readJson', 'writeAtomic', 'lookupRecord', 'preflightPaths', 'consumeFailure', 'reenter', 'failureProjection',
     'validateLinkedEntry', 'validateTerminalLinkedEntry', 'sliceClosure', 'dependencies']);
   assert.deepEqual(Object.keys(clock), ['CLOCK_POLICY', 'FORECAST_POLICY', 'DELIVERY_PROOF_MODES', 'computeClock', 'readClock', 'readDeliveries',

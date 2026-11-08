@@ -204,14 +204,14 @@ function runHookPostToolUse(root, sessionId) {
 
 test('two logical units sharing the bare unitId T01 (different milestone axis) write to distinct files', () => {
   const root = mkWorkspace();
-  fs.mkdirSync(path.join(root, '.gsd', 'milestones', 'M-AAAA'), { recursive: true });
-  fs.mkdirSync(path.join(root, '.gsd', 'milestones', 'M-BBBB'), { recursive: true });
+  fs.mkdirSync(path.join(root, '.gsd', 'milestones', 'M001'), { recursive: true });
+  fs.mkdirSync(path.join(root, '.gsd', 'milestones', 'M002'), { recursive: true });
   writeRun(root, {
-    id: 'M-AAAA', kind: 'milestone', active: true, session_id: 'sess-A',
+    id: 'M001', kind: 'milestone', active: true, session_id: 'sess-A', host_runtime: 'claude',
     worker: 'execute-task/T01', worker_slice: 'S01', started_at: Date.now(),
   });
   writeRun(root, {
-    id: 'M-BBBB', kind: 'milestone', active: true, session_id: 'sess-B',
+    id: 'M002', kind: 'milestone', active: true, session_id: 'sess-B', host_runtime: 'claude',
     worker: 'execute-task/T01', worker_slice: 'S02', started_at: Date.now(),
   });
 

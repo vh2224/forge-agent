@@ -9,16 +9,22 @@ const readBytes=file=>{const stat=fs.lstatSync(file);if(!stat.isFile()||stat.isS
 function create({request,timeoutMs,reference,assertAuthority,assertBoundary,attestStoppedWriter,attestFailure,lease,ownerVerificationEvents}={}){
   if([assertAuthority,assertBoundary,attestStoppedWriter,attestFailure].some(fn=>typeof fn!=='function')||typeof reference!=='string'||!reference.trim()||reference.length>512)fail('verification-successor-live-authority-required');
   const r=structuredClone(request),side=require('./forge-unit-sidecar'),recovery=require('./forge-attempt-recovery'),verify=require('./forge-verify');
-  if(r.scope!=='milestone'||r.unitType!=='execute-task'||r.route?.worker_mode!=='sidecar'||r.linked_begin_key)fail('verification-successor-scope-unsupported');
+  const standalone=r.scope==='standalone-task';
+  if(!['milestone','standalone-task'].includes(r.scope)||r.unitType!=='execute-task'||r.route?.worker_mode!=='sidecar'||r.linked_begin_key)fail('verification-successor-scope-unsupported');
+  if(standalone&&(lease!==undefined||require('./forge-linked-task').linkedTaskFor(r.contextRoot,r.taskId)!==null))fail('verification-successor-scope-unsupported');
   side.validateRecoveryRequest(r);
   const parentFile=r.resultFile+'.receipt.json',parentBytes=readBytes(parentFile),parent=JSON.parse(parentBytes),outputBytes=readBytes(r.resultFile),output=JSON.parse(outputBytes);
-  if(parent.phase!=='executed'||parent.result?.status!=='done'||!parent.milestone_delivery||parent.execution
+  const deliveryKey=standalone?'execution':'milestone_delivery',otherKey=standalone?'milestone_delivery':'execution',saved=parent[deliveryKey];
+  if(parent.phase!=='executed'||parent.result?.status!=='done'||!saved||typeof saved!=='object'||Array.isArray(saved)||Object.hasOwn(parent,otherKey)
+    ||standalone&&roots.digest(saved.execution_contract)!==roots.digest(r.execution_contract)
     ||parent.dispatch_id!==r.dispatchId||parent.fingerprint!==side.artifactFingerprint(r)
     ||parent.recovery_identity_sha256!==roots.digest(recovery.requestIdentity(recovery.canonicalRequest(r)))
     ||output.status!=='adapter-failed'||output.dispatch_id!==r.dispatchId||output.reason_code!=='execution-verification-failed')fail('verification-successor-parent-binding');
   const baseline=parent.recovery_baseline;
   if(!baseline||baseline.schema_version!==1||baseline.dispatch_id!==r.dispatchId||baseline.fingerprint!==parent.fingerprint
     ||roots.digest(baseline.execution_contract)!==roots.digest(r.execution_contract))fail('verification-successor-baseline-binding');
+  if(standalone&&(!saved.inputs||typeof saved.inputs!=='object'||Array.isArray(saved.inputs)||!Object.keys(saved.inputs).length
+    ||path.resolve(parent.reset_state_file||'')!==path.resolve(baseline.state_file)))fail('verification-successor-baseline-binding');
   recovery.validateStateTarget(baseline.state_file,r,r.execution_contract);
   const stateBytes=readBytes(baseline.state_file),state=require('./forge-surgical-reset').readState(baseline.state_file);
   const {reconciliation,...stateBody}=state;
@@ -37,7 +43,10 @@ function create({request,timeoutMs,reference,assertAuthority,assertBoundary,atte
     ||typeof observation.reference!=='string'||!observation.reference.trim()||observation.reference.length>512||!Number.isInteger(observation.check_index)||observation.check_index<0
     ||!command||observation.command_sha256!==hash(command))fail('verification-successor-timeout-observation-required');
   if(parent.delivery_capture){const check=parent.delivery_capture.gate?.roots.find(row=>row.root_id===observation.root_id)?.result.checks[observation.check_index];if(parent.delivery_capture.passed!==false||check?.exitCode!==124)fail('verification-successor-failure-capture-mismatch');}
-  const originalOwner=parent.milestone_delivery.protected_owner,leaseApi=require('./forge-unit-lease'),unit=r.unitType+'/'+r.taskId;
+  const originalOwner=saved.protected_owner,leaseApi=require('./forge-unit-lease'),unit=r.unitType+'/'+r.taskId;
+  if(!originalOwner||typeof originalOwner!=='object'||Array.isArray(originalOwner))fail('verification-successor-parent-binding');
+  if(standalone&&(!Array.isArray(baseline.protected_roots)||baseline.protected_roots.length!==r.execution_contract.code_roots.length
+    ||r.execution_contract.code_roots.some(root=>baseline.protected_roots.filter(row=>row.root_id===root.id&&row.path===root.path).length!==1)))fail('verification-successor-baseline-binding');
   const eventsRelative='.gsd/forge/events.jsonl',eventsFile=path.join(r.contextRoot,eventsRelative),eventsBytes=readBytes(eventsFile);
   let eventEvidence=null;
   if(hash(eventsBytes)!==originalOwner[eventsRelative]){
@@ -54,8 +63,10 @@ function create({request,timeoutMs,reference,assertAuthority,assertBoundary,atte
     if(observed?.observed!==true||typeof observed.reference!=='string'||!observed.reference.trim()||observed.reference.length>512)fail('verification-successor-diagnostic-events-attestation-required');
     eventEvidence={kind:'owner-diagnostic-verification-events',reference:observed.reference,...challenge};
   }
-  const leaseFile=leaseApi.leaseFile(r.contextRoot,unit),relative=path.relative(r.contextRoot,leaseFile).replace(/\\/g,'/'),currentLeaseBytes=readBytes(leaseFile),currentLease=JSON.parse(currentLeaseBytes);
-  let leaseEvidence=null;
+  let leaseFile=null,relative=null,currentLeaseBytes=null,leaseEvidence=null;
+  if(!standalone){
+  leaseFile=leaseApi.leaseFile(r.contextRoot,unit);relative=path.relative(r.contextRoot,leaseFile).replace(/\\/g,'/');currentLeaseBytes=readBytes(leaseFile);
+  const currentLease=JSON.parse(currentLeaseBytes);
   if(originalOwner[relative]!==hash(currentLeaseBytes)){
     if(!Buffer.isBuffer(lease?.originalBytes)||hash(lease.originalBytes)!==originalOwner[relative])fail('verification-successor-original-lease-required');
     const old=JSON.parse(lease.originalBytes),nonClock=x=>Object.fromEntries(Object.entries(x).filter(([key])=>!['heartbeat_at','expires_at'].includes(key)));
@@ -63,14 +74,20 @@ function create({request,timeoutMs,reference,assertAuthority,assertBoundary,atte
       ||roots.digest(nonClock(old))!==roots.digest(nonClock(currentLease))||currentLease.heartbeat_at<old.heartbeat_at||currentLease.expires_at<old.expires_at||currentLease.heartbeat_at>Date.now())fail('verification-successor-lease-binding');
     leaseEvidence={kind:'same-owner-lease-clock-reconciliation',path:relative,original_sha256:hash(lease.originalBytes),current_sha256:hash(currentLeaseBytes),allowed_fields:['heartbeat_at','expires_at']};
   }
+  }
   const inputs=[r.planFile,r.contextFile,r.securityFile,r.researchFile,r.roadmapFile,r.promptFile].filter(Boolean).map(file=>({file,sha256:hash(readBytes(file))}));
   const check=()=>{
     side.validateRecoveryRequest(r);
     assertAuthority();assertBoundary();if(attestStoppedWriter()!==true)fail('verification-successor-writer-not-stopped');
-    if(hash(readBytes(parentFile))!==hash(parentBytes)||hash(readBytes(r.resultFile))!==hash(outputBytes)||hash(readBytes(leaseFile))!==hash(currentLeaseBytes)
+    if(standalone){
+      if(require('./forge-linked-task').linkedTaskFor(r.contextRoot,r.taskId)!==null)fail('verification-successor-scope-unsupported');
+      execution.assertReplay(r,parent);
+      for(const row of baseline.protected_roots)if(path.resolve(row.path)!==path.resolve(r.contextRoot))execution.assertProtected(row.path,row.snapshot);
+    }
+    if(hash(readBytes(parentFile))!==hash(parentBytes)||hash(readBytes(r.resultFile))!==hash(outputBytes)||!standalone&&hash(readBytes(leaseFile))!==hash(currentLeaseBytes)
       ||hash(readBytes(baseline.state_file))!==hash(stateBytes)||hash(readBytes(eventsFile))!==hash(eventsBytes)
       ||inputs.some(row=>hash(readBytes(row.file))!==row.sha256)||roots.digest(require('./forge-runs').get(r.contextRoot,r.runId)?.write_claim)!==roots.digest(r.claim)
-      ||roots.digest(execution.replayState(r.cwd,r.execution_contract))!==roots.digest(parent.milestone_delivery.code_state))fail('verification-successor-source-changed');
+      ||!standalone&&roots.digest(execution.replayState(r.cwd,r.execution_contract))!==roots.digest(saved.code_state))fail('verification-successor-source-changed');
     roots.validateContract(r.execution_contract,{owner:r.contextRoot,revalidate:true});
   };
   check();
@@ -89,7 +106,8 @@ function create({request,timeoutMs,reference,assertAuthority,assertBoundary,atte
     }
   };
   const expectedOwner=(record,expected)=>{
-    assertRecord(record);if(expected[relative]!==originalOwner[relative]||expected[eventsRelative]!==originalOwner[eventsRelative])fail('verification-successor-owner-baseline-changed');return {...expected,[relative]:hash(currentLeaseBytes),[eventsRelative]:hash(eventsBytes)};
+    assertRecord(record);if(expected[eventsRelative]!==originalOwner[eventsRelative]||!standalone&&expected[relative]!==originalOwner[relative])fail('verification-successor-owner-baseline-changed');
+    return {...expected,...(!standalone?{[relative]:hash(currentLeaseBytes)}:{}),[eventsRelative]:hash(eventsBytes)};
   };
   const capability=Object.freeze({});records.set(capability,{request_digest:roots.digest(r),check,assertRecord,expectedOwner,seal,info,receiptFile,resultFile,seed,used:false});return capability;
 }

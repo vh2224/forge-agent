@@ -114,7 +114,10 @@ function normalizeAbsolutePaths(content, contract) {
   contract = validateContract(contract, { revalidate: true });
   // Rewrite only path-bearing fields. Truths and prose are never interpreted as
   // authority and are byte-preserved, including quoted absolute examples.
-  const fields = must.parseExecutionFields(content), parsed = must.parseMustHaves(content), mapping = [];
+  // This one migration boundary needs the structural declarations before paths
+  // become relative. The measured contract above authorizes conversion; resolvePath
+  // checks each absolute declaration and validatePlan below admits the WHOLE output.
+  const fields = must.parseExecutionFields(content), parsed = must.parseMustHavesStructure(content), mapping = [];
   const v2 = contract.code_roots.length > 1 || fields.roots_schema !== undefined;
   const convert = value => {
     if (typeof value !== 'string') fail('migration-path-invalid');

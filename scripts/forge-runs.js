@@ -220,6 +220,83 @@ function resolveBySessionId(cwd, sessionId) {
   return listActive(cwd).find(r => r.session_id === sessionId) || null;
 }
 
+// Host identity is observed only from this process, never selected from a run.
+function observeHostSession(hostRuntime, expectedSession) {
+  if (hostRuntime === 'claude') {
+    const value = process.env.FORGE_CLAUDE_OWNER_SESSION_ID;
+    return process.env.FORGE_CLAUDE_OWNER_SOURCE === 'claude-sessionstart-env-v1'
+      && typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/.test(value)
+      && expectedSession === value ? { sessionId: value, hostRuntime: 'claude', source: 'claude-sessionstart-env-v1' } : null;
+  }
+  if (hostRuntime !== 'codex') return null;
+  for (const source of ['CODEX_THREAD_ID', 'CODEX_SESSION_ID']) {
+    const value = process.env[source];
+    if (typeof value === 'string' && value.trim() && value.length <= 1024 && !/[\r\n\0]/.test(value)) return { sessionId: value, hostRuntime: 'codex', source };
+  }
+  return null;
+}
+
+function validSessionOwner(owner) {
+  return !!owner && typeof owner.sessionId === 'string' && owner.sessionId.trim() !== '' && ['claude', 'codex'].includes(owner.hostRuntime);
+}
+
+function matchesSessionOwner(record, owner) {
+  return validSessionOwner(owner) && record?.active === true && record.session_id === owner.sessionId && record.host_runtime === owner.hostRuntime;
+}
+
+function resolveBySessionOwner(cwd, owner) {
+  if (!validSessionOwner(owner)) return null;
+  const census = boundedCensus(cwd);
+  if (census.unparseable.length) return null;
+  const matches = census.parsed.filter(record => matchesSessionOwner(record, owner));
+  return matches.length === 1 && typeof matches[0].id === 'string' && ids.isValid(matches[0].id) ? matches[0] : null;
+}
+
+function bumpOwnedHeartbeat(cwd, id, owner, timestamp, guard) {
+  const now = timestamp === undefined ? Date.now() : timestamp;
+  if (!validSessionOwner(owner) || !ids.isValid(id) || !Number.isSafeInteger(now) || now <= 0) return { updated: false, record: null };
+  // The trusted caller supplies its observed host/session, not a serialized
+  // authorization. Recheck both axes and uniqueness INSIDE the existing mutex.
+  return updateWith(cwd, id, current => {
+    if (!matchesSessionOwner(current, owner) || resolveBySessionOwner(cwd, owner)?.id !== id) return null;
+    if (Number.isFinite(current.last_heartbeat) && now <= current.last_heartbeat) return null;
+    return { last_heartbeat: now };
+  }, guard);
+}
+
+function registryPresent(cwd) {
+  try { fs.lstatSync(runsDir(cwd)); return true; }
+  catch (error) { return error.code !== 'ENOENT'; }
+}
+
+function legacyOwnedRecord(cwd, owner) {
+  if (!validSessionOwner(owner) || registryPresent(cwd)) return null;
+  try {
+    const root = fs.realpathSync.native(cwd), file = path.join(root, '.gsd', 'forge', ALIAS_FILE);
+    for (const relative of ['.gsd', '.gsd/forge', '.gsd/forge/' + ALIAS_FILE]) {
+      const stat = fs.lstatSync(path.join(root, relative));
+      if (stat.isSymbolicLink() || (relative.endsWith(ALIAS_FILE) ? !stat.isFile() || stat.size > 65536 : !stat.isDirectory())) return null;
+    }
+    const read = require('./forge-autonomy-sources').readBoundedStableFile(file, 65536, { expectedReal: fs.realpathSync.native(file) });
+    if (read.error) return null;
+    const record = JSON.parse(read.buffer.toString('utf8'));
+    return matchesSessionOwner(record, owner) ? record : null;
+  } catch { return null; }
+}
+
+function bumpLegacyOwnedHeartbeat(cwd, owner, timestamp) {
+  const now = timestamp === undefined ? Date.now() : timestamp;
+  if (!Number.isSafeInteger(now) || now <= 0 || !legacyOwnedRecord(cwd, owner)) return false;
+  // add/update share this fence: a newly created registry cannot race a legacy
+  // alias write. An absent/mismatched identity never creates even the mutex.
+  return withRegistryFence(cwd, () => {
+    const record = legacyOwnedRecord(cwd, owner);
+    if (!record || Number.isFinite(record.last_heartbeat) && now <= record.last_heartbeat) return false;
+    writeAtomic(path.join(cwd, '.gsd', 'forge', ALIAS_FILE), { ...record, last_heartbeat: now });
+    return true;
+  });
+}
+
 function oldestActive(cwd) {
   const active = listActive(cwd);
   if (active.length === 0) return null;
@@ -500,6 +577,126 @@ Run record migrated by forge-runs.js on ${nowIso}. Legacy single-run STATE.md wa
 }
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
+
+// Explicit resume is a different operation from an ordinary targeted update.
+// Its flags are trusted-caller attestations, like claim-recovery's flags; they
+// are not OS observations and cannot be inferred from inactive/age/imported JSON.
+function resumeError(reason) { return Object.assign(new Error(reason), { code: reason }); }
+function resumeDigest(bytes) { return require('crypto').createHash('sha256').update(bytes).digest('hex'); }
+function resumeRecord(cwd, id) {
+  if (typeof id !== 'string' || !ids.isValid(id)) throw resumeError('owner-resume-id-invalid');
+  for (const relative of ['.gsd','.gsd/forge','.gsd/forge/runs']) {
+    const stat = fs.lstatSync(path.join(cwd,relative));
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw resumeError('owner-resume-registry-unknown');
+  }
+  const census = boundedCensus(cwd);
+  if (census.unparseable.length || census.parsed.filter(row => row.id === id).length !== 1) throw resumeError('owner-resume-registry-unknown');
+  const file = runFile(cwd, id);
+  const read = require('./forge-autonomy-sources').readBoundedStableFile(file, 65536, { expectedReal: fs.realpathSync.native(file) });
+  if (read.error) throw resumeError('owner-resume-record-unknown');
+  let record; try { record = JSON.parse(read.buffer.toString('utf8')); } catch { throw resumeError('owner-resume-record-unknown'); }
+  if (record.id !== id || !['milestone','task'].includes(record.kind)) throw resumeError('owner-resume-record-unknown');
+  return { record, sha256: resumeDigest(read.buffer) };
+}
+function observedResumeOwner(options) {
+  const observed = observeHostSession(options.hostRuntime, options.expectedSession);
+  if (!observed || options.expectedSession !== undefined && observed.sessionId !== options.expectedSession) throw resumeError('owner-session-unavailable');
+  return observed;
+}
+function knownResumeBinding(record) {
+  return typeof record.active === 'boolean' && typeof record.session_id === 'string' && record.session_id.trim() !== ''
+    && (record.host_runtime === 'codex' && record.session_id.length <= 1024 && !/[\r\n\0]/.test(record.session_id)
+      && ['CODEX_THREAD_ID','CODEX_SESSION_ID'].includes(record.owner_session_source)
+      || record.host_runtime === 'claude' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/.test(record.session_id)
+      && record.owner_session_source === 'claude-sessionstart-env-v1');
+}
+function inspectOwnerResume(cwd, id, options = {}) {
+  const observed = observedResumeOwner(options), current = resumeRecord(cwd, id), record = current.record;
+  if (!knownResumeBinding(record)) throw resumeError('owner-resume-binding-unknown');
+  const same = record.session_id === observed.sessionId && record.host_runtime === observed.hostRuntime;
+  return { status: same ? record.active === true ? 'same-owner-active' : 'same-owner-inactive' : 'transfer-required',
+    record_sha256: current.sha256, current_host: observed.hostRuntime,
+    previous_host: record.host_runtime, previous_session_sha256: resumeDigest(record.session_id),
+    required_attestations: same ? record.active === true ? [] : ['workspace-quiescent'] : ['owner-stopped','workspace-quiescent'],
+    attestation_is_os_proof: false };
+}
+function assertResumeQuiescence(cwd, record, nextHost, noLeases) {
+  const controller = require('./forge-unit-controller');
+  const empty = directory => {
+    let handle;
+    try { const stat = fs.lstatSync(directory); if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
+      handle = fs.opendirSync(directory); return handle.readSync() === null;
+    } catch (error) { return error.code === 'ENOENT' && !handle; }
+    finally { if (handle) handle.closeSync(); }
+  };
+  if (!noLeases()) throw resumeError('owner-resume-lease-present');
+  const transactions = controller.transactionDir(cwd);
+  try {
+    const stat = fs.lstatSync(transactions);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw resumeError('owner-resume-transactions-unknown');
+    for (const name of fs.readdirSync(transactions)) {
+      const entry = fs.lstatSync(path.join(transactions,name));
+      if (!name.endsWith('.json') || !entry.isFile() || entry.isSymbolicLink()) throw resumeError('owner-resume-transactions-unknown');
+    }
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (controller.pendingTransactions(cwd).length) throw resumeError('owner-resume-transaction-pending');
+  if (require('./forge-write-claim').isHeld(record.write_claim)) throw resumeError('owner-resume-claim-held');
+  if (record.worker || record.worker_started) throw resumeError('owner-resume-worker-unreconciled');
+  // Legacy file locks and unreadable/debris entries cannot prove quiescence.
+  if (!empty(path.join(cwd, '.gsd/forge/file-locks'))) throw resumeError('owner-resume-file-lock-present');
+  if (record.kind !== 'milestone') throw resumeError('owner-resume-boundary-required');
+  const eventsFile = controller.eventsFile(cwd, record.id);
+  const eventBytes = fs.existsSync(eventsFile) ? fs.readFileSync(eventsFile) : Buffer.alloc(0);
+  const intervals = require('./forge-phase-cost').analyzeEventIntervals(eventBytes);
+  if (intervals.open.length || intervals.ambiguous.length || intervals.milestones.some(id => id !== record.id)) throw resumeError('owner-resume-history-unreconciled');
+  const events = controller.readEvents(eventsFile);
+  const terminal = events.filter(event => ['complete','pause','fail','expired-safe'].includes(event.action)).at(-1);
+  if (!terminal) throw resumeError('owner-resume-boundary-required');
+  const handoff = controller.handoff(cwd, { unit: terminal.unit, next_host_runtime: nextHost });
+  if (!handoff.ok || handoff.milestone !== record.id) throw resumeError('owner-resume-boundary-required');
+  return { unit: handoff.unit, result_checksum: handoff.result_checksum, committed_at: handoff.committed_at };
+}
+function resumeOwner(cwd, id, options = {}) {
+  const observed = observedResumeOwner(options);
+  if (!/^[a-f0-9]{64}$/.test(options.expectedRecordSha256 || '')) throw resumeError('owner-resume-snapshot-required');
+  // Same lock order as canonical begin/terminal publication: controller,
+  // registry fence, run lock. Direct registry writers cannot change the snapshot
+  // and canonical new begin cannot interleave the final quiescence recheck.
+  return require('./forge-unit-controller').withOwnerBoundary(cwd, boundaryGuard => {
+    return withRegistryFence(cwd, guard => {
+      const snapshot = resumeRecord(cwd, id), current = snapshot.record;
+      if (snapshot.sha256 !== options.expectedRecordSha256) throw resumeError('owner-resume-snapshot-changed');
+      if (!knownResumeBinding(current)) throw resumeError('owner-resume-binding-unknown');
+      const same = current.session_id === observed.sessionId && current.host_runtime === observed.hostRuntime;
+      if (same && current.active === true) return { status: 'unchanged', record: get(cwd,id) };
+      if (!same && options.confirmOwnerStopped !== true) throw resumeError('owner-resume-owner-stop-attestation-required');
+      if (options.confirmWorkspaceQuiescent !== true) throw resumeError('owner-resume-workspace-quiescent-attestation-required');
+      const boundary = assertResumeQuiescence(cwd, current, observed.hostRuntime, boundaryGuard.noLeases);
+      const history = current.owner_resume_history === undefined ? [] : current.owner_resume_history;
+      if (!Array.isArray(history)) throw resumeError('owner-resume-history-unknown');
+      const evidence = { at: new Date().toISOString(), previous_record_sha256: snapshot.sha256,
+        previous_session_sha256: resumeDigest(current.session_id), previous_host_runtime: current.host_runtime,
+        current_session_sha256: resumeDigest(observed.sessionId), current_host_runtime: observed.hostRuntime,
+        kind: same ? 'same-owner-reactivation' : 'stopped-owner-transfer', boundary,
+        workspace_quiescent_attested: true, previous_owner_stopped_attested: !same,
+        mechanism: 'trusted-caller-attestation-v1', os_process_death_proven: false };
+      const patch = { session_id: observed.sessionId, host_runtime: observed.hostRuntime,
+        owner_session_source: observed.source, active: true, last_heartbeat: Date.now(), owner_resume_history: [...history, evidence] };
+      if (Buffer.byteLength(JSON.stringify({ ...current, ...patch }, null, 2)) > 65536) throw resumeError('owner-resume-history-limit');
+      const result = updateWith(cwd, id, record => {
+        // Recheck after acquiring the run lock, preserving all claims, receipts,
+        // pending questions and unrelated metadata. No JSON supplies authority.
+        if (resumeRecord(cwd,id).sha256 !== options.expectedRecordSha256) throw resumeError('owner-resume-snapshot-changed');
+        const live = observedResumeOwner(options);
+        if (live.sessionId !== observed.sessionId || live.hostRuntime !== observed.hostRuntime || live.source !== observed.source) throw resumeError('owner-session-unavailable');
+        assertResumeQuiescence(cwd, record, observed.hostRuntime, boundaryGuard.noLeases);
+        return patch;
+      }, guard);
+      return { status: same ? 'reactivated' : 'transferred', record: result.record };
+    });
+  });
+}
+
 function parseArgs(argv) {
   const args = {};
   for (let i = 0; i < argv.length; i++) {
@@ -528,6 +725,10 @@ Flags:
         [--branch <git-branch>] [--root <root>] [--project <path>]          create
                            (address fields are recorded as given — never derived here;
                             see forge-run-address.js --address for resolution)
+  --inspect-owner-resume <id> --observed-owner --host-runtime claude|codex
+  --resume-owner <id> --observed-owner --host-runtime claude|codex --expected-record-sha256 <sha>
+       --confirm-workspace-quiescent [--confirm-owner-stopped]
+       trusted caller attestations after actual process/receipt/root reconciliation; not OS proof
   --update <id> --json <patch-json>                       update fields
   --remove <id>            delete record
   --bump <id>              bump last_heartbeat to now
@@ -543,7 +744,24 @@ Flags:
   }
 
   try {
-    if (args.list) {
+    const observedOwner = args['observed-owner'] ? observeHostSession(args['host-runtime'], args['expected-owner-session']) : null;
+    if (args['observed-owner'] && (!observedOwner || args.session && args.session !== observedOwner.sessionId)) throw new Error('owner-session-unavailable-or-mismatch');
+    if (args['inspect-owner-resume'] || args['resume-owner']) {
+      if (!args['observed-owner']) throw resumeError('owner-session-observation-required');
+      if (args.json !== undefined) throw resumeError('owner-resume-json-not-authority');
+      const allowed = new Set(['inspect-owner-resume','resume-owner','observed-owner','host-runtime','expected-owner-session','expected-record-sha256','confirm-owner-stopped','confirm-workspace-quiescent','cwd']);
+      if (args['inspect-owner-resume'] && args['resume-owner'] || Object.keys(args).some(key => !allowed.has(key))) throw resumeError('owner-resume-arguments-invalid');
+      const options = { hostRuntime: args['host-runtime'], expectedSession: args['expected-owner-session'],
+        expectedRecordSha256: args['expected-record-sha256'], confirmOwnerStopped: args['confirm-owner-stopped'] === true,
+        confirmWorkspaceQuiescent: args['confirm-workspace-quiescent'] === true };
+      const result = args['inspect-owner-resume'] ? inspectOwnerResume(cwd, args['inspect-owner-resume'], options)
+        : resumeOwner(cwd, args['resume-owner'], options);
+      process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+    } else if (args['owner-session']) {
+      const observed = observeHostSession(args['host-runtime'], args['expected-owner-session']);
+      if (!observed) throw new Error('owner-session-unavailable');
+      process.stdout.write(observed.sessionId + '\n');
+    } else if (args.list) {
       process.stdout.write(JSON.stringify(listAll(cwd), null, 2) + '\n');
     } else if (args['list-active']) {
       process.stdout.write(JSON.stringify(listActive(cwd), null, 2) + '\n');
@@ -569,7 +787,8 @@ Flags:
       const r = add(cwd, {
         id: args.id,
         kind: args.kind,
-        session_id: args.session,
+        session_id: observedOwner ? observedOwner.sessionId : args.session,
+        ...(observedOwner ? { host_runtime: observedOwner.hostRuntime, owner_session_source: observedOwner.source } : {}),
         isolation_mode: args['isolation-mode'] || 'shared',
         task_description: args['task-description'],
         account: (typeof args.account === 'string') ? args.account : (process.env.FORGE_ACCOUNT || null),
@@ -584,7 +803,18 @@ Flags:
       process.stdout.write(JSON.stringify(r, null, 2) + '\n');
     } else if (args.update) {
       const patch = args.json ? JSON.parse(args.json) : {};
-      const r = update(cwd, args.update, patch);
+      let r;
+      if (observedOwner) {
+        // This command has an explicit target: check that exact active owner,
+        // even when it owns another run. Reactivation/transfer use resumeOwner;
+        // implicit hook lookup remains ambiguity-sensitive.
+        const changed = updateWith(cwd, args.update, current => {
+          if (!matchesSessionOwner(current, observedOwner)) return null;
+          return { ...patch, session_id: observedOwner.sessionId, host_runtime: observedOwner.hostRuntime, owner_session_source: observedOwner.source };
+        });
+        if (!changed.updated) throw new Error('owner-session-binding-unknown-or-mismatch');
+        r = changed.record;
+      } else r = update(cwd, args.update, patch);
       process.stdout.write(JSON.stringify(r, null, 2) + '\n');
     } else if (args.remove) {
       remove(cwd, args.remove);
@@ -654,16 +884,17 @@ Flags:
   }
 }
 
-if (require.main === module) cliMain();
-
 module.exports = {
   listAll, listAllDetailed, boundedCensus, withRegistryFence, listActive, get,
   add, update, updateWith, remove,
   bumpHeartbeat, cleanupStale,
-  resolveBySessionId, oldestActive,
+  inspectOwnerResume, resumeOwner,
+  observeHostSession, resolveBySessionId, resolveBySessionOwner, bumpOwnedHeartbeat, bumpLegacyOwnedHeartbeat, oldestActive,
   refreshLegacyAlias, migrateLegacyState,
   withAddressDefaults,
   runsDir, runFile, writeAtomic, withRunLock, normalizeMetadataPatch,
   STALE_THRESHOLD_MS,
   ACTIVE_THRESHOLD_MS,
 };
+
+if (require.main === module) cliMain();

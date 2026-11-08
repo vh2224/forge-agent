@@ -418,9 +418,9 @@ Isolation rules (CRITICAL — the operator configured this; honor it):
 **Register in multi-run registry** (M004+) — only when initializing fresh (not on resume):
 ```bash
 if [ -z "$RESUME_MODE" ]; then
-  SESSION_ID="${CLAUDE_SESSION_ID:-$(node -e "process.stdout.write(require('crypto').randomBytes(8).toString('hex'))")}" 
+  SESSION_ID=$(node "$FORGE_SCRIPTS_DIR/forge-runs.js" --owner-session --host-runtime claude --expected-owner-session '${CLAUDE_SESSION_ID}') || { echo "owner-session-unavailable: current Claude host identity was not attested; stop before registration." >&2; exit 2; }
   WORKTREES_JSON=$(node -e "const r=JSON.parse(process.argv[1]);process.stdout.write(JSON.stringify((r.repos||[]).filter(x=>x.worktree&&x.status!=='error').map(x=>({repo:x.path,path:x.worktree}))))" "$ISO_RESULT")
-  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --add --id "$TASK_ID" --kind task --session "$SESSION_ID" --isolation-mode "$ISOLATION_MODE" --account "${FORGE_ACCOUNT:-}" --worktrees "$WORKTREES_JSON" --attached-to "${ATTACH_RUN:-}" --branch "${RUN_BRANCH:-}" --cwd "$(pwd)" --task-description "$TASK_DESCRIPTION" > /dev/null
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --add --observed-owner --host-runtime claude --expected-owner-session '${CLAUDE_SESSION_ID}' --id "$TASK_ID" --kind task --session "$SESSION_ID" --isolation-mode "$ISOLATION_MODE" --account "${FORGE_ACCOUNT:-}" --worktrees "$WORKTREES_JSON" --attached-to "${ATTACH_RUN:-}" --branch "${RUN_BRANCH:-}" --cwd "$(pwd)" --task-description "$TASK_DESCRIPTION" > /dev/null
   mkdir -p "$WORKING_DIR/.gsd/tasks/$TASK_ID"
   if ! node "$FORGE_SCRIPTS_DIR/forge-personal-context.js" --bind --project "$WORKING_DIR" --id "$TASK_ID" --intent create --json; then
     echo "Partial: run $TASK_ID exists, personal bind failed. Recover with --bind --intent explicit-resume for this ID." >&2

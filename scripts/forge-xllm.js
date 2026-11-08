@@ -2771,7 +2771,7 @@ async function runWriteContractCore(opts, contract) {
       claudeOutput = await invokeClaudeTransport({
         provisionalStoreRoot: opts.provisionalStoreRoot,
         onProgress: opts.onProgress, calibrationOptions: opts.calibrationOptions, calibrationOptions: opts.calibrationOptions,
-    onPackagedContext: opts.onPackagedContext, telemetryIdentity: opts.telemetryIdentity,
+    onPackagedContext: opts.onPackagedContext, onBeforeSpawn: opts.onBeforeSpawn, telemetryIdentity: opts.telemetryIdentity,
         telemetryRoute: opts.telemetryRoute, budgets: opts.executionContext?.budgets || opts.budgets,
         prompt,
         resultProfile: contract.mode === 'fix' ? 'fix' : 'execute',
@@ -3109,6 +3109,7 @@ async function runPlanCore(opts) {
   // dispatch report `no-transport-field` forever.
   const planOptions = {
     provisionalStoreRoot: opts.provisionalStoreRoot,
+    ...(engine === 'claude' ? { onBeforeSpawn: opts.onBeforeSpawn } : {}),
     onProgress: opts.onProgress, calibrationOptions: opts.calibrationOptions,
     onPackagedContext: opts.onPackagedContext, telemetryIdentity: opts.telemetryIdentity,
     telemetryRoute: opts.telemetryRoute, budgets: opts.budgets,

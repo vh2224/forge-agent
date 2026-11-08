@@ -234,3 +234,50 @@ Measured from base `ad62d774fc37ec6fcf5a85347d69eaf5c8a8c675` using the pure Cla
 | hooks | `c149db9dd45bed13f05931987217d224a6f23d805dc6e8900e46b32893a41c48` | `228bceb55413320b8f3b47564711989f454a841d9946ebdfde92f690b733ad1e` |
 
 The exact source and attributed hashes are recorded in `scripts/fixtures/entry-contracts/distribution-delta.json`; #341 remains an immutable earlier layer. Distribution proof does not establish provider/client execution or human acceptance.
+
+## Product artifact path contract (#348)
+
+Measured by the pure Claude renderer over the composed #348/#353 candidate based on
+`c91dfc77231a176892df72f56c0eefefbbd430be` (entry contracts plus required-result budget attribution).
+The immutable #347 fixture retains SHA-256 `ffb4476cd2ef7b7b8e44676a392e9a11607015fc38d349be9ae2a5fa0a8558a2`.
+Only the agents surface changes, through `agents/forge-planner.md`:
+
+- agents: `91dd5d2a3ece86df030fcf5e374041c3bb496da040baf3f3a2830445061c8c5e` to `5a340f4af8ad04071f5d3f39573f72e849c5e97a40e33364da787a14d2ef8de2`.
+- planner file: `45ceadf4a8299115a9a492a9beab4e4c83e29748ca68af03763144b5e904e4cb` to `21be82c7121303e915e0e1a4b490f6ced8c72baefeef55d4a231143cda278400`.
+
+The other eight active surface pins, all member identities, #341/#347 deltas and
+owner/historical captures remain unchanged. The bounded source/render evidence is
+recorded in `scripts/fixtures/artifact-contracts/distribution-delta.json`.
+This proves distribution only; it does not establish CI, release, installation,
+provider/client behavior or human acceptance.
+
+## Identity and lifecycle distribution
+
+Measured from artifact base `20ae504cbd4e546aaa49f9643955ded1062e67ce` plus the scoped identity producer diff.
+The three earlier delta files remain byte-identical. Only skills/hooks change;
+all rendered member identities and the other seven active pins stay unchanged.
+
+- hooks raw: `228bceb55413320b8f3b47564711989f454a841d9946ebdfde92f690b733ad1e` to `b7c42a1e5f13383c13d6099655bbd05481bf584c19d90ecf74a4bdefb99d5c36`; attributed: `228bceb55413320b8f3b47564711989f454a841d9946ebdfde92f690b733ad1e` to `b7c42a1e5f13383c13d6099655bbd05481bf584c19d90ecf74a4bdefb99d5c36`.
+- skills raw: `bcb38a84d24878be82872ebfd78f0b6461e1b11bdabcd5829e4181692b15aab4` to `ea8df89a439017a632388a99e813136c5c9277996d530494723ae144cef63f5c`; attributed: `78559130c1c543be186ebd14ab2a448c4612e080ff76dbabbe3e915bf10d7819` to `7f84746e6e9f73905ea343f1eb4c0c750e1af5016424399f14ae40fe02e808a4`.
+
+The historical T06 fresh-registration span retains its before anchor
+`b0d14d5ba51b0096922338482ad357c77a193e5af4097616fbdc469681ee7874` (1803 bytes); the attested-owner
+registration change measures `2bb749560c1dc907d9f1db882e78033ebe883c9b58a8609b6ea5cb4820ec52c7` (2037 bytes).
+The other three historical spans remain unchanged.
+
+The exact three source members and two sample citations are recorded in
+`scripts/fixtures/identity-lifecycle/distribution-delta.json`. This establishes
+distribution only; CI, review, release, installation and human acceptance remain
+separate facts.
+
+
+## Identity after maintenance correction 090bd42f9eb4
+
+Source/render remeasurement following maintenance corrections. Existing review receipts and historical captures remain separate.
+
+- hooks raw after: `b7c42a1e5f13383c13d6099655bbd05481bf584c19d90ecf74a4bdefb99d5c36`; attributed after: `b7c42a1e5f13383c13d6099655bbd05481bf584c19d90ecf74a4bdefb99d5c36`.
+- skills raw after: `f0d6e8f36cadc8c4f4c66d5e9a5b4da486b2843434af49d68d6875109d982f7c`; attributed after: `9655fa67054b852bcd29319efdff465b5a677ebdbf50a26eee9124befaea93d7`.
+
+Fresh-registration after: `2bb749560c1dc907d9f1db882e78033ebe883c9b58a8609b6ea5cb4820ec52c7` (2037 bytes).
+Immutable fixture348 SHA256: `d0d50a7cace922a0a5d4edb8668c64429d32c81c40d20eaf9d175d31ad95993f`.
+Exactly the same three source files and two surfaces remain in this layer. No CI, release, installation or human acceptance is asserted.

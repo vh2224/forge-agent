@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "kind": "identity-lifecycle-measured-distribution-delta",
+  "provenance": {
+    "base_revision": "20ae504cbd4e546aaa49f9643955ded1062e67ce",
+    "previous_delta": "scripts/fixtures/artifact-contracts/distribution-delta.json",
+    "method": "measured LF source bytes and pure Claude render of final artifact base plus identity producer diff; distribution proof only"
+  },
+  "surfaces": {
+    "hooks": {
+      "before": "228bceb55413320b8f3b47564711989f454a841d9946ebdfde92f690b733ad1e",
+      "after": "b7c42a1e5f13383c13d6099655bbd05481bf584c19d90ecf74a4bdefb99d5c36",
+      "attributed_before": "228bceb55413320b8f3b47564711989f454a841d9946ebdfde92f690b733ad1e",
+      "attributed_after": "b7c42a1e5f13383c13d6099655bbd05481bf584c19d90ecf74a4bdefb99d5c36"
+    },
+    "skills": {
+      "before": "bcb38a84d24878be82872ebfd78f0b6461e1b11bdabcd5829e4181692b15aab4",
+      "after": "f0d6e8f36cadc8c4f4c66d5e9a5b4da486b2843434af49d68d6875109d982f7c",
+      "attributed_before": "78559130c1c543be186ebd14ab2a448c4612e080ff76dbabbe3e915bf10d7819",
+      "attributed_after": "9655fa67054b852bcd29319efdff465b5a677ebdbf50a26eee9124befaea93d7"
+    }
+  },
+  "files": {
+    "scripts/forge-hook.js": {
+      "before": "1ab156ae4fd74c01c656ce3b378691a2ab126d39343f38d8a19e43ac1ef0a946",
+      "after": "9863e1271a8bf37a383c2f59042b4ba5595492f613743706ee9109fb58e494fb",
+      "attributed_before": "1ab156ae4fd74c01c656ce3b378691a2ab126d39343f38d8a19e43ac1ef0a946",
+      "attributed_after": "9863e1271a8bf37a383c2f59042b4ba5595492f613743706ee9109fb58e494fb"
+    },
+    "skills/forge-auto/SKILL.md": {
+      "before": "11bb75ddae971bbaa0deb2c5271a08a1df3896a132cb3b69bd5a4f554b108d8f",
+      "after": "9fcf35a50982903f413e11f9883c5ce73f838d4b7031bf65a72da250a1c1d094",
+      "attributed_before": "e248e1a60e0dfccc43b0d0fd0b2f8df78d8d1443571a730e664d843ad62deaa3",
+      "attributed_after": "f414a5b65c0c7285d9944c710989e8e495d2a40e0b3ba4da620deac82f153923"
+    },
+    "skills/forge-task/SKILL.md": {
+      "before": "2f3a10c2e2d906b77778077af83d00bb6578f124d92cee4b40b638e787593754",
+      "after": "109262eb2c60a498b7775527988b1b1b5a3b57b4a6ce3d890b83282f333dc854",
+      "attributed_before": "f85dce7a8bed7c53fd1253183c520f6017e52902b0e2d083ae0a587224269329",
+      "attributed_after": "e6114c0603df23f99697e6264d13d496427ef139f86f99c033209173b8bcedb5"
+    }
+  },
+  "retained_spans": {
+    "fresh_registration": {
+      "file": "skills/forge-task/SKILL.md",
+      "before": {
+        "bytes": 1803,
+        "sha256": "b0d14d5ba51b0096922338482ad357c77a193e5af4097616fbdc469681ee7874"
+      },
+      "after": {
+        "bytes": 2037,
+        "sha256": "2bb749560c1dc907d9f1db882e78033ebe883c9b58a8609b6ea5cb4820ec52c7"
+      }
+    }
+  },
+  "samples": {
+    "file": "docs/communication-evaluation/samples.json",
+    "before": "c0a3cdd57bc64ea98691f216712665013a52ee570fdf233ffe6c8c13b1e449ff",
+    "after": "0a0d5ccb39fc880642d6a338153ed0e91bc72f39f978bda94ddcddb9ce242f3c",
+    "nodes": [
+      {
+        "pointer": "/entries/1/supporting/timeline/after",
+        "file": "skills/forge-task/SKILL.md",
+        "before": "2f3a10c2e2d906b77778077af83d00bb6578f124d92cee4b40b638e787593754",
+        "after": "109262eb2c60a498b7775527988b1b1b5a3b57b4a6ce3d890b83282f333dc854"
+      },
+      {
+        "pointer": "/entries/5/supporting/timeline/after",
+        "file": "skills/forge-task/SKILL.md",
+        "before": "2f3a10c2e2d906b77778077af83d00bb6578f124d92cee4b40b638e787593754",
+        "after": "109262eb2c60a498b7775527988b1b1b5a3b57b4a6ce3d890b83282f333dc854"
+      }
+    ]
+  },
+  "unchanged_surfaces": [
+    "agents",
+    "claude-instructions",
+    "claude-settings",
+    "commands",
+    "configuration",
+    "dispatch-templates",
+    "mcp"
+  ]
+}

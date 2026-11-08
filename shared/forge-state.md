@@ -652,6 +652,24 @@ metadata for audit.
 
 ### Resume and recovery
 
+For a paused unfinished `execute-task`, `forge-long-workflow-adapter.js
+--command resume` receives `resume_intent: "execute"` in its JSON input and the
+same paused snapshot. This authorizes dispatch of that exact task/slice through
+the normal routing, claims and gates; it returns `dispatch_required` and retains
+the unit and step count. It does not write a successful completion. A response
+alone is refused with `execution-resume-intent-required`, and combining an
+execution intent and a result response is refused as ambiguous. Refusal keeps the
+paused snapshot available for a corrected resume.
+
+Only the later canonical `complete` call may finish that resumed task, after a
+genuine task delivery with complete independently captured source/verification
+evidence from the resumed begin. A claimed `status: done`, missing/invalid delivery
+or a capture from before that begin returns `execution-resume-delivery-required`.
+Committed and interrupted completion replay keeps its original historical proof;
+later mutable delivery sources do not rewrite it. Phases whose response itself
+is their result retain their existing answer-as-result resume behavior.
+
+
 `resume` enumerates only non-committed intents, reuses their idempotency keys,
 and re-enters the phase machine. It first observes the same lease generation;
 if the old generation was safely recovered, the caller must acquire a new

@@ -311,9 +311,50 @@ function readRecordJson(file) {
     throw new ControllerError('invalid-request', `registro JSON inválido: ${file}`, { cause: error.message });
   }
 }
+const ownerActivityLocks = new Map();
 function withMutex(cwd, name, fn) {
   const handle = forgeLock.acquireProcessSync(cwd, name, { retries: 80, ttlMs: 10_000 });
-  try { return fn(handle); } finally { handle.release(); }
+  const ownerBoundary = name === 'unit-controller-transactions', key = path.resolve(cwd);
+  if (ownerBoundary) ownerActivityLocks.set(key, handle);
+  try { return fn(handle); }
+  finally { if (ownerBoundary) ownerActivityLocks.delete(key); handle.release(); }
+}
+
+function noOwnerLeases(cwd) {
+    const directory = path.join(cwd, '.gsd', 'forge', 'leases'); let handle;
+    try {
+      const stat = fs.lstatSync(directory);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
+      handle = fs.opendirSync(directory); return handle.readSync() === null;
+    } catch (error) { return error.code === 'ENOENT' && !handle; }
+    finally { if (handle) handle.closeSync(); }
+}
+
+// The owner resume caller shares the controller's real publication fence and
+// exact fail-closed lease census. No raw mutex capability escapes this seam.
+function withOwnerBoundary(cwd, callback, options) {
+  resolvePrefs(cwd, options);
+  if (typeof callback !== 'function') throw new ControllerError('invalid-request', 'owner boundary callback required');
+  return withMutex(cwd, 'unit-controller-transactions', () => callback({ noLeases: () => noOwnerLeases(cwd) }));
+}
+
+function recordOwnerBoundaryActivity(cwd, runId, hostRuntime) {
+  // The calling controller holds the real transaction mutex. Canonical new
+  // begins cannot race this census, and registry writers share their own fence.
+  const held = ownerActivityLocks.get(path.resolve(cwd));
+  if (!held || !forgeLock.assertOwned(held) || hostRuntime !== 'codex') return false;
+  const observed = forgeRuns.observeHostSession(hostRuntime);
+  if (!observed) return false;
+  const noLeases = () => noOwnerLeases(cwd);
+  // Any lease/debris/unknown state suppresses activity recording; age never
+  // authorizes a write. In particular, no native protected window is changed.
+  if (!noLeases()) return false;
+  return forgeRuns.withRegistryFence(cwd, guard => {
+    if (!noLeases()) return false;
+    const selected = forgeRuns.resolveBySessionOwner(cwd, observed);
+    if (!selected || selected.id !== runId) return false;
+    return forgeRuns.bumpOwnedHeartbeat(cwd, runId, observed, undefined, guard).updated;
+  });
 }
 
 function resolvePrefs(cwd, options) {
@@ -1073,6 +1114,9 @@ function runTransaction(cwd, transaction, ownerToken, generation, options) {
     setPhase(cwd, transaction, 'boundary-ready', options);
   }
   if (transaction.phase === 'boundary-ready') setPhase(cwd, transaction, 'committed', options);
+  if (transaction.action === 'complete') {
+    try { recordOwnerBoundaryActivity(cwd, transaction.milestone, transaction.host_runtime); } catch { /* unknown owner activity never becomes workflow authority */ }
+  }
   return { ok: true, reason: 'transition-committed', transaction: publicTransaction(transaction, cwd) };
 }
 function publicTransaction(transaction, cwd) {
@@ -1135,6 +1179,7 @@ function beginInside(cwd, request, options) {
   // inventory or a stale snapshot cannot bypass the owner's S02 state.
   assertTimeOptionAdmission(cwd, input.milestone, unit, key, availabilitySlice, options);
   preflightPaths(cwd, key, unit.key, input.milestone);
+  try { recordOwnerBoundaryActivity(cwd, input.milestone, hostRuntime); } catch { /* measurement remains unknown; no workflow decision changes */ }
   const acquired = forgeLease.acquire(cwd, unit.key, {
     ownerToken,
     requestId: key,
@@ -1770,7 +1815,7 @@ module.exports = {
   PROTOCOL_VERSION, BOUNDARY_KINDS, ACTIONS, PHASES, REASON_CODES, TIME_ADMISSION_CODES, ControllerError,
   selectNextUnit, discoverInventory, select, begin, transition, persistResult,
   complete, pause, fail: failUnit, expireSafe, resume, handoff,
-  pendingTransactions, projectLogicalHistory, logicalState, resolvePrefs,
+  withOwnerBoundary, pendingTransactions, projectLogicalHistory, logicalState, resolvePrefs,
   transactionDir, resultDir, boundaryDir, eventsFile, transactionFile,
   resultFile, boundaryFile, readEvents, readJson, writeAtomic,
   lookupRecord, preflightPaths,

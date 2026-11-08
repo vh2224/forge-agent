@@ -640,8 +640,17 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
   onLiveness, livenessIntervalMs = DEFAULT_LIVENESS_INTERVAL_MS, livenessPolicy,
   proofRoots = [], localProofIgnore = [], localProofFactory = null,
   localProofIntervalMs = DEFAULT_LOCAL_PROOF_INTERVAL_MS, progressIntervalMs = DEFAULT_PROGRESS_INTERVAL_MS,
-  provisionalControl = null }) {
+  provisionalControl = null, onBeforeSpawn }) {
   if (signal?.aborted) return Promise.reject(sidecarError(CLAUDE_SIDECAR_REASON_CODES.CANCELLED));
+  // All packaging/provisional/calibration work is complete at this boundary.
+  // The trusted owner hook is synchronous; a refusal cannot launch a child.
+  try {
+    const admitted = onBeforeSpawn?.();
+    if (admitted && typeof admitted.then === 'function') {
+      Promise.resolve(admitted).catch(() => {});
+      return Promise.reject(preSpawnRefusal(CLAUDE_SIDECAR_REASON_CODES.PROMPT_IO));
+    }
+  } catch (error) { return Promise.reject(error); }
   let child;
   try {
     child = spawn(cmd, args, { cwd, shell: false, env, stdio: ['ignore', 'pipe', 'pipe'],
@@ -1315,7 +1324,7 @@ async function invokeClaudeSidecar(opts) {
       calibration: readCalibration({ model, effort: effort || 'medium', phase }, options.calibrationOptions),
       onLiveness, livenessIntervalMs, livenessPolicy: options.livenessPolicy,
       proofRoots, localProofIgnore, localProofFactory, localProofIntervalMs, progressIntervalMs,
-      provisionalControl,
+      provisionalControl, onBeforeSpawn: options.onBeforeSpawn,
     });
     // The stream only confirms the Forge-generated id; it never replaces it.
     return finalizeOutput(output);

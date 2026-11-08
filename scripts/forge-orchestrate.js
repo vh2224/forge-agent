@@ -88,6 +88,7 @@ function normalizeInput(value) {
     description: typeof input.description === 'string' ? input.description : null,
     needs_input: input.needs_input === true,
     response: own(input, 'response') ? input.response : undefined,
+    resume_intent: input.resume_intent,
     boundary: input.boundary || null,
     inventory: input.inventory || null,
     prefsReader: typeof input.prefsReader === 'function' ? input.prefsReader : undefined,
@@ -252,6 +253,15 @@ function complete(inputValue, options) {
     return base('complete', 'blocked', 'unit-identity-mismatch', input);
   }
   try {
+    // Authorization-only resumes must await a genuine, independently captured task
+    // delivery. A caller's status:done or its earlier human response is no proof.
+    if (key.startsWith('forge-orchestrate-resume-execution:') && !forgeController.lookupRecord(input.cwd, 'transaction', key + ':complete')) {
+      const completedAt = typeof options?.now === 'function' ? options.now() : options?.now ?? Date.now();
+      const proof = require('./forge-milestone-time-clock').readHistoricalTaskDelivery({ cwd: input.cwd, milestone: input.milestone,
+        slice: begun.after.state.active_slice, task: selected.id, completedAt });
+      if (proof.status !== 'proven' || proof.captures.some(c => Date.parse(c.captured_at) < Date.parse(begun.created_at)))
+        return base('complete', 'blocked', 'execution-resume-delivery-required', input);
+    }
     const committed = forgeController.complete(input.cwd, {
       milestone: input.milestone, unit: selected, host_runtime: input.host_runtime,
       owner_token: input.owner_token, generation: begun.lease_generation,
@@ -296,7 +306,8 @@ function durableBoundary(input, boundary) {
   const durable = forgeController.readJson(forgeController.boundaryFile(input.cwd, boundary.unit));
   if (!durable) throw error('boundary-missing', `boundary ausente para ${boundary.unit}`);
   const resumedKey = `forge-orchestrate-resume:${boundary.idempotency_key}:complete`;
-  if (![boundary.idempotency_key, resumedKey].includes(durable.idempotency_key) ||
+  const executionKeys = [`forge-orchestrate-resume-execution:${boundary.idempotency_key}`, `forge-orchestrate-resume-execution:${boundary.idempotency_key}:complete`];
+  if (![boundary.idempotency_key, resumedKey, ...executionKeys].includes(durable.idempotency_key) ||
       (boundary.milestone && durable.milestone !== boundary.milestone)) {
     throw error('boundary-not-transferable', 'boundary informado não corresponde ao registro durável');
   }
@@ -367,7 +378,51 @@ function withPrepared(result, prepared) {
   if (prepared) result.details = { ...(result.details || {}), time_options: { ...(result.details?.time_options || {}), boundary: prepared } };
   return result;
 }
+// A pause is a transition of the CURRENT dispatch, never a new selection.
+// The supplied binding is a locator only; canonical begin/lease/owner records
+// establish identity. A distinct bounded key follows each resumed generation.
+function pauseCurrent(inputValue, options = {}) {
+  const input = normalizeInput(inputValue), locator = inputValue.pause_current;
+  const selected = unit(locator?.unit), binding = locator?.transaction;
+  const refused = reason => Object.assign(base('next', 'blocked', reason, input), { unit: selected });
+  if (!selected || !binding || typeof binding.idempotency_key !== 'string' || !binding.begin_checksum || !binding.generation)
+    return refused('unit-identity-mismatch');
+  const begun = forgeController.lookupRecord(input.cwd, 'transaction', binding.idempotency_key);
+  const ownerDigest = 'sha256:' + crypto.createHash('sha256').update(input.owner_token.normalize('NFC').trim()).digest('hex');
+  if (!begun || begun.action !== 'begin' || begun.phase !== 'committed' || begun.unit.key !== selected.key
+      || begun.milestone !== input.milestone || begun.host_runtime !== input.host_runtime || begun.owner_digest !== ownerDigest
+      || begun.lease_generation !== binding.generation || checksum(begun) !== binding.begin_checksum
+      || binding.unit !== begun.unit.key || binding.milestone !== begun.milestone || binding.host_runtime !== begun.host_runtime
+      || binding.owner_digest !== begun.owner_digest) return refused('unit-identity-mismatch');
+  const key = 'forge-orchestrate-pause:' + checksum({ milestone: begun.milestone, unit: begun.unit.key,
+    begin_key: begun.idempotency_key, generation: begun.lease_generation });
+  const txOptions = { ...options, ...(input.prefsReader ? { prefsReader: input.prefsReader } : {}) };
+  try {
+    let paused = forgeController.lookupRecord(input.cwd, 'transaction', key);
+    if (paused) {
+      if (paused.action !== 'pause' || paused.unit.key !== begun.unit.key || paused.milestone !== begun.milestone
+          || paused.host_runtime !== begun.host_runtime || paused.owner_digest !== begun.owner_digest
+          || paused.lease_generation !== begun.lease_generation) return refused('unit-identity-mismatch');
+      if (paused.phase !== 'committed') forgeController.resume(input.cwd, { idempotency_key: key,
+        owner_token: input.owner_token, generation: begun.lease_generation }, txOptions);
+    } else {
+      forgeController.pause(input.cwd, { milestone: begun.milestone, unit: begun.unit.key, host_runtime: begun.host_runtime,
+        owner_token: input.owner_token, generation: begun.lease_generation, idempotency_key: key,
+        result: { status: 'cancelled' } }, txOptions);
+    }
+    paused = forgeController.lookupRecord(input.cwd, 'transaction', key);
+    const boundary = forgeController.lookupRecord(input.cwd, 'boundary', begun.unit.key);
+    if (paused?.phase !== 'committed' || !boundary || boundary.idempotency_key !== key) return refused('boundary-not-transferable');
+    // Handoff rechecks durable result/event checksums and requires ZERO lease.
+    // Thus a stale snapshot cannot report paused over a newer resumed writer.
+    forgeController.handoff(input.cwd, { unit: begun.unit.key, next_host_runtime: input.host_runtime }, txOptions);
+    const result = base('next', 'needs_input', 'needs-input', input); result.unit = selected;
+    result.boundary = boundary; result.state = publicState(forgeState.read(input.cwd, input.milestone));
+    return result;
+  } catch (cause) { return refused(cause.code || 'pause-refused'); }
+}
 function next(inputValue, options = {}) {
+  if (own(inputValue, 'pause_current')) return pauseCurrent(inputValue, options);
   const input = normalizeInput(inputValue);
   if (!input.milestone) return nextInside(inputValue, options);
   // Before any time read or selection: the boundary output is what they observe.
@@ -415,6 +470,7 @@ function nextInside(inputValue, options) {
   options = { ...(options || {}) };
   if (!options.inventoryReader && input.prefsReader && input.inventory) options.inventoryReader = () => input.inventory;
   if (!input.milestone) throw error('invalid-request', 'milestone é obrigatório para next');
+  if (input.resume_intent !== undefined) return resumeExecution(input, options);
   if (input.response !== undefined && !input.boundary) {
     const result = base('next', 'blocked', 'needs-input-boundary', input);
     return result;
@@ -517,7 +573,47 @@ function nextInside(inputValue, options) {
     return attachTimeRefusal(result, cause, input, options);
   }
 }
+// Execution authorization reopens the exact paused unit. It is never its result.
+function resumeExecution(input, options = {}) {
+  const boundary = input.boundary, selected = unit(boundary?.unit);
+  const refuse = reason => Object.assign(base('next', 'blocked', reason, input), { unit: selected });
+  if (input.resume_intent !== 'execute' || input.response !== undefined) return refuse('execution-resume-intent-invalid');
+  if (!boundary?.idempotency_key || selected?.type !== 'execute-task') return refuse('execution-resume-boundary-invalid');
+  try {
+    durableBoundary(input, boundary);
+    const paused = forgeController.lookupRecord(input.cwd, 'transaction', boundary.idempotency_key);
+    if (!paused || paused.action !== 'pause' || paused.phase !== 'committed' || paused.milestone !== input.milestone
+        || paused.unit.key !== selected.key || boundary.milestone !== input.milestone) return refuse('execution-resume-boundary-invalid');
+    const slice = paused.after.state.active_slice;
+    if (typeof slice !== 'string' || !/^S\d{2,}$/.test(slice)) return refuse('execution-resume-boundary-invalid');
+    const key = 'forge-orchestrate-resume-execution:' + boundary.idempotency_key, completeKey = key + ':complete';
+    let prior = forgeController.lookupRecord(input.cwd, 'transaction', key);
+    let finished = forgeController.lookupRecord(input.cwd, 'transaction', completeKey);
+    const txOptions = { ...options, ...(input.prefsReader ? { prefsReader: input.prefsReader } : {}) };
+    if (finished) {
+      if (finished.action !== 'complete' || finished.result?.status !== 'succeeded' || finished.unit.key !== selected.key || finished.milestone !== input.milestone || finished.host_runtime !== input.host_runtime
+          || finished.owner_digest !== 'sha256:' + crypto.createHash('sha256').update(input.owner_token.normalize('NFC').trim()).digest('hex')) return refuse('unit-identity-mismatch');
+      if (finished.phase !== 'committed') forgeController.resume(input.cwd, { idempotency_key: completeKey, owner_token: input.owner_token, generation: finished.lease_generation }, txOptions);
+      forgeController.handoff(input.cwd, { unit: selected.key, next_host_runtime: input.host_runtime }, txOptions);
+      const result = base('next', 'completed', 'execution-resume-completed', input); result.unit = selected;
+      result.boundary = forgeController.lookupRecord(input.cwd, 'boundary', selected.key); return result;
+    }
+    if (!prior) forgeController.handoff(input.cwd, { unit: selected.key, next_host_runtime: input.host_runtime }, txOptions);
+    const begun = forgeController.begin(input.cwd, { milestone: input.milestone, unit: selected.key, slice, state_patch: { active_slice: slice },
+      host_runtime: input.host_runtime, owner_token: input.owner_token, idempotency_key: key, ...(prior ? { generation: prior.lease_generation } : {}) }, txOptions);
+    prior = forgeController.lookupRecord(input.cwd, 'transaction', key);
+    const result = base('next', 'completed', 'execution-resume-ready', input); result.unit = selected;
+    result.state = publicState(forgeState.read(input.cwd, input.milestone));
+    result.details = { resume_execution: true, transaction: { idempotency_key: key, phase: begun.transaction.phase,
+      begin_checksum: checksum(prior), generation: prior.lease_generation, owner_digest: prior.owner_digest,
+      host_runtime: prior.host_runtime, milestone: prior.milestone, unit: prior.unit.key } };
+    const valid = validatePending(input, result, options);
+    if (!valid.ok) return refuse(valid.reason);
+    return result;
+  } catch (cause) { return attachTimeRefusal(refuse(cause.code || 'execution-resume-failed'), cause, input, options); }
+}
 function resumeResponse(input, options) {
+  if (unit(input.boundary?.unit)?.type === 'execute-task') return base('next', 'blocked', 'execution-resume-intent-required', input);
   let response;
   try { response = normalizedResponse(input.response); } catch (cause) { return base('next', 'blocked', cause.code || 'response-invalid', input); }
   const boundary = input.boundary;
