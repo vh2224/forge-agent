@@ -148,6 +148,52 @@ function contractFor(record, option, ceiling, linked, chain) {
     preselection_started_at: new Date(NOW - 120000).toISOString(), ceiling_ms: ceiling, endpoint: record.proposal.endpoint, allocation: null, linked_task: linked, chain_forecast: chain };
 }
 function prepareFor(record) { const cwd = root(); time.recordEnrollment({ cwd, milestone: M, source: 'owner', now: NOW - 120000 }); time.recordOptions({ cwd, milestone: M, record }); return cwd; }
+// Issue 342 fixtures: closed milestone M101 written by the real controller (committed begin
+// transactions carrying active_slice) plus synthetic rows in the owner global log.
+const HOUR = 3600000, T0 = Date.parse('2026-10-01T08:00:00.000Z');
+function iso(value) { return new Date(value).toISOString(); }
+function globalLog(cwd) { return path.join(cwd, '.gsd/forge/events.jsonl'); }
+function writeRows(cwd, rows) { fs.writeFileSync(globalLog(cwd), rows.map(row => JSON.stringify(row)).join('\n') + '\n'); }
+// units: [{ unit, slice, segments: [[startMs, endMs, host?], ...] }]; consecutive segments pause and resume.
+function committedOwner(units, ownerRows = []) {
+  const controller = require('./forge-unit-controller'), state = require('./forge-state');
+  const cwd = root(), milestone = 'M101';
+  fs.mkdirSync(path.join(cwd, '.gsd/milestones', milestone), { recursive: true });
+  state.write(cwd, { milestone, kind: 'milestone', phase: 'idle', active_slice: 'S01', active_task: '—', auto_mode: 'on', created: iso(T0), heartbeat: iso(T0) });
+  let at = T0;
+  const opts = { now: () => at, prefsReader: () => ({ ok: true, prefs: {} }), inventoryReader: () => ({ slices: [] }) };
+  for (const [u, item] of units.entries()) {
+    const slice = item.slice || 'S01', tag = 'issue342-' + u + '-' + item.unit.replace('/', '-') + '-' + slice;
+    item.segments.forEach(([start, end, host = 'claude'], i) => {
+      at = T0 + start;
+      const begun = controller.begin(cwd, { milestone, unit: item.unit, slice, host_runtime: host, owner_token: 'history-owner', idempotency_key: tag + '-begin-' + i,
+        state_patch: { active_slice: slice } }, opts);
+      assert.ok(begun.ok, JSON.stringify(begun));
+      at = T0 + end;
+      const last = i === item.segments.length - 1, request = { milestone, unit: item.unit, host_runtime: host, owner_token: 'history-owner', generation: begun.generation,
+        idempotency_key: tag + (last ? '-complete-' : '-pause-') + i };
+      const closed = last ? controller.complete(cwd, { ...request, result: { status: 'succeeded' } }, opts) : controller.pause(cwd, request, opts);
+      assert.ok(closed.ok, JSON.stringify(closed));
+    });
+  }
+  fs.mkdirSync(path.join(cwd, '.gsd/ledger'), { recursive: true }); fs.writeFileSync(path.join(cwd, '.gsd/ledger', milestone + '.md'), '# Closed history\n');
+  if (ownerRows.length) writeRows(cwd, ownerRows);
+  return cwd;
+}
+// dispatch + sidecar-unit started/done of one review-fix attempt (the forge-review-policy fixture shape).
+function reviewRows(id, unit, milestone, slice, start, end, extra = {}) {
+  const dispatch = { ts: iso(start), event: 'dispatch', unit, ...(milestone ? { milestone } : {}), ...(slice ? { slice } : {}), ...(extra.noId ? {} : { dispatch_id: id }) };
+  if (extra.noId) return [dispatch];
+  const rows = extra.noDispatch ? [] : [dispatch];
+  rows.push({ ts: extra.ts || iso(start), event: 'sidecar-unit', workflow_id: 'wf-fixture', dispatch_id: id, unit, status: 'started', provider_called: false });
+  if (extra.terminal !== false) rows.push({ ts: iso(end), event: 'sidecar-unit', workflow_id: 'wf-fixture', dispatch_id: id, unit, status: 'done', provider_called: true });
+  return rows;
+}
+const T01_27H = [{ unit: 'execute-task/T01', segments: [[0, 27 * HOUR]] }];
+function w1Rows(milestone = 'M101') { return reviewRows('rf-s01-a', 'review-fix/S01', milestone, 'S01', T0 + HOUR, T0 + 26.5 * HOUR); }
+function readM(cwd) { return options.readHistory({ cwd, milestone: M }); }
+function intCor(history) { const e = options.estimate(validCase('sem-julgamento'), history).positions[0]; return ['INT', 'COR'].map(id => e.nodes.find(n => n.id === id).high_ms); }
+function executeStats(history) { const e = history.phases['execute-task']; return [e.n, e.p50_ms, e.p90_ms, e.min_ms, e.max_ms]; }
 
 try {
   test('S02 review R62: cross-host pause history never truncates successful sample cost', () => {
@@ -193,6 +239,188 @@ try {
     fs.writeFileSync(file, original);
     assert.deepStrictEqual(read(), history);
     console.log('ok - S02 review R62: cross-host pause history never truncates successful sample cost');
+  });
+  test('issue342 attributed review-fix: committed S01 begin and a measured 25.5 h attempt turn the 27 h execute-task sample into 1.5 h; p90, INT/COR and the range follow', () => {
+    const cwd = committedOwner(T01_27H, w1Rows()), history = readM(cwd);
+    assert.deepStrictEqual(executeStats(history), [1, 5400000, 5400000, 5400000, 5400000]);
+    assert.deepStrictEqual(intCor(history), [5400000, 5400000]);
+    // curta with every node on execute-task:1 follows the adjusted sample (independent count x 1.5 h).
+    const stripped = validCase('sem-julgamento');
+    const curta = applyPatches(stripped, stripped.positions[0].nodes.map((_, i) => ({ op: 'set', path: ['positions', 0, 'nodes', i, 'phases'], value: { 'execute-task': 1 } })));
+    assert.deepStrictEqual(options.validateProposal(curta, M), { valid: true });
+    const e = options.estimate(curta, history).positions[0], expected = curta.positions[0].nodes.reduce((t, n) => t + Object.values(n.phases).reduce((s, count) => s + count * 5400000, 0), 0);
+    assert.deepStrictEqual([e.status, e.low_ms, e.high_ms], ['estimated', expected, expected]);
+    // Without scope proof for M101 (dispatch moved to M102) the same owner keeps the 27 h sample.
+    writeRows(cwd, w1Rows('M102'));
+    const foreign = readM(cwd);
+    assert.deepStrictEqual([executeStats(foreign), intCor(foreign), foreign.review_fix.discounted_ms, foreign.review_fix.attempts.no_sample], [[1, 97200000, 97200000, 97200000, 97200000], [97200000, 97200000], 0, 1]);
+  });
+  test('issue342 separate surface: history.review_fix and the rendered options show the discounted cost apart, never inside a range or node', () => {
+    const cwd = committedOwner(T01_27H, w1Rows()), history = readM(cwd), bytes = fs.readFileSync(globalLog(cwd));
+    assert.deepStrictEqual(history.review_fix, { status: 'applied', reason: null,
+      source: { path: '.gsd/forge/events.jsonl', sha256: digest(bytes), bytes: bytes.length, max_bytes: 16777216, malformed_lines: 0 },
+      attempts: { measured: 1, used: 1, partial: 0, unmeasured: 0, missing_dispatch: 0, invalid_scope: 0, ambiguous: 0, missing_proof: 0, foreign: 0, triage: 0, no_sample: 0, no_overlap: 0 },
+      samples_adjusted: 1, samples_consumed: 0, measured_ms: 91800000, discounted_ms: 91800000,
+      by_phase: { 'execute-task': { samples_adjusted: 1, discounted_ms: 91800000 }, 'complete-slice': { samples_adjusted: 0, discounted_ms: 0 } }, added_to_ranges: false });
+    for (const name of ['sem-julgamento', 'completa-tres-posicoes']) assert.ok(!numbersOf(options.estimate(validCase(name), history)).includes(91800000), name);
+    const { record } = materialized(validCase('completa-tres-posicoes'), history);
+    assert.ok(!numbersOf(record.estimate).includes(91800000), 'never in positions, nodes, ranges, ceilings or chain');
+    assert.strictEqual(rt.optionsView(record).status, 'valid');
+    const markdown = options.renderOptionsMarkdown(record), lines = markdown.split('\n');
+    assert.ok(lines.includes('- Review-fix separado (fora de faixas e nós): aplicado; descontado 1 d 1 h 30 min de 1 amostra(s) (execute-task 1, complete-slice 0); tentativas usadas 1, parciais 0, sem prova 0, triagem 0; fonte `.gsd/forge/events.jsonl` sha256 '
+      + digest(bytes).slice(0, 12) + ', ' + bytes.length + ' bytes.'), markdown);
+    const section = markdown.slice(markdown.indexOf('## Histórico usado'), markdown.indexOf('## Posição curta'));
+    assert.ok(section.includes('Review-fix separado') && section.indexOf('Review-fix separado') < section.indexOf('- Limitação:'), 'separate line in Histórico usado before the limitations');
+    assert.ok(lines.includes('- Limitação: Review-fix medido e atribuído foi retirado das amostras de execução e é apresentado à parte; não foi somado a nenhuma faixa nem nó'));
+    assert.ok(lines.find(l => l.startsWith('- Números:')).endsWith(' Além das pausas, só o review-fix medido e atribuído sai das amostras de execução; aparece à parte em Histórico usado e não entra em faixa.'));
+    for (const line of lines.filter(l => /review-fix/i.test(l))) assert.ok(!/cobert/i.test(line), 'no coverage claim: ' + line);
+  });
+  test('issue342 preservation: controller events, transactions, ledger, state and global log keep bytes and mtime; reads are deterministic and aggregate-only', () => {
+    const cwd = committedOwner(T01_27H, w1Rows()), before = snapshot(cwd);
+    assert.ok(Object.keys(before).some(k => /transactions/.test(k)) && Object.keys(before).some(k => k.endsWith('M101-events.jsonl')) && Object.keys(before).some(k => k.endsWith('events.jsonl') && /forge/.test(k)));
+    const history = readM(cwd), again = readM(cwd);
+    assert.deepStrictEqual(again, history);
+    const { record } = materialized(validCase('completa-tres-posicoes'), history);
+    options.estimate(validCase('sem-julgamento'), history); options.renderOptionsMarkdown(record);
+    assert.deepStrictEqual(snapshot(cwd), before, 'sources keep sha256, size and mtime');
+    const text = JSON.stringify(history), real = fs.realpathSync.native(cwd);
+    for (const bad of [cwd, cwd.replace(/\\/g, '/'), real, real.replace(/\\/g, '/'), 'rf-s01-a', 'review-fix/S01', 'execute-task/T01', 'issue342-']) assert.ok(!text.includes(bad), 'leaked ' + bad);
+    assert.ok(!/"(?:start|end|unit|begin_key|begin_keys|segments|dispatch_id)"/.test(text), 'no windows, units or ids');
+    assert.ok(time.isPublicData(history) && time.isPublicData(record));
+  });
+  test('issue342 partial and pause: only the proven intersection with active segments is discounted; the explicit pause gap is never subtracted', () => {
+    const partial = readM(committedOwner(T01_27H, reviewRows('rf-p', 'review-fix/S01', 'M101', 'S01', T0 + 20 * HOUR, T0 + 30 * HOUR)));
+    assert.deepStrictEqual([executeStats(partial)[0], executeStats(partial)[2], partial.review_fix.discounted_ms, partial.review_fix.measured_ms, partial.review_fix.attempts.partial],
+      [1, 20 * HOUR, 7 * HOUR, 10 * HOUR, 1]);
+    assert.ok(partial.limitations.includes('Só a interseção provada de cada tentativa de review-fix com os segmentos ativos de uma única amostra foi descontada; o restante ficou nas amostras'));
+    // Real same-host pause and resume: active 0-10 h and 20-27 h (17 h); the 10-20 h gap is not in the sample.
+    const paused = [{ unit: 'execute-task/T01', segments: [[0, 10 * HOUR], [20 * HOUR, 27 * HOUR]] }];
+    const gapOnly = readM(committedOwner(paused, reviewRows('rf-gap', 'review-fix/S01', 'M101', 'S01', T0 + 12 * HOUR, T0 + 18 * HOUR)));
+    assert.deepStrictEqual([executeStats(gapOnly)[2], gapOnly.review_fix.status, gapOnly.review_fix.discounted_ms, gapOnly.review_fix.attempts.no_overlap], [17 * HOUR, 'none', 0, 1]);
+    const across = readM(committedOwner(paused, [...reviewRows('rf-across', 'review-fix/S01', 'M101', 'S01', T0 + 5 * HOUR, T0 + 25 * HOUR),
+      ...reviewRows('rf-gap', 'review-fix/S01', 'M101', 'S01', T0 + 12 * HOUR, T0 + 18 * HOUR)]));
+    assert.deepStrictEqual([executeStats(across)[0], executeStats(across)[2], across.review_fix.discounted_ms, across.review_fix.attempts.used, across.review_fix.attempts.no_overlap, across.review_fix.attempts.partial],
+      [1, 7 * HOUR, 10 * HOUR, 1, 1, 1]);
+    // A sample entirely covered leaves the pool; no zero-duration sample is published.
+    const covered = readM(committedOwner(T01_27H, reviewRows('rf-all', 'review-fix/S01', 'M101', 'S01', T0 - HOUR, T0 + 28 * HOUR)));
+    assert.deepStrictEqual([covered.phases['execute-task'].n, covered.phases['execute-task'].min_ms, covered.review_fix.samples_consumed, covered.review_fix.samples_adjusted, covered.review_fix.discounted_ms, covered.excluded.zero_duration],
+      [0, null, 1, 1, 27 * HOUR, 0]);
+    assert.deepStrictEqual(covered.sources.find(s => s.kind === 'milestone').samples, {});
+    assert.ok(covered.limitations.includes('Amostra(s) inteiramente coberta(s) por review-fix medido saíram do conjunto; o custo está à parte'));
+  });
+  test('issue342 no double counting: an overlapping recovery counts once and one attempt adjusts exactly one sample', () => {
+    const union = readM(committedOwner(T01_27H, [...reviewRows('rf-a', 'review-fix/S01', 'M101', 'S01', T0 + HOUR, T0 + 10 * HOUR),
+      ...reviewRows('rf-a-recovery-1', 'review-fix/S01', 'M101', 'S01', T0 + 8 * HOUR, T0 + 20 * HOUR)]));
+    assert.deepStrictEqual([union.review_fix.discounted_ms, union.review_fix.measured_ms, union.review_fix.attempts.used, union.review_fix.samples_adjusted, executeStats(union)[2]],
+      [19 * HOUR, 21 * HOUR, 2, 1, 8 * HOUR]);
+    // Sequential execute-task/T01 and complete-slice/S01 of S01, both committed: the larger fresh intersection wins alone.
+    const sequential = [{ unit: 'execute-task/T01', segments: [[0, 10 * HOUR]] }, { unit: 'complete-slice/S01', segments: [[10 * HOUR + 60000, 27 * HOUR]] }];
+    const one = readM(committedOwner(sequential, reviewRows('rf-b', 'review-fix/S01', 'M101', 'S01', T0 + 8 * HOUR, T0 + 20 * HOUR)));
+    const slice = 27 * HOUR - (10 * HOUR + 60000), fresh = 20 * HOUR - (10 * HOUR + 60000);
+    assert.deepStrictEqual([one.phases['execute-task'].p90_ms, one.phases['complete-slice'].p90_ms, one.review_fix.discounted_ms, one.review_fix.samples_adjusted, one.review_fix.attempts.partial],
+      [10 * HOUR, slice - fresh, fresh, 1, 1]);
+    assert.deepStrictEqual(one.review_fix.by_phase, { 'execute-task': { samples_adjusted: 0, discounted_ms: 0 }, 'complete-slice': { samples_adjusted: 1, discounted_ms: fresh } });
+    // Equal fresh intersections are ambiguous and discount nothing.
+    const tie = readM(committedOwner([{ unit: 'execute-task/T01', segments: [[0, 10 * HOUR]] }, { unit: 'execute-task/T02', segments: [[10 * HOUR, 20 * HOUR]] }],
+      reviewRows('rf-c', 'review-fix/S01', 'M101', 'S01', T0 + 5 * HOUR, T0 + 15 * HOUR)));
+    assert.deepStrictEqual([tie.review_fix.discounted_ms, tie.review_fix.attempts.ambiguous, tie.phases['execute-task'].n, tie.phases['execute-task'].min_ms, tie.phases['execute-task'].max_ms],
+      [0, 1, 2, 10 * HOUR, 10 * HOUR]);
+  });
+  test('issue342 missing, ambiguous and foreign proof: the unbound original fixture and every negative keep samples intact with a named counter', () => {
+    // The original unbound diagnostic: synthetic controller rows without any committed transaction.
+    const diagnostic = [[5400000, []], [97200000, w1Rows()], [97200000, []], [5400000, reviewRows('rf-out', 'review-fix/S01', 'M101', 'S01', T0 + 3 * HOUR, T0 + 4 * HOUR)]].map(([duration, rows]) => {
+      const cwd = buildHistory(root(), { ledger: ['M101'], events: { M101: [{ phase: 'execute-task', durations_ms: [duration] }] } });
+      if (rows.length) writeRows(cwd, rows);
+      return readM(cwd);
+    });
+    assert.deepStrictEqual(diagnostic.map(h => h.phases['execute-task'].p90_ms), [5400000, 97200000, 97200000, 5400000]);
+    assert.deepStrictEqual([diagnostic[1].review_fix.attempts.missing_proof, diagnostic[1].review_fix.discounted_ms, diagnostic[3].review_fix.attempts.no_overlap], [1, 0, 1]);
+    assert.ok(diagnostic[1].limitations.includes('Tentativas de review-fix sem prova suficiente (ausente, ambígua, estrangeira ou sem medição) não foram descontadas e podem permanecer nas amostras'));
+    const intact = (history, counter, label) => {
+      assert.deepStrictEqual([executeStats(history), intCor(history), history.review_fix.status, history.review_fix.discounted_ms, history.review_fix.attempts[counter]],
+        [[1, 97200000, 97200000, 97200000, 97200000], [97200000, 97200000], 'none', 0, 1], label);
+    };
+    const window = [T0 + HOUR, T0 + 26.5 * HOUR];
+    for (const [label, counter, rows] of [
+      ['sidecar-unit without dispatch', 'missing_dispatch', reviewRows('rf-orphan', 'review-fix/S01', 'M101', 'S01', ...window, { noDispatch: true })],
+      ['started without terminal', 'unmeasured', reviewRows('rf-open', 'review-fix/S01', 'M101', 'S01', ...window, { terminal: false })],
+      ['invalid ts', 'unmeasured', reviewRows('rf-ts', 'review-fix/S01', 'M101', 'S01', ...window, { ts: 'not-a-date' })],
+      ['dispatch without dispatch_id', 'unmeasured', reviewRows('rf-none', 'review-fix/S01', 'M101', 'S01', ...window, { noId: true })],
+      ['dispatch for M102', 'no_sample', w1Rows('M102')],
+      ['dispatch for the current milestone', 'no_sample', w1Rows(M)],
+      ['one dispatch_id with two scopes', 'ambiguous', [...w1Rows(), { ts: iso(window[0]), event: 'dispatch', unit: 'review-fix/S02', milestone: 'M101', slice: 'S02', dispatch_id: 'rf-s01-a' }]],
+      ['milestone triage', 'triage', reviewRows('rf-triage', 'review-fix/M101-triage', 'M101', null, ...window)],
+      ['task review-fix carrying a milestone', 'invalid_scope', reviewRows('rf-task', 'review-fix/TASK-001', 'M101', null, ...window)]]) {
+      intact(readM(committedOwner(T01_27H, rows)), counter, label);
+    }
+    intact(readM(committedOwner([{ unit: 'execute-task/T01', slice: 'S02', segments: [[0, 27 * HOUR]] }], w1Rows())), 'foreign', 'committed begin of S02');
+    // Cross-host segments of one unit stay continuation_unknown and are never a target.
+    const hosts = [{ unit: 'execute-task/T01', segments: [[0, 10 * HOUR, 'claude'], [12 * HOUR, 27 * HOUR, 'codex']] }];
+    const plain = readM(committedOwner(hosts)), crossed = readM(committedOwner(hosts, w1Rows()));
+    assert.deepStrictEqual([crossed.excluded.continuation_unknown, crossed.phases['execute-task'].n, crossed.review_fix.discounted_ms, crossed.review_fix.attempts.no_sample],
+      [plain.excluded.continuation_unknown, 0, 0, 1]);
+    assert.ok(plain.excluded.continuation_unknown >= 1);
+  });
+  test('issue342 unknown stays unknown: unclassified waits and absent, oversized, invalid or linked global logs keep samples and history available', () => {
+    const unclassified = readM(committedOwner(T01_27H, [{ ts: iso(T0), event: 'dispatch', unit: 'execute-task/T09', dispatch_id: 'not-review' }]));
+    assert.deepStrictEqual([executeStats(unclassified)[2], unclassified.review_fix.status], [97200000, 'none']);
+    assert.ok(unclassified.limitations.some(l => /sem classificação/.test(l) && /desconhecidas/.test(l)));
+    const absent = historyFor('sem-pausa').history;
+    assert.deepStrictEqual([absent.status, absent.review_fix.status, absent.review_fix.reason], ['available', 'absent', null]);
+    assert.ok(absent.limitations.includes('Sem log global do owner: review-fix não pôde ser separado das amostras'));
+    const text = w1Rows().map(row => JSON.stringify(row)).join('\n') + '\n';
+    const closedSource = history => history.sources.find(s => s.path === '.gsd/milestones/M101/M101-events.jsonl');
+    const refused = (write, reason) => {
+      const cwd = committedOwner(T01_27H);
+      write(cwd);
+      const history = readM(cwd);
+      assert.deepStrictEqual([history.status, closedSource(history).status, executeStats(history)[2], history.review_fix.status, history.review_fix.reason, history.review_fix.discounted_ms],
+        ['available', 'available', 97200000, 'unavailable', reason, 0], reason);
+      assert.ok(history.limitations.includes('Log global do owner indisponível (' + reason + '): review-fix não separado das amostras; custo desconhecido'), reason);
+      return history;
+    };
+    const big = refused(cwd => fs.writeFileSync(globalLog(cwd), Buffer.concat([Buffer.from(text), Buffer.alloc(16 * 1024 * 1024 + 1 - Buffer.byteLength(text), 0x0a)])), 'review-fix-source-too-large');
+    assert.strictEqual(big.review_fix.source.bytes, 16 * 1024 * 1024 + 1, 'real size, never truncated');
+    refused(cwd => fs.writeFileSync(globalLog(cwd), Buffer.concat([Buffer.from(text), Buffer.from([0xff, 0x0a])])), 'review-fix-source-invalid');
+    refused(cwd => { writeRows(cwd, w1Rows()); const moved = path.join(root(false), 'forge'); fs.renameSync(path.join(cwd, '.gsd/forge'), moved); link(moved, path.join(cwd, '.gsd/forge')); }, 'review-fix-source-link');
+    // 3 MiB: refused as the 2 MiB shared-tasks source, still read by the 16 MiB attribution reader.
+    const cwd = committedOwner(T01_27H), filler = JSON.stringify({ event: 'synthetic-padding', note: 'x'.repeat(1000) }) + '\n';
+    let padded = text;
+    while (Buffer.byteLength(padded) <= 3 * 1024 * 1024) padded += filler;
+    fs.writeFileSync(globalLog(cwd), padded);
+    const independent = readM(cwd);
+    assert.deepStrictEqual([independent.sources.find(s => s.kind === 'shared-tasks').reason, independent.review_fix.status, executeStats(independent)[2]], ['history-source-too-large', 'applied', 5400000]);
+    assert.ok(independent.limits.max_source_bytes === 2 * 1024 * 1024 && independent.review_fix.source.max_bytes === 16 * 1024 * 1024);
+  });
+  test('issue342 standalone task: review-fix of a task discounts only its own shared-tasks sample', () => {
+    const task = eventRows('TASK-001', [{ phase: 'execute-task', durations_ms: [28 * HOUR] }], T0);
+    const taskFix = reviewRows('rf-task-001', 'review-fix/TASK-001', null, null, T0 + HOUR, T0 + 26.5 * HOUR);
+    const otherFix = reviewRows('rf-task-002', 'review-fix/TASK-002', null, null, T0 + HOUR, T0 + 26.5 * HOUR);
+    const cwd = committedOwner(T01_27H, [...task, ...taskFix, ...otherFix]), before = snapshot(cwd), history = readM(cwd);
+    assert.deepStrictEqual(snapshot(cwd), before, 'no transaction is invented for tasks');
+    const pooled = h => [h.phases['execute-task'].min_ms, h.phases['execute-task'].max_ms];
+    assert.deepStrictEqual([pooled(history), history.review_fix.discounted_ms, history.review_fix.attempts.used, history.review_fix.attempts.no_sample],
+      [[2.5 * HOUR, 27 * HOUR], 25.5 * HOUR, 1, 1], 'TASK-001 discounted, M101 sample intact');
+    assert.deepStrictEqual(history.sources.map(s => [s.kind, s.samples]), [['milestone', { 'execute-task': 1 }], ['shared-tasks', { 'execute-task': 1 }]]);
+    // A slice review-fix never adjusts a task sample.
+    const slice = readM(committedOwner(T01_27H, [...task, ...w1Rows()]));
+    assert.deepStrictEqual([pooled(slice), slice.review_fix.discounted_ms], [[1.5 * HOUR, 28 * HOUR], 25.5 * HOUR]);
+  });
+  test('issue342 compatibility: a history without review_fix stays valid, viewable and renderable with the unchanged header', () => {
+    const history = readM(committedOwner(T01_27H, w1Rows()));
+    assert.deepStrictEqual(Object.keys(history.excluded), ['open', 'ambiguous', 'unfinished_paused', 'zero_duration']);
+    const legacy = structuredClone(history);
+    delete legacy.review_fix;
+    legacy.limitations = legacy.limitations.filter(l => !/review-fix|log global/i.test(l));
+    const { record, options_sha256: sha } = materialized(validCase('completa-tres-posicoes'), legacy);
+    assert.strictEqual(rt.optionsView(record).status, 'valid');
+    assert.deepStrictEqual(time.readOptions({ cwd: prepareFor(record), milestone: M, options_sha256: sha }).record, record);
+    const markdown = options.renderOptionsMarkdown(record);
+    assert.ok(!markdown.includes('Review-fix separado') && !/review-fix/i.test(markdown), 'no review-fix line');
+    assert.strictEqual(markdown.split('\n').find(l => l.startsWith('- Números:')), '- Números: consumo de trabalho e coordenação identificáveis, não tempo de parede; só pausas explicitamente registradas ficam fora; '
+      + 'esperas humanas, de CI, externas ou sem classificação não são separadas por esta evidência (desconhecidas) e podem permanecer nas amostras; overhead desconhecido fica explícito.');
+    assert.deepStrictEqual([options.ESTIMATE_POLICY, options.HISTORY_LIMITS, options.CALIBRATED_SAMPLES], [{ id: 'forge-milestone-time-estimate', version: 1 }, { max_sources: 64, max_total_bytes: 64 * 1024 * 1024, max_source_bytes: MAX_BYTES }, 5]);
+    assert.deepStrictEqual(options.MEASURABLE_PHASES, ['plan-milestone', 'discuss-milestone', 'research-milestone', 'plan-slice', 'research-slice', 'execute-task', 'complete-slice', 'complete-milestone']);
   });
   test('exports-constants-and-import-purity', () => {
     for (const name of ['PROPOSAL_SCHEMA_VERSION', 'POSITION_IDS', 'MEASURABLE_PHASES', 'NODE_KINDS', 'ESTIMATE_POLICY', 'HISTORY_LIMITS', 'validateProposal', 'validateProposalContent',
