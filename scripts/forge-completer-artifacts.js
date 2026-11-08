@@ -3,6 +3,8 @@
 
 const { execFileSync } = require('child_process');
 const path = require('path');
+const fs = require('fs');
+const { svnWcRoot } = require('./forge-ignore.js');
 const vcsApi = require('./forge-vcs.js');
 
 function lines(value) {
@@ -32,11 +34,40 @@ function gitActualAm(cwd, opts = {}) {
   }
 }
 
+function svnProjectStatus(cwd) {
+  // Reporting wrapper only: the reset/snapshot primitives still require the WC root.
+  let project, root;
+  try {
+    project = fs.realpathSync.native(path.resolve(cwd));
+    const found = svnWcRoot(project);
+    if (!found) return { ok: false, entries: [], error: 'svn-wcroot-unavailable' };
+    root = fs.realpathSync.native(found);
+    const relative = path.relative(root, project);
+    if (path.isAbsolute(relative) || relative === '..' || relative.startsWith('..' + path.sep)) {
+      return { ok: false, entries: [], error: 'svn-project-outside-working-copy' };
+    }
+  } catch { return { ok: false, entries: [], error: 'svn-project-scope-unavailable' }; }
+  const status = vcsApi.workingStatus(root, { vcs: 'svn' });
+  if (!status.ok) return status;
+  const entries = [];
+  for (const entry of status.entries) {
+    const absolute = path.resolve(root, entry.path);
+    const underRoot = path.relative(root, absolute);
+    if (path.isAbsolute(underRoot) || underRoot === '..' || underRoot.startsWith('..' + path.sep)) {
+      return { ok: false, entries: [], error: 'svn-status-outside-working-copy' };
+    }
+    const relative = path.relative(project, absolute);
+    if (path.isAbsolute(relative) || relative === '..' || relative.startsWith('..' + path.sep)) continue;
+    entries.push({ ...entry, path: relative || '.' });
+  }
+  return { ...status, entries };
+}
+
 function actualAddedModified(cwd, opts = {}) {
   const vcs = opts.vcs || vcsApi.detectVcs(cwd);
   if (vcs === 'git') return gitActualAm(cwd, opts);
   if (vcs === 'svn') {
-    const status = vcsApi.workingStatus(cwd, { vcs: 'svn' });
+    const status = svnProjectStatus(cwd);
     if (!status.ok) return { vcs, ok: false, paths: [], error: `file-audit-unavailable:svn:${status.error}` };
     const paths = status.entries
       .filter((entry) => ['added', 'modified', 'untracked'].includes(entry.kind))

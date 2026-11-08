@@ -93,6 +93,13 @@ const POST_CLOSURE_CI_SMOKE = Object.freeze({
   outside_section61_sha256: '11144be92ecb59e0be7a298238971578aa061a5c7ae48b7095833991eb91797e',
   reference: 'https://github.com/vh2224/forge-agent/issues/339#issuecomment-6674714308',
 });
+// #339 replaces only the Section98 fixed death window with observation tied to
+// actual driver settlement. Keep both historical measurements and the tamper negative.
+const CAMPAIGN_339_SMOKE = Object.freeze({
+  base_revision: 'ad62d774fc37ec6fcf5a85347d69eaf5c8a8c675',
+  outside_section61_sha256: '7195370c71d86eea6dfc415e5e16c8235a4cf16eb654edd887930b631ad9fc57',
+  reference: 'https://github.com/vh2224/forge-agent/issues/339',
+});
 const t07Labels = [];
 // S03/T06 attribution. T06 adds its linked-task text to the ten declared paths only inside
 // whole-line `<!-- forge:linked-task:<id>:start -->` … `:end -->` blocks. The S02 pins,
@@ -460,7 +467,8 @@ function assertSmokeScope(text) {
   const start = text.indexOf('// ── Section 61:'), end = text.indexOf('// ── Section 62:', start);
   assert(start >= 0 && end > start, 'smoke scope markers remain present');
   const actual = hash(text.slice(0, start) + '<allowed-section61>\n' + text.slice(end));
-  assert(actual === before.smoke.outside_section61_sha256 || actual === POST_CLOSURE_CI_SMOKE.outside_section61_sha256,
+  assert(actual === before.smoke.outside_section61_sha256 || actual === POST_CLOSURE_CI_SMOKE.outside_section61_sha256 ||
+    actual === CAMPAIGN_339_SMOKE.outside_section61_sha256,
     'unrecognized smoke changes outside Section61 and the exact post-closure CI scope');
 }
 function checkSmoke() {

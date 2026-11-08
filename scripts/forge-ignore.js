@@ -335,6 +335,7 @@ module.exports = {
   LOCAL_IGNORE_PATHS,
   PROJECTION_IGNORE_PATHS,
   detectVcs,
+  svnWcRoot,
   applyIgnore,
   validateIgnore,
   svnIsVersioned,

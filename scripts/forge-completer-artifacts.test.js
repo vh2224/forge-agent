@@ -59,6 +59,39 @@ test('SVN-007 live no-Git WC returns only added/modified paths', () => {
   } finally { fs.rmSync(rootDir, { recursive: true, force: true }); }
 });
 
+test('SVN-359 scoped audit resolves nested projects, literal at signs and excludes siblings while preserving raw guards', function scopedSvnRegression() {
+  if (!hasSvnToolchain()) return;
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-completer-svn-scoped-'));
+  try {
+    const repo = path.join(rootDir, 'repo'), seed = path.join(rootDir, 'seed'), wc = path.join(rootDir, 'wc');
+    const names = ['project', 'project@1.0', 'literal@', 'project-extra'];
+    for (const name of names) { fs.mkdirSync(path.join(seed, name), { recursive: true }); fs.writeFileSync(path.join(seed, name, 'tracked.txt'), 'base\n'); }
+    execFileSync('svnadmin', ['create', repo]);
+    const url = require('url').pathToFileURL(repo).href;
+    execFileSync('svn', ['import', seed, url, '-m', 'synthetic scoped audit', '--quiet']);
+    execFileSync('svn', ['checkout', url, wc, '--quiet']);
+    for (const name of names) { fs.appendFileSync(path.join(wc, name, 'tracked.txt'), 'changed\n'); fs.writeFileSync(path.join(wc, name, 'new.txt'), 'new\n'); }
+    const vcs = require('./forge-vcs.js');
+    for (const name of names.slice(0, 3)) {
+      const project = path.join(wc, name);
+      assert.strictEqual(vcs.detectVcs(project), 'svn', name);
+      assert.deepStrictEqual(actualAddedModified(project), { vcs: 'svn', ok: true, paths: ['new.txt', 'tracked.txt'], scope: 'working-copy' }, name);
+      assert.deepStrictEqual(vcs.workingStatus(project, { vcs: 'svn' }), { vcs: 'svn', ok: false, entries: [], error: 'svn-wcroot-mismatch: run primitives from the working-copy root' }, 'raw primitive remains guarded');
+      const cli = spawnSync(process.execPath, [path.join(__dirname, 'forge-completer-artifacts.js'), '--actual-am', '--cwd', project], { encoding: 'utf8' });
+      assert.strictEqual(cli.status, 0, cli.stderr);
+      assert.deepStrictEqual(cli.stdout.trim().split(/\r?\n/), ['new.txt', 'tracked.txt']);
+    }
+    assert.deepStrictEqual(actualAddedModified(wc).paths, names.flatMap(name => [name + '/new.txt', name + '/tracked.txt']).sort(), 'root audit remains whole working copy');
+    const ignore = require('./forge-ignore.js');
+    ignore.__setExecFileSync(() => path.join(rootDir, 'foreign'));
+    fs.mkdirSync(path.join(rootDir, 'foreign'));
+    try { assert.deepStrictEqual(actualAddedModified(path.join(wc, 'project'), { vcs: 'svn' }), { vcs: 'svn', ok: false, paths: [], error: 'file-audit-unavailable:svn:svn-project-outside-working-copy' }); }
+    finally { ignore.__setExecFileSync(execFileSync); }
+    const empty = path.join(rootDir, 'empty'); fs.mkdirSync(empty);
+    assert.deepStrictEqual(actualAddedModified(empty, { vcs: 'svn' }), { vcs: 'svn', ok: false, paths: [], error: 'file-audit-unavailable:svn:svn-wcroot-unavailable' });
+  } finally { fs.rmSync(rootDir, { recursive: true, force: true }); }
+});
+
 test('SVN-007 helper preserves Git branch and untracked file audit behavior', () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-completer-git-'));
   try {

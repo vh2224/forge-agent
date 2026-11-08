@@ -102,21 +102,78 @@ public static class ForgeVerificationJob {
 '@
 try {
  if($Mode -eq 'Compile') {
-  $compiler=New-Object Microsoft.CSharp.CSharpCodeProvider
-  $parameters=New-Object System.CodeDom.Compiler.CompilerParameters
-  $parameters.GenerateExecutable=$false
-  $parameters.GenerateInMemory=$false
-  $parameters.ReferencedAssemblies.Add('System.dll') | Out-Null
+  # Use only the compiler and references shipped with this PowerShell CLR.
+  # CodeDom's compiler-launch path fails for some valid Unicode TEMP values;
+  # ProcessStartInfo retains Unicode paths without changing the caller's env.
+  $runtime=[Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()
+  $compilerPath=Join-Path $runtime 'csc.exe'
+  $coreReference=Join-Path $runtime 'mscorlib.dll'
+  $systemReference=Join-Path $runtime 'System.dll'
+  foreach($trusted in @($compilerPath,$coreReference,$systemReference)) {
+   if(-not [IO.File]::Exists($trusted) -or $trusted.Contains('"') -or $trusted.Contains([char]0)) { throw 'compiler-runtime-unavailable' }
+  }
   $buildRoot=Join-Path ([IO.Path]::GetTempPath()) ('forge-verifier-build-'+[Guid]::NewGuid().ToString('N'))
   [IO.Directory]::CreateDirectory($buildRoot) | Out-Null
-  $parameters.OutputAssembly=Join-Path $buildRoot 'supervisor.dll'
-  $parameters.TempFiles=New-Object System.CodeDom.Compiler.TempFileCollection($buildRoot,$false)
+  $sourceFile=Join-Path $buildRoot 'supervisor.cs'
+  $assemblyFile=Join-Path $buildRoot 'supervisor.dll'
+  $compiler=$null
+  $compileStarted=$false
+  $compileJoined=$true
   try {
-   $compiled=$compiler.CompileAssemblyFromSource($parameters,$program)
-   if($compiled.Errors.HasErrors) { throw 'compile-failed' }
-   @{schema=1;assembly=[Convert]::ToBase64String([IO.File]::ReadAllBytes($parameters.OutputAssembly))} | ConvertTo-Json -Compress
+   if($sourceFile.Contains('"') -or $assemblyFile.Contains('"')) { throw 'compiler-path-invalid' }
+   [IO.File]::WriteAllText($sourceFile,$program,(New-Object Text.UTF8Encoding($false)))
+   $start=New-Object Diagnostics.ProcessStartInfo
+   $start.FileName=$compilerPath
+   # No ambient csc.rsp, PATH lookup, shell, resource tools, user references or
+   # command text: the source and all compiler switches/references are fixed.
+   $start.Arguments=('/noconfig /nologo /target:library /nostdlib+ /reference:"{0}" /reference:"{1}" /out:"{2}" "{3}"' -f $coreReference,$systemReference,$assemblyFile,$sourceFile)
+   $start.WorkingDirectory=$buildRoot
+   $start.UseShellExecute=$false
+   $start.CreateNoWindow=$true
+   $start.RedirectStandardOutput=$true
+   $start.RedirectStandardError=$true
+   $compiler=New-Object Diagnostics.Process
+   $compiler.StartInfo=$start
+   if(-not $compiler.Start()) { throw 'compiler-start-failed' }
+   $compileStarted=$true
+   $compileJoined=$false
+   # Drain both pipes concurrently with bounded buffers. Ten seconds plus a
+   # two-second join fits inside the unchanged 15-second JS compile envelope.
+   $readers=@(@{stream=$compiler.StandardOutput.BaseStream;buffer=(New-Object byte[] 4096);read=$null;bytes=0},
+              @{stream=$compiler.StandardError.BaseStream;buffer=(New-Object byte[] 4096);read=$null;bytes=0})
+   foreach($reader in $readers) { $reader.read=$reader.stream.ReadAsync($reader.buffer,0,$reader.buffer.Length) }
+   $watch=[Diagnostics.Stopwatch]::StartNew()
+   while($true) {
+    foreach($reader in $readers) {
+     if($null -ne $reader.read -and $reader.read.IsCompleted) {
+      $count=$reader.read.GetAwaiter().GetResult()
+      if($count -eq 0) { $reader.read=$null }
+      else {
+       $reader.bytes+=$count
+       if($reader.bytes -gt 1048576) { throw 'compiler-output-limit' }
+       $reader.read=$reader.stream.ReadAsync($reader.buffer,0,$reader.buffer.Length)
+      }
+     }
+    }
+    if($compiler.HasExited -and @($readers | Where-Object {$null -ne $_.read}).Count -eq 0) { break }
+    if($watch.ElapsedMilliseconds -ge 10000) { throw 'compiler-timeout' }
+    [Threading.Thread]::Sleep(5)
+   }
+   $compileJoined=$compiler.WaitForExit(2000)
+   if(-not $compileJoined -or $compiler.ExitCode -ne 0 -or -not [IO.File]::Exists($assemblyFile)) { throw 'compile-failed' }
+   @{schema=1;assembly=[Convert]::ToBase64String([IO.File]::ReadAllBytes($assemblyFile))} | ConvertTo-Json -Compress
   } finally {
-   $compiler.Dispose()
+   if($null -ne $compiler) {
+    if($compileStarted -and -not $compileJoined) {
+     try {
+      if(-not $compiler.HasExited) { $compiler.Kill() }
+      $compileJoined=$compiler.WaitForExit(2000)
+     } catch { $compileJoined=$false }
+    }
+    $compiler.Dispose()
+   }
+   # Unproved compiler termination never authorizes cleanup of its live files.
+   if(-not $compileJoined) { throw 'compiler-join-unproved' }
    $expected=[IO.Path]::GetFullPath($buildRoot)
    if($expected.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()),[StringComparison]::OrdinalIgnoreCase) -and ([IO.Path]::GetFileName($expected) -match '^forge-verifier-build-[a-f0-9]{32}$')) {
     foreach($item in Get-ChildItem -LiteralPath $expected -Force) { if(-not $item.PSIsContainer) { Remove-Item -LiteralPath $item.FullName -Force } }
