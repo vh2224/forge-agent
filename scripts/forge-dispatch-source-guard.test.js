@@ -777,6 +777,46 @@ function delta341Row(delta, kind, key) {
 }
 
 
+
+// #348 follows the immutable #347 layer. Only planner guidance changes this
+// rendered surface; #353 and the mandatory budget-attribution repair do not.
+const ARTIFACT_348_PATH = path.join(ROOT, 'scripts/fixtures/artifact-contracts/distribution-delta.json');
+const ARTIFACT_348 = JSON.parse(fs.readFileSync(ARTIFACT_348_PATH, 'utf8'));
+const ARTIFACT_348_BASE = 'c91dfc77231a176892df72f56c0eefefbbd430be';
+const ARTIFACT_348_PRIOR_PIN = '91dd5d2a3ece86df030fcf5e374041c3bb496da040baf3f3a2830445061c8c5e';
+const ARTIFACT_348_PRIOR_PLANNER = '45ceadf4a8299115a9a492a9beab4e4c83e29748ca68af03763144b5e904e4cb';
+const ARTIFACT_348_PREVIOUS_DELTA_SHA = 'ffb4476cd2ef7b7b8e44676a392e9a11607015fc38d349be9ae2a5fa0a8558a2';
+function artifact348After(kind, key, prior, delta = ARTIFACT_348, attributed = false) {
+  const row = delta && delta[kind] && Object.hasOwn(delta[kind], key) ? delta[kind][key] : null;
+  if (!row) return prior;
+  assert.strictEqual(row[attributed ? 'attributed_before' : 'before'], prior, '#348 follows preceding ' + kind + ' ' + key);
+  return row[attributed ? 'attributed_after' : 'after'];
+}
+function validateArtifact348(delta, previous, { measure, readRaw, readme }) {
+  assert.deepStrictEqual(Object.keys(delta).sort(), ['schema_version','issue','provenance','surfaces','files','unchanged_surfaces'].sort(), '#348 closed delta shape');
+  assert.strictEqual(delta.schema_version, 1); assert.strictEqual(delta.issue, 348);
+  assert.strictEqual(delta.provenance.base_revision, ARTIFACT_348_BASE, '#348 named base');
+  assert.strictEqual(delta.provenance.previous_delta, 'scripts/fixtures/entry-contracts/distribution-delta.json');
+  assert.strictEqual(typeof delta.provenance.method, 'string'); assert(delta.provenance.method.length > 0);
+  assert.strictEqual(sha256(readRaw('scripts/fixtures/entry-contracts/distribution-delta.json')), ARTIFACT_348_PREVIOUS_DELTA_SHA, '#347 fixture remains immutable');
+  assert.deepStrictEqual(Object.keys(delta.surfaces), ['agents'], '#348 exactly one affected surface');
+  assert.deepStrictEqual(Object.keys(delta.files), ['agents/forge-planner.md'], '#348 exactly one changed rendered member');
+  assert.deepStrictEqual([...delta.unchanged_surfaces].sort(), ["claude-instructions","claude-settings","commands","configuration","dispatch-templates","hooks","mcp","skills"], '#348 eight untouched surfaces');
+  for (const [kind,key,expectedBefore] of [['surfaces','agents',ARTIFACT_348_PRIOR_PIN],['files','agents/forge-planner.md',ARTIFACT_348_PRIOR_PLANNER]]) {
+    const row = delta[kind][key], old = previous[kind][key];
+    assert.deepStrictEqual(Object.keys(row).sort(), ['before','after','attributed_before','attributed_after'].sort(), '#348 closed row');
+    for (const field of Object.keys(row)) assert.match(row[field], /^[a-f0-9]{64}$/, '#348 valid digest');
+    assert.strictEqual(row.before, expectedBefore, '#348 independent before anchor');
+    assert.strictEqual(row.before, old.after, '#348 raw chain from347');
+    assert.strictEqual(row.attributed_before, old.attributed_after, '#348 attributed chain from347');
+    assert.strictEqual(row.before, row.attributed_before); assert.strictEqual(row.after, row.attributed_after);
+    assert.notStrictEqual(row.before, row.after, '#348 actual bounded change');
+    const actual = kind === 'surfaces' ? measure(key) : sha256(readRaw(key));
+    assert.strictEqual(row.after, actual, '#348 actual measured ' + kind);
+  }
+  assert(readme.includes(ARTIFACT_348_BASE) && readme.includes(delta.surfaces.agents.before) && readme.includes(delta.surfaces.agents.after), '#348 README records the real base/before/after');
+}
+
 // #347 is a subsequent measured layer. These before anchors were read from the
 // named base commit, not recomputed from current sources or old owner captures.
 const ENTRY_347_PATH = path.join(__dirname, 'fixtures', 'entry-contracts', 'distribution-delta.json');
@@ -890,14 +930,15 @@ function entry347Row(delta, kind, key) {
 }
 function entry347After(kind, key, prior, delta = ENTRY_347, attributed = false) {
   const row = entry347Row(delta, kind, key);
-  if (!row) return prior;
+  if (!row) return artifact348After(kind, key, prior, ARTIFACT_348, attributed);
   const beforeKey = attributed ? 'attributed_before' : 'before';
   const afterKey = attributed ? 'attributed_after' : 'after';
   assert.strictEqual(row[beforeKey], prior, '#347 ' + kind + ' ' + key + ': before follows the preceding layer');
   assert.match(row[afterKey], /^[0-9a-f]{64}$/, '#347 measured after');
-  return row[afterKey];
+  return artifact348After(kind, key, row[afterKey], ARTIFACT_348, attributed);
 }
-function validateEntry347(delta, earlier, { measure, readRaw, readme, renderMembers }) {
+function validateEntry347(delta, earlier, { measure, readRaw, readme, renderMembers, artifactDelta = ARTIFACT_348 }) {
+  validateArtifact348(artifactDelta, delta, { measure, readRaw, readme });
   assert.deepStrictEqual(Object.keys(delta).sort(), ['schema_version', 'issue', 'provenance', 'surfaces', 'files', 'unchanged_surfaces'].sort(), '#347 closed delta shape');
   assert.strictEqual(delta.schema_version, 1); assert.strictEqual(delta.issue, 347);
   assert.strictEqual(delta.provenance.base_revision, 'ad62d774fc37ec6fcf5a85347d69eaf5c8a8c675', '#347 named base revision');
@@ -922,12 +963,12 @@ function validateEntry347(delta, earlier, { measure, readRaw, readme, renderMemb
       assert.notStrictEqual(row.before, row.after, '#347 actual change ' + key);
       if (kind === 'surfaces') {
         assert.strictEqual(row.after, row.attributed_after, '#347 surfaces have no linked blocks ' + key);
-        assert.strictEqual(measure(key), row.after, '#347 measured surface ' + key);
+        assert.strictEqual(measure(key), artifact348After(kind, key, row.after, artifactDelta), '#347 measured surface followed by348 ' + key);
         assert(readme.includes(row.before) && readme.includes(row.after), '#347 README records ' + key + ' before/after');
       } else {
         const raw = readRaw(key);
-        assert.strictEqual(sha256(raw), row.after, '#347 measured file ' + key);
-        assert.strictEqual(sha256(Buffer.from(raw.toString('utf8').replace(LINKED_BLOCK_RE, ''), 'utf8')), row.attributed_after, '#347 measured attributed file ' + key);
+        assert.strictEqual(sha256(raw), artifact348After(kind, key, row.after, artifactDelta), '#347 measured file followed by348 ' + key);
+        assert.strictEqual(sha256(Buffer.from(raw.toString('utf8').replace(LINKED_BLOCK_RE, ''), 'utf8')), artifact348After(kind, key, row.attributed_after, artifactDelta, true), '#347 measured attributed file followed by348 ' + key);
       }
     }
   }
@@ -935,9 +976,9 @@ function validateEntry347(delta, earlier, { measure, readRaw, readme, renderMemb
 
 // Pins and captured sources of the linked-task proof. The defaults read the real bytes; the
 // #341 negative fixtures only pass in-memory golden, README, delta or file variants.
-function assertLinkedPinsAndSources({ before, declared, delta, golden, measured, readme, artifacts, entryDelta = ENTRY_347,
+function assertLinkedPinsAndSources({ before, declared, delta, golden, measured, readme, artifacts, entryDelta = ENTRY_347, artifactDelta = ARTIFACT_348,
   readRaw = (relative) => fs.readFileSync(path.join(ROOT, relative)) }) {
-  validateEntry347(entryDelta, delta, { measure: id => measured.get(id), readRaw, readme,
+  validateEntry347(entryDelta, delta, { measure: id => measured.get(id), readRaw, readme, artifactDelta,
     renderMembers: Object.fromEntries(['agents', 'hooks'].map(id => [id, artifacts.filter(item => item.source_id === id).map(item => item.source)])) });
   // Pins: every new layer starts at the independently retained preceding value.
   for (const surface of golden.surfaces) {
@@ -1151,6 +1192,28 @@ test('#341 linked-task layer refuses edits outside the delta, wrong pins, bad de
   refused('#347 undocumented current pin', { readme: readme.split(ENTRY_347.surfaces.agents.after).join('') });
   refused('#347 undocumented intermediate pin', { readme: readme.split(ENTRY_347.surfaces.agents.before).join('') });
   process.stdout.write('ok - issue-341-linked-task-layer-refuses-out-of-delta-edits-wrong-pins-and-undocumented-repins\n');
+
+  // #348 is checked against the retained #347 end state, not a rewritten fixture.
+  const variant348 = mutate => { const copy = JSON.parse(JSON.stringify(ARTIFACT_348)); mutate(copy); return copy; };
+  const refused348 = (label, overrides) => assert.throws(() => assertLinkedPinsAndSources({ ...base, ...overrides }), error => error instanceof assert.AssertionError, '#348 ' + label + ' must be refused');
+  const wrong348 = sha256('not a measured348 value');
+  refused348('foreign before', { artifactDelta: variant348(d => { d.surfaces.agents.before = wrong348; d.surfaces.agents.attributed_before = wrong348; }) });
+  refused348('invented after', { artifactDelta: variant348(d => { d.surfaces.agents.after = wrong348; d.surfaces.agents.attributed_after = wrong348; }) });
+  refused348('extra surface', { artifactDelta: variant348(d => { d.surfaces.hooks = { ...d.surfaces.agents }; }) });
+  refused348('omitted surface', { artifactDelta: variant348(d => { delete d.surfaces.agents; }) });
+  refused348('extra file', { artifactDelta: variant348(d => { d.files['agents/forge-worker.md'] = { ...d.files['agents/forge-planner.md'] }; }) });
+  refused348('omitted file', { artifactDelta: variant348(d => { delete d.files['agents/forge-planner.md']; }) });
+  refused348('foreign file before', { artifactDelta: variant348(d => { d.files['agents/forge-planner.md'].before = wrong348; d.files['agents/forge-planner.md'].attributed_before = wrong348; }) });
+  refused348('invented file after', { artifactDelta: variant348(d => { d.files['agents/forge-planner.md'].after = wrong348; d.files['agents/forge-planner.md'].attributed_after = wrong348; }) });
+  refused348('extra untouched surface', { artifactDelta: variant348(d => { d.unchanged_surfaces.push('imaginary'); }) });
+  const read348 = rel => fs.readFileSync(path.join(ROOT, rel));
+  const edit348 = target => rel => rel === target ? Buffer.concat([read348(rel), Buffer.from('\nforeign348 edit\n')]) : read348(rel);
+  refused348('planner edited after measure', { readRaw: edit348('agents/forge-planner.md') });
+  refused348('edit outside measure', { readRaw: edit348('agents/forge-memory.md') });
+  refused348('prior fixture rewritten', { readRaw: edit348('scripts/fixtures/entry-contracts/distribution-delta.json') });
+  refused348('stale pin', { golden: { ...golden, surfaces: golden.surfaces.map(row => row.source_id === 'agents' ? { ...row, sha256: ARTIFACT_348.surfaces.agents.before } : row) } });
+  refused348('stale docs', { readme: readme.split(ARTIFACT_348.surfaces.agents.after).join('') });
+
   process.stdout.write('ok - issue-347-linked-task-layer-chains-exact-members-and-refuses-tampering\n');
 });
 

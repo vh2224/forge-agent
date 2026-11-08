@@ -389,6 +389,33 @@ function hasStructuredMustHaves(content) {
   return /^must_haves:\s*(\n|$)/m.test(fm);
 }
 
+// Product declarations share the execution root policy. This lexical check does
+// not resolve a physical root, alter declarations or inspect truths/via/prose.
+// Load lazily: forge-code-roots imports this parser, while --check exports the
+// parser before invoking it. Both module load orders retain complete exports.
+function assertProductPlanPaths(frontmatter, parsed) {
+  const entries = [];
+  const writes = parseArrayKey(frontmatter, 'writes');
+  if (Array.isArray(writes)) writes.forEach((value, index) => entries.push(['writes[' + index + ']', value]));
+  parsed.expected_output.forEach((value, index) => entries.push(['expected_output[' + index + ']', value]));
+  parsed.artifacts.forEach((value, index) => entries.push(['artifacts[' + index + '].path', value.path]));
+  parsed.key_links.forEach((value, index) => {
+    entries.push(['key_links[' + index + '].from', value.from], ['key_links[' + index + '].to', value.to]);
+  });
+  const { assertRelative } = require('./forge-code-roots');
+  for (const [field, value] of entries) {
+    const relative = value && typeof value === 'object' && !Array.isArray(value) ? value.path
+      : typeof value === 'string' && value.includes('::') ? value.slice(value.indexOf('::') + 2) : value;
+    try { assertRelative(relative); }
+    catch (cause) {
+      const code = cause.code || 'root-path-invalid';
+      const guidance = code === 'root-path-protected'
+        ? '; product deliverables belong outside .gsd/.git/.svn (use docs/ for documents)' : '';
+      throw Object.assign(new Error('malformed must_haves schema: ' + field + ' - ' + code + guidance), { code });
+    }
+  }
+}
+
 /**
  * Parse the `must_haves:` block and `expected_output:` array from a structured plan.
  * Callers MUST check `hasStructuredMustHaves` first; throws if called on legacy plans.
@@ -409,7 +436,9 @@ function hasStructuredMustHaves(content) {
  * @param {string} content  Full plan file content
  * @returns {{ truths: string[], artifacts: object[], key_links: object[], expected_output: string[], domain: string|null, capability: string|null }}
  */
-function parseMustHaves(content) {
+// Structural decoding only: this result is not product-path admission. The
+// normalizer uses it only after validating the physical execution contract.
+function parseMustHavesStructure(content) {
   if (!hasStructuredMustHaves(content)) {
     throw new Error('plan is legacy — use hasStructuredMustHaves to pre-check');
   }
@@ -570,7 +599,7 @@ function parseMustHaves(content) {
     throw new Error('malformed must_haves schema: capability — must be a string when present');
   }
 
-  return {
+  const parsed = {
     truths,
     artifacts,
     key_links: keyLinks,
@@ -578,6 +607,14 @@ function parseMustHaves(content) {
     domain,
     capability,
   };
+  return parsed;
+}
+
+// The ordinary API and --check remain strict. No option can bypass admission.
+function parseMustHaves(content) {
+  const parsed = parseMustHavesStructure(content);
+  assertProductPlanPaths(extractFrontmatter(content), parsed);
+  return parsed;
 }
 
 /**
@@ -645,7 +682,7 @@ function parseExecutionFields(content) {
   return result;
 }
 
-module.exports = { hasStructuredMustHaves, parseMustHaves, parseExecutionFields, resolveCapability, stripInlineComment };
+module.exports = { hasStructuredMustHaves, parseMustHaves, parseMustHavesStructure, parseExecutionFields, resolveCapability, stripInlineComment };
 
 // ── CLI entrypoint ────────────────────────────────────────────────────────────
 

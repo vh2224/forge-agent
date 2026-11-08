@@ -15066,13 +15066,23 @@ async function t02WaitForFile(file, timeoutMs) {
 // amostragem — feita PELO PROCESSO PAI, nunca pelo peer que está prestes a
 // morrer de SIGKILL — que dá o carimbo de "o pid deixou de existir" contra o
 // qual o `at` do turn/interrupt registrado pelo mock é comparado.
-async function t02WatchDeath(pid, maxWaitMs) {
+async function t02WatchDeath(pid, maxWaitMs, finished) {
   const start = Date.now();
-  while (Date.now() - start < maxWaitMs) {
+  let settled = false;
+  if (finished) Promise.resolve(finished).then(() => { settled = true; }, () => { settled = true; });
+  while (Date.now() - start < maxWaitMs && !settled) {
     if (!t02Alive(pid)) return Date.now();
     await t02Sleep(5);
   }
-  return null;
+  return !t02Alive(pid) ? Date.now() : null;
+}
+
+function t02ObserveScenarioDeath(pid, driverPromise, watchdogMs) {
+  // Keep sampling for the actual scenario, including the existing 200 ms kernel
+  // visibility grace after driver close. The same scenario watchdog is the cap;
+  // an unresolved driver cannot leave this observer waiting indefinitely.
+  const finished = Promise.resolve(driverPromise).then(() => t02Sleep(200));
+  return t02WatchDeath(pid, watchdogMs, finished);
 }
 
 // WATCHDOG (S07 review R5). Resolver só em `close`/`error` deixava esta seção
@@ -15177,7 +15187,7 @@ async function smokeTurnInterrupt() {
       const driverPromise = t02SpawnDriverAsync(driverPath, baseEnv(mode, stem, timeoutMs, graceMs), watchdogMs);
       const rawPid = await t02WaitForFile(pidFile, 3000);
       const pid = rawPid ? Number(rawPid) : null;
-      const deathPromise = pid ? t02WatchDeath(pid, 5000) : Promise.resolve(null);
+      const deathPromise = pid ? t02ObserveScenarioDeath(pid, driverPromise, watchdogMs) : Promise.resolve(null);
       const [driverResult, deathAt] = await Promise.all([driverPromise, deathPromise]);
       assert(driverResult.timedOut === false,
         `(watchdog) ${label}: o driver terminou por conta própria — um travamento aqui apagaria o sinal da suíte inteira`,
