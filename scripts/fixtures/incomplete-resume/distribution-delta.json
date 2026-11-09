@@ -49,9 +49,15 @@
     },
     "scripts/forge-communication-surfaces.test.js": {
       "before": "270ca613a4828789cae3253929ea9bf41294483702615cf344c548da482a4a3e",
-      "after": "6eb893da52678925b4b044cd858e877934712bdaf8346c711268859af5c49d2f",
+      "after": "74d20c474d11f12ce15256154cd240b586b8f8571b175405fd1acaf76ad72b24",
       "attributed_before": "270ca613a4828789cae3253929ea9bf41294483702615cf344c548da482a4a3e",
-      "attributed_after": "6eb893da52678925b4b044cd858e877934712bdaf8346c711268859af5c49d2f"
+      "attributed_after": "74d20c474d11f12ce15256154cd240b586b8f8571b175405fd1acaf76ad72b24"
+    },
+    "scripts/forge-smoke.js": {
+      "before": "2f5e48bb5fc6018e5f7ebd39c01229b8ac7793e5684e212c89b2e91d3324f574",
+      "after": "ec690d32ce120494db717900ac82b193d552dd6ccb27915bb53bba91dfe0c2f7",
+      "attributed_before": "2f5e48bb5fc6018e5f7ebd39c01229b8ac7793e5684e212c89b2e91d3324f574",
+      "attributed_after": "ec690d32ce120494db717900ac82b193d552dd6ccb27915bb53bba91dfe0c2f7"
     }
   },
   "unchanged_surfaces": [
@@ -92,5 +98,11 @@
       "attributed_before": "8605c96802c313dbda6f43adc21913717b2750add2eb440514e47ed7d85768ee",
       "attributed_after": "d0ae3824753619f847538ffceb78d38735c5f4f861775988654cb04facad586c"
     }
+  },
+  "smoke": {
+    "file": "scripts/forge-smoke.js",
+    "before": "81ba5ae500896168c821f1a1bc5d373693023cd13be45fbe5e7e27b86f28719b",
+    "after": "7e924a923fa8571a324268a2eb77239a0450fd418b1da2a45bd22956ede6129f",
+    "outside": "0943cd2b234e760e2e9bd1e582d83d907ef94b300ef59f1bd339785297c68a17"
   }
 }

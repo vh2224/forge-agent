@@ -828,6 +828,7 @@ function checkRegistry(fixture = {}) {
   }
 }
 function assertSmokeScope(text) {
+  text = unitEntry.previousSmoke(text);
   const start = text.indexOf('// ── Section 61:'), end = text.indexOf('// ── Section 62:', start);
   assert(start >= 0 && end > start, 'smoke scope markers remain present');
   const actual = hash(text.slice(0, start) + '<allowed-section61>\n' + text.slice(end));
