@@ -529,7 +529,7 @@ using a JSON serializer — never shell interpolation. Supply:
   `cwd`, `contextRoot`, `hostRuntime: "claude"`, `workflowId`, a fresh
   `dispatchId`, `resultFile`, the complete prompt below, and operator
   `constraints`;
-- capabilities observed from the active host tool. For native Claude, read the
+- capabilities observed from the active host tool. For native Claude without an observed per-call effort argument, read the
   actual exposed `agents/<agent>.md`, compute SHA-256 over those bytes, call
   `observeClaudeAgentBinding`, and include the successful `effortBinding`;
 - prompt text is not an effort API. Preserve the resolver's effort only through
@@ -1984,3 +1984,7 @@ token_budget.coding_standards bounds optional standards only, with full-file ref
 retain requirements/research/checklist. No credentials or full prompt in telemetry.
 Personal handoff retains authority reference, evidence, acceptance and questions.
 Synthetic provider tests do not establish real provider execution or human UAT.
+
+
+<!-- forge346-native-effort -->
+When the active Claude Agent schema exposes a per-call effort parameter, report both effort_transports:['agent-argument'] (alongside any observed frontmatter transport) and reasoning_efforts with its exact observed enum. buildNativeInvocation prefers that argument and sends the resolved effort unchanged. Without this observation, retain the fingerprinted agent-frontmatter binding and its strict mismatch refusal. Do not infer capability from another session, installed version or prompt text. Before opening a new lease, preflightNativeBinding with these same observed capabilities; keep ordinary native preparation/publication and pending-decision gates.

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/superseded-owner/distribution.cjs');
+const unitEntry = require('./fixtures/native-effort/distribution.cjs');
 
 // forge-communication-surfaces.test.js — proves the orchestration and status
 // skills follow shared/forge-communication.md by POINTER, not by a second copy;
@@ -339,7 +339,7 @@ function validateIdentitySamples(delta, { sampleText, sampleReadme, readRaw }) {
     assert.strictEqual(node.file, 'skills/forge-task/SKILL.md');
     assert.strictEqual(node.before, IDENTITY_BEFORE.files[node.file].before);
     assert.strictEqual(node.after, delta.files[node.file].after);
-    assert.strictEqual(node.after, hash(readRaw(node.file)), 'identity sample actual source');
+    assert.strictEqual(unitEntry.after('files', node.file, node.after), hash(readRaw(node.file)), 'identity sample actual source');
     const value = node.pointer.split('/').slice(1).reduce((v,k) => v[k], parsed);
     assert.strictEqual(value.source.file, node.file); assert.strictEqual(value.source.sha256, node.after);
     assert(sampleReadme.includes(node.before) && sampleReadme.includes(node.after), 'identity documented sample before/after');
@@ -419,7 +419,7 @@ function validateArtifact348(delta, previous, { measure, readRaw, readme }) {
     assert.strictEqual(row.before, row.attributed_before); assert.strictEqual(row.after, row.attributed_after);
     assert.notStrictEqual(row.before, row.after, '#348 actual bounded change');
     const actual = kind === 'surfaces' ? measure(key) : hash(readRaw(key));
-    assert.strictEqual(row.after, actual, '#348 actual measured ' + kind);
+    assert.strictEqual(unitEntry.after(kind, key, row.after), actual, '#348 actual measured ' + kind);
   }
   assert(readme.includes(ARTIFACT_348_BASE) && readme.includes(delta.surfaces.agents.before) && readme.includes(delta.surfaces.agents.after), '#348 README records the real base/before/after');
 }
@@ -809,7 +809,7 @@ function checkRegistry(fixture = {}) {
   const audit = sourceGuard.audit({ root });
   assert.strictEqual(audit.ok, true, JSON.stringify(audit));
   const old = new Map(before.dispatch_registry.rows.map(row => [row.id, row]));
-  const current = sourceGuard.SOURCE_REGISTRY;
+  const current = unitEntry.previousRegistry(sourceGuard.SOURCE_REGISTRY);
   assert.strictEqual(current.length, 248, 'actual registry count (inline planner was outside registry scope)');
   assert.strictEqual(current.length, before.dispatch_registry.rows.length, 'measured count delta zero');
   const changed = [];

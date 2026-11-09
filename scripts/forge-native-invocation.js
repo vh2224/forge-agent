@@ -291,8 +291,11 @@ function buildNativeInvocation(options) {
   }
   const modelArgument = exactId ? model : alias;
   const effortEvidence = input.effortBinding || input.effort_binding;
-  const effortTransport = effortEvidence && typeof effortEvidence === 'object'
-    ? text(effortEvidence.transport) : '';
+  // A per-call argument is available only when the embedding host observed it.
+  // Prefer that capability; clients without it retain the strict file binding.
+  const effortTransport = stringSet(caps.effort_transports).has('agent-argument')
+    ? 'agent-argument' : effortEvidence && typeof effortEvidence === 'object'
+      ? text(effortEvidence.transport) : '';
   if (!effortTransport) {
     return refusal(host, 'native-effort-binding-missing',
       'Claude invocation requires a read-only observation of its real agent definition.');
@@ -301,7 +304,7 @@ function buildNativeInvocation(options) {
     return refusal(host, 'native-effort-prompt-header-not-api',
       'Prompt text is not a Claude native reasoning-effort API or observed agent binding.');
   }
-  if (effortTransport !== 'agent-frontmatter') {
+  if (!['agent-frontmatter', 'agent-argument'].includes(effortTransport)) {
     return refusal(host, 'native-effort-transport-unimplemented',
       `Claude effort transport ${effortTransport} has no native adapter.`);
   }
@@ -309,15 +312,43 @@ function buildNativeInvocation(options) {
     return refusal(host, 'native-effort-transport-unsupported',
       `The active Claude tool did not report effort transport ${effortTransport}.`);
   }
-  const observedBinding = observeClaudeAgentBinding({
-    agentType,
-    agentPath: effortEvidence.agentPath || effortEvidence.agent_path || effortEvidence.source,
-    sourceFingerprint: effortEvidence.sourceFingerprint || effortEvidence.source_fingerprint,
-  });
-  if (!observedBinding.ok) return observedBinding;
-  if (observedBinding.effort !== effort) {
-    return refusal(host, 'native-effort-binding-mismatch',
-      `Observed ${agentType} frontmatter effort ${observedBinding.effort} does not match resolved effort ${effort}.`);
+  // This observation concerns the actual embedding Claude host, not the env
+  // of a Node child. A missing observation cannot prove that no override exists.
+  const environmentDiagnostics = [];
+  const environment = caps.claude_effort_environment;
+  if (environment !== undefined) {
+    if (!environment || typeof environment !== 'object' || Array.isArray(environment)
+        || Object.keys(environment).some(key => !['source','override'].includes(key))
+        || typeof environment.source !== 'string' || !/^[a-z0-9_.:-]{1,120}$/i.test(environment.source)
+        || !Object.prototype.hasOwnProperty.call(environment, 'override')
+        || environment.override !== null && !modelPolicy.EFFORT_SCALE.includes(environment.override)) {
+      return refusal(host, 'native-effort-environment-unverified',
+        'Provide a bounded actual-host effort environment observation; never infer absence from a child process.');
+    }
+    if (environment.override !== null && environment.override !== effort) {
+      return refusal(host, 'native-effort-environment-conflict',
+        'The observed Claude host effort override conflicts with the resolved effort; no invocation was made.');
+    }
+    environmentDiagnostics.push({ code: 'native-effort-environment-observed', layer: 'native-binding',
+      source: environment.source, override: environment.override });
+  }
+  let observedBinding = null;
+  if (effortTransport === 'agent-argument') {
+    if (!stringSet(caps.reasoning_efforts).has(effort)) {
+      return refusal(host, 'native-effort-unsupported',
+        `The active Claude tool did not report support for reasoning effort ${effort}.`);
+    }
+  } else {
+    observedBinding = observeClaudeAgentBinding({
+      agentType,
+      agentPath: effortEvidence.agentPath || effortEvidence.agent_path || effortEvidence.source,
+      sourceFingerprint: effortEvidence.sourceFingerprint || effortEvidence.source_fingerprint,
+    });
+    if (!observedBinding.ok) return observedBinding;
+    if (observedBinding.effort !== effort) {
+      return refusal(host, 'native-effort-binding-mismatch',
+        `Observed ${agentType} frontmatter effort ${observedBinding.effort} does not match resolved effort ${effort}.`);
+    }
   }
   // A `thinking:` line in the agent frontmatter is NOT a documented subagent
   // control: subagents inherit thinking from the session. It is therefore a
@@ -325,22 +356,24 @@ function buildNativeInvocation(options) {
   // When it contradicts the model policy (Sonnet 5.5 + disabled) the caller
   // gets a separate diagnostic; explicit operator intent (the thinking pref)
   // is refused earlier by the resolver through the same policy.
-  const diagnostics = [];
-  if (observedBinding.thinking) {
+  const diagnostics = [...environmentDiagnostics];
+  if (observedBinding?.thinking) {
     const thinking = modelPolicy.evaluateThinking({ model, effort, mode: observedBinding.thinking });
     if (!thinking.ok) {
       diagnostics.push({ code: 'native-thinking-declaration-inert', agent: agentType,
         declared: observedBinding.thinking, model, policy_code: thinking.reason_code, layer: 'native-binding' });
     }
   }
-  const args = { subagent_type: agentType, prompt, model: modelArgument };
-  const telemetry = baseTelemetry(dispatch, modelArgument, null, caps);
-  telemetry.effort_transport = effortTransport;
-  telemetry.effort_transport_value = observedBinding.effort;
-  telemetry.effort_transport_source = observedBinding.source;
-  telemetry.effort_binding_observed = observedBinding.effort;
-  telemetry.effort_binding_observed_source = observedBinding.source;
-  telemetry.effort_binding_observed_fingerprint = observedBinding.source_fingerprint;
+  const args = { subagent_type: agentType, prompt, model: modelArgument,
+    ...(effortTransport === 'agent-argument' ? { effort } : {}) };
+  const telemetry = baseTelemetry(dispatch, modelArgument, effortTransport === 'agent-argument' ? effort : null, caps);
+  telemetry.effort_transport = effortTransport === 'agent-argument' ? 'native-argument' : effortTransport;
+  telemetry.effort_transport_value = effortTransport === 'agent-argument' ? effort : observedBinding.effort;
+  telemetry.effort_transport_source = effortTransport === 'agent-argument'
+    ? text(caps.source) || 'caller-supplied' : observedBinding.source;
+  telemetry.effort_binding_observed = observedBinding?.effort ?? null;
+  telemetry.effort_binding_observed_source = observedBinding?.source ?? null;
+  telemetry.effort_binding_observed_fingerprint = observedBinding?.source_fingerprint ?? null;
   // An alias is not evidence of the executed model version. Only entries that
   // declare it (Sonnet 5.5) gain these keys, and only on the alias path; every
   // other model keeps the exact pre-existing telemetry envelope. A full-id
@@ -407,6 +440,19 @@ function refusalLayer(code, refused, fallback) {
   return refused && refused.layer === 'review-policy' && refused.code === code ? 'review-policy' : fallback;
 }
 
+// Environment observations are fresh launch diagnostics, not stable arguments.
+// Preserve the exact historical journal identity when no such diagnostic exists.
+// Actual request/telemetry identity, arguments and every other diagnostic stay bound.
+function journalInvocation(invocation) {
+  if (!Array.isArray(invocation.diagnostics)) return invocation;
+  const diagnostics = invocation.diagnostics.filter(item => item.code !== 'native-effort-environment-observed');
+  if (diagnostics.length === invocation.diagnostics.length) return invocation;
+  const stable = { ...invocation };
+  if (diagnostics.length) stable.diagnostics = diagnostics;
+  else delete stable.diagnostics;
+  return stable;
+}
+
 async function invokeNative(options, invoke) {
   const started = Date.now();
   const telemetryApi = require('./forge-attempt-telemetry');
@@ -451,7 +497,7 @@ async function invokeNative(options, invoke) {
     const supervision = require('./forge-native-supervision');
     // The observer is a Forge capability for the host adapter, never a tool argument.
     supervised = await supervision.supervise({ ...options.lifecycle,
-      identity: supervision.digest(JSON.stringify({ invocation, identity: options.telemetryIdentity || null })),
+      identity: supervision.digest(JSON.stringify({ invocation: journalInvocation(invocation), identity: options.telemetryIdentity || null })),
       route: options.resolvedDispatch, terminal: options.terminalResult,
       dispatchId: options.telemetryIdentity?.dispatchId ?? null,
     }, observer => {
