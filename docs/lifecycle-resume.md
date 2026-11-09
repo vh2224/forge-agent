@@ -130,3 +130,134 @@ locators duráveis e perguntas pendentes. Sem incompletas, o terminal é preserv
 Pausas de planejamento apenas para entrada, sem `partial_attempt` durável,
 conservam o contrato de resposta humana; essa resposta nunca conclui uma execução
 parcial nem substitui receipt, reconciliação das raízes ou respostas por ID.
+
+## Owner encerrado com linhagem nativa sem receipt (#375)
+
+reconcilePartialSuccessors continua exigindo o mesmo owner e o receipt parcial
+canônico original. resumeOwner continua recusando leases presentes e história
+incompleta. Nenhum desses guards é removido para interpretar um relato nativo
+como receipt sidecar.
+
+O host pode encerrar essa linhagem como **interrompida e não verificada**, sem
+aceitar seus artefatos, por forge-runs.settleInterruptedOwner(cwd, milestoneId,
+options). Essa operação administrativa exige:
+
+- snapshot SHA atual do RunRecord conhecido, host/session efetivamente
+  observados e inventário ordenado exato do begin original e de todos os
+  sucessores; apenas uma linhagem do mesmo owner/host é admitida;
+- inspectInterruption vivo, vinculado ao key/checksum de cada begin: original
+  invoked-unverified, sucessores positivamente not-invoked, referência da
+  observação, inventário explícito de perguntas, raízes físicas completas,
+  receipt_path:null e saved_response:'none-observed';
+- processProbe retornando o literal stopped a partir da observação atual de
+  todas as identidades de processo/Agent relevantes, e reconcileRoots
+  comprovando cada raiz atual (root_id, process_stopped, reconciled);
+- callback vivo attestOwnerInterruption(challenge) que devolve o SHA canônico
+  do challenge, referência da atestação e os fatos previous_owner_stopped:true
+  e workspace_quiescent:true. É atestação confiável do operador/host,
+  explicitamente rotulada; não é prova automática do sistema operacional nem
+  um JSON approved.
+
+O challenge vincula snapshot, ator observado, begins e raízes. A função de hash
+é SHA-256 da string JSON com chaves de objetos recursivamente ordenadas (arrays
+preservam a ordem), como o checksum canônico do controller. Callbacks devem
+observar fatos reais; idade, lease expirada, owner inativo, ausência de receipt
+ou texto “partial” não provam esses fatos.
+
+A operação usa as cercas controller → registry → run e as guardas reais de cada
+lease. Um handle opaco, válido somente durante essa chamada, permite retirar
+apenas os bytes/generation antigos efetivamente observados. O token antigo não
+é adotado ou devolvido. Lease estrangeira, geração diferente, processo incerto,
+sucessor invocado, metadata desconhecida, inventário incompleto e prova canônica
+salva mantêm a recusa antes da primeira publicação. Transferência entre hosts
+diferentes permanece explicitamente owner-interruption-cross-host-unsupported.
+
+São acrescentados terminais administrativos failed, com worker_result:unverified,
+artifacts_accepted:false e chamada ao provedor unknown. Não se cria receipt de
+worker, resultado parcial canônico, SUMMARY, DELIVERY ou completion. Begins,
+receipts e fontes antigos ficam preservados, assim como o claim e perguntas
+pendentes do run.
+
+O manifesto durável preserva a base observada; as fases são retomadas pela mesma
+operação após uma interrupção, com callbacks vivos novamente. O histórico do run
+publica ao final um witness independente com os hashes exatos do manifesto e dos
+terminais. Sem esse witness, a forma de um terminal não fecha os begins nem
+autoriza reentrada. Uma operação incompleta impede novos begins e o resume
+ordinário; não apague os registros para liberar o fluxo.
+
+O retorno interrupted-and-transferred permite ao owner atual usar a reentrada
+canônica controller.reenter para a **mesma unidade original**, apontando para
+interruption.terminals[0] e seu checksum, com token novo, baseline reconciliada
+e autorização viva da nova entrada. A nova lease/generation é emitida pelo
+controller. O begin sucessor antigo não vira autorização para pular S01.
+Perguntas pendentes continuam exigindo respostas explícitas. A interrupção
+administrativa e a entrada nova não são delivery: só a entrega real da unidade
+nova permite seu fechamento normal.
+
+
+### Perguntas, retenção e capacidade da interrupção
+
+A falha original e o run preservam a união das perguntas observadas em todos os
+targets, inclusive sucessores não invocados. Uma pergunta vista somente em S02
+continua impedindo nova lease na reentrada de S01 até resposta explícita.
+
+remove e cleanupStale preservam witnesses de interrupções completas em
+.gsd/forge/owner-interruption-witnesses antes de apagar o RunRecord. O arquivo
+retém o mesmo vínculo verificável a manifesto, begins, terminais, resultados e
+eventos; não cria autorização nova nem entrega. Falha de arquivamento deixa o
+run intacto, e uma interrupção ainda pendente impede sua remoção. Raízes/owner
+atuais e autorização viva continuam obrigatórios para qualquer reentrada.
+
+A capacidade final do RunRecord é calculada com as perguntas combinadas e o
+formato exato do witness antes do primeiro manifesto ou terminal. O limite
+existente de64KiB não muda; falta de espaço recusa sem liberar leases nem
+publicar efeitos. O commit mantém uma conferência da mesma estrutura reservada.
+
+### Recibo anterior substituído na cadeia (#378)
+
+Há uma exceção opt-in à exigência de original sem receipt: um recibo canônico
+`ready/blocked` de um sidecar anterior pode ser preservado como evidência de
+uma tentativa substituída, quando a tentativa final da mesma unidade foi um
+worker nativo `partial`, sem receipt. Isso não aceita nenhum dos resultados.
+O encerramento continua administrativo `failed/unverified`, com
+`artifacts_accepted:false`. Sucessores continuam positivamente não invocados e
+sem receipt. Recibos atuais, `done`, `partial`, `executed` ou candidatos salvos
+continuam exigindo seu caminho de replay original.
+
+No retorno vivo de `inspectInterruption` para o original, o host fornece o
+`request` anterior exato, `receipt_path` real, `saved_response:'ready/blocked'`
+e `supersession` com:
+
+- `route_evidence:[{path,line,sha256}]`: referências a linhas existentes nos
+  eventos globais ou da própria milestone. `line` começa em1; o SHA-256 mede
+  os bytes UTF-8 da linha sem o LF final, preservando um eventual CR;
+- `final_native_attempt:{id,host_runtime,worker_mode:'native',status:'partial',
+  receipt_path:null,observation_reference}`: a identidade observada da tentativa
+  final, distinta do dispatch anterior, no mesmo host.
+
+Também é obrigatório o callback **vivo** `attestSupersededAttempt(challenge)`.
+Ele precisa conferir a relação real entre begin, request, recibo, avanço de
+rota registrado e tentativa nativa final. Retorna `challenge_sha256` pelo hash
+canônico do controller, `superseded:true`, `final_native_receiptless:true`,
+`final_native_status:'partial'` e uma `reference` estável e não vazia.
+Objetos JSON, texto `approved` e o nome de um evento não são essa atestação.
+Não há um schema universal comprovado para os eventos históricos de avanço;
+o callback do host é responsável por verificar seu significado e sua ordem.
+
+O core confere o caminho canônico, fingerprint, dispatch e identidade do recibo
+contra o request e o begin, observa também o processo do sidecar anterior e
+exige reconciliação de todas as raízes das tentativas. `processProbe` atende
+tanto a inspeção desse receipt quanto a observação atual do alvo nativo.
+Perguntas do receipt, de seu resultado e do contexto atual são combinadas sem
+dispensa de respostas. Os hashes do recibo e das linhas referenciadas, a
+observação nativa e a referência da atestação ficam na safety do manifesto.
+Cada retomada e cada fase terminal reconferem a mesma evidência; outro receipt
+ou outra observação não substituem a base persistida. Linhas novas de eventos
+podem ser acrescentadas sem alterar as linhas históricas referenciadas.
+
+Esta fronteira depende de observações confiáveis do host; não prova por si só
+que um worker histórico executou, que chamou o provedor ou que seu parcial foi
+verificado. Não fabrique um receipt nativo, apague o recibo anterior ou omita-o
+para passar pelo caminho antigo. A recuperação do consumidor real precisa ser
+executada pelo seu owner com os callbacks vivos e continua separada dos testes
+descartáveis de regressão do Forge.

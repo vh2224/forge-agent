@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/incomplete-resume/distribution.cjs');
+const unitEntry = require('./fixtures/superseded-owner/distribution.cjs');
 
 // forge-communication-surfaces.test.js — proves the orchestration and status
 // skills follow shared/forge-communication.md by POINTER, not by a second copy;

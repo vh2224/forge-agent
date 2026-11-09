@@ -889,11 +889,15 @@ function incompleteUnits(cwd, milestone) {
   const records = discoverRecords(cwd, 'transaction').filter(row => row.milestone === milestone);
   const closed = begin => records.some(row => row.phase === 'committed' && row.boundary?.handoff_ready === true
     && ['complete', 'pause', 'fail', 'expired-safe'].includes(row.action) && row.unit.key === begin.unit.key
-    && row.lease_generation === begin.lease_generation && row.owner_digest === begin.owner_digest);
+    && row.lease_generation === begin.lease_generation && row.owner_digest === begin.owner_digest
+    && (!row.owner_interruption || witnessedOwnerInterruption(cwd, row)));
   return records.filter(row => row.phase === 'committed' && (row.action === 'begin' && !closed(row)
     || row.action === 'pause' && row.result?.output?.partial_attempt
       && !records.some(next => next.action === 'begin' && next.resumed_pause?.key === row.idempotency_key
-        && next.resumed_pause.checksum === sha(row))));
+        && next.resumed_pause.checksum === sha(row))
+    || row.owner_interruption?.role === 'original' && witnessedOwnerInterruption(cwd, row)
+      && !records.some(next => next.action === 'begin' && next.phase === 'committed'
+        && next.linked_entry?.failure_key === row.idempotency_key && next.linked_entry.failure_checksum === sha(row))));
 }
 function partialQuestions(cwd, paused, options) {
   const original = paused.result.output.partial_attempt.pending_questions;
@@ -1080,7 +1084,10 @@ function publishEvent(cwd, milestone, event) {
       return;
     }
     const record = { ...event, sequence: events.length + 1 };
-    const content = events.concat(record).map(item => JSON.stringify(item)).join('\n') + '\n';
+    // Preserve historical UTF-8 line bytes (CRLF and formatting included).
+    // Re-serializing old records invalidates pinned route evidence mid-settle.
+    const previous = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+    const content = previous + (previous && !previous.endsWith('\n') ? '\n' : '') + JSON.stringify(record) + '\n';
     writeAtomic(file, content, true);
   });
 }
@@ -1406,8 +1413,387 @@ function projectLogicalHistory(cwd, milestone) {
 
 // Failure consumption is a new terminal transaction. The old begin, receipt,
 // candidate and recovery clock are immutable inputs, never patched history.
+function interruptionFile(cwd, id, archive = false) {
+  if (!/^[a-f0-9]{64}$/.test(id)) throw new ControllerError('owner-interruption-scope-mismatch', 'invalid operation id');
+  const file = path.join(rootDir(cwd), archive ? 'owner-interruption-witnesses' : 'owner-interruptions', id + '.json');
+  for (let cursor = file; cursor !== path.resolve(cwd); cursor = path.dirname(cursor)) {
+    if (fs.existsSync(cursor) && fs.lstatSync(cursor).isSymbolicLink()) throw new ControllerError('owner-interruption-path-invalid', 'linked interruption path');
+    if (cursor === path.dirname(cursor)) throw new ControllerError('owner-interruption-path-invalid', 'foreign interruption path');
+  }
+  return file;
+}
+function ownerInterruptionQuestions(basis) {
+  if (!Array.isArray(basis?.safety) || basis.safety.length !== basis.targets.length) throw new ControllerError('questions-invalid', 'complete interruption question inventory required');
+  return basis.safety.reduce((all, safety) => require('./forge-interaction').mergePendingQuestions(all, safety.pending_questions), []);
+}
+// A cleanup archive preserves existing completion authority; it never mints an
+// interruption, changes ownership, grants reentry or accepts worker artifacts.
+function storedOwnerInterruptionWitness(cwd, basis) {
+  const record = forgeRuns.get(cwd, basis.milestone);
+  const live = Array.isArray(record?.owner_resume_history) && record.owner_resume_history.find(row =>
+    row.kind === 'interrupted-owner-transfer' && row.operation_id === basis.operation_id);
+  const archived = readRecordJson(interruptionFile(cwd, basis.operation_id, true));
+  if (archived && (archived.schema_version !== 1 || archived.operation_id !== basis.operation_id
+    || archived.milestone !== basis.milestone || !archived.witness)) throw new ControllerError('owner-interruption-witness-invalid', 'invalid completion archive');
+  if (live && archived && sha(live) !== sha(archived.witness)) throw new ControllerError('owner-interruption-witness-invalid', 'live and archived witnesses differ');
+  const witness = live || archived?.witness;
+  if (witness) verifyOwnerInterruption(cwd, witness);
+  return witness || null;
+}
+function archiveOwnerInterruptionWitnesses(cwd, milestone) {
+  // The canonical remove caller holds its existing registry and run fences.
+  // Read the REAL registry; no caller-supplied witness is accepted here.
+  const record = forgeRuns.get(cwd, milestone);
+  const history = record?.owner_resume_history;
+  if (history !== undefined && !Array.isArray(history)) throw new ControllerError('owner-interruption-witness-invalid', 'unknown owner history');
+  const witnesses = (history || []).filter(row => row.kind === 'interrupted-owner-transfer');
+  if (pendingOwnerInterruptions(cwd).some(basis => basis.milestone === milestone)) throw new ControllerError('owner-interruption-pending', 'cannot remove an unfinished interruption anchor');
+  // Validate all before writing the first archive. A failure leaves the run.
+  const entries = witnesses.map(witness => {
+    const basis = verifyOwnerInterruption(cwd, witness);
+    return { file: interruptionFile(cwd, basis.operation_id, true), content: {
+      schema_version: 1, operation_id: basis.operation_id, milestone, witness: clone(witness) } };
+  });
+  for (const entry of entries) {
+    const previous = readRecordJson(entry.file);
+    if (previous && sha(previous) !== sha(entry.content)) throw new ControllerError('owner-interruption-witness-invalid', 'archive conflict');
+  }
+  for (const entry of entries) if (!fs.existsSync(entry.file)) writeAtomic(entry.file, entry.content);
+}
+
+function verifyOwnerInterruption(cwd, witness) {
+  const basis = readRecordJson(interruptionFile(cwd, witness.operation_id));
+  if (!basis || sha(basis) !== witness.manifest_sha256 || basis.run_before_sha256 !== witness.previous_record_sha256
+    || basis.milestone !== witness.milestone || !Array.isArray(witness.terminals)
+    || witness.terminals.length !== basis.targets.length) throw new ControllerError('owner-interruption-witness-invalid', 'interruption manifest differs');
+  for (let i = 0; i < basis.targets.length; i++) {
+    const target = basis.targets[i], pin = witness.terminals[i], begin = lookupRecord(cwd, 'transaction', target.begin_key);
+    const terminal = lookupRecord(cwd, 'transaction', target.terminal_key);
+    const result = terminal && lookupRecord(cwd, 'result', target.terminal_key);
+    const event = terminal && readEvents(eventsFile(cwd, basis.milestone)).find(row => row.idempotency_key === target.terminal_key);
+    const content = event && { ...event }; if (content) delete content.sequence;
+    if (!begin || sha(begin) !== target.begin_checksum || !terminal || pin.key !== target.terminal_key
+      || pin.sha256 !== sha(terminal) || terminal.phase !== 'committed' || terminal.action !== 'fail'
+      || terminal.owner_interruption?.operation_id !== witness.operation_id || terminal.owner_interruption.target_begin !== target.begin_key
+      || terminal.owner_interruption.manifest_sha256 !== sha(basis)
+      || terminal.owner_interruption.role !== (i === 0 ? 'original' : 'successor')
+      || i === 0 && sha(terminal.terminal_failure?.safety.pending_questions) !== sha(ownerInterruptionQuestions(basis))
+      || terminal.owner_digest !== begin.owner_digest || terminal.lease_generation !== begin.lease_generation
+      || terminal.unit.key !== begin.unit.key || terminal.milestone !== begin.milestone
+      || !terminal.boundary?.handoff_ready || terminal.result?.status !== 'failed'
+      || terminal.result?.output?.artifacts_accepted !== false || !result || sha(result) !== sha(terminal.result)
+      || !content || sha(content) !== sha(terminal.event)) throw new ControllerError('owner-interruption-witness-invalid', 'administrative terminal differs');
+  }
+  return basis;
+}
+function pendingOwnerInterruptions(cwd) {
+  const directory = path.join(rootDir(cwd), 'owner-interruptions');
+  if (!fs.existsSync(directory)) return [];
+  if (fs.lstatSync(directory).isSymbolicLink()) throw new ControllerError('owner-interruption-path-invalid', 'linked interruption directory');
+  return fs.readdirSync(directory).map(name => {
+    if (!/^[a-f0-9]{64}\.json$/.test(name)) throw new ControllerError('owner-interruption-path-invalid', 'unknown interruption entry');
+    const basis = readRecordJson(interruptionFile(cwd, name.slice(0, -5)));
+    const witness = basis && storedOwnerInterruptionWitness(cwd, basis);
+    if (witness) return null;
+    return basis;
+  }).filter(Boolean);
+}
+function witnessedOwnerInterruption(cwd, transaction) {
+  if (!transaction?.owner_interruption) return false;
+  const basis = readRecordJson(interruptionFile(cwd, transaction.owner_interruption.operation_id));
+  if (!basis) return false;
+  const witness = storedOwnerInterruptionWitness(cwd, basis);
+  if (!witness) return false;
+  return witness.terminals.some(pin => pin.key === transaction.idempotency_key && pin.sha256 === sha(transaction));
+}
+// Historical route-chain records have no universal dispatch-authority schema.
+// Read the referenced real lines, then require a LIVE host adapter to attest
+// their relationship to the original request and the final native attempt.
+function interruptionRouteEvidence(cwd, milestone, references) {
+  if (!Array.isArray(references) || !references.length || references.length > 64) {
+    throw new ControllerError('owner-interruption-supersession-invalid', 'recorded route evidence required');
+  }
+  const pathKey = file => require('./forge-code-roots').key(path.resolve(file));
+  const owner = fs.realpathSync.native(cwd);
+  // The owner may be reached through a platform alias (/var on macOS, an
+  // observed Windows junction). Only its exact protected descendants are
+  // traversed; links within .gsd remain forbidden.
+  const allowed = [undefined, milestone].map(id => ({ input: eventsFile(cwd, id), file: eventsFile(owner, id) }));
+  const seen = new Set();
+  return references.map(reference => {
+    if (!reference || typeof reference.path !== 'string' || !path.isAbsolute(reference.path)
+      || !Number.isSafeInteger(reference.line) || reference.line < 1
+      || !/^[a-f0-9]{64}$/.test(reference.sha256 || '')) {
+      throw new ControllerError('owner-interruption-supersession-invalid', 'exact owner event line required');
+    }
+    const matched = allowed.find(row => pathKey(reference.path) === pathKey(row.input) || pathKey(reference.path) === pathKey(row.file));
+    if (!matched) throw new ControllerError('owner-interruption-supersession-invalid', 'exact owner event line required');
+    const file = matched.file;
+    for (let cursor = file; pathKey(cursor) !== pathKey(owner); cursor = path.dirname(cursor)) {
+      if (fs.lstatSync(cursor).isSymbolicLink()) throw new ControllerError('owner-interruption-path-invalid', 'linked evidence path');
+    }
+    if (!fs.statSync(file).isFile()) throw new ControllerError('owner-interruption-supersession-invalid', 'event evidence is not a file');
+    const line = fs.readFileSync(file, 'utf8').split('\n')[reference.line - 1];
+    if (line === undefined || crypto.createHash('sha256').update(line).digest('hex') !== reference.sha256) {
+      throw new ControllerError('owner-interruption-evidence-changed', 'recorded event line differs');
+    }
+    let event; try { event = JSON.parse(line); } catch { throw new ControllerError('owner-interruption-supersession-invalid', 'invalid event evidence'); }
+    if (event.event !== 'route-chain-advance') throw new ControllerError('owner-interruption-supersession-invalid', 'a recorded route advance is required');
+    const key = file + ':' + reference.line;
+    if (seen.has(key)) throw new ControllerError('owner-interruption-supersession-invalid', 'duplicate event evidence');
+    seen.add(key);
+    return { path: fs.realpathSync.native(file), line: reference.line, sha256: reference.sha256 };
+  });
+}
+function inspectSupersededInterruption(cwd, begin, context, basis, held, options) {
+  const reject = () => { throw new ControllerError('saved-response-replay-required', 'canonical evidence must use its original replay path unless a live host proves supersession'); };
+  const supersession = context.supersession;
+  if (typeof options.attestSupersededAttempt !== 'function' || !supersession || !context.request
+    || context.saved_response !== 'ready/blocked' || typeof context.receipt_path !== 'string') reject();
+  const recovery = require('./forge-attempt-recovery'), sidecar = require('./forge-unit-sidecar');
+  const request = recovery.canonicalRequest(context.request), identity = recovery.requestIdentity(request);
+  if (`${identity.unit_type}/${identity.task_id || identity.slice_id || identity.milestone_id}` !== begin.unit.key
+    || identity.milestone_id !== begin.milestone || identity.host !== begin.host_runtime
+    || identity.owner !== (process.platform === 'win32' ? fs.realpathSync(cwd).toLowerCase() : fs.realpathSync(cwd))
+    || identity.slice_id && identity.slice_id !== begin.after.state.active_slice
+    || path.resolve(sidecar.artifactAttemptFiles(context.request).receiptFile) !== path.resolve(context.receipt_path)) {
+    throw new ControllerError('attempt-identity-mismatch', 'superseded request does not match the original begin');
+  }
+  const file = path.resolve(context.receipt_path);
+  for (let cursor = file; ; cursor = path.dirname(cursor)) {
+    if (fs.lstatSync(cursor).isSymbolicLink()) throw new ControllerError('owner-interruption-path-invalid', 'linked receipt path');
+    if (cursor === path.dirname(cursor)) break;
+  }
+  if (!fs.statSync(file).isFile()) reject();
+  const inspection = recovery.inspectReceipt(file, { request: context.request, processProbe: options.processProbe });
+  const receipt = inspection.receipt, fingerprint = sidecar.artifactFingerprint(context.request);
+  if (receipt.fingerprint !== fingerprint || receipt.dispatch_id !== context.request.dispatchId
+    || receipt.recovery_identity_sha256 && receipt.recovery_identity_sha256 !== require('./forge-code-roots').digest(identity)) {
+    throw new ControllerError('attempt-identity-mismatch', 'superseded receipt differs from its exact request');
+  }
+  if (receipt.phase !== 'ready' || receipt.result?.status !== 'blocked' || receipt.saved_candidate) reject();
+  if (inspection.process_stopped !== true) throw new ControllerError('process-not-stopped', 'earlier sidecar process is active or unknown');
+  const native = supersession.final_native_attempt;
+  if (!native || typeof native.id !== 'string' || !native.id.trim() || native.id === receipt.dispatch_id
+    || native.host_runtime !== begin.host_runtime || native.worker_mode !== 'native' || native.status !== 'partial'
+    || native.receipt_path !== null || typeof native.observation_reference !== 'string' || !native.observation_reference.trim()) reject();
+  const requestRoots = [...new Set([cwd, context.request.cwd, context.request.contextRoot,
+    ...(context.request.execution_contract?.code_roots || []).map(root => root.path)].filter(Boolean).map(root => fs.realpathSync.native(root)))].sort();
+  const evidence = { request_identity: identity, request_fingerprint: fingerprint, request_roots: requestRoots,
+    receipt: { path: fs.realpathSync.native(file), sha256: inspection.receipt_sha256, dispatch_id: receipt.dispatch_id, phase: 'ready', status: 'blocked' },
+    route_evidence: interruptionRouteEvidence(cwd, begin.milestone, supersession.route_evidence),
+    final_native_attempt: { id: native.id, host_runtime: native.host_runtime, worker_mode: 'native', status: 'partial',
+      receipt_path: null, observation_reference: native.observation_reference } };
+  const challenge = { operation_id: basis.operation_id, run_record_sha256: held.expectedRecordSha256,
+    begin_key: begin.idempotency_key, begin_checksum: sha(begin), unit: begin.unit.key, milestone: begin.milestone,
+    host_runtime: begin.host_runtime, owner_digest: begin.owner_digest, lease_generation: begin.lease_generation, evidence };
+  const attestation = options.attestSupersededAttempt(clone(challenge));
+  if (!attestation || attestation.challenge_sha256 !== sha(challenge) || attestation.superseded !== true
+    || attestation.final_native_receiptless !== true || attestation.final_native_status !== 'partial'
+    || typeof attestation.reference !== 'string' || !attestation.reference.trim()) {
+    throw new ControllerError('owner-interruption-supersession-attestation-required', 'live host must verify actual chain advance and final native observation');
+  }
+  // The callback may inspect tools/files; recheck the very same immutable data.
+  if (crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') !== evidence.receipt.sha256
+    || sha(interruptionRouteEvidence(cwd, begin.milestone, evidence.route_evidence)) !== sha(evidence.route_evidence)) {
+    throw new ControllerError('owner-interruption-evidence-changed', 'superseded evidence changed during attestation');
+  }
+  const merge = require('./forge-interaction').mergePendingQuestions;
+  return { evidence: { ...evidence, attestation_reference: attestation.reference },
+    questions: merge(merge(receipt.input_pending_questions || [], receipt.pending_questions || []), receipt.result.questions || []) };
+}
+function inspectInterruptionTargets(cwd, handle, basis, options) {
+  const mutex = ownerActivityLocks.get(path.resolve(cwd));
+  if (!mutex || !forgeLock.assertOwned(mutex)) throw new ControllerError('owner-interruption-fence-lost', 'controller fence lost');
+  const held = forgeRuns.assertOwnerInterruptionAuthority(handle, cwd);
+  const required = [cwd];
+  if (held.record.write_claim && require('./forge-write-claim').isHeld(held.record.write_claim)) require('./forge-write-claim').validateHeldClaim(held.record.write_claim);
+  if (held.record.write_claim) required.push(...require('./forge-code-roots').claimGroups(held.record.write_claim).map(row => row.path));
+  const proofs = [];
+  for (let i = 0; i < basis.targets.length; i++) {
+    const target = basis.targets[i], begin = lookupRecord(cwd, 'transaction', target.begin_key);
+    if (!begin || sha(begin) !== target.begin_checksum) throw new ControllerError('owner-interruption-lineage-changed', 'begin changed');
+    const context = options.inspectInterruption({ cwd, run: clone(held.record), begin: clone(begin),
+      role: i === 0 ? 'original' : 'successor', operation_id: basis.operation_id });
+    if (!context || context.begin_key !== target.begin_key || context.begin_checksum !== target.begin_checksum
+      || typeof context.observation_reference !== 'string' || !context.observation_reference.trim()) throw new ControllerError('owner-interruption-evidence-missing', 'positive begin-bound host observation required');
+    if (context.invocation_status !== (i === 0 ? 'invoked-unverified' : 'not-invoked')) throw new ControllerError('owner-interruption-invocation-unknown', 'original unverified / successor not-invoked required');
+    let superseded = null;
+    if (context.receipt_path !== null || context.saved_response !== 'none-observed') {
+      if (i !== 0) throw new ControllerError('saved-response-replay-required', 'successors must remain positively uninvoked and receiptless');
+      superseded = inspectSupersededInterruption(cwd, begin, context, basis, held, options);
+    }
+    if (!Array.isArray(context.pending_questions)) throw new ControllerError('questions-invalid', 'explicit question inventory required');
+    const merge = require('./forge-interaction').mergePendingQuestions;
+    const pending = merge(merge(held.record.pending_questions || [], context.pending_questions), superseded?.questions || []);
+    const roots = physicalRoots(context.roots);
+    if (required.some(file => !roots.some(root => root.path === fs.realpathSync.native(file)))) throw new ControllerError('roots-unverified', 'interruption omitted a physical root');
+    if (superseded && superseded.evidence.request_roots.some(file => !roots.some(root => root.path === file))) {
+      throw new ControllerError('roots-unverified', 'interruption omitted a superseded attempt root');
+    }
+    if (options.processProbe({ cwd, begin: clone(begin), context, purpose: 'owner-interruption' }) !== 'stopped') throw new ControllerError('process-not-stopped', 'old native/process identity is active or unknown');
+    for (const root of roots) {
+      const proof = options.reconcileRoots({ cwd, root, context, begin: clone(begin) });
+      if (!proof || proof.root_id !== root.root_id || proof.process_stopped !== true || proof.reconciled !== true) throw new ControllerError('roots-unreconciled', 'interruption root not reconciled');
+    }
+    proofs.push({ roots, pending_questions: pending, invocation_status: context.invocation_status,
+      observation_reference: context.observation_reference, receipt_sha256: superseded?.evidence.receipt.sha256 || null,
+      ...(superseded ? { superseded_attempt: superseded.evidence } : {}),
+      historical_reason: 'owner-stopped-unverified-lineage', provenance_gaps: ['receiptless-legacy-native'],
+      process_stopped: true, roots_reconciled: true });
+  }
+  const challenge = { operation_id: basis.operation_id, record_sha256: held.expectedRecordSha256,
+    milestone: basis.milestone, actor: held.actor, targets: basis.targets.map(row => ({ begin_key: row.begin_key, begin_checksum: row.begin_checksum })),
+    roots: proofs.map(row => row.roots),
+    ...(proofs.some(row => row.superseded_attempt) ? { superseded_attempts: proofs.map(row => row.superseded_attempt || null) } : {}) };
+  const attestation = options.attestOwnerInterruption(clone(challenge));
+  if (!attestation || attestation.challenge_sha256 !== sha(challenge) || attestation.previous_owner_stopped !== true
+    || attestation.workspace_quiescent !== true || typeof attestation.reference !== 'string' || !attestation.reference.trim()) throw new ControllerError('owner-interruption-attestation-required', 'live host must attest stopped owner and reconciled workspace');
+  const safetyIdentity = rows => rows.map(row => ({ roots: row.roots, pending_questions: row.pending_questions,
+    ...(row.superseded_attempt ? { receipt_sha256: row.receipt_sha256, superseded_attempt: row.superseded_attempt } : {}) }));
+  if (basis.safety && sha(safetyIdentity(basis.safety)) !== sha(safetyIdentity(proofs))) {
+    throw new ControllerError('owner-interruption-evidence-changed', 'interruption roots/questions/attempt evidence changed');
+  }
+  return proofs;
+}
+function ownerInterruptionIdentity(milestone, recordSha256, lineage) { return sha({ milestone, record_sha256: recordSha256, lineage }); }
+function settleInterruptedLineage(cwd, handle, options) {
+  const held = forgeRuns.assertOwnerInterruptionAuthority(handle, cwd), input = object(options.lineage, 'lineage');
+  const operationId = ownerInterruptionIdentity(held.record.id, held.expectedRecordSha256, input);
+  const file = interruptionFile(cwd, operationId);
+  let basis = readRecordJson(file);
+  if (basis && (basis.schema_version !== 1 || !Array.isArray(basis.targets) || !Array.isArray(basis.safety))) throw new ControllerError('owner-interruption-lineage-changed', 'malformed durable interruption basis');
+  const first = lookupRecord(cwd, 'transaction', input.begin_key);
+  if (!first || first.action !== 'begin' || first.phase !== 'committed' || first.milestone !== held.record.id
+    || first.host_runtime !== held.record.host_runtime || input.begin_checksum !== sha(first)
+    || !Array.isArray(input.successors)) throw new ControllerError('owner-interruption-lineage-invalid', 'exact original begin and all successors required');
+  const roster = [first, ...laterBegins(cwd, first)];
+  if (roster.some(row => row.owner_digest !== first.owner_digest || row.host_runtime !== held.record.host_runtime)) throw new ControllerError('owner-interruption-foreign-lineage', 'foreign owner/host begin cannot be administratively retired');
+  const transactions = transactionDir(cwd);
+  if (fs.existsSync(transactions)) {
+    if (fs.lstatSync(transactions).isSymbolicLink()) throw new ControllerError('owner-resume-transactions-unknown', 'linked transaction directory');
+    for (const name of fs.readdirSync(transactions)) {
+      const entry = fs.lstatSync(path.join(transactions, name));
+      if (!name.endsWith('.json') || !entry.isFile() || entry.isSymbolicLink()) throw new ControllerError('owner-resume-transactions-unknown', 'unknown transaction debris');
+    }
+  }
+  if (roster.length < 2 || sha(input.successors) !== sha(roster.slice(1).map(row => ({ key: row.idempotency_key, checksum: sha(row) })))) throw new ControllerError('owner-interruption-lineage-invalid', 'ordered successor roster differs');
+  if (new Set(roster.map(row => row.unit.key)).size !== roster.length) throw new ControllerError('owner-interruption-lineage-invalid', 'repeated unit targets unsupported');
+  const terminalKeys = roster.map(row => 'owner-interruption:' + sha({ operation_id: operationId, begin_key: row.idempotency_key }));
+  const unrelated = pendingTransactions(cwd).filter(row => !terminalKeys.includes(row.idempotency_key));
+  if (unrelated.length) throw new ControllerError('transaction-pending', 'unrelated pending transaction blocks interruption');
+  if (pendingOwnerInterruptions(cwd).some(row => row.operation_id !== operationId)) throw new ControllerError('owner-interruption-pending', 'another administrative interruption remains pending');
+  const records = discoverRecords(cwd, 'transaction');
+  if (incompleteUnits(cwd, held.record.id).some(row => !roster.some(begin => begin.idempotency_key === row.idempotency_key))
+    || records.some(row => row.milestone === held.record.id && !terminalKeys.includes(row.idempotency_key)
+      && roster.some(begin => row.action !== 'begin' && row.unit.key === begin.unit.key && row.lease_generation === begin.lease_generation))) throw new ControllerError('owner-interruption-lineage-invalid', 'foreign terminal or unfinished unit exists');
+  const locks = path.join(rootDir(cwd), 'file-locks');
+  if (fs.existsSync(locks) && (fs.lstatSync(locks).isSymbolicLink() || fs.readdirSync(locks).length)) throw new ControllerError('owner-resume-file-lock-present', 'unreconciled legacy file lock');
+  const leaseFiles = roster.map(row => path.basename(forgeLease.leaseFile(cwd, row.unit.key)));
+  const leaseDir = forgeLease.leasesDir(cwd);
+  if (fs.existsSync(leaseDir) && (fs.lstatSync(leaseDir).isSymbolicLink() || fs.readdirSync(leaseDir).some(name => !leaseFiles.includes(name)))) throw new ControllerError('owner-resume-lease-present', 'foreign/unknown lease blocks interruption');
+  if (!basis) {
+    basis = { schema_version: 1, operation_id: operationId, milestone: held.record.id,
+      run_before_sha256: held.expectedRecordSha256, claim_sha256: sha(held.record.write_claim || null),
+      previous_host_runtime: held.record.host_runtime, previous_session_sha256: sha(held.record.session_id),
+      actor: { host_runtime: held.actor.hostRuntime, session_sha256: sha(held.actor.sessionId) },
+      targets: roster.map((row, i) => {
+        const leaseFile = forgeLease.leaseFile(cwd, row.unit.key), observed = forgeLease.readLease(leaseFile);
+        if (observed.corrupt || observed.record && (!forgeLease.validRecord(observed.record, row.unit.key)
+          || observed.record.generation !== row.lease_generation || ownerDigest(observed.record.owner_token) !== row.owner_digest)) throw new ControllerError('lease-owner-mismatch', 'old generation/owner differs');
+        return { operation_id: operationId, begin_key: row.idempotency_key, begin_checksum: sha(row), unit: row.unit.key,
+          generation: row.lease_generation, terminal_key: terminalKeys[i], lease_sha256: observed.record ? sha(fs.readFileSync(leaseFile).toString('utf8')) : null };
+      }) };
+  } else if (basis.operation_id !== operationId || basis.run_before_sha256 !== held.expectedRecordSha256
+    || basis.claim_sha256 !== sha(held.record.write_claim || null)
+    || sha(basis.targets.map(row => row.begin_checksum)) !== sha(roster.map(sha))) throw new ControllerError('owner-interruption-lineage-changed', 'durable interruption basis differs');
+  for (let i = 0; i < roster.length; i++) {
+    const begin = roster[i], target = basis.targets[i];
+    if (!target || target.operation_id !== operationId || target.begin_key !== begin.idempotency_key
+      || target.unit !== begin.unit.key || target.generation !== begin.lease_generation || target.terminal_key !== terminalKeys[i]
+      || target.lease_sha256 !== null && !/^[a-f0-9]{64}$/.test(target.lease_sha256)) throw new ControllerError('owner-interruption-lineage-changed', 'durable target differs');
+    const observed = forgeLease.readLease(forgeLease.leaseFile(cwd, begin.unit.key));
+    if (observed.corrupt || observed.record && (!forgeLease.validRecord(observed.record, begin.unit.key)
+      || observed.record.generation !== begin.lease_generation || ownerDigest(observed.record.owner_token) !== begin.owner_digest)) throw new ControllerError('lease-owner-mismatch', 'target owner/generation changed');
+  }
+  const proofs = inspectInterruptionTargets(cwd, handle, basis, options);
+  forgeRuns.bindOwnerInterruptionAuthority(handle, cwd, basis);
+  // Validate EVERY target before writing any intent or releasing the first lease.
+  for (const target of basis.targets) {
+    const checked = forgeLease.withTerminalGuard(cwd, target.unit, guard => forgeLease.inspectInterrupted(guard, handle, cwd, target.unit));
+    if (!checked.ok) throw new ControllerError('lease-owner-mismatch', checked.reason);
+  }
+  if (!basis.safety) basis.safety = proofs;
+  forgeRuns.assertOwnerInterruptionCapacity(handle, cwd, basis);
+  if (!fs.existsSync(file)) { writeAtomic(file, basis); fail(options, 'owner-interruption-after-manifest'); }
+  for (let i = basis.targets.length - 1; i >= 0; i--) {
+    const target = basis.targets[i], begin = roster[i];
+    const output = forgeLease.withTerminalGuard(cwd, target.unit, guard => {
+      let tx = lookupRecord(cwd, 'transaction', target.terminal_key);
+      const check = () => {
+        forgeRuns.assertOwnerInterruptionAuthority(handle, cwd, target.unit);
+        inspectInterruptionTargets(cwd, handle, basis, options);
+        const checked = forgeLease.inspectInterrupted(guard, handle, cwd, target.unit);
+        if (!checked.ok) throw new ControllerError('lease-owner-mismatch', checked.reason);
+      };
+      check();
+      if (!tx) {
+        tx = makeTransaction(cwd, { milestone: basis.milestone,
+          result: { status: 'failed', reason_code: 'owner-stopped-unverified-lineage', output: {
+            administrative_interruption: true, worker_result: 'unverified', artifacts_accepted: false, provider_called: 'unknown' } },
+          state_patch: { phase: 'blocked', active_slice: first.after.state.active_slice, active_task: '\u2014', owner: null } },
+        'fail', begin.unit, target.terminal_key, 'administrative-interruption-not-an-old-owner-token',
+        begin.lease_generation, begin.host_runtime, nowOf(options));
+        // These are TARGET namespace fields for closing the old begin, not an
+        // adopted credential. The actual actor and trust mechanism are separate.
+        tx.owner_digest = begin.owner_digest;
+        tx.owner_interruption = { operation_id: operationId, target_begin: begin.idempotency_key,
+          manifest_sha256: sha(basis), role: i === 0 ? 'original' : 'successor', actor: clone(basis.actor) };
+        if (i === 0) tx.terminal_failure = { kind: 'owner-interruption', begin_key: begin.idempotency_key,
+          begin_checksum: sha(begin), slice: begin.after.state.active_slice,
+          safety: { ...basis.safety[i], pending_questions: ownerInterruptionQuestions(basis) } };
+        saveTransaction(cwd, tx, nowOf(options), options); fail(options, 'owner-interruption-after-intent');
+      }
+      if (tx.owner_interruption?.operation_id !== operationId || tx.owner_interruption.manifest_sha256 !== sha(basis)) throw new ControllerError('record-conflict', 'interruption terminal differs');
+      if (tx.phase === 'intent') { check(); publishResult(cwd, tx.result); setPhase(cwd, tx, 'result-published', options); }
+      if (tx.phase === 'result-published') { check(); publishEvent(cwd, tx.milestone, tx.event); setPhase(cwd, tx, 'event-published', options); }
+      if (tx.phase === 'event-published') { check(); publishBoundary(cwd, tx.boundary); setPhase(cwd, tx, 'boundary-pending', options); }
+      if (tx.phase === 'boundary-pending') {
+        check(); const current = logicalState(forgeState.read(cwd, begin.milestone));
+        for (const key of Object.keys(tx.after.state_patch)) {
+          if (Object.prototype.hasOwnProperty.call(tx.after.state, key)
+            && stableStringify(current[key]) !== stableStringify(tx.before.state[key])
+            && stableStringify(current[key]) !== stableStringify(tx.after.state[key])) throw new ControllerError('state-successor-conflict', 'administrative STATE patch conflicts with current state');
+        }
+        publishState(cwd, tx); setPhase(cwd, tx, 'state-published', options);
+      }
+      if (tx.phase === 'state-published') { check(); setPhase(cwd, tx, 'lease-release-pending', options); }
+      if (tx.phase === 'lease-release-pending') { check(); const released = forgeLease.releaseInterrupted(guard, handle, cwd, target.unit);
+        if (!released.ok) throw new ControllerError('lease-owner-mismatch', released.reason); setPhase(cwd, tx, 'lease-released', options); }
+      if (tx.phase === 'lease-released') { check(); tx.boundary.handoff_ready = true; tx.boundary.committed_at = iso(nowOf(options));
+        publishBoundary(cwd, tx.boundary); setPhase(cwd, tx, 'boundary-ready', options); }
+      if (tx.phase === 'boundary-ready') { check(); setPhase(cwd, tx, 'committed', options); }
+      return { ok: true };
+    });
+    if (!output.ok) throw new ControllerError('lease-owner-mismatch', output.reason);
+  }
+  fail(options, 'owner-interruption-before-owner-transfer');
+  return { operation_id: operationId, milestone: basis.milestone, manifest_sha256: sha(basis),
+    terminals: basis.targets.map(target => ({ key: target.terminal_key, sha256: sha(lookupRecord(cwd, 'transaction', target.terminal_key)) })) };
+}
+function assertInterruptedEntryActor(cwd, failure, input, options) {
+  if (!witnessedOwnerInterruption(cwd, failure)) throw new ControllerError('owner-interruption-witness-invalid', 'unwitnessed administrative failure');
+  const record = forgeRuns.get(cwd, failure.milestone);
+  if (Array.isArray(record?.pending_decisions) && record.pending_decisions.length) throw new ControllerError('pending-questions', 'run decisions remain unresolved');
+  const observed = forgeRuns.observeHostSession(input.host_runtime, options.expectedSession);
+  if (!record || record.active !== true || !forgeRuns.knownResumeBinding(record) || !observed
+    || record.host_runtime !== observed.hostRuntime || record.session_id !== observed.sessionId
+    || ownerDigest(input.owner_token) === failure.owner_digest) throw new ControllerError('owner-interruption-actor-mismatch', 'current observed owner and a new token are required');
+}
+
 function verifiedFailure(cwd, transaction) {
   if (!transaction?.terminal_failure || transaction.phase !== 'committed') return null;
+  if (transaction.owner_interruption && !witnessedOwnerInterruption(cwd, transaction)) return null;
   const begin = lookupRecord(cwd, 'transaction', transaction.terminal_failure.begin_key);
   const result = lookupRecord(cwd, 'result', transaction.idempotency_key);
   const event = readEvents(eventsFile(cwd, transaction.milestone)).find(item => item.idempotency_key === transaction.idempotency_key);
@@ -1421,7 +1807,7 @@ function verifiedFailure(cwd, transaction) {
 function failureProjection(cwd, milestone) {
   const records = discoverRecords(cwd, 'transaction');
   const failures = records.filter(item => item.milestone === milestone && item.terminal_failure && item.phase === 'committed')
-    .map(item => verifiedFailure(cwd, item));
+    .map(item => verifiedFailure(cwd, item)).filter(Boolean);
   for (const failure of failures) {
     const entries = records.filter(item => item.action === 'begin' && item.phase === 'committed'
       && item.linked_entry && item.linked_entry.failure_key === failure.transaction.idempotency_key);
@@ -1445,7 +1831,7 @@ function failureAncestors(cwd, key) {
       || begin.after.state.active_slice !== failure.terminal_failure.slice
       || expected && (expected.failure_checksum !== sha(failure) || expected.unit !== failure.unit.key
         || expected.milestone !== failure.milestone || expected.slice !== failure.terminal_failure.slice
-        || expected.owner_digest !== failure.owner_digest || expected.host_runtime !== failure.host_runtime
+        || expected.owner_digest !== failure.owner_digest && !failure.owner_interruption || expected.host_runtime !== failure.host_runtime
         || sha(expected.roots) !== sha(failure.terminal_failure.safety.roots)
         || expected.begin_checksum !== failure.terminal_failure.begin_checksum)) {
       throw new ControllerError('entry-ancestry-invalid', 'failure ancestry identity mismatch');
@@ -1463,6 +1849,7 @@ function failureAncestors(cwd, key) {
   return keys;
 }
 function assertUnitAvailable(cwd, milestone, unit, slice, options, linked = {}) {
+  if (pendingOwnerInterruptions(cwd).length) throw new ControllerError('owner-interruption-pending', 'administrative interruption has not been committed by its owner');
   if (pendingTransactions(cwd).some(item => item.idempotency_key !== linked.transactionKey && (item.terminal_failure || item.linked_entry))) throw new ControllerError('transaction-pending', 'transação vinculada incompleta impede begin');
   const ancestors = linked.failureKey ? failureAncestors(cwd, linked.failureKey) : new Set();
   const failures = failureProjection(cwd, milestone).filter(item => !ancestors.has(item.transaction.idempotency_key));
@@ -1897,9 +2284,10 @@ function reenter(cwd, request, options = {}) {
     const input = object(request, 'request'), failure = lookupRecord(cwd, 'transaction', input.entry?.failure_key);
     const verified = failure && verifiedFailure(cwd, failure);
     if (!verified || input.entry.failure_checksum !== sha(failure) || failure.unit.key !== unitFromRequest(input).key || failure.milestone !== input.milestone
-      || failure.owner_digest !== ownerDigest(input.owner_token)
+      || !failure.owner_interruption && failure.owner_digest !== ownerDigest(input.owner_token)
       || failure.host_runtime !== forgeRuntime.normalizeHostRuntime(input.host_runtime)) throw new ControllerError('entry-failure-mismatch', 'falha consumida não corresponde à entrada');
     failureAncestors(cwd, failure.idempotency_key);
+    if (failure.owner_interruption) assertInterruptedEntryActor(cwd, failure, input, options);
     const linked = entryScope(cwd, input, failure, options), key = `linked-entry:${sha(linked.entry_id)}`;
     const questions = currentEntryQuestions(cwd, failure, options);
     assertQuestionsResolved(questions);
@@ -1975,6 +2363,7 @@ function validateLinkedScope(cwd, key, options) {
   failureAncestors(cwd, linked.failure_key);
   if (!failure || linked.failure_checksum !== sha(failure)) throw new ControllerError('entry-conflict', 'linked failure changed');
   const ownerToken = options.ownerToken;
+  if (failure.owner_interruption) assertInterruptedEntryActor(cwd, failure, { owner_token: ownerToken, host_runtime: linked.host_runtime }, options);
   const live = entryScope(cwd, { owner_token: ownerToken, host_runtime: linked.host_runtime,
     entry: { entry_id: linked.entry_id, authorization_ref: linked.authorization_ref } }, failure, options);
   if (sha(live) !== sha(linked)) throw new ControllerError('entry-conflict', 'entrada mudou desde autorização');
@@ -2050,6 +2439,8 @@ module.exports = {
   resultFile, boundaryFile, readEvents, readJson, writeAtomic,
   lookupRecord, preflightPaths,
   consumeFailure, reenter, failureProjection, validateLinkedEntry, validateTerminalLinkedEntry, sliceClosure,
+  settleInterruptedLineage, verifyOwnerInterruption, pendingOwnerInterruptions, ownerInterruptionIdentity,
+  ownerInterruptionQuestions, archiveOwnerInterruptionWitnesses,
   dependencies: { forgeState, forgeRuns, forgePrefs, forgeRuntime, forgeIds, forgeLease },
 };
 

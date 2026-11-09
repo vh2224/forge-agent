@@ -465,7 +465,10 @@ function updateWith(cwd, id, mutator, guard) {
 function remove(cwd, id, guard) {
   return withRegistryFence(cwd, () => withRunLock(cwd, id, () => {
     const f = runFile(cwd, id);
-    if (fs.existsSync(f)) fs.unlinkSync(f);
+    if (fs.existsSync(f)) {
+      require('./forge-unit-controller').archiveOwnerInterruptionWitnesses(cwd, id);
+      fs.unlinkSync(f);
+    }
     refreshLegacyAlias(cwd);
   }), guard);
 }
@@ -629,6 +632,7 @@ function inspectOwnerResume(cwd, id, options = {}) {
 }
 function assertResumeQuiescence(cwd, record, nextHost, noLeases, partialOptions) {
   const controller = require('./forge-unit-controller');
+  if (controller.pendingOwnerInterruptions(cwd).length) throw resumeError('owner-interruption-pending');
   const empty = directory => {
     let handle;
     try { const stat = fs.lstatSync(directory); if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
@@ -667,6 +671,101 @@ function assertResumeQuiescence(cwd, record, nextHost, noLeases, partialOptions)
   if (!noLeases()) throw resumeError('owner-resume-lease-present');
   return { unit: handoff.unit, result_checksum: handoff.result_checksum, committed_at: handoff.committed_at };
 }
+// Administrative interruption is deliberately separate from resumeOwner and
+// receipt-backed partial recovery. The actor does not acquire an old token.
+const ownerInterruptionAuthorities = new WeakMap();
+function assertOwnerInterruptionAuthority(handle, cwd, unit) {
+  const held = ownerInterruptionAuthorities.get(handle);
+  if (!held || held.cwd !== fs.realpathSync.native(cwd)) throw resumeError('owner-interruption-authority-required');
+  held.assertCurrent();
+  if (unit === undefined) return { record: held.record, actor: held.actor, expectedRecordSha256: held.sha256 };
+  const target = held.basis?.targets.find(row => row.unit === unit);
+  if (!target) throw resumeError('owner-interruption-scope-mismatch');
+  return JSON.parse(JSON.stringify(target));
+}
+function bindOwnerInterruptionAuthority(handle, cwd, basis) {
+  const held = ownerInterruptionAuthorities.get(handle);
+  assertOwnerInterruptionAuthority(handle, cwd);
+  if (held.basis || basis.run_before_sha256 !== held.sha256 || basis.milestone !== held.record.id) throw resumeError('owner-interruption-scope-mismatch');
+  held.basis = JSON.parse(JSON.stringify(basis));
+}
+function interruptedOwnerSize(record, patch) {
+  // Match updateWith/get's exact normalization and writeAtomic's JSON format,
+  // including additive read defaults materialized by the eventual write.
+  return Buffer.byteLength(JSON.stringify(Object.assign({}, withAddressDefaults(record), normalizeMetadataPatch(patch)), null, 2));
+}
+function interruptedOwnerPatch(record, actor, snapshotSha256, interruption, questions, clock) {
+  const evidence = { kind: 'interrupted-owner-transfer', at: clock.at,
+    previous_record_sha256: snapshotSha256, previous_session_sha256: resumeDigest(record.session_id),
+    previous_host_runtime: record.host_runtime, current_session_sha256: resumeDigest(actor.sessionId),
+    current_host_runtime: actor.hostRuntime, mechanism: 'trusted-caller-attestation-v1',
+    os_process_death_proven: false, artifacts_accepted: false, ...interruption };
+  return { evidence, patch: { session_id: actor.sessionId, host_runtime: actor.hostRuntime, owner_session_source: actor.source,
+    active: true, last_heartbeat: clock.last_heartbeat, worker: null, worker_started: null, worker_slice: null,
+    pending_questions: questions, owner_resume_history: (record.owner_resume_history || []).concat(evidence) } };
+}
+function assertOwnerInterruptionCapacity(handle, cwd, basis) {
+  const held = ownerInterruptionAuthorities.get(handle);
+  assertOwnerInterruptionAuthority(handle, cwd);
+  if (!held.basis || basis.operation_id !== held.basis.operation_id) throw resumeError('owner-interruption-scope-mismatch');
+  const controller = require('./forge-unit-controller'), questions = controller.ownerInterruptionQuestions(basis);
+  // Every unknown terminal/manifest hash is lowercase hexadecimal of exactly64
+  // bytes in the final JSON. All other bytes and the clock are already fixed.
+  const preview = { operation_id: basis.operation_id, milestone: basis.milestone, manifest_sha256: '0'.repeat(64),
+    terminals: basis.targets.map(target => ({ key: target.terminal_key, sha256: '0'.repeat(64) })) };
+  const planned = interruptedOwnerPatch(held.record, held.actor, held.sha256, preview, questions, held.transferClock);
+  const bytes = interruptedOwnerSize(held.record, planned.patch);
+  if (bytes > 65536) throw resumeError('owner-resume-history-limit');
+  held.capacity = { bytes, questions_sha256: controller.ownerInterruptionIdentity(basis.milestone, held.sha256, questions) };
+}
+
+function settleInterruptedOwner(cwd, id, options = {}) {
+  const actor = observedResumeOwner(options);
+  if (!/^[a-f0-9]{64}$/.test(options.expectedRecordSha256 || '')) throw resumeError('owner-resume-snapshot-required');
+  if (typeof options.inspectInterruption !== 'function' || typeof options.processProbe !== 'function'
+    || typeof options.reconcileRoots !== 'function' || typeof options.attestOwnerInterruption !== 'function') throw resumeError('owner-interruption-inspector-required');
+  return require('./forge-unit-controller').withOwnerBoundary(cwd, boundaryGuard => withRegistryFence(cwd, registryGuard => {
+    const controller = require('./forge-unit-controller'), snapshot = resumeRecord(cwd, id), record = snapshot.record;
+    if (!knownResumeBinding(record) || record.kind !== 'milestone') throw resumeError('owner-resume-binding-unknown');
+    const historical = record.owner_resume_history || [];
+    if (!Array.isArray(historical)) throw resumeError('owner-resume-history-unknown');
+    const previous = historical.find(row => row.kind === 'interrupted-owner-transfer'
+      && row.previous_record_sha256 === options.expectedRecordSha256);
+    if (previous) {
+      if (record.session_id !== actor.sessionId || record.host_runtime !== actor.hostRuntime) throw resumeError('owner-interruption-actor-mismatch');
+      const identity = controller.ownerInterruptionIdentity(id, options.expectedRecordSha256, options.lineage);
+      if (identity !== previous.operation_id) throw resumeError('owner-interruption-lineage-invalid');
+      controller.verifyOwnerInterruption(cwd, previous);
+      return { status: 'already-settled', record: get(cwd, id), interruption: previous };
+    }
+    if (snapshot.sha256 !== options.expectedRecordSha256) throw resumeError('owner-resume-snapshot-changed');
+    if (record.host_runtime !== actor.hostRuntime) throw resumeError('owner-interruption-cross-host-unsupported');
+    const handle = Object.freeze({});
+    const assertCurrent = () => {
+      const fenced = registryGuards.get(registryGuard);
+      if (!fenced || !lock.assertOwned(fenced.handle)) throw resumeError('owner-interruption-fence-lost');
+      const current = observedResumeOwner(options);
+      if (current.sessionId !== actor.sessionId || current.hostRuntime !== actor.hostRuntime || current.source !== actor.source) throw resumeError('owner-session-unavailable');
+      if (resumeRecord(cwd, id).sha256 !== snapshot.sha256) throw resumeError('owner-resume-snapshot-changed');
+    };
+    ownerInterruptionAuthorities.set(handle, { cwd: fs.realpathSync.native(cwd), record, actor, sha256: snapshot.sha256, assertCurrent,
+      transferClock: { at: new Date().toISOString(), last_heartbeat: Date.now() } });
+    try {
+      const interruption = controller.settleInterruptedLineage(cwd, handle, options);
+      controller.verifyOwnerInterruption(cwd, { ...interruption, previous_record_sha256: snapshot.sha256 });
+      assertCurrent();
+      if (!boundaryGuard.noLeases()) throw resumeError('owner-resume-lease-present');
+      const held = ownerInterruptionAuthorities.get(handle), basis = controller.verifyOwnerInterruption(cwd, { ...interruption, previous_record_sha256: snapshot.sha256 });
+      const questions = controller.ownerInterruptionQuestions(basis);
+      const { evidence, patch } = interruptedOwnerPatch(record, actor, snapshot.sha256, interruption, questions, held.transferClock);
+      if (!held.capacity || held.capacity.questions_sha256 !== controller.ownerInterruptionIdentity(id, snapshot.sha256, questions)
+        || interruptedOwnerSize(record, patch) !== held.capacity.bytes) throw resumeError('owner-interruption-capacity-changed');
+      const result = updateWith(cwd, id, () => { assertCurrent(); return patch; }, registryGuard);
+      return { status: 'interrupted-and-transferred', record: result.record, interruption: evidence };
+    } finally { ownerInterruptionAuthorities.delete(handle); }
+  }), options);
+}
+
 function resumeOwner(cwd, id, options = {}) {
   const observed = observedResumeOwner(options);
   if (!/^[a-f0-9]{64}$/.test(options.expectedRecordSha256 || '')) throw resumeError('owner-resume-snapshot-required');
@@ -901,7 +1000,8 @@ module.exports = {
   listAll, listAllDetailed, boundedCensus, withRegistryFence, listActive, get,
   add, update, updateWith, remove,
   bumpHeartbeat, cleanupStale,
-  inspectOwnerResume, resumeOwner, knownResumeBinding,
+  inspectOwnerResume, resumeOwner, knownResumeBinding, settleInterruptedOwner,
+  assertOwnerInterruptionAuthority, bindOwnerInterruptionAuthority, assertOwnerInterruptionCapacity,
   observeHostSession, resolveBySessionId, resolveBySessionOwner, bumpOwnedHeartbeat, bumpLegacyOwnedHeartbeat, oldestActive,
   refreshLegacyAlias, migrateLegacyState,
   withAddressDefaults,
