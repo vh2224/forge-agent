@@ -7,7 +7,7 @@
   "base_revision": "a36033d41fd779cf4b1262d3e01455c54016786d",
   "previous_delta": "scripts/fixtures/superseded-owner/distribution-delta.json",
   "method": "Exact frozen composed source and pure Claude render; preserved prior bytes/validators; generated without provider output.",
-  "input_scope_sha256": "061f356926e9aa2760eb974d61010452d46d3094c312cfa881d7cb6525dbb3c4",
+  "input_scope_sha256": "5cb41e5335432cf7cfd8b1400b1c585b95ac448bb55fdd84b4363cdb0459ad3d",
   "prototype_only": false
 }
 
@@ -50,6 +50,9 @@ after 64e46d92c79297a4a53ccd5c13bb7f1783a8af1744e6d23123359c18aff3c965
 scripts/forge-native-invocation.test.js
 before 197825fac690c1c74c12c97202174e81d42eff9c8ead58ac2a466ec02baa72c5
 after 41add8cc2de51172eda2c6b0809871d0ffe4258a6824322d2ef5d3c53c3413b8
+scripts/forge-native-readonly-guard.test.js
+before 6668380670d29ac733eb047f9936cafdeb7c1acb7e1abb5224aa4fb2690bc260
+after 42c230378877472219a07d22fe8f0cf891f6495ade0fb107426787d61ccb285d
 scripts/forge-review-effort.js
 before f4b56354697a04626ef0ba565c2883c31aef6ac9a02412c4fd3d48aa0d97cea8
 after a9be05ef0274238ef569ce5ec7683bd25d0d956a25b2e4983c195dda895e3df2
