@@ -48,6 +48,14 @@ function resolveRunFromArgs(cwd, argsRaw, opts) {
   return resolveRunInProject(cwd, argsRaw, opts);
 }
 
+// Pure classification only: existing inactive legacy records are never
+// activated/adopted. The later owner inspection still validates live identity.
+function inactiveBindingRefusal(record, runId, kind) {
+  return record && record.active === false && !runs.knownResumeBinding(record)
+    ? { run_id: runId, kind, status: 'refuse', reason: 'owner-resume-binding-unknown',
+      message: 'Run inativa com vínculo legado desconhecido; registro e claims preservados: ' + runId } : null;
+}
+
 function resolveRunInProject(cwd, argsRaw, opts) {
   opts = opts || {};
   const arg = String(argsRaw || '').trim();
@@ -71,8 +79,10 @@ function resolveRunInProject(cwd, argsRaw, opts) {
       // timestamp IDs used verbatim — slug is lowercase, must NOT be upper-cased.
       const lookupId = ids.classify(arg) === 'legacy' ? arg.toUpperCase() : arg;
       const existing = runs.get(cwd, lookupId);
-      if (existing && existing.active) {
-        return { run_id: lookupId, kind: 'milestone', status: 'resume', message: `Retomando run ativa: ${lookupId}` };
+      if (existing) {
+        const refused = inactiveBindingRefusal(existing, lookupId, 'milestone');
+        if (refused) return refused;
+        return { run_id: lookupId, kind: 'milestone', status: 'resume', message: `Retomando run existente: ${lookupId}` };
       }
       return { run_id: lookupId, kind: 'milestone', status: 'activate-new', message: `Iniciando run: ${lookupId}` };
     }
@@ -80,6 +90,8 @@ function resolveRunInProject(cwd, argsRaw, opts) {
     if (kind === 'task') {
       // Task lookup is format-agnostic — registry key is the ID string as-is
       const existing = runs.get(cwd, arg);
+      const refused = inactiveBindingRefusal(existing, arg, 'task');
+      if (refused) return refused;
       if (existing || fs.existsSync(path.join(cwd, '.gsd', 'tasks', arg, `${arg}-PLAN.md`))) {
         return { run_id: arg, kind: 'task', status: 'resume', message: `Retomando task run: ${arg}` };
       }
@@ -96,6 +108,8 @@ function resolveRunInProject(cwd, argsRaw, opts) {
   const selection = personal.selectPersonalWork({ ...opts, cwd });
   if (selection.selected) {
     const existing = runs.get(selection.project, selection.selected.id);
+    const refused = inactiveBindingRefusal(existing, selection.selected.id, selection.selected.kind);
+    if (refused) return { ...refused, project: selection.project };
     const status = selection.selected.kind === 'milestone' && !existing ? 'activate-new' : 'resume';
     return { run_id: selection.selected.id, kind: selection.selected.kind, project: selection.project, status, reason: selection.reason, message: `Retomando trabalho pessoal: ${selection.selected.id}` };
   }

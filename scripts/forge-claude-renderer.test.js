@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const unitEntry = require('./fixtures/incomplete-resume/distribution.cjs');
 
 const assert = require('assert');
 const crypto = require('crypto');
@@ -156,7 +157,16 @@ try {
   const historicalBytes = fs.readFileSync(path.join(__dirname, 'fixtures', 'claude-renderer', 'claude-4.19.0.golden.json'));
   assert.strictEqual(crypto.createHash('sha256').update(historicalBytes).digest('hex'),
     'f2b3e910445d2557f50aa4ced9e1b31498debc6b1cdd1ed05b452d8141b4307f', 'historical Claude 4.19.0 golden must remain byte-for-byte unchanged');
-  const golden = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'claude-renderer', 'claude-memory-v2.golden.json'), 'utf8'));
+  const golden = unitEntry.projectGolden(JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'claude-renderer', 'claude-memory-v2.golden.json'), 'utf8')));
+  unitEntry.validate({ artifacts: first.artifacts });
+  for (const field of ['before','after','attributed_before','attributed_after']) {
+    const value = JSON.parse(JSON.stringify(unitEntry.delta)); value.surfaces.skills[field] = '0'.repeat(64);
+    assert.throws(() => unitEntry.validate({ artifacts: first.artifacts, value }), '#368 foreign ' + field);
+  }
+  for (const mutate of [d => { d.surfaces.commands = d.surfaces.skills; }, d => { delete d.files[unitEntry.files[0]]; }, d => { d.files['skills/foreign/SKILL.md'] = d.files[unitEntry.files[0]]; }]) {
+    const value = JSON.parse(JSON.stringify(unitEntry.delta)); mutate(value); assert.throws(() => unitEntry.validate({ artifacts: first.artifacts, value }));
+  }
+  assert.throws(() => unitEntry.validate({ artifacts: first.artifacts.map(a => a.source === 'skills/forge-config/SKILL.md' ? { ...a, content: a.content + '\nforeign edit\n' } : a) }), '#368 out-of-delta edit');
   assert.strictEqual(golden.surfaces.length, 9);
   assert.deepStrictEqual(golden.surfaces.map(({ sha256, ...identity }) => identity),
     JSON.parse(historicalBytes).surfaces.map(({ sha256, ...identity }) => identity));
@@ -177,7 +187,7 @@ try {
 
   // Markdown receives a safe origin marker; JSONC and CommonJS stay parseable/textual.
   assert.strictEqual(new Set(first.artifacts.map(item => item.source_id)).size, 9, 'unexpected Claude surface');
-  console.log('PASS communication Claude goldens: exactly nine surfaces retain every golden hash and historical fixture bytes');
+  console.log('PASS communication Claude goldens: immutable captures plus exact measured #368 layer across nine surfaces');
   const settings = first.artifacts.find((item) => item.source.endsWith('settings.jsonc'));
   const hook = first.artifacts.find((item) => item.source === 'scripts/forge-hook.js');
   assert(!settings.content.startsWith('<!--'));

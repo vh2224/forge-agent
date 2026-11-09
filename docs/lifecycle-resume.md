@@ -1,0 +1,132 @@
+# Retomada de unidades incompletas
+
+Registrar uma run com `forge-runs.add` cria um registro novo. A operação recusa
+`ERUNEXISTS` sob os mesmos locks do registro e da run, inclusive para registros
+ilegíveis ou links existentes. Uma run existente inativa com binding
+legado desconhecido é recusada já por resolve-args com status refuse e razão
+owner-resume-binding-unknown, tanto por ID quanto pela seleção pessoal. A mesma
+classificação usa o predicado canônico knownResumeBinding do registry, sem migração
+ou escrita. Run ativa mantém a classificação existente; inativa com binding conhecido
+segue resume. Isso não atesta o dono: a inspeção posterior ainda exige identidade viva.
+
+
+Um `begin` committed permanece aberto até a transação terminal da sua geração.
+ROADMAP marcada, STATE, SUMMARY, inatividade e TTL não o encerram. O avanço serial via
+`orchestrate` usa `beginSerial` e recusa `unit-incomplete` antes de replay ou nova lease, com locators
+duráveis em `details.incomplete_units`. O `begin` de baixo nível continua permitindo unidades independentes; disputa real da mesma unidade preserva `lease-active`. O replay de uma transação existente mantém
+sua identidade; uma pausa parcial só permite a nova entrada explicitamente
+vinculada à sua boundary, preservando o plano e a unidade original.
+
+## Host embedding com evidência real
+
+O host mantém sua observação real de join/terminal e a reconciliação de cada raiz.
+Ele chama `forge-long-workflow-adapter.invoke(host, 'auto', command, input,
+snapshot, dependencies)`; o adaptador não resolve modelos nem cria processos.
+As funções em `dependencies` são implementações executáveis do host. Prosa,
+`approved:true`, JSON importado e um identificador de sessão não as substituem.
+
+Para um resultado genuíno `partial` ou `blocked`, chame `complete` com o resultado
+e o snapshot da seleção. São necessários os callbacks existentes:
+
+- `inspectAttempt({cwd, begin, references})` retorna o pedido e `receipt_path`
+  originais, `begin_key`, `begin_checksum` calculado por
+  `forge-orchestrate.checksum(begin)`, todas as `roots:[{root_id,path}]` físicas e
+  `pending_questions`. A implementação atesta que aquele pedido/receipt pertence
+  realmente ao begin observado, além da comparação estrutural de escopo.
+- `processProbe(receipt)` retorna `stopped` somente com observação real do
+  transporte/processo. Ausência de PID, TTL ou `active:false` não são essa prova.
+- `reconcileRoots({cwd,root,context,inspection,begin})` retorna
+  `{root_id,process_stopped:true,reconciled:true}` somente depois da reconciliação
+  real de cada raiz, incluindo owner e CODE_DIRs.
+
+O controller relê e vincula fingerprint, receipt ready e status original; conserva
+as perguntas e seus IDs, o hash do pedido/receipt, as raízes medidas e o claim.
+Execution receipts também passam pelo replay de fonte já existente. A pausa usa
+a transação canônica, com publicação de resultado/evento/boundary e release da
+lease correta. Ela não converte o resultado do worker em `done` ou em falha e não
+reescreve seu receipt. O resultado do loop é `needs_input`/`paused`. Conserve o
+snapshot retornado e as referências originais no continuation/checkpoint.
+
+Se o snapshot do loop se perdeu, use o locator durável de `unit-incomplete` em
+`pause_current:{unit,transaction}` e o resultado original no comando `pause` de
+um loop novo da MESMA milestone, com os mesmos callbacks. O locator apenas
+localiza: o controller confere proprietário, host, begin checksum e geração.
+Sem resultado parcial e evidência reais essa recuperação recusa; não construa um
+snapshot fictício nem uma milestone substituta. O CLI JSON sozinho não consegue
+fornecer callbacks vivos e retorna a recusa correspondente.
+
+Para retomar, use `resume` com `resume_intent:'execute'` e a boundary/snapshot
+retornados. O controller revalida a pausa e a evidência original antes da nova
+lease e grava `resumed_pause:{key,checksum,pending_questions}` na transação nova.
+Toda pausa parcial, inclusive de planejamento ou conclusão de milestone, volta a
+`dispatch_required` por essa retomada de execução na MESMA unidade,
+slice e plano, com nova lease; resposta humana não é resultado de execução.
+Perguntas pendentes exigem `questionStateAdapter` vivo com respostas explícitas
+por ID antes da nova entrada; elas são reatestadas na validação subsequente.
+Completar uma retomada exige a entrega capturada genuína: a prova histórica de
+task existente ou, para as demais unidades parciais, o receipt atual e os callbacks vinculados
+ao novo begin. O resultado parcial antigo nunca é a prova de sucesso novo.
+
+## Reativação e limites
+
+`inspectOwnerResume` fornece o hash do registro. `resumeOwner` conserva a ordem
+controller mutex → registry fence → run lock, observação real da sessão e CAS
+existentes. Uma reativação do MESMO proprietário conhecido com claim retida exige
+os callbacks acima, uma única pausa parcial aberta, pedido/receipt/raízes e claim
+exatamente vinculados, nenhum lease/worker/file-lock ou transação pendente e a
+atestação `confirmWorkspaceQuiescent` existente. Os checks se repetem dentro do
+CAS. A claim permanece intacta e unreleased; não é uma transferência. Outro
+proprietário com claim retida e proprietário legado desconhecido continuam
+recusados. Atestação do operador não é prova automática de morte do sistema.
+
+Esses campos são aditivos em transações schema 1. Transações antigas sem
+`resumed_pause` mantêm o replay existente; criar um novo begin exige primeiro
+fechar o anterior. Operações ordinárias de update e transferência de proprietário
+mantêm os guards de autoria e quiescência anteriores.
+
+## Histórico com sucessor comprovadamente não despachado
+
+O caminho ordinário `assertNoSuccessor` continua estrito. Se S02 já recebeu um
+begin antes de fechar o partial de S01, a operação específica
+`controller.reconcilePartialSuccessors(cwd, input, dependencies)` pode publicar
+pausas compensatórias `abandon-before-dispatch`. `input` identifica o begin
+original por unidade/milestone/owner/host/checksum e fornece o inventário ordenado
+EXATO `successors:[{key,checksum}]` de todos os begins posteriores. Não se trata
+de apagar eventos, concluir o sucessor ou fabricar receipt de falha.
+
+Além de reinspecionar o partial original, a operação exige que
+`inspectOwnerResume` observe o MESMO proprietário conhecido do registro e a claim
+atual permaneça idêntica ao pedido original. Para cada sucessor, chama o mesmo
+`inspectAttempt` com `references.purpose:'abandon-before-dispatch'`. O host precisa
+atestar positivamente `invocation_status:'not-invoked'`, com
+`observation_reference` real, o pedido planejado, `begin_key`, `begin_checksum`,
+as mesmas raízes físicas e claim. `receipt_path` precisa estar ausente/nulo;
+essa ausência sozinha NÃO prova que não houve despacho. `processProbe` e
+`reconcileRoots` precisam atestar, respectivamente, a observação real de ausência
+de writer e a reconciliação de todas as raízes. Para Claude, forneça também o
+`expectedSession` efetivamente observado, como exige a API existente.
+
+Todos os sucessores são validados antes do primeiro efeito. A publicação ocorre
+da última entrada para a primeira, sob o mutex existente, usando a transação de
+pause, a lease/generation real de cada sucessor e vínculos/hash dos begins e da
+observação. Reexecução retoma fases duráveis da mesma compensação, sem refazer ou
+reescrever os begins antigos. Depois chame `complete`/`pause` com o partial
+original e os mesmos callbacks: somente essa prova compensatória exata permite
+fechar S01 e retomá-la pela boundary, sem novo S02/S03. Os callbacks de S02 ainda
+são revalidados nesse fechamento; não promova a compensação a um booleano.
+
+Sucessor invocado, proprietário legado/desconhecido/estrangeiro, processo
+desconhecido, raiz/claim/pedido divergente, inventário incompleto, terminal
+conflitante ou lease ausente sem reconciliação canônica continuam recusados.
+Este caminho não recupera automaticamente qualquer histórico legado nem declara
+reconciliado um projeto real externo; cada operação precisa de fatos próprios.
+
+## Conclusão aparente e pausas somente de entrada
+
+Ledger de conclusão, seleção sem próxima unidade e snapshot antes marcado como
+concluído não encerram uma linhagem parcial. Antes de retornar terminal, o fluxo
+consulta as transações incompletas em leitura e retorna `unit-incomplete`, seus
+locators duráveis e perguntas pendentes. Sem incompletas, o terminal é preservado.
+Pausas de planejamento apenas para entrada, sem `partial_attempt` durável,
+conservam o contrato de resposta humana; essa resposta nunca conclui uma execução
+parcial nem substitui receipt, reconciliação das raízes ou respostas por ID.

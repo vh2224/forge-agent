@@ -762,7 +762,7 @@ function declarationFlow(text) {
     if ((char === '"' || char === "'") && !element.trim()) { quote = char; element += char; continue; }
     if (char === ',' || char === ']') {
       const value = scalar();
-      if (value === null && !(char === ']' && !items.length && !element.trim())) return null;
+      if (value === null && !(char === ']' && !element.trim())) return null;
       if (value !== null) items.push(value);
       element = '';
       if (char === ']') { closed = index; break; }
@@ -857,6 +857,17 @@ function decodeDeclarationList(frontmatter, key) {
   }
   if (value) layout.inline_comment_lines.push(start + 1); // `key: # comment`
   if (!region.length) return declarationResult(key, 'empty', { line: start + 1, layout });
+  // Published #365 legacy producers emit an indented empty flow collection.
+  // Keep blank/comment layout so the temporal consumer retains its stricter gap policy.
+  const significant = region.filter(row => !DECLARATION_TRANSPARENT.test(row.text));
+  if (significant.length === 1 && /^[ \t]+\[\](?:[ \t]*|[ \t]+#.*)$/.test(significant[0].text)) {
+    for (const row of region) {
+      if (!row.text.trim()) layout.leading_blank_lines.push(row.line);
+      else if (/^[ \t]*#/.test(row.text)) layout.comment_lines.push(row.line);
+    }
+    if (significant[0].text.includes('#')) layout.inline_comment_lines.push(significant[0].line);
+    return declarationResult(key, 'valid', { form: 'block', items: [], line: start + 1, layout });
+  }
   const block = declarationBlock(region, layout, fail);
   if (block.status === 'invalid') return block;
   return declarationResult(key, 'valid', { form: 'block', items: block.items, line: start + 1, layout });
@@ -990,6 +1001,16 @@ function validateTaskDeclarations(content, options) {
 // ordinary projection (issue 343 U0a-r1): a complete YAML list is an array, its
 // blank and comment lines included; YAML null (`key:` with no list) and a
 // malformed declaration stay present but are null, never an array.
+// Structural observation of one requested declaration. Legacy readers keep
+// their fixed projection without validating unrelated execution fields. This
+// does not admit a writer: full parseExecutionFields/validatePlan remain strict.
+function parseExecutionDeclaration(content, key) {
+  if (typeof key !== 'string' || !/^[A-Za-z][\w-]*$/.test(key)) throw new Error('execution-plan-declaration-key-invalid');
+  const fm = extractFrontmatter(content);
+  if (!fm) throw new Error('execution-plan-frontmatter-required');
+  return decodeDeclarationList(fm, key);
+}
+
 function parseExecutionFields(content) {
   const fm = extractFrontmatter(content);
   if (!fm) throw new Error('execution-plan-frontmatter-required');
@@ -998,18 +1019,21 @@ function parseExecutionFields(content) {
   const result = {};
   for (const key of ['depends', 'writes']) {
     const read = decodeDeclarationList(fm, key);
-    if (read.error === 'execution-plan-duplicate-key') throw new Error('execution-plan-duplicate-key');
+    if (read.error === 'execution-plan-duplicate-key' || read.error === 'declaration-flow-malformed') throw new Error(read.error);
     if (read.status === 'valid') result[key] = read.items.map(item => (typeof item === 'string' ? item : { ...item }));
     else if (read.status !== 'absent') result[key] = null;
   }
   for (const key of ['expected_output', 'code_roots']) {
-    if (keys.includes(key)) result[key] = parseArrayKey(fm, key);
+    if (!keys.includes(key)) continue;
+    const read = decodeDeclarationList(fm, key);
+    if (read.status === 'invalid') throw new Error(read.error);
+    result[key] = read.status === 'valid' ? read.items.map(item => typeof item === 'string' ? item : { ...item }) : undefined;
   }
   for (const key of ['roots_schema', 'primary_root_id']) result[key] = extractTopLevelValue(fm, key);
   return result;
 }
 
-module.exports = { hasStructuredMustHaves, parseMustHaves, parseMustHavesStructure, parseExecutionFields, resolveCapability, stripInlineComment,
+module.exports = { hasStructuredMustHaves, parseMustHaves, parseMustHavesStructure, parseExecutionFields, parseExecutionDeclaration, resolveCapability, stripInlineComment,
   extractFrontmatter, decodeDeclarationList, validateTaskDeclarations };
 
 // ── CLI entrypoint ────────────────────────────────────────────────────────────

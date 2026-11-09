@@ -1,0 +1,24 @@
+# #367 measured distribution layer
+
+Base8856ddb3bdbed8e6c0a19802e9764fe950f67172; successor of the immutable #368 layer. Exactly two rendered skill files, five captured non-rendered sources, the skills surface and two sample source literals change. Prior deltas/helpers/goldens/READMEs remain byte-identical. Expectations are projected in memory.
+
+Skills raw `019035d20f0f70239fe0e035478af988ec6fdd5efea8b7f78e8eff6c8a64e052` → `4b1446cf4fcfc99184596bf84aeb936d497f79aab1dcde46c2fb1f72a2a23fd8`; attributed `bc8e2f9ebbb1a189a435417c9b3ef258531cb8db67046ccf5b26cc48f99ca5bd` → `01041828db52aa6e6c477ad222fa46ab09b8e95b53c51f65f60087ef2dbea6d8`.
+
+- skills/forge-auto/SKILL.md: raw `9fcf35a50982903f413e11f9883c5ce73f838d4b7031bf65a72da250a1c1d094` → `14b15d90a92f8334cb0d85e4f0dadd651bbd02ec9c94dbf87f1c360302133b8b`; attributed `f414a5b65c0c7285d9944c710989e8e495d2a40e0b3ba4da620deac82f153923` → `5b46877c05a3f1dcce71a524dcdac9e06c7a845c1ace247662f696b5bd149329`.
+- skills/forge-next/SKILL.md: raw `3ffd7bef2befcbfdf49e865435b538da9b3305d5207036d488507c741fdb1e6e` → `26cd95c5cbb829eae5dbefad7e115e77c496d10af41b5a033fd336a6e2d553f1`; attributed `0d9fed221f4fa52227184fc1d68a6aadac6f7ba917ce294b9dc837d04fb27eb4` → `e7bd4bd148db233e2896c4dd7c553abce729a4a52e266e2c148de2d920f42fde`.
+- scripts/forge-unit-controller.js: raw `98709c2b106f3f32451c578d05868161e812dde9714b7dd6140c8a29f5408814` → `83bd10375fafc52c1d26af8125ca27e1d3c4f23e7f81cb5ac90df68b610ae900`; attributed `98709c2b106f3f32451c578d05868161e812dde9714b7dd6140c8a29f5408814` → `83bd10375fafc52c1d26af8125ca27e1d3c4f23e7f81cb5ac90df68b610ae900`.
+- scripts/forge-orchestrate.js: raw `b37892abb702e2a3ad361066bbfa1fc8b29409e89bdfdb91328bc4ac21d11434` → `a2ea2311761cb77155e8074949939611eafaa689274b94f9d187e5bca2f259a6`; attributed `b37892abb702e2a3ad361066bbfa1fc8b29409e89bdfdb91328bc4ac21d11434` → `a2ea2311761cb77155e8074949939611eafaa689274b94f9d187e5bca2f259a6`.
+- scripts/forge-claude-renderer.test.js: raw `8124c2c2b066c3e0f02d69b16b2bf16dc1204250eeeefb2abe428ee60d7c3580` → `ce9604c74c6085c961981323663e2e4b86317c8f8551f426bdfb0c9d061c2e7c`; attributed `8124c2c2b066c3e0f02d69b16b2bf16dc1204250eeeefb2abe428ee60d7c3580` → `ce9604c74c6085c961981323663e2e4b86317c8f8551f426bdfb0c9d061c2e7c`.
+- scripts/forge-communication-surfaces.test.js: raw `270ca613a4828789cae3253929ea9bf41294483702615cf344c548da482a4a3e` → `74d20c474d11f12ce15256154cd240b586b8f8571b175405fd1acaf76ad72b24`; attributed `270ca613a4828789cae3253929ea9bf41294483702615cf344c548da482a4a3e` → `74d20c474d11f12ce15256154cd240b586b8f8571b175405fd1acaf76ad72b24`.
+- docs/communication-evaluation/README.md: raw `8605c96802c313dbda6f43adc21913717b2750add2eb440514e47ed7d85768ee` → `d0ae3824753619f847538ffceb78d38735c5f4f861775988654cb04facad586c`; attributed `8605c96802c313dbda6f43adc21913717b2750add2eb440514e47ed7d85768ee` → `d0ae3824753619f847538ffceb78d38735c5f4f861775988654cb04facad586c`.
+
+Only two sample hash literals change: `3ffd7bef2befcbfdf49e865435b538da9b3305d5207036d488507c741fdb1e6e` → `26cd95c5cbb829eae5dbefad7e115e77c496d10af41b5a033fd336a6e2d553f1`; full sample raw `40d879d0b390068d8133de40e2d2c70ae9afab012d0d3770050af0d65def65bc` → `38bb2dea9d9c6ea56ff672eae2452a0a6f6a2bfbe5697830724a49a43039e405`, attributed `40d879d0b390068d8133de40e2d2c70ae9afab012d0d3770050af0d65def65bc` → `38bb2dea9d9c6ea56ff672eae2452a0a6f6a2bfbe5697830724a49a43039e405`. The previous full bytes are restored by reversing exactly those two literals.
+
+Prior validations receive a verified reversible projection of only the measured inserted skill block, changed consumer require and sample literals. No baseline is regenerated and all historical negatives execute unchanged. This proves distribution bytes; actual lifecycle, CI, publication, installation and human acceptance remain separate.
+
+
+## #367 Section8 smoke compatibility
+
+- scripts/forge-smoke.js: raw `2f5e48bb5fc6018e5f7ebd39c01229b8ac7793e5684e212c89b2e91d3324f574` → `ec690d32ce120494db717900ac82b193d552dd6ccb27915bb53bba91dfe0c2f7`; attributed `2f5e48bb5fc6018e5f7ebd39c01229b8ac7793e5684e212c89b2e91d3324f574` → `ec690d32ce120494db717900ac82b193d552dd6ccb27915bb53bba91dfe0c2f7`.
+
+Only the exact shipping Section8 is changed: span `81ba5ae500896168c821f1a1bc5d373693023cd13be45fbe5e7e27b86f28719b` → `7e924a923fa8571a324268a2eb77239a0450fd418b1da2a45bd22956ede6129f`; bytes outside Section8 retain `0943cd2b234e760e2e9bd1e582d83d907ef94b300ef59f1bd339785297c68a17`. Reversing this one span restores the full Git8856 smoke hash. Section61 and its historical negative remain unchanged; the current compatibility validator projects Section8 before applying that guard, with no new OR/allowlist digest. Lifecycle/resolver production is unchanged.

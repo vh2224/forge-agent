@@ -1,9 +1,12 @@
 ---
 name: forge-next
 description: "Executa exatamente uma unidade de trabalho e para (step mode)."
-disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Bash, Agent, Skill, TaskCreate, TaskUpdate, TaskList, TaskStop, SendMessage, WebSearch, WebFetch
 ---
+
+## Invocation policy
+
+Pode ser invocada pelo orquestrador quando o operador pedir explicitamente um passo ou uma unidade, no escopo/ID solicitado. Execute exatamente uma unidade e pare após sua verificação e checkpoint; não encadeie chamadas, não abra auto-loop e não substitua por `forge-auto`. Recuperação autorizada continua limitada à mesma unidade. Preserve seleção pessoal, perguntas pendentes, plan/security gates, isolamento, claims, routing, revisão e checkpoints; invocação não concede autorização nem troca modelo/esforço.
 
 Nos despachos sidecar, siga `shared/forge-bidirectional-sidecar.md § Identidade do sidecar exibida na conversa`: anuncie a solicitação pré-disparo e repasse literalmente as linhas `[forge-agente]` do stderr; as linhas `[forge-sidecar]` ficam no registro técnico e só são repassadas nos casos daquele contrato.
 
@@ -1660,6 +1663,22 @@ SALVAGE=$(node "$FORGE_SCRIPTS_DIR/forge-worker-result.js" --salvage \
 ```
 
 A rung that yields a status hands back a `recovered.block` — parse **that** with the rows below. `/forge-next` is always `MODE = interactive`, so when the ladder reaches rung 4 (`blocked`), show the operator the salvage census verbatim before surfacing: what was probed and what each probe found is the actionable part, not the verdict alone.
+
+Before a returned `partial` or `blocked` result stops this unit, settle its
+CURRENT controller begin through the embedded long-workflow adapter's `complete`
+command with the actual result, original snapshot and live attempt/process/root
+inspection callbacks. Require the durable paused boundary and zero current lease;
+preserve the original request, receipt, questions and returned snapshot in the
+continuation. A status string, an inactive run or lease expiry proves no stopped
+writer. Missing evidence is a named refusal; preserve the begin/claim and report
+that limit rather than editing STATE or lease files to imitate a pause.
+Resume unfinished `execute-task` and `complete-slice` with
+`resume_intent:'execute'` from that boundary, never with an answer-as-result or
+a fresh `next`. If the old loop snapshot is missing, use the canonical durable
+locator and live callbacks described in `docs/lifecycle-resume.md`; JSON CLI flags
+cannot supply these callbacks or assume ownership. Known same-owner inactive runs
+with a retained claim use the proved partial-boundary branch of `resumeOwner`;
+legacy unknown ownership and unreconciled writers still refuse.
 
 Parse the `---GSD-WORKER-RESULT---` block:
 - `status: done` → proceed to post-unit housekeeping

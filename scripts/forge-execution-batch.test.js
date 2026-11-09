@@ -560,6 +560,41 @@ test('issue343 U1-4 swapped inputs, foreign begin or lease and imported manifest
   assert.notStrictEqual(held(between, 'execute-task/T01').generation, held(between, 'execute-task/T02').generation, 'distinct live leases');
 });
 
+test('integration R1 existing later batch member with missing or foreign lease blocks before earlier new begin', () => {
+  for (const condition of ['absent', 'foreign']) {
+    const fixture = crashed('later-member-lease-' + condition), dir = fixture.dir;
+    const manifest = batch.readManifest(dir, fixture.batchId);
+    const request = member => ({ milestone: M, unit: member.unit, slice: S,
+      state_patch: { active_slice: S, active_task: manifest.primary.task_id }, host_runtime: 'codex',
+      owner_token: TOKEN, idempotency_key: member.begin_key, batch: batch.memberBinding(manifest, member) });
+    // A genuine canonical later begin, not an imported or resealed transaction.
+    const later = manifest.members[1], admitted = controller.begin(dir, { members: [request(later)] }, {});
+    assert.strictEqual(admitted.members[0].ok, true, condition + ': later member really began');
+    const begun = controller.lookupRecord(dir, 'transaction', later.begin_key);
+    assert.strictEqual(begun.phase, 'committed');
+    assert.strictEqual(lease.release(dir, later.unit, TOKEN, begun.lease_generation).ok, true);
+    if (condition === 'foreign') assert.strictEqual(lease.acquire(dir, later.unit,
+      { ownerToken: 'foreign-later-owner', requestId: 'foreign-later-request', hostRuntime: 'codex' }).ok, true);
+    const leaseFile = lease.leaseFile(dir, later.unit), leaseBefore = fs.existsSync(leaseFile) ? fs.readFileSync(leaseFile) : null;
+    const beginBefore = fs.readFileSync(controller.transactionFile(dir, later.begin_key));
+    const eventsBefore = fs.readFileSync(controller.eventsFile(dir, M)), stateBefore = fs.readFileSync(state.statePath(dir, M));
+    const earlier = manifest.members[0];
+    assert.strictEqual(controller.lookupRecord(dir, 'transaction', earlier.begin_key), null);
+    assert.strictEqual(held(dir, earlier.unit), null);
+    assert.throws(() => controller.begin(dir, { members: manifest.members.map(request) }, {}),
+      error => error && error.code === (condition === 'absent' ? 'lease-required' : 'lease-owner-mismatch'),
+      condition + ': invalid later lease is checked before any earlier begin');
+    assert.strictEqual(controller.lookupRecord(dir, 'transaction', earlier.begin_key), null, condition + ': no earlier begin');
+    assert.strictEqual(held(dir, earlier.unit), null, condition + ': no earlier lease');
+    assert.strictEqual(memberTransactions(dir).length, 1, condition + ': only the genuine later begin remains');
+    assert(fs.readFileSync(controller.transactionFile(dir, later.begin_key)).equals(beginBefore), condition + ': later begin immutable');
+    assert(fs.readFileSync(controller.eventsFile(dir, M)).equals(eventsBefore), condition + ': no new event');
+    assert(fs.readFileSync(state.statePath(dir, M)).equals(stateBefore), condition + ': STATE unchanged');
+    if (leaseBefore) assert(fs.readFileSync(leaseFile).equals(leaseBefore), 'foreign lease bytes remain untouched');
+    else assert.strictEqual(fs.existsSync(leaseFile), false, 'missing lease is not silently recreated');
+  }
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 for (const [name, value] of Object.entries(SAVED_ENV)) {
   if (value === undefined) delete process.env[name];

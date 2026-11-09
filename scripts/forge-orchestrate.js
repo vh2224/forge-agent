@@ -213,8 +213,32 @@ function stable(value) {
   return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]));
 }
 function checksum(value) { return crypto.createHash('sha256').update(JSON.stringify(stable(value))).digest('hex'); }
+function pendingLineage(input, begun, cohort = null) {
+  const other = forgeController.incompleteUnits(input.cwd, input.milestone).filter(row => row.idempotency_key !== begun.idempotency_key
+    && row.idempotency_key !== begun.resumed_pause?.key
+    && (!cohort || cohort.get(row.idempotency_key) !== checksum(row)));
+  return other.length ? { ok: false, reason: 'unit-incomplete', incomplete_units: other.map(row => ({
+    idempotency_key: row.idempotency_key, unit: row.unit, begin_checksum: checksum(row), generation: row.lease_generation,
+    milestone: row.milestone, host_runtime: row.host_runtime, owner_digest: row.owner_digest })) } : { ok: true };
+}
+// Terminal validation observes durable lineage only: no selection, lease or state write.
+function validateTerminal(inputValue) {
+  const input = normalizeInput(inputValue);
+  const incomplete = forgeController.incompleteUnits(input.cwd, input.milestone);
+  if (!incomplete.length) return { ok: true };
+  let questions = [];
+  for (const row of incomplete) questions = require('./forge-interaction').mergePendingQuestions(questions,
+    row.result?.output?.partial_attempt?.pending_questions || []);
+  return { ok: false, reason: 'unit-incomplete', incomplete_units: incomplete.map(row => ({
+    idempotency_key: row.idempotency_key, unit: row.unit, begin_checksum: checksum(row), generation: row.lease_generation,
+    milestone: row.milestone, host_runtime: row.host_runtime, owner_digest: row.owner_digest })), pending_questions: questions };
+}
 function validatePending(inputValue, decision, options = {}) {
   if (decision?.details?.dispatch_batch) return validateBatchPending(inputValue, decision, options);
+  return validatePendingSingle(inputValue, decision, options);
+}
+// The cohort parameter is private call context, never an option/request or a serialized skip.
+function validatePendingSingle(inputValue, decision, options = {}, cohort = null) {
   const input = normalizeInput(inputValue), binding = decision?.details?.transaction;
   if (!binding) return { ok: false, reason: 'unit-identity-mismatch' };
   const begun = forgeController.lookupRecord(input.cwd, 'transaction', binding.idempotency_key);
@@ -223,6 +247,8 @@ function validatePending(inputValue, decision, options = {}) {
     || begun.unit.key !== decision.unit?.key || begun.milestone !== input.milestone || begun.host_runtime !== input.host_runtime
     || begun.owner_digest !== `sha256:${crypto.createHash('sha256').update(input.owner_token.normalize('NFC').trim()).digest('hex')}`) return { ok: false, reason: 'unit-identity-mismatch' };
   if (forgeController.pendingTransactions(input.cwd).length) return { ok: false, reason: 'transaction-pending' };
+  const lineage = pendingLineage(input, begun, cohort);
+  if (!lineage.ok) return lineage;
   const leaseApi = forgeController.dependencies.forgeLease;
   const held = leaseApi.readLease(leaseApi.leaseFile(input.cwd, begun.unit.key));
   if (!leaseApi.validRecord(held.record, begun.unit.key) || held.record.owner_token !== input.owner_token
@@ -233,9 +259,9 @@ function validatePending(inputValue, decision, options = {}) {
   if (boundary?.kind === 'needs-input') return { ok: false, reason: 'pending-questions' };
   const context = typeof options.inspectAttempt === 'function'
     ? options.inspectAttempt({ cwd: input.cwd, begin: begun, references: {} }) : null;
-  const currentQuestions = begun.linked_entry
+  const currentQuestions = begun.resumed_pause ? forgeController.validatePausedEntry(input.cwd, begun, options) : (begun.linked_entry
     ? forgeController.validateLinkedEntry(input.cwd, begun.idempotency_key, { ...options, ownerToken: input.owner_token,
-      observedPendingQuestions: context?.pending_questions || [] }).pending_questions : null;
+      observedPendingQuestions: context?.pending_questions || [] }).pending_questions : null);
   if (context) {
     if (context?.pending_questions?.some(item => item.status === 'pending'
       && !currentQuestions?.some(q => q.id === item.id && q.question === item.question && q.status === 'resolved'))) {
@@ -250,15 +276,42 @@ function validatePending(inputValue, decision, options = {}) {
 function validateBatchPending(inputValue, decision, options) {
   const input = normalizeInput(inputValue), batch = decision.details.dispatch_batch;
   if (!batch || !Array.isArray(batch.members) || !batch.members.length) return { ok: false, reason: 'batch-dispatch-invalid' };
-  let view;
+  let view, manifest;
   try {
     view = executionBatch.status({ cwd: input.cwd, milestone: input.milestone, host_runtime: input.host_runtime,
       owner_token: input.owner_token, batch_id: batch.batch_id, manifest_sha256: batch.manifest_sha256 }, options);
+    manifest = executionBatch.readManifest(input.cwd, batch.batch_id);
   } catch (cause) { return { ok: false, reason: cause.code || 'batch-manifest-invalid' }; }
+  if (!manifest || manifest.manifest_sha256 !== batch.manifest_sha256 || view.members.length !== manifest.members.length) {
+    return { ok: false, reason: 'batch-dispatch-invalid' };
+  }
+  // The whole canonical roster supplies order and exclusions. Only actual active
+  // committed begins may be exempt siblings; an omitted active/unknown begin blocks.
+  const active = view.members.filter(row => !executionBatch.TERMINAL_STATES.includes(row.state));
+  if (active.length !== batch.members.length) return { ok: false, reason: 'batch-dispatch-invalid' };
+  const cohort = new Map(), leaseApi = forgeController.dependencies.forgeLease;
+  for (let index = 0; index < batch.members.length; index++) {
+    const member = batch.members[index], listed = active[index], canonical = listed && manifest.members[listed.index];
+    const binding = member && member.transaction;
+    if (!canonical || member.index !== listed.index || binding?.idempotency_key !== canonical.begin_key
+      || unit(member.unit)?.key !== canonical.unit || listed.begin !== 'committed' || listed.lease !== 'held') {
+      return { ok: false, reason: 'batch-dispatch-invalid' };
+    }
+    const begun = forgeController.lookupRecord(input.cwd, 'transaction', canonical.begin_key);
+    if (!begun || begun.action !== 'begin' || begun.phase !== 'committed' || begun.unit.key !== canonical.unit
+      || begun.milestone !== manifest.milestone || begun.host_runtime !== manifest.host_runtime || begun.owner_digest !== manifest.owner_digest
+      || !executionBatch.validBinding(begun.batch, canonical.begin_key, begun.unit)
+      || checksum(begun.batch) !== checksum(executionBatch.memberBinding(manifest, canonical))
+      || binding.begin_checksum !== checksum(begun) || binding.generation !== begun.lease_generation
+      || binding.owner_digest !== begun.owner_digest || binding.host_runtime !== begun.host_runtime || binding.milestone !== begun.milestone
+      || binding.unit !== begun.unit.key) return { ok: false, reason: 'unit-identity-mismatch' };
+    const held = leaseApi.readLease(leaseApi.leaseFile(input.cwd, canonical.unit));
+    if (!leaseApi.validRecord(held.record, canonical.unit) || held.record.owner_token !== input.owner_token
+      || held.record.generation !== begun.lease_generation) return { ok: false, reason: 'lease-owner-mismatch' };
+    cohort.set(canonical.begin_key, checksum(begun));
+  }
   for (const member of batch.members) {
-    const listed = view.members.find(row => row.begin_key === member?.transaction?.idempotency_key && row.unit.key === unit(member.unit)?.key);
-    if (!listed) return { ok: false, reason: 'batch-dispatch-invalid' };
-    const checked = validatePending(inputValue, { unit: member.unit, details: { transaction: member.transaction } }, options);
+    const checked = validatePendingSingle(inputValue, { unit: member.unit, details: { transaction: member.transaction } }, options, cohort);
     if (!checked.ok) return checked;
   }
   return { ok: true };
@@ -282,6 +335,12 @@ function complete(inputValue, options) {
   const input = normalizeInput(inputValue);
   const selected = unit(inputValue.unit);
   const key = inputValue.begin_key;
+  if (selected && key && ['partial', 'blocked'].includes(inputValue.result?.status)) {
+    const begin = forgeController.lookupRecord(input.cwd, 'transaction', key);
+    return pauseCurrent({ ...inputValue, pause_current: { unit: selected, transaction: begin && { idempotency_key: key,
+      begin_checksum: checksum(begin), generation: begin.lease_generation, unit: begin.unit.key, milestone: begin.milestone,
+      host_runtime: begin.host_runtime, owner_digest: begin.owner_digest } } }, options);
+  }
   if (!selected || !key || !inputValue.result || inputValue.result.status !== 'done') {
     return base('complete', 'blocked', 'unit-result-required', input);
   }
@@ -298,10 +357,14 @@ function complete(inputValue, options) {
     // delivery. A caller's status:done or its earlier human response is no proof.
     if (key.startsWith('forge-orchestrate-resume-execution:') && !forgeController.lookupRecord(input.cwd, 'transaction', key + ':complete')) {
       const completedAt = typeof options?.now === 'function' ? options.now() : options?.now ?? Date.now();
+      if (selected.type !== 'execute-task') {
+        forgeController.verifyCompletedAttempt(input.cwd, begun, options);
+      } else {
       const proof = require('./forge-milestone-time-clock').readHistoricalTaskDelivery({ cwd: input.cwd, milestone: input.milestone,
         slice: begun.after.state.active_slice, task: selected.id, completedAt });
       if (proof.status !== 'proven' || proof.captures.some(c => Date.parse(c.captured_at) < Date.parse(begun.created_at)))
         return base('complete', 'blocked', 'execution-resume-delivery-required', input);
+      }
     }
     const committed = forgeController.complete(input.cwd, {
       milestone: input.milestone, unit: selected, host_runtime: input.host_runtime,
@@ -449,9 +512,11 @@ function pauseCurrent(inputValue, options = {}) {
       if (paused.phase !== 'committed') forgeController.resume(input.cwd, { idempotency_key: key,
         owner_token: input.owner_token, generation: begun.lease_generation }, txOptions);
     } else {
-      forgeController.pause(input.cwd, { milestone: begun.milestone, unit: begun.unit.key, host_runtime: begun.host_runtime,
+      const partial = ['partial', 'blocked'].includes(inputValue.result?.status);
+      (partial ? forgeController.pausePartial : forgeController.pause)(input.cwd, { milestone: begun.milestone, unit: begun.unit.key, host_runtime: begun.host_runtime,
+        ...(partial ? { begin_key: begun.idempotency_key, begin_checksum: checksum(begun) } : {}),
         owner_token: input.owner_token, generation: begun.lease_generation, idempotency_key: key,
-        result: { status: 'cancelled' } }, txOptions);
+        result: partial ? inputValue.result : { status: 'cancelled' } }, txOptions);
     }
     paused = forgeController.lookupRecord(input.cwd, 'transaction', key);
     const boundary = forgeController.lookupRecord(input.cwd, 'boundary', begun.unit.key);
@@ -461,6 +526,7 @@ function pauseCurrent(inputValue, options = {}) {
     forgeController.handoff(input.cwd, { unit: begun.unit.key, next_host_runtime: input.host_runtime }, txOptions);
     const result = base('next', 'needs_input', 'needs-input', input); result.unit = selected;
     result.boundary = boundary; result.state = publicState(forgeState.read(input.cwd, input.milestone));
+    if (paused.result?.output?.partial_attempt) result.details = { pending_questions: paused.result.output.partial_attempt.pending_questions };
     return result;
   } catch (cause) { return refused(cause.code || 'pause-refused'); }
 }
@@ -476,6 +542,13 @@ function nextTimed(inputValue, input, options) {
   let status, boundary;
   try {
     status = milestoneTime.readTimeStatus(input.cwd, input.milestone, options);
+    // An invalid source is a temporal refusal before selection/serial lineage,
+    // just as a thrown clock read is. It cannot be masked by an open unit.
+    if (!['absent', 'valid'].includes(status.contract)) {
+      const invalid = base('next', 'blocked', 'milestone-time-invalid', input);
+      invalid.details = { time: { ...publicTime(status), unknown: true } };
+      return invalid;
+    }
     if (status.contract !== 'absent') {
       recordTimePresence(input, 'next', options);
       boundary = milestoneTime.observeBoundary(input.cwd, input.milestone, { ...options, kind: 'slice-boundary' });
@@ -538,6 +611,15 @@ function nextInside(inputValue, options) {
     return result;
   }
   if (!selection.ok) {
+    if (selection.done === true) {
+      let terminal;
+      try { terminal = validateTerminal(input); }
+      catch (cause) { terminal = { ok: false, reason: cause.code || 'terminal-validation-failed' }; }
+      if (!terminal.ok) {
+        const result = base('next', 'blocked', terminal.reason, input);
+        result.details = terminal; result.state = publicState(forgeState.read(input.cwd, input.milestone)); return result;
+      }
+    }
     const result = base('next', selection.done === true ? 'no_work' : 'blocked', selection.reason || 'no-next-unit', input);
     result.details = { blocked: selection.blocked || [],
       ...(own(selection, 'time_options') ? { time_options: timeOptionsDetails(input, selection.time_options, options) } : {}),
@@ -579,7 +661,6 @@ function nextInside(inputValue, options) {
     // harmless when no transaction exists and makes crash retry deterministic.
     stage = 'resume';
     diagnosticKey = key;
-    forgeController.resume(input.cwd, { idempotency_key: key, owner_token: input.owner_token }, txOptions);
     // Issue 343 U1: the canonical batch decision of an execute-task selection. A sidecar primary
     // with independent ready sidecar siblings dispatches one durable cohort; every other case
     // keeps this single path unchanged and names its one closed reason.
@@ -594,7 +675,7 @@ function nextInside(inputValue, options) {
       batchDecision = { decision: 'single', reason_code: decided.reason_code, ...(decided.excluded && decided.excluded.length ? { excluded: decided.excluded } : {}) };
     }
     stage = 'begin';
-    const begun = forgeController.begin(input.cwd, request, txOptions);
+    const begun = forgeController.beginSerial(input.cwd, request, txOptions);
     let paused = null;
     if (input.needs_input) {
       stage = 'pause';
@@ -622,16 +703,26 @@ function nextInside(inputValue, options) {
       begin_checksum: checksum(durableBegin), generation: durableBegin.lease_generation, owner_digest: durableBegin.owner_digest,
       host_runtime: durableBegin.host_runtime, milestone: durableBegin.milestone, unit: durableBegin.unit.key } : null, selection_reason: selection.reason,
       batch: batchDecision };
+    if (!input.needs_input) {
+      const valid = pendingLineage(input, durableBegin);
+      if (!valid.ok) {
+        result.outcome = 'blocked'; result.reason_code = valid.reason;
+        if (valid.incomplete_units) result.details.incomplete_units = valid.incomplete_units;
+        return result;
+      }
+    }
     // The dispatcher forwards this owner capture as the sidecar producerBasis.
     if (producer) result.details.time_options = { status: 'estimate-required', key_suffix: selection.key_suffix, begin_key: key, producer_basis: producer };
     return result;
   } catch (cause) {
     if (cause && cause.code === 'CONTROLLER_FAILPOINT') throw cause;
     const code = cause.code || 'failed';
-    const result = base('next', code === 'lease-active' || code === 'transaction-pending' || code === 'prefs-invalid'
+    const result = base('next', code === 'lease-active' || code === 'transaction-pending' || code === 'unit-incomplete' || code === 'prefs-invalid'
       || executionBatch.REFUSAL_CODES.includes(code) ? 'blocked' : 'failed', code, input);
     result.unit = selectedUnit;
     result.diagnostic = failureDiagnostic(cause, input, stage, diagnosticKey);
+    if (code === 'unit-incomplete') result.details = { incomplete_units: cause.details?.units || [],
+      ...(cause.details?.existing_begin ? { transaction: cause.details.existing_begin } : {}) };
     return attachPlanRefusal(attachTimeRefusal(result, cause, input, options), cause);
   }
 }
@@ -660,14 +751,17 @@ function resumeExecution(input, options = {}) {
   const boundary = input.boundary, selected = unit(boundary?.unit);
   const refuse = reason => Object.assign(base('next', 'blocked', reason, input), { unit: selected });
   if (input.resume_intent !== 'execute' || input.response !== undefined) return refuse('execution-resume-intent-invalid');
-  if (!boundary?.idempotency_key || selected?.type !== 'execute-task') return refuse('execution-resume-boundary-invalid');
+  if (!boundary?.idempotency_key || !selected?.key) return refuse('execution-resume-boundary-invalid');
   try {
     durableBoundary(input, boundary);
     const paused = forgeController.lookupRecord(input.cwd, 'transaction', boundary.idempotency_key);
     if (!paused || paused.action !== 'pause' || paused.phase !== 'committed' || paused.milestone !== input.milestone
         || paused.unit.key !== selected.key || boundary.milestone !== input.milestone) return refuse('execution-resume-boundary-invalid');
-    const slice = paused.after.state.active_slice;
-    if (typeof slice !== 'string' || !/^S\d{2,}$/.test(slice)) return refuse('execution-resume-boundary-invalid');
+    const partial = paused.result?.output?.partial_attempt;
+    // Non-executor input-only pauses retain their response-only contract.
+    if (!partial && !['execute-task', 'complete-slice'].includes(selected.type)) return refuse('execution-resume-boundary-invalid');
+    const slice = paused.after.state.active_slice, sliceScoped = /slice|plan-check|execute-task/.test(selected.type);
+    if (sliceScoped && (typeof slice !== 'string' || !/^S\d{2,}$/.test(slice))) return refuse('execution-resume-boundary-invalid');
     const key = 'forge-orchestrate-resume-execution:' + boundary.idempotency_key, completeKey = key + ':complete';
     let prior = forgeController.lookupRecord(input.cwd, 'transaction', key);
     let finished = forgeController.lookupRecord(input.cwd, 'transaction', completeKey);
@@ -681,12 +775,12 @@ function resumeExecution(input, options = {}) {
       result.boundary = forgeController.lookupRecord(input.cwd, 'boundary', selected.key); return result;
     }
     if (!prior) forgeController.handoff(input.cwd, { unit: selected.key, next_host_runtime: input.host_runtime }, txOptions);
-    const begun = forgeController.begin(input.cwd, { milestone: input.milestone, unit: selected.key, slice, state_patch: { active_slice: slice },
+    const begun = forgeController.beginSerial(input.cwd, { milestone: input.milestone, unit: selected.key, ...(sliceScoped ? { slice } : {}), resume_from: paused.idempotency_key, state_patch: { active_slice: slice },
       host_runtime: input.host_runtime, owner_token: input.owner_token, idempotency_key: key, ...(prior ? { generation: prior.lease_generation } : {}) }, txOptions);
     prior = forgeController.lookupRecord(input.cwd, 'transaction', key);
     const result = base('next', 'completed', 'execution-resume-ready', input); result.unit = selected;
     result.state = publicState(forgeState.read(input.cwd, input.milestone));
-    result.details = { resume_execution: true, transaction: { idempotency_key: key, phase: begun.transaction.phase,
+    result.details = { resume_execution: true, pending_questions: prior.resumed_pause?.pending_questions || [], transaction: { idempotency_key: key, phase: begun.transaction.phase,
       begin_checksum: checksum(prior), generation: prior.lease_generation, owner_digest: prior.owner_digest,
       host_runtime: prior.host_runtime, milestone: prior.milestone, unit: prior.unit.key } };
     const valid = validatePending(input, result, options);
@@ -695,7 +789,7 @@ function resumeExecution(input, options = {}) {
   } catch (cause) { return attachPlanRefusal(attachTimeRefusal(refuse(cause.code || 'execution-resume-failed'), cause, input, options), cause); }
 }
 function resumeResponse(input, options) {
-  if (unit(input.boundary?.unit)?.type === 'execute-task') return base('next', 'blocked', 'execution-resume-intent-required', input);
+  if (['execute-task', 'complete-slice'].includes(unit(input.boundary?.unit)?.type)) return base('next', 'blocked', 'execution-resume-intent-required', input);
   let response;
   try { response = normalizedResponse(input.response); } catch (cause) { return base('next', 'blocked', cause.code || 'response-invalid', input); }
   const boundary = input.boundary;
@@ -703,6 +797,8 @@ function resumeResponse(input, options) {
   let handoff;
   try {
     durableBoundary(input, boundary);
+    const paused = forgeController.lookupRecord(input.cwd, 'transaction', boundary.idempotency_key);
+    if (paused?.result?.output?.partial_attempt) return base('next', 'blocked', 'execution-resume-intent-required', input);
     handoff = forgeController.handoff(input.cwd, { unit: boundary.unit, next_host_runtime: input.host_runtime }, { prefsReader: input.prefsReader });
     const beginKey = `forge-orchestrate-resume:${boundary.idempotency_key}`;
     const completeKey = `${beginKey}:complete`;
@@ -726,16 +822,7 @@ function resumeResponse(input, options) {
       return result;
     }
     let beginRecord = readTransaction(beginKey);
-    if (beginRecord && beginRecord.phase !== 'committed') {
-      forgeController.resume(input.cwd, { idempotency_key: beginKey, owner_token: input.owner_token, generation: beginRecord.lease_generation }, txOptions);
-      beginRecord = readTransaction(beginKey);
-    }
-    let begun;
-    if (beginRecord && beginRecord.phase === 'committed') {
-      begun = { transaction: beginRecord, owner_token: input.owner_token, generation: beginRecord.lease_generation };
-    } else {
-      begun = forgeController.begin(input.cwd, { milestone: boundary.milestone || input.milestone, unit: boundary.unit, host_runtime: input.host_runtime, owner_token: input.owner_token, idempotency_key: beginKey }, txOptions);
-    }
+    const begun = forgeController.beginSerial(input.cwd, { milestone: boundary.milestone || input.milestone, unit: boundary.unit, host_runtime: input.host_runtime, owner_token: input.owner_token, idempotency_key: beginKey }, txOptions);
     const completed = forgeController.complete(input.cwd, { milestone: boundary.milestone || input.milestone, unit: boundary.unit, host_runtime: input.host_runtime, owner_token: begun.owner_token || input.owner_token, generation: begun.generation || (begun.transaction && begun.transaction.lease_generation), idempotency_key: completeKey, result: { status: 'succeeded', output: response } }, txOptions);
     const result = base('next', 'completed', 'handoff-ready', input);
     result.unit = unit(boundary.unit);
@@ -945,4 +1032,4 @@ function main(argv = process.argv.slice(2), output = process.stdout.write.bind(p
 }
 if (require.main === module) process.exitCode = main();
 module.exports = { PROTOCOL_VERSION, OPERATIONS, OUTCOMES, REASON_CODES, BUDGET_RESUME_REASON_CODES, TIME_OPTION_BLOCK_CODES,
-  TIME_OPTION_CONTINUATION_CODES, normalizeInput, normalizeHost, init, status, next, handoff, run, parseArgs, main, checksum, validatePending };
+  TIME_OPTION_CONTINUATION_CODES, normalizeInput, normalizeHost, init, status, next, handoff, run, parseArgs, main, checksum, validatePending, validateTerminal };

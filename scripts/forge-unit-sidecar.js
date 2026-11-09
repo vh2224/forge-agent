@@ -91,6 +91,8 @@ function atomic(file, value) {
   finally { try { fs.unlinkSync(tmp); } catch { /* preserve the publication error */ } }
 }
 function json(file, value) { atomic(file, JSON.stringify(value, null, 2) + '\n'); }
+const verificationFailures = new WeakMap();
+function verificationFailureRef(error) { return verificationFailures.get(error) || null; }
 function fileHash(file) { return fs.existsSync(file) ? hash(fs.readFileSync(file)) : null; }
 function fileState(file) {
   if (!fs.existsSync(file)) return null;
@@ -425,16 +427,50 @@ function validateRecoveryRequest(raw, options = {}) {
 // original already satisfies the rule above (pure re-evaluation, no authority).
 // Every other value, origin or destination is returned unchanged and is still
 // decided by validateRecoveryRequest/runUnitSidecarCore. Inputs never mutate.
-function projectTransportOptions(value, original) {
-  if (value?.claudePermissions !== 'verification') return value;
-  const engine = value.route?.resolved_worker_engine;
-  if (typeof engine !== 'string' || !engine || engine === 'claude') return value;
-  const source = require('./forge-attempt-recovery').canonicalRequest(original);
-  const mode = capability(source.route?.resolved_worker_engine, source.unitType,
-    source.scope === 'milestone' ? {} : source).mode;
-  if (source.claudePermissions !== 'verification' || source.route?.resolved_worker_engine !== 'claude'
-      || !['execute', 'fix'].includes(mode) || !source.execution_contract) return value;
-  const { claudePermissions: transportOnly, ...projected } = value;
+function projectTransportOptions(value, original, nativeInvocation) {
+  let projected = value;
+  if (value?.claudePermissions === 'verification') {
+    const engine = value.route?.resolved_worker_engine;
+    const source = require('./forge-attempt-recovery').canonicalRequest(original);
+    const mode = capability(source.route?.resolved_worker_engine, source.unitType,
+      source.scope === 'milestone' ? {} : source).mode;
+    if (typeof engine === 'string' && engine && engine !== 'claude'
+        && source.claudePermissions === 'verification' && source.route?.resolved_worker_engine === 'claude'
+        && ['execute', 'fix'].includes(mode) && source.execution_contract) {
+      const { claudePermissions: transportOnly, ...rest } = value;
+      projected = rest;
+    }
+  }
+  // Local #369 control derivative: rederive only a NEW native route's memo.
+  // The original memo must independently match the current plan/physical roots
+  // and its original sidecar capability. This is data projection, not authority;
+  // prepare and the actual native adapter still validate the held claim/binding.
+  if (original.plan_contract && original.route?.worker_mode === 'sidecar'
+      && projected.route?.worker_mode === 'native' && nativeInvocation !== undefined) {
+    const roots = require('./forge-code-roots');
+    const contract = roots.validateContract(original.execution_contract, { revalidate: true });
+    const validated = roots.validatePlan(fs.readFileSync(original.planFile, 'utf8'), contract);
+    const oldCapability = require('./forge-transport-capabilities').executionCapability(original.route, contract);
+    const memo = original.plan_contract;
+    if (!oldCapability.supported || memo.plan_sha256 !== validated.plan_sha256
+        || memo.contract_sha256 !== validated.contract_sha256
+        || memo.capabilities_sha256 !== roots.digest(oldCapability)
+        || roots.digest(projected.plan_contract) !== roots.digest(memo)
+        || roots.digest(projected.execution_contract) !== roots.digest(contract)
+        || path.resolve(projected.planFile) !== path.resolve(original.planFile)
+        || projected.route.host_runtime !== original.route.host_runtime
+        || projected.route.tier !== original.route.tier || projected.route.effort !== original.route.effort) fail('execution-preflight-stale');
+    const route = projected.route, telemetry = nativeInvocation?.telemetry;
+    if (nativeInvocation?.ok !== true || nativeInvocation.host_runtime !== route.host_runtime
+        || !nativeInvocation.tool || !nativeInvocation.args
+        || telemetry?.model_resolved !== (route.model_resolved || route.model)
+        || telemetry?.effort_resolved !== route.effort
+        || (route.host_runtime === 'codex' && (nativeInvocation.args.model !== (route.model_resolved || route.model)
+          || nativeInvocation.args.reasoning_effort !== route.effort))) fail('native-execution-binding-mismatch');
+    const nextCapability = require('./forge-transport-capabilities').executionCapability(route, contract, { nativeInvocation });
+    if (!nextCapability.supported) fail(nextCapability.reason_code);
+    projected = { ...projected, plan_contract: { ...memo, capabilities_sha256: roots.digest(nextCapability) } };
+  }
   return projected;
 }
 function baselineDigest(state) {
@@ -2227,6 +2263,26 @@ function sameExecutedBase(candidate, executed) {
 // path) and the event emitters. Callers: finishExecute and the executed replay of
 // runUnitSidecarCore (the single context, its exact previous behavior) and verifyRetainedExecution
 // (a cohort member after the barrier, owner events deferred). It never publishes.
+function retainFailedVerification(context, record, deliveryCapture) {
+  const { request: r, root, receiptFile, verificationIdentity } = context;
+  const resultFile = r.resultFile, dispatchId = verificationIdentity.dispatch_id, fingerprint = verificationIdentity.fingerprint;
+  // Observation only. Never replace a raw native result or historical receipt,
+  // and never treat a negative capture as replay/publication authority.
+  const value = { schema_version: 1, kind: 'failed-verification-observation',
+    dispatch_id: dispatchId, fingerprint, captured_at: new Date().toISOString(),
+    original_receipt_sha256: hash(fs.readFileSync(receiptFile)),
+    request_identity_sha256: require('./forge-code-roots').digest(require('./forge-attempt-recovery').requestIdentity(r)),
+    verification_policy_sha256: record.verification_seal.sha256, delivery_capture: deliveryCapture };
+  const bytes = JSON.stringify(value, null, 2) + '\n', sha256 = hash(bytes);
+  const file = resultFile + '.verification-failed-' + sha256 + '.json';
+  // Current result-target admission already requires this parent outside
+  // owner and every code root. Recheck the private sibling before writing.
+  for (const cwd of new Set([root, r.cwd, ...(r.execution_contract?.code_roots || []).map(row => row.path)])) xllm.validateResultFileTarget(file, cwd);
+  if (fs.existsSync(file)) { if (hash(fs.readFileSync(file)) !== sha256) fail('verification-diagnostic-collision'); }
+  else fs.writeFileSync(file, bytes, { flag: 'wx', mode: 0o600 });
+  return Object.freeze({ file, sha256 });
+}
+
 async function completeExecutionCore(context, record, deferredEvents = null) {
   const r = context.request, loc = context.loc, root = context.root, cwd = context.cwd, member = context.member || null;
   const persist = context.persist === undefined ? !deferredEvents : context.persist === true;
@@ -2259,7 +2315,16 @@ async function completeExecutionCore(context, record, deferredEvents = null) {
     if (persist) json(context.receiptFile, record);
     if (deferredEvents) deferredEvents.push(...resourceEvents);
     else await context.appendOwnedEvents(resourceEvents, record);
-    if (!deliveryCapture.passed) fail('execution-verification-failed');
+    if (!deliveryCapture.passed) {
+      const error = Object.assign(new Error('execution-verification-failed'), { code: 'execution-verification-failed' });
+      if (deferredEvents) {
+        const retained = retainFailedVerification(context, record, deliveryCapture);
+        error.diagnostic = diagnostic('verification-capture-failed', { verification_capture_sha256: retained.sha256 });
+        error.verification_diagnostic = retained;
+        verificationFailures.set(error, retained);
+      }
+      throw error;
+    }
     if (record.execution) require('./forge-task-execution').assertReplay(r, record);
     if (persist) json(context.receiptFile, record);
   }
@@ -4092,7 +4157,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       const invocation = route.worker_mode === 'native'
         ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(route)) : { ok: true };
       if (!invocation.ok) return invocation;
-      const candidate = projectTransportOptions({ ...executionRequest, route }, executionRequest);
+      const candidate = projectTransportOptions({ ...executionRequest, route }, executionRequest, invocation);
       try { asOriginal(candidate, () => validateRecoveryRequest(candidate, { verification: runtime.verification, nativeInvocation: invocation })); }
       catch (error) { return { ok: false, reason_code: error.code || 'unit-contract-refused', provider_called: false }; }
       return invocation;
@@ -4110,7 +4175,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     // a Claude sidecar route may carry it; runUnitSidecarCore revalidates the ref.
     invoke: async (route, invocation, _ceiling, assertReady, reservationHash, resume) => {
       if (resume != null && (route.worker_mode !== 'sidecar' || route.resolved_worker_engine !== 'claude')) fail('recovery-resume-route-invalid');
-      const routed = projectTransportOptions({ ...executionRequest, route }, executionRequest);
+      const routed = projectTransportOptions({ ...executionRequest, route }, executionRequest, invocation);
       asOriginal(routed, () => validateRecoveryRequest(routed, { verification: runtime.verification, nativeInvocation: invocation }));
       const ceiling = route.worker_mode === 'sidecar' ? ceilingFromRoute(route) : null;
       const next = deliveryHelper ? finalRequest(route) : projectTransportOptions({ ...executionRequest, recoveryStateFile: recovery.stateFile, route: ceiling
@@ -4119,7 +4184,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
         ...(resume != null ? { claudeResume: resume.session, resumedFrom: resume.resumed_from } : {}),
         // The successor carries only its actual parent: the admission returns the
         // parent's recorded decision for the same correction, never a new cycle.
-        ...(canonical.unitType === 'review-fix' ? { reviewFixRecoveryOf: request.dispatchId } : {}) }, executionRequest);
+        ...(canonical.unitType === 'review-fix' ? { reviewFixRecoveryOf: request.dispatchId } : {}) }, executionRequest, invocation);
       if (route.worker_mode === 'native') {
         if (deliveryHelper) {
           // The successor has a new dispatch: an auto-deferred one needs the
@@ -4226,7 +4291,7 @@ module.exports = { appendProtectedOwnerEvents, preflightExecutionVerification, s
   publishReadyRecord, nativeMemoryFingerprint, acceptNativeMemoryResult, candidateFromNativeResult, runNativeMemory,
   routeIdentity, artifactFingerprint, artifactAttemptFiles, beginArtifactAttempt, replayArtifactAttempt, reconcileLegacyReviewFix,
   failArtifactAttempt, acceptArtifactResult, reconcileArtifactAttempt, runUnitSidecar, recoverUnitSidecar, reviewFixUnitLabel, effortTelemetry,
-  cliObservers, verifyRetainedExecution, retainedPublication, publishRetainedMember };
+  cliObservers, verificationFailureRef, verifyRetainedExecution, retainedPublication, publishRetainedMember };
 // Default CLI observers: stderr only, never through the announcer. Phase lines and
 // activity lines use the sanitized T03 formatters; activity is written only on a
 // phase or liveness-state transition, at most 20 lines per unit. Verification
@@ -4266,5 +4331,5 @@ if (require.main === module) {
     return process.argv[2] === '--accept-native-memory' ? acceptNativeMemoryResult(request) : runUnitSidecar(request, { announce, ...cliObservers() });
   }).then(result => {
     process.stdout.write(`${JSON.stringify(result)}\n`);
-  }).catch(error => { process.stderr.write(`forge-unit-sidecar: ${error.code || 'sidecar-unit-failed'}\n`); process.exitCode = 1; });
+  }).catch(error => { const retained = verificationFailureRef(error); if (retained) process.stderr.write(`[forge-verification-failure] ${JSON.stringify(retained)}\n`); process.stderr.write(`forge-unit-sidecar: ${error.code || 'sidecar-unit-failed'}\n`); process.exitCode = 1; });
 }

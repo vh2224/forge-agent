@@ -1,7 +1,6 @@
 ---
 name: forge-discuss
 description: "Discuss de arquitetura — captura decisoes antes de planejar."
-disable-model-invocation: true
 allowed-tools: Read, Write, Bash, Agent, Skill, WebSearch, WebFetch
 ---
 

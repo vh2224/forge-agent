@@ -49,7 +49,7 @@ const TIME_ADMISSION_CODES = Object.freeze(['time-unit-not-admitted', 'time-task
 const REASON_CODES = Object.freeze([
   'selected', 'no-next-unit', 'prefs-invalid', 'transaction-pending',
   'lease-required', 'lease-owner-mismatch', 'transition-committed',
-  'already-committed', 'handoff-ready', 'boundary-missing',
+  'already-committed', 'handoff-ready', 'boundary-missing', 'unit-incomplete',
   'boundary-not-transferable', 'lease-active', 'invalid-request',
   ...require('./forge-milestone-time-admission').TIME_REASON_CODES,
   ...timeSelection.TIME_OPTION_REASON_CODES, ...timeSelection.TIME_OPTION_RESUME_CODES, ...TIME_ADMISSION_CODES,
@@ -896,6 +896,50 @@ function transactionKey(input, action, unit) {
   const explicit = input.idempotency_key === undefined ? input.idempotencyKey : input.idempotency_key;
   return opaque(explicit, 'idempotency_key', false) || sha(`${action}\u0000${unit.key}\u0000${input.milestone || ''}\u0000${input.request_id || ''}`);
 }
+// A committed begin is still open until its own generation has a committed
+// terminal transaction. ROADMAP/STATE, TTL and another unit's terminal do not
+// close it. A partial pause stays resumable until a canonically linked begin.
+function incompleteUnits(cwd, milestone) {
+  const records = discoverRecords(cwd, 'transaction').filter(row => row.milestone === milestone);
+  const closed = begin => records.some(row => row.phase === 'committed' && row.boundary?.handoff_ready === true
+    && ['complete', 'pause', 'fail', 'expired-safe'].includes(row.action) && row.unit.key === begin.unit.key
+    && row.lease_generation === begin.lease_generation && row.owner_digest === begin.owner_digest);
+  return records.filter(row => row.phase === 'committed' && (row.action === 'begin' && !closed(row)
+    || row.action === 'pause' && row.result?.output?.partial_attempt
+      && !records.some(next => next.action === 'begin' && next.resumed_pause?.key === row.idempotency_key
+        && next.resumed_pause.checksum === sha(row))));
+}
+function partialQuestions(cwd, paused, options) {
+  const original = paused.result.output.partial_attempt.pending_questions;
+  const interaction = require('./forge-interaction');
+  if (!original.some(row => row.status === 'pending')) return clone(original);
+  if (typeof options?.questionStateAdapter !== 'function') throw new ControllerError('pending-questions', 'partial pause retains unanswered decisions');
+  const observed = options.questionStateAdapter({ cwd, previous: { questions: clone(original) }, boundary: clone(paused.boundary) });
+  const questions = interaction.resolvePendingQuestions(interaction.mergePendingQuestions(original, observed?.questions || []), observed?.answers || []);
+  if (questions.some(row => row.status === 'pending')) throw new ControllerError('pending-questions', 'partial pause retains unanswered decisions');
+  return questions;
+}
+function resumedPause(cwd, input, unit, options) {
+  if (input.resume_from === undefined) return null;
+  const paused = lookupRecord(cwd, 'transaction', input.resume_from);
+  if (!paused || paused.phase !== 'committed' || paused.action !== 'pause' || !paused.boundary?.handoff_ready
+    || paused.unit.key !== unit.key || paused.milestone !== input.milestone
+    || input.slice && input.slice !== paused.after.state.active_slice) throw new ControllerError('unit-identity-mismatch', 'resume requires the exact durable paused unit');
+  if (paused.result?.output?.partial_attempt) {
+    const begin = lookupRecord(cwd, 'transaction', paused.result.output.partial_attempt.begin_key);
+    const live = begin && inspectSettledAttempt(cwd, begin, options, ['partial', 'blocked'], false);
+    if (!live || sha(live) !== sha(paused.result.output.partial_attempt)) throw new ControllerError('attempt-evidence-changed', 'paused attempt changed before resume');
+  }
+  return { key: paused.idempotency_key, checksum: sha(paused),
+    pending_questions: paused.result?.output?.partial_attempt ? partialQuestions(cwd, paused, options) : [] };
+}
+function validatePausedEntry(cwd, begin, options) {
+  const paused = lookupRecord(cwd, 'transaction', begin.resumed_pause?.key);
+  if (!paused || sha(paused) !== begin.resumed_pause.checksum) throw new ControllerError('attempt-evidence-changed', 'paused entry changed');
+  const questions = paused.result?.output?.partial_attempt ? partialQuestions(cwd, paused, options) : [];
+  if (sha(questions) !== sha(begin.resumed_pause.pending_questions)) throw new ControllerError('pending-questions', 'actual answers changed');
+  return questions;
+}
 function pendingTransactions(cwd) {
   return discoverRecords(cwd, 'transaction').filter(record => record.phase !== 'committed');
 }
@@ -1285,6 +1329,13 @@ function begin(cwd, request, options) {
   }
   return withMutex(cwd, 'unit-controller-transactions', () => beginInside(cwd, request, options));
 }
+// Serial workflow entry only. Independent/batched low-level begin remains
+// available; no request/options flag can disable this named boundary.
+const SERIAL_BEGIN_CONTEXT = Symbol('serial-begin-context');
+function beginSerial(cwd, request, options) {
+  resolvePrefs(cwd, options);
+  return withMutex(cwd, 'unit-controller-transactions', () => beginInside(cwd, request, options, { serialBoundary: SERIAL_BEGIN_CONTEXT }));
+}
 function decideTimeAdmission(cwd, options) {
   return require('./forge-milestone-time-admission').decideAdmission(cwd, options);
 }
@@ -1323,6 +1374,43 @@ function beginMembersInside(cwd, request, options) {
     }
     return { member, key };
   });
+  // Batch workflow admission composes the serial lineage guard with the canonical
+  // full manifest. A caller may request its ordered subset after real placement refusals;
+  // omitted/foreign/unknown incomplete begins are never exempted by JSON membership.
+  const manifest = manifests.size === 1 ? [...manifests.values()][0] : null;
+  if (!manifest || members.some(({ member }, index) => index > 0 && member.batch.member_index <= members[index - 1].member.batch.member_index)) {
+    throw new ControllerError('record-conflict', 'batch requests must be an ordered subset of one canonical manifest');
+  }
+  const requested = new Map(members.map(({ member, key }) => [key, member]));
+  const incomplete = incompleteUnits(cwd, manifest.milestone).filter(row => {
+    const member = requested.get(row.idempotency_key), listed = member && manifest.members[member.batch.member_index];
+    const foreign = !listed || row.action !== 'begin' || row.unit.key !== listed.unit || row.milestone !== manifest.milestone
+      || row.host_runtime !== manifest.host_runtime || row.owner_digest !== manifest.owner_digest
+      || !executionBatch().validBinding(row.batch, row.idempotency_key, row.unit)
+      || stableStringify(row.batch) !== stableStringify(executionBatch().memberBinding(manifest, listed));
+    if (foreign) return true;
+    // A committed begin is not completion, and its historical no-op replay does
+    // not assert a live lease. Validate every exempt sibling BEFORE any new begin.
+    // lookupRecord revalidates canonical storage checksums; use the recorded
+    // generation and the same ownership-only lease primitive as canonical replay.
+    // An expired but identically owned lease remains valid here; never infer death.
+    const current = lookupRecord(cwd, 'transaction', row.idempotency_key);
+    if (!current || sha(current) !== sha(row)) throw new ControllerError('record-conflict', 'batch begin changed during lineage admission');
+    if (member.generation !== undefined && member.generation !== row.lease_generation) {
+      throw new ControllerError('lease-owner-mismatch', 'batch replay generation differs from its begin');
+    }
+    assertLease(cwd, row.unit.key, member.owner_token === undefined ? member.ownerToken : member.owner_token, row.lease_generation);
+    return false;
+  });
+  if (incomplete.length) {
+    if (incomplete.some(row => members.some(({ member }) => row.unit.key === unitFromRequest(member).key)
+      && forgeLease.observe(cwd, row.unit.key, options || {}).reason === 'lease-active')) {
+      throw new ControllerError('lease-active', 'selected batch unit already has an active foreign lease');
+    }
+    throw new ControllerError('unit-incomplete', 'settle or resume the existing unit before batch advance', {
+      units: incomplete.map(row => ({ idempotency_key: row.idempotency_key, unit: row.unit, begin_checksum: sha(row),
+        generation: row.lease_generation, milestone: row.milestone, host_runtime: row.host_runtime, owner_digest: row.owner_digest })) });
+  }
   const outcomes = [];
   for (const [index, { member, key }] of members.entries()) {
     try {
@@ -1336,6 +1424,7 @@ function beginMembersInside(cwd, request, options) {
   return { ok: outcomes[0].ok === true, reason: 'batch-members', members: outcomes };
 }
 function beginInside(cwd, request, options, extra = {}) {
+  const serialBoundary = extra.serialBoundary === SERIAL_BEGIN_CONTEXT;
   const input = object(request, 'request');
   const selection = input.unit ? { ok: true, milestone: input.milestone, unit: unitFromRequest(input), slice: input.slice || null }
     : select(cwd, input, options);
@@ -1371,10 +1460,32 @@ function beginInside(cwd, request, options, extra = {}) {
   }
   const availabilitySlice = unit.type === 'execute-task' ? (effectiveSlice === '—' ? null : effectiveSlice) : input.slice;
   assertUnitAvailable(cwd, input.milestone, unit, availabilitySlice, options);
-  // A replayed member resumes under its own recorded lease generation (as resume() would).
-  if (existing) return runTransaction(cwd, existing, ownerToken, input.generation || (boundBatch ? existing.lease_generation : undefined), options);
+  let serialResumed = null;
+  if (serialBoundary) {
+    if (existing?.resumed_pause) { validatePausedEntry(cwd, existing, options); serialResumed = existing.resumed_pause; }
+    else serialResumed = resumedPause(cwd, input, unit, options);
+    const incomplete = incompleteUnits(cwd, input.milestone).filter(row => row.idempotency_key !== key
+      && row.idempotency_key !== serialResumed?.key);
+    if (incomplete.length) {
+      // Preserve the real unit lease refusal when another owner contests that
+      // same unit. A different unfinished unit still blocks historical S02 replay.
+      if (incomplete.some(row => row.unit.key === unit.key) && forgeLease.observe(cwd, unit.key, options || {}).reason === 'lease-active') {
+        throw new ControllerError('lease-active', 'selected unit already has an active lease');
+      }
+      throw new ControllerError('unit-incomplete', 'settle or resume the existing unit before serial advance', {
+        existing_begin: existing ? { idempotency_key: key, phase: existing.phase, begin_checksum: sha(existing),
+          generation: existing.lease_generation, owner_digest: existing.owner_digest, host_runtime: existing.host_runtime,
+          milestone: existing.milestone, unit: existing.unit.key } : null,
+        units: incomplete.map(row => ({ idempotency_key: row.idempotency_key, unit: row.unit, action: row.action,
+          begin_checksum: sha(row), generation: row.lease_generation, milestone: row.milestone, host_runtime: row.host_runtime, owner_digest: row.owner_digest })) });
+    }
+    fail(options, 'serial-lineage-checked');
+  }
+  if (existing) return runTransaction(cwd, existing, ownerToken,
+    input.generation || (serialBoundary || boundBatch ? existing.lease_generation : undefined), options);
   const otherPending = pendingTransactions(cwd);
   if (otherPending.length) throw new ControllerError('transaction-pending', 'recovery obrigatório antes de novo begin');
+  const resumed = serialBoundary ? serialResumed : resumedPause(cwd, input, unit, options);
   const admission = decideTimeAdmission(cwd,
     { milestone: input.milestone, unit, key, now: options && options.now, kind: 'begin' });
   if (!admission.allowed) throw new ControllerError(admission.reason_code, 'Entrada recusada pelo contrato de tempo da milestone', admission.details);
@@ -1403,6 +1514,7 @@ function beginInside(cwd, request, options, extra = {}) {
   try {
     fail(options, 'before-make-transaction');
     transaction = makeTransaction(cwd, input, 'begin', unit, key, ownerToken, acquired.generation, hostRuntime, nowOf(options));
+    if (resumed) transaction.resumed_pause = resumed;
     if (admission.record || admission.decision === 'boundary-continuation' && admission.details.contract !== 'absent') {
       transaction.time_admission = admission.record || { decision: admission.decision, ...admission.details };
     }
@@ -1806,7 +1918,10 @@ function assertNoSuccessor(cwd, begin, terminalKey) {
   if (events.slice(index + 1).some(item => item.action === 'begin' && item.idempotency_key !== begin.idempotency_key)) {
     throw new ControllerError('successor-conflict', 'unidade já possui begin sucessor');
   }
-  if (events.slice(index + 1).some(item => item.unit === begin.unit.key && item.idempotency_key !== terminalKey
+  assertNoTerminal(cwd, begin, terminalKey, events.slice(index + 1));
+}
+function assertNoTerminal(cwd, begin, terminalKey, later) {
+  if (later.some(item => item.unit === begin.unit.key && item.idempotency_key !== terminalKey
     && ['complete', 'fail', 'pause', 'expired-safe', 'persist-result'].includes(item.action))
     || discoverRecords(cwd, 'transaction').some(item => item.unit.key === begin.unit.key && item.milestone === begin.milestone
       && item.lease_generation === begin.lease_generation && item.idempotency_key !== terminalKey
@@ -1814,6 +1929,96 @@ function assertNoSuccessor(cwd, begin, terminalKey) {
     throw new ControllerError('terminal-conflict', 'unidade já possui transição terminal');
   }
   if (pendingTransactions(cwd).some(item => item.idempotency_key !== terminalKey)) throw new ControllerError('transaction-pending', 'transação pendente impede consumo');
+}
+function laterBegins(cwd, begin) {
+  const events = readEvents(eventsFile(cwd, begin.milestone));
+  const index = events.findIndex(row => row.idempotency_key === begin.idempotency_key && row.action === 'begin');
+  if (index < 0) throw new ControllerError('begin-event-missing', 'begin has no published event');
+  const seen = new Set();
+  return events.slice(index + 1).filter(row => row.action === 'begin').map(event => {
+    const row = lookupRecord(cwd, 'transaction', event.idempotency_key);
+    if (!row || row.phase !== 'committed' || row.action !== 'begin' || row.milestone !== begin.milestone
+      || row.unit.key !== event.unit || seen.has(row.idempotency_key)) throw new ControllerError('record-conflict', 'successor history ambiguous');
+    seen.add(row.idempotency_key); return row;
+  });
+}
+function uninvokedEvidence(cwd, begin, successor, original, options) {
+  if (successor.owner_digest !== begin.owner_digest || successor.host_runtime !== begin.host_runtime) throw new ControllerError('successor-owner-mismatch', 'successor owner differs');
+  const context = options.inspectAttempt({ cwd, begin: clone(successor), references: { purpose: 'abandon-before-dispatch', original_begin_key: begin.idempotency_key } });
+  // This is the live host's positive observation of no invocation. A missing
+  // receipt, PID, elapsed TTL or a serialized flag never makes this assertion.
+  if (context?.begin_key !== successor.idempotency_key || context.begin_checksum !== sha(successor)
+    || context.invocation_status !== 'not-invoked' || typeof context.observation_reference !== 'string' || !context.observation_reference.trim()
+    || !context.request || context.receipt_path != null) throw new ControllerError('successor-not-proved-uninvoked', 'positive host observation required');
+  const recovery = require('./forge-attempt-recovery'), api = require('./forge-code-roots');
+  const identity = recovery.requestIdentity(recovery.canonicalRequest(context.request));
+  if (`${identity.unit_type}/${identity.task_id || identity.slice_id || identity.milestone_id}` !== successor.unit.key
+    || identity.milestone_id !== begin.milestone || identity.host !== successor.host_runtime
+    || identity.slice_id && identity.slice_id !== successor.after.state.active_slice
+    || api.digest(context.request.claim || null) !== original.claim_sha256) throw new ControllerError('successor-scope-mismatch', 'successor request/claim differs');
+  const roots = physicalRoots(context.roots);
+  if (sha(roots) !== sha(original.roots) || [context.request.cwd, context.request.contextRoot,
+    context.request.execution_contract?.owner, ...(context.request.execution_contract?.code_roots || []).map(root => root.path)]
+    .filter(Boolean).some(file => !roots.some(root => root.path === fs.realpathSync.native(file)))) throw new ControllerError('roots-unverified', 'successor physical roots differ');
+  if (options.processProbe({ begin_key: successor.idempotency_key, invocation_status: 'not-invoked', observation_reference: context.observation_reference }) !== 'stopped') throw new ControllerError('process-not-stopped', 'successor writer unknown');
+  for (const root of roots) {
+    const result = options.reconcileRoots({ cwd, root, context, begin: clone(successor), inspection: { invocation_status: 'not-invoked' } });
+    if (result?.root_id !== root.root_id || result.process_stopped !== true || result.reconciled !== true) throw new ControllerError('roots-unreconciled', 'successor root unreconciled');
+  }
+  return { original_begin_key: begin.idempotency_key, original_begin_checksum: sha(begin),
+    begin_key: successor.idempotency_key, begin_checksum: sha(successor), request_sha256: recovery.callerRequestHash(context.request),
+    claim_sha256: original.claim_sha256, roots, observation_sha256: sha(context.observation_reference) };
+}
+function compensationKey(begin, successor) { return 'abandon-before-dispatch:' + sha({ original: sha(begin), successor: sha(successor) }); }
+function reconcilePartialSuccessors(cwd, input, options = {}) {
+  resolvePrefs(cwd, options);
+  return withMutex(cwd, 'unit-controller-transactions', () => {
+    const begin = terminalIdentity(cwd, input), original = inspectSettledAttempt(cwd, begin, options, ['partial', 'blocked']);
+    const observed = forgeRuns.inspectOwnerResume(cwd, begin.milestone, { hostRuntime: begin.host_runtime, expectedSession: options.expectedSession });
+    const held = forgeRuns.get(cwd, begin.milestone);
+    if (!['same-owner-active', 'same-owner-inactive'].includes(observed.status)
+      || require('./forge-code-roots').digest(held?.write_claim || null) !== original.claim_sha256) throw new ControllerError('successor-owner-mismatch', 'observed existing owner and exact claim required');
+    const successors = laterBegins(cwd, begin);
+    const locators = successors.map(row => ({ key: row.idempotency_key, checksum: sha(row) }));
+    if (!successors.length || !Array.isArray(input.successors) || sha(input.successors) !== sha(locators)) throw new ControllerError('successor-inventory-mismatch', 'exact ordered successor inventory required');
+    const prepared = successors.map(row => {
+      const proof = uninvokedEvidence(cwd, begin, row, original, options), key = compensationKey(begin, row);
+      const existing = lookupRecord(cwd, 'transaction', key);
+      if (existing && (existing.action !== 'pause' || existing.unit.key !== row.unit.key || existing.milestone !== row.milestone
+        || existing.owner_digest !== row.owner_digest || existing.host_runtime !== row.host_runtime || existing.lease_generation !== row.lease_generation
+        || sha(existing.result?.output?.abandoned_before_dispatch) !== sha(proof))) throw new ControllerError('successor-terminal-conflict', 'compensation identity differs');
+      const records = discoverRecords(cwd, 'transaction').filter(tx => tx.milestone === begin.milestone && tx.unit.key === row.unit.key
+        && tx.lease_generation === row.lease_generation && ['complete', 'pause', 'fail', 'expired-safe'].includes(tx.action));
+      if (records.some(tx => tx.idempotency_key !== key || sha(tx.result?.output?.abandoned_before_dispatch) !== sha(proof))) throw new ControllerError('successor-terminal-conflict', 'successor has a different terminal');
+      return { row, proof, key };
+    });
+    // Validate ALL successors before the first effect. Every partial phase is
+    // replayed by the original transaction runtime; old begins/events survive.
+    const transactions = [];
+    for (const { row, proof, key } of prepared.reverse()) {
+      if (sha(uninvokedEvidence(cwd, begin, row, original, options)) !== sha(proof)) throw new ControllerError('attempt-evidence-changed', 'successor observation changed');
+      transactions.push(transitionInside(cwd, { milestone: begin.milestone, unit: row.unit, host_runtime: row.host_runtime,
+        owner_token: input.owner_token, generation: row.lease_generation, idempotency_key: key, action: 'pause',
+        result: { status: 'cancelled', output: { abandoned_before_dispatch: proof } } }, options).transaction);
+    }
+    return { ok: true, reason: 'successors-abandoned-before-dispatch', transactions };
+  });
+}
+function assertPartialLineage(cwd, begin, key, proof, options) {
+  const successors = laterBegins(cwd, begin);
+  if (!successors.length) return assertNoSuccessor(cwd, begin, key);
+  const compensatedKeys = new Set();
+  for (const row of successors) {
+    const compensation = lookupRecord(cwd, 'transaction', compensationKey(begin, row));
+    const live = uninvokedEvidence(cwd, begin, row, proof, options);
+    if (!compensation || compensation.phase !== 'committed' || compensation.action !== 'pause' || !compensation.boundary?.handoff_ready
+      || compensation.unit.key !== row.unit.key || compensation.milestone !== row.milestone || compensation.owner_digest !== row.owner_digest
+      || compensation.host_runtime !== row.host_runtime || compensation.lease_generation !== row.lease_generation
+      || sha(compensation.result?.output?.abandoned_before_dispatch) !== sha(live)) throw new ControllerError('successor-conflict', 'successor needs exact canonical uninvoked compensation');
+    compensatedKeys.add(compensation.idempotency_key);
+  }
+  const events = readEvents(eventsFile(cwd, begin.milestone)), index = events.findIndex(row => row.idempotency_key === begin.idempotency_key);
+  assertNoTerminal(cwd, begin, key, events.slice(index + 1).filter(row => !compensatedKeys.has(row.idempotency_key)));
 }
 function terminalReplay(cwd, transaction) {
   verifiedFailure(cwd, transaction);
@@ -1861,6 +2066,69 @@ function runTerminal(cwd, transaction, begin, input, options, guard) {
   }
   if (transaction.phase === 'boundary-ready') { check(); setPhase(cwd, transaction, 'committed', options); }
   return terminalReplay(cwd, transaction);
+}
+// The locator is data. The live inspector must bind its actual request/receipt
+// and stopped writer to THIS begin, including all physical roots. JSON flags,
+// inactivity, an expired lease and a partial string are insufficient.
+function inspectSettledAttempt(cwd, begin, options, statuses, replaySource = true) {
+  if (typeof options?.inspectAttempt !== 'function' || typeof options?.processProbe !== 'function'
+    || typeof options?.reconcileRoots !== 'function') throw new ControllerError('attempt-inspector-required', 'live attempt and root reconciliation required');
+  const context = options.inspectAttempt({ cwd, begin: clone(begin), references: {} });
+  if (!context?.request || typeof context.receipt_path !== 'string' || context.begin_key !== begin.idempotency_key
+    || context.begin_checksum !== sha(begin)) throw new ControllerError('attempt-evidence-missing', 'actual begin-bound request and receipt required');
+  const recovery = require('./forge-attempt-recovery'), rootsApi = require('./forge-code-roots');
+  const identity = recovery.requestIdentity(recovery.canonicalRequest(context.request));
+  if (`${identity.unit_type}/${identity.task_id || identity.slice_id || identity.milestone_id}` !== begin.unit.key || identity.milestone_id !== begin.milestone || identity.host !== begin.host_runtime || identity.slice_id && identity.slice_id !== begin.after.state.active_slice) throw new ControllerError('attempt-identity-mismatch', 'request scope differs from begin');
+  const inspection = recovery.inspectReceipt(context.receipt_path, { request: context.request, processProbe: options.processProbe });
+  const receipt = inspection.receipt;
+  if (receipt.fingerprint !== require('./forge-unit-sidecar').artifactFingerprint(context.request)
+    || receipt.recovery_identity_sha256 && receipt.recovery_identity_sha256 !== rootsApi.digest(identity)) throw new ControllerError('attempt-identity-mismatch', 'receipt differs from actual request');
+  if (inspection.process_stopped !== true) throw new ControllerError('process-not-stopped', 'writer has not been proved stopped');
+  if (receipt.phase !== 'ready' || !statuses.includes(receipt.result?.status)) throw new ControllerError('settled-result-required', 'canonical ready result with the declared status required');
+  if (replaySource && receipt.execution) require('./forge-task-execution').assertReplay(context.request, receipt);
+  const roots = physicalRoots(context.roots);
+  const required = [cwd, context.request.cwd, context.request.contextRoot, context.request.execution_contract?.owner,
+    ...(context.request.execution_contract?.code_roots || []).map(root => root.path)].filter(Boolean);
+  if (required.some(file => !roots.some(root => root.path === fs.realpathSync.native(file)))) throw new ControllerError('roots-unverified', 'attempt root omitted');
+  for (const root of roots) {
+    const observed = options.reconcileRoots({ cwd, root, context, inspection, begin: clone(begin) });
+    if (!observed || observed.root_id !== root.root_id || observed.process_stopped !== true || observed.reconciled !== true) throw new ControllerError('roots-unreconciled', 'actual root reconciliation required');
+  }
+  const pending = require('./forge-interaction').mergePendingQuestions(receipt.pending_questions || [], receipt.result.questions || []);
+  return { begin_key: begin.idempotency_key, begin_checksum: sha(begin), receipt_sha256: inspection.receipt_sha256,
+    request_sha256: recovery.callerRequestHash(context.request), claim_sha256: rootsApi.digest(context.request.claim || null),
+    status: receipt.result.status, roots, pending_questions: require('./forge-interaction').mergePendingQuestions(pending, context.pending_questions || []) };
+}
+function pausePartial(cwd, input, options = {}) {
+  resolvePrefs(cwd, options);
+  return withMutex(cwd, 'unit-controller-transactions', () => {
+    const begin = terminalIdentity(cwd, input), key = input.idempotency_key;
+    const existing = lookupRecord(cwd, 'transaction', key);
+    if (existing && (existing.action !== 'pause' || existing.result?.output?.partial_attempt?.begin_key !== begin.idempotency_key)) throw new ControllerError('record-conflict', 'partial pause key differs');
+    const proof = inspectSettledAttempt(cwd, begin, options, ['partial', 'blocked']);
+    if (!existing) assertPartialLineage(cwd, begin, key, proof, options);
+    if (input.result?.status !== proof.status || existing && sha(existing.result.output.partial_attempt) !== sha(proof)) throw new ControllerError('attempt-evidence-changed', 'partial evidence changed');
+    return transitionInside(cwd, { ...input, action: 'pause', unit: begin.unit, generation: begin.lease_generation,
+      state_patch: { active_slice: begin.after.state.active_slice, active_task: begin.after.state.active_task },
+      result: { status: 'cancelled', output: { partial_attempt: proof } } }, options);
+  });
+}
+function verifyCompletedAttempt(cwd, begin, options) {
+  return inspectSettledAttempt(cwd, begin, options, ['done']);
+}
+// Read-only proof used inside resumeOwner's existing controller→registry fence.
+// It grants no owner transfer, claim release or writer authority of its own.
+function inspectPausedAttempt(cwd, record, options) {
+  const pending = incompleteUnits(cwd, record.id).filter(row => row.action === 'pause' && row.result?.output?.partial_attempt);
+  if (pending.length !== 1) throw new ControllerError('owner-resume-partial-boundary-required', 'one exact paused attempt required');
+  const paused = pending[0], stored = paused.result.output.partial_attempt;
+  handoff(cwd, { unit: paused.unit.key, next_host_runtime: record.host_runtime }, options);
+  const begin = lookupRecord(cwd, 'transaction', stored.begin_key);
+  if (!begin || sha(begin) !== stored.begin_checksum) throw new ControllerError('attempt-evidence-changed', 'partial begin changed');
+  const live = inspectSettledAttempt(cwd, begin, options, ['partial', 'blocked'], false);
+  if (sha(live) !== sha(stored) || live.claim_sha256 !== require('./forge-code-roots').digest(record.write_claim)) throw new ControllerError('attempt-evidence-changed', 'partial claim or attempt changed');
+  require('./forge-code-roots').claimGroups(record.write_claim);
+  return { unit: paused.unit.key, receipt_sha256: live.receipt_sha256, request_sha256: live.request_sha256 };
 }
 function consumeFailure(cwd, request, options = {}) {
   resolvePrefs(cwd, options);
@@ -2130,9 +2398,9 @@ function cliMain() {
 
 module.exports = {
   PROTOCOL_VERSION, BOUNDARY_KINDS, ACTIONS, PHASES, REASON_CODES, TIME_ADMISSION_CODES, ControllerError,
-  selectNextUnit, discoverInventory, select, begin, transition, persistResult,
+  selectNextUnit, discoverInventory, select, begin, beginSerial, transition, persistResult,
   complete, pause, fail: failUnit, expireSafe, resume, handoff,
-  withOwnerBoundary, pendingTransactions, projectLogicalHistory, logicalState, resolvePrefs,
+  withOwnerBoundary, pendingTransactions, incompleteUnits, pausePartial, reconcilePartialSuccessors, inspectPausedAttempt, verifyCompletedAttempt, validatePausedEntry, projectLogicalHistory, logicalState, resolvePrefs,
   transactionDir, resultDir, boundaryDir, eventsFile, transactionFile,
   resultFile, boundaryFile, readEvents, readJson, writeAtomic,
   lookupRecord, preflightPaths,

@@ -533,8 +533,11 @@ function smokeCliHelpers() {
     f.work('M001', 'milestone');
     assert(resolve().status === 'none', 'no personal bindings means none, never a legacy team fallback');
     assert(!fs.existsSync(path.join(f.home, '.forge-personal')), 'unbound query is read-only');
+    const legacyFile = path.join(f.project, '.gsd', 'forge', 'runs', 'M001.json');
+    const legacyBytes = fs.readFileSync(legacyFile);
     const explicit = resolve('M001');
-    assert(explicit.status === 'activate-new' && explicit.run_id === 'M001', 'explicit M001 activates an inactive milestone');
+    assert(explicit.status === 'refuse' && explicit.reason === 'owner-resume-binding-unknown' && explicit.run_id === 'M001', 'explicit inactive legacy M001 refuses unknown ownership');
+    assert(fs.readFileSync(legacyFile).equals(legacyBytes), 'unknown inactive M001 inspection preserves the exact registry bytes');
     assert(personal.readPersonalSnapshot(f.options).works.length === 0, 'explicit inspection does not bind');
     f.work('M001', 'milestone', true);
     f.work('M002', 'milestone', true);
@@ -553,13 +556,38 @@ function smokeCliHelpers() {
     assert(resolve('M001').run_id === 'M001', 'explicit choice resolves personal ambiguity');
     const tsMs = 'M-20260522143012-oauth';
     f.work(tsMs, 'milestone');
+    const timestampFile = path.join(f.project, '.gsd', 'forge', 'runs', tsMs + '.json'), timestampBytes = fs.readFileSync(timestampFile);
     const timestamp = resolve(tsMs);
-    assert(timestamp.status === 'activate-new' && timestamp.run_id === tsMs && timestamp.kind === 'milestone', 'timestamp milestone retains activate-new semantics');
+    assert(timestamp.status === 'refuse' && timestamp.reason === 'owner-resume-binding-unknown' && timestamp.run_id === tsMs && timestamp.kind === 'milestone', 'inactive timestamp milestone refuses unknown ownership');
+    assert(fs.readFileSync(timestampFile).equals(timestampBytes), 'inactive timestamp milestone inspection preserves the exact registry bytes');
     const tsTask = 'T-20260522143012-fix-typo';
     f.work(tsTask);
+    const taskFile = path.join(f.project, '.gsd', 'forge', 'runs', tsTask + '.json'), taskBytes = fs.readFileSync(taskFile);
     const task = resolve(tsTask);
-    assert(task.kind === 'task' && task.status === 'resume', 'explicit registered timestamp task resumes');
+    assert(task.kind === 'task' && task.status === 'refuse' && task.reason === 'owner-resume-binding-unknown', 'inactive timestamp task refuses unknown ownership');
+    assert(fs.readFileSync(taskFile).equals(taskBytes), 'inactive timestamp task inspection preserves the exact registry bytes');
     assert(!personal.readPersonalSnapshot(f.options).works.some(w => w.id === tsMs || w.id === tsTask), 'timestamp inspection also leaves bindings unchanged');
+    // Creation and resume are separate: these are fresh private fixture cases,
+    // never an adoption or repair of the unknown legacy records checked above.
+    const runs = require('./forge-runs');
+    for (const [knownId, kind] of [['M003', 'milestone'], ['M-20260522143013-known', 'milestone'], ['T-20260522143013-known-task', 'task']]) {
+      f.work(knownId, kind);
+      const file = path.join(f.project, '.gsd', 'forge', 'runs', knownId + '.json');
+      assert(JSON.parse(fs.readFileSync(file)).write_claim === undefined, 'known-owner fixture has no claim to discard');
+      fs.unlinkSync(file); // f.work prepared artifacts; canonical registration creates the NEW row.
+      runs.add(f.project, { id: knownId, kind, active: false, session_id: 'smoke-known-owner', host_runtime: 'codex', owner_session_source: 'CODEX_THREAD_ID' });
+      const bytes = fs.readFileSync(file), known = resolve(knownId);
+      assert(known.status === 'resume' && known.run_id === knownId && known.kind === kind, 'known inactive ' + knownId + ' selects resume inspection');
+      assert(fs.readFileSync(file).equals(bytes), 'known inactive ' + knownId + ' classification does not activate or replace its owner');
+    }
+    for (const newId of ['M004', 'M-20260522143014-new']) {
+      f.work(newId, 'milestone');
+      const file = path.join(f.project, '.gsd', 'forge', 'runs', newId + '.json');
+      assert(JSON.parse(fs.readFileSync(file)).write_claim === undefined, 'new-milestone fixture has no claim to discard');
+      fs.unlinkSync(file); const fresh = resolve(newId);
+      assert(fresh.status === 'activate-new' && fresh.run_id === newId, 'absent milestone ' + newId + ' keeps activate-new classification');
+      assert(!fs.existsSync(file), 'absent milestone classification remains read-only');
+    }
     const id = runScript('forge-ids.js', ['--new-task', 'fix typo in readme', '--format', 'timestamp'], { env: f.env() });
     assert(/^T-\d{14}(-[a-z0-9-]+)?$/.test(id.stdout.trim()), 'newTaskId format is T-<14digits>-<slug>');
   } finally { f.cleanup(); }
@@ -3850,6 +3878,9 @@ async function smokeXllmPlan() {
     'id: T01',
     'slice: S99',
     'milestone: M999',
+    'depends: []',
+    'writes:',
+    '  - src/thing.js',
     'must_haves:',
     '  truths:',
     '    - "the thing works"',
@@ -3897,7 +3928,7 @@ async function smokeXllmPlan() {
     return JSON.stringify({
       status: 'done',
       summary: 'planned the slice',
-      slice_plan: { filename: 'S99-PLAN.md', content: '# S99: slice plan\n\ntasks: T01\n' },
+      slice_plan: { filename: 'S99-PLAN.md', content: '# S99: slice plan\n\n- [ ] **T01**: do the thing\n' },
       task_plans: [{ id: 'T01', filename: 'T01-PLAN.md', content: taskPlanContent }],
     });
   }
@@ -4057,7 +4088,8 @@ function smokeXllmSvn() {
     files_changed: ['sidecar-file.txt'],
   });
   const taskPlan = [
-    '---', 'id: T01', 'slice: S99', 'milestone: M999', 'must_haves:',
+    '---', 'id: T01', 'slice: S99', 'milestone: M999',
+    'depends: []', 'writes:', '  - src/thing.js', 'must_haves:',
     '  truths:', '    - "the thing works"', '  artifacts:', '    - path: "src/thing.js"',
     '      provides: "the thing"', '      min_lines: 5', '  key_links:',
     '    - from: "src/thing.js"', '      to: "src/other.js"', '      via: "import"',
@@ -4065,7 +4097,7 @@ function smokeXllmSvn() {
   ].join('\n');
   const planPayload = JSON.stringify({
     status: 'done', summary: 'SVN plan completed',
-    slice_plan: { filename: 'S99-PLAN.md', content: '# S99\n' },
+    slice_plan: { filename: 'S99-PLAN.md', content: '# S99\n\n- [ ] **T01**: fixture\n' },
     task_plans: [{ id: 'T01', filename: 'T01-PLAN.md', content: taskPlan }],
   });
   const readJson = (file) => {
