@@ -8,8 +8,13 @@ const runtime = require('./forge-runtime.js');
 
 const PROTOCOL_VERSION = runtime.PROTOCOL_VERSION;
 const MODES = Object.freeze(['auto', 'task']);
-const COMMANDS = Object.freeze(['next', 'pause', 'resume', 'status', 'complete', 'consume-failure', 'reenter', 'resume-budget', 'resume-time-option']);
+const COMMANDS = Object.freeze(['next', 'pause', 'resume', 'status', 'complete', 'consume-failure', 'reenter', 'resume-budget', 'resume-time-option',
+  'batch-status', 'batch-ack']);
 const TERMINAL = new Set(['completed', 'blocked', 'failed']);
+// Issue 343 U1: while a dispatched batch is active, every command that acts on one unit is
+// refused by name (no delegation); only next (replay), status and the batch commands run.
+const SINGLE_UNIT_COMMANDS = new Set(['pause', 'resume', 'complete', 'consume-failure', 'reenter', 'resume-budget', 'resume-time-option']);
+const BATCH_ID = /^batch-[a-f0-9]{32}$/;
 // S02 owner blocks that the named resume-time-option command may continue: the
 // pending/invalid selection, roadmap conformance, the scoped task DAG and a review
 // mode incompatible with the active contract. Budget blocks keep their own
@@ -56,6 +61,16 @@ function validateSnapshot(value) {
   if (value.protocol_version !== PROTOCOL_VERSION) throw error('invalid-snapshot', 'protocol_version incompatível');
   mode(value.mode); host(value.host_runtime); cleanText(value.workflow_id, 'workflow_id');
   if (!Number.isInteger(value.step_count) || value.step_count < 0 || !Number.isInteger(value.max_steps) || value.max_steps < 1) throw error('invalid-snapshot', 'contadores inválidos');
+  // Issue 343 U1: an older snapshot has no current_batch. A present one is only a locator of
+  // a published manifest (the owner records decide), kept apart from current_unit.
+  if (own(value, 'current_batch') && value.current_batch !== null) {
+    const batch = value.current_batch;
+    if (!batch || typeof batch !== 'object' || Array.isArray(batch) || !BATCH_ID.test(String(batch.batch_id)) || !HASH.test(String(batch.manifest_sha256))
+        || !Array.isArray(batch.members) || !batch.members.length || batch.members.some(item => typeof item !== 'string' || !item.trim())) {
+      throw error('invalid-snapshot', 'current_batch inválido');
+    }
+    if (value.current_unit) throw error('invalid-snapshot', 'current_batch e current_unit são exclusivos');
+  }
   return JSON.parse(JSON.stringify(value));
 }
 function publicResult(command, state, outcome, reason, action, delegate) {
@@ -70,10 +85,15 @@ function publicResult(command, state, outcome, reason, action, delegate) {
     lifecycle: state.lifecycle,
     action,
     unit: safeUnit(state.current_unit),
+    ...(state.current_batch ? { batch: state.current_batch } : {}),
     boundary: state.boundary || null,
     snapshot: state,
     controller_result: delegate || null,
   };
+}
+// The loop's own budget and mode, passed to orchestrate as a trusted in-process option.
+function workflowOf(state) {
+  return { mode: state.mode, workflow_id: state.workflow_id, remaining_steps: Math.max(0, state.max_steps - state.step_count) };
 }
 function delegateInput(input, state) {
   const payload = { ...(input || {}), host_runtime: state.host_runtime };
@@ -117,7 +137,29 @@ function next(state, input, orchestrate) {
     state.lifecycle = 'blocked';
     return publicResult('next', state, 'blocked', 'step-budget-exhausted', 'stop', null);
   }
-  const delegated = orchestrate.run('next', delegateInput(input, state));
+  const delegated = orchestrate.run('next', delegateInput(input, state), { workflow: workflowOf(state) });
+  // Issue 343 U1: a dispatched batch charges max_steps once per admitted member and is held as
+  // current_batch; current_unit stays empty. Replay returns last_decision above, uncharged.
+  const batch = delegated.outcome === 'completed' && delegated.details && delegated.details.dispatch_batch;
+  if (batch) {
+    const members = Array.isArray(batch.members) ? batch.members : [];
+    const keys = members.map(member => member && member.unit && member.unit.key);
+    if (!members.length || !BATCH_ID.test(String(batch.batch_id)) || !HASH.test(String(batch.manifest_sha256))
+        || keys.some(key => typeof key !== 'string' || !key)) {
+      state.lifecycle = 'failed';
+      return publicResult('next', state, 'failed', 'batch-dispatch-invalid', 'stop', delegated);
+    }
+    if (members.length > state.max_steps - state.step_count) {
+      state.lifecycle = 'blocked';
+      return publicResult('next', state, 'blocked', 'step-budget-exhausted', 'stop', delegated);
+    }
+    state.lifecycle = 'dispatch_required'; state.current_unit = null; state.step_count += members.length;
+    state.current_batch = { batch_id: batch.batch_id, manifest_sha256: batch.manifest_sha256, members: keys };
+    const result = publicResult('next', state, 'dispatch_required', 'batch-ready', 'dispatch-batch', delegated);
+    const { snapshot: _snapshot, ...decision } = result;
+    state.last_decision = decision;
+    result.snapshot = state; return result;
+  }
   if (delegated.outcome === 'completed' && delegated.unit) {
     state.lifecycle = 'dispatch_required'; state.current_unit = safeUnit(delegated.unit); state.step_count += 1;
     const result = publicResult('next', state, 'dispatch_required', 'unit-ready', 'dispatch', delegated);
@@ -254,6 +296,36 @@ function reenter(state, input, orchestrate) {
   const { snapshot: _snapshot, ...decision } = result; state.last_decision = decision;
   return result;
 }
+// Issue 343 U1: the additive batch commands. The snapshot's current_batch is the only locator
+// delegated (never caller JSON); a response, a done result or an approved flag in the input
+// never completes, acknowledges or clears a member — only the owner's member records do.
+function batchLocator(state) { return { batch_id: state.current_batch.batch_id, manifest_sha256: state.current_batch.manifest_sha256 }; }
+function batchStatus(state, input, orchestrate) {
+  if (!state.current_batch) return publicResult('batch-status', state, 'blocked', 'batch-not-active', 'stop', null);
+  const delegated = orchestrate.run('batch-status', { ...delegateInput(input, state), batch: batchLocator(state) });
+  if (delegated.outcome !== 'completed') return publicResult('batch-status', state, 'blocked', delegated.reason_code || 'batch-manifest-invalid', 'stop', delegated);
+  return publicResult('batch-status', state, 'status', delegated.reason_code, 'observe', delegated);
+}
+// Issue 343 U5: the members the owner acknowledged (its ack progress AND the controller's committed
+// completion of that member's own begin, checked by forge-orchestrate) leave current_batch one by one;
+// any other member stays, and the batch itself clears only once every member is terminal.
+function acknowledgedOf(delegated) {
+  const listed = delegated && delegated.details && Array.isArray(delegated.details.acknowledged) ? delegated.details.acknowledged : [];
+  return new Set(listed.filter(key => typeof key === 'string' && key));
+}
+function batchAck(state, input, orchestrate) {
+  if (!state.current_batch) return publicResult('batch-ack', state, 'blocked', 'batch-not-active', 'stop', null);
+  const delegated = orchestrate.run('batch-ack', { ...delegateInput(input, state), batch: batchLocator(state) });
+  if (delegated.outcome !== 'completed') {
+    const acknowledged = acknowledgedOf(delegated);
+    const remaining = state.current_batch.members.filter(key => !acknowledged.has(key));
+    if (remaining.length && remaining.length < state.current_batch.members.length) state.current_batch = { ...state.current_batch, members: remaining };
+    return publicResult('batch-ack', state, 'blocked', delegated.reason_code || 'batch-members-pending', 'stop', delegated);
+  }
+  delete state.current_batch; state.current_unit = null; state.last_decision = null; state.boundary = null;
+  state.lifecycle = state.mode === 'task' ? 'completed' : 'idle';
+  return publicResult('batch-ack', state, 'completed', delegated.reason_code, state.lifecycle === 'idle' ? 'continue' : 'stop', delegated);
+}
 function advance(snapshot, commandValue, input = {}, dependencies = {}) {
   const state = validateSnapshot(snapshot);
   const command = String(commandValue || '').toLowerCase();
@@ -263,11 +335,15 @@ function advance(snapshot, commandValue, input = {}, dependencies = {}) {
   const controller = dependencies.orchestrate || orchestrateDefault;
   if (!controller || typeof controller.run !== 'function') throw error('invalid-controller', 'forge-orchestrate indisponível');
   const trusted = {};
-  for (const name of ['prefsReader', 'inventoryReader', 'now', 'failpoint', 'inspectAttempt', 'processProbe', 'replaySavedResponse', 'reconcileRoots', 'captureEntryBaseline', 'entryAuthority', 'questionStateAdapter', 'reconcileRetainedClaim', 'userHome', 'env', 'workerObservationReader']) {
+  for (const name of ['prefsReader', 'inventoryReader', 'now', 'failpoint', 'inspectAttempt', 'processProbe', 'replaySavedResponse', 'reconcileRoots', 'captureEntryBaseline', 'entryAuthority', 'questionStateAdapter', 'reconcileRetainedClaim', 'userHome', 'env', 'workerObservationReader', 'routeResolver']) {
     if (dependencies[name] !== undefined) trusted[name] = dependencies[name];
   }
-  const orchestrate = { run: (operation, payload) => controller.run(operation, payload, trusted),
+  // A call-scoped extra (the loop's own workflow mode/budget) joins the trusted options only.
+  const orchestrate = { run: (operation, payload, extra) => controller.run(operation, payload, extra ? { ...trusted, ...extra } : trusted),
     ...(typeof controller.validatePending === 'function' ? { validatePending: (payload, decision) => controller.validatePending(payload, decision, trusted) } : {}) };
+  if (state.current_batch && SINGLE_UNIT_COMMANDS.has(command)) return publicResult(command, state, 'blocked', 'batch-active', 'stop', null);
+  if (command === 'batch-status') return batchStatus(state, input, orchestrate);
+  if (command === 'batch-ack') return batchAck(state, input, orchestrate);
   if (command === 'consume-failure') return consumeFailure(state, input, orchestrate);
   if (command === 'reenter') return reenter(state, input, orchestrate);
   if (command === 'resume-budget') return resumeBudget(state, input, orchestrate);

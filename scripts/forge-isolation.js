@@ -16,6 +16,8 @@
 //   setupForRun(cwd, runId, opts) → { mode, repos: [{path, branch?, worktree?, status, error?}] }
 //   cleanupForRun(cwd, runId, opts) → similar shape
 //   readIsolationPrefs(cwd) → { mode, modeSource, branchPattern, autoPullMain, worktreeRoot, worktreeCleanupOnComplete, worktreeInstallDeps }
+//   captureBatchBase / setupForBatchMember → issue 343 U2a, the measured dirty base and one
+//     exclusive worktree and index per batch member and root (see the section below)
 //
 // CLI:
 //   node forge-isolation.js --setup --run M065 [--cwd <path>]
@@ -24,13 +26,14 @@
 
 'use strict';
 
+const crypto = require('crypto');
 const fs   = require('fs');
 const os   = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { git, validateBranch } = require('./forge-git-process');
 const { readPrefsCached } = require('./forge-prefs.js');
-const { detectVcs } = require('./forge-vcs.js');
+const { detectVcs, isGsdPath } = require('./forge-vcs.js');
 const ws = require('./forge-workspace.js');
 
 const repos = require('./forge-repos.js');
@@ -878,6 +881,7 @@ function attachForRun(cwd, runId, lenderRunId) {
   if (!lender) {
     return { ok: false, attached: false, reason: 'unknown-run', error: `Run emprestador não encontrado: ${lenderRunId}.` };
   }
+  if (lender.batch_locator) return { ok: false, attached: false, reason: 'batch-member-root-exclusive', error: 'Batch roots cannot be borrowed.' };
   if (!Array.isArray(lender.worktrees) || lender.worktrees.length === 0) {
     return {
       ok: false,
@@ -892,6 +896,8 @@ function attachForRun(cwd, runId, lenderRunId) {
       const missingPath = entry && entry.path ? entry.path : '(caminho ausente no registro)';
       return { ok: false, attached: false, reason: 'worktree-path-missing', error: `Worktree registrado não existe ou não é diretório: ${missingPath}.` };
     }
+    const reservation = batchAuthority().memberRootReservation(cwd, entry.path);
+    if (reservation.reserved) return { ok: false, attached: false, reason: reservation.reason_code, error: 'The worktree has a retained batch owner.' };
     if (typeof entry.repo !== 'string' || typeof lender.branch !== 'string' || !lender.branch) {
       return { ok: false, attached: false, reason: 'worktree-identity-missing', error: 'Lender registry must identify repository and expected branch.' };
     }
@@ -1038,6 +1044,10 @@ function cleanupFenced(cwd, runId, opts) {
     repos: [{ path: cwd, status: 'skipped (ownership unknown)', reason: 'ownership-unknown' }],
   };
   const rec = records.find(r => r.id === runId) || null;
+  if (rec?.batch_locator) return {
+    mode: 'worktree', mode_source: 'batch-retained', user_mode: null, elevated: null, elevation_reason: null,
+    vcs: 'git', repos: [{ path: cwd, status: 'skipped (batch retained)', reason: 'batch-members-pending' }],
+  };
   if (rec && rec.attached_to) {
     // Borrowed worktrees belong to another (possibly still active) run. A clean
     // status does not make them disposable: cleanupWorktreeOne only protects
@@ -1166,6 +1176,1378 @@ function cleanupFenced(cwd, runId, opts) {
   return result;
 }
 
+// ── Issue 343 U2a: batch dirty base and member worktrees (B2 part 1) ────────
+//
+// An admitted execute-task cohort (forge-execution-batch prepareIsolation) gives every
+// member its own linked worktree and index per physical root. The member reproduces the
+// MEASURED base of the integration root: HEAD, the logical index (path, stage, mode, blob),
+// the working-tree bytes (staged and unstaged kept apart, deletions, renames as a removal
+// plus a creation, binary content, the representable exec bit) and the legitimate untracked
+// files. The integration root is only read, always with GIT_OPTIONAL_LOCKS=0 (not even an
+// opportunistic index refresh), and its repository receives exactly one
+// `worktree add --no-checkout -b <sibling ref> <HEAD>` per member root: no commit, stash,
+// reset, checkout, fetch, rebase or pull, and no fabricated baseline.
+//
+//   captureBatchBase(reservationHandle, integrationContract, trusted?)
+//     measures every integration root before and after reading it and publishes ONE
+//     immutable package beside the run's worktree anchor, outside the owner and every code
+//     root: <anchor>/.batch/<batch-hash>/base/{package.json, objects/<aa>/<sha256>}
+//   setupForBatchMember(memberHandle, baseRef, trusted?)
+//     <anchor>/.batch/<batch-hash>/<member-hash>/<root-hash> on a ref sibling of the run
+//     branch; its index is built only in its own index file; provisioning journal
+//     intent → worktree → verified, resumable in a fresh process
+//
+// Authority is never minted here: both handles are opaque in-process capabilities of
+// forge-execution-batch (resolveIsolationHandle revalidates the manifest, the committed
+// begin and the live lease). An unrepresentable base is the named serial fallback
+// materialization-unsupported with one BATCH_MATERIALIZATION_DETAILS entry (SVN:
+// svn-isolation-unavailable); a foreign, aliased, unstable or changed source refuses with
+// one BATCH_ISOLATION_REFUSALS code. Preferences are read only for the existing layout and
+// never rewritten. `trusted` is in-process only: named failpoints and limits that can only
+// be tightened.
+
+const BATCH_BASE_SCHEMA = 'forge-batch-base-v1';
+const BATCH_JOURNAL_SCHEMA = 'forge-batch-provisioning-v1';
+const BATCH_ATTEMPT_SCHEMA = 'forge-batch-base-attempt-v1';
+const BATCH_AREA = '.batch';
+// forge-claude-sidecar TEMP_DIR_PREFIX: one sidecar's private prompt staging, never product.
+const SIDECAR_STAGING_PREFIX = '.forge-claude-sidecar-';
+const BATCH_BASE_LIMITS = Object.freeze({ entries: 50000, fileBytes: 64 * 1024 * 1024, totalBytes: 512 * 1024 * 1024,
+  listingBytes: 64 * 1024 * 1024, packageBytes: 64 * 1024 * 1024, chunkBytes: 32 * 1024 * 1024 });
+const BATCH_GIT_TIMEOUT_MS = 60000;
+const BATCH_MATERIALIZATION_DETAILS = Object.freeze(['head-unborn', 'object-format', 'sparse-checkout', 'worktree-config',
+  'index-entry-invalid', 'index-conflict-stage', 'skip-worktree', 'assume-unchanged', 'intent-to-add', 'gitlink',
+  'nested-repository', 'symlink', 'special-file', 'type-change', 'case-collision', 'path-encoding', 'path-unsafe',
+  'filter-attribute', 'ignored-input', 'limits-exceeded', 'ref-invalid', 'untracked-base-unprovenance']);
+const BATCH_ISOLATION_REFUSALS = Object.freeze(['batch-isolation-handle-invalid', 'batch-isolation-handle-stale',
+  'batch-isolation-contract-mismatch', 'batch-root-foreign', 'batch-root-alias', 'batch-area-unsafe', 'batch-base-invalid',
+  'batch-source-unstable', 'batch-integration-changed', 'batch-member-path-occupied', 'batch-member-ref-occupied',
+  'batch-member-unreconciled', 'batch-member-verification-failed', 'batch-journal-invalid']);
+const BATCH_ISOLATION_FAILPOINTS = Object.freeze(['base-inventory-read', 'base-captured', 'member-intent-recorded',
+  'member-worktree-created', 'member-materialized', 'batch-isolation-recorded', 'batch-claim-committed']);
+const JOURNAL_PHASES = Object.freeze(['intent', 'worktree', 'verified']);
+const OID_LENGTH = Object.freeze({ sha1: 40, sha256: 64 });
+const SHA256_RE = /^[a-f0-9]{64}$/;
+const OID_RE = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/;
+// Nothing may point git at another repository, index, object store or injected
+// configuration; optional locks and replace refs are off for every batch command.
+const BATCH_GIT_ENV = Object.freeze({ GIT_OPTIONAL_LOCKS: '0', GIT_NO_REPLACE_OBJECTS: '1', GIT_DIR: undefined,
+  GIT_WORK_TREE: undefined, GIT_INDEX_FILE: undefined, GIT_OBJECT_DIRECTORY: undefined,
+  GIT_ALTERNATE_OBJECT_DIRECTORIES: undefined, GIT_COMMON_DIR: undefined, GIT_NAMESPACE: undefined,
+  GIT_CONFIG_PARAMETERS: undefined, GIT_CONFIG_COUNT: undefined });
+const STAGE_ARGS = Object.freeze(['ls-files', '-s', '-z']);
+const TAGS_ARGS = Object.freeze(['ls-files', '-v', '-z']);
+const STATUS_ARGS = Object.freeze(['-c', 'core.fsmonitor=false', 'status', '--porcelain=v1', '-z', '--untracked-files=all',
+  '--ignored=no', '--no-renames']);
+const UNTRACKED_ARGS = Object.freeze(['ls-files', '-z', '-o', '--exclude-standard']);
+const IGNORED_ARGS = Object.freeze(['ls-files', '-z', '-o', '-i', '--exclude-standard', '--directory']);
+const STABILITY_KEYS = Object.freeze(['head', 'index_sha256', 'stage_sha256', 'tags_sha256', 'status_sha256',
+  'untracked_sha256', 'ignored_sha256']);
+// After the capture a reader's stat refresh may rewrite the index FILE without any logical
+// change; every other observation must stay exactly the measured one.
+const UNCHANGED_KEYS = Object.freeze(STABILITY_KEYS.filter(key => key !== 'index_sha256'));
+const LIMITS_EXCEEDED = Symbol('limits-exceeded');
+const UTF8_PATH = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+const WINDOWS_RESERVED = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
+
+class BatchIsolationError extends Error {
+  constructor(code, detail) {
+    super(`forge-isolation (${code}): ${detail}`);
+    this.name = 'BatchIsolationError';
+    this.code = code;
+    this.detail = detail;
+  }
+}
+function isolationRefuse(code, detail) { throw new BatchIsolationError(code, detail); }
+// Lazy: these modules load forge modules this file must not load at require time, and
+// forge-autonomy-sources itself requires this file.
+function batchAuthority() { return require('./forge-execution-batch'); }
+function codeRootsApi() { return require('./forge-code-roots'); }
+function parallelismApi() { return require('./forge-parallelism'); }
+function stableReader() { return require('./forge-autonomy-sources'); }
+
+function sha256Hex(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
+function stableValue(value) {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).sort().map(key => [key, stableValue(value[key])]));
+}
+function stableDigest(value) { return sha256Hex(JSON.stringify(stableValue(value))); }
+function freezeDeep(value) {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const item of Object.values(value)) freezeDeep(item);
+  }
+  return value;
+}
+function plainObject(value) { return !!value && typeof value === 'object' && !Array.isArray(value); }
+function lstatOrNull(file, options) {
+  try { return fs.lstatSync(file, options); }
+  catch (error) { if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) return null; throw error; }
+}
+function failpoint(trusted, name) { if (trusted && typeof trusted.failpoint === 'function') trusted.failpoint(name); }
+function limitsOf(requested) {
+  const limits = { ...BATCH_BASE_LIMITS };
+  if (plainObject(requested)) {
+    for (const key of Object.keys(BATCH_BASE_LIMITS)) {
+      if (Number.isSafeInteger(requested[key]) && requested[key] >= 0 && requested[key] < limits[key]) limits[key] = requested[key];
+    }
+  }
+  return Object.freeze(limits);
+}
+function firstLine(error) {
+  const stderr = error && Buffer.isBuffer(error.stderr) ? error.stderr.toString('utf8') : '';
+  return (stderr.trim() || String((error && error.message) || error)).split(/\r?\n/)[0].slice(0, 300);
+}
+
+// Git only through forge-git-process (argv, no shell, windowsHide); output stays a Buffer.
+function batchGit(cwd, args, extra = {}) {
+  const options = { encoding: 'buffer', maxBuffer: extra.maxBuffer || BATCH_BASE_LIMITS.listingBytes,
+    timeout: BATCH_GIT_TIMEOUT_MS, env: BATCH_GIT_ENV };
+  if (extra.input) { options.input = extra.input; options.stdio = ['pipe', 'pipe', 'pipe']; }
+  return git(cwd, args, options);
+}
+function batchGitStatus(cwd, args) {
+  try { return { status: 0, stdout: batchGit(cwd, args) }; }
+  catch (error) {
+    if (error && Number.isInteger(error.status)) return { status: error.status, stdout: Buffer.isBuffer(error.stdout) ? error.stdout : Buffer.alloc(0) };
+    throw error;
+  }
+}
+// A listing Buffer, LIMITS_EXCEEDED, or null when git could not list.
+function listing(cwd, args, maxBuffer) {
+  try { return batchGit(cwd, args, { maxBuffer }); }
+  catch (error) { return error && error.code === 'ENOBUFS' ? LIMITS_EXCEEDED : null; }
+}
+function splitNul(buffer) {
+  const tokens = [];
+  let start = 0;
+  for (let at = buffer.indexOf(0, start); at >= 0; at = buffer.indexOf(0, start)) {
+    tokens.push(buffer.subarray(start, at));
+    start = at + 1;
+  }
+  return start === buffer.length ? tokens : null;
+}
+function decodePath(bytes) {
+  try { return UTF8_PATH.decode(bytes); } catch (_) { return null; }
+}
+function pathProblem(rel) {
+  if (typeof rel !== 'string' || !rel || Buffer.byteLength(rel, 'utf8') > 4096 || rel.startsWith('/') || rel.includes('\\')
+      || rel.includes(':')) return 'path-unsafe';
+  for (const part of rel.split('/')) {
+    if (!part || part === '.' || part === '..' || part.toLowerCase() === '.git' || /[\u0000-\u001f\u007f]/.test(part)) return 'path-unsafe';
+    if (process.platform === 'win32' && (/[<>"|?*]/.test(part) || /[. ]$/.test(part) || WINDOWS_RESERVED.test(part))) return 'path-unsafe';
+  }
+  return null;
+}
+// Owner metadata and a sidecar's private prompt staging never enter a member base.
+function baseExclusion(rel) {
+  if (isGsdPath(rel)) return 'gsd';
+  const slash = rel.indexOf('/');
+  return slash > 0 && rel.slice(0, slash).startsWith(SIDECAR_STAGING_PREFIX) ? 'sidecar_staging' : null;
+}
+function pathList(buffer) {
+  const tokens = splitNul(buffer);
+  if (!tokens) return null;
+  const paths = [];
+  for (const token of tokens) {
+    const rel = decodePath(token);
+    if (rel === null) return null;
+    if (!baseExclusion(rel)) paths.push(rel);
+  }
+  return paths;
+}
+function parseStatus(buffer) {
+  const tokens = splitNul(buffer);
+  if (!tokens) return { detail: 'index-entry-invalid' };
+  const entries = [];
+  for (const token of tokens) {
+    if (token.length < 4 || token[2] !== 0x20) return { detail: 'index-entry-invalid' };
+    const xy = token.subarray(0, 2).toString('latin1'), rel = decodePath(token.subarray(3));
+    if (rel === null) return { detail: 'path-encoding' };
+    // --no-renames: a rename is one removal and one creation; a pair is not this listing.
+    if (/[RC]/.test(xy)) return { detail: 'index-entry-invalid' };
+    entries.push({ xy, path: rel });
+  }
+  return { entries };
+}
+function statusList(entries) { return entries.filter(entry => !baseExclusion(entry.path)).map(entry => [entry.xy, entry.path]); }
+function parseStage(buffer, format) {
+  const tokens = splitNul(buffer);
+  if (!tokens) return { detail: 'index-entry-invalid' };
+  const entries = [];
+  for (const token of tokens) {
+    const tab = token.indexOf(0x09);
+    const meta = tab < 0 ? null : /^([0-7]{6}) ([0-9a-f]+) ([0-3])$/.exec(token.subarray(0, tab).toString('latin1'));
+    if (!meta || meta[2].length !== OID_LENGTH[format]) return { detail: 'index-entry-invalid' };
+    const rel = decodePath(token.subarray(tab + 1));
+    if (rel === null) return { detail: 'path-encoding' };
+    if (meta[3] !== '0') return { detail: 'index-conflict-stage' };
+    if (meta[1] === '160000') return { detail: 'gitlink' };
+    if (meta[1] === '120000') return { detail: 'symlink' };
+    if (meta[1] !== '100644' && meta[1] !== '100755') return { detail: 'index-entry-invalid' };
+    const problem = pathProblem(rel);
+    if (problem) return { detail: problem };
+    entries.push({ path: rel, mode: meta[1], oid: meta[2] });
+  }
+  return { entries };
+}
+// `ls-files -v`: H plain; S/s skip-worktree; lowercase assume-unchanged; M/m unmerged.
+function tagsDetail(buffer) {
+  const tokens = splitNul(buffer);
+  if (!tokens) return 'index-entry-invalid';
+  for (const token of tokens) {
+    if (token.length < 3 || token[1] !== 0x20) return 'index-entry-invalid';
+    const tag = String.fromCharCode(token[0]);
+    if (tag === 'H') continue;
+    if (tag === 'S' || tag === 's') return 'skip-worktree';
+    if (tag === 'M' || tag === 'm') return 'index-conflict-stage';
+    return tag === 'h' ? 'assume-unchanged' : 'index-entry-invalid';
+  }
+  return null;
+}
+function readHead(at) {
+  const probe = batchGitStatus(at, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']);
+  const oid = probe.stdout.toString('latin1').trim();
+  return probe.status === 0 && OID_RE.test(oid) ? oid : null;
+}
+function objectFormatOf(at) {
+  const probe = batchGitStatus(at, ['rev-parse', '--show-object-format']);
+  const value = probe.stdout.toString('latin1').trim();
+  return probe.status === 0 && Object.prototype.hasOwnProperty.call(OID_LENGTH, value) ? value : null;
+}
+// false when unset; null when present but not a boolean (unknown is never equality).
+function configBool(at, key) {
+  const probe = batchGitStatus(at, ['config', '--bool', '--get', key]);
+  if (probe.status === 1) return false;
+  const value = probe.stdout.toString('latin1').trim();
+  return probe.status === 0 && (value === 'true' || value === 'false') ? value === 'true' : null;
+}
+function gitPathOf(at, args) {
+  const out = batchGitStatus(at, args);
+  const value = out.status === 0 ? decodePath(out.stdout) : null;
+  const trimmed = value === null ? '' : value.replace(/\r?\n$/, '');
+  return trimmed ? path.resolve(at, trimmed) : null;
+}
+// Index content may change during execution; its physical ownership may not.
+// Do not pin an inode across Git's legitimate atomic index replacement.
+function batchIndexIdentity(at) {
+  const file = gitPathOf(at, ['rev-parse', '--git-path', 'index']);
+  if (!file) return null;
+  const stat = lstatOrNull(file, { bigint: true });
+  const actual = realpathCanonical(file);
+  if (codeRootsApi().key(actual) !== codeRootsApi().key(file)
+      || stat && (stat.isSymbolicLink() || !stat.isFile())) return null;
+  return { path: actual, links: stat ? Number(stat.nlink) : 0 };
+}
+// Bounded stable read (forge-autonomy-sources): a size, identity, time or real-path change
+// during the read is no observation. `expectedReal` defaults to the joined path itself, so a
+// link or junction anywhere under a physical root makes the read fail.
+function stableRead(file, size, expectedReal) {
+  const read = stableReader().readBoundedStableFile(file, size, { expectedReal: expectedReal || file });
+  return read.error ? null : read.buffer;
+}
+function indexDigest(file) {
+  if (!file) return null;
+  const stat = lstatOrNull(file);
+  if (!stat) return 'absent';
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.size > BATCH_BASE_LIMITS.listingBytes) return null;
+  const bytes = stableRead(file, stat.size, realpathCanonical(file));
+  return bytes ? sha256Hex(bytes) : null;
+}
+function gitBlobId(bytes, format) {
+  return crypto.createHash(format === 'sha256' ? 'sha256' : 'sha1').update(`blob ${bytes.length}\0`, 'latin1').update(bytes).digest('hex');
+}
+function statOf(stat) { return { size: String(stat.size), mtime: String(stat.mtimeNs), ctime: String(stat.ctimeNs), ino: String(stat.ino) }; }
+// 'missing' (the path is absent), 'symlink' or 'type-change' for the first parent that is not
+// a real directory under `rootReal`; null when every parent is one.
+function parentProblem(rootReal, rel, cache) {
+  const parts = rel.split('/');
+  let dir = '';
+  for (let index = 0; index < parts.length - 1; index++) {
+    dir = dir ? `${dir}/${parts[index]}` : parts[index];
+    let verdict = cache.get(dir);
+    if (verdict === undefined) {
+      const stat = lstatOrNull(path.join(rootReal, ...dir.split('/')));
+      verdict = !stat ? 'missing' : stat.isSymbolicLink() ? 'symlink' : !stat.isDirectory() ? 'type-change' : null;
+      cache.set(dir, verdict);
+    }
+    if (verdict) return verdict;
+  }
+  return null;
+}
+function nestedRepository(at, paths) {
+  const seen = new Set();
+  for (const rel of paths) {
+    const parts = rel.split('/');
+    for (let depth = 1; depth < parts.length; depth++) {
+      const dir = parts.slice(0, depth).join('/');
+      if (seen.has(dir)) continue;
+      seen.add(dir);
+      if (lstatOrNull(path.join(at, ...parts.slice(0, depth), '.git'))) return true;
+    }
+  }
+  return false;
+}
+// A filter driver (clean/smudge/process) may run external programs and is not reproduced.
+function filterAttribute(at, paths) {
+  if (!paths.length) return false;
+  let out;
+  try { out = batchGit(at, ['check-attr', '-z', '--stdin', 'filter'], { input: Buffer.concat(paths.map(rel => Buffer.from(`${rel}\0`, 'utf8'))) }); }
+  catch (_) { return true; }
+  const tokens = splitNul(out);
+  if (!tokens || tokens.length !== paths.length * 3) return true;
+  for (let index = 0; index < tokens.length; index += 3) {
+    const value = tokens[index + 2].toString('latin1');
+    if (value !== 'unspecified' && value !== 'unset') return true;
+  }
+  return false;
+}
+
+// Classifies one integration root, read-only. Returns { detail } for an unrepresentable
+// base, { unstable } when git could not list it, else the measured listings.
+function classifyRoot(root, reservation, limits) {
+  const at = root.path;
+  const head = readHead(at);
+  if (!head) return { detail: 'head-unborn' };
+  const format = objectFormatOf(at);
+  if (!format || head.length !== OID_LENGTH[format]) return { detail: 'object-format' };
+  if (configBool(at, 'core.sparseCheckout') !== false || configBool(at, 'index.sparse') !== false) return { detail: 'sparse-checkout' };
+  if (configBool(at, 'extensions.worktreeConfig') !== false) return { detail: 'worktree-config' };
+  if (lstatOrNull(path.join(at, '.gitmodules'))) return { detail: 'gitlink' };
+  const commonDir = gitPathOf(at, ['rev-parse', '--git-common-dir']);
+  const indexSha = indexDigest(gitPathOf(at, ['rev-parse', '--git-path', 'index']));
+  if (!commonDir || indexSha === null) return { unstable: ['index'] };
+  const stage = listing(at, STAGE_ARGS, limits.listingBytes);
+  if (stage === LIMITS_EXCEEDED) return { detail: 'limits-exceeded' };
+  if (stage === null) return { unstable: ['index'] };
+  const parsed = parseStage(stage, format);
+  if (parsed.detail) return parsed;
+  const tags = listing(at, TAGS_ARGS, limits.listingBytes);
+  if (tags === LIMITS_EXCEEDED) return { detail: 'limits-exceeded' };
+  if (tags === null) return { unstable: ['index'] };
+  const flagged = tagsDetail(tags);
+  if (flagged) return { detail: flagged };
+  // Two names one case-insensitive (or Unicode-normalizing) file system would fold together.
+  const keys = new Map();
+  const collides = rel => {
+    const key = rel.normalize('NFC').toLowerCase(), prior = keys.get(key);
+    keys.set(key, rel);
+    return prior !== undefined && prior !== rel;
+  };
+  if (parsed.entries.some(entry => collides(entry.path))) return { detail: 'case-collision' };
+  const status = listing(at, STATUS_ARGS, limits.listingBytes);
+  if (status === LIMITS_EXCEEDED) return { detail: 'limits-exceeded' };
+  if (status === null) return { unstable: ['status'] };
+  const reported = parseStatus(status);
+  if (reported.detail) return reported;
+  for (const entry of reported.entries) {
+    const [x, y] = entry.xy;
+    if (x === 'U' || y === 'U' || entry.xy === 'AA' || entry.xy === 'DD') return { detail: 'index-conflict-stage' };
+    if (x === ' ' && y === 'A') return { detail: 'intent-to-add' };
+    if (x === 'T' || y === 'T') return { detail: 'type-change' };
+  }
+  const others = listing(at, UNTRACKED_ARGS, limits.listingBytes);
+  if (others === LIMITS_EXCEEDED) return { detail: 'limits-exceeded' };
+  const otherTokens = others === null ? null : splitNul(others);
+  if (!otherTokens) return { unstable: ['untracked'] };
+  const untracked = [], excluded = { gsd: 0, sidecar_staging: 0 };
+  for (const token of otherTokens) {
+    const rel = decodePath(token);
+    if (rel === null) return { detail: 'path-encoding' };
+    const exclusion = baseExclusion(rel);
+    if (exclusion) { excluded[exclusion] += 1; continue; }
+    if (rel.endsWith('/')) return { detail: 'nested-repository' };
+    const problem = pathProblem(rel);
+    if (problem) return { detail: problem };
+    if (collides(rel)) return { detail: 'case-collision' };
+    // Names alone are not permission to read/copy a nonignored local file. Only exact
+    // qualified references of the live reservation's admitted plans grant that authority.
+    if (!inputOrigins(reservation, root.id, rel).length) return { detail: 'untracked-base-unprovenance' };
+    untracked.push(rel);
+  }
+  if (parsed.entries.length + untracked.length > limits.entries) return { detail: 'limits-exceeded' };
+  if (nestedRepository(at, untracked)) return { detail: 'nested-repository' };
+  // An ignored path under a member's declared writes is input the member root would lack.
+  const ignoredRaw = listing(at, IGNORED_ARGS, limits.listingBytes);
+  if (ignoredRaw === LIMITS_EXCEEDED) return { detail: 'limits-exceeded' };
+  if (ignoredRaw === null) return { unstable: ['ignored'] };
+  const ignored = pathList(ignoredRaw);
+  if (!ignored) return { detail: 'path-encoding' };
+  const overlaps = parallelismApi().pathsOverlap;
+  for (const rel of ignored) {
+    const target = `${root.id}::${rel.replace(/\/+$/, '')}`;
+    if (reservation.members.some(member => (member.writes || []).some(write => overlaps(target, write)))
+        || (reservation.base_inputs?.entries || []).some(ref => ref.root_id === root.id && overlaps(target, `${ref.root_id}::${ref.path}`))) {
+      return { detail: 'ignored-input' };
+    }
+  }
+  const tracked = parsed.entries.filter(entry => !isGsdPath(entry.path));
+  if (filterAttribute(at, [...tracked.map(entry => entry.path), ...untracked])) return { detail: 'filter-attribute' };
+  const kept = statusList(reported.entries);
+  return { format, head, commonDir, stage, entryCount: parsed.entries.length, tracked, untracked, excluded, status: kept,
+    gsdTracked: parsed.entries.filter(entry => isGsdPath(entry.path)).map(entry => ({ path: entry.path, oid: entry.oid, exec: entry.mode === '100755' })),
+    observation: { head, index_sha256: indexSha, stage_sha256: sha256Hex(stage), tags_sha256: sha256Hex(tags),
+      status_sha256: stableDigest(kept), untracked_sha256: stableDigest(untracked), ignored_sha256: stableDigest(ignored) } };
+}
+// The same digests, read again (stability and every later "unchanged" check).
+function observationOf(at) {
+  const index = indexDigest(gitPathOf(at, ['rev-parse', '--git-path', 'index']));
+  const read = args => { const out = listing(at, args); return Buffer.isBuffer(out) ? out : null; };
+  const stage = read(STAGE_ARGS), tags = read(TAGS_ARGS), status = read(STATUS_ARGS), others = read(UNTRACKED_ARGS), ignored = read(IGNORED_ARGS);
+  const reported = status ? parseStatus(status) : null, untracked = others ? pathList(others) : null, skipped = ignored ? pathList(ignored) : null;
+  return { head: readHead(at), index_sha256: index, stage_sha256: stage ? sha256Hex(stage) : null, tags_sha256: tags ? sha256Hex(tags) : null,
+    status_sha256: reported && reported.entries ? stableDigest(statusList(reported.entries)) : null,
+    untracked_sha256: untracked ? stableDigest(untracked) : null, ignored_sha256: skipped ? stableDigest(skipped) : null };
+}
+// The working-tree inventory: type, size, SHA-256 of the real bytes, exec bit and stat
+// identity of every tracked (non-.gsd) and legitimate untracked path. A tracked file whose
+// bytes ARE its index blob comes back from the object database; everything else is packaged.
+function inventoryRoot(rootReal, rows, format, limits) {
+  const cache = new Map(), inventory = [];
+  let total = 0;
+  for (const row of rows) {
+    const parent = parentProblem(rootReal, row.path, cache);
+    if (parent === 'symlink' || parent === 'type-change') return { detail: parent };
+    const file = path.join(rootReal, ...row.path.split('/'));
+    const stat = parent === 'missing' ? null : lstatOrNull(file, { bigint: true });
+    if (!stat) {
+      if (!row.tracked) return { unstable: true };
+      inventory.push({ path: row.path, tracked: true, type: 'absent', size: 0, sha256: null, exec: null, source: null, oid: row.oid, stat: null });
+      continue;
+    }
+    if (stat.isSymbolicLink()) return { detail: 'symlink' };
+    if (stat.isDirectory()) return { detail: 'type-change' };
+    if (!stat.isFile()) return { detail: 'special-file' };
+    const size = Number(stat.size);
+    total += size;
+    if (size > limits.fileBytes || total > limits.totalBytes) return { detail: 'limits-exceeded' };
+    const bytes = stableRead(file, size);
+    if (!bytes) return { unstable: true };
+    inventory.push({ path: row.path, tracked: row.tracked, ...(row.tracked ? {} : { provenance: row.provenance }), type: 'file', size, sha256: sha256Hex(bytes),
+      exec: process.platform === 'win32' ? null : (Number(stat.mode) & 0o100) !== 0,
+      source: row.tracked && gitBlobId(bytes, format) === row.oid ? 'odb' : 'package', oid: row.oid, stat: statOf(stat) });
+  }
+  return { inventory };
+}
+// The first inventory path whose presence or stat identity moved, else null.
+function movedPath(rootReal, inventory) {
+  for (const entry of inventory) {
+    const stat = lstatOrNull(path.join(rootReal, ...entry.path.split('/')), { bigint: true });
+    if (entry.type === 'absent') { if (stat) return entry.path; continue; }
+    if (!stat || !stat.isFile() || JSON.stringify(statOf(stat)) !== JSON.stringify(entry.stat)) return entry.path;
+  }
+  return null;
+}
+
+// ── Batch area: beside the run's worktree anchor, real directories only ──
+function physicalPrefix(dir) {
+  const rest = [];
+  let cursor = path.resolve(dir);
+  for (;;) {
+    if (lstatOrNull(cursor)) {
+      let real = null, directory = false;
+      try { real = fs.realpathSync.native(cursor); directory = fs.statSync(real).isDirectory(); } catch (_) { directory = false; }
+      if (!directory) isolationRefuse('batch-area-unsafe', 'the worktree anchor is not a directory');
+      return { real, rest };
+    }
+    const parent = path.dirname(cursor);
+    if (parent === cursor) isolationRefuse('batch-area-unsafe', 'the worktree anchor has no existing ancestor');
+    rest.unshift(path.basename(cursor));
+    cursor = parent;
+  }
+}
+function mainCheckoutOf(repo) {
+  try {
+    const listed = decodePath(batchGit(repo, ['worktree', 'list', '--porcelain']));
+    const first = listed === null ? null : parseWorktreePorcelain(listed)[0];
+    if (first && first.path && !first.bare) return realpathCanonical(first.path);
+  } catch (_) { /* the root itself anchors the layout */ }
+  return repo;
+}
+// The run's existing worktree layout (forge_isolation prefs, workspace registry,
+// resolveWorktreeAnchor) decides where the batch area lives; never inside the owner or any
+// code root, never containing one.
+function batchLayout(reservation, contract) {
+  const prefs = readIsolationPrefs(reservation.owner);
+  const primary = contract.code_roots.find(root => root.id === contract.primary_root_id) || contract.code_roots[0];
+  const home = process.env.HOME || process.env.USERPROFILE || os.homedir();
+  const registry = loadRegistryRoots(home);
+  let anchor;
+  try {
+    anchor = resolveWorktreeAnchor(mainCheckoutOf(primary.path), prefs.worktreeRoot, reservation.run_id,
+      { roots: registry.roots, home, registryFile: registry.file });
+  } catch (error) { return isolationRefuse('batch-area-unsafe', firstLine(error)); }
+  const batchHash = stableDigest({ owner: reservation.owner_key, batch_id: reservation.batch_id,
+    manifest_sha256: reservation.manifest_sha256 }).slice(0, 16);
+  const prefix = physicalPrefix(path.dirname(anchor.path));
+  const segments = [...prefix.rest, BATCH_AREA, batchHash];
+  const batchDir = path.join(prefix.real, ...segments);
+  const roots = codeRootsApi();
+  for (const outer of [reservation.owner, ...contract.code_roots.map(root => root.path)]) {
+    if (roots.within(outer, batchDir) || roots.within(batchDir, outer)) isolationRefuse('batch-area-unsafe', 'the batch area would overlap the owner or a code root');
+  }
+  return freezeDeep({ batch_hash: batchHash, batch_dir: batchDir, real_base: prefix.real, segments, anchor: anchor.anchor,
+    branch_base: resolveBranchName(prefs.branchPattern, reservation.run_id) });
+}
+// Hashed names (full values live in the journal binding); the ref is a SIBLING of the run
+// branch (forge/<run>-batch-…), never a child of it.
+function memberLayout(layout, reservation, member, root) {
+  const memberHash = stableDigest({ batch_id: reservation.batch_id, manifest_sha256: reservation.manifest_sha256,
+    member_index: member.member_index, task_id: member.task_id, begin_key: member.begin_key,
+    lease_generation: member.lease_generation }).slice(0, 16);
+  const rootHash = stableDigest({ root_id: root.id, identity_sha256: root.identity_sha256 }).slice(0, 16);
+  return { member_hash: memberHash, root_hash: rootHash, target: path.join(layout.batch_dir, memberHash, rootHash),
+    branch: `${layout.branch_base}-batch-${layout.batch_hash.slice(0, 12)}-${memberHash.slice(0, 12)}-${rootHash.slice(0, 12)}` };
+}
+function branchValid(at, branch) { try { validateBranch(at, branch); return true; } catch (_) { return false; } }
+function ensureRealDirs(base, segments) {
+  let cursor = base;
+  for (const segment of segments) {
+    cursor = path.join(cursor, segment);
+    let stat = lstatOrNull(cursor);
+    if (!stat) {
+      try { fs.mkdirSync(cursor); } catch (error) { if (!error || error.code !== 'EEXIST') throw error; }
+      stat = fs.lstatSync(cursor);
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) isolationRefuse('batch-area-unsafe', `${segment} is not a real directory`);
+  }
+  return cursor;
+}
+// true when the whole area exists; false before it was created; refuses a link in it.
+function areaPresent(layout) {
+  let cursor = layout.real_base;
+  for (const segment of layout.segments) {
+    cursor = path.join(cursor, segment);
+    const stat = lstatOrNull(cursor);
+    if (!stat) return false;
+    if (stat.isSymbolicLink() || !stat.isDirectory()) isolationRefuse('batch-area-unsafe', `${segment} is not a real directory`);
+  }
+  return true;
+}
+function ensureBatchArea(layout) {
+  const dir = ensureRealDirs(layout.real_base, layout.segments);
+  if (codeRootsApi().key(realpathCanonical(dir)) !== codeRootsApi().key(layout.batch_dir)) isolationRefuse('batch-area-unsafe', 'the batch area resolves elsewhere');
+  return dir;
+}
+// Written and synced in staging, then hard linked to its name: a collision returns false and
+// never overwrites; staging debris is never read.
+function publishBuffer(layout, file, buffer) {
+  const staging = ensureRealDirs(layout.batch_dir, ['.staging']);
+  const temporary = path.join(staging, `${crypto.randomUUID()}.tmp`);
+  let created = false;
+  try {
+    const descriptor = fs.openSync(temporary, 'wx', 0o600);
+    created = true;
+    try { fs.writeFileSync(descriptor, buffer); fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
+    try { fs.linkSync(temporary, file); return true; }
+    catch (error) { if (error && error.code === 'EEXIST') return false; throw error; }
+  } finally {
+    if (created) { try { fs.unlinkSync(temporary); } catch (_) { /* staging debris is never authority */ } }
+  }
+}
+function blobFile(layout, sha) { return path.join(layout.batch_dir, 'base', 'objects', sha.slice(0, 2), sha); }
+function readBlob(layout, sha) {
+  const file = blobFile(layout, sha), stat = lstatOrNull(file);
+  const bytes = stat && stat.isFile() && !stat.isSymbolicLink() && stat.size <= BATCH_BASE_LIMITS.listingBytes ? stableRead(file, stat.size) : null;
+  if (!bytes || sha256Hex(bytes) !== sha) isolationRefuse('batch-base-invalid', 'a base blob is missing or does not match its digest');
+  return bytes;
+}
+function storeBlob(layout, sha, bytes) {
+  const file = path.join(ensureRealDirs(layout.batch_dir, ['base', 'objects', sha.slice(0, 2)]), sha);
+  if (!lstatOrNull(file) && publishBuffer(layout, file, bytes)) return;
+  readBlob(layout, sha);
+}
+function packageFile(layout) { return path.join(layout.batch_dir, 'base', 'package.json'); }
+function inputOrigins(reservation, rootId, relative) {
+  return (reservation.base_inputs?.entries || []).filter(entry => entry.root_id === rootId && entry.path === relative);
+}
+function bindingOf(reservation) {
+  return { owner_key: reservation.owner_key, batch_id: reservation.batch_id, manifest_sha256: reservation.manifest_sha256,
+    milestone: reservation.milestone, run_id: reservation.run_id, base_inputs_sha256: stableDigest(reservation.base_inputs) };
+}
+function validInventoryEntry(entry) {
+  if (!plainObject(entry) || pathProblem(entry.path) || isGsdPath(entry.path) || typeof entry.tracked !== 'boolean') return false;
+  if (!entry.tracked && (!Array.isArray(entry.provenance) || !entry.provenance.length)) return false;
+  if (entry.type === 'absent') return entry.tracked && entry.sha256 === null && entry.source === null && entry.stat === null;
+  return entry.type === 'file' && Number.isSafeInteger(entry.size) && entry.size >= 0 && SHA256_RE.test(String(entry.sha256))
+    && (entry.exec === null || typeof entry.exec === 'boolean') && plainObject(entry.stat)
+    && (entry.source === 'package' || (entry.source === 'odb' && entry.tracked && OID_RE.test(String(entry.oid))));
+}
+function validPackageRoot(root, expected, bad, reservation, layout) {
+  if (!plainObject(root) || root.root_id !== expected.id || root.identity_sha256 !== expected.identity_sha256) bad('the base package names another root');
+  if (!Object.prototype.hasOwnProperty.call(OID_LENGTH, root.object_format) || typeof root.head !== 'string'
+      || root.head.length !== OID_LENGTH[root.object_format] || !OID_RE.test(root.head)) bad('the base HEAD is invalid');
+  if (!plainObject(root.observation) || root.observation.head !== root.head
+      || STABILITY_KEYS.some(key => typeof root.observation[key] !== 'string')) bad('the base observation is invalid');
+  if (!plainObject(root.index) || !Number.isSafeInteger(root.index.entries) || root.index.entries < 0
+      || !SHA256_RE.test(String(root.index.blob)) || root.index.blob !== root.observation.stage_sha256) bad('the base index is invalid');
+  if (!Array.isArray(root.status) || root.status.some(row => !Array.isArray(row) || row.length !== 2 || typeof row[0] !== 'string'
+      || typeof row[1] !== 'string')) bad('the base status is invalid');
+  if (!Array.isArray(root.untracked) || root.untracked.some(rel => pathProblem(rel) || baseExclusion(rel))) bad('the base untracked inventory is invalid');
+  if (!Array.isArray(root.gsd_tracked) || root.gsd_tracked.some(row => !plainObject(row) || pathProblem(row.path) || !isGsdPath(row.path)
+      || !OID_RE.test(String(row.oid)) || typeof row.exec !== 'boolean')) bad('the base owner-metadata entries are invalid');
+  if (!Array.isArray(root.inventory) || !root.inventory.every(validInventoryEntry)) bad('the base working-tree inventory is invalid');
+  // A package seal is integrity, not permission to label an arbitrary path "tracked".
+  // The captured ls-files -s -z blob is pinned by the measured stage observation; prove a
+  // bijection to that actual index before any member journal/content can be materialized.
+  const stage = parseStage(readBlob(layout, root.index.blob), root.object_format);
+  if (stage.detail || root.index.entries !== stage.entries.length
+      || new Set(stage.entries.map(entry => entry.path)).size !== stage.entries.length) bad('the base stage inventory is invalid');
+  const tracked = stage.entries.filter(entry => !isGsdPath(entry.path));
+  const metadata = stage.entries.filter(entry => isGsdPath(entry.path)).map(entry => ({ path: entry.path, oid: entry.oid, exec: entry.mode === '100755' }));
+  if (stableDigest(root.gsd_tracked) !== stableDigest(metadata)) bad('the base owner-metadata index does not match its stage');
+  const indexed = new Map(tracked.map(entry => [entry.path, entry]));
+  const product = root.inventory.filter(entry => entry.tracked);
+  if (new Set(root.inventory.map(entry => entry.path)).size !== root.inventory.length || product.length !== tracked.length
+      || product.some(entry => !indexed.has(entry.path) || entry.oid !== indexed.get(entry.path).oid)) {
+    bad('the base tracked working-tree inventory does not match its stage');
+  }
+  const untracked = root.inventory.filter(entry => !entry.tracked);
+  if (new Set(root.untracked).size !== root.untracked.length
+      || untracked.some(entry => indexed.has(entry.path) || entry.oid !== null)
+      || stableDigest(root.untracked) !== stableDigest(untracked.map(entry => entry.path))
+      || root.observation.untracked_sha256 !== stableDigest(root.untracked)) bad('the base untracked paths do not match its observation and inventory');
+  if (root.observation.status_sha256 !== stableDigest(root.status)
+      || new Set(root.status.map(row => row[1])).size !== root.status.length
+      || root.status.some(row => pathProblem(row[1]) || baseExclusion(row[1]))
+      || stableDigest(root.status.filter(row => row[0] === '??').map(row => row[1])) !== stableDigest(root.untracked)) {
+    bad('the base status does not match its observation and untracked inventory');
+  }
+  for (const entry of untracked) {
+    const origins = inputOrigins(reservation, root.root_id, entry.path);
+    if (!origins.length || stableDigest(entry.provenance) !== stableDigest(origins)) bad('the base untracked provenance is not the admitted one');
+  }
+}
+// The published package of this batch (sealed, bound to the reservation, rooted in the
+// contract order), null when `optional` and nothing is published yet.
+function readPackage(layout, reservation, contract, optional) {
+  const bad = detail => isolationRefuse('batch-base-invalid', detail);
+  const absent = () => (optional ? null : bad('the base package is not published'));
+  if (!areaPresent(layout)) return absent();
+  const base = lstatOrNull(path.join(layout.batch_dir, 'base'));
+  if (!base) return absent();
+  if (base.isSymbolicLink() || !base.isDirectory()) bad('the base directory is not a real directory');
+  const file = packageFile(layout), stat = lstatOrNull(file);
+  if (!stat) return absent();
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.size > BATCH_BASE_LIMITS.packageBytes) bad('the base package is not a bounded regular file');
+  const bytes = stableRead(file, stat.size);
+  let record = null;
+  try { record = bytes ? JSON.parse(UTF8_PATH.decode(bytes)) : null; } catch (_) { record = null; }
+  if (!plainObject(record)) bad('the base package is unreadable');
+  const { package_sha256: sealed, ...content } = record;
+  if (record.schema !== BATCH_BASE_SCHEMA || typeof sealed !== 'string' || sealed !== stableDigest(content)) bad('the base package seal does not bind its content');
+  if (!plainObject(record.batch) || stableDigest(record.batch) !== stableDigest(bindingOf(reservation))) bad('the base package belongs to another batch');
+  if (!Array.isArray(record.roots) || record.roots.length !== contract.code_roots.length) bad('the base package names other roots');
+  record.roots.forEach((root, index) => validPackageRoot(root, contract.code_roots[index], bad, reservation, layout));
+  return freezeDeep(record);
+}
+function verifyPackageBlobs(layout, pkg) {
+  const seen = new Set();
+  for (const root of pkg.roots) {
+    for (const sha of [root.index.blob, ...root.inventory.filter(entry => entry.source === 'package').map(entry => entry.sha256)]) {
+      if (!seen.has(sha)) { readBlob(layout, sha); seen.add(sha); }
+    }
+  }
+}
+function recordAttempt(layout, record) {
+  ensureBatchArea(layout);
+  const dir = ensureRealDirs(layout.batch_dir, ['attempts']);
+  const bytes = Buffer.from(`${JSON.stringify({ ...record, attempt_sha256: stableDigest(record) })}\n`, 'utf8');
+  for (let tries = 0; tries < 4; tries++) {
+    const sequence = fs.readdirSync(dir).filter(name => /^\d{4}\.json$/.test(name)).length + 1 + tries;
+    if (publishBuffer(layout, path.join(dir, `${String(sequence).padStart(4, '0')}.json`), bytes)) return;
+  }
+  isolationRefuse('batch-source-unstable', 'the unstable capture attempt could not be recorded');
+}
+// An unstable source is recorded once as an attempt, never retried into an empty snapshot.
+function unstableBase(layout, reservation, rootId, changed) {
+  recordAttempt(layout, { schema: BATCH_ATTEMPT_SCHEMA, batch: bindingOf(reservation), outcome: 'source-unstable', root_id: rootId,
+    changed: [...changed], at: new Date().toISOString() });
+  return isolationRefuse('batch-source-unstable', `${rootId}: the source changed or could not be read while it was measured (${changed.join(', ')})`);
+}
+function unsupportedBase(reason, detail, rootId) { return freezeDeep({ status: 'unsupported', reason_code: reason, detail, root_id: rootId }); }
+function capturedBase(layout, pkg, replay) {
+  return freezeDeep({ status: 'captured', base: { schema: BATCH_BASE_SCHEMA, batch_id: pkg.batch.batch_id,
+    manifest_sha256: pkg.batch.manifest_sha256, package_sha256: pkg.package_sha256, batch_dir: layout.batch_dir, replay,
+    roots: pkg.roots.map(root => ({ root_id: root.root_id, head: root.head, index_entries: root.index.entries,
+      files: root.inventory.filter(entry => entry.type === 'file').length, deleted: root.inventory.filter(entry => entry.type === 'absent').length,
+      untracked: root.untracked.length, package_blobs: new Set(root.inventory.filter(entry => entry.source === 'package').map(entry => entry.sha256)).size })) } });
+}
+function revalidatedContract(reservation) {
+  try { return codeRootsApi().validateContract(reservation.contract, { revalidate: true, owner: reservation.owner }); }
+  catch (error) {
+    const code = error && error.code;
+    return isolationRefuse(code === 'roots-overlap-or-alias' || code === 'root-id-duplicate' ? 'batch-root-alias' : 'batch-root-foreign',
+      `the integration roots are no longer their measured checkouts (${code || 'unknown'})`);
+  }
+}
+function assertRootUnchanged(base, root) {
+  const now = observationOf(root.path);
+  const changed = UNCHANGED_KEYS.filter(key => now[key] !== base.observation[key]);
+  if (movedPath(root.path, base.inventory)) changed.push('working-tree');
+  // readPackage has already proved every inventory path against the measured stage or
+  // explicit input origins. Only those authorized paths may be read here. Stat equality
+  // and a self-consistent package seal cannot prove its payload is still the source bytes
+  // (notably a dirty tracked file whose Git status remains M after a forged package).
+  if (!changed.length) {
+    for (const entry of base.inventory) {
+      if (entry.type !== 'file') continue;
+      const bytes = stableRead(path.join(root.path, ...entry.path.split('/')), entry.size);
+      if (!bytes || sha256Hex(bytes) !== entry.sha256) { changed.push('working-tree-bytes'); break; }
+    }
+    if (movedPath(root.path, base.inventory)) changed.push('working-tree');
+  }
+  if (changed.length) {
+    isolationRefuse('batch-integration-changed', `${base.root_id}: the integration root no longer holds the measured base (${changed.join(', ')})`);
+  }
+}
+function assertRootsUnchanged(pkg, contract) { contract.code_roots.forEach((root, index) => assertRootUnchanged(pkg.roots[index], root)); }
+function packageRoot(layout, reservation, row) {
+  const { root, classified, inventory } = row;
+  storeBlob(layout, classified.observation.stage_sha256, classified.stage);
+  const stored = new Set();
+  for (const entry of inventory) {
+    if (entry.source !== 'package' || stored.has(entry.sha256)) continue;
+    const bytes = stableRead(path.join(root.path, ...entry.path.split('/')), entry.size);
+    if (!bytes || sha256Hex(bytes) !== entry.sha256) unstableBase(layout, reservation, root.id, ['working-tree']);
+    storeBlob(layout, entry.sha256, bytes);
+    stored.add(entry.sha256);
+  }
+  const roots = codeRootsApi();
+  return { root_id: root.id, identity_sha256: root.identity_sha256, path_key: roots.key(root.path), common_dir_key: roots.key(classified.commonDir),
+    object_format: classified.format, head: classified.head, observation: classified.observation,
+    index: { entries: classified.entryCount, blob: classified.observation.stage_sha256 }, status: classified.status,
+    untracked: classified.untracked, gsd_tracked: classified.gsdTracked, excluded: classified.excluded, inventory };
+}
+
+/**
+ * Measures the base of every integration root of a reserved cohort and publishes it once.
+ * Returns { status: 'captured', base } (base.replay when the package was already published
+ * and every root still holds it) or { status: 'unsupported', reason_code, detail, root_id }.
+ */
+function captureBatchBase(reservationHandle, integrationContract, trusted = {}) {
+  const reservation = batchAuthority().resolveIsolationHandle(reservationHandle, 'reservation');
+  if (stableDigest(integrationContract) !== stableDigest(reservation.contract)) {
+    isolationRefuse('batch-isolation-contract-mismatch', 'the integration contract is not the one of this reservation');
+  }
+  const contract = revalidatedContract(reservation);
+  for (const root of contract.code_roots) {
+    if (root.vcs !== 'git') return unsupportedBase(root.vcs === 'svn' ? 'svn-isolation-unavailable' : 'vcs-isolation-unavailable', null, root.id);
+  }
+  const limits = limitsOf(trusted.limits);
+  const layout = batchLayout(reservation, contract);
+  // Replay: the published package IS the base while every root still holds it.
+  const published = readPackage(layout, reservation, contract, true);
+  if (published) {
+    assertRootsUnchanged(published, contract);
+    return capturedBase(layout, published, true);
+  }
+  for (const member of reservation.members) {
+    for (const ref of member.roots) {
+      const root = contract.code_roots.find(candidate => candidate.id === ref.root_id);
+      if (!root) isolationRefuse('batch-isolation-contract-mismatch', `${member.task_id} names a root outside the contract`);
+      if (!branchValid(root.path, memberLayout(layout, reservation, member, root).branch)) return unsupportedBase('materialization-unsupported', 'ref-invalid', root.id);
+    }
+  }
+  const measured = [];
+  for (const root of contract.code_roots) {
+    const classified = classifyRoot(root, reservation, limits);
+    if (classified.unstable) unstableBase(layout, reservation, root.id, classified.unstable);
+    if (classified.detail) return unsupportedBase('materialization-unsupported', classified.detail, root.id);
+    const rows = [...classified.tracked.map(entry => ({ path: entry.path, tracked: true, oid: entry.oid })),
+      ...classified.untracked.map(rel => ({ path: rel, tracked: false, oid: null, provenance: inputOrigins(reservation, root.id, rel) }))];
+    const counted = inventoryRoot(root.path, rows, classified.format, limits);
+    if (counted.unstable) unstableBase(layout, reservation, root.id, ['working-tree']);
+    if (counted.detail) return unsupportedBase('materialization-unsupported', counted.detail, root.id);
+    measured.push({ root, classified, inventory: counted.inventory });
+  }
+  failpoint(trusted, 'base-inventory-read');
+  // Measured again after every byte was read: a moving source is refused, never captured.
+  for (const row of measured) {
+    const after = observationOf(row.root.path);
+    const changed = STABILITY_KEYS.filter(key => after[key] !== row.classified.observation[key]);
+    if (movedPath(row.root.path, row.inventory)) changed.push('working-tree');
+    if (changed.length) unstableBase(layout, reservation, row.root.id, changed);
+  }
+  ensureBatchArea(layout);
+  const roots = measured.map(row => packageRoot(layout, reservation, row));
+  const content = { schema: BATCH_BASE_SCHEMA, batch: bindingOf(reservation),
+    layout: { batch_dir_key: codeRootsApi().key(layout.batch_dir), anchor: layout.anchor, branch_base: layout.branch_base },
+    roots, captured_at: new Date().toISOString() };
+  const bytes = Buffer.from(`${JSON.stringify({ ...content, package_sha256: stableDigest(content) })}\n`, 'utf8');
+  if (bytes.length > limits.packageBytes) return unsupportedBase('materialization-unsupported', 'limits-exceeded', null);
+  ensureRealDirs(layout.batch_dir, ['base']);
+  const fresh = publishBuffer(layout, packageFile(layout), bytes);
+  // Re-read what was published (or what a concurrent capture published first) and check it.
+  const reread = readPackage(layout, reservation, contract, false);
+  if (!fresh) assertRootsUnchanged(reread, contract);
+  verifyPackageBlobs(layout, reread);
+  failpoint(trusted, 'base-captured');
+  return capturedBase(layout, reread, !fresh);
+}
+
+// ── Member worktree: journal, checkout identity, materialization, verification ──
+function journalName(sequence) { return `${String(sequence).padStart(4, '0')}.json`; }
+function readJournal(dir, binding) {
+  const bad = detail => isolationRefuse('batch-journal-invalid', detail);
+  const found = lstatOrNull(dir);
+  if (!found) return [];
+  if (found.isSymbolicLink() || !found.isDirectory()) bad('the provisioning journal is not a real directory');
+  const names = fs.readdirSync(dir).sort();
+  if (names.length > JOURNAL_PHASES.length || names.some((name, index) => name !== journalName(index + 1))) bad('the provisioning journal holds unexpected entries');
+  const entries = [];
+  for (const name of names) {
+    const file = path.join(dir, name), stat = lstatOrNull(file);
+    const bytes = stat && stat.isFile() && !stat.isSymbolicLink() && stat.size <= 65536 ? stableRead(file, stat.size) : null;
+    let entry = null;
+    try { entry = bytes ? JSON.parse(UTF8_PATH.decode(bytes)) : null; } catch (_) { entry = null; }
+    if (!plainObject(entry)) bad(`${name} is unreadable`);
+    const { entry_sha256: sealed, ...content } = entry;
+    if (entry.schema !== BATCH_JOURNAL_SCHEMA || sealed !== stableDigest(content) || entry.sequence !== entries.length + 1
+        || entry.phase !== JOURNAL_PHASES[entries.length]) bad(`${name} is not a sealed provisioning step`);
+    if (!plainObject(entry.binding) || stableDigest(entry.binding) !== stableDigest(binding)) {
+      isolationRefuse('batch-member-path-occupied', 'the provisioning journal belongs to another member attempt');
+    }
+    if (entry.previous_sha256 !== (entries.length ? entries[entries.length - 1].entry_sha256 : stableDigest(binding))) bad(`${name} is not linked to its predecessor`);
+    entries.push(entry);
+  }
+  return entries;
+}
+function appendJournal(layout, segments, binding, entries, phase, extra) {
+  if (JOURNAL_PHASES[entries.length] !== phase) isolationRefuse('batch-journal-invalid', `${phase} cannot follow the journal`);
+  const content = { schema: BATCH_JOURNAL_SCHEMA, sequence: entries.length + 1, phase, binding,
+    previous_sha256: entries.length ? entries[entries.length - 1].entry_sha256 : stableDigest(binding), extra: extra || null,
+    at: new Date().toISOString() };
+  const entry = { ...content, entry_sha256: stableDigest(content) };
+  const dir = ensureRealDirs(layout.batch_dir, segments);
+  if (!publishBuffer(layout, path.join(dir, journalName(content.sequence)), Buffer.from(`${JSON.stringify(entry)}\n`, 'utf8'))) {
+    isolationRefuse('batch-journal-invalid', 'another writer advanced this provisioning journal');
+  }
+  return [...entries, entry];
+}
+function refExists(at, branch) {
+  const probe = batchGitStatus(at, ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]);
+  if (probe.status === 0) return true;
+  if (probe.status === 1) return false;
+  return isolationRefuse('batch-member-ref-occupied', 'the member ref could not be inspected');
+}
+// The registered linked worktree of the integration repository, on its own ref, at HEAD.
+function assertMemberCheckout(integration, target, branch, base) {
+  const identity = validateWorktreeIdentity(integration.path, target, branch);
+  if (!identity.ok) isolationRefuse('batch-member-unreconciled', `the member root is not this batch worktree (${identity.reason})`);
+  if (readHead(target) !== base.head) isolationRefuse('batch-member-unreconciled', 'the member root is not at the measured HEAD');
+}
+// The checkout `worktree add --no-checkout` leaves: only `.git`, an empty index.
+function pristine(target) {
+  let names;
+  try { names = fs.readdirSync(target); } catch (_) { return false; }
+  if (names.length !== 1 || names[0] !== '.git') return false;
+  const stage = listing(target, STAGE_ARGS);
+  return Buffer.isBuffer(stage) && stage.length === 0;
+}
+function ensureMemberDirs(target, parts, dirs) {
+  let rel = '';
+  for (const part of parts) {
+    rel = rel ? `${rel}/${part}` : part;
+    if (dirs.has(rel)) continue;
+    const dir = path.join(target, ...rel.split('/'));
+    let stat = lstatOrNull(dir);
+    if (!stat) {
+      try { fs.mkdirSync(dir); } catch (error) { if (!error || error.code !== 'EEXIST') throw error; }
+      stat = fs.lstatSync(dir);
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) isolationRefuse('batch-member-unreconciled', `${rel} is not a real directory in the member root`);
+    dirs.add(rel);
+  }
+}
+// Exclusive creation; an existing file (a resumed materialization) must already hold the bytes.
+function writeMemberFile(target, entry, bytes, dirs) {
+  const parts = entry.path.split('/');
+  ensureMemberDirs(target, parts.slice(0, -1), dirs);
+  const file = path.join(target, ...parts), mode = entry.exec ? 0o755 : 0o644, existing = lstatOrNull(file);
+  if (existing) {
+    const current = existing.isFile() && !existing.isSymbolicLink() ? stableRead(file, existing.size) : null;
+    if (!current || !current.equals(bytes)) isolationRefuse('batch-member-unreconciled', `${entry.path} already differs from the base in the member root`);
+  } else {
+    fs.writeFileSync(file, bytes, { flag: 'wx', mode });
+  }
+  if (process.platform !== 'win32') fs.chmodSync(file, mode);
+}
+function objectChunks(entries) {
+  const byOid = new Map(), chunks = [];
+  for (const entry of entries) {
+    if (!byOid.has(entry.oid)) byOid.set(entry.oid, []);
+    byOid.get(entry.oid).push(entry);
+  }
+  let current = null;
+  for (const [oid, group] of byOid) {
+    const known = group[0].size === null ? 0 : group[0].size;
+    if (!current || current.oids.length >= 512 || (current.oids.length && current.bytes + known > BATCH_BASE_LIMITS.chunkBytes)) {
+      current = { oids: [], entries: [], bytes: 0, unknown: 0 };
+      chunks.push(current);
+    }
+    current.oids.push(oid);
+    current.entries.push(...group);
+    current.bytes += known;
+    if (group[0].size === null) current.unknown += 1;
+  }
+  return chunks;
+}
+// Raw blobs by id (`cat-file --batch`, no filter, no textconv, no replace refs).
+function readObjects(cwd, chunk) {
+  const cap = Math.min(BATCH_BASE_LIMITS.totalBytes, chunk.bytes + chunk.unknown * BATCH_BASE_LIMITS.fileBytes) + chunk.oids.length * 160 + 4096;
+  let out;
+  try { out = batchGit(cwd, ['cat-file', '--batch'], { input: Buffer.from(`${chunk.oids.join('\n')}\n`, 'latin1'), maxBuffer: cap }); }
+  catch (error) { return isolationRefuse('batch-base-invalid', `the object database could not provide the base blobs: ${firstLine(error)}`); }
+  const objects = new Map();
+  let at = 0;
+  for (const oid of chunk.oids) {
+    const newline = out.indexOf(0x0a, at);
+    const header = newline < 0 ? [] : out.subarray(at, newline).toString('latin1').split(' ');
+    if (header.length !== 3 || header[0] !== oid || header[1] !== 'blob' || !/^\d+$/.test(header[2])) isolationRefuse('batch-base-invalid', 'the object database returned another object');
+    const start = newline + 1, end = start + Number(header[2]);
+    if (end >= out.length || out[end] !== 0x0a) isolationRefuse('batch-base-invalid', 'the object database returned a truncated blob');
+    objects.set(oid, out.subarray(start, end));
+    at = end + 1;
+  }
+  if (at !== out.length) isolationRefuse('batch-base-invalid', 'the object database returned extra objects');
+  return objects;
+}
+// The member's OWN index from the measured logical entries, then the working-tree bytes:
+// packaged blobs for every dirty or untracked file, raw index blobs for the rest.
+function materializeMember(layout, target, base) {
+  const stage = readBlob(layout, base.index.blob);
+  const current = listing(target, STAGE_ARGS);
+  if (!Buffer.isBuffer(current)) isolationRefuse('batch-member-unreconciled', 'the member index cannot be listed');
+  if (!current.length) {
+    try { batchGit(target, ['update-index', '-z', '--index-info'], { input: stage }); }
+    catch (error) { isolationRefuse('batch-member-unreconciled', `the member index could not be built: ${firstLine(error)}`); }
+  } else if (!current.equals(stage)) isolationRefuse('batch-member-unreconciled', 'the member index holds entries this base does not');
+  const dirs = new Set(), files = base.inventory.filter(entry => entry.type === 'file');
+  for (const entry of files) if (entry.source === 'package') writeMemberFile(target, entry, readBlob(layout, entry.sha256), dirs);
+  const fromObjects = [...files.filter(entry => entry.source === 'odb'),
+    ...base.gsd_tracked.map(entry => ({ path: entry.path, oid: entry.oid, exec: entry.exec, sha256: null, size: null }))];
+  for (const chunk of objectChunks(fromObjects)) {
+    const objects = readObjects(target, chunk);
+    for (const entry of chunk.entries) {
+      const bytes = objects.get(entry.oid);
+      if (!bytes || (entry.sha256 !== null && sha256Hex(bytes) !== entry.sha256)) isolationRefuse('batch-base-invalid', `${entry.path} is not the measured blob`);
+      writeMemberFile(target, entry, bytes, dirs);
+    }
+  }
+}
+// Independent of checkout filters and line endings: logical index and flags, the real bytes
+// and exec bit of every inventory path, the untracked set and what git itself reports.
+function verifyMember(target, base) {
+  const fail = detail => isolationRefuse('batch-member-verification-failed', detail);
+  if (readHead(target) !== base.head) fail('the member HEAD is not the measured HEAD');
+  const stage = listing(target, STAGE_ARGS), tags = listing(target, TAGS_ARGS);
+  if (!Buffer.isBuffer(stage) || sha256Hex(stage) !== base.observation.stage_sha256) fail('the member index is not the measured logical index');
+  if (!Buffer.isBuffer(tags) || sha256Hex(tags) !== base.observation.tags_sha256) fail('the member index flags are not the measured ones');
+  const cache = new Map();
+  for (const entry of base.inventory) {
+    const parent = parentProblem(target, entry.path, cache);
+    if (parent === 'symlink' || parent === 'type-change') fail(`${entry.path}: a parent is not a real directory`);
+    const file = path.join(target, ...entry.path.split('/'));
+    const stat = parent === 'missing' ? null : lstatOrNull(file);
+    if (entry.type === 'absent') { if (stat) fail(`${entry.path} must stay deleted`); continue; }
+    const bytes = stat && stat.isFile() && !stat.isSymbolicLink() && stat.size === entry.size ? stableRead(file, stat.size) : null;
+    if (!bytes || sha256Hex(bytes) !== entry.sha256) fail(`${entry.path} does not hold the measured bytes`);
+    if (entry.exec !== null && ((stat.mode & 0o100) !== 0) !== entry.exec) fail(`${entry.path} does not keep its mode`);
+  }
+  const others = listing(target, UNTRACKED_ARGS), tokens = Buffer.isBuffer(others) ? splitNul(others) : null;
+  const untracked = tokens ? tokens.map(decodePath) : null;
+  if (!untracked || untracked.includes(null) || JSON.stringify(untracked) !== JSON.stringify(base.untracked)) {
+    fail('the member untracked files are not the measured legitimate ones');
+  }
+  const status = listing(target, STATUS_ARGS), reported = Buffer.isBuffer(status) ? parseStatus(status) : null;
+  if (!reported || !reported.entries || JSON.stringify(statusList(reported.entries)) !== JSON.stringify(base.status)) {
+    fail('git does not see the measured staged and unstaged state in the member');
+  }
+}
+function provisionMemberRoot(context) {
+  const { layout, reservation, member, integration, base, pkg, placed, trusted } = context;
+  const { target, branch } = placed;
+  const binding = { ...bindingOf(reservation), member_index: member.member_index, task_id: member.task_id, begin_key: member.begin_key,
+    lease_generation: member.lease_generation, root_id: integration.id, root_identity_sha256: integration.identity_sha256,
+    package_sha256: pkg.package_sha256, head: base.head, target_key: codeRootsApi().key(target), branch };
+  const segments = ['journal', placed.member_hash, placed.root_hash];
+  let entries = readJournal(path.join(layout.batch_dir, ...segments), binding);
+  let phase = entries.length ? entries[entries.length - 1].phase : null;
+  const replay = phase === 'verified';
+  if (phase === null) {
+    // A fresh attempt owns nothing yet: a directory or ref of the same name is not ours.
+    if (lstatOrNull(target)) isolationRefuse('batch-member-path-occupied', 'the member root path exists without its provisioning journal');
+    if (refExists(integration.path, branch)) isolationRefuse('batch-member-ref-occupied', 'the member ref exists without its provisioning journal');
+    ensureRealDirs(layout.batch_dir, [placed.member_hash]);
+    entries = appendJournal(layout, segments, binding, entries, 'intent', null);
+    failpoint(trusted, 'member-intent-recorded');
+    phase = 'intent';
+  }
+  if (phase === 'intent') {
+    if (!lstatOrNull(target)) {
+      if (refExists(integration.path, branch)) isolationRefuse('batch-member-unreconciled', 'the member ref exists but its worktree was never created');
+      try {
+        batchGit(integration.path, ['-c', `core.hooksPath=${path.join(layout.batch_dir, '.no-hooks')}`, 'worktree', 'add',
+          '--no-checkout', '-b', branch, '--', target, base.head]);
+      } catch (error) { isolationRefuse('batch-member-unreconciled', `git worktree add failed: ${firstLine(error)}`); }
+    }
+    assertMemberCheckout(integration, target, branch, base);
+    if (!pristine(target)) isolationRefuse('batch-member-unreconciled', 'the member worktree is not the empty checkout this journal created');
+    entries = appendJournal(layout, segments, binding, entries, 'worktree', null);
+    failpoint(trusted, 'member-worktree-created');
+    phase = 'worktree';
+  }
+  assertMemberCheckout(integration, target, branch, base);
+  if (phase === 'worktree') {
+    materializeMember(layout, target, base);
+    failpoint(trusted, 'member-materialized');
+  }
+  verifyMember(target, base);
+  assertRootUnchanged(base, integration);
+  let identity;
+  try { identity = codeRootsApi().measureRoot({ id: integration.id, path: target, vcs: 'git' }).identity_sha256; }
+  catch (error) { return isolationRefuse('batch-member-verification-failed', `the member root is not a measurable checkout (${error && error.code})`); }
+  if (phase === 'worktree') entries = appendJournal(layout, segments, binding, entries, 'verified', { identity_sha256: identity });
+  else if (!plainObject(entries[entries.length - 1].extra) || entries[entries.length - 1].extra.identity_sha256 !== identity) {
+    isolationRefuse('batch-member-unreconciled', 'the verified member root was replaced');
+  }
+  return { root_id: integration.id, path: target, branch, head: base.head, integration_identity_sha256: integration.identity_sha256,
+    identity_sha256: identity, journal_sha256: entries[entries.length - 1].entry_sha256, replay };
+}
+
+/**
+ * One exclusive worktree and index per root of ONE member, from the published base.
+ * Returns { status: 'prepared', member } (each root: path, branch, head, identities, journal
+ * digest, replay) or { status: 'unsupported', reason_code, detail, root_id }.
+ */
+function setupForBatchMember(memberHandle, baseRef, trusted = {}) {
+  const member = batchAuthority().resolveIsolationHandle(memberHandle, 'member');
+  const reservation = member.reservation;
+  const contract = revalidatedContract(reservation);
+  const layout = batchLayout(reservation, contract), keyOf = codeRootsApi().key;
+  if (!plainObject(baseRef) || typeof baseRef.package_sha256 !== 'string' || !SHA256_RE.test(baseRef.package_sha256)
+      || typeof baseRef.batch_dir !== 'string' || keyOf(baseRef.batch_dir) !== keyOf(layout.batch_dir)) {
+    isolationRefuse('batch-base-invalid', 'the base reference does not name this batch package');
+  }
+  const pkg = readPackage(layout, reservation, contract, false);
+  if (pkg.package_sha256 !== baseRef.package_sha256) isolationRefuse('batch-base-invalid', 'the base reference names another package');
+  const roots = [];
+  for (const ref of member.roots) {
+    const index = contract.code_roots.findIndex(root => root.id === ref.root_id), integration = contract.code_roots[index];
+    if (!integration || integration.identity_sha256 !== ref.identity_sha256) isolationRefuse('batch-root-foreign', `${ref.root_id} is not the reserved integration root`);
+    const base = pkg.roots[index];
+    // The package must still describe the integration root before a member is built from it.
+    assertRootUnchanged(base, integration);
+    const placed = memberLayout(layout, reservation, member, integration);
+    if (!branchValid(integration.path, placed.branch)) return unsupportedBase('materialization-unsupported', 'ref-invalid', integration.id);
+    roots.push(provisionMemberRoot({ layout, reservation, member, integration, base, pkg, placed, trusted }));
+  }
+  return freezeDeep({ status: 'prepared', member: { batch_id: reservation.batch_id, manifest_sha256: reservation.manifest_sha256,
+    member_index: member.member_index, task_id: member.task_id, begin_key: member.begin_key, lease_generation: member.lease_generation,
+    package_sha256: pkg.package_sha256, roots } });
+}
+
+// ── Issue 343 U5: same-run integration of verified member deltas, and cleanup (B5) ──
+//
+// After the barrier, the serial consolidation of forge-execution-batch integrates each published
+// member's verified delta (the difference after the measured base, never the base itself) into the
+// run's integration target, one member at a time in manifest order. The target must still hold exactly
+// the measured base plus the deltas already consolidated: HEAD, the logical index and its flags, every
+// inventory path's bytes and the untracked set (the member's own delta paths may hold their
+// precondition or, on a replay, their verified bytes). Anything else is a named conflict that writes
+// nothing. Only working-tree bytes are written (atomic replace, delete, exec bit); the index, HEAD,
+// refs, stash and commits are never touched and no owner metadata (.gsd) ever enters. Cleanup plans per
+// member root and removes only what is admissible (every sibling terminal, a clean root no reader needs
+// and the parent claim no longer names), revalidating its Git registration right before the effect; it
+// never resets, commits or forces. Authority is the consolidation's opaque cohort handle of
+// forge-execution-batch (resolveConsolidationCohort revalidates it); nothing here mints any.
+//   checkBatchIntegration(cohortHandle, { consolidated, member? })  read-only precondition or recheck
+//   integrateBatchMember(cohortHandle, { consolidated, member })     the member's writes, idempotent
+//   planBatchCleanup(cohortHandle)                                   the retention plan, no effect
+//   cleanupBatchMember(cohortHandle, memberIndex)                    only admissible removals
+const BATCH_INTEGRATION_REFUSALS = Object.freeze(['batch-integration-delta-invalid', 'batch-integration-conflict',
+  'batch-integration-readback-failed', 'batch-cleanup-member-unknown']);
+const BATCH_INTEGRATION_CONFLICTS = Object.freeze(['integration-target-moved', 'integration-conflict', 'integration-mode-unsupported']);
+const BATCH_CLEANUP_REASONS = Object.freeze(['member-root-identity-unknown', 'batch-members-pending', 'member-root-status-unknown',
+  'member-root-dirty', 'delivery-evidence-dependency', 'attempt-evidence-dependency', 'claim-retains-root']);
+const TERMINAL_PROGRESS = Object.freeze(['ack', 'falhou', 'bloqueado']);
+
+// One anchored member path: { root_id, path, sha256, exec }; deletion/Windows exec is null.
+function deltaRows(rows, contract) {
+  if (!Array.isArray(rows)) isolationRefuse('batch-integration-delta-invalid', 'a delta is a list of verified paths');
+  const seen = new Set();
+  return rows.map(row => {
+    if (!plainObject(row) || Object.keys(row).sort().join(',') !== 'exec,path,root_id,sha256' || !contract.code_roots.some(root => root.id === row.root_id)
+        || pathProblem(row.path) || isGsdPath(row.path) || baseExclusion(row.path)
+        || (row.sha256 !== null && (typeof row.sha256 !== 'string' || !SHA256_RE.test(row.sha256)))
+        || (row.sha256 === null || process.platform === 'win32' ? row.exec !== null : typeof row.exec !== 'boolean')) {
+      isolationRefuse('batch-integration-delta-invalid', `${plainObject(row) ? String(row.path) : 'a row'} is not a verified member path`);
+    }
+    const key = `${row.root_id}\u0000${row.path}`;
+    if (seen.has(key)) isolationRefuse('batch-integration-delta-invalid', `${row.path} is listed twice`);
+    seen.add(key);
+    return { root_id: row.root_id, path: row.path, sha256: row.sha256, exec: row.exec };
+  });
+}
+// The integration contract re-measured, the batch's own sealed base package, and per root: the
+// consolidated deltas and this member's delta.
+function integrationPlan(cohort, input) {
+  const reservation = cohort.reservation, contract = revalidatedContract(reservation);
+  const layout = batchLayout(reservation, contract);
+  if (codeRootsApi().key(layout.batch_dir) !== codeRootsApi().key(cohort.base.batch_dir)) isolationRefuse('batch-base-invalid', 'the consolidation names another batch area');
+  const pkg = readPackage(layout, reservation, contract, false);
+  if (pkg.package_sha256 !== cohort.base.package_sha256) isolationRefuse('batch-base-invalid', 'the consolidation names another base package');
+  const consolidated = deltaRows(plainObject(input) ? input.consolidated : null, contract);
+  let member = null;
+  if (plainObject(input) && input.member !== undefined) {
+    const placed = plainObject(input.member) ? cohort.members.find(row => row.member_index === input.member.member_index) : null;
+    if (!placed) isolationRefuse('batch-integration-delta-invalid', 'the delta names no prepared member');
+    const delta = deltaRows(input.member.delta, contract);
+    if (delta.some(row => !placed.roots.some(root => root.root_id === row.root_id))) isolationRefuse('batch-integration-delta-invalid', 'the delta names a root of another member');
+    const taken = new Set(consolidated.map(row => `${row.root_id}\u0000${row.path}`));
+    if (delta.some(row => taken.has(`${row.root_id}\u0000${row.path}`))) isolationRefuse('batch-integration-delta-invalid', 'two members changed one path');
+    member = { placed, delta };
+  }
+  const roots = contract.code_roots.map((root, index) => ({ root, base: pkg.roots[index],
+    consolidated: new Map(consolidated.filter(row => row.root_id === root.id).map(row => [row.path, { sha256: row.sha256, exec: row.exec }])),
+    member: new Map(member ? member.delta.filter(row => row.root_id === root.id).map(row => [row.path, { sha256: row.sha256, exec: row.exec }]) : []) }));
+  return { contract, roots, member, layout };
+}
+// On Windows the filesystem cannot attest an executable bit. Do not turn that null into
+// success for a new Git executable-mode intention: retain it by name before publication/apply.
+// The immutable index of the base is authoritative; the member's current index is observed only
+// to refuse an unrepresentable change, never to derive or authorize a target mode.
+function unobservableMemberMode(plan) {
+  if (process.platform !== 'win32' || !plan.member) return null;
+  for (const entry of plan.roots) {
+    if (!entry.member.size) continue;
+    const placed = plan.member.placed.roots.find(row => row.root_id === entry.root.id);
+    const unsupported = rel => ({ reason_code: 'integration-mode-unsupported', root_id: entry.root.id, path: rel, detail: 'mode-not-observable' });
+    const raw = listing(placed.path, STAGE_ARGS);
+    const current = Buffer.isBuffer(raw) ? parseStage(raw, entry.base.object_format) : null;
+    if (!current || current.detail) return unsupported(null);
+    const original = parseStage(readBlob(plan.layout, entry.base.index.blob), entry.base.object_format);
+    if (original.detail) return unsupported(null);
+    const before = new Map(original.entries.map(row => [row.path, row.mode]));
+    const now = new Map(current.entries.map(row => [row.path, row.mode]));
+    for (const [rel, verified] of entry.member) {
+      if (verified.sha256 === null) continue;
+      const oldMode = before.get(rel), newMode = now.get(rel);
+      if (oldMode && newMode && oldMode !== newMode || oldMode === '100755' && !newMode
+          || !oldMode && newMode === '100755') return unsupported(rel);
+    }
+  }
+  return null;
+}
+// sha256 of a regular file's real bytes, null when absent, 'unsafe' for a link, a directory or a
+// parent that is not a real directory.
+function targetSha(rootReal, rel, cache) {
+  const parent = parentProblem(rootReal, rel, cache);
+  if (parent === 'missing') return null;
+  if (parent) return 'unsafe';
+  const file = path.join(rootReal, ...rel.split('/')), stat = lstatOrNull(file);
+  if (!stat) return null;
+  if (stat.isSymbolicLink() || !stat.isFile()) return 'unsafe';
+  const bytes = stableRead(file, stat.size);
+  return bytes ? sha256Hex(bytes) : 'unsafe';
+}
+// The full verified file state: bytes plus the platform's executable-mode authority.
+function targetMatches(rootReal, rel, expected, cache) {
+  if (targetSha(rootReal, rel, cache) !== expected.sha256) return false;
+  if (expected.sha256 === null || process.platform === 'win32') return expected.exec === null;
+  const stat = lstatOrNull(path.join(rootReal, ...rel.split('/')));
+  return !!stat && stat.isFile() && !stat.isSymbolicLink() && typeof expected.exec === 'boolean'
+    && ((Number(stat.mode) & 0o100) !== 0) === expected.exec;
+}
+// null when the target root holds exactly the base plus the consolidated deltas (this member's delta
+// paths: at their precondition or their verified bytes in 'replay', only verified bytes in 'exact').
+function targetVerdict(entry, mode) {
+  const { root, base, consolidated, member } = entry, at = root.path;
+  if (readHead(at) !== base.head) return { reason_code: 'integration-target-moved', root_id: root.id, path: null, detail: 'head' };
+  const stage = listing(at, STAGE_ARGS), tags = listing(at, TAGS_ARGS);
+  if (!Buffer.isBuffer(stage) || sha256Hex(stage) !== base.observation.stage_sha256 || !Buffer.isBuffer(tags) || sha256Hex(tags) !== base.observation.tags_sha256) {
+    return { reason_code: 'integration-target-moved', root_id: root.id, path: null, detail: 'index' };
+  }
+  const expected = new Map(base.inventory.map(row => [row.path, { sha256: row.type === 'file' ? row.sha256 : null, exec: row.type === 'file' ? row.exec : null }]));
+  for (const [rel, sha] of consolidated) expected.set(rel, sha);
+  const cache = new Map();
+  for (const [rel, wanted] of expected) {
+    if (member.has(rel)) continue;
+    if (!targetMatches(at, rel, wanted, cache)) return { reason_code: 'integration-conflict', root_id: root.id, path: rel, detail: 'bytes-or-mode' };
+  }
+  for (const [rel, after] of member) {
+    const before = expected.has(rel) ? expected.get(rel) : { sha256: null, exec: null };
+    const matchesAfter = targetMatches(at, rel, after, cache);
+    if (mode === 'exact' ? !matchesAfter : !matchesAfter && !targetMatches(at, rel, before, cache)) {
+      return { reason_code: 'integration-conflict', root_id: root.id, path: rel, detail: 'delta' };
+    }
+  }
+  const others = listing(at, UNTRACKED_ARGS), listed = Buffer.isBuffer(others) ? pathList(others) : null;
+  if (!listed) return { reason_code: 'integration-conflict', root_id: root.id, path: null, detail: 'untracked' };
+  const tracked = new Set(base.inventory.filter(row => row.tracked).map(row => row.path)), wanted = new Set(base.untracked);
+  for (const [rel, sha] of consolidated) {
+    if (tracked.has(rel)) continue;
+    if (sha.sha256 === null) wanted.delete(rel); else wanted.add(rel);
+  }
+  for (const rel of member.keys()) wanted.delete(rel);
+  const actual = listed.filter(rel => !member.has(rel));
+  const extra = actual.find(rel => !wanted.has(rel)), missing = [...wanted].find(rel => !actual.includes(rel));
+  if (extra !== undefined || missing !== undefined) {
+    return { reason_code: 'integration-conflict', root_id: root.id, path: extra !== undefined ? extra : missing, detail: 'untracked' };
+  }
+  return null;
+}
+// Atomic replace through a temporary sibling, real parent directories only.
+function writeTargetFile(rootReal, rel, bytes, exec) {
+  const parts = rel.split('/');
+  let dir = rootReal;
+  for (const part of parts.slice(0, -1)) {
+    dir = path.join(dir, part);
+    let stat = lstatOrNull(dir);
+    if (!stat) {
+      try { fs.mkdirSync(dir); } catch (error) { if (!error || error.code !== 'EEXIST') throw error; }
+      stat = fs.lstatSync(dir);
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) isolationRefuse('batch-integration-conflict', `${rel}: a parent is not a real directory`);
+  }
+  const name = parts[parts.length - 1], file = path.join(dir, name), existing = lstatOrNull(file);
+  if (existing && (existing.isSymbolicLink() || !existing.isFile())) isolationRefuse('batch-integration-conflict', `${rel} is not a regular file`);
+  const mode = exec === true ? 0o755 : exec === false ? 0o644 : existing ? Number(existing.mode) & 0o777 : 0o644;
+  const temporary = path.join(dir, `.${name}.forge-batch-${crypto.randomUUID()}.tmp`);
+  let created = false;
+  try {
+    const descriptor = fs.openSync(temporary, 'wx', mode);
+    created = true;
+    try { fs.writeFileSync(descriptor, bytes); fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
+    if (process.platform !== 'win32') fs.chmodSync(temporary, mode);
+    fs.renameSync(temporary, file);
+    created = false;
+  } finally {
+    if (created) { try { fs.unlinkSync(temporary); } catch (_) { /* a temporary is never product */ } }
+  }
+}
+function removeTargetFile(rootReal, rel) {
+  const file = path.join(rootReal, ...rel.split('/')), stat = lstatOrNull(file);
+  if (!stat) return;
+  if (stat.isSymbolicLink() || !stat.isFile()) isolationRefuse('batch-integration-conflict', `${rel} is not a regular file`);
+  fs.unlinkSync(file);
+}
+
+/** Read-only: { status: 'ready' } or { status: 'conflict', reason_code, root_id, path, detail }. */
+function checkBatchIntegration(cohortHandle, input = {}) {
+  const cohort = batchAuthority().resolveConsolidationCohort(cohortHandle);
+  const plan = integrationPlan(cohort, input);
+  const mode = unobservableMemberMode(plan);
+  if (mode) return freezeDeep({ status: 'conflict', ...mode });
+  for (const entry of plan.roots) {
+    const verdict = targetVerdict(entry, 'replay');
+    if (verdict) return freezeDeep({ status: 'conflict', ...verdict });
+  }
+  return freezeDeep({ status: 'ready', roots: plan.roots.map(entry => entry.root.id) });
+}
+
+/**
+ * Integrates one published member's verified delta into the integration target. A conflict writes
+ * nothing; a replay applies only what is still missing. Returns { status: 'integrated', applied,
+ * already, delta_sha256 } or { status: 'conflict', reason_code, root_id, path, detail }.
+ */
+function integrateBatchMember(cohortHandle, input = {}) {
+  const cohort = batchAuthority().resolveConsolidationCohort(cohortHandle);
+  const plan = integrationPlan(cohort, input);
+  if (!plan.member) isolationRefuse('batch-integration-delta-invalid', 'a member delta is required');
+  const mode = unobservableMemberMode(plan);
+  if (mode) return freezeDeep({ status: 'conflict', ...mode, applied: [], already: [] });
+  for (const entry of plan.roots) {
+    const verdict = targetVerdict(entry, 'replay');
+    if (verdict) return freezeDeep({ status: 'conflict', ...verdict, applied: [], already: [] });
+  }
+  // The verified bytes come from the member's own roots and are all read before the first write.
+  const writes = [];
+  for (const entry of plan.roots) {
+    for (const [rel, verified] of entry.member) {
+      const after = verified.sha256, exec = verified.exec;
+      const placed = plan.member.placed.roots.find(row => row.root_id === entry.root.id);
+      let bytes = null;
+      const source = path.join(placed.path, ...rel.split('/')), stat = lstatOrNull(source);
+      if (after !== null) {
+        bytes = stat && stat.isFile() && !stat.isSymbolicLink() ? stableRead(source, stat.size) : null;
+        if (!bytes || sha256Hex(bytes) !== after) isolationRefuse('batch-integration-delta-invalid', `${rel}: the member root no longer holds its verified bytes`);
+        const current = lstatOrNull(source);
+        if (!current || !current.isFile() || current.isSymbolicLink()
+            || ['dev', 'ino', 'size', 'mtimeMs', 'mode'].some(key => stat[key] !== current[key])
+            || (process.platform === 'win32' ? exec !== null : ((Number(current.mode) & 0o100) !== 0) !== exec)) {
+          isolationRefuse('batch-integration-delta-invalid', rel + ': the member mode is not its anchored mode');
+        }
+      } else if (stat) isolationRefuse('batch-integration-delta-invalid', rel + ': the member deletion changed');
+      writes.push({ root: entry.root, rel, after, bytes, exec });
+    }
+  }
+  const modeAfter = unobservableMemberMode(plan);
+  if (modeAfter) return freezeDeep({ status: 'conflict', ...modeAfter, applied: [], already: [] });
+  const applied = [], already = [];
+  for (const write of writes) {
+    const label = `${write.root.id}::${write.rel}`;
+    if (targetMatches(write.root.path, write.rel, { sha256: write.after, exec: write.exec }, new Map())) { already.push(label); continue; }
+    if (write.after === null) removeTargetFile(write.root.path, write.rel);
+    else writeTargetFile(write.root.path, write.rel, write.bytes, write.exec);
+    applied.push(label);
+  }
+  for (const entry of plan.roots) {
+    const verdict = targetVerdict(entry, 'exact');
+    if (verdict) isolationRefuse('batch-integration-readback-failed', `${verdict.root_id}: ${verdict.path || verdict.detail} does not hold the integrated delivery`);
+  }
+  return freezeDeep({ status: 'integrated', member_index: plan.member.placed.member_index, applied, already,
+    delta_sha256: stableDigest(plan.member.delta) });
+}
+
+// The retention decision of one member root; removal only when every condition admits it.
+function cleanupDecision(contract, member, root, live, claimed) {
+  const retain = reason => ({ decision: 'retained', reason_code: reason });
+  const integration = contract.code_roots.find(row => row.id === root.root_id);
+  if (!integration || !lstatOrNull(root.path) || !validateWorktreeIdentity(integration.path, root.path, root.branch).ok) return retain('member-root-identity-unknown');
+  if (live) return retain('batch-members-pending');
+  const status = batchGitStatus(root.path, STATUS_ARGS), reported = status.status === 0 ? parseStatus(status.stdout) : null;
+  if (!reported || !reported.entries) return retain('member-root-status-unknown');
+  // A dirty base, a member result kept uncommitted (auto_commit false) or any other change stays.
+  if (reported.entries.length) return retain('member-root-dirty');
+  // Published delivery envelopes and failed attempt receipts name this physical root; no verified
+  // archive successor exists for their readers, so the historical root stays.
+  if (['publicado', 'integrado', 'ack'].includes(member.state)) return retain('delivery-evidence-dependency');
+  if (member.state !== 'bloqueado') return retain('attempt-evidence-dependency');
+  if (claimed.has(codeRootsApi().key(root.path))) return retain('claim-retains-root');
+  return { decision: 'removable', reason_code: null };
+}
+/** The cleanup plan of a cohort: one decision per member root, no effect. */
+function planBatchCleanup(cohortHandle) {
+  const cohort = batchAuthority().resolveConsolidationCohort(cohortHandle);
+  const contract = revalidatedContract(cohort.reservation);
+  const live = cohort.members.some(member => !TERMINAL_PROGRESS.includes(member.state));
+  const claimed = new Set(((cohort.claim && cohort.claim.execution_contract && cohort.claim.execution_contract.code_roots) || [])
+    .map(root => codeRootsApi().key(root.path)));
+  return freezeDeep({ batch_id: cohort.batch_id, members: cohort.members.map(member => ({ member_index: member.member_index, task_id: member.task_id,
+    state: member.state, roots: member.roots.map(root => ({ root_id: root.root_id, path: root.path, branch: root.branch,
+      ...cleanupDecision(contract, member, root, live, claimed) })) })) });
+}
+/** Removes only the admissible roots of one member (revalidated right before; never forced). */
+function cleanupBatchMember(cohortHandle, memberIndex) {
+  const plan = planBatchCleanup(cohortHandle);
+  const member = plan.members.find(row => row.member_index === memberIndex);
+  if (!member) isolationRefuse('batch-cleanup-member-unknown', 'the cleanup names no prepared member');
+  const contract = revalidatedContract(batchAuthority().resolveConsolidationCohort(cohortHandle).reservation);
+  const roots = member.roots.map(root => {
+    if (root.decision !== 'removable') return root;
+    const integration = contract.code_roots.find(row => row.id === root.root_id);
+    if (!integration || !validateWorktreeIdentity(integration.path, root.path, root.branch).ok) {
+      return { ...root, decision: 'retained', reason_code: 'member-root-identity-unknown' };
+    }
+    const removed = batchGitStatus(integration.path, ['worktree', 'remove', '--', root.path]);
+    return removed.status === 0 ? { ...root, decision: 'removed', reason_code: null } : { ...root, decision: 'retained', reason_code: 'member-root-dirty' };
+  });
+  return freezeDeep({ member_index: member.member_index, task_id: member.task_id, state: member.state, roots });
+}
+
 // ── CLI ─────────────────────────────────────────────────────────────────────
 function parseArgs(argv) {
   const args = {};
@@ -1192,6 +2574,15 @@ function validateCodeDirBoundary(input = {}) {
   const declared = canonicalDirectory(input.declaredCodeDir);
   const reposList = Array.isArray(input.repoRoots) ? input.repoRoots.map(canonicalDirectory).filter(Boolean) : [];
   if (!workspace || !codeDir || !declared) return { ok: false, reason_code: 'code-dir-undeclared' };
+  const owner = canonicalDirectory(input.ownerRoot) || ws.resolveOwner(codeDir) || ws.resolveOwner(mainCheckoutOf(codeDir));
+  if (owner) {
+    const reservation = batchAuthority().memberRootReservation(owner, codeDir);
+    if (reservation.reserved) {
+      if (!input.memberHandle) return { ok: false, reason_code: reservation.reason_code };
+      try { batchAuthority().assertMemberRootOwner(input.memberHandle, codeDir); }
+      catch (error) { return { ok: false, reason_code: error.code || 'batch-member-root-exclusive' }; }
+    }
+  }
   if (reposList.length !== 1) return { ok: false, reason_code: 'multirepo-refused' };
   const relative = path.relative(workspace, codeDir);
   if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return { ok: false, reason_code: 'code-dir-outside-workspace' };
@@ -1276,4 +2667,11 @@ module.exports = {
   gitHasOriginRemote, fetchDefaultBranch,
   resolvePackageManager, installWorktreeDeps, WORKTREE_INSTALL_TIMEOUT_MS,
   validateCodeDirBoundary, validateWorktreeIdentity,
+  // Issue 343 U2a: batch dirty base and member worktrees.
+  captureBatchBase, setupForBatchMember, BatchIsolationError, BATCH_BASE_LIMITS, BATCH_MATERIALIZATION_DETAILS,
+  BATCH_ISOLATION_REFUSALS, BATCH_ISOLATION_FAILPOINTS,
+  batchIndexIdentity,
+  // Issue 343 U5: same-run integration of verified member deltas and the retaining cleanup.
+  checkBatchIntegration, integrateBatchMember, planBatchCleanup, cleanupBatchMember,
+  BATCH_INTEGRATION_REFUSALS, BATCH_INTEGRATION_CONFLICTS, BATCH_CLEANUP_REASONS,
 };

@@ -33,6 +33,11 @@ function preparationInput(cwd, host, extra) {
   const request = input(cwd, host, extra);
   request.inventory.slices[0].plan_exists = false;
   request.inventory.slices[0].tasks = [];
+  // This answer completes plan-slice; its real owner outputs must also be valid.
+  const slice = path.join(cwd, '.gsd', 'milestones', milestone, 'slices', 'S01');
+  fs.mkdirSync(path.join(slice, 'tasks', 'T01'), { recursive: true });
+  fs.writeFileSync(path.join(slice, 'S01-PLAN.md'), '# S01\n- [ ] **T01**: Fixture\n');
+  fs.writeFileSync(path.join(slice, 'tasks', 'T01', 'T01-PLAN.md'), '---\nid: T01\ndepends: []\nwrites:\n  - src/result.js\nmust_haves:\n  truths:\n    - Vertical preparation fixture is observable.\n  artifacts: []\n  key_links: []\nexpected_output:\n  - src/result.js\n---\n# T01\n');
   return request;
 }
 try {

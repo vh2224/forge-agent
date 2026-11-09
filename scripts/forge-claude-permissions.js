@@ -18,7 +18,29 @@ function parseNodeCommand(command) {
   const match = /^node (?:--check )?([A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:js|cjs|mjs))$/.exec(command);
   return match ? match[1] : null;
 }
-function createPolicy({ seal, contract, identity, cwd } = {}) {
+// Issue 343 U3b: a sidecar cohort member's seal binds its runtime view. Its policy is created only
+// with that view as minted by the member's live handle (forge-execution-batch): the same view,
+// the original plan hash and this measured physical contract. A single caller never uses a member
+// seal, nor a member a single one. The representable subset and the multiroot refusal are the
+// same as for every other seal.
+function assertMemberSeal(seal, contract, view) {
+  try {
+    if (view === undefined) fail('claude-permission-member-view-required');
+    const measured = roots.validateContract(contract, { revalidate: true });
+    const { sha256, ...body } = seal || {};
+    if (!require('./forge-execution-batch').isMemberView(view) || !HEX.test(body.runtime_view_sha256 || '')
+        || body.runtime_view_sha256 !== view.runtime_view_sha256 || body.plan_sha256 !== view.canonical_plan_sha256
+        || view.runtime_contract_sha256 !== roots.digest(measured)) fail('claude-permission-member-view-invalid');
+  } catch (error) {
+    if (error?.code?.startsWith('claude-permission-')) throw error;
+    fail();
+  }
+}
+function createPolicy({ seal, contract, identity, cwd, memberView } = {}) {
+  if (memberView !== undefined || seal?.runtime_view_sha256 !== undefined) assertMemberSeal(seal, contract, memberView);
+  return derivePolicy({ seal, contract, identity, cwd });
+}
+function derivePolicy({ seal, contract, identity, cwd }) {
   try {
     contract = roots.validateContract(contract, { revalidate: true });
     const { sha256, ...body } = seal || {};
@@ -55,7 +77,8 @@ function createPolicy({ seal, contract, identity, cwd } = {}) {
 function validatePolicy(policy, { cwd, readOnly, identity } = {}) {
   if (policy === undefined || policy === null) return null; // legacy: no new permission
   if (readOnly || !identity) fail();
-  const expected = createPolicy({ seal: policy.seal, contract: policy.contract, identity, cwd });
+  // Integrity of an owner-created policy: its own seal (a member seal included) re-derives it.
+  const expected = derivePolicy({ seal: policy.seal, contract: policy.contract, identity, cwd });
   if (roots.digest(expected) !== roots.digest(policy)) fail();
   return expected;
 }

@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:forge:execution-batch:v1",
+  "title": "Canonical execute-task batch decision v1 (issue 343 U1)",
+  "description": "Immutable manifest published exclusively by scripts/forge-execution-batch.js at .gsd/forge/batches/<batch_id>/manifest.json before any member lease. A record of the owner decision, never authority: every member that has not begun is admitted again against the live owner state before its begin. Per-member progress lives in .gsd/forge/batches/<batch_id>/progress/m<index>/<NNNN>.json (progressEntry), one compare-and-swap chain per member. The member begin transactions carry the binding below. Public projections carry no owner token, raw session or prompt.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "kind", "batch_id", "owner", "milestone", "slice", "request_key", "host_runtime", "owner_digest", "primary", "generation", "slice_plan", "limits", "members", "excluded", "decided_at", "manifest_sha256"],
+  "properties": {
+    "schema": { "const": "forge-execution-batch-v1" },
+    "kind": { "const": "execute-task-cohort" },
+    "batch_id": { "$ref": "#/$defs/batchId" },
+    "owner": { "type": "string", "minLength": 1, "description": "Physical owner key (forge-code-roots key of the owner realpath)." },
+    "milestone": { "$ref": "#/$defs/segment" },
+    "slice": { "$ref": "#/$defs/segment" },
+    "request_key": { "type": "string", "minLength": 1, "maxLength": 2048, "description": "The primary's single request key; batch_id is derived from it, so a crash or a repeated next of the same request replays this manifest." },
+    "host_runtime": { "enum": ["claude", "codex"] },
+    "owner_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "primary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["task_id", "unit"],
+      "properties": { "task_id": { "$ref": "#/$defs/taskId" }, "unit": { "$ref": "#/$defs/unitKey" } },
+      "description": "The unit selectNextUnit chose canonically; always members[0]."
+    },
+    "generation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "generation_key", "validation_key", "semantic_sha256", "graph_sha256"],
+      "properties": {
+        "status": { "const": "current" },
+        "generation_key": { "type": "string" },
+        "validation_key": { "type": "string" },
+        "semantic_sha256": { "$ref": "#/$defs/hash" },
+        "graph_sha256": { "type": "string" }
+      },
+      "description": "The enrolled, admitted plan-slice generation the decision read (forge-plan-validation assertSliceGeneration)."
+    },
+    "slice_plan": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": { "path": { "type": "string" }, "sha256": { "$ref": "#/$defs/hash" } }
+    },
+    "limits": {
+      "type": "object", "additionalProperties": false,
+      "required": ["max_concurrent", "max_concurrent_source", "remaining_steps", "roots_limit", "roots_used", "retained_roots"],
+      "properties": {
+        "max_concurrent": { "type": "integer", "minimum": 1, "description": "forge-resources maxConcurrentClamp over parallelism.max_concurrent (default 3, schema range unchanged)." },
+        "max_concurrent_source": { "const": "forge-resources.maxConcurrentClamp" },
+        "remaining_steps": { "type": "integer", "minimum": 2, "description": "max_steps - step_count of the loop at decision time; one step per member." },
+        "roots_limit": { "const": 14 },
+        "roots_used": { "type": "integer", "minimum": 0, "maximum": 14, "description": "Member roots plus their integration union plus retained protected roots of other batches." },
+        "retained_roots": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "members": { "type": "array", "minItems": 2, "maxItems": 8, "items": { "$ref": "#/$defs/member" } },
+    "excluded": { "type": "array", "items": { "$ref": "#/$defs/excluded" } },
+    "decided_at": { "$ref": "#/$defs/instant" },
+    "manifest_sha256": { "$ref": "#/$defs/hash", "description": "sha256 of the sorted-key JSON of every other field." }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "batchId": { "type": "string", "pattern": "^batch-[a-f0-9]{32}$" },
+    "segment": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "taskId": { "type": "string", "pattern": "^T\\d+(?:\\.\\d+)?$" },
+    "unitKey": { "type": "string", "pattern": "^execute-task/T\\d+(?:\\.\\d+)?$" },
+    "instant": { "type": "string", "format": "date-time" },
+    "reasonCode": {
+      "description": "Closed reasons that keep the current single (or native) path; the decision returns exactly one.",
+      "enum": ["single-candidate", "primary-native", "mode-not-auto", "unit-not-execute-task", "legacy-plan-sequential", "plan-generation-invalid", "dependency-unmet", "writes-overlap", "route-not-sidecar", "route-stale", "svn-isolation-unavailable", "vcs-isolation-unavailable", "isolation-policy", "materialization-unsupported", "roots-limit", "max-concurrent", "max-steps", "time-admission", "lease-scope-collision", "claim-gate-conflict", "pending-question", "member-begin-refused"]
+    },
+    "refusalCode": {
+      "description": "Closed refusals of a durable batch record or batch command: blocked boundaries, never a fallback.",
+      "enum": ["batch-scope-invalid", "batch-manifest-invalid", "batch-manifest-foreign", "batch-member-begin-foreign", "batch-progress-invalid", "batch-progress-conflict", "batch-active", "batch-not-active", "batch-members-pending", "batch-member-operation-deferred", "batch-dispatch-invalid"]
+    },
+    "memberState": {
+      "description": "Per-member progress, advanced only by compare-and-swap; ack, falhou and bloqueado are terminal.",
+      "enum": ["preparado", "admitido", "executando", "retido", "verificacao-falhou", "publicacao-pendente", "publicado", "integrado", "ack", "falhou", "bloqueado", "needs-input"]
+    },
+    "write": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "type": "object", "additionalProperties": false, "required": ["root_id", "path"],
+          "properties": { "root_id": { "type": "string" }, "path": { "type": "string" } } }
+      ]
+    },
+    "root": {
+      "type": "object", "additionalProperties": false,
+      "required": ["root_id", "vcs", "identity_sha256"],
+      "properties": { "root_id": { "type": "string" }, "vcs": { "const": "git" }, "identity_sha256": { "$ref": "#/$defs/hash" } }
+    },
+    "route": {
+      "type": "object", "additionalProperties": false,
+      "required": ["worker_mode", "dispatch_allowed", "host_runtime", "resolved_worker_engine", "engine", "model", "tier", "effort", "chain", "sidecar_model", "resolution_options", "resolution_sources_sha256", "route_sha256"],
+      "properties": {
+        "worker_mode": { "const": "sidecar" },
+        "dispatch_allowed": { "const": true },
+        "host_runtime": { "enum": ["claude", "codex"] },
+        "resolved_worker_engine": { "type": "string" },
+        "engine": { "type": "string" },
+        "model": { "type": "string" },
+        "tier": { "type": "string" },
+        "effort": { "type": "string" },
+        "chain": { "type": "array", "items": { "type": "string" } },
+        "sidecar_model": { "type": "string" },
+        "resolution_options": { "type": "object", "description": "The exact resolver inputs of this member's task plan (forge-dispatch-resolve resolveDispatch)." },
+        "resolution_sources_sha256": { "$ref": "#/$defs/hash" },
+        "route_sha256": { "$ref": "#/$defs/hash", "description": "Binds policy, resolver inputs and source digest; a different re-resolution only refuses (route-stale)." }
+      }
+    },
+    "member": {
+      "type": "object", "additionalProperties": false,
+      "required": ["index", "task_id", "unit", "begin_key", "plan", "declaration_sha256", "depends", "writes", "roots", "route", "time_admission", "step_charge"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0, "maximum": 7 },
+        "task_id": { "$ref": "#/$defs/taskId" },
+        "unit": { "$ref": "#/$defs/unitKey" },
+        "begin_key": { "type": "string", "pattern": "^forge-execution-batch:batch-[a-f0-9]{32}:execute-task/T\\d+(?:\\.\\d+)?$" },
+        "plan": {
+          "type": "object", "additionalProperties": false, "required": ["path", "sha256"],
+          "properties": { "path": { "type": "string" }, "sha256": { "$ref": "#/$defs/hash" } }
+        },
+        "declaration_sha256": { "$ref": "#/$defs/hash" },
+        "depends": { "type": "array", "items": { "$ref": "#/$defs/taskId" } },
+        "writes": { "type": "array", "items": { "$ref": "#/$defs/write" } },
+        "roots": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/root" } },
+        "route": { "$ref": "#/$defs/route" },
+        "time_admission": {
+          "type": "object", "additionalProperties": false, "required": ["decision"],
+          "properties": { "decision": { "type": "string" } },
+          "description": "Read-only owner time admission at decision time; the member begin decides again and records it once."
+        },
+        "step_charge": { "const": 1 }
+      }
+    },
+    "excluded": {
+      "type": "object", "additionalProperties": false,
+      "required": ["task_id", "reason_code"],
+      "properties": { "task_id": { "type": "string" }, "reason_code": { "$ref": "#/$defs/reasonCode" } }
+    },
+    "binding": {
+      "description": "Stored on each member begin transaction (transaction.batch); its key is forge-execution-batch:<batch_id>:<unit>.",
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "batch_id", "manifest_sha256", "member_index", "task_id"],
+      "properties": {
+        "schema": { "const": "forge-execution-batch-v1" },
+        "batch_id": { "$ref": "#/$defs/batchId" },
+        "manifest_sha256": { "$ref": "#/$defs/hash" },
+        "member_index": { "type": "integer", "minimum": 0, "maximum": 7 },
+        "task_id": { "$ref": "#/$defs/taskId" }
+      }
+    },
+    "progressEntry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "batch_id", "member_index", "task_id", "sequence", "state", "previous_state", "previous_sha256", "reason_code", "at", "entry_sha256"],
+      "properties": {
+        "schema": { "const": "forge-execution-batch-progress-v1" },
+        "batch_id": { "$ref": "#/$defs/batchId" },
+        "member_index": { "type": "integer", "minimum": 0, "maximum": 7 },
+        "task_id": { "$ref": "#/$defs/taskId" },
+        "sequence": { "type": "integer", "minimum": 1, "maximum": 32 },
+        "state": { "$ref": "#/$defs/memberState" },
+        "previous_state": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/memberState" }] },
+        "previous_sha256": { "$ref": "#/$defs/hash", "description": "The predecessor entry digest, or manifest_sha256 for the first entry." },
+        "reason_code": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/reasonCode" }] },
+        "at": { "$ref": "#/$defs/instant" },
+        "entry_sha256": { "$ref": "#/$defs/hash" }
+      }
+    }
+  }
+}

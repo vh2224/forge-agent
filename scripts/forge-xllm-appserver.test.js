@@ -278,6 +278,10 @@ const TASK_PLAN = [
   '  key_links: []',
   'expected_output:',
   '  - scripts/foo.js',
+  // Issue 343 U0c: a new planner result declares depends/writes and its S-plan lists it.
+  'depends: []',
+  'writes:',
+  '  - scripts/foo.js',
   '---',
   '',
   '# T01',
@@ -287,7 +291,7 @@ function answer() {
     return JSON.stringify({
       status: 'done',
       summary: 'plan',
-      slice_plan: { filename: 'S01-PLAN.md', content: '# Slice plan\n' },
+      slice_plan: { filename: 'S01-PLAN.md', content: '# Slice plan\n\n- [ ] **T01**: real-shape fixture task\n' },
       task_plans: [{ id: 'T01', filename: 'T01-PLAN.md', content: TASK_PLAN }],
     });
   }

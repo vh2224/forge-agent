@@ -5,6 +5,9 @@
 //   hasStructuredMustHaves(planContent) → boolean
 //   parseMustHaves(planContent) → { truths, artifacts, key_links, expected_output, domain, capability }
 //   resolveCapability(planContent) → { capability, declared, event }
+//   extractFrontmatter(planContent) → string|null   (the only CRLF/BOM normalizer)
+//   decodeDeclarationList(frontmatter, key) → { key, status, form, items, error, line, diagnostics, layout }
+//   validateTaskDeclarations(planContent, { taskId, requireExplicit: true }) → frozen projection
 //
 // CLI usage:
 //   node scripts/forge-must-haves.js --check <plan.md>
@@ -15,6 +18,7 @@
 
 'use strict';
 
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
@@ -663,26 +667,350 @@ function resolveCapability(planText) {
   }
 }
 
+// ── Execution declarations: one structural depends/writes decoder (issue 343 U0a, U0a-r1) ──
+
+// decodeDeclarationList is the one structural decoder of the top-level `depends`
+// and `writes` declarations. It records what the YAML says — values, presence,
+// layout and named diagnostics — and decides nothing else. Every consumer applies
+// its own projection, fixed in code at its historical caller and never selected
+// by an option, a profile string or imported JSON:
+//   ordinary  parseExecutionFields (below): a complete list is an array, blank
+//             lines included; YAML null and a malformed declaration stay present
+//             but are never an array.
+//   temporal  forge-unit-controller dependsOf (time DAG): absent and YAML null are
+//             a root; a blank gap or a malformed declaration is refused.
+//   schedule  forge-parallelism parseTaskFrontmatter and validateTaskDeclarations
+//             (below): a declaration enters a schedule only as a list whose layout
+//             the temporal guard also admits.
+// The input is LF frontmatter (extractFrontmatter, still the only CRLF/BOM
+// normalizer of plan text). Supported YAML: a flow list on the key line
+// (`key: [a, "b"]`) and an indented block of `- item` lines. Items are quoted
+// (taken verbatim between the quotes, as before) or plain; `root::path` stays a
+// string and `- root_id: x` / `path: y` is one object entry. A ` #` tail and whole
+// `#` lines are comments; a `#` inside quotes or without whitespace before it is
+// text. Blank lines are YAML-transparent inside a block: the list stays valid and
+// the decoder names them (declaration-leading-blank before the first entry,
+// declaration-interior-blank after it). A key followed only by blank or comment
+// lines is YAML null: status `empty` (declaration-empty-value), never a list.
+// Anything else — a scalar, text after a flow list, a mixed or unindented block,
+// an empty item, a nested collection or a repeated key — is `invalid` with a
+// named error.
+const DECLARATION_FIELD = /^([A-Za-z_][\w-]*):(?:[ \t]+(.*))?$/;
+const DECLARATION_TAIL = /^(?:[ \t]*|[ \t]+#.*)$/;
+const DECLARATION_TRANSPARENT = /^[ \t]*(?:#.*)?$/;
+const DECLARATION_GAPS = Object.freeze(['declaration-leading-blank', 'declaration-interior-blank']);
+
+// Frontmatter line numbers (1-based) of one declaration, by role.
+function declarationLayout(keyLine) {
+  return { key_line: keyLine, item_lines: [], comment_lines: [], inline_comment_lines: [], leading_blank_lines: [], interior_blank_lines: [] };
+}
+
+// The frozen decoder result. `diagnostics` names every finding: the error of an
+// invalid declaration, declaration-empty-value for YAML null and the blank gaps of
+// a valid block; a valid list without blank lines and an absent key have none.
+function declarationResult(key, status, extra = {}) {
+  const valid = status === 'valid', layout = valid || status === 'empty' ? extra.layout : null;
+  const gaps = valid ? [layout.leading_blank_lines.length ? DECLARATION_GAPS[0] : null,
+    layout.interior_blank_lines.length ? DECLARATION_GAPS[1] : null].filter(Boolean) : [];
+  const diagnostics = status === 'invalid' ? [extra.error] : status === 'empty' ? ['declaration-empty-value'] : gaps;
+  return deepFreeze({
+    key,
+    status,
+    form: valid ? extra.form : null,
+    items: valid ? extra.items.map(item => (typeof item === 'string' ? item : { ...item })) : null,
+    error: status === 'invalid' ? extra.error : null,
+    line: extra.line || null,
+    diagnostics,
+    layout: layout ? { ...layout } : null,
+  });
+}
+
+// One item scalar: { value, comment } or null (an unterminated quote, text after
+// the closing quote, an empty value or a nested collection/sequence).
+function declarationScalar(text) {
+  const value = String(text).replace(/^[ \t]+/, '');
+  if (value[0] === '"' || value[0] === "'") {
+    for (let end = value.indexOf(value[0], 1); end > 0; end = value.indexOf(value[0], end + 1)) {
+      const tail = value.slice(end + 1);
+      if (DECLARATION_TAIL.test(tail)) return end > 1 ? { value: value.slice(1, end), comment: tail.includes('#') } : null;
+    }
+    return null;
+  }
+  const comment = value.search(/[ \t]#/);
+  const plain = (comment < 0 ? value : value.slice(0, comment)).replace(/[ \t]+$/, '');
+  if (!plain || plain[0] === '#' || /^(?:[[{]|-(?:[ \t]|$))/.test(plain)) return null;
+  return { value: plain, comment: comment >= 0 };
+}
+
+// A flow list `[a, "b, c", 'd']` on the key line: { items, comment } or null.
+function declarationFlow(text) {
+  const items = [];
+  let element = '', quote = null, closed = -1;
+  const scalar = () => {
+    const trimmed = element.trim();
+    if (trimmed[0] === '"' || trimmed[0] === "'") return trimmed.length > 2 && trimmed[trimmed.length - 1] === trimmed[0] ? trimmed.slice(1, -1) : null;
+    return trimmed || null;
+  };
+  for (let index = 1; index < text.length; index++) {
+    const char = text[index];
+    if (quote) {
+      element += char;
+      if (char === quote && quote === "'" && text[index + 1] === "'") element += text[++index];
+      else if (char === quote) quote = null;
+      continue;
+    }
+    if ((char === '"' || char === "'") && !element.trim()) { quote = char; element += char; continue; }
+    if (char === ',' || char === ']') {
+      const value = scalar();
+      if (value === null && !(char === ']' && !items.length && !element.trim())) return null;
+      if (value !== null) items.push(value);
+      element = '';
+      if (char === ']') { closed = index; break; }
+      continue;
+    }
+    if (char === '[' || char === '{' || char === '}' || (char === '#' && /[ \t]/.test(text[index - 1]))) return null;
+    element += char;
+  }
+  if (closed < 0 || quote) return null;
+  const tail = text.slice(closed + 1);
+  return DECLARATION_TAIL.test(tail) ? { items, comment: tail.includes('#') } : null;
+}
+
+// The indented block below the key line: string items and object entries aligned
+// under their first key. Comment and blank lines are recorded in `layout`, never
+// read as items. Returns { items } or the invalid result of `fail`.
+function declarationBlock(region, layout, fail) {
+  const items = [];
+  let indent = null, object = null;
+  for (const { text, line } of region) {
+    if (!text.trim()) { (items.length ? layout.interior_blank_lines : layout.leading_blank_lines).push(line); continue; }
+    if (/^[ \t]*#/.test(text)) { layout.comment_lines.push(line); continue; }
+    const entry = text.match(/^([ \t]+)-(?:([ \t]+)(.*))?$/);
+    if (entry) {
+      if (indent === null) indent = entry[1];
+      if (entry[1] !== indent) return fail('declaration-block-malformed', line);
+      object = null;
+      const body = entry[3] === undefined ? '' : entry[3], field = body.match(DECLARATION_FIELD);
+      const read = field ? (field[2] === undefined ? null : declarationScalar(field[2])) : declarationScalar(body);
+      if (read === null) return fail('declaration-item-malformed', line);
+      layout.item_lines.push(line);
+      if (read.comment) layout.inline_comment_lines.push(line);
+      if (field) {
+        object = { fields: { [field[1]]: read.value }, column: entry[1].length + 1 + entry[2].length };
+        items.push(object.fields);
+      } else items.push(read.value);
+      continue;
+    }
+    const field = object && text.match(/^([ \t]+)([A-Za-z_][\w-]*):(?:[ \t]+(.*))?$/);
+    if (!field || field[1].length !== object.column || Object.prototype.hasOwnProperty.call(object.fields, field[2])) {
+      return fail('declaration-block-malformed', line);
+    }
+    const read = field[3] === undefined ? null : declarationScalar(field[3]);
+    if (read === null) return fail('declaration-item-malformed', line);
+    if (read.comment) layout.inline_comment_lines.push(line);
+    object.fields[field[2]] = read.value;
+  }
+  return { items };
+}
+
+/**
+ * Decode one top-level declaration list (`depends`, `writes`) of LF frontmatter.
+ * Structural only: it takes no options, and every consumer projects the result
+ * in its own code.
+ *
+ * @param {string} frontmatter  extractFrontmatter() output
+ * @param {string} key
+ * @returns {{ key: string, status: 'absent'|'empty'|'valid'|'invalid', form: 'flow'|'block'|null,
+ *   items: Array<string|object>|null, error: string|null, line: number|null, diagnostics: string[],
+ *   layout: { key_line, item_lines, comment_lines, inline_comment_lines, leading_blank_lines,
+ *   interior_blank_lines }|null }} deep-frozen; `line` is the key line (the offending line when invalid)
+ */
+function decodeDeclarationList(frontmatter, key) {
+  const lines = String(frontmatter).split('\n');
+  const escaped = String(key).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const head = new RegExp('^' + escaped + '[ \\t]*:');
+  const at = [];
+  lines.forEach((line, index) => { if (head.test(line)) at.push(index); });
+  if (!at.length) return declarationResult(key, 'absent');
+  if (at.length > 1) return declarationResult(key, 'invalid', { error: 'execution-plan-duplicate-key', line: at[1] + 1 });
+  const start = at[0], rest = lines[start].replace(head, ''), layout = declarationLayout(start + 1);
+  const fail = (error, line) => declarationResult(key, 'invalid', { error, line: line || start + 1 });
+  // The declaration runs to the first column-0 line that is neither blank nor a
+  // comment; trailing blank/comment lines belong to nobody.
+  let end = start + 1;
+  while (end < lines.length && (/^[ \t]/.test(lines[end]) || DECLARATION_TRANSPARENT.test(lines[end]))) end++;
+  let last = end;
+  while (last > start + 1 && DECLARATION_TRANSPARENT.test(lines[last - 1])) last--;
+  const region = lines.slice(start + 1, last).map((text, offset) => ({ text, line: start + 2 + offset }));
+  // A column-0 `- item` right after the declaration is an unindented list: refuse
+  // it rather than read the key as empty.
+  if (end < lines.length && /^-(?:[ \t]|$)/.test(lines[end])) return fail('declaration-block-malformed', end + 1);
+  const value = rest.trim();
+  if (value && !/^[ \t]+#/.test(rest)) {
+    if (value[0] !== '[') return fail('declaration-scalar');
+    const flow = declarationFlow(value);
+    if (!flow) return fail('declaration-flow-malformed');
+    if (region.length) return fail('declaration-continuation', region[0].line);
+    for (let index = 0; index < flow.items.length; index++) layout.item_lines.push(start + 1);
+    if (flow.comment) layout.inline_comment_lines.push(start + 1);
+    return declarationResult(key, 'valid', { form: 'flow', items: flow.items, line: start + 1, layout });
+  }
+  if (value) layout.inline_comment_lines.push(start + 1); // `key: # comment`
+  if (!region.length) return declarationResult(key, 'empty', { line: start + 1, layout });
+  const block = declarationBlock(region, layout, fail);
+  if (block.status === 'invalid') return block;
+  return declarationResult(key, 'valid', { form: 'block', items: block.items, line: start + 1, layout });
+}
+
+const TASK_ID = /^T\d+(?:\.\d+)?$/;
+const ROOT_ID = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+
+function deepFreeze(value) {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const item of Object.values(value)) deepFreeze(item);
+  }
+  return value;
+}
+
+function declarationError(code, detail, extra) {
+  return Object.assign(new Error(`${code}: ${detail}`), { code, detail }, extra);
+}
+
+// A write declaration as written: `path`, `root::path` or exactly { root_id, path }.
+function declaredWrite(item) {
+  if (typeof item === 'string') {
+    const at = item.indexOf('::');
+    if (at < 0) return { root_id: null, path: item };
+    return ROOT_ID.test(item.slice(0, at)) ? { root_id: item.slice(0, at), path: item.slice(at + 2) } : null;
+  }
+  if (!item || typeof item !== 'object' || Object.keys(item).sort().join(',') !== 'path,root_id') return null;
+  return typeof item.root_id === 'string' && ROOT_ID.test(item.root_id) && typeof item.path === 'string'
+    ? { root_id: item.root_id, path: item.path } : null;
+}
+
+function declarationScalarValue(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = stripInlineComment(value).trim();
+  return trimmed === '' ? null : trimmed;
+}
+
+/**
+ * Strict admission of a new task's explicit `depends`/`writes` (issue 343 U0a).
+ * The identity comes from the canonical list and the plan path (`taskId`), never
+ * from the frontmatter `id:`. Throws a named error (`code`, `detail`, `errors`):
+ * plan-declaration-depends-missing|writes-missing|depends-invalid|writes-invalid|
+ * depends-blank-gap|writes-blank-gap|task-id-invalid|path-protected. It never
+ * supplies an empty list for an absent, empty (YAML null) or malformed declaration
+ * and has no bypass, profile or relaxed option: `options` carries only the
+ * identity and the explicit requirement, and any other field changes nothing.
+ * Its fixed schedule-admission projection (U0a-r1) reads the shared decoder's
+ * layout: a structurally valid list with a leading or interior blank line stays
+ * readable by parseExecutionFields, but it never enters a new task schedule,
+ * because the temporal guard (forge-unit-controller dependsOf) refuses that
+ * layout. Historical readers (parseMustHaves, --check, parseExecutionFields) are
+ * unchanged by it.
+ *
+ * @returns {{ task_id, depends, writes, roots_schema, primary_root_id, declared_roots, declaration_sha256 }} frozen
+ */
+function validateTaskDeclarations(content, options) {
+  if (!options || options.requireExplicit !== true) {
+    throw new TypeError('validateTaskDeclarations requires { taskId, requireExplicit: true }');
+  }
+  const taskId = options.taskId, errors = [];
+  if (typeof taskId !== 'string' || !TASK_ID.test(taskId)) errors.push(['plan-declaration-task-id-invalid', String(taskId)]);
+  const fm = typeof content === 'string' ? extractFrontmatter(content) : null;
+  const decoded = {};
+  for (const key of ['depends', 'writes']) {
+    const read = fm === null ? declarationResult(key, 'absent') : decodeDeclarationList(fm, key);
+    decoded[key] = read;
+    if (read.status === 'absent') errors.push([`plan-declaration-${key}-missing`, fm === null ? 'frontmatter-missing' : 'key-absent']);
+    else if (read.status === 'invalid') errors.push([`plan-declaration-${key}-invalid`, `${read.error} (frontmatter line ${read.line})`]);
+    else if (read.status === 'empty') errors.push([`plan-declaration-${key}-invalid`, `declaration-empty-value (frontmatter line ${read.line}; declare [] explicitly)`]);
+    else if (read.diagnostics.length) {
+      const gap = [...read.layout.leading_blank_lines, ...read.layout.interior_blank_lines][0];
+      errors.push([`plan-declaration-${key}-blank-gap`, `${read.diagnostics[0]} (frontmatter line ${gap})`]);
+    }
+  }
+  const usable = key => decoded[key].status === 'valid' && decoded[key].diagnostics.length === 0;
+  if (usable('depends')) {
+    const seen = new Set();
+    for (const [index, item] of decoded.depends.items.entries()) {
+      if (typeof item !== 'string' || !TASK_ID.test(item)) { errors.push(['plan-declaration-depends-invalid', `depends[${index}] task-id-invalid`]); break; }
+      if (seen.has(item)) { errors.push(['plan-declaration-depends-invalid', `depends[${index}] duplicate ${item}`]); break; }
+      seen.add(item);
+    }
+  }
+  const writes = [];
+  if (usable('writes')) {
+    // The existing product-path policy (#348), loaded lazily as in parseMustHaves.
+    const { assertRelative } = require('./forge-code-roots');
+    for (const [index, item] of decoded.writes.items.entries()) {
+      const entry = declaredWrite(item);
+      if (!entry) { errors.push(['plan-declaration-writes-invalid', `writes[${index}] entry-invalid`]); continue; }
+      try { assertRelative(entry.path); }
+      catch (cause) {
+        const code = cause.code || 'root-path-invalid';
+        errors.push([code === 'root-path-protected' ? 'plan-declaration-path-protected' : 'plan-declaration-writes-invalid', `writes[${index}] ${code}`]);
+        continue;
+      }
+      writes.push(typeof item === 'string' ? item : { root_id: entry.root_id, path: entry.path });
+    }
+  }
+  if (errors.length) {
+    const [code, detail] = errors[0];
+    throw declarationError(code, detail, { task_id: typeof taskId === 'string' ? taskId : null,
+      errors: errors.map(([name, why]) => ({ code: name, detail: why })) });
+  }
+  const roots = parseArrayKey(fm, 'code_roots');
+  const declarations = {
+    depends: [...decoded.depends.items],
+    writes,
+    roots_schema: declarationScalarValue(extractTopLevelValue(fm, 'roots_schema')),
+    primary_root_id: declarationScalarValue(extractTopLevelValue(fm, 'primary_root_id')),
+    declared_roots: Array.isArray(roots) ? roots.map(root => ({
+      id: root && root.id !== undefined ? String(root.id) : null,
+      path: root && root.path !== undefined ? String(root.path) : null,
+      vcs: root && root.vcs !== undefined ? String(root.vcs) : null,
+    })) : null,
+  };
+  // Digest of the declarations only: prose, checkboxes, comments and EOL never count.
+  const declarationSha256 = crypto.createHash('sha256')
+    .update(JSON.stringify({ schema: 'forge-task-declarations-v1', ...declarations }), 'utf8').digest('hex');
+  return deepFreeze({ task_id: taskId, ...declarations, declaration_sha256: declarationSha256 });
+}
+
 // ── Exports ───────────────────────────────────────────────────────────────────
 
 // stripInlineComment is exported so the OTHER reader of the same frontmatter
 // keys (forge-dispatch-resolve.js) shares this rule instead of copying it.
 // Execution declarations use the same frontmatter parser as must_haves. Missing
 // keys remain missing: a consumer must not turn an unread declaration into [].
+// depends/writes come from decodeDeclarationList through this reader's fixed
+// ordinary projection (issue 343 U0a-r1): a complete YAML list is an array, its
+// blank and comment lines included; YAML null (`key:` with no list) and a
+// malformed declaration stay present but are null, never an array.
 function parseExecutionFields(content) {
   const fm = extractFrontmatter(content);
   if (!fm) throw new Error('execution-plan-frontmatter-required');
   const keys = [...fm.matchAll(/^([A-Za-z][\w-]*):/gm)].map(m => m[1]);
   if (new Set(keys).size !== keys.length) throw new Error('execution-plan-duplicate-key');
   const result = {};
-  for (const key of ['depends', 'writes', 'expected_output', 'code_roots']) {
+  for (const key of ['depends', 'writes']) {
+    const read = decodeDeclarationList(fm, key);
+    if (read.error === 'execution-plan-duplicate-key') throw new Error('execution-plan-duplicate-key');
+    if (read.status === 'valid') result[key] = read.items.map(item => (typeof item === 'string' ? item : { ...item }));
+    else if (read.status !== 'absent') result[key] = null;
+  }
+  for (const key of ['expected_output', 'code_roots']) {
     if (keys.includes(key)) result[key] = parseArrayKey(fm, key);
   }
   for (const key of ['roots_schema', 'primary_root_id']) result[key] = extractTopLevelValue(fm, key);
   return result;
 }
 
-module.exports = { hasStructuredMustHaves, parseMustHaves, parseMustHavesStructure, parseExecutionFields, resolveCapability, stripInlineComment };
+module.exports = { hasStructuredMustHaves, parseMustHaves, parseMustHavesStructure, parseExecutionFields, resolveCapability, stripInlineComment,
+  extractFrontmatter, decodeDeclarationList, validateTaskDeclarations };
 
 // ── CLI entrypoint ────────────────────────────────────────────────────────────
 

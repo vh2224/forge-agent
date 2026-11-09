@@ -75,6 +75,34 @@ for (const host of ['claude', 'codex']) {
   assert.strictEqual(seen[2].trusted.workerObservationReader, undefined, 'JSON input is not a trusted reader');
 }
 
+// Issue 343 U1: the additive batch commands are forwarded unchanged for both hosts; the
+// snapshot's current_batch is the only locator and the decision stays the owner's.
+for (const host of ['claude', 'codex']) {
+  const seen = [], batchId = `batch-${'3'.repeat(32)}`, digest = '4'.repeat(64);
+  const api = { run(operation, input, trusted) {
+    seen.push({ operation, input, trusted });
+    if (operation === 'next') return { outcome: 'completed', reason_code: 'batch-selected', unit: null, details: { dispatch_batch: { batch_id: batchId,
+      manifest_sha256: digest, members: [{ unit: { type: 'execute-task', id: 'T01', key: 'execute-task/T01' } }, { unit: { type: 'execute-task', id: 'T02', key: 'execute-task/T02' } }] } } };
+    if (operation === 'batch-status') return { outcome: 'completed', reason_code: 'batch-status-ready' };
+    return { outcome: 'blocked', reason_code: 'batch-members-pending' };
+  } };
+  const dispatched = adapter.invoke(host, 'auto', 'next', { workflow_id: `batch-${host}`, milestone: 'M1' }, null, { orchestrate: api });
+  assert.deepStrictEqual([dispatched.adapter_runtime, dispatched.result.action, dispatched.result.snapshot.current_batch.batch_id], [host, 'dispatch-batch', batchId]);
+  assert.strictEqual(adapter.invoke(host, 'auto', 'batch-status', { milestone: 'M1' }, dispatched.result.snapshot, { orchestrate: api }).result.reason_code, 'batch-status-ready');
+  const ack = adapter.invoke(host, 'auto', 'batch-ack', { milestone: 'M1', approved: true }, dispatched.result.snapshot, { orchestrate: api });
+  assert.deepStrictEqual([ack.result.outcome, ack.result.reason_code], ['blocked', 'batch-members-pending']);
+  assert.deepStrictEqual(seen.map(row => [row.operation, row.input.host_runtime]), [['next', host], ['batch-status', host], ['batch-ack', host]]);
+  assert.deepStrictEqual(seen[2].input.batch, { batch_id: batchId, manifest_sha256: digest });
+  assert.strictEqual(adapter.invoke(host, 'auto', 'complete', { milestone: 'M1', result: { status: 'done' } }, dispatched.result.snapshot, { orchestrate: api }).result.reason_code,
+    'batch-active');
+  assert.strictEqual(seen.length, 3, 'a single-unit command over an active batch is never delegated');
+}
+{
+  let usage = '';
+  assert.strictEqual(adapter.main(['--help'], value => { usage += value; }, () => {}), 0);
+  for (const command of ['batch-status', 'batch-ack', 'next', 'resume-time-option']) assert(usage.includes(command), command);
+}
+
 const source = require('fs').readFileSync(require('path').join(__dirname, 'forge-long-workflow-adapter.js'), 'utf8');
 {
   const fixtures = require('./forge-loop-failure.test'), f = fixtures.fixture();

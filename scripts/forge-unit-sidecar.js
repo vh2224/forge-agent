@@ -307,8 +307,36 @@ function preflightExecutionVerification(raw, options = {}) {
         !== require('./forge-code-roots').key(fs.realpathSync.native(planFile))) fail('execution-plan-path-mismatch');
   } else planFile = milestonePlanFile(request);
   const runtimeVerification = options.verification === undefined ? undefined : JSON.parse(JSON.stringify(options.verification));
+  // Issue 343 U3b: a cohort member's seal also binds the runtime view minted by its live handle.
   return require('./forge-verify').normalizeExecutionVerification(request.execution_contract,
-    fs.readFileSync(planFile, 'utf8'), request.verification, runtimeVerification, options.identity || {});
+    fs.readFileSync(planFile, 'utf8'), request.verification, runtimeVerification, options.identity || {},
+    options.memberView !== undefined ? { memberView: options.memberView } : undefined);
+}
+// Issue 343 U3b: the milestone execute preflight of a sidecar cohort member. The live member
+// operations (forge-execution-batch memberSidecar, never imported data) hold the runtime view its
+// handle validated: the canonical plan and gate bytes against the integration origin, mapped to
+// this member's own roots, under the held aggregate claim and the member's begin and lease. The
+// request must be exactly the bound attempt; the gates and the execution capability are the same
+// as on the single path.
+function validateMemberRequest(request, transport, options) {
+  const roots = require('./forge-code-roots'), member = options.member;
+  if (!require('./forge-execution-batch').isMemberSidecar(member) || !member.matches(request)) fail('execution-member-handle-required');
+  const view = member.view();
+  const contract = roots.validateContract(request.execution_contract, { owner: request.contextRoot, revalidate: true });
+  const planFile = milestonePlanFile(request);
+  const plan = fs.readFileSync(planFile, 'utf8');
+  if (roots.digest(contract) !== roots.digest(member.contract()) || view.runtime_contract_sha256 !== roots.digest(contract)
+      || view.canonical_plan_sha256 !== hash(plan)) fail('execution-member-view-stale');
+  const gateFile = planFile.replace(/-PLAN\.md$/, '-PLAN-GATE.md');
+  const gate = fs.existsSync(gateFile) ? fs.readFileSync(gateFile, 'utf8') : '';
+  if (!/^status:\s*approved\s*$/m.test(gate)) fail('execution-plan-gate-required');
+  if (gate.match(/^plan_sha256:\s*([a-f0-9]{64})\s*$/m)?.[1] !== hash(plan)) fail('execution-plan-gate-stale');
+  if (request.gates?.claim !== 'proceed' || !['passed', 'not-applicable'].includes(request.gates?.security)) fail('execution-gates-required');
+  if (request.gates.security === 'passed'
+      && (!request.securityFile || !fs.readFileSync(request.securityFile, 'utf8').trim())) fail('execution-security-required');
+  const effective = require('./forge-transport-capabilities').executionCapability(request.route, contract, options);
+  if (!effective.supported) fail(effective.reason_code);
+  return { ...transport, contract, planFile };
 }
 function validateRecoveryRequest(raw, options = {}) {
   const attempt = require('./forge-attempt-recovery');
@@ -353,6 +381,10 @@ function validateRecoveryRequest(raw, options = {}) {
       return { ...transport, contract: prepared.execution_contract, planFile: request.planFile };
     } else {
       const roots = require('./forge-code-roots');
+      // Issue 343 U3b: a cohort member consumes its live validated runtime view; a request naming
+      // a batch, an aggregate claim or a run under a batch never takes the single path without it.
+      if (options.member !== undefined) return validateMemberRequest(request, transport, options);
+      if (request.batch_id !== undefined || request.claim?.batch_roots) fail('execution-member-handle-required');
       const contract = request.execution_contract ? roots.validateContract(request.execution_contract, { owner: request.contextRoot, revalidate: true })
         : roots.singleContract(request.contextRoot, request.cwd);
       const planFile = milestonePlanFile(request);
@@ -365,6 +397,7 @@ function validateRecoveryRequest(raw, options = {}) {
         if (!held || held.active !== true || held.write_claim?.released
             || held.write_claim?.generation !== claim.generation
             || roots.digest(held.write_claim) !== roots.digest(claim)) fail('execution-claim-generation-stale');
+        if (held.batch_locator) fail('execution-member-handle-required');
         roots.claimGroups(claim);
         if (roots.digest(claim.execution_contract) !== roots.digest(contract)
             || checked.writes.some(p => !claim.paths.some(c => roots.covers(c, p)))) fail('execution-held-claim-mismatch');
@@ -422,9 +455,11 @@ function captureMilestoneBaseline(request, receipt, options = {}) {
   const state = require('./forge-surgical-reset').initState(stateFile, { cwd: request.cwd,
     attempt: request.dispatchId, executionContract: contract });
   const input = { path: checked.planFile, sha256: roots.digest(fs.readFileSync(checked.planFile)) };
+  // Issue 343 U3b: a cohort member's owner is protected by the cohort's common signed stream (the
+  // broker's S0 and every sibling's signed append), never by a private snapshot of a shared owner.
   return { schema_version: 1, state_file: stateFile, state_sha256: baselineDigest(state),
     execution_contract: contract, fingerprint: receipt.fingerprint, dispatch_id: receipt.dispatch_id, input,
-    protected_owner: execution.protectedSnapshot(contract.owner),
+    protected_owner: options.member !== undefined ? null : execution.protectedSnapshot(contract.owner),
     protected_roots: contract.code_roots.map(root => ({ root_id: root.id, path: root.path, snapshot: execution.protectedSnapshot(root.path) })) };
 }
 function reconcileMilestoneAttempt(request, receipt, runtime = {}) {
@@ -496,6 +531,44 @@ function reconcileLegacyReviewFix(request, receipt, executionContract) {
       || roots.digest(normalize(observed.pre_dirty)) !== roots.digest(normalize(state.pre_dirty))) fail('review-fix-recovery-baseline-changed');
   return { ok: true, roots: [{ root_id: root.id, reconciled: true }], pending_roots: [] };
 }
+// Issue 343 U5: executable modes are member execution evidence, captured with the verified
+// bytes before the immutable executed anchor. Windows has no executable-mode authority: null.
+// Ordinary single-unit receipts keep their historical shape and behavior.
+function captureMemberModes(request, verifiedFiles) {
+  const roots = require('./forge-code-roots');
+  if (!verifiedFiles || typeof verifiedFiles !== 'object' || Array.isArray(verifiedFiles)) fail('batch-member-mode-invalid');
+  roots.validateContract(request.execution_contract, { revalidate: true });
+  const entries = [];
+  for (const qualified of Object.keys(verifiedFiles).sort()) {
+    const expected = verifiedFiles[qualified], resolved = roots.resolvePath(request.execution_contract, qualified);
+    let before;
+    try { before = fs.lstatSync(resolved.absolute); }
+    catch (error) { if (error && error.code === 'ENOENT') before = null; else throw error; }
+    if (expected === null) {
+      if (before) fail('batch-member-mode-changed');
+      entries.push([qualified, null]);
+      continue;
+    }
+    if (typeof expected !== 'string' || !/^[a-f0-9]{64}$/.test(expected) || !before || !before.isFile() || before.isSymbolicLink()) fail('batch-member-mode-invalid');
+    const bytes = fs.readFileSync(resolved.absolute), after = fs.lstatSync(resolved.absolute);
+    if (!after.isFile() || after.isSymbolicLink() || ['dev', 'ino', 'size', 'mtimeMs', 'mode'].some(key => before[key] !== after[key])
+        || hash(bytes) !== expected) fail('batch-member-mode-changed');
+    entries.push([qualified, process.platform === 'win32' ? null : (Number(after.mode) & 0o100) !== 0]);
+  }
+  return Object.fromEntries(entries);
+}
+function assertMemberModes(request, record) {
+  const saved = record.milestone_delivery, files = saved && saved.verified_files, modes = saved && saved.verified_modes;
+  if (!files || typeof files !== 'object' || Array.isArray(files) || !modes || typeof modes !== 'object' || Array.isArray(modes)
+      || Object.keys(files).sort().join('\n') !== Object.keys(modes).sort().join('\n')) fail('batch-member-mode-required');
+  for (const qualified of Object.keys(files)) {
+    const mode = modes[qualified];
+    if (files[qualified] === null || process.platform === 'win32') {
+      if (mode !== null) fail('batch-member-mode-invalid');
+    } else if (typeof mode !== 'boolean') fail('batch-member-mode-invalid');
+  }
+  if (canonicalDigest(captureMemberModes(request, files)) !== canonicalDigest(modes)) fail('batch-member-mode-changed');
+}
 function assertMilestoneDeliveryReplay(request, record) {
   if (!record.milestone_delivery) return;
   const saved = record.milestone_delivery, api = require('./forge-task-execution');
@@ -556,7 +629,8 @@ function inspectArtifacts(value, allowed, required, maxPayloadBytes = Infinity, 
 function validateArtifacts(value, allowed, required, maxPayloadBytes, rules, options) {
   return inspectArtifacts(value, allowed, required, maxPayloadBytes, rules, options).ok;
 }
-function executeDeliveryArtifacts(request, loc, result, root, cwd, captured) {
+// options.memberView (issue 343 U3b): a cohort member's delivery consumes its minted runtime view.
+function executeDeliveryArtifacts(request, loc, result, root, cwd, captured, options = {}) {
   if (result.status !== 'done') return [];
   if (!loc.delivery || !request.planFile) fail('delivery-plan-required');
   const planFile = fs.realpathSync(request.planFile);
@@ -596,7 +670,8 @@ function executeDeliveryArtifacts(request, loc, result, root, cwd, captured) {
     });
   }
   const delivery = require('./forge-delivery');
-  const output = delivery.buildDelivery(input, { ownerRoot: root, codeDir: cwd, sourceEnvelopes: sources });
+  const output = delivery.buildDelivery(input, { ownerRoot: root, codeDir: cwd, sourceEnvelopes: sources,
+    ...(options && options.memberView !== undefined ? { memberView: options.memberView } : {}) });
   const deliveryReference = `./${path.posix.basename(loc.delivery.output)}`;
   // Canonical SUMMARY/replay bytes keep the historical table-only rendering.
   const deliverySection = delivery.renderDeliveryMarkdown(output, { detailReference: deliveryReference, summary: false });
@@ -624,17 +699,27 @@ function taskMarkerPath(request) {
   if (loc.execution || !loc.slice) fail('task-marker-scope-invalid');
   return `${loc.slice}/${request.sliceId}-PLAN.md`;
 }
-function createTaskMarker(request, root, preimageSha256) {
+// Issue 343 U5: `chain` (a cohort member only) lists, in manifest order, the sibling markers the
+// cohort's own committed member-artifacts operations already published on this slice plan
+// ({ before, after } from the broker's signed journal). They are the only admissible changes since
+// the member's recorded preimage; the marker is then rebased on the last one. Any other edit stays
+// the operator's and refuses exactly as before.
+function createTaskMarker(request, root, preimageSha256, chain) {
   const relative = taskMarkerPath(request);
   if (typeof preimageSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(preimageSha256)) fail('task-marker-preimage-required');
+  let expected = preimageSha256;
+  for (const link of chain || []) {
+    if (!link || link.before !== expected || typeof link.after !== 'string' || !/^[a-f0-9]{64}$/.test(link.after)) fail('task-marker-chain-invalid');
+    expected = link.after;
+  }
   const file = target(root, relative);
   const bytes = fs.existsSync(file) ? fs.readFileSync(file) : null;
   // Never recapture: an edit since the recorded preimage stays the operator's.
-  if (!bytes || hash(bytes) !== preimageSha256) fail('task-marker-preimage-changed', 'O plano da slice mudou desde a preimagem registrada; a marcação não foi aplicada.');
+  if (!bytes || hash(bytes) !== expected) fail('task-marker-preimage-changed', 'O plano da slice mudou desde a preimagem registrada; a marcação não foi aplicada.');
   const preimage = bytes.toString('utf8');
   if (!Buffer.from(preimage, 'utf8').equals(bytes)) fail('task-marker-preimage-invalid');
   const content = markChecked(preimage, request.taskId);
-  return content === preimage ? null : { path: relative, content, before: preimageSha256 };
+  return content === preimage ? null : { path: relative, content, before: expected };
 }
 function verifyTaskMarker(request, artifact, preimageSha256) {
   const invalid = () => fail('task-marker-invalid', 'O marcador não corresponde ao artefato canônico desta task.');
@@ -656,6 +741,251 @@ function verifyTaskMarker(request, artifact, preimageSha256) {
   if (!candidates.some(preimage => hash(preimage) === preimageSha256 && markChecked(preimage, request.taskId) === artifact.content)) invalid();
   return true;
 }
+// ── Strict new-plan generation (issue 343 U0c) ────────────────────────────────
+// A new milestone plan-slice attempt records the owner's plan_generation requirement
+// (the marker) in its started receipt: the current requirement bound to this attempt
+// (request fingerprint, dispatch, workflow), its trusted scope (physical owner key,
+// milestone, slice) and, when the in-process owner supplies one, the committed
+// controller begin enrollment. The returned candidate is admitted again here,
+// independently of the transport, and its exact bytes become the receipt's
+// plan_validation evidence before the ready record exists. Publication rechecks
+// marker, evidence and candidate bytes under the owner lock before any artifact byte;
+// replay uses only the saved content. Neither record is ever taken from a worker. A
+// ready receipt with neither is pre-requirement only when the controller's canonical
+// classification shows no enrolled lineage for the slice (U0d; see
+// assertPlanGenerationPublication for the explicit limit): it then replays with its
+// historical semantics and is never rewritten. A standalone brainstorm also carries
+// unitType plan-slice, but it is an artifacts contract and stays outside this block.
+// U0d: the marker's begin is the slice's open enrolled controller lineage whenever one
+// exists, and the execute recheck shares the native first execute's classification.
+const PLAN_GENERATION_KIND = 'sidecar-plan-generation';
+const PLAN_VALIDATION_KIND = 'sidecar-plan-validation';
+const PLAN_OWNER_FIELDS = Object.freeze(['plan_generation', 'plan_validation']);
+const PLAN_MARKER_KEYS = Object.freeze(['schema_version', 'kind', 'requirement', 'requirement_sha256', 'fingerprint',
+  'dispatch_id', 'workflow_id', 'owner', 'milestone', 'slice', 'begin', 'marker_sha256']);
+const PLAN_BEGIN_KEYS = Object.freeze(['generation_key', 'begin_key', 'lease_generation']);
+const PLAN_EVIDENCE_KEYS = Object.freeze(['schema_version', 'kind', 'requirement', 'requirement_sha256', 'marker_sha256',
+  'fingerprint', 'dispatch_id', 'workflow_id', 'owner', 'milestone', 'slice', 'source', 'task_ids', 'graph_sha256',
+  'semantic_sha256', 'validation_sha256']);
+// Read-only pre-spawn refusals of a milestone execute-task (provider_called false).
+const PLAN_GENERATION_STAGE = 'plan-generation-admission';
+function planApi() { return require('./forge-plan-validation'); }
+function milestonePlanSlice(request) { return request.unitType === 'plan-slice' && request.scope !== 'standalone-task'; }
+function canonicalJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalJson(value[key])]));
+}
+function canonicalDigest(value) { return hash(JSON.stringify(canonicalJson(value))); }
+function exactFields(value, keys) {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).sort().join('\n') === [...keys].sort().join('\n');
+}
+// Closed validation diagnostic; the named code and detail never carry provider prose.
+function planRefusal(code, detail, extra = {}) {
+  throw Object.assign(new Error(`${code}: ${detail}`), { code, detail, diagnostic: { reason: 'validator-failed' } }, extra);
+}
+function planGenerationRefusal(error) { return error?.stage === PLAN_GENERATION_STAGE && error.provider_called === false; }
+function planOwner(root) { return fs.realpathSync.native(root); }
+function planScope(request, root) { return { owner: planOwner(root), milestone: request.milestoneId, slice: request.sliceId }; }
+// Issue 343 U0d: the slice's canonical controller classification (forge-plan-validation
+// classifySliceGeneration, shared with the native first execute). Outside the enrollment
+// segment grammar no enrolled begin can exist, so such a scope is unenrolled.
+function planSliceClassification(request, root) {
+  const api = planApi(), owner = planOwner(root);
+  if (!api.isScopeSegment(request.milestoneId) || !api.isScopeSegment(request.sliceId)) return { status: 'unenrolled' };
+  return api.classifySliceGeneration(owner, { owner, milestone: request.milestoneId, slice: request.sliceId });
+}
+// The committed controller begin this plan-slice attempt belongs to: the slice's OPEN
+// enrolled lineage (issue 343 U0d), reused whenever it exists, whether or not the
+// in-process owner also supplies its plan_generation; a supplied enrollment must be
+// exactly what that open begin carries. Without an enrolled lineage the attempt is an
+// unlinked producer and its marker says begin:null; that null proves no origin by itself.
+function planGenerationBegin(request, runtime, root) {
+  const api = planApi(), owner = planOwner(root), invalid = detail => planRefusal('plan-generation-begin-invalid', detail);
+  const supplied = runtime.planGeneration !== undefined;
+  let classified, enrolled, begin;
+  try { classified = planSliceClassification(request, root); }
+  catch (error) { invalid(`the slice enrollment is not classifiable (${error?.code || 'error'})`); }
+  if (supplied) {
+    try { enrolled = api.verifyPlanGeneration(runtime.planGeneration, { owner, milestone: request.milestoneId, slice: request.sliceId }); }
+    catch (error) { invalid(`the enrollment does not verify (${error?.code || 'error'})`); }
+  } else if (classified.status !== 'open') return null;
+  const beginKey = supplied ? enrolled.begin_key : classified.begin_key;
+  try { begin = require('./forge-unit-controller').lookupRecord(owner, 'transaction', beginKey); }
+  catch (error) { invalid(`the begin transaction is unreadable (${error?.code || 'error'})`); }
+  const carried = begin && begin[api.TRANSACTION_FIELDS.generation];
+  if (!supplied && carried) {
+    try { enrolled = api.verifyPlanGeneration(carried, { owner, milestone: request.milestoneId, slice: request.sliceId }); }
+    catch (error) { invalid(`the open enrollment does not verify (${error?.code || 'error'})`); }
+  }
+  if (!begin || !enrolled || begin.phase !== 'committed' || begin.action !== 'begin' || begin.milestone !== request.milestoneId
+      || begin.unit?.key !== `plan-slice/${request.sliceId}` || begin.idempotency_key !== enrolled.begin_key
+      || begin.lease_generation !== enrolled.lease_generation || begin.owner_digest !== enrolled.owner_digest
+      || !carried || canonicalDigest(carried) !== canonicalDigest(enrolled)) {
+    invalid('the enrollment is not the committed plan-slice begin of this slice');
+  }
+  if (classified.status !== 'open' || classified.begin_key !== enrolled.begin_key) {
+    invalid('the enrollment is not the open plan-slice lineage of this slice');
+  }
+  return { generation_key: enrolled.generation_key, begin_key: enrolled.begin_key, lease_generation: enrolled.lease_generation };
+}
+// A non-null marker begin must still name the committed enrolled begin of this slice.
+function verifyMarkerBegin(marker, request, root) {
+  const api = planApi(), owner = planOwner(root), invalid = detail => planRefusal('plan-generation-marker-invalid', detail);
+  let begin;
+  try { begin = require('./forge-unit-controller').lookupRecord(owner, 'transaction', marker.begin.begin_key); }
+  catch (error) { invalid(`the bound begin is unreadable (${error?.code || 'error'})`); }
+  const carried = begin && begin[api.TRANSACTION_FIELDS.generation];
+  if (!begin || begin.phase !== 'committed' || begin.action !== 'begin' || begin.milestone !== request.milestoneId
+      || begin.unit?.key !== `plan-slice/${request.sliceId}` || begin.lease_generation !== marker.begin.lease_generation
+      || !carried || carried.generation_key !== marker.begin.generation_key || carried.begin_key !== marker.begin.begin_key) {
+    invalid('the marker names no committed enrolled begin of this slice');
+  }
+}
+function buildPlanGenerationMarker(request, { fingerprint, dispatchId, root, begin }) {
+  const api = planApi();
+  const marker = { schema_version: 1, kind: PLAN_GENERATION_KIND, requirement: api.REQUIREMENT,
+    requirement_sha256: api.REQUIREMENT_SHA256, fingerprint, dispatch_id: dispatchId, workflow_id: request.workflowId,
+    owner: require('./forge-code-roots').key(planOwner(root)), milestone: request.milestoneId, slice: request.sliceId, begin };
+  marker.marker_sha256 = canonicalDigest(marker);
+  return marker;
+}
+// The marker of this exact attempt: its fields, current requirement and own digest,
+// the request fingerprint and dispatch the record also names, workflow and scope.
+function verifyPlanGenerationMarker(marker, request, record, root) {
+  const api = planApi(), invalid = detail => planRefusal('plan-generation-marker-invalid', detail);
+  if (!exactFields(marker, PLAN_MARKER_KEYS)) invalid('the marker fields are not the closed set');
+  const { marker_sha256: digest, ...body } = marker;
+  if (marker.schema_version !== 1 || marker.kind !== PLAN_GENERATION_KIND) invalid('unknown marker schema');
+  if (marker.requirement !== api.REQUIREMENT || marker.requirement_sha256 !== api.REQUIREMENT_SHA256) invalid('not the current requirement');
+  if (digest !== canonicalDigest(body)) invalid('marker_sha256 does not bind the marker');
+  if (marker.begin !== null && (!exactFields(marker.begin, PLAN_BEGIN_KEYS)
+      || PLAN_BEGIN_KEYS.some(key => typeof marker.begin[key] !== 'string' || !marker.begin[key]))) invalid('begin is not a committed enrollment');
+  if (marker.fingerprint !== artifactFingerprint(request) || marker.fingerprint !== record.fingerprint) invalid('another request');
+  if (marker.dispatch_id !== request.dispatchId || marker.dispatch_id !== record.dispatch_id) invalid('another dispatch');
+  if (marker.workflow_id !== request.workflowId) invalid('another workflow');
+  if (marker.owner !== require('./forge-code-roots').key(planOwner(root)) || marker.milestone !== request.milestoneId
+      || marker.slice !== request.sliceId) invalid('another owner or slice');
+  return marker;
+}
+function buildPlanValidationEvidence(marker, admission) {
+  const api = planApi();
+  const evidence = { schema_version: 1, kind: PLAN_VALIDATION_KIND, requirement: api.REQUIREMENT,
+    requirement_sha256: api.REQUIREMENT_SHA256, marker_sha256: marker.marker_sha256, fingerprint: marker.fingerprint,
+    dispatch_id: marker.dispatch_id, workflow_id: marker.workflow_id, owner: marker.owner, milestone: marker.milestone,
+    slice: marker.slice, source: JSON.parse(JSON.stringify(admission.source)), task_ids: [...admission.task_ids],
+    graph_sha256: admission.graph_sha256, semantic_sha256: admission.semantic_sha256 };
+  evidence.validation_sha256 = canonicalDigest(evidence);
+  return evidence;
+}
+function verifyPlanValidationEvidence(evidence, marker) {
+  const invalid = detail => planRefusal('plan-validation-invalid', detail);
+  if (!exactFields(evidence, PLAN_EVIDENCE_KEYS)) invalid('the evidence fields are not the closed set');
+  const { validation_sha256: digest, ...body } = evidence;
+  if (evidence.schema_version !== 1 || evidence.kind !== PLAN_VALIDATION_KIND) invalid('unknown evidence schema');
+  if (digest !== canonicalDigest(body)) invalid('validation_sha256 does not bind the evidence');
+  for (const key of ['requirement', 'requirement_sha256', 'marker_sha256', 'fingerprint', 'dispatch_id', 'workflow_id', 'owner', 'milestone', 'slice']) {
+    if (evidence[key] !== marker[key]) invalid(`${key} does not follow the marker`);
+  }
+  const source = evidence.source;
+  if (!exactFields(source, ['slice_plan', 'task_plans']) || !source.slice_plan || !Array.isArray(source.task_plans)
+      || !Array.isArray(evidence.task_ids) || source.task_plans.length !== evidence.task_ids.length) invalid('source does not follow task_ids');
+  return evidence;
+}
+// The shared strict admission of returned bytes under the trusted scope.
+function admitReturnedPlan(request, root, slicePlan, taskPlans, extra = {}) {
+  try {
+    return planApi().validateNewSlicePlan({ slice_plan: { content: slicePlan },
+      task_plans: taskPlans.map(plan => ({ id: plan.id, content: plan.content })) }, planScope(request, root));
+  } catch (error) {
+    if (error && typeof error === 'object') Object.assign(error, { diagnostic: { reason: 'validator-failed' }, stage: 'plan-admission' }, extra);
+    throw error;
+  }
+}
+// Publication check of a ready record, under the owner lock and before any artifact
+// byte. null: not a plan-slice generation record, or one with no independent new origin.
+//
+// Issue 343 U0d — provenance of a ready record WITHOUT either owner record. Its own shape,
+// a begin:null, its timestamps or an imported flag prove neither age nor newness; only the
+// controller's canonical classification of the slice is independent. With an enrolled
+// lineage (open, ended or completed) the slice's plans belong to the new requirement, so
+// the record is a known-new receipt with both owner records stripped (or a stale one
+// replayed over an enrolled slice) and refuses. EXPLICIT LIMIT: when the slice has no
+// enrolled lineage (a genuine pre-requirement slice, or an unlinked producer that ran
+// without any controller begin), nothing canonical distinguishes a historical receipt
+// from a stripped new one; it replays with its historical semantics, unrewritten. This
+// seam does not promise universal detection and never revalidates or backfills history.
+function assertPlanGenerationPublication(request, record, root) {
+  const present = PLAN_OWNER_FIELDS.filter(key => Object.hasOwn(record, key));
+  if (!milestonePlanSlice(request)) {
+    if (present.length) planRefusal('plan-generation-marker-invalid', 'only a milestone plan-slice record carries plan generation records');
+    return null;
+  }
+  if (!present.length) {
+    let anchor;
+    try { anchor = planSliceClassification(request, root).status; }
+    catch (error) {
+      planRefusal(typeof error?.code === 'string' ? error.code : 'plan-generation-evidence-invalid',
+        typeof error?.detail === 'string' ? error.detail : 'the slice enrollment is not classifiable');
+    }
+    if (anchor !== 'unenrolled') {
+      planRefusal('plan-generation-marker-missing', `the slice has an enrolled controller generation (${anchor}); a record without its owner records is not historical`);
+    }
+    return null;
+  }
+  if (!Object.hasOwn(record, 'plan_generation')) planRefusal('plan-generation-marker-missing', 'plan_validation without its plan_generation marker');
+  if (!Object.hasOwn(record, 'plan_validation')) planRefusal('plan-validation-missing', 'a plan_generation marker without plan_validation evidence');
+  const marker = verifyPlanGenerationMarker(record.plan_generation, request, record, root);
+  if (marker.begin !== null) verifyMarkerBegin(marker, request, root);
+  const evidence = verifyPlanValidationEvidence(record.plan_validation, marker);
+  // The candidate is exactly the admitted source set, byte for byte, at its canonical paths.
+  const sources = [evidence.source.slice_plan, ...evidence.source.task_plans];
+  const artifacts = Array.isArray(record.artifacts) ? record.artifacts : [];
+  const byPath = new Map(artifacts.map(item => [item && item.path, item]));
+  if (byPath.size !== artifacts.length || artifacts.length !== sources.length) {
+    planRefusal('plan-validation-source-mismatch', 'the artifacts are not exactly the admitted plan set');
+  }
+  for (const entry of sources) {
+    const item = entry && byPath.get(entry.path);
+    if (!item || typeof item.content !== 'string' || hash(item.content) !== entry.sha256
+        || Buffer.byteLength(item.content, 'utf8') !== entry.bytes) {
+      planRefusal('plan-validation-source-mismatch', 'an artifact is not the admitted byte content');
+    }
+  }
+  // Independent re-admission of exactly those bytes: digests alone never authorize.
+  const admission = admitReturnedPlan(request, root, byPath.get(evidence.source.slice_plan.path).content,
+    evidence.source.task_plans.map(entry => ({ id: entry.id, content: byPath.get(entry.path).content })));
+  if (admission.semantic_sha256 !== evidence.semantic_sha256 || admission.graph_sha256 !== evidence.graph_sha256
+      || canonicalDigest(admission.source) !== canonicalDigest(evidence.source)
+      || canonicalDigest(admission.task_ids) !== canonicalDigest(evidence.task_ids)) {
+    planRefusal('plan-validation-invalid', 'the admitted content does not reproduce its evidence');
+  }
+  return admission;
+}
+// Read-only recheck of an enrolled plan-slice generation immediately before a milestone
+// execute-task spawns, beside the live last-spawn admission, through the SAME canonical
+// classification as the native first execute (forge-plan-validation assertSliceGeneration,
+// issue 343 U0d): an enrolled lineage whose completion is missing, pending, corrupt,
+// foreign or ambiguous refuses, and a completed one must be current. Only a slice with no
+// enrolled lineage keeps its historical behavior; nothing returns null as permission.
+// Reads only: no record is written inside the protected window.
+function assertExecutionPlanGeneration(request, root) {
+  if (request.unitType !== 'execute-task' || request.scope === 'standalone-task' || !request.milestoneId) return null;
+  const api = planApi(), owner = planOwner(root);
+  const refuse = (code, detail, cause) => {
+    throw Object.assign(new Error(`${code}: ${detail}`), { code, detail, cause_code: cause || null,
+      provider_called: false, stage: PLAN_GENERATION_STAGE, layer: PLAN_GENERATION_STAGE });
+  };
+  // Outside the enrollment segment grammar no enrolled begin can exist for the milestone.
+  if (!api.isScopeSegment(request.milestoneId)) return { status: 'unenrolled', milestone: request.milestoneId, slice: null };
+  const slice = api.isScopeSegment(request.sliceId) ? request.sliceId : null;
+  try { return api.assertSliceGeneration(owner, { owner, milestone: request.milestoneId, slice }); }
+  catch (error) {
+    return refuse(typeof error?.code === 'string' ? error.code : 'plan-generation-evidence-invalid',
+      typeof error?.detail === 'string' ? error.detail : 'the enrolled generation is not current', error?.cause_code);
+  }
+}
 function materialize(request, record, publicationGuard, publicationLock, options = {}) {
   assertVerificationSuccessorPublication(request, record, options);
   if (record.kind === 'memory-extraction') fail('memory-publication-required', 'Use publishReadyRecord for memory extraction receipts.');
@@ -663,12 +993,20 @@ function materialize(request, record, publicationGuard, publicationLock, options
   const root = fs.realpathSync(request.contextRoot || request.cwd);
   return require('./forge-artifact-reconciliation').withOwnerLock(root, () => {
   publicationGuard?.();
+  // Issue 343 U0c: a new plan-slice generation publishes only its admitted bytes.
+  assertPlanGenerationPublication(request, record, root);
   assertMilestoneDeliveryReplay(request, record);
   if (record.execution || record.milestone_delivery) {
     if (record.execution) require('./forge-task-execution').assertReplay(request, record);
     if (request.ownerBroker) require('./forge-artifact-reconciliation').assertBroker(request.ownerBroker)
       .verify({ canonicalArtifacts: record.artifacts });
-    else {
+    // Issue 343 U5: a cohort member publishes inside its typed member-artifacts operation; the owner
+    // surface is the post-barrier broker's (S0, signed lines, committed operations, this intent).
+    else if (options.memberPublication !== undefined) {
+      if (!require('./forge-execution-batch').isMemberSidecar(options.memberPublication)) fail('execution-member-handle-required');
+      options.memberPublication.assertOwnerSurface();
+      assertMemberModes(request, record);
+    } else {
       const protectedOwner = (record.execution || record.milestone_delivery).protected_owner;
       if (!protectedOwner) fail('execution-owner-baseline-required');
       let expected = { ...protectedOwner };
@@ -867,6 +1205,9 @@ async function acceptArtifactResultCore(request, rawResult, metadata = {}, publi
   }
   if (existing.phase === 'failed') fail(existing.failure?.reason_code || 'artifact-attempt-failed');
   if (existing.phase !== 'started') fail('sidecar-attempt-interrupted');
+  // Issue 343 U0c: a milestone plan-slice record exists only through its plan transport
+  // (strict admission, marker and evidence); this artifacts acceptance never creates one.
+  if (milestonePlanSlice(request)) fail('plan-generation-transport-required', 'Milestone slice plans publish only through the plan transport.');
   if (metadata.providerCalled !== true) fail('artifact-provider-call-unconfirmed');
   xllm.assertUntrustedOutputBarrier(rawResult);
   if (/(?:token|secret|password|credential)\s*[:=]\s*[^\s"}]+/i.test(JSON.stringify(rawResult))) fail('secret-output');
@@ -940,6 +1281,8 @@ async function acceptArtifactResultCore(request, rawResult, metadata = {}, publi
   return { result, record, replayed: false, provider_called: true };
 }
 async function reconcileArtifactAttempt(request, options) {
+  // Issue 343 U0c: never a second publisher of milestone slice plans (see acceptArtifactResultCore).
+  if (milestonePlanSlice(request)) fail('plan-generation-transport-required', 'Milestone slice plans publish only through the plan transport.');
   const files = artifactAttemptFiles(request), loc = locations(request);
   return require('./forge-artifact-reconciliation').reconcile({ ...options, receiptFile: files.receiptFile,
     async publish(child, publicationGuard) {
@@ -1270,7 +1613,9 @@ async function publishReadyRecord(request, record, publicationGuard, publication
     ...result.transport_telemetry,
     observation: require('./forge-sidecar-calibration').observation(record.telemetry.observation),
   } };
-  if (record.calibration_proposal && result.status === 'done'
+  // Issue 343 U5: a cohort member's calibration is no effect of its typed member-artifacts
+  // operation; it stays in the member's receipt (never an unproved owner write).
+  if (record.calibration_proposal && result.status === 'done' && options.memberPublication === undefined
       && !['deferred', 'quarantined', 'conflict'].includes(result.publication?.status)) {
     const outcome = await require('./forge-sidecar-calibration').commitAccepted(record.calibration_proposal, {
       fingerprint: record.fingerprint, receipt: options.receiptFile || artifactAttemptFiles(request).receiptFile,
@@ -1835,7 +2180,269 @@ function admissionRefusal(error) {
     || error?.stage === 'linked-task-admission' && error.layer === 'milestone-time-admission' && error.provider_called === false;
 }
 
-async function runUnitSidecarCore(request, runtime, identity) {
+// ── Retained cohort member execution (issue 343 U3b, B3 part 2) ──────────────
+//
+// A sidecar cohort member (its opaque handle travels beside the request, never inside it) runs
+// through the same core with an explicit member branch: its owner events are signed lines of the
+// cohort stream, its owner surface is the broker's common verification, its plan is the runtime
+// view its handle validated, and a finished member stops at the retained executed record plus seal
+// (forge-execution-batch memberSidecar retain). It produces no .gsd artifact, task marker,
+// controller completion, owner event or done result while its siblings run; the heavy verification
+// (verifyRetainedExecution) exists only after the cohort barrier and publication belongs to the
+// serial post-barrier publisher. returned.json stays custody, never replay authority.
+
+// The live member operations of a request (forge-execution-batch), resolved from its handle.
+function memberExecution(handle, request) {
+  return require('./forge-execution-batch').memberSidecar(handle, request);
+}
+// A member's execution always carries a real seal bound to its runtime view: the historical
+// tolerance of an absent seal never applies to it, and a single seal never verifies a member.
+function verifyMemberSeal(request, record, identity, runtimeVerification, view) {
+  if (!record || !record.verification_seal) fail('verification-provenance-insufficient');
+  if (record.verification_successor) fail('verification-successor-capability-required');
+  const verificationApi = require('./forge-verify'), plan = fs.readFileSync(request.planFile, 'utf8');
+  verificationApi.assertExecutionVerification(record.verification_seal, request.execution_contract, plan, identity, { memberView: view });
+  if (runtimeVerification !== undefined) {
+    const supplied = verificationApi.normalizeExecutionVerification(request.execution_contract, plan, request.verification,
+      runtimeVerification, identity, { memberView: view });
+    if (supplied.sha256 !== record.verification_seal.sha256) fail('verification-policy-changed');
+  }
+  if (record.delivery_capture && record.delivery_capture.verification_policy_sha256 !== record.verification_seal.sha256) fail('verification-capture-binding');
+}
+// The executed record a later receipt derives from: only the core's own fields (delivery_capture,
+// then phase ready and its artifacts) may differ from the anchored executed bytes.
+function executedBase(record) {
+  const { phase, delivery_capture: capture, artifacts, ...base } = record;
+  return base;
+}
+function sameExecutedBase(candidate, executed) {
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate) || !executed || executed.phase !== 'executed'
+      || !['executed', 'ready'].includes(candidate.phase) || (candidate.phase === 'executed' && candidate.artifacts !== undefined)) return false;
+  return canonicalDigest(executedBase(candidate)) === canonicalDigest(executedBase(executed));
+}
+
+// The validated core of a writing unit's completion, with an explicit context: the request, its
+// locations and physical roots, the receipt channel, the verification identity and seal check
+// (with the runtime policy), the delivery renderer, the member's live view (null on the single
+// path) and the event emitters. Callers: finishExecute and the executed replay of
+// runUnitSidecarCore (the single context, its exact previous behavior) and verifyRetainedExecution
+// (a cohort member after the barrier, owner events deferred). It never publishes.
+async function completeExecutionCore(context, record, deferredEvents = null) {
+  const r = context.request, loc = context.loc, root = context.root, cwd = context.cwd, member = context.member || null;
+  const persist = context.persist === undefined ? !deferredEvents : context.persist === true;
+  context.verifySeal(record);
+  if (record.execution) require('./forge-task-execution').assertReplay(r, record);
+  else if (record.milestone_delivery) {
+    const api = require('./forge-task-execution');
+    const saved = record.milestone_delivery;
+    assertMilestoneDeliveryReplay(r, record);
+    // A cohort member's owner surface is the cohort's common signed stream, after the barrier.
+    if (member) {
+      assertMemberModes(r, record);
+      await member.verifyOwner('sealed');
+    }
+    else api.assertProtected(root, context.verificationSuccessor
+      ? context.verificationSuccessor.expectedOwner(record, saved.protected_owner) : saved.protected_owner);
+  }
+  if (r.execution_contract && (!record.delivery_capture || !record.delivery_capture.passed)) {
+    const resourceEvents = [];
+    context.notifyPhase('verifying');
+    const deliveryCapture = require('./forge-verify').captureRootDelivery(r.execution_contract,
+      fs.readFileSync(r.planFile, 'utf8'), { ...r.verification, verificationSeal: record.verification_seal,
+        verificationIdentity: context.verificationIdentity, unit: loc.rules[loc.delivery.input].unit,
+        resourceEventSink: line => resourceEvents.push(line),
+        ...(typeof context.onVerificationCheck === 'function' ? { onCheck: context.onVerificationCheck } : {}),
+        ...(member ? { memberView: member.view() } : {}) });
+    record = { ...record, delivery_capture: deliveryCapture };
+    // Retain stdout, cleanup and the actual failing check before throwing.
+    // A failed capture never satisfies replay: the gate runs again above.
+    if (persist) json(context.receiptFile, record);
+    if (deferredEvents) deferredEvents.push(...resourceEvents);
+    else await context.appendOwnedEvents(resourceEvents, record);
+    if (!deliveryCapture.passed) fail('execution-verification-failed');
+    if (record.execution) require('./forge-task-execution').assertReplay(r, record);
+    if (persist) json(context.receiptFile, record);
+  }
+  if (member && record.milestone_delivery) assertMemberModes(r, record);
+  const artifacts = executeDeliveryArtifacts(r, loc, record.result, root, cwd, record.delivery_capture,
+    member ? { memberView: member.view() } : undefined);
+  const ready = { ...record, phase: 'ready', artifacts: artifacts.map(a => ({ ...a, before: record.before[a.path] ?? null })) };
+  // Milestone v2 only: the owner marker enters the durable record after the
+  // validated delivery artifacts and last, so a checked task implies delivery.
+  if (r.execution_contract && record.milestone_delivery && !record.execution && record.result?.status === 'done') {
+    const marker = createTaskMarker(r, root, record.before?.[taskMarkerPath(r)], member ? context.markerChain : undefined);
+    if (marker) ready.artifacts.push(marker);
+  }
+  if (persist) json(context.receiptFile, ready);
+  if (context.verificationSuccessor) verificationSuccessorReady.set(ready, {
+    cap: context.successorCapability, record: require('./forge-code-roots').digest(ready),
+    request: require('./forge-code-roots').digest(r),
+  });
+  return ready;
+}
+
+// A ready cache is not authority to cross the cohort barrier. Reproduce it from
+// the anchored executed base through the canonical core, without persistence,
+// capture or publication; a changed workspace/artifact cache is refused.
+async function assertRetainedReady(context, record, retained) {
+  if (retained.phase !== 'sealed') fail('batch-member-barrier-open');
+  if (record.delivery_capture?.passed !== true || !Array.isArray(record.artifacts)) fail('batch-member-retained-invalid');
+  const ready = await completeExecutionCore({ ...context, persist: false }, record, []);
+  if (canonicalDigest(ready) !== canonicalDigest(record)) fail('batch-member-retained-changed');
+}
+
+/**
+ * Issue 343 U3b: the post-barrier verification of one retained sidecar cohort member (the serial
+ * coordinator calls it, one member at a time). The request is the member's exact bound attempt
+ * with its live `memberHandle` beside the data. It requires the sealed barrier and the anchored
+ * retained execution, revalidates the original executed record, seal and preconditions with the
+ * member's current runtime view, and then runs the real completion core: the captured delivery,
+ * artifacts and task marker of a verified ready record, written only to the attempt's own receipt
+ * channel. It publishes nothing, appends no owner event (its resource events are returned), calls
+ * no provider, and a failing capture never becomes ready.
+ *
+ * @returns {Promise<{ status: 'retained', stage: 'ready', ready_sha256, deferred_events, ... }>}
+ */
+async function verifyRetainedExecution(request, runtime = {}) {
+  if (!request || typeof request !== 'object' || !Object.prototype.hasOwnProperty.call(request, 'memberHandle')) fail('execution-member-handle-required');
+  const { memberHandle, ...r } = request;
+  const member = memberExecution(memberHandle, r);
+  const route = r.route || {};
+  const transport = capability(route.resolved_worker_engine, r.unitType, r.scope === 'milestone' ? {} : r);
+  if (!transport.supported || transport.mode !== 'execute' || r.scope !== 'milestone' || !r.execution_contract
+      || runtime.verificationSuccessor !== undefined) fail('batch-member-operation-unsupported');
+  if (!r.dispatchId || !r.workflowId) fail('dispatch-identity-required');
+  const cwd = fs.realpathSync(r.cwd), root = fs.realpathSync(r.contextRoot || cwd);
+  const resultFile = xllm.validateResultFileTarget(r.resultFile, cwd);
+  xllm.validateResultFileTarget(resultFile, root);
+  artifactAttemptFiles(r);
+  member.assertChannels(resultFile);
+  const receiptFile = `${resultFile}.receipt.json`;
+  const loc = locations(r);
+  const dispatchId = xllm.normalizeDispatchId(r.dispatchId, 'unit');
+  const fingerprint = artifactFingerprint(r);
+  const verificationIdentity = { dispatch_id: dispatchId, fingerprint, recovery_identity_sha256: recoveryIdentity(r) };
+  // The heavy capture exists only after the barrier, and only for an anchored retained execution:
+  // a saved returned response alone (custody) is never the record verified here.
+  if (!member.barrierSealed()) fail('batch-member-barrier-open');
+  const retained = await member.retained();
+  if (!retained) fail('batch-member-retained-required');
+  if (retained.phase !== 'sealed') fail('batch-member-barrier-open');
+  const executed = retained.executed_record;
+  if (executed.phase !== 'executed' || executed.fingerprint !== fingerprint || executed.dispatch_id !== dispatchId
+      || !executed.milestone_delivery || executed.result?.status !== 'done') fail('batch-member-retained-invalid');
+  if (!fs.existsSync(receiptFile)) fail('batch-member-retained-invalid');
+  const current = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+  if (!sameExecutedBase(current, executed)) fail('batch-member-retained-changed');
+  const verifySeal = record => verifyMemberSeal(r, record, verificationIdentity, runtime.verification, member.view());
+  const deferredEvents = [];
+  // Issue 343 U5: the sibling markers the cohort's committed operations already published (signed journal).
+  const markerChain = member.markerChain(taskMarkerPath(r));
+  if (current.phase === 'ready') await assertRetainedReady({ request: r, loc, root, cwd, receiptFile, verificationIdentity,
+    verificationSuccessor: null, member, markerChain, verifySeal, notifyPhase: () => {}, appendOwnedEvents: () => fail('batch-member-owner-event-deferred') }, current, retained);
+  else {
+    const notify = phase => {
+      if (typeof runtime.onPhase !== 'function') return;
+      try {
+        runtime.onPhase(Object.freeze({ schema_version: 1, phase, dispatch_id: dispatchId, unit: unitLabel(r, loc), worker_mode: 'sidecar',
+          at: new Date().toISOString() }));
+      } catch { /* observer errors never affect the unit */ }
+    };
+    await completeExecutionCore({ request: r, loc, root, cwd, receiptFile, verificationIdentity, verificationSuccessor: null,
+      member, markerChain, persist: true, verifySeal, notifyPhase: notify,
+      appendOwnedEvents: () => fail('batch-member-owner-event-deferred'), onVerificationCheck: runtime.onVerificationCheck },
+    current, deferredEvents);
+  }
+  // Verification wrote nothing into the owner: the cohort stream still proves its whole surface.
+  await member.verifyOwner('sealed');
+  const receiptBytes = fs.readFileSync(receiptFile), ready = JSON.parse(receiptBytes.toString('utf8'));
+  if (ready.phase !== 'ready' || !sameExecutedBase(ready, executed) || ready.delivery_capture?.passed !== true) fail('batch-member-retained-changed');
+  const result = { status: 'retained', stage: 'ready', dispatch_id: dispatchId, batch_id: retained.batch_id, member_ref: retained.member_ref,
+    task_id: retained.task_id, retained_ref: { path: retained.ref_path, sha256: retained.ref_sha256 }, anchor_sha256: retained.anchor.sha256,
+    ready_sha256: hash(receiptBytes), provider_called: false };
+  json(resultFile, result);
+  return { ...result, deferred_events: deferredEvents };
+}
+
+// ── Serial publication of a verified cohort member (issue 343 U5, B5) ─────────
+//
+// The post-barrier coordinator (forge-execution-batch consolidateCohort) publishes one member at a
+// time through the canonical publisher. retainedPublication validates the verified ready record again
+// from the anchored executed record through the real completion core (no capture repeated, nothing
+// written) and returns its exact effects (artifact path, preimage, post-image digest; the task marker
+// last) for the member's typed member-artifacts intent. publishRetainedMember runs publishReadyRecord /
+// materialize only while that signed intent is in flight for exactly this member and ready record;
+// the publisher's owner guard is the cohort broker's whole-surface verification. No provider call, no
+// owner event, no controller completion here.
+function retainedRequest(request, runtime) {
+  if (!request || typeof request !== 'object' || !Object.prototype.hasOwnProperty.call(request, 'memberHandle')) fail('execution-member-handle-required');
+  const { memberHandle, ...r } = request;
+  const member = memberExecution(memberHandle, r);
+  const route = r.route || {};
+  const transport = capability(route.resolved_worker_engine, r.unitType, r.scope === 'milestone' ? {} : r);
+  if (!transport.supported || transport.mode !== 'execute' || r.scope !== 'milestone' || !r.execution_contract
+      || runtime.verificationSuccessor !== undefined) fail('batch-member-operation-unsupported');
+  if (!r.dispatchId || !r.workflowId) fail('dispatch-identity-required');
+  const cwd = fs.realpathSync(r.cwd), root = fs.realpathSync(r.contextRoot || cwd);
+  const resultFile = xllm.validateResultFileTarget(r.resultFile, cwd);
+  xllm.validateResultFileTarget(resultFile, root);
+  artifactAttemptFiles(r);
+  member.assertChannels(resultFile);
+  const dispatchId = xllm.normalizeDispatchId(r.dispatchId, 'unit');
+  const fingerprint = artifactFingerprint(r);
+  return { r, member, cwd, root, resultFile, receiptFile: `${resultFile}.receipt.json`, loc: locations(r), dispatchId, fingerprint,
+    verificationIdentity: { dispatch_id: dispatchId, fingerprint, recovery_identity_sha256: recoveryIdentity(r) } };
+}
+async function retainedReady(context, runtime) {
+  const { r, member, receiptFile, dispatchId, fingerprint, verificationIdentity } = context;
+  if (!member.barrierSealed()) fail('batch-member-barrier-open');
+  const retained = await member.retained();
+  if (!retained) fail('batch-member-retained-required');
+  if (retained.phase !== 'sealed') fail('batch-member-barrier-open');
+  const executed = retained.executed_record;
+  if (executed.phase !== 'executed' || executed.fingerprint !== fingerprint || executed.dispatch_id !== dispatchId
+      || !executed.milestone_delivery || executed.result?.status !== 'done') fail('batch-member-retained-invalid');
+  if (!fs.existsSync(receiptFile)) fail('batch-member-ready-required');
+  const bytes = fs.readFileSync(receiptFile), ready = JSON.parse(bytes.toString('utf8'));
+  if (ready.phase !== 'ready' || !sameExecutedBase(ready, executed) || ready.delivery_capture?.passed !== true
+      || !Array.isArray(ready.artifacts) || !ready.artifacts.length) fail('batch-member-ready-required');
+  const verifySeal = record => verifyMemberSeal(r, record, verificationIdentity, runtime.verification, member.view());
+  verifySeal(ready);
+  assertMemberModes(r, ready);
+  return { retained, ready, ready_sha256: hash(bytes), verifySeal };
+}
+function publicationEffects(ready) {
+  return ready.artifacts.map(item => ({ path: item.path, before: typeof item.before === 'string' ? item.before : null,
+    after: { sha256: hash(item.content) } }));
+}
+/** Issue 343 U5: the exact typed effects of a verified member's publication (read-only). */
+async function retainedPublication(request, runtime = {}) {
+  const context = retainedRequest(request, runtime);
+  const { r, member, loc, root, cwd, receiptFile, verificationIdentity } = context;
+  if (member.pendingOperation()) fail('batch-member-publication-pending');
+  const prepared = await retainedReady(context, runtime);
+  // The ready record must be exactly what the real completion core derives now from the anchored record.
+  await assertRetainedReady({ request: r, loc, root, cwd, receiptFile, verificationIdentity, verificationSuccessor: null, member,
+    markerChain: member.markerChain(taskMarkerPath(r)), verifySeal: prepared.verifySeal, notifyPhase: () => {},
+    appendOwnedEvents: () => fail('batch-member-owner-event-deferred') }, prepared.ready, prepared.retained);
+  return { task_id: r.taskId, dispatch_id: context.dispatchId, member_ref: member.member_ref, ready_sha256: prepared.ready_sha256,
+    effects: publicationEffects(prepared.ready) };
+}
+/** Issue 343 U5: the canonical publication of one member inside its signed, in-flight member-artifacts intent. */
+async function publishRetainedMember(request, runtime = {}) {
+  const context = retainedRequest(request, runtime);
+  const { r, member } = context;
+  const prepared = await retainedReady(context, runtime);
+  const pending = member.pendingOperation(), intent = pending && pending.payload;
+  if (!intent || intent.species !== 'member-artifacts' || intent.member_ref !== member.member_ref || !intent.producer
+      || intent.producer.ready_sha256 !== prepared.ready_sha256
+      || canonicalDigest(intent.effects) !== canonicalDigest(publicationEffects(prepared.ready))) fail('batch-member-publication-intent-required');
+  const result = await publishReadyRecord(r, prepared.ready, () => member.assertOwnerSurface(), undefined, { memberPublication: member });
+  return { status: 'published', task_id: r.taskId, dispatch_id: context.dispatchId, member_ref: member.member_ref,
+    ready_sha256: prepared.ready_sha256, result_status: result && typeof result.status === 'string' ? result.status : null, provider_called: false };
+}
+
+async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
   let verificationSuccessor = null;
   let transportReturned = false;
   let partialFixResult = false;
@@ -1859,8 +2466,11 @@ async function runUnitSidecarCore(request, runtime, identity) {
       if (r.scope !== 'standalone-task' && r.milestoneId) require('./forge-milestone-time-admission').assertTransportEntry({
         cwd: r.contextRoot || r.cwd, milestone: r.milestoneId, unit: unitLabel(r, locations(r)), now: runtime.now });
       else admitTaskLaunch();
+      // Issue 343 U0c: beside the live last-spawn admission, the read-only recheck of the
+      // enrolled plan-slice generation of a milestone execute-task, immediately before spawn.
+      if (transport.mode === 'execute') assertExecutionPlanGeneration(r, root);
     } catch (refusal) {
-      if (admissionRefusal(refusal) && refusal.provider_called === false) packagingRefusal = refusal;
+      if ((admissionRefusal(refusal) || planGenerationRefusal(refusal)) && refusal.provider_called === false) packagingRefusal = refusal;
       throw refusal;
     }
   };
@@ -1873,11 +2483,26 @@ async function runUnitSidecarCore(request, runtime, identity) {
     // native execution callback and recovery): a linked task outside its horizon refuses here,
     // before any spawn.
     else admitTaskLaunch();
+    // Issue 343 U0c: the same read-only generation recheck at every actual execute entry.
+    if (transport.mode === 'execute') assertExecutionPlanGeneration(r, root);
+    // Issue 343 U3b: a cohort member's complete seam again at its launch (claim, begin and lease,
+    // physical map and plan view), before any provider: a refusal here called none.
+    if (member) {
+      try { member.resolve(); }
+      catch (refusal) { if (typeof refusal?.provider_called !== 'boolean') refusal.provider_called = false; throw refusal; }
+    }
     recoveryReady?.();
     recoveryReady = null;
     if (!executingObserved) { executingObserved = true; notifyPhase('executing'); }
   };
   const r = request || {}, route = r.route || {};
+  // Issue 343 U3b: the explicit cohort-member branch exists only with the member's live handle
+  // (beside the request, never inside it); a request naming a batch or an aggregate claim never
+  // takes the single path without it, and combinations not yet integrated refuse before any write.
+  const member = memberHandle === undefined ? null : memberExecution(memberHandle, r);
+  if (!member && (r.batch_id !== undefined || r.claim?.batch_roots)) fail('execution-member-handle-required');
+  if (member && (r.scope !== 'milestone' || runtime.verificationSuccessor !== undefined || r.ownerBroker
+      || runtime.assertRecoveryReady || runtime.savedNativeResult)) fail('batch-member-operation-unsupported');
   if (!fs.existsSync(`${r.resultFile}.receipt.json`)) require('./forge-dispatch-resolve').assertMilestoneContext(r);
   const transport = capability(route.resolved_worker_engine, r.unitType, r.scope === 'milestone' ? {} : r);
   if (!transport.supported) fail(transport.reason_code, transport.hint);
@@ -1891,7 +2516,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
   if (route.dispatch_allowed !== true || (!nativeExecution && (route.worker_mode !== 'sidecar' || !route.sidecar_declared))
     || !guard.dispatch_allowed) fail(guard.reason_code || 'route-refused', guard.hint);
   if (transport.mode === 'execute' && !fs.existsSync(`${r.resultFile}.receipt.json`)) {
-    preflightExecutionVerification(r, { verification: runtime.verification });
+    preflightExecutionVerification(r, { verification: runtime.verification, ...(member ? { memberView: member.view() } : {}) });
   }
   const authoritativeModel = route.model_resolved || route.model;
   if (!authoritativeModel
@@ -1914,6 +2539,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
   // Both code and context roots are worker-readable; neither owns the result.
   xllm.validateResultFileTarget(resultFile, root);
   artifactAttemptFiles(r); // Validate all attempt channels against every declared root before writes.
+  // Issue 343 U3b: a member's channels also stay outside every sibling, integration and evidence root.
+  if (member) member.assertChannels(resultFile);
   const loc = locations(r);
   const dispatchId = xllm.normalizeDispatchId(r.dispatchId, 'unit');
   identity.dispatch_id = dispatchId;
@@ -2001,6 +2628,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
       json(receiptFile, record);
       return;
     }
+    // Issue 343 U3b: every owner event of a cohort member is a signed line of the cohort stream.
+    if (member) return member.appendEvent(line);
     if (recoveryReady?.appendOwnerEvent) return recoveryReady.appendOwnerEvent(line);
     if (r.ownerBroker) return require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker)
       .append('.gsd/forge/events.jsonl', line);
@@ -2029,7 +2658,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
     const batch = lines.slice();
     await livenessQueue;
     const protectedOwner = record?.execution?.protected_owner || record?.recovery_baseline?.protected_owner;
-    if (verificationSuccessor || recoveryReady?.appendOwnerEvent || r.ownerBroker || !protectedOwner) {
+    if (verificationSuccessor || recoveryReady?.appendOwnerEvent || r.ownerBroker || member || !protectedOwner) {
       for (const line of batch) await appendOwnedEvent(line, record);
     } else return appendProtectedOwnerEvents(root, receiptFile, record, batch);
   }
@@ -2176,7 +2805,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
         duration_ms: record.started_at ? Date.now() - Date.parse(record.started_at) : null } : {}),
       recovery: replayable ? 'replay-publication' : 'operator-required',
       failed_at: new Date().toISOString(), ...(replayable ? {} : (extra || {})),
-      ...(admissionRefusal(error) ? { layer: 'milestone-time-admission' } : {}) };
+      ...(admissionRefusal(error) ? { layer: 'milestone-time-admission' }
+        : planGenerationRefusal(error) ? { layer: PLAN_GENERATION_STAGE } : {}) };
     if (retained?.private_ref) {
       if (!transaction) {
         transaction = { record, failure, complete: false };
@@ -2272,6 +2902,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
   const verificationApi = require('./forge-verify');
   const verifySeal = record => {
     if (transport.mode !== 'execute' || !r.execution_contract) return;
+    // Issue 343 U3b: a cohort member always verifies a real seal bound to its current runtime view.
+    if (member) return verifyMemberSeal(r, record, verificationIdentity, runtime.verification, member.view());
     if (record.verification_successor || verificationSuccessor) {
       if (!verificationSuccessor) fail('verification-successor-capability-required');
       verificationSuccessor.assertRecord(record);
@@ -2310,52 +2942,71 @@ async function runUnitSidecarCore(request, runtime, identity) {
           || hash(fs.readFileSync(r.nativePromptFile)) !== record.execution.packaged_context.sha256) fail('native-prompt-file-changed');
     }
   };
+  // The extracted completion core with this attempt's single context (its exact previous behavior).
+  // A cohort member never completes here: it is retained, and verified only after the barrier.
   async function completeExecution(record, deferredEvents = null) {
+    if (member) fail('batch-member-operation-unsupported');
+    return completeExecutionCore({ request: r, loc, root, cwd, receiptFile, verificationIdentity, verificationSuccessor,
+      successorCapability: runtime.verificationSuccessor, member: null, verifySeal, notifyPhase, appendOwnedEvents,
+      onVerificationCheck: runtime.onVerificationCheck }, record, deferredEvents);
+  }
+  // Issue 343 U3b: the retained result of a cohort member (never a done delivery) on its channel.
+  function retainedResult(stage, retained, providerCalled) {
+    const result = { status: 'retained', stage, dispatch_id: dispatchId, batch_id: retained.batch_id, member_ref: retained.member_ref,
+      task_id: retained.task_id, retained_ref: { path: retained.ref_path, sha256: retained.ref_sha256 },
+      anchor_sha256: retained.anchor.sha256, provider_called: providerCalled };
+    json(resultFile, result);
+    notifyPhase('waiting');
+    return result;
+  }
+  // Issue 343 U3b: a finished cohort member is retained as its executed record plus its real seal:
+  // the exact executed bytes (copied immutably) and the RetainedRef in the cohort batch area, bound
+  // by the broker's single anchor of the attempt once its attached writer joined. No .gsd artifact,
+  // task marker, controller completion, owner event or done result; returned.json stays custody.
+  async function retainExecuted(record, telemetry = null, providerCalled = true) {
     verifySeal(record);
-    if (record.execution) require('./forge-task-execution').assertReplay(r, record);
-    else if (record.milestone_delivery) {
-      const api = require('./forge-task-execution');
-      const saved = record.milestone_delivery;
-      assertMilestoneDeliveryReplay(r, record);
-      api.assertProtected(root, verificationSuccessor
-        ? verificationSuccessor.expectedOwner(record, saved.protected_owner) : saved.protected_owner);
+    assertMemberModes(r, record);
+    const bytes = fs.readFileSync(receiptFile);
+    if (!bytes.equals(Buffer.from(`${JSON.stringify(record, null, 2)}\n`, 'utf8')) || record.phase !== 'executed'
+        || !record.milestone_delivery || !record.recovery_baseline) fail('batch-member-executed-changed');
+    const response = record.returned_response, responseFile = `${resultFile}.returned.json`;
+    if (!response || !fs.existsSync(responseFile) || hash(fs.readFileSync(responseFile)) !== response.sha256) fail('batch-member-response-changed');
+    const digest = require('./forge-code-roots').digest;
+    const retained = await member.retain({ executed: bytes, response: { path: responseFile, sha256: response.sha256 },
+      seal_sha256: record.verification_seal.sha256, baseline_sha256: digest(record.recovery_baseline),
+      delta_sha256: digest({ verified_files: record.milestone_delivery.verified_files,
+        verified_modes: record.milestone_delivery.verified_modes, code_state: record.milestone_delivery.code_state }) });
+    if (telemetry) await sessionCleanupEvent(telemetry.session?.cleanup, sessionShaOf(telemetry));
+    return retainedResult('executed', retained, providerCalled);
+  }
+  // Issue 343 U3b: the replay of a cohort member respects the barrier. A saved executed record is
+  // revalidated and stays (or, saved before its retention completed, becomes) the retained
+  // execution; a verified ready record stays unpublished. Zero provider calls, no completion.
+  async function replayRetainedMember(saved) {
+    verifySeal(saved);
+    await runtime.announce?.('reaproveitado', { ...identity, provider_called: false });
+    const retained = await member.retained();
+    if (retained && !sameExecutedBase(saved, retained.executed_record)) fail('batch-member-retained-changed');
+    if (saved.phase === 'ready') {
+      if (!retained) fail('batch-member-retained-required');
+      await assertRetainedReady({ request: r, loc, root, cwd, receiptFile, verificationIdentity, verificationSuccessor: null,
+        member, markerChain: member.markerChain(taskMarkerPath(r)), verifySeal, notifyPhase, appendOwnedEvents }, saved, retained);
+      return retainedResult('ready', retained, false);
     }
-    if (r.execution_contract && (!record.delivery_capture || !record.delivery_capture.passed)) {
-      const resourceEvents = [];
-      notifyPhase('verifying');
-      const deliveryCapture = require('./forge-verify').captureRootDelivery(r.execution_contract,
-        fs.readFileSync(r.planFile, 'utf8'), { ...r.verification, verificationSeal: record.verification_seal, verificationIdentity, unit: loc.rules[loc.delivery.input].unit,
-          resourceEventSink: line => resourceEvents.push(line),
-          ...(typeof runtime.onVerificationCheck === 'function' ? { onCheck: runtime.onVerificationCheck } : {}) });
-      record = { ...record, delivery_capture: deliveryCapture };
-      // Retain stdout, cleanup and the actual failing check before throwing.
-      // A failed capture never satisfies replay: the gate runs again above.
-      if (!deferredEvents) json(receiptFile, record);
-      if (deferredEvents) deferredEvents.push(...resourceEvents);
-      else await appendOwnedEvents(resourceEvents, record);
-      if (!deliveryCapture.passed) fail('execution-verification-failed');
-      if (record.execution) require('./forge-task-execution').assertReplay(r, record);
-      if (!deferredEvents) json(receiptFile, record);
-    }
-    const artifacts = executeDeliveryArtifacts(r, loc, record.result, root, cwd, record.delivery_capture);
-    const ready = { ...record, phase: 'ready', artifacts: artifacts.map(a => ({ ...a, before: record.before[a.path] ?? null })) };
-    // Milestone v2 only: the owner marker enters the durable record after the
-    // validated delivery artifacts and last, so a checked task implies delivery.
-    if (r.execution_contract && record.milestone_delivery && !record.execution && record.result?.status === 'done') {
-      const marker = createTaskMarker(r, root, record.before?.[taskMarkerPath(r)]);
-      if (marker) ready.artifacts.push(marker);
-    }
-    if (!deferredEvents) json(receiptFile, ready);
-    if (verificationSuccessor) verificationSuccessorReady.set(ready, {
-      cap: runtime.verificationSuccessor, record: require('./forge-code-roots').digest(ready),
-      request: require('./forge-code-roots').digest(r),
-    });
-    return ready;
+    assertMilestoneDeliveryReplay(r, saved);
+    if (retained) return retainedResult('executed', retained, false);
+    if (member.barrierSealed()) fail('batch-member-retained-required');
+    await member.verifyOwner('execution');
+    return retainExecuted(saved, null, false);
   }
   if (existing) {
     if (existing.fingerprint !== fingerprint && !(memoryContract && (legacyMemoryReceipt(existing, legacyFingerprint)
         || historicalV2MemoryReceipt(existing, r, loc.sourceUnit, legacyFingerprint)))) {
       fail('dispatch-identity-conflict');
+    }
+    // Issue 343 U3b: a cohort member's saved delivery record replays only as its retention.
+    if (member && existing.milestone_delivery && (existing.phase === 'executed' || existing.phase === 'ready')) {
+      return await replayRetainedMember(existing);
     }
     if (existing.phase === 'ready' || existing.phase === 'executed') {
       if (nativeExecution) {
@@ -2488,23 +3139,32 @@ async function runUnitSidecarCore(request, runtime, identity) {
   const permissionRequested = r.claudePermissions !== undefined;
   if (claudeWriter && transport.mode === 'fix' && r.verification !== undefined && !permissionRequested) fail('claude-verification-permission-required');
   if (permissionRequested && (r.claudePermissions !== 'verification' || !claudeWriter || !r.execution_contract)) fail('claude-permission-policy-invalid');
+  // Issue 343 U3b: a cohort member's seal and permission policy bind the runtime view its handle
+  // validated (the original plan hash stays); the multiroot Claude refusal is unchanged.
+  const memberViewOption = member ? { memberView: member.view() } : {};
   const verificationSeal = r.execution_contract && transport.mode === 'execute'
-    ? preflightExecutionVerification(r, { verification: runtime.verification, identity: verificationIdentity })
+    ? preflightExecutionVerification(r, { verification: runtime.verification, identity: verificationIdentity, ...memberViewOption })
     : r.execution_contract && transport.mode === 'fix' && permissionRequested
       ? verificationApi.normalizeExecutionVerification(r.execution_contract, '', r.verification, runtime.verification, verificationIdentity) : null;
   // Resolve permissions before creating a receipt or entering a transport.
   // Legacy requests without a root contract gain no shell permission.
   const permissionPolicy = permissionRequested && verificationSeal
-    ? require('./forge-claude-permissions').createPolicy({ seal: verificationSeal, contract: r.execution_contract, identity: verificationIdentity, cwd }) : null;
+    ? require('./forge-claude-permissions').createPolicy({ seal: verificationSeal, contract: r.execution_contract, identity: verificationIdentity, cwd,
+      ...memberViewOption }) : null;
   // Review-fix policy admission (last gate), then the reset state.
   if (fix) {
     admitReviewFix(r, loc, fix, { root, dispatchId });
     createReviewFixResetState(fix, { dispatchId });
   }
+  // Issue 343 U0c: a new milestone plan-slice attempt records the owner's requirement
+  // marker in its started receipt; an invalid begin enrollment refuses before any receipt.
+  const planGeneration = transport.mode === 'plan'
+    ? buildPlanGenerationMarker(r, { fingerprint, dispatchId, root, begin: planGenerationBegin(r, runtime, root) }) : null;
   const startedAt = new Date().toISOString();
   // Exclusive creation arbitrates concurrent invocations of the same attempt.
   fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'started', fingerprint, dispatch_id: dispatchId, before, started_at: startedAt,
     recovery_identity_sha256: recoveryIdentity(r), route, ...(verificationSeal ? { verification_seal: verificationSeal } : {}),
+    ...(planGeneration ? { plan_generation: planGeneration } : {}),
     ...(resumedFrom ? { resumed_from: resumedFrom, session_sha256: resumeSessionSha } : {}),
     ...(execution ? { execution: { inputs: execution.inputs, budgets: execution.budgets }, reset_state_file: executionStateFile } : {}),
     input_pending_questions: r.pending_questions || [],
@@ -2520,7 +3180,11 @@ async function runUnitSidecarCore(request, runtime, identity) {
     slice: r.sliceId, dispatchId, model, engine: route.resolved_worker_engine,
     transport: nativeExecution ? 'native-tool' : route.resolved_worker_engine === 'claude' ? 'claude-cli' : 'app-server',
   }, route, startedAt);
-  if (r.ownerBroker) await require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker).append('.gsd/forge/events.jsonl', JSON.stringify(dispatchEvent) + '\n');
+  // Issue 343 U3b: a cohort member's dispatch event is the canonical member builder's, signed by
+  // the cohort broker (its cohort fields come from the broker registry, its route is its own).
+  if (member) await member.appendDispatch({ unit: label, milestone: r.milestoneId, slice: r.sliceId, dispatchId, model,
+    engine: route.resolved_worker_engine, transport: route.resolved_worker_engine === 'claude' ? 'claude-cli' : 'app-server' }, route, startedAt);
+  else if (r.ownerBroker) await require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker).append('.gsd/forge/events.jsonl', JSON.stringify(dispatchEvent) + '\n');
   else if (recoveryReady?.appendOwnerEvent) recoveryReady.appendOwnerEvent(JSON.stringify(dispatchEvent) + '\n');
   else fs.appendFileSync(eventsFile, JSON.stringify(dispatchEvent) + '\n');
   if (loc.preparation) {
@@ -2633,6 +3297,11 @@ async function runUnitSidecarCore(request, runtime, identity) {
           effort_resolved: route.effort || null, effort_reason: route.effort_reason || null },
         artifacts: artifacts.map(a => ({ ...a, before: before[a.path] ?? null })) };
     const previous = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+    // Issue 343 U0c: the plan marker and evidence come only from this owner's receipt,
+    // never from the generic spread of a returned result.
+    if (transport.mode === 'plan') for (const key of PLAN_OWNER_FIELDS) {
+      if (Object.hasOwn(previous, key)) record[key] = previous[key]; else delete record[key];
+    }
     if (previous.provisional_replay) record.provisional_replay = previous.provisional_replay;
     if (transportTelemetry) record.telemetry = {...record.telemetry, observation: transportTelemetry.observation ? require('./forge-sidecar-calibration').observation(transportTelemetry.observation) : null};
     if (transportTelemetry?.calibration_proposal) record.calibration_proposal = transportTelemetry.calibration_proposal;
@@ -2706,7 +3375,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
     // snapshot is not the caller's durable recovery authority.
     if (transport.mode === 'execute') {
       const saved = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
-      const baseline = captureMilestoneBaseline(r, saved, { nativeInvocation: nativeBinding });
+      const baseline = captureMilestoneBaseline(r, saved, { nativeInvocation: nativeBinding, ...(member ? { member } : {}) });
       json(receiptFile, { ...saved, recovery_baseline: baseline });
     }
     const authorizationReference = require('./forge-attempt-recovery').bindRecoveryAuthorization(runtime.recoveryAuthorization);
@@ -2828,14 +3497,18 @@ async function runUnitSidecarCore(request, runtime, identity) {
         await preserveReturnedResponse(result, { recordTelemetry: false });
         const api = require('./forge-task-execution');
         const saved = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
-        api.assertProtected(root, saved.recovery_baseline.protected_owner);
+        // Issue 343 U3b: a cohort member's owner surface is the cohort's common signed stream (S0
+        // and every sibling's signed append, through the broker), which also revalidates its seam.
+        if (member) await member.verifyOwner('execution');
+        else api.assertProtected(root, saved.recovery_baseline.protected_owner);
         for (const entry of saved.recovery_baseline.protected_roots) api.assertProtected(entry.path, entry.snapshot);
         const roots = require('./forge-code-roots');
         const baseline = saved.recovery_baseline;
         const state = require('./forge-surgical-reset').readState(baseline.state_file);
         if (baseline.state_sha256 !== baselineDigest(state)) fail('recovery-baseline-binding');
         if (baseline.input.sha256 !== roots.digest(fs.readFileSync(baseline.input.path))) fail('execution-input-changed');
-        const checked = roots.validatePlan(fs.readFileSync(r.planFile, 'utf8'), r.execution_contract);
+        // A cohort member's claims are its validated runtime view of the canonical plan.
+        const checked = member ? member.view().checked_runtime_plan : roots.validatePlan(fs.readFileSync(r.planFile, 'utf8'), r.execution_contract);
         const verifiedFiles = api.verifyResult(cwd, { execution_contract: r.execution_contract,
           claims: checked.writes, snapshots: state.repos }, result);
         // Save the validated response before checks/publication. A failing gate
@@ -2846,12 +3519,16 @@ async function runUnitSidecarCore(request, runtime, identity) {
             model_observed: result.transport_telemetry?.model_observed || result.appserver?.transport_telemetry?.model_observed || null } : null,
           milestone_delivery: { plan_sha256: hash(fs.readFileSync(r.planFile)),
             verified_files: verifiedFiles,
-            protected_owner: api.protectedSnapshot(root),
+            ...(member ? { verified_modes: captureMemberModes(r, verifiedFiles) } : {}),
+            protected_owner: member ? null : api.protectedSnapshot(root),
             protected_roots: saved.recovery_baseline.protected_roots,
             code_state: api.replayState(cwd, r.execution_contract) },
           result: { ...result, dispatch_id: dispatchId, workflow_id: r.workflowId,
             host_runtime: route.host_runtime, worker_engine: options.engine } };
         json(receiptFile, executed);
+        // Issue 343 U3b: a cohort member stops here, retained executed plus seal. Its heavy
+        // verification, publication and completion exist only after the cohort barrier.
+        if (member) return await retainExecuted(executed, transportTelemetry);
         const ready = await completeExecution(executed);
         result = await publish(ready, () => { assertNativePublication(ready); options.assertNativePublication?.(); });
         json(resultFile, result);
@@ -2902,7 +3579,31 @@ async function runUnitSidecarCore(request, runtime, identity) {
           if (fs.existsSync(legacy)) fail('legacy-task-plan-conflict', 'Migrate the explicitly selected legacy plan before publishing a second source.');
           return { path: `${loc.slice}/tasks/${p.id}/${p.id}-PLAN.md`, content: p.content };
         })];
+        if (result.status === 'done') recordPlanValidation(result);
         return finalizeUnitResult(result, artifacts, result.transport_telemetry || null);
+      }
+      // Issue 343 U0c: the returned bytes (already preserved above) are admitted again,
+      // independently of the transport, under the trusted scope; the receipt then gains
+      // plan_validation from those exact bytes and its own marker, before the ready record.
+      // The evidence is deterministic, so a continuation that reenters after it was saved
+      // reproduces it exactly; any other prior evidence refuses.
+      function recordPlanValidation(result) {
+        for (const key of PLAN_OWNER_FIELDS) {
+          if (Object.hasOwn(result, key)) planRefusal('plan-generation-marker-untrusted', `the returned result carries ${key}`, { provider_called: true });
+        }
+        const saved = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+        if (!Object.hasOwn(saved, 'plan_generation')) planRefusal('plan-generation-marker-missing', 'the started receipt carries no plan_generation', { provider_called: true });
+        const marker = verifyPlanGenerationMarker(saved.plan_generation, r, saved, root);
+        const admission = admitReturnedPlan(r, root, result.slice_plan.content, result.task_plans, { provider_called: true });
+        const evidence = buildPlanValidationEvidence(marker, admission);
+        if (Object.hasOwn(saved, 'plan_validation')) {
+          if (canonicalDigest(saved.plan_validation) !== canonicalDigest(evidence)) {
+            planRefusal('plan-validation-invalid', 'the receipt already carries other plan_validation evidence', { provider_called: true });
+          }
+          return;
+        }
+        saved.plan_validation = evidence;
+        json(receiptFile, saved);
       }
       finishContinuation = finishPlan;
       const promptDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'forge-plan-procedure-'));
@@ -3024,7 +3725,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
     let extra = execution ? { reset_state_file: executionStateFile,
       possible_writes: providerCalled ? 'unknown' : false,
       reconciliation_required: providerCalled !== false }
-      : admissionRefusal(error) && transport.mode === 'execute' && providerCalled === false
+      : (admissionRefusal(error) || planGenerationRefusal(error)) && transport.mode === 'execute' && providerCalled === false
         ? { possible_writes: false, reconciliation_required: false } : null;
     const phase = fix ? JSON.parse(fs.readFileSync(receiptFile, 'utf8')).phase : null;
     if (fix && phase !== 'ready') {
@@ -3174,7 +3875,15 @@ function appendProtectedOwnerEvents(root, receiptFile, record, lines) {
 }
 
 async function runUnitSidecar(request, runtime = {}) {
-  const r = request?.linked_begin_key ? require('./forge-attempt-recovery').bindLinkedRequest(request, runtime.linkedEntryOptions) : request || {};
+  const linked = request?.linked_begin_key ? require('./forge-attempt-recovery').bindLinkedRequest(request, runtime.linkedEntryOptions) : request || {};
+  // Issue 343 U3b: a cohort member's opaque handle is an in-process capability, never request data:
+  // it leaves the request before any fingerprint, receipt or serialization of the attempt.
+  const memberHandle = linked && Object.prototype.hasOwnProperty.call(linked, 'memberHandle') ? linked.memberHandle : undefined;
+  let r = linked;
+  if (memberHandle !== undefined) {
+    const { memberHandle: liveHandle, ...data } = linked;
+    r = data;
+  }
   const route = r.route || {};
   const identity = { phase: r.preparationIdentity?.phase, unit: r.unitType === 'review-fix' ? reviewFixUnitLabel(r)
     : `${r.unitType || '-'}/${r.taskId || r.sliceId || r.milestoneId || r.sourceUnit || '-'}`,
@@ -3189,7 +3898,7 @@ async function runUnitSidecar(request, runtime = {}) {
     if (['recusado', 'falhou', 'reaproveitado'].includes(stage)) terminal = true;
     runtime.announce?.(stage, fields);
   } };
-  try { return await runUnitSidecarCore(r, scopedRuntime, identity); }
+  try { return await runUnitSidecarCore(r, scopedRuntime, identity, memberHandle); }
   catch (error) {
     if (typeof error.provider_called !== 'boolean') error.provider_called = transportRequested ? 'unknown' : false;
     scopedRuntime.announce('recusado', { ...identity, model_sent: '-', reason_code: error.code || 'sidecar-unit-failed',
@@ -3517,7 +4226,7 @@ module.exports = { appendProtectedOwnerEvents, preflightExecutionVerification, s
   publishReadyRecord, nativeMemoryFingerprint, acceptNativeMemoryResult, candidateFromNativeResult, runNativeMemory,
   routeIdentity, artifactFingerprint, artifactAttemptFiles, beginArtifactAttempt, replayArtifactAttempt, reconcileLegacyReviewFix,
   failArtifactAttempt, acceptArtifactResult, reconcileArtifactAttempt, runUnitSidecar, recoverUnitSidecar, reviewFixUnitLabel, effortTelemetry,
-  cliObservers };
+  cliObservers, verifyRetainedExecution, retainedPublication, publishRetainedMember };
 // Default CLI observers: stderr only, never through the announcer. Phase lines and
 // activity lines use the sanitized T03 formatters; activity is written only on a
 // phase or liveness-state transition, at most 20 lines per unit. Verification

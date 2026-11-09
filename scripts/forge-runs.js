@@ -96,6 +96,7 @@ function runFile(cwd, id) {
  */
 function withAddressDefaults(rec) {
   if (!rec || typeof rec !== 'object') return rec;
+  if (rec.batch_locator != null) validateBatchLocator(rec.batch_locator, rec.id);
   return Object.assign({}, rec, {
     branch:  (rec.branch  === undefined || rec.branch  === '') ? null : rec.branch,
     root:    (rec.root    === undefined || rec.root    === '') ? null : rec.root,
@@ -305,6 +306,7 @@ function oldestActive(cwd) {
 
 // ── Write (atomic via temp+rename) ──────────────────────────────────────────
 function writeAtomic(filePath, record) {
+  if (record.batch_locator != null) validateBatchLocator(record.batch_locator, record.id);
   const dir  = path.dirname(filePath);
   const base = path.basename(filePath);
   // Random suffix avoids collisions if two writers hit the same id concurrently
@@ -315,6 +317,9 @@ function writeAtomic(filePath, record) {
 
 function normalizeMetadataPatch(patch) {
   const next = Object.assign({}, patch || {});
+  if (Object.prototype.hasOwnProperty.call(next, 'batch_locator') && next.batch_locator != null) {
+    next.batch_locator = validateBatchLocator(next.batch_locator);
+  }
   if (Object.prototype.hasOwnProperty.call(next, 'host_runtime')) {
     if (next.host_runtime === undefined || next.host_runtime === null || next.host_runtime === '') delete next.host_runtime;
     else next.host_runtime = normalizeHostRuntime(next.host_runtime);
@@ -323,6 +328,23 @@ function normalizeMetadataPatch(patch) {
     if (Object.prototype.hasOwnProperty.call(next, key) && next[key] === undefined) delete next[key];
   }
   return next;
+}
+
+// A locator is data, never a serialized execution capability. Keep it additive:
+// old records are neither migrated nor given a fabricated batch field on read.
+function validateBatchLocator(value, runId) {
+  const keys = ['schema', 'phase', 'run_id', 'batch_id', 'manifest_sha256', 'isolation_ref', 'isolation_sha256', 'claim_generation', 'claim_sha256'];
+  const invalid = () => { throw Object.assign(new Error('batch-locator-invalid'), { code: 'batch-locator-invalid' }); };
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+      || Object.keys(value).sort().join(',') !== keys.sort().join(',')
+      || value.schema !== 'forge-batch-locator-v1' || !['preparing', 'prepared'].includes(value.phase)
+      || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value.run_id || '')
+      || runId !== undefined && value.run_id !== runId || !/^batch-[a-f0-9]{32}$/.test(value.batch_id || '')
+      || !['manifest_sha256', 'claim_sha256'].every(key => /^[a-f0-9]{64}$/.test(value[key] || ''))
+      || (value.phase === 'preparing' ? value.isolation_sha256 !== null : !/^[a-f0-9]{64}$/.test(value.isolation_sha256 || ''))
+      || typeof value.claim_generation !== 'string' || !/^[a-f0-9-]{36}$/.test(value.claim_generation)
+      || value.isolation_ref !== `.gsd/forge/batches/${value.batch_id}/isolation.json`) invalid();
+  return { ...value };
 }
 
 function withRunLock(cwd, id, fn) {
@@ -885,7 +907,7 @@ Flags:
 }
 
 module.exports = {
-  listAll, listAllDetailed, boundedCensus, withRegistryFence, listActive, get,
+  listAll, listAllDetailed, boundedCensus, withRegistryFence, listActive, get, validateBatchLocator,
   add, update, updateWith, remove,
   bumpHeartbeat, cleanupStale,
   inspectOwnerResume, resumeOwner,

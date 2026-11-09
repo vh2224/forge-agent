@@ -12,6 +12,8 @@ const forgeController = require('./forge-unit-controller.js');
 const forgeRuntime = require('./forge-runtime.js');
 const milestoneTime = require('./forge-milestone-time-admission');
 const timeSelection = require('./forge-milestone-time-selection');
+// Issue 343 U1: the canonical batch decision (core modules only at require time).
+const executionBatch = require('./forge-execution-batch');
 
 // Closed summaries, not exception text: messages/paths/stack can contain private
 // context. Like sidecar diagnostics, this boundary retains only allowlisted data.
@@ -45,7 +47,8 @@ function failureDiagnostic(cause, input, stage, transactionKey) {
 }
 
 const PROTOCOL_VERSION = '1.0.0';
-const OPERATIONS = Object.freeze(['init', 'status', 'next', 'complete', 'consume-failure', 'reenter', 'resume-budget', 'resume-time-option']);
+const OPERATIONS = Object.freeze(['init', 'status', 'next', 'complete', 'consume-failure', 'reenter', 'resume-budget', 'resume-time-option',
+  'batch-status', 'batch-ack']);
 const OUTCOMES = Object.freeze(['needs_input', 'completed', 'blocked', 'no_work', 'failed']);
 // Named results of the owner budget-resume boundary, including the explicit
 // consumed-failure continuation that only a linked entry may take.
@@ -66,6 +69,8 @@ const REASON_CODES = Object.freeze([
   ...milestoneTime.TIME_REASON_CODES, ...BUDGET_RESUME_REASON_CODES,
   ...timeSelection.TIME_OPTION_REASON_CODES, ...timeSelection.TIME_OPTION_RESUME_CODES,
   ...forgeController.TIME_ADMISSION_CODES, ...TIME_OPTION_CONTINUATION_CODES,
+  // Issue 343 U1: the batch dispatch, its loop commands and their closed refusals.
+  'batch-selected', 'batch-status-ready', 'batch-acked', ...executionBatch.REFUSAL_CODES,
 ]);
 
 function own(value, key) { return Object.prototype.hasOwnProperty.call(value || {}, key); }
@@ -126,6 +131,19 @@ function observeWorkers(input, unitKey, beginKey, completionKey, completion, opt
 function attachWorkers(output, workers) {
   if (workers) output.details = { ...(output.details || {}), time: { ...(output.details?.time || {}), worker_observations: workers } };
   return output;
+}
+// Issue 343 U0d: a strict plan-generation refusal of the controller (a NEW plan-slice
+// completion over invalid owner plan bytes, or a new execute begin whose slice's enrolled
+// generation is not current) is a blocked admission, never a failure. The reason code
+// stays the controller's named code; only its closed diagnostic is forwarded (no prose,
+// path or stack beyond the controller's bounded detail). Nothing is retried or released.
+function attachPlanRefusal(result, cause) {
+  const refusal = cause && cause.details && cause.details.plan_generation;
+  if (!refusal || typeof refusal !== 'object' || typeof refusal.code !== 'string') return result;
+  result.outcome = 'blocked';
+  result.details = { ...(result.details || {}), plan_generation: { stage: refusal.stage ?? null, code: refusal.code,
+    detail: typeof refusal.detail === 'string' ? refusal.detail : null, task_id: refusal.task_id ?? null, cause_code: refusal.cause_code ?? null } };
+  return result;
 }
 function publicTime(status) {
   return { ...milestoneTime.summarizeTimeStatus(status), contract: status.contract, contract_version: status.contract_version,
@@ -196,6 +214,7 @@ function stable(value) {
 }
 function checksum(value) { return crypto.createHash('sha256').update(JSON.stringify(stable(value))).digest('hex'); }
 function validatePending(inputValue, decision, options = {}) {
+  if (decision?.details?.dispatch_batch) return validateBatchPending(inputValue, decision, options);
   const input = normalizeInput(inputValue), binding = decision?.details?.transaction;
   if (!binding) return { ok: false, reason: 'unit-identity-mismatch' };
   const begun = forgeController.lookupRecord(input.cwd, 'transaction', binding.idempotency_key);
@@ -225,6 +244,25 @@ function validatePending(inputValue, decision, options = {}) {
   }
   return { ok: true, ...(currentQuestions ? { pending_questions: currentQuestions } : {}) };
 }
+// Issue 343 U1: a replayed batch decision is pending only while the manifest it names is the
+// published one of this owner, host and owner token, every dispatched member is exactly a
+// member of it, and EACH member keeps its committed begin and live lease (the single checks).
+function validateBatchPending(inputValue, decision, options) {
+  const input = normalizeInput(inputValue), batch = decision.details.dispatch_batch;
+  if (!batch || !Array.isArray(batch.members) || !batch.members.length) return { ok: false, reason: 'batch-dispatch-invalid' };
+  let view;
+  try {
+    view = executionBatch.status({ cwd: input.cwd, milestone: input.milestone, host_runtime: input.host_runtime,
+      owner_token: input.owner_token, batch_id: batch.batch_id, manifest_sha256: batch.manifest_sha256 }, options);
+  } catch (cause) { return { ok: false, reason: cause.code || 'batch-manifest-invalid' }; }
+  for (const member of batch.members) {
+    const listed = view.members.find(row => row.begin_key === member?.transaction?.idempotency_key && row.unit.key === unit(member.unit)?.key);
+    if (!listed) return { ok: false, reason: 'batch-dispatch-invalid' };
+    const checked = validatePending(inputValue, { unit: member.unit, details: { transaction: member.transaction } }, options);
+    if (!checked.ok) return checked;
+  }
+  return { ok: true };
+}
 function unit(value) {
   if (!value) return null;
   if (typeof value === 'string') {
@@ -252,6 +290,9 @@ function complete(inputValue, options) {
     || begun.host_runtime !== input.host_runtime || begun.action !== 'begin') {
     return base('complete', 'blocked', 'unit-identity-mismatch', input);
   }
+  // Issue 343 U1: a batch member is never completed by the single-unit operation; its
+  // verification, publication and ACK belong to the serial batch consolidation.
+  if (begun.batch) return Object.assign(base('complete', 'blocked', 'batch-member-operation-deferred', input), { unit: selected });
   try {
     // Authorization-only resumes must await a genuine, independently captured task
     // delivery. A caller's status:done or its earlier human response is no proof.
@@ -274,7 +315,7 @@ function complete(inputValue, options) {
     catch { output.details = { time: { presence: 'unknown', unknowns: ['time-presence-unrecorded'] } }; }
     return attachWorkers(output, observeWorkers(input, selected.key, key, `${key}:complete`, 'complete', options));
   } catch (cause) {
-    return base('complete', 'blocked', cause.code || 'completion-failed', input);
+    return attachPlanRefusal(base('complete', 'blocked', cause.code || 'completion-failed', input), cause);
   }
 }
 function publicState(value) {
@@ -394,6 +435,8 @@ function pauseCurrent(inputValue, options = {}) {
       || begun.lease_generation !== binding.generation || checksum(begun) !== binding.begin_checksum
       || binding.unit !== begun.unit.key || binding.milestone !== begun.milestone || binding.host_runtime !== begun.host_runtime
       || binding.owner_digest !== begun.owner_digest) return refused('unit-identity-mismatch');
+  // Issue 343 U1: a batch member is never paused (and later resumed) as a single unit.
+  if (begun.batch) return refused('batch-member-operation-deferred');
   const key = 'forge-orchestrate-pause:' + checksum({ milestone: begun.milestone, unit: begun.unit.key,
     begin_key: begun.idempotency_key, generation: begun.lease_generation });
   const txOptions = { ...options, ...(input.prefsReader ? { prefsReader: input.prefsReader } : {}) };
@@ -480,9 +523,13 @@ function nextInside(inputValue, options) {
   // derive the estimate key from one owner capture.
   if (input.code) options.timeOptionsCode = input.code;
   else delete options.timeOptionsCode;
+  // Issue 343 U1: only the loop's auto mode (a trusted in-process option, never JSON) asks the
+  // controller for the cohort enumeration of an execute-task selection.
+  const auto = !!options.workflow && typeof options.workflow === 'object' && options.workflow.mode === 'auto';
   let selection;
   try {
-    selection = forgeController.select(input.cwd, { milestone: input.milestone }, { ...options, ...(input.prefsReader ? { prefsReader: input.prefsReader } : {}) });
+    selection = forgeController.select(input.cwd, { milestone: input.milestone, ...(auto ? { cohort: true } : {}) },
+      { ...options, ...(input.prefsReader ? { prefsReader: input.prefsReader } : {}) });
   } catch (cause) {
     if (cause && cause.code === 'CONTROLLER_FAILPOINT') throw cause;
     const code = cause.code || 'failed';
@@ -533,6 +580,19 @@ function nextInside(inputValue, options) {
     stage = 'resume';
     diagnosticKey = key;
     forgeController.resume(input.cwd, { idempotency_key: key, owner_token: input.owner_token }, txOptions);
+    // Issue 343 U1: the canonical batch decision of an execute-task selection. A sidecar primary
+    // with independent ready sidecar siblings dispatches one durable cohort; every other case
+    // keeps this single path unchanged and names its one closed reason.
+    let batchDecision = { decision: 'single', reason_code: selectedUnit.type === 'execute-task' ? 'mode-not-auto' : 'unit-not-execute-task' };
+    if (selectedUnit.type === 'execute-task' && !input.needs_input) {
+      stage = 'batch';
+      const decided = executionBatch.dispatch({ cwd: input.cwd, milestone: input.milestone, slice: selection.slice, unit: selectedUnit,
+        request_key: key, host_runtime: input.host_runtime, owner_token: input.owner_token, session: input.session,
+        code_root: input.code && typeof input.code.root === 'string' && path.isAbsolute(input.code.root) ? input.code.root : null,
+        cohort: selection.cohort || null }, txOptions);
+      if (decided.status === 'batch') return batchResult(input, selection, decided);
+      batchDecision = { decision: 'single', reason_code: decided.reason_code, ...(decided.excluded && decided.excluded.length ? { excluded: decided.excluded } : {}) };
+    }
     stage = 'begin';
     const begun = forgeController.begin(input.cwd, request, txOptions);
     let paused = null;
@@ -560,18 +620,40 @@ function nextInside(inputValue, options) {
     const durableBegin = forgeController.lookupRecord(input.cwd, 'transaction', key);
     result.details = { transaction: begun.transaction ? { idempotency_key: key, phase: begun.transaction.phase,
       begin_checksum: checksum(durableBegin), generation: durableBegin.lease_generation, owner_digest: durableBegin.owner_digest,
-      host_runtime: durableBegin.host_runtime, milestone: durableBegin.milestone, unit: durableBegin.unit.key } : null, selection_reason: selection.reason };
+      host_runtime: durableBegin.host_runtime, milestone: durableBegin.milestone, unit: durableBegin.unit.key } : null, selection_reason: selection.reason,
+      batch: batchDecision };
     // The dispatcher forwards this owner capture as the sidecar producerBasis.
     if (producer) result.details.time_options = { status: 'estimate-required', key_suffix: selection.key_suffix, begin_key: key, producer_basis: producer };
     return result;
   } catch (cause) {
     if (cause && cause.code === 'CONTROLLER_FAILPOINT') throw cause;
     const code = cause.code || 'failed';
-    const result = base('next', code === 'lease-active' || code === 'transaction-pending' || code === 'prefs-invalid' ? 'blocked' : 'failed', code, input);
+    const result = base('next', code === 'lease-active' || code === 'transaction-pending' || code === 'prefs-invalid'
+      || executionBatch.REFUSAL_CODES.includes(code) ? 'blocked' : 'failed', code, input);
     result.unit = selectedUnit;
     result.diagnostic = failureDiagnostic(cause, input, stage, diagnosticKey);
-    return attachTimeRefusal(result, cause, input, options);
+    return attachPlanRefusal(attachTimeRefusal(result, cause, input, options), cause);
   }
+}
+// Issue 343 U1: the additive dispatch_batch decision. No single unit is dispatched on its
+// own: every member is bound to its committed begin (checksum, lease generation, owner digest,
+// host) and to its own canonical route; the public projection carries no token or session.
+function batchResult(input, selection, decided) {
+  const result = base('next', 'completed', 'batch-selected', input);
+  result.state = publicState(forgeState.read(input.cwd, input.milestone));
+  const members = decided.members.map(member => {
+    const durable = forgeController.lookupRecord(input.cwd, 'transaction', member.begin_key);
+    return { ...executionBatch.publicMember(decided.manifest, member), transaction: { idempotency_key: member.begin_key,
+      phase: durable.phase, begin_checksum: checksum(durable), generation: durable.lease_generation, owner_digest: durable.owner_digest,
+      host_runtime: durable.host_runtime, milestone: durable.milestone, unit: durable.unit.key } };
+  });
+  result.events = members.map(member => ({ event: 'unit-began', action: 'begin', unit: member.unit.key, milestone: input.milestone,
+    reason_code: 'selected', batch_id: decided.manifest.batch_id }));
+  result.details = { selection_reason: selection.reason, batch: { decision: 'batch', reason_code: null },
+    dispatch_batch: { batch_id: decided.manifest.batch_id, manifest_ref: executionBatch.manifestRef(decided.manifest.batch_id),
+      manifest_sha256: decided.manifest.manifest_sha256, replay: decided.replay === true, slice: decided.manifest.slice,
+      primary: decided.manifest.primary.task_id, limits: { ...decided.manifest.limits }, members, excluded: decided.excluded } };
+  return result;
 }
 // Execution authorization reopens the exact paused unit. It is never its result.
 function resumeExecution(input, options = {}) {
@@ -610,7 +692,7 @@ function resumeExecution(input, options = {}) {
     const valid = validatePending(input, result, options);
     if (!valid.ok) return refuse(valid.reason);
     return result;
-  } catch (cause) { return attachTimeRefusal(refuse(cause.code || 'execution-resume-failed'), cause, input, options); }
+  } catch (cause) { return attachPlanRefusal(attachTimeRefusal(refuse(cause.code || 'execution-resume-failed'), cause, input, options), cause); }
 }
 function resumeResponse(input, options) {
   if (unit(input.boundary?.unit)?.type === 'execute-task') return base('next', 'blocked', 'execution-resume-intent-required', input);
@@ -666,7 +748,7 @@ function resumeResponse(input, options) {
     const code = cause.code || 'failed';
     const result = base('next', ['lease-active', 'transaction-pending'].includes(code) ? 'blocked' : 'failed', code, input);
     result.unit = unit(boundary.unit);
-    return attachTimeRefusal(result, cause, input, options);
+    return attachPlanRefusal(attachTimeRefusal(result, cause, input, options), cause);
   }
 }
 function handoff(inputValue) {
@@ -705,7 +787,7 @@ function linkedOperation(operation, inputValue, options) {
     if (cause.code === 'CONTROLLER_FAILPOINT') throw cause;
     const result = base(operation, 'blocked', cause.code || 'linked-operation-refused', input);
     if (cause.pending_questions) result.details = { pending_questions: cause.pending_questions };
-    return attachTimeRefusal(result, cause, input, options);
+    return attachPlanRefusal(attachTimeRefusal(result, cause, input, options), cause);
   }
 }
 // A named owner boundary for a budget-blocked loop. A serialized resume flag
@@ -791,10 +873,42 @@ function resumeTimeOption(inputValue, options = {}) {
   }
   return refuse(checked.reason_code || 'time-option-resume-invalid', details);
 }
+// Issue 343 U1: the additive batch commands of the loop. The snapshot locator names one
+// manifest; the owner records decide. status observes; ack is completed only when EVERY member
+// reached ack, falhou or bloqueado in its own progress chain — a response, a done result or an
+// approved flag in the input never completes or acknowledges a member. Nothing is written.
+function batchOperation(operation, inputValue, options = {}) {
+  const input = normalizeInput(inputValue), locator = inputValue && inputValue.batch;
+  const refuse = (reason, details) => Object.assign(base(operation, 'blocked', reason, input), details ? { details } : {});
+  if (!input.milestone || !locator || typeof locator !== 'object' || Array.isArray(locator)) return refuse('batch-not-active');
+  let view;
+  try {
+    view = executionBatch.status({ cwd: input.cwd, milestone: input.milestone, host_runtime: input.host_runtime,
+      owner_token: input.owner_token, batch_id: locator.batch_id, manifest_sha256: locator.manifest_sha256 }, options);
+  } catch (cause) { return refuse(cause.code || 'batch-manifest-invalid'); }
+  // Issue 343 U5: the ACK of each member is its own fact, never the batch's: its ack progress AND
+  // the controller's committed completion of exactly its begin (the serial consolidation's
+  // controller-terminal operation). The loop releases only those members from current_batch.
+  const acknowledged = view.members.filter(member => member.state === 'ack' && memberCompleted(input, member)).map(member => member.unit.key);
+  if (operation === 'batch-status') return Object.assign(base(operation, 'completed', 'batch-status-ready', input), { details: { batch: view, acknowledged } });
+  // An ack progress row is not completion authority: every ack must still name its real committed completion.
+  if (!view.terminal || view.members.some(member => member.state === 'ack' && !acknowledged.includes(member.unit.key))) {
+    return refuse('batch-members-pending', { batch: view, acknowledged });
+  }
+  return Object.assign(base(operation, 'completed', 'batch-acked', input), { details: { batch: view, acknowledged } });
+}
+function memberCompleted(input, member) {
+  try {
+    const record = forgeController.lookupRecord(input.cwd, 'transaction', `${member.begin_key}:complete`);
+    return !!record && record.action === 'complete' && record.phase === 'committed' && record.unit.key === member.unit.key
+      && record.milestone === input.milestone && record.host_runtime === input.host_runtime && record.result?.status === 'succeeded';
+  } catch { return false; }
+}
 function run(operation, input, options) {
   if (!OPERATIONS.includes(operation)) throw error('invalid-request', `operation inválida: ${operation}`);
   if (operation === 'init') return init(input);
   if (operation === 'status') return status(input);
+  if (operation === 'batch-status' || operation === 'batch-ack') return batchOperation(operation, input, options);
   if (operation === 'complete') return complete(input, options);
   if (operation === 'resume-budget') return resumeBudget(input, options);
   if (operation === 'resume-time-option') return resumeTimeOption(input, options);
@@ -815,9 +929,9 @@ function parseArgs(argv) {
 function main(argv = process.argv.slice(2), output = process.stdout.write.bind(process.stdout), errorOutput = process.stderr.write.bind(process.stderr)) {
   try {
     const args = parseArgs(argv);
-    if (args.help) { output('Usage: forge-orchestrate --init|--status|--next|--complete|--consume-failure|--reenter|--resume-budget|--resume-time-option --json JSON\n'); return 0; }
+    if (args.help) { output('Usage: forge-orchestrate --init|--status|--next|--complete|--consume-failure|--reenter|--resume-budget|--resume-time-option|--batch-status|--batch-ack --json JSON\n'); return 0; }
     const operation = OPERATIONS.find(name => args[name]);
-    if (!operation) throw error('invalid-request', 'use --init, --status, --next, --complete, --consume-failure, --reenter, --resume-budget ou --resume-time-option');
+    if (!operation) throw error('invalid-request', 'use --init, --status, --next, --complete, --consume-failure, --reenter, --resume-budget, --resume-time-option, --batch-status ou --batch-ack');
     const payload = args.json ? JSON.parse(args.json) : {};
     if (args.cwd) payload.cwd = args.cwd;
     if (args.milestone) payload.milestone = args.milestone;

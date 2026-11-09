@@ -672,6 +672,32 @@ function validatePlanResult(obj) {
   return true;
 }
 
+// Strict new-plan admission at the planner transport (issue 343 U0c): the one shared
+// owner gate, forge-plan-validation validateNewSlicePlan, runs after the untrusted-output
+// barrier, the shape validation and the must_haves check, and before the success
+// result-file, for both engines and for the Claude provisional finalizer (all three
+// reach finishPlan). Its order is fixed in code; no option, flag or imported field
+// selects another profile. The decision never depends on the milestone/slice values —
+// they only label evidence paths, which this transport discards — so every transport
+// call (the unit owner's, the historical Branch D CLI, a direct runPlan) is admitted
+// under the same fixed labels, never a canonical milestone or slice ID. The owner
+// publisher (forge-unit-sidecar) admits the returned bytes again under its trusted
+// scope. A refusal keeps its named code, with provider_called true: the planner ran.
+const TRANSPORT_PLAN_LABEL = 'transport-unscoped';
+function admitPlanCandidate(parsed, owner) {
+  const candidate = {
+    slice_plan: { content: parsed.slice_plan.content },
+    task_plans: parsed.task_plans.map(tp => ({ id: tp.id, content: tp.content })),
+  };
+  try {
+    return require('./forge-plan-validation').validateNewSlicePlan(candidate,
+      { owner, milestone: TRANSPORT_PLAN_LABEL, slice: TRANSPORT_PLAN_LABEL });
+  } catch (error) {
+    if (error && typeof error === 'object') Object.assign(error, { provider_called: true, stage: 'plan-admission' });
+    throw error;
+  }
+}
+
 // ── Prompt builders ───────────────────────────────────────────────────────────
 
 function buildChallengePrompt(diffText) {
@@ -3015,7 +3041,10 @@ async function runWriteContractCore(opts, contract) {
  * forge-must-haves.js BEFORE exit 0 — this is the enforcing gate (S03 requirement #1):
  * a legacy or malformed plan aborts with a throw → exit 2 → orchestrator falls back to
  * the Claude planner. The must_haves check runs on the CONTENT string directly (no temp
- * file — parseMustHaves accepts a string).
+ * file — parseMustHaves accepts a string). Issue 343 U0c then admits the whole candidate
+ * through the shared strict gate (admitPlanCandidate): missing or invalid depends/writes,
+ * a task list that does not match the task plans, or an invalid task graph refuses with
+ * its named code before the success result-file, on both engines.
  *
  * @param {object} opts
  * @param {string} opts.planContextFile  path to the planning-context markdown
@@ -3206,6 +3235,9 @@ async function runPlanCore(opts) {
       throw new Error(`${tp.id} must_haves invalid: ${e.message}`);
     }
   }
+  // Issue 343 U0c: explicit depends/writes, canonical membership and a valid task graph,
+  // still before any success byte (named refusal, provider_called true).
+  admitPlanCandidate(parsed, path.resolve(opts.contextRoot || cwd));
 
   const finishedAt = normalizedFinishedAt ||= new Date().toISOString();
   const planTransport = appServerOutput.transport || { kind: 'unknown', version: 'unknown' };
