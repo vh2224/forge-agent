@@ -1,9 +1,12 @@
 ---
 name: forge-next
 description: "Executa exatamente uma unidade de trabalho e para (step mode)."
-disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Bash, Agent, Skill, TaskCreate, TaskUpdate, TaskList, TaskStop, SendMessage, WebSearch, WebFetch
 ---
+
+## Invocation policy
+
+Pode ser invocada pelo orquestrador quando o operador pedir explicitamente um passo ou uma unidade, no escopo/ID solicitado. Execute exatamente uma unidade e pare após sua verificação e checkpoint; não encadeie chamadas, não abra auto-loop e não substitua por `forge-auto`. Recuperação autorizada continua limitada à mesma unidade. Preserve seleção pessoal, perguntas pendentes, plan/security gates, isolamento, claims, routing, revisão e checkpoints; invocação não concede autorização nem troca modelo/esforço.
 
 Nos despachos sidecar, siga `shared/forge-bidirectional-sidecar.md § Identidade do sidecar exibida na conversa`: anuncie a solicitação pré-disparo e repasse literalmente as linhas `[forge-agente]` do stderr; as linhas `[forge-sidecar]` ficam no registro técnico e só são repassadas nos casos daquele contrato.
 

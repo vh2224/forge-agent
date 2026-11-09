@@ -1,7 +1,6 @@
 ---
 name: forge-ask
 description: "Modo conversa — discute ideias, captura decisoes, salva sessao."
-disable-model-invocation: true
 allowed-tools: Read, Write, Bash, Glob, Skill, WebSearch, WebFetch
 ---
 

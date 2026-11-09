@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "issue": 368,
+  "provenance": {
+    "base_revision": "52a69e79e92c58914da7fcb69f112219a4fd508b",
+    "previous_delta": "scripts/fixtures/identity-lifecycle/distribution-delta.json",
+    "method": "git show52a source bytes; unchanged real Claude renderer for before/after; LF and linked-block attribution; distribution proof only"
+  },
+  "surfaces": {
+    "skills": {
+      "before": "f0d6e8f36cadc8c4f4c66d5e9a5b4da486b2843434af49d68d6875109d982f7c",
+      "after": "019035d20f0f70239fe0e035478af988ec6fdd5efea8b7f78e8eff6c8a64e052",
+      "attributed_before": "9655fa67054b852bcd29319efdff465b5a677ebdbf50a26eee9124befaea93d7",
+      "attributed_after": "bc8e2f9ebbb1a189a435417c9b3ef258531cb8db67046ccf5b26cc48f99ca5bd"
+    }
+  },
+  "files": {
+    "skills/forge-add-slice/SKILL.md": {
+      "before": "90f8fba15a2a0c57d368344c7ce8fd87719a1db619a2e9353e82591e4a205d89",
+      "after": "38cfbbf349d58dbaa3840581dfa149af51f0daf496fc5e333f2a5013658d64cf",
+      "attributed_before": "90f8fba15a2a0c57d368344c7ce8fd87719a1db619a2e9353e82591e4a205d89",
+      "attributed_after": "38cfbbf349d58dbaa3840581dfa149af51f0daf496fc5e333f2a5013658d64cf"
+    },
+    "skills/forge-add-task/SKILL.md": {
+      "before": "93f4725bb45625382859fecd2cc0964bc96b94528f03a849e8e3c74650b906af",
+      "after": "54e4aa6a3d9220b51ef118309daa48c0b5c6b48d85719c5bd4115cd3b18a9c27",
+      "attributed_before": "93f4725bb45625382859fecd2cc0964bc96b94528f03a849e8e3c74650b906af",
+      "attributed_after": "54e4aa6a3d9220b51ef118309daa48c0b5c6b48d85719c5bd4115cd3b18a9c27"
+    },
+    "skills/forge-ask/SKILL.md": {
+      "before": "4c7d381151eb613dfe8a2f9e6acd8c4d1b24177dffb737e71d3d4aeb2d8a2160",
+      "after": "9da697fc961b744052a6c4ecb6113dadc65cc4512948ebfe5fc89f1cfcb305fb",
+      "attributed_before": "4c7d381151eb613dfe8a2f9e6acd8c4d1b24177dffb737e71d3d4aeb2d8a2160",
+      "attributed_after": "9da697fc961b744052a6c4ecb6113dadc65cc4512948ebfe5fc89f1cfcb305fb"
+    },
+    "skills/forge-codebase/SKILL.md": {
+      "before": "55504399d213736ae1012c86a486b87a7995d6f11582a1883289229e2e3e2fec",
+      "after": "9bdba1013ac012793d4678ca81b9b1646023131221f68ba9c367590cc2dd15ee",
+      "attributed_before": "55504399d213736ae1012c86a486b87a7995d6f11582a1883289229e2e3e2fec",
+      "attributed_after": "9bdba1013ac012793d4678ca81b9b1646023131221f68ba9c367590cc2dd15ee"
+    },
+    "skills/forge-discuss/SKILL.md": {
+      "before": "f11074fb4aa2bcb68d1eb866796fc237eaed55b09bffadaf18ab25d2f60679ad",
+      "after": "6ccb7ad1c5b63586c15175f3a8cdfe669e8551edd40cbe96696441c42fb94b12",
+      "attributed_before": "f11074fb4aa2bcb68d1eb866796fc237eaed55b09bffadaf18ab25d2f60679ad",
+      "attributed_after": "6ccb7ad1c5b63586c15175f3a8cdfe669e8551edd40cbe96696441c42fb94b12"
+    },
+    "skills/forge-explain/SKILL.md": {
+      "before": "f6c6780f659451a8f2712b7d5b2f4877f48359a3922ba75c67286a02b52003e4",
+      "after": "a0d2d8c1df7b61cfc019a280bedbdcaf85e9212947f5655facee1320df172757",
+      "attributed_before": "f6c6780f659451a8f2712b7d5b2f4877f48359a3922ba75c67286a02b52003e4",
+      "attributed_after": "a0d2d8c1df7b61cfc019a280bedbdcaf85e9212947f5655facee1320df172757"
+    },
+    "skills/forge-memories/SKILL.md": {
+      "before": "30f10a06e748ed8c7d6f8df5ca42d7c2a67edc2b6340e760b63350aedb5480ee",
+      "after": "707166b7aadb98c878ca68adf2c29ab78584f052eba52ddf04ee1c24409f6f1a",
+      "attributed_before": "30f10a06e748ed8c7d6f8df5ca42d7c2a67edc2b6340e760b63350aedb5480ee",
+      "attributed_after": "707166b7aadb98c878ca68adf2c29ab78584f052eba52ddf04ee1c24409f6f1a"
+    },
+    "skills/forge-next/SKILL.md": {
+      "before": "61d13a04a7cfd6c3f8543fadf6de12ac8d27e856e23a7946028a965bd34755a1",
+      "after": "3ffd7bef2befcbfdf49e865435b538da9b3305d5207036d488507c741fdb1e6e",
+      "attributed_before": "fad7ae40c8495226402cce4fbf0c849e1823450172e130195503af6e072cadee",
+      "attributed_after": "0d9fed221f4fa52227184fc1d68a6aadac6f7ba917ce294b9dc837d04fb27eb4"
+    },
+    "skills/forge-skills/SKILL.md": {
+      "before": "660e699644b4c459ccea10bbd631299949a2c416df36ecd9c1ea12c5e4a4b0e3",
+      "after": "6736fd332f1dd4e73ebcf3eef4fa072bc3e68c28be04722e60733175106a453e",
+      "attributed_before": "660e699644b4c459ccea10bbd631299949a2c416df36ecd9c1ea12c5e4a4b0e3",
+      "attributed_after": "6736fd332f1dd4e73ebcf3eef4fa072bc3e68c28be04722e60733175106a453e"
+    }
+  },
+  "unchanged_surfaces": [
+    "agents",
+    "commands",
+    "dispatch-templates",
+    "hooks",
+    "mcp",
+    "claude-instructions",
+    "claude-settings",
+    "configuration"
+  ],
+  "samples": {
+    "file": "docs/communication-evaluation/samples.json",
+    "before": "0a0d5ccb39fc880642d6a338153ed0e91bc72f39f978bda94ddcddb9ce242f3c",
+    "after": "40d879d0b390068d8133de40e2d2c70ae9afab012d0d3770050af0d65def65bc",
+    "nodes": [
+      {
+        "pointer": "/entries/2/supporting/partial/after",
+        "file": "skills/forge-next/SKILL.md",
+        "before": "61d13a04a7cfd6c3f8543fadf6de12ac8d27e856e23a7946028a965bd34755a1",
+        "after": "3ffd7bef2befcbfdf49e865435b538da9b3305d5207036d488507c741fdb1e6e"
+      },
+      {
+        "pointer": "/entries/6/supporting/partial/after",
+        "file": "skills/forge-next/SKILL.md",
+        "before": "61d13a04a7cfd6c3f8543fadf6de12ac8d27e856e23a7946028a965bd34755a1",
+        "after": "3ffd7bef2befcbfdf49e865435b538da9b3305d5207036d488507c741fdb1e6e"
+      }
+    ]
+  },
+  "sources": {
+    "scripts/forge-claude-renderer.test.js": {
+      "before": "3b4d4404d1eb4b1cd75d74a2a2c65d17e38030c940c4dbcb3a18ebc3a670a09a",
+      "after": "8124c2c2b066c3e0f02d69b16b2bf16dc1204250eeeefb2abe428ee60d7c3580",
+      "attributed_before": "3b4d4404d1eb4b1cd75d74a2a2c65d17e38030c940c4dbcb3a18ebc3a670a09a",
+      "attributed_after": "8124c2c2b066c3e0f02d69b16b2bf16dc1204250eeeefb2abe428ee60d7c3580"
+    },
+    "scripts/forge-communication-surfaces.test.js": {
+      "before": "640b55434109fcc6ed34a10c524ea1fd7068ad3b23e263cc8d16213ba13cfd3f",
+      "after": "270ca613a4828789cae3253929ea9bf41294483702615cf344c548da482a4a3e",
+      "attributed_before": "640b55434109fcc6ed34a10c524ea1fd7068ad3b23e263cc8d16213ba13cfd3f",
+      "attributed_after": "270ca613a4828789cae3253929ea9bf41294483702615cf344c548da482a4a3e"
+    }
+  }
+}
