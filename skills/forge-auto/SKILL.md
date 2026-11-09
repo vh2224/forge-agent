@@ -1939,6 +1939,22 @@ SALVAGE=$(node "$FORGE_SCRIPTS_DIR/forge-worker-result.js" --salvage \
 
 A rung that yields a status hands back a `recovered.block` — parse **that** with the rows below and continue the loop normally; the run is not stopped for a contract miss that was recovered. **This gate never pauses to ask the user** (AUTONOMY RULE intact): every rung is mechanical, and rung 4 is the existing `blocked` path with its existing item capture. `agent_id` for the resume rung, when needed, comes from the last `phase: "escaped"` line in `.gsd/forge/contract-miss.jsonl`.
 
+Before a returned `partial` or `blocked` result stops this unit, settle its
+CURRENT controller begin through the embedded long-workflow adapter's `complete`
+command with the actual result, original snapshot and live attempt/process/root
+inspection callbacks. Require the durable paused boundary and zero current lease;
+preserve the original request, receipt, questions and returned snapshot in the
+continuation. A status string, an inactive run or lease expiry proves no stopped
+writer. Missing evidence is a named refusal; preserve the begin/claim and report
+that limit rather than editing STATE or lease files to imitate a pause.
+Resume unfinished `execute-task` and `complete-slice` with
+`resume_intent:'execute'` from that boundary, never with an answer-as-result or
+a fresh `next`. If the old loop snapshot is missing, use the canonical durable
+locator and live callbacks described in `docs/lifecycle-resume.md`; JSON CLI flags
+cannot supply these callbacks or assume ownership. Known same-owner inactive runs
+with a retained claim use the proved partial-boundary branch of `resumeOwner`;
+legacy unknown ownership and unreconciled writers still refuse.
+
 Parse the `---GSD-WORKER-RESULT---` block:
 - `status: done` → proceed to post-unit housekeeping, then **immediately continue loop** (do NOT pause or ask user)
 - `status: partial` → write `continue.md`, update STATE, emit compact signal, tell the user `Trabalho parcial salvo em continue.md: {o que ficou feito}. Continua executável: {o que segue}. Decisão pendente: {ID ou nenhuma}. Para retomar: /forge-auto {RUN_ID}.`, **fire push (call-site 1):** use Push helper with message `"Forge {RUN_ID} travou — partial: {resumo do blocker}. Run pausado, requer ação manual."`, then **deactivate run NOW** (`node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json '{"active":false}'` — see `## Deactivate auto-mode indicator`), **stop loop**

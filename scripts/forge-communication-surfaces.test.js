@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/unit-entry/distribution.cjs');
+const unitEntry = require('./fixtures/incomplete-resume/distribution.cjs');
 
 // forge-communication-surfaces.test.js — proves the orchestration and status
 // skills follow shared/forge-communication.md by POINTER, not by a second copy;
@@ -828,6 +828,7 @@ function checkRegistry(fixture = {}) {
   }
 }
 function assertSmokeScope(text) {
+  text = unitEntry.previousSmoke(text);
   const start = text.indexOf('// ── Section 61:'), end = text.indexOf('// ── Section 62:', start);
   assert(start >= 0 && end > start, 'smoke scope markers remain present');
   const actual = hash(text.slice(0, start) + '<allowed-section61>\n' + text.slice(end));

@@ -871,9 +871,10 @@ try {
 
   // ---- Truth 7 (part): endpoint adds sliceClosure; ownership adds withOwnerBoundary; clock adds two.
   assert.equal(typeof controller.withOwnerBoundary, 'function', 'the reviewed owner boundary remains an actual callable seam');
+  for (const name of ['beginSerial', 'incompleteUnits', 'pausePartial', 'reconcilePartialSuccessors', 'inspectPausedAttempt', 'verifyCompletedAttempt', 'validatePausedEntry']) assert.equal(typeof controller[name], 'function', name + ' is the explicit additive #367 API');
   assert.deepEqual(Object.keys(controller), ['PROTOCOL_VERSION', 'BOUNDARY_KINDS', 'ACTIONS', 'PHASES', 'REASON_CODES', 'TIME_ADMISSION_CODES', 'ControllerError',
-    'selectNextUnit', 'discoverInventory', 'select', 'begin', 'transition', 'persistResult', 'complete', 'pause', 'fail', 'expireSafe', 'resume', 'handoff',
-    'withOwnerBoundary', 'pendingTransactions', 'projectLogicalHistory', 'logicalState', 'resolvePrefs', 'transactionDir', 'resultDir', 'boundaryDir', 'eventsFile', 'transactionFile',
+    'selectNextUnit', 'discoverInventory', 'select', 'begin', 'beginSerial', 'transition', 'persistResult', 'complete', 'pause', 'fail', 'expireSafe', 'resume', 'handoff',
+    'withOwnerBoundary', 'pendingTransactions', 'incompleteUnits', 'pausePartial', 'reconcilePartialSuccessors', 'inspectPausedAttempt', 'verifyCompletedAttempt', 'validatePausedEntry', 'projectLogicalHistory', 'logicalState', 'resolvePrefs', 'transactionDir', 'resultDir', 'boundaryDir', 'eventsFile', 'transactionFile',
     'resultFile', 'boundaryFile', 'readEvents', 'readJson', 'writeAtomic', 'lookupRecord', 'preflightPaths', 'consumeFailure', 'reenter', 'failureProjection',
     'validateLinkedEntry', 'validateTerminalLinkedEntry', 'sliceClosure', 'dependencies']);
   assert.deepEqual(Object.keys(clock), ['CLOCK_POLICY', 'FORECAST_POLICY', 'DELIVERY_PROOF_MODES', 'computeClock', 'readClock', 'readDeliveries',

@@ -1664,6 +1664,22 @@ SALVAGE=$(node "$FORGE_SCRIPTS_DIR/forge-worker-result.js" --salvage \
 
 A rung that yields a status hands back a `recovered.block` — parse **that** with the rows below. `/forge-next` is always `MODE = interactive`, so when the ladder reaches rung 4 (`blocked`), show the operator the salvage census verbatim before surfacing: what was probed and what each probe found is the actionable part, not the verdict alone.
 
+Before a returned `partial` or `blocked` result stops this unit, settle its
+CURRENT controller begin through the embedded long-workflow adapter's `complete`
+command with the actual result, original snapshot and live attempt/process/root
+inspection callbacks. Require the durable paused boundary and zero current lease;
+preserve the original request, receipt, questions and returned snapshot in the
+continuation. A status string, an inactive run or lease expiry proves no stopped
+writer. Missing evidence is a named refusal; preserve the begin/claim and report
+that limit rather than editing STATE or lease files to imitate a pause.
+Resume unfinished `execute-task` and `complete-slice` with
+`resume_intent:'execute'` from that boundary, never with an answer-as-result or
+a fresh `next`. If the old loop snapshot is missing, use the canonical durable
+locator and live callbacks described in `docs/lifecycle-resume.md`; JSON CLI flags
+cannot supply these callbacks or assume ownership. Known same-owner inactive runs
+with a retained claim use the proved partial-boundary branch of `resumeOwner`;
+legacy unknown ownership and unreconciled writers still refuse.
+
 Parse the `---GSD-WORKER-RESULT---` block:
 - `status: done` → proceed to post-unit housekeeping
 - `status: partial` → write `continue.md`, update STATE, emit compact signal, stop

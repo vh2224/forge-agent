@@ -353,6 +353,13 @@ function add(cwd, record, guard) {
   if (!fs.existsSync(path.join(cwd, '.gsd'))) ensureRunsDir(cwd);
   return withRegistryFence(cwd, () => withRunLock(cwd, record.id, () => {
   ensureRunsDir(cwd);
+  // Registration is create-only under the registry fence AND the run lock.
+  // Existence, including unreadable/corrupt records or links, is never consent
+  // to replace ownership, pending work, or an unreleased claim.
+  try {
+    fs.lstatSync(runFile(cwd, record.id));
+    throw Object.assign(new Error(`forge-runs.add: run already exists: ${record.id}; inspect and resume it`), { code: 'ERUNEXISTS' });
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
   const now = Date.now();
   const supplied = normalizeMetadataPatch(record);
   const full = Object.assign({}, supplied, {
@@ -620,7 +627,7 @@ function inspectOwnerResume(cwd, id, options = {}) {
     required_attestations: same ? record.active === true ? [] : ['workspace-quiescent'] : ['owner-stopped','workspace-quiescent'],
     attestation_is_os_proof: false };
 }
-function assertResumeQuiescence(cwd, record, nextHost, noLeases) {
+function assertResumeQuiescence(cwd, record, nextHost, noLeases, partialOptions) {
   const controller = require('./forge-unit-controller');
   const empty = directory => {
     let handle;
@@ -640,7 +647,10 @@ function assertResumeQuiescence(cwd, record, nextHost, noLeases) {
     }
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
   if (controller.pendingTransactions(cwd).length) throw resumeError('owner-resume-transaction-pending');
-  if (require('./forge-write-claim').isHeld(record.write_claim)) throw resumeError('owner-resume-claim-held');
+  if (require('./forge-write-claim').isHeld(record.write_claim)) {
+    if (!partialOptions) throw resumeError('owner-resume-claim-held');
+    controller.inspectPausedAttempt(cwd, record, partialOptions);
+  }
   if (record.worker || record.worker_started) throw resumeError('owner-resume-worker-unreconciled');
   // Legacy file locks and unreadable/debris entries cannot prove quiescence.
   if (!empty(path.join(cwd, '.gsd/forge/file-locks'))) throw resumeError('owner-resume-file-lock-present');
@@ -654,6 +664,7 @@ function assertResumeQuiescence(cwd, record, nextHost, noLeases) {
   if (!terminal) throw resumeError('owner-resume-boundary-required');
   const handoff = controller.handoff(cwd, { unit: terminal.unit, next_host_runtime: nextHost });
   if (!handoff.ok || handoff.milestone !== record.id) throw resumeError('owner-resume-boundary-required');
+  if (!noLeases()) throw resumeError('owner-resume-lease-present');
   return { unit: handoff.unit, result_checksum: handoff.result_checksum, committed_at: handoff.committed_at };
 }
 function resumeOwner(cwd, id, options = {}) {
@@ -671,7 +682,8 @@ function resumeOwner(cwd, id, options = {}) {
       if (same && current.active === true) return { status: 'unchanged', record: get(cwd,id) };
       if (!same && options.confirmOwnerStopped !== true) throw resumeError('owner-resume-owner-stop-attestation-required');
       if (options.confirmWorkspaceQuiescent !== true) throw resumeError('owner-resume-workspace-quiescent-attestation-required');
-      const boundary = assertResumeQuiescence(cwd, current, observed.hostRuntime, boundaryGuard.noLeases);
+      const boundary = assertResumeQuiescence(cwd, current, observed.hostRuntime, boundaryGuard.noLeases,
+        same && typeof options.inspectAttempt === 'function' ? options : null);
       const history = current.owner_resume_history === undefined ? [] : current.owner_resume_history;
       if (!Array.isArray(history)) throw resumeError('owner-resume-history-unknown');
       const evidence = { at: new Date().toISOString(), previous_record_sha256: snapshot.sha256,
@@ -689,7 +701,8 @@ function resumeOwner(cwd, id, options = {}) {
         if (resumeRecord(cwd,id).sha256 !== options.expectedRecordSha256) throw resumeError('owner-resume-snapshot-changed');
         const live = observedResumeOwner(options);
         if (live.sessionId !== observed.sessionId || live.hostRuntime !== observed.hostRuntime || live.source !== observed.source) throw resumeError('owner-session-unavailable');
-        assertResumeQuiescence(cwd, record, observed.hostRuntime, boundaryGuard.noLeases);
+        assertResumeQuiescence(cwd, record, observed.hostRuntime, boundaryGuard.noLeases,
+          same && typeof options.inspectAttempt === 'function' ? options : null);
         return patch;
       }, guard);
       return { status: same ? 'reactivated' : 'transferred', record: result.record };
@@ -888,7 +901,7 @@ module.exports = {
   listAll, listAllDetailed, boundedCensus, withRegistryFence, listActive, get,
   add, update, updateWith, remove,
   bumpHeartbeat, cleanupStale,
-  inspectOwnerResume, resumeOwner,
+  inspectOwnerResume, resumeOwner, knownResumeBinding,
   observeHostSession, resolveBySessionId, resolveBySessionOwner, bumpOwnedHeartbeat, bumpLegacyOwnedHeartbeat, oldestActive,
   refreshLegacyAlias, migrateLegacyState,
   withAddressDefaults,

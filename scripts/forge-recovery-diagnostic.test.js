@@ -234,6 +234,10 @@ test('R1 recaptured acceptance clears current uncertainty but keeps historical e
   assert.strictEqual(r.acceptances[0].validity, 'stale'); assert.strictEqual(r.acceptances[1].validity, 'current');
 });
 test('O1 registry writer defaults and legacy absent address retain bound checkpoint', f => {
+  // f.work created only the task artifacts and a bare synthetic registry row.
+  // Exercise creation defaults on a genuinely absent registry, preserving artifacts.
+  assert.strictEqual(f.readRun().write_claim, undefined);
+  fs.unlinkSync(f.runFile);
   runs.add(f.project, { id: f.id, kind: 'task', session_id: 'isolated-fixture', active: false });
   assert.strictEqual(f.readRun().project, null); f.bind(f.id);
   const file = path.join(f.project, '.gsd', 'tasks', f.id, `${f.id}-PLAN.md`);

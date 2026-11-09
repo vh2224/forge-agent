@@ -110,6 +110,16 @@ function next(state, input, orchestrate) {
     return { ...state.last_decision, snapshot: state };
   }
   if (state.lifecycle === 'paused') return publicResult('next', state, 'needs_input', 'pause-active', 'pause', null);
+  if (state.lifecycle === 'completed' && orchestrate.validateTerminal) {
+    let checked;
+    try { checked = orchestrate.validateTerminal(delegateInput(input, state)); }
+    catch (cause) { checked = { ok: false, reason: cause.code || 'terminal-validation-failed' }; }
+    if (!checked.ok) {
+      state.lifecycle = 'blocked';
+      if (checked.pending_questions) state.pending_questions = checked.pending_questions;
+      return publicResult('next', state, 'blocked', checked.reason, 'stop', { details: checked });
+    }
+  }
   if (TERMINAL.has(state.lifecycle)) return publicResult('next', state, state.lifecycle, 'workflow-terminal', 'stop', null);
   const refusedNext = taskScopeRefusal(state, input, 'next');
   if (refusedNext) return refusedNext;
@@ -134,6 +144,7 @@ function next(state, input, orchestrate) {
     return publicResult('next', state, 'completed', delegated.reason_code || 'no-next-unit', 'stop', delegated);
   }
   state.lifecycle = delegated.outcome === 'failed' ? 'failed' : 'blocked';
+  if (delegated.details?.pending_questions) state.pending_questions = delegated.details.pending_questions;
   if (['milestone-budget-exhausted', 'milestone-budget-draining'].includes(delegated.reason_code)) {
     const details = delegated.details?.time;
     state.time_block = { milestone: delegated.milestone, contract_version: details?.contract_version,
@@ -183,20 +194,23 @@ function pause(state, input, orchestrate) {
   if (TERMINAL.has(state.lifecycle)) return publicResult('pause', state, state.lifecycle, 'workflow-terminal', 'stop', null);
   const refusedPause = taskScopeRefusal(state, input, 'pause');
   if (refusedPause) return refusedPause;
-  const current = state.lifecycle === 'dispatch_required' ? state.last_decision?.controller_result?.details?.transaction : null;
+  const located = state.lifecycle === 'idle' ? input.pause_current : null;
+  if (located && !['partial', 'blocked'].includes(input.result?.status)) return publicResult('pause', state, 'blocked', 'settled-result-required', 'stop', null);
+  const current = state.lifecycle === 'dispatch_required' ? state.last_decision?.controller_result?.details?.transaction : located?.transaction;
   if (state.lifecycle === 'dispatch_required' && !current) return publicResult('pause', state, 'blocked', 'unit-identity-mismatch', 'stop', null);
   const delegated = orchestrate.run('next', { ...delegateInput(input, state), ...(current
-    ? { pause_current: { unit: state.current_unit, transaction: current } }
+    ? { pause_current: { unit: state.current_unit || located.unit, transaction: current } }
     : { needs_input: true }) });
   if (delegated.outcome !== 'needs_input' || !delegated.boundary) {
     return publicResult('pause', state, delegated.outcome === 'failed' ? 'failed' : 'blocked', delegated.reason_code || 'pause-refused', 'stop', delegated);
   }
   state.lifecycle = 'paused'; state.current_unit = safeUnit(delegated.unit); state.boundary = delegated.boundary;
+  state.pending_questions = delegated.details?.pending_questions || [];
   return publicResult('pause', state, 'needs_input', delegated.reason_code || 'needs-input', 'pause', delegated);
 }
 function resume(state, input, orchestrate) {
   if (state.lifecycle !== 'paused' || !state.boundary) return publicResult('resume', state, 'blocked', 'boundary-missing', 'stop', null);
-  if (!own(input, 'response') && input.resume_intent === undefined) return publicResult('resume', state, 'blocked', state.current_unit?.type === 'execute-task' ? 'execution-resume-intent-required' : 'response-required', 'pause', null);
+  if (!own(input, 'response') && input.resume_intent === undefined) return publicResult('resume', state, 'blocked', ['execute-task', 'complete-slice'].includes(state.current_unit?.type) ? 'execution-resume-intent-required' : 'response-required', 'pause', null);
   const targetHost = host(input.host_runtime || input.hostRuntime || state.host_runtime);
   const delegated = orchestrate.run('next', { ...delegateInput(input, { ...state, host_runtime: targetHost }), boundary: state.boundary, ...(own(input, 'response') ? { response: input.response } : {}) });
   if (delegated.outcome !== 'completed') {
@@ -204,6 +218,7 @@ function resume(state, input, orchestrate) {
   }
   if (delegated.details?.resume_execution === true) {
     state.host_runtime = targetHost; state.boundary = null; state.current_unit = safeUnit(delegated.unit); state.lifecycle = 'dispatch_required';
+    state.pending_questions = delegated.details.pending_questions || [];
     const result = publicResult('resume', state, 'dispatch_required', delegated.reason_code, 'dispatch', delegated);
     const { snapshot: _snapshot, ...decision } = result; state.last_decision = decision; result.snapshot = state; return result;
   }
@@ -220,6 +235,11 @@ function complete(state, input, orchestrate) {
   const decision = state.last_decision && state.last_decision.controller_result;
   const beginKey = decision && decision.details && decision.details.transaction && decision.details.transaction.idempotency_key;
   const delegated = orchestrate.run('complete', { ...delegateInput(input, state), unit: state.current_unit, begin_key: beginKey });
+  if (delegated.outcome === 'needs_input' && delegated.boundary) {
+    state.lifecycle = 'paused'; state.boundary = delegated.boundary;
+    state.pending_questions = delegated.details?.pending_questions || [];
+    return publicResult('complete', state, 'needs_input', delegated.reason_code, 'pause', delegated);
+  }
   if (delegated.outcome !== 'completed') return publicResult('complete', state, 'blocked', delegated.reason_code, 'stop', delegated);
   state.current_unit = null; state.last_decision = null; state.boundary = delegated.boundary;
   state.lifecycle = state.mode === 'task' ? 'completed' : 'idle';
@@ -267,7 +287,8 @@ function advance(snapshot, commandValue, input = {}, dependencies = {}) {
     if (dependencies[name] !== undefined) trusted[name] = dependencies[name];
   }
   const orchestrate = { run: (operation, payload) => controller.run(operation, payload, trusted),
-    ...(typeof controller.validatePending === 'function' ? { validatePending: (payload, decision) => controller.validatePending(payload, decision, trusted) } : {}) };
+    ...(typeof controller.validatePending === 'function' ? { validatePending: (payload, decision) => controller.validatePending(payload, decision, trusted) } : {}),
+    ...(typeof controller.validateTerminal === 'function' ? { validateTerminal: payload => controller.validateTerminal(payload, trusted) } : {}) };
   if (command === 'consume-failure') return consumeFailure(state, input, orchestrate);
   if (command === 'reenter') return reenter(state, input, orchestrate);
   if (command === 'resume-budget') return resumeBudget(state, input, orchestrate);

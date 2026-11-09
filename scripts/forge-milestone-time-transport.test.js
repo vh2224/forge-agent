@@ -84,7 +84,14 @@ function request(f, engine, unitType = 'research-milestone', taskId = 'T01') {
     r.claim = { schema_version: 2, generation: 'budget-claim', execution_contract: f.contract,
       paths: ['alpha', 'beta'].map(root_id => ({ root_id, path: 'same.txt' })) };
     r.gates = { plan: 'skipped', planSkipReason: 'interactive-off', claim: 'proceed', security: 'not-applicable' };
-    require('./forge-runs').add(f.owner, { id: r.runId, kind: 'milestone', session_id: 'fixture', write_claim: r.claim });
+    const runs = require('./forge-runs'), existing = runs.get(f.owner, r.runId);
+    if (!existing) runs.add(f.owner, { id: r.runId, kind: 'milestone', session_id: 'fixture', write_claim: r.claim });
+    else {
+      // This fixture reuses one owner and the SAME held claim across attempts;
+      // registration is create-only and must never replace another record.
+      assert.equal(existing.session_id, 'fixture'); assert.equal(existing.active, true);
+      assert.deepEqual(existing.write_claim, r.claim);
+    }
   }
   r.route = resolver.resolveDispatch({ cwd: f.owner, unitType, milestoneId: M,
     unitId: r.taskId || r.sliceId || M, planPath: r.planFile, hostRuntime: host });
