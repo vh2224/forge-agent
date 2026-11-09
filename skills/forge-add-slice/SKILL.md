@@ -1,7 +1,6 @@
 ---
 name: forge-add-slice
 description: "Adiciona um slice a um milestone existente e planeja suas tasks."
-disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Glob
 ---
 

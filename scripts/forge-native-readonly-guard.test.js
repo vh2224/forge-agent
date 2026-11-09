@@ -55,6 +55,20 @@ function check(label, action) { action(); console.log(`PASS S03/T06 ${label}`); 
 function cli(args) { return spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', shell: false, windowsHide: true, maxBuffer: 1024 * 1024 }); }
 
 try {
+  check('intent-to-add empty and nonempty files preserve baseline and detect later mutation', () => {
+    const root = fixture();
+    for (const [file, contents] of [['intent empty.txt', ''], ['intent data.txt', 'new\n']]) fs.writeFileSync(path.join(root, file), contents);
+    git(root, 'add', '-N', '--', 'intent empty.txt', 'intent data.txt');
+    const baseline = capture(root);
+    for (const file of ['intent empty.txt', 'intent data.txt']) {
+      assert.ok(baseline.code_roots[0].status.some(row => row.path === file && row.code === ' A'));
+    }
+    assert.equal(verify(baseline).exit_code, 0);
+    fs.appendFileSync(path.join(root, 'intent empty.txt'), 'changed\n');
+    const changed = verify(baseline);
+    assert.equal(changed.reason, guard.REASONS.MUTATION);
+    assert.equal(changed.exit_code, 3);
+  });
   check('preexisting assume-unchanged skip-worktree refuse hidden tracked changes before spawn', () => {
     for (const flag of ['--assume-unchanged', '--skip-worktree']) {
       const root = fixture(); git(root, 'update-index', flag, 'tracked.txt');

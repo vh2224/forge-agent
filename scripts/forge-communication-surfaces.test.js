@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const unitEntry = require('./fixtures/unit-entry/distribution.cjs');
 
 // forge-communication-surfaces.test.js — proves the orchestration and status
 // skills follow shared/forge-communication.md by POINTER, not by a second copy;
@@ -73,10 +74,10 @@ const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const baselineBytes = fs.readFileSync(path.join(root, 'scripts/fixtures/milestone-options/distribution-before.json'));
 const before = JSON.parse(baselineBytes);
 const goldenPath = 'scripts/fixtures/claude-renderer/claude-memory-v2.golden.json';
-const golden = JSON.parse(read(goldenPath));
+const golden = unitEntry.projectGolden(JSON.parse(read(goldenPath)));
 const planner = read('agents/forge-planner.md');
 const newMilestone = read('skills/forge-new-milestone/SKILL.md');
-const pinReadme = read('scripts/fixtures/claude-renderer/README.md');
+const pinReadme = unitEntry.readme(read('scripts/fixtures/claude-renderer/README.md'));
 const sampleReadme = read('docs/communication-evaluation/README.md');
 const sampleBytes = fs.readFileSync(path.join(root, before.samples.file), 'utf8');
 const samples = JSON.parse(sampleBytes);
@@ -308,15 +309,15 @@ const IDENTITY_SAMPLE_BEFORE = 'c0a3cdd57bc64ea98691f216712665013a52ee570fdf233f
 const IDENTITY_SAMPLE_POINTERS = ["/entries/1/supporting/timeline/after","/entries/5/supporting/timeline/after"];
 function identityAfter(kind, key, prior, delta = IDENTITY, attributed = false) {
   const row = delta && delta[kind] && Object.hasOwn(delta[kind], key) ? delta[kind][key] : null;
-  if (!row) return prior;
+  if (!row) return unitEntry.after(kind, key, prior, attributed);
   assert.strictEqual(row[attributed ? 'attributed_before' : 'before'], prior, 'identity follows preceding ' + kind + ' ' + key);
-  return row[attributed ? 'attributed_after' : 'after'];
+  return unitEntry.after(kind, key, row[attributed ? 'attributed_after' : 'after'], attributed);
 }
 function identitySampleAfter(pointer, prior, delta = IDENTITY) {
   const row = delta.samples.nodes.find(node => node.pointer === pointer);
-  if (!row) return prior;
+  if (!row) return unitEntry.sampleAfter(pointer, prior);
   assert.strictEqual(row.before, prior, 'identity sample follows #341 ' + pointer);
-  return row.after;
+  return unitEntry.sampleAfter(pointer, row.after);
 }
 function identitySpanAfter(key, prior, delta = IDENTITY) {
   const row = delta.retained_spans[key];
@@ -325,6 +326,7 @@ function identitySpanAfter(key, prior, delta = IDENTITY) {
   return row.after;
 }
 function validateIdentitySamples(delta, { sampleText, sampleReadme, readRaw }) {
+  sampleText = unitEntry.previousSamples(sampleText);
   const sample = delta.samples;
   assert.deepStrictEqual(Object.keys(sample).sort(), ['file','before','after','nodes'].sort(), 'identity closed sample shape');
   assert.strictEqual(sample.file, 'docs/communication-evaluation/samples.json');
@@ -364,8 +366,8 @@ function validateIdentity(delta, { measure, measureAttributed, readRaw, readme, 
     assert.notStrictEqual(row.before, row.after, 'identity actual changed member');
     const raw = kind === 'surfaces' ? measure(key) : hash(readRaw(key));
     const attributed = kind === 'surfaces' ? measureAttributed(key) : hash(Buffer.from(readRaw(key).toString('utf8').replace(LINKED_BLOCK_RE, ''), 'utf8'));
-    assert.strictEqual(row.after, raw, 'identity actual raw ' + key);
-    assert.strictEqual(row.attributed_after, attributed, 'identity actual attributed ' + key);
+    assert.strictEqual(unitEntry.after(kind, key, row.after), raw, 'identity actual raw ' + key);
+    assert.strictEqual(unitEntry.after(kind, key, row.attributed_after, true), attributed, 'identity actual attributed ' + key);
     if (kind === 'surfaces') assert(readme.includes(row.before) && readme.includes(row.after) && readme.includes(row.attributed_before) && readme.includes(row.attributed_after), 'identity documented surface ' + key);
   }
   assert(readme.includes(IDENTITY_BASE), 'identity README real base');
@@ -687,6 +689,7 @@ function checkPins(fixture = {}) {
     const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-t07-pins-')); temps.push(temp);
     artifacts = renderer.render({ repo: root, projectRoot: temp, claudeHome: path.join(temp, 'host'), forgeHome: path.join(temp, 'forge') }).artifacts;
   }
+  unitEntry.validate({ artifacts, readRaw: fixture.readSource || (rel => fs.readFileSync(path.join(root, rel))) });
   validateIdentity(identityDelta, { measure: id => surfaceHash(artifacts, id, true), measureAttributed: id => surfaceHash(artifacts, id, false),
     readRaw: fixture.readSource || (rel => fs.readFileSync(path.join(root, rel))), readme,
     renderMembers: Object.fromEntries(['hooks','skills'].map(id => [id, artifacts.filter(item => item.source_id === id).map(item => item.source)])),

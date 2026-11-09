@@ -231,3 +231,10 @@ Only the existing two forge-task timeline-after source.sha256 literal spans are 
 Raw task after: `109262eb2c60a498b7775527988b1b1b5a3b57b4a6ce3d890b83282f333dc854`; attributed task after: `e6114c0603df23f99697e6264d13d496427ef139f86f99c033209173b8bcedb5`.
 Full samples before: `c0a3cdd57bc64ea98691f216712665013a52ee570fdf233ffe6c8c13b1e449ff`; after: `0a0d5ccb39fc880642d6a338153ed0e91bc72f39f978bda94ddcddb9ce242f3c`.
 This records source attribution following maintenance corrections; review, client behavior and acceptance remain separate facts.
+
+
+## #368 — bounded forge-next citation update
+
+Base52a69e79e92c58914da7fcb69f112219a4fd508b. Only the two existing forge-next source.sha256 literals change from `61d13a04a7cfd6c3f8543fadf6de12ac8d27e856e23a7946028a965bd34755a1` to `3ffd7bef2befcbfdf49e865435b538da9b3305d5207036d488507c741fdb1e6e`; quotations, metadata and all other bytes are preserved. Full samples `0a0d5ccb39fc880642d6a338153ed0e91bc72f39f978bda94ddcddb9ce242f3c` → `40d879d0b390068d8133de40e2d2c70ae9afab012d0d3770050af0d65def65bc`. Measured layer: scripts/fixtures/unit-entry/distribution-delta.json; distribution only, no client/UAT proof.
+
+The attributed forge-next source, with only its existing linked-task blocks removed, changes from `fad7ae40c8495226402cce4fbf0c849e1823450172e130195503af6e072cadee` to `0d9fed221f4fa52227184fc1d68a6aadac6f7ba917ce294b9dc837d04fb27eb4`. Both attributed and raw sample states remain documented and checked.

@@ -1414,10 +1414,11 @@ function workingStatus(cwd, opts = {}) {
         let kind = null;
         if (xy === '??') kind = 'untracked';
         else if (xy === '!!') kind = 'ignored';
-        // Index A is checked before the generic worktree-modified branch:
+        // Intent-to-add is exactly ` A`; index A is checked before the generic
+        // worktree-modified branch:
         // both `A ` and `AM` are additions not yet committed, not ordinary
         // local modifications.
-        else if (xy[0] === 'A') kind = 'added';
+        else if (xy === ' A' || xy[0] === 'A') kind = 'added';
         else if (xy.includes('D')) kind = 'deleted';
         else if (/[MRCU]/.test(xy)) kind = 'modified';
         else return { vcs, ok: false, entries: [], error: `git-status-unhandled:${xy}` };

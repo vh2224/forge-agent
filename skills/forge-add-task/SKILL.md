@@ -1,7 +1,6 @@
 ---
 name: forge-add-task
 description: "Adiciona uma task a um slice existente."
-disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Glob
 ---
 
