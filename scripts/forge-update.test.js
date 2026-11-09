@@ -556,7 +556,9 @@ test('successful apply invalidates sibling consumers of only the updated install
     const otherHome = path.join(data.root, 'shared-update-other-home');
     const prefsA = path.join(data.root, 'shared-update-prefs-a');
     const prefsB = path.join(data.root, 'shared-update-prefs-b');
-    for (const directory of [cacheDir, consumerA, consumerB, data.forgeHome, otherHome, prefsA, prefsB]) {
+    // The cache directory must be private: on POSIX the provider rejects a group/world-readable one.
+    fs.mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
+    for (const directory of [consumerA, consumerB, data.forgeHome, otherHome, prefsA, prefsB]) {
       fs.mkdirSync(directory, { recursive: true });
     }
     const manifest = {
