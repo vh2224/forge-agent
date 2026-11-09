@@ -670,6 +670,43 @@ test('v2 compares same relative path by physical checkout across legacy and root
   strict(require('./forge-claim-overlap').claimsConflict(c('beta'), { schema_version: 99, paths: [] }));
   f.cleanup();
 });
+
+test('issue366 valid nested contracts compare physical paths without weakening aggregate root validation', () => {
+  const strict = require('assert/strict'), roots = require('./forge-code-roots');
+  const h = require('./forge-code-roots.test'), f = h.fixture();
+  try {
+    const nested = h.checkout(path.join(f.a, 'nested'));
+    const contract = entries => roots.validateContract({ schema_version: 2, owner: f.owner, primary_root_id: entries[0].id, code_roots: entries });
+    const outer = contract([{ id: 'outer', path: f.a }]), inner = contract([{ id: 'inner', path: nested }]);
+    const c = (root, entries) => ({ schema_version: 2, execution_contract: root, paths: entries });
+    const a = p => c(outer, ['outer::' + p]), b = p => c(inner, ['inner::' + p]);
+    strict.equal(fs.realpathSync.native(roots.resolvePath(outer, 'outer::nested/same.txt').absolute), fs.realpathSync.native(roots.resolvePath(inner, 'inner::same.txt').absolute));
+    strict.equal(codeDirScope(a('nested/same.txt'), b('same.txt')).scope, 'same');
+    strict.equal(claimsConflict(a('nested/same.txt'), b('same.txt')).cause, 'overlap');
+    strict.equal(claimsConflict(b('same.txt'), a('nested/same.txt')).cause, 'overlap');
+    strict.equal(claimsConflict(a('nested/other.txt'), b('same.txt')), null);
+    strict.equal(claimsConflict(a('nested'), b('same.txt')).cause, 'overlap');
+    strict.equal(claimsConflict(a('nested/*.txt'), b('same.txt')).cause, 'overlap');
+    strict.equal(claimsConflict(a('nested/*.txt'), b('s*')).cause, 'overlap');
+    strict.equal(claimsConflict(a('nested/src/*.txt'), b('tests/*')), null);
+    const separate = contract([{ id: 'separate', path: f.b }]), other = c(separate, ['separate::same.txt']);
+    strict.equal(codeDirScope(b('same.txt'), other).scope, 'different'); strict.equal(claimsConflict(b('same.txt'), other), null);
+    strict.equal(claimsConflict(a('nested/same.txt'), { code_dir: nested, paths: ['same.txt'] }).cause, 'overlap');
+    const unknown = c(inner, ['unknown::same.txt']);
+    strict.equal(codeDirScope(a('nested/same.txt'), unknown).scope, 'unknown'); strict.equal(claimsConflict(a('nested/same.txt'), unknown).cause, 'undeclared-writes');
+    const stale = JSON.parse(JSON.stringify(b('same.txt'))); stale.execution_contract.code_roots[0].identity_sha256 = '0'.repeat(64);
+    strict.equal(codeDirScope(a('nested/same.txt'), stale).scope, 'unknown'); strict.equal(claimsConflict(a('nested/same.txt'), stale).cause, 'undeclared-writes');
+    strict.throws(() => contract([{ id: 'outer', path: f.a }, { id: 'inner', path: nested }]), e => e.code === 'roots-overlap-or-alias');
+    const alias = path.join(f.dir, 'nested-alias'); fs.symlinkSync(nested, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const aliased = contract([{ id: 'alias', path: alias }]); strict.equal(claimsConflict(a('nested/same.txt'), c(aliased, ['alias::same.txt'])).cause, 'overlap');
+    strict.throws(() => contract([{ id: 'inner', path: nested }, { id: 'alias', path: alias }]), e => e.code === 'roots-overlap-or-alias');
+    if (process.platform === 'win32') {
+      const upper = contract([{ id: 'case', path: nested.toUpperCase() }]);
+      strict.equal(claimsConflict(a('NESTED/SAME.TXT'), c(upper, ['case::same.txt'])).cause, 'overlap');
+    }
+  } finally { f.cleanup(); }
+});
+
 cleanup();
 
 console.log(`\n${passed} passed, ${failed} failed`);

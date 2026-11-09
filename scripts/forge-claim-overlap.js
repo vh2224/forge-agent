@@ -32,7 +32,7 @@
 // that distinction — it is born here, not there).
 //
 // The two polarities coexist ON PURPOSE. This module therefore reuses only
-// `pathsOverlap` — the glob/prefix ALGEBRA — and NEVER the intra-slice
+// `pathsOverlap` / `claimPathMatches` — path ALGEBRA — and NEVER the intra-slice
 // predicate. T03 is the executable guard for both halves of that sentence.
 //
 // ── Composition, not reimplementation ──────────────────────────────────────
@@ -61,7 +61,7 @@ const fs = require('fs');
 const path = require('path');
 
 const { readClaim } = require('./forge-write-claim.js');
-const { pathsOverlap } = require('./forge-parallelism.js');
+const { pathsOverlap, claimPathMatches } = require('./forge-parallelism.js');
 const runs = require('./forge-runs.js');
 
 // ── Verdicts ─────────────────────────────────────────────────────────────
@@ -188,7 +188,9 @@ function codeDirScope(a, b) {
     try {
       const roots = require('./forge-code-roots');
       const aa = roots.claimGroups(a), bb = roots.claimGroups(b);
-      return { scope: aa.some(x => bb.some(y => x.identity_sha256 === y.identity_sha256)) ? 'same' : 'different', note: null };
+      // Individually valid contracts can name nested checkouts; unequal identities
+      // prove neither disjoint root regions nor disjoint write targets.
+      return { scope: aa.some(x => bb.some(y => roots.within(x.path, y.path) || roots.within(y.path, x.path))) ? 'same' : 'different', note: null };
     } catch { return { scope: 'unknown', note: 'code-dir-unresolved' }; }
   }
   const ka = classifyCodeDir(a && a.code_dir !== undefined ? a.code_dir : null);
@@ -249,15 +251,32 @@ function isUndeclared(claim) {
  * distinct from `overlap` so the S04 gate can treat them differently.
  *
  * `writesConflict` is deliberately NOT imported here, and is not referenced
- * anywhere in this file; only `pathsOverlap` — the algebra — is reused.
+ * anywhere in this file; `pathsOverlap` and directory coverage from `claimPathMatches` are reused.
  */
+// Compare in one measured physical namespace; root IDs are local to each contract.
+function physicalPathsOverlap(a, b, common, roots) {
+  const x = roots.key(path.relative(common.path, a.absolute));
+  const y = roots.key(path.relative(common.path, b.absolute));
+  if (pathsOverlap(x, y) || claimPathMatches(x, y) || claimPathMatches(y, x)) return true;
+  if (!/[*?]/.test(x) || !/[*?]/.test(y)) return false;
+  // Existing glob matching need not prove intersection of two patterns. Unless
+  // their literal ancestor directories are disjoint, uncertainty conflicts.
+  const literal = p => path.resolve(common.path, p.split(/[*?]/, 1)[0].replace(/[^/]*$/, ''));
+  return roots.within(literal(x), literal(y)) || roots.within(literal(y), literal(x));
+}
+
 function claimsConflict(claimA, claimB) {
   if (claimA?.schema_version !== undefined && claimA.schema_version !== 1 || claimB?.schema_version !== undefined && claimB.schema_version !== 1) {
     try {
       const roots = require('./forge-code-roots'), matched = [];
       for (const a of roots.claimGroups(claimA)) for (const b of roots.claimGroups(claimB)) {
-        if (a.identity_sha256 !== b.identity_sha256) continue;
-        for (const x of a.paths) for (const y of b.paths) if (pathsOverlap(x, y)) matched.push(`${a.id}::${x} × ${b.id}::${y}`);
+        const common = roots.within(a.path, b.path) ? a : roots.within(b.path, a.path) ? b : null;
+        if (!common) continue;
+        const resolve = group => group.paths.map(value => roots.resolvePath({ code_roots: [group] }, { root_id: group.id, path: value }));
+        const left = resolve(a), right = resolve(b);
+        for (const x of left) for (const y of right) {
+          if (physicalPathsOverlap(x, y, common, roots)) matched.push(String(a.id) + '::' + x.path + ' × ' + b.id + '::' + y.path);
+        }
       }
       return matched.length ? { cause: 'overlap', paths: matched } : null;
     } catch (e) { return { cause: 'undeclared-writes', paths: [], detail: e.message }; }

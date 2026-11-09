@@ -24,7 +24,7 @@
 //   parseDeclaredPaths(planText) → { paths: string[], source: 'writes+expected_output'|'files-to-change'|'none' }
 //   parseFilesToChange(planText) → string[]
 //   attributeRepo(absPath, repos) → repo|null   (longest-prefix, boundary-aware)
-//   parseListField(fm, key) → string[]|null     (copied from forge-parallelism.js — see below)
+//   parseListField(fm, key) → string[]|null     (shared structural execution parser)
 //   parseScalarField(fm, key) → string|null
 //   matchDeclaredRepo(value, usable, cwd, repoIndex) → { repo, status, path }
 //   scorePath(root, repoPath) → number
@@ -76,15 +76,13 @@
 // verdict, a status or an exit code — same refusal, better explanation. Additive: it is on
 // every result with default '' and nothing reads it to decide anything.
 //
-// NOTE: `parseListField` / `normalizePath` are COPIED from scripts/forge-parallelism.js
-// rather than required: that module calls main() at top level with no `require.main`
-// guard, so requiring it would print JSON into our stdout and process.exit().
+// Declaration lists use forge-must-haves' shared structural parser.
 
 'use strict';
 
 const fs   = require('fs');
 const path = require('path');
-const { hasStructuredMustHaves, parseMustHaves } = require('./forge-must-haves.js');
+const { hasStructuredMustHaves, parseMustHaves, parseExecutionDeclaration } = require('./forge-must-haves.js');
 
 const REASON_CROSS_REPO  = 'sidecar-multirepo-unsupported';
 const REASON_UNDECLARED  = 'sidecar-code-dir-undeclared';
@@ -97,35 +95,14 @@ function normalizePath(p) {
 
 // Parse either inline (`key: [a, b]`) or block (`key:\n  - a\n  - b`) YAML list.
 // Returns array (possibly empty) or null if key not present.
-// (copied from forge-parallelism.js:137-160)
+// Shared structural declaration parsing; no second list/comment scanner here.
 function parseListField(fm, key) {
-  const inlineRe = new RegExp('^' + key + ':\\s*\\[([^\\]]*)\\]\\s*$', 'm');
-  const mi = fm.match(inlineRe);
-  if (mi) {
-    const raw = mi[1].trim();
-    if (!raw) return [];
-    return raw.split(',').map(s => s.trim().replace(/^["']|["']$/g, '')).filter(Boolean);
-  }
-  // Form A-inplace (S03/T05): the repetition terminator must accept CRLF. `.` in
-  // JavaScript excludes \r as a line terminator, so on a CRLF plan `.+` stops
-  // before the \r and the optional `\n?` cannot bridge it — the repetition ends
-  // after the FIRST item and every later declared path is silently dropped.
-  // Measured: a two-entry CRLF `writes:` parsed to one entry, which made a
-  // cross-repo plan look single-repo (forge-code-dir-repo.test.js "R12 — exit 4"
-  // came back 0). Silent under-reporting of declared paths, not a parse error.
-  const blockRe = new RegExp('^' + key + ':[ \\t]*\\r?\\n((?:[ \\t]+-[ \\t]+.+\\r?\\n?)+)', 'm');
-  const mb = fm.match(blockRe);
-  if (mb) {
-    const items = [];
-    for (const line of mb[1].split(/\r?\n/)) {
-      const mm = line.match(/^[ \t]+-[ \t]+(.+?)\s*$/);
-      if (mm) items.push(mm[1].replace(/^["']|["']$/g, ''));
-    }
-    return items;
-  }
-  const emptyRe = new RegExp('^' + key + ':\\s*$', 'm');
-  if (emptyRe.test(fm)) return [];
-  return null;
+  const read = parseExecutionDeclaration('---\n' + String(fm).replace(/\r\n?/g, '\n') + '\n---', key);
+  if (read.status === 'absent') return null;
+  if (read.status === 'empty') return []; // historical bare-empty CODE_DIR list
+  if (read.status === 'invalid') throw new Error(read.error);
+  if (read.items.some(value => typeof value !== 'string')) throw new Error('code-dir-root-contract-required');
+  return read.items;
 }
 
 // Parse a simple YAML scalar, accepting quotes and stripping an inline comment.
