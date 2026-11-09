@@ -30,6 +30,7 @@ const REASONS = Object.freeze({
   'provider-exit': 'transport', 'authentication-failed': 'transport',
   'provider-timeout': 'transport', 'provider-cancelled': 'transport',
   'provider-unavailable': 'transport', 'publication-failed': 'publication',
+  'host-observation-failed': 'adapter', 'verification-capture-failed': 'verification',
   'adapter-failed': 'adapter', 'anomalous-silence': 'transport',
   'budget-exceeded-while-active': 'transport', 'duplicate-terminal':'envelope', 'event-after-terminal':'envelope',
   // S04/T02: the app-server asked for a human answer; refused and the turn stopped.
@@ -58,6 +59,11 @@ function diagnostic(reason, counts = {}) {
   // A substitution names the observed model; nothing else ever carries an id.
   if (safeReason === 'model-substituted' && isSafeModelId(counts.model_observed)) {
     value.model_observed = counts.model_observed;
+  }
+  if (safeReason === 'verification-capture-failed' && typeof counts.verification_capture_sha256 === 'string' && /^[a-f0-9]{64}$/.test(counts.verification_capture_sha256)) value.verification_capture_sha256 = counts.verification_capture_sha256;
+  if (safeReason === 'host-observation-failed') {
+    if (counts.observer_stage === 'packaged-context') value.observer_stage = counts.observer_stage;
+    if (typeof counts.observer_error_sha256 === 'string' && /^[a-f0-9]{64}$/.test(counts.observer_error_sha256)) value.observer_error_sha256 = counts.observer_error_sha256;
   }
   if (counts.observation) value.observation = observation(counts.observation);
   return value;

@@ -2604,6 +2604,36 @@ test('multi-root plan derives qualified writes and physical claim lock refuses c
   strict.throws(() => require('./forge-claim-gate').deriveClaimFromPlan(f.owner, file, f.contract));
   f.cleanup();
 });
+
+test('issue366 enforcing gate blocks a parent/nested shared target and permits a disjoint target', () => {
+  const strict = require('assert/strict'), roots = require('./forge-code-roots');
+  const h = require('./forge-code-roots.test'), f = h.fixture();
+  try {
+    const nested = h.checkout(path.join(f.a, 'nested'));
+    const contract = entries => roots.validateContract({ schema_version: 2, owner: f.owner, primary_root_id: entries[0].id, code_roots: entries });
+    const outer = contract([{ id: 'outer', path: f.a }]), inner = contract([{ id: 'inner', path: nested }]);
+    strict.throws(() => contract([{ id: 'outer', path: f.a }, { id: 'inner', path: nested }]), e => e.code === 'roots-overlap-or-alias');
+    const outerId = 'T-20261109020000-outer', innerId = 'T-20261109020001-inner';
+    const held = require('./forge-write-claim').normalizeClaim({ schema_version: 2, execution_contract: inner,
+      paths: ['inner::same.txt'], source: 'manual', unit: 'execute-task/' + innerId });
+    fs.mkdirSync(path.join(f.owner, '.gsd', 'forge', 'runs'), { recursive: true });
+    fs.writeFileSync(path.join(f.owner, '.gsd', 'PROJECT.md'), '# Synthetic nested fixture\n');
+    for (const [id, write_claim] of [[outerId, null], [innerId, held]]) fs.writeFileSync(path.join(f.owner, '.gsd', 'forge', 'runs', id + '.json'), JSON.stringify({
+      id, kind: 'task', session_id: 'fixture-' + id, host_runtime: 'claude', active: true, cwd: f.owner,
+      started_at: Date.now(), last_heartbeat: Date.now(), worker: null, write_claim }));
+    const globalDir = path.join(f.dir, 'private-prefs'); fs.mkdirSync(globalDir);
+    const options = { cwd: f.owner, runId: outerId, unit: 'execute-task/' + outerId, codeDir: f.a,
+      executionContract: outer, paths: ['outer::nested/same.txt'], source: 'manual', posture: 'block',
+      enforcement: 'enforcing', wait: false, emitEvent: false, prefsOpts: { globalDir } };
+    const blocked = require('./forge-claim-gate').recordAndEvaluate(options);
+    strict.equal(blocked.decision, 'block'); strict.equal(blocked.cause, 'overlap'); strict.notEqual(blocked.advised_action, 'dispatch');
+    strict.equal(blocked.census.counterparts_in_scope, 1); strict(!blocked.census.skipped.some(row => row.reason === 'different-code-dir'));
+    const clean = require('./forge-claim-gate').recordAndEvaluate({ ...options, paths: ['outer::nested/other.txt'] });
+    strict.equal(clean.decision, 'proceed'); strict.equal(clean.reason, 'no-conflict'); strict.equal(clean.census.counterparts_in_scope, 1);
+    require('./forge-write-claim').validateHeldClaim(JSON.parse(fs.readFileSync(path.join(f.owner, '.gsd', 'forge', 'runs', outerId + '.json'), 'utf8')).write_claim);
+  } finally { f.cleanup(); }
+});
+
 // --- Summary ---
 cleanup();
 console.log(`\n=== Result: ${passed} passed, ${failed} failed ===`);

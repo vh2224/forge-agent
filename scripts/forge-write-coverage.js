@@ -59,8 +59,8 @@
 const fs = require('fs');
 const path = require('path');
 
-const { pathsOverlap, normalizePath, parseTaskFrontmatter } = require('./forge-parallelism.js');
-const { hasStructuredMustHaves, parseMustHavesStructure } = require('./forge-must-haves.js');
+const { pathsOverlap, normalizePath } = require('./forge-parallelism.js');
+const { hasStructuredMustHaves, parseMustHavesStructure, parseExecutionDeclaration } = require('./forge-must-haves.js');
 const { writtenByUnit, listUnitRefs, commitsForRef, unitKeyFor } = require('./forge-unit-delta.js');
 const { resolveEvidenceFiles } = require('./forge-evidence-path.js');
 const { entityKind } = require('./forge-ids.js');
@@ -260,17 +260,21 @@ function declaredFor(cwd, unit) {
   if (!hasStructuredMustHaves(unit.content)) {
     return { declared: [], legacy: true, detail: 'no structured must_haves: block' };
   }
-  let expected = [];
+  let expected = [], writes = [];
   try {
-    // Historical observation must retain valid old declarations, including
-    // .gsd-only plans that the current product-admission policy rightly rejects.
-    // Structural validity still applies; this reader never admits a writer.
+    // Observation remains structural: historical protected paths are readable.
     expected = parseMustHavesStructure(unit.content).expected_output || [];
+    const read = parseExecutionDeclaration(unit.content, 'writes');
+    if (read.status === 'invalid') throw new Error(read.error);
+    writes = read.status === 'valid' ? read.items : [];
+    if ([...writes, ...expected].some(value => typeof value !== 'string' || value.includes('::'))) {
+      // This legacy metric has only one unqualified VCS namespace. It cannot
+      // invent a physical root or let its output authorize a writer claim.
+      return { declared: [], legacy: true, detail: 'root-qualified-execution-contract-required' };
+    }
   } catch (e) {
     return { declared: [], legacy: true, detail: e.message };
   }
-  const fm = parseTaskFrontmatter(path.join(cwd, unit.plan_path));
-  const writes = (fm && Array.isArray(fm.writes)) ? fm.writes : [];
 
   const seen = new Set();
   const declared = [];
