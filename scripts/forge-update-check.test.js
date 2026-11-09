@@ -277,18 +277,209 @@ try {
     assert.strictEqual(fs.existsSync(file), false);
   });
 
+  test('installation invalidation fences every consumer of one forgeHome and no other installation', () => {
+    const forgeHome = path.join(ROOT, 'shared-generation-home');
+    const otherHome = path.join(ROOT, 'shared-generation-other-home');
+    const consumerA = path.join(ROOT, 'shared-generation-consumer-a');
+    const consumerB = path.join(ROOT, 'shared-generation-consumer-b');
+    const prefsA = path.join(ROOT, 'shared-generation-prefs-a');
+    const prefsB = path.join(ROOT, 'shared-generation-prefs-b');
+    for (const directory of [consumerA, consumerB, prefsA, prefsB]) fs.mkdirSync(directory);
+    writeManifest(forgeHome, remoteManifest({ sha: 'a'.repeat(40) }));
+    writeManifest(otherHome, remoteManifest({ sha: 'a'.repeat(40) }));
+    const targetA = { forgeHome, cwd: consumerA, prefs: { repo_path: prefsA } };
+    const targetB = { forgeHome, cwd: consumerB, prefs: { repo_path: prefsB } };
+    const targetOther = { forgeHome: otherHome, cwd: consumerB, prefs: { repo_path: prefsB } };
+    for (const target of [targetA, targetB, targetOther]) {
+      provider.refresh(target, { cacheDir, git: remoteGit(tag('a'.repeat(40), '1.2.3')) });
+      assert.strictEqual(provider.cachedUpdate(target, { cacheDir }).state, 'equal');
+    }
+    const pathsA = provider._private.cachePaths(targetA, cacheDir);
+    const pathsB = provider._private.cachePaths(targetB, cacheDir);
+    const pathsOther = provider._private.cachePaths(targetOther, cacheDir);
+    assert.strictEqual(pathsA.installationGenerationFile, pathsB.installationGenerationFile);
+    assert.notStrictEqual(pathsA.installationGenerationFile, pathsOther.installationGenerationFile);
+    const invalidated = provider.invalidateCache(targetA, { cacheDir });
+    assert.strictEqual(invalidated.invalidated, true);
+    assert.strictEqual(invalidated.installation_generation_rotated, true);
+    assert.strictEqual(invalidated.consumer_generation_rotated, true);
+    assert.strictEqual(invalidated.cache_cleanup, 'removed');
+    let launches = 0;
+    assert.strictEqual(provider.cachedUpdate(targetB, { cacheDir, spawn() {
+      launches++;
+      return { on() {}, unref() {} };
+    } }).state, 'unknown');
+    assert.strictEqual(launches, 1, 'the second consumer is stale before the ten-minute TTL');
+    assert.strictEqual(fs.existsSync(pathsB.file), true, 'logical invalidation does not scan or delete siblings');
+    assert.strictEqual(provider.cachedUpdate(targetOther, { cacheDir,
+      spawn() { throw new Error('another installation must remain warm'); } }).state, 'equal');
+    fs.rmSync(`${pathsB.file}.refresh`, { force: true });
+  });
+
+  test('stale shared-generation publication and transient retention are rejected', () => {
+    const forgeHome = path.join(ROOT, 'shared-generation-stale-home');
+    const targetA = { forgeHome, cwd: path.join(ROOT, 'shared-stale-a'), prefs: { repo_path: repo } };
+    const targetB = { forgeHome, cwd: path.join(ROOT, 'shared-stale-b'), prefs: { repo_path: origin } };
+    fs.mkdirSync(targetA.cwd);
+    fs.mkdirSync(targetB.cwd);
+    writeManifest(forgeHome, remoteManifest({ sha: 'a'.repeat(40) }));
+    const file = provider.cachePath(targetA, cacheDir);
+    const success = provider.refresh(targetA, {
+      cacheDir, git: remoteGit(tag('b'.repeat(40), '2.0.0') + tag('a'.repeat(40), '1.2.3')),
+    });
+    const capturedPublication = fs.readFileSync(file, 'utf8');
+    assert.strictEqual(success.state, 'behind');
+    provider.invalidateCache(targetB, { cacheDir });
+    fs.writeFileSync(file, capturedPublication, { mode: 0o600 });
+    fs.chmodSync(file, 0o600);
+    let launches = 0;
+    assert.strictEqual(provider.cachedUpdate(targetA, { cacheDir, spawn() {
+      launches++;
+      return { on() {}, unref() {} };
+    } }).state, 'unknown');
+    assert.strictEqual(launches, 1);
+    fs.rmSync(`${file}.refresh`, { force: true });
+    const transient = provider.refresh(targetA, { cacheDir, git() { throw new Error('network down'); } });
+    assert.strictEqual(transient.state, 'unknown');
+    assert.strictEqual(transient.has_update, false);
+    assert.strictEqual(transient.error, 'git_transient');
+    assert.notStrictEqual(transient.installation_generation, success.installation_generation);
+  });
+
+  test('refresh captured before shared invalidation does not publish after the rotation', () => {
+    const forgeHome = path.join(ROOT, 'shared-generation-race-home');
+    const targetA = { forgeHome, cwd: path.join(ROOT, 'shared-race-a') };
+    const targetB = { forgeHome, cwd: path.join(ROOT, 'shared-race-b') };
+    fs.mkdirSync(targetA.cwd);
+    fs.mkdirSync(targetB.cwd);
+    writeManifest(forgeHome, remoteManifest({ sha: 'a'.repeat(40) }));
+    const file = provider.cachePath(targetA, cacheDir);
+    let rotated = false;
+    const value = provider.refresh(targetA, { cacheDir, git(cwd, args) {
+      if (!rotated) {
+        rotated = true;
+        provider.invalidateCache(targetB, { cacheDir });
+      }
+      return tag('a'.repeat(40), '1.2.3');
+    } });
+    assert.strictEqual(value.state, 'equal');
+    assert.strictEqual(rotated, true);
+    assert.strictEqual(fs.existsSync(file), false, 'superseded result must not be published');
+  });
+
+  test('installation schema requires a non-null shared generation while direct clone stays local-only', () => {
+    const forgeHome = path.join(ROOT, 'required-installation-generation');
+    const target = { forgeHome };
+    writeManifest(forgeHome, remoteManifest({ sha: 'a'.repeat(40) }));
+    const file = provider.cachePath(target, cacheDir);
+    provider.refresh(target, { cacheDir, git: remoteGit(tag('a'.repeat(40), '1.2.3')) });
+    const valid = JSON.parse(fs.readFileSync(file, 'utf8'));
+    for (const installationGeneration of [undefined, null]) {
+      const payload = { ...valid, installation_generation: installationGeneration };
+      if (installationGeneration === undefined) delete payload.installation_generation;
+      fs.writeFileSync(file, JSON.stringify(payload), { mode: 0o600 });
+      fs.chmodSync(file, 0o600);
+      let launches = 0;
+      assert.strictEqual(provider.cachedUpdate(target, { cacheDir, spawn() {
+        launches++;
+        return { on() {}, unref() {} };
+      } }).state, 'unknown');
+      assert.strictEqual(launches, 1);
+      fs.rmSync(`${file}.refresh`, { force: true });
+    }
+    const direct = provider.refresh(repo, { cacheDir });
+    assert.strictEqual(direct.installation_generation, null);
+    const directPaths = provider._private.cachePaths(repo, cacheDir);
+    assert.strictEqual(directPaths.installationGenerationFile, null);
+    assert(provider._private.readCache(directPaths.file, directPaths),
+      `direct clone publication was not readable: ${fs.readFileSync(directPaths.file, 'utf8')}`);
+    assert.strictEqual(provider.cachedUpdate(repo, { cacheDir,
+      spawn() { throw new Error('direct clone cache should remain valid'); } }).state, direct.state);
+  });
+
+  test('invalidation reports shared rotation independently from missing or failed cleanup', () => {
+    const forgeHome = path.join(ROOT, 'invalidation-outcomes-home');
+    const missingTarget = { forgeHome, cwd: path.join(ROOT, 'invalidation-missing') };
+    fs.mkdirSync(missingTarget.cwd);
+    const missing = provider.invalidateCache(missingTarget, { cacheDir });
+    assert.strictEqual(missing.invalidated, true);
+    assert.strictEqual(missing.installation_generation_rotated, true);
+    assert.strictEqual(missing.consumer_generation_rotated, true);
+    assert.strictEqual(missing.cache_cleanup, 'missing');
+
+    const failedTarget = { forgeHome, cwd: path.join(ROOT, 'invalidation-failed') };
+    fs.mkdirSync(failedTarget.cwd);
+    writeManifest(forgeHome, remoteManifest({ sha: 'a'.repeat(40) }));
+    provider.refresh(failedTarget, { cacheDir, git: remoteGit(tag('a'.repeat(40), '1.2.3')) });
+    const failedFile = provider.cachePath(failedTarget, cacheDir);
+    const originalUnlink = fs.unlinkSync;
+    try {
+      fs.unlinkSync = function(file, ...args) {
+        if (physical(file) === physical(failedFile)) {
+          const error = new Error('fixture cleanup denied');
+          error.code = 'EACCES';
+          throw error;
+        }
+        return originalUnlink.call(fs, file, ...args);
+      };
+      const failed = provider.invalidateCache(failedTarget, { cacheDir });
+      assert.strictEqual(failed.invalidated, true);
+      assert.strictEqual(failed.installation_generation_rotated, true);
+      assert.strictEqual(failed.consumer_generation_rotated, true);
+      assert.strictEqual(failed.cache_cleanup, 'failed');
+      assert.strictEqual(failed.reason, 'cache-cleanup-failed');
+    } finally { fs.unlinkSync = originalUnlink; }
+  });
+
+  test('failed shared rotation is not reported as a successful invalidation', () => {
+    const forgeHome = path.join(ROOT, 'invalidation-global-failure-home');
+    const target = { forgeHome };
+    const paths = provider._private.cachePaths(target, cacheDir);
+    provider.invalidateCache(target, { cacheDir });
+    const localBefore = provider._private.readGenerationFile(paths.consumerGenerationFile);
+    const originalRename = fs.renameSync;
+    try {
+      fs.renameSync = function(source, destination, ...args) {
+        if (physical(destination) === physical(paths.installationGenerationFile)) {
+          const error = new Error('fixture global rotation denied');
+          error.code = 'EACCES';
+          throw error;
+        }
+        return originalRename.call(fs, source, destination, ...args);
+      };
+      const result = provider.invalidateCache(target, { cacheDir });
+      assert.strictEqual(result.invalidated, false);
+      assert.strictEqual(result.installation_generation_rotated, false);
+      assert.strictEqual(result.consumer_generation_rotated, false);
+      assert.strictEqual(result.cache_cleanup, 'not-attempted');
+      assert.strictEqual(result.reason, 'installation-generation-failed');
+      assert.strictEqual(provider._private.readGenerationFile(paths.consumerGenerationFile), localBefore);
+    } finally { fs.renameSync = originalRename; }
+  });
+
+  test('cache timing constants retain ten-minute TTL and fixed sixty-second retry', () => {
+    assert.strictEqual(provider._private.TTL_MS, 10 * 60 * 1000);
+    assert.strictEqual(provider._private.TRANSIENT_RETRY_MS, 60 * 1000);
+  });
+
   test('CLI --invalidate --cwd resolves repo_path with the canonical prefs engine', () => {
     const forgeHome = path.join(ROOT, 'cli-invalidate-home');
     const consumer = path.join(ROOT, 'cli-invalidate-consumer');
     const cliCache = path.join(ROOT, 'cli-invalidate-cache');
+    const otherConsumer = path.join(ROOT, 'cli-invalidate-other-consumer');
     const relativeRepo = path.relative(consumer, repo);
+    const otherRelativeRepo = path.relative(otherConsumer, origin);
     fs.mkdirSync(path.join(consumer, '.gsd'), { recursive: true });
+    fs.mkdirSync(path.join(otherConsumer, '.gsd'), { recursive: true });
     fs.mkdirSync(cliCache, { mode: 0o700 });
     fs.writeFileSync(path.join(consumer, '.gsd', 'forge-prefs.jsonc'), JSON.stringify({ repo_path: relativeRepo }));
+    fs.writeFileSync(path.join(otherConsumer, '.gsd', 'forge-prefs.jsonc'), JSON.stringify({ repo_path: otherRelativeRepo }));
     writeManifest(forgeHome, remoteManifest({ sha: 'a'.repeat(40) }));
     const target = { forgeHome, cwd: consumer, prefs: { repo_path: relativeRepo } };
+    const otherTarget = { forgeHome, cwd: otherConsumer, prefs: { repo_path: otherRelativeRepo } };
     const file = provider.cachePath(target, cliCache);
     provider.refresh(target, { cacheDir: cliCache, git: remoteGit(tag('a'.repeat(40), '1.2.3')) });
+    provider.refresh(otherTarget, { cacheDir: cliCache, git: remoteGit(tag('a'.repeat(40), '1.2.3')) });
     assert.strictEqual(fs.existsSync(file), true);
     const result = spawnSync(process.execPath, [require.resolve('./forge-update-check'), '--invalidate', '--cwd', consumer, cliCache], {
       encoding: 'utf8', timeout: 3000,
@@ -299,6 +490,14 @@ try {
     assert.strictEqual(output.file, file);
     assert.strictEqual(output.invalidated, true);
     assert.strictEqual(fs.existsSync(file), false);
+    assert.strictEqual(output.installation_generation_rotated, true);
+    let launches = 0;
+    assert.strictEqual(provider.cachedUpdate(otherTarget, { cacheDir: cliCache, spawn() {
+      launches++;
+      return { on() {}, unref() {} };
+    } }).state, 'unknown');
+    assert.strictEqual(launches, 1, 'CLI invalidates sibling consumers through the shared fence');
+    fs.rmSync(`${provider.cachePath(otherTarget, cliCache)}.refresh`, { force: true });
   });
 
   test('missing, malformed and oversized manifests are unknown without Git', () => {

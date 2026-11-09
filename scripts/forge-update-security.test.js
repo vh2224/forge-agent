@@ -29,7 +29,9 @@ function fixture(name) {
   fs.mkdirSync(forgeHome, { recursive: true });
   fs.mkdirSync(cacheDir, { mode: 0o700 });
   const target = { forgeHome };
-  return { forgeHome, cacheDir, target, file: provider.cachePath(target, cacheDir) };
+  const paths = provider._private.cachePaths(target, cacheDir);
+  provider.invalidateCache(target, { cacheDir });
+  return { forgeHome, cacheDir, target, file: paths.file, paths };
 }
 
 function writeManifest(f, source, extras = {}) {
@@ -53,7 +55,7 @@ function unknown(value) {
   assert.strictEqual(value.remote_version, '');
 }
 
-function validCache(overrides = {}) {
+function validCache(f, overrides = {}) {
   return {
     schema_version: provider._private.CACHE_SCHEMA_VERSION,
     ts: Date.now(),
@@ -63,7 +65,8 @@ function validCache(overrides = {}) {
     version: 'v1.2.3',
     has_update: true,
     remote_version: 'v2.0.0',
-    generation: null,
+    generation: provider._private.readGenerationFile(f.paths.consumerGenerationFile),
+    installation_generation: provider._private.readGenerationFile(f.paths.installationGenerationFile),
     ...overrides,
   };
 }
@@ -197,18 +200,18 @@ try {
 
   test('cache accepts differs but rejects legacy, unsafe text and invented states', () => {
     const f = fixture('cache-schema');
-    fs.writeFileSync(f.file, JSON.stringify(validCache({ state: 'differs' })), { mode: 0o600 });
+    fs.writeFileSync(f.file, JSON.stringify(validCache(f, { state: 'differs' })), { mode: 0o600 });
     const differs = render(f);
     assert.strictEqual(differs.state, 'differs');
     assert.strictEqual(differs.has_update, true);
     for (const payload of [
-      { ...validCache(), schema_version: undefined },
-      { ...validCache(), state: 'invented' },
-      { ...validCache(), version: 'v1\nforged' },
-      { ...validCache(), remote_version: '\x1b]52;c;ZXhwbG9pdA==\x07' },
-      { ...validCache(), remote_version: 'x'.repeat(257) },
-      { ...validCache(), identity: 'short' },
-      { ...validCache(), source_mode: 'shell' },
+      { ...validCache(f), schema_version: undefined },
+      { ...validCache(f), state: 'invented' },
+      { ...validCache(f), version: 'v1\nforged' },
+      { ...validCache(f), remote_version: '\x1b]52;c;ZXhwbG9pdA==\x07' },
+      { ...validCache(f), remote_version: 'x'.repeat(257) },
+      { ...validCache(f), identity: 'short' },
+      { ...validCache(f), source_mode: 'shell' },
     ]) {
       fs.rmSync(`${f.file}.refresh`, { force: true });
       fs.writeFileSync(f.file, JSON.stringify(payload), { mode: 0o600 });
@@ -216,9 +219,37 @@ try {
     }
   });
 
+  test('installation generation basename contains only a canonical forgeHome hash', () => {
+    const first = fixture('generation-name-first');
+    const same = provider._private.cachePaths({ forgeHome: path.join(first.forgeHome, '.') }, first.cacheDir);
+    const second = fixture('generation-name-second');
+    const basename = path.basename(first.paths.installationGenerationFile);
+    assert.match(basename, /^forge-update-installation-[a-f0-9]{64}\.generation$/);
+    assert.strictEqual(same.installationGenerationFile, first.paths.installationGenerationFile);
+    assert.notStrictEqual(second.paths.installationGenerationFile, first.paths.installationGenerationFile);
+    assert(!basename.includes(path.basename(first.forgeHome)));
+    assert(!basename.includes(first.forgeHome));
+  });
+
+  for (const [name, installGeneration] of [
+    ['invalid-content', (f) => fs.writeFileSync(f.paths.installationGenerationFile, 'not-a-generation', { mode: 0o600 })],
+    ['oversized', (f) => fs.writeFileSync(f.paths.installationGenerationFile, 'x'.repeat(65), { mode: 0o600 })],
+    ['non-regular', (f) => {
+      fs.rmSync(f.paths.installationGenerationFile, { force: true });
+      fs.mkdirSync(f.paths.installationGenerationFile);
+    }],
+  ]) {
+    test(`${name} installation generation is a silent cache miss`, () => {
+      const f = fixture(`generation-${name}`);
+      fs.writeFileSync(f.file, JSON.stringify(validCache(f)), { mode: 0o600 });
+      installGeneration(f);
+      assert.doesNotThrow(() => unknown(render(f)));
+    });
+  }
+
   test('oversized cache is treated as absent and never rendered', () => {
     const f = fixture('oversized-cache');
-    fs.writeFileSync(f.file, JSON.stringify({ ...validCache(), pad: 'x'.repeat(70000) }), { mode: 0o600 });
+    fs.writeFileSync(f.file, JSON.stringify({ ...validCache(f), pad: 'x'.repeat(70000) }), { mode: 0o600 });
     unknown(render(f));
   });
 
@@ -250,6 +281,23 @@ try {
       assert.strictEqual(fs.statSync(f.file).mode & 0o777, 0o600);
       provider.invalidateCache(f.target, { cacheDir: f.cacheDir });
       assert.strictEqual(fs.statSync(`${f.file}.generation`).mode & 0o777, 0o600);
+      assert.strictEqual(fs.statSync(f.paths.installationGenerationFile).mode & 0o777, 0o600);
+      assert.strictEqual(fs.statSync(f.paths.installationGenerationFile).uid, process.getuid());
+    });
+
+    test('unsafe mode and foreign owner on installation generation are cache misses', () => {
+      const f = fixture('installation-generation-posix-policy');
+      fs.writeFileSync(f.file, JSON.stringify(validCache(f)), { mode: 0o600 });
+      fs.chmodSync(f.paths.installationGenerationFile, 0o640);
+      unknown(render(f));
+      fs.chmodSync(f.paths.installationGenerationFile, 0o600);
+      if (process.getuid() === 0) {
+        fs.chownSync(f.paths.installationGenerationFile, 65534,
+          typeof process.getgid === 'function' ? process.getgid() : 0);
+        unknown(render(f));
+      } else {
+        skip('foreign owner installation generation requires root');
+      }
     });
   } else skip('POSIX permission checks');
 
@@ -263,6 +311,35 @@ try {
     fileSymlinks = false;
   }
   if (fileSymlinks) {
+    test('symlinked installation generation is a silent cache miss', () => {
+      const f = fixture('installation-generation-symlink');
+      const target = path.join(root, 'installation-generation-symlink-target');
+      fs.writeFileSync(f.file, JSON.stringify(validCache(f)), { mode: 0o600 });
+      fs.writeFileSync(target, fs.readFileSync(f.paths.installationGenerationFile));
+      fs.rmSync(f.paths.installationGenerationFile);
+      fs.symlinkSync(target, f.paths.installationGenerationFile, 'file');
+      assert.doesNotThrow(() => unknown(render(f)));
+    });
+
+    test('installation generation publication uses exclusive private staging', () => {
+      const f = fixture('installation-generation-staging');
+      const victim = path.join(root, 'installation-generation-staging-victim');
+      const token = '22222222-2222-4222-8222-222222222222';
+      const collision = `${f.paths.installationGenerationFile}.${token}.tmp`;
+      fs.writeFileSync(victim, 'keep victim');
+      fs.symlinkSync(victim, collision);
+      const original = crypto.randomUUID;
+      try {
+        crypto.randomUUID = () => token;
+        const result = provider.invalidateCache(f.target, { cacheDir: f.cacheDir });
+        assert.strictEqual(result.invalidated, false);
+        assert.strictEqual(result.installation_generation_rotated, false);
+        assert.strictEqual(result.reason, 'installation-generation-failed');
+      } finally { crypto.randomUUID = original; }
+      assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'keep victim');
+      assert(fs.lstatSync(collision).isSymbolicLink());
+    });
+
     test('exclusive staging publication never follows a symlink collision', () => {
       const f = fixture('staging-symlink');
       writeManifest(f, {});
@@ -283,6 +360,14 @@ try {
       assert(fs.lstatSync(collision).isSymbolicLink());
     });
   } else skip('Windows file-symlink privilege unavailable');
+
+  test('installation generation reader is private and never uses manifest trust policy', () => {
+    const source = fs.readFileSync(require.resolve('./forge-update-check'), 'utf8');
+    const reader = source.slice(source.indexOf('function readGenerationFile'),
+      source.indexOf('function readGeneration(file)'));
+    assert(reader.includes('readPrivateFile(file, 64)'));
+    assert(!reader.includes('readManifestFile'));
+  });
 
   test('refresh CLI rejects malformed request without echoing its bytes', () => {
     const result = spawnSync(process.execPath, [require.resolve('./forge-update-check'), '--refresh', 'not-base64-json', root], {
