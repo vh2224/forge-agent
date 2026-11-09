@@ -90,6 +90,7 @@ async function main() {
   console.log('PASS C02 modelNotFound recovery classification: true and unknown provider remain unknown without service or timeout cause');
   await activeBudgetRecovery(identity, route, attempt, inspection, candidateSet);
   await sessionResumeRecovery({ ...route, worker_mode: 'sidecar', tier: 'heavy', workers_timeout: 21, workers_timeout_source: 'tier-default' });
+  await sessionResumeRecovery({ ...route, worker_mode: 'sidecar', tier: 'heavy', workers_timeout: 21, workers_timeout_source: 'tier-default' }, 'claude-output-limit');
   await codexAppServerRecovery(identity, route, attempt, inspection, candidateSet);
   await modelNotFoundRecovery(identity, route, attempt, inspection, candidateSet);
   console.log('PASS C02 modelNotFound recovery: no live authority stops without invocation and the authorized route uses another model');
@@ -561,7 +562,7 @@ async function codexAppServerRecovery(identity, route, attempt, inspection, cand
   console.log('PASS codex app-server: silence class with one same-target retry; active budget without session stops as resume-unavailable');
 }
 
-async function sessionResumeRecovery(route) {
+async function sessionResumeRecovery(route, code = 'budget-exceeded-while-active') {
   const fs = require('fs'), path = require('path'), stateApi = require('./forge-xllm-state');
   const sessions = require('./forge-claude-session'), { digest } = require('./forge-code-roots');
   const lab = require('./forge-code-roots.test').laboratory('recovery-resume');
@@ -574,9 +575,25 @@ async function sessionResumeRecovery(route) {
   const ref = sessions.createSessionRef({ id: sessions.newSessionId(), accountName: null, configDir: path.join(lab.dir, 'profile', '.claude'), cwd });
   const capture = (session, file = stateFile) => api.captureFailure({ stateFile: file, receiptFile, request, unit: 'research-milestone/M001', route,
     finalEvidence: require('./forge-attempt-telemetry').captureFinal({ request: { argv: ['--model', route.model] }, context: request.prompt }),
-    error: { code: 'budget-exceeded-while-active', provider_called: true, session }, budgets: { coding_standards: 3000 } });
+    error: { code, provider_called: code === 'claude-output-limit' ? 'unknown' : true, session,
+      ...(code === 'claude-output-limit' ? { liveness: { state: 'working' }, diagnostic: { observation: {
+        liveness: { version: 1, state: 'working', since_ms: 0, reason: null } } } } : {}) }, budgets: { coding_standards: 3000 } });
   assert.strictEqual(capture({ ...ref, id: 'not-a-uuid' }, path.join(lab.dir, 'invalid.json')).attempts[0].session, null, 'invalid ref discarded, never thrown');
   const first = capture(ref);
+  assert.strictEqual(first.attempts[0].reason_code, code, 'original cause stays exact');
+  assert.strictEqual(first.attempts[0].failure_class, code === 'claude-output-limit' ? 'active-output' : 'active-budget');
+  if (code === 'claude-output-limit') {
+    assert.strictEqual(first.attempts[0].provider_called, 'unknown');
+    for (const state of ['starting', 'dead', undefined]) {
+      const file = path.join(lab.dir, 'inactive-output-' + String(state) + '.json');
+      const out = api.captureFailure({ stateFile: file, receiptFile, request, unit: 'research-milestone/M001', route,
+        finalEvidence: require('./forge-attempt-telemetry').captureFinal({ request: { argv: ['--model', route.model] }, context: request.prompt }),
+        error: { code, provider_called: 'unknown', session: ref, liveness: { state }, diagnostic: { observation: {
+          liveness: state ? { version: 1, state, since_ms: 0, reason: null } : undefined } } }, budgets: { coding_standards: 3000 } });
+      assert.strictEqual(out.attempts[0].failure_class, 'unknown');
+      assert.strictEqual(out.attempts[0].session, undefined, 'unproved active cut retains no recovery ref');
+    }
+  }
   assert.deepStrictEqual(first.attempts[0].session, JSON.parse(JSON.stringify(ref)));
   const removed = [];
   const base = { stateFile, receiptFile, request, clock: () => first.started_at + 1, processProbe: () => 'stopped',
