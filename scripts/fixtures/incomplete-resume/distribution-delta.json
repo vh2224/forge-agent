@@ -37,9 +37,9 @@
     },
     "scripts/forge-orchestrate.js": {
       "before": "b37892abb702e2a3ad361066bbfa1fc8b29409e89bdfdb91328bc4ac21d11434",
-      "after": "55d1e18fcd33fd4ac385f8b900740ecdc25d18b5492cbd984db46d538f661352",
+      "after": "a2ea2311761cb77155e8074949939611eafaa689274b94f9d187e5bca2f259a6",
       "attributed_before": "b37892abb702e2a3ad361066bbfa1fc8b29409e89bdfdb91328bc4ac21d11434",
-      "attributed_after": "55d1e18fcd33fd4ac385f8b900740ecdc25d18b5492cbd984db46d538f661352"
+      "attributed_after": "a2ea2311761cb77155e8074949939611eafaa689274b94f9d187e5bca2f259a6"
     },
     "scripts/forge-claude-renderer.test.js": {
       "before": "8124c2c2b066c3e0f02d69b16b2bf16dc1204250eeeefb2abe428ee60d7c3580",

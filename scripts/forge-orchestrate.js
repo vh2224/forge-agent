@@ -467,6 +467,13 @@ function nextTimed(inputValue, input, options) {
   let status, boundary;
   try {
     status = milestoneTime.readTimeStatus(input.cwd, input.milestone, options);
+    // An invalid source is a temporal refusal before selection/serial lineage,
+    // just as a thrown clock read is. It cannot be masked by an open unit.
+    if (!['absent', 'valid'].includes(status.contract)) {
+      const invalid = base('next', 'blocked', 'milestone-time-invalid', input);
+      invalid.details = { time: { ...publicTime(status), unknown: true } };
+      return invalid;
+    }
     if (status.contract !== 'absent') {
       recordTimePresence(input, 'next', options);
       boundary = milestoneTime.observeBoundary(input.cwd, input.milestone, { ...options, kind: 'slice-boundary' });

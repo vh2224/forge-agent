@@ -82,13 +82,17 @@ function liveAdapter(cwd, o = {}) {
   } };
 }
 function transaction(cwd, key, fields) {
-  const state = {}, unit = fields.unit;
-  const record = { protocol_version: '1.0.0', idempotency_key: key, action: fields.action, unit, milestone: fields.milestone, host_runtime: 'codex',
-    owner_digest: 'sha256:' + 'f'.repeat(64), lease_generation: 'fixture-generation', phase: 'committed', created_at: iso(fields.at), updated_at: iso(fields.at),
-    before: { state_checksum: ssha(state), state }, after: { state_checksum: ssha(state), state, state_patch: {} },
-    result: fields.result ? { idempotency_key: key, unit: unit.key, milestone: fields.milestone, status: fields.result } : null,
-    event: { idempotency_key: key, unit: unit.key, milestone: fields.milestone, action: fields.action } };
-  m().controller.writeAtomic(m().controller.transactionFile(cwd, key), record, false);
+  // Estimation is part of the fixture's real controller history as well: a
+  // hand-written committed ledger is not a lease-free, handoff-ready boundary.
+  const controller = m().controller, state = require('./forge-state');
+  if (!state.read(cwd, fields.milestone)) state.write(cwd, { milestone: fields.milestone, kind: 'milestone',
+    phase: 'estimate-milestone', active_slice: '—', active_task: '—', auto_mode: 'on' });
+  const request = { milestone: fields.milestone, unit: fields.unit, host_runtime: 'codex', owner_token: 'fixture-owner', idempotency_key: key };
+  const options = { now: () => fields.at, prefsReader: () => ({ ok: true, prefs: {} }) };
+  if (fields.action === 'begin') return controller.begin(cwd, request, options);
+  assert.equal(fields.action, 'complete');
+  const begin = controller.lookupRecord(cwd, 'transaction', key.slice(0, -':complete'.length));
+  return controller.complete(cwd, { ...request, generation: begin.lease_generation, result: { status: fields.result } }, options);
 }
 
 // ---------------------------------------------------------------------------
