@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/incomplete-resume/distribution.cjs');
+const unitEntry = require('./fixtures/parallelism/distribution.cjs');
 
 // Standalone acceptance suite: only Node built-ins and production modules.
 const assert = require('assert');
@@ -1014,7 +1014,7 @@ function validateArtifact348(delta, previous, { measure, readRaw, readme }) {
     assert.strictEqual(row.before, row.attributed_before); assert.strictEqual(row.after, row.attributed_after);
     assert.notStrictEqual(row.before, row.after, '#348 actual bounded change');
     const actual = kind === 'surfaces' ? measure(key) : sha256(readRaw(key));
-    assert.strictEqual(row.after, actual, '#348 actual measured ' + kind);
+    assert.strictEqual(unitEntry.after(kind, key, row.after), actual, '#348 actual measured ' + kind);
   }
   assert(readme.includes(ARTIFACT_348_BASE) && readme.includes(delta.surfaces.agents.before) && readme.includes(delta.surfaces.agents.after), '#348 README records the real base/before/after');
 }

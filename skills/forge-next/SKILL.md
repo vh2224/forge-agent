@@ -1752,6 +1752,15 @@ Parse the `---GSD-WORKER-RESULT---` block:
        + "\n\nMODE: decompose\nTARGET_TASK: {T##}\n\n## Unmet Must-Haves\n{diff list}\n\n## Why it failed\n{result/SUMMARY excerpt}" })
      ```
      After return, re-derive next unit (sub-tasks `T##.1`, `T##.2` … now visible via `forge-parallelism.js`).
+     Owner mutation gate around this dispatch (issue 343, mandatory): after the idempotency guard and before the banner and planner above, choose the 2–4 sub-task IDs (`{T##}.1`, `{T##}.2`, …), open the owner intent and add the line `ANNOUNCED_SUBTASKS: {T##}.1,{T##}.2` to that planner prompt; after the planner returns and before re-deriving the next unit, admit exactly those bytes:
+     ```bash
+     MUTATION_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-plan-validation.js" begin-mutation --operation decompose \
+       --milestone "{M###}" --slice "{S##}" --parent "{T##}" --task "{T##}.1" --task "{T##}.2" \
+       --owner "$WORKING_DIR" --cwd "$WORKING_DIR") || stop
+     MUTATION_REF=$(node -pe 'JSON.parse(process.argv[1]).mutation.mutation_ref' "$MUTATION_JSON")
+     node "$FORGE_SCRIPTS_DIR/forge-plan-validation.js" finish-mutation --ref "$MUTATION_REF" --cwd "$WORKING_DIR" || stop
+     ```
+     `begin-mutation` runs only at the owner safe boundary (`plan-mutation-boundary-deferred` while a begin, lease or transaction is open) and the same request replays its open intent. `finish-mutation` admits the sub-tasks strictly (new announced IDs, explicit `depends`/`writes`, parent bytes unchanged except the `DECOMPOSED` line, no unknown reference or cycle) or refuses by name, writing nothing and keeping the intent and candidate bytes for correction. Until the admission exists the slice stays unready across restart: never re-derive or dispatch a sub-task over an open or refused intent, and never edit the mutation chain by hand. This gate adds no cohort: `forge-next` still dispatches exactly one unit.
    - `prune` → **`AskUserQuestion`** (interactive — forge-next is always interactive):
      ```
      AskUserQuestion({

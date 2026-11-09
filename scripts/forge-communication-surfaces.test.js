@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/incomplete-resume/distribution.cjs');
+const unitEntry = require('./fixtures/parallelism/distribution.cjs');
 
 // forge-communication-surfaces.test.js — proves the orchestration and status
 // skills follow shared/forge-communication.md by POINTER, not by a second copy;
@@ -419,7 +419,7 @@ function validateArtifact348(delta, previous, { measure, readRaw, readme }) {
     assert.strictEqual(row.before, row.attributed_before); assert.strictEqual(row.after, row.attributed_after);
     assert.notStrictEqual(row.before, row.after, '#348 actual bounded change');
     const actual = kind === 'surfaces' ? measure(key) : hash(readRaw(key));
-    assert.strictEqual(row.after, actual, '#348 actual measured ' + kind);
+    assert.strictEqual(unitEntry.after(kind, key, row.after), actual, '#348 actual measured ' + kind);
   }
   assert(readme.includes(ARTIFACT_348_BASE) && readme.includes(delta.surfaces.agents.before) && readme.includes(delta.surfaces.agents.after), '#348 README records the real base/before/after');
 }
@@ -2251,6 +2251,36 @@ test('#347 distribution delta: exact chain, members and tamper refusals', () => 
   refused('wrong active pin', { golden: { ...golden, surfaces: golden.surfaces.map(row => row.source_id === 'agents' ? { ...row, sha256: wrong } : row) } });
   refused('undocumented current pin', { pinReadme: pinReadme.split(ENTRY_347.surfaces.agents.after).join('') });
   refused('undocumented intermediate pin', { pinReadme: pinReadme.split(ENTRY_347.surfaces.agents.before).join('') });
+});
+
+
+test('issue343 U6-1 forge-auto runs only the execute-task sidecar cohort through the batch CLI and keeps the native flows', () => {
+ const text=fs.readFileSync(path.join(root,'skills/forge-auto/SKILL.md'),'utf8');
+ assert(text.includes('dispatch-batch')&&text.includes('#### 4-C. Sidecar cohort flow'));
+ assert(/forge-execution-batch\.js[^\n]*run --batch/.test(text));assert(/forge-execution-batch\.js[^\n]*consolidate --batch/.test(text));
+ assert(text.includes('NATIVE_DISPATCH_ID_BY_TASK')&&text.includes('#### 4-P.')&&text.includes('**k) Re-enter the dispatch loop**'));
+ assert(text.includes('acknowledged')&&text.includes('never inside this native window'));
+ assert(text.includes('The following compatibility batch paragraph applies only to a native primary. Sidecar primaries use the canonical cohort protocol below and must not use this native batch computation.'));
+ const header=text.split(/\r?\n/).find(line=>line.startsWith('**Batch determination (step 1.6'));assert(header&&header.includes('Invoke '+String.fromCharCode(96)+'scripts/forge-parallelism.js'+String.fromCharCode(96)+' to compute a **ready batch**'));
+ assert(!header.includes('For a native primary only'));
+ assert(!/Process .*SIDECAR_BATCH_IDS.* sequentially/.test(text));
+});
+test('issue343 U6-2 planner, add-task, add-slice and decompose require depends/writes and call the owner gate', () => {
+ for(const file of ['skills/forge-add-task/SKILL.md','skills/forge-add-slice/SKILL.md']){
+  const text=fs.readFileSync(path.join(root,file),'utf8');for(const token of ['depends','writes','must_haves','expected_output','begin-mutation','finish-mutation'])assert(text.includes(token),file+' '+token);
+ }
+ const planner=fs.readFileSync(path.join(root,'agents/forge-planner.md'),'utf8');assert(planner.includes('ANNOUNCED_SUBTASKS')&&planner.includes('Unconditional and explicit'));
+ for(const file of ['skills/forge-auto/SKILL.md','skills/forge-next/SKILL.md']){const text=fs.readFileSync(path.join(root,file),'utf8');assert(text.includes('--operation decompose')&&text.includes('finish-mutation'),file);}
+});
+test('issue343 U6-3 parallelism distribution layer: earlier layers immutable, exact measured members, historical negatives kept', () => {
+ const renderer=require('./forge-claude-renderer'),artifacts=renderer.render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts;
+ assert.strictEqual(unitEntry.validate({artifacts}),true);
+ for(const field of ['before','after','attributed_before','attributed_after']){
+  const value=structuredClone(unitEntry.parallelismLayer),first=Object.keys(value.files).find(file=>value.files[file].before!==null);
+  value.files[first][field]='0'.repeat(64);assert.throws(()=>unitEntry.validate({artifacts,parallelismLayerValue:value}));
+ }
+ const extra=structuredClone(unitEntry.parallelismLayer);extra.files.extra=extra.files[Object.keys(extra.files)[0]];assert.throws(()=>unitEntry.validate({artifacts,parallelismLayerValue:extra}));
+ const old=structuredClone(unitEntry.interruptionLayer);old.sources[Object.keys(old.sources)[0]].after='0'.repeat(64);assert.throws(()=>unitEntry.validate({artifacts,terminalLayerValue:old}),'375 validators still reject');
 });
 
 for (const temp of temps) fs.rmSync(temp, { recursive: true, force: true });

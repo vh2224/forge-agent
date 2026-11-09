@@ -208,9 +208,18 @@ test('issue343 U0d-1 native flow with interactive off cannot complete an invalid
   // The S-plan now exists, so selection skips plan-slice: the first executor is still refused.
   const skipped = loop.advance(loop.create({ mode: 'auto', workflow_id: 'u0d-skip', host_runtime: HOST }), 'next',
     { ...input, owner_token: 'owner-u0d-skip' }, deps);
+  // The serial workflow first preserves the unfinished original lineage (#367).
   assert.deepStrictEqual([skipped.outcome, skipped.reason_code, skipped.controller_result.unit.key],
-    ['blocked', 'plan-generation-pending', TASK_UNIT], JSON.stringify(skipped.controller_result));
-  assert.strictEqual(skipped.controller_result.details.plan_generation.stage, 'execute-begin');
+    ['blocked', 'unit-incomplete', TASK_UNIT], JSON.stringify(skipped.controller_result));
+  assert.deepStrictEqual(skipped.controller_result.details.incomplete_units.map(row =>
+    [row.idempotency_key, row.unit.key, row.begin_checksum, row.generation]),
+  [[beginKey, PLAN_UNIT, checksum(begin), begin.lease_generation]], 'the serial refusal names the exact original begin');
+  // The independent low-level entry still enforces the generation gate before any lease or record.
+  const directKey = 'execute-u0d-pending-low-level', directBefore = observe(dir, [directKey]);
+  const directRefusal = refuses(() => beginExecute(dir, directKey, 'owner-u0d-direct-skip'),
+    'plan-generation-pending', 'low-level entry cannot skip the unfinished enrolled plan');
+  assertPlanRefusal(directRefusal, 'plan-generation-pending', 'execute-begin', 'independent generation gate');
+  assert.deepStrictEqual(observe(dir, [directKey]), directBefore, 'the low-level refusal has no record, event, STATE or boundary effect');
   assert.strictEqual(held(dir, TASK_UNIT), null, 'the first executor never received a lease');
   assert(!exists(recordFile(dir, `forge-orchestrate-next:${M}:${TASK_UNIT}:${S}`)), 'no execute begin record');
   // The same snapshot still dispatches the plan-slice, never the executor.

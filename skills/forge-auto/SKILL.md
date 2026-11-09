@@ -742,7 +742,15 @@ fi
 
 `unit_effort` (and `$EFFORT`/`$EFFORT_REASON` for the dispatch event) are set by the resolver above. The prompt may carry `effort: {unit_effort}` as diagnostic metadata and, for opus/fable phases, `thinking: {THINKING_OPUS}`. That text never satisfies Claude's effort binding; only the fingerprinted agent-frontmatter observation at the native adapter does.
 
+The following compatibility batch paragraph applies only to a native primary. Sidecar primaries use the canonical cohort protocol below and must not use this native batch computation.
+
 **Batch determination (step 1.6 — execute-task only):** When `unit_type == execute-task`, the dispatch is no longer strictly single-task. Invoke `scripts/forge-parallelism.js` to compute a **ready batch** — a set of tasks in the active slice whose `depends:[]` are satisfied AND whose `writes:[]` don't overlap with each other.
+
+**Canonical batch decision first (issue 343, auto mode only).** The adapter's `next` already applied the controller's durable decision for this `execute-task` selection; this step only consumes it:
+- Action `dispatch-batch` (reason `batch-ready`): `controller_result.details.dispatch_batch` names the published immutable manifest of a **sidecar primary** and its independent ready sidecar siblings (`batch_id`, `manifest_ref`, `manifest_sha256`, `replay`, `slice`, `primary`, `limits`, `members`, `excluded`). The snapshot holds it as `current_batch` and keeps `current_unit` empty. Do not run `forge-parallelism.js`, the per-task resolution or any branch of step 4 for it: follow **§ 4-C. Sidecar cohort flow**.
+- Action `dispatch`: the single path. `controller_result.details.batch` records `{decision: 'single', reason_code}` with one closed reason (for example `primary-native`, `single-candidate`, `legacy-plan-sequential`, `dependency-unmet`, `writes-overlap`, `roots-limit`, `svn-isolation-unavailable`, `materialization-unsupported`). A **sidecar** primary on this path dispatches alone: `BATCH = [{id: unit_id}]` and Branch C, never siblings borrowed from `forge-parallelism.js`. Only a **native** primary keeps the existing native batch below, and that batch launches only its native entries.
+
+`forge-parallelism.js` stays a read-only compatibility picker: it creates no cohort, begin, lease or claim, and its output never overrides, extends or re-routes the controller's decision. Models, tiers, efforts and routes stay exactly as the resolver returned them for each task.
 
 ```bash
 SLICE_PLAN=".gsd/milestones/${M###}/slices/${S##}/${S##}-PLAN.md"
@@ -758,9 +766,9 @@ Parse the JSON. Field semantics:
 
 | `mode` | Meaning | Action |
 |--------|---------|--------|
-| `parallel` | `batch.length ≥ 2` — multiple ready tasks, no `writes` conflicts | Parallel dispatch path (Step 4 branch B) |
+| `parallel` | `batch.length ≥ 2` — multiple ready tasks, no `writes` conflicts | Native primary only: native parallel dispatch (Step 4-P). A sidecar primary ignores it (single Branch C, or § 4-C when the adapter returned `dispatch-batch`) |
 | `single` | `batch.length == 1` — modern plan, only one task currently ready | Single dispatch path (Step 4 branch A) |
-| `legacy` | At least one task in slice is missing `depends` or `writes` frontmatter | Single dispatch with `batch[0]` — preserves behavior for pre-parallelism plans |
+| `legacy` | At least one task in slice is missing `depends` or `writes` frontmatter | Single dispatch with `batch[0]` — preserves behavior for genuine pre-parallelism plans. Newly generated plans never reach this mode: the owner gate refuses missing/invalid declarations first (`shared/forge-plan-gate.md § New task declarations`) |
 | `blocked` | Pending tasks exist but none have satisfied deps (or all ready tasks were filtered out) | Error — emit `reason` to user, deactivate auto-mode, stop loop |
 | `none` | All tasks complete | Advance STATE, re-derive unit_type (should flip to `complete-slice`) |
 | `error` | Script crash | Stop loop, surface reason |
@@ -821,7 +829,7 @@ for ENTRY in "${BATCH[@]}"; do
 done
 ```
 
-These maps are immutable dispatch inputs for the rest of this batch. Security checks still loop over every task. Partition delivery by `BATCH_WORKER_MODE[$ENTRY_ID]`: all `native` entries use the projected native batch mechanism; each `sidecar` entry is handled serially through the loaded Branch C/D mirror. Never read the scalar values left by the last loop iteration to choose a task's route or write its event.
+These maps are immutable dispatch inputs for the rest of this batch. Security checks still loop over every task. Partition delivery by `BATCH_WORKER_MODE[$ENTRY_ID]`: all `native` entries use the projected native batch mechanism. A `sidecar` entry is never launched from a native batch window, neither concurrently nor serially afterwards: remove it from `BATCH` before the security and claim gates below, keep its resolved route unchanged and let the controller's next canonical selection return it (single Branch C, or its cohort in § 4-C). When only the native primary remains, `BATCH.length == 1` and the single-task native flow applies. Never read the scalar values left by the last loop iteration to choose a task's route or write its event.
 
 **Risk radar gate (plan-slice only):** If `unit_type == plan-slice` and the slice is tagged `risk:high` in ROADMAP, check if `S##-RISK.md` already exists. If not:
 ```
@@ -1441,6 +1449,8 @@ Do NOT read artifact files here — templates now pass paths; workers read their
 
 Any unsupported `WORKER_MODE`, or `sidecar` for a unit without Branch C/D, follows `dispatch_refusal_stop` and stops. It never substitutes a model family, host, or inline implementation.
 
+Sidecar cohort (issue 343): the adapter action `dispatch-batch` never enters the branches above; follow § 4-C. Under the controller's canonical decision the batch bullet's serial handling of `sidecar` entries no longer applies: a `sidecar` entry of a native batch stays pending with its resolved route until the next canonical selection. `BATCH.length == 1` still takes the single paths above, and a native writer window never runs while a sidecar cohort is active.
+
 ---
 
 **Per-unit `CODE_DIR` resolution (multi-repo precondition)** — executable mirror of `shared/forge-dispatch.md § Sidecar dispatch state machine step 0.5` (contract prose lives there, never restated here). Runs HERE because `$PLAN_PATH` is only known per unit — the bootstrap `WORKTREE_DIR` is derived before any plan exists and stays untouched:
@@ -1764,7 +1774,7 @@ for ENTRY_ID in "${BATCH_TASK_IDS[@]}"; do
 done
 ```
 
-Process `SIDECAR_BATCH_IDS` sequentially through `shared/forge-sidecar-auto.md` before or after the native group, never concurrently with it. For each entry bind `$PLAN_PATH` and the other task inputs from that entry, parse its stored `BATCH_ROUTE_JSON[$ENTRY_ID]` with the flag-free `--shell-exports` transform, immediately re-check `DISPATCH_ALLOWED`, then load Branch C. This re-binding cannot borrow another task's scalars and does not re-resolve or change the route.
+`SIDECAR_BATCH_IDS` must be empty here: step 1.6 already removed every `sidecar` entry from a native batch (issue 343). The runtime-modes note above therefore means that a sidecar task runs single-task through Branch C only as the canonical primary of its own iteration, or as a cohort member through § 4-C. The former serial loop that loaded Branch C for those entries before or after the native group is replaced by the canonical cohort path: the controller selects them again, and a sidecar primary with independent ready sidecar siblings runs through `node "$FORGE_SCRIPTS_DIR/forge-execution-batch.js" run --batch <ref>` in § 4-C, never inside this native window. A non-empty `SIDECAR_BATCH_IDS` is a caller defect: before any launch, stop through `dispatch_refusal_stop` with the partition's existing `invalid-worker-mode` code and a hint naming those entries, keeping every route, begin and lease untouched (never a serial run or a fallback). Every step below iterates only `NATIVE_BATCH_IDS`.
 
 **b) Create N timeline tasks** — emit one `TaskCreate` per batch member in the single-task form above (icon `⚡`, descrição humana do T##-PLAN.md, executor e modelo da rota já resolvida desse membro; campo ausente fica `desconhecido`). Store returned IDs in parallel array `task_ids = [id1, id2, ...]`. Mark each `in_progress` via `TaskUpdate`.
 
@@ -1910,6 +1920,32 @@ done
 - If any task returned `status: partial` or `status: blocked`, follow the existing partial/blocked handling (write `continue.md`, stop loop, etc.) — but AFTER processing all other `done` results so their work isn't lost.
 
 **k) Re-enter the dispatch loop** — after all results are processed, loop back to step 1 (derive next unit). The next iteration will usually be another `execute-task` in the same slice (batch exhausted → possibly a new batch) or a `complete-slice` if this batch finished all tasks.
+
+#### 4-C. Sidecar cohort flow (execute-task only, adapter action `dispatch-batch`)
+
+This flow runs ONLY when the loop adapter returned `dispatch-batch` for an `execute-task` selection of `forge-auto` (step 1.6). The controller already published the immutable manifest, committed one begin and one live lease per member and charged `max_steps` once per member; the snapshot names the cohort in `current_batch` while `current_unit` stays empty. Nothing here selects, re-routes, adds or drops a member, opens a native writer window or writes STATE. `forge-next`, standalone tasks, plan/research/review-fix/complete units and native primaries never enter this flow.
+
+a) Per-member inputs — for each member of `dispatch_batch.members`, in manifest order, apply the same gates as a single sidecar `execute-task`: the security gate, the plan and symbol-check gates of the slice, and the step 1.7 cross-run claim gate over the union of every member's writes, recorded under this run's ID, with `proceed` for every member (the CLI refuses `batch-parent-claim-required` or `batch-claim-gate-conflict` otherwise). The run's reservation is only that union fence: each member writes solely through its own worktree view. Then prepare the member's own prompt file exactly as Step 3 renders it for that member's plan, plus its own `dispatchId`, `workflowId`, absolute `resultFile` outside every root, optional `securityFile`/`contextFile`, `gates`, `verification`, `budgets`, `procedure_context` and `constraints` carrying the run's real `auto_commit` and `deploy`. Route, model, tier, effort, roots, plan, begin, lease and claim never come from these inputs; the CLI reads them from that member's owner records.
+
+b) Run request — write one bounded UTF-8 JSON file outside every root with exactly the closed fields `schema: "forge-execution-batch-run-request-v1"`, `cwd` (`WORKING_DIR`), `milestone`, `host_runtime`, `owner_token`, `run_id`, optional `code_root`, `manifest_sha256` and `members` (the inputs above keyed by task ID, exactly the members still `admitido`). The owner token lives only in that file and in memory: never an argument, an output or an environment variable.
+
+c) Bounded concurrent run — one foreground call (`BATCH_MANIFEST_REF` is `dispatch_batch.manifest_ref`):
+```bash
+BATCH_RUN_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-execution-batch.js" run --batch "$BATCH_MANIFEST_REF" --request "$BATCH_REQUEST_FILE")
+BATCH_RUN_EXIT=$?
+```
+The CLI prepares every member's exclusive worktree and index before the common snapshot S0 (or reports `status: serial` with one named reason and runs nothing), opens one cohort broker and calls the real `runUnitSidecar` once per member, never more than the resolved `max_concurrent` members at once (the decision's limit, only ever tightened), each in its own process scope with its own route, model, effort, cwd and sanitized environment. A finished member is retained as its executed record plus seal while siblings run; nothing is published, integrated or acknowledged before the barrier, and members' sidecar events are signed appends of the cohort broker, never lines written by this skill. Relay each member's `[forge-agente]` stderr lines as the sidecar identity contract says. stdout is one JSON report (`schema: forge-execution-batch-run-v1`, `status` ∈ `retained|partial|failed|blocked|serial`, `broker`, `barrier`, `members[]` whose `outcome` ∈ `acknowledged|retained|failed|needs-input|blocked` carries a closed `reason_code`). Exit 1 means `blocked`, or a refusal printed only as `forge-execution-batch: <code>` on stderr before any provider of the run started.
+
+d) Serial consolidation — once the report shows a sealed barrier, write the same request with `schema: "forge-execution-batch-consolidate-request-v1"` plus the run's `broker.manifest_sha256` as `broker_manifest_sha256`, then:
+```bash
+BATCH_CONSOLIDATION_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-execution-batch.js" consolidate --batch "$BATCH_MANIFEST_REF" --request "$BATCH_CONSOLIDATE_FILE")
+BATCH_CONSOLIDATION_EXIT=$?
+```
+It never starts a provider. Member by member, in manifest order, it verifies the retained execution, checks the original integration target, publishes the artifacts through typed exact-byte owner operations (task marker last), integrates the verified delta into this run's own target (never HEAD, the index or a commit), rechecks the integrated delivery and acknowledges the member through the controller's own completion. The report's `status` ∈ `consolidated|partial|failed|conflict` and each member's `outcome` ∈ `acknowledged|failed|needs-input|pending`; exit 1 only for `conflict`. After any crash, rerun the same `consolidate` command: the durable records resume it with zero inference and no second publication, delta, commit or ACK.
+
+e) Post-unit — only `acknowledged` members get the Step 5/6 housekeeping (timeline update, events, decisions, progress, and memory extraction per member exactly as today). `retained`, `pending`, `failed`, `needs-input` and `blocked` members keep their receipts, responses, seals, worktrees, begins and leases; a pending question stays pending and never becomes an approval. Report one line per member with its outcome and reason code, and never write a member's STATE, marker or `continue.md` by hand.
+
+f) Release — call the loop adapter with `--command batch-ack` and the same snapshot. Only members whose own progress reached `ack` with a committed controller completion leave `current_batch`; while any member is not terminal the adapter answers `batch-members-pending` and stops (`--command batch-status` observes without writing). Then re-enter the dispatch loop (step 1): dependents and `complete-slice` see only integrated, rechecked deliveries.
 
 ---
 
@@ -2059,6 +2095,15 @@ Auto-recovery attempts (context_overflow, model_refusal, 429, 400) count as unit
        + "\n\nMODE: decompose\nTARGET_TASK: {T##}\n\n## Unmet Must-Haves\n{diff list}\n\n## Why it failed\n{result/SUMMARY excerpt}" })
      ```
      After return, re-derive next unit (sub-tasks `T##.1`, `T##.2` … now visible via `forge-parallelism.js` — regex extended in T03).
+     Owner mutation gate around this dispatch (issue 343, mandatory): after the idempotency guard and before the banner and planner above, choose the 2–4 sub-task IDs (`{T##}.1`, `{T##}.2`, …), open the owner intent and add the line `ANNOUNCED_SUBTASKS: {T##}.1,{T##}.2` to that planner prompt; after the planner returns and before re-deriving the next unit, admit exactly those bytes:
+     ```bash
+     MUTATION_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-plan-validation.js" begin-mutation --operation decompose \
+       --milestone "{M###}" --slice "{S##}" --parent "{T##}" --task "{T##}.1" --task "{T##}.2" \
+       --owner "$WORKING_DIR" --cwd "$WORKING_DIR") || stop
+     MUTATION_REF=$(node -pe 'JSON.parse(process.argv[1]).mutation.mutation_ref' "$MUTATION_JSON")
+     node "$FORGE_SCRIPTS_DIR/forge-plan-validation.js" finish-mutation --ref "$MUTATION_REF" --cwd "$WORKING_DIR" || stop
+     ```
+     `begin-mutation` runs only at the owner safe boundary (`plan-mutation-boundary-deferred` while a begin, lease or transaction is open) and the same request replays its open intent. `finish-mutation` admits the sub-tasks strictly (new announced IDs, explicit `depends`/`writes`, parent bytes unchanged except the `DECOMPOSED` line, no unknown reference or cycle) or refuses by name, writing nothing and keeping the intent and candidate bytes for correction. Until the admission exists the slice stays unready across restart: never re-derive or dispatch a sub-task over an open or refused intent, and never edit the mutation chain by hand.
    - `prune` → write entry to `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-CONTEXT.md § Decisions` (WORKING_DIR, not CODE_DIR) naming pruned requirement + rationale + task ID. In `forge-auto` with `review.ask_in_auto: defer`: **do NOT pause** — register and continue (AUTONOMY RULE).
    - `blocked` → fall through to existing `blocked → human` path.
 

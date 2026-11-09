@@ -1193,8 +1193,12 @@ test('issue343 U0a-1 one reader: every reader case is decoded once and must-have
         strict.deepStrictEqual([dag.status, dag.reasons], ['valid', []], `${c.name}: time DAG`);
         strict.deepStrictEqual(dag.tasks.find(row => row.id === c.task).depends, want.temporal.depends, `${c.name}: temporal projection`);
       }
-      // forge-code-dir.js is not edited: its recorded base reading is re-measured, never rewritten.
-      strict.deepStrictEqual(codeDir.parseDeclaredPaths(content), c.base['code-dir.parseDeclaredPaths'], `${c.name}: code-dir base reading`);
+      // Public365 changed this reader. Check its current fixed projection and
+      // keep every recorded52a base column historical, never rewritten as current.
+      strict(want.code_dir && typeof want.code_dir === 'object', c.name + ': current CODE_DIR projection is explicit');
+      if (want.code_dir.throws) strict.throws(() => codeDir.parseDeclaredPaths(content),
+        error => error && error.message === want.code_dir.throws, c.name + ': CODE_DIR exact named refusal');
+      else strict.deepStrictEqual(codeDir.parseDeclaredPaths(content), want.code_dir, c.name + ': current public365 CODE_DIR projection');
     });
   });
   console.log(`      ${READER_CASES.cases.length} reader cases: one structural decoding; ordinary, schedule, list and temporal projections each match their row`);

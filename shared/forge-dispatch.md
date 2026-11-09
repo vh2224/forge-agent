@@ -2925,13 +2925,15 @@ This event schema is **additive**: existing readers that process `"verify"` and 
 
 ## Parallel Task Execution
 
-Execute-task dispatches may run **in parallel** when the ready set has ≥2 tasks with satisfied `depends:[]` and non-overlapping `writes:[]`. This section is the canonical spec for parallelism — both `forge-auto` and `forge-next` reference it.
+Execute-task dispatches may run **in parallel** when the ready set has ≥2 tasks with satisfied `depends:[]` and non-overlapping `writes:[]`. This section is the canonical spec for parallelism — both `forge-auto` and `forge-next` reference it. Two mechanisms exist and never mix: the existing **native batch** of a native primary, and the **sidecar cohort** of a sidecar primary, decided canonically by the controller (§ Sidecar cohort through the batch CLI below).
 
 ### Scope
 
 - **Parallel:** `forge-auto` only. When `forge-parallelism.js` returns `mode: parallel`, the orchestrator dispatches N `Agent()` calls in a single response message.
 - **Sequential (depends-aware):** `forge-next` always. It invokes `forge-parallelism.js --max-concurrent 1` to pick the first pending task whose deps are satisfied — never more than one dispatch per `/forge-next` invocation. This is deliberate — `forge-next` is a debug/manual-control mode.
 - **Other unit types** (`plan-slice`, `research-slice`, `complete-slice`, etc.) are always sequential. Parallelism applies strictly within `execute-task`.
+
+- **Sidecar cohort (issue 343):** `forge-auto` `execute-task` only, from the controller's durable `dispatch_batch` decision, through `forge-execution-batch.js run --batch <ref>` and then `consolidate --batch <ref>`. `forge-next`, standalone tasks, plan/research/review-fix/complete units, native primaries, legacy plans, SVN roots and unsupported materialization keep their current single/native path with one closed reason. A native writer window and a sidecar cohort never run together.
 
 ### Contract — plan frontmatter
 
@@ -2946,7 +2948,8 @@ writes:               # every file/glob this task will create, modify, or delete
 
 - `depends` is a flat array of task IDs. Empty array means no predecessors.
 - `writes` uses literal paths OR globs (`*`, `**`). Paths use forward slashes (Windows-safe).
-- Both fields are emitted by `forge-planner` on every plan, even when empty (`writes: []` for docs-only tasks).
+- Both fields are emitted explicitly on every new plan, by `forge-planner` and by the direct creators (`/forge-add-task`, `/forge-add-slice`, decompose); `writes: []` only when the task writes no product file.
+- New output is admitted by the owner gate before any success (`shared/forge-plan-gate.md § New task declarations`): both planner transports and the owner sidecar publisher, the native `complete(plan-slice)`, the first execute begin and sidecar pre-spawn, and the creators' `begin-mutation`/`finish-mutation` pair refuse missing, bare-empty, scalar, duplicate or malformed declarations, unknown/self references, cycles and protected product paths by name. A refused new plan never becomes `legacy`.
 - `T##-SUMMARY.md` existence = task done. `forge-parallelism.js` uses this as the done signal.
 
 ### Algorithm
@@ -2959,6 +2962,8 @@ writes:               # every file/glob this task will create, modify, or delete
 4. **Build ready set** — pending tasks whose `depends` are all satisfied (each dep has a `T##-SUMMARY.md`).
 5. **Greedy conflict-free batch** — iterate `ready` in plan order; include a task iff its `writes` don't overlap any already-claimed task's `writes`. Stop at `max-concurrent`.
 6. **Return** `{mode, batch, reason, details?}`.
+
+The picker reads the same shared structural decoder as the owner gate (`forge-must-haves.js parseExecutionFields`), and its glob intersection is conservative and bounded: exhausted or undecidable work counts as a conflict. It stays a read-only compatibility picker — it never creates a cohort, begin, lease or claim, and in `forge-auto` it never overrides the controller's canonical decision.
 
 ### Output modes
 
@@ -2973,11 +2978,11 @@ writes:               # every file/glob this task will create, modify, or delete
 
 ### Backward compatibility — legacy semantics
 
-Tasks created before the parallelism schema existed lack `depends`/`writes` in their frontmatter. The script detects this at slice-scope: **if ANY task in the slice is missing either field, the entire slice runs sequentially** — preserving exact pre-parallelism behavior for in-flight milestones. No backfill is required. Only newly-planned slices benefit from parallelism. This is intentional: mixing old/new within a slice is too risky for the race conditions we'd unlock.
+Tasks created before the parallelism schema existed lack `depends`/`writes` in their frontmatter. The script detects this at slice-scope: **if ANY task in the slice is missing either field, the entire slice runs sequentially** — preserving exact pre-parallelism behavior for in-flight milestones. No backfill is required. Only newly-planned slices benefit from parallelism. This is intentional: mixing old/new within a slice is too risky for the race conditions we'd unlock. Legacy is a property of genuine historical plans only (the controller names an unenrolled slice generation `legacy-plan-sequential`); newly generated plans with a missing or invalid field are refused at admission and never reach this path.
 
 ### Parallel dispatch semantics (forge-auto only)
 
-When `mode == parallel` and `BATCH.length > 1`:
+When the primary is native, `mode == parallel` and `BATCH.length > 1` (native entries only; a sidecar entry is removed from the batch before its gates and stays pending):
 
 1. **Per-task prep** — build a worker prompt, resolve tier (`{TIER, MODEL_ID, REASON}`), run the security gate, and create a `TaskCreate` entry for each batch member.
 2. **Single heartbeat write** — `auto-mode.json` gets one `BATCH:<csv-of-units>` label so the statusline surfaces the parallel group without special-casing.
@@ -2994,7 +2999,16 @@ When `mode == parallel` and `BATCH.length > 1`:
 {"ts":"...","event":"dispatch","dispatch_id":"execute-task-T01-4f90ac-a1","prompt_id":"execute-task-T01-4f90ac","attempt":1,"status":"done","unit":"execute-task/T01","model":"...","host_runtime":"claude","worker_mode":"native","dispatch_allowed":true,"tier":"...","reason":"...","input_tokens":1234,"output_tokens":5678,"token_method":"heuristic-chars-4","batch_size":3}
 ```
 
-Readers that don't know about `batch_size` ignore it (additive by design). Sequential dispatches omit the field entirely.
+Readers that don't know about `batch_size` ignore it (additive by design). Sequential dispatches omit the field entirely. A sidecar cohort member's `dispatch` line additionally carries `batch_id` and `member_ref`, both or neither, with `batch_size` between 2 and 8; it is appended only through the live cohort broker by that member's own handle, with exactly that member's resolved model, tier, effort and worker axes.
+
+### Sidecar cohort through the batch CLI (forge-auto execute-task only)
+
+Issue 343. This documents the implemented path; it adds no new concurrency to any other unit or skill.
+
+- **Decision.** `forge-orchestrate next`, in the loop's `auto` mode, calls the `dispatch` function of `scripts/forge-execution-batch.js` for the canonically selected `execute-task` (the primary). A sidecar primary with independent ready sidecar siblings of the same slice gets one immutable manifest (`.gsd/forge/batches/<batch_id>/manifest.json`), published before any lease, then one committed begin and one live lease per member under one controller transaction. The loop answers `dispatch-batch` with `details.dispatch_batch`, holds `current_batch` separately from `current_unit` and charges `max_steps` once per member; a replay of the same request returns the same manifest without a second begin. Every other case keeps the single path with one closed `reason_code` (`single-candidate`, `primary-native`, `mode-not-auto`, `unit-not-execute-task`, `legacy-plan-sequential`, `plan-generation-invalid`, `dependency-unmet`, `writes-overlap`, `route-not-sidecar`, `route-stale`, `svn-isolation-unavailable`, `vcs-isolation-unavailable`, `isolation-policy`, `materialization-unsupported`, `roots-limit`, `max-concurrent`, `max-steps`, `time-admission`, `lease-scope-collision`, `claim-gate-conflict`, `pending-question`, `member-begin-refused`). Each member keeps exactly its own resolved route, model, tier and effort; native candidates stay pending with theirs unchanged.
+- **Isolation.** Before any child and before the common snapshot S0, the CLI captures the measured dirty base and gives each member one exclusive worktree and index per physical Git root reproducing staged, unstaged, legitimate untracked, binary, deleted, renamed and mode changes; the integration HEAD, index and working tree stay byte-identical, with no commit, stash or branch move. An unrepresentable base or root answers `serial` with a named reason. The parent run holds one aggregate live claim generation with its batch locator; a member acts only through its opaque in-process handle and its separately validated runtime view, while canonical plan and gate bytes stay unchanged. The parent's union reservation never becomes a member's write permission. The 14-root budget reduces the cohort; no limit is enlarged.
+- **Run.** `run --batch <ref> --request <file>` opens one cohort broker (one complete signed stream, one immutable anchor per member attempt, private key only in the broker process) and calls the real `runUnitSidecar` per member under the resolved `max_concurrent`, each member in its own process scope; aborting one member terminates only its own scope. A finished member is retained as its executed record plus seal: no SUMMARY, DELIVERY, marker, controller completion or done result while siblings run, and heavy verification waits for the barrier, sealed only after every writer really exited.
+- **Consolidation.** `consolidate --batch <ref> --request <file>` never starts a provider. In manifest order it verifies each retained member, checks the original integration target, publishes through typed exact-byte owner operations, integrates the verified delta into the run's own target, rechecks the integrated delivery and acknowledges through the controller's own completion — one member at a time. A failed member, a moved target or a pending question preserves the successful siblings, responses, seals and worktrees; a rerun after any crash performs zero second inference, publication, commit or ACK, never refreshes a protected baseline and never ignores `.gsd/events`. Cleanup removes a member root only with reader-safe evidence after ACK and retains dirty or historically needed worktrees.
 
 ### Memory extraction and safe publication
 
@@ -3015,7 +3029,7 @@ parallelism:
   max_concurrent: 3   # integer 1–8; default 3. Caps batch size in forge-auto.
 ```
 
-Setting `max_concurrent: 1` disables parallelism in `forge-auto` while still honoring depends-aware picking. Setting it higher than 3 works but has diminishing returns — most slices rarely have more than 3 independently-writable tasks ready simultaneously.
+Setting `max_concurrent: 1` disables parallelism in `forge-auto` while still honoring depends-aware picking. Setting it higher than 3 works but has diminishing returns — most slices rarely have more than 3 independently-writable tasks ready simultaneously. The same resolved value bounds the sidecar cohort: the decision cuts members from the tail for `max_steps`, `max_concurrent` and the 14-root budget, and the pool only ever tightens it. The preference, its default and its range are unchanged.
 
 ### Authoring guidance for planners
 
@@ -3025,7 +3039,7 @@ When decomposing a slice:
 2. **List every file each task writes** — literal paths or globs. Be **explicit and realistic**. Underreporting `writes` causes race conditions; overreporting only sequentializes unnecessarily.
 3. **If two tasks share a file in `writes`** (e.g., both registering exports in a barrel file), either (a) order them with `depends`, or (b) split the shared-file responsibility into a third task that both depend on.
 
-`writes` conflicts are checked bidirectionally — glob on either side matches literal path on the other, and vice versa. `src/auth/**` conflicts with `src/auth/jwt.ts`.
+`writes` conflicts are checked bidirectionally — glob on either side matches literal path on the other, and vice versa. `src/auth/**` conflicts with `src/auth/jwt.ts`. Two globs conflict whenever they can match a common path (`src/*.js` and `src/a*` conflict); proved-disjoint literal segments do not; empty, `.` and malformed paths conflict. Every new task declares `depends` and `writes` explicitly, and the owner gate refuses a missing or invalid declaration instead of treating the plan as legacy.
 
 ## Pre-dispatch capability policy
 

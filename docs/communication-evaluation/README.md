@@ -245,3 +245,16 @@ The attributed forge-next source, with only its existing linked-task blocks remo
 Base8856ddb3bdbed8e6c0a19802e9764fe950f67172. Only the two existing forge-next source.sha256 literals change from `3ffd7bef2befcbfdf49e865435b538da9b3305d5207036d488507c741fdb1e6e` to `26cd95c5cbb829eae5dbefad7e115e77c496d10af41b5a033fd336a6e2d553f1`; quotations, metadata and all other sample bytes remain unchanged. Full samples `40d879d0b390068d8133de40e2d2c70ae9afab012d0d3770050af0d65def65bc` → `38bb2dea9d9c6ea56ff672eae2452a0a6f6a2bfbe5697830724a49a43039e405`. Raw skills `019035d20f0f70239fe0e035478af988ec6fdd5efea8b7f78e8eff6c8a64e052` → `4b1446cf4fcfc99184596bf84aeb936d497f79aab1dcde46c2fb1f72a2a23fd8`; attributed skills `bc8e2f9ebbb1a189a435417c9b3ef258531cb8db67046ccf5b26cc48f99ca5bd` → `01041828db52aa6e6c477ad222fa46ab09b8e95b53c51f65f60087ef2dbea6d8`. Measured layer: scripts/fixtures/incomplete-resume/distribution-delta.json; distribution only, not client/UAT proof.
 
 The forge-next SOURCE attributed bytes also change from `0d9fed221f4fa52227184fc1d68a6aadac6f7ba917ce294b9dc837d04fb27eb4` to `e7bd4bd148db233e2896c4dd7c553abce729a4a52e266e2c148de2d920f42fde`; both raw and attributed citation states remain explicitly documented.
+
+
+## Measured parallelism next terminal
+
+Prior revision: bccfb723bee755f830e452d0b3e3dbcc6fb66025
+Previous layer: scripts/fixtures/interrupted-owner/distribution-delta.json
+Only the two existing forge-next citation source.sha256 literals change; all other sample bytes are retained.
+forge-next before 26cd95c5cbb829eae5dbefad7e115e77c496d10af41b5a033fd336a6e2d553f1
+forge-next after ca226959ba87cbe75acffd91e0d9af673677f876aa3f39ec12b238e9b9ded711
+forge-next attributed before e7bd4bd148db233e2896c4dd7c553abce729a4a52e266e2c148de2d920f42fde
+forge-next attributed after 41d75d9cba96f8c0953626c7951bb2bd762db8abecd716feabe2bbcdca8245ed
+samples before 38bb2dea9d9c6ea56ff672eae2452a0a6f6a2bfbe5697830724a49a43039e405
+samples after 29f9dcf18ccd04e9759f52a0ec428a576f70ec608697419b1db7edd39cd290bf

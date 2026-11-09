@@ -168,8 +168,9 @@ expected_output:
 
 **Schema contract:**
 
-- `depends` is a flat array of task IDs from this slice (e.g. `[T01, T02]`). Empty array (`[]`) means the task has no predecessors and can run immediately. **Unconditional** — emit on every T##-PLAN.
-- `writes` lists every file/path this task will create, modify, or delete. Use literal paths (`src/a.ts`) or globs (`src/auth/**`, `tests/*.spec.ts`). **Unconditional** — emit on every T##-PLAN, even when empty (`writes: []` for a docs-only task). The dispatcher uses `writes` to detect conflicts between independent tasks in the same slice — two tasks with overlapping `writes` cannot run in parallel.
+- `depends` is a flat array of task IDs from this slice (e.g. `[T01, T02]`). Empty array (`[]`) means the task has no predecessors and can run immediately. **Unconditional and explicit** — emit it on every new T##-PLAN, always; never omit it to mean "none".
+- `writes` lists every file/path this task will create, modify, or delete. Use literal paths (`src/a.ts`) or globs (`src/auth/**`, `tests/*.spec.ts`). **Unconditional and explicit** — emit it on every new T##-PLAN; `writes: []` only when the task genuinely writes no product file (for example a read-only investigation), never as a placeholder for unknown writes. The dispatcher uses `writes` to detect conflicts between independent tasks in the same slice — two tasks with overlapping `writes` (conservative glob intersection) cannot run in parallel.
+- New output is admitted strictly by the owner gate (`shared/forge-plan-gate.md § New task declarations`) before any success: a missing, bare-empty (`writes:` with nothing), scalar, duplicate or malformed `depends`/`writes`, a `depends` naming an unknown task, itself or forming a cycle, or a protected product path is refused by name. Refused output is returned for correction; it is **never** downgraded to a legacy or sequential plan.
 - `must_haves` is a **map** with exactly three keys: `truths`, `artifacts`, `key_links`.
 - `artifacts[].path` + `min_lines` + `provides` are REQUIRED per entry; `stub_patterns` is OPTIONAL.
 - `key_links[]` REQUIRES `from`, `to`, `via`.
@@ -317,7 +318,9 @@ When decomposing a slice into tasks, explicitly think about which tasks **can** 
    - Order them with `depends` (one must complete first), or
    - Split the shared file responsibility into a third task that depends on both.
 
-**Legacy / upgrade note:** tasks created before this schema existed lack `depends` and `writes`. The dispatcher auto-detects this at slice-scope (any task in the slice missing either field) and forces sequential execution for the whole slice — preserving the behavior of in-flight milestones. You do NOT need to backfill old T##-PLAN.md files; the next slice will be planned under the new schema.
+**Legacy / upgrade note:** tasks created before this schema existed lack `depends` and `writes`. Only such genuine historical plans (an unenrolled slice generation) stay sequential for the whole slice — preserving the behavior of in-flight milestones. You do NOT need to backfill old T##-PLAN.md files. Everything you plan now is new output: the owner gate refuses it when a declaration is missing or invalid, and it never qualifies as legacy.
+
+**Execution of your declarations:** in `forge-auto`, the controller may run independent ready sidecar tasks of one slice as a bounded cohort (each in its own worktree and index) only when their `depends` are satisfied and their `writes` are disjoint; anything else stays serial with a named reason. Accurate declarations are what make that safe — you never choose concurrency, models or routes yourself.
 
 Then return the `---GSD-WORKER-RESULT---` block.
 
@@ -333,6 +336,8 @@ Then return the `---GSD-WORKER-RESULT---` block.
 - The T##-SUMMARY or worker result block explaining why the task failed
 
 **Your job:** Rewrite the failed T## as 2–4 sub-tasks (`T##.1`, `T##.2`, …) in the same slice, each fitting one context window, with the full structured `must_haves` schema.
+
+**Owner mutation (issue 343):** the orchestrator opens an owner `decompose` intent before dispatching you and lists its sub-task IDs in `ANNOUNCED_SUBTASKS:`. Create exactly those IDs — no other, none missing — each with explicit `depends` and `writes`, and change nothing else except the parent's `status: DECOMPOSED` line and the container substitution in `S##-PLAN.md`. The orchestrator then admits your bytes with `finish-mutation`; a refusal (for example an unannounced ID, a missing declaration or a cycle) keeps the sub-tasks unready until corrected. When the Step 1 guard below finds no sub-task and the prompt has no `ANNOUNCED_SUBTASKS`, return `status: blocked` naming the missing owner intent instead of guessing IDs.
 
 ### Step 1 — Idempotency guard (MANDATORY FIRST CHECK)
 
@@ -350,7 +355,7 @@ Do NOT create duplicate sub-tasks. Re-running decompose on the same T## is a no-
 
 ### Step 2 — Partition the unmet must-haves
 
-Divide the unmet must_haves into 2–4 coherent sub-goals. Rules:
+Divide the unmet must_haves into exactly as many coherent sub-goals as `ANNOUNCED_SUBTASKS` lists (2–4). Rules:
 
 - **No silent drops:** every unmet must_have from the parent must appear in at least one sub-task's `must_haves`. Decompressing does NOT mean dropping — this is scope-reduction layer 1 (the Scope-Reduction Prohibition above still applies). If a must_have appears genuinely impossible, that is **PRUNE** (a separate strategy), not DECOMPOSE — declare it explicitly rather than omitting it.
 - Each sub-goal should fit within a single context window (this is the entire reason for decomposing).

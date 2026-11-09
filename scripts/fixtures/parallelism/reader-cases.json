@@ -6,6 +6,7 @@
   "purpose": "Named depends/writes reader cases: the one structural decoding of each case, the fixed projection of every consumer (ordinary parseExecutionFields, the controller time DAG, the forge-parallelism scheduling reader and strict validateTaskDeclarations) and the reading of the pre-343 readers at the base revision.",
   "provenance": {
     "source_revision": "52a69e79e92c58914da7fcb69f112219a4fd508b",
+    "current_code_dir_reader": {"revision":"b0828ad687114e15db06c5bbd835e1191c4b2c7e","issue":365,"path":"scripts/forge-code-dir.js","symbol":"parseDeclaredPaths","sha256":"babb41bc2b7c44a326b2365dfd28363ea3acf171a680037f010d0ab14690212f","method":"Source-derived current projection after public365 integration. Original base52a readings below remain immutable history; no API was invoked by this fixture repair. Actual execution remains forge-must-haves.test.js for every case."},
     "base_readers": [
       {
         "id": "parallelism.parseListField",
@@ -44,7 +45,7 @@
         "input": "full plan text; read only (not edited by issue 343)"
       }
     ],
-    "method": "decoded and projections are the approved fixed projection matrix of the corrected readers (attempt U0a-r1). They were derived by reading the corrected sources case by case, and forge-must-haves.test.js issue343 U0a-1 executes every reader against them. The base columns are the pre-343 readings derived by reading the recorded base sources (git blob and SHA-256 above); they are not an executed measurement, because node execution was denied in the sidecars that wrote this file ('This command requires approval'). The unedited code-dir reader is re-measured live against its column by issue343 U0a-1; the three edited readers keep their base column as historical record only.",
+    "method": "decoded and projections are the approved fixed projection matrix of the corrected readers (attempt U0a-r1). They were derived by reading the corrected sources case by case, and forge-must-haves.test.js issue343 U0a-1 executes every reader against them. The base columns are the pre-343 readings derived by reading the recorded base sources (git blob and SHA-256 above); they are not an executed measurement, because node execution was denied in the sidecars that wrote this file ('This command requires approval'). After integrating public issue365 at b082, code-dir is checked live against projections.code_dir by issue343 U0a-1; every pre-343 base column remains historical, including code-dir. Decoder/ordinary/schedule/temporal/strict projections are unchanged by this fixture repair.",
     "first_attempt": "Schema 1 of this file (attempt U0a) gave every case one universal expectation shared by all scheduling readers, so a blank line inside a block was refused by the ordinary reader too and a bare `key:` was read as []. The U0a-r1 adjudication replaced that with the fixed per-consumer projections below; the first attempt's bytes remain archived with that attempt.",
     "historical_probe": "The campaign parser-probe report under the owner's .gsd/reports/issue-campaign-20261108/parallelism-preparation was not readable from the sidecars (permission refused); the U0a cases follow the enumeration of the U0a plan step 1 (LF inline, LF block, CRLF block with two items, comments, root-qualified and object items, malformed, empty/absent and decimal IDs) and the u0a-r1 cases the blank-gap, YAML-null, comment-layout and unindented-list findings of the U0a-r1 correction, without a new experiment.",
     "plan_template": "Each plan is ---, the frontmatter lines, ---, '# <task>' and a final empty line, joined with the case EOL."
@@ -54,6 +55,7 @@
     "ordinary": "forge-must-haves parseExecutionFields: a valid list is an array, blank lines included; empty (YAML null) and invalid are null, present but never an array; absent stays absent; a repeated key throws execution-plan-duplicate-key",
     "temporal": "forge-unit-controller dependsOf through the controller time DAG: absent and empty are the root []; a blank gap, a malformed declaration or a non-string item is null (dependency-malformed)",
     "schedule": "forge-parallelism parseTaskFrontmatter: a valid list keeps its items; empty and invalid are null; every decoder diagnostic is <key>:<name>; null without a diagnostic is an absent key (legacy). The CLI never makes a diagnosed task ready",
+    "code_dir": "Current public365 parseDeclaredPaths: quote-aware string paths without YAML comments, the whole list despite blanks/comments; root objects throw code-dir-root-contract-required; absent/empty writes with no structured/freetext output is paths[]/none. The historical base column remains the original52a reading.",
     "strict": "forge-must-haves validateTaskDeclarations: valid or the code of the first refusal"
   },
   "value_encoding": {
@@ -73,6 +75,7 @@
         "writes": { "status": "valid", "form": "flow", "items": ["src/a.js", "src/b.js"], "diagnostics": [] }
       },
       "projections": {
+        "code_dir": {"paths":["src/a.js","src/b.js"],"source":"writes+expected_output"},
         "ordinary": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"] },
         "temporal": { "depends": ["T01", "T02"] },
         "schedule": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"], "diagnostics": [] },
@@ -96,6 +99,7 @@
         "writes": { "status": "valid", "form": "block", "items": ["src/a.js", "src/b.js"], "diagnostics": [] }
       },
       "projections": {
+        "code_dir": {"paths":["src/a.js","src/b.js"],"source":"writes+expected_output"},
         "ordinary": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"] },
         "temporal": { "depends": ["T01", "T02"] },
         "schedule": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"], "diagnostics": [] },
@@ -119,6 +123,7 @@
         "writes": { "status": "valid", "form": "block", "items": ["src/a.js", "src/b.js"], "diagnostics": [] }
       },
       "projections": {
+        "code_dir": {"paths":["src/a.js","src/b.js"],"source":"writes+expected_output"},
         "ordinary": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"] },
         "temporal": { "depends": ["T01", "T02"] },
         "schedule": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"], "diagnostics": [] },
@@ -142,6 +147,7 @@
         "writes": { "status": "valid", "form": "block", "items": ["src/a.js", "src/b.js"], "diagnostics": [] }
       },
       "projections": {
+        "code_dir": {"paths":["src/a.js","src/b.js"],"source":"writes+expected_output"},
         "ordinary": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"] },
         "temporal": { "depends": ["T01", "T02"] },
         "schedule": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"], "diagnostics": [] },
@@ -165,6 +171,7 @@
         "writes": { "status": "valid", "form": "block", "items": ["docs/a #1.md", "docs/b # 2.md", "docs/c#3.md"], "diagnostics": [] }
       },
       "projections": {
+        "code_dir": {"paths":["docs/a #1.md","docs/b # 2.md","docs/c#3.md"],"source":"writes+expected_output"},
         "ordinary": { "depends": [], "writes": ["docs/a #1.md", "docs/b # 2.md", "docs/c#3.md"] },
         "temporal": { "depends": [] },
         "schedule": { "depends": [], "writes": ["docs/a #1.md", "docs/b # 2.md", "docs/c#3.md"], "diagnostics": [] },
@@ -188,6 +195,7 @@
         "writes": { "status": "valid", "form": "block", "items": ["src/a.js", "src/b.js"], "diagnostics": [] }
       },
       "projections": {
+        "code_dir": {"paths":["src/a.js","src/b.js"],"source":"writes+expected_output"},
         "ordinary": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"] },
         "temporal": { "depends": ["T01", "T02"] },
         "schedule": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"], "diagnostics": [] },
@@ -211,6 +219,7 @@
         "writes": { "status": "valid", "form": "block", "items": ["primary::src/a.js", "primary::src/b.js"], "diagnostics": [] }
       },
       "projections": {
+        "code_dir": {"paths":["primary::src/a.js","primary::src/b.js"],"source":"writes+expected_output"},
         "ordinary": { "depends": ["T01"], "writes": ["primary::src/a.js", "primary::src/b.js"] },
         "temporal": { "depends": ["T01"] },
         "schedule": { "depends": ["T01"], "writes": ["primary::src/a.js", "primary::src/b.js"], "diagnostics": [] },
@@ -234,6 +243,7 @@
         "writes": { "status": "valid", "form": "block", "items": [{ "root_id": "primary", "path": "src/a.js" }, { "root_id": "primary", "path": "src/b.js" }], "diagnostics": [] }
       },
       "projections": {
+        "code_dir": {"throws":"code-dir-root-contract-required"},
         "ordinary": { "depends": [], "writes": [{ "root_id": "primary", "path": "src/a.js" }, { "root_id": "primary", "path": "src/b.js" }] },
         "temporal": { "depends": [] },
         "schedule": { "depends": [], "writes": [{ "root_id": "primary", "path": "src/a.js" }, { "root_id": "primary", "path": "src/b.js" }], "diagnostics": [] },
@@ -257,6 +267,7 @@
         "writes": { "status": "valid", "form": "flow", "items": ["src/a.js"], "diagnostics": [] }
       },
       "projections": {
+        "code_dir": {"paths":["src/a.js"],"source":"writes+expected_output"},
         "ordinary": { "depends": null, "writes": ["src/a.js"] },
         "temporal": { "depends": null },
         "schedule": { "depends": null, "writes": ["src/a.js"], "diagnostics": ["depends:declaration-scalar"] },
@@ -280,6 +291,7 @@
         "writes": { "status": "valid", "form": "flow", "items": ["src/a.js"], "diagnostics": [] }
       },
       "projections": {
+        "code_dir": {"paths":["src/a.js"],"source":"writes+expected_output"},
         "ordinary": { "depends": null, "writes": ["src/a.js"] },
         "temporal": { "depends": null },
         "schedule": { "depends": null, "writes": ["src/a.js"], "diagnostics": ["depends:declaration-block-malformed"] },
@@ -303,6 +315,7 @@
         "writes": { "status": "valid", "form": "flow", "items": ["src/a.js"], "diagnostics": [] }
       },
       "projections": {
+        "code_dir": {"paths":["src/a.js"],"source":"writes+expected_output"},
         "ordinary": { "depends": null, "writes": ["src/a.js"] },
         "temporal": { "depends": null },
         "schedule": { "depends": null, "writes": ["src/a.js"], "diagnostics": ["depends:declaration-continuation"] },
@@ -326,6 +339,7 @@
         "writes": { "status": "valid", "form": "flow", "items": ["src/a.js"], "diagnostics": [] }
       },
       "projections": {
+        "code_dir": {"paths":["src/a.js"],"source":"writes+expected_output"},
         "ordinary": { "throws": "execution-plan-duplicate-key" },
         "temporal": { "depends": null },
         "schedule": { "depends": null, "writes": ["src/a.js"], "diagnostics": ["depends:execution-plan-duplicate-key"] },
@@ -349,6 +363,7 @@
         "writes": { "status": "valid", "form": "flow", "items": [], "diagnostics": [] }
       },
       "projections": {
+        "code_dir": {"paths":[],"source":"none"},
         "ordinary": { "depends": [], "writes": [] },
         "temporal": { "depends": [] },
         "schedule": { "depends": [], "writes": [], "diagnostics": [] },
@@ -372,6 +387,7 @@
         "writes": { "status": "empty", "diagnostics": ["declaration-empty-value"] }
       },
       "projections": {
+        "code_dir": {"paths":[],"source":"none"},
         "ordinary": { "depends": [], "writes": null },
         "temporal": { "depends": [] },
         "schedule": { "depends": [], "writes": null, "diagnostics": ["writes:declaration-empty-value"] },
@@ -395,6 +411,7 @@
         "writes": { "status": "absent", "diagnostics": [] }
       },
       "projections": {
+        "code_dir": {"paths":[],"source":"none"},
         "ordinary": { "depends": [], "writes": "<absent>" },
         "temporal": { "depends": [] },
         "schedule": { "depends": [], "writes": null, "diagnostics": [] },
@@ -418,6 +435,7 @@
         "writes": { "status": "valid", "form": "flow", "items": ["src/a.js"], "diagnostics": [] }
       },
       "projections": {
+        "code_dir": {"paths":["src/a.js"],"source":"writes+expected_output"},
         "ordinary": { "depends": ["T03", "T03.1"], "writes": ["src/a.js"] },
         "temporal": { "depends": ["T03", "T03.1"] },
         "schedule": { "depends": ["T03", "T03.1"], "writes": ["src/a.js"], "diagnostics": [] },
@@ -441,6 +459,7 @@
         "writes": { "status": "valid", "form": "flow", "items": ["src/a.js"], "diagnostics": [] }
       },
       "projections": {
+        "code_dir": {"paths":["src/a.js"],"source":"writes+expected_output"},
         "ordinary": { "depends": "<absent>", "writes": ["src/a.js"] },
         "temporal": { "depends": [] },
         "schedule": { "depends": null, "writes": ["src/a.js"], "diagnostics": [] },
@@ -464,6 +483,7 @@
         "writes": { "status": "valid", "form": "flow", "items": ["src/a.js"], "diagnostics": [] }
       },
       "projections": {
+        "code_dir": {"paths":["src/a.js"],"source":"writes+expected_output"},
         "ordinary": { "depends": null, "writes": ["src/a.js"] },
         "temporal": { "depends": [] },
         "schedule": { "depends": null, "writes": ["src/a.js"], "diagnostics": ["depends:declaration-empty-value"] },
@@ -487,6 +507,7 @@
         "writes": { "status": "valid", "form": "flow", "items": ["src/a.js"], "diagnostics": [] }
       },
       "projections": {
+        "code_dir": {"paths":["src/a.js"],"source":"writes+expected_output"},
         "ordinary": { "depends": null, "writes": ["src/a.js"] },
         "temporal": { "depends": [] },
         "schedule": { "depends": null, "writes": ["src/a.js"], "diagnostics": ["depends:declaration-empty-value"] },
@@ -510,6 +531,7 @@
         "writes": { "status": "valid", "form": "flow", "items": ["src/a.js"], "diagnostics": [] }
       },
       "projections": {
+        "code_dir": {"paths":["src/a.js"],"source":"writes+expected_output"},
         "ordinary": { "depends": ["T01", "T02"], "writes": ["src/a.js"] },
         "temporal": { "depends": null },
         "schedule": { "depends": ["T01", "T02"], "writes": ["src/a.js"], "diagnostics": ["depends:declaration-interior-blank"] },
@@ -533,6 +555,7 @@
         "writes": { "status": "valid", "form": "flow", "items": ["src/a.js"], "diagnostics": [] }
       },
       "projections": {
+        "code_dir": {"paths":["src/a.js"],"source":"writes+expected_output"},
         "ordinary": { "depends": ["T01"], "writes": ["src/a.js"] },
         "temporal": { "depends": null },
         "schedule": { "depends": ["T01"], "writes": ["src/a.js"], "diagnostics": ["depends:declaration-leading-blank"] },
@@ -556,6 +579,7 @@
         "writes": { "status": "valid", "form": "block", "items": ["src/a.js", "src/b.js"], "diagnostics": ["declaration-leading-blank", "declaration-interior-blank"] }
       },
       "projections": {
+        "code_dir": {"paths":["src/a.js","src/b.js"],"source":"writes+expected_output"},
         "ordinary": { "depends": [], "writes": ["src/a.js", "src/b.js"] },
         "temporal": { "depends": [] },
         "schedule": { "depends": [], "writes": ["src/a.js", "src/b.js"], "diagnostics": ["writes:declaration-leading-blank", "writes:declaration-interior-blank"] },
@@ -579,6 +603,7 @@
         "writes": { "status": "valid", "form": "block", "items": [{ "root_id": "primary", "path": "src/a.js" }, { "root_id": "primary", "path": "src/b.js" }], "diagnostics": ["declaration-interior-blank"] }
       },
       "projections": {
+        "code_dir": {"throws":"code-dir-root-contract-required"},
         "ordinary": { "depends": [], "writes": [{ "root_id": "primary", "path": "src/a.js" }, { "root_id": "primary", "path": "src/b.js" }] },
         "temporal": { "depends": [] },
         "schedule": { "depends": [], "writes": [{ "root_id": "primary", "path": "src/a.js" }, { "root_id": "primary", "path": "src/b.js" }], "diagnostics": ["writes:declaration-interior-blank"] },
@@ -602,6 +627,7 @@
         "writes": { "status": "valid", "form": "flow", "items": ["src/a.js"], "diagnostics": [] }
       },
       "projections": {
+        "code_dir": {"paths":["src/a.js"],"source":"writes+expected_output"},
         "ordinary": { "depends": ["T01", "T02"], "writes": ["src/a.js"] },
         "temporal": { "depends": ["T01", "T02"] },
         "schedule": { "depends": ["T01", "T02"], "writes": ["src/a.js"], "diagnostics": [] },
@@ -625,6 +651,7 @@
         "writes": { "status": "valid", "form": "flow", "items": ["src/a.js"], "diagnostics": [] }
       },
       "projections": {
+        "code_dir": {"paths":["src/a.js"],"source":"writes+expected_output"},
         "ordinary": { "depends": null, "writes": ["src/a.js"] },
         "temporal": { "depends": null },
         "schedule": { "depends": null, "writes": ["src/a.js"], "diagnostics": ["depends:declaration-block-malformed"] },

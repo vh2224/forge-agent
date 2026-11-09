@@ -287,6 +287,34 @@ function releaseTerminal(handle, cwd, unitInput, ownerToken, generation) {
   removeQuarantine(saved);
   return result(true, 'released', { generation });
 }
+// Only the named administrative operation can mint this process-local scope.
+// The old owner credential is neither returned nor used as the caller identity.
+function inspectInterrupted(handle, authority, cwd, unitInput) {
+  const held = assertTerminalGuard(handle, cwd, unitInput);
+  const target = require('./forge-runs').assertOwnerInterruptionAuthority(authority, cwd, held.unit);
+  const file = leaseFile(cwd, held.unit), read = readLease(file);
+  if (read.corrupt || read.record && !validRecord(read.record, held.unit)) return result(false, 'lease-corrupt');
+  if (!read.record) {
+    if (target.lease_sha256 !== null) {
+      const terminal = require('./forge-unit-controller').lookupRecord(cwd, 'transaction', target.terminal_key);
+      if (!terminal?.owner_interruption || terminal.owner_interruption.operation_id !== target.operation_id
+        || !['lease-release-pending','lease-released','boundary-ready','committed'].includes(terminal.phase)) return result(false, 'lease-required');
+    }
+    return result(true, 'lease-absent', { present: false });
+  }
+  if (read.record.generation !== target.generation || digest(fs.readFileSync(file)) !== target.lease_sha256) return result(false, 'owner-mismatch');
+  return result(true, 'lease-matching', { present: true, generation: target.generation });
+}
+function releaseInterrupted(handle, authority, cwd, unitInput) {
+  const held = assertTerminalGuard(handle, cwd, unitInput);
+  const checked = inspectInterrupted(handle, authority, cwd, held.unit);
+  if (!checked.ok || !checked.present) return checked;
+  const saved = quarantine(leaseFile(cwd, held.unit), 'interrupted-' + checked.generation);
+  if (!saved) return result(false, 'contended-recovery');
+  removeQuarantine(saved);
+  return result(true, 'released', { generation: checked.generation });
+}
+
 function withTerminalGuard(cwd, unitInput, callback) {
   const unit = normalizeUnitKey(unitInput);
   return withGuard(cwd, unit, guard => {
@@ -391,7 +419,10 @@ if (require.main === module) cliMain();
  *   successor because the complete record is compared while the mutex is held.
  *
  * recover(cwd, unit, options)
- *   Is the only operation that deletes a non-owner record. Its injected clock
+ *   Is the expiry-based operation that deletes a non-owner record. The named
+ *   administrative interruption can instead release an exact observed target
+ *   only inside a live, nonserializable controller/registry authority.
+ *   Its injected clock
  *   must be beyond expiry plus grace. The implementation intentionally never
  *   asks whether a PID exists or whether a run registry row looks current.
  *
@@ -417,5 +448,5 @@ module.exports = {
   PROTOCOL_VERSION, DEFAULT_TTL_MS, DEFAULT_GRACE_MS, REASON_CODES,
   normalizeUnitKey, leasesDir, leaseFile, mutexName, acquire, observe,
   heartbeat, release, recover, publicLease, validRecord, readLease, openProtectedWindow, assertProtectedWindow,
-  withTerminalGuard, assertTerminalGuard, inspectTerminal, releaseTerminal,
+  withTerminalGuard, assertTerminalGuard, inspectTerminal, releaseTerminal, inspectInterrupted, releaseInterrupted,
 };

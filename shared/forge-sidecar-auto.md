@@ -8,6 +8,14 @@ Para anunciar a rota e repassar as linhas de stderr do adaptador, siga `shared/f
 > conditions below; never apply their implicit Claude fallback to this branch.
 > The resolver and transport share `forge-transport-capabilities.js`.
 
+> **Cohort members (issue 343):** a sidecar cohort of `execute-task` (loop action
+> `dispatch-batch`) never loads this mirror per member and never runs Branch C
+> serially for several tasks. It runs through `forge-execution-batch.js run --batch <ref>`
+> and then `consolidate --batch <ref>` (`skills/forge-auto/SKILL.md` § 4-C); each member
+> calls the bidirectional unit adapter (`runUnitSidecar`) with the route, model,
+> effort and roots its owner records pinned. Branch C below stays the single-task
+> path (`BATCH.length == 1`), unchanged for a sidecar primary without a cohort.
+
 
 > **Loaded on demand.** Extracted VERBATIM from `skills/forge-auto/SKILL.md` on 2026-08-23
 > (context diagnosis): these two branches cost ~11.5k tokens in EVERY orchestrator turn while

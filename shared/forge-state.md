@@ -686,3 +686,35 @@ Code and Codex CLI.
 
 The schema and conformance suite are the executable reference for these
 ordering and handoff guarantees.
+
+## 10. Execute-task cohort records and projection (issue 343)
+
+`forge-auto` may run a sidecar cohort of one slice (`shared/forge-dispatch.md`
+§ Sidecar cohort through the batch CLI). Its durable records live only in the
+owner's `.gsd`, are regular bounded files, never links and never rewritten:
+
+- `.gsd/forge/batches/<batch_id>/manifest.json` — the immutable decision
+  (`schema: forge-execution-batch-v1`, members with their own begin key, plan
+  digest, declarations, roots, route and step charge; excluded tasks with one
+  closed reason each). It is a record, never authority: imported manifests,
+  `dispatch_batch` objects or approved flags are never read.
+- `.gsd/forge/batches/<batch_id>/progress/m<index>/<NNNN>.json` — one CAS chain
+  per member over the closed states `preparado`, `admitido`, `executando`,
+  `retido`, `verificacao-falhou`, `publicacao-pendente`, `publicado`,
+  `integrado`, `ack`, `falhou`, `bloqueado` and `needs-input` (terminal:
+  `ack`, `falhou`, `bloqueado`).
+- the run record's `batch_locator` binds the parent's one aggregate claim
+  generation and the isolation record to that manifest.
+
+The loop snapshot keeps `current_batch {batch_id, manifest_sha256, members}`
+separately from `current_unit`; the two are exclusive, and an older snapshot
+without `current_batch` stays valid. `max_steps` is charged once per member at
+dispatch and never again on replay. `batch-status` observes; `batch-ack`
+releases only members whose own progress reached `ack` with a committed
+controller completion of exactly their begin.
+
+STATE stays the compatible projection described above: no worker or cohort
+member ever writes `M###-STATE.md`, the dashboard or the run registry. Members'
+completions reach STATE only through the controller's own transaction, applied
+one member at a time by the owner's serial consolidation after publication and
+integration; a retained, failed or pending member leaves STATE where it was.

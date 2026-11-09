@@ -329,6 +329,25 @@ These are **additive fields** (readers that ignore unknown keys stay compatible 
 
 For `forge-task`, `{M###}` may be omitted or set to `""` if the task runs outside a milestone.
 
+## New task declarations
+
+Issue 343. Separate from the interactive approval above and never waived by it: every newly generated slice task is admitted strictly by the owner before any success, executor entry or ready report. `scripts/forge-plan-validation.js` holds the shared gate over the one structural decoder (`forge-must-haves.js parseExecutionFields`):
+
+- **Declarations** — every new task carries explicit `depends` and `writes`; nothing is defaulted to an empty array. Missing, bare-empty, scalar, duplicate, mixed or malformed declarations and protected product paths (`.gsd`, `.git`, `.svn` segments) are refused with named codes. `writes: []` stays valid for a task that writes no product file.
+- **Graph** — over the canonical S-plan task set: valid, legacy or invalid. Duplicates, a set mismatch between the S-plan and the task plans, unknown or self references and cycles are invalid; decimal IDs (`T03.1`) are supported. Write overlap uses the conservative bounded glob intersection (undecidable work is a conflict).
+- **Where it runs** — both planner engine branches of `forge-xllm.js` before success; the owner sidecar publisher before any artifact byte; the native `complete(plan-slice)` of an enrolled generation before any completion intent, event, STATE advance or lease release (loop, orchestrate and direct controller APIs); the first `execute-task` begin and sidecar pre-spawn, which refuse a missing, invalid or semantically altered enrolled generation with zero provider calls (checkbox and `repair_count` edits still pass); and the direct creators, whose owner mutations stay unready across restart until admitted.
+
+Read-only and creator commands (one JSON line; exit 0 ok, 1 named refusal `{"ok":false,"code","detail"}`, 2 usage):
+
+```bash
+node "$FORGE_SCRIPTS_DIR/forge-plan-validation.js" --check --milestone "<M>" --slice "<S##>" --cwd "<owner>"
+node "$FORGE_SCRIPTS_DIR/forge-plan-validation.js" check --milestone "<M>" --slice "<S##>" --cwd "<owner>"
+node "$FORGE_SCRIPTS_DIR/forge-plan-validation.js" begin-mutation --operation add-task|add-slice|decompose --milestone "<M>" --slice "<S##>" --task "<T>" [--task "<T>" ...] [--parent "<T>"] --owner "<owner>" --cwd "<owner>"
+node "$FORGE_SCRIPTS_DIR/forge-plan-validation.js" finish-mutation --ref "<mutation_ref>" --cwd "<owner>"
+```
+
+`--check` admits the owner plan read-only; `check` reports the execute readiness of a slice with its mutation chain. A creator runs `begin-mutation` before writing any plan byte and `finish-mutation` before declaring the work ready; a refused finish writes nothing and keeps the intent and candidate bytes for correction. The `forge-must-haves.js --check` result of Step 4 (`legacy:true` included), an approval marker, an imported `legacy`/`approved` flag or a saved worker summary never substitutes for this admission. Genuine historical plans keep their inspection and sequential behavior without backfill, and historical records and legacy ready receipts replay byte-identical.
+
 ## Cross-references
 
 - `skills/forge-task/SKILL.md` — consumer: insert plan gate after Step 4 (plan) and before Step 5 (execute). Binding: `UNIT=task/{TASK_ID}`, `PLAN_GLOB={TASK_ID}-PLAN.md`, `MODE=interactive`, marker=`{TASK_ID}-PLAN-GATE.md`.

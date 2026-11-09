@@ -1080,6 +1080,20 @@ function parentRun(scope, owner, manifest, contract) {
   return run;
 }
 
+// Shared with the pool's two pre-S0 heartbeats: replay through runCohort must not
+// mutate leases before prepareIsolation gets a chance to refuse an existing S0.
+function assertPreparationBeforeS0(owner, manifest, locator, batchDir) {
+  const existing = readIsolation(owner, manifest);
+  if (!existing && locator?.phase === 'prepared') {
+    refuse('batch-isolation-record-invalid', 'a committed locator has no physical record');
+  }
+  for (const dir of [existing?.base?.batch_dir, batchDir].filter(Boolean)) {
+    try { fs.lstatSync(path.join(dir, BROKER_DIRECTORY)); }
+    catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+    refuse('batch-cohort-broker-exists', 'S0 already exists; preparation cannot renew its members');
+  }
+}
+
 function prepareIsolationInside(scope, options, guard) {
   if (!isObject(scope) || typeof scope.batch_id !== 'string' || !BATCH_ID.test(scope.batch_id)
       || typeof scope.manifest_sha256 !== 'string' || !HASH.test(scope.manifest_sha256)) refuse('batch-not-active', 'no batch is named');
@@ -1194,9 +1208,35 @@ function prepareIsolationInside(scope, options, guard) {
     } catch (_) { now = null; }
     if (!now || digestOf(now) !== digestOf(baseInputs)) refuse('batch-isolation-handle-stale', 'the exact admitted input provenance changed');
   };
+  // Preparation can exceed one lease period while Git copies several roots. Renewal is
+  // only legal before S0, under the existing owner boundary and registry fence. Never
+  // renew in a member handle's read-only revalidation or after the union is committed.
+  const beforeS0 = batchDir => {
+    const held = parentRun(scope, owner, manifest, contract);
+    assertPreparationBeforeS0(owner, manifest, held.batch_locator, batchDir);
+  };
+  const renewPreparation = batchDir => {
+    beforeS0(batchDir);
+    manifestLive();
+    // Validate the WHOLE cohort before the first heartbeat: a foreign/missing last
+    // member must not cause an earlier member's lease to be changed.
+    const token = String(scope.owner_token).normalize('NFC').trim();
+    for (const row of rows) {
+      const generation = memberLease(scope.cwd, manifest, row.member, 'batch-isolation-handle-stale', true);
+      const raw = leases().readLease(leases().leaseFile(owner.real, row.member.unit));
+      if (generation !== row.generation || raw.corrupt || !leases().validRecord(raw.record, row.member.unit)
+          || raw.record.generation !== row.generation || raw.record.owner_token !== token
+          || progressOf(owner, manifest)[row.member.index].state !== 'admitido') {
+        refuse('batch-isolation-handle-stale', row.member.task_id + ' no longer owns its admitted preparation lease');
+      }
+    }
+    renewLeases(owner, manifest, rows.map(row => row.member), token, parent.id);
+  };
+  beforeS0();
   const iso = isolation(), trusted = { failpoint: options.failpoint, limits: options.isolationLimits };
   const captured = iso.captureBatchBase(mintHandle('reservation', reservationData, manifestLive), contract, trusted);
   if (captured.status !== 'captured') return serial(captured.reason_code, { detail: captured.detail, root_id: captured.root_id });
+  renewPreparation(captured.base.batch_dir);
   // Retain an intent locator before the FIRST member/index effect. A crash
   // before the final union CAS must still block borrowing, cleanup and another
   // writer; no physical root has to be invented in a claim before it exists.
@@ -1209,6 +1249,7 @@ function prepareIsolationInside(scope, options, guard) {
   }, guard);
   const members = [], handles = [];
   for (const [position, row] of rows.entries()) {
+    if (position > 0) renewPreparation(captured.base.batch_dir);
     const handle = mintHandle('member', { reservation: reservationData, ...reservationData.members[position] }, () => {
       manifestLive();
       if (memberLease(scope.cwd, manifest, row.member, 'batch-isolation-handle-stale') !== row.generation
@@ -1221,6 +1262,7 @@ function prepareIsolationInside(scope, options, guard) {
     if (prepared.status !== 'prepared') return serial(prepared.reason_code, { detail: prepared.detail, root_id: prepared.root_id, members: copy(members) });
     members.push(prepared.member);
   }
+  renewPreparation(captured.base.batch_dir);
   const ready = commitIsolation(scope, owner, manifest, contract, reservationData, captured.base, members, parent, guard, options);
   parentRef.claim = ready.claim;
   handles.forEach((handle, index) => {
@@ -1973,13 +2015,26 @@ function memberRoute(owner, manifest, member, options) {
 // The live owner renews the leases its members' committed begins hold (the canonical heartbeat,
 // TTL unchanged), only BEFORE S0: a lease record is owner surface, and inside the execution
 // window only the broker's signed appends may change the owner.
-function renewLeases(owner, manifest, members, ownerToken) {
+function renewLeases(owner, manifest, members, ownerToken, runId) {
+  assertPreparationBeforeS0(owner, manifest, require('./forge-runs').get(owner.real, runId)?.batch_locator);
+  const token = String(ownerToken).normalize('NFC').trim(), generations = [];
+  // Check all members before touching any lease. A failed or foreign heartbeat
+  // is a refusal, never a best-effort success followed by another writer.
   for (const member of members) {
-    const found = recordAt(owner.real, member.begin_key), record = found.record;
-    if (found.conflict || !record || record.action !== 'begin' || record.phase !== 'committed'
-        || !sameBinding(record.batch, memberBinding(manifest, member)) || typeof record.lease_generation !== 'string') continue;
-    try { leases().heartbeat(owner.real, member.unit, ownerToken, record.lease_generation); }
-    catch (_) { /* a lost lease is refused by the isolation and broker checks of this member */ }
+    const generation = memberLease(owner.real, manifest, member, 'batch-isolation-handle-stale', true);
+    const raw = leases().readLease(leases().leaseFile(owner.real, member.unit));
+    if (raw.corrupt || !leases().validRecord(raw.record, member.unit) || raw.record.owner_token !== token
+        || raw.record.generation !== generation) refuse('batch-isolation-handle-stale', member.task_id + ' preparation owner changed');
+    generations.push(generation);
+  }
+  for (const [index, member] of members.entries()) {
+    const renewed = leases().heartbeat(owner.real, member.unit, token, generations[index]);
+    if (!renewed.ok || renewed.generation !== generations[index]) {
+      refuse('batch-isolation-handle-stale', member.task_id + ' preparation heartbeat was refused');
+    }
+  }
+  for (const [index, member] of members.entries()) if (memberLease(owner.real, manifest, member, 'batch-isolation-handle-stale') !== generations[index]) {
+    refuse('batch-isolation-handle-stale', member.task_id + ' changed generation during preparation');
   }
 }
 
@@ -2144,6 +2199,7 @@ async function runCohort(scope, options = {}) {
       || manifest.host_runtime !== scope.host_runtime || manifest.owner_digest !== ownerDigest(scope.owner_token)) {
     refuse('batch-manifest-foreign', 'the named manifest belongs to another owner, milestone, host or owner token');
   }
+  assertPreparationBeforeS0(owner, manifest, require('./forge-runs').get(owner.real, scope.run_id)?.batch_locator);
   // No new work: exactly the manifest's admitido members run, each once; the others keep their state.
   const progress = progressOf(owner, manifest);
   const admitted = manifest.members.filter(member => progress[member.index].state === 'admitido');
@@ -2163,7 +2219,7 @@ async function runCohort(scope, options = {}) {
   const pool = { max_concurrent: limit, manifest_max_concurrent: manifest.limits.max_concurrent, resolved_max_concurrent: resolved, peak_in_flight: 0 };
   // Everything before S0: the members' leases, then their isolation (worktrees, indexes, base,
   // aggregate claim and locator), then each exact attempt binding.
-  renewLeases(owner, manifest, admitted, scope.owner_token);
+  renewLeases(owner, manifest, admitted, scope.owner_token, scope.run_id);
   const placed = new Map();
   const prepared = prepareIsolation(scope, { failpoint: options.failpoint, isolationLimits: options.isolationLimits,
     onMember: (handle, data) => placed.set(data.member_index, { handle, data }) });
@@ -2193,7 +2249,7 @@ async function runCohort(scope, options = {}) {
   for (const lane of lanes) checkMemberRequest(memberState(lane.handle), lane.request);
   if (stopped()) refuse('batch-run-aborted', 'the run was cancelled before any member started');
   for (const lane of lanes) bindMemberExecution(lane.handle, lane.request);
-  renewLeases(owner, manifest, admitted, scope.owner_token);
+  renewLeases(owner, manifest, admitted, scope.owner_token, scope.run_id);
   // S0: the one cohort broker over the closed registry of exactly these bound attempts.
   const { cohort, broker } = await openCohortBroker(scope, lanes.map(lane => lane.handle));
   for (const lane of lanes) lane.state.broker = broker;

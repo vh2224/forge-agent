@@ -1126,13 +1126,94 @@ test('issue343 U2b-4 cohort shrinks at the 14-root budget without changing limit
   const contract = rootsApi.validateContract({ ...prior.execution_contract, code_roots: [...prior.execution_contract.code_roots, ...retained] });
   claims.recordClaim(dir, scope.run_id, { schema_version: 2, execution_contract: contract, source: 'plan-writes', unit: prior.unit,
     paths: contract.code_roots.map(root => ({ root_id: root.id, path: '**' })) });
-  const prepared = batch.prepareIsolation(scope), held = runs.get(dir, scope.run_id).write_claim;
+  const leaseApi = require('./forge-unit-lease'), second = manifest.members[1];
+  const secondBefore = leaseApi.readLease(leaseApi.leaseFile(dir, second.unit)).record;
+  const setup = isolation.setupForBatchMember;
+  let setups = 0, expiredAtCheckpoint = false, prepared;
+  isolation.setupForBatchMember = (...args) => {
+    const result = setup(...args);
+    if (++setups === 1) {
+      // The real first member was prepared. Advance only this fixture's heartbeat
+      // clock to reproduce a long Git preparation; retain the actual generation.
+      assert(leaseApi.heartbeat(dir, second.unit, TOKEN, secondBefore.generation,
+        { now: () => Date.now() - leaseApi.DEFAULT_TTL_MS - 1 }).ok);
+      expiredAtCheckpoint = leaseApi.observe(dir, second.unit).lease.expired;
+    }
+    return result;
+  };
+  try { prepared = batch.prepareIsolation(scope); } finally { isolation.setupForBatchMember = setup; }
+  const held = runs.get(dir, scope.run_id).write_claim;
+  const secondAfter = leaseApi.readLease(leaseApi.leaseFile(dir, second.unit)).record;
+  assert(expiredAtCheckpoint, 'same-owner second member really expired before the next preparation checkpoint');
+  assert.strictEqual(secondAfter.generation, secondBefore.generation);
+  assert.strictEqual(secondAfter.acquired_at, secondBefore.acquired_at);
+  assert.strictEqual(secondAfter.expires_at - secondAfter.heartbeat_at, leaseApi.DEFAULT_TTL_MS);
+  assert.strictEqual(leaseApi.observe(dir, second.unit).lease.expired, false);
   assert.strictEqual(prepared.status, 'prepared');
   assert.strictEqual(held.execution_contract.code_roots.length, 14, 'four integration, eight members and two retained roots all remain visible');
   assert.strictEqual(prepared.members.length, 2);
   assert.throws(() => rootsApi.validateContract({ ...held.execution_contract, code_roots: [...held.execution_contract.code_roots, { id: 'fifteenth', path: dir }] }), /execution-contract-schema/);
   assert.strictEqual(require('./forge-unit-lease').observe(dir, 'execute-task/T03').lease, null);
   assert(held.execution_contract.code_roots.some(root => root.id === 'retained0') && held.execution_contract.code_roots.some(root => root.id === 'retained1'));
+});
+
+
+test('issue343 U2b-4 preparation refuses a missing or foreign generation before renewing another member', () => {
+  const leaseApi = require('./forge-unit-lease');
+  for (const kind of ['missing', 'foreign']) {
+    const dir = owner('preparation-' + kind), ids = cohort(dir, independent(['T01', 'T02']));
+    const manifest = batch.readManifest(dir, ids.batch_id), scope = scopeOf(dir, ids, 'preparation-' + kind);
+    const first = manifest.members[0], second = manifest.members[1], setup = isolation.setupForBatchMember;
+    let calls = 0, firstBytes, secondBytes;
+    isolation.setupForBatchMember = (...args) => {
+      const result = setup(...args);
+      if (++calls === 1) {
+        const prior = leaseApi.readLease(leaseApi.leaseFile(dir, second.unit)).record;
+        assert(leaseApi.release(dir, second.unit, TOKEN, prior.generation).ok);
+        if (kind === 'foreign') assert(leaseApi.acquire(dir, second.unit,
+          { ownerToken: 'foreign-preparation-owner', hostRuntime: 'codex', session: runs.get(dir, scope.run_id).session_id }).ok);
+        firstBytes = fs.readFileSync(leaseApi.leaseFile(dir, first.unit));
+        secondBytes = fs.existsSync(leaseApi.leaseFile(dir, second.unit)) ? fs.readFileSync(leaseApi.leaseFile(dir, second.unit)) : null;
+      }
+      return result;
+    };
+    try { assert.throws(() => batch.prepareIsolation(scope), error => error.code === 'batch-isolation-handle-stale'); }
+    finally { isolation.setupForBatchMember = setup; }
+    assert.strictEqual(calls, 1, 'no second member is materialized');
+    assert.deepStrictEqual(fs.readFileSync(leaseApi.leaseFile(dir, first.unit)), firstBytes, 'whole cohort is checked before any renewal');
+    assert.deepStrictEqual(fs.existsSync(leaseApi.leaseFile(dir, second.unit)) ? fs.readFileSync(leaseApi.leaseFile(dir, second.unit)) : null, secondBytes);
+    assert.strictEqual(runs.get(dir, scope.run_id).batch_locator.phase, 'preparing');
+  }
+});
+
+test('issue343 U2b-4 existing broker or missing prepared record refuses before capture and renewal', () => {
+  const leaseApi = require('./forge-unit-lease');
+  for (const kind of ['broker', 'missing-record']) {
+    const dir = owner('preparation-replay-' + kind), ids = cohort(dir, independent(['T01', 'T02']));
+    const scope = scopeOf(dir, ids, 'preparation-replay-' + kind), prepared = batch.prepareIsolation(scope);
+    const manifest = batch.readManifest(dir, ids.batch_id);
+    if (kind === 'broker') fs.mkdirSync(path.join(prepared.base.batch_dir, 'broker'));
+    else fs.unlinkSync(path.join(dir, '.gsd', 'forge', 'batches', ids.batch_id, 'isolation.json'));
+    const savedRun = runs.get(dir, scope.run_id), leaseBytes = manifest.members.map(member => fs.readFileSync(leaseApi.leaseFile(dir, member.unit)));
+    const capture = isolation.captureBatchBase;
+    let captures = 0;
+    isolation.captureBatchBase = (...args) => { captures++; return capture(...args); };
+    try { assert.throws(() => batch.prepareIsolation(scope), error => error.code === (kind === 'broker' ? 'batch-cohort-broker-exists' : 'batch-isolation-record-invalid')); }
+    finally { isolation.captureBatchBase = capture; }
+    assert.strictEqual(captures, 0);
+    if (kind === 'broker') {
+      // Real public async pool entry, in a fresh process. It must refuse before
+      // inputs/routes/providers and before its first renewal (not just in prepare).
+      const script = 'const batch=require(' + JSON.stringify(BATCH_MODULE) + ');' +
+        'batch.runCohort(JSON.parse(process.argv[1]),{}).then(()=>{process.exitCode=2},error=>process.stdout.write(String(error.code)));';
+      const child = spawnSync(process.execPath, ['-e', script, JSON.stringify(scope)],
+        { encoding: 'utf8', timeout: 180000, windowsHide: true, env: { ...process.env } });
+      assert.strictEqual(child.status, 0, child.stderr || String(child.error));
+      assert.strictEqual(child.stdout, 'batch-cohort-broker-exists');
+    }
+    assert.deepStrictEqual(runs.get(dir, scope.run_id), savedRun);
+    manifest.members.forEach((member, index) => assert.deepStrictEqual(fs.readFileSync(leaseApi.leaseFile(dir, member.unit)), leaseBytes[index]));
+  }
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
