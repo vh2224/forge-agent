@@ -32,6 +32,7 @@ childProcess.spawnSync = function guardedSpawnSync(command, args, options) {
 
 const installer = require('./forge-installer.js');
 const updater = require('./forge-update.js');
+const updateCheck = require('./forge-update-check.js');
 
 let passed = 0;
 function test(name, fn) { fn(); passed++; process.stdout.write(`  ✓ ${name}\n`); }
@@ -504,15 +505,45 @@ test('successful apply invalidates the installation cache after the installer re
         order.push('install');
         return { ok: true, changed: true, backup: null, plan: [] };
       },
+      readPrefs() { return { ok: true, errors: [], prefs: {} }; },
       invalidateUpdateCache(target) {
         order.push('invalidate');
-        assert.strictEqual(target.forgeHome, data.forgeHome);
+        assert.strictEqual(target.forgeHome, updateCheck.renderContext({ forgeHome: data.forgeHome }).forgeHome);
         return { invalidated: true, file: 'fixture-cache' };
       },
     });
     assert.deepStrictEqual(order, ['install', 'invalidate']);
     assert.strictEqual(report.applied, true);
     assert.strictEqual(report.cache_invalidation.invalidated, true);
+  } finally { data.cleanup(); }
+});
+
+test('post-apply invalidation resolves the same consumer identity as the statusline', () => {
+  const data = fixture();
+  try {
+    const consumer = path.join(data.root, 'consumer');
+    const prefsRepo = path.join(data.root, 'consumer-source');
+    const identityCache = path.join(data.root, 'identity-cache');
+    fs.mkdirSync(consumer);
+    fs.mkdirSync(prefsRepo);
+    let prefsCwd = null;
+    let invalidatedContext = null;
+    const report = updater.update({ ...data, cwd: consumer, runtime: 'claude', apply: true, skipCapabilityCheck: true }, {
+      install() { return { ok: true, changed: true, backup: null, plan: [] }; },
+      readPrefs(cwd) {
+        prefsCwd = cwd;
+        return { ok: true, errors: [], prefs: { repo_path: prefsRepo } };
+      },
+      invalidateUpdateCache(context) {
+        invalidatedContext = context;
+        return { invalidated: true, file: updateCheck.cachePath(context, identityCache) };
+      },
+    });
+    const statuslineContext = { forgeHome: data.forgeHome, cwd: consumer, prefs: { repo_path: prefsRepo } };
+    assert.strictEqual(prefsCwd, updateCheck.renderContext({ forgeHome: data.forgeHome, cwd: consumer }).cwd);
+    assert.strictEqual(invalidatedContext.cwd, updateCheck.renderContext(statuslineContext).cwd);
+    assert.strictEqual(invalidatedContext.prefsRepo, updateCheck.renderContext(statuslineContext).prefsRepo);
+    assert.strictEqual(report.cache_invalidation.file, updateCheck.cachePath(statuslineContext, identityCache));
   } finally { data.cleanup(); }
 });
 

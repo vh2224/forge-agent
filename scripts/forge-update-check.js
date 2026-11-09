@@ -12,10 +12,11 @@ const { compareSemver, parseStableTags } = require('./forge-update-remote');
 
 const TTL_MS = 600000;
 const REFRESH_TIMEOUT_MS = 60000;
+const TRANSIENT_RETRY_MS = 60000;
 const MAX_FILE_BYTES = 65536;
 const MAX_REMOTE_LENGTH = 2048;
 const MAX_PATH_LENGTH = 4096;
-const CACHE_SCHEMA_VERSION = 2;
+const CACHE_SCHEMA_VERSION = 3;
 const SHA_PATTERN = /^[a-f0-9]{40,64}$/;
 const STABLE_TAG_PATTERN = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const CONTROL_PATTERN = /[\x00-\x1f\x7f-\x9f]/;
@@ -35,7 +36,7 @@ function renderContext(target, options = {}) {
     return { mode: 'clone', repo: canonicalPath(target), cwd: canonicalPath(target), direct: true };
   }
   const input = target && typeof target === 'object' ? target : {};
-  const cwd = path.resolve(input.cwd || options.cwd || process.cwd());
+  const cwd = canonicalPath(input.cwd || options.cwd || process.cwd());
   const forgeHome = resolveForgeHome({
     forgeHome: input.forgeHome || options.forgeHome,
     userHome: input.userHome || options.userHome,
@@ -43,14 +44,23 @@ function renderContext(target, options = {}) {
     platform: input.platform || options.platform,
   });
   const prefs = input.prefs && typeof input.prefs === 'object' ? input.prefs : {};
-  return { mode: 'installation', forgeHome: canonicalPath(forgeHome), cwd, prefsRepo: resolveRepoPath(prefs, cwd) };
+  const explicitPrefsRepo = typeof input.prefsRepo === 'string' && input.prefsRepo.trim()
+    ? canonicalPath(path.resolve(cwd, input.prefsRepo.trim()))
+    : null;
+  return {
+    mode: 'installation',
+    forgeHome: canonicalPath(forgeHome),
+    cwd,
+    prefsRepo: explicitPrefsRepo || resolveRepoPath(prefs, cwd),
+  };
 }
 
 function cachePath(target, directory = path.join(os.tmpdir(), `forge-update-cache-${digest(os.homedir()).slice(0, 24)}`)) {
   const context = renderContext(target);
   const identity = context.mode === 'installation'
-    ? `installation\0${context.forgeHome}`
-    : `clone\0${context.repo}`;
+    ? JSON.stringify({ mode: context.mode, forgeHome: context.forgeHome, cwd: context.cwd,
+      prefsRepo: context.prefsRepo || null })
+    : JSON.stringify({ mode: context.mode, repo: context.repo });
   return path.join(directory, `forge-update-${digest(identity)}.json`);
 }
 
@@ -65,17 +75,69 @@ function ensureCacheDirectory(file) {
   }
 }
 
-function readPrivateFile(file, maxBytes = MAX_FILE_BYTES) {
-  const stat = fs.lstatSync(file);
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maxBytes
-    || (typeof process.getuid === 'function' && stat.uid !== process.getuid())) {
-    throw new Error('Unsafe update data file');
+function sameFile(left, right) {
+  return String(left.dev) === String(right.dev) && String(left.ino) === String(right.ino);
+}
+
+function validateBoundedFile(stat, maxBytes, policy) {
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maxBytes) {
+    throw new Error(policy.error);
   }
-  return fs.readFileSync(file, 'utf8');
+  if (process.platform !== 'win32' && (stat.mode & policy.forbiddenMode)) {
+    throw new Error(policy.error);
+  }
+  if (!policy.allowForeignOwner && typeof process.getuid === 'function' && stat.uid !== process.getuid()) {
+    throw new Error(policy.error);
+  }
+}
+
+function readBoundedFile(file, maxBytes, policy) {
+  const before = fs.lstatSync(file);
+  validateBoundedFile(before, maxBytes, policy);
+  const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | noFollow);
+  try {
+    const opened = fs.fstatSync(fd);
+    validateBoundedFile(opened, maxBytes, policy);
+    if (!sameFile(before, opened)) throw new Error(policy.error);
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let length = 0;
+    while (length <= maxBytes) {
+      const count = fs.readSync(fd, buffer, length, buffer.length - length, null);
+      if (count === 0) break;
+      length += count;
+    }
+    const after = fs.fstatSync(fd);
+    validateBoundedFile(after, maxBytes, policy);
+    if (!sameFile(opened, after) || length > maxBytes) throw new Error(policy.error);
+    return buffer.subarray(0, length).toString('utf8');
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function readPrivateFile(file, maxBytes = MAX_FILE_BYTES) {
+  return readBoundedFile(file, maxBytes, {
+    allowForeignOwner: false,
+    forbiddenMode: 0o077,
+    error: 'Unsafe update data file',
+  });
+}
+
+function readManifestFile(file) {
+  return readBoundedFile(file, MAX_FILE_BYTES, {
+    allowForeignOwner: true,
+    forbiddenMode: 0o002,
+    error: 'Unsafe update manifest',
+  });
 }
 
 function readJsonFile(file) {
   return JSON.parse(readPrivateFile(file, MAX_FILE_BYTES));
+}
+
+function readManifest(file) {
+  return JSON.parse(readManifestFile(file));
 }
 
 function publish(file, contents) {
@@ -112,6 +174,8 @@ function readCache(file) {
     const valid = value && typeof value === 'object' && !Array.isArray(value)
       && value.schema_version === CACHE_SCHEMA_VERSION
       && Number.isFinite(value.ts) && value.ts >= 0
+      && (value.last_success_ts == null || (Number.isFinite(value.last_success_ts) && value.last_success_ts >= 0))
+      && (value.retry_after == null || (Number.isFinite(value.retry_after) && value.retry_after >= 0))
       && typeof value.has_update === 'boolean'
       && ['unknown', 'equal', 'behind', 'ahead', 'diverged', 'differs'].includes(value.state)
       && ['remote', 'clone', 'invalid'].includes(value.source_mode)
@@ -127,7 +191,22 @@ function readCache(file) {
 
 function resolveRepoPath(prefs, cwd = process.cwd()) {
   const repo = prefs && typeof prefs.repo_path === 'string' ? prefs.repo_path.trim() : '';
-  return repo ? path.resolve(cwd, repo) : null;
+  return repo ? canonicalPath(path.resolve(cwd, repo)) : null;
+}
+
+function resolveConsumerContext(cwd, options = {}) {
+  const consumer = canonicalPath(cwd || options.cwd || process.cwd());
+  const readPrefs = options.readPrefs || require('./forge-prefs').readPrefsCached;
+  const resolved = readPrefs(consumer, options.prefsOptions);
+  if (!resolved || typeof resolved !== 'object') throw new Error('prefs_unavailable');
+  return renderContext({
+    cwd: consumer,
+    forgeHome: options.forgeHome,
+    userHome: options.userHome,
+    env: options.env,
+    platform: options.platform,
+    prefs: resolved.prefs || {},
+  });
 }
 
 function validateString(value, label, limit, options = {}) {
@@ -147,7 +226,10 @@ function installationVersion(manifest, remote) {
 
 function validateRemoteSource(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_source_remote');
-  const remote = validateString(value.remote, 'remote', MAX_REMOTE_LENGTH, { rejectOption: true });
+  const remote = validateString(value.remote, 'remote', MAX_REMOTE_LENGTH).trim();
+  if (!remote || remote.startsWith('-') || /^ext::/i.test(remote) || /--upload-pack/i.test(remote)) {
+    throw new Error('invalid_remote');
+  }
   const channel = validateString(value.channel, 'channel', 16);
   if (channel !== 'stable' && channel !== 'master') throw new Error('invalid_channel');
   const sha = validateString(value.sha, 'sha', 64);
@@ -170,7 +252,7 @@ function validateRepo(value, base) {
 function resolveInstalledSource(target, options = {}) {
   const context = renderContext(target, options);
   if (context.mode === 'clone') return { mode: 'clone', repo: context.repo, version: null, direct: true };
-  const manifest = readJsonFile(path.join(context.forgeHome, 'manifest.json'));
+  const manifest = readManifest(path.join(context.forgeHome, 'manifest.json'));
   if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) throw new Error('invalid_manifest');
   if (Object.prototype.hasOwnProperty.call(manifest, 'source_remote')) {
     const remote = validateRemoteSource(manifest.source_remote);
@@ -193,9 +275,21 @@ function sourceIdentity(source, localCommit = null) {
     localCommit: localCommit || null }));
 }
 
-function unknownResult(identity = digest('invalid-installation'), error = 'update-check-unavailable', generation = null) {
-  return { schema_version: CACHE_SCHEMA_VERSION, ts: Date.now(), state: 'unknown', source_mode: 'invalid',
-    identity, version: '', has_update: false, remote_version: '', error, generation };
+function unknownResult(options = {}) {
+  return {
+    schema_version: CACHE_SCHEMA_VERSION,
+    ts: Number.isFinite(options.ts) ? options.ts : Date.now(),
+    last_success_ts: options.lastSuccessTs || null,
+    retry_after: options.retryAfter || null,
+    state: 'unknown',
+    source_mode: options.sourceMode || 'invalid',
+    identity: options.identity || digest('invalid-installation'),
+    version: options.version || '',
+    has_update: false,
+    remote_version: '',
+    error: options.error || 'update-check-unavailable',
+    generation: options.generation || null,
+  };
 }
 
 function diagnosticCode(error) {
@@ -208,8 +302,26 @@ function diagnosticCode(error) {
     : 'update-check-unavailable';
 }
 
+function callGit(runGit, cwd, args, options) {
+  try {
+    return runGit(cwd, args, options);
+  } catch (cause) {
+    const error = new Error('git_transient');
+    error.transient = true;
+    if (cause && Number.isInteger(cause.status)) error.status = cause.status;
+    throw error;
+  }
+}
+
+function successfulResult(fields) {
+  const now = Date.now();
+  return { schema_version: CACHE_SCHEMA_VERSION, ts: now, last_success_ts: now,
+    retry_after: null, error: null, ...fields };
+}
+
 function invalidateCache(target, options = {}) {
-  const file = cachePath(target, options.cacheDir);
+  const context = renderContext(target, options);
+  const file = cachePath(context, options.cacheDir);
   ensureCacheDirectory(file);
   publish(`${file}.generation`, crypto.randomUUID());
   try {
@@ -221,7 +333,7 @@ function invalidateCache(target, options = {}) {
   }
 }
 
-function compareCommits(repo, local, remote, runGit = git) {
+function compareCommits(repo, local, remote, runGit = git, options = {}) {
   if (!SHA_PATTERN.test(local) || !SHA_PATTERN.test(remote)) return 'unknown';
   if (local === remote) return 'equal';
   const ancestor = (left, right) => {
@@ -232,7 +344,10 @@ function compareCommits(repo, local, remote, runGit = git) {
     if (ancestor(local, remote)) return 'behind';
     if (ancestor(remote, local)) return 'ahead';
     return 'diverged';
-  } catch (_) { return 'unknown'; }
+  } catch (error) {
+    if (options.throwOnError) throw error;
+    return 'unknown';
+  }
 }
 
 function remoteRefresh(source, generation, runGit) {
@@ -246,32 +361,33 @@ function remoteRefresh(source, generation, runGit) {
     const latest = tags[0];
     const currentVersion = source.tag.slice(1);
     const hasUpdate = compareSemver(latest.version, currentVersion) > 0;
-    return { schema_version: CACHE_SCHEMA_VERSION, ts: Date.now(), last_success_ts: Date.now(),
+    return successfulResult({
       source_mode: 'remote', identity, version: source.tag, localCommit: source.sha,
       remoteCommit: latest.sha, state: hasUpdate ? 'behind' : 'equal', has_update: hasUpdate,
-      remote_version: hasUpdate ? `v${latest.version}` : '', generation };
+      remote_version: hasUpdate ? `v${latest.version}` : '', generation });
   }
   const output = String(runGit(cwd, ['ls-remote', source.remote, 'refs/heads/master'], { timeout: 5000 })).trim();
   const match = /^([a-f0-9]{40,64})\s+refs\/heads\/master$/.exec(output);
   if (!match) throw new Error('master_ref_unavailable');
   const remoteCommit = match[1];
   const differs = remoteCommit !== source.sha;
-  return { schema_version: CACHE_SCHEMA_VERSION, ts: Date.now(), last_success_ts: Date.now(),
+  return successfulResult({
     source_mode: 'remote', identity, version: source.version, localCommit: source.sha, remoteCommit,
     state: differs ? 'differs' : 'equal', has_update: differs,
-    remote_version: differs ? remoteCommit.slice(0, 8) : '', generation };
+    remote_version: differs ? remoteCommit.slice(0, 8) : '', generation });
 }
 
-function cloneRefresh(source, generation, runGit) {
+function cloneRefresh(source, generation, runGit, prepared = {}) {
   const repo = source.repo;
-  const localCommit = String(runGit(repo, ['rev-parse', '--verify', 'HEAD'], { timeout: 2000 })).trim();
+  const localCommit = prepared.localCommit
+    || String(runGit(repo, ['rev-parse', '--verify', 'HEAD'], { timeout: 2000 })).trim();
   if (!SHA_PATTERN.test(localCommit)) throw new Error('local_commit_unavailable');
-  const identity = sourceIdentity(source, localCommit);
+  const identity = prepared.identity || sourceIdentity(source, localCommit);
   const remoteCommit = String(runGit(repo, ['ls-remote', 'origin', 'HEAD'], { timeout: 5000 })).trim().split(/\s+/)[0];
   if (!SHA_PATTERN.test(remoteCommit)) throw new Error('remote_head_unavailable');
   try { runGit(repo, ['cat-file', '-e', `${remoteCommit}^{commit}`], { timeout: 2000 }); }
   catch (_) { runGit(repo, ['fetch', '--no-tags', '--no-write-fetch-head', 'origin', remoteCommit], { timeout: 5000 }); }
-  const state = compareCommits(repo, localCommit, remoteCommit, runGit);
+  const state = compareCommits(repo, localCommit, remoteCommit, runGit, { throwOnError: true });
   if (state === 'unknown') throw new Error('ancestry_unavailable');
   const hasUpdate = state === 'behind' || state === 'diverged';
   let remoteVersion = '';
@@ -288,9 +404,9 @@ function cloneRefresh(source, generation, runGit) {
     try { version = String(runGit(repo, ['describe', '--tags', '--always'], { timeout: 2000 })).trim().replace(/^(v[\d.]+)-(\d+)-g[0-9a-f]+$/, '$1.$2'); }
     catch (_) { /* direct legacy clone only */ }
   }
-  return { schema_version: CACHE_SCHEMA_VERSION, ts: Date.now(), last_success_ts: Date.now(),
+  return successfulResult({
     source_mode: 'clone', identity, version, localCommit, remoteCommit, state,
-    has_update: hasUpdate, remote_version: remoteVersion, generation };
+    has_update: hasUpdate, remote_version: remoteVersion, generation });
 }
 
 // Runs only in the bounded refresh subprocess, never on the render path.
@@ -298,15 +414,40 @@ function refresh(target, options = {}) {
   const file = cachePath(target, options.cacheDir);
   ensureCacheDirectory(file);
   const generation = readGeneration(file);
-  const runGit = options.git || git;
+  const previous = readCache(file);
+  const rawGit = options.git || git;
+  const runGit = (cwd, args, gitOptions) => callGit(rawGit, cwd, args, gitOptions);
   let next;
+  let source = null;
+  let identity = null;
+  let localCommit = null;
   try {
-    const source = resolveInstalledSource(target, options);
-    next = source.mode === 'remote'
-      ? remoteRefresh(source, generation, runGit)
-      : cloneRefresh(source, generation, runGit);
+    source = resolveInstalledSource(target, options);
+    if (source.mode === 'remote') {
+      identity = sourceIdentity(source);
+      next = remoteRefresh(source, generation, runGit);
+    } else {
+      localCommit = String(runGit(source.repo, ['rev-parse', '--verify', 'HEAD'], { timeout: 2000 })).trim();
+      if (!SHA_PATTERN.test(localCommit)) throw new Error('local_commit_unavailable');
+      identity = sourceIdentity(source, localCommit);
+      next = cloneRefresh(source, generation, runGit, { localCommit, identity });
+    }
   } catch (error) {
-    next = unknownResult(digest(`invalid\0${renderContext(target, options).mode}`), diagnosticCode(error), generation);
+    const code = diagnosticCode(error);
+    const sourceMode = source ? source.mode : 'invalid';
+    const version = source && source.version ? source.version : '';
+    if (error && error.transient) {
+      const retryAfter = Date.now() + TRANSIENT_RETRY_MS;
+      if (previous && identity && previous.identity === identity
+        && (previous.generation || null) === (generation || null)
+        && Number.isFinite(previous.last_success_ts)) {
+        next = { ...previous, error: code, retry_after: retryAfter, generation };
+      } else {
+        next = unknownResult({ identity, sourceMode, version, error: code, generation, retryAfter });
+      }
+    } else {
+      next = unknownResult({ identity, sourceMode, version, error: code, generation });
+    }
   }
   publish(file, JSON.stringify(next));
   return next;
@@ -325,11 +466,14 @@ function targetFromRequest(request) {
 
 function cachedUpdate(target, options = {}) {
   const context = renderContext(target, options);
-  const file = cachePath(target, options.cacheDir);
+  const file = cachePath(context, options.cacheDir);
   const unknown = { state: 'unknown', version: '', has_update: false, remote_version: '' };
   try { ensureCacheDirectory(file); } catch (_) { return unknown; }
   const cache = readCache(file);
-  if (!cache || Date.now() - cache.ts >= TTL_MS) {
+  const due = !cache || (cache.retry_after != null
+    ? Date.now() >= cache.retry_after
+    : Date.now() - cache.ts >= TTL_MS);
+  if (due) {
     const marker = `${file}.refresh`;
     try {
       try { if (Date.now() - fs.statSync(marker).mtimeMs > REFRESH_TIMEOUT_MS) fs.unlinkSync(marker); } catch (_) { /* absent */ }
@@ -374,7 +518,7 @@ if (require.main === module && process.argv[2] === '--invalidate') {
     let cacheDir;
     if (process.argv[3] === '--cwd') {
       if (!process.argv[4]) throw new Error('--cwd requires a consumer directory');
-      target = { cwd: path.resolve(process.argv[4]), prefs: {} };
+      target = resolveConsumerContext(process.argv[4]);
       cacheDir = process.argv[5];
     } else if (process.argv[3]) {
       target = process.argv[3];
@@ -389,7 +533,9 @@ if (require.main === module && process.argv[2] === '--invalidate') {
 
 module.exports = {
   cachePath,
+  renderContext,
   resolveRepoPath,
+  resolveConsumerContext,
   resolveInstalledSource,
   invalidateCache,
   compareCommits,
@@ -401,10 +547,13 @@ module.exports = {
     CONTROL_PATTERN,
     MAX_FILE_BYTES,
     MAX_REMOTE_LENGTH,
+    TRANSIENT_RETRY_MS,
     SHA_PATTERN,
     STABLE_TAG_PATTERN,
     readCache,
+    spawnRequest,
     sourceIdentity,
+    targetFromRequest,
     validateRemoteSource,
   },
 };

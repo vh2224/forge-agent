@@ -9,6 +9,7 @@ const installer = require('./forge-installer.js');
 const { resolveForgeHome } = require('./forge-home.js');
 const { resolveExecutable } = require('./forge-capabilities.js');
 const remoteUpdater = require('./forge-update-remote.js');
+const updateCheck = require('./forge-update-check.js');
 const vscodePanel = require('./forge-vscode-install.js');
 
 const SOURCE_MANIFEST = 'forge-source-manifest.json';
@@ -290,12 +291,17 @@ function update(input = {}, dependencies = {}) {
   let cache_invalidation;
   try {
     const invalidate = dependencies.invalidateUpdateCache
-      || require('./forge-update-check').invalidateCache;
-    cache_invalidation = invalidate({
+      || updateCheck.invalidateCache;
+    const resolveContext = dependencies.resolveUpdateContext
+      || updateCheck.resolveConsumerContext;
+    const consumerContext = resolveContext(input.cwd || process.cwd(), {
       forgeHome: resolveForgeHome(input),
-      cwd: input.cwd || process.cwd(),
-      prefs: {},
+      userHome: input.userHome,
+      env: input.env,
+      platform: input.platform,
+      readPrefs: dependencies.readPrefs,
     });
+    cache_invalidation = invalidate(consumerContext);
   } catch (_) {
     cache_invalidation = { invalidated: false, reason: 'invalidation-failed' };
   }
