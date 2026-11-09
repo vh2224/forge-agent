@@ -1,6 +1,6 @@
 # #378 superseded-owner next distribution terminal
 
-Base bccfb723bee755f830e452d0b3e3dbcc6fb66025 is the actual immutable published375 source. Final input-set SHA 1da4da5888a71380a49dd7752c7a033a576ffb744d39456c3a85139e0822d096. No future implementation commit is invented.
+Base bccfb723bee755f830e452d0b3e3dbcc6fb66025 is the actual immutable published375 source. Final input-set SHA 6f3b580a2eff7f98ce7020abe564c5f17d917e1a8f0fa4badb26a36ba0298bc3. No future implementation commit is invented.
 Seven independently measured source rows: three Root maintenance paths plus four real consumer imports. Endpoint375 and all375/367/earlier fixtures remain byte-exact. No rendered surface, golden, allowlist or runtime preference is repinned.
 Every old validator and57 old negative controls remains in the chain; new bounded tampering assertions are additive. This fixture does not prove delivery/UAT/provider/CI/merge/install.
 UAT humano dispensado; not performed or accepted.
@@ -11,10 +11,10 @@ UAT humano dispensado; not performed or accepted.
   - after 0d073cbfe70afcbdd9805f97166729784f2c4223fe16b66a1df922953bfb3f3a
 - scripts/forge-unit-controller.js
   - before 4ee058cfb7447c7ab95cd083bcbc83e65492059ecf1401f449806bb22d38d598
-  - after 3058c2bce2b0f0df59db3e80366d2b404f47f3702a781e0cf7880421d905f38b
+  - after fac26dcec950cb30c6a6bd4bb4117de09fce825e9f1e1ddee12ccfa3ab43bdfb
 - scripts/forge-unit-controller.test.js
   - before 434b4c5ecbe18f12eb767a5929684e2e06bdfa49c9aa19675b1c62a22dfb1549
-  - after b4cd44cc63aabf2d83144c5f1f8e3c7ccf6eeed8aaa1a17f21fdac2efeb2c18d
+  - after 28de4e749f991e7b8171f41d95349e16b40e1af77c20af5bb9f2de1c91225109
 - scripts/forge-claude-renderer.test.js
   - before 6b4c2f4b4d1ee6bd710a668a1c092fb85655b6e3c2a11556f972917e1de9d1db
   - after 75e88bc78d5036cabcdb8326c7b4a800e052f15ae7c0197119c9b490b4e4a9c1

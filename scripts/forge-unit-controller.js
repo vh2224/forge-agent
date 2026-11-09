@@ -1514,18 +1514,23 @@ function interruptionRouteEvidence(cwd, milestone, references) {
     throw new ControllerError('owner-interruption-supersession-invalid', 'recorded route evidence required');
   }
   const pathKey = file => require('./forge-code-roots').key(path.resolve(file));
-  const allowed = [eventsFile(cwd), eventsFile(cwd, milestone)].map(file => pathKey(fs.existsSync(file) ? fs.realpathSync.native(file) : file));
+  const owner = fs.realpathSync.native(cwd);
+  // The owner may be reached through a platform alias (/var on macOS, an
+  // observed Windows junction). Only its exact protected descendants are
+  // traversed; links within .gsd remain forbidden.
+  const allowed = [undefined, milestone].map(id => ({ input: eventsFile(cwd, id), file: eventsFile(owner, id) }));
   const seen = new Set();
   return references.map(reference => {
     if (!reference || typeof reference.path !== 'string' || !path.isAbsolute(reference.path)
-      || !allowed.includes(pathKey(fs.realpathSync.native(reference.path))) || !Number.isSafeInteger(reference.line) || reference.line < 1
+      || !Number.isSafeInteger(reference.line) || reference.line < 1
       || !/^[a-f0-9]{64}$/.test(reference.sha256 || '')) {
       throw new ControllerError('owner-interruption-supersession-invalid', 'exact owner event line required');
     }
-    const file = path.resolve(reference.path);
-    for (let cursor = file; ; cursor = path.dirname(cursor)) {
+    const matched = allowed.find(row => pathKey(reference.path) === pathKey(row.input) || pathKey(reference.path) === pathKey(row.file));
+    if (!matched) throw new ControllerError('owner-interruption-supersession-invalid', 'exact owner event line required');
+    const file = matched.file;
+    for (let cursor = file; pathKey(cursor) !== pathKey(owner); cursor = path.dirname(cursor)) {
       if (fs.lstatSync(cursor).isSymbolicLink()) throw new ControllerError('owner-interruption-path-invalid', 'linked evidence path');
-      if (cursor === path.dirname(cursor)) break;
     }
     if (!fs.statSync(file).isFile()) throw new ControllerError('owner-interruption-supersession-invalid', 'event evidence is not a file');
     const line = fs.readFileSync(file, 'utf8').split('\n')[reference.line - 1];

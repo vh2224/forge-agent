@@ -1939,6 +1939,24 @@ function supersededInterruptionFixture(options = {}) {
 function testSupersededInterruptedOwner() {
   const oldSession = process.env.CODEX_THREAD_ID;
   try {
+    {
+      const f = supersededInterruptionFixture(), parent = temp(), alias = path.join(parent, 'owner-alias');
+      try {
+        fs.symlinkSync(f.cwd, alias, process.platform === 'win32' ? 'junction' : 'dir');
+        assert.strictEqual(fs.realpathSync.native(alias), fs.realpathSync.native(f.cwd));
+        f.routeEvidence.path = controller.eventsFile(alias);
+        const result = f.runs.settleInterruptedOwner(alias, f.seed.milestone, f.options);
+        assert.strictEqual(result.status, 'interrupted-and-transferred', 'known owner alias is not a protected descendant link');
+        assert.strictEqual(result.interruption.artifacts_accepted, false);
+      } finally {
+        if (fs.existsSync(alias)) {
+          assert.strictEqual(path.resolve(alias), path.resolve(parent, 'owner-alias'));
+          assert(fs.lstatSync(alias).isSymbolicLink());
+          fs.rmSync(alias, { recursive: true, force: true });
+        }
+        cleanup(parent); f.cleanup();
+      }
+    }
     for (const options of [{ milestone: true, crlf: true }, { milestone: true, crlf: false }, { milestone: false, crlf: true }]) {
       const f = supersededInterruptionFixture(options);
       try {
