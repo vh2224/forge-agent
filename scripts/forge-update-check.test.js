@@ -107,7 +107,10 @@ try {
     assert.strictEqual(value.version, 'v1.2.3');
     assert.strictEqual(value.remote_version, '');
     assert(calls.every((call) => call.args.includes('https://example.invalid/forge.git')));
-    assert(calls.every((call) => path.resolve(call.cwd).toLowerCase() === path.resolve(forgeHome).toLowerCase()));
+    // The provider realpaths FORGE_HOME (Windows 8.3 short names such as PEDROV~1 become
+    // long names), so compare physical paths rather than lexical ones.
+    const physical = (value) => fs.realpathSync.native(path.resolve(value)).toLowerCase();
+    assert(calls.every((call) => physical(call.cwd) === physical(forgeHome)));
     assert.strictEqual(git(repo, 'rev-parse', 'HEAD'), base, 'auxiliary clone stays untouched');
   });
 
@@ -218,12 +221,17 @@ try {
   test('unreadable manifest is unknown and never reaches Git', () => {
     const forgeHome = path.join(ROOT, 'manifest-unreadable');
     writeManifest(forgeHome, remoteManifest());
-    const manifestFile = path.resolve(forgeHome, 'manifest.json');
+    // Physical comparison: the provider realpaths FORGE_HOME (8.3 short names on Windows).
+    const physical = (value) => {
+      try { return fs.realpathSync.native(path.resolve(String(value))).toLowerCase(); }
+      catch (_) { return path.resolve(String(value)).toLowerCase(); }
+    };
+    const manifestFile = physical(path.join(forgeHome, 'manifest.json'));
     const originalRead = fs.readFileSync;
     let gitCalls = 0;
     try {
       fs.readFileSync = function(file, ...args) {
-        if (path.resolve(file).toLowerCase() === manifestFile.toLowerCase()) {
+        if (typeof file === 'string' && physical(file) === manifestFile) {
           const error = new Error('fixture access denied');
           error.code = 'EACCES';
           throw error;
