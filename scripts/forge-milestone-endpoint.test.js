@@ -872,11 +872,12 @@ try {
   // ---- Truth 7 (part): endpoint adds sliceClosure; ownership adds withOwnerBoundary; clock adds two.
   assert.equal(typeof controller.withOwnerBoundary, 'function', 'the reviewed owner boundary remains an actual callable seam');
   for (const name of ['beginSerial', 'incompleteUnits', 'pausePartial', 'reconcilePartialSuccessors', 'inspectPausedAttempt', 'verifyCompletedAttempt', 'validatePausedEntry']) assert.equal(typeof controller[name], 'function', name + ' is the explicit additive #367 API');
+  for (const name of ["settleInterruptedLineage","verifyOwnerInterruption","pendingOwnerInterruptions","ownerInterruptionIdentity","ownerInterruptionQuestions","archiveOwnerInterruptionWitnesses"]) assert.equal(typeof controller[name], 'function', name + ' is the explicit additive #375 administrative API');
   assert.deepEqual(Object.keys(controller), ['PROTOCOL_VERSION', 'BOUNDARY_KINDS', 'ACTIONS', 'PHASES', 'REASON_CODES', 'TIME_ADMISSION_CODES', 'ControllerError',
     'selectNextUnit', 'discoverInventory', 'select', 'begin', 'beginSerial', 'transition', 'persistResult', 'complete', 'pause', 'fail', 'expireSafe', 'resume', 'handoff',
     'withOwnerBoundary', 'pendingTransactions', 'incompleteUnits', 'pausePartial', 'reconcilePartialSuccessors', 'inspectPausedAttempt', 'verifyCompletedAttempt', 'validatePausedEntry', 'projectLogicalHistory', 'logicalState', 'resolvePrefs', 'transactionDir', 'resultDir', 'boundaryDir', 'eventsFile', 'transactionFile',
     'resultFile', 'boundaryFile', 'readEvents', 'readJson', 'writeAtomic', 'lookupRecord', 'preflightPaths', 'consumeFailure', 'reenter', 'failureProjection',
-    'validateLinkedEntry', 'validateTerminalLinkedEntry', 'sliceClosure', 'dependencies']);
+    'validateLinkedEntry', 'validateTerminalLinkedEntry', 'sliceClosure', 'settleInterruptedLineage', 'verifyOwnerInterruption', 'pendingOwnerInterruptions', 'ownerInterruptionIdentity', 'ownerInterruptionQuestions', 'archiveOwnerInterruptionWitnesses', 'dependencies']);
   assert.deepEqual(Object.keys(clock), ['CLOCK_POLICY', 'FORECAST_POLICY', 'DELIVERY_PROOF_MODES', 'computeClock', 'readClock', 'readDeliveries',
     'readHistoricalDeliveries', 'readHistoricalTaskDelivery', 'computeForecast', 'readForecast', 'main', 'ENDPOINT_PROOF_POLICY', 'readEndpointProof']);
   assert(Object.isFrozen(clock.ENDPOINT_PROOF_POLICY) && Object.isFrozen(clock.ENDPOINT_PROOF_POLICY.limitations));
