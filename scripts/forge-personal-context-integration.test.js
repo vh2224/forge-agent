@@ -160,6 +160,8 @@ try {
   }
   // Partial creation exposes the failed second write, preserving the run.
   f.work('TASK-003');
+  // Creation starts with existing task artifacts, not an existing registry owner.
+  fs.unlinkSync(path.join(f.project, '.gsd', 'forge', 'runs', 'TASK-003.json'));
   const corruptHome = path.join(f.root, 'corrupt-home'); fs.mkdirSync(path.join(corruptHome, '.forge-personal'), { recursive: true });
   fs.writeFileSync(path.join(corruptHome, '.forge-personal', 'context.json'), '{broken');
   const partial = helpers.activateRun(f.project, { userHome: corruptHome, id: 'TASK-003', kind: 'task', session_id: 'fixture', intent: 'create' });
