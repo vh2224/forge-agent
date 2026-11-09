@@ -1555,7 +1555,7 @@ refused resolver contract and unsupported model/effort/fork/tool capability stop
 before launch. Invoke the returned tool and structured arguments unchanged.
 Pass `forkTurns:'none'`; Codex receives the full model ID, separate
 `reasoning_effort`, and `fork_turns:'none'`;
-Claude aliases remain inside the Claude adapter. When the active schema exposes Agent effort, supply the observed agent-argument capability and exact reasoning_efforts enum. Otherwise, before every Claude native call, read/hash the actual exposed agent file, call `observeClaudeAgentBinding`, and pass the successful observation as `effortBinding`. Prompt text is not an effort API;
+Claude aliases remain inside the Claude adapter. When the active schema exposes Agent effort, supply the observed agent-argument capability and exact reasoning_efforts enum. Otherwise, before every Claude native call, read the actual exposed agent file, compute SHA-256 over those exact bytes, call `observeClaudeAgentBinding`, and pass the successful observation as `effortBinding`. Prompt text is not an effort API;
 a missing, stale, or mismatched binding is a named refusal. Never omit an
 explicit model to inherit agent frontmatter. Use a description that captures what is happening:
 - Format: `{unit_type} {unit_id}: {one-liner describing the work}`
