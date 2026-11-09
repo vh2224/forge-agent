@@ -783,7 +783,7 @@
             "source": {
               "file": "skills/forge-task/SKILL.md",
               "reference": "skills/forge-task/SKILL.md#modelo-literal",
-              "sha256": "850589544a3e7698971bee85931c1fe99b8ba110a8f1ec94ecd5f42419fc9168"
+              "sha256": "d657fe3b191a675c2d2a62012ca00c71360d44b65cd65787fa4e75a81016b957"
             },
             "text": "TaskCreate({ subject: \"⚡ {TASK_ID} — execute: {descrição humana da task}\", description: \"executor {nativo|sidecar} forge-executor ({modelo resolvido})\", activeForm: \"executando agente: {descrição humana} · forge-executor\" })",
             "rubric": {
@@ -2138,7 +2138,7 @@
             "source": {
               "file": "skills/forge-task/SKILL.md",
               "reference": "skills/forge-task/SKILL.md#modelo-literal",
-              "sha256": "850589544a3e7698971bee85931c1fe99b8ba110a8f1ec94ecd5f42419fc9168"
+              "sha256": "d657fe3b191a675c2d2a62012ca00c71360d44b65cd65787fa4e75a81016b957"
             },
             "text": "TaskCreate({ subject: \"⚡ {TASK_ID} — execute: {descrição humana da task}\", description: \"executor {nativo|sidecar} forge-executor ({modelo resolvido})\", activeForm: \"executando agente: {descrição humana} · forge-executor\" })",
             "rubric": {

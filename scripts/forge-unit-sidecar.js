@@ -806,7 +806,10 @@ function artifactAttemptFiles(request) {
   return { cwd, root, resultFile, receiptFile };
 }
 
-function beginArtifactAttempt(request) {
+function beginArtifactAttempt(...args) {
+  return require('./forge-owner-transport-window').withMutation(args[0].contextRoot || args[0].cwd, () => beginArtifactAttemptInsideOwnerWindow(...args));
+}
+function beginArtifactAttemptInsideOwnerWindow(request) {
   const loc = locations(request);
   const files = artifactAttemptFiles(request);
   const fingerprint = artifactFingerprint(request);
@@ -939,7 +942,15 @@ async function acceptArtifactResultCore(request, rawResult, metadata = {}, publi
       const broker = require('./forge-artifact-reconciliation').assertBroker(request.ownerBroker);
       if (broker.manifest_sha256 !== existing.broker_manifest_sha256) fail('broker-manifest-changed');
       broker.verify();
-    } else if (JSON.stringify(preparationSurfaceSnapshot(request)) !== JSON.stringify(existing.preparation_surface)) fail('artifact-direct-write-detected');
+    } else {
+      const observed = preparationSurfaceSnapshot(request);
+      if (JSON.stringify(observed) !== JSON.stringify(existing.preparation_surface)) {
+        existing.preparation_surface_drift = { scope: 'whole-owner', attribution: 'unproven',
+          expected_sha256: hash(JSON.stringify(existing.preparation_surface)), observed_sha256: hash(JSON.stringify(observed)) };
+        json(files.receiptFile, existing);
+        fail('artifact-direct-write-detected');
+      }
+    }
   }
   if (/(?:token|secret|password|credential)\s*[:=]\s*[^\s"}]+/i.test(JSON.stringify(rawResult))) {
     const error = new Error('Secret-like provider output refused.');
@@ -3025,7 +3036,15 @@ async function runUnitSidecarCore(request, runtime, identity) {
           plan_sha256: r.ownerBroker?.manifest?.plan_sha256 || null };
         json(receiptFile, saved);
         if (r.ownerBroker) require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker).verify();
-        else if (JSON.stringify(preparationSurfaceSnapshot(r)) !== JSON.stringify(saved.preparation_surface)) fail('artifact-direct-write-detected');
+        else {
+          const observed = preparationSurfaceSnapshot(r);
+          if (JSON.stringify(observed) !== JSON.stringify(saved.preparation_surface)) {
+            saved.preparation_surface_drift = { scope: 'whole-owner', attribution: 'unproven',
+              expected_sha256: hash(JSON.stringify(saved.preparation_surface)), observed_sha256: hash(JSON.stringify(observed)) };
+            json(receiptFile, saved);
+            fail('artifact-direct-write-detected');
+          }
+        }
         if (r.phase === 'plan' && result.status === 'done') saved.plan_contract = require('./forge-task-preparation').preflightPlan(r, result.artifacts[0].content);
         saved.pending_questions = require('./forge-interaction').mergePendingQuestions(r.pending_questions || [], result.questions || []);
         json(receiptFile, saved);
@@ -3248,6 +3267,14 @@ function appendProtectedOwnerEvents(root, receiptFile, record, lines) {
 }
 
 async function runUnitSidecar(request, runtime = {}) {
+  const windows = require('./forge-owner-transport-window');
+  if (request?.scope === 'standalone-task' && ['brainstorm','discuss','research','plan'].includes(request.phase)) {
+    windows.assertMutationAllowed(request.contextRoot || request.cwd);
+    if (runtime.ownerTransportAdapter) return windows.protectPreparation(request, runtime.ownerTransportAdapter, () => runUnitSidecarInsideOwnerWindow(request, runtime));
+  }
+  return runUnitSidecarInsideOwnerWindow(request, runtime);
+}
+async function runUnitSidecarInsideOwnerWindow(request, runtime = {}) {
   const r = request?.linked_begin_key ? require('./forge-attempt-recovery').bindLinkedRequest(request, runtime.linkedEntryOptions) : request || {};
   const route = r.route || {};
   const identity = { phase: r.preparationIdentity?.phase, unit: r.unitType === 'review-fix' ? reviewFixUnitLabel(r)

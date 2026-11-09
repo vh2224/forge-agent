@@ -312,7 +312,10 @@ function readRecordJson(file) {
   }
 }
 const ownerActivityLocks = new Map();
-function withMutex(cwd, name, fn) {
+function withMutex(...args) {
+  return require('./forge-owner-transport-window').withMutation(args[0], () => withMutexInsideOwnerWindow(...args));
+}
+function withMutexInsideOwnerWindow(cwd, name, fn) {
   const handle = forgeLock.acquireProcessSync(cwd, name, { retries: 80, ttlMs: 10_000 });
   const ownerBoundary = name === 'unit-controller-transactions', key = path.resolve(cwd);
   if (ownerBoundary) ownerActivityLocks.set(key, handle);

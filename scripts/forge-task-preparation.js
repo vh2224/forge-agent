@@ -558,6 +558,23 @@ function preparationIdentity(request, route = {}) {
 }
 
 async function startStandaloneTaskPreparation(rawRequest, deps = {}) {
+  const windows = require('./forge-owner-transport-window');
+  // Legacy --start/--accept remains strict and byte-compatible in its receipts.
+  // A live host opts into the retained protected-window capability, never JSON.
+  let request;
+  try { request = validateRequest(rawRequest); }
+  catch (error) { return refused(error.stage || 'input', error.code || 'invalid-preparation-request'); }
+  if (deps.ownerTransportAdapter) return windows.protectPreparation(request, deps.ownerTransportAdapter, () => startStandaloneTaskPreparationInsideOwnerWindow(rawRequest, deps));
+  try {
+    const cap = windows.coordinatePreparation(request, preparationRequestFingerprint(request),
+      { create: !fs.existsSync(unit.artifactAttemptFiles(request).receiptFile), operation: 'start' });
+    if (!cap) return startStandaloneTaskPreparationInsideOwnerWindow(rawRequest, deps);
+    const result = await windows.withWindow(cap, () => startStandaloneTaskPreparationInsideOwnerWindow(rawRequest, deps));
+    return windows.coordinationResult(cap, typeof result.invoke === 'function'
+      ? { ...result, invoke: callback => windows.withWindow(cap, () => result.invoke(callback)) } : result);
+  } catch (error) { return refused('coordination', error.code || 'owner-window-unmeasured'); }
+}
+async function startStandaloneTaskPreparationInsideOwnerWindow(rawRequest, deps = {}) {
   const result = await startStandaloneTaskPreparationCore(rawRequest, deps);
   if (typeof deps.announce === 'function') {
     const route = result.route || {};
@@ -643,6 +660,14 @@ function candidateFromPreparationResult(raw, delivery) {
 }
 
 async function acceptStandaloneTaskPreparation(rawRequest, acceptance) {
+  const windows = require('./forge-owner-transport-window');
+  let request, cap;
+  try { request = validateRequest(rawRequest); cap = windows.coordinatePreparation(request, preparationRequestFingerprint(request), { create: false }); }
+  catch (error) { return refused('coordination', error.code || 'owner-window-unmeasured', undefined, 'unknown'); }
+  return cap ? windows.withWindow(cap, async () => windows.coordinationResult(cap, await acceptStandaloneTaskPreparationInsideOwnerWindow(rawRequest, acceptance)))
+    : acceptStandaloneTaskPreparationInsideOwnerWindow(rawRequest, acceptance);
+}
+async function acceptStandaloneTaskPreparationInsideOwnerWindow(rawRequest, acceptance) {
   let request;
   try { request = validateRequest(rawRequest); }
   catch (error) { return refused(error.stage || 'input', error.code || 'invalid-preparation-request'); }
@@ -700,6 +725,23 @@ async function acceptStandaloneTaskPreparation(rawRequest, acceptance) {
 }
 
 async function prepareStandaloneTask(rawRequest, deps = {}) {
+  const windows = require('./forge-owner-transport-window');
+  // Legacy --start/--accept remains strict and byte-compatible in its receipts.
+  // A live host opts into the retained protected-window capability, never JSON.
+  let request;
+  try { request = validateRequest(rawRequest); }
+  catch (error) { return refused(error.stage || 'input', error.code || 'invalid-preparation-request'); }
+  if (deps.ownerTransportAdapter) return windows.protectPreparation(request, deps.ownerTransportAdapter, () => prepareStandaloneTaskInsideOwnerWindow(rawRequest, deps));
+  try {
+    const cap = windows.coordinatePreparation(request, preparationRequestFingerprint(request),
+      { create: !fs.existsSync(unit.artifactAttemptFiles(request).receiptFile), operation: 'start' });
+    if (!cap) return prepareStandaloneTaskInsideOwnerWindow(rawRequest, deps);
+    const result = await windows.withWindow(cap, () => prepareStandaloneTaskInsideOwnerWindow(rawRequest, deps));
+    return windows.coordinationResult(cap, typeof result.invoke === 'function'
+      ? { ...result, invoke: callback => windows.withWindow(cap, () => result.invoke(callback)) } : result);
+  } catch (error) { return refused('coordination', error.code || 'owner-window-unmeasured'); }
+}
+async function prepareStandaloneTaskInsideOwnerWindow(rawRequest, deps = {}) {
   const started = await startStandaloneTaskPreparation(rawRequest, deps);
   if (!started.ok || started.action === 'complete' || started.action === 'invoke-native' && !deps.invokeNative) return started;
   const request = validateRequest(rawRequest);

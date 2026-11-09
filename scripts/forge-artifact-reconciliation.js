@@ -50,12 +50,15 @@ function lock(manifest) {
 }
 function withOwnerLock(owner, callback, guard) {
   owner = roots.realDirectory(owner);
+  const windows = require('./forge-owner-transport-window');
+  if (guard === undefined) guard = windows.currentPublicationGuard(owner);
   if (guard !== undefined) {
     if (heldLocks.get(guard) !== owner) fail('reconciliation-lock-handle-required');
+    windows.assertMutationAllowed(owner);
     return callback();
   }
   const acquired = lock({ owner });
-  try { return callback(); } finally { acquired.release(); }
+  try { return windows.withPublicationContext(owner, acquired, () => { windows.assertMutationAllowed(owner); return callback(); }); } finally { acquired.release(); }
 }
 function verifyProof(manifest, proof) {
   if (manifest.schema_version !== 1 || proof?.manifest_sha256 !== digest(manifest) || proof.dispatch_id !== manifest.dispatch_id) fail('reconciliation-proof-identity');
@@ -117,16 +120,19 @@ async function startBroker(options) {
   // Public material lives in the trusted result channel, outside every writable
   // surface. Trust is the hash retained in the caller, never a path from output.
   if (roots.within(owner, manifestFile) || options.execution_contract?.code_roots.some(r => roots.within(r.path, manifestFile))) fail('broker-manifest-in-worker-surface');
-  const appendPaths = options.appendPaths || ['.gsd/forge/events.jsonl'];
-  for (const rel of appendPaths) {
-    const file = safeTarget(owner, rel);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    if (!fs.existsSync(file)) fs.writeFileSync(file, '', { flag: 'wx' });
-  }
-  const surface = require('./forge-task-execution').protectedSnapshot(owner);
-  const baselines = Object.fromEntries(appendPaths.map(rel => { const file = safeTarget(owner, rel), b = bytes(file);
-    return [rel, { length: b.length, sha256: digest(b), identity_sha256: logIdentity(file), sequence: 0 }]; }));
-  const child = fork(__filename, ['--broker'], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true, env: { ...process.env } });
+  const { appendPaths, surface, baselines, child } = require('./forge-owner-transport-window').withMutation(owner, () => {
+    const appendPaths = options.appendPaths || ['.gsd/forge/events.jsonl'];
+    for (const rel of appendPaths) {
+      const file = safeTarget(owner, rel);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      if (!fs.existsSync(file)) fs.writeFileSync(file, '', { flag: 'wx' });
+    }
+    const surface = require('./forge-task-execution').protectedSnapshot(owner);
+    const baselines = Object.fromEntries(appendPaths.map(rel => { const file = safeTarget(owner, rel), b = bytes(file);
+      return [rel, { length: b.length, sha256: digest(b), identity_sha256: logIdentity(file), sequence: 0 }]; }));
+    const child = fork(__filename, ['--broker'], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true, env: { ...process.env } });
+    return { appendPaths, surface, baselines, child };
+  });
   let sequence = 0; const pending = new Map();
   child.on('message', message => { const p = pending.get(message.id); if (!p) return; pending.delete(message.id); clearTimeout(p.timer);
     message.error ? p.reject(Object.assign(new Error(message.error), { code: message.error })) : p.resolve(message.result); });

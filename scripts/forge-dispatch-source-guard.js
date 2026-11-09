@@ -306,6 +306,8 @@ const REGISTRY_ROWS = [
   ["skills-forge-auto-skill-md-native-3edeb4fd2dce","skills/forge-auto/SKILL.md","native","excluded","sha256:3edeb4fd2dced521c3dd26624c8705fcc419eeba4cb51ee35b393a61b132a221","explanatory Agent effort capability policy paragraph; it describes buildNativeInvocation but contains no native invocation statement",""],
   ["skills-forge-next-skill-md-native-3edeb4fd2dce","skills/forge-next/SKILL.md","native","excluded","sha256:3edeb4fd2dced521c3dd26624c8705fcc419eeba4cb51ee35b393a61b132a221","explanatory Agent effort capability policy paragraph; it describes buildNativeInvocation but contains no native invocation statement",""],
   ["skills-forge-task-skill-md-native-3edeb4fd2dce","skills/forge-task/SKILL.md","native","excluded","sha256:3edeb4fd2dced521c3dd26624c8705fcc419eeba4cb51ee35b393a61b132a221","explanatory Agent effort capability policy paragraph; it describes buildNativeInvocation but contains no native invocation statement",""],
+  ["skills-forge-task-skill-md-native-31f04c27752b","skills/forge-task/SKILL.md","native","excluded","sha256:31f04c27752bb1b4145b9ca340507ef329da4da8e0e84c951ac53bc104631abd","documentation names the live callback option in the runCliPreparation signature; it executes no native tool or route",""],
+  ["skills-forge-task-skill-md-native-f58cacc1c95e","skills/forge-task/SKILL.md","native","excluded","sha256:f58cacc1c95e5a93cf195338f2e37fa8fb715acd25fa2db49b47ca2565e09729","documentation describes the trusted host callback contract and its actual invocation binding; it is not an executable native invocation statement",""],
 ];
 
 const SOURCE_REGISTRY = deepFreeze(REGISTRY_ROWS.map((row) => ({
