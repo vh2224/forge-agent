@@ -565,7 +565,7 @@ fi
 > HTTP 400 on an explicit `thinking: disabled` at any effort, and `claude-opus-5` returns HTTP 400
 > when `disabled` is paired with effort `xhigh`/`max` (Opus 4.7/4.8 accept it at any effort).
 
-`unit_effort` (and `$EFFORT`/`$EFFORT_REASON` for the dispatch event) were set by the resolver above (§ Effort Resolution — unit-type default + frontmatter axis + risk-escalation sync + model-cap clamp). The prompt may carry `effort: {unit_effort}` as diagnostic metadata and, for opus/fable phases, `thinking: {THINKING_OPUS}`. That text never satisfies Claude's effort binding; only the fingerprinted agent-frontmatter observation at the native adapter does.
+`unit_effort` (and `$EFFORT`/`$EFFORT_REASON` for the dispatch event) were set by the resolver above (§ Effort Resolution — unit-type default + frontmatter axis + risk-escalation sync + model-cap clamp). The prompt may carry `effort: {unit_effort}` as diagnostic metadata and, for opus/fable phases, `thinking: {THINKING_OPUS}`. That text never satisfies Claude's effort binding; only an observed per-call Agent effort argument or a fingerprinted matching agent-frontmatter binding does.
 
 **Risk radar gate (plan-slice only):** If `unit_type == plan-slice` and the slice is tagged `risk:high` in ROADMAP, check if `S##-RISK.md` already exists. If not:
 ```
@@ -1555,10 +1555,7 @@ refused resolver contract and unsupported model/effort/fork/tool capability stop
 before launch. Invoke the returned tool and structured arguments unchanged.
 Pass `forkTurns:'none'`; Codex receives the full model ID, separate
 `reasoning_effort`, and `fork_turns:'none'`;
-Claude aliases remain inside the Claude adapter. Before every Claude native
-call, read the actual exposed `agents/<agent>.md` (repo or installed Forge copy),
-hash those same bytes with SHA-256, call `observeClaudeAgentBinding`, and pass
-the successful observation as `effortBinding`. Prompt text is not an effort API;
+Claude aliases remain inside the Claude adapter. When the active schema exposes Agent effort, supply the observed agent-argument capability and exact reasoning_efforts enum. Otherwise, before every Claude native call, read/hash the actual exposed agent file, call `observeClaudeAgentBinding`, and pass the successful observation as `effortBinding`. Prompt text is not an effort API;
 a missing, stale, or mismatched binding is a named refusal. Never omit an
 explicit model to inherit agent frontmatter. Use a description that captures what is happening:
 - Format: `{unit_type} {unit_id}: {one-liner describing the work}`
@@ -1996,3 +1993,7 @@ checklist; personal and interaction contracts still own live authority and quest
 Keep the existing unit/roots/claims, receipt, historical deadline and pending IDs.
 This composition alone authorizes neither host execution nor preference rewrites.
 Separately authorized Forge maintenance follows `shared/forge-direct-actions.md`.
+
+
+<!-- forge346-native-effort -->
+When the active Claude Agent schema exposes a per-call effort parameter, report both effort_transports:['agent-argument'] (alongside any observed frontmatter transport) and reasoning_efforts with its exact observed enum. buildNativeInvocation prefers that argument and sends the resolved effort unchanged. Without this observation, retain the fingerprinted agent-frontmatter binding and its strict mismatch refusal. Do not infer capability from another session, installed version or prompt text. Before opening a new lease, preflightNativeBinding with these same observed capabilities; keep ordinary native preparation/publication and pending-decision gates.

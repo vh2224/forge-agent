@@ -11,7 +11,8 @@
 //     for the caller's forge-xllm command line;
 //   - native Claude leg (reviewer/advocate, external→Claude fallback, rebuttal
 //     resumed with SendMessage, engine workflow): the effort lives in the agent
-//     frontmatter, so the observed binding must match or the leg is refused
+//     frontmatter: these consumers cannot forward a per-call Agent effort
+//     argument. The observed binding must match or the leg is refused
 //     before launch (`native-effort-binding-mismatch`);
 //   - native Codex leg (host codex): the effort is the `reasoning_effort`
 //     argument of the active tool, checked against the capabilities the caller
@@ -76,7 +77,21 @@ function nativeDispatch(model, effort, host) {
 }
 
 function claudeNative(planned, ctx) {
-  const { leg, key, requested, resolved, model, binding, capabilities } = ctx;
+  const { leg, key, requested, resolved, model, binding } = ctx;
+  // Review's direct Agent/workflow/SendMessage consumers do not forward an
+  // effort argument. Only their observed frontmatter transport is supported.
+  // The general native adapter still supports agent-argument for other units.
+  const observedCapabilities = ctx.capabilities;
+  const transports = Array.isArray(observedCapabilities?.effort_transports)
+    ? observedCapabilities.effort_transports : [];
+  if (transports.includes('agent-argument') && !transports.includes('agent-frontmatter')) {
+    return refuse(planned, 'native-effort-transport-unsupported',
+      'This native review caller cannot forward Agent effort; an observed matching frontmatter transport is required. Nothing was launched.',
+      { requested, resolved, host: 'claude', transport: 'claude-native' });
+  }
+  // A supported subset of the observed schema cannot invent a capability.
+  const capabilities = observedCapabilities && { ...observedCapabilities,
+    effort_transports: transports.filter(value => value === 'agent-frontmatter') };
   if (!binding || binding.invalid) {
     return refuse(planned, 'native-effort-binding-missing',
       `O leg nativo ${leg} exige a observação do agente (--binding-json) para entregar review.${key}; nada foi lançado.`,

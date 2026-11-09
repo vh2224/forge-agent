@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('fs'),path=require('path');
-const root=path.resolve(__dirname,'..'),layer=require('./fixtures/superseded-owner/distribution.cjs');
+const root=path.resolve(__dirname,'..'),layer=require('./fixtures/native-effort/distribution.cjs');
 const artifacts=require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts;
 assert.equal(layer.validate({artifacts}),true);
 let cases=0;
@@ -74,3 +74,42 @@ for(const file of ['scripts/fixtures/interrupted-owner/distribution.cjs','script
 }
 assert.equal(layer.supersededSources.length,7);assert.strictEqual(layer.validate({artifacts}),true);
 console.log('PASS #378 superseded-owner terminal: seven exact sources, all previous validators and '+supersededCases+' additional bounded negatives');
+
+// #381/#346 additive terminal; every preceding57+27 control remains above.
+let nativeEffortCases=0;
+assert(layer.nativeEffortSources.length>0,'native-effort source census cannot be empty');
+const nativeEffortFirst=layer.nativeEffortSources[0];
+for(const field of ['before','after','attributed_before','attributed_after']){
+ const value=structuredClone(layer.nativeEffortLayer);value.files[nativeEffortFirst][field]='0'.repeat(64);
+ assert.throws(()=>layer.validate({artifacts,nativeEffortLayerValue:value}));nativeEffortCases++;
+}
+for(const mutate of [value=>{delete value.files[nativeEffortFirst];},value=>{value.files.foreign=value.files[nativeEffortFirst];},value=>{value.provenance.base_revision='0'.repeat(40);}]){
+ const value=structuredClone(layer.nativeEffortLayer);mutate(value);assert.throws(()=>layer.validate({artifacts,nativeEffortLayerValue:value}));nativeEffortCases++;
+}
+{
+ const raw=fs.readFileSync(path.join(root,nativeEffortFirst)),foreign=Buffer.concat([raw,Buffer.from('\nforeign native-effort bytes\n')]);
+ const value=structuredClone(layer.nativeEffortLayer);value.files[nativeEffortFirst].after=hash(foreign);value.files[nativeEffortFirst].attributed_after=hash(foreign);
+ assert.throws(()=>layer.validate({artifacts,nativeEffortLayerValue:value,readRaw:relative=>relative===nativeEffortFirst?foreign:fs.readFileSync(path.join(root,relative))}));nativeEffortCases++;
+}
+{
+ const value=structuredClone(layer.nativeEffortLayer);assert.equal(value.samples.nodes.length,4);value.samples.nodes[0].after='0'.repeat(64);
+ assert.throws(()=>layer.validate({artifacts,nativeEffortLayerValue:value}));nativeEffortCases++;
+}
+for(const file of ['scripts/fixtures/superseded-owner/distribution.cjs','scripts/fixtures/superseded-owner/distribution-delta.json','scripts/fixtures/superseded-owner/README.md']){
+ assert.throws(()=>layer.validate({artifacts,readRaw:relative=>relative===file?Buffer.from('foreign preserved378 bytes'):fs.readFileSync(path.join(root,relative))}));nativeEffortCases++;
+}
+assert.strictEqual(layer.validate({artifacts}),true);
+console.log('PASS #381/#346 native-effort terminal: independent pins, four citation spans, inherited57+27 controls and '+nativeEffortCases+' additive negatives');
+
+// Revision2: multi-hop projection is the expected side of the historical raw-source equality.
+{
+ const review=JSON.parse(fs.readFileSync(path.join(root,'scripts/fixtures/review-policy/distribution-delta.json'))),file='skills/forge-next/SKILL.md',historic=review.files[file].after,actual=hash(fs.readFileSync(path.join(root,file)));
+ assert.notStrictEqual(historic,actual);assert.strictEqual(layer.after('files',file,historic),actual);assert.strictEqual(layer.after('files',file,historic),actual);
+ assert.throws(()=>layer.after('files',file,'0'.repeat(64)),'unknown historical hash remains refused');
+ const guard=require(path.join(root,'scripts/forge-dispatch-source-guard.js')),current=guard.SOURCE_REGISTRY,old=layer.previousRegistry(current);assert.equal(current.length,252);assert.equal(old.length,248);
+ assert.deepStrictEqual(layer.previousRegistry(current),old,'repeated projection changes neither source nor history');
+ assert.throws(()=>layer.previousRegistry(current.slice(1)),'omitted current registry row');
+ assert.throws(()=>layer.previousRegistry([...current,current[0]]),'extra/duplicated current registry row');
+ const changed=current.map(row=>({...row}));changed[0].classification=changed[0].classification==='operational'?'excluded':'operational';assert.throws(()=>layer.previousRegistry(changed),'classification cannot self-repin');
+ const metadata=structuredClone(layer.nativeEffortLayer);metadata.registry.before_rows[0].reason+=' forged';metadata.registry.before_sha256=hash(JSON.stringify(metadata.registry.before_rows));assert.throws(()=>layer.previousRegistry(current,metadata),'historical row+metadata self-repin');
+}

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/superseded-owner/distribution.cjs');
+const unitEntry = require('./fixtures/native-effort/distribution.cjs');
 
 // Standalone acceptance suite: only Node built-ins and production modules.
 const assert = require('assert');
@@ -934,7 +934,7 @@ function validateIdentitySamples(delta, { sampleText, sampleReadme, readRaw }) {
     assert.strictEqual(node.file, 'skills/forge-task/SKILL.md');
     assert.strictEqual(node.before, IDENTITY_BEFORE.files[node.file].before);
     assert.strictEqual(node.after, delta.files[node.file].after);
-    assert.strictEqual(node.after, sha256(readRaw(node.file)), 'identity sample actual source');
+    assert.strictEqual(unitEntry.after('files', node.file, node.after), sha256(readRaw(node.file)), 'identity sample actual source');
     const value = node.pointer.split('/').slice(1).reduce((v,k) => v[k], parsed);
     assert.strictEqual(value.source.file, node.file); assert.strictEqual(value.source.sha256, node.after);
     assert(sampleReadme.includes(node.before) && sampleReadme.includes(node.after), 'identity documented sample before/after');
@@ -1014,7 +1014,7 @@ function validateArtifact348(delta, previous, { measure, readRaw, readme }) {
     assert.strictEqual(row.before, row.attributed_before); assert.strictEqual(row.after, row.attributed_after);
     assert.notStrictEqual(row.before, row.after, '#348 actual bounded change');
     const actual = kind === 'surfaces' ? measure(key) : sha256(readRaw(key));
-    assert.strictEqual(row.after, actual, '#348 actual measured ' + kind);
+    assert.strictEqual(unitEntry.after(kind, key, row.after), actual, '#348 actual measured ' + kind);
   }
   assert(readme.includes(ARTIFACT_348_BASE) && readme.includes(delta.surfaces.agents.before) && readme.includes(delta.surfaces.agents.after), '#348 README records the real base/before/after');
 }
@@ -1338,7 +1338,7 @@ test('linked-task scoped pins follow the owner pre-T06 capture and the measured 
   // Registry: measured drift zero, so every row/classification/reason/fingerprint is the capture.
   const auditResult = guard.audit({ root: ROOT });
   assert.strictEqual(auditResult.ok, true, JSON.stringify(auditResult));
-  assert.strictEqual(guard.SOURCE_REGISTRY.length, before.dispatch_registry.audit_before.registered_count);
+  assert.strictEqual(unitEntry.previousRegistry(guard.SOURCE_REGISTRY).length, before.dispatch_registry.audit_before.registered_count);
   // #341: the delta declares the measured registry change; drifted rows swap only id and fingerprint.
   assert.strictEqual(delta.registry.count, before.dispatch_registry.audit_before.registered_count, '#341 keeps the registry count');
   assert.deepStrictEqual([delta.registry.added, delta.registry.removed], [[], []], '#341 adds or removes no registered call');
@@ -1350,7 +1350,7 @@ test('linked-task scoped pins follow the owner pre-T06 capture and the measured 
     return { ...row, id: drift.after_id, fingerprint: drift.after_fingerprint };
   });
   assert.strictEqual(drift341.size, delta.registry.drifted_rows.length, '#341 drift rows are distinct');
-  assert.deepStrictEqual(guard.SOURCE_REGISTRY.map((row) => ({ ...row })), registryExact);
+  assert.deepStrictEqual(unitEntry.previousRegistry(guard.SOURCE_REGISTRY).map((row) => ({ ...row })), registryExact);
   process.stdout.write('ok - chain-distribution-pins-follow-owner-pre-t06-baseline-and-measured-source-map-only\n');
 });
 

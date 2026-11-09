@@ -1433,19 +1433,27 @@ function nativeMemoryIdentity(request, durableTelemetry) {
     || telemetry.effort_binding_observed !== null
     || telemetry.effort_binding_observed_source !== null
     || telemetry.effort_binding_observed_fingerprint !== null);
+  const claudeEffortMismatch = telemetry.effort_transport === 'native-argument'
+    ? telemetry.effort_argument !== identity.effort
+      || telemetry.effort_transport_value !== identity.effort
+      || typeof telemetry.effort_transport_source !== 'string' || !telemetry.effort_transport_source
+      || telemetry.effort_binding_observed !== null
+      || telemetry.effort_binding_observed_source !== null
+      || telemetry.effort_binding_observed_fingerprint !== null
+    : telemetry.effort_argument !== null
+      || telemetry.effort_transport !== 'agent-frontmatter'
+      || telemetry.effort_transport_value !== identity.effort
+      || telemetry.effort_binding_observed !== identity.effort
+      || typeof telemetry.effort_transport_source !== 'string' || !telemetry.effort_transport_source
+      || typeof telemetry.effort_binding_observed_source !== 'string' || !telemetry.effort_binding_observed_source
+      || telemetry.effort_binding_observed_source !== telemetry.effort_transport_source
+      || typeof telemetry.effort_binding_observed_fingerprint !== 'string'
+      || !/^sha256:[a-f0-9]{64}$/.test(telemetry.effort_binding_observed_fingerprint);
   // Claude: the alias, or the exact resolved id when the active tool listed it.
   const claudeMismatch = host === 'claude' && ((telemetry.model_argument !== route.alias
       && telemetry.model_argument !== identity.model)
     || (telemetry.model_argument === identity.model && Object.prototype.hasOwnProperty.call(telemetry, 'model_version_proof'))
-    || telemetry.effort_argument !== null
-    || telemetry.effort_transport !== 'agent-frontmatter'
-    || telemetry.effort_transport_value !== identity.effort
-    || telemetry.effort_binding_observed !== identity.effort
-    || typeof telemetry.effort_transport_source !== 'string' || !telemetry.effort_transport_source
-    || typeof telemetry.effort_binding_observed_source !== 'string' || !telemetry.effort_binding_observed_source
-    || telemetry.effort_binding_observed_source !== telemetry.effort_transport_source
-    || typeof telemetry.effort_binding_observed_fingerprint !== 'string'
-    || !/^sha256:[a-f0-9]{64}$/.test(telemetry.effort_binding_observed_fingerprint));
+    || claudeEffortMismatch);
   if (!['codex', 'claude'].includes(host) || commonMismatch || codexMismatch || claudeMismatch) {
     fail('native-memory-telemetry-mismatch', 'Native memory telemetry must describe the exact resolved route and adapter transport.');
   }

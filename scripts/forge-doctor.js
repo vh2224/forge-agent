@@ -665,7 +665,7 @@ function checkNativeBinding(cwd, options = {}) {
     message: 'O esforço declarado pelo agente não pertence ao contrato reconhecido; o valor bruto não é exposto.' };
   Object.assign(report, { effort_observed: observed.effort, source_sha256: observed.source_fingerprint });
   if (observed.effort !== route.effort) return { ...report, status: 'incompatible', reason_code: 'native-effort-binding-mismatch',
-    message: 'O esforço resolvido diverge do arquivo de agente observado. A rota foi preservada; revise a incompatibilidade antes de iniciar a unidade. Este diagnóstico não inicia nem altera leases.' };
+    message: 'O esforço resolvido diverge do frontmatter observado. Um caller com Agent effort observado no schema ativo pode usar agent-argument; este CLI não observa essa ferramenta e não prova incompatibilidade desse argumento. A rota foi preservada; este diagnóstico não inicia nem altera leases.' };
   return { ...report, ok: true, status: 'compatible-binding', reason_code: 'native-agent-binding-compatible',
     message: 'Somente o binding de esforço coincide com os bytes observados. A ferramenta nativa e o despacho real ainda não foram validados.' };
 }
@@ -973,9 +973,9 @@ Flags:
   --recover-claim <run-id>       preview manual recovery of a stuck live claim
     --apply --confirm-owner-stopped --confirm-workspace-quiescent
   --restore-claim <run-id>       preview; apply requires --confirm-workspace-quiescent
-  --fix [--cwd <dir>] [--migrate]  write SCHEMA-VERSION if missing; suggest ignore
+  --fix [--cwd <dir>] [--migrate] [--dry-run]\n                                 write SCHEMA-VERSION if missing; suggest ignore
                                  fixes. Refuses to stamp an unmigrated store unless
-                                 --migrate is given (then runs forge-migrate first).
+                                 --migrate is given (then runs forge-migrate first).\n  --dry-run                      preview --fix/--fix --migrate only; no project writes
   --regen-projection [--cwd <dir>] [--force]  regenerate monolith projections from
                                  fragment store (refuses to overwrite a populated
                                  monolith from an empty store unless --force)
@@ -992,6 +992,22 @@ Exit codes:
     return;
   }
 
+  // Fix previews are explicit, boolean and exclusive. A misspelled/unsupported
+  // modifier must never be silently ignored at a writing command boundary.
+  if ('fix' in args) {
+    const allowed = new Set(['fix', 'migrate', 'dry-run', 'cwd']);
+    if (Object.keys(args).some(key => !allowed.has(key)) || args.fix !== true
+      || ('migrate' in args && args.migrate !== true)
+      || ('dry-run' in args && args['dry-run'] !== true)
+      || ('cwd' in args && (typeof args.cwd !== 'string' || !args.cwd))) {
+      process.stderr.write('forge-doctor: --fix accepts only --migrate, --dry-run and --cwd <dir>; boolean flags take no value.\n');
+      process.exitCode = 2; return;
+    }
+  } else if ('dry-run' in args) {
+    process.stderr.write('forge-doctor: --dry-run is supported only with --fix [--migrate]; no action taken.\n');
+    process.exitCode = 2; return;
+  }
+  const dryRun = args['dry-run'] === true;
   const cwdArg = typeof args.cwd === 'string' ? path.resolve(args.cwd) : process.cwd();
 
   if (args['recover-claim'] || args['restore-claim']) {
@@ -1013,9 +1029,10 @@ Exit codes:
     const schemaPath = path.join(cwdArg, SCHEMA_FILE);
     const gsdDir = path.join(cwdArg, '.gsd');
     let fixed = [];
+    const fixHeading = `forge-doctor --fix${dryRun ? ' (dry-run; no files written)' : ''}:\n`;
 
     // Ensure .gsd/ exists
-    if (!fs.existsSync(gsdDir)) {
+    if (!dryRun && !fs.existsSync(gsdDir)) {
       fs.mkdirSync(gsdDir, { recursive: true });
     }
 
@@ -1031,7 +1048,7 @@ Exit codes:
         .map(([name, s]) => `${name} (${s.monolithPath}: ${s.monolithEntries} entries, 0 fragments)`);
 
       if (!args.migrate) {
-        process.stdout.write('forge-doctor --fix:\n');
+        process.stdout.write(fixHeading);
         process.stdout.write('  Refusing to stamp SCHEMA-VERSION — fragment store is not migrated.\n');
         process.stdout.write('  The following monoliths still hold the source of truth:\n');
         for (const u of unmig) process.stdout.write(`    - ${u}\n`);
@@ -1050,7 +1067,7 @@ Exit codes:
       const { migrateAll } = require('./forge-migrate');
       let results;
       try {
-        results = migrateAll(cwdArg, {});
+        results = migrateAll(cwdArg, { dryRun });
       } catch (e) {
         process.stderr.write(`forge-doctor --fix --migrate: migration failed: ${e.message}\n`);
         process.exit(1);
@@ -1059,28 +1076,30 @@ Exit codes:
       const migErr = ['ledger', 'decisions', 'memory'].find(n => results[n] && results[n].error);
       if (migErr) {
         process.stderr.write(`forge-doctor --fix --migrate: ${migErr} migration errored: ${results[migErr].error}\n`);
-        process.stderr.write('  Partial state preserved; .bak files kept. See above.\n');
+        process.stderr.write(dryRun ? '  Dry-run wrote no files; resolve the migration error before apply.\n' : '  Partial state preserved; .bak files kept. See above.\n');
         process.exit(1);
         return;
       }
-      process.stdout.write('forge-doctor --fix --migrate:\n');
+      process.stdout.write(`forge-doctor --fix --migrate${dryRun ? ' (dry-run; no files written)' : ''}:\n`);
       for (const n of ['ledger', 'decisions', 'memory']) {
         const r = results[n];
-        if (r) process.stdout.write(`  ${n}: ${r.written} fragment(s) written, verification: ${r.verification}\n`);
+        if (r) process.stdout.write(dryRun
+          ? `  ${n}: ${r.would_write || 0} fragment(s) would be written, verification: ${r.verification}\n`
+          : `  ${n}: ${r.written} fragment(s) written, verification: ${r.verification}\n`);
       }
-      process.stdout.write(`  SCHEMA-VERSION stamped: ${results.schema_version_written}\n`);
+      process.stdout.write(`  SCHEMA-VERSION ${dryRun ? 'preview' : 'stamped'}: ${results.schema_version_written}\n`);
       process.exit(0);
       return;
     }
 
     if (!fs.existsSync(schemaPath)) {
-      fs.writeFileSync(schemaPath, CURRENT_SCHEMA + '\n', 'utf8');
-      fixed.push(`Created ${SCHEMA_FILE} with "${CURRENT_SCHEMA}"`);
+      if (!dryRun) fs.writeFileSync(schemaPath, CURRENT_SCHEMA + '\n', 'utf8');
+      fixed.push(`${dryRun ? 'Would create' : 'Created'} ${SCHEMA_FILE} with "${CURRENT_SCHEMA}"`);
     } else {
       const current = fs.readFileSync(schemaPath, 'utf8').trim();
       if (current !== CURRENT_SCHEMA) {
-        fs.writeFileSync(schemaPath, CURRENT_SCHEMA + '\n', 'utf8');
-        fixed.push(`Updated ${SCHEMA_FILE}: "${current}" → "${CURRENT_SCHEMA}"`);
+        if (!dryRun) fs.writeFileSync(schemaPath, CURRENT_SCHEMA + '\n', 'utf8');
+        fixed.push(`${dryRun ? 'Would update' : 'Updated'} ${SCHEMA_FILE}: "${current}" → "${CURRENT_SCHEMA}"`);
       } else {
         fixed.push(`${SCHEMA_FILE} already at "${CURRENT_SCHEMA}" — no change`);
       }
@@ -1089,13 +1108,13 @@ Exit codes:
     // Suggest ignore fixes for tracked projections
     const projResult = checkProjectionVersioned(cwdArg);
     if (!projResult.ok && projResult.tracked.length > 0) {
-      process.stdout.write(`forge-doctor --fix:\n`);
+      process.stdout.write(fixHeading);
       for (const f of fixed) process.stdout.write(`  ${f}\n`);
       process.stdout.write(`\nProjection monoliths tracked by VCS:\n`);
       for (const t of projResult.tracked) process.stdout.write(`  - ${t}\n`);
       process.stdout.write(`\nTo fix, run:\n  node scripts/forge-ignore.js --apply\n`);
     } else {
-      process.stdout.write(`forge-doctor --fix:\n`);
+      process.stdout.write(fixHeading);
       for (const f of fixed) process.stdout.write(`  ${f}\n`);
     }
     process.exit(0);
