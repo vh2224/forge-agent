@@ -532,6 +532,34 @@ async function main() {
     } finally { xllm.invokeCodexAppServer = original; }
   });
 
+  await test('Codex sidecar preparation keeps context health in memory under the read-only surface census', async () => {
+    // The real app-server transport persists `.gsd/forge/context/codex/*` under the
+    // owner unless the caller passes `persistContext:false` (forge-xllm.js). The
+    // preparation surface census covers the whole owner `.gsd/`, so that write used
+    // to refuse the provider's valid answer as artifact-direct-write-detected.
+    const original = xllm.invokeCodexAppServer;
+    try {
+      for (const phase of ['brainstorm', 'discuss', 'plan']) {
+        const request = fixture({ phase, hostRuntime: 'claude', model: 'gpt-5.6-sol' });
+        const seen = [];
+        xllm.invokeCodexAppServer = async options => {
+          seen.push(options.persistContext);
+          if (options.persistContext !== false) {
+            const dir = path.join(request.contextRoot, '.gsd', 'forge', 'context', 'codex');
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(path.join(dir, 'thread-fixture.json'), '{}\n');
+          }
+          return { finalText: JSON.stringify(envelope(request)) };
+        };
+        const result = await prep.prepareStandaloneTask(request);
+        assert.deepEqual(seen, [false], `${phase}: preparation must not persist context health`);
+        assert.equal(result.ok, true, `${phase}: ${JSON.stringify(result)}`);
+        assert.equal(fs.readFileSync(artifactPath(request), 'utf8'), content(phase, request.taskId));
+        assert(!fs.existsSync(path.join(request.contextRoot, '.gsd', 'forge', 'context')), `${phase}: no context dir in the owner`);
+      }
+    } finally { xllm.invokeCodexAppServer = original; }
+  });
+
   await test('standalone research on the Codex sidecar is refused by start, prepare and the transport entrypoint (#350)', async () => {
     const sentinel = 'SENTINEL-350-RESEARCH-PROMPT-CONTENT';
     const original = xllm.invokeCodexAppServer;

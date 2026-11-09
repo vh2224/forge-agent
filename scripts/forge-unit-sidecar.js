@@ -3044,7 +3044,11 @@ async function runUnitSidecarCore(request, runtime, identity) {
       } else {
         enterTransport();
         transportEntered = true;
-        const output = await xllm.invokeCodexAppServer({ ...options, prompt, schema, sandbox: 'read-only', onHeartbeat: heartbeat });
+        // Read-only delivery under the owner surface census: context health stays in
+        // memory, or its .gsd/forge/context/codex/* write refuses the valid answer as
+        // artifact-direct-write-detected (same class runExecute closed in f3c9968).
+        const output = await xllm.invokeCodexAppServer({ ...options, prompt, schema, sandbox: 'read-only', onHeartbeat: heartbeat,
+          persistContext: false });
         transportReturned = true;
         await livenessQueue;
         result = xllm.extractLastJsonBlock(output.finalText || output.agentTexts);
