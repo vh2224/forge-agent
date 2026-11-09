@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('fs'),path=require('path');
-const root=path.resolve(__dirname,'..'),layer=require('./fixtures/interrupted-owner/distribution.cjs');
+const root=path.resolve(__dirname,'..'),layer=require('./fixtures/superseded-owner/distribution.cjs');
 const artifacts=require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts;
 assert.equal(layer.validate({artifacts}),true);
 let cases=0;
@@ -50,3 +50,27 @@ for(const file of ['scripts/fixtures/incomplete-resume/distribution.cjs','script
   /#375 immutable historical fixture/);ownerCases++;
 }
 console.log('PASS #375 next distribution terminal: exact source/API delta, historical validators retained and '+ownerCases+' additional bounded negatives');
+
+// #378 wraps #375; every preceding assertion remains byte-identical above.
+let supersededCases=0;
+for(const field of ['before','after','attributed_before','attributed_after']){
+ const value=structuredClone(layer.supersededLayer),file=layer.supersededSources[0];value.sources[file][field]='0'.repeat(64);
+ assert.throws(()=>layer.validate({artifacts,supersededLayerValue:value}));supersededCases++;
+}
+for(const mutate of [value=>{value.sources.extra=value.sources[layer.supersededSources[0]];},
+ value=>{delete value.sources[layer.supersededSources[0]];},value=>{value.provenance.base_revision='0'.repeat(40);},
+ value=>{value.sources[layer.supersededSources[0]].approved=true;},
+ value=>{value.sources[layer.supersededSources[0]].before_gzip_base64=Buffer.from('not the real Git before').toString('base64');}]){
+ const value=structuredClone(layer.supersededLayer);mutate(value);assert.throws(()=>layer.validate({artifacts,supersededLayerValue:value}));supersededCases++;
+}
+for(const file of layer.supersededSources){
+ const raw=fs.readFileSync(path.join(root,file)),foreign=Buffer.concat([raw,Buffer.from('\n// foreign378 byte edit\n')]);
+ assert.throws(()=>layer.validate({artifacts,readRaw:relative=>relative===file?foreign:fs.readFileSync(path.join(root,relative))}));supersededCases++;
+ const repinned=structuredClone(layer.supersededLayer);repinned.sources[file].after=hash(foreign);repinned.sources[file].attributed_after=hash(foreign);
+ assert.throws(()=>layer.validate({artifacts,supersededLayerValue:repinned,readRaw:relative=>relative===file?foreign:fs.readFileSync(path.join(root,relative))}));supersededCases++;
+}
+for(const file of ['scripts/fixtures/interrupted-owner/distribution.cjs','scripts/fixtures/interrupted-owner/distribution-delta.json','scripts/fixtures/interrupted-owner/README.md','scripts/forge-milestone-endpoint.test.js']){
+ assert.throws(()=>layer.validate({artifacts,readRaw:relative=>relative===file?Buffer.from('tampered preserved375 bytes'):fs.readFileSync(path.join(root,relative))}));supersededCases++;
+}
+assert.equal(layer.supersededSources.length,7);assert.strictEqual(layer.validate({artifacts}),true);
+console.log('PASS #378 superseded-owner terminal: seven exact sources, all previous validators and '+supersededCases+' additional bounded negatives');

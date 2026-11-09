@@ -1895,7 +1895,158 @@ function testInterruptedOwnerReviewGuards() {
   } finally { if (oldSession === undefined) delete process.env.CODEX_THREAD_ID; else process.env.CODEX_THREAD_ID = oldSession; }
 }
 
+// Synthetic historical observations exercise the public administrative API;
+// they are not fabricated receipts for a real worker or provider invocation.
+function supersededInterruptionFixture(options = {}) {
+  const f = interruptionFixture(), sidecar = require('./forge-unit-sidecar');
+  const external = temp(), resultFile = path.join(external, 'prior-blocked.json');
+  const request = { unitType: 'complete-slice', milestoneId: f.seed.milestone, sliceId: 'S01',
+    cwd: f.cwd, contextRoot: f.cwd, resultFile, dispatchId: 'fixture378-codex-first', workflowId: f.seed.milestone,
+    route: { host_runtime: 'codex', resolved_worker_engine: 'codex', worker_mode: 'sidecar' } };
+  const receiptFile = sidecar.artifactAttemptFiles(request).receiptFile;
+  const receipt = { phase: 'ready', fingerprint: sidecar.artifactFingerprint(request), dispatch_id: request.dispatchId,
+    recovery_identity_sha256: require('./forge-code-roots').digest(require('./forge-attempt-recovery').requestIdentity(require('./forge-attempt-recovery').canonicalRequest(request))),
+    provider_called: true, pending_questions: [], result: { status: 'blocked', artifacts: [], questions: [] } };
+  fs.writeFileSync(receiptFile, JSON.stringify(receipt));
+  const eventFile = controller.eventsFile(f.cwd, options.milestone ? f.seed.milestone : undefined);
+  const eol = options.crlf ? '\r\n' : '\n';
+  const prior = (fs.existsSync(eventFile) ? fs.readFileSync(eventFile, 'utf8') : '').replace(/\r?\n/g, eol);
+  const prefix = prior && !prior.endsWith('\n') ? prior + eol : prior;
+  const eventLine = '  ' + JSON.stringify({ event: 'route-chain-advance', fixture_only: true,
+    unit: 'complete-slice/S01', milestone: f.seed.milestone, from_dispatch: request.dispatchId, to_native: 'fixture378-native-final' }) + ' ';
+  fs.mkdirSync(path.dirname(eventFile), { recursive: true });
+  fs.writeFileSync(eventFile, prefix + eventLine + eol);
+  const routeEvidence = { path: eventFile, line: prefix.split('\n').length,
+    sha256: require('crypto').createHash('sha256').update(eventLine + (options.crlf ? '\r' : '')).digest('hex') };
+  const finalNative = { id: 'fixture378-native-final', host_runtime: 'codex', worker_mode: 'native',
+    status: 'partial', receipt_path: null, observation_reference: 'fixture-only observed native final partial; no actual Agent call' };
+  const previous = f.options.inspectInterruption;
+  f.options.inspectInterruption = query => ({ ...previous(query), ...(query.role === 'original' ? {
+    receipt_path: receiptFile, saved_response: 'ready/blocked', request,
+    supersession: { route_evidence: [routeEvidence], final_native_attempt: finalNative } } : {}) });
+  f.options.attestSupersededAttempt = challenge => {
+    assert.strictEqual(challenge.begin_key, f.seed.lineage.begin_key);
+    assert.strictEqual(challenge.begin_checksum, f.seed.lineage.begin_checksum);
+    assert.strictEqual(challenge.evidence.receipt.dispatch_id, request.dispatchId);
+    assert.strictEqual(challenge.evidence.final_native_attempt.id, finalNative.id);
+    assert.deepStrictEqual(challenge.evidence.route_evidence, [{ ...routeEvidence, path: fs.realpathSync.native(eventFile) }]);
+    return { challenge_sha256: f.digest(challenge), superseded: true, final_native_receiptless: true,
+      final_native_status: 'partial', reference: 'fixture-only live supersession attestation' };
+  };
+  return { ...f, request, receipt, receiptFile, eventFile, routeEvidence, finalNative,
+    cleanup: () => { cleanup(f.cwd); cleanup(external); } };
+}
+function testSupersededInterruptedOwner() {
+  const oldSession = process.env.CODEX_THREAD_ID;
+  try {
+    for (const options of [{ milestone: true, crlf: true }, { milestone: true, crlf: false }, { milestone: false, crlf: true }]) {
+      const f = supersededInterruptionFixture(options);
+      try {
+        const before = fs.readFileSync(f.eventFile);
+        assert.strictEqual(f.settle().status, 'interrupted-and-transferred');
+        const after = fs.readFileSync(f.eventFile);
+        assert(after.subarray(0, before.length).equals(before), 'preserve complete historical event bytes and formatting');
+        const line = after.toString('utf8').split('\n')[f.routeEvidence.line - 1];
+        assert.strictEqual(require('crypto').createHash('sha256').update(line).digest('hex'), f.routeEvidence.sha256);
+        const settled = f.monitored();
+        assert.strictEqual(f.settle().status, 'already-settled');
+        assert.deepStrictEqual(f.monitored(), settled, 'terminal event replay is idempotent');
+        assert(fs.readFileSync(f.eventFile).equals(after));
+      } finally { f.cleanup(); }
+    }
+    {
+      const f = supersededInterruptionFixture();
+      try {
+        f.receipt.pending_questions = [{ id: 'earlier378-question', question: 'Earlier unresolved decision', status: 'pending' }];
+        f.receipt.result.questions = [{ id: 'result378-question', question: 'Result unresolved decision', status: 'pending' }];
+        fs.writeFileSync(f.receiptFile, JSON.stringify(f.receipt));
+        const beforeReceipt = fs.readFileSync(f.receiptFile), beforeEvents = fs.readFileSync(f.eventFile);
+        const result = f.settle();
+        assert.strictEqual(result.status, 'interrupted-and-transferred');
+        assert.strictEqual(result.interruption.artifacts_accepted, false);
+        assert.deepStrictEqual(result.record.pending_questions.map(q => q.id).sort(), ['earlier378-question', 'result378-question']);
+        assert(fs.readFileSync(f.receiptFile).equals(beforeReceipt));
+        assert(fs.readFileSync(f.eventFile).equals(beforeEvents));
+        const terminal = controller.lookupRecord(f.cwd, 'transaction', result.interruption.terminals[0].key);
+        assert.strictEqual(terminal.result.status, 'failed');
+        assert.strictEqual(terminal.result.output.worker_result, 'unverified');
+        assert.strictEqual(terminal.terminal_failure.safety.superseded_attempt.receipt.dispatch_id, f.request.dispatchId);
+        assert.strictEqual(terminal.terminal_failure.safety.receipt_sha256,
+          require('crypto').createHash('sha256').update(beforeReceipt).digest('hex'));
+        assert.strictEqual(lease.observe(f.cwd, 'complete-slice/S01').lease, null);
+        assert.strictEqual(lease.observe(f.cwd, 'plan-slice/S02').lease, null);
+        assert.strictEqual(f.settle().status, 'already-settled');
+      } finally { f.cleanup(); }
+    }
+    const negatives = [
+      ['missing live attester', f => { delete f.options.attestSupersededAttempt; }, 'saved-response-replay-required'],
+      ['JSON is not an attester', f => { f.options.attestSupersededAttempt = { approved: true }; }, 'saved-response-replay-required'],
+      ['unbound attestation', f => { f.options.attestSupersededAttempt = () => ({ approved: true }); }, 'owner-interruption-supersession-attestation-required'],
+      ['current done receipt', f => { f.receipt.result.status = 'done'; }, 'saved-response-replay-required'],
+      ['current partial receipt', f => { f.receipt.result.status = 'partial'; }, 'saved-response-replay-required'],
+      ['executed receipt', f => { f.receipt.phase = 'executed'; }, 'saved-response-replay-required'],
+      ['saved candidate', f => { f.receipt.saved_candidate = { status: 'done' }; }, 'saved-response-replay-required'],
+      ['foreign dispatch', f => { f.receipt.dispatch_id = 'foreign'; }, 'attempt-identity-mismatch'],
+      ['foreign fingerprint', f => { f.receipt.fingerprint = 'f'.repeat(64); }, 'attempt-identity-mismatch'],
+      ['foreign recovery identity', f => { f.receipt.recovery_identity_sha256 = 'f'.repeat(64); }, 'attempt-identity-mismatch'],
+      ['foreign request unit', f => { f.request.sliceId = 'S02'; }, 'attempt-identity-mismatch'],
+      ['changed historical event', f => { fs.appendFileSync(f.eventFile, ''); f.routeEvidence.sha256 = 'f'.repeat(64); }, 'owner-interruption-evidence-changed'],
+      ['no recorded route advance', f => { const raw = JSON.stringify({ event: 'unrelated' }); fs.writeFileSync(f.eventFile, raw + '\n'); f.routeEvidence.line = 1; f.routeEvidence.sha256 = require('crypto').createHash('sha256').update(raw).digest('hex'); }, 'owner-interruption-supersession-invalid'],
+      ['native done', f => { f.finalNative.status = 'done'; }, 'saved-response-replay-required'],
+      ['native foreign host', f => { f.finalNative.host_runtime = 'claude'; }, 'saved-response-replay-required'],
+      ['native receipt present', f => { f.finalNative.receipt_path = f.receiptFile; }, 'saved-response-replay-required'],
+      ['native unknown process', f => { f.options.processProbe = () => 'unknown'; }, 'process-not-stopped'],
+      ['invoked successor with receipt', f => { const old = f.options.inspectInterruption; f.options.inspectInterruption = query => ({ ...old(query), receipt_path: f.receiptFile, saved_response: 'ready/blocked' }); }, 'saved-response-replay-required'],
+    ];
+    for (const [label, change, code] of negatives) {
+      const f = supersededInterruptionFixture();
+      try {
+        change(f); fs.writeFileSync(f.receiptFile, JSON.stringify(f.receipt));
+        const before = f.monitored();
+        assert.throws(f.settle, error => error.code === code, label);
+        assert.deepStrictEqual(f.monitored(), before, label + ' has no terminal/lease/run effect');
+        assert(!fs.existsSync(path.join(f.cwd, '.gsd/forge/owner-interruptions')), label + ' publishes no manifest');
+      } finally { f.cleanup(); }
+    }
+    {
+      const f = supersededInterruptionFixture();
+      try {
+        f.options.failpoint = point => point === 'owner-interruption-after-manifest';
+        assert.throws(f.settle, /failpoint/); delete f.options.failpoint;
+        const before = f.monitored(), original = fs.readFileSync(f.receiptFile);
+        f.receipt.pending_questions = [{ id: 'changed378-q', question: 'Changed historical evidence', status: 'pending' }];
+        fs.writeFileSync(f.receiptFile, JSON.stringify(f.receipt));
+        assert.throws(f.settle, error => error.code === 'owner-interruption-evidence-changed');
+        assert.deepStrictEqual(f.monitored(), before, 'changed receipt cannot continue the old durable manifest');
+        fs.writeFileSync(f.receiptFile, original);
+        assert.strictEqual(f.settle().status, 'interrupted-and-transferred', 'exact original evidence safely replays');
+      } finally { f.cleanup(); }
+    }
+    {
+      const f = supersededInterruptionFixture();
+      try {
+        const original = fs.readFileSync(f.receiptFile);
+        let changed = false;
+        f.options.failpoint = point => {
+          if (point === 'owner-interruption-after-intent' && !changed) {
+            changed = true; f.receipt.provider_called = false;
+            fs.writeFileSync(f.receiptFile, JSON.stringify(f.receipt));
+          }
+          return false;
+        };
+        assert.throws(f.settle, error => error.code === 'owner-interruption-evidence-changed',
+          'every terminal phase is bound to the durable original receipt');
+        assert(lease.observe(f.cwd, 'complete-slice/S01').lease);
+        assert(lease.observe(f.cwd, 'plan-slice/S02').lease);
+        fs.writeFileSync(f.receiptFile, original); delete f.options.failpoint;
+        assert.strictEqual(f.settle().status, 'interrupted-and-transferred');
+      } finally { f.cleanup(); }
+    }
+  } finally { if (oldSession === undefined) delete process.env.CODEX_THREAD_ID; else process.env.CODEX_THREAD_ID = oldSession; }
+}
+
 function main() {
+  test('378: superseded blocked receipt, live native-partial attestation, evidence retention and replay refusals', testSupersededInterruptedOwner);
   test('interrupted owner review R1/R2/R3: successor questions, cleanup archive and prepublication capacity', testInterruptedOwnerReviewGuards);
   test('receiptless interrupted-owner lineage: actor separation, failure-only settlement, zero-effect negatives and eleven fresh-process crashes', testInterruptedOwnerLineage);
   console.log(`forge-unit-controller tests on ${process.platform}`);
@@ -1939,7 +2090,9 @@ function main() {
   test('own temporary cleanup and distinct path capability diagnostics', testOwnTemporaryCleanupAndPathDiagnostics);
   console.log('forge-unit-controller tests passed');
 }
-if (process.argv[2] === '--owner-interruption-fixture-child') {
+if (process.argv[2] === '--superseded-interruption-only') {
+  testSupersededInterruptedOwner();
+} else if (process.argv[2] === '--owner-interruption-fixture-child') {
   const fixture = interruptionFixture(process.argv[3]);
   assert.strictEqual(fixture.settle().status, 'interrupted-and-transferred');
 } else main();

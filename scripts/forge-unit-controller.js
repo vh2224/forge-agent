@@ -1084,7 +1084,10 @@ function publishEvent(cwd, milestone, event) {
       return;
     }
     const record = { ...event, sequence: events.length + 1 };
-    const content = events.concat(record).map(item => JSON.stringify(item)).join('\n') + '\n';
+    // Preserve historical UTF-8 line bytes (CRLF and formatting included).
+    // Re-serializing old records invalidates pinned route evidence mid-settle.
+    const previous = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+    const content = previous + (previous && !previous.endsWith('\n') ? '\n' : '') + JSON.stringify(record) + '\n';
     writeAtomic(file, content, true);
   });
 }
@@ -1503,6 +1506,97 @@ function witnessedOwnerInterruption(cwd, transaction) {
   if (!witness) return false;
   return witness.terminals.some(pin => pin.key === transaction.idempotency_key && pin.sha256 === sha(transaction));
 }
+// Historical route-chain records have no universal dispatch-authority schema.
+// Read the referenced real lines, then require a LIVE host adapter to attest
+// their relationship to the original request and the final native attempt.
+function interruptionRouteEvidence(cwd, milestone, references) {
+  if (!Array.isArray(references) || !references.length || references.length > 64) {
+    throw new ControllerError('owner-interruption-supersession-invalid', 'recorded route evidence required');
+  }
+  const pathKey = file => require('./forge-code-roots').key(path.resolve(file));
+  const allowed = [eventsFile(cwd), eventsFile(cwd, milestone)].map(file => pathKey(fs.existsSync(file) ? fs.realpathSync.native(file) : file));
+  const seen = new Set();
+  return references.map(reference => {
+    if (!reference || typeof reference.path !== 'string' || !path.isAbsolute(reference.path)
+      || !allowed.includes(pathKey(fs.realpathSync.native(reference.path))) || !Number.isSafeInteger(reference.line) || reference.line < 1
+      || !/^[a-f0-9]{64}$/.test(reference.sha256 || '')) {
+      throw new ControllerError('owner-interruption-supersession-invalid', 'exact owner event line required');
+    }
+    const file = path.resolve(reference.path);
+    for (let cursor = file; ; cursor = path.dirname(cursor)) {
+      if (fs.lstatSync(cursor).isSymbolicLink()) throw new ControllerError('owner-interruption-path-invalid', 'linked evidence path');
+      if (cursor === path.dirname(cursor)) break;
+    }
+    if (!fs.statSync(file).isFile()) throw new ControllerError('owner-interruption-supersession-invalid', 'event evidence is not a file');
+    const line = fs.readFileSync(file, 'utf8').split('\n')[reference.line - 1];
+    if (line === undefined || crypto.createHash('sha256').update(line).digest('hex') !== reference.sha256) {
+      throw new ControllerError('owner-interruption-evidence-changed', 'recorded event line differs');
+    }
+    let event; try { event = JSON.parse(line); } catch { throw new ControllerError('owner-interruption-supersession-invalid', 'invalid event evidence'); }
+    if (event.event !== 'route-chain-advance') throw new ControllerError('owner-interruption-supersession-invalid', 'a recorded route advance is required');
+    const key = file + ':' + reference.line;
+    if (seen.has(key)) throw new ControllerError('owner-interruption-supersession-invalid', 'duplicate event evidence');
+    seen.add(key);
+    return { path: fs.realpathSync.native(file), line: reference.line, sha256: reference.sha256 };
+  });
+}
+function inspectSupersededInterruption(cwd, begin, context, basis, held, options) {
+  const reject = () => { throw new ControllerError('saved-response-replay-required', 'canonical evidence must use its original replay path unless a live host proves supersession'); };
+  const supersession = context.supersession;
+  if (typeof options.attestSupersededAttempt !== 'function' || !supersession || !context.request
+    || context.saved_response !== 'ready/blocked' || typeof context.receipt_path !== 'string') reject();
+  const recovery = require('./forge-attempt-recovery'), sidecar = require('./forge-unit-sidecar');
+  const request = recovery.canonicalRequest(context.request), identity = recovery.requestIdentity(request);
+  if (`${identity.unit_type}/${identity.task_id || identity.slice_id || identity.milestone_id}` !== begin.unit.key
+    || identity.milestone_id !== begin.milestone || identity.host !== begin.host_runtime
+    || identity.owner !== (process.platform === 'win32' ? fs.realpathSync(cwd).toLowerCase() : fs.realpathSync(cwd))
+    || identity.slice_id && identity.slice_id !== begin.after.state.active_slice
+    || path.resolve(sidecar.artifactAttemptFiles(context.request).receiptFile) !== path.resolve(context.receipt_path)) {
+    throw new ControllerError('attempt-identity-mismatch', 'superseded request does not match the original begin');
+  }
+  const file = path.resolve(context.receipt_path);
+  for (let cursor = file; ; cursor = path.dirname(cursor)) {
+    if (fs.lstatSync(cursor).isSymbolicLink()) throw new ControllerError('owner-interruption-path-invalid', 'linked receipt path');
+    if (cursor === path.dirname(cursor)) break;
+  }
+  if (!fs.statSync(file).isFile()) reject();
+  const inspection = recovery.inspectReceipt(file, { request: context.request, processProbe: options.processProbe });
+  const receipt = inspection.receipt, fingerprint = sidecar.artifactFingerprint(context.request);
+  if (receipt.fingerprint !== fingerprint || receipt.dispatch_id !== context.request.dispatchId
+    || receipt.recovery_identity_sha256 && receipt.recovery_identity_sha256 !== require('./forge-code-roots').digest(identity)) {
+    throw new ControllerError('attempt-identity-mismatch', 'superseded receipt differs from its exact request');
+  }
+  if (receipt.phase !== 'ready' || receipt.result?.status !== 'blocked' || receipt.saved_candidate) reject();
+  if (inspection.process_stopped !== true) throw new ControllerError('process-not-stopped', 'earlier sidecar process is active or unknown');
+  const native = supersession.final_native_attempt;
+  if (!native || typeof native.id !== 'string' || !native.id.trim() || native.id === receipt.dispatch_id
+    || native.host_runtime !== begin.host_runtime || native.worker_mode !== 'native' || native.status !== 'partial'
+    || native.receipt_path !== null || typeof native.observation_reference !== 'string' || !native.observation_reference.trim()) reject();
+  const requestRoots = [...new Set([cwd, context.request.cwd, context.request.contextRoot,
+    ...(context.request.execution_contract?.code_roots || []).map(root => root.path)].filter(Boolean).map(root => fs.realpathSync.native(root)))].sort();
+  const evidence = { request_identity: identity, request_fingerprint: fingerprint, request_roots: requestRoots,
+    receipt: { path: fs.realpathSync.native(file), sha256: inspection.receipt_sha256, dispatch_id: receipt.dispatch_id, phase: 'ready', status: 'blocked' },
+    route_evidence: interruptionRouteEvidence(cwd, begin.milestone, supersession.route_evidence),
+    final_native_attempt: { id: native.id, host_runtime: native.host_runtime, worker_mode: 'native', status: 'partial',
+      receipt_path: null, observation_reference: native.observation_reference } };
+  const challenge = { operation_id: basis.operation_id, run_record_sha256: held.expectedRecordSha256,
+    begin_key: begin.idempotency_key, begin_checksum: sha(begin), unit: begin.unit.key, milestone: begin.milestone,
+    host_runtime: begin.host_runtime, owner_digest: begin.owner_digest, lease_generation: begin.lease_generation, evidence };
+  const attestation = options.attestSupersededAttempt(clone(challenge));
+  if (!attestation || attestation.challenge_sha256 !== sha(challenge) || attestation.superseded !== true
+    || attestation.final_native_receiptless !== true || attestation.final_native_status !== 'partial'
+    || typeof attestation.reference !== 'string' || !attestation.reference.trim()) {
+    throw new ControllerError('owner-interruption-supersession-attestation-required', 'live host must verify actual chain advance and final native observation');
+  }
+  // The callback may inspect tools/files; recheck the very same immutable data.
+  if (crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') !== evidence.receipt.sha256
+    || sha(interruptionRouteEvidence(cwd, begin.milestone, evidence.route_evidence)) !== sha(evidence.route_evidence)) {
+    throw new ControllerError('owner-interruption-evidence-changed', 'superseded evidence changed during attestation');
+  }
+  const merge = require('./forge-interaction').mergePendingQuestions;
+  return { evidence: { ...evidence, attestation_reference: attestation.reference },
+    questions: merge(merge(receipt.input_pending_questions || [], receipt.pending_questions || []), receipt.result.questions || []) };
+}
 function inspectInterruptionTargets(cwd, handle, basis, options) {
   const mutex = ownerActivityLocks.get(path.resolve(cwd));
   if (!mutex || !forgeLock.assertOwned(mutex)) throw new ControllerError('owner-interruption-fence-lost', 'controller fence lost');
@@ -1519,27 +1613,42 @@ function inspectInterruptionTargets(cwd, handle, basis, options) {
     if (!context || context.begin_key !== target.begin_key || context.begin_checksum !== target.begin_checksum
       || typeof context.observation_reference !== 'string' || !context.observation_reference.trim()) throw new ControllerError('owner-interruption-evidence-missing', 'positive begin-bound host observation required');
     if (context.invocation_status !== (i === 0 ? 'invoked-unverified' : 'not-invoked')) throw new ControllerError('owner-interruption-invocation-unknown', 'original unverified / successor not-invoked required');
-    if (context.receipt_path !== null || context.saved_response !== 'none-observed') throw new ControllerError('saved-response-replay-required', 'canonical evidence must use its original replay path');
+    let superseded = null;
+    if (context.receipt_path !== null || context.saved_response !== 'none-observed') {
+      if (i !== 0) throw new ControllerError('saved-response-replay-required', 'successors must remain positively uninvoked and receiptless');
+      superseded = inspectSupersededInterruption(cwd, begin, context, basis, held, options);
+    }
     if (!Array.isArray(context.pending_questions)) throw new ControllerError('questions-invalid', 'explicit question inventory required');
-    const pending = require('./forge-interaction').mergePendingQuestions(held.record.pending_questions || [], context.pending_questions);
+    const merge = require('./forge-interaction').mergePendingQuestions;
+    const pending = merge(merge(held.record.pending_questions || [], context.pending_questions), superseded?.questions || []);
     const roots = physicalRoots(context.roots);
     if (required.some(file => !roots.some(root => root.path === fs.realpathSync.native(file)))) throw new ControllerError('roots-unverified', 'interruption omitted a physical root');
+    if (superseded && superseded.evidence.request_roots.some(file => !roots.some(root => root.path === file))) {
+      throw new ControllerError('roots-unverified', 'interruption omitted a superseded attempt root');
+    }
     if (options.processProbe({ cwd, begin: clone(begin), context, purpose: 'owner-interruption' }) !== 'stopped') throw new ControllerError('process-not-stopped', 'old native/process identity is active or unknown');
     for (const root of roots) {
       const proof = options.reconcileRoots({ cwd, root, context, begin: clone(begin) });
       if (!proof || proof.root_id !== root.root_id || proof.process_stopped !== true || proof.reconciled !== true) throw new ControllerError('roots-unreconciled', 'interruption root not reconciled');
     }
     proofs.push({ roots, pending_questions: pending, invocation_status: context.invocation_status,
-      observation_reference: context.observation_reference, receipt_sha256: null,
+      observation_reference: context.observation_reference, receipt_sha256: superseded?.evidence.receipt.sha256 || null,
+      ...(superseded ? { superseded_attempt: superseded.evidence } : {}),
       historical_reason: 'owner-stopped-unverified-lineage', provenance_gaps: ['receiptless-legacy-native'],
       process_stopped: true, roots_reconciled: true });
   }
   const challenge = { operation_id: basis.operation_id, record_sha256: held.expectedRecordSha256,
     milestone: basis.milestone, actor: held.actor, targets: basis.targets.map(row => ({ begin_key: row.begin_key, begin_checksum: row.begin_checksum })),
-    roots: proofs.map(row => row.roots) };
+    roots: proofs.map(row => row.roots),
+    ...(proofs.some(row => row.superseded_attempt) ? { superseded_attempts: proofs.map(row => row.superseded_attempt || null) } : {}) };
   const attestation = options.attestOwnerInterruption(clone(challenge));
   if (!attestation || attestation.challenge_sha256 !== sha(challenge) || attestation.previous_owner_stopped !== true
     || attestation.workspace_quiescent !== true || typeof attestation.reference !== 'string' || !attestation.reference.trim()) throw new ControllerError('owner-interruption-attestation-required', 'live host must attest stopped owner and reconciled workspace');
+  const safetyIdentity = rows => rows.map(row => ({ roots: row.roots, pending_questions: row.pending_questions,
+    ...(row.superseded_attempt ? { receipt_sha256: row.receipt_sha256, superseded_attempt: row.superseded_attempt } : {}) }));
+  if (basis.safety && sha(safetyIdentity(basis.safety)) !== sha(safetyIdentity(proofs))) {
+    throw new ControllerError('owner-interruption-evidence-changed', 'interruption roots/questions/attempt evidence changed');
+  }
   return proofs;
 }
 function ownerInterruptionIdentity(milestone, recordSha256, lineage) { return sha({ milestone, record_sha256: recordSha256, lineage }); }
@@ -1603,8 +1712,6 @@ function settleInterruptedLineage(cwd, handle, options) {
       || observed.record.generation !== begin.lease_generation || ownerDigest(observed.record.owner_token) !== begin.owner_digest)) throw new ControllerError('lease-owner-mismatch', 'target owner/generation changed');
   }
   const proofs = inspectInterruptionTargets(cwd, handle, basis, options);
-  if (basis.safety && sha(basis.safety.map(row => ({ roots: row.roots, pending_questions: row.pending_questions })))
-    !== sha(proofs.map(row => ({ roots: row.roots, pending_questions: row.pending_questions })))) throw new ControllerError('owner-interruption-evidence-changed', 'interruption roots/questions changed');
   forgeRuns.bindOwnerInterruptionAuthority(handle, cwd, basis);
   // Validate EVERY target before writing any intent or releasing the first lease.
   for (const target of basis.targets) {
