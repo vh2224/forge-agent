@@ -495,4 +495,64 @@ test('update() tells the installer when stdout is a JSON report', () => {
   } finally { data.cleanup(); }
 });
 
+test('successful apply invalidates the installation cache after the installer returns', () => {
+  const data = fixture();
+  try {
+    const order = [];
+    const report = updater.update({ ...data, runtime: 'claude', apply: true, skipCapabilityCheck: true }, {
+      install() {
+        order.push('install');
+        return { ok: true, changed: true, backup: null, plan: [] };
+      },
+      invalidateUpdateCache(target) {
+        order.push('invalidate');
+        assert.strictEqual(target.forgeHome, data.forgeHome);
+        return { invalidated: true, file: 'fixture-cache' };
+      },
+    });
+    assert.deepStrictEqual(order, ['install', 'invalidate']);
+    assert.strictEqual(report.applied, true);
+    assert.strictEqual(report.cache_invalidation.invalidated, true);
+  } finally { data.cleanup(); }
+});
+
+test('dry-run never invalidates the statusline cache', () => {
+  const data = fixture();
+  try {
+    let invalidations = 0;
+    const report = updater.update({ ...data, runtime: 'claude', apply: false }, {
+      install() { return { ok: true, changed: false, backup: null, plan: [] }; },
+      invalidateUpdateCache() { invalidations++; return { invalidated: true }; },
+    });
+    assert.strictEqual(report.applied, false);
+    assert.strictEqual(invalidations, 0);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(report, 'cache_invalidation'), false);
+  } finally { data.cleanup(); }
+});
+
+test('installer failure leaves the statusline cache intact', () => {
+  const data = fixture();
+  try {
+    let invalidations = 0;
+    assert.throws(() => updater.update({ ...data, runtime: 'claude', apply: true }, {
+      install() { throw new Error('installer failed'); },
+      invalidateUpdateCache() { invalidations++; },
+    }), /installer failed/);
+    assert.strictEqual(invalidations, 0);
+  } finally { data.cleanup(); }
+});
+
+test('cache invalidation failure does not mask a successful applied update', () => {
+  const data = fixture();
+  try {
+    const report = updater.update({ ...data, runtime: 'claude', apply: true }, {
+      install() { return { ok: true, changed: true, backup: 'backup', plan: [] }; },
+      invalidateUpdateCache() { throw new Error('cache unavailable'); },
+    });
+    assert.strictEqual(report.applied, true);
+    assert.strictEqual(report.changed, true);
+    assert.deepStrictEqual(report.cache_invalidation, { invalidated: false, reason: 'invalidation-failed' });
+  } finally { data.cleanup(); }
+});
+
 process.stdout.write(`\n${passed} passed, 0 failed\n`);

@@ -7,15 +7,28 @@ const os = require('os');
 const path = require('path');
 const { execFileSync, spawnSync } = require('child_process');
 const provider = require('./forge-update-check');
+
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-update-check-'));
 const cacheDir = path.join(ROOT, 'cache');
 fs.mkdirSync(cacheDir, { mode: 0o700 });
 let passed = 0;
 
-function git(cwd, ...args) {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', timeout: 10000,
-    stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }).trim();
+function test(name, fn) {
+  fn();
+  passed++;
+  console.log(`PASS ${name}`);
 }
+
+function git(cwd, ...args) {
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    timeout: 10000,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+  }).trim();
+}
+
 function commit(repo, text) {
   fs.writeFileSync(path.join(repo, 'content.txt'), text);
   git(repo, 'add', 'content.txt');
@@ -23,8 +36,37 @@ function commit(repo, text) {
     '-c', 'commit.gpgsign=false', 'commit', '-m', text);
   return git(repo, 'rev-parse', 'HEAD');
 }
-function test(name, fn) {
-  fn(); passed++; console.log(`PASS ${name}`);
+
+function writeManifest(forgeHome, value) {
+  fs.mkdirSync(forgeHome, { recursive: true });
+  fs.writeFileSync(path.join(forgeHome, 'manifest.json'), `${JSON.stringify(value)}\n`);
+}
+
+function remoteManifest(overrides = {}) {
+  return {
+    version: '1.2.3',
+    source_remote: {
+      remote: 'https://example.invalid/forge.git',
+      channel: 'stable',
+      tag: 'v1.2.3',
+      sha: '1'.repeat(40),
+      ...overrides,
+    },
+  };
+}
+
+function remoteGit(tags, master = '1'.repeat(40), calls = []) {
+  return (cwd, args) => {
+    calls.push({ cwd, args: [...args] });
+    assert.strictEqual(args[0], 'ls-remote');
+    if (args.includes('--tags')) return tags;
+    assert.deepStrictEqual(args.slice(-1), ['refs/heads/master']);
+    return `${master}\trefs/heads/master\n`;
+  };
+}
+
+function tag(sha, version) {
+  return `${sha}\trefs/tags/v${version}\n`;
 }
 
 try {
@@ -33,295 +75,281 @@ try {
   fs.mkdirSync(origin);
   git(origin, 'init', '--initial-branch=main');
   const base = commit(origin, 'base');
-  const remote = commit(origin, 'remote ahead');
   git(origin, 'tag', 'v1.2.3');
+  const remote = commit(origin, 'remote ahead');
+  git(origin, 'tag', 'v1.3.0');
   git(origin, 'switch', '-c', 'side', base);
   const side = commit(origin, 'side branch');
   git(origin, 'switch', 'main');
   git(ROOT, 'clone', origin, repo);
 
-  test('ancestry distinguishes equal, behind, ahead, diverged and unknown', () => {
+  test('clone ancestry retains equal, behind, ahead, diverged and unknown states', () => {
     assert.strictEqual(provider.compareCommits(repo, base, base), 'equal');
     assert.strictEqual(provider.compareCommits(repo, base, remote), 'behind');
     assert.strictEqual(provider.compareCommits(repo, remote, base), 'ahead');
     assert.strictEqual(provider.compareCommits(repo, remote, side), 'diverged');
     assert.strictEqual(provider.compareCommits(repo, base, '0'.repeat(40)), 'unknown');
-    assert.strictEqual(provider.compareCommits(repo, 'not-a-commit', remote), 'unknown');
+    assert.strictEqual(provider.compareCommits(repo, 'not-a-sha', remote), 'unknown');
   });
 
-  test('known remote commit after fetch still reports behind and stable tag', () => {
+  test('stable installation ignores an outdated auxiliary clone when installed tag is current', () => {
     git(repo, 'reset', '--hard', base);
-    git(repo, 'fetch', 'origin');
-    git(repo, 'cat-file', '-e', `${remote}^{commit}`);
-    const value = provider.refresh(repo, { cacheDir });
+    const forgeHome = path.join(ROOT, 'stable-current');
+    const installedSha = 'a'.repeat(40);
+    writeManifest(forgeHome, remoteManifest({ sha: installedSha }));
+    const calls = [];
+    const value = provider.refresh({ forgeHome, cwd: ROOT, prefs: { repo_path: repo } }, {
+      cacheDir,
+      git: remoteGit(tag(installedSha, '1.2.3'), 'b'.repeat(40), calls),
+    });
+    assert.strictEqual(value.state, 'equal');
+    assert.strictEqual(value.has_update, false);
+    assert.strictEqual(value.version, 'v1.2.3');
+    assert.strictEqual(value.remote_version, '');
+    assert(calls.every((call) => call.args.includes('https://example.invalid/forge.git')));
+    assert(calls.every((call) => path.resolve(call.cwd).toLowerCase() === path.resolve(forgeHome).toLowerCase()));
+    assert.strictEqual(git(repo, 'rev-parse', 'HEAD'), base, 'auxiliary clone stays untouched');
+  });
+
+  test('only a higher stable semver produces the stable update arrow payload', () => {
+    const forgeHome = path.join(ROOT, 'stable-newer');
+    const installedSha = 'a'.repeat(40);
+    const nextSha = 'b'.repeat(40);
+    writeManifest(forgeHome, remoteManifest({ sha: installedSha }));
+    const value = provider.refresh({ forgeHome, cwd: ROOT, prefs: { repo_path: repo } }, {
+      cacheDir,
+      git: remoteGit(tag(nextSha, '2.0.0') + tag(installedSha, '1.2.3')),
+    });
     assert.strictEqual(value.state, 'behind');
     assert.strictEqual(value.has_update, true);
-    assert.strictEqual(value.remote_version, 'v1.2.3');
-    assert.strictEqual(value.localCommit, base);
-    assert.strictEqual(value.remoteCommit, remote);
-    assert.strictEqual(git(repo, 'rev-parse', 'HEAD'), base);
-    assert.strictEqual(JSON.parse(fs.readFileSync(provider.cachePath(repo, cacheDir))).state, 'behind');
+    assert.strictEqual(value.remote_version, 'v2.0.0');
+    assert.strictEqual(value.version, 'v1.2.3');
   });
 
-  test('offline refresh preserves last known indicator and marks unknown', () => {
-    const previous = JSON.parse(fs.readFileSync(provider.cachePath(repo, cacheDir)));
-    git(repo, 'remote', 'set-url', 'origin', path.join(ROOT, 'missing-origin'));
-    try {
-      const value = provider.refresh(repo, { cacheDir });
-      assert.strictEqual(value.state, 'unknown');
-      assert.strictEqual(value.error, 'update-check-unavailable');
-      assert.strictEqual(value.has_update, true);
-      assert.strictEqual(value.remote_version, previous.remote_version);
-      assert.strictEqual(value.last_success_ts, previous.last_success_ts);
-    } finally { git(repo, 'remote', 'set-url', 'origin', origin); }
+  test('a new master commit without a stable tag does not affect stable', () => {
+    const forgeHome = path.join(ROOT, 'stable-master-only');
+    const installedSha = 'a'.repeat(40);
+    writeManifest(forgeHome, remoteManifest({ sha: installedSha }));
+    const calls = [];
+    const value = provider.refresh({ forgeHome }, {
+      cacheDir,
+      git: remoteGit(tag(installedSha, '1.2.3'), 'f'.repeat(40), calls),
+    });
+    assert.strictEqual(value.state, 'equal');
+    assert.strictEqual(value.has_update, false);
+    assert.strictEqual(calls.length, 1, 'stable consults tags only, never master');
+    assert(calls[0].args.includes('--tags'));
   });
 
-  test('offline refresh clears an update verdict after the checkout changes', () => {
-    git(repo, 'reset', '--hard', remote);
-    git(repo, 'remote', 'set-url', 'origin', path.join(ROOT, 'missing-origin'));
-    try {
-      const value = provider.refresh(repo, { cacheDir });
-      assert.strictEqual(value.localCommit, remote);
+  test('master compares equality only and reports a different SHA as differs', () => {
+    const forgeHome = path.join(ROOT, 'master');
+    const installedSha = 'c'.repeat(40);
+    writeManifest(forgeHome, remoteManifest({ channel: 'master', tag: null, sha: installedSha }));
+    const equal = provider.refresh({ forgeHome }, {
+      cacheDir,
+      git: remoteGit('', installedSha),
+    });
+    assert.strictEqual(equal.state, 'equal');
+    assert.strictEqual(equal.has_update, false);
+    const different = provider.refresh({ forgeHome }, {
+      cacheDir,
+      git: remoteGit('', 'd'.repeat(40)),
+    });
+    assert.strictEqual(different.state, 'differs');
+    assert.strictEqual(different.has_update, true);
+    assert.strictEqual(different.remote_version, 'dddddddd');
+    assert.strictEqual(different.version, '1.2.3');
+  });
+
+  for (const [name, tags] of [
+    ['missing', tag('b'.repeat(40), '2.0.0')],
+    ['retargeted', tag('b'.repeat(40), '1.2.3')],
+  ]) {
+    test(`stable installed tag ${name} is conservative unknown`, () => {
+      const forgeHome = path.join(ROOT, `stable-${name}`);
+      writeManifest(forgeHome, remoteManifest({ sha: 'a'.repeat(40) }));
+      const value = provider.refresh({ forgeHome }, { cacheDir, git: remoteGit(tags) });
       assert.strictEqual(value.state, 'unknown');
       assert.strictEqual(value.has_update, false);
       assert.strictEqual(value.remote_version, '');
-    } finally { git(repo, 'remote', 'set-url', 'origin', origin); }
-  });
-
-  test('refresh handles equal, ahead and diverged checkouts without changing HEAD', () => {
-    git(repo, 'reset', '--hard', remote);
-    assert.strictEqual(provider.refresh(repo, { cacheDir }).state, 'equal');
-    assert.strictEqual(provider.refresh(repo, { cacheDir }).has_update, false);
-    const ahead = commit(repo, 'local ahead');
-    const value = provider.refresh(repo, { cacheDir });
-    assert.strictEqual(value.state, 'ahead');
-    assert.strictEqual(value.has_update, false);
-    assert.strictEqual(git(repo, 'rev-parse', 'HEAD'), ahead);
-    git(repo, 'reset', '--hard', side);
-    const diverged = provider.refresh(repo, { cacheDir });
-    assert.strictEqual(diverged.state, 'diverged');
-    assert.strictEqual(diverged.has_update, true);
-    assert.strictEqual(git(repo, 'rev-parse', 'HEAD'), side);
-  });
-
-  test('fresh remote object is fetched only into the object database', () => {
-    const next = commit(origin, 'new remote commit');
-    const headBefore = git(repo, 'rev-parse', 'HEAD');
-    const refsBefore = git(repo, 'show-ref');
-    const fetchHead = fs.readFileSync(path.join(repo, '.git', 'FETCH_HEAD'), 'utf8');
-    const value = provider.refresh(repo, { cacheDir });
-    assert.strictEqual(value.remoteCommit, next);
-    assert.strictEqual(value.state, 'diverged');
-    git(repo, 'cat-file', '-e', `${next}^{commit}`);
-    assert.strictEqual(git(repo, 'rev-parse', 'HEAD'), headBefore);
-    assert.strictEqual(git(repo, 'show-ref'), refsBefore);
-    assert.strictEqual(fs.readFileSync(path.join(repo, '.git', 'FETCH_HEAD'), 'utf8'), fetchHead);
-  });
-
-  test('two repositories have distinct caches and independent results', () => {
-    const second = path.join(ROOT, 'second');
-    git(ROOT, 'clone', origin, second);
-    const firstFile = provider.cachePath(repo, cacheDir);
-    const secondFile = provider.cachePath(second, cacheDir);
-    assert.notStrictEqual(firstFile, secondFile);
-    assert.strictEqual(provider.cachePath(path.join(repo, '.'), cacheDir), firstFile);
-    const before = fs.readFileSync(firstFile, 'utf8');
-    assert.strictEqual(provider.refresh(second, { cacheDir }).state, 'equal');
-    assert.strictEqual(fs.readFileSync(firstFile, 'utf8'), before);
-    assert.strictEqual(provider.cachedUpdate(repo, { cacheDir }).state, 'diverged');
-    assert.strictEqual(provider.cachedUpdate(second, { cacheDir }).state, 'equal');
-  });
-
-  test('invalidation API removes only the canonical repository cache and is idempotent', () => {
-    const firstFile = provider.cachePath(repo, cacheDir);
-    const secondFile = provider.cachePath(origin, cacheDir);
-    fs.writeFileSync(firstFile, 'first');
-    fs.writeFileSync(secondFile, 'second');
-    assert.strictEqual(provider.invalidateCache(path.join(repo, '.'), { cacheDir }).invalidated, true);
-    assert.strictEqual(fs.existsSync(firstFile), false);
-    assert.strictEqual(fs.readFileSync(secondFile, 'utf8'), 'second');
-    assert.strictEqual(provider.invalidateCache(repo, { cacheDir }).reason, 'cache-missing');
-    assert.throws(() => provider.invalidateCache('', { cacheDir }), /repository path/);
-  });
-
-  test('invalidation CLI maps consumer preferences to the Forge cache without touching other identities', () => {
-    const consumer = path.join(ROOT, 'consumer with spaces');
-    fs.mkdirSync(path.join(consumer, '.gsd'), { recursive: true });
-    const prefsFile = path.join(consumer, '.gsd', 'forge-prefs.jsonc');
-    const firstFile = provider.cachePath(repo, cacheDir);
-    const otherFile = provider.cachePath(origin, cacheDir);
-    const consumerFile = provider.cachePath(consumer, cacheDir);
-    fs.writeFileSync(firstFile, 'forge');
-    fs.writeFileSync(otherFile, 'other');
-    fs.writeFileSync(consumerFile, 'consumer');
-    fs.writeFileSync(prefsFile, JSON.stringify({ repo_path: `  ${repo}  ` }));
-    const invoke = (...args) => {
-      const result = spawnSync(process.execPath, [require.resolve('./forge-update-check'), '--invalidate', ...args], {
-        encoding: 'utf8', timeout: 5000, env: { ...process.env, HOME: ROOT, USERPROFILE: ROOT },
-      });
-      assert.strictEqual(result.status, 0, result.stderr);
-      return JSON.parse(result.stdout);
-    };
-    assert.strictEqual(invoke('--cwd', consumer, cacheDir).file, firstFile);
-    assert.strictEqual(fs.existsSync(firstFile), false);
-    assert.strictEqual(fs.readFileSync(otherFile, 'utf8'), 'other');
-    assert.strictEqual(fs.readFileSync(consumerFile, 'utf8'), 'consumer');
-    fs.writeFileSync(firstFile, 'forge-relative');
-    fs.writeFileSync(prefsFile, JSON.stringify({ repo_path: `  ${path.relative(consumer, repo)}  ` }));
-    assert.strictEqual(invoke('--cwd', consumer, cacheDir).file, firstFile);
-    assert.strictEqual(fs.existsSync(firstFile), false);
-    assert.strictEqual(fs.readFileSync(otherFile, 'utf8'), 'other');
-    for (const value of ['', 42]) {
-      fs.writeFileSync(prefsFile, JSON.stringify({ repo_path: value }));
-      assert.strictEqual(invoke('--cwd', consumer, cacheDir).reason, 'repo-path-unconfigured');
-      assert.strictEqual(fs.readFileSync(consumerFile, 'utf8'), 'consumer');
-    }
-    assert.strictEqual(invoke(origin, cacheDir).invalidated, true);
-    assert.strictEqual(fs.existsSync(otherFile), false);
-    assert.strictEqual(fs.readFileSync(consumerFile, 'utf8'), 'consumer');
-  });
-
-  test('milestone template invalidates through the provider with consumer context', () => {
-    const template = fs.readFileSync(path.join(__dirname, '..', 'shared', 'forge-completer-milestone.md'), 'utf8');
-    assert(template.includes('node "$FORGE_SCRIPTS_DIR/forge-update-check.js" --invalidate --cwd "{WORKING_DIR}"'));
-    assert(template.includes('--cwd "{WORKING_DIR}" || echo "Warning: statusline cache invalidation failed; continuing milestone completion."'));
-    assert(template.includes('${FORGE_HOME:-$HOME/.forge-agent}/scripts'));
-    assert(!template.includes('forge-update-check.json'));
-  });
-
-  for (const window of ['during-git', 'before-publication']) {
-    test(`invalidation fences an older refresh ${window}`, () => {
-      const file = provider.cachePath(repo, cacheDir);
-      const gitModule = require('./forge-git-process'), originalGit = gitModule.git;
-      const originalRename = fs.renameSync;
-      const modulePath = require.resolve('./forge-update-check');
-      let invalidated = false;
-      const invalidateOnce = () => {
-        if (!invalidated) { invalidated = true; provider.invalidateCache(repo, { cacheDir }); }
-      };
-      try {
-        if (window === 'during-git') {
-          gitModule.git = (...args) => { invalidateOnce(); return originalGit(...args); };
-        } else {
-          fs.renameSync = function(from, to) {
-            if (to === file) invalidateOnce();
-            return originalRename.call(fs, from, to);
-          };
-        }
-        delete require.cache[modulePath];
-        require('./forge-update-check').refresh(repo, { cacheDir });
-      } finally {
-        gitModule.git = originalGit;
-        fs.renameSync = originalRename;
-        delete require.cache[modulePath];
-      }
-      assert.strictEqual(invalidated, true);
-      const old = JSON.parse(fs.readFileSync(file, 'utf8'));
-      assert(Date.now() - old.ts < provider.TTL_MS, 'old worker published a fresh TTL');
-      assert.notStrictEqual(old.generation, fs.readFileSync(`${file}.generation`, 'utf8'));
-      let launches = 0;
-      const value = provider.cachedUpdate(repo, { cacheDir, spawn() {
-        launches++; return { on() {}, unref() {} };
-      } });
-      assert.strictEqual(value.state, 'unknown', 'invalidated worker cannot revive its verdict');
-      assert.strictEqual(value.has_update, false);
-      assert.strictEqual(launches, 1, 'refresh is requested without waiting for the old TTL');
-      fs.unlinkSync(`${file}.refresh`);
-      const current = provider.refresh(repo, { cacheDir });
-      assert.deepStrictEqual(provider.cachedUpdate(repo, { cacheDir }), current);
     });
   }
 
-  test('cache render schedules once, serves stale data and performs no synchronous Git', () => {
-    const file = provider.cachePath(repo, cacheDir);
-    const stale = { ts: 1, state: 'behind', version: 'v1.0', has_update: true, remote_version: 'v2.0',
-      generation: fs.readFileSync(`${file}.generation`, 'utf8') };
-    fs.writeFileSync(file, JSON.stringify(stale));
-    const gitModule = require('./forge-git-process'), originalGit = gitModule.git;
-    let launches = 0, unrefs = 0;
-    try {
-      gitModule.git = () => { throw new Error('synchronous Git reached render path'); };
-      delete require.cache[require.resolve('./forge-update-check')];
-      const isolated = require('./forge-update-check');
-      const spawn = (command, args, options) => {
-        launches++;
-        assert.strictEqual(command, process.execPath);
-        assert(args.includes('--refresh'));
-        assert(args.includes(path.resolve(repo)));
-        assert.strictEqual(options.stdio, 'ignore');
-        assert.strictEqual(options.windowsHide, true);
-        assert.strictEqual(options.detached, true, 'refresh must outlive render on Windows');
-        assert.strictEqual(options.timeout, undefined, 'Node spawn timeout would keep the render event loop alive');
-        return { on() {}, unref() { unrefs++; } };
-      };
-      assert.deepStrictEqual(isolated.cachedUpdate(repo, { cacheDir, spawn }), stale);
-      assert.deepStrictEqual(isolated.cachedUpdate(repo, { cacheDir, spawn }), stale);
-      assert.strictEqual(launches, 1);
-      assert.strictEqual(unrefs, 1);
-    } finally {
-      gitModule.git = originalGit;
-      delete require.cache[require.resolve('./forge-update-check')];
-      fs.rmSync(`${file}.refresh`, { force: true });
+  test('source_repo clone fallback keeps Git states and installation version', () => {
+    git(repo, 'reset', '--hard', base);
+    git(repo, 'fetch', 'origin');
+    const forgeHome = path.join(ROOT, 'source-repo');
+    writeManifest(forgeHome, { version: '9.8.7', source_repo: repo });
+    const beforeHead = git(repo, 'rev-parse', 'HEAD');
+    const value = provider.refresh({ forgeHome, cwd: ROOT, prefs: { repo_path: origin } }, { cacheDir });
+    assert.strictEqual(value.state, 'behind');
+    assert.strictEqual(value.has_update, true);
+    assert.strictEqual(value.version, '9.8.7', 'version comes from installation manifest');
+    assert.strictEqual(value.localCommit, base);
+    assert.strictEqual(git(repo, 'rev-parse', 'HEAD'), beforeHead);
+  });
+
+  test('repo_path is only the clone fallback when source_repo is absent', () => {
+    git(repo, 'reset', '--hard', remote);
+    const forgeHome = path.join(ROOT, 'prefs-repo');
+    writeManifest(forgeHome, { version: '4.5.6' });
+    const value = provider.refresh({ forgeHome, cwd: ROOT, prefs: { repo_path: repo } }, { cacheDir });
+    assert.strictEqual(value.state, 'equal');
+    assert.strictEqual(value.version, '4.5.6');
+    const unavailable = path.join(ROOT, 'prefs-unavailable');
+    writeManifest(unavailable, { version: '4.5.6' });
+    assert.strictEqual(provider.refresh({ forgeHome: unavailable }, { cacheDir }).state, 'unknown');
+  });
+
+  test('missing, malformed and oversized manifests are unknown without Git', () => {
+    for (const name of ['missing', 'malformed', 'oversized']) {
+      const forgeHome = path.join(ROOT, `manifest-${name}`);
+      fs.mkdirSync(forgeHome);
+      if (name === 'malformed') fs.writeFileSync(path.join(forgeHome, 'manifest.json'), '{bad');
+      if (name === 'oversized') fs.writeFileSync(path.join(forgeHome, 'manifest.json'), `{"pad":"${'x'.repeat(70000)}"}`);
+      let gitCalls = 0;
+      const value = provider.refresh({ forgeHome }, { cacheDir, git() { gitCalls++; throw new Error('must not run'); } });
+      assert.strictEqual(value.state, 'unknown');
+      assert.strictEqual(value.has_update, false);
+      assert.strictEqual(gitCalls, 0);
     }
   });
 
-  test('real render process exits promptly while a scheduled worker is still alive', () => {
-    const isolatedCache = path.join(ROOT, 'render-cache');
+  test('unreadable manifest is unknown and never reaches Git', () => {
+    const forgeHome = path.join(ROOT, 'manifest-unreadable');
+    writeManifest(forgeHome, remoteManifest());
+    const manifestFile = path.resolve(forgeHome, 'manifest.json');
+    const originalRead = fs.readFileSync;
+    let gitCalls = 0;
+    try {
+      fs.readFileSync = function(file, ...args) {
+        if (path.resolve(file).toLowerCase() === manifestFile.toLowerCase()) {
+          const error = new Error('fixture access denied');
+          error.code = 'EACCES';
+          throw error;
+        }
+        return originalRead.call(fs, file, ...args);
+      };
+      const value = provider.refresh({ forgeHome }, {
+        cacheDir,
+        git() { gitCalls++; throw new Error('must not run'); },
+      });
+      assert.strictEqual(value.state, 'unknown');
+      assert.strictEqual(value.has_update, false);
+      assert.strictEqual(gitCalls, 0);
+    } finally { fs.readFileSync = originalRead; }
+  });
+
+  test('remote identity changes for sha, tag, channel or remote while clone identity includes HEAD', () => {
+    const baseSource = { mode: 'remote', remote: 'https://one.invalid/a.git', channel: 'stable',
+      tag: 'v1.2.3', sha: 'a'.repeat(40), version: 'v1.2.3' };
+    const identity = provider._private.sourceIdentity(baseSource);
+    for (const changed of [
+      { sha: 'b'.repeat(40) },
+      { tag: 'v1.2.4', version: 'v1.2.4' },
+      { channel: 'master', tag: null, version: '1.2.3' },
+      { remote: 'https://two.invalid/a.git' },
+    ]) assert.notStrictEqual(provider._private.sourceIdentity({ ...baseSource, ...changed }), identity);
+    const clone = { mode: 'clone', repo, version: '1.2.3' };
+    assert.notStrictEqual(provider._private.sourceIdentity(clone, base), provider._private.sourceIdentity(clone, remote));
+  });
+
+  test('generation invalidation rejects an older concurrent publication', () => {
+    const forgeHome = path.join(ROOT, 'generation');
+    const installedSha = 'a'.repeat(40);
+    writeManifest(forgeHome, remoteManifest({ sha: installedSha }));
+    const target = { forgeHome };
+    const file = provider.cachePath(target, cacheDir);
+    provider.refresh(target, { cacheDir, git: remoteGit(tag(installedSha, '1.2.3')) });
+    const old = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.strictEqual(provider.invalidateCache(target, { cacheDir }).invalidated, true);
+    fs.writeFileSync(file, JSON.stringify(old));
+    let launches = 0;
+    const value = provider.cachedUpdate(target, { cacheDir, spawn() {
+      launches++;
+      return { on() {}, unref() {} };
+    } });
+    assert.strictEqual(value.state, 'unknown');
+    assert.strictEqual(launches, 1);
+    fs.rmSync(`${file}.refresh`, { force: true });
+  });
+
+  test('renderer reads cache only and starts one detached refresh without repo_path', () => {
+    const forgeHome = path.join(ROOT, 'render');
+    writeManifest(forgeHome, remoteManifest());
+    const target = { forgeHome, cwd: ROOT, prefs: {} };
+    let launches = 0;
+    let unrefs = 0;
+    const spawn = (command, args, options) => {
+      launches++;
+      assert.strictEqual(command, process.execPath);
+      assert.strictEqual(args[1], '--refresh');
+      assert.strictEqual(options.stdio, 'ignore');
+      assert.strictEqual(options.windowsHide, true);
+      assert.strictEqual(options.detached, true);
+      return { on() {}, unref() { unrefs++; } };
+    };
+    assert.strictEqual(provider.cachedUpdate(target, { cacheDir, spawn }).state, 'unknown');
+    assert.strictEqual(provider.cachedUpdate(target, { cacheDir, spawn }).state, 'unknown');
+    assert.strictEqual(launches, 1);
+    assert.strictEqual(unrefs, 1);
+    fs.rmSync(`${provider.cachePath(target, cacheDir)}.refresh`, { force: true });
+  });
+
+  test('real render process exits while its detached refresh child remains alive', () => {
+    const isolatedCache = path.join(ROOT, 'render-process-cache');
+    const forgeHome = path.join(ROOT, 'render-process-home');
+    const pidFile = path.join(ROOT, 'render-worker.pid');
     fs.mkdirSync(isolatedCache, { mode: 0o700 });
-    const pidFile = path.join(ROOT, 'worker.pid');
+    writeManifest(forgeHome, remoteManifest());
     let workerPid;
-    const started = Date.now();
     try {
       const result = spawnSync(process.execPath, ['-e', `
         const fs = require('fs'), { spawn } = require('child_process');
         const provider = require(process.argv[1]);
-        const value = provider.cachedUpdate(process.argv[2], {
+        console.log(JSON.stringify(provider.cachedUpdate({ forgeHome: process.argv[2] }, {
           cacheDir: process.argv[3],
           spawn(command, args, options) {
             const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], options);
             fs.writeFileSync(process.argv[4], String(child.pid));
             return child;
           }
-        });
-        console.log(JSON.stringify(value));
-      `, require.resolve('./forge-update-check'), repo, isolatedCache, pidFile], {
+        })));
+      `, require.resolve('./forge-update-check'), forgeHome, isolatedCache, pidFile], {
         encoding: 'utf8', timeout: 3000,
       });
       workerPid = Number(fs.readFileSync(pidFile, 'utf8'));
       assert.strictEqual(result.status, 0, result.stderr || String(result.error));
-      assert(Date.now() - started < 3000, 'render waited for worker');
       assert.strictEqual(JSON.parse(result.stdout).state, 'unknown');
-      assert.strictEqual(JSON.parse(result.stdout).has_update, false);
-      process.kill(workerPid, 0); // The render exited while its refresh was still running.
+      process.kill(workerPid, 0);
     } finally {
       if (!workerPid && fs.existsSync(pidFile)) workerPid = Number(fs.readFileSync(pidFile, 'utf8'));
-      if (workerPid) { try { process.kill(workerPid); } catch {} }
+      if (workerPid) { try { process.kill(workerPid); } catch (_) { /* finished */ } }
     }
   });
 
-  test('flat installed statusline resolves provider under scripts and renders cached update', () => {
+  test('installed statusline calls provider without requiring repo_path', () => {
     const installed = path.join(ROOT, 'flat-install');
     const scripts = path.join(installed, 'scripts');
     fs.mkdirSync(scripts, { recursive: true });
-    const statusline = path.join(installed, 'forge-statusline.js');
-    fs.copyFileSync(path.join(__dirname, 'forge-statusline.js'), statusline);
+    fs.copyFileSync(path.join(__dirname, 'forge-statusline.js'), path.join(installed, 'forge-statusline.js'));
     const called = path.join(installed, 'provider-called.json');
-    fs.writeFileSync(path.join(scripts, 'forge-prefs.js'),
-      `module.exports.readPrefsCached = () => ({prefs:{repo_path:${JSON.stringify(path.relative(installed, repo))}}});`);
+    fs.writeFileSync(path.join(scripts, 'forge-prefs.js'), 'module.exports.readPrefsCached=()=>({prefs:{}});');
     fs.writeFileSync(path.join(scripts, 'forge-update-check.js'), `
-      module.exports.resolveRepoPath = require(${JSON.stringify(require.resolve('./forge-update-check'))}).resolveRepoPath;
-      module.exports.cachedUpdate = repo => {
-        require('fs').writeFileSync(${JSON.stringify(called)}, JSON.stringify(repo));
-        return {version:'v1.0.0',has_update:true,remote_version:'v2.0.0',state:'behind'};
+      module.exports.cachedUpdate = context => {
+        require('fs').writeFileSync(${JSON.stringify(called)}, JSON.stringify(context));
+        return {version:'v1.2.3',has_update:true,remote_version:'v2.0.0',state:'behind'};
       };
     `);
-    const rendered = spawnSync(process.execPath, [statusline], {
+    const rendered = spawnSync(process.execPath, [path.join(installed, 'forge-statusline.js')], {
       encoding: 'utf8', timeout: 3000, cwd: installed,
       input: JSON.stringify({ cwd: installed, model: { display_name: 'Fixture' } }),
+      env: { ...process.env, FORGE_HOME: installed },
     });
     assert.strictEqual(rendered.status, 0, rendered.stderr);
-    assert.strictEqual(JSON.parse(fs.readFileSync(called, 'utf8')), repo);
-    assert(rendered.stdout.includes('Forge'), rendered.stdout);
+    const context = JSON.parse(fs.readFileSync(called, 'utf8'));
+    assert.deepStrictEqual(context.prefs, {});
+    assert.strictEqual(context.forgeHome, installed);
     assert(rendered.stdout.includes('v2.0.0'), rendered.stdout);
   });
 
