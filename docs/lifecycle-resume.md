@@ -130,3 +130,85 @@ locators duráveis e perguntas pendentes. Sem incompletas, o terminal é preserv
 Pausas de planejamento apenas para entrada, sem `partial_attempt` durável,
 conservam o contrato de resposta humana; essa resposta nunca conclui uma execução
 parcial nem substitui receipt, reconciliação das raízes ou respostas por ID.
+
+## Owner encerrado com linhagem nativa sem receipt (#375)
+
+reconcilePartialSuccessors continua exigindo o mesmo owner e o receipt parcial
+canônico original. resumeOwner continua recusando leases presentes e história
+incompleta. Nenhum desses guards é removido para interpretar um relato nativo
+como receipt sidecar.
+
+O host pode encerrar essa linhagem como **interrompida e não verificada**, sem
+aceitar seus artefatos, por forge-runs.settleInterruptedOwner(cwd, milestoneId,
+options). Essa operação administrativa exige:
+
+- snapshot SHA atual do RunRecord conhecido, host/session efetivamente
+  observados e inventário ordenado exato do begin original e de todos os
+  sucessores; apenas uma linhagem do mesmo owner/host é admitida;
+- inspectInterruption vivo, vinculado ao key/checksum de cada begin: original
+  invoked-unverified, sucessores positivamente not-invoked, referência da
+  observação, inventário explícito de perguntas, raízes físicas completas,
+  receipt_path:null e saved_response:'none-observed';
+- processProbe retornando o literal stopped a partir da observação atual de
+  todas as identidades de processo/Agent relevantes, e reconcileRoots
+  comprovando cada raiz atual (root_id, process_stopped, reconciled);
+- callback vivo attestOwnerInterruption(challenge) que devolve o SHA canônico
+  do challenge, referência da atestação e os fatos previous_owner_stopped:true
+  e workspace_quiescent:true. É atestação confiável do operador/host,
+  explicitamente rotulada; não é prova automática do sistema operacional nem
+  um JSON approved.
+
+O challenge vincula snapshot, ator observado, begins e raízes. A função de hash
+é SHA-256 da string JSON com chaves de objetos recursivamente ordenadas (arrays
+preservam a ordem), como o checksum canônico do controller. Callbacks devem
+observar fatos reais; idade, lease expirada, owner inativo, ausência de receipt
+ou texto “partial” não provam esses fatos.
+
+A operação usa as cercas controller → registry → run e as guardas reais de cada
+lease. Um handle opaco, válido somente durante essa chamada, permite retirar
+apenas os bytes/generation antigos efetivamente observados. O token antigo não
+é adotado ou devolvido. Lease estrangeira, geração diferente, processo incerto,
+sucessor invocado, metadata desconhecida, inventário incompleto e prova canônica
+salva mantêm a recusa antes da primeira publicação. Transferência entre hosts
+diferentes permanece explicitamente owner-interruption-cross-host-unsupported.
+
+São acrescentados terminais administrativos failed, com worker_result:unverified,
+artifacts_accepted:false e chamada ao provedor unknown. Não se cria receipt de
+worker, resultado parcial canônico, SUMMARY, DELIVERY ou completion. Begins,
+receipts e fontes antigos ficam preservados, assim como o claim e perguntas
+pendentes do run.
+
+O manifesto durável preserva a base observada; as fases são retomadas pela mesma
+operação após uma interrupção, com callbacks vivos novamente. O histórico do run
+publica ao final um witness independente com os hashes exatos do manifesto e dos
+terminais. Sem esse witness, a forma de um terminal não fecha os begins nem
+autoriza reentrada. Uma operação incompleta impede novos begins e o resume
+ordinário; não apague os registros para liberar o fluxo.
+
+O retorno interrupted-and-transferred permite ao owner atual usar a reentrada
+canônica controller.reenter para a **mesma unidade original**, apontando para
+interruption.terminals[0] e seu checksum, com token novo, baseline reconciliada
+e autorização viva da nova entrada. A nova lease/generation é emitida pelo
+controller. O begin sucessor antigo não vira autorização para pular S01.
+Perguntas pendentes continuam exigindo respostas explícitas. A interrupção
+administrativa e a entrada nova não são delivery: só a entrega real da unidade
+nova permite seu fechamento normal.
+
+
+### Perguntas, retenção e capacidade da interrupção
+
+A falha original e o run preservam a união das perguntas observadas em todos os
+targets, inclusive sucessores não invocados. Uma pergunta vista somente em S02
+continua impedindo nova lease na reentrada de S01 até resposta explícita.
+
+remove e cleanupStale preservam witnesses de interrupções completas em
+.gsd/forge/owner-interruption-witnesses antes de apagar o RunRecord. O arquivo
+retém o mesmo vínculo verificável a manifesto, begins, terminais, resultados e
+eventos; não cria autorização nova nem entrega. Falha de arquivamento deixa o
+run intacto, e uma interrupção ainda pendente impede sua remoção. Raízes/owner
+atuais e autorização viva continuam obrigatórios para qualquer reentrada.
+
+A capacidade final do RunRecord é calculada com as perguntas combinadas e o
+formato exato do witness antes do primeiro manifesto ou terminal. O limite
+existente de64KiB não muda; falta de espaço recusa sem liberar leases nem
+publicar efeitos. O commit mantém uma conferência da mesma estrutura reservada.
