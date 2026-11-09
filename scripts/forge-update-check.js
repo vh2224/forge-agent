@@ -75,29 +75,31 @@ function ensureCacheDirectory(file) {
   }
 }
 
+// Stats are read with { bigint: true }: on Windows/NTFS the 64-bit file ID loses precision as a
+// Number, so two distinct files can compare equal and a swap between lstat and open goes unnoticed.
 function sameFile(left, right) {
   return String(left.dev) === String(right.dev) && String(left.ino) === String(right.ino);
 }
 
 function validateBoundedFile(stat, maxBytes, policy) {
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maxBytes) {
+  if (!stat.isFile() || stat.isSymbolicLink() || Number(stat.size) > maxBytes) {
     throw new Error(policy.error);
   }
-  if (process.platform !== 'win32' && (stat.mode & policy.forbiddenMode)) {
+  if (process.platform !== 'win32' && (Number(stat.mode) & policy.forbiddenMode)) {
     throw new Error(policy.error);
   }
-  if (!policy.allowForeignOwner && typeof process.getuid === 'function' && stat.uid !== process.getuid()) {
+  if (!policy.allowForeignOwner && typeof process.getuid === 'function' && Number(stat.uid) !== process.getuid()) {
     throw new Error(policy.error);
   }
 }
 
 function readBoundedFile(file, maxBytes, policy) {
-  const before = fs.lstatSync(file);
+  const before = fs.lstatSync(file, { bigint: true });
   validateBoundedFile(before, maxBytes, policy);
   const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
   const fd = fs.openSync(file, fs.constants.O_RDONLY | noFollow);
   try {
-    const opened = fs.fstatSync(fd);
+    const opened = fs.fstatSync(fd, { bigint: true });
     validateBoundedFile(opened, maxBytes, policy);
     if (!sameFile(before, opened)) throw new Error(policy.error);
     const buffer = Buffer.alloc(maxBytes + 1);
@@ -107,7 +109,7 @@ function readBoundedFile(file, maxBytes, policy) {
       if (count === 0) break;
       length += count;
     }
-    const after = fs.fstatSync(fd);
+    const after = fs.fstatSync(fd, { bigint: true });
     validateBoundedFile(after, maxBytes, policy);
     if (!sameFile(opened, after) || length > maxBytes) throw new Error(policy.error);
     return buffer.subarray(0, length).toString('utf8');

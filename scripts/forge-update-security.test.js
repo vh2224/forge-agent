@@ -183,8 +183,13 @@ try {
       cacheDir: f.cacheDir,
       git() { throw new Error(`Command failed: git ls-remote --tags ${secretRemote}`); },
     });
-    unknown(value);
-    assert.strictEqual(value.error, 'update-check-unavailable');
+    // A transient Git failure without a reusable prior result is unknown but keeps the locally
+    // known installed version (T-20261109152729 decision); only the remote side is blanked.
+    assert.strictEqual(value.state, 'unknown');
+    assert.strictEqual(value.has_update, false);
+    assert.strictEqual(value.version, 'v1.2.3');
+    assert.strictEqual(value.remote_version, '');
+    assert.strictEqual(value.error, 'git_transient');
     assert(!JSON.stringify(value).includes(secretRemote));
     assert(!JSON.stringify(value).includes('top-secret'));
     assert(!fs.readFileSync(f.file, 'utf8').includes('top-secret'));
