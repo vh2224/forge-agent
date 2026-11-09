@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('fs'),path=require('path');
-const root=path.resolve(__dirname,'..'),layer=require('./fixtures/incomplete-resume/distribution.cjs');
+const root=path.resolve(__dirname,'..'),layer=require('./fixtures/interrupted-owner/distribution.cjs');
 const artifacts=require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts;
 assert.equal(layer.validate({artifacts}),true);
 let cases=0;
@@ -22,3 +22,31 @@ const foreignOutside=smoke+'\n// self-repinned foreign outside Section8\n',repin
 for(const field of ['before','after','outside']){const value=structuredClone(layer.layer);value.smoke[field]='0'.repeat(64);assert.throws(()=>layer.validate({artifacts,layerValue:value}));cases++;}
 const weakenedInside=smoke.replace("assert(explicit.status === 'refuse' &&","assert(true || explicit.status === 'refuse' &&");assert.notEqual(weakenedInside,smoke);const repinnedInside=structuredClone(layer.layer);repinnedInside.sources[smokePath].after=hash(weakenedInside);repinnedInside.sources[smokePath].attributed_after=hash(weakenedInside);repinnedInside.smoke.after=hash(weakenedInside.slice(s8,weakenedInside.indexOf('// ── Section 9:',s8)));assert.throws(()=>layer.validate({artifacts,layerValue:repinnedInside,readRaw:rel=>rel===smokePath?Buffer.from(weakenedInside):fs.readFileSync(path.join(root,rel))}),/unrecognized smoke changes: independent Section8 after/);cases++;
 console.log('PASS #367 additive distribution: exact8856 chain, full prior validators and '+cases+' bounded negative cases');
+
+// #375 is a separate next terminal. Every #367 assertion above still executes.
+let ownerCases=0;
+for(const field of ['before','after','attributed_before','attributed_after']){
+ const value=structuredClone(layer.interruptionLayer),file=layer.interruptionSources[0];
+ value.sources[file][field]='0'.repeat(64);
+ assert.throws(()=>layer.validate({artifacts,terminalLayerValue:value}));ownerCases++;
+}
+for(const mutate of [value=>{value.sources.extra=value.sources[layer.interruptionSources[0]];},
+ value=>{delete value.sources[layer.interruptionSources[0]];},
+ value=>{value.provenance.base_revision='0'.repeat(40);},
+ value=>{value.sources[layer.interruptionSources[0]].approved=true;},
+ value=>{value.sources[layer.interruptionSources[0]].before_gzip_base64=Buffer.from('foreign prior').toString('base64');}]){
+ const value=structuredClone(layer.interruptionLayer);mutate(value);
+ assert.throws(()=>layer.validate({artifacts,terminalLayerValue:value}));ownerCases++;
+}
+for(const file of layer.interruptionSources){
+ const raw=fs.readFileSync(path.join(root,file)),foreign=Buffer.concat([raw,Buffer.from('\n// foreign edit outside declared375 bytes\n')]);
+ assert.throws(()=>layer.validate({artifacts,readRaw:relative=>relative===file?foreign:fs.readFileSync(path.join(root,relative))}));ownerCases++;
+ const repinned=structuredClone(layer.interruptionLayer);repinned.sources[file].after=hash(foreign);repinned.sources[file].attributed_after=hash(foreign);
+ assert.throws(()=>layer.validate({artifacts,terminalLayerValue:repinned,readRaw:relative=>relative===file?foreign:fs.readFileSync(path.join(root,relative))}),
+  /#375 independent committed\/measured after/);ownerCases++;
+}
+for(const file of ['scripts/fixtures/incomplete-resume/distribution.cjs','scripts/fixtures/incomplete-resume/distribution-delta.json','scripts/fixtures/incomplete-resume/README.md']){
+ assert.throws(()=>layer.validate({artifacts,readRaw:relative=>relative===file?Buffer.from('tampered historical fixture'):fs.readFileSync(path.join(root,relative))}),
+  /#375 immutable historical fixture/);ownerCases++;
+}
+console.log('PASS #375 next distribution terminal: exact source/API delta, historical validators retained and '+ownerCases+' additional bounded negatives');
