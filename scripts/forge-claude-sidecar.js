@@ -799,7 +799,15 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
         : reason === 'authentication-failed' ? CLAUDE_SIDECAR_REASON_CODES.AUTH_FAILED
         : reason === 'output-empty' ? CLAUDE_SIDECAR_REASON_CODES.EMPTY_OUTPUT
         : CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT;
-      terminate(sidecarError(code, reason));
+      const failure = sidecarError(code, reason);
+      if (code === CLAUDE_SIDECAR_REASON_CODES.OUTPUT_LIMIT && !closed) {
+        // Use the same current proof/progress derivation as an active ceiling.
+        // The original output-limit code and every output bound stay unchanged.
+        const { state, reason: currentReason } = tracker.assess(reducer.snapshot(), livenessInputs());
+        failure.liveness = { version: 1, state, reason: currentReason };
+        livenessView = { version: 1, state, since_ms: livenessView.since_ms, reason: currentReason ?? null };
+      }
+      terminate(failure);
     }
     const cancel = () => terminate(sidecarError(CLAUDE_SIDECAR_REASON_CODES.CANCELLED));
     signal?.addEventListener('abort', cancel, { once: true });
@@ -1357,10 +1365,13 @@ async function invokeClaudeSidecar(opts) {
     provisional.transferFailure(error, primaryError);
     if (provisional.describe(primaryError)?.private_ref) provisional.addFinalizer(primaryError, value => finalizeOutput(value, true), { cache: true });
     if (sessionRef) {
-      // Only an active stream that hit the safety ceiling under the confirmed
-      // id keeps its session, for the single same-session resume (S05). A
-      // resume never keeps it: at most one resume per unit.
-      if (!resumeRef && primaryError.code === CLAUDE_SIDECAR_REASON_CODES.BUDGET_EXCEEDED
+      // Only confirmed active cuts retain the first session. Output exhaustion
+      // uses the existing active-ceiling predicate without relabelling its cause.
+      // A resume never retains it again: at most one resume per unit.
+      const activeOutput = primaryError.code === CLAUDE_SIDECAR_REASON_CODES.OUTPUT_LIMIT
+        && liveness.classifyTermination({ cause: 'ceiling', state: primaryError.liveness?.state })
+          === CLAUDE_SIDECAR_REASON_CODES.BUDGET_EXCEEDED;
+      if (!resumeRef && (primaryError.code === CLAUDE_SIDECAR_REASON_CODES.BUDGET_EXCEEDED || activeOutput)
         && observedSessionId === sessionId) {
         primaryError.session = sessionRef;
       } else if (typeof awaitExit === 'function'

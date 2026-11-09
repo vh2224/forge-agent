@@ -9,6 +9,15 @@ const { validateSessionRef, sessionDigest, removeSession } = require('./forge-cl
 // A preserved Claude session (S05) is resumed at most once per unit; these stops
 // are terminal for the session, so recoverAttempt removes its artifacts.
 const RESUME_RESERVATION = 'same-session-resume';
+function activeOutputEvidence(code, evidence) {
+  return code === 'claude-output-limit'
+    && require('./forge-sidecar-liveness').classifyTermination({ cause: 'ceiling', state: evidence?.state })
+      === 'budget-exceeded-while-active';
+}
+function sameSessionCut(attempt) {
+  return attempt?.failure_class === 'active-budget'
+    || attempt?.failure_class === 'active-output' && activeOutputEvidence(attempt.reason_code, attempt.observation?.liveness);
+}
 const RESUME_PRE_SPAWN_REFUSALS = Object.freeze(['claude-resume-account-mismatch', 'claude-resume-config-mismatch', 'claude-session-invalid',
   ...require('./forge-milestone-time-admission').TRANSPORT_REFUSAL_CODES]);
 const SILENCE_CODES = Object.freeze(['claude-anomalous-silence', 'appserver-anomalous-silence']);
@@ -300,15 +309,15 @@ function createRecovery(options) {
       state.pending_questions = require('./forge-interaction').resolvePendingQuestions(state.pending_questions, answers); save();
     },
     record(attempt) {
-      if (!['caller', 'service', 'timeout', 'silence', 'active-budget', 'interrupted', 'unknown'].includes(attempt.failure_class)) fail('recovery-failure-class-invalid');
+      if (!['caller', 'service', 'timeout', 'silence', 'active-budget', 'active-output', 'interrupted', 'unknown'].includes(attempt.failure_class)) fail('recovery-failure-class-invalid');
       const measurementValid = (hash, bytes) => hash === null && bytes === null
         || typeof hash === 'string' && hash.length > 0 && Number.isFinite(bytes) && bytes >= 0;
       if (!attempt.reason_code || !attempt.layer || !measurementValid(attempt.request_sha256, attempt.request_bytes)
           || !measurementValid(attempt.context_sha256, attempt.context_bytes)
           || !(attempt.duration_ms === null || Number.isFinite(attempt.duration_ms)) || !attempt.budgets || !attempt.route) fail('recovery-telemetry-required');
-      // The raw session ref lives only in attempts[].session of the owner's
-      // recovery state, and only for a live stream at the tier ceiling.
-      if (attempt.session !== undefined && attempt.failure_class !== 'active-budget' && attempt.session_cleanup_pending !== true) fail('recovery-session-class-invalid');
+      if (attempt.failure_class === 'active-output' && !activeOutputEvidence(attempt.reason_code, attempt.observation?.liveness)) fail('recovery-active-output-evidence-required');
+      // The raw ref remains private to recovery state for confirmed active cuts.
+      if (attempt.session !== undefined && !sameSessionCut(attempt) && attempt.session_cleanup_pending !== true) fail('recovery-session-class-invalid');
       if (attempt.session !== undefined && attempt.session !== null && !validSessionRef(attempt.session)) fail('recovery-session-invalid');
       const previous = state.attempts.at(-1);
       const entry = { ...attempt, diagnostic: safeDiagnostic(attempt.diagnostic), stderr: safeDiagnostic(attempt.stderr),
@@ -347,13 +356,13 @@ function createRecovery(options) {
       // Single same-session resume (S05). Budget exhaustion with a live stream is
       // not a destination failure: no standing exception is consumed and no other
       // candidate is selected; the previous route (tier/effort/model) is reused.
-      // Only active-budget reaches here, so silence/timeout (dead) never resume.
+      // Active output/ceiling cuts share this one-use path; dead cuts never resume.
       const last = state.attempts.at(-1);
       // A resume refused before spawn (account/config/session mismatch) is a
       // terminal session outcome, not a caller defect to correct and retry.
       if (last?.failure_class === 'caller' && last.reservation?.reason === RESUME_RESERVATION
         && RESUME_PRE_SPAWN_REFUSALS.includes(last.reason_code)) return { action: 'stop', reason_code: 'budget-exceeded-resume-refused', refusal: last.reason_code };
-      if (last?.failure_class === 'active-budget') {
+      if (sameSessionCut(last)) {
         if ((state.reservations || []).some(r => r.reason === RESUME_RESERVATION)) return { action: 'stop', reason_code: 'budget-exceeded-resume-exhausted' };
         if (!validSessionRef(last.session)) return { action: 'stop', reason_code: 'budget-exceeded-resume-unavailable' };
         const resumeRoute = last.route;
@@ -629,9 +638,11 @@ function captureFailure(options) {
       method: 'legacy-packaged', diagnostic: null } : observed.context;
   const error = options.error || {}, code = error.code || error.reason_code || 'attempt-failed';
   // Never throws: an invalid ref is discarded, so the resume is refused as unavailable.
+  const activeOutput = activeOutputEvidence(code, error.liveness)
+    && activeOutputEvidence(code, error.diagnostic?.observation?.liveness);
   let sessionRef = null;
   const cleanupPending = error.session_cleanup?.pending === true;
-  if ((code === 'budget-exceeded-while-active' || cleanupPending) && error.session) {
+  if ((code === 'budget-exceeded-while-active' || activeOutput || cleanupPending) && error.session) {
     try { sessionRef = validSessionRef(error.session) ? error.session : null; } catch { sessionRef = null; }
   }
   const state = fs.existsSync(options.stateFile) ? stateApi.loadRecovery(options.stateFile) : undefined;
@@ -650,16 +661,16 @@ function captureFailure(options) {
   const silence = SILENCE_CODES.includes(code)
     && require('./forge-sidecar-diagnostic').observation(error.diagnostic?.observation).silence?.cause === 'indeterminate';
   const timeout = /timeout|timed-out/.test(code);
-  const service = !activeBudget && provider === true && /quota|rate-limit|model-unavailable|service-unavailable/.test(code);
+  const service = !activeBudget && !activeOutput && provider === true && /quota|rate-limit|model-unavailable|service-unavailable/.test(code);
   // A refused inbound input request (S04/T02) proves no outage, no timeout and no
   // caller defect: it stays unknown, and each closed input record becomes a stable
   // pending question for the owner. Malformed records are ignored.
   const inputRequired = code === INPUT_REQUIRED_CODE;
   const inbound = inputRequired && Array.isArray(error.inboundRequests)
     ? error.inboundRequests.map(closedInboundRecord).filter(Boolean) : [];
-  session.record({ failure_class: inputRequired ? 'unknown' : activeBudget ? 'active-budget' : silence ? 'silence' : timeout ? 'timeout' : service ? 'service' : provider === false ? 'caller' : 'unknown',
+  session.record({ failure_class: inputRequired ? 'unknown' : activeBudget ? 'active-budget' : activeOutput ? 'active-output' : silence ? 'silence' : timeout ? 'timeout' : service ? 'service' : provider === false ? 'caller' : 'unknown',
     ...(inputRequired ? { inbound_requests: inbound } : {}),
-    observation: error.diagnostic?.observation, service_failure_proven: service, ...(activeBudget || cleanupPending && sessionRef ? { session: sessionRef } : {}),
+    observation: error.diagnostic?.observation, service_failure_proven: service, ...(activeBudget || activeOutput || cleanupPending && sessionRef ? { session: sessionRef } : {}),
     ...(cleanupPending && sessionRef ? { session_cleanup_pending: true } : {}), reason_code: code,
     layer: timeRefusal ? 'milestone-time-admission' : options.layer || error.stage || 'unknown', route: options.route,
     request_sha256: observed.request.sha256, caller_request_sha256: callerRequestHash(options.request), context_sha256: context.sha256,
@@ -923,8 +934,8 @@ async function recoverAttempt(options) {
   const authorizedReference = binding ? bindRecoveryAuthorization(binding) : reference;
   const candidateSet = !inspection.valid_saved_response && (!correction || preSpawn)
     && !session.snapshot().pending_questions.some(q => q.status === 'pending')
-    // active-budget resumes the same route: no candidate list, no exception issued.
-    && state.attempts.at(-1)?.failure_class !== 'active-budget'
+    // Active cuts resume the same route: no candidate list or exception issued.
+    && !sameSessionCut(state.attempts.at(-1))
     // An input stop (S04/T02) never walks candidates: no list, no exception issued.
     && state.attempts.at(-1)?.reason_code !== INPUT_REQUIRED_CODE
     && (state.attempts.at(-1)?.service_failure_proven === true || exception || binding)

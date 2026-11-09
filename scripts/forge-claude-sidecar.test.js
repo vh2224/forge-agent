@@ -2112,6 +2112,53 @@ test('session: budget-exceeded-while-active keeps the session and returns a froz
   assert.strictEqual(fs.existsSync(run.file), false);
 });
 
+
+// Issue373: real bounded synthetic CLI, private transcript, no provider/network.
+function activeOutputSessionFixture(mode) {
+  return writeFixture('claude active output ' + mode + '.js', `
+'use strict';
+const fs=require('fs'),path=require('path'),args=process.argv.slice(2);
+const at=args.indexOf('--session-id'),resume=args.indexOf('--resume');
+const id=at>=0?args[at+1]:resume>=0?args[resume+1]:null;
+const home=process.platform==='win32'?process.env.USERPROFILE:process.env.HOME;
+const key=require(${JSON.stringify(require.resolve('./forge-claude-session'))}).projectKey(process.cwd());
+const dir=path.join(home,'.claude','projects',key),file=path.join(dir,id+'.jsonl');
+if(resume>=0&&!fs.existsSync(file))process.exit(2);
+fs.mkdirSync(dir,{recursive:true});fs.appendFileSync(file,'{"fixture":true}\\n');
+const out=v=>process.stdout.write(JSON.stringify(v)+'\\n');
+out({type:'system',subtype:'init',session_id:${JSON.stringify(mode)}==='unconfirmed'?undefined:${JSON.stringify(mode)}==='wrong'?${JSON.stringify(OTHER_SESSION_ID)}:id});
+if(${JSON.stringify(mode)}!=='starting')out({type:'stream_event',event:{type:'message_start',message:{id:'output-active',role:'assistant'}}});
+// Each frame is below the line cap; total stdout crosses the unchanged16MiB cap.
+const frame=JSON.stringify({type:'system',subtype:'status',padding:'x'.repeat(60000)})+'\\n';
+let count=0;function flood(){if(++count<=300){process.stdout.write(frame);setImmediate(flood);}}
+setTimeout(flood,20);setInterval(()=>{},1000);
+`);
+}
+test('issue373 active output cap retains exact confirmed session once without changing reason or bounds', async () => {
+  assert.strictEqual(require('./forge-claude-stream').LIMITS.stdout,16777216);
+  const fixture=activeOutputSessionFixture('active');
+  const first=await runSession(fixture,{session:{persist:true},timeoutMs:15000});
+  try {
+    assert.strictEqual(first.error.code,'claude-output-limit');
+    assert.strictEqual(first.error.session.id,first.id);
+    assert.strictEqual(first.error.diagnostic.reason,'output-limit');
+    assert(['working','slow-suspect'].includes(first.error.liveness.state));
+    assert.strictEqual(fs.existsSync(first.file),true);
+    const second=await runSession(fixture,{session:{resume:first.error.session},timeoutMs:15000},null,first.home);
+    assert.strictEqual(second.error.code,'claude-output-limit');
+    assert.strictEqual(second.error.session,undefined,'one resume only');
+    assert.strictEqual(fs.existsSync(first.file),false,'resumed output failure cleans the exact transcript');
+  } finally { if(first.error?.session)SESSION_MODULE.removeSession(first.error.session); }
+});
+test('issue373 output cap before activity or without matching session confirmation never retains a ref', async () => {
+  for(const mode of ['starting','unconfirmed','wrong']){
+    const run=await runSession(activeOutputSessionFixture(mode),{session:{persist:true},timeoutMs:15000});
+    assert.strictEqual(run.error.code,'claude-output-limit');
+    assert.strictEqual(run.error.session,undefined,mode);
+    assert.strictEqual(fs.existsSync(run.file),false,mode+' cleans only its transcript');
+  }
+});
+
 test('session: dead-silence removes the session and never attaches a ref', async () => {
   const run = await runSession(SESSION_SILENT_FIXTURE, { session: { persist: true } },
     acceleratedClock(200, { fromFirstRemote: true }));
