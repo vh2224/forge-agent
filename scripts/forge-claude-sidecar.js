@@ -1297,7 +1297,20 @@ async function invokeClaudeSidecar(opts) {
     // Observe the actual CLI packaging, after instruction/argv construction.
     // Account credentials exist only in env and never enter this measurement.
     // A resume has no prompt file: its packaged context is the fixed instruction.
-    const finalEvidence = require('./forge-attempt-telemetry').observeFinal(options, { cmd, args },
+    const observedOptions = typeof options.onPackagedContext !== 'function' ? options : { ...options, onPackagedContext: evidence => {
+      try { return options.onPackagedContext(evidence); }
+      catch (cause) {
+        // This callback ran before runOwnedChild: no provider was launched.
+        // Retain the actual cause for private API callers, never raw text in
+        // the closed diagnostic/receipt/CLI projection. No retry is authorized.
+        const refused = preSpawnRefusal(CLAUDE_SIDECAR_REASON_CODES.PROMPT_IO);
+        Object.defineProperty(refused, 'cause', { value: cause, writable: true, configurable: true });
+        refused.diagnostic = diagnostic('host-observation-failed', { observer_stage: 'packaged-context',
+          observer_error_sha256: require('crypto').createHash('sha256').update(String(cause?.name || '') + '\0' + String(cause?.message || '')).digest('hex') });
+        throw refused;
+      }
+    } };
+    const finalEvidence = require('./forge-attempt-telemetry').observeFinal(observedOptions, { cmd, args },
       resumeRef ? instruction : fs.readFileSync(promptFile, 'utf8'), 'claude-cli');
     try {
       provisionalControl = provisional.prepare({
