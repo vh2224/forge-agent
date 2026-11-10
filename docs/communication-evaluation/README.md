@@ -276,7 +276,7 @@ samples after f7c143e50413e1eb00391e6857bbd9cd995a233078409ab2957153f676844cdf
 
 ## Measured request-retention terminal (#382)
 
-Actual public predecessor 93150432d3b291bcbf0db22ef48c5d316125cea5
+Actual public predecessor 421a8ec3af341fa8ec3a71fd0feee7f985e5d1eb
 Previous layer scripts/fixtures/owner-recovery/distribution-delta.json
 Only 0 existing changed after/source.sha256 citation literals move; all other sample bytes remain exact.
 samples before f7c143e50413e1eb00391e6857bbd9cd995a233078409ab2957153f676844cdf

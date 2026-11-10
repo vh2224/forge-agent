@@ -1,11 +1,11 @@
 # Request-retention measured next terminal
 
 {
-  "base_revision": "93150432d3b291bcbf0db22ef48c5d316125cea5",
-  "parent_qualification": "owned-public-pr-head-ci-pending",
+  "base_revision": "421a8ec3af341fa8ec3a71fd0feee7f985e5d1eb",
+  "parent_qualification": "merged-public-parent-final",
   "previous_delta": "scripts/fixtures/owner-recovery/distribution-delta.json",
   "method": "Exact frozen source and pure Claude render; immutable historical fixtures and scanner; data-only bounded fixture provenance; no provider output or runtime authority.",
-  "input_scope_sha256": "83ccc7786e1b3c69f8ded396f065a1af63133347249ffcce6605cd19850342e5",
+  "input_scope_sha256": "a0ef3dff39a4c3cf6af242674e6b626a74f255a4eec610e7e2c93919aafc5a8c",
   "prototype_only": false,
   "issues": [
     382
@@ -14,9 +14,9 @@
 
 docs/communication-evaluation/README.md
 before fd8931be8bd306d01c8b03ba3a1c407374709575423a57a1c105e3edc2cb67d7
-after 3f333eb8c0eb12b05b73aff1405ac6b76340a67ffbc99bef2c80d68d7a44c01e
+after 0d4ec9609d0c689661e818aaf05d9c122ef59b79c4ce244fdfef55821826c9b7
 attributed_before fd8931be8bd306d01c8b03ba3a1c407374709575423a57a1c105e3edc2cb67d7
-attributed_after 3f333eb8c0eb12b05b73aff1405ac6b76340a67ffbc99bef2c80d68d7a44c01e
+attributed_after 0d4ec9609d0c689661e818aaf05d9c122ef59b79c4ce244fdfef55821826c9b7
 
 docs/communication-evaluation/samples.json
 before f7c143e50413e1eb00391e6857bbd9cd995a233078409ab2957153f676844cdf
