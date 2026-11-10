@@ -1557,7 +1557,10 @@ function inspectSupersededInterruption(cwd, begin, context, basis, held, options
   if (typeof options.attestSupersededAttempt !== 'function' || !supersession || !context.request
     || context.saved_response !== 'ready/blocked' || typeof context.receipt_path !== 'string') reject();
   const recovery = require('./forge-attempt-recovery'), sidecar = require('./forge-unit-sidecar');
-  const request = recovery.canonicalRequest(context.request), identity = recovery.requestIdentity(request);
+  // #382: a revalidated archived proof replaces only identity/fingerprint
+  // derivation; every R1, process, root and attestation check below remains.
+  const archived = archivedProof(cwd, begin, context);
+  const identity = archived ? archived.identity : recovery.requestIdentity(recovery.canonicalRequest(context.request));
   if (`${identity.unit_type}/${identity.task_id || identity.slice_id || identity.milestone_id}` !== begin.unit.key
     || identity.milestone_id !== begin.milestone || identity.host !== begin.host_runtime
     || identity.owner !== (process.platform === 'win32' ? fs.realpathSync(cwd).toLowerCase() : fs.realpathSync(cwd))
@@ -1571,8 +1574,10 @@ function inspectSupersededInterruption(cwd, begin, context, basis, held, options
     if (cursor === path.dirname(cursor)) break;
   }
   if (!fs.statSync(file).isFile()) reject();
-  const inspection = recovery.inspectReceipt(file, { request: context.request, processProbe: options.processProbe });
-  const receipt = inspection.receipt, fingerprint = sidecar.artifactFingerprint(context.request);
+  // Without a live binding the historical receipt keeps writer_possible unknown.
+  const inspection = recovery.inspectReceipt(file, { request: archived?.linked ? undefined : context.request, processProbe: options.processProbe });
+  const receipt = inspection.receipt, fingerprint = archived ? archived.fingerprint : sidecar.artifactFingerprint(context.request);
+  if (archived && archived.receipt_sha256 !== inspection.receipt_sha256) throw new ControllerError('owner-interruption-evidence-changed', 'archived receipt changed');
   if (receipt.fingerprint !== fingerprint || receipt.dispatch_id !== context.request.dispatchId
     || receipt.recovery_identity_sha256 && receipt.recovery_identity_sha256 !== require('./forge-code-roots').digest(identity)) {
     throw new ControllerError('attempt-identity-mismatch', 'superseded receipt differs from its exact request');
@@ -1603,6 +1608,13 @@ function inspectSupersededInterruption(cwd, begin, context, basis, held, options
   if (crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') !== evidence.receipt.sha256
     || sha(interruptionRouteEvidence(cwd, begin.milestone, evidence.route_evidence)) !== sha(evidence.route_evidence)) {
     throw new ControllerError('owner-interruption-evidence-changed', 'superseded evidence changed during attestation');
+  }
+  if (archived) {
+    let again;
+    try { again = archivedProof(cwd, begin, context); } catch { again = null; }
+    if (!again || again.archive_sha256 !== archived.archive_sha256 || again.receipt_sha256 !== evidence.receipt.sha256) {
+      throw new ControllerError('owner-interruption-evidence-changed', 'archived request changed during attestation');
+    }
   }
   const merge = require('./forge-interaction').mergePendingQuestions;
   return { evidence: { ...evidence, attestation_reference: attestation.reference },
@@ -1910,9 +1922,13 @@ function inspectFailure(cwd, begin, failure, options, terminal) {
   const context = options.inspectAttempt({ cwd, begin: clone(begin), references: clone(failure || {}) });
   if (!context || typeof context.receipt_path !== 'string' || !context.request) throw new ControllerError('attempt-evidence-missing', 'receipt/pedido original ausente');
   const recovery = require('./forge-attempt-recovery.js');
+  // The live terminal guard keeps priority; an archived proof (#382) is only a
+  // historical identity source and never relaxes saved-response replay below.
   const terminalInspection = terminal && context.request.linked_begin_key
     ? recovery.inspectTerminalRequest(context.request, { ...options, ...terminal }) : null;
-  const identity = terminalInspection?.identity || recovery.requestIdentity(recovery.canonicalRequest(context.request));
+  const archived = terminalInspection ? null : archivedProof(cwd, begin, context);
+  const historical = terminalInspection || archived;
+  const identity = historical?.identity || recovery.requestIdentity(recovery.canonicalRequest(context.request));
   if (`${identity.unit_type}/${identity.task_id || identity.slice_id || identity.milestone_id}` !== begin.unit.key
     || identity.milestone_id !== begin.milestone || identity.host !== begin.host_runtime
     || identity.slice_id && begin.after.state.active_slice !== identity.slice_id) {
@@ -1920,9 +1936,10 @@ function inspectFailure(cwd, begin, failure, options, terminal) {
   }
   // Terminal data is not a dispatch binding. Without one the inspector keeps
   // writer_possible unknown, conservatively requiring every root reconciled.
-  const inspection = recovery.inspectReceipt(context.receipt_path, { request: terminalInspection ? undefined : context.request, processProbe: options.processProbe });
+  const inspection = recovery.inspectReceipt(context.receipt_path, { request: terminalInspection || archived?.linked ? undefined : context.request, processProbe: options.processProbe });
   if (inspection.receipt.recovery_identity_sha256 && inspection.receipt.recovery_identity_sha256 !== require('./forge-code-roots').digest(identity)
-    || inspection.receipt.fingerprint && inspection.receipt.fingerprint !== (terminalInspection?.fingerprint || require('./forge-unit-sidecar').artifactFingerprint(context.request))) {
+    || archived && archived.receipt_sha256 !== inspection.receipt_sha256
+    || inspection.receipt.fingerprint && inspection.receipt.fingerprint !== (historical?.fingerprint || require('./forge-unit-sidecar').artifactFingerprint(context.request))) {
     throw new ControllerError('attempt-identity-mismatch', 'receipt não corresponde ao pedido original');
   }
   if (!inspection.receipt_checked || inspection.process_stopped !== true) throw new ControllerError('process-not-stopped', 'processo ativo ou desconhecido');
@@ -2121,11 +2138,16 @@ function inspectSettledAttempt(cwd, begin, options, statuses, replaySource = tru
   if (!context?.request || typeof context.receipt_path !== 'string' || context.begin_key !== begin.idempotency_key
     || context.begin_checksum !== sha(begin)) throw new ControllerError('attempt-evidence-missing', 'actual begin-bound request and receipt required');
   const recovery = require('./forge-attempt-recovery'), rootsApi = require('./forge-code-roots');
-  const identity = recovery.requestIdentity(recovery.canonicalRequest(context.request));
+  const archived = archivedProof(cwd, begin, context);
+  const identity = archived ? archived.identity : recovery.requestIdentity(recovery.canonicalRequest(context.request));
   if (`${identity.unit_type}/${identity.task_id || identity.slice_id || identity.milestone_id}` !== begin.unit.key || identity.milestone_id !== begin.milestone || identity.host !== begin.host_runtime || identity.slice_id && identity.slice_id !== begin.after.state.active_slice) throw new ControllerError('attempt-identity-mismatch', 'request scope differs from begin');
-  const inspection = recovery.inspectReceipt(context.receipt_path, { request: context.request, processProbe: options.processProbe });
+  // The settled proof records the caller hash. From an archive it exists only
+  // when the retained wire bytes reproduce it; a stored hash never substitutes.
+  if (archived && archived.caller_request_sha256 === null) throw new ControllerError('request-retention-caller-hash-unavailable', 'archived request cannot reproduce the original caller hash');
+  const inspection = recovery.inspectReceipt(context.receipt_path, { request: archived?.linked ? undefined : context.request, processProbe: options.processProbe });
   const receipt = inspection.receipt;
-  if (receipt.fingerprint !== require('./forge-unit-sidecar').artifactFingerprint(context.request)
+  if (receipt.fingerprint !== (archived ? archived.fingerprint : require('./forge-unit-sidecar').artifactFingerprint(context.request))
+    || archived && archived.receipt_sha256 !== inspection.receipt_sha256
     || receipt.recovery_identity_sha256 && receipt.recovery_identity_sha256 !== rootsApi.digest(identity)) throw new ControllerError('attempt-identity-mismatch', 'receipt differs from actual request');
   if (inspection.process_stopped !== true) throw new ControllerError('process-not-stopped', 'writer has not been proved stopped');
   if (receipt.phase !== 'ready' || !statuses.includes(receipt.result?.status)) throw new ControllerError('settled-result-required', 'canonical ready result with the declared status required');
@@ -2140,7 +2162,7 @@ function inspectSettledAttempt(cwd, begin, options, statuses, replaySource = tru
   }
   const pending = require('./forge-interaction').mergePendingQuestions(receipt.pending_questions || [], receipt.result.questions || []);
   return { begin_key: begin.idempotency_key, begin_checksum: sha(begin), receipt_sha256: inspection.receipt_sha256,
-    request_sha256: recovery.callerRequestHash(context.request), claim_sha256: rootsApi.digest(context.request.claim || null),
+    request_sha256: archived ? archived.caller_request_sha256 : recovery.callerRequestHash(context.request), claim_sha256: rootsApi.digest(context.request.claim || null),
     status: receipt.result.status, roots, pending_questions: require('./forge-interaction').mergePendingQuestions(pending, context.pending_questions || []) };
 }
 function pausePartial(cwd, input, options = {}) {
@@ -2378,6 +2400,33 @@ function validateLinkedScope(cwd, key, options) {
   return { entry_digest: linked.entry_digest, entry_id: linked.entry_id, begin_key: key, unit: begin.unit.key, roots: linked.roots, classification: 'new-unit', pending_questions: questions };
 }
 
+// #382 read-only historical data: the identity a committed linked begin had,
+// proven by its own checksummed failure chain. No owner token, lease, question
+// or authorization is validated or implied; this is never a linked binding.
+function inspectHistoricalLinkedEntry(cwd, key) {
+  const begin = lookupRecord(cwd, 'transaction', key);
+  if (!begin?.linked_entry || begin.action !== 'begin' || begin.phase !== 'committed') throw new ControllerError('entry-invalid', 'begin vinculado ausente');
+  const linked = begin.linked_entry;
+  const failure = lookupRecord(cwd, 'transaction', linked.failure_key);
+  failureAncestors(cwd, linked.failure_key);
+  if (!failure || linked.failure_checksum !== sha(failure)) throw new ControllerError('entry-conflict', 'linked failure changed');
+  return clone({ entry_id: linked.entry_id, entry_digest: linked.entry_digest, begin_key: key, begin_checksum: sha(begin),
+    unit: begin.unit.key, roots: linked.roots, host_runtime: begin.host_runtime, milestone: begin.milestone,
+    failure_key: linked.failure_key, failure_checksum: linked.failure_checksum, classification: 'new-unit' });
+}
+function recordChecksum(record) { return sha(record); }
+// Consumer side of the archived proof: revalidated synchronously each use; absent
+// proof keeps the existing external-request + live-binding path unchanged.
+function archivedProof(cwd, begin, context) {
+  if (context.archived_inspection === undefined) return null;
+  try {
+    return require('./forge-attempt-recovery').revalidateArchivedInspection(context.archived_inspection,
+      { cwd, begin, receiptPath: context.receipt_path, request: context.request });
+  } catch (error) {
+    throw new ControllerError('attempt-identity-mismatch', `archived inspection refused: ${error.code || 'invalid'}`, { archived_reason: error.code || 'invalid' });
+  }
+}
+
 function validateTerminalLinkedEntry(cwd, key, options = {}) {
   const begin = lookupRecord(cwd, 'transaction', key);
   if (!begin?.linked_entry) throw new ControllerError('entry-invalid', 'begin vinculado ausente');
@@ -2444,7 +2493,7 @@ module.exports = {
   transactionDir, resultDir, boundaryDir, eventsFile, transactionFile,
   resultFile, boundaryFile, readEvents, readJson, writeAtomic,
   lookupRecord, preflightPaths,
-  consumeFailure, reenter, failureProjection, validateLinkedEntry, validateTerminalLinkedEntry, sliceClosure,
+  consumeFailure, reenter, failureProjection, validateLinkedEntry, validateTerminalLinkedEntry, inspectHistoricalLinkedEntry, recordChecksum, sliceClosure,
   settleInterruptedLineage, verifyOwnerInterruption, pendingOwnerInterruptions, ownerInterruptionIdentity,
   ownerInterruptionQuestions, archiveOwnerInterruptionWitnesses,
   dependencies: { forgeState, forgeRuns, forgePrefs, forgeRuntime, forgeIds, forgeLease },

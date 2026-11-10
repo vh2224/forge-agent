@@ -1370,6 +1370,43 @@ async function main() {
       assert.equal(f.request.milestoneId, undefined);
     } finally { f.cleanup(); }
   });
+  await test('#382 both transports retain exact delivery and caller preimages before started; capture refusal precedes the provider', async () => {
+    const sha = value => crypto.createHash('sha256').update(value).digest('hex');
+    for (const transport of ['sidecar', 'native']) {
+      const request = fixture(transport === 'native' ? { model: 'gpt-5.6-sol' } : {});
+      if (transport === 'native') request.activeCapabilities = codexCapabilities();
+      const archive = `${request.resultFile}.request.json`, receiptFile = `${request.resultFile}.receipt.json`;
+      let observed = null;
+      const capture = () => { observed = { archive: fs.existsSync(archive), phase: JSON.parse(fs.readFileSync(receiptFile, 'utf8')).phase }; };
+      const result = await prep.prepareStandaloneTask(request, transport === 'native'
+        ? { invokeNative: async () => { capture(); return framed(envelope(request)); } }
+        : { invokeSidecar: async () => { capture(); return envelope(request); } });
+      assert.equal(result.ok, true, JSON.stringify(result));
+      assert.deepEqual(observed, { archive: true, phase: 'started' }, `${transport}: archive durable before the provider turn`);
+      const bytes = fs.readFileSync(archive), data = JSON.parse(bytes), receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+      assert.equal(receipt.phase, 'ready');
+      assert.equal(receipt.retained_request.sha256, sha(bytes));
+      assert.equal(data.preparation_input, 'captured');
+      assert.equal(sha(data.preparation_json), receipt.request_fingerprint, 'caller preimage reproduces the historical preparation hash');
+      assert.equal(sha(data.delivery_json), receipt.fingerprint, 'delivery preimage reproduces the artifact fingerprint');
+      assert.equal(JSON.parse(data.preparation_json).prompt, request.prompt);
+      const replay = await prep.startStandaloneTaskPreparation(request, { resolveDispatch() { throw Error('replay must not resolve'); },
+        invokeNative() { throw Error('replay must not invoke'); }, invokeSidecar() { throw Error('replay must not invoke'); } });
+      assert.equal(replay.replayed, true, JSON.stringify(replay));
+      assert(fs.readFileSync(archive).equals(bytes), `${transport}: archive immutable through replay`);
+      // A conflicting orphan from an earlier crash is never overwritten or used.
+      const orphaned = fixture(transport === 'native' ? { model: 'gpt-5.6-sol' } : {});
+      if (transport === 'native') orphaned.activeCapabilities = codexCapabilities();
+      fs.writeFileSync(`${orphaned.resultFile}.request.json`, '{"partial":');
+      let calls = 0;
+      const refused = await prep.prepareStandaloneTask(orphaned, { invokeNative: async () => { calls++; throw Error('must not invoke'); },
+        invokeSidecar: async () => { calls++; throw Error('must not invoke'); } });
+      assert.equal(refused.ok, false); assert.equal(refused.reason_code, 'request-retention-conflict');
+      assert.equal(refused.provider_called, false); assert.equal(calls, 0);
+      assert(!fs.existsSync(`${orphaned.resultFile}.receipt.json`), `${transport}: no started receipt after capture refusal`);
+      assert.equal(fs.readFileSync(`${orphaned.resultFile}.request.json`, 'utf8'), '{"partial":');
+    }
+  });
 }
 
 main().finally(() => {

@@ -426,6 +426,10 @@ async function recoveryContracts() {
     sidecar.beginArtifactAttempt(replayable);
     const candidate = { status: 'partial', summary: 'Saved fixture response', questions: [], artifacts: [] };
     await sidecar.acceptArtifactResult(replayable, candidate, { providerCalled: true });
+    // #382: the ready receipt keeps the locator/hash of the exact input captured before started.
+    const retainedRef = JSON.parse(fs.readFileSync(replayable.resultFile + '.receipt.json')).retained_request;
+    assert.strictEqual(retainedRef.sha256, crypto.createHash('sha256').update(fs.readFileSync(replayable.resultFile + '.request.json')).digest('hex'));
+    assert.strictEqual(retainedRef.delivery_fingerprint, sidecar.artifactFingerprint(replayable));
     const replayReceipt = replayable.resultFile + '.receipt.json', replayState = replayable.resultFile + '.recovery.json';
     recovery.captureFailure({ stateFile: replayState, receiptFile: replayReceipt, request: replayable,
       unit: 'research-milestone/M001', route: replayable.route, error: { code: 'publication-interrupted' } });

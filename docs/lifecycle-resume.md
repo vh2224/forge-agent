@@ -261,3 +261,100 @@ verificado. Não fabrique um receipt nativo, apague o recibo anterior ou omita-o
 para passar pelo caminho antigo. A recuperação do consumidor real precisa ser
 executada pelo seu owner com os callbacks vivos e continua separada dos testes
 descartáveis de regressão do Forge.
+
+## Pedido exato retido da tentativa (#382)
+
+Cada nova tentativa de artefatos (`beginArtifactAttempt`, o modo `artifacts` de
+`runUnitSidecar` e os dois transportes de preparação de task) grava o pedido
+exato em `<resultFile>.request.json` **antes** do receipt `started` e de qualquer
+provider. A escrita é exclusiva (`wx`, modo `0600`) com `fsync` do arquivo, no
+mesmo diretório privado do resultado, validado fora de todas as raízes físicas.
+Os bytes são determinísticos: um órfão idêntico de uma queda anterior é
+reaproveitado; um órfão diferente ou truncado nunca é sobrescrito nem usado, e a
+tentativa é recusada (`request-retention-conflict`) sem receipt e sem provider.
+Campos de credencial no nível superior (`env`, `token`, `api_key`…) recusam a
+captura (`request-retention-secret-field`); ambiente, credenciais e resultado bruto
+não são copiados. `fsync` melhora a persistência mas não prova durabilidade em
+queda de energia em todas as plataformas; ACL do Windows não é afirmada pelo
+bit de modo.
+
+O arquivo guarda dados, nunca capacidade:
+
+- `delivery_json`: o preimage exato do fingerprint de artefato (mesma ordem de
+  propriedades e posição de `linked_entry_identity`). `delivery_input_json`: o
+  pedido serializável original com `resultFile`, sem `ownerBroker`,
+  `linkedEntryBinding`, `signal` e demais canais de runtime.
+- `preparation_json`: na preparação de task, o preimage exato de
+  `preparationRequestFingerprint` (`preparation_input:'captured'`). Uma entrega
+  sem esse preimage registra `not-supplied`; nada é inferido.
+- `caller_request_sha256` com `caller_request_reproducible`: o hash do pedido do
+  chamador só é usado quando os bytes retidos o reproduzem sozinhos.
+- `runtime_requirements:{linked_entry, owner_broker}`: **restrições** de uso, nunca
+  permissão.
+
+O receipt `started` e o `ready`/`failed` subsequente carregam
+`retained_request:{file, sha256, delivery_fingerprint, preparation_fingerprint, …}`.
+O locator não escolhe arquivo: o leitor deriva o único irmão permitido do
+`resultFile` esperado e das raízes físicas, exige arquivo regular com um único
+link, sem symlink/junction no alvo, com o mesmo inode observado antes, durante e
+depois da leitura, e confere hash, identidade (unidade, workflow, dispatch, owner,
+cwd, code roots) e fingerprints. Cada receipt existente com arquivo retido é
+reconferido em replay/aceite; legado sem `retained_request` mantém exatamente a
+política anterior (pedido externo exato), sem backfill. Cópia nova ausente ou
+adulterada recusa (`request-retention-unavailable`/`-hash-mismatch`).
+
+### Como fornecer `context.request` sem o pedido externo
+
+Depois de um reinício, o host cria de novo
+`forge-attempt-recovery.createArchivedRequestInspector({ observeOriginalAttempt })`.
+`observeOriginalAttempt({cwd, begin, receiptPath})` é uma função executável do
+host que devolve o `expected` que ele conhece independentemente para aquele
+begin: `resultFile`, `cwd`, `contextRoot`, `unitType`, IDs de milestone/slice/task,
+`workflowId`, `dispatchId` e `execution_contract` quando houver. Objetos com
+`approved`, `attested`, `ownerBroker`, `linkedEntryBinding` ou
+`archived_inspection` são recusados. `inspector.inspect({cwd, begin})` revalida o
+begin atual pelo checksum, lê receipt e arquivo, reconstrói o pedido de dados e
+devolve `{request, receipt_path, begin_key, begin_checksum, runtime_requirements,
+preparation_input, archived_inspection}`. O host acrescenta suas próprias
+observações (`roots`, `pending_questions`, `invocation_status`,
+`observation_reference`, supersession) dentro de `inspectAttempt` ou
+`inspectInterruption`; o arquivo não as fabrica.
+
+`archived_inspection` é um handle opaco de processo (chave de WeakMap). Não é
+`linkedEntryBinding`, owner token, broker, claim, rota ou autorização de recuperação,
+e sua forma JSON é recusada. `inspectSupersededInterruption`, `inspectSettledAttempt`
+e `inspectFailure` só o aceitam depois de `revalidateArchivedInspection`, que relê
+begin, receipt e arquivo a cada uso (também após a atestação de supersession). Todas
+as demais verificações permanecem: ready/blocked, prova de supersession, processo,
+raízes, perguntas e o terminal guard existente, que continua com prioridade.
+
+### Prova histórica × binding vivo
+
+- Pedido não vinculado: identidade e fingerprint são recalculados pelas funções
+  atuais a partir dos dados restaurados.
+- Pedido linked: a identidade histórica vem apenas do begin committed real e da
+  sua cadeia de falha com checksum (`inspectHistoricalLinkedEntry`), nunca do
+  `linked_entry_identity` do JSON. Não chama `bindLinkedRequest`, não valida lease e
+  não registra entrada em `linkedEntries`; `requestIdentity`/`artifactFingerprint`
+  continuam recusando o pedido restaurado com `linked-entry-binding-required`.
+  Sem binding vivo a inspeção do receipt mantém `writer_possible` desconhecido.
+- `inspectSettledAttempt` registra `request_sha256`. Pelo arquivo ele só existe se
+  os bytes retidos reproduzem o hash original; caso contrário a retomada é recusada
+  com `request-retention-caller-hash-unavailable` (um hash guardado nunca substitui
+  bytes ausentes).
+
+### Limites de replay
+
+- Artefato comum não linked, sem broker: o pedido restaurado pode chamar
+  `replayArtifactAttempt`, que publica a resposta salva sem resolver nem provider.
+- Linked ainda aberto: somente o host com capacidades atuais chama
+  `bindLinkedRequest`; a prova histórica não a substitui. Linked sem lease/owner
+  válidos permite inspeção e settlement administrativo, mas o replay continua
+  recusado pela API atual.
+- Broker: um receipt ready cujo arquivo registra `owner_broker:true` recusa replay
+  sem broker vivo (`request-retention-broker-required`); handle falso ou manifest
+  importado falham em `assertBroker`, e um broker vivo precisa corresponder ao
+  manifest original. `startBroker` cria nova S0 e não é reconexão. Inspeção e
+  settlement histórico não iniciam broker.
+- Legado sem arquivo: continua exigindo o pedido externo exato pelo caminho
+  original; nada é reconstruído nem preenchido retroativamente.
