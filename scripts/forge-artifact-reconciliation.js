@@ -465,9 +465,11 @@ function verifyBatchSurface(manifest, proofs, options = {}) {
           || digest(observed.subarray(0, row.end)) !== row.result_sha256) fail('reconciliation-append-changed');
       end = row.end; prefix = row.result_sha256;
     }
-    if (end !== observed.length) fail('reconciliation-unsigned-append');
-    expected[relative] = prefix;
+    // Barrier heads remain the member-only heads. Typed owner tails never alter them.
     heads[relative] = { sequence: stream.length, length: end, sha256: prefix };
+    const tail = verifyPostUnitTail(observed, relative, end, prefix, options.operations);
+    if (tail.end !== observed.length) fail('reconciliation-unsigned-append');
+    expected[relative] = prefix;
   }
   const observedSurface = digest(Object.entries(current).sort());
   const surfaceMatches = observedSurface === digest(Object.entries(expected).sort());
@@ -852,7 +854,7 @@ function readBatchEvidence(options = {}) {
 // Evidence layout (the root broker directory, outside the owner and every root of the union):
 //   successors/g<N>.json                  generation N's public manifest (the root is generation 1)
 //   ops/<NNNN>.intent.json|.commit.json   the operation journal, one contiguous sequence
-const OPERATION_SPECIES = Object.freeze(['member-artifacts', 'controller-terminal', 'batch-progress', 'claim-mutation']);
+const OPERATION_SPECIES = Object.freeze(['member-artifacts', 'controller-terminal', 'batch-progress', 'claim-mutation', 'post-unit']);
 const SUCCESSOR_KIND = 'forge-batch-broker-successor';
 const MAX_OPERATIONS = 512;
 const MAX_EFFECTS = 64;
@@ -902,13 +904,66 @@ function validPending(value) {
     && Number.isSafeInteger(value.sequence) && value.sequence >= 1 && typeof value.intent_sha256 === 'string' && HEX64.test(value.intent_sha256));
 }
 // The closed effect shape of an intent: unique owner paths outside the signed append logs.
-function checkEffects(effects, appendPaths) {
+// Only this typed post-unit producer may extend the global event stream. Its
+// descriptor is signed before append and every byte remains part of the stream.
+function postUnitAppends(operation) {
+  if (operation?.species !== 'post-unit') return [];
+  const p = operation.producer;
+  if (!isRecord(p) || p.name !== 'forge-execution-batch.post-unit' || !Array.isArray(p.appends) || p.appends.length > 2) fail('broker-operation-invalid');
+  const seen = new Set();
+  for (const a of p.appends) {
+    if (!isRecord(a) || Object.keys(a).sort().join(',') !== 'after_length,after_sha256,append_sha256,before_length,before_sha256,path'
+        || a.path !== '.gsd/forge/events.jsonl' || seen.has(a.path)
+        || !Number.isSafeInteger(a.before_length) || a.before_length < 0
+        || !Number.isSafeInteger(a.after_length) || a.after_length <= a.before_length || a.after_length - a.before_length > 8192
+        || ![a.before_sha256,a.append_sha256,a.after_sha256].every(value => typeof value === 'string' && HEX64.test(value))) fail('broker-operation-invalid');
+    seen.add(a.path);
+  }
+  return p.appends;
+}
+function verifyPostUnitTail(observed, relative, end, prefix, operations) {
+  for (const entry of operations?.committed || []) {
+    for (const a of postUnitAppends(entry.intent)) if (a.path === relative) {
+      if (a.before_length !== end || a.before_sha256 !== prefix || a.after_length > observed.length) fail('reconciliation-span-invalid');
+      checkPostUnitBytes(observed, a, entry.intent.producer);
+      end = a.after_length; prefix = a.after_sha256;
+    }
+  }
+  const pending = operations?.pending;
+  for (const a of postUnitAppends(pending)) if (a.path === relative) {
+    if (a.before_length !== end || a.before_sha256 !== prefix) fail('reconciliation-span-invalid');
+    if (observed.length === a.before_length && digest(observed) === a.before_sha256) continue;
+    checkPostUnitBytes(observed, a, pending.producer);
+    end = a.after_length; prefix = a.after_sha256;
+  }
+  return { end, prefix };
+}
+function checkPostUnitBytes(observed, a, producer) {
+  if (a.after_length > observed.length || digest(observed.subarray(0,a.before_length)) !== a.before_sha256
+      || digest(observed.subarray(a.before_length,a.after_length)) !== a.append_sha256
+      || digest(observed.subarray(0,a.after_length)) !== a.after_sha256) fail('reconciliation-append-changed');
+  const text = observed.subarray(a.before_length,a.after_length).toString('utf8');
+  if (!text.endsWith('\n')) fail('broker-operation-invalid');
+  const lines = text.slice(0,-1).split('\n');
+  if (!lines.length || lines.length > 2) fail('broker-operation-invalid');
+  for (const line of lines) {
+    const event = parsed(Buffer.from(line), 'broker-operation-invalid');
+    if (!['memory-policy','memory-publication'].includes(event.event) || event.post_unit_key !== producer.key
+        || event.batch_id !== producer.batch_id || event.member_index !== producer.member_index
+        || typeof event.event_id !== 'string' || !event.event_id.startsWith(producer.key + ':')) fail('broker-operation-invalid');
+  }
+}
+function checkEffects(effects, appendPaths, operation) {
   if (!Array.isArray(effects) || !effects.length || effects.length > MAX_EFFECTS) fail('broker-operation-invalid');
   const seen = new Set();
   return effects.map(effect => {
     if (!isRecord(effect) || Object.keys(effect).sort().join(',') !== 'after,before,path') fail('broker-operation-invalid');
-    const relative = ownerRelative(effect.path);
-    if (seen.has(relative) || appendPaths.includes(relative)) fail('broker-operation-invalid');
+    const directory = operation?.species === 'post-unit' && operation.producer?.name === 'forge-execution-batch.post-unit'
+      && ['.gsd/forge/file-locks/','.gsd/memory/.locks/'].includes(effect.path) && effect.after?.directory === true;
+    const relative = directory ? ownerRelative(effect.path.slice(0,-1)) + '/' : ownerRelative(effect.path);
+    const append = postUnitAppends(operation).find(row => row.path === relative);
+    if (seen.has(relative) || (appendPaths.includes(relative) && !append)) fail('broker-operation-invalid');
+    if (append && (effect.before !== append.before_sha256 || effect.after?.sha256 !== append.after_sha256)) fail('broker-operation-invalid');
     seen.add(relative);
     if (effect.before !== null && (typeof effect.before !== 'string' || !HEX64.test(effect.before))) fail('broker-operation-invalid');
     const after = effect.after;
@@ -917,7 +972,7 @@ function checkEffects(effects, appendPaths) {
       if (keys === 'sha256') {
         if (typeof after.sha256 !== 'string' || !HEX64.test(after.sha256)) fail('broker-operation-invalid');
 
-      } else fail('broker-operation-invalid');
+      } else if (!(directory && keys === 'directory')) fail('broker-operation-invalid');
     }
     return { path: relative, before: effect.before, after: after === null ? null : copy(after) };
   });
@@ -927,9 +982,10 @@ function checkReadback(effects, readback) {
   if (!Array.isArray(readback) || readback.length !== effects.length) fail('broker-operation-readback-mismatch');
   return readback.map((row, index) => {
     const effect = effects[index];
+    const wanted = effect.after?.directory === true ? 'directory' : effect.after?.sha256 ?? null;
     if (!isRecord(row) || Object.keys(row).sort().join(',') !== 'path,sha256' || row.path !== effect.path
-        || (row.sha256 !== null && (typeof row.sha256 !== 'string' || !HEX64.test(row.sha256)))) fail('broker-operation-readback-mismatch');
-    if (effect.after === null ? row.sha256 !== null : row.sha256 !== effect.after.sha256) {
+        || (row.sha256 !== null && row.sha256 !== wanted && (typeof row.sha256 !== 'string' || !HEX64.test(row.sha256)))) fail('broker-operation-readback-mismatch');
+    if (row.sha256 !== wanted) {
       fail('broker-operation-readback-mismatch');
     }
     return { path: row.path, sha256: row.sha256 };
@@ -949,8 +1005,8 @@ function applyOperations(expected, operations, current, owner) {
   if (!pending) return;
   for (const effect of pending.effects) {
     const now = own(current, effect.path) ? current[effect.path] : null;
-    const atAfter = effect.after === null ? now === null : now === effect.after.sha256;
-    if (now === 'directory' || (now !== effect.before && !atAfter)) fail('reconciliation-operation-drift');
+    const atAfter = effect.after === null ? now === null : now === (effect.after.directory === true ? 'directory' : effect.after.sha256);
+    if (now === 'directory' && effect.after?.directory !== true || (now !== effect.before && !atAfter)) fail('reconciliation-operation-drift');
     if (now === null) delete expected[effect.path];
     else expected[effect.path] = now;
     if (effect.after !== null) for (const dir of ancestorsOf(effect.path)) if (current[dir] === 'directory') expected[dir] = 'directory';
@@ -1005,7 +1061,7 @@ function verifyIntentRecord(root, rootSha, registry, generations, record, sequen
       || payload.sequence !== sequence || payload.previous_sha256 !== head.sha256 || !OPERATION_SPECIES.includes(payload.species)
       || (payload.member_ref !== null && !registry.has(payload.member_ref)) || !isRecord(payload.producer)
       || typeof payload.prepared_at !== 'string') fail('broker-operations-mismatch');
-  return { ...payload, effects: checkEffects(payload.effects, root.append_paths) };
+  return { ...payload, effects: checkEffects(payload.effects, root.append_paths, payload) };
 }
 function verifyCommitRecord(root, rootSha, generations, record, intentPayload, intentSha, sequence) {
   if (!isRecord(record) || typeof record.signer_sha256 !== 'string') fail('broker-operations-mismatch');
@@ -1056,14 +1112,14 @@ function readOperations(directory, root, rootSha, registry, generations, barrier
 // Every sealed record of one cohort, verified: the root manifest through the digest the caller
 // retained, the complete signed stream, the anchors, the barrier, the successor generations and the
 // owner operation journal. The owner surface is compared by the callers.
-function loadCohortEvidence(directory, trustedSha, options = {}) {
+function loadCohortRecords(directory, trustedSha, options = {}) {
   const manifestBytes = boundedBytes(path.join(directory, 'manifest.json'), MAX_EVIDENCE_BYTES, 'broker-evidence-invalid');
   if (manifestBytes === null) fail('broker-evidence-invalid');
   const manifest = parsed(manifestBytes, 'broker-evidence-invalid');
   if (typeof trustedSha !== 'string' || digest(manifest) !== trustedSha) fail('reconciliation-trust-anchor-required');
   const registry = assertBatchManifest(manifest);
   const journal = readJournal(path.join(directory, 'proofs.jsonl'));
-  const streams = verifyBatchSurface(manifest, journal, { manifest_sha256: trustedSha, surface: 'report', snapshot: options.snapshot });
+  const memberRows = journal.map(proof => verifyBatchProof(manifest, registry, proof));
   const folder = path.join(directory, 'anchors'), folderStat = fs.existsSync(folder) ? fs.lstatSync(folder) : null;
   if (!folderStat || folderStat.isSymbolicLink() || !folderStat.isDirectory()) fail('broker-evidence-invalid');
   const byName = new Map(manifest.members.map(member => [`m${member.member_index}.json`, member])), anchors = new Map();
@@ -1080,11 +1136,74 @@ function loadCohortEvidence(directory, trustedSha, options = {}) {
     const record = parsed(barrierBytes, 'broker-barrier-invalid');
     barrierSha = digest(record);
     if (options.barrier_sha256 !== undefined && barrierSha !== options.barrier_sha256) fail('broker-barrier-untrusted');
-    barrier = verifyBarrier(manifest, record, streams.rows, anchors);
+    barrier = verifyBarrier(manifest, record, memberRows, anchors);
   } else if (options.barrier_sha256 !== undefined) fail('broker-barrier-untrusted');
   const generations = readGenerations(directory, manifest, trustedSha, barrierSha);
   const operations = readOperations(directory, manifest, trustedSha, registry, generations, barrierSha);
-  return { manifest, registry, journal, streams, anchors, barrier, barrier_sha256: barrierSha, generations, operations };
+  return { manifest, registry, journal, anchors, barrier, barrier_sha256: barrierSha, generations, operations };
+}
+function loadCohortEvidence(directory, trustedSha, options = {}) {
+  const records = loadCohortRecords(directory, trustedSha, options);
+  const streams = verifyBatchSurface(records.manifest, records.journal, { manifest_sha256: trustedSha, surface: 'report', snapshot: options.snapshot,
+    operations: operationView(records.operations) });
+  return { ...records, streams };
+}
+// A closed cohort has no writer authority. Historical reads verify its complete
+// signed chain and immutable final producer; they never accept a new owner
+// operation or claim that the current owner still equals the old S0 boundary.
+function readBatchClosedHistory(options = {}) {
+  if (!isRecord(options) || typeof options.directory !== 'string' || !path.isAbsolute(options.directory)) fail('broker-evidence-invalid');
+  const directory = roots.realDirectory(options.directory);
+  if (roots.key(directory) !== roots.key(path.resolve(options.directory))) fail('broker-evidence-invalid');
+  const data = loadCohortRecords(directory, options.manifest_sha256);
+  const finished = data.operations.entries.filter(entry => entry.payload.species === 'post-unit'
+    && entry.payload.producer?.name === 'forge-execution-batch.post-unit' && entry.payload.producer.kind === 'final');
+  if (!finished.length) return null;
+  if (finished.length !== 1 || data.operations.pending || !finished[0].commit || finished[0] !== data.operations.entries.at(-1)) fail('broker-operation-invalid');
+  const retired = data.operations.entries.filter(entry => entry.payload.species === 'claim-mutation'
+    && entry.payload.producer?.name === 'forge-execution-batch.retire');
+  if (retired.length !== 1 || !retired[0].commit || retired[0].sequence >= finished[0].sequence) fail('broker-operation-invalid');
+  const p = finished[0].payload.producer, row = retired[0].payload.producer.row;
+  if (!data.barrier || p.batch_id !== data.manifest.batch_id || p.retirement_id !== row.retirement_id
+      || p.key !== row.retirement_id + ':post-unit-complete' || p.ledger?.retirement_id !== row.retirement_id
+      || p.ledger.members?.length !== data.manifest.members.length) fail('broker-operation-invalid');
+  const finalEffect = finished[0].payload.effects.find(effect => effect.path === p.relative);
+  const finalBytes = boundedBytes(safeTarget(data.manifest.owner,p.relative), MAX_OPERATION_BYTES,'broker-operation-invalid');
+  if (!finalBytes || digest(finalBytes) !== finalEffect?.after?.sha256 || digest(finalBytes) !== digest(Buffer.from(JSON.stringify(p.ledger)+'\n'))) fail('broker-operation-invalid');
+  const ledgers = p.ledger.members.map((ref,index) => {
+    if (ref.member_index !== index || ref.file !== '.gsd/forge/batches/' + p.batch_id + '/post-unit/m' + index + '.json') fail('broker-operation-invalid');
+    const raw = boundedBytes(safeTarget(data.manifest.owner,ref.file),MAX_OPERATION_BYTES,'broker-operation-invalid');
+    const ledger = parsed(raw,'broker-operation-invalid');
+    if (!raw || digest(raw) !== ref.sha256 || ledger.status !== 'complete' || ledger.key !== row.post_unit[index]?.key) fail('broker-operation-invalid');
+    const op = data.operations.entries.findLast(entry => entry.sequence < finished[0].sequence && entry.payload.species === 'post-unit'
+      && entry.payload.producer?.kind === 'member' && entry.payload.producer.member_index === index);
+    const effect = op?.payload.effects.find(item => item.path === ref.file);
+    if (!op?.commit || effect?.after?.sha256 !== ref.sha256) fail('broker-operation-invalid');
+    return ledger;
+  });
+  const retire = retired[0];
+  return frozen(copy({ historical_only: true, retirement: { sequence: retire.sequence, committed:true,
+    producer: retire.payload.producer, effects: retire.payload.effects,
+    operations:{ committed:data.operations.committed.length,pending:null,head_sha256:data.operations.head.sha256 } },
+    evidence:{ manifest_sha256:options.manifest_sha256, batch_id:data.manifest.batch_id,
+      batch_manifest_sha256:data.manifest.batch_manifest_sha256,run_id:data.manifest.run_id },
+    post_unit:{ status:'complete',members:ledgers } }));
+}
+function readBatchPostUnitComplete(options) { return readBatchClosedHistory(options)?.post_unit || null; }
+// Signature-bound retained response data for historical lineage consumers.
+// No owner-surface assertion, writer handle, lease or publication permission is
+// minted by this read. Callers separately require the committed ACK/retirement.
+function readBatchRetainedResult(options = {}) {
+  if(!isRecord(options)||!path.isAbsolute(options.directory||''))fail('broker-evidence-invalid');
+  const directory=roots.realDirectory(options.directory);
+  if(roots.key(directory)!==roots.key(path.resolve(options.directory)))fail('broker-evidence-invalid');
+  const data=loadCohortRecords(directory,options.manifest_sha256),member=data.manifest.members.find(row=>row.member_index===options.member_index);
+  const anchor=member&&data.anchors.get(member.member_ref),outcome=member&&data.barrier?.members.find(row=>row.member_ref===member.member_ref);
+  if(!member||!anchor||!outcome||!['retained','residual'].includes(outcome.outcome))fail('broker-anchor-invalid');
+  const file=path.join(path.dirname(directory),'retained',member.member_ref+'.executed.json');
+  const raw=boundedBytes(file,32*1024*1024,'broker-anchor-invalid');
+  if(!raw||digest(raw)!==anchor.executed_sha256)fail('broker-anchor-invalid');
+  return frozen(copy({historical_only:true,member,anchor,outcome,executed_file:file,executed:parsed(raw,'broker-anchor-invalid')}));
 }
 // A sha256 of every regular file of the evidence directory (one level of subdirectories): the
 // successor compares it before every operation, so any edited, added or removed byte refuses.
@@ -1280,7 +1399,7 @@ async function resumeBatchBrokerInside(batchHandle, members, paths, observation)
         if (!isRecord(operation) || !OPERATION_SPECIES.includes(operation.species) || !isRecord(operation.producer)
             || (operation.member_ref !== null && !evidence.registry.has(operation.member_ref)) || typeof operation.prepared_at !== 'string'
             || Buffer.byteLength(JSON.stringify(operation.producer)) > MAX_OPERATION_BYTES / 2) fail('broker-operation-invalid');
-        const effects = checkEffects(operation.effects, root.append_paths);
+        const effects = checkEffects(operation.effects, root.append_paths, operation);
         for (const effect of effects) {
           const now = own(verified.current, effect.path) ? verified.current[effect.path] : null;
           if (now === 'directory' || now !== effect.before) fail('broker-operation-preimage-mismatch');
@@ -1301,8 +1420,8 @@ async function resumeBatchBrokerInside(batchHandle, members, paths, observation)
         const verified = verifyNow();
         const readback = state.pending.payload.effects.map(effect => {
           const now = own(verified.current, effect.path) ? verified.current[effect.path] : null;
-          const exact = effect.after === null ? now === null : now === effect.after.sha256;
-          if (now === 'directory' || !exact) fail('broker-operation-readback-mismatch');
+          const exact = effect.after === null ? now === null : now === (effect.after.directory === true ? 'directory' : effect.after.sha256);
+          if (now === 'directory' && effect.after?.directory !== true || !exact) fail('broker-operation-readback-mismatch');
           return { path: effect.path, sha256: now };
         });
         const commit = await call('owner-commit', { intent: state.pending.record, readback, committed_at: new Date().toISOString() });
@@ -1332,7 +1451,7 @@ async function resumeBatchBrokerInside(batchHandle, members, paths, observation)
 }
 
 module.exports = { startBroker, assertBroker, verifyProof, verifySurface, inspectCandidate, reconcile, safeTarget, lock, withOwnerLock,
-  BATCH_BROKER_REFUSALS, startBatchBroker, assertBatchBroker, readBatchEvidence, readBatchRetirement,
+  BATCH_BROKER_REFUSALS, startBatchBroker, assertBatchBroker, readBatchEvidence, readBatchRetirement, readBatchClosedHistory, readBatchPostUnitComplete, readBatchRetainedResult,
   // Issue 343 U5: the post-barrier successor generation and its closed typed owner operations.
   OPERATION_SPECIES, resumeBatchBroker };
 if (require.main === module && process.argv[2] === '--broker' && process.send) {
@@ -1460,7 +1579,7 @@ if (require.main === module && process.argv[2] === '--broker' && process.send) {
         if (operationPending) fail('broker-operation-pending');
         if (!isRecord(data) || !OPERATION_SPECIES.includes(data.species) || !isRecord(data.producer) || typeof data.prepared_at !== 'string'
             || (data.member_ref !== null && !manifest.members.includes(data.member_ref))) fail('broker-operation-invalid');
-        const effects = checkEffects(data.effects, manifest.append_paths);
+        const effects = checkEffects(data.effects, manifest.append_paths, data);
         const intent = sign({ kind: 'owner-intent', root_manifest_sha256: manifest.root_manifest_sha256, signer_sha256: manifestSha,
           batch_id: manifest.batch_id, sequence: operationHead.sequence + 1, previous_sha256: operationHead.sha256, species: data.species,
           member_ref: data.member_ref, producer: data.producer, effects, prepared_at: data.prepared_at });
@@ -1471,7 +1590,7 @@ if (require.main === module && process.argv[2] === '--broker' && process.send) {
         const data = message.data;
         if (!operationPending || !isRecord(data) || !isRecord(data.intent) || digest(data.intent) !== operationPending.intent_sha256
             || data.intent.sequence !== operationPending.sequence || typeof data.committed_at !== 'string') fail('broker-operation-not-pending');
-        const readback = checkReadback(checkEffects(data.intent.effects, manifest.append_paths), data.readback);
+        const readback = checkReadback(checkEffects(data.intent.effects, manifest.append_paths, data.intent), data.readback);
         const commit = sign({ kind: 'owner-commit', root_manifest_sha256: manifest.root_manifest_sha256, signer_sha256: manifestSha,
           batch_id: manifest.batch_id, sequence: operationPending.sequence, intent_sha256: operationPending.intent_sha256, readback,
           committed_at: data.committed_at });

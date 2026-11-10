@@ -378,7 +378,9 @@ function fixture(label, names, providers, options = {}) {
   const plan = path.join(TMP, `${label}-providers.json`), journalFile = path.join(TMP, `${label}-transport.jsonl`);
   fs.writeFileSync(plan, JSON.stringify({ rendezvous, members: providers }));
   fs.writeFileSync(journalFile, '');
-  return { label, names, dir, ids, scope, rendezvous, plan, journal: journalFile, inputs: hostInputs(label, names), controls: new Map(), running: null };
+  const inputs=hostInputs(label,names);
+  if(typeof options.verification==='function')for(const id of names)inputs[id].verification=options.verification(id);
+  return { label, names, dir, ids, scope, rendezvous, plan, journal: journalFile, inputs, controls: new Map(), running: null };
 }
 // The in-process pool of a fixture, with the trusted seams of this case.
 function start(fx, options = {}) {
@@ -713,7 +715,8 @@ const ACKED = Object.freeze(['preparado', 'admitido', 'executando', 'retido', 'p
 const RESTART_POINTS = Object.freeze(['consolidation-progress-intent', 'consolidation-progress-applied', 'consolidation-member-verified',
   'member-artifacts-intent', 'member-artifacts-applied', 'member-artifacts-committed', 'member-integrated',
   'controller-terminal-intent', 'controller-terminal-applied', 'member-acknowledged',
-  'claim-mutation-intent', 'claim-mutation-applied', 'claim-mutation-before-commit']);
+  'claim-mutation-intent', 'claim-mutation-applied', 'claim-mutation-before-commit',
+  'post-unit-intent', 'post-unit-applied', 'post-unit-before-commit']);
 // Cohorts consolidated by one case and inspected by a later one (U5-6), released at the end.
 const u5 = {};
 function taskDir(dir, id) { return path.join(sliceDir(dir), 'tasks', id); }
@@ -825,7 +828,8 @@ test('issue343 U5-1 after the barrier each member is verified, published, integr
     const evidence = reconciliation.readBatchEvidence(fx.trust), refs = evidence.members.map(row => row.member_ref);
     assert.deepStrictEqual(evidence.operations.entries.filter(entry => entry.species !== 'batch-progress')
       .map(entry => [entry.species, refs.indexOf(entry.member_ref), entry.committed]),
-    [['member-artifacts', 0, true], ['controller-terminal', 0, true], ['member-artifacts', 1, true], ['controller-terminal', 1, true], ['claim-mutation', -1, true]]);
+    [['member-artifacts', 0, true], ['controller-terminal', 0, true], ['member-artifacts', 1, true], ['controller-terminal', 1, true], ['claim-mutation', -1, true],
+      ['post-unit',0,true],['post-unit',1,true],['post-unit',-1,true]]);
     assert.deepStrictEqual([evidence.stream, evidence.barrier.sealed, evidence.operations.pending, evidence.surface.matches_s0, evidence.surface.matches_operations],
       ['verified', true, null, false, true], 'the owner is S0, the signed member lines and exactly the committed operations');
     assert.deepStrictEqual(evidence.generations.map(row => row.generation), [1, 2], 'one successor generation signed every operation');
@@ -894,11 +898,11 @@ test('issue343 U5-2 a done member is acknowledged beside a failed and a needs-in
 
 // ── U5-3: fresh-process restart at each failpoint ─────────────────────────────
 
-test('issue343 U5-3 a fresh process restarted at each failpoint resumes with zero second inference, publication, delta, commit or ACK', async () => {
-  assert.deepStrictEqual([...RESTART_POINTS].sort(), [...batch.CONSOLIDATION_FAILPOINTS].sort(), 'every declared failpoint has an actual fresh-process restart witness');
-  for (const point of RESTART_POINTS) {
+const RESTART_OBSERVED = new Set();
+async function restartWitness(point) {
     assert(batch.CONSOLIDATION_FAILPOINTS.includes(point), point);
-    const fx = await retainedCohort(`u5-crash-${point}`, PAIR, PAIR_GO);
+    const label = point.startsWith('claim-mutation-') ? `u5c-${digest(point).slice(0, 12)}` : `u5-crash-${point}`;
+    const fx = await retainedCohort(label, PAIR, PAIR_GO);
     try {
       const before = targetState(fx.dir), spawned = spawnedCount(fx);
       const rootManifest = fs.readFileSync(path.join(fx.trust.directory, 'manifest.json'));
@@ -914,6 +918,10 @@ test('issue343 U5-3 a fresh process restarted at each failpoint resumes with zer
           [['T01', [['retained', 'batch-members-pending']]], ['T02', [['retained', 'batch-members-pending']]]]);
       }
       const cli = await freshConsolidate(fx);
+      write(path.join(TMP, 'restart-witnesses', digest(point) + '.json'), JSON.stringify({ point,
+        pid: cli.pid, exit_code: cli.code, signal: cli.signal, actual_child_close: true,
+        stdout_sha256: digest(cli.stdout), stderr_sha256: digest(cli.stderr) }));
+      console.log(`  fresh coordinator ${point}: pid=${cli.pid} exit=${cli.code}`);
       assert.strictEqual(cli.code, 0, `${point}: the fresh consolidation (stderr tail):\n${cli.stderr.slice(-4000)}`);
       const report = JSON.parse(cli.stdout.trim().split('\n').pop());
       assert.deepStrictEqual([report.status, report.members.map(row => row.outcome)], ['consolidated', ['acknowledged', 'acknowledged']], point);
@@ -922,7 +930,8 @@ test('issue343 U5-3 a fresh process restarted at each failpoint resumes with zer
       const evidence = reconciliation.readBatchEvidence(fx.trust), refs = evidence.members.map(row => row.member_ref);
       assert.deepStrictEqual(evidence.operations.entries.filter(entry => entry.species !== 'batch-progress')
         .map(entry => [entry.species, refs.indexOf(entry.member_ref), entry.committed]),
-      [['member-artifacts', 0, true], ['controller-terminal', 0, true], ['member-artifacts', 1, true], ['controller-terminal', 1, true]],
+      [['member-artifacts', 0, true], ['controller-terminal', 0, true], ['member-artifacts', 1, true], ['controller-terminal', 1, true], ['claim-mutation', -1, true],
+        ['post-unit',0,true],['post-unit',1,true],['post-unit',-1,true]],
       `${point}: exactly one publication and one controller terminal per member`);
       assert.deepStrictEqual([evidence.operations.pending, evidence.surface.matches_operations], [null, true], point);
       assert.deepStrictEqual([chainStates(fx, 0), chainStates(fx, 1)], [ACKED, ACKED], `${point}: no progress step repeated`);
@@ -938,8 +947,22 @@ test('issue343 U5-3 a fresh process restarted at each failpoint resumes with zer
       }
       assertNoKey(`${point} consolidation report`, cli.stdout);
     } finally { await finish(fx); }
-  }
+  RESTART_OBSERVED.add(point);
+  console.log('  restart witness ' + point);
+}
+
+test('issue343 U5-3 a fresh process restarted at each failpoint resumes with zero second inference, publication, delta, commit or ACK', async () => {
+  assert.deepStrictEqual([...RESTART_POINTS].sort(), [...batch.CONSOLIDATION_FAILPOINTS].sort(), 'every declared failpoint has an actual fresh-process restart witness');
+  for (const point of RESTART_POINTS) await restartWitness(point);
 });
+
+test('review R5 fresh coordinator recovers each new claim intent effect and precommit with no second inference', async () => {
+  const points = ['claim-mutation-intent', 'claim-mutation-applied', 'claim-mutation-before-commit'];
+  for (const point of points) if (!RESTART_OBSERVED.has(point)) await restartWitness(point);
+  assert(points.every(point => RESTART_OBSERVED.has(point)), 'all three have actual fresh-process witnesses');
+});
+
+
 
 // ── U5-4: one-byte edits ──────────────────────────────────────────────────────
 
@@ -1542,6 +1565,144 @@ test('review R5 R19 partial ACK projects the original roster and terminal custod
     assert.strictEqual(next.unit.key, 'execute-task/T03');
     assert.strictEqual(next.action, 'dispatch');
     assert.notStrictEqual(JSON.stringify(runs.get(fx.dir, fx.scope.run_id).write_claim), held, 'new unit reservation is an additive union');
+  } finally { await finish(fx); }
+});
+
+test('review R5 R7 R16 all ACK then one genuine single delivery then a second cohort keep one run and exclusive dirty custody', async () => {
+  const verification=id=>({preferenceCommands:['node src/check-fixture.cjs '+id],bindings:[
+    {root_id:'primary',criterion:{kind:'truth',index:0},aspect:'default',coverage:'behavioral',source:{kind:'verification',check_index:0}},
+    {root_id:'primary',criterion:{kind:'artifact',index:0},aspect:'declared-property',coverage:'structural',source:{kind:'verification',check_index:0}},
+  ]});
+  const fx=await retainedCohort('review-sequence',PAIR,PAIR_GO,{verification,setup(dir){
+    write(path.join(dir,'src/check-fixture.cjs'),"'use strict';const assert=require('assert'),path=require('path');const id=process.argv[2],file='src/'+id.toLowerCase()+'.js';assert.strictEqual(require(path.resolve(file)),id+':'+file);console.log(id+' observable module value passed');\n");
+  },tasks:{T01:taskPlan('T01'),T02:taskPlan('T02'),T03:taskPlan('T03',['T01','T02']),T04:taskPlan('T04',['T03']),T05:taskPlan('T05',['T03'])}});
+  let secondFx=null;const cohortTransport=xllm.runExecute;
+  try {
+    const originalTarget=targetState(fx.dir),first=await consolidated(fx,'first cohort retirement');
+    assert.strictEqual(first.retirement.status,'retired');assert.strictEqual(first.post_unit.status,'complete');
+    const dirtyRoots=[...memberPaths(fx).values()];
+    for(const root of dirtyRoots) {
+      assert(git(root,['status','--porcelain']).trim(),'the fixture root is genuinely dirty');
+      assert.strictEqual(isolation.validateCodeDirBoundary({workspaceRoot:path.dirname(root),codeDir:root,declaredCodeDir:root,repoRoots:[fx.dir],ownerRoot:fx.dir}).reason_code,'batch-member-root-exclusive');
+    }
+    const ack=adapter.invoke('codex','auto','batch-ack',ackInput(fx),fx.ids.snapshot,{}).result;
+    assert.strictEqual(ack.outcome,'completed');
+    const selected=adapter.invoke('codex','auto','next',ackInput(fx),ack.snapshot,{}).result;
+    assert.deepStrictEqual([selected.action,selected.unit.key],['dispatch','execute-task/T03']);
+    const planFile=path.join(taskDir(fx.dir,'T03'),'T03-PLAN.md');
+    const route=resolveDispatch({unitType:'execute-task',cwd:fx.dir,planPath:planFile,roadmapPath:path.join(fx.dir,'.gsd/milestones',M,M+'-ROADMAP.md'),milestoneId:M,unitId:'T03',hostRuntime:'codex'});
+    assert.strictEqual(route.dispatch_allowed,true);assert.strictEqual(route.worker_mode,'sidecar');
+    const claim=claims.recordClaim(fx.dir,fx.scope.run_id,{schema_version:2,execution_contract:rootsApi.singleContract(fx.dir,fx.dir),source:'plan-writes',unit:'execute-task/T03',paths:[{root_id:'primary',path:'src/t03.js'}]});
+    xllm.runExecute=async options=>{
+      options.onBeforeSpawn?.();
+      const child=spawn(process.execPath,[PROVIDER,'T03',fx.rendezvous,'','src/t03.js',String(options.model),String(options.effort),'90000','go','[]'],{cwd:options.cwd,env:xllm.buildSidecarEnv(options.envPolicy||'minimal'),stdio:['ignore','ignore','pipe'],windowsHide:true});
+      let stderr='';child.stderr.on('data',data=>{stderr=(stderr+data).slice(-4000);});
+      const joined=new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',(code,signal)=>resolve({code,signal}));});
+      options.announce?.('iniciado',{...options.identity,engine:options.engine,model_sent:options.model,effort:options.effort,host:options.hostRuntime,transport:options.engine==='claude'?'claude-cli':'app-server',pid:child.pid,provider_called:'unknown'});
+      const close=await joined;assert.strictEqual(close.code,0,stderr);
+      return {status:'done',summary:'T03 synthetic single delivery',files_changed:['src/t03.js'],must_haves_status:[]};
+    };
+    const request={...hostInputs('review-sequence-single',['T03']).T03,unitType:'execute-task',scope:'milestone',phase:'execute',milestoneId:M,sliceId:S,taskId:'T03',cwd:fx.dir,contextRoot:fx.dir,
+      planFile,verification:verification('T03'),execution_contract:rootsApi.singleContract(fx.dir,fx.dir),runId:fx.scope.run_id,claim,route,begin_key:selected.controller_result.details.transaction.idempotency_key,
+      lease_generation:selected.controller_result.details.transaction.generation};
+    const sidecar=require('./forge-unit-sidecar');
+    assert.throws(()=>sidecar.validateRecoveryRequest({...request,cwd:dirtyRoots[0],execution_contract:rootsApi.singleContract(fx.dir,dirtyRoots[0])}),/execution-member-handle-required/,'an ordinary unit cannot borrow retained member custody');
+    assert.strictEqual(claims.ordinaryRetainedProjection(runs.get(fx.dir,fx.scope.run_id),claim.execution_contract),false,'the whole union cannot become ordinary writer authority');
+    assert.throws(()=>sidecar.validateRecoveryRequest({...request,execution_contract:claim.execution_contract}),error=>error.code==='legacy-multiroot-refused','the existing earlier legacy-plan guard also rejects the broad contract');
+    const delivered=await sidecar.runUnitSidecar(request);
+    assert.strictEqual(delivered.status,'done');assert.strictEqual(readJson(request.resultFile+'.receipt.json').phase,'ready');
+    const done=adapter.invoke('codex','auto','complete',{...ackInput(fx),result:delivered},selected.snapshot,{}).result;
+    assert.strictEqual(done.outcome,'completed',JSON.stringify(done.controller_result));
+    assert.strictEqual(lease.observe(fx.dir,'execute-task/T03').lease,null,'the single unit released its genuine lease');
+    xllm.runExecute=cohortTransport;
+    const next=adapter.invoke('codex','auto','next',ackInput(fx),done.snapshot,{}).result;
+    write(path.join(TMP,'requests','review-sequence-next-observed.json'),JSON.stringify({fx:{label:fx.label,names:fx.names,dir:fx.dir,ids:fx.ids,scope:fx.scope,inputs:fx.inputs,report:fx.report,trust:fx.trust,journal:fx.journal,rendezvous:fx.rendezvous,plan:fx.plan},selected,request,done,next}));
+    assert.strictEqual(next.action,'dispatch-batch');
+    const data=next.controller_result.details.dispatch_batch;
+    assert.deepStrictEqual(data.members.map(row=>row.unit.key),['execute-task/T04','execute-task/T05']);
+    assert.notStrictEqual(data.batch_id,fx.ids.batch_id);
+    const label='review-sequence-next',rendezvous=fs.mkdtempSync(path.join(TMP,label+'-rendezvous-'));
+    const plan=write(path.join(TMP,label+'-providers.json'),JSON.stringify({rendezvous,members:{T04:GO,T05:GO}}));
+    const journalFile=write(path.join(TMP,label+'-transport.jsonl'),'');
+    secondFx={...fx,label,names:['T04','T05'],ids:{batch_id:data.batch_id,manifest_sha256:data.manifest_sha256,snapshot:next.snapshot},scope:{...fx.scope,batch_id:data.batch_id,manifest_sha256:data.manifest_sha256},rendezvous,plan,journal:journalFile,inputs:hostInputs(label,['T04','T05']),controls:new Map(),running:null};
+    for(const id of secondFx.names)secondFx.inputs[id].verification=verification(id);
+    write(path.join(TMP,'requests','review-sequence-before-second.json'),JSON.stringify({fx:{label:secondFx.label,names:secondFx.names,dir:secondFx.dir,ids:secondFx.ids,scope:secondFx.scope,inputs:secondFx.inputs,journal:secondFx.journal,rendezvous:secondFx.rendezvous,plan:secondFx.plan},previous:fx.scope,previous_claim:claim}));
+    const ran=await within(start(secondFx),300000,'second cohort same run');assert(!ran.error,ran.error?.stack);secondFx.report=ran.value;
+    assert.strictEqual(secondFx.report.barrier.sealed,true);secondFx.trust={directory:secondFx.report.broker.directory,manifest_sha256:secondFx.report.broker.manifest_sha256};
+    const second=await consolidated(secondFx,'second cohort retirement');
+    assert.strictEqual(second.retirement.status,'retired');assert.strictEqual(second.post_unit.status,'complete');
+    const run=runs.get(fx.dir,fx.scope.run_id);assert.strictEqual(run.batch_locator,null);assert.strictEqual(run.batch_retirements.length,2);
+    const secondIsolation=readJson(path.join(fx.dir,'.gsd/forge/batches',data.batch_id,'isolation.json'));
+    assert.deepStrictEqual(secondIsolation.claim,run.write_claim,'actual held claim is the complete immutable union of this cohort');
+    assert.strictEqual(secondIsolation.claim.execution_contract.code_roots.length,5,'one integration plus four physically distinct member roots');
+    for(const root of claim.execution_contract.code_roots){const current=run.write_claim.execution_contract.code_roots.find(row=>row.identity_sha256===root.identity_sha256);assert(current);assert.deepStrictEqual(run.write_claim.root_baselines[current.id],claim.root_baselines[root.id],'historical baseline is preserved');}
+    assert.strictEqual(runs.listAll(fx.dir).length,1,'no substitute run');
+    for(const root of dirtyRoots)assert.strictEqual(batch.memberRootReservation(fx.dir,root).reserved,true);
+    assert.deepStrictEqual(targetState(fx.dir),originalTarget,'no aggregate commit/index/HEAD mutation');
+    assert.deepStrictEqual(controller.readEvents(controller.eventsFile(fx.dir,M)).filter(row=>row.action==='complete'&&row.unit.startsWith('execute-task/')).map(row=>row.unit),['execute-task/T01','execute-task/T02','execute-task/T03','execute-task/T04','execute-task/T05']);
+  } finally {xllm.runExecute=cohortTransport;if(secondFx)await finish(secondFx);await finish(fx);}
+});
+
+test('review R18 post-unit queue waits for real ready memory and publishes canonical fragments exactly once after all ACKs', async () => {
+  const fx = await retainedCohort('review-post-unit',PAIR,PAIR_GO);
+  const memoryReceipts=[];
+  const policyPrefs=()=>{ const p=require('./forge-prefs').readPrefs(fx.dir);assert(p.ok);return {...p,prefs:{...p.prefs,memory:{...p.prefs.memory,extraction:'always'}}}; };
+  try {
+    const spawned=spawnedCount(fx);
+    const queued=await consolidated(fx,'post-unit queue',{prefsReader:policyPrefs});
+    assert.strictEqual(queued.retirement.status,'retired');
+    assert.strictEqual(queued.post_unit.status,'pending');
+    assert(queued.post_unit.members.every(row=>row.status==='awaiting-memory'));
+    assert.throws(()=>controller.beginSerial(fx.dir,{milestone:M,unit:'complete-slice/S01',slice:S,host_runtime:'codex',owner_token:TOKEN,idempotency_key:'before-post-unit'},{}),/batch-post-unit-pending/);
+    const pendingView=batch.status(fx.scope);
+    assert.strictEqual(pendingView.retirement.post_unit.status,'pending');
+    const memory_publications={};
+    const sidecar=require('./forge-unit-sidecar');
+    const nativeRoute={host_runtime:'codex',worker_engine:'native',resolved_worker_engine:'native',worker_mode:'native',model:'gpt-6-luna',model_resolved:'gpt-6-luna',effort:'medium'};
+    const telemetry={model_requested:null,model_resolved:'gpt-6-luna',model_argument:'gpt-6-luna',model_observed:null,model_observed_source:null,
+      effort_requested:'medium',effort_resolved:'medium',effort_argument:'medium',effort_transport:'native-argument',effort_transport_value:'medium',
+      effort_transport_source:'fixture-native-argument',effort_binding_observed:null,effort_binding_observed_source:null,effort_binding_observed_fingerprint:null,
+      effort_applied:null,effort_applied_source:null,capabilities_source:'fixture'};
+    for(const [index,id] of PAIR.entries()) {
+      const ledger=queued.post_unit.members[index], ready=readJson(ledger.source.file),atTime=new Date().toISOString();
+      const request={cwd:fx.dir,contextRoot:fx.dir,unitType:'memory-extract',sourceUnitType:'execute-task',sourceUnitId:id,milestoneId:M,
+        workflowId:'fixture-post-unit',dispatchId:'post-memory-'+id,extractionId:'post-memory-'+id,extractedAt:atTime,
+        sourceFingerprint:ledger.source.fingerprint,summaryContent:ready.artifacts.find(item=>item.path.endsWith('/'+id+'-SUMMARY.md')).content,sourceResult:JSON.stringify(ready.result),keyDecisions:[],existingMemory:{facts:[],stats:[]},
+        route:nativeRoute,hostRuntime:'codex',resultFile:path.join(CHANNELS,'post-memory-'+id+'.json'),publicationSafe:false,
+        publicationBoundary:{ownerJoined:true,checkedAt:atTime,protectedSnapshots:[{id:queued.retirement.retirement_id,state:'ended'}]},invocationTelemetry:telemetry};
+      const extraction={schema_version:1,status:'done',summary:'Synthetic post-unit proof',questions:[],facts:[{local_id:'fact',category:'gotcha',text:'Preserve '+id+' custody.',confidence_base:0.8}],events:[]};
+      const accepted=await sidecar.acceptNativeMemoryResult({...request,rawResult:extraction});
+      assert.strictEqual(accepted.publication.status,'deferred','synthetic callback saves ready without owner publication');
+      const receiptFile=request.resultFile+'.receipt.json',receiptHash=digest(fs.readFileSync(receiptFile));
+      memoryReceipts.push([receiptFile,receiptHash]);
+      const file=write(path.join(TMP,'requests','post-memory-'+id+'.json'),JSON.stringify({...request,publicationSafe:true}));
+      memory_publications[id]={file,sha256:digest(fs.readFileSync(file))};
+    }
+    const interrupted=await consolidate(fx,{prefsReader:policyPrefs,memory_publications,failpoint:crashAt('post-unit-applied')});
+    assert.strictEqual(interrupted.error?.code,'FIXTURE_CRASH','interrupt only after actual canonical fragment/event effects');
+    const pending=reconciliation.readBatchEvidence(fx.trust);
+    assert(Number.isSafeInteger(pending.operations.pending));
+    assert.strictEqual(pending.surface.matches_operations,true,'the pending intent proves every publisher effect');
+    const finished=await consolidated(fx,'post-unit canonical memory publication',{prefsReader:policyPrefs,memory_publications});
+    assert.strictEqual(finished.post_unit.status,'complete');
+    const events=fs.readFileSync(path.join(fx.dir,'.gsd/forge/events.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
+    const housekeeping=events.filter(row=>row.post_unit_key);
+    assert.deepStrictEqual(housekeeping.map(row=>row.event),['memory-policy','memory-policy','memory-publication','memory-publication']);
+    assert.strictEqual(new Set(housekeeping.map(row=>row.event_id)).size,4);
+    for(const id of PAIR) assert.strictEqual(require('./forge-memory').readFragment(fx.dir,id,{milestoneId:M}).facts.length,1);
+    for(const [file,hash] of memoryReceipts) assert.strictEqual(digest(fs.readFileSync(file)),hash,'ready memory remains authentic and immutable');
+    const before=fs.readFileSync(path.join(fx.dir,'.gsd/forge/events.jsonl'));
+    const replay=await consolidated(fx,'post-unit immutable replay',{prefsReader:policyPrefs,memory_publications});
+    assert.strictEqual(replay.historical_replay,true);
+    assert.deepStrictEqual(fs.readFileSync(path.join(fx.dir,'.gsd/forge/events.jsonl')),before);
+    assert.strictEqual(spawnedCount(fx),spawned,'no new execution inference in any consolidation');
+    const unrelated=write(path.join(fx.dir,'.gsd','later-owner-note.md'),'later safe owner work\n');
+    assert.strictEqual((await consolidated(fx,'historical facts after next owner boundary')).historical_replay,true);
+    assert.strictEqual(fs.readFileSync(unrelated,'utf8'),'later safe owner work\n','historical fact read grants no writer or deletion');
+    const queue=path.join(fx.dir,'.gsd/forge/batches',fx.ids.batch_id,'post-unit/m0.json'),bytes=fs.readFileSync(queue);
+    fs.appendFileSync(queue,'foreign');
+    await assert.rejects(()=>batch.consolidateCohort(fx.scope,{members:fx.inputs,broker_manifest_sha256:fx.trust.manifest_sha256}),/broker-operation-invalid/);
+    fs.writeFileSync(queue,bytes);
   } finally { await finish(fx); }
 });
 

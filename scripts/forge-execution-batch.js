@@ -525,14 +525,14 @@ function timeVerdict(scope, unit, key, options) {
 }
 // Roots still protected by members of other batches that never reached ack or bloqueado.
 // Anything unreadable exhausts the budget (fail closed).
-function retainedRoots(owner, current) {
+function retainedRoots(owner, current, countedPaths = []) {
   const census = require('./forge-runs').boundedCensus(owner.real);
   if (census.unparseable.length) return ROOTS_LIMIT;
-  const historical = new Set();
+  const historical = new Set(), counted=new Set(countedPaths.map(value=>codeRoots().key(value)));
   try {
     for (const run of census.parsed) for (const retirement of run.batch_retirements || []) {
       require('./forge-runs').validateBatchRetirements(run.batch_retirements, run.id);
-      if (retirement.locator.batch_id !== current) for (const root of retirement.retained_roots) historical.add(codeRoots().key(root.path));
+      if (retirement.locator.batch_id !== current) for (const root of retirement.retained_roots) if(!counted.has(codeRoots().key(root.path)))historical.add(codeRoots().key(root.path));
     }
   } catch { return ROOTS_LIMIT; }
   const found = directoryAt(owner.real, BATCH_SEGMENTS);
@@ -919,7 +919,45 @@ function realOrSelf(value) { try { return fs.realpathSync.native(value); } catch
 // manifest. A transitive predecessor additionally needs the controller's genuine scoped
 // completion plus historical delivery proof of its current plan; semantic graph equality
 // alone does not authorize edits to artifacts/key_links. No schema or approval is invented.
-function predecessorNamespace(owner, manifest, id, source, contract) {
+function retiredPredecessorNamespace(owner, manifest, id, source, contract, runtime, runId, read) {
+  const run=runId&&require('./forge-runs').get(owner.real,runId);
+  if(!run?.active||!run.batch_retirements?.length)return null;
+  require('./forge-runs').validateBatchRetirements(run.batch_retirements,run.id);
+  const matches=[];
+  for(const row of run.batch_retirements){
+    const previous=readManifestAt(owner,row.locator.batch_id);
+    if(!previous||previous.milestone!==manifest.milestone||previous.slice!==manifest.slice||previous.host_runtime!==manifest.host_runtime||previous.owner_digest!==manifest.owner_digest)continue;
+    const member=previous.members.find(item=>item.task_id===id&&item.plan.path===source.path&&item.plan.sha256===source.sha256);
+    if(!member)continue;
+    const physical=readIsolation(owner,previous),placed=physical?.members.find(item=>item.member_index===member.index);
+    if(!physical||physical.run_id!==runId||!placed||digestOf(physical.integration_contract)!==digestOf(contract))continue;
+    if(runtime.code_roots.length!==placed.roots.length||runtime.code_roots.some(root=>!placed.roots.some(item=>item.root_id===root.id&&item.identity_sha256===root.identity_sha256
+        &&contract.code_roots.some(target=>target.id===root.id&&target.identity_sha256===item.integration_identity_sha256))))continue;
+    const directory=path.join(physical.base.batch_dir,BROKER_DIRECTORY),closed=reconciliation().readBatchClosedHistory({directory,manifest_sha256:row.broker_manifest_sha256});
+    if(!closed||closed.evidence.run_id!==runId||closed.evidence.batch_manifest_sha256!==previous.manifest_sha256||digestOf(closed.retirement.producer.row)!==digestOf(row))continue;
+    const report=closed.retirement.producer.witness.report.members.find(item=>item.index===member.index);
+    if(report?.outcome!=='acknowledged'||report.recheck!=='verified'||!HASH.test(report.ready_sha256||''))continue;
+    const witnessed=read(row.witness_ref);
+    if(digestOf(witnessed)!==digestOf(closed.retirement.producer.witness))return null;
+    const old=reconciliation().readBatchRetainedResult({directory,manifest_sha256:row.broker_manifest_sha256,member_index:member.index});
+    if(old.outcome.outcome!=='retained'||old.member.begin_key!==member.begin_key||old.member.runtime_contract_sha256!==codeRoots().digest(runtime))return null;
+    const stateFile=old.executed.recovery_baseline?.state_file;
+    if(typeof stateFile!=='string'||!path.isAbsolute(stateFile)||!stateFile.endsWith('.reset-state.json'))return null;
+    const file=stateFile.slice(0,-'.reset-state.json'.length)+'.receipt.json';
+    for(const root of [owner.real,...runtime.code_roots.map(item=>item.path),...contract.code_roots.map(item=>item.path)])require('./forge-xllm').validateResultFileTarget(file,root);
+    const raw=retainedRead(file,'batch-retained-invalid');if(!raw||sha256(raw)!==report.ready_sha256)return null;
+    const ready=JSON.parse(raw);
+    if(ready.phase!=='ready'||ready.delivery_capture?.passed!==true||ready.fingerprint!==old.executed.fingerprint||ready.dispatch_id!==old.member.dispatch_id)return null;
+    matches.push({ready});
+  }
+  if(matches.length!==1)return null;
+  return relative=>{
+    const artifacts=matches[0].ready.artifacts.filter(item=>item.path===relative);
+    const raw=retainedRead(path.join(owner.real,...relative.split('/')),'batch-retained-invalid');
+    return artifacts.length===1&&typeof artifacts[0].content==='string'&&raw&&sha256(raw)===sha256(Buffer.from(artifacts[0].content));
+  };
+}
+function predecessorNamespace(owner, manifest, id, source, contract, runId) {
   const records = [], read = relative => {
     if (typeof relative !== 'string' || /[:\\\0]/.test(relative) || relative.startsWith('/')
         || relative.split('/').some(part => !part || part === '.' || part === '..')) throw new Error('foreign proof reference');
@@ -933,16 +971,22 @@ function predecessorNamespace(owner, manifest, id, source, contract) {
     const base = `.gsd/milestones/${manifest.milestone}/slices/${manifest.slice}/tasks/${id}`;
     const input = read(`${base}/${id}-DELIVERY-INPUT.json`);
     if (input.plan !== source.path || input.plan_fingerprint !== source.sha256 || !Array.isArray(input.bindings) || !input.bindings.length) return null;
+    let namespace=contract,assertArtifact=null;
     if (input.schema_version === 2) {
       const measured = codeRoots().validateContract(input.execution_contract, { owner: owner.real, revalidate: true });
-      if (digestOf(measured) !== digestOf(contract)) return null;
+      if (digestOf(measured) !== digestOf(contract)) {
+        assertArtifact=retiredPredecessorNamespace(owner,manifest,id,source,contract,measured,runId,read);
+        if(!assertArtifact||!assertArtifact(`${base}/${id}-DELIVERY-INPUT.json`))return null;
+        namespace=measured;
+      }
     } else if (input.schema_version !== 1 || contract.code_roots.length !== 1) return null;
     for (const relative of new Set(input.bindings.map(binding => binding.source?.path))) {
-      const envelope = read(relative), root = contract.code_roots.find(row => row.id === (input.schema_version === 2 ? envelope.root_id : contract.primary_root_id));
+      const envelope = read(relative), root = namespace.code_roots.find(row => row.id === (input.schema_version === 2 ? envelope.root_id : namespace.primary_root_id));
+      if(assertArtifact&&!assertArtifact(relative))return null;
       if (!root || envelope.plan_fingerprint !== source.sha256 || typeof envelope.code_dir !== 'string'
           || codeRoots().key(fs.realpathSync.native(envelope.code_dir)) !== codeRoots().key(root.path)) return null;
       if (input.schema_version === 2 && (envelope.root_identity_sha256 !== root.identity_sha256
-          || envelope.execution_contract_sha256 !== codeRoots().digest(contract))) return null;
+          || envelope.execution_contract_sha256 !== codeRoots().digest(namespace))) return null;
     }
     return records;
   } catch (_) { return null; }
@@ -975,7 +1019,7 @@ function baseInputProvenance(scope, owner, manifest, admission, contract) {
     const authority = member ? 'manifest-member-plan' : 'controller-proven-predecessor';
     // Metadata is only a namespace check, never its own proof. The real controller proof
     // below must then validate these same bytes, followed by a stable reread of every pin.
-    const proofSources = member ? null : predecessorNamespace(owner, manifest, id, source, planContract);
+    const proofSources = member ? null : predecessorNamespace(owner, manifest, id, source, planContract, scope.run_id);
     if (!member && !proofSources) continue;
     plans.push({ task_id: id, path: source.path, sha256: sha, authority, ...(member ? {} : { proof_sources: proofSources }) });
     const refs = [
@@ -1009,7 +1053,7 @@ function baseInputProvenance(scope, owner, manifest, admission, contract) {
     const declaration = declarations.get(plan.task_id), roots = rootsOf(scope, { declaration });
     const planContract = codeRoots().validateContract({ schema_version: 2, owner: owner.real,
       primary_root_id: declaration.primary_root_id || roots[0].id, code_roots: roots });
-    if (digestOf(predecessorNamespace(owner, manifest, plan.task_id, plan, planContract)) === digestOf(plan.proof_sources)) allowed.add(plan.task_id);
+    if (digestOf(predecessorNamespace(owner, manifest, plan.task_id, plan, planContract, scope.run_id)) === digestOf(plan.proof_sources)) allowed.add(plan.task_id);
   }
   return { generation: copy(manifest.generation), plans: plans.filter(plan => allowed.has(plan.task_id)), entries: entries.filter(entry => allowed.has(entry.task_id)) };
 }
@@ -1232,12 +1276,13 @@ function prepareIsolationInside(scope, options, guard) {
   const parentRef = { claim: parent.write_claim };
   // The existing roots limit and isolation policy, never enlarged or rewritten.
   const extraRetained = parent.write_claim.execution_contract.code_roots.filter(root => !contract.code_roots.some(r => r.identity_sha256 === root.identity_sha256)
-    && !parent.write_claim.batch_roots?.some(ref => ref.root_id === root.id)).length;
-  const used = contract.code_roots.length + extraRetained + rows.reduce((total, row) => total + row.member.roots.length, 0) + retainedRoots(owner, manifest.batch_id);
+    && !parent.write_claim.batch_roots?.some(ref => ref.root_id === root.id));
+  const used = contract.code_roots.length + extraRetained.length + rows.reduce((total, row) => total + row.member.roots.length, 0)
+    + retainedRoots(owner, manifest.batch_id, extraRetained.map(root=>root.path));
   if (used > ROOTS_LIMIT) return serial('roots-limit');
   if (isolationRefused(scope.cwd)) return serial('isolation-policy');
   let baseInputs;
-  try { baseInputs = baseInputProvenance({ cwd: scope.cwd, code_root: codeRoot }, owner, manifest, admission, contract); }
+  try { baseInputs = baseInputProvenance({ cwd: scope.cwd, code_root: codeRoot, run_id:parent.id }, owner, manifest, admission, contract); }
   catch (_) { baseInputs = null; }
   if (!baseInputs) return serial('materialization-unsupported', { detail: 'untracked-base-unprovenance', root_id: null });
   const reservationData = { owner: owner.real, owner_key: owner.key, batch_id: manifest.batch_id, manifest_sha256: manifest.manifest_sha256,
@@ -1253,7 +1298,7 @@ function prepareIsolationInside(scope, options, guard) {
     let now;
     try {
       const admitted = currentAdmission(scope.cwd, owner, manifest);
-      now = admitted && baseInputProvenance({ cwd: scope.cwd, code_root: codeRoot }, owner, manifest, admitted, contract);
+      now = admitted && baseInputProvenance({ cwd: scope.cwd, code_root: codeRoot, run_id:parent.id }, owner, manifest, admitted, contract);
     } catch (_) { now = null; }
     if (!now || digestOf(now) !== digestOf(baseInputs)) refuse('batch-isolation-handle-stale', 'the exact admitted input provenance changed');
   };
@@ -2541,7 +2586,7 @@ async function runCohortWithGate(scope, options) {
 
 const CONSOLIDATION_SCHEMA = 'forge-execution-batch-consolidation-v1';
 const CONSOLIDATE_REQUEST_SCHEMA = 'forge-execution-batch-consolidate-request-v1';
-const CONSOLIDATE_REQUEST_KEYS = Object.freeze([...RUN_REQUEST_KEYS, 'broker_manifest_sha256']);
+const CONSOLIDATE_REQUEST_KEYS = Object.freeze([...RUN_REQUEST_KEYS, 'broker_manifest_sha256', 'memory_publications']);
 // The closed status of a consolidation and the closed outcome of each of its members.
 const CONSOLIDATION_STATUSES = Object.freeze(['consolidated', 'partial', 'failed', 'conflict']);
 const CONSOLIDATION_OUTCOMES = Object.freeze(['acknowledged', 'failed', 'needs-input', 'pending']);
@@ -2552,12 +2597,13 @@ const CONSOLIDATION_REASON_CODES = Object.freeze(['member-failed', 'member-inter
 const CONSOLIDATION_REFUSAL_CODES = Object.freeze(['batch-consolidation-request-invalid', 'batch-barrier-required',
   'batch-member-restore-refused', 'batch-member-delta-invalid', 'batch-operation-unexpected',
   'batch-consolidation-busy', 'batch-consolidation-cleanup-unproven', 'batch-consolidation-lock-lost',
-  'batch-retirement-pending', 'batch-retirement-stale', 'batch-retirement-owner-drift']);
+  'batch-retirement-pending', 'batch-retirement-stale', 'batch-retirement-owner-drift', 'batch-post-unit-invalid', 'batch-post-unit-stale', 'batch-post-unit-pending']);
 // Named in-process failpoints (a trusted test seam: the callback may throw to simulate a crash).
 const CONSOLIDATION_FAILPOINTS = Object.freeze(['consolidation-progress-intent', 'consolidation-progress-applied',
   'consolidation-member-verified', 'member-artifacts-intent', 'member-artifacts-applied', 'member-artifacts-committed',
   'member-integrated', 'controller-terminal-intent', 'controller-terminal-applied', 'member-acknowledged',
-  'claim-mutation-intent', 'claim-mutation-applied', 'claim-mutation-before-commit']);
+  'claim-mutation-intent', 'claim-mutation-applied', 'claim-mutation-before-commit',
+  'post-unit-intent', 'post-unit-applied', 'post-unit-before-commit']);
 const PROGRESS_PRODUCER = 'forge-execution-batch.progress';
 const ARTIFACTS_PRODUCER = 'forge-unit-sidecar.publishRetainedMember';
 const TERMINAL_PRODUCER = 'forge-unit-controller.batch-terminal';
@@ -2762,7 +2808,8 @@ async function finishPending(ctx) {
     HANDLES.get(ctx.cohort).retirement = producer;
     applyRetirement(ctx, producer);
     ctx.failpoint('claim-mutation-before-commit');
-  } else refuse('batch-operation-unexpected', `no producer of this consolidation replays a ${payload.species} operation`);
+  } else if (payload.species === 'post-unit' && producer.name === POST_UNIT_PRODUCER) applyPostUnit(ctx, producer);
+  else refuse('batch-operation-unexpected', `no producer of this consolidation replays a ${payload.species} operation`);
   await ctx.broker.commitOwnerOperation(ctx.cohort, record);
 }
 // The barrier's real outcome of each member still admitido, in one batch-progress operation.
@@ -2931,7 +2978,197 @@ function consolidationLock(owner, manifest) {
 function brokerJoined(cleanup) {
   return isObject(cleanup) && cleanup.status === 'joined' && cleanup.active_processes === 0;
 }
+const POST_UNIT_PRODUCER = 'forge-execution-batch.post-unit';
 const RETIRE_PRODUCER = 'forge-execution-batch.retire';
+function postUnitRelative(ctx, index) { return '.gsd/forge/batches/' + ctx.manifest.batch_id + '/post-unit/m' + index + '.json'; }
+function postUnitKey(ctx, retirement, member) {
+  const row = retirement.row.post_unit.find(item => item.member_index === member.index && item.unit === member.unit);
+  if (!row) refuse('batch-post-unit-invalid', 'the retirement does not queue this member');
+  return row.key;
+}
+function readPostUnitSource(ctx, retirement, lane) {
+  const expected = retirement.witness.report.members.find(item => item.index === lane.member.index);
+  const file = lane.inputs.resultFile + '.receipt.json';
+  for (const root of [ctx.owner.real, ...ctx.record.claim.execution_contract.code_roots.map(item => item.path)]) {
+    require('./forge-xllm').validateResultFileTarget(lane.inputs.resultFile, root);
+    if (codeRoots().within(root, path.resolve(file))) refuse('batch-post-unit-invalid', 'a result channel is inside a protected root');
+  }
+  const raw = retainedRead(file, 'batch-post-unit-invalid');
+  if (!raw || !expected?.ready_sha256 || sha256(raw) !== expected.ready_sha256) refuse('batch-post-unit-invalid', 'the queued ready source changed');
+  const ready = JSON.parse(raw);
+  if (ready.phase !== 'ready' || ready.result?.status !== 'done' || ready.dispatch_id !== lane.row.dispatch_id
+      || ready.delivery_capture?.passed !== true) refuse('batch-post-unit-invalid', 'a post-unit source is not the actual captured ready delivery');
+  const summaryPath=lane.member.plan.path.replace(/-PLAN\.md$/,'-SUMMARY.md');
+  const summaries=(ready.artifacts||[]).filter(item=>item.path===summaryPath);
+  if(summaries.length!==1||typeof summaries[0].content!=='string')refuse('batch-post-unit-invalid','the canonical full summary is not retained');
+  return { ready, summary:summaries[0].content, source: { file, sha256: expected.ready_sha256,
+    fingerprint: codeRoots().digest({ retirement_id: retirement.row.retirement_id, member_ref: lane.row.member_ref, ready_sha256: expected.ready_sha256 }) } };
+}
+function postUnitTarget(ctx, relative) {
+  if (!relative.startsWith('.gsd/') || relative.includes('\\') || relative.split('/').some(x => !x || x === '..' || x === '.')) refuse('batch-post-unit-invalid', 'invalid post-unit path');
+  const target = path.join(ctx.owner.real, relative);
+  let probe = target;
+  while (probe !== ctx.owner.real) {
+    if (fs.existsSync(probe) && fs.lstatSync(probe).isSymbolicLink()) refuse('batch-post-unit-invalid', 'a post-unit path is a link');
+    probe = path.dirname(probe);
+  }
+  return target;
+}
+function preparedPostUnitEvent(ctx, key, index, event) {
+  const relative = '.gsd/forge/events.jsonl', file = postUnitTarget(ctx, relative);
+  const before = retainedRead(file, 'batch-post-unit-invalid');
+  if (!before) refuse('batch-post-unit-invalid', 'the signed event stream is absent');
+  const content = Buffer.from(JSON.stringify({ ...event, event_id: key + ':' + event.event,
+    post_unit_key: key, batch_id: ctx.manifest.batch_id, member_index: index }) + '\n');
+  const after = Buffer.concat([before, content]);
+  return { content: content.toString('utf8'), descriptor: { path: relative, before_length: before.length,
+    after_length: after.length, before_sha256: sha256(before), append_sha256: sha256(content), after_sha256: sha256(after) } };
+}
+function postUnitEffects(ctx, producer) {
+  const effects = producer.decisions ? [{ path: path.relative(ctx.owner.real, producer.decisions.prepared.path).split(path.sep).join('/'),
+    before: producer.decisions.prepared.before, after: { sha256: producer.decisions.prepared.after } }] : [];
+  if (producer.memory?.prepared) effects.push({ path: path.relative(ctx.owner.real, producer.memory.prepared.path).split(path.sep).join('/'),
+    before: producer.memory.prepared.before, after: { sha256: producer.memory.prepared.after } });
+  for (const relative of producer.directories || []) {
+    if (!['.gsd/forge/file-locks/','.gsd/memory/.locks/'].includes(relative)) refuse('batch-post-unit-invalid','unknown publisher lock directory');
+    effects.push({path:relative,before:null,after:{directory:true}});
+  }
+  for (const a of producer.appends) effects.push({ path: a.path, before: a.before_sha256, after: { sha256: a.after_sha256 } });
+  effects.push({ path: producer.relative, before: producer.before, after: { sha256: sha256(progressBytes(producer.ledger)) } });
+  if (new Set(effects.map(effect => effect.path)).size !== effects.length) refuse('batch-post-unit-invalid', 'post-unit effects overlap');
+  return effects;
+}
+function readMemoryPostUnit(ctx, lane, ledger) {
+  const ref = ctx.options.memory_publications?.[lane.member.task_id];
+  if (!ref) return null;
+  if (!isObject(ref) || Object.keys(ref).sort().join(',') !== 'file,sha256' || !path.isAbsolute(ref.file) || !HASH.test(ref.sha256)) refuse('batch-post-unit-invalid', 'a memory request needs an exact external file pin');
+  const raw = retainedRead(ref.file, 'batch-post-unit-invalid');
+  if (!raw || sha256(raw) !== ref.sha256) refuse('batch-post-unit-invalid', 'the memory request changed');
+  const request = JSON.parse(raw);
+  const source = readPostUnitSource(ctx, HANDLES.get(ctx.cohort).retirement, lane);
+  if (codeRoots().key(fs.realpathSync(request.contextRoot || request.cwd)) !== ctx.owner.key
+      || request.milestoneId !== ctx.manifest.milestone || request.sourceUnitType !== 'execute-task'
+      || request.sourceUnitId !== lane.member.task_id || request.sourceFingerprint !== ledger.source.fingerprint
+      || request.sourceResult !== JSON.stringify(source.ready.result) || request.summaryContent !== source.summary) refuse('batch-post-unit-invalid', 'the memory request is not bound to this queued ready source');
+  const prepared = unitSidecar().prepareReadyMemoryPublication(request);
+  if (prepared.publication?.status === 'deferred') return null;
+  const { request: ignored, ...record } = prepared;
+  return { request_ref: copy(ref), ...record };
+}
+function applyPostUnit(ctx, producer) {
+  return controller().withOwnerBoundary(ctx.owner.real, ({ noLeases }) => {
+    if (!noLeases() || !retirementTerminal(ctx)) refuse('batch-post-unit-pending', 'all writers must remain stopped during post-unit publication');
+    return applyPostUnitInside(ctx, producer);
+  }, ctx.controllerOptions);
+}
+function applyPostUnitInside(ctx, producer) {
+  const retirement = HANDLES.get(ctx.cohort).retirement;
+  if (!retirement || producer.name !== POST_UNIT_PRODUCER || producer.batch_id !== ctx.manifest.batch_id
+      || producer.retirement_id !== retirement.row.retirement_id || !Array.isArray(producer.appends)) refuse('batch-post-unit-invalid', 'foreign post-unit producer');
+  for (const relative of producer.directories || []) {
+    if (!['.gsd/forge/file-locks/','.gsd/memory/.locks/'].includes(relative)) refuse('batch-post-unit-invalid','unknown publisher lock directory');
+    const target=postUnitTarget(ctx,relative.slice(0,-1));
+    if(fs.existsSync(target)){if(!fs.lstatSync(target).isDirectory())refuse('batch-post-unit-stale','publisher lock path changed');}
+    else fs.mkdirSync(target,{recursive:true});
+  }
+  if (producer.kind === 'member') {
+    const lane = ctx.lanes.find(item => item.member.index === producer.member_index);
+    if (!lane || producer.key !== postUnitKey(ctx, retirement, lane.member) || producer.relative !== postUnitRelative(ctx, lane.member.index)
+        || producer.ledger.key !== producer.key) refuse('batch-post-unit-invalid', 'foreign post-unit member');
+    const source = readPostUnitSource(ctx, retirement, lane);
+    if (codeRoots().digest(source.source) !== codeRoots().digest(producer.ledger.source)) refuse('batch-post-unit-invalid', 'queued source changed');
+    if (producer.decisions) {
+      if (codeRoots().digest(producer.decisions.fragment.decisions) !== codeRoots().digest(source.ready.result.key_decisions || [])) refuse('batch-post-unit-invalid', 'decisions are not from the result');
+      require('./forge-decisions').applyPreparedFragment(ctx.owner.real, producer.decisions.fragment, producer.decisions.prepared);
+    }
+    if (producer.memory) {
+      const raw = retainedRead(producer.memory.request_ref.file, 'batch-post-unit-invalid');
+      if (!raw || sha256(raw) !== producer.memory.request_ref.sha256) refuse('batch-post-unit-invalid', 'memory request changed');
+      unitSidecar().applyReadyMemoryPublication({ ...producer.memory, request: JSON.parse(raw) });
+    }
+  } else if (producer.kind === 'final') {
+    if (producer.relative !== '.gsd/forge/batches/' + ctx.manifest.batch_id + '/post-unit-complete.json'
+        || producer.key !== retirement.row.retirement_id + ':post-unit-complete' || producer.decisions || producer.memory || producer.appends.length) refuse('batch-post-unit-invalid', 'invalid post-unit final');
+    for (const member of ctx.manifest.members) {
+      const raw = retainedRead(postUnitTarget(ctx, postUnitRelative(ctx, member.index)), 'batch-post-unit-invalid');
+      const ledger = raw && JSON.parse(raw);
+      if (ledger?.status !== 'complete' || ledger.key !== postUnitKey(ctx, retirement, member)
+          || producer.ledger.members[member.index]?.sha256 !== sha256(raw)) refuse('batch-post-unit-pending', 'a queued member has not completed housekeeping');
+    }
+  } else refuse('batch-post-unit-invalid', 'unknown post-unit producer kind');
+  for (const append of producer.appends) {
+    const file = postUnitTarget(ctx, append.path), raw = retainedRead(file, 'batch-post-unit-invalid');
+    if (raw?.length === append.after_length && sha256(raw) === append.after_sha256) continue;
+    if (!raw || raw.length !== append.before_length || sha256(raw) !== append.before_sha256
+        || sha256(Buffer.from(producer.event_content)) !== append.append_sha256) refuse('batch-post-unit-stale', 'the event preimage changed');
+    fs.appendFileSync(file, producer.event_content);
+    if (sha256(retainedRead(file, 'batch-post-unit-invalid')) !== append.after_sha256) refuse('batch-post-unit-stale', 'the event readback changed');
+  }
+  const target = postUnitTarget(ctx, producer.relative), raw = retainedRead(target, 'batch-post-unit-invalid'), next = progressBytes(producer.ledger);
+  if (raw && sha256(raw) === sha256(next)) return;
+  if ((raw ? sha256(raw) : null) !== producer.before) refuse('batch-post-unit-stale', 'the queue changed');
+  if (!raw) {
+    if (!publishExclusive(ctx.owner, producer.relative.split('/').slice(0,-1), path.basename(producer.relative), producer.ledger, MAX_MANIFEST_BYTES, 'batch-post-unit-stale')) refuse('batch-post-unit-stale', 'the queue appeared');
+  } else {
+    require('./forge-yaml-safe').writeAtomic(target, next.toString('utf8'), { cwd:ctx.owner.real, runId:ctx.record.run_id });
+    if (sha256(retainedRead(target, 'batch-post-unit-invalid')) !== sha256(next)) refuse('batch-post-unit-stale', 'the queue readback changed');
+  }
+}
+async function postUnitOperation(ctx, producer) {
+  const intent = await ctx.broker.beginOwnerOperation(ctx.cohort, { species: 'post-unit', member_ref: producer.member_ref || null,
+    producer, effects: postUnitEffects(ctx, producer), prepared_at: producer.prepared_at });
+  ctx.failpoint('post-unit-intent');
+  applyPostUnit(ctx, producer);
+  ctx.failpoint('post-unit-applied');
+  ctx.failpoint('post-unit-before-commit');
+  await ctx.broker.commitOwnerOperation(ctx.cohort, intent);
+}
+async function finishPostUnits(ctx, retirement) {
+  HANDLES.get(ctx.cohort).retirement = retirement;
+  for (const lane of ctx.lanes) {
+    const relative = postUnitRelative(ctx, lane.member.index), raw = retainedRead(postUnitTarget(ctx, relative), 'batch-post-unit-invalid');
+    let ledger = raw && JSON.parse(raw);
+    if (ledger?.status === 'complete') continue;
+    const key = postUnitKey(ctx, retirement, lane.member), source = readPostUnitSource(ctx, retirement, lane);
+    if (ledger && (ledger.key !== key || codeRoots().digest(ledger.source) !== codeRoots().digest(source.source))) refuse('batch-post-unit-stale', 'the queued source changed');
+    const at = ledger?.prepared_at || new Date(nowOf(ctx.options)).toISOString();
+    const prefs = typeof ctx.options.prefsReader === 'function' ? ctx.options.prefsReader(ctx.owner.real) : require('./forge-prefs').readPrefs(ctx.owner.real);
+    const policy = ledger?.memory_policy || require('./forge-cost-policy').decideMemory({ memory: (prefs.prefs || prefs).memory, unitType: 'execute-task', result: JSON.stringify(source.ready.result) });
+    const decisions = !ledger && source.ready.result.key_decisions?.length ? (() => {
+      const fragment = { unit_id: ctx.manifest.milestone, decisions: source.ready.result.key_decisions };
+      return { fragment, prepared: require('./forge-decisions').prepareFragment(ctx.owner.real, fragment).prepared };
+    })() : null;
+    ledger ||= { schema: 'forge-batch-post-unit-v1', key, prepared_at: at, source: source.source,
+      memory_policy: policy, status: policy.decision === 'extract' ? 'awaiting-memory' : 'complete', memory: null };
+    const memory = policy.decision === 'extract' ? readMemoryPostUnit(ctx, lane, ledger) : null;
+    if (memory) ledger = { ...ledger, status: 'complete', memory: { receipt_file: memory.receipt_file,
+      receipt_sha256: memory.receipt_sha256, publication: memory.publication } };
+    if (!raw || memory) {
+      const event = !raw ? { ts: at, event: 'memory-policy', unit: lane.member.unit, decision: policy.decision, reason: policy.reason, mode: policy.mode }
+        : memory.event;
+      const preparedEvent = event ? preparedPostUnitEvent(ctx, key, lane.member.index, event) : null;
+      await postUnitOperation(ctx, { name: POST_UNIT_PRODUCER, kind: 'member', batch_id: ctx.manifest.batch_id,
+        retirement_id: retirement.row.retirement_id, key, member_index: lane.member.index, member_ref: lane.row.member_ref,
+        relative, before: raw ? sha256(raw) : null, prepared_at: at, ledger, decisions, memory,
+        directories:[...(decisions||memory?.prepared?['.gsd/forge/file-locks/']:[]),...(memory?.prepared?['.gsd/memory/.locks/']:[])].filter(relative=>!fs.existsSync(postUnitTarget(ctx,relative.slice(0,-1)))),
+        appends: preparedEvent ? [preparedEvent.descriptor] : [], event_content: preparedEvent?.content || null });
+    }
+  }
+  const members = ctx.manifest.members.map(member => {
+    const file = postUnitRelative(ctx, member.index), raw = retainedRead(postUnitTarget(ctx, file), 'batch-post-unit-invalid');
+    return { member_index: member.index, file, sha256: raw ? sha256(raw) : null, ledger: raw && JSON.parse(raw) };
+  });
+  if (members.some(row => row.ledger?.status !== 'complete')) return { status: 'pending', members: members.map(row => copy(row.ledger)) };
+  const relative = '.gsd/forge/batches/' + ctx.manifest.batch_id + '/post-unit-complete.json';
+  const ledger = { schema: 'forge-batch-post-unit-complete-v1', retirement_id: retirement.row.retirement_id,
+    members: members.map(({ member_index, file, sha256 }) => ({ member_index, file, sha256 })) };
+  const current = retainedRead(postUnitTarget(ctx, relative), 'batch-post-unit-invalid');
+  if (!current) await postUnitOperation(ctx, { name: POST_UNIT_PRODUCER, kind: 'final', batch_id: ctx.manifest.batch_id,
+    retirement_id: retirement.row.retirement_id, key: retirement.row.retirement_id + ':post-unit-complete', member_index: null,
+    relative, before: null, prepared_at: new Date(nowOf(ctx.options)).toISOString(), ledger, appends: [], decisions: null, memory: null });
+  else if (sha256(current) !== sha256(progressBytes(ledger))) refuse('batch-post-unit-stale', 'final queue witness changed');
+  return { status: 'complete', members: members.map(row => copy(row.ledger)) };
+}
 function retirementTerminal(ctx) {
   const progress = progressOf(ctx.owner, ctx.manifest);
   return ctx.manifest.members.every(member => {
@@ -3018,7 +3255,7 @@ async function retirementOperation(ctx, report) {
 }
 function retiredReport(ctx, proof) {
   if (!proof?.committed) return null;
-  if (ctx.evidence.surface?.matches_operations !== true) refuse('batch-retirement-owner-drift', 'post-unit owner changes require their own proven producer');
+  if (!ctx.historical && ctx.evidence.surface?.matches_operations !== true) refuse('batch-retirement-owner-drift', 'post-unit owner changes require their own proven producer');
   const producer = proof.producer, roots = codeRoots(), runApi = require('./forge-runs');
   runApi.validateBatchRetirements([producer.row], ctx.record.run_id);
   if (producer.name !== RETIRE_PRODUCER || producer.row?.locator.batch_id !== ctx.manifest.batch_id
@@ -3033,8 +3270,10 @@ function retiredReport(ctx, proof) {
   const raw = retainedRead(path.join(ctx.owner.real, producer.row.witness_ref), 'batch-retirement-stale');
   if (!effect?.after || sha256(raw) !== effect.after.sha256 || sha256(raw) !== sha256(progressBytes(producer.witness))) refuse('batch-retirement-stale', 'terminal witness bytes changed');
   if (!retirementTerminal(ctx)) refuse('batch-retirement-stale', 'a completed member proof changed');
-  return deepFreeze({ ...copy(producer.witness.report), operations: copy(proof.operations),
-    retirement: { status: 'retired', ...copy(producer.row) }, historical_replay: true });
+  const broker = ctx.broker ? { directory: ctx.broker.directory, manifest_sha256: ctx.broker.manifest_sha256,
+    generation: ctx.broker.generation, signer_sha256: ctx.broker.signer_sha256 } : copy(producer.witness.report.broker);
+  return deepFreeze({ ...copy(producer.witness.report), broker, operations: copy(proof.operations),
+    retirement: { status: 'retired', ...copy(producer.row) }, historical_replay: !ctx.broker });
 }
 async function consolidateCohort(scope, options = {}) {
   return autoGateContext(options, () => consolidateCohortWithGate(scope, options));
@@ -3049,13 +3288,16 @@ async function consolidateCohortWithGate(scope, options) {
   try {
     const directory = path.join(record.base.batch_dir, BROKER_DIRECTORY);
     // The sealed root evidence, read-only: the stream, the anchors and the barrier of the run's real join.
+    const closed = reconciliation().readBatchClosedHistory({ directory, manifest_sha256: options.broker_manifest_sha256 });
+    if (closed) return deepFreeze({ ...retiredReport({ owner, manifest, record, evidence:closed.evidence, historical:true }, closed.retirement),
+      post_unit:closed.post_unit, historical_replay:true });
     const evidence = reconciliation().readBatchEvidence({ directory, manifest_sha256: options.broker_manifest_sha256 });
     if (!evidence.barrier.sealed) refuse('batch-barrier-required', 'the cohort barrier is not sealed');
     if (evidence.batch_id !== manifest.batch_id || evidence.batch_manifest_sha256 !== manifest.manifest_sha256 || evidence.run_id !== record.run_id) {
       refuse('batch-manifest-foreign', 'the broker evidence belongs to another batch or run');
     }
     const retirement = reconciliation().readBatchRetirement({ directory, manifest_sha256: options.broker_manifest_sha256 });
-    if (retirement?.committed) return retiredReport({ owner, manifest, record, evidence }, retirement);
+    if (retirement?.committed && reconciliation().readBatchPostUnitComplete({ directory, manifest_sha256: options.broker_manifest_sha256 })) return retiredReport({ owner, manifest, record, evidence }, retirement);
     const barrierMembers = evidence.members.map(row => {
       const member = manifest.members[row.member_index];
       if (!member || member.task_id !== row.task_id || member.unit !== row.unit) refuse('batch-manifest-foreign', 'the broker registry names another member');
@@ -3093,7 +3335,10 @@ async function consolidateCohortWithGate(scope, options) {
     await finishPending(ctx);
     if (retirement) {
       const finished = reconciliation().readBatchRetirement({ directory, manifest_sha256: options.broker_manifest_sha256 });
-      if (finished?.committed) return retiredReport(ctx, finished);
+      if (finished?.committed) {
+        const post_unit = await finishPostUnits(ctx, finished.producer);
+        return deepFreeze({ ...retiredReport({ ...ctx, evidence: reconciliation().readBatchEvidence({ directory, manifest_sha256: options.broker_manifest_sha256 }) }, finished), post_unit });
+      }
     }
     await recordBarrier(ctx);
     let stop = null;
@@ -3108,9 +3353,10 @@ async function consolidateCohortWithGate(scope, options) {
     }
     const report = consolidationReport(ctx, stop, cohortCleanup(cohort));
     if (!stop && retirementTerminal(ctx)) {
-      const row = await retirementOperation(ctx, report), state = ctx.broker.operations();
+      const row = await retirementOperation(ctx, report);
+      const post_unit = await finishPostUnits(ctx, HANDLES.get(ctx.cohort).retirement), state = ctx.broker.operations();
       return deepFreeze({ ...report, operations: { committed: state.committed.length, pending: state.pending, head_sha256: state.head.sha256 },
-        retirement: { status: 'retired', ...row }, historical_replay: false });
+        retirement: { status: 'retired', ...row }, post_unit, historical_replay: false });
     }
     return deepFreeze({ ...report, retirement: { status: 'pending' } });
   } finally {
@@ -3197,7 +3443,7 @@ async function main(argv = process.argv.slice(2), io = {}) {
       owner_token: input.owner_token, batch_id: batchId, manifest_sha256: input.manifest_sha256, run_id: input.run_id,
       ...(input.code_root !== undefined ? { code_root: input.code_root } : {}) };
     if (command === 'consolidate') {
-      const report = await consolidateCohort(scope, { members: input.members, broker_manifest_sha256: input.broker_manifest_sha256 });
+      const report = await consolidateCohort(scope, { members: input.members, broker_manifest_sha256: input.broker_manifest_sha256, memory_publications: input.memory_publications });
       stdout.write(`${JSON.stringify(report)}\n`);
       return report.status === 'conflict' ? 1 : 0;
     }
@@ -3256,21 +3502,39 @@ function status(scope, options = {}) {
   const archived = run?.batch_retirements?.find(row => row.locator.batch_id === manifest.batch_id);
   if (archived) {
     const directory = path.join(physical.base.batch_dir, BROKER_DIRECTORY);
-    const proof = reconciliation().readBatchRetirement({ directory, manifest_sha256: archived.broker_manifest_sha256 });
-    const evidence = reconciliation().readBatchEvidence({ directory, manifest_sha256: archived.broker_manifest_sha256 });
-    const historical = retiredReport({ owner, manifest, record: physical,
-      evidence }, proof);
-    retirement = historical ? historical.retirement : { status: 'pending' };
+    const closed = reconciliation().readBatchClosedHistory({ directory, manifest_sha256: archived.broker_manifest_sha256 });
+    const proof = closed?.retirement || reconciliation().readBatchRetirement({ directory, manifest_sha256: archived.broker_manifest_sha256 });
+    const evidence = closed?.evidence || reconciliation().readBatchEvidence({ directory, manifest_sha256: archived.broker_manifest_sha256 });
+    const historical = retiredReport({ owner, manifest, record: physical, evidence, historical:!!closed }, proof);
+    retirement = historical ? { ...historical.retirement, post_unit:closed?.post_unit || {status:'pending'} } : { status: 'pending' };
   }
   return deepFreeze({ batch_id: manifest.batch_id, manifest_ref: manifestRef(manifest.batch_id), manifest_sha256: manifest.manifest_sha256,
     milestone: manifest.milestone, slice: manifest.slice, members, excluded: copy(manifest.excluded),
     terminal: members.every(member => TERMINAL_STATES.includes(member.state)), retirement });
 }
 
+// Every new owner begin shares the controller fence. A completed cohort's
+// deferred metadata must have its own signed final boundary before a new
+// protected writer can start. Historical records never create writer authority.
+function assertPostUnitBoundary(cwd) {
+  const runApi = require('./forge-runs'), census = runApi.boundedCensus(cwd);
+  if (census.unparseable.length) refuse('batch-post-unit-invalid', 'the owner run census is unknown');
+  const owner = ownerOf(cwd);
+  for (const run of census.parsed) for (const row of run.batch_retirements || []) {
+    runApi.validateBatchRetirements(run.batch_retirements, run.id);
+    const manifest = readManifestAt(owner, row.locator.batch_id), record = manifest && readIsolation(owner, manifest);
+    if (!record || record.run_id !== run.id) refuse('batch-post-unit-invalid', 'retained custody lost its manifest');
+    const closed = reconciliation().readBatchClosedHistory({ directory:path.join(record.base.batch_dir,BROKER_DIRECTORY),
+      manifest_sha256:row.broker_manifest_sha256 });
+    if (!closed) refuse('batch-post-unit-pending', 'finish the cohort post-unit queue before a new begin');
+  }
+  return true;
+}
+
 module.exports = {
   SCHEMA, PROGRESS_SCHEMA, KIND, ROOTS_LIMIT, MAX_MEMBERS, REASON_CODES, REFUSAL_CODES, MEMBER_STATES, TERMINAL_STATES, TRANSITIONS,
   BatchError, batchIdOf, memberBeginKey, memberBinding, validBinding, manifestRef, decide, dispatch, readManifest, readProgress,
-  appendProgress, status, publicMember, prepareIsolation, resolveIsolationHandle,
+  appendProgress, status, assertPostUnitBoundary, publicMember, prepareIsolation, resolveIsolationHandle,
   bindMemberExecution, resolveMemberExecution, validateMemberPlan, assertMemberRootOwner, resumeMemberExecution, memberRootReservation,
   openCohortBroker, closeCohortBroker, resolveBrokerCohort, brokerMemberBinding,
   isMemberView, memberSidecar, isMemberSidecar,

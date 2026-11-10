@@ -41,6 +41,16 @@ const { isGroupedFile, readGroupedUnits, readSniffBuffer, parseGroup, attachSnap
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const MEMORY_DIR = '.gsd/memory';
+const PREVIEW_FRAGMENT = Symbol('memory-fragment-preview');
+const EXPECTED_FRAGMENT = Symbol('memory-fragment-preimage');
+function preparedConflict() { throw Object.assign(new Error('Prepared memory publication changed'), { code: 'MEMORY_PUBLICATION_CONFLICT', reasonCode: 'prepared-publication-stale' }); }
+function fragmentDigest(content) { return crypto.createHash('sha256').update(content).digest('hex'); }
+function assertPreparedFragment(plan, file) {
+  if (!plan || Object.keys(plan).sort().join(',') !== 'after,before,path,schema'
+      || plan.schema !== 'forge-memory-fragment-prepared-v1' || plan.path !== file
+      || plan.before !== null && !/^[a-f0-9]{64}$/.test(plan.before)
+      || !/^[a-f0-9]{64}$/.test(plan.after || '')) preparedConflict();
+}
 const MAX_QUERY_BYTES = 512 * 1024;
 const FRAGMENT_LOCK_TTL_MS = 120 * 1000;
 const FRAGMENT_LOCK_ATTEMPTS = 200;
@@ -869,6 +879,7 @@ function writeFragment(cwd, fragment, opts) {
     const storageKey = qualifiedStorageKey(fragment.unit_id, milestoneId);
     const member = detectGroupedMember(cwd, storageKey, { milestoneId });
     if (member) {
+      if (opts[PREVIEW_FRAGMENT]) throw Object.assign(new Error('Grouped memory requires its existing quarantine publisher'), { code: 'MEMORY_PREPARE_GROUPED' });
       const remedy = `forge-sweep-project --undo ${member.path} → editar → reagrupar`;
       const { quarantineFragment } = require('./forge-memory-quarantine');
       let refusedFragment = fragment;
@@ -912,8 +923,9 @@ function writeFragment(cwd, fragment, opts) {
 
   // mkdir -p, then resolve the directory to prevent a .gsd/memory symlink
   // from redirecting writes outside the workspace.
-  assertMemoryDirectory(cwd, true);
-  const transactionLock = acquireFragmentLock(cwd, fpath, opts);
+  const preview = opts[PREVIEW_FRAGMENT] === true;
+  assertMemoryDirectory(cwd, !preview);
+  const transactionLock = preview ? null : acquireFragmentLock(cwd, fpath, opts);
   try {
     if (fs.existsSync(fpath)) {
       const targetStat = fs.lstatSync(fpath);
@@ -922,6 +934,13 @@ function writeFragment(cwd, fragment, opts) {
       }
     }
 
+    const preimage = fs.existsSync(fpath) ? fs.readFileSync(fpath) : null;
+    const beforeDigest = preimage === null ? null : fragmentDigest(preimage);
+    const expected = opts[EXPECTED_FRAGMENT];
+    if (expected) {
+      assertPreparedFragment(expected, fpath);
+      if (beforeDigest !== expected.before && beforeDigest !== expected.after) preparedConflict();
+    }
     // Read and merge only after acquiring the transaction lock. This is what
     // prevents two background forge-memory agents from both merging stale data.
     let base;
@@ -989,6 +1008,14 @@ function writeFragment(cwd, fragment, opts) {
     const body = eol === '\n' ? rawBody : rawBody.replace(/\r\n?|\n/g, eol);
     const content = `---${eol}${frontmatter}${eol}---${eol}${body}`;
 
+    const afterDigest = fragmentDigest(Buffer.from(content));
+    if (expected && expected.after !== afterDigest) preparedConflict();
+    if (preview) {
+      const now = fs.existsSync(fpath) ? fragmentDigest(fs.readFileSync(fpath)) : null;
+      if (now !== beforeDigest) preparedConflict();
+      return { path: fpath, created: false, transaction_result: transactionResult,
+        prepared: { schema: 'forge-memory-fragment-prepared-v1', path: fpath, before: beforeDigest, after: afterDigest } };
+    }
     if (fs.existsSync(fpath) && fs.readFileSync(fpath, 'utf8') === content) {
       const unchanged = { path: fpath, created: false };
       if (typeof opts.transaction === 'function') unchanged.transaction_result = transactionResult;
@@ -1004,7 +1031,7 @@ function writeFragment(cwd, fragment, opts) {
     if (typeof opts.transaction === 'function') committed.transaction_result = transactionResult;
     return committed;
   } finally {
-    transactionLock.release();
+    if (transactionLock) transactionLock.release();
   }
 }
 
@@ -1015,6 +1042,14 @@ function writeFragment(cwd, fragment, opts) {
 // entering the canonical store. The callback returns either the complete next
 // fragment or { fragment, result }; existing facts remain immutable and
 // facts/stats remain append-only through the merge guards above.
+function prepareFragmentTransaction(cwd, fragment, opts, transaction) {
+  if (typeof transaction !== 'function') throw new Error('memory transaction callback required');
+  return writeFragment(cwd, fragment, { ...(opts || {}), transaction, [PREVIEW_FRAGMENT]: true });
+}
+function applyPreparedFragmentTransaction(cwd, fragment, opts, transaction, prepared) {
+  if (typeof transaction !== 'function') throw new Error('memory transaction callback required');
+  return writeFragment(cwd, fragment, { ...(opts || {}), transaction, [EXPECTED_FRAGMENT]: prepared });
+}
 function transactFragment(cwd, fragment, opts, transaction) {
   if (typeof transaction !== 'function') {
     throw new Error('transactFragment requires a transaction callback');
@@ -1167,7 +1202,7 @@ module.exports = {
   parseFragment,
   serializeFrontmatter,
   writeFragment,
-  transactFragment,
+  transactFragment, prepareFragmentTransaction, applyPreparedFragmentTransaction,
   readFragment,
   readFragmentText,
   listFragments,

@@ -292,6 +292,7 @@ function coversRetainedExecution(run, contract, paths) {
     runs.validateBatchRetirements(run.batch_retirements, run.id);
     const roots = require('./forge-code-roots'), claim = run.write_claim;
     const checked = roots.validateContract(contract, { revalidate: true, owner: claim.execution_contract.owner });
+    if (!ordinaryRetainedProjection(run, checked)) return false;
     const groups = roots.claimGroups(claim), mapping = new Map();
     for (const root of checked.code_roots) {
       const group = groups.find(row => row.identity_sha256 === root.identity_sha256);
@@ -302,6 +303,19 @@ function coversRetainedExecution(run, contract, paths) {
       const group = mapping.get(row.root_id);
       return group && group.paths.some(path => roots.covers({ root_id: group.id, path }, { root_id: group.id, path: row.path }));
     });
+  } catch { return false; }
+}
+
+// Historical member custody never becomes an ordinary writable root, even if
+// the caller submits the complete retained union as its execution contract.
+// A resumed member needs the separate controller-bound member continuation.
+function ordinaryRetainedProjection(run, contract) {
+  if (!run?.batch_retirements?.length) return true;
+  try {
+    runs.validateBatchRetirements(run.batch_retirements, run.id);
+    const roots=require('./forge-code-roots'),checked=roots.validateContract(contract,{revalidate:true,owner:run.write_claim.execution_contract.owner});
+    const retained=new Set(run.batch_retirements.flatMap(row=>row.retained_roots.map(root=>root.identity_sha256)));
+    return checked.code_roots.every(root=>!retained.has(root.identity_sha256));
   } catch { return false; }
 }
 
@@ -684,7 +698,7 @@ module.exports = {
   replaceBatchClaim,
   readClaim,
   clearClaim,
-  retainBatchCustody, coversRetainedExecution,
+  retainBatchCustody, coversRetainedExecution, ordinaryRetainedProjection,
   releaseClaim,
   recoverClaim,
   isHeld,

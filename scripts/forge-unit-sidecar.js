@@ -405,8 +405,11 @@ function validateRecoveryRequest(raw, options = {}) {
             || roots.digest(held.write_claim) !== roots.digest(claim)) fail('execution-claim-generation-stale');
         if (held.batch_locator) fail('execution-member-handle-required');
         roots.claimGroups(claim);
-        if (roots.digest(claim.execution_contract) !== roots.digest(contract)
-            || checked.writes.some(p => !claim.paths.some(c => roots.covers(c, p)))) fail('execution-held-claim-mismatch');
+        const custody=require('./forge-write-claim');
+        if(!custody.ordinaryRetainedProjection(held,contract))fail('execution-member-handle-required');
+        if ((roots.digest(claim.execution_contract) !== roots.digest(contract)
+            || checked.writes.some(p => !claim.paths.some(c => roots.covers(c, p))))
+            && !custody.coversRetainedExecution(held,contract,checked.writes)) fail('execution-held-claim-mismatch');
         const gateFile = planFile.replace(/-PLAN\.md$/, '-PLAN-GATE.md');
         const gate = fs.existsSync(gateFile) ? fs.readFileSync(gateFile, 'utf8') : '';
         if (!/^status:\s*approved\s*$/m.test(gate)
@@ -1520,7 +1523,7 @@ function memoryPublicationReason(publication) {
   }
   return 'memory-publication-detail-redacted';
 }
-function appendMemoryPublicationEvent(request, record, result) {
+function appendMemoryPublicationEvent(request, record, result, preview = false) {
   if (!memoryBoundarySafe(request) || result.publication?.status === 'deferred') return null;
   const root = fs.realpathSync(request.contextRoot || request.cwd);
   const eventsFile = target(root, '.gsd/forge/events.jsonl');
@@ -1556,9 +1559,50 @@ function appendMemoryPublicationEvent(request, record, result) {
     memory_contract_version: record.memory_contract?.schema_version === NEW_MEMORY_SCHEMA_VERSION ? NEW_MEMORY_SCHEMA_VERSION : null,
     ...telemetry,
   };
+  if (preview) return event;
   fs.mkdirSync(path.dirname(eventsFile), { recursive: true });
   fs.appendFileSync(eventsFile, JSON.stringify(event) + '\n');
   return event;
+}
+// A cohort's post-unit publisher consumes only an already validated READY memory
+// response. This seam never invokes a worker, marks a receipt ready, or changes it.
+// The same request fingerprint/telemetry and fragment producer as ordinary replay
+// are used; the batch broker signs the fragment and event effects before apply.
+function prepareReadyMemoryPublication(request) {
+  const r = request || {}, loc = locations({ ...r, unitType: 'memory-extract' });
+  if (!memoryBoundarySafe(r)) fail('memory-publication-boundary-required');
+  const native = r.route?.worker_mode === 'native';
+  const files = native ? nativeReceiptFiles(r) : artifactAttemptFiles(r);
+  const stat = fs.lstatSync(files.receiptFile);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_ARTIFACT_PAYLOAD_BYTES) fail('memory-ready-invalid');
+  const bytes = fs.readFileSync(files.receiptFile), record = JSON.parse(bytes);
+  const fingerprint = native ? nativeMemoryFingerprint(r)
+    : memoryRequestFingerprint(artifactFingerprint(r), memoryEvidenceContract(r, loc.sourceUnit));
+  if (record.phase !== 'ready' || record.kind !== 'memory-extraction' || record.fingerprint !== fingerprint
+      || record.dispatch_id !== r.dispatchId || record.source_unit !== loc.sourceUnit) fail('dispatch-identity-conflict');
+  if (native) {
+    const identity = nativeMemoryIdentity(r, record.telemetry);
+    if (record.model !== identity.model || record.effort !== identity.effort) fail('native-memory-telemetry-mismatch');
+  }
+  const options = { cwd: r.contextRoot || r.cwd, extraction: record.extraction, sourceContext: memorySourceContext(r, record) };
+  const preview = require('./forge-memory-extraction').prepareExtractionPublication(options);
+  const publication = preview.status === 'prepared' ? preview.publication : preview;
+  const event = appendMemoryPublicationEvent(r, record, { status: record.extraction.status, extraction: record.extraction, publication }, true);
+  if (hash(fs.readFileSync(files.receiptFile)) !== hash(bytes)) fail('memory-ready-changed');
+  return { schema: 'forge-ready-memory-publication-v1', receipt_file: files.receiptFile,
+    receipt_sha256: hash(bytes), request: r, prepared: preview.prepared || null, publication, event };
+}
+function applyReadyMemoryPublication(prepared) {
+  if (!prepared || prepared.schema !== 'forge-ready-memory-publication-v1') fail('memory-ready-invalid');
+  const current = prepareReadyMemoryPublication(prepared.request);
+  if (current.receipt_sha256 !== prepared.receipt_sha256) fail('memory-ready-changed');
+  if (prepared.prepared) {
+    const record = JSON.parse(fs.readFileSync(prepared.receipt_file, 'utf8'));
+    return require('./forge-memory-extraction').applyPreparedExtractionPublication({ cwd: prepared.request.contextRoot || prepared.request.cwd,
+      extraction: record.extraction, sourceContext: memorySourceContext(prepared.request, record) }, prepared.prepared);
+  }
+  if (prepared.publication?.status === 'deferred') fail('memory-publication-deferred');
+  return prepared.publication;
 }
 // Review-fix publication, parent-owned and replayable from a ready receipt:
 //   1. commit (only git + auto_commit) with a durable intent persisted first and
@@ -4362,7 +4406,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
 module.exports = { appendProtectedOwnerEvents, preflightExecutionVerification, schema, memorySchema, memorySchemaV2, NEW_MEMORY_SCHEMA_VERSION, memoryExtractionSchema, memoryResponseSchema,
   memoryTransportSchema, memoryEvidenceContract, MEMORY_QUALITY_CONTRACT, locations, milestonePlanFile, validateRecoveryRequest, projectTransportOptions, captureMilestoneBaseline, reconcileMilestoneAttempt, validateArtifacts, inspectArtifacts, inspectDeliveryContent, executeDeliveryArtifacts, MAX_ARTIFACT_BYTES,
   MAX_ARTIFACT_PAYLOAD_BYTES, target, markChecked, createTaskMarker, verifyTaskMarker, materialize, memoryPrompt, memorySourceContext,
-  publishReadyRecord, nativeMemoryFingerprint, acceptNativeMemoryResult, candidateFromNativeResult, runNativeMemory,
+  publishReadyRecord, prepareReadyMemoryPublication, applyReadyMemoryPublication, nativeMemoryFingerprint, acceptNativeMemoryResult, candidateFromNativeResult, runNativeMemory,
   routeIdentity, artifactFingerprint, artifactAttemptFiles, beginArtifactAttempt, replayArtifactAttempt, reconcileLegacyReviewFix,
   failArtifactAttempt, acceptArtifactResult, reconcileArtifactAttempt, runUnitSidecar, recoverUnitSidecar, reviewFixUnitLabel, effortTelemetry,
   cliObservers, verificationFailureRef, verifyRetainedExecution, retainedPublication, publishRetainedMember };

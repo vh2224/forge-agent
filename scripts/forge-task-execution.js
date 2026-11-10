@@ -199,6 +199,7 @@ function prepare(r, root, cwd) {
         || roots.digest(held.write_claim) !== roots.digest(claim)) fail('execution-claim-generation-stale');
     roots.claimGroups(claim);
     if (!member && held.batch_locator) fail('execution-member-handle-required');
+    if (!member && !require('./forge-write-claim').ordinaryRetainedProjection(held,contract)) fail('execution-member-handle-required');
     if (!member && (roots.digest(claim.execution_contract) !== roots.digest(contract)
         || claims.some(p => !claim.paths.some(c => roots.covers(c, p))))
         && !require('./forge-write-claim').coversRetainedExecution(held, contract, claims)) fail('execution-held-claim-mismatch');

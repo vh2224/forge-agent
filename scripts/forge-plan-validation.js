@@ -1793,7 +1793,38 @@ function inspectOwnerPlanMutations(cwd, scope) {
   });
 }
 
+// Read-only continuation binding for an admitted decompose, never authority.
+function readDecompositionAdmission(cwd, mutationRef) {
+  const ref = parseMutationRef(mutationRef), owner = physicalMutationOwner(cwd);
+  const chain = readMutationChain(owner, ref.milestone, ref.slice);
+  const intent = chain.records[ref.sequence - 1], admitted = chain.records[ref.sequence];
+  if (!intent || intent.kind !== 'intent' || intent.operation !== 'decompose' || intent.record_sha256 !== ref.intent_sha256
+      || !admitted || admitted.kind !== 'admission' || admitted.previous_sha256 !== intent.record_sha256
+      || admitted.operation !== 'decompose' || admitted.evidence.graph_status !== 'valid') {
+    refuse('plan-mutation-ref-invalid', 'one exact admitted decompose is required');
+  }
+  const parent = intent.before.task_plans.find(row => row.id === intent.parent_task_id);
+  if (!parent) refuse('plan-mutation-parent-invalid', 'the original parent is absent');
+  return deepFreeze({ mutation_ref: mutationRef, admission_sha256: admitted.record_sha256,
+    milestone: intent.milestone, slice: intent.slice, parent_task_id: intent.parent_task_id,
+    parent_plan_sha256: parent.sha256, added_task_ids: [...admitted.evidence.added_task_ids] });
+}
+
 // ── Exports ───────────────────────────────────────────────────────────────────
+
+function admittedDecompositions(cwd, scope) {
+  const input = scopeOf(scope, ['owner', 'milestone', 'slice'], ['milestone', 'slice']), owner = physicalMutationOwner(cwd);
+  const chain = readMutationChain(owner, input.milestone, input.slice), out = [];
+  for (const intent of chain.records.filter(row => row.kind === 'intent' && row.operation === 'decompose')) {
+    if (!chain.records[intent.sequence] || chain.records[intent.sequence].kind !== 'admission') continue;
+    const current = readOwnerTaskPlan(cwd, { milestone: input.milestone, slice: input.slice, task: intent.parent_task_id });
+    const prior = intent.before.task_plans.find(row => row.id === intent.parent_task_id);
+    const restored = current.status === 'ok' ? withoutDecomposed(current.content) : null;
+    if (!prior || restored === null || sha256(Buffer.from(restored, 'utf8')) !== prior.sha256) refuse('plan-mutation-parent-altered', 'admitted decompose parent changed');
+    out.push(readDecompositionAdmission(cwd, mutationRefOf(intent)));
+  }
+  return deepFreeze(out);
+}
 
 module.exports = {
   REQUIREMENT, REQUIREMENT_SHA256, MAX_PLAN_BYTES, TRANSACTION_FIELDS, CODES,
@@ -1801,7 +1832,7 @@ module.exports = {
   validateNewSlicePlan, collectOwnerSlicePlan, readOwnerTaskPlan, buildPlanGeneration, verifyPlanGeneration,
   planGenerationIntegrity, buildPlanValidation, verifyPlanValidation, semanticDigest, assertCurrentGeneration,
   classifySliceGeneration, assertSliceGeneration,
-  MUTATION_OPERATIONS, beginOwnerPlanMutation, finishOwnerPlanMutation, inspectOwnerPlanMutations,
+  MUTATION_OPERATIONS, beginOwnerPlanMutation, finishOwnerPlanMutation, inspectOwnerPlanMutations, readDecompositionAdmission, admittedDecompositions,
   listedTaskIds, // the parsePlanTasks mirror, exported so the suite pins its parity
 };
 

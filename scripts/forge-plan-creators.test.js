@@ -595,6 +595,190 @@ test('issue343 U0e the mutation chain is exact, bound to its owner and fails clo
   assert.deepStrictEqual([current.task_ids, current.amendment.sequence], [['T01', 'T02', 'T03', 'T04'], 4], 'the last admitted amendment is the anchor');
 });
 
+test('issue343 R9 single repair decomposes through real auto and next adapter without accepting parent', () => {
+  const workflow = require('./forge-long-workflow-adapter'), recovery = require('./forge-attempt-recovery');
+  for (const mode of ['auto', 'task']) {
+    const r9Plan = (id, opts) => taskPlan(id, opts).replace(/  artifacts:\n    - path:[\s\S]*?  key_links:/, '  artifacts: []\n  key_links:');
+    const tasks = { T01: r9Plan('T01'), T02: r9Plan('T02', { depends: 'depends: [T01]' }), ...(mode === 'task' ? { T03: r9Plan('T03') } : {}) };
+    const f = planned('r9-' + mode, tasks), dir = f.dir;
+    const input = { cwd: dir, milestone: M, owner_token: 'r9-owner-' + mode, workflow_id: 'r9-flow-' + mode, ...(mode === 'auto' ? { max_steps: 5 } : {}) };
+    const invoke = (command, snapshot, extra = {}, options = live) => workflow.invoke(HOST, mode, command, { ...input, ...extra }, snapshot, options).result;
+    let live = { prefsReader };
+    const selected = invoke('next', null);assert.strictEqual(selected.unit?.key, 'execute-task/T01', JSON.stringify(selected));
+    selected.snapshot.pending_questions = [{ id: 'r9-kept-answer', question: 'kept fixture decision', status: 'resolved', answer: 'keep' }];
+    const original = controller.lookupRecord(dir, 'transaction', selected.controller_result.details.transaction.idempotency_key);
+    const request = { cwd: dir, contextRoot: dir, milestoneId: M, sliceId: S, taskId: 'T01', phase: 'execute', scope: 'milestone', unitType: 'execute-task',
+      workflowId: input.workflow_id, dispatchId: 'r9-dispatch-' + mode, planFile: taskFile(dir, 'T01'), route: { host_runtime: HOST, resolved_worker_engine: 'claude' } };
+    const receipt = path.join(TMP, 'r9-' + mode + '.receipt.json');
+    fs.writeFileSync(receipt, JSON.stringify({ phase: 'ready', fingerprint: require('./forge-unit-sidecar').artifactFingerprint(request),
+      recovery_identity_sha256: require('./forge-code-roots').digest(recovery.requestIdentity(request)),
+      execution: { inputs: { [request.planFile]: sha(fs.readFileSync(request.planFile)) } }, result: { status: 'done', questions: [] } }));
+    const receiptBytes = fs.readFileSync(receipt), originalBytes = fs.readFileSync(controller.transactionFile(dir, original.idempotency_key));
+    repair.incrementRepairCount(taskFile(dir, 'T01'));
+    const stopped = spawnSync(process.execPath, ['-e', 'process.exit(0)'], { windowsHide: true });assert.strictEqual(stopped.status, 0);
+    const context = { request, receipt_path: receipt, begin_key: original.idempotency_key, begin_checksum: controller.recordChecksum(original),
+      roots: [{ root_id: 'primary', path: dir }], pending_questions: [] };
+    const contexts = new Map([[original.idempotency_key, context]]);
+    live = { prefsReader, inspectAttempt: ({ begin }) => contexts.get(begin.idempotency_key), processProbe: () => stopped.status === 0 ? 'stopped' : 'unknown',
+      reconcileRoots: ({ root }) => ({ root_id: root.root_id, process_stopped: root.path === fs.realpathSync.native(dir), reconciled: root.path === fs.realpathSync.native(dir) }) };
+    const unknown = invoke('decompose-pause', selected.snapshot, {}, { ...live, processProbe: () => 'unknown' });
+    assert.strictEqual(unknown.outcome, 'blocked');assert.strictEqual(unknown.snapshot.step_count, 1);
+    const foreign = structuredClone(selected.snapshot);foreign.last_decision.controller_result.details.transaction.begin_checksum = '0'.repeat(64);
+    assert.strictEqual(invoke('decompose-pause', foreign).reason_code, 'unit-identity-mismatch');
+    context.pending_questions = [{ id: 'r9-question', question: 'unresolved fixture decision', status: 'pending' }];
+    assert.strictEqual(invoke('decompose-pause', selected.snapshot).reason_code, 'pending-questions');context.pending_questions = [];
+    const unverifiedRoot = invoke('decompose-pause', selected.snapshot, {}, { ...live, reconcileRoots: ({ root }) => ({ root_id: root.root_id, process_stopped: true, reconciled: false }) });
+    assert.strictEqual(unverifiedRoot.reason_code, 'roots-unreconciled');
+    const validParent = fs.readFileSync(taskFile(dir, 'T01'));
+    const unanchored = JSON.parse(receiptBytes);delete unanchored.execution;
+    fs.writeFileSync(receipt, JSON.stringify(unanchored));
+    assert.strictEqual(invoke('decompose-pause', selected.snapshot).reason_code, 'attempt-evidence-missing', 'legacy unknown original plan hash is never backfilled');
+    fs.writeFileSync(receipt, receiptBytes);
+    fs.writeFileSync(taskFile(dir, 'T01'), validParent.toString('utf8').replace('writes:', 'writes:\n  - foreign.js'));
+    assert.strictEqual(invoke('decompose-pause', selected.snapshot).outcome, 'blocked', 'repair_count does not permit a contract rewrite');
+    fs.writeFileSync(taskFile(dir, 'T01'), validParent);
+    fs.writeFileSync(taskFile(dir, 'T01'), validParent.toString('utf8').replace('fixture behavior is observable', 'rewritten business goal'));
+    assert.strictEqual(invoke('decompose-pause', selected.snapshot).reason_code, 'attempt-evidence-changed', 'semantic DAG identity never permits rewriting original must-haves');
+    fs.writeFileSync(taskFile(dir, 'T01'), validParent);
+    const paused = invoke('decompose-pause', selected.snapshot);assert.strictEqual(paused.lifecycle, 'paused', JSON.stringify(paused));
+    assert.strictEqual(paused.snapshot.step_count, 1);assert.strictEqual(controller.incompleteUnits(dir, M).length, 1, 'pause alone cannot select unrelated work');
+    assert.strictEqual(state.read(dir, M).auto_mode, 'on', 'administrative repair preserves current auto mode');
+    assert.strictEqual(paused.snapshot.pending_questions.find(row => row.id === 'r9-kept-answer')?.answer, 'keep', 'earlier accepted answers survive administrative pause');
+    const mutation = pv.beginOwnerPlanMutation(dir, { operation: 'decompose', milestone: M, slice: S, parentTaskId: 'T01', changedTaskIds: ['T01.1', 'T01.2'], ownerBinding: { owner: dir } });
+    const parentPlan = fs.readFileSync(taskFile(dir, 'T01'), 'utf8');writeTask(dir, 'T01', parentPlan.replace(/^---\n/, '---\nstatus: DECOMPOSED\n'));
+    writeTask(dir, 'T01.1', r9Plan('T01.1', { file: 'src/t01.js' }));writeTask(dir, 'T01.2', r9Plan('T01.2', { depends: 'depends: [T01.1]', file: 'src/t01.js' }));
+    writeSlice(dir, `# ${S}: Fixture slice\n\n## Tasks\n\n- [ ] **T01** *(DECOMPOSED — see sub-tasks below)*\n  - [ ] T01.1: first child\n  - [ ] T01.2: second child\n- [ ] **T02**: T02 fixture task\n${mode === 'task' ? '- [ ] **T03**: T03 fixture task\n' : ''}\nSlice prose.\n`);
+    pv.finishOwnerPlanMutation(dir, mutation.mutation_ref);
+    const noStop = invoke('decompose-continue', paused.snapshot, { mutation_ref: mutation.mutation_ref }, { ...live, processProbe: () => 'unknown' });
+    assert.strictEqual(noStop.outcome, 'blocked');assert.strictEqual(noStop.snapshot.step_count, 1);
+    const foreignFlow = structuredClone(paused.snapshot);foreignFlow.workflow_id += '-foreign';
+    assert.strictEqual(invoke('decompose-continue', foreignFlow, { mutation_ref: mutation.mutation_ref }).reason_code, 'unit-identity-mismatch');
+    for (const mutate of [snapshot => { snapshot.step_count = 0; }, snapshot => { snapshot.max_steps += 1; }]) {
+      const foreignBudget = structuredClone(paused.snapshot);mutate(foreignBudget);
+      assert.strictEqual(invoke('decompose-continue', foreignBudget, { mutation_ref: mutation.mutation_ref }).reason_code, 'unit-identity-mismatch', 'foreign budget cannot mint a replacement step');
+    }
+    const continued = invoke('decompose-continue', paused.snapshot, { mutation_ref: mutation.mutation_ref });
+    assert.strictEqual(continued.outcome, 'dispatch_required', JSON.stringify(continued));assert.strictEqual(continued.unit.key, 'execute-task/T01.1');
+    assert.strictEqual(continued.snapshot.step_count, 1);assert.strictEqual(continued.snapshot.workflow_id, selected.snapshot.workflow_id);
+    const repeatedContinue = invoke('decompose-continue', paused.snapshot, { mutation_ref: mutation.mutation_ref });
+    assert.strictEqual(repeatedContinue.controller_result.details.transaction.idempotency_key, continued.controller_result.details.transaction.idempotency_key);
+    assert.strictEqual(repeatedContinue.snapshot.step_count, 1, 'replaying substitution never reuses the reservation twice');
+    const child = controller.lookupRecord(dir, 'transaction', continued.controller_result.details.transaction.idempotency_key);
+    assert.strictEqual(continued.snapshot.max_steps, selected.snapshot.max_steps);assert.strictEqual(child.decomposition_entry.replaces_parent_step, 1);
+    if (mode === 'task') assert.strictEqual(continued.snapshot.max_steps, 1, 'forge-next default is exercised without override');
+    const bothBegins = controller.readEvents(controller.eventsFile(dir, M)).filter(row => row.action === 'begin' && [original.idempotency_key, child.idempotency_key].includes(row.idempotency_key));assert.strictEqual(bothBegins.length, 2, 'two real dispatch beginnings remain in history');
+    assert.strictEqual(child.decomposition_entry.mutation_ref, mutation.mutation_ref);assert.strictEqual(child.decomposition_entry.parent_begin_key, original.idempotency_key);
+    assert(fs.readFileSync(controller.transactionFile(dir, original.idempotency_key)).equals(originalBytes));assert(fs.readFileSync(receipt).equals(receiptBytes));
+    const parentTerminal = controller.lookupRecord(dir, 'transaction', child.decomposition_entry.pause_key);assert.strictEqual(parentTerminal.action, 'pause');assert.strictEqual(parentTerminal.result.status, 'cancelled');
+    const pending = controller.incompleteUnits(dir, M);assert.deepStrictEqual(pending.map(row => row.unit.key), ['execute-task/T01.1']);
+    const replay = invoke('next', continued.snapshot);assert.strictEqual(replay.outcome, 'dispatch_required', JSON.stringify(replay));assert.strictEqual(replay.snapshot.step_count, 1);
+    const canonicalPlan = fs.readFileSync(sliceFile(dir));
+    try {
+      let claimed = canonicalPlan.toString('utf8').replace('- [ ] T01.1:', '- [x] T01.1:').replace('- [ ] T01.2:', '- [x] T01.2:');
+      fs.writeFileSync(sliceFile(dir), claimed);
+      if (mode === 'task') assert.strictEqual(controller.select(dir, { milestone: M }, { prefsReader }).unit.key, 'execute-task/T03', 'independent work remains selectable');
+      claimed = claimed.replace('- [ ] **T03**:', '- [x] **T03**:');fs.writeFileSync(sliceFile(dir), claimed);
+      const barrier = controller.select(dir, { milestone: M }, { prefsReader });
+      assert.strictEqual(barrier.reason, 'decomposition-verification-required', 'checkboxes never prove parent completion or satisfy its dependents');
+      assert(!claimed.includes('- [x] **T01**'), 'parent remains unchecked');
+    } finally { fs.writeFileSync(sliceFile(dir), canonicalPlan); }
+    {
+      const git = args => { const out = spawnSync('git', args, { cwd: dir, encoding: 'utf8', windowsHide: true });assert.strictEqual(out.status, 0, out.stderr);return out.stdout; };
+      fs.writeFileSync(path.join(dir, '.gitignore'), '.gsd/\n');fs.mkdirSync(path.join(dir, 'src'), { recursive: true });fs.writeFileSync(path.join(dir, 'src/t01.js'), 'module.exports = 0;\n');
+      git(['init', '-q']);git(['config', 'core.autocrlf', 'false']);git(['add', '.gitignore', 'src']);git(['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','-c','commit.gpgsign=false','commit','-qm','fixture base']);
+      const verify = require('./forge-verify'), rootApi = require('./forge-code-roots'), delivery = require('./forge-delivery');
+      const finishReal = (dispatch, id, value) => {
+        fs.writeFileSync(path.join(dir, 'src/t01.js'), 'module.exports = ' + value + ';\n');
+        const plan = fs.readFileSync(taskFile(dir, id), 'utf8'), base = '.gsd/milestones/' + M + '/slices/' + S + '/tasks/' + id + '/' + id;
+        const contract = rootApi.singleContract(dir, dir), unit = { type: 'task', id, milestone: M, slice: S };
+        const command = "node -e \"require('assert/strict').equal(require('./src/t01.js')," + value + ")\"";
+        const gate = verify.runRootVerification(contract, { unit, planFingerprint: sha(plan), preferenceCommands: [command] });assert(gate.passed, JSON.stringify(gate));
+        const source = base + '-VERIFY-ENVELOPE.json';fs.writeFileSync(path.join(dir, source), JSON.stringify(gate.roots[0]));
+        const inputProof = { schema_version: 2, execution_contract: contract, unit, plan: base + '-PLAN.md', plan_fingerprint: sha(plan),
+          bindings: [{ criterion: { kind: 'truth', index: 0 }, aspect: 'default', coverage: 'behavioral', source: { kind: 'verification', path: source, check_index: 0 } }] };
+        fs.writeFileSync(path.join(dir, base + '-DELIVERY-INPUT.json'), JSON.stringify(inputProof));
+        const projected = delivery.buildDelivery(inputProof, { ownerRoot: dir, codeDir: dir });assert(projected.criteria.every(row => row.status === 'verificado'), JSON.stringify(projected));
+        fs.writeFileSync(path.join(dir, base + '-DELIVERY.json'), JSON.stringify(projected));
+        const begin = controller.lookupRecord(dir, 'transaction', dispatch.controller_result.details.transaction.idempotency_key);
+        const currentRequest = { ...request, taskId: id, dispatchId: 'r9-verified-' + id, planFile: taskFile(dir, id) };
+        const file = path.join(TMP, 'r9-verified-' + id + '.receipt.json');fs.writeFileSync(file, JSON.stringify({ phase: 'ready', fingerprint: require('./forge-unit-sidecar').artifactFingerprint(currentRequest),
+          recovery_identity_sha256: rootApi.digest(recovery.requestIdentity(currentRequest)), result: { status: 'done', questions: [] } }));
+        contexts.set(begin.idempotency_key, { request: currentRequest, receipt_path: file, begin_key: begin.idempotency_key, begin_checksum: controller.recordChecksum(begin), roots: [{ root_id: 'primary', path: dir }], pending_questions: [] });
+        let container = fs.readFileSync(sliceFile(dir), 'utf8');container = container.replace('- [ ] ' + id + ':', '- [x] ' + id + ':').replace('- [ ] **' + id + '**', '- [x] **' + id + '**');fs.writeFileSync(sliceFile(dir), container);
+        const completed = invoke('complete', dispatch.snapshot, { result: { status: 'done' } });assert.strictEqual(completed.outcome, 'completed', JSON.stringify(completed));return completed;
+      };
+      const firstDone = finishReal(continued, 'T01.1', 1);
+      if (mode === 'task') {
+        assert.strictEqual(firstDone.lifecycle, 'completed');assert.strictEqual(firstDone.snapshot.step_count, 1);assert.strictEqual(firstDone.snapshot.max_steps, 1);
+        assert.strictEqual(controller.incompleteUnits(dir, M).length, 0, 'one genuine substituted child delivery closes forge-next');
+      } else {
+      assert.throws(() => controller.beginSerial(dir, { milestone: M, slice: S, unit: 'execute-task/T01.2', host_runtime: HOST,
+        owner_token: input.owner_token, idempotency_key: 'r9-forged-second-slot', state_patch: { active_slice: S },
+        decomposition_from: { pause_key: child.decomposition_entry.pause_key, pause_checksum: child.decomposition_entry.pause_checksum, mutation_ref: mutation.mutation_ref } },
+      { ...live, workflow: { workflow_id: input.workflow_id, step_count: 1, max_steps: 5 } }), error => error.code === 'record-conflict', 'the second child cannot reuse the parent reservation');
+      const second = invoke('next', firstDone.snapshot);assert.strictEqual(second.unit.key, 'execute-task/T01.2', JSON.stringify(second));
+      const secondDone = finishReal(second, 'T01.2', 2);
+      const expectedVerification = controller.select(dir, { milestone: M }, { prefsReader }).decomposition_verification;
+      const forgedVerification = structuredClone(expectedVerification);forgedVerification.children_sha256 = '0'.repeat(64);
+      assert.throws(() => controller.beginSerial(dir, { milestone: M, slice: S, unit: 'execute-task/T01', host_runtime: HOST, owner_token: input.owner_token,
+        idempotency_key: 'r9-forged-parent-proof', state_patch: { active_slice: S }, decomposition_verification_from: forgedVerification }, live),
+        error => error.code === 'decomposition-verification-required', 'imported child proof cannot authorize parent verification');
+      const verifyParent = invoke('next', secondDone.snapshot);
+      assert.strictEqual(verifyParent.outcome, 'dispatch_required', JSON.stringify(verifyParent));assert.strictEqual(verifyParent.unit.key, 'execute-task/T01');
+      assert.notStrictEqual(verifyParent.controller_result.details.transaction.idempotency_key, original.idempotency_key, 'parent verification is a fresh actual unit');
+      const verificationBegin = controller.lookupRecord(dir, 'transaction', verifyParent.controller_result.details.transaction.idempotency_key);
+      assert.strictEqual(verificationBegin.decomposition_verification.children.length, 2);assert.strictEqual(verificationBegin.decomposition_verification.mutation_ref, mutation.mutation_ref);
+      assert.strictEqual(controller.lookupRecord(dir, 'transaction', child.decomposition_entry.pause_key).action, 'pause', 'original parent remains cancelled until fresh verification');
+      const parentDone = finishReal(verifyParent, 'T01', 2), dependent = invoke('next', parentDone.snapshot);assert.strictEqual(dependent.unit.key, 'execute-task/T02', JSON.stringify(dependent));
+      assert.strictEqual(parentDone.snapshot.workflow_id, input.workflow_id);assert.strictEqual(verifyParent.snapshot.step_count, 3, 'one substituted reservation, second child and actual verification only');
+      assert(fs.readFileSync(receipt).equals(receiptBytes));assert(fs.readFileSync(controller.transactionFile(dir, original.idempotency_key)).equals(originalBytes));
+      }
+    }
+    const inventorySource = fs.readFileSync(path.join(__dirname, 'forge-milestone-endpoint.test.js'), 'utf8');
+    const inventory = inventorySource.match(/assert\.deepEqual\(Object\.keys\(controller\), (\[[^\r\n]*\])\);/);
+    assert(inventory);assert.deepStrictEqual(Object.keys(controller), JSON.parse(inventory[1]), 'all382/batch APIs plus explicit R9 API remain in exact inventory');
+
+  }
+});
+
+﻿test('issue343 R9 interop382 receipt-only resolves original plan binding with live observer', () => {
+  const workflow = require('./forge-long-workflow-adapter'), recovery = require('./forge-attempt-recovery'), retention = require('./forge-request-retention');
+  const f = planned('r9-interop382', { T01: taskPlan('T01') }), dir = f.dir;
+  const input = { cwd: dir, milestone: M, owner_token: 'r9-interop-owner', workflow_id: 'r9-interop-flow' };
+  const selected = workflow.invoke(HOST, 'task', 'next', input, null, { prefsReader }).result;
+  assert.strictEqual(selected.unit?.key, 'execute-task/T01', JSON.stringify(selected));
+  const begin = controller.lookupRecord(dir, 'transaction', selected.controller_result.details.transaction.idempotency_key);
+  const request = { cwd: dir, contextRoot: dir, milestoneId: M, sliceId: S, taskId: 'T01', phase: 'execute', scope: 'milestone', unitType: 'execute-task',
+    workflowId: input.workflow_id, dispatchId: 'r9-interop-dispatch', planFile: taskFile(dir, 'T01'), route: { host_runtime: HOST, resolved_worker_engine: 'claude' },
+    resultFile: path.join(TMP, 'r9-interop-result.json') };
+  const expected = { resultFile: request.resultFile, cwd: dir, contextRoot: dir, unitType: request.unitType, milestoneId: M, sliceId: S, taskId: 'T01', workflowId: request.workflowId, dispatchId: request.dispatchId };
+  const originalCallerHash = recovery.callerRequestHash(request), originalPlanHash = sha(fs.readFileSync(request.planFile));
+  const retained = retention.retain(request), receiptPath = request.resultFile + '.receipt.json', archivePath = request.resultFile + '.request.json';
+  fs.writeFileSync(receiptPath, JSON.stringify({ phase: 'ready', dispatch_id: request.dispatchId, retained_request: retained,
+    fingerprint: require('./forge-unit-sidecar').artifactFingerprint(request), recovery_identity_sha256: require('./forge-code-roots').digest(recovery.requestIdentity(request)),
+    execution: { inputs: { [request.planFile]: originalPlanHash } }, result: { status: 'done', questions: [] } }));
+  const receiptBefore = fs.readFileSync(receiptPath), archiveBefore = fs.readFileSync(archivePath), beginBefore = fs.readFileSync(controller.transactionFile(dir, begin.idempotency_key));
+  repair.incrementRepairCount(request.planFile);
+  const stopped = spawnSync(process.execPath, ['-e', 'process.exit(0)'], { windowsHide: true });assert.strictEqual(stopped.status, 0);
+  let observations = 0;
+  const live = { prefsReader, inspectAttempt: () => ({ receipt_path: receiptPath, roots: [{ root_id: 'primary', path: dir }], pending_questions: [] }),
+    observeOriginalAttempt: ({ begin: observed, receiptPath: locator }) => { observations++;assert.strictEqual(observed.idempotency_key, begin.idempotency_key);assert.strictEqual(locator, receiptPath);return expected; },
+    processProbe: () => stopped.status === 0 ? 'stopped' : 'unknown', reconcileRoots: ({ root }) => ({ root_id: root.root_id, process_stopped: true, reconciled: true }) };
+  const pause = options => workflow.invoke(HOST, 'task', 'decompose-pause', input, selected.snapshot, options).result;
+  const absent = { ...live };delete absent.observeOriginalAttempt;
+  assert.strictEqual(pause(absent).reason_code, 'attempt-evidence-missing', 'missing real observer never upgrades a receipt-only locator');
+  assert.strictEqual(pause({ ...live, observeOriginalAttempt: () => ({ ...expected, dispatchId: 'foreign' }) }).outcome, 'blocked', 'foreign observation refuses');
+  assert.strictEqual(pause({ ...live, observeOriginalAttempt: { approved: true } }).outcome, 'blocked', 'serialized approval is not observer');
+  assert.strictEqual(pause({ ...live, inspectAttempt: () => ({ receipt_path: receiptPath, begin_key: 'foreign', roots: [{ root_id: 'primary', path: dir }] }) }).reason_code, 'attempt-identity-mismatch', 'foreign provided begin is not repaired');
+  const archived = recovery.createArchivedRequestInspector({ observeOriginalAttempt: () => expected }).inspect({ cwd: dir, begin, receiptPath });
+  const proof = recovery.revalidateArchivedInspection(archived.archived_inspection, { cwd: dir, begin, receiptPath, request: archived.request });assert.strictEqual(proof.caller_request_sha256, originalCallerHash);
+  const paused = pause(live);assert.strictEqual(paused.lifecycle, 'paused', JSON.stringify(paused));assert(observations >= 2, 'both settlement and original-plan binding re-observe the real archived attempt');
+  const terminal = controller.lookupRecord(dir, 'transaction', paused.controller_result.details.decomposition_pause.pause_key), binding = terminal.result.output.decomposition_attempt;
+  assert.strictEqual(binding.request_sha256, originalCallerHash);assert.strictEqual(binding.original_plan_sha256, originalPlanHash);assert.strictEqual(binding.plan_transition, 'repair-counter-only');
+  assert.strictEqual(terminal.result.status, 'cancelled');assert.strictEqual(selected.snapshot.max_steps, 1);assert.strictEqual(paused.snapshot.step_count, 1);
+  assert(fs.readFileSync(receiptPath).equals(receiptBefore));assert(fs.readFileSync(archivePath).equals(archiveBefore));assert(fs.readFileSync(controller.transactionFile(dir, begin.idempotency_key)).equals(beginBefore));
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 try { fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 }); } catch { /* best-effort cleanup of synthetic fixtures */ }
 if (failed) process.exitCode = 1;
