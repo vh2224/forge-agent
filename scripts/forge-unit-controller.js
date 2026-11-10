@@ -49,7 +49,7 @@ const TIME_ADMISSION_CODES = Object.freeze(['time-unit-not-admitted', 'time-task
 const REASON_CODES = Object.freeze([
   'selected', 'no-next-unit', 'prefs-invalid', 'transaction-pending',
   'lease-required', 'lease-owner-mismatch', 'transition-committed',
-  'already-committed', 'handoff-ready', 'boundary-missing', 'unit-incomplete',
+  'already-committed', 'handoff-ready', 'boundary-missing', 'unit-incomplete', 'decomposition-verification-required',
   'boundary-not-transferable', 'lease-active', 'invalid-request',
   ...require('./forge-milestone-time-admission').TIME_REASON_CODES,
   ...timeSelection.TIME_OPTION_REASON_CODES, ...timeSelection.TIME_OPTION_RESUME_CODES, ...TIME_ADMISSION_CODES,
@@ -170,6 +170,19 @@ function validateRecord(record, kind, key, options) {
         (record.result && (record.result.idempotency_key !== key || record.result.unit !== record.unit.key || record.result.milestone !== record.milestone)) ||
         (record.boundary && (sha(record.result) !== record.boundary.result_checksum || sha(record.event) !== record.boundary.event_checksum))) {
       throw new ControllerError('record-conflict', 'checksum/identidade da transação inválido');
+    }
+    // Issue 343 U0d: a stored plan_generation enrollment belongs to exactly the plan-slice
+    // begin that carries it; its digest is recomposed from its own fields. The completion
+    // evidence lives inside result, so the result checksum above already covers it.
+    if (own(record, 'plan_generation') && (record.action !== 'begin' || record.unit.type !== 'plan-slice'
+        || !planValidation().planGenerationIntegrity(record.plan_generation, { begin_key: key, lease_generation: record.lease_generation,
+          owner_digest: record.owner_digest, milestone: record.milestone, slice: record.unit.id }))) {
+      throw new ControllerError('record-conflict', 'enrollment plan_generation diverge da transação');
+    }
+    // Issue 343 U1: a stored batch binding belongs to exactly the execute-task member begin of
+    // its manifest; the begin key is derived from that binding (forge-execution-batch).
+    if (own(record, 'batch') && (record.action !== 'begin' || !executionBatch().validBinding(record.batch, key, record.unit))) {
+      throw new ControllerError('record-conflict', 'vínculo de batch diverge da transação');
     }
   }
   return record;
@@ -434,30 +447,45 @@ function selectNextUnit(input) {
     if (reasons.length) { blocked.push({ slice: slice.id, reasons }); continue; }
     if (!slice.plan_exists) return selected('plan-slice', slice.id, milestone, current, slice.id);
     if (!slice.research_exists && !skipSliceResearch) return selected('research-slice', slice.id, milestone, current, slice.id);
-    if (inventory.task_dag === true) {
-      // Opt-in milestone with an active contract: the scoped task DAG, not the
-      // checklist order, decides which unchecked task is admissible.
-      const pendingTasks = (slice.tasks || []).filter(item => !item.checked);
-      const dag = slice.task_dag || { status: 'unknown', reasons: ['task-dag-missing'], tasks: [] };
-      if (pendingTasks.length && dag.status !== 'valid') {
-        return { ...timeBlock(TASK_DAG_BLOCKS[dag.status] || 'time-task-dependency-unknown'), slice: slice.id, task_dag: dag };
-      }
-      const proven = new Set(dag.tasks.filter(item => item.completion === 'proven').map(item => item.id));
-      const ready = pendingTasks.find(item => {
-        const row = dag.tasks.find(candidate => candidate.id === item.id);
-        return (row?.depends || []).every(id => proven.has(id)) && (row?.barrier || []).length === 0;
-      });
-      if (ready) return selected('execute-task', ready.id, milestone, current, slice.id);
-      if (pendingTasks.length) return { ...timeBlock('time-task-dependency-pending'), slice: slice.id, task_dag: dag };
-    } else {
-      const task = (slice.tasks || []).find(item => !item.checked);
-      if (task) return selected('execute-task', task.id, milestone, current, slice.id);
+    const tasks = admissibleTasks(slice, inventory);
+    if (tasks.status === 'decomposition') return { ok: false, reason: 'decomposition-verification-required', done: false, milestone,
+      slice: slice.id, decomposition: { parent_tasks: tasks.parents, required: 'all-child-completions-and-original-parent-contract-verification' } };
+    if (tasks.status === 'blocked') {
+      return { ...timeBlock(TASK_DAG_BLOCKS[tasks.dag.status] || 'time-task-dependency-unknown'), slice: slice.id, task_dag: tasks.dag };
     }
+    if (tasks.ready.length) {
+      const task = tasks.ready[0], verification = task.decomposition_verification;
+      return selected('execute-task', task.id, milestone, current, slice.id, verification
+        ? { decomposition_verification: verification, key_suffix: 'decompose-verify-' + verification.admission_sha256 } : undefined);
+    }
+    if (tasks.status === 'dag' && tasks.pending.length) return { ...timeBlock('time-task-dependency-pending'), slice: slice.id, task_dag: tasks.dag };
     if (!slice.summary_exists) return selected('complete-slice', slice.id, milestone, current, slice.id);
   }
   if (pending.length) return { ok: false, reason: 'units-blocked', done: false, milestone, blocked };
   if (!inventory.milestone_complete) return selected('complete-milestone', milestone, milestone, current);
   return { ok: false, reason: 'no-next-unit', done: true, milestone };
+}
+// The admissible pending tasks of one slice, in canonical S-plan order: selectNextUnit picks
+// the first, the batch decision (issue 343 U1) enumerates the rest through this same function.
+// Opt-in milestone with an active contract: the scoped task DAG, not the checklist order,
+// decides which unchecked task is admissible; otherwise every unchecked task keeps its order.
+function admissibleTasks(slice, inventory) {
+  const pending = (slice.tasks || []).filter(item => !item.checked && item.decomposed !== true);
+  const containers = (slice.tasks || []).filter(item => item.decomposed === true && item.decomposition_verified !== true), eligible = pending.filter(item => !item.decomposition_blocked);
+  const verification = containers.find(item => item.decomposition_verification);
+  if (verification) return { status: 'checklist', pending, ready: [verification], dag: null };
+  // A container is never a completed task. Children can run; independent work
+  // can continue; dependent work and slice close require real aggregate proof.
+  if (containers.length && !eligible.length) return { status: 'decomposition', pending, ready: [], dag: null, parents: containers.map(item => item.id) };
+  if (inventory.task_dag !== true) return { status: 'checklist', pending, ready: eligible, dag: null };
+  const dag = slice.task_dag || { status: 'unknown', reasons: ['task-dag-missing'], tasks: [] };
+  if (pending.length && dag.status !== 'valid') return { status: 'blocked', pending, ready: [], dag };
+  const proven = new Set(dag.tasks.filter(item => item.completion === 'proven').map(item => item.id));
+  const ready = eligible.filter(item => {
+    const row = dag.tasks.find(candidate => candidate.id === item.id);
+    return (row?.depends || []).every(id => proven.has(id)) && (row?.barrier || []).length === 0;
+  });
+  return { status: 'dag', pending, ready, dag };
 }
 function selected(type, id, milestone, state, slice, extra) {
   const unit = forgeRuntime.normalizeUnit({ type, id, state: 'queued' });
@@ -491,7 +519,22 @@ function discoverInventory(cwd, milestone, current, options) {
       plan_exists: fs.existsSync(plan),
       research_exists: fs.existsSync(research),
       summary_exists: fs.existsSync(summary),
-      tasks: fs.existsSync(plan) ? forgeStatus.parsePlanTasks(fs.readFileSync(plan, 'utf8')) : [],
+      tasks: fs.existsSync(plan) ? (() => {
+        const decompositions = require('./forge-plan-validation').admittedDecompositions(cwd, { milestone, slice: entry.id });
+        const records = decompositions.length ? discoverRecords(cwd, 'transaction') : [];
+        const states = new Map(decompositions.map(mutation => [mutation.parent_task_id, decompositionProgress(cwd, mutation, records)]));
+        const parents = new Set(states.keys());
+        return forgeStatus.parsePlanTasks(fs.readFileSync(plan, 'utf8')).map(task => {
+          if (parents.has(task.id)) {
+            const progress = states.get(task.id);
+            return { ...task, decomposed: true, decomposition_verified: progress.verified,
+              ...(progress.verification ? { decomposition_verification: progress.verification } : {}) };
+          }
+          if (!parents.size) return task;
+          const read = readTaskPlan(cwd, milestone, entry.id, task.id), declared = read.status === 'valid' && dependsOf(read.frontmatter);
+          return declared?.depends.some(id => parents.has(id) && !states.get(id).verified) ? { ...task, decomposition_blocked: true } : task;
+        });
+      })() : [],
     };
   });
   const roadmapComplete = slices.length > 0 && slices.every(item => item.checked);
@@ -607,53 +650,31 @@ function deliveryProven(cwd, milestone, slice, task, completedAt) {
 // One bounded stable TaskPlan body per task. Every component from the physical owner .gsd down to
 // the plan must be a real directory/file (no symlink or junction), so a foreign linked plan never
 // supplies dependencies or bindings. The expected real path is rebuilt from the owner, never taken
-// from the file's own resolution.
-const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/, LOCAL_TASK_ID = /^T\d+(?:\.\d+)?$/, TASK_PLAN_MAX_BYTES = 1024 * 1024;
+// from the file's own resolution. The read itself is the shared owner collector's single-plan read
+// (forge-plan-validation readOwnerTaskPlan, issue 343 U0d): the same walk, bound and fatal UTF-8
+// decode the plan admission uses, with this guard's status/reason vocabulary unchanged.
+const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/, LOCAL_TASK_ID = /^T\d+(?:\.\d+)?$/;
 function readTaskPlan(cwd, milestone, slice, task) {
   if (typeof task !== 'string' || !LOCAL_TASK_ID.test(task) || ![milestone, slice].every(item => typeof item === 'string' && SAFE_SEGMENT.test(item))) return { status: 'invalid', reason: 'path-invalid' };
-  const segments = ['.gsd', 'milestones', milestone, 'slices', slice, 'tasks', task, `${task}-PLAN.md`];
-  let cursor = cwd, expected;
-  try { expected = fs.realpathSync.native(cwd); } catch { return { status: 'invalid', reason: 'owner-unreadable' }; }
-  for (const [index, segment] of segments.entries()) {
-    cursor = path.join(cursor, segment); expected = path.join(expected, segment);
-    let stat;
-    try { stat = fs.lstatSync(cursor); } catch (error) { return error.code === 'ENOENT' ? { status: 'missing' } : { status: 'invalid', reason: 'path-unreadable' }; }
-    if (stat.isSymbolicLink()) return { status: 'invalid', reason: 'link' };
-    if (index === segments.length - 1 ? !stat.isFile() : !stat.isDirectory()) return { status: 'invalid', reason: 'not-regular' };
-  }
-  const read = require('./forge-autonomy-sources').readBoundedStableFile(cursor, TASK_PLAN_MAX_BYTES, { expectedReal: expected });
-  if (read.error) return { status: 'invalid', reason: read.error === 'source_too_large' ? 'too-large' : 'unstable' };
-  let text;
-  try { text = new TextDecoder('utf-8', { fatal: true }).decode(read.buffer); } catch { return { status: 'invalid', reason: 'encoding' }; }
+  const read = planValidation().readOwnerTaskPlan(cwd, { milestone, slice, task });
+  if (read.status !== 'ok') return read;
+  // The collector keeps a leading BOM in the text; this guard's frontmatter never began with one.
+  const text = read.content.replace(/^﻿/, '');
   const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   return { status: 'valid', frontmatter: match ? match[1].replace(/\r\n/g, '\n') : null };
 }
-// The complete present `depends` declaration must be a supported inline list, a valid block list
-// or a genuinely empty value; a scalar, multiline scalar, broken/mixed block, stray indented
-// continuation or repeated key is malformed (null). A missing declaration is a root.
+// The complete present `depends` declaration is read by the one structural decoder
+// (forge-must-haves decodeDeclarationList, issue 343 U0a) through this guard's own fixed
+// temporal projection (U0a-r1), never an option: a missing declaration and a YAML-null value
+// (`depends:` followed by no list) are a root; whole-line and quote-aware inline comments are
+// transparent, so every declared dependency is kept; a leading or interior blank gap, a scalar,
+// multiline scalar, broken/mixed/unindented block, stray indented continuation, empty item,
+// non-string item or repeated key is malformed (null).
 function dependsOf(frontmatter) {
-  const lines = frontmatter.split('\n'), at = lines.flatMap((line, index) => /^depends[ \t]*:/.test(line) ? [index] : []);
-  if (!at.length) return { depends: [] };
-  if (at.length > 1) return null;
-  const head = lines[at[0]].replace(/^depends[ \t]*:/, '').trim(), tail = [];
-  for (let index = at[0] + 1; index < lines.length && /^(?:[ \t]|$)/.test(lines[index]); index++) tail.push(lines[index]);
-  while (tail.length && !tail[tail.length - 1].trim()) tail.pop();
-  const unquote = value => value.trim().replace(/^["']|["']$/g, '');
-  let items = [];
-  if (head) {
-    const inline = head.match(/^\[([^\]]*)\]$/);
-    if (!inline || tail.length) return null;
-    if (inline[1].trim()) items = inline[1].split(',').map(unquote);
-  } else {
-    for (const line of tail) {
-      const item = line.match(/^[ \t]+-[ \t]+(\S.*?)\s*$/);
-      if (!item) return null;
-      items.push(unquote(item[1]));
-    }
-  }
-  const parsed = require('./forge-parallelism').parseListField(frontmatter, 'depends');
-  if (items.some(item => !item) || !Array.isArray(parsed) || JSON.stringify(parsed) !== JSON.stringify(items)) return null;
-  return { depends: items };
+  const decoded = require('./forge-must-haves').decodeDeclarationList(frontmatter, 'depends');
+  if (decoded.status === 'absent' || decoded.status === 'empty') return { depends: [] };
+  if (decoded.status !== 'valid' || decoded.diagnostics.length || decoded.items.some(item => typeof item !== 'string')) return null;
+  return { depends: [...decoded.items] };
 }
 // Dependencies come from the real task plans of one slice; IDs are scoped to
 // that milestone/slice, so the same task ID elsewhere never satisfies them.
@@ -864,7 +885,27 @@ function select(cwd, request, options) {
   if (!current) throw new ControllerError('invalid-request', `STATE ausente para ${milestone}`);
   const inventory = options && typeof options.inventoryReader === 'function' ? options.inventoryReader(cwd, milestone, current) : discoverInventory(cwd, milestone, current, options);
   inventory.deferred_slices = failureProjection(cwd, milestone).filter(item => !item.entry).map(item => item.slice).filter(Boolean);
-  return { ...selectNextUnit({ state: current, inventory, prefs: prefsResult.prefs }), id_kind };
+  const selection = selectNextUnit({ state: current, inventory, prefs: prefsResult.prefs });
+  // Issue 343 U1: an opted-in caller (orchestrate next in auto mode) also receives the same
+  // enumeration the execute-task was picked from; nothing here selects, admits or begins more.
+  const cohort = input.cohort === true && selection.ok && !selection.decomposition_verification && selection.unit.type === 'execute-task'
+    ? cohortOf(cwd, milestone, inventory, selection.slice, options) : null;
+  return { ...selection, id_kind, ...(cohort ? { cohort } : {}) };
+}
+// The pending tasks of the selected slice (canonical S-plan order), the admissible ones and
+// the tasks whose scoped committed completion plus historical delivery prove them; a
+// checkbox or a SUMMARY never proves a dependency. Read-only.
+function cohortOf(cwd, milestone, inventory, sliceId, options) {
+  const slice = (inventory.slices || []).find(item => item.id === sliceId);
+  if (!slice) return { slice: sliceId, status: 'unknown', pending: [], admissible: [], proven: [] };
+  const tasks = admissibleTasks(slice, inventory);
+  let dag = tasks.dag;
+  if (!dag) {
+    try { dag = taskDag(cwd, milestone, sliceId, slice.tasks, discoverRecords(cwd, 'transaction'), nowOf(options)); }
+    catch { dag = { status: 'unknown', reasons: ['task-dag-unreadable'], tasks: [] }; }
+  }
+  return { slice: sliceId, status: dag.status, pending: tasks.pending.map(item => item.id), admissible: tasks.ready.map(item => item.id),
+    proven: (dag.tasks || []).filter(row => row.completion === 'proven').map(row => row.id) };
 }
 
 function logicalState(value) {
@@ -901,6 +942,9 @@ function incompleteUnits(cwd, milestone) {
     || row.action === 'pause' && row.result?.output?.partial_attempt
       && !records.some(next => next.action === 'begin' && next.resumed_pause?.key === row.idempotency_key
         && next.resumed_pause.checksum === sha(row))
+    || row.action === 'pause' && row.result?.output?.decomposition_attempt
+      && !records.some(next => next.action === 'begin' && next.phase === 'committed'
+        && next.decomposition_entry?.pause_key === row.idempotency_key && validDecompositionEntry(cwd, next))
     || row.owner_interruption?.role === 'original' && witnessedOwnerInterruption(cwd, row)
       && !records.some(next => next.action === 'begin' && next.phase === 'committed'
         && next.linked_entry?.failure_key === row.idempotency_key && next.linked_entry.failure_checksum === sha(row))));
@@ -951,6 +995,126 @@ function assertLease(cwd, unit, ownerToken, generation) {
   return read.record;
 }
 
+// ── Issue 343 U0d: strict new-plan generation at the native controller ──────────
+// A NEW plan-slice begin is enrolled (plan_generation, bound to that begin by
+// validateRecord); a NEW successful completion of an enrolled lineage admits the owner's
+// current S-plan/T-plans strictly before any intent and carries plan_validation inside
+// its normalized result, under result_checksum; an uncommitted intent publishes only the
+// evidence it was admitted with; every new execute-task begin rechecks its slice's
+// enrolled generation read-only. Committed history replays first and is never
+// revalidated, backfilled or rewritten. None of this reads plan_gate.interactive,
+// ask_in_auto, a plan-checker verdict or an approval marker.
+// Lazy: forge-plan-validation reaches this controller lazily too, inside its read-only
+// checks, so neither module loads the other at require time.
+function planValidation() { return require('./forge-plan-validation.js'); }
+// Issue 343 U1: batch member bindings and manifests; that module loads no Forge module at
+// require time, so this lazy seam adds no cycle.
+function executionBatch() { return require('./forge-execution-batch.js'); }
+function planFail(code, detail) { throw Object.assign(new Error(`${code}: ${detail}`), { code, detail }); }
+// A named refusal of the gate: the plan code itself, plus a closed diagnostic (stage,
+// code, bounded detail, task, cause). Controller errors (record-conflict, lease) pass through.
+function planRefusal(error, stage) {
+  if (error instanceof ControllerError) return error;
+  if (!error || typeof error.code !== 'string' || !/^plan-/.test(error.code)) return error;
+  const detail = typeof error.detail === 'string' ? error.detail.slice(0, 500) : null;
+  return new ControllerError(error.code, `geração do plano recusada (${stage})${detail ? `: ${detail}` : ''}`, { plan_generation: {
+    stage, code: error.code, detail, task_id: typeof error.task_id === 'string' ? error.task_id : null,
+    cause_code: typeof error.cause_code === 'string' ? error.cause_code : null } });
+}
+function physicalOwner(cwd) {
+  try { return fs.realpathSync.native(cwd); }
+  catch (error) { return planFail('plan-source-owner-unreadable', `owner físico ilegível (${error.code || 'error'})`); }
+}
+// The canonical predecessor begin of a continuation: the one committed begin of the same
+// unit, milestone and lease generation as the transaction that ended its lineage. An
+// unknown predecessor keeps the obligation (fail closed).
+function predecessorEnrolled(cwd, milestone, unit, ended) {
+  if (!ended || ended.unit?.key !== unit.key || ended.milestone !== milestone) return true;
+  const begins = discoverRecords(cwd, 'transaction').filter(item => item.action === 'begin' && item.phase === 'committed'
+    && item.unit.key === unit.key && item.milestone === milestone && item.lease_generation === ended.lease_generation);
+  return begins.length !== 1 || own(begins[0], 'plan_generation');
+}
+// Whether a NEW plan-slice begin is enrolled: a fresh begin is; a continuation of the unit's
+// current paused lineage inherits its predecessor's classification, so an enrolled lineage
+// never loses its obligation and a genuine pre-requirement lineage stays unclassified.
+function planBeginEnrolled(cwd, milestone, unit) {
+  if (unit.type !== 'plan-slice') return false;
+  const boundary = lookupRecord(cwd, 'boundary', unit.key);
+  if (!boundary || boundary.kind !== 'paused' || boundary.milestone !== milestone) return true;
+  return predecessorEnrolled(cwd, milestone, unit, lookupRecord(cwd, 'transaction', boundary.idempotency_key));
+}
+function planGenerationOf(cwd, milestone, unit, key, generation, ownerToken) {
+  try {
+    return planValidation().buildPlanGeneration({ owner: physicalOwner(cwd), milestone, slice: unit.id, begin_key: key,
+      lease_generation: generation, owner_digest: ownerDigest(ownerToken) });
+  } catch (error) { throw planRefusal(error, 'plan-slice-begin'); }
+}
+// The begin of one lineage: the single begin of the same unit, milestone and lease generation.
+function lineageBegin(cwd, milestone, unit, generation, stage) {
+  const begins = discoverRecords(cwd, 'transaction').filter(item => item.action === 'begin' && item.unit.key === unit.key
+    && item.milestone === milestone && item.lease_generation === generation);
+  if (begins.length > 1) throw planRefusal({ code: 'plan-generation-ambiguous', detail: `${unit.key} has ${begins.length} begins of one lease generation` }, stage);
+  return begins[0] || null;
+}
+// A NEW successful completion of an enrolled plan-slice lineage: the enrollment of the real
+// begin of this lease, its owner and host, then the strict admission of the owner's current
+// plan bytes. A refusal happens before makeTransaction, so no intent, event, STATE or lease
+// release exists and the lease stays held for a corrected plan. null: a genuine
+// pre-requirement lineage (its begin carries no enrollment), completed as before.
+function admitPlanCompletion(cwd, milestone, unit, generation, ownerToken, hostRuntime, options) {
+  const stage = 'plan-slice-completion';
+  const begin = lineageBegin(cwd, milestone, unit, generation, stage);
+  if (!begin || !own(begin, 'plan_generation')) return null;
+  try {
+    const pv = planValidation();
+    if (begin.phase !== 'committed') planFail('plan-generation-pending', `the enrolled ${unit.key} begin is not committed`);
+    if (begin.owner_digest !== ownerDigest(ownerToken) || begin.host_runtime !== hostRuntime) {
+      planFail('plan-generation-lineage-mismatch', `the completion is not the owner and host of the enrolled ${unit.key} begin`);
+    }
+    const owner = physicalOwner(cwd);
+    const enrolled = pv.verifyPlanGeneration(begin.plan_generation, { begin_key: begin.idempotency_key, lease_generation: begin.lease_generation,
+      owner_digest: begin.owner_digest, milestone, slice: unit.id });
+    if (enrolled.owner !== require('./forge-code-roots').key(owner)) planFail('plan-generation-owner-mismatch', 'the enrollment belongs to another owner');
+    const admission = pv.validateNewSlicePlan(pv.collectOwnerSlicePlan(cwd, { milestone, slice: unit.id }), { owner, milestone, slice: unit.id });
+    return pv.buildPlanValidation(enrolled, admission, { validatedAt: iso(nowOf(options)) });
+  } catch (error) { throw planRefusal(error, stage); }
+}
+// An uncommitted plan-slice intent publishes only the evidence it was admitted with: a
+// successful completion of an enrolled lineage carries its nested plan_validation bound to
+// that begin's enrollment; an unenrolled lineage carries none; a top-level alias never counts.
+function assertPlanIntent(cwd, transaction) {
+  if (transaction.unit?.type !== 'plan-slice') return;
+  const stage = 'transaction-recovery';
+  if (own(transaction, 'plan_validation')) throw planRefusal({ code: 'plan-generation-evidence-invalid', detail: 'a top-level plan_validation alias is never evidence' }, stage);
+  if (transaction.action !== 'complete' || transaction.result?.status !== 'succeeded') return;
+  const begin = lineageBegin(cwd, transaction.milestone, transaction.unit, transaction.lease_generation, stage);
+  const carried = own(transaction.result, 'plan_validation');
+  if (!begin || !own(begin, 'plan_generation')) {
+    if (carried) throw planRefusal({ code: 'plan-generation-evidence-invalid', detail: 'plan_validation without an enrolled begin' }, stage);
+    return;
+  }
+  if (!carried) throw planRefusal({ code: 'plan-generation-evidence-missing', detail: 'the enrolled completion intent carries no plan_validation' }, stage);
+  try { planValidation().verifyPlanValidation(transaction.result.plan_validation, begin.plan_generation); }
+  catch (error) { throw planRefusal(error, stage); }
+}
+// Every new execute-task begin (first entry and linked reentry): the slice's enrolled
+// generation is current, read-only, through the classification shared with the sidecar.
+// A milestone ID outside the enrollment grammar can carry no enrollment (buildPlanGeneration
+// refuses it); an unknown or unsafe slice passes only while no slice of the milestone is enrolled.
+function assertExecuteGeneration(cwd, milestone, slice) {
+  const pv = planValidation();
+  if (!pv.isScopeSegment(milestone)) return null;
+  const known = pv.isScopeSegment(slice) ? slice : null;
+  try { return pv.assertSliceGeneration(cwd, { owner: physicalOwner(cwd), milestone, slice: known }); }
+  catch (error) { throw planRefusal(error, 'execute-begin'); }
+}
+
+// The status normalizedResult will record for a complete request (same checks, same order).
+function completionSucceeds(input) {
+  const source = input.result || {};
+  assertJsonSafe(source, 'result');
+  return forgeRuntime.normalizeResult({ ...source, status: source.status || 'succeeded' }).status === 'succeeded';
+}
 function normalizedResult(input, action, unit, key, milestone, now) {
   if (action === 'begin' || action === 'running') return null;
   const source = input.result || {};
@@ -989,7 +1153,7 @@ function defaultStatePatch(action, unit, hostRuntime, ownerToken, now) {
   if (action === 'complete' || action === 'expired-safe') patch.owner = null;
   return patch;
 }
-function makeTransaction(cwd, input, action, unit, key, ownerToken, generation, hostRuntime, now) {
+function makeTransaction(cwd, input, action, unit, key, ownerToken, generation, hostRuntime, now, extra) {
   const milestone = opaque(input.milestone, 'milestone', true);
   const before = forgeState.read(cwd, milestone);
   if (!before) throw new ControllerError('invalid-request', `STATE ausente para ${milestone}`);
@@ -1000,6 +1164,9 @@ function makeTransaction(cwd, input, action, unit, key, ownerToken, generation, 
   delete patch.owner_token;
   const after = { ...before, ...patch };
   const result = normalizedResult(input, action, unit, key, milestone, now);
+  // Issue 343 U0d: owner-built plan evidence joins the normalized result (never caller input)
+  // before the event and boundary checksums are composed, so result_checksum covers it.
+  if (result && extra && extra.planValidation) result.plan_validation = clone(extra.planValidation);
   const kind = boundaryKind(action);
   const event = {
     protocol_version: PROTOCOL_VERSION,
@@ -1112,13 +1279,19 @@ function publishState(cwd, transaction) {
   if (!current) throw new ControllerError('invalid-request', `STATE ausente para ${transaction.milestone}`);
   // Reapply only the owned patch.  This makes recovery preserve unrelated
   // fields written after intent while retaining the recorded logical target.
-  forgeState.updateFields(cwd, transaction.milestone, transaction.after.state_patch);
+  if (transaction.after.prepared_state) {
+    forgeState.commitPreparedUpdate(cwd, transaction.milestone, transaction.after.state_patch,
+      transaction.after.prepared_state, { at: transaction.created_at });
+  } else forgeState.updateFields(cwd, transaction.milestone, transaction.after.state_patch);
 }
 
 function runTransaction(cwd, transaction, ownerToken, generation, options) {
   const phases = new Set(PHASES);
   if (!phases.has(transaction.phase)) throw new ControllerError('invalid-request', `fase de transação desconhecida: ${transaction.phase}`);
   if (transaction.phase === 'committed') return { ok: true, reason: 'already-committed', transaction: publicTransaction(transaction, cwd) };
+  // Issue 343 U0d: an uncommitted plan-slice intent (new or recovered by resume) proves its
+  // saved evidence before anything is published or republished; committed history above never is.
+  assertPlanIntent(cwd, transaction);
   // Every phase that can still publish result/event/boundary/STATE is guarded
   // by the exact lease generation.  A recovered or missing lease must never
   // be treated as implicit authorization to finish an old transaction.
@@ -1171,7 +1344,9 @@ function runTransaction(cwd, transaction, ownerToken, generation, options) {
     setPhase(cwd, transaction, 'boundary-ready', options);
   }
   if (transaction.phase === 'boundary-ready') setPhase(cwd, transaction, 'committed', options);
-  if (transaction.action === 'complete') {
+  // Issue 343 U5: a batch member's terminal is one typed owner operation with exact effects; the
+  // cohort coordinator's activity is not an owner-activity measurement of this transaction.
+  if (transaction.action === 'complete' && !(options && options.batchTerminal === true)) {
     try { recordOwnerBoundaryActivity(cwd, transaction.milestone, transaction.host_runtime); } catch { /* unknown owner activity never becomes workflow authority */ }
   }
   return { ok: true, reason: 'transition-committed', transaction: publicTransaction(transaction, cwd) };
@@ -1192,18 +1367,107 @@ function publicTransaction(transaction, cwd) {
 
 function begin(cwd, request, options) {
   resolvePrefs(cwd, options); // reject preferences before even creating a mutex
+  if (request && typeof request === 'object' && !Array.isArray(request) && own(request, 'members')) {
+    return withMutex(cwd, 'unit-controller-transactions', () => beginMembersInside(cwd, request, options));
+  }
   return withMutex(cwd, 'unit-controller-transactions', () => beginInside(cwd, request, options));
 }
 // Serial workflow entry only. Independent/batched low-level begin remains
 // available; no request/options flag can disable this named boundary.
+const SERIAL_BEGIN_CONTEXT = Symbol('serial-begin-context');
 function beginSerial(cwd, request, options) {
   resolvePrefs(cwd, options);
-  return withMutex(cwd, 'unit-controller-transactions', () => beginInside(cwd, request, options, true));
+  return withMutex(cwd, 'unit-controller-transactions', () => beginInside(cwd, request, options, { serialBoundary: SERIAL_BEGIN_CONTEXT }));
 }
 function decideTimeAdmission(cwd, options) {
   return require('./forge-milestone-time-admission').decideAdmission(cwd, options);
 }
-function beginInside(cwd, request, options, serialBoundary = false) {
+// Issue 343 U1: the member begins of one published batch manifest (forge-execution-batch),
+// in manifest order, under the ONE transaction mutex hold of begin() and without reentrance.
+// Each member is the ordinary beginInside — its own time admission, gates, explicit slice,
+// owner, runtime, idempotency key and lease generation — plus the member binding recorded on
+// its begin. A refused member is reported, never retried; when the first member is refused
+// no later member begins. A failpoint or an uncoded error propagates unchanged.
+function beginMembersInside(cwd, request, options) {
+  const input = object(request, 'request'), batchApi = executionBatch();
+  if (!Array.isArray(input.members) || !input.members.length || input.members.length > batchApi.MAX_MEMBERS) {
+    throw new ControllerError('invalid-request', 'members do batch inválidos');
+  }
+  // Provenance before any lease: every member is exactly a member of its published manifest
+  // (same digest, key, unit, milestone, slice, host and owner); a JSON binding alone is nothing.
+  const manifests = new Map();
+  const manifestOf = batchId => {
+    if (!manifests.has(batchId)) {
+      let manifest = null;
+      try { manifest = batchApi.readManifest(cwd, batchId); } catch { manifest = null; }
+      manifests.set(batchId, manifest);
+    }
+    return manifests.get(batchId);
+  };
+  const members = input.members.map(entry => {
+    const member = object(entry, 'member');
+    const key = opaque(member.idempotency_key, 'idempotency_key', true), unit = unitFromRequest(member);
+    if (!batchApi.validBinding(member.batch, key, unit)) throw new ControllerError('invalid-request', 'vínculo do membro do batch inválido');
+    const manifest = manifestOf(member.batch.batch_id), listed = manifest && manifest.members[member.batch.member_index];
+    const token = opaque(member.owner_token === undefined ? member.ownerToken : member.owner_token, 'owner_token', true);
+    if (!listed || manifest.manifest_sha256 !== member.batch.manifest_sha256 || listed.begin_key !== key || listed.unit !== unit.key
+        || manifest.milestone !== member.milestone || manifest.slice !== member.slice || manifest.owner_digest !== ownerDigest(token)
+        || manifest.host_runtime !== forgeRuntime.normalizeHostRuntime(member.host_runtime === undefined ? member.hostRuntime : member.host_runtime)) {
+      throw new ControllerError('record-conflict', 'membro fora do manifesto de batch publicado');
+    }
+    return { member, key };
+  });
+  // Batch workflow admission composes the serial lineage guard with the canonical
+  // full manifest. A caller may request its ordered subset after real placement refusals;
+  // omitted/foreign/unknown incomplete begins are never exempted by JSON membership.
+  const manifest = manifests.size === 1 ? [...manifests.values()][0] : null;
+  if (!manifest || members.some(({ member }, index) => index > 0 && member.batch.member_index <= members[index - 1].member.batch.member_index)) {
+    throw new ControllerError('record-conflict', 'batch requests must be an ordered subset of one canonical manifest');
+  }
+  const requested = new Map(members.map(({ member, key }) => [key, member]));
+  const incomplete = incompleteUnits(cwd, manifest.milestone).filter(row => {
+    const member = requested.get(row.idempotency_key), listed = member && manifest.members[member.batch.member_index];
+    const foreign = !listed || row.action !== 'begin' || row.unit.key !== listed.unit || row.milestone !== manifest.milestone
+      || row.host_runtime !== manifest.host_runtime || row.owner_digest !== manifest.owner_digest
+      || !executionBatch().validBinding(row.batch, row.idempotency_key, row.unit)
+      || stableStringify(row.batch) !== stableStringify(executionBatch().memberBinding(manifest, listed));
+    if (foreign) return true;
+    // A committed begin is not completion, and its historical no-op replay does
+    // not assert a live lease. Validate every exempt sibling BEFORE any new begin.
+    // lookupRecord revalidates canonical storage checksums; use the recorded
+    // generation and the same ownership-only lease primitive as canonical replay.
+    // An expired but identically owned lease remains valid here; never infer death.
+    const current = lookupRecord(cwd, 'transaction', row.idempotency_key);
+    if (!current || sha(current) !== sha(row)) throw new ControllerError('record-conflict', 'batch begin changed during lineage admission');
+    if (member.generation !== undefined && member.generation !== row.lease_generation) {
+      throw new ControllerError('lease-owner-mismatch', 'batch replay generation differs from its begin');
+    }
+    assertLease(cwd, row.unit.key, member.owner_token === undefined ? member.ownerToken : member.owner_token, row.lease_generation);
+    return false;
+  });
+  if (incomplete.length) {
+    if (incomplete.some(row => members.some(({ member }) => row.unit.key === unitFromRequest(member).key)
+      && forgeLease.observe(cwd, row.unit.key, options || {}).reason === 'lease-active')) {
+      throw new ControllerError('lease-active', 'selected batch unit already has an active foreign lease');
+    }
+    throw new ControllerError('unit-incomplete', 'settle or resume the existing unit before batch advance', {
+      units: incomplete.map(row => ({ idempotency_key: row.idempotency_key, unit: row.unit, begin_checksum: sha(row),
+        generation: row.lease_generation, milestone: row.milestone, host_runtime: row.host_runtime, owner_digest: row.owner_digest })) });
+  }
+  const outcomes = [];
+  for (const [index, { member, key }] of members.entries()) {
+    try {
+      outcomes.push({ ok: true, idempotency_key: key, result: beginInside(cwd, member, options, { batch: member.batch }) });
+    } catch (error) {
+      if (!error || typeof error.code !== 'string' || error.code === 'CONTROLLER_FAILPOINT') throw error;
+      outcomes.push({ ok: false, idempotency_key: key, error });
+      if (index === 0) break;
+    }
+  }
+  return { ok: outcomes[0].ok === true, reason: 'batch-members', members: outcomes };
+}
+function beginInside(cwd, request, options, extra = {}) {
+  const serialBoundary = extra.serialBoundary === SERIAL_BEGIN_CONTEXT;
   const input = object(request, 'request');
   const selection = input.unit ? { ok: true, milestone: input.milestone, unit: unitFromRequest(input), slice: input.slice || null }
     : select(cwd, input, options);
@@ -1226,18 +1490,38 @@ function beginInside(cwd, request, options, serialBoundary = false) {
     || declaredSlice && declaredSlice !== existing.after.state.active_slice)) {
     throw new ControllerError('record-conflict', 'idempotency_key pertence a outra operação');
   }
+  // Issue 343 U1: a batch member begin replays only under its own manifest member binding, and
+  // no other begin request (single path, CLI or JSON) adopts or strips that binding.
+  const boundBatch = extra && extra.batch ? extra.batch : null;
+  if (existing && (own(existing, 'batch') || boundBatch)
+      && stableStringify(own(existing, 'batch') ? existing.batch : null) !== stableStringify(boundBatch)) {
+    throw new ControllerError('record-conflict', 'begin pertence a outro membro de batch');
+  }
   if (input.slice && input.slice !== effectiveSlice
     || input.slice && suppliedPatch.active_slice && input.slice !== suppliedPatch.active_slice) {
     throw new ControllerError('unit-identity-mismatch', 'slice declarada diverge do estado da unidade');
   }
+  if (!existing) executionBatch().assertPostUnitBoundary(cwd);
   const availabilitySlice = unit.type === 'execute-task' ? (effectiveSlice === '—' ? null : effectiveSlice) : input.slice;
   assertUnitAvailable(cwd, input.milestone, unit, availabilitySlice, options);
-  let serialResumed = null;
+  let serialResumed = null, decomposed = null, parentVerification = null;
+  if (existing?.decomposition_verification && input.decomposition_verification_from === undefined) throw new ControllerError('record-conflict', 'parent verification binding cannot be stripped');
+  if (input.decomposition_verification_from !== undefined) {
+    if (!serialBoundary) throw new ControllerError('unit-identity-mismatch', 'parent verification uses canonical serial entry');
+    parentVerification = decompositionVerification(cwd, { ...input, slice: availabilitySlice }, unit, ownerToken, hostRuntime);
+    if (existing && sha(existing.decomposition_verification) !== sha(parentVerification)) throw new ControllerError('record-conflict', 'parent verification changed');
+  }
+  if (existing?.decomposition_entry && input.decomposition_from === undefined) throw new ControllerError('record-conflict', 'the decompose continuation binding cannot be stripped');
+  if (input.decomposition_from !== undefined) {
+    if (!serialBoundary) throw new ControllerError('unit-identity-mismatch', 'decompose requires canonical serial entry');
+    decomposed = decompositionEntry(cwd, { ...input, slice: availabilitySlice }, unit, ownerToken, hostRuntime, options);
+    if (existing && sha(existing.decomposition_entry) !== sha(decomposed)) throw new ControllerError('record-conflict', 'decompose entry changed');
+  }
   if (serialBoundary) {
     if (existing?.resumed_pause) { validatePausedEntry(cwd, existing, options); serialResumed = existing.resumed_pause; }
     else serialResumed = resumedPause(cwd, input, unit, options);
     const incomplete = incompleteUnits(cwd, input.milestone).filter(row => row.idempotency_key !== key
-      && row.idempotency_key !== serialResumed?.key);
+      && row.idempotency_key !== serialResumed?.key && row.idempotency_key !== decomposed?.pause_key);
     if (incomplete.length) {
       // Preserve the real unit lease refusal when another owner contests that
       // same unit. A different unfinished unit still blocks historical S02 replay.
@@ -1254,7 +1538,7 @@ function beginInside(cwd, request, options, serialBoundary = false) {
     fail(options, 'serial-lineage-checked');
   }
   if (existing) return runTransaction(cwd, existing, ownerToken,
-    serialBoundary ? input.generation || existing.lease_generation : input.generation, options);
+    input.generation || (serialBoundary || boundBatch ? existing.lease_generation : undefined), options);
   const otherPending = pendingTransactions(cwd);
   if (otherPending.length) throw new ControllerError('transaction-pending', 'recovery obrigatório antes de novo begin');
   const resumed = serialBoundary ? serialResumed : resumedPause(cwd, input, unit, options);
@@ -1264,6 +1548,12 @@ function beginInside(cwd, request, options, serialBoundary = false) {
   // After replay and beside budget admission: an explicit unit, an injected
   // inventory or a stale snapshot cannot bypass the owner's S02 state.
   assertTimeOptionAdmission(cwd, input.milestone, unit, key, availabilitySlice, options);
+  // Issue 343 U0d, read-only and independent of the time contract: a new execute-task begin
+  // needs its slice's enrolled generation current; a new plan-slice begin is classified for
+  // enrollment. Both decide before any path probe, lease or record.
+  const recordMilestone = opaque(input.milestone, 'milestone', true); // the form makeTransaction records
+  if (unit.type === 'execute-task') assertExecuteGeneration(cwd, recordMilestone, availabilitySlice);
+  const enrolled = planBeginEnrolled(cwd, recordMilestone, unit);
   preflightPaths(cwd, key, unit.key, input.milestone);
   try { recordOwnerBoundaryActivity(cwd, input.milestone, hostRuntime); } catch { /* measurement remains unknown; no workflow decision changes */ }
   const acquired = forgeLease.acquire(cwd, unit.key, {
@@ -1281,9 +1571,15 @@ function beginInside(cwd, request, options, serialBoundary = false) {
     fail(options, 'before-make-transaction');
     transaction = makeTransaction(cwd, input, 'begin', unit, key, ownerToken, acquired.generation, hostRuntime, nowOf(options));
     if (resumed) transaction.resumed_pause = resumed;
+    if (decomposed) transaction.decomposition_entry = decomposed;
+    if (parentVerification) transaction.decomposition_verification = parentVerification;
     if (admission.record || admission.decision === 'boundary-continuation' && admission.details.contract !== 'absent') {
       transaction.time_admission = admission.record || { decision: admission.decision, ...admission.details };
     }
+    // The enrollment of this real begin: its key, lease generation, owner digest and owner.
+    if (enrolled) transaction.plan_generation = clone(planGenerationOf(cwd, transaction.milestone, unit, key, acquired.generation, ownerToken));
+    // Issue 343 U1: the member binding of a batch begin (validated again on every read).
+    if (boundBatch) transaction.batch = clone(boundBatch);
     saveTransaction(cwd, transaction, nowOf(options), options);
   } catch (error) {
     let durable;
@@ -1336,11 +1632,109 @@ function transitionInside(cwd, request, options) {
   const otherPending = pendingTransactions(cwd);
   if (otherPending.length) throw new ControllerError('transaction-pending', 'recovery obrigatório antes de nova transição');
   assertLease(cwd, unit.key, ownerToken, generation);
-  const transaction = makeTransaction(cwd, input, action, unit, key, ownerToken, generation, hostRuntime, nowOf(options));
+  // Issue 343 U0d: a new successful plan-slice completion of an enrolled lineage admits the
+  // owner plan first; a refusal leaves no intent and the lease held for a corrected plan.
+  const planValidationRecord = action === 'complete' && unit.type === 'plan-slice' && completionSucceeds(input)
+    ? admitPlanCompletion(cwd, opaque(input.milestone, 'milestone', true), unit, generation, ownerToken, hostRuntime, options) : null;
+  if (planValidationRecord) fail(options, 'after-plan-validation');
+  const transaction = makeTransaction(cwd, input, action, unit, key, ownerToken, generation, hostRuntime, nowOf(options),
+    planValidationRecord ? { planValidation: planValidationRecord } : undefined);
+  if (options && options.batchTerminalState) transaction.after.prepared_state = clone(options.batchTerminalState);
   saveTransaction(cwd, transaction, nowOf(options), options);
   fail(options, 'after-intent');
   return runTransaction(cwd, transaction, ownerToken, generation, options);
 }
+// ── Issue 343 U5: the controller-terminal seam of a batch member (B5) ─────────
+//
+// The serial consolidation of forge-execution-batch acknowledges a member through THIS controller's
+// own complete transaction, never a copy of it. prepareBatchTerminal (under the transaction mutex,
+// writing nothing) builds that transaction at one fixed instant and returns the exact final effects
+// the unchanged runTransaction leaves at that instant: the transaction, result and boundary records,
+// the milestone event stream, the released lease (absent) and canonical STATE bytes at prepared_at.
+// commitBatchTerminal runs transitionInside at the same instant with that exact STATE pre/postimage, so its
+// readback is exactly those effects, and a replay resumes the same transaction. The begin must be the
+// committed batch member begin of this owner and host; the prepared request carries no owner token
+// (the caller supplies it again to commit) and nothing here is read from caller JSON as authority.
+const BATCH_TERMINAL_KEYS = Object.freeze(['milestone', 'unit', 'begin_key', 'host_runtime', 'prepared_at', 'output']);
+const BATCH_TERMINAL_PREPARED_KEY = 'prepared_state';
+function batchTerminalInput(cwd, input, ownerToken) {
+  const value = object(input, 'request');
+  if (Object.keys(value).some(key => !BATCH_TERMINAL_KEYS.includes(key) && key !== BATCH_TERMINAL_PREPARED_KEY) || BATCH_TERMINAL_KEYS.some(key => !own(value, key))) {
+    throw new ControllerError('invalid-request', 'pedido terminal do membro do batch inválido');
+  }
+  const token = opaque(ownerToken, 'owner_token', true);
+  const milestone = opaque(value.milestone, 'milestone', true);
+  const unit = unitFromRequest({ unit: value.unit });
+  const hostRuntime = forgeRuntime.normalizeHostRuntime(value.host_runtime);
+  const beginKey = opaque(value.begin_key, 'begin_key', true);
+  const at = typeof value.prepared_at === 'string' ? Date.parse(value.prepared_at) : NaN;
+  if (!Number.isFinite(at) || iso(at) !== value.prepared_at) throw new ControllerError('invalid-request', 'prepared_at inválido');
+  const begin = lookupRecord(cwd, 'transaction', beginKey);
+  if (!begin || begin.action !== 'begin' || begin.phase !== 'committed' || !own(begin, 'batch')
+      || !executionBatch().validBinding(begin.batch, beginKey, begin.unit) || begin.unit.key !== unit.key || begin.milestone !== milestone
+      || begin.host_runtime !== hostRuntime || begin.owner_digest !== ownerDigest(token)) {
+    throw new ControllerError('unit-identity-mismatch', 'o begin do membro do batch diverge do pedido terminal');
+  }
+  return { at, unit, request: { action: 'complete', milestone, unit: unit.key, host_runtime: hostRuntime, owner_token: token,
+    generation: begin.lease_generation, idempotency_key: `${beginKey}:complete`, result: { status: 'succeeded', output: value.output } } };
+}
+// The exact bytes writeAtomic publishes for a record that has no legacy copy.
+function recordBytes(record) { return `${JSON.stringify({ ...record, storage_checksum: sha(record) }, null, 2)}\n`; }
+function fileDigest(file) {
+  try { return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'); }
+  catch (error) { if (error && error.code === 'ENOENT') return null; throw error; }
+}
+function ownerPath(cwd, file) { return path.relative(cwd, file).split(path.sep).join('/'); }
+function prepareBatchTerminal(cwd, input, ownerToken, options) {
+  resolvePrefs(cwd, options);
+  return withMutex(cwd, 'unit-controller-transactions', () => {
+    const { at, unit, request } = batchTerminalInput(cwd, input, ownerToken);
+    const key = request.idempotency_key;
+    if (lookupRecord(cwd, 'transaction', key)) throw new ControllerError('transaction-pending', 'o terminal deste membro já começou');
+    if (pendingTransactions(cwd).length) throw new ControllerError('transaction-pending', 'recovery obrigatório antes do terminal do batch');
+    assertLease(cwd, unit.key, request.owner_token, request.generation);
+    const transaction = makeTransaction(cwd, request, 'complete', unit, key, request.owner_token, request.generation, request.host_runtime, at);
+    if (own(input, BATCH_TERMINAL_PREPARED_KEY)) throw new ControllerError('invalid-request', 'terminal request is already prepared');
+    const preparedState = forgeState.prepareUpdateFields(cwd, transaction.milestone, transaction.after.state_patch, { at: iso(at) });
+    transaction.after.prepared_state = clone(preparedState);
+    // The final record runTransaction leaves: committed, its boundary handed off at the same instant.
+    const final = clone(transaction);
+    final.phase = 'committed'; final.updated_at = iso(at);
+    if (final.boundary) { final.boundary.handoff_ready = true; final.boundary.committed_at = iso(at); }
+    const events = eventsFile(cwd, transaction.milestone), stream = readEvents(events);
+    const content = `${stream.concat({ ...transaction.event, sequence: stream.length + 1 }).map(item => JSON.stringify(item)).join('\n')}\n`;
+    const transactionPath = transactionFile(cwd, key), result = resultFile(cwd, key), boundary = boundaryFile(cwd, unit.key);
+    const state = forgeState.statePath(cwd, transaction.milestone), lease = forgeLease.leaseFile(cwd, unit.key);
+    const effects = [
+      { path: ownerPath(cwd, transactionPath), before: fileDigest(transactionPath), after: { sha256: sha(recordBytes(final)) } },
+      { path: ownerPath(cwd, result), before: fileDigest(result), after: { sha256: sha(recordBytes(transaction.result)) } },
+      { path: ownerPath(cwd, events), before: fileDigest(events), after: { sha256: sha(content) } },
+      { path: ownerPath(cwd, boundary), before: fileDigest(boundary), after: { sha256: sha(recordBytes(final.boundary)) } },
+      { path: ownerPath(cwd, state), before: preparedState.before_sha256, after: { sha256: preparedState.after_sha256 } },
+      { path: ownerPath(cwd, lease), before: fileDigest(lease), after: null },
+    ];
+    return { prepared_at: iso(at), effects, request: { ...clone(input), prepared_state: clone(preparedState) } };
+  });
+}
+function commitBatchTerminal(cwd, input, ownerToken, options) {
+  resolvePrefs(cwd, options);
+  return withMutex(cwd, 'unit-controller-transactions', () => {
+    const { at, request } = batchTerminalInput(cwd, input, ownerToken);
+    if (!own(input, BATCH_TERMINAL_PREPARED_KEY)) throw new ControllerError('invalid-request', 'exact prepared STATE required');
+    const existing = lookupRecord(cwd, 'transaction', request.idempotency_key);
+    if (existing) {
+      if (!existing.after.prepared_state || sha(existing.after.prepared_state) !== sha(input.prepared_state)) {
+        throw new ControllerError('record-conflict', 'prepared STATE differs from terminal transaction');
+      }
+    } else {
+      const candidate = makeTransaction(cwd, request, 'complete', unitFromRequest(request), request.idempotency_key,
+        request.owner_token, request.generation, request.host_runtime, at);
+      forgeState.assertPreparedUpdate(cwd, request.milestone, candidate.after.state_patch, input.prepared_state, { at: iso(at) });
+    }
+    return transitionInside(cwd, request, { ...(options || {}), now: () => at, batchTerminal: true, batchTerminalState: clone(input.prepared_state) });
+  });
+}
+
 function persistResult(cwd, request, options) { return transition(cwd, { ...request, action: 'persist-result' }, options); }
 function complete(cwd, request, options) { return transition(cwd, { ...request, action: 'complete' }, options); }
 function pause(cwd, request, options) { return transition(cwd, { ...request, action: 'pause' }, options); }
@@ -2166,6 +2560,147 @@ function inspectSettledAttempt(cwd, begin, options, statuses, replaySource = tru
     request_sha256: archived ? archived.caller_request_sha256 : recovery.callerRequestHash(context.request), claim_sha256: rootsApi.digest(context.request.claim || null),
     status: receipt.result.status, roots, pending_questions: require('./forge-interaction').mergePendingQuestions(pending, context.pending_questions || []) };
 }
+// A verified ready/done attempt can be administratively paused for repair.
+// This records no accepted parent delivery and cannot be supplied as JSON proof.
+function decompositionPlanBinding(cwd, begin, options, proof, plan) {
+  const context = originalAttemptContext(cwd, begin, options.inspectAttempt({ cwd, begin: clone(begin), references: { purpose: 'decompose-plan-binding' } }), options);
+  if (!context?.request?.planFile || context.begin_key !== begin.idempotency_key || context.begin_checksum !== sha(begin)) throw new ControllerError('attempt-evidence-missing', 'original plan input binding required');
+  const receipt = require('./forge-attempt-recovery').inspectReceipt(context.receipt_path);
+  if (receipt.receipt_sha256 !== proof.receipt_sha256) throw new ControllerError('attempt-evidence-changed', 'original receipt changed');
+  const original = receipt.receipt.execution?.inputs?.[context.request.planFile];
+  if (typeof original !== 'string' || !/^[a-f0-9]{64}$/.test(original)) throw new ControllerError('attempt-evidence-missing', 'original plan hash is unknown; never infer an anchor');
+  const digest = text => crypto.createHash('sha256').update(text).digest('hex'), candidates = new Set([plan.content]);
+  const count = require('./forge-repair').readRepairCount(plan.content);
+  if (Number.isSafeInteger(count) && count > 0) {
+    candidates.add(plan.content.replace(/^(repair_count:[ \t]*)\d+/m, (_line, prefix) => prefix + (count - 1)));
+    if (count === 1) candidates.add(plan.content.replace(/^(\uFEFF?---\r?\n)repair_count: 1\r?\n/, '$1'));
+  }
+  const prior = [...candidates].find(text => digest(text) === original);
+  if (prior === undefined) throw new ControllerError('attempt-evidence-changed', 'only the exact original plan or canonical repair counter increment is accepted');
+  return { original_plan_sha256: original, plan_transition: prior === plan.content ? 'unchanged' : 'repair-counter-only' };
+}
+function pauseDecomposition(cwd, input, options = {}) {
+  resolvePrefs(cwd, options);
+  return withMutex(cwd, 'unit-controller-transactions', () => {
+    const begin = terminalIdentity(cwd, input);
+    if (begin.unit.type !== 'execute-task' || begin.batch) throw new ControllerError('unit-identity-mismatch', 'only the current single task can decompose');
+    const existing = lookupRecord(cwd, 'transaction', input.idempotency_key);
+    if (existing && (existing.action !== 'pause' || existing.result?.output?.decomposition_attempt?.begin_key !== begin.idempotency_key)) throw new ControllerError('record-conflict', 'decompose pause key differs');
+    // Administrative repair does not publish/accept the old result. The owner
+    // may have incremented repair_count, but its executable contract must still
+    // be the admitted generation; receipt/request and stopped/root proof stay exact.
+    require('./forge-plan-validation').assertSliceGeneration(cwd, { milestone: begin.milestone, slice: begin.after.state.active_slice });
+    const live = inspectSettledAttempt(cwd, begin, options, ['done'], false);
+    if (live.pending_questions.some(row => row.status === 'pending')) throw new ControllerError('pending-questions', 'decompose retains unanswered decisions');
+    const plan = require('./forge-plan-validation').readOwnerTaskPlan(cwd, { milestone: begin.milestone, slice: begin.after.state.active_slice, task: begin.unit.id });
+    if (plan.status !== 'ok') throw new ControllerError('attempt-evidence-missing', 'the current canonical parent plan is unavailable');
+    const workflow = options.workflow?.workflow_id;
+    if (typeof workflow !== 'string' || !workflow.trim()) throw new ControllerError('unit-identity-mismatch', 'the actual loop workflow is required');
+    const count = options.workflow.step_count, maximum = options.workflow.max_steps;
+    if (!Number.isInteger(count) || count < 1 || !Number.isInteger(maximum) || count > maximum) throw new ControllerError('unit-identity-mismatch', 'the real reserved parent step is required');
+    const planBinding = decompositionPlanBinding(cwd, begin, options, live, plan);
+    const proof = { ...live, ...planBinding, workflow_id: workflow, parent_step: count, max_steps: maximum,
+      plan_sha256: existing?.result.output.decomposition_attempt.plan_sha256 || plan.sha256 };
+    if (existing && sha(existing.result.output.decomposition_attempt) !== sha(proof)) throw new ControllerError('attempt-evidence-changed', 'decompose attempt changed');
+    if (!existing) assertNoSuccessor(cwd, begin, input.idempotency_key);
+    const currentAutoMode = forgeState.read(cwd, begin.milestone)?.auto_mode;
+    return transitionInside(cwd, { ...input, action: 'pause', unit: begin.unit, generation: begin.lease_generation,
+      state_patch: { active_slice: begin.after.state.active_slice, active_task: begin.after.state.active_task,
+        ...(currentAutoMode !== undefined ? { auto_mode: currentAutoMode } : {}) },
+      result: { status: 'cancelled', output: { decomposition_attempt: proof } } }, options);
+  });
+}
+// The canonical historical completion of every child, then a new REAL parent
+// execution/verification. A checkbox, callback or imported aggregate cannot
+// replace any child delivery, begin, completion, or the new parent's own proof.
+function decompositionProgress(cwd, mutation, records) {
+  const children = [];
+  for (const id of mutation.added_task_ids) {
+    if (!scopedCompletion(cwd, mutation.milestone, mutation.slice, id, records)) return { verified: false, verification: null };
+    const lineage = records.filter(row => row.phase === 'committed' && row.milestone === mutation.milestone
+      && row.unit.key === 'execute-task/' + id && row.after.state.active_slice === mutation.slice
+      && ['begin', 'complete'].includes(row.action)).map(row => ({ key: row.idempotency_key, checksum: sha(row) })).sort((x,y) => x.key.localeCompare(y.key));
+    const delivery = fs.readFileSync(path.join(cwd, '.gsd/milestones', mutation.milestone, 'slices', mutation.slice, 'tasks', id, id + '-DELIVERY.json'));
+    children.push({ task_id: id, lineage, delivery_sha256: crypto.createHash('sha256').update(delivery).digest('hex') });
+  }
+  const entries = records.filter(row => row.phase === 'committed' && row.action === 'begin' && row.decomposition_entry?.mutation_ref === mutation.mutation_ref
+    && mutation.added_task_ids.includes(row.unit.id) && validDecompositionEntry(cwd, row));
+  const pauses = [...new Set(entries.map(row => row.decomposition_entry.pause_key))];
+  if (pauses.length !== 1) return { verified: false, verification: null };
+  const paused = lookupRecord(cwd, 'transaction', pauses[0]);
+  const binding = { mutation_ref: mutation.mutation_ref, admission_sha256: mutation.admission_sha256,
+    pause_key: paused.idempotency_key, pause_checksum: sha(paused), children_sha256: sha(children), children };
+  const own = records.filter(row => row.unit.key === 'execute-task/' + mutation.parent_task_id
+    && row.milestone === mutation.milestone && row.after.state.active_slice === mutation.slice);
+  const begins = own.filter(row => row.action === 'begin' && row.phase === 'committed' && sha(row.decomposition_verification || null) === sha(binding));
+  const verified = begins.some(begin => scopedCompletion(cwd, mutation.milestone, mutation.slice, mutation.parent_task_id,
+    own.filter(row => row.owner_digest === begin.owner_digest && row.lease_generation === begin.lease_generation)));
+  return { verified, verification: verified ? null : binding };
+}
+function decompositionVerification(cwd, input, unit, ownerToken, hostRuntime) {
+  const provided = input.decomposition_verification_from;
+  const mutation = require('./forge-plan-validation').readDecompositionAdmission(cwd, provided?.mutation_ref);
+  if (unit.type !== 'execute-task' || unit.id !== mutation.parent_task_id || input.milestone !== mutation.milestone || input.slice !== mutation.slice) throw new ControllerError('unit-identity-mismatch', 'verification is of the exact original parent');
+  const progress = decompositionProgress(cwd, mutation, discoverRecords(cwd, 'transaction'));
+  if (!progress.verification || sha(progress.verification) !== sha(provided)) throw new ControllerError('decomposition-verification-required', 'actual child completion and delivery proofs required');
+  const paused = lookupRecord(cwd, 'transaction', progress.verification.pause_key);
+  if (paused.owner_digest !== ownerDigest(ownerToken) || paused.host_runtime !== hostRuntime) throw new ControllerError('unit-identity-mismatch', 'verification belongs to another owner/host');
+  return progress.verification;
+}
+function decompositionEntry(cwd, input, unit, ownerToken, hostRuntime, options) {
+  const ref = input.decomposition_from;
+  if (!ref || typeof ref.pause_key !== 'string' || typeof ref.pause_checksum !== 'string' || typeof ref.mutation_ref !== 'string') throw new ControllerError('unit-identity-mismatch', 'decompose continuation binding is required');
+  const paused = lookupRecord(cwd, 'transaction', ref.pause_key), stored = paused?.result?.output?.decomposition_attempt;
+  if (!paused || paused.action !== 'pause' || paused.phase !== 'committed' || !paused.boundary?.handoff_ready || !stored
+      || sha(paused) !== ref.pause_checksum || paused.owner_digest !== ownerDigest(ownerToken) || paused.host_runtime !== hostRuntime
+      || paused.milestone !== input.milestone || paused.unit.type !== 'execute-task'
+      || options.workflow?.workflow_id !== stored.workflow_id || options.workflow?.step_count !== stored.parent_step
+      || options.workflow?.max_steps !== stored.max_steps) throw new ControllerError('unit-identity-mismatch', 'foreign decompose pause or step reservation');
+  const mutation = require('./forge-plan-validation').readDecompositionAdmission(cwd, ref.mutation_ref);
+  if (mutation.milestone !== input.milestone || mutation.slice !== input.slice || mutation.slice !== paused.after.state.active_slice
+      || mutation.parent_task_id !== paused.unit.id || mutation.parent_plan_sha256 !== stored.plan_sha256
+      || unit.type !== 'execute-task' || !mutation.added_task_ids.includes(unit.id)) throw new ControllerError('unit-identity-mismatch', 'child is not of this exact admitted mutation');
+  const spent = discoverRecords(cwd, 'transaction').filter(row => row.action === 'begin'
+    && row.decomposition_entry?.pause_key === paused.idempotency_key);
+  if (spent.length > 1 || spent.length === 1 && (spent[0].idempotency_key !== input.idempotency_key
+      || spent[0].unit.key !== unit.key || !validDecompositionEntry(cwd, spent[0]))) throw new ControllerError('record-conflict', 'the parent step reservation is already consumed');
+  if (!spent.length) {
+    const ready = select(cwd, { milestone: input.milestone }, options);
+    if (!ready.ok || ready.slice !== input.slice || ready.unit?.key !== unit.key) throw new ControllerError('unit-identity-mismatch', 'only the canonical first ready child replaces the parent step');
+  }
+  {
+    const begin = lookupRecord(cwd, 'transaction', stored.begin_key);
+    if (!begin || sha(begin) !== stored.begin_checksum) throw new ControllerError('attempt-evidence-changed', 'parent begin changed');
+    const { plan_sha256, original_plan_sha256, plan_transition, workflow_id, parent_step, max_steps, ...original } = stored, live = inspectSettledAttempt(cwd, begin, options, ['done'], false);
+    if (sha(original) !== sha(live) || live.pending_questions.some(row => row.status === 'pending')) throw new ControllerError('attempt-evidence-changed', 'paused evidence or questions changed');
+    const oldLease = forgeLease.readLease(forgeLease.leaseFile(cwd, paused.unit.key));
+    if (oldLease.record || oldLease.corrupt) throw new ControllerError('lease-active', 'the parent is not released');
+  }
+  return { pause_key: paused.idempotency_key, pause_checksum: sha(paused), mutation_ref: ref.mutation_ref,
+    admission_sha256: mutation.admission_sha256, parent_begin_key: stored.begin_key, parent_begin_checksum: stored.begin_checksum,
+    workflow_id: stored.workflow_id, replaces_parent_step: stored.parent_step, max_steps: stored.max_steps };
+}
+function validDecompositionEntry(cwd, next) {
+  try {
+    const link = next.decomposition_entry;
+    const input = { milestone: next.milestone, slice: next.after.state.active_slice,
+      decomposition_from: { pause_key: link.pause_key, pause_checksum: link.pause_checksum, mutation_ref: link.mutation_ref } };
+    // Historical validation has no callback or runtime grant: only exact
+    // canonical pause/mutation/begin checksums can close this lineage edge.
+    const paused = lookupRecord(cwd, 'transaction', link.pause_key);
+    if (!paused || next.owner_digest !== paused.owner_digest || next.host_runtime !== paused.host_runtime) return false;
+    const mutation = require('./forge-plan-validation').readDecompositionAdmission(cwd, link.mutation_ref);
+    return sha(paused) === link.pause_checksum && mutation.admission_sha256 === link.admission_sha256
+      && paused.result.output.decomposition_attempt.begin_key === link.parent_begin_key
+      && paused.result.output.decomposition_attempt.begin_checksum === link.parent_begin_checksum
+      && paused.result.output.decomposition_attempt.workflow_id === link.workflow_id
+      && paused.result.output.decomposition_attempt.parent_step === link.replaces_parent_step
+      && paused.result.output.decomposition_attempt.max_steps === link.max_steps
+      && mutation.parent_plan_sha256 === paused.result.output.decomposition_attempt.plan_sha256
+      && mutation.parent_task_id === paused.unit.id && mutation.milestone === input.milestone && mutation.slice === input.slice
+      && next.unit.type === 'execute-task' && mutation.added_task_ids.includes(next.unit.id);
+  } catch { return false; }
+}
 function pausePartial(cwd, input, options = {}) {
   resolvePrefs(cwd, options);
   return withMutex(cwd, 'unit-controller-transactions', () => {
@@ -2342,6 +2877,11 @@ function reenter(cwd, request, options = {}) {
       if (concurrent) throw new ControllerError('lease-active', 'outra unidade operacional permanece ativa');
       const observation = forgeLease.observe(cwd, failure.unit.key);
       if (!observation.ok || observation.lease) throw new ControllerError('lease-active', 'reentrada exige lease ausente e íntegra');
+      // Issue 343 U0d: a linked reentry is a new begin too. An execute-task rechecks its
+      // slice's enrolled generation; a plan-slice inherits the enrollment of its failed
+      // predecessor begin (never lost, never invented for a pre-requirement lineage).
+      if (failure.unit.type === 'execute-task') assertExecuteGeneration(cwd, failure.milestone, failure.terminal_failure.slice);
+      const enrolled = failure.unit.type === 'plan-slice' && predecessorEnrolled(cwd, failure.milestone, failure.unit, failure);
       const acquired = forgeLease.acquire(cwd, failure.unit.key, { ownerToken: input.owner_token, hostRuntime: linked.host_runtime, requestId: key, now: options.now });
       if (!acquired.ok) throw new ControllerError('lease-active', 'lease concorrente');
       try {
@@ -2349,6 +2889,7 @@ function reenter(cwd, request, options = {}) {
           'begin', failure.unit, key, input.owner_token, acquired.generation, linked.host_runtime, nowOf(options));
         existing.linked_entry = linked;
         if (admission.record) existing.time_admission = admission.record;
+        if (enrolled) existing.plan_generation = clone(planGenerationOf(cwd, failure.milestone, failure.unit, key, acquired.generation, input.owner_token));
         saveTransaction(cwd, existing, nowOf(options), options);
       } catch (error) {
         let durable;
@@ -2508,11 +3049,13 @@ module.exports = {
   PROTOCOL_VERSION, BOUNDARY_KINDS, ACTIONS, PHASES, REASON_CODES, TIME_ADMISSION_CODES, ControllerError,
   selectNextUnit, discoverInventory, select, begin, beginSerial, transition, persistResult,
   complete, pause, fail: failUnit, expireSafe, resume, handoff,
-  withOwnerBoundary, pendingTransactions, incompleteUnits, pausePartial, reconcilePartialSuccessors, inspectPausedAttempt, verifyCompletedAttempt, validatePausedEntry, projectLogicalHistory, logicalState, resolvePrefs,
+  withOwnerBoundary, pendingTransactions, incompleteUnits, pausePartial, pauseDecomposition, reconcilePartialSuccessors, inspectPausedAttempt, verifyCompletedAttempt, validatePausedEntry, projectLogicalHistory, logicalState, resolvePrefs,
   transactionDir, resultDir, boundaryDir, eventsFile, transactionFile,
   resultFile, boundaryFile, readEvents, readJson, writeAtomic,
   lookupRecord, preflightPaths,
   consumeFailure, reenter, failureProjection, validateLinkedEntry, validateTerminalLinkedEntry, inspectHistoricalLinkedEntry, recordChecksum, sliceClosure,
+  // Issue 343 U5: the controller-terminal seam of a batch member's serial consolidation.
+  prepareBatchTerminal, commitBatchTerminal,
   settleInterruptedLineage, verifyOwnerInterruption, pendingOwnerInterruptions, ownerInterruptionIdentity,
   ownerInterruptionQuestions, archiveOwnerInterruptionWitnesses,
   dependencies: { forgeState, forgeRuns, forgePrefs, forgeRuntime, forgeIds, forgeLease },

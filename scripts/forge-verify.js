@@ -914,11 +914,28 @@ function formatEvidenceYaml(entries) {
 
 // ── Exports ───────────────────────────────────────────────────────────────────
 
+// Issue 343 U3b: the physical runtime view of a sidecar cohort member. Only a view minted by
+// forge-execution-batch through the member's live handle (validateMemberPlan or
+// resolveMemberExecution) is accepted, never a copy or JSON. It must bind this exact canonical
+// plan text, whose hash every record keeps, and this measured physical contract. Without one,
+// every caller below behaves exactly as before.
+function memberRuntimeView(options, measured, planText) {
+  if (!options || options.memberView === undefined) return null;
+  const roots = require('./forge-code-roots'), view = options.memberView;
+  if (!require('./forge-execution-batch').isMemberView(view) || view.canonical_plan_sha256 !== roots.digest(planText)
+      || view.runtime_contract_sha256 !== roots.digest(measured)) {
+    throw Object.assign(new Error('verification-member-view-invalid'), { code: 'verification-member-view-invalid', provider_called: false });
+  }
+  return view;
+}
+
 // A verification policy is fixed before a writer starts. Runtime options may
 // extend explicit command lists, never remove or replace their prefix.
-function normalizeExecutionVerification(contract, planText, declared = {}, runtime = {}, identity = {}) {
+// options.memberView (issue 343 U3b): a cohort member's seal also binds its runtime view.
+function normalizeExecutionVerification(contract, planText, declared = {}, runtime = {}, identity = {}, options = {}) {
   const roots = require('./forge-code-roots');
   const measured = roots.validateContract(contract, { revalidate: true });
+  const view = memberRuntimeView(options, measured, planText);
   const fail = code => { throw Object.assign(new Error(code), { code, provider_called: false }); };
   const allowed = ['preferenceCommands', 'commandsByRoot', 'commandTimeoutMs'];
   const validate = value => {
@@ -988,16 +1005,26 @@ function normalizeExecutionVerification(contract, planText, declared = {}, runti
   });
   const policy = { schema_version: 1, execution_contract_sha256: roots.digest(measured), plan_sha256: roots.digest(planText),
     identity, roots: rows, command_timeout_ms: timeout,
-    timeout_origin: declared.commandTimeoutMs !== undefined ? 'request' : runtime.commandTimeoutMs !== undefined ? 'runtime' : 'default' };
+    timeout_origin: declared.commandTimeoutMs !== undefined ? 'request' : runtime.commandTimeoutMs !== undefined ? 'runtime' : 'default',
+    ...(view ? { runtime_view_sha256: view.runtime_view_sha256 } : {}) };
   return { ...policy, sha256: roots.digest(policy) };
 }
-function assertExecutionVerification(seal, contract, planText, identity) {
+function assertExecutionVerification(seal, contract, planText, identity, options = {}) {
   const roots = require('./forge-code-roots');
   const { sha256, ...policy } = seal || {};
+  const insufficient = () => {
+    throw Object.assign(new Error('verification-provenance-insufficient'), { code: 'verification-provenance-insufficient', provider_called: false });
+  };
   if (policy.schema_version !== 1 || sha256 !== roots.digest(policy)
     || policy.execution_contract_sha256 !== roots.digest(roots.validateContract(contract, { revalidate: true }))
     || policy.plan_sha256 !== roots.digest(planText) || roots.digest(policy.identity) !== roots.digest(identity)) {
-    throw Object.assign(new Error('verification-provenance-insufficient'), { code: 'verification-provenance-insufficient', provider_called: false });
+    insufficient();
+  }
+  // Issue 343 U3b: a member seal verifies only with that member's current minted view, and a
+  // single seal never verifies a member (nor a member seal a single caller).
+  if (policy.runtime_view_sha256 !== undefined || (options && options.memberView !== undefined)) {
+    const view = memberRuntimeView(options, roots.validateContract(contract, { revalidate: true }), planText);
+    if (!view || policy.runtime_view_sha256 !== view.runtime_view_sha256) insufficient();
   }
   return seal;
 }
@@ -1039,10 +1066,16 @@ function runRootVerification(contract, options = {}) {
 function captureRootDelivery(contract, planText, options = {}) {
   const fs = require('fs');
   const roots = require('./forge-code-roots');
-  if (options.verificationSeal) assertExecutionVerification(options.verificationSeal, contract, planText, options.verificationIdentity);
-  const checked = roots.validatePlan(planText, contract);
+  // Issue 343 U3b: a cohort member's capture validates the canonical plan through its minted
+  // runtime view (member roots); the fingerprint and the criteria stay the original plan's.
+  const { memberView: suppliedView, ...captureOptions } = options;
+  const view = suppliedView === undefined ? null
+    : memberRuntimeView({ memberView: suppliedView }, roots.validateContract(contract, { revalidate: true }), planText);
+  if (captureOptions.verificationSeal) assertExecutionVerification(captureOptions.verificationSeal, contract, planText,
+    captureOptions.verificationIdentity, view ? { memberView: view } : undefined);
+  const checked = roots.validatePlan(view ? view.runtime_plan_text : planText, contract);
   const parsed = require('./forge-must-haves').parseMustHaves(planText);
-  const gate = runRootVerification(contract, { ...options, taskPlanVerify: parsePlanVerify(planText), planFingerprint: roots.digest(planText) });
+  const gate = runRootVerification(contract, { ...captureOptions, taskPlanVerify: parsePlanVerify(planText), planFingerprint: roots.digest(planText) });
   const artifacts = gate.roots.map(envelope => {
     const entries = checked.artifacts.filter(row => row.root_id === envelope.root_id);
     const result = require('./forge-verifier').verifyArtifact({ ...parsed, artifacts: entries, key_links: [] }, [], { cwd: envelope.code_dir });

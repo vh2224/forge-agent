@@ -208,6 +208,58 @@ try {
   }
   assert.ok(loop.COMMANDS.includes('resume-time-option'));
 
+  // Issue 343 U1: a dispatched batch is held as current_batch (never current_unit), charges one
+  // step per member, replays without a second charge, refuses every single-unit command by name
+  // and clears only through batch-ack once the owner reports every member terminal.
+  for (const host of ['claude', 'codex']) {
+    const calls = [], batchId = `batch-${'1'.repeat(32)}`, digest = '2'.repeat(64);
+    let terminal = false;
+    const members = ['T01', 'T02'].map(id => ({ unit: { type: 'execute-task', id, key: `execute-task/${id}` },
+      transaction: { idempotency_key: `forge-execution-batch:${batchId}:execute-task/${id}` } }));
+    const fake = {
+      run: (operation, payload, trusted) => {
+        calls.push({ operation, payload, trusted });
+        if (operation === 'next') return { outcome: 'completed', reason_code: 'batch-selected', unit: null,
+          details: { dispatch_batch: { batch_id: batchId, manifest_sha256: digest, members } } };
+        if (operation === 'batch-status') return { outcome: 'completed', reason_code: 'batch-status-ready', details: { batch: { terminal } } };
+        if (operation === 'batch-ack') return terminal ? { outcome: 'completed', reason_code: 'batch-acked' } : { outcome: 'blocked', reason_code: 'batch-members-pending' };
+        throw new Error(`unexpected ${operation}`);
+      },
+      validatePending: () => ({ ok: true }),
+    };
+    const initial = loop.create({ mode: 'auto', workflow_id: `batch-${host}`, host_runtime: host, max_steps: 5 });
+    const first = loop.advance(initial, 'next', { cwd: '/fixture', milestone }, { orchestrate: fake });
+    assert.deepStrictEqual([first.outcome, first.action, first.reason_code, first.unit, first.snapshot.current_unit, first.snapshot.step_count],
+      ['dispatch_required', 'dispatch-batch', 'batch-ready', null, null, 2]);
+    assert.deepStrictEqual(first.snapshot.current_batch, { batch_id: batchId, manifest_sha256: digest, members: ['execute-task/T01', 'execute-task/T02'] });
+    assert.deepStrictEqual(calls[0].trusted.workflow, { mode: 'auto', workflow_id: `batch-${host}`, remaining_steps: 5 }, 'the loop passes its own mode and budget');
+    const replayed = loop.advance(first.snapshot, 'next', { cwd: '/fixture', milestone }, { orchestrate: fake });
+    assert.deepStrictEqual([replayed.snapshot.step_count, calls.length], [2, 1], 'replay is uncharged and never delegates next again');
+    for (const command of ['complete', 'pause', 'resume', 'consume-failure', 'reenter', 'resume-budget', 'resume-time-option']) {
+      const refused = loop.advance(first.snapshot, command, { cwd: '/fixture', milestone, response: 'sim', resume_intent: 'execute', result: { status: 'done' } }, { orchestrate: fake });
+      assert.deepStrictEqual([refused.outcome, refused.reason_code, refused.controller_result], ['blocked', 'batch-active', null], command);
+    }
+    assert.strictEqual(calls.length, 1, 'no single-unit command was delegated');
+    const pending = loop.advance(first.snapshot, 'batch-ack', { cwd: '/fixture', milestone, approved: true, batch: { batch_id: `batch-${'9'.repeat(32)}` } }, { orchestrate: fake });
+    assert.deepStrictEqual([pending.outcome, pending.reason_code, pending.snapshot.current_batch.batch_id], ['blocked', 'batch-members-pending', batchId]);
+    assert.deepStrictEqual(calls[calls.length - 1].payload.batch, { batch_id: batchId, manifest_sha256: digest }, 'the snapshot locator, never caller JSON');
+    assert.strictEqual(loop.advance(first.snapshot, 'batch-status', { cwd: '/fixture', milestone }, { orchestrate: fake }).action, 'observe');
+    terminal = true;
+    const acked = loop.advance(first.snapshot, 'batch-ack', { cwd: '/fixture', milestone }, { orchestrate: fake });
+    assert.deepStrictEqual([acked.outcome, acked.action, acked.snapshot.lifecycle, acked.snapshot.current_batch, acked.snapshot.last_decision],
+      ['completed', 'continue', 'idle', undefined, null]);
+    assert.strictEqual(loop.advance(acked.snapshot, 'batch-ack', { cwd: '/fixture', milestone }, { orchestrate: fake }).reason_code, 'batch-not-active');
+    // Budget: a batch larger than the remaining steps is never charged partially.
+    const tight = loop.advance({ ...initial, step_count: 4 }, 'next', { cwd: '/fixture', milestone }, { orchestrate: fake });
+    assert.deepStrictEqual([tight.outcome, tight.reason_code, tight.snapshot.step_count, tight.snapshot.current_batch], ['blocked', 'step-budget-exhausted', 4, undefined]);
+    // Snapshot compatibility: older snapshots carry no current_batch; a batch excludes current_unit.
+    assert.throws(() => loop.validateSnapshot({ ...first.snapshot, current_unit: members[0].unit }), error => error.code === 'invalid-snapshot');
+    assert.throws(() => loop.validateSnapshot({ ...first.snapshot, current_batch: { batch_id: batchId, manifest_sha256: digest, members: [] } }),
+      error => error.code === 'invalid-snapshot');
+    assert.doesNotThrow(() => loop.validateSnapshot({ ...initial, current_batch: null }));
+  }
+  assert.ok(loop.COMMANDS.includes('batch-status') && loop.COMMANDS.includes('batch-ack'));
+
   const source = fs.readFileSync(path.join(__dirname, 'forge-loop-controller.js'), 'utf8');
   assert.strictEqual(/child_process|\bspawn(?:Sync)?\s*\(/.test(source), false, 'controller must not spawn');
   console.log(`forge-loop-controller tests passed (${cases} host/platform vectors)`);

@@ -3878,6 +3878,9 @@ async function smokeXllmPlan() {
     'id: T01',
     'slice: S99',
     'milestone: M999',
+    'depends: []',
+    'writes:',
+    '  - src/thing.js',
     'must_haves:',
     '  truths:',
     '    - "the thing works"',
@@ -3925,7 +3928,7 @@ async function smokeXllmPlan() {
     return JSON.stringify({
       status: 'done',
       summary: 'planned the slice',
-      slice_plan: { filename: 'S99-PLAN.md', content: '# S99: slice plan\n\ntasks: T01\n' },
+      slice_plan: { filename: 'S99-PLAN.md', content: '# S99: slice plan\n\n- [ ] **T01**: do the thing\n' },
       task_plans: [{ id: 'T01', filename: 'T01-PLAN.md', content: taskPlanContent }],
     });
   }
@@ -4085,7 +4088,8 @@ function smokeXllmSvn() {
     files_changed: ['sidecar-file.txt'],
   });
   const taskPlan = [
-    '---', 'id: T01', 'slice: S99', 'milestone: M999', 'must_haves:',
+    '---', 'id: T01', 'slice: S99', 'milestone: M999',
+    'depends: []', 'writes:', '  - src/thing.js', 'must_haves:',
     '  truths:', '    - "the thing works"', '  artifacts:', '    - path: "src/thing.js"',
     '      provides: "the thing"', '      min_lines: 5', '  key_links:',
     '    - from: "src/thing.js"', '      to: "src/other.js"', '      via: "import"',
@@ -4093,7 +4097,7 @@ function smokeXllmSvn() {
   ].join('\n');
   const planPayload = JSON.stringify({
     status: 'done', summary: 'SVN plan completed',
-    slice_plan: { filename: 'S99-PLAN.md', content: '# S99\n' },
+    slice_plan: { filename: 'S99-PLAN.md', content: '# S99\n\n- [ ] **T01**: fixture\n' },
     task_plans: [{ id: 'T01', filename: 'T01-PLAN.md', content: taskPlan }],
   });
   const readJson = (file) => {

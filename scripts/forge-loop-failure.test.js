@@ -36,6 +36,14 @@ function fixture(host = 'codex', mode = 'auto', executeTask = false) {
   assert.strictEqual(selected.outcome, 'dispatch_required', JSON.stringify(selected));
   assert.strictEqual(selected.unit.key, executeTask ? 'execute-task/T01' : 'plan-slice/S03');
   const begin = selected.controller_result.details.transaction;
+  if (!executeTask) {
+    // The selected native planner produces valid bytes before its eventual completion.
+    // Publish AFTER selection so this remains plan-slice/S03.
+    const sliceDir = path.join(dir, 'slices', 'S03'), taskDir = path.join(sliceDir, 'tasks', 'T01');
+    fs.mkdirSync(taskDir, { recursive: true });
+    fs.writeFileSync(path.join(sliceDir, 'S03-PLAN.md'), '# S03\n- [ ] **T01**: Work\n');
+    fs.writeFileSync(path.join(taskDir, 'T01-PLAN.md'), '---\nid: T01\ndepends: []\nwrites:\n  - scripts/result.js\nmust_haves:\n  truths:\n    - Planned fixture task is observable.\n  artifacts: []\n  key_links: []\nexpected_output:\n  - scripts/result.js\n---\n# T01\n');
+  }
   const request = { cwd, contextRoot: cwd, milestoneId: milestone, sliceId: 'S03', taskId: executeTask ? 'T01' : undefined, scope: 'milestone', phase: executeTask ? 'execute' : 'plan',
     unitType: executeTask ? 'execute-task' : 'plan-slice', roadmapFile, route: { host_runtime: host, resolved_worker_engine: host } };
   const receiptFile = path.join(cwd, 'old-receipt.json');

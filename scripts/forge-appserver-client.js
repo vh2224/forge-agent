@@ -710,13 +710,16 @@ function startAppServerTurn(options) {
     };
 
     try {
-      child = spawn(cmd, [...args, 'app-server'], {
+      const memberScope = require('./forge-execution-batch').currentMemberProcessScope();
+      const spawnProvider = memberScope ? memberScope.spawn : spawn;
+      child = spawnProvider(cmd, [...args, 'app-server'], {
         cwd,
         env,
         stdio: ['pipe', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
       });
     } catch (error) {
+      if (String(error.code || '').startsWith('batch-')) { reject(error); return; }
       fail(`spawn failed: ${error.message}`, null, false);
       return;
     }

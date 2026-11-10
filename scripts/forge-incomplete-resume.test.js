@@ -16,8 +16,11 @@ function fixture(host, type = 'complete-slice') {
   f.call = (command, snapshot, extra = {}, changes = {}) => adapter.invoke(host, 'auto', command, { ...input, ...extra }, snapshot, { ...f.options, ...changes }).result;
   if (type === 'plan-slice') {
     input.inventory.slices[0].plan_exists = false;
-    const git = require('child_process').spawnSync('git', ['init', '-q', cwd], { encoding: 'utf8', windowsHide: true }); assert.equal(git.status, 0, git.stderr);
-    fs.writeFileSync(path.join(cwd, '.gsd/forge-prefs.jsonc'), JSON.stringify({ tier_models: { light: 'claude-sonnet-5', standard: 'claude-sonnet-5', heavy: 'claude-sonnet-5', max: 'claude-sonnet-5' } }));
+    for (const args of [['init', '-q', cwd], ['-C', cwd, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'fixture']]) {
+      const git = require('child_process').spawnSync('git', args, { encoding: 'utf8', windowsHide: true }); assert.equal(git.status, 0, git.stderr);
+    }
+    fs.writeFileSync(path.join(cwd, '.gsd/forge-prefs.jsonc'), JSON.stringify({ tier_models: { light: 'claude-sonnet-5', standard: 'claude-sonnet-5', heavy: 'claude-sonnet-5', max: 'claude-sonnet-5' },
+      routing: { default: { planner: { heavy: ['claude-sonnet-5'], max: ['claude-sonnet-5'] } } }, effort: { 'plan-slice': 'medium' } }));
   }
   if (type === 'complete-milestone') input.inventory.slices.forEach(row => { row.checked = true; });
   f.current = f.call('next'); assert.equal(f.current.unit.key, type + '/' + (type === 'complete-milestone' ? milestone : 'S01'));
@@ -33,12 +36,45 @@ async function partial(f, selected, questions = [], status = 'partial') {
     phase: type.startsWith('plan-') ? 'plan' : 'complete', unitType: type, dispatchId: crypto.randomUUID(), workflowId: 'synthetic-no-provider',
     route: { host_runtime: f.host, resolved_worker_engine: f.host }, resultFile: path.join(root, crypto.randomUUID() + '.json'),
     ...(f.claim ? { claim: f.claim } : {}) };
-  sidecar.beginArtifactAttempt(request);
-  const result = { status, summary: 'Synthetic returned ' + status, questions,
+  let result = { status, summary: 'Synthetic returned ' + status, questions,
     artifacts: status === 'done' ? sidecar.locations(request).required.map(relative => ({ path: relative, content: '---\ntier: standard\neffort: medium\ndepends: []\nexpected_output: [src/result.js]\nwrites: [src/result.js]\nmust_haves:\n  truths: [Observable fixture output]\n  artifacts: []\n  key_links: []\n---\n# Plan\n\n## Steps\n\n1. Deliver fixture output.\n\n## Must-Haves\n\n- Observable fixture output.\n\n## Standards\n\n- Use canonical APIs.\n\n## Files to Change\n\n- src/result.js\n' })) : [] };
-  // This private fixture simulates an observed synthetic transport result;
-  // no resolve, provider, native host tool or operational receipt is involved.
-  await sidecar.acceptArtifactResult(request, result, { providerCalled: true });
+  if (type === 'plan-slice') {
+    // Host coverage is codex/claude; the worker in THIS fixture is an explicit
+    // isolated Claude sidecar. Replace only its runPlan transport, as the U0c
+    // owner-publisher tests do: the actual receiver must create marker/evidence,
+    // capture the result and publish the admitted plan. No generic artifact
+    // acceptance or caller-invented plan-generation record is used.
+    request.route = require('./forge-dispatch-resolve').resolveDispatch({ cwd: f.cwd, unitType: type,
+      milestoneId: f.milestone, unitId: begin.unit.id, hostRuntime: f.host, workerEngine: 'claude', workerMode: 'sidecar', sidecarDeclared: true });
+    const routeDiagnostic = Object.fromEntries(['dispatch_reason_code', 'worker_reason_code', 'host_runtime', 'worker_engine', 'worker_mode', 'resolved_worker_engine', 'engine', 'model_resolved', 'tier', 'effort', 'prefs_ok', 'config_ok'].map(key => [key, request.route[key]]));
+    assert.equal(request.route.dispatch_allowed, true, JSON.stringify(routeDiagnostic)); assert.equal(request.route.resolved_worker_engine, 'claude');
+    assert.equal(request.route.worker_mode, 'sidecar'); assert.equal(request.route.host_runtime, f.host);
+    request.promptFile = path.join(root, crypto.randomUUID() + '-plan-context.md');
+    fs.writeFileSync(request.promptFile, '# Synthetic plan-slice fixture\nReturn only the selected fixture plan.\n');
+    const returned = { status, summary: result.summary, questions,
+      slice_plan: { filename: begin.unit.id + '-PLAN.md', content: status === 'done'
+        ? '# ' + begin.unit.id + ': Fixture slice\n\n## Tasks\n\n- [ ] **T01**: Fixture task\n' : '' },
+      task_plans: status === 'done' ? [{ id: 'T01', filename: 'T01-PLAN.md',
+        content: result.artifacts[0].content.replace('# Plan', '# T01: Fixture task') }] : [] };
+    const xllm = require('./forge-xllm'), original = xllm.runPlan;
+    let transportCalls = 0;
+    xllm.runPlan = async options => {
+      transportCalls++;
+      assert.equal(options.hostRuntime, f.host); assert.equal(options.engine, 'claude');
+      assert(fs.existsSync(options.planContextFile), 'canonical composed plan prompt exists before synthetic return');
+      return structuredClone(returned);
+    };
+    try { result = await sidecar.runUnitSidecar(request, { calibrationOptions: { userHome: path.join(root, 'calibration-home') } }); }
+    finally { xllm.runPlan = original; }
+    assert.equal(transportCalls, 1);
+    const receipt = JSON.parse(fs.readFileSync(request.resultFile + '.receipt.json', 'utf8'));
+    assert(receipt.plan_generation, 'canonical plan transport enrolled its own attempt');
+    assert.equal(Object.hasOwn(receipt, 'plan_validation'), status === 'done');
+  } else {
+    // Other lifecycle fixtures retain the generic synthetic artifact receiver.
+    sidecar.beginArtifactAttempt(request);
+    await sidecar.acceptArtifactResult(request, result, { providerCalled: true });
+  }
   f.request = request; f.receipt = request.resultFile + '.receipt.json';
   f.options = { prefsReader, inventoryReader: () => f.input.inventory, processProbe: () => 'stopped',
     inspectAttempt: () => ({ begin_key: begin.idempotency_key, begin_checksum: require('./forge-orchestrate').checksum(begin),
@@ -262,12 +298,19 @@ async function reviewCases() {
     console.log('PASS ' + host + ': real partial plan-slice -> same-unit execution -> current captured done; response/unknown/foreign/old partial refuse');
   }
   {
+    const missing = fixture('codex', 'plan-slice'), missingPause = missing.call('pause', missing.current.snapshot);
+    const before = controller.readEvents(controller.eventsFile(missing.cwd, missing.milestone));
+    assert.equal(missing.call('resume', missingPause.snapshot, { response: { choice: 'observed input' } }).reason_code, 'plan-source-missing');
+    assert.deepEqual(controller.readEvents(controller.eventsFile(missing.cwd, missing.milestone)).filter(row => row.action === 'complete'),
+      before.filter(row => row.action === 'complete'), 'a human response cannot commit a completion without plan outputs');
+    assert(lease.observe(missing.cwd, 'plan-slice/S01').lease, 'the legitimate resumed begin remains recoverable after its completion is refused');
     const f = fixture('codex', 'plan-slice');
+    await partial(f, f.current, [], 'done'); // Genuine plan transport delivered the owner bytes before this input-only pause.
     const paused = f.call('pause', f.current.snapshot); assert.equal(paused.lifecycle, 'paused');
     assert.equal(f.call('resume', paused.snapshot, { resume_intent: 'execute' }).reason_code, 'execution-resume-boundary-invalid');
     const resumed = f.call('resume', paused.snapshot, { response: { choice: 'observed input' } });
     assert.equal(resumed.outcome, 'resumed', JSON.stringify(resumed));
-    console.log('PASS input-only planning pause retains response-only completion contract');
+    console.log('PASS input-only planning pause retains response completion with canonical plan bytes; missing plans refuse');
   }
   {
     const f = fixture('codex', 'complete-milestone'), selected = f.current;

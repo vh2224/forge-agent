@@ -900,6 +900,38 @@ test('CLI validates stdin and publishes only a strict owner request file', () =>
   }
 });
 
+test('review R18 memory prepare writes nothing and anchored apply replays dedup with stale content refused', () => {
+  const cwd=tempDir(), options={cwd,extraction:result({facts:[candidate('a','Retained proof is immutable.')]}),sourceContext:context('prepared')};
+  const before=snapshot(cwd), preview=extraction.prepareExtractionPublication(options);
+  assert.strictEqual(preview.status,'prepared');
+  assert.deepStrictEqual(snapshot(cwd),before,'preview cannot create owner directories, fragments or quarantine');
+  const applied=extraction.applyPreparedExtractionPublication(options,preview.prepared);
+  assert.strictEqual(applied.status,'written');
+  const once=snapshot(cwd), replay=extraction.applyPreparedExtractionPublication(options,preview.prepared);
+  assert.strictEqual(replay.status,'noop');
+  assert.deepStrictEqual(snapshot(cwd),once,'one durable fact and one event on replay');
+  const wrong=extraction.applyPreparedExtractionPublication({...options,extraction:result({facts:[candidate('b','Changed source.') ]})},preview.prepared);
+  assert.strictEqual(wrong.status,'conflict');
+  assert.deepStrictEqual(snapshot(cwd),once);
+  fs.appendFileSync(applied.path,'foreign\n');
+  const foreign=snapshot(cwd);
+  assert.strictEqual(extraction.applyPreparedExtractionPublication(options,preview.prepared).status,'conflict');
+  assert.deepStrictEqual(snapshot(cwd),foreign);
+});
+
+test('review R18 grouped memory preview defers without quarantine or owner edits', () => {
+  const cwd=tempDir(), options={cwd,extraction:result({facts:[candidate('a','Grouped durable fact.')]}),sourceContext:context('grouped-prepared')};
+  publish(cwd,options.extraction,options.sourceContext);
+  const loose=memory.fragmentPath(cwd,'T01',{milestoneId:'M001'});
+  const container=path.join(memory.memoryDir(cwd),'sweep-project-01.md');
+  fs.writeFileSync(container,serializeGroup({epoch:'sweep-project-01',units:[{id:'M001__T01',content:fs.readFileSync(loose)}]}).buffer);
+  fs.unlinkSync(loose);
+  const before=snapshot(cwd), preview=extraction.prepareExtractionPublication(options);
+  assert.strictEqual(preview.status,'deferred');
+  assert.strictEqual(preview.reason,'grouped-member');
+  assert.deepStrictEqual(snapshot(cwd),before,'preview never repacks or quarantines grouped source');
+});
+
 async function run() {
   console.log('\nforge-memory-extraction tests\n');
   for (const entry of tests) {

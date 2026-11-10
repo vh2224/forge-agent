@@ -3,6 +3,9 @@
 
 // Host adapters provide identity/presentation only. They never spawn, select a
 // worker, inspect provider homes, or implement fallback.
+// Issue 343 U1: the additive batch commands (batch-status, batch-ack) are forwarded to
+// the loop exactly like every other command, for both hosts; the batch decision itself
+// is the owner's, never this adapter's.
 const loop = require('./forge-loop-controller.js');
 
 function error(code, message) { const value = new Error(message); value.code = code; return value; }
@@ -26,7 +29,7 @@ function parseArgs(argv = process.argv.slice(2)) {
 function main(argv = process.argv.slice(2), output = process.stdout.write.bind(process.stdout), errorOutput = process.stderr.write.bind(process.stderr)) {
   try {
     const args = parseArgs(argv);
-    if (args.help) { output('Usage: forge-long-workflow-adapter.js --host claude|codex --mode auto|task --command next|pause|resume|resume-budget|resume-time-option|status|complete|consume-failure|reenter --json JSON [--snapshot JSON]\n'); return 0; }
+    if (args.help) { output(`Usage: forge-long-workflow-adapter.js --host claude|codex --mode auto|task --command ${loop.COMMANDS.join('|')} --json JSON [--snapshot JSON]\n`); return 0; }
     const input = JSON.parse(args.json || '{}'); const snapshot = args.snapshot ? JSON.parse(args.snapshot) : null;
     output(`${JSON.stringify(invoke(args.host, args.mode, args.command, input, snapshot))}\n`); return 0;
   } catch (cause) { errorOutput(`forge-long-workflow-adapter: ${cause.code || 'failed'}: ${cause.message}\n`); return 1; }

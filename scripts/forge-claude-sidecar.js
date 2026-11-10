@@ -653,9 +653,11 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
   } catch (error) { return Promise.reject(error); }
   let child;
   try {
-    child = spawn(cmd, args, { cwd, shell: false, env, stdio: ['ignore', 'pipe', 'pipe'],
+    const memberScope = require('./forge-execution-batch').currentMemberProcessScope();
+    const spawnProvider = memberScope ? memberScope.spawn : spawn;
+    child = spawnProvider(cmd, args, { cwd, shell: false, env, stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true, detached: process.platform !== 'win32' });
-  } catch (error) { return Promise.reject(mapSpawnError(error)); }
+  } catch (error) { return Promise.reject(String(error.code || '').startsWith('batch-') ? error : mapSpawnError(error)); }
   try { provisionalControl?.start(child); } catch { provisionalControl = null; }
 
   return new Promise((resolve, reject) => {
@@ -1128,10 +1130,10 @@ async function invokeClaudeSidecar(opts) {
   // argv, environment, or a fallback branch.
   let account;
   try { account = resolveLaunch(null); }
-  catch { throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.ACCOUNT_UNAVAILABLE); }
+  catch { throw preSpawnRefusal(CLAUDE_SIDECAR_REASON_CODES.ACCOUNT_UNAVAILABLE); }
   if (!account || typeof account.name !== 'string' || !account.name.trim()
     || typeof account.token !== 'string' || !account.token) {
-    throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.ACCOUNT_UNAVAILABLE);
+    throw preSpawnRefusal(CLAUDE_SIDECAR_REASON_CODES.ACCOUNT_UNAVAILABLE);
   }
 
   const cwd = path.resolve(typeof options.cwd === 'string' && options.cwd ? options.cwd : process.cwd());

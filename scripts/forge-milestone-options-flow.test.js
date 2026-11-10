@@ -176,6 +176,22 @@ function skeleton(f) { return JSON.parse(/```json\n([\s\S]*?)\n```/.exec(selecti
 function questionFiles(cwd) { const dir = path.join(cwd, '.gsd/forge/questions'); return fs.existsSync(dir) ? fs.readdirSync(dir).sort() : []; }
 function stripped(proposal) { const value = structuredClone(proposal); for (const p of value.positions) for (const n of p.nodes) n.judgment = null; return value; }
 
+function closeAllocationFixtureSlice(f, snapshot, slice) {
+  // Strict planning now creates a real task; close it with the existing canonical proof fixtures.
+  const task = invoke(f, 'next', snapshot);
+  assert.deepEqual([task.outcome, task.unit.key], ['dispatch_required', 'execute-task/T01'], JSON.stringify(task.controller_result));
+  deliveryFile(f.cwd, slice, 'T01');
+  const taskDone = invoke(f, 'complete', task.snapshot, { result: { status: 'done' } });
+  assert.equal(taskDone.outcome, 'completed', JSON.stringify(taskDone.controller_result));
+  slicePlan(f.cwd, slice, [['T01', true]]);
+  write(f.cwd, `.gsd/milestones/${M}/slices/${slice}/tasks/T01/T01-SUMMARY.md`, '# T01\nFeito\n');
+  const close = invoke(f, 'next', taskDone.snapshot);
+  assert.deepEqual([close.outcome, close.unit.key], ['dispatch_required', `complete-slice/${slice}`], JSON.stringify(close.controller_result));
+  sliceDeliveryFiles(f.cwd, slice, ['T01']);
+  const closed = invoke(f, 'complete', close.snapshot, { result: { status: 'done' } });
+  assert.equal(closed.outcome, 'completed', JSON.stringify(closed.controller_result));
+  return closed;
+}
 async function hostFlow(host) {
   const f = fixture(host, 'flow');
   const { blocked, estimate, done } = await toDecision(f);
@@ -272,15 +288,16 @@ async function hostFlow(host) {
   assert.deepEqual([current.version, current.chain[1].kind, current.chain[1].delegation.basis], [2, 'allocation', 'activation-delegation']);
   assert.equal(selection.readSelectionState(f.cwd, M).roadmap.status, 'conformant', 'conformant after the amendment');
   assert.deepEqual(questionFiles(f.cwd), questionsBefore, 'no redundant question');
-  write(f.cwd, `.gsd/milestones/${M}/slices/S01/S01-PLAN.md`, '# S01 plan\n');
+  slicePlan(f.cwd, 'S01', [['T01', false]]); taskPlan(f.cwd, 'S01', 'T01', []);
   const sliceDone = invoke(f, 'complete', slice1.snapshot, { result: { status: 'done' } });
+  const closedSlice1 = closeAllocationFixtureSlice(f, sliceDone.snapshot, 'S01');
   // A checked box and an equivalent compact JSON section keep the allocation.
   write(f.cwd, ROADMAP, roadmapText(section, { checked: true, compact: true }));
-  const slice2 = invoke(f, 'next', sliceDone.snapshot);
+  const slice2 = invoke(f, 'next', closedSlice1.snapshot);
   assert.deepEqual([slice2.unit.key, slice2.controller_result.details.time_options.boundary.status], ['plan-slice/S02', 'unchanged']);
   assert.equal(time.readContract({ cwd: f.cwd, milestone: M }).version, 2);
+  slicePlan(f.cwd, 'S02', [['T01', false]]); taskPlan(f.cwd, 'S02', 'T01', []);
   const slice2Done = invoke(f, 'complete', slice2.snapshot, { result: { status: 'done' } });
-  write(f.cwd, `.gsd/milestones/${M}/slices/S02/S02-PLAN.md`, '# S02 plan\n');
   // A technical refinement inside strategy/scope/ceiling publishes a new delegated amendment.
   write(f.cwd, ROADMAP, roadmapText({ ...section, allocation: ALLOCATION.map(row => row.id === 's1' ? { ...row, ms: 300000 } : row) }, { checked: true }));
   const refined = invoke(f, 'next', slice2Done.snapshot);
@@ -289,6 +306,9 @@ async function hostFlow(host) {
   current = time.readContract({ cwd: f.cwd, milestone: M });
   assert.deepEqual([current.chain[2].kind, current.contract.allocation.items[1].ms], ['allocation', 300000]);
   assert.deepEqual(questionFiles(f.cwd), questionsBefore, 'still no question');
+  if (refined.unit.type === 'plan-slice') {
+    slicePlan(f.cwd, refined.unit.id, [['T01', false]]); taskPlan(f.cwd, refined.unit.id, 'T01', []);
+  }
   const refinedDone = invoke(f, 'complete', refined.snapshot, { result: { status: 'done' } });
   // A structural change outside the authorization blocks until a specific decision.
   write(f.cwd, ROADMAP, roadmapText({ ...section, allocation: ALLOCATION.map(row => row.id === 's1' ? { ...row, ms: 300000 } : row) },
@@ -311,7 +331,8 @@ function bindingLines(cwd, slice, node = NODE_OF[slice]) {
   return `time_options_sha256: ${selected.options_sha256}\ntime_position_id: ${selected.position_id}\ntime_node: ${node}\n`;
 }
 function taskPlan(cwd, slice, id, depends, node) {
-  write(cwd, `.gsd/milestones/${M}/slices/${slice}/tasks/${id}/${id}-PLAN.md`, `---\nid: ${id}\nslice: ${slice}\nmilestone: ${M}\ndepends: [${depends.join(', ')}]\n${bindingLines(cwd, slice, node)}---\n# ${id}\n`);
+  const source = `src/${slice}-${id}.js`;
+  write(cwd, `.gsd/milestones/${M}/slices/${slice}/tasks/${id}/${id}-PLAN.md`, `---\nid: ${id}\nslice: ${slice}\nmilestone: ${M}\ndepends: [${depends.join(', ')}]\n${bindingLines(cwd, slice, node)}writes:\n  - "${source}"\nmust_haves:\n  truths:\n    - "Fixture ${id} verificada"\n  artifacts:\n    - path: "${source}"\n      provides: "Fixture ${id}"\n      min_lines: 1\n  key_links: []\nexpected_output:\n  - "${source}"\n---\n# ${id}\n`);
 }
 function slicePlan(cwd, slice, tasks) {
   write(cwd, `.gsd/milestones/${M}/slices/${slice}/${slice}-PLAN.md`, `# ${slice}\n\n## Tasks\n${tasks.map(([id, checked]) => `- [${checked ? 'x' : ' '}] **${id}: Trabalho ${id}**`).join('\n')}\n`);
@@ -461,8 +482,9 @@ async function bindingFlow(host) {
   assert.equal(slice.unit.key, 'plan-slice/S01');
   const context = selection.taskBindingContext(f.cwd, M, { sliceId: 'S01' });
   assert.deepEqual([context.status, context.allocated.map(item => item.id), context.edges.map(edge => `${edge.from}>${edge.to}`)], ['ready', ['N1', 'N2'], ['N1>PREP', 'N2>N1']]);
-  const done = invoke(f, 'complete', slice.snapshot, { result: { status: 'done' } });
   slicePlan(f.cwd, 'S01', [['T08', false], ['T10', false]]);
+  taskPlan(f.cwd, 'S01', 'T08', ['T10'], 'N2'); taskPlan(f.cwd, 'S01', 'T10', [], 'N1');
+  const done = invoke(f, 'complete', slice.snapshot, { result: { status: 'done' } });
   const roadmapBytes = fs.readFileSync(path.join(f.cwd, ROADMAP), 'utf8');
   const unchanged = () => JSON.stringify([fs.readFileSync(path.join(f.cwd, ROADMAP), 'utf8') === roadmapBytes, selection.readSelectionState(f.cwd, M), time.readContract({ cwd: f.cwd, milestone: M }).sha256]);
   const baseline = unchanged();

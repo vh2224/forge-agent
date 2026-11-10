@@ -5,6 +5,9 @@
 //   hasStructuredMustHaves(planContent) → boolean
 //   parseMustHaves(planContent) → { truths, artifacts, key_links, expected_output, domain, capability }
 //   resolveCapability(planContent) → { capability, declared, event }
+//   extractFrontmatter(planContent) → string|null   (the only CRLF/BOM normalizer)
+//   decodeDeclarationList(frontmatter, key) → { key, status, form, items, error, line, diagnostics, layout }
+//   validateTaskDeclarations(planContent, { taskId, requireExplicit: true }) → frozen projection
 //
 // CLI usage:
 //   node scripts/forge-must-haves.js --check <plan.md>
@@ -15,6 +18,7 @@
 
 'use strict';
 
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
@@ -663,20 +667,34 @@ function resolveCapability(planText) {
   }
 }
 
-// ── Exports ───────────────────────────────────────────────────────────────────
+// ── Execution declarations: one structural depends/writes decoder (issue 343 U0a, U0a-r1) ──
 
-// stripInlineComment is exported so the OTHER reader of the same frontmatter
-// keys (forge-dispatch-resolve.js) shares this rule instead of copying it.
-// Execution declarations use the same frontmatter parser as must_haves. Missing
-// keys remain missing: a consumer must not turn an unread declaration into [].
-// Shared structural list decoder (#365). Reused from the reviewed #343 U0a
-// seam only; no scheduling/task admission is imported here.
-function deepFreeze(value) {
-  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
-    Object.freeze(value); for (const item of Object.values(value)) deepFreeze(item);
-  }
-  return value;
-}
+// decodeDeclarationList is the one structural decoder of the top-level `depends`
+// and `writes` declarations. It records what the YAML says — values, presence,
+// layout and named diagnostics — and decides nothing else. Every consumer applies
+// its own projection, fixed in code at its historical caller and never selected
+// by an option, a profile string or imported JSON:
+//   ordinary  parseExecutionFields (below): a complete list is an array, blank
+//             lines included; YAML null and a malformed declaration stay present
+//             but are never an array.
+//   temporal  forge-unit-controller dependsOf (time DAG): absent and YAML null are
+//             a root; a blank gap or a malformed declaration is refused.
+//   schedule  forge-parallelism parseTaskFrontmatter and validateTaskDeclarations
+//             (below): a declaration enters a schedule only as a list whose layout
+//             the temporal guard also admits.
+// The input is LF frontmatter (extractFrontmatter, still the only CRLF/BOM
+// normalizer of plan text). Supported YAML: a flow list on the key line
+// (`key: [a, "b"]`) and an indented block of `- item` lines. Items are quoted
+// (taken verbatim between the quotes, as before) or plain; `root::path` stays a
+// string and `- root_id: x` / `path: y` is one object entry. A ` #` tail and whole
+// `#` lines are comments; a `#` inside quotes or without whitespace before it is
+// text. Blank lines are YAML-transparent inside a block: the list stays valid and
+// the decoder names them (declaration-leading-blank before the first entry,
+// declaration-interior-blank after it). A key followed only by blank or comment
+// lines is YAML null: status `empty` (declaration-empty-value), never a list.
+// Anything else — a scalar, text after a flow list, a mixed or unindented block,
+// an empty item, a nested collection or a repeated key — is `invalid` with a
+// named error.
 const DECLARATION_FIELD = /^([A-Za-z_][\w-]*):(?:[ \t]+(.*))?$/;
 const DECLARATION_TAIL = /^(?:[ \t]*|[ \t]+#.*)$/;
 const DECLARATION_TRANSPARENT = /^[ \t]*(?:#.*)?$/;
@@ -839,11 +857,15 @@ function decodeDeclarationList(frontmatter, key) {
   }
   if (value) layout.inline_comment_lines.push(start + 1); // `key: # comment`
   if (!region.length) return declarationResult(key, 'empty', { line: start + 1, layout });
-  // Historical producers also emit a YAML empty flow list on the indented
-  // next line. Preserve that valid [] form, never a nonempty/multiline flow
-  // collection that an old reader might have silently collapsed to empty.
+  // Published #365 legacy producers emit an indented empty flow collection.
+  // Keep blank/comment layout so the temporal consumer retains its stricter gap policy.
   const significant = region.filter(row => !DECLARATION_TRANSPARENT.test(row.text));
   if (significant.length === 1 && /^[ \t]+\[\](?:[ \t]*|[ \t]+#.*)$/.test(significant[0].text)) {
+    for (const row of region) {
+      if (!row.text.trim()) layout.leading_blank_lines.push(row.line);
+      else if (/^[ \t]*#/.test(row.text)) layout.comment_lines.push(row.line);
+    }
+    if (significant[0].text.includes('#')) layout.inline_comment_lines.push(significant[0].line);
     return declarationResult(key, 'valid', { form: 'block', items: [], line: start + 1, layout });
   }
   const block = declarationBlock(region, layout, fail);
@@ -851,7 +873,146 @@ function decodeDeclarationList(frontmatter, key) {
   return declarationResult(key, 'valid', { form: 'block', items: block.items, line: start + 1, layout });
 }
 
+const TASK_ID = /^T\d+(?:\.\d+)?$/;
+const ROOT_ID = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 
+function deepFreeze(value) {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const item of Object.values(value)) deepFreeze(item);
+  }
+  return value;
+}
+
+function declarationError(code, detail, extra) {
+  return Object.assign(new Error(`${code}: ${detail}`), { code, detail }, extra);
+}
+
+// A write declaration as written: `path`, `root::path` or exactly { root_id, path }.
+function declaredWrite(item) {
+  if (typeof item === 'string') {
+    const at = item.indexOf('::');
+    if (at < 0) return { root_id: null, path: item };
+    return ROOT_ID.test(item.slice(0, at)) ? { root_id: item.slice(0, at), path: item.slice(at + 2) } : null;
+  }
+  if (!item || typeof item !== 'object' || Object.keys(item).sort().join(',') !== 'path,root_id') return null;
+  return typeof item.root_id === 'string' && ROOT_ID.test(item.root_id) && typeof item.path === 'string'
+    ? { root_id: item.root_id, path: item.path } : null;
+}
+
+function declarationScalarValue(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = stripInlineComment(value).trim();
+  return trimmed === '' ? null : trimmed;
+}
+
+/**
+ * Strict admission of a new task's explicit `depends`/`writes` (issue 343 U0a).
+ * The identity comes from the canonical list and the plan path (`taskId`), never
+ * from the frontmatter `id:`. Throws a named error (`code`, `detail`, `errors`):
+ * plan-declaration-depends-missing|writes-missing|depends-invalid|writes-invalid|
+ * depends-blank-gap|writes-blank-gap|task-id-invalid|path-protected. It never
+ * supplies an empty list for an absent, empty (YAML null) or malformed declaration
+ * and has no bypass, profile or relaxed option: `options` carries only the
+ * identity and the explicit requirement, and any other field changes nothing.
+ * Its fixed schedule-admission projection (U0a-r1) reads the shared decoder's
+ * layout: a structurally valid list with a leading or interior blank line stays
+ * readable by parseExecutionFields, but it never enters a new task schedule,
+ * because the temporal guard (forge-unit-controller dependsOf) refuses that
+ * layout. Historical readers (parseMustHaves, --check, parseExecutionFields) are
+ * unchanged by it.
+ *
+ * @returns {{ task_id, depends, writes, roots_schema, primary_root_id, declared_roots, declaration_sha256 }} frozen
+ */
+function validateTaskDeclarations(content, options) {
+  if (!options || options.requireExplicit !== true) {
+    throw new TypeError('validateTaskDeclarations requires { taskId, requireExplicit: true }');
+  }
+  return taskDeclarations(content, options.taskId, false);
+}
+// Historical observation only: preserve each known declaration independently.
+// This cannot admit a new task: validateTaskDeclarations remains strictly explicit.
+// Genuine missing fields are null; a wholly unknown historical declaration stays null.
+function readHistoricalTaskDeclarations(content, taskId) {
+  return taskDeclarations(content, taskId, true);
+}
+function taskDeclarations(content, taskId, historical) {
+  const errors = [];
+  if (typeof taskId !== 'string' || !TASK_ID.test(taskId)) errors.push(['plan-declaration-task-id-invalid', String(taskId)]);
+  const fm = typeof content === 'string' ? extractFrontmatter(content) : null;
+  const decoded = {};
+  for (const key of ['depends', 'writes']) {
+    const read = fm === null ? declarationResult(key, 'absent') : decodeDeclarationList(fm, key);
+    decoded[key] = read;
+    if (read.status === 'absent') {
+      if (!historical) errors.push([`plan-declaration-${key}-missing`, fm === null ? 'frontmatter-missing' : 'key-absent']);
+    }
+    else if (read.status === 'invalid') errors.push([`plan-declaration-${key}-invalid`, `${read.error} (frontmatter line ${read.line})`]);
+    else if (read.status === 'empty') errors.push([`plan-declaration-${key}-invalid`, `declaration-empty-value (frontmatter line ${read.line}; declare [] explicitly)`]);
+    else if (read.diagnostics.length) {
+      const gap = [...read.layout.leading_blank_lines, ...read.layout.interior_blank_lines][0];
+      errors.push([`plan-declaration-${key}-blank-gap`, `${read.diagnostics[0]} (frontmatter line ${gap})`]);
+    }
+  }
+  const usable = key => decoded[key].status === 'valid' && decoded[key].diagnostics.length === 0;
+  if (usable('depends')) {
+    const seen = new Set();
+    for (const [index, item] of decoded.depends.items.entries()) {
+      if (typeof item !== 'string' || !TASK_ID.test(item)) { errors.push(['plan-declaration-depends-invalid', `depends[${index}] task-id-invalid`]); break; }
+      if (seen.has(item)) { errors.push(['plan-declaration-depends-invalid', `depends[${index}] duplicate ${item}`]); break; }
+      seen.add(item);
+    }
+  }
+  const writes = [];
+  if (usable('writes')) {
+    // The existing product-path policy (#348), loaded lazily as in parseMustHaves.
+    const { assertRelative } = require('./forge-code-roots');
+    for (const [index, item] of decoded.writes.items.entries()) {
+      const entry = declaredWrite(item);
+      if (!entry) { errors.push(['plan-declaration-writes-invalid', `writes[${index}] entry-invalid`]); continue; }
+      try { assertRelative(entry.path); }
+      catch (cause) {
+        const code = cause.code || 'root-path-invalid';
+        errors.push([code === 'root-path-protected' ? 'plan-declaration-path-protected' : 'plan-declaration-writes-invalid', `writes[${index}] ${code}`]);
+        continue;
+      }
+      writes.push(typeof item === 'string' ? item : { root_id: entry.root_id, path: entry.path });
+    }
+  }
+  if (errors.length) {
+    const [code, detail] = errors[0];
+    throw declarationError(code, detail, { task_id: typeof taskId === 'string' ? taskId : null,
+      errors: errors.map(([name, why]) => ({ code: name, detail: why })) });
+  }
+  if (historical && decoded.depends.status === 'absent' && decoded.writes.status === 'absent') return null;
+  const roots = parseArrayKey(fm, 'code_roots');
+  const declarations = {
+    depends: decoded.depends.status === 'absent' ? null : [...decoded.depends.items],
+    writes: decoded.writes.status === 'absent' ? null : writes,
+    roots_schema: declarationScalarValue(extractTopLevelValue(fm, 'roots_schema')),
+    primary_root_id: declarationScalarValue(extractTopLevelValue(fm, 'primary_root_id')),
+    declared_roots: Array.isArray(roots) ? roots.map(root => ({
+      id: root && root.id !== undefined ? String(root.id) : null,
+      path: root && root.path !== undefined ? String(root.path) : null,
+      vcs: root && root.vcs !== undefined ? String(root.vcs) : null,
+    })) : null,
+  };
+  // Digest of the declarations only: prose, checkboxes, comments and EOL never count.
+  const declarationSha256 = crypto.createHash('sha256')
+    .update(JSON.stringify({ schema: 'forge-task-declarations-v1', ...declarations }), 'utf8').digest('hex');
+  return deepFreeze({ task_id: taskId, ...declarations, declaration_sha256: declarationSha256 });
+}
+
+// ── Exports ───────────────────────────────────────────────────────────────────
+
+// stripInlineComment is exported so the OTHER reader of the same frontmatter
+// keys (forge-dispatch-resolve.js) shares this rule instead of copying it.
+// Execution declarations use the same frontmatter parser as must_haves. Missing
+// keys remain missing: a consumer must not turn an unread declaration into [].
+// depends/writes come from decodeDeclarationList through this reader's fixed
+// ordinary projection (issue 343 U0a-r1): a complete YAML list is an array, its
+// blank and comment lines included; YAML null (`key:` with no list) and a
+// malformed declaration stay present but are null, never an array.
 // Structural observation of one requested declaration. Legacy readers keep
 // their fixed projection without validating unrelated execution fields. This
 // does not admit a writer: full parseExecutionFields/validatePlan remain strict.
@@ -868,19 +1029,24 @@ function parseExecutionFields(content) {
   const keys = [...fm.matchAll(/^([A-Za-z][\w-]*):/gm)].map(m => m[1]);
   if (new Set(keys).size !== keys.length) throw new Error('execution-plan-duplicate-key');
   const result = {};
-  for (const key of ['depends', 'writes', 'expected_output', 'code_roots']) {
+  for (const key of ['depends', 'writes']) {
+    const read = decodeDeclarationList(fm, key);
+    if (read.error === 'execution-plan-duplicate-key' || read.error === 'declaration-flow-malformed') throw new Error(read.error);
+    if (read.status === 'valid') result[key] = read.items.map(item => (typeof item === 'string' ? item : { ...item }));
+    else if (read.status !== 'absent') result[key] = null;
+  }
+  for (const key of ['expected_output', 'code_roots']) {
     if (!keys.includes(key)) continue;
     const read = decodeDeclarationList(fm, key);
     if (read.status === 'invalid') throw new Error(read.error);
-    // Retain the historical bare-empty projection (undefined), distinct from
-    // an explicit [] list. Consumers keep their existing admission policy.
     result[key] = read.status === 'valid' ? read.items.map(item => typeof item === 'string' ? item : { ...item }) : undefined;
   }
   for (const key of ['roots_schema', 'primary_root_id']) result[key] = extractTopLevelValue(fm, key);
   return result;
 }
 
-module.exports = { hasStructuredMustHaves, parseMustHaves, parseMustHavesStructure, parseExecutionFields, parseExecutionDeclaration, resolveCapability, stripInlineComment };
+module.exports = { hasStructuredMustHaves, parseMustHaves, parseMustHavesStructure, parseExecutionFields, parseExecutionDeclaration, resolveCapability, stripInlineComment,
+  extractFrontmatter, decodeDeclarationList, validateTaskDeclarations, readHistoricalTaskDeclarations };
 
 // ── CLI entrypoint ────────────────────────────────────────────────────────────
 

@@ -272,6 +272,12 @@ function claimsConflict(claimA, claimB) {
       for (const a of roots.claimGroups(claimA)) for (const b of roots.claimGroups(claimB)) {
         const common = roots.within(a.path, b.path) ? a : roots.within(b.path, a.path) ? b : null;
         if (!common) continue;
+        // Same checkout/index ownership is exclusive even for otherwise disjoint member paths.
+        // Physical nesting is evaluated before local root IDs; distinct contracts may alias roots.
+        if (exclusiveMemberRoot(claimA, a.id) || exclusiveMemberRoot(claimB, b.id)) {
+          matched.push(String(a.id) + '::** × ' + b.id + '::**');
+          continue;
+        }
         const resolve = group => group.paths.map(value => roots.resolvePath({ code_roots: [group] }, { root_id: group.id, path: value }));
         const left = resolve(a), right = resolve(b);
         for (const x of left) for (const y of right) {
@@ -298,6 +304,20 @@ function claimsConflict(claimA, claimB) {
   return { cause: 'overlap', paths: matched };
 }
 
+// Root/index possession and per-file write permission are independent. Even
+// disjoint paths in a member checkout would share its index and administration.
+function exclusiveMemberRoot(claim, rootId) {
+  if (claim?.batch_roots === undefined) return false;
+  if (claim.schema_version !== 2 || !Array.isArray(claim.batch_roots) || !claim.batch_roots.length
+      || claim.batch_roots.some(row => !row || typeof row.root_id !== 'string'
+        || !Number.isSafeInteger(row.member_index) || row.member_index < 0 || row.member_index >= 8
+        || !claim.execution_contract.code_roots.some(root => root.id === row.root_id))
+      || new Set(claim.batch_roots.map(row => row.root_id)).size !== claim.batch_roots.length) {
+    throw new Error('batch-claim-roots-invalid');
+  }
+  return claim.batch_roots.some(row => row.root_id === rootId);
+}
+
 /**
  * Read the run registry and split every run into `comparable` or `skipped`.
  *
@@ -319,7 +339,7 @@ function collectRunClaims(cwd, opts) {
   for (const rec of all) {
     const id = rec && rec.id ? rec.id : '(?)';
 
-    if (!o.all && rec.active !== true) {
+    if (!o.all && rec.active !== true && !rec.batch_locator) {
       skipped.push({ id, reason: 'run-inactive' });
       continue;
     }
@@ -587,6 +607,7 @@ function main(argv) {
 if (require.main === module) process.exit(main(process.argv.slice(2)));
 
 module.exports = {
+  exclusiveMemberRoot,
   collectRunClaims,
   claimsConflict,
   compareClaims,

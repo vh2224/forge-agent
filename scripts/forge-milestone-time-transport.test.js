@@ -53,9 +53,11 @@ function fixture(contract = true, base = BASE) {
   fs.mkdirSync(path.join(lab.owner, '.gsd/forge'), { recursive: true });
   if (contract) activate(lab.owner, base);
   corpus(lab.a);
-  const f = { ...lab, at: 1, base };
-  const plan = write(lab.owner, '.gsd/milestones/M001/slices/S01/tasks/T01/T01-PLAN.md', fixtures.plan(lab.contract));
-  write(lab.owner, '.gsd/milestones/M001/slices/S01/S01-PLAN.md', '# Slice\n- [ ] **T01** fixture\n');
+  const f = { ...lab, at: 1, base, hasTimeContract: contract };
+  const plan = write(lab.owner, '.gsd/milestones/M001/slices/S01/tasks/T01/T01-PLAN.md', fixtures.plan(lab.contract).replace('id: T-roots', 'id: T01'));
+  // Both execution IDs belong to the admitted generation before any transport probe.
+  write(lab.owner, '.gsd/milestones/M001/slices/S01/tasks/T01.1/T01.1-PLAN.md', fixtures.plan(lab.contract).replace('id: T-roots', 'id: T01.1'));
+  write(lab.owner, '.gsd/milestones/M001/slices/S01/S01-PLAN.md', '# Slice\n- [ ] **T01** fixture\n- [ ] **T01.1** dotted fixture\n');
   f.plan = plan;
   require('./forge-state').write(lab.owner, { milestone: M, kind: 'milestone', phase: 'idle', active_slice: 'S01', active_task: 'T01', auto_mode: 'on' });
   f.begin = controller.begin(lab.owner, { milestone: M, slice: 'S01', unit: 'plan-slice/S01',
@@ -66,6 +68,18 @@ function fixture(contract = true, base = BASE) {
   return f;
 }
 function request(f, engine, unitType = 'research-milestone', taskId = 'T01') {
+  // Above-cap cases retain their original LIVE planning writer for draining.
+  // Only a positive executor entry first completes its actual native generation.
+  if (unitType === 'execute-task' && !f.completed && (f.at === 1 || !f.hasTimeContract)) {
+    f.completed = controller.complete(f.owner, { milestone: M, slice: 'S01', unit: 'plan-slice/S01',
+      host_runtime: 'codex', owner_token: 'fixture', generation: f.begin.generation, idempotency_key: 'before-cap:complete',
+      result: { status: 'succeeded' } }, { now: () => f.base + f.at, prefsReader: () => ({ ok: true, prefs: {} }) });
+    assert.equal(f.completed.ok, true, JSON.stringify(f.completed));
+    const begun = controller.lookupRecord(f.owner, 'transaction', 'before-cap');
+    const completion = controller.lookupRecord(f.owner, 'transaction', 'before-cap:complete');
+    require('./forge-plan-validation').verifyPlanValidation(completion.result.plan_validation, begun.plan_generation);
+    assert(!Object.hasOwn(completion, 'plan_validation'), 'native evidence is result-checksum covered');
+  }
   const host = engine === 'claude' ? 'codex' : 'claude';
   const model = engine === 'claude' ? 'claude-sonnet-5' : 'gpt-6-sol';
   const tiers = Object.fromEntries(['light', 'standard', 'heavy', 'max'].map(tier => [tier, [model]]));
@@ -178,7 +192,7 @@ async function main() {
     });
     await test('canonical dotted task id T01.1 passes real transport entry below cap and is refused beyond it', async () => {
       const savedPlan = f.plan;
-      f.plan = write(f.owner, '.gsd/milestones/M001/slices/S01/tasks/T01.1/T01.1-PLAN.md', fixtures.plan(f.contract));
+      f.plan = write(f.owner, '.gsd/milestones/M001/slices/S01/tasks/T01.1/T01.1-PLAN.md', fixtures.plan(f.contract).replace('id: T-roots', 'id: T01.1'));
       try {
         f.at = 1; const r = request(f, 'codex', 'execute-task', 'T01.1');
         const before = providers;

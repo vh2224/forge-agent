@@ -521,6 +521,18 @@ function aggregateChildren(input, context, diagnostics) {
   return { criteria, depth, lineage };
 }
 
+// Issue 343 U3b: a sidecar cohort member validates its canonical plan through the runtime view
+// minted by its live handle (forge-execution-batch validateMemberPlan): the view must bind these
+// exact plan bytes and this measured physical contract. The plan fingerprint and every criterion
+// stay the original plan's. Without a view, the plan itself (the previous behavior).
+function memberPlanText(options, contract, planRaw) {
+  if (!options || options.memberView === undefined) return planRaw;
+  const view = options.memberView;
+  if (!require('./forge-execution-batch').isMemberView(view) || view.canonical_plan_sha256 !== sha256(planRaw)
+      || view.runtime_contract_sha256 !== require('./forge-code-roots').digest(contract)) throw new Error('delivery-member-view-invalid');
+  return view.runtime_plan_text;
+}
+
 function buildDelivery(input, options = {}) {
   if (!isObject(input) || ![1, 2].includes(input.schema_version)) throw new Error('input schema_version 1 or 2 is required');
   const unit = input.unit;
@@ -529,6 +541,7 @@ function buildDelivery(input, options = {}) {
   const [ownerRootReal, codeDirReal] = rootRealpaths([options.ownerRoot, options.codeDir]);
   const executionContract = input.schema_version === 2 ? require('./forge-code-roots').validateContract(input.execution_contract, { owner: ownerRootReal, revalidate: true }) : null;
   if (executionContract && executionContract.code_roots.find(r => r.id === executionContract.primary_root_id).path !== codeDirReal) throw new Error('delivery-primary-root-mismatch');
+  if (options.memberView !== undefined && !executionContract) throw new Error('delivery-member-view-invalid');
   const roots = [...new Set([ownerRootReal, codeDirReal, ...(executionContract?.code_roots.map(r => r.path) || [])])];
   const planResolved = path.isAbsolute(String(input.plan || ''))
     ? { error: 'reference_not_relative' }
@@ -549,7 +562,7 @@ function buildDelivery(input, options = {}) {
   // task/slice units, including all write/path/root checks.
   const aggregateRoadmap = unit.type === 'milestone' && !hasStructuredMustHaves(planRaw);
   const checkedPlan = executionContract && !aggregateRoadmap
-    ? require('./forge-code-roots').validatePlan(planRaw, executionContract) : null;
+    ? require('./forge-code-roots').validatePlan(memberPlanText(options, executionContract, planRaw), executionContract) : null;
   if (executionContract) for (const criterion of criteria) {
     for (const field of ['artifact_path', 'link_from', 'link_to']) if (criterion[field]) {
       const rootPaths = require('./forge-code-roots');

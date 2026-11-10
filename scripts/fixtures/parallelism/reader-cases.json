@@ -1,0 +1,677 @@
+{
+  "schema_version": 2,
+  "issue": 343,
+  "unit": "U0a",
+  "attempt": "U0a-r1",
+  "purpose": "Named depends/writes reader cases: the one structural decoding of each case, the fixed projection of every consumer (ordinary parseExecutionFields, the controller time DAG, the forge-parallelism scheduling reader and strict validateTaskDeclarations) and the reading of the pre-343 readers at the base revision.",
+  "provenance": {
+    "source_revision": "52a69e79e92c58914da7fcb69f112219a4fd508b",
+    "current_code_dir_reader": {"revision":"b0828ad687114e15db06c5bbd835e1191c4b2c7e","issue":365,"path":"scripts/forge-code-dir.js","symbol":"parseDeclaredPaths","sha256":"babb41bc2b7c44a326b2365dfd28363ea3acf171a680037f010d0ab14690212f","method":"Source-derived current projection after public365 integration. Original base52a readings below remain immutable history; no API was invoked by this fixture repair. Actual execution remains forge-must-haves.test.js for every case."},
+    "base_readers": [
+      {
+        "id": "parallelism.parseListField",
+        "path": "scripts/forge-parallelism.js",
+        "symbol": "parseListField",
+        "line": 166,
+        "git_blob": "b8bdc980f7a829e23d859cc7429bb1260f3241f6",
+        "sha256": "6f4280ffbe31aa9cda0b320a6e6f21f98d0ec352ca4771e509b47d232ad476a4",
+        "input": "frontmatter sliced by parseTaskFrontmatter with /^---\\r?\\n([\\s\\S]*?)\\r?\\n---/ (inner CR kept); null = key not found or not readable"
+      },
+      {
+        "id": "unit-controller.dependsOf",
+        "path": "scripts/forge-unit-controller.js",
+        "symbol": "dependsOf",
+        "line": 628,
+        "git_blob": "b0a5e3cf9984fd0d08fbaa5bb7611d2e7a766c56",
+        "sha256": "98709c2b106f3f32451c578d05868161e812dde9714b7dd6140c8a29f5408814",
+        "input": "readTaskPlan frontmatter (CRLF folded to LF); null = malformed (dependency-malformed); a missing key is the root []"
+      },
+      {
+        "id": "must-haves.parseExecutionFields",
+        "path": "scripts/forge-must-haves.js",
+        "symbol": "parseExecutionFields",
+        "line": 672,
+        "git_blob": "9483a00519483dc04498782f7d043bf1f4e0ba55",
+        "sha256": "5713f3d0d8a46ce40af756b37aefd0bf5dacf4b5befa99677a1561855caebfd8",
+        "input": "full plan text through extractFrontmatter"
+      },
+      {
+        "id": "code-dir.parseDeclaredPaths",
+        "path": "scripts/forge-code-dir.js",
+        "symbol": "parseDeclaredPaths",
+        "line": 207,
+        "git_blob": "429d3274e6f7c87d0c56c70bf4862662e870f348",
+        "sha256": "85024aa58a66c353a0222d1b77bcc2ed7868aa7512e756e424a75690cfeb015a",
+        "input": "full plan text; read only (not edited by issue 343)"
+      }
+    ],
+    "method": "decoded and projections are the approved fixed projection matrix of the corrected readers (attempt U0a-r1). They were derived by reading the corrected sources case by case, and forge-must-haves.test.js issue343 U0a-1 executes every reader against them. The base columns are the pre-343 readings derived by reading the recorded base sources (git blob and SHA-256 above); they are not an executed measurement, because node execution was denied in the sidecars that wrote this file ('This command requires approval'). After integrating public issue365 at b082, code-dir is checked live against projections.code_dir by issue343 U0a-1; every pre-343 base column remains historical, including code-dir. Decoder/ordinary/schedule/temporal/strict projections are unchanged by this fixture repair.",
+    "first_attempt": "Schema 1 of this file (attempt U0a) gave every case one universal expectation shared by all scheduling readers, so a blank line inside a block was refused by the ordinary reader too and a bare `key:` was read as []. The U0a-r1 adjudication replaced that with the fixed per-consumer projections below; the first attempt's bytes remain archived with that attempt.",
+    "historical_probe": "The campaign parser-probe report under the owner's .gsd/reports/issue-campaign-20261108/parallelism-preparation was not readable from the sidecars (permission refused); the U0a cases follow the enumeration of the U0a plan step 1 (LF inline, LF block, CRLF block with two items, comments, root-qualified and object items, malformed, empty/absent and decimal IDs) and the u0a-r1 cases the blank-gap, YAML-null, comment-layout and unindented-list findings of the U0a-r1 correction, without a new experiment.",
+    "plan_template": "Each plan is ---, the frontmatter lines, ---, '# <task>' and a final empty line, joined with the case EOL."
+  },
+  "projections": {
+    "decoded": "forge-must-haves decodeDeclarationList(extractFrontmatter(plan), key): status absent|empty|valid|invalid, form flow|block (valid only), items (valid only), error (invalid only) and the named diagnostics",
+    "ordinary": "forge-must-haves parseExecutionFields: a valid list is an array, blank lines included; empty (YAML null) and invalid are null, present but never an array; absent stays absent; a repeated key throws execution-plan-duplicate-key",
+    "temporal": "forge-unit-controller dependsOf through the controller time DAG: absent and empty are the root []; a blank gap, a malformed declaration or a non-string item is null (dependency-malformed)",
+    "schedule": "forge-parallelism parseTaskFrontmatter: a valid list keeps its items; empty and invalid are null; every decoder diagnostic is <key>:<name>; null without a diagnostic is an absent key (legacy). The CLI never makes a diagnosed task ready",
+    "code_dir": "Current public365 parseDeclaredPaths: quote-aware string paths without YAML comments, the whole list despite blanks/comments; root objects throw code-dir-root-contract-required; absent/empty writes with no structured/freetext output is paths[]/none. The historical base column remains the original52a reading.",
+    "strict": "forge-must-haves validateTaskDeclarations: valid or the code of the first refusal"
+  },
+  "value_encoding": {
+    "<absent>": "the key is not present in the parseExecutionFields result",
+    "<non-array>": "the key is present in the pre-343 parseExecutionFields result with an undefined (non-array) value",
+    "null": "projections.ordinary: present as null; projections.temporal: dependsOf refuses the declaration; projections.schedule: no list read; base parallelism.parseListField: no readable list (the pre-343 CLI treated it as legacy); base unit-controller.dependsOf: dependsOf refused the declaration"
+  },
+  "cases": [
+    {
+      "name": "lf-inline-two-items",
+      "origin": "plan-u0a-step-1",
+      "task": "T09",
+      "eol": "lf",
+      "frontmatter": ["depends: [T01, T02]", "writes: [\"src/a.js\", \"src/b.js\"]"],
+      "decoded": {
+        "depends": { "status": "valid", "form": "flow", "items": ["T01", "T02"], "diagnostics": [] },
+        "writes": { "status": "valid", "form": "flow", "items": ["src/a.js", "src/b.js"], "diagnostics": [] }
+      },
+      "projections": {
+        "code_dir": {"paths":["src/a.js","src/b.js"],"source":"writes+expected_output"},
+        "ordinary": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"] },
+        "temporal": { "depends": ["T01", "T02"] },
+        "schedule": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"], "diagnostics": [] },
+        "strict": "valid"
+      },
+      "base": {
+        "parallelism.parseListField": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"] },
+        "unit-controller.dependsOf": { "depends": ["T01", "T02"] },
+        "must-haves.parseExecutionFields": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"] },
+        "code-dir.parseDeclaredPaths": { "paths": ["src/a.js", "src/b.js"], "source": "writes+expected_output" }
+      }
+    },
+    {
+      "name": "lf-block-two-items",
+      "origin": "plan-u0a-step-1",
+      "task": "T09",
+      "eol": "lf",
+      "frontmatter": ["depends:", "  - T01", "  - T02", "writes:", "  - src/a.js", "  - src/b.js"],
+      "decoded": {
+        "depends": { "status": "valid", "form": "block", "items": ["T01", "T02"], "diagnostics": [] },
+        "writes": { "status": "valid", "form": "block", "items": ["src/a.js", "src/b.js"], "diagnostics": [] }
+      },
+      "projections": {
+        "code_dir": {"paths":["src/a.js","src/b.js"],"source":"writes+expected_output"},
+        "ordinary": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"] },
+        "temporal": { "depends": ["T01", "T02"] },
+        "schedule": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"], "diagnostics": [] },
+        "strict": "valid"
+      },
+      "base": {
+        "parallelism.parseListField": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"] },
+        "unit-controller.dependsOf": { "depends": ["T01", "T02"] },
+        "must-haves.parseExecutionFields": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"] },
+        "code-dir.parseDeclaredPaths": { "paths": ["src/a.js", "src/b.js"], "source": "writes+expected_output" }
+      }
+    },
+    {
+      "name": "crlf-block-two-items",
+      "origin": "plan-u0a-step-1",
+      "task": "T09",
+      "eol": "crlf",
+      "frontmatter": ["depends:", "  - T01", "  - T02", "writes:", "  - src/a.js", "  - src/b.js"],
+      "decoded": {
+        "depends": { "status": "valid", "form": "block", "items": ["T01", "T02"], "diagnostics": [] },
+        "writes": { "status": "valid", "form": "block", "items": ["src/a.js", "src/b.js"], "diagnostics": [] }
+      },
+      "projections": {
+        "code_dir": {"paths":["src/a.js","src/b.js"],"source":"writes+expected_output"},
+        "ordinary": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"] },
+        "temporal": { "depends": ["T01", "T02"] },
+        "schedule": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"], "diagnostics": [] },
+        "strict": "valid"
+      },
+      "base": {
+        "parallelism.parseListField": { "depends": ["T01"], "writes": ["src/a.js"] },
+        "unit-controller.dependsOf": { "depends": ["T01", "T02"] },
+        "must-haves.parseExecutionFields": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"] },
+        "code-dir.parseDeclaredPaths": { "paths": ["src/a.js", "src/b.js"], "source": "writes+expected_output" }
+      }
+    },
+    {
+      "name": "inline-comment-after-unquoted-item",
+      "origin": "plan-u0a-step-1",
+      "task": "T09",
+      "eol": "lf",
+      "frontmatter": ["depends:", "  - T01 # first prerequisite", "  - T02", "writes:", "  - src/a.js # main entry", "  - src/b.js"],
+      "decoded": {
+        "depends": { "status": "valid", "form": "block", "items": ["T01", "T02"], "diagnostics": [] },
+        "writes": { "status": "valid", "form": "block", "items": ["src/a.js", "src/b.js"], "diagnostics": [] }
+      },
+      "projections": {
+        "code_dir": {"paths":["src/a.js","src/b.js"],"source":"writes+expected_output"},
+        "ordinary": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"] },
+        "temporal": { "depends": ["T01", "T02"] },
+        "schedule": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"], "diagnostics": [] },
+        "strict": "valid"
+      },
+      "base": {
+        "parallelism.parseListField": { "depends": ["T01 # first prerequisite", "T02"], "writes": ["src/a.js # main entry", "src/b.js"] },
+        "unit-controller.dependsOf": { "depends": ["T01 # first prerequisite", "T02"] },
+        "must-haves.parseExecutionFields": { "depends": ["T01 # first prerequisite", "T02"], "writes": ["src/a.js # main entry", "src/b.js"] },
+        "code-dir.parseDeclaredPaths": { "paths": ["src/a.js # main entry", "src/b.js"], "source": "writes+expected_output" }
+      }
+    },
+    {
+      "name": "hash-inside-quoted-item",
+      "origin": "plan-u0a-step-1",
+      "task": "T09",
+      "eol": "lf",
+      "frontmatter": ["depends: []", "writes:", "  - \"docs/a #1.md\"", "  - 'docs/b # 2.md'", "  - docs/c#3.md"],
+      "decoded": {
+        "depends": { "status": "valid", "form": "flow", "items": [], "diagnostics": [] },
+        "writes": { "status": "valid", "form": "block", "items": ["docs/a #1.md", "docs/b # 2.md", "docs/c#3.md"], "diagnostics": [] }
+      },
+      "projections": {
+        "code_dir": {"paths":["docs/a #1.md","docs/b # 2.md","docs/c#3.md"],"source":"writes+expected_output"},
+        "ordinary": { "depends": [], "writes": ["docs/a #1.md", "docs/b # 2.md", "docs/c#3.md"] },
+        "temporal": { "depends": [] },
+        "schedule": { "depends": [], "writes": ["docs/a #1.md", "docs/b # 2.md", "docs/c#3.md"], "diagnostics": [] },
+        "strict": "valid"
+      },
+      "base": {
+        "parallelism.parseListField": { "depends": [], "writes": ["docs/a #1.md", "docs/b # 2.md", "docs/c#3.md"] },
+        "unit-controller.dependsOf": { "depends": [] },
+        "must-haves.parseExecutionFields": { "depends": [], "writes": ["docs/a #1.md", "docs/b # 2.md", "docs/c#3.md"] },
+        "code-dir.parseDeclaredPaths": { "paths": ["docs/a #1.md", "docs/b # 2.md", "docs/c#3.md"], "source": "writes+expected_output" }
+      }
+    },
+    {
+      "name": "comment-line-inside-block",
+      "origin": "plan-u0a-step-1",
+      "task": "T09",
+      "eol": "lf",
+      "frontmatter": ["depends:", "  - T01", "  # T02 waits for the review fix", "  - T02", "writes:", "  - src/a.js", "# column-zero comment inside the list", "  - src/b.js"],
+      "decoded": {
+        "depends": { "status": "valid", "form": "block", "items": ["T01", "T02"], "diagnostics": [] },
+        "writes": { "status": "valid", "form": "block", "items": ["src/a.js", "src/b.js"], "diagnostics": [] }
+      },
+      "projections": {
+        "code_dir": {"paths":["src/a.js","src/b.js"],"source":"writes+expected_output"},
+        "ordinary": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"] },
+        "temporal": { "depends": ["T01", "T02"] },
+        "schedule": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"], "diagnostics": [] },
+        "strict": "valid"
+      },
+      "base": {
+        "parallelism.parseListField": { "depends": ["T01"], "writes": ["src/a.js"] },
+        "unit-controller.dependsOf": null,
+        "must-haves.parseExecutionFields": { "depends": ["T01", "T02"], "writes": ["src/a.js", "src/b.js"] },
+        "code-dir.parseDeclaredPaths": { "paths": ["src/a.js"], "source": "writes+expected_output" }
+      }
+    },
+    {
+      "name": "root-qualified-items",
+      "origin": "plan-u0a-step-1",
+      "task": "T09",
+      "eol": "lf",
+      "frontmatter": ["depends: [T01]", "writes:", "  - primary::src/a.js", "  - \"primary::src/b.js\""],
+      "decoded": {
+        "depends": { "status": "valid", "form": "flow", "items": ["T01"], "diagnostics": [] },
+        "writes": { "status": "valid", "form": "block", "items": ["primary::src/a.js", "primary::src/b.js"], "diagnostics": [] }
+      },
+      "projections": {
+        "code_dir": {"paths":["primary::src/a.js","primary::src/b.js"],"source":"writes+expected_output"},
+        "ordinary": { "depends": ["T01"], "writes": ["primary::src/a.js", "primary::src/b.js"] },
+        "temporal": { "depends": ["T01"] },
+        "schedule": { "depends": ["T01"], "writes": ["primary::src/a.js", "primary::src/b.js"], "diagnostics": [] },
+        "strict": "valid"
+      },
+      "base": {
+        "parallelism.parseListField": { "depends": ["T01"], "writes": ["primary::src/a.js", "primary::src/b.js"] },
+        "unit-controller.dependsOf": { "depends": ["T01"] },
+        "must-haves.parseExecutionFields": { "depends": ["T01"], "writes": [{ "primary": ":src/a.js" }] },
+        "code-dir.parseDeclaredPaths": { "paths": ["primary::src/a.js", "primary::src/b.js"], "source": "writes+expected_output" }
+      }
+    },
+    {
+      "name": "object-items",
+      "origin": "plan-u0a-step-1",
+      "task": "T09",
+      "eol": "lf",
+      "frontmatter": ["depends: []", "writes:", "  - root_id: primary", "    path: src/a.js", "  - root_id: primary", "    path: \"src/b.js\""],
+      "decoded": {
+        "depends": { "status": "valid", "form": "flow", "items": [], "diagnostics": [] },
+        "writes": { "status": "valid", "form": "block", "items": [{ "root_id": "primary", "path": "src/a.js" }, { "root_id": "primary", "path": "src/b.js" }], "diagnostics": [] }
+      },
+      "projections": {
+        "code_dir": {"throws":"code-dir-root-contract-required"},
+        "ordinary": { "depends": [], "writes": [{ "root_id": "primary", "path": "src/a.js" }, { "root_id": "primary", "path": "src/b.js" }] },
+        "temporal": { "depends": [] },
+        "schedule": { "depends": [], "writes": [{ "root_id": "primary", "path": "src/a.js" }, { "root_id": "primary", "path": "src/b.js" }], "diagnostics": [] },
+        "strict": "valid"
+      },
+      "base": {
+        "parallelism.parseListField": { "depends": [], "writes": ["root_id: primary"] },
+        "unit-controller.dependsOf": { "depends": [] },
+        "must-haves.parseExecutionFields": { "depends": [], "writes": [{ "root_id": "primary", "path": "src/a.js" }, { "root_id": "primary", "path": "src/b.js" }] },
+        "code-dir.parseDeclaredPaths": { "paths": ["root_id: primary"], "source": "writes+expected_output" }
+      }
+    },
+    {
+      "name": "scalar-depends",
+      "origin": "plan-u0a-step-1",
+      "task": "T09",
+      "eol": "lf",
+      "frontmatter": ["depends: T01", "writes: [src/a.js]"],
+      "decoded": {
+        "depends": { "status": "invalid", "error": "declaration-scalar", "diagnostics": ["declaration-scalar"] },
+        "writes": { "status": "valid", "form": "flow", "items": ["src/a.js"], "diagnostics": [] }
+      },
+      "projections": {
+        "code_dir": {"paths":["src/a.js"],"source":"writes+expected_output"},
+        "ordinary": { "depends": null, "writes": ["src/a.js"] },
+        "temporal": { "depends": null },
+        "schedule": { "depends": null, "writes": ["src/a.js"], "diagnostics": ["depends:declaration-scalar"] },
+        "strict": "plan-declaration-depends-invalid"
+      },
+      "base": {
+        "parallelism.parseListField": { "depends": null, "writes": ["src/a.js"] },
+        "unit-controller.dependsOf": null,
+        "must-haves.parseExecutionFields": { "depends": "<non-array>", "writes": ["src/a.js"] },
+        "code-dir.parseDeclaredPaths": { "paths": ["src/a.js"], "source": "writes+expected_output" }
+      }
+    },
+    {
+      "name": "mixed-block",
+      "origin": "plan-u0a-step-1",
+      "task": "T09",
+      "eol": "lf",
+      "frontmatter": ["depends:", "  - T01", "  T02", "writes: [src/a.js]"],
+      "decoded": {
+        "depends": { "status": "invalid", "error": "declaration-block-malformed", "diagnostics": ["declaration-block-malformed"] },
+        "writes": { "status": "valid", "form": "flow", "items": ["src/a.js"], "diagnostics": [] }
+      },
+      "projections": {
+        "code_dir": {"paths":["src/a.js"],"source":"writes+expected_output"},
+        "ordinary": { "depends": null, "writes": ["src/a.js"] },
+        "temporal": { "depends": null },
+        "schedule": { "depends": null, "writes": ["src/a.js"], "diagnostics": ["depends:declaration-block-malformed"] },
+        "strict": "plan-declaration-depends-invalid"
+      },
+      "base": {
+        "parallelism.parseListField": { "depends": ["T01"], "writes": ["src/a.js"] },
+        "unit-controller.dependsOf": null,
+        "must-haves.parseExecutionFields": { "depends": ["T01"], "writes": ["src/a.js"] },
+        "code-dir.parseDeclaredPaths": { "paths": ["src/a.js"], "source": "writes+expected_output" }
+      }
+    },
+    {
+      "name": "stray-continuation-after-flow",
+      "origin": "plan-u0a-step-1",
+      "task": "T09",
+      "eol": "lf",
+      "frontmatter": ["depends: [T01]", "  - T02", "writes: [src/a.js]"],
+      "decoded": {
+        "depends": { "status": "invalid", "error": "declaration-continuation", "diagnostics": ["declaration-continuation"] },
+        "writes": { "status": "valid", "form": "flow", "items": ["src/a.js"], "diagnostics": [] }
+      },
+      "projections": {
+        "code_dir": {"paths":["src/a.js"],"source":"writes+expected_output"},
+        "ordinary": { "depends": null, "writes": ["src/a.js"] },
+        "temporal": { "depends": null },
+        "schedule": { "depends": null, "writes": ["src/a.js"], "diagnostics": ["depends:declaration-continuation"] },
+        "strict": "plan-declaration-depends-invalid"
+      },
+      "base": {
+        "parallelism.parseListField": { "depends": ["T01"], "writes": ["src/a.js"] },
+        "unit-controller.dependsOf": null,
+        "must-haves.parseExecutionFields": { "depends": ["T01"], "writes": ["src/a.js"] },
+        "code-dir.parseDeclaredPaths": { "paths": ["src/a.js"], "source": "writes+expected_output" }
+      }
+    },
+    {
+      "name": "duplicate-key",
+      "origin": "plan-u0a-step-1",
+      "task": "T09",
+      "eol": "lf",
+      "frontmatter": ["depends: [T01]", "writes: [src/a.js]", "depends: []"],
+      "decoded": {
+        "depends": { "status": "invalid", "error": "execution-plan-duplicate-key", "diagnostics": ["execution-plan-duplicate-key"] },
+        "writes": { "status": "valid", "form": "flow", "items": ["src/a.js"], "diagnostics": [] }
+      },
+      "projections": {
+        "code_dir": {"paths":["src/a.js"],"source":"writes+expected_output"},
+        "ordinary": { "throws": "execution-plan-duplicate-key" },
+        "temporal": { "depends": null },
+        "schedule": { "depends": null, "writes": ["src/a.js"], "diagnostics": ["depends:execution-plan-duplicate-key"] },
+        "strict": "plan-declaration-depends-invalid"
+      },
+      "base": {
+        "parallelism.parseListField": { "depends": ["T01"], "writes": ["src/a.js"] },
+        "unit-controller.dependsOf": null,
+        "must-haves.parseExecutionFields": { "throws": "execution-plan-duplicate-key" },
+        "code-dir.parseDeclaredPaths": { "paths": ["src/a.js"], "source": "writes+expected_output" }
+      }
+    },
+    {
+      "name": "writes-empty-inline",
+      "origin": "plan-u0a-step-1",
+      "task": "T09",
+      "eol": "lf",
+      "frontmatter": ["depends: []", "writes: []"],
+      "decoded": {
+        "depends": { "status": "valid", "form": "flow", "items": [], "diagnostics": [] },
+        "writes": { "status": "valid", "form": "flow", "items": [], "diagnostics": [] }
+      },
+      "projections": {
+        "code_dir": {"paths":[],"source":"none"},
+        "ordinary": { "depends": [], "writes": [] },
+        "temporal": { "depends": [] },
+        "schedule": { "depends": [], "writes": [], "diagnostics": [] },
+        "strict": "valid"
+      },
+      "base": {
+        "parallelism.parseListField": { "depends": [], "writes": [] },
+        "unit-controller.dependsOf": { "depends": [] },
+        "must-haves.parseExecutionFields": { "depends": [], "writes": [] },
+        "code-dir.parseDeclaredPaths": { "paths": [], "source": "none" }
+      }
+    },
+    {
+      "name": "writes-empty-value",
+      "origin": "plan-u0a-step-1",
+      "task": "T09",
+      "eol": "lf",
+      "frontmatter": ["depends: []", "writes:"],
+      "decoded": {
+        "depends": { "status": "valid", "form": "flow", "items": [], "diagnostics": [] },
+        "writes": { "status": "empty", "diagnostics": ["declaration-empty-value"] }
+      },
+      "projections": {
+        "code_dir": {"paths":[],"source":"none"},
+        "ordinary": { "depends": [], "writes": null },
+        "temporal": { "depends": [] },
+        "schedule": { "depends": [], "writes": null, "diagnostics": ["writes:declaration-empty-value"] },
+        "strict": "plan-declaration-writes-invalid"
+      },
+      "base": {
+        "parallelism.parseListField": { "depends": [], "writes": [] },
+        "unit-controller.dependsOf": { "depends": [] },
+        "must-haves.parseExecutionFields": { "depends": [], "writes": "<non-array>" },
+        "code-dir.parseDeclaredPaths": { "paths": [], "source": "none" }
+      }
+    },
+    {
+      "name": "writes-absent",
+      "origin": "plan-u0a-step-1",
+      "task": "T09",
+      "eol": "lf",
+      "frontmatter": ["depends: []"],
+      "decoded": {
+        "depends": { "status": "valid", "form": "flow", "items": [], "diagnostics": [] },
+        "writes": { "status": "absent", "diagnostics": [] }
+      },
+      "projections": {
+        "code_dir": {"paths":[],"source":"none"},
+        "ordinary": { "depends": [], "writes": "<absent>" },
+        "temporal": { "depends": [] },
+        "schedule": { "depends": [], "writes": null, "diagnostics": [] },
+        "strict": "plan-declaration-writes-missing"
+      },
+      "base": {
+        "parallelism.parseListField": { "depends": [], "writes": null },
+        "unit-controller.dependsOf": { "depends": [] },
+        "must-haves.parseExecutionFields": { "depends": [], "writes": "<absent>" },
+        "code-dir.parseDeclaredPaths": { "paths": [], "source": "none" }
+      }
+    },
+    {
+      "name": "decimal-ids",
+      "origin": "plan-u0a-step-1",
+      "task": "T09",
+      "eol": "lf",
+      "frontmatter": ["depends: [T03, T03.1]", "writes: [src/a.js]"],
+      "decoded": {
+        "depends": { "status": "valid", "form": "flow", "items": ["T03", "T03.1"], "diagnostics": [] },
+        "writes": { "status": "valid", "form": "flow", "items": ["src/a.js"], "diagnostics": [] }
+      },
+      "projections": {
+        "code_dir": {"paths":["src/a.js"],"source":"writes+expected_output"},
+        "ordinary": { "depends": ["T03", "T03.1"], "writes": ["src/a.js"] },
+        "temporal": { "depends": ["T03", "T03.1"] },
+        "schedule": { "depends": ["T03", "T03.1"], "writes": ["src/a.js"], "diagnostics": [] },
+        "strict": "valid"
+      },
+      "base": {
+        "parallelism.parseListField": { "depends": ["T03", "T03.1"], "writes": ["src/a.js"] },
+        "unit-controller.dependsOf": { "depends": ["T03", "T03.1"] },
+        "must-haves.parseExecutionFields": { "depends": ["T03", "T03.1"], "writes": ["src/a.js"] },
+        "code-dir.parseDeclaredPaths": { "paths": ["src/a.js"], "source": "writes+expected_output" }
+      }
+    },
+    {
+      "name": "depends-absent",
+      "origin": "plan-u0a-step-1",
+      "task": "T09",
+      "eol": "lf",
+      "frontmatter": ["writes: [src/a.js]"],
+      "decoded": {
+        "depends": { "status": "absent", "diagnostics": [] },
+        "writes": { "status": "valid", "form": "flow", "items": ["src/a.js"], "diagnostics": [] }
+      },
+      "projections": {
+        "code_dir": {"paths":["src/a.js"],"source":"writes+expected_output"},
+        "ordinary": { "depends": "<absent>", "writes": ["src/a.js"] },
+        "temporal": { "depends": [] },
+        "schedule": { "depends": null, "writes": ["src/a.js"], "diagnostics": [] },
+        "strict": "plan-declaration-depends-missing"
+      },
+      "base": {
+        "parallelism.parseListField": { "depends": null, "writes": ["src/a.js"] },
+        "unit-controller.dependsOf": { "depends": [] },
+        "must-haves.parseExecutionFields": { "depends": "<absent>", "writes": ["src/a.js"] },
+        "code-dir.parseDeclaredPaths": { "paths": ["src/a.js"], "source": "writes+expected_output" }
+      }
+    },
+    {
+      "name": "depends-empty-value",
+      "origin": "u0a-r1",
+      "task": "T09",
+      "eol": "lf",
+      "frontmatter": ["depends:", "writes: [src/a.js]"],
+      "decoded": {
+        "depends": { "status": "empty", "diagnostics": ["declaration-empty-value"] },
+        "writes": { "status": "valid", "form": "flow", "items": ["src/a.js"], "diagnostics": [] }
+      },
+      "projections": {
+        "code_dir": {"paths":["src/a.js"],"source":"writes+expected_output"},
+        "ordinary": { "depends": null, "writes": ["src/a.js"] },
+        "temporal": { "depends": [] },
+        "schedule": { "depends": null, "writes": ["src/a.js"], "diagnostics": ["depends:declaration-empty-value"] },
+        "strict": "plan-declaration-depends-invalid"
+      },
+      "base": {
+        "parallelism.parseListField": { "depends": [], "writes": ["src/a.js"] },
+        "unit-controller.dependsOf": { "depends": [] },
+        "must-haves.parseExecutionFields": { "depends": "<non-array>", "writes": ["src/a.js"] },
+        "code-dir.parseDeclaredPaths": { "paths": ["src/a.js"], "source": "writes+expected_output" }
+      }
+    },
+    {
+      "name": "depends-comment-only-is-yaml-null",
+      "origin": "u0a-r1",
+      "task": "T09",
+      "eol": "lf",
+      "frontmatter": ["depends:", "  # - T01 is no longer a prerequisite", "writes: [src/a.js]"],
+      "decoded": {
+        "depends": { "status": "empty", "diagnostics": ["declaration-empty-value"] },
+        "writes": { "status": "valid", "form": "flow", "items": ["src/a.js"], "diagnostics": [] }
+      },
+      "projections": {
+        "code_dir": {"paths":["src/a.js"],"source":"writes+expected_output"},
+        "ordinary": { "depends": null, "writes": ["src/a.js"] },
+        "temporal": { "depends": [] },
+        "schedule": { "depends": null, "writes": ["src/a.js"], "diagnostics": ["depends:declaration-empty-value"] },
+        "strict": "plan-declaration-depends-invalid"
+      },
+      "base": {
+        "parallelism.parseListField": { "depends": [], "writes": ["src/a.js"] },
+        "unit-controller.dependsOf": null,
+        "must-haves.parseExecutionFields": { "depends": "<non-array>", "writes": ["src/a.js"] },
+        "code-dir.parseDeclaredPaths": { "paths": ["src/a.js"], "source": "writes+expected_output" }
+      }
+    },
+    {
+      "name": "depends-interior-blank",
+      "origin": "u0a-r1",
+      "task": "T09",
+      "eol": "lf",
+      "frontmatter": ["depends:", "  - T01", "", "  - T02", "writes: [src/a.js]"],
+      "decoded": {
+        "depends": { "status": "valid", "form": "block", "items": ["T01", "T02"], "diagnostics": ["declaration-interior-blank"] },
+        "writes": { "status": "valid", "form": "flow", "items": ["src/a.js"], "diagnostics": [] }
+      },
+      "projections": {
+        "code_dir": {"paths":["src/a.js"],"source":"writes+expected_output"},
+        "ordinary": { "depends": ["T01", "T02"], "writes": ["src/a.js"] },
+        "temporal": { "depends": null },
+        "schedule": { "depends": ["T01", "T02"], "writes": ["src/a.js"], "diagnostics": ["depends:declaration-interior-blank"] },
+        "strict": "plan-declaration-depends-blank-gap"
+      },
+      "base": {
+        "parallelism.parseListField": { "depends": ["T01"], "writes": ["src/a.js"] },
+        "unit-controller.dependsOf": null,
+        "must-haves.parseExecutionFields": { "depends": ["T01", "T02"], "writes": ["src/a.js"] },
+        "code-dir.parseDeclaredPaths": { "paths": ["src/a.js"], "source": "writes+expected_output" }
+      }
+    },
+    {
+      "name": "depends-leading-blank-crlf",
+      "origin": "u0a-r1",
+      "task": "T09",
+      "eol": "crlf",
+      "frontmatter": ["depends:", "", "  - T01", "writes: [src/a.js]"],
+      "decoded": {
+        "depends": { "status": "valid", "form": "block", "items": ["T01"], "diagnostics": ["declaration-leading-blank"] },
+        "writes": { "status": "valid", "form": "flow", "items": ["src/a.js"], "diagnostics": [] }
+      },
+      "projections": {
+        "code_dir": {"paths":["src/a.js"],"source":"writes+expected_output"},
+        "ordinary": { "depends": ["T01"], "writes": ["src/a.js"] },
+        "temporal": { "depends": null },
+        "schedule": { "depends": ["T01"], "writes": ["src/a.js"], "diagnostics": ["depends:declaration-leading-blank"] },
+        "strict": "plan-declaration-depends-blank-gap"
+      },
+      "base": {
+        "parallelism.parseListField": { "depends": ["T01"], "writes": ["src/a.js"] },
+        "unit-controller.dependsOf": null,
+        "must-haves.parseExecutionFields": { "depends": ["T01"], "writes": ["src/a.js"] },
+        "code-dir.parseDeclaredPaths": { "paths": ["src/a.js"], "source": "writes+expected_output" }
+      }
+    },
+    {
+      "name": "writes-blank-and-comment-lines",
+      "origin": "u0a-r1",
+      "task": "T09",
+      "eol": "lf",
+      "frontmatter": ["depends: []", "writes:", "", "  - src/a.js", "", "  # the second file", "  - src/b.js"],
+      "decoded": {
+        "depends": { "status": "valid", "form": "flow", "items": [], "diagnostics": [] },
+        "writes": { "status": "valid", "form": "block", "items": ["src/a.js", "src/b.js"], "diagnostics": ["declaration-leading-blank", "declaration-interior-blank"] }
+      },
+      "projections": {
+        "code_dir": {"paths":["src/a.js","src/b.js"],"source":"writes+expected_output"},
+        "ordinary": { "depends": [], "writes": ["src/a.js", "src/b.js"] },
+        "temporal": { "depends": [] },
+        "schedule": { "depends": [], "writes": ["src/a.js", "src/b.js"], "diagnostics": ["writes:declaration-leading-blank", "writes:declaration-interior-blank"] },
+        "strict": "plan-declaration-writes-blank-gap"
+      },
+      "base": {
+        "parallelism.parseListField": { "depends": [], "writes": ["src/a.js"] },
+        "unit-controller.dependsOf": { "depends": [] },
+        "must-haves.parseExecutionFields": { "depends": [], "writes": ["src/a.js", "src/b.js"] },
+        "code-dir.parseDeclaredPaths": { "paths": [], "source": "none" }
+      }
+    },
+    {
+      "name": "object-items-blank-between-entries",
+      "origin": "u0a-r1",
+      "task": "T09",
+      "eol": "lf",
+      "frontmatter": ["depends: []", "writes:", "  - root_id: primary", "    path: src/a.js", "", "  - root_id: primary", "    path: src/b.js"],
+      "decoded": {
+        "depends": { "status": "valid", "form": "flow", "items": [], "diagnostics": [] },
+        "writes": { "status": "valid", "form": "block", "items": [{ "root_id": "primary", "path": "src/a.js" }, { "root_id": "primary", "path": "src/b.js" }], "diagnostics": ["declaration-interior-blank"] }
+      },
+      "projections": {
+        "code_dir": {"throws":"code-dir-root-contract-required"},
+        "ordinary": { "depends": [], "writes": [{ "root_id": "primary", "path": "src/a.js" }, { "root_id": "primary", "path": "src/b.js" }] },
+        "temporal": { "depends": [] },
+        "schedule": { "depends": [], "writes": [{ "root_id": "primary", "path": "src/a.js" }, { "root_id": "primary", "path": "src/b.js" }], "diagnostics": ["writes:declaration-interior-blank"] },
+        "strict": "plan-declaration-writes-blank-gap"
+      },
+      "base": {
+        "parallelism.parseListField": { "depends": [], "writes": ["root_id: primary"] },
+        "unit-controller.dependsOf": { "depends": [] },
+        "must-haves.parseExecutionFields": { "depends": [], "writes": [{ "root_id": "primary", "path": "src/a.js" }, { "root_id": "primary", "path": "src/b.js" }] },
+        "code-dir.parseDeclaredPaths": { "paths": ["root_id: primary"], "source": "writes+expected_output" }
+      }
+    },
+    {
+      "name": "key-line-comment-then-block",
+      "origin": "u0a-r1",
+      "task": "T09",
+      "eol": "lf",
+      "frontmatter": ["depends: # predecessors below", "  - T01", "  - 'T02' # quoted, then a comment", "writes: [src/a.js] # one file"],
+      "decoded": {
+        "depends": { "status": "valid", "form": "block", "items": ["T01", "T02"], "diagnostics": [] },
+        "writes": { "status": "valid", "form": "flow", "items": ["src/a.js"], "diagnostics": [] }
+      },
+      "projections": {
+        "code_dir": {"paths":["src/a.js"],"source":"writes+expected_output"},
+        "ordinary": { "depends": ["T01", "T02"], "writes": ["src/a.js"] },
+        "temporal": { "depends": ["T01", "T02"] },
+        "schedule": { "depends": ["T01", "T02"], "writes": ["src/a.js"], "diagnostics": [] },
+        "strict": "valid"
+      },
+      "base": {
+        "parallelism.parseListField": { "depends": null, "writes": null },
+        "unit-controller.dependsOf": null,
+        "must-haves.parseExecutionFields": { "depends": ["T01", "T02' # quoted, then a comment"], "writes": ["src/a.js] # one file"] },
+        "code-dir.parseDeclaredPaths": { "paths": [], "source": "none" }
+      }
+    },
+    {
+      "name": "unindented-block",
+      "origin": "u0a-r1",
+      "task": "T09",
+      "eol": "lf",
+      "frontmatter": ["depends:", "- T01", "writes: [src/a.js]"],
+      "decoded": {
+        "depends": { "status": "invalid", "error": "declaration-block-malformed", "diagnostics": ["declaration-block-malformed"] },
+        "writes": { "status": "valid", "form": "flow", "items": ["src/a.js"], "diagnostics": [] }
+      },
+      "projections": {
+        "code_dir": {"paths":["src/a.js"],"source":"writes+expected_output"},
+        "ordinary": { "depends": null, "writes": ["src/a.js"] },
+        "temporal": { "depends": null },
+        "schedule": { "depends": null, "writes": ["src/a.js"], "diagnostics": ["depends:declaration-block-malformed"] },
+        "strict": "plan-declaration-depends-invalid"
+      },
+      "base": {
+        "parallelism.parseListField": { "depends": [], "writes": ["src/a.js"] },
+        "unit-controller.dependsOf": { "depends": [] },
+        "must-haves.parseExecutionFields": { "depends": "<non-array>", "writes": ["src/a.js"] },
+        "code-dir.parseDeclaredPaths": { "paths": ["src/a.js"], "source": "writes+expected_output" }
+      }
+    }
+  ],
+  "base_divergences": [
+    "parallelism.parseListField: a CRLF block kept only its first item (crlf-block-two-items), a comment line ended a block (comment-line-inside-block), a blank line ended a block silently (depends-interior-blank, writes-blank-and-comment-lines), inline comments stayed in the values, an object entry collapsed to its first line, a key-line comment made the list unreadable, a scalar became null (the CLI then fell to legacy), an unindented list or a comment-only value read as [], and mixed blocks, stray continuations and repeated keys kept the first reading silently.",
+    "unit-controller.dependsOf: strict, but a comment line or a key-line comment refused the whole declaration, an inline comment became part of the task ID, and an unindented list (unindented-block) was read as a root, hiding its prerequisite.",
+    "must-haves.parseExecutionFields: an unquoted root-qualified first item was misread as an object ({\"primary\": \":src/a.js\"}, the next item dropped), a mixed block dropped its stray line, a continuation after a flow list was ignored, inline comments stayed in the values (a quoted item lost only its opening quote), a flow list with a trailing comment kept the comment and its closing bracket, and a scalar, an empty value or an unindented list was a present non-array. Complete block lists with blank lines were read in full; the U0a-r1 ordinary projection keeps that."
+  ],
+  "independent_issues": [
+    "forge-code-dir.js parseListField is a copy of the pre-343 reader and keeps its divergences (inline comments kept, a comment line ends a block, a leading blank line reads writes as [], a key-line comment makes writes unreadable, object entries collapse to 'root_id: primary', mixed/continuation/repeated forms read leniently). It only feeds the sidecar CODE_DIR/cross-repo attribution, not batch eligibility, so it is registered here once and left unedited (U0a plan step 1).",
+    "forge-write-coverage.js declaredFor normalizes each declared write with String(), so an object entry ({root_id, path}) is observed as '[object Object]'; an observation-only limitation that predates issue 343 (the old reader produced 'root_id: primary') and is left unedited."
+  ]
+}

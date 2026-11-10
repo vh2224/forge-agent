@@ -35,6 +35,10 @@ const { isGroupedFile, readGroupedUnits, readSniffBuffer, parseGroup, attachSnap
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const DECISIONS_DIR = '.gsd/decisions';
+const PREVIEW_DECISIONS = Symbol('decisions-preview');
+const EXPECTED_DECISIONS = Symbol('decisions-preimage');
+const decisionDigest = value => crypto.createHash('sha256').update(value).digest('hex');
+function decisionConflict() { throw Object.assign(new Error('Prepared decisions changed'), { code: 'DECISIONS_PREPARED_CONFLICT' }); }
 
 // Grouped containers are a read format only. listFragments exposes one
 // envelope per decision unit and preserves the physical container path;
@@ -422,6 +426,13 @@ function writeFragment(cwd, fragment, opts) {
 
   const fpath = fragmentPath(cwd, fragment.unit_id); // throws if invalid id
 
+  const preimage = fs.existsSync(fpath) ? fs.readFileSync(fpath) : null;
+  const before = preimage === null ? null : decisionDigest(preimage);
+  const expected = opts[EXPECTED_DECISIONS];
+  if (expected && (Object.keys(expected).sort().join(',') !== 'after,before,path,schema'
+      || expected.schema !== 'forge-decisions-prepared-v1' || expected.path !== fpath
+      || expected.before !== null && !/^[a-f0-9]{64}$/.test(expected.before)
+      || !/^[a-f0-9]{64}$/.test(expected.after || '') || before !== expected.before && before !== expected.after)) decisionConflict();
   // Merge with existing if present
   let base = fragment;
   if (fs.existsSync(fpath)) {
@@ -442,6 +453,13 @@ function writeFragment(cwd, fragment, opts) {
   const body = base.body ? `\n${base.body}` : '';
   const content = `---\n${frontmatter}\n---\n${body}`;
 
+  const after = decisionDigest(Buffer.from(content));
+  if (expected && after !== expected.after) decisionConflict();
+  if (opts[PREVIEW_DECISIONS]) {
+    if ((fs.existsSync(fpath) ? decisionDigest(fs.readFileSync(fpath)) : null) !== before) decisionConflict();
+    return { path: fpath, created: false, prepared: { schema: 'forge-decisions-prepared-v1', path: fpath, before, after } };
+  }
+  if (expected && (fs.existsSync(fpath) ? decisionDigest(fs.readFileSync(fpath)) : null) !== before) decisionConflict();
   // Idempotent check
   if (fs.existsSync(fpath)) {
     const existingContent = fs.readFileSync(fpath, 'utf8');
@@ -458,6 +476,13 @@ function writeFragment(cwd, fragment, opts) {
   });
 
   return { path: fpath, created: true };
+}
+
+function prepareFragment(cwd, fragment, opts) {
+  return writeFragment(cwd, fragment, { ...(opts || {}), [PREVIEW_DECISIONS]: true });
+}
+function applyPreparedFragment(cwd, fragment, prepared, opts) {
+  return writeFragment(cwd, fragment, { ...(opts || {}), [EXPECTED_DECISIONS]: prepared });
 }
 
 // ── readFragment ──────────────────────────────────────────────────────────────
@@ -547,7 +572,7 @@ module.exports = {
   decisionsDir,
   fragmentPath,
   parseFragment,
-  writeFragment,
+  writeFragment, prepareFragment, applyPreparedFragment,
   readFragment,
   readFragmentText,
   listFragments,

@@ -42,6 +42,8 @@ const FLAGS = Object.freeze({
   '--input-tokens': 'inputTokens',
   '--output-tokens': 'outputTokens',
   '--batch-size': 'batchSize',
+  '--batch-id': 'batchId',
+  '--member-ref': 'memberRef',
   '--vcs': 'vcs',
   '--transport': 'transport',
   '--transport-version': 'transportVersion',
@@ -121,6 +123,23 @@ function pick(override, routeValue) {
   return present(override) ? String(override) : text(routeValue);
 }
 
+// Issue 343 U3a: a sidecar cohort member names its cohort and its own attempt. The two
+// fields travel together with the cohort size; a partial or malformed set is refused, and
+// a line without them keeps the exact previous key set.
+const BATCH_ID = /^batch-[a-f0-9]{32}$/;
+const MEMBER_REF = /^m[0-7]-[a-f0-9]{16}$/;
+function cohortFields(args) {
+  const named = [present(args.batchId), present(args.memberRef)];
+  if (!named[0] && !named[1]) return null;
+  if (!named[0] || !named[1]) throw new DispatchEventError('batch_id e member_ref vêm juntos: informe os dois ou nenhum');
+  const batchId = String(args.batchId).trim(), memberRef = String(args.memberRef).trim();
+  if (!BATCH_ID.test(batchId)) throw new DispatchEventError(`batch_id inválido (recebido: ${JSON.stringify(batchId)})`);
+  if (!MEMBER_REF.test(memberRef)) throw new DispatchEventError(`member_ref inválido (recebido: ${JSON.stringify(memberRef)})`);
+  const size = present(args.batchSize) ? number(args.batchSize, 'batch_size') : NaN;
+  if (!Number.isInteger(size) || size < 2 || size > 8) throw new DispatchEventError('batch_size de um membro de cohort deve ser um inteiro de 2 a 8');
+  return { batch_id: batchId, member_ref: memberRef };
+}
+
 /**
  * Build the dispatch event object. Pure: no I/O, no clock unless the caller
  * omitted `--ts` (then `now` is used, which the caller supplies in tests).
@@ -157,6 +176,7 @@ function buildDispatchEvent(args, route, now) {
   ]) {
     if (!present(value)) throw new DispatchEventError(`${field} ausente: informe --route-json ou a flag correspondente`);
   }
+  const cohort = cohortFields(args);
 
   const event = {
     ts: present(args.ts) ? String(args.ts) : now,
@@ -182,6 +202,10 @@ function buildDispatchEvent(args, route, now) {
   if (present(args.outputTokens)) event.output_tokens = number(args.outputTokens, 'output_tokens');
   event.model_applied = present(args.modelApplied) ? String(args.modelApplied) : null;
   if (present(args.batchSize)) event.batch_size = number(args.batchSize, 'batch_size');
+  if (cohort) {
+    event.batch_id = cohort.batch_id;
+    event.member_ref = cohort.member_ref;
+  }
   if (present(args.dispatchId)) event.dispatch_id = String(args.dispatchId);
   if (present(args.attempt)) event.attempt = number(args.attempt, 'attempt');
   event.vcs = present(args.vcs) ? String(args.vcs) : 'unknown';
@@ -215,6 +239,39 @@ async function appendDispatchEvent(broker, args, route, now = new Date().toISOSt
   return broker.append(args.relativePath || '.gsd/forge/events.jsonl', renderDispatchEvent(args, route, now));
 }
 
+// The route axes a member event must carry exactly as the cohort decision resolved them for
+// THIS member: a sibling's route, or another model, tier or effort, is never stamped on it.
+const MEMBER_ROUTE_KEYS = Object.freeze(['model', 'tier', 'effort', 'worker_mode', 'resolved_worker_engine', 'host_runtime']);
+
+/**
+ * Issue 343 U3a: the dispatch event of one sidecar cohort member, appended only through the
+ * live cohort broker (forge-artifact-reconciliation startBatchBroker) by that member's own
+ * opaque handle. The cohort fields come from the broker's closed registry, never from the
+ * caller: a caller value naming another batch, member, unit or dispatch is refused, and the
+ * rest of the line is the same canonical builder (the Route stays derived from each member's
+ * real events). The broker signs the line into the cohort's single stream.
+ */
+async function appendMemberDispatchEvent(broker, memberHandle, args, route, now = new Date().toISOString()) {
+  const client = require('./forge-artifact-reconciliation').assertBatchBroker(broker);
+  const member = client.memberIdentity(memberHandle);
+  const input = { ...(args || {}) };
+  delete input.relativePath;
+  for (const [key, value] of [['batchId', member.batch_id], ['memberRef', member.member_ref], ['batchSize', member.batch_size],
+    ['unit', member.unit], ['dispatchId', member.dispatch_id], ['milestone', member.milestone], ['slice', member.slice]]) {
+    if (present(input[key]) && String(input[key]).trim() !== String(value)) {
+      throw Object.assign(new DispatchEventError(`${key} não pertence a este membro do cohort`), { code: 'dispatch-event-member-mismatch' });
+    }
+    input[key] = String(value);
+  }
+  const event = buildDispatchEvent(input, route || {}, now);
+  for (const key of MEMBER_ROUTE_KEYS) {
+    if (event[key] !== member.route[key]) {
+      throw Object.assign(new DispatchEventError(`${key} difere da rota resolvida deste membro`), { code: 'dispatch-event-member-route-mismatch' });
+    }
+  }
+  return client.appendMember(memberHandle, (args && args.relativePath) || '.gsd/forge/events.jsonl', `${JSON.stringify(event)}\n`);
+}
+
 function main(argv, streams, now) {
   const io = streams || { stdout: process.stdout, stderr: process.stderr };
   const stamp = now || new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
@@ -237,7 +294,8 @@ function main(argv, streams, now) {
   return 0;
 }
 
-module.exports = { FLAGS, DispatchEventError, parseArgs, buildDispatchEvent, renderDispatchEvent, appendDispatchEvent, main };
+module.exports = { FLAGS, DispatchEventError, parseArgs, buildDispatchEvent, renderDispatchEvent, appendDispatchEvent,
+  appendMemberDispatchEvent, main };
 
 if (require.main === module) {
   process.exitCode = main(process.argv.slice(2));

@@ -210,6 +210,20 @@ const WRAPPER_DIR_READERS = Object.freeze([
     verdict: 'safe-by-construction',
     why: 'The specific validated milestone selects its slices directory before enumeration; the SLICE_ID_RE filter never enumerates the .gsd/milestones or .gsd/tasks wrapper roots or consumes grouped containers as units.',
   },
+  {
+    file: 'forge-execution-batch.js',
+    dirs: Object.freeze(['.gsd/milestones']),
+    evidence: 'forge-execution-batch.js:87,357-379,538-545 — BATCH_SEGMENTS is .gsd/forge/batches; the only readdirSync calls inspect one selected batch/progress/mN directory and that batch-metadata root filtered by BATCH_ID. Milestone/slice/task plan paths are explicitly selected.',
+    verdict: 'safe-by-construction',
+    why: 'The specific .gsd/forge/batches metadata targets and closed batch-id/contiguous-progress filters never enumerate .gsd/milestones or .gsd/tasks wrapper roots. Selected loose-plan paths remain individually validated; this is not a claim of grouped-container reading support.',
+  },
+  {
+    file: 'forge-plan-validation.js',
+    dirs: Object.freeze(['.gsd/milestones']),
+    evidence: 'forge-plan-validation.js:914,1188,1379,1443 — enumeration is confined to .gsd/forge/transactions filtered by .json, .gsd/forge/plan-validations/<milestone>/<slice>, the selected milestone mutation directory, and plan-validations/.staging. The plan walk at658 uses lstat on explicitly selected .gsd/milestones/<id>/slices/<id>/tasks/<id> paths.',
+    verdict: 'safe-by-construction',
+    why: 'The specific controller-record and mutation-chain/staging directories never enumerate milestone/task wrapper roots; selected plan components use exact safe ids and no-follow lstat rather than directory discovery. Missing or grouped loose-plan paths still refuse; grouped-container compatibility is not asserted.',
+  },
 ].map(Object.freeze));
 
 function unlearnedReaders() {
