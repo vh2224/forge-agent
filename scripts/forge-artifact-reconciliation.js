@@ -34,7 +34,7 @@ function logIdentity(file) {
 function lockRoot(owner) {
   return path.join(require('os').tmpdir(), `forge-artifact-owner-${digest(roots.key(owner))}`);
 }
-function lock(manifest) {
+function lock(manifest, acquisitionBudget) {
   // The canonical mutex lives in the trusted transport directory, outside the
   // protected owner. Both appends and publication take the same attempt lock.
   const directory = lockRoot(manifest.owner);
@@ -43,20 +43,31 @@ function lock(manifest) {
   // This synchronous critical section belongs to the actual owner/broker
   // process. Recover only its proven death, never an old clock or a live PID.
   const handle = require('./forge-lock').acquireProcessSync(directory, 'publication',
-    { retries: 1 });
+    { retries: 1, ...(acquisitionBudget ? { retries: acquisitionBudget.remaining_attempts || 1, acquisitionBudget } : {}) });
   const guard = Object.freeze({ release() { heldLocks.delete(guard); return handle.release(); } });
   heldLocks.set(guard, manifest.owner);
   return guard;
 }
 function withOwnerLock(owner, callback, guard) {
   owner = roots.realDirectory(owner);
+  const windows = require('./forge-owner-transport-window');
+  if (guard === undefined) guard = windows.currentPublicationGuard(owner, true);
   if (guard !== undefined) {
     if (heldLocks.get(guard) !== owner) fail('reconciliation-lock-handle-required');
+    windows.assertMutationAllowed(owner);
     return callback();
   }
   const acquired = lock({ owner });
-  try { return callback(); } finally { acquired.release(); }
+  try { return windows.withPublicationContext(owner, acquired, () => { windows.assertMutationAllowed(owner); return callback(); }); } finally { acquired.release(); }
 }
+// Validate the real held guard without entering another publication boundary.
+// A forged withPublicationContext handle is still rejected by this WeakMap.
+Object.defineProperty(lock, 'assertGuard', { value(owner, guard) {
+  owner = roots.realDirectory(owner);
+  if (heldLocks.get(guard) !== owner) fail('reconciliation-lock-handle-required');
+  require('./forge-owner-transport-window').assertMutationAllowed(owner);
+  return true;
+} });
 function verifyProof(manifest, proof) {
   if (manifest.schema_version !== 1 || proof?.manifest_sha256 !== digest(manifest) || proof.dispatch_id !== manifest.dispatch_id) fail('reconciliation-proof-identity');
   const { signature, ...payload } = proof;
@@ -117,16 +128,19 @@ async function startBroker(options) {
   // Public material lives in the trusted result channel, outside every writable
   // surface. Trust is the hash retained in the caller, never a path from output.
   if (roots.within(owner, manifestFile) || options.execution_contract?.code_roots.some(r => roots.within(r.path, manifestFile))) fail('broker-manifest-in-worker-surface');
-  const appendPaths = options.appendPaths || ['.gsd/forge/events.jsonl'];
-  for (const rel of appendPaths) {
-    const file = safeTarget(owner, rel);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    if (!fs.existsSync(file)) fs.writeFileSync(file, '', { flag: 'wx' });
-  }
-  const surface = require('./forge-task-execution').protectedSnapshot(owner);
-  const baselines = Object.fromEntries(appendPaths.map(rel => { const file = safeTarget(owner, rel), b = bytes(file);
-    return [rel, { length: b.length, sha256: digest(b), identity_sha256: logIdentity(file), sequence: 0 }]; }));
-  const child = fork(__filename, ['--broker'], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true, env: { ...process.env } });
+  const { appendPaths, surface, baselines, child } = require('./forge-owner-transport-window').withMutation(owner, () => {
+    const appendPaths = options.appendPaths || ['.gsd/forge/events.jsonl'];
+    for (const rel of appendPaths) {
+      const file = safeTarget(owner, rel);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      if (!fs.existsSync(file)) fs.writeFileSync(file, '', { flag: 'wx' });
+    }
+    const surface = require('./forge-task-execution').protectedSnapshot(owner);
+    const baselines = Object.fromEntries(appendPaths.map(rel => { const file = safeTarget(owner, rel), b = bytes(file);
+      return [rel, { length: b.length, sha256: digest(b), identity_sha256: logIdentity(file), sequence: 0 }]; }));
+    const child = fork(__filename, ['--broker'], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true, env: { ...process.env } });
+    return { appendPaths, surface, baselines, child };
+  });
   let sequence = 0; const pending = new Map();
   child.on('message', message => { const p = pending.get(message.id); if (!p) return; pending.delete(message.id); clearTimeout(p.timer);
     message.error ? p.reject(Object.assign(new Error(message.error), { code: message.error })) : p.resolve(message.result); });

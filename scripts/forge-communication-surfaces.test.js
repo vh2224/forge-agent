@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/native-effort/distribution.cjs');
+const unitEntry = require('./fixtures/owner-recovery/distribution.cjs');
 
 // forge-communication-surfaces.test.js — proves the orchestration and status
 // skills follow shared/forge-communication.md by POINTER, not by a second copy;
@@ -380,7 +380,7 @@ function validateIdentity(delta, { measure, measureAttributed, readRaw, readme, 
   const taskText = readRaw(spanRow.file).toString('utf8'), start = taskText.indexOf('**Register in multi-run registry**'), end = taskText.indexOf('\nThis makes the task visible', start);
   assert(start >= 0 && end > start);
   const span = Buffer.from(taskText.slice(start, end + 1));
-  assert.deepStrictEqual(spanRow.after, { bytes: span.length, sha256: hash(span) }, 'identity actual fresh-registration postimage');
+  assert.deepStrictEqual(unitEntry.retainedSpanAfter('fresh_registration', spanRow.after), { bytes: span.length, sha256: hash(span) }, 'identity actual fresh-registration postimage');
   assert(readme.includes(spanRow.before.sha256) && readme.includes(spanRow.after.sha256), 'identity documents bounded historical span delta');
   validateIdentitySamples(delta, { sampleText, sampleReadme, readRaw });
 }
@@ -1801,7 +1801,7 @@ t06('two-host-literals-main-exports-and-old-retention', () => {
   const builder = Buffer.from(lf.slice(lf.indexOf(open), lf.indexOf(close) + close.length), 'utf8');
   assert.strictEqual(count(lf, open), 1, 'one request builder');
   for (const [key, bytes] of [['fresh_registration', fresh], ['new_initialization', init], ['brief_template_lf', brief], ['request_builder_lf', builder]]) {
-    assert.deepStrictEqual({ bytes: bytes.length, sha256: hash(bytes) }, identitySpanAfter(key, T06_SPANS[key]), `frozen ${key}`);
+    assert.deepStrictEqual({ bytes: bytes.length, sha256: hash(bytes) }, unitEntry.retainedSpanAfter(key, identitySpanAfter(key, T06_SPANS[key])), `frozen ${key}`);
     assert(!bytes.toString('utf8').includes('forge:linked-task:'), `${key} carries no linked text`);
   }
   // Old literals: outside the linked blocks every declared skill/shared byte still equals the owner baseline.

@@ -125,11 +125,20 @@ function acquireSync(cwd, name, opts) {
   const ttlMs = positive(opts.ttlMs, DEFAULT_TTL_MS, 'ttl');
   const backoffMin = positive(opts.backoffMin, DEFAULT_BACKOFF_MIN, 'backoff');
   const backoffMax = positive(opts.backoffMax, DEFAULT_BACKOFF_MAX, 'backoff');
+  const acquisitionBudget = opts.acquisitionBudget;
+  if (acquisitionBudget && (!Number.isInteger(acquisitionBudget.remaining_attempts) || acquisitionBudget.remaining_attempts < 0 || !Number.isFinite(acquisitionBudget.deadline_ms))) throw new Error('forge-lock: invalid shared acquisition budget');
   const sleeper = new Int32Array(new SharedArrayBuffer(4));
   for (let attempt = 0; attempt < retries; attempt++) {
+    if (acquisitionBudget) {
+      if (acquisitionBudget.remaining_attempts === 0 || Date.now() >= acquisitionBudget.deadline_ms) break;
+      acquisitionBudget.remaining_attempts--;
+    }
     const handle = tryAcquireSync(cwd, name, { ...opts, ttlMs });
     if (handle) return handle;
-    if (attempt + 1 < retries) Atomics.wait(sleeper, 0, 0, jitter(backoffMin, backoffMax));
+    if (attempt + 1 < retries && (!acquisitionBudget || acquisitionBudget.remaining_attempts > 0)) {
+      const wait = acquisitionBudget ? Math.min(jitter(backoffMin, backoffMax), Math.max(0, acquisitionBudget.deadline_ms - Date.now())) : jitter(backoffMin, backoffMax);
+      if (wait > 0) Atomics.wait(sleeper, 0, 0, wait);
+    }
   }
   const error = new Error(`forge-lock: mutex ocupado para "${name}"`);
   error.code = 'LOCK_BUSY';

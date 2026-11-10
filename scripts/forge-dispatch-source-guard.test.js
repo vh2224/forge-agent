@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/native-effort/distribution.cjs');
+const unitEntry = require('./fixtures/owner-recovery/distribution.cjs');
 
 // Standalone acceptance suite: only Node built-ins and production modules.
 const assert = require('assert');
@@ -975,7 +975,7 @@ function validateIdentity(delta, { measure, measureAttributed, readRaw, readme, 
   const taskText = readRaw(spanRow.file).toString('utf8'), start = taskText.indexOf('**Register in multi-run registry**'), end = taskText.indexOf('\nThis makes the task visible', start);
   assert(start >= 0 && end > start);
   const span = Buffer.from(taskText.slice(start, end + 1));
-  assert.deepStrictEqual(spanRow.after, { bytes: span.length, sha256: sha256(span) }, 'identity actual fresh-registration postimage');
+  assert.deepStrictEqual(unitEntry.retainedSpanAfter('fresh_registration', spanRow.after), { bytes: span.length, sha256: sha256(span) }, 'identity actual fresh-registration postimage');
   assert(readme.includes(spanRow.before.sha256) && readme.includes(spanRow.after.sha256), 'identity documents bounded historical span delta');
   validateIdentitySamples(delta, { sampleText, sampleReadme, readRaw });
 }

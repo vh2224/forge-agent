@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('fs'),path=require('path');
-const root=path.resolve(__dirname,'..'),layer=require('./fixtures/native-effort/distribution.cjs');
+const root=path.resolve(__dirname,'..'),layer=require('./fixtures/owner-recovery/distribution.cjs');
 const artifacts=require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts;
 assert.equal(layer.validate({artifacts}),true);
 let cases=0;
@@ -106,10 +106,73 @@ console.log('PASS #381/#346 native-effort terminal: independent pins, four citat
  const review=JSON.parse(fs.readFileSync(path.join(root,'scripts/fixtures/review-policy/distribution-delta.json'))),file='skills/forge-next/SKILL.md',historic=review.files[file].after,actual=hash(fs.readFileSync(path.join(root,file)));
  assert.notStrictEqual(historic,actual);assert.strictEqual(layer.after('files',file,historic),actual);assert.strictEqual(layer.after('files',file,historic),actual);
  assert.throws(()=>layer.after('files',file,'0'.repeat(64)),'unknown historical hash remains refused');
- const guard=require(path.join(root,'scripts/forge-dispatch-source-guard.js')),current=guard.SOURCE_REGISTRY,old=layer.previousRegistry(current);assert.equal(current.length,252);assert.equal(old.length,248);
+ const guard=require(path.join(root,'scripts/forge-dispatch-source-guard.js')),current=guard.SOURCE_REGISTRY,old=layer.previousRegistry(current);assert.equal(current.length,254);assert.equal(old.length,248);
  assert.deepStrictEqual(layer.previousRegistry(current),old,'repeated projection changes neither source nor history');
  assert.throws(()=>layer.previousRegistry(current.slice(1)),'omitted current registry row');
  assert.throws(()=>layer.previousRegistry([...current,current[0]]),'extra/duplicated current registry row');
  const changed=current.map(row=>({...row}));changed[0].classification=changed[0].classification==='operational'?'excluded':'operational';assert.throws(()=>layer.previousRegistry(changed),'classification cannot self-repin');
  const metadata=structuredClone(layer.nativeEffortLayer);metadata.registry.before_rows[0].reason+=' forged';metadata.registry.before_sha256=hash(JSON.stringify(metadata.registry.before_rows));assert.throws(()=>layer.previousRegistry(current,metadata),'historical row+metadata self-repin');
+}
+
+// Owner-recovery terminal: all predecessor native-effort/378/375/367 controls remain above.
+assert(layer.ownerRecoverySources.length>0,'owner-recovery source census cannot be empty');
+let ownerRecoveryCases=0;
+const ownerRecoveryFirst=layer.ownerRecoverySources[0];
+for(const field of ['before','after','attributed_before','attributed_after']){
+ const value=structuredClone(layer.ownerRecoveryLayer);value.files[ownerRecoveryFirst][field]='0'.repeat(64);
+ assert.throws(()=>layer.validate({artifacts,ownerRecoveryLayerValue:value}));ownerRecoveryCases++;
+}
+for(const mutate of [value=>{delete value.files[ownerRecoveryFirst];},value=>{value.files.foreign=value.files[ownerRecoveryFirst];},value=>{value.provenance.base_revision='0'.repeat(40);},value=>{value.provenance.approved=true;}]){
+ const value=structuredClone(layer.ownerRecoveryLayer);mutate(value);assert.throws(()=>layer.validate({artifacts,ownerRecoveryLayerValue:value}));ownerRecoveryCases++;
+}
+{
+ const raw=fs.readFileSync(path.join(root,ownerRecoveryFirst)),foreign=Buffer.concat([raw,Buffer.from('\nforeign owner-recovery bytes\n')]);
+ const value=structuredClone(layer.ownerRecoveryLayer);value.files[ownerRecoveryFirst].after=hash(foreign);value.files[ownerRecoveryFirst].attributed_after=hash(foreign);
+ assert.throws(()=>layer.validate({artifacts,ownerRecoveryLayerValue:value,readRaw:file=>file===ownerRecoveryFirst?foreign:fs.readFileSync(path.join(root,file))}));ownerRecoveryCases++;
+}
+for(const file of ['scripts/fixtures/native-effort/distribution.cjs','scripts/fixtures/native-effort/distribution-delta.json','scripts/fixtures/native-effort/README.md']){
+ assert.throws(()=>layer.validate({artifacts,readRaw:relative=>relative===file?Buffer.from('foreign preserved native-effort bytes'):fs.readFileSync(path.join(root,relative))}));ownerRecoveryCases++;
+}
+assert([0,2,4].includes(layer.ownerRecoveryLayer.samples.nodes.length),'only actual existing changed task/next citations');
+assert.strictEqual(layer.validate({artifacts}),true);
+console.log('PASS owner-recovery terminal: exact new source, immutable history, conditional actual citation spans and '+ownerRecoveryCases+' additive negatives');
+
+// #376 bounded registration projection: immutable historical2037 postimage maps
+// only to the independently measured current span; before1803 stays historical.
+const freshRegistration376=layer.ownerRecoveryLayer.retained_spans.fresh_registration;
+assert.deepStrictEqual(Object.keys(layer.ownerRecoveryLayer.retained_spans),['fresh_registration','new_initialization']);
+assert.deepStrictEqual(layer.retainedSpanAfter('fresh_registration',freshRegistration376.before),freshRegistration376.after);
+let retained376Cases=0;
+for(const call of [
+ ()=>layer.retainedSpanAfter('foreign',freshRegistration376.before),
+ ()=>layer.retainedSpanAfter('fresh_registration',{...freshRegistration376.before,bytes:freshRegistration376.before.bytes+1}),
+ ()=>layer.retainedSpanAfter('fresh_registration',{...freshRegistration376.before,sha256:'0'.repeat(64)}),
+ ()=>layer.retainedSpanAfter('fresh_registration',{bytes:1803,sha256:'b0d14d5ba51b0096922338482ad357c77a193e5af4097616fbdc469681ee7874'})
+]){assert.throws(call);retained376Cases++;}
+for(const mutate of [value=>{value.retained_spans.foreign=structuredClone(value.retained_spans.fresh_registration);},value=>{delete value.retained_spans.fresh_registration;},value=>{value.retained_spans.fresh_registration.after={bytes:7,sha256:hash(Buffer.from('forged!'))};}]){
+ const value=structuredClone(layer.ownerRecoveryLayer);mutate(value);assert.throws(()=>layer.retainedSpanAfter('fresh_registration',freshRegistration376.before,value));retained376Cases++;
+}
+{
+ const file=freshRegistration376.file,raw=fs.readFileSync(path.join(root,file)),text=raw.toString('utf8'),a=text.indexOf('**Register in multi-run registry**'),b=text.indexOf('\nThis makes the task visible',a);assert(a>=0&&b>a);
+ const foreign=Buffer.from(text.slice(0,a)+text.slice(a,b+1).replace('Register','REGISTER')+text.slice(b+1));
+ assert.throws(()=>layer.validate({artifacts,readRaw:relative=>relative===file?foreign:fs.readFileSync(path.join(root,relative))}));retained376Cases++;
+}
+console.log('PASS #376 retained registration span: exact measured before/after and '+retained376Cases+' bounded negatives; historical identity spans remain unchanged');
+
+// #376 initialization is the only second changed bounded span. Brief/request
+// remain strict identity projections under the preexisting four-span assertion.
+const initialization376=layer.ownerRecoveryLayer.retained_spans.new_initialization;
+assert.deepStrictEqual(layer.retainedSpanAfter('new_initialization',initialization376.before),initialization376.after);
+let initialization376Cases=0;
+for(const prior of [{...initialization376.before,bytes:initialization376.before.bytes+1},{...initialization376.before,sha256:'0'.repeat(64)}]){assert.throws(()=>layer.retainedSpanAfter('new_initialization',prior));initialization376Cases++;}
+for(const mutate of [value=>{value.retained_spans.new_initialization.markers.extra=1;},value=>{value.retained_spans.new_initialization.after={bytes:7,sha256:hash(Buffer.from('forged!'))};},value=>{delete value.retained_spans.new_initialization;}]){const value=structuredClone(layer.ownerRecoveryLayer);mutate(value);assert.throws(()=>layer.retainedSpanAfter('new_initialization',initialization376.before,value));initialization376Cases++;}
+for(const key of ['brief_template_lf','request_builder_lf']){const prior=Object.freeze({bytes:1,sha256:'identity-sentinel'});assert.strictEqual(layer.retainedSpanAfter(key,prior),prior,'unchanged span expected side is not relaxed or repinned');}
+console.log('PASS #376 initialization bounded span: '+initialization376Cases+' directed negatives; brief/request projection is identity');
+
+// #376 exact full registry: current254 -> native predecessor252 -> history248.
+{
+ const rows=require(path.join(root,'scripts/forge-dispatch-source-guard.js')).SOURCE_REGISTRY;
+ assert.equal(rows.length,254);assert.equal(layer.previousRegistry(rows).length,248);
+ for(const changed of [rows.slice(1),[...rows,rows[0]],rows.map((r,i)=>i?{...r}:{...r,classification:'foreign'})])assert.throws(()=>layer.previousRegistry(changed));
+ for(const mutate of [v=>{v.registry.after_rows[0].classification='foreign';v.registry.after_sha256=hash(JSON.stringify(v.registry.after_rows));},v=>{v.registry.before_rows[0].reason+=' forged';v.registry.before_sha256=hash(JSON.stringify(v.registry.before_rows));},v=>{v.registry.foreign=true;}]){const value=structuredClone(layer.ownerRecoveryLayer);mutate(value);assert.throws(()=>layer.previousRegistry(rows,value));}
 }

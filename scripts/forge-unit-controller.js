@@ -312,8 +312,14 @@ function readRecordJson(file) {
   }
 }
 const ownerActivityLocks = new Map();
-function withMutex(cwd, name, fn) {
-  const handle = forgeLock.acquireProcessSync(cwd, name, { retries: 80, ttlMs: 10_000 });
+function withMutex(...args) {
+  // One existing acquisition budget covers fence first, then controller mutex.
+  // 80 attempts and 79*300ms is the previous controller's backoff upper bound.
+  const budget = { remaining_attempts: 80, deadline_ms: Date.now() + 79 * 300 };
+  return require('./forge-owner-transport-window').withMutation(args[0], (_guard, sharedBudget) => withMutexInsideOwnerWindow(...args, sharedBudget), budget);
+}
+function withMutexInsideOwnerWindow(cwd, name, fn, acquisitionBudget) {
+  const handle = forgeLock.acquireProcessSync(cwd, name, { retries: 80, ttlMs: 10_000, ...(acquisitionBudget ? { acquisitionBudget } : {}) });
   const ownerBoundary = name === 'unit-controller-transactions', key = path.resolve(cwd);
   if (ownerBoundary) ownerActivityLocks.set(key, handle);
   try { return fn(handle); }
