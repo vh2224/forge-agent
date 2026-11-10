@@ -197,3 +197,52 @@ de política fora do escopo desta slice.
 Este documento não muda rotas, política de sandbox, `shared/forge-dispatch.md`
 nem preferências globais de modelo ou permissão. Também não declara aceite
 humano. A aparência e a compreensão na interface ficam para o UAT final.
+
+
+### FULL em working copies SVN
+
+O guard mantém a mesma API e as permissões exatas de FULL. Cada raiz física
+de código SVN deve ser a raiz real da WC; subdiretórios, externals, links,
+evidência incompleta/instável e limites excedidos recusam a captura. O ramo
+Git e baselines Git anteriores conservam índice, refs, stash, config local e
+hooks. SVN usa captureDirty strict validado: BASE/UUID/URL/revisões/depth,
+scheduling/status, conteúdo inclusive ignorados e propriedades. Acrescenta
+modes observáveis pelo Node e digest limitado dos bytes/modes de .svn.
+
+A comparação de código projeta apenas .gsd; FULL continua comparando o owner
+e suas permissões append/publication/heartbeat já declaradas. Alterações de
+scheduling ou administração SVN não são permissões de publicação do owner.
+Configuração/autenticação global do cliente SVN não é capturada, assim como o
+ramo Git não captura configuração global; não é prova de isolamento do SO.
+Nenhum dado de .svn é publicado no resultado, somente fingerprints/paths.
+
+A leitura SVN reutiliza SVN_STRICT_POLICY: 512 MiB por arquivo, 8 GiB
+agregados por árvore de conteúdo/administração e profundidade 128. Não
+carrega wc.db inteiro: os bytes administrativos são resumidos em blocos de
+64 KiB, com identidade física/tamanho/tempos conferidos antes e depois da
+leitura, recusa de links e duas observações completas estáveis. O inventário
+continua limitado a 20000 entradas e sua evidência a 16 MiB; os comandos
+SVN conservam o limite de saída de 16 MiB. Git/hooks, controles do owner e
+timeouts não mudam. Isso substitui o limite novo de 1 MiB da proposta SVN,
+que recusava wc.db legítimos de 2,5–9,3 MB. Uma WC pode continuar unavailable
+por tamanho, instabilidade, links ou evidência incompleta; indisponibilidade
+nunca equivale a aprovação ou code-only.
+Em Windows, mode significa apenas o que fs.stat observa; ACLs e modos POSIX
+não observáveis não ficam provados. Escritas revertidas/transientes, rede e
+escritores concorrentes continuam fora da garantia após a unidade.
+
+
+### Alias legado da própria run em FULL
+
+Com ownRun explícito, o guard permite também o heartbeat do alias auto-mode
+somente quando um census limitado e legível comprova que essa run é a única
+mais antiga ativa e o arquivo é exatamente a projeção produzida por
+forge-runs. O relógio deve coincidir com a própria run e avançar; a identidade
+e todos os demais campos continuam vinculados. A projeção e a seleção são as
+mesmas funções puras usadas pelo produtor canônico, sem regra paralela.
+
+Alias ausente/malformado/não canônico, registry ilegível/ambíguo, relógio
+estrangeiro, troca de owner/active/worker/claim ou edição arbitrária não
+adquirem permissão. Se não for possível comprovar o alias, ele permanece
+owner-control integral. A regra não migra registros nem relaxa baselines
+históricas que não capturaram essa prova, e vale igualmente para Git e SVN.

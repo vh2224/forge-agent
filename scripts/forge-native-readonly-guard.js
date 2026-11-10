@@ -8,6 +8,7 @@ const roots = require('./forge-code-roots');
 const vcs = require('./forge-vcs');
 const execution = require('./forge-task-execution');
 const lease = require('./forge-unit-lease');
+const runs = require('./forge-runs');
 const { sha256, fingerprint, resolveSafeFile } = require('./forge-delivery');
 const { readBoundedStableFile } = require('./forge-autonomy-sources');
 
@@ -24,7 +25,7 @@ const ATTESTATION = '--writer-stopped é atestado do chamador, não prova de pro
 const LIMITS = Object.freeze([
   'Detecção depois da unidade, não sandbox do SO; nunca reverte, apaga ou corrige arquivos.',
   'Não ficam provados caminhos ignorados, escritas fora das raízes guardadas, mudança criada e revertida dentro da janela, efeitos de rede e escritores alheios concorrentes no mesmo owner.',
-  'Leitura limitada a 20000 entradas por árvore; arquivos de código/hooks e registros próprios a 1 MiB, append e baseline a 16 MiB; indisponibilidade falha fechada.',
+  'Leitura limitada a 20000 entradas por árvore; arquivos Git/hooks e registros próprios a 1 MiB, append/baseline a 16 MiB; SVN usa a política strict canônica e blocos de 64 KiB; indisponibilidade falha fechada.',
   'Captura recusa índices com assume-unchanged, skip-worktree ou outros estados que ocultam caminhos; o chamador não deve iniciar a unidade nessa condição.',
 ]);
 function fail(detail, usage = false) { throw Object.assign(new Error(detail), { guardDetail: detail, usage }); }
@@ -148,7 +149,99 @@ function hooksDigest(directoryPath) {
   visit(directoryPath, '.');
   return fingerprint(rows);
 }
+// SVN administration can contain a multi-megabyte wc.db. Reuse the canonical
+// strict SVN byte/depth policy, without buffering database contents. This is
+// separate from the historical Git hooks reader and owner-control byte limits.
+function svnAdminDigest(directoryPath) {
+  const policy = vcs.SVN_STRICT_POLICY;
+  const buffer = Buffer.allocUnsafe(64 * 1024), rows = [];
+  let total = 0, manifestBytes = 2;
+  function stable(left, right) {
+    return ['dev', 'ino', 'mode', 'size', 'birthtimeNs', 'mtimeNs', 'ctimeNs']
+      .every(key => left[key] === right[key]);
+  }
+  function observe(file) {
+    noLinks(file);
+    const stat = fs.lstatSync(file, { bigint: true });
+    if (stat.isSymbolicLink() || !stat.isDirectory() && !stat.isFile()) fail('tipo administrativo SVN indisponivel');
+    return stat;
+  }
+  function append(row) {
+    manifestBytes += Buffer.byteLength(JSON.stringify(row)) + 1;
+    if (rows.length >= MAX_ENTRIES || manifestBytes > SNAPSHOT_BYTES) fail('inventario administrativo SVN excedido');
+    rows.push(row);
+  }
+  function names(file) {
+    noLinks(file);
+    const listed = [], directory = fs.opendirSync(file);
+    try {
+      let entry;
+      while ((entry = directory.readSync()) !== null) {
+        if (listed.length >= MAX_ENTRIES) fail('inventario administrativo SVN excedido');
+        listed.push(entry.name);
+      }
+    } finally { directory.closeSync(); }
+    noLinks(file);
+    return listed.sort();
+  }
+  function visit(file, rel, depth) {
+    if (depth > policy.maxDepth) fail('profundidade administrativa SVN excedida');
+    const before = observe(file);
+    if (before.isDirectory()) {
+      append([rel, 'directory', Number(before.mode)]);
+      const children = names(file);
+      if (!stable(before, observe(file))) fail('administracao SVN instavel');
+      for (const name of children) visit(path.join(file, name), rel + '/' + name, depth + 1);
+      if (JSON.stringify(children) !== JSON.stringify(names(file)) || !stable(before, observe(file))) fail('administracao SVN instavel');
+      return;
+    }
+    if (before.size > BigInt(policy.maxFileBytes) || before.size > BigInt(policy.maxTotalBytes - total)) fail('bytes administrativos SVN excedidos');
+    const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+    const digest = require('crypto').createHash('sha256');
+    let readBytes = 0;
+    try {
+      // Recheck the opened physical identity before reading even the first byte.
+      if (!stable(before, fs.fstatSync(fd, { bigint: true })) || !stable(before, observe(file))) fail('administracao SVN instavel');
+      let count;
+      while ((count = fs.readSync(fd, buffer, 0, buffer.length, null)) !== 0) {
+        readBytes += count;
+        if (readBytes > policy.maxFileBytes || readBytes > Number(before.size) || total + readBytes > policy.maxTotalBytes) fail('bytes administrativos SVN excedidos');
+        digest.update(buffer.subarray(0, count));
+      }
+      if (readBytes !== Number(before.size) || !stable(before, fs.fstatSync(fd, { bigint: true })) || !stable(before, observe(file))) fail('administracao SVN instavel');
+    } finally { fs.closeSync(fd); }
+    total += readBytes;
+    append([rel, Number(before.mode), readBytes, digest.digest('hex')]);
+  }
+  visit(directoryPath, '.', 0);
+  return fingerprint({ format: 'svn-admin-stream-v1', entries: rows });
+}
+// SVN has no Git index/refs/hooks. Retain its canonical local BASE and
+// complete status/content/property evidence, plus bounded administrative bytes
+// and observable modes. Owner .gsd permissions remain in the FULL owner layer.
+function svnCodeSnapshot(root) {
+  const snapshot = vcs.captureDirty(root.path, { vcs: 'svn', strict: true,
+    maxBuffer: SNAPSHOT_BYTES, strictLimits: { maxEntries: MAX_ENTRIES } });
+  if (!vcs.validateSvnStrictSnapshot(snapshot)
+      || snapshot.coverage.scope !== 'all-local-descendants'
+      || snapshot.baseline.inventory.some(row => roots.key(row.wc_root) !== roots.key(root.path))) fail('snapshot SVN integral indisponível');
+  const entries = snapshot.entries.filter(row => !excluded(row.path)).map(row => {
+    if (row.path) relative(row.path);
+    const file = path.join(root.path, row.path); noLinks(file, true);
+    let mode = null;
+    try { mode = fs.lstatSync(file).mode; }
+    catch (error) { if (error.code !== 'ENOENT' || row.kind !== 'missing') throw error; }
+    if (row.kind === 'link' || (row.kind === 'missing') !== (mode === null)) fail('tipo SVN indisponível');
+    return { ...row, mode };
+  });
+  return { ...root, vcs: 'svn', base: snapshot.baseline.fingerprint,
+    scheduling: fingerprint(snapshot.baseline.local_nodes), entries,
+    // Read-only SVN commands must leave the administrative tree stable too.
+    // Stream with the canonical strict SVN policy and verify physical stability.
+    admin: svnAdminDigest(path.join(root.path, '.svn')) };
+}
 function codeSnapshot(root, verifying) {
+  if (vcs.detectVcs(root.path) === 'svn') return svnCodeSnapshot(root);
   const options = { vcs: 'git', maxBuffer: SNAPSHOT_BYTES, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' }, exclude: excluded };
   const head = vcs.baselineId(root.path, options), status = vcs.workingStatus(root.path, options), dirty = vcs.captureDirty(root.path, options);
   if (!head.ok || !status.ok || !dirty.ok || !/^[a-f0-9]{40,64}$/.test(head.id)) fail('VCS ou código porcelain indisponível');
@@ -205,6 +298,28 @@ function recordPreimage(owner, rel, kind, unit) {
   return { path: rel, kind, file_sha256: sha256(buffer), invariant_sha256: fingerprint(Object.fromEntries(Object.entries(parsed).filter(([key]) => !clocks.includes(key)))),
     clocks: Object.fromEntries(clocks.map(key => [key, parsed[key]])) };
 }
+// A legacy alias is not a run identity. Permit its clock only when the
+// bounded registry proves the own run is the unique oldest active record,
+// and the alias bytes are exactly what the canonical producer would write.
+function ownRunAliasPreimage(owner, id) {
+  const census = runs.boundedCensus(owner);
+  if (census.unparseable.length || census.parsed.some(row => !row || Array.isArray(row)
+      || typeof row.id !== 'string' || typeof row.active !== 'boolean'
+      || !Number.isFinite(row.started_at) || !Number.isFinite(row.last_heartbeat))
+      || new Set(census.parsed.map(row => row.id)).size !== census.parsed.length) return null;
+  const oldest = runs.oldestActiveRecord(census.parsed);
+  if (!oldest || oldest.id !== id
+      || census.parsed.filter(row => row.active && row.started_at === oldest.started_at).length !== 1) return null;
+  const rel = '.gsd/forge/auto-mode.json';
+  try {
+    const buffer = bytes(ownerFile(owner, rel));
+    const projection = runs.legacyAliasProjection(oldest);
+    if (sha256(buffer) !== sha256(Buffer.from(JSON.stringify(projection, null, 2)))) return null;
+    const { last_heartbeat, ...immutable } = projection;
+    return { path: rel, kind: 'run-alias-heartbeat', file_sha256: sha256(buffer),
+      invariant_sha256: fingerprint({ run_id: id, projection: immutable }), clocks: { last_heartbeat } };
+  } catch { return null; }
+}
 function snapshot(settings, verifying = false) {
   const codeRoots = settings.codeRoots.map(root => codeSnapshot(root, verifying));
   if (settings.mode === 'code-only') return { code_roots: codeRoots, owner_snapshot: null, appends: [], owner_records: [] };
@@ -222,6 +337,10 @@ function snapshot(settings, verifying = false) {
   if (settings.permissions.own_lease !== null) ownRecord(
     path.relative(settings.owner, lease.leaseFile(settings.owner, settings.permissions.own_lease)).replace(/\\/g, '/'), 'lease-heartbeat', settings.permissions.own_lease);
   if (settings.permissions.own_run !== null) ownRecord(`.gsd/forge/runs/${settings.permissions.own_run}.json`, 'run-heartbeat', settings.permissions.own_run);
+  if (settings.permissions.own_run !== null) {
+    const alias = ownRunAliasPreimage(settings.owner, settings.permissions.own_run);
+    if (alias) records.push(alias);
+  }
   return { code_roots: codeRoots, owner_snapshot: ownerSnapshot, appends, owner_records: records };
 }
 function stableSnapshot(settings, verifying = false) {
@@ -251,6 +370,24 @@ function compare(baseline, current, settings) {
   const add = (list, root, rel, kind) => { count++; if (list.length < 100) list.push({ root, path: rel, kind }); };
   for (let index = 0; index < baseline.code_roots.length; index++) {
     const before = baseline.code_roots[index], after = current.code_roots[index];
+    if ((before.vcs || 'git') !== (after.vcs || 'git')) {
+      add(changes, before.root, '.', 'vcs'); continue;
+    }
+    if (before.vcs === 'svn') {
+      for (const [field, kind, rel] of [['base', 'base', '.svn/wc.db'], ['scheduling', 'status', '.svn/wc.db'], ['admin', 'administration', '.svn']]) {
+        if (before[field] !== after[field]) add(changes, before.root, rel, kind);
+      }
+      const oldRows = new Map(before.entries.map(row => [row.path, row]));
+      const newRows = new Map(after.entries.map(row => [row.path, row]));
+      for (const rel of new Set([...oldRows.keys(), ...newRows.keys()])) {
+        const oldRow = oldRows.get(rel), newRow = newRows.get(rel);
+        if (fingerprint(oldRow || null) === fingerprint(newRow || null)) continue;
+        const kind = !newRow || newRow.kind === 'missing' ? 'deleted' : !oldRow || oldRow.kind === 'missing' ? 'added'
+          : oldRow.mode !== newRow.mode ? 'mode' : oldRow.properties_hash !== newRow.properties_hash ? 'properties' : 'modified';
+        add(changes, before.root, rel || '.', kind);
+      }
+      continue;
+    }
     for (const [field, kind, rel] of [['head', 'head', '.git/HEAD'], ['head_ref', 'head', '.git/HEAD'], ['refs', 'ref', '.git/refs'], ['stash', 'stash', '.git/logs/refs/stash'], ['config', 'config', '.git/config'], ['hooks', 'hooks', '.git/hooks'], ['index', 'index', '.git/index']]) {
       if (before[field] !== after[field]) add(changes, before.root, rel, kind);
     }
