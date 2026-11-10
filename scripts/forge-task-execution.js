@@ -200,7 +200,8 @@ function prepare(r, root, cwd) {
     roots.claimGroups(claim);
     if (!member && held.batch_locator) fail('execution-member-handle-required');
     if (!member && (roots.digest(claim.execution_contract) !== roots.digest(contract)
-        || claims.some(p => !claim.paths.some(c => roots.covers(c, p))))) fail('execution-held-claim-mismatch');
+        || claims.some(p => !claim.paths.some(c => roots.covers(c, p))))
+        && !require('./forge-write-claim').coversRetainedExecution(held, contract, claims)) fail('execution-held-claim-mismatch');
     const capability = require('./forge-transport-capabilities').executionCapability(r.route, contract, { nativeInvocation: r.nativeInvocation });
     if (!capability.supported) fail(capability.reason_code);
     if (r.plan_contract && (r.plan_contract.plan_sha256 !== (member ? member.runtime_view.canonical_plan_sha256 : validated.plan_sha256)

@@ -928,14 +928,25 @@ function validateTaskDeclarations(content, options) {
   if (!options || options.requireExplicit !== true) {
     throw new TypeError('validateTaskDeclarations requires { taskId, requireExplicit: true }');
   }
-  const taskId = options.taskId, errors = [];
+  return taskDeclarations(content, options.taskId, false);
+}
+// Historical observation only: preserve each known declaration independently.
+// This cannot admit a new task: validateTaskDeclarations remains strictly explicit.
+// Genuine missing fields are null; a wholly unknown historical declaration stays null.
+function readHistoricalTaskDeclarations(content, taskId) {
+  return taskDeclarations(content, taskId, true);
+}
+function taskDeclarations(content, taskId, historical) {
+  const errors = [];
   if (typeof taskId !== 'string' || !TASK_ID.test(taskId)) errors.push(['plan-declaration-task-id-invalid', String(taskId)]);
   const fm = typeof content === 'string' ? extractFrontmatter(content) : null;
   const decoded = {};
   for (const key of ['depends', 'writes']) {
     const read = fm === null ? declarationResult(key, 'absent') : decodeDeclarationList(fm, key);
     decoded[key] = read;
-    if (read.status === 'absent') errors.push([`plan-declaration-${key}-missing`, fm === null ? 'frontmatter-missing' : 'key-absent']);
+    if (read.status === 'absent') {
+      if (!historical) errors.push([`plan-declaration-${key}-missing`, fm === null ? 'frontmatter-missing' : 'key-absent']);
+    }
     else if (read.status === 'invalid') errors.push([`plan-declaration-${key}-invalid`, `${read.error} (frontmatter line ${read.line})`]);
     else if (read.status === 'empty') errors.push([`plan-declaration-${key}-invalid`, `declaration-empty-value (frontmatter line ${read.line}; declare [] explicitly)`]);
     else if (read.diagnostics.length) {
@@ -973,10 +984,11 @@ function validateTaskDeclarations(content, options) {
     throw declarationError(code, detail, { task_id: typeof taskId === 'string' ? taskId : null,
       errors: errors.map(([name, why]) => ({ code: name, detail: why })) });
   }
+  if (historical && decoded.depends.status === 'absent' && decoded.writes.status === 'absent') return null;
   const roots = parseArrayKey(fm, 'code_roots');
   const declarations = {
-    depends: [...decoded.depends.items],
-    writes,
+    depends: decoded.depends.status === 'absent' ? null : [...decoded.depends.items],
+    writes: decoded.writes.status === 'absent' ? null : writes,
     roots_schema: declarationScalarValue(extractTopLevelValue(fm, 'roots_schema')),
     primary_root_id: declarationScalarValue(extractTopLevelValue(fm, 'primary_root_id')),
     declared_roots: Array.isArray(roots) ? roots.map(root => ({
@@ -1034,7 +1046,7 @@ function parseExecutionFields(content) {
 }
 
 module.exports = { hasStructuredMustHaves, parseMustHaves, parseMustHavesStructure, parseExecutionFields, parseExecutionDeclaration, resolveCapability, stripInlineComment,
-  extractFrontmatter, decodeDeclarationList, validateTaskDeclarations };
+  extractFrontmatter, decodeDeclarationList, validateTaskDeclarations, readHistoricalTaskDeclarations };
 
 // ── CLI entrypoint ────────────────────────────────────────────────────────────
 

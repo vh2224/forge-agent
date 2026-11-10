@@ -840,6 +840,54 @@ test('issue343 U2a-2 a crash after the member worktree or after its materializat
   assert.deepStrictEqual(states(dir, ids), ['admitido', 'admitido']);
 });
 
+test('issue343 member dependencies are provisioned canonically before verification and are not installed again on replay', () => {
+  for (const enabled of [true, false]) {
+    const dir = owner(`member-deps-${enabled}`, { prefs: () => ({ forge_isolation: { worktree_install_deps: enabled } }) });
+    write(at(dir, '.gitignore'), 'node_modules/\n');
+    write(at(dir, 'package.json'), JSON.stringify({ name: 'fixture', private: true, dependencies: { 'fixture-dep': '1.0.0' } }));
+    write(at(dir, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3 }));
+    git(dir, ['add', '--', '.gitignore', 'package.json', 'package-lock.json']);
+    git(dir, [...COMMIT, 'dependency fixture']);
+    const ids = cohort(dir), scope = scopeOf(dir, ids, `deps-${enabled}`), calls = [];
+    const dependencyRunner = (cmd, args, options) => {
+      calls.push({ cmd, args, cwd: options.cwd, timeout: options.timeoutMs });
+      write(at(options.cwd, 'node_modules/fixture-dep/index.js'), 'module.exports = 17;\n');
+      return { status: 0 };
+    };
+    const checkpoints = [];
+    const prepared = batch.prepareIsolation(scope, { dependencyRunner, leaseCheckpoint: row => checkpoints.push(row) });
+    assert.strictEqual(prepared.status, 'prepared');
+    assert.strictEqual(calls.length, enabled ? 2 : 0);
+    assert.deepStrictEqual(checkpoints.filter(row => row.stage === 'before-install').map(row => row.required_ms),
+      enabled ? [isolation.WORKTREE_INSTALL_TIMEOUT_MS, isolation.WORKTREE_INSTALL_TIMEOUT_MS] : [0, 0]);
+    for (const member of prepared.members) {
+      const root = member.roots[0].path;
+      if (enabled) assert.strictEqual(require(require.resolve('fixture-dep', { paths: [root] })), 17);
+      else assert(!fs.existsSync(at(root, 'node_modules')));
+    }
+    for (const call of calls) {
+      assert.deepStrictEqual(call.args, ['ci']);
+      assert.strictEqual(call.timeout, isolation.WORKTREE_INSTALL_TIMEOUT_MS);
+    }
+    assert.strictEqual(batch.prepareIsolation(scope, { dependencyRunner }).status, 'prepared');
+    assert.strictEqual(calls.length, enabled ? 2 : 0, 'a verified member replays its provisioning evidence');
+  }
+});
+
+test('issue343 dependency lifecycle drift cannot publish a verified member or change the integration target', () => {
+  const dir = owner('dependency-drift');
+  write(at(dir, '.gitignore'), 'node_modules/\n');
+  write(at(dir, 'package.json'), '{"name":"fixture","private":true}\n');
+  write(at(dir, 'package-lock.json'), '{"lockfileVersion":3}\n');
+  git(dir, ['add', '--', '.gitignore', 'package.json', 'package-lock.json']);
+  git(dir, [...COMMIT, 'dependency drift fixture']);
+  const before = fs.readFileSync(at(dir, 'src/keep.js')), ids = cohort(dir), scope = scopeOf(dir, ids, 'dependency-drift');
+  assert.throws(() => batch.prepareIsolation(scope, { dependencyRunner(_cmd, _args, options) {
+    write(at(options.cwd, 'src/keep.js'), 'installer altered source\n'); return { status: 0 };
+  } }), error => error.code === 'batch-member-verification-failed');
+  assert(fs.readFileSync(at(dir, 'src/keep.js')).equals(before));
+});
+
 // ── U2b: real reservations, opaque execution handles and physical consumers ──
 
 // The fixture is the live owner between synchronous lower-level API calls.

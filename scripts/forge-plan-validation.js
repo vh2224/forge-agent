@@ -293,9 +293,15 @@ function knownDeclarations(task) {
   try { return { declarations: must().validateTaskDeclarations(task.content, { taskId: task.id, requireExplicit: true }), legacy: false }; }
   catch (error) {
     const errors = error && Array.isArray(error.errors) ? error.errors : [];
-    if (errors.length && errors.every(entry => entry && LEGACY_ABSENCE.includes(entry.code))) return { declarations: null, legacy: true };
+    if (errors.length && errors.every(entry => entry && LEGACY_ABSENCE.includes(entry.code))) {
+      return { declarations: must().readHistoricalTaskDeclarations(task.content, task.id), legacy: true };
+    }
     return refuse('plan-known-invalid', `${task.id}: ${error && error.code ? error.code : 'unreadable declarations'}`, { task_id: task.id });
   }
+}
+function declarationRow(id, entry) {
+  return entry ? { id, depends: entry.depends === null ? null : [...entry.depends], writes: copy(entry.writes) }
+    : { id, depends: null, writes: null };
 }
 
 // ── Pure admission ────────────────────────────────────────────────────────────
@@ -366,7 +372,7 @@ function validateNewSlicePlan(candidate, scope) {
   // 4. The pure task graph over the canonical S-plan set.
   const rows = listed.map(id => {
     const entry = declarations.get(id);
-    return entry ? { id, depends: [...entry.depends], writes: copy(entry.writes) } : { id, depends: null, writes: null };
+    return declarationRow(id, entry);
   });
   const dag = parallel().validateTaskDag(rows, { scopeTaskIds: [...listed], legacyPolicy: addition ? 'sequential' : 'refuse' });
   if (dag.status === 'invalid' || (!addition && dag.status !== 'valid')) {
@@ -528,21 +534,23 @@ function declarationDigestOf(entry) {
   return sha256(JSON.stringify({
     schema: 'forge-task-declarations-v1',
     depends: entry.depends,
-    writes: entry.writes.map(item => (typeof item === 'string' ? item : { root_id: item.root_id, path: item.path })),
+    writes: entry.writes === null ? null : entry.writes.map(item => (typeof item === 'string' ? item : { root_id: item.root_id, path: item.path })),
     roots_schema: entry.roots_schema,
     primary_root_id: entry.primary_root_id,
     declared_roots: entry.declared_roots === null ? null : entry.declared_roots.map(root => ({ id: root.id, path: root.path, vcs: root.vcs })),
   }));
 }
-function checkDeclaration(entry, id, code) {
+function checkDeclaration(entry, id, code, historical = false) {
   const label = `declarations[${id}]`;
   if (!isObject(entry)) refuse(code, `${label} must be an explicit declaration`);
   exactKeys(entry, DECLARATION_KEYS, code, label);
   if (entry.task_id !== id) refuse(code, `${label}.task_id must be ${id}`);
-  if (!Array.isArray(entry.depends) || entry.depends.some(item => !taskId(item)) || new Set(entry.depends).size !== entry.depends.length) {
+  if (!(historical && entry.depends === null) && (!Array.isArray(entry.depends)
+      || entry.depends.some(item => !taskId(item)) || new Set(entry.depends).size !== entry.depends.length)) {
     refuse(code, `${label}.depends invalid`);
   }
-  if (!Array.isArray(entry.writes) || entry.writes.some(item => !admittedWrite(item))) refuse(code, `${label}.writes invalid`);
+  if (!(historical && entry.writes === null) && (!Array.isArray(entry.writes) || entry.writes.some(item => !admittedWrite(item)))) refuse(code, `${label}.writes invalid`);
+  if (entry.depends === null && entry.writes === null) refuse(code, `${label} must preserve the original null historical representation`);
   for (const key of ['roots_schema', 'primary_root_id']) {
     if (entry[key] !== null && typeof entry[key] !== 'string') refuse(code, `${label}.${key} invalid`);
   }
@@ -1302,7 +1310,7 @@ function verifyAdmissionRecord(record, intent, label) {
   evidence.declarations.forEach((entry, index) => {
     if (entry === null) {
       if (!legacyAllowed || added.includes(ids[index])) invalidChain(`${label} declarations[${ids[index]}] must be explicit`);
-    } else checkDeclaration(entry, ids[index], code);
+    } else checkDeclaration(entry, ids[index], code, legacyAllowed && !added.includes(ids[index]));
   });
   if (complete) {
     if (ids.length !== added.length) invalidChain(`${label} a new slice is entirely new`);
@@ -1316,7 +1324,7 @@ function verifyAdmissionRecord(record, intent, label) {
   }
   const rows = ids.map((id, index) => {
     const entry = evidence.declarations[index];
-    return entry ? { id, depends: [...entry.depends], writes: copy(entry.writes) } : { id, depends: null, writes: null };
+    return declarationRow(id, entry);
   });
   const dag = parallel().validateTaskDag(rows, { scopeTaskIds: [...ids], legacyPolicy: legacyAllowed ? 'sequential' : 'refuse' });
   if (dag.status === 'invalid' || dag.status !== evidence.graph_status || digestOf(dag.edges) !== digestOf(evidence.edges)
@@ -1508,8 +1516,7 @@ function inspectKnownPlan(collected, scope) {
   const listed = planList(known.slicePlan.content, 'known slice plan');
   if (listed.length !== known.tasks.size || listed.some(id => !known.tasks.has(id))) refuse('plan-known-invalid', 'known slice plan list does not match its task plans');
   const declarations = listed.map(id => knownDeclarations(known.tasks.get(id)).declarations);
-  const rows = listed.map((id, index) => (declarations[index]
-    ? { id, depends: [...declarations[index].depends], writes: copy(declarations[index].writes) } : { id, depends: null, writes: null }));
+  const rows = listed.map((id, index) => declarationRow(id, declarations[index]));
   const dag = parallel().validateTaskDag(rows, { scopeTaskIds: [...listed], legacyPolicy: 'sequential' });
   if (dag.status === 'invalid') {
     refuse('plan-known-invalid', `the known graph is invalid: ${dag.diagnostics.slice(0, 5).join(', ')}`, { diagnostics: [...dag.diagnostics] });

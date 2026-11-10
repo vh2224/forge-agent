@@ -442,6 +442,22 @@ test('issue343 U0e-3 add-slice needs a fully valid graph and decompose keeps the
 
 // ── U0e-4 ─────────────────────────────────────────────────────────────────────
 
+test('issue343 historical dependencies survive owner add-task intent, admission and fresh-process replay', () => {
+  const dir = owner('historical-depends');
+  const original = { T01: taskPlan('T01', { writes: null }),
+    T02: taskPlan('T02', { depends: 'depends: [T01]', writes: null }) };
+  writePlan(dir, original);
+  const intent = ok(begin(dir, 'add-task', ['T03']), 'partial known begin').mutation;
+  writeSlice(dir, slicePlan(['T01', 'T02', 'T03']));
+  writeTask(dir, 'T03', taskPlan('T03', { depends: 'depends: [T02]' }));
+  const first = ok(finish(dir, intent.mutation_ref), 'partial known finish').admission;
+  assert.strictEqual(first.graph_status, 'legacy');
+  const replay = ok(finish(dir, intent.mutation_ref), 'partial known replay').admission;
+  assert.strictEqual(replay.semantic_sha256, first.semantic_sha256);
+  assert.strictEqual(ok(check(dir), 'partial known readmission').readiness.status, 'unenrolled');
+  for (const [id, bytes] of Object.entries(original)) assert.strictEqual(fs.readFileSync(taskFile(dir, id), 'utf8'), bytes);
+});
+
 test('issue343 U0e-4 legacy mixed slice: strict new subset, sequential slice, no backfill', () => {
   // A genuine historical slice: no controller generation, two tasks without declarations
   // (one without any frontmatter) and one explicit task.

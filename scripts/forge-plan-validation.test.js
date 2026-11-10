@@ -970,6 +970,38 @@ test('issue343 U0b additions admit only the strict altered subset and check refe
     { ...scopeFor(malformedRoot), known: collect(malformedRoot) }), 'plan-known-invalid', 'a malformed known declaration');
 });
 
+test('issue343 historical missing writes preserves every known dependency and missing depends preserves writes', () => {
+  const add = (knownRoot) => pv.validateNewSlicePlan({ slice_plan: { content: slicePlan(['T01', 'T02', 'T03']) },
+    task_plans: [{ id: 'T03', content: taskPlan('T03', { depends: ['depends: [T02]'] }) }] },
+  { ...scopeFor(knownRoot), known: collect(knownRoot) });
+  const root = published('partial-known', candidate(['T01', 'T02'], {
+    T01: { writes: null }, T02: { depends: ['depends: [T01]'], writes: null },
+  }));
+  const admitted = add(root);
+  assert.strictEqual(admitted.graph_status, 'legacy');
+  assert.deepStrictEqual(admitted.declarations[1].depends, ['T01']);
+  assert.strictEqual(admitted.declarations[1].writes, null);
+  for (const [label, first, second] of [
+    ['cycle', 'depends: [T02]', 'depends: [T01]'],
+    ['self', 'depends: [T01]', 'depends: []'],
+    ['unknown', 'depends: [T09]', 'depends: []'],
+  ]) {
+    const invalid = published(`partial-${label}`, candidate(['T01', 'T02'], {
+      T01: { depends: [first], writes: null }, T02: { depends: [second], writes: null },
+    }));
+    refuses(() => add(invalid), 'plan-dag-invalid', label);
+  }
+  const missingDepends = published('known-writes', candidate(['T01', 'T02'], {
+    T01: { depends: null }, T02: { depends: ['depends: [T01]'] },
+  }));
+  const before = add(missingDepends);
+  assert.strictEqual(before.declarations[0].depends, null);
+  assert.deepStrictEqual(before.declarations[0].writes, ['src/t01.js']);
+  fs.writeFileSync(taskFile(missingDepends, 'T01'), taskPlan('T01', { depends: null,
+    writes: ['writes:', '  - "src/changed.js"'] }));
+  assert.notStrictEqual(add(missingDepends).semantic_sha256, before.semantic_sha256);
+});
+
 test('issue343 U0b plan_generation and plan_validation records are exact, bound and verified by recomputation', () => {
   const root = published('records');
   const scope = scopeFor(root);

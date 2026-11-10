@@ -526,18 +526,28 @@ function timeVerdict(scope, unit, key, options) {
 // Roots still protected by members of other batches that never reached ack or bloqueado.
 // Anything unreadable exhausts the budget (fail closed).
 function retainedRoots(owner, current) {
+  const census = require('./forge-runs').boundedCensus(owner.real);
+  if (census.unparseable.length) return ROOTS_LIMIT;
+  const historical = new Set();
+  try {
+    for (const run of census.parsed) for (const retirement of run.batch_retirements || []) {
+      require('./forge-runs').validateBatchRetirements(run.batch_retirements, run.id);
+      if (retirement.locator.batch_id !== current) for (const root of retirement.retained_roots) historical.add(codeRoots().key(root.path));
+    }
+  } catch { return ROOTS_LIMIT; }
   const found = directoryAt(owner.real, BATCH_SEGMENTS);
-  if (found.status === 'missing') return 0;
+  if (found.status === 'missing') return historical.size ? ROOTS_LIMIT : 0;
   if (found.status !== 'ok') return ROOTS_LIMIT;
   let names;
   try { names = fs.readdirSync(found.dir).filter(name => BATCH_ID.test(name) && name !== current).sort(); }
   catch (_) { return ROOTS_LIMIT; }
   if (names.length > MAX_RETAINED_BATCHES) return ROOTS_LIMIT;
-  let total = 0;
+  let total = historical.size;
   for (const name of names) {
     try {
       const manifest = readManifestAt(owner, name);
       if (!manifest) continue;
+      if (census.parsed.some(run => run.batch_retirements?.some(row => row.locator.batch_id === name))) continue;
       for (const row of progressOf(owner, manifest)) {
         if (row.state !== 'ack' && row.state !== 'bloqueado') total += manifest.members[row.index].roots.length;
       }
@@ -1005,14 +1015,49 @@ function baseInputProvenance(scope, owner, manifest, admission, contract) {
 }
 
 function prepareIsolation(scope, options = {}) {
+  return autoGateContext(options, () => prepareIsolationWithGate(scope, options));
+}
+function prepareIsolationWithGate(scope, options) {
   // Lock order is shared with controller admission and run ownership transfer.
   return controller().withOwnerBoundary(scope.cwd, () => require('./forge-runs').withRegistryFence(scope.cwd,
     guard => prepareIsolationInside(scope, options, guard)), options);
 }
 
-function memberGate(owner, manifest, member) {
-  const plan = require('./forge-task-execution').milestonePlanFile({ contextRoot: owner.real, milestoneId: manifest.milestone,
+// The host adapter is opaque, process-local and never written into a manifest,
+// request or receipt. A callback is re-attested for every origin/runtime use.
+const AUTO_GATE_CONTEXT = new (require('async_hooks').AsyncLocalStorage)();
+function autoGateContext(options, action) {
+  if (!options || options.autoPlanGateAdapter === undefined) return action();
+  return AUTO_GATE_CONTEXT.run({ adapter: options.autoPlanGateAdapter, members: options.members }, action);
+}
+function originMemberContract(owner, manifest, member, contract) {
+  const plan = planValidation().readOwnerTaskPlan(owner.real, { milestone: manifest.milestone, slice: manifest.slice, task: member.task_id });
+  if (plan.status !== 'ok' || plan.sha256 !== member.plan.sha256) refuse('batch-member-plan-invalid', 'the canonical plan changed');
+  const roots = codeRoots(), origin = roots.validateContract({ ...contract,
+    primary_root_id: require('./forge-must-haves').parseExecutionFields(plan.content).primary_root_id || member.roots[0].root_id,
+    code_roots: member.roots.map(ref => contract.code_roots.find(root => root.id === ref.root_id)) }, { owner: owner.real, revalidate: true });
+  if (origin.code_roots.some(root => !member.roots.some(ref => ref.root_id === root.id && ref.identity_sha256 === root.identity_sha256))) {
+    refuse('batch-root-foreign', 'auto gate origin differs from the manifest');
+  }
+  return origin;
+}
+function memberGate(owner, manifest, member, contract) {
+  const execution = require('./forge-task-execution'), plan = execution.milestonePlanFile({ contextRoot: owner.real, milestoneId: manifest.milestone,
     sliceId: manifest.slice, taskId: member.task_id, planFile: path.join(owner.real, member.plan.path) });
+  const live = AUTO_GATE_CONTEXT.getStore(), input = live?.members?.[member.task_id];
+  if (input?.gates?.plan === 'skipped' && input.gates.planSkipReason === 'auto-defer') {
+    const origin = originMemberContract(owner, manifest, member, contract), primary = origin.code_roots.find(root => root.id === origin.primary_root_id);
+    const request = { scope: 'milestone', phase: 'execute', unitType: 'execute-task', contextRoot: owner.real, cwd: primary.path,
+      milestoneId: manifest.milestone, sliceId: manifest.slice, taskId: member.task_id, planFile: plan, execution_contract: origin,
+      workflowId: input.workflowId, dispatchId: input.dispatchId, route: { host_runtime: manifest.host_runtime }, gates: input.gates };
+    return execution.withAutoPlanGateAdapterSync(live.adapter, request, () => {
+      if (!execution.autoGateAllowed(request)) refuse('batch-member-plan-invalid', 'the live auto gate is not attested');
+      const descriptor = { kind: 'auto-defer', owner: owner.key, milestone: manifest.milestone, slice: manifest.slice, task: member.task_id,
+        plan_sha256: member.plan.sha256, origin_contract_sha256: codeRoots().digest(origin), workflow_id: input.workflowId,
+        dispatch_id: input.dispatchId, host: manifest.host_runtime, reference: input.gates.authorizationReference };
+      return { bytes: null, sha256: digestOf(descriptor) };
+    });
+  }
   const file = plan.replace(/-PLAN\.md$/, '-PLAN-GATE.md');
   let read;
   try {
@@ -1024,6 +1069,10 @@ function memberGate(owner, manifest, member) {
     refuse('batch-member-plan-invalid', 'the canonical gate must approve the exact plan');
   }
   return { bytes: read.buffer, sha256: sha256(read.buffer) };
+}
+function withMemberAutoGate(request, action) {
+  if (request.gates?.plan !== 'skipped' || request.gates.planSkipReason !== 'auto-defer') return action();
+  return require('./forge-task-execution').withAutoPlanGateAdapter(AUTO_GATE_CONTEXT.getStore()?.adapter, request, action);
 }
 
 function boundRun(scope, owner, manifest) {
@@ -1056,12 +1105,12 @@ function parentRun(scope, owner, manifest, contract) {
   if (roots.key(claim.execution_contract.owner) !== owner.key) refuse('batch-parent-run-invalid', 'foreign claim owner');
   const groups = roots.claimGroups(claim);
   for (const member of manifest.members) {
-    memberGate(owner, manifest, member);
     const plan = planValidation().readOwnerTaskPlan(owner.real, { milestone: manifest.milestone, slice: manifest.slice, task: member.task_id });
     if (plan.status !== 'ok' || plan.sha256 !== member.plan.sha256) refuse('batch-isolation-handle-stale', 'canonical plan changed');
     const memberContract = roots.validateContract({ ...contract,
       primary_root_id: require('./forge-must-haves').parseExecutionFields(plan.content).primary_root_id || member.roots[0].root_id,
       code_roots: member.roots.map(ref => contract.code_roots.find(root => root.id === ref.root_id)) });
+    memberGate(owner, manifest, member, memberContract);
     const derived = require('./forge-claim-gate').deriveClaimFromPlan(owner.real, member.plan.path, memberContract);
     for (const write of derived.paths) {
       const origin = memberContract.code_roots.find(root => root.id === write.root_id);
@@ -1230,10 +1279,13 @@ function prepareIsolationInside(scope, options, guard) {
         refuse('batch-isolation-handle-stale', row.member.task_id + ' no longer owns its admitted preparation lease');
       }
     }
-    renewLeases(owner, manifest, rows.map(row => row.member), token, parent.id);
+    if (typeof options.leaseCheckpoint === 'function') options.leaseCheckpoint({ stage: 'preparation' });
+    else renewLeases(owner, manifest, rows.map(row => row.member), token, parent.id);
   };
   beforeS0();
-  const iso = isolation(), trusted = { failpoint: options.failpoint, limits: options.isolationLimits };
+  const iso = isolation(), trusted = { failpoint: options.failpoint, limits: options.isolationLimits,
+    ...(typeof options.dependencyRunner === 'function' ? { dependencyRunner: options.dependencyRunner } : {}),
+    ...(typeof options.leaseCheckpoint === 'function' ? { leaseCheckpoint: options.leaseCheckpoint } : {}) };
   const captured = iso.captureBatchBase(mintHandle('reservation', reservationData, manifestLive), contract, trusted);
   if (captured.status !== 'captured') return serial(captured.reason_code, { detail: captured.detail, root_id: captured.root_id });
   renewPreparation(captured.base.batch_dir);
@@ -1268,6 +1320,7 @@ function prepareIsolationInside(scope, options, guard) {
   handles.forEach((handle, index) => {
     HANDLES.get(handle).isolation = ready.record;
     HANDLES.get(handle).scope = { ...scope };
+    HANDLES.get(handle).autoGateContext = AUTO_GATE_CONTEXT.getStore();
     if (typeof options.onMember === 'function') options.onMember(handle, copy(members[index]));
   });
   return deepFreeze({ status: 'prepared', batch_id: manifest.batch_id, manifest_sha256: manifest.manifest_sha256,
@@ -1294,7 +1347,7 @@ function commitIsolation(scope, owner, manifest, contract, reservation, base, me
   }));
   const memberRows = members.map(member => {
     const planned = manifest.members[member.member_index];
-    return { ...member, gate_sha256: memberGate(owner, manifest, planned).sha256, roots: member.roots.map(({ replay, ...root }) => {
+    return { ...member, gate_sha256: memberGate(owner, manifest, planned, contract).sha256, roots: member.roots.map(({ replay, ...root }) => {
       const index = isolation().batchIndexIdentity(root.path);
       if (!index || index.links !== 1 || indexes.has(roots.key(index.path))) refuse('batch-root-foreign', 'a member index is not exclusive');
       indexes.add(roots.key(index.path));
@@ -1347,6 +1400,11 @@ function commitIsolation(scope, owner, manifest, contract, reservation, base, me
 // ── Live member execution (issue 343 U2b) ────────────────────────────────────
 
 function memberState(handle) {
+  const entry = handle && typeof handle === 'object' ? HANDLES.get(handle) : null;
+  const context = AUTO_GATE_CONTEXT.getStore() || entry?.autoGateContext;
+  return context ? AUTO_GATE_CONTEXT.run(context, () => memberStateWithGate(handle)) : memberStateWithGate(handle);
+}
+function memberStateWithGate(handle) {
   const entry = handle && typeof handle === 'object' ? HANDLES.get(handle) : null;
   if (!entry || entry.kind !== 'member' || !entry.isolation || !entry.scope) refuse('batch-member-handle-invalid', 'a live prepared member handle is required');
   const owner = ownerOf(entry.scope.cwd), manifest = readManifestAt(owner, entry.scope.batch_id);
@@ -1445,11 +1503,15 @@ function validateMemberPlan(handle, canonicalBytes) {
 }
 
 function memberPlanView(state, canonicalBytes) {
+  const context = AUTO_GATE_CONTEXT.getStore() || state.entry.autoGateContext;
+  return context ? AUTO_GATE_CONTEXT.run(context, () => memberPlanViewWithGate(state, canonicalBytes)) : memberPlanViewWithGate(state, canonicalBytes);
+}
+function memberPlanViewWithGate(state, canonicalBytes) {
   const roots = codeRoots();
   const planFile = path.join(state.owner.real, state.member.plan.path);
   const physical = require('./forge-task-execution').milestonePlanFile({ contextRoot: state.owner.real, milestoneId: state.manifest.milestone,
     sliceId: state.manifest.slice, taskId: state.member.task_id, planFile });
-  const bytes = fs.readFileSync(physical), gate = memberGate(state.owner, state.manifest, state.member);
+  const bytes = fs.readFileSync(physical), gate = memberGate(state.owner, state.manifest, state.member, state.origin);
   if (!Buffer.from(canonicalBytes).equals(bytes) || sha256(bytes) !== state.member.plan.sha256 || gate.sha256 !== state.placed.gate_sha256) {
     refuse('batch-member-plan-invalid', 'the canonical plan/gate is changed or unapproved');
   }
@@ -1491,6 +1553,10 @@ function assertMemberRootOwner(handle, root) {
 // Reconstruction is host-only and never runs provision/materialization again.
 // Both callbacks must actually attest every root's stopped and reconciled scope.
 function resumeMemberExecution(scope, memberIndex, request, trusted = {}) {
+  return autoGateContext({ autoPlanGateAdapter: trusted.autoPlanGateAdapter, members: trusted.members || { [request?.taskId]: request } },
+    () => resumeMemberExecutionWithGate(scope, memberIndex, request, trusted));
+}
+function resumeMemberExecutionWithGate(scope, memberIndex, request, trusted) {
   if (typeof trusted.processProbe !== 'function' || typeof trusted.reconcile !== 'function') refuse('batch-member-reconciliation-required', 'restart requires live process and root reconciliation');
   const owner = ownerOf(scope.cwd), manifest = readManifestAt(owner, scope.batch_id);
   if (!manifest || manifest.owner_digest !== ownerDigest(scope.owner_token) || manifest.manifest_sha256 !== scope.manifest_sha256) refuse('batch-manifest-foreign', 'foreign restart');
@@ -1504,6 +1570,7 @@ function resumeMemberExecution(scope, memberIndex, request, trusted = {}) {
   const data = record.reservation.members.find(row => row.member_index === memberIndex);
   const handle = mintHandle('member', { reservation: record.reservation, ...data }, () => refuse('batch-member-reconciliation-required', 'a resumed execution handle cannot provision'));
   const entry = HANDLES.get(handle); entry.isolation = record; entry.scope = { ...scope };
+  entry.autoGateContext = AUTO_GATE_CONTEXT.getStore();
   // A restart may only rebind the exact already-published attempt, never open one.
   const prior = readRecord(owner, [...BATCH_SEGMENTS, manifest.batch_id, 'attempts'], `member-${memberIndex}.json`, MAX_PROGRESS_BYTES, 'batch-member-attempt-invalid');
   if (!prior || prior.request_sha256 !== memberRequestDigest(request)) refuse('batch-member-request-mismatch', 'restart is not the saved attempt');
@@ -1515,8 +1582,18 @@ function resumeMemberExecution(scope, memberIndex, request, trusted = {}) {
 function memberRootReservation(cwd, target) {
   const owner = ownerOf(cwd), roots = codeRoots(), census = require('./forge-runs').boundedCensus(owner.real);
   if (census.unparseable.length) return { reserved: true, reason_code: 'batch-ownership-unknown' };
-  for (const run of census.parsed.filter(row => row.batch_locator != null)) {
+  for (const run of census.parsed) {
     try {
+      for (const retirement of run.batch_retirements || []) {
+        require('./forge-runs').validateBatchRetirements(run.batch_retirements, run.id);
+        for (const root of retirement.retained_roots) {
+          if (roots.within(root.path, realOrSelf(target)) || roots.within(realOrSelf(target), root.path)) {
+            return { reserved: true, reason_code: 'batch-member-root-exclusive', run_id: run.id,
+              retirement_id: retirement.retirement_id };
+          }
+        }
+      }
+      if (run.batch_locator == null) continue;
       const locator = require('./forge-runs').validateBatchLocator(run.batch_locator, run.id);
       if (locator.phase === 'preparing') return { reserved: true, reason_code: 'batch-member-provisioning-pending', run_id: run.id };
       const manifest = readManifestAt(owner, locator.batch_id), record = manifest && readIsolation(owner, manifest);
@@ -1576,14 +1653,15 @@ function brokerMemberBinding(handle, options = {}) {
 }
 // The cohort handle stays live only while the published manifest, the physical isolation record
 // and the run's aggregate claim and locator are exactly the ones the broker was started over.
-function cohortLive(owner, manifest, record) {
+function cohortLive(owner, manifest, record, retirement) {
   const current = readManifestAt(owner, manifest.batch_id);
   if (!current || current.manifest_sha256 !== manifest.manifest_sha256) refuse('batch-cohort-handle-stale', 'the batch manifest changed');
   const physical = readIsolation(owner, current);
   if (!physical || physical.isolation_sha256 !== record.isolation_sha256) refuse('batch-cohort-handle-stale', 'the physical map changed');
   const census = require('./forge-runs').boundedCensus(owner.real);
   const run = census.unparseable.length ? null : census.parsed.find(row => row.id === record.run_id);
-  if (!run || run.active !== true || !isObject(run.batch_locator) || run.batch_locator.isolation_sha256 !== record.isolation_sha256
+  const atRetirement = retirement && run && codeRoots().digest(run) === codeRoots().digest(retirement.after_record);
+  if (!run || run.active !== true || (!atRetirement && (!isObject(run.batch_locator) || run.batch_locator.isolation_sha256 !== record.isolation_sha256))
       || !run.write_claim || codeRoots().digest(run.write_claim) !== codeRoots().digest(record.claim)) {
     refuse('batch-cohort-handle-stale', 'the aggregate claim or locator changed');
   }
@@ -1824,7 +1902,10 @@ function memberSidecar(handle, request) {
         refuse('batch-retained-invalid', 'a retained execution needs its executed bytes and every hash');
       }
       const executed = parsedRecord(input.executed, 'batch-retained-invalid', 'the executed record is not JSON');
-      if (!isObject(executed) || executed.phase !== 'executed' || executed.dispatch_id !== binding.dispatch_id || !isObject(executed.verification_seal)) {
+      const residual = executed && executed.phase === 'residual';
+      if (!isObject(executed) || !['executed','residual'].includes(executed.phase) || executed.dispatch_id !== binding.dispatch_id || !isObject(executed.verification_seal)
+          || residual && (!['partial','blocked'].includes(executed.result?.status)
+            || executed.residual?.result_status !== executed.result.status || executed.residual.provider_called !== executed.provider_called)) {
         refuse('batch-retained-invalid', 'the executed record is not this sealed attempt');
       }
       // The custodial response stays custody: its bytes are hashed, never read as a result.
@@ -1836,7 +1917,8 @@ function memberSidecar(handle, request) {
       // The one signed anchor of this attempt: the broker binds it only after the member's attached
       // writer really exited, and a second, different binding is refused (broker-response-already-bound).
       const anchor = await client.bindMemberResponse(handle, { response_sha256: input.response.sha256, executed_sha256: executedSha,
-        seal_sha256: input.seal_sha256, baseline_sha256: input.baseline_sha256, delta_sha256: input.delta_sha256 });
+        seal_sha256: input.seal_sha256, baseline_sha256: input.baseline_sha256, delta_sha256: input.delta_sha256,
+        ...(residual ? {residual:executed.residual} : {}) });
       const record = { schema: RETAINED_SCHEMA, batch_id: binding.batch_id, broker_manifest_sha256: client.manifest_sha256,
         member_index: binding.member_index, task_id: binding.task_id, member_ref: memberRef, dispatch_id: binding.dispatch_id,
         request_sha256: binding.request_sha256, executed: { path: files.executed, sha256: executedSha },
@@ -1869,6 +1951,8 @@ function memberSidecar(handle, request) {
         refuse('batch-retained-invalid', 'a retained byte changed');
       }
       const anchor = parsedRecord(anchorBytes, 'batch-retained-invalid', 'the anchor is not JSON');
+      const archived = parsedRecord(executed, 'batch-retained-invalid', 'the retained record is not JSON');
+      if ((archived.phase === 'residual') !== !!anchor.residual || anchor.residual && digestOf(anchor.residual) !== digestOf(archived.residual)) refuse('batch-retained-invalid', 'residual metadata changed');
       if (!isObject(anchor) || roots.digest(anchor) !== record.anchor.sha256 || anchor.member_ref !== memberRef
           || anchor.executed_sha256 !== record.executed.sha256 || anchor.response_sha256 !== record.response.sha256
           || anchor.seal_sha256 !== record.seal_sha256 || anchor.baseline_sha256 !== record.baseline_sha256
@@ -1877,7 +1961,7 @@ function memberSidecar(handle, request) {
       const verified = await verify();
       if (verified.anchor_sha256 !== record.anchor.sha256) refuse('batch-retained-invalid', 'the cohort broker holds no such anchor');
       return deepFreeze({ ...copy(record), ref_path: files.ref, ref_sha256: sha256(bytes), phase: verified.phase,
-        executed_record: parsedRecord(executed, 'batch-retained-invalid', 'the executed record is not JSON') });
+        executed_record: archived });
     },
   });
   SIDECARS.add(api);
@@ -1918,7 +2002,8 @@ const POOL_REASON_CODES = Object.freeze(['batch-member-aborted', 'batch-member-r
 // Closed refusals of the pool and its CLI: thrown before any provider of the run could start.
 const POOL_REFUSAL_CODES = Object.freeze(['batch-run-request-invalid', 'batch-run-aborted', 'batch-member-input-invalid',
   'batch-member-constraints-unsupported', 'batch-member-route-stale', 'batch-cohort-incomplete', 'batch-member-scope-closed',
-  'batch-member-process-invalid', 'batch-member-writer-exists', 'batch-member-broker-required']);
+  'batch-member-process-invalid', 'batch-member-writer-exists', 'batch-member-broker-required',
+  'batch-member-no-start-unproven', 'batch-lease-coverage-insufficient']);
 // A member stopped on a request only the owner can answer: never a failure and never an approval.
 const NEEDS_INPUT_CODES = Object.freeze(['appserver-input-required', 'pending-human-decision']);
 // The host's own fields of one member attempt (shared/forge-bidirectional-sidecar.md): the route,
@@ -1966,8 +2051,8 @@ function currentMemberProcessScope() {
 }
 
 // The host inputs of every admitido member, exactly: closed fields, one dispatch and one channel
-// per member, and the operator constraints of a cohort (a member never commits or deploys; an
-// auto_commit cohort stays unsupported until the serial consolidation owns that commit).
+// per member, and the operator's real constraints. A member never commits or deploys;
+// preserving auto_commit does not give the worker Git publication authority.
 function memberInputs(admitted, supplied) {
   const bad = detail => refuse('batch-member-input-invalid', detail);
   if (!isObject(supplied)) bad('the host inputs of every admitido member are required');
@@ -1986,8 +2071,8 @@ function memberInputs(admitted, supplied) {
     if (value.prompt === undefined && value.promptFile === undefined) bad(`${id}: a prompt or promptFile is required`);
     for (const key of ['verification', 'budgets', 'procedure_context']) if (value[key] !== undefined && !isObject(value[key])) bad(`${id}: ${key} must be an object`);
     if (!isObject(value.gates)) bad(`${id}: gates are required`);
-    if (!isObject(value.constraints) || value.constraints.auto_commit !== false || value.constraints.deploy !== false) {
-      refuse('batch-member-constraints-unsupported', `${id}: a cohort member runs only with auto_commit false and deploy false`);
+    if (!isObject(value.constraints) || typeof value.constraints.auto_commit !== 'boolean' || value.constraints.deploy !== false) {
+      refuse('batch-member-constraints-unsupported', `${id}: a cohort member requires a boolean auto_commit and deploy false`);
     }
     const channel = codeRoots().key(path.resolve(value.resultFile));
     if (dispatches.has(value.dispatchId) || channels.has(channel)) bad(`${id}: every member has its own dispatch and channels`);
@@ -2038,6 +2123,53 @@ function renewLeases(owner, manifest, members, ownerToken, runId) {
   }
 }
 
+function cohortCoverage(owner, manifest, members, routes, limit, scope) {
+  const timeout = require('./forge-worker-timeout'), slots = Array(limit).fill(0);
+  let longest = 0;
+  for (const member of members) {
+    const ceiling = timeout.ceilingFromRoute(routes.get(member.task_id)).ms;
+    longest = Math.max(longest, ceiling);
+    const earliest = slots.indexOf(Math.min(...slots)); slots[earliest] += ceiling;
+  }
+  // The canonical grace already pays for joins; charge only their excess,
+  // rather than adding the same grace twice and rejecting every max-tier lane.
+  const joinBound=members.length*(JOIN_GRACE_MS+JOIN_KILL_MS);
+  const execution = timeout.protectedWindowMs(Math.max(...slots)+Math.max(0,joinBound-timeout.PROTECTED_WINDOW_GRACE_MS));
+  // Installation is charged only where the current frozen input can install.
+  // A checkpoint before the actual install checks the full remaining bound
+  // again, so a changed package/lockfile cannot obtain a smaller reservation.
+  const iso = isolation(), admission = currentAdmission(owner.real, owner, manifest);
+  const installEnabled = iso.readIsolationPrefs(owner.real).worktreeInstallDeps !== false;
+  let installs = 0;
+  if (installEnabled) for (const member of members) {
+    const declaration = admission.declarations[admission.task_ids.indexOf(member.task_id)];
+    for (const root of rootsOf(scope, { declaration })) if (iso.resolvePackageManager(root.path)) installs++;
+  }
+  // Preparation has its own existing-tier bounded window, independent of
+  // execution. It is revalidated at filesystem/install checkpoints and before
+  // S0, never extended by a heartbeat inside a protected owner snapshot.
+  const preparation = timeout.protectedWindowMs(longest + installs * iso.WORKTREE_INSTALL_TIMEOUT_MS);
+  if (!execution.covers || !preparation.covers) refuse('batch-lease-coverage-insufficient', 'the existing protected-window bound cannot cover this preparation/queue');
+  return { preparation, execution };
+}
+function openCohortLeases(owner, manifest, members, token, durationMs) {
+  const checked = members.map(member => {
+    const generation = memberLease(owner.real, manifest, member, 'batch-isolation-handle-stale');
+    const raw = leases().readLease(leases().leaseFile(owner.real, member.unit));
+    if (!raw.record || raw.record.owner_token !== String(token).normalize('NFC').trim()) refuse('batch-isolation-handle-stale', member.task_id);
+    return { member, generation };
+  });
+  const opened = [];
+  try {
+    for (const {member,generation} of checked) {
+      const window = leases().openProtectedWindow(owner.real, member.unit, token, generation, {durationMs});
+      if (!window.ok) refuse('batch-lease-coverage-insufficient', member.task_id + ': ' + window.reason);
+      opened.push(window);
+    }
+    return opened;
+  } catch(error) { opened.forEach(window=>window.close()); throw error; }
+}
+
 // One member's own observers: a prefixed stream, its own announcer and the CLI observer factory
 // of forge-unit-sidecar instantiated for this member only.
 function memberRuntime(member, stream) {
@@ -2054,18 +2186,70 @@ function memberRuntime(member, stream) {
 
 // One member of the run: its bound request, its own AbortController, its process scope (the one
 // attached writer) and the control a host uses to cancel THIS member only.
-function memberLane(manifest, member, handle, request, controller, stream) {
-  const state = { broker: null, child: null, attached: null, started: false, settled: false, aborted: false };
+function memberLane(manifest, member, handle, request, controller, stream, leaseCheckpoint = () => {}) {
+  const state = { broker: null, child: null, attemptedChild: null, attached: null, started: false, settled: false, aborted: false,
+    spawnAttempted: false, spawnClosed: false, neverStartedReason: null };
   const terminate = () => {
-    if (state.child && !childExited(state.child)) {
-      try { require('./forge-xllm').terminateOwnedProcessTree(state.child); } catch (_) { /* the join observes the real exit */ }
+    const child=state.child || state.attemptedChild;
+    if (child && !childExited(child)) {
+      try { require('./forge-xllm').terminateOwnedProcessTree(child); } catch (_) { /* the join observes the real exit */ }
     }
   };
   const scope = Object.freeze({
     batch_id: manifest.batch_id, member_index: member.index, task_id: member.task_id, signal: controller.signal,
+    // Production adapters delegate their actual spawn here. The scope, rather
+    // than a best-effort PID observer, owns the one irreversible spawn boundary.
+    spawn(command, args, options) {
+      if (state.settled || state.spawnClosed) refuse('batch-member-scope-closed', member.task_id);
+      if (state.spawnAttempted || state.child) refuse('batch-member-writer-exists', member.task_id);
+      try { leaseCheckpoint({ stage: 'spawn', required_ms:require('./forge-worker-timeout').ceilingFromRoute(request.route).ms+JOIN_GRACE_MS+JOIN_KILL_MS }); }
+      catch(error){error.provider_called=false;throw error;}
+      state.spawnAttempted = true;
+      let child;
+      try { child = require('child_process').spawn(command, args, options); }
+      catch (error) {
+        state.spawnClosed = true;
+        state.neverStartedReason = ['ENOENT','EACCES','ENOEXEC'].includes(error.code) ? error.code : null;
+        throw error;
+      }
+      state.attemptedChild = child;
+      if (!Number.isSafeInteger(child.pid) || child.pid <= 0) {
+        // An ENOENT-style child is a real spawn attempt, never a fabricated
+        // process. The broker subscribes to its actual error/close events.
+        state.broker.observeMemberSpawnFailure(handle, child);
+        child.once('error', error => {
+          if (!child.pid && ['ENOENT','EACCES','ENOEXEC'].includes(error.code)) {
+            state.spawnClosed = true; state.neverStartedReason = error.code;
+          }
+        });
+        return child;
+      }
+      try { scope.attach(child); }
+      catch (error) {
+        // Retain the real child even when attachment is refused: the cohort
+        // must terminate and join it before reporting the refusal.
+        state.child = child; child.once('error', () => {}); terminate();
+        error.provider_called = 'unknown'; throw error;
+      }
+      return child;
+    },
+    ownsSpawnAttempt(child) { return child === state.attemptedChild && state.spawnAttempted; },
+    async joinWriter() {
+      const child=state.child || state.attemptedChild;
+      if (!child || !Number.isSafeInteger(child.pid) || child.pid<=0) refuse('batch-member-no-start-unproven', member.task_id);
+      let joined=await joinedWithin(child,JOIN_GRACE_MS);
+      if(!joined){terminate();joined=await joinedWithin(child,JOIN_KILL_MS);}
+      if(!joined)refuse('batch-member-writer-live',member.task_id);
+      return Object.freeze({joined:true,pid:child.pid});
+    },
+    closeWithoutSpawn(expectedHandle) {
+      if (expectedHandle !== handle || !state.settled || !state.spawnClosed || state.child
+          || !state.neverStartedReason) refuse('batch-member-no-start-unproven', member.task_id);
+      return Object.freeze({ reason_code: state.neverStartedReason });
+    },
     /** The member's ONE writer process, attached right after its spawn: the broker observes its exit. */
     attach(child) {
-      if (state.settled) refuse('batch-member-scope-closed', `${member.task_id} is no longer running`);
+      if (state.settled || state.spawnClosed) refuse('batch-member-scope-closed', `${member.task_id} is no longer running`);
       if (!(child instanceof ChildProcess) || !Number.isSafeInteger(child.pid) || child.pid <= 0) {
         refuse('batch-member-process-invalid', 'only a spawned child process is a member writer');
       }
@@ -2100,12 +2284,17 @@ function memberRow(member, fields) {
     aborted: false, process: { pid: null, exit_code: null, signal: null, join: null }, ...fields };
 }
 function laneReport(lane) {
-  const { member, state, outcome } = lane, child = state.child;
+  const { member, state, outcome } = lane, child = state.child || state.attemptedChild;
   const base = { dispatch_id: lane.request.dispatchId, progress_state: 'admitido', aborted: state.aborted,
     process: { pid: child ? child.pid : null, exit_code: child ? child.exitCode : null, signal: child ? child.signalCode : null, join: lane.join } };
   if (!outcome || outcome.kind === 'skipped') return memberRow(member, { ...base, outcome: 'blocked', reason_code: 'batch-member-aborted' });
   if (outcome.kind === 'value') {
     const value = outcome.value;
+    if (isObject(value) && ['partial','blocked'].includes(value.status) && value.stage === 'residual' && HASH.test(value.anchor_sha256 || '')) {
+      return memberRow(member,{...base,outcome:value.pending_questions?.length?'needs-input':'blocked',result_status:value.status,
+        reason_code:value.reason_code,reason:value.reason,pending_questions:value.pending_questions,provider_called:value.provider_called,
+        stage:'residual',member_ref:value.member_ref,anchor_sha256:value.anchor_sha256,retained_ref:value.retained_ref});
+    }
     if (isObject(value) && value.status === 'retained' && typeof value.anchor_sha256 === 'string' && HASH.test(value.anchor_sha256)) {
       return memberRow(member, { ...base, outcome: 'retained', provider_called: typeof value.provider_called === 'boolean' ? value.provider_called : 'unknown',
         stage: typeof value.stage === 'string' ? value.stage : null, member_ref: typeof value.member_ref === 'string' ? value.member_ref : null,
@@ -2151,8 +2340,10 @@ async function pooled(lanes, limit, run) {
 // pid gone. A writer still alive after its grace is terminated (its own tree only) and joined again.
 async function joinWriters(lanes) {
   for (const lane of lanes) {
-    const child = lane.state.child;
-    if (!child) { lane.join = lane.state.started ? 'no-writer' : 'not-started'; continue; }
+    const child = lane.state.child || lane.state.attemptedChild;
+    if (!child || !Number.isSafeInteger(child.pid) || child.pid<=0) {
+      lane.join = lane.state.spawnClosed || !lane.state.started ? 'not-started' : 'unknown'; continue;
+    }
     let joined = await joinedWithin(child, JOIN_GRACE_MS);
     if (!joined) { lane.terminate(); joined = await joinedWithin(child, JOIN_KILL_MS); }
     lane.join = joined ? 'joined' : 'live';
@@ -2162,10 +2353,10 @@ async function joinWriters(lanes) {
 // and any broker refusal (a member without an observed writer, an outcome without its anchor) is
 // reported with its own code, never forced.
 async function sealBarrier(broker, cohort, lanes) {
-  if (lanes.some(lane => lane.join === 'live')) return { sealed: false, sha256: null, reason_code: 'batch-member-writer-live' };
+  if (lanes.some(lane => ['live','unknown'].includes(lane.join))) return { sealed: false, sha256: null, reason_code: 'batch-member-writer-live' };
   try {
     const record = await broker.sealExecutionBarrier(cohort, lanes.map(lane => ({ handle: lane.handle,
-      outcome: laneReport(lane).outcome === 'retained' ? 'retained' : lane.state.aborted ? 'interrupted' : 'failed' })));
+      outcome: laneReport(lane).outcome === 'retained' ? 'retained' : laneReport(lane).stage === 'residual' ? 'residual' : lane.state.aborted ? 'interrupted' : 'failed' })));
     return { sealed: true, sha256: codeRoots().digest(record), reason_code: null };
   } catch (error) { return { sealed: false, sha256: null, reason_code: errorCode(error, 'batch-barrier-unsealed') }; }
 }
@@ -2183,6 +2374,9 @@ async function sealBarrier(broker, cohort, lanes) {
  *   member. A refusal before the execution window throws, and then no provider was started.
  */
 async function runCohort(scope, options = {}) {
+  return autoGateContext(options, () => runCohortWithGate(scope, options));
+}
+async function runCohortWithGate(scope, options) {
   if (!isObject(scope) || typeof scope.batch_id !== 'string' || !BATCH_ID.test(scope.batch_id)
       || typeof scope.manifest_sha256 !== 'string' || !HASH.test(scope.manifest_sha256)) refuse('batch-not-active', 'no batch is named');
   for (const key of ['cwd', 'milestone', 'host_runtime', 'owner_token']) {
@@ -2220,8 +2414,18 @@ async function runCohort(scope, options = {}) {
   // Everything before S0: the members' leases, then their isolation (worktrees, indexes, base,
   // aggregate claim and locator), then each exact attempt binding.
   renewLeases(owner, manifest, admitted, scope.owner_token, scope.run_id);
+  const coverage = cohortCoverage(owner, manifest, admitted, routes, limit, scope);
+  let leaseWindows = openCohortLeases(owner, manifest, admitted, scope.owner_token, coverage.preparation.duration_ms);
+  const leaseCheckpoint = (check = {}) => {
+    for (const window of leaseWindows) if (!window.check().ok
+        || (Number.isFinite(check.required_ms) && Date.now() + check.required_ms >= window.deadline_at)) {
+      refuse('batch-lease-coverage-insufficient', 'the exact owner/generation or preparation window no longer covers ' + (check.stage || 'execution'));
+    }
+  };
+  try {
   const placed = new Map();
-  const prepared = prepareIsolation(scope, { failpoint: options.failpoint, isolationLimits: options.isolationLimits,
+  const prepared = prepareIsolation(scope, { failpoint: options.failpoint, isolationLimits: options.isolationLimits, leaseCheckpoint,
+    ...(typeof options.dependencyRunner === 'function' ? { dependencyRunner: options.dependencyRunner } : {}),
     onMember: (handle, data) => placed.set(data.member_index, { handle, data }) });
   if (prepared.status !== 'prepared') {
     return runReport(manifest, { status: 'serial', reason_code: prepared.reason_code, pool, broker: null,
@@ -2243,13 +2447,18 @@ async function runCohort(scope, options = {}) {
       milestoneId: manifest.milestone, sliceId: manifest.slice, taskId: member.task_id, cwd: primary.path, contextRoot: owner.real, planFile,
       execution_contract: contract, runId: parent.id, claim: parent.write_claim, batch_id: manifest.batch_id, begin_key: entry.data.begin_key,
       lease_generation: entry.data.lease_generation, route: routes.get(member.task_id), signal: controller.signal };
-    lanes.push(memberLane(manifest, member, entry.handle, request, controller, stream));
+    const lane = memberLane(manifest, member, entry.handle, request, controller, stream, leaseCheckpoint);
+    lane.runtime.executionPlanGate = AUTO_GATE_CONTEXT.getStore()?.adapter;
+    lanes.push(lane);
   }
   // Every exact attempt is checked whole before any is bound, so a refusal binds none.
   for (const lane of lanes) checkMemberRequest(memberState(lane.handle), lane.request);
   if (stopped()) refuse('batch-run-aborted', 'the run was cancelled before any member started');
   for (const lane of lanes) bindMemberExecution(lane.handle, lane.request);
-  renewLeases(owner, manifest, admitted, scope.owner_token, scope.run_id);
+  leaseCheckpoint();
+  leaseWindows.forEach(window=>window.close());
+  leaseWindows = openCohortLeases(owner, manifest, admitted, scope.owner_token, coverage.execution.duration_ms);
+  leaseCheckpoint();
   // S0: the one cohort broker over the closed registry of exactly these bound attempts.
   const { cohort, broker } = await openCohortBroker(scope, lanes.map(lane => lane.handle));
   for (const lane of lanes) lane.state.broker = broker;
@@ -2265,19 +2474,34 @@ async function runCohort(scope, options = {}) {
   }
   let inFlight = 0, failure = null, barrier = { sealed: false, sha256: null, reason_code: 'batch-barrier-unsealed' };
   const execute = async lane => {
-    if (lane.state.aborted) { lane.state.settled = true; return { kind: 'skipped' }; }
+    if (lane.state.aborted) {
+      lane.state.spawnClosed = true; lane.state.neverStartedReason = 'queue-cancelled';
+      lane.state.settled = true; return { kind: 'skipped' };
+    }
     lane.state.started = true;
     inFlight += 1;
     pool.peak_in_flight = Math.max(pool.peak_in_flight, inFlight);
     try {
       const call = { ...lane.request, memberHandle: lane.handle };
-      return { kind: 'value', value: await PROCESS_SCOPES.run(lane.scope, () => unitSidecar().runUnitSidecar(call, lane.runtime)) };
-    } catch (error) { return { kind: 'error', error }; }
+      return { kind: 'value', value: await withMemberAutoGate(call, () => PROCESS_SCOPES.run(lane.scope, () => unitSidecar().runUnitSidecar(call, lane.runtime))) };
+    } catch (error) {
+      // The canonical sidecar observed no transport entry, and every real
+      // production spawn is fenced by the scope above. Data claiming false
+      // cannot overrule an attempted/attached process.
+      if (error.provider_called === false && !lane.state.spawnAttempted && !lane.state.child) {
+        lane.state.spawnClosed = true; lane.state.neverStartedReason = 'pre-spawn-refused';
+      }
+      return { kind: 'error', error };
+    }
     finally { inFlight -= 1; lane.state.settled = true; }
   };
   try {
     await pooled(lanes, limit, execute);
     await joinWriters(lanes);
+    leaseCheckpoint({ stage: 'joined-barrier' });
+    for (const lane of lanes) if (!lane.state.child && lane.state.spawnClosed) {
+      PROCESS_SCOPES.run(lane.scope, () => broker.closeMemberWithoutWriter(lane.handle));
+    }
     barrier = await sealBarrier(broker, cohort, lanes);
   } catch (error) {
     failure = error;
@@ -2291,6 +2515,7 @@ async function runCohort(scope, options = {}) {
   const outcome = failure || !barrier.sealed ? 'blocked' : retained === rows.length ? 'retained' : retained ? 'partial' : 'failed';
   return runReport(manifest, { status: outcome, reason_code: failure ? errorCode(failure, 'batch-run-failed') : barrier.sealed ? null : barrier.reason_code,
     pool, broker: { directory: broker.directory, manifest_sha256: broker.manifest_sha256 }, barrier, members: [...rows, ...held] });
+  } finally { leaseWindows.forEach(window=>window.close()); }
 }
 
 // ── Serial consolidation, publication, ACK and cleanup (issue 343 U5, B5) ─────
@@ -2326,11 +2551,13 @@ const CONSOLIDATION_REASON_CODES = Object.freeze(['member-failed', 'member-inter
 // Closed refusals of the consolidation itself (the broker, sidecar and isolation keep their own codes).
 const CONSOLIDATION_REFUSAL_CODES = Object.freeze(['batch-consolidation-request-invalid', 'batch-barrier-required',
   'batch-member-restore-refused', 'batch-member-delta-invalid', 'batch-operation-unexpected',
-  'batch-consolidation-busy', 'batch-consolidation-cleanup-unproven', 'batch-consolidation-lock-lost']);
+  'batch-consolidation-busy', 'batch-consolidation-cleanup-unproven', 'batch-consolidation-lock-lost',
+  'batch-retirement-pending', 'batch-retirement-stale', 'batch-retirement-owner-drift']);
 // Named in-process failpoints (a trusted test seam: the callback may throw to simulate a crash).
 const CONSOLIDATION_FAILPOINTS = Object.freeze(['consolidation-progress-intent', 'consolidation-progress-applied',
   'consolidation-member-verified', 'member-artifacts-intent', 'member-artifacts-applied', 'member-artifacts-committed',
-  'member-integrated', 'controller-terminal-intent', 'controller-terminal-applied', 'member-acknowledged']);
+  'member-integrated', 'controller-terminal-intent', 'controller-terminal-applied', 'member-acknowledged',
+  'claim-mutation-intent', 'claim-mutation-applied', 'claim-mutation-before-commit']);
 const PROGRESS_PRODUCER = 'forge-execution-batch.progress';
 const ARTIFACTS_PRODUCER = 'forge-unit-sidecar.publishRetainedMember';
 const TERMINAL_PRODUCER = 'forge-unit-controller.batch-terminal';
@@ -2357,7 +2584,7 @@ function consolidationCohort(owner, manifest, record) {
   const cohort = mintHandle('cohort', { owner: owner.real, batch_id: manifest.batch_id, manifest_sha256: manifest.manifest_sha256,
     isolation_sha256: record.isolation_sha256, run_id: record.run_id, claim: { generation: record.claim.generation, sha256: codeRoots().digest(record.claim) },
     batch_dir: record.base.batch_dir, union_roots: record.claim.execution_contract.code_roots.map(root => root.path), members: [] },
-  () => cohortLive(owner, manifest, record));
+  () => cohortLive(owner, manifest, record, HANDLES.get(cohort)?.retirement));
   HANDLES.get(cohort).consolidation = { owner, manifest, record };
   return cohort;
 }
@@ -2500,6 +2727,7 @@ function restoreMember(ctx, lane, route) {
     () => refuse('batch-member-restore-refused', 'a restored member handle never provisions'));
   const entry = HANDLES.get(handle);
   entry.isolation = record; entry.scope = { ...scope }; entry.postBarrier = true;
+  entry.autoGateContext = AUTO_GATE_CONTEXT.getStore();
   const planFile = path.join(owner.real, ...member.plan.path.split('/'));
   const runtime = validateMemberPlan(handle, fs.readFileSync(planFile)).checked_runtime_plan.contract;
   const primary = runtime.code_roots.find(root => root.id === runtime.primary_root_id);
@@ -2527,9 +2755,13 @@ async function finishPending(ctx) {
   else if (payload.species === 'member-artifacts' && producer.name === ARTIFACTS_PRODUCER) {
     const lane = ctx.lanes.find(row => row.row.member_ref === payload.member_ref);
     if (!lane || !lane.handle) refuse('batch-operation-unexpected', 'the in-flight publication names no restored member');
-    await unitSidecar().publishRetainedMember({ ...lane.request, memberHandle: lane.handle }, {});
+    await withMemberAutoGate(lane.request, () => unitSidecar().publishRetainedMember({ ...lane.request, memberHandle: lane.handle }, {}));
   } else if (payload.species === 'controller-terminal' && producer.name === TERMINAL_PRODUCER) {
     controller().commitBatchTerminal(ctx.owner.real, producer.request, ctx.scope.owner_token, ctx.controllerOptions);
+  } else if (payload.species === 'claim-mutation' && producer.name === RETIRE_PRODUCER) {
+    HANDLES.get(ctx.cohort).retirement = producer;
+    applyRetirement(ctx, producer);
+    ctx.failpoint('claim-mutation-before-commit');
   } else refuse('batch-operation-unexpected', `no producer of this consolidation replays a ${payload.species} operation`);
   await ctx.broker.commitOwnerOperation(ctx.cohort, record);
 }
@@ -2541,6 +2773,7 @@ async function recordBarrier(ctx) {
     if (progress[index].state !== 'admitido') continue;
     transitions.push({ member_index: index, from: 'admitido', to: 'executando', reason_code: null });
     if (lane.row.outcome === 'retained') transitions.push({ member_index: index, from: 'executando', to: 'retido', reason_code: null });
+    else if (lane.row.outcome === 'residual') transitions.push({ member_index:index,from:'executando',to:lane.row.pending_questions.length?'needs-input':'bloqueado',reason_code:lane.row.pending_questions.length?'pending-question':null });
     else if (lane.row.outcome === 'failed' && NEEDS_INPUT_CODES.includes(failureCode(lane))) {
       transitions.push({ member_index: index, from: 'executando', to: 'needs-input', reason_code: 'pending-question' });
     } else transitions.push({ member_index: index, from: 'executando', to: 'falhou', reason_code: null });
@@ -2589,7 +2822,7 @@ async function consolidateMember(ctx, lane) {
   if (state() === 'retido') {
     if (!lane.handle) refuse('batch-member-restore-refused', `${lane.member.task_id} was not restored`);
     try {
-      lane.verified = await unitSidecar().verifyRetainedExecution({ ...lane.request, memberHandle: lane.handle }, {});
+      lane.verified = await withMemberAutoGate(lane.request, () => unitSidecar().verifyRetainedExecution({ ...lane.request, memberHandle: lane.handle }, {}));
     } catch (error) {
       if (errorCode(error, '') !== 'execution-verification-failed') throw error;
       // A failing capture never becomes ready, nor a second inference: the residual stays explicit.
@@ -2698,7 +2931,115 @@ function consolidationLock(owner, manifest) {
 function brokerJoined(cleanup) {
   return isObject(cleanup) && cleanup.status === 'joined' && cleanup.active_processes === 0;
 }
+const RETIRE_PRODUCER = 'forge-execution-batch.retire';
+function retirementTerminal(ctx) {
+  const progress = progressOf(ctx.owner, ctx.manifest);
+  return ctx.manifest.members.every(member => {
+    if (progress[member.index].state !== 'ack') return false;
+    const completed = controller().lookupRecord(ctx.owner.real, 'transaction', `${member.begin_key}:complete`);
+    return completed?.phase === 'committed' && completed.action === 'complete'
+      && completed.unit.key === member.unit && completed.result?.status === 'succeeded';
+  });
+}
+function prepareRetirement(ctx, report) {
+  const runApi = require('./forge-runs'), roots = codeRoots();
+  return controller().withOwnerBoundary(ctx.owner.real, ({ noLeases }) => {
+    if (!noLeases() || !retirementTerminal(ctx)) refuse('batch-retirement-pending', 'all member terminals and absent leases are required');
+    return runApi.withRegistryFence(ctx.owner.real, guard => runApi.withRunLock(ctx.owner.real, ctx.record.run_id, () => {
+      if (!noLeases()) refuse('batch-retirement-pending', 'a lease appeared');
+      const run = runApi.get(ctx.owner.real, ctx.record.run_id);
+      if (!run?.active || !run.batch_locator || run.batch_locator.batch_id !== ctx.manifest.batch_id
+          || run.batch_locator.isolation_sha256 !== ctx.record.isolation_sha256
+          || roots.digest(run.write_claim) !== roots.digest(ctx.record.claim)) refuse('batch-retirement-stale', 'the exact held union and locator are required');
+      const retirement_id = roots.digest({ locator: run.batch_locator, broker: ctx.evidence.manifest_sha256 });
+      const row = { retirement_id, locator: copy(run.batch_locator), broker_manifest_sha256: ctx.evidence.manifest_sha256,
+        operation_sequence: ctx.broker.operations().head.sequence + 1,
+        witness_ref: `.gsd/forge/batches/${ctx.manifest.batch_id}/retirement.json`,
+        retained_roots: ctx.record.members.flatMap(member => member.roots.map(root => {
+          const held = run.write_claim.execution_contract.code_roots.find(item => item.identity_sha256 === root.identity_sha256);
+          if (!held) refuse('batch-retirement-stale', 'a member root lost custody');
+          return { root_id: held.id, path: held.path, identity_sha256: held.identity_sha256 };
+        })),
+        post_unit: ctx.manifest.members.map(member => ({ member_index: member.index, unit: member.unit,
+          key: `${retirement_id}:${member.index}:post-unit` })) };
+      const history = [...(run.batch_retirements || []), row];
+      runApi.validateBatchRetirements(history, run.id);
+      const before = retainedRead(runApi.runFile(ctx.owner.real, run.id), 'batch-retirement-stale');
+      const after_record = { ...run, batch_locator: null, batch_retirements: history };
+      const witness = { schema: 'forge-batch-retirement-v1', retirement: row, report: copy(report) };
+      return { name: RETIRE_PRODUCER, row, before_record_sha256: sha256(before), after_record,
+        after_record_sha256: sha256(Buffer.from(JSON.stringify(after_record, null, 2))), witness };
+    }));
+  }, ctx.controllerOptions);
+}
+function applyRetirement(ctx, producer) {
+  if (!isObject(producer) || producer.name !== RETIRE_PRODUCER || producer.row?.locator.batch_id !== ctx.manifest.batch_id
+      || producer.row.locator.manifest_sha256 !== ctx.manifest.manifest_sha256
+      || producer.row.locator.isolation_sha256 !== ctx.record.isolation_sha256) refuse('batch-retirement-stale', 'foreign retirement producer');
+  const runApi = require('./forge-runs'), roots = codeRoots();
+  runApi.validateBatchRetirements(producer.after_record.batch_retirements, ctx.record.run_id);
+  if (sha256(Buffer.from(JSON.stringify(producer.after_record, null, 2))) !== producer.after_record_sha256) refuse('batch-retirement-stale', 'retirement postimage differs');
+  controller().withOwnerBoundary(ctx.owner.real, ({ noLeases }) => {
+    if (!noLeases() || !retirementTerminal(ctx)) refuse('batch-retirement-pending', 'member terminals or leases changed');
+    runApi.withRegistryFence(ctx.owner.real, guard => runApi.updateWith(ctx.owner.real, ctx.record.run_id, current => {
+      if (!noLeases()) refuse('batch-retirement-pending', 'a lease appeared');
+      const now = sha256(retainedRead(runApi.runFile(ctx.owner.real, current.id), 'batch-retirement-stale'));
+      if (now === producer.after_record_sha256 && roots.digest(current) === roots.digest(producer.after_record)) return null;
+      if (now !== producer.before_record_sha256 || !current.active || !current.batch_locator
+          || roots.digest(current.batch_locator) !== roots.digest(producer.row.locator)
+          || roots.digest(current.write_claim) !== roots.digest(ctx.record.claim)) refuse('batch-retirement-stale', 'the RunRecord changed');
+      const patch = { batch_locator: null, batch_retirements: producer.after_record.batch_retirements };
+      if (roots.digest({ ...current, ...patch }) !== roots.digest(producer.after_record)) refuse('batch-retirement-stale', 'non-custody run fields changed');
+      return patch;
+    }, guard));
+  }, ctx.controllerOptions);
+  ctx.failpoint('claim-mutation-applied');
+  const witnessPath = path.join(ctx.owner.real, producer.row.witness_ref);
+  if (fs.existsSync(witnessPath)) {
+    if (sha256(retainedRead(witnessPath, 'batch-retirement-stale')) !== sha256(progressBytes(producer.witness))) refuse('batch-retirement-stale', 'the terminal witness changed');
+  } else if (!publishExclusive(ctx.owner, [...BATCH_SEGMENTS, ctx.manifest.batch_id], 'retirement.json', producer.witness,
+      MAX_MANIFEST_BYTES, 'batch-retirement-stale')) refuse('batch-retirement-stale', 'the terminal witness appeared');
+}
+async function retirementOperation(ctx, report) {
+  const producer = prepareRetirement(ctx, report);
+  const effects = [
+    { path: path.relative(ctx.owner.real, require('./forge-runs').runFile(ctx.owner.real, ctx.record.run_id)).split(path.sep).join('/'),
+      before: producer.before_record_sha256, after: { sha256: producer.after_record_sha256 } },
+    { path: producer.row.witness_ref, before: null, after: { sha256: sha256(progressBytes(producer.witness)) } },
+  ];
+  const intent = await ctx.broker.beginOwnerOperation(ctx.cohort, { species: 'claim-mutation', member_ref: null,
+    producer, effects, prepared_at: new Date(nowOf(ctx.options)).toISOString() });
+  HANDLES.get(ctx.cohort).retirement = producer;
+  ctx.failpoint('claim-mutation-intent');
+  applyRetirement(ctx, producer);
+  ctx.failpoint('claim-mutation-before-commit');
+  await ctx.broker.commitOwnerOperation(ctx.cohort, intent);
+  return producer.row;
+}
+function retiredReport(ctx, proof) {
+  if (!proof?.committed) return null;
+  if (ctx.evidence.surface?.matches_operations !== true) refuse('batch-retirement-owner-drift', 'post-unit owner changes require their own proven producer');
+  const producer = proof.producer, roots = codeRoots(), runApi = require('./forge-runs');
+  runApi.validateBatchRetirements([producer.row], ctx.record.run_id);
+  if (producer.name !== RETIRE_PRODUCER || producer.row?.locator.batch_id !== ctx.manifest.batch_id
+      || producer.row.locator.isolation_sha256 !== ctx.record.isolation_sha256
+      || producer.row.broker_manifest_sha256 !== ctx.evidence.manifest_sha256
+      || producer.row.operation_sequence !== proof.sequence) refuse('batch-retirement-stale', 'foreign terminal witness');
+  const run = runApi.get(ctx.owner.real, ctx.record.run_id);
+  if (!run || !run.batch_retirements?.some(row => roots.digest(row) === roots.digest(producer.row))) refuse('batch-retirement-stale', 'custody history changed');
+  const groups = roots.claimGroups(run.write_claim);
+  if (producer.row.retained_roots.some(root => !groups.some(group => group.identity_sha256 === root.identity_sha256))) refuse('batch-retirement-stale', 'retained root protection changed');
+  const effect = proof.effects.find(row => row.path === producer.row.witness_ref);
+  const raw = retainedRead(path.join(ctx.owner.real, producer.row.witness_ref), 'batch-retirement-stale');
+  if (!effect?.after || sha256(raw) !== effect.after.sha256 || sha256(raw) !== sha256(progressBytes(producer.witness))) refuse('batch-retirement-stale', 'terminal witness bytes changed');
+  if (!retirementTerminal(ctx)) refuse('batch-retirement-stale', 'a completed member proof changed');
+  return deepFreeze({ ...copy(producer.witness.report), operations: copy(proof.operations),
+    retirement: { status: 'retired', ...copy(producer.row) }, historical_replay: true });
+}
 async function consolidateCohort(scope, options = {}) {
+  return autoGateContext(options, () => consolidateCohortWithGate(scope, options));
+}
+async function consolidateCohortWithGate(scope, options) {
   if (!isObject(options) || typeof options.broker_manifest_sha256 !== 'string' || !HASH.test(options.broker_manifest_sha256)) {
     refuse('batch-consolidation-request-invalid', 'the broker manifest digest the run reported is required');
   }
@@ -2713,6 +3054,8 @@ async function consolidateCohort(scope, options = {}) {
     if (evidence.batch_id !== manifest.batch_id || evidence.batch_manifest_sha256 !== manifest.manifest_sha256 || evidence.run_id !== record.run_id) {
       refuse('batch-manifest-foreign', 'the broker evidence belongs to another batch or run');
     }
+    const retirement = reconciliation().readBatchRetirement({ directory, manifest_sha256: options.broker_manifest_sha256 });
+    if (retirement?.committed) return retiredReport({ owner, manifest, record, evidence }, retirement);
     const barrierMembers = evidence.members.map(row => {
       const member = manifest.members[row.member_index];
       if (!member || member.task_id !== row.task_id || member.unit !== row.unit) refuse('batch-manifest-foreign', 'the broker registry names another member');
@@ -2732,6 +3075,7 @@ async function consolidateCohort(scope, options = {}) {
       Object.assign(lane, restoreMember(ctx, lane, route));
     }
     const cohort = consolidationCohort(owner, manifest, record);
+    if (retirement) HANDLES.get(cohort).retirement = retirement.producer;
     const restored = ctx.lanes.filter(lane => lane.handle);
     // A failed resume may have spawned a broker. Only its actual joined cleanup releases our fence.
     joined = false;
@@ -2747,6 +3091,10 @@ async function consolidateCohort(scope, options = {}) {
     for (const lane of restored) HANDLES.get(lane.handle).broker = broker;
     Object.assign(ctx, { cohort, broker });
     await finishPending(ctx);
+    if (retirement) {
+      const finished = reconciliation().readBatchRetirement({ directory, manifest_sha256: options.broker_manifest_sha256 });
+      if (finished?.committed) return retiredReport(ctx, finished);
+    }
     await recordBarrier(ctx);
     let stop = null;
     for (const lane of ctx.lanes) {
@@ -2758,7 +3106,13 @@ async function consolidateCohort(scope, options = {}) {
       const recheck = isolation().checkBatchIntegration(cohort, { consolidated: consolidatedDeltas(ctx, null) });
       if (recheck.status !== 'ready') stop = { task_id: null, reason_code: 'integration-recheck-failed', root_id: recheck.root_id || null, path: recheck.path || null };
     }
-    return consolidationReport(ctx, stop, cohortCleanup(cohort));
+    const report = consolidationReport(ctx, stop, cohortCleanup(cohort));
+    if (!stop && retirementTerminal(ctx)) {
+      const row = await retirementOperation(ctx, report), state = ctx.broker.operations();
+      return deepFreeze({ ...report, operations: { committed: state.committed.length, pending: state.pending, head_sha256: state.head.sha256 },
+        retirement: { status: 'retired', ...row }, historical_replay: false });
+    }
+    return deepFreeze({ ...report, retirement: { status: 'pending' } });
   } finally {
     try {
       if (broker) {
@@ -2896,9 +3250,21 @@ function status(scope, options = {}) {
     return { ...publicMember(manifest, member), state: progress[member.index].state, reason_code: progress[member.index].reason_code,
       begin: found.conflict ? 'conflict' : found.record ? found.record.phase : null, lease };
   });
+  let retirement = { status: 'active' };
+  const physical = readIsolation(owner, manifest);
+  const run = physical && require('./forge-runs').get(owner.real, physical.run_id);
+  const archived = run?.batch_retirements?.find(row => row.locator.batch_id === manifest.batch_id);
+  if (archived) {
+    const directory = path.join(physical.base.batch_dir, BROKER_DIRECTORY);
+    const proof = reconciliation().readBatchRetirement({ directory, manifest_sha256: archived.broker_manifest_sha256 });
+    const evidence = reconciliation().readBatchEvidence({ directory, manifest_sha256: archived.broker_manifest_sha256 });
+    const historical = retiredReport({ owner, manifest, record: physical,
+      evidence }, proof);
+    retirement = historical ? historical.retirement : { status: 'pending' };
+  }
   return deepFreeze({ batch_id: manifest.batch_id, manifest_ref: manifestRef(manifest.batch_id), manifest_sha256: manifest.manifest_sha256,
     milestone: manifest.milestone, slice: manifest.slice, members, excluded: copy(manifest.excluded),
-    terminal: members.every(member => TERMINAL_STATES.includes(member.state)) });
+    terminal: members.every(member => TERMINAL_STATES.includes(member.state)), retirement });
 }
 
 module.exports = {

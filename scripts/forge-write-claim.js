@@ -240,12 +240,69 @@ function normalizeReleased(input) {
 
 /** Derive AND persist — the ONLY function in this module that writes. */
 function recordClaim(cwd, runId, input) {
-  const write_claim = normalizeClaim(input);
+  let write_claim = normalizeClaim(input);
   runs.updateWith(cwd, runId, current => {
     if (current.batch_locator) throw new Error('batch-claim-owner-operation-required');
+    if (current.batch_retirements?.length) write_claim = retainBatchCustody(current, write_claim);
     return { write_claim };
   });
   return write_claim;
+}
+
+// A new unit may add protection but cannot erase the retained physical roots
+// or their original baselines when the active cohort locator is retired.
+function retainBatchCustody(run, incoming) {
+  runs.validateBatchRetirements(run.batch_retirements, run.id);
+  const roots = require('./forge-code-roots'), held = run.write_claim;
+  validateHeldClaim(held); validateHeldClaim(incoming);
+  if (held.schema_version !== 2 || incoming.schema_version !== 2 || held.released || incoming.released
+      || roots.key(held.execution_contract.owner) !== roots.key(incoming.execution_contract.owner)) throw new Error('batch-custody-claim-required');
+  const previous = roots.claimGroups(held), additions = roots.claimGroups(incoming);
+  const union = held.execution_contract.code_roots.map(root => ({ ...root })), mapping = new Map();
+  for (const root of incoming.execution_contract.code_roots) {
+    const existing = union.find(row => row.identity_sha256 === root.identity_sha256);
+    if (existing) mapping.set(root.id, existing.id);
+    else {
+      if (union.some(row => row.id === root.id)) throw new Error('batch-custody-root-id-conflict');
+      union.push(root); mapping.set(root.id, root.id);
+    }
+  }
+  const contract = roots.validateContract({ ...held.execution_contract, code_roots: union }, { revalidate: true });
+  const paths = held.paths.map(row => ({ ...row }));
+  for (const row of incoming.paths) {
+    const mapped = { root_id: mapping.get(row.root_id), path: row.path };
+    if (!paths.some(existing => roots.covers(existing, mapped))) paths.push(mapped);
+  }
+  const baselines = { ...held.root_baselines };
+  for (const group of additions) {
+    const id = mapping.get(group.id);
+    if (!previous.some(row => row.identity_sha256 === group.identity_sha256)) baselines[id] = incoming.root_baselines[group.id];
+  }
+  const next = { ...incoming, execution_contract: contract, code_dir: contract.code_roots.find(row => row.id === contract.primary_root_id).path,
+    paths, root_baselines: baselines, vcs_baseline: baselines[contract.primary_root_id] };
+  validateHeldClaim(next);
+  return next;
+}
+
+// A retained union is reservation, not permission to write all its roots. The
+// current unit keeps its own declared contract/capability and a physical subset.
+function coversRetainedExecution(run, contract, paths) {
+  if (!run?.batch_retirements?.length || run.batch_locator || !isHeld(run.write_claim)) return false;
+  try {
+    runs.validateBatchRetirements(run.batch_retirements, run.id);
+    const roots = require('./forge-code-roots'), claim = run.write_claim;
+    const checked = roots.validateContract(contract, { revalidate: true, owner: claim.execution_contract.owner });
+    const groups = roots.claimGroups(claim), mapping = new Map();
+    for (const root of checked.code_roots) {
+      const group = groups.find(row => row.identity_sha256 === root.identity_sha256);
+      if (!group) return false;
+      mapping.set(root.id, group);
+    }
+    return paths.every(row => {
+      const group = mapping.get(row.root_id);
+      return group && group.paths.some(path => roots.covers({ root_id: group.id, path }, { root_id: group.id, path: row.path }));
+    });
+  } catch { return false; }
 }
 
 // Replace the ONE parent reservation, not a slot per child. The expected digest
@@ -320,7 +377,7 @@ function readClaim(rec) {
  */
 function clearClaim(cwd, runId) {
   runs.updateWith(cwd, runId, current => {
-    if (current.batch_locator) throw new Error('batch-claim-owner-operation-required');
+    if (current.batch_locator || current.batch_retirements?.some(row => row.retained_roots.length)) throw new Error('batch-claim-owner-operation-required');
     return { write_claim: null };
   });
   return null;
@@ -397,7 +454,7 @@ function releaseClaim(cwd, runId, release, opts) {
 
   let outcome = null;
   const result = runs.updateWith(cwd, runId, (current) => {
-    if (current.batch_locator) { outcome = { ok: false, reason: 'batch-claim-owner-operation-required' }; return null; }
+    if (current.batch_locator || current.batch_retirements?.some(row => row.retained_roots.length)) { outcome = { ok: false, reason: 'batch-claim-owner-operation-required' }; return null; }
     const claim = readClaim(current);
     if (claim === null) { outcome = { ok: false, reason: 'no-claim' }; return null; }
     const found = claimIdentity(claim);
@@ -627,6 +684,7 @@ module.exports = {
   replaceBatchClaim,
   readClaim,
   clearClaim,
+  retainBatchCustody, coversRetainedExecution,
   releaseClaim,
   recoverClaim,
   isHeld,

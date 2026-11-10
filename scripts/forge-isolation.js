@@ -2166,6 +2166,24 @@ function verifyMember(target, base) {
     fail('git does not see the measured staged and unstaged state in the member');
   }
 }
+function memberDependencySpec(owner, target) {
+  const enabled = readIsolationPrefs(owner).worktreeInstallDeps !== false;
+  const manager = enabled ? resolvePackageManager(target) : null;
+  const lock = manager && ({ npm: 'package-lock.json', yarn: 'yarn.lock', pnpm: 'pnpm-lock.yaml' })[manager.manager];
+  const measured = relative => {
+    const file = path.join(target, relative), stat = lstatOrNull(file);
+    const bytes = stat && stat.isFile() && !stat.isSymbolicLink() && stat.size <= BATCH_BASE_LIMITS.fileBytes
+      ? stableRead(file, stat.size) : null;
+    if (!bytes) isolationRefuse('batch-member-verification-failed', 'dependency input is not a bounded stable member file');
+    return sha256Hex(bytes);
+  };
+  return { enabled, manager: manager ? manager.manager : null,
+    package_sha256: manager ? measured('package.json') : null,
+    lock_sha256: lock ? measured(lock) : null };
+}
+function memberLeaseCheckpoint(trusted, stage, requiredMs = 0) {
+  if (typeof trusted.leaseCheckpoint === 'function') trusted.leaseCheckpoint({ stage, required_ms: requiredMs });
+}
 function provisionMemberRoot(context) {
   const { layout, reservation, member, integration, base, pkg, placed, trusted } = context;
   const { target, branch } = placed;
@@ -2176,6 +2194,7 @@ function provisionMemberRoot(context) {
   let entries = readJournal(path.join(layout.batch_dir, ...segments), binding);
   let phase = entries.length ? entries[entries.length - 1].phase : null;
   const replay = phase === 'verified';
+  memberLeaseCheckpoint(trusted, 'before-materialization');
   if (phase === null) {
     // A fresh attempt owns nothing yet: a directory or ref of the same name is not ours.
     if (lstatOrNull(target)) isolationRefuse('batch-member-path-occupied', 'the member root path exists without its provisioning journal');
@@ -2206,13 +2225,43 @@ function provisionMemberRoot(context) {
   }
   verifyMember(target, base);
   assertRootUnchanged(base, integration);
+  const dependencySpec = memberDependencySpec(reservation.owner, target);
+  let dependencyProvisioning;
+  if (phase === 'worktree') {
+    memberLeaseCheckpoint(trusted, 'before-install', dependencySpec.enabled && dependencySpec.manager ? WORKTREE_INSTALL_TIMEOUT_MS : 0);
+    const installed = installWorktreeDeps(target, target, { enabled: dependencySpec.enabled,
+      ...(typeof trusted.dependencyRunner === 'function' ? { runner: trusted.dependencyRunner } : {}) });
+    memberLeaseCheckpoint(trusted, 'after-install');
+    if (!['installed', 'disabled', 'no-lockfile'].includes(installed.status)) {
+      isolationRefuse('batch-member-verification-failed', `member dependency provisioning failed: ${installed.error || installed.status}`);
+    }
+    // Lifecycle scripts must not alter the measured sources, index, head or integration root.
+    verifyMember(target, base);
+    assertMemberCheckout(integration, target, branch, base);
+    assertRootUnchanged(base, integration);
+    if (stableDigest(memberDependencySpec(reservation.owner, target)) !== stableDigest(dependencySpec)) {
+      isolationRefuse('batch-member-verification-failed', 'dependency provisioning changed its configuration or lockfile');
+    }
+    dependencyProvisioning = { ...dependencySpec, status: installed.status };
+  } else {
+    dependencyProvisioning = entries[entries.length - 1].extra?.dependency_provisioning;
+    const expectedStatus = !dependencySpec.enabled ? 'disabled' : dependencySpec.manager ? 'installed' : 'no-lockfile';
+    if (dependencyProvisioning === undefined && dependencySpec.enabled && dependencySpec.manager) {
+      isolationRefuse('batch-member-unreconciled', 'the verified member has no dependency provisioning evidence');
+    }
+    if (dependencyProvisioning !== undefined && stableDigest(dependencyProvisioning) !== stableDigest({ ...dependencySpec, status: expectedStatus })) {
+      isolationRefuse('batch-member-unreconciled', 'dependency provisioning no longer matches the verified member');
+    }
+  }
   let identity;
   try { identity = codeRootsApi().measureRoot({ id: integration.id, path: target, vcs: 'git' }).identity_sha256; }
   catch (error) { return isolationRefuse('batch-member-verification-failed', `the member root is not a measurable checkout (${error && error.code})`); }
-  if (phase === 'worktree') entries = appendJournal(layout, segments, binding, entries, 'verified', { identity_sha256: identity });
+  if (phase === 'worktree') entries = appendJournal(layout, segments, binding, entries, 'verified', { identity_sha256: identity,
+    dependency_provisioning: dependencyProvisioning });
   else if (!plainObject(entries[entries.length - 1].extra) || entries[entries.length - 1].extra.identity_sha256 !== identity) {
     isolationRefuse('batch-member-unreconciled', 'the verified member root was replaced');
   }
+  memberLeaseCheckpoint(trusted, 'after-materialization');
   return { root_id: integration.id, path: target, branch, head: base.head, integration_identity_sha256: integration.identity_sha256,
     identity_sha256: identity, journal_sha256: entries[entries.length - 1].entry_sha256, replay };
 }
@@ -2387,9 +2436,24 @@ function targetVerdict(entry, mode) {
   const others = listing(at, UNTRACKED_ARGS), listed = Buffer.isBuffer(others) ? pathList(others) : null;
   if (!listed) return { reason_code: 'integration-conflict', root_id: root.id, path: null, detail: 'untracked' };
   const tracked = new Set(base.inventory.filter(row => row.tracked).map(row => row.path)), wanted = new Set(base.untracked);
+  // Declared outputs remain byte/mode verified above even when Git ignores them.
+  // Only the expected ls-files membership follows the real checkout's ignore rules.
+  const newFiles = [...consolidated].filter(([rel, value]) => !tracked.has(rel) && value.sha256 !== null).map(([rel]) => rel);
+  let ignored = new Set();
+  if (newFiles.length) {
+    let output;
+    try { output = batchGit(at, ['check-ignore', '-z', '--stdin'], { input: Buffer.from(`${newFiles.join('\0')}\0`, 'utf8') }); }
+    catch (error) {
+      if (error && error.status === 1 && Buffer.isBuffer(error.stdout)) output = error.stdout;
+      else return { reason_code: 'integration-conflict', root_id: root.id, path: null, detail: 'ignore-query' };
+    }
+    const paths = Buffer.isBuffer(output) ? pathList(output) : null;
+    if (!paths || paths.some(rel => !newFiles.includes(rel))) return { reason_code: 'integration-conflict', root_id: root.id, path: null, detail: 'ignore-query' };
+    ignored = new Set(paths);
+  }
   for (const [rel, sha] of consolidated) {
     if (tracked.has(rel)) continue;
-    if (sha.sha256 === null) wanted.delete(rel); else wanted.add(rel);
+    if (sha.sha256 === null || ignored.has(rel)) wanted.delete(rel); else wanted.add(rel);
   }
   for (const rel of member.keys()) wanted.delete(rel);
   const actual = listed.filter(rel => !member.has(rel));

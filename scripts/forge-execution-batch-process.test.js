@@ -76,6 +76,14 @@ fs.cpSync(path.join(__dirname, '..', 'shared'), path.join(process.env.FORGE_HOME
 const CHANNELS = path.join(TMP, 'channels');
 fs.mkdirSync(CHANNELS, { recursive: true });
 
+// Account resolution is the canonical credential seam; replace it before any
+// production adapter can be imported through the controller graph.
+const fixtureAccounts = require('./forge-accounts'), savedLaunch = fixtureAccounts.resolveLaunch;
+let unavailableAccountTask = null;
+fixtureAccounts.resolveLaunch = () => {
+  if(require('./forge-execution-batch').currentMemberProcessScope()?.task_id===unavailableAccountTask)throw Error('synthetic unavailable account');
+  return {name:'isolated-process-fixture',token:'synthetic-process-fixture-token'};
+};
 const adapter = require('./forge-long-workflow-adapter');
 const loop = require('./forge-loop-controller');
 const controller = require('./forge-unit-controller');
@@ -85,7 +93,10 @@ const runs = require('./forge-runs');
 const claims = require('./forge-write-claim');
 const rootsApi = require('./forge-code-roots');
 const reconciliation = require('./forge-artifact-reconciliation');
+// The production Claude adapter captures this canonical account seam at load.
+// Synthetic child-only credentials keep these fixtures entirely off operator accounts.
 const xllm = require('./forge-xllm');
+fixtureAccounts.resolveLaunch = savedLaunch;
 const isolation = require('./forge-isolation');
 const lease = require('./forge-unit-lease');
 const { resolveDispatch } = require('./forge-dispatch-resolve');
@@ -236,6 +247,7 @@ function preloadSource(configFile) {
 }
 // The in-process transport: the same module, with a mutable configuration per case.
 const CONFIG = { xllm: XLLM, batch: CLI, provider: PROVIDER, plan: null, journal: null, onSpawn: null };
+const canonicalRunExecute = xllm.runExecute;
 xllm.runExecute = require(TRANSPORT)(CONFIG);
 // The members' observer lines of the in-process runs (bounded tail for diagnostics).
 const SINK = { bytes: 0, tail: '', write(value) { const line = String(value); this.bytes += line.length; this.tail = (this.tail + line).slice(-8000); return true; } };
@@ -331,24 +343,24 @@ function planSlice(dir, tasks) {
 }
 // The real cohort: the loop's auto next through the long-workflow adapter dispatches every named
 // task with committed begins and live leases (U1). The loop snapshot is kept for its batch commands.
-function cohort(dir, names, tasks) {
+function cohort(dir, names, tasks, hostRuntime = 'codex') {
   planSlice(dir, tasks || Object.fromEntries(names.map(id => [id, taskPlan(id)])));
-  const snapshot = loop.create({ mode: 'auto', workflow_id: `wf-${++serial}`, host_runtime: 'codex', max_steps: 10 });
-  const result = adapter.invoke('codex', 'auto', 'next', { cwd: dir, milestone: M, owner_token: TOKEN, session: SESSION }, snapshot, {}).result;
+  const snapshot = loop.create({ mode: 'auto', workflow_id: `wf-${++serial}`, host_runtime: hostRuntime, max_steps: 10 });
+  const result = adapter.invoke(hostRuntime, 'auto', 'next', { cwd: dir, milestone: M, owner_token: TOKEN, session: SESSION }, snapshot, {}).result;
   assert.deepStrictEqual([result.outcome, result.action], ['dispatch_required', 'dispatch-batch'], JSON.stringify(result.controller_result));
   const dispatched = result.controller_result.details.dispatch_batch;
   assert.deepStrictEqual(dispatched.members.map(member => member.unit.key), names.map(id => `execute-task/${id}`));
   return { batch_id: dispatched.batch_id, manifest_sha256: dispatched.manifest_sha256, snapshot: result.snapshot };
 }
 // The real run of the cohort and its live v2 reservation of the integration namespace.
-function scopeOf(dir, ids, label, names) {
+function scopeOf(dir, ids, label, names, hostRuntime = 'codex') {
   const runId = `M-20261108000001-${label}`;
-  runs.add(dir, { id: runId, kind: 'milestone', session_id: SESSION, host_runtime: 'codex',
+  runs.add(dir, { id: runId, kind: 'milestone', session_id: SESSION, host_runtime: hostRuntime,
     project: dir, cwd: dir, milestone_dir: `.gsd/milestones/${M}/`, isolation_mode: 'worktree' });
   const contract = rootsApi.validateContract({ schema_version: 2, owner: dir, primary_root_id: 'primary', code_roots: [{ id: 'primary', path: dir, vcs: 'git' }] });
   claims.recordClaim(dir, runId, { schema_version: 2, execution_contract: contract, source: 'plan-writes', unit: `BATCH:${names.join(',')}`,
     paths: [{ root_id: 'primary', path: '**' }] });
-  return { cwd: dir, milestone: M, host_runtime: 'codex', owner_token: TOKEN, batch_id: ids.batch_id, manifest_sha256: ids.manifest_sha256, run_id: runId };
+  return { cwd: dir, milestone: M, host_runtime: hostRuntime, owner_token: TOKEN, batch_id: ids.batch_id, manifest_sha256: ids.manifest_sha256, run_id: runId };
 }
 // The host's own fields of each member attempt (the U3b sidecar request shape): its own dispatch,
 // its own external result channel, the operator constraints. Nothing else is the host's.
@@ -356,12 +368,12 @@ function hostInputs(label, names) {
   return Object.fromEntries(names.map((id, index) => [id, { dispatchId: `u4-${label}-dispatch-${index}`, workflowId: `u4-${label}-workflow`,
     resultFile: path.join(CHANNELS, `${label}-${id}.json`), prompt: 'Synthetic cohort member fixture only.',
     verification: { preferenceCommands: [`node --check src/${id.toLowerCase()}.js`] },
-    gates: { plan: 'approved', claim: 'proceed', security: 'not-applicable' }, constraints: { auto_commit: false, deploy: false } }]));
+    gates: { plan: 'approved', claim: 'proceed', security: 'not-applicable' }, constraints: { auto_commit: true, deploy: false } }]));
 }
 // One real cohort per case: its own owner, dispatch, run, rendezvous folder, provider plan and
 // transport journal.
 function fixture(label, names, providers, options = {}) {
-  const dir = owner(label, options), ids = cohort(dir, names, options.tasks), scope = scopeOf(dir, ids, label, names);
+  const dir = owner(label, options), ids = cohort(dir, names, options.tasks, options.hostRuntime), scope = scopeOf(dir, ids, label, names, options.hostRuntime);
   const rendezvous = fs.mkdtempSync(path.join(TMP, `${label}-rendezvous-`));
   const plan = path.join(TMP, `${label}-providers.json`), journalFile = path.join(TMP, `${label}-transport.jsonl`);
   fs.writeFileSync(plan, JSON.stringify({ rendezvous, members: providers }));
@@ -471,7 +483,7 @@ function assertBinding(fx) {
     const canonical = resolveDispatch({ ...route.resolution_options });
     assert.deepStrictEqual([canonical.worker_mode, canonical.resolved_worker_engine, canonical.model_resolved || canonical.model, canonical.effort],
       ['sidecar', route.resolved_worker_engine, route.model, route.effort], `${label}: the canonical resolver still resolves this member's own route`);
-    assert.deepStrictEqual(row.constraints, { auto_commit: false, deploy: false }, `${label}: the operator constraints`);
+    assert.deepStrictEqual(row.constraints, fx.inputs[member.task_id].constraints, `${label}: the operator constraints are preserved`);
     assert.strictEqual(row.signal, true, `${label}: the transport receives the member's own AbortSignal`);
     const root = rootsApi.key(fs.realpathSync.native(row.cwd));
     assert.strictEqual(root, roots.get(member.task_id), `${label}: it runs in its own member worktree`);
@@ -566,6 +578,8 @@ test('issue343 U4-2 three members with limit two never run three providers at on
   assert(os.cpus().length >= 3, 'the forced-normal resource budget needs three CPUs for a decided cohort of three');
   const hold = { peers: [], hold: true, timeout_ms: 90000 };
   const fx = fixture('limit', TRIO, { T01: hold, T02: hold, T03: hold });
+  // Explicit false remains supported beside the default-true rendezvous/CLI cases.
+  for (const input of Object.values(fx.inputs)) input.constraints.auto_commit = false;
   const live = { now: 0, peak: 0, order: [], signals: new Map() };
   try {
     const manifest = batch.readManifest(fx.dir, fx.ids.batch_id);
@@ -618,14 +632,15 @@ test('issue343 U4-4 aborting one member stops only its own process scope', async
   const emitted = [], realEmit = process.emit;
   try {
     // Imported authority never starts anything: an approved flag, an imported route, a missing
-    // member, an auto_commit cohort and a foreign owner token refuse before any effect.
+    // member, malformed constraints and a foreign owner token refuse before any effect.
     const isolationFile = path.join(fx.dir, '.gsd', 'forge', 'batches', fx.ids.batch_id, 'isolation.json');
     const refused = [
       [{ ...fx.inputs, T01: { ...fx.inputs.T01, approved: true } }, 'batch-member-input-invalid', 'an approved flag'],
       [{ ...fx.inputs, T02: { ...fx.inputs.T02, route: { model: 'imported-model' } } }, 'batch-member-input-invalid', 'an imported route'],
       [{ T01: fx.inputs.T01 }, 'batch-member-input-invalid', 'a missing member'],
       [{ ...fx.inputs, T02: { ...fx.inputs.T02, resultFile: fx.inputs.T01.resultFile } }, 'batch-member-input-invalid', 'a shared channel'],
-      [{ ...fx.inputs, T01: { ...fx.inputs.T01, constraints: { auto_commit: true, deploy: false } } }, 'batch-member-constraints-unsupported', 'an auto_commit cohort'],
+      [{ ...fx.inputs, T01: { ...fx.inputs.T01, constraints: { auto_commit: 'true', deploy: false } } }, 'batch-member-constraints-unsupported', 'a nonboolean auto_commit'],
+      [{ ...fx.inputs, T01: { ...fx.inputs.T01, constraints: { auto_commit: true, deploy: true } } }, 'batch-member-constraints-unsupported', 'an unsupported deployment'],
     ];
     for (const [members, code, label] of refused) await rejectsCode(batch.runCohort(fx.scope, { members, stream: SINK }), code, label);
     await rejectsCode(batch.runCohort({ ...fx.scope, owner_token: 'foreign-owner-token' }, { members: fx.inputs, stream: SINK }), 'batch-manifest-foreign', 'a foreign owner token');
@@ -697,7 +712,8 @@ const PAIR_GO = Object.freeze({ T01: GO, T02: GO });
 const ACKED = Object.freeze(['preparado', 'admitido', 'executando', 'retido', 'publicacao-pendente', 'publicado', 'integrado', 'ack']);
 const RESTART_POINTS = Object.freeze(['consolidation-progress-intent', 'consolidation-progress-applied', 'consolidation-member-verified',
   'member-artifacts-intent', 'member-artifacts-applied', 'member-artifacts-committed', 'member-integrated',
-  'controller-terminal-intent', 'controller-terminal-applied', 'member-acknowledged']);
+  'controller-terminal-intent', 'controller-terminal-applied', 'member-acknowledged',
+  'claim-mutation-intent', 'claim-mutation-applied', 'claim-mutation-before-commit']);
 // Cohorts consolidated by one case and inspected by a later one (U5-6), released at the end.
 const u5 = {};
 function taskDir(dir, id) { return path.join(sliceDir(dir), 'tasks', id); }
@@ -809,7 +825,7 @@ test('issue343 U5-1 after the barrier each member is verified, published, integr
     const evidence = reconciliation.readBatchEvidence(fx.trust), refs = evidence.members.map(row => row.member_ref);
     assert.deepStrictEqual(evidence.operations.entries.filter(entry => entry.species !== 'batch-progress')
       .map(entry => [entry.species, refs.indexOf(entry.member_ref), entry.committed]),
-    [['member-artifacts', 0, true], ['controller-terminal', 0, true], ['member-artifacts', 1, true], ['controller-terminal', 1, true]]);
+    [['member-artifacts', 0, true], ['controller-terminal', 0, true], ['member-artifacts', 1, true], ['controller-terminal', 1, true], ['claim-mutation', -1, true]]);
     assert.deepStrictEqual([evidence.stream, evidence.barrier.sealed, evidence.operations.pending, evidence.surface.matches_s0, evidence.surface.matches_operations],
       ['verified', true, null, false, true], 'the owner is S0, the signed member lines and exactly the committed operations');
     assert.deepStrictEqual(evidence.generations.map(row => row.generation), [1, 2], 'one successor generation signed every operation');
@@ -1024,7 +1040,7 @@ test('issue343 U5-5 a moved target or a Git conflict integrates nothing and pres
 test('issue343 U5-6 cleanup retains dirty or needed member worktrees, never forces, and keeps every sibling claim valid', async () => {
   assert(u5.serial && u5.partial, 'the consolidated cohorts of U5-1 and U5-2 are required');
   try {
-    // Acknowledged members keep their uncommitted results (auto_commit false): dirty roots stay.
+    // Cohort integration never commits the worker roots: dirty evidence stays reserved.
     const serialPlan = batch.cleanupCohort(u5.serial.scope);
     assert.deepStrictEqual(serialPlan.map(member => [member.task_id, member.roots.map(root => [root.decision, root.reason_code])]),
       [['T01', [['retained', 'member-root-dirty']]], ['T02', [['retained', 'member-root-dirty']]]]);
@@ -1147,6 +1163,31 @@ test('issue343 U5-1 and U5-5 integrate rename deletion binary and POSIX mode-onl
   } finally { await finish(fx); }
 });
 
+test('issue343 ignored declared output integrates and acknowledges without weakening byte verification', async () => {
+  const tasks = { T01: taskPlan('T01').replace('writes:\n', 'writes:\n  - "src/declared-ignored.bin"\n')
+    .replace('  artifacts:\n', '  artifacts:\n    - path: "src/declared-ignored.bin"\n      provides: "Declared ignored binary"\n      min_lines: 1\n')
+    .replace('expected_output:\n', 'expected_output:\n  - src/declared-ignored.bin\n'), T02: taskPlan('T02') };
+  const bytes = Buffer.from([0, 255, 42, 13, 10]);
+  const fx = await retainedCohort('ignored-output', PAIR, {
+    T01: { ...GO, operations: [{ kind: 'binary', path: 'src/declared-ignored.bin', base64: bytes.toString('base64') }] }, T02: GO,
+  }, { tasks, setup(dir) { write(at(dir, '.gitignore'), 'build/\n*.log\nsrc/declared-ignored.bin\n'); } });
+  try {
+    const index = targetState(fx.dir);
+    const crashed = await within(consolidate(fx, { failpoint: crashAt('member-integrated') }), 300000, 'ignored-output integration crash');
+    assert.strictEqual(crashed.error?.code, 'FIXTURE_CRASH');
+    write(at(fx.dir, 'src/declared-ignored.bin'), Buffer.from('tampered ignored output'));
+    const refused = await within(consolidate(fx), 300000, 'ignored-output byte tamper');
+    assert(refused.error || refused.value?.status !== 'consolidated', 'ignored bytes still require exact verification');
+    assert.deepStrictEqual(completions(fx.dir), [], 'tamper never acknowledges the first member');
+    write(at(fx.dir, 'src/declared-ignored.bin'), bytes);
+    const report = await consolidated(fx, 'ignored declared output');
+    assert.strictEqual(report.status, 'consolidated');
+    assert(fs.readFileSync(at(fx.dir, 'src/declared-ignored.bin')).equals(bytes));
+    assert.deepStrictEqual(targetState(fx.dir), index, 'the target index remains unchanged');
+    assert.deepStrictEqual(completions(fx.dir).map(row => row.unit.key), ['execute-task/T01', 'execute-task/T02']);
+  } finally { await finish(fx); }
+});
+
 test('issue343 U5-5 POSIX executable mode drift conflicts before publication and resumes only after restoring the exact base mode', async () => {
   if (process.platform === 'win32') return; // Windows mode observability is separately refused by isolation.
   const tasks = { T01: taskPlan('T01').replace('writes:\n', 'writes:\n  - "src/t01/**"\n'), T02: taskPlan('T02') };
@@ -1252,8 +1293,257 @@ test('issue343 U5-4 corrupted committed completion refuses batch-ack and keeps t
   } finally { fs.writeFileSync(file, original); }
 });
 
+// Real production transports: a local executable implements their wire protocols,
+// without replacing runExecute or calling scope.attach from the harness.
+const ACTUAL_ADAPTER_PROVIDER = path.join(TMP, 'provider', 'actual-adapter-provider.js');
+fs.writeFileSync(ACTUAL_ADAPTER_PROVIDER, `
+'use strict';
+const fs=require('fs'),path=require('path'),readline=require('readline');
+const send=value=>process.stdout.write(JSON.stringify(value)+'\\n');
+async function result(prompt){
+ const match=prompt.match(/FORGE_FIXTURE_CONFIG=(\\{[^\\n]+\\})/);if(!match)throw Error('fixture config absent');
+ const c=JSON.parse(match[1]);fs.writeFileSync(path.join(c.rendezvous,c.task+'.entered'),String(process.pid));
+ if(c.delay_ms)await new Promise(r=>setTimeout(r,c.delay_ms));
+ const until=Date.now()+5000;while((c.peers||[]).some(id=>!fs.existsSync(path.join(c.rendezvous,id+'.entered')))){
+  if(Date.now()>until)throw Error('actual adapter peer absent');await new Promise(r=>setTimeout(r,10));
+ }
+ const file='src/'+c.task.toLowerCase()+'.js';
+ if(c.status!=='blocked')fs.writeFileSync(file,'module.exports = '+JSON.stringify(c.task)+';\\n');
+ fs.writeFileSync(path.join(c.rendezvous,c.task+'.finished'),String(Date.now()));
+ return {status:c.status,summary:c.task+' actual adapter '+c.status,files_changed:c.status==='blocked'?[]:[file],
+ must_haves_status:[{item:'real fixture',status:c.status==='done'?'met':'unmet',note:'actual child',scope:c.status==='blocked'?'environment':'task',reason:c.status==='blocked'?'network-required':''}]};
+}
+if(process.argv.includes('app-server')){
+ const rl=readline.createInterface({input:process.stdin});rl.on('line',async line=>{try{const m=JSON.parse(line);
+  if(m.method==='initialize')send({id:m.id,result:{serverInfo:{name:'fixture'}}});
+  else if(m.method==='thread/start')send({id:m.id,result:{thread:{id:'thread-fixture'}}});
+  else if(m.method==='turn/start'){
+   send({id:m.id,result:{turn:{id:'turn-fixture'}}});const value=await result(m.params.input[0].text);
+   send({method:'item/completed',params:{item:{id:'answer',type:'agentMessage',text:JSON.stringify(value)}}});
+   send({method:'turn/completed',params:{turn:{id:'turn-fixture',status:'completed'}}});
+  }
+ }catch(e){process.stderr.write(e.message);process.exitCode=1;rl.close();}});
+}else{
+ const args=process.argv.slice(2),instruction=args[args.indexOf('-p')+1];
+ if(args.includes('--session-id'))send({type:'system',subtype:'init',session_id:args[args.indexOf('--session-id')+1],model:args[args.indexOf('--model')+1]});
+ const prefix='Read the complete task prompt from this UTF-8 file: ',suffix='. Follow it exactly and return the required structured_output JSON.';
+ const prompt=fs.readFileSync(JSON.parse(instruction.slice(prefix.length,-suffix.length)),'utf8');
+ result(prompt).then(value=>send({type:'result',subtype:'success',is_error:false,structured_output:value,session_id:args[args.indexOf('--session-id')+1],
+  result:['---GSD-WORKER-RESULT---','status: '+value.status,'result_json: '+JSON.stringify(value),'---END-RESULT---'].join('\\n'),
+  modelUsage:{[args[args.indexOf('--model')+1]]:{inputTokens:1,outputTokens:1}}})).catch(e=>{process.stderr.write(e.message);process.exitCode=1;});
+}
+`);
+const ACTUAL_ACCOUNT_PRELOAD=path.join(TMP,'provider','actual-account-preload.js');
+fs.writeFileSync(ACTUAL_ACCOUNT_PRELOAD,`require(${JSON.stringify(require.resolve('./forge-accounts'))}).resolveLaunch=()=>({name:'isolated-cli-fixture',token:'synthetic-process-fixture-token'});`);
+async function actualAdapterCase(label, statuses, options={}) {
+  const tasks=options.codex?Object.fromEntries(PAIR.map(id=>[id,taskPlan(id).replace('tier: standard','tier: standard\nworker: codex')])):undefined;
+  const previous=xllm.runExecute,oldClaude=process.env.FORGE_XLLM_CLAUDE_BIN,oldCodex=process.env.FORGE_XLLM_CODEX_BIN;
+  let fx=null;
+  try{
+    process.env.FORGE_XLLM_CLAUDE_BIN=ACTUAL_ADAPTER_PROVIDER;process.env.FORGE_XLLM_CODEX_BIN=ACTUAL_ADAPTER_PROVIDER;
+    fx=fixture(label,PAIR,{}, {tasks,hostRuntime:options.codex?'claude':'codex'});
+    xllm.runExecute=canonicalRunExecute;
+    for(const id of PAIR){
+      const context=path.join(CHANNELS,label+'-'+id+'-context.md');
+      fs.writeFileSync(context,'FORGE_FIXTURE_CONFIG='+JSON.stringify({task:id,status:statuses[id],rendezvous:fx.rendezvous,peers:options.serial?[]:PAIR,delay_ms:id==='T01'?options.delay_ms||0:0})+'\n');
+      fx.inputs[id].contextFile=context;
+    }
+    if(options.preflight)unavailableAccountTask='T02';
+    if(options.cli){
+      const requestFile=write(path.join(TMP,'requests',label+'-actual-cli.json'),JSON.stringify({schema:batch.RUN_REQUEST_SCHEMA,
+        cwd:fx.scope.cwd,milestone:M,host_runtime:fx.scope.host_runtime,owner_token:TOKEN,run_id:fx.scope.run_id,
+        manifest_sha256:fx.ids.manifest_sha256,members:fx.inputs}));
+      fx.running=settle(runCli(['-r',ACTUAL_ACCOUNT_PRELOAD,CLI,'run','--batch',fx.ids.batch_id,'--request',requestFile],90000).then(cli=>{
+        assert.strictEqual(cli.code,0,cli.stderr.slice(-1500));return JSON.parse(cli.stdout.trim().split('\n').pop());
+      }));
+    }else fx.running=settle(batch.runCohort(fx.scope,{members:fx.inputs,stream:SINK,
+      ...(options.serial?{prefsReader:prefs(1)}:{}),
+      onMemberControl:control=>{fx.controls.set(control.task_id,control);if(options.cancel&&control.task_id==='T02')control.abort('queued fixture cancellation');
+        if(options.captureLease&&control.task_id==='T01')fx.leaseBefore=PAIR.map(id=>({file:lease.leaseFile(fx.dir,'execute-task/'+id),bytes:fs.readFileSync(lease.leaseFile(fx.dir,'execute-task/'+id))}));}}));
+    const settled=await within(fx.running,90000,label);if(settled.error)throw settled.error;
+    const report=settled.value;assert(report.barrier.sealed,JSON.stringify(report));
+    const evidence=reconciliation.readBatchEvidence({directory:report.broker.directory,manifest_sha256:report.broker.manifest_sha256});
+    return {fx,report,evidence,barrier:readJson(path.join(report.broker.directory,'barrier.json'))};
+  }catch(error){await finish(fx);throw error;}
+  finally{unavailableAccountTask=null;xllm.runExecute=previous;process.env.FORGE_XLLM_CLAUDE_BIN=oldClaude;process.env.FORGE_XLLM_CODEX_BIN=oldCodex;}
+}
+test('issue343 R1 actual production adapters attach both real children before retention',async()=>{
+  const {fx,report,barrier}=await actualAdapterCase('actual-production',{T01:'done',T02:'done'},{cli:true});
+  try{assert.strictEqual(report.status,'retained');assert(report.members.every(row=>row.process.pid>0&&row.process.join==='joined'));assert(barrier.members.every(row=>row.pid>0&&row.outcome==='retained'));}
+  finally{await finish(fx);}
+});
+test('issue343 R1 actual appserver adapter attaches real JSON-RPC children before retention',async()=>{
+ const {fx,report,barrier}=await actualAdapterCase('actual-appserver',{T01:'done',T02:'done'},{codex:true});
+ try{assert.strictEqual(report.status,'retained');assert(report.members.every(row=>row.process.pid>0&&row.process.join==='joined'));assert(barrier.members.every(row=>row.pid>0&&row.outcome==='retained'));}
+ finally{await finish(fx);}
+});
+for(const kind of ['cancel','preflight'])test('issue343 R6 actual '+kind+' never-started proof permits the healthy sibling barrier',async()=>{
+ const {fx,report,barrier}=await actualAdapterCase('actual-'+kind,{T01:'done',T02:'done'},{[kind]:true,serial:true});
+ try{assert.strictEqual(report.members[0].outcome,'retained');const row=barrier.members[1];assert.strictEqual(row.writer_state,'never-started');assert.strictEqual(row.pid,null);assert.strictEqual(row.exit_code,null);assert.strictEqual(row.signal,null);assert(!fs.existsSync(path.join(fx.rendezvous,'T02.entered')));}
+ finally{await finish(fx);}
+});
+for(const status of ['partial','blocked'])test('issue343 R13 actual '+status+' result remains signed residual beside done',async()=>{
+ const {fx,report,evidence,barrier}=await actualAdapterCase('actual-'+status,{T01:'done',T02:status});
+ try{const row=report.members[1],signed=barrier.members[1],receipt=readJson(fx.inputs.T02.resultFile+'.receipt.json');
+  assert.strictEqual(row.result_status,status);assert.strictEqual(row.outcome,'blocked');assert.strictEqual(row.provider_called,true);
+  assert.strictEqual(signed.outcome,'residual');assert.strictEqual(signed.result_status,status);assert.strictEqual(signed.provider_called,true);
+  assert.strictEqual(evidence.members[1].result_status,status);assert.strictEqual(evidence.members[1].provider_called,true);
+  assert.strictEqual(receipt.phase,'residual');assert.strictEqual(receipt.result.status,status);assert.strictEqual(published(fx.dir,'T02'),false);
+  assert.strictEqual(completions(fx.dir).length,0);if(status==='blocked')assert.strictEqual(signed.reason,'network-required');
+ }finally{await finish(fx);}
+});
+test('issue343 R4 actual healthy child and queued sibling exceed ordinary TTL without owner heartbeats',async()=>{
+ const {fx,report}=await actualAdapterCase('actual-window',{T01:'done',T02:'done'},{serial:true,delay_ms:lease.DEFAULT_TTL_MS+1000,captureLease:true});
+ try{assert.strictEqual(report.status,'retained');assert.strictEqual(report.pool.max_concurrent,1);
+  for(const snapshot of fx.leaseBefore){assert(fs.readFileSync(snapshot.file).equals(snapshot.bytes),'no heartbeat under S0');const raw=JSON.parse(snapshot.bytes);assert(raw.expires_at-raw.heartbeat_at>lease.DEFAULT_TTL_MS);}
+  assert(fs.statSync(path.join(fx.rendezvous,'T02.entered')).mtimeMs>=fs.statSync(path.join(fx.rendezvous,'T01.finished')).mtimeMs,'queued sibling starts only after first writer finished');
+ }finally{await finish(fx);}
+});
+test('issue343 R4 uncovered max-tier serial queue refuses before any provider or S0',async()=>{
+ const tasks=Object.fromEntries(PAIR.map(id=>[id,taskPlan(id).replace('tier: standard','tier: max')]));
+ const fx=fixture('uncovered-window',PAIR,{}, {tasks});
+ try{await rejectsCode(batch.runCohort(fx.scope,{members:fx.inputs,stream:SINK,prefsReader:prefs(1)}),'batch-lease-coverage-insufficient','max queue cannot fit existing lease bound');
+  assert(!fs.existsSync(fx.inputs.T01.resultFile+'.receipt.json'));assert(!fs.existsSync(fx.inputs.T02.resultFile+'.receipt.json'));
+ }finally{await finish(fx);}
+});
+
 // Root adds the two scoped corruption witnesses here: STATE bytes after terminal intent,
 // and completed controller proof corruption refusing batch-ack without clearing its locator.
+
+// Auto-deferred cohort plans use a live host adapter; no approval files exist.
+function r2AutoInputs(fx) {
+  for (const id of fx.names) {
+    fs.unlinkSync(path.join(sliceDir(fx.dir), 'tasks', id, `${id}-PLAN-GATE.md`));
+    fx.inputs[id].gates = { ...fx.inputs[id].gates, plan: 'skipped', planSkipReason: 'auto-defer', authorizationReference: `fixture-auto:${fx.label}:${id}` };
+  }
+}
+function r2HostAdapter(fx, observations, enabled = () => true) {
+  const execution = require('./forge-task-execution'), expected = structuredClone(fx.inputs);
+  const plans = Object.fromEntries(fx.names.map(id => [id, digest(fs.readFileSync(path.join(sliceDir(fx.dir), 'tasks', id, `${id}-PLAN.md`)))]));
+  return execution.createAutoPlanGateAdapter(scope => {
+    const input = expected[scope.taskId];
+    let knownRoot = rootsApi.key(scope.codeDir) === rootsApi.key(fx.dir);
+    if (!knownRoot) {
+      const record = readJson(path.join(fx.dir, '.gsd/forge/batches', fx.ids.batch_id, 'isolation.json'));
+      const member = record.members.find(row => row.task_id === scope.taskId);
+      const root = member?.roots.find(row => rootsApi.key(row.path) === rootsApi.key(scope.codeDir));
+      knownRoot = Boolean(root && isolation.validateWorktreeIdentity(fx.dir, root.path, root.branch).ok);
+    }
+    const contract = rootsApi.validateContract({ schema_version: 2, owner: fx.dir, primary_root_id: 'primary', code_roots: [{ id: 'primary', path: scope.codeDir, vcs: 'git' }] });
+    const authorized = enabled() && Boolean(input) && knownRoot && scope.scope === 'milestone' && scope.phase === 'execute'
+      && scope.unitType === 'execute-task' && scope.host === 'codex' && rootsApi.key(scope.owner) === rootsApi.key(fx.dir)
+      && scope.milestoneId === M && scope.sliceId === S && scope.workflowId === input.workflowId && scope.dispatchId === input.dispatchId
+      && scope.reference === input.gates.authorizationReference && scope.planSha256 === plans[scope.taskId]
+      && scope.planFile === fs.realpathSync.native(path.join(sliceDir(fx.dir), 'tasks', scope.taskId, `${scope.taskId}-PLAN.md`))
+      && scope.executionContractSha256 === rootsApi.digest(contract);
+    observations.push({ task: scope.taskId, codeDir: scope.codeDir, authorized });
+    return { authorized, mode: 'auto', reference: scope.reference };
+  });
+}
+
+test('issue343 R2 automatic cohort runs without manual markers and reattests origin and physical members', async () => {
+  const fx = fixture('r2-auto', PAIR, { T01: { peers: ['T02'], hold: false }, T02: { peers: ['T01'], hold: false } });
+  const observed = []; let enabled = true;
+  try {
+    r2AutoInputs(fx); const autoPlanGateAdapter = r2HostAdapter(fx, observed, () => enabled);
+    Object.assign(CONFIG, { plan: fx.plan, journal: fx.journal, onSpawn: null });
+    fx.running = settle(batch.runCohort(fx.scope, { members: fx.inputs, stream: SINK, autoPlanGateAdapter }));
+    const outcome = await within(fx.running, 120000, 'R2 actual auto pool');
+    assert(!outcome.error, outcome.error && outcome.error.stack); fx.report = outcome.value;
+    assert.strictEqual(fx.report.status, 'retained', JSON.stringify(fx.report));
+    assert(fx.report.barrier.sealed && fx.report.members.every(row => row.outcome === 'retained'));
+    assert(observed.length > 4 && observed.every(row => row.authorized));
+    for (const id of fx.names) {
+      assert(observed.some(row => row.task === id && rootsApi.key(row.codeDir) === rootsApi.key(fx.dir)), 'origin authorization was actually observed');
+      assert(observed.some(row => row.task === id && rootsApi.key(row.codeDir) !== rootsApi.key(fx.dir)), 'physical member authorization was actually observed');
+      assert(!fs.existsSync(path.join(sliceDir(fx.dir), 'tasks', id, `${id}-PLAN-GATE.md`)), 'no synthetic approved marker');
+    }
+    enabled = false;
+    await assert.rejects(batch.consolidateCohort(fx.scope, { members: fx.inputs, broker_manifest_sha256: fx.report.broker.manifest_sha256, autoPlanGateAdapter }), error => error.code === 'execution-auto-gate-not-attested');
+    enabled = true;
+    const fresh = r2HostAdapter(fx, observed), report = await batch.consolidateCohort(fx.scope, { members: fx.inputs, broker_manifest_sha256: fx.report.broker.manifest_sha256, autoPlanGateAdapter: fresh });
+    assert.strictEqual(report.status, 'consolidated', JSON.stringify(report));
+    assert(report.members.every(row => row.outcome === 'acknowledged'));
+    assertBinding(fx);
+  } finally { await finish(fx); }
+});
+
+test('issue343 R2 missing, serialized and foreign auto attestation starts no writer', async () => {
+  const fx = fixture('r2-refuse', PAIR, { T01: { peers: [], hold: false }, T02: { peers: [], hold: false } });
+  try {
+    r2AutoInputs(fx); const observed = [], live = r2HostAdapter(fx, observed);
+    for (const adapter of [undefined, JSON.parse(JSON.stringify(live))]) {
+      await assert.rejects(batch.runCohort(fx.scope, { members: fx.inputs, stream: SINK, autoPlanGateAdapter: adapter }), error => ['batch-member-plan-invalid', 'execution-auto-gate-adapter-required'].includes(error.code));
+    }
+    const bad = require('./forge-task-execution').createAutoPlanGateAdapter(scope => ({ authorized: true, mode: 'auto', reference: scope.reference + ':foreign' }));
+    await assert.rejects(batch.runCohort(fx.scope, { members: fx.inputs, stream: SINK, autoPlanGateAdapter: bad }), error => error.code === 'execution-auto-gate-not-attested');
+    for (const field of ['workflowId', 'dispatchId']) {
+      const old = fx.inputs.T01[field]; fx.inputs.T01[field] = old + '-foreign';
+      await assert.rejects(batch.runCohort(fx.scope, { members: fx.inputs, stream: SINK, autoPlanGateAdapter: live }), error => error.code === 'execution-auto-gate-not-attested'); fx.inputs.T01[field] = old;
+    }
+    const reference = fx.inputs.T01.gates.authorizationReference; fx.inputs.T01.gates.authorizationReference += ':forged';
+    await assert.rejects(batch.runCohort(fx.scope, { members: fx.inputs, stream: SINK, autoPlanGateAdapter: live }), error => error.code === 'execution-auto-gate-not-attested'); fx.inputs.T01.gates.authorizationReference = reference;
+    const plan = path.join(sliceDir(fx.dir), 'tasks/T01/T01-PLAN.md'), bytes = fs.readFileSync(plan);fs.appendFileSync(plan, '\nforeign plan edit\n');
+    try { await assert.rejects(batch.runCohort(fx.scope, { members: fx.inputs, stream: SINK, autoPlanGateAdapter: live })); } finally { fs.writeFileSync(plan, bytes); }
+    assert.strictEqual(fs.readFileSync(fx.journal, 'utf8'), '', 'no synthetic or real transport started');
+    assert(!fs.existsSync(path.join(fx.dir, '.gsd/forge/batches', fx.ids.batch_id, 'isolation.json')), 'no member worktree or aggregate claim published');
+  } finally { await finish(fx); }
+});
+
+test('review R5 R19 partial ACK projects the original roster and terminal custody replays intent effect and commit before a single successor', async () => {
+  const fx = await retainedCohort('review-custody', PAIR, PAIR_GO, { tasks: {
+    T01: taskPlan('T01'), T02: taskPlan('T02'), T03: taskPlan('T03', ['T02']),
+  } });
+  try {
+    const original = fx.ids.snapshot.last_decision.controller_result.details.dispatch_batch;
+    const partial = await consolidate(fx, { failpoint: crashAt('member-acknowledged') });
+    assert.strictEqual(partial.error?.code, 'FIXTURE_CRASH');
+    const pending = adapter.invoke('codex', 'auto', 'batch-ack', ackInput(fx), fx.ids.snapshot, {}).result;
+    assert.strictEqual(pending.reason_code, 'batch-members-pending');
+    assert.deepStrictEqual(pending.snapshot.current_batch.members, ['execute-task/T02']);
+    const projected = pending.snapshot.last_decision.controller_result.details.dispatch_batch;
+    assert.deepStrictEqual(projected.members, [original.members[1]], 'the original index/route/begin/lease binding is preserved');
+    const repeated = adapter.invoke('codex', 'auto', 'next', ackInput(fx), pending.snapshot, {}).result;
+    assert.strictEqual(repeated.outcome, 'dispatch_required');
+    assert.deepStrictEqual(repeated.controller_result.details.dispatch_batch.members, [original.members[1]]);
+    assert.strictEqual(repeated.snapshot.step_count, fx.ids.snapshot.step_count, 'no second charge');
+    const tampered = JSON.parse(JSON.stringify(pending.snapshot));
+    tampered.last_decision.controller_result.details.dispatch_batch.members[0].transaction.generation = 'foreign';
+    assert.strictEqual(adapter.invoke('codex', 'auto', 'next', ackInput(fx), tampered, {}).result.outcome, 'blocked');
+    for (const point of ['claim-mutation-intent', 'claim-mutation-applied', 'claim-mutation-before-commit']) {
+      const interrupted = await consolidate(fx, { failpoint: crashAt(point) });
+      assert.strictEqual(interrupted.error?.code, 'FIXTURE_CRASH', point);
+      const proof = reconciliation.readBatchRetirement(fx.trust);
+      assert.strictEqual(proof.committed, false, point + ': the historical intent is not promoted');
+    }
+    const report = await consolidated(fx, 'review custody final commit');
+    assert.strictEqual(report.retirement.status, 'retired');
+    const run = runs.get(fx.dir, fx.scope.run_id);
+    assert.strictEqual(run.batch_locator, null);
+    assert.strictEqual(run.batch_retirements.length, 1);
+    const held = JSON.stringify(run.write_claim), spawned = spawnedCount(fx), completionsBefore = completeEvents(fx.dir).length;
+    const replay = await consolidated(fx, 'review terminal read-only replay');
+    assert.strictEqual(replay.historical_replay, true);
+    assert.strictEqual(spawnedCount(fx), spawned);
+    assert.strictEqual(completeEvents(fx.dir).length, completionsBefore);
+    for (const memberRoot of memberPaths(fx).values()) {
+      assert.strictEqual(batch.memberRootReservation(fx.dir, memberRoot).reserved, true, 'dirty/evidence roots remain exclusive');
+    }
+    const acked = adapter.invoke('codex', 'auto', 'batch-ack', ackInput(fx), pending.snapshot, {}).result;
+    assert.strictEqual(acked.outcome, 'completed');
+    const nextClaim = claims.recordClaim(fx.dir, fx.scope.run_id, { schema_version: 2,
+      execution_contract: rootsApi.singleContract(fx.dir, fx.dir), source: 'plan-writes', unit: 'execute-task/T03',
+      paths: [{ root_id: 'primary', path: 'src/t03.js' }] });
+    assert.strictEqual(nextClaim.execution_contract.code_roots.length, run.write_claim.execution_contract.code_roots.length);
+    assert.deepStrictEqual(nextClaim.root_baselines, run.write_claim.root_baselines);
+    assert(claims.coversRetainedExecution(runs.get(fx.dir, fx.scope.run_id), rootsApi.singleContract(fx.dir, fx.dir), [{ root_id: 'primary', path: 'src/t03.js' }]));
+    assert.throws(() => claims.clearClaim(fx.dir, fx.scope.run_id), /batch-claim-owner-operation-required/);
+    const next = adapter.invoke('codex', 'auto', 'next', ackInput(fx), acked.snapshot, {}).result;
+    assert.strictEqual(next.unit.key, 'execute-task/T03');
+    assert.strictEqual(next.action, 'dispatch');
+    assert.notStrictEqual(JSON.stringify(runs.get(fx.dir, fx.scope.run_id).write_claim), held, 'new unit reservation is an additive union');
+  } finally { await finish(fx); }
+});
 
 (async () => {
   try {

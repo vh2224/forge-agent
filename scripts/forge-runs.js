@@ -100,6 +100,7 @@ function runFile(cwd, id) {
 function withAddressDefaults(rec) {
   if (!rec || typeof rec !== 'object') return rec;
   if (rec.batch_locator != null) validateBatchLocator(rec.batch_locator, rec.id);
+  if (rec.batch_retirements !== undefined) validateBatchRetirements(rec.batch_retirements, rec.id);
   return Object.assign({}, rec, {
     branch:  (rec.branch  === undefined || rec.branch  === '') ? null : rec.branch,
     root:    (rec.root    === undefined || rec.root    === '') ? null : rec.root,
@@ -313,6 +314,7 @@ function writeAtomic(...args) {
 }
 function writeAtomicInsideOwnerWindow(filePath, record) {
   if (record.batch_locator != null) validateBatchLocator(record.batch_locator, record.id);
+  if (record.batch_retirements !== undefined) validateBatchRetirements(record.batch_retirements, record.id);
   const dir  = path.dirname(filePath);
   const base = path.basename(filePath);
   // Random suffix avoids collisions if two writers hit the same id concurrently
@@ -351,6 +353,36 @@ function validateBatchLocator(value, runId) {
       || typeof value.claim_generation !== 'string' || !/^[a-f0-9-]{36}$/.test(value.claim_generation)
       || value.isolation_ref !== `.gsd/forge/batches/${value.batch_id}/isolation.json`) invalid();
   return { ...value };
+}
+
+// Historical custody is not a live batch locator or permission to restart it.
+function validateBatchRetirements(value, runId) {
+  const invalid = () => { throw Object.assign(new Error('batch-custody-invalid'), { code: 'batch-custody-invalid' }); };
+  if (!Array.isArray(value) || value.length > 64) invalid();
+  const seen = new Set();
+  for (const row of value) {
+    if (!row || Object.keys(row).sort().join(',') !== 'broker_manifest_sha256,locator,operation_sequence,post_unit,retained_roots,retirement_id,witness_ref'
+        || !/^[a-f0-9]{64}$/.test(row.retirement_id || '') || seen.has(row.retirement_id)
+        || !/^[a-f0-9]{64}$/.test(row.broker_manifest_sha256 || '') || !Number.isSafeInteger(row.operation_sequence) || row.operation_sequence < 1) invalid();
+    const locator = validateBatchLocator(row.locator, runId);
+    if (locator.phase !== 'prepared' || row.witness_ref !== `.gsd/forge/batches/${locator.batch_id}/retirement.json`
+        || !Array.isArray(row.retained_roots) || row.retained_roots.length > 14 || !Array.isArray(row.post_unit)) invalid();
+    const paths = new Set();
+    for (const root of row.retained_roots) {
+      if (!root || Object.keys(root).sort().join(',') !== 'identity_sha256,path,root_id' || typeof root.root_id !== 'string'
+          || !path.isAbsolute(root.path || '') || !/^[a-f0-9]{64}$/.test(root.identity_sha256 || '') || paths.has(root.path)) invalid();
+      paths.add(root.path);
+    }
+    const units = new Set();
+    for (const member of row.post_unit) {
+      if (!member || Object.keys(member).sort().join(',') !== 'key,member_index,unit' || !Number.isSafeInteger(member.member_index)
+          || member.member_index < 0 || typeof member.unit !== 'string' || units.has(member.unit)
+          || member.key !== `${row.retirement_id}:${member.member_index}:post-unit`) invalid();
+      units.add(member.unit);
+    }
+    seen.add(row.retirement_id);
+  }
+  return value;
 }
 
 function withRunLock(...args) {
@@ -1037,7 +1069,7 @@ Flags:
 }
 
 module.exports = {
-  listAll, listAllDetailed, boundedCensus, withRegistryFence, listActive, get, validateBatchLocator,
+  listAll, listAllDetailed, boundedCensus, withRegistryFence, listActive, get, validateBatchLocator, validateBatchRetirements,
   add, update, updateWith, remove,
   bumpHeartbeat, cleanupStale,
   inspectOwnerResume, resumeOwner, knownResumeBinding, settleInterruptedOwner,

@@ -867,7 +867,8 @@ function evaluateGateCore(opts, persistReleases) {
     // `different-code-dir` is cheap and I/O-free; probing first would spend a
     // VCS round-trip on pairs that are out of scope anyway, and would grow the
     // census with release facts about runs this evaluation never had to judge.
-    const rel = record?.batch_locator ? { released: false, note: null } : counterpartRelease(c.claim, {
+    const rel = record?.batch_locator || record?.batch_retirements?.some(row => row.retained_roots.length)
+      ? { released: false, note: null } : counterpartRelease(c.claim, {
       cwd,
       runId: c.id,
       runRecord: record,

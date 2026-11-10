@@ -285,7 +285,16 @@ const MAX_EVIDENCE_BYTES = 16 * 1024 * 1024;
 const HEX64 = /^[a-f0-9]{64}$/;
 const MEMBER_REF = /^m[0-7]-[a-f0-9]{16}$/;
 const RETAINED_KEYS = Object.freeze(['response_sha256', 'executed_sha256', 'seal_sha256', 'baseline_sha256', 'delta_sha256']);
-const OUTCOMES = Object.freeze(['retained', 'failed', 'interrupted']);
+const OUTCOMES = Object.freeze(['retained', 'residual', 'failed', 'interrupted']);
+function residualMetadata(value) {
+  if (!isRecord(value) || Object.keys(value).sort().join(',') !== 'pending_questions,provider_called,reason,reason_code,result_status'
+      || !['partial','blocked'].includes(value.result_status) || typeof value.reason_code !== 'string' || value.reason_code.length > 256
+      || !(value.reason === null || typeof value.reason === 'string' && value.reason.length <= 4096)
+      || ![true,false,'unknown'].includes(value.provider_called) || !Array.isArray(value.pending_questions)
+      || value.pending_questions.length > 128 || JSON.stringify(value.pending_questions).length > 65536) fail('broker-residual-invalid');
+  return {result_status:value.result_status,reason_code:value.reason_code,reason:value.reason,
+    pending_questions:copy(value.pending_questions),provider_called:value.provider_called};
+}
 // The key holder inherits only what Node and the shared temporary mutex need: no provider
 // credential, NODE_OPTIONS or inspector flag ever reaches the signing child.
 const SIGNER_ENV = Object.freeze(['PATH', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'TMPDIR', 'HOME',
@@ -490,6 +499,7 @@ function verifyAnchor(manifest, registry, anchor) {
       || payload.request_sha256 !== member.request_sha256 || payload.plan_sha256 !== member.plan_sha256
       || payload.runtime_contract_sha256 !== member.runtime_contract_sha256
       || RETAINED_KEYS.some(key => typeof payload[key] !== 'string' || !HEX64.test(payload[key]))) fail('broker-anchor-invalid');
+  if (payload.residual !== undefined) residualMetadata(payload.residual);
   return payload;
 }
 function verifyBarrier(manifest, record, rows, anchors) {
@@ -498,8 +508,15 @@ function verifyBarrier(manifest, record, rows, anchors) {
       || !Array.isArray(payload.members) || payload.members.length !== manifest.members.length || !isRecord(payload.heads)) fail('broker-barrier-invalid');
   payload.members.forEach((row, index) => {
     const member = manifest.members[index], anchor = anchors.get(member.member_ref);
-    if (!isRecord(row) || row.member_ref !== member.member_ref || !OUTCOMES.includes(row.outcome) || !Number.isSafeInteger(row.pid)
-        || (row.outcome === 'retained') !== !!anchor || row.anchor_sha256 !== (anchor ? digest(anchor) : null)) fail('broker-barrier-invalid');
+    const neverStarted = row && row.writer_state === 'never-started';
+    if (!isRecord(row) || row.member_ref !== member.member_ref || !OUTCOMES.includes(row.outcome)
+        || (neverStarted ? Object.keys(row).sort().join(',') !== 'anchor_sha256,exit_code,member_ref,outcome,pid,reason_code,signal,writer_state'
+          || row.pid !== null || row.exit_code !== null || row.signal !== null || ['retained','residual'].includes(row.outcome)
+          || !['queue-cancelled','pre-spawn-refused','ENOENT','EACCES','ENOEXEC'].includes(row.reason_code)
+          : !Number.isSafeInteger(row.pid) || row.pid <= 0 || row.writer_state !== undefined)
+        || (['retained','residual'].includes(row.outcome)) !== !!anchor || row.anchor_sha256 !== (anchor ? digest(anchor) : null)
+        || (row.outcome === 'residual' ? !anchor.residual || digest(residualMetadata(Object.fromEntries(['pending_questions','provider_called','reason','reason_code','result_status'].map(key=>[key,row[key]])))) !== digest(anchor.residual)
+          : anchor?.residual !== undefined)) fail('broker-barrier-invalid');
   });
   for (const relative of manifest.append_paths) {
     const head = payload.heads[relative], stream = rows.filter(row => row.path === relative), last = stream[stream.length - 1];
@@ -639,12 +656,13 @@ async function startBatchBroker(batchHandle, members, paths = {}) {
       return serial(async () => {
         const member = memberOf(handle);
         writable();
-        if (!isRecord(retainedRef) || Object.keys(retainedRef).length !== RETAINED_KEYS.length
+        if (!isRecord(retainedRef) || Object.keys(retainedRef).length !== RETAINED_KEYS.length + (retainedRef.residual === undefined ? 0 : 1)
             || RETAINED_KEYS.some(key => typeof retainedRef[key] !== 'string' || !HEX64.test(retainedRef[key]))) fail('broker-response-ref-invalid');
+        const residual = retainedRef.residual === undefined ? null : residualMetadata(retainedRef.residual);
         const writer = processes.get(member.member_ref);
         if (!writer) fail('broker-member-join-required');
         if (!writer.exit || processAlive(writer.pid)) fail('broker-member-writer-live');
-        const anchor = await call('member-response', { member_ref: member.member_ref, ...Object.fromEntries(RETAINED_KEYS.map(key => [key, retainedRef[key]])) });
+        const anchor = await call('member-response', { member_ref: member.member_ref, ...Object.fromEntries(RETAINED_KEYS.map(key => [key, retainedRef[key]])), ...(residual ? {residual} : {}) });
         if (verifyAnchor(manifest, registry, anchor).member_ref !== member.member_ref) fail('broker-anchor-invalid');
         const file = anchorFile(directory, member), existing = boundedBytes(file, MAX_LINE_BYTES, 'broker-response-anchor-conflict');
         if (existing !== null) { if (digest(parsed(existing, 'broker-response-anchor-conflict')) !== digest(anchor)) fail('broker-response-anchor-conflict'); }
@@ -665,6 +683,30 @@ async function startBatchBroker(batchHandle, members, paths = {}) {
       processes.set(member.member_ref, observed);
       return Object.freeze({ member_ref: member.member_ref, pid: processHandle.pid });
     },
+    // Only the lexical production spawn in the live member scope can register
+    // a no-PID ChildProcess. Neither a JSON flag nor a fabricated child proves it.
+    observeMemberSpawnFailure(handle, child) {
+      const member = memberOf(handle), scope = batch.currentMemberProcessScope();
+      writable();
+      if (!(child instanceof ChildProcess) || child.pid || !scope || !scope.ownsSpawnAttempt(child)
+          || processes.has(member.member_ref)) fail('broker-process-invalid');
+      const observed = { pid: null, exit: null, writer_state: 'pending-spawn' };
+      processes.set(member.member_ref, observed);
+      child.once('error', error => {
+        if (!child.pid && ['ENOENT','EACCES','ENOEXEC'].includes(error.code)) {
+          observed.writer_state = 'never-started'; observed.reason_code = error.code;
+        }
+      });
+    },
+    closeMemberWithoutWriter(handle) {
+      const member = memberOf(handle), scope = batch.currentMemberProcessScope();
+      writable();
+      if (!scope) fail('broker-member-no-start-unproven');
+      const proof = scope.closeWithoutSpawn(handle), observed = processes.get(member.member_ref);
+      if (observed && (observed.writer_state !== 'never-started' || observed.reason_code !== proof.reason_code)) fail('broker-member-no-start-unproven');
+      processes.set(member.member_ref, { writer_state: 'never-started', pid: null, exit: null, reason_code: proof.reason_code });
+      return Object.freeze({ member_ref: member.member_ref, writer_state: 'never-started' });
+    },
     /** The execution barrier: every member joined (its attached process exited and is gone). */
     sealExecutionBarrier(handle, observations) {
       return serial(async () => {
@@ -683,9 +725,18 @@ async function startBatchBroker(batchHandle, members, paths = {}) {
           // gone. A worker report, a boolean or a plain object never stands in for it.
           const observed = processes.get(member.member_ref);
           if (!observed) fail('broker-barrier-join-required');
+          if (observed.writer_state === 'never-started') {
+            if (['retained','residual'].includes(observation.outcome) || anchors.has(member.member_ref)) fail('broker-barrier-outcome-mismatch');
+            outcomes.set(member.member_ref, { member_ref: member.member_ref, outcome: observation.outcome,
+              writer_state: 'never-started', reason_code: observed.reason_code, pid: null, exit_code: null, signal: null });
+            continue;
+          }
           if (!observed.exit || processAlive(observed.pid)) fail('broker-barrier-writer-live');
-          if ((observation.outcome === 'retained') !== anchors.has(member.member_ref)) fail('broker-barrier-outcome-mismatch');
+          if ((['retained','residual'].includes(observation.outcome)) !== anchors.has(member.member_ref)) fail('broker-barrier-outcome-mismatch');
+          const anchor = anchors.get(member.member_ref);
+          if ((observation.outcome === 'residual') !== !!anchor?.residual) fail('broker-barrier-outcome-mismatch');
           outcomes.set(member.member_ref, { member_ref: member.member_ref, outcome: observation.outcome, pid: observed.pid,
+            ...(anchor?.residual ? residualMetadata(anchor.residual) : {}),
             exit_code: Number.isSafeInteger(observed.exit.code) ? observed.exit.code : null,
             signal: typeof observed.exit.signal === 'string' ? observed.exit.signal : null });
         }
@@ -770,11 +821,13 @@ function readBatchEvidence(options = {}) {
     members: manifest.members.map((member, index) => {
       const anchor = anchors.get(member.member_ref);
       return { member_ref: member.member_ref, member_index: member.member_index, task_id: member.task_id, unit: member.unit,
+        ...(barrier?.members[index].outcome === 'residual' ? residualMetadata(Object.fromEntries(['pending_questions','provider_called','reason','reason_code','result_status'].map(key=>[key,barrier.members[index][key]]))) : {}),
         dispatch_id: member.dispatch_id, sequences: verified.members[member.member_ref],
         anchor: anchor ? { sha256: digest(anchor), response_sha256: anchor.response_sha256, executed_sha256: anchor.executed_sha256,
           seal_sha256: anchor.seal_sha256, trust: options.anchors === undefined ? 'signed' : 'anchored' } : null,
         outcome: barrier ? barrier.members[index].outcome : null,
-        process: barrier ? { pid: barrier.members[index].pid, exit_code: barrier.members[index].exit_code, signal: barrier.members[index].signal } : null };
+        process: barrier ? { pid: barrier.members[index].pid, exit_code: barrier.members[index].exit_code, signal: barrier.members[index].signal,
+          ...(barrier.members[index].writer_state === 'never-started' ? {writer_state:'never-started',reason_code:barrier.members[index].reason_code} : {}) } : null };
     }),
     generations: evidence.generations.map(row => ({ generation: row.generation, sha256: row.sha256 })),
     operations: { committed: operations.committed.length, pending: operations.pending ? operations.pending.sequence : null,
@@ -810,6 +863,23 @@ const SUCCESSOR_NAME = /^g(\d{1,3})\.json$/;
 function pad4(value) { return String(value).padStart(4, '0'); }
 function lstatOrNull(file) {
   try { return fs.lstatSync(file); } catch (error) { if (error && error.code === 'ENOENT') return null; throw error; }
+}
+// Read the one typed retirement producer from the authenticated journal. This
+// is historical evidence, never a capability to reopen a terminal cohort.
+function readBatchRetirement(options = {}) {
+  if (!isRecord(options) || typeof options.directory !== 'string' || !path.isAbsolute(options.directory)) fail('broker-evidence-invalid');
+  const directory = roots.realDirectory(options.directory);
+  if (roots.key(directory) !== roots.key(path.resolve(options.directory))) fail('broker-evidence-invalid');
+  const evidence = loadCohortEvidence(directory, options.manifest_sha256, { barrier_sha256: options.barrier_sha256 });
+  const entries = evidence.operations.entries.filter(entry => entry.payload.species === 'claim-mutation'
+    && entry.payload.producer?.name === 'forge-execution-batch.retire');
+  if (entries.length > 1) fail('broker-operation-invalid');
+  if (!entries.length) return null;
+  const entry = entries[0];
+  return frozen(copy({ sequence: entry.sequence, committed: entry.commit !== null,
+    producer: entry.payload.producer, effects: entry.payload.effects,
+    operations: { committed: evidence.operations.committed.length, pending: evidence.operations.pending?.sequence || null,
+      head_sha256: evidence.operations.head.sha256 } }));
 }
 // The lexical grammar safeTarget enforces, without touching the file system.
 function ownerRelative(value) {
@@ -1262,7 +1332,7 @@ async function resumeBatchBrokerInside(batchHandle, members, paths, observation)
 }
 
 module.exports = { startBroker, assertBroker, verifyProof, verifySurface, inspectCandidate, reconcile, safeTarget, lock, withOwnerLock,
-  BATCH_BROKER_REFUSALS, startBatchBroker, assertBatchBroker, readBatchEvidence,
+  BATCH_BROKER_REFUSALS, startBatchBroker, assertBatchBroker, readBatchEvidence, readBatchRetirement,
   // Issue 343 U5: the post-barrier successor generation and its closed typed owner operations.
   OPERATION_SPECIES, resumeBatchBroker };
 if (require.main === module && process.argv[2] === '--broker' && process.send) {
@@ -1329,12 +1399,13 @@ if (require.main === module && process.argv[2] === '--broker' && process.send) {
         if (RETAINED_KEYS.some(key => typeof message.data[key] !== 'string' || !HEX64.test(message.data[key]))) fail('broker-response-hash-invalid');
         // One immutable anchor per member attempt: broker-response-already-bound still holds.
         const prior = memberAnchors.get(member.member_ref);
-        if (prior && RETAINED_KEYS.some(key => prior[key] !== message.data[key])) fail('broker-response-already-bound');
+        if (prior && (RETAINED_KEYS.some(key => prior[key] !== message.data[key]) || digest(prior.residual || null) !== digest(message.data.residual || null))) fail('broker-response-already-bound');
         if (!prior) {
           memberAnchors.set(member.member_ref, sign({ kind: 'member-response', manifest_sha256: manifestSha, batch_id: manifest.batch_id,
             member_ref: member.member_ref, member_index: member.member_index, task_id: member.task_id, dispatch_id: member.dispatch_id,
             request_sha256: member.request_sha256, plan_sha256: member.plan_sha256, runtime_contract_sha256: member.runtime_contract_sha256,
-            ...Object.fromEntries(RETAINED_KEYS.map(key => [key, message.data[key]])) }));
+            ...Object.fromEntries(RETAINED_KEYS.map(key => [key, message.data[key]])),
+            ...(message.data.residual === undefined ? {} : {residual:residualMetadata(message.data.residual)}) }));
         }
         result = memberAnchors.get(member.member_ref);
       } else if (message.op === 'barrier' && manifest && manifest.schema_version === 2) {
@@ -1344,11 +1415,19 @@ if (require.main === module && process.argv[2] === '--broker' && process.send) {
             || typeof message.data.sealed_at !== 'string' || !Number.isFinite(Date.parse(message.data.sealed_at))) fail('broker-barrier-incomplete');
         const outcomes = manifest.members.map((member, index) => {
           const row = rows[index], anchor = memberAnchors.get(member.member_ref);
-          if (!isRecord(row) || row.member_ref !== member.member_ref || !OUTCOMES.includes(row.outcome) || !Number.isSafeInteger(row.pid) || row.pid <= 0) {
+          const neverStarted = row && row.writer_state === 'never-started';
+          if (!isRecord(row) || row.member_ref !== member.member_ref || !OUTCOMES.includes(row.outcome)
+              || (neverStarted ? Object.keys(row).sort().join(',') !== 'exit_code,member_ref,outcome,pid,reason_code,signal,writer_state'
+                || row.pid !== null || row.exit_code !== null || row.signal !== null || ['retained','residual'].includes(row.outcome)
+                || !['queue-cancelled','pre-spawn-refused','ENOENT','EACCES','ENOEXEC'].includes(row.reason_code)
+                : !Number.isSafeInteger(row.pid) || row.pid <= 0 || row.writer_state !== undefined)) {
             fail('broker-barrier-incomplete');
           }
-          if ((row.outcome === 'retained') !== !!anchor) fail('broker-barrier-outcome-mismatch');
+          if ((['retained','residual'].includes(row.outcome)) !== !!anchor || (row.outcome === 'residual') !== !!anchor?.residual) fail('broker-barrier-outcome-mismatch');
+          if (anchor?.residual && digest(residualMetadata(Object.fromEntries(['pending_questions','provider_called','reason','reason_code','result_status'].map(key=>[key,row[key]])))) !== digest(anchor.residual)) fail('broker-barrier-outcome-mismatch');
           return { member_ref: member.member_ref, outcome: row.outcome, pid: row.pid,
+            ...(neverStarted ? { writer_state: 'never-started', reason_code: row.reason_code } : {}),
+            ...(anchor?.residual ? residualMetadata(anchor.residual) : {}),
             exit_code: Number.isSafeInteger(row.exit_code) ? row.exit_code : null, signal: typeof row.signal === 'string' ? row.signal : null,
             anchor_sha256: anchor ? digest(anchor) : null };
         });

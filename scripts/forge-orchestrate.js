@@ -70,7 +70,7 @@ const REASON_CODES = Object.freeze([
   ...timeSelection.TIME_OPTION_REASON_CODES, ...timeSelection.TIME_OPTION_RESUME_CODES,
   ...forgeController.TIME_ADMISSION_CODES, ...TIME_OPTION_CONTINUATION_CODES,
   // Issue 343 U1: the batch dispatch, its loop commands and their closed refusals.
-  'batch-selected', 'batch-status-ready', 'batch-acked', ...executionBatch.REFUSAL_CODES,
+  'batch-selected', 'batch-status-ready', 'batch-acked', 'batch-retirement-pending', ...executionBatch.REFUSAL_CODES,
 ]);
 
 function own(value, key) { return Object.prototype.hasOwnProperty.call(value || {}, key); }
@@ -315,6 +315,41 @@ function validateBatchPending(inputValue, decision, options) {
     if (!checked.ok) return checked;
   }
   return { ok: true };
+}
+// Read-only projection of an already charged dispatch. No route or begin is
+// selected here: every retained binding must be the original canonical one.
+function projectBatchPending(inputValue, decision, options) {
+  const input = normalizeInput(inputValue), cached = decision?.details?.dispatch_batch;
+  if (!cached || !Array.isArray(cached.members) || !cached.members.length) return { ok: false, reason: 'batch-dispatch-invalid' };
+  let view, manifest;
+  try {
+    view = executionBatch.status({ cwd: input.cwd, milestone: input.milestone, host_runtime: input.host_runtime,
+      owner_token: input.owner_token, batch_id: cached.batch_id, manifest_sha256: cached.manifest_sha256 }, options);
+    manifest = executionBatch.readManifest(input.cwd, cached.batch_id);
+  } catch (cause) { return { ok: false, reason: cause.code || 'batch-manifest-invalid' }; }
+  if (!manifest || manifest.manifest_sha256 !== cached.manifest_sha256) return { ok: false, reason: 'batch-dispatch-invalid' };
+  let prior = -1;
+  for (const member of cached.members) {
+    if (!member || !member.transaction || !member.route) return { ok: false, reason: 'batch-dispatch-invalid' };
+    const canonical = manifest.members[member.index], binding = member.transaction;
+    const begun = canonical && forgeController.lookupRecord(input.cwd, 'transaction', canonical.begin_key);
+    if (!Number.isSafeInteger(member.index) || member.index <= prior || !canonical || !begun
+      || unit(member.unit)?.key !== canonical.unit || binding?.idempotency_key !== canonical.begin_key
+      || binding.begin_checksum !== checksum(begun) || binding.generation !== begun.lease_generation
+      || binding.owner_digest !== begun.owner_digest || binding.host_runtime !== begun.host_runtime
+      || binding.milestone !== begun.milestone || binding.unit !== begun.unit.key
+      || checksum(member.route) !== checksum(executionBatch.publicMember(manifest, canonical).route)) {
+      return { ok: false, reason: 'unit-identity-mismatch' };
+    }
+    prior = member.index;
+  }
+  const active = view.members.filter(member => !executionBatch.TERMINAL_STATES.includes(member.state));
+  if (!active.length) return { ok: false, reason: 'batch-dispatch-empty' };
+  const members = active.map(member => cached.members.find(row => row.index === member.index));
+  if (members.some(member => !member)) return { ok: false, reason: 'batch-dispatch-invalid' };
+  const projected = { ...decision, details: { ...decision.details, dispatch_batch: { ...cached, members } } };
+  const checked = validateBatchPending(inputValue, projected, options);
+  return checked.ok ? { ok: true, decision: projected } : checked;
 }
 function unit(value) {
   if (!value) return null;
@@ -982,6 +1017,7 @@ function batchOperation(operation, inputValue, options = {}) {
   if (!view.terminal || view.members.some(member => member.state === 'ack' && !acknowledged.includes(member.unit.key))) {
     return refuse('batch-members-pending', { batch: view, acknowledged });
   }
+  if (view.retirement?.status !== 'retired') return refuse('batch-retirement-pending', { batch: view, acknowledged });
   return Object.assign(base(operation, 'completed', 'batch-acked', input), { details: { batch: view, acknowledged } });
 }
 function memberCompleted(input, member) {
@@ -1032,4 +1068,4 @@ function main(argv = process.argv.slice(2), output = process.stdout.write.bind(p
 }
 if (require.main === module) process.exitCode = main();
 module.exports = { PROTOCOL_VERSION, OPERATIONS, OUTCOMES, REASON_CODES, BUDGET_RESUME_REASON_CODES, TIME_OPTION_BLOCK_CODES,
-  TIME_OPTION_CONTINUATION_CODES, normalizeInput, normalizeHost, init, status, next, handoff, run, parseArgs, main, checksum, validatePending, validateTerminal };
+  TIME_OPTION_CONTINUATION_CODES, normalizeInput, normalizeHost, init, status, next, handoff, run, parseArgs, main, checksum, validatePending, validateTerminal, projectBatchPending };

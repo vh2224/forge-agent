@@ -339,7 +339,17 @@ function batchAck(state, input, orchestrate) {
   if (delegated.outcome !== 'completed') {
     const acknowledged = acknowledgedOf(delegated);
     const remaining = state.current_batch.members.filter(key => !acknowledged.has(key));
-    if (remaining.length && remaining.length < state.current_batch.members.length) state.current_batch = { ...state.current_batch, members: remaining };
+    if (acknowledged.size || delegated.details?.batch?.members) {
+      if (typeof orchestrate.projectBatchPending !== 'function') return publicResult('batch-ack', state, 'blocked', 'batch-pending-projection-required', 'stop', delegated);
+      const projected = orchestrate.projectBatchPending(delegateInput(input, state), state.last_decision?.controller_result);
+      if (!projected.ok) return publicResult('batch-ack', state, 'blocked', projected.reason || 'batch-dispatch-invalid', 'stop', delegated);
+      // Commit the retention locator and cached active roster in one snapshot.
+      state.last_decision = { ...state.last_decision, controller_result: projected.decision };
+    }
+    if (remaining.length && remaining.length < state.current_batch.members.length) {
+      state.current_batch = { ...state.current_batch, members: remaining };
+      state.last_decision = { ...state.last_decision, batch: state.current_batch };
+    }
     return publicResult('batch-ack', state, 'blocked', delegated.reason_code || 'batch-members-pending', 'stop', delegated);
   }
   delete state.current_batch; state.current_unit = null; state.last_decision = null; state.boundary = null;
@@ -361,6 +371,7 @@ function advance(snapshot, commandValue, input = {}, dependencies = {}) {
   // A call-scoped extra (the loop's own workflow mode/budget) joins the trusted options only.
   const orchestrate = { run: (operation, payload, extra) => controller.run(operation, payload, extra ? { ...trusted, ...extra } : trusted),
     ...(typeof controller.validatePending === 'function' ? { validatePending: (payload, decision) => controller.validatePending(payload, decision, trusted) } : {}),
+    ...(typeof controller.projectBatchPending === 'function' ? { projectBatchPending: (payload, decision) => controller.projectBatchPending(payload, decision, trusted) } : {}),
     ...(typeof controller.validateTerminal === 'function' ? { validateTerminal: payload => controller.validateTerminal(payload, trusted) } : {}) };
   if (state.current_batch && SINGLE_UNIT_COMMANDS.has(command)) return publicResult(command, state, 'blocked', 'batch-active', 'stop', null);
   if (command === 'batch-status') return batchStatus(state, input, orchestrate);

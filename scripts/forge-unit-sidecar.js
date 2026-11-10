@@ -331,8 +331,12 @@ function validateMemberRequest(request, transport, options) {
       || view.canonical_plan_sha256 !== hash(plan)) fail('execution-member-view-stale');
   const gateFile = planFile.replace(/-PLAN\.md$/, '-PLAN-GATE.md');
   const gate = fs.existsSync(gateFile) ? fs.readFileSync(gateFile, 'utf8') : '';
-  if (!/^status:\s*approved\s*$/m.test(gate)) fail('execution-plan-gate-required');
-  if (gate.match(/^plan_sha256:\s*([a-f0-9]{64})\s*$/m)?.[1] !== hash(plan)) fail('execution-plan-gate-stale');
+  if (request.gates?.plan === 'skipped' && request.gates.planSkipReason === 'auto-defer') {
+    if (!require('./forge-task-execution').autoGateAllowed(request)) fail('execution-plan-gate-required');
+  } else {
+    if (!/^status:\s*approved\s*$/m.test(gate)) fail('execution-plan-gate-required');
+    if (gate.match(/^plan_sha256:\s*([a-f0-9]{64})\s*$/m)?.[1] !== hash(plan)) fail('execution-plan-gate-stale');
+  }
   if (request.gates?.claim !== 'proceed' || !['passed', 'not-applicable'].includes(request.gates?.security)) fail('execution-gates-required');
   if (request.gates.security === 'passed'
       && (!request.securityFile || !fs.readFileSync(request.securityFile, 'utf8').trim())) fail('execution-security-required');
@@ -3045,9 +3049,12 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
   }
   // Issue 343 U3b: the retained result of a cohort member (never a done delivery) on its channel.
   function retainedResult(stage, retained, providerCalled) {
-    const result = { status: 'retained', stage, dispatch_id: dispatchId, batch_id: retained.batch_id, member_ref: retained.member_ref,
+    const residual = retained.executed_record?.residual || (stage === 'residual' ? JSON.parse(fs.readFileSync(receiptFile,'utf8')).residual : null);
+    const result = { status: residual ? residual.result_status : 'retained', stage, dispatch_id: dispatchId, batch_id: retained.batch_id, member_ref: retained.member_ref,
+      ...(residual ? {result_status:residual.result_status,reason_code:residual.reason_code,reason:residual.reason,pending_questions:residual.pending_questions} : {}),
       task_id: retained.task_id, retained_ref: { path: retained.ref_path, sha256: retained.ref_sha256 },
-      anchor_sha256: retained.anchor.sha256, provider_called: providerCalled };
+      anchor_sha256: retained.anchor.sha256, provider_called: residual ? residual.provider_called : providerCalled,
+      ...(residual && providerCalled === false ? { replay_provider_called: false } : {}) };
     json(resultFile, result);
     notifyPhase('waiting');
     return result;
@@ -3060,7 +3067,7 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
     verifySeal(record);
     assertMemberModes(r, record);
     const bytes = fs.readFileSync(receiptFile);
-    if (!bytes.equals(Buffer.from(`${JSON.stringify(record, null, 2)}\n`, 'utf8')) || record.phase !== 'executed'
+    if (!bytes.equals(Buffer.from(`${JSON.stringify(record, null, 2)}\n`, 'utf8')) || !['executed','residual'].includes(record.phase)
         || !record.milestone_delivery || !record.recovery_baseline) fail('batch-member-executed-changed');
     const response = record.returned_response, responseFile = `${resultFile}.returned.json`;
     if (!response || !fs.existsSync(responseFile) || hash(fs.readFileSync(responseFile)) !== response.sha256) fail('batch-member-response-changed');
@@ -3070,7 +3077,7 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
       delta_sha256: digest({ verified_files: record.milestone_delivery.verified_files,
         verified_modes: record.milestone_delivery.verified_modes, code_state: record.milestone_delivery.code_state }) });
     if (telemetry) await sessionCleanupEvent(telemetry.session?.cleanup, sessionShaOf(telemetry));
-    return retainedResult('executed', retained, providerCalled);
+    return retainedResult(record.phase, retained, providerCalled);
   }
   // Issue 343 U3b: the replay of a cohort member respects the barrier. A saved executed record is
   // revalidated and stays (or, saved before its retention completed, becomes) the retained
@@ -3087,7 +3094,7 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
       return retainedResult('ready', retained, false);
     }
     assertMilestoneDeliveryReplay(r, saved);
-    if (retained) return retainedResult('executed', retained, false);
+    if (retained) return retainedResult(saved.phase === 'residual' ? 'residual' : 'executed', retained, false);
     if (member.barrierSealed()) fail('batch-member-retained-required');
     await member.verifyOwner('execution');
     return retainExecuted(saved, null, false);
@@ -3099,7 +3106,7 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
     }
     if (existing.retained_request) require('./forge-request-retention').assertForReceipt(r, existing);
     // Issue 343 U3b: a cohort member's saved delivery record replays only as its retention.
-    if (member && existing.milestone_delivery && (existing.phase === 'executed' || existing.phase === 'ready')) {
+    if (member && existing.milestone_delivery && ['executed','ready','residual'].includes(existing.phase)) {
       return await replayRetainedMember(existing);
     }
     if (existing.phase === 'ready' || existing.phase === 'executed') {
@@ -3550,6 +3557,13 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
         let artifacts;
       transportReturned = true;
       await livenessQueue;
+       // A completed app-server turn can resolve while its local process is
+       // still draining/being terminated. Verify immutable deltas only after
+       // the real member writer exited and its PID is gone.
+       if (member) {
+         const processScope=require('./forge-execution-batch').currentMemberProcessScope();
+         if(processScope)await processScope.joinWriter();
+       }
       transportTelemetry = result.transport_telemetry || null;
       const trustedTransportRecord = transportTelemetry ? {
         telemetry: { ...observedModelTelemetry(transportTelemetry),
@@ -3591,7 +3605,7 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
         completed(result);
         return result;
       }
-      if (r.execution_contract && result.status === 'done') {
+      if (r.execution_contract && (result.status === 'done' || member && ['partial','blocked'].includes(result.status))) {
         // Retain the returned object privately before integrity checks can refuse it;
         // receipts gain only the hash reference. Not an acceptance or replay source.
         await preserveReturnedResponse(result, { recordTelemetry: false });
@@ -3613,7 +3627,12 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
           claims: checked.writes, snapshots: state.repos }, result);
         // Save the validated response before checks/publication. A failing gate
         // must replay delivery, never infer again or capture a new writer baseline.
-        const executed = { ...saved, phase: 'executed', provider_called: true, ...trustedTransportRecord,
+        const isResidual = member && ['partial','blocked'].includes(result.status);
+        const residual = isResidual ? {result_status:result.status,reason_code:typeof result.reason_code==='string'?result.reason_code:'worker-'+result.status,
+          reason:typeof result.reason==='string'?result.reason:(result.must_haves_status || []).find(item=>item.reason)?.reason || null,
+          pending_questions:result.pending_questions || [],provider_called:true} : null;
+        const executed = { ...saved, phase: isResidual ? 'residual' : 'executed', provider_called: true, ...trustedTransportRecord,
+          ...(residual ? {residual} : {}),
           final_evidence: saved.final_evidence ? { ...saved.final_evidence, stage: 'returned', provider_called: true,
             duration_ms: Date.now() - Date.parse(startedAt),
             model_observed: result.transport_telemetry?.model_observed || result.appserver?.transport_telemetry?.model_observed || null } : null,
