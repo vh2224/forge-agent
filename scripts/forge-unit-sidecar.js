@@ -946,6 +946,127 @@ function admitReturnedPlan(request, root, slicePlan, taskPlans, extra = {}) {
     throw error;
   }
 }
+// Compatibility producer for the established native plan-slice artifacts facade.
+// This admission is created AFTER return, from the real controller begin and
+// current canonical task sources. It never pretends to be a pre-provider marker.
+const NATIVE_PLAN_ADMISSION_FIELD = 'native_plan_admission';
+const NATIVE_PLAN_ADMISSION_KEYS = Object.freeze(['kind', 'fingerprint', 'dispatch_id', 'workflow_id', 'begin_key', 'begin_checksum', 'generation', 'validation']);
+function nativePlanArtifactRoute(request) {
+  const route = request.route;
+  return milestonePlanSlice(request) && request.scope === 'milestone' && request.phase === 'plan'
+    && route?.worker_mode === 'native' && route.dispatch_allowed === true
+    && route.resolved_worker_engine === route.host_runtime
+    && (!request.hostRuntime || request.hostRuntime === route.host_runtime)
+    && capability(route.resolved_worker_engine, request.unitType).mode === 'plan'
+    && evaluateDispatchGuard({ ...route, unit_type: request.unitType }).dispatch_allowed === true;
+}
+// Verify the already-resolved scope, never re-select a model or reread its
+// resolution sources/preferences after the native host has invoked it.
+function assertNativePlanArtifactContext(request) {
+  const resolver = require('./forge-dispatch-resolve'), route = request.route;
+  const expected = resolver.resolutionContext({ unitType: request.unitType, milestoneId: request.milestoneId,
+    unitId: request.taskId || request.sliceId || request.milestoneId, cwd: request.contextRoot || request.cwd,
+    planPath: request.planFile, roadmapPath: request.roadmapFile });
+  if (!route?.resolution_context || !route.resolution_options
+      || canonicalDigest(route.resolution_context) !== canonicalDigest(expected)
+      || canonicalDigest(resolver.resolutionContext(route.resolution_options)) !== canonicalDigest(expected)) {
+    planRefusal('plan-generation-begin-invalid', 'native publication must retain its originally resolved owner, unit and plan scope');
+  }
+}
+// An unenrolled STARTED native attempt keeps the public historical validation.
+// Its origin still requires a unique real unfinished controller begin and the
+// same reserved lease; absence of a new field never selects this branch.
+function assertLegacyNativePlanArtifactOrigin(request, record, root) {
+  const invalid = detail => planRefusal('plan-generation-begin-invalid', detail);
+  if (planSliceClassification(request, root).status !== 'unenrolled') invalid('an enrolled lineage cannot become historical');
+  assertNativePlanArtifactContext(request);
+  require('./forge-request-retention').assertForReceipt(request, record);
+  if (record.fingerprint !== artifactFingerprint(request) || record.dispatch_id !== request.dispatchId
+      || canonicalDigest(record.route) !== canonicalDigest(request.route)) invalid('historical native request or original route differs');
+  const controller = require('./forge-unit-controller');
+  const begins = controller.incompleteUnits(root, request.milestoneId).filter(row => row.action === 'begin'
+    && row.phase === 'committed' && row.unit?.key === ('plan-slice/' + request.sliceId));
+  if (begins.length !== 1) invalid('historical native publication needs exactly one genuine unfinished begin');
+  const begin = controller.lookupRecord(root, 'transaction', begins[0].idempotency_key);
+  if (!begin || Object.hasOwn(begin, 'plan_generation') || begin.host_runtime !== request.route.host_runtime
+      || begin.milestone !== request.milestoneId) invalid('historical native begin does not belong to this host and milestone');
+  const held = require('./forge-unit-lease').observe(root, begin.unit.key).lease;
+  if (!held || held.generation !== begin.lease_generation || held.host_runtime !== begin.host_runtime) invalid('historical native begin no longer holds its reserved lease');
+  return begin;
+}
+function nativePlanArtifactOrigin(request, root, options = {}) {
+  const invalid = detail => planRefusal('plan-generation-begin-invalid', detail);
+  const classified = planSliceClassification(request, root);
+  if (!(options.replay ? ['open', 'completed'] : ['open']).includes(classified.status)) invalid('native plan artifacts require the genuine current controller generation');
+  const controller = require('./forge-unit-controller'), begin = controller.lookupRecord(root, 'transaction', classified.begin_key);
+  if (!begin || begin.phase !== 'committed' || begin.action !== 'begin' || begin.unit?.key !== `plan-slice/${request.sliceId}`
+      || begin.milestone !== request.milestoneId || begin.host_runtime !== request.route.host_runtime) invalid('native publication does not belong to this owner, unit or host');
+  const generation = planApi().verifyPlanGeneration(begin.plan_generation, { owner: root, milestone: request.milestoneId,
+    slice: request.sliceId, begin_key: begin.idempotency_key, lease_generation: begin.lease_generation, owner_digest: begin.owner_digest });
+  if (generation.generation_key !== classified.generation_key) invalid('native publication names another generation');
+  if (classified.status === 'open') {
+    const held = require('./forge-unit-lease').observe(root, begin.unit.key).lease;
+    if (!held || held.generation !== begin.lease_generation || held.host_runtime !== begin.host_runtime) invalid('native begin no longer holds its own lease');
+  } else planApi().assertSliceGeneration(root, planScope(request, root));
+  return { begin, generation, checksum: controller.recordChecksum(begin) };
+}
+function admitNativeArtifactPlan(request, record, root) {
+  const artifacts = record.artifacts || record.result?.artifacts;
+  const loc = locations(request), expected = loc.required[0];
+  if (!Array.isArray(artifacts) || artifacts.length !== 1 || artifacts[0].path !== expected || typeof artifacts[0].content !== 'string') {
+    planRefusal('plan-generation-transport-required', 'native compatibility accepts the slice artifact and canonical existing task sources only');
+  }
+  const slice = artifacts[0].content, tasks = planApi().listedTaskIds(slice).map(id => {
+    const source = planApi().readOwnerTaskPlan(root, { milestone: request.milestoneId, slice: request.sliceId, task: id });
+    if (source.status !== 'ok') planRefusal('plan-validation-source-mismatch', 'native plan task source is absent or unreadable');
+    return { id, content: source.content };
+  });
+  const admission = admitReturnedPlan(request, root, slice, tasks);
+  for (const source of admission.source.task_plans) {
+    const observed = planApi().readOwnerTaskPlan(root, { milestone: request.milestoneId, slice: request.sliceId, task: source.id });
+    if (observed.status !== 'ok' || observed.sha256 !== source.sha256) planRefusal('plan-validation-source-mismatch', 'native task sources changed during admission');
+  }
+  return admission;
+}
+function buildNativeArtifactPlanAdmission(request, rawResult, existing, root) {
+  if (!nativePlanArtifactRoute(request)) planRefusal('plan-generation-transport-required', 'milestone plan artifacts require the established native route');
+  // Native callback/metadata authentication stays with the current trusted host
+  // contract. No imported allowNative/legacy/approved flag enters this producer.
+  assertNativePlanArtifactContext(request);
+  if (rawResult.status !== 'done') {
+    if (Object.hasOwn(existing, NATIVE_PLAN_ADMISSION_FIELD)) planRefusal('plan-validation-invalid', 'a saved native plan admission cannot be stripped');
+    return null; // a partial response publishes no plan and completes no generation
+  }
+  if (Object.hasOwn(existing, NATIVE_PLAN_ADMISSION_FIELD)) {
+    verifyNativeArtifactPlanPublication(request, { ...existing, result: rawResult, artifacts: rawResult.artifacts }, root);
+    return existing[NATIVE_PLAN_ADMISSION_FIELD];
+  }
+  if (planSliceClassification(request, root).status === 'unenrolled') {
+    assertLegacyNativePlanArtifactOrigin(request, existing, root);
+    return null; // historical semantics, no enrollment or admission backfill
+  }
+  const origin = nativePlanArtifactOrigin(request, root), admission = admitNativeArtifactPlan(request, { result: rawResult }, root);
+  return { kind: 'native-artifact-plan-admission-v1', fingerprint: artifactFingerprint(request), dispatch_id: request.dispatchId,
+    workflow_id: request.workflowId, begin_key: origin.begin.idempotency_key, begin_checksum: origin.checksum,
+    generation: origin.generation, validation: planApi().buildPlanValidation(origin.generation, admission, { validatedAt: new Date().toISOString() }) };
+}
+function verifyNativeArtifactPlanPublication(request, record, root) {
+  const proof = record[NATIVE_PLAN_ADMISSION_FIELD], invalid = detail => planRefusal('plan-validation-invalid', detail);
+  assertNativePlanArtifactContext(request);
+  require('./forge-request-retention').assertForReceipt(request, record);
+  if (!nativePlanArtifactRoute(request) || !exactFields(proof, NATIVE_PLAN_ADMISSION_KEYS) || proof.kind !== 'native-artifact-plan-admission-v1') invalid('native plan admission is not a route or a permission flag');
+  if (PLAN_OWNER_FIELDS.some(key => Object.hasOwn(record, key))) invalid('native admission cannot be mixed with sidecar generation markers');
+  if (proof.fingerprint !== artifactFingerprint(request) || proof.fingerprint !== record.fingerprint || proof.dispatch_id !== request.dispatchId
+      || proof.dispatch_id !== record.dispatch_id || proof.workflow_id !== request.workflowId) invalid('native admission belongs to another request');
+  const origin = nativePlanArtifactOrigin(request, root, { replay: true });
+  if (proof.begin_key !== origin.begin.idempotency_key || proof.begin_checksum !== origin.checksum
+      || canonicalDigest(proof.generation) !== canonicalDigest(origin.generation)) invalid('native admission belongs to another real begin');
+  const checked = planApi().verifyPlanValidation(proof.validation, origin.generation), admission = admitNativeArtifactPlan(request, record, root);
+  const current = planApi().buildPlanValidation(origin.generation, admission, { validatedAt: checked.validated_at });
+  if (canonicalDigest(current) !== canonicalDigest(checked)) planRefusal('plan-validation-source-mismatch', 'native plan source bytes changed since admission');
+  return admission;
+}
+
 // Publication check of a ready record, under the owner lock and before any artifact
 // byte. null: not a plan-slice generation record, or one with no independent new origin.
 //
@@ -960,6 +1081,7 @@ function admitReturnedPlan(request, root, slicePlan, taskPlans, extra = {}) {
 // from a stripped new one; it replays with its historical semantics, unrewritten. This
 // seam does not promise universal detection and never revalidates or backfills history.
 function assertPlanGenerationPublication(request, record, root) {
+  if (Object.hasOwn(record, NATIVE_PLAN_ADMISSION_FIELD)) return verifyNativeArtifactPlanPublication(request, record, root);
   const present = PLAN_OWNER_FIELDS.filter(key => Object.hasOwn(record, key));
   if (!milestonePlanSlice(request)) {
     if (present.length) planRefusal('plan-generation-marker-invalid', 'only a milestone plan-slice record carries plan generation records');
@@ -1259,16 +1381,20 @@ async function acceptArtifactResultCore(request, rawResult, metadata = {}, publi
   }
   if (existing.phase === 'failed') fail(existing.failure?.reason_code || 'artifact-attempt-failed');
   if (existing.phase !== 'started') fail('sidecar-attempt-interrupted');
-  // Issue 343 U0c: a milestone plan-slice record exists only through its plan transport
-  // (strict admission, marker and evidence); this artifacts acceptance never creates one.
-  if (milestonePlanSlice(request)) fail('plan-generation-transport-required', 'Milestone slice plans publish only through the plan transport.');
+  // Generic plan artifacts still refuse. The existing native facade is admitted
+  // from its genuine controller generation and complete current task sources.
+  const nativePlan = milestonePlanSlice(request) && nativePlanArtifactRoute(request);
+  if (milestonePlanSlice(request) && !nativePlan) fail('plan-generation-transport-required', 'Milestone slice plans require an admitted native generation or the plan transport.');
   if (metadata.providerCalled !== true) fail('artifact-provider-call-unconfirmed');
+  if (nativePlan && [...PLAN_OWNER_FIELDS, NATIVE_PLAN_ADMISSION_FIELD].some(key => Object.hasOwn(rawResult || {}, key))) planRefusal('plan-generation-marker-untrusted', 'worker output cannot carry owner plan admission');
   xllm.assertUntrustedOutputBarrier(rawResult);
   if (/(?:token|secret|password|credential)\s*[:=]\s*[^\s"}]+/i.test(JSON.stringify(rawResult))) fail('secret-output');
   const checked = inspectArtifacts(rawResult, loc.allowed, loc.required,
     metadata.maxPayloadBytes === undefined ? Infinity : metadata.maxPayloadBytes, loc.rules,
     { forbidArtifactsOnNonDone: loc.preparation === true });
   if (!checked.ok) fail('invalid-artifact-result', checked.reason);
+  const nativeAdmission = nativePlan ? buildNativeArtifactPlanAdmission(request, rawResult, existing, files.root) : null;
+  if (nativeAdmission) existing[NATIVE_PLAN_ADMISSION_FIELD] = nativeAdmission;
   // Save validated bytes before checking owner drift. Failure keeps this exact
   // response, allowing proved owner appends to be reconciled without inference.
   const responseAnchor = request.ownerBroker
@@ -1330,7 +1456,8 @@ async function acceptArtifactResultCore(request, rawResult, metadata = {}, publi
   const pendingQuestions = require('./forge-interaction').mergePendingQuestions(request.pending_questions || [], rawResult.questions || []);
   const record = { phase: 'ready', fingerprint, dispatch_id: request.dispatchId,
     ...(existing.retained_request ? { retained_request: existing.retained_request } : {}),
-    ...(planContract ? { plan_contract: planContract } : {}), pending_questions: pendingQuestions,
+    ...(planContract ? { plan_contract: planContract } : {}),
+    ...(nativeAdmission ? { [NATIVE_PLAN_ADMISSION_FIELD]: nativeAdmission } : {}), pending_questions: pendingQuestions,
     input_pending_questions: request.pending_questions || [],
     request_fingerprint: request.preparationRequestFingerprint || null,
     preparation_identity: request.preparationIdentity || existing.preparation_identity || null,
@@ -1339,13 +1466,16 @@ async function acceptArtifactResultCore(request, rawResult, metadata = {}, publi
     artifacts: artifacts.map(artifact => ({ ...artifact, before: existing.before[artifact.path] ?? null })) };
   if (metadata.telemetry?.calibration_proposal) record.calibration_proposal = metadata.telemetry.calibration_proposal;
   json(files.receiptFile, record);
-  const result = await publishReadyRecord(request, record, undefined, publicationLock);
+  const legacyNativeGuard = nativePlan && rawResult.status === 'done' && !nativeAdmission
+    ? () => assertLegacyNativePlanArtifactOrigin(request, existing, files.root) : undefined;
+  const result = await publishReadyRecord(request, record, legacyNativeGuard, publicationLock);
   json(files.resultFile, result);
   return { result, record, replayed: false, provider_called: true };
 }
 async function reconcileArtifactAttempt(request, options) {
-  // Issue 343 U0c: never a second publisher of milestone slice plans (see acceptArtifactResultCore).
-  if (milestonePlanSlice(request)) fail('plan-generation-transport-required', 'Milestone slice plans publish only through the plan transport.');
+  // Reconciliation uses the SAME computed native admission and publisher;
+  // nonnative plan artifacts never gain this compatibility path.
+  if (milestonePlanSlice(request) && !nativePlanArtifactRoute(request)) fail('plan-generation-transport-required', 'Milestone slice plans require an admitted native generation or the plan transport.');
   const files = artifactAttemptFiles(request), loc = locations(request);
   return require('./forge-artifact-reconciliation').reconcile({ ...options, receiptFile: files.receiptFile,
     async publish(child, publicationGuard) {
@@ -1355,8 +1485,21 @@ async function reconcileArtifactAttempt(request, options) {
       const checked = inspectArtifacts(result, loc.allowed, loc.required, Infinity, loc.rules, { forbidArtifactsOnNonDone: loc.preparation === true });
       if (!checked.ok) fail('invalid-artifact-result');
       if (request.phase === 'plan' && result.status === 'done') require('./forge-task-preparation').preflightPlan(request, result.artifacts[0].content);
-      const record = { result, artifacts: result.artifacts.map(a => ({ ...a, before: child.before[a.path] ?? null })) };
-      await publishReadyRecord(request, record, undefined, publicationGuard);
+      const savedBytes = milestonePlanSlice(request) ? fs.readFileSync(files.receiptFile) : null;
+      if (savedBytes && hash(savedBytes) !== child.original_receipt_sha256) fail('reconciliation-receipt-raced');
+      const saved = savedBytes ? JSON.parse(savedBytes) : null;
+      if (saved) require('./forge-request-retention').assertForReceipt(request, saved);
+      const record = { ...(saved && Object.hasOwn(saved, NATIVE_PLAN_ADMISSION_FIELD) ? { fingerprint: saved.fingerprint, dispatch_id: saved.dispatch_id, ...(saved.retained_request ? { retained_request: saved.retained_request } : {}), [NATIVE_PLAN_ADMISSION_FIELD]: saved[NATIVE_PLAN_ADMISSION_FIELD] } : {}),
+        result, artifacts: result.artifacts.map(a => ({ ...a, before: child.before[a.path] ?? null })) };
+      if (milestonePlanSlice(request)) {
+        if (!Object.hasOwn(record, NATIVE_PLAN_ADMISSION_FIELD)) {
+          if (planSliceClassification(request, files.root).status !== 'unenrolled') planRefusal('plan-generation-marker-missing', 'reconciliation cannot invent a prior native admission');
+          assertLegacyNativePlanArtifactOrigin(request, saved, files.root);
+        } else verifyNativeArtifactPlanPublication(request, record, files.root);
+      }
+      const legacyNativeGuard = milestonePlanSlice(request) && !Object.hasOwn(record, NATIVE_PLAN_ADMISSION_FIELD)
+        ? () => assertLegacyNativePlanArtifactOrigin(request, saved, files.root) : undefined;
+      await publishReadyRecord(request, record, legacyNativeGuard, publicationGuard);
       json(files.resultFile, result);
     } });
 }

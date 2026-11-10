@@ -2761,8 +2761,14 @@ function restoreMember(ctx, lane, route) {
   const data = record.reservation.members.find(row => row.member_index === member.index);
   const placed = record.members.find(row => row.member_index === member.index);
   if (!data || !placed || data.task_id !== member.task_id) refuse('batch-member-restore-refused', `${member.task_id} has no prepared reservation`);
-  const pid = lane.row.process && lane.row.process.pid;
-  if (!Number.isSafeInteger(pid) || pid <= 0 || !processGone(pid)) refuse('batch-member-writer-live', `${member.task_id} has a writer the barrier did not join`);
+  const process = lane.row.process;
+  // readBatchEvidence verified this barrier's signature, member/anchor and actual observed exit.
+  // A numeric PID can be reused after that join; it is not the identity of the historical writer.
+  if (!ctx.evidence.barrier.sealed || lane.row.outcome !== 'retained' || !lane.row.anchor
+      || !Number.isSafeInteger(process?.pid) || process.pid <= 0
+      || !(Number.isSafeInteger(process.exit_code) || (typeof process.signal === 'string' && process.signal.length))) {
+    refuse('batch-member-writer-live', `${member.task_id} has no signed terminal writer observation`);
+  }
   for (const root of placed.roots) {
     const integration = record.integration_contract.code_roots.find(row => row.id === root.root_id);
     if (!integration || !isolation().validateWorktreeIdentity(integration.path, root.path, root.branch).ok) {
@@ -2929,6 +2935,18 @@ function memberReason(lane, state, outcome, stop) {
   if (stop && stop.task_id === lane.member.task_id) return stop.reason_code;
   return stop ? 'consolidation-stopped' : null;
 }
+// Replays can skip verification and publication entirely. Their READY pin still comes from the
+// original signed publication intent, never from the current mutable external receipt channel.
+function publishedReadySha(ctx, lane) {
+  const publication = ctx.broker.memberPublication(lane.row.member_ref);
+  if (!publication) return lane.verified?.ready_sha256 || null;
+  const producer = publication.producer;
+  if (producer?.name !== ARTIFACTS_PRODUCER || producer.task_id !== lane.member.task_id || !HASH.test(producer.ready_sha256 || '')
+      || (lane.verified && lane.verified.ready_sha256 !== producer.ready_sha256)) {
+    refuse('batch-operation-unexpected', 'the committed publication does not bind this member READY');
+  }
+  return producer.ready_sha256;
+}
 function consolidationReport(ctx, stop, cleanup) {
   const progress = progressOf(ctx.owner, ctx.manifest);
   const members = ctx.lanes.map(lane => {
@@ -2936,7 +2954,7 @@ function consolidationReport(ctx, stop, cleanup) {
     const outcome = state === 'ack' ? 'acknowledged' : state === 'needs-input' ? 'needs-input' : ['falhou', 'bloqueado'].includes(state) ? 'failed' : 'pending';
     return { index: lane.member.index, task_id: lane.member.task_id, unit: lane.member.unit, member_ref: lane.row.member_ref,
       barrier_outcome: lane.row.outcome, progress_state: state, outcome, reason_code: memberReason(lane, state, outcome, stop),
-      ready_sha256: lane.verified ? lane.verified.ready_sha256 : lane.ready_sha256 || null, integration: lane.integration || null,
+      ready_sha256: publishedReadySha(ctx, lane), integration: lane.integration || null,
       recheck: lane.recheck || null };
   });
   const acknowledged = members.filter(member => member.outcome === 'acknowledged').length;
@@ -3413,7 +3431,21 @@ async function consolidateCohortWithGate(scope, options) {
  */
 function cleanupCohort(scope) {
   const { owner, manifest, record } = consolidationScope(scope);
-  return deepFreeze(cohortCleanup(consolidationCohort(owner, manifest, record)));
+  const cohort = consolidationCohort(owner, manifest, record);
+  const run = require('./forge-runs').get(owner.real, record.run_id);
+  const archived = run?.batch_retirements?.find(row => row.locator.batch_id === manifest.batch_id);
+  if (archived) {
+    const directory = path.join(record.base.batch_dir, BROKER_DIRECTORY);
+    const closed = reconciliation().readBatchClosedHistory({ directory, manifest_sha256: archived.broker_manifest_sha256 });
+    const proof = closed?.retirement || reconciliation().readBatchRetirement({ directory, manifest_sha256: archived.broker_manifest_sha256 });
+    const evidence = closed?.evidence || reconciliation().readBatchEvidence({ directory, manifest_sha256: archived.broker_manifest_sha256 });
+    if (!retiredReport({ owner, manifest, record, evidence, historical: !!closed }, proof)) {
+      refuse('batch-retirement-stale', 'cleanup has no committed terminal custody proof');
+    }
+    HANDLES.get(cohort).retirement = proof.producer;
+  }
+  // The handle still enforces the exact current RunRecord post-image and held claim.
+  return deepFreeze(cohortCleanup(cohort));
 }
 
 // ── CLI: run --batch <ref> --request <file> ──────────────────────────────────

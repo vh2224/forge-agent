@@ -220,6 +220,23 @@ function cohort(dir, tasks) {
   assert.deepStrictEqual(dispatched.members.map(member => member.unit.key), ['execute-task/T01', 'execute-task/T02']);
   return { batch_id: dispatched.batch_id, manifest_sha256: dispatched.manifest_sha256 };
 }
+// Each matrix variant/replay is a separate fixture-owner operation. Keep the
+// actual committed begin's live generation through the canonical heartbeat;
+// never resurrect an expired lease, change its TTL or replace its generation.
+function heartbeatAdmittedMembers(dir, ids) {
+  const manifest = batch.readManifest(dir, ids.batch_id);
+  const members = manifest.members.map(member => {
+    const begin = controller.lookupRecord(dir, 'transaction', member.begin_key);
+    assert(begin && begin.action === 'begin' && begin.phase === 'committed');
+    assert.strictEqual(begin.unit.key, member.unit);
+    assert.strictEqual(begin.owner_digest, manifest.owner_digest);
+    assert.strictEqual(begin.host_runtime, manifest.host_runtime);
+    assert.deepStrictEqual(begin.batch, batch.memberBinding(manifest, member));
+    assert.strictEqual(typeof begin.lease_generation, 'string');
+    return { task_id: member.task_id, lease_generation: begin.lease_generation };
+  });
+  heartbeatMembers(dir, { members });
+}
 function scopeOf(dir, ids, label, extra = {}) {
   const runId = runLabel(label);
   if (!runs.get(dir, runId)) {
@@ -411,6 +428,7 @@ test('issue343 U2a-2 unrepresentable bases fall back to one named serial reason 
   const keep = git(dir, ['rev-parse', 'HEAD:src/keep.js']).trim(), head = git(dir, ['rev-parse', 'HEAD']).trim(), zero = '0'.repeat(keep.length);
   const seen = new Set();
   const expectSerial = (label, detail, options) => {
+    heartbeatAdmittedMembers(dir, ids);
     const index = fs.readFileSync(path.join(dir, '.git', 'index'));
     const result = batch.prepareIsolation(scope, options || {});
     assert.deepStrictEqual([result.status, result.reason_code, result.detail], ['serial', 'materialization-unsupported', detail], `${label}: ${JSON.stringify(result)}`);
@@ -737,6 +755,7 @@ test('issue343 U2a-2 a resealed package before its first journal cannot disguise
     fs.writeFileSync(packagePath, JSON.stringify(value));
   };
   const negative = (label, mutate, code = 'batch-base-invalid') => {
+    heartbeatAdmittedMembers(dir, ids);
     const forged = JSON.parse(original);
     mutate(forged.roots[0]);
     reseal(forged);
@@ -785,6 +804,7 @@ test('issue343 U2a-2 a resealed package before its first journal cannot disguise
     const entry = root.inventory.find(row => row.path === allowed);
     entry.sha256 = store(Buffer.alloc(entry.size, 0x78));
   }, 'batch-integration-changed');
+  heartbeatAdmittedMembers(dir, ids);
   const prepared = freshPrepare(scope);
   assert.strictEqual(prepared.status, 'prepared', JSON.stringify(prepared));
   assert(fs.readFileSync(packagePath).equals(original), 'the genuine original package is unchanged and still replays');

@@ -13,7 +13,7 @@
 //   U0c-4 a valid candidate publishes and replays with zero provider calls; legacy ready
 //         bytes are preserved;
 //   U0c-5 a sidecar execute refuses an altered generation before spawn.
-//   U0d   every controller record comes from the real native begin/complete (no
+//   U0d   enrolled records come from the real native begin/complete (no
 //         post-commit attach); the evidence is read only from the checksum-covered
 //         completion.result; the marker binds the slice's open enrolled lineage; a
 //         both-stripped known-new receipt refuses by that independent controller origin,
@@ -293,6 +293,35 @@ function beginPlanSlice(dir, key) {
     'the real begin carries its own enrollment');
   return { begun, enrollment, generation: record[pv.TRANSACTION_FIELDS.generation] };
 }
+// Explicit historical OldSchema fixture, derived from public 1da8887's
+// makeTransaction/defaultStatePatch begin shape. This is synthetic test data,
+// never a production source anchor, ancient timestamp or stripped current begin.
+// Lease/storage/readback/checksums are real; no current begin is created/de-enrolled.
+function historicalNativeBeginFixture(dir, key) {
+  const leaseApi = require('./forge-unit-lease'), ownerToken = 'old-schema-' + key;
+  const held = leaseApi.acquire(dir, 'plan-slice/' + S, { host_runtime: 'claude', owner_token: ownerToken, session: 'old-schema-test' });
+  assert.strictEqual(held.ok, true);
+  const now = new Date().toISOString(), unitKey = { type: 'plan-slice', id: S, key: 'plan-slice/' + S };
+  const before = { milestone: M, kind: 'milestone', phase: 'plan-slice', active_slice: S, active_task: '—', next_action: 'plan', auto_mode: 'on' };
+  state.write(dir, before);
+  const ownerDigest = 'sha256:' + sha(ownerToken);
+  const patch = { phase: 'plan-slice', active_task: '—', host_runtime: 'claude', owner: ownerDigest, heartbeat: now };
+  const after = { ...before, ...patch };
+  const logicalBefore = controller.logicalState(state.read(dir, M)), logicalAfter = controller.logicalState(after);
+  const event = { protocol_version: controller.PROTOCOL_VERSION, idempotency_key: key, ts: now,
+    event: 'unit-began', action: 'begin', unit: unitKey.key, milestone: M, host_runtime: 'claude', outcome: 'running', reason_code: 'begin' };
+  const record = { protocol_version: controller.PROTOCOL_VERSION, idempotency_key: key, action: 'begin', unit: unitKey,
+    milestone: M, host_runtime: 'claude', owner_digest: ownerDigest, lease_generation: held.generation, phase: 'committed',
+    created_at: now, updated_at: now, before: { state_checksum: recordDigest(logicalBefore), state: logicalBefore },
+    after: { state_checksum: recordDigest(logicalAfter), state: logicalAfter, state_patch: patch }, result: null, event, boundary: null };
+  controller.writeAtomic(controller.transactionFile(dir, key), record);
+  controller.writeAtomic(controller.eventsFile(dir, M), JSON.stringify({ ...event, sequence: 1 }) + '\n', true);
+  state.write(dir, after);
+  assert.deepStrictEqual(controller.lookupRecord(dir, 'transaction', key), record);
+  assert.strictEqual(controller.incompleteUnits(dir, M).length, 1);
+  assert.strictEqual(pv.classifySliceGeneration(dir, { milestone: M, slice: S }).status, 'unenrolled');
+  return { begun: held, record };
+}
 // The real native completion of that begin: the controller admits the owner plan files and
 // writes plan_validation inside the committed result (no post-commit attach).
 function completePlanSlice(dir, seam, key) {
@@ -345,7 +374,139 @@ function assertAdmissionRefusal(error, code, label) {
 
 // ── U0c-1 / U0c-2: the planner transport ──────────────────────────────────────
 
+function nativeFixture(label, options = {}) {
+  const native = require('./forge-native-invocation');
+  const dir = owner('native346-' + label), content = taskPlan('T01');
+  fs.mkdirSync(path.dirname(taskFile(dir, 'T01')), { recursive: true });fs.writeFileSync(taskFile(dir, 'T01'), content);
+  const route = resolveDispatch({ cwd: dir, unitType: 'plan-slice', hostRuntime: options.sidecar ? 'codex' : 'claude', milestoneId: M, unitId: S });
+  const capabilities = { available: true, tool: 'Agent', source: 'synthetic-active-schema-fixture', model_aliases: ['opus', 'sonnet'], model_ids: [route.model, 'claude-sonnet-5'], effort_transports: ['agent-argument'], reasoning_efforts: ['low', 'medium', 'high', 'xhigh', 'max'] };
+  const invokeOptions = { hostRuntime: 'claude', resolvedDispatch: route, activeCapabilities: capabilities, agentType: 'forge-planner', prompt: 'Synthetic existing native plan.', terminalResult: xllm.validatePlanResult };
+  if (!options.sidecar) assert.strictEqual(native.preflightNativeBinding(invokeOptions).ok, true);
+  const seam = options.noBegin ? null : options.historical
+    ? historicalNativeBeginFixture(dir, 'native346-' + label) : beginPlanSlice(dir, 'native346-' + label);
+  const request = { unitType: 'plan-slice', scope: 'milestone', phase: 'plan', milestoneId: M, sliceId: S, cwd: dir, contextRoot: dir,
+    execution_contract: codeRoots.singleContract(dir, dir), hostRuntime: route.host_runtime, activeCapabilities: capabilities, route,
+    workflowId: 'native346-' + label, dispatchId: 'native346-' + label, resultFile: path.join(root, 'native346-' + label + '.json') };
+  if (!options.noAttempt) unit.beginArtifactAttempt(request);
+  const response = { status: 'done', summary: 'Synthetic native plan.', questions: [], artifacts: [{ path: unit.locations(request).required[0], content: content + '\n' + slicePlan(['T01']) }] };
+  return { dir, content, request, seam, response, invokeOptions };
+}
+
 async function main() {
+  await test('issue343 native346 facade admits existing native plans and refuses imported authority or changed sources', async () => {
+    const native = require('./forge-native-invocation');
+    const originalCalls = calls(), good = nativeFixture('good');let hostCalls = 0;
+    const returned = await native.invokeNative(good.invokeOptions, async args => { hostCalls++;assert.strictEqual(args.model, good.request.route.model);assert.strictEqual(args.effort, good.request.route.effort);return { ...candidate({ T01: good.content }), slice_plan: { filename: 'S01-PLAN.md', content: good.response.artifacts[0].content } }; });
+    assert.strictEqual(returned.ok, true);assert.strictEqual(hostCalls, 1);
+    assert.strictEqual(good.response.artifacts[0].content, returned.result.slice_plan.content, 'publish exactly the same validated native return, no host enrichment');
+    const metadata = { providerCalled: true, telemetry: returned.telemetry };
+    // Owner fields from an imported worker object cannot enable publication.
+    await assert.rejects(unit.acceptArtifactResult(good.request, { ...good.response, native_plan_admission: { approved: true } }, metadata), error => error.code === 'plan-generation-marker-untrusted');
+    assert.strictEqual(fs.existsSync(planTargets(good.dir, ['T01'])[0]), false);
+    const invalidTask = good.content.replace(/^depends:.*\n/m, '');fs.writeFileSync(taskFile(good.dir, 'T01'), invalidTask);
+    const beforeInvalid = hashes(planTargets(good.dir, ['T01']));
+    await assert.rejects(unit.acceptArtifactResult(good.request, good.response, metadata), error => error.code === 'plan-declaration-depends-missing');
+    assert.deepStrictEqual(hashes(planTargets(good.dir, ['T01'])), beforeInvalid, 'admission refusal writes no owner plan bytes');
+    fs.writeFileSync(taskFile(good.dir, 'T01'), good.content);
+    const published = await unit.acceptArtifactResult(good.request, good.response, metadata);
+    assert.strictEqual(published.record.phase, 'ready');assert.strictEqual(hostCalls, 1, 'same saved native response, no second invocation');
+    assert.strictEqual(fs.readFileSync(planTargets(good.dir, ['T01'])[0], 'utf8'), good.response.artifacts[0].content);
+    assert(published.record.native_plan_admission);assert(!Object.hasOwn(published.record, 'plan_generation'), 'post-return admission never fabricates a started sidecar marker');
+    const receiptPath = good.request.resultFile + '.receipt.json', originalReceipt = fs.readFileSync(receiptPath);
+    const stripped = JSON.parse(originalReceipt);delete stripped.native_plan_admission;fs.writeFileSync(receiptPath, JSON.stringify(stripped));
+    const beforeStripped = hashes(planTargets(good.dir, ['T01']));
+    await assert.rejects(unit.replayArtifactAttempt(good.request), error => error.code === 'plan-generation-marker-missing');
+    assert.deepStrictEqual(hashes(planTargets(good.dir, ['T01'])), beforeStripped, 'an enrolled begin never becomes legacy by deleting the new proof');fs.writeFileSync(receiptPath, originalReceipt);
+    const forged = JSON.parse(originalReceipt);forged.native_plan_admission.begin_checksum = '0'.repeat(64);fs.writeFileSync(receiptPath, JSON.stringify(forged));
+    const beforeForged = hashes(planTargets(good.dir, ['T01']));
+    await assert.rejects(unit.replayArtifactAttempt(good.request), error => error.code === 'plan-validation-invalid');
+    assert.deepStrictEqual(hashes(planTargets(good.dir, ['T01'])), beforeForged);fs.writeFileSync(receiptPath, originalReceipt);
+    fs.writeFileSync(taskFile(good.dir, 'T01'), good.content.replace('fixture behavior is observable', 'changed original goal'));
+    await assert.rejects(unit.replayArtifactAttempt(good.request), error => error.code === 'plan-validation-source-mismatch');
+    assert(fs.readFileSync(receiptPath).equals(originalReceipt));fs.writeFileSync(taskFile(good.dir, 'T01'), good.content);
+    const completed = completePlanSlice(good.dir, good.seam, 'native346-good-complete');assert(completed.result.plan_validation);
+    await unit.replayArtifactAttempt(good.request);assert(fs.readFileSync(receiptPath).equals(originalReceipt), 'ready replay is byte-preserving');
+    const noBegin = nativeFixture('no-begin', { noBegin: true }), noBeginBefore = hashes(planTargets(noBegin.dir, ['T01']));
+    await assert.rejects(unit.acceptArtifactResult(noBegin.request, noBegin.response, { providerCalled: true }), error => error.code === 'plan-generation-begin-invalid');
+    assert.deepStrictEqual(hashes(planTargets(noBegin.dir, ['T01'])), noBeginBefore);
+    const sidecar = nativeFixture('sidecar', { sidecar: true }), sidecarBefore = hashes(planTargets(sidecar.dir, ['T01']));
+    await assert.rejects(unit.acceptArtifactResult(sidecar.request, sidecar.response, { providerCalled: true }), error => error.code === 'plan-generation-transport-required');
+    assert.deepStrictEqual(hashes(planTargets(sidecar.dir, ['T01'])), sidecarBefore);
+    const historical = nativeFixture('historical', { historical: true });
+    const oldTask = taskPlan('T01', { depends: null, writes: null });
+    fs.writeFileSync(taskFile(historical.dir, 'T01'), oldTask);
+    // The old native facade publishes only its returned S-plan artifact. Existing
+    // old task bytes deliberately fail current declarations and remain untouched.
+    assert.throws(() => require('./forge-must-haves').validateTaskDeclarations(oldTask, { taskId: 'T01', requireExplicit: true }), error => error.code === 'plan-declaration-depends-missing');
+    const oldResult = await unit.acceptArtifactResult(historical.request, historical.response, { providerCalled: true });
+    assert.strictEqual(oldResult.record.phase, 'ready');
+    assert(!Object.hasOwn(oldResult.record, 'native_plan_admission'));
+    assert(!Object.hasOwn(oldResult.record, 'plan_generation'));
+    assert.strictEqual(fs.readFileSync(taskFile(historical.dir, 'T01'), 'utf8'), oldTask);
+    const historicalBytes = fs.readFileSync(historical.request.resultFile + '.receipt.json');
+    await unit.replayArtifactAttempt(historical.request);
+    assert(fs.readFileSync(historical.request.resultFile + '.receipt.json').equals(historicalBytes), 'old ready bytes are not backfilled');
+    const lostLease = nativeFixture('historical-lost-lease', { historical: true }), beforeLostLease = hashes(planTargets(lostLease.dir, ['T01']));
+    const leaseApi = require('./forge-unit-lease');
+    assert(leaseApi.release(lostLease.dir, 'plan-slice/' + S, lostLease.seam.begun.owner_token, lostLease.seam.begun.generation).ok);
+    assert(leaseApi.acquire(lostLease.dir, 'plan-slice/' + S, { host_runtime: 'claude', owner_token: 'foreign-old-schema-owner' }).ok);
+    await assert.rejects(unit.acceptArtifactResult(lostLease.request, lostLease.response, { providerCalled: true }), error => error.code === 'plan-generation-begin-invalid');
+    assert.deepStrictEqual(hashes(planTargets(lostLease.dir, ['T01'])), beforeLostLease);
+    assert.strictEqual(calls(), originalCalls, 'native compatibility uses no sidecar provider');
+  });
+  await test('issue343 native346 saved admission and historical begin reconcile through the original facade without inference', async () => {
+    const api = require('./forge-artifact-reconciliation'), native = require('./forge-native-invocation');
+    const originalCalls = calls();
+    for (const historical of [false, true]) {
+      const label = historical ? 'reconcile-historical' : 'reconcile-enrolled';
+      const f = nativeFixture(label, { historical, noAttempt: true });
+      const fingerprint = unit.artifactFingerprint(f.request);
+      const broker = await api.startBroker({ owner: f.dir, manifestFile: path.join(root, label + '-manifest.json'),
+        dispatchId: f.request.dispatchId, request_sha256: fingerprint, execution_contract: f.request.execution_contract });
+      f.request.ownerBroker = broker;
+      try {
+        unit.beginArtifactAttempt(f.request);
+        let nativeCalls = 0;
+        const outcome = await native.invokeNative(f.invokeOptions, async () => {
+          nativeCalls++;
+          return { ...candidate({ T01: f.content }), slice_plan: { filename: 'S01-PLAN.md', content: f.response.artifacts[0].content } };
+        });
+        assert.strictEqual(outcome.ok, true);assert.strictEqual(nativeCalls, 1);
+        assert.strictEqual(f.response.artifacts[0].content, outcome.result.slice_plan.content, 'saved artifacts are exactly the original validated native return');
+        await broker.append('.gsd/forge/events.jsonl', JSON.stringify({ event: 'synthetic-owner-progress', label }) + '\n');
+        const responseAnchor = await broker.bindResponse(f.response);
+        const withoutBroker = { ...f.request };delete withoutBroker.ownerBroker;
+        await assert.rejects(unit.acceptArtifactResult(withoutBroker, f.response,
+          { providerCalled: true, telemetry: outcome.telemetry, enforceReadOnlySurface: true, responseAnchor }), error => error.code === 'artifact-direct-write-detected');
+        unit.failArtifactAttempt(f.request, 'artifact-direct-write-detected', 'synthetic signed owner append', true);
+        const receiptFile = f.request.resultFile + '.receipt.json', original = fs.readFileSync(receiptFile), saved = JSON.parse(original);
+        assert.strictEqual(saved.phase, 'failed');assert(saved.saved_candidate);
+        assert.strictEqual(Object.hasOwn(saved, 'native_plan_admission'), !historical);
+        const options = { manifest: broker.manifest, proofs: broker.proofs(), trust: { manifest_sha256: broker.manifest_sha256, request_sha256: fingerprint } };
+        await broker.close();
+        const before = hashes(planTargets(f.dir, ['T01']));
+        if (!historical) {
+          const stripped = JSON.parse(original);delete stripped.native_plan_admission;fs.writeFileSync(receiptFile, JSON.stringify(stripped));
+          await assert.rejects(unit.reconcileArtifactAttempt(f.request, options), error => error.code === 'plan-generation-marker-missing');
+          assert.deepStrictEqual(hashes(planTargets(f.dir, ['T01'])), before, 'enrolled missing admission publishes zero bytes');
+          fs.writeFileSync(receiptFile, original);
+        }
+        await assert.rejects(unit.reconcileArtifactAttempt(f.request, { ...options,
+          beforePublish() { fs.writeFileSync(receiptFile, JSON.stringify({ ...saved, synthetic_receipt_race: true })); } }),
+          error => error.code === 'reconciliation-receipt-raced');
+        assert.deepStrictEqual(hashes(planTargets(f.dir, ['T01'])), before, 'raced parent receipt publishes zero bytes');fs.writeFileSync(receiptFile, original);
+        const recovered = await unit.reconcileArtifactAttempt(f.request, options);
+        assert.strictEqual(recovered.provider_called, false);assert.strictEqual(recovered.replayed, true);
+        assert.strictEqual(nativeCalls, 1, 'saved response is recovered with no native reinvocation');
+        assert(fs.readFileSync(receiptFile).equals(original), 'failed parent receipt remains byte-identical');
+        assert.strictEqual(fs.readFileSync(planTargets(f.dir, ['T01'])[0], 'utf8'), f.response.artifacts[0].content);
+        const replay = await unit.reconcileArtifactAttempt(f.request, options);
+        assert.strictEqual(replay.child_receipt, recovered.child_receipt);
+        assert(fs.readFileSync(receiptFile).equals(original));
+      } finally { await broker.close(); }
+    }
+    assert.strictEqual(calls(), originalCalls, 'reconciliation never invokes a synthetic sidecar provider');
+  });
   await test('issue343 U0c-1 Claude planner branch refuses missing declarations before success', async () => {
     for (const [label, plan, code] of [['depends', MISSING_DEPENDS(), 'plan-declaration-depends-missing'],
       ['writes', MISSING_WRITES(), 'plan-declaration-writes-missing']]) {

@@ -224,6 +224,7 @@ test('canonical unit owner seals opt-in commands through xllm to final argv; uns
     assert.deepStrictEqual(args.slice(args.indexOf('--allowedTools') + 1, args.indexOf('-p')), commands.map(c => `Bash(${c})`));
     const bad = { ...request, dispatchId: 'unsupported', resultFile: path.join(unitLab.dir, 'unsupported.json'),
       verification: { preferenceCommands: ['node -e "process.exit(0)"'] } };
+    bad.route = require('./forge-dispatch-resolve').resolveDispatch(request.route.resolution_options);
     records.length = 0;
     await assert.rejects(unit.runUnitSidecar(bad), error => error.code === 'claude-permission-command-unsupported');
     assert.strictEqual(records.length, 0);

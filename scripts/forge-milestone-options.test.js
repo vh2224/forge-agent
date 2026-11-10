@@ -205,6 +205,12 @@ try {
     state.write(cwd, { milestone, kind: 'milestone', phase: 'plan-slice', active_slice: 'S01', active_task: '—', auto_mode: 'on', next_action: 'plan-slice' });
     const dir = path.join(cwd, '.gsd/milestones', milestone);
     fs.writeFileSync(path.join(dir, `${milestone}-ROADMAP.md`), '# History\n\n- [ ] **S01: Work** `depends:[]`\n');
+    // A newly enrolled planner must have its actual owner S/T outputs before completion.
+    // These files change no synthetic clock, pause/handoff, lease or history assertions.
+    const sliceDir = path.join(dir, 'slices', 'S01'), taskDir = path.join(sliceDir, 'tasks', 'T01');
+    fs.mkdirSync(taskDir, { recursive: true });
+    fs.writeFileSync(path.join(sliceDir, 'S01-PLAN.md'), '# S01\n- [ ] **T01**: History fixture\n');
+    fs.writeFileSync(path.join(taskDir, 'T01-PLAN.md'), '---\nid: T01\ndepends: []\nwrites:\n  - src/result.js\nmust_haves:\n  truths:\n    - History fixture behavior is observable.\n  artifacts: []\n  key_links: []\nexpected_output:\n  - src/result.js\n---\n# T01\n');
     const first = controller.begin(cwd, { milestone, unit, owner_token, host_runtime: 'claude', idempotency_key: 'history-first' }, at(0));
     controller.pause(cwd, { milestone, unit, owner_token, host_runtime: 'claude', generation: first.generation, idempotency_key: 'history-pause' }, at(600000));
     assert.strictEqual(controller.handoff(cwd, { unit, next_host_runtime: 'codex' }, at(700000)).reason, 'handoff-ready');

@@ -56,7 +56,10 @@ async function runGroups(transitionOnly) {
       ['forge-attempt-recovery.test.js'],
       ['forge-unit-controller.test.js'],
     ].map(([suite, ...selectors]) => ({ name: [suite, ...selectors].join(' '),
-      args: [path.join(__dirname, suite), ...selectors], timeout: 120000, delegated: true })));
+      // The complete controller corpus includes Git/restart/concurrency integration fixtures.
+      // Use the existing long integration-group bound only for this full delegate.
+      args: [path.join(__dirname, suite), ...selectors],
+      timeout: suite === 'forge-unit-controller.test.js' ? 300000 : 120000, delegated: true })));
   // Start the slow independent groups first to keep the three-worker tail short.
   const order = ['standalone-unsigned', 'milestone-unsigned', 'context',
     'forge-unit-sidecar.test.js --pre-spawn-sidecar', 'forge-task-preparation.test.js',

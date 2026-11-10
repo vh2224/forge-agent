@@ -255,6 +255,7 @@ const SINK = { bytes: 0, tail: '', write(value) { const line = String(value); th
 let passed = 0;
 let failed = 0;
 const CASES = [];
+const UNPROVEN_FIXTURE_CLEANUP = new Set();
 function test(name, fn) { CASES.push({ name, fn }); }
 async function runCases() {
   for (const { name, fn } of CASES) {
@@ -397,12 +398,30 @@ async function finish(fx) {
   for (const name of fx.names) {
     try { fs.writeFileSync(mark(fx, name, 'release'), ''); } catch (_) { /* fixture release */ }
   }
+  // Only opaque controls of this live invocation may stop a pending member. A PID saved
+  // in an entered marker is historical data and can now name an unrelated process.
+  for (const control of fx.controls.values()) control.abort('fixture-cleanup');
+  let outcome;
   if (fx.running) {
-    try { await within(fx.running, 120000, `${fx.label} pool`); } catch (error) { console.log(`      ${fx.label} pool: ${error && error.message}`); }
+    try { outcome = await within(fx.running, 120000, `${fx.label} pool`); }
+    catch (error) { console.log(`      ${fx.label} pool: ${error && error.message}`); }
   }
-  for (const name of fx.names) {
-    try { const entered = readJson(mark(fx, name, 'entered')); if (alive(entered.pid)) process.kill(entered.pid); } catch (_) { /* already gone */ }
+  const report = outcome?.value || fx.report;
+  let joined = false;
+  if (report?.batch_id === fx.ids.batch_id && report.barrier?.sealed === true && report.broker?.directory
+      && report.members.every(row => ['joined', 'not-started'].includes(row.process?.join))) {
+    try {
+      const evidence = reconciliation.readBatchEvidence({ directory: report.broker.directory, manifest_sha256: report.broker.manifest_sha256 });
+      joined = evidence.batch_id === fx.ids.batch_id && evidence.barrier.sealed
+        && evidence.members.length === report.members.length;
+    } catch (_) { /* no join is inferred from a settled promise or unverifiable data */ }
   }
+  if (!joined) {
+    UNPROVEN_FIXTURE_CLEANUP.add(fx.dir);
+    console.log(`      fixture-cleanup-unproven: ${fx.label}; preserve fixture and external namespace`);
+    return;
+  }
+  UNPROVEN_FIXTURE_CLEANUP.delete(fx.dir);
   try { removeLockRoot(ownerLockRoot(fx.dir)); } catch (error) { console.log(`      lock cleanup: ${error && error.message}`); }
 }
 
@@ -926,6 +945,8 @@ async function restartWitness(point) {
       const report = JSON.parse(cli.stdout.trim().split('\n').pop());
       assert.deepStrictEqual([report.status, report.members.map(row => row.outcome)], ['consolidated', ['acknowledged', 'acknowledged']], point);
       assert.strictEqual(report.broker.generation, 3, `${point}: the fresh process signs with a new generation, never the dead key`);
+      for (const member of report.members) assert.strictEqual(member.ready_sha256,
+        digest(fs.readFileSync(fx.inputs[member.task_id].resultFile + '.receipt.json')), `${point}: the replay preserved the signed READY pin`);
       assert.strictEqual(spawnedCount(fx), spawned, `${point}: zero second inference`);
       const evidence = reconciliation.readBatchEvidence(fx.trust), refs = evidence.members.map(row => row.member_ref);
       assert.deepStrictEqual(evidence.operations.entries.filter(entry => entry.species !== 'batch-progress')
@@ -1078,7 +1099,43 @@ test('issue343 U5-6 cleanup retains dirty or needed member worktrees, never forc
       const run = runs.get(fx.dir, fx.scope.run_id);
       assert.doesNotThrow(() => claims.validateHeldClaim(run.write_claim), `${fx.label}: the aggregate claim is still held and valid`);
       assert.doesNotThrow(() => rootsApi.claimGroups(run.write_claim), `${fx.label}: every root of the union, each sibling worktree included, still exists`);
-      assert.strictEqual(isolation.cleanupForRun(fx.dir, fx.scope.run_id).repos[0].reason, 'batch-members-pending', `${fx.label}: the run cleanup keeps the batch roots`);
+      const runBytes = fs.readFileSync(runs.runFile(fx.dir, fx.scope.run_id));
+      const claim = { generation: run.write_claim.generation, sha256: rootsApi.digest(run.write_claim) };
+      const snapshotRoots = () => [...memberPaths(fx)].map(([id, root]) => {
+        const bytes = [];
+        const walk = (dir, prefix = '') => {
+          for (const name of fs.readdirSync(dir).sort()) {
+            const file = path.join(dir, name), rel = prefix ? prefix + '/' + name : name, stat = fs.lstatSync(file);
+            assert(!stat.isSymbolicLink(), 'this fixture has no borrowed or aliased root entries');
+            if (stat.isDirectory()) walk(file, rel);
+            else { assert(stat.isFile()); bytes.push([rel, digest(fs.readFileSync(file)), stat.mode & 0o777]); }
+          }
+        };
+        walk(root);
+        return { id, root, git: targetState(root), status: git(root, ['status', '--porcelain=v1', '--untracked-files=all']), bytes };
+      });
+      const before = snapshotRoots();
+      if (fx === u5.serial) {
+        const proof = reconciliation.readBatchRetirement(fx.trust);
+        assert.strictEqual(proof.committed, true, 'the retirement has its genuine signed commit');
+        assert.strictEqual(run.batch_locator, null, 'ALLACK retired the active locator');
+        assert(run.batch_retirements.some(row => rootsApi.digest(row) === rootsApi.digest(proof.producer.row)));
+        assert(proof.producer.witness.report.members.every(row => row.outcome === 'acknowledged'));
+        assert.strictEqual(isolation.readIsolationPrefs(fx.dir).worktreeCleanupOnComplete, false,
+          'the real isolated fixture preserves the existing default, without changing prefs');
+      } else assert(run.batch_locator, 'the partial cohort is still live');
+      const cleaned = isolation.cleanupForRun(fx.dir, fx.scope.run_id);
+      if (fx === u5.serial) assert.deepStrictEqual(cleaned.repos,
+        [{ path: fx.dir, status: 'skipped (worktree_cleanup_on_complete=false)' }],
+        'retired custody is not mislabeled as a live batch; the actual default keeps cleanup disabled');
+      else assert.deepStrictEqual(cleaned.repos,
+        [{ path: fx.dir, status: 'skipped (batch retained)', reason: 'batch-members-pending' }],
+        'a genuinely pending sibling keeps the exact live-batch refusal');
+      assert.deepStrictEqual(snapshotRoots(), before, 'all member bytes, modes, HEAD, index and dirty status are preserved');
+      assert(fs.readFileSync(runs.runFile(fx.dir, fx.scope.run_id)).equals(runBytes), 'generic cleanup changes no run or custody field');
+      const after = runs.get(fx.dir, fx.scope.run_id);
+      assert.deepStrictEqual({ generation: after.write_claim.generation, sha256: rootsApi.digest(after.write_claim) }, claim,
+        'the exact held reservation is neither replaced nor released');
     }
     // Only a live consolidation cohort handle of forge-execution-batch authorizes a cleanup.
     for (const forged of [{}, Object.create(null)]) {
@@ -1297,6 +1354,37 @@ test('issue343 U5-4 independent STATE byte drift after terminal intent refuses a
   } finally { await finish(fx); }
 });
 
+test('issue343 U5-3 a restored signed joined writer is not confused with later numeric PID reuse', async () => {
+  const fx = await retainedCohort('u5-joined-pid-reuse', PAIR, PAIR_GO);
+  try {
+    const crashed = await consolidate(fx, { failpoint: crashAt('member-artifacts-intent') });
+    assert.strictEqual(crashed.error?.code, 'FIXTURE_CRASH');
+    const evidence = reconciliation.readBatchEvidence(fx.trust);
+    assert(evidence.barrier.sealed);
+    const joinedPids = new Set(evidence.members.map(row => {
+      assert(row.anchor && Number.isSafeInteger(row.process.pid) && row.process.pid > 0);
+      assert(Number.isSafeInteger(row.process.exit_code) || typeof row.process.signal === 'string');
+      return row.process.pid;
+    }));
+    const realKill = process.kill, spawned = spawnedCount(fx);
+    let pending, numericChecks = 0;
+    try {
+      // Model ONLY a later numeric lookup reporting a different process. The real signed
+      // barrier above was produced from actual child exit; no join or receipt is fabricated.
+      process.kill = function (pid, signal) {
+        if (signal === 0 && joinedPids.has(pid)) { numericChecks++; return true; }
+        return realKill.apply(this, arguments);
+      };
+      pending = await within(consolidate(fx), 300000, 'the signed joined writer replay');
+    } finally { process.kill = realKill; }
+    const resumed = pending;
+    assert(!resumed.error, resumed.error?.stack);
+    assert.strictEqual(resumed.value.status, 'consolidated');
+    assert.strictEqual(numericChecks, 0, 'restoration never reclassifies a signed historical exit by PID alone');
+    assert.strictEqual(spawnedCount(fx), spawned, 'no second inference');
+  } finally { await finish(fx); }
+});
+
 test('issue343 U5-4 corrupted committed completion refuses batch-ack and keeps the current batch locator', async () => {
   const fx = u5.serial;
   assert(fx && fx.consolidation, 'the already verified serial cohort is reused');
@@ -1312,7 +1400,8 @@ test('issue343 U5-4 corrupted committed completion refuses batch-ack and keeps t
     assert.strictEqual(ack.outcome, 'blocked');
     assert(ack.snapshot.current_batch, 'progress ack cannot clear an unproved completion');
     assert(ack.snapshot.current_batch.members.includes(completed.unit.key));
-    assert(!(ack.controller_result.details.acknowledged || []).includes(completed.unit.key));
+    assert.strictEqual(ack.reason_code, 'record-conflict', 'the completion checksum refusal is preserved');
+    assert(!(ack.controller_result.details?.acknowledged || []).includes(completed.unit.key));
   } finally { fs.writeFileSync(file, original); }
 });
 
@@ -1794,7 +1883,8 @@ test('review R18 post-unit queue waits for real ready memory and publishes canon
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
     }
-    try { fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); } catch { /* best-effort cleanup of synthetic fixtures */ }
+    if (UNPROVEN_FIXTURE_CLEANUP.size) console.log(`      fixture-root-preserved: ${TMP}; cleanup unknown for ${UNPROVEN_FIXTURE_CLEANUP.size} fixture(s)`);
+    else try { fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); } catch { /* best-effort cleanup of joined synthetic fixtures */ }
     if (failed) process.exitCode = 1;
   }
 })().catch(error => { console.error(error); process.exitCode = 1; });

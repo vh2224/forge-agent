@@ -1376,6 +1376,14 @@ async function resumeBatchBrokerInside(batchHandle, members, paths, observation)
       return state.pending ? frozen(copy({ sequence: state.pending.sequence, intent_sha256: state.pending.intent_sha256,
         record: state.pending.record, payload: state.pending.payload })) : null;
     },
+    /** Read-only: the original producer of this member's committed, signature-verified publication. */
+    memberPublication(memberRef) {
+      if (!evidence.registry.has(memberRef)) fail('broker-member-foreign');
+      verifyNow();
+      const entries = state.committed.filter(entry => entry.intent.species === 'member-artifacts' && entry.intent.member_ref === memberRef);
+      if (entries.length > 1) fail('broker-operation-invalid');
+      return entries.length ? frozen(copy({ sequence: entries[0].sequence, producer: entries[0].intent.producer })) : null;
+    },
     /** The committed member-artifacts effects on one owner path, in commit order: { before, after }. */
     publishedEffects(relative) {
       const chain = [];

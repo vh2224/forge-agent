@@ -531,7 +531,13 @@ test('issue343 U3a-2 raw, non-canonical, unauthorized, cross-member and forged-h
   for (const forged of [{}, { ...handles[0] }, Object.create(handles[0]), structuredClone(handles[0]), null, 'execute-task/T01']) {
     await rejectsCode(broker.appendMember(forged, EVENTS, progress(a)), 'broker-member-handle-required', 'a forged member handle');
     throwsCode(() => broker.memberIdentity(forged), 'broker-member-handle-required', 'a forged identity handle');
+    throwsCode(() => broker.closeMemberWithoutWriter(forged), 'broker-member-handle-required', 'a forged no-writer member handle');
+    throwsCode(() => broker.observeMemberSpawnFailure(forged, { pid: null }), 'broker-member-handle-required', 'a forged spawn-failure member handle');
   }
+  // R6 typed no-writer methods grant neither a JSON spawn proof nor a lexical process scope.
+  throwsCode(() => broker.observeMemberSpawnFailure(handles[0], { pid: null, exitCode: null, signalCode: null }),
+    'broker-process-invalid', 'a JSON no-PID record is not a real production spawn');
+  throwsCode(() => broker.closeMemberWithoutWriter(handles[0]), 'broker-member-no-start-unproven', 'no live production scope proves a no-writer member');
   throwsCode(() => JSON.stringify(handles[0]), 'batch-isolation-handle-invalid', 'a serialized member handle');
   await rejectsCode(emitter.appendMemberDispatchEvent(JSON.parse(JSON.stringify(broker)), handles[0], args(a), routes[0]), 'broker-batch-handle-required', 'a serialized broker');
   // The single entry uses its existing refusal contract, not the batch-only enum.
@@ -731,9 +737,21 @@ test('issue343 U3a-2 unsigned, truncated, reordered, extra, forged and member-fi
     evidenceCode('reconciliation-proof-sequence', 'a reordered journal');
     await rejectsCode(broker.verifyMember(handles[1]), 'broker-journal-mismatch', 'verifyMember over a reordered journal');
   });
-  await tampered(journalFile, journal(rows.slice(0, -1)), () => evidenceCode('reconciliation-unsigned-append', 'a dropped proof'));
-  await tampered(journalFile, journal([...rows, rows[rows.length - 1]]), () => evidenceCode('reconciliation-proof-sequence', 'an extra proof'));
-  await tampered(journalFile, journal(rows.filter((_, index) => index % 2 === 0)), () => evidenceCode('reconciliation-proof-sequence', 'one member\'s proofs only'));
+  // R18 authenticates the sealed barrier before inspecting the owner surface.
+  // Altering the journal length cannot match the already signed terminal head.
+  // The live broker independently rejects the same journal against its actual proofs.
+  await tampered(journalFile, journal(rows.slice(0, -1)), async () => {
+    evidenceCode('broker-barrier-head-mismatch', 'a dropped proof changes the sealed stream head');
+    await rejectsCode(broker.verifyMember(handles[0]), 'broker-journal-mismatch', 'verifyMember over a dropped proof');
+  });
+  await tampered(journalFile, journal([...rows, rows[rows.length - 1]]), async () => {
+    evidenceCode('broker-barrier-head-mismatch', 'an extra proof changes the sealed stream head');
+    await rejectsCode(broker.verifyMember(handles[0]), 'broker-journal-mismatch', 'verifyMember over an extra proof');
+  });
+  await tampered(journalFile, journal(rows.filter((_, index) => index % 2 === 0)), async () => {
+    evidenceCode('broker-barrier-head-mismatch', 'one member\'s proofs cannot match the complete sealed head');
+    await rejectsCode(broker.verifyMember(handles[0]), 'broker-journal-mismatch', 'verifyMember over member-filtered proofs');
+  });
   const forged = JSON.parse(rows[3]);
   forged.end += 1;
   await tampered(journalFile, journal([...rows.slice(0, 3), JSON.stringify(forged), ...rows.slice(4)]), () => evidenceCode('reconciliation-signature-invalid', 'a forged span'));
@@ -785,8 +803,11 @@ test('issue343 U3a-3 the private key never reaches the signer or worker argument
   const workers = NAMES.map(name => fs.readFileSync(path.join(lab.rendezvous, `${name}.environment.json`)));
   assert.strictEqual(JSON.parse(workers[0]).env.FORGE_SYNTHETIC_PROVIDER_SECRET, SENTINEL, 'the fixture really inspected a worker environment');
   // The client exposes closed member operations only: no generic signing function, no key.
-  assert.deepStrictEqual(Object.keys(broker).sort(), ['appendMember', 'attachMemberProcess', 'bindMemberResponse', 'close', 'directory', 'manifest',
-    'manifest_sha256', 'memberIdentity', 'proofs', 'sealExecutionBarrier', 'verifyMember']);
+  assert.deepStrictEqual(Object.keys(broker).sort(), ['appendMember', 'attachMemberProcess', 'bindMemberResponse', 'close', 'closeMemberWithoutWriter', 'directory', 'manifest',
+    'manifest_sha256', 'memberIdentity', 'observeMemberSpawnFailure', 'proofs', 'sealExecutionBarrier', 'verifyMember']);
+  // The typed R6 additions are closed once every real writer has joined.
+  throwsCode(() => broker.closeMemberWithoutWriter(lab.handles[0]), 'broker-barrier-sealed', 'no no-writer admission after the barrier');
+  throwsCode(() => broker.observeMemberSpawnFailure(lab.handles[0], { pid: null }), 'broker-barrier-sealed', 'no spawn-failure observation after the barrier');
   const publicFiles = [...filesBelow(broker.directory), eventsFile];
   assert.deepStrictEqual(fs.readdirSync(broker.directory).sort(), ['anchors', 'barrier.json', 'manifest.json', 'proofs.jsonl'], 'no key is ever persisted');
   for (const [label, value] of [['broker client', JSON.stringify(broker)], ['signer arguments and environment', JSON.stringify(signer)],
