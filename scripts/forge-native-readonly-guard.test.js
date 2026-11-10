@@ -54,7 +54,340 @@ function mutation(root, change, expected, options = {}) {
 function check(label, action) { action(); console.log(`PASS S03/T06 ${label}`); }
 function cli(args) { return spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', shell: false, windowsHide: true, maxBuffer: 1024 * 1024 }); }
 
+// #387 uses real canonical run writes and exact FULL owner comparisons.
+function oldestAliasCases(root, label) {
+  for (const record of runs.listAll(root)) runs.remove(root, record.id);
+  runs.add(root, { id: 'alias-own', kind: 'milestone', session_id: 'fixture', started_at: 200, last_heartbeat: 200, write_claim: null });
+  const options = { ownRun: 'alias-own' }, alias = path.join(root, '.gsd', 'forge', 'auto-mode.json');
+  check(label + ' only-own canonical heartbeat permits exact legacy alias clock', () => {
+    const baseline = capture(root, options); runs.bumpHeartbeat(root, 'alias-own', 300);
+    const result = verify(baseline); assert.equal(result.ok, true, JSON.stringify(result));
+    assert.deepEqual(result.owner_transitions.map(row => row.kind).sort(), ['run-alias-heartbeat', 'run-heartbeat']);
+    assert.equal(fs.readFileSync(alias, 'utf8'), JSON.stringify(runs.legacyAliasProjection(runs.oldestActive(root)), null, 2));
+  });
+  runs.add(root, { id: 'alias-foreign', kind: 'milestone', session_id: 'foreign', started_at: 400, last_heartbeat: 400, write_claim: null });
+  check(label + ' oldest-own with foreign newer run permits own heartbeat only', () => {
+    const baseline = capture(root, options); runs.bumpHeartbeat(root, 'alias-own', 500);
+    assert.equal(verify(baseline).ok, true);
+    const denied = capture(root, options), foreignFile = runs.runFile(root, 'alias-foreign'), raw = fs.readFileSync(foreignFile);
+    runs.bumpHeartbeat(root, 'alias-foreign', 600);
+    assert.equal(verify(denied).reason, guard.REASONS.MUTATION);
+    fs.writeFileSync(foreignFile, raw);
+  });
+  check(label + ' malformed arbitrary and forged alias clocks remain owner-control', () => {
+    for (const mutate of [() => '{', value => JSON.stringify({ ...value, arbitrary: true }, null, 2),
+      value => JSON.stringify({ ...value, last_heartbeat: value.last_heartbeat + 1 }, null, 2),
+      value => JSON.stringify({ ...value, worker: 'foreign' }, null, 2)]) {
+      const baseline = capture(root, options), raw = fs.readFileSync(alias);
+      fs.writeFileSync(alias, mutate(JSON.parse(raw)));
+      const result = verify(baseline); assert.equal(result.reason, guard.REASONS.MUTATION);
+      assert.ok(result.changes.some(row => row.path === '.gsd/forge/auto-mode.json' && row.kind === 'owner-control'));
+      fs.writeFileSync(alias, raw);
+    }
+  });
+  check(label + ' own owner active worker claim changes remain forbidden', () => {
+    for (const patch of [{ owner: { session_id: 'foreign' } }, { active: false }, { worker: 'execute-task/foreign' }, { write_claim: { forged: true } }]) {
+      const baseline = capture(root, options), ownFile = runs.runFile(root, 'alias-own');
+      const ownRaw = fs.readFileSync(ownFile), aliasRaw = fs.readFileSync(alias);
+      runs.update(root, 'alias-own', patch);
+      assert.equal(verify(baseline).reason, guard.REASONS.MUTATION);
+      fs.writeFileSync(ownFile, ownRaw); fs.writeFileSync(alias, aliasRaw);
+    }
+  });
+  check(label + ' foreign oldest malformed registry and absent preimage grant no alias allowance', () => {
+    const foreignFile = runs.runFile(root, 'alias-foreign'), foreignRaw = fs.readFileSync(foreignFile);
+    runs.update(root, 'alias-foreign', { started_at: 100 });
+    const foreignOldest = capture(root, options); runs.bumpHeartbeat(root, 'alias-foreign', 700);
+    assert.equal(verify(foreignOldest).reason, guard.REASONS.MUTATION);
+    fs.writeFileSync(foreignFile, foreignRaw); runs.refreshLegacyAlias(root);
+    const malformed = path.join(runs.runsDir(root), 'malformed.json'); fs.writeFileSync(malformed, '{');
+    const unknown = capture(root, options); runs.bumpHeartbeat(root, 'alias-own', 800);
+    assert.equal(verify(unknown).reason, guard.REASONS.MUTATION); fs.unlinkSync(malformed);
+    const saved = fs.readFileSync(alias); fs.unlinkSync(alias);
+    const absent = capture(root, options); runs.bumpHeartbeat(root, 'alias-own', 900);
+    assert.equal(verify(absent).reason, guard.REASONS.MUTATION); fs.writeFileSync(alias, saved);
+  });
+}
+// END #387 REGRESSION
+
+// SVN regression: real private file:// repository, no foreign WC or provider.
+function svnFullCases() {
+  for (const binary of ['svn', 'svnadmin']) {
+    const observed = spawnSync(binary, ['--version', '--quiet'], { encoding: 'utf8', shell: false, windowsHide: true });
+    if (observed.status !== 0) { console.log('SKIP S03/T06 SVN fixture: ' + binary + ' unavailable'); return; }
+  }
+  const folder = path.join(temporary, 'svn-full'), repository = path.join(folder, 'repository'), root = path.join(folder, 'wc');
+  fs.mkdirSync(folder); const home = path.join(folder, 'home'); fs.mkdirSync(home);
+  const saved = Object.fromEntries(['HOME', 'USERPROFILE', 'APPDATA', 'FORGE_HOME', 'CODEX_HOME'].map(key => [key, process.env[key]]));
+  for (const key of Object.keys(saved)) process.env[key] = home;
+  const configDir = path.join(home, 'svn-client'); fs.mkdirSync(configDir);
+  function command(binary, args, cwd = folder) {
+    assert.ok(path.resolve(cwd).startsWith(path.resolve(folder) + path.sep) || path.resolve(cwd) === path.resolve(folder));
+    const result = spawnSync(binary, args, { cwd, encoding: 'utf8', shell: false, windowsHide: true });
+    assert.equal(result.status, 0, result.stderr); return result.stdout;
+  }
+  const svn = (...args) => command('svn', ['--non-interactive', '--config-dir', configDir, ...args], root);
+  try {
+    command('svnadmin', ['create', repository]);
+    command('svn', ['--non-interactive', '--config-dir', configDir, 'checkout', require('url').pathToFileURL(repository).href, root]);
+    fs.writeFileSync(path.join(root, 'tracked.txt'), 'original\n');
+    fs.mkdirSync(path.join(root, 'subdir')); fs.writeFileSync(path.join(root, 'subdir', 'nested.txt'), 'nested\n');
+    svn('add', 'tracked.txt', 'subdir'); svn('commit', '-m', 'synthetic baseline'); svn('update');
+    fs.mkdirSync(path.join(root, '.gsd', 'forge'), { recursive: true });
+    fs.writeFileSync(path.join(root, '.gsd', 'control.json'), '{"original":true}\n');
+    fs.writeFileSync(path.join(root, '.gsd', 'forge', 'events.jsonl'), 'before\n');
+    check('SVN FULL unchanged and writer attestation remain strict', () => {
+      const baseline = capture(root); assert.equal(baseline.code_roots[0].vcs, 'svn');
+      assert.equal(verify(baseline).ok, true);
+      assert.equal(guard.verifyBaseline(baseline).reason, guard.REASONS.UNRECONCILED);
+      assert.equal(guard.captureBaseline({ owner: root, codeRoots: [path.join(root, 'subdir')] }).ok, true);
+    });
+    check('SVN FULL permits exact owner append/publication and own heartbeat only', () => {
+      const own = lease.acquire(root, 'review/svn', { now: 1000, ttlMs: 10000 }); assert.equal(own.ok, true);
+      runs.add(root, { id: 'svn-foreign', kind: 'milestone', session_id: 'fixture', started_at: 100, last_heartbeat: 100, write_claim: null });
+      runs.add(root, { id: 'svn-own', kind: 'milestone', session_id: 'fixture', started_at: 200, last_heartbeat: 200, write_claim: null });
+      const baseline = capture(root, { allowAppend: ['.gsd/forge/events.jsonl'], allowPublication: ['.gsd/DEFENSE.md'], ownLease: 'review/svn', ownRun: 'svn-own' });
+      fs.appendFileSync(path.join(root, '.gsd', 'forge', 'events.jsonl'), 'append\n');
+      fs.writeFileSync(path.join(root, '.gsd', 'DEFENSE.md'), 'synthetic defense\n');
+      assert.equal(lease.heartbeat(root, 'review/svn', own.owner_token, own.generation, { now: 2000, ttlMs: 10000 }).ok, true);
+      runs.bumpHeartbeat(root, 'svn-own', 300);
+      const allowed = verify(baseline); assert.equal(allowed.ok, true, JSON.stringify(allowed));
+      fs.writeFileSync(path.join(root, '.gsd', 'control.json'), '{"original":false}\n');
+      assert.equal(verify(baseline).reason, guard.REASONS.MUTATION);
+    });
+    check('SVN FULL detects content plus unversioned add and missing path', () => {
+      mutation(root, r => fs.writeFileSync(path.join(r, 'tracked.txt'), 'changed\n'), 'modified');
+      fs.writeFileSync(path.join(root, 'tracked.txt'), 'original\n');
+      mutation(root, r => fs.writeFileSync(path.join(r, 'new.txt'), 'new\n'), 'added');
+      mutation(root, r => fs.unlinkSync(path.join(r, 'tracked.txt')), 'deleted');
+      fs.writeFileSync(path.join(root, 'tracked.txt'), 'original\n');
+    });
+    check('SVN FULL detects observable mode without byte changes', () => {
+      const file = path.join(root, 'tracked.txt'), mode = fs.statSync(file).mode;
+      const baseline = capture(root); fs.chmodSync(file, mode & ~0o222);
+      assert.notEqual(fs.statSync(file).mode, mode, 'fixture requires observable readonly bit');
+      assert.ok(verify(baseline).changes.some(row => row.kind === 'mode'));
+      fs.chmodSync(file, mode & 0o777);
+    });
+    check('SVN FULL detects property and administrative bytes', () => {
+      mutation(root, () => svn('propset', 'fixture:property', 'new', 'tracked.txt'), 'properties');
+      mutation(root, r => fs.writeFileSync(path.join(r, '.svn', 'tmp', 'unapproved'), 'admin\n'), 'administration');
+    });
+    check('SVN FULL detects local BASE advancement', () => {
+      const baseline = capture(root); fs.writeFileSync(path.join(root, 'tracked.txt'), 'committed\n');
+      svn('commit', '-m', 'synthetic revision'); svn('update');
+      assert.ok(verify(baseline).changes.some(row => row.kind === 'base'));
+    });
+    oldestAliasCases(root, 'SVN FULL #387');
+  } finally {
+    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+  }
+}
+// END SVN REGRESSION
+
+// SVN administration regression: bounded stream, real private SQLite WC files.
+function svnAdminStreamingCases() {
+  const folder = path.join(temporary, 'svn-streaming'), repository = path.join(folder, 'repository');
+  fs.mkdirSync(folder);
+  const configDir = path.join(folder, 'client'); fs.mkdirSync(configDir);
+  function command(binary, args, cwd = folder) {
+    assert.ok(path.resolve(cwd) === path.resolve(folder) || path.resolve(cwd).startsWith(path.resolve(folder) + path.sep));
+    const observed = spawnSync(binary, args, { cwd, encoding: 'utf8', shell: false, windowsHide: true, maxBuffer: 1024 * 1024 });
+    assert.equal(observed.status, 0, observed.stderr); return observed.stdout;
+  }
+  for (const binary of ['svn', 'svnadmin']) {
+    const observed = spawnSync(binary, ['--version', '--quiet'], { encoding: 'utf8', shell: false, windowsHide: true });
+    if (observed.status !== 0) { console.log('SKIP SVN admin streaming: ' + binary + ' unavailable'); return; }
+  }
+  command('svnadmin', ['create', repository]);
+  function largeFixture(name, payloadBytes) {
+    const root = path.join(folder, name);
+    command('svn', ['--non-interactive', '--config-dir', configDir, 'checkout', require('url').pathToFileURL(repository).href, root]);
+    fs.writeFileSync(path.join(root, 'tracked.txt'), 'original\n');
+    const svn = (...args) => command('svn', ['--non-interactive', '--config-dir', configDir, ...args], root);
+    svn('add', 'tracked.txt');
+    const payload = path.join(folder, name + '.payload');
+    fs.writeFileSync(payload, Buffer.alloc(payloadBytes, 65));
+    svn('propset', 'fixture:large-admin', '--file', payload, 'tracked.txt');
+    fs.mkdirSync(path.join(root, '.gsd'), { recursive: true });
+    const db = path.join(root, '.svn', 'wc.db'), size = fs.statSync(db).size;
+    assert.ok(size >= payloadBytes, 'valid SQLite WC contains the representative administrative payload');
+    return { root, db, size };
+  }
+  const small = largeFixture('wc-4m6', 4603904), large = largeFixture('wc-9m3', 9256960);
+  console.log('MEASURE SVN admin fixtures ' + JSON.stringify({ small_wc_db_bytes: small.size, large_wc_db_bytes: large.size }));
+  const saved = { open: fs.openSync, read: fs.readSync, close: fs.closeSync, readFile: fs.readFileSync };
+  const administrative = new Map(); let calls = 0, largest = 0, observer = null;
+  function isAdmin(file) { return typeof file !== 'number' && /[\\/]\.svn(?:[\\/]|$)/i.test(String(file)); }
+  fs.openSync = function(file, ...args) {
+    const fd = saved.open.call(fs, file, ...args); if (isAdmin(file)) administrative.set(fd, String(file)); return fd;
+  };
+  fs.readSync = function(fd, buffer, offset, length, position) {
+    if (administrative.has(fd)) {
+      assert.ok(length <= 64 * 1024, 'administrative read buffer stays bounded');
+      largest = Math.max(largest, length); calls++;
+    }
+    const count = saved.read.call(fs, fd, buffer, offset, length, position);
+    if (observer && administrative.has(fd)) observer(administrative.get(fd), count);
+    return count;
+  };
+  fs.closeSync = function(fd) { administrative.delete(fd); return saved.close.call(fs, fd); };
+  fs.readFileSync = function(file, ...args) { assert.ok(!isAdmin(file), 'no whole administrative file read'); return saved.readFile.call(fs, file, ...args); };
+  try {
+    check('SVN FULL streams a valid 4.6 MB administrative database', () => {
+      const baseline = capture(small.root); assert.equal(verify(baseline).ok, true);
+    });
+    check('SVN FULL streams a valid 9.3 MB database and canonical-sized local content', () => {
+      fs.writeFileSync(path.join(large.root, 'local-2m.bin'), Buffer.alloc(2 * 1024 * 1024, 88));
+      const baseline = capture(large.root); assert.equal(verify(baseline).ok, true);
+      assert.ok(calls > 100 && largest === 64 * 1024);
+    });
+    check('SVN FULL detects administrative content tamper after a large baseline', () => {
+      const proof = path.join(small.root, '.svn', 'tmp', 'stream-proof'); fs.writeFileSync(proof, 'before');
+      const baseline = capture(small.root); fs.writeFileSync(proof, 'after!');
+      const observed = verify(baseline); assert.equal(observed.reason, guard.REASONS.MUTATION);
+      assert.ok(observed.changes.some(row => row.kind === 'administration'));
+      fs.unlinkSync(proof);
+    });
+    check('SVN FULL refuses an administrative file changing during its stream', () => {
+      const before = fs.statSync(small.db); let changed = false;
+      observer = (file, count) => {
+        if (!changed && path.resolve(file) === path.resolve(small.db) && count > 0) {
+          changed = true; fs.utimesSync(small.db, before.atime, new Date(before.mtimeMs + 5000));
+        }
+      };
+      try {
+        const observed = guard.captureBaseline({ owner: small.root, codeRoots: [small.root] });
+        assert.ok(changed); assert.equal(observed.reason, guard.REASONS.UNAVAILABLE);
+        assert.ok(!observed.baseline, 'unstable evidence never publishes a baseline');
+      } finally { observer = null; fs.utimesSync(small.db, before.atime, before.mtime); }
+    });
+    check('SVN FULL refuses administration above the canonical per-file limit before reading it', () => {
+      const oversized = path.join(small.root, '.svn', 'tmp', 'oversized');
+      const fd = saved.open.call(fs, oversized, 'wx');
+      try { fs.ftruncateSync(fd, vcs.SVN_STRICT_POLICY.maxFileBytes + 1); } finally { saved.close.call(fs, fd); }
+      const openBefore = fs.openSync;
+      fs.openSync = function(file, ...args) {
+        assert.notEqual(typeof file === 'number' ? '' : path.resolve(String(file)), path.resolve(oversized), 'oversized content is not opened');
+        return openBefore.call(fs, file, ...args);
+      };
+      try {
+        const observed = guard.captureBaseline({ owner: small.root, codeRoots: [small.root] });
+        assert.equal(observed.reason, guard.REASONS.UNAVAILABLE); assert.ok(!observed.baseline);
+      } finally { fs.openSync = openBefore; fs.unlinkSync(oversized); }
+    });
+    check('SVN FULL counts administrative entries once across both observations', () => {
+      const folder = path.join(small.root, '.svn', 'tmp', 'entry-budget'); fs.mkdirSync(folder);
+      try {
+        for (let i = 0; i < 10000; i++) fs.writeFileSync(path.join(folder, 'empty-' + i), '');
+        const baseline = capture(small.root); assert.equal(verify(baseline).ok, true);
+      } finally { fs.rmSync(folder, { recursive: true, force: true }); }
+    });
+    console.log('MEASURE SVN admin stream ' + JSON.stringify({ administrative_read_calls: calls, maximum_buffer_bytes: largest }));
+  } finally {
+    fs.openSync = saved.open; fs.readSync = saved.read; fs.closeSync = saved.close; fs.readFileSync = saved.readFile;
+  }
+}
+// END SVN ADMIN STREAMING REGRESSION
+
+// FULL guard observed paths are evidence, not permission patterns.
+function observedGitPathCases(reproduceBefore = false) {
+  const root = fixture(), file = path.join(root, '[id].js'); fs.writeFileSync(file, 'route original\n');
+  git(root, 'add', '--', '[id].js'); git(root, 'commit', '-qm', 'dynamic route');
+  if (reproduceBefore) {
+    check('REPRO R2 Git tracked bracket name refuses before dispatch', () => {
+      assert.equal(guard.captureBaseline({ owner: root, codeRoots: [root] }).reason, guard.REASONS.USAGE);
+    }); return;
+  }
+  check('Git FULL observes bracket filenames in index, status and dirty content', () => {
+    const baseline = capture(root); assert.equal(verify(baseline).ok, true);
+    fs.writeFileSync(file, 'changed route\n'); const changed = verify(baseline);
+    assert.equal(changed.reason, guard.REASONS.MUTATION); assert.ok(changed.changes.some(row => row.path === '[id].js'));
+    fs.writeFileSync(file, 'route original\n');
+    fs.writeFileSync(path.join(root, '[new].js'), 'new route\n'); const added = verify(baseline);
+    assert.equal(added.reason, guard.REASONS.MUTATION); assert.ok(added.changes.some(row => row.path === '[new].js'));
+  });
+}
+function svnObservedPathCases(reproduceBefore = false) {
+  for (const binary of ['svn', 'svnadmin']) {
+    const observed = spawnSync(binary, ['--version', '--quiet'], { encoding: 'utf8', shell: false, windowsHide: true });
+    if (observed.status !== 0) { console.log('SKIP observed SVN paths: ' + binary + ' unavailable'); return; }
+  }
+  const folder = path.join(temporary, 'svn-observed-paths'), repository = path.join(folder, 'repository'), root = path.join(folder, 'wc');
+  fs.mkdirSync(folder); const configDir = path.join(folder, 'client'); fs.mkdirSync(configDir);
+  function command(binary, args, cwd = folder) {
+    assert.ok(path.resolve(cwd) === path.resolve(folder) || path.resolve(cwd).startsWith(path.resolve(folder) + path.sep));
+    const observed = spawnSync(binary, args, { cwd, encoding: 'utf8', shell: false, windowsHide: true });
+    assert.equal(observed.status, 0, observed.stderr); return observed.stdout;
+  }
+  const svn = (...args) => command('svn', ['--non-interactive', '--config-dir', configDir, ...args], root);
+  command('svnadmin', ['create', repository]);
+  command('svn', ['--non-interactive', '--config-dir', configDir, 'checkout', require('url').pathToFileURL(repository).href, root]);
+  const subdir = path.join(root, 'subdir'); fs.mkdirSync(subdir);
+  fs.writeFileSync(path.join(root, 'outside.txt'), 'outside original\n'); fs.writeFileSync(path.join(subdir, 'nested.txt'), 'nested original\n');
+  svn('add', 'outside.txt', 'subdir'); svn('commit', '-m', 'nested baseline'); svn('update');
+  fs.mkdirSync(path.join(root, '.gsd'), { recursive: true });
+  const options = { owner: root, codeRoots: [{ id: 'nested', path: subdir }] };
+  if (reproduceBefore) {
+    check('REPRO R1 SVN nested code root refuses before dispatch', () => {
+      assert.equal(guard.captureBaseline(options).reason, guard.REASONS.UNAVAILABLE);
+    });
+    fs.writeFileSync(path.join(root, '[id].js'), 'dynamic route\n'); svn('add', '[id].js');
+    check('REPRO R2 SVN bracket name refuses before dispatch', () => {
+      assert.equal(guard.captureBaseline({ owner: root, codeRoots: [root] }).reason, guard.REASONS.USAGE);
+    }); return;
+  }
+  check('SVN FULL nested code root retains exact content scope and observes actual WC administration', () => {
+    const observed = guard.captureBaseline(options); assert.equal(observed.ok, true, JSON.stringify(observed)); const baseline = observed.baseline;
+    assert.equal(path.resolve(baseline.code_roots[0].path), path.resolve(subdir));
+    assert.ok(baseline.code_roots[0].entries.some(row => row.path === 'nested.txt'));
+    assert.ok(!baseline.code_roots[0].entries.some(row => row.path === 'outside.txt'));
+    fs.writeFileSync(path.join(root, 'outside.txt'), 'outside changed\n'); assert.equal(verify(baseline).ok, true, 'content outside nested scope is not silently claimed');
+    fs.writeFileSync(path.join(subdir, 'nested.txt'), 'nested changed\n');
+    const content = verify(baseline); assert.equal(content.reason, guard.REASONS.MUTATION); assert.ok(content.changes.some(row => row.path === 'nested.txt'));
+    fs.writeFileSync(path.join(subdir, 'nested.txt'), 'nested original\n');
+    const admin = path.join(root, '.svn', 'tmp', 'nested-admin-proof'); fs.writeFileSync(admin, 'unapproved\n');
+    try { const changed = verify(baseline); assert.equal(changed.reason, guard.REASONS.MUTATION); assert.ok(changed.changes.some(row => row.kind === 'administration')); }
+    finally { fs.unlinkSync(admin); }
+  });
+  fs.writeFileSync(path.join(subdir, '[id].js'), 'dynamic route\n'); svn('add', 'subdir/[id].js');
+  check('SVN FULL accepts observed bracket filenames and detects their mutation', () => {
+    const baseline = capture(root); assert.equal(verify(baseline).ok, true);
+    const file = path.join(subdir, '[id].js'); fs.writeFileSync(file, 'changed dynamic route\n');
+    const changed = verify(baseline); assert.equal(changed.reason, guard.REASONS.MUTATION);
+    assert.ok(changed.changes.some(row => row.path === 'subdir/[id].js')); fs.writeFileSync(file, 'dynamic route\n');
+    fs.writeFileSync(path.join(subdir, '[new].js'), 'new route\n'); const added = verify(baseline);
+    assert.equal(added.reason, guard.REASONS.MUTATION); assert.ok(added.changes.some(row => row.path === 'subdir/[new].js'));
+  });
+  check('Observed path support grants no wildcard or bracket owner permission', () => {
+    for (const key of ['allowAppend', 'allowPublication']) {
+      assert.equal(guard.captureBaseline({ ...options, [key]: ['.gsd/[id].json'] }).reason, guard.REASONS.USAGE);
+      assert.equal(guard.captureBaseline({ ...options, [key]: ['.gsd/../escape'] }).reason, guard.REASONS.USAGE);
+    }
+  });
+  check('SVN FULL refuses a validated snapshot claiming an unrelated administrative root', () => {
+    const saved = vcs.captureDirty, unrelated = path.join(folder, 'unrelated'); fs.mkdirSync(unrelated);
+    vcs.captureDirty = (...args) => {
+      const value = saved(...args); assert.equal(value.ok, true);
+      for (const row of value.baseline.inventory) row.wc_root = fs.realpathSync.native(unrelated);
+      const base = value.baseline;
+      base.fingerprint = require('crypto').createHash('sha256').update(JSON.stringify({ code_dir: base.code_dir, svnversion: base.svnversion, inventory: base.inventory })).digest('hex');
+      assert.equal(vcs.validateSvnStrictSnapshot(value), true, 'negative reaches physical ancestry validation, not malformed evidence'); return value;
+    };
+    try { assert.equal(guard.captureBaseline(options).reason, guard.REASONS.UNAVAILABLE); }
+    finally { vcs.captureDirty = saved; }
+  });
+}
+// END OBSERVED PATH REGRESSION
+
+
+
 try {
+  oldestAliasCases(fixture(), 'Git FULL #387');
+  svnFullCases();
+  svnAdminStreamingCases();
+  observedGitPathCases();
+  svnObservedPathCases();
   check('intent-to-add empty and nonempty files preserve baseline and detect later mutation', () => {
     const root = fixture();
     for (const [file, contents] of [['intent empty.txt', ''], ['intent data.txt', 'new\n']]) fs.writeFileSync(path.join(root, file), contents);

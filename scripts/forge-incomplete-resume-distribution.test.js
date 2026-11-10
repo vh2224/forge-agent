@@ -203,3 +203,30 @@ for(const file of ['scripts/fixtures/owner-recovery/distribution.cjs','scripts/f
 }
 assert.equal(layer.validate({artifacts}),true);
 console.log('PASS #382 request-retention terminal: exact parent/core/registry/citations with '+requestRetentionCases+' additive negatives');
+
+// #385+#387 exact next terminal. All request-retention/owner-recovery/native/378/375 negatives stay above.
+assert(layer.fullGuardSources.length>0,'full-guard source census cannot be empty');
+let fullGuardCases=0;
+const fullGuardFirst=layer.fullGuardSources[0];
+for(const field of ['before','after','attributed_before','attributed_after']){
+ const value=structuredClone(layer.fullGuardLayer);value.files[fullGuardFirst][field]='0'.repeat(64);
+ assert.throws(()=>layer.validate({artifacts,fullGuardLayerValue:value}));fullGuardCases++;
+}
+for(const mutate of [value=>{delete value.files[fullGuardFirst];},value=>{value.files.foreign=value.files[fullGuardFirst];},value=>{value.provenance.base_revision='0'.repeat(40);},value=>{value.provenance.approved=true;},value=>{value.registry.after_rows[0].classification='foreign';value.registry.after_sha256=hash(JSON.stringify(value.registry.after_rows));},value=>{value.registry.before_rows[0].reason+=' forged';value.registry.before_sha256=hash(JSON.stringify(value.registry.before_rows));},value=>{value.registry.foreign=true;}]){
+ const value=structuredClone(layer.fullGuardLayer);mutate(value);assert.throws(()=>layer.validate({artifacts,fullGuardLayerValue:value}));fullGuardCases++;
+}
+{
+ const raw=fs.readFileSync(path.join(root,fullGuardFirst)),foreign=Buffer.concat([raw,Buffer.from('\nforeign full-guard bytes\n')]);
+ const value=structuredClone(layer.fullGuardLayer);value.files[fullGuardFirst].after=hash(foreign);value.files[fullGuardFirst].attributed_after=hash(foreign);
+ assert.throws(()=>layer.validate({artifacts,fullGuardLayerValue:value,readRaw:file=>file===fullGuardFirst?foreign:fs.readFileSync(path.join(root,file))}));fullGuardCases++;
+}
+for(const file of ['scripts/fixtures/request-retention/distribution.cjs','scripts/fixtures/request-retention/distribution-delta.json','scripts/fixtures/request-retention/README.md','scripts/forge-dispatch-source-guard.js']){
+ assert.throws(()=>layer.validate({artifacts,readRaw:relative=>relative===file?Buffer.from('foreign immutable predecessor/scanner'):fs.readFileSync(path.join(root,relative))}));fullGuardCases++;
+}
+{
+ const rows=require(path.join(root,'scripts/forge-dispatch-source-guard.js')).SOURCE_REGISTRY;
+ assert.equal(rows.length,254);assert.equal(layer.ownerRecoveryLayer.registry.before_count,252);assert.equal(layer.previousRegistry(rows).length,248);
+ for(const changed of [rows.slice(1),[...rows,rows[0]],rows.map((row,i)=>i?row:{...row,classification:'foreign'})]){assert.throws(()=>layer.previousRegistry(changed));fullGuardCases++;}
+}
+assert.equal(layer.validate({artifacts}),true);
+console.log('PASS #385+#387 full-guard terminal: exact parent/core/registry/citations with '+fullGuardCases+' additive negatives');
