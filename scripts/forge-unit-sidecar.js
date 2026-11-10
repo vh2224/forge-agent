@@ -817,6 +817,9 @@ function beginArtifactAttemptInsideOwnerWindow(request) {
   if (fs.existsSync(files.receiptFile)) {
     const record = JSON.parse(fs.readFileSync(files.receiptFile, 'utf8'));
     if (record.fingerprint !== fingerprint) fail('dispatch-identity-conflict');
+    // A retained archive must still match exactly; its recorded broker/linked
+    // requirement cannot disappear on replay. Legacy receipts are unchanged.
+    require('./forge-request-retention').assertForReceipt(request, record);
     if (record.phase === 'ready') return { state: 'ready', record, loc, files, fingerprint };
     if (record.phase === 'failed') fail(record.failure?.reason_code || 'artifact-attempt-failed');
     fail('sidecar-attempt-interrupted', 'The attempt is started without a durable result; inspect it before a new dispatch.');
@@ -830,7 +833,11 @@ function beginArtifactAttemptInsideOwnerWindow(request) {
         || hash(JSON.stringify(broker.manifest.execution_contract)) !== hash(JSON.stringify(request.execution_contract || null))) fail('broker-attempt-binding');
     broker.verify();
   }
+  // Exact inputs become durable (exclusive write + fsync) before started exists;
+  // a capture refusal leaves no receipt and never reaches a provider.
+  const retainedRequest = require('./forge-request-retention').retain(request);
   const record = { phase: 'started', fingerprint, dispatch_id: request.dispatchId, before,
+    retained_request: retainedRequest,
     recovery_identity_sha256: recoveryIdentity(request),
     ...(request.ownerBroker ? { broker_manifest_sha256: require('./forge-artifact-reconciliation').assertBroker(request.ownerBroker).manifest_sha256,
       broker_plan_sha256: request.ownerBroker.manifest.plan_sha256 } : {}),
@@ -898,6 +905,7 @@ async function acceptArtifactResultCore(request, rawResult, metadata = {}, publi
   if (!fs.existsSync(files.receiptFile)) fail('artifact-attempt-not-started');
   const existing = JSON.parse(fs.readFileSync(files.receiptFile, 'utf8'));
   if (existing.fingerprint !== fingerprint) fail('dispatch-identity-conflict');
+  require('./forge-request-retention').assertForReceipt(request, existing);
   if (existing.phase === 'ready') {
     if (request.ownerBroker) request.ownerBroker.verify({ canonicalArtifacts: existing.artifacts || [] });
     const result = await publishReadyRecord(request, existing, undefined, publicationLock);
@@ -973,6 +981,7 @@ async function acceptArtifactResultCore(request, rawResult, metadata = {}, publi
     ? require('./forge-task-preparation').preflightPlan(request, artifacts[0].content) : null;
   const pendingQuestions = require('./forge-interaction').mergePendingQuestions(request.pending_questions || [], rawResult.questions || []);
   const record = { phase: 'ready', fingerprint, dispatch_id: request.dispatchId,
+    ...(existing.retained_request ? { retained_request: existing.retained_request } : {}),
     ...(planContract ? { plan_contract: planContract } : {}), pending_questions: pendingQuestions,
     input_pending_questions: request.pending_questions || [],
     request_fingerprint: request.preparationRequestFingerprint || null,
@@ -2438,6 +2447,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         || historicalV2MemoryReceipt(existing, r, loc.sourceUnit, legacyFingerprint)))) {
       fail('dispatch-identity-conflict');
     }
+    if (existing.retained_request) require('./forge-request-retention').assertForReceipt(r, existing);
     if (existing.phase === 'ready' || existing.phase === 'executed') {
       if (nativeExecution) {
         const { native: ignoredNative, dispatch_id: ignoredDispatch, workflow_id: ignoredWorkflow,
@@ -2582,9 +2592,15 @@ async function runUnitSidecarCore(request, runtime, identity) {
     admitReviewFix(r, loc, fix, { root, dispatchId });
     createReviewFixResetState(fix, { dispatchId });
   }
+  // #382: artifact attempts retain their exact inputs (exclusive write + fsync)
+  // after every refusal gate and before started/provider. Other transports keep
+  // their own receipt contracts unchanged.
+  const retainedRequest = transport.mode === 'artifacts' && !verificationSuccessor
+    ? require('./forge-request-retention').retain(r) : null;
   const startedAt = new Date().toISOString();
   // Exclusive creation arbitrates concurrent invocations of the same attempt.
   fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'started', fingerprint, dispatch_id: dispatchId, before, started_at: startedAt,
+    ...(retainedRequest ? { retained_request: retainedRequest } : {}),
     recovery_identity_sha256: recoveryIdentity(r), route, ...(verificationSeal ? { verification_seal: verificationSeal } : {}),
     ...(resumedFrom ? { resumed_from: resumedFrom, session_sha256: resumeSessionSha } : {}),
     ...(execution ? { execution: { inputs: execution.inputs, budgets: execution.budgets }, reset_state_file: executionStateFile } : {}),
@@ -2762,7 +2778,17 @@ async function runUnitSidecarCore(request, runtime, identity) {
       const channels = artifactAttemptFiles(publicationRequest);
       if (!initial) {
         const { failure, provisional_terminal, ...kept } = parent.failed;
-        initial = JSON.stringify({ ...kept, phase: 'started', provisional_replay: {
+        // A provisional continuation has its own exact result/archive sibling.
+        // Preserve the failed parent's receipt and archive byte-for-byte; a
+        // legacy parent without retained data gains no inferred backfill.
+        let retainedRequest = null;
+        if (parent.failed.retained_request) {
+          const retention = require('./forge-request-retention');
+          const original = retention.read(parent.failed, r, { receiptPath: parentReceipt });
+          retainedRequest = retention.retain(publicationRequest, original.preparation_input === 'captured'
+            ? { preparationPreimage: original.preparation_json } : {});
+        }
+        initial = JSON.stringify({ ...kept, ...(retainedRequest ? { retained_request: retainedRequest } : {}), phase: 'started', provisional_replay: {
           parent_receipt_sha256: parent.receipt, parent_result_sha256: parent.result,
           inference_performed: false, provisional_id: metadata.id } }, null, 2) + '\n';
       }

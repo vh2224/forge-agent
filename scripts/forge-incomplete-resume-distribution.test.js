@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('fs'),path=require('path');
-const root=path.resolve(__dirname,'..'),layer=require('./fixtures/owner-recovery/distribution.cjs');
+const root=path.resolve(__dirname,'..'),layer=require('./fixtures/request-retention/distribution.cjs');
 const artifacts=require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts;
 assert.equal(layer.validate({artifacts}),true);
 let cases=0;
@@ -176,3 +176,30 @@ console.log('PASS #376 initialization bounded span: '+initialization376Cases+' d
  for(const changed of [rows.slice(1),[...rows,rows[0]],rows.map((r,i)=>i?{...r}:{...r,classification:'foreign'})])assert.throws(()=>layer.previousRegistry(changed));
  for(const mutate of [v=>{v.registry.after_rows[0].classification='foreign';v.registry.after_sha256=hash(JSON.stringify(v.registry.after_rows));},v=>{v.registry.before_rows[0].reason+=' forged';v.registry.before_sha256=hash(JSON.stringify(v.registry.before_rows));},v=>{v.registry.foreign=true;}]){const value=structuredClone(layer.ownerRecoveryLayer);mutate(value);assert.throws(()=>layer.previousRegistry(rows,value));}
 }
+
+// #382 exact next terminal. All owner-recovery/native/378/375 negatives stay above.
+assert(layer.requestRetentionSources.length>0,'request-retention source census cannot be empty');
+let requestRetentionCases=0;
+const requestRetentionFirst=layer.requestRetentionSources[0];
+for(const field of ['before','after','attributed_before','attributed_after']){
+ const value=structuredClone(layer.requestRetentionLayer);value.files[requestRetentionFirst][field]='0'.repeat(64);
+ assert.throws(()=>layer.validate({artifacts,requestRetentionLayerValue:value}));requestRetentionCases++;
+}
+for(const mutate of [value=>{delete value.files[requestRetentionFirst];},value=>{value.files.foreign=value.files[requestRetentionFirst];},value=>{value.provenance.base_revision='0'.repeat(40);},value=>{value.provenance.approved=true;},value=>{value.registry.after_rows[0].classification='foreign';value.registry.after_sha256=hash(JSON.stringify(value.registry.after_rows));},value=>{value.registry.before_rows[0].reason+=' forged';value.registry.before_sha256=hash(JSON.stringify(value.registry.before_rows));},value=>{value.registry.foreign=true;}]){
+ const value=structuredClone(layer.requestRetentionLayer);mutate(value);assert.throws(()=>layer.validate({artifacts,requestRetentionLayerValue:value}));requestRetentionCases++;
+}
+{
+ const raw=fs.readFileSync(path.join(root,requestRetentionFirst)),foreign=Buffer.concat([raw,Buffer.from('\nforeign request-retention bytes\n')]);
+ const value=structuredClone(layer.requestRetentionLayer);value.files[requestRetentionFirst].after=hash(foreign);value.files[requestRetentionFirst].attributed_after=hash(foreign);
+ assert.throws(()=>layer.validate({artifacts,requestRetentionLayerValue:value,readRaw:file=>file===requestRetentionFirst?foreign:fs.readFileSync(path.join(root,file))}));requestRetentionCases++;
+}
+for(const file of ['scripts/fixtures/owner-recovery/distribution.cjs','scripts/fixtures/owner-recovery/distribution-delta.json','scripts/fixtures/owner-recovery/README.md','scripts/forge-dispatch-source-guard.js']){
+ assert.throws(()=>layer.validate({artifacts,readRaw:relative=>relative===file?Buffer.from('foreign immutable predecessor/scanner'):fs.readFileSync(path.join(root,relative))}));requestRetentionCases++;
+}
+{
+ const rows=require(path.join(root,'scripts/forge-dispatch-source-guard.js')).SOURCE_REGISTRY;
+ assert.equal(rows.length,254);assert.equal(layer.ownerRecoveryLayer.registry.before_count,252);assert.equal(layer.previousRegistry(rows).length,248);
+ for(const changed of [rows.slice(1),[...rows,rows[0]],rows.map((row,i)=>i?row:{...row,classification:'foreign'})]){assert.throws(()=>layer.previousRegistry(changed));requestRetentionCases++;}
+}
+assert.equal(layer.validate({artifacts}),true);
+console.log('PASS #382 request-retention terminal: exact parent/core/registry/citations with '+requestRetentionCases+' additive negatives');

@@ -244,10 +244,15 @@ function validatePhaseContent(phase, taskId, content) {
   return inspectPhaseContent(phase, taskId, content).ok;
 }
 
-function preparationRequestFingerprint(request) {
+// Exact preimage of the historical preparation hash; retained privately (#382)
+// so a later inspector never has to re-infer the caller's original input.
+function preparationRequestPreimage(request) {
   const copy = { ...request };
   for (const key of ['contract', 'route', 'readback', 'ownerBroker', 'pending_questions']) delete copy[key];
-  return crypto.createHash('sha256').update(JSON.stringify(copy)).digest('hex');
+  return JSON.stringify(copy);
+}
+function preparationRequestFingerprint(request) {
+  return crypto.createHash('sha256').update(preparationRequestPreimage(request)).digest('hex');
 }
 
 // The consumed handoff block of a started linked task enters each of the four phase prompts exactly
@@ -508,14 +513,26 @@ async function startStandaloneTaskPreparationCore(rawRequest, deps = {}) {
   try { prompt = buildPreparationPrompt(request); }
   catch (error) { return refused('procedure', error.code || 'procedure-context-invalid', route, false); }
   const delivery = deliveryRequest(request, route, prompt);
+  // #382: both exact inputs (delivery preimage and caller preparation preimage)
+  // become durable before either transport creates started. An existing receipt
+  // keeps its original replay/interrupted policy; nothing is backfilled.
+  const retainExactInputs = () => {
+    if (fs.existsSync(unit.artifactAttemptFiles(delivery).receiptFile)) return null;
+    try { require('./forge-request-retention').retain(delivery, { preparationPreimage: preparationRequestPreimage(request) }); return null; }
+    catch (error) { return refused('publication', error.code || 'request-retention-failed', route, false); }
+  };
   const authorizationReference = require('./forge-attempt-recovery').bindRecoveryAuthorization(deps.recoveryAuthorization);
   if (route.worker_mode === 'sidecar') {
+    const captureRefusal = retainExactInputs();
+    if (captureRefusal) return captureRefusal;
     return { ok: true, action: 'invoke-sidecar', transport: 'sidecar', status: 'ready',
       reason_code: 'sidecar-invocation-ready', provider_called: false, route, delivery_request: delivery };
   }
   const options = nativeOptions(request, route, prompt);
   const invocation = nativeApi.buildNativeInvocation(options);
   if (!invocation.ok) return refused('native', invocation.reason_code, route, false);
+  const captureRefusal = retainExactInputs();
+  if (captureRefusal) return captureRefusal;
   try {
     const replay = await unit.replayArtifactAttempt(delivery);
     if (replay.replayed) return completed('native', route, replay);
@@ -915,7 +932,7 @@ async function cli(argv, deps = {}) {
 
 module.exports = {
   REQUEST_SCHEMA_VERSION, PHASE_CONTRACTS, phaseContract, validateRequest,
-  requiredArtifact, validatePhaseContent, inspectPhaseContent, preparationRequestFingerprint,
+  requiredArtifact, validatePhaseContent, inspectPhaseContent, preparationRequestFingerprint, preparationRequestPreimage,
   buildPreparationPrompt, deliveryRequest, nativeOptions, preflightPlan,
   candidateFromPreparationResult, startStandaloneTaskPreparation,
   acceptStandaloneTaskPreparation, prepareStandaloneTask, recoverStandaloneTask,

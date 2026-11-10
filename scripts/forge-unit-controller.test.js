@@ -2015,6 +2015,11 @@ function testSupersededInterruptedOwner() {
       ['native receipt present', f => { f.finalNative.receipt_path = f.receiptFile; }, 'saved-response-replay-required'],
       ['native unknown process', f => { f.options.processProbe = () => 'unknown'; }, 'process-not-stopped'],
       ['invoked successor with receipt', f => { const old = f.options.inspectInterruption; f.options.inspectInterruption = query => ({ ...old(query), receipt_path: f.receiptFile, saved_response: 'ready/blocked' }); }, 'saved-response-replay-required'],
+      // #382: a historical proof is an opaque process-local handle; JSON/flags never substitute it.
+      ['serialized archived proof', f => { const old = f.options.inspectInterruption; f.options.inspectInterruption = query => ({ ...old(query),
+        ...(query.role === 'original' ? { archived_inspection: JSON.parse(JSON.stringify(Object.freeze({}))) } : {}) }); }, 'attempt-identity-mismatch'],
+      ['approved archived proof flag', f => { const old = f.options.inspectInterruption; f.options.inspectInterruption = query => ({ ...old(query),
+        ...(query.role === 'original' ? { archived_inspection: { approved: true, attested: true } } : {}) }); }, 'attempt-identity-mismatch'],
     ];
     for (const [label, change, code] of negatives) {
       const f = supersededInterruptionFixture();
