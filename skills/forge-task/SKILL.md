@@ -321,7 +321,7 @@ isolation, run registration and all normal coordination/claim gates.
 
 **Determine TASK_ID:**
 ```bash
-mkdir -p .gsd/tasks
+# ID allocation is read-only; bootstrap admission precedes the first owner write.
 TASK_ID=$(node "$FORGE_SCRIPTS_DIR/forge-ids.js" --new-task "$TASK_DESCRIPTION")
 ```
 
@@ -420,8 +420,8 @@ Isolation rules (CRITICAL — the operator configured this; honor it):
 if [ -z "$RESUME_MODE" ]; then
   SESSION_ID=$(node "$FORGE_SCRIPTS_DIR/forge-runs.js" --owner-session --host-runtime claude --expected-owner-session '${CLAUDE_SESSION_ID}') || { echo "owner-session-unavailable: current Claude host identity was not attested; stop before registration." >&2; exit 2; }
   WORKTREES_JSON=$(node -e "const r=JSON.parse(process.argv[1]);process.stdout.write(JSON.stringify((r.repos||[]).filter(x=>x.worktree&&x.status!=='error').map(x=>({repo:x.path,path:x.worktree}))))" "$ISO_RESULT")
-  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --add --observed-owner --host-runtime claude --expected-owner-session '${CLAUDE_SESSION_ID}' --id "$TASK_ID" --kind task --session "$SESSION_ID" --isolation-mode "$ISOLATION_MODE" --account "${FORGE_ACCOUNT:-}" --worktrees "$WORKTREES_JSON" --attached-to "${ATTACH_RUN:-}" --branch "${RUN_BRANCH:-}" --cwd "$(pwd)" --task-description "$TASK_DESCRIPTION" > /dev/null
-  mkdir -p "$WORKING_DIR/.gsd/tasks/$TASK_ID"
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --add --observed-owner --host-runtime claude --expected-owner-session '${CLAUDE_SESSION_ID}' --id "$TASK_ID" --kind task --session "$SESSION_ID" --isolation-mode "$ISOLATION_MODE" --account "${FORGE_ACCOUNT:-}" --worktrees "$WORKTREES_JSON" --attached-to "${ATTACH_RUN:-}" --branch "${RUN_BRANCH:-}" --cwd "$(pwd)" --task-description "$TASK_DESCRIPTION" > /dev/null || exit 2
+  node "$FORGE_SCRIPTS_DIR/forge-owner-transport-window.js" --ensure-task "$WORKING_DIR" "$TASK_ID" || exit 2
   if ! node "$FORGE_SCRIPTS_DIR/forge-personal-context.js" --bind --project "$WORKING_DIR" --id "$TASK_ID" --intent create --json; then
     echo "Partial: run $TASK_ID exists, personal bind failed. Recover with --bind --intent explicit-resume for this ID." >&2
     exit 1
@@ -449,13 +449,21 @@ node "$FORGE_SCRIPTS_DIR/forge-dashboard.js" --cwd "$(pwd)" --holder "task:$TASK
 
 ---
 
+## Protected owner admission
+
+Canonical metadata transactions acquire the external owner publication fence before any owner lock, probe, directory or file write. `owner-window-busy` means another genuine protected owner transport window is held; stop this metadata entry before inference and retry after its actual joined close. A run active flag alone is never writer evidence. The canonical task-directory/BRIEF helpers and run registry enforce this admission. Personal binding, dashboard, item updates and any remaining raw host metadata writes must also be executed through `forge-owner-transport-window.withMutation(owner, synchronousTransaction)` or deferred; the instruction is not a filesystem sandbox. Do not continue after a busy registration.
+
+For a live native host, use the existing `startStandaloneTaskPreparation(...).invoke(actualNativeCallback)` with `ownerTransportAdapter: createTransportAdapter(attestActualStopped)`. The live callback must bind real child/tool identity and prove all possible writers joined; JSON flags are not that attestation. Sidecar callers may pass the same live adapter. Keep the capability alive until actual terminal/join and canonical acceptance. Unknown cleanup retains the fence for explicit recovery.
+
+Public CLI `--start` / `--accept-native` remains supported. With a genuinely observed task owner it retains durable coordination bound to owner, task/run, dispatch, request and host session. The same observed owner may accept in a later process; all existing artifact/native/receipt validations still run. The response `owner_window.status=held` requires the trusted host to use the shipped `settlePreparation(request, opaqueLiveAdapter)` after actual tool/process-family and CLI joins; the canonical phase flow below supplies its wrapper and ordinary-CLI integration. Failed/unknown attempts remain explicit recovery. Ready is not that join. A repeated start of a pending dispatch is refused. Without observed ownership the legacy strict-snapshot path remains; it gains no serialized capability. Foreign ownership is refused. No historical saved candidate gains a broker anchor.
+
 ## Initialize task (skip if resume mode)
 
 ```bash
-mkdir -p .gsd/tasks/{TASK_ID}
+node "$FORGE_SCRIPTS_DIR/forge-owner-transport-window.js" --ensure-task "$WORKING_DIR" "{TASK_ID}" || exit 2
 ```
 
-Write `.gsd/tasks/{TASK_ID}/{TASK_ID}-BRIEF.md`. When `ITEM_ID` is set, add an `item:` frontmatter key and append `{ITEM_PROVENANCE}` to the body — both omitted entirely for a free-text task, whose BRIEF stays byte-identical to today's. The BRIEF is the single provenance carrier: every downstream `/forge-task` prompt (brainstorm, discuss, research, plan) already inlines `## Task Brief` = this file's content, so one edit here propagates to all four phases without touching their templates. The same carrier records the assessment decision when `ASSESSMENT_FILE` was supplied — the reuse has to be readable later by whoever asks why a phase did not run.
+Render the BRIEF bytes to an external host-owned temporary file, then use `node "$FORGE_SCRIPTS_DIR/forge-owner-transport-window.js" --write-brief "$WORKING_DIR" "{TASK_ID}" "$BRIEF_TEMP"`; stop on refusal. Do not directly create or overwrite `.gsd/tasks/{TASK_ID}/{TASK_ID}-BRIEF.md`. When `ITEM_ID` is set, add an `item:` frontmatter key and append `{ITEM_PROVENANCE}` to the body — both omitted entirely for a free-text task, whose BRIEF stays byte-identical to today's. The BRIEF is the single provenance carrier: every downstream `/forge-task` prompt (brainstorm, discuss, research, plan) already inlines `## Task Brief` = this file's content, so one edit here propagates to all four phases without touching their templates. The same carrier records the assessment decision when `ASSESSMENT_FILE` was supplied — the reuse has to be readable later by whoever asks why a phase did not run.
 
 ```markdown
 ---
@@ -529,7 +537,7 @@ using a JSON serializer — never shell interpolation. Supply:
   `cwd`, `contextRoot`, `hostRuntime: "claude"`, `workflowId`, a fresh
   `dispatchId`, `resultFile`, the complete prompt below, and operator
   `constraints`;
-- capabilities observed from the active host tool. For native Claude, read the
+- capabilities observed from the active host tool. For native Claude without an observed per-call effort argument, read the
   actual exposed `agents/<agent>.md`, compute SHA-256 over those bytes, call
   `observeClaudeAgentBinding`, and include the successful `effortBinding`;
 - prompt text is not an effort API. Preserve the resolver's effort only through
@@ -579,6 +587,39 @@ const request = {
 fs.writeFileSync(requestFile, JSON.stringify(request, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
 ```
 <!-- forge:task-preparation-request:end -->
+
+The trusted host owns the settlement of every durable CLI preparation window.
+When an actual Node-to-native-tool binding exists, use the shipped
+`forge-owner-transport-window.runCliPreparation(requestFile,
+{acceptanceFile, invokeNative, ownerTransportAdapter})`. It observes both CLI
+children through their real `close` events, invokes the host callback with the
+unchanged resolved invocation, runs the Codex code-only guard, accepts the
+result canonically and settles only after a live attestation of every possible
+writer. `invokeNative(invocation)` must call the actually exposed host tool
+with `invocation.args`, join its real family, and return
+`{rawResult, providerCalled:true}` only from observed provider-start evidence.
+It is a binding supplied by the trusted host, not a Node SDK for Agent.
+The branded adapter comes from `createTransportAdapter(liveAttestStopped)`;
+its synchronous callback must match each challenge hash and attest actual
+joins with `joined:true, possible_writers:0, reference`. Never construct that
+proof from JSON consent, receipt readiness, process age or a PID lookup.
+Without this live binding the wrapper refuses before start. Its native route
+does not override engine/model selection; normal sidecar orchestration remains
+canonical. An unexpected invoke-sidecar handoff retains its fence and requires
+the existing canonical sidecar continuation, never another model resolution.
+
+For hosts whose native tool remains outside Node, retain the explicit CLI flow
+below. After both real CLI children and the actual native family have joined,
+the trusted live host calls `await settlePreparation(request, adapter)` in its
+existing callback bridge, using the same owner/session and immutable request.
+This shipped settlement reattaches that identity, validates the exact ready
+receipt through canonical replay, obtains the challenge-bound live proof and
+releases the window. Only then write identity, run, checkpoint or next-phase
+metadata. A ready receipt alone never releases it. A missing bridge is
+conditional unavailability: use the existing live callback preparation API,
+or stop before opening a CLI attempt; do not pretend Node can call host tools.
+Unknown writers, failed receipts and raw surface drift retain the window and
+follow explicit reconciliation/recovery, separately from successful settlement.
 
 Start the phase with:
 
@@ -1984,3 +2025,7 @@ token_budget.coding_standards bounds optional standards only, with full-file ref
 retain requirements/research/checklist. No credentials or full prompt in telemetry.
 Personal handoff retains authority reference, evidence, acceptance and questions.
 Synthetic provider tests do not establish real provider execution or human UAT.
+
+
+<!-- forge346-native-effort -->
+When the active Claude Agent schema exposes a per-call effort parameter, report both effort_transports:['agent-argument'] (alongside any observed frontmatter transport) and reasoning_efforts with its exact observed enum. buildNativeInvocation prefers that argument and sends the resolved effort unchanged. Without this observation, retain the fingerprinted agent-frontmatter binding and its strict mismatch refusal. Do not infer capability from another session, installed version or prompt text. Before opening a new lease, preflightNativeBinding with these same observed capabilities; keep ordinary native preparation/publication and pending-decision gates.

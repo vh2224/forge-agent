@@ -247,7 +247,42 @@ Base8856ddb3bdbed8e6c0a19802e9764fe950f67172. Only the two existing forge-next s
 The forge-next SOURCE attributed bytes also change from `0d9fed221f4fa52227184fc1d68a6aadac6f7ba917ce294b9dc837d04fb27eb4` to `e7bd4bd148db233e2896c4dd7c553abce729a4a52e266e2c148de2d920f42fde`; both raw and attributed citation states remain explicitly documented.
 
 
-## Measured parallelism next terminal
+## Measured381/346 native effort terminal
+
+Prior revision: a36033d41fd779cf4b1262d3e01455c54016786d
+Previous layer: scripts/fixtures/superseded-owner/distribution-delta.json
+Only the four existing task/next source.sha256 citation literals change. All other sample bytes are retained.
+/entries/1/supporting/timeline/after/source/sha256 before 109262eb2c60a498b7775527988b1b1b5a3b57b4a6ce3d890b83282f333dc854 after 850589544a3e7698971bee85931c1fe99b8ba110a8f1ec94ecd5f42419fc9168
+/entries/5/supporting/timeline/after/source/sha256 before 109262eb2c60a498b7775527988b1b1b5a3b57b4a6ce3d890b83282f333dc854 after 850589544a3e7698971bee85931c1fe99b8ba110a8f1ec94ecd5f42419fc9168
+/entries/2/supporting/partial/after/source/sha256 before 26cd95c5cbb829eae5dbefad7e115e77c496d10af41b5a033fd336a6e2d553f1 after 1d3fc660ccfd9bb411f4f6911660b03ce53afc3b118915715081ba5e33947d71
+/entries/6/supporting/partial/after/source/sha256 before 26cd95c5cbb829eae5dbefad7e115e77c496d10af41b5a033fd336a6e2d553f1 after 1d3fc660ccfd9bb411f4f6911660b03ce53afc3b118915715081ba5e33947d71
+skills/forge-task/SKILL.md attributed before e6114c0603df23f99697e6264d13d496427ef139f86f99c033209173b8bcedb5 attributed after 9b092ac794b0139a2b29158808229bdd4374fc596d9a258c9cdd28d2400975d3
+skills/forge-next/SKILL.md attributed before e7bd4bd148db233e2896c4dd7c553abce729a4a52e266e2c148de2d920f42fde attributed after c74b137205734a1cf266a1befcc8d14decfef6b07b335807e3ab1aa3b1321417
+samples before 38bb2dea9d9c6ea56ff672eae2452a0a6f6a2bfbe5697830724a49a43039e405
+samples after de86e803156d05f2b1e9bbb016801026529360db9e5fb0030377c4ddac578cec
+
+
+## Measured owner-recovery terminal
+
+Actual public predecessor b0e3dd9a5970d07014f63a0a2240764cf22df211
+Previous layer scripts/fixtures/native-effort/distribution-delta.json
+Only the 2 existing changed source.sha256 literals move; every other sample byte is retained.
+/entries/1/supporting/timeline/after/source/sha256 before 850589544a3e7698971bee85931c1fe99b8ba110a8f1ec94ecd5f42419fc9168 after d657fe3b191a675c2d2a62012ca00c71360d44b65cd65787fa4e75a81016b957
+/entries/5/supporting/timeline/after/source/sha256 before 850589544a3e7698971bee85931c1fe99b8ba110a8f1ec94ecd5f42419fc9168 after d657fe3b191a675c2d2a62012ca00c71360d44b65cd65787fa4e75a81016b957
+skills/forge-task/SKILL.md attributed before 9b092ac794b0139a2b29158808229bdd4374fc596d9a258c9cdd28d2400975d3 attributed after 4e778c46a1db66ec35d49314129fb30aad6ce7c075cae72aa0e43f3d3d03e952
+samples before de86e803156d05f2b1e9bbb016801026529360db9e5fb0030377c4ddac578cec
+samples after f7c143e50413e1eb00391e6857bbd9cd995a233078409ab2957153f676844cdf
+
+
+## Measured request-retention terminal (#382)
+
+Actual public predecessor 421a8ec3af341fa8ec3a71fd0feee7f985e5d1eb
+Previous layer scripts/fixtures/owner-recovery/distribution-delta.json
+Only 0 existing changed after/source.sha256 citation literals move; all other sample bytes remain exact.
+samples before f7c143e50413e1eb00391e6857bbd9cd995a233078409ab2957153f676844cdf
+samples after f7c143e50413e1eb00391e6857bbd9cd995a233078409ab2957153f676844cdf
+
+## Historical parallelism branch measurement (pending integration regeneration)
 
 Prior revision: bccfb723bee755f830e452d0b3e3dbcc6fb66025
 Previous layer: scripts/fixtures/interrupted-owner/distribution-delta.json
@@ -258,3 +293,5 @@ forge-next attributed before e7bd4bd148db233e2896c4dd7c553abce729a4a52e266e2c148
 forge-next attributed after 41d75d9cba96f8c0953626c7951bb2bd762db8abecd716feabe2bbcdca8245ed
 samples before 38bb2dea9d9c6ea56ff672eae2452a0a6f6a2bfbe5697830724a49a43039e405
 samples after 29f9dcf18ccd04e9759f52a0ec428a576f70ec608697419b1db7edd39cd290bf
+
+This preserved branch measurement predates the native-effort, owner-recovery and request-retention layers above. It is not a measurement of this merged tree. The parallelism fixture and current citation samples require a new measured terminal after the final dependency integration; historical fixture pins are unchanged here.

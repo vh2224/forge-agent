@@ -212,3 +212,156 @@ A capacidade final do RunRecord é calculada com as perguntas combinadas e o
 formato exato do witness antes do primeiro manifesto ou terminal. O limite
 existente de64KiB não muda; falta de espaço recusa sem liberar leases nem
 publicar efeitos. O commit mantém uma conferência da mesma estrutura reservada.
+
+### Recibo anterior substituído na cadeia (#378)
+
+Há uma exceção opt-in à exigência de original sem receipt: um recibo canônico
+`ready/blocked` de um sidecar anterior pode ser preservado como evidência de
+uma tentativa substituída, quando a tentativa final da mesma unidade foi um
+worker nativo `partial`, sem receipt. Isso não aceita nenhum dos resultados.
+O encerramento continua administrativo `failed/unverified`, com
+`artifacts_accepted:false`. Sucessores continuam positivamente não invocados e
+sem receipt. Recibos atuais, `done`, `partial`, `executed` ou candidatos salvos
+continuam exigindo seu caminho de replay original.
+
+No retorno vivo de `inspectInterruption` para o original, o host fornece o
+`request` anterior exato, `receipt_path` real, `saved_response:'ready/blocked'`
+e `supersession` com:
+
+- `route_evidence:[{path,line,sha256}]`: referências a linhas existentes nos
+  eventos globais ou da própria milestone. `line` começa em1; o SHA-256 mede
+  os bytes UTF-8 da linha sem o LF final, preservando um eventual CR;
+- `final_native_attempt:{id,host_runtime,worker_mode:'native',status:'partial',
+  receipt_path:null,observation_reference}`: a identidade observada da tentativa
+  final, distinta do dispatch anterior, no mesmo host.
+
+Também é obrigatório o callback **vivo** `attestSupersededAttempt(challenge)`.
+Ele precisa conferir a relação real entre begin, request, recibo, avanço de
+rota registrado e tentativa nativa final. Retorna `challenge_sha256` pelo hash
+canônico do controller, `superseded:true`, `final_native_receiptless:true`,
+`final_native_status:'partial'` e uma `reference` estável e não vazia.
+Objetos JSON, texto `approved` e o nome de um evento não são essa atestação.
+Não há um schema universal comprovado para os eventos históricos de avanço;
+o callback do host é responsável por verificar seu significado e sua ordem.
+
+O core confere o caminho canônico, fingerprint, dispatch e identidade do recibo
+contra o request e o begin, observa também o processo do sidecar anterior e
+exige reconciliação de todas as raízes das tentativas. `processProbe` atende
+tanto a inspeção desse receipt quanto a observação atual do alvo nativo.
+Perguntas do receipt, de seu resultado e do contexto atual são combinadas sem
+dispensa de respostas. Os hashes do recibo e das linhas referenciadas, a
+observação nativa e a referência da atestação ficam na safety do manifesto.
+Cada retomada e cada fase terminal reconferem a mesma evidência; outro receipt
+ou outra observação não substituem a base persistida. Linhas novas de eventos
+podem ser acrescentadas sem alterar as linhas históricas referenciadas.
+
+Esta fronteira depende de observações confiáveis do host; não prova por si só
+que um worker histórico executou, que chamou o provedor ou que seu parcial foi
+verificado. Não fabrique um receipt nativo, apague o recibo anterior ou omita-o
+para passar pelo caminho antigo. A recuperação do consumidor real precisa ser
+executada pelo seu owner com os callbacks vivos e continua separada dos testes
+descartáveis de regressão do Forge.
+
+## Pedido exato retido da tentativa (#382)
+
+Cada nova tentativa de artefatos (`beginArtifactAttempt`, o modo `artifacts` de
+`runUnitSidecar` e os dois transportes de preparação de task) grava o pedido
+exato em `<resultFile>.request.json` **antes** do receipt `started` e de qualquer
+provider. A escrita é exclusiva (`wx`, modo `0600`) com `fsync` do arquivo, no
+mesmo diretório privado do resultado, validado fora de todas as raízes físicas.
+Os bytes são determinísticos: um órfão idêntico de uma queda anterior é
+reaproveitado; um órfão diferente ou truncado nunca é sobrescrito nem usado, e a
+tentativa é recusada (`request-retention-conflict`) sem receipt e sem provider.
+Campos de credencial no nível superior (`env`, `token`, `api_key`…) recusam a
+captura (`request-retention-secret-field`); ambiente, credenciais e resultado bruto
+não são copiados. `fsync` melhora a persistência mas não prova durabilidade em
+queda de energia em todas as plataformas; ACL do Windows não é afirmada pelo
+bit de modo.
+
+O arquivo guarda dados, nunca capacidade:
+
+- `delivery_json`: o preimage exato do fingerprint de artefato (mesma ordem de
+  propriedades e posição de `linked_entry_identity`). `delivery_input_json`: o
+  pedido serializável original com `resultFile`, sem `ownerBroker`,
+  `linkedEntryBinding`, `signal` e demais canais de runtime.
+- `preparation_json`: na preparação de task, o preimage exato de
+  `preparationRequestFingerprint` (`preparation_input:'captured'`). Uma entrega
+  sem esse preimage registra `not-supplied`; nada é inferido.
+- `caller_preimage_json`: bytes canônicos separados que reproduzem o hash original
+  inclusive para linked; dados serializados não restauram membership/capabilities.
+- `caller_request_sha256` com `caller_request_reproducible`: o hash do pedido do
+  chamador só é usado quando os bytes retidos o reproduzem sozinhos.
+- `runtime_requirements:{linked_entry, owner_broker}`: **restrições** de uso, nunca
+  permissão.
+
+O receipt `started` e o `ready`/`failed` subsequente carregam
+`retained_request:{file, sha256, delivery_fingerprint, preparation_fingerprint, …}`.
+O locator não escolhe arquivo: o leitor deriva o único irmão permitido do
+`resultFile` esperado e das raízes físicas, exige arquivo regular com um único
+link, sem symlink/junction no alvo, com o mesmo inode observado antes, durante e
+depois da leitura, e confere hash, identidade (unidade, workflow, dispatch, owner,
+cwd, code roots) e fingerprints. Cada receipt existente com arquivo retido é
+reconferido em replay/aceite; legado sem `retained_request` mantém exatamente a
+política anterior (pedido externo exato), sem backfill. Cópia nova ausente ou
+adulterada recusa (`request-retention-unavailable`/`-hash-mismatch`).
+
+### Como fornecer `context.request` sem o pedido externo
+
+Depois de um reinício, o host cria de novo
+`forge-attempt-recovery.createArchivedRequestInspector({ observeOriginalAttempt })`.
+`observeOriginalAttempt({cwd, begin, receiptPath})` é uma função executável do
+host que devolve o `expected` que ele conhece independentemente para aquele
+begin: `resultFile`, `cwd`, `contextRoot`, `unitType`, IDs de milestone/slice/task,
+`workflowId`, `dispatchId` e `execution_contract` quando houver. Objetos com
+`approved`, `attested`, `ownerBroker`, `linkedEntryBinding` ou
+`archived_inspection` são recusados. `inspector.inspect({cwd, begin})` revalida o
+begin atual pelo checksum, lê receipt e arquivo, reconstrói o pedido de dados e
+devolve `{request, receipt_path, begin_key, begin_checksum, runtime_requirements,
+preparation_input, archived_inspection}`. O host acrescenta suas próprias
+observações (`roots`, `pending_questions`, `invocation_status`,
+`observation_reference`, supersession) dentro de `inspectAttempt` ou
+`inspectInterruption`; o arquivo não as fabrica.
+
+`archived_inspection` é um handle opaco de processo (chave de WeakMap). Não é
+`linkedEntryBinding`, owner token, broker, claim, rota ou autorização de recuperação,
+e sua forma JSON é recusada. `inspectSupersededInterruption`, `inspectSettledAttempt`
+e `inspectFailure` só o aceitam depois de `revalidateArchivedInspection`, que relê
+begin, receipt e arquivo a cada uso (também após a atestação de supersession). Todas
+as demais verificações permanecem: ready/blocked, prova de supersession, processo,
+raízes, perguntas e o terminal guard existente, que continua com prioridade.
+
+### Prova histórica × binding vivo
+
+- Pedido não vinculado: identidade e fingerprint são recalculados pelas funções
+  atuais a partir dos dados restaurados.
+- Pedido linked: a identidade histórica vem apenas do begin committed real e da
+  sua cadeia de falha com checksum (`inspectHistoricalLinkedEntry`), nunca do
+  `linked_entry_identity` do JSON. Não chama `bindLinkedRequest`, não valida lease e
+  não registra entrada em `linkedEntries`; `requestIdentity`/`artifactFingerprint`
+  continuam recusando o pedido restaurado com `linked-entry-binding-required`.
+  Sem binding vivo a inspeção do receipt mantém `writer_possible` desconhecido.
+- `inspectSettledAttempt` registra `request_sha256`. Pelo arquivo ele só existe se
+  os bytes retidos reproduzem o hash original; caso contrário a retomada é recusada
+  com `request-retention-caller-hash-unavailable` (um hash guardado nunca substitui
+  bytes ausentes).
+
+### Limites de replay
+
+- Artefato comum não linked, sem broker: o pedido restaurado pode chamar
+  `replayArtifactAttempt`, que publica a resposta salva sem resolver nem provider.
+- Linked ainda aberto: somente o host com capacidades atuais chama
+  `bindLinkedRequest`; a prova histórica não a substitui. Linked sem lease/owner
+  válidos permite inspeção e settlement administrativo, mas o replay continua
+  recusado pela API atual.
+- Broker: um receipt ready cujo arquivo registra `owner_broker:true` recusa replay
+  sem broker vivo (`request-retention-broker-required`); handle falso ou manifest
+  importado falham em `assertBroker`, e um broker vivo precisa corresponder ao
+  manifest original. `startBroker` cria nova S0 e não é reconexão. Inspeção e
+  settlement histórico não iniciam broker.
+- Legado sem arquivo: continua exigindo o pedido externo exato pelo caminho
+  original; nada é reconstruído nem preenchido retroativamente.
+
+
+### Preimage histórico do hash do chamador (#382)
+
+O arquivo privado retém `caller_preimage_json` separado de `delivery_input_json`: são os bytes canônicos exatos (sort recursivo original) usados por `callerRequestHash`. O digest recebe essa string diretamente, sem dupla codificação JSON. O leitor confere o hash, a canonicalização, a projeção dos campos de dados e os metadados de runtime; nunca usa esse preimage em `restore()` ou replay. Um `linkedEntryBinding:{}` retido é só a serialização histórica vazia, sem membership no WeakMap. O inspector opaco continua exigindo begin/receipt/arquivo atuais e atestações reais de processo/raízes para settlement. Broker e binding vivos continuam obrigatórios para execução/publicação; funções e chave privada da closure do broker nunca são restauradas. Canais função/undefined seguem omitidos pelo JSON original. Credenciais em canais de runtime são recusadas, sem reinterpretar campos arbitrários de negócio em inputs. Arquivos anteriores sem o novo preimage mantêm sua regra anterior e não recebem backfill.

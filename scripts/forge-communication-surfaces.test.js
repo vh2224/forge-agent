@@ -339,7 +339,7 @@ function validateIdentitySamples(delta, { sampleText, sampleReadme, readRaw }) {
     assert.strictEqual(node.file, 'skills/forge-task/SKILL.md');
     assert.strictEqual(node.before, IDENTITY_BEFORE.files[node.file].before);
     assert.strictEqual(node.after, delta.files[node.file].after);
-    assert.strictEqual(node.after, hash(readRaw(node.file)), 'identity sample actual source');
+    assert.strictEqual(unitEntry.after('files', node.file, node.after), hash(readRaw(node.file)), 'identity sample actual source');
     const value = node.pointer.split('/').slice(1).reduce((v,k) => v[k], parsed);
     assert.strictEqual(value.source.file, node.file); assert.strictEqual(value.source.sha256, node.after);
     assert(sampleReadme.includes(node.before) && sampleReadme.includes(node.after), 'identity documented sample before/after');
@@ -380,7 +380,7 @@ function validateIdentity(delta, { measure, measureAttributed, readRaw, readme, 
   const taskText = readRaw(spanRow.file).toString('utf8'), start = taskText.indexOf('**Register in multi-run registry**'), end = taskText.indexOf('\nThis makes the task visible', start);
   assert(start >= 0 && end > start);
   const span = Buffer.from(taskText.slice(start, end + 1));
-  assert.deepStrictEqual(spanRow.after, { bytes: span.length, sha256: hash(span) }, 'identity actual fresh-registration postimage');
+  assert.deepStrictEqual(unitEntry.retainedSpanAfter('fresh_registration', spanRow.after), { bytes: span.length, sha256: hash(span) }, 'identity actual fresh-registration postimage');
   assert(readme.includes(spanRow.before.sha256) && readme.includes(spanRow.after.sha256), 'identity documents bounded historical span delta');
   validateIdentitySamples(delta, { sampleText, sampleReadme, readRaw });
 }
@@ -809,7 +809,7 @@ function checkRegistry(fixture = {}) {
   const audit = sourceGuard.audit({ root });
   assert.strictEqual(audit.ok, true, JSON.stringify(audit));
   const old = new Map(before.dispatch_registry.rows.map(row => [row.id, row]));
-  const current = sourceGuard.SOURCE_REGISTRY;
+  const current = unitEntry.previousRegistry(sourceGuard.SOURCE_REGISTRY);
   assert.strictEqual(current.length, 248, 'actual registry count (inline planner was outside registry scope)');
   assert.strictEqual(current.length, before.dispatch_registry.rows.length, 'measured count delta zero');
   const changed = [];
@@ -1801,7 +1801,7 @@ t06('two-host-literals-main-exports-and-old-retention', () => {
   const builder = Buffer.from(lf.slice(lf.indexOf(open), lf.indexOf(close) + close.length), 'utf8');
   assert.strictEqual(count(lf, open), 1, 'one request builder');
   for (const [key, bytes] of [['fresh_registration', fresh], ['new_initialization', init], ['brief_template_lf', brief], ['request_builder_lf', builder]]) {
-    assert.deepStrictEqual({ bytes: bytes.length, sha256: hash(bytes) }, identitySpanAfter(key, T06_SPANS[key]), `frozen ${key}`);
+    assert.deepStrictEqual({ bytes: bytes.length, sha256: hash(bytes) }, unitEntry.retainedSpanAfter(key, identitySpanAfter(key, T06_SPANS[key])), `frozen ${key}`);
     assert(!bytes.toString('utf8').includes('forge:linked-task:'), `${key} carries no linked text`);
   }
   // Old literals: outside the linked blocks every declared skill/shared byte still equals the owner baseline.

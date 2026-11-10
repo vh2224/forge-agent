@@ -64,6 +64,50 @@ function dispatch(model, effort, engine, alias) {
 }
 
 async function main() {
+  await claudeEnvironmentJournalIdentity346();
+  await claudeEffortEnvironmentAndResume346();
+  await claudeArgumentPlanPublication346();
+  // Capability observations here are synthetic fixtures, never live Claude claims.
+  for (const effort of ['medium','high','xhigh','max']) {
+    const argument = buildNativeInvocation({ hostRuntime:'claude',
+      resolvedDispatch:dispatch('claude-opus-5-5',effort,'claude'),
+      activeCapabilities:{...claudeCapabilities,effort_transports:['agent-argument'],reasoning_efforts:['low','medium','high','xhigh','max']},
+      agentType:'forge-planner',prompt:'plan with exact effort' });
+    assert.strictEqual(argument.ok,true,JSON.stringify(argument));
+    assert.strictEqual(argument.args.effort,effort);
+    assert.strictEqual(argument.telemetry.effort_argument,effort);
+    assert.strictEqual(argument.telemetry.effort_binding_observed,null);
+    assert.strictEqual(argument.telemetry.effort_applied,null);
+    let calls=0;
+    const delivered=await invokeNative({hostRuntime:'claude',resolvedDispatch:dispatch('claude-opus-5-5',effort,'claude'),
+      activeCapabilities:{...claudeCapabilities,effort_transports:['agent-argument'],reasoning_efforts:['low','medium','high','xhigh','max']},
+      agentType:'forge-planner',prompt:'synthetic native callback'},async args=>{calls++;assert.strictEqual(args.effort,effort);return{status:'done'};});
+    assert.strictEqual(delivered.ok,true,JSON.stringify(delivered));assert.strictEqual(calls,1);
+  }
+  const unsupportedArgument=buildNativeInvocation({hostRuntime:'claude',resolvedDispatch:dispatch('claude-opus-5-5','max','claude'),
+    activeCapabilities:{...claudeCapabilities,effort_transports:['agent-argument'],reasoning_efforts:['medium']},agentType:'forge-planner',prompt:'plan'});
+  assert.strictEqual(unsupportedArgument.reason_code,'native-effort-unsupported');
+  // The public memory failure receiver also validates the new closed telemetry.
+  // This is local synthetic evidence, not a provider or plan-publication test.
+  const memoryWork=fs.mkdtempSync(path.join(os.tmpdir(),'forge346-memory-'));
+  const memoryOwner=path.join(memoryWork,'owner');fs.mkdirSync(memoryOwner);
+  try {
+    const route=dispatch('claude-opus-5-5','max','claude','opus');
+    const argument=buildNativeInvocation({hostRuntime:'claude',resolvedDispatch:route,
+      activeCapabilities:{...claudeCapabilities,effort_transports:['agent-argument'],reasoning_efforts:['max']},agentType:'forge-memory',prompt:'memory'});
+    const request={cwd:memoryOwner,contextRoot:memoryOwner,unitType:'memory-extract',sourceUnitType:'execute-task',sourceUnitId:'T01',milestoneId:'M001',
+      workflowId:'fixture346',dispatchId:'fixture346-memory',route,resultFile:path.join(memoryWork,'result.json'),
+      nativeFailure:{reason_code:'fixture-worker-error',provider_called:true,telemetry:argument.telemetry}};
+    const unit=require('./forge-unit-sidecar');
+    const accepted=await unit.acceptNativeMemoryResult(request);
+    assert.strictEqual(accepted.status,'failure');
+    assert.strictEqual(JSON.parse(fs.readFileSync(request.resultFile+'.receipt.json')).failure.telemetry.effort_argument,'max');
+    const foreign={...request,dispatchId:'fixture346-bad-memory',resultFile:path.join(memoryWork,'bad.json'),
+      nativeFailure:{...request.nativeFailure,telemetry:{...argument.telemetry,effort_argument:'medium'}}};
+    await assert.rejects(unit.acceptNativeMemoryResult(foreign),e=>e.code==='native-memory-telemetry-mismatch');
+    assert.strictEqual(fs.existsSync(foreign.resultFile+'.receipt.json'),false);
+  }finally{fs.rmSync(memoryWork,{recursive:true,force:true});}
+
   assert.strictEqual(validateActiveCapabilities('codex', codexCapabilities).ok, true);
   assert.strictEqual(validateActiveCapabilities('codex', null).reason_code, 'native-capabilities-missing');
 
@@ -809,3 +853,175 @@ main().catch((error) => {
   process.stderr.write(`${error.stack || error}\n`);
   process.exit(1);
 });
+
+async function claudeArgumentPlanPublication346() {
+  const assert=require('assert'),fs=require('fs'),os=require('os'),path=require('path'),crypto=require('crypto');
+  const controller=require('./forge-unit-controller'),state=require('./forge-state'),lease=require('./forge-unit-lease');
+  const roots=require('./forge-code-roots'),unit=require('./forge-unit-sidecar'),xllm=require('./forge-xllm');
+  const native=require('./forge-native-invocation'),{resolveDispatch}=require('./forge-dispatch-resolve');
+  const {checkout,plan}=require('./forge-code-roots.test');
+  const home=fs.mkdtempSync(path.join(os.tmpdir(),'forge346-plan-publication-'));
+  const previous={};for(const k of ['HOME','USERPROFILE','CODEX_HOME','CLAUDE_CONFIG_DIR']){previous[k]=process.env[k];process.env[k]=path.join(home,'isolated-home');}
+  let serial=0;
+  try {
+    for(const [risk,effort]of [['high','max'],['low','medium']]) {
+      const area=path.join(home,risk),owner=path.join(area,'owner');fs.mkdirSync(owner,{recursive:true});
+      const code=checkout(path.join(area,'code')),contract=roots.singleContract(owner,code);
+      const milestone='M001',slice='S01',base=path.join(owner,'.gsd/milestones',milestone),sliceDir=path.join(base,'slices',slice);
+      fs.mkdirSync(path.join(sliceDir,'tasks/T01'),{recursive:true});fs.mkdirSync(path.join(owner,'.gsd/forge'),{recursive:true});
+      const roadmap=path.join(base,milestone+'-ROADMAP.md');fs.writeFileSync(roadmap,'# Roadmap\n- [ ] **S01: Existing task, newly planned slice** `risk:'+risk+'` `depends:[]`\n');
+      const prefs={tier_models:Object.fromEntries(['light','standard','heavy','max'].map(t=>[t,['claude-opus-5-5']])),
+        effort:{'plan-slice':'medium'},skip_discuss:true,skip_research:true,skip_slice_research:true};
+      fs.writeFileSync(path.join(owner,'.gsd/forge-prefs.jsonc'),JSON.stringify(prefs));
+      state.write(owner,{milestone,kind:'milestone',phase:'idle',active_slice:slice,active_task:'—',auto_mode:'on'});
+      // A genuine preexisting task source is reused; this does NOT claim the
+      // native artifacts receiver can publish NEW task-plan paths.
+      const taskPlan=plan(contract),taskFile=path.join(sliceDir,'tasks/T01/T01-PLAN.md');fs.writeFileSync(taskFile,taskPlan);
+      const returnedSlice=taskPlan+'\n# Slice S01\n- [ ] **T01** — Existing validated task\n';
+      const route=resolveDispatch({cwd:owner,unitType:'plan-slice',unitId:slice,milestoneId:milestone,hostRuntime:'claude',roadmapPath:roadmap});
+      assert.equal(route.dispatch_allowed,true,JSON.stringify({reason:route.dispatch_reason_code,prefs_ok:route.prefs_ok}));
+      assert.equal(route.worker_mode,'native');assert.equal(route.model,'claude-opus-5-5');assert.equal(route.effort,effort);
+      if(risk==='high')assert.equal(route.effort_reason,'risk-escalation:high');
+      const capabilities={available:true,tool:'Agent',source:'synthetic-active-schema-fixture',model_aliases:['opus'],model_ids:['claude-opus-5-5'],
+        effort_transports:['agent-argument'],reasoning_efforts:['low','medium','high','xhigh','max']};
+      const options={hostRuntime:'claude',resolvedDispatch:route,activeCapabilities:capabilities,agentType:'forge-planner',prompt:'Synthetic fixture: return the existing task and new slice plan.'};
+      // Compatibility precedes the actual controller lease; refusal is write-free.
+      assert.equal(native.preflightNativeBinding(options).ok,true);
+      const preferences={prefsReader:()=>({ok:true,prefs})};
+      const selected=controller.select(owner,{milestone},preferences);assert(selected.unit,JSON.stringify(selected));assert.equal(selected.unit.type,'plan-slice');
+      const begin=controller.beginSerial(owner,{milestone,unit:'plan-slice/S01',slice,host_runtime:'claude',session:'fixture346',owner_token:'fixture346-owner',idempotency_key:'begin346-'+risk},preferences);
+      const request={unitType:'plan-slice',scope:'milestone',phase:'plan',milestoneId:milestone,sliceId:slice,cwd:code,contextRoot:owner,
+        execution_contract:contract,hostRuntime:'claude',activeCapabilities:capabilities,route,workflowId:'fixture346',dispatchId:'native346-'+risk,
+        resultFile:path.join(area,'result.json'),constraints:{auto_commit:false,deploy:false}};
+      unit.beginArtifactAttempt(request);
+      let calls=0;const returned={status:'done',summary:'Synthetic native plan',slice_plan:{filename:'S01-PLAN.md',content:returnedSlice},
+        task_plans:[{id:'T01',filename:'T01-PLAN.md',content:taskPlan}]};
+      assert.equal(xllm.validatePlanResult({...returned,task_plans:[{...returned.task_plans[0],filename:'../unsafe.md'}]}),false);
+      const outcome=await native.invokeNative({...options,terminalResult:xllm.validatePlanResult},async args=>{
+        calls++;assert.equal(args.model,route.model);assert.equal(args.effort,effort);return returned;
+      });assert.equal(outcome.ok,true,JSON.stringify(outcome));assert.equal(calls,1);
+      assert.equal(xllm.validatePlanResult(outcome.result),true);roots.validatePlan(outcome.result.task_plans[0].content,contract);
+      assert.equal(fs.readFileSync(taskFile,'utf8'),outcome.result.task_plans[0].content);
+      const artifactPath='.gsd/milestones/M001/slices/S01/S01-PLAN.md';
+      const delivered=await unit.acceptArtifactResult(request,{status:'done',summary:outcome.result.summary,questions:[],
+        artifacts:[{path:artifactPath,content:outcome.result.slice_plan.content}]},{providerCalled:true,telemetry:outcome.telemetry});
+      assert.equal(delivered.record.phase,'ready');assert.equal(fs.readFileSync(path.join(owner,artifactPath),'utf8'),returnedSlice);
+      assert.equal(delivered.record.route.model,route.model);assert.equal(delivered.record.telemetry.effort_argument,effort);
+      const receipt=fs.readFileSync(request.resultFile+'.receipt.json');
+      const completed=controller.complete(owner,{milestone,unit:'plan-slice/S01',slice,host_runtime:'claude',owner_token:begin.owner_token,generation:begin.generation,
+        idempotency_key:'complete346-'+risk,result:{status:'succeeded',output:{result:delivered.result,
+          publication_receipt:request.resultFile+'.receipt.json',receipt_sha256:crypto.createHash('sha256').update(receipt).digest('hex')}}},preferences);
+      assert.equal(completed.ok,true);assert.equal(lease.observe(owner,'plan-slice/S01').lease,null);
+      const resumed=controller.resume(owner,{idempotency_key:completed.transaction.idempotency_key},preferences);
+      assert.equal(resumed.results[0].reason,'already-committed');assert.deepEqual(controller.pendingTransactions(owner),[]);
+      assert.deepEqual(fs.readFileSync(request.resultFile+'.receipt.json'),receipt);
+      const next=controller.select(owner,{milestone},preferences);assert.equal(next.unit.type,'execute-task');assert.equal(next.unit.id,'T01');
+      console.log('PASS #346 '+risk+' slice -> '+effort+': native argument, validated returned plan, public S01 publication, controller complete/replay and next execution gate; existing task source reused, synthetic host only');serial++;
+    }
+    assert.equal(serial,2);
+  } finally {
+    for(const k of Object.keys(previous)){if(previous[k]===undefined)delete process.env[k];else process.env[k]=previous[k];}
+    fs.rmSync(home,{recursive:true,force:true});
+  }
+}
+
+async function claudeEffortEnvironmentAndResume346() {
+  const caps={...claudeCapabilities,effort_transports:['agent-argument'],reasoning_efforts:['medium','max']};
+  const options={hostRuntime:'claude',resolvedDispatch:dispatch('claude-opus-5-5','max','claude'),
+    activeCapabilities:caps,agentType:'forge-planner',prompt:'Synthetic environment/resume fixture.'};
+  const unknown=buildNativeInvocation(options);
+  assert.equal(unknown.ok,true);assert(!unknown.diagnostics?.some(d=>d.code.startsWith('native-effort-environment-')));
+  // No observation/diagnostic is not proof that the actual host variable is unset.
+  assert.equal(unknown.telemetry.effort_argument,'max');assert.equal(unknown.telemetry.effort_applied,null);
+  for(const override of [null,'max']) {
+    const known=buildNativeInvocation({...options,activeCapabilities:{...caps,
+      claude_effort_environment:{source:'synthetic-actual-host-environment',override}}});
+    assert.equal(known.ok,true);assert(known.diagnostics.some(d=>d.code==='native-effort-environment-observed'&&d.override===override));
+    assert.equal(known.telemetry.effort_applied,null,'matching/unset environment is not provider readback');
+  }
+  let calls=0;
+  const conflictOptions={...options,activeCapabilities:{...caps,
+    claude_effort_environment:{source:'synthetic-actual-host-environment',override:'medium'}}};
+  const conflict=await invokeNative(conflictOptions,()=>{calls++;return{status:'done'};});
+  assert.equal(conflict.reason_code,'native-effort-environment-conflict');assert.equal(conflict.provider_called,false);assert.equal(calls,0);
+  const invalid=buildNativeInvocation({...options,activeCapabilities:{...caps,
+    claude_effort_environment:{source:'synthetic-actual-host-environment',override:'unrecognized'}}});
+  assert.equal(invalid.reason_code,'native-effort-environment-unverified');
+  const root=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'forge346-native-resume-')));
+  try {
+    const matching={...options,activeCapabilities:{...caps,
+      claude_effort_environment:{source:'synthetic-actual-host-environment',override:'max'}}};
+    const lifecycle={journal:{root,file:path.join(root,'native.json'),authorize:()=>true}};
+    const first=await invokeNative({...matching,lifecycle},args=>{calls++;assert.equal(args.effort,'max');throw Error('synthetic interrupted native host');});
+    assert.equal(first.ok,false);assert.equal(calls,1);
+    let resumes=0;
+    lifecycle.adapter={capabilities:{resume:true},resume:()=>{resumes++;return{status:'done'};}};
+    const refusedResume=await invokeNative({...conflictOptions,lifecycle},()=>assert.fail('must not launch'));
+    assert.equal(refusedResume.reason_code,'native-effort-environment-conflict');assert.equal(resumes,0);
+    const resumed=await invokeNative({...matching,lifecycle},()=>assert.fail('resume must not spawn another agent'));
+    assert.equal(resumed.ok,true,JSON.stringify(resumed));assert.equal(resumes,1);assert.equal(calls,1);
+    assert.equal(resumed.args.effort,'max');assert.equal(resumed.telemetry.effort_argument,'max');assert.equal(resumed.telemetry.effort_applied,null);
+    console.log('PASS #346 Claude actual-host effort observation: unknown/observed-unset/matching/conflict, exact max argument and real journal resume API; synthetic host only, applied unknown');
+  }finally{fs.rmSync(root,{recursive:true,force:true});}
+}
+
+async function claudeEnvironmentJournalIdentity346() {
+  const supervision=require('./forge-native-supervision');
+  const baseCaps={...claudeCapabilities,effort_transports:['agent-argument'],reasoning_efforts:['medium','max']};
+  const cases=[
+    [undefined,{source:'fresh-host',override:'max'}],
+    [undefined,{source:'fresh-host',override:null}],
+    [{source:'old-host-source',override:'max'},{source:'fresh-host-source',override:'max'}],
+    [{source:'old-host-source',override:null},{source:'fresh-host-source',override:'max'}],
+  ];
+  const work=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'forge346-journal-id-')));
+  const withEnvironment=(caps,observation)=>observation===undefined?caps:{...caps,claude_effort_environment:observation};
+  try {
+    for(const [i,[initial,fresh]]of cases.entries()) {
+      // Actual request identity is immutable. Fresh observations belong to the
+      // runtime invocation, not to a rewritten request or historical receipt.
+      // This is a generic native-adapter telemetry identity, not a fabricated
+      // milestone dispatch. No real Forge unit or controller is invoked here.
+      const request={dispatchId:'synthetic-native-env-'+i,test_request_id:'immutable-adapter-fixture'};
+      const originalRequest=JSON.stringify(request),file=path.join(work,'journal-'+i+'.json');
+      const options={hostRuntime:'claude',resolvedDispatch:dispatch('claude-opus-5-5','max','claude'),
+        activeCapabilities:withEnvironment(baseCaps,initial),agentType:'forge-planner',prompt:'Synthetic fixed native request.',telemetryIdentity:request};
+      const lifecycle={journal:{root:work,file,authorize:()=>true}};let spawned=0,resumes=0;
+      const first=await invokeNative({...options,lifecycle},args=>{spawned++;assert.equal(args.effort,'max');throw Error('synthetic interrupted host');});
+      assert.equal(first.ok,false);assert.equal(spawned,1);
+      const journal=JSON.parse(fs.readFileSync(file)),stable=JSON.parse(JSON.stringify(buildNativeInvocation(options)));
+      if(stable.diagnostics){stable.diagnostics=stable.diagnostics.filter(d=>d.code!=='native-effort-environment-observed');if(!stable.diagnostics.length)delete stable.diagnostics;}
+      assert.equal(journal.identity,supervision.digest(JSON.stringify({invocation:stable,identity:request})),'old/default identity and non-environment fields remain exact');
+      lifecycle.adapter={capabilities:{resume:true},resume:()=>{resumes++;return{status:'done'};}};
+      const beforeConflict=fs.readFileSync(file);
+      const conflict=await invokeNative({...options,lifecycle,activeCapabilities:withEnvironment(baseCaps,{source:'fresh-host',override:'medium'})},()=>assert.fail('must not spawn'));
+      assert.equal(conflict.reason_code,'native-effort-environment-conflict');assert.equal(conflict.provider_called,false);
+      assert.equal(resumes,0);assert.equal(spawned,1);assert.deepEqual(fs.readFileSync(file),beforeConflict,'known conflict does not mutate/reuse journal');
+      const changedEffort=await invokeNative({...options,lifecycle,resolvedDispatch:dispatch('claude-opus-5-5','medium','claude'),
+        activeCapabilities:withEnvironment(baseCaps,{source:'fresh-host',override:'medium'})},()=>assert.fail('must not spawn'));
+      assert.equal(changedEffort.reason_code,'native-journal-identity-or-clock');assert.equal(resumes,0,'argument/effort changes stay bound');
+      const changedRequest=await invokeNative({...options,lifecycle,telemetryIdentity:{...request,dispatchId:request.dispatchId+'-changed'},
+        activeCapabilities:withEnvironment(baseCaps,fresh)},()=>assert.fail('must not spawn'));
+      assert.equal(changedRequest.reason_code,'native-journal-identity-or-clock');assert.equal(resumes,0,'request identity is never masked');
+      const resumed=await invokeNative({...options,lifecycle,activeCapabilities:withEnvironment(baseCaps,fresh)},()=>assert.fail('must not respawn'));
+      assert.equal(resumed.ok,true,JSON.stringify(resumed));assert.equal(resumes,1);assert.equal(spawned,1);
+      assert.equal(resumed.args.effort,'max');assert.equal(resumed.telemetry.effort_argument,'max');assert.equal(resumed.telemetry.effort_applied,null);
+      assert(resumed.diagnostics.some(d=>d.code==='native-effort-environment-observed'&&d.source===fresh.source&&d.override===fresh.override),'fresh observation remains in runtime result');
+      assert.equal(JSON.stringify(request),originalRequest);
+    }
+    // Non-environment diagnostics are still inside the actual durable identity.
+    const agent=agentFixture('forge-executor','medium');
+    try {
+      fs.appendFileSync(agent.filename,'');
+      fs.writeFileSync(agent.filename,fs.readFileSync(agent.filename,'utf8').replace('effort: medium','effort: medium\nthinking: disabled'));
+      const options={hostRuntime:'claude',resolvedDispatch:dispatch('claude-sonnet-5-5','medium','claude','sonnet'),
+        activeCapabilities:{...claudeCapabilities,claude_effort_environment:{source:'host-environment',override:null}},agentType:'forge-executor',prompt:'fixture',
+        effortBinding:{transport:'agent-frontmatter',agentPath:agent.filename,sourceFingerprint:'sha256:'+crypto.createHash('sha256').update(fs.readFileSync(agent.filename)).digest('hex')}};
+      const original=buildNativeInvocation(options);assert(original.diagnostics.some(d=>d.code==='native-thinking-declaration-inert'));
+      const file=path.join(work,'thinking.json');await invokeNative({...options,lifecycle:{journal:{root:work,file,authorize:()=>true}}},()=>{throw Error('synthetic interrupted host');});
+      const stable={...original,diagnostics:original.diagnostics.filter(d=>d.code!=='native-effort-environment-observed')};
+      assert.equal(JSON.parse(fs.readFileSync(file)).identity,supervision.digest(JSON.stringify({invocation:stable,identity:null})));
+    }finally{fs.rmSync(agent.dir,{recursive:true,force:true});}
+    console.log('PASS #346 stable journal identity: omitted->matching/unset, source refresh, unset->matching; fresh conflict zero calls, argument/request changes refused, other diagnostics bound; synthetic host only');
+  } finally {fs.rmSync(work,{recursive:true,force:true});}
+}

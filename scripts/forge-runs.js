@@ -43,7 +43,10 @@ function runsDir(cwd) {
  * Forge project the moment a run is registered against it. Creating `.gsd/` is
  * `/forge-init`'s job and nothing else's.
  */
-function ensureRunsDir(cwd) {
+function ensureRunsDir(...args) {
+  return require('./forge-owner-transport-window').withMutation(args[0], () => ensureRunsDirInsideOwnerWindow(...args));
+}
+function ensureRunsDirInsideOwnerWindow(cwd) {
   const gsd = path.join(cwd, '.gsd');
   if (!fs.existsSync(gsd)) {
     const err = new Error(
@@ -305,7 +308,10 @@ function oldestActive(cwd) {
 }
 
 // ── Write (atomic via temp+rename) ──────────────────────────────────────────
-function writeAtomic(filePath, record) {
+function writeAtomic(...args) {
+  return require('./forge-owner-transport-window').withMutation(require('./forge-owner-transport-window').metadataOwner(args[0]), () => writeAtomicInsideOwnerWindow(...args));
+}
+function writeAtomicInsideOwnerWindow(filePath, record) {
   if (record.batch_locator != null) validateBatchLocator(record.batch_locator, record.id);
   const dir  = path.dirname(filePath);
   const base = path.basename(filePath);
@@ -347,7 +353,10 @@ function validateBatchLocator(value, runId) {
   return { ...value };
 }
 
-function withRunLock(cwd, id, fn) {
+function withRunLock(...args) {
+  return require('./forge-owner-transport-window').withMutation(args[0], () => withRunLockInsideOwnerWindow(...args));
+}
+function withRunLockInsideOwnerWindow(cwd, id, fn) {
   const handle = lock.acquireSync(cwd, `run-${id}`, { holderRunId: id, retries: 80 });
   try { return fn(); } finally { handle.release(); }
 }
@@ -357,7 +366,10 @@ function registryKey(cwd) {
   const actual = fs.realpathSync.native(cwd);
   return process.platform === 'win32' ? actual.toLowerCase() : actual;
 }
-function withRegistryFence(cwd, callback, guard) {
+function withRegistryFence(...args) {
+  return require('./forge-owner-transport-window').withMutation(args[0], () => withRegistryFenceInsideOwnerWindow(...args));
+}
+function withRegistryFenceInsideOwnerWindow(cwd, callback, guard) {
   const key = registryKey(cwd);
   const held = guard && registryGuards.get(guard);
   if (held && held.key === key && lock.assertOwned(held.handle)) return callback(guard);
@@ -513,7 +525,10 @@ function cleanupStale(cwd, thresholdMs) {
 }
 
 // ── Legacy alias (auto-mode.json mirror of oldest active) ───────────────────
-function refreshLegacyAlias(cwd) {
+function refreshLegacyAlias(...args) {
+  return require('./forge-owner-transport-window').withMutation(args[0], () => refreshLegacyAliasInsideOwnerWindow(...args));
+}
+function refreshLegacyAliasInsideOwnerWindow(cwd) {
   // Best-effort mirror: silently no-op without .gsd/ rather than manufacture it.
   // Unlike ensureRunsDir this must never throw — remove()/cleanupStale() call it
   // from paths that must not hard-fail (skills chain these with `|| true`).
@@ -548,7 +563,10 @@ function refreshLegacyAlias(cwd) {
 // ── Migration ───────────────────────────────────────────────────────────────
 // Detect a pre-M004 STATE.md and migrate to M###-STATE.md + dashboard regen.
 // Idempotent: if STATE.md already has the AUTO-GENERATED marker, no-op.
-function migrateLegacyState(cwd) {
+function migrateLegacyState(...args) {
+  return require('./forge-owner-transport-window').withMutation(args[0], () => migrateLegacyStateInsideOwnerWindow(...args));
+}
+function migrateLegacyStateInsideOwnerWindow(cwd) {
   const statePath = path.join(cwd, '.gsd', 'STATE.md');
   if (!fs.existsSync(statePath)) return { migrated: false, reason: 'no STATE.md' };
 

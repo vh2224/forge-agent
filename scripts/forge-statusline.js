@@ -403,16 +403,19 @@ process.stdin.on('end', () => {
       // parseLegacyValue — old mantinha aspas literais e o update-check falhava
       // calado em path citado (ex.: valor quoted "foo/bar"). Comportamento novo é
       // uma melhoria e permanece; documentado aqui só para não ficar implícito.
-      const repo = typeof resolvedPrefs.prefs.repo_path === 'string'
-        ? resolvedPrefs.prefs.repo_path.trim() : '';
-      if (repo) {
-        let updateProvider;
-        try { updateProvider = require('./scripts/forge-update-check'); }
-        catch { updateProvider = require('./forge-update-check'); }
-        const cache = updateProvider.cachedUpdate(updateProvider.resolveRepoPath(resolvedPrefs.prefs, cwd || process.cwd()));
-        forgeVersion = cache.version || '';
-        if (cache.has_update && cache.remote_version) forgeUpdate = `\u2191 ${cache.remote_version}`;
-      }
+      let updateProvider;
+      try { updateProvider = require('./scripts/forge-update-check'); }
+      catch { updateProvider = require('./forge-update-check'); }
+      // The renderer supplies only already-resolved local context. The provider
+      // reads cache synchronously and delegates manifest parsing and every Git or
+      // remote operation to its detached refresh subprocess.
+      const cache = updateProvider.cachedUpdate({
+        cwd: cwd || process.cwd(),
+        prefs: resolvedPrefs.prefs,
+        forgeHome: process.env.FORGE_HOME,
+      });
+      forgeVersion = cache.version || '';
+      if (cache.has_update && cache.remote_version) forgeUpdate = `\u2191 ${cache.remote_version}`;
     } catch {}
 
     // --- ANSI colors (used sparingly, only for critical info) ---

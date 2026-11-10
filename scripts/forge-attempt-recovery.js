@@ -57,8 +57,7 @@ const linkedEntries = new WeakMap();
 const transitions = require('./forge-recovery-transition');
 function fail(code) { throw Object.assign(new Error(code), { code }); }
 function callerRequestHash(request) {
-  return digest(JSON.stringify(request, (_key, value) => value && typeof value === 'object' && !Array.isArray(value)
-    ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value));
+  return digest(require('./forge-request-fingerprint').callerRequestPreimage(request));
 }
 function safeDiagnostic(value) {
   return String(value || '').replace(/(?:bearer\s+|(?:token|secret|password|api[_-]?key)\s*[:=]\s*)[^\s,;]+/gi, '[redacted]').slice(0, 4096);
@@ -147,6 +146,91 @@ function inspectTerminalRequest(request, context) {
   const identity = projectRequestIdentity(canonicalRequest(request), () => ({ ...entry, owner: process.platform === 'win32' ? owner.toLowerCase() : owner,
     host_runtime: begin.host_runtime, milestone: begin.milestone }));
   return { identity, fingerprint: require('./forge-request-fingerprint').projectFingerprint(request, identity.linked_entry) };
+}
+// #382 historical inspector. The embedding host supplies an EXECUTABLE observer
+// that names the attempt it actually started for this begin (result path,
+// unit/workflow/dispatch and roots). The archive then supplies the exact data.
+// The returned proof is an opaque, process-local WeakMap key: it is not a
+// linkedEntryBinding, broker, claim, route or recovery authorization, it is
+// never serialized, and every consumer revalidates begin+receipt+archive again.
+const archivedInspections = new WeakMap();
+const physicalKey = file => { const real = fs.realpathSync.native(file); return process.platform === 'win32' ? real.toLowerCase() : real; };
+function proveArchivedAttempt(cwd, begin, receiptPath, expected) {
+  const controller = require('./forge-unit-controller'), retention = require('./forge-request-retention');
+  const fingerprints = require('./forge-request-fingerprint');
+  if (typeof receiptPath !== 'string' || !receiptPath) fail('archived-inspection-receipt-required');
+  const loc = retention.locate(expected);
+  if (retention.physicalSibling(receiptPath) !== retention.physicalSibling(loc.receipt)) fail('archived-inspection-receipt-mismatch');
+  const receiptBytes = retention.readStable(loc.receipt);
+  let receipt; try { receipt = JSON.parse(receiptBytes); } catch { fail('archived-inspection-receipt-invalid'); }
+  const data = retention.read(receipt, expected, { receiptPath: loc.receipt });
+  const request = data.restore();
+  // Same owner canonicalization as projectRequestIdentity/bindLinkedRequest.
+  const ownerReal = fs.realpathSync(cwd), canonicalOwner = process.platform === 'win32' ? ownerReal.toLowerCase() : ownerReal;
+  let identity;
+  if (request.linked_begin_key) {
+    // Historical linked identity comes only from the actual committed begin and
+    // its checksummed failure chain, never from linked_entry_identity in JSON.
+    const entry = controller.inspectHistoricalLinkedEntry(cwd, request.linked_begin_key);
+    if (entry.unit !== begin.unit.key || entry.milestone !== begin.milestone
+        || !entry.roots.some(root => physicalKey(root.path) === physicalKey(request.cwd))
+        || (request.execution_contract?.code_roots || []).some(root => !entry.roots.some(bound => bound.root_id === root.id
+          && physicalKey(bound.path) === physicalKey(root.path)))) fail('linked-entry-roots-mismatch');
+    identity = projectRequestIdentity(canonicalRequest(request), () => ({ ...entry, owner: canonicalOwner }));
+  } else identity = projectRequestIdentity(canonicalRequest(request), () => null);
+  if (`${identity.unit_type}/${identity.task_id || identity.slice_id || identity.milestone_id}` !== begin.unit.key
+      || identity.milestone_id !== (begin.milestone ?? null) || identity.host !== begin.host_runtime || identity.owner !== canonicalOwner
+      || identity.slice_id && begin.after?.state?.active_slice && identity.slice_id !== begin.after.state.active_slice) fail('archived-inspection-identity-mismatch');
+  const projected = JSON.stringify(fingerprints.projectRequestData(request, identity.linked_entry));
+  const fingerprint = fingerprints.projectFingerprint(request, identity.linked_entry);
+  if (projected !== data.delivery_json || fingerprint !== data.delivery_fingerprint || fingerprint !== receipt.fingerprint
+      || receipt.dispatch_id !== request.dispatchId
+      || receipt.recovery_identity_sha256 && receipt.recovery_identity_sha256 !== digest(identity)) fail('archived-inspection-fingerprint-mismatch');
+  const recomputedCaller = data.caller_preimage_json === null ? callerRequestHash(request) : digest(data.caller_preimage_json);
+  return { request, identity, fingerprint, receipt_path: loc.receipt, receipt_sha256: digest(receiptBytes),
+    archive_sha256: data.archive_sha256, linked: !!request.linked_begin_key,
+    caller_request_sha256: data.caller_request_sha256 !== null && data.caller_request_sha256 === recomputedCaller ? recomputedCaller : null,
+    runtime_requirements: { ...data.runtime_requirements }, preparation_input: data.preparation_input };
+}
+function createArchivedRequestInspector(adapter) {
+  if (!adapter || typeof adapter.observeOriginalAttempt !== 'function') fail('archived-inspection-host-required');
+  return Object.freeze({ inspect(query) {
+    const controller = require('./forge-unit-controller');
+    const cwd = query?.cwd, key = query?.begin?.idempotency_key;
+    const begin = typeof key === 'string' ? controller.lookupRecord(cwd, 'transaction', key) : null;
+    if (!begin || controller.recordChecksum(begin) !== controller.recordChecksum(query.begin)) fail('archived-inspection-begin-changed');
+    const observed = adapter.observeOriginalAttempt({ cwd, begin: JSON.parse(JSON.stringify(begin)), receiptPath: query.receiptPath });
+    if (!observed || typeof observed !== 'object' || Array.isArray(observed)
+        || ['archived_inspection', 'linkedEntryBinding', 'ownerBroker', 'approved', 'attested'].some(field => Object.hasOwn(observed, field))) fail('archived-inspection-expected-invalid');
+    const expected = JSON.parse(JSON.stringify(observed));
+    const proof = proveArchivedAttempt(cwd, begin, query.receiptPath ?? `${path.resolve(expected.resultFile)}.receipt.json`, expected);
+    const handle = Object.freeze(Object.create(null));
+    archivedInspections.set(handle, Object.freeze({ purpose: 'historical-inspection', cwd: physicalKey(cwd), begin_key: key,
+      begin_checksum: controller.recordChecksum(begin), expected, request_json: JSON.stringify(proof.request),
+      receipt_path: proof.receipt_path, receipt_sha256: proof.receipt_sha256, archive_sha256: proof.archive_sha256,
+      identity_sha256: digest(proof.identity), fingerprint: proof.fingerprint }));
+    return { request: proof.request, receipt_path: proof.receipt_path, begin_key: key, begin_checksum: controller.recordChecksum(begin),
+      runtime_requirements: proof.runtime_requirements, preparation_input: proof.preparation_input, archived_inspection: handle };
+  } });
+}
+// Synchronous consumer-side revalidation inside the same controller boundary.
+function revalidateArchivedInspection(handle, query) {
+  const proof = handle && typeof handle === 'object' ? archivedInspections.get(handle) : undefined;
+  if (!proof) fail('archived-inspection-invalid');
+  const controller = require('./forge-unit-controller');
+  if (physicalKey(query.cwd) !== proof.cwd || query.begin?.idempotency_key !== proof.begin_key
+      || controller.recordChecksum(query.begin) !== proof.begin_checksum
+      || typeof query.receiptPath !== 'string'
+      || require('./forge-request-retention').physicalSibling(query.receiptPath) !== require('./forge-request-retention').physicalSibling(proof.receipt_path)
+      || JSON.stringify(query.request) !== proof.request_json) fail('archived-inspection-scope-mismatch');
+  const begin = controller.lookupRecord(query.cwd, 'transaction', proof.begin_key);
+  if (!begin || controller.recordChecksum(begin) !== proof.begin_checksum) fail('archived-inspection-stale');
+  const fresh = proveArchivedAttempt(query.cwd, begin, proof.receipt_path, proof.expected);
+  if (fresh.receipt_sha256 !== proof.receipt_sha256 || fresh.archive_sha256 !== proof.archive_sha256
+      || fresh.fingerprint !== proof.fingerprint || digest(fresh.identity) !== proof.identity_sha256) fail('archived-inspection-stale');
+  return Object.freeze({ identity: fresh.identity, fingerprint: fresh.fingerprint, linked: fresh.linked,
+    caller_request_sha256: fresh.caller_request_sha256, runtime_requirements: Object.freeze(fresh.runtime_requirements),
+    receipt_sha256: fresh.receipt_sha256, archive_sha256: fresh.archive_sha256 });
 }
 function bindLinkedRequest(request, options) {
   if (!request.linked_begin_key) return request;
@@ -1094,7 +1178,8 @@ async function cli(argv) {
   }
   fail('usage: forge-attempt-recovery.js --inspect <state.json> <receipt.json> | --preparation <request.json>');
 }
-module.exports = { canonicalRequest, callerRequestHash, bindRecoveryAuthorization, bindLinkedRequest, inspectTerminalRequest, createRecovery, migrateState, resolveCandidates, createAuthority, exceptionFor, requestIdentity, validateState, validateStateTarget, routeKey, safeDiagnostic, inspectReceipt, captureFailure, recoverAttempt, cli,
+module.exports = { canonicalRequest, callerRequestHash, bindRecoveryAuthorization, bindLinkedRequest, inspectTerminalRequest,
+  createArchivedRequestInspector, revalidateArchivedInspection, createRecovery, migrateState, resolveCandidates, createAuthority, exceptionFor, requestIdentity, validateState, validateStateTarget, routeKey, safeDiagnostic, inspectReceipt, captureFailure, recoverAttempt, cli,
   INPUT_REQUIRED_CODE, INBOUND_INPUT_METHODS, ANSWERED_CONTINUATION_STOP };
 if (require.main === module) cli(process.argv.slice(2)).then(value => process.stdout.write(JSON.stringify(value) + '\n')).catch(error => {
   process.stderr.write(JSON.stringify({ reason_code: error.code || 'recovery-command-failed' }) + '\n'); process.exitCode = 2;

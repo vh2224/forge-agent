@@ -51,6 +51,35 @@ const CODEX_CAPS = { available: true, tool: 'spawn_agent', source: 'fixture-obse
   models: ['gpt-6.1-sol'], reasoning_efforts: ['low', 'medium', 'high'], fork_turns: ['none'] };
 const prefs = review => ({ review });
 
+test('native review argument-only transport fails closed for every leg before invocation', () => {
+  let calls = 0;
+  for (const leg of ['challenge','defense','rebuttal']) {
+    const key = {challenge:'challenge_effort',defense:'defense_effort',rebuttal:'rebuttal_effort'}[leg];
+    for (const effort of ['medium','high','xhigh','max']) {
+      const out = resolveReviewEffort({leg,engine:'claude',transport:'claude-native',model:'claude-opus-5-5',agentType:'forge-reviewer',
+        capabilities:{...CLAUDE_CAPS,effort_transports:['agent-argument'],reasoning_efforts:['low','medium','high','xhigh','max']},prefs:prefs({[key]:effort})});
+      // This is the native review caller's existing refusal barrier. Do not
+      // approve a call whose consumers would silently drop native_args.
+      if (!out.refusal) calls++;
+      assert.strictEqual(out.refusal?.code,'native-effort-transport-unsupported');
+      assert.strictEqual(out.effort_requested,effort);assert.strictEqual(out.effort_resolved,effort);
+      assert.strictEqual(out.native_args,null);assert.strictEqual(out.effort_planned,null);
+      assert.strictEqual(out.effort_sent,null);assert.strictEqual(out.effort_applied,null);
+    }
+  }
+  assert.strictEqual(calls,0);
+});
+test('native review with both transports keeps strict observed frontmatter instead of approving an unforwarded argument', () => {
+  const binding=agent('forge-reviewer-r1',['model: opus','effort: medium']);
+  const capabilities={...CLAUDE_CAPS,effort_transports:['agent-argument','agent-frontmatter'],reasoning_efforts:['medium','high']};
+  const request={leg:'challenge',engine:'claude',transport:'claude-native',model:'claude-opus-5-5',binding,capabilities};
+  const medium=resolveReviewEffort({...request,prefs:prefs({challenge_effort:'medium'})});
+  assert.strictEqual(medium.refusal,null);assert.strictEqual(medium.effort_planned,'agent-frontmatter:medium');
+  assert.strictEqual(medium.native_args,null);assert.strictEqual(medium.effort_sent,null);
+  const mismatch=resolveReviewEffort({...request,prefs:prefs({challenge_effort:'high'})});
+  assert.strictEqual(mismatch.refusal?.code,'native-effort-binding-mismatch');
+  assert.strictEqual(mismatch.effort_resolved,'high');assert.strictEqual(mismatch.effort_planned,null);
+});
 test('absent keys: legacy call, no argv, nothing planned or sent', () => {
   for (const leg of ['challenge', 'defense', 'rebuttal']) {
     const out = resolveReviewEffort({ leg, engine: 'codex', transport: 'app-server', model: 'gpt-6.1-sol', prefs: prefs({ trigger: 'adaptive' }) });

@@ -1144,7 +1144,10 @@ function artifactAttemptFiles(request) {
   return { cwd, root, resultFile, receiptFile };
 }
 
-function beginArtifactAttempt(request) {
+function beginArtifactAttempt(...args) {
+  return require('./forge-owner-transport-window').withMutation(args[0].contextRoot || args[0].cwd, () => beginArtifactAttemptInsideOwnerWindow(...args));
+}
+function beginArtifactAttemptInsideOwnerWindow(request) {
   const loc = locations(request);
   const files = artifactAttemptFiles(request);
   const fingerprint = artifactFingerprint(request);
@@ -1152,6 +1155,9 @@ function beginArtifactAttempt(request) {
   if (fs.existsSync(files.receiptFile)) {
     const record = JSON.parse(fs.readFileSync(files.receiptFile, 'utf8'));
     if (record.fingerprint !== fingerprint) fail('dispatch-identity-conflict');
+    // A retained archive must still match exactly; its recorded broker/linked
+    // requirement cannot disappear on replay. Legacy receipts are unchanged.
+    require('./forge-request-retention').assertForReceipt(request, record);
     if (record.phase === 'ready') return { state: 'ready', record, loc, files, fingerprint };
     if (record.phase === 'failed') fail(record.failure?.reason_code || 'artifact-attempt-failed');
     fail('sidecar-attempt-interrupted', 'The attempt is started without a durable result; inspect it before a new dispatch.');
@@ -1165,7 +1171,11 @@ function beginArtifactAttempt(request) {
         || hash(JSON.stringify(broker.manifest.execution_contract)) !== hash(JSON.stringify(request.execution_contract || null))) fail('broker-attempt-binding');
     broker.verify();
   }
+  // Exact inputs become durable (exclusive write + fsync) before started exists;
+  // a capture refusal leaves no receipt and never reaches a provider.
+  const retainedRequest = require('./forge-request-retention').retain(request);
   const record = { phase: 'started', fingerprint, dispatch_id: request.dispatchId, before,
+    retained_request: retainedRequest,
     recovery_identity_sha256: recoveryIdentity(request),
     ...(request.ownerBroker ? { broker_manifest_sha256: require('./forge-artifact-reconciliation').assertBroker(request.ownerBroker).manifest_sha256,
       broker_plan_sha256: request.ownerBroker.manifest.plan_sha256 } : {}),
@@ -1233,6 +1243,7 @@ async function acceptArtifactResultCore(request, rawResult, metadata = {}, publi
   if (!fs.existsSync(files.receiptFile)) fail('artifact-attempt-not-started');
   const existing = JSON.parse(fs.readFileSync(files.receiptFile, 'utf8'));
   if (existing.fingerprint !== fingerprint) fail('dispatch-identity-conflict');
+  require('./forge-request-retention').assertForReceipt(request, existing);
   if (existing.phase === 'ready') {
     if (request.ownerBroker) request.ownerBroker.verify({ canonicalArtifacts: existing.artifacts || [] });
     const result = await publishReadyRecord(request, existing, undefined, publicationLock);
@@ -1280,7 +1291,15 @@ async function acceptArtifactResultCore(request, rawResult, metadata = {}, publi
       const broker = require('./forge-artifact-reconciliation').assertBroker(request.ownerBroker);
       if (broker.manifest_sha256 !== existing.broker_manifest_sha256) fail('broker-manifest-changed');
       broker.verify();
-    } else if (JSON.stringify(preparationSurfaceSnapshot(request)) !== JSON.stringify(existing.preparation_surface)) fail('artifact-direct-write-detected');
+    } else {
+      const observed = preparationSurfaceSnapshot(request);
+      if (JSON.stringify(observed) !== JSON.stringify(existing.preparation_surface)) {
+        existing.preparation_surface_drift = { scope: 'whole-owner', attribution: 'unproven',
+          expected_sha256: hash(JSON.stringify(existing.preparation_surface)), observed_sha256: hash(JSON.stringify(observed)) };
+        json(files.receiptFile, existing);
+        fail('artifact-direct-write-detected');
+      }
+    }
   }
   if (/(?:token|secret|password|credential)\s*[:=]\s*[^\s"}]+/i.test(JSON.stringify(rawResult))) {
     const error = new Error('Secret-like provider output refused.');
@@ -1303,6 +1322,7 @@ async function acceptArtifactResultCore(request, rawResult, metadata = {}, publi
     ? require('./forge-task-preparation').preflightPlan(request, artifacts[0].content) : null;
   const pendingQuestions = require('./forge-interaction').mergePendingQuestions(request.pending_questions || [], rawResult.questions || []);
   const record = { phase: 'ready', fingerprint, dispatch_id: request.dispatchId,
+    ...(existing.retained_request ? { retained_request: existing.retained_request } : {}),
     ...(planContract ? { plan_contract: planContract } : {}), pending_questions: pendingQuestions,
     input_pending_questions: request.pending_questions || [],
     request_fingerprint: request.preparationRequestFingerprint || null,
@@ -1778,19 +1798,27 @@ function nativeMemoryIdentity(request, durableTelemetry) {
     || telemetry.effort_binding_observed !== null
     || telemetry.effort_binding_observed_source !== null
     || telemetry.effort_binding_observed_fingerprint !== null);
+  const claudeEffortMismatch = telemetry.effort_transport === 'native-argument'
+    ? telemetry.effort_argument !== identity.effort
+      || telemetry.effort_transport_value !== identity.effort
+      || typeof telemetry.effort_transport_source !== 'string' || !telemetry.effort_transport_source
+      || telemetry.effort_binding_observed !== null
+      || telemetry.effort_binding_observed_source !== null
+      || telemetry.effort_binding_observed_fingerprint !== null
+    : telemetry.effort_argument !== null
+      || telemetry.effort_transport !== 'agent-frontmatter'
+      || telemetry.effort_transport_value !== identity.effort
+      || telemetry.effort_binding_observed !== identity.effort
+      || typeof telemetry.effort_transport_source !== 'string' || !telemetry.effort_transport_source
+      || typeof telemetry.effort_binding_observed_source !== 'string' || !telemetry.effort_binding_observed_source
+      || telemetry.effort_binding_observed_source !== telemetry.effort_transport_source
+      || typeof telemetry.effort_binding_observed_fingerprint !== 'string'
+      || !/^sha256:[a-f0-9]{64}$/.test(telemetry.effort_binding_observed_fingerprint);
   // Claude: the alias, or the exact resolved id when the active tool listed it.
   const claudeMismatch = host === 'claude' && ((telemetry.model_argument !== route.alias
       && telemetry.model_argument !== identity.model)
     || (telemetry.model_argument === identity.model && Object.prototype.hasOwnProperty.call(telemetry, 'model_version_proof'))
-    || telemetry.effort_argument !== null
-    || telemetry.effort_transport !== 'agent-frontmatter'
-    || telemetry.effort_transport_value !== identity.effort
-    || telemetry.effort_binding_observed !== identity.effort
-    || typeof telemetry.effort_transport_source !== 'string' || !telemetry.effort_transport_source
-    || typeof telemetry.effort_binding_observed_source !== 'string' || !telemetry.effort_binding_observed_source
-    || telemetry.effort_binding_observed_source !== telemetry.effort_transport_source
-    || typeof telemetry.effort_binding_observed_fingerprint !== 'string'
-    || !/^sha256:[a-f0-9]{64}$/.test(telemetry.effort_binding_observed_fingerprint));
+    || claudeEffortMismatch);
   if (!['codex', 'claude'].includes(host) || commonMismatch || codexMismatch || claudeMismatch) {
     fail('native-memory-telemetry-mismatch', 'Native memory telemetry must describe the exact resolved route and adapter transport.');
   }
@@ -3069,6 +3097,7 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
         || historicalV2MemoryReceipt(existing, r, loc.sourceUnit, legacyFingerprint)))) {
       fail('dispatch-identity-conflict');
     }
+    if (existing.retained_request) require('./forge-request-retention').assertForReceipt(r, existing);
     // Issue 343 U3b: a cohort member's saved delivery record replays only as its retention.
     if (member && existing.milestone_delivery && (existing.phase === 'executed' || existing.phase === 'ready')) {
       return await replayRetainedMember(existing);
@@ -3225,9 +3254,15 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
   // marker in its started receipt; an invalid begin enrollment refuses before any receipt.
   const planGeneration = transport.mode === 'plan'
     ? buildPlanGenerationMarker(r, { fingerprint, dispatchId, root, begin: planGenerationBegin(r, runtime, root) }) : null;
+  // #382: artifact attempts retain their exact inputs (exclusive write + fsync)
+  // after every refusal gate and before started/provider. Other transports keep
+  // their own receipt contracts unchanged.
+  const retainedRequest = transport.mode === 'artifacts' && !verificationSuccessor
+    ? require('./forge-request-retention').retain(r) : null;
   const startedAt = new Date().toISOString();
   // Exclusive creation arbitrates concurrent invocations of the same attempt.
   fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'started', fingerprint, dispatch_id: dispatchId, before, started_at: startedAt,
+    ...(retainedRequest ? { retained_request: retainedRequest } : {}),
     recovery_identity_sha256: recoveryIdentity(r), route, ...(verificationSeal ? { verification_seal: verificationSeal } : {}),
     ...(planGeneration ? { plan_generation: planGeneration } : {}),
     ...(resumedFrom ? { resumed_from: resumedFrom, session_sha256: resumeSessionSha } : {}),
@@ -3721,7 +3756,15 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
           plan_sha256: r.ownerBroker?.manifest?.plan_sha256 || null };
         json(receiptFile, saved);
         if (r.ownerBroker) require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker).verify();
-        else if (JSON.stringify(preparationSurfaceSnapshot(r)) !== JSON.stringify(saved.preparation_surface)) fail('artifact-direct-write-detected');
+        else {
+          const observed = preparationSurfaceSnapshot(r);
+          if (JSON.stringify(observed) !== JSON.stringify(saved.preparation_surface)) {
+            saved.preparation_surface_drift = { scope: 'whole-owner', attribution: 'unproven',
+              expected_sha256: hash(JSON.stringify(saved.preparation_surface)), observed_sha256: hash(JSON.stringify(observed)) };
+            json(receiptFile, saved);
+            fail('artifact-direct-write-detected');
+          }
+        }
         if (r.phase === 'plan' && result.status === 'done') saved.plan_contract = require('./forge-task-preparation').preflightPlan(r, result.artifacts[0].content);
         saved.pending_questions = require('./forge-interaction').mergePendingQuestions(r.pending_questions || [], result.questions || []);
         json(receiptFile, saved);
@@ -3748,7 +3791,11 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
       } else {
         enterTransport();
         transportEntered = true;
-        const output = await xllm.invokeCodexAppServer({ ...options, prompt, schema, sandbox: 'read-only', onHeartbeat: heartbeat });
+        // Read-only delivery under the owner surface census: context health stays in
+        // memory, or its .gsd/forge/context/codex/* write refuses the valid answer as
+        // artifact-direct-write-detected (same class runExecute closed in f3c9968).
+        const output = await xllm.invokeCodexAppServer({ ...options, prompt, schema, sandbox: 'read-only', onHeartbeat: heartbeat,
+          persistContext: false });
         transportReturned = true;
         await livenessQueue;
         result = xllm.extractLastJsonBlock(output.finalText || output.agentTexts);
@@ -3940,6 +3987,14 @@ function appendProtectedOwnerEvents(root, receiptFile, record, lines) {
 }
 
 async function runUnitSidecar(request, runtime = {}) {
+  const windows = require('./forge-owner-transport-window');
+  if (request?.scope === 'standalone-task' && ['brainstorm','discuss','research','plan'].includes(request.phase)) {
+    windows.assertMutationAllowed(request.contextRoot || request.cwd);
+    if (runtime.ownerTransportAdapter) return windows.protectPreparation(request, runtime.ownerTransportAdapter, () => runUnitSidecarInsideOwnerWindow(request, runtime));
+  }
+  return runUnitSidecarInsideOwnerWindow(request, runtime);
+}
+async function runUnitSidecarInsideOwnerWindow(request, runtime = {}) {
   const linked = request?.linked_begin_key ? require('./forge-attempt-recovery').bindLinkedRequest(request, runtime.linkedEntryOptions) : request || {};
   // Issue 343 U3b: a cohort member's opaque handle is an in-process capability, never request data:
   // it leaves the request before any fingerprint, receipt or serialization of the attempt.

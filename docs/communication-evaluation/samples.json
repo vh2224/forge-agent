@@ -783,7 +783,7 @@
             "source": {
               "file": "skills/forge-task/SKILL.md",
               "reference": "skills/forge-task/SKILL.md#modelo-literal",
-              "sha256": "109262eb2c60a498b7775527988b1b1b5a3b57b4a6ce3d890b83282f333dc854"
+              "sha256": "d657fe3b191a675c2d2a62012ca00c71360d44b65cd65787fa4e75a81016b957"
             },
             "text": "TaskCreate({ subject: \"⚡ {TASK_ID} — execute: {descrição humana da task}\", description: \"executor {nativo|sidecar} forge-executor ({modelo resolvido})\", activeForm: \"executando agente: {descrição humana} · forge-executor\" })",
             "rubric": {
@@ -998,7 +998,7 @@
             "source": {
               "file": "skills/forge-next/SKILL.md",
               "reference": "skills/forge-next/SKILL.md#parcial",
-              "sha256": "ca226959ba87cbe75acffd91e0d9af673677f876aa3f39ec12b238e9b9ded711"
+              "sha256": "1d3fc660ccfd9bb411f4f6911660b03ce53afc3b118915715081ba5e33947d71"
             },
             "text": "Trabalho parcial salvo em continue.md: {o que ficou feito}. Continua executável: {o que segue}. Decisão pendente: {ID ou nenhuma}. Para retomar: /forge-next.",
             "rubric": {
@@ -2138,7 +2138,7 @@
             "source": {
               "file": "skills/forge-task/SKILL.md",
               "reference": "skills/forge-task/SKILL.md#modelo-literal",
-              "sha256": "109262eb2c60a498b7775527988b1b1b5a3b57b4a6ce3d890b83282f333dc854"
+              "sha256": "d657fe3b191a675c2d2a62012ca00c71360d44b65cd65787fa4e75a81016b957"
             },
             "text": "TaskCreate({ subject: \"⚡ {TASK_ID} — execute: {descrição humana da task}\", description: \"executor {nativo|sidecar} forge-executor ({modelo resolvido})\", activeForm: \"executando agente: {descrição humana} · forge-executor\" })",
             "rubric": {
@@ -2353,7 +2353,7 @@
             "source": {
               "file": "skills/forge-next/SKILL.md",
               "reference": "skills/forge-next/SKILL.md#parcial",
-              "sha256": "ca226959ba87cbe75acffd91e0d9af673677f876aa3f39ec12b238e9b9ded711"
+              "sha256": "1d3fc660ccfd9bb411f4f6911660b03ce53afc3b118915715081ba5e33947d71"
             },
             "text": "Trabalho parcial salvo em continue.md: {o que ficou feito}. Continua executável: {o que segue}. Decisão pendente: {ID ou nenhuma}. Para retomar: /forge-next.",
             "rubric": {

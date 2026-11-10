@@ -32,6 +32,7 @@ childProcess.spawnSync = function guardedSpawnSync(command, args, options) {
 
 const installer = require('./forge-installer.js');
 const updater = require('./forge-update.js');
+const updateCheck = require('./forge-update-check.js');
 
 let passed = 0;
 function test(name, fn) { fn(); passed++; process.stdout.write(`  ✓ ${name}\n`); }
@@ -492,6 +493,173 @@ test('update() tells the installer when stdout is a JSON report', () => {
     updater.update({ ...data, runtime: 'claude', apply: true, skipCapabilityCheck: true }, { install: fakeInstall });
     assert.strictEqual(seen[0].jsonOutput, true, 'sem o aviso, o build do app despeja progresso no relatório JSON');
     assert.strictEqual(Boolean(seen[1].jsonOutput), false);
+  } finally { data.cleanup(); }
+});
+
+test('successful apply invalidates the installation cache after the installer returns', () => {
+  const data = fixture();
+  try {
+    const order = [];
+    const report = updater.update({ ...data, runtime: 'claude', apply: true, skipCapabilityCheck: true }, {
+      install() {
+        order.push('install');
+        return { ok: true, changed: true, backup: null, plan: [] };
+      },
+      readPrefs() { return { ok: true, errors: [], prefs: {} }; },
+      invalidateUpdateCache(target) {
+        order.push('invalidate');
+        assert.strictEqual(target.forgeHome, updateCheck.renderContext({ forgeHome: data.forgeHome }).forgeHome);
+        return { invalidated: true, file: 'fixture-cache' };
+      },
+    });
+    assert.deepStrictEqual(order, ['install', 'invalidate']);
+    assert.strictEqual(report.applied, true);
+    assert.strictEqual(report.cache_invalidation.invalidated, true);
+  } finally { data.cleanup(); }
+});
+
+test('post-apply invalidation resolves the same consumer identity as the statusline', () => {
+  const data = fixture();
+  try {
+    const consumer = path.join(data.root, 'consumer');
+    const prefsRepo = path.join(data.root, 'consumer-source');
+    const identityCache = path.join(data.root, 'identity-cache');
+    fs.mkdirSync(consumer);
+    fs.mkdirSync(prefsRepo);
+    let prefsCwd = null;
+    let invalidatedContext = null;
+    const report = updater.update({ ...data, cwd: consumer, runtime: 'claude', apply: true, skipCapabilityCheck: true }, {
+      install() { return { ok: true, changed: true, backup: null, plan: [] }; },
+      readPrefs(cwd) {
+        prefsCwd = cwd;
+        return { ok: true, errors: [], prefs: { repo_path: prefsRepo } };
+      },
+      invalidateUpdateCache(context) {
+        invalidatedContext = context;
+        return { invalidated: true, file: updateCheck.cachePath(context, identityCache) };
+      },
+    });
+    const statuslineContext = { forgeHome: data.forgeHome, cwd: consumer, prefs: { repo_path: prefsRepo } };
+    assert.strictEqual(prefsCwd, updateCheck.renderContext({ forgeHome: data.forgeHome, cwd: consumer }).cwd);
+    assert.strictEqual(invalidatedContext.cwd, updateCheck.renderContext(statuslineContext).cwd);
+    assert.strictEqual(invalidatedContext.prefsRepo, updateCheck.renderContext(statuslineContext).prefsRepo);
+    assert.strictEqual(report.cache_invalidation.file, updateCheck.cachePath(statuslineContext, identityCache));
+  } finally { data.cleanup(); }
+});
+
+test('successful apply invalidates sibling consumers of only the updated installation', () => {
+  const data = fixture();
+  try {
+    const cacheDir = path.join(data.root, 'shared-update-cache');
+    const consumerA = path.join(data.root, 'shared-update-consumer-a');
+    const consumerB = path.join(data.root, 'shared-update-consumer-b');
+    const otherHome = path.join(data.root, 'shared-update-other-home');
+    const prefsA = path.join(data.root, 'shared-update-prefs-a');
+    const prefsB = path.join(data.root, 'shared-update-prefs-b');
+    // The cache directory must be private: on POSIX the provider rejects a group/world-readable one.
+    fs.mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
+    for (const directory of [consumerA, consumerB, data.forgeHome, otherHome, prefsA, prefsB]) {
+      fs.mkdirSync(directory, { recursive: true });
+    }
+    const manifest = {
+      version: '1.2.3',
+      adapters: { claude: {} },
+      source_remote: {
+        remote: 'https://example.invalid/forge.git', channel: 'stable', tag: 'v1.2.3', sha: 'a'.repeat(40),
+      },
+    };
+    fs.writeFileSync(path.join(data.forgeHome, 'manifest.json'), JSON.stringify(manifest));
+    fs.writeFileSync(path.join(otherHome, 'manifest.json'), JSON.stringify(manifest));
+    const targetA = { forgeHome: data.forgeHome, cwd: consumerA, prefs: { repo_path: prefsA } };
+    const targetB = { forgeHome: data.forgeHome, cwd: consumerB, prefs: { repo_path: prefsB } };
+    const targetOther = { forgeHome: otherHome, cwd: consumerB, prefs: { repo_path: prefsB } };
+    const offlineGit = () => `${'a'.repeat(40)}\trefs/tags/v1.2.3\n`;
+    for (const target of [targetA, targetB, targetOther]) {
+      updateCheck.refresh(target, { cacheDir, git: offlineGit });
+      assert.strictEqual(updateCheck.cachedUpdate(target, { cacheDir }).state, 'equal');
+    }
+    const report = updater.update({ ...data, cwd: consumerA, runtime: 'claude', apply: true, skipCapabilityCheck: true }, {
+      install() { return { ok: true, changed: true, backup: null, plan: [] }; },
+      readPrefs() { return { ok: true, errors: [], prefs: { repo_path: prefsA } }; },
+      invalidateUpdateCache(context) { return updateCheck.invalidateCache(context, { cacheDir }); },
+    });
+    assert.strictEqual(report.cache_invalidation.invalidated, true);
+    assert.strictEqual(report.cache_invalidation.installation_generation_rotated, true);
+    let launches = 0;
+    assert.strictEqual(updateCheck.cachedUpdate(targetB, { cacheDir, spawn() {
+      launches++;
+      return { on() {}, unref() {} };
+    } }).state, 'unknown');
+    assert.strictEqual(launches, 1);
+    assert.strictEqual(updateCheck.cachedUpdate(targetOther, { cacheDir,
+      spawn() { throw new Error('another installation must remain valid'); } }).state, 'equal');
+    fs.rmSync(`${updateCheck.cachePath(targetB, cacheDir)}.refresh`, { force: true });
+  } finally { data.cleanup(); }
+});
+
+test('dry-run and installer failure do not rotate either cache generation', () => {
+  const data = fixture();
+  try {
+    const cacheDir = path.join(data.root, 'no-update-invalidation-cache');
+    const consumer = path.join(data.root, 'no-update-invalidation-consumer');
+    fs.mkdirSync(consumer);
+    const target = { forgeHome: data.forgeHome, cwd: consumer };
+    const paths = updateCheck._private.cachePaths(target, cacheDir);
+    updateCheck.invalidateCache(target, { cacheDir });
+    const before = {
+      installation: fs.readFileSync(paths.installationGenerationFile, 'utf8'),
+      consumer: fs.readFileSync(paths.consumerGenerationFile, 'utf8'),
+    };
+    const invalidate = (context) => updateCheck.invalidateCache(context, { cacheDir });
+    updater.update({ ...data, cwd: consumer, runtime: 'claude', apply: false }, {
+      install() { return { ok: true, changed: false, backup: null, plan: [] }; },
+      invalidateUpdateCache: invalidate,
+    });
+    assert.throws(() => updater.update({ ...data, cwd: consumer, runtime: 'claude', apply: true }, {
+      install() { throw new Error('installer failed before invalidation'); },
+      invalidateUpdateCache: invalidate,
+    }), /installer failed before invalidation/);
+    assert.strictEqual(fs.readFileSync(paths.installationGenerationFile, 'utf8'), before.installation);
+    assert.strictEqual(fs.readFileSync(paths.consumerGenerationFile, 'utf8'), before.consumer);
+  } finally { data.cleanup(); }
+});
+
+test('dry-run never invalidates the statusline cache', () => {
+  const data = fixture();
+  try {
+    let invalidations = 0;
+    const report = updater.update({ ...data, runtime: 'claude', apply: false }, {
+      install() { return { ok: true, changed: false, backup: null, plan: [] }; },
+      invalidateUpdateCache() { invalidations++; return { invalidated: true }; },
+    });
+    assert.strictEqual(report.applied, false);
+    assert.strictEqual(invalidations, 0);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(report, 'cache_invalidation'), false);
+  } finally { data.cleanup(); }
+});
+
+test('installer failure leaves the statusline cache intact', () => {
+  const data = fixture();
+  try {
+    let invalidations = 0;
+    assert.throws(() => updater.update({ ...data, runtime: 'claude', apply: true }, {
+      install() { throw new Error('installer failed'); },
+      invalidateUpdateCache() { invalidations++; },
+    }), /installer failed/);
+    assert.strictEqual(invalidations, 0);
+  } finally { data.cleanup(); }
+});
+
+test('cache invalidation failure does not mask a successful applied update', () => {
+  const data = fixture();
+  try {
+    const report = updater.update({ ...data, runtime: 'claude', apply: true }, {
+      install() { return { ok: true, changed: true, backup: 'backup', plan: [] }; },
+      invalidateUpdateCache() { throw new Error('cache unavailable'); },
+    });
+    assert.strictEqual(report.applied, true);
+    assert.strictEqual(report.changed, true);
+    assert.deepStrictEqual(report.cache_invalidation, { invalidated: false, reason: 'invalidation-failed' });
   } finally { data.cleanup(); }
 });
 

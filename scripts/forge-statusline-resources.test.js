@@ -299,5 +299,69 @@ process.stdout.write('forge-statusline-resources.test.js\n');
   } finally { cleanup(dir); cleanup(poolDir); cleanup(profile); }
 })();
 
+// Installation provenance exists without repo_path: the render path may read
+// only the safe cache and must still schedule one detached refresh.
+(() => {
+  const dir = mkTmp('remote-install');
+  const poolDir = mkTmp('remote-install-pool');
+  const installed = mkTmp('remote-install-flat');
+  const forgeHome = path.join(installed, 'forge-home');
+  const scripts = path.join(installed, 'scripts');
+  const record = path.join(installed, 'refresh-record.json');
+  const realProvider = path.join(SCRIPTS, 'forge-update-check.js');
+  const realGit = path.join(SCRIPTS, 'forge-git-process.js');
+  try {
+    fs.mkdirSync(scripts, { recursive: true });
+    fs.mkdirSync(forgeHome, { recursive: true });
+    fs.copyFileSync(STATUSLINE, path.join(installed, 'forge-statusline.js'));
+    fs.writeFileSync(path.join(forgeHome, 'manifest.json'), JSON.stringify({
+      version: '1.2.3',
+      source_remote: {
+        remote: 'https://example.invalid/forge.git',
+        channel: 'stable',
+        tag: 'v1.2.3',
+        sha: 'a'.repeat(40),
+      },
+    }));
+    fs.writeFileSync(path.join(scripts, 'forge-prefs.js'), 'module.exports.readPrefsCached=()=>({prefs:{}});');
+    fs.writeFileSync(path.join(scripts, 'forge-update-check.js'), `
+      const fs = require('fs');
+      const gitModule = require(${JSON.stringify(realGit)});
+      gitModule.git = () => { throw new Error('Git reached synchronous render path'); };
+      delete require.cache[require.resolve(${JSON.stringify(realProvider)})];
+      const provider = require(${JSON.stringify(realProvider)});
+      module.exports.cachedUpdate = context => {
+        let unref = false;
+        const value = provider.cachedUpdate(context, {
+          cacheDir: ${JSON.stringify(path.join(installed, 'cache'))},
+          spawn(command, args, options) {
+            const result = { context, command, args, options, unref: false };
+            return {
+              on() {},
+              unref() { unref = true; result.unref = true; fs.writeFileSync(${JSON.stringify(record)}, JSON.stringify(result)); },
+            };
+          },
+        });
+        if (!unref && !fs.existsSync(${JSON.stringify(record)})) throw new Error('refresh was not detached');
+        return value;
+      };
+    `);
+    const input = JSON.stringify({ cwd: dir, model: { display_name: 'test-model' }, context_window: { used_percentage: 1 } });
+    const result = spawnSync(process.platform === 'win32' ? 'node.exe' : 'node', [path.join(installed, 'forge-statusline.js')], {
+      input,
+      encoding: 'utf8',
+      cwd: installed,
+      env: { ...process.env, FORGE_HOME: forgeHome, FORGE_RESOURCE_POOL_DIR: poolDir },
+    });
+    assert(result.status === 0, '(H) render works with source_remote and no repo_path', result.stderr);
+    const scheduled = JSON.parse(fs.readFileSync(record, 'utf8'));
+    assert(scheduled.context.forgeHome === forgeHome, '(H) installation context reaches provider', JSON.stringify(scheduled));
+    assert(Object.keys(scheduled.context.prefs).length === 0, '(H) repo_path is not required', JSON.stringify(scheduled));
+    assert(scheduled.options.windowsHide === true && scheduled.options.detached === true,
+      '(H) refresh uses windowsHide and detached process', JSON.stringify(scheduled.options));
+    assert(scheduled.unref === true, '(H) refresh child is unrefed', JSON.stringify(scheduled));
+  } finally { cleanup(dir); cleanup(poolDir); cleanup(installed); }
+})();
+
 process.stdout.write(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed === 0 ? 0 : 1);

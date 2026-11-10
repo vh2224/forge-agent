@@ -247,7 +247,10 @@ try {
     const inserted = review.slice(start, end);
     for (const term of ['challenge', 'defense', 'rebuttal', '--mode full', '--allow-append .gsd/forge/events.jsonl', '--allow-publication', 'DEFENSE_FILE', '--own-lease', '--own-run', '--writer-stopped', 'saída 3 ou 4', 'REVIEW', 'review-fix', 'reconciliação', 'Claude', 'opcional']) assert.ok(inserted.includes(term), term);
     assert.ok(!inserted.split('\n').some(line => /^(#|\*\*)/.test(line)));
-    assert.deepEqual(require('./forge-dispatch-source-guard').audit(), { ok: true, root: path.resolve(__dirname, '..'), discovered_count: 248, registered_count: 248, unexpected: [], missing: [], errors: [] });
+    const sourceGuard = require('./forge-dispatch-source-guard');
+    const historicalRegistry = require('./fixtures/owner-recovery/distribution.cjs').previousRegistry(sourceGuard.SOURCE_REGISTRY);
+    assert.equal(historicalRegistry.length, 248, 'exact historical inventory remains preserved');
+    assert.deepEqual(sourceGuard.audit(), { ok: true, root: path.resolve(__dirname, '..'), discovered_count: 254, registered_count: 254, unexpected: [], missing: [], errors: [] });
   });
   check('permissions document G2-1 modes exact allowances limits review and renderer anchors', () => {
     const doc = fs.readFileSync(path.join(__dirname, '..', 'docs', 'codex-agent-permissions.md'), 'utf8');
