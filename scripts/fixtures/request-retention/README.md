@@ -5,7 +5,7 @@
   "parent_qualification": "merged-public-parent-final",
   "previous_delta": "scripts/fixtures/owner-recovery/distribution-delta.json",
   "method": "Exact frozen source and pure Claude render; immutable historical fixtures and scanner; data-only bounded fixture provenance; no provider output or runtime authority.",
-  "input_scope_sha256": "a0ef3dff39a4c3cf6af242674e6b626a74f255a4eec610e7e2c93919aafc5a8c",
+  "input_scope_sha256": "5ed7b40c035624452c84caf01d5e127fb26b9cfdf8201584c1f82b6345130039",
   "prototype_only": false,
   "issues": [
     382
@@ -26,9 +26,9 @@ attributed_after f7c143e50413e1eb00391e6857bbd9cd995a233078409ab2957153f676844cd
 
 docs/lifecycle-resume.md
 before 0d073cbfe70afcbdd9805f97166729784f2c4223fe16b66a1df922953bfb3f3a
-after 5862f85f79461bec5654b9efd73d3edfee4b46eb559e62c1315b0cbe65954b53
+after 2e341ecb8c676a175efeeb942f46e0d7acaf129304992fe50da74d8c6821c508
 attributed_before 0d073cbfe70afcbdd9805f97166729784f2c4223fe16b66a1df922953bfb3f3a
-attributed_after 5862f85f79461bec5654b9efd73d3edfee4b46eb559e62c1315b0cbe65954b53
+attributed_after 2e341ecb8c676a175efeeb942f46e0d7acaf129304992fe50da74d8c6821c508
 
 scripts/forge-attempt-recovery.js
 before 67fa79f158a8b8c07e3153a7a0b0e1ef3bbc7f97ca5d5f90ff04b467222fc844
@@ -74,9 +74,9 @@ attributed_after 8ea33eaa8215c4fb9f1516b80243dcd223239178637291e05a690985a0cba7f
 
 scripts/forge-request-retention.test.js
 before null
-after 6f63fb5940b20098ca13de9b101e023db5834bfd3990b394f379ac0110cb139d
+after bc20538ade49e8d1f412987317430a3c8a54628389292ce9b4722c9cc078568a
 attributed_before null
-attributed_after 6f63fb5940b20098ca13de9b101e023db5834bfd3990b394f379ac0110cb139d
+attributed_after bc20538ade49e8d1f412987317430a3c8a54628389292ce9b4722c9cc078568a
 
 scripts/forge-task-preparation.js
 before 5f14e146485cfff22dcdfa14a717cf7dbd1737948e27d3448366c516fb320e44
@@ -92,9 +92,9 @@ attributed_after 4907cbd6303c649c13ccf2d4d43d88d444f7246291639a36baad1bc7ae556f7
 
 scripts/forge-unit-controller.js
 before 61b3a06d7bbce0f279202b8dae47ce8e19944fa9c72f0539ba575a38a2f80a60
-after 192e4a9f7b3f5e28a1a4443bfaa90d204f8fbe4186add25bbe67c74de94bf1df
+after b70d40a4570b45405efb968db8ca440dee13525fc3ad99daf3f1bc8db52da260
 attributed_before 61b3a06d7bbce0f279202b8dae47ce8e19944fa9c72f0539ba575a38a2f80a60
-attributed_after 192e4a9f7b3f5e28a1a4443bfaa90d204f8fbe4186add25bbe67c74de94bf1df
+attributed_after b70d40a4570b45405efb968db8ca440dee13525fc3ad99daf3f1bc8db52da260
 
 scripts/forge-unit-controller.test.js
 before 28de4e749f991e7b8171f41d95349e16b40e1af77c20af5bb9f2de1c91225109

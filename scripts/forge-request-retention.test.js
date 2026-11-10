@@ -70,6 +70,36 @@ function settledOptions(seed, inspector) {
     reconcileRoots: ({ root }) => ({ root_id: root.root_id, process_stopped: true, reconciled: true }) };
 }
 
+// Existing production APIs take host observations; the host constructs no
+// archive inspector, request object or opaque proof on these two paths.
+function productionInterruptionOptions(seed, observed = []) {
+  const options = r1Options(seed, null);
+  options.observeOriginalAttempt = ({ begin }) => {
+    observed.push(begin.idempotency_key);
+    if (begin.idempotency_key !== seed.beginKey) throw Object.assign(new Error('fixture-unobserved-attempt'), { code: 'fixture-unobserved-attempt' });
+    return seed.expected; // Independent fixture host observation, not archive data.
+  };
+  options.inspectInterruption = ({ begin, role }) => ({
+    begin_key: begin.idempotency_key, begin_checksum: modules().controller.recordChecksum(begin),
+    invocation_status: role === 'original' ? 'invoked-unverified' : 'not-invoked',
+    receipt_path: role === 'original' ? seed.receiptPath : null,
+    saved_response: role === 'original' ? 'ready/blocked' : 'none-observed',
+    roots: [{ root_id: 'primary', path: seed.cwd }], pending_questions: [],
+    observation_reference: 'synthetic trusted host observed original begin, route advance and stopped family',
+    ...(role === 'original' ? { supersession: { route_evidence: [seed.routeEvidence], final_native_attempt: seed.finalNative } } : {})
+  });
+  return options;
+}
+function productionSettledOptions(seed, observed = []) {
+  return { prefsReader, observeOriginalAttempt: ({ begin }) => {
+    observed.push(begin.idempotency_key);
+    if (begin.idempotency_key !== seed.beginKey) throw Object.assign(new Error('fixture-unobserved-attempt'), { code: 'fixture-unobserved-attempt' });
+    return seed.expected;
+  }, inspectAttempt: ({ cwd }) => ({ receipt_path: seed.receiptPath,
+    roots: [{ root_id: 'primary', path: cwd }], pending_questions: [] }),
+  processProbe: () => 'stopped', reconcileRoots: ({ root }) => ({ root_id: root.root_id, process_stopped: true, reconciled: true }) };
+}
+
 async function childMain(seed) {
   const m = modules();
   // Zero resolver use: any resolution attempt in a fresh process is a failure.
@@ -82,6 +112,18 @@ async function childMain(seed) {
     const resumeRefusal = m.adapter.invoke('codex', 'auto', 'resume', { ...seed.input, resume_intent: 'execute' }, paused.snapshot, options).result;
     return { lifecycle: paused.lifecycle, pending: (paused.snapshot?.pending_questions || []).map(q => q.id),
       resume_reason: resumeRefusal.reason_code, observed };
+  }
+  if (seed.scenario === 'production-r1') {
+    const observed=[],result=m.runs.settleInterruptedOwner(seed.cwd,seed.milestone,productionInterruptionOptions(seed,observed));
+    const terminal=m.controller.lookupRecord(seed.cwd,'transaction',result.interruption.terminals[0].key);
+    return{status:result.status,artifacts_accepted:result.interruption.artifacts_accepted,pending:result.record.pending_questions.map(q=>q.id).sort(),observed,superseded_dispatch:terminal.terminal_failure.safety.superseded_attempt.receipt.dispatch_id};
+  }
+  if (seed.scenario === 'production-linked') {
+    const observed=[],options=productionSettledOptions(seed,observed),input={milestone:seed.begin.milestone,unit:seed.begin.unit,host_runtime:'codex',owner_token:'new382-owner-token',begin_key:seed.begin.idempotency_key,begin_checksum:m.controller.recordChecksum(seed.begin),idempotency_key:'production382-linked-pause',result:{status:'blocked'}};
+    assert.throws(()=>m.controller.pausePartial(seed.cwd,input,{...options,processProbe:()=> 'running'}),e=>e.code==='process-not-stopped');
+    const paused=m.controller.pausePartial(seed.cwd,input,options),transaction=m.controller.lookupRecord(seed.cwd,'transaction',paused.transaction.idempotency_key);
+    const request=m.retention.read(JSON.parse(fs.readFileSync(seed.receiptPath)),seed.expected).restore();
+    return{paused:transaction.phase==='committed',caller_hash:transaction.result.output.partial_attempt.request_sha256,pending:transaction.result.output.partial_attempt.pending_questions.map(q=>q.id),observed,runtime_identity:codeOf(()=>m.recovery.requestIdentity(m.recovery.canonicalRequest(request))),replay:await codeOfAsync(()=>m.sidecar.replayArtifactAttempt(request))};
   }
   if (seed.scenario === 'r1') {
     const observed = [], inspector = hostInspector(seed, observed);
@@ -421,6 +463,68 @@ async function main() {
     // Historical inspection remains distinct from publication.
     const read = m.retention.read(json(receiptOf(f.request)), f.expected, { receiptPath: receiptOf(f.request) });
     assert.equal(read.runtime_requirements.owner_broker, true);
+  });
+
+  await test('production requestless: settleInterruptedOwner constructs the proof through its real observer option', async () => {
+    const f = legacyFixture(), request = await genuineBlocked(f, 'production382-original', [{ id: 'production382-kept', question: 'Preserve?' }]);
+    const chain = supersession(f, request), seed = { cwd: f.cwd, milestone: f.milestone, expectedRecordSha256: f.expectedRecordSha256, lineage: f.lineage,
+      beginKey: f.first.idempotency_key, receiptPath: receiptOf(request), routeEvidence: chain.routeEvidence, finalNative: chain.finalNative,
+      expected: { resultFile: request.resultFile, cwd: f.cwd, contextRoot: f.cwd, unitType: 'complete-slice', milestoneId: f.milestone,
+        sliceId: 'S01', workflowId: request.workflowId, dispatchId: request.dispatchId } };
+    const before = fs.readFileSync(m.runs.runFile(f.cwd, f.milestone)), receiptBytes = fs.readFileSync(receiptOf(request)), archiveBytes = fs.readFileSync(archiveOf(request));
+    process.env.CODEX_THREAD_ID = 'fixture375-new';
+    try {
+      const absent = productionInterruptionOptions(seed); delete absent.observeOriginalAttempt;
+      assert.throws(() => m.runs.settleInterruptedOwner(f.cwd, f.milestone, absent), e => e.code === 'saved-response-replay-required', 'legacy missing-request path is not auto-upgraded');
+      const invalid = productionInterruptionOptions(seed); invalid.observeOriginalAttempt = { approved: true };
+      assert.throws(() => m.runs.settleInterruptedOwner(f.cwd, f.milestone, invalid), e => e.code === 'archived-inspection-host-required');
+      for (const observe of [() => ({ ...seed.expected, dispatchId: 'foreign' }), () => ({ ...seed.expected, approved: true }), () => { throw Object.assign(new Error('fixture-unobserved-attempt'), { code: 'fixture-unobserved-attempt' }); }]) {
+        const options = productionInterruptionOptions(seed); options.observeOriginalAttempt = observe;
+        assert.throws(() => m.runs.settleInterruptedOwner(f.cwd, f.milestone, options));
+      }
+      const imported = productionInterruptionOptions(seed), original = imported.inspectInterruption;
+      imported.inspectInterruption = query => ({ ...original(query), archived_inspection: { approved: true } });
+      assert.throws(() => m.runs.settleInterruptedOwner(f.cwd, f.milestone, imported), e => e.code === 'attempt-identity-mismatch' && e.details?.archived_reason === 'archived-inspection-invalid');
+      fs.writeFileSync(archiveOf(request), Buffer.concat([archiveBytes, Buffer.from(' ')]));
+      assert.throws(() => m.runs.settleInterruptedOwner(f.cwd, f.milestone, productionInterruptionOptions(seed)), e => e.code === 'request-retention-hash-mismatch');
+      fs.writeFileSync(archiveOf(request), archiveBytes);
+      assert(fs.readFileSync(m.runs.runFile(f.cwd, f.milestone)).equals(before), 'refusals do not transfer owner');
+      assert(fs.readFileSync(receiptOf(request)).equals(receiptBytes));
+    } finally { delete process.env.CODEX_THREAD_ID; }
+    const out = child('production-r1', seed, { CODEX_THREAD_ID: 'fixture375-new' });
+    assert.equal(out.status, 'interrupted-and-transferred'); assert.equal(out.artifacts_accepted, false);
+    assert.deepEqual(out.pending, ['production382-kept']); assert.equal(out.superseded_dispatch, request.dispatchId);
+    assert(out.observed.length && out.observed.every(key => key === seed.beginKey));
+    assert(fs.readFileSync(receiptOf(request)).equals(receiptBytes)); assert(fs.readFileSync(archiveOf(request)).equals(archiveBytes));
+  });
+
+  await test('production requestless: linked pausePartial attaches an opaque historical proof inside the controller', async () => {
+    const f = legacyFixture(); let begun, bound;
+    process.env.CODEX_THREAD_ID = 'fixture375-new';
+    try {
+      const plain = { ...r1Options({ ...f }, null), inspectInterruption: ({ begin, role }) => ({ begin_key: begin.idempotency_key,
+        begin_checksum: m.controller.recordChecksum(begin), invocation_status: role === 'original' ? 'invoked-unverified' : 'not-invoked',
+        receipt_path: null, saved_response: 'none-observed', roots: [{ root_id: 'primary', path: f.cwd }], pending_questions: [], observation_reference: 'disposable fixture original observation' }) };
+      assert.equal(m.runs.settleInterruptedOwner(f.cwd, f.milestone, plain).status, 'interrupted-and-transferred');
+      const failure = m.controller.failureProjection(f.cwd, f.milestone)[0], baseline = m.controller.recordChecksum({ fixture: 'production-entry-baseline382' });
+      const live = { ...plain, captureEntryBaseline: () => ({ sha256: baseline, roots: [{ root_id: 'primary', path: f.cwd }] }),
+        entryAuthority: m.recovery.createAuthority(reference => ({ reference, status: 'resolved', answer: 'authorize', resolved_at: new Date().toISOString() })) };
+      const entered = m.controller.reenter(f.cwd, { milestone: f.milestone, unit: 'complete-slice/S01', host_runtime: 'codex', owner_token: 'new382-owner-token',
+        entry: { entry_id: 'production382-S01', failure_key: failure.transaction.idempotency_key, failure_checksum: m.controller.recordChecksum(failure.transaction), authorization_ref: 'conversation:synthetic-production382' } }, live);
+      begun = m.controller.lookupRecord(f.cwd, 'transaction', entered.transaction.idempotency_key);
+      bound = m.recovery.bindLinkedRequest({ unitType: 'complete-slice', milestoneId: f.milestone, sliceId: 'S01', cwd: f.cwd, contextRoot: f.cwd,
+        resultFile: path.join(mk('results'), 'production-linked.json'), dispatchId: 'production382-linked', workflowId: f.milestone,
+        route: { host_runtime: 'codex', resolved_worker_engine: 'codex', worker_mode: 'sidecar' }, linked_begin_key: begun.idempotency_key }, { ...live, ownerToken: 'new382-owner-token' });
+    } finally { delete process.env.CODEX_THREAD_ID; }
+    m.sidecar.beginArtifactAttempt(bound);
+    await m.sidecar.acceptArtifactResult(bound, { status: 'blocked', summary: 'Synthetic production linked partial', questions: [{ id: 'production-linked-question', question: 'Retained?' }], artifacts: [] }, { providerCalled: true });
+    const receiptBytes = fs.readFileSync(receiptOf(bound)), archiveBytes = fs.readFileSync(archiveOf(bound));
+    const out = child('production-linked', { cwd: f.cwd, begin: begun, beginKey: begun.idempotency_key, receiptPath: receiptOf(bound),
+      expected: { resultFile: bound.resultFile, cwd: f.cwd, contextRoot: f.cwd, unitType: 'complete-slice', milestoneId: f.milestone, sliceId: 'S01', workflowId: bound.workflowId, dispatchId: bound.dispatchId } });
+    assert.equal(out.paused, true); assert.equal(out.caller_hash, m.recovery.callerRequestHash(bound)); assert.deepEqual(out.pending, ['production-linked-question']);
+    assert.equal(out.runtime_identity, 'linked-entry-binding-required'); assert.equal(out.replay, 'linked-entry-binding-required');
+    assert(out.observed.length && out.observed.every(key => key === begun.idempotency_key));
+    assert(fs.readFileSync(receiptOf(bound)).equals(receiptBytes)); assert(fs.readFileSync(archiveOf(bound)).equals(archiveBytes));
   });
 
   await test('capture refusals, orphans, tamper, links and legacy receipts fail safely', async () => {

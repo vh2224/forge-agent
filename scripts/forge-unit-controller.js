@@ -1552,6 +1552,7 @@ function interruptionRouteEvidence(cwd, milestone, references) {
   });
 }
 function inspectSupersededInterruption(cwd, begin, context, basis, held, options) {
+  context = originalAttemptContext(cwd, begin, context, options);
   const reject = () => { throw new ControllerError('saved-response-replay-required', 'canonical evidence must use its original replay path unless a live host proves supersession'); };
   const supersession = context.supersession;
   if (typeof options.attestSupersededAttempt !== 'function' || !supersession || !context.request
@@ -1919,7 +1920,7 @@ function inspectFailure(cwd, begin, failure, options, terminal) {
   if (!options || typeof options.inspectAttempt !== 'function' || typeof options.processProbe !== 'function') {
     throw new ControllerError('failure-inspector-required', 'inspeção viva do host obrigatória');
   }
-  const context = options.inspectAttempt({ cwd, begin: clone(begin), references: clone(failure || {}) });
+  const context = originalAttemptContext(cwd, begin, options.inspectAttempt({ cwd, begin: clone(begin), references: clone(failure || {}) }), options);
   if (!context || typeof context.receipt_path !== 'string' || !context.request) throw new ControllerError('attempt-evidence-missing', 'receipt/pedido original ausente');
   const recovery = require('./forge-attempt-recovery.js');
   // The live terminal guard keeps priority; an archived proof (#382) is only a
@@ -2134,7 +2135,7 @@ function runTerminal(cwd, transaction, begin, input, options, guard) {
 function inspectSettledAttempt(cwd, begin, options, statuses, replaySource = true) {
   if (typeof options?.inspectAttempt !== 'function' || typeof options?.processProbe !== 'function'
     || typeof options?.reconcileRoots !== 'function') throw new ControllerError('attempt-inspector-required', 'live attempt and root reconciliation required');
-  const context = options.inspectAttempt({ cwd, begin: clone(begin), references: {} });
+  const context = originalAttemptContext(cwd, begin, options.inspectAttempt({ cwd, begin: clone(begin), references: {} }), options);
   if (!context?.request || typeof context.receipt_path !== 'string' || context.begin_key !== begin.idempotency_key
     || context.begin_checksum !== sha(begin)) throw new ControllerError('attempt-evidence-missing', 'actual begin-bound request and receipt required');
   const recovery = require('./forge-attempt-recovery'), rootsApi = require('./forge-code-roots');
@@ -2417,6 +2418,24 @@ function inspectHistoricalLinkedEntry(cwd, key) {
 function recordChecksum(record) { return sha(record); }
 // Consumer side of the archived proof: revalidated synchronously each use; absent
 // proof keeps the existing external-request + live-binding path unchanged.
+// Existing live administrative callbacks may return only a receipt locator.
+// Independent expected identity still comes from the host's executable observer;
+// the controller owns creation of the process-local historical proof.
+function originalAttemptContext(cwd, begin, context, options) {
+  if (!context || context.request !== undefined
+      || options.observeOriginalAttempt === undefined) return context;
+  if (context.archived_inspection !== undefined) throw new ControllerError('attempt-identity-mismatch',
+    'requestless context cannot import an inspection proof', { archived_reason: 'archived-inspection-invalid' });
+  if (typeof options.observeOriginalAttempt !== 'function') throw Object.assign(new Error('archived-inspection-host-required'), { code: 'archived-inspection-host-required' });
+  if (typeof context.receipt_path !== 'string') return context;
+  if (context.begin_key !== undefined && context.begin_key !== begin.idempotency_key
+      || context.begin_checksum !== undefined && context.begin_checksum !== sha(begin)) throw new ControllerError('attempt-identity-mismatch', 'host observation belongs to another begin');
+  const inspector = require('./forge-attempt-recovery').createArchivedRequestInspector({
+    observeOriginalAttempt: observation => options.observeOriginalAttempt(observation) });
+  const original = inspector.inspect({ cwd, begin: clone(begin), receiptPath: context.receipt_path });
+  return { ...context, ...original };
+}
+
 function archivedProof(cwd, begin, context) {
   if (context.archived_inspection === undefined) return null;
   try {
