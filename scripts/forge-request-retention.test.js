@@ -105,6 +105,14 @@ async function childMain(seed) {
     const proof = m.recovery.revalidateArchivedInspection(context.archived_inspection,
       { cwd: seed.cwd, begin: seed.begin, receiptPath: context.receipt_path, request: context.request });
     const handle = context.archived_inspection;
+    const options={prefsReader,inspectAttempt:({cwd,begin})=>({...inspector.inspect({cwd,begin}),roots:[{root_id:'primary',path:cwd}],pending_questions:[]}),processProbe:()=> 'stopped',reconcileRoots:({root})=>({root_id:root.root_id,process_stopped:true,reconciled:true})};
+    const completedRefusal=codeOf(()=>m.controller.verifyCompletedAttempt(seed.cwd,seed.begin,options));
+    const pauseInput={milestone:seed.begin.milestone,unit:seed.begin.unit,host_runtime:'codex',owner_token:'new382-owner-token',begin_key:seed.begin.idempotency_key,begin_checksum:m.controller.recordChecksum(seed.begin),idempotency_key:'fixture382-linked-pause',result:{status:'blocked'}};
+    assert.throws(()=>m.controller.pausePartial(seed.cwd,pauseInput,{...options,processProbe:()=> 'running'}),e=>e.code==='process-not-stopped');
+    assert.throws(()=>m.controller.pausePartial(seed.cwd,pauseInput,{...options,inspectAttempt:({cwd,begin})=>({...options.inspectAttempt({cwd,begin}),archived_inspection:JSON.parse(JSON.stringify(handle))})}),e=>e.code==='attempt-identity-mismatch'&&e.details?.archived_reason==='archived-inspection-invalid');
+    assert.equal(m.controller.lookupRecord(seed.cwd,'transaction',pauseInput.idempotency_key),null,'refused settlement created no terminal');
+    const paused=m.controller.pausePartial(seed.cwd,{milestone:seed.begin.milestone,unit:seed.begin.unit,host_runtime:'codex',owner_token:'new382-owner-token',begin_key:seed.begin.idempotency_key,begin_checksum:m.controller.recordChecksum(seed.begin),idempotency_key:'fixture382-linked-pause',result:{status:'blocked'}},options);
+    const pause=m.controller.lookupRecord(seed.cwd,'transaction',paused.transaction.idempotency_key);
     return { linked: proof.linked, fingerprint: proof.fingerprint, linked_entry: proof.identity.linked_entry,
       caller_hash: proof.caller_request_sha256, runtime_requirements: context.runtime_requirements,
       // Current live APIs still refuse the historical data as a binding.
@@ -113,9 +121,7 @@ async function childMain(seed) {
       proof_as_binding: codeOf(() => m.recovery.requestIdentity(m.recovery.canonicalRequest({ ...context.request, linkedEntryBinding: handle }))),
       proof_as_owner_token: codeOf(() => m.recovery.bindLinkedRequest(context.request, { ownerToken: handle })),
       replay: await codeOfAsync(() => m.sidecar.replayArtifactAttempt(context.request)),
-      settle: codeOf(() => m.controller.verifyCompletedAttempt(seed.cwd, seed.begin, {
-        inspectAttempt: ({ cwd, begin }) => ({ ...inspector.inspect({ cwd, begin }), roots: [{ root_id: 'primary', path: cwd }], pending_questions: [] }),
-        processProbe: () => 'stopped', reconcileRoots: ({ root }) => ({ root_id: root.root_id, process_stopped: true, reconciled: true }) })) };
+      settle: completedRefusal,paused:pause.phase==='committed',paused_caller_hash:pause.result.output.partial_attempt.request_sha256 };
   }
   throw new Error(`unknown child scenario ${seed.scenario}`);
 }
@@ -143,7 +149,7 @@ async function main() {
     assert.equal(run.status, 0, `child ${scenario}: ${run.stderr}\n${run.stdout}`);
     return JSON.parse(run.stdout.trim().split('\n').pop());
   };
-  const test = async (name, fn) => { await fn(); passed++; console.log(`ok - ${name}`); };
+  const test = async (name, fn) => { if(process.argv[2]==='--only-linked-hash'&&!name.startsWith('linked:')&&!name.startsWith('caller hash preimage:'))return; await fn(); passed++; console.log(`ok - ${name}`); };
   const archiveOf = request => `${request.resultFile}.request.json`;
   const receiptOf = request => `${request.resultFile}.receipt.json`;
   const json = file => JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -321,7 +327,18 @@ async function main() {
     assert.deepEqual(json(receiptOf(f.request)).pending_questions.map(q => q.id), ['keep-382']);
   });
 
-  await test('linked: historical proof derives identity from the actual begin chain, never becomes a binding or caller hash', async () => {
+  await test('caller hash preimage: exact known vectors and runtime-only credential refusal',async()=>{
+    for(const value of [{b:2,a:1},{z:{y:1,a:0},array:[{b:2,a:1},null]},{linkedEntryBinding:{},input:{z:'business',a:0}},{ownerBroker:{manifest:{public_key:'public-data',dispatch_id:'fixture'},manifest_sha256:'public-hash',manifestFile:'private-path',verify(){throw new Error('never called');}}}]){
+      const original=JSON.stringify(value,(_k,v)=>v&&typeof v==='object'&&!Array.isArray(v)?Object.fromEntries(Object.keys(v).sort().map(k=>[k,v[k]])):v);
+      const bytes=m.fingerprint.callerRequestPreimage(value);assert.equal(bytes,original);assert.equal(m.recovery.callerRequestHash(value),sha(bytes));assert.notEqual(sha(JSON.stringify(bytes)),sha(bytes),'no JSON string double encoding');
+    }
+    for(const secret of ['privateKey','access_token']){const f=sliceFixture();const r={...f.request,ownerBroker:{manifest:{[secret]:'synthetic-not-a-credential'}}};assert.equal(codeOf(()=>m.retention.retain(r)),'request-retention-secret-field');assert(!fs.existsSync(archiveOf(r)));}
+    const business=sliceFixture();m.retention.retain({...business.request,inputs:{authorization:'ordinary business field, not a runtime credential'}});assert(fs.existsSync(archiveOf(business.request)));
+    const callbacks=sliceFixture(),runtime={...callbacks.request,signal:undefined,publicationSafe:()=>true,waitForPublicationBoundary:async()=>{}};const ref=m.retention.retain(runtime),read=m.retention.read({dispatch_id:runtime.dispatchId,fingerprint:m.sidecar.artifactFingerprint(runtime),retained_request:ref},callbacks.expected);assert.equal(read.caller_request_sha256,m.recovery.callerRequestHash(runtime));assert(!Object.hasOwn(read.restore(),'publicationSafe'));assert(!Object.hasOwn(JSON.parse(read.caller_preimage_json),'publicationSafe'),'JSON omits function channels without refusing a valid caller');
+    const legacy=sliceFixture();m.sidecar.beginArtifactAttempt(legacy.request);const prior=json(archiveOf(legacy.request));delete prior.caller_preimage_json;const bytes=Buffer.from(JSON.stringify(prior)+'\n');fs.writeFileSync(archiveOf(legacy.request),bytes);const receipt=json(receiptOf(legacy.request));receipt.retained_request.sha256=sha(bytes);const old=m.retention.read(receipt,legacy.expected);assert.equal(old.caller_preimage_json,null);assert.equal(old.caller_request_sha256,m.recovery.callerRequestHash(legacy.request));assert(fs.readFileSync(archiveOf(legacy.request)).equals(bytes),'legacy archive never backfilled');
+  });
+
+  await test('linked: historical caller preimage enables actual settlement without restoring live capabilities', async () => {
     const f = legacyFixture();
     process.env.CODEX_THREAD_ID = 'fixture375-new';
     let begun, bound;
@@ -349,21 +366,39 @@ async function main() {
     await m.sidecar.acceptArtifactResult(bound, { status: 'blocked', summary: 'Synthetic linked blocked', questions: [], artifacts: [] }, { providerCalled: true });
     const receipt = json(receiptOf(bound)), archive = json(archiveOf(bound));
     assert.deepEqual(archive.runtime_requirements, { linked_entry: true, owner_broker: false });
-    assert.equal(archive.caller_request_reproducible, false, 'live handle bytes are not reproducible from data');
+    assert.equal(archive.caller_request_reproducible, true, 'separate canonical caller bytes reproduce the original hash');
+    assert.equal(sha(archive.caller_preimage_json), m.recovery.callerRequestHash(bound));
+    assert.deepEqual(JSON.parse(archive.caller_preimage_json).linkedEntryBinding, {});
     assert(!JSON.parse(archive.delivery_input_json).linkedEntryBinding);
+    const receiptBytes=fs.readFileSync(receiptOf(bound)),archiveBytes=fs.readFileSync(archiveOf(bound));
+    for(const mutate of [a=>{a.caller_preimage_json=a.caller_preimage_json+' ';},a=>{const p=JSON.parse(a.caller_preimage_json);p.workflowId='foreign';a.caller_preimage_json=m.fingerprint.callerRequestPreimage(p);a.caller_request_sha256=sha(a.caller_preimage_json);},a=>{a.caller_request_sha256='0'.repeat(64);}]){
+      const altered=JSON.parse(archiveBytes);mutate(altered);const bytes=Buffer.from(JSON.stringify(altered)+'\n');fs.writeFileSync(archiveOf(bound),bytes);
+      const forged={...receipt,retained_request:{...receipt.retained_request,sha256:sha(bytes)}};fs.writeFileSync(receiptOf(bound),JSON.stringify(forged));
+      assert.throws(()=>hostInspector({beginKey:begun.idempotency_key,expected:{resultFile:bound.resultFile,cwd:f.cwd,contextRoot:f.cwd,unitType:'complete-slice',milestoneId:f.milestone,sliceId:'S01',workflowId:bound.workflowId,dispatchId:bound.dispatchId}}).inspect({cwd:f.cwd,begin:begun}),e=>e.code==='request-retention-caller-preimage-mismatch');
+      fs.writeFileSync(archiveOf(bound),archiveBytes);fs.writeFileSync(receiptOf(bound),receiptBytes);
+    }
+    {const legacy=JSON.parse(archiveBytes);delete legacy.caller_preimage_json;legacy.caller_request_reproducible=false;const bytes=Buffer.from(JSON.stringify(legacy)+'\n');fs.writeFileSync(archiveOf(bound),bytes);const oldReceipt={...receipt,retained_request:{...receipt.retained_request,sha256:sha(bytes)}};fs.writeFileSync(receiptOf(bound),JSON.stringify(oldReceipt));
+      const legacyInspector=hostInspector({beginKey:begun.idempotency_key,expected:{resultFile:bound.resultFile,cwd:f.cwd,contextRoot:f.cwd,unitType:'complete-slice',milestoneId:f.milestone,sliceId:'S01',workflowId:bound.workflowId,dispatchId:bound.dispatchId}});
+      assert.equal(codeOf(()=>m.controller.verifyCompletedAttempt(f.cwd,begun,{prefsReader,inspectAttempt:({cwd,begin})=>({...legacyInspector.inspect({cwd,begin}),roots:[{root_id:'primary',path:cwd}]}),processProbe:()=> 'stopped',reconcileRoots:({root})=>({root_id:root.root_id,process_stopped:true,reconciled:true})})),'request-retention-caller-hash-unavailable','older linked archive is not fabricated/backfilled');
+      assert(fs.readFileSync(archiveOf(bound)).equals(bytes));fs.writeFileSync(archiveOf(bound),archiveBytes);fs.writeFileSync(receiptOf(bound),receiptBytes);
+    }
     const out = child('linked', { cwd: f.cwd, begin: begun, beginKey: begun.idempotency_key,
       expected: { resultFile: bound.resultFile, cwd: f.cwd, contextRoot: f.cwd, unitType: 'complete-slice', milestoneId: f.milestone,
         sliceId: 'S01', workflowId: bound.workflowId, dispatchId: bound.dispatchId } });
     assert.equal(out.linked, true);
     assert.equal(out.fingerprint, receipt.fingerprint);
     assert.deepEqual(out.linked_entry, liveIdentity.linked_entry);
-    assert.equal(out.caller_hash, null);
+    assert.equal(out.caller_hash, m.recovery.callerRequestHash(bound));
     assert.equal(out.current_identity, 'linked-entry-binding-required');
     assert.equal(out.current_fingerprint, 'linked-entry-binding-required');
     assert.equal(out.proof_as_binding, 'linked-entry-binding-required');
     assert.notEqual(out.proof_as_owner_token, 'no-error');
     assert.equal(out.replay, 'linked-entry-binding-required', 'replay needs the live binding');
-    assert.equal(out.settle, 'request-retention-caller-hash-unavailable');
+    assert.equal(out.settle, 'settled-result-required', 'completed API still enforces done status');
+    assert.equal(out.paused, true, 'fresh process committed a genuine administrative pause');
+    assert.equal(out.paused_caller_hash,m.recovery.callerRequestHash(bound));
+    assert(fs.readFileSync(receiptOf(bound)).equals(receiptBytes),'historical receipt remains byte-identical');
+    assert(fs.readFileSync(archiveOf(bound)).equals(archiveBytes),'historical archive remains byte-identical');
   });
 
   await test('broker requirement survives restoration: missing, fake or imported broker refuses replay publication', async () => {

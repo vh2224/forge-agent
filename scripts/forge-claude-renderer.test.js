@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/owner-recovery/distribution.cjs');
+const unitEntry = require('./fixtures/request-retention/distribution.cjs');
 
 const assert = require('assert');
 const crypto = require('crypto');

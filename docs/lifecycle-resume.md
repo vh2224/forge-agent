@@ -287,6 +287,8 @@ O arquivo guarda dados, nunca capacidade:
 - `preparation_json`: na preparação de task, o preimage exato de
   `preparationRequestFingerprint` (`preparation_input:'captured'`). Uma entrega
   sem esse preimage registra `not-supplied`; nada é inferido.
+- `caller_preimage_json`: bytes canônicos separados que reproduzem o hash original
+  inclusive para linked; dados serializados não restauram membership/capabilities.
 - `caller_request_sha256` com `caller_request_reproducible`: o hash do pedido do
   chamador só é usado quando os bytes retidos o reproduzem sozinhos.
 - `runtime_requirements:{linked_entry, owner_broker}`: **restrições** de uso, nunca
@@ -358,3 +360,8 @@ raízes, perguntas e o terminal guard existente, que continua com prioridade.
   settlement histórico não iniciam broker.
 - Legado sem arquivo: continua exigindo o pedido externo exato pelo caminho
   original; nada é reconstruído nem preenchido retroativamente.
+
+
+### Preimage histórico do hash do chamador (#382)
+
+O arquivo privado retém `caller_preimage_json` separado de `delivery_input_json`: são os bytes canônicos exatos (sort recursivo original) usados por `callerRequestHash`. O digest recebe essa string diretamente, sem dupla codificação JSON. O leitor confere o hash, a canonicalização, a projeção dos campos de dados e os metadados de runtime; nunca usa esse preimage em `restore()` ou replay. Um `linkedEntryBinding:{}` retido é só a serialização histórica vazia, sem membership no WeakMap. O inspector opaco continua exigindo begin/receipt/arquivo atuais e atestações reais de processo/raízes para settlement. Broker e binding vivos continuam obrigatórios para execução/publicação; funções e chave privada da closure do broker nunca são restauradas. Canais função/undefined seguem omitidos pelo JSON original. Credenciais em canais de runtime são recusadas, sem reinterpretar campos arbitrários de negócio em inputs. Arquivos anteriores sem o novo preimage mantêm sua regra anterior e não recebem backfill.

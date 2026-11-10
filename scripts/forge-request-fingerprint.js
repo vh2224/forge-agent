@@ -21,8 +21,14 @@ function projectRequestData(request, linkedIdentity) {
   return copy;
 }
 
+// Exactly the historical callerRequestHash serializer, including nested key sort.
+function callerRequestPreimage(request) {
+  return JSON.stringify(request, (_key, value) => value && typeof value === 'object' && !Array.isArray(value)
+    ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value);
+}
+
 function projectFingerprint(request, linkedIdentity) {
   return crypto.createHash('sha256').update(JSON.stringify(projectRequestData(request, linkedIdentity))).digest('hex');
 }
 
-module.exports = { projectFingerprint, projectRequestData, PROJECTION_EXCLUDED };
+module.exports = { projectFingerprint, projectRequestData, callerRequestPreimage, PROJECTION_EXCLUDED };

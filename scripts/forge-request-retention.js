@@ -110,6 +110,49 @@ function preparationCapture(request, preimage) {
   assertNoSecrets(caller);
   return { preparation_input: 'captured', preparation_json: preimage };
 }
+// Caller hashing has a different preimage from delivery hashing. Keep its
+// canonical bytes as historical data; never feed them to restore/replay.
+function callerPreimage(request) {
+  let bytes;
+  try { bytes = fingerprintApi.callerRequestPreimage(request); } catch { return null; }
+  if (typeof bytes !== 'string') return null;
+  const value = JSON.parse(bytes);
+  assertNoSecrets(value);
+  const scan = node => {
+    if (!node || typeof node !== 'object') return;
+    for (const [key, nested] of Object.entries(node)) {
+      if (SECRET_FIELD.test(key) || /^(?:private[_-]?key|refresh[_-]?token|client[_-]?secret|owner[_-]?token)$/i.test(key)) fail('request-retention-secret-field');
+      scan(nested);
+    }
+  };
+  // Business inputs keep their existing contract. Only actual runtime channel
+  // serializations receive the additional credential/private-key check.
+  for (const key of RUNTIME_KEYS) if (Object.hasOwn(value, key)) scan(value[key]);
+  return bytes;
+}
+function callerHashFromData(data, input) {
+  if (!Object.hasOwn(data, 'caller_preimage_json')) {
+    // Previously captured archives are not backfilled or upgraded by inference.
+    const legacy = fingerprintApi.callerRequestPreimage(input);
+    return data.caller_request_reproducible === true && sha(legacy) === data.caller_request_sha256 ? sha(legacy) : null;
+  }
+  if (data.caller_preimage_json === null) {
+    if (data.caller_request_reproducible !== false || data.caller_request_sha256 !== null) fail('request-retention-caller-preimage-mismatch');
+    return null;
+  }
+  if (typeof data.caller_preimage_json !== 'string') fail('request-retention-caller-preimage-mismatch');
+  let caller; try { caller = JSON.parse(data.caller_preimage_json); } catch { fail('request-retention-caller-preimage-mismatch'); }
+  if (!isObject(caller) || callerPreimage(caller) !== data.caller_preimage_json
+      || sha(data.caller_preimage_json) !== data.caller_request_sha256 || data.caller_request_reproducible !== true
+      || fingerprintApi.callerRequestPreimage(omit(caller, RUNTIME_KEYS)) !== fingerprintApi.callerRequestPreimage(input)
+      || data.runtime_fields.some(key => !RUNTIME_KEYS.includes(key))
+      || !same([...new Set(data.runtime_fields)].sort(), data.runtime_fields)
+      || RUNTIME_KEYS.some(key => Object.hasOwn(caller, key) && !data.runtime_fields.includes(key))
+      || !!caller.ownerBroker !== data.runtime_requirements.owner_broker) fail('request-retention-caller-preimage-mismatch');
+  if (input.linked_begin_key && (!isObject(caller.linkedEntryBinding) || Object.keys(caller.linkedEntryBinding).length !== 0)) fail('request-retention-caller-preimage-mismatch');
+  return sha(data.caller_preimage_json);
+}
+
 function envelope(request, preimage) {
   const loc = locate(request);
   assertNoSecrets(request);
@@ -118,14 +161,15 @@ function envelope(request, preimage) {
   const inputJson = JSON.stringify(input);
   const callerHashOf = value => { try { return require('./forge-attempt-recovery').callerRequestHash(value); } catch { return null; } };
   const callerHash = callerHashOf(request);
+  const callerJson = callerPreimage(request);
   const prep = preparationCapture(request, preimage);
   const data = { schema_version: VERSION, kind: KIND, binding: loc.bound, result_file: loc.result,
     delivery_fingerprint: sha(deliveryJson), delivery_json: deliveryJson, delivery_input_json: inputJson,
     preparation_fingerprint: request.preparationRequestFingerprint ?? null, ...prep,
     // The caller hash is reproducible only when the archived wire bytes alone
     // produce it; otherwise a resume needing it is refused, never substituted.
-    caller_request_sha256: callerHash,
-    caller_request_reproducible: callerHash !== null && callerHashOf(JSON.parse(inputJson)) === callerHash,
+    caller_request_sha256: callerHash, caller_preimage_json: callerJson,
+    caller_request_reproducible: callerHash !== null && callerJson !== null && sha(callerJson) === callerHash,
     runtime_requirements: { linked_entry: !!request.linked_begin_key, owner_broker: !!request.ownerBroker },
     runtime_fields: RUNTIME_KEYS.filter(key => Object.hasOwn(request, key)).sort() };
   return { loc, data, bytes: Buffer.from(JSON.stringify(data) + '\n') };
@@ -161,6 +205,7 @@ function decode(bytes, loc) {
   try { preimage = JSON.parse(data.delivery_json); } catch { fail('request-retention-data-invalid'); }
   if (JSON.stringify(fingerprintApi.projectRequestData(input, input.linked_begin_key ? preimage.linked_entry_identity : undefined))
       !== data.delivery_json) fail('request-retention-fingerprint-mismatch');
+  callerHashFromData(data, input);
   return data;
 }
 function writeExclusive(file, bytes) {
@@ -209,7 +254,8 @@ function read(receipt, expected, options = {}) {
     receipt_file: loc.receipt, delivery_fingerprint: data.delivery_fingerprint, delivery_json: data.delivery_json,
     delivery_input_json: data.delivery_input_json, preparation_fingerprint: data.preparation_fingerprint,
     preparation_input: data.preparation_input, preparation_json: data.preparation_json,
-    caller_request_sha256: data.caller_request_reproducible === true ? data.caller_request_sha256 : null,
+    caller_request_sha256: callerHashFromData(data, JSON.parse(data.delivery_input_json)),
+    caller_preimage_json: data.caller_preimage_json ?? null,
     runtime_requirements: Object.freeze({ ...data.runtime_requirements }), runtime_fields: Object.freeze([...data.runtime_fields || []]),
     binding: data.binding, runtime_authority_restored: false,
     // A fresh plain-data object for every caller: no handle, broker or binding.

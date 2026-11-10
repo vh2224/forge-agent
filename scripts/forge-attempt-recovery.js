@@ -57,8 +57,7 @@ const linkedEntries = new WeakMap();
 const transitions = require('./forge-recovery-transition');
 function fail(code) { throw Object.assign(new Error(code), { code }); }
 function callerRequestHash(request) {
-  return digest(JSON.stringify(request, (_key, value) => value && typeof value === 'object' && !Array.isArray(value)
-    ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value));
+  return digest(require('./forge-request-fingerprint').callerRequestPreimage(request));
 }
 function safeDiagnostic(value) {
   return String(value || '').replace(/(?:bearer\s+|(?:token|secret|password|api[_-]?key)\s*[:=]\s*)[^\s,;]+/gi, '[redacted]').slice(0, 4096);
@@ -187,7 +186,7 @@ function proveArchivedAttempt(cwd, begin, receiptPath, expected) {
   if (projected !== data.delivery_json || fingerprint !== data.delivery_fingerprint || fingerprint !== receipt.fingerprint
       || receipt.dispatch_id !== request.dispatchId
       || receipt.recovery_identity_sha256 && receipt.recovery_identity_sha256 !== digest(identity)) fail('archived-inspection-fingerprint-mismatch');
-  const recomputedCaller = callerRequestHash(request);
+  const recomputedCaller = data.caller_preimage_json === null ? callerRequestHash(request) : digest(data.caller_preimage_json);
   return { request, identity, fingerprint, receipt_path: loc.receipt, receipt_sha256: digest(receiptBytes),
     archive_sha256: data.archive_sha256, linked: !!request.linked_begin_key,
     caller_request_sha256: data.caller_request_sha256 !== null && data.caller_request_sha256 === recomputedCaller ? recomputedCaller : null,
