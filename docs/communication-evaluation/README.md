@@ -281,3 +281,12 @@ Previous layer scripts/fixtures/owner-recovery/distribution-delta.json
 Only 0 existing changed after/source.sha256 citation literals move; all other sample bytes remain exact.
 samples before f7c143e50413e1eb00391e6857bbd9cd995a233078409ab2957153f676844cdf
 samples after f7c143e50413e1eb00391e6857bbd9cd995a233078409ab2957153f676844cdf
+
+
+## Measured FULL guard / legacy-alias terminal (#385+#387)
+
+Actual public predecessor 61da5cf036fcab26f4cb63a01084b09cae7e4781
+Previous layer scripts/fixtures/request-retention/distribution-delta.json
+Only 0 existing changed after/source.sha256 citation literals move; all other sample bytes remain exact.
+samples before f7c143e50413e1eb00391e6857bbd9cd995a233078409ab2957153f676844cdf
+samples after f7c143e50413e1eb00391e6857bbd9cd995a233078409ab2957153f676844cdf

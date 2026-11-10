@@ -300,10 +300,13 @@ function bumpLegacyOwnedHeartbeat(cwd, owner, timestamp) {
   });
 }
 
-function oldestActive(cwd) {
-  const active = listActive(cwd);
+function oldestActiveRecord(records) {
+  const active = records.filter(r => r.active === true);
   if (active.length === 0) return null;
   return active.reduce((a, b) => (a.started_at <= b.started_at ? a : b));
+}
+function oldestActive(cwd) {
+  return oldestActiveRecord(listAll(cwd));
 }
 
 // ── Write (atomic via temp+rename) ──────────────────────────────────────────
@@ -503,16 +506,7 @@ function cleanupStale(cwd, thresholdMs) {
 }
 
 // ── Legacy alias (auto-mode.json mirror of oldest active) ───────────────────
-function refreshLegacyAlias(...args) {
-  return require('./forge-owner-transport-window').withMutation(args[0], () => refreshLegacyAliasInsideOwnerWindow(...args));
-}
-function refreshLegacyAliasInsideOwnerWindow(cwd) {
-  // Best-effort mirror: silently no-op without .gsd/ rather than manufacture it.
-  // Unlike ensureRunsDir this must never throw — remove()/cleanupStale() call it
-  // from paths that must not hard-fail (skills chain these with `|| true`).
-  if (!fs.existsSync(path.join(cwd, '.gsd'))) return;
-  const aliasPath = path.join(cwd, '.gsd', 'forge', ALIAS_FILE);
-  const oldest = oldestActive(cwd);
+function legacyAliasProjection(oldest) {
   let mirror;
   if (oldest) {
     mirror = {
@@ -532,6 +526,20 @@ function refreshLegacyAliasInsideOwnerWindow(cwd) {
   } else {
     mirror = { active: false };
   }
+  return mirror;
+}
+
+function refreshLegacyAlias(...args) {
+  return require('./forge-owner-transport-window').withMutation(args[0], () => refreshLegacyAliasInsideOwnerWindow(...args));
+}
+function refreshLegacyAliasInsideOwnerWindow(cwd) {
+  // Best-effort mirror: silently no-op without .gsd/ rather than manufacture it.
+  // Unlike ensureRunsDir this must never throw — remove()/cleanupStale() call it
+  // from paths that must not hard-fail (skills chain these with `|| true`).
+  if (!fs.existsSync(path.join(cwd, '.gsd'))) return;
+  const aliasPath = path.join(cwd, '.gsd', 'forge', ALIAS_FILE);
+  const oldest = oldestActive(cwd);
+  const mirror = legacyAliasProjection(oldest);
   try {
     fs.mkdirSync(path.dirname(aliasPath), { recursive: true });
     writeAtomic(aliasPath, mirror);
@@ -1021,7 +1029,7 @@ module.exports = {
   inspectOwnerResume, resumeOwner, knownResumeBinding, settleInterruptedOwner,
   assertOwnerInterruptionAuthority, bindOwnerInterruptionAuthority, assertOwnerInterruptionCapacity,
   observeHostSession, resolveBySessionId, resolveBySessionOwner, bumpOwnedHeartbeat, bumpLegacyOwnedHeartbeat, oldestActive,
-  refreshLegacyAlias, migrateLegacyState,
+  refreshLegacyAlias, migrateLegacyState, oldestActiveRecord, legacyAliasProjection,
   withAddressDefaults,
   runsDir, runFile, writeAtomic, withRunLock, normalizeMetadataPatch,
   STALE_THRESHOLD_MS,
