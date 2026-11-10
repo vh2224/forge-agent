@@ -1643,6 +1643,85 @@ test('review R5 R7 R16 all ACK then one genuine single delivery then a second co
   } finally {xllm.runExecute=cohortTransport;if(secondFx)await finish(secondFx);await finish(fx);}
 });
 
+test('review R18 grouped memory settles only the deferred queue attempt after exact READY and target revalidation', async () => {
+  const memory=require('./forge-memory'), {serializeGroup}=require('./forge-grouped-file');
+  let group;
+  const fx=await retainedCohort('review-post-grouped',PAIR,PAIR_GO,{setup(dir){
+    const units=PAIR.map(id=>{
+      memory.writeFragment(dir,{unit_id:id,milestone_id:M,facts:[],stats:[]},{milestoneId:M});
+      const file=memory.fragmentPath(dir,id,{milestoneId:M}),content=fs.readFileSync(file);
+      fs.unlinkSync(file);return{id:memory.qualifiedStorageKey(id,M),content};
+    });
+    group=write(path.join(memory.memoryDir(dir),'sweep-project-01.md'),serializeGroup({epoch:'sweep-project-01',units}).buffer);
+  }});
+  const groupBefore=fs.readFileSync(group), memoryBefore=fs.readdirSync(memory.memoryDir(fx.dir)).sort(),receipts=[];
+  const policyPrefs=()=>{const p=require('./forge-prefs').readPrefs(fx.dir);assert(p.ok);return{...p,prefs:{...p.prefs,memory:{...p.prefs.memory,extraction:'always'}}};};
+  try {
+    const spawned=spawnedCount(fx),queued=await consolidated(fx,'grouped memory queue',{prefsReader:policyPrefs});
+    assert.strictEqual(queued.post_unit.status,'pending');
+    assert.throws(()=>controller.beginSerial(fx.dir,{milestone:M,unit:'complete-slice/S01',slice:S,host_runtime:'codex',owner_token:TOKEN,idempotency_key:'grouped-before-ready'},{}),/batch-post-unit-pending/);
+    const sidecar=require('./forge-unit-sidecar'),memory_publications={};
+    const route={host_runtime:'codex',worker_engine:'native',resolved_worker_engine:'native',worker_mode:'native',model:'gpt-6-luna',model_resolved:'gpt-6-luna',effort:'medium'};
+    const telemetry={model_requested:null,model_resolved:'gpt-6-luna',model_argument:'gpt-6-luna',model_observed:null,model_observed_source:null,
+      effort_requested:'medium',effort_resolved:'medium',effort_argument:'medium',effort_transport:'native-argument',effort_transport_value:'medium',
+      effort_transport_source:'fixture-native-argument',effort_binding_observed:null,effort_binding_observed_source:null,effort_binding_observed_fingerprint:null,
+      effort_applied:null,effort_applied_source:null,capabilities_source:'fixture'};
+    for(const[index,id]of PAIR.entries()){
+      const ledger=queued.post_unit.members[index],ready=readJson(ledger.source.file),atTime=new Date().toISOString();
+      const request={cwd:fx.dir,contextRoot:fx.dir,unitType:'memory-extract',sourceUnitType:'execute-task',sourceUnitId:id,milestoneId:M,
+        workflowId:'fixture-grouped-post-unit',dispatchId:'grouped-memory-'+id,extractionId:'grouped-memory-'+id,extractedAt:atTime,
+        sourceFingerprint:ledger.source.fingerprint,summaryContent:ready.artifacts.find(item=>item.path.endsWith('/'+id+'-SUMMARY.md')).content,
+        sourceResult:JSON.stringify(ready.result),keyDecisions:[],existingMemory:{facts:[],stats:[]},route,hostRuntime:'codex',
+        resultFile:path.join(CHANNELS,'grouped-memory-'+id+'.json'),publicationSafe:false,
+        publicationBoundary:{ownerJoined:true,checkedAt:atTime,protectedSnapshots:[{id:queued.retirement.retirement_id,state:'ended'}]},invocationTelemetry:telemetry};
+      const extraction={schema_version:1,status:'done',summary:'Synthetic grouped post-unit proof',questions:[],facts:[{local_id:'fact',category:'gotcha',text:'Keep the real '+id+' group conditional.',confidence_base:0.8}],events:[]};
+      const accepted=await sidecar.acceptNativeMemoryResult({...request,rawResult:extraction});
+      assert.strictEqual(accepted.publication.status,'deferred');
+      const receipt=request.resultFile+'.receipt.json',bytes=fs.readFileSync(receipt);receipts.push({file:receipt,bytes});
+      const publicRequest={...request,publicationSafe:true},preview=sidecar.prepareReadyMemoryPublication(publicRequest);
+      assert.deepStrictEqual([preview.publication.status,preview.publication.reason,preview.prepared,preview.event],['deferred','grouped-member',null,null]);
+      const file=write(path.join(TMP,'requests','grouped-memory-'+id+'.json'),JSON.stringify(publicRequest));
+      memory_publications[id]={file,sha256:digest(fs.readFileSync(file))};
+    }
+    assert.deepStrictEqual(fs.readFileSync(group),groupBefore,'preparing a real grouped READY never quarantines or publishes it');
+    const queue=path.join(fx.dir,'.gsd/forge/batches',fx.ids.batch_id,'post-unit/m0.json'),queueBefore=fs.readFileSync(queue);
+    const moved=path.join(path.dirname(group),'sweep-project-02.md');let changed=false;
+    const wrongTarget=await consolidate(fx,{prefsReader:policyPrefs,memory_publications,failpoint(point){if(point==='post-unit-intent'&&!changed){changed=true;fs.renameSync(group,moved);}}});
+    assert.strictEqual(wrongTarget.error?.code,'batch-post-unit-stale','a different canonical group target cannot consume the signed deferred intent');
+    assert.deepStrictEqual(fs.readFileSync(queue),queueBefore,'target refusal precedes the ledger effect');
+    fs.renameSync(moved,group);
+    fs.appendFileSync(receipts[0].file,'\n');
+    const staleReady=await consolidate(fx,{prefsReader:policyPrefs,memory_publications});
+    assert.strictEqual(staleReady.error?.code,'batch-post-unit-stale','the same parsed READY with changed bytes is stale');
+    assert.deepStrictEqual(fs.readFileSync(queue),queueBefore,'READY refusal precedes the ledger effect');
+    fs.writeFileSync(receipts[0].file,receipts[0].bytes);
+    const interrupted=await consolidate(fx,{prefsReader:policyPrefs,memory_publications,failpoint:crashAt('post-unit-applied')});
+    assert.strictEqual(interrupted.error?.code,'FIXTURE_CRASH');
+    assert.throws(()=>controller.beginSerial(fx.dir,{milestone:M,unit:'complete-slice/S01',slice:S,host_runtime:'codex',owner_token:TOKEN,idempotency_key:'grouped-before-final'},{}),/batch-post-unit-pending/,'complete member ledgers do not substitute for the final signed witness');
+    const finished=await consolidated(fx,'canonical grouped deferral replay',{prefsReader:policyPrefs,memory_publications});
+    assert.strictEqual(finished.post_unit.status,'complete','only the queue attempt settles');
+    for(const row of finished.post_unit.members){
+      assert.strictEqual(row.status,'complete');assert.strictEqual(row.memory.publication.status,'deferred');assert.strictEqual(row.memory.publication.reason,'grouped-member');
+      assert.strictEqual(row.memory.deferred_target.sha256,digest(groupBefore));
+      assert.strictEqual(row.memory.receipt_sha256,digest(receipts.find(item=>item.file===row.memory.receipt_file).bytes));
+    }
+    assert.deepStrictEqual(fs.readFileSync(group),groupBefore,'group bytes remain unchanged');
+    assert.deepStrictEqual(fs.readdirSync(memory.memoryDir(fx.dir)).sort(),memoryBefore,'no loose shadow, quarantine or lock directory is manufactured');
+    for(const r of receipts)assert.deepStrictEqual(fs.readFileSync(r.file),r.bytes,'actual READY remains byte exact');
+    const events=fs.readFileSync(path.join(fx.dir,'.gsd/forge/events.jsonl'));
+    const housekeeping=events.toString().trim().split('\n').map(JSON.parse).filter(row=>row.post_unit_key);
+    assert.deepStrictEqual(housekeeping.map(row=>row.event),['memory-policy','memory-policy'],'no memory-publication event claims acceptance');
+    assert.strictEqual(new Set(housekeeping.map(row=>row.event_id)).size,2);
+    assert.strictEqual((await consolidated(fx,'grouped immutable historical replay')).historical_replay,true);
+    assert.deepStrictEqual(fs.readFileSync(path.join(fx.dir,'.gsd/forge/events.jsonl')),events);
+    const begun=controller.beginSerial(fx.dir,{milestone:M,unit:'complete-slice/S01',slice:S,host_runtime:'codex',owner_token:TOKEN,idempotency_key:'grouped-after-final'},{});
+    assert.strictEqual(begun.ok,true,'new begin is admitted only after the typed final witness');
+    const paused=controller.pause(fx.dir,{milestone:M,unit:'complete-slice/S01',host_runtime:'codex',owner_token:TOKEN,generation:begun.generation,idempotency_key:'grouped-after-final:pause',result:{status:'cancelled',summary:'Fixture next-boundary proof complete'}},{});
+    assert.strictEqual(paused.transaction.phase,'committed');assert.strictEqual(lease.observe(fx.dir,'complete-slice/S01').lease,null);
+    assert.strictEqual(spawnedCount(fx),spawned,'replay/deferred settlement invokes no new provider');
+  } finally {await finish(fx);}
+});
+
 test('review R18 post-unit queue waits for real ready memory and publishes canonical fragments exactly once after all ACKs', async () => {
   const fx = await retainedCohort('review-post-unit',PAIR,PAIR_GO);
   const memoryReceipts=[];

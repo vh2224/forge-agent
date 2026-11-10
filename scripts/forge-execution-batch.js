@@ -3038,8 +3038,24 @@ function postUnitEffects(ctx, producer) {
   if (new Set(effects.map(effect => effect.path)).size !== effects.length) refuse('batch-post-unit-invalid', 'post-unit effects overlap');
   return effects;
 }
-function readMemoryPostUnit(ctx, lane, ledger) {
-  const ref = ctx.options.memory_publications?.[lane.member.task_id];
+function deferredMemoryTarget(ctx, lane) {
+  const memory = require('./forge-memory'), storage_key = memory.qualifiedStorageKey(lane.member.task_id, ctx.manifest.milestone);
+  const entries = memory.listFragments(ctx.owner.real, { milestoneId: ctx.manifest.milestone }).filter(item => item.storageKey === storage_key);
+  if (entries.length !== 1 || entries[0].grouped !== true) refuse('batch-post-unit-invalid', 'the deferred memory target is not one canonical grouped member');
+  const entry = entries[0], relative = path.relative(ctx.owner.real, entry.path).split(path.sep).join('/');
+  const target = postUnitTarget(ctx, relative), before = retainedRead(target, 'batch-post-unit-invalid');
+  if (!before) refuse('batch-post-unit-invalid', 'the deferred memory group is absent');
+  const member_sha256 = sha256(Buffer.from(memory.readFragmentText(ctx.owner.real, entry)));
+  const after = retainedRead(target, 'batch-post-unit-invalid');
+  if (!after || sha256(after) !== sha256(before)) refuse('batch-post-unit-stale', 'the deferred memory group changed');
+  return { path: relative, sha256: sha256(before), storage_key, member_sha256 };
+}
+function memoryPostUnitOutcome(memory) {
+  return { receipt_file: memory.receipt_file, receipt_sha256: memory.receipt_sha256, publication: memory.publication,
+    ...(memory.deferred_target ? { deferred_target: memory.deferred_target } : {}) };
+}
+function readMemoryPostUnit(ctx, lane, ledger, suppliedRef) {
+  const ref = suppliedRef === undefined ? ctx.options.memory_publications?.[lane.member.task_id] : suppliedRef;
   if (!ref) return null;
   if (!isObject(ref) || Object.keys(ref).sort().join(',') !== 'file,sha256' || !path.isAbsolute(ref.file) || !HASH.test(ref.sha256)) refuse('batch-post-unit-invalid', 'a memory request needs an exact external file pin');
   const raw = retainedRead(ref.file, 'batch-post-unit-invalid');
@@ -3051,9 +3067,13 @@ function readMemoryPostUnit(ctx, lane, ledger) {
       || request.sourceUnitId !== lane.member.task_id || request.sourceFingerprint !== ledger.source.fingerprint
       || request.sourceResult !== JSON.stringify(source.ready.result) || request.summaryContent !== source.summary) refuse('batch-post-unit-invalid', 'the memory request is not bound to this queued ready source');
   const prepared = unitSidecar().prepareReadyMemoryPublication(request);
-  if (prepared.publication?.status === 'deferred') return null;
+  let deferred_target;
+  if (prepared.publication?.status === 'deferred') {
+    if (prepared.publication.reason !== 'grouped-member' || prepared.prepared !== null || prepared.event !== null) refuse('batch-post-unit-invalid', 'unknown deferred memory publication');
+    deferred_target = deferredMemoryTarget(ctx, lane);
+  }
   const { request: ignored, ...record } = prepared;
-  return { request_ref: copy(ref), ...record };
+  return { request_ref: copy(ref), ...record, ...(deferred_target ? { deferred_target } : {}) };
 }
 function applyPostUnit(ctx, producer) {
   return controller().withOwnerBoundary(ctx.owner.real, ({ noLeases }) => {
@@ -3065,6 +3085,17 @@ function applyPostUnitInside(ctx, producer) {
   const retirement = HANDLES.get(ctx.cohort).retirement;
   if (!retirement || producer.name !== POST_UNIT_PRODUCER || producer.batch_id !== ctx.manifest.batch_id
       || producer.retirement_id !== retirement.row.retirement_id || !Array.isArray(producer.appends)) refuse('batch-post-unit-invalid', 'foreign post-unit producer');
+  // A settled attempt is not published memory. Revalidate its real READY and
+  // canonical grouped target before any ledger, decision, directory or event effect.
+  let deferredMemory = false;
+  if (producer.kind === 'member' && producer.memory?.publication?.status === 'deferred') {
+    const lane = ctx.lanes.find(item => item.member.index === producer.member_index);
+    if (!lane) refuse('batch-post-unit-invalid', 'foreign deferred memory member');
+    const current = readMemoryPostUnit(ctx, lane, producer.ledger, producer.memory.request_ref);
+    if (!current || current.publication?.status !== 'deferred' || codeRoots().digest(current) !== codeRoots().digest(producer.memory)
+        || producer.ledger.status !== 'complete' || codeRoots().digest(producer.ledger.memory) !== codeRoots().digest(memoryPostUnitOutcome(current))) refuse('batch-post-unit-stale', 'the deferred memory outcome changed');
+    deferredMemory = true;
+  }
   for (const relative of producer.directories || []) {
     if (!['.gsd/forge/file-locks/','.gsd/memory/.locks/'].includes(relative)) refuse('batch-post-unit-invalid','unknown publisher lock directory');
     const target=postUnitTarget(ctx,relative.slice(0,-1));
@@ -3081,7 +3112,7 @@ function applyPostUnitInside(ctx, producer) {
       if (codeRoots().digest(producer.decisions.fragment.decisions) !== codeRoots().digest(source.ready.result.key_decisions || [])) refuse('batch-post-unit-invalid', 'decisions are not from the result');
       require('./forge-decisions').applyPreparedFragment(ctx.owner.real, producer.decisions.fragment, producer.decisions.prepared);
     }
-    if (producer.memory) {
+    if (producer.memory && !deferredMemory) {
       const raw = retainedRead(producer.memory.request_ref.file, 'batch-post-unit-invalid');
       if (!raw || sha256(raw) !== producer.memory.request_ref.sha256) refuse('batch-post-unit-invalid', 'memory request changed');
       unitSidecar().applyReadyMemoryPublication({ ...producer.memory, request: JSON.parse(raw) });
@@ -3141,8 +3172,7 @@ async function finishPostUnits(ctx, retirement) {
     ledger ||= { schema: 'forge-batch-post-unit-v1', key, prepared_at: at, source: source.source,
       memory_policy: policy, status: policy.decision === 'extract' ? 'awaiting-memory' : 'complete', memory: null };
     const memory = policy.decision === 'extract' ? readMemoryPostUnit(ctx, lane, ledger) : null;
-    if (memory) ledger = { ...ledger, status: 'complete', memory: { receipt_file: memory.receipt_file,
-      receipt_sha256: memory.receipt_sha256, publication: memory.publication } };
+    if (memory) ledger = { ...ledger, status: 'complete', memory: memoryPostUnitOutcome(memory) };
     if (!raw || memory) {
       const event = !raw ? { ts: at, event: 'memory-policy', unit: lane.member.unit, decision: policy.decision, reason: policy.reason, mode: policy.mode }
         : memory.event;
