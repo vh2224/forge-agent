@@ -5,7 +5,7 @@
   "parent_qualification": "merged-public-parent-final",
   "previous_delta": "scripts/fixtures/request-retention/distribution-delta.json",
   "method": "Exact frozen source and pure Claude render; immutable historical fixtures and scanner; data-only bounded fixture provenance; no provider output or runtime authority.",
-  "input_scope_sha256": "a5a30ed9117011d534f6edd5bf2cb9dba69a4226ab985fb82652d74e0076605b",
+  "input_scope_sha256": "0a7cd92c824f209a9a9b0da3ea785dcd15882889d65d899c849074c334323c10",
   "prototype_only": false,
   "issues": [
     385,
@@ -15,9 +15,9 @@
 
 docs/codex-agent-permissions.md
 before b0098a0aa4f26e5d95c6c15ca07d3ed4d56721804a2c1505baf2ab48400d640a
-after 83215648d4767b57271d1fdb79bd6e7b04573607d4dc7c383a6ab23b95edca20
+after b362c6a11a2a1b3ea8582c6a19096e1c2bcf604483aac7762db31e4975d46b5e
 attributed_before b0098a0aa4f26e5d95c6c15ca07d3ed4d56721804a2c1505baf2ab48400d640a
-attributed_after 83215648d4767b57271d1fdb79bd6e7b04573607d4dc7c383a6ab23b95edca20
+attributed_after b362c6a11a2a1b3ea8582c6a19096e1c2bcf604483aac7762db31e4975d46b5e
 
 docs/communication-evaluation/README.md
 before 0d4ec9609d0c689661e818aaf05d9c122ef59b79c4ce244fdfef55821826c9b7
@@ -57,15 +57,15 @@ attributed_after b856074248ce76869f335be0937e57aacbf939b6bab0dc292db4f595fa87a35
 
 scripts/forge-native-readonly-guard.js
 before 0afa284e548f5127750a354d4264340f23563a49aa10ebebafe7c56337827e0a
-after 6dc88d397a81166938710c8a3d811c368e0d66e5385cf01aa348fe84ee5fe4de
+after 91fb6b956670f1532f4351d513683a76b15febc63778c552ecaa96b39a732033
 attributed_before 0afa284e548f5127750a354d4264340f23563a49aa10ebebafe7c56337827e0a
-attributed_after 6dc88d397a81166938710c8a3d811c368e0d66e5385cf01aa348fe84ee5fe4de
+attributed_after 91fb6b956670f1532f4351d513683a76b15febc63778c552ecaa96b39a732033
 
 scripts/forge-native-readonly-guard.test.js
 before fbe4e7daa50103455420f11b3721cf735edfe3386ed64220f9f4f9850b980f78
-after 2440c8e4c3e2ed9602cd207f70e970e95fdd7cb77afc3af4d5a028ad9abf9f07
+after 9311fb252e2b03fbb287b9d56891a854d8a7ecfa217a7a76a49f76510b8d7487
 attributed_before fbe4e7daa50103455420f11b3721cf735edfe3386ed64220f9f4f9850b980f78
-attributed_after 2440c8e4c3e2ed9602cd207f70e970e95fdd7cb77afc3af4d5a028ad9abf9f07
+attributed_after 9311fb252e2b03fbb287b9d56891a854d8a7ecfa217a7a76a49f76510b8d7487
 
 scripts/forge-runs.js
 before ca8b295ade332ea4960184ab363d6558861734a20026ec7ac742c62698f80e23

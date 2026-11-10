@@ -140,7 +140,7 @@ function svnFullCases() {
       const baseline = capture(root); assert.equal(baseline.code_roots[0].vcs, 'svn');
       assert.equal(verify(baseline).ok, true);
       assert.equal(guard.verifyBaseline(baseline).reason, guard.REASONS.UNRECONCILED);
-      assert.equal(guard.captureBaseline({ owner: root, codeRoots: [path.join(root, 'subdir')] }).ok, false);
+      assert.equal(guard.captureBaseline({ owner: root, codeRoots: [path.join(root, 'subdir')] }).ok, true);
     });
     check('SVN FULL permits exact owner append/publication and own heartbeat only', () => {
       const own = lease.acquire(root, 'review/svn', { now: 1000, ttlMs: 10000 }); assert.equal(own.ok, true);
@@ -290,11 +290,104 @@ function svnAdminStreamingCases() {
 }
 // END SVN ADMIN STREAMING REGRESSION
 
+// FULL guard observed paths are evidence, not permission patterns.
+function observedGitPathCases(reproduceBefore = false) {
+  const root = fixture(), file = path.join(root, '[id].js'); fs.writeFileSync(file, 'route original\n');
+  git(root, 'add', '--', '[id].js'); git(root, 'commit', '-qm', 'dynamic route');
+  if (reproduceBefore) {
+    check('REPRO R2 Git tracked bracket name refuses before dispatch', () => {
+      assert.equal(guard.captureBaseline({ owner: root, codeRoots: [root] }).reason, guard.REASONS.USAGE);
+    }); return;
+  }
+  check('Git FULL observes bracket filenames in index, status and dirty content', () => {
+    const baseline = capture(root); assert.equal(verify(baseline).ok, true);
+    fs.writeFileSync(file, 'changed route\n'); const changed = verify(baseline);
+    assert.equal(changed.reason, guard.REASONS.MUTATION); assert.ok(changed.changes.some(row => row.path === '[id].js'));
+    fs.writeFileSync(file, 'route original\n');
+    fs.writeFileSync(path.join(root, '[new].js'), 'new route\n'); const added = verify(baseline);
+    assert.equal(added.reason, guard.REASONS.MUTATION); assert.ok(added.changes.some(row => row.path === '[new].js'));
+  });
+}
+function svnObservedPathCases(reproduceBefore = false) {
+  for (const binary of ['svn', 'svnadmin']) {
+    const observed = spawnSync(binary, ['--version', '--quiet'], { encoding: 'utf8', shell: false, windowsHide: true });
+    if (observed.status !== 0) { console.log('SKIP observed SVN paths: ' + binary + ' unavailable'); return; }
+  }
+  const folder = path.join(temporary, 'svn-observed-paths'), repository = path.join(folder, 'repository'), root = path.join(folder, 'wc');
+  fs.mkdirSync(folder); const configDir = path.join(folder, 'client'); fs.mkdirSync(configDir);
+  function command(binary, args, cwd = folder) {
+    assert.ok(path.resolve(cwd) === path.resolve(folder) || path.resolve(cwd).startsWith(path.resolve(folder) + path.sep));
+    const observed = spawnSync(binary, args, { cwd, encoding: 'utf8', shell: false, windowsHide: true });
+    assert.equal(observed.status, 0, observed.stderr); return observed.stdout;
+  }
+  const svn = (...args) => command('svn', ['--non-interactive', '--config-dir', configDir, ...args], root);
+  command('svnadmin', ['create', repository]);
+  command('svn', ['--non-interactive', '--config-dir', configDir, 'checkout', require('url').pathToFileURL(repository).href, root]);
+  const subdir = path.join(root, 'subdir'); fs.mkdirSync(subdir);
+  fs.writeFileSync(path.join(root, 'outside.txt'), 'outside original\n'); fs.writeFileSync(path.join(subdir, 'nested.txt'), 'nested original\n');
+  svn('add', 'outside.txt', 'subdir'); svn('commit', '-m', 'nested baseline'); svn('update');
+  fs.mkdirSync(path.join(root, '.gsd'), { recursive: true });
+  const options = { owner: root, codeRoots: [{ id: 'nested', path: subdir }] };
+  if (reproduceBefore) {
+    check('REPRO R1 SVN nested code root refuses before dispatch', () => {
+      assert.equal(guard.captureBaseline(options).reason, guard.REASONS.UNAVAILABLE);
+    });
+    fs.writeFileSync(path.join(root, '[id].js'), 'dynamic route\n'); svn('add', '[id].js');
+    check('REPRO R2 SVN bracket name refuses before dispatch', () => {
+      assert.equal(guard.captureBaseline({ owner: root, codeRoots: [root] }).reason, guard.REASONS.USAGE);
+    }); return;
+  }
+  check('SVN FULL nested code root retains exact content scope and observes actual WC administration', () => {
+    const observed = guard.captureBaseline(options); assert.equal(observed.ok, true, JSON.stringify(observed)); const baseline = observed.baseline;
+    assert.equal(path.resolve(baseline.code_roots[0].path), path.resolve(subdir));
+    assert.ok(baseline.code_roots[0].entries.some(row => row.path === 'nested.txt'));
+    assert.ok(!baseline.code_roots[0].entries.some(row => row.path === 'outside.txt'));
+    fs.writeFileSync(path.join(root, 'outside.txt'), 'outside changed\n'); assert.equal(verify(baseline).ok, true, 'content outside nested scope is not silently claimed');
+    fs.writeFileSync(path.join(subdir, 'nested.txt'), 'nested changed\n');
+    const content = verify(baseline); assert.equal(content.reason, guard.REASONS.MUTATION); assert.ok(content.changes.some(row => row.path === 'nested.txt'));
+    fs.writeFileSync(path.join(subdir, 'nested.txt'), 'nested original\n');
+    const admin = path.join(root, '.svn', 'tmp', 'nested-admin-proof'); fs.writeFileSync(admin, 'unapproved\n');
+    try { const changed = verify(baseline); assert.equal(changed.reason, guard.REASONS.MUTATION); assert.ok(changed.changes.some(row => row.kind === 'administration')); }
+    finally { fs.unlinkSync(admin); }
+  });
+  fs.writeFileSync(path.join(subdir, '[id].js'), 'dynamic route\n'); svn('add', 'subdir/[id].js');
+  check('SVN FULL accepts observed bracket filenames and detects their mutation', () => {
+    const baseline = capture(root); assert.equal(verify(baseline).ok, true);
+    const file = path.join(subdir, '[id].js'); fs.writeFileSync(file, 'changed dynamic route\n');
+    const changed = verify(baseline); assert.equal(changed.reason, guard.REASONS.MUTATION);
+    assert.ok(changed.changes.some(row => row.path === 'subdir/[id].js')); fs.writeFileSync(file, 'dynamic route\n');
+    fs.writeFileSync(path.join(subdir, '[new].js'), 'new route\n'); const added = verify(baseline);
+    assert.equal(added.reason, guard.REASONS.MUTATION); assert.ok(added.changes.some(row => row.path === 'subdir/[new].js'));
+  });
+  check('Observed path support grants no wildcard or bracket owner permission', () => {
+    for (const key of ['allowAppend', 'allowPublication']) {
+      assert.equal(guard.captureBaseline({ ...options, [key]: ['.gsd/[id].json'] }).reason, guard.REASONS.USAGE);
+      assert.equal(guard.captureBaseline({ ...options, [key]: ['.gsd/../escape'] }).reason, guard.REASONS.USAGE);
+    }
+  });
+  check('SVN FULL refuses a validated snapshot claiming an unrelated administrative root', () => {
+    const saved = vcs.captureDirty, unrelated = path.join(folder, 'unrelated'); fs.mkdirSync(unrelated);
+    vcs.captureDirty = (...args) => {
+      const value = saved(...args); assert.equal(value.ok, true);
+      for (const row of value.baseline.inventory) row.wc_root = fs.realpathSync.native(unrelated);
+      const base = value.baseline;
+      base.fingerprint = require('crypto').createHash('sha256').update(JSON.stringify({ code_dir: base.code_dir, svnversion: base.svnversion, inventory: base.inventory })).digest('hex');
+      assert.equal(vcs.validateSvnStrictSnapshot(value), true, 'negative reaches physical ancestry validation, not malformed evidence'); return value;
+    };
+    try { assert.equal(guard.captureBaseline(options).reason, guard.REASONS.UNAVAILABLE); }
+    finally { vcs.captureDirty = saved; }
+  });
+}
+// END OBSERVED PATH REGRESSION
+
+
 
 try {
   oldestAliasCases(fixture(), 'Git FULL #387');
   svnFullCases();
   svnAdminStreamingCases();
+  observedGitPathCases();
+  svnObservedPathCases();
   check('intent-to-add empty and nonempty files preserve baseline and detect later mutation', () => {
     const root = fixture();
     for (const [file, contents] of [['intent empty.txt', ''], ['intent data.txt', 'new\n']]) fs.writeFileSync(path.join(root, file), contents);

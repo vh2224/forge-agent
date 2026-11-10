@@ -202,8 +202,14 @@ humano. A aparência e a compreensão na interface ficam para o UAT final.
 ### FULL em working copies SVN
 
 O guard mantém a mesma API e as permissões exatas de FULL. Cada raiz física
-de código SVN deve ser a raiz real da WC; subdiretórios, externals, links,
-evidência incompleta/instável e limites excedidos recusam a captura. O ramo
+de código SVN pode ser a WC ou um subdiretório físico dela. O conteúdo
+observado continua restrito à raiz declarada; a raiz administrativa vem da
+inventory strict validada e deve ser ancestral física uniforme, sem links.
+O digest observa o .svn real da WC sem ampliar o escopo de conteúdo.
+Externals, links, evidência incompleta/instável e limites excedidos recusam
+a captura. Caminhos descobertos em SVN/Git são validados por contenção e
+sem traversal, preservando nomes literais como [id].js. Isso não amplia a
+gramática restrita de allow-append/allow-publication concedida pelo usuário. O ramo
 Git e baselines Git anteriores conservam índice, refs, stash, config local e
 hooks. SVN usa captureDirty strict validado: BASE/UUID/URL/revisões/depth,
 scheduling/status, conteúdo inclusive ignorados e propriedades. Acrescenta

@@ -65,6 +65,16 @@ function relative(value, ownerPermission = false) {
       || ownerPermission && (parts[0] !== '.gsd' || parts.length < 2)) fail('permissão exata sob .gsd obrigatória', true);
   return portable;
 }
+// Observed repository paths are data, not caller-granted permission patterns.
+// Retain literal filenames while refusing absolute paths, traversal and escape.
+function observedPath(root, value) {
+  if (typeof value !== 'string' || path.isAbsolute(value) || path.win32.isAbsolute(value)
+      || /[\\\0-\x1f\x7f]/.test(value)) fail('caminho observado indisponivel');
+  if (value && value.split('/').some(part => !part || part === '.' || part === '..')) fail('caminho observado invalido');
+  const file = path.resolve(root, value);
+  if (!contained(root, file)) fail('caminho observado fora da raiz');
+  return file;
+}
 function ownerFile(owner, relativePath, allowMissing = false, maxBytes = FILE_BYTES) {
   const file = path.join(owner, relativePath);
   noLinks(file, allowMissing);
@@ -224,10 +234,13 @@ function svnCodeSnapshot(root) {
     maxBuffer: SNAPSHOT_BYTES, strictLimits: { maxEntries: MAX_ENTRIES } });
   if (!vcs.validateSvnStrictSnapshot(snapshot)
       || snapshot.coverage.scope !== 'all-local-descendants'
-      || snapshot.baseline.inventory.some(row => roots.key(row.wc_root) !== roots.key(root.path))) fail('snapshot SVN integral indisponível');
+      || roots.key(snapshot.coverage.code_dir) !== roots.key(root.path)) fail('snapshot SVN integral indisponível');
+  const declared = snapshot.baseline.inventory.find(row => row.path === '');
+  const wcRoot = directory(declared.wc_root);
+  if (!contained(wcRoot, root.path)
+      || snapshot.baseline.inventory.some(row => roots.key(row.wc_root) !== roots.key(wcRoot))) fail('raiz administrativa SVN indisponivel');
   const entries = snapshot.entries.filter(row => !excluded(row.path)).map(row => {
-    if (row.path) relative(row.path);
-    const file = path.join(root.path, row.path); noLinks(file, true);
+    const file = observedPath(root.path, row.path); noLinks(file, true);
     let mode = null;
     try { mode = fs.lstatSync(file).mode; }
     catch (error) { if (error.code !== 'ENOENT' || row.kind !== 'missing') throw error; }
@@ -238,7 +251,7 @@ function svnCodeSnapshot(root) {
     scheduling: fingerprint(snapshot.baseline.local_nodes), entries,
     // Read-only SVN commands must leave the administrative tree stable too.
     // Stream with the canonical strict SVN policy and verify physical stability.
-    admin: svnAdminDigest(path.join(root.path, '.svn')) };
+    admin: svnAdminDigest(path.join(wcRoot, '.svn')) };
 }
 function codeSnapshot(root, verifying) {
   if (vcs.detectVcs(root.path) === 'svn') return svnCodeSnapshot(root);
@@ -247,7 +260,7 @@ function codeSnapshot(root, verifying) {
   if (!head.ok || !status.ok || !dirty.ok || !/^[a-f0-9]{40,64}$/.test(head.id)) fail('VCS ou código porcelain indisponível');
   if (status.entries.length > MAX_ENTRIES || dirty.entries.length > MAX_ENTRIES) fail('limite de caminhos excedido');
   const statusRows = status.entries.filter(row => row.kind !== 'ignored' && !excluded(row.path)).map(row => {
-    relative(row.path);
+    observedPath(root.path, row.path);
     if (!/^(?:\?\?|[ MADRCU?!]{2})$/.test(row.code) || row.code === '!!' || /[?!]/.test(row.code) && row.code !== '??') fail('código porcelain inesperado');
     return { path: row.path, code: row.code };
   }).sort((a, b) => a.path.localeCompare(b.path) || a.code.localeCompare(b.code));
@@ -263,10 +276,10 @@ function codeSnapshot(root, verifying) {
     // helpers. Refuse before the unit; a newly introduced flag still yields
     // an index delta during verification against the original visible index.
     if (!verifying && entry[0] !== 'H') fail('índice oculta caminhos rastreados');
-    relative(rel); noLinks(path.join(root.path, rel), true);
+    noLinks(observedPath(root.path, rel), true);
   }
   const dirtyRows = dirty.entries.filter(row => !excluded(row.path)).map(row => {
-    relative(row.path); const file = path.join(root.path, row.path); noLinks(file, true);
+    const file = observedPath(root.path, row.path); noLinks(file, true);
     let raw = null;
     try { raw = sha256(bytes(file)); }
     catch (error) {
