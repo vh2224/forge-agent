@@ -3501,7 +3501,17 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
       const channels = artifactAttemptFiles(publicationRequest);
       if (!initial) {
         const { failure, provisional_terminal, ...kept } = parent.failed;
-        initial = JSON.stringify({ ...kept, phase: 'started', provisional_replay: {
+        // A provisional continuation has its own exact result/archive sibling.
+        // Preserve the failed parent's receipt and archive byte-for-byte; a
+        // legacy parent without retained data gains no inferred backfill.
+        let retainedRequest = null;
+        if (parent.failed.retained_request) {
+          const retention = require('./forge-request-retention');
+          const original = retention.read(parent.failed, r, { receiptPath: parentReceipt });
+          retainedRequest = retention.retain(publicationRequest, original.preparation_input === 'captured'
+            ? { preparationPreimage: original.preparation_json } : {});
+        }
+        initial = JSON.stringify({ ...kept, ...(retainedRequest ? { retained_request: retainedRequest } : {}), phase: 'started', provisional_replay: {
           parent_receipt_sha256: parent.receipt, parent_result_sha256: parent.result,
           inference_performed: false, provisional_id: metadata.id } }, null, 2) + '\n';
       }

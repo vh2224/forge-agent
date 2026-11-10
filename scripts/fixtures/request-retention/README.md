@@ -5,7 +5,7 @@
   "parent_qualification": "merged-public-parent-final",
   "previous_delta": "scripts/fixtures/owner-recovery/distribution-delta.json",
   "method": "Exact frozen source and pure Claude render; immutable historical fixtures and scanner; data-only bounded fixture provenance; no provider output or runtime authority.",
-  "input_scope_sha256": "5ed7b40c035624452c84caf01d5e127fb26b9cfdf8201584c1f82b6345130039",
+  "input_scope_sha256": "bc8dad9155b6669dfde9b61aef391b0b4d9d985e71d6de07e3c0c228ad3257e6",
   "prototype_only": false,
   "issues": [
     382
@@ -60,6 +60,12 @@ after 0fad1f877e0507dced2efb25363b61699e8bb88966ec18992be8f9f2d4bbc432
 attributed_before 64cd14e9f19a568906884c4af1d5b1ec02536fc98062d7d26eeb86b76bcbcdb1
 attributed_after 0fad1f877e0507dced2efb25363b61699e8bb88966ec18992be8f9f2d4bbc432
 
+scripts/forge-milestone-endpoint.test.js
+before 4206951f30ce7be0ecd1044720d6263bfd8986709795e9cc161a255cbfd6d159
+after b6f30c0aeb59f9e8fd31e39c04f3b06531a28009a9fc93b582a068adbd838b2f
+attributed_before 4206951f30ce7be0ecd1044720d6263bfd8986709795e9cc161a255cbfd6d159
+attributed_after b6f30c0aeb59f9e8fd31e39c04f3b06531a28009a9fc93b582a068adbd838b2f
+
 scripts/forge-request-fingerprint.js
 before 4de75b2e7267eaa6961c936df01e7eb24355165c1a131a9232accf77a359f01e
 after faad94c8b7b094370b5039876bca7caa71c164e8510fffe74bccb5c656bab556
@@ -104,9 +110,9 @@ attributed_after ca48fe10ab9d44cad83bee30b3c3336adf35d161e5ae4cadd9c0f2f349eb9ce
 
 scripts/forge-unit-sidecar.js
 before 5f8134396b98c635fc3d5d825092886cb8415d8d6c4c0d0d8b6b78b73b6231d2
-after 86bf74c546a1a776c265550f0c26f4860d750513c2244a87ba24f71aafec72ba
+after ee7d467535750a9aba65ee0daa0216ab07cd541db506b9d5d23be04ad25f76b5
 attributed_before 5f8134396b98c635fc3d5d825092886cb8415d8d6c4c0d0d8b6b78b73b6231d2
-attributed_after 86bf74c546a1a776c265550f0c26f4860d750513c2244a87ba24f71aafec72ba
+attributed_after ee7d467535750a9aba65ee0daa0216ab07cd541db506b9d5d23be04ad25f76b5
 
 scripts/forge-unit-sidecar.test.js
 before 14c677d37e374573718dc2ad7f848474699d9578dbe80d0964b466fb5a011991
