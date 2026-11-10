@@ -7,7 +7,7 @@
   "base_revision": "b0e3dd9a5970d07014f63a0a2240764cf22df211",
   "previous_delta": "scripts/fixtures/native-effort/distribution-delta.json",
   "method": "Exact frozen composed source and pure Claude render; preserved prior bytes/validators; generated without provider output.",
-  "input_scope_sha256": "227f1de4548d0b59a236b9d3724d9518e87305678b1e7589d43653e639c5bce3",
+  "input_scope_sha256": "05809ba4ca0b602d062d7216d1838bc84f3080817cdf24a590460f2690e617b0",
   "prototype_only": false,
   "issues": [
     376
@@ -28,7 +28,7 @@ before de86e803156d05f2b1e9bbb016801026529360db9e5fb0030377c4ddac578cec
 after f7c143e50413e1eb00391e6857bbd9cd995a233078409ab2957153f676844cdf
 scripts/forge-artifact-reconciliation.js
 before 23f5ba2bdcb2634a339044b2e30a1b77185311f460ef0437993437be40c79511
-after accfdfa9371735f4d28baf1d7cb05f86a66f6fcd671631d89a93d0889a726e4a
+after 7253297f54c50a6fcdc7d9e455abbab4f25f742318e0ab236c0250ddce90a838
 scripts/forge-claude-renderer.test.js
 before cc32ea08a2d022ed253d865504bf977c142eb115cc331825967508909861d402
 after ce22631d02f14272aead11478f8673d46c8c079424192c6130f5290b00b64965
@@ -44,15 +44,18 @@ after e1ec29478f6bd84a4194653c9aafa819b197bc48c4e68e909ec33d156d7d9c4b
 scripts/forge-incomplete-resume-distribution.test.js
 before e467fcc1ac979aecb7b63430de7e7660d424600f72327b98b44d3845512baccd
 after 64cd14e9f19a568906884c4af1d5b1ec02536fc98062d7d26eeb86b76bcbcdb1
+scripts/forge-lock.js
+before 0fec7a659a178f4d10f37f7241b66e46062c503d1e3e74ef0186d53a3891ae34
+after e2cdd6ed5cbb57b93249138b270792fb206a5125be00de56eee0688651a86d9b
 scripts/forge-native-readonly-guard.test.js
 before 42c230378877472219a07d22fe8f0cf891f6495ade0fb107426787d61ccb285d
 after fbe4e7daa50103455420f11b3721cf735edfe3386ed64220f9f4f9850b980f78
 scripts/forge-owner-transport-window.js
 before null
-after ae88c1f26db77eceeaee74f3c6f8a03185b647100f4e9f2f144b4b4b7cefc895
+after a31714890c03091560c9bbb52b5eaf7898234098ed6dd05d0c31f5d892e156d1
 scripts/forge-owner-transport-window.test.js
 before null
-after 8f3560393d10f93ebc2a6845031575a7f5ff5ea7175b2460748b7c458e7f21bb
+after a1e439b8cd6262ca12057186b3f42da905acaed5cb09a3d007961872cb5c8e10
 scripts/forge-runs.js
 before 2f0d77d3ff54b971fec865f5c4f2276fd5ed0c9ccfb59f458b6f61b099b5c28d
 after ca8b295ade332ea4960184ab363d6558861734a20026ec7ac742c62698f80e23
@@ -61,7 +64,7 @@ before bc545e69ea278cec8a3f2bd66d7d63408f054c6af4a84a2f0a5e8bae431414f0
 after 5f14e146485cfff22dcdfa14a717cf7dbd1737948e27d3448366c516fb320e44
 scripts/forge-unit-controller.js
 before fac26dcec950cb30c6a6bd4bb4117de09fce825e9f1e1ddee12ccfa3ab43bdfb
-after f8f15867946a1efc7ba550309d620a2c5fb84ff30ef85aa08196b9ec566acc88
+after 61b3a06d7bbce0f279202b8dae47ce8e19944fa9c72f0539ba575a38a2f80a60
 scripts/forge-unit-sidecar.js
 before 75330f7eec386cdd0a5c901ad6097c6a4b31004c457eac390d07326c54152e88
 after 5f8134396b98c635fc3d5d825092886cb8415d8d6c4c0d0d8b6b78b73b6231d2

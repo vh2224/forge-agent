@@ -34,7 +34,7 @@ function logIdentity(file) {
 function lockRoot(owner) {
   return path.join(require('os').tmpdir(), `forge-artifact-owner-${digest(roots.key(owner))}`);
 }
-function lock(manifest) {
+function lock(manifest, acquisitionBudget) {
   // The canonical mutex lives in the trusted transport directory, outside the
   // protected owner. Both appends and publication take the same attempt lock.
   const directory = lockRoot(manifest.owner);
@@ -43,7 +43,7 @@ function lock(manifest) {
   // This synchronous critical section belongs to the actual owner/broker
   // process. Recover only its proven death, never an old clock or a live PID.
   const handle = require('./forge-lock').acquireProcessSync(directory, 'publication',
-    { retries: 1 });
+    { retries: 1, ...(acquisitionBudget ? { retries: acquisitionBudget.remaining_attempts || 1, acquisitionBudget } : {}) });
   const guard = Object.freeze({ release() { heldLocks.delete(guard); return handle.release(); } });
   heldLocks.set(guard, manifest.owner);
   return guard;
@@ -51,7 +51,7 @@ function lock(manifest) {
 function withOwnerLock(owner, callback, guard) {
   owner = roots.realDirectory(owner);
   const windows = require('./forge-owner-transport-window');
-  if (guard === undefined) guard = windows.currentPublicationGuard(owner);
+  if (guard === undefined) guard = windows.currentPublicationGuard(owner, true);
   if (guard !== undefined) {
     if (heldLocks.get(guard) !== owner) fail('reconciliation-lock-handle-required');
     windows.assertMutationAllowed(owner);
@@ -60,6 +60,14 @@ function withOwnerLock(owner, callback, guard) {
   const acquired = lock({ owner });
   try { return windows.withPublicationContext(owner, acquired, () => { windows.assertMutationAllowed(owner); return callback(); }); } finally { acquired.release(); }
 }
+// Validate the real held guard without entering another publication boundary.
+// A forged withPublicationContext handle is still rejected by this WeakMap.
+Object.defineProperty(lock, 'assertGuard', { value(owner, guard) {
+  owner = roots.realDirectory(owner);
+  if (heldLocks.get(guard) !== owner) fail('reconciliation-lock-handle-required');
+  require('./forge-owner-transport-window').assertMutationAllowed(owner);
+  return true;
+} });
 function verifyProof(manifest, proof) {
   if (manifest.schema_version !== 1 || proof?.manifest_sha256 !== digest(manifest) || proof.dispatch_id !== manifest.dispatch_id) fail('reconciliation-proof-identity');
   const { signature, ...payload } = proof;
