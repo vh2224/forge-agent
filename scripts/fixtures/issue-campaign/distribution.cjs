@@ -2,7 +2,7 @@
 // Additive measured successor: retain every historical validator and pin.
 const fs=require('fs'),path=require('path'),crypto=require('crypto'),zlib=require('zlib'),assert=require('node:assert/strict');
 const previous=require('../parallelism/distribution.cjs'),data=require('./distribution-delta.json');
-const ROOT=path.resolve(__dirname,'../../..'),PIN='9726b5ac762b371d3e784ce35480e78f3b82f6b9aec642457d9875cb5786cf3e';
+const ROOT=path.resolve(__dirname,'../../..'),PIN='6986fff759fea09c473fcfcafd62ef07d3ae29ba5c642122027a227ec298cd1d';
 const hash=x=>crypto.createHash('sha256').update(x).digest('hex');
 const read=file=>fs.readFileSync(path.join(ROOT,file));
 const normalize=text=>String(text).replace(/version=\d+\.\d+\.\d+/g,'version=<dynamic>');

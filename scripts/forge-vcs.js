@@ -1219,6 +1219,14 @@ function svnRestoreAndRemove(cwd, baseline, target, opts) { // baseline is inten
   const restored = [];
   const removed = [];
   if (!guard.ok) return { ok: false, restored, removed, error: guard.error };
+  // The leaf census expands unversioned trees for exact reset ownership, but
+  // SVN has no metadata to revert for those leaves. Strict SVN builds reject
+  // them with E155010. Measure status before any mutation; scheduled additions
+  // remain versioned revert targets, and status failure never authorizes removal.
+  const status = svnStatusEntries(cwd, opts);
+  if (!status.ok) return { ok: false, restored, removed, error: status.error };
+  const unversionedRoots = status.entries.filter(entry => entry.item === 'unversioned')
+    .map(entry => entry.path.replace(/\\/g, '/').replace(/\/+$/, ''));
   const all = Array.from(new Set([...target.restore, ...target.remove])).filter((p) => !excluded(opts, p));
   const preservedSet = new Set(target.preserved || []);
   const isDirTarget = (p) => {
@@ -1234,6 +1242,8 @@ function svnRestoreAndRemove(cwd, baseline, target, opts) { // baseline is inten
   const infinityPaths = [];
   const emptyPaths = [];
   for (const p of all) {
+    const relative = String(p).replace(/\\/g, '/');
+    if (unversionedRoots.some(root => root && (relative === root || relative.startsWith(root + '/')))) continue;
     if (isDirTarget(p) && hasPreservedDescendant(p)) emptyPaths.push(p);
     else infinityPaths.push(p);
   }
