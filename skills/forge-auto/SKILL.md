@@ -220,9 +220,12 @@ materializa as opções na fronteira segura; enquanto não há escolha, ele devo
 3. Grave só a resposta explícita do operador com
    `--answer --round <ID> --response "<texto exato do operador>" --source user-text|tool-answer`;
    resposta vazia, estrangeira ou conflitante não avança. Nova rodada, mesmo fluxo.
-4. Registre a escolha com `--decide` pelo host que embute `main(argv, io, liveAdapter)`
-   com `liveAdapter.getDecisionHandle`. A CLI avulsa recusa com
-   `time-decision-attestation-required`: a decisão continua pendente.
+4. O próprio caller do host registra a escolha por `decideObserved`, conforme o
+   exemplo executável em `shared/forge-milestone-time.md § Ponte viva dos hosts`.
+   Monte o callback com a resposta real já observada no canal nativo ou na conversa;
+   o operador não precisa escrever um adaptador. A CLI avulsa `--decide` continua
+   recusando JSON/flags como autoridade com `time-decision-attestation-required`.
+   Nunca repita essa CLI para destravar o fluxo.
 5. Continue com `forge-long-workflow-adapter.js --command resume-time-option` e o mesmo snapshot do loop;
    `time-option-ready` segue para `plan-milestone`, `time-option-reestimate-ready` para
    a nova estimativa, e qualquer outro código para e mostra a pendência.

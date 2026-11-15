@@ -1,0 +1,31 @@
+'use strict';
+const assert=require('assert/strict'),fs=require('fs'),path=require('path'),os=require('os'),cp=require('child_process');
+const adapter=require('./forge-claude-sidecar'), original=adapter.invokeClaudeSidecar;
+const lab=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'forge-plan-retain-'))),cwd=path.join(lab,'code');fs.mkdirSync(cwd);
+for(const args of [['init','-q'],['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','--allow-empty','-qm','fixture']])assert.equal(cp.spawnSync('git',args,{cwd,windowsHide:true}).status,0);
+const context=path.join(lab,'context.md');fs.writeFileSync(context,'# Synthetic context\n');
+const content='---\nmust_haves:\n  truths: ["observable"]\n  artifacts:\n    - path: src/a.js\n      provides: implementation\n      min_lines: 1\n  key_links: []\nexpected_output: ["src/a.js"]\ndepends: []\nwrites: ["src/a.js"]\n---\n# Task\n';
+const valid={status:'done',summary:'Synthetic plan',slice_plan:{filename:'S01-PLAN.md',content:'# Slice\n- [ ] **T01: Example**\n'},task_plans:[{id:'T01',filename:'T01-PLAN.md',content}]};
+const telemetry={model_observed:'claude-sonnet-5',model_observed_source:'claude-json-modelUsage'};
+let current=valid;
+adapter.invokeClaudeSidecar=async()=>({candidate:current,telemetry});
+delete require.cache[require.resolve('./forge-xllm')];const xllm=require('./forge-xllm');
+let sequence=0;
+const options=()=>({engine:'claude',hostRuntime:'codex',sidecarDeclared:true,model:'claude-sonnet-5',effort:'medium',cwd,planContextFile:context,resultFile:path.join(lab,'result-'+(++sequence)+'.json'),dispatchId:'retain-'+sequence,timeoutSecs:10});
+(async()=>{
+ const good=await xllm.runPlan(options());assert.equal(good.status,'done');
+ current={...valid,slice_plan:{...valid.slice_plan,content:'# Slice\n### T01: Example\n'}};
+ const bad=options();let failure;try{await xllm.runPlan(bad);}catch(e){failure=e;}
+ assert.equal(failure.code,'plan-task-list-empty');assert.equal(failure.provider_called,true);
+ assert.equal(failure.plan_candidate.transport_telemetry.model_observed,'claude-sonnet-5');
+ const saved=JSON.parse(fs.readFileSync(bad.resultFile+'.rejected.json'));assert.equal(saved.trust,'rejected-unpublishable');assert.equal(saved.result.slice_plan.content,current.slice_plan.content);
+ assert.notEqual(JSON.parse(fs.readFileSync(bad.resultFile)).status,'done');
+ const clash=options();fs.writeFileSync(clash.resultFile+'.rejected.json','prior immutable bytes');
+ await assert.rejects(xllm.runPlan(clash),e=>e.code==='plan-task-list-empty'&&e.rejected_candidate.status==='evidence-write-failed'&&e.plan_candidate.transport_telemetry.model_observed==='claude-sonnet-5');
+ assert.equal(fs.readFileSync(clash.resultFile+'.rejected.json','utf8'),'prior immutable bytes');
+ current={...current,slice_plan:{...current.slice_plan,content:current.slice_plan.content+'x'.repeat(8*1024*1024)}};
+ await assert.rejects(xllm.runPlan(options()),e=>e.code==='plan-source-too-large'&&e.rejected_candidate.status==='too-large'&&!e.plan_candidate&&e.transport_telemetry.model_observed==='claude-sonnet-5');
+ current={...valid,task_plans:[{...valid.task_plans[0],content:content.replace('depends: []','depends: ["T01"]')}]};
+ await assert.rejects(xllm.runPlan(options()),e=>!!e.code&&e.stage==='plan-admission'&&e.rejected_candidate.status==='retained');
+ console.log('PASS canonical/rejected plan lists, invalid DAG, private retained candidate, primary refusal on I/O/cap and observed telemetry');
+})().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>{adapter.invokeClaudeSidecar=original;assert.equal(path.dirname(lab),fs.realpathSync.native(os.tmpdir()));fs.rmSync(lab,{recursive:true,force:true});});

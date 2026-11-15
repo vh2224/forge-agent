@@ -419,6 +419,7 @@ function createRecovery(options) {
     async next(input) {
       if (state.pending_questions.some(q => q.status === 'pending')) return { action: 'pending-questions', questions: state.pending_questions };
       if (!input.inspection || input.inspection.process_stopped !== true || input.inspection.receipt_checked !== true) fail('recovery-process-receipt-inspection-required');
+      if (input.inspection.incomplete_execution === true) return { action: 'partial-continuation-required', reason_code: 'execution-partial-continuation-required', provider_called: false };
       if (input.inspection.valid_saved_response === true) return { action: 'replay', provider_called: false };
       if (input.inspection.writer_possible !== false && input.inspection.roots_reconciled !== true) fail('recovery-writer-reconciliation-required');
       if (require('./forge-milestone-time-admission').TRANSPORT_REFUSAL_CODES.includes(state.attempts.at(-1)?.reason_code)) {
@@ -563,6 +564,10 @@ function createRecovery(options) {
     },
     async resumeReservation(input) {
       if (state.pending_questions.some(q => q.status === 'pending')) return { action: 'pending-questions', questions: state.pending_questions };
+      if (input.inspection?.incomplete_execution === true) {
+        if (input.inspection.process_stopped !== true || input.inspection.receipt_checked !== true) fail('recovery-process-receipt-inspection-required');
+        return { action: 'partial-continuation-required', reason_code: 'execution-partial-continuation-required', provider_called: false };
+      }
       if (input.inspection?.valid_saved_response === true) return { action: 'replay', provider_called: false };
       if (input.inspection?.process_stopped !== true || input.inspection.receipt_checked !== true
           || input.inspection.valid_saved_response || input.inspection.roots_reconciled !== true) fail('recovery-writer-reconciliation-required');
@@ -704,8 +709,10 @@ function inspectReceipt(file, options = {}) {
       if (request.unitType === 'execute-task' || receipt.execution || receipt.reset_state_file) writer = true;
     } catch { writer = 'unknown'; }
   }
+  const incomplete = require('./forge-execution-continuation').incomplete(receipt);
   return { receipt_checked: true, process_stopped: stopped, receipt_sha256: digest(bytes),
-    phase: receipt.phase, valid_saved_response: ['ready', 'executed'].includes(receipt.phase) || !!receipt.saved_candidate,
+    phase: receipt.phase, incomplete_execution: incomplete,
+    valid_saved_response: !incomplete && (['ready', 'executed'].includes(receipt.phase) || !!receipt.saved_candidate),
     writer_possible: writer,
     roots_reconciled: false, receipt };
 }
@@ -885,7 +892,7 @@ async function recoverAttempt(options) {
   const savedWriter = typeof options.inspectSavedResult === 'function' ? await options.inspectSavedResult() : null;
   if (savedWriter) {
     transitions.assertWriterObservation(savedWriter);
-    inspection.valid_saved_response = true;
+    inspection.valid_saved_response = inspection.incomplete_execution !== true;
   }
   if (inspection.process_stopped !== true) fail('recovery-process-receipt-inspection-required');
   // The old review-fix producer recorded only {cwd}, even though recovery now
@@ -909,6 +916,12 @@ async function recoverAttempt(options) {
   }
   if (options.transitions && state.pending_questions.some(row => row.status === 'pending') && !options.answers?.length)
     return { action: 'pending-questions', questions: state.pending_questions };
+  if (inspection.incomplete_execution === true) {
+    if (state.pending_questions.some(row => row.status === 'pending')) return { action: 'pending-questions', questions: state.pending_questions };
+    // Do not enter artifact disposition, environmental correction or surgical
+    // reset. The owner can create a fresh bounded same-task continuation.
+    return { action: 'partial-continuation-required', reason_code: 'execution-partial-continuation-required', provider_called: false };
+  }
   const transition = options.transitions ? await transitions.prepare(options, state, inspection) : null;
   const transitionGuard = transition?.handle ? transitions.assertLive(transition.handle) : null;
   if (transition?.disposed) { inspection.valid_saved_response = false; inspection.roots_reconciled = true; }

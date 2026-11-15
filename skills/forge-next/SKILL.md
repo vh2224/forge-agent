@@ -212,10 +212,13 @@ materializa as opções na fronteira segura; enquanto não há escolha, ele devo
 3. Grave só a resposta explícita do operador com
    `--answer --round <ID> --response "<texto exato do operador>" --source user-text|tool-answer`;
    resposta vazia, estrangeira ou conflitante não avança. Nova rodada, mesmo fluxo.
-4. Registre a escolha com `--decide` pelo host que embute `main(argv, io, liveAdapter)`
-   com `liveAdapter.getDecisionHandle`. A CLI avulsa recusa com
-   `time-decision-attestation-required`: a decisão continua pendente.
-5. Continue com `forge-long-workflow-adapter.js --command resume-time-option` e o mesmo snapshot;
+4. O próprio caller do host registra a escolha por `decideObserved`, conforme o
+   exemplo executável em `shared/forge-milestone-time.md § Ponte viva dos hosts`.
+   Monte o callback com a resposta real já observada no canal nativo ou na conversa;
+   o operador não precisa escrever um adaptador. A CLI avulsa `--decide` continua
+   recusando JSON/flags como autoridade com `time-decision-attestation-required`.
+   Nunca repita essa CLI para destravar o fluxo.
+5. Continue com `forge-long-workflow-adapter.js --mode step --command resume-time-option` e o mesmo snapshot;
    `time-option-ready` segue para `plan-milestone`, `time-option-reestimate-ready` para
    a nova estimativa, e qualquer outro código para e mostra a pendência.
 Nenhum JSON, flag, `approved:true`, texto de prompt ou silêncio aprova uma opção.
@@ -1366,7 +1369,8 @@ Until S01/T02 this skill had **zero** invocations of `forge-runs.js` (measured: 
 # One spawn (2026-08-24). Step mode NEVER falls back to auto-mode.json (see note
 # below), so --run is passed only when a run exists — never the legacy branch.
 if [ -n "$RUN_ID" ]; then
-  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --heartbeat --run "$RUN_ID" --worker "UNIT_TYPE/UNIT_ID" --worker-slice "SLICE_ID" > /dev/null || true
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --ensure-step-run "$RUN_ID" --host-runtime "$HOST_RUNTIME" --cwd "$WORKING_DIR" > /dev/null || exit 1
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --heartbeat --observed-owner --host-runtime "$HOST_RUNTIME" ${FORGE_CLAUDE_OWNER_SESSION_ID:+--expected-owner-session "$FORGE_CLAUDE_OWNER_SESSION_ID"} --run "$RUN_ID" --worker "UNIT_TYPE/UNIT_ID" --worker-slice "SLICE_ID" --cwd "$WORKING_DIR" > /dev/null || exit 1
 else
   echo "ℹ worker não registrado: RUN_ID ausente (step mode sem run registrada) — evidence desta unidade cai em adhoc"
 fi

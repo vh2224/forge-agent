@@ -24,7 +24,7 @@ const M = PROPOSALS.milestone, OTHER = 'M002', NOW = Date.parse('2026-11-02T12:0
 const roots = [];
 let passed = 0, serial = 0;
 
-function test(name, callback) { callback(); passed++; console.log('PASS ' + name); }
+function test(name, callback) { if (process.env.FORGE_SELECTION_TEST_FILTER && !name.includes(process.env.FORGE_SELECTION_TEST_FILTER)) return; callback(); passed++; console.log('PASS ' + name); }
 function iso(value) { return new Date(value).toISOString(); }
 function root() {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-selection-test-')); roots.push(cwd);
@@ -64,15 +64,18 @@ function transaction(cwd, key, fields) {
     owner_digest: fields.owner_digest || 'sha256:' + 'f'.repeat(64), lease_generation: 'fixture-generation', phase: fields.phase || 'committed', created_at: iso(fields.at), updated_at: iso(fields.at),
     before: { state_checksum: sha(state), state }, after: { state_checksum: sha(state), state, state_patch: {} },
     result: fields.result ? { idempotency_key: key, unit: unit.key, milestone: fields.milestone, status: fields.result } : null,
-    event: { idempotency_key: key, unit: unit.key, milestone: fields.milestone, action: fields.action } };
+    event: { idempotency_key: key, unit: unit.key, milestone: fields.milestone, action: fields.action },
+    ...(fields.boundary ? { boundary: structuredClone(fields.boundary) } : {}) };
+  if (record.boundary) Object.assign(record.boundary, { result_checksum: sha(record.result), event_checksum: sha(record.event) });
   controller.writeAtomic(controller.transactionFile(cwd, key), record, false);
   return controller.transactionFile(cwd, key);
 }
 function unitOf(type, id) { return { type, id, key: type + '/' + id }; }
-function commitEstimate(cwd, suffix, at, complete = true) {
+function commitEstimate(cwd, suffix, at, complete = true, closed = false) {
   const key = selection.estimateBeginKey(M, suffix), unit = unitOf('estimate-milestone', M);
   transaction(cwd, key, { action: 'begin', unit, milestone: M, at });
-  if (complete) transaction(cwd, key + ':complete', { action: 'complete', unit, milestone: M, at: at + 60000, result: 'succeeded' });
+  if (complete) transaction(cwd, key + ':complete', { action: 'complete', unit, milestone: M, at: at + 60000, result: 'succeeded',
+    ...(closed ? { boundary: { handoff_ready: true } } : {}) });
   return key;
 }
 function proposalFile(cwd, proposal) { return write(cwd, `.gsd/milestones/${M}/${M}-OPTIONS.json`, JSON.stringify(proposal, null, 2)); }
@@ -137,6 +140,84 @@ function writeRoadmap(cwd, section, opts) { return write(cwd, `.gsd/milestones/$
 function sectionFor(cwd, overrides = {}) { return { ...skeletonOf(selection.promptBlock(cwd, M)), allocation: structuredClone(ALLOCATION), ...overrides }; }
 
 try {
+  test('both-hosts-auto-and-step-reach-time-question-and-resume-to-plan-milestone', () => {
+    const adapter = require('./forge-long-workflow-adapter');
+    for (const host of ['claude', 'codex']) for (const mode of ['auto', 'step']) {
+      const cwd = enrolled(), before = selection.readSelectionState(cwd, M);
+      // The synthetic estimate is closed from its initial write, matching the
+      // handoff boundary normally produced by controller.complete.
+      commitEstimate(cwd, before.key_suffix, NOW - 1800000, true, true);proposalFile(cwd, structuredClone(PROPOSALS.base));
+      const prepared = selection.prepareBoundary(cwd, M, { now: NOW - 600000 });
+      assert.strictEqual(prepared.status, 'materialized', JSON.stringify(prepared));
+      require('./forge-state').write(cwd, { milestone: M, phase: 'idle', active_slice: '—', active_task: '—', next_action: 'plan-milestone', auto_mode: 'off' });
+      const input = { cwd, milestone: M, workflow_id: host+'-'+mode, owner_token: 'bridge-owner', idempotency_key: 'bridge-'+host+'-'+mode };
+      const deps = { now: () => NOW, prefsReader: () => ({ ok: true, prefs: { workflow: { skip_discuss: true, skip_research: true } } }),
+        inventoryReader: () => ({ roadmap_exists: false, context_exists: true, research_exists: true, slices: [], milestone_complete: false }) };
+      const initial = require('./forge-loop-controller').create({ mode, workflow_id: input.workflow_id, host_runtime: host });
+      initial.step_count = 1; // the completed estimate already consumed one real unit
+      const blocked = adapter.invoke(host, mode, 'next', input, initial, deps).result;
+      assert.strictEqual(blocked.reason_code, 'time-option-pending', JSON.stringify(blocked));
+      assert.strictEqual(blocked.snapshot.step_count, 1, 'administrative question costs no additional worker step');
+      const picked = answer(cwd, 'Sem contrato');
+      const observed = { status: 'resolved', question: { identity_sha256: picked.opened.identity_sha256, id: picked.opened.question_id },
+        response: 'Sem contrato', source: 'tool-answer', resolved_at: iso(NOW - 1000) };
+      assert.strictEqual(selection.decideObserved({ cwd, milestone: M, clock: () => NOW, prefsReader: hermeticPrefs, observeAnswer: () => observed }).status, 'decided');
+      const resumed = adapter.invoke(host, mode, 'resume-time-option', input, blocked.snapshot, deps).result;
+      assert.strictEqual(resumed.action, 'dispatch', JSON.stringify(resumed));
+      assert.strictEqual(resumed.unit.type, 'plan-milestone');assert.strictEqual(resumed.snapshot.step_count, 2);
+    }
+  });
+  test('host-bridge-activates-and-resumes-recorded-contract-with-same-live-response', () => {
+    for (const interrupt of [false, true]) {
+      const cwd = enrolled(); materializeFor(cwd);
+      answer(cwd, 'Escolher posição'); const picked = answer(cwd, 'Escopo completo (curta) (Recomendado)');
+      const observed = { status: 'resolved', question: { identity_sha256: picked.opened.identity_sha256, id: picked.opened.question_id },
+        response: 'Escopo completo (curta) (Recomendado)', source: 'tool-answer', resolved_at: iso(NOW - 1000) };
+      const input = { cwd, milestone: M, clock: () => NOW, prefsReader: hermeticPrefs, observeAnswer: () => observed };
+      if (interrupt) {
+        assert.strictEqual(selection.decideObserved({ ...input, failpoint: name => name === 'after-selection' }).status, 'refused');
+        assert.strictEqual(selection.readSelectionState(cwd, M).status, 'activation-pending');
+      }
+      const result = selection.decideObserved(input);
+      assert.strictEqual(result.status, 'decided', JSON.stringify(result));
+      assert.strictEqual(time.readContract({ cwd, milestone: M }).status, 'valid');
+      assert.strictEqual(selection.resumeCheck(cwd, M, { milestone: M, options_sha256: picked.opened.options_sha256 }).ok, true);
+    }
+  });
+  test('host-bridge-performs-authorized-linked-task-creation-and-idempotent-resume', () => {
+    const cwd = enrolled(); materializeFor(cwd); const observed = [];
+    for (const response of ['Escolher posição', 'Com task ligada (media)', 'Criar sem iniciar']) {
+      const selected = answer(cwd, response);
+      observed.push({ status: 'resolved', question: { identity_sha256: selected.opened.identity_sha256, id: selected.opened.question_id },
+        response, source: 'tool-answer', resolved_at: iso(NOW - 1000) });
+    }
+    const input = { cwd, milestone: M, clock: () => NOW, prefsReader: hermeticPrefs, userHome: path.join(cwd, 'private-profile'),
+      observeAnswer: challenge => observed.find(a => a.question.id === challenge.question.id) };
+    const result = selection.decideObserved(input);
+    assert.strictEqual(result.status, 'decided', JSON.stringify(result));
+    assert.ok(['created', 'resumed', 'unchanged'].includes(result.linked_task?.status), JSON.stringify(result));
+    assert.ok(result.linked_task.task_id);
+    const replay = selection.decideObserved(input); assert.strictEqual(replay.status, 'decided', JSON.stringify(replay));
+    assert.strictEqual(replay.linked_task.task_id, result.linked_task.task_id);
+  });
+  test('actual-host-observation-bridge-confirms-no-contract-and-refuses-foreign-empty-or-conflicting-observations', () => {
+    const cwd = enrolled(); materializeFor(cwd);
+    const { opened, result } = answer(cwd, 'Sem contrato');
+    const question = { identity_sha256: opened.identity_sha256, id: opened.question_id };
+    const before = snapshot(cwd);
+    const observed = { status: 'resolved', question, response: 'Sem contrato', source: 'tool-answer', resolved_at: iso(NOW - 1000) };
+    const run = value => selection.decideObserved({ cwd, milestone: M, clock: () => NOW, prefsReader: hermeticPrefs, observeAnswer: () => value });
+    assert.strictEqual(result.answer, 'no-contract');
+    for (const value of [null, { ...observed, status: 'pending' }, { ...observed, response: '' },
+      { ...observed, question: { ...question, id: 'foreign' } }, { ...observed, response: 'Reestimar' }]) {
+      assert.strictEqual(run(value).status, 'refused'); assert.deepStrictEqual(snapshot(cwd), before);
+    }
+    const decided = run(observed);
+    assert.strictEqual(decided.status, 'decided', JSON.stringify(decided));
+    assert.strictEqual(decided.choice, 'no-contract');
+    assert.strictEqual(time.readContract({ cwd, milestone: M }).status, 'absent');
+    assert.strictEqual(selection.resumeCheck(cwd, M, { milestone: M, options_sha256: opened.options_sha256 }).ok, true);
+  });
   test('exports-codes-and-inert-import-without-controller', () => {
     for (const name of ['TIME_OPTION_REASON_CODES', 'TIME_OPTION_RESUME_CODES', 'estimateKeySuffix', 'estimateBeginKey', 'readSelectionState', 'enroll', 'prepareBoundary',
       'nextRound', 'answerRound', 'decide', 'promptBlock', 'roadmapRule', 'resumeCheck', 'main']) assert.ok(selection[name] !== undefined, name);

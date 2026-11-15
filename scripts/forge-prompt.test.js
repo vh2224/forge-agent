@@ -1264,9 +1264,10 @@ test('estimate-milestone is registered, requires description and composes core p
   assert.deepStrictEqual(result.procedure_context.modules.map(item => item.id), ['core', 'planning']);
   assert.strictEqual(result.procedure_context.phase, 'estimate-milestone');
   assert.strictEqual(path.basename(result.template_source), 'estimate-milestone.md');
-  for (const pointer of ['.gsd/PROJECT.md', '.gsd/REQUIREMENTS.md', 'M001-CONTEXT.md', 'M001-BRAINSTORM.md', 'M001-SCOPE.md', 'forge-projection.js --render ledger']) {
+  for (const pointer of ['.gsd/PROJECT.md', '.gsd/REQUIREMENTS.md', 'M001-CONTEXT.md', 'M001-BRAINSTORM.md', 'M001-SCOPE.md', 'forge-projection.js" --render ledger']) {
     assert(result.prompt.includes(pointer), pointer);
   }
+  assert(!result.prompt.includes(cwd + '/scripts/forge-projection.js'), 'consumer source checkout is not the Forge scripts directory');
   assert(result.prompt.includes('Source belongs in src/.'), 'CS_STRUCTURE rendered inside its DATA envelope');
   assert(result.prompt.includes('- Prefer deterministic inputs'), 'TOP_MEMORIES rendered inside its DATA envelope');
   assert(!result.prompt.includes(TIME_OPEN), 'the estimate unit carries no selection block');

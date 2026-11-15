@@ -1160,8 +1160,7 @@ function publishClaudeOwnerEnvironment(data) {
             }
           }
 
-          fs.mkdirSync(evidenceDir, { recursive: true });
-          fs.appendFileSync(evidenceFile, serialized + '\n', 'utf8');
+          loadCoreModule('forge-owner-transport-window.js').appendHookEvidence(ownerDir, fileSlug, serialized);
         }
       } catch { /* silent-fail — hook must never crash Claude Code (MEM008) */ }
     }

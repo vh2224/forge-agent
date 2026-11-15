@@ -390,8 +390,43 @@ async function recoveryContracts() {
     const rejectedPlan = { status: 'done', summary: 'local-only explanation',
       slice_plan: { content: '# Slice\n- [ ] T03: mismatch\n' },
       task_plans: [{ id: 'T02', content: fixtures.plan(lab.contract) }],
-      transport_telemetry: { model_observed: 'fixture-model' } };
+      transport_telemetry: { model_observed: 'fixture-model', model_observed_source: 'fixture-closed-transport' } };
     const mismatch = { ...planning, dispatchId: 'plan-mismatch', resultFile: path.join(lab.dir, 'mismatch.json') };
+    const semanticRefusal = { ...planning, dispatchId: 'plan-semantic-refusal', resultFile: path.join(lab.dir, 'semantic-refusal.json') };
+    xllm.runPlan = async options => { require('./forge-attempt-telemetry').observeFinal(options,
+      { fixture: 'closed plan transport' }, fs.readFileSync(options.planContextFile, 'utf8'), 'fixture-closed');
+      throw Object.assign(new Error('plan-task-list-empty'), {
+      code: 'plan-task-list-empty', stage: 'plan-admission', provider_called: true, plan_candidate: rejectedPlan,
+      transport_telemetry: rejectedPlan.transport_telemetry,
+      rejected_candidate: { status: 'retained', channel: 'resultFile.rejected.json', bytes: 100, sha256: 'a'.repeat(64) } }); };
+    await assert.rejects(sidecar.runUnitSidecar(resolveContext(semanticRefusal)), e => e.code === 'plan-task-list-empty');
+    const semanticReceipt = JSON.parse(fs.readFileSync(semanticRefusal.resultFile + '.receipt.json'));
+    assert.strictEqual(semanticReceipt.phase, 'failed');
+    assert.strictEqual(semanticReceipt.returned_response.unit_validation, 'rejected');
+    assert.strictEqual(semanticReceipt.telemetry.model_observed, 'fixture-model');
+    assert.strictEqual(semanticReceipt.final_evidence.model_observed, 'fixture-model');
+    assert.strictEqual(semanticReceipt.saved_candidate, undefined, 'rejected semantic response cannot gain replay authority');
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(semanticRefusal.resultFile + '.returned.json')).result, rejectedPlan);
+    const receiptIo = { ...planning, dispatchId: 'plan-receipt-io', resultFile: path.join(lab.dir, 'plan-receipt-io.json') };
+    const realRead = fs.readFileSync; let fault = false;
+    xllm.runPlan = async options => {
+      require('./forge-attempt-telemetry').observeFinal(options, { fixture: 'closed plan transport' }, fs.readFileSync(options.planContextFile, 'utf8'), 'fixture-closed');
+      fault = true;
+      throw Object.assign(new Error('plan-task-list-empty'), { code: 'plan-task-list-empty', stage: 'plan-admission', provider_called: true,
+        plan_candidate: rejectedPlan, transport_telemetry: rejectedPlan.transport_telemetry,
+        rejected_candidate: { status: 'retained', channel: 'resultFile.rejected.json' } });
+    };
+    fs.readFileSync = function(file, ...args) {
+      if (fault && typeof file === 'string' && path.resolve(file) === path.resolve(receiptIo.resultFile + '.receipt.json'))
+        throw Object.assign(new Error('synthetic receipt I/O failure'), { code: 'EACCES' });
+      return realRead.call(this, file, ...args);
+    };
+    try { await assert.rejects(sidecar.runUnitSidecar(resolveContext(receiptIo)), e => e.code === 'plan-task-list-empty' && e.provider_called === true); }
+    finally { fs.readFileSync = realRead; }
+    const receiptFailure = JSON.parse(fs.readFileSync(receiptIo.resultFile));
+    assert.strictEqual(receiptFailure.layer, 'plan-admission');assert.strictEqual(receiptFailure.reason_code, 'plan-task-list-empty');
+    assert.strictEqual(receiptFailure.provider_called, true);assert.strictEqual(receiptFailure.telemetry.model_observed, 'fixture-model');
+    assert.strictEqual(receiptFailure.retention_diagnostic, 'receipt-unavailable');
     xllm.runPlan = async () => rejectedPlan;
     await assert.rejects(sidecar.runUnitSidecar(resolveContext(mismatch)), /plan-task-list-mismatch/);
     const rejectedBytes = fs.readFileSync(mismatch.resultFile + '.returned.json');
