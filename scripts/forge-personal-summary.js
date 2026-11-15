@@ -26,7 +26,7 @@ const SUMMARY_LIMITS = Object.freeze({ works: 5, items: 3, text: 240, bytes: 409
 const NON_MANDATORY_TEXT = 80;
 const DIAGNOSTIC = 'forge-personal-context.js --snapshot';
 const EMPTY_TEXT = '(vazio)';
-const REASONS = Object.freeze(['snapshot', 'no-bindings', 'corrupt', 'unreadable', 'schema-unsupported', 'schema-invalid',
+const REASONS = Object.freeze(['snapshot', 'no-bindings', 'all-closed', 'corrupt', 'unreadable', 'schema-unsupported', 'schema-invalid',
   'namespace-invalid', 'project-unresolved', 'project-changed', 'project-unanchored', 'invalid-id', 'summary-failed',
   'summary-limit-exceeded', 'summary-command-conflict', 'snapshot-error']);
 const CONFLICTS = Object.freeze(['bind', 'checkpoint', 'select', 'snapshot']);
@@ -278,14 +278,17 @@ function buildPersonalSummary(options = {}) {
     const snapshot = readPersonalSnapshot({ project: options.project, cwd: options.cwd, id: options.id,
       userHome: options.userHome, env: options.env });
     if (!snapshot || snapshot.status !== 'ok') return failureSummary(snapshot && snapshot.reason);
-    const entries = (Array.isArray(snapshot.works) ? snapshot.works : []).map(work => prepareWork(work, snapshot.project, { userHome: options.userHome, env: options.env }))
+    const allWorks = Array.isArray(snapshot.works) ? snapshot.works : [];
+    const retired = allWorks.filter(work => require('./forge-task-retirement').isClosedWork(snapshot.project, work));
+    const entries = allWorks.filter(work => !retired.includes(work)).map(work => prepareWork(work, snapshot.project, { userHome: options.userHome, env: options.env }))
       .sort((a, b) => rank(a) - rank(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     const totals = { works: entries.length, pending: 0, acceptances: 0 };
+    if (retired.length) totals.retired = retired.length;
     for (const entry of entries) { totals.pending += entry.pending.length; totals.acceptances += entry.acceptances.length; }
     const home = options.userHome || os.homedir();
     const privateRoots = [home, typeof home === 'string' ? path.dirname(home) : null,
       options.env && options.env.FORGE_HOME || process.env.FORGE_HOME, path.resolve(__dirname, '..')].filter(root => typeof root === 'string' && root.length > 1 && path.isAbsolute(root));
-    return bound({ reason: entries.length ? 'snapshot' : 'no-bindings', project: snapshot.project, entries, totals, privateRoots });
+    return bound({ reason: entries.length ? 'snapshot' : retired.length ? 'all-closed' : 'no-bindings', project: snapshot.project, entries, totals, privateRoots });
   } catch {
     return failureSummary('summary-failed');
   }

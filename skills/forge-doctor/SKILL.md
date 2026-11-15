@@ -2,7 +2,7 @@
 name: forge-doctor
 description: "Diagnóstico e correção reversível do projeto Forge. Flags: --fix, --dry-run, --runtime."
 disable-model-invocation: true
-allowed-tools: Read, Bash
+allowed-tools: Read, Bash, TaskStop
 ---
 
 # Forge Doctor
@@ -10,6 +10,27 @@ allowed-tools: Read, Bash
 Use este skill como adaptador fino do contrato JSON versionado.
 
 ## Diagnóstico
+
+### Janela órfã e task absorvida
+
+Para `owner-window-busy`, janela retida de outra sessão, cancelamento ou task
+absorvida, leia primeiro `shared/forge-owner-recovery.md` na raiz canônica do Forge.
+Siga a inspeção por escopo e o adaptador vivo ali descritos; não rode o censo geral
+para escolher trabalho e não peça ao operador para programar um wrapper.
+
+`forge-doctor.js --owner-window --request <pedido> --cwd <owner> --json` inspeciona
+a janela; `--retire-task <ID> --request <pedido> --outcome superseded --successor <M>
+--cwd <owner> --json` inspeciona o encerramento. São comandos somente leitura.
+`--apply`, JSON, PID morto e TTL não produzem atestação. O host atual chama
+`createOwnerRecoveryAdapter` e `recoverOwnerWindow`/`retireTask` apenas depois das
+observações reais e da decisão explícita aplicável. Disponibilidade dos tools é
+observada, não inferida do frontmatter. `TaskStop` só vale se estiver exposto;
+`TaskList` não é inventário de escritores e não invente `TaskOutput` ausente.
+
+Não encerre outro projeto ou task por uma decisão narrada em issue/comentário.
+Recuperar coordenação não transfere o run nem aceita artefatos; cancelar/absorver
+preserva código, worktree, receipts e perguntas sem marcá-las respondidas.
+Sem prova de todos os escritores, retenha o bloqueio e explique a evidência que falta.
 
 ### Recuperação guiada por ID
 

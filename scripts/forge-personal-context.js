@@ -266,14 +266,29 @@ function inspectWork(project, binding) {
     } catch (error) { return failure(error.code === 'ENOENT' ? 'missing' : 'unreadable', error); }
   };
   const registry = read(path.join('.gsd', 'forge', 'runs', `${binding.id}.json`));
-  let activity = 'unknown', runDiagnostic = registry.reason || null;
+  let activity = 'unknown', runDiagnostic = registry.reason || null, runRecord = null;
   if (registry.status === 'ok') {
     try {
       const run = JSON.parse(registry.content);
       if (!object(run) || run.id !== binding.id || run.kind !== binding.kind || typeof run.active !== 'boolean') throw new Error('run-schema');
       if (run.project && (!path.isAbsolute(run.project) || canonical(run.project) !== project.path)) throw new Error('run-project-mismatch');
       activity = run.active ? 'active' : 'inactive';
+      runRecord = run;
     } catch { runDiagnostic = 'corrupt'; }
+  }
+  if (runRecord?.task_retirement) {
+    const retirement = require('./forge-task-retirement').readPublished(project.path, runRecord);
+    if (!retirement?.valid) return { id: binding.id, kind: binding.kind, activity, runDiagnostic, checkpoint,
+      workStatus: 'unknown', reliability: 'needs-reconciliation', state: null, lastResult: null,
+      nextAction: { text: 'Inspecionar a evidência inválida de encerramento da task; não retomar nem ocultar.', validity: 'uncertain' },
+      terminalEvidence: { reason: retirement?.reason || 'task-retirement-evidence-invalid' } };
+    const record = retirement.record;
+    return { id: binding.id, kind: binding.kind, activity, runDiagnostic, checkpoint,
+      workStatus: record.intent.outcome, reliability: 'current', state: null, nextAction: null,
+      lastResult: { text: record.intent.outcome === 'superseded' ? `Task absorvida pela milestone ${record.intent.successor_id}; artefatos e worktree preservados sem aceite de implementação.` : 'Task cancelada; artefatos e worktree preservados sem aceite de implementação.',
+        source: retirement.file, hash: retirement.sha256, validity: 'current' },
+      terminalEvidence: { source: retirement.file, hash: retirement.sha256, completed: false, retired: true },
+      retirement: { outcome: record.intent.outcome, successor_id: record.intent.successor_id, worktree_disposition: 'retained', questions_disposition: 'retained-unanswered-history' } };
   }
   const terminalFile = binding.kind === 'task'
     ? path.join('.gsd', 'tasks', binding.id, `${binding.id}-PLAN.md`)
@@ -345,8 +360,9 @@ function selectPersonalWork(options = {}) {
   const snapshot = readPersonalSnapshot(options);
   if (snapshot.status !== 'ok') return snapshot;
   const candidates = snapshot.works.filter(w => w.workStatus === 'open' && w.reliability === 'current');
-  const unresolved = snapshot.works.some(w => w.workStatus !== 'completed');
-  return { ...snapshot, reason: candidates.length > 1 ? 'selection-required' : candidates.length ? 'selected' : unresolved ? 'attention-required' : snapshot.works.length ? 'all-completed' : 'no-bindings',
+  const unresolved = snapshot.works.some(w => !['completed','cancelled','superseded'].includes(w.workStatus));
+  const closedReason = snapshot.works.some(w => ['cancelled','superseded'].includes(w.workStatus)) ? 'all-closed' : 'all-completed';
+  return { ...snapshot, reason: candidates.length > 1 ? 'selection-required' : candidates.length ? 'selected' : unresolved ? 'attention-required' : snapshot.works.length ? closedReason : 'no-bindings',
     candidates: candidates.map(w => ({ id: w.id, kind: w.kind })), selected: candidates.length === 1 ? candidates[0] : null };
 }
 

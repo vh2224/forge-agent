@@ -51,6 +51,8 @@ function resolveRunFromArgs(cwd, argsRaw, opts) {
 // Pure classification only: existing inactive legacy records are never
 // activated/adopted. The later owner inspection still validates live identity.
 function inactiveBindingRefusal(record, runId, kind) {
+  if (record?.task_retirement) return { run_id: runId, kind, status: 'refuse', reason: 'run-retired',
+    message: 'Task encerrada administrativamente; histórico e worktree preservados: ' + runId };
   return record && record.active === false && !runs.knownResumeBinding(record)
     ? { run_id: runId, kind, status: 'refuse', reason: 'owner-resume-binding-unknown',
       message: 'Run inativa com vínculo legado desconhecido; registro e claims preservados: ' + runId } : null;
