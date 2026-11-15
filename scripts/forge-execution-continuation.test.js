@@ -50,8 +50,11 @@ let completed = false;
   const repeated = create();
   await sidecar.runUnitSidecar(repeated.request, { ...runtime, partialContinuation: repeated.capability });
   assert.equal(calls, 1); assert(fs.readFileSync(parentFile).equals(original));
-  const only = { execution_contract: f.r.execution_contract, claims: [{root_id:'app',path:'src.js'}], continuation_paths:['app::src.js'], snapshots:[] };
-  assert.throws(()=>require('./forge-task-execution').verifyResult(f.cwd,only,{files_changed:['app::src.js/extra.js']}),e=>e.code==='execution-outside-claim','exact residual must never cover descendant');
+  // Use an absent planned leaf: a child under the existing src.js file is
+  // already refused by lstat with ENOTDIR on POSIX, before the residual guard.
+  // A missing leaf reaches the exactness check on every supported platform.
+  const only = { execution_contract: f.r.execution_contract, claims: [{root_id:'app',path:'pending.js'}], continuation_paths:['app::pending.js'], snapshots:[] };
+  assert.throws(()=>require('./forge-task-execution').verifyResult(f.cwd,only,{files_changed:['app::pending.js/extra.js']}),e=>e.code==='execution-outside-claim','exact residual must never cover descendant');
   completed = true;
   console.log('PASS retained partial, joined writer, immutable parent, narrowed continuation and idempotent replay');
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => h.close(completed));
