@@ -78,7 +78,7 @@ function canonicalRoot(cwd) {
   }
 }
 
-function collectDiff(cwd, base) {
+function collectDiff(cwd, base, scopeFile) {
   // Every containment comparison below must use the same canonical namespace as
   // `realpathSync` on untracked files. On macOS `/tmp` and `/var` commonly
   // traverse symlinks, so a lexical root would otherwise classify safe new files
@@ -157,25 +157,7 @@ function collectDiff(cwd, base) {
 
   const insideSvn = run(root, 'svn', ['info']);
   if (insideSvn.ok) {
-    const summary = run(root, 'svn', ['diff', '--summarize']);
-    const entries = String(summary.stdout || '').split(/\r?\n/)
-      .map((line) => normalizePath(line.replace(/^\s*[AMDRC!?~]\s+/, '').trim()))
-      .filter(Boolean)
-      .map((file) => ({ file, added: 0, deleted: 0, binary: false }));
-    const seen = new Set(entries.map((entry) => entry.file));
-    const status = run(root, 'svn', ['status']);
-    if (status.ok) {
-      for (const line of status.stdout.split(/\r?\n/)) {
-        if (!/^\?\s+/.test(line)) continue;
-        const file = normalizePath(line.replace(/^\?\s+/, '').trim());
-        if (!file || seen.has(file)) continue;
-        entries.push({ file, added: 0, deleted: 0, binary: true });
-        seen.add(file);
-      }
-    }
-    const ok = summary.ok && status.ok;
-    const warning = !summary.ok ? 'svn-diff-failed' : (!status.ok ? 'svn-status-failed' : null);
-    return { vcs: 'svn', base: null, ok, entries, warning };
+    return { vcs: 'svn', base: null, ...require('./forge-review-diff').collectDiffEntries(root, scopeFile) };
   }
 
   return { vcs: 'none', base: null, ok: false, entries: [], warning: 'vcs-unavailable' };
@@ -264,7 +246,7 @@ function planReviewShards(entries, opts) {
       file: normalizePath(entry && entry.file),
       // A binary file carries no line counts but still costs a read; charge it
       // one line so it cannot make a shard look free.
-      lines: Number(entry && entry.added || 0) + Number(entry && entry.deleted || 0) || 1,
+      lines: Number(entry && entry.review_lines || 0) || Number(entry && entry.added || 0) + Number(entry && entry.deleted || 0) || 1,
     }))
     .filter((entry) => entry.file);
   const total = list.reduce((sum, entry) => sum + entry.lines, 0);
@@ -438,7 +420,7 @@ function runCli(argv) {
 
   const prefs = readPrefs(args.cwd);
   if (args.command === 'review') {
-    const diff = applyScopeFile(collectDiff(args.cwd, args.base), args.scopeFile);
+    const diff = applyScopeFile(collectDiff(args.cwd, args.base, args.scopeFile), args.scopeFile);
     let decision = decideReview({
       review: prefs.review,
       entries: diff.entries,

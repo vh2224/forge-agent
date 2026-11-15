@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/parallelism/distribution.cjs');
+const unitEntry = require('./fixtures/issue-campaign/distribution.cjs');
 
 // forge-communication-surfaces.test.js — proves the orchestration and status
 // skills follow shared/forge-communication.md by POINTER, not by a second copy;
@@ -872,8 +872,8 @@ function checkTimeSkill(name, text) {
 function checkChoiceSkill(name, text) {
   const block = between(text, 'Opções de prazo (só milestone com adesão;', '## Bidirectional delivery');
   for (const token of ['time-option-pending', '--round', '--answer', '--response', '--source user-text|tool-answer',
-    'forge-question-channel.js --select', '--present', '--decide', 'main(argv, io, liveAdapter)', 'liveAdapter.getDecisionHandle',
-    'time-decision-attestation-required', 'forge-long-workflow-adapter.js --command resume-time-option', 'mesmo snapshot', 'econômica',
+    'forge-question-channel.js --select', '--present', '--decide', 'decideObserved', 'Ponte viva dos hosts',
+    'time-decision-attestation-required', 'forge-long-workflow-adapter.js', 'resume-time-option', 'mesmo snapshot', 'econômica',
     'Nenhum JSON, flag', 'silêncio aprova', 'Evidência insuficiente:', 'Posição inviável:', 'Nenhuma posição viável:',
     'Roadmap não conforme:', 'Escopo não alocado:', 'Decisão pendente:']) assert(block.includes(token), `${name}: ${token}`);
   assert(block.includes('o próprio `next`') && block.includes('fronteira segura'), `${name} canonical materialization`);

@@ -141,6 +141,7 @@ function stripQuotes(value) {
  * into the manifest, so it contributes nothing.
  */
 function itemDeclaredPath(raw) {
+  if (/^[A-Za-z][A-Za-z0-9_-]*::/.test(raw)) return stripQuotes(raw);
   const mapping = /^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$/.exec(raw);
   if (!mapping) return stripQuotes(raw);
   return /^(path|file)$/i.test(mapping[1]) ? stripQuotes(mapping[2]) : '';
@@ -195,7 +196,7 @@ function readDeclaredPaths(text) {
   return out;
 }
 
-function collectUnitDeclaredPaths(unitDir) {
+function collectUnitDeclaredPaths(unitDir, cwd) {
   const out = [];
   const walk = (dir, depth) => {
     if (depth > 4) return;
@@ -205,7 +206,22 @@ function collectUnitDeclaredPaths(unitDir) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) walk(full, depth + 1);
       else if (entry.isFile() && /-(PLAN|SUMMARY)\.md$/i.test(entry.name)) {
-        try { out.push(...readDeclaredPaths(fs.readFileSync(full, 'utf8'))); } catch { /* unreadable plan is no manifest */ }
+        const content = fs.readFileSync(full, 'utf8');
+        const declared = readDeclaredPaths(content);
+        if (declared.some(p => p.includes('::'))) {
+          if (!cwd) throw new Error('review-root-context-required');
+          const fields = require('./forge-must-haves').parseExecutionFields(content);
+          const roots = require('./forge-code-roots');
+          const contract = roots.validateContract({ schema_version: 2, owner: cwd,
+            primary_root_id: fields.primary_root_id, code_roots: fields.code_roots });
+          const physical = fs.realpathSync.native(cwd);
+          const current = contract.code_roots.find(r => roots.key(r.path) === roots.key(physical));
+          if (!current) throw new Error('review-root-context-mismatch');
+          for (const p of declared) {
+            const resolved = roots.resolvePath(contract, p);
+            if (resolved.root_id === current.id) out.push(resolved.path);
+          }
+        } else out.push(...declared);
       }
     }
   };
@@ -248,15 +264,15 @@ function changedEntries(cwd) {
 function expandUntracked(cwd, entries) {
   const files = [];
   const visit = (rel, depth) => {
-    if (depth > 12) return;
+    if (depth > 64 || files.length > 100000) throw new Error('svn-review-inventory-limit');
     const abs = path.resolve(cwd, rel);
     let stat;
-    try { stat = fs.lstatSync(abs); } catch { return; }
-    if (stat.isSymbolicLink()) return; // never follow a link out of the working copy
+    try { stat = fs.lstatSync(abs); } catch { throw new Error('svn-review-inventory-unreadable'); }
+    if (stat.isSymbolicLink()) throw new Error('svn-review-inventory-link'); // never follow links
     if (stat.isFile()) { files.push(rel); return; }
     if (!stat.isDirectory()) return;
     let children = [];
-    try { children = fs.readdirSync(abs); } catch { return; }
+    try { children = fs.readdirSync(abs); } catch { throw new Error('svn-review-inventory-unreadable'); }
     for (const child of children) visit(`${rel}/${child}`, depth + 1);
   };
   for (const entry of entries) visit(entry, 0);
@@ -282,6 +298,7 @@ function withinManifest(candidate, manifest) {
 }
 
 function computeScope({ versioned, untracked, manifest, only }) {
+  if ([...manifest].some(p => p.includes('::'))) throw new Error('review-root-context-required');
   const all = { versioned, untracked };
   let reason = 'manifest';
   let scoped = all;
@@ -406,6 +423,33 @@ function parseArgs(argv) {
   return args;
 }
 
+// Cost and sharding use the same reconstructed SVN diff as the reviewer.
+function collectDiffEntries(cwd, scopeFile) {
+  const state = changedEntries(cwd);
+  if (!state.ok) return { ok: false, entries: [], warning: state.error };
+  let scope;
+  try { scope = computeScope({ versioned: state.versioned, untracked: expandUntracked(cwd, state.untracked),
+    manifest: new Set(scopeFile ? readPathsFile(scopeFile) : []), only: [] }); }
+  catch (error) { return { ok: false, entries: [], warning: error.message }; }
+  const text = versionedDiff(cwd, scope.versioned) + untrackedDiff(cwd, scope.untracked);
+  const entries = new Map();
+  let current = null;
+  for (const line of text.split(/\r?\n/)) {
+    if (line.startsWith('Index: ')) {
+      const file = normalize(line.slice(7));
+      current = entries.get(file) || { file, added: 0, deleted: 0, binary: false, review_lines: 0 };
+      entries.set(file, current);
+    }
+    if (!current) continue;
+    current.review_lines++;
+    if (line.startsWith('+') && !line.startsWith('+++')) current.added++;
+    if (line.startsWith('-') && !line.startsWith('---')) current.deleted++;
+    if (line === BINARY_NOTICE || line.includes('new file omitted,')) current.binary = true;
+  }
+  const warning = text.includes('### forge-review-diff:') ? 'svn-review-diff-incomplete' : null;
+  return { ok: warning === null, entries: [...entries.values()], warning };
+}
+
 function main(argv) {
   const args = parseArgs(argv);
 
@@ -442,7 +486,7 @@ Diffs against BASE; the SVN baseline marker is intentionally inert (see header).
 
   const manifest = new Set();
   if (typeof args['paths-file'] === 'string') for (const p of readPathsFile(args['paths-file'])) manifest.add(p);
-  if (typeof args['unit-dir'] === 'string') for (const p of collectUnitDeclaredPaths(path.resolve(args['unit-dir']))) manifest.add(p);
+  if (typeof args['unit-dir'] === 'string') for (const p of collectUnitDeclaredPaths(path.resolve(args['unit-dir']), cwd)) manifest.add(p);
 
   const untrackedFiles = expandUntracked(cwd, state.untracked);
   const scope = computeScope({
@@ -485,6 +529,7 @@ module.exports = {
   batched,
   changedEntries,
   expandUntracked,
+  collectDiffEntries,
 };
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));

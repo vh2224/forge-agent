@@ -220,6 +220,39 @@ não carrega testemunha; nunca se fabrica resultado de worker.
 
 ## Opções de prazo antes do roadmap (S02)
 
+### Ponte viva dos hosts
+
+Depois de `--round`, apresente a pergunta real pelo canal nativo permitido. Depois
+da resposta explícita e de `--answer`, o caller Claude/Codex executa o helper abaixo
+no próprio processo. Use os valores exatos observados pelo host, incluindo a
+identidade da rodada aberta e o instante da resposta. Em retomada, reateste a
+resposta efetivamente vista na conversa; um arquivo de perguntas não prova isso.
+Não copie valores de exemplos, não leia respostas de JSON para esse callback e
+não use uma opção recomendada como resposta. Resposta async `accepted:true` sem
+resposta do operador permanece pendente e encerra a rodada economicamente.
+
+```js
+const selection = require(FORGE_SCRIPTS_DIR + '/forge-milestone-time-selection.js');
+// observedAnswer vem da resposta real do canal/conversa presenciada pelo caller:
+// {question:{identity_sha256,id}, response:<texto exato>, source, resolved_at}.
+// Para mais de uma decisão, selecione pela identidade exata, sem ecoar challenge.
+const result = selection.decideObserved({ cwd: WORKING_DIR, milestone: RUN_ID,
+  observeAnswer(challenge) {
+    const actual = observedAnswers.find(a =>
+      a.question.id === challenge.question.id &&
+      a.question.identity_sha256 === challenge.question.identity_sha256);
+    return actual ? { ...actual, status: 'resolved' } : null;
+  }
+});
+```
+
+O helper canonicaliza o texto da resposta contra a rodada original, emite e
+revalida o handle opaco, confere a resposta persistida e mantém os gates normais.
+Uma resposta ausente, conflitante ou de outra rodada recusa antes de publicar.
+Essa API é a ponte do caller, não uma promessa de integração automática da UI.
+`--mode step` do adaptador conserva o snapshot e permite materialização/perguntas
+administrativas entre unidades; cada `/forge-next` executa uma única unidade.
+
 Módulos: `scripts/forge-milestone-time-selection.js` (adesão, fronteira do owner,
 rodadas, decisão, bloco de prompt, regra do roadmap, projeção de vínculo e retomada),
 `scripts/forge-milestone-options.js` (validador, estimador, render e rodadas),

@@ -7,7 +7,10 @@ const orchestrateDefault = require('./forge-orchestrate.js');
 const runtime = require('./forge-runtime.js');
 
 const PROTOCOL_VERSION = runtime.PROTOCOL_VERSION;
-const MODES = Object.freeze(['auto', 'task']);
+// Step keeps the same durable administrative flow; each advance still returns
+// at one dispatch and the host stops after completing that unit. Its cumulative
+// safety budget is not a one-step budget that could hide the next question.
+const MODES = Object.freeze(['auto', 'task', 'step']);
 const COMMANDS = Object.freeze(['next', 'pause', 'resume', 'status', 'complete', 'decompose-pause', 'decompose-continue', 'consume-failure', 'reenter', 'resume-budget', 'resume-time-option',
   'batch-status', 'batch-ack']);
 const TERMINAL = new Set(['completed', 'blocked', 'failed']);

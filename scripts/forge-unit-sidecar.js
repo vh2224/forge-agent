@@ -1251,7 +1251,8 @@ function unitLabel(request, loc) {
 function artifactFingerprint(request) {
   const linked = request.linked_begin_key
     ? require('./forge-attempt-recovery').requestIdentity(require('./forge-attempt-recovery').canonicalRequest(request)).linked_entry : null;
-  return require('./forge-request-fingerprint').projectFingerprint(request, linked);
+  const base = require('./forge-request-fingerprint').projectFingerprint(request, linked);
+  return request.partialContinuation === undefined ? base : hash(JSON.stringify({ base, partialContinuation: request.partialContinuation }));
 }
 
 function artifactAttemptFiles(request) {
@@ -2780,6 +2781,8 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
     if (!executingObserved) { executingObserved = true; notifyPhase('executing'); }
   };
   const r = request || {}, route = r.route || {};
+  if (r.partialContinuation !== undefined || runtime.partialContinuation !== undefined)
+    require('./forge-execution-continuation').validate(runtime.partialContinuation, r);
   // Issue 343 U3b: the explicit cohort-member branch exists only with the member's live handle
   // (beside the request, never inside it); a request naming a batch or an aggregate claim never
   // takes the single path without it, and combinations not yet integrated refuse before any write.
@@ -2797,8 +2800,12 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
   const nativeAuthority = () => hash(JSON.stringify({ request: r, capabilities: runtime.activeCapabilities, verification: runtime.verification }));
   const nativeAuthorityHash = nativeExecution ? nativeAuthority() : null;
   const nativePromptIdentity = nativeExecution && r.nativePromptFile && fs.existsSync(r.nativePromptFile) ? physicalFileIdentity(r.nativePromptFile) : null;
-  if (route.dispatch_allowed !== true || (!nativeExecution && (route.worker_mode !== 'sidecar' || !route.sidecar_declared))
-    || !guard.dispatch_allowed) fail(guard.reason_code || 'route-refused', guard.hint);
+  if (route.dispatch_allowed !== true || !guard.dispatch_allowed) fail(guard.reason_code || 'route-refused', guard.hint);
+  if (!nativeExecution && (route.worker_mode !== 'sidecar' || !route.sidecar_declared)) {
+    fail('execution-entrypoint-incompatible', route.worker_mode === 'native' && r.scope === 'milestone'
+      ? 'Native milestone execution requires the native owner delivery API (forge-native-execution), not runUnitSidecar.'
+      : 'This execution entrypoint requires a declared sidecar route or standalone native execution.');
+  }
   if (transport.mode === 'execute' && !fs.existsSync(`${r.resultFile}.receipt.json`)) {
     preflightExecutionVerification(r, { verification: runtime.verification, ...(member ? { memberView: member.view() } : {}) });
   }
@@ -3067,7 +3074,8 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
     const detail = diagnostic(error.diagnostic?.reason || (code === 'untrusted-output-barrier'
       ? 'control-data-output' : code === 'artifact-direct-write-detected' ? 'validator-failed'
         : ['ready', 'executed'].includes(record.phase) ? 'publication-failed' : 'adapter-failed'), error.diagnostic);
-    const replayable = ['ready', 'executed'].includes(record.phase);
+    const incompleteExecution = require('./forge-execution-continuation').incomplete(record);
+    const replayable = ['ready', 'executed'].includes(record.phase) && !incompleteExecution;
     if (replayable) error.stage = 'publication';
     error.diagnostic = detail;
     if (record.final_evidence) record.final_evidence = { ...record.final_evidence,
@@ -3077,11 +3085,12 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
     let failure = { status: 'adapter-failed', dispatch_id: dispatchId, reason_code: code,
       ...(retained ? { provisional_terminal: { present: true, state: retained.state, accepted: false } } : {}),
       ...(record.returned_response ? { returned_response: record.returned_response } : {}),
+      ...(record.rejected_candidate ? { rejected_candidate: record.rejected_candidate } : {}),
       ...(record.plan_task_diagnostic ? { plan_task_diagnostic: record.plan_task_diagnostic } : {}),
       provider_called: typeof error.provider_called === 'boolean' ? error.provider_called : record.provider_called === true ? true : 'unknown',
       error_class: xllm.classifyErrorClass(error.message), diagnostic: detail,
       final_evidence: record.final_evidence || null,
-      layer: replayable ? 'publication' : 'transport-adapter',
+      layer: error.stage === 'plan-admission' ? 'plan-admission' : replayable ? 'publication' : 'transport-adapter',
       duration_ms: record.started_at ? Date.now() - Date.parse(record.started_at) : null,
       ...(record.execution ? { request_sha256: fingerprint, packaged_context: record.execution.packaged_context || null,
         budgets: record.execution.budgets, layer: replayable ? 'publication' : 'writing-adapter',
@@ -3100,7 +3109,7 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
     const failedSessionSha = sessionShaOf(null, error);
     if (failedSessionSha) record.session_sha256 = failedSessionSha;
     // Never overwrite the validated response if publication was interrupted.
-    if (!replayable && !transaction?.receiptDone) {
+    if (!replayable && !incompleteExecution && !transaction?.receiptDone) {
       writeSameJson(receiptFile, { ...record, phase: 'failed', failure });
       if (transaction) transaction.receiptDone = true;
     }
@@ -3120,7 +3129,7 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
       else {
         failure.recovery = 'unavailable';
         failure.recovery_reason_code = require('./forge-attempt-telemetry').code(captureError.code, 'recovery-capture-failed');
-        if (!replayable) writeSameJson(receiptFile, { ...record, phase: 'failed', failure });
+        if (!replayable && !incompleteExecution) writeSameJson(receiptFile, { ...record, phase: 'failed', failure });
         writeSameJson(resultFile, failure);
       }
     }
@@ -3130,7 +3139,7 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
       // no recovery state or authorization is fabricated for an invalid identity.
       failure.recovery = 'unavailable';
       failure.recovery_reason_code = transaction.captureOutcome.code;
-      if (!replayable) writeSameJson(receiptFile, { ...record, phase: 'failed', failure });
+      if (!replayable && !incompleteExecution) writeSameJson(receiptFile, { ...record, phase: 'failed', failure });
       writeSameJson(resultFile, failure);
     }
     if (!transaction?.cleanupDone) {
@@ -3166,6 +3175,10 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
     record.returned_response = { version: 1, sha256: hash(bytes), bytes: bytes.length,
       channel: 'resultFile.returned.json', unit_validation: 'pending' };
     if (recordTelemetry && result.transport_telemetry) record.telemetry = result.transport_telemetry;
+    if (recordTelemetry && result.transport_telemetry && record.final_evidence) {
+      record.final_evidence = { ...record.final_evidence,
+        model_observed: observedModelTelemetry(result.transport_telemetry).model_observed, stage: 'returned' };
+    }
     json(receiptFile, record);
   }
   function writeProvisionalAnchor(file, bytes) {
@@ -3296,6 +3309,7 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
     if (member && existing.milestone_delivery && ['executed','ready','residual'].includes(existing.phase)) {
       return await replayRetainedMember(existing);
     }
+    if (require('./forge-execution-continuation').incomplete(existing)) fail('execution-partial-continuation-required');
     if (existing.phase === 'ready' || existing.phase === 'executed') {
       if (nativeExecution) {
         const { native: ignoredNative, dispatch_id: ignoredDispatch, workflow_id: ignoredWorkflow,
@@ -3390,6 +3404,8 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
   const fix = transport.mode === 'fix' ? prepareReviewFix(r, loc, { cwd, root, resultFile, route, dispatchId }) : null;
   const executionApi = loc.execution ? require('./forge-task-execution') : null;
   const execution = executionApi ? executionApi.prepare({ ...r, ...(nativeBinding ? { nativeInvocation: nativeBinding } : {}) }, root, cwd) : null;
+  const partialContinuation = runtime.partialContinuation === undefined ? null
+    : require('./forge-execution-continuation').apply(runtime.partialContinuation, r, execution);
   let executeProcedure;
   if (transport.mode === 'execute') {
     executeProcedure = require('./forge-procedure-context').loadProcedureContext({ cwd,
@@ -3461,6 +3477,7 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
     ...(planGeneration ? { plan_generation: planGeneration } : {}),
     ...(resumedFrom ? { resumed_from: resumedFrom, session_sha256: resumeSessionSha } : {}),
     ...(execution ? { execution: { inputs: execution.inputs, budgets: execution.budgets }, reset_state_file: executionStateFile } : {}),
+    ...(partialContinuation ? { partial_continuation: partialContinuation } : {}),
     input_pending_questions: r.pending_questions || [],
     request_fingerprint: r.preparationRequestFingerprint || null,
     preparation_identity: r.preparationIdentity || null,
@@ -4036,6 +4053,29 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
     // A transport failure can leave a queued liveness append: settle it before
     // the failed receipt and the terminal event are written.
     await livenessQueue;
+    if (transport.mode === 'plan' && error.rejected_candidate && error.stage === 'plan-admission') {
+      transportReturned = true;
+      if (error.plan_candidate) {
+        try { await preserveReturnedResponse(error.plan_candidate); }
+        catch { error.rejected_candidate.owner_retention = 'evidence-write-failed'; }
+      }
+      try {
+      const retained = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+      retained.rejected_candidate = error.rejected_candidate;
+      if (retained.returned_response) retained.returned_response.unit_validation = 'rejected';
+      if (error.transport_telemetry) {
+        retained.telemetry = error.transport_telemetry;
+        if (retained.final_evidence) retained.final_evidence = { ...retained.final_evidence,
+          ...observedModelTelemetry(error.transport_telemetry), stage: 'returned' };
+      }
+      json(receiptFile, retained);
+      } catch {
+        // Receipt I/O is secondary to the already observed semantic refusal.
+        // Keep the original error and telemetry; normal failure publication is
+        // attempted below and may retain evidence on its independent channel.
+        error.rejected_candidate.owner_receipt = 'evidence-write-failed';
+      }
+    }
     // The Claude adapter rewraps any exception of its packaging step (where the last launch hook
     // runs, before its owned child) as its prompt I/O code. When this attempt's own hook refused,
     // that wrap reports no prompt I/O failure: the original typed refusal (code, provider_called
@@ -4092,9 +4132,17 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
     if (retained) registerContinuation(error, finishContinuation);
     try { await recordFailure(error, extra); }
     catch (secondary) {
-      if (!retained) throw secondary;
-      error.provisional_handoff = { status: 'pending', reason_code: 'failure-handoff-unavailable',
-        secondary_code: require('./forge-attempt-telemetry').code(secondary.code, 'unknown') };
+      if (transport.mode === 'plan' && error.rejected_candidate && error.stage === 'plan-admission') {
+        error.rejected_candidate.owner_receipt = 'evidence-write-failed';
+        try { json(resultFile, { status: 'adapter-failed', dispatch_id: dispatchId,
+          reason_code: error.code || 'plan-admission-failed', layer: 'plan-admission', provider_called: true,
+          rejected_candidate: error.rejected_candidate, telemetry: observedModelTelemetry(error.transport_telemetry),
+          recovery: 'operator-required', retention_diagnostic: 'receipt-unavailable' }); } catch { /* original refusal remains primary */ }
+      } else {
+        if (!retained) throw secondary;
+        error.provisional_handoff = { status: 'pending', reason_code: 'failure-handoff-unavailable',
+          secondary_code: require('./forge-attempt-telemetry').code(secondary.code, 'unknown') };
+      }
     }
     throw error;
   }

@@ -688,6 +688,20 @@ function resumeRecord(cwd, id) {
   if (record.id !== id || !['milestone','task'].includes(record.kind)) throw resumeError('owner-resume-record-unknown');
   return { record, sha256: resumeDigest(read.buffer) };
 }
+function ensureStepRun(cwd, id, hostRuntime) {
+  const kind = require('./forge-ids').entityKind(id);
+  if (!['milestone', 'task'].includes(kind)) throw new Error('step-run-id-invalid');
+  const actor = observeHostSession(hostRuntime, process.env.FORGE_CLAUDE_OWNER_SESSION_ID);
+  if (!actor) throw new Error('owner-session-unavailable');
+  const existing = get(cwd, id);
+  if (existing) {
+    if (existing.host_runtime !== actor.hostRuntime || existing.session_id !== actor.sessionId)
+      throw new Error('step-run-owner-mismatch');
+    return existing;
+  }
+  return add(cwd, { id, kind, session_id: actor.sessionId, host_runtime: actor.hostRuntime,
+    owner_session_source: actor.source, cwd, root: cwd, isolation_mode: 'shared' });
+}
 function observedResumeOwner(options) {
   const observed = observeHostSession(options.hostRuntime, options.expectedSession);
   if (!observed || options.expectedSession !== undefined && observed.sessionId !== options.expectedSession) throw resumeError('owner-session-unavailable');
@@ -949,6 +963,8 @@ Flags:
       const result = args['inspect-owner-resume'] ? inspectOwnerResume(cwd, args['inspect-owner-resume'], options)
         : resumeOwner(cwd, args['resume-owner'], options);
       process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+    } else if (args['ensure-step-run']) {
+      process.stdout.write(JSON.stringify(ensureStepRun(cwd, args['ensure-step-run'], args['host-runtime'])) + '\n');
     } else if (args['owner-session']) {
       const observed = observeHostSession(args['host-runtime'], args['expected-owner-session']);
       if (!observed) throw new Error('owner-session-unavailable');
@@ -1082,7 +1098,7 @@ module.exports = {
   bumpHeartbeat, cleanupStale,
   inspectOwnerResume, resumeOwner, knownResumeBinding, settleInterruptedOwner,
   assertOwnerInterruptionAuthority, bindOwnerInterruptionAuthority, assertOwnerInterruptionCapacity,
-  observeHostSession, resolveBySessionId, resolveBySessionOwner, bumpOwnedHeartbeat, bumpLegacyOwnedHeartbeat, oldestActive,
+  observeHostSession, ensureStepRun, resolveBySessionId, resolveBySessionOwner, bumpOwnedHeartbeat, bumpLegacyOwnedHeartbeat, oldestActive,
   refreshLegacyAlias, migrateLegacyState, oldestActiveRecord, legacyAliasProjection,
   withAddressDefaults,
   runsDir, runFile, writeAtomic, withRunLock, normalizeMetadataPatch,

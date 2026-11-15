@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/parallelism/distribution.cjs');
+const unitEntry = require('./fixtures/issue-campaign/distribution.cjs');
 
 // Standalone acceptance suite: only Node built-ins and production modules.
 const assert = require('assert');
@@ -1268,10 +1268,11 @@ test('linked-task scoped pins follow the owner pre-T06 capture and the measured 
   }
   // #341: the affected surfaces are the owner after map plus exactly the surfaces the delta declares.
   const captureOrder = before.active_golden_before.surfaces.map((surface) => surface.source_id);
-  assert.deepStrictEqual(affected, captureOrder.filter((id) => id in OWNER_POST_T06.surfaces || delta341Row(delta, 'surfaces', id) || entry347Row(ENTRY_347, 'surfaces', id)),
-    'measured affected surfaces equal the owner after map plus the declared #341 surfaces');
-  assert.deepStrictEqual(affected.filter((id) => !delta341Row(delta, 'surfaces', id) && !entry347Row(ENTRY_347, 'surfaces', id)),
-    Object.keys(OWNER_POST_T06.surfaces).filter((id) => !delta341Row(delta, 'surfaces', id) && !entry347Row(ENTRY_347, 'surfaces', id)), 'outside the #341 delta the owner after map is unchanged');
+  const campaignSurface = id => Object.hasOwn(unitEntry.campaignLayer.surfaces, id);
+  assert.deepStrictEqual(affected, captureOrder.filter((id) => id in OWNER_POST_T06.surfaces || delta341Row(delta, 'surfaces', id) || entry347Row(ENTRY_347, 'surfaces', id) || campaignSurface(id)),
+    'measured affected surfaces equal the historical owner/deltas plus the independently pinned campaign surfaces');
+  assert.deepStrictEqual(affected.filter((id) => !delta341Row(delta, 'surfaces', id) && !entry347Row(ENTRY_347, 'surfaces', id) && !campaignSurface(id)),
+    Object.keys(OWNER_POST_T06.surfaces).filter((id) => !delta341Row(delta, 'surfaces', id) && !entry347Row(ENTRY_347, 'surfaces', id) && !campaignSurface(id)), 'outside declared deltas the owner after map is unchanged');
   const members341 = Object.values(delta.surfaces).flatMap((row) => row.members);
   assert.deepStrictEqual([...contributors].sort(), [...new Set([...Object.keys(OWNER_POST_T06.contributors), ...members341, ...Object.values(ENTRY_347_MEMBERS).flat(), ...unitEntry.files])].sort());
   for (const [file, [beforeSha, afterSha]] of Object.entries(OWNER_POST_T06.contributors)) {

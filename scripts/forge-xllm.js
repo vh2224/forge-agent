@@ -481,7 +481,8 @@ function acquireDiff(diffCmd, cwd) {
   }
   const lines = out.split('\n');
   if (lines.length > MAX_DIFF_LINES) {
-    return lines.slice(0, MAX_DIFF_LINES).join('\n') + '\n[diff truncated at 4000 lines]\n';
+    throw Object.assign(new Error('Review diff exceeds 4000 lines; use complete whole-file shards or explicitly split an oversized file.'),
+      { code: 'review-diff-too-large', provider_called: false });
   }
   return out;
 }
@@ -1034,6 +1035,8 @@ function buildPlanPrompt(contextText) {
     ' 2. Produce ONE slice plan file (S##-PLAN.md) and ONE task plan file (T##-PLAN.md)',
     '    per task. Return the FULL markdown content of every file — you write NOTHING to',
     '    disk; the orchestrator materializes your output.',
+    '    The slice task list MUST use one canonical checkbox per task:',
+    '    - [ ] **T01: Task title** (and T02, etc.). Headings or tables alone do not list tasks.',
     ' 3. Every T##-PLAN.md MUST carry a YAML frontmatter block with this exact structured',
     '    schema (the executor enforces it — a missing or malformed block fails the task).',
     '    INDENTATION IS PART OF THE CONTRACT. `must_haves:` has EXACTLY THREE children:',
@@ -3225,6 +3228,7 @@ async function runPlanCore(opts) {
   // returned T##-PLAN must carry a structured, well-formed must_haves block or we abort
   // BEFORE exit 0 so the orchestrator falls back to the Claude planner.
   const { hasStructuredMustHaves, parseMustHaves } = require('./forge-must-haves.js');
+  try {
   for (const tp of parsed.task_plans) {
     if (!hasStructuredMustHaves(tp.content)) {
       throw new Error(`${tp.id} is legacy — GPT plan must carry a structured must_haves block`);
@@ -3238,6 +3242,35 @@ async function runPlanCore(opts) {
   // Issue 343 U0c: explicit depends/writes, canonical membership and a valid task graph,
   // still before any success byte (named refusal, provider_called true).
   admitPlanCandidate(parsed, path.resolve(opts.contextRoot || cwd));
+  } catch (error) {
+    // A closed, structurally valid transport response is useful evidence even
+    // when strict semantic admission rejects it. Never label this ready.
+    const candidate = { ...parsed, protocol_version: PROTOCOL_VERSION,
+      dispatch_id: dispatchId, started_at: startedAt,
+      ...(transportTelemetry ? { transport_telemetry: transportTelemetry } : {}) };
+    const bytes = Buffer.from(JSON.stringify({ version: 1, trust: 'rejected-unpublishable',
+      reason_code: error.code || 'plan-admission-failed', result: candidate }, null, 2));
+    const retained = `${resultFile}.rejected.json`;
+    error.provider_called = true;
+    error.stage = 'plan-admission';
+    error.transport_telemetry = transportTelemetry;
+    error.rejected_candidate = { channel: 'resultFile.rejected.json', bytes: bytes.length,
+      sha256: require('crypto').createHash('sha256').update(bytes).digest('hex'), status: 'too-large' };
+    // The response schema is already bounded by the transport. Bound this
+    // additional private evidence too, without publishing or printing payloads.
+    if (bytes.length <= 8 * 1024 * 1024) {
+      error.plan_candidate = candidate;
+      try {
+        if (fs.existsSync(retained)) {
+          const stat = fs.lstatSync(retained);
+          if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== bytes.length || !fs.readFileSync(retained).equals(bytes))
+            throw new Error('candidate-conflict');
+        } else fs.writeFileSync(retained, bytes, { flag: 'wx', mode: 0o600 });
+        error.rejected_candidate.status = 'retained';
+      } catch { error.rejected_candidate.status = 'evidence-write-failed'; }
+    }
+    throw error;
+  }
 
   const finishedAt = normalizedFinishedAt ||= new Date().toISOString();
   const planTransport = appServerOutput.transport || { kind: 'unknown', version: 'unknown' };

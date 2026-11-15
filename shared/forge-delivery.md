@@ -1,5 +1,48 @@
 # Forge delivery by acceptance criterion
 
+## Retained partial execution
+
+An `executed` standalone partial with a failed delivery capture retains valuable
+code but cannot publish by replay. Recovery returns
+`execution-partial-continuation-required` before any reset, disposition or model
+fallback. A complete saved response still replays; an unverified partial may run
+verification once, and a verified environment-only partial keeps the existing
+`forge-env-promote` checks without requiring another writer.
+
+The owner handles this result using `forge-execution-continuation.create`:
+
+```js
+const continuation = require(FORGE_SCRIPTS_DIR + '/forge-execution-continuation.js').create({
+  request: originalRequest,
+  paths: residualQualifiedPaths,
+  processProbe: joinedProcessObservation
+});
+const result = await require(FORGE_SCRIPTS_DIR + '/forge-unit-sidecar.js').runUnitSidecar(
+  continuation.request, { ...liveRuntime, partialContinuation: continuation.capability });
+```
+
+Derive the exact residual file paths from unmet implementation criteria and the
+original plan, not from a newly broadened scope. The live process callback must
+prove the actual previous writer joined; unknown/live processes refuse. The
+helper rechecks original source hashes, every code root, held claim generation,
+pending task questions and receipt identity. The child uses a separate immutable
+request/result/receipt and native prompt file with the same explicit route; normal
+plan, security, claim and verification admission still run. Exact residual paths
+are enforced on declarations and independently observed deltas. Its deterministic
+identity replays an existing child rather than creating another inference.
+Preserve the original receipt/result/state; never patch a failed capture to pass.
+
+## Protected-window hook observations
+
+During a coordinated native preparation window, `forge-hook` retains observational
+tool evidence under `forge-owner-transport-window.controlRoot(owner)` in
+`hook-evidence/<binding_sha256>/<canonical-evidence-name>.jsonl`. This private
+external journal survives window settlement; it is not replayed as an authorized
+owner append and grants no consent or publication authority. The strict owner
+snapshot and live join requirements remain in force. Other `.gsd` writes still
+refuse. Legacy uncoordinated embedding must supply the supported owner transport
+adapter; absence of a protected window is not evidence of compatibility.
+
 This contract builds a deterministic delivery projection for review, QA and human
 acceptance. It does not change verification gates, workflow state or approval. The
 projection lives beside the unit SUMMARY as `<unit>-DELIVERY.json`; the SUMMARY

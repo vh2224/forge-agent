@@ -8,6 +8,23 @@ function ownerOf(owner){return roots.realDirectory(owner);}
 function controlRoot(owner){return path.join(require('os').tmpdir(),'forge-artifact-owner-'+roots.digest(roots.key(ownerOf(owner))));}
 function windowFile(owner){return path.join(locks.lockPath(controlRoot(owner),'owner-transport-window'),'binding.json');}
 function observed(owner){const dir=locks.lockPath(controlRoot(owner),'owner-transport-window');if(!fs.existsSync(dir))return null;try{const file=windowFile(owner),stat=fs.lstatSync(file);if(!stat.isFile()||stat.isSymbolicLink())throw error('owner-window-unmeasured');const bytes=fs.readFileSync(file),binding=JSON.parse(bytes);if(binding.owner!==ownerOf(owner))throw error('owner-window-unmeasured');return{binding,sha256:sha(bytes)};}catch{throw error('owner-window-unmeasured');}}
+// Hook observations are telemetry, never authority. During a protected turn keep
+// them in its external control journal, rather than mutating the owner snapshot.
+// This journal is deliberately not replayed as an authorized owner append.
+function appendHookEvidence(owner,fileSlug,line){
+ owner=ownerOf(owner);
+ if(typeof fileSlug!=='string'||path.basename(fileSlug)!==fileSlug||!/^evidence[-~][A-Za-z0-9_.~-]+\.jsonl$/.test(fileSlug))throw error('hook-evidence-path-invalid');
+ if(typeof line!=='string'||Buffer.byteLength(line)>2048||/[\r\n]/.test(line))throw error('hook-evidence-record-invalid');
+ JSON.parse(line);
+ const seen=observed(owner);
+ const dir=seen?path.join(controlRoot(owner),'hook-evidence',seen.sha256):path.join(owner,'.gsd','forge');
+ const append=()=>{fs.mkdirSync(dir,{recursive:true});const file=path.join(dir,fileSlug);if(fs.existsSync(file)&&(!fs.lstatSync(file).isFile()||fs.lstatSync(file).isSymbolicLink()))throw error('hook-evidence-path-invalid');fs.appendFileSync(file,line+'\n',{encoding:'utf8',mode:0o600});return{deferred:!!seen,file,binding_sha256:seen?.sha256||null};};
+ // Recheck under the same owner mutation serialization when no window exists:
+ // a newly starting preparation cannot race an ordinary append.
+ if(!seen)return withMutation(owner,append);
+ if(observed(owner)?.sha256!==seen.sha256)throw error('owner-window-binding-changed');
+ return append();
+}
 function held(cap){const entry=cap&&caps.get(cap);if(!entry||!locks.assertOwned(entry.lock))throw error('owner-window-capability-required');const seen=observed(entry.owner);if(!seen||seen.sha256!==entry.binding_sha256)throw error('owner-window-binding-changed');return entry;}
 function assertMutationAllowed(owner){owner=ownerOf(owner);const seen=observed(owner);if(!seen)return true;const cap=context.getStore()?.cap,entry=cap&&caps.get(cap);if(!entry||entry.owner!==owner)throw error('owner-window-busy');held(cap);return true;}
 function currentPublicationGuard(owner,mutationOnly=false){const live=context.getStore();return live?.owner===ownerOf(owner)&&(!mutationOnly||live.mutation===true)?live.guard:undefined;}
@@ -141,5 +158,5 @@ async function runCliPreparation(requestFile,{acceptanceFile,invokeNative,ownerT
 
 function ensureTask(owner,taskId){const ids=require('./forge-ids');if(!ids.isValid(taskId)||ids.entityKind(taskId)!=='task'||/[\\/\0]/.test(taskId))throw error('owner-task-id-required');return withMutation(owner,()=>{let directory=ownerOf(owner);for(const part of ['.gsd','tasks',taskId]){directory=path.join(directory,part);if(fs.existsSync(directory)){const stat=fs.lstatSync(directory);if(stat.isSymbolicLink()||!stat.isDirectory())throw error('owner-task-path-untrusted');}else{if(part==='.gsd')throw error('owner-project-required');fs.mkdirSync(directory);}}return{directory,created:true};});}
 function writeBrief(owner,taskId,bytes){return withMutation(owner,()=>{const ensured=ensureTask(owner,taskId),file=path.join(ensured.directory,taskId+'-BRIEF.md');if(fs.existsSync(file)){const stat=fs.lstatSync(file);if(stat.isSymbolicLink()||!stat.isFile())throw error('owner-task-path-untrusted');if(!fs.readFileSync(file).equals(bytes))throw error('owner-brief-exists');return{file,unchanged:true};}fs.writeFileSync(file,bytes,{flag:'wx'});return{file,created:true};});}
-module.exports={open,withWindow,withMutation,assertMutationAllowed,currentPublicationGuard,withPublicationContext,close,recover,observed,controlRoot,metadataOwner,coordinatePreparation,coordinationResult,createTransportAdapter,protectPreparation,settlePreparation,runCliPreparation,ensureTask,writeBrief};
+module.exports={open,withWindow,withMutation,assertMutationAllowed,currentPublicationGuard,withPublicationContext,close,recover,observed,controlRoot,metadataOwner,coordinatePreparation,coordinationResult,createTransportAdapter,protectPreparation,settlePreparation,runCliPreparation,ensureTask,writeBrief,appendHookEvidence};
 if(require.main===module){try{const[mode,owner,taskId,source]=process.argv.slice(2);const result=mode==='--ensure-task'&&!source?ensureTask(owner,taskId):mode==='--write-brief'&&source?writeBrief(owner,taskId,fs.readFileSync(source)):null;if(!result)throw error('owner-window-usage');process.stdout.write(JSON.stringify(result)+'\n');}catch(e){process.stdout.write(JSON.stringify({ok:false,reason_code:e.code||'owner-window-failed',provider_called:false})+'\n');process.exitCode=1;}}

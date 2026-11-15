@@ -10,7 +10,8 @@ const ids = require('./forge-ids');
 const parallel = require('./forge-parallelism');
 const roots = require('./forge-code-roots');
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
-function fail(code) { throw Object.assign(new Error(code), { code }); }
+function fail(code, offendingPath) { throw Object.assign(new Error(code), { code,
+  ...(offendingPath ? { offending_path: offendingPath } : {}) }); }
 const autoPlanGate = new AsyncLocalStorage();
 // Shared with the milestone adapter: identical canonical/legacy selection,
 // conflict, supplied-path and no-link rules. No dependency back to the adapter.
@@ -348,7 +349,8 @@ function verifyResult(cwd, prepared, result) {
     if (multiple && (typeof entry === 'string' ? !entry.includes('::') : !entry.root_id)) fail('execution-result-root-required');
     const resolved = roots.resolvePath(prepared.execution_contract, typeof entry === 'string' ? entry
       : { root_id: entry.root_id || prepared.execution_contract.primary_root_id, path: entry.path }, { legacy: !multiple });
-    if (!prepared.claims.some(claim => roots.covers(claim, resolved))) fail('execution-outside-claim');
+    if (!prepared.claims.some(claim => roots.covers(claim, resolved))
+        || prepared.continuation_paths && !prepared.continuation_paths.includes(roots.qualified(resolved))) fail('execution-outside-claim', roots.wire(resolved));
     files[roots.qualified(resolved)] = fs.existsSync(resolved.absolute) ? hash(fs.readFileSync(resolved.absolute)) : null;
   }
   // Independently inspect every checkout; a caller's files_changed is never the
@@ -360,11 +362,19 @@ function verifyResult(cwd, prepared, result) {
     const after = new Map(now.pre_dirty.map(p => [p.path, p.hash]));
     for (const rel of new Set([...before.keys(), ...after.keys()])) {
       if (before.get(rel) === after.get(rel)) continue;
+      // An empty unversioned directory's sentinel can appear/disappear when its
+      // first/last leaf changes. Ignore only a proved surviving container whose
+      // prior directory identity is present; never file/directory replacement.
+      const container = path.resolve(snapshot.code_dir, rel);
+      if ((before.get(rel) === 'dir' && !after.has(rel)
+          || after.get(rel) === 'dir' && !before.has(rel) && [...before.keys()].some(p => p.startsWith(rel + '/')))
+          && fs.existsSync(container) && fs.lstatSync(container).isDirectory() && !fs.lstatSync(container).isSymbolicLink()) continue;
       const resolved = roots.resolvePath(prepared.execution_contract, { root_id: snapshot.root_id, path: rel });
-      if (!prepared.claims.some(claim => roots.covers(claim, resolved))) fail('execution-outside-claim');
+      if (!prepared.claims.some(claim => roots.covers(claim, resolved))
+          || prepared.continuation_paths && !prepared.continuation_paths.includes(roots.qualified(resolved))) fail('execution-outside-claim', roots.wire(resolved));
       const q = roots.qualified(resolved);
       const observed = fs.existsSync(resolved.absolute) ? hash(fs.readFileSync(resolved.absolute)) : null;
-      if (!(q in files)) fail('execution-result-omitted-delta');
+      if (!(q in files)) fail('execution-result-omitted-delta', roots.wire(resolved));
       if (files[q] !== observed) fail('execution-result-raced');
     }
   }
