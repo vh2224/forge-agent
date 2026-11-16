@@ -32,6 +32,8 @@ const REASONS = Object.freeze({
   'provider-unavailable': 'transport', 'publication-failed': 'publication',
   'host-observation-failed': 'adapter', 'verification-capture-failed': 'verification',
   'adapter-failed': 'adapter', 'anomalous-silence': 'transport',
+  'codex-readonly-context-unsupported': 'capability',
+  'unsupported-sidecar-unit': 'capability',
   'budget-exceeded-while-active': 'transport', 'duplicate-terminal':'envelope', 'event-after-terminal':'envelope',
   // S04/T02: the app-server asked for a human answer; refused and the turn stopped.
   'appserver-input-required': 'transport',

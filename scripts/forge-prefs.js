@@ -455,14 +455,15 @@ function validatePrefs(resolved, schema) {
   // silently accepted as a domain that can never select its intended model.
   if (schema.properties?.routing && isPlainObject(resolved?.routing)) {
     const tiers = new Set(['light', 'standard', 'heavy', 'max']);
+    const artifactPhases = Array.isArray(schema.$defs?.artifactRoutingPhase?.enum) ? schema.$defs.artifactRoutingPhase.enum : [];
     const warn = (key, expected) => warnings.push({ key, message: `${key}: ${expected}` });
     for (const [domain, phases] of Object.entries(resolved.routing)) {
       const prefix = `routing.${domain}`;
       if (!isPlainObject(phases)) { warn(prefix, 'expected a routing domain object'); continue; }
       for (const [phase, cells] of Object.entries(phases)) {
         const phaseKey = `${prefix}.${phase}`;
-        if (phase !== 'executor' && phase !== 'planner') {
-          warn(phaseKey, 'expected a routing phase (executor or planner), then tier arrays');
+        if (phase !== 'executor' && phase !== 'planner' && !artifactPhases.includes(phase)) {
+          warn(phaseKey, 'expected a routing phase (executor, planner or an exact supported artifact unit type), then tier arrays');
           continue;
         }
         if (!isPlainObject(cells)) { warn(phaseKey, 'expected a routing phase object'); continue; }

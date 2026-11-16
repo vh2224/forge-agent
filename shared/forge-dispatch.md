@@ -1325,7 +1325,7 @@ Applicability by `unit_type`:
 | `memory-extract` | resolved from `tier_models.light` | yes when the resolver selects a declared sidecar; native otherwise |
 | other preparation/closure units | resolved per unit | only when `forge-transport-capabilities.js` declares that exact unit; unsupported preparation routes refuse explicitly |
 
-`plan-milestone` and `estimate-milestone` are **never** covered by `workers:` (locked) — they stay on tier `max`, with the model resolved through `tier_models.max`.
+`plan-milestone` and `estimate-milestone` are **never** covered by `workers:` (locked) — they stay on tier `max`, with the model resolved through the exact-unit routing cell or fallback `tier_models.max`.
 
 The `native` path passes the resolver result through
 `forge-native-invocation.js`; the adapter validates the actual host tool and
@@ -1336,6 +1336,24 @@ write/read-only behavior, artifact units return bounded content, and
 without a declared transport refuse explicitly.
 
 #### Single-call resolver — `forge-routing.js` (ONE call per dispatch)
+
+Routing cells use `executor` for `execute-task`, `planner` for `plan-slice`, and
+the exact unit type for milestone artifacts: `research-milestone`,
+`research-slice`, `discuss-milestone`, `discuss-slice`, `plan-milestone`,
+`estimate-milestone`, `plan-check`, `complete-slice`, `complete-milestone`.
+For example, `routing.default.research-milestone.standard` can explicitly name
+a supported Claude model while existing executor/planner cells keep their GPT
+choices. Missing cells preserve normal tier fallback; memory and unknown phases
+do not gain a routing cell. `plan-milestone` retains its `max` tier and has no
+relationship to the `planner` cell. The cascade still replaces a whole domain:
+use the canonical prefs editing helper to preserve the effective domain and its
+existing sibling cells; do not replace a domain with an isolated example fragment.
+
+The dispatch guard also checks the selected transport's deterministic artifact
+profile. A Codex sidecar profile refused by #350 is already refused by resolution
+with its exact reason/hint, without changing that route or contacting a provider.
+Configure a supported per-unit route explicitly, then resolve again. No automatic
+artifact fallback or weakening of the transport's read-only context is implied.
 
 The Engine Resolution (the old step 1.45) and the tier-chain resolution of § Tier Resolution (the old step 4, `forge-tier-chain.js --json`) **collapse into ONE call** to `forge-routing.js`. The resolver is a **superset** of `readTierChain()`: the chain it returns already carries the `engine` per member, so the wiring calls the CLI **once** with all inputs and consumes the chain — never re-resolving mid-unit (`--next-after` is used only on a failure trigger; see § Cross-engine chain walk).
 
@@ -2122,7 +2140,7 @@ Materialization is **orchestrator-only** — codex never touches `.gsd/**`. Afte
 | `workers.timeout` | int (seconds) \| null | `null` (→ tier ceiling) | **Safety ceiling** per sidecar attempt, forwarded as `--timeout` via the resolver's `$WORKERS_TIMEOUT`. Absent/null → route tier ceiling (light/standard/heavy/max = 900/1800/3600/5400 s); explicit 1..86400 overrides; legacy `300` ignored with warning `legacy-300-ignored`; invalid → tier ceiling with warning. Source: `scripts/forge-worker-timeout.js resolveWorkerCeiling` (`WORKERS_TIMEOUT_SOURCE`). Liveness is the primary kill authority; reaching the ceiling with a live stream ends as `budget-exceeded-while-active` |
 | `workers.codex_model` | string (model id) | unset (`null`) | Legacy fallback for the sidecar `--model` when no routed Codex chain member leads; unset **and** no Codex chain → Codex CLI default. The flag itself is driven by `$SIDECAR_MODEL` (`sidecarModelFor`) |
 
-`plan-milestone` and `estimate-milestone` are intentionally **absent** from this table — neither is routed through `workers:` (locked tier `max`, model through `tier_models.max`). The scaffold that documents these keys (commented) ships in `forge-agent-prefs.jsonc § Workers Settings` (S05); the reader operates with the safe defaults above without it.
+`plan-milestone` and `estimate-milestone` are intentionally **absent** from this table — neither is routed through `workers:` (locked tier `max`, model through the exact-unit routing cell or fallback `tier_models.max`). The scaffold that documents these keys (commented) ships in `forge-agent-prefs.jsonc § Workers Settings` (S05); the reader operates with the safe defaults above without it.
 
 #### Domain metadata — format fixed by S02, emitted by S03
 

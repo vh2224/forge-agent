@@ -158,6 +158,8 @@ try {
       const blocked = adapter.invoke(host, mode, 'next', input, initial, deps).result;
       assert.strictEqual(blocked.reason_code, 'time-option-pending', JSON.stringify(blocked));
       assert.strictEqual(blocked.snapshot.step_count, 1, 'administrative question costs no additional worker step');
+      assert(blocked.controller_result.details.time_options.decision_rounds.some(round => round.options.some(option => option.label === 'Sem contrato')),
+        'auto/step next exposes the original question labels without inferring an answer');
       const picked = answer(cwd, 'Sem contrato');
       const observed = { status: 'resolved', question: { identity_sha256: picked.opened.identity_sha256, id: picked.opened.question_id },
         response: 'Sem contrato', source: 'tool-answer', resolved_at: iso(NOW - 1000) };
@@ -230,6 +232,34 @@ try {
     assert.strictEqual(decided.choice, 'no-contract');
     assert.strictEqual(time.readContract({ cwd, milestone: M }).status, 'absent');
     assert.strictEqual(selection.resumeCheck(cwd, M, { milestone: M, options_sha256: opened.options_sha256 }).ok, true);
+  });
+  test('decision-diagnostics-preserve-safe-causes-and-original-round-labels', () => {
+    const cwd = enrolled(); materializeFor(cwd);
+    const { opened } = answer(cwd, 'Sem contrato');
+    const question = { identity_sha256: opened.identity_sha256, id: opened.question_id }, before = snapshot(cwd);
+    const observed = { status: 'resolved', question, response: 'Sem contrato', source: 'user-text', resolved_at: iso(NOW - 1000) };
+    const call = callback => selection.decideObserved({ cwd, milestone: M, clock: () => NOW, prefsReader: hermeticPrefs, observeAnswer: callback });
+    assert.strictEqual(call(() => ({ ...observed, response: 'no-contract' })).reason, 'time-decision-answer-mismatch');
+    for (const code of ['time-decision-answer-mismatch', 'time-decision-scope-mismatch', 'time-options-stale', 'time-options-invalid']) {
+      const error = Object.assign(new Error('PRIVATE-DIAGNOSTIC-DO-NOT-PRINT'), { code });
+      assert.strictEqual(call(() => { throw error; }).reason, code);
+      const direct = decide(cwd, { getDecisionHandle() { throw error; } });
+      assert.strictEqual(direct.reason, code);
+      assert.deepStrictEqual(snapshot(cwd), before, 'diagnostics never publish a decision');
+    }
+    for (const error of [new Error('PRIVATE-DIAGNOSTIC-DO-NOT-PRINT'), { code: 'time-PRIVATE-DIAGNOSTIC-DO-NOT-PRINT' }, { get code() { throw new Error('PRIVATE-DIAGNOSTIC-DO-NOT-PRINT'); } }]) {
+      const result = call(() => { throw error; });
+      assert.strictEqual(result.reason, 'time-decision-attestation-required');
+      assert(!JSON.stringify(result).includes('PRIVATE-DIAGNOSTIC-DO-NOT-PRINT'));
+      assert.deepStrictEqual(snapshot(cwd), before);
+    }
+    const view = selection.readSelectionState(cwd, M);
+    assert.strictEqual(view.round, null, 'all persisted answers can still await live attestation');
+    const round = view.decision_rounds.find(row => row.question.id === question.id);
+    assert.strictEqual(round.response_format, 'option-label');
+    assert(round.options.some(option => option.label === 'Sem contrato' && option.canonical_answer === 'no-contract'));
+    assert.strictEqual(round.question.identity_sha256, question.identity_sha256);
+    assert.strictEqual(call(() => ({ ...observed, response: 'Sem contrato (Recomendado)' })).status, 'decided');
   });
   test('exports-codes-and-inert-import-without-controller', () => {
     for (const name of ['TIME_OPTION_REASON_CODES', 'TIME_OPTION_RESUME_CODES', 'estimateKeySuffix', 'estimateBeginKey', 'readSelectionState', 'enroll', 'prepareBoundary',

@@ -889,7 +889,12 @@ async function reviewFixMatrix() {
 
   for (const host of ['claude', 'codex']) for (const engine of ['claude', 'codex']) {
     for (const unitType of [...ARTIFACT_UNITS, 'plan-slice', 'execute-task', 'review-challenger', 'review-advocate', 'review-rebuttal']) {
-      assert.strictEqual(evaluateDispatchGuard({ host_runtime: host, worker_engine: engine, unit_type: unitType }).dispatch_allowed, true);
+      const admission = require('./forge-transport-capabilities').readOnlyArtifactAdmission({ engine,
+        workerMode: host !== engine ? 'sidecar' : 'native',
+        mode: require('./forge-transport-capabilities').UNIT_MODES[unitType], unitType });
+      const verdict = evaluateDispatchGuard({ host_runtime: host, worker_engine: engine, unit_type: unitType });
+      assert.strictEqual(verdict.dispatch_allowed, admission.admitted);
+      if (!admission.admitted) assert.strictEqual(verdict.reason_code, admission.reason_code);
     }
     // review-fix now has the scoped `fix` contract for claude/codex workers.
     if (host !== engine) {
@@ -997,6 +1002,7 @@ async function reviewFixMatrix() {
   // A saved ready receipt (created before #350) still replays first: no new inference.
   {
     const cwd = setup(), r = request(cwd, 'complete-slice', 'codex', 'gpt-5.6-sol'), p = payload(r);
+    r.route.dispatch_allowed = true; // Historical pre-#404 resolver result, replay only.
     assert.strictEqual(unit.beginArtifactAttempt(r).state, 'started');
     await unit.acceptArtifactResult(r, p, { providerCalled: true });
     assert.strictEqual(JSON.parse(fs.readFileSync(`${r.resultFile}.receipt.json`, 'utf8')).phase, 'ready');
@@ -1016,7 +1022,7 @@ async function reviewFixMatrix() {
     ['memory', dir => memoryRequest(dir, 'codex', 'T-20260924010101-route-mismatch', 'M001')],
   ]) {
     const cwd = setup(), r = makeRequest(cwd);
-    r.route = { ...r.route, sidecar_model: 'gpt-5.6-sol' };
+    r.route = { ...r.route, dispatch_allowed: true, sidecar_model: 'gpt-5.6-sol' }; // Isolate malformed historical model identity.
     let providerCalls = 0;
     xllm.invokeCodexAppServer = async () => { providerCalls++; return { finalText: '{}' }; };
     await assert.rejects(() => unit.runUnitSidecar(r), error => error.code === 'route-model-identity-mismatch', kind);

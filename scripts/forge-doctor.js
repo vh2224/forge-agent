@@ -47,7 +47,7 @@ const SCHEMA_FILE = '.gsd/SCHEMA-VERSION';
 // Single source of truth for the check names this CLI accepts via `--check`.
 // `runCheck` dispatches these; the unknown-check message and `--help` text
 // must both be derived from this array — never hand-repeated.
-const VALID_CHECKS = ['schema', 'projection-versioned', 'review-model-drift', 'plan-repo-declared', 'capabilities', 'workspace-consistency', 'run-overlap', 'resources', 'memory-quarantine', 'claim-stuck'];
+const VALID_CHECKS = ['schema', 'projection-versioned', 'review-model-drift', 'plan-repo-declared', 'capabilities', 'workspace-consistency', 'run-overlap', 'resources', 'memory-quarantine', 'claim-stuck', 'artifact-routing'];
 
 // ── checkSchema ───────────────────────────────────────────────────────────────
 /**
@@ -684,6 +684,7 @@ module.exports = {
   checkResources,
   checkMemoryQuarantine,
   checkClaimStuck,
+  checkArtifactRouting: (cwd, options) => require('./forge-artifact-routing-diagnostic').checkArtifactRouting(cwd, options),
   createOwnerRecoveryAdapter: options => require('./forge-owner-window-recovery').createObservedHostAdapter(options),
   inspectOwnerWindow: options => require('./forge-owner-window-recovery').inspect(options),
   recoverOwnerWindow: options => {
@@ -805,6 +806,8 @@ function runCheck(name, cwd, options = {}) {
       results.push({ check: c, ...r });
       // Advisory: `r.ok` is always true, so this never flips `allOk`.
       if (!r.ok) allOk = false;
+    } else if (c === 'artifact-routing') {
+      results.push({ check: c, ...module.exports.checkArtifactRouting(cwd, options) });
     } else if (c === 'capabilities') {
       const r = checkCapabilities(cwd, options);
       results.push(r);
@@ -861,6 +864,7 @@ function formatResults(results) {
     // warn on anything short of a genuinely clean/measured result; exit code
     // stays 0 in every case (advisory posture unchanged).
     const advisoryWarn = (r.check === 'plan-repo-declared' && Array.isArray(r.plans) && r.plans.length > 0)
+      || (r.check === 'artifact-routing' && r.verdict !== 'compatible')
       || (r.check === 'workspace-consistency' && r.divergentCount > 0)
       || (r.check === 'run-overlap' && (r.verdict === 'overlap' || r.verdict === 'inconclusive'))
       || (r.check === 'resources' && ((r.verdict && r.verdict !== 'clean') || Boolean(r.skipped)))

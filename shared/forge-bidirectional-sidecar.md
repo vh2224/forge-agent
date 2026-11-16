@@ -666,6 +666,40 @@ rule, and no route, preference, sandbox or permission changes; choosing another
 engine stays with the existing routing and recovery policy. Verified offline with
 simulated transports only; no live provider reproduction.
 
+**Resolver parity and explicit artifact routing (#404):** the dispatch guard now
+uses this same classification before advertising a route as allowed. An
+incompatible Codex sidecar artifact keeps its chosen model, engine, tier, effort
+and chain but returns `dispatch_allowed:false` with the exact
+`codex-readonly-context-unsupported` reason, profile/needs and a configuration
+hint. The transport still enforces its own check; stale or forged route metadata
+cannot authorize it. The human `[forge-agente]` line retains this closed cause.
+This deterministic configuration refusal is not a provider failure and does not
+silently walk the artifact chain or substitute Claude. Execution/plan-slice
+Layer2 recovery remains separate and unchanged.
+
+Milestone artifact units can now use exact named cells in `routing`, separately
+from `executor` and `planner`: `research-milestone`, `research-slice`,
+`discuss-milestone`, `discuss-slice`, `plan-milestone`, `estimate-milestone`,
+`plan-check`, `complete-slice` and `complete-milestone`. An absent cell still
+uses the normal domain/default/tier-model resolution. Cells select by unit type:
+standalone preparation aliases reuse `discuss-milestone`, `research-milestone`,
+`plan-milestone` and `plan-slice` for discuss/research/plan/brainstorm respectively;
+their admission still uses the actual standalone scope and phase.
+`plan-milestone` is its own
+cell, never `planner`; its default tier remains `max`. No existing preference is
+rewritten. An operator can explicitly select a supported artifact model without
+moving GPT execution/planning choices out of their existing cells.
+
+Use `forge-doctor.js --check artifact-routing --runtime claude --cwd <owner> --json`
+for the actual host, or explicitly request `--runtime both`. The advisory names
+each selected incompatible profile and its routing cell in the default domain;
+an actual dispatch also names its effective domain/tier cell in the refusal hint.
+Unknown resolution stays
+inconclusive. Structural prefs validation recognizes the exact phase cells and
+warns on unknown or malformed cells. A GPT tier is not universally invalid: its
+native Codex route has different capabilities, so host-dependent compatibility
+belongs in this diagnostic rather than a blanket static prefs rejection.
+
 Install/synchronize the updated Forge sources on **both** hosts. Updating only
 the guard or copying one adapter leaves stale skills and incomplete delivery.
 

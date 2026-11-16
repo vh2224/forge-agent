@@ -167,12 +167,12 @@ function applyFamilyPin(chain, familyPin, rawWorker, reasonParts) {
 }
 
 // ── Phase mapping ───────────────────────────────────────────────────────────
-// execute-task → executor; plan-slice → planner. plan-milestone is NEVER
-// captured (locked max/Fable). discuss-*/memory/complete-*/unknown → null.
-// null ⇒ phase-not-routable (resolves via the legacy tier chain).
+// Execution/planning keep their established cells; artifact units have exact
+// named cells, never the executor/planner cells. Memory/unknown stay unroutable.
 function mapPhase(unitType) {
   if (unitType === 'execute-task') return 'executor';
   if (unitType === 'plan-slice') return 'planner';
+  if (require('./forge-transport-capabilities').ARTIFACT_UNITS.includes(unitType)) return unitType;
   return null;
 }
 

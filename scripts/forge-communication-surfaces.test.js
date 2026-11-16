@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/issue-401/distribution.cjs');
+const unitEntry = require('./fixtures/issues-403-404/distribution.cjs');
 
 // forge-communication-surfaces.test.js — proves the orchestration and status
 // skills follow shared/forge-communication.md by POINTER, not by a second copy;
@@ -719,7 +719,7 @@ function checkPins(fixture = {}) {
     const row341 = deltaRow(delta, 'surfaces', surface.source_id);
     if (row341) {
       assert(surface.sha256 === entry347After('surfaces', surface.source_id, row341.after, entryDelta) || surface.sha256 === entry347After('surfaces', surface.source_id, row341.attributed_after || row341.after, entryDelta, true), `#341 pin ${surface.source_id} is a measured delta after`);
-      assert(readme.includes(row341.before) && readme.includes(surface.sha256), `#341 documented before/after ${surface.source_id}`);
+      assert(readme.includes(row341.before) && readme.includes(row341.after) && readme.includes(surface.sha256), `#341 documented historical and current before/after ${surface.source_id}`);
     }
     if (old.get(surface.source_id) !== surface.sha256) {
       changed.push(surface.source_id);

@@ -2800,7 +2800,13 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
   const nativeAuthority = () => hash(JSON.stringify({ request: r, capabilities: runtime.activeCapabilities, verification: runtime.verification }));
   const nativeAuthorityHash = nativeExecution ? nativeAuthority() : null;
   const nativePromptIdentity = nativeExecution && r.nativePromptFile && fs.existsSync(r.nativePromptFile) ? physicalFileIdentity(r.nativePromptFile) : null;
-  if (route.dispatch_allowed !== true || !guard.dispatch_allowed) fail(guard.reason_code || 'route-refused', guard.hint);
+  // Read-only artifact admission remains after saved-receipt replay below.
+  // A newly refused route cannot enter; historical ready receipts may replay.
+  if (route.dispatch_allowed !== true && guard.artifact_admission) {
+    require('./forge-transport-capabilities').assertReadOnlyArtifactContext({ engine: route.resolved_worker_engine,
+      workerMode: route.worker_mode, mode: transport.mode, scope: r.scope, phase: r.phase, unitType: r.unitType });
+  }
+  if (route.dispatch_allowed !== true || (!guard.dispatch_allowed && !guard.artifact_admission)) fail(guard.reason_code || 'route-refused', guard.hint);
   if (!nativeExecution && (route.worker_mode !== 'sidecar' || !route.sidecar_declared)) {
     fail('execution-entrypoint-incompatible', route.worker_mode === 'native' && r.scope === 'milestone'
       ? 'Native milestone execution requires the native owner delivery API (forge-native-execution), not runUnitSidecar.'
@@ -3512,7 +3518,7 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
   let finishContinuation = null;
   const options = { enterTransport: () => { enterTransport(); transportEntered = true; }, cwd, contextRoot: root, engine: route.resolved_worker_engine,
     permissionPolicy, permissionIdentity: permissionPolicy ? verificationIdentity : undefined,
-    unitType: r.unitType,
+    unitType: r.unitType, scope: r.scope, phase: r.phase,
     calibrationOptions: runtime.calibrationOptions,
     provisionalStoreRoot: runtime.provisionalStoreRoot,
     onProgress: snapshot => {

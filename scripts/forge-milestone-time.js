@@ -186,7 +186,7 @@ function readContract(options) {
   } catch (e) { return { status: 'invalid', reason: e.code?.startsWith('time-') ? e.code : 'time-source-unreadable' }; }
 }
 function liveAnswer(resolver, reference, scope, now) {
-  let a; try { a = resolver(reference); } catch { fail('time-decision-attestation-required'); }
+  let a; try { a = resolver(reference); } catch (error) { fail(require('./forge-time-decision-errors').safeDecisionFailure(error)); }
   if (!Number.isSafeInteger(now) || !a || a.reference !== reference || a.status !== 'resolved' || !text(a.answer) || !instant(a.resolved_at) || Date.parse(a.resolved_at) > now
       || !['user-text', 'tool-answer'].includes(a.source) || !exact(a.question, ['identity_sha256', 'id']) || !hash(a.question.identity_sha256) || !id(a.question.id)
       || !id(reference) || !object(scope) || !DECISION_KINDS.includes(scope.kind) || !hash(scope.request_sha256)

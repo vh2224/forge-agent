@@ -75,6 +75,14 @@ atravessando uma janela retida nem procure automaticamente em outros projetos.
 
 ### Diagnóstico geral
 
+Para configuração de artefatos que resolve para Codex sidecar read-only, use
+`forge-doctor.js --check artifact-routing --runtime <host atual> --cwd <owner> --json`.
+O diagnóstico é advisory, mantém a causa real e indica as células `routing` da
+unidade. Não altere `tier_models` de outros executores para contornar a recusa,
+não substitua modelos automaticamente e não prometa suporte no host nativo sem
+verificar a rota. Fases de artefato possuem células com seu nome exato; consulte
+`shared/forge-bidirectional-sidecar.md` antes de editar preferências autorizadas.
+
 Determine o runtime do host atual, sem sondar outro home, e execute:
 
 ```bash

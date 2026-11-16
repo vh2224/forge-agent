@@ -2126,6 +2126,7 @@ function authorizeSidecar(mode, opts = {}) {
       challenge: 'review-challenger', defend: 'review-advocate', rebuttal: 'review-rebuttal' })[mode];
     const guard = require('./forge-dispatch-guard').evaluateDispatchGuard({
       host_runtime: opts.hostRuntime, worker_engine: workerEngine, worker_mode: 'sidecar', unit_type: unitType,
+      ...(opts.scope === 'standalone-task' ? { scope: opts.scope, phase: opts.phase } : {}),
     });
     if (!guard.dispatch_allowed) throw boundaryError(guard.reason_code, guard.hint);
   }
