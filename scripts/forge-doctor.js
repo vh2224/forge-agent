@@ -913,7 +913,7 @@ function cliMain() {
   // These CLI entries inspect only. A live callback capability cannot be
   // serialized through flags or a request file and never comes from --apply.
   if ('owner-window' in args || 'retire-task' in args) {
-    const allowed = new Set(['owner-window','retire-task','request','outcome','successor','cwd','json','apply']);
+    const allowed = new Set(['owner-window','retire-task','request','receipt-copy','outcome','successor','cwd','json','apply']);
     const argv = process.argv.slice(2), seen = new Set(); let invalid = false;
     for (let i = 0; i < argv.length; i++) {
       const flag = argv[i], key = flag.slice(2);
@@ -933,10 +933,11 @@ function cliMain() {
     try {
       const recovery = require('./forge-owner-window-recovery');
       const request = args.request ? JSON.parse(recovery.readEvidence(path.resolve(args.request), 8 * 1024 * 1024)) : undefined;
+      const receiptCopy = args['receipt-copy'] ? path.resolve(args['receipt-copy']) : undefined;
       if (!windowMode && request.taskId !== args['retire-task']) throw Object.assign(new Error(), { code: 'task-retirement-request-mismatch' });
       const owner = path.resolve(args.cwd || process.cwd());
-      const report = windowMode ? module.exports.inspectOwnerWindow({ owner, request })
-        : module.exports.inspectTaskRetirement({ owner, request, outcome: args.outcome || (args.successor ? 'superseded' : 'cancelled'), successorId: args.successor });
+      const report = windowMode ? module.exports.inspectOwnerWindow({ owner, request, receiptCopy })
+        : module.exports.inspectTaskRetirement({ owner, request, receiptCopy, outcome: args.outcome || (args.successor ? 'superseded' : 'cancelled'), successorId: args.successor });
       if (args.apply) {
         process.stdout.write(JSON.stringify({ status: 'blocked', reason_code: 'owner-window-live-host-required', inspection: report,
           message: 'A ação exige o adaptador vivo do host; --apply e arquivos não atestam escritores nem decisões.' }) + '\n');
@@ -1013,10 +1014,11 @@ function cliMain() {
     process.stdout.write(`forge-doctor — Forge schema-version and projection-versioned checks
 
 Flags:
-  --owner-window [--request <json>] [--cwd <dir>] [--json]
+  --owner-window [--request <json>] [--receipt-copy <file>] [--cwd <dir>] [--json]
                                  inspect the exact held owner window, read-only
   --retire-task <id> --request <json> [--outcome cancelled|superseded]
-    [--successor <milestone-id>]   inspect administrative closure, read-only
+    [--successor <milestone-id>] [--receipt-copy <file>]
+                                 inspect administrative closure, read-only
                                  --apply cannot supply the required live host proof;
                                  use shared/forge-owner-recovery.md host adapter
   --check <name> [--cwd <dir>]   run check: ${VALID_CHECKS.join(' | ')} |

@@ -46,25 +46,21 @@ function stableSnapshot(root){
   worktree_metadata:snapshot.pre_dirty.map(entry=>pathMetadata(root.path,entry.path)).sort((a,b)=>a.path.localeCompare(b.path)),
   ...(index?{git_index:index}:{}),...(snapshot.svn_state?{svn_state_sha256:digest(snapshot.svn_state)}:{})};
 }
-function measureTask({owner,request}){
+function measureTask({owner,request,receiptCopy}){
  owner=roots.realDirectory(owner);const prep=require('./forge-task-preparation'),q=prep.validateRequest(request),fingerprint=prep.preparationRequestFingerprint(q);
  if(roots.key(roots.realDirectory(q.contextRoot||q.cwd))!==roots.key(owner))fail('owner-window-request-mismatch');
  const runBytes=read(runs.runFile(owner,q.taskId)),run=JSON.parse(runBytes);
  if(run.id!==q.taskId||run.kind!=='task'||!['claude','codex'].includes(run.host_runtime)||typeof run.session_id!=='string')fail('owner-window-run-binding-mismatch');
  const contract=q.execution_contract||roots.singleContract(owner,q.cwd);roots.validateContract(contract,{revalidate:true});
- if(run.worktrees!==undefined&&!Array.isArray(run.worktrees))fail('owner-window-code-roots-unmeasured');
- for(const wt of run.worktrees||[]){
-  if(!wt||!contract.code_roots.some(root=>roots.key(root.path)===roots.key(wt.path||''))
-    ||!require('./forge-isolation').validateWorktreeIdentity(wt.repo,wt.path,run.branch).ok)fail('owner-window-code-roots-unmeasured');
- }
- const file=require('./forge-unit-sidecar').artifactAttemptFiles(q).receiptFile,receiptBytes=read(file,8*1024*1024,true);
- let receipt=null;if(receiptBytes){receipt=JSON.parse(receiptBytes);if(receipt.dispatch_id!==q.dispatchId||receipt.request_fingerprint!==fingerprint)fail('owner-window-receipt-mismatch');}
+ const census=require('./forge-owner-recovery-roots').measure({owner,contract,run});
+ const evidence=require('./forge-owner-recovery-receipt').measure({owner,request:q,fingerprint,receiptCopy,read}),receipt=evidence.receipt;
  const scope={schema_version:1,owner,task_id:q.taskId,dispatch_id:q.dispatchId,previous_host_runtime:run.host_runtime,previous_host_session_sha256:digest(run.session_id),owner_identity_sha256:identity(owner),run_sha256:digest(runBytes),request_sha256:fingerprint,
-  receipt:{file,sha256:receiptBytes?digest(receiptBytes):null,phase:receipt?.phase||'missing'},
-  owner_surface_sha256:digest(require('./forge-task-execution').protectedSnapshot(owner)),code_states:contract.code_roots.map(stableSnapshot).sort((a,b)=>a.root_id.localeCompare(b.root_id))};
+  receipt:evidence.reference,worktree_bindings:census.bindings,
+  owner_surface_sha256:digest(require('./forge-task-execution').protectedSnapshot(owner)),code_states:census.roots.map(stableSnapshot).sort((a,b)=>a.root_id.localeCompare(b.root_id))};
  return{owner,run,request:q,receipt,scope};
 }
-function capture({owner,request}){
+function capture({owner,request,receiptCopy}){
+ if(receiptCopy!==undefined&&!request)fail('owner-window-request-required');
  owner=roots.realDirectory(owner);const seen=windows.observed(owner);if(!seen)return{owner,seen:null};
  const binding=seen.binding;
  if(binding.kind!=='artifact-preparation'||binding.coordination!=='observed-host-session-v1'
@@ -74,7 +70,7 @@ function capture({owner,request}){
  const runFile=runs.runFile(owner,binding.task_id),runBytes=read(runFile),run=JSON.parse(runBytes);
  if(run.id!==binding.task_id||run.kind!=='task'||run.host_runtime!==binding.host_runtime||digest(run.session_id||'')!==binding.host_session_sha256)fail('owner-window-run-binding-mismatch');
  if(!request)return{owner,seen,run,metadata};
- const measured=measureTask({owner,request}),q=measured.request;
+ const measured=measureTask({owner,request,receiptCopy}),q=measured.request;
  if(q.taskId!==binding.task_id||q.dispatchId!==binding.dispatch_id||q.hostRuntime!==binding.host_runtime
    ||measured.scope.request_sha256!==binding.request_sha256||measured.scope.run_sha256!==digest(runBytes))fail('owner-window-request-mismatch');
  const scope={...measured.scope,binding_sha256:seen.sha256,binding,custody:{owner_token:metadata.owner_token,generation:metadata.generation}};
@@ -130,21 +126,21 @@ function auditFile(owner,scopeSha,nonce){
  if(!roots.within(fs.realpathSync.native(base),fs.realpathSync.native(directory)))fail('owner-window-audit-path');
  return path.join(directory,scopeSha+'.'+nonce+'.json');
 }
-async function recover({owner,request,expected,adapter}={}){
- const entry=assertAdapter(adapter),current=capture({owner,request});
+async function recover({owner,request,receiptCopy,expected,adapter}={}){
+ const entry=assertAdapter(adapter),current=capture({owner,request,receiptCopy});
  if(!current.seen)return{status:'already-absent',recovered:false};
  if(!current.scope||typeof expected!=='string'||current.observation_sha256!==expected)fail('owner-window-recovery-conflict');
  if(entry.actor.hostRuntime!==current.seen.binding.host_runtime)fail('owner-window-cross-host-unsupported');
  if(digest(entry.actor.sessionId)===current.seen.binding.host_session_sha256)fail('owner-window-current-session-use-settle');
  const nonce=crypto.randomBytes(16).toString('hex'),challenge={operation:'recover-orphan-owner-window',nonce,actor:actorWire(entry.actor),scope_sha256:expected,scope:current.scope};
  const proof=await observeStopped(adapter,challenge);
- if(capture({owner,request}).observation_sha256!==expected)fail('owner-window-recovery-conflict');
+ if(capture({owner,request,receiptCopy}).observation_sha256!==expected)fail('owner-window-recovery-conflict');
  const file=auditFile(current.owner,expected,nonce),audit={schema_version:1,outcome:'authorized',actor:actorWire(entry.actor),scope:current.scope,...proof,at:new Date().toISOString()};
  try{fs.writeFileSync(file,JSON.stringify(audit,null,2)+'\n',{flag:'wx',mode:0o600});}
  catch(error){throw Object.assign(new Error('owner-window-audit-write-failed'),{code:'owner-window-audit-write-failed',layer:'owner-window-audit',cause_code:error.code||'unknown'});}
  const result=windows.recover(current.owner,current.seen,low=>{
   assertAdapter(adapter);
-  if(low.binding_sha256!==current.scope.binding_sha256||capture({owner,request}).observation_sha256!==expected)fail('owner-window-recovery-conflict');
+  if(low.binding_sha256!==current.scope.binding_sha256||capture({owner,request,receiptCopy}).observation_sha256!==expected)fail('owner-window-recovery-conflict');
   return{challenge_sha256:digest(low),joined:true,possible_writers:0,reference:proof.writer_reference};
  });
  audit.outcome='recovered';let auditSaved=true;try{fs.writeFileSync(file,JSON.stringify(audit,null,2)+'\n',{mode:0o600});}catch{auditSaved=false;}
