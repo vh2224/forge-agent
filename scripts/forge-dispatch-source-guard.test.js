@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/issues-405-406/distribution.cjs');
+const unitEntry = require('./fixtures/issue-407/distribution.cjs');
 
 // Standalone acceptance suite: only Node built-ins and production modules.
 const assert = require('assert');
@@ -1268,7 +1268,7 @@ test('linked-task scoped pins follow the owner pre-T06 capture and the measured 
   }
   // #341: the affected surfaces are the owner after map plus exactly the surfaces the delta declares.
   const captureOrder = before.active_golden_before.surfaces.map((surface) => surface.source_id);
-  const campaignSurface = id => Object.hasOwn(unitEntry.campaignLayer.surfaces, id);
+  const campaignSurface = id => Object.hasOwn(unitEntry.campaignLayer.surfaces, id) || Object.hasOwn(unitEntry.issue407Layer.surfaces, id);
   assert.deepStrictEqual(affected, captureOrder.filter((id) => id in OWNER_POST_T06.surfaces || delta341Row(delta, 'surfaces', id) || entry347Row(ENTRY_347, 'surfaces', id) || campaignSurface(id)),
     'measured affected surfaces equal the historical owner/deltas plus the independently pinned campaign surfaces');
   assert.deepStrictEqual(affected.filter((id) => !delta341Row(delta, 'surfaces', id) && !entry347Row(ENTRY_347, 'surfaces', id) && !campaignSurface(id)),

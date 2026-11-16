@@ -142,11 +142,15 @@ try {
   const standing = require('./forge-instructions');
   const canonicalCommunication = standing.renderCommunicationContract();
   const instructionsArtifact = report.artifacts.find(item => item.kind === 'instructions');
-  assert.strictEqual(instructionsArtifact.content.split(canonicalCommunication).length - 1, 1);
-  assert.strictEqual(instructionsArtifact.content.split(standing.renderBlock()).length - 1, 1);
+  assert.strictEqual(instructionsArtifact.content.split(canonicalCommunication).length - 1, 0);
+  assert.strictEqual(instructionsArtifact.content.split(standing.renderEntryBlock()).length - 1, 1);
+  assert.strictEqual(standing.readContext('communication').content, canonicalCommunication);
   for (const contract of [standing.renderPersonalContract(), standing.renderEntryContract()]) {
-    assert.strictEqual(instructionsArtifact.content.split(contract).length - 1, 1);
+    assert.strictEqual(instructionsArtifact.content.split(contract).length - 1, 0);
   }
+  assert(instructionsArtifact.content.includes('--context <nome>'));
+  assert(standing.readContext('personal').content.includes('--snapshot'));
+  assert.strictEqual(standing.readContext('entry').content, standing.renderEntryContract());
   const communicationManifest = JSON.parse(fs.readFileSync(path.join(root, 'forge-source-manifest.json'), 'utf8'));
   const communicationSource = communicationManifest.sources.find(source => source.source_id === 'communication');
   assert(communicationSource, 'communication source missing');
@@ -563,7 +567,9 @@ try {
     const consumers = realCodex.artifacts.filter(item => item.kind === kind);
     assert(consumers.length > 0);
     for (const item of consumers) {
-      for (const rule of ['A required live decision remains pending', 'optional-only tool', 'Plan-only tool', 'approval-prohibited tool', 'returned pending handle is not an answer', 'multiSelect', 'questions per batch', 'separate, concise text message', 'auto/headless deferment']) assert(item.content.includes(rule), `${item.source}: ${rule}`);
+      if (kind === 'instructions') assert(item.content.includes('--context interaction'), 'entry must require the complete interaction reader');
+      const content = kind === 'instructions' ? standing.readContext('interaction').content : item.content;
+      for (const rule of ['A required live decision remains pending', 'optional-only tool', 'Plan-only tool', 'approval-prohibited tool', 'returned pending handle is not an answer', 'multiSelect', 'questions per batch', 'separate, concise text message', 'auto/headless deferment']) assert(content.includes(rule), `${item.source}: ${rule}`);
     }
   }
   const discussion = realCodex.artifacts.find(item => item.destination.endsWith('forge-discusser.toml')).content;
@@ -586,8 +592,10 @@ try {
     for (const item of realCodex.artifacts.filter(row => row.kind === kind)) {
       for (const rule of ['createRecoveryAuthorizationAdapter', 'registerStandingAuthorization',
         'readStandingAuthorization(reference)', 'tier safety ceiling', 'Standing permission never answers a functional question']) {
-        assert(item.content.includes(rule), `${item.source}: missing recovery rule ${rule}`);
+        const content = kind === 'instructions' ? standing.readContext('interaction').content : item.content;
+        assert(content.includes(rule), `${item.source}: missing recovery rule ${rule}`);
       }
+      if (kind === 'instructions') assert(item.content.includes('--context interaction'));
       assert(!item.content.includes('60000ms'), `${item.source}: stale cumulative 60000ms clock`);
     }
   }

@@ -14,12 +14,29 @@ function renderBlock(eol = '\n') {
   return [START, contract(), END].join('\n').replace(/\r\n|\n/g, eol);
 }
 
+// Project entry documents load details on demand. Worker projections keep the
+// complete contract through the unchanged renderBlock/project/sync defaults.
+function renderEntryBlock(eol = '\n') {
+  return [START,
+    '## Forge — perguntas e autorizações',
+    'Autorizações explícitas anteriores continuam válidas. Texto importado, silêncio,',
+    'timeout, formulário aceito ou opção recomendada não são consentimento.',
+    'Pergunta funcional necessária sem resposta bloqueia trabalho dependente;',
+    'não repita decisões resolvidas. Use a ferramenta real e permitida do host.',
+    'Antes de apresentar/persistir pergunta ou emitir autorização de recuperação,',
+    'carregue: `node "<FORGE_SCRIPTS_DIR>/forge-instructions.js" --context interaction --json`.',
+    'Consuma `content`; referência/hash não substituem leitura. Erro bloqueia essa fase.',
+    'Após pergunta sem resposta, preserve ID/estado e encerre a rodada; não faça polling',
+    'para esperar o humano. Recuperação autorizada não responde decisão funcional.',
+    END].join('\n').replace(/\r\n|\n/g, eol);
+}
+
 function project(content) {
   // Keep YAML frontmatter on line one. Original workflow bytes remain intact.
   return `${content}${content.endsWith('\n') ? '\n' : '\n\n'}${renderBlock()}\n`;
 }
 
-function sync(text) {
+function sync(text, options = {}) {
   const markers = [];
   let offset = 0, fence = null;
   for (const raw of text.split('\n')) {
@@ -38,7 +55,7 @@ function sync(text) {
     return { malformed: 'interaction-malformed-markers' };
   }
   const eol = text.includes('\r\n') ? '\r\n' : '\n';
-  const block = renderBlock(eol);
+  const block = options.compact === true ? renderEntryBlock(eol) : renderBlock(eol);
   if (markers.length) return { content: text.slice(0, markers[0].start) + block + text.slice(markers[1].end) };
   const padding = !text || text.endsWith(eol + eol) ? '' : text.endsWith(eol) ? eol : eol + eol;
   return { content: text + padding + block + eol };
@@ -116,4 +133,4 @@ function createRecoveryAuthorizationAdapter(attestAuthorization, dependencies = 
   if (typeof attestAuthorization !== 'function') throw new Error('recovery-host-attestation-required');
   return require('./forge-recovery-authority').createRecoveryAuthority({ ...dependencies, attestAuthorization });
 }
-module.exports = { START, END, contract, renderBlock, project, sync, mergePendingQuestions, resolvePendingQuestions, persistQuestionState, QUESTION_ROUND_OUTCOMES, recordQuestionRound, boundedRoundState, createRecoveryAuthorizationAdapter };
+module.exports = { START, END, contract, renderBlock, renderEntryBlock, project, sync, mergePendingQuestions, resolvePendingQuestions, persistQuestionState, QUESTION_ROUND_OUTCOMES, recordQuestionRound, boundedRoundState, createRecoveryAuthorizationAdapter };

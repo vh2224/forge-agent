@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/issues-405-406/distribution.cjs');
+const unitEntry = require('./fixtures/issue-407/distribution.cjs');
 
 // forge-communication-surfaces.test.js — proves the orchestration and status
 // skills follow shared/forge-communication.md by POINTER, not by a second copy;
@@ -726,7 +726,7 @@ function checkPins(fixture = {}) {
       assert(readme.includes(old.get(surface.source_id)) && readme.includes(surface.sha256), `documented actual ${surface.source_id}`);
     }
   }
-  assert.deepStrictEqual(changed.sort(), [...new Set([...before.allowed_active_changes, ...Object.keys(entryDelta.surfaces)])].sort(), 'historical changes plus exactly the #347 surfaces');
+  assert.deepStrictEqual(changed.sort(), [...new Set([...before.allowed_active_changes, ...Object.keys(entryDelta.surfaces), ...Object.keys(unitEntry.issue407Layer.surfaces)])].sort(), 'historical changes plus exactly the #347 and independently pinned407 surfaces');
   for (const historical of before.historical_goldens) assert.strictEqual(hash(fs.readFileSync(path.join(root, historical.path))), historical.sha256, historical.path);
   // Every unrelated input captured by the owner still has its exact original bytes.
   const allowed = new Set([goldenPath, 'agents/forge-planner.md', 'agents/forge-worker.md', 'skills/forge-auto/SKILL.md',
@@ -1072,7 +1072,7 @@ test('communication status: forge-status keeps verbatim relay and comments by th
   assert(status.includes('node "$FORGE_SCRIPTS_DIR/forge-status.js" $ARGUMENTS'), 'status command changed');
 });
 
-test('communication CLAUDE.md: projector dry-run unchanged, contract once inside routing block, interaction block canonical', () => {
+test('communication CLAUDE.md: compact entry stable and complete contracts available by mandatory context', () => {
   const file = path.join(root, 'CLAUDE.md');
   const before = fs.readFileSync(file);
   assert.strictEqual(instructions.syncFile(file, { host: 'claude', dryRun: true }).outcome, 'unchanged', 'CLAUDE.md drifted from the projector');
@@ -1082,11 +1082,14 @@ test('communication CLAUDE.md: projector dry-run unchanged, contract once inside
   const found = instructions.findBlock(text);
   assert(found && !found.malformed, 'routing block missing or malformed');
   const block = text.slice(found.start, found.end);
-  assert.strictEqual(block, instructions.renderBlock({ eol }), 'routing block differs from renderBlock');
+  assert.strictEqual(block, instructions.renderEntryBlock({ eol }), 'routing entry differs from renderEntryBlock');
   const normalized = text.replace(/\r\n/g, '\n');
-  assert.strictEqual(count(normalized, contract), 1, 'communication contract must appear once in CLAUDE.md');
-  assert.strictEqual(count(block.replace(/\r\n/g, '\n'), contract), 1, 'communication contract outside routing block');
-  assert(normalized.includes(interaction.renderBlock()), 'interaction block differs from interaction.renderBlock()');
+  assert.strictEqual(count(normalized, contract), 0, 'complete communication contract must be loaded by context');
+  assert.strictEqual(instructions.readContext('communication').content, contract);
+  assert(block.includes('`personal` e `communication` no boot'), 'mandatory communication loading trigger missing');
+  assert(normalized.includes(interaction.renderEntryBlock()), 'compact interaction entry missing');
+  assert.strictEqual(instructions.readContext('interaction').content, interaction.contract());
+  assert(Buffer.byteLength(text) <= instructions.DEFAULT_MAX_BYTES, 'project entry exceeds per-file budget');
   assert(!fs.existsSync(path.join(root, 'AGENTS.md')), 'AGENTS.md created in the repository');
 });
 
@@ -1132,7 +1135,9 @@ test('communication Codex projection: projected skills carry the same pointer an
     for (const line of lines) assert(!artifact.content.includes(line), `${name}: projected skill copies the contract`);
   }
   const agents = report.artifacts.find(item => item.kind === 'instructions');
-  assert.strictEqual(count(agents.content, contract), 1, 'Codex AGENTS.md must carry the contract once');
+  assert.strictEqual(count(agents.content, contract), 0, 'Codex AGENTS.md loads full contract by context');
+  assert(agents.content.includes('`personal` e `communication` no boot'), 'Codex mandatory context trigger lost');
+  assert.strictEqual(instructions.readContext('communication').content, contract);
 });
 
 test('communication before transcription: verbatim old templates cite repository paths and base revision', () => {
@@ -1372,7 +1377,8 @@ test('S04 decision lifecycle: canonical old and new safeguards remain distribute
     'new dispatch of the same unit', 'answered-continuation-required',
   ]) assert(text.includes(phrase), `interaction contract lost: ${phrase}`);
   assert(!/proceed regardless|orchestrator always has the tool/i.test(text));
-  assert.strictEqual(count(read('CLAUDE.md'), interaction.renderBlock()), 1);
+  assert.strictEqual(count(read('CLAUDE.md'), interaction.renderEntryBlock()), 1);
+  assert.strictEqual(instructions.readContext('interaction').content, interaction.contract());
 });
 
 test('S04 Codex lifecycle: skill, agent TOML and dispatch template contain canonical block exactly once', () => {

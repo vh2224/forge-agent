@@ -17296,8 +17296,10 @@ function smokeRoutingContractProjection() {
     const bytes = fs.readFileSync(path.join(root, 'CLAUDE.md'), 'utf8');
     assert(bytes.includes('<!-- forge:routing-contract:start -->'), '(a) emits the exact stable marker');
     assert(!bytes.includes('forge:routing-contract:start version='), '(a) stable output carries no version');
-    assert(bytes.includes('forge-dispatch-resolve.js') && bytes.includes('worker-engine-fallback'),
-      '(a) o bloco escrito nomeia o resolvedor e o fallback nomeado');
+    assert(bytes.includes('--context <nome>') && bytes.includes('`routing` antes de preparar/despachar/recuperar')
+      && mod.readContext('routing').content.includes('forge-dispatch-resolve.js')
+      && mod.readContext('routing').content.includes('worker-engine-fallback'),
+      '(a) entrada exige carregar roteamento completo com resolvedor e fallback nomeado');
     const second = mod.syncInstructions(root);
     assert(second.changed === 0 && fs.readFileSync(path.join(root, 'CLAUDE.md'), 'utf8') === bytes,
       '(a) o segundo sync é byte-idêntico');
@@ -17484,7 +17486,9 @@ function smokeIntentEntryAssessment() {
     for (const name of ['CLAUDE.md', 'AGENTS.md']) {
       const text = fs.readFileSync(path.join(consumer, name), 'utf8');
       assert(text.startsWith('# Operador\n'), `(c) ${name}: bytes do operador preservados`);
-      assert(text.includes(contract), `(c) ${name} carrega o contrato de entrada`);
+      assert(text.includes('`entry` antes de classificar uma nova demanda')
+        && instructions.readContext('entry').content === contract,
+      `(c) ${name} exige contexto de entrada completo antes de classificar`);
     }
     assert(instructions.syncInstructions(consumer, { host: 'both' }).changed === 0, '(c) o segundo sync é inerte');
     assert(readRepoText(path.join(repoRoot, 'commands/forge.md')).includes('shared/forge-intent-entry.md'),

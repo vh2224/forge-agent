@@ -389,6 +389,18 @@ function install(input = {}) {
   let panelStateBackupFailure = null;
   const selected = selectedRuntimes(runtime);
   const projectRoot = path.resolve(options.projectRoot || options.cwd || process.cwd());
+  if (declaresProcedures) {
+    // A later host's oversize file must not leave an earlier host compacted.
+    // Preflight before backups, core copying or generated project projections.
+    const instructionSource = require('./forge-instructions');
+    for (const host of selected) {
+      const file = path.join(projectRoot, host === 'codex' ? 'AGENTS.md' : 'CLAUDE.md');
+      const check = instructionSource.syncFile(file, { host, dryRun: true, create: false });
+      if (check.instructionBudgetExceeded) {
+        throw Object.assign(new Error('instruction-budget-exceeded'), { code: 'instruction-budget-exceeded' });
+      }
+    }
+  }
   if (declaresProcedures) loadAllProcedureContexts({ cwd: projectRoot, forgeHome: repo,
     requiredPhases: procedures.map(procedure => procedure.phase) });
   const capabilities = capabilityReport(repo, runtime, options);
@@ -533,17 +545,25 @@ function install(input = {}) {
     const report = generated.reports[host];
     if ((report.self_sourced || []).some((entry) => entry.destination === file)) continue;
     instructionFiles.push({ host, file });
-    const current = exists(file) ? fs.readFileSync(file, 'utf8') : '';
-    const synced = interaction.sync(current);
-    if (synced.malformed) {
-      plan.push({ op: 'skip', destination: file, reason: synced.malformed });
-    } else if (synced.content !== current) {
-      writeText(file, synced.content, plan, options);
-    }
     if (declaresProcedures) {
+      // Compose routing + compact interaction and enforce the budget together.
+      // Do not first write a full interaction block that a later size refusal
+      // would leave behind in an operator-owned instruction file.
       const instructions = require('./forge-instructions').syncFile(file, { host, dryRun: options.dryRun, create: false });
+      if (instructions.instructionBudgetExceeded) {
+        const error = new Error('instruction-budget-exceeded');
+        error.code = 'instruction-budget-exceeded';
+        throw error;
+      }
       if (instructions.outcome !== 'unchanged') plan.push({ op: instructions.outcome === 'skipped' ? 'skip' : 'write',
-        destination: file, reason: `instructions:${instructions.reason}`, ...(options.dryRun ? { dry_run: true } : {}) });
+        destination: file, reason: instructions.reason.startsWith('malformed-block:interaction-')
+          ? instructions.reason.slice('malformed-block:'.length) : `instructions:${instructions.reason}`,
+        ...(options.dryRun ? { dry_run: true } : {}) });
+    } else {
+      const current = exists(file) ? fs.readFileSync(file, 'utf8') : '';
+      const synced = interaction.sync(current);
+      if (synced.malformed) plan.push({ op: 'skip', destination: file, reason: synced.malformed });
+      else if (synced.content !== current) writeText(file, synced.content, plan, options);
     }
   }
   const existingManifest = priorManifest;

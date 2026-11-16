@@ -475,7 +475,7 @@ function render(options = {}) {
   // managed block owns routing, personal, entry and communication together, so
   // the installer's later sync replaces that same span without duplicate prose.
   const standing = require('./forge-instructions');
-  add('codex-instructions', 'AGENTS.md', path.join(root.projectRoot, 'AGENTS.md'), interaction.project(instructions + '\n' + standing.renderBlock() + '\n'), 'instructions');
+  add('codex-instructions', 'AGENTS.md', path.join(root.projectRoot, 'AGENTS.md'), interaction.sync(instructions + '\n' + standing.renderEntryBlock() + '\n', { compact: true }).content, 'instructions');
   for (const file of agentFiles) {
     const name = path.basename(file, '.md');
     const source = rewriteMarkdown(fs.readFileSync(file, 'utf8'));
