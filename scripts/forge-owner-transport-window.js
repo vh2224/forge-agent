@@ -54,6 +54,7 @@ function coordinatePreparation(request,requestSha,{create=true,operation='accept
  const owner=ownerOf(request.contextRoot||request.cwd),active=context.getStore()?.cap;
  if(active){const row=held(active);if(row.owner!==owner||row.binding.task_id!==request.taskId||row.binding.dispatch_id!==request.dispatchId)throw error('owner-window-scope-conflict');return active;}
  const seen=observed(owner),runs=require('./forge-runs'),record=runs.get(owner,request.taskId),actor=runs.observeHostSession(request.hostRuntime,process.env.FORGE_CLAUDE_OWNER_SESSION_ID);
+ if(record?.task_retirement)throw error('run-retired');
  if(actor&&record?.host_runtime&&record?.session_id&&(record.host_runtime!==actor.hostRuntime||record.session_id!==actor.sessionId))throw error('owner-window-foreign-owner');
  if(!actor||!record||record.kind!=='task'||record.host_runtime!==actor.hostRuntime||record.session_id!==actor.sessionId){assertMutationAllowed(owner);return null;}
  const scope={kind:'artifact-preparation',coordination:'observed-host-session-v1',task_id:request.taskId,dispatch_id:request.dispatchId,request_sha256:requestSha,host_runtime:actor.hostRuntime,host_session_sha256:sha(actor.sessionId),run_owner_sha256:sha(JSON.stringify({id:record.id,kind:record.kind,host_runtime:record.host_runtime,session_sha256:sha(record.session_id)})),run_record_sha256:sha(fs.readFileSync(runs.runFile(owner,request.taskId)))};

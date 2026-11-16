@@ -482,11 +482,18 @@ function add(cwd, record, guard) {
   }), guard);
 }
 
+function assertRetiredTransition(current, next) {
+  if (!current?.task_retirement) return;
+  for (const key of ['active','worker','worker_started','worker_slice','session_id','session','host_runtime','kind','id','task_retirement','write_claim']) {
+    if (JSON.stringify(current[key]) !== JSON.stringify(next[key])) throw new Error('run-retired');
+  }
+}
 function update(cwd, id, patch, guard) {
   return withRegistryFence(cwd, () => withRunLock(cwd, id, () => {
     const current = get(cwd, id);
     if (!current) throw new Error(`forge-runs.update: run ${id} not found`);
     const next = Object.assign({}, current, normalizeMetadataPatch(patch));
+    assertRetiredTransition(current, next);
     writeAtomic(runFile(cwd, id), next);
     refreshLegacyAlias(cwd);
     return next;
@@ -522,9 +529,11 @@ function updateWith(cwd, id, mutator, guard) {
   return withRegistryFence(cwd, () => withRunLock(cwd, id, () => {
     const current = get(cwd, id);
     if (!current) throw new Error(`forge-runs.updateWith: run ${id} not found`);
+    const retiredBefore = current.task_retirement ? JSON.parse(JSON.stringify(current)) : null;
     const patch = mutator(current);
     if (patch === null || patch === undefined) return { updated: false, record: current };
     const next = Object.assign({}, current, normalizeMetadataPatch(patch));
+    assertRetiredTransition(retiredBefore, next);
     writeAtomic(runFile(cwd, id), next);
     refreshLegacyAlias(cwd);
     return { updated: true, record: next };
@@ -695,6 +704,7 @@ function ensureStepRun(cwd, id, hostRuntime) {
   if (!actor) throw new Error('owner-session-unavailable');
   const existing = get(cwd, id);
   if (existing) {
+    if (existing.task_retirement) throw new Error('run-retired');
     if (existing.host_runtime !== actor.hostRuntime || existing.session_id !== actor.sessionId)
       throw new Error('step-run-owner-mismatch');
     return existing;

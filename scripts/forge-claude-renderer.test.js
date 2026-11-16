@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/issue-campaign/distribution.cjs');
+const unitEntry = require('./fixtures/issue-399/distribution.cjs');
 
 const assert = require('assert');
 const crypto = require('crypto');

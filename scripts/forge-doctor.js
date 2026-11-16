@@ -684,6 +684,17 @@ module.exports = {
   checkResources,
   checkMemoryQuarantine,
   checkClaimStuck,
+  createOwnerRecoveryAdapter: options => require('./forge-owner-window-recovery').createObservedHostAdapter(options),
+  inspectOwnerWindow: options => require('./forge-owner-window-recovery').inspect(options),
+  recoverOwnerWindow: options => {
+    const api = require('./forge-owner-window-recovery'), inspection = api.inspect(options);
+    return api.recover({ ...options, expected: options.expected || inspection.observation_sha256 });
+  },
+  inspectTaskRetirement: options => require('./forge-task-retirement').inspect(options),
+  retireTask: options => {
+    const api = require('./forge-task-retirement'), inspection = api.inspect(options);
+    return api.closeTask({ ...options, expected: options.expected || inspection.observation_sha256 });
+  },
   // Additive export (R1 guard): lets the regression test assert the RENDERED
   // icon, not just the check result shape. No existing signature changed.
   formatResults,
@@ -899,6 +910,50 @@ function formatResults(results) {
 function cliMain() {
   const args = parseArgs(process.argv.slice(2));
 
+  // These CLI entries inspect only. A live callback capability cannot be
+  // serialized through flags or a request file and never comes from --apply.
+  if ('owner-window' in args || 'retire-task' in args) {
+    const allowed = new Set(['owner-window','retire-task','request','outcome','successor','cwd','json','apply']);
+    const argv = process.argv.slice(2), seen = new Set(); let invalid = false;
+    for (let i = 0; i < argv.length; i++) {
+      const flag = argv[i], key = flag.slice(2);
+      if (!flag.startsWith('--') || !allowed.has(key) || seen.has(key)) { invalid = true; break; }
+      seen.add(key);
+      if (!['owner-window','json','apply'].includes(key) && (!argv[++i] || argv[i].startsWith('--'))) { invalid = true; break; }
+    }
+    const windowMode = args['owner-window'] === true;
+    if (invalid || ('owner-window' in args) === ('retire-task' in args)
+      || ('owner-window' in args && !windowMode) || windowMode && ('outcome' in args || 'successor' in args)
+      || !windowMode && (typeof args['retire-task'] !== 'string' || typeof args.request !== 'string')
+      || !windowMode && args.outcome !== undefined && !['cancelled','superseded'].includes(args.outcome)
+      || ('json' in args && args.json !== true) || ('apply' in args && args.apply !== true)) {
+      process.stderr.write('forge-doctor: owner recovery inspection accepts one mode, --request, --cwd, --json and retirement intent; no duplicate or unknown flags.\n');
+      process.exitCode = 2; return;
+    }
+    try {
+      const recovery = require('./forge-owner-window-recovery');
+      const request = args.request ? JSON.parse(recovery.readEvidence(path.resolve(args.request), 8 * 1024 * 1024)) : undefined;
+      if (!windowMode && request.taskId !== args['retire-task']) throw Object.assign(new Error(), { code: 'task-retirement-request-mismatch' });
+      const owner = path.resolve(args.cwd || process.cwd());
+      const report = windowMode ? module.exports.inspectOwnerWindow({ owner, request })
+        : module.exports.inspectTaskRetirement({ owner, request, outcome: args.outcome || (args.successor ? 'superseded' : 'cancelled'), successorId: args.successor });
+      if (args.apply) {
+        process.stdout.write(JSON.stringify({ status: 'blocked', reason_code: 'owner-window-live-host-required', inspection: report,
+          message: 'A ação exige o adaptador vivo do host; --apply e arquivos não atestam escritores nem decisões.' }) + '\n');
+        process.exitCode = 2; return;
+      }
+      const message = windowMode ? report.status === 'absent' ? 'Nenhuma janela do owner observada; isto não atesta escritores encerrados.'
+        : 'Janela do owner retida. Recupere pelo adaptador vivo após comprovar join e reconciliar o escopo exato.'
+        : report.closed ? 'Task encerrada administrativamente; código e evidências preservados sem aceite de implementação.'
+        : 'Task aberta. Encerramento exige decisão explícita, join e reconciliação; worktree será preservado.';
+      process.stdout.write(args.json ? JSON.stringify(report) + '\n' : message + '\n');
+    } catch (error) {
+      const reason = /^[A-Za-z0-9_-]{1,120}$/.test(error.code || '') ? error.code : 'owner-recovery-diagnostic-failed';
+      process.stdout.write(JSON.stringify({ status: 'partial', reason_code: reason }) + '\n'); process.exitCode = 1;
+    }
+    return;
+  }
+
 
   // A named exclusive diagnostic accepts explicit unit context. It never
   // observes or fabricates active tool capabilities, dispatches or opens leases.
@@ -958,6 +1013,12 @@ function cliMain() {
     process.stdout.write(`forge-doctor — Forge schema-version and projection-versioned checks
 
 Flags:
+  --owner-window [--request <json>] [--cwd <dir>] [--json]
+                                 inspect the exact held owner window, read-only
+  --retire-task <id> --request <json> [--outcome cancelled|superseded]
+    [--successor <milestone-id>]   inspect administrative closure, read-only
+                                 --apply cannot supply the required live host proof;
+                                 use shared/forge-owner-recovery.md host adapter
   --check <name> [--cwd <dir>]   run check: ${VALID_CHECKS.join(' | ')} |
                                  all
   --runtime <name>               capabilities host: claude | codex | both
