@@ -1,5 +1,76 @@
 # Forge delivery by acceptance criterion
 
+## Committed task without delivery: current verification successor
+
+New single-task sidecar execution uses the unit adapter on both engines. The
+workflow's `complete` refuses a successful execute-task without canonical delivery
+before creating a completion intent; the existing begin and lease remain held.
+Publish through the unit adapter and complete that same begin, not a new inference.
+For a new or incomplete completion, captures must be inside that begin's time
+window and their declared source blobs must match the current workspace. The
+owner records the begin checksum and exact capture fingerprints in its completion
+result; worker-provided fields cannot substitute this measured binding. Already
+committed history keeps historical validation and is not compared to later code.
+
+An old release may already have committed completion before delivery existed.
+The next selection now returns `execution-delivery-recovery-required` with exact
+begin/completion locators instead of dispatching the same task again. Preserve
+that original transaction, event, result, SUMMARY, source changes and timestamps.
+An envelope captured today cannot prove that earlier completion.
+
+The trusted host may use `forge-completion-delivery-recovery.createRepair` for an
+explicit **verification-only** successor. It composes the real serial controller
+begin and workflow complete; it does not invoke a provider or replay implementation.
+Use this API in one owner process, not serialized JSON approvals:
+
+```js
+const repair = require('./scripts/forge-completion-delivery-recovery').createRepair({
+  cwd: owner, milestone, slice, task, runId, ownerToken, hostRuntime,
+  beginKey: originalBeginKey, completionKey: originalCompletionKey,
+  executionContract, assertAuthority, attestStoppedWriter, readPendingQuestions,
+});
+const next = repair.start(); // verify-only, distinct deterministic begin_key
+// Run the plan's real checks now. Build/reverify the canonical delivery with
+// contemporaneous root/workspace/source captures and explicit criterion bindings.
+const completed = repair.complete();
+```
+
+After that genuine completion, resume the **same saved loop snapshot** with the
+existing loop adapter's `resume-delivery` command and `repair_begin_key` from
+`start()`. This read-only administrative admission revalidates the old block,
+new published lineage, saved baseline digest, owner capture binding and canonical
+historical delivery. It clears only that delivery block, preserves workflow ID,
+step count, time budgets and pending questions, and returns `continue`. Then use
+normal `next`; no worker step is charged by the administrative resume. A missing
+or forged successor cannot resume the workflow. Do not edit the snapshot to idle
+or start another workflow to escape the blocked state.
+
+The callbacks are live host adapters. `assertAuthority(scope)` revalidates the
+operator's existing authorization, owned run, held nonempty claim, isolation and
+absence of conflicting writers for every physical root. `attestStoppedWriter`
+must return true only after actual writer/process join and reconciliation in all
+roots; PID absence, an inactive run or a JSON flag are insufficient.
+`readPendingQuestions` must inspect the original receipt/checkpoint and current
+continuation; every unresolved question still blocks. Do not supply empty stubs
+for a real user task. Unknown authority, process state or questions means stop.
+
+Retain any invalid old delivery/captures by exact bytes and hash before current
+publication. Reuse the unchanged plan and source work; do not run the executor.
+The helper validates the physical execution contract, held claim, original
+published lineage, current code snapshots and original plan/records across both
+operations. New captures must be at or after the new begin and before its new
+completion. It refuses code/claim/root/plan/history drift or pending questions.
+Before that new begin, it saves a bounded baseline under the task's existing
+artifact directory. The baseline digest forms part of the new begin identity.
+Restart reuses that exact saved state and compares current roots and code to it;
+missing, changed or linked baseline files refuse instead of capturing a new basis.
+Do not edit or delete this state to accept changed code. A changed claim or source
+needs a separately reconciled owner continuation, not a silent baseline refresh.
+The old completion stays unproven and immutable; the new completion records
+current verification, never backdated implementation evidence. No saved worker
+receipt is invented. A crash keeps the canonical new begin/transaction for
+reconciliation; it does not authorize another executor or an automatic reset.
+
 ## Retained partial execution
 
 An `executed` standalone partial with a failed delivery capture retains valuable

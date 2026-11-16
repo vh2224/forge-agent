@@ -48,7 +48,7 @@ function failureDiagnostic(cause, input, stage, transactionKey) {
 
 const PROTOCOL_VERSION = '1.0.0';
 const OPERATIONS = Object.freeze(['init', 'status', 'next', 'complete', 'decompose-pause', 'decompose-continue', 'consume-failure', 'reenter', 'resume-budget', 'resume-time-option',
-  'batch-status', 'batch-ack']);
+  'batch-status', 'batch-ack', 'resume-delivery']);
 const OUTCOMES = Object.freeze(['needs_input', 'completed', 'blocked', 'no_work', 'failed']);
 // Named results of the owner budget-resume boundary, including the explicit
 // consumed-failure continuation that only a linked entry may take.
@@ -66,6 +66,8 @@ const REASON_CODES = Object.freeze([
   'no-next-unit', 'needs-input', 'needs-input-boundary', 'not-initialized',
   'prefs-invalid', 'lease-active', 'transaction-pending', 'invalid-request', 'failed',
   'handoff-ready', 'boundary-missing', 'boundary-not-transferable', 'response-invalid', 'decomposition-verification-required',
+  'execution-delivery-required', 'execution-delivery-recovery-required', 'delivery-recovery-ready',
+  'delivery-recovery-unproven', 'delivery-recovery-original-changed', 'delivery-recovery-baseline-unproven', 'delivery-recovery-event-unproven',
   ...milestoneTime.TIME_REASON_CODES, ...BUDGET_RESUME_REASON_CODES,
   ...timeSelection.TIME_OPTION_REASON_CODES, ...timeSelection.TIME_OPTION_RESUME_CODES,
   ...forgeController.TIME_ADMISSION_CODES, ...TIME_OPTION_CONTINUATION_CODES,
@@ -388,6 +390,25 @@ function complete(inputValue, options) {
   // verification, publication and ACK belong to the serial batch consolidation.
   if (begun.batch) return Object.assign(base('complete', 'blocked', 'batch-member-operation-deferred', input), { unit: selected });
   try {
+    let deliveryValidation = null;
+    // A worker's done/SUMMARY is not a durable delivery. Refuse before the
+    // completion intent; keep the lease available for genuine publication.
+    const existingCompletion = forgeController.lookupRecord(input.cwd, 'transaction', key + ':complete');
+    if (selected.type === 'execute-task' && existingCompletion?.phase !== 'committed') {
+      const completedAt = existingCompletion?.created_at || (typeof options?.now === 'function' ? options.now() : options?.now ?? Date.now());
+      const proof = require('./forge-milestone-time-clock').readCurrentTaskDelivery({ cwd: input.cwd, milestone: input.milestone,
+        slice: begun.after.state.active_slice, task: selected.id, begunAt: begun.created_at, completedAt });
+      if (proof.status !== 'proven') {
+        const refused = base('complete', 'blocked', key.startsWith('forge-orchestrate-resume-execution:')
+          ? 'execution-resume-delivery-required' : 'execution-delivery-required', input);
+        refused.unit = selected; refused.details = { delivery: { status: 'unproven', reason: proof.reason || 'delivery-unproven',
+          next_action: 'Publish the canonical unit-adapter delivery before completing; retain the current begin and lease.' } };
+        return refused;
+      }
+      deliveryValidation = { begin_key: key, begin_sha256: checksum(begun), proof_kind: proof.proof_kind,
+        current_source_conformity: proof.current_source_conformity, delivery_fingerprint: proof.fingerprint,
+        captures: proof.captures.map(capture => ({ reference: capture.reference, sha256: capture.sha256, captured_at: capture.captured_at })) };
+    }
     // Authorization-only resumes must await a genuine, independently captured task
     // delivery. A caller's status:done or its earlier human response is no proof.
     if (key.startsWith('forge-orchestrate-resume-execution:') && !forgeController.lookupRecord(input.cwd, 'transaction', key + ':complete')) {
@@ -405,7 +426,7 @@ function complete(inputValue, options) {
       milestone: input.milestone, unit: selected, host_runtime: input.host_runtime,
       owner_token: input.owner_token, generation: begun.lease_generation,
       idempotency_key: `${key}:complete`,
-      result: { status: 'succeeded', output: inputValue.result },
+      result: { status: 'succeeded', output: deliveryValidation ? { ...inputValue.result, owner_delivery_proof: deliveryValidation } : inputValue.result },
     }, { ...options, ...(input.prefsReader ? { prefsReader: input.prefsReader } : {}) });
     const output = base('complete', 'completed', committed.reason, input);
     output.unit = selected; output.boundary = committed.transaction.boundary;
@@ -730,6 +751,14 @@ function nextInside(inputValue, options) {
       if (prior && prior.action === 'begin' && prior.milestone === input.milestone
         && prior.unit.key === selectedUnit.key && prior.after.state.active_slice === selection.slice) key = legacyKey;
     }
+    const oldCompletion = selectedUnit.type === 'execute-task' && forgeController.lookupRecord(input.cwd, 'transaction', key + ':complete');
+    if (oldCompletion?.phase === 'committed' && oldCompletion.unit?.key === selectedUnit.key
+        && oldCompletion.milestone === input.milestone && oldCompletion.after?.state?.active_slice === selection.slice) {
+      const refused = base('next', 'blocked', 'execution-delivery-recovery-required', input);
+      refused.unit = selectedUnit; refused.details = { delivery: { begin_key: key, completion_key: key + ':complete',
+        completion_sha256: checksum(oldCompletion), next_action: 'Use forge-completion-delivery-recovery with live owner/stopped-writer evidence for verification only; never backdate delivery or reexecute the task.' } };
+      return refused;
+    }
     const request = { milestone: input.milestone, unit: selectedUnit, slice: selection.slice, host_runtime: input.host_runtime, owner_token: input.owner_token, session: input.session, idempotency_key: key,
       state_patch: { active_slice: selection.slice || '—' },
       ...(selection.decomposition_verification ? { decomposition_verification_from: selection.decomposition_verification } : {}) };
@@ -1023,6 +1052,17 @@ function resumeBudget(inputValue, options = {}) {
 // only a locator: the canonical resumeCheck rereads the owner selection, so a
 // serialized flag, an approved:true field or an edited snapshot never decides.
 // Nothing is written here; next is delegated by the loop on the same snapshot.
+function resumeDelivery(inputValue) {
+  const input = normalizeInput(inputValue);
+  try {
+    const proof = require('./forge-completion-delivery-recovery').verifyRepairCompletion({ cwd: input.cwd, milestone: input.milestone,
+      ownerToken: input.owner_token, hostRuntime: input.host_runtime, block: inputValue.delivery_block, repairBeginKey: inputValue.repair_begin_key });
+    return Object.assign(base('resume-delivery', 'completed', 'delivery-recovery-ready', input), { details: { delivery: proof } });
+  } catch (cause) {
+    const known = ['delivery-recovery-original-changed', 'delivery-recovery-baseline-unproven', 'delivery-recovery-event-unproven'];
+    return base('resume-delivery', 'blocked', known.includes(cause.code) ? cause.code : 'delivery-recovery-unproven', input);
+  }
+}
 function resumeTimeOption(inputValue, options = {}) {
   const input = normalizeInput(inputValue), block = inputValue.time_option_block;
   const refuse = (reason, details) => Object.assign(base('resume-time-option', 'blocked', reason, input), details ? { details } : {});
@@ -1079,6 +1119,7 @@ function run(operation, input, options) {
   if (operation === 'decompose-pause' || operation === 'decompose-continue') return decomposeOperation(operation, input, options);
   if (operation === 'resume-budget') return resumeBudget(input, options);
   if (operation === 'resume-time-option') return resumeTimeOption(input, options);
+  if (operation === 'resume-delivery') return resumeDelivery(input);
   if (operation === 'consume-failure' || operation === 'reenter') return linkedOperation(operation, input, options);
   return next(input, options);
 }
@@ -1096,9 +1137,9 @@ function parseArgs(argv) {
 function main(argv = process.argv.slice(2), output = process.stdout.write.bind(process.stdout), errorOutput = process.stderr.write.bind(process.stderr)) {
   try {
     const args = parseArgs(argv);
-    if (args.help) { output('Usage: forge-orchestrate --init|--status|--next|--complete|--consume-failure|--reenter|--resume-budget|--resume-time-option|--batch-status|--batch-ack --json JSON\n'); return 0; }
+    if (args.help) { output('Usage: forge-orchestrate --init|--status|--next|--complete|--consume-failure|--reenter|--resume-budget|--resume-time-option|--resume-delivery|--batch-status|--batch-ack --json JSON\n'); return 0; }
     const operation = OPERATIONS.find(name => args[name]);
-    if (!operation) throw error('invalid-request', 'use --init, --status, --next, --complete, --consume-failure, --reenter, --resume-budget, --resume-time-option, --batch-status ou --batch-ack');
+    if (!operation) throw error('invalid-request', 'use --init, --status, --next, --complete, --consume-failure, --reenter, --resume-budget, --resume-time-option, --resume-delivery, --batch-status ou --batch-ack');
     const payload = args.json ? JSON.parse(args.json) : {};
     if (args.cwd) payload.cwd = args.cwd;
     if (args.milestone) payload.milestone = args.milestone;

@@ -589,8 +589,18 @@ function readHistoricalDeliveries(options) { return readDeliveries({ ...options,
 // fully covered by its root captures, and verification/artifact captures of one root agreeing on
 // revision, identity and source bindings. Today's sources are never compared, so a later
 // legitimate code change keeps the history; the caller supplies the committed completion instant.
-function readHistoricalTaskDelivery(options = {}) {
-  const purpose = { proof_kind: 'historical-delivery', current_source_conformity: 'not-evaluated', current_integrated_acceptance: 'not-evaluated' };
+function readHistoricalTaskDelivery(options = {}) { return readTaskDelivery(options, 'historical-delivery'); }
+function readCurrentTaskDelivery(options = {}) {
+  const currentHashReader = (cwd, file) => {
+    const vcs = require('./forge-vcs'), kind = vcs.detectVcs(cwd);
+    if (!['git', 'svn'].includes(kind)) return { ok: false, error: 'current-vcs-unknown' };
+    return vcs.hashPath(cwd, file, { vcs: kind, maxBuffer: 1024,
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_NO_REPLACE_OBJECTS: '1' } });
+  };
+  return readTaskDelivery({ ...options, currentHashReader }, 'current-source-strict');
+}
+function readTaskDelivery(options, proofMode) {
+  const purpose = { proof_kind: proofMode, current_source_conformity: proofMode === 'historical-delivery' ? 'not-evaluated' : 'unknown', current_integrated_acceptance: 'not-evaluated' };
   try {
     options = observationOptions(options);
     const { milestone, slice, task } = options;
@@ -598,7 +608,9 @@ function readHistoricalTaskDelivery(options = {}) {
     time.timePaths(options);
     const completionAt = instant(options.completedAt);
     if (!Number.isFinite(completionAt)) fail('delivery-completion-time-invalid');
-    Object.assign(options, { proofMode: 'historical-delivery', completionAt, proof: { units: [], captures: [] },
+    const beginAt = proofMode === 'current-source-strict' ? instant(options.begunAt) : null;
+    if (proofMode === 'current-source-strict' && (!Number.isFinite(beginAt) || beginAt > completionAt)) fail('delivery-begin-time-invalid');
+    Object.assign(options, { proofMode, completionAt, proof: { units: [], captures: [] },
       deliveryCache: { files: new Map(), hashes: new Map(), blobs: new Map(), bytes: 0 } });
     const delivery = require('./forge-delivery'), roots = require('./forge-code-roots');
     const expected = { type: 'task', id: task, slice, milestone }, key = delivery.unitKey(expected);
@@ -614,6 +626,7 @@ function readHistoricalTaskDelivery(options = {}) {
     if (!scope.length) fail('delivery-source-inventory-missing');
     const captures = options.proof.captures.filter(c => c.unit === key);
     if (!captures.length) fail('delivery-source-capture-missing');
+    if (proofMode === 'current-source-strict' && captures.some(c => instant(c.captured_at) < beginAt)) fail('delivery-capture-before-begin');
     // Every declared path is bound by a capture of the root that owns it.
     const contract = input.schema_version === 2 ? roots.validateContract(input.execution_contract, { owner: fs.realpathSync.native(options.cwd), revalidate: true }) : null;
     const envelopeOf = capture => deliverySource(options, options.cwd, capture.reference, MAX_JSON, true).value;
@@ -641,7 +654,7 @@ function readHistoricalTaskDelivery(options = {}) {
     for (const read of options.deliveryCache.files.values()) {
       if (readSource(read.root, read.reference, read.limit).sha256 !== read.source.sha256) fail('clock-source-unstable');
     }
-    return { status: 'proven', ...purpose, unit: key, reference, fingerprint: projection.delivery_fingerprint, completed_at: options.completedAt,
+    return { status: 'proven', ...purpose, current_source_conformity: proofMode === 'current-source-strict' ? 'matched' : 'not-evaluated', unit: key, reference, fingerprint: projection.delivery_fingerprint, completed_at: options.completedAt,
       coverage: { criteria: projection.criteria.length, captures: captures.length, sources: scope.length },
       captures: captures.map(c => ({ reference: c.reference, sha256: c.sha256, captured_at: c.captured_at, revision: c.revision })) };
   } catch (e) { return { status: 'unproven', ...purpose, reason: sourceReason(e) }; }
@@ -894,6 +907,6 @@ function main(argv = process.argv.slice(2), io = process, options = {}) {
   const result = { clock: readClock(input), forecast: readForecast(input) };
   io.stdout.write(JSON.stringify(result) + '\n'); return 0;
 }
-module.exports = { CLOCK_POLICY, FORECAST_POLICY, DELIVERY_PROOF_MODES, computeClock, readClock, readDeliveries, readHistoricalDeliveries, readHistoricalTaskDelivery, computeForecast, readForecast, main,
+module.exports = { CLOCK_POLICY, FORECAST_POLICY, DELIVERY_PROOF_MODES, computeClock, readClock, readDeliveries, readHistoricalDeliveries, readHistoricalTaskDelivery, readCurrentTaskDelivery, computeForecast, readForecast, main,
   ENDPOINT_PROOF_POLICY, readEndpointProof };
 if (require.main === module) process.exitCode = main();

@@ -1,7 +1,7 @@
 # Bidirectional unit delivery
 
 This contract takes precedence over the historical Codex-only Branch C/D for
-**Claude sidecars**, artifact units, and memory extraction on either engine. Native delivery
+**all supported sidecars including Codex execute-task**, artifact units, and memory extraction on either engine. Native delivery
 still uses the host's native agent tool. Neither model family nor a CLI's
 presence grants delivery: `forge-dispatch-resolve` and the sidecar entrypoint
 consult `forge-transport-capabilities.js` for the actual unit contract.

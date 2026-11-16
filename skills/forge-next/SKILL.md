@@ -223,6 +223,26 @@ materializa as opções na fronteira segura; enquanto não há escolha, ele devo
    a nova estimativa, e qualquer outro código para e mostra a pendência.
 Nenhum JSON, flag, `approved:true`, texto de prompt ou silêncio aprova uma opção.
 
+### Conclusão de task sem entrega comprovada
+
+`execution-delivery-required` em complete conserva o begin e a lease: verifique
+e publique a entrega canônica do mesmo trabalho, depois complete o mesmo begin.
+Não redispare implementação para gerar um recibo. Todo sidecar de execução,
+inclusive Codex single-task, usa o unit adapter de `shared/forge-bidirectional-sidecar.md`.
+
+`execution-delivery-recovery-required` em next identifica conclusão antiga já
+committed. Preserve snapshot, código, registros e horários. Carregue o procedimento
+recovery e siga `shared/forge-delivery.md § Committed task without delivery`:
+o host monta os callbacks vivos de autoridade, perguntas e join/reconciliação de
+todos os writers/roots, conserva claim e isolamento e usa createRepair para
+verificação atual, sem executor nem inferência. Ausência de prova do host continua
+pendente; PID ausente e JSON approved não autorizam recuperação.
+
+Após a conclusão genuína do sucessor, use `resume-delivery` no mesmo adaptador em
+modo step, com snapshot salvo e o `repair_begin_key` de start. Ele valida a
+publicação e retorna continue; next continua respeitando uma unidade por rodada.
+Não edite lifecycle, workflow ID, contadores ou relógio para desbloquear.
+
 Mensagens das opções de prazo (pt-BR, uma decisão por rodada):
 - Decisão: `Decisão de prazo da milestone {M}: {pergunta}. Recomendo {opção} porque {motivo}. Escolha uma, sem pré-seleção: {opção 1} ({consequência}); {opção 2} ({consequência}){; opção 3}. Decisão pendente: {ID}. Sem resposta explícita, o roadmap não é planejado.`
 - Evidência insuficiente: `Prazo de {M} sem número para {posição}: evidência local insuficiente ({motivo}). Nenhum prazo foi inventado.`
