@@ -23,6 +23,47 @@ diagnostic, not join proof. A missing request, unknown binding, unreadable recei
 foreign session/root, held claim or changed evidence retains a named refusal.
 `--apply` cannot serialize a live host capability: it refuses without mutating.
 
+### Registered isolated worktrees
+
+Keep the original preparation request unchanged, including its `cwd` and
+fingerprint. A legacy request can name the original repository while its run
+records an isolated worktree. The reconciliation census measures both checkouts
+after validating the registered repository, worktree, exact branch and physical
+identity. An explicit contract already naming the isolated checkout also retains
+its owner repository in the census. This adds observed roots for reconciliation;
+it does not rewrite the execution contract or grant another code-writing scope.
+Foreign repositories, wrong branches, duplicate/aliased registrations, malformed
+records and changed mappings refuse. Nested registered Git checkouts remain
+separate measured roots even when the original repository ignores their folder.
+
+### An already preserved receipt copy
+
+Prefer a durable external result directory when starting a new preparation.
+Do not reconstruct or edit a historical request to relocate its result path.
+For an existing preparation whose original temporary receipt has disappeared,
+an already preserved copy may be supplied explicitly:
+
+```bash
+node "$FORGE_SCRIPTS_DIR/forge-doctor.js" --owner-window --cwd "$OWNER" --request "$REQUEST_FILE" --receipt-copy "$TASK_EVIDENCE/retained.receipt.json" --json
+```
+
+Use the same optional `--receipt-copy` with `--retire-task`; the host APIs accept
+`receiptCopy: ABSOLUTE_FILE` with inspection, recovery and retirement. The copy
+must be a bounded stable ordinary file inside this exact task's
+`.gsd/tasks/$TASK_ID/` directory, with no symlink ancestors. Its dispatch and
+preparation-request fingerprint must match. If the original is still present,
+their bytes must be identical; a conflict or unreadable original never triggers
+automatic fallback. The original path stays in the scope together with the
+selected copy, its hash and the original presence/hash. Changes invalidate the
+observation, including removal of the original while reconciling a copy.
+
+The copy supplies historical data only. The live host must reconcile its actual
+provenance along with both code roots; a file cannot attest writers, answer a
+question, accept artifacts or authorize replay. There is no automatic search or
+copy creation through a held owner window. Without an original or trustworthy
+preserved copy, retirement remains `task-retirement-receipt-required`; do not
+fabricate a receipt or promote a result/request JSON to one.
+
 ## Observe writers in the real host
 
 The assistant performs this step; the operator need not implement a lock wrapper.
@@ -50,6 +91,25 @@ the lock, change its baseline, transfer the run, add a force flag, claim that
 restarting/joining the parent proved descendants stopped, or recommend reinstalling.
 The supported path is conditional on real host evidence, not universal automatic
 recovery of every historical window.
+
+`coverage_complete` means the trusted host can account for the complete possible
+writer family and bind actual termination observations to this attempt. For
+example, a host that tracked all native-agent IDs and background-command handles
+can join those exact writers, provided its tools also cover descendants and
+prevent an unobserved continuation. A tool result covering only a parent or
+current session cannot attest a different legacy family. A command-line census
+matching an old session ID/PID/worktree, even when empty, is diagnostic evidence
+only; it does not prove that detached or renamed descendants were joined. The
+adapter validates the bound report, not the semantics or availability of an
+external census tool. Missing coverage stays an explicit limit.
+
+After a supported recovery and retirement, continue the milestone through its
+own gates. `decideObserved` accepts an explicit earlier answer observed by the
+current host in a resumed transcript with `source:'user-text'`, exact persisted
+question identity and matching response; imported transcript JSON alone cannot
+create the live callback. Recapture stale personal checkpoint sources while
+preserving the same actual accepted decisions. A new checkpoint is neither a
+new acceptance nor an answer to an unresolved question.
 
 ## Invoke the supported host API
 

@@ -62,6 +62,17 @@ pode preceder a fase; committed não prova conclusão global. Inspeção não co
 autorização nem atestações. Qualquer ação posterior permanece na autoridade
 original, que revalida precondições; não recomende replay pela ausência de evento.
 
+### Isolamento e recibo preservado
+
+Para preparação avulsa com worktree registrado, mantenha o request original.
+A inspeção reconcilia o repositório e o worktree pela identidade/branch reais;
+não altere `cwd` nem invente `execution_contract` para fazê-la passar.
+Se o recibo temporário foi removido e já existe uma cópia preservada na pasta
+da própria task, use `--receipt-copy <arquivo>` (API: `receiptCopy`). Siga os
+limites e a prova viva de `shared/forge-owner-recovery.md`; cópia não é
+autorização, prova de join ou recibo elegível para replay. Não crie a cópia
+atravessando uma janela retida nem procure automaticamente em outros projetos.
+
 ### Diagnóstico geral
 
 Determine o runtime do host atual, sem sondar outro home, e execute:

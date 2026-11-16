@@ -167,6 +167,19 @@ try {
       assert.strictEqual(resumed.unit.type, 'plan-milestone');assert.strictEqual(resumed.snapshot.step_count, 2);
     }
   });
+  test('host-bridge-restores-explicit-user-text-no-contract-after-module-restart', () => {
+    const cwd = enrolled(); materializeFor(cwd);
+    const { opened } = answer(cwd, 'Sem contrato', { source: 'user-text' });
+    const question = { identity_sha256: opened.identity_sha256, id: opened.question_id };
+    const observed = { status: 'resolved', question, response: 'Sem contrato', source: 'user-text', resolved_at: iso(NOW - 1000) };
+    delete require.cache[require.resolve('./forge-milestone-time-selection')];
+    const restarted = require('./forge-milestone-time-selection');
+    const input = { cwd, milestone: M, clock: () => NOW + 60000, prefsReader: hermeticPrefs, observeAnswer: () => observed };
+    assert.strictEqual(restarted.decideObserved({ ...input, observeAnswer: undefined }).reason, 'time-decision-attestation-required');
+    const result = restarted.decideObserved(input); assert.strictEqual(result.status, 'decided', JSON.stringify(result));
+    assert.strictEqual(result.choice, 'no-contract');
+    assert.strictEqual(restarted.decideObserved(input).status, 'decided', 'same observed prior answer remains idempotent');
+  });
   test('host-bridge-activates-and-resumes-recorded-contract-with-same-live-response', () => {
     for (const interrupt of [false, true]) {
       const cwd = enrolled(); materializeFor(cwd);
