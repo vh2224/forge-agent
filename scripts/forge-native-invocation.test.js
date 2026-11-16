@@ -150,8 +150,15 @@ async function main() {
           activeCapabilities: claudeCapabilities, taskName,
           agentType: unit.agentType, prompt: `Run ${unit.unitType}.`,
         });
-        assert.strictEqual(refusedNative.reason_code, 'native-route-identity-mismatch',
-          `${unit.unitType}/${model} must remain on the declared sidecar transport`);
+        assert.strictEqual(refusedNative.reason_code, remoteRoute.dispatch_allowed
+          ? 'native-route-identity-mismatch' : remoteRoute.dispatch_reason_code,
+        `${unit.unitType}/${model} preserves authoritative admission before native transport checks`);
+        if(unit.unitType !== 'memory-extract') {
+          assert.strictEqual(remoteRoute.dispatch_allowed, false);
+          assert.strictEqual(remoteRoute.dispatch_reason_code, 'codex-readonly-context-unsupported');
+          assert.strictEqual(remoteRoute.artifact_admission.admitted, false);
+          assert.strictEqual(remoteRoute.artifact_admission.reason_code, remoteRoute.dispatch_reason_code);
+        }
       }
     } finally {
       fs.rmSync(routeRoot, { recursive: true, force: true });

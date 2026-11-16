@@ -205,13 +205,15 @@ try {
   for (const name of ['CLAUDE.md', 'AGENTS.md']) {
     const content = fs.readFileSync(path.join(target, name), 'utf8');
     assert(content.startsWith('External instructions\r\n'));
-    assert(content.includes('forge-personal-context.js')); assert(content.includes('--snapshot'));
+    const personalContract = instructions.readContext('personal').content;
+    assert(content.includes('forge-personal-context.js')); assert(personalContract.includes('--snapshot'));
     // Simple questions use the bounded summary; the snapshot stays the explicit diagnostic.
-    assert(content.includes('forge-personal-context.js" --summary --cwd'), `${name}: synchronized contract lacks --summary`);
+    assert(content.includes('forge-personal-context.js --summary --cwd') && content.includes('Leia `personal`'), `${name}: synchronized entry lacks summary and mandatory full personal loading`);
     assert(!content.includes('--snapshot --cwd "<diretório absoluto atual>" --json'), `${name}: old snapshot entry remains`);
   }
   const projection = renderer.render({ ...renderer.PRODUCTION_DISPATCH_DIALECT, repo: path.resolve(__dirname, '..'), userHome: f.home, forgeHome: f.options.env.FORGE_HOME, codexHome: path.join(f.home, '.codex'), projectRoot: target });
-  assert(projection.artifacts.find(a => a.kind === 'instructions').content.includes(instructions.renderPersonalContract()));
+  assert(projection.artifacts.find(a => a.kind === 'instructions').content.includes('Leia `personal`'));
+  assert.strictEqual(instructions.readContext('personal').content, instructions.renderPersonalContract());
   for (const name of ['forge-task', 'forge-new-milestone', 'forge-auto', 'forge-next', 'forge-status']) {
     assert(projection.artifacts.find(a => a.source === `skills/${name}/SKILL.md`).content.includes('forge-personal-context'));
   }

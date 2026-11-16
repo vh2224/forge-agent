@@ -492,7 +492,8 @@ function issue350Expected(expected) {
 }
 function reviewPolicyDeltaChecks(trace, expected, delta) {
   const assert = require('assert'), clone = value => JSON.parse(JSON.stringify(value));
-  const check = (current, proposed = delta) => assert.deepStrictEqual(current, issue350Expected(reviewPolicyExpected(expected, proposed)));
+  const routingParity=require('./fixtures/issues-403-407-integration/parity.cjs');
+  const check = (current, proposed = delta) => assert.deepStrictEqual(routingParity.beforeTrace(current), issue350Expected(reviewPolicyExpected(expected, proposed)));
   check(trace);
   const variants = [
     ['missing path', d => { d.unlinked_task_parity.changes.pop(); }],
@@ -530,7 +531,8 @@ async function parityCheck() {
   // The stored bytes and digest stay immutable; only the comparison is projected (see personalCaseProjection).
   const projectedTrace = personalCaseProjection(trace), historicalExpected = personalCaseProjection(expected);
   const delta = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/review-policy/distribution-delta.json'), 'utf8'));
-  const projectedExpected = issue350Expected(reviewPolicyExpected(historicalExpected, delta));
+  const routingParity=require('./fixtures/issues-403-407-integration/parity.cjs');
+  const projectedExpected = routingParity.afterTrace(issue350Expected(reviewPolicyExpected(historicalExpected, delta)));
   reviewPolicyDeltaChecks(projectedTrace, historicalExpected, delta);
   assert.strictEqual(traceDigest(projectedTrace), traceDigest(projectedExpected), 'unlinked trace differs from the owner baseline at ' + firstDifference(projectedTrace, projectedExpected));
   assert.strictEqual(JSON.stringify(projectedTrace), JSON.stringify(projectedExpected));

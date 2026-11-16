@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('fs'),path=require('path');
-const root=path.resolve(__dirname,'..'),layer=require('./fixtures/issue-407/distribution.cjs'),artifacts=require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts;
+const root=path.resolve(__dirname,'..'),layer=require('./fixtures/issues-403-407-integration/distribution.cjs'),artifacts=require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts;
 assert.equal(layer.validate({artifacts}),true);
 const wrong=structuredClone(layer.issue407Layer);wrong.provenance.base_revision='0'.repeat(40);assert.throws(()=>layer.validate({artifacts,issue407LayerValue:wrong}));
 for(const file of ['CLAUDE.md','scripts/forge-instructions.js','scripts/forge-interaction.js','scripts/forge-installer.js','scripts/forge-codex-renderer.js','shared/forge-instruction-context.md'])assert.throws(()=>layer.validate({artifacts,readRaw:rel=>rel===file?Buffer.from('foreign drift'):fs.readFileSync(path.join(root,rel))}));
