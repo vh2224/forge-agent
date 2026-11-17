@@ -2,14 +2,17 @@
 // Additive measured successor: retain every historical validator and pin.
 const fs=require('fs'),path=require('path'),crypto=require('crypto'),zlib=require('zlib'),assert=require('node:assert/strict');
 const previous=require('../issue-416/distribution.cjs'),data=require('./distribution-delta.json');
-const ROOT=path.resolve(__dirname,'../../..'),PIN='97a364ef8a127aa1e5cbaa3e4c15d184f0a44ef4c802432e63129bcbf2ae9e6e';
+const ROOT=path.resolve(__dirname,'../../..'),PIN='f611c032dc8506700b873970acae6a8b3826af77778d4cc4c71bd322e7533d03';
 const hash=x=>crypto.createHash('sha256').update(x).digest('hex');
 const read=file=>fs.readFileSync(path.join(ROOT,file));
 const normalize=text=>String(text).replace(/version=\d+\.\d+\.\d+/g,'version=<dynamic>');
 const linked=/^<!-- forge:linked-task:([a-z0-9-]+):start -->\r?\n[\s\S]*?^<!-- forge:linked-task:\1:end -->\r?\n/gm;
 const attributed=bytes=>hash(bytes.toString('utf8').replace(linked,''));
 const key=item=>item.source_id+'::'+item.source;
-function check(value=data){assert.equal(hash(JSON.stringify(value)),PIN,'campaign independent measured delta');assert.equal(hash(JSON.stringify(previous.issue416Layer)),value.predecessor_layer_sha256,'campaign independent measured delta predecessor');previous.after('files','__validate_ancestor_pins__','');return value;}
+// Each public projection/validation below delegates to its predecessor, which
+// validates its complete history. Do not traverse it again here: doing so
+// doubles predecessor work at every additional layer.
+function check(value=data){assert.equal(hash(JSON.stringify(value)),PIN,'campaign independent measured delta');assert.equal(hash(JSON.stringify(previous.issue416Layer)),value.predecessor_layer_sha256,'campaign independent measured delta predecessor');return value;}
 function before(row){const bytes=zlib.gunzipSync(Buffer.from(row.before_gzip_base64,'base64'),{maxOutputLength:4*1024*1024});assert.equal(hash(bytes),row.before,'campaign exact predecessor bytes');return bytes;}
 function validate(options){
  const value=check(options.issue418LayerValue||data),readRaw=options.readRaw||read;
