@@ -19,4 +19,9 @@ for(const field of ['before','after','attributed_before','attributed_after']){
 }
 const old=structuredClone(entry.parallelismLayer),first=Object.keys(old.files).find(file=>old.files[file].before!==null);old.files[first].before='0'.repeat(64);
 assert.throws(()=>entry.validate({artifacts,parallelismLayerValue:old}),'historical negative controls remain enforcing');
+const upstream=structuredClone(entry.issue414Layer);upstream.provenance.issues=[];
+assert.throws(()=>entry.validate({artifacts,issue414LayerValue:upstream}),'the integrated native telemetry predecessor remains independently pinned');
+for(const file of ['scripts/forge-task-preparation.js','scripts/forge-task-preparation.test.js']){
+ assert.throws(()=>entry.validate({artifacts,readRaw:relative=>relative===file?Buffer.from('foreign telemetry drift'):fs.readFileSync(path.join(root,relative))}),'upstream native telemetry changes remain guarded');
+}
 console.log('PASS additive CI source layer, undeclared source drift, four independent pin mutations and historical-layer tamper refusal');
