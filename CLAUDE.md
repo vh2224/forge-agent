@@ -368,8 +368,9 @@ Ausência de vínculo é no-bindings; erro ou fonte desatualizada exige diagnós
 <!-- Gerado por forge-instructions.js; detalhes por contexto, sem remover contratos. -->
 ## Forge — entrada e controles permanentes
 Resolva FORGE_SCRIPTS_DIR para scripts/ da instalação atual (FORGE_HOME ou ~/.forge-agent).
-Ao iniciar/retomar/status: contexto pessoal `forge-personal-context.js --summary --cwd <raiz>`
-e `forge-procedure-context.js --phase boot --cwd <raiz-física>`. Boot é somente leitura;
+Ao iniciar/retomar/status: carregue `forge-procedure-context.js --phase boot --cwd <raiz-física>`.
+Antes do primeiro uso do adaptador, leia shared/forge-personal-context.md; então consulte
+`forge-personal-context.js --summary --cwd <raiz>`, antes de selecionar trabalho. Boot é somente leitura;
 não escolha trabalho por STATE/ledger, não migre vínculos nem apague continue.md.
 Antes de cada fase carregue o módulo canônico com --phase <fase>; consuma `content`.
 O loader inclui shared/forge-procedure-core.md e módulos transitivos; leia o conteúdo antes do despacho.

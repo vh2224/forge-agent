@@ -482,7 +482,8 @@ function install(input = {}) {
     if (fs.statSync(source).isDirectory()) copyTree(source, destination, plan, options, relative => isRuntimeFile(path.join(item, relative)));
     else copyFile(source, destination, plan, options);
   }
-  if (options.update) retireDevelopmentFiles(repo, paths.forgeHome, backupRoot, plan, options);
+  if (options.update && options.deferDevelopmentRetirement !== true) retireDevelopmentFiles(repo, paths.forgeHome, backupRoot, plan, options);
+  else if (options.update) plan.push({ op: 'skip', reason: 'development-retirement-deferred', destination: paths.forgeHome });
   // Review schemas historically lived under shared/schemas in the repository,
   // while installed scripts resolve the canonical Forge-home schemas directory.
   copyTree(path.join(repo, 'shared', 'schemas'), paths.shared.schemas, plan, options);
@@ -645,11 +646,13 @@ function install(input = {}) {
   writeText(paths.shared.manifest, JSON.stringify(manifest, null, 2) + '\n', plan, options);
   const app = installApp(repo, plan, options, paths.platform);
   // Never throws: the core above is already applied and its outcome stays ok.
-  const panel = panelStateBackupFailure || vscodePanel.applyPanel({
+  const deferPanel = options.deferVscodePanel === true && !['opt-in', 'opt-out'].includes(options.vscodePanel);
+  if (deferPanel) plan.push({ op: 'skip', reason: 'vscode-panel-activation-deferred', destination: paths.forgeHome });
+  const panel = panelStateBackupFailure || (deferPanel ? vscodePanel.panelSummary(paths.forgeHome) : vscodePanel.applyPanel({
     repo, forgeHome: paths.forgeHome, version: VERSION, request: options.vscodePanel, dryRun: Boolean(options.dryRun), plan,
     env: options.env || process.env, platform: paths.platform, spawnSync: options.vscodeSpawnSync,
     windowsRunner: options.vscodeWindowsRunner, stagingRoot: options.vscodeStagingRoot, onStaged: options.vscodeOnStaged,
-  });
+  }));
   const backupPath = path.resolve(backupRoot);
   const hasBackup = options.update && plan.some((entry) => entry.destination && (path.resolve(entry.destination) === backupPath || path.resolve(entry.destination).startsWith(`${backupPath}${path.sep}`)));
   return { ok: true, changed: plan.some((entry) => entry.op === 'copy' || entry.op === 'write' || entry.op === 'app-build' || entry.op === 'vscode-panel-install'), dry_run: Boolean(options.dryRun), runtime, selected, forge_home: paths.forgeHome, runtime_homes: Object.fromEntries(selected.map((host) => [host, paths.runtimeHomes[host]])), backup: hasBackup ? backupRoot : null, capabilities, presentation, plan, manifest, app, vscode_panel: panel };

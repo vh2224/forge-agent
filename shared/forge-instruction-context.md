@@ -33,3 +33,12 @@ imports does not reduce context. Operator content is never silently truncated.
 Distribution/fixture tests establish byte preservation and discoverability, not
 that every host will follow arbitrary prose. Record fresh-host observations and
 their exact scope separately from local passing tests.
+
+For an explicitly scoped local maintenance activation, the canonical installer
+API accepts `deferDevelopmentRetirement:true` and `deferVscodePanel:true`.
+These defer unrelated cleanup and optional extension installation without
+changing opt-in/preferences or bypassing source, capability, ownership and
+procedure checks. Defaults remain unchanged. The caller must still compare the
+installed runtime and protected profile hashes and report the exact source view.
+An explicit `vscodePanel:'opt-in'` or `'opt-out'` takes precedence over panel
+deferral; a deferred activation is recorded in the installation plan.
