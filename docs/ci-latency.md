@@ -52,18 +52,20 @@ the suite explicitly preserved.
 
 The active profile at `scripts/fixtures/ci-latency/shard-profile.json` was refreshed
 through the canonical collector from seven complete structured PR415 artifacts
-and 48 completed worker profiles from diagnostic run44172245727. Only unambiguous
+and 47 completed worker profiles from diagnostic run44183550750. Only unambiguous
 passing rows contribute weights; that failed run is not acceptance evidence.
-All sixteen Windows test jobs passed; Linux/macOS smoke rejected three obsolete
-workflow-shape assertions, now updated for the allocated smoke suite. Original
+Mutable-export negative controls exposed an incompatible freeze, now replaced
+with exact graph-change detection. One Windows restart CLI failed with an
+undetermined cause; its complete unit passed in a separate local run. Original
 merge-checkout provenance is retained. Earlier diagnostic unit weights are
 superseded; their original evidence remains recorded. Changed case rosters use
 new unit revisions.
 
 Historical distribution layers repeat an ancestor-pin sentinel through the same
-immutable JSON defaults. The successor freezes those defaults and memoizes only
-that sentinel proof; ordinary lookups, full validation and raw-source reads stay
-live. Replacing a dependency's lookup invalidates the cached proof. Accessor or
+JSON defaults. The successor snapshots their data descriptors and memoizes only
+the unchanged sentinel proof; mutable-export negatives, ordinary lookups, full
+validation and raw-source reads stay live. Changing the graph or a dependency's
+lookup invalidates the cached proof. Accessor or
 non-data defaults disable the optimization. No historical fixture file changes.
 New virtual units use explicitly estimated historical source costs divided by
 their declared partition factor. Already concurrent source coordinators use
@@ -78,7 +80,7 @@ matrix job-name binding and observed Node/image metadata. Feed those logs
 individually to the existing raw-log collector. The combined job console has
 multiple runners and intentionally remains ambiguous for that collector.
 For an allocation estimate matching CI, use `forge-ci-profile report` with
-`--partition-suites` and the effective counts linux:6, darwin:9, win32:32.
+`--partition-suites` and the effective counts linux:6, darwin:15, win32:32.
 Leave out that option when analyzing the older whole-file runner universe.
 Report execution, queue, setup and aggregate runner work separately.
 

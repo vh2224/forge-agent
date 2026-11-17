@@ -1,6 +1,6 @@
 'use strict';
 // Historical layers recursively recheck the same ancestor sentinel twice.
-// Freeze their JSON defaults and memoize ONLY that immutable sentinel proof.
+// Snapshot their JSON defaults and memoize ONLY an unchanged sentinel proof.
 // validate(), raw-source reads and caller-supplied negative fixtures stay live.
 const installed = new WeakMap();
 function installImmutablePinCache(root) {
@@ -26,7 +26,22 @@ function installImmutablePinCache(root) {
   visit(root);
   const json=modules.filter(module=>module.filename && module.filename.endsWith('.json'));
   if (!json.length || !json.every(module=>plainData(module.exports))) return {enabled:false,layers:0};
-  for (const value of objects) Object.freeze(value);
+  // Exported defaults are deliberately mutated by negative-control tests.
+  // Preserve that contract and invalidate the proof before any changed graph
+  // reaches a cached sentinel. Descriptors avoid invoking injected accessors.
+  const snapshots=[...objects].map(value=>({value,prototype:Object.getPrototypeOf(value),
+    entries:Reflect.ownKeys(value).map(key=>[key,Object.getOwnPropertyDescriptor(value,key).value])}));
+  const exports=json.map(module=>[module,module.exports]);
+  function unchanged() {
+    if (!exports.every(([module,value])=>module.exports===value)) return false;
+    return snapshots.every(({value,prototype,entries})=>Object.getPrototypeOf(value)===prototype
+      && Reflect.ownKeys(value).length===entries.length
+      && entries.every(([key,expected])=>{
+        const descriptor=Object.getOwnPropertyDescriptor(value,key);
+        return descriptor && Object.hasOwn(descriptor,'value') && Object.is(descriptor.value,expected);
+      }));
+  }
+  let depth=0,graphStable=false;
   const states=[];
   for (const module of modules) {
     if (!module.exports || typeof module.exports.after !== 'function') continue;
@@ -35,13 +50,17 @@ function installImmutablePinCache(root) {
     const original=module.exports.after,state={module,wrapper:null};
     const memo=new Map();
     function after(kind,file,previous,attributed=false) {
+      if (depth===0) graphStable=unchanged();
+      depth++;
+      try {
       const sentinel=kind==='files' && file==='__validate_ancestor_pins__' && previous===''
         && typeof attributed==='boolean' && arguments.length<=4;
-      const stable=sentinel && states.every(item=>item.module.exports.after===item.wrapper);
+      const stable=sentinel && graphStable && states.every(item=>item.module.exports.after===item.wrapper);
       if (stable && memo.has(attributed)) return memo.get(attributed);
       const result=Reflect.apply(original,this,arguments);
       if (stable) memo.set(attributed,result);
       return result;
+      } finally { depth--; }
     }
     state.wrapper=after;
     if (!Object.getOwnPropertyDescriptor(module.exports,'after')?.writable) { state.wrapper=original;states.push(state);continue; }

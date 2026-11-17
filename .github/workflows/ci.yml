@@ -76,20 +76,32 @@ jobs:
           - os: macos-latest
             platform: darwin
             shard-index: 0
-            shard-count: 3
-            label: macos-latest, shard 1/3
+            shard-count: 5
+            label: macos-latest, shard 1/5
             workers: 3
           - os: macos-latest
             platform: darwin
             shard-index: 1
-            shard-count: 3
-            label: macos-latest, shard 2/3
+            shard-count: 5
+            label: macos-latest, shard 2/5
             workers: 3
           - os: macos-latest
             platform: darwin
             shard-index: 2
-            shard-count: 3
-            label: macos-latest, shard 3/3
+            shard-count: 5
+            label: macos-latest, shard 3/5
+            workers: 3
+          - os: macos-latest
+            platform: darwin
+            shard-index: 3
+            shard-count: 5
+            label: macos-latest, shard 4/5
+            workers: 3
+          - os: macos-latest
+            platform: darwin
+            shard-index: 4
+            shard-count: 5
+            label: macos-latest, shard 5/5
             workers: 3
           - os: windows-latest
             platform: win32

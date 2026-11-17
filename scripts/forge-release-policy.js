@@ -13,8 +13,8 @@ const POLICY = {
   workflows: {
     ci: {
       filename: 'ci.yml', path: '.github/workflows/ci.yml',
-      blob_oid: '894b5d837166323247d574a99093e1fed58c9a6a',
-      blob_sha256: 'da37443b4e7170ae5acb55c21f2dbb13514d4055b78dbb183c34d7a4bdd8cb57',
+      blob_oid: '29b6a3c1425cc40098ff8ef47168d43bfcb46e4a',
+      blob_sha256: '8bdde3aafb49639b0b4b9d00932c90078005850014667b77943d1c33afb152d9',
       jobs: [
         { key: 'operational-offline', kind: 'native', needs: [],
           name: 'Offline ${{ matrix.host }} / ${{ matrix.platform }}',
@@ -28,9 +28,11 @@ const POLICY = {
             {os: "ubuntu-latest",platform: "linux","shard-index":0,"shard-count":3,label: "ubuntu-latest, shard 1/3",workers: 2},
             {os: "ubuntu-latest",platform: "linux","shard-index":1,"shard-count":3,label: "ubuntu-latest, shard 2/3",workers: 2},
             {os: "ubuntu-latest",platform: "linux","shard-index":2,"shard-count":3,label: "ubuntu-latest, shard 3/3",workers: 2},
-            {os: "macos-latest",platform: "darwin","shard-index":0,"shard-count":3,label: "macos-latest, shard 1/3",workers: 3},
-            {os: "macos-latest",platform: "darwin","shard-index":1,"shard-count":3,label: "macos-latest, shard 2/3",workers: 3},
-            {os: "macos-latest",platform: "darwin","shard-index":2,"shard-count":3,label: "macos-latest, shard 3/3",workers: 3},
+            {os: "macos-latest",platform: "darwin","shard-index":0,"shard-count":5,label: "macos-latest, shard 1/5",workers: 3},
+            {os: "macos-latest",platform: "darwin","shard-index":1,"shard-count":5,label: "macos-latest, shard 2/5",workers: 3},
+            {os: "macos-latest",platform: "darwin","shard-index":2,"shard-count":5,label: "macos-latest, shard 3/5",workers: 3},
+            {os: "macos-latest",platform: "darwin","shard-index":3,"shard-count":5,label: "macos-latest, shard 4/5",workers: 3},
+            {os: "macos-latest",platform: "darwin","shard-index":4,"shard-count":5,label: "macos-latest, shard 5/5",workers: 3},
             {os: "windows-latest",platform: "win32","shard-index":0,"shard-count":16,label: "windows-latest, shard 1/16",workers: 2},
             {os: "windows-latest",platform: "win32","shard-index":1,"shard-count":16,label: "windows-latest, shard 2/16",workers: 2},
             {os: "windows-latest",platform: "win32","shard-index":2,"shard-count":16,label: "windows-latest, shard 3/16",workers: 2},

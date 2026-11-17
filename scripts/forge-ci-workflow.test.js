@@ -239,13 +239,13 @@ const verifySteps = steps.filter(step => /svn --version --quiet/.test(step) && /
 assert.strictEqual(verifySteps.length, 1);
 assert(!/^\s*if:/m.test(verifySteps[0]) && texts.ci.indexOf(verifySteps[0]) < testIndex);
 const rows = expandJobs(POLICY.workflows.ci);
-assert.strictEqual(rows.length, 34);
+assert.strictEqual(rows.length, 36);
 assert.strictEqual(rows.filter(row => row.kind === 'alias').length, 9);
 assert.deepStrictEqual(rows.filter(row => row.key === 'test').map(row => row.name),
-  [['ubuntu-latest', 3], ['macos-latest', 3], ['windows-latest', 16]].flatMap(([os, count]) => Array.from({length:count}, (_, i) => `Tests (${os}, shard ${i+1}/${count})`)));
+  [['ubuntu-latest', 3], ['macos-latest', 5], ['windows-latest', 16]].flatMap(([os, count]) => Array.from({length:count}, (_, i) => `Tests (${os}, shard ${i+1}/${count})`)));
 assert.strictEqual(rows.filter(row => row.name === 'Tests (ubuntu-latest)' && row.kind === 'alias').length, 1);
 assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'win32').map(row => row.matrix['shard-count']), Array(16).fill(16));
-assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'darwin').map(row => row.matrix['shard-count']), Array(3).fill(3));
+assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'darwin').map(row => row.matrix['shard-count']), Array(5).fill(5));
 // Smoke condition evaluated per policy cell: exactly one Linux and one macOS run, never Windows.
 const runnerOs = { 'ubuntu-latest': 'Linux', 'macos-latest': 'macOS', 'windows-latest': 'Windows' };
 const smokeCells = rows.filter(row => row.key === 'test'
