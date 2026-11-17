@@ -605,8 +605,9 @@ function scopedCompletion(cwd, milestone, slice, task, records) {
   const unitKey = `execute-task/${task}`;
   let events = null, completedAt = null;
   // Unreadable or divergent records never prove a predecessor (fail closed).
-  try { if (!records.some(isCompletion)) return false; } catch { return false; }
-  return deliveryProven(cwd, milestone, slice, task, completedAt);
+  try {
+    return records.some(record => isCompletion(record) && deliveryProven(cwd, milestone, slice, task, completedAt));
+  } catch { return false; }
   // The completion is bound to its begin by durable lineage (milestone, unit, owner
   // digest, host and lease generation), never by the caller's key spelling.
   function sameLineage(left, right) {

@@ -276,6 +276,34 @@ function planSlice(dir, tasks) {
 }
 // The real cohort: the loop's auto next through the long-workflow adapter dispatches T01 and
 // T02 with committed begins and live leases (U1).
+const FIXTURE_LEASE_WINDOWS = new Map();
+let leaseWindowControlsChecked = false;
+function protectFixtureLeases(dir, members) {
+  const lease = require('./forge-unit-lease'), timeout = require('./forge-worker-timeout');
+  const coverage = timeout.protectedWindowMs(timeout.resolveWorkerCeiling({ tier: 'standard' }).ms);
+  assert(coverage.covers, 'fixture standard-tier ceiling must fit a canonical owner window');
+  const windows = [];
+  for (const member of members || NAMES.map(task_id => ({ task_id }))) {
+    const unit = `execute-task/${member.task_id}`, observed = lease.observe(dir, unit);
+    assert(observed.ok && observed.lease && !observed.lease.expired, `fixture lost live lease for ${unit}`);
+    const generation = observed.lease.generation;
+    if (member.lease_generation) assert.strictEqual(generation, member.lease_generation);
+    if (!leaseWindowControlsChecked) {
+      const file = lease.leaseFile(dir, unit), before = fs.readFileSync(file);
+      for (const [token, gen, options] of [[TOKEN + '-foreign', generation, {}], [TOKEN, generation + '-foreign', {}],
+        [TOKEN, generation, { now: () => observed.lease.expires_at + 1 }]]) {
+        assert.strictEqual(lease.openProtectedWindow(dir, unit, token, gen, { durationMs: coverage.duration_ms, ...options }).ok, false);
+        assert(fs.readFileSync(file).equals(before), 'refused fixture window must not alter a lease');
+      }
+      leaseWindowControlsChecked = true;
+    }
+    const window = lease.openProtectedWindow(dir, unit, TOKEN, generation, { durationMs: coverage.duration_ms });
+    assert.strictEqual(window.ok, true);assert.strictEqual(window.generation, generation);assert(window.check().ok);
+    windows.push(window);
+  }
+  for (const old of FIXTURE_LEASE_WINDOWS.get(dir) || []) old.close();
+  FIXTURE_LEASE_WINDOWS.set(dir, windows);
+}
 function cohort(dir) {
   planSlice(dir, Object.fromEntries(NAMES.map(id => [id, taskPlan(id)])));
   const snapshot = loop.create({ mode: 'auto', workflow_id: `wf-${++serial}`, host_runtime: 'codex', max_steps: 10 });
@@ -283,6 +311,9 @@ function cohort(dir) {
   assert.deepStrictEqual([result.outcome, result.action], ['dispatch_required', 'dispatch-batch'], JSON.stringify(result.controller_result));
   const dispatched = result.controller_result.details.dispatch_batch;
   assert.deepStrictEqual(dispatched.members.map(member => member.unit.key), NAMES.map(id => `execute-task/${id}`));
+  // Same canonical protection as runCohort: before physical preparation/S0,
+  // with real time, unchanged default TTL, and the exact held owner/generation.
+  protectFixtureLeases(dir);
   return { batch_id: dispatched.batch_id, manifest_sha256: dispatched.manifest_sha256 };
 }
 // The real run of the cohort and its live v2 reservation of the integration namespace.
@@ -295,16 +326,10 @@ function scopeOf(dir, ids, label) {
     paths: [{ root_id: 'primary', path: '**' }] });
   return { cwd: dir, milestone: M, host_runtime: 'codex', owner_token: TOKEN, batch_id: ids.batch_id, manifest_sha256: ids.manifest_sha256, run_id: runId };
 }
-// The fixture is the live owner between synchronous lower-level API calls: it keeps the actual
-// leases with their canonical heartbeat and unchanged TTL, and fails if one already expired.
+// Preparation checkpoints remain outside S0. Reopen bounded opaque windows,
+// rather than resetting them to a30s heartbeat before potentially slow real I/O.
 function heartbeatMembers(dir, prepared) {
-  const lease = require('./forge-unit-lease');
-  for (const member of prepared.members) {
-    const unit = `execute-task/${member.task_id}`, observed = lease.observe(dir, unit);
-    assert(observed.ok && observed.lease && !observed.lease.expired, `fixture lost live lease for ${unit}`);
-    const renewed = lease.heartbeat(dir, unit, TOKEN, member.lease_generation);
-    assert.strictEqual(renewed.ok, true, JSON.stringify(renewed));
-  }
+  protectFixtureLeases(dir, prepared.members);
 }
 // The exact member request a sidecar attempt binds (the U2b shape): the member's own physical
 // projection, the held aggregate claim and the manifest route of THIS member.
@@ -950,6 +975,8 @@ async function closeRetainedCohort(lab) {
     if (writer.child && writer.child.exitCode === null && writer.child.signalCode === null) writer.child.kill();
   }
   try { await batch.closeCohortBroker(lab.cohortHandle); } catch (_) { /* already stopped */ }
+  for (const window of FIXTURE_LEASE_WINDOWS.get(lab.dir) || []) window.close();
+  FIXTURE_LEASE_WINDOWS.delete(lab.dir);
   try { removeLockRoot(lab.broker.manifest.lock_root); } catch (error) { console.log(`      lock cleanup: ${error && error.message}`); }
 }
 const memberCall = (lab, index) => ({ ...lab.requests[index], memberHandle: lab.handles[index] });
@@ -1248,6 +1275,8 @@ test('issue343 U3b-3 the single path publishes exactly as before; member request
   try {
     await runCases();
   } finally {
+    for (const windows of FIXTURE_LEASE_WINDOWS.values()) for (const window of windows) window.close();
+    FIXTURE_LEASE_WINDOWS.clear();
     if (lab.broker) {
       try { await lab.broker.close(); } catch (_) { /* already stopped */ }
       try { removeLockRoot(lab.broker.manifest.lock_root); } catch (error) { console.log(`      lock cleanup: ${error && error.message}`); }

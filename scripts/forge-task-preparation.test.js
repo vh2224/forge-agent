@@ -518,7 +518,7 @@ async function main() {
         if (phase === 'research') {
           assert.equal(result.ok, false, JSON.stringify(result));
           assert.equal(result.reason_code, 'codex-readonly-context-unsupported');
-          assert.equal(result.diagnostic.stage, 'capability');
+          assert.equal(result.diagnostic.stage, 'resolution');
           assert.equal(result.provider_called, false);
           assert.equal(calls, 0);
           assert(!fs.existsSync(`${request.resultFile}.receipt.json`));
@@ -575,7 +575,7 @@ async function main() {
           : await prep.prepareStandaloneTask(request, { invokeSidecar: async () => { calls++; throw Error('must not invoke'); } });
         assert.equal(result.ok, false, `${entry}: ${JSON.stringify(result)}`);
         assert.equal(result.reason_code, 'codex-readonly-context-unsupported', entry);
-        assert.equal(result.diagnostic.stage, 'capability', entry);
+        assert.equal(result.diagnostic.stage, 'resolution', entry);
         assert.equal(result.provider_called, false, entry);
         assert.equal(result.route.resolved_worker_engine, 'codex', entry);
         assert.equal(result.route.worker_mode, 'sidecar', entry);
@@ -650,6 +650,9 @@ async function main() {
     const route = { ...resolveDispatch({ cwd: request.contextRoot, unitType: 'research-milestone', hostRuntime: 'claude',
       scope: 'standalone-task', phase: 'research', unitId: request.taskId, taskId: request.taskId }), unit_type: 'research-milestone' };
     assert.equal(route.resolved_worker_engine, 'codex');
+    // Historical receipt predates early resolver admission (#404). No new
+    // invocation is authorized by this persisted route during the replay.
+    route.dispatch_allowed = true;
     const delivery = prep.deliveryRequest(validated, route, prep.buildPreparationPrompt(validated));
     assert.equal(unit.beginArtifactAttempt(delivery).state, 'started');
     await unit.acceptArtifactResult(delivery, envelope(request), { providerCalled: true, maxPayloadBytes: unit.MAX_ARTIFACT_PAYLOAD_BYTES });

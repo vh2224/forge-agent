@@ -420,6 +420,7 @@ function composeRuntimePosture(runtime, unitType, delivery = {}) {
     dispatch_hint: guard.hint,
     dispatch_posture: guard.posture,
     dispatch_decision: guard.decision,
+    ...(guard.artifact_admission ? { artifact_admission: guard.artifact_admission } : {}),
   };
 }
 
@@ -594,6 +595,12 @@ function resolveDispatch(opts, environment) {
       dispatch_posture: 'enforce',
       dispatch_decision: 'refuse',
     };
+  }
+  if (resolvedRuntime.dispatch_reason_code === 'codex-readonly-context-unsupported') {
+    const domain = route.domain_used || 'default';
+    const cell = /^[A-Za-z0-9_-]{1,64}$/.test(domain)
+      ? `routing.${domain}.${unitType}.${tier}` : 'a célula da unidade/tier no domínio efetivo';
+    resolvedRuntime = { ...resolvedRuntime, dispatch_hint: `${resolvedRuntime.dispatch_hint} Célula efetiva: ${cell}; corrija essa escolha explicitamente antes de novo dispatch.` };
   }
   return {
     engine,

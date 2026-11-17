@@ -145,6 +145,64 @@ function renderBlock(options = {}) {
   return lines.join('\n').replace(/\r?\n/g, eol);
 }
 
+const CONTEXT_NAMES = Object.freeze(['routing', 'personal', 'entry', 'communication', 'interaction']);
+const DEFAULT_MAX_BYTES = 32768;
+
+function instructionBudget(options) {
+  const limit = options.maxBytes === undefined ? DEFAULT_MAX_BYTES : options.maxBytes;
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw Object.assign(new Error('instruction-budget-invalid'), { code: 'instruction-budget-invalid' });
+  }
+  return limit;
+}
+
+function readContext(name) {
+  const readers = { routing: () => CONTRACT_LINES.join('\n'), personal: renderPersonalContract,
+    entry: renderEntryContract, communication: renderCommunicationContract, interaction: interaction.contract };
+  if (!CONTEXT_NAMES.includes(name)) throw Object.assign(new Error('instruction-context-invalid'), { code: 'instruction-context-invalid' });
+  const content = readers[name]().replace(/\r\n/g, '\n').trimEnd();
+  if (!content) throw Object.assign(new Error('instruction-context-empty'), { code: 'instruction-context-empty' });
+  return { schema_version: 1, context: name, content, bytes: Buffer.byteLength(content, 'utf8'),
+    sha256: require('crypto').createHash('sha256').update(content).digest('hex') };
+}
+
+function renderEntryBlock(options = {}) {
+  // Validate the adjacent canonical source, even though its prose is not inlined.
+  renderCommunicationContract();
+  return [MARKER_START,
+    '<!-- Gerado por forge-instructions.js; detalhes por contexto, sem remover contratos. -->',
+    '## Forge — entrada e controles permanentes',
+    'Resolva FORGE_SCRIPTS_DIR para scripts/ da instalação atual (FORGE_HOME ou ~/.forge-agent).',
+    'Ao iniciar/retomar/status: carregue `forge-procedure-context.js --phase boot --cwd <raiz-física>`.',
+    'Antes do primeiro uso do adaptador, leia shared/forge-personal-context.md; então consulte',
+    '`forge-personal-context.js --summary --cwd <raiz>`, antes de selecionar trabalho. Boot é somente leitura;',
+    'não escolha trabalho por STATE/ledger, não migre vínculos nem apague continue.md.',
+    'Antes de cada fase carregue o módulo canônico com --phase <fase>; consuma `content`.',
+    'O loader inclui shared/forge-procedure-core.md e módulos transitivos; leia o conteúdo antes do despacho.',
+    'Módulo ausente, integridade inválida ou conteúdo não lido bloqueiam a fase correspondente.',
+    '',
+    'Carregamento obrigatório por intenção: `node "<FORGE_SCRIPTS_DIR>/forge-instructions.js" --context <nome> --json`.',
+    'Leia `personal` e `communication` no boot; `entry` antes de classificar uma nova demanda;',
+    '`routing` antes de preparar/despachar/recuperar unidade; `interaction` antes de pergunta',
+    'ou recuperação que use autorização. Conteúdo completo preservado; caminho/hash não o substitui.',
+    'Antes de ação direta/correção de UAT/manutenção autorizada, leia shared/forge-direct-actions.md.',
+    '',
+    'Invariantes: intenção antes do lifecycle; comando/flags explícitos valem como escolhidos.',
+    'Ação direta elegível não cria task. Unidade no lifecycle mantém plano, gates, isolamento,',
+    'claims, CODE_DIR, verificação, revisão, histórico e checkpoint. Nunca invente milestone.',
+    'Modelo/engine/tier/esforço vêm do resolvedor e adaptador reais, explícitos; não herde defaults.',
+    'Recusa bloqueia aquele despacho, não diagnóstico/recuperação já autorizados. Reconcile processos,',
+    'receipts e possíveis escritas antes de tentar novamente; não troque executor silenciosamente.',
+    'Distingua host direto, worker nativo e sidecar. Não fabrique receipt, gate ou prova de sandbox.',
+    'Manutenção direta do Forge exige autorização própria e controles do contrato de ações diretas.',
+    '',
+    'Comunicação pt-BR: resultado, fase/executor real, próximo passo e decisão pendente quando houver.',
+    'Separe implementação, testes, revisão, CI, merge, instalação e aceite humano por evidência.',
+    'Não repita autorizações resolvidas, altere preferências nem publique segredos/prompts brutos.',
+    'Após pausa/retomada/fecho salve checkpoint pessoal com fontes atuais; idle/SUMMARY não provam conclusão.',
+    MARKER_END].join('\n').replace(/\r?\n/g, options.eol === 'crlf' ? '\r\n' : '\n');
+}
+
 // Resolve beside the script in both the checkout and installed Forge home.
 // The explicit file seam permits isolated failure tests without an env override.
 function renderCommunicationContract(options = {}) {
@@ -330,16 +388,25 @@ function readFileSafe(file) {
  *          outcome ∈ OUTCOMES; reason is always named, never empty.
  */
 function syncFile(file, options = {}) {
+  const maxBytes = instructionBudget(options);
   const host = options.host || 'claude';
   const dryRun = Boolean(options.dryRun);
   const create = options.create !== false;
-  const result = (outcome, reason) => ({ file, host, outcome, reason });
+  let budget = {};
+  const result = (outcome, reason) => ({ file, host, outcome, reason, ...budget });
+  const measure = (content) => {
+    const instructionBytes = Buffer.byteLength(content, 'utf8');
+    budget = { instructionBytes, instructionBudget: maxBytes,
+      instructionBudgetExceeded: instructionBytes > maxBytes };
+    return !budget.instructionBudgetExceeded;
+  };
 
   const read = readFileSafe(file);
 
   if (!read.ok && read.absent) {
     if (!create) return result('skipped', 'absent-and-not-requested');
-    const block = interaction.sync(`${renderBlock({ eol: 'lf' })}\n`).content;
+    const block = interaction.sync(`${renderEntryBlock({ eol: 'lf' })}\n`, { compact: true }).content;
+    if (!measure(block)) return result('skipped', 'instruction-budget-exceeded');
     if (dryRun) return result('created', 'absent-would-create');
     try { fs.writeFileSync(file, block, 'utf8'); }
     catch (error) { return result('skipped', `write-failed:${(error && error.code) || 'EUNKNOWN'}`); }
@@ -349,7 +416,7 @@ function syncFile(file, options = {}) {
 
   const text = read.text;
   const eol = detectEol(text);
-  const block = renderBlock({ eol });
+  const block = renderEntryBlock({ eol });
   const found = findBlock(text);
 
   if (found && found.malformed) return result('skipped', `malformed-block:${found.malformed}`);
@@ -373,9 +440,10 @@ function syncFile(file, options = {}) {
     reason = 'block-absent';
   }
 
-  const interactive = interaction.sync(next);
+  const interactive = interaction.sync(next, { compact: true });
   if (interactive.malformed) return result('skipped', `malformed-block:${interactive.malformed}`);
   next = interactive.content;
+  if (!measure(next)) return result('skipped', 'instruction-budget-exceeded');
   if (next === text) return result('unchanged', reason);
   if (dryRun) return result('updated', `${reason}-would-write`);
   try { fs.writeFileSync(file, next, 'utf8'); }
@@ -392,6 +460,7 @@ function syncFile(file, options = {}) {
  * still ends up carrying the contract.
  */
 function syncInstructions(cwd, options = {}) {
+  instructionBudget(options);
   const root = path.resolve(cwd || process.cwd());
   const host = options.host || null; // null = auto
   const files = [];
@@ -412,7 +481,21 @@ function syncInstructions(cwd, options = {}) {
       files.push({ file: full, host: target.host, outcome: 'skipped', reason: 'absent-and-not-requested' });
       continue;
     }
-    files.push(syncFile(full, { host: target.host, dryRun: options.dryRun, create: canCreate }));
+    files.push(syncFile(full, { host: target.host, dryRun: true, create: canCreate, maxBytes: options.maxBytes }));
+  }
+
+  // Refuse the entire instruction batch before changing the first selected file.
+  if (files.some(file => file.instructionBudgetExceeded)) {
+    return { cwd: root, changed: 0, files: files.map(file =>
+      ['created', 'updated'].includes(file.outcome)
+        ? { ...file, outcome: 'skipped', reason: 'instruction-batch-budget-exceeded' } : file) };
+  }
+  if (!options.dryRun) {
+    for (let i = 0; i < files.length; i++) {
+      if (['created', 'updated', 'unchanged'].includes(files[i].outcome)) {
+        files[i] = syncFile(files[i].file, { host: files[i].host, create: options.create !== false, maxBytes: options.maxBytes });
+      }
+    }
   }
 
   const changed = files.filter((f) => f.outcome === 'created' || f.outcome === 'updated').length;
@@ -427,6 +510,8 @@ function usage() {
     '  node forge-instructions.js --sync  [--cwd <dir>] [--host claude|codex|both] [--json] [--quiet]',
     '  node forge-instructions.js --check [--cwd <dir>] [--json]',
     '  node forge-instructions.js --print [--eol lf|crlf]',
+    '  node forge-instructions.js --context routing|personal|entry|communication|interaction [--json]',
+    '  --max-bytes <N> sets the per-file generation budget (default32768, not the effective host-chain budget).',
     '',
     'Injects the multi-LLM routing contract as a managed block into the project',
     'instruction file (CLAUDE.md / AGENTS.md). Idempotent; bytes outside the',
@@ -437,10 +522,12 @@ function usage() {
 }
 
 function parseArgs(argv) {
-  const out = { mode: null, cwd: process.cwd(), host: null, json: false, quiet: false, eol: 'lf', create: true };
+  const out = { mode: null, cwd: process.cwd(), host: null, json: false, quiet: false, eol: 'lf', create: true, maxBytes: DEFAULT_MAX_BYTES };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--sync' || arg === '--check' || arg === '--print') out.mode = arg.slice(2);
+    else if (arg === '--context') { out.mode = 'context'; out.context = argv[++i]; }
+    else if (arg === '--max-bytes') out.maxBytes = Number(argv[++i]);
     else if (arg === '--cwd') out.cwd = argv[++i];
     else if (arg === '--host') out.host = argv[++i];
     else if (arg === '--eol') out.eol = argv[++i];
@@ -453,6 +540,8 @@ function parseArgs(argv) {
   if (!out.mode) out.mode = 'help';
   if (out.host && !['claude', 'codex', 'both'].includes(out.host)) return { error: `invalid --host: ${out.host}` };
   if (!['lf', 'crlf'].includes(out.eol)) return { error: `invalid --eol: ${out.eol}` };
+  if (out.mode === 'context' && !CONTEXT_NAMES.includes(out.context)) return { error: 'invalid --context' };
+  if (!Number.isSafeInteger(out.maxBytes) || out.maxBytes < 1) return { error: 'invalid --max-bytes' };
   return out;
 }
 
@@ -466,9 +555,13 @@ function main(argv) {
   if (args.error) { process.stderr.write(`forge-instructions: ${args.error}\n${usage()}\n`); return 2; }
   if (args.mode === 'help') { process.stdout.write(`${usage()}\n`); return 0; }
   if (args.mode === 'print') { process.stdout.write(`${renderBlock({ eol: args.eol })}\n`); return 0; }
+  if (args.mode === 'context') {
+    try { const context = readContext(args.context); process.stdout.write(`${args.json ? JSON.stringify(context) : context.content}\n`); return 0; }
+    catch (error) { process.stderr.write(`forge-instructions: ${error.code || 'instruction-context-unavailable'}\n`); return 2; }
+  }
 
   const dryRun = args.mode === 'check';
-  const report = syncInstructions(args.cwd, { host: args.host, dryRun, create: args.create });
+  const report = syncInstructions(args.cwd, { host: args.host, dryRun, create: args.create, maxBytes: args.maxBytes });
 
   if (args.json) {
     process.stdout.write(`${JSON.stringify(report)}\n`);
@@ -490,6 +583,7 @@ function main(argv) {
     }
   }
 
+  if (report.files.some(f => f.instructionBudgetExceeded)) return 2;
   if (dryRun) return report.changed > 0 ? 1 : 0;
   return 0;
 }
@@ -501,6 +595,10 @@ module.exports = {
   OUTCOMES,
   CONTRACT_LINES,
   renderBlock,
+  renderEntryBlock,
+  readContext,
+  CONTEXT_NAMES,
+  DEFAULT_MAX_BYTES,
   renderPersonalContract,
   renderEntryContract,
   renderCommunicationContract,

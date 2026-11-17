@@ -172,8 +172,8 @@ try {
   for (const name of ['CLAUDE.md', 'AGENTS.md']) {
     const text = fs.readFileSync(path.join(consumer, name), 'utf8');
     assert(text.startsWith('Bytes do operador\n'), `${name}: operator bytes changed`);
-    assert(text.includes(contract), `${name} não recebeu o contrato de entrada`);
-    assert(text.includes(instructions.renderPersonalContract()), `${name} perdeu o contrato pessoal`);
+    assert(text.includes('`entry` antes de classificar uma nova demanda') && instructions.readContext('entry').content === contract, `${name} não exige o contexto completo de entrada`);
+    assert(text.includes('Leia `personal`') && instructions.readContext('personal').content === instructions.renderPersonalContract(), `${name} perdeu o contexto pessoal completo`);
   }
   assert.strictEqual(instructions.syncInstructions(consumer, { host: 'both' }).changed, 0, 'second sync is not idempotent');
 
@@ -186,8 +186,8 @@ try {
     projectRoot: consumer,
   });
   const agents = projection.artifacts.find(artifact => artifact.kind === 'instructions');
-  assert(agents.content.includes(contract), 'a projeção Codex não expressa o contrato de entrada');
-  assert(agents.content.includes(instructions.renderPersonalContract()), 'a projeção Codex perdeu o contrato pessoal');
+  assert(agents.content.includes('`entry` antes de classificar uma nova demanda') && instructions.readContext('entry').content === contract, 'a projeção Codex não exige o contexto de entrada completo');
+  assert(agents.content.includes('Leia `personal`') && instructions.readContext('personal').content === instructions.renderPersonalContract(), 'a projeção Codex perdeu o contexto pessoal completo');
   const projectedSkill = projection.artifacts.find(artifact => artifact.source === 'skills/forge-task/SKILL.md');
   assert(projectedSkill.content.includes('forge-entry-assessment.js'), 'a skill projetada perdeu o receptor');
 

@@ -1,6 +1,7 @@
 # Forge Dispatch — Shared Dispatch Control Flow
 
-> Bidirectional entry: for Claude sidecars and artifact units on either engine,
+> Bidirectional entry: for ALL supported sidecars, including Codex execute-task,
+> and artifact units on either engine,
 > read `shared/forge-bidirectional-sidecar.md` first and use its unit adapter.
 > This supported branch takes precedence over the historical Codex-only
 > conditions below; never apply their implicit Claude fallback to this branch.
@@ -1320,12 +1321,12 @@ Applicability by `unit_type`:
 
 | `unit_type` | Engine routing | Sidecar dispatch |
 |-------------|----------------|--------------------------|
-| `execute-task` | **active** | yes — `WORKER_MODE == sidecar` plus the codex adapter selection reaches `--mode execute` (Branch C) |
+| `execute-task` | **active** | yes — single-task sidecars on both engines use the canonical unit-adapter request interface; raw `--mode execute` is a lower-level transport, not the workflow publisher |
 | `plan-slice` | **active** (S03) | yes — `WORKER_MODE == sidecar` plus the codex adapter selection reaches read-only `--mode plan` (Branch D) |
 | `memory-extract` | resolved from `tier_models.light` | yes when the resolver selects a declared sidecar; native otherwise |
 | other preparation/closure units | resolved per unit | only when `forge-transport-capabilities.js` declares that exact unit; unsupported preparation routes refuse explicitly |
 
-`plan-milestone` and `estimate-milestone` are **never** covered by `workers:` (locked) — they stay on tier `max`, with the model resolved through `tier_models.max`.
+`plan-milestone` and `estimate-milestone` are **never** covered by `workers:` (locked) — they stay on tier `max`, with the model resolved through the exact-unit routing cell or fallback `tier_models.max`.
 
 The `native` path passes the resolver result through
 `forge-native-invocation.js`; the adapter validates the actual host tool and
@@ -1336,6 +1337,24 @@ write/read-only behavior, artifact units return bounded content, and
 without a declared transport refuse explicitly.
 
 #### Single-call resolver — `forge-routing.js` (ONE call per dispatch)
+
+Routing cells use `executor` for `execute-task`, `planner` for `plan-slice`, and
+the exact unit type for milestone artifacts: `research-milestone`,
+`research-slice`, `discuss-milestone`, `discuss-slice`, `plan-milestone`,
+`estimate-milestone`, `plan-check`, `complete-slice`, `complete-milestone`.
+For example, `routing.default.research-milestone.standard` can explicitly name
+a supported Claude model while existing executor/planner cells keep their GPT
+choices. Missing cells preserve normal tier fallback; memory and unknown phases
+do not gain a routing cell. `plan-milestone` retains its `max` tier and has no
+relationship to the `planner` cell. The cascade still replaces a whole domain:
+use the canonical prefs editing helper to preserve the effective domain and its
+existing sibling cells; do not replace a domain with an isolated example fragment.
+
+The dispatch guard also checks the selected transport's deterministic artifact
+profile. A Codex sidecar profile refused by #350 is already refused by resolution
+with its exact reason/hint, without changing that route or contacting a provider.
+Configure a supported per-unit route explicitly, then resolve again. No automatic
+artifact fallback or weakening of the transport's read-only context is implied.
 
 The Engine Resolution (the old step 1.45) and the tier-chain resolution of § Tier Resolution (the old step 4, `forge-tier-chain.js --json`) **collapse into ONE call** to `forge-routing.js`. The resolver is a **superset** of `readTierChain()`: the chain it returns already carries the `engine` per member, so the wiring calls the CLI **once** with all inputs and consumes the chain — never re-resolving mid-unit (`--next-after` is used only on a failure trigger; see § Cross-engine chain walk).
 
@@ -1456,6 +1475,16 @@ CODEX_MODEL=$(printf '%s' "$PREFS_JSON" | node -e "let d='';process.stdin.on('da
 **JSONC shape:** the parser exposes the per-unit-type engine as `.prefs.workers[<unit_type>]`; `timeout` as `.prefs.workers.timeout`; `codex_model` as `.prefs.workers.codex_model`. Without a `workers:` block the defaults are `WORKERS_ENGINE=claude`, `CODEX_MODEL=""`. `WORKERS_TIMEOUT` is always the resolver's `workers_timeout` (the dispatch resolver's `--shell-exports`), i.e. the **safety ceiling** computed by `scripts/forge-worker-timeout.js resolveWorkerCeiling`: absent/null → the route tier's ceiling (light/standard/heavy/max = 900/1800/3600/5400 s, `WORKERS_TIMEOUT_SOURCE=tier-default`); an explicit 1..86400 overrides the tier (`explicit`); the legacy value `300` is ignored with a warning and the tier ceiling applies (`legacy-300-ignored`, message in `WORKERS_TIMEOUT_WARNING`); an invalid value falls back to the tier ceiling with a warning. Liveness (60/120/240 s without a signal) is the primary kill authority; the ceiling only acts on a worker that is still alive.
 
 #### Sidecar dispatch state machine (`WORKER_MODE == sidecar && UNIT_TYPE == execute-task`)
+
+**Workflow entry:** use `forge-unit-sidecar.js` through the canonical request CLI
+in [bidirectional delivery](forge-bidirectional-sidecar.md#supported-contracts)
+for both supported engines and for a single task. Follow that contract
+for the full execution request, held claims, gates, root verification and criterion
+bindings. That adapter publishes canonical delivery/captures before `complete`.
+The workflow refuses missing delivery before committing success. The raw xllm
+mechanics below describe the lower-level primitive only; they cannot replace this
+owner publisher. Old committed tasks lacking proof use the current-verification
+successor in `forge-delivery.md`, without backdating or rerunning implementation.
 
 **Sidecar environment policy (canonical — mirrors reference this, never copy).** Todo spawn de
 sidecar recebe `env: buildSidecarEnv(policy)`. A resolução é `--env-policy` >
@@ -2122,7 +2151,7 @@ Materialization is **orchestrator-only** — codex never touches `.gsd/**`. Afte
 | `workers.timeout` | int (seconds) \| null | `null` (→ tier ceiling) | **Safety ceiling** per sidecar attempt, forwarded as `--timeout` via the resolver's `$WORKERS_TIMEOUT`. Absent/null → route tier ceiling (light/standard/heavy/max = 900/1800/3600/5400 s); explicit 1..86400 overrides; legacy `300` ignored with warning `legacy-300-ignored`; invalid → tier ceiling with warning. Source: `scripts/forge-worker-timeout.js resolveWorkerCeiling` (`WORKERS_TIMEOUT_SOURCE`). Liveness is the primary kill authority; reaching the ceiling with a live stream ends as `budget-exceeded-while-active` |
 | `workers.codex_model` | string (model id) | unset (`null`) | Legacy fallback for the sidecar `--model` when no routed Codex chain member leads; unset **and** no Codex chain → Codex CLI default. The flag itself is driven by `$SIDECAR_MODEL` (`sidecarModelFor`) |
 
-`plan-milestone` and `estimate-milestone` are intentionally **absent** from this table — neither is routed through `workers:` (locked tier `max`, model through `tier_models.max`). The scaffold that documents these keys (commented) ships in `forge-agent-prefs.jsonc § Workers Settings` (S05); the reader operates with the safe defaults above without it.
+`plan-milestone` and `estimate-milestone` are intentionally **absent** from this table — neither is routed through `workers:` (locked tier `max`, model through the exact-unit routing cell or fallback `tier_models.max`). The scaffold that documents these keys (commented) ships in `forge-agent-prefs.jsonc § Workers Settings` (S05); the reader operates with the safe defaults above without it.
 
 #### Domain metadata — format fixed by S02, emitted by S03
 
@@ -2780,11 +2809,45 @@ Each rung is tried in order; the first that yields a status wins, and the run re
 
 ### Repair wording (rungs 2 and 3)
 
-Ask for the **complete** answer, and forbid only the expensive part:
+Choose the variant from the unit's actual output contract, never from the model
+family. Preserve scope, claims, pending questions and transport restrictions.
+
+**Inline deliverables** (review findings, advocate verdicts): ask for the complete
+answer and forbid repeat investigation:
 
 > Re-emit your COMPLETE final answer in ONE message: every inline deliverable your agent instructions require, followed by the `---GSD-WORKER-RESULT---` block. The block must contain `status: done | partial | blocked`; choose exactly one accepted status (`complete` and `ok` are invalid). Do not re-run tools or redo investigation — restate the conclusions you already reached. A message containing only the result block discards your work: the orchestrator reads this message and nothing else.
 
 Wording is load-bearing and the failure it avoids was measured. An earlier version said "emit the missing structured block", which a compliant agent obeys literally — it emits the block **alone**. For agents whose deliverable is inline prose in that same message (`forge-advocate` verdicts, `forge-reviewer` findings), the orchestrator then reads a scoreboard with the payload stripped off. M018 lost six advocate defenses that way, three returning exactly `refuted=3 conceded=2 open=1` and nothing else. Keep the two clauses together: *complete answer* **and** *no re-running tools*.
+
+**File artifacts** (native researcher/planner with authorized writes):
+
+> Finalize the conclusions already reached. Writing and checking EVERY required
+> artifact in the existing unit contract is permitted and required. Read your
+> existing draft/checkpoint only as needed to finalize; do not repeat research,
+> searches, probes or implementation. Preserve the same CODE_DIR, write scope,
+> claims and decisions. Account for all required paths, including every task plan
+> and any authorized standards update; one parent file is not the whole roster.
+> Write canonical artifacts only when their content is complete and valid. Return
+> your COMPLETE final report plus `---GSD-WORKER-RESULT---`, with exactly one status:
+> `done | partial | blocked`. Report missing files/checks as partial, never done.
+
+For a sidecar whose artifacts are returned in JSON, finalization means returning
+all required artifact entries through that existing schema; it never permits
+direct `.gsd` writes or relaxes read-only admission. An inline restatement alone
+does not satisfy a native file-output contract. Drafts can guide the same worker's
+recovery, but salvage never promotes draft presence to a worker verdict or gate.
+
+**Unfinished investigation, same live session only:** when the preserved worker
+explicitly reports unfinished research, finalize-only wording cannot complete it.
+If the real host exposes a resume/follow-up tool, request at most 8 additional turns
+in that same session: use existing findings first, perform only the named missing
+checks, reserve the final 3 turns for ALL required outputs and the result block,
+then return partial/blocked for remaining gaps. Preserve the same model/effort,
+scope, writer reconciliation, budgets and unanswered decisions. This is a bounded
+prompt request, not a runtime-enforced turn override; configured maxTurns and
+transport ceilings still apply. Without a resumable session/tool, use the existing
+ladder and no-write reconciliation rules; do not silently re-run over drafts or
+changed code. A necessary human decision still requires its explicit answer.
 
 ### Events
 

@@ -107,7 +107,11 @@ function readOnlyArtifactAdmission({ engine, workerMode, mode, scope, phase, uni
   const admitted = row.classification === 'owner-packaged';
   return Object.freeze({ admitted, classification: row.classification, profile,
     reason_code: admitted ? 'readonly-context-owner-packaged' : READONLY_CONTEXT_REASON, needs: row.needs,
-    hint: admitted ? null : `Codex read-only artifact transport cannot supply ${profile} (needs: ${row.needs.join(', ')}). No worker was launched and no route was changed.` });
+    hint: admitted ? null : `Codex read-only artifact transport cannot supply ${profile} (needs: ${row.needs.join(', ')}). `
+      + (ARTIFACT_UNITS.includes(unitType) && (scope === undefined || scope === null || scope === 'milestone')
+        ? `Configure an explicitly supported model in routing.default.${unitType}.<tier>, preserving other phase choices. `
+        : 'Configure an explicitly supported route for this preparation profile. ')
+      + 'No worker was launched and no route was changed.' });
 }
 function assertReadOnlyArtifactContext(input) {
   const admission = readOnlyArtifactAdmission(input);

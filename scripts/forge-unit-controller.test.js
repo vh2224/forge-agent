@@ -841,7 +841,7 @@ function taskDelivery(cwd, slice, task, options = {}) {
     : `---\nid: ${task}\ndepends: []\n${bindingLines(cwd, slice, options.node)}writes:\n  - "${source}"\nmust_haves:\n  truths:\n    - "${task} comportamento observável"\n`
     + `    - "${task} segundo comportamento"\n  artifacts:\n    - path: "${source}"\n      provides: "${task} source"\n      min_lines: 1\n  key_links: []\nexpected_output:\n  - "${source}"\n---\n# ${task}\n`;
   writeFile(cwd, rel('PLAN.md'), planText);
-  const at = new Date(TNOW).toISOString();
+  const at = options.capturedAt || new Date(TNOW).toISOString();
   const context = { schema_version: 1, unit, plan_fingerprint: delivery.sha256(planText), code_dir: cwd, revision: 'abc123',
     workspace: [{ path: source, hash: BLOB }], environment: 'node-test', captured_at: at };
   const checks = [{ command: 'node check.js one', exitCode: options.exitCode || 0 }, { command: 'node check.js two', exitCode: 0 }];
@@ -883,6 +883,32 @@ function closeSlice(cwd, slice, tasks, offset, options = {}) {
 }
 function taskProof(cwd, slice, task) {
   return controller.discoverInventory(cwd, TM, state.read(cwd, TM), timeOptions()).slices.find(item => item.id === slice).task_dag.tasks.find(item => item.id === task).completion;
+}
+function testCurrentDeliverySuccessorUnblocksDependencies() {
+  const cwd = decidedRoot();
+  try {
+    conformantRoadmap(cwd);
+    assert.strictEqual(timeSelection.prepareBoundary(cwd, TM, { now: TNOW + 1000 }).status, 'allocated');
+    slicePlanFile(cwd, 'S01', [['T08', false], ['T10', false]]);
+    taskPlanFile(cwd, 'S01', 'T08', ['T10']); taskPlanFile(cwd, 'S01', 'T10', []);
+    const oldKey = 'old-complete-without-delivery';
+    completeTask(cwd, 'S01', 'T10', 3000, oldKey);
+    const old = JSON.stringify(controller.lookupRecord(cwd, 'transaction', oldKey));
+    taskDelivery(cwd, 'S01', 'T10', { capturedAt: new Date(TNOW + 6000).toISOString() });
+    assert.strictEqual(taskProof(cwd, 'S01', 'T10'), 'unproven', 'late capture cannot prove the original completion');
+    let key;
+    for (let i = 0; i < 10000; i++) {
+      const candidate = 'new-verification-complete-' + i;
+      if (controller.transactionFile(cwd, candidate) > controller.transactionFile(cwd, oldKey)) { key = candidate; break; }
+    }
+    assert(key, 'force original completion to be read first');
+    const begun = explicitBegin(cwd, 'execute-task/T10', 'verification-only-successor', { state_patch: { active_slice: 'S01' }, slice: 'S01' }, timeOptions(5000));
+    controller.complete(cwd, { milestone: TM, unit: 'execute-task/T10', host_runtime: 'codex', owner_token: 'explicit-owner', generation: begun.generation,
+      idempotency_key: key, result: { status: 'succeeded' } }, timeOptions(7000));
+    assert.strictEqual(taskProof(cwd, 'S01', 'T10'), 'proven', 'a new actual completion proves only its own current capture');
+    assert.strictEqual(controller.select(cwd, { milestone: TM }, timeOptions(8000)).unit.key, 'execute-task/T08');
+    assert.strictEqual(JSON.stringify(controller.lookupRecord(cwd, 'transaction', oldKey)), old);
+  } finally { cleanup(cwd); }
 }
 function testHistoricalProofTamperAndLineage() {
   const cwd = decidedRoot();
@@ -2082,6 +2108,7 @@ function main() {
   test('S02 guard: roadmap conformance blocks dependents with budget priority', testTimeOptionGuardRoadmapAndBudgetPriority);
   test('S02 guard: scoped task DAG on explicit begin and on reentry', testScopedTaskDagGuardAndReentry);
   test('S02 guard: historical canonical proof, independent completion key and tamper negatives', testHistoricalProofTamperAndLineage);
+  test('current verification successor unblocks dependencies without backdating the old completion', testCurrentDeliverySuccessorUnblocksDependencies);
   test('S02 guard R53: captured time, declared-source bindings and capture consistency bound to the committed completion', testHistoricalCaptureMetadataAndInventory);
   test('S02 guard R54: begin and completion events bound symmetrically with finite ordered sequences', testCompletionEventLineage);
   test('S02 guard R55: review disabled is a named incompatibility before activation and for new admissions; legacy/no-contract unchanged', testReviewModeIncompatibleWithContract);
@@ -2118,4 +2145,6 @@ if (process.argv[2] === '--superseded-interruption-only') {
 } else if (process.argv[2] === '--owner-interruption-fixture-child') {
   const fixture = interruptionFixture(process.argv[3]);
   assert.strictEqual(fixture.settle().status, 'interrupted-and-transferred');
+} else if (process.argv[2] === '--delivery-successor-only') {
+  testCurrentDeliverySuccessorUnblocksDependencies();
 } else main();

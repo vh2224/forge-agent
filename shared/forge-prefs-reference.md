@@ -540,7 +540,7 @@ Eixo sidecars: isolamento do ambiente entregue aos processos externos codex e ag
 
 - **Tipo:** object
 - **Default:** `{}`
-- **Descrição:** Eixo routing (M007): roteamento domain-first opt-in com precedência sobre tier_models/workers. Chaves de domínio são ABERTAS (default, backend, frontend, ...). Shape por domínio: { <phase executor|planner>: { <tier>: [cadeia de IDs, cross-engine permitido], fallback: <1 ID Claude mapeado> } }. Célula ausente → domínio default → legado (nunca erro). Cascata last-wins por domínio inteiro. Resolvedor: scripts/forge-routing.js. Somente execute-task (executor) e plan-slice (planner) são capturados; demais unit_types resolvem por tier_models — ver /forge-prefs phases.
+- **Descrição:** Roteamento domain-first opt-in, com precedência sobre tier_models/workers. Domínios são abertos e a cascata continua last-wins por domínio inteiro. Células de fase: executor (execute-task), planner (plan-slice) e o nome exato de cada unidade de artefato de milestone: research-milestone, research-slice, discuss-milestone, discuss-slice, plan-milestone, estimate-milestone, plan-check, complete-slice, complete-milestone. Cada célula contém arrays light/standard/heavy/max e fallback Claude opcional. Célula ausente segue domínio default e tier_models; memória e fases desconhecidas não são roteáveis. Compatibilidade depende do host/transporte: forge-doctor --check artifact-routing --runtime <host> informa perfis de artefato recusados; nenhuma preferência ou rota é alterada automaticamente. Use o helper canônico de edição para preservar as células irmãs do domínio efetivo.
 
 ## verification
 

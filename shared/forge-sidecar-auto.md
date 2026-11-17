@@ -2,7 +2,8 @@
 
 Para anunciar a rota e repassar as linhas de stderr do adaptador, siga `shared/forge-bidirectional-sidecar.md § Identidade do sidecar exibida na conversa`.
 
-> Bidirectional entry: for Claude sidecars and artifact units on either engine,
+> Bidirectional entry: for ALL supported sidecars, including Codex execute-task
+> and artifact units on either engine,
 > read `shared/forge-bidirectional-sidecar.md` first and use its unit adapter.
 > This supported branch takes precedence over the historical Codex-only
 > conditions below; never apply their implicit Claude fallback to this branch.
@@ -13,8 +14,8 @@ Para anunciar a rota e repassar as linhas de stderr do adaptador, siga `shared/f
 > serially for several tasks. It runs through `forge-execution-batch.js run --batch <ref>`
 > and then `consolidate --batch <ref>` (`skills/forge-auto/SKILL.md` § 4-C); each member
 > calls the bidirectional unit adapter (`runUnitSidecar`) with the route, model,
-> effort and roots its owner records pinned. Branch C below stays the single-task
-> path (`BATCH.length == 1`), unchanged for a sidecar primary without a cohort.
+> effort and roots its owner records pinned. A single task (`BATCH.length == 1`)
+> uses that same unit adapter, with its own canonical request and receipt.
 
 
 > **Loaded on demand.** Extracted VERBATIM from `skills/forge-auto/SKILL.md` on 2026-08-23
@@ -29,6 +30,29 @@ Para anunciar a rota e repassar as linhas de stderr do adaptador, siga `shared/f
 > $SIDECAR_MODEL, $WORKERS_TIMEOUT, $CODE_DIR, $WORKING_DIR, $FORGE_SCRIPTS_DIR, ...).
 
 **Branch C — sidecar codex (`WORKER_MODE == sidecar && RESOLVED_WORKER_ENGINE == codex && unit_type == execute-task && BATCH.length == 1`):**
+
+The supported workflow entry is the canonical request CLI for `forge-unit-sidecar.js`
+in [bidirectional delivery](forge-bidirectional-sidecar.md#supported-contracts),
+for both Codex and Claude execution. Use that invocation and complete request:
+authoritative route/model/effort, actual CODE_DIR,
+owner, plan, execution contract, held claim, gates, verification commands and
+criterion bindings, external result channel and exact unit identity. Retain and
+join its process; recover/replay through the same unit adapter. On success that
+adapter publishes DELIVERY-INPUT, DELIVERY and contemporaneous workspace/source
+captures before controller completion. Run the existing delivery verification;
+only then complete the same begin through the loop. Missing proof returns
+`execution-delivery-required` without a completion intent or lease release.
+
+Do not run raw `forge-xllm --mode execute` as the single-task forge-auto entry.
+It is a lower-level code transport, not the owner delivery publisher. A done result,
+SUMMARY or plan status cannot replace delivery. Already committed old completions
+without delivery use the verification-only recovery in `forge-delivery.md`; never
+backdate captures, rewrite history or reexecute code to repair a missing receipt.
+
+### Historical raw execute transport notes — not a workflow entry
+
+The primitive mechanics below are retained for protocol maintenance/reference.
+They do not authorize bypassing the unit adapter or completing a milestone task.
 
 Entry is fail-closed: `DISPATCH_ALLOWED` is already `true` before this file is
 loaded. A false verdict prints `DISPATCH_REASON_CODE` + `DISPATCH_HINT` and

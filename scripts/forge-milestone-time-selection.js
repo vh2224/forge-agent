@@ -248,6 +248,12 @@ function roundState(owner, milestone, head) {
   }
   fail('time-option-round-limit');
 }
+function roundPresentation(round, question) {
+  return { round_id: round.id, type: round.type, question: { id: question.question_id, identity_sha256: question.identity_sha256 },
+    response_format: round.free_text ? 'operator-ceiling' : 'option-label',
+    options: (round.options || []).map(option => ({ label: option.label, canonical_answer: option.answer })),
+    ...(round.minimum_ms ? { minimum_ms: round.minimum_ms } : {}) };
+}
 function cleanText(value) { return String(value).replace(/[\x00-\x1f\x7f]/g, ' ').replace(MARKER, '[marcador removido]'); }
 function markerFree(value) { MARKER.lastIndex = 0; const found = MARKER.test(JSON.stringify(value)); MARKER.lastIndex = 0; return !found; }
 function decisionOf(round, question) {
@@ -330,7 +336,9 @@ function preselectionState(owner, milestone, base, options) {
         const outcome = rounds.outcome && { choice: rounds.outcome.choice, option_id: rounds.outcome.option_id, position_id: rounds.outcome.position_id,
           ceiling: rounds.outcome.ceiling, activation_answer: rounds.outcome.activation_answer, linked_task_authorization: rounds.outcome.linked_task_authorization };
         return { state: { ...base, status: 'decision-pending', options_sha256: chain.head.options_sha256, round: rounds.round || null,
-          question: rounds.question || null, answered_rounds: rounds.rounds.length, outcome: outcome || null }, head: chain.head, rounds };
+          question: rounds.question || null, answered_rounds: rounds.rounds.length,
+          decision_rounds: [...rounds.rounds, ...(rounds.round ? [{ round: rounds.round, question: rounds.question }] : [])]
+            .map(row => roundPresentation(row.round, row.question)), outcome: outcome || null }, head: chain.head, rounds };
       }
       reason = 're-estimate-requested'; scopeReduction = rounds.outcome.scope_reduction ?? null;
       const o = rounds.outcome;
@@ -629,7 +637,7 @@ function liveHandle(owner, milestone, liveAdapter, row, now) {
   try {
     handle = liveAdapter.getDecisionHandle({ cwd: owner, milestone, kind: row.kind, request: structuredClone(row.request), request_sha256: digest(row.request),
       question: { ...row.question }, expected: [...row.expected] });
-  } catch { fail('time-decision-attestation-required'); }
+  } catch (error) { fail(require('./forge-time-decision-errors').safeDecisionFailure(error)); }
   const decision = time().verifyDecision({ cwd: owner, milestone, now, handle, kind: row.kind, request: row.request, expected: row.expected });
   if (!same(decision.question, row.question)) fail('time-decision-scope-mismatch');
   return { handle, decision };

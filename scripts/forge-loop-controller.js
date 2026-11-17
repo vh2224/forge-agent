@@ -12,11 +12,11 @@ const PROTOCOL_VERSION = runtime.PROTOCOL_VERSION;
 // safety budget is not a one-step budget that could hide the next question.
 const MODES = Object.freeze(['auto', 'task', 'step']);
 const COMMANDS = Object.freeze(['next', 'pause', 'resume', 'status', 'complete', 'decompose-pause', 'decompose-continue', 'consume-failure', 'reenter', 'resume-budget', 'resume-time-option',
-  'batch-status', 'batch-ack']);
+  'batch-status', 'batch-ack', 'resume-delivery']);
 const TERMINAL = new Set(['completed', 'blocked', 'failed']);
 // Issue 343 U1: while a dispatched batch is active, every command that acts on one unit is
 // refused by name (no delegation); only next (replay), status and the batch commands run.
-const SINGLE_UNIT_COMMANDS = new Set(['decompose-pause', 'decompose-continue', 'pause', 'resume', 'complete', 'consume-failure', 'reenter', 'resume-budget', 'resume-time-option']);
+const SINGLE_UNIT_COMMANDS = new Set(['decompose-pause', 'decompose-continue', 'pause', 'resume', 'complete', 'consume-failure', 'reenter', 'resume-budget', 'resume-time-option', 'resume-delivery']);
 const BATCH_ID = /^batch-[a-f0-9]{32}$/;
 // S02 owner blocks that the named resume-time-option command may continue: the
 // pending/invalid selection, roadmap conformance, the scoped task DAG and a review
@@ -189,6 +189,9 @@ function next(state, input, orchestrate) {
     return publicResult('next', state, 'completed', delegated.reason_code || 'no-next-unit', 'stop', delegated);
   }
   state.lifecycle = delegated.outcome === 'failed' ? 'failed' : 'blocked';
+  if (state.lifecycle === 'blocked' && delegated.reason_code === 'execution-delivery-recovery-required') {
+    state.delivery_block = { milestone: delegated.milestone, ...delegated.details.delivery };
+  }
   if (delegated.details?.pending_questions) state.pending_questions = delegated.details.pending_questions;
   if (['milestone-budget-exhausted', 'milestone-budget-draining'].includes(delegated.reason_code)) {
     const details = delegated.details?.time;
@@ -210,6 +213,14 @@ function resumeTimeOption(state, input, orchestrate) {
   if (delegated.outcome !== 'completed') return publicResult('resume-time-option', state, 'blocked', delegated.reason_code || 'time-option-resume-invalid', 'stop', delegated);
   state.lifecycle = 'idle'; delete state.time_option_block;
   return next(state, input, orchestrate);
+}
+function resumeDelivery(state, input, orchestrate) {
+  if (state.lifecycle !== 'blocked' || !state.delivery_block) return publicResult('resume-delivery', state, 'blocked', 'delivery-resume-invalid', 'stop', null);
+  if (state.pending_questions?.some(q => q.status !== 'resolved')) return publicResult('resume-delivery', state, 'blocked', 'pending-questions', 'stop', null);
+  const delegated = orchestrate.run('resume-delivery', { ...delegateInput(input, state), delivery_block: state.delivery_block });
+  if (delegated.outcome !== 'completed') return publicResult('resume-delivery', state, 'blocked', delegated.reason_code || 'delivery-recovery-unproven', 'stop', delegated);
+  state.lifecycle = 'idle'; state.current_unit = null; state.last_decision = null; state.boundary = null; delete state.delivery_block;
+  return publicResult('resume-delivery', state, 'resumed', 'delivery-recovery-ready', 'continue', delegated);
 }
 // The same persisted snapshot continues after an extension. A failure consumed
 // by this workflow is not skipped through next: the owner names the required
@@ -407,6 +418,7 @@ function advance(snapshot, commandValue, input = {}, dependencies = {}) {
   if (command === 'reenter') return reenter(state, input, orchestrate);
   if (command === 'resume-budget') return resumeBudget(state, input, orchestrate);
   if (command === 'resume-time-option') return resumeTimeOption(state, input, orchestrate);
+  if (command === 'resume-delivery') return resumeDelivery(state, input, orchestrate);
   if (command === 'next') return next(state, input, orchestrate);
   if (command === 'decompose-pause' || command === 'decompose-continue') return decompose(state, input, orchestrate, command);
   if (command === 'pause') return pause(state, input, orchestrate);

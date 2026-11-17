@@ -122,10 +122,11 @@ test('runtime install omits tests and update backs up only known unchanged devel
       { model: 'gpt-6-sol', reasoning_effort: 'medium', fork_turns: 'none' },
     );
     const projected = fs.readFileSync(path.join(data.projectRoot, 'AGENTS.md'), 'utf8');
-    assert(projected.includes('--snapshot'));
-    assert(projected.includes(require('./forge-instructions.js').renderEntryContract()));
+    assert(require('./forge-instructions.js').readContext('personal').content.includes('--snapshot'));
+    assert(projected.includes('`entry` antes'));
     const personalContract = require('./forge-instructions.js').renderPersonalContract();
-    assert(personalContract.includes('--summary --cwd') && projected.includes(personalContract), 'AGENTS.md lacks the summary-first personal contract');
+    assert(personalContract.includes('--summary --cwd') && projected.includes('--summary --cwd'), 'AGENTS.md lacks the summary-first personal bootstrap');
+    assert.strictEqual(require('./forge-instructions.js').readContext('personal').content, personalContract);
     // The installed copy answers by itself: another project, clean profile, no source tree.
     assert(fs.existsSync(path.join(scripts, 'forge-personal-summary.js')));
     const otherProject = path.join(data.root, 'Other Project Ω');
@@ -226,8 +227,9 @@ test('native question contract reaches installed consumers and safe feature defa
     const read = file => fs.readFileSync(file, 'utf8');
     const config = path.join(data.codexHome, 'config.toml');
     assert(read(config).includes('default_mode_request_user_input = true'));
-    for (const name of ['CLAUDE.md', 'AGENTS.md']) assert(read(path.join(data.projectRoot, name)).includes('A required live decision remains pending'));
+    for (const name of ['CLAUDE.md', 'AGENTS.md']) assert(read(path.join(data.projectRoot, name)).includes('--context interaction'));
     const contract = read(path.join(data.forgeHome, 'shared', 'forge-interaction.md'));
+    assert(contract.includes('A required live decision remains pending'));
     assert(contract.includes('optional-only tool'));
     assert(read(path.join(data.claudeHome, 'agents', 'forge-discusser.md')).includes('Native questions:'));
     for (const file of [
@@ -1247,7 +1249,9 @@ test('instruction sync preserves operator ownership, historical digests and malf
       assert(first.manifest.adapters[host].conflicts.some(row => row.destination === file && row.reason === 'user_owned'));
       assert(fs.readFileSync(file, 'utf8').startsWith(original), 'prefixo do operador alterado');
       assert(fs.readFileSync(file, 'utf8').includes('<!-- forge:interaction:start -->'));
-      assert.strictEqual(fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n').split(personalContract).length - 1, 1, `${name}: personal contract once`);
+      assert.strictEqual(fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n').split(personalContract).length - 1, 0, `${name}: personal contract is on demand`);
+      assert(fs.readFileSync(file, 'utf8').includes('`personal`'));
+      assert.strictEqual(require(path.join(data.forgeHome, 'scripts', 'forge-instructions.js')).readContext('personal').content, personalContract);
       assert(!Object.hasOwn(prior.ownership, key), 'span adotou arquivo inteiro');
       prior.ownership[key] = 'b'.repeat(64);
     }
@@ -1258,7 +1262,8 @@ test('instruction sync preserves operator ownership, historical digests and malf
       assert.strictEqual(second.manifest.ownership[ownership.keyFor(file)], 'b'.repeat(64));
       assert(second.manifest.adapters[host].conflicts.some(row => row.destination === file && row.reason === 'user_owned'));
       assert(fs.readFileSync(file, 'utf8').startsWith(original));
-      assert.strictEqual(fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n').split(personalContract).length - 1, 1, `${name}: personal contract once after update`);
+      assert.strictEqual(fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n').split(personalContract).length - 1, 0, `${name}: no eager personal contract after update`);
+      assert(fs.readFileSync(file, 'utf8').includes('`personal`'));
     }
     const malformed = '# Operator\n<!-- forge:interaction:start -->\nUnclosed\n';
     const agents = path.join(data.projectRoot, 'AGENTS.md');
@@ -1329,7 +1334,9 @@ test('Codex instruction ownership records final synchronized bytes across update
     assert.strictEqual(content, generatedInstruction.content, 'sync alterou a gravação completa do renderer');
     assert.strictEqual(content.split(instructions.MARKER_START).length - 1, 1);
     assert.strictEqual(content.split(instructions.MARKER_END).length - 1, 1);
-    assert.strictEqual(content.split(instructions.renderCommunicationContract()).length - 1, 1);
+    assert.strictEqual(content.split(instructions.renderCommunicationContract()).length - 1, 0);
+    assert(content.includes('`communication` no boot'));
+    assert.strictEqual(instructions.readContext('communication').content, instructions.renderCommunicationContract());
     assert(!first.plan.some(row => row.op === 'write' && row.destination === file), 'sync gerou escrita redundante');
     assert.strictEqual(instructions.syncFile(file, { host: 'codex' }).outcome, 'unchanged');
     assert.strictEqual(fs.readFileSync(file, 'utf8'), content);

@@ -249,7 +249,7 @@ function taskPlan(f, slice, task, node, spec) {
 function taskWork(f, slice, task) {
   const prefix = `.gsd/milestones/${M}/slices/${slice}/tasks/${task}/${task}`, plan = fs.readFileSync(file(f.owner, prefix + '-PLAN.md'), 'utf8');
   const unit = { type: 'task', id: task, slice, milestone: M };
-  const gate = verify.runRootVerification(f.execution, { unit, planFingerprint: sha(plan), taskPlanVerify: verify.parsePlanVerify(plan), commandTimeoutMs: 60000 });
+  const gate = withInjectedClock(f, () => verify.runRootVerification(f.execution, { unit, planFingerprint: sha(plan), taskPlanVerify: verify.parsePlanVerify(plan), commandTimeoutMs: 60000 }));
   assert.equal(gate.passed, true, JSON.stringify(gate.roots.map(r => r.result.checks.map(c => [c.command, c.exitCode, c.stderr]))));
   write(f.owner, prefix + '-VERIFY-ENVELOPE.json', gate.roots[0]);
   const input = { schema_version: 2, execution_contract: f.execution, unit, plan: prefix + '-PLAN.md', plan_fingerprint: sha(plan),

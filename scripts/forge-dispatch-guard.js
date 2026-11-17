@@ -4,7 +4,7 @@
 // This guard owns posture only. Identity normalization, including the
 // native -> host resolution rule, remains canonical in forge-runtime.
 const { resolveWorkerIdentity } = require('./forge-runtime.js');
-const { capability } = require('./forge-transport-capabilities.js');
+const { capability, readOnlyArtifactAdmission } = require('./forge-transport-capabilities.js');
 
 const REASON_CODES = Object.freeze({
   RUNTIME_POSTURE_OBSERVED: 'runtime-posture-observed',
@@ -114,6 +114,11 @@ function evaluateDispatchGuard(input) {
     if (!transport.supported) return {
       ...errorResult(transport.reason_code, transport.hint, identity),
       posture: 'enforce', decision: 'refuse',
+    };
+    const admission = readOnlyArtifactAdmission({ engine: identity.resolved_engine, workerMode: 'sidecar', mode: transport.mode,
+      scope: input.scope, phase: input.phase, unitType: input.unit_type });
+    if (!admission.admitted) return {
+      ...errorResult(admission.reason_code, admission.hint, identity), posture: 'enforce', decision: 'refuse', artifact_admission: admission,
     };
   }
   // Keep the posture axis for callers; capability refusal above is independent

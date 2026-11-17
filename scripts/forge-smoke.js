@@ -5173,27 +5173,27 @@ function smokeRouting() {
   assert(kCli.status === 0, '(k) CLI com fallback inválido ainda sai 0', `status=${kCli.status}`);
   cleanup(dirK);
 
-  // (l) plan-milestone NUNCA é capturado pelo routing, mesmo com célula presente
+  // (l) exact artifact phase routing is independent from the planner cell.
   const dirL = mkTmp('routing-l');
   writeRoutingPrefs(dirL,
     '  default:\n' +
-    '    plan:\n' +
+    '    plan-milestone:\n' +
     '      standard: [claude-fable-5]\n'
   );
   const rL = resolveRoute({ unitType: 'plan-milestone', tier: 'standard', domain: 'backend', cwd: dirL });
-  assert(/phase-not-routable/.test(rL.reason), '(l) plan-milestone → phase-not-routable (nunca célula do routing)', rL.reason);
+  assert(rL.source === 'routing' && rL.phase === 'plan-milestone' && rL.chain[0].id === 'claude-fable-5', '(l) exact plan-milestone routing cell selects its own model', rL.reason);
   const cliL = runScript('forge-routing.js', ['--unit-type', 'plan-milestone', '--tier', 'standard', '--domain', 'backend', '--cwd', dirL]);
   qStatuses.push(cliL.status);
   let parsedL = null;
   try { parsedL = JSON.parse(cliL.stdout); } catch {}
-  assert(cliL.status === 0 && parsedL !== null && /phase-not-routable/.test(parsedL.reason),
-    '(l) CLI contrato JSON confirma phase-not-routable, sai 0', `status=${cliL.status} stdout=${cliL.stdout}`);
+  assert(cliL.status === 0 && parsedL !== null && parsedL.source === 'routing' && parsedL.phase === 'plan-milestone',
+    '(l) CLI confirms exact artifact phase routing', `status=${cliL.status} stdout=${cliL.stdout}`);
   cleanup(dirL);
 
-  // (m) fases claude-only (discuss-slice, memory) também são phase-not-routable
+  // (m) absent artifact cells fall back; memory remains non-routable.
   const dirM = mkTmp('routing-m');
   const rM1 = resolveRoute({ unitType: 'discuss-slice', tier: 'standard', cwd: dirM });
-  assert(/phase-not-routable/.test(rM1.reason), '(m) discuss-slice → phase-not-routable', rM1.reason);
+  assert(rM1.source === 'tier_models' && rM1.phase === 'discuss-slice', '(m) unconfigured discuss-slice uses tier_models', rM1.reason);
   const rM2 = resolveRoute({ unitType: 'memory', tier: 'standard', cwd: dirM });
   assert(/phase-not-routable/.test(rM2.reason), '(m) memory → phase-not-routable', rM2.reason);
   cleanup(dirM);
@@ -10506,8 +10506,8 @@ function smokePhasesTable() {
     assert(table.rows.filter((row) => tierOnly.has(row.unit_type)).every((row) => /^tier_models\./.test(row.config_key)),
       '(b) non-routable unit types configure through tier_models');
     const milestone = table.rows.find((row) => row.unit_type === 'plan-milestone');
-    assert(milestone && milestone.config_key === 'tier_models.max' && milestone.routable === false,
-      '(c) plan-milestone is non-routable and configures through tier_models.max', JSON.stringify(milestone));
+    assert(milestone && milestone.config_key === 'tier_models.max' && milestone.routable === true,
+      '(c) unconfigured plan-milestone keeps max tier_models fallback while allowing exact phase routing', JSON.stringify(milestone));
     assert(!/travado|locked/i.test(renderPhases(root)),
       '(c) rendered plan-milestone note has no misleading locked configuration key');
     assert(renderPhases(root).includes(`tem tier fixo ${TIER_DEFAULTS['plan-milestone']}`)
@@ -10534,7 +10534,7 @@ function smokePhasesTable() {
     const skill = readRepoText(path.join(repoRoot, 'skills', 'forge-prefs', 'SKILL.md'));
     const resolver = fs.readFileSync(path.join(SCRIPTS, 'forge-dispatch-resolve.js'), 'utf8');
     assert(/### Domain-routable vs tier_models-only/.test(tierDoc), '(f) tier documentation has routability subsection');
-    assert(schema.properties.routing.description.includes('Somente execute-task (executor) e plan-slice (planner)'),
+    assert(['executor','planner',...require('./forge-transport-capabilities').ARTIFACT_UNITS].every(phase => schema.properties.routing.description.includes(phase)),
       '(f) routing schema description explains captured phases');
     assert(/### "phases"/.test(skill) && !skill.includes('Fase legada'),
       '(f) prefs skill exposes phases and removes the drifted legacy table');
@@ -17296,8 +17296,10 @@ function smokeRoutingContractProjection() {
     const bytes = fs.readFileSync(path.join(root, 'CLAUDE.md'), 'utf8');
     assert(bytes.includes('<!-- forge:routing-contract:start -->'), '(a) emits the exact stable marker');
     assert(!bytes.includes('forge:routing-contract:start version='), '(a) stable output carries no version');
-    assert(bytes.includes('forge-dispatch-resolve.js') && bytes.includes('worker-engine-fallback'),
-      '(a) o bloco escrito nomeia o resolvedor e o fallback nomeado');
+    assert(bytes.includes('--context <nome>') && bytes.includes('`routing` antes de preparar/despachar/recuperar')
+      && mod.readContext('routing').content.includes('forge-dispatch-resolve.js')
+      && mod.readContext('routing').content.includes('worker-engine-fallback'),
+      '(a) entrada exige carregar roteamento completo com resolvedor e fallback nomeado');
     const second = mod.syncInstructions(root);
     assert(second.changed === 0 && fs.readFileSync(path.join(root, 'CLAUDE.md'), 'utf8') === bytes,
       '(a) o segundo sync é byte-idêntico');
@@ -17484,7 +17486,9 @@ function smokeIntentEntryAssessment() {
     for (const name of ['CLAUDE.md', 'AGENTS.md']) {
       const text = fs.readFileSync(path.join(consumer, name), 'utf8');
       assert(text.startsWith('# Operador\n'), `(c) ${name}: bytes do operador preservados`);
-      assert(text.includes(contract), `(c) ${name} carrega o contrato de entrada`);
+      assert(text.includes('`entry` antes de classificar uma nova demanda')
+        && instructions.readContext('entry').content === contract,
+      `(c) ${name} exige contexto de entrada completo antes de classificar`);
     }
     assert(instructions.syncInstructions(consumer, { host: 'both' }).changed === 0, '(c) o segundo sync é inerte');
     assert(readRepoText(path.join(repoRoot, 'commands/forge.md')).includes('shared/forge-intent-entry.md'),

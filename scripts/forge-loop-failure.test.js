@@ -314,6 +314,8 @@ async function main() {
     try {
       const consumed = consume(f), entered = invoke(f, 'reenter', consumed.snapshot, entryInput(f, consumed));
       assert.strictEqual(entered.reason_code, 'entry-ready');
+      assert.strictEqual(invoke(f, 'complete', entered.snapshot, { result: { status: 'done' } }).reason_code, 'execution-delivery-required');
+      require('./fixtures/completion-delivery.cjs').publish(f.cwd, {milestone:f.milestone,slice:'S03',task:'T01'});
       const completed = invoke(f, 'complete', entered.snapshot, { result: { status: 'done' } });
       assert.strictEqual(completed.reason_code, 'transition-committed');
       const before = history(f);
