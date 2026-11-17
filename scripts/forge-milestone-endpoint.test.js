@@ -101,6 +101,7 @@ function fixture(opts = {}) {
   const children = [], envelopes = [], revisions = [];
   const tasks = [{ id: 'T01', writes: ['scripts/result.js', 'scripts/check.js'], verify: ['node scripts/check.js'] },
     { id: 'T02', writes: ['scripts/result.js'], verify: ['node scripts/check.js', 'node scripts/check.js 2'], source: 'module.exports = 2;\n' }];
+  if (opts.glob) tasks[0].writes = ['scripts/**'];
   if (docs) tasks.push({ id: 'T03', root: 'docs', writes: ['check.js', 'notes.js'], verify: ['node check.js'], output: 'notes.js' });
   for (const task of tasks) {
     if (task.source) { write(cwd, 'scripts/result.js', task.source); commit(git, 'B legitimately changes the source verified by A'); }
@@ -298,6 +299,14 @@ try {
     const result = expectProof(f, 'unproven', 'endpoint-verification-unavailable', 'every root needs declared commands');
     assert.deepEqual([result.detail, result.root_id], ['commands-empty', 'docs']);
   });
+  const globFixture = fixture({ glob: true });
+  assert.equal(endpoint.writeEndpointVerification({ cwd: globFixture.cwd, milestone: M }).status, 'verified');
+  expectProof(globFixture, 'proven', null, 'integrated endpoint glob binds concrete source universe');
+  write(globFixture.cwd, 'scripts/new.js', 'module.exports = 3;\n');
+  assert.equal(proof(globFixture).status, 'unproven', 'endpoint must reject a new glob source after capture');
+  fs.unlinkSync(file(globFixture.cwd, 'scripts/new.js'));
+  expectProof(globFixture, 'proven', null, 'endpoint glob recovers after exact source restoration');
+  pass('endpoint-glob-current-universe');
   const written = endpoint.writeEndpointVerification({ cwd, milestone: M });
   assert.equal(written.status, 'verified', JSON.stringify(written));
   assert.deepEqual(written.envelopes, [{ root_id: 'primary', reference: ENVELOPE, passed: true, checks: 2 }]);

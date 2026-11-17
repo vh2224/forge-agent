@@ -115,7 +115,7 @@ function sameRoot(left, right) {
 // Multiroot envelopes bind one contract root; scope paths are mapped into it.
 function captureScope(options, envelope, scope) {
   const contract = options.executionContract;
-  if (!contract) return { codeRoot: options.codeDir || options.cwd, scope };
+  if (!contract) return expandedCaptureScope(options, envelope, options.codeDir || options.cwd, scope);
   const row = contract.code_roots.find(r => r.id === envelope?.root_id);
   if (!row) fail('delivery-code-root-mismatch');
   const mapped = [];
@@ -125,7 +125,23 @@ function captureScope(options, envelope, scope) {
     catch { fail('delivery-code-root-mismatch'); }
     if (resolved.root_id === row.id) mapped.push(resolved.path);
   }
-  return { codeRoot: row.path, scope: mapped };
+  return expandedCaptureScope(options, envelope, row.path, mapped);
+}
+function expandedCaptureScope(options, envelope, codeRoot, declared) {
+  const sourceScope = require('./forge-delivery-source-scope');
+  const expanded = sourceScope.expand(codeRoot, envelope, declared, { current: options.proofMode === 'current-source-strict' });
+  if (expanded.globs.length && options.proofMode === 'current-source-strict') {
+    options.deliveryCache.globScopes ||= new Map();
+    const key = codeRoot + '\0' + JSON.stringify([envelope.revision, envelope.workspace, declared]);
+    if (options.deliveryCache.globScopes.size >= 64 && !options.deliveryCache.globScopes.has(key)) fail('delivery-source-inventory-limit');
+    options.deliveryCache.globScopes.set(key, { codeRoot, envelope, declared });
+  }
+  return { codeRoot, scope: expanded.paths, globs: expanded.globs };
+}
+function revalidateGlobScopes(options) {
+  for (const row of options.deliveryCache.globScopes?.values() || []) {
+    require('./forge-delivery-source-scope').expand(row.codeRoot, row.envelope, row.declared, { current: true });
+  }
 }
 function capturedSourceHash(options, envelope, relative, root) {
   const cache = options.deliveryCache, codeRoot = root || options.codeDir || options.cwd;
@@ -169,7 +185,7 @@ function validateCurrentSources(options, envelope, fullScope) {
 // it to today's files, and cannot stand in for integrated verification/review.
 function historicalCapture(options, reference, read, fullScope, expected) {
   const envelope = read.value;
-  const { codeRoot, scope } = captureScope(options, envelope, fullScope);
+  const { codeRoot, scope, globs } = captureScope(options, envelope, fullScope);
   if (!Array.isArray(envelope?.workspace) || envelope.workspace.length > 256
       || !sameRoot(envelope.code_dir, codeRoot)) fail('delivery-current-source-binding-missing');
   const capturedAt = instant(envelope.captured_at);
@@ -186,7 +202,7 @@ function historicalCapture(options, reference, read, fullScope, expected) {
   return { unit: require('./forge-delivery').unitKey(expected), reference, sha256: read.sha256,
     revision: /^(?:[a-f0-9]{40}|[a-f0-9]{64}|[a-z][a-z0-9.-]{0,99})$/.test(envelope.revision) ? envelope.revision : null,
     workspace, workspace_scope: 'declared-source-paths-only', captured_at: envelope.captured_at,
-    plan_fingerprint: envelope.plan_fingerprint, source_bindings: bindings, current_source_conformity: 'not-evaluated' };
+    plan_fingerprint: envelope.plan_fingerprint, source_bindings: bindings, ...(globs.length ? { scope_globs: globs } : {}), current_source_conformity: 'not-evaluated' };
 }
 function sourceReason(error) {
   return /^(?:clock-|phase-cost-|time-|delivery-)/.test(error.code || '') ? error.code : 'clock-source-unreadable';
@@ -573,6 +589,7 @@ function readDeliveries(options) {
           history: options.proof.units, captures: options.proof.captures });
       } catch (e) { unproven.push({ slice, reason: sourceReason(e) === 'clock-source-unreadable' ? 'delivery-completion-invalid' : sourceReason(e) }); }
     }
+    revalidateGlobScopes(options);
     for (const read of options.deliveryCache.files.values()) {
       if (readSource(read.root, read.reference, read.limit).sha256 !== read.source.sha256) fail('clock-source-unstable');
     }
@@ -637,7 +654,8 @@ function readTaskDelivery(options, proofMode) {
         try { const r = roots.resolvePath(contract, relative, { legacy: contract.code_roots.length === 1 }); root = r.root_id; mapped = r.path; }
         catch { fail('delivery-code-root-mismatch'); }
       }
-      if (!captures.some(c => rootOf(c) === root && c.source_bindings.some(b => b.path === mapped))) fail('delivery-source-inventory-incomplete');
+      if (!captures.some(c => rootOf(c) === root && (require('./forge-delivery-source-scope').isGlob(mapped)
+        ? c.scope_globs?.some(g => g.pattern === mapped) : c.source_bindings.some(b => b.path === mapped)))) fail('delivery-source-inventory-incomplete');
     }
     // Captures of one root describe one workspace: identical identity, revision and scoped blobs,
     // and the artifact capture never precedes the verification capture.
@@ -651,6 +669,7 @@ function readTaskDelivery(options, proofMode) {
       const at = kind => group.filter(c => envelopeOf(c).kind === kind).map(c => instant(c.captured_at));
       if (at('verification').length && at('artifact').length && Math.max(...at('verification')) > Math.min(...at('artifact'))) fail('delivery-capture-inconsistent');
     }
+    revalidateGlobScopes(options);
     for (const read of options.deliveryCache.files.values()) {
       if (readSource(read.root, read.reference, read.limit).sha256 !== read.source.sha256) fail('clock-source-unstable');
     }
@@ -788,7 +807,9 @@ function readEndpointProof(options = {}) {
     if (!union.size) refuse('endpoint-scope-missing', { detail: 'scope-empty' });
     plan = { execution_contract_sha256: contractSha, plan_fingerprint: projection.delivery_fingerprint,
       roots: measured.code_roots.map(r => ({ root_id: r.id, commands: [...commands.get(r.id)] })) };
-    const scopeOptions = { ...options, executionContract: measured }, committedAt = instant(completion.boundary.committed_at);
+    // Completed child deliveries stay historical; integrated endpoint envelopes
+    // independently prove the current source universe, including glob additions.
+    const scopeOptions = { ...options, proofMode: 'current-source-strict', executionContract: measured }, committedAt = instant(completion.boundary.committed_at);
     const rootRows = [];
     for (const root of measured.code_roots) {
       const envelopeRef = ENDPOINT_PROOF_POLICY.envelope.replace(/\{milestone\}/g, M).replace('{root}', root.id);
@@ -831,6 +852,7 @@ function readEndpointProof(options = {}) {
       rootRows.push({ root_id: root.id, root_identity_sha256: root.identity_sha256, revision: e.revision, branch, envelope_sha256: read.sha256,
         checks: checks.length, scope: scope.map(relative => ({ path: relative, hash: capturedSourceHash(scopeOptions, e, relative, root.path) })) });
     }
+    revalidateGlobScopes(options);
     for (const read of options.deliveryCache.files.values()) {
       if (readSource(read.root, read.reference, read.limit).sha256 !== read.source.sha256) fail('clock-source-unstable');
     }

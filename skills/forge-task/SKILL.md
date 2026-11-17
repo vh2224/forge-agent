@@ -977,7 +977,7 @@ contract. After the frontmatter, include exactly these sections:
 [List of files expected to be modified, with one-line reason for each]
 
 Iron rule: this task MUST fit in ONE context window for the executor.
-If scope is too large, plan the most valuable subset and note what was deferred in ## Deferred.
+If scope is too large, plan the most valuable subset and note the deferred work in a nonempty ### Deferred subsection inside ## Steps. Keep exactly the four required level-two sections; do not add a fifth section.
 Return only the preparation envelope requested by the canonical caller. Do not
 write files or return another path.
 ```

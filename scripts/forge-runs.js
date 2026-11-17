@@ -757,7 +757,8 @@ function assertResumeQuiescence(cwd, record, nextHost, noLeases, partialOptions)
   if (controller.pendingTransactions(cwd).length) throw resumeError('owner-resume-transaction-pending');
   if (require('./forge-write-claim').isHeld(record.write_claim)) {
     if (!partialOptions) throw resumeError('owner-resume-claim-held');
-    controller.inspectPausedAttempt(cwd, record, partialOptions);
+    if (partialOptions.deliveryRepair) require('./forge-completion-delivery-recovery').inspectRetainedClaimResume(cwd, record, partialOptions.deliveryRepair);
+    else controller.inspectPausedAttempt(cwd, record, partialOptions);
   }
   if (record.worker || record.worker_started) throw resumeError('owner-resume-worker-unreconciled');
   // Legacy file locks and unreadable/debris entries cannot prove quiescence.
@@ -886,7 +887,7 @@ function resumeOwner(cwd, id, options = {}) {
       if (!same && options.confirmOwnerStopped !== true) throw resumeError('owner-resume-owner-stop-attestation-required');
       if (options.confirmWorkspaceQuiescent !== true) throw resumeError('owner-resume-workspace-quiescent-attestation-required');
       const boundary = assertResumeQuiescence(cwd, current, observed.hostRuntime, boundaryGuard.noLeases,
-        same && typeof options.inspectAttempt === 'function' ? options : null);
+        options.deliveryRepair ? { deliveryRepair: options.deliveryRepair } : same && typeof options.inspectAttempt === 'function' ? options : null);
       const history = current.owner_resume_history === undefined ? [] : current.owner_resume_history;
       if (!Array.isArray(history)) throw resumeError('owner-resume-history-unknown');
       const evidence = { at: new Date().toISOString(), previous_record_sha256: snapshot.sha256,
@@ -905,7 +906,7 @@ function resumeOwner(cwd, id, options = {}) {
         const live = observedResumeOwner(options);
         if (live.sessionId !== observed.sessionId || live.hostRuntime !== observed.hostRuntime || live.source !== observed.source) throw resumeError('owner-session-unavailable');
         assertResumeQuiescence(cwd, record, observed.hostRuntime, boundaryGuard.noLeases,
-          same && typeof options.inspectAttempt === 'function' ? options : null);
+          options.deliveryRepair ? { deliveryRepair: options.deliveryRepair } : same && typeof options.inspectAttempt === 'function' ? options : null);
         return patch;
       }, guard);
       return { status: same ? 'reactivated' : 'transferred', record: result.record };
