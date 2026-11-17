@@ -624,7 +624,14 @@ function validateNativeTelemetry(actual, expected) {
   }
   for (const key of expectedKeys) {
     if (['model_observed', 'model_observed_source', 'effort_applied', 'effort_applied_source'].includes(key)) continue;
-    if (actual[key] !== expected[key]) throw preparationError('native-preparation-telemetry-mismatch', 'native');
+    // Non-primitive fields (e.g. policy_diagnostics) cross JSON, so compare by
+    // content with sorted keys: a reference check can never match a recomputed array.
+    const a = actual[key], e = expected[key];
+    const canonical = value => JSON.stringify(value, (_, v) => (v && typeof v === 'object' && !Array.isArray(v)
+      ? Object.fromEntries(Object.keys(v).sort().map(k => [k, v[k]])) : v));
+    const same = a === e || (a !== null && e !== null && typeof a === 'object' && typeof e === 'object'
+      && canonical(a) === canonical(e));
+    if (!same) throw preparationError('native-preparation-telemetry-mismatch', 'native');
   }
   for (const [valueKey, sourceKey] of [['model_observed', 'model_observed_source'],
     ['effort_applied', 'effort_applied_source']]) {
