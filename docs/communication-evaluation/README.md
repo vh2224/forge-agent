@@ -337,3 +337,10 @@ skills/forge-next/SKILL.md: before=05c13bbcd0d39435f6cccac14f5828b805fcd5efe1c42
 Earlier evidence remains above. Only current after-node source fingerprints are updated; no sample prose or human acceptance is changed.
 
 skills/forge-next/SKILL.md: before=598398fba42577af77dc68282ad02878996787b55abb9caf4787d302c61d2a49 after=fe72edc9eedccfac3faa77dc9a619d0a0b98ee6fed052265dfd2700740a7d9e1 attributed_before=ea25b3d92b2946066b61c1a0e6e8f28cf29e9d8995b3fa3ea384b9b0cae11cca attributed_after=47c80adfef2ce723846c2ea58150a14c874e20a1cfcf3107ad480450938f4791
+
+
+## Issue416 standalone deferral source references
+
+Earlier evidence remains above. Only current after-node source fingerprints are updated; no sample prose or human acceptance is changed.
+
+skills/forge-task/SKILL.md: before=d657fe3b191a675c2d2a62012ca00c71360d44b65cd65787fa4e75a81016b957 after=168dfdec333011062dd114e427c92f8baf0eb3b6d1511ad705fe592b50f6efef attributed_before=4e778c46a1db66ec35d49314129fb30aad6ce7c075cae72aa0e43f3d3d03e952 attributed_after=e64ab30c3f4c347a541e0238b8e177be556208fd66e9d8c040fb4c85519daaa4
