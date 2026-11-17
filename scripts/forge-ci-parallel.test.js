@@ -5,7 +5,8 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { Writable } = require('node:stream');
-const { parseArgs, prepareCheckout, logHeader, allocateRoot, run } = require('./forge-ci-parallel');
+const { parseArgs, workerLayout, prepareCheckout, logHeader, allocateRoot, run } = require('./forge-ci-parallel');
+const fixtureJobName=require('./forge-release-checks').expandJobs(require('./forge-release-checks').POLICY.workflows.ci).find(job=>job.key==='test'&&job.matrix.platform==='win32').name;
 const temp = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-ci-parallel-fixture-')));
 const root = path.join(temp, 'source'); fs.mkdirSync(root);
 for (const code of ['EACCES', 'EPERM', 'EROFS']) {
@@ -66,7 +67,15 @@ const remoteOnly=git(root,['commit-tree',git(root,['rev-parse','HEAD^{tree}']),'
 git(root,['update-ref','refs/remotes/origin/divergent',remoteOnly]);
 git(root,['config','http.https://example.invalid/.extraheader','fixture-secret-header']);
 const argv=['--shard-index','0','--shard-count','1','--jobs','2','--profile-dir',path.join(temp,'profiles')];
-assert.deepEqual(parseArgs(argv),{index:0,count:1,jobs:2,profileDir:path.join(temp,'profiles')});
+assert.deepEqual(parseArgs(argv),{index:0,count:1,jobs:2,singleWorkerJobs:0,profileDir:path.join(temp,'profiles')});
+for(let count=1;count<=32;count++)for(let jobs=1;jobs<=3;jobs++)for(let singleWorkerJobs=0;singleWorkerJobs<=count;singleWorkerJobs++){
+  const total=singleWorkerJobs+(count-singleWorkerJobs)*jobs;
+  if(total>64){assert.throws(()=>workerLayout({index:0,count,jobs,singleWorkerJobs}),/arguments/);continue;}
+  const indices=Array.from({length:count},(_,index)=>workerLayout({index,count,jobs,singleWorkerJobs}))
+    .flatMap(row=>Array.from({length:row.workers},(_,i)=>{assert.equal(row.count,total);return row.start+i;}));
+  assert.deepEqual(indices,Array.from({length:total},(_,i)=>i),'single-worker prefixes preserve exact complete global coverage');
+}
+for(const value of ['-1','2','1.5','NaN'])assert.throws(()=>parseArgs([...argv,'--single-worker-jobs',value]));
 assert.throws(()=>logHeader('injected\nComplete job name: foreign'),/job-name/);
 for(const bad of [[],['--jobs','4'],[...argv,'--jobs','1'],argv.map(v=>v==='--jobs'?'--unknown':v),argv.map(v=>v==='1'?'0':v)])assert.throws(()=>parseArgs(bad));
 const chunks=[];const sink=new Writable({write(chunk,_,done){chunks.push(chunk.toString());done();}});
@@ -79,7 +88,7 @@ const streams={stdout:sink,stderr:sink};
     assert.equal(git(independent,['cat-file','-t',remoteOnly]),'commit');
     git(independent,['update-ref','refs/heads/worker-only',sha]);
     const absent=spawnSync('git',['show-ref','--verify','refs/heads/worker-only'],{cwd:root,windowsHide:true});assert.notEqual(absent.status,0);
-    assert.equal(await run(parseArgs(argv),{source:root,temp,streams,jobName:'Tests (windows-latest, shard 1/16)'}),0);
+    assert.equal(await run(parseArgs(argv),{source:root,temp,streams,jobName:fixtureJobName}),0);
     const profiles=[0,1].map(i=>JSON.parse(fs.readFileSync(path.join(temp,'profiles',`worker-${i}.json`))));
     assert.deepEqual(profiles.map(x=>[x.index,x.count]),[[0,2],[1,2]]);
     assert.notEqual(profiles[0].cwd,profiles[1].cwd);
@@ -99,6 +108,13 @@ const streams={stdout:sink,stderr:sink};
     assert.deepEqual(triple.map(p=>[p.index,p.count]),[[0,3],[1,3],[2,3]]);
     assert.equal(new Set(triple.map(p=>p.cwd)).size,3);
     assert(triple.every(p=>!fs.existsSync(p.cwd)),'all three successful workers are joined before cleanup');
+    for(const file of fs.readdirSync(channel))fs.rmSync(path.join(channel,file));
+    const heterogeneous=[0,1].map(index=>({...parseArgs(argv),index,count:2,singleWorkerJobs:1,profileDir:path.join(temp,'heterogeneous-'+index)}));
+    assert.deepEqual(await Promise.all(heterogeneous.map(options=>run(options,{source:root,temp,streams}))),[0,0]);
+    const mixed=heterogeneous.flatMap((options,index)=>Array.from({length:index===0?1:2},(_,worker)=>JSON.parse(fs.readFileSync(path.join(options.profileDir,`worker-${worker}.json`)))));
+    assert.deepEqual(mixed.map(row=>[row.index,row.count]),[[0,3],[1,3],[2,3]]);
+    assert.equal(new Set(mixed.map(row=>row.cwd)).size,3);
+    assert(mixed.every(row=>!fs.existsSync(row.cwd)),'exclusive and paired jobs both drain before cleanup');
     for(const file of fs.readdirSync(channel))fs.rmSync(path.join(channel,file));
     fs.writeFileSync(path.join(channel,'fail'),'fail first worker');
     const failedOptions={...parseArgs(argv),profileDir:path.join(temp,'failed-profiles')};

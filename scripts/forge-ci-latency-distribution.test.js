@@ -17,6 +17,7 @@ for(const field of ['before','after','attributed_before','attributed_after']){
  const value=structuredClone(entry.ciLatencyLayer);value.files[source][field]='0'.repeat(64);
  assert.throws(()=>entry.validate({artifacts,ciLatencyLayerValue:value}));
 }
+assert.throws(()=>entry.validate({artifacts,readRaw:file=>file==='scripts/forge-native-execution.test.js'?Buffer.from('foreign native cohort drift'):fs.readFileSync(path.join(root,file))}));
 const old=structuredClone(entry.parallelismLayer),first=Object.keys(old.files).find(file=>old.files[file].before!==null);old.files[first].before='0'.repeat(64);
 assert.throws(()=>entry.validate({artifacts,parallelismLayerValue:old}),'historical negative controls remain enforcing');
 const upstream=structuredClone(entry.issue414Layer);upstream.provenance.issues=[];

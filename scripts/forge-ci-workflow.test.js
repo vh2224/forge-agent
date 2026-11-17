@@ -10,6 +10,7 @@ const { POLICY, expandJobs, assertJobMapping } = require('./forge-release-checks
 const { loadShardProfile, planShards, verifyPartition } = require('./forge-ci-shards.js');
 const { discoverTests } = require('./run-tests.js');
 const { expandSuites, unitWeights } = require('./forge-ci-units.js');
+const { workerLayout } = require('./forge-ci-parallel.js');
 
 const root = path.resolve(__dirname, '..');
 const bytes = Object.fromEntries(['ci', 'app', 'release'].map(id => [id, fs.readFileSync(path.join(root, '.github', 'workflows', `${id}.yml`))]));
@@ -198,7 +199,7 @@ assert(testStep.includes('        env:\n          FORGE_CI_JOB_NAME: Tests (${{ 
 assert(texts.ci.includes('          path: ${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}/*\n'), 'both structured profiles and separate worker logs are retained');
 const command = testStep.match(/^        run: (.+)$/m)[1];
 assert.strictEqual(command, 'node scripts/forge-ci-parallel.js --shard-index ${{ matrix.shard-index }} --shard-count ${{ matrix.shard-count }}'
-  + ' --jobs "${{ matrix.workers }}" --profile-dir "${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}"');
+  + ' --jobs "${{ matrix.workers }}" --single-worker-jobs ${{ matrix.single-worker-jobs }} --profile-dir "${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}"');
 const parallelSource = fs.readFileSync(path.join(__dirname, 'forge-ci-parallel.js'), 'utf8');
 for (const token of ["'--baseline', 'scripts/fixtures/ci-baseline/known-unit-failures.json'", "'--partition-suites'", "'--shard-profile', 'scripts/fixtures/ci-latency/shard-profile.json'", "'--profile-out'"]) assert(parallelSource.includes(token), token);
 assert(!/--(?:changed|match|fail-fast|inherit-home)\b/.test(parallelSource));
@@ -239,12 +240,12 @@ const verifySteps = steps.filter(step => /svn --version --quiet/.test(step) && /
 assert.strictEqual(verifySteps.length, 1);
 assert(!/^\s*if:/m.test(verifySteps[0]) && texts.ci.indexOf(verifySteps[0]) < testIndex);
 const rows = expandJobs(POLICY.workflows.ci);
-assert.strictEqual(rows.length, 36);
+assert.strictEqual(rows.length, 41);
 assert.strictEqual(rows.filter(row => row.kind === 'alias').length, 9);
 assert.deepStrictEqual(rows.filter(row => row.key === 'test').map(row => row.name),
-  [['ubuntu-latest', 3], ['macos-latest', 5], ['windows-latest', 16]].flatMap(([os, count]) => Array.from({length:count}, (_, i) => `Tests (${os}, shard ${i+1}/${count})`)));
+  [['ubuntu-latest', 3], ['macos-latest', 5], ['windows-latest', 21]].flatMap(([os, count]) => Array.from({length:count}, (_, i) => `Tests (${os}, shard ${i+1}/${count})`)));
 assert.strictEqual(rows.filter(row => row.name === 'Tests (ubuntu-latest)' && row.kind === 'alias').length, 1);
-assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'win32').map(row => row.matrix['shard-count']), Array(16).fill(16));
+assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'win32').map(row => row.matrix['shard-count']), Array(21).fill(21));
 assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'darwin').map(row => row.matrix['shard-count']), Array(5).fill(5));
 // Smoke condition evaluated per policy cell: exactly one Linux and one macOS run, never Windows.
 const runnerOs = { 'ubuntu-latest': 'Linux', 'macos-latest': 'macOS', 'windows-latest': 'Windows' };
@@ -259,15 +260,21 @@ const profilePath = 'scripts/fixtures/ci-latency/shard-profile.json';
 assert.strictEqual(profilePath, 'scripts/fixtures/ci-latency/shard-profile.json');
 const profile = loadShardProfile(path.join(root, profilePath));
 assert.strictEqual(profile.state, 'loaded');
-const cells = new Map(rows.filter(row => row.key === 'test').map(row => [`${row.matrix.platform}/${row.matrix['shard-count']}`, row.matrix]));
-for (const cell of cells.values()) {
-  const plans = Array.from({ length: cell['shard-count'] * cell.workers }, (_, index) => planShards({
-    suites, index, count: cell['shard-count'] * cell.workers, platform: cell.platform, profile, estimatedWeights: unitWeights(unitInventory, profile, cell.platform) }));
+const cells=new Map();for(const row of rows.filter(row=>row.key==='test')){const key=row.matrix.platform;if(!cells.has(key))cells.set(key,[]);cells.get(key).push(row.matrix);}
+let totalWorkers=0;
+for (const [platform,platformCells] of cells) {
+  const cell=platformCells[0],layouts=platformCells.map(row=>workerLayout({index:row['shard-index'],count:row['shard-count'],jobs:row.workers,singleWorkerJobs:row['single-worker-jobs']}));
+  const count=layouts[0].count;assert(layouts.every(row=>row.count===count));
+  assert.deepStrictEqual(layouts.flatMap(row=>Array.from({length:row.workers},(_,i)=>row.start+i)).sort((a,b)=>a-b),Array.from({length:count},(_,i)=>i));
+  assert.strictEqual(count,{linux:6,darwin:15,win32:40}[platform]);totalWorkers+=count;
+  const plans = Array.from({ length: count }, (_, index) => planShards({
+    suites, index, count, platform, profile, estimatedWeights: unitWeights(unitInventory, profile, platform) }));
   assert(plans.every(plan => plan.fallback === null && plan.algorithm === 'weighted-lpt-v1'));
   assert.strictEqual(new Set(plans.map(plan => plan.partition_sha256)).size, 1);
   assert(verifyPartition(suites, plans.map(plan => plan.selected)).ok);
   console.log(`PASS partition ${cell.platform}/${cell['shard-count']} universe=${suites.length} unprofiled=${plans[0].unprofiled.length} stale=${plans[0].stale.length} partition_sha256=${plans[0].partition_sha256}`);
 }
+assert.strictEqual(totalWorkers,61);assert(totalWorkers<=64);
 marker('truth', 3, 'baseline and versioned profile wired; full matrix coverage disjoint with equal fingerprints and fallback null; CI structure preserved');
 marker('key_link', 1, 'loadShardProfile planShards and verifyPartition exercise every real matrix platform/count/index');
 marker('key_link', 5, 'Run test suites invokes run-tests with baseline profile and final shard-index/count flags');

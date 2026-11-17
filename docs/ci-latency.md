@@ -33,15 +33,19 @@ It keeps the original platform applicability and fails on nonzero exit, signal
 or spawn failure. Its explicit initial cost estimates come from the previous
 hosted smoke steps; future measured suite timings override those estimates.
 
-Linux/Windows jobs start two canonical runners; macOS jobs start three, each in separate Git clones,
+Linux jobs start two canonical runners and macOS jobs start three. Windows uses
+two initial jobs with one worker each, followed by nineteen jobs with two workers
+each. This gives the longest weighted lanes their own runner rather than pairing
+the two heaviest tests on the same machine. Every worker uses separate Git clones,
 with independent objects, refs, indexes, working directories and temp roots.
 Local clone optimization/hardlinks are disabled. Checkout credentials are not
 copied. Candidate HEAD and source origin/history are preserved. The canonical
 runner continues to isolate HOME for each suite, compare the known-failure
 baseline in both directions and produce bounded structured profiles.
 
-Three Linux, three macOS and sixteen Windows jobs produce six, nine and thirty-two
-effective shards. `job_index * workers + worker_index` is the global shard index.
+Three Linux, five macOS and twenty-one Windows jobs produce six, fifteen and forty
+effective shards. The explicit single-worker prefix and paired-job offsets map
+all sixty-one global worker indices without gaps or duplication.
 Every unit is assigned exactly once by the common complete partition. Every
 worker is joined on failure; successful sibling profiles remain diagnostic
 evidence. Failed/incompletely joined checkouts and nonempty worker temp roots are
@@ -52,11 +56,12 @@ the suite explicitly preserved.
 
 The active profile at `scripts/fixtures/ci-latency/shard-profile.json` was refreshed
 through the canonical collector from seven complete structured PR415 artifacts
-and 47 completed worker profiles from diagnostic run44183550750. Only unambiguous
+and 53 completed worker profiles from diagnostic run44187991176. Only unambiguous
 passing rows contribute weights; that failed run is not acceptance evidence.
-Mutable-export negative controls exposed an incompatible freeze, now replaced
-with exact graph-change detection. One Windows restart CLI failed with an
-undetermined cause; its complete unit passed in a separate local run. Original
+The only failed source was a stale matrix assertion, now updated. All 514
+then-current execution units and all 129 split cases ran exactly once per
+platform. Native core/saved groups now use new timing identities with explicit
+estimates from the earlier combined cohort. Original
 merge-checkout provenance is retained. Earlier diagnostic unit weights are
 superseded; their original evidence remains recorded. Changed case rosters use
 new unit revisions.
@@ -80,7 +85,7 @@ matrix job-name binding and observed Node/image metadata. Feed those logs
 individually to the existing raw-log collector. The combined job console has
 multiple runners and intentionally remains ambiguous for that collector.
 For an allocation estimate matching CI, use `forge-ci-profile report` with
-`--partition-suites` and the effective counts linux:6, darwin:15, win32:32.
+`--partition-suites` and the effective counts linux:6, darwin:15, win32:40.
 Leave out that option when analyzing the older whole-file runner universe.
 Report execution, queue, setup and aggregate runner work separately.
 

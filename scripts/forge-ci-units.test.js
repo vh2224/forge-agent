@@ -38,6 +38,18 @@ const sample = unitsForSuite('forge-native-repackage.test.js');
 const profile = {state:'loaded',doc:{platforms:{win32:{status:'observed',weights_ms:{'forge-native-repackage.test.js':6000}}}}};
 assert.deepEqual(Object.values(unitWeights(sample,profile,'win32')),Array(6).fill(1000));
 assert.deepEqual(unitWeights(sample,profile,'darwin'),{});
+const nativeUnits=unitsForSuite('forge-native-execution.test.js');
+assert.deepEqual(nativeUnits.map(row=>row.args),[['--core'],['--saved'],['--extra'],['--recovery']]);
+const nativeProfile={state:'loaded',doc:{platforms:{win32:{status:'observed',weights_ms:{
+ 'forge-native-execution.test.js':1000,'forge-native-execution.ci-01-of-3.test.js':480,
+ 'forge-native-execution.ci-02-of-3.test.js':90,'forge-native-execution.ci-03-of-3.test.js':400}}}}};
+assert.deepEqual(Object.values(unitWeights(nativeUnits,nativeProfile,'win32')),[240,240,90,400],'new memberships use explicitly estimated legacy timings, never invented observations');
+assert(nativeUnits.every(unit=>unit.id.includes('native-v2')),'changed membership has fresh timing identities');
+const measuredProfile=require('./forge-ci-shards').loadShardProfile(path.join(__dirname,'fixtures/ci-latency/shard-profile.json'));
+measuredProfile.doc.platforms.win32.weights_ms[nativeUnits[0].id]=7;
+measuredProfile.sha256=require('node:crypto').createHash('sha256').update(JSON.stringify(measuredProfile.doc)).digest('hex');
+const measured=planShards({suites:[nativeUnits[0].id],index:0,count:1,platform:'win32',profile:measuredProfile,estimatedWeights:unitWeights([nativeUnits[0]],nativeProfile,'win32')});
+assert.equal(measured.predicted_ms[0],7,'a measured current unit wins over a legacy estimate');
 const smokeUnit = unitsForSuite('forge-ci-smoke.test.js');
 const smokeProfile = {state:'loaded',doc:{platforms:{darwin:{status:'observed',weights_ms:{}}}}};
 assert.equal(unitWeights(smokeUnit,smokeProfile,'darwin')['forge-ci-smoke.test.js'],180000);

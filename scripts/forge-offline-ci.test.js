@@ -100,11 +100,12 @@ assert.deepStrictEqual(offlineCells, [
 assert.match(offlineBlock, /forge-offline-ci\.js --host \$\{\{ matrix\.host \}\}/);
 
 const testBlock = workflow.slice(workflow.indexOf('\n  test:'));
-const testCells = [...testBlock.matchAll(/- os: ([^\s]+)\s+platform: (linux|darwin|win32)\s+shard-index: (\d+)\s+shard-count: (\d+)\s+label: ([^\r\n]+)\s+workers: (\d+)/g)]
-  .map((match) => ({ os: match[1], platform: match[2], shardIndex: Number(match[3]), shardCount: Number(match[4]), label: match[5], workers:Number(match[6]) }));
-assert.deepStrictEqual(testCells, [['ubuntu-latest','linux',3,2],['macos-latest','darwin',3,3],['windows-latest','win32',16,2]]
-  .flatMap(([os,platform,shardCount,workers])=>Array.from({length:shardCount},(_,shardIndex)=>({os,platform,shardIndex,shardCount,label:`${os}, shard ${shardIndex+1}/${shardCount}`,workers}))));
+const testCells = [...testBlock.matchAll(/- os: ([^\s]+)\s+platform: (linux|darwin|win32)\s+shard-index: (\d+)\s+shard-count: (\d+)\s+label: ([^\r\n]+)\s+workers: (\d+)\s+single-worker-jobs: (\d+)/g)]
+  .map((match) => ({ os: match[1], platform: match[2], shardIndex: Number(match[3]), shardCount: Number(match[4]), label: match[5], workers:Number(match[6]),singleWorkerJobs:Number(match[7]) }));
+assert.deepStrictEqual(testCells, [['ubuntu-latest','linux',3,2,0],['macos-latest','darwin',5,3,0],['windows-latest','win32',21,2,2]]
+  .flatMap(([os,platform,shardCount,workers,singleWorkerJobs])=>Array.from({length:shardCount},(_,shardIndex)=>({os,platform,shardIndex,shardCount,label:`${os}, shard ${shardIndex+1}/${shardCount}`,workers,singleWorkerJobs}))));
 assert.match(testBlock, /forge-ci-parallel\.js --shard-index \$\{\{ matrix\.shard-index \}\} --shard-count \$\{\{ matrix\.shard-count \}\} --jobs "\$\{\{ matrix\.workers \}\}"/);
+assert.match(testBlock,/--single-worker-jobs \$\{\{ matrix\.single-worker-jobs \}\}/);
 const compatibilityBlock = workflow.slice(workflow.indexOf('\n  required-offline-windows:'));
 assert.match(compatibilityBlock, /name: Offline \$\{\{ matrix\.host \}\} \/ \$\{\{ matrix\.platform \}\}/);
 assert.match(compatibilityBlock, /platform:\s*\r?\n\s+- linux\s*\r?\n\s+- darwin\s*\r?\n\s+- win32/);

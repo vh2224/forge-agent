@@ -10,18 +10,28 @@ const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const { validateBaselinePair } = require('./forge-ci-units');
 function integer(value, max) { return /^\d+$/.test(value || '') && Number.isSafeInteger(+value) && +value <= max; }
+function workerLayout({index,count,jobs,singleWorkerJobs=0}) {
+  if (![index,count,jobs,singleWorkerJobs].every(Number.isSafeInteger) || index<0 || count<1 || jobs<1 || jobs>3
+      || index>=count || singleWorkerJobs<0 || singleWorkerJobs>count) throw Error('ci-parallel-arguments');
+  const total=singleWorkerJobs+(count-singleWorkerJobs)*jobs;
+  if(total>64)throw Error('ci-parallel-arguments');
+  return {start:index<singleWorkerJobs?index:singleWorkerJobs+(index-singleWorkerJobs)*jobs,
+    workers:index<singleWorkerJobs?1:jobs,count:total};
+}
 function parseArgs(argv) {
   const options = {};
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i], value = argv[i + 1];
-    if (!['--shard-index', '--shard-count', '--jobs', '--profile-dir'].includes(key) || !value || Object.hasOwn(options, key)) throw Error('ci-parallel-arguments');
+    if (!['--shard-index', '--shard-count', '--jobs', '--single-worker-jobs', '--profile-dir'].includes(key) || !value || Object.hasOwn(options, key)) throw Error('ci-parallel-arguments');
     options[key] = value;
   }
   if (!integer(options['--shard-index'], 63) || !integer(options['--shard-count'], 64)
       || !integer(options['--jobs'], 3) || +options['--jobs'] < 1 || +options['--shard-count'] < 1
-      || +options['--shard-index'] >= +options['--shard-count'] || +options['--shard-count'] * +options['--jobs'] > 64
+      || +options['--shard-index'] >= +options['--shard-count']
+      || (Object.hasOwn(options,'--single-worker-jobs') && !integer(options['--single-worker-jobs'],64))
       || !options['--profile-dir']) throw Error('ci-parallel-arguments');
-  return { index: +options['--shard-index'], count: +options['--shard-count'], jobs: +options['--jobs'], profileDir: path.resolve(options['--profile-dir']) };
+  const result={ index: +options['--shard-index'], count: +options['--shard-count'], jobs: +options['--jobs'],singleWorkerJobs:+(options['--single-worker-jobs']||0), profileDir: path.resolve(options['--profile-dir']) };
+  workerLayout(result);return result;
 }
 function git(cwd, args, input) {
   const result = spawnSync('git', args, { cwd, input, encoding: 'utf8', windowsHide: true, timeout: 120000, maxBuffer: 8 * 1024 * 1024 });
@@ -102,6 +112,7 @@ function allocateRoot(preferred, { create = fs.mkdtempSync, fallback = os.tmpdir
   }
 }
 async function run(options, { source = path.resolve(__dirname, '..'), temp = path.dirname(source), streams = process, jobName = process.env.FORGE_CI_JOB_NAME || null } = {}) {
+  const layout=workerLayout(options);
   if (git(source, ['status', '--porcelain', '--untracked-files=normal'])) throw Error('ci-parallel-requires-clean-checkout');
   const sourceSuites = fs.readdirSync(path.join(source,'scripts')).filter(name => name.endsWith('.test.js'));
   const baselinePair = validateBaselinePair({ sourceSuites, platform: process.platform,
@@ -117,17 +128,17 @@ async function run(options, { source = path.resolve(__dirname, '..'), temp = pat
   const checkouts = [];
   let outcomes = null;
   try {
-    for (let worker = 0; worker < options.jobs; worker++) {
+    for (let worker = 0; worker < layout.workers; worker++) {
       const checkout = path.join(own, `w${worker}`);
       prepareCheckout(source, checkout, sha);
       checkouts.push(checkout);
     }
     // The effective shard count covers ALL workers of ALL jobs exactly once.
     outcomes = await Promise.allSettled(checkouts.map((checkout, worker) => {
-      const index = options.index * options.jobs + worker, count = options.count * options.jobs;
+      const index = layout.start + worker, count = layout.count;
       const workerTemp = path.join(own, `t${worker}`);
       fs.mkdirSync(workerTemp);
-      streams.stdout.write(`CI isolated worker ${worker + 1}/${options.jobs}; global shard ${index + 1}/${count}; candidate ${sha}\n`);
+      streams.stdout.write(`CI isolated worker ${worker + 1}/${layout.workers}; global shard ${index + 1}/${count}; candidate ${sha}\n`);
       return runChild(checkout, ['--baseline', 'scripts/fixtures/ci-baseline/known-unit-failures.json',
         '--partition-suites', '--shard-profile', 'scripts/fixtures/ci-latency/shard-profile.json',
         '--shard-index', String(index), '--shard-count', String(count),
@@ -154,5 +165,5 @@ async function main(argv = process.argv.slice(2)) {
   try { return await run(parseArgs(argv)); }
   catch (error) { process.stderr.write(`${error.message}\n`); return 2; }
 }
-module.exports = { parseArgs, prepareCheckout, logHeader, runChild, allocateRoot, run, main };
+module.exports = { parseArgs, workerLayout, prepareCheckout, logHeader, runChild, allocateRoot, run, main };
 if (require.main === module) main().then(code => { process.exitCode = code; });

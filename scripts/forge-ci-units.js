@@ -8,7 +8,8 @@ const DEFINITIONS = Object.freeze({
   'forge-execution-batch-process.test.js': { parts: 16, kind: 'cases', revision: 'restart-v2', costDivisors: {0:5,5:4} },
   'forge-execution-batch-isolation.test.js': { parts: 8, kind: 'cases' },
   'forge-native-repackage.test.js': { parts: 6, kind: 'cases' },
-  'forge-native-execution.test.js': { args: [['--core-saved'], ['--extra'], ['--recovery']], divisor: 2 },
+  'forge-native-execution.test.js': { args: [['--core'], ['--saved'], ['--extra'], ['--recovery']], revision:'native-v2',
+    costDivisors:{0:2,1:2,2:4,3:1}, timingEstimates:[['forge-native-execution.ci-01-of-3.test.js',2],['forge-native-execution.ci-01-of-3.test.js',2],['forge-native-execution.ci-02-of-3.test.js',1],['forge-native-execution.ci-03-of-3.test.js',1]] },
   'forge-native-recovery-delivery.test.js': { args: [['--cohort', '0'], ['--cohort', '1'], ['--cohort', '2']], divisor: 1 },
   'forge-agent-phase.test.js': { args: ['identity', 'recovery', 'native', 'sidecar'].map(name => [`--phase-cohort=${name}`]), divisor: 2 },
   'forge-communication-surfaces.test.js': { parts: 4, kind: 'cases' },
@@ -25,6 +26,7 @@ function unitsForSuite(source) {
     id: source.replace(/\.test\.js$/, `.ci-${definition.revision ? definition.revision + '-' : ''}${String(index + 1).padStart(2, '0')}-of-${count}.test.js`),
     source, args: definition.kind === 'cases' ? [`--ci-cases=${index}/${count}`] : [...definition.args[index]],
     divisor: definition.costDivisors?.[index] || definition.divisor || count,
+    ...(definition.timingEstimates?.[index]?{timingEstimate:definition.timingEstimates[index]}:{}),
   }));
 }
 function expandSuites(suites) {
@@ -37,6 +39,8 @@ function unitWeights(units, profile, platform) {
   if (!row || row.status !== 'observed') return {};
   const weights = Object.fromEntries(units.filter(unit => unit.id !== unit.source && Object.hasOwn(row.weights_ms, unit.source))
     .map(unit => [unit.id, Math.max(1, Math.ceil(row.weights_ms[unit.source] / unit.divisor))]));
+  for(const unit of units)if(unit.timingEstimate && Object.hasOwn(row.weights_ms,unit.timingEstimate[0]))
+    weights[unit.id]=Math.max(1,Math.ceil(row.weights_ms[unit.timingEstimate[0]]/unit.timingEstimate[1]));
   for (const unit of units) if (INITIAL_COSTS[unit.source]?.[platform] && !Object.hasOwn(row.weights_ms, unit.id)) weights[unit.id] = INITIAL_COSTS[unit.source][platform];
   return weights;
 }
