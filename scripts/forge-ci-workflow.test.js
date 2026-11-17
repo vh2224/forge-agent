@@ -205,13 +205,17 @@ assert(!/--(?:changed|match|fail-fast|inherit-home)\b/.test(command));
 assert(!/\b(?:paths|paths-ignore|branches-ignore):/.test(texts.ci.split('\npermissions:')[0]));
 const steps = texts.ci.match(/^      - name:[^\n]*(?:\n(?!      - name:)[^\n]*)*/gm);
 const testIndex = texts.ci.indexOf('      - name: Run test suites');
-const smokeIndex = texts.ci.indexOf('      - name: Smoke suite (release gate)');
-assert(testIndex < smokeIndex);
-const smokeStep = "      - name: Smoke suite (release gate)\n        if: runner.os != 'Windows' && matrix.shard-index == 0\n"
-  + '        run: node scripts/forge-smoke.js\n\n  required-offline-windows:\n';
-assert.strictEqual(texts.ci.split(smokeStep).length, 2);
-assert.strictEqual(texts.ci.indexOf(smokeStep), smokeIndex);
-assert.strictEqual(texts.ci.split('forge-smoke.js').length, 2);
+assert(!texts.ci.includes('Smoke suite (release gate)'), 'smoke must participate in weighted suite allocation');
+assert(discoverTests([]).includes('forge-ci-smoke.test.js'), 'full smoke is discovered by the canonical runner');
+const smokeSuite = require('./forge-ci-smoke.test');
+for (const platform of ['linux', 'darwin']) {
+  let calls = 0;
+  const invoke = (command, args, options) => { calls++; assert.strictEqual(command, process.execPath); assert.deepStrictEqual(args, [path.join(__dirname,'forge-smoke.js')]); assert.strictEqual(options.stdio,'inherit'); return {status:7,signal:null}; };
+  assert.strictEqual(smokeSuite.run(platform, invoke),7,'a real smoke failure blocks the suite'); assert.strictEqual(calls,1);
+  assert.strictEqual(smokeSuite.run(platform,()=>({status:0,signal:'SIGTERM'})),1);
+  assert.strictEqual(smokeSuite.run(platform,()=>({status:null,error:new Error('fixture')})),1);
+}
+assert.strictEqual(smokeSuite.run('win32',()=>{throw Error('original Windows smoke was not applicable');}),0);
 for (const [platform, pattern] of [
   ['Linux', /run:\s*sudo apt-get update && sudo apt-get install -y subversion/],
   ['macOS', /run:\s*brew install subversion/],

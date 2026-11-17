@@ -249,10 +249,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      - name: Smoke suite (release gate)
-        if: runner.os != 'Windows' && matrix.shard-index == 0
-        run: node scripts/forge-smoke.js
-
   required-offline-windows:
     name: Offline ${{ matrix.host }} / ${{ matrix.platform }}
     needs: operational-offline

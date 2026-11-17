@@ -6,6 +6,9 @@ const artifacts=require('./forge-claude-renderer').render({repo:root,projectRoot
 assert.equal(entry.validate({artifacts}),true);
 const source='scripts/forge-execution-batch-process.test.js';
 assert.throws(()=>entry.validate({artifacts,readRaw:file=>{const bytes=fs.readFileSync(path.join(root,file));return file===source?Buffer.concat([bytes,Buffer.from('\n// undeclared drift')]):bytes;}}));
+const added='scripts/forge-ci-smoke.test.js';
+assert.equal(entry.ciLatencyLayer.files[added].before,null);
+assert.throws(()=>entry.validate({artifacts,readRaw:file=>{const bytes=fs.readFileSync(path.join(root,file));return file===added?Buffer.concat([bytes,Buffer.from('\n// new-file drift')]):bytes;}}),'the final current-byte census still checks files absent from historical validators');
 for(const field of ['before','after','attributed_before','attributed_after']){
  const value=structuredClone(entry.ciLatencyLayer);value.files[source][field]='0'.repeat(64);
  assert.throws(()=>entry.validate({artifacts,ciLatencyLayerValue:value}));

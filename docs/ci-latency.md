@@ -14,12 +14,24 @@ By PR415/run44132612926 there were470suites/platform and94unprofiled suites.
 Windows test steps reached64m23s; one file alone took29m43s. File-only shards
 cannot remove that indivisible-file floor.
 
-The CI inventory now expands six reviewed heavy suites into independently
+The CI inventory now expands eight reviewed heavy suites into independently
 invocable units. Registered-case partitions preserve one complete roster,
 reject duplicate/empty/malformed selection, and select each case once across
 the partition. Existing native execution, delivery and phase cohort selectors
 are reused instead of reimplementing their assertions. Direct source-suite
 invocation keeps the complete original path.
+
+The sixteen consolidation restart witnesses are registered individually rather
+than hidden inside one serial case. The three claim witnesses and their shared
+completion check stay together. Communication cases are partitioned from their
+complete named roster. Linked lifecycle's independent regression fixtures run
+separately from the dependent lifecycle chain; direct invocation keeps both.
+
+The original complete Linux/macOS smoke CLI is now the discoverable
+`forge-ci-smoke.test.js` suite, rather than an extra serial step after shard zero.
+It keeps the original platform applicability and fails on nonzero exit, signal
+or spawn failure. Its explicit initial cost estimates come from the previous
+hosted smoke steps; future measured suite timings override those estimates.
 
 Each hosted test job starts two canonical runners in separate Git clones,
 with independent objects, refs, indexes, working directories and temp roots.
@@ -40,9 +52,11 @@ the suite explicitly preserved.
 
 The active profile at `scripts/fixtures/ci-latency/shard-profile.json` was refreshed
 through the canonical collector from seven complete structured PR415 artifacts
-and 39 worker profiles from diagnostic run44154000574. Only unambiguous passing
+and 47 worker profiles from diagnostic run44163993587. Only unambiguous passing
 rows contribute weights; that failed run is not acceptance evidence. The missing
 Windows worker remains incomplete. Original merge-checkout provenance is retained.
+The first diagnostic run's unit weights are superseded by the newer run; its
+original evidence remains recorded. Changed case rosters use new unit revisions.
 New virtual units use explicitly estimated historical source costs divided by
 their declared partition factor. Already concurrent source coordinators use
 conservative factors. A virtual unit remains unprofiled until it has its own

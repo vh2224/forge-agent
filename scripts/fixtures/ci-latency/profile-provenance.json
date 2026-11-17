@@ -1,18 +1,20 @@
 {
   "base_run": "44132612926",
-  "unit_run": "44154000574",
-  "unit_run_head": "d48cd002f572245e4647630fc4f4cf70e96cc5a1",
+  "unit_run": "44163993587",
+  "unit_run_head": "b2ad4d10764c5b5687bd786e843bd3218e70f4a0",
   "unit_run_conclusion": "failure",
-  "sources": 46,
-  "unit_profiles": 39,
+  "sources": 54,
+  "unit_profiles": 47,
   "original_profiles": 7,
+  "superseded_unit_run": "44154000574",
   "collector": "forge-ci-profile.readInput/sourceFrom/profileFromSources",
-  "profile_sha256": "a0dcc3e80e9c5b8f584d93bfdb0de625b6815816f0abdb94db8070f0955d941d",
+  "profile_sha256": "8db23c63ed471570eafb55d09c58371f29d8e49a69db5a7bc3d944a9023294d7",
   "limits": [
-    "Only passing unambiguous rows contribute weights; this does not accept the failed run.",
-    "Original complete source profiles retain physical-suite fallback for failed units.",
-    "The cancelled Windows shard has incomplete observations.",
-    "Shared-fixture regrouping uses a new virtual-unit revision, so old unit weights cannot silently describe the new roster.",
-    "Predictions are historical allocations, not measured speedups or end-to-end guarantees."
+    "Only passing unambiguous rows contribute weights; a failed run is not accepted.",
+    "Original complete profiles retain physical-suite fallback for missing or failed units.",
+    "Windows shard28 has incomplete observations after the fifteen-minute cancellation.",
+    "Changed batch restart membership uses new virtual IDs; original physical-suite costs remain conservative initial estimates.",
+    "Smoke initial estimates are declared in forge-ci-units, not manufactured profile observations.",
+    "Predictions exclude queue/setup and are not a hosted success guarantee."
   ]
 }

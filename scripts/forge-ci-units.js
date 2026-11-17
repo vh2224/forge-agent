@@ -5,13 +5,18 @@
 const path = require('node:path');
 const crypto = require('node:crypto');
 const DEFINITIONS = Object.freeze({
-  'forge-execution-batch-process.test.js': { parts: 16, kind: 'cases', revision: 'groups-v1', costDivisors: {5:4} },
+  'forge-execution-batch-process.test.js': { parts: 16, kind: 'cases', revision: 'restart-v2', costDivisors: {0:5,5:4} },
   'forge-execution-batch-isolation.test.js': { parts: 8, kind: 'cases' },
   'forge-native-repackage.test.js': { parts: 6, kind: 'cases' },
   'forge-native-execution.test.js': { args: [['--core-saved'], ['--extra'], ['--recovery']], divisor: 2 },
   'forge-native-recovery-delivery.test.js': { args: [['--cohort', '0'], ['--cohort', '1'], ['--cohort', '2']], divisor: 1 },
   'forge-agent-phase.test.js': { args: ['identity', 'recovery', 'native', 'sidecar'].map(name => [`--phase-cohort=${name}`]), divisor: 2 },
+  'forge-communication-surfaces.test.js': { parts: 4, kind: 'cases' },
+  'forge-linked-task-start.test.js': { args: [['--lts-cohort=core'], ['--lts-cohort=regressions']], costDivisors: {0:1,1:3} },
 });
+// Explicit initial estimates, not observations of this new wrapper. The prior
+// smoke steps in run44163993587 took56s on Linux and153s on macOS.
+const INITIAL_COSTS = Object.freeze({ 'forge-ci-smoke.test.js': Object.freeze({ linux: 60000, darwin: 180000, win32: 1 }) });
 function unitsForSuite(source) {
   const definition = DEFINITIONS[source];
   if (!definition) return [{ id: source, source, args: [], divisor: 1 }];
@@ -30,8 +35,10 @@ function expandSuites(suites) {
 function unitWeights(units, profile, platform) {
   const row = profile && profile.state === 'loaded' && profile.doc.platforms[platform];
   if (!row || row.status !== 'observed') return {};
-  return Object.fromEntries(units.filter(unit => unit.id !== unit.source && Object.hasOwn(row.weights_ms, unit.source))
+  const weights = Object.fromEntries(units.filter(unit => unit.id !== unit.source && Object.hasOwn(row.weights_ms, unit.source))
     .map(unit => [unit.id, Math.max(1, Math.ceil(row.weights_ms[unit.source] / unit.divisor))]));
+  for (const unit of units) if (INITIAL_COSTS[unit.source]?.[platform] && !Object.hasOwn(row.weights_ms, unit.id)) weights[unit.id] = INITIAL_COSTS[unit.source][platform];
+  return weights;
 }
 // Whole-source and CI-unit baselines have different universes. Keep each
 // explicit and human-versioned, and refuse drift between their source sets.
