@@ -79,12 +79,6 @@ jobs:
       - name: Resolve version
         id: version
         run: node scripts/forge-release-version.js --check --github-output "$GITHUB_OUTPUT" --notes "$RUNNER_TEMP/release-notes.md"
-      - name: Fresh token-free prepare (10 minute receipt TTL)
-        id: prepare
-        env:
-          GH_TOKEN: ''
-          GITHUB_TOKEN: ''
-        run: GITHUB_EVENT_PATH="$RUNNER_TEMP/release-event.json" node scripts/forge-release-publish.js prepare --sha "$GITHUB_SHA" --notes "$RUNNER_TEMP/release-notes.md" --github-output "$GITHUB_OUTPUT"
 
   publisher:
     name: Release publisher

@@ -1,0 +1,202 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+# Superseded pull request runs are cancelled; every other event gets a
+# unique per-run group, so master validation is never cancelled or queued.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  operational-offline:
+    name: Offline ${{ matrix.host }} / ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: both
+            os: ubuntu-latest
+            platform: linux
+          - host: both
+            os: macos-latest
+            platform: darwin
+          - host: both
+            os: windows-latest
+            platform: win32
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run deterministic offline operational gate
+        run: node scripts/forge-offline-ci.js --host ${{ matrix.host }} --platform ${{ matrix.platform }}
+
+  test:
+    name: Tests (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            shard-index: 0
+            shard-count: 1
+            label: ubuntu-latest
+          - os: macos-latest
+            platform: darwin
+            shard-index: 0
+            shard-count: 2
+            label: macos-latest, shard 1/2
+          - os: macos-latest
+            platform: darwin
+            shard-index: 1
+            shard-count: 2
+            label: macos-latest, shard 2/2
+          - os: windows-latest
+            platform: win32
+            shard-index: 0
+            shard-count: 4
+            label: windows-latest, shard 1/4
+          - os: windows-latest
+            platform: win32
+            shard-index: 1
+            shard-count: 4
+            label: windows-latest, shard 2/4
+          - os: windows-latest
+            platform: win32
+            shard-index: 2
+            shard-count: 4
+            label: windows-latest, shard 3/4
+          - os: windows-latest
+            platform: win32
+            shard-index: 3
+            shard-count: 4
+            label: windows-latest, shard 4/4
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          # Release-version validation needs tags and conventional commit history.
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Verify product version matches the prospective release
+        if: runner.os == 'Linux'
+        run: node scripts/forge-release-version.js --check
+
+      - name: Install Subversion (smoke fixture gate)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y subversion
+
+      - name: Install Subversion (macOS fixtures)
+        if: runner.os == 'macOS'
+        run: brew install subversion
+
+      - name: Install Subversion (Windows fixtures)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install sliksvn --version=1.14.5 --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $svnBin = Join-Path $env:ProgramFiles 'SlikSvn\bin'
+          $expectedVersion = '1.14.5'
+          $expectedVersionPattern = '\A' + [regex]::Escape($expectedVersion) + '(-SlikSvn)?\z'
+          foreach ($tool in 'svn.exe', 'svnadmin.exe') {
+            $toolPath = Join-Path $svnBin $tool
+            if (-not (Test-Path -LiteralPath $toolPath -PathType Leaf)) {
+              throw "Missing Subversion fixture tool: $tool in $svnBin"
+            }
+            $actualVersion = & $toolPath --version --quiet
+            if ($LASTEXITCODE -ne 0) { throw "Subversion fixture tool failed: $toolPath (exit $LASTEXITCODE)" }
+            if ($actualVersion -isnot [string] -or $actualVersion -cnotmatch $expectedVersionPattern) {
+              throw "Unexpected Subversion fixture version for ${tool}: expected $expectedVersion, got $actualVersion"
+            }
+          }
+          $env:PATH = "$svnBin;$env:PATH"
+          $svnBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Verify Subversion fixture tools
+        run: |
+          svn --version --quiet
+          svnadmin --version --quiet
+
+      - name: Run test suites
+        # The baseline is what makes "CI is red" carry information again. Every
+        # suite still runs and logs; only the exit code consults the known-failure
+        # set for this platform, and it compares BOTH ways — a new red fails, and
+        # a suite that healed while staying listed fails too, so the list cannot
+        # rot into a green-but-inert gate. Measured cause: 20 of the last 20 PRs
+        # merged with windows-latest red, which is why the wrapper-readers break
+        # (the #94 x #98 interaction) was indistinguishable from the chronic noise.
+        run: node scripts/run-tests.js --baseline scripts/fixtures/ci-baseline/known-failures.json --shard-profile scripts/fixtures/ci-shards/shard-profile.json --shard-index ${{ matrix.shard-index }} --shard-count ${{ matrix.shard-count }} --profile-out "${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}.json"
+
+      - name: Preserve bounded suite timing profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}
+          path: ${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Smoke suite (release gate)
+        if: runner.os != 'Windows' && matrix.shard-index == 0
+        run: node scripts/forge-smoke.js
+
+  required-offline-windows:
+    name: Offline ${{ matrix.host }} / ${{ matrix.platform }}
+    needs: operational-offline
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        host:
+          - claude
+          - codex
+        platform:
+          - linux
+          - darwin
+          - win32
+    steps:
+      - name: Preserve required-check contract
+        run: test "${{ needs.operational-offline.result }}" = success
+
+  required-tests-windows:
+    name: Tests (windows-latest)
+    needs: test
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Preserve required-check contract
+        run: test "${{ needs.test.result }}" = success
+
+  required-tests-macos:
+    name: Tests (macos-latest)
+    needs: test
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Preserve required-check contract
+        run: test "${{ needs.test.result }}" = success

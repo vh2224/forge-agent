@@ -266,7 +266,7 @@ function compareStrata(before, after) {
     before_count: before.suites.length, after_count: after.suites.length,
     suite_delta_seconds: (after.total_suite_ms - before.total_suite_ms) / 1000 };
 }
-function buildProfileReport({ sources = [], jobs = [], runs = [], api_sources = [], shard_profile = null, partitions = [] } = {}) {
+function buildProfileReport({ sources = [], jobs = [], runs = [], api_sources = [], shard_profile = null, partitions = [], partition_suites = false } = {}) {
   const strata = [];
   sources.forEach((source, source_index) => {
     const key = stratumKey(source);
@@ -285,15 +285,21 @@ function buildProfileReport({ sources = [], jobs = [], runs = [], api_sources = 
     stratum.unavailable.queue = 'not-observable-inside-runner';
   });
   const predictions = [];
-  const suites = partitions.length ? discoverTests([]) : [];
+  const sourceSuites = partitions.length ? discoverTests([]) : [];
+  const unitApi = partition_suites ? require('./forge-ci-units') : null;
+  const unitInventory = unitApi ? unitApi.expandSuites(sourceSuites) : null;
+  const suites = unitInventory ? unitInventory.map(unit => unit.id) : sourceSuites;
   for (const { platform, count } of partitions) {
     const positional = planShards({ suites, index: 0, count, platform });
-    const weighted = planShards({ suites, index: 0, count, platform, profile: shard_profile || { state: 'absent' } });
+    const estimates = unitApi ? unitApi.unitWeights(unitInventory, shard_profile, platform) : {};
+    const weighted = planShards({ suites, index: 0, count, platform, profile: shard_profile || { state: 'absent' }, estimatedWeights: estimates });
     const weights = shard_profile && shard_profile.doc.platforms[platform];
     const positionalMs = weights && weights.status === 'observed' ? positional.shards.map(shard => shard.reduce((total, suite) => total
-      + (Object.hasOwn(weights.weights_ms, suite) ? weights.weights_ms[suite] : weights.default_weight_ms), 0)) : null;
+      + (Object.hasOwn(weights.weights_ms, suite) ? weights.weights_ms[suite]
+        : Object.hasOwn(estimates, suite) ? estimates[suite] : weights.default_weight_ms), 0)) : null;
     predictions.push({ status: 'estimated', label: 'Estimativa sobre pesos históricos PASS; não é medição hospedada nem ganho comprovado.',
       platform, count, universe_size: suites.length, profile_sha256: weighted.profile_sha256,
+      ...(partition_suites ? { partition_suites: true, estimated_unit_weights: estimates } : {}),
       positional: { algorithm: positional.algorithm, suite_counts: positional.shards.map(row => row.length), predicted_ms: positionalMs },
       weighted: { algorithm: weighted.algorithm, fallback: weighted.fallback, suite_counts: weighted.shards.map(row => row.length),
         predicted_ms: weighted.predicted_ms, unprofiled: weighted.unprofiled, stale: weighted.stale } });
@@ -397,9 +403,14 @@ function writeOutput(file, text, inputs) {
   } finally { if (created) fs.unlinkSync(temporary); }
 }
 function parseArgs(args) {
+  args = [...args];
+  const partitionFlags = args.filter(arg => arg === '--partition-suites').length;
+  if (partitionFlags > 1 || (partitionFlags && args[0] !== 'report')) fail('ci-profile-usage');
+  if (partitionFlags) args.splice(args.indexOf('--partition-suites'), 1);
   const command = args[0];
   if (!['build-shard-profile', 'report'].includes(command)) fail('ci-profile-usage');
   const options = { command, input: [], 'local-log': [], jobs: [], runs: [], partition: [] };
+  if (partitionFlags) options.partitionSuites = true;
   const repeated = ['input', 'local-log', 'jobs', 'runs', 'partition'];
   const allowed = command === 'build-shard-profile' ? ['input', 'out'] : [...repeated, 'shard-profile', 'json', 'markdown'];
   for (let index = 1; index < args.length; index += 2) {
@@ -451,7 +462,7 @@ function main(args = process.argv.slice(2)) {
       });
       const apiSources = reads.filter(row => ['jobs', 'runs'].includes(row.type)).map(row => ({
         kind: row.type, name: row.read.name, sha256: row.read.sha256, bytes: row.read.bytes }));
-      const report = buildProfileReport({ sources, jobs, runs, api_sources: apiSources, shard_profile: shardProfile, partitions });
+      const report = buildProfileReport({ sources, jobs, runs, api_sources: apiSources, shard_profile: shardProfile, partitions, partition_suites: options.partitionSuites === true });
       if (options.json) writeOutput(options.json, `${JSON.stringify(report, null, 2)}\n`, inputs);
       if (options.markdown) writeOutput(options.markdown, renderProfileReport(report), inputs);
       process.stdout.write(`Perfil de CI: ${sources.length} fontes, ${report.strata.length} estratos, ${jobs.length} jobs, ${runs.length} runs, ${report.predictions.length} previsões estimadas; anomalias: ${report.anomalies.map(row => `${anomalyLabel(row)}:${row.reason}`).join(', ') || 'nenhuma'}.\n`);

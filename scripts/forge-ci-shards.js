@@ -187,7 +187,8 @@ function verifyPartition(universe, shards) {
   return { ok: !missing.length && !duplicated.length && !unknown.length, missing, duplicated, unknown };
 }
 
-function planShards({ suites, index, count, platform, profile = null }) {
+function planShards({ suites, index, count, platform, profile = null, estimatedWeights = {} }) {
+  if (!plain(estimatedWeights) || Object.entries(estimatedWeights).some(([id, ms]) => !suites.includes(id) || !integer(ms, 1, LIMITS.maxWeightMs))) throw namedError('shard-estimated-weight-invalid');
   if (!Array.isArray(suites) || suites.length > LIMITS.maxSuites || !list(suites) || suites.some(id => typeof id !== 'string')
     || new Set(suites).size !== suites.length || !integer(count, 1, LIMITS.maxShards)
     || !integer(index, 0, count - 1)) throw namedError('shard-input-invalid');
@@ -215,7 +216,8 @@ function planShards({ suites, index, count, platform, profile = null }) {
   let stale = [];
   if (algorithm === ALGORITHMS.weighted) {
     const universe = new Set(suites);
-    const weight = id => Object.hasOwn(row.weights_ms, id) ? row.weights_ms[id] : row.default_weight_ms;
+    const weight = id => Object.hasOwn(row.weights_ms, id) ? row.weights_ms[id]
+      : Object.hasOwn(estimatedWeights, id) ? estimatedWeights[id] : row.default_weight_ms;
     unprofiled = suites.filter(id => !Object.hasOwn(row.weights_ms, id)).sort(compareCodeUnits);
     stale = Object.keys(row.weights_ms).filter(id => !universe.has(id)).sort(compareCodeUnits);
     const assignment = new Map();

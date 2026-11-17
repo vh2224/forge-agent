@@ -1,0 +1,214 @@
+{
+  "base": "63fc4ebcbd0c33e0bc9f91873bfd4d5ab8b56dc8",
+  "ci_before": {
+    "sha256": "aaebc13d224e26dc85fbf7c077a878b550fc041978dc30d9e6995da15d650fc8",
+    "oid": "ccb36bc99476b31c83c790321b9a816d4a4402ea"
+  },
+  "ci_after": {
+    "sha256": "457ee9412fb76eb98ee5116051014a4be6936789ce5a95a95fca92304ab51793",
+    "oid": "a55e549385f40c5edcbb1436ff4e0d6acd661175"
+  },
+  "release_before": {
+    "sha256": "635887910ef3fdb5b5c0b7731ee7e6dee86c39e6e675b6d701cacf8e4a321747",
+    "oid": "a0abdda28d8c37df0907f216ff445528ea3c7fd3"
+  },
+  "release_after": {
+    "sha256": "cb08cc3e2b98d3aa7d169cfe2bffec31d904a0bf3406d4e07713c23e4801008f",
+    "oid": "9ba8dbfcce940f852143171ff6059eb730f0c547"
+  },
+  "matrix_before": [
+    {
+      "os": "ubuntu-latest",
+      "platform": "linux",
+      "shard-index": 0,
+      "shard-count": 1,
+      "label": "ubuntu-latest"
+    },
+    {
+      "os": "macos-latest",
+      "platform": "darwin",
+      "shard-index": 0,
+      "shard-count": 2,
+      "label": "macos-latest, shard 1/2"
+    },
+    {
+      "os": "macos-latest",
+      "platform": "darwin",
+      "shard-index": 1,
+      "shard-count": 2,
+      "label": "macos-latest, shard 2/2"
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 0,
+      "shard-count": 4,
+      "label": "windows-latest, shard 1/4"
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 1,
+      "shard-count": 4,
+      "label": "windows-latest, shard 2/4"
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 2,
+      "shard-count": 4,
+      "label": "windows-latest, shard 3/4"
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 3,
+      "shard-count": 4,
+      "label": "windows-latest, shard 4/4"
+    }
+  ],
+  "matrix_after": [
+    {
+      "os": "ubuntu-latest",
+      "platform": "linux",
+      "shard-index": 0,
+      "shard-count": 3,
+      "label": "ubuntu-latest, shard 1/3"
+    },
+    {
+      "os": "ubuntu-latest",
+      "platform": "linux",
+      "shard-index": 1,
+      "shard-count": 3,
+      "label": "ubuntu-latest, shard 2/3"
+    },
+    {
+      "os": "ubuntu-latest",
+      "platform": "linux",
+      "shard-index": 2,
+      "shard-count": 3,
+      "label": "ubuntu-latest, shard 3/3"
+    },
+    {
+      "os": "macos-latest",
+      "platform": "darwin",
+      "shard-index": 0,
+      "shard-count": 5,
+      "label": "macos-latest, shard 1/5"
+    },
+    {
+      "os": "macos-latest",
+      "platform": "darwin",
+      "shard-index": 1,
+      "shard-count": 5,
+      "label": "macos-latest, shard 2/5"
+    },
+    {
+      "os": "macos-latest",
+      "platform": "darwin",
+      "shard-index": 2,
+      "shard-count": 5,
+      "label": "macos-latest, shard 3/5"
+    },
+    {
+      "os": "macos-latest",
+      "platform": "darwin",
+      "shard-index": 3,
+      "shard-count": 5,
+      "label": "macos-latest, shard 4/5"
+    },
+    {
+      "os": "macos-latest",
+      "platform": "darwin",
+      "shard-index": 4,
+      "shard-count": 5,
+      "label": "macos-latest, shard 5/5"
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 0,
+      "shard-count": 12,
+      "label": "windows-latest, shard 1/12"
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 1,
+      "shard-count": 12,
+      "label": "windows-latest, shard 2/12"
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 2,
+      "shard-count": 12,
+      "label": "windows-latest, shard 3/12"
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 3,
+      "shard-count": 12,
+      "label": "windows-latest, shard 4/12"
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 4,
+      "shard-count": 12,
+      "label": "windows-latest, shard 5/12"
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 5,
+      "shard-count": 12,
+      "label": "windows-latest, shard 6/12"
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 6,
+      "shard-count": 12,
+      "label": "windows-latest, shard 7/12"
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 7,
+      "shard-count": 12,
+      "label": "windows-latest, shard 8/12"
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 8,
+      "shard-count": 12,
+      "label": "windows-latest, shard 9/12"
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 9,
+      "shard-count": 12,
+      "label": "windows-latest, shard 10/12"
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 10,
+      "shard-count": 12,
+      "label": "windows-latest, shard 11/12"
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 11,
+      "shard-count": 12,
+      "label": "windows-latest, shard 12/12"
+    }
+  ],
+  "oldCommand": "node scripts/run-tests.js --baseline scripts/fixtures/ci-baseline/known-failures.json --shard-profile scripts/fixtures/ci-shards/shard-profile.json --shard-index ${{ matrix.shard-index }} --shard-count ${{ matrix.shard-count }} --profile-out \"${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}.json\"",
+  "newCommand": "node scripts/forge-ci-parallel.js --shard-index ${{ matrix.shard-index }} --shard-count ${{ matrix.shard-count }} --jobs 2 --profile-dir \"${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}\""
+}

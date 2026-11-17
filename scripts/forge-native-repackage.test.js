@@ -207,6 +207,16 @@ async function scenario(linked = false, fileBacked = false, renewLease = false) 
     console.log('PASS '+(renewLease?'owned-lease-renewal ':'')+(fileBacked?'already-file ':'')+(linked?'linked ':'')+'canonical uninvoked repackage: live census, immutable history, pre-consumption restart, exact payload, short binding and returned/publication replay');
   } finally { f.cleanup(); }
 }
-async function main(){await scenario();await scenario(true);await scenario(false,true);await scenario(true,true);await scenario(false,true,true);await scenario(true,true,true);}
+async function main(){
+  const cases=[
+    {name:'standalone-inline',fn:()=>scenario()},
+    {name:'linked-inline',fn:()=>scenario(true)},
+    {name:'standalone-file',fn:()=>scenario(false,true)},
+    {name:'linked-file',fn:()=>scenario(true,true)},
+    {name:'standalone-renewed-lease',fn:()=>scenario(false,true,true)},
+    {name:'linked-renewed-lease',fn:()=>scenario(true,true,true)},
+  ];
+  for(const entry of require('./forge-ci-units').selectCases(cases))await entry.fn();
+}
 if (require.main === module) (process.argv.includes('--linked')?scenario(true):main()).catch(error => { console.error(error); process.exitCode = 1; });
 module.exports = { main, scenario };

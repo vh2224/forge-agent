@@ -9,3 +9,7 @@ Measured Windows suite sums by existing shard:990.27,1205.44,1175.09,1807.62 sec
 Replaying existing and refreshed assignments against the SAME measured376-suite Windows cost table predicts old shard sums(ms) [990110,1205270,1807430,1174950] and refreshed [1294440,1294440,1294440,1294440]. These are historical-allocation predictions, not a hosted speedup. They do not include the new agent-phase cohort gain, queue, job setup or runner variance. Actual before/after CI results must be recorded separately.
 
 Every test job now emits a bounded structured profile under runner.temp and preserves it for14days. No raw child output or environment dump is uploaded. Required checks, shard counts, failure baseline, smoke and exact-candidate push release policy remain unchanged. Verified PR reuse is a fail-closed design in docs/ci-validation-reuse.md; it is not enabled by these timing observations.
+
+## Refresh2026-11-17
+
+Seven complete structured artifacts from PR415/run44132612926, actual tested merge0f84655ff6e1f59a3b7608fcce46285e4a46a853, provide470passing suite observations per platform. Canonical profile collector generated this refresh. CI virtual unit estimates divide historical source costs by declared partition factors; these are allocation estimates, not observed per-case durations. Virtual units remain explicitly unprofiled until hosted measurements exist. Previous observations and source pins remain historical evidence. Full coverage, baseline, smoke and exact-push release authority stay enforcing.

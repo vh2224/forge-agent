@@ -258,7 +258,7 @@ const CASES = [];
 const UNPROVEN_FIXTURE_CLEANUP = new Set();
 function test(name, fn) { CASES.push({ name, fn }); }
 async function runCases() {
-  for (const { name, fn } of CASES) {
+  for (const { name, fn } of require('./forge-ci-units').selectCases(CASES)) {
     const started = Date.now();
     try {
       await fn();

@@ -212,8 +212,10 @@ async function execute(f, key, mutate = () => {}) {
       checks.assertJobMapping(source, checks.POLICY.workflows.release);
       assert(steps.findIndex(step => step.id === 'origin') < steps.findIndex(step => step.name === 'Exact candidate checkout'));
       const prepare = steps.find(step => step.id === 'prepare');
-      assert.strictEqual(prepare.env.GH_TOKEN, "''"); assert.strictEqual(prepare.env.GITHUB_TOKEN, "''");
-      assert(prepare.run.startsWith('GITHUB_EVENT_PATH="$RUNNER_TEMP/release-event.json" node '));
+      if (key === 'publisher') {
+        assert.strictEqual(prepare.env.GH_TOKEN, "''"); assert.strictEqual(prepare.env.GITHUB_TOKEN, "''");
+        assert(prepare.run.startsWith('GITHUB_EVENT_PATH="$RUNNER_TEMP/release-event.json" node '));
+      } else assert.strictEqual(prepare, undefined, 'read-only coordinator must not build a discarded receipt');
       assert.strictEqual(steps.filter(step => step.env && step.env.GH_TOKEN === '${{ github.token }}').length, 1);
       assert(steps.find(step => step.id === 'version').run.includes('--check --github-output'));
       assert(!source.includes('forge-release-gate.js --report'));
@@ -261,23 +263,30 @@ async function execute(f, key, mutate = () => {}) {
       const text = notes.toString('utf8');
       assert(text.includes(`### Breaking Changes\n\n- feat: fixture (${breakingSha.slice(0, 7)})`));
       assert(text.includes('### Bug Fixes\n\n- fix: regression'));
-      const receipt = JSON.parse(fs.readFileSync(f.prepared.state));
-      assert.strictEqual(crypto.createHash('sha256').update(notes).digest('hex'), receipt.notes_sha256);
-      assert.deepStrictEqual(fs.readFileSync(path.join(path.dirname(f.prepared.state), 'notes.md')), notes);
+      if (key === 'publisher') {
+        const receipt = JSON.parse(fs.readFileSync(f.prepared.state));
+        assert.strictEqual(crypto.createHash('sha256').update(notes).digest('hex'), receipt.notes_sha256);
+        assert.deepStrictEqual(fs.readFileSync(path.join(path.dirname(f.prepared.state), 'notes.md')), notes);
+      } else assert.strictEqual(f.prepared, undefined);
     });
   });
   await test('workflow-coordinator-readonly-get-wait-and-unusable-cross-job-receipt', () => fixture(async f => {
-    await execute(f, 'coordinator'); assert.strictEqual(f.state.generates, 1); assert.strictEqual(f.state.mutations.length, 0);
+    await execute(f, 'coordinator'); assert.strictEqual(f.state.generates, 0); assert.strictEqual(f.state.mutations.length, 0);
+    assert.strictEqual(f.prepared, undefined, 'no cross-job receipt is produced or transferred');
     assert(f.state.calls.length > 0 && f.state.calls.every(call => call.method === 'GET'));
     f.env.GITHUB_EVENT_PATH = path.join(f.temp, 'release-event.json');
-    assert.strictEqual((await f.apply(f.prepared)).status, 'blocked'); assert.strictEqual(f.state.mutations.length, 0);
+    // Preserve the old negative control explicitly: even a separately produced
+    // coordinator receipt is not authority for a publisher job.
+    f.env.GITHUB_JOB = 'coordinator'; const foreign = await f.prepare();
+    f.env.GITHUB_JOB = 'publisher';
+    assert.strictEqual((await f.apply(foreign)).status, 'blocked'); assert.strictEqual(f.state.mutations.length, 0);
   }));
-  await test('workflow-app-all-master-pushes-pr-swift-pty-and-18-ci-cells-preserved', () => {
+  await test('workflow-app-all-master-pushes-pr-swift-pty-and-complete-ci-cells-preserved', () => {
     assert(app.includes('  push:\n    branches: [master]\n\npermissions:'));
     assert(app.includes("  pull_request:\n    paths:\n      - 'app/**'\n      - '.github/workflows/app.yml'"));
     for (const text of ['  app:', 'name: Swift app and PTY regressions', 'runs-on: macos-26', 'timeout-minutes: 20',
       'actions/cache@v4', 'app/.build', 'swift build --package-path app --product Forge', 'swift run --package-path app ForgeKitTests']) assert(app.includes(text));
-    assert.strictEqual(checks.expandJobs(checks.POLICY.workflows.ci).length, 18);
+    assert.strictEqual(checks.expandJobs(checks.POLICY.workflows.ci).length, 32);
     const ci = fs.readFileSync(path.join(ROOT, checks.POLICY.workflows.ci.path));
     assert.strictEqual(crypto.createHash('sha256').update(ci).digest('hex'), checks.POLICY.workflows.ci.blob_sha256);
     assert(ci.toString().includes('baseline')); assert.strictEqual(checks.POLICY.local.suites.length, 11);
