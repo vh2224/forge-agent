@@ -68,7 +68,7 @@ git(root,['config','http.https://example.invalid/.extraheader','fixture-secret-h
 const argv=['--shard-index','0','--shard-count','1','--jobs','2','--profile-dir',path.join(temp,'profiles')];
 assert.deepEqual(parseArgs(argv),{index:0,count:1,jobs:2,profileDir:path.join(temp,'profiles')});
 assert.throws(()=>logHeader('injected\nComplete job name: foreign'),/job-name/);
-for(const bad of [[],['--jobs','3'],[...argv,'--jobs','1'],argv.map(v=>v==='--jobs'?'--unknown':v),argv.map(v=>v==='1'?'0':v)])assert.throws(()=>parseArgs(bad));
+for(const bad of [[],['--jobs','4'],[...argv,'--jobs','1'],argv.map(v=>v==='--jobs'?'--unknown':v),argv.map(v=>v==='1'?'0':v)])assert.throws(()=>parseArgs(bad));
 const chunks=[];const sink=new Writable({write(chunk,_,done){chunks.push(chunk.toString());done();}});
 const streams={stdout:sink,stderr:sink};
 (async()=>{
@@ -91,6 +91,14 @@ const streams={stdout:sink,stderr:sink};
       const parsed=require('./forge-ci-profile').parseRunTestsLog(fs.readFileSync(path.join(temp,'profiles',`worker-${index}.log`),'utf8'));
       assert.deepEqual(parsed.anomalies,[]);assert.equal(parsed.platform,'win32');assert.equal(parsed.suites_observed,1);
     }
+    for(const file of fs.readdirSync(channel))fs.rmSync(path.join(channel,file));
+    const tripleArgs=[...argv];tripleArgs[5]='3';
+    const tripleOptions={...parseArgs(tripleArgs),profileDir:path.join(temp,'triple-profiles')};
+    assert.equal(await run(tripleOptions,{source:root,temp,streams}),0);
+    const triple=[0,1,2].map(i=>JSON.parse(fs.readFileSync(path.join(tripleOptions.profileDir,`worker-${i}.json`))));
+    assert.deepEqual(triple.map(p=>[p.index,p.count]),[[0,3],[1,3],[2,3]]);
+    assert.equal(new Set(triple.map(p=>p.cwd)).size,3);
+    assert(triple.every(p=>!fs.existsSync(p.cwd)),'all three successful workers are joined before cleanup');
     for(const file of fs.readdirSync(channel))fs.rmSync(path.join(channel,file));
     fs.writeFileSync(path.join(channel,'fail'),'fail first worker');
     const failedOptions={...parseArgs(argv),profileDir:path.join(temp,'failed-profiles')};

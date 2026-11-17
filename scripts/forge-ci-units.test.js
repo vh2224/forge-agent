@@ -63,7 +63,7 @@ try {
   const scripts=path.join(temp,'scripts');fs.mkdirSync(scripts);
   for(const file of ['run-tests.js','forge-ci-units.js','forge-ci-shards.js','forge-suite-profile.js'])fs.copyFileSync(path.join(__dirname,file),path.join(scripts,file));
   const markers=path.join(temp,'markers');fs.mkdirSync(markers);
-  const source=`const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');const arg=process.argv.find(x=>x.startsWith('--ci-cases='));assert(arg);const index=arg.match(/^--ci-cases=(\\d+)\\/6$/)[1];fs.writeFileSync(path.join(${JSON.stringify(markers)},index),'ran');if(fs.existsSync(path.join(${JSON.stringify(temp)},'fail'))&&index==='0')process.exitCode=1;`;
+  const source=`const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');const arg=process.argv.find(x=>x.startsWith('--ci-cases='));assert(arg);const index=arg.match(/^--ci-cases=(\\d+)\\/6$/)[1];const selected=require('./forge-ci-units').selectCases(Array.from({length:6},(_,i)=>({name:'fixture-'+i})));assert.equal(selected[0].name,'fixture-'+index);fs.writeFileSync(path.join(${JSON.stringify(markers)},index),'ran');if(fs.existsSync(path.join(${JSON.stringify(temp)},'fail'))&&index==='0')process.exitCode=1;`;
   fs.writeFileSync(path.join(scripts,'forge-native-repackage.test.js'),source);
   fs.writeFileSync(path.join(scripts,'ordinary.test.js'),`require('node:fs').writeFileSync(${JSON.stringify(path.join(markers,'ordinary'))},'ran');`);
   const baseline=path.join(temp,'baseline.json');fs.writeFileSync(baseline,JSON.stringify({win32:[],linux:[],darwin:[]}));
@@ -72,6 +72,7 @@ try {
     const profileOut=path.join(temp,`profile-${index}.json`);
     const result=spawnSync(process.execPath,[path.join(scripts,'run-tests.js'),'--partition-suites','--shard-index',String(index),'--shard-count','3','--baseline',baseline,'--profile-out',profileOut],{cwd:temp,encoding:'utf8',windowsHide:true});
     assert.equal(result.status,0,result.stdout+'\n'+result.stderr);
+    assert.equal(result.stdout.split('CI case partition: ').length-1,2,'quiet successful units retain exactly one actual roster each');
     const parsed=JSON.parse(fs.readFileSync(profileOut));assert.equal(parsed.totals.failed,0);assert.equal(parsed.selection.discovered,7);profiles.push(parsed);
   }
   assert.deepEqual(fs.readdirSync(markers).sort(),['0','1','2','3','4','5','ordinary']);

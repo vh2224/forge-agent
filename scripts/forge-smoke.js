@@ -10698,7 +10698,10 @@ function smokeSvnFixture() {
   // Match executable provisioning steps, scoped independently to each runner.
   const steps = ci.match(/^      - name:[^\n]*(?:\n(?!      - name:)[^\n]*)*/gm) || [];
   const suitesIndex = ci.indexOf('      - name: Run test suites');
-  const smokeIndex = ci.indexOf('      - name: Smoke suite');
+  const serialSmokeIndex = ci.indexOf('      - name: Smoke suite');
+  const allocatedSmoke = require('./run-tests').discoverTests([]).includes('forge-ci-smoke.test.js');
+  const smokeIndex = serialSmokeIndex >= 0 ? serialSmokeIndex : allocatedSmoke
+    ? ci.indexOf('node scripts/forge-ci-parallel.js', suitesIndex) : -1;
   for (const { platform, command } of [
     { platform: 'Linux', command: /run:\s*sudo apt-get update && sudo apt-get install -y subversion/ },
     { platform: 'macOS', command: /run:\s*brew install subversion/ },

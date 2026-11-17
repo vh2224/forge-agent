@@ -15,7 +15,7 @@ jobs:
   coordinator:
     name: Release coordinator
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 5
     permissions:
       contents: read
       actions: read
@@ -72,10 +72,6 @@ jobs:
           const head = execFileSync('git', ['rev-parse', '--verify', 'HEAD'], { encoding: 'utf8', timeout: 30000 }).trim();
           if (head !== process.env.GITHUB_SHA) throw new Error('candidate-head-mismatch');
           NODE
-      - name: Wait for complete CI and app (60 minute deadline)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: GITHUB_EVENT_PATH="$RUNNER_TEMP/release-event.json" node scripts/forge-release-github.js wait --sha "$GITHUB_SHA"
       - name: Resolve version
         id: version
         run: node scripts/forge-release-version.js --check --github-output "$GITHUB_OUTPUT" --notes "$RUNNER_TEMP/release-notes.md"
@@ -84,7 +80,7 @@ jobs:
     name: Release publisher
     needs: coordinator
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     permissions:
       contents: write
       actions: read
@@ -150,9 +146,21 @@ jobs:
           GH_TOKEN: ''
           GITHUB_TOKEN: ''
         run: GITHUB_EVENT_PATH="$RUNNER_TEMP/release-event.json" node scripts/forge-release-publish.js prepare --sha "$GITHUB_SHA" --notes "$RUNNER_TEMP/release-notes.md" --github-output "$GITHUB_OUTPUT"
+      - name: Wait for complete CI and app (publisher deadline)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: GITHUB_EVENT_PATH="$RUNNER_TEMP/release-event.json" node scripts/forge-release-github.js wait --sha "$GITHUB_SHA"
+      - name: Revalidate or renew current publisher preparation
+        id: ready
+        env:
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+          PREPARED_STATE: ${{ steps.prepare.outputs.state }}
+          PREPARED_NONCE: ${{ steps.prepare.outputs.nonce }}
+        run: GITHUB_EVENT_PATH="$RUNNER_TEMP/release-event.json" node scripts/forge-release-publish.js ensure-fresh --state "$PREPARED_STATE" --nonce "$PREPARED_NONCE" --sha "$GITHUB_SHA" --notes "$RUNNER_TEMP/release-notes.md" --github-output "$GITHUB_OUTPUT"
       - name: Apply current publisher receipt
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_STATE: ${{ steps.prepare.outputs.state }}
-          RELEASE_NONCE: ${{ steps.prepare.outputs.nonce }}
+          RELEASE_STATE: ${{ steps.ready.outputs.state }}
+          RELEASE_NONCE: ${{ steps.ready.outputs.nonce }}
         run: GITHUB_EVENT_PATH="$RUNNER_TEMP/release-event.json" node scripts/forge-release-publish.js apply --state "$RELEASE_STATE" --nonce "$RELEASE_NONCE"

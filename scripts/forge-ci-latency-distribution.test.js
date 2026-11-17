@@ -9,6 +9,10 @@ assert.throws(()=>entry.validate({artifacts,readRaw:file=>{const bytes=fs.readFi
 const added='scripts/forge-ci-smoke.test.js';
 assert.equal(entry.ciLatencyLayer.files[added].before,null);
 assert.throws(()=>entry.validate({artifacts,readRaw:file=>{const bytes=fs.readFileSync(path.join(root,file));return file===added?Buffer.concat([bytes,Buffer.from('\n// new-file drift')]):bytes;}}),'the final current-byte census still checks files absent from historical validators');
+for(const file of ['scripts/fixtures/ci-latency/immutable-pin-cache.cjs','scripts/forge-ci-pin-cache.test.js']){
+ assert.equal(entry.ciLatencyLayer.files[file].before,null);
+ assert.throws(()=>entry.validate({artifacts,readRaw:relative=>{const bytes=fs.readFileSync(path.join(root,relative));return relative===file?Buffer.concat([bytes,Buffer.from('\n// cache source drift')]):bytes;}}));
+}
 for(const field of ['before','after','attributed_before','attributed_after']){
  const value=structuredClone(entry.ciLatencyLayer);value.files[source][field]='0'.repeat(64);
  assert.throws(()=>entry.validate({artifacts,ciLatencyLayerValue:value}));

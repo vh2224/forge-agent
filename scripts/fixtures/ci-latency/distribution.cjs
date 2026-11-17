@@ -2,7 +2,8 @@
 // Measured CI successor; historical validators and their data remain immutable.
 const fs=require('fs'),path=require('path'),crypto=require('crypto'),zlib=require('zlib'),assert=require('node:assert/strict');
 const previous=require('../issue-416/distribution.cjs'),data=require('./distribution-delta.json');
-const ROOT=path.resolve(__dirname,'../../..'),PIN='3b5da8aa51ca4177095fa5f59f0fe59b7dd57e6c4d394927f66e1e19ac5f74ee';
+require('./immutable-pin-cache.cjs').installImmutablePinCache(require.cache[require.resolve('../issue-416/distribution.cjs')]);
+const ROOT=path.resolve(__dirname,'../../..'),PIN='bf09a2d7f8a7188cae06baaa7919611285df353322515abea0a0a9f78b883edf';
 const hash=x=>crypto.createHash('sha256').update(x).digest('hex');
 const read=file=>fs.readFileSync(path.join(ROOT,file));
 function check(value=data){assert.equal(hash(JSON.stringify(value)),PIN,'CI independent measured source delta');assert.equal(hash(JSON.stringify(previous.issue416Layer)),value.predecessor_layer_sha256,'CI immutable predecessor');return value;}
@@ -17,4 +18,7 @@ function validate(options){
  return valid;
 }
 function after(kind,file,prior,attr=false){const value=check(),old=previous.after(kind,file,prior,attr),row=kind==='files'?value.files[file]:null;if(!row||row.before===null)return old;assert.equal(old,row[attr?'attributed_before':'before'],'CI exact predecessor '+file);return row[attr?'attributed_after':'after'];}
-module.exports={...previous,validate,after,ciLatencyLayer:data};
+function projectSmoke(text){const row=check().files['scripts/forge-smoke.js'];return row&&row.before!==null&&hash(text)===row.after?before(row).toString('utf8'):text;}
+function previousSmoke(text){return previous.previousSmoke(projectSmoke(text));}
+function predecessorSmoke(text){return previous.predecessorSmoke(projectSmoke(text));}
+module.exports={...previous,validate,after,previousSmoke,predecessorSmoke,ciLatencyLayer:data};

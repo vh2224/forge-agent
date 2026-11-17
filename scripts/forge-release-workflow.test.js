@@ -200,14 +200,20 @@ async function execute(f, key, mutate = () => {}) {
     assert(source.startsWith('name: Release\n\non:\n  push:\n    branches: [master]\n\npermissions: {}\n'));
     assert(!/tags:|workflow_run:|pull_request|download-artifact|continue-on-error|cancel-in-progress: true/.test(source));
     assert(source.includes('group: release\n  cancel-in-progress: false'));
-    assert.strictEqual((source.match(/timeout-minutes: 45/g) || []).length, 1);
-    assert(source.includes('name: Release coordinator\n    runs-on: ubuntu-latest\n    timeout-minutes: 75'));
-    assert(source.includes('name: Wait for complete CI and app (60 minute deadline)'));
+    assert.strictEqual((source.match(/timeout-minutes: 75/g) || []).length, 1);
+    assert(75*60000 >= github.DEFAULT_LIMITS.deadlineMs + publisher.TTL_MS,'publisher retains the full collector wait plus preparation and renewal margin');
+    assert(source.includes('name: Release coordinator\n    runs-on: ubuntu-latest\n    timeout-minutes: 5'));
+    assert(source.includes('name: Wait for complete CI and app (publisher deadline)'));
     assert(source.includes('publisher:\n    name: Release publisher\n    needs: coordinator'));
     assert.strictEqual(checks.POLICY.workflows.release.jobs[0].permissions.contents, 'read');
     assert.strictEqual(checks.POLICY.workflows.release.jobs[1].permissions.contents, 'write');
-    assert.strictEqual(jobs.coordinator.filter(step => step.run && step.run.includes('github.js wait')).length, 1);
-    assert(!jobs.publisher.some(step => step.run && step.run.includes('github.js wait')));
+    assert(!jobs.coordinator.some(step => step.run && step.run.includes('github.js wait')));
+    assert.strictEqual(jobs.publisher.filter(step => step.run && step.run.includes('github.js wait')).length, 1);
+    const prepareIndex=jobs.publisher.findIndex(step=>step.id==='prepare'),waitIndex=jobs.publisher.findIndex(step=>step.run&&step.run.includes('github.js wait'));
+    const readyIndex=jobs.publisher.findIndex(step=>step.id==='ready'),applyIndex=jobs.publisher.findIndex(step=>step.run&&step.run.includes(' apply '));
+    assert(prepareIndex<waitIndex&&waitIndex<readyIndex&&readyIndex<applyIndex,'preparation overlaps CI; publication remains after complete checks and freshness validation');
+    assert(jobs.publisher[readyIndex].run.includes('ensure-fresh --state "$PREPARED_STATE" --nonce "$PREPARED_NONCE"'));
+    assert.strictEqual(jobs.publisher[readyIndex].env.GH_TOKEN,"''");assert.strictEqual(jobs.publisher[readyIndex].env.GITHUB_TOKEN,"''");
     for (const [key, steps] of Object.entries(jobs)) {
       checks.assertJobMapping(source, checks.POLICY.workflows.release);
       assert(steps.findIndex(step => step.id === 'origin') < steps.findIndex(step => step.name === 'Exact candidate checkout'));
@@ -216,7 +222,7 @@ async function execute(f, key, mutate = () => {}) {
         assert.strictEqual(prepare.env.GH_TOKEN, "''"); assert.strictEqual(prepare.env.GITHUB_TOKEN, "''");
         assert(prepare.run.startsWith('GITHUB_EVENT_PATH="$RUNNER_TEMP/release-event.json" node '));
       } else assert.strictEqual(prepare, undefined, 'read-only coordinator must not build a discarded receipt');
-      assert.strictEqual(steps.filter(step => step.env && step.env.GH_TOKEN === '${{ github.token }}').length, 1);
+      assert.strictEqual(steps.filter(step => step.env && step.env.GH_TOKEN === '${{ github.token }}').length, key==='publisher'?2:0);
       assert(steps.find(step => step.id === 'version').run.includes('--check --github-output'));
       assert(!source.includes('forge-release-gate.js --report'));
       assert(key === 'coordinator' || steps.at(-1).run.includes('apply --state "$RELEASE_STATE" --nonce "$RELEASE_NONCE"'));
@@ -270,10 +276,10 @@ async function execute(f, key, mutate = () => {}) {
       } else assert.strictEqual(f.prepared, undefined);
     });
   });
-  await test('workflow-coordinator-readonly-get-wait-and-unusable-cross-job-receipt', () => fixture(async f => {
+  await test('workflow-coordinator-readonly-no-network-and-unusable-cross-job-receipt', () => fixture(async f => {
     await execute(f, 'coordinator'); assert.strictEqual(f.state.generates, 0); assert.strictEqual(f.state.mutations.length, 0);
     assert.strictEqual(f.prepared, undefined, 'no cross-job receipt is produced or transferred');
-    assert(f.state.calls.length > 0 && f.state.calls.every(call => call.method === 'GET'));
+    assert.strictEqual(f.state.calls.length,0,'coordinator neither waits nor mutates; publisher performs authenticated checks');
     f.env.GITHUB_EVENT_PATH = path.join(f.temp, 'release-event.json');
     // Preserve the old negative control explicitly: even a separately produced
     // coordinator receipt is not authority for a publisher job.
@@ -286,7 +292,7 @@ async function execute(f, key, mutate = () => {}) {
     assert(app.includes("  pull_request:\n    paths:\n      - 'app/**'\n      - '.github/workflows/app.yml'"));
     for (const text of ['  app:', 'name: Swift app and PTY regressions', 'runs-on: macos-26', 'timeout-minutes: 20',
       'actions/cache@v4', 'app/.build', 'swift build --package-path app --product Forge', 'swift run --package-path app ForgeKitTests']) assert(app.includes(text));
-    assert.strictEqual(checks.expandJobs(checks.POLICY.workflows.ci).length, 36);
+    assert.strictEqual(checks.expandJobs(checks.POLICY.workflows.ci).length, 34);
     const ci = fs.readFileSync(path.join(ROOT, checks.POLICY.workflows.ci.path));
     assert.strictEqual(crypto.createHash('sha256').update(ci).digest('hex'), checks.POLICY.workflows.ci.blob_sha256);
     assert(ci.toString().includes('baseline')); assert.strictEqual(checks.POLICY.local.suites.length, 11);

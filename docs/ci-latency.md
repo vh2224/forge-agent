@@ -33,14 +33,14 @@ It keeps the original platform applicability and fails on nonzero exit, signal
 or spawn failure. Its explicit initial cost estimates come from the previous
 hosted smoke steps; future measured suite timings override those estimates.
 
-Each hosted test job starts two canonical runners in separate Git clones,
+Linux/Windows jobs start two canonical runners; macOS jobs start three, each in separate Git clones,
 with independent objects, refs, indexes, working directories and temp roots.
 Local clone optimization/hardlinks are disabled. Checkout credentials are not
 copied. Candidate HEAD and source origin/history are preserved. The canonical
 runner continues to isolate HOME for each suite, compare the known-failure
 baseline in both directions and produce bounded structured profiles.
 
-Three Linux, five macOS and sixteen Windows jobs produce six, ten and thirty-two
+Three Linux, three macOS and sixteen Windows jobs produce six, nine and thirty-two
 effective shards. `job_index * workers + worker_index` is the global shard index.
 Every unit is assigned exactly once by the common complete partition. Every
 worker is joined on failure; successful sibling profiles remain diagnostic
@@ -52,25 +52,33 @@ the suite explicitly preserved.
 
 The active profile at `scripts/fixtures/ci-latency/shard-profile.json` was refreshed
 through the canonical collector from seven complete structured PR415 artifacts
-and 47 worker profiles from diagnostic run44163993587. Only unambiguous passing
-rows contribute weights; that failed run is not acceptance evidence. The missing
-Windows worker remains incomplete. Original merge-checkout provenance is retained.
-The first diagnostic run's unit weights are superseded by the newer run; its
-original evidence remains recorded. Changed case rosters use new unit revisions.
+and 48 completed worker profiles from diagnostic run44172245727. Only unambiguous
+passing rows contribute weights; that failed run is not acceptance evidence.
+All sixteen Windows test jobs passed; Linux/macOS smoke rejected three obsolete
+workflow-shape assertions, now updated for the allocated smoke suite. Original
+merge-checkout provenance is retained. Earlier diagnostic unit weights are
+superseded; their original evidence remains recorded. Changed case rosters use
+new unit revisions.
+
+Historical distribution layers repeat an ancestor-pin sentinel through the same
+immutable JSON defaults. The successor freezes those defaults and memoizes only
+that sentinel proof; ordinary lookups, full validation and raw-source reads stay
+live. Replacing a dependency's lookup invalidates the cached proof. Accessor or
+non-data defaults disable the optimization. No historical fixture file changes.
 New virtual units use explicitly estimated historical source costs divided by
 their declared partition factor. Already concurrent source coordinators use
 conservative factors. A virtual unit remains unprofiled until it has its own
 hosted passing observation. Measured unit weights always take precedence. Earlier
 `ci-shards` profile/provenance fixtures remain byte-identical historical evidence.
 
-Each test-job timing artifact now contains both worker profiles. Feed the actual
+Each test-job timing artifact contains every worker profile. Feed the actual
 worker JSON files to `forge-ci-profile build-shard-profile` for future refreshes.
 It also contains a separate timestamped log for each worker, with the actual
 matrix job-name binding and observed Node/image metadata. Feed those logs
 individually to the existing raw-log collector. The combined job console has
 multiple runners and intentionally remains ambiguous for that collector.
 For an allocation estimate matching CI, use `forge-ci-profile report` with
-`--partition-suites` and the effective counts linux:6, darwin:10, win32:32.
+`--partition-suites` and the effective counts linux:6, darwin:9, win32:32.
 Leave out that option when analyzing the older whole-file runner universe.
 Report execution, queue, setup and aggregate runner work separately.
 
@@ -97,10 +105,13 @@ app checks. There is no PR-attestation reuse, nightly-only regression or skipped
 platform. Original required test names are preserved by enforcing aliases,
 including Linux after its matrix expansion.
 
-The read-only coordinator waits for checks and resolves version/notes. It no
-longer builds a package and a receipt that the publisher discards. The publisher
-still makes its own token-free fresh preparation with the existing ten-minute
-receipt TTL and applies only its own job-bound receipt. Trusted origin checks,
+The read-only coordinator resolves version/notes. It no longer builds a package
+and a receipt that the publisher discards. The publisher starts its own token-free
+preparation while CI runs, then waits for complete exact-candidate checks. A
+token-free step validates that same-job receipt or creates a new complete
+preparation if less than two minutes of its ten-minute TTL remain. It never
+extends an old receipt or accepts foreign/tampered state. Apply still enforces
+the original expiry and uses only its own job-bound receipt. Trusted origin checks,
 candidate checkout, permission split and publication readback remain enforcing.
 Historical workflow bytes and their original reconstruction assertions remain
 under an additive latency layer; current bytes and semantic job mappings are

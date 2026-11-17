@@ -18,7 +18,7 @@ function parseArgs(argv) {
     options[key] = value;
   }
   if (!integer(options['--shard-index'], 63) || !integer(options['--shard-count'], 64)
-      || !integer(options['--jobs'], 2) || +options['--jobs'] < 1 || +options['--shard-count'] < 1
+      || !integer(options['--jobs'], 3) || +options['--jobs'] < 1 || +options['--shard-count'] < 1
       || +options['--shard-index'] >= +options['--shard-count'] || +options['--shard-count'] * +options['--jobs'] > 64
       || !options['--profile-dir']) throw Error('ci-parallel-arguments');
   return { index: +options['--shard-index'], count: +options['--shard-count'], jobs: +options['--jobs'], profileDir: path.resolve(options['--profile-dir']) };

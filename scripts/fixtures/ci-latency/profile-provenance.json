@@ -1,20 +1,23 @@
 {
   "base_run": "44132612926",
-  "unit_run": "44163993587",
-  "unit_run_head": "b2ad4d10764c5b5687bd786e843bd3218e70f4a0",
+  "unit_run": "44172245727",
+  "unit_run_head": "aff6aef4f57ddc0f968046199e372ee92c84f897",
   "unit_run_conclusion": "failure",
-  "sources": 54,
-  "unit_profiles": 47,
+  "sources": 55,
+  "unit_profiles": 48,
   "original_profiles": 7,
-  "superseded_unit_run": "44154000574",
+  "superseded_unit_runs": [
+    "44154000574",
+    "44163993587"
+  ],
   "collector": "forge-ci-profile.readInput/sourceFrom/profileFromSources",
-  "profile_sha256": "8db23c63ed471570eafb55d09c58371f29d8e49a69db5a7bc3d944a9023294d7",
+  "profile_sha256": "7b2b7a6e769983d9a54c01109dcf60ed7bcdda9da26a0cf8602596175d8a383d",
   "limits": [
-    "Only passing unambiguous rows contribute weights; a failed run is not accepted.",
-    "Original complete profiles retain physical-suite fallback for missing or failed units.",
-    "Windows shard28 has incomplete observations after the fifteen-minute cancellation.",
-    "Changed batch restart membership uses new virtual IDs; original physical-suite costs remain conservative initial estimates.",
-    "Smoke initial estimates are declared in forge-ci-units, not manufactured profile observations.",
-    "Predictions exclude queue/setup and are not a hosted success guarantee."
+    "Only passing unambiguous rows contribute weights; full-run conclusion remains failure.",
+    "All48worker profiles completed; all16Windows test jobs passed.",
+    "Linux/macOS smoke failed three stale workflow-shape assertions; their failed timing rows do not become accepted observations.",
+    "Original complete profiles retain physical-suite fallback; measured current unit costs override estimates.",
+    "Mac3worker density and the immutable sentinel optimization require a new hosted measurement.",
+    "Predictions exclude queue/setup and do not demonstrate a ten-minute success."
   ]
 }

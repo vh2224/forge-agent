@@ -160,6 +160,40 @@ function existing(f) {
 }
 
 (async () => {
+  await test('publish-overlap-reuses-only-a-valid-current-job-preparation', () => withFixture(async f => {
+    const p=await f.prepare();
+    const ready=await publisher.ensureFreshPreparation({...f.prepareOptions,state:p.state,nonce:p.nonce},f.dependencies);
+    assert.strictEqual(ready.reused,true);assert.strictEqual(ready.state,p.state);assert.strictEqual(ready.nonce,p.nonce);
+    assert.strictEqual(f.state.generates,1);assert.strictEqual(f.state.mutations.length,0);
+    assert.strictEqual((await f.apply(ready)).status,'published-verified');assert.strictEqual(f.state.generates,1);
+  }));
+  await test('publish-overlap-renews-near-expiry-or-expired-without-rewriting-old-receipt', async () => {
+    for(const elapsed of [publisher.TTL_MS-publisher.FRESHNESS_MARGIN_MS+1,publisher.TTL_MS+1])await withFixture(async f=>{
+      const p=await f.prepare(),bytes=fs.readFileSync(p.state);f.state.time+=elapsed;
+      if(elapsed>publisher.TTL_MS)blocked(await f.apply(p),f,'receipt-expired');
+      const ready=await publisher.ensureFreshPreparation({...f.prepareOptions,state:p.state,nonce:p.nonce},f.dependencies);
+      assert.strictEqual(ready.reused,false);assert.notStrictEqual(ready.nonce,p.nonce);assert.notStrictEqual(ready.state,p.state);
+      assert.deepStrictEqual(fs.readFileSync(p.state),bytes);assert.strictEqual(f.state.generates,2);assert.strictEqual(f.state.mutations.length,0);
+      const renewed=JSON.parse(fs.readFileSync(ready.state));assert.strictEqual(renewed.expires_at-renewed.created_at,publisher.TTL_MS);
+      assert.strictEqual(renewed.created_at,f.state.time);assert.strictEqual((await f.apply(ready)).status,'published-verified');
+    });
+  });
+  await test('publish-overlap-inspection-refuses-foreign-tampered-or-backdated-state-before-regeneration', async () => {
+    for(const change of [
+      (f,p,o)=>{o.nonce='0'.repeat(64);},
+      f=>{f.env.GITHUB_JOB='coordinator';},
+      (f,p)=>{fs.appendFileSync(path.join(path.dirname(p.state),'report.json'),'tampered');},
+      (f,p,o)=>{o.sha=B;},
+      f=>{fs.appendFileSync(f.notes,'changed');},
+      f=>{f.state.time=1;},
+      (f,p,o)=>{o.env={...f.env,GH_TOKEN:'forbidden'};},
+    ])await withFixture(async f=>{
+      const p=await f.prepare();f.state.time+=publisher.TTL_MS+1;
+      const options={...f.prepareOptions,state:p.state,nonce:p.nonce};change(f,p,options);
+      await assert.rejects(publisher.ensureFreshPreparation(options,f.dependencies));
+      assert.strictEqual(f.state.generates,1);assert.strictEqual(f.state.mutations.length,0);
+    });
+  });
   await test('publish-fresh-prepare-token-free-report-and-apply-never-generates', () => withFixture(async f => {
     const p = await f.prepare(); assert.strictEqual(p.status, 'prepared');
     const receipt = JSON.parse(fs.readFileSync(p.state));

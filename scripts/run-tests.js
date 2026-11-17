@@ -556,6 +556,11 @@ function main(argv) {
       });
 
       process.stdout.write(`${passed ? 'PASS' : 'FAIL'} ${filename} (${elapsed}s)\n`);
+      // Keep bounded case-selection evidence even when successful suite output
+      // is quiet. Failed/verbose suites already print their captured roster.
+      if (passed && !options.verbose && options.partitionSuites && unit.args.some(arg => arg.startsWith('--ci-cases='))) {
+        for (const line of String(result.stdout || '').split(/\r?\n/).filter(line => line.startsWith('CI case partition: '))) process.stdout.write(line + '\n');
+      }
       if (options.verbose || !passed) writeCaptured(result);
 
       if (!passed) {
