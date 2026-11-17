@@ -235,7 +235,11 @@ committed. Preserve snapshot, código, registros e horários. Carregue o procedi
 recovery e siga `shared/forge-delivery.md § Committed task without delivery`:
 o host monta os callbacks vivos de autoridade, perguntas e join/reconciliação de
 todos os writers/roots, conserva claim e isolamento e usa createRepair para
-verificação atual, sem executor nem inferência. Ausência de prova do host continua
+verificação atual, sem executor nem inferência. Para dono diferente ou inativo,
+use a ponte canônica `resumeAndCreateRepair` de
+`shared/forge-completion-delivery-recovery.md`, com os três callbacks vivos e o
+snapshot exato de owner; ela conserva o claim e a linhagem committed. Não libere
+claim para contornar transferência. Ausência de prova do host continua
 pendente; PID ausente e JSON approved não autorizam recuperação.
 
 Após a conclusão genuína do sucessor, use `resume-delivery` no mesmo adaptador em
@@ -621,6 +625,10 @@ else
   # segunda enumeração. Legacy (`BATCH_JSON.mode == legacy`, sem .details.readyCount) → 0 (piso D3).
   READY_ALTERNATIVES=$(node -e "let r;try{r=JSON.parse(process.argv[1])}catch(e){r={}}; const rc=(r.details&&typeof r.details.readyCount==='number')?r.details.readyCount:0; process.stdout.write(String(Math.max(0, rc-1)))" "${BATCH_JSON:-{}}")
 
+  GATE_PLANS=$(node -e "process.stdout.write(JSON.stringify([process.argv[1]]))" "$PLAN_PATH") || exit 1
+  GATE_ROOT=$(node "$FORGE_SCRIPTS_DIR/forge-code-dir.js" --resolve --iso-result "$ISO_RESULT" \
+    --claim-plans-json "$GATE_PLANS" --run "$RUN_ID" --cwd "$WORKING_DIR") || exit 1
+  UNIT_CODE_DIR=$(node -e "const r=JSON.parse(process.argv[1]);if(!['ok','shared'].includes(r.status)||!r.code_dir)process.exit(1);process.stdout.write(r.code_dir)" "$GATE_ROOT") || exit 1
   GATE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-claim-gate.js" --claim-and-check \
     --run "$RUN_ID" \
     --unit "execute-task/$unit_id" \
@@ -632,11 +640,8 @@ else
     --json)
   GATE_EXIT=$?
 
-  # `--code-dir` só quando o resolvedor de código já correu para esta unidade — B2. Neste ponto do
-  # fluxo (antes do Step 4) o resolvedor per-unit ainda não rodou; `$UNIT_CODE_DIR` fica vazio salvo
-  # se um passe anterior já o deixou setado (idempotência entre invocações). A flag omitida NÃO é
-  # uma degradação silenciosa: o claim carrega `code_dir: null`, o escopo contra cada counterpart vira
-  # `unknown` e `unknown` continua em escopo — o gate fecha por precaução, nunca abre por suposição.
+  # B2: this unit's physical root was just resolved from its plan and isolation
+  # result; no previous unit's CODE_DIR is inherited. A refusal stops the gate.
 
   # Fail-closed (§ Fail-closed) — exit != 0 ou stdout não-JSON é sempre block/gate-unavailable, loud.
   if [ "$GATE_EXIT" -ne 0 ] || ! printf '%s' "$GATE_JSON" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{JSON.parse(d);process.exit(0)}catch(e){process.exit(1)}})"; then

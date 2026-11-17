@@ -36,6 +36,11 @@ function persistBaseline(cwd, file, value) {
 }
 
 function createRepair(options = {}) {
+  return constructRepair(options, false);
+}
+// Only inspectRetainedClaimResume can request an inactive read-only preflight;
+// that function returns scope alone, never this object's start/complete methods.
+function constructRepair(options, inactivePreflight) {
   const { assertAuthority, attestStoppedWriter, readPendingQuestions } = options;
   if (![assertAuthority, attestStoppedWriter, readPendingQuestions].every(fn => typeof fn === 'function')) fail('delivery-repair-live-adapter-required');
   const cwd = fs.realpathSync.native(options.cwd), { milestone, slice, task, runId, ownerToken, hostRuntime } = options;
@@ -72,7 +77,7 @@ function createRepair(options = {}) {
   const run = () => require('./forge-runs').get(cwd, runId);
   function currentClaim() {
     const record = run(), claim = claims.readClaim(record);
-    if (record?.active !== true || !claims.isHeld(claim) || !claim.paths?.length) fail('delivery-repair-claim-required');
+    if (!(record?.active === true || inactivePreflight && record?.active === false) || !claims.isHeld(claim) || !claim.paths?.length) fail('delivery-repair-claim-required');
     claims.validateHeldClaim(claim);
     const primary = contract.code_roots.find(root => root.id === contract.primary_root_id);
     if (claim.schema_version === 2 ? digest(claim.execution_contract) !== digest(contract)
@@ -208,4 +213,32 @@ function verifyRepairCompletion(options = {}) {
     repair_completion_key: complete.idempotency_key, implementation_reexecuted: false };
 }
 
-module.exports = { createRepair, verifyRepairCompletion };
+// A narrow preflight inside the existing fenced owner-transfer path. This
+// read-only construction reuses the real committed lineage/roots/claim/event
+// and live stopped-writer/questions checks; start() is never called here.
+function inspectRetainedClaimResume(cwd, record, options) {
+  let sameRoot=false;try{sameRoot=roots.key(fs.realpathSync.native(cwd))===roots.key(fs.realpathSync.native(options?.cwd));}catch{}
+  if (!options || record.kind!=='milestone' || options.runId!==record.id || options.milestone!==record.id || !sameRoot) fail('delivery-repair-resume-scope-mismatch');
+  return constructRepair(options, true).scope;
+}
+// Live host bridge: three host callbacks remain mandatory; imported JSON and
+// CLI flags do not become callbacks. resumeOwner retains its existing caller
+// confirmations and fences. Observed identity is checked on each repair call.
+function resumeAndCreateRepair(options = {}) {
+  const runs=require('./forge-runs');
+  if (![options.assertAuthority,options.attestStoppedWriter,options.readPendingQuestions].every(fn=>typeof fn==='function')) fail('delivery-repair-live-adapter-required');
+  const observed=runs.observeHostSession(options.hostRuntime,options.expectedSession);
+  if (!observed || observed.sessionId!==options.ownerToken) fail('delivery-repair-observed-owner-required');
+  const resumed=runs.resumeOwner(options.cwd,options.runId,{hostRuntime:options.hostRuntime,expectedSession:observed.sessionId,
+    expectedRecordSha256:options.expectedRecordSha256,confirmOwnerStopped:options.confirmOwnerStopped,
+    confirmWorkspaceQuiescent:options.confirmWorkspaceQuiescent,deliveryRepair:options});
+  const hostAuthority=options.assertAuthority;
+  const repair=createRepair({...options,assertAuthority:scope=>{
+    const current=runs.observeHostSession(options.hostRuntime,options.expectedSession),record=runs.get(options.cwd,options.runId);
+    if (!current || current.sessionId!==observed.sessionId || current.source!==observed.source || record?.active!==true
+        || record.session_id!==observed.sessionId || record.host_runtime!==observed.hostRuntime) fail('delivery-repair-authority-required');
+    return hostAuthority(scope);
+  }});
+  return Object.freeze({owner_resume_status:resumed.status,scope:repair.scope,start:repair.start,complete:repair.complete});
+}
+module.exports = { createRepair, verifyRepairCompletion, inspectRetainedClaimResume, resumeAndCreateRepair };

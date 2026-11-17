@@ -330,6 +330,10 @@ function acquireClampForCommand(opts) {
   try {
     const contract = resourcesMod.acquireCommandBudget({
       cwd: opts.cwd,
+      // Policy belongs to WORKING_DIR; cwd still selects the command's real
+      // package and resource lifecycle. A worktree need not contain .gsd.
+      prefsResult: require('./forge-prefs').readPrefsCached(opts.gsdDir
+        ? dirname(resolve(opts.gsdDir)) : resolveOwner(opts.cwd) || opts.cwd),
       commandTimeoutMs: opts.timeoutMs,
       session: opts.session,
     });
@@ -372,7 +376,8 @@ function acquireClampForCommand(opts) {
       return passthrough;
     }
 
-    const plan = rewriteMod.planRewrite(opts.command, contract, { cwd: opts.cwd });
+    const plan = rewriteMod.planRewrite(opts.command, contract, { cwd: opts.cwd,
+      ...(process.platform === 'win32' ? { envMode: 'spawn' } : {}) });
 
     if (plan.outcome !== "rewritten") {
       // Unrecognized/refused form — release immediately (W5, non-error
@@ -389,10 +394,11 @@ function acquireClampForCommand(opts) {
     // Overlay: NODE_OPTIONS is never overwritten if the parent already
     // defines it — a human's choice always wins (same rule S03 conceded
     // three times, R3/R4).
-    const overlay = {};
+    const overlay = { ...(plan.env || {}) };
     let nodeOptionsReason = null;
     let rewrittenCommand = plan.command;
     if (process.env.NODE_OPTIONS) {
+      delete overlay.NODE_OPTIONS;
       nodeOptionsReason = "node-options-preserved-parent-defined";
       // forge-command-rewrite.js's vitest env-prefix embeds a LITERAL
       // `NODE_OPTIONS='...'` assignment directly in the rewritten command

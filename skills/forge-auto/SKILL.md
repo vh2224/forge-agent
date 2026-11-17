@@ -243,7 +243,11 @@ committed. Preserve snapshot, código, registros e horários. Carregue o procedi
 recovery e siga `shared/forge-delivery.md § Committed task without delivery`:
 o host monta os callbacks vivos de autoridade, perguntas e join/reconciliação de
 todos os writers/roots, conserva claim e isolamento e usa createRepair para
-verificação atual, sem executor nem inferência. Ausência de prova do host continua
+verificação atual, sem executor nem inferência. Para dono diferente ou inativo,
+use a ponte canônica `resumeAndCreateRepair` de
+`shared/forge-completion-delivery-recovery.md`, com os três callbacks vivos e o
+snapshot exato de owner; ela conserva o claim e a linhagem committed. Não libere
+claim para contornar transferência. Ausência de prova do host continua
 pendente; PID ausente e JSON approved não autorizam recuperação.
 
 Após a conclusão genuína do sucessor, use o comando `resume-delivery` do mesmo
@@ -878,16 +882,17 @@ Batch order (spec § Step 1 — fixed, not an implementation detail): (1) record
 ```bash
 FORGE_SCRIPTS_DIR=$([ -f scripts/forge-claim-gate.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 
-# B2: --code-dir carries ONLY a value THIS dispatch already resolved. At this point (step 1.7 runs
-# BEFORE Step 4's per-unit CODE_DIR resolution) only `shared` isolation already has one — WORKING_DIR
-# itself. `worktree`/`branch` modes have not resolved the per-unit CODE_DIR yet, so the flag is
-# omitted here on purpose (code_dir: null -> scope unknown -> fail closed, spec contract #7). NEVER
-# $WORKTREE_DIR, NEVER a value derived from root+branch+isolation_mode (explicitly prohibited).
+# B2: resolve every selected plan from the actual isolation result BEFORE the
+# union claim. Never infer a path from branch/root or reuse a preceding unit.
+# Different physical roots require the schema-v2 claim path; stop this legacy
+# single-root batch instead of choosing one root or recording code_dir:null.
 # Médio 2 (PR #110): the value travels QUOTED. `$GATE_CODE_DIR_FLAG` unquoted word-split a CODE_DIR
 # containing a space, producing a truncated `code_dir` -> fabricated `different-code-dir` -> the pair
 # left scope -> silent `proceed`. The canonical shape is the spec's own: `${CODE_DIR:+--code-dir "$CODE_DIR"}`.
-GATE_CODE_DIR="" 
-[ "$ISOLATION_MODE" = "shared" ] && [ -n "$CODE_DIR" ] && GATE_CODE_DIR="$CODE_DIR"
+GATE_PLANS=$(node -e "process.stdout.write(JSON.stringify(process.argv.slice(1)))" "${BATCH_PLAN_PATHS[@]}") || exit 1
+GATE_ROOT=$(node "$FORGE_SCRIPTS_DIR/forge-code-dir.js" --resolve --iso-result "$ISO_RESULT" \
+  --claim-plans-json "$GATE_PLANS" --run "$RUN_ID" --cwd "$WORKING_DIR") || exit 1
+GATE_CODE_DIR=$(node -e "const r=JSON.parse(process.argv[1]);if(!['ok','shared'].includes(r.status)||!r.code_dir)process.exit(1);process.stdout.write(r.code_dir)" "$GATE_ROOT") || exit 1
 
 # Claim extraction, used by every union computation below. `--evaluate` and `--check-only` both carry
 # `.claim` (the derived, normalised claim). FAIL CLOSED: a missing/invalid `.claim.paths` exits != 0

@@ -330,3 +330,10 @@ skills/forge-next/SKILL.md: before=c83b01e327117e3bde566b0c652fb98166f516a172583
 Earlier evidence remains above. Only current after-node source fingerprints are updated; no sample prose or human acceptance is changed.
 
 skills/forge-next/SKILL.md: before=05c13bbcd0d39435f6cccac14f5828b805fcd5efe1c421d0d59c3eeb695d1c00 after=598398fba42577af77dc68282ad02878996787b55abb9caf4787d302c61d2a49 attributed_before=68d07271e590070913bc62c15e704c0d67e4f7fc2d3c4727b9927d2b4f1e33c0 attributed_after=ea25b3d92b2946066b61c1a0e6e8f28cf29e9d8995b3fa3ea384b9b0cae11cca
+
+
+## Owner recovery issue407 current source references
+
+Earlier evidence remains above. Only current after-node source fingerprints are updated; no sample prose or human acceptance is changed.
+
+skills/forge-next/SKILL.md: before=598398fba42577af77dc68282ad02878996787b55abb9caf4787d302c61d2a49 after=fe72edc9eedccfac3faa77dc9a619d0a0b98ee6fed052265dfd2700740a7d9e1 attributed_before=ea25b3d92b2946066b61c1a0e6e8f28cf29e9d8995b3fa3ea384b9b0cae11cca attributed_after=47c80adfef2ce723846c2ea58150a14c874e20a1cfcf3107ad480450938f4791
