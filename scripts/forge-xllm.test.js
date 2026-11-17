@@ -253,7 +253,8 @@ try {
   for (const [technical, word] of [[technicalLines[0], 'pedido ao adaptador'], [technicalLines[1], 'recusado']]) {
     const human = refusalLines[refusalLines.indexOf(technical) + 1];
     assert(human.startsWith(`[forge-agente] ${word}: `), human);
-    assert(human.includes(' (execute) · executor sidecar codex via '), human);
+    assert(human.includes(': execute · executor sidecar codex via '), human);
+    assert.match(human, / · ref [a-f0-9]{8}$/);
   }
   const refusalHuman = refusalLines[refusalLines.indexOf(technicalLines[1]) + 1];
   assert.match(refusalHuman, / · causa adapter-failed · provedor chamado: não · /);
