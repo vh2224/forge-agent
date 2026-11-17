@@ -94,7 +94,14 @@ function runChild(checkout, args, streams = process, tempDir = null, logFile = n
     });
   });
 }
-async function run(options, { source = path.resolve(__dirname, '..'), temp = os.tmpdir(), streams = process, jobName = process.env.FORGE_CI_JOB_NAME || null } = {}) {
+function allocateRoot(preferred, { create = fs.mkdtempSync, fallback = os.tmpdir() } = {}) {
+  try { return create(path.join(preferred, 'ci-')); }
+  catch (error) {
+    if (!['EACCES', 'EPERM', 'EROFS'].includes(error.code) || path.resolve(preferred) === path.resolve(fallback)) throw error;
+    return create(path.join(fallback, 'ci-'));
+  }
+}
+async function run(options, { source = path.resolve(__dirname, '..'), temp = path.dirname(source), streams = process, jobName = process.env.FORGE_CI_JOB_NAME || null } = {}) {
   if (git(source, ['status', '--porcelain', '--untracked-files=normal'])) throw Error('ci-parallel-requires-clean-checkout');
   const sourceSuites = fs.readdirSync(path.join(source,'scripts')).filter(name => name.endsWith('.test.js'));
   const baselinePair = validateBaselinePair({ sourceSuites, platform: process.platform,
@@ -103,24 +110,26 @@ async function run(options, { source = path.resolve(__dirname, '..'), temp = os.
     resolveBaseline: require('./run-tests').resolveBaseline });
   if (!baselinePair.ok) throw Error('ci-baseline-pair-invalid:' + baselinePair.errors.join(';'));
   const sha = git(source, ['rev-parse', 'HEAD']);
-  const own = fs.realpathSync.native(fs.mkdtempSync(path.join(temp, 'forge-ci-workers-')));
+  // Keep checkout paths near the original length: long temp paths can inflate
+  // path-bearing prompt fixtures and hit Windows path limits.
+  const own = fs.realpathSync.native(allocateRoot(temp));
   fs.mkdirSync(options.profileDir, { recursive: true });
   const checkouts = [];
   let outcomes = null;
   try {
     for (let worker = 0; worker < options.jobs; worker++) {
-      const checkout = path.join(own, `worker-${worker}`);
+      const checkout = path.join(own, `w${worker}`);
       prepareCheckout(source, checkout, sha);
       checkouts.push(checkout);
     }
     // The effective shard count covers ALL workers of ALL jobs exactly once.
     outcomes = await Promise.allSettled(checkouts.map((checkout, worker) => {
       const index = options.index * options.jobs + worker, count = options.count * options.jobs;
-      const workerTemp = path.join(own, `temp-${worker}`);
+      const workerTemp = path.join(own, `t${worker}`);
       fs.mkdirSync(workerTemp);
       streams.stdout.write(`CI isolated worker ${worker + 1}/${options.jobs}; global shard ${index + 1}/${count}; candidate ${sha}\n`);
       return runChild(checkout, ['--baseline', 'scripts/fixtures/ci-baseline/known-unit-failures.json',
-        '--partition-suites', '--shard-profile', 'scripts/fixtures/ci-shards/shard-profile.json',
+        '--partition-suites', '--shard-profile', 'scripts/fixtures/ci-latency/shard-profile.json',
         '--shard-index', String(index), '--shard-count', String(count),
         '--profile-out', path.join(options.profileDir, `worker-${worker}.json`)], streams, workerTemp,
       path.join(options.profileDir, `worker-${worker}.log`), jobName);
@@ -131,7 +140,7 @@ async function run(options, { source = path.resolve(__dirname, '..'), temp = os.
   } finally {
     // No operator path or caller-selected checkout is ever removed.
     const retainedTemp = checkouts.some((_, worker) => {
-      const directory = path.join(own, `temp-${worker}`);
+      const directory = path.join(own, `t${worker}`);
       return fs.existsSync(directory) && fs.readdirSync(directory).length > 0;
     });
     if (outcomes && !retainedTemp && outcomes.every(row => row.status === 'fulfilled' && row.value.code === 0 && row.value.signal === null && !row.value.spawnError)) {
@@ -145,5 +154,5 @@ async function main(argv = process.argv.slice(2)) {
   try { return await run(parseArgs(argv)); }
   catch (error) { process.stderr.write(`${error.message}\n`); return 2; }
 }
-module.exports = { parseArgs, prepareCheckout, logHeader, runChild, run, main };
+module.exports = { parseArgs, prepareCheckout, logHeader, runChild, allocateRoot, run, main };
 if (require.main === module) main().then(code => { process.exitCode = code; });

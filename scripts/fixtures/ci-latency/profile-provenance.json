@@ -1,0 +1,18 @@
+{
+  "base_run": "44132612926",
+  "unit_run": "44154000574",
+  "unit_run_head": "d48cd002f572245e4647630fc4f4cf70e96cc5a1",
+  "unit_run_conclusion": "failure",
+  "sources": 46,
+  "unit_profiles": 39,
+  "original_profiles": 7,
+  "collector": "forge-ci-profile.readInput/sourceFrom/profileFromSources",
+  "profile_sha256": "a0dcc3e80e9c5b8f584d93bfdb0de625b6815816f0abdb94db8070f0955d941d",
+  "limits": [
+    "Only passing unambiguous rows contribute weights; this does not accept the failed run.",
+    "Original complete source profiles retain physical-suite fallback for failed units.",
+    "The cancelled Windows shard has incomplete observations.",
+    "Shared-fixture regrouping uses a new virtual-unit revision, so old unit weights cannot silently describe the new roster.",
+    "Predictions are historical allocations, not measured speedups or end-to-end guarantees."
+  ]
+}

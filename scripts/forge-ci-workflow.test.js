@@ -199,7 +199,7 @@ const command = testStep.match(/^        run: (.+)$/m)[1];
 assert.strictEqual(command, 'node scripts/forge-ci-parallel.js --shard-index ${{ matrix.shard-index }} --shard-count ${{ matrix.shard-count }}'
   + ' --jobs 2 --profile-dir "${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}"');
 const parallelSource = fs.readFileSync(path.join(__dirname, 'forge-ci-parallel.js'), 'utf8');
-for (const token of ["'--baseline', 'scripts/fixtures/ci-baseline/known-unit-failures.json'", "'--partition-suites'", "'--shard-profile', 'scripts/fixtures/ci-shards/shard-profile.json'", "'--profile-out'"]) assert(parallelSource.includes(token), token);
+for (const token of ["'--baseline', 'scripts/fixtures/ci-baseline/known-unit-failures.json'", "'--partition-suites'", "'--shard-profile', 'scripts/fixtures/ci-latency/shard-profile.json'", "'--profile-out'"]) assert(parallelSource.includes(token), token);
 assert(!/--(?:changed|match|fail-fast|inherit-home)\b/.test(parallelSource));
 assert(!/--(?:changed|match|fail-fast|inherit-home)\b/.test(command));
 assert(!/\b(?:paths|paths-ignore|branches-ignore):/.test(texts.ci.split('\npermissions:')[0]));
@@ -234,12 +234,12 @@ const verifySteps = steps.filter(step => /svn --version --quiet/.test(step) && /
 assert.strictEqual(verifySteps.length, 1);
 assert(!/^\s*if:/m.test(verifySteps[0]) && texts.ci.indexOf(verifySteps[0]) < testIndex);
 const rows = expandJobs(POLICY.workflows.ci);
-assert.strictEqual(rows.length, 32);
+assert.strictEqual(rows.length, 36);
 assert.strictEqual(rows.filter(row => row.kind === 'alias').length, 9);
 assert.deepStrictEqual(rows.filter(row => row.key === 'test').map(row => row.name),
-  [['ubuntu-latest', 3], ['macos-latest', 5], ['windows-latest', 12]].flatMap(([os, count]) => Array.from({length:count}, (_, i) => `Tests (${os}, shard ${i+1}/${count})`)));
+  [['ubuntu-latest', 3], ['macos-latest', 5], ['windows-latest', 16]].flatMap(([os, count]) => Array.from({length:count}, (_, i) => `Tests (${os}, shard ${i+1}/${count})`)));
 assert.strictEqual(rows.filter(row => row.name === 'Tests (ubuntu-latest)' && row.kind === 'alias').length, 1);
-assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'win32').map(row => row.matrix['shard-count']), Array(12).fill(12));
+assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'win32').map(row => row.matrix['shard-count']), Array(16).fill(16));
 assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'darwin').map(row => row.matrix['shard-count']), Array(5).fill(5));
 // Smoke condition evaluated per policy cell: exactly one Linux and one macOS run, never Windows.
 const runnerOs = { 'ubuntu-latest': 'Linux', 'macos-latest': 'macOS', 'windows-latest': 'Windows' };
@@ -250,8 +250,8 @@ marker('key_link', 2, 'CI source test command triggers concurrency SVN ordering 
 
 const unitInventory = expandSuites(discoverTests([]));
 const suites = unitInventory.map(unit => unit.id);
-const profilePath = 'scripts/fixtures/ci-shards/shard-profile.json';
-assert.strictEqual(profilePath, 'scripts/fixtures/ci-shards/shard-profile.json');
+const profilePath = 'scripts/fixtures/ci-latency/shard-profile.json';
+assert.strictEqual(profilePath, 'scripts/fixtures/ci-latency/shard-profile.json');
 const profile = loadShardProfile(path.join(root, profilePath));
 assert.strictEqual(profile.state, 'loaded');
 const cells = new Map(rows.filter(row => row.key === 'test').map(row => [`${row.matrix.platform}/${row.matrix['shard-count']}`, row.matrix]));

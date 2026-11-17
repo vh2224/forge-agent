@@ -5,7 +5,7 @@
 const path = require('node:path');
 const crypto = require('node:crypto');
 const DEFINITIONS = Object.freeze({
-  'forge-execution-batch-process.test.js': { parts: 16, kind: 'cases' },
+  'forge-execution-batch-process.test.js': { parts: 16, kind: 'cases', revision: 'groups-v1', costDivisors: {5:4} },
   'forge-execution-batch-isolation.test.js': { parts: 8, kind: 'cases' },
   'forge-native-repackage.test.js': { parts: 6, kind: 'cases' },
   'forge-native-execution.test.js': { args: [['--core-saved'], ['--extra'], ['--recovery']], divisor: 2 },
@@ -17,9 +17,9 @@ function unitsForSuite(source) {
   if (!definition) return [{ id: source, source, args: [], divisor: 1 }];
   const count = definition.parts || definition.args.length;
   return Array.from({ length: count }, (_, index) => ({
-    id: source.replace(/\.test\.js$/, `.ci-${String(index + 1).padStart(2, '0')}-of-${count}.test.js`),
+    id: source.replace(/\.test\.js$/, `.ci-${definition.revision ? definition.revision + '-' : ''}${String(index + 1).padStart(2, '0')}-of-${count}.test.js`),
     source, args: definition.kind === 'cases' ? [`--ci-cases=${index}/${count}`] : [...definition.args[index]],
-    divisor: definition.divisor || count,
+    divisor: definition.costDivisors?.[index] || definition.divisor || count,
   }));
 }
 function expandSuites(suites) {
@@ -59,10 +59,13 @@ function selectCases(cases, argv = process.argv.slice(2)) {
   if (!Number.isSafeInteger(index) || !Number.isSafeInteger(count) || index >= count || count > 64) throw new Error('ci-case-selector-invalid');
   const names = cases.map(row => row.name);
   if (names.some(name => typeof name !== 'string' || !name) || new Set(names).size !== names.length) throw new Error('ci-case-roster-invalid');
-  const selected = cases.filter((_, position) => position % count === index);
+  const keys = cases.map(row => row.group === undefined ? row.name : row.group);
+  if (keys.some(key => typeof key !== 'string' || !key)) throw new Error('ci-case-group-invalid');
+  const groups = [...new Set(keys)], groupIndex = new Map(groups.map((key, position) => [key, position]));
+  const selected = cases.filter((_, position) => groupIndex.get(keys[position]) % count === index);
   if (!selected.length) throw new Error('ci-case-partition-empty');
   const roster = { source: path.basename(process.argv[1] || ''), index, count,
-    total: cases.length, roster_sha256: crypto.createHash('sha256').update(JSON.stringify(names)).digest('hex'),
+    total: cases.length, total_groups: groups.length, roster_sha256: crypto.createHash('sha256').update(JSON.stringify(cases.map((row,i)=>({name:row.name,group:keys[i]})))).digest('hex'),
     selected: selected.map(row => row.name) };
   process.stdout.write(`CI case partition: ${JSON.stringify(roster)}\n`);
   return selected;

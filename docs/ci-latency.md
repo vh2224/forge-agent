@@ -28,7 +28,7 @@ copied. Candidate HEAD and source origin/history are preserved. The canonical
 runner continues to isolate HOME for each suite, compare the known-failure
 baseline in both directions and produce bounded structured profiles.
 
-Three Linux, five macOS and twelve Windows jobs produce six, ten and twenty-four
+Three Linux, five macOS and sixteen Windows jobs produce six, ten and thirty-two
 effective shards. `job_index * workers + worker_index` is the global shard index.
 Every unit is assigned exactly once by the common complete partition. Every
 worker is joined on failure; successful sibling profiles remain diagnostic
@@ -38,12 +38,16 @@ the suite explicitly preserved.
 
 ## Measurement and future additions
 
-The versioned profile was refreshed through the canonical collector from seven
-complete structured PR415artifacts, preserving actual merge-checkout provenance.
+The active profile at `scripts/fixtures/ci-latency/shard-profile.json` was refreshed
+through the canonical collector from seven complete structured PR415 artifacts
+and 39 worker profiles from diagnostic run44154000574. Only unambiguous passing
+rows contribute weights; that failed run is not acceptance evidence. The missing
+Windows worker remains incomplete. Original merge-checkout provenance is retained.
 New virtual units use explicitly estimated historical source costs divided by
 their declared partition factor. Already concurrent source coordinators use
 conservative factors. A virtual unit remains unprofiled until it has its own
-hosted passing observation. Measured unit weights always take precedence.
+hosted passing observation. Measured unit weights always take precedence. Earlier
+`ci-shards` profile/provenance fixtures remain byte-identical historical evidence.
 
 Each test-job timing artifact now contains both worker profiles. Feed the actual
 worker JSON files to `forge-ci-profile build-shard-profile` for future refreshes.
@@ -52,7 +56,7 @@ matrix job-name binding and observed Node/image metadata. Feed those logs
 individually to the existing raw-log collector. The combined job console has
 multiple runners and intentionally remains ambiguous for that collector.
 For an allocation estimate matching CI, use `forge-ci-profile report` with
-`--partition-suites` and the effective counts linux:6, darwin:10, win32:24.
+`--partition-suites` and the effective counts linux:6, darwin:10, win32:32.
 Leave out that option when analyzing the older whole-file runner universe.
 Report execution, queue, setup and aggregate runner work separately.
 
@@ -66,6 +70,11 @@ same source-suite/issue set after projecting unit entries to their sources.
 Unknown entries or drift refuse execution. Each mode then retains its own exact
 two-way failure/healed-entry comparison; neither baseline is generated or grown
 automatically.
+
+Independent checkouts prefer a short directory beside the source checkout.
+Permission-only failures fall back to the system temporary directory; other
+filesystem failures remain visible. This avoids inflating path-bearing context
+fixtures on normal hosted Windows layouts without changing their budgets.
 
 ## Release boundary
 

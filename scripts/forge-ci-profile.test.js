@@ -28,7 +28,7 @@ const collector = require('./forge-ci-profile.js');
 originals.forEach(([module, name, original]) => { module[name] = original; });
 
 const fixtures = path.join(__dirname, 'fixtures', 'ci-profile');
-const versioned = path.join(__dirname, 'fixtures', 'ci-shards', 'shard-profile.json');
+const versioned = path.join(__dirname, 'fixtures', 'ci-latency', 'shard-profile.json');
 const tempRoot = fs.realpathSync(os.tmpdir());
 const root = fs.mkdtempSync(path.join(tempRoot, 'forge-ci-profile-'));
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
@@ -36,7 +36,7 @@ const rawFixture = name => fs.readFileSync(path.join(fixtures, name), 'utf8');
 // In-memory synthetic current-policy names; retain historical fixture bytes.
 // These parser fixtures still exercise a two-way synthetic partition, not CI timing.
 const fixture = name => rawFixture(name).replace(/Tests \(windows-latest, shard ([12])\/2\)/g,
-  'Tests (windows-latest, shard $1/12)');
+  'Tests (windows-latest, shard $1/16)');
 const json = name => JSON.parse(fixture(name));
 let passed = 0, failed = 0;
 function test(name, body) {
@@ -68,7 +68,7 @@ try {
   test('S04-T05 truth:0 exact log parse BOM timestamps ANSI counts failures metadata and fail-closed ambiguity', () => {
     const first = collector.parseRunTestsLog(fixture('windows-shard-1.log'), { name: 'windows-shard-1.log' });
     assert.strictEqual(first.platform, 'win32'); assert.strictEqual(first.semantic_key, 'test');
-    assert.strictEqual(first.job_name, 'Tests (windows-latest, shard 1/12)');
+    assert.strictEqual(first.job_name, 'Tests (windows-latest, shard 1/16)');
     assert.strictEqual(first.runner_image, 'windows-synthetic');
     assert.strictEqual(first.runner_image_version, '20261001.1');
     assert.strictEqual(first.node_version, 'v22.23.3');

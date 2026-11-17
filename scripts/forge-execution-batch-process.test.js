@@ -256,7 +256,13 @@ let passed = 0;
 let failed = 0;
 const CASES = [];
 const UNPROVEN_FIXTURE_CLEANUP = new Set();
-function test(name, fn) { CASES.push({ name, fn }); }
+function test(name, fn) {
+  // These four existing scenarios deliberately reuse the same genuine
+  // consolidated fixtures. Keep their original order in one process.
+  const shared = ['issue343 U5-1 after the barrier ', 'issue343 U5-2 a done member ',
+    'issue343 U5-6 cleanup ', 'issue343 U5-4 corrupted committed completion '].some(prefix => name.startsWith(prefix));
+  CASES.push({ name, fn, group: shared ? 'shared-u5-consolidation' : name });
+}
 async function runCases() {
   for (const { name, fn } of require('./forge-ci-units').selectCases(CASES)) {
     const started = Date.now();

@@ -29,6 +29,11 @@ for (const arg of ['--ci-cases=1/1','--ci-cases=-1/3','--ci-cases=0/0','--ci-cas
 assert.throws(()=>selectCases([{name:'same'},{name:'same'}],['--ci-cases=0/2']),/roster/);
 assert.throws(()=>selectCases([{name:'one'}],['--ci-cases=1/2']),/empty/);
 assert.throws(()=>selectCases([{name:'one'}],['--ci-cases=0/1','--ci-cases=0/1']),/duplicate/);
+const coupled=[{name:'producer',group:'shared'}, {name:'independent'}, {name:'consumer',group:'shared'}, {name:'independent-two'}];
+const grouped=[0,1].map(index=>selectCases(coupled,[`--ci-cases=${index}/2`]));
+assert(grouped.some(part=>part.map(row=>row.name).join(',')==='producer,consumer,independent-two'));
+assert.equal(new Set(grouped.flat()).size,coupled.length);
+assert.throws(()=>selectCases([{name:'one',group:1}],['--ci-cases=0/1']),/group/);
 const sample = unitsForSuite('forge-native-repackage.test.js');
 const profile = {state:'loaded',doc:{platforms:{win32:{status:'observed',weights_ms:{'forge-native-repackage.test.js':6000}}}}};
 assert.deepEqual(Object.values(unitWeights(sample,profile,'win32')),Array(6).fill(1000));

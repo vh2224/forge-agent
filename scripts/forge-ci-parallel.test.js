@@ -5,9 +5,20 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { Writable } = require('node:stream');
-const { parseArgs, prepareCheckout, logHeader, run } = require('./forge-ci-parallel');
+const { parseArgs, prepareCheckout, logHeader, allocateRoot, run } = require('./forge-ci-parallel');
 const temp = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-ci-parallel-fixture-')));
 const root = path.join(temp, 'source'); fs.mkdirSync(root);
+for (const code of ['EACCES', 'EPERM', 'EROFS']) {
+  const calls=[], fallback=path.join(temp,'fallback');
+  assert.equal(allocateRoot(root,{fallback,create(prefix){calls.push(prefix);if(calls.length===1)throw Object.assign(Error('fixture'),{code});return prefix+'allocated';}}),path.join(fallback,'ci-allocated'));
+  assert.deepEqual(calls,[path.join(root,'ci-'),path.join(fallback,'ci-')]);
+}
+for (const code of ['ENOSPC', 'ENOENT', 'EIO']) {
+  let calls=0;
+  assert.throws(()=>allocateRoot(root,{create(){calls++;throw Object.assign(Error('fixture'),{code});}}),error=>error.code===code);
+  assert.equal(calls,1,'unrelated filesystem failures must remain visible');
+}
+assert.throws(()=>allocateRoot(root,{fallback:root,create(){throw Object.assign(Error('same-root'),{code:'EACCES'});}}),/same-root/);
 function git(cwd, args) {
   const result = spawnSync('git', args, {cwd, encoding:'utf8', windowsHide:true});
   assert.equal(result.status,0,result.stderr);return result.stdout.trim();
@@ -68,10 +79,11 @@ const streams={stdout:sink,stderr:sink};
     assert.equal(git(independent,['cat-file','-t',remoteOnly]),'commit');
     git(independent,['update-ref','refs/heads/worker-only',sha]);
     const absent=spawnSync('git',['show-ref','--verify','refs/heads/worker-only'],{cwd:root,windowsHide:true});assert.notEqual(absent.status,0);
-    assert.equal(await run(parseArgs(argv),{source:root,temp,streams,jobName:'Tests (windows-latest, shard 1/12)'}),0);
+    assert.equal(await run(parseArgs(argv),{source:root,temp,streams,jobName:'Tests (windows-latest, shard 1/16)'}),0);
     const profiles=[0,1].map(i=>JSON.parse(fs.readFileSync(path.join(temp,'profiles',`worker-${i}.json`))));
     assert.deepEqual(profiles.map(x=>[x.index,x.count]),[[0,2],[1,2]]);
     assert.notEqual(profiles[0].cwd,profiles[1].cwd);
+    assert(profiles.every(row=>row.cwd.length<=root.length+15),'independent checkouts retain a bounded path-length overhead');
     assert.notEqual(profiles[0].temp,profiles[1].temp);
     assert(profiles.every(row=>!fs.existsSync(row.cwd)),'successful joined workers are removed');
     assert(!fs.existsSync(path.join(root,'same-name.txt')));

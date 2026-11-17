@@ -98,63 +98,83 @@ jobs:
           - os: windows-latest
             platform: win32
             shard-index: 0
-            shard-count: 12
-            label: windows-latest, shard 1/12
+            shard-count: 16
+            label: windows-latest, shard 1/16
           - os: windows-latest
             platform: win32
             shard-index: 1
-            shard-count: 12
-            label: windows-latest, shard 2/12
+            shard-count: 16
+            label: windows-latest, shard 2/16
           - os: windows-latest
             platform: win32
             shard-index: 2
-            shard-count: 12
-            label: windows-latest, shard 3/12
+            shard-count: 16
+            label: windows-latest, shard 3/16
           - os: windows-latest
             platform: win32
             shard-index: 3
-            shard-count: 12
-            label: windows-latest, shard 4/12
+            shard-count: 16
+            label: windows-latest, shard 4/16
           - os: windows-latest
             platform: win32
             shard-index: 4
-            shard-count: 12
-            label: windows-latest, shard 5/12
+            shard-count: 16
+            label: windows-latest, shard 5/16
           - os: windows-latest
             platform: win32
             shard-index: 5
-            shard-count: 12
-            label: windows-latest, shard 6/12
+            shard-count: 16
+            label: windows-latest, shard 6/16
           - os: windows-latest
             platform: win32
             shard-index: 6
-            shard-count: 12
-            label: windows-latest, shard 7/12
+            shard-count: 16
+            label: windows-latest, shard 7/16
           - os: windows-latest
             platform: win32
             shard-index: 7
-            shard-count: 12
-            label: windows-latest, shard 8/12
+            shard-count: 16
+            label: windows-latest, shard 8/16
           - os: windows-latest
             platform: win32
             shard-index: 8
-            shard-count: 12
-            label: windows-latest, shard 9/12
+            shard-count: 16
+            label: windows-latest, shard 9/16
           - os: windows-latest
             platform: win32
             shard-index: 9
-            shard-count: 12
-            label: windows-latest, shard 10/12
+            shard-count: 16
+            label: windows-latest, shard 10/16
           - os: windows-latest
             platform: win32
             shard-index: 10
-            shard-count: 12
-            label: windows-latest, shard 11/12
+            shard-count: 16
+            label: windows-latest, shard 11/16
           - os: windows-latest
             platform: win32
             shard-index: 11
-            shard-count: 12
-            label: windows-latest, shard 12/12
+            shard-count: 16
+            label: windows-latest, shard 12/16
+          - os: windows-latest
+            platform: win32
+            shard-index: 12
+            shard-count: 16
+            label: windows-latest, shard 13/16
+          - os: windows-latest
+            platform: win32
+            shard-index: 13
+            shard-count: 16
+            label: windows-latest, shard 14/16
+          - os: windows-latest
+            platform: win32
+            shard-index: 14
+            shard-count: 16
+            label: windows-latest, shard 15/16
+          - os: windows-latest
+            platform: win32
+            shard-index: 15
+            shard-count: 16
+            label: windows-latest, shard 16/16
 
     steps:
       - name: Check out repository
