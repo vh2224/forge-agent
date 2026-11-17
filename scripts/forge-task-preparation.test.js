@@ -850,6 +850,32 @@ async function main() {
     assert.equal(calls, 1);
   });
 
+  await test('Claude native telemetry with policy diagnostics survives a JSON round trip at acceptance', async () => {
+    // The CLI --accept-native path receives telemetry parsed from a file, so arrays
+    // such as policy_diagnostics are never the same reference as the recomputed ones.
+    const request = fixture({ phase: 'discuss', hostRuntime: 'claude', model: 'claude-sonnet-5-5' });
+    request.activeCapabilities = { available: true, tool: 'Agent', source: 'fixture-tool-schema',
+      model_aliases: ['sonnet'], effort_transports: ['agent-argument'], reasoning_efforts: ['medium', 'high'] };
+    const started = await prep.startStandaloneTaskPreparation(request);
+    assert.equal(started.action, 'invoke-native', JSON.stringify(started));
+    const telemetry = JSON.parse(JSON.stringify(started.invocation.telemetry));
+    assert(Array.isArray(started.invocation.telemetry.policy_diagnostics) && started.invocation.telemetry.policy_diagnostics.length > 0,
+      'Sonnet 5.5 alias path must carry policy_diagnostics: ' + JSON.stringify(started.invocation.telemetry));
+    const result = await prep.acceptStandaloneTaskPreparation(request, { route: started.route,
+      rawResult: framed(envelope(request)), invocationTelemetry: telemetry, providerCalled: true });
+    assert.equal(result.ok, true, JSON.stringify(result));
+
+    const tampered = fixture({ phase: 'discuss', hostRuntime: 'claude', model: 'claude-sonnet-5-5' });
+    tampered.activeCapabilities = request.activeCapabilities;
+    const tamperedStart = await prep.startStandaloneTaskPreparation(tampered);
+    const altered = JSON.parse(JSON.stringify(tamperedStart.invocation.telemetry));
+    altered.policy_diagnostics = [{ code: 'altered-by-caller' }];
+    const refused = await prep.acceptStandaloneTaskPreparation(tampered, { route: tamperedStart.route,
+      rawResult: framed(envelope(tampered)), invocationTelemetry: altered, providerCalled: true });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.reason_code, 'native-preparation-telemetry-mismatch');
+  });
+
   await test('canonical, sequential and dashed timestamp task IDs publish without a milestone', async () => {
     for (const taskId of ['T-20260928151522-canonical', 'TASK-007', 'TASK-20260928-104227']) {
       const request = fixture({ phase: 'discuss', taskId });
