@@ -249,12 +249,12 @@ function appServerInputCodes() {
 // Only adapter vocabulary and re-sanitized diagnostic fields cross the CLI.
 // A local process/elapsed duration does not establish a remote provider call.
 function reviewFailureDiagnostic(error = {}) {
-  const safeDiagnostic = diagnostic(error.diagnostic?.reason, error.diagnostic);
+  const safeDiagnostic = diagnostic(error.code === 'review-diff-too-large' ? error.code : error.diagnostic?.reason, error.diagnostic);
   const timeRefusalCodes = require('./forge-milestone-time-admission').TRANSPORT_REFUSAL_CODES;
   const knownCodes = [...Object.values(CLAUDE_SIDECAR_REASON_CODES),
     'procedure-manifest-missing', 'procedure-manifest-invalid', 'procedure-file-unreadable',
     'procedure-module-pending', 'procedure-integrity-mismatch', 'procedure-phase-unmapped',
-    'review-prefs-invalid', 'review-effort-invalid', 'effort-transport-unsupported',
+    'review-prefs-invalid', 'review-effort-invalid', 'review-diff-too-large', 'effort-transport-unsupported',
     'effort-unsupported-by-model', 'native-effort-binding-missing', 'invalid-native-invocation-input',
     'native-capabilities-missing', 'native-tool-unavailable', 'native-capabilities-invalid',
     'native-host-unsupported', 'native-model-unsupported', 'native-effort-unsupported',

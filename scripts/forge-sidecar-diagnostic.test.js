@@ -357,12 +357,21 @@ test('safe diagnostic is a closed vocabulary with numeric metadata only', () => 
 });
 test('review failures preserve closed resolver/output causes without arbitrary messages', () => {
   const { reviewFailureDiagnostic } = require('./forge-xllm');
-  for (const code of ['effort-transport-unsupported', 'effort-unsupported-by-model', 'review-effort-invalid']) {
+  for (const code of ['effort-transport-unsupported', 'effort-unsupported-by-model', 'review-effort-invalid', 'review-diff-too-large']) {
     const safe = reviewFailureDiagnostic({ code, provider_called: false, message: 'private-sentinel' });
     assert.equal(safe.reason_code, code); assert.equal(safe.provider_called, false);
     assert(!JSON.stringify(safe).includes('private-sentinel'));
   }
   const empty = reviewFailureDiagnostic({ code: 'agy-output-empty', diagnostic: diagnostic('output-empty', { stdout_bytes: 0 }) });
+  for (const provider_called of [false, true, undefined]) {
+    const guarded = reviewFailureDiagnostic({ code: 'review-diff-too-large', provider_called,
+      message: 'private-sentinel', diagnostic: { reason: 'private-sentinel', tail: 'private-sentinel' } });
+    assert.equal(guarded.reason_code, 'review-diff-too-large');
+    assert.equal(guarded.diagnostic.reason, 'review-diff-too-large');
+    assert.equal(guarded.diagnostic.stage, 'validation');
+    assert.equal(guarded.provider_called, provider_called ?? null);
+    assert(!JSON.stringify(guarded).includes('private-sentinel'));
+  }
   assert.equal(empty.reason_code, 'agy-output-empty'); assert.equal(empty.diagnostic.reason, 'output-empty');
   assert.equal(empty.provider_called, null);
   const reasons = { 'agy-timeout': 'provider-timeout', 'agy-cancelled': 'provider-cancelled', 'agy-output-limit': 'output-limit',

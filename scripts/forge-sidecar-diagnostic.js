@@ -32,6 +32,7 @@ const REASONS = Object.freeze({
   'provider-unavailable': 'transport', 'publication-failed': 'publication',
   'host-observation-failed': 'adapter', 'verification-capture-failed': 'verification',
   'adapter-failed': 'adapter', 'anomalous-silence': 'transport',
+  'review-diff-too-large': 'validation',
   'codex-readonly-context-unsupported': 'capability',
   'unsupported-sidecar-unit': 'capability',
   'budget-exceeded-while-active': 'transport', 'duplicate-terminal':'envelope', 'event-after-terminal':'envelope',

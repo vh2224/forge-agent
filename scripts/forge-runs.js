@@ -737,6 +737,8 @@ function inspectOwnerResume(cwd, id, options = {}) {
 function assertResumeQuiescence(cwd, record, nextHost, noLeases, partialOptions) {
   const controller = require('./forge-unit-controller');
   if (controller.pendingOwnerInterruptions(cwd).length) throw resumeError('owner-interruption-pending');
+  const repairScope = partialOptions?.deliveryRepair
+    ? require('./forge-completion-delivery-recovery').inspectRetainedClaimResume(cwd,record,partialOptions.deliveryRepair) : null;
   const empty = directory => {
     let handle;
     try { const stat = fs.lstatSync(directory); if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
@@ -744,7 +746,7 @@ function assertResumeQuiescence(cwd, record, nextHost, noLeases, partialOptions)
     } catch (error) { return error.code === 'ENOENT' && !handle; }
     finally { if (handle) handle.closeSync(); }
   };
-  if (!noLeases()) throw resumeError('owner-resume-lease-present');
+  if (!noLeases(repairScope)) throw resumeError('owner-resume-lease-present');
   const transactions = controller.transactionDir(cwd);
   try {
     const stat = fs.lstatSync(transactions);
@@ -757,7 +759,7 @@ function assertResumeQuiescence(cwd, record, nextHost, noLeases, partialOptions)
   if (controller.pendingTransactions(cwd).length) throw resumeError('owner-resume-transaction-pending');
   if (require('./forge-write-claim').isHeld(record.write_claim)) {
     if (!partialOptions) throw resumeError('owner-resume-claim-held');
-    if (partialOptions.deliveryRepair) require('./forge-completion-delivery-recovery').inspectRetainedClaimResume(cwd, record, partialOptions.deliveryRepair);
+    if (partialOptions.deliveryRepair) { if(!repairScope)throw resumeError('owner-resume-claim-held'); }
     else controller.inspectPausedAttempt(cwd, record, partialOptions);
   }
   if (record.worker || record.worker_started) throw resumeError('owner-resume-worker-unreconciled');
@@ -767,7 +769,13 @@ function assertResumeQuiescence(cwd, record, nextHost, noLeases, partialOptions)
   const eventsFile = controller.eventsFile(cwd, record.id);
   const eventBytes = fs.existsSync(eventsFile) ? fs.readFileSync(eventsFile) : Buffer.alloc(0);
   const intervals = require('./forge-phase-cost').analyzeEventIntervals(eventBytes);
-  if (intervals.open.length || intervals.ambiguous.length || intervals.milestones.some(id => id !== record.id)) throw resumeError('owner-resume-history-unreconciled');
+  if (intervals.open.some(row=>!repairScope || row.begin_key!==repairScope.begin_key || row.unit!==repairScope.unit || row.milestone!==record.id || row.host!==nextHost)
+      || intervals.ambiguous.length || intervals.milestones.some(id => id !== record.id)) throw resumeError('owner-resume-history-unreconciled');
+  if (repairScope) {
+    const original=controller.verifyCommittedCompletionBoundary(cwd,repairScope.original_completion_key);
+    if(original.unit!==repairScope.unit || original.milestone!==record.id || !noLeases(repairScope)) throw resumeError('owner-resume-boundary-required');
+    return {...original,delivery_repair:repairScope};
+  }
   const events = controller.readEvents(eventsFile);
   const terminal = events.filter(event => ['complete','pause','fail','expired-safe'].includes(event.action)).at(-1);
   if (!terminal) throw resumeError('owner-resume-boundary-required');
@@ -883,13 +891,14 @@ function resumeOwner(cwd, id, options = {}) {
       if (snapshot.sha256 !== options.expectedRecordSha256) throw resumeError('owner-resume-snapshot-changed');
       if (!knownResumeBinding(current)) throw resumeError('owner-resume-binding-unknown');
       const same = current.session_id === observed.sessionId && current.host_runtime === observed.hostRuntime;
-      if (same && current.active === true) return { status: 'unchanged', record: get(cwd,id) };
+      if (same && current.active === true && !options.deliveryRepair) return { status: 'unchanged', record: get(cwd,id) };
       if (!same && options.confirmOwnerStopped !== true) throw resumeError('owner-resume-owner-stop-attestation-required');
       if (options.confirmWorkspaceQuiescent !== true) throw resumeError('owner-resume-workspace-quiescent-attestation-required');
       const boundary = assertResumeQuiescence(cwd, current, observed.hostRuntime, boundaryGuard.noLeases,
         options.deliveryRepair ? { deliveryRepair: options.deliveryRepair } : same && typeof options.inspectAttempt === 'function' ? options : null);
       const history = current.owner_resume_history === undefined ? [] : current.owner_resume_history;
       if (!Array.isArray(history)) throw resumeError('owner-resume-history-unknown');
+      if(options.deliveryRepair) require('./forge-completion-delivery-recovery').publishPreparedResumeBaseline(cwd,current,options.deliveryRepair,boundary.delivery_repair);
       const evidence = { at: new Date().toISOString(), previous_record_sha256: snapshot.sha256,
         previous_session_sha256: resumeDigest(current.session_id), previous_host_runtime: current.host_runtime,
         current_session_sha256: resumeDigest(observed.sessionId), current_host_runtime: observed.hostRuntime,

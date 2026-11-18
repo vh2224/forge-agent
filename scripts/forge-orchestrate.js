@@ -698,7 +698,9 @@ function nextInside(inputValue, options) {
   let selection;
   try {
     selection = forgeController.select(input.cwd, { milestone: input.milestone, ...(auto ? { cohort: true } : {}) },
-      { ...options, ...(input.prefsReader ? { prefsReader: input.prefsReader } : {}) });
+      { ...options, ...(input.prefsReader ? { prefsReader: input.prefsReader } : {}),
+        deliveryRepairActor:{hostRuntime:input.host_runtime,ownerToken:input.owner_token,
+          allowDefaultOwnerToken:inputValue.owner_token===undefined&&inputValue.ownerToken===undefined} });
   } catch (cause) {
     if (cause && cause.code === 'CONTROLLER_FAILPOINT') throw cause;
     const code = cause.code || 'failed';
@@ -1056,7 +1058,8 @@ function resumeDelivery(inputValue) {
   const input = normalizeInput(inputValue);
   try {
     const proof = require('./forge-completion-delivery-recovery').verifyRepairCompletion({ cwd: input.cwd, milestone: input.milestone,
-      ownerToken: input.owner_token, hostRuntime: input.host_runtime, block: inputValue.delivery_block, repairBeginKey: inputValue.repair_begin_key });
+      ownerToken: input.owner_token, hostRuntime: input.host_runtime, block: inputValue.delivery_block, repairBeginKey: inputValue.repair_begin_key,
+      allowDefaultOwnerToken: inputValue.owner_token === undefined && inputValue.ownerToken === undefined });
     return Object.assign(base('resume-delivery', 'completed', 'delivery-recovery-ready', input), { details: { delivery: proof } });
   } catch (cause) {
     const known = ['delivery-recovery-original-changed', 'delivery-recovery-baseline-unproven', 'delivery-recovery-event-unproven'];

@@ -1056,6 +1056,7 @@ function runRootVerification(contract, options = {}) {
   const results = measured.code_roots.map(root => {
     const sealed = options.verificationSeal?.roots.find(row => row.root_id === root.id);
     const snapshot = require('./forge-surgical-reset').captureAttemptSnapshot(root.path);
+    require('./forge-delivery-source-policy').capture(root.path, snapshot);
     const result = runVerificationGate({ ...options, cwd: root.path, gsdDir: require('path').join(measured.owner, '.gsd'), checkRootId: root.id,
       preferenceCommands: sealed?.commands || options.commandsByRoot?.[root.id] || options.preferenceCommands,
       ...(sealed ? { taskPlanVerify: null, commandTimeoutMs: options.verificationSeal.command_timeout_ms } : {}) });
@@ -1092,6 +1093,7 @@ function captureRootDelivery(contract, planText, options = {}) {
     }).map(row => ({ path: roots.qualified(row), reason: 'expected_output_missing' }));
     result.passed = result.missing.length === 0 && result.rows.every(row => row.exists === true);
     const observed = require('./forge-surgical-reset').captureAttemptSnapshot(envelope.code_dir);
+    require('./forge-delivery-source-policy').capture(envelope.code_dir, observed);
     return { ...envelope, kind: 'artifact', revision: observed.start_sha, workspace: observed.pre_dirty,
       captured_at: new Date().toISOString(), result };
   });
