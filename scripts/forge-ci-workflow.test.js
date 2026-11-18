@@ -254,12 +254,12 @@ for(const platform of ['Linux','macOS','Windows'])for(const output of [undefined
   assert.strictEqual(verify,!(platform==='Windows'&&output==='false'),'missing or unknown setup metadata always keeps verification');
 }
 const rows = expandJobs(POLICY.workflows.ci);
-assert.strictEqual(rows.length, 41);
+assert.strictEqual(rows.length, 49);
 assert.strictEqual(rows.filter(row => row.kind === 'alias').length, 9);
 assert.deepStrictEqual(rows.filter(row => row.key === 'test').map(row => row.name),
-  [['ubuntu-latest', 3], ['macos-latest', 5], ['windows-latest', 21]].flatMap(([os, count]) => Array.from({length:count}, (_, i) => `Tests (${os}, shard ${i+1}/${count})`)));
+  [['ubuntu-latest', 5], ['macos-latest', 5], ['windows-latest', 27]].flatMap(([os, count]) => Array.from({length:count}, (_, i) => `Tests (${os}, shard ${i+1}/${count})`)));
 assert.strictEqual(rows.filter(row => row.name === 'Tests (ubuntu-latest)' && row.kind === 'alias').length, 1);
-assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'win32').map(row => row.matrix['shard-count']), Array(21).fill(21));
+assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'win32').map(row => row.matrix['shard-count']), Array(27).fill(27));
 assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'darwin').map(row => row.matrix['shard-count']), Array(5).fill(5));
 // Smoke condition evaluated per policy cell: exactly one Linux and one macOS run, never Windows.
 const runnerOs = { 'ubuntu-latest': 'Linux', 'macos-latest': 'macOS', 'windows-latest': 'Windows' };

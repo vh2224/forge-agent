@@ -33,17 +33,18 @@ It keeps the original platform applicability and fails on nonzero exit, signal
 or spawn failure. Its explicit initial cost estimates come from the previous
 hosted smoke steps; future measured suite timings override those estimates.
 
-Linux jobs start two canonical runners and macOS jobs start three. Windows uses
-two initial jobs with one worker each, followed by nineteen jobs with two workers
-each. This gives the longest weighted lanes their own runner rather than pairing
-the two heaviest tests on the same machine. Every worker uses separate Git clones,
+Linux uses four initial single-worker jobs and one paired job. macOS uses five
+jobs with three canonical runners each. Windows uses fourteen initial single-worker
+jobs followed by thirteen paired jobs. This separates the previously slow shared
+VM lanes while preserving the exact global worker assignments. Every worker uses
+separate Git clones,
 with independent objects, refs, indexes, working directories and temp roots.
 Local clone optimization/hardlinks are disabled. Checkout credentials are not
 copied. Candidate HEAD and source origin/history are preserved. The canonical
 runner continues to isolate HOME for each suite, compare the known-failure
 baseline in both directions and produce bounded structured profiles.
 
-Three Linux, five macOS and twenty-one Windows jobs produce six, fifteen and forty
+Five Linux, five macOS and twenty-seven Windows jobs produce six, fifteen and forty
 effective shards. The explicit single-worker prefix and paired-job offsets map
 all sixty-one global worker indices without gaps or duplication.
 Every unit is assigned exactly once by the common complete partition. Every
