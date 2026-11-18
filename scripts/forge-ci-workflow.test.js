@@ -254,13 +254,13 @@ for(const platform of ['Linux','macOS','Windows'])for(const output of [undefined
   assert.strictEqual(verify,!(platform==='Windows'&&output==='false'),'missing or unknown setup metadata always keeps verification');
 }
 const rows = expandJobs(POLICY.workflows.ci);
-assert.strictEqual(rows.length, 42);
+assert.strictEqual(rows.length, 41);
 assert.strictEqual(rows.filter(row => row.kind === 'alias').length, 9);
 assert.deepStrictEqual(rows.filter(row => row.key === 'test').map(row => row.name),
-  [['ubuntu-latest', 3], ['macos-latest', 6], ['windows-latest', 21]].flatMap(([os, count]) => Array.from({length:count}, (_, i) => `Tests (${os}, shard ${i+1}/${count})`)));
+  [['ubuntu-latest', 3], ['macos-latest', 5], ['windows-latest', 21]].flatMap(([os, count]) => Array.from({length:count}, (_, i) => `Tests (${os}, shard ${i+1}/${count})`)));
 assert.strictEqual(rows.filter(row => row.name === 'Tests (ubuntu-latest)' && row.kind === 'alias').length, 1);
 assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'win32').map(row => row.matrix['shard-count']), Array(21).fill(21));
-assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'darwin').map(row => row.matrix['shard-count']), Array(6).fill(6));
+assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'darwin').map(row => row.matrix['shard-count']), Array(5).fill(5));
 // Smoke condition evaluated per policy cell: exactly one Linux and one macOS run, never Windows.
 const runnerOs = { 'ubuntu-latest': 'Linux', 'macos-latest': 'macOS', 'windows-latest': 'Windows' };
 const smokeCells = rows.filter(row => row.key === 'test'
@@ -280,7 +280,7 @@ for (const [platform,platformCells] of cells) {
   const cell=platformCells[0],layouts=platformCells.map(row=>workerLayout({index:row['shard-index'],count:row['shard-count'],jobs:row.workers,singleWorkerJobs:row['single-worker-jobs']}));
   const count=layouts[0].count;assert(layouts.every(row=>row.count===count));
   assert.deepStrictEqual(layouts.flatMap(row=>Array.from({length:row.workers},(_,i)=>row.start+i)).sort((a,b)=>a-b),Array.from({length:count},(_,i)=>i));
-  assert.strictEqual(count,{linux:6,darwin:18,win32:40}[platform]);totalWorkers+=count;
+  assert.strictEqual(count,{linux:6,darwin:15,win32:40}[platform]);totalWorkers+=count;
   const plans = Array.from({ length: count }, (_, index) => planShards({
     suites, index, count, platform, profile, estimatedWeights: unitWeights(unitInventory, profile, platform) }));
   assert(plans.every(plan => plan.fallback === null && plan.algorithm === 'weighted-lpt-v1'));
@@ -288,7 +288,7 @@ for (const [platform,platformCells] of cells) {
   assert(verifyPartition(suites, plans.map(plan => plan.selected)).ok);
   console.log(`PASS partition ${cell.platform}/${cell['shard-count']} universe=${suites.length} unprofiled=${plans[0].unprofiled.length} stale=${plans[0].stale.length} partition_sha256=${plans[0].partition_sha256}`);
 }
-assert.strictEqual(totalWorkers,64);assert(totalWorkers<=64);
+assert.strictEqual(totalWorkers,61);assert(totalWorkers<=64);
 marker('truth', 3, 'baseline and versioned profile wired; full matrix coverage disjoint with equal fingerprints and fallback null; CI structure preserved');
 marker('key_link', 1, 'loadShardProfile planShards and verifyPartition exercise every real matrix platform/count/index');
 marker('key_link', 5, 'Run test suites invokes run-tests with baseline profile and final shard-index/count flags');

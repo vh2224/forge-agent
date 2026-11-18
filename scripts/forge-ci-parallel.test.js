@@ -76,7 +76,8 @@ assert.equal(toolPlan({...toolOptions,index:2},{platform:'win32',profileFile:'un
 assert.equal(toolPlan(toolOptions,{platform:'win32',profileFile:path.join(temp,'absent-profile')}).needs_svn,true);
 const toolProfile=JSON.parse(fs.readFileSync(path.join(__dirname,'fixtures/ci-latency/shard-profile.json')));
 for(const id of Object.keys(toolProfile.platforms.win32.weights_ms))toolProfile.platforms.win32.weights_ms[id]=1;
-toolProfile.platforms.win32.weights_ms['forge-linked-task-start.ci-01-of-2.test.js']=800000;
+const linkedCoreId=require('./forge-ci-units').unitsForSuite('forge-linked-task-start.test.js')[0].id;
+toolProfile.platforms.win32.weights_ms[linkedCoreId]=800000;
 const toolProfileFile=path.join(temp,'tool-profile.json');fs.writeFileSync(toolProfileFile,JSON.stringify(toolProfile));
 assert.equal(require('./forge-ci-shards').loadShardProfile(toolProfileFile).state,'loaded');
 const gitOnly=toolPlan(toolOptions,{platform:'win32',profileFile:toolProfileFile});

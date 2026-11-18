@@ -5,8 +5,8 @@
     "oid": "ccb36bc99476b31c83c790321b9a816d4a4402ea"
   },
   "ci_after": {
-    "sha256": "55b3bcc7ea618b3376c67aa67e467ebf62397680300b71ec9f01f90e20da1f91",
-    "oid": "7047d4744fd3131367bfca57fc84d6d250bc1156"
+    "sha256": "9a9ccc6f3f7b9bf5cd69830edf93ec89f1715004c9065648dc0148dfc5d4b2ff",
+    "oid": "ba9c6634c7d9a67313d51588af00ae20de8bb0ef"
   },
   "release_before": {
     "sha256": "635887910ef3fdb5b5c0b7731ee7e6dee86c39e6e675b6d701cacf8e4a321747",
@@ -99,8 +99,8 @@
       "os": "macos-latest",
       "platform": "darwin",
       "shard-index": 0,
-      "shard-count": 6,
-      "label": "macos-latest, shard 1/6",
+      "shard-count": 5,
+      "label": "macos-latest, shard 1/5",
       "workers": 3,
       "single-worker-jobs": 0
     },
@@ -108,8 +108,8 @@
       "os": "macos-latest",
       "platform": "darwin",
       "shard-index": 1,
-      "shard-count": 6,
-      "label": "macos-latest, shard 2/6",
+      "shard-count": 5,
+      "label": "macos-latest, shard 2/5",
       "workers": 3,
       "single-worker-jobs": 0
     },
@@ -117,8 +117,8 @@
       "os": "macos-latest",
       "platform": "darwin",
       "shard-index": 2,
-      "shard-count": 6,
-      "label": "macos-latest, shard 3/6",
+      "shard-count": 5,
+      "label": "macos-latest, shard 3/5",
       "workers": 3,
       "single-worker-jobs": 0
     },
@@ -126,8 +126,8 @@
       "os": "macos-latest",
       "platform": "darwin",
       "shard-index": 3,
-      "shard-count": 6,
-      "label": "macos-latest, shard 4/6",
+      "shard-count": 5,
+      "label": "macos-latest, shard 4/5",
       "workers": 3,
       "single-worker-jobs": 0
     },
@@ -135,17 +135,8 @@
       "os": "macos-latest",
       "platform": "darwin",
       "shard-index": 4,
-      "shard-count": 6,
-      "label": "macos-latest, shard 5/6",
-      "workers": 3,
-      "single-worker-jobs": 0
-    },
-    {
-      "os": "macos-latest",
-      "platform": "darwin",
-      "shard-index": 5,
-      "shard-count": 6,
-      "label": "macos-latest, shard 6/6",
+      "shard-count": 5,
+      "label": "macos-latest, shard 5/5",
       "workers": 3,
       "single-worker-jobs": 0
     },

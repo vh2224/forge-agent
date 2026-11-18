@@ -1,28 +1,17 @@
 {
-  "unit_run": "44221144256",
-  "unit_run_head": "34a9a3c7a41f651f4e15f3a8bda93a22cf1d68b2",
+  "unit_run": "44236577264",
+  "unit_run_head": "439ff6dadf4b129509287530b4bacfe04463705f",
   "unit_run_conclusion": "success",
   "sources": 61,
   "unit_profiles": 61,
   "original_profiles": 0,
-  "superseded_unit_runs": [
-    "44154000574",
-    "44163993587",
-    "44172245727",
-    "44183550750",
-    "44187991176"
-  ],
   "collector": "forge-ci-profile.readInput/sourceFrom/profileFromSources",
-  "profile_sha256": "209a89e08a610c6fea777165ed3a239722b91d1bf7815fc8aebeaa68f3609dca",
+  "profile_sha256": "563530d16e29e1736c4e8a37087ef8e205c4c50307dcc04b2ccd8f0a87621dbd",
   "limits": [
-    "Complete successful master run: all517units and129registered split cases executed exactly once per platform.",
-    "Only the61 current profiles are inputs; old physical artifacts are preserved separately to honor the64-source bound.",
-    "All current unit memberships are measured; no renamed cohort is assigned a fabricated current observation.",
-    "Observed CI was13m05s including queue/setup; one macOS lane executed10m56s against6m36s mean worker work.",
-    "Windows linked lifecycle unit measured9m23s on its exclusive VM; a file-only reallocation cannot shorten that unit.",
-    "New allocation predictions exclude queue/setup and hardware variability and are not a hosted success guarantee.",
-    "Linked-v2 core/regressions/closures identities are intentionally unprofiled. Catalog estimates refer to the old measured core/regressions; no old observation is relabeled as a new measurement.",
-    "The third linked cohort moves only independent E/F fixtures; direct all invocation retains the original block/order and every assertion.",
-    "Windows tool preflight can skip SVN only for a nonempty single-worker assignment containing solely the Git-only linked fixture."
+    "All518 current units and129 registered cases executed exactly once perplatform in a successful complete run.",
+    "FullCI took601seconds: strict ten-minute target was missed byone second, not hidden.",
+    "Only61 successful current profiles are inputs; failed-run timings are not observations in this refreshed profile.",
+    "Newlinked-v2 identities are now measured; their memberships match the current catalog exactly.",
+    "Predictions exclude queue/setup and hardware variability; native macOS concurrency is limited externally."
   ]
 }

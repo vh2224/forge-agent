@@ -43,9 +43,9 @@ copied. Candidate HEAD and source origin/history are preserved. The canonical
 runner continues to isolate HOME for each suite, compare the known-failure
 baseline in both directions and produce bounded structured profiles.
 
-Three Linux, six macOS and twenty-one Windows jobs produce six, eighteen and forty
+Three Linux, five macOS and twenty-one Windows jobs produce six, fifteen and forty
 effective shards. The explicit single-worker prefix and paired-job offsets map
-all sixty-four global worker indices without gaps or duplication.
+all sixty-one global worker indices without gaps or duplication.
 Every unit is assigned exactly once by the common complete partition. Every
 worker is joined on failure; successful sibling profiles remain diagnostic
 evidence. Failed/incompletely joined checkouts and nonempty worker temp roots are
@@ -56,18 +56,20 @@ the suite explicitly preserved.
 
 The active profile at `scripts/fixtures/ci-latency/shard-profile.json` was refreshed
 through the canonical collector from all 61 complete worker profiles of successful
-master run 44221144256 on 34a9a3c. All 517 then-current units and 129 registered
-partition cases executed exactly once per platform. Old physical inputs remain
-separate so the collector stays below its 64-source bound. The first master run
-took 13m05s; its macOS maximum worker took 10m56s against 6m36s mean worker work.
-The refreshed weights rebalance those observed costs; predictions are not hosted
-acceptance.
+PR run 44236577264 on 439ff6d. All 518 current units and 129 registered partition
+cases executed exactly once per platform. That run took 10m01s, a strict target
+miss retained as evidence. Old physical and failed inputs remain separate so the
+collector stays below its unchanged 64-source bound. All current cohort identities
+are measured; the new allocation has no unprofiled or stale units. Predictions
+remain distinct from hosted acceptance. The earlier master run 44221144256 took
+13m05s and remains a separate historical measurement.
 
 The linked lifecycle now has a third cohort for its two independent closure
 fixtures. The dependent lifecycle stays together. Direct complete invocation calls
 the identical extracted block at its original position. New linked-v2 timing
-identities use explicit estimates from the old measured core/regression units;
-future measurements of the new identities win. The inventory is now 478 source
+identities retain explicit legacy estimates for an absent measurement; the current
+profile now contains real observations of all three identities, which take
+precedence. The inventory is now 478 source
 suites and 518 execution units per platform.
 
 Historical distribution layers repeat an ancestor-pin sentinel through the same
@@ -89,7 +91,7 @@ matrix job-name binding and observed Node/image metadata. Feed those logs
 individually to the existing raw-log collector. The combined job console has
 multiple runners and intentionally remains ambiguous for that collector.
 For an allocation estimate matching CI, use `forge-ci-profile report` with
-`--partition-suites` and the effective counts linux:6, darwin:18, win32:40.
+`--partition-suites` and the effective counts linux:6, darwin:15, win32:40.
 Leave out that option when analyzing the older whole-file runner universe.
 Report execution, queue, setup and aggregate runner work separately.
 
