@@ -1,4 +1,4 @@
-'use strict';const assert=require('assert/strict'),fs=require('fs'),path=require('path');const root=path.resolve(__dirname,'..'),layer=require('./fixtures/issues-420-424/distribution.cjs');
+'use strict';const assert=require('assert/strict'),fs=require('fs'),path=require('path');const root=path.resolve(__dirname,'..'),layer=require('./fixtures/issues-429-432/distribution.cjs');
 const artifacts=require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts;
 assert.equal(layer.validate({artifacts}),true);assert.equal(layer.issues410413Layer.provenance.base_revision,'7d2e83a22f2f4a87db538af0ab5632cd3c3487cb');
 for(const file of ['scripts/forge-verify.js','scripts/forge-runs.js','scripts/forge-delivery-source-scope.js','scripts/forge-completion-delivery-recovery.js','shared/forge-completion-delivery-recovery.md'])assert.throws(()=>layer.validate({artifacts,readRaw:rel=>rel===file?Buffer.from('foreign drift'):fs.readFileSync(path.join(root,rel))}));

@@ -506,6 +506,13 @@ function captureMilestoneBaseline(request, receipt, options = {}) {
     protected_roots: contract.code_roots.map(root => ({ root_id: root.id, path: root.path, snapshot: execution.protectedSnapshot(root.path) })) };
 }
 function reconcileMilestoneAttempt(request, receipt, runtime = {}) {
+  if (runtime.ownerReconciliation !== undefined) {
+    return require('./forge-protected-owner-activity').withOwnerReconciliation(runtime.ownerReconciliation, request,
+      () => reconcileMilestoneAttemptInside(request, receipt, runtime));
+  }
+  return reconcileMilestoneAttemptInside(request, receipt, runtime);
+}
+function reconcileMilestoneAttemptInside(request, receipt, runtime = {}) {
   const baseline = receipt.recovery_baseline, roots = require('./forge-code-roots');
   if (!baseline || baseline.schema_version !== 1) fail('recovery-baseline-required');
   const contract = roots.validateContract(baseline.execution_contract, { owner: request.contextRoot || request.cwd, revalidate: true });
@@ -520,7 +527,8 @@ function reconcileMilestoneAttempt(request, receipt, runtime = {}) {
   const execution = require('./forge-task-execution');
   const protectedOwner = receipt.execution?.protected_owner || baseline.protected_owner;
   // Only the core-owned event hash may advance from the original baseline.
-  const withoutEvent = snapshot => Object.entries(snapshot).filter(([key]) => key !== '.gsd/forge/events.jsonl').sort();
+  const withoutEvent = snapshot => Object.entries(require('./forge-protected-owner-activity').expectedProtectedOwner(contract.owner, snapshot))
+    .filter(([key]) => key !== '.gsd/forge/events.jsonl').sort();
   if (roots.digest(withoutEvent(protectedOwner)) !== roots.digest(withoutEvent(baseline.protected_owner))) fail('recovery-owner-snapshot-mismatch');
   execution.assertProtected(contract.owner, protectedOwner);
   if (baseline.protected_roots.length !== contract.code_roots.length) fail('recovery-baseline-roots-missing');
@@ -3777,6 +3785,11 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
         let artifacts;
       transportReturned = true;
       await livenessQueue;
+      const ownerActivity = require('./forge-protected-owner-activity').currentScope();
+      if (ownerActivity) {
+        await ownerActivity.joinWriter();
+        ownerActivity.verificationWindow(verificationSeal);
+      }
        // A completed app-server turn can resolve while its local process is
        // still draining/being terminated. Verify immutable deltas only after
        // the real member writer exited and its PID is gone.
@@ -4262,7 +4275,9 @@ async function runUnitSidecar(request, runtime = {}) {
     windows.assertMutationAllowed(request.contextRoot || request.cwd);
     if (runtime.ownerTransportAdapter) return windows.protectPreparation(request, runtime.ownerTransportAdapter, () => runUnitSidecarInsideOwnerWindow(request, runtime));
   }
-  return runUnitSidecarInsideOwnerWindow(request, runtime);
+  const activity = require('./forge-protected-owner-activity');
+  return activity.withReconciliationHandoff(request, runtime, () => activity.withExecutionActivity(request, runtime,
+    scoped => runUnitSidecarInsideOwnerWindow(request, scoped)));
 }
 async function runUnitSidecarInsideOwnerWindow(request, runtime = {}) {
   const linked = request?.linked_begin_key ? require('./forge-attempt-recovery').bindLinkedRequest(request, runtime.linkedEntryOptions) : request || {};
@@ -4297,6 +4312,8 @@ async function runUnitSidecarInsideOwnerWindow(request, runtime = {}) {
   }
 }
 async function recoverUnitSidecar(request, recovery, runtime = {}) {
+  if (runtime.ownerReconciliation !== undefined) require('./forge-protected-owner-activity')
+    .assertOwnerReconciliationReady(runtime.ownerReconciliation, request);
   if (request.linked_begin_key) request = require('./forge-attempt-recovery').bindLinkedRequest(request, runtime.linkedEntryOptions);
   // Mandatory obligations fail closed before process/receipt inspection.
   const recoveryProcedure = require('./forge-procedure-context').loadProcedureContext({ cwd: request.cwd, phase: 'recovery',
@@ -4451,8 +4468,12 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     validateEnvironmentalCorrection: runtime.validateEnvironmentalCorrection,
     // Reached synchronously through transitionGuard.assertAuthority, also from
     // inside a successor scope: the original keeps its own fresh exact scope.
-    validateExecutionAuthority: () => asOriginal(executionRequest, () => validateRecoveryRequest(executionRequest, { verification: runtime.verification, nativeInvocation: request.route.worker_mode === 'native'
-      ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route)) : undefined })),
+    validateExecutionAuthority: () => {
+      if (runtime.ownerReconciliation !== undefined) require('./forge-protected-owner-activity')
+        .assertOwnerReconciliationReady(runtime.ownerReconciliation, request);
+      return asOriginal(executionRequest, () => validateRecoveryRequest(executionRequest, { verification: runtime.verification, nativeInvocation: request.route.worker_mode === 'native'
+        ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route)) : undefined }));
+    },
     reconcile: receipt => {
       if (canonical.unitType === 'review-fix' && !receipt.recovery_baseline)
         return reconcileLegacyReviewFix(request, receipt, executionRequest.execution_contract);

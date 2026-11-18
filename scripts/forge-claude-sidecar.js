@@ -654,7 +654,8 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
   let child;
   try {
     const memberScope = require('./forge-execution-batch').currentMemberProcessScope();
-    const spawnProvider = memberScope ? memberScope.spawn : spawn;
+    const ownerScope = require('./forge-protected-owner-activity').currentScope();
+    const spawnProvider = memberScope ? memberScope.spawn : ownerScope ? ownerScope.spawn : spawn;
     child = spawnProvider(cmd, args, { cwd, shell: false, env, stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true, detached: process.platform !== 'win32' });
   } catch (error) { return Promise.reject(String(error.code || '').startsWith('batch-') ? error : mapSpawnError(error)); }

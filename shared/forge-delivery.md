@@ -105,7 +105,7 @@ Preserve the original receipt/result/state; never patch a failed capture to pass
 
 ## Protected-window hook observations
 
-During a coordinated native preparation window, `forge-hook` retains observational
+During a coordinated native preparation or ordinary v2 execution window, `forge-hook` retains observational
 tool evidence under `forge-owner-transport-window.controlRoot(owner)` in
 `hook-evidence/<binding_sha256>/<canonical-evidence-name>.jsonl`. This private
 external journal survives window settlement; it is not replayed as an authorized
@@ -113,6 +113,37 @@ owner append and grants no consent or publication authority. The strict owner
 snapshot and live join requirements remain in force. Other `.gsd` writes still
 refuse. Legacy uncoordinated embedding must supply the supported owner transport
 adapter; absence of a protected window is not evidence of compatibility.
+
+### Reconcile an attributed owner delta
+
+`forge-protected-owner-activity.createOwnerReconciliation` creates a private,
+single-use observation for a milestone execute-task attempt. It requires live
+owner authority, stopped-writer and pending-question adapters, plus an exact
+delta attestation bound to the request, original receipt and baseline hashes.
+Saved JSON assertions are not adapters. All possible writer roots must have
+been reconciled before a successor writer starts.
+
+Known lease-clock, append-only hook and canonical stop deltas require their
+original bytes and an attributable host reference. A changed lease must still
+belong to the original, open controller begin. A manual HANDOFF/session note or
+missing preimage requires the exact scoped decision produced by
+`reconciliationDecision`: present it through the owner's question channel and
+save the explicit answer with `forge-pending-questions`. The decision binds the
+reviewed delta hash; pending, negative or foreign answers refuse. Plans, claims,
+code and unrelated metadata cannot be approved through this API.
+
+Pass the private handle as `runtime.ownerReconciliation` to
+`reconcileMilestoneAttempt` and the eligible `recoverUnitSidecar` continuation.
+The overlay accepts only the observed paths/bytes; another edit invalidates it.
+It preserves original receipt/S0 evidence, permits only the canonical reset's
+reconciliation annotation, and transfers to fresh successor guards once. It
+does not grant routing permission or turn raw `returned.json` into a validated
+delivery. Reuse still requires the existing saved-result eligibility and all
+verification/publication gates.
+
+Zero verification bindings cannot establish a task's criteria: both the current
+delivery reader and controller completion gate require every criterion to be
+verified. A successful command alone does not supply missing bindings.
 
 This contract builds a deterministic delivery projection for review, QA and human
 acceptance. It does not change verification gates, workflow state or approval. The

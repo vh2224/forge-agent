@@ -711,7 +711,8 @@ function startAppServerTurn(options) {
 
     try {
       const memberScope = require('./forge-execution-batch').currentMemberProcessScope();
-      const spawnProvider = memberScope ? memberScope.spawn : spawn;
+      const ownerScope = require('./forge-protected-owner-activity').currentScope();
+      const spawnProvider = memberScope ? memberScope.spawn : ownerScope ? ownerScope.spawn : spawn;
       child = spawnProvider(cmd, [...args, 'app-server'], {
         cwd,
         env,

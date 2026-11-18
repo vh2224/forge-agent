@@ -5,6 +5,7 @@
 const path = require('node:path');
 const crypto = require('node:crypto');
 const DEFINITIONS = Object.freeze({
+  'forge-issues-429-432.test.js': { parts: 13, kind: 'cases', revision: 'owner-v1' },
   'forge-issues-420-424.test.js': { parts: 17, kind: 'cases', revision: 'delivery-v2' },
   'forge-execution-batch-process.test.js': { parts: 16, kind: 'cases', revision: 'restart-v2', costDivisors: {0:5,5:4} },
   'forge-execution-batch-isolation.test.js': { parts: 8, kind: 'cases' },
@@ -20,6 +21,7 @@ const DEFINITIONS = Object.freeze({
 // Explicit initial estimates, not observations of this new wrapper. The prior
 // smoke steps in run44163993587 took56s on Linux and153s on macOS.
 const INITIAL_COSTS = Object.freeze({
+  'forge-issues-429-432.test.js': Object.freeze({ linux: 30000, darwin: 30000, win32: 30000 }),
   'forge-ci-smoke.test.js': Object.freeze({ linux: 60000, darwin: 180000, win32: 1 }),
   // Conservative planning estimate for each new independent fixture, not a
   // hosted measurement. A measured current unit always wins in planShards.

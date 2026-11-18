@@ -242,6 +242,77 @@ function listPendingQuestions(options = {}) {
   }
   return { ...base, empty_reason: questions.length ? null : 'no-matching-questions' };
 }
+// Planning consumes the complete canonical answer, never the status-only UI
+// projection. Filter by immutable origin, not by words found in an answer.
+function readPlanningQuestions(options = {}) {
+  const milestone = options.milestone, slice = options.slice ?? null;
+  if (!ids.isValid(milestone) || ids.entityKind(milestone) !== 'milestone'
+      || slice !== null && !shortId(slice, 'S')) fail('planning-question-scope-invalid');
+  const empty = { schema_version: 1, milestone, slice, records: [], sources: [] };
+  const absolute = path.resolve(options.cwd || '.');
+  noLinks(absolute);
+  try {
+    const stat = fs.lstatSync(path.join(absolute, '.gsd/forge'));
+    if (!stat.isDirectory() || stat.isSymbolicLink()) fail('planning-question-source-type');
+  } catch (error) { if (error.code === 'ENOENT') return empty; throw error; }
+  const owner = ownerRoot(options, true);
+  const directory = path.join(owner, '.gsd/forge/questions');
+  let names;
+  try { names = fs.readdirSync(directory).sort(); }
+  catch (error) { if (error.code === 'ENOENT') return empty; fail('planning-question-source-unreadable'); }
+  if (names.length > 8192) fail('planning-question-source-limit');
+  const hashes = [...new Set(names.filter(n => /^[a-f0-9]{64}(?:\.origin)?\.json$/.test(n))
+    .map(n => n.slice(0, 64)))];
+  const result = { ...empty, records: [], sources: [] }, reads = [];
+  let bytes = 0, selected = 0;
+  function stable(file) {
+    noLinks(file);
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.nlink !== 1) fail('planning-question-source-type');
+    const read = readBoundedStableFile(file, MAX_STATE, { expectedReal: fs.realpathSync.native(file) });
+    if (read.error) fail('planning-question-source-unreadable');
+    bytes += read.buffer.length;
+    if (bytes > 8 * 1024 * 1024) fail('planning-question-source-limit');
+    const sha256 = digest(read.buffer), relative = path.relative(owner, file).replace(/\\/g, '/');
+    reads.push({ file, sha256 });
+    return { buffer: read.buffer, source: { path: relative, sha256 } };
+  }
+  for (const hash of hashes) {
+    const files = statePaths(owner, hash), original = stable(files.origin);
+    let origin;
+    try { origin = JSON.parse(original.buffer.toString('utf8')); } catch { fail('planning-question-origin-invalid'); }
+    if (origin?.schema_version !== 1 || origin.identity_sha256 !== hash || digest(origin.identity) !== hash) fail('planning-question-origin-invalid');
+    const identity = origin.identity;
+    if (identity.milestone !== milestone) continue;
+    const match = /^(?:discuss|research|plan)-(milestone|slice)\/(.+)$/.exec(identity.unit || '');
+    if (!match || identity.task !== null) continue;
+    if (match[1] === 'milestone') {
+      if (match[2] !== milestone || identity.slice !== null) fail('planning-question-origin-invalid');
+    } else {
+      if (!shortId(match[2], 'S') || identity.slice !== match[2]) fail('planning-question-origin-invalid');
+      if (slice !== null && identity.slice !== slice) continue;
+    }
+    if (++selected > 64) fail('planning-question-source-limit');
+    const current = stable(files.file), loaded = loadState(owner, hash);
+    if (!loaded.origin_bytes.equals(original.buffer) || digest(loaded.state) !== digest(JSON.parse(current.buffer.toString('utf8')))) fail('planning-question-source-unstable');
+    result.sources.push(original.source, current.source);
+    for (const row of loaded.state.questions) result.records.push({ identity_sha256: hash,
+      origin: loaded.identity, id: row.id, question: row.question, status: row.status,
+      ...(row.status === 'resolved' ? { answer: row.answer } : {}) });
+  }
+  // This observation is synchronous and bounded; a changed origin/state leaves
+  // no apparently current answer packet. It does not create a decision or write.
+  for (const row of reads) {
+    noLinks(row.file);
+    const stat = fs.lstatSync(row.file);
+    if (!stat.isFile() || stat.nlink !== 1) fail('planning-question-source-type');
+    const read = readBoundedStableFile(row.file, MAX_STATE, { expectedReal: fs.realpathSync.native(row.file) });
+    if (read.error || digest(read.buffer) !== row.sha256) fail('planning-question-source-unstable');
+  }
+  if (JSON.stringify(fs.readdirSync(directory).sort()) !== JSON.stringify(names)) fail('planning-question-source-unstable');
+  return result;
+}
+
 function main(argv = process.argv.slice(2), io = process) {
   const options = {}; let action, json = false;
   try {
@@ -273,5 +344,5 @@ function main(argv = process.argv.slice(2), io = process) {
     return refusal ? 3 : 2;
   }
 }
-module.exports = { openQuestions, handoff, answer, recordRound, continuation, listPendingQuestions, main };
+module.exports = { openQuestions, handoff, answer, recordRound, continuation, listPendingQuestions, readPlanningQuestions, main };
 if (require.main === module) process.exitCode = main();
