@@ -3,7 +3,7 @@
 // historical negative controls remain intact; each projection delegates once.
 const fs=require('fs'),path=require('path'),crypto=require('crypto'),zlib=require('zlib'),assert=require('node:assert/strict');
 const previous=require('../ci-latency/distribution.cjs'),data=require('./distribution-delta.json');
-const ROOT=path.resolve(__dirname,'../../..'),PIN='e3921936b10b74b4c9f0dddcef2d20bf1e3961b66e331df9ec88d5faeddcd789';
+const ROOT=path.resolve(__dirname,'../../..'),PIN='d162c8aa79fb99371b8b1f95596667add8ffa5de8df2b9ffd13ed1030ea512b2';
 const hash=value=>crypto.createHash('sha256').update(value).digest('hex');
 const read=file=>fs.readFileSync(path.join(ROOT,file));
 function check(value=data){
