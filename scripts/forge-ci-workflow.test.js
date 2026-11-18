@@ -24,6 +24,12 @@ assert.strictEqual(hash(bytes.release), latencyLayer.release_after.sha256);
 assert.strictEqual(hash(predecessorCi), latencyLayer.ci_before.sha256);
 assert.strictEqual(hash(bytes.ci), latencyLayer.ci_after.sha256);
 assert.strictEqual(latencyLayer.ci_before.sha256, 'aaebc13d224e26dc85fbf7c077a878b550fc041978dc30d9e6995da15d650fc8');
+assert(texts.ci.includes("if: runner.os == 'Windows' && steps.fixture_tools.outputs.needs_svn != 'false'"));
+assert(texts.ci.includes("if: runner.os != 'Windows' || steps.fixture_tools.outputs.needs_svn != 'false'"));
+assert(texts.ci.includes('id: fixture_tools')&&texts.ci.includes('--tool-plan true --jobs'));
+const actualTestStep=texts.ci.split('      - name: Run test suites\n')[1].split('      - name: Preserve bounded suite timing profile')[0];
+assert(!/^\s+if:/m.test(actualTestStep),'tool setup metadata never skips the actual test step');
+assert(!actualTestStep.includes('--tool-plan'),'tool metadata mode never replaces actual test execution');
 const marker = (kind, index, detail) => console.log(`PASS S04-T06 ${kind}:${index} ${detail}`);
 
 // Reverse the authorized concurrency, profile, four-shard and two-macOS-shard changes. Old
@@ -238,14 +244,22 @@ for (const required of ["Join-Path $env:ProgramFiles 'SlikSvn\\bin'", "foreach (
 assert(windowsInstall.indexOf('-cnotmatch') < windowsInstall.indexOf('$svnBin | Out-File'));
 const verifySteps = steps.filter(step => /svn --version --quiet/.test(step) && /svnadmin --version --quiet/.test(step));
 assert.strictEqual(verifySteps.length, 1);
-assert(!/^\s*if:/m.test(verifySteps[0]) && texts.ci.indexOf(verifySteps[0]) < testIndex);
+assert(verifySteps[0].includes("if: runner.os != 'Windows' || steps.fixture_tools.outputs.needs_svn != 'false'")
+  && texts.ci.indexOf(verifySteps[0]) < testIndex);
+const planningStep=steps.find(step=>step.includes('id: fixture_tools'));
+assert(planningStep&&planningStep.includes("if: runner.os == 'Windows'")&&planningStep.includes('--tool-plan true'));
+assert(texts.ci.indexOf(planningStep)<texts.ci.indexOf(windowsInstall));
+for(const platform of ['Linux','macOS','Windows'])for(const output of [undefined,'','true','false','unknown']){
+  const verify=platform!=='Windows'||output!=='false';
+  assert.strictEqual(verify,!(platform==='Windows'&&output==='false'),'missing or unknown setup metadata always keeps verification');
+}
 const rows = expandJobs(POLICY.workflows.ci);
-assert.strictEqual(rows.length, 41);
+assert.strictEqual(rows.length, 49);
 assert.strictEqual(rows.filter(row => row.kind === 'alias').length, 9);
 assert.deepStrictEqual(rows.filter(row => row.key === 'test').map(row => row.name),
-  [['ubuntu-latest', 3], ['macos-latest', 5], ['windows-latest', 21]].flatMap(([os, count]) => Array.from({length:count}, (_, i) => `Tests (${os}, shard ${i+1}/${count})`)));
+  [['ubuntu-latest', 5], ['macos-latest', 5], ['windows-latest', 27]].flatMap(([os, count]) => Array.from({length:count}, (_, i) => `Tests (${os}, shard ${i+1}/${count})`)));
 assert.strictEqual(rows.filter(row => row.name === 'Tests (ubuntu-latest)' && row.kind === 'alias').length, 1);
-assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'win32').map(row => row.matrix['shard-count']), Array(21).fill(21));
+assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'win32').map(row => row.matrix['shard-count']), Array(27).fill(27));
 assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'darwin').map(row => row.matrix['shard-count']), Array(5).fill(5));
 // Smoke condition evaluated per policy cell: exactly one Linux and one macOS run, never Windows.
 const runnerOs = { 'ubuntu-latest': 'Linux', 'macos-latest': 'macOS', 'windows-latest': 'Windows' };

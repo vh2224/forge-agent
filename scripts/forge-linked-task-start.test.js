@@ -91,9 +91,10 @@ function tree(dir) {
     for (const entry of fs.readdirSync(d, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
       if (entry.name === '.locks') continue;
       const target = path.join(d, entry.name), relative = path.relative(dir, target);
-      if (entry.isSymbolicLink() || fs.lstatSync(target).isSymbolicLink()) out[relative] = 'link:' + fs.readlinkSync(target);
+      const stat = entry.isSymbolicLink() ? null : fs.lstatSync(target);
+      if (entry.isSymbolicLink() || stat.isSymbolicLink()) out[relative] = 'link:' + fs.readlinkSync(target);
       else if (entry.isDirectory()) { out[relative] = 'directory'; visit(target); }
-      else { const stat = fs.lstatSync(target); out[relative] = [sha(fs.readFileSync(target)), stat.size, stat.mtimeMs]; }
+      else { out[relative] = [sha(fs.readFileSync(target)), stat.size, stat.mtimeMs]; }
     }
   })(dir);
   return out;
@@ -558,9 +559,98 @@ async function independentStartRegressions() {
     }
 }
 
+function independentClosureRegressions() {
+    // R24 uses an independent chain: A's genuine interrupted/repeated closure controls stay intact.
+    {
+      const E = chainFixture(); E.endpoint();
+      assert.equal(lts.produceHandoff({ cwd: E.owner, milestone: M, ...E.prof }).status, 'produced');
+      assert.equal(start(E).status, 'started');
+      const built = taskDelivery(E);
+      assert.deepEqual(built.diagnostics, []);
+      assert.ok(built.criteria.length > 0 && built.criteria.every(c => c.status === 'verificado' && !c.pending.length));
+      const open = snap(E);
+      assert.equal(lts.continueLinkedTask({ cwd: E.owner, taskId: E.task, liveAdapter: liveAdapter(E.owner) }).status, 'continued');
+      unchanged(E, open, 'genuine nonclosed continuation');
+      const actual = liveAdapter(E.owner), startBytes = fs.readFileSync(file(E.owner, recordRef('start')));
+      const witnessBytes = fs.readFileSync(file(E.owner, recordRef('start-witness')));
+      let afterCallback = null, closureBytes = null, callbacks = 0;
+      const result = lts.continueLinkedTask({ cwd: E.owner, taskId: E.task, liveAdapter: { getDecisionHandle(request) {
+        callbacks++;
+        const handle = actual.getDecisionHandle(request);
+        assert.ok(handle, 'the real current start authority issued an opaque handle');
+        const closed = lts.closeLinkedTask({ cwd: E.owner, taskId: E.task, ...E.prof });
+        assert.deepEqual([closed.status, closed.fingerprint], ['closed', built.delivery_fingerprint], JSON.stringify(closed));
+        const closure = time.readOwnerRecord({ cwd: E.owner, milestone: M, path: 'linked-task/closure.json' });
+        assert.deepEqual([closure.status, lts.linkedLifecycle(E.owner, E.task).status], ['valid', 'closed']);
+        assert.equal(closure.record.start_sha256, digest(json(E.owner, recordRef('start'))));
+        assert.equal(workOf(E).workStatus, 'completed', 'the callback legitimately completed its checkpoint');
+        closureBytes = fs.readFileSync(file(E.owner, recordRef('closure')));
+        afterCallback = snap(E);
+        return handle;
+      } } });
+      assert.deepEqual([callbacks, actual.calls.length], [1, 1], 'the real live callback closed the task once');
+      assert.ok(afterCallback && closureBytes, 'the baseline follows the genuine callback closure effects');
+      assert.deepEqual([result.status, result.reason], ['refused', 'linked-task-closed'], JSON.stringify(result));
+      unchanged(E, afterCallback, 'continuation adds no effects after callback closure');
+      assert.ok(fs.readFileSync(file(E.owner, recordRef('closure'))).equals(closureBytes), 'the genuine closure remains byte-identical');
+      assert.ok(fs.readFileSync(file(E.owner, recordRef('start'))).equals(startBytes));
+      assert.ok(fs.readFileSync(file(E.owner, recordRef('start-witness'))).equals(witnessBytes));
+      process.stdout.write('ok - T03 correction: continuation refuses genuine task closure published during the live callback without additional effects\n');
+    }
+    // R25 has its own real delivery: closing the task during close-chain authority cannot publish a second terminal record.
+    {
+      const F = chainFixture(); F.endpoint();
+      assert.equal(lts.produceHandoff({ cwd: F.owner, milestone: M, ...F.prof }).status, 'produced');
+      assert.equal(start(F).status, 'started');
+      const built = taskDelivery(F);
+      assert.deepEqual(built.diagnostics, []);
+      assert.ok(built.criteria.length > 0 && built.criteria.every(c => c.status === 'verificado' && !c.pending.length));
+      const prepared = lts.prepareLinkedDecision({ cwd: F.owner, task: F.task, action: 'close-chain' });
+      assert.equal(prepared.status, 'open', JSON.stringify(prepared));
+      assert.equal(questions.continuation({ cwd: F.owner, identity: prepared.question.identity_sha256 }).ok, false);
+      const answered = lts.answerLinkedDecision({ cwd: F.owner, task: F.task, action: 'close-chain', response: 'Encerrar a cadeia', source: 'user-text' });
+      assert.deepEqual([answered.status, answered.answer, answered.question], ['answered', 'linked-task:close-chain', prepared.question]);
+      const actual = liveAdapter(F.owner), startBytes = fs.readFileSync(file(F.owner, recordRef('start')));
+      const witnessBytes = fs.readFileSync(file(F.owner, recordRef('start-witness')));
+      let afterCallback = null, closureBytes = null, callbacks = 0;
+      const result = lts.closeChain({ cwd: F.owner, taskId: F.task, ...F.prof, liveAdapter: { getDecisionHandle(request) {
+        callbacks++;
+        assert.deepEqual([request.question, request.expected, request.request_sha256], [prepared.question, ['linked-task:close-chain'], prepared.request_sha256]);
+        const handle = actual.getDecisionHandle(request);
+        assert.ok(handle, 'the real current close-chain authority issued an opaque handle');
+        const closed = lts.closeLinkedTask({ cwd: F.owner, taskId: F.task, ...F.prof });
+        assert.deepEqual([closed.status, closed.fingerprint], ['closed', built.delivery_fingerprint], JSON.stringify(closed));
+        const closure = time.readOwnerRecord({ cwd: F.owner, milestone: M, path: 'linked-task/closure.json' });
+        assert.deepEqual([closure.status, lts.linkedLifecycle(F.owner, F.task).status], ['valid', 'closed']);
+        assert.equal(closure.record.start_sha256, digest(json(F.owner, recordRef('start'))));
+        const work = workOf(F);
+        assert.deepEqual([work.workStatus, path.basename(work.checkpoint.lastResult[0].source)], ['completed', 'closure.json']);
+        assert.ok(work.checkpoint.nextAction.every(c => c.resolved && path.basename(c.source) === 'closure.json'));
+        assert.ok(!fs.existsSync(file(F.owner, recordRef('chain-closure'))));
+        closureBytes = fs.readFileSync(file(F.owner, recordRef('closure')));
+        afterCallback = snap(F);
+        return handle;
+      } } });
+      assert.deepEqual([callbacks, actual.calls.length], [1, 1], 'the real live close-chain callback closed the task once');
+      assert.ok(afterCallback && closureBytes, 'the baseline follows legitimate callback closure and checkpoint effects');
+      assert.deepEqual([result.status, result.reason], ['refused', 'linked-task-closed'], JSON.stringify(result));
+      unchanged(F, afterCallback, 'chain closure adds no effects after callback task closure');
+      assert.ok(!fs.existsSync(file(F.owner, recordRef('chain-closure'))), 'no second terminal record');
+      assert.ok(fs.readFileSync(file(F.owner, recordRef('closure'))).equals(closureBytes));
+      assert.ok(fs.readFileSync(file(F.owner, recordRef('start'))).equals(startBytes));
+      assert.ok(fs.readFileSync(file(F.owner, recordRef('start-witness'))).equals(witnessBytes));
+      const replay = lts.closeLinkedTask({ cwd: F.owner, taskId: F.task, now: Date.now() + 5000, ...F.prof });
+      assert.deepEqual([replay.status, replay.fingerprint], ['unchanged', built.delivery_fingerprint], JSON.stringify(replay));
+      assert.equal(lts.linkedLifecycle(F.owner, F.task).status, 'closed');
+      assert.deepEqual([workOf(F).workStatus, path.basename(workOf(F).checkpoint.lastResult[0].source)], ['completed', 'closure.json']);
+      unchanged(F, afterCallback, 'historical task closure replay preserves the completed checkpoint and all records');
+      process.stdout.write('ok - T03 correction: chain closure refuses genuine task closure published during the live callback without additional effects and preserves task closure replay\n');
+    }
+}
+
 async function suite() {
   const args = process.argv.slice(2);
-  if (args.length && (args.length !== 1 || !['--lts-cohort=core','--lts-cohort=regressions'].includes(args[0]))) throw Error('linked-test-cohort-invalid');
+  if (args.length && (args.length !== 1 || !['--lts-cohort=core','--lts-cohort=regressions','--lts-cohort=closures'].includes(args[0]))) throw Error('linked-test-cohort-invalid');
   const cohort = args.length ? args[0].slice('--lts-cohort='.length) : 'all';
   console.log('CI linked cohort: ' + cohort);
   const suiteHome = tempRoot('forge-lts-home-'), saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
@@ -571,7 +661,10 @@ async function suite() {
   process.env.HOME = suiteHome; process.env.USERPROFILE = suiteHome;
   let passed = false;
   try {
-    if (cohort === 'regressions') {
+    if (cohort === 'closures') {
+      independentClosureRegressions();
+      passed = true;
+    } else if (cohort === 'regressions') {
       await independentStartRegressions();
       passed = true;
     } else {
@@ -1860,92 +1953,7 @@ async function suite() {
       assert.equal(lts.closeChain({ cwd: A.owner, taskId: A.task, liveAdapter: liveAdapter(A.owner), ...A.prof }).reason, 'linked-task-closed');
       unchanged(A, before, 'after the task closure');
     }
-    // R24 uses an independent chain: A's genuine interrupted/repeated closure controls stay intact.
-    {
-      const E = chainFixture(); E.endpoint();
-      assert.equal(lts.produceHandoff({ cwd: E.owner, milestone: M, ...E.prof }).status, 'produced');
-      assert.equal(start(E).status, 'started');
-      const built = taskDelivery(E);
-      assert.deepEqual(built.diagnostics, []);
-      assert.ok(built.criteria.length > 0 && built.criteria.every(c => c.status === 'verificado' && !c.pending.length));
-      const open = snap(E);
-      assert.equal(lts.continueLinkedTask({ cwd: E.owner, taskId: E.task, liveAdapter: liveAdapter(E.owner) }).status, 'continued');
-      unchanged(E, open, 'genuine nonclosed continuation');
-      const actual = liveAdapter(E.owner), startBytes = fs.readFileSync(file(E.owner, recordRef('start')));
-      const witnessBytes = fs.readFileSync(file(E.owner, recordRef('start-witness')));
-      let afterCallback = null, closureBytes = null, callbacks = 0;
-      const result = lts.continueLinkedTask({ cwd: E.owner, taskId: E.task, liveAdapter: { getDecisionHandle(request) {
-        callbacks++;
-        const handle = actual.getDecisionHandle(request);
-        assert.ok(handle, 'the real current start authority issued an opaque handle');
-        const closed = lts.closeLinkedTask({ cwd: E.owner, taskId: E.task, ...E.prof });
-        assert.deepEqual([closed.status, closed.fingerprint], ['closed', built.delivery_fingerprint], JSON.stringify(closed));
-        const closure = time.readOwnerRecord({ cwd: E.owner, milestone: M, path: 'linked-task/closure.json' });
-        assert.deepEqual([closure.status, lts.linkedLifecycle(E.owner, E.task).status], ['valid', 'closed']);
-        assert.equal(closure.record.start_sha256, digest(json(E.owner, recordRef('start'))));
-        assert.equal(workOf(E).workStatus, 'completed', 'the callback legitimately completed its checkpoint');
-        closureBytes = fs.readFileSync(file(E.owner, recordRef('closure')));
-        afterCallback = snap(E);
-        return handle;
-      } } });
-      assert.deepEqual([callbacks, actual.calls.length], [1, 1], 'the real live callback closed the task once');
-      assert.ok(afterCallback && closureBytes, 'the baseline follows the genuine callback closure effects');
-      assert.deepEqual([result.status, result.reason], ['refused', 'linked-task-closed'], JSON.stringify(result));
-      unchanged(E, afterCallback, 'continuation adds no effects after callback closure');
-      assert.ok(fs.readFileSync(file(E.owner, recordRef('closure'))).equals(closureBytes), 'the genuine closure remains byte-identical');
-      assert.ok(fs.readFileSync(file(E.owner, recordRef('start'))).equals(startBytes));
-      assert.ok(fs.readFileSync(file(E.owner, recordRef('start-witness'))).equals(witnessBytes));
-      process.stdout.write('ok - T03 correction: continuation refuses genuine task closure published during the live callback without additional effects\n');
-    }
-    // R25 has its own real delivery: closing the task during close-chain authority cannot publish a second terminal record.
-    {
-      const F = chainFixture(); F.endpoint();
-      assert.equal(lts.produceHandoff({ cwd: F.owner, milestone: M, ...F.prof }).status, 'produced');
-      assert.equal(start(F).status, 'started');
-      const built = taskDelivery(F);
-      assert.deepEqual(built.diagnostics, []);
-      assert.ok(built.criteria.length > 0 && built.criteria.every(c => c.status === 'verificado' && !c.pending.length));
-      const prepared = lts.prepareLinkedDecision({ cwd: F.owner, task: F.task, action: 'close-chain' });
-      assert.equal(prepared.status, 'open', JSON.stringify(prepared));
-      assert.equal(questions.continuation({ cwd: F.owner, identity: prepared.question.identity_sha256 }).ok, false);
-      const answered = lts.answerLinkedDecision({ cwd: F.owner, task: F.task, action: 'close-chain', response: 'Encerrar a cadeia', source: 'user-text' });
-      assert.deepEqual([answered.status, answered.answer, answered.question], ['answered', 'linked-task:close-chain', prepared.question]);
-      const actual = liveAdapter(F.owner), startBytes = fs.readFileSync(file(F.owner, recordRef('start')));
-      const witnessBytes = fs.readFileSync(file(F.owner, recordRef('start-witness')));
-      let afterCallback = null, closureBytes = null, callbacks = 0;
-      const result = lts.closeChain({ cwd: F.owner, taskId: F.task, ...F.prof, liveAdapter: { getDecisionHandle(request) {
-        callbacks++;
-        assert.deepEqual([request.question, request.expected, request.request_sha256], [prepared.question, ['linked-task:close-chain'], prepared.request_sha256]);
-        const handle = actual.getDecisionHandle(request);
-        assert.ok(handle, 'the real current close-chain authority issued an opaque handle');
-        const closed = lts.closeLinkedTask({ cwd: F.owner, taskId: F.task, ...F.prof });
-        assert.deepEqual([closed.status, closed.fingerprint], ['closed', built.delivery_fingerprint], JSON.stringify(closed));
-        const closure = time.readOwnerRecord({ cwd: F.owner, milestone: M, path: 'linked-task/closure.json' });
-        assert.deepEqual([closure.status, lts.linkedLifecycle(F.owner, F.task).status], ['valid', 'closed']);
-        assert.equal(closure.record.start_sha256, digest(json(F.owner, recordRef('start'))));
-        const work = workOf(F);
-        assert.deepEqual([work.workStatus, path.basename(work.checkpoint.lastResult[0].source)], ['completed', 'closure.json']);
-        assert.ok(work.checkpoint.nextAction.every(c => c.resolved && path.basename(c.source) === 'closure.json'));
-        assert.ok(!fs.existsSync(file(F.owner, recordRef('chain-closure'))));
-        closureBytes = fs.readFileSync(file(F.owner, recordRef('closure')));
-        afterCallback = snap(F);
-        return handle;
-      } } });
-      assert.deepEqual([callbacks, actual.calls.length], [1, 1], 'the real live close-chain callback closed the task once');
-      assert.ok(afterCallback && closureBytes, 'the baseline follows legitimate callback closure and checkpoint effects');
-      assert.deepEqual([result.status, result.reason], ['refused', 'linked-task-closed'], JSON.stringify(result));
-      unchanged(F, afterCallback, 'chain closure adds no effects after callback task closure');
-      assert.ok(!fs.existsSync(file(F.owner, recordRef('chain-closure'))), 'no second terminal record');
-      assert.ok(fs.readFileSync(file(F.owner, recordRef('closure'))).equals(closureBytes));
-      assert.ok(fs.readFileSync(file(F.owner, recordRef('start'))).equals(startBytes));
-      assert.ok(fs.readFileSync(file(F.owner, recordRef('start-witness'))).equals(witnessBytes));
-      const replay = lts.closeLinkedTask({ cwd: F.owner, taskId: F.task, now: Date.now() + 5000, ...F.prof });
-      assert.deepEqual([replay.status, replay.fingerprint], ['unchanged', built.delivery_fingerprint], JSON.stringify(replay));
-      assert.equal(lts.linkedLifecycle(F.owner, F.task).status, 'closed');
-      assert.deepEqual([workOf(F).workStatus, path.basename(workOf(F).checkpoint.lastResult[0].source)], ['completed', 'closure.json']);
-      unchanged(F, afterCallback, 'historical task closure replay preserves the completed checkpoint and all records');
-      process.stdout.write('ok - T03 correction: chain closure refuses genuine task closure published during the live callback without additional effects and preserves task closure replay\n');
-    }
+    if (cohort === 'all') independentClosureRegressions();
     line('explicit chain closure and verified task delivery govern closure');
 
     if (cohort === 'all') await independentStartRegressions();

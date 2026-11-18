@@ -13,7 +13,8 @@ const DEFINITIONS = Object.freeze({
   'forge-native-recovery-delivery.test.js': { args: [['--cohort', '0'], ['--cohort', '1'], ['--cohort', '2']], divisor: 1 },
   'forge-agent-phase.test.js': { args: ['identity', 'recovery', 'native', 'sidecar'].map(name => [`--phase-cohort=${name}`]), divisor: 2 },
   'forge-communication-surfaces.test.js': { parts: 4, kind: 'cases' },
-  'forge-linked-task-start.test.js': { args: [['--lts-cohort=core'], ['--lts-cohort=regressions']], costDivisors: {0:1,1:3} },
+  'forge-linked-task-start.test.js': { args: [['--lts-cohort=core'], ['--lts-cohort=regressions'], ['--lts-cohort=closures']], revision:'linked-v2', costDivisors: {0:1,1:3,2:4},
+    timingEstimates:[['forge-linked-task-start.ci-01-of-2.test.js',1],['forge-linked-task-start.ci-02-of-2.test.js',1],['forge-linked-task-start.ci-01-of-2.test.js',4]] },
 });
 // Explicit initial estimates, not observations of this new wrapper. The prior
 // smoke steps in run44163993587 took56s on Linux and153s on macOS.

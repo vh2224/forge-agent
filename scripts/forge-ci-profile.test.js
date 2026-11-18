@@ -287,11 +287,28 @@ try {
 
   test('unit allocation comparisons use the same measured/estimated/default costs', () => {
     const profile=loaded(),count=24;
+    const units=require('./forge-ci-units').expandSuites(runner.discoverTests([])),weights=profile.doc.platforms.win32;
+    // Exercise all three cost paths even when every current unit is measured.
+    const estimated=units.find(unit=>unit.source==='forge-native-repackage.test.js');
+    const measuredId='forge-ci-parallel.test.js',defaultId='forge-ci-profile.test.js';
+    assert(estimated&&estimated.id!==estimated.source);
+    assert(units.some(unit=>unit.id===measuredId)&&units.some(unit=>unit.id===defaultId));
+    weights.weights_ms[measuredId]=3000;
+    weights.weights_ms[estimated.source]=6000;
+    delete weights.weights_ms[estimated.id];
+    delete weights.weights_ms[defaultId];
+    profile.sha256=hash(JSON.stringify(profile.doc));
+    assert(shards.validateShardProfile(profile.doc).ok);
     const report=collector.buildProfileReport({shard_profile:profile,partitions:[{platform:'win32',count}],partition_suites:true});
-    const prediction=report.predictions[0],units=require('./forge-ci-units').expandSuites(runner.discoverTests([])),weights=profile.doc.platforms.win32;
+    const prediction=report.predictions[0];
     const positional=shards.planShards({suites:units.map(unit=>unit.id),index:0,count,platform:'win32'});
     const cost=id=>Object.hasOwn(weights.weights_ms,id)?weights.weights_ms[id]:Object.hasOwn(prediction.estimated_unit_weights,id)?prediction.estimated_unit_weights[id]:weights.default_weight_ms;
     assert(Object.keys(prediction.estimated_unit_weights).length>0);
+    assert.equal(prediction.estimated_unit_weights[estimated.id],Math.ceil(6000/estimated.divisor));
+    assert(!Object.hasOwn(prediction.estimated_unit_weights,defaultId));
+    assert(prediction.weighted.unprofiled.includes(defaultId));
+    assert.equal(cost(measuredId),3000);
+    assert.equal(cost(defaultId),weights.default_weight_ms);
     assert.deepEqual(prediction.positional.predicted_ms,positional.shards.map(shard=>shard.reduce((sum,id)=>sum+cost(id),0)));
     assert.equal(prediction.positional.predicted_ms.reduce((a,b)=>a+b,0),prediction.weighted.predicted_ms.reduce((a,b)=>a+b,0));
   });

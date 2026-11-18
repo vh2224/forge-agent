@@ -33,17 +33,18 @@ It keeps the original platform applicability and fails on nonzero exit, signal
 or spawn failure. Its explicit initial cost estimates come from the previous
 hosted smoke steps; future measured suite timings override those estimates.
 
-Linux jobs start two canonical runners and macOS jobs start three. Windows uses
-two initial jobs with one worker each, followed by nineteen jobs with two workers
-each. This gives the longest weighted lanes their own runner rather than pairing
-the two heaviest tests on the same machine. Every worker uses separate Git clones,
+Linux uses four initial single-worker jobs and one paired job. macOS uses five
+jobs with three canonical runners each. Windows uses fourteen initial single-worker
+jobs followed by thirteen paired jobs. This separates the previously slow shared
+VM lanes while preserving the exact global worker assignments. Every worker uses
+separate Git clones,
 with independent objects, refs, indexes, working directories and temp roots.
 Local clone optimization/hardlinks are disabled. Checkout credentials are not
 copied. Candidate HEAD and source origin/history are preserved. The canonical
 runner continues to isolate HOME for each suite, compare the known-failure
 baseline in both directions and produce bounded structured profiles.
 
-Three Linux, five macOS and twenty-one Windows jobs produce six, fifteen and forty
+Five Linux, five macOS and twenty-seven Windows jobs produce six, fifteen and forty
 effective shards. The explicit single-worker prefix and paired-job offsets map
 all sixty-one global worker indices without gaps or duplication.
 Every unit is assigned exactly once by the common complete partition. Every
@@ -55,16 +56,22 @@ the suite explicitly preserved.
 ## Measurement and future additions
 
 The active profile at `scripts/fixtures/ci-latency/shard-profile.json` was refreshed
-through the canonical collector from seven complete structured PR415 artifacts
-and 53 completed worker profiles from diagnostic run44187991176. Only unambiguous
-passing rows contribute weights; that failed run is not acceptance evidence.
-The only failed source was a stale matrix assertion, now updated. All 514
-then-current execution units and all 129 split cases ran exactly once per
-platform. Native core/saved groups now use new timing identities with explicit
-estimates from the earlier combined cohort. Original
-merge-checkout provenance is retained. Earlier diagnostic unit weights are
-superseded; their original evidence remains recorded. Changed case rosters use
-new unit revisions.
+through the canonical collector from all 61 complete worker profiles of successful
+PR run 44236577264 on 439ff6d. All 518 current units and 129 registered partition
+cases executed exactly once per platform. That run took 10m01s, a strict target
+miss retained as evidence. Old physical and failed inputs remain separate so the
+collector stays below its unchanged 64-source bound. All current cohort identities
+are measured; the new allocation has no unprofiled or stale units. Predictions
+remain distinct from hosted acceptance. The earlier master run 44221144256 took
+13m05s and remains a separate historical measurement.
+
+The linked lifecycle now has a third cohort for its two independent closure
+fixtures. The dependent lifecycle stays together. Direct complete invocation calls
+the identical extracted block at its original position. New linked-v2 timing
+identities retain explicit legacy estimates for an absent measurement; the current
+profile now contains real observations of all three identities, which take
+precedence. The inventory is now 478 source
+suites and 518 execution units per platform.
 
 Historical distribution layers repeat an ancestor-pin sentinel through the same
 JSON defaults. The successor snapshots their data descriptors and memoizes only
@@ -104,6 +111,12 @@ Independent checkouts prefer a short directory beside the source checkout.
 Permission-only failures fall back to the system temporary directory; other
 filesystem failures remain visible. This avoids inflating path-bearing context
 fixtures on normal hosted Windows layouts without changing their budgets.
+
+Windows fixture-tool planning uses the same catalog, profile and global partition
+as execution. A nonempty sole-worker assignment consisting entirely of the
+Git-only linked lifecycle source can omit SVN installation/verification. Unknown,
+missing-profile, mixed-source and parallel assignments retain the pinned tools.
+The test step is unconditional and all workers still use independent Git clones.
 
 ## Release boundary
 

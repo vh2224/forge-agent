@@ -22,16 +22,34 @@ function parseArgs(argv) {
   const options = {};
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i], value = argv[i + 1];
-    if (!['--shard-index', '--shard-count', '--jobs', '--single-worker-jobs', '--profile-dir'].includes(key) || !value || Object.hasOwn(options, key)) throw Error('ci-parallel-arguments');
+    if (!['--shard-index', '--shard-count', '--jobs', '--single-worker-jobs', '--profile-dir', '--tool-plan'].includes(key) || !value || Object.hasOwn(options, key)) throw Error('ci-parallel-arguments');
     options[key] = value;
   }
   if (!integer(options['--shard-index'], 63) || !integer(options['--shard-count'], 64)
       || !integer(options['--jobs'], 3) || +options['--jobs'] < 1 || +options['--shard-count'] < 1
       || +options['--shard-index'] >= +options['--shard-count']
       || (Object.hasOwn(options,'--single-worker-jobs') && !integer(options['--single-worker-jobs'],64))
+      || (Object.hasOwn(options,'--tool-plan') && !['true','false'].includes(options['--tool-plan']))
       || !options['--profile-dir']) throw Error('ci-parallel-arguments');
-  const result={ index: +options['--shard-index'], count: +options['--shard-count'], jobs: +options['--jobs'],singleWorkerJobs:+(options['--single-worker-jobs']||0), profileDir: path.resolve(options['--profile-dir']) };
+  const result={ index: +options['--shard-index'], count: +options['--shard-count'], jobs: +options['--jobs'],singleWorkerJobs:+(options['--single-worker-jobs']||0), profileDir: path.resolve(options['--profile-dir']), toolPlan:options['--tool-plan']==='true' };
   workerLayout(result);return result;
+}
+// This is setup metadata, never test selection or a passing test result.
+// Every unknown/mixed/parallel assignment conservatively retains SVN. The
+// linked lifecycle source composes real Git roots and has no SVN fixture.
+function toolPlan(options, { source=path.resolve(__dirname,'..'), platform=process.platform, profileFile=null }={}) {
+  const layout=workerLayout(options);
+  if(platform!=='win32'||layout.workers!==1) return {needs_svn:true,reason:'conservative-platform-or-parallel-default'};
+  const unitsApi=require(path.join(source,'scripts/forge-ci-units'));
+  const {loadShardProfile,planShards}=require(path.join(source,'scripts/forge-ci-shards'));
+  const profile=loadShardProfile(profileFile||path.join(source,'scripts/fixtures/ci-latency/shard-profile.json'));
+  if(profile.state!=='loaded')return {needs_svn:true,reason:'profile-unavailable'};
+  const units=unitsApi.expandSuites(require(path.join(source,'scripts/run-tests')).discoverTests([]));
+  const plan=planShards({suites:units.map(u=>u.id),index:layout.start,count:layout.count,platform,profile,estimatedWeights:unitsApi.unitWeights(units,profile,platform)});
+  const byId=new Map(units.map(u=>[u.id,u]));
+  const selected=plan.selected.map(id=>byId.get(id));
+  const needs_svn=!selected.length||selected.some(unit=>!unit||unit.source!=='forge-linked-task-start.test.js');
+  return {needs_svn,reason:needs_svn?'conservative-assigned-source-default':'git-only-linked-fixtures',selected_units:plan.selected};
 }
 function git(cwd, args, input) {
   const result = spawnSync('git', args, { cwd, input, encoding: 'utf8', windowsHide: true, timeout: 120000, maxBuffer: 8 * 1024 * 1024 });
@@ -162,8 +180,20 @@ async function run(options, { source = path.resolve(__dirname, '..'), temp = pat
   }
 }
 async function main(argv = process.argv.slice(2)) {
-  try { return await run(parseArgs(argv)); }
+  try {
+    const options=parseArgs(argv);
+    if(options.toolPlan){
+      const report=toolPlan(options);
+      if(process.env.GITHUB_OUTPUT){
+        const stat=fs.lstatSync(process.env.GITHUB_OUTPUT);
+        if(!stat.isFile()||stat.isSymbolicLink())throw Error('ci-tool-output-invalid');
+        fs.appendFileSync(process.env.GITHUB_OUTPUT,`needs_svn=${report.needs_svn}\n`);
+      }
+      process.stdout.write(JSON.stringify(report)+'\n');return 0;
+    }
+    return await run(options);
+  }
   catch (error) { process.stderr.write(`${error.message}\n`); return 2; }
 }
-module.exports = { parseArgs, workerLayout, prepareCheckout, logHeader, runChild, allocateRoot, run, main };
+module.exports = { parseArgs, workerLayout, toolPlan, prepareCheckout, logHeader, runChild, allocateRoot, run, main };
 if (require.main === module) main().then(code => { process.exitCode = code; });
