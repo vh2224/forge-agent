@@ -3,7 +3,7 @@
 const fs=require('fs'),path=require('path'),crypto=require('crypto'),zlib=require('zlib'),assert=require('node:assert/strict');
 const previous=require('../issues-414-418/distribution.cjs'),data=require('./distribution-delta.json');
 require('./immutable-pin-cache.cjs').installImmutablePinCache(require.cache[require.resolve('../issues-414-418/distribution.cjs')]);
-const ROOT=path.resolve(__dirname,'../../..'),PIN='fcaf1ac338b8f114d5d7531c57f31eb24736e23b5d0e57f0255dc0aa80435763';
+const ROOT=path.resolve(__dirname,'../../..'),PIN='c713314122ac10dc043021a0562ad20ea703fa263a93a75e9d178cf090f82da8';
 const hash=x=>crypto.createHash('sha256').update(x).digest('hex');
 const read=file=>fs.readFileSync(path.join(ROOT,file));
 function check(value=data){assert.equal(hash(JSON.stringify(value)),PIN,'CI independent measured source delta');assert.equal(hash(JSON.stringify(previous.issue414418Layer)),value.predecessor_layer_sha256,'CI immutable predecessor');return value;}

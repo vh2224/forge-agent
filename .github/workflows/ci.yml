@@ -283,8 +283,13 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install subversion
 
-      - name: Install Subversion (Windows fixtures)
+      - name: Determine Windows fixture tool requirements
+        id: fixture_tools
         if: runner.os == 'Windows'
+        run: node scripts/forge-ci-parallel.js --tool-plan true --jobs "${{ matrix.workers }}" --shard-index ${{ matrix.shard-index }} --shard-count ${{ matrix.shard-count }} --single-worker-jobs ${{ matrix.single-worker-jobs }} --profile-dir "${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}"
+
+      - name: Install Subversion (Windows fixtures)
+        if: runner.os == 'Windows' && steps.fixture_tools.outputs.needs_svn != 'false'
         shell: pwsh
         run: |
           choco install sliksvn --version=1.14.5 --yes --no-progress
@@ -307,6 +312,7 @@ jobs:
           $svnBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Verify Subversion fixture tools
+        if: runner.os != 'Windows' || steps.fixture_tools.outputs.needs_svn != 'false'
         run: |
           svn --version --quiet
           svnadmin --version --quiet

@@ -14,6 +14,7 @@ The execution model and integrity boundaries are documented in
 | [4e2efba, attempt1](https://github.com/vh2224/forge-agent/actions/runs/44193105049/attempts/1) | 20m04s | All 41 checks passed; macOS admission reached 12m12s during concurrent workflows |
 | [4e2efba, attempt2](https://github.com/vh2224/forge-agent/actions/runs/44193105049/attempts/2) | 9m40s | All 41 checks passed; clock starts before the rerun request |
 | [db36bea, integrated with PR419](https://github.com/vh2224/forge-agent/actions/runs/44216793059) | 10m05s | All 41 checks passed; workflow creation to final check completion |
+| [First optimized master34a9a3c](https://github.com/vh2224/forge-agent/actions/runs/44221144256) | 13m05s | All 41 checks passed; macOS lane imbalance and setup/admission retained |
 
 The 9m40s interval is 2026-11-17T23:06:49.015Z through 23:16:29Z. The 10m05s
 interval is 2026-11-18T01:34:05Z through 01:44:10Z. These are separate candidates
@@ -67,3 +68,21 @@ master commit and read back the published release. Record workflow creation to
 the release's actual `published_at`, plus complete workflow duration separately.
 A successful `no-publication` result proves no new release latency. Never create
 or move a tag to bypass the publisher's exact-candidate checks or receipt rules.
+
+## Follow-up for stable allocation
+
+The first master run finished at 2026-11-18T02:22:22Z after starting at 02:09:17Z.
+Its 61 complete successful profiles now provide the weights; all 517 then-current
+units are retained as observations with their original identities. The linked
+fixture extraction introduces three linked-v2 cohorts and 518 current execution
+units. Their initial costs are explicitly estimated from the old measured core
+and regressions, not presented as current observations. The E/F closure fixtures
+move together into their own cohort, while the coupled lifecycle and default
+complete call order retain every original assertion.
+
+The snapshot helper still reads every regular file and records byte hashes, size,
+mtime and links. It removes one duplicate metadata query per regular file and
+keeps same-size/same-mtime byte changes observable. Windows setup can skip SVN
+only when the actual nonempty single-worker assignment contains solely the
+Git-only linked fixture; every other assignment keeps the pinned tools. The
+actual test step and independent Git clones remain unconditional.

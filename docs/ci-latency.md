@@ -55,16 +55,20 @@ the suite explicitly preserved.
 ## Measurement and future additions
 
 The active profile at `scripts/fixtures/ci-latency/shard-profile.json` was refreshed
-through the canonical collector from seven complete structured PR415 artifacts
-and 53 completed worker profiles from diagnostic run44187991176. Only unambiguous
-passing rows contribute weights; that failed run is not acceptance evidence.
-The only failed source was a stale matrix assertion, now updated. All 514
-then-current execution units and all 129 split cases ran exactly once per
-platform. Native core/saved groups now use new timing identities with explicit
-estimates from the earlier combined cohort. Original
-merge-checkout provenance is retained. Earlier diagnostic unit weights are
-superseded; their original evidence remains recorded. Changed case rosters use
-new unit revisions.
+through the canonical collector from all 61 complete worker profiles of successful
+master run 44221144256 on 34a9a3c. All 517 then-current units and 129 registered
+partition cases executed exactly once per platform. Old physical inputs remain
+separate so the collector stays below its 64-source bound. The first master run
+took 13m05s; its macOS maximum worker took 10m56s against 6m36s mean worker work.
+The refreshed weights rebalance those observed costs; predictions are not hosted
+acceptance.
+
+The linked lifecycle now has a third cohort for its two independent closure
+fixtures. The dependent lifecycle stays together. Direct complete invocation calls
+the identical extracted block at its original position. New linked-v2 timing
+identities use explicit estimates from the old measured core/regression units;
+future measurements of the new identities win. The inventory is now 478 source
+suites and 518 execution units per platform.
 
 Historical distribution layers repeat an ancestor-pin sentinel through the same
 JSON defaults. The successor snapshots their data descriptors and memoizes only
@@ -104,6 +108,12 @@ Independent checkouts prefer a short directory beside the source checkout.
 Permission-only failures fall back to the system temporary directory; other
 filesystem failures remain visible. This avoids inflating path-bearing context
 fixtures on normal hosted Windows layouts without changing their budgets.
+
+Windows fixture-tool planning uses the same catalog, profile and global partition
+as execution. A nonempty sole-worker assignment consisting entirely of the
+Git-only linked lifecycle source can omit SVN installation/verification. Unknown,
+missing-profile, mixed-source and parallel assignments retain the pinned tools.
+The test step is unconditional and all workers still use independent Git clones.
 
 ## Release boundary
 

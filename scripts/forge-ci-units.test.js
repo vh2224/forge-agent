@@ -45,6 +45,12 @@ const nativeProfile={state:'loaded',doc:{platforms:{win32:{status:'observed',wei
  'forge-native-execution.ci-02-of-3.test.js':90,'forge-native-execution.ci-03-of-3.test.js':400}}}}};
 assert.deepEqual(Object.values(unitWeights(nativeUnits,nativeProfile,'win32')),[240,240,90,400],'new memberships use explicitly estimated legacy timings, never invented observations');
 assert(nativeUnits.every(unit=>unit.id.includes('native-v2')),'changed membership has fresh timing identities');
+const linkedUnits=unitsForSuite('forge-linked-task-start.test.js');
+assert.deepEqual(linkedUnits.map(row=>row.args),[['--lts-cohort=core'],['--lts-cohort=regressions'],['--lts-cohort=closures']]);
+assert(linkedUnits.every(unit=>unit.id.includes('linked-v2')),'new linked memberships have new timing identities');
+const linkedProfile={state:'loaded',doc:{platforms:{win32:{status:'observed',weights_ms:{
+ 'forge-linked-task-start.ci-01-of-2.test.js':900,'forge-linked-task-start.ci-02-of-2.test.js':120}}}}};
+assert.deepEqual(Object.values(unitWeights(linkedUnits,linkedProfile,'win32')),[900,120,225],'linked estimates retain measured legacy identities without inventing new observations');
 const measuredProfile=require('./forge-ci-shards').loadShardProfile(path.join(__dirname,'fixtures/ci-latency/shard-profile.json'));
 measuredProfile.doc.platforms.win32.weights_ms[nativeUnits[0].id]=7;
 measuredProfile.sha256=require('node:crypto').createHash('sha256').update(JSON.stringify(measuredProfile.doc)).digest('hex');
