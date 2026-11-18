@@ -11,6 +11,7 @@ const roots = require('./forge-code-roots');
 const lease = require('./forge-unit-lease');
 const windows = require('./forge-owner-transport-window');
 const contexts = new AsyncLocalStorage();
+const preflightRefusals = new AsyncLocalStorage();
 const scopes = new WeakSet();
 const reconciliations = new WeakMap();
 const reconciliationContext = new AsyncLocalStorage();
@@ -18,6 +19,10 @@ const handoffs = new AsyncLocalStorage();
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 function fail(code) { throw Object.assign(new Error(code), { code }); }
 function currentScope() { return contexts.getStore() || null; }
+function assertPreflightAdmission() {
+  const refusal = preflightRefusals.getStore();
+  if (refusal) throw refusal;
+}
 function regular(file, limit = 1024 * 1024) {
   const stat = fs.lstatSync(file);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > limit) fail('protected-owner-source-invalid');
@@ -47,6 +52,18 @@ async function withExecutionActivity(request, runtime, action) {
       || r.ownerBroker || r.memberHandle !== undefined || r.route?.worker_mode === 'native'
       || fs.existsSync(`${r.resultFile}.receipt.json`)) return action(runtime);
   const owner = fs.realpathSync.native(r.contextRoot || r.cwd), unit = `execute-task/${r.taskId}`;
+  // A known time refusal must reach the existing owner receipt path without
+  // opening/renewing a writer lease or requiring writer identity. Carry the
+  // exact canonical refusal privately, so a changing clock cannot turn this
+  // diagnostic-only branch into an uncoordinated provider launch.
+  try {
+    require('./forge-milestone-time-admission').assertTransportEntry({ cwd: owner,
+      milestone: r.milestoneId, unit, now: runtime.now });
+  } catch (error) {
+    if (error?.provider_called !== false || error.stage !== 'milestone-time-admission'
+        || !require('./forge-milestone-time-admission').TRANSPORT_REFUSAL_CODES.includes(error.code)) throw error;
+    return preflightRefusals.run(error, () => action(runtime));
+  }
   const leaseFile = lease.leaseFile(owner, unit), observed = lease.readLease(leaseFile);
   // Old adapter fixtures/legacy callers may execute without a controller begin.
   // They gain no lease exception or owner capability through this branch.
@@ -379,5 +396,5 @@ async function withReconciliationHandoff(request, runtime, action) {
   try { return await handoffs.run(entry, action); }
   finally { entry.consumed = true; }
 }
-module.exports = { withExecutionActivity, currentScope, expectedProtectedOwner, reconciliationDecision,
+module.exports = { withExecutionActivity, currentScope, assertPreflightAdmission, expectedProtectedOwner, reconciliationDecision,
   createOwnerReconciliation, assertOwnerReconciliationReady, withOwnerReconciliation, withReconciliationHandoff };

@@ -2756,6 +2756,7 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
   let packagingRefusal = null;
   const admitFinalLaunch = () => {
     try {
+      require('./forge-protected-owner-activity').assertPreflightAdmission();
       if (r.scope !== 'standalone-task' && r.milestoneId) require('./forge-milestone-time-admission').assertTransportEntry({
         cwd: r.contextRoot || r.cwd, milestone: r.milestoneId, unit: unitLabel(r, locations(r)), now: runtime.now });
       else admitTaskLaunch();
@@ -2769,6 +2770,7 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
   };
   const enterTransport = () => {
     packagingRefusal = null;
+    require('./forge-protected-owner-activity').assertPreflightAdmission();
     if (verificationSuccessor) fail('verification-successor-no-inference');
     if (r.scope !== 'standalone-task' && r.milestoneId) require('./forge-milestone-time-admission').assertTransportEntry({
       cwd: r.contextRoot || r.cwd, milestone: r.milestoneId, unit: unitLabel(r, locations(r)), now: runtime.now });
