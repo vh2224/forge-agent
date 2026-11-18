@@ -9,11 +9,21 @@ const concurrency = require('./forge-ci-concurrency.js');
 const { POLICY, expandJobs, assertJobMapping } = require('./forge-release-checks.js');
 const { loadShardProfile, planShards, verifyPartition } = require('./forge-ci-shards.js');
 const { discoverTests } = require('./run-tests.js');
+const { expandSuites, unitWeights } = require('./forge-ci-units.js');
+const { workerLayout } = require('./forge-ci-parallel.js');
 
 const root = path.resolve(__dirname, '..');
 const bytes = Object.fromEntries(['ci', 'app', 'release'].map(id => [id, fs.readFileSync(path.join(root, '.github', 'workflows', `${id}.yml`))]));
 const texts = Object.fromEntries(Object.entries(bytes).map(([id, value]) => [id, value.toString('utf8')]));
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
+const latencyLayer = require('./fixtures/ci-latency/workflow-layer.json');
+const predecessorCi = fs.readFileSync(path.join(__dirname, 'fixtures/ci-latency/predecessor-ci.yml'), 'utf8');
+const predecessorRelease = fs.readFileSync(path.join(__dirname, 'fixtures/ci-latency/predecessor-release.yml'), 'utf8');
+assert.strictEqual(hash(predecessorRelease), '635887910ef3fdb5b5c0b7731ee7e6dee86c39e6e675b6d701cacf8e4a321747');
+assert.strictEqual(hash(bytes.release), latencyLayer.release_after.sha256);
+assert.strictEqual(hash(predecessorCi), latencyLayer.ci_before.sha256);
+assert.strictEqual(hash(bytes.ci), latencyLayer.ci_after.sha256);
+assert.strictEqual(latencyLayer.ci_before.sha256, 'aaebc13d224e26dc85fbf7c077a878b550fc041978dc30d9e6995da15d650fc8');
 const marker = (kind, index, detail) => console.log(`PASS S04-T06 ${kind}:${index} ${detail}`);
 
 // Reverse the authorized concurrency, profile, four-shard and two-macOS-shard changes. Old
@@ -26,7 +36,7 @@ for (const id of ['ci', 'app']) {
     + `  cancel-in-progress: ${concurrency.SUPPORTED_FORMS.cancellations.pull_request}\n\n`;
   assert.strictEqual(texts[id].split(block).length, 2);
   assert(texts[id].includes(`permissions:\n  contents: read\n\n${block}jobs:`));
-  let original = texts[id].replace(block, '');
+  let original = (id === 'ci' ? predecessorCi : texts[id]).replace(block, '');
   if (id === 'ci') {
     const profileArgument = ' --profile-out "${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}.json"';
     const profileStep = '\n      - name: Preserve bounded suite timing profile\n'
@@ -69,9 +79,10 @@ const OLD_CHANGELOG_STEP = "      - name: Generate changelog\n        env:\n    
 const RESOLVE_RUN = "        run: node scripts/forge-release-version.js --check --github-output \"$GITHUB_OUTPUT\" --notes \"$RUNNER_TEMP/release-notes.md\"\n";
 assert(!bytes.release.includes(13) && !texts.release.startsWith('\uFEFF'));
 assert.strictEqual(texts.release.split(RESOLVE_RUN).length, 3);
-assert.strictEqual(texts.release.split('    timeout-minutes: 75\n').length, 2);
-assert.strictEqual(texts.release.split('Wait for complete CI and app (60 minute deadline)').length, 2);
-const historicalRelease = Buffer.from(texts.release
+assert.strictEqual(predecessorRelease.split('    timeout-minutes: 75\n').length, 2);
+assert.strictEqual(predecessorRelease.split('Wait for complete CI and app (60 minute deadline)').length, 2);
+assert.strictEqual(texts.release.split('Wait for complete CI and app (publisher deadline)').length, 2);
+const historicalRelease = Buffer.from(predecessorRelease
   .replace('    timeout-minutes: 75\n', '    timeout-minutes: 45\n')
   .replace('Wait for complete CI and app (60 minute deadline)', 'Wait for complete CI and app (30 minute deadline)')
   .split(RESOLVE_RUN).join(OLD_RESOLVE_RUN + OLD_CHANGELOG_STEP));
@@ -184,21 +195,29 @@ marker('truth', 2, 'fail-closed parser negatives and injected global-cancel/ref-
 marker('key_link', 0, 'readConcurrency and rehearse consume real workflow bytes; simulate detects injected bad models');
 
 const testStep = texts.ci.match(/^      - name: Run test suites\n([\s\S]*?)(?=^      - name:)/m)[1];
+assert(testStep.includes('        env:\n          FORGE_CI_JOB_NAME: Tests (${{ matrix.label }})\n'), 'raw worker logs bind the actual matrix display name');
+assert(texts.ci.includes('          path: ${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}/*\n'), 'both structured profiles and separate worker logs are retained');
 const command = testStep.match(/^        run: (.+)$/m)[1];
-assert.strictEqual(command, 'node scripts/run-tests.js --baseline scripts/fixtures/ci-baseline/known-failures.json'
-  + ' --shard-profile scripts/fixtures/ci-shards/shard-profile.json --shard-index ${{ matrix.shard-index }} --shard-count ${{ matrix.shard-count }}'
-  + ' --profile-out "${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}.json"');
+assert.strictEqual(command, 'node scripts/forge-ci-parallel.js --shard-index ${{ matrix.shard-index }} --shard-count ${{ matrix.shard-count }}'
+  + ' --jobs "${{ matrix.workers }}" --single-worker-jobs ${{ matrix.single-worker-jobs }} --profile-dir "${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}"');
+const parallelSource = fs.readFileSync(path.join(__dirname, 'forge-ci-parallel.js'), 'utf8');
+for (const token of ["'--baseline', 'scripts/fixtures/ci-baseline/known-unit-failures.json'", "'--partition-suites'", "'--shard-profile', 'scripts/fixtures/ci-latency/shard-profile.json'", "'--profile-out'"]) assert(parallelSource.includes(token), token);
+assert(!/--(?:changed|match|fail-fast|inherit-home)\b/.test(parallelSource));
 assert(!/--(?:changed|match|fail-fast|inherit-home)\b/.test(command));
 assert(!/\b(?:paths|paths-ignore|branches-ignore):/.test(texts.ci.split('\npermissions:')[0]));
 const steps = texts.ci.match(/^      - name:[^\n]*(?:\n(?!      - name:)[^\n]*)*/gm);
 const testIndex = texts.ci.indexOf('      - name: Run test suites');
-const smokeIndex = texts.ci.indexOf('      - name: Smoke suite (release gate)');
-assert(testIndex < smokeIndex);
-const smokeStep = "      - name: Smoke suite (release gate)\n        if: runner.os != 'Windows' && matrix.shard-index == 0\n"
-  + '        run: node scripts/forge-smoke.js\n\n  required-offline-windows:\n';
-assert.strictEqual(texts.ci.split(smokeStep).length, 2);
-assert.strictEqual(texts.ci.indexOf(smokeStep), smokeIndex);
-assert.strictEqual(texts.ci.split('forge-smoke.js').length, 2);
+assert(!texts.ci.includes('Smoke suite (release gate)'), 'smoke must participate in weighted suite allocation');
+assert(discoverTests([]).includes('forge-ci-smoke.test.js'), 'full smoke is discovered by the canonical runner');
+const smokeSuite = require('./forge-ci-smoke.test');
+for (const platform of ['linux', 'darwin']) {
+  let calls = 0;
+  const invoke = (command, args, options) => { calls++; assert.strictEqual(command, process.execPath); assert.deepStrictEqual(args, [path.join(__dirname,'forge-smoke.js')]); assert.strictEqual(options.stdio,'inherit'); return {status:7,signal:null}; };
+  assert.strictEqual(smokeSuite.run(platform, invoke),7,'a real smoke failure blocks the suite'); assert.strictEqual(calls,1);
+  assert.strictEqual(smokeSuite.run(platform,()=>({status:0,signal:'SIGTERM'})),1);
+  assert.strictEqual(smokeSuite.run(platform,()=>({status:null,error:new Error('fixture')})),1);
+}
+assert.strictEqual(smokeSuite.run('win32',()=>{throw Error('original Windows smoke was not applicable');}),0);
 for (const [platform, pattern] of [
   ['Linux', /run:\s*sudo apt-get update && sudo apt-get install -y subversion/],
   ['macOS', /run:\s*brew install subversion/],
@@ -221,13 +240,13 @@ const verifySteps = steps.filter(step => /svn --version --quiet/.test(step) && /
 assert.strictEqual(verifySteps.length, 1);
 assert(!/^\s*if:/m.test(verifySteps[0]) && texts.ci.indexOf(verifySteps[0]) < testIndex);
 const rows = expandJobs(POLICY.workflows.ci);
-assert.strictEqual(rows.length, 18);
-assert.strictEqual(rows.filter(row => row.kind === 'alias').length, 8);
-assert.deepStrictEqual(rows.filter(row => row.key === 'test').map(row => row.name), [
-  'Tests (ubuntu-latest)', 'Tests (macos-latest, shard 1/2)', 'Tests (macos-latest, shard 2/2)',
-  'Tests (windows-latest, shard 1/4)', 'Tests (windows-latest, shard 2/4)', 'Tests (windows-latest, shard 3/4)', 'Tests (windows-latest, shard 4/4)']);
-assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'win32').map(row => row.matrix['shard-count']), [4, 4, 4, 4]);
-assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'darwin').map(row => row.matrix['shard-count']), [2, 2]);
+assert.strictEqual(rows.length, 41);
+assert.strictEqual(rows.filter(row => row.kind === 'alias').length, 9);
+assert.deepStrictEqual(rows.filter(row => row.key === 'test').map(row => row.name),
+  [['ubuntu-latest', 3], ['macos-latest', 5], ['windows-latest', 21]].flatMap(([os, count]) => Array.from({length:count}, (_, i) => `Tests (${os}, shard ${i+1}/${count})`)));
+assert.strictEqual(rows.filter(row => row.name === 'Tests (ubuntu-latest)' && row.kind === 'alias').length, 1);
+assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'win32').map(row => row.matrix['shard-count']), Array(21).fill(21));
+assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'darwin').map(row => row.matrix['shard-count']), Array(5).fill(5));
 // Smoke condition evaluated per policy cell: exactly one Linux and one macOS run, never Windows.
 const runnerOs = { 'ubuntu-latest': 'Linux', 'macos-latest': 'macOS', 'windows-latest': 'Windows' };
 const smokeCells = rows.filter(row => row.key === 'test'
@@ -235,20 +254,27 @@ const smokeCells = rows.filter(row => row.key === 'test'
 assert.deepStrictEqual(['linux', 'darwin', 'win32'].map(platform => smokeCells.filter(row => row.matrix.platform === platform).length), [1, 1, 0]);
 marker('key_link', 2, 'CI source test command triggers concurrency SVN ordering and smoke structure asserted');
 
-const suites = discoverTests([]);
-const profilePath = command.match(/--shard-profile (\S+)/)[1];
-assert.strictEqual(profilePath, 'scripts/fixtures/ci-shards/shard-profile.json');
+const unitInventory = expandSuites(discoverTests([]));
+const suites = unitInventory.map(unit => unit.id);
+const profilePath = 'scripts/fixtures/ci-latency/shard-profile.json';
+assert.strictEqual(profilePath, 'scripts/fixtures/ci-latency/shard-profile.json');
 const profile = loadShardProfile(path.join(root, profilePath));
 assert.strictEqual(profile.state, 'loaded');
-const cells = new Map(rows.filter(row => row.key === 'test').map(row => [`${row.matrix.platform}/${row.matrix['shard-count']}`, row.matrix]));
-for (const cell of cells.values()) {
-  const plans = Array.from({ length: cell['shard-count'] }, (_, index) => planShards({
-    suites, index, count: cell['shard-count'], platform: cell.platform, profile }));
+const cells=new Map();for(const row of rows.filter(row=>row.key==='test')){const key=row.matrix.platform;if(!cells.has(key))cells.set(key,[]);cells.get(key).push(row.matrix);}
+let totalWorkers=0;
+for (const [platform,platformCells] of cells) {
+  const cell=platformCells[0],layouts=platformCells.map(row=>workerLayout({index:row['shard-index'],count:row['shard-count'],jobs:row.workers,singleWorkerJobs:row['single-worker-jobs']}));
+  const count=layouts[0].count;assert(layouts.every(row=>row.count===count));
+  assert.deepStrictEqual(layouts.flatMap(row=>Array.from({length:row.workers},(_,i)=>row.start+i)).sort((a,b)=>a-b),Array.from({length:count},(_,i)=>i));
+  assert.strictEqual(count,{linux:6,darwin:15,win32:40}[platform]);totalWorkers+=count;
+  const plans = Array.from({ length: count }, (_, index) => planShards({
+    suites, index, count, platform, profile, estimatedWeights: unitWeights(unitInventory, profile, platform) }));
   assert(plans.every(plan => plan.fallback === null && plan.algorithm === 'weighted-lpt-v1'));
   assert.strictEqual(new Set(plans.map(plan => plan.partition_sha256)).size, 1);
   assert(verifyPartition(suites, plans.map(plan => plan.selected)).ok);
   console.log(`PASS partition ${cell.platform}/${cell['shard-count']} universe=${suites.length} unprofiled=${plans[0].unprofiled.length} stale=${plans[0].stale.length} partition_sha256=${plans[0].partition_sha256}`);
 }
+assert.strictEqual(totalWorkers,61);assert(totalWorkers<=64);
 marker('truth', 3, 'baseline and versioned profile wired; full matrix coverage disjoint with equal fingerprints and fallback null; CI structure preserved');
 marker('key_link', 1, 'loadShardProfile planShards and verifyPartition exercise every real matrix platform/count/index');
 marker('key_link', 5, 'Run test suites invokes run-tests with baseline profile and final shard-index/count flags');
@@ -265,6 +291,8 @@ for (const id of ['ci', 'app', 'release']) {
 // Reconstruct only the authorized Windows and macOS matrix changes and remove the macOS
 // tests alias before historical pinning.
 const historicalJobs = JSON.parse(JSON.stringify(Object.fromEntries(Object.entries(POLICY.workflows).map(([key, value]) => [key, value.jobs]))));
+historicalJobs.ci = historicalJobs.ci.filter(job => job.key !== 'required-tests-linux');
+historicalJobs.ci.find(job => job.key === 'test').matrix.include = latencyLayer.matrix_before;
 assert.strictEqual(historicalJobs.ci.filter(job => job.key === 'required-tests-macos').length, 1);
 assert.deepStrictEqual(historicalJobs.ci[historicalJobs.ci.length - 1], { key: 'required-tests-macos', kind: 'alias', needs: ['test'],
   name: 'Tests (macos-latest)', runner: 'ubuntu-latest', matrix: null });

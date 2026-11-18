@@ -190,7 +190,8 @@ async function computeTrace() {
   const prep = require('./forge-task-preparation'), unit = require('./forge-unit-sidecar'), execution = require('./forge-task-execution');
   const admission = require('./forge-milestone-time-admission'), personal = require('./forge-personal-context');
   const summary = require('./forge-personal-summary'), status = require('./forge-status'), runs = require('./forge-runs');
-  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-linked-parity-')));
+  // A parent path containing forge-agent must not be rewritten as an agent name.
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-agent-linked-parity-')));
   const saved = Object.fromEntries(['HOME', 'USERPROFILE', 'FORGE_HOME'].map(k => [k, process.env[k]]));
   const home = path.join(root, 'home');
   try {
@@ -208,7 +209,7 @@ async function computeTrace() {
     const nativeExtra = (host, phase) => {
       if (host === 'codex') return { activeCapabilities: { available: true, tool: 'collaboration.spawn_agent', source: 'fixture-tool-schema',
         models: ['gpt-5.6-sol'], reasoning_efforts: ['medium', 'high'], fork_turns: ['none'] } };
-      const file = agent.replace('forge-agent', prep.PHASE_CONTRACTS[phase].agentType);
+      const file = path.join(path.dirname(agent), prep.PHASE_CONTRACTS[phase].agentType + '.md');
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, '---\nname: ' + prep.PHASE_CONTRACTS[phase].agentType + '\neffort: medium\n---\n');
       return { activeCapabilities: { available: true, tool: 'Agent', source: 'fixture-tool-schema', model_aliases: ['sonnet'], effort_transports: ['agent-frontmatter'] },

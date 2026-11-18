@@ -394,7 +394,175 @@ function foreignQuestions(f, n) {
 }
 function removeQuestion(f, identity) { for (const suffix of ['.json', '.origin.json']) fs.rmSync(path.join(f.owner, '.gsd/forge/questions', identity + suffix), { force: true }); }
 
+async function independentStartRegressions() {
+    // =======================================================================
+    // R33: the whole start holds one owner registry fence, including lender cleanup.
+    {
+      const G = chainFixture(); G.endpoint();
+      assert.equal(lts.produceHandoff({ cwd: G.owner, milestone: M, ...G.prof }).status, 'produced');
+      const lender = fs.readFileSync(runs.runFile(G.owner, M)); let attempts = 0;
+      const result = start(G, { failpoint: name => {
+        if (!['after-personal', 'after-run', 'after-witness'].includes(name)) return false;
+        for (const attempt of [
+          () => runs.add(G.owner, { id: 'M999', kind: 'milestone', session_id: 'competitor', worktrees: [{ repo: G.owner, path: G.code }] }),
+          () => runs.update(G.owner, M, { worktrees: [] }),
+          () => runs.updateWith(G.owner, M, () => ({ worktrees: [] })),
+          () => runs.remove(G.owner, M),
+          () => isolation.cleanupForRun(G.owner, M),
+        ]) { assert.throws(attempt, e => e.code === 'EOWNERSHIPBUSY'); attempts++; }
+        assert.ok(fs.existsSync(G.code));
+        assert.ok(fs.readFileSync(runs.runFile(G.owner, M)).equals(lender));
+        return false;
+      } });
+      assert.equal(result.status, 'started', JSON.stringify(result)); assert.equal(attempts, 15);
+      assert.equal(runs.get(G.owner, 'M999'), null);
+      assert.deepEqual(runs.get(G.owner, G.task).worktrees, runs.get(G.owner, M).worktrees);
+      assert.ok(isolation.cleanupForRun(G.owner, M).lent_to.includes(G.task)); assert.ok(fs.existsSync(G.code));
+      assert.equal(lts.continueLinkedTask({ cwd: G.owner, taskId: G.task, liveAdapter: liveAdapter(G.owner) }).status, 'continued');
+      process.stdout.write('ok - ownership transfer is fenced across registry activation and lender cleanup\n');
+    }
+    // R35: private binding first, public snapshot second; replay preserves every field.
+    {
+      const G = chainFixture(); G.endpoint();
+      const publicFile = file(G.owner, recordRef('handoff')), bindingFile = path.join(G.owner, '.gsd/forge/time', M, 'linked-task-bindings/handoff.json');
+      const linkFile = fs.linkSync; let interrupted = 0;
+      fs.linkSync = function (from, to) {
+        if (path.resolve(to) === path.resolve(publicFile)) { interrupted++; throw Object.assign(new Error('publication interrupted'), { code: 'EIO' }); }
+        return linkFile.apply(this, arguments);
+      };
+      let partial;
+      try { partial = lts.produceHandoff({ cwd: G.owner, milestone: M, ...G.prof }); } finally { fs.linkSync = linkFile; }
+      assert.equal(partial.status, 'partial', JSON.stringify(partial)); assert.equal(interrupted, 1);
+      assert.ok(!fs.existsSync(publicFile)); const bound = JSON.parse(fs.readFileSync(bindingFile));
+      assert.equal(time.readOwnerRecord({ cwd: G.owner, milestone: M, path: 'linked-task-bindings/handoff.json' }).status, 'invalid');
+      assert.throws(() => time.publishLinkedTaskHandoff({ cwd: G.owner, milestone: M, record: bound.handoff }), e => e.code === 'time-record-invalid');
+      assert.equal(lts.produceHandoff({ cwd: G.owner, milestone: M, now: Date.now() + 1000, ...G.prof }).status, 'produced');
+      const bytes = fs.readFileSync(publicFile), proofBytes = fs.readFileSync(bindingFile);
+      assert.deepEqual(JSON.parse(bytes), bound.handoff, 'proof-first recovery finishes the exact original full snapshot');
+      for (const mutate of [h => { h.produced_at = iso(Date.parse(h.produced_at) + 1); },
+        h => { h.clocks.milestone.current_state = h.clocks.milestone.current_state === 'active' ? 'warning' : 'active'; },
+        h => { h.clocks.milestone.current_ceiling_ms += 1; }, h => { h.clocks.milestone.current_contract_version += 1; }]) {
+        const edited = JSON.parse(bytes); mutate(edited); fs.writeFileSync(publicFile, JSON.stringify(edited) + '\n');
+        const before = snap(G);
+        assert.equal(lts.produceHandoff({ cwd: G.owner, milestone: M, ...G.prof }).status, 'refused');
+        assert.equal(start(G).reason, 'linked-task-handoff-tampered'); unchanged(G, before, 'valid-valued full snapshot edit refused');
+        fs.writeFileSync(publicFile, bytes);
+      }
+      fs.unlinkSync(bindingFile); const unbound = snap(G);
+      assert.equal(lts.produceHandoff({ cwd: G.owner, milestone: M, ...G.prof }).status, 'refused');
+      unchanged(G, unbound, 'unbound public history is never retroactively blessed'); fs.writeFileSync(bindingFile, proofBytes);
+      const ceiling = time.readContract({ cwd: G.owner, milestone: M }).contract.ceiling_ms;
+      const extension = { kind: 'extension', reason: 'Legitimate later extension', patch: { ceiling_ms: ceiling + 1000 } };
+      time.amendContract({ cwd: G.owner, milestone: M, ...extension, handle: authorize(G.owner, 'extension', extension, 'extend:' + (ceiling + 1000)) });
+      const beforeReplay = snap(G);
+      assert.equal(lts.produceHandoff({ cwd: G.owner, milestone: M, ...G.prof }).status, 'unchanged'); unchanged(G, beforeReplay, 'later extension retains original clock projection');
+      assert.ok(fs.readFileSync(publicFile).equals(bytes) && fs.readFileSync(bindingFile).equals(proofBytes));
+      assert.equal(start(G).status, 'started');
+      process.stdout.write('ok - genuine handoff has publisher-only full snapshot binding and stable replay\n');
+    }
+    // R36: real personal commits can succeed while lock cleanup reports failure.
+    {
+      const G = chainFixture(); G.endpoint();
+      assert.equal(lts.produceHandoff({ cwd: G.owner, milestone: M, ...G.prof, failpoint: name => name === 'after-handoff' }).status, 'partial');
+      const mutex = require('./forge-lock'), release = mutex.releaseHandle;
+      const context = path.join(G.home, '.forge-personal/context.json');
+      const inject = callback => {
+        let calls = 0;
+        mutex.releaseHandle = handle => { const result = release(handle); calls++; return { ...result, ok: false, reason: 'injected-cleanup-failure', message: 'C:\\private token=synthetic-only' }; };
+        try { const result = callback(); assert.ok(calls > 0); return result; } finally { mutex.releaseHandle = release; }
+      };
+      const before = fs.readFileSync(context);
+      const result = inject(() => lts.produceHandoff({ cwd: G.owner, milestone: M, ...G.prof }));
+      assert.deepEqual([result.status, result.personal_committed, result.detail], ['partial', true, 'checkpoint-cleanup-required']);
+      assert.deepEqual(result.cleanup, [{ reason: 'lock-release-failed' }]); assert.ok(time.isPublicData(result));
+      assert.ok(!JSON.stringify(result).includes('synthetic-only') && !fs.readFileSync(context).equals(before), 'actual changed checkpoint committed without private diagnostics');
+      assert.equal(lts.produceHandoff({ cwd: G.owner, milestone: M, ...G.prof }).status, 'unchanged');
+      assert.equal(start(G).status, 'started'); taskDelivery(G);
+      assert.equal(lts.closeLinkedTask({ cwd: G.owner, taskId: G.task, ...G.prof, failpoint: name => name === 'after-closure' }).status, 'partial');
+      const closure = fs.readFileSync(file(G.owner, recordRef('closure'))), beforeClose = fs.readFileSync(context);
+      const closed = inject(() => lts.closeLinkedTask({ cwd: G.owner, taskId: G.task, ...G.prof }));
+      assert.deepEqual([closed.status, closed.personal_committed], ['partial', true]); assert.ok(time.isPublicData(closed));
+      assert.ok(!fs.readFileSync(context).equals(beforeClose)); assert.ok(fs.readFileSync(file(G.owner, recordRef('closure'))).equals(closure));
+      assert.equal(lts.closeLinkedTask({ cwd: G.owner, taskId: G.task, ...G.prof }).status, 'unchanged');
+      process.stdout.write('ok - committed personal cleanup failure is reported as partial with public diagnostics\n');
+    }
+    // R26: a genuine canonical independent writer wins immediately before our personal mutex acquisition.
+    {
+      const G = chainFixture(); G.endpoint();
+      const stopped = lts.produceHandoff({ cwd: G.owner, milestone: M, ...G.prof, failpoint: name => name === 'after-handoff' });
+      assert.deepEqual([stopped.status, stopped.detail], ['partial', 'after-handoff']);
+      const handoffBytes = fs.readFileSync(file(G.owner, recordRef('handoff')));
+      const independent = '.gsd/independent-note.md'; write(G.owner, independent, 'Independent current action.\n');
+      const mutex = require('./forge-lock'), acquire = mutex.acquireSync;
+      let injected = 0, afterWriter = null;
+      mutex.acquireSync = function (root, name) {
+        if (name === 'context' && path.resolve(root) === path.resolve(G.home, '.forge-personal') && !injected) {
+          injected++;
+          const payload = { project: G.owner, ...G.prof, id: G.task, intent: 'checkpoint', checkpoint: {
+            nextAction: [{ text: 'Independent current action', source: file(G.owner, independent) }] } };
+          const writer = spawnSync(process.execPath, ['-e', 'const p=require(process.argv[1]);const r=p.saveCheckpoint(JSON.parse(process.argv[2]));console.log(JSON.stringify(r));process.exitCode=r.status==="ok"?0:1;',
+            require.resolve('./forge-personal-context'), JSON.stringify(payload)], { encoding: 'utf8', windowsHide: true });
+          assert.equal(writer.status, 0, writer.stdout + writer.stderr);
+          assert.equal(JSON.parse(writer.stdout).reason, 'checkpoint-saved');
+          afterWriter = snap(G);
+        }
+        return acquire.apply(this, arguments);
+      };
+      let refused;
+      try { refused = lts.produceHandoff({ cwd: G.owner, milestone: M, ...G.prof }); }
+      finally { mutex.acquireSync = acquire; }
+      assert.equal(injected, 1, 'the real context mutex seam was reached');
+      assert.deepEqual([refused.status, refused.reason, refused.detail], ['refused', 'linked-task-personal-conflict', 'checkpoint-conflict'], JSON.stringify(refused));
+      unchanged(G, afterWriter, 'the winning canonical writer and every unrelated slot survive');
+      assert.equal(workOf(G).checkpoint.nextAction[0].text, 'Independent current action');
+      assert.ok(fs.readFileSync(file(G.owner, recordRef('handoff'))).equals(handoffBytes));
+      const beforeRetry = snap(G);
+      assert.equal(lts.produceHandoff({ cwd: G.owner, milestone: M, ...G.prof }).reason, 'linked-task-personal-conflict');
+      unchanged(G, beforeRetry, 'independent capture remains protected on retry');
+      const H = chainFixture(); H.endpoint();
+      assert.equal(lts.produceHandoff({ cwd: H.owner, milestone: M, ...H.prof }).status, 'produced', 'matching owned captures save normally');
+      const matched = snap(H);
+      assert.equal(lts.produceHandoff({ cwd: H.owner, milestone: M, ...H.prof }).status, 'unchanged');
+      unchanged(H, matched, 'matching owned replay is unchanged');
+      process.stdout.write('ok - T03 correction: conditional personal checkpoint save preserves a concurrent canonical independent capture under the personal mutex\n');
+    }
+    // R27: source mutation after genuine outer preparation reaches the actual owner boundary.
+    {
+      const G = chainFixture(); G.endpoint();
+      const summary = file(G.owner, `.gsd/milestones/${M}/${M}-SUMMARY.md`), boundary = selection.ownerBoundary;
+      let injected = 0, afterChange = null;
+      selection.ownerBoundary = function (owner, milestone) {
+        if (owner === G.owner && milestone === M && !injected) {
+          injected++; fs.appendFileSync(summary, '\nCurrent owner summary intelligence.\n');
+          assert.equal(endpoint.readEndpoint({ cwd: G.owner, milestone: M }).status, 'valid');
+          afterChange = snap(G);
+        }
+        return boundary.apply(this, arguments);
+      };
+      let refused;
+      try { refused = lts.produceHandoff({ cwd: G.owner, milestone: M, ...G.prof }); }
+      finally { selection.ownerBoundary = boundary; }
+      assert.equal(injected, 1);
+      assert.deepEqual([refused.status, refused.reason, refused.detail], ['refused', 'linked-task-handoff-stale', 'sources-changed-during-handoff'], JSON.stringify(refused));
+      unchanged(G, afterChange, 'stale first publication has no effects and retains the current source');
+      assert.ok(!fs.existsSync(file(G.owner, recordRef('handoff'))));
+      const now = Date.now();
+      assert.equal(lts.produceHandoff({ cwd: G.owner, milestone: M, now, ...G.prof }).status, 'produced');
+      const published = json(G.owner, recordRef('handoff'));
+      assert.equal(published.summary.sha256, sha(fs.readFileSync(summary)));
+      assert.equal(published.produced_at, iso(now));
+      const stable = snap(G);
+      assert.equal(lts.produceHandoff({ cwd: G.owner, milestone: M, now: now + 1000, ...G.prof }).status, 'unchanged');
+      unchanged(G, stable, 'stable retry and immutable replay retain bytes and timestamps');
+      process.stdout.write('ok - T03 correction: first handoff publication revalidates current sources inside the owner boundary before effects\n');
+    }
+}
+
 async function suite() {
+  const args = process.argv.slice(2);
+  if (args.length && (args.length !== 1 || !['--lts-cohort=core','--lts-cohort=regressions'].includes(args[0]))) throw Error('linked-test-cohort-invalid');
+  const cohort = args.length ? args[0].slice('--lts-cohort='.length) : 'all';
+  console.log('CI linked cohort: ' + cohort);
   const suiteHome = tempRoot('forge-lts-home-'), saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
   const realStore = path.join(REAL_HOME, '.forge-personal', 'context.json'), realBefore = fs.existsSync(realStore) ? sha(fs.readFileSync(realStore)) : null;
   const realGsd = path.join(__dirname, '..', '.gsd');
@@ -403,6 +571,10 @@ async function suite() {
   process.env.HOME = suiteHome; process.env.USERPROFILE = suiteHome;
   let passed = false;
   try {
+    if (cohort === 'regressions') {
+      await independentStartRegressions();
+      passed = true;
+    } else {
     // =======================================================================
     // Truth 0: exports, inert import and the reusable owner decision preparation.
     // =======================================================================
@@ -1776,167 +1948,8 @@ async function suite() {
     }
     line('explicit chain closure and verified task delivery govern closure');
 
-    // =======================================================================
-    // R33: the whole start holds one owner registry fence, including lender cleanup.
-    {
-      const G = chainFixture(); G.endpoint();
-      assert.equal(lts.produceHandoff({ cwd: G.owner, milestone: M, ...G.prof }).status, 'produced');
-      const lender = fs.readFileSync(runs.runFile(G.owner, M)); let attempts = 0;
-      const result = start(G, { failpoint: name => {
-        if (!['after-personal', 'after-run', 'after-witness'].includes(name)) return false;
-        for (const attempt of [
-          () => runs.add(G.owner, { id: 'M999', kind: 'milestone', session_id: 'competitor', worktrees: [{ repo: G.owner, path: G.code }] }),
-          () => runs.update(G.owner, M, { worktrees: [] }),
-          () => runs.updateWith(G.owner, M, () => ({ worktrees: [] })),
-          () => runs.remove(G.owner, M),
-          () => isolation.cleanupForRun(G.owner, M),
-        ]) { assert.throws(attempt, e => e.code === 'EOWNERSHIPBUSY'); attempts++; }
-        assert.ok(fs.existsSync(G.code));
-        assert.ok(fs.readFileSync(runs.runFile(G.owner, M)).equals(lender));
-        return false;
-      } });
-      assert.equal(result.status, 'started', JSON.stringify(result)); assert.equal(attempts, 15);
-      assert.equal(runs.get(G.owner, 'M999'), null);
-      assert.deepEqual(runs.get(G.owner, G.task).worktrees, runs.get(G.owner, M).worktrees);
-      assert.ok(isolation.cleanupForRun(G.owner, M).lent_to.includes(G.task)); assert.ok(fs.existsSync(G.code));
-      assert.equal(lts.continueLinkedTask({ cwd: G.owner, taskId: G.task, liveAdapter: liveAdapter(G.owner) }).status, 'continued');
-      process.stdout.write('ok - ownership transfer is fenced across registry activation and lender cleanup\n');
-    }
-    // R35: private binding first, public snapshot second; replay preserves every field.
-    {
-      const G = chainFixture(); G.endpoint();
-      const publicFile = file(G.owner, recordRef('handoff')), bindingFile = path.join(G.owner, '.gsd/forge/time', M, 'linked-task-bindings/handoff.json');
-      const linkFile = fs.linkSync; let interrupted = 0;
-      fs.linkSync = function (from, to) {
-        if (path.resolve(to) === path.resolve(publicFile)) { interrupted++; throw Object.assign(new Error('publication interrupted'), { code: 'EIO' }); }
-        return linkFile.apply(this, arguments);
-      };
-      let partial;
-      try { partial = lts.produceHandoff({ cwd: G.owner, milestone: M, ...G.prof }); } finally { fs.linkSync = linkFile; }
-      assert.equal(partial.status, 'partial', JSON.stringify(partial)); assert.equal(interrupted, 1);
-      assert.ok(!fs.existsSync(publicFile)); const bound = JSON.parse(fs.readFileSync(bindingFile));
-      assert.equal(time.readOwnerRecord({ cwd: G.owner, milestone: M, path: 'linked-task-bindings/handoff.json' }).status, 'invalid');
-      assert.throws(() => time.publishLinkedTaskHandoff({ cwd: G.owner, milestone: M, record: bound.handoff }), e => e.code === 'time-record-invalid');
-      assert.equal(lts.produceHandoff({ cwd: G.owner, milestone: M, now: Date.now() + 1000, ...G.prof }).status, 'produced');
-      const bytes = fs.readFileSync(publicFile), proofBytes = fs.readFileSync(bindingFile);
-      assert.deepEqual(JSON.parse(bytes), bound.handoff, 'proof-first recovery finishes the exact original full snapshot');
-      for (const mutate of [h => { h.produced_at = iso(Date.parse(h.produced_at) + 1); },
-        h => { h.clocks.milestone.current_state = h.clocks.milestone.current_state === 'active' ? 'warning' : 'active'; },
-        h => { h.clocks.milestone.current_ceiling_ms += 1; }, h => { h.clocks.milestone.current_contract_version += 1; }]) {
-        const edited = JSON.parse(bytes); mutate(edited); fs.writeFileSync(publicFile, JSON.stringify(edited) + '\n');
-        const before = snap(G);
-        assert.equal(lts.produceHandoff({ cwd: G.owner, milestone: M, ...G.prof }).status, 'refused');
-        assert.equal(start(G).reason, 'linked-task-handoff-tampered'); unchanged(G, before, 'valid-valued full snapshot edit refused');
-        fs.writeFileSync(publicFile, bytes);
-      }
-      fs.unlinkSync(bindingFile); const unbound = snap(G);
-      assert.equal(lts.produceHandoff({ cwd: G.owner, milestone: M, ...G.prof }).status, 'refused');
-      unchanged(G, unbound, 'unbound public history is never retroactively blessed'); fs.writeFileSync(bindingFile, proofBytes);
-      const ceiling = time.readContract({ cwd: G.owner, milestone: M }).contract.ceiling_ms;
-      const extension = { kind: 'extension', reason: 'Legitimate later extension', patch: { ceiling_ms: ceiling + 1000 } };
-      time.amendContract({ cwd: G.owner, milestone: M, ...extension, handle: authorize(G.owner, 'extension', extension, 'extend:' + (ceiling + 1000)) });
-      const beforeReplay = snap(G);
-      assert.equal(lts.produceHandoff({ cwd: G.owner, milestone: M, ...G.prof }).status, 'unchanged'); unchanged(G, beforeReplay, 'later extension retains original clock projection');
-      assert.ok(fs.readFileSync(publicFile).equals(bytes) && fs.readFileSync(bindingFile).equals(proofBytes));
-      assert.equal(start(G).status, 'started');
-      process.stdout.write('ok - genuine handoff has publisher-only full snapshot binding and stable replay\n');
-    }
-    // R36: real personal commits can succeed while lock cleanup reports failure.
-    {
-      const G = chainFixture(); G.endpoint();
-      assert.equal(lts.produceHandoff({ cwd: G.owner, milestone: M, ...G.prof, failpoint: name => name === 'after-handoff' }).status, 'partial');
-      const mutex = require('./forge-lock'), release = mutex.releaseHandle;
-      const context = path.join(G.home, '.forge-personal/context.json');
-      const inject = callback => {
-        let calls = 0;
-        mutex.releaseHandle = handle => { const result = release(handle); calls++; return { ...result, ok: false, reason: 'injected-cleanup-failure', message: 'C:\\private token=synthetic-only' }; };
-        try { const result = callback(); assert.ok(calls > 0); return result; } finally { mutex.releaseHandle = release; }
-      };
-      const before = fs.readFileSync(context);
-      const result = inject(() => lts.produceHandoff({ cwd: G.owner, milestone: M, ...G.prof }));
-      assert.deepEqual([result.status, result.personal_committed, result.detail], ['partial', true, 'checkpoint-cleanup-required']);
-      assert.deepEqual(result.cleanup, [{ reason: 'lock-release-failed' }]); assert.ok(time.isPublicData(result));
-      assert.ok(!JSON.stringify(result).includes('synthetic-only') && !fs.readFileSync(context).equals(before), 'actual changed checkpoint committed without private diagnostics');
-      assert.equal(lts.produceHandoff({ cwd: G.owner, milestone: M, ...G.prof }).status, 'unchanged');
-      assert.equal(start(G).status, 'started'); taskDelivery(G);
-      assert.equal(lts.closeLinkedTask({ cwd: G.owner, taskId: G.task, ...G.prof, failpoint: name => name === 'after-closure' }).status, 'partial');
-      const closure = fs.readFileSync(file(G.owner, recordRef('closure'))), beforeClose = fs.readFileSync(context);
-      const closed = inject(() => lts.closeLinkedTask({ cwd: G.owner, taskId: G.task, ...G.prof }));
-      assert.deepEqual([closed.status, closed.personal_committed], ['partial', true]); assert.ok(time.isPublicData(closed));
-      assert.ok(!fs.readFileSync(context).equals(beforeClose)); assert.ok(fs.readFileSync(file(G.owner, recordRef('closure'))).equals(closure));
-      assert.equal(lts.closeLinkedTask({ cwd: G.owner, taskId: G.task, ...G.prof }).status, 'unchanged');
-      process.stdout.write('ok - committed personal cleanup failure is reported as partial with public diagnostics\n');
-    }
-    // R26: a genuine canonical independent writer wins immediately before our personal mutex acquisition.
-    {
-      const G = chainFixture(); G.endpoint();
-      const stopped = lts.produceHandoff({ cwd: G.owner, milestone: M, ...G.prof, failpoint: name => name === 'after-handoff' });
-      assert.deepEqual([stopped.status, stopped.detail], ['partial', 'after-handoff']);
-      const handoffBytes = fs.readFileSync(file(G.owner, recordRef('handoff')));
-      const independent = '.gsd/independent-note.md'; write(G.owner, independent, 'Independent current action.\n');
-      const mutex = require('./forge-lock'), acquire = mutex.acquireSync;
-      let injected = 0, afterWriter = null;
-      mutex.acquireSync = function (root, name) {
-        if (name === 'context' && path.resolve(root) === path.resolve(G.home, '.forge-personal') && !injected) {
-          injected++;
-          const payload = { project: G.owner, ...G.prof, id: G.task, intent: 'checkpoint', checkpoint: {
-            nextAction: [{ text: 'Independent current action', source: file(G.owner, independent) }] } };
-          const writer = spawnSync(process.execPath, ['-e', 'const p=require(process.argv[1]);const r=p.saveCheckpoint(JSON.parse(process.argv[2]));console.log(JSON.stringify(r));process.exitCode=r.status==="ok"?0:1;',
-            require.resolve('./forge-personal-context'), JSON.stringify(payload)], { encoding: 'utf8', windowsHide: true });
-          assert.equal(writer.status, 0, writer.stdout + writer.stderr);
-          assert.equal(JSON.parse(writer.stdout).reason, 'checkpoint-saved');
-          afterWriter = snap(G);
-        }
-        return acquire.apply(this, arguments);
-      };
-      let refused;
-      try { refused = lts.produceHandoff({ cwd: G.owner, milestone: M, ...G.prof }); }
-      finally { mutex.acquireSync = acquire; }
-      assert.equal(injected, 1, 'the real context mutex seam was reached');
-      assert.deepEqual([refused.status, refused.reason, refused.detail], ['refused', 'linked-task-personal-conflict', 'checkpoint-conflict'], JSON.stringify(refused));
-      unchanged(G, afterWriter, 'the winning canonical writer and every unrelated slot survive');
-      assert.equal(workOf(G).checkpoint.nextAction[0].text, 'Independent current action');
-      assert.ok(fs.readFileSync(file(G.owner, recordRef('handoff'))).equals(handoffBytes));
-      const beforeRetry = snap(G);
-      assert.equal(lts.produceHandoff({ cwd: G.owner, milestone: M, ...G.prof }).reason, 'linked-task-personal-conflict');
-      unchanged(G, beforeRetry, 'independent capture remains protected on retry');
-      const H = chainFixture(); H.endpoint();
-      assert.equal(lts.produceHandoff({ cwd: H.owner, milestone: M, ...H.prof }).status, 'produced', 'matching owned captures save normally');
-      const matched = snap(H);
-      assert.equal(lts.produceHandoff({ cwd: H.owner, milestone: M, ...H.prof }).status, 'unchanged');
-      unchanged(H, matched, 'matching owned replay is unchanged');
-      process.stdout.write('ok - T03 correction: conditional personal checkpoint save preserves a concurrent canonical independent capture under the personal mutex\n');
-    }
-    // R27: source mutation after genuine outer preparation reaches the actual owner boundary.
-    {
-      const G = chainFixture(); G.endpoint();
-      const summary = file(G.owner, `.gsd/milestones/${M}/${M}-SUMMARY.md`), boundary = selection.ownerBoundary;
-      let injected = 0, afterChange = null;
-      selection.ownerBoundary = function (owner, milestone) {
-        if (owner === G.owner && milestone === M && !injected) {
-          injected++; fs.appendFileSync(summary, '\nCurrent owner summary intelligence.\n');
-          assert.equal(endpoint.readEndpoint({ cwd: G.owner, milestone: M }).status, 'valid');
-          afterChange = snap(G);
-        }
-        return boundary.apply(this, arguments);
-      };
-      let refused;
-      try { refused = lts.produceHandoff({ cwd: G.owner, milestone: M, ...G.prof }); }
-      finally { selection.ownerBoundary = boundary; }
-      assert.equal(injected, 1);
-      assert.deepEqual([refused.status, refused.reason, refused.detail], ['refused', 'linked-task-handoff-stale', 'sources-changed-during-handoff'], JSON.stringify(refused));
-      unchanged(G, afterChange, 'stale first publication has no effects and retains the current source');
-      assert.ok(!fs.existsSync(file(G.owner, recordRef('handoff'))));
-      const now = Date.now();
-      assert.equal(lts.produceHandoff({ cwd: G.owner, milestone: M, now, ...G.prof }).status, 'produced');
-      const published = json(G.owner, recordRef('handoff'));
-      assert.equal(published.summary.sha256, sha(fs.readFileSync(summary)));
-      assert.equal(published.produced_at, iso(now));
-      const stable = snap(G);
-      assert.equal(lts.produceHandoff({ cwd: G.owner, milestone: M, now: now + 1000, ...G.prof }).status, 'unchanged');
-      unchanged(G, stable, 'stable retry and immutable replay retain bytes and timestamps');
-      process.stdout.write('ok - T03 correction: first handoff publication revalidates current sources inside the owner boundary before effects\n');
-    }
+    if (cohort === 'all') await independentStartRegressions();
+
     // Truth 8: the historical endpoint stays frozen; the standalone CLI refuses live actions.
     // =======================================================================
     {
@@ -2036,6 +2049,7 @@ async function suite() {
     line('historical endpoint stays frozen and standalone CLI refuses live actions');
     process.stdout.write('ok - T03 correction: canonical typed IDs reject malformed public handoffs and preserve genuine legacy and modern rendering\n');
     passed = true;
+    }
   } finally {
     process.env.HOME = saved.HOME; process.env.USERPROFILE = saved.USERPROFILE;
     if (saved.HOME === undefined) delete process.env.HOME;

@@ -68,7 +68,11 @@ const NUL = '\u0000';
 
 let passed = 0;
 let failed = 0;
+const CI_CASES = [];
 function test(name, fn) {
+  CI_CASES.push({ name, fn });
+}
+function runCase({ name, fn }) {
   const started = Date.now();
   try {
     fn();
@@ -1284,6 +1288,7 @@ test('issue343 U2b-4 existing broker or missing prepared record refuses before c
   }
 });
 
+for (const entry of require('./forge-ci-units').selectCases(CI_CASES)) runCase(entry);
 console.log(`\n${passed} passed, ${failed} failed`);
 for (const [name, value] of Object.entries(SAVED_ENV)) {
   if (value === undefined) delete process.env[name];

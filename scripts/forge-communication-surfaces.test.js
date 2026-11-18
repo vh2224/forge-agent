@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/issues-414-418/distribution.cjs');
+const unitEntry = require('./fixtures/ci-latency/distribution.cjs');
 
 // forge-communication-surfaces.test.js — proves the orchestration and status
 // skills follow shared/forge-communication.md by POINTER, not by a second copy;
@@ -43,7 +43,9 @@ let failed = 0;
 const failures = [];
 const temps = [];
 
-function test(name, fn) {
+const CASES = [];
+function test(name, fn) { CASES.push({ name, fn }); }
+function runTest(name, fn) {
   try {
     fn();
     passed++;
@@ -2289,6 +2291,7 @@ test('issue343 U6-3 parallelism distribution layer: earlier layers immutable, ex
  const old=structuredClone(unitEntry.interruptionLayer);old.sources[Object.keys(old.sources)[0]].after='0'.repeat(64);assert.throws(()=>unitEntry.validate({artifacts,terminalLayerValue:old}),'375 validators still reject');
 });
 
+for (const { name, fn } of require('./forge-ci-units').selectCases(CASES)) runTest(name, fn);
 for (const temp of temps) fs.rmSync(temp, { recursive: true, force: true });
 
 console.log('');

@@ -48,6 +48,7 @@ function usage() {
     '  --shard-profile <file>  Optional versioned weights; the partition remains',
     '                         complete. A missing file falls back to positional.',
     '  --profile-out <file>    Write a bounded execution profile (not with --list)',
+    '  --partition-suites     Expand reviewed independent case/selector partitions',
     '  --help             Show this help',
   ].join('\n');
 }
@@ -65,6 +66,7 @@ function parseArgs(argv) {
     shardCount: null,
     shardProfile: null,
     profileOut: null,
+    partitionSuites: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -74,6 +76,7 @@ function parseArgs(argv) {
     else if (arg === '--fail-fast') options.failFast = true;
     else if (arg === '--verbose') options.verbose = true;
     else if (arg === '--inherit-home') options.inheritHome = true;
+    else if (arg === '--partition-suites') options.partitionSuites = true;
     else if (arg === '--help' || arg === '-h') options.help = true;
     else if (arg === '--match') {
       const value = argv[index + 1];
@@ -445,6 +448,11 @@ function main(argv) {
       return withoutSuiteProfile(options, 0, 'no-related-suites');
     }
   }
+  // Legacy copied-runner fixtures do not need the optional CI inventory.
+  const unitApi = options.partitionSuites ? require('./forge-ci-units.js') : null;
+  const units = unitApi ? unitApi.expandSuites(tests) : tests.map(source => ({id: source, source, args: []}));
+  const unitsById = new Map(units.map(unit => [unit.id, unit]));
+  tests = units.map(unit => unit.id);
   const baselineUniverse = tests;
   let shardPlan = null;
   // Keep the original selector when neither new flag is used. Limits belonging
@@ -466,7 +474,8 @@ function main(argv) {
     }
     try {
       shardPlan = planShards({ suites: tests, index: options.shardIndex,
-        count: options.shardCount, platform: process.platform, profile });
+        count: options.shardCount, platform: process.platform, profile,
+        estimatedWeights: unitApi ? unitApi.unitWeights(units, profile, process.platform) : {} });
       if (!verifyPartition(tests, shardPlan.shards).ok) throw new Error('shard-partition-invalid');
       if (options.shardProfile !== null) {
         const output = options.list ? process.stderr : process.stdout;
@@ -530,7 +539,8 @@ function main(argv) {
     for (const filename of tests) {
       executed += 1;
       const suiteStarted = process.hrtime.bigint();
-      const result = spawnSync(process.execPath, [path.join(scriptsDir, filename)], {
+      const unit = unitsById.get(filename);
+      const result = spawnSync(process.execPath, [path.join(scriptsDir, unit.source), ...unit.args], {
         cwd: repoRoot,
         env: childEnv(isolatedRoot, filename),
         encoding: 'utf8',
@@ -546,6 +556,11 @@ function main(argv) {
       });
 
       process.stdout.write(`${passed ? 'PASS' : 'FAIL'} ${filename} (${elapsed}s)\n`);
+      // Keep bounded case-selection evidence even when successful suite output
+      // is quiet. Failed/verbose suites already print their captured roster.
+      if (passed && !options.verbose && options.partitionSuites && unit.args.some(arg => arg.startsWith('--ci-cases='))) {
+        for (const line of String(result.stdout || '').split(/\r?\n/).filter(line => line.startsWith('CI case partition: '))) process.stdout.write(line + '\n');
+      }
       if (options.verbose || !passed) writeCaptured(result);
 
       if (!passed) {

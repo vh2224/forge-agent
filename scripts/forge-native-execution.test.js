@@ -138,7 +138,7 @@ async function main() {
   };
   await refuse(linked, linked.runtime, /prompt|link|target/); label('physical-prompt-junction');
   }
-  if (!process.argv.some(arg => ['--extra', '--recovery'].includes(arg))) {
+  if (!process.argv.some(arg => ['--core', '--extra', '--recovery'].includes(arg))) {
   await reviewReadinessCases();
   for (const phase of ['failed', 'started']) {
     for (const state of ['running', 'unknown', true]) {
@@ -218,8 +218,8 @@ async function main() {
   const resumed = { ...local.savedRuntime, writerObservationAdapter: retainedAdapter(writer), processProbe: () => { try { process.kill(writer.pid, 0); return 'running'; } catch { return 'stopped'; } } };
   assert.strictEqual((await unit.runUnitSidecar(local.r, resumed)).status, 'done'); label('local-process-running-exited-restart');
   }
-  if (!process.argv.some(arg => ['--saved', '--recovery', '--core-saved'].includes(arg))) await extraCases();
-  if (!process.argv.some(arg => ['--saved', '--extra', '--core-saved'].includes(arg))) await recoveryCases();
+  if (!process.argv.some(arg => ['--core', '--saved', '--recovery', '--core-saved'].includes(arg))) await extraCases();
+  if (!process.argv.some(arg => ['--core', '--saved', '--extra', '--core-saved'].includes(arg))) await recoveryCases();
   label('PASS: synthetic provider; real local process/filesystem; provider real and human UAT not exercised');
 }
 async function extraCases() {

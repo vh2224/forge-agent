@@ -50,6 +50,7 @@ jobs:
   test:
     name: Tests (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -57,38 +58,206 @@ jobs:
           - os: ubuntu-latest
             platform: linux
             shard-index: 0
-            shard-count: 1
-            label: ubuntu-latest
+            shard-count: 3
+            label: ubuntu-latest, shard 1/3
+            workers: 2
+            single-worker-jobs: 0
+          - os: ubuntu-latest
+            platform: linux
+            shard-index: 1
+            shard-count: 3
+            label: ubuntu-latest, shard 2/3
+            workers: 2
+            single-worker-jobs: 0
+          - os: ubuntu-latest
+            platform: linux
+            shard-index: 2
+            shard-count: 3
+            label: ubuntu-latest, shard 3/3
+            workers: 2
+            single-worker-jobs: 0
           - os: macos-latest
             platform: darwin
             shard-index: 0
-            shard-count: 2
-            label: macos-latest, shard 1/2
+            shard-count: 5
+            label: macos-latest, shard 1/5
+            workers: 3
+            single-worker-jobs: 0
           - os: macos-latest
             platform: darwin
             shard-index: 1
-            shard-count: 2
-            label: macos-latest, shard 2/2
+            shard-count: 5
+            label: macos-latest, shard 2/5
+            workers: 3
+            single-worker-jobs: 0
+          - os: macos-latest
+            platform: darwin
+            shard-index: 2
+            shard-count: 5
+            label: macos-latest, shard 3/5
+            workers: 3
+            single-worker-jobs: 0
+          - os: macos-latest
+            platform: darwin
+            shard-index: 3
+            shard-count: 5
+            label: macos-latest, shard 4/5
+            workers: 3
+            single-worker-jobs: 0
+          - os: macos-latest
+            platform: darwin
+            shard-index: 4
+            shard-count: 5
+            label: macos-latest, shard 5/5
+            workers: 3
+            single-worker-jobs: 0
           - os: windows-latest
             platform: win32
             shard-index: 0
-            shard-count: 4
-            label: windows-latest, shard 1/4
+            shard-count: 21
+            label: windows-latest, shard 1/21
+            workers: 2
+            single-worker-jobs: 2
           - os: windows-latest
             platform: win32
             shard-index: 1
-            shard-count: 4
-            label: windows-latest, shard 2/4
+            shard-count: 21
+            label: windows-latest, shard 2/21
+            workers: 2
+            single-worker-jobs: 2
           - os: windows-latest
             platform: win32
             shard-index: 2
-            shard-count: 4
-            label: windows-latest, shard 3/4
+            shard-count: 21
+            label: windows-latest, shard 3/21
+            workers: 2
+            single-worker-jobs: 2
           - os: windows-latest
             platform: win32
             shard-index: 3
-            shard-count: 4
-            label: windows-latest, shard 4/4
+            shard-count: 21
+            label: windows-latest, shard 4/21
+            workers: 2
+            single-worker-jobs: 2
+          - os: windows-latest
+            platform: win32
+            shard-index: 4
+            shard-count: 21
+            label: windows-latest, shard 5/21
+            workers: 2
+            single-worker-jobs: 2
+          - os: windows-latest
+            platform: win32
+            shard-index: 5
+            shard-count: 21
+            label: windows-latest, shard 6/21
+            workers: 2
+            single-worker-jobs: 2
+          - os: windows-latest
+            platform: win32
+            shard-index: 6
+            shard-count: 21
+            label: windows-latest, shard 7/21
+            workers: 2
+            single-worker-jobs: 2
+          - os: windows-latest
+            platform: win32
+            shard-index: 7
+            shard-count: 21
+            label: windows-latest, shard 8/21
+            workers: 2
+            single-worker-jobs: 2
+          - os: windows-latest
+            platform: win32
+            shard-index: 8
+            shard-count: 21
+            label: windows-latest, shard 9/21
+            workers: 2
+            single-worker-jobs: 2
+          - os: windows-latest
+            platform: win32
+            shard-index: 9
+            shard-count: 21
+            label: windows-latest, shard 10/21
+            workers: 2
+            single-worker-jobs: 2
+          - os: windows-latest
+            platform: win32
+            shard-index: 10
+            shard-count: 21
+            label: windows-latest, shard 11/21
+            workers: 2
+            single-worker-jobs: 2
+          - os: windows-latest
+            platform: win32
+            shard-index: 11
+            shard-count: 21
+            label: windows-latest, shard 12/21
+            workers: 2
+            single-worker-jobs: 2
+          - os: windows-latest
+            platform: win32
+            shard-index: 12
+            shard-count: 21
+            label: windows-latest, shard 13/21
+            workers: 2
+            single-worker-jobs: 2
+          - os: windows-latest
+            platform: win32
+            shard-index: 13
+            shard-count: 21
+            label: windows-latest, shard 14/21
+            workers: 2
+            single-worker-jobs: 2
+          - os: windows-latest
+            platform: win32
+            shard-index: 14
+            shard-count: 21
+            label: windows-latest, shard 15/21
+            workers: 2
+            single-worker-jobs: 2
+          - os: windows-latest
+            platform: win32
+            shard-index: 15
+            shard-count: 21
+            label: windows-latest, shard 16/21
+            workers: 2
+            single-worker-jobs: 2
+          - os: windows-latest
+            platform: win32
+            shard-index: 16
+            shard-count: 21
+            label: windows-latest, shard 17/21
+            workers: 2
+            single-worker-jobs: 2
+          - os: windows-latest
+            platform: win32
+            shard-index: 17
+            shard-count: 21
+            label: windows-latest, shard 18/21
+            workers: 2
+            single-worker-jobs: 2
+          - os: windows-latest
+            platform: win32
+            shard-index: 18
+            shard-count: 21
+            label: windows-latest, shard 19/21
+            workers: 2
+            single-worker-jobs: 2
+          - os: windows-latest
+            platform: win32
+            shard-index: 19
+            shard-count: 21
+            label: windows-latest, shard 20/21
+            workers: 2
+            single-worker-jobs: 2
+          - os: windows-latest
+            platform: win32
+            shard-index: 20
+            shard-count: 21
+            label: windows-latest, shard 21/21
+            workers: 2
+            single-worker-jobs: 2
 
     steps:
       - name: Check out repository
@@ -143,6 +312,8 @@ jobs:
           svnadmin --version --quiet
 
       - name: Run test suites
+        env:
+          FORGE_CI_JOB_NAME: Tests (${{ matrix.label }})
         # The baseline is what makes "CI is red" carry information again. Every
         # suite still runs and logs; only the exit code consults the known-failure
         # set for this platform, and it compares BOTH ways — a new red fails, and
@@ -150,20 +321,16 @@ jobs:
         # rot into a green-but-inert gate. Measured cause: 20 of the last 20 PRs
         # merged with windows-latest red, which is why the wrapper-readers break
         # (the #94 x #98 interaction) was indistinguishable from the chronic noise.
-        run: node scripts/run-tests.js --baseline scripts/fixtures/ci-baseline/known-failures.json --shard-profile scripts/fixtures/ci-shards/shard-profile.json --shard-index ${{ matrix.shard-index }} --shard-count ${{ matrix.shard-count }} --profile-out "${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}.json"
+        run: node scripts/forge-ci-parallel.js --shard-index ${{ matrix.shard-index }} --shard-count ${{ matrix.shard-count }} --jobs "${{ matrix.workers }}" --single-worker-jobs ${{ matrix.single-worker-jobs }} --profile-dir "${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}"
 
       - name: Preserve bounded suite timing profile
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}
-          path: ${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}.json
+          path: ${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}/*
           if-no-files-found: warn
           retention-days: 14
-
-      - name: Smoke suite (release gate)
-        if: runner.os != 'Windows' && matrix.shard-index == 0
-        run: node scripts/forge-smoke.js
 
   required-offline-windows:
     name: Offline ${{ matrix.host }} / ${{ matrix.platform }}
@@ -194,6 +361,15 @@ jobs:
 
   required-tests-macos:
     name: Tests (macos-latest)
+    needs: test
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Preserve required-check contract
+        run: test "${{ needs.test.result }}" = success
+
+  required-tests-linux:
+    name: Tests (ubuntu-latest)
     needs: test
     if: ${{ always() }}
     runs-on: ubuntu-latest

@@ -256,9 +256,17 @@ let passed = 0;
 let failed = 0;
 const CASES = [];
 const UNPROVEN_FIXTURE_CLEANUP = new Set();
-function test(name, fn) { CASES.push({ name, fn }); }
+function test(name, fn) {
+  // These four existing scenarios deliberately reuse the same genuine
+  // consolidated fixtures. Keep their original order in one process.
+  const shared = ['issue343 U5-1 after the barrier ', 'issue343 U5-2 a done member ',
+    'issue343 U5-6 cleanup ', 'issue343 U5-4 corrupted committed completion '].some(prefix => name.startsWith(prefix));
+  const claims = name.startsWith('issue343 U5-3 fresh-process restart at claim-mutation-')
+    || name.startsWith('review R5 fresh coordinator recovers each new claim ');
+  CASES.push({ name, fn, group: shared ? 'shared-u5-consolidation' : claims ? 'claim-restart-witnesses' : name });
+}
 async function runCases() {
-  for (const { name, fn } of CASES) {
+  for (const { name, fn } of require('./forge-ci-units').selectCases(CASES)) {
     const started = Date.now();
     try {
       await fn();
@@ -736,6 +744,8 @@ const RESTART_POINTS = Object.freeze(['consolidation-progress-intent', 'consolid
   'controller-terminal-intent', 'controller-terminal-applied', 'member-acknowledged',
   'claim-mutation-intent', 'claim-mutation-applied', 'claim-mutation-before-commit',
   'post-unit-intent', 'post-unit-applied', 'post-unit-before-commit']);
+assert.deepStrictEqual([...RESTART_POINTS].sort(), [...batch.CONSOLIDATION_FAILPOINTS].sort(),
+  'every declared failpoint has an actual fresh-process restart witness');
 // Cohorts consolidated by one case and inspected by a later one (U5-6), released at the end.
 const u5 = {};
 function taskDir(dir, id) { return path.join(sliceDir(dir), 'tasks', id); }
@@ -972,9 +982,11 @@ async function restartWitness(point) {
   console.log('  restart witness ' + point);
 }
 
-test('issue343 U5-3 a fresh process restarted at each failpoint resumes with zero second inference, publication, delta, commit or ACK', async () => {
-  assert.deepStrictEqual([...RESTART_POINTS].sort(), [...batch.CONSOLIDATION_FAILPOINTS].sort(), 'every declared failpoint has an actual fresh-process restart witness');
-  for (const point of RESTART_POINTS) await restartWitness(point);
+// Each witness owns a fresh retained cohort. Register at this granularity so a
+// CI unit never contains the complete sixteen-restart serial loop.
+for (const point of RESTART_POINTS) test('issue343 U5-3 fresh-process restart at ' + point
+  + ' resumes with zero second inference, publication, delta, commit or ACK', async () => {
+  await restartWitness(point);
 });
 
 test('review R5 fresh coordinator recovers each new claim intent effect and precommit with no second inference', async () => {

@@ -1,0 +1,28 @@
+{
+  "base_run": "44132612926",
+  "unit_run": "44187991176",
+  "unit_run_head": "043a81faa4e87318a3bb65c3eb9448785446c9db",
+  "unit_run_conclusion": "failure",
+  "sources": 60,
+  "unit_profiles": 53,
+  "original_profiles": 7,
+  "superseded_unit_runs": [
+    "44154000574",
+    "44163993587",
+    "44172245727",
+    "44183550750"
+  ],
+  "collector": "forge-ci-profile.readInput/sourceFrom/profileFromSources",
+  "profile_sha256": "694e3ee8ddbf2d1e1b24ee965d2845b5e8934f13ae2aa0f884c7ee7bc8e92ad9",
+  "limits": [
+    "Only passing unambiguous rows contribute weights; full-run conclusion remains failure.",
+    "All53worker profiles completed; only a stale offline-matrix assertion failed on allthreeplatforms.",
+    "All514then-currentunits and all129splitcases executed exactlyonce/platform; seeprivatehostedcensus, not a gateapproval.",
+    "macOS max admission7m10s and maxexecution9m15s; Windows maxexecution12m59s.",
+    "WindowsLTS measured10m22s sharingaVM with8m12s nativetest; dedicatedVMperformance is conditional and unproved.",
+    "Newnative memberships use fresh IDs with explicit estimates derived from priorcohorttimings; no new current observations invented.",
+    "Original complete profiles retain physical-suite fallback.",
+    "Windows21jobs with2single-workerprefix gives40workers; allplatforms61workers.",
+    "Predictions exclude queue/setup and hardware/contention differences; tenmin acceptance pending."
+  ]
+}
