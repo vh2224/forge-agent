@@ -1038,6 +1038,7 @@ async function adapterPreflightRecovery() {
       cwd: lab.a, contextRoot: lab.owner, planFile, route, dispatchId: 'preflight-236', claudePermissions: 'verification',
       execution_contract: lab.contract, verification: { commandsByRoot: { alpha: ['node scripts/test.js'], beta: ['node scripts/test.js'] } } };
     request.resultFile = path.join(lab.dir, 'result.json');
+    require('./fixtures/issues-434-436/execution-fixtures.cjs').declareBindings(request);
     request.workflowId = 'preflight-fixture';
     request.runId = 'preflight-fixture';
     request.claim = { schema_version: 2, generation: require('crypto').randomUUID(), execution_contract: lab.contract,

@@ -145,6 +145,7 @@ function sidecarRequest(f) {
   r.route = require('./forge-dispatch-resolve').resolveDispatch({ cwd: f.owner, unitType: 'execute-task', milestoneId: M,
     unitId: 'T01', planPath: f.plan, hostRuntime: f.host });
   assert.equal(r.route.resolved_worker_engine, f.engine); assert.equal(r.route.worker_mode, 'sidecar');
+  require('./fixtures/issues-434-436/execution-fixtures.cjs').declareBindings(r);
   return r;
 }
 function beginOf(f, result) { return controller.lookupRecord(f.owner, 'transaction', result.controller_result.details.transaction.idempotency_key); }
