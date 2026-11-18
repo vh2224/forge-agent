@@ -98,6 +98,7 @@ async function canonicalContinuation() {
         verification: { preferenceCommands: ['node -e "process.exit(0)"'] } });
       const slice = path.join(base, 'slices/S01'); fs.mkdirSync(path.join(slice, 'tasks/T01'), { recursive: true });
       request.planFile = path.join(slice, 'tasks/T01/T01-PLAN.md'); fs.writeFileSync(request.planFile, fixtures.plan(lab.contract).replace('depends: []', 'worker: claude\ndepends: []'));
+      require('./fixtures/issues-434-436/execution-fixtures.cjs').declareBindings(request);
       fs.writeFileSync(path.join(slice, 'S01-PLAN.md'), '# Slice\n- [ ] **T01** — fixture\n');
       request.runId = 'provisional-writing';
       request.claim = { schema_version: 2, generation: require('crypto').randomUUID(), execution_contract: lab.contract,
