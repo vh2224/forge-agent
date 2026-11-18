@@ -35,8 +35,9 @@ function expand(root,envelope,scope,{current=false}={}){
    // outside the scope are provably irrelevant. Wildcard/negation semantics
    // are not guessed. Binding the policy also detects current policy changes.
    const rules=command(root,['cat-file','blob',tree.get('.gitignore').hash]).split(/\r?\n/).map(l=>l.trim()).filter(l=>l&&!l.startsWith('#'));
-   for(const rule of rules){if(installArtifact(rule))continue;
+   for(const rule of rules){if(installArtifact(rule)||require('./forge-delivery-source-policy').irrelevantRule(rule,pattern))continue;
     if(/[!*?\[\]\\]/.test(rule))fail('delivery-source-ignore-ambiguous');
+    if(!rule.startsWith('/')&&!rule.replace(/\/$/,'').includes('/'))fail('delivery-source-ignore-ambiguous');
     const simple=rule.replace(/^\//,'').replace(/\/$/,'');valid(simple);
     if([simple,simple+'/**'].some(other=>require('./forge-parallelism').pathsOverlap(pattern,other)))fail('delivery-source-ignored-unproven');
    }paths.add('.gitignore');

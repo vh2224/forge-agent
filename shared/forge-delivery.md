@@ -386,3 +386,11 @@ revision mismatches. As with behavioral captures, local envelope fingerprints
 detect changes; they are not cryptographic authentication.
 
 forge-verify.captureRootDelivery(execution_contract,planText,options) gera envelopes próprios de verification/artifact por root_id, identidade física, contract hash, cwd real, revisão/workspace, environment e captured_at contemporâneos. Os comandos rodam em cada checkout e expected_output é conferido em sua raiz. Input de delivery v2 conserva execution_contract e bindings com root_id; fonte estrangeira ou identidade alterada falha. Truth global requer binding explícito para cada raiz; artifact requer sua raiz e key_link as raízes de from/to. Um comando global, sucesso de outra raiz ou mero arquivo existente não cobre comportamento. CI/review/merge/install/aceite humano continuam fatos independentes.
+
+Na captura Git, uma política raiz `.gitignore` suja é persistida como o blob
+exato vinculado ao hash do snapshot, após leitura regular, limitada e estável.
+Isso não altera working tree nem index e não persiste todos os arquivos sujos.
+As leituras current/historical não escrevem objetos nem usam regras atuais para
+preencher uma política histórica ausente. O glob mantém seu universo capturado;
+uma regra de ignore só é descartada quando seu prefixo raiz literal é
+comprovadamente disjunto. Regras relevantes ou ambíguas continuam recusadas.

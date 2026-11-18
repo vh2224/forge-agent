@@ -339,12 +339,27 @@ function withMutexInsideOwnerWindow(cwd, name, fn, acquisitionBudget) {
   finally { if (ownerBoundary) ownerActivityLocks.delete(key); handle.release(); }
 }
 
-function noOwnerLeases(cwd) {
+function noOwnerLeases(cwd, repairScope) {
     const directory = path.join(cwd, '.gsd', 'forge', 'leases'); let handle;
     try {
       const stat = fs.lstatSync(directory);
       if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
-      handle = fs.opendirSync(directory); return handle.readSync() === null;
+      handle = fs.opendirSync(directory);
+      let entry, seen = false;
+      while ((entry = handle.readSync()) !== null) {
+        if (seen || !repairScope?.repair_generation || !entry.isFile()
+            || entry.name !== path.basename(forgeLease.leaseFile(cwd, repairScope.unit))) return false;
+        if(fs.lstatSync(path.join(directory,entry.name)).nlink!==1)return false;
+        const read = forgeLease.readLease(path.join(directory,entry.name));
+        const begin = lookupRecord(cwd,'transaction',repairScope.begin_key);
+        if (read.corrupt || !forgeLease.validRecord(read.record,repairScope.unit) || !begin || begin.phase !== 'committed'
+            || begin.action !== 'begin' || begin.unit?.key !== repairScope.unit || begin.milestone !== repairScope.milestone
+            || read.record.generation !== repairScope.repair_generation || begin.lease_generation !== read.record.generation
+            || ownerDigest(read.record.owner_token) !== repairScope.repair_owner_digest || begin.owner_digest !== repairScope.repair_owner_digest
+            || read.record.host_runtime !== repairScope.host_runtime || begin.host_runtime !== repairScope.host_runtime) return false;
+        seen = true;
+      }
+      return true;
     } catch (error) { return error.code === 'ENOENT' && !handle; }
     finally { if (handle) handle.closeSync(); }
 }
@@ -354,7 +369,7 @@ function noOwnerLeases(cwd) {
 function withOwnerBoundary(cwd, callback, options) {
   resolvePrefs(cwd, options);
   if (typeof callback !== 'function') throw new ControllerError('invalid-request', 'owner boundary callback required');
-  return withMutex(cwd, 'unit-controller-transactions', () => callback({ noLeases: () => noOwnerLeases(cwd) }));
+  return withMutex(cwd, 'unit-controller-transactions', () => callback({ noLeases: scope => noOwnerLeases(cwd,scope) }));
 }
 
 function recordOwnerBoundaryActivity(cwd, runId, hostRuntime) {
@@ -884,7 +899,8 @@ function select(cwd, request, options) {
   const id_kind = forgeIds.entityKind(milestone) || 'milestone';
   const current = forgeState.read(cwd, milestone);
   if (!current) throw new ControllerError('invalid-request', `STATE ausente para ${milestone}`);
-  const inventory = options && typeof options.inventoryReader === 'function' ? options.inventoryReader(cwd, milestone, current) : discoverInventory(cwd, milestone, current, options);
+  let inventory = options && typeof options.inventoryReader === 'function' ? options.inventoryReader(cwd, milestone, current) : discoverInventory(cwd, milestone, current, options);
+  if(options?.deliveryRepairActor) inventory=require('./forge-completion-delivery-recovery').projectVerifiedRepairs(cwd,milestone,inventory,options.deliveryRepairActor);
   inventory.deferred_slices = failureProjection(cwd, milestone).filter(item => !item.entry).map(item => item.slice).filter(Boolean);
   const selection = selectNextUnit({ state: current, inventory, prefs: prefsResult.prefs });
   // Issue 343 U1: an opted-in caller (orchestrate next in auto mode) also receives the same
@@ -1759,6 +1775,22 @@ function resumeInside(cwd, request, options) {
     results.push(runTransaction(cwd, record, ownerToken, generation, options));
   }
   return { ok: true, reason: records.length ? 'transition-committed' : 'already-committed', recovered: results.length, results };
+}
+
+// Validate an immutable completed boundary even while its separately verified
+// delivery-only successor is open. This is not a current handoff/zero-lease
+// assertion and does not release or transfer any lease.
+function verifyCommittedCompletionBoundary(cwd, completionKey) {
+  const tx=lookupRecord(cwd,'transaction',completionKey), boundary=tx?.boundary;
+  if (!tx || tx.phase!=='committed' || tx.action!=='complete' || tx.result?.status!=='succeeded'
+      || boundary?.kind!=='completed' || boundary.handoff_ready!==true || boundary.idempotency_key!==completionKey
+      || !boundary.committed_at || boundary.milestone!==tx.milestone) throw new ControllerError('boundary-not-transferable','original completion boundary is not proven');
+  const result=lookupRecord(cwd,'result',completionKey);
+  const events=readEvents(eventsFile(cwd,tx.milestone)).filter(row=>row.idempotency_key===completionKey);
+  const event=events.length===1?{...events[0]}:null;if(event)delete event.sequence;
+  if (!result || sha(result)!==boundary.result_checksum || !event || sha(event)!==boundary.event_checksum
+      || sha(event)!==sha(tx.event)) throw new ControllerError('record-conflict','original completion evidence changed');
+  return {unit:tx.unit.key,milestone:tx.milestone,result_checksum:boundary.result_checksum,committed_at:boundary.committed_at};
 }
 
 function handoff(cwd, request, options) {
@@ -3050,7 +3082,7 @@ module.exports = {
   PROTOCOL_VERSION, BOUNDARY_KINDS, ACTIONS, PHASES, REASON_CODES, TIME_ADMISSION_CODES, ControllerError,
   selectNextUnit, discoverInventory, select, begin, beginSerial, transition, persistResult,
   complete, pause, fail: failUnit, expireSafe, resume, handoff,
-  withOwnerBoundary, pendingTransactions, incompleteUnits, pausePartial, pauseDecomposition, reconcilePartialSuccessors, inspectPausedAttempt, verifyCompletedAttempt, validatePausedEntry, projectLogicalHistory, logicalState, resolvePrefs,
+  withOwnerBoundary, verifyCommittedCompletionBoundary, pendingTransactions, incompleteUnits, pausePartial, pauseDecomposition, reconcilePartialSuccessors, inspectPausedAttempt, verifyCompletedAttempt, validatePausedEntry, projectLogicalHistory, logicalState, resolvePrefs,
   transactionDir, resultDir, boundaryDir, eventsFile, transactionFile,
   resultFile, boundaryFile, readEvents, readJson, writeAtomic,
   lookupRecord, preflightPaths,
