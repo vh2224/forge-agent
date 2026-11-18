@@ -738,7 +738,8 @@ function assertResumeQuiescence(cwd, record, nextHost, noLeases, partialOptions)
   const controller = require('./forge-unit-controller');
   if (controller.pendingOwnerInterruptions(cwd).length) throw resumeError('owner-interruption-pending');
   const repairScope = partialOptions?.deliveryRepair
-    ? require('./forge-completion-delivery-recovery').inspectRetainedClaimResume(cwd,record,partialOptions.deliveryRepair) : null;
+    ? require('./forge-completion-delivery-recovery').inspectRetainedClaimResume(cwd,record,partialOptions.deliveryRepair)
+    : partialOptions?.attemptRecovery ? require('./forge-protected-owner-activity').inspectAttemptResume(cwd, record, partialOptions.attemptRecovery) : null;
   const empty = directory => {
     let handle;
     try { const stat = fs.lstatSync(directory); if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
@@ -759,7 +760,7 @@ function assertResumeQuiescence(cwd, record, nextHost, noLeases, partialOptions)
   if (controller.pendingTransactions(cwd).length) throw resumeError('owner-resume-transaction-pending');
   if (require('./forge-write-claim').isHeld(record.write_claim)) {
     if (!partialOptions) throw resumeError('owner-resume-claim-held');
-    if (partialOptions.deliveryRepair) { if(!repairScope)throw resumeError('owner-resume-claim-held'); }
+    if (partialOptions.deliveryRepair || partialOptions.attemptRecovery) { if(!repairScope)throw resumeError('owner-resume-claim-held'); }
     else controller.inspectPausedAttempt(cwd, record, partialOptions);
   }
   if (record.worker || record.worker_started) throw resumeError('owner-resume-worker-unreconciled');
@@ -769,9 +770,16 @@ function assertResumeQuiescence(cwd, record, nextHost, noLeases, partialOptions)
   const eventsFile = controller.eventsFile(cwd, record.id);
   const eventBytes = fs.existsSync(eventsFile) ? fs.readFileSync(eventsFile) : Buffer.alloc(0);
   const intervals = require('./forge-phase-cost').analyzeEventIntervals(eventBytes);
-  if (intervals.open.some(row=>!repairScope || row.begin_key!==repairScope.begin_key || row.unit!==repairScope.unit || row.milestone!==record.id || row.host!==nextHost)
+  if (intervals.open.some(row=>!repairScope || row.begin_key!==repairScope.begin_key || row.unit!==repairScope.unit || row.milestone!==record.id || row.host!==(repairScope.kind === 'attempt-recovery' ? repairScope.host_runtime : nextHost))
       || intervals.ambiguous.length || intervals.milestones.some(id => id !== record.id)) throw resumeError('owner-resume-history-unreconciled');
   if (repairScope) {
+    if (repairScope.kind === 'attempt-recovery') {
+      const begin = controller.lookupRecord(cwd, 'transaction', repairScope.begin_key);
+      if (!begin || begin.phase !== 'committed' || begin.action !== 'begin'
+          || !controller.incompleteUnits(cwd, record.id).some(row => row.idempotency_key === repairScope.begin_key)
+          || !noLeases(repairScope)) throw resumeError('owner-resume-boundary-required');
+      return { unit: repairScope.unit, attempt_recovery: repairScope };
+    }
     const original=controller.verifyCommittedCompletionBoundary(cwd,repairScope.original_completion_key);
     if(original.unit!==repairScope.unit || original.milestone!==record.id || !noLeases(repairScope)) throw resumeError('owner-resume-boundary-required');
     return {...original,delivery_repair:repairScope};
@@ -891,11 +899,11 @@ function resumeOwner(cwd, id, options = {}) {
       if (snapshot.sha256 !== options.expectedRecordSha256) throw resumeError('owner-resume-snapshot-changed');
       if (!knownResumeBinding(current)) throw resumeError('owner-resume-binding-unknown');
       const same = current.session_id === observed.sessionId && current.host_runtime === observed.hostRuntime;
-      if (same && current.active === true && !options.deliveryRepair) return { status: 'unchanged', record: get(cwd,id) };
+      if (same && current.active === true && !options.deliveryRepair && !options.attemptRecovery) return { status: 'unchanged', record: get(cwd,id) };
       if (!same && options.confirmOwnerStopped !== true) throw resumeError('owner-resume-owner-stop-attestation-required');
       if (options.confirmWorkspaceQuiescent !== true) throw resumeError('owner-resume-workspace-quiescent-attestation-required');
       const boundary = assertResumeQuiescence(cwd, current, observed.hostRuntime, boundaryGuard.noLeases,
-        options.deliveryRepair ? { deliveryRepair: options.deliveryRepair } : same && typeof options.inspectAttempt === 'function' ? options : null);
+        options.deliveryRepair ? { deliveryRepair: options.deliveryRepair } : options.attemptRecovery ? { attemptRecovery: options.attemptRecovery } : same && typeof options.inspectAttempt === 'function' ? options : null);
       const history = current.owner_resume_history === undefined ? [] : current.owner_resume_history;
       if (!Array.isArray(history)) throw resumeError('owner-resume-history-unknown');
       if(options.deliveryRepair) require('./forge-completion-delivery-recovery').publishPreparedResumeBaseline(cwd,current,options.deliveryRepair,boundary.delivery_repair);
@@ -915,7 +923,7 @@ function resumeOwner(cwd, id, options = {}) {
         const live = observedResumeOwner(options);
         if (live.sessionId !== observed.sessionId || live.hostRuntime !== observed.hostRuntime || live.source !== observed.source) throw resumeError('owner-session-unavailable');
         assertResumeQuiescence(cwd, record, observed.hostRuntime, boundaryGuard.noLeases,
-          options.deliveryRepair ? { deliveryRepair: options.deliveryRepair } : same && typeof options.inspectAttempt === 'function' ? options : null);
+          options.deliveryRepair ? { deliveryRepair: options.deliveryRepair } : options.attemptRecovery ? { attemptRecovery: options.attemptRecovery } : same && typeof options.inspectAttempt === 'function' ? options : null);
         return patch;
       }, guard);
       return { status: same ? 'reactivated' : 'transferred', record: result.record };

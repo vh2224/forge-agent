@@ -1,7 +1,7 @@
 'use strict';
 const assert = require('assert'), fs = require('fs'), path = require('path');
 // Install the fixture account lookup before consumers capture it at module load.
-const harness = require('./fixtures/forge-native-execution').createFixtureHarness();
+const harness = require('./fixtures/issues-434-436/execution-fixtures.cjs').createFixtureHarness();
 const unit = require('./forge-unit-sidecar');
 const prep = require('./forge-task-preparation');
 const verify = require('./forge-verify');
@@ -71,7 +71,7 @@ async function main() {
   });
   await test('runtime supplements remain separate across serialization and preserve provenance', () => {
     const f = nativeFixture({ defaultVerification: false });
-    const request = wire({ ...f.r, verification: { preferenceCommands: ['node --version'], commandTimeoutMs: 9000, bindings: [] } });
+    const request = wire({ ...f.r, verification: { preferenceCommands: ['node --version'], commandTimeoutMs: 9000, bindings: f.r.verification.bindings } });
     const runtime = wire({ preferenceCommands: ['node --version', 'npm test'], commandTimeoutMs: 9000 });
     const identity = { dispatch_id: request.dispatchId };
     const policy = unit.preflightExecutionVerification(request, { verification: runtime, identity });
@@ -97,7 +97,7 @@ async function main() {
     fs.symlinkSync(f.owner, alias, process.platform === 'win32' ? 'junction' : 'dir');
     const aliased = wire({ ...f.r, planFile: path.join(alias, '.gsd/tasks', f.r.taskId, `${f.r.taskId}-PLAN.md`) });
     assert.deepStrictEqual(unit.preflightExecutionVerification(aliased), policy);
-    const declared = unit.preflightExecutionVerification(wire({ ...f.r, verification: { preferenceCommands: ['npm test && node --version'] } }));
+    const declared = unit.preflightExecutionVerification(wire({ ...f.r, verification: { preferenceCommands: ['npm test && node --version'], bindings: f.r.verification.bindings } }));
     assert.deepStrictEqual(declared.roots[0].commands, ['npm test && node --version']);
     pristine(f);
   });
@@ -105,7 +105,9 @@ async function main() {
     const f = nativeFixture({ defaultVerification: false }), second = harness.setup();
     const contract = roots.validateContract({ schema_version: 2, owner: f.owner, primary_root_id: 'app',
       code_roots: [{ id: 'app', path: f.cwd }, { id: 'other', path: second.cwd }] });
+    write(f.r.planFile, require('./forge-code-roots.test').plan(contract));
     const r = wire({ ...f.r, execution_contract: contract, verification: { commandsByRoot: { app: ['node --version'] } } });
+    r.verification.bindings = require('./fixtures/issues-434-436/execution-fixtures.cjs').bindingDeclarations(r);
     assert.throws(() => unit.preflightExecutionVerification(r), { code: 'verification-root-unverified' });
     const policy = unit.preflightExecutionVerification(r, { verification: { commandsByRoot: { other: ['npm test'] } } });
     assert.deepStrictEqual(policy.roots.map(row => row.commands), [['node --version'], ['npm test']]);

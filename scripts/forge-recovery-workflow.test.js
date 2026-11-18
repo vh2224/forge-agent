@@ -145,6 +145,7 @@ function authority(profile, now, register) {
 }
 function write(file, value) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, value); }
 function resolveMilestone(request) {
+  require('./fixtures/issues-434-436/execution-fixtures.cjs').declareBindings(request);
   request.route = require('./forge-dispatch-resolve').resolveDispatch({ cwd: request.contextRoot, unitType: request.unitType,
     milestoneId: request.milestoneId, unitId: request.taskId || request.sliceId || request.milestoneId,
     planPath: request.planFile, roadmapPath: request.roadmapFile, hostRuntime: 'codex' });

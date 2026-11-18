@@ -425,3 +425,35 @@ As leituras current/historical não escrevem objetos nem usam regras atuais para
 preencher uma política histórica ausente. O glob mantém seu universo capturado;
 uma regra de ignore só é descartada quando seu prefixo raiz literal é
 comprovadamente disjunto. Regras relevantes ou ambíguas continuam recusadas.
+
+## Critérios antes do provedor e reparo de verificação
+
+O preflight de execute-task com execution_contract v2 valida as declarações de
+bindings com o mesmo inventário, seletores, aspectos e raízes da entrega. Cada
+critério precisa de cobertura em todas as raízes exigidas; índice de comando,
+fonte, aspecto e cobertura inválidos são recusados antes do spawn. Isso verifica
+prontidão, não o resultado: a captura real e o gate de entrega continuam exigidos.
+Suplementos runtime não fornecem nem substituem bindings do pedido. Receipts
+históricos conservam a verificação de identidade e replay, sem backfill silencioso.
+
+Uma tentativa milestone v2 já executada sem bindings pode usar
+`forge-sidecar-verification-repair.create({request, bindings, reference,
+assertAuthority, attestStoppedWriter, readPendingQuestions, ownerReconciliation})`.
+O owner observado deve manter o claim exato e provar todos os writers parados.
+Qualquer delta protegido exige antes a reconciliação limitada correspondente;
+não é preciso resetar os arquivos do worker. O reparo valida plano, S0, pedido,
+receipt, resposta retida, censo completo de alterações e raízes. Um returned.json
+isolado não basta: o hash/canal do receipt original deve ancorá-lo e a resposta,
+seus arquivos e todas as superfícies são novamente validados. Pending questions,
+arquivos omitidos, mudanças fora do claim ou originais adulterados recusam.
+
+Passe a capacidade privada retornada como `verificationSuccessor` ao
+`runUnitSidecar` do pedido original e, quando usada na criação, mantenha também
+`ownerReconciliation`. O caminho executa somente a captura e a publicação
+canônicas, com bindings separados no sucessor. A entrada do provedor é recusada.
+Pedido, fingerprint, receipt, resultado e S0 originais não são reescritos; o código
+devolvido não é apagado. O sucessor tem canais próprios, origem e hashes, e só um
+ready produzido pelo gate vivo pode publicar. Não reutilize ou serialize a
+capacidade, não aceite uma captura salva como autoridade e não confunda o reparo
+com o sucessor existente para timeout. Uma falha de verificação permanece falha;
+o complete do begin original ainda exige entrega comprovada.

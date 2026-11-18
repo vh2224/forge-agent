@@ -95,6 +95,7 @@ function request(f, engine, unitType = 'research-milestone', taskId = 'T01') {
   if (unitType === 'execute-task') {
     r.phase = 'execute'; r.taskId = taskId; r.planFile = f.plan; r.execution_contract = f.contract;
     r.verification = { preferenceCommands: ['node --version'] }; r.runId = 'fixture-run';
+    require('./fixtures/issues-434-436/execution-fixtures.cjs').declareBindings(r);
     r.claim = { schema_version: 2, generation: 'budget-claim', execution_contract: f.contract,
       paths: ['alpha', 'beta'].map(root_id => ({ root_id, path: 'same.txt' })) };
     r.gates = { plan: 'skipped', planSkipReason: 'interactive-off', claim: 'proceed', security: 'not-applicable' };

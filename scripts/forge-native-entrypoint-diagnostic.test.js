@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('assert/strict'),fs=require('fs');
-const h=require('./fixtures/forge-native-execution').createFixtureHarness();let completed=false;
+const h=require('./fixtures/issues-434-436/execution-fixtures.cjs').createFixtureHarness();let completed=false;
 (async()=>{
  const f=h.nativeFixture();
  const request={...f.r,scope:'milestone',phase:'execute',milestoneId:'M001',sliceId:'S01',taskId:'T01'};

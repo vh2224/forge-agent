@@ -6,7 +6,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const cp = require('child_process'), crypto = require('crypto');
-const { createFixtureHarness } = require('./fixtures/forge-native-execution');
+const { createFixtureHarness } = require('./fixtures/issues-434-436/execution-fixtures.cjs');
 const harness = createFixtureHarness();
 const { root, base, fixtureMarker, saved, accounts, originalLookup, provider, setup, stageProcedures, write, git, id } = harness;
 const unit = require('./forge-unit-sidecar'), execution = require('./forge-task-execution'), delivery = require('./forge-delivery');
@@ -318,6 +318,7 @@ async function main() {
     gates: { plan: 'skipped', planSkipReason: 'interactive-off', claim: 'proceed', security: 'not-applicable' },
     verification: { preferenceCommands: ['node -e "require(\'fs\').accessSync(\'same.txt\')"'] } };
   multi.control.writes = { [path.join(multi.cwd, 'same.txt')]: 'alpha after\n', [path.join(second, 'same.txt')]: 'beta after\n' };
+  require('./fixtures/issues-434-436/execution-fixtures.cjs').declareBindings(request);
   write(multi.controlFile, multi.control);
   const multiResult = await unit.runUnitSidecar(request);
   assert.deepStrictEqual(multiResult.files_changed.map(row => row.root_id).sort(), ['alpha', 'beta']);

@@ -46,6 +46,7 @@ function setup(dispatchId, slicePlan = SLICE_PLAN) {
     resultFile: path.join(lab.dir, `${dispatchId}.json`), prompt: 'Fixture only.',
     planFile: path.join(base, 'tasks/T01/T01-PLAN.md'), verification: { preferenceCommands: ['node -e "process.exit(0)"'] } };
   fs.writeFileSync(request.planFile, taskPlan(lab.contract));
+  require('./fixtures/issues-434-436/execution-fixtures.cjs').declareBindings(request);
   fs.writeFileSync(path.join(lab.owner, '.gsd/forge-prefs.jsonc'), JSON.stringify({ tier_models: Object.fromEntries(
     ['light', 'standard', 'heavy', 'max'].map(tier => [tier, ['claude-sonnet-5']])), effort: { 'plan-slice': 'medium' } }));
   request.route = require('./forge-dispatch-resolve').resolveDispatch({ cwd: request.contextRoot, unitType: request.unitType,

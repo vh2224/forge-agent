@@ -200,6 +200,7 @@ test('canonical unit owner seals opt-in commands through xllm to final argv; uns
     cwd: unitLab.a, contextRoot: unitLab.owner, execution_contract: unitContract, planFile,
     workflowId: 'permissions-fixture', dispatchId: 'permissions-fixture', resultFile: path.join(unitLab.dir, 'result.json'),
     prompt: 'Fixture only.', verification: { preferenceCommands: commands }, claudePermissions: 'verification' };
+  require('./fixtures/issues-434-436/execution-fixtures.cjs').declareBindings(request);
   try {
     process.env.FORGE_XLLM_CLAUDE_BIN = executable;
     request.route = require('./forge-dispatch-resolve').resolveDispatch({ cwd: request.contextRoot,
@@ -223,7 +224,7 @@ test('canonical unit owner seals opt-in commands through xllm to final argv; uns
     const args = records[0].args;
     assert.deepStrictEqual(args.slice(args.indexOf('--allowedTools') + 1, args.indexOf('-p')), commands.map(c => `Bash(${c})`));
     const bad = { ...request, dispatchId: 'unsupported', resultFile: path.join(unitLab.dir, 'unsupported.json'),
-      verification: { preferenceCommands: ['node -e "process.exit(0)"'] } };
+      verification: { preferenceCommands: ['node -e "process.exit(0)"'], bindings: request.verification.bindings } };
     bad.route = require('./forge-dispatch-resolve').resolveDispatch(request.route.resolution_options);
     records.length = 0;
     await assert.rejects(unit.runUnitSidecar(bad), error => error.code === 'claude-permission-command-unsupported');
@@ -267,6 +268,7 @@ test('issue 328: Claude to Claude recovery keeps the legitimate option', async (
     cwd: unitLab.a, contextRoot: unitLab.owner, execution_contract: unitContract, planFile,
     workflowId: 'permissions-recovery-fixture', dispatchId: 'permissions-recovery-fixture', resultFile: path.join(unitLab.dir, 'recovery.json'),
     prompt: 'Fixture only.', verification: { preferenceCommands: commands }, claudePermissions: 'verification' };
+  require('./fixtures/issues-434-436/execution-fixtures.cjs').declareBindings(request);
   try {
     process.env.FORGE_XLLM_CLAUDE_BIN = executable;
     request.route = require('./forge-dispatch-resolve').resolveDispatch({ cwd: request.contextRoot,

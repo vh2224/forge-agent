@@ -1086,3 +1086,37 @@ recovery, invocation and CLI entrypoints. Its shared factory lives in
 patch production module loading. Inference/host observation are synthetic;
 controlled child Node process, filesystem/VCS and link checks are local evidence.
 A passing fixture is neither a real provider execution nor human UAT.
+
+## Failed execute-task: retain the open begin across sessions
+
+For an anchored milestone v2 attempt, a stopped owner may be replaced without
+closing its original begin. Use `forge-protected-owner-activity.resumeAttemptOwner`
+with the original `request`, an observed `hostRuntime`/`expectedSession`, the
+`inspectOwnerResume` record hash, the existing stop/quiescence attestations and
+live `assertAuthority`, `attestStoppedWriter`, `readPendingQuestions` callbacks.
+These callbacks must prove the exact attempt and every possible writer root;
+TTL, an inactive flag and imported JSON are not proof. This path retains
+the original owner host runtime; a different host is refused before transfer.
+It does not rewrite the original request/transport into another host's request.
+The helper rechecks under the controller and registry fences. Only the original begin/lease/generation and
+retained claim are admitted; another lease, pending transaction or unknown writer
+refuses. No administrative interruption, reset or new inference is performed.
+
+The result's process-local `ownerTransfer` capability may be passed to
+`createOwnerReconciliation`; classify the exact run delta as
+`canonical-owner-transfer` and supply its original S0 bytes. Preserve the returned
+scope and actual transfer evidence. A serialized capability grants nothing.
+After restart, revalidate current ownership and use the ordinary explicit bounded
+operator reconciliation for historical changes; never reconstruct a live handle
+from its JSON description. This is distinct from delivery-repair owner adoption.
+
+`reconciliationDecision(request, operatorDecision, {hookEvidence})` can separate
+strictly attributed hook appends from the manual decision. `hookEvidence` contains
+`originalBytes` keyed by the exact evidence journal path and a live `attestAppend`
+callback returning `{observed:true, reference}` for the supplied byte/hash
+challenge. Register the same journal/preimage at decision generation and use;
+pass the same proof contract to `createOwnerReconciliation`. Every suffix must be
+bounded valid JSONL preserving the original prefix. The decision binds that
+prefix plus every manual delta. Appends alone leave it stable; changed manual
+bytes, a new journal or invalid/unattributed append refuse or require a new
+decision. No journal is globally ignored and no previous answer is retargeted.

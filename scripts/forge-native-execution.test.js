@@ -11,7 +11,7 @@ if (require.main === module && process.argv.length === 2) {
 // observation are synthetic. Local child-process tests do not prove provider/UAT.
 const assert = require('assert'), fs = require('fs'), path = require('path'), cp = require('child_process');
 const { once } = require('events');
-const harness = require('./fixtures/forge-native-execution').createFixtureHarness();
+const harness = require('./fixtures/issues-434-436/execution-fixtures.cjs').createFixtureHarness();
 const { nativeFixture, write } = harness;
 const unit = require('./forge-unit-sidecar'), native = require('./forge-native-invocation');
 const transition = require('./forge-recovery-transition'), recovery = require('./forge-attempt-recovery');
@@ -362,7 +362,7 @@ async function reviewVerificationCases() {
   const required = 'node -e "process.exit(7)"', passing = 'node -e "process.exit(0)"';
   for (const rootSpecific of [false, true]) {
     const f = nativeFixture();
-    f.r.verification = rootSpecific ? { commandsByRoot: { app: [required] } } : { preferenceCommands: [required] };
+    f.r.verification = { ...(rootSpecific ? { commandsByRoot: { app: [required] } } : { preferenceCommands: [required] }), bindings: f.r.verification.bindings };
     await refuse(f, { ...f.runtime, verification: { commandsByRoot: { app: [passing] } } }, /verification-command-replacement/);
     label(`runtime-root-cannot-replace-request-${rootSpecific ? 'root' : 'general'}`);
     const policy = verify.normalizeExecutionVerification(f.r.execution_contract, fs.readFileSync(f.r.planFile, 'utf8'),

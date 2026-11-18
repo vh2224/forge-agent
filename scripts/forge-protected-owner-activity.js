@@ -16,6 +16,8 @@ const scopes = new WeakSet();
 const reconciliations = new WeakMap();
 const reconciliationContext = new AsyncLocalStorage();
 const handoffs = new AsyncLocalStorage();
+const attemptResumes = new WeakMap();
+const ownerTransfers = new WeakMap();
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 function fail(code) { throw Object.assign(new Error(code), { code }); }
 function currentScope() { return contexts.getStore() || null; }
@@ -189,7 +191,28 @@ function expectedProtectedOwner(root, before) {
   return scope && scopes.has(scope) ? scope.expectedOwner(root, before) : before;
 }
 
-function reconciliationView(request, operatorDecision) {
+function hookAppendProof(owner, change, evidence, unit, dispatch) {
+  const prior = evidence?.originalBytes?.[change.path];
+  if (!Buffer.isBuffer(prior) || typeof evidence?.attestAppend !== 'function'
+      || !/^\.gsd\/forge\/evidence[-~][A-Za-z0-9_.~-]+\.jsonl$/.test(change.path)
+      || (change.before === null ? prior.length !== 0 : sha(prior) !== change.before)) fail('owner-reconciliation-hook-proof-required');
+  if (change.before === null && change.after === null) return { path: change.path, before: null, original_sha256: sha(prior) };
+  const current = regular(path.join(owner, change.path));
+  if (sha(current) !== change.after || current.length < prior.length || !current.subarray(0, prior.length).equals(prior)) fail('owner-reconciliation-append-invalid');
+  if (current.equals(prior)) return { path: change.path, before: change.before, original_sha256: sha(prior) };
+  if (current.at(-1) !== 10) fail('owner-reconciliation-append-invalid');
+  const suffix = current.subarray(prior.length);
+  if (suffix.length > 65536) fail('owner-reconciliation-delta-limit');
+  const lines = suffix.toString('utf8').trimEnd().split('\n');
+  if (lines.length > 128) fail('owner-reconciliation-delta-limit');
+  for (const line of lines) { try { JSON.parse(line); } catch { fail('owner-reconciliation-append-invalid'); } }
+  const challenge = Object.freeze({ owner, unit, dispatch_id: dispatch, ...change, original_sha256: sha(prior), appended_sha256: sha(suffix), rows: lines.length });
+  const observed = evidence.attestAppend(challenge);
+  if (observed?.observed !== true || typeof observed.reference !== 'string' || !observed.reference.trim()
+      || observed.reference.length > 512 || /[\r\n]/.test(observed.reference)) fail('owner-reconciliation-hook-proof-required');
+  return { path: change.path, before: change.before, original_sha256: sha(prior) };
+}
+function reconciliationView(request, operatorDecision, options = {}) {
   const sidecar = require('./forge-unit-sidecar'), r = require('./forge-attempt-recovery').canonicalRequest(request);
   if (r.scope !== 'milestone' || r.unitType !== 'execute-task' || !r.execution_contract) fail('owner-reconciliation-scope-invalid');
   const owner = fs.realpathSync.native(r.contextRoot), contract = roots.validateContract(r.execution_contract, { owner, revalidate: true });
@@ -210,22 +233,85 @@ function reconciliationView(request, operatorDecision) {
   const carriers = new Set(operatorDecision ? [`.gsd/forge/questions/${operatorDecision}.json`, `.gsd/forge/questions/${operatorDecision}.origin.json`] : []);
   const changes = [...new Set([...Object.keys(before), ...Object.keys(current)])].sort()
     .filter(file => before[file] !== current[file]).map(file => ({ path: file, before: before[file] ?? null, after: current[file] ?? null }));
-  const reviewed = changes.filter(row => !carriers.has(row.path) && !(operatorDecision && row.path === '.gsd/forge/questions/'));
+  const hooks = Object.keys(options.hookEvidence?.originalBytes || {}).sort().map(file => hookAppendProof(owner,
+    { path: file, before: before[file] ?? null, after: current[file] ?? null }, options.hookEvidence, `execute-task/${r.taskId}`, r.dispatchId));
+  const hookPaths = new Set(hooks.map(row => row.path));
+  const reviewed = changes.filter(row => !carriers.has(row.path) && !(operatorDecision && row.path === '.gsd/forge/questions/') && !hookPaths.has(row.path));
   if (changes.length > 64) fail('owner-reconciliation-delta-limit');
-  const deltaSha = roots.digest({ owner, unit: `execute-task/${r.taskId}`, dispatch_id: r.dispatchId, changes: reviewed });
+  const deltaSha = roots.digest({ owner, unit: `execute-task/${r.taskId}`, dispatch_id: r.dispatchId, changes: reviewed,
+    ...(hooks.length ? { hook_baselines: hooks } : {}) });
   return { r, owner, contract, receiptFile, receiptBytes, receipt, baseline, stateBytes, current, before, changes, reviewed, carriers, deltaSha };
 }
-function reconciliationDecision(request, operatorDecision) {
-  const view = reconciliationView(request, operatorDecision), r = view.r;
+function reconciliationDecision(request, operatorDecision, options = {}) {
+  const view = reconciliationView(request, operatorDecision, options), r = view.r;
   return { cwd: view.owner, unit: `execute-task/${r.taskId}`, milestone: r.milestoneId,
     slice: r.sliceId, task: r.taskId, workflow_id: r.milestoneId, decision_set: `owner-delta/${view.deltaSha}`,
     questions: [{ id: 'owner-delta-approval', question: `Autorizar somente os deltas de metadados revisados ${view.deltaSha} para ${r.milestoneId}/${r.taskId}? Nenhum plano, claim ou código será aceito como alterado.` }],
     delta_sha256: view.deltaSha, changes: view.reviewed };
 }
+
+// Private, live exception for this one original open begin. The generic resume
+// API cannot acquire this authority from serialized scope or an expired clock.
+function inspectAttemptResume(owner, record, handle) {
+  const prepared = attemptResumes.get(handle);
+  if (!prepared || roots.key(owner) !== roots.key(prepared.owner) || record.id !== prepared.runId) fail('owner-reconciliation-resume-capability-required');
+  prepared.check(record);
+  return structuredClone(prepared.scope);
+}
+function resumeAttemptOwner(options = {}) {
+  const { request, assertAuthority, attestStoppedWriter, readPendingQuestions } = options;
+  if (![assertAuthority, attestStoppedWriter, readPendingQuestions].every(fn => typeof fn === 'function')) fail('owner-reconciliation-live-adapter-required');
+  const view = reconciliationView(request), r = view.r, runId = r.runId || r.milestoneId, unit = `execute-task/${r.taskId}`;
+  const runs = require('./forge-runs'), controller = require('./forge-unit-controller');
+  const actor = runs.observeHostSession(options.hostRuntime, options.expectedSession);
+  if (!actor) fail('owner-reconciliation-observed-owner-required');
+  const recordPath = `.gsd/forge/runs/${runId}.json`, beforeBytes = regular(path.join(view.owner, recordPath));
+  const before = runs.get(view.owner, runId), leaseBytes = regular(lease.leaseFile(view.owner, unit)), held = JSON.parse(leaseBytes);
+  const begin = controller.lookupRecord(view.owner, 'transaction', held.request_id);
+  if (view.receipt.phase !== 'failed' && view.receipt.phase !== 'executed' || !runs.knownResumeBinding(before)
+      || before.active !== false || before.worker || before.worker_started || !lease.validRecord(held, unit)
+      || actor.hostRuntime !== held.host_runtime || before.host_runtime !== held.host_runtime || r.route?.host_runtime !== held.host_runtime
+      || roots.digest(before.write_claim) !== roots.digest(r.claim) || !begin || begin.action !== 'begin' || begin.phase !== 'committed'
+      || begin.milestone !== r.milestoneId || begin.unit?.key !== unit || begin.lease_generation !== held.generation
+      || begin.owner_digest !== `sha256:${sha(held.owner_token)}`
+      || view.before[path.relative(view.owner, controller.transactionFile(view.owner, held.request_id)).replace(/\\/g, '/')] !== sha(regular(controller.transactionFile(view.owner, held.request_id)))
+      || !controller.incompleteUnits(view.owner, runId).some(row => row.idempotency_key === held.request_id && row.action === 'begin')) fail('owner-reconciliation-resume-scope-invalid');
+  const challenge = Object.freeze({ owner: view.owner, run_id: runId, unit, dispatch_id: r.dispatchId,
+    request_sha256: roots.digest(r), receipt_sha256: sha(view.receiptBytes), original_owner_record_sha256: sha(beforeBytes),
+    current_session_sha256: sha(actor.sessionId), roots: view.contract.code_roots.map(row => ({ id: row.id, identity_sha256: row.identity_sha256 })) });
+  const code = view.contract.code_roots.map(root => ({ path: root.path, code: require('./forge-task-execution').replayState(root.path), protected: require('./forge-task-execution').protectedSnapshot(root.path) }));
+  const check = record => {
+    const liveActor = runs.observeHostSession(actor.hostRuntime, actor.sessionId);
+    if (liveActor?.sessionId !== actor.sessionId || liveActor?.source !== actor.source
+        || assertAuthority(structuredClone(challenge)) !== true || attestStoppedWriter(structuredClone(challenge)) !== true) fail('owner-reconciliation-authority-required');
+    const pending = readPendingQuestions(structuredClone(challenge));
+    if (!Array.isArray(pending) || pending.some(row => row?.status !== 'resolved')) fail('owner-reconciliation-pending-questions');
+    if (roots.digest(record) !== roots.digest(before) || sha(regular(path.join(view.owner, recordPath))) !== sha(beforeBytes)
+        || !regular(view.receiptFile, 8 * 1024 * 1024).equals(view.receiptBytes)
+        || !regular(view.baseline.state_file, 16 * 1024 * 1024).equals(view.stateBytes)
+        || sha(regular(r.planFile)) !== view.baseline.input.sha256
+        || !regular(lease.leaseFile(view.owner, unit)).equals(leaseBytes)) fail('owner-reconciliation-resume-source-changed');
+    roots.validateContract(view.contract, { owner: view.owner, revalidate: true });
+    for (const row of code) if (roots.digest(require('./forge-task-execution').replayState(row.path)) !== roots.digest(row.code)
+        || roots.digest(require('./forge-task-execution').protectedSnapshot(row.path)) !== roots.digest(row.protected)) fail('owner-reconciliation-root-changed');
+  };
+  const scope = { kind: 'attempt-recovery', milestone: runId, unit, begin_key: begin.idempotency_key,
+    repair_generation: held.generation, repair_owner_digest: begin.owner_digest, host_runtime: held.host_runtime,
+    request_sha256: roots.digest(r), parent_receipt_sha256: sha(view.receiptBytes) };
+  const handle = Object.freeze({}); attemptResumes.set(handle, { owner: view.owner, runId, check, scope });
+  let resumed;
+  try { resumed = runs.resumeOwner(view.owner, runId, { hostRuntime: actor.hostRuntime, expectedSession: actor.sessionId,
+    expectedRecordSha256: options.expectedRecordSha256, confirmOwnerStopped: options.confirmOwnerStopped,
+    confirmWorkspaceQuiescent: options.confirmWorkspaceQuiescent, attemptRecovery: handle }); }
+  finally { attemptResumes.delete(handle); }
+  const afterBytes = regular(path.join(view.owner, recordPath));
+  const transfer = Object.freeze({}); ownerTransfers.set(transfer, { requestHash: roots.digest(r), recordPath, beforeBytes, afterBytes });
+  return Object.freeze({ status: resumed.status, ownerTransfer: transfer, scope: structuredClone(scope) });
+}
 function createOwnerReconciliation(options = {}) {
   const { request, assertAuthority, attestStoppedWriter, readPendingQuestions, attestChanges } = options;
   if ([assertAuthority, attestStoppedWriter, readPendingQuestions, attestChanges].some(fn => typeof fn !== 'function')) fail('owner-reconciliation-live-adapter-required');
-  const view = reconciliationView(request, options.operatorDecision), r = view.r, unit = `execute-task/${r.taskId}`;
+  const view = reconciliationView(request, options.operatorDecision, options), r = view.r, unit = `execute-task/${r.taskId}`;
   const leasePath = path.relative(view.owner, lease.leaseFile(view.owner, unit)).replace(/\\/g, '/');
   const runs = require('./forge-runs'), actor = runs.observeHostSession(options.hostRuntime || r.route?.host_runtime, process.env.FORGE_CLAUDE_OWNER_SESSION_ID);
   const record = runs.get(view.owner, r.runId || r.milestoneId);
@@ -255,7 +341,7 @@ function createOwnerReconciliation(options = {}) {
   live();
   let operatorApproved = false;
   if (options.operatorDecision !== undefined) {
-    const expected = reconciliationDecision(request, options.operatorDecision), answer = require('./forge-pending-questions').continuation({ cwd: view.owner, identity: options.operatorDecision });
+    const expected = reconciliationDecision(request, options.operatorDecision, options), answer = require('./forge-pending-questions').continuation({ cwd: view.owner, identity: options.operatorDecision });
     const identity = answer.identity;
     const q = answer.questions?.find(row => row.id === expected.questions[0].id);
     if (!answer.ok || identity?.origin !== 'owner' || identity.unit !== unit || identity.milestone !== r.milestoneId
@@ -310,6 +396,12 @@ function createOwnerReconciliation(options = {}) {
         const suffix = current.subarray(prior.length).toString('utf8').trimEnd().split('\n');
         if (suffix.length > 128) fail('owner-reconciliation-delta-limit');
         for (const line of suffix) { try { JSON.parse(line); } catch { fail('owner-reconciliation-append-invalid'); } }
+      } else if (row.kind === 'canonical-owner-transfer') {
+        const proof = ownerTransfers.get(options.ownerTransfer);
+        if (!proof || proof.requestHash !== roots.digest(r) || proof.recordPath !== change.path || !current.equals(proof.afterBytes)) fail('owner-reconciliation-transfer-proof-required');
+        const original = JSON.parse(prior), previous = JSON.parse(proof.beforeBytes);
+        const immutable = value => Object.fromEntries(Object.entries(value).filter(([key]) => !['active', 'last_heartbeat', 'heartbeat', 'updated_at', 'ended_at', 'worker', 'worker_started'].includes(key)));
+        if (roots.digest(immutable(original)) !== roots.digest(immutable(previous))) fail('owner-reconciliation-transfer-proof-required');
       } else if (row.kind === 'canonical-stop') {
         if (!canonical(change.path)) fail('owner-reconciliation-stop-scope-invalid');
         if (change.path.startsWith('.gsd/forge/runs/')) {
@@ -397,4 +489,5 @@ async function withReconciliationHandoff(request, runtime, action) {
   finally { entry.consumed = true; }
 }
 module.exports = { withExecutionActivity, currentScope, assertPreflightAdmission, expectedProtectedOwner, reconciliationDecision,
-  createOwnerReconciliation, assertOwnerReconciliationReady, withOwnerReconciliation, withReconciliationHandoff };
+  createOwnerReconciliation, assertOwnerReconciliationReady, withOwnerReconciliation, withReconciliationHandoff,
+  resumeAttemptOwner, inspectAttemptResume };

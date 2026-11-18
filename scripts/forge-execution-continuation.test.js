@@ -1,12 +1,12 @@
 'use strict';
 const assert = require('assert/strict'), fs = require('fs'), path = require('path');
-const h = require('./fixtures/forge-native-execution').createFixtureHarness();
+const h = require('./fixtures/issues-434-436/execution-fixtures.cjs').createFixtureHarness();
 const sidecar = require('./forge-unit-sidecar'), api = require('./forge-execution-continuation');
 const recovery = require('./forge-attempt-recovery');
 let completed = false;
 (async () => {
   const f = h.nativeFixture();
-  f.r.verification = { preferenceCommands: ['node -e "process.exit(require(\'fs\').readFileSync(\'src.js\',\'utf8\').includes(\'bounded\')?0:1)"'] };
+  f.r.verification = { ...f.r.verification, preferenceCommands: ['node -e "process.exit(require(\'fs\').readFileSync(\'src.js\',\'utf8\').includes(\'bounded\')?0:1)"'] };
   const invoke = f.runtime.invokeNative;
   const partialRuntime = { ...f.runtime, invokeNative: async args => ({ ...await invoke(args), status: 'partial' }) };
   const captureFailure = recovery.captureFailure;

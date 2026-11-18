@@ -11,6 +11,7 @@ async function main(){
     require('./forge-runs').update(f.owner,f.request.runId,{session_id:process.env.CODEX_THREAD_ID,host_runtime:'codex',owner_session_source:'CODEX_THREAD_ID'});
     const r=f.request;fs.unlinkSync(f.receiptFile);
     r.verification.commandTimeoutMs=1000;
+    const originalVerification=structuredClone(r.verification);
     for(const row of f.contract.code_roots)fs.writeFileSync(path.join(row.path,'check.cjs'),
       "setTimeout(()=>{require('assert').equal(require('fs').readFileSync('same.txt','utf8'),'after\\n');console.log('PASS claimed root content')},2000)");
     let calls=0;xllm.runExecute=async()=>{calls++;for(const row of f.contract.code_roots)fs.writeFileSync(path.join(row.path,'same.txt'),'after\n');return f.result();};
@@ -110,7 +111,7 @@ async function main(){
     await assert.rejects(side.runUnitSidecar(r,{verificationSuccessor:cap}),/already-used|protected|source-changed/);
     console.log('PASS actual verification-only successor publishes identical worker result after fresh checks without changing original receipt, result, seal or command order');
     assert.equal(hash(parentBytes),next.verification_successor.parent_receipt_sha256);
-    assert.equal(roots.digest(r.verification),roots.digest({commandTimeoutMs:1000,commandsByRoot:{alpha:['node check.cjs'],beta:['node check.cjs']}}));
+    assert.equal(roots.digest(r.verification),roots.digest(originalVerification));
   }finally{if(previousThread===undefined)delete process.env.CODEX_THREAD_ID;else process.env.CODEX_THREAD_ID=previousThread;xllm.runExecute=original;f.cleanup();}
 }
 module.exports={main};if(require.main===module)main().catch(e=>{console.error(e);process.exitCode=1;});
