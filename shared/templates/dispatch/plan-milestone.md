@@ -24,6 +24,8 @@ Read: `node {WORKING_DIR}/scripts/forge-projection.js --render ledger --cwd {WOR
 
 ## Context (discuss decisions)
 
+Use appended canonical answers within their scope; keep pending questions.
+
 Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/{M###}-CONTEXT.md
 
 ## Brainstorm Output

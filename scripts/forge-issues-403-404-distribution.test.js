@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('assert/strict'),fs=require('fs'),path=require('path');
-const root=path.resolve(__dirname,'..'),layer=require('./fixtures/issues-420-424/distribution.cjs'),artifacts=require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts;
+const root=path.resolve(__dirname,'..'),layer=require('./fixtures/issues-429-432/distribution.cjs'),artifacts=require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts;
 assert.equal(layer.validate({artifacts}),true);const bad=structuredClone(layer.issues403404Layer);bad.provenance.base_revision='0'.repeat(40);assert.throws(()=>layer.validate({artifacts,issues403404LayerValue:bad}));
 for(const file of ['scripts/forge-time-decision-errors.js','scripts/forge-artifact-routing-diagnostic.js','scripts/forge-xllm.js','forge-prefs.schema.json','skills/forge-doctor/SKILL.md'])assert.throws(()=>layer.validate({artifacts,readRaw:rel=>rel===file?Buffer.from('foreign drift'):fs.readFileSync(path.join(root,rel))}));
 assert.throws(()=>layer.validate({artifacts:artifacts.map(a=>a.source==='skills/forge-doctor/SKILL.md'?{...a,content:a.content+'foreign drift'}:a)}));

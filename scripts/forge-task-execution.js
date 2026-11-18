@@ -333,7 +333,8 @@ function protectedSnapshot(root) {
   return result;
 }
 function assertProtected(root, before) {
-  if (roots.digest(Object.entries(protectedSnapshot(root)).sort()) !== roots.digest(Object.entries(before).sort())) fail('execution-protected-metadata');
+  const expected = require('./forge-protected-owner-activity').expectedProtectedOwner(root, before);
+  if (roots.digest(Object.entries(protectedSnapshot(root)).sort()) !== roots.digest(Object.entries(expected).sort())) fail('execution-protected-metadata');
 }
 function verifyResult(cwd, prepared, result) {
   if (prepared.runtime_view) {

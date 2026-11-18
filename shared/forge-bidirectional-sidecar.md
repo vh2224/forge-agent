@@ -175,6 +175,19 @@ the evidence in the personal checkpoint and honor the user's recovery policy.
    public observation as authorization. A lease renewal refusal stops delivery
    and enters recovery; the provider heartbeat does not renew a workflow lease.
 
+   For a fresh, ordinary milestone v2 execute-task with an actual controller
+   begin, `runUnitSidecar` opens a `forge-protected-owner-activity` boundary before
+   S0. Its private lease window covers the resolved worker ceiling; polling the
+   same owner/generation checks that lease without rewriting it. Hook observations
+   go to the external owner-window journal. Both supported process adapters spawn
+   through the boundary, which joins its actual child before changing to the
+   sealed verification budget. Only that boundary's exact lease hash chain may
+   advance the expected snapshot. Other protected writes still refuse. A failed
+   join retains the fence; JSON/PIDs supplied by a worker cannot release it.
+
+   This coordination is not an OS sandbox. Native, cohort, legacy uncoordinated
+   and saved-attempt paths retain their own authority contracts.
+
 ## Result and recovery
 
 The adapter validates each unit's contract and persists the response before
