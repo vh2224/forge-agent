@@ -1677,8 +1677,9 @@ test('review R5 R7 R16 all ACK then one genuine single delivery then a second co
   const fx=await retainedCohort('review-sequence',PAIR,PAIR_GO,{verification,setup(dir){
     write(path.join(dir,'src/check-fixture.cjs'),"'use strict';const assert=require('assert'),path=require('path');const id=process.argv[2],file='src/'+id.toLowerCase()+'.js';assert.strictEqual(require(path.resolve(file)),id+':'+file);console.log(id+' observable module value passed');\n");
   },tasks:{T01:taskPlan('T01'),T02:taskPlan('T02'),T03:taskPlan('T03',['T01','T02']),T04:taskPlan('T04',['T03']),T05:taskPlan('T05',['T03'])}});
-  let secondFx=null;const cohortTransport=xllm.runExecute;
+  let secondFx=null;const cohortTransport=xllm.runExecute,previousThread=process.env.CODEX_THREAD_ID;
   try {
+    process.env.CODEX_THREAD_ID=SESSION;
     const originalTarget=targetState(fx.dir),first=await consolidated(fx,'first cohort retirement');
     assert.strictEqual(first.retirement.status,'retired');assert.strictEqual(first.post_unit.status,'complete');
     const dirtyRoots=[...memberPaths(fx).values()];
@@ -1696,7 +1697,7 @@ test('review R5 R7 R16 all ACK then one genuine single delivery then a second co
     const claim=claims.recordClaim(fx.dir,fx.scope.run_id,{schema_version:2,execution_contract:rootsApi.singleContract(fx.dir,fx.dir),source:'plan-writes',unit:'execute-task/T03',paths:[{root_id:'primary',path:'src/t03.js'}]});
     xllm.runExecute=async options=>{
       options.onBeforeSpawn?.();
-      const child=spawn(process.execPath,[PROVIDER,'T03',fx.rendezvous,'','src/t03.js',String(options.model),String(options.effort),'90000','go','[]'],{cwd:options.cwd,env:xllm.buildSidecarEnv(options.envPolicy||'minimal'),stdio:['ignore','ignore','pipe'],windowsHide:true});
+      const child=(require('./forge-protected-owner-activity').currentScope()?.spawn||spawn)(process.execPath,[PROVIDER,'T03',fx.rendezvous,'','src/t03.js',String(options.model),String(options.effort),'90000','go','[]'],{cwd:options.cwd,env:xllm.buildSidecarEnv(options.envPolicy||'minimal'),stdio:['ignore','ignore','pipe'],windowsHide:true});
       let stderr='';child.stderr.on('data',data=>{stderr=(stderr+data).slice(-4000);});
       const joined=new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',(code,signal)=>resolve({code,signal}));});
       options.announce?.('iniciado',{...options.identity,engine:options.engine,model_sent:options.model,effort:options.effort,host:options.hostRuntime,transport:options.engine==='claude'?'claude-cli':'app-server',pid:child.pid,provider_called:'unknown'});
@@ -1741,7 +1742,7 @@ test('review R5 R7 R16 all ACK then one genuine single delivery then a second co
     for(const root of dirtyRoots)assert.strictEqual(batch.memberRootReservation(fx.dir,root).reserved,true);
     assert.deepStrictEqual(targetState(fx.dir),originalTarget,'no aggregate commit/index/HEAD mutation');
     assert.deepStrictEqual(controller.readEvents(controller.eventsFile(fx.dir,M)).filter(row=>row.action==='complete'&&row.unit.startsWith('execute-task/')).map(row=>row.unit),['execute-task/T01','execute-task/T02','execute-task/T03','execute-task/T04','execute-task/T05']);
-  } finally {xllm.runExecute=cohortTransport;if(secondFx)await finish(secondFx);await finish(fx);}
+  } finally {if(previousThread===undefined)delete process.env.CODEX_THREAD_ID;else process.env.CODEX_THREAD_ID=previousThread;xllm.runExecute=cohortTransport;if(secondFx)await finish(secondFx);await finish(fx);}
 });
 
 test('review R18 grouped memory settles only the deferred queue attempt after exact READY and target revalidation', async () => {

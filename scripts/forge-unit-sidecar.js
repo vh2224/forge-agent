@@ -4263,7 +4263,9 @@ function appendProtectedOwnerEvents(root, receiptFile, record, lines) {
       record.recovery_baseline.protected_owner = advanced;
       for (const row of record.recovery_baseline.protected_roots) if (path.resolve(row.path) === path.resolve(root)) row.snapshot = advanced;
     }
-    if (record.milestone_delivery) record.milestone_delivery.protected_owner = advanced;
+    if (record.milestone_delivery) record.milestone_delivery.protected_owner = {
+      ...record.milestone_delivery.protected_owner, '.gsd/forge/events.jsonl': hash(appended),
+    };
     // Saved-native failures keep their original failed/started receipt until here.
     json(receiptFile, record);
   });

@@ -192,6 +192,20 @@ async function activityDrift() { return fixture(async f => {
   }), /execution-protected-metadata/);
   assert.equal(require('./forge-owner-transport-window').observed(f.owner), null);
 }); }
+async function activityWindowReplacement() { return fixture(async f => {
+  activityRequest(f, 'codex'); const api = require('./forge-unit-lease'), unit = 'execute-task/T01';
+  const record = api.readLease(api.leaseFile(f.owner, unit)).record;
+  const first = api.openProtectedWindow(f.owner, unit, record.owner_token, record.generation, { durationMs: 60000 }); assert(first.ok);
+  const before = fs.readFileSync(api.leaseFile(f.owner, unit));
+  assert.equal(api.openProtectedWindow(f.owner, unit, record.owner_token + '-foreign', record.generation, { durationMs: 60000 }).ok, false);
+  assert.equal(api.openProtectedWindow(f.owner, unit, record.owner_token, record.generation + '-foreign', { durationMs: 60000 }).ok, false);
+  assert(fs.readFileSync(api.leaseFile(f.owner, unit)).equals(before));
+  const second = api.openProtectedWindow(f.owner, unit, record.owner_token, record.generation, { durationMs: 120000 }); assert(second.ok);
+  first.close(); const expected = fs.readFileSync(api.leaseFile(f.owner, unit));
+  assert(api.heartbeat(f.owner, unit, record.owner_token, record.generation).ok); assert(fs.readFileSync(api.leaseFile(f.owner, unit)).equals(expected));
+  const borrowed = api.openProtectedWindow(f.owner, unit, record.owner_token, record.generation, { durationMs: 60000, reuseExisting: true }); assert(borrowed.borrowed);
+  borrowed.close(); assert(second.check().ok); second.close();
+}); }
 function recoveryReceipt(f, request) {
   const sidecar = require('./forge-unit-sidecar'), fingerprint = sidecar.artifactFingerprint(request);
   const receipt = { phase: 'failed', dispatch_id: request.dispatchId, fingerprint,
@@ -261,6 +275,7 @@ async function recoveryNegatives() { return fixture(async f => {
 const cases = [{ name: 'planning-scope', fn: planningScope }, { name: 'planning-boundaries', fn: planningBoundaries },
   { name: 'criteria-zero-bindings', fn: criteriaProof }, { name: 'activity-codex', fn: () => activityPositive('codex') },
   { name: 'activity-claude', fn: () => activityPositive('claude') }, { name: 'activity-drift', fn: activityDrift },
+  { name: 'activity-window-replacement', fn: activityWindowReplacement },
   { name: 'recovery-pipeline', fn: () => activityPipeline(false, true) }, { name: 'activity-runtime-verification', fn: () => activityPipeline(false, false, true) },
   { name: 'activity-pipeline', fn: () => activityPipeline() }, { name: 'activity-pipeline-drift', fn: () => activityPipeline(true) },
   { name: 'recovery-canonical', fn: recoveryCanonical }, { name: 'recovery-manual-decision', fn: recoveryManualDecision },

@@ -365,9 +365,9 @@ function openProtectedWindow(cwd, unitInput, ownerToken, generation, options = {
   const key = protectedKey(cwd, unit);
   let active = activeProtectedWindows.get(key);
   if (active && !protectedWindows.get(active)?.check().ok) { activeProtectedWindows.delete(key); active = null; }
-  if (active) {
+  if (active && options.reuseExisting === true) {
     const prior = protectedWindows.get(active);
-    if (options.reuseExisting !== true || prior?.ownerToken !== token || prior.generation !== gen
+    if (prior?.ownerToken !== token || prior.generation !== gen
         || !prior.check().ok || prior.deadline_at - nowOf(options) < duration - 60000) throw new Error('forge-unit-lease: protected-window-active');
     let closed = false;
     const check = () => closed ? result(false, 'owner-mismatch') : prior.check();

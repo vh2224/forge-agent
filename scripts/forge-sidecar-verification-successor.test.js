@@ -5,8 +5,10 @@ const roots=require('./forge-code-roots'),xllm=require('./forge-xllm');
 const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
 async function main(){
   const f=await require('./forge-native-recovery-delivery.test').fixture();
-  const original=xllm.runExecute;
+  const original=xllm.runExecute,previousThread=process.env.CODEX_THREAD_ID;
   try{
+    process.env.CODEX_THREAD_ID='fixture-sidecar-verification-owner';
+    require('./forge-runs').update(f.owner,f.request.runId,{session_id:process.env.CODEX_THREAD_ID,host_runtime:'codex',owner_session_source:'CODEX_THREAD_ID'});
     const r=f.request;fs.unlinkSync(f.receiptFile);
     r.verification.commandTimeoutMs=1000;
     for(const row of f.contract.code_roots)fs.writeFileSync(path.join(row.path,'check.cjs'),
@@ -16,6 +18,9 @@ async function main(){
     await assert.rejects(side.runUnitSidecar(r,{onVerificationCheck:row=>observations.push(row)}),{code:'execution-verification-failed'});
     const parentBytes=fs.readFileSync(f.receiptFile),outputBytes=fs.readFileSync(r.resultFile),parent=JSON.parse(parentBytes);
     assert.equal(calls,1);assert.equal(parent.phase,'executed');assert.equal(parent.result.status,'done');
+    const capturedLeaseFile=require('./forge-unit-lease').leaseFile(f.owner,'execute-task/T01');
+    assert.equal(parent.milestone_delivery.protected_owner[path.relative(f.owner,capturedLeaseFile).replace(/\\/g,'/')],hash(fs.readFileSync(capturedLeaseFile)),
+      'owned failure events preserve the exact lease already captured with the executed delivery');
     assert.equal(parent.delivery_capture.passed,false);
     const check=parent.delivery_capture.gate.roots[0].result.checks[0];
     assert.equal(check.exitCode,124);
@@ -106,6 +111,6 @@ async function main(){
     console.log('PASS actual verification-only successor publishes identical worker result after fresh checks without changing original receipt, result, seal or command order');
     assert.equal(hash(parentBytes),next.verification_successor.parent_receipt_sha256);
     assert.equal(roots.digest(r.verification),roots.digest({commandTimeoutMs:1000,commandsByRoot:{alpha:['node check.cjs'],beta:['node check.cjs']}}));
-  }finally{xllm.runExecute=original;f.cleanup();}
+  }finally{if(previousThread===undefined)delete process.env.CODEX_THREAD_ID;else process.env.CODEX_THREAD_ID=previousThread;xllm.runExecute=original;f.cleanup();}
 }
 module.exports={main};if(require.main===module)main().catch(e=>{console.error(e);process.exitCode=1;});
