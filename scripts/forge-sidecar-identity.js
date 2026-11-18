@@ -1,6 +1,7 @@
 'use strict';
 
 const { diagnostic } = require('./forge-sidecar-diagnostic');
+const { createHash } = require('crypto');
 
 const STAGES = new Set(['solicitado', 'iniciado', 'recusado', 'falhou', 'reaproveitado']);
 const TERMINAL = new Set(['recusado', 'falhou', 'reaproveitado']);
@@ -70,18 +71,31 @@ const HUMAN_STAGES = { solicitado: 'pedido ao adaptador', iniciado: 'em execuç�
   recusado: 'recusado', reaproveitado: 'reaproveitado' };
 const HUMAN_MAX_BYTES = 1024;
 const PROVIDER_WORDS = { true: 'sim', false: 'não', unknown: 'desconhecido' };
+const BINDING_FIELDS = ['phase', 'unit', 'engine', 'transport', 'model_sent',
+  'model_resolved', 'model_route', 'effort', 'host', 'retroactive'];
 
 // Human companion of formatIdentityLine: same accepted fields and sanitizer,
 // one pt-BR line. It restates the technical evidence and never upgrades it.
-function formatHumanIdentity(stage, fields = {}) {
+function formatHumanIdentity(stage, fields = {}, { contextual = false, compact = false } = {}) {
   if (!STAGES.has(stage)) throw new Error(`unknown sidecar identity stage: ${stage}`);
   const render = (limit, modelLimit) => {
     // Same clean() as the technical line; Unicode line and paragraph
     // separators are also dropped so chat renderers keep one line.
     const value = (field, missing = '-', bound = limit) => clean(typeof field === 'string'
       ? field.replace(/\p{Zl}|\p{Zp}/gu, '') : field, missing, bound);
+    // A short display reference is never a dispatch identity or a dedup key.
+    // Full IDs remain in dispatch receipts; technical line bytes stay intact.
+    // Standalone formatting keeps
+    // its existing full-context output for readers without prior messages.
+    const reference = contextual
+      ? `ref ${createHash('sha256').update(String(fields.dispatch_id || '-')).digest('hex').slice(0, 8)}` : null;
+    const label = contextual && fields.unit === fields.phase
+      ? value(fields.unit) : `${value(fields.unit)} (${value(fields.phase)})`;
+    if (contextual && compact && stage === 'iniciado') {
+      return `${HUMAN_PREFIX} ${HUMAN_STAGES[stage]}: ${label} · ${reference}`;
+    }
     const sent = value(fields.model_sent, '-', modelLimit);
-    const parts = [`${HUMAN_PREFIX} ${HUMAN_STAGES[stage]}: ${value(fields.unit)} (${value(fields.phase)})`,
+    const parts = [`${HUMAN_PREFIX} ${HUMAN_STAGES[stage]}: ${label}`,
       `executor sidecar ${value(fields.engine)} via ${value(fields.transport)}`,
       sent === '-' ? 'nenhum modelo enviado' : `modelo enviado ${sent} (aplicação não confirmada)`];
     if (stage !== 'recusado' && fields.model_resolved !== undefined && value(fields.model_resolved, '-', modelLimit) !== sent) {
@@ -99,7 +113,7 @@ function formatHumanIdentity(stage, fields = {}) {
       parts.push(`causa ${value(cause)}`, `provedor chamado: ${PROVIDER_WORDS[provider]}`,
         'próximo passo: inspecione o processo e o receipt antes de nova tentativa');
     }
-    parts.push(`acompanhe nesta conversa; registro técnico dispatch ${value(fields.dispatch_id)}`);
+    parts.push(reference || `acompanhe nesta conversa; registro técnico dispatch ${value(fields.dispatch_id)}`);
     return parts.join(' · ');
   };
   // Hostile values are already one line; shrink value bounds so the whole
@@ -121,10 +135,14 @@ function createAnnouncer({ write } = {}) {
       if (state.stages.has(stage) || state.terminal || (TERMINAL.has(stage) && state.terminal)
         || (stage === 'iniciado' && (!state.stages.has('solicitado') || !Number.isInteger(fields.pid) || fields.pid <= 0))) return false;
       const line = formatIdentityLine(stage, fields);
+      const binding = BINDING_FIELDS.map(key => fields[key]);
+      const compact = stage === 'iniciado' && id !== '-' && state.binding
+        && binding.every((value, index) => Object.is(value, state.binding[index]));
       // One write per accepted stage keeps the technical line first for
       // positional readers; the human line follows in the same chunk.
-      write(line + '\n' + formatHumanIdentity(stage, fields) + '\n');
+      write(line + '\n' + formatHumanIdentity(stage, fields, { contextual: true, compact }) + '\n');
       state.stages.add(stage);
+      if (stage === 'solicitado') state.binding = binding;
       if (TERMINAL.has(stage)) state.terminal = true;
       states.set(id, state);
       return true;

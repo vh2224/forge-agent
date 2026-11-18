@@ -1,12 +1,12 @@
 'use strict';
 // Measured CI successor; historical validators and their data remain immutable.
 const fs=require('fs'),path=require('path'),crypto=require('crypto'),zlib=require('zlib'),assert=require('node:assert/strict');
-const previous=require('../issue-414/distribution.cjs'),data=require('./distribution-delta.json');
-require('./immutable-pin-cache.cjs').installImmutablePinCache(require.cache[require.resolve('../issue-414/distribution.cjs')]);
-const ROOT=path.resolve(__dirname,'../../..'),PIN='c87924b4689376a29c6a3080df49f04135ac2f17f2e2e57b4606b63b297dd5f2';
+const previous=require('../issues-414-418/distribution.cjs'),data=require('./distribution-delta.json');
+require('./immutable-pin-cache.cjs').installImmutablePinCache(require.cache[require.resolve('../issues-414-418/distribution.cjs')]);
+const ROOT=path.resolve(__dirname,'../../..'),PIN='fcaf1ac338b8f114d5d7531c57f31eb24736e23b5d0e57f0255dc0aa80435763';
 const hash=x=>crypto.createHash('sha256').update(x).digest('hex');
 const read=file=>fs.readFileSync(path.join(ROOT,file));
-function check(value=data){assert.equal(hash(JSON.stringify(value)),PIN,'CI independent measured source delta');assert.equal(hash(JSON.stringify(previous.issue414Layer)),value.predecessor_layer_sha256,'CI immutable predecessor');return value;}
+function check(value=data){assert.equal(hash(JSON.stringify(value)),PIN,'CI independent measured source delta');assert.equal(hash(JSON.stringify(previous.issue414418Layer)),value.predecessor_layer_sha256,'CI immutable predecessor');return value;}
 function before(row){const bytes=zlib.gunzipSync(Buffer.from(row.before_gzip_base64,'base64'),{maxOutputLength:4*1024*1024});assert.equal(hash(bytes),row.before,'CI exact predecessor bytes');return bytes;}
 function validate(options){
  const value=check(options.ciLatencyLayerValue||data),readRaw=options.readRaw||read;
@@ -21,4 +21,5 @@ function after(kind,file,prior,attr=false){const value=check(),old=previous.afte
 function projectSmoke(text){const row=check().files['scripts/forge-smoke.js'];return row&&row.before!==null&&hash(text)===row.after?before(row).toString('utf8'):text;}
 function previousSmoke(text){return previous.previousSmoke(projectSmoke(text));}
 function predecessorSmoke(text){return previous.predecessorSmoke(projectSmoke(text));}
-module.exports={...previous,validate,after,previousSmoke,predecessorSmoke,ciLatencyLayer:data};
+function validate414Snapshot(options){const value=check(options.ciLatencyLayerValue||data),readRaw=options.readRaw||read;return previous.validate414Snapshot({...options,readRaw:file=>{const actual=readRaw(file),row=value.files[file];return row&&row.before!==null&&hash(actual)===row.after?before(row):actual;}});}
+module.exports={...previous,validate,validate414Snapshot,after,previousSmoke,predecessorSmoke,ciLatencyLayer:data};

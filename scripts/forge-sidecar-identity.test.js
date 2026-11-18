@@ -35,7 +35,7 @@ assert(lines[2].includes('provider_called=true'));
 // Each accepted stage is one write: technical line first, human line second.
 for (const [index, [stage, fields]] of [['solicitado', base], ['iniciado', { ...base, pid: 10 }],
   ['falhou', { ...base, reason_code: 'provider-exit', provider_called: true }]].entries()) {
-  assert.strictEqual(lines[index], `${formatIdentityLine(stage, fields)}\n${formatHumanIdentity(stage, fields)}\n`);
+  assert.strictEqual(lines[index], `${formatIdentityLine(stage, fields)}\n${formatHumanIdentity(stage, fields, { contextual: true, compact: stage === 'iniciado' })}\n`);
 }
 assert(lines.every(chunk => chunk.split('\n').length === 3 && chunk.startsWith('[forge-sidecar] ')
   && chunk.split('\n')[1].startsWith(`${HUMAN_PREFIX} `)));
@@ -147,11 +147,61 @@ for (const fields of legacyInputs) {
   for (const stage of Object.keys(words)) legacyOutputs.push(formatIdentityLine(stage, fields), formatHumanIdentity(stage, fields));
   const writes = [], legacyAnnounce = createAnnouncer({ write: value => writes.push(value) });
   for (const stage of ['solicitado', 'iniciado', 'falhou', 'recusado']) legacyAnnounce(stage, { ...fields, pid: 10 });
-  legacyOutputs.push(...writes);
+  legacyOutputs.push(...writes.map(chunk => chunk.split('\n')[0]));
 }
 const legacyDigest = require('crypto').createHash('sha256').update(JSON.stringify(legacyOutputs)).digest('hex');
-assert.strictEqual(legacyDigest, 'a33cdf9a858ec6b5d03032ffa84df28d7845fb8052f8143e7214fedf091d9b4e', `legacy identity bytes changed: ${legacyDigest}`);
-console.log('PASS S03/T02 legacy identity bytes: formatIdentityLine, formatHumanIdentity, createAnnouncer and clean() unchanged');
+assert.strictEqual(legacyDigest, '96427d2cea5d9fb26845aba00f558f6abcfb042532cc3c3581ecb5e81fab6a3a', `legacy identity bytes changed: ${legacyDigest}`);
+console.log('PASS legacy bytes measured at63fc4eb: standalone formatters and announcer technical lines unchanged; contextual human announcements intentionally shortened');
+
+// Three real attempts remain three requests and three start transitions.
+// Their long IDs share the same prefix, which previously hid the suffix.
+const progress = [], progressAnnounce = createAnnouncer({ write: chunk => progress.push(chunk) });
+const attempts = [1, 2, 3].map(n => ({ ...running, phase: 'challenge', unit: 'challenge',
+  dispatch_id: 'synthetic-review-dispatch-'.repeat(4) + n }));
+for (const fields of attempts) assert(progressAnnounce('solicitado', fields));
+for (const fields of attempts.toReversed()) assert(progressAnnounce('iniciado', { ...fields, pid: 11 }));
+const humanRows = progress.map(chunk => chunk.split('\n')[1]);
+const refs = humanRows.slice(0, 3).map(row => row.match(/ · ref ([a-f0-9]{8})$/)[1]);
+assert.equal(new Set(refs).size, 3);
+for (const [index, row] of humanRows.entries()) {
+  assert(!row.includes('challenge (challenge)'));
+  assert(!row.includes('acompanhe nesta conversa'));
+  assert(!row.includes('synthetic-review-dispatch'));
+  assert.equal(row.includes('executor sidecar'), index < 3);
+  assert(row.endsWith(` · ref ${refs[index < 3 ? index : 5 - index]}`));
+}
+for (const [index, fields] of attempts.entries()) {
+  assert.equal(progress[index].split('\n')[0], formatIdentityLine('solicitado', fields));
+  assert.equal(progress[5 - index].split('\n')[0], formatIdentityLine('iniciado', { ...fields, pid: 11 }));
+}
+assert(humanRows.slice(3).every(row => Buffer.byteLength(row) < 100));
+for (const key of ['phase', 'unit', 'engine', 'transport', 'model_sent', 'model_resolved', 'model_route', 'effort', 'host', 'retroactive']) {
+  const chunks = [], changedAnnounce = createAnnouncer({ write: chunk => chunks.push(chunk) });
+  changedAnnounce('solicitado', running);
+  changedAnnounce('iniciado', { ...running, pid: 12, [key]: key === 'retroactive' ? true : 'changed' });
+  assert(chunks[1].split('\n')[1].includes('executor sidecar'), `changed ${key} must retain full identity`);
+}
+const missingId = [], missingAnnounce = createAnnouncer({ write: chunk => missingId.push(chunk) });
+missingAnnounce('solicitado', { ...running, dispatch_id: undefined });
+missingAnnounce('iniciado', { ...running, dispatch_id: undefined, pid: 13 });
+assert(missingId[1].split('\n')[1].includes('executor sidecar'));
+for (const stage of ['falhou', 'recusado', 'reaproveitado']) {
+  const chunks = [], terminalAnnounce = createAnnouncer({ write: chunk => chunks.push(chunk) });
+  terminalAnnounce('solicitado', running);
+  terminalAnnounce(stage, { ...running, reason_code: 'provider-timeout', provider_called: 'unknown' });
+  assert(chunks[1].split('\n')[1].includes('executor sidecar'));
+  if (stage !== 'reaproveitado') assert(chunks[1].includes('provedor chamado: desconhecido'));
+  assert.equal(terminalAnnounce('iniciado', { ...running, pid: 14 }), false);
+}
+const failedWrite = [], retryAnnounce = createAnnouncer({ write: chunk => {
+  if (!failedWrite.length) { failedWrite.push(null); throw new Error('fixture-write'); }
+  failedWrite.push(chunk);
+} });
+assert.equal(retryAnnounce('solicitado', running), false);
+assert.equal(retryAnnounce('iniciado', { ...running, pid: 15 }), false);
+assert.equal(retryAnnounce('solicitado', running), true);
+assert.equal(retryAnnounce('iniciado', { ...running, pid: 15 }), true);
+console.log('PASS418 three interleaved attempts remain visible; unchanged starts are concise, changed identities and terminal evidence stay full, failed writes do not authorize starts');
 
 const { plainText } = require('./forge-sidecar-identity');
 const ESC = '\x1b', BEL = '\x07', ST = '\x1b\\';
