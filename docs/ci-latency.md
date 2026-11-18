@@ -43,9 +43,9 @@ copied. Candidate HEAD and source origin/history are preserved. The canonical
 runner continues to isolate HOME for each suite, compare the known-failure
 baseline in both directions and produce bounded structured profiles.
 
-Three Linux, five macOS and twenty-one Windows jobs produce six, fifteen and forty
+Three Linux, six macOS and twenty-one Windows jobs produce six, eighteen and forty
 effective shards. The explicit single-worker prefix and paired-job offsets map
-all sixty-one global worker indices without gaps or duplication.
+all sixty-four global worker indices without gaps or duplication.
 Every unit is assigned exactly once by the common complete partition. Every
 worker is joined on failure; successful sibling profiles remain diagnostic
 evidence. Failed/incompletely joined checkouts and nonempty worker temp roots are
@@ -89,7 +89,7 @@ matrix job-name binding and observed Node/image metadata. Feed those logs
 individually to the existing raw-log collector. The combined job console has
 multiple runners and intentionally remains ambiguous for that collector.
 For an allocation estimate matching CI, use `forge-ci-profile report` with
-`--partition-suites` and the effective counts linux:6, darwin:15, win32:40.
+`--partition-suites` and the effective counts linux:6, darwin:18, win32:40.
 Leave out that option when analyzing the older whole-file runner universe.
 Report execution, queue, setup and aggregate runner work separately.
 

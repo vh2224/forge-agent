@@ -13,8 +13,8 @@ const POLICY = {
   workflows: {
     ci: {
       filename: 'ci.yml', path: '.github/workflows/ci.yml',
-      blob_oid: 'ba9c6634c7d9a67313d51588af00ae20de8bb0ef',
-      blob_sha256: '9a9ccc6f3f7b9bf5cd69830edf93ec89f1715004c9065648dc0148dfc5d4b2ff',
+      blob_oid: '7047d4744fd3131367bfca57fc84d6d250bc1156',
+      blob_sha256: '55b3bcc7ea618b3376c67aa67e467ebf62397680300b71ec9f01f90e20da1f91',
       jobs: [
         { key: 'operational-offline', kind: 'native', needs: [],
           name: 'Offline ${{ matrix.host }} / ${{ matrix.platform }}',
@@ -28,11 +28,12 @@ const POLICY = {
             {os: "ubuntu-latest",platform: "linux","shard-index":0,"shard-count":3,label: "ubuntu-latest, shard 1/3",workers: 2,"single-worker-jobs":0},
             {os: "ubuntu-latest",platform: "linux","shard-index":1,"shard-count":3,label: "ubuntu-latest, shard 2/3",workers: 2,"single-worker-jobs":0},
             {os: "ubuntu-latest",platform: "linux","shard-index":2,"shard-count":3,label: "ubuntu-latest, shard 3/3",workers: 2,"single-worker-jobs":0},
-            {os: "macos-latest",platform: "darwin","shard-index":0,"shard-count":5,label: "macos-latest, shard 1/5",workers: 3,"single-worker-jobs":0},
-            {os: "macos-latest",platform: "darwin","shard-index":1,"shard-count":5,label: "macos-latest, shard 2/5",workers: 3,"single-worker-jobs":0},
-            {os: "macos-latest",platform: "darwin","shard-index":2,"shard-count":5,label: "macos-latest, shard 3/5",workers: 3,"single-worker-jobs":0},
-            {os: "macos-latest",platform: "darwin","shard-index":3,"shard-count":5,label: "macos-latest, shard 4/5",workers: 3,"single-worker-jobs":0},
-            {os: "macos-latest",platform: "darwin","shard-index":4,"shard-count":5,label: "macos-latest, shard 5/5",workers: 3,"single-worker-jobs":0},
+            {os: "macos-latest",platform: "darwin","shard-index":0,"shard-count":6,label: "macos-latest, shard 1/6",workers: 3,"single-worker-jobs":0},
+            {os: "macos-latest",platform: "darwin","shard-index":1,"shard-count":6,label: "macos-latest, shard 2/6",workers: 3,"single-worker-jobs":0},
+            {os: "macos-latest",platform: "darwin","shard-index":2,"shard-count":6,label: "macos-latest, shard 3/6",workers: 3,"single-worker-jobs":0},
+            {os: "macos-latest",platform: "darwin","shard-index":3,"shard-count":6,label: "macos-latest, shard 4/6",workers: 3,"single-worker-jobs":0},
+            {os: "macos-latest",platform: "darwin","shard-index":4,"shard-count":6,label: "macos-latest, shard 5/6",workers: 3,"single-worker-jobs":0},
+            {os: "macos-latest",platform: "darwin","shard-index":5,"shard-count":6,label: "macos-latest, shard 6/6",workers: 3,"single-worker-jobs":0},
             {os: "windows-latest",platform: "win32","shard-index":0,"shard-count":21,label: "windows-latest, shard 1/21",workers: 2,"single-worker-jobs":2},
             {os: "windows-latest",platform: "win32","shard-index":1,"shard-count":21,label: "windows-latest, shard 2/21",workers: 2,"single-worker-jobs":2},
             {os: "windows-latest",platform: "win32","shard-index":2,"shard-count":21,label: "windows-latest, shard 3/21",workers: 2,"single-worker-jobs":2},
