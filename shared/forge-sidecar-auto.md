@@ -501,3 +501,19 @@ else
 fi
 ```
 On chain advance, re-enter the canonical resolver/guard for the selected member. `WORKER_MODE == sidecar` re-enters **Branch D step 0** with the incremented `SIDECAR_ATTEMPT`; `WORKER_MODE == native` runs the host-native planning flow, including Tier/Effort Resolution. That native path emits its own `dispatch` event with `engine:"claude"` and the resolved runtime axes. The generic Claude fallback (with its `worker-engine-fallback` event) fires **only** when the chain is exhausted or the cap forbids advancement — mutually exclusive with chain-advance (R1). Not a 4th recovery layer — it fires once, in-band, at dispatch time.
+
+### Retained code before another inference
+
+Before resetting an anchored failed milestone execute-task or advancing its
+provider, inspect whether only owner adoption/reconciliation and missing criterion
+bindings prevent verification. The owner APIs in
+`forge-bidirectional-sidecar.md § Failed execute-task: retain the open begin across sessions`
+and `forge-delivery.md § Critérios antes do provedor e reparo de verificação`
+provide a bounded transfer and verification-only successor. They require live
+authority, stopped writers, the original open begin/lease and exact retained
+claim; automatic mode does not answer a manual-delta approval. Keep it pending
+until explicitly resolved. Reuse eligible returned code without a reset or new
+inference; unanchored custody, changed originals, unknown writers and failed
+criterion evidence still refuse. Record actual provider_called separately for
+the historical attempt and the owner-only verification. This path neither
+changes routing preferences nor consumes another worker reservation.

@@ -389,6 +389,10 @@ function fixture(label, names, providers, options = {}) {
   fs.writeFileSync(journalFile, '');
   const inputs=hostInputs(label,names);
   if(typeof options.verification==='function')for(const id of names)inputs[id].verification=options.verification(id);
+  for (const id of names) if (!Object.hasOwn(inputs[id].verification || {}, 'bindings')) {
+    inputs[id].verification.bindings = require('./fixtures/issues-434-436/execution-fixtures.cjs').bindingDeclarations({
+      planFile: path.join(sliceDir(dir), 'tasks', id, `${id}-PLAN.md`), execution_contract: rootsApi.singleContract(dir, dir) });
+  }
   return { label, names, dir, ids, scope, rendezvous, plan, journal: journalFile, inputs, controls: new Map(), running: null };
 }
 // The in-process pool of a fixture, with the trusted seams of this case.

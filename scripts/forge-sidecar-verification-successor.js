@@ -112,7 +112,8 @@ function create({request,timeoutMs,reference,assertAuthority,assertBoundary,atte
   const capability=Object.freeze({});records.set(capability,{request_digest:roots.digest(r),check,assertRecord,expectedOwner,seal,info,receiptFile,resultFile,seed,used:false});return capability;
 }
 function read(capability,request){
-  const value=records.get(capability);if(!value||roots.digest(request)!==value.request_digest)fail('verification-successor-capability-required');value.check();
+  const value=records.get(capability);if(!value)return require('./forge-sidecar-verification-repair').read(capability,request);
+  if(roots.digest(request)!==value.request_digest)fail('verification-successor-capability-required');value.check();
   return {check:value.check,assertRecord:value.assertRecord,expectedOwner:value.expectedOwner,seal:structuredClone(value.seal),info:structuredClone(value.info),receiptFile:value.receiptFile,resultFile:value.resultFile,
     initialize(){value.check();if(value.used||fs.existsSync(value.receiptFile)||fs.existsSync(value.resultFile))fail('verification-successor-already-used');value.used=true;
       fs.writeFileSync(value.receiptFile,JSON.stringify(value.seed,null,2)+'\n',{flag:'wx',mode:0o600});},

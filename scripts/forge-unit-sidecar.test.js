@@ -42,6 +42,7 @@ const sidecar = require('./forge-unit-sidecar');
   } finally { fixtures.cleanup(f); }
 }
 function resolveContext(request) {
+  require('./fixtures/issues-434-436/execution-fixtures.cjs').declareBindings(request);
   request.route = require('./forge-dispatch-resolve').resolveDispatch({ cwd: request.contextRoot, unitType: request.unitType,
     milestoneId: request.milestoneId, unitId: request.taskId || request.sliceId || request.milestoneId,
     planPath: request.planFile, roadmapPath: request.roadmapFile, hostRuntime: 'codex' });
@@ -1142,6 +1143,7 @@ async function ownerEventReconcileContracts(batchOnly = false) {
         fs.mkdirSync(path.join(base, 'tasks/T01'), { recursive: true });
         request.planFile = path.join(base, 'tasks/T01/T01-PLAN.md');
         fs.writeFileSync(request.planFile, fixtures.plan(contract));
+        require('./fixtures/issues-434-436/execution-fixtures.cjs').declareBindings(request);
         fs.writeFileSync(path.join(base, 'S01-PLAN.md'), '# Slice\n- [ ] **T01** — fixture\n');
         fs.writeFileSync(path.join(lab.a, '.gsd/forge-prefs.jsonc'), JSON.stringify({ tier_models: Object.fromEntries(
           ['light', 'standard', 'heavy', 'max'].map(tier => [tier, ['claude-sonnet-5']])), effort: { 'plan-slice': 'medium' } }));

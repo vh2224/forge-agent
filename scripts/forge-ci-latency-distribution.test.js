@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
-const entry=require('./fixtures/issues-429-432/distribution.cjs');
+const entry=require('./fixtures/issues-434-436/distribution.cjs');
 const root=path.resolve(__dirname,'..');
 const artifacts=require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts;
 assert.equal(entry.validate({artifacts}),true);

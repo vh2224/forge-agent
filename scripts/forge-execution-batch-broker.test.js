@@ -932,7 +932,7 @@ function sidecarRequest(dir, scope, prepared, index, handle, label, extra) {
   const planFile = at(dir, planned.plan.path);
   const view = batch.validateMemberPlan(handle, fs.readFileSync(planFile));
   const contract = view.checked_runtime_plan.contract, id = planned.task_id;
-  return { view, request: { unitType: 'execute-task', scope: 'milestone', phase: 'execute', milestoneId: M, sliceId: S, taskId: id,
+  return { view, request: require('./fixtures/issues-434-436/execution-fixtures.cjs').declareBindings({ unitType: 'execute-task', scope: 'milestone', phase: 'execute', milestoneId: M, sliceId: S, taskId: id,
     cwd: contract.code_roots.find(root => root.id === contract.primary_root_id).path, contextRoot: dir, planFile,
     execution_contract: contract, runId: scope.run_id, claim: runs.get(dir, scope.run_id).write_claim, batch_id: scope.batch_id,
     begin_key: placed.begin_key, lease_generation: placed.lease_generation,
@@ -940,7 +940,7 @@ function sidecarRequest(dir, scope, prepared, index, handle, label, extra) {
     route: resolveDispatch({ ...planned.route.resolution_options }), resultFile: path.join(CHANNELS, `${label}-${id}.json`),
     prompt: 'Synthetic cohort member fixture only.', verification: { preferenceCommands: [`node --check src/${id.toLowerCase()}.js`] },
     gates: { plan: 'approved', claim: 'proceed', security: 'not-applicable' }, constraints: { auto_commit: false, deploy: false },
-    ...(extra || {}) } };
+    ...(extra || {}) }) };
 }
 // One real cohort per U3b case: its own owner, the loop's real dispatch, real isolation, one sidecar
 // attempt bound to each member handle, and the cohort broker opened last (S0), right after the
@@ -1217,6 +1217,7 @@ test('issue343 U3b-3 the single path publishes exactly as before; member request
     verification: { preferenceCommands: ['node --check src/t01.js'] },
     gates: { plan: 'approved', claim: 'proceed', security: 'not-applicable' }, constraints: { auto_commit: false, deploy: false } };
   const rendezvous = fs.mkdtempSync(path.join(TMP, 'u3b-single-rendezvous-'));
+  require('./fixtures/issues-434-436/execution-fixtures.cjs').declareBindings(request);
   fs.writeFileSync(path.join(rendezvous, 'single.release'), '');
   WRITERS.set(rootsApi.key(fs.realpathSync.native(dir)), { name: 'single', rendezvous, files: ['src/t01.js'], broker: null });
   try {

@@ -277,6 +277,7 @@ function nativeExecutionRequest(f, host, label, o = {}) {
   r.nativeInvocation = require('./forge-native-invocation').buildNativeInvocation({ hostRuntime: host, resolvedDispatch: route, activeCapabilities: caps,
     agentType: 'forge-executor', taskName, forkTurns: 'none', prompt: 'binding preflight', ...(host === 'claude' ? { effortBinding: r.effortBinding } : {}) });
   assert.equal(r.nativeInvocation.ok, true, JSON.stringify(r.nativeInvocation).slice(0, 300));
+  require('./fixtures/issues-434-436/execution-fixtures.cjs').declareBindings(r);
   if (host === 'claude') assert.equal(r.nativeInvocation.telemetry.effort_binding_observed, 'medium', 'the observed forge-executor frontmatter effort');
   return r;
 }

@@ -177,6 +177,68 @@ function resolveCriterionSelector(binding, criteria, unit) {
   return criteria.some((item) => item.id === id) ? id : null;
 }
 
+// Admission checks declarations, not outcomes. The same inventory/selectors as
+// delivery are used; passing a command later is still not criterion evidence.
+function attributeCriterionRoots(criteria, contract, legacy) {
+  const rootPaths = require('./forge-code-roots');
+  for (const criterion of criteria) {
+    for (const field of ['artifact_path', 'link_from', 'link_to']) if (criterion[field]) {
+      criterion[field] = rootPaths.qualified(rootPaths.resolvePath(contract, criterion[field], { legacy }));
+    }
+    const paths = criterion.artifact_path ? [criterion.artifact_path]
+      : criterion.link_from && criterion.link_to ? [criterion.link_from, criterion.link_to] : [];
+    criterion.required_roots = paths.length ? [...new Set(paths.map(value => rootPaths.resolvePath(contract, value).root_id))]
+      : contract.code_roots.map(root => root.id);
+  }
+}
+function validateExecutionBindings(planText, contract, unit, bindings, seal) {
+  const fail = code => { throw Object.assign(new Error(code), { code, provider_called: false }); };
+  const inventory = inventoryPlan(planText, '<execution-plan>', unit);
+  if (!inventory.structured || inventory.diagnostics.length || !inventory.criteria.length) fail('verification-criteria-invalid');
+  if (!Array.isArray(bindings) || !bindings.length || bindings.length > MAX_BINDINGS) fail('verification-bindings-required');
+  const checked = require('./forge-code-roots').validatePlan(planText, contract);
+  attributeCriterionRoots(inventory.criteria, contract, checked.schema_version === 1);
+  const covered = new Set(), coverage = new Set(), obligations = new Map();
+  for (const binding of bindings) {
+    if (!isObject(binding) || !isObject(binding.source)) fail('verification-binding-invalid');
+    const id = resolveCriterionSelector(binding, inventory.criteria, unit);
+    const criterion = inventory.criteria.find(row => row.id === id);
+    const root = contract.code_roots.find(row => row.id === binding.root_id);
+    const aspect = nonEmpty(binding.aspect) ? binding.aspect : criterion?.aspects[0];
+    if (!criterion || !root || !criterion.aspects.includes(aspect)) fail('verification-binding-invalid');
+    if (criterion.artifact_path && require('./forge-code-roots').resolvePath(contract, criterion.artifact_path).root_id !== root.id) fail('verification-binding-root-mismatch');
+    if (binding.required_coverages !== undefined) {
+      if (!validRequiredCoverages(binding.required_coverages, criterion)
+          || binding.required_coverages.some(row => !contract.code_roots.some(root => root.id === row.root_id))
+          || obligations.has(id) && fingerprint(obligations.get(id)) !== fingerprint(binding.required_coverages)) fail('verification-binding-invalid');
+      obligations.set(id, binding.required_coverages);
+    }
+    if (binding.source.kind === 'verification') {
+      const commands = seal?.roots.find(row => row.root_id === root.id)?.commands;
+      if (!['behavioral', 'structural'].includes(binding.coverage)
+          || (criterion.type === 'functional' || criterion.origin === 'key_link') && binding.coverage !== 'behavioral'
+          || !Number.isInteger(binding.source.check_index) || binding.source.check_index < 0
+          || !commands?.[binding.source.check_index]) fail('verification-binding-source-invalid');
+    } else if (binding.source.kind === 'artifact' && binding.source.property === 'documentary') {
+      // Only the independent documentary repair produces that capture, after
+      // its own review. Ordinary execution/verification cannot promise it.
+      fail('verification-binding-source-invalid');
+    } else if (binding.source.kind === 'artifact') {
+      const rows = checked.artifacts.filter(row => row.root_id === root.id);
+      if (criterion.type !== 'structural' || criterion.origin === 'key_link' || binding.coverage !== 'structural'
+          || !Number.isInteger(binding.source.row_index) || binding.source.row_index < 0
+          || !rows[binding.source.row_index]
+          || criterion.artifact_path !== require('./forge-code-roots').qualified(rows[binding.source.row_index])
+          || !['exists', 'substantive', 'wired'].includes(binding.source.property)) fail('verification-binding-source-invalid');
+    } else fail('verification-binding-source-invalid');
+    covered.add(JSON.stringify([id, aspect, root.id]));
+    coverage.add(JSON.stringify([id, aspect, root.id, binding.coverage]));
+  }
+  if (inventory.criteria.some(row => row.aspects.some(aspect => row.required_roots.some(root => !covered.has(JSON.stringify([row.id, aspect, root])))))
+      || [...obligations].some(([id, rows]) => rows.some(row => !coverage.has(JSON.stringify([id, row.aspect, row.root_id, row.coverage]))))) fail('verification-bindings-incomplete');
+  return { criteria: inventory.criteria.length, bindings: bindings.length };
+}
+
 function contextReasons(envelope, expected) {
   const reasons = [];
   if (!expected.inputPlanFingerprintValid) reasons.push('input_plan_fingerprint_invalid');
@@ -563,16 +625,7 @@ function buildDelivery(input, options = {}) {
   const aggregateRoadmap = unit.type === 'milestone' && !hasStructuredMustHaves(planRaw);
   const checkedPlan = executionContract && !aggregateRoadmap
     ? require('./forge-code-roots').validatePlan(memberPlanText(options, executionContract, planRaw), executionContract) : null;
-  if (executionContract) for (const criterion of criteria) {
-    for (const field of ['artifact_path', 'link_from', 'link_to']) if (criterion[field]) {
-      const rootPaths = require('./forge-code-roots');
-      criterion[field] = rootPaths.qualified(rootPaths.resolvePath(executionContract, criterion[field], { legacy: checkedPlan.schema_version === 1 }));
-    }
-    const paths = criterion.artifact_path ? [criterion.artifact_path]
-      : criterion.link_from && criterion.link_to ? [criterion.link_from, criterion.link_to] : [];
-    criterion.required_roots = paths.length ? [...new Set(paths.map(value => require('./forge-code-roots').resolvePath(executionContract, value).root_id))]
-      : executionContract.code_roots.map(root => root.id);
-  }
+  if (executionContract) attributeCriterionRoots(criteria, executionContract, checkedPlan?.schema_version === 1);
   addAdditionalCriteria(criteria, input.additional_criteria, unit, diagnostics);
   if (criteria.length > MAX_CRITERIA) throw new Error(`criteria limit exceeded (${MAX_CRITERIA})`);
   const context = {
@@ -682,7 +735,7 @@ function runCli(argv = process.argv.slice(2)) {
 module.exports = {
   SCHEMA_VERSION, MAX_FILE_BYTES, MAX_CRITERIA, MAX_BINDINGS, MAX_CHILDREN, MAX_DEPTH, MAX_OBSERVATIONS,
   sha256, canonical, fingerprint, unitKey, normalizeArtifactPath, resolveSafeFile, inventoryPlan, classifyCriterion,
-  buildDelivery, renderDeliveryMarkdown, escapeMarkdownCell, finalizeOutput,
+  buildDelivery, renderDeliveryMarkdown, escapeMarkdownCell, finalizeOutput, validateExecutionBindings,
 };
 
 if (require.main === module) {

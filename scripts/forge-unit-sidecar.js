@@ -310,9 +310,15 @@ function preflightExecutionVerification(raw, options = {}) {
   } else planFile = milestonePlanFile(request);
   const runtimeVerification = options.verification === undefined ? undefined : JSON.parse(JSON.stringify(options.verification));
   // Issue 343 U3b: a cohort member's seal also binds the runtime view minted by its live handle.
-  return require('./forge-verify').normalizeExecutionVerification(request.execution_contract,
-    fs.readFileSync(planFile, 'utf8'), request.verification, runtimeVerification, options.identity || {},
+  const planText = fs.readFileSync(planFile, 'utf8');
+  const seal = require('./forge-verify').normalizeExecutionVerification(request.execution_contract,
+    planText, request.verification, runtimeVerification, options.identity || {},
     options.memberView !== undefined ? { memberView: options.memberView } : undefined);
+  const loc = locations(request);
+  const effectivePlan = options.memberView?.runtime_plan_text || planText;
+  require('./forge-delivery').validateExecutionBindings(effectivePlan, request.execution_contract,
+    loc.rules[loc.delivery.input].unit, request.verification?.bindings, seal);
+  return seal;
 }
 // Issue 343 U3b: the milestone execute preflight of a sidecar cohort member. The live member
 // operations (forge-execution-batch memberSidecar, never imported data) hold the runtime view its
@@ -2513,6 +2519,8 @@ function retainFailedVerification(context, record, deliveryCapture) {
 
 async function completeExecutionCore(context, record, deferredEvents = null) {
   const r = context.request, loc = context.loc, root = context.root, cwd = context.cwd, member = context.member || null;
+  const verificationRequest = context.verificationSuccessor?.bindings
+    ? { ...r, verification: { ...r.verification, bindings: context.verificationSuccessor.bindings } } : r;
   const persist = context.persist === undefined ? !deferredEvents : context.persist === true;
   context.verifySeal(record);
   if (record.execution) require('./forge-task-execution').assertReplay(r, record);
@@ -2532,7 +2540,7 @@ async function completeExecutionCore(context, record, deferredEvents = null) {
     const resourceEvents = [];
     context.notifyPhase('verifying');
     const deliveryCapture = require('./forge-verify').captureRootDelivery(r.execution_contract,
-      fs.readFileSync(r.planFile, 'utf8'), { ...r.verification, verificationSeal: record.verification_seal,
+      fs.readFileSync(r.planFile, 'utf8'), { ...verificationRequest.verification, verificationSeal: record.verification_seal,
         verificationIdentity: context.verificationIdentity, unit: loc.rules[loc.delivery.input].unit,
         resourceEventSink: line => resourceEvents.push(line),
         ...(typeof context.onVerificationCheck === 'function' ? { onCheck: context.onVerificationCheck } : {}),
@@ -2557,7 +2565,7 @@ async function completeExecutionCore(context, record, deferredEvents = null) {
     if (persist) json(context.receiptFile, record);
   }
   if (member && record.milestone_delivery) assertMemberModes(r, record);
-  const artifacts = executeDeliveryArtifacts(r, loc, record.result, root, cwd, record.delivery_capture,
+  const artifacts = executeDeliveryArtifacts(verificationRequest, loc, record.result, root, cwd, record.delivery_capture,
     member ? { memberView: member.view() } : undefined);
   const ready = { ...record, phase: 'ready', artifacts: artifacts.map(a => ({ ...a, before: record.before[a.path] ?? null })) };
   // Milestone v2 only: the owner marker enters the durable record after the
