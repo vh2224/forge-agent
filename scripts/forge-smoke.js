@@ -10732,9 +10732,15 @@ function smokeSvnFixture() {
     && windowsInstall.includes('-FilePath $env:GITHUB_PATH'),
     '(h) validated Windows SVN precedes PATH export');
   const verifySteps = steps.filter(step => /svn --version --quiet/.test(step) && /svnadmin --version --quiet/.test(step));
-  assert(verifySteps.length === 1 && !/^\s*if:/m.test(verifySteps[0])
+  assert(verifySteps.length === 1
+    && verifySteps[0].includes("if: runner.os != 'Windows' || steps.fixture_tools.outputs.needs_svn != 'false'")
     && ci.indexOf(verifySteps[0]) >= 0 && ci.indexOf(verifySteps[0]) < suitesIndex,
     '(h) svn and svnadmin are verified before test suites', JSON.stringify(verifySteps));
+  assert(windowsInstall.includes("if: runner.os == 'Windows' && steps.fixture_tools.outputs.needs_svn != 'false'"),
+    '(h) only explicit Git-only Windows metadata can omit SVN installation');
+  const actualSuites = steps.find(step => step.includes('run: node scripts/forge-ci-parallel.js') && !step.includes('--tool-plan')) || '';
+  assert(actualSuites && !/^\s*if:/m.test(actualSuites),
+    '(h) fixture tool metadata never skips the actual test step', actualSuites);
 
   const decisionMatch = source.match(/function svnGateDecision\(env, platform, present\) \{[\s\S]*?\n\}/);
   assert(!!decisionMatch, '(h) svn gate decision can be extracted from source');
