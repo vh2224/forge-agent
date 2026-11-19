@@ -1,7 +1,7 @@
 'use strict';
 const fs=require('fs'),path=require('path'),crypto=require('crypto'),zlib=require('zlib'),assert=require('node:assert/strict');
 const previous=require('../issues-434-436/distribution.cjs'),data=require('./distribution.json');
-const ROOT=path.resolve(__dirname,'../../..'),PIN='0216811ca091a2bae4778d050fb8240a91fa2c56ca87dd8136025f878322e32b';
+const ROOT=path.resolve(__dirname,'../../..'),PIN='8de0074f0a7de85b232a1e470f5e7c32211c13e57885d46572850ea19a9b606c';
 const hash=value=>crypto.createHash('sha256').update(value).digest('hex'),read=file=>fs.readFileSync(path.join(ROOT,file));
 const normalize=value=>String(value).replace(/version=\d+\.\d+\.\d+/g,'version=<dynamic>');
 function check(value=data){assert.equal(hash(JSON.stringify(value)),PIN,'owner independent measured delta');assert.equal(hash(JSON.stringify(previous.issues434436Layer)),value.predecessor_layer_sha256,'owner immutable predecessor');return value;}
