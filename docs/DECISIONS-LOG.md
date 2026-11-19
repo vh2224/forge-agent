@@ -512,3 +512,23 @@ com o teto absoluto. No Windows não há CPU por processo, então a prova local 
 `proof-unavailable` e a extensão expira em 660000 ms. A calibração v2 só aperta, nunca afrouxa
 acima do default. Codex não é retomado. Provas offline com fixtures não estabelecem comportamento
 do provedor real.
+
+### 2026-11-19 — Cronologia de alocação com qualidade entre slices (issue #440)
+
+**Problema.** Uma opção aceita pode exigir slice, revisão, correções e a próxima
+slice. O validador ordenava globalmente os tipos de alocação, tornando esse DAG
+impossível de representar sem trocar papéis ou alterar o contrato já aceito.
+
+**Decisão.** A ordem das linhas declara a cronologia, enquanto os tipos preservam
+seus papéis. Toda dependência entre linhas distintas exige a linha pré-requisito
+antes da dependente. Entre slices, o grafo do ROADMAP deve provar também os
+caminhos transitivos por nós de qualidade; a cronologia sozinha não determina o
+despacho do controlador. Refinamentos preservam todas essas obrigações, e uma
+única linha de qualidade não prova ordem interna. A execução continua passando
+pelos gates próprios do lifecycle. Seleção, hashes, escopo e teto não mudam.
+
+**Evidência e limite.** O novo teste hermético `forge-staged-roadmap-time.test.js`
+reproduziu a recusa e cobre a sequência de três slices, inversões, dependências
+transitivas ausentes, papéis, contrato e partes refinadas. A revisão independente
+encontrou a lacuna transitiva na primeira versão, corrigida antes da utilização.
+Essas provas não constituem CI, integração, instalação ou E2E de provedor real.

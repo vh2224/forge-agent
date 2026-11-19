@@ -357,6 +357,16 @@ rodadas, decisão, bloco de prompt, regra do roadmap, projeção de vínculo e r
   bloco `json`: opção, posição, hash das opções, hash do contrato BASE, alocação por
   slice, integração, revisão e correções (positiva, até o teto, sem piso obrigatório),
   dependências, adiados e a divisão com a task ligada inalterada, sem adiamento novo.
+- A ordem das linhas de alocação declara a cronologia das dependências; o tipo
+  restringe o papel, sem impor uma fase global por tipo. Isso permite revisão e
+  correções entre slices, seguidas de integração. Cada linha pré-requisito deve
+  preceder sua dependente; entre slices distintas também se exige alcance pelo
+  grafo do ROADMAP, inclusive nos caminhos transitivos por nós de qualidade.
+  Linhas distintas da mesma slice também respeitam a cronologia; uma linha de
+  slice compartilhada mantém a ordem interna das tasks, mas uma única linha
+  de qualidade não prova ordem entre dois nós. Partes refinadas preservam o papel
+  original e todas devem respeitar as dependências. Isso não executa nem dispensa
+  gates do lifecycle; a conformidade continua exigindo o DAG e os hashes aceitos.
 - A conformidade é validada no aceite (sidecar, nativo e reconciliação), na seleção do
   controlador e na fronteira do owner: `time-roadmap-nonconformant`,
   `time-allocation-pending` e `time-scope-unallocated` bloqueiam.
