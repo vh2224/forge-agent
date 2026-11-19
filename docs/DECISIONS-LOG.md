@@ -532,3 +532,28 @@ reproduziu a recusa e cobre a sequência de três slices, inversões, dependênc
 transitivas ausentes, papéis, contrato e partes refinadas. A revisão independente
 encontrou a lacuna transitiva na primeira versão, corrigida antes da utilização.
 Essas provas não constituem CI, integração, instalação ou E2E de provedor real.
+
+### 2026-11-19 — Nova transferência da mesma tentativa retida (issue #443)
+
+**Problema.** A transferência canônica deixa o run ativo na sessão nova. Se essa
+sessão também encerra antes do término da tentativa, a exigência de run inativo
+impedia uma segunda transferência do mesmo begin, receipt, lease e claim.
+
+**Decisão.** O primeiro caso conserva a exigência de inatividade. O caso repetido
+exige outro ator observado no mesmo host, a última transferência terminando no
+owner atual e escopo exato da tentativa original. Histórico só dá elegibilidade;
+callbacks vivos, perguntas, atestações explícitas e revalidações sob lock continuam
+obrigatórios. A operação captura run e espelho de compatibilidade sob o fence.
+
+Uma aprovação anterior só é reaproveitada se a projeção das imagens anteriores
+capturadas pelo handle vivo reproduzir exatamente a identidade, pergunta e delta
+já respondidos. O handle comprova apenas a nova transição canônica. Outros deltas
+novos continuam exigindo aprovação correspondente; histórico serializado não
+restaura capabilities nem aprova mudanças. A revisão encontrou a lacuna de
+reconciliação após a segunda transferência e essa composição a corrigiu.
+
+**Evidência e limite.** Seis casos novos cobrem os dois hosts até replay retido,
+entrega e conclusão, com zero chamadas ao provedor, além de controles negativos.
+Os dez casos históricos de434–436 permanecem sem edição e passaram. Histórico
+sem aprovação/prova compatível conserva a reconciliação explícita. Os testes
+não demonstram parada de processos do SO, provedor real, CI ou instalação.

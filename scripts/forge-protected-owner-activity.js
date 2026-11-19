@@ -240,14 +240,17 @@ function reconciliationView(request, operatorDecision, options = {}) {
   if (changes.length > 64) fail('owner-reconciliation-delta-limit');
   const deltaSha = roots.digest({ owner, unit: `execute-task/${r.taskId}`, dispatch_id: r.dispatchId, changes: reviewed,
     ...(hooks.length ? { hook_baselines: hooks } : {}) });
-  return { r, owner, contract, receiptFile, receiptBytes, receipt, baseline, stateBytes, current, before, changes, reviewed, carriers, deltaSha };
+  return { r, owner, contract, receiptFile, receiptBytes, receipt, baseline, stateBytes, current, before, changes, reviewed, carriers, deltaSha, hooks };
+}
+function decisionForView(view, deltaSha = view.deltaSha, changes = view.reviewed) {
+  const r = view.r;
+  return { cwd: view.owner, unit: `execute-task/${r.taskId}`, milestone: r.milestoneId,
+    slice: r.sliceId, task: r.taskId, workflow_id: r.milestoneId, decision_set: `owner-delta/${deltaSha}`,
+    questions: [{ id: 'owner-delta-approval', question: `Autorizar somente os deltas de metadados revisados ${deltaSha} para ${r.milestoneId}/${r.taskId}? Nenhum plano, claim ou código será aceito como alterado.` }],
+    delta_sha256: deltaSha, changes };
 }
 function reconciliationDecision(request, operatorDecision, options = {}) {
-  const view = reconciliationView(request, operatorDecision, options), r = view.r;
-  return { cwd: view.owner, unit: `execute-task/${r.taskId}`, milestone: r.milestoneId,
-    slice: r.sliceId, task: r.taskId, workflow_id: r.milestoneId, decision_set: `owner-delta/${view.deltaSha}`,
-    questions: [{ id: 'owner-delta-approval', question: `Autorizar somente os deltas de metadados revisados ${view.deltaSha} para ${r.milestoneId}/${r.taskId}? Nenhum plano, claim ou código será aceito como alterado.` }],
-    delta_sha256: view.deltaSha, changes: view.reviewed };
+  return decisionForView(reconciliationView(request, operatorDecision, options));
 }
 
 // Private, live exception for this one original open begin. The generic resume
@@ -259,6 +262,11 @@ function inspectAttemptResume(owner, record, handle) {
   return structuredClone(prepared.scope);
 }
 function resumeAttemptOwner(options = {}) {
+  const request = options.request || {};
+  const owner = roots.realDirectory(request.contextRoot || request.cwd);
+  return windows.withMutation(owner, () => resumeAttemptOwnerInside(options));
+}
+function resumeAttemptOwnerInside(options) {
   const { request, assertAuthority, attestStoppedWriter, readPendingQuestions } = options;
   if (![assertAuthority, attestStoppedWriter, readPendingQuestions].every(fn => typeof fn === 'function')) fail('owner-reconciliation-live-adapter-required');
   const view = reconciliationView(request), r = view.r, runId = r.runId || r.milestoneId, unit = `execute-task/${r.taskId}`;
@@ -266,16 +274,36 @@ function resumeAttemptOwner(options = {}) {
   const actor = runs.observeHostSession(options.hostRuntime, options.expectedSession);
   if (!actor) fail('owner-reconciliation-observed-owner-required');
   const recordPath = `.gsd/forge/runs/${runId}.json`, beforeBytes = regular(path.join(view.owner, recordPath));
+  const mirrorPath = '.gsd/forge/auto-mode.json', mirrorFile = path.join(view.owner, mirrorPath);
+  const mirrorBefore = fs.existsSync(mirrorFile) ? regular(mirrorFile) : null;
   const before = runs.get(view.owner, runId), leaseBytes = regular(lease.leaseFile(view.owner, unit)), held = JSON.parse(leaseBytes);
   const begin = controller.lookupRecord(view.owner, 'transaction', held.request_id);
   if (view.receipt.phase !== 'failed' && view.receipt.phase !== 'executed' || !runs.knownResumeBinding(before)
-      || before.active !== false || before.worker || before.worker_started || !lease.validRecord(held, unit)
+      || before.worker || before.worker_started || !lease.validRecord(held, unit)
       || actor.hostRuntime !== held.host_runtime || before.host_runtime !== held.host_runtime || r.route?.host_runtime !== held.host_runtime
       || roots.digest(before.write_claim) !== roots.digest(r.claim) || !begin || begin.action !== 'begin' || begin.phase !== 'committed'
       || begin.milestone !== r.milestoneId || begin.unit?.key !== unit || begin.lease_generation !== held.generation
       || begin.owner_digest !== `sha256:${sha(held.owner_token)}`
       || view.before[path.relative(view.owner, controller.transactionFile(view.owner, held.request_id)).replace(/\\/g, '/')] !== sha(regular(controller.transactionFile(view.owner, held.request_id)))
       || !controller.incompleteUnits(view.owner, runId).some(row => row.idempotency_key === held.request_id && row.action === 'begin')) fail('owner-reconciliation-resume-scope-invalid');
+  const scope = { kind: 'attempt-recovery', milestone: runId, unit, begin_key: begin.idempotency_key,
+    repair_generation: held.generation, repair_owner_digest: begin.owner_digest, host_runtime: held.host_runtime,
+    request_sha256: roots.digest(r), parent_receipt_sha256: sha(view.receiptBytes) };
+  if (before.active !== false) {
+    const latest = Array.isArray(before.owner_resume_history) ? before.owner_resume_history.at(-1) : null;
+    // History permits only this exact retained-attempt continuation. It is not
+    // authority or a death proof: fresh live callbacks and fenced source checks
+    // below remain mandatory, as do resumeOwner's explicit stop/quiescence gates.
+    if (before.active !== true || before.session_id === actor.sessionId
+        || latest?.kind !== 'stopped-owner-transfer'
+        || latest.current_session_sha256 !== roots.digest(before.session_id)
+        || latest.current_host_runtime !== before.host_runtime
+        || latest.previous_owner_stopped_attested !== true || latest.workspace_quiescent_attested !== true
+        || latest.mechanism !== 'trusted-caller-attestation-v1'
+        || !latest.boundary?.attempt_recovery || typeof latest.boundary.attempt_recovery !== 'object'
+        || Array.isArray(latest.boundary.attempt_recovery)
+        || roots.digest(latest.boundary?.attempt_recovery) !== roots.digest(scope)) fail('owner-reconciliation-resume-scope-invalid');
+  }
   const challenge = Object.freeze({ owner: view.owner, run_id: runId, unit, dispatch_id: r.dispatchId,
     request_sha256: roots.digest(r), receipt_sha256: sha(view.receiptBytes), original_owner_record_sha256: sha(beforeBytes),
     current_session_sha256: sha(actor.sessionId), roots: view.contract.code_roots.map(row => ({ id: row.id, identity_sha256: row.identity_sha256 })) });
@@ -295,9 +323,6 @@ function resumeAttemptOwner(options = {}) {
     for (const row of code) if (roots.digest(require('./forge-task-execution').replayState(row.path)) !== roots.digest(row.code)
         || roots.digest(require('./forge-task-execution').protectedSnapshot(row.path)) !== roots.digest(row.protected)) fail('owner-reconciliation-root-changed');
   };
-  const scope = { kind: 'attempt-recovery', milestone: runId, unit, begin_key: begin.idempotency_key,
-    repair_generation: held.generation, repair_owner_digest: begin.owner_digest, host_runtime: held.host_runtime,
-    request_sha256: roots.digest(r), parent_receipt_sha256: sha(view.receiptBytes) };
   const handle = Object.freeze({}); attemptResumes.set(handle, { owner: view.owner, runId, check, scope });
   let resumed;
   try { resumed = runs.resumeOwner(view.owner, runId, { hostRuntime: actor.hostRuntime, expectedSession: actor.sessionId,
@@ -305,7 +330,9 @@ function resumeAttemptOwner(options = {}) {
     confirmWorkspaceQuiescent: options.confirmWorkspaceQuiescent, attemptRecovery: handle }); }
   finally { attemptResumes.delete(handle); }
   const afterBytes = regular(path.join(view.owner, recordPath));
-  const transfer = Object.freeze({}); ownerTransfers.set(transfer, { requestHash: roots.digest(r), recordPath, beforeBytes, afterBytes });
+  const mirrorAfter = fs.existsSync(mirrorFile) ? regular(mirrorFile) : null;
+  const transfer = Object.freeze({}); ownerTransfers.set(transfer, { requestHash: roots.digest(r), recordPath, beforeBytes, afterBytes,
+    changes: [{ path: recordPath, beforeBytes, afterBytes }, { path: mirrorPath, beforeBytes: mirrorBefore, afterBytes: mirrorAfter }] });
   return Object.freeze({ status: resumed.status, ownerTransfer: transfer, scope: structuredClone(scope) });
 }
 function createOwnerReconciliation(options = {}) {
@@ -339,14 +366,32 @@ function createOwnerReconciliation(options = {}) {
     }
   }
   live();
-  let operatorApproved = false;
+  let operatorApproved = false, preTransferApproved = false;
   if (options.operatorDecision !== undefined) {
-    const expected = reconciliationDecision(request, options.operatorDecision, options), answer = require('./forge-pending-questions').continuation({ cwd: view.owner, identity: options.operatorDecision });
+    const expected = decisionForView(view), answer = require('./forge-pending-questions').continuation({ cwd: view.owner, identity: options.operatorDecision });
     const identity = answer.identity;
     const q = answer.questions?.find(row => row.id === expected.questions[0].id);
     if (!answer.ok || identity?.origin !== 'owner' || identity.unit !== unit || identity.milestone !== r.milestoneId
-        || identity.slice !== r.sliceId || identity.task !== r.taskId || identity.decision_set !== expected.decision_set
-        || !q || q.question !== expected.questions[0].question || !['aprovar', 'aprovado', 'sim', 'autorizar'].includes(q.answer?.trim().toLowerCase())) fail('owner-reconciliation-operator-decision-required');
+        || identity.slice !== r.sliceId || identity.task !== r.taskId
+        || !q || !['aprovar', 'aprovado', 'sim', 'autorizar'].includes(q.answer?.trim().toLowerCase())) fail('owner-reconciliation-operator-decision-required');
+    const matches = candidate => identity.decision_set === candidate.decision_set && q.question === candidate.questions[0].question;
+    if (!matches(expected)) {
+      // Compose an already answered EXACT historical delta with only the new
+      // canonical transition captured by this live opaque handle. No serialized
+      // history, missing handle or different new metadata supplies this bridge.
+      const proof = ownerTransfers.get(options.ownerTransfer);
+      if (!proof || proof.requestHash !== roots.digest(r)
+          || !view.reviewed.some(row => row.path === proof.recordPath && row.after === sha(proof.afterBytes))
+          || view.current[proof.recordPath] !== sha(proof.afterBytes)) fail('owner-reconciliation-operator-decision-required');
+      const bridge = new Map(proof.changes.map(row => [row.path, row]));
+      for (const row of bridge.values()) if ((view.current[row.path] ?? null) !== (row.afterBytes ? sha(row.afterBytes) : null)) fail('owner-reconciliation-operator-decision-required');
+      const changes = view.reviewed.map(row => bridge.has(row.path) ? { ...row, after: bridge.get(row.path).beforeBytes ? sha(bridge.get(row.path).beforeBytes) : null } : row)
+        .filter(row => row.before !== row.after);
+      const delta = roots.digest({ owner: view.owner, unit, dispatch_id: r.dispatchId, changes,
+        ...(view.hooks.length ? { hook_baselines: view.hooks } : {}) });
+      if (!matches(decisionForView(view, delta, changes))) fail('owner-reconciliation-operator-decision-required');
+      preTransferApproved = true;
+    }
     operatorApproved = true;
   }
   const classified = attestChanges(structuredClone(challenge));
@@ -401,7 +446,7 @@ function createOwnerReconciliation(options = {}) {
         if (!proof || proof.requestHash !== roots.digest(r) || proof.recordPath !== change.path || !current.equals(proof.afterBytes)) fail('owner-reconciliation-transfer-proof-required');
         const original = JSON.parse(prior), previous = JSON.parse(proof.beforeBytes);
         const immutable = value => Object.fromEntries(Object.entries(value).filter(([key]) => !['active', 'last_heartbeat', 'heartbeat', 'updated_at', 'ended_at', 'worker', 'worker_started'].includes(key)));
-        if (roots.digest(immutable(original)) !== roots.digest(immutable(previous))) fail('owner-reconciliation-transfer-proof-required');
+        if (roots.digest(immutable(original)) !== roots.digest(immutable(previous)) && !preTransferApproved) fail('owner-reconciliation-transfer-proof-required');
       } else if (row.kind === 'canonical-stop') {
         if (!canonical(change.path)) fail('owner-reconciliation-stop-scope-invalid');
         if (change.path.startsWith('.gsd/forge/runs/')) {
