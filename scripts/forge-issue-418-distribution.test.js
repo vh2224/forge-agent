@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('assert/strict'),fs=require('fs'),path=require('path');
-const root=path.resolve(__dirname,'..'),layer=require('./fixtures/issues-434-436/distribution.cjs');
+const root=path.resolve(__dirname,'..'),layer=require('./fixtures/project-context/distribution.cjs');
 const artifacts=require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts;
 assert.equal(layer.validate({artifacts}),true);
 assert.equal(layer.issue418Layer.provenance.base_revision,'63fc4ebcbd0c33e0bc9f91873bfd4d5ab8b56dc8');

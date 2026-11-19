@@ -172,6 +172,7 @@ function renderEntryBlock(options = {}) {
   return [MARKER_START,
     '<!-- Gerado por forge-instructions.js; detalhes por contexto, sem remover contratos. -->',
     '## Forge — entrada e controles permanentes',
+    'Se existir .agents/project-policy.md na raiz do projeto, leia-o antes de agir; preserve as regras locais.',
     'Resolva FORGE_SCRIPTS_DIR para scripts/ da instalação atual (FORGE_HOME ou ~/.forge-agent).',
     'Ao iniciar/retomar/status: carregue `forge-procedure-context.js --phase boot --cwd <raiz-física>`.',
     'Antes do primeiro uso do adaptador, leia shared/forge-personal-context.md; então consulte',

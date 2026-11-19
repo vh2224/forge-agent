@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "source": {
+    "path": "CLAUDE.md",
+    "git_commit": "63fc4ebcbd0c33e0bc9f91873bfd4d5ab8b56dc8",
+    "bytes": 31589,
+    "sha256": "c29d739155bb8c660e97d6556e08bbe0a2c4024641a41f0b1cd320e6fbf680db"
+  },
+  "reconstruction": "Concatenate bodies after removing each exact prefix, in listed order. Historical evidence is not current instructions.",
+  "parts": [
+    {
+      "path": "reference/legacy-01.md",
+      "prefix": "# Histórico preservado — parte 1\n\nEvidência da entrada anterior, não é política vigente nem fila atual. Consulte ../project-policy.md e contratos atuais antes de agir. Leia somente quando necessário.\n\n---\n\n`````text\n",
+      "body_bytes": 6554,
+      "body_sha256": "d059637cc1ff76c8ce3249782224471326ddbf297d8f7f5fd8c709c6746d0411",
+      "suffix": "\n`````\n"
+    },
+    {
+      "path": "reference/legacy-02.md",
+      "prefix": "# Histórico preservado — parte 2\n\nEvidência da entrada anterior, não é política vigente nem fila atual. Consulte ../project-policy.md e contratos atuais antes de agir. Leia somente quando necessário.\n\n---\n\n`````text\n",
+      "body_bytes": 7162,
+      "body_sha256": "d02b8153d3dfe57a0fcc1a3548c37848941257266a00480906c35df7a28f790b",
+      "suffix": "\n`````\n"
+    },
+    {
+      "path": "reference/legacy-03.md",
+      "prefix": "# Histórico preservado — parte 3\n\nEvidência da entrada anterior, não é política vigente nem fila atual. Consulte ../project-policy.md e contratos atuais antes de agir. Leia somente quando necessário.\n\n---\n\n`````text\n",
+      "body_bytes": 6613,
+      "body_sha256": "0090a5fd74cb28cf2cd116ddf1cc47ac3846d9921330e616da7c6a194ed9b3e6",
+      "suffix": "\n`````\n"
+    },
+    {
+      "path": "reference/legacy-04.md",
+      "prefix": "# Histórico preservado — parte 4\n\nEvidência da entrada anterior, não é política vigente nem fila atual. Consulte ../project-policy.md e contratos atuais antes de agir. Leia somente quando necessário.\n\n---\n\n`````text\n",
+      "body_bytes": 6584,
+      "body_sha256": "395e606c48a8bdb9305bb4579dd7a2c4a1aca8dd0df400f91e31fb1f7e46c481",
+      "suffix": "\n`````\n"
+    },
+    {
+      "path": "reference/legacy-05.md",
+      "prefix": "# Histórico preservado — parte 5\n\nEvidência da entrada anterior, não é política vigente nem fila atual. Consulte ../project-policy.md e contratos atuais antes de agir. Leia somente quando necessário.\n\n---\n\n`````text\n",
+      "body_bytes": 4676,
+      "body_sha256": "0d450d1e8ebd6627b6f7f54a395cca9b5c9efd709ce178ac019f36a8eaf6a072",
+      "suffix": "\n`````\n"
+    }
+  ]
+}
