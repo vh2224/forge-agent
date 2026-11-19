@@ -557,3 +557,29 @@ entrega e conclusão, com zero chamadas ao provedor, além de controles negativo
 Os dez casos históricos de434–436 permanecem sem edição e passaram. Histórico
 sem aprovação/prova compatível conserva a reconciliação explícita. Os testes
 não demonstram parada de processos do SO, provedor real, CI ou instalação.
+
+## 2026-11-19 — Custódia de preparação sem invocação (#442)
+
+**Problema.** Uma recusa canônica antes da invocação nativa deixava a janela do
+owner retida; o encerramento só aceitava receipt ready. A recuperação inventariava
+todo o checkout SVN e podia atingir svn-snapshot-limit antes da inspeção útil.
+
+**Decisão.** Introduzir preparation-no-invocation-v1 como perfil explícito de
+coordenação, elegível somente para receipt failed/provider_called:false sem
+candidato retido. Mede controles nomeados, receipt/request/run, geração e raízes
+físicas; declara conteúdo de código não medido. O perfil completo e seus limites
+permanecem. Nenhuma flag importada prova ausência de invocação: o adapter vivo do
+host ainda exige cobertura/join de todos os possíveis escritores, observação de
+não invocação, reconciliação, ciência da cobertura limitada e rechecagem cercada.
+O wrapper CLI tenta o encerramento nos dois retornos de falha e conserva resultado
+e bytes do receipt. Retirement conserva decisão, vínculo pessoal e claim próprios.
+Não há aceitação de código, reset, dispensa de claim ou nova inferência nesse caminho.
+
+**Evidência.** Oito casos novos exercitam CLI real, recusa após accept-native,
+reentrada em falha salva, prova incompleta e candidatos retidos nos dois hosts.
+Dois casos adicionais usam SVN local real com arquivo não relacionado acima do
+limite padrão maxFileBytes: inspeção/recuperação/retirement limitados passam sem
+inventariar a árvore, e a medição estrita continua recusando antes/depois. Isso
+reproduz o limite de bytes, não o de500mil entradas. Fixtures sem provedor; revisão
+independente e integração permanecem gates separados. Não recupera o consumidor
+relatado nem resolve o limite global de20000entradas do owner observado no dogfood.

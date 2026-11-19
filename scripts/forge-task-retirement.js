@@ -46,6 +46,7 @@ function measure(options){
 function inspect(options){
  const measured=measure(options);if(measured.published)return{status:measured.published.record.intent.outcome,closed:true,retirement_file:measured.published.file};
  return{status:'open',closed:false,task_id:measured.request.taskId,observation_sha256:measured.observation_sha256,intent:measured.scope.intent,
+  ...(measured.scope.measurement_profile?{measurement_profile:measured.scope.measurement_profile,coverage:measured.scope.coverage}:{}),
   worktree_disposition:'retained',artifacts_accepted:false,required_evidence:['decisão explícita observada do operador','join dos escritores','reconciliação exata dos roots e recibo preservados']};
 }
 async function closeTask(options){

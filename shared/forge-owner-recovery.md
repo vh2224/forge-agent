@@ -23,6 +23,145 @@ diagnostic, not join proof. A missing request, unknown binding, unreadable recei
 foreign session/root, held claim or changed evidence retains a named refusal.
 `--apply` cannot serialize a live host capability: it refuses without mutating.
 
+### Failed preparation with no invocation
+
+For an exact failed preparation receipt with `failure.provider_called:false`
+and no retained candidate, inspection uses `preparation-no-invocation-v1`.
+It measures the request fingerprint, receipt bytes, run, binding/generation,
+named task control files, physical code-root identities and registered worktree
+mappings. The output explicitly marks code contents **unmeasured** and owner
+metadata limited to named controls. It does not inventory unrelated SVN files
+or the entire owner history. The original full snapshot profile and its strict
+limits remain in force for all other attempts. A saved candidate must follow
+canonical replay/reconciliation; it cannot use this settlement profile.
+
+This limited observation is coordination evidence only. It cannot authorize
+artifact acceptance, replay, code reset, another writer, claim release or a
+successful task outcome. `provider_called:false` establishes eligibility,
+never proof that an external native tool was not invoked. Recovery still needs
+the actual host/session, complete writer joins, root reconciliation and fenced
+remeasurement. In addition, its writer callback must report
+`no_invocation_observed:true`, `coverage_complete:true` and
+`unmeasured_code_contents_acknowledged:true` from actual observations.
+Unknown invocation or descendants retain the window. Administrative retirement
+preserves its separate explicit decision, personal binding and claim gates.
+
+For the same observed owner, the assistant can settle the failure through the
+shipped API after obtaining actual native-tool and CLI termination evidence:
+
+```javascript
+const doctor = require(`${FORGE_SCRIPTS_DIR}/forge-doctor.js`);
+const adapter = doctor.createPreparationSettlementAdapter({
+  hostRuntime: HOST_RUNTIME,
+  observeWriters, // synchronous callback over actual joined tool/CLI observations
+  reconcile      // synchronous callback over exact controls and physical roots
+});
+const settled = await doctor.settleFailedPreparation(request, adapter);
+```
+
+The trusted host authors these live callbacks in its current Node/Bash bridge;
+the operator does not implement challenge hashing. `observeWriters` returns the
+three explicit fields above, `writers:[{state:'joined',reference}]`, `joined:true`,
+`possible_writers:0` and a real tool/event `reference`. `reconcile` returns
+`reconciled:true` and its actual evidence `reference`. The factory binds the
+current observed session and exact fresh challenge itself. A Bash process does
+not independently discover another Claude/Codex session's descendants: the host
+must obtain that evidence from tools it actually has before constructing the
+callbacks. JSON files, a terminal receipt and PID absence cannot supply it.
+
+#### Executable native-decline example
+
+The example below is deliberately limited to a fresh canonical request whose
+caller already explicitly selected `worker_mode:native` or `workerMode:native`.
+Do not add that flag to a retained request or use this example to replace a
+selected sidecar. It declines before calling any native tool. Its evidence is
+the wrapper's real CLI close events plus the in-process branch that calls no
+tool; no transcript JSON or invented host SDK supplies authority. A failure
+before that branch, an older held attempt, or unknown writers stays held.
+
+Save this complete block as an owned `decline-native.cjs` outside the code roots:
+
+<!-- forge:preparation-native-decline-example:start -->
+```javascript
+'use strict';
+const fs = require('node:fs'), path = require('node:path');
+const [scripts, requestFile, acceptanceFile] = process.argv.slice(2);
+if (!scripts || !requestFile || !acceptanceFile) throw Error('scripts, request and external acceptance paths required');
+const load = name => require(path.join(path.resolve(scripts), name));
+const prep = load('forge-task-preparation'), windows = load('forge-owner-transport-window');
+const doctor = load('forge-doctor'), roots = load('forge-code-roots');
+const source = fs.readFileSync(requestFile), raw = JSON.parse(source);
+if ((raw.workerMode || raw.worker_mode) !== 'native') throw Error('an already explicit native request is required');
+const request = prep.validateRequest(raw), owner = request.contextRoot || request.cwd;
+const contract = roots.validateContract(request.execution_contract || roots.singleContract(owner, request.cwd), { revalidate: true });
+let declinedBeforeTool = false;
+const adapter = doctor.createPreparationSettlementAdapter({
+  hostRuntime: request.hostRuntime,
+  observeWriters(challenge) {
+    if (!declinedBeforeTool || !Array.isArray(challenge.cli_joins) || !challenge.cli_joins.length
+        || challenge.cli_joins.some(row => row.closed !== true)) throw Error('live no-invocation/CLI coverage unavailable');
+    return {
+      coverage_complete: true, no_invocation_observed: true,
+      unmeasured_code_contents_acknowledged: true,
+      writers: challenge.cli_joins.map(row => ({ state: 'joined', reference: `actual ${row.mode} close pid=${row.pid} status=${row.status}` })),
+      joined: true, possible_writers: 0,
+      reference: 'this in-process callback deliberately invoked no native tool; wrapper observed its CLI closes'
+    };
+  },
+  reconcile(challenge) {
+    if (!fs.readFileSync(requestFile).equals(source)) throw Error('request changed');
+    roots.validateContract(contract, { revalidate: true });
+    if (challenge.scope) {
+      const current = load('forge-owner-window-recovery').capture({ owner, request: raw });
+      if (current.observation_sha256 !== challenge.scope_sha256) throw Error('named controls or physical roots changed');
+    }
+    return { reconciled: true, reference: 'actual request bytes, named control observation and physical-root identities; code contents unmeasured' };
+  }
+});
+windows.runCliPreparation(requestFile, {
+  acceptanceFile, ownerTransportAdapter: adapter,
+  async invokeNative() {
+    declinedBeforeTool = true; // This branch calls no Agent/spawn/tool API.
+    throw Object.assign(new Error('declined before native tool'), {
+      code: 'host-declined-before-tool', provider_called: false
+    });
+  }
+}).then(result => process.stdout.write(JSON.stringify(result) + '\n'))
+  .catch(error => { process.stderr.write((error.code || 'preparation-decline-failed') + '\n'); process.exitCode = 1; });
+```
+<!-- forge:preparation-native-decline-example:end -->
+
+Both launchers run the same program with three actual absolute arguments:
+
+```text
+node <owned>/decline-native.cjs <FORGE_SCRIPTS_DIR> <request.json> <external-acceptance.json>
+```
+
+- **Codex:** use the actually exposed foreground `exec_command`; if it returns
+  a running `session_id`, join that exact handle with `write_stdin` until its
+  real terminal result. Those handles prove this controlled CLI family only.
+- **Claude Code:** use the actually exposed foreground `Bash`. A background
+  acknowledgment is not a join. If the session exposes no supported way to join
+  its exact background family, retain the window and report the missing coverage.
+
+The example is exercised with real CLI processes under both synthetic host
+identities; that does not prove a live Claude Code tool schema or an actual
+provider invocation. To execute native work instead of declining it, a real
+in-process host binding must track and join that tool's complete family. Neither
+`Bash`/Node nor a separate Codex command can independently discover another
+session's native agents. A later standalone `settleFailedPreparation` call is
+conditional on genuine host observations; it is not a generic unlock command.
+Without that bridge/evidence, keep the window and use the supported owner
+recovery path after obtaining the required actual observations. Do not fill the
+callbacks with `true` copied from a file or an unverified transcript.
+
+`runCliPreparation` attempts this same supported settlement after either failed
+CLI return, using its actual close observations. Missing or insufficient live
+proof keeps the original failed result and reports `owner_window.status:held`
+with a named reason. Successful settlement reports `closed`, preserves the
+failure outcome and never rewrites the receipt or invokes a provider. A new
+owner uses the existing recovery API with its additional previous-owner proof.
+
 ### Registered isolated worktrees
 
 Keep the original preparation request unchanged, including its `cwd` and

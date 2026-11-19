@@ -54,9 +54,13 @@ function measureTask({owner,request,receiptCopy}){
  const contract=q.execution_contract||roots.singleContract(owner,q.cwd);roots.validateContract(contract,{revalidate:true});
  const census=require('./forge-owner-recovery-roots').measure({owner,contract,run});
  const evidence=require('./forge-owner-recovery-receipt').measure({owner,request:q,fingerprint,receiptCopy,read}),receipt=evidence.receipt;
- const scope={schema_version:1,owner,task_id:q.taskId,dispatch_id:q.dispatchId,previous_host_runtime:run.host_runtime,previous_host_session_sha256:digest(run.session_id),owner_identity_sha256:identity(owner),run_sha256:digest(runBytes),request_sha256:fingerprint,
-  receipt:evidence.reference,worktree_bindings:census.bindings,
+ const custody=require('./forge-preparation-custody-profile');
+ const channels=custody.eligible(receipt)?custody.inspectChannels({request:q,read}):null,limited=channels!==null&&!channels.candidate;
+ const surface=limited?custody.measure({owner,request:q,receipt,census,read}):{
   owner_surface_sha256:digest(require('./forge-task-execution').protectedSnapshot(owner)),code_states:census.roots.map(stableSnapshot).sort((a,b)=>a.root_id.localeCompare(b.root_id))};
+ const scope={schema_version:limited?2:1,owner,task_id:q.taskId,dispatch_id:q.dispatchId,previous_host_runtime:run.host_runtime,previous_host_session_sha256:digest(run.session_id),owner_identity_sha256:identity(owner),run_sha256:digest(runBytes),request_sha256:fingerprint,
+  receipt:evidence.reference,worktree_bindings:census.bindings,
+  ...surface,...(channels?.candidate?{retained_candidate_channels:channels}:{})};
  return{owner,run,request:q,receipt,scope};
 }
 function capture({owner,request,receiptCopy}){
@@ -82,6 +86,7 @@ function inspect(options){
  return{status:'held',task_id:current.seen.binding.task_id,dispatch_id:current.seen.binding.dispatch_id,host_runtime:current.seen.binding.host_runtime,
   binding_sha256:current.seen.sha256,holder_state:holder,process_observation_is_join_proof:false,
   observation_sha256:current.observation_sha256||null,receipt_phase:current.scope?.receipt.phase||'unmeasured',
+  ...(current.scope?.measurement_profile?{measurement_profile:current.scope.measurement_profile,coverage:current.scope.coverage}:{}),
   recovery:'conditional',reason_code:current.scope?'owner-window-live-host-required':'owner-window-request-required',
   required_evidence:['sessão atual observada do host','join do owner anterior e de todos os escritores possíveis','reconciliação exata do owner, código e recibo']};
 }
@@ -114,6 +119,7 @@ async function observeStopped(adapter,challenge,{requirePreviousOwnerStopped=tru
    ||!Array.isArray(proof.writers)||proof.writers.length>1024||proof.writers.some(row=>!row||row.state!=='joined'||typeof row.reference!=='string'||!row.reference.trim()||row.reference.length>2048)
    ||(requirePreviousOwnerStopped&&proof.previous_owner_stopped!==true)||proof.joined!==true||proof.possible_writers!==0
    ||typeof proof.reference!=='string'||!proof.reference.trim()||proof.reference.length>2048)fail('owner-window-writer-unproven');
+ require('./forge-preparation-custody-profile').assertLiveProof(challenge.scope,proof);
  const reconciliation=await entry.reconcile(challenge);assertAdapter(adapter);
  if(reconciliation?.scope_sha256!==challenge.scope_sha256||reconciliation.reconciled!==true||typeof reconciliation.reference!=='string'
    ||!reconciliation.reference.trim()||reconciliation.reference.length>2048)fail('owner-window-reconciliation-required');

@@ -686,6 +686,8 @@ module.exports = {
   checkClaimStuck,
   checkArtifactRouting: (cwd, options) => require('./forge-artifact-routing-diagnostic').checkArtifactRouting(cwd, options),
   createOwnerRecoveryAdapter: options => require('./forge-owner-window-recovery').createObservedHostAdapter(options),
+  createPreparationSettlementAdapter: options => require('./forge-owner-transport-window').createObservedPreparationAdapter(options),
+  settleFailedPreparation: (request, adapter) => require('./forge-owner-transport-window').settleFailedPreparation(request, adapter),
   inspectOwnerWindow: options => require('./forge-owner-window-recovery').inspect(options),
   recoverOwnerWindow: options => {
     const api = require('./forge-owner-window-recovery'), inspection = api.inspect(options);

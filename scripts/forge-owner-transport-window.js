@@ -79,6 +79,17 @@ function coordinatePreparation(request,requestSha,{create=true,operation='accept
 }
 function coordinationResult(cap,result){const row=held(cap);return row.binding.coordination==='observed-host-session-v1'?{...result,owner_window:{status:'held',binding_sha256:row.binding_sha256,settlement:'live-host-join-required'}}:result;}
 function createTransportAdapter(attestStopped){if(typeof attestStopped!=='function')throw error('owner-window-live-host-required');const handle=Object.freeze({});adapters.set(handle,attestStopped);return handle;}
+function createObservedPreparationAdapter({hostRuntime,observeWriters,reconcile}={}){
+ const runs=require('./forge-runs'),actor=()=>runs.observeHostSession(hostRuntime,process.env.FORGE_CLAUDE_OWNER_SESSION_ID),initial=actor();
+ if(!initial||typeof observeWriters!=='function'||typeof reconcile!=='function')throw error('owner-window-live-host-required');
+ const unchanged=()=>{if(digest(actor())!==digest(initial))throw error('owner-window-host-session-changed');};
+ return createTransportAdapter(challenge=>{
+  unchanged();const facts=observeWriters(challenge),checked=reconcile(challenge);unchanged();
+  if(!facts||facts.then||checked?.then||facts.coverage_complete!==true||!Array.isArray(facts.writers)||facts.writers.length>1024
+   ||facts.writers.some(row=>row?.state!=='joined'||typeof row.reference!=='string'||!row.reference.trim()||row.reference.length>2048))throw error('owner-window-writer-unproven');
+  return{...facts,challenge_sha256:digest(challenge),reconciled:checked?.reconciled===true,reconciliation_reference:checked?.reference};
+ });
+}
 async function protectPreparation(request,adapter,action){
  const attest=adapters.get(adapter);if(!attest)throw error('owner-window-live-host-required');
  const owner=ownerOf(request.contextRoot||request.cwd),current=context.getStore()?.cap;
@@ -105,6 +116,23 @@ async function settlePreparationInside(rawRequest,adapter,cliJoins){
  const file=require('./forge-unit-sidecar').artifactAttemptFiles(request).receiptFile;
  const read=()=>{const stat=fs.lstatSync(file);if(!stat.isFile()||stat.isSymbolicLink())throw error('owner-window-receipt-untrusted');return fs.readFileSync(file);};
  const bytes=read(),receipt=JSON.parse(bytes);
+ if(receipt.phase==='failed'&&require('./forge-preparation-custody-profile').eligible(receipt)){
+  const recovery=require('./forge-owner-window-recovery'),current=recovery.capture({owner:entry.owner,request:rawRequest});
+  if(!current.scope||current.scope.request_sha256!==fingerprint)throw error('owner-window-coordination-mismatch');
+  if(current.scope.measurement_profile!==require('./forge-preparation-custody-profile').PROFILE)throw error('owner-window-saved-candidate-retained');
+  const bound={operation:'settle-cli-preparation-failure',owner:entry.owner,binding_sha256:entry.binding_sha256,request_sha256:fingerprint,
+   receipt_sha256:sha(bytes),scope_sha256:current.observation_sha256,scope:current.scope,cli_joins:cliJoins};
+  const proof=attest(freezeTree(bound));
+  require('./forge-preparation-custody-profile').assertLiveProof(current.scope,proof);
+  const reference=attestJoined(bound,()=>proof);
+  if(proof.reconciled!==true||typeof proof.reconciliation_reference!=='string'||!proof.reconciliation_reference.trim()||proof.reconciliation_reference.length>2048)throw error('owner-window-reconciliation-required');
+  const unchanged=()=>{if(!read().equals(bytes)||recovery.capture({owner:entry.owner,request:rawRequest}).observation_sha256!==current.observation_sha256)throw error('owner-window-recovery-conflict');};
+  unchanged();
+  return close(cap,challenge=>{
+   unchanged();
+   return{challenge_sha256:digest(challenge),joined:true,possible_writers:0,reference};
+  });
+ }
  if(receipt.phase!=='ready'||receipt.request_fingerprint!==fingerprint||receipt.dispatch_id!==request.dispatchId)throw error('owner-window-terminal-receipt-required');
  // A ready flag cannot authorize release. Reuse canonical replay validation,
  // then obtain a live proof bound to request, exact receipt and CLI closes.
@@ -120,6 +148,12 @@ async function settlePreparationInside(rawRequest,adapter,cliJoins){
  });
 }
 async function settlePreparation(rawRequest,adapter){return settlePreparationInside(rawRequest,adapter,[]);}
+async function settleFailedPreparation(rawRequest,adapter,cliJoins=[]){
+ const request=require('./forge-task-preparation').validateRequest(rawRequest),file=require('./forge-unit-sidecar').artifactAttemptFiles(request).receiptFile;
+ const receipt=JSON.parse(require('./forge-owner-window-recovery').readEvidence(file,8*1024*1024));
+ if(!require('./forge-preparation-custody-profile').eligible(receipt))throw error('owner-window-no-invocation-scope-required');
+ return settlePreparationInside(rawRequest,adapter,cliJoins);
+}
 function freezeTree(value){if(value&&typeof value==='object'){for(const nested of Object.values(value))freezeTree(nested);Object.freeze(value);}return value;}
 async function runCliPreparation(requestFile,{acceptanceFile,invokeNative,ownerTransportAdapter}={}){
  const attest=adapters.get(ownerTransportAdapter);
@@ -137,7 +171,12 @@ async function runCliPreparation(requestFile,{acceptanceFile,invokeNative,ownerT
   child.once('close',(status,signal)=>{try{unchanged();cliJoins.push({mode:args[0],pid:child.pid,status,signal,closed:true,stdout_sha256:sha(stdout),stderr_sha256:sha(stderr)});if(spawnError)throw spawnError;const result=JSON.parse(stdout.trim());resolve({status,result});}catch(e){reject(e);}});
  });
  const first=await cli(['--start',requestFile]),started=first.result;
- if(first.status!==0||started.ok!==true)return started;
+ const settleFailure=async result=>{
+  if(!observed(owner))return result;
+  try{const settlement=await settleFailedPreparation(raw,ownerTransportAdapter,cliJoins);return{...result,owner_window:{status:'closed',reference:settlement.reference}};}
+  catch(e){return{...result,owner_window:{status:'held',reason_code:e.code||'owner-window-writer-unproven',settlement:'live-host-join-required'}};}
+ };
+ if(first.status!==0||started.ok!==true)return settleFailure(started);
  if(started.action==='complete'){
   const settlement=observed(owner)?await settlePreparationInside(raw,ownerTransportAdapter,cliJoins):null;
   return{...started,...(settlement?{owner_window:{status:'closed',reference:settlement.reference}}:{})};
@@ -157,12 +196,12 @@ async function runCliPreparation(requestFile,{acceptanceFile,invokeNative,ownerT
  for(const root of [owner,...codeRoots.map(row=>row.path)])xllm.validateResultFileTarget(acceptanceFile,root);
  fs.writeFileSync(acceptanceFile,JSON.stringify(packet)+'\n',{flag:'wx',mode:0o600});
  const second=await cli(['--accept-native',requestFile,acceptanceFile]);
- if(second.status!==0||second.result.ok!==true)return second.result;
+ if(second.status!==0||second.result.ok!==true)return settleFailure(second.result);
  const settlement=observed(owner)?await settlePreparationInside(raw,ownerTransportAdapter,cliJoins):null;
  return{...second.result,...(settlement?{owner_window:{status:'closed',reference:settlement.reference}}:{})};
 }
 
 function ensureTask(owner,taskId){const ids=require('./forge-ids');if(!ids.isValid(taskId)||ids.entityKind(taskId)!=='task'||/[\\/\0]/.test(taskId))throw error('owner-task-id-required');return withMutation(owner,()=>{let directory=ownerOf(owner);for(const part of ['.gsd','tasks',taskId]){directory=path.join(directory,part);if(fs.existsSync(directory)){const stat=fs.lstatSync(directory);if(stat.isSymbolicLink()||!stat.isDirectory())throw error('owner-task-path-untrusted');}else{if(part==='.gsd')throw error('owner-project-required');fs.mkdirSync(directory);}}return{directory,created:true};});}
 function writeBrief(owner,taskId,bytes){return withMutation(owner,()=>{const ensured=ensureTask(owner,taskId),file=path.join(ensured.directory,taskId+'-BRIEF.md');if(fs.existsSync(file)){const stat=fs.lstatSync(file);if(stat.isSymbolicLink()||!stat.isFile())throw error('owner-task-path-untrusted');if(!fs.readFileSync(file).equals(bytes))throw error('owner-brief-exists');return{file,unchanged:true};}fs.writeFileSync(file,bytes,{flag:'wx'});return{file,created:true};});}
-module.exports={open,withWindow,withMutation,assertMutationAllowed,currentPublicationGuard,withPublicationContext,close,recover,observed,controlRoot,metadataOwner,coordinatePreparation,coordinationResult,createTransportAdapter,protectPreparation,settlePreparation,runCliPreparation,ensureTask,writeBrief,appendHookEvidence};
+module.exports={open,withWindow,withMutation,assertMutationAllowed,currentPublicationGuard,withPublicationContext,close,recover,observed,controlRoot,metadataOwner,coordinatePreparation,coordinationResult,createTransportAdapter,createObservedPreparationAdapter,protectPreparation,settlePreparation,settleFailedPreparation,runCliPreparation,ensureTask,writeBrief,appendHookEvidence};
 if(require.main===module){try{const[mode,owner,taskId,source]=process.argv.slice(2);const result=mode==='--ensure-task'&&!source?ensureTask(owner,taskId):mode==='--write-brief'&&source?writeBrief(owner,taskId,fs.readFileSync(source)):null;if(!result)throw error('owner-window-usage');process.stdout.write(JSON.stringify(result)+'\n');}catch(e){process.stdout.write(JSON.stringify({ok:false,reason_code:e.code||'owner-window-failed',provider_called:false})+'\n');process.exitCode=1;}}
