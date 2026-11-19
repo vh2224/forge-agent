@@ -637,6 +637,29 @@ function validateExecuteResult(obj) {
 }
 
 /**
+ * Validate an execute result in the transport-assembled shape that
+ * `assembleExecuteResult` produces and every owner channel retains
+ * (receipt result, `resultFile.returned.json`). The model-returned part is
+ * validated with the same field-by-field gate as the raw response, using the
+ * declared list it carried (`files_changed_declared`); `files_changed` is the
+ * adapter's own VCS-derived delta. A historical raw-shaped result (no
+ * `files_changed_declared`) is still validated as before.
+ * @param {*} obj
+ * @returns {boolean}
+ */
+function validateAssembledExecuteResult(obj) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
+  if (!Object.prototype.hasOwnProperty.call(obj, 'files_changed_declared')) return validateExecuteResult(obj);
+  if (!validateExecuteResult({ ...obj, files_changed: obj.files_changed_declared })) return false;
+  if (!Array.isArray(obj.files_changed)) return false;
+  return obj.files_changed.every(entry => typeof entry === 'string' && entry.length > 0
+    || entry && typeof entry === 'object' && !Array.isArray(entry)
+      && ['A', 'M', 'D'].includes(entry.status) && typeof entry.path === 'string' && entry.path.length > 0
+      && (entry.root_id === undefined || typeof entry.root_id === 'string' && entry.root_id.length > 0)
+      && (entry.repo === undefined || typeof entry.repo === 'string' && entry.repo.length > 0));
+}
+
+/**
  * Validate a parsed plan response from codex. ANY deviation → invalid (return false).
  * Field-by-field — the --output-schema is a hint, never trusted (codex#15451/#4181).
  * The must_haves content of each task_plan is validated separately, in-sidecar, via
@@ -2522,41 +2545,50 @@ function executeContract(opts) {
     invalidClaudeMessage: 'Claude worker block failed execute-result validation',
     noResultMessage: 'no parseable/valid execute result in app-server output',
     assemble(parsed, common) {
-      return {
-        status: parsed.status,
-        protocol_version: PROTOCOL_VERSION,
-        summary: parsed.summary,
-        must_haves_status: parsed.must_haves_status,
-        files_changed: common.derived,
-        files_changed_declared: parsed.files_changed,
-        pre_dirty: common.preDirty,
-        ...common.multiRepo,
-        start_sha: common.startSha,
-        head_sha: common.headSha,
-        ...common.vcsField,
-        started_at: common.startedAt,
-        finished_at: common.finishedAt,
-        duration_secs: common.durationSecs,
-        dispatch_id: common.dispatchId,
-        input_tokens: common.inputTokens,
-        output_tokens: common.outputTokens,
-        token_method: 'heuristic-chars-4',
-        parse_path: common.parsePath,
-        ...(common.degradation ? { degradation: common.degradation } : {}),
-        capability: cap.capability,
-        ...(cap.declared !== cap.capability ? { capability_declared: cap.declared } : {}),
-        ...(cap.event ? { capability_event: cap.event } : {}),
-        appserver: common.appserver,
-        // Claude only: the proven model rides here. A codex result never gets the
-        // key, so the frozen BASELINE_RESULT_KEYS set of that transport is unchanged.
-        ...(common.transportTelemetry ? { transport_telemetry: common.transportTelemetry } : {}),
-        // ADDITIVE, same mold as parse_path/degradation/capability/appserver above:
-        // no existing key changes name or shape, and validateExecuteResult does NOT
-        // require this one (it validates the JSON the MODEL returns; this field is
-        // the adapter's own). A reader that ignores it sees a byte-identical result.
-        ...(common.runtimeEvidence ? { runtime_evidence: common.runtimeEvidence } : {}),
-      };
+      return assembleExecuteResult(parsed, common, cap);
     },
+  };
+}
+
+/**
+ * The single execute-result shape every owner channel retains. Exported so
+ * consumers and regressions use the real assembled shape, never a hand-built one.
+ * Validate it with `validateAssembledExecuteResult`.
+ */
+function assembleExecuteResult(parsed, common, cap) {
+  return {
+    status: parsed.status,
+    protocol_version: PROTOCOL_VERSION,
+    summary: parsed.summary,
+    must_haves_status: parsed.must_haves_status,
+    files_changed: common.derived,
+    files_changed_declared: parsed.files_changed,
+    pre_dirty: common.preDirty,
+    ...common.multiRepo,
+    start_sha: common.startSha,
+    head_sha: common.headSha,
+    ...common.vcsField,
+    started_at: common.startedAt,
+    finished_at: common.finishedAt,
+    duration_secs: common.durationSecs,
+    dispatch_id: common.dispatchId,
+    input_tokens: common.inputTokens,
+    output_tokens: common.outputTokens,
+    token_method: 'heuristic-chars-4',
+    parse_path: common.parsePath,
+    ...(common.degradation ? { degradation: common.degradation } : {}),
+    capability: cap.capability,
+    ...(cap.declared !== cap.capability ? { capability_declared: cap.declared } : {}),
+    ...(cap.event ? { capability_event: cap.event } : {}),
+    appserver: common.appserver,
+    // Claude only: the proven model rides here. A codex result never gets the
+    // key, so the frozen BASELINE_RESULT_KEYS set of that transport is unchanged.
+    ...(common.transportTelemetry ? { transport_telemetry: common.transportTelemetry } : {}),
+    // ADDITIVE, same mold as parse_path/degradation/capability/appserver above:
+    // no existing key changes name or shape, and validateExecuteResult does NOT
+    // require this one (it validates the JSON the MODEL returns; this field is
+    // the adapter's own). A reader that ignores it sees a byte-identical result.
+    ...(common.runtimeEvidence ? { runtime_evidence: common.runtimeEvidence } : {}),
   };
 }
 
@@ -3343,6 +3375,8 @@ module.exports = {
   validateObjections,
   validateVerdicts,
   validateExecuteResult,
+  validateAssembledExecuteResult,
+  assembleExecuteResult,
   validatePlanResult,
   buildPlanPrompt,
   captureDirtySnapshot,
