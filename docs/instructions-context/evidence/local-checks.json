@@ -1,0 +1,56 @@
+{
+  "base": "63fc4ebcbd0c33e0bc9f91873bfd4d5ab8b56dc8",
+  "executor": "current Codex host direct authorized maintenance",
+  "checks": [
+    {
+      "test": "forge-project-context.test.js",
+      "exit": 0,
+      "error": null,
+      "seconds": 3.177
+    },
+    {
+      "test": "forge-instructions.test.js",
+      "exit": 0,
+      "error": null,
+      "seconds": 9.904
+    },
+    {
+      "test": "forge-instructions-context.test.js",
+      "exit": 0,
+      "error": null,
+      "seconds": 1.149
+    },
+    {
+      "test": "forge-instructions-install-budget.test.js",
+      "exit": 0,
+      "error": null,
+      "seconds": 18.148
+    },
+    {
+      "test": "forge-source-manifest.test.js",
+      "exit": 0,
+      "error": null,
+      "seconds": 0.283
+    },
+    {
+      "test": "forge-claude-renderer.test.js",
+      "exit": 0,
+      "error": null,
+      "seconds": 22.68
+    },
+    {
+      "test": "forge-codex-renderer.test.js",
+      "exit": 0,
+      "error": null,
+      "seconds": 26.094
+    }
+  ],
+  "review": {
+    "executor": "independent read-only forge-reviewer",
+    "maintained_findings": 0,
+    "corrected_and_withdrawn": 2,
+    "successor_review_findings": 0
+  },
+  "ci": "not run",
+  "installed": "not applied"
+}
