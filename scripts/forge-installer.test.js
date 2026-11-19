@@ -1293,7 +1293,17 @@ test('span-only and self-sourced instructions do not gain whole-file ownership',
     const inventoryFile = path.join(data.options.repo, 'forge-source-manifest.json');
     const inventory = JSON.parse(fs.readFileSync(inventoryFile, 'utf8'));
     const source = JSON.parse(fs.readFileSync(path.join(__dirname, '../forge-source-manifest.json'), 'utf8'));
-    inventory.sources.push(source.sources.find(row => row.source_id === 'claude-instructions'));
+    const instructionSource = source.sources.find(row => row.source_id === 'claude-instructions');
+    inventory.sources.push(instructionSource);
+    const sourceRoot = path.resolve(__dirname, '..');
+    for (const input of instructionSource.inputs.filter(input => input !== 'CLAUDE.md')) {
+      for (const file of installer.walk(path.join(sourceRoot, input))) {
+        const destination = path.join(data.options.repo, path.relative(sourceRoot, file));
+        fs.mkdirSync(path.dirname(destination), { recursive: true });
+        fs.copyFileSync(file, destination);
+        assert(fs.readFileSync(destination).equals(fs.readFileSync(file)), 'fixture instruction input copy');
+      }
+    }
     fs.writeFileSync(inventoryFile, JSON.stringify(inventory));
     const self = path.join(data.options.repo, 'CLAUDE.md');
     const original = '# Canonical instructions\nPreserve source.\n';

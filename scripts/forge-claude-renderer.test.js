@@ -20,7 +20,7 @@ function fixtureRepo() {
     fs.mkdirSync(path.dirname(destination), { recursive: true });
     fs.copyFileSync(source, destination);
   }
-  for (const directory of ['agents', 'commands', 'skills', 'shared/templates/dispatch']) {
+  for (const directory of ['.agents', 'agents', 'commands', 'skills', 'shared/templates/dispatch']) {
     fs.cpSync(path.join(repo, directory), path.join(root, directory), { recursive: true });
   }
   fs.copyFileSync(path.join(repo, 'forge-source-manifest.json'), path.join(root, 'forge-source-manifest.json'));
