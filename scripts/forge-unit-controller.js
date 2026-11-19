@@ -2271,10 +2271,12 @@ function failureAncestors(cwd, key) {
   while (failure) {
     if (keys.has(failure.idempotency_key)) throw new ControllerError('entry-ancestry-invalid', 'failure cycle');
     const checked = verifiedFailure(cwd, failure), begin = checked?.begin;
+    // Terminal failures encode the STATE no-slice sentinel as null.
+    const beginSlice = begin?.after?.state?.active_slice === '—' ? null : begin?.after?.state?.active_slice;
     if (!checked || begin.action !== 'begin' || begin.phase !== 'committed'
       || begin.unit.key !== failure.unit.key || begin.milestone !== failure.milestone
       || begin.owner_digest !== failure.owner_digest || begin.host_runtime !== failure.host_runtime
-      || begin.after.state.active_slice !== failure.terminal_failure.slice
+      || beginSlice !== failure.terminal_failure.slice
       || expected && (expected.failure_checksum !== sha(failure) || expected.unit !== failure.unit.key
         || expected.milestone !== failure.milestone || expected.slice !== failure.terminal_failure.slice
         || expected.owner_digest !== failure.owner_digest && !failure.owner_interruption || expected.host_runtime !== failure.host_runtime
