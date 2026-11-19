@@ -58,7 +58,8 @@ function construct({ request, bindings, reference, assertAuthority, attestStoppe
         || !['execution-protected-metadata', 'execution-verification-failed'].includes(parent.failure?.reason_code)) fail('verification-repair-response-anchor-required');
     result = response.result;
   }
-  if (!require('./forge-xllm').validateExecuteResult(result) || result.status !== 'done') fail('verification-repair-result-invalid');
+  // The retained response is the transport-assembled result (#439): validate that shape.
+  if (!require('./forge-xllm').validateAssembledExecuteResult(result) || result.status !== 'done') fail('verification-repair-result-invalid');
   execution.assertProtected(owner, baseline.protected_owner);
   if (!Array.isArray(baseline.protected_roots) || baseline.protected_roots.length !== contract.code_roots.length) fail('verification-repair-roots-invalid');
   for (const root of contract.code_roots) {

@@ -10,7 +10,7 @@ async function fixture(fn) {
   try { const home = path.join(f.dir, 'home'); fs.mkdirSync(home); Object.assign(process.env, { HOME: home, USERPROFILE: home, FORGE_HOME: path.resolve(__dirname, '..') }); return await fn(f); }
   finally { process.env = env; f.cleanup(); }
 }
-function historical(f, { expired = false } = {}) {
+function historical(f, { expired = false, result: buildResult } = {}) {
   const request = require('./forge-issues-429-432.test').activityRequest(f, 'codex');
   const bindings = structuredClone(request.verification.bindings); delete request.verification.bindings;
   if (expired) {
@@ -30,7 +30,7 @@ function historical(f, { expired = false } = {}) {
   const originalBytes = {};
   for (const [file, hash] of Object.entries(parent.recovery_baseline.protected_owner)) if (hash !== 'directory') originalBytes[file] = fs.readFileSync(path.join(f.owner, file));
   put(path.join(f.a, 'same.txt'), 'after\n');
-  const result = { status: 'done', summary: 'Synthetic retained historical writer', files_changed: ['same.txt'], must_haves_status: [] };
+  const result = buildResult ? buildResult(f, request) : { status: 'done', summary: 'Synthetic retained historical writer', files_changed: ['same.txt'], must_haves_status: [] };
   const response = Buffer.from(JSON.stringify({ version: 1, dispatch_id: request.dispatchId, request_fingerprint: fingerprint,
     result, trust: 'transport-normalized; unit-validation-pending' }));
   put(request.resultFile + '.returned.json', response);
@@ -171,5 +171,5 @@ const cases = [{ name: 'preflight-coverage', fn: preflight }, { name: 'hook-stab
   { name: 'verification-repair-pipeline', fn: () => repairPipeline() }, { name: 'cross-session-repair-pipeline', fn: () => repairPipeline(true) },
   { name: 'retained-result-negatives', fn: retainedNegatives }, { name: 'transfer-scope-negatives', fn: transferScopeNegatives }];
 async function main() { for (const row of require('./forge-ci-units').selectCases(cases)) { await row.fn(); console.log('PASS ' + row.name); } }
-module.exports = { cases, main };
+module.exports = { cases, main, fixture, historical, repairOptions, unchanged };
 if (require.main === module) main().catch(error => { console.error(error); process.exitCode = 1; });
