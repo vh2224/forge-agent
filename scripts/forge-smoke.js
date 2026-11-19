@@ -8191,6 +8191,10 @@ function smokePrefsCutoverGuards() {
     // what past entries said when the legacy filename was current — the same
     // audited-not-rewritten status the CLAUDE.md entry above already had.
     'docs/DECISIONS-LOG.md',
+    // Exact, byte-pinned parts of the former CLAUDE.md entry. These retain
+    // historical mentions; instructions-map.json and project-context tests
+    // verify their original bodies rather than treating them as live readers.
+    '.agents/reference/legacy-02.md', '.agents/reference/legacy-04.md',
     // The index-green allowed-misses list keys each accepted miss as
     // `<mem_id>::<normalized mention>`, and one accepted miss IS a memory fact
     // that mentions the legacy prefs filename. The occurrence is a RECORD of
