@@ -64,6 +64,17 @@ for (const relative of active) {
 }
 reconstruct(file => claude.stripOriginHeader(projection.get(path.resolve(options.projectRoot, file))));
 const successor = require('./fixtures/project-context/distribution.cjs');
+const currentSmoke = read('scripts/forge-smoke.js');
+assert.doesNotThrow(() => successor.previousSmoke(currentSmoke));
+assert.doesNotThrow(() => successor.predecessorSmoke(currentSmoke));
+const historicalSmoke = require('zlib').gunzipSync(Buffer.from(successor.projectContextLayer.files['scripts/forge-smoke.js'].before_gzip_base64, 'base64')).toString('utf8');
+const historicalDistribution = require('./fixtures/issues-434-436/distribution.cjs');
+assert.doesNotThrow(() => historicalDistribution.previousSmoke(historicalSmoke));
+assert.doesNotThrow(() => historicalDistribution.predecessorSmoke(historicalSmoke));
+assert.throws(() => successor.previousSmoke(historicalSmoke), /unrecognized smoke changes: project context measured source/);
+assert.throws(() => successor.predecessorSmoke(historicalSmoke), /unrecognized smoke changes: project context measured source/);
+assert.throws(() => successor.previousSmoke(currentSmoke + '\n// unmeasured drift\n'), /unrecognized smoke changes/);
+assert.throws(() => successor.predecessorSmoke(currentSmoke + '\n// unmeasured drift\n'), /unrecognized smoke changes/);
 successor.validate({ artifacts: rendered.artifacts });
 assert.throws(() => successor.validate({ artifacts: rendered.artifacts.filter(row => row.source !== '.agents/project-policy.md') }));
 assert.throws(() => successor.validate({ artifacts: [...rendered.artifacts, rendered.artifacts.find(row => row.source === '.agents/project-policy.md')] }));

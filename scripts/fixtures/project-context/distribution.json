@@ -263,10 +263,10 @@
     },
     "scripts/forge-project-context.test.js": {
       "before": null,
-      "after": "ab0e069d372e7b2aebac73e750eeebcd88a082d31d32aa9855687380c4df5d8d",
+      "after": "7cc7269291e8f089a20c448b2c032957a41be7fcba1c284849478675acdc733d",
       "before_gzip_base64": null,
       "attributed_before": null,
-      "attributed_after": "ab0e069d372e7b2aebac73e750eeebcd88a082d31d32aa9855687380c4df5d8d"
+      "attributed_after": "7cc7269291e8f089a20c448b2c032957a41be7fcba1c284849478675acdc733d"
     },
     "scripts/forge-smoke.js": {
       "before": "2694608a471c7caaab89cee8a29344b11e633c73f6aced8a4f6cc43c85c50646",
