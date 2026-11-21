@@ -455,7 +455,7 @@ Canonical metadata transactions acquire the external owner publication fence bef
 
 For a live native host, use the existing `startStandaloneTaskPreparation(...).invoke(actualNativeCallback)` with `ownerTransportAdapter: createTransportAdapter(attestActualStopped)`. The live callback must bind real child/tool identity and prove all possible writers joined; JSON flags are not that attestation. Sidecar callers may pass the same live adapter. Keep the capability alive until actual terminal/join and canonical acceptance. Unknown cleanup retains the fence for explicit recovery.
 
-Public CLI `--start` / `--accept-native` remains supported. With a genuinely observed task owner it retains durable coordination bound to owner, task/run, dispatch, request and host session. The same observed owner may accept in a later process; all existing artifact/native/receipt validations still run. The response `owner_window.status=held` requires the trusted host to use the shipped `settlePreparation(request, opaqueLiveAdapter)` after actual tool/process-family and CLI joins; the canonical phase flow below supplies its wrapper and ordinary-CLI integration. Failed/unknown attempts remain explicit recovery. Ready is not that join. A repeated start of a pending dispatch is refused. Without observed ownership the legacy strict-snapshot path remains; it gains no serialized capability. Foreign ownership is refused. No historical saved candidate gains a broker anchor.
+Public CLI `--start` / `--accept-native` remains supported. With a genuinely observed task owner it retains durable coordination bound to owner, task/run, dispatch, request and host session. The same observed owner may accept in a later process; all existing artifact/native/receipt validations still run. The response `owner_window.status=held` requires the trusted host to use the shipped `settlePreparation(request, opaqueLiveAdapter)` after actual tool/process-family and CLI joins; the canonical phase flow below supplies its wrapper and ordinary-CLI integration. Failed attempts with no invocation proved by the live host can use `forge-doctor.settleFailedPreparation(request, adapter)` and `createPreparationSettlementAdapter`; follow `shared/forge-owner-recovery.md § Failed preparation with no invocation`. `runCliPreparation` attempts that settlement at both failed CLI-return boundaries; a false provider flag alone cannot release the window. Unknown writers and retained candidates keep the existing reconciliation path. Ready is not that join. A repeated start of a pending dispatch is refused. Without observed ownership the legacy strict-snapshot path remains; it gains no serialized capability. Foreign ownership is refused. No historical saved candidate gains a broker anchor.
 
 ## Initialize task (skip if resume mode)
 
@@ -599,10 +599,18 @@ writer. `invokeNative(invocation)` must call the actually exposed host tool
 with `invocation.args`, join its real family, and return
 `{rawResult, providerCalled:true}` only from observed provider-start evidence.
 It is a binding supplied by the trusted host, not a Node SDK for Agent.
-The branded adapter comes from `createTransportAdapter(liveAttestStopped)`;
-its synchronous callback must match each challenge hash and attest actual
-joins with `joined:true, possible_writers:0, reference`. Never construct that
-proof from JSON consent, receipt readiness, process age or a PID lookup.
+Construct `ownerTransportAdapter` with the shipped
+`forge-doctor.createPreparationSettlementAdapter({hostRuntime,
+observeWriters, reconcile})`. Both synchronous callbacks use actual observations
+from the host's exposed tools; the factory binds the observed session and
+challenge hash. `observeWriters` returns complete coverage, actual joined writer
+references, `joined:true`, `possible_writers:0` and a real tool/event `reference`.
+For a failed attempt it also proves `no_invocation_observed:true` and explicitly
+acknowledges `unmeasured_code_contents_acknowledged:true`. `reconcile` returns
+`reconciled:true` with its actual controls/root evidence `reference`. This adapter
+supports both the existing ready settlement and the limited failed path; the
+legacy `createTransportAdapter(liveAttestStopped)` does not add those observations.
+Never construct proof from JSON consent, receipt readiness, age or PID absence.
 Without this live binding the wrapper refuses before start. Its native route
 does not override engine/model selection; normal sidecar orchestration remains
 canonical. An unexpected invoke-sidecar handoff retains its fence and requires
@@ -618,8 +626,11 @@ releases the window. Only then write identity, run, checkpoint or next-phase
 metadata. A ready receipt alone never releases it. A missing bridge is
 conditional unavailability: use the existing live callback preparation API,
 or stop before opening a CLI attempt; do not pretend Node can call host tools.
-Unknown writers, failed receipts and raw surface drift retain the window and
-follow explicit reconciliation/recovery, separately from successful settlement.
+For an exact failed receipt with no invocation independently proved, call
+`await forgeDoctor.settleFailedPreparation(request, adapter)` with that same
+observed preparation adapter; it preserves the failed receipt/outcome and uses
+the limited profile in `shared/forge-owner-recovery.md`. Unknown writers, retained
+candidates and raw surface drift keep the explicit reconciliation/recovery path.
 
 Start the phase with:
 
@@ -1798,7 +1809,7 @@ that were actually produced, then re-run the two `forge-delivery.js` materializa
 `shared/forge-delivery.md`. Re-render `## Entrega por critério`; do not infer merge,
 installation or human acceptance, and do not turn review availability into criterion success.
 
-**Event log** — append the `review` line to `.gsd/forge/events.jsonl` (`shared/forge-review.md § Step 8`, with `"unit":"task/{TASK_ID}"`).
+**Event log** — call the canonical `forge-review-emit.js` writer (`shared/forge-review.md § Step 8`) with `--cwd "$WORKING_DIR" --unit "task/{TASK_ID}"`, plus the resolved review pairing, rounds, counts and actual effort arguments from that step. Omit `--milestone` and `--slice`: a standalone review does not acquire those axes. The unavailable-agent companion uses the same task unit.
 
 **Follow-up commit** (only if `auto_commit: true` AND a `{TASK_ID}-REVIEW.md` was written):
 ```bash

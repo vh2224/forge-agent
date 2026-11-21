@@ -46,7 +46,7 @@
  * separates them.
  *
  * CLI:
- *   node forge-review-emit.js --cwd <dir> --milestone <id> --slice <id>
+ *   node forge-review-emit.js --cwd <dir> (--milestone <id> --slice <id> | --unit task/<id>)
  *     [--events <file>] [--style dialectic|flags] [--rounds N]
  *     [--engine agents|workflow] --author-engine claude|codex|gemini
  *     [--challenger claude|codex|gemini] [--advocate <alias>]
@@ -123,14 +123,27 @@ function parseArgs(argv) {
  * non-empty only for caller mistakes the emitter refuses to paper over —
  * a missing scope, an out-of-enum value, a negative count.
  */
+function reviewScope(options, errors, required = true) {
+  const milestone = typeof options.milestone === 'string' ? options.milestone.trim() : '';
+  const slice = typeof options.slice === 'string' ? options.slice.trim() : '';
+  if (options.unit !== undefined) {
+    const unit = typeof options.unit === 'string' ? options.unit : '';
+    if (!/^task\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(unit)) {
+      errors.push('--unit must be a standalone task/<id> with a bounded literal id');
+    }
+    if (options.milestone !== undefined || options.slice !== undefined) errors.push('--unit cannot be combined with --milestone or --slice');
+    return { unit };
+  }
+  if (required && milestone === '') errors.push('--milestone is required (RUN_ID or {M###})');
+  if (required && slice === '') errors.push('--slice is required ({S##} or {TASK_ID})');
+  return { milestone, slice };
+}
+
 function buildReviewEvent(opts) {
   const errors = [];
   const options = opts || {};
 
-  const milestone = typeof options.milestone === 'string' ? options.milestone.trim() : '';
-  const slice = typeof options.slice === 'string' ? options.slice.trim() : '';
-  if (milestone === '') errors.push('--milestone is required (RUN_ID or {M###})');
-  if (slice === '') errors.push('--slice is required ({S##} or {TASK_ID})');
+  const scope = reviewScope(options, errors);
 
   const style = options.style === undefined ? 'dialectic' : String(options.style).toLowerCase();
   if (!STYLES.includes(style)) errors.push(`--style must be one of ${STYLES.join('|')}`);
@@ -219,8 +232,7 @@ function buildReviewEvent(opts) {
   const event = {
     ts: options.ts || new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
     event: 'review',
-    milestone,
-    slice,
+    ...scope,
     style,
     rounds,
     counts,
@@ -239,6 +251,7 @@ function buildReviewEvent(opts) {
 function buildUnavailableEvent(opts) {
   const errors = [];
   const options = opts || {};
+  const scope = reviewScope(options, errors, false);
   const reason = String(options.unavailableReason || '');
   if (!UNAVAILABLE_REASONS.includes(reason)) {
     errors.push(`--unavailable-reason must be one of ${UNAVAILABLE_REASONS.join('|')}`);
@@ -248,8 +261,7 @@ function buildUnavailableEvent(opts) {
     event: {
       ts: options.ts || new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
       event: 'review-agent-unavailable',
-      milestone: typeof options.milestone === 'string' ? options.milestone.trim() : '',
-      slice: typeof options.slice === 'string' ? options.slice.trim() : '',
+      ...scope,
       reason,
       attempts,
     },
@@ -325,6 +337,7 @@ function runCli(argv) {
   const file = typeof flags.events === 'string' ? flags.events : eventsPathFor(cwd);
 
   const opts = {
+    unit: flags.unit,
     milestone: flags.milestone,
     slice: flags.slice,
     style: flags.style,
@@ -353,6 +366,7 @@ function runCli(argv) {
 
   if (flags['unavailable-reason'] !== undefined) {
     const companion = buildUnavailableEvent({
+      unit: opts.unit,
       milestone: opts.milestone,
       slice: opts.slice,
       unavailableReason: flags['unavailable-reason'],
@@ -379,7 +393,7 @@ function runCli(argv) {
   } else {
     const shape = built.event.intra_family_debate ? ' intra-family=TRUE' : '';
     process.stdout.write(
-      `review event: ${built.event.milestone}/${built.event.slice} ` +
+      `review event: ${built.event.unit || `${built.event.milestone}/${built.event.slice}`} ` +
         `author=${built.event.author_engine} challenger=${built.event.challenger} ` +
         `advocate=${built.event.advocate}${shape}\n`
     );

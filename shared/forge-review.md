@@ -1662,6 +1662,8 @@ node "$FORGE_SCRIPTS_DIR/forge-review-emit.js" --cwd "$WORKING_DIR" \
   --intra-family-withdrawn N
 ```
 
+For a standalone task, replace both `--milestone` and `--slice` with `--unit "task/{TASK_ID}"`; keep the same resolved pairing, rounds, counts and optional effort arguments. The task identifier is the current parent-derived task ID, never an invented milestone. Task and milestone/slice scope flags are mutually exclusive. The canonical writer also carries the task unit on an unavailable-agent companion. Existing milestone review rows are unchanged when `--unit` is absent.
+
 Exit 2 means the invocation was malformed and **nothing was written** — fix the arguments and re-run; do not fall back to appending a hand-built line. I/O errors propagate (no silent-fail), same posture as before.
 
 Shape written (documented for **readers of the log**, not for retyping — the emitter is the only writer):

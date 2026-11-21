@@ -1466,7 +1466,7 @@ async function acceptArtifactResultCore(request, rawResult, metadata = {}, publi
   }
   xllm.assertUntrustedOutputBarrier(rawResult);
   const artifacts = rawResult.status === 'done' ? rawResult.artifacts : [];
-  const planContract = request.phase === 'plan' && rawResult.status === 'done'
+  const planContract = request.scope === 'standalone-task' && request.phase === 'plan' && rawResult.status === 'done'
     ? require('./forge-task-preparation').preflightPlan(request, artifacts[0].content) : null;
   const pendingQuestions = require('./forge-interaction').mergePendingQuestions(request.pending_questions || [], rawResult.questions || []);
   const record = { phase: 'ready', fingerprint, dispatch_id: request.dispatchId,
@@ -1499,7 +1499,7 @@ async function reconcileArtifactAttempt(request, options) {
       xllm.assertUntrustedOutputBarrier(result);
       const checked = inspectArtifacts(result, loc.allowed, loc.required, Infinity, loc.rules, { forbidArtifactsOnNonDone: loc.preparation === true });
       if (!checked.ok) fail('invalid-artifact-result');
-      if (request.phase === 'plan' && result.status === 'done') require('./forge-task-preparation').preflightPlan(request, result.artifacts[0].content);
+      if (request.scope === 'standalone-task' && request.phase === 'plan' && result.status === 'done') require('./forge-task-preparation').preflightPlan(request, result.artifacts[0].content);
       const savedBytes = milestonePlanSlice(request) ? fs.readFileSync(files.receiptFile) : null;
       if (savedBytes && hash(savedBytes) !== child.original_receipt_sha256) fail('reconciliation-receipt-raced');
       const saved = savedBytes ? JSON.parse(savedBytes) : null;
@@ -2036,11 +2036,15 @@ function normalizedNativeFailure(request) {
       || typeof raw.reason_code !== 'string' || !/^[a-z0-9-]{1,80}$/.test(raw.reason_code)) {
     fail('native-memory-failure-invalid', 'Native memory failure requires a bounded machine-readable reason_code.');
   }
-  if (raw.provider_called === true) nativeMemoryIdentity(request, raw.telemetry);
+  const providerCalled = raw.provider_called === undefined ? 'unknown' : raw.provider_called;
+  if (providerCalled !== true && providerCalled !== false && providerCalled !== 'unknown') {
+    fail('native-memory-failure-invalid', 'Native memory failure provider_called must be true, false or unknown.');
+  }
+  if (providerCalled === true) nativeMemoryIdentity(request, raw.telemetry);
   const telemetry = memoryTelemetry({ telemetry: raw.telemetry || null });
   return {
     status: 'failure', reason_code: raw.reason_code,
-    provider_called: raw.provider_called === true,
+    provider_called: providerCalled,
     telemetry,
     publication: { status: 'noop', reason: 'worker-error' },
   };
@@ -4027,7 +4031,7 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
             fail('artifact-direct-write-detected');
           }
         }
-        if (r.phase === 'plan' && result.status === 'done') saved.plan_contract = require('./forge-task-preparation').preflightPlan(r, result.artifacts[0].content);
+        if (r.scope === 'standalone-task' && r.phase === 'plan' && result.status === 'done') saved.plan_contract = require('./forge-task-preparation').preflightPlan(r, result.artifacts[0].content);
         saved.pending_questions = require('./forge-interaction').mergePendingQuestions(r.pending_questions || [], result.questions || []);
         json(receiptFile, saved);
       }

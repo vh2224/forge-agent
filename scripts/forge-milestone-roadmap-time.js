@@ -18,10 +18,12 @@
 // NODE IDs: a node whose covers all lie in the deferrals is deferred, linked_task.nodes are the moved nodes, and
 // edges come from node.depends plus explicit edges.
 //
-// Execution mapping: the allocation kind is the lifecycle anchor, in ALLOCATION_KINDS order
-// (preparation < slice < integration < review < corrections). "A depends on B" holds when A's row has a later kind
-// than B's row; two slice rows need the roadmap slice of A to reach that of B; two rows of the same non-slice kind
-// follow allocation array order (A's row after B's); the same non-slice row proves nothing and is refused.
+// Execution mapping: allocation array order declares chronology, including repeated
+// slice -> review -> corrections stages. Kinds constrain roles, not global phase order.
+// Every prerequisite row must precede its dependent row. Two slice rows additionally
+// need the roadmap slice of A to reach that of B. A shared slice row retains its
+// internal task ordering; distinct rows still declare chronology even in one
+// slice. The same non-slice row proves nothing and is refused.
 // Node kinds allow only: delivery -> slice, gate -> integration|review, integration|review|corrections|preparation -> own kind;
 // unknown kinds behave as delivery. Refined parts inherit the kind of their parent node.
 //
@@ -320,12 +322,31 @@ function validateRoadmap(inspected, expected) {
     if (visited.has(from)) return false; visited.add(from);
     return (roadmapSlices.get(from) || []).some(next => reaches(next, to, visited));
   }
-  const rank = r => ALLOCATION_KINDS.indexOf(r.kind);
+  const positions = new Map(s.allocation.map((row, index) => [row, index]));
   for (const e of expected.edges) {
     for (const a of rowsOf.get(e.from)) for (const b of rowsOf.get(e.to)) {
-      if (rank(a) < rank(b)) return refuse('roadmap-time-edge-inverted', { edge: edgeKey(e) });
-      const ordered = rank(a) > rank(b) || (a.kind === 'slice' ? reaches(a.slice, b.slice) : s.allocation.indexOf(a) > s.allocation.indexOf(b));
+      if (a.kind !== b.kind && positions.get(a) < positions.get(b)) return refuse('roadmap-time-edge-inverted', { edge: edgeKey(e) });
+      const sameSlice = a.kind === 'slice' && b.kind === 'slice' && a.slice === b.slice;
+      const ordered = a === b && sameSlice || positions.get(a) > positions.get(b)
+        && (a.kind !== 'slice' || b.kind !== 'slice' || reaches(a.slice, b.slice));
       if (!ordered) return refuse('roadmap-time-edge-unmapped', { edge: edgeKey(e) });
+    }
+  }
+  // Quality rows between slices are real barriers too. The scheduler follows
+  // ROADMAP dependencies, so array order alone cannot prove a transitive
+  // slice prerequisite through review/correction/integration nodes.
+  const prerequisites = new Map([...scope.keys()].map(node => [node, []]));
+  for (const e of expected.edges) prerequisites.get(e.from).push(e.to);
+  for (const [from, slices] of slicesOf) {
+    if (!slices.size) continue;
+    const visited = new Set(), pending = [...prerequisites.get(from)];
+    while (pending.length) {
+      const to = pending.pop();
+      if (visited.has(to)) continue;
+      visited.add(to); pending.push(...prerequisites.get(to));
+      for (const a of slices) for (const b of slicesOf.get(to)) {
+        if (!reaches(a, b)) return refuse('roadmap-time-edge-unmapped', { edge: from + '>' + to });
+      }
     }
   }
   const total = s.allocation.reduce((sum, r) => sum + r.ms, 0);

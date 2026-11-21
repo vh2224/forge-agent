@@ -415,6 +415,258 @@ try {
     write(f.cwd, f.deliveryRef, Buffer.alloc(1024 * 1024 + 1)); assert.equal(read().proven.length, 0);
     write(f.cwd, f.deliveryRef, '{'); assert.equal(read().proven.length, 0);
   });
+  test('record-candidate-seam-is-the-controller-addressing-and-refuses-other-kinds', () => {
+    const f = setup();
+    for (const kind of ['transaction', 'result']) {
+      const candidates = controller.recordCandidatePaths(f.cwd, kind, 'fixture-complete');
+      assert(Object.isFrozen(candidates)); assert.equal(candidates.length, 2);
+      assert.equal(candidates[0], kind === 'transaction' ? controller.transactionFile(f.cwd, 'fixture-complete') : controller.resultFile(f.cwd, 'fixture-complete'));
+      assert.throws(() => candidates.push('foreign'), TypeError);
+      assert.deepEqual(controller.recordCandidatePaths(f.cwd, kind, 'fixture-complete'), candidates);
+      assert.equal(controller.recordCandidatePaths(f.cwd, kind, 'x'.repeat(260)).length, 1);
+      assert(candidates.length <= 2, 'structural prerequisite only, not an aggregate-guard exercise');
+    }
+    assert.equal(2 * 1024 * 1024, phase.MAX_BYTES);
+    const legacy = controller.recordCandidatePaths(f.cwd, 'transaction', 'fixture-complete')[1];
+    write(f.cwd, path.relative(f.cwd, legacy), {});
+    assert.equal(controller.transactionFile(f.cwd, 'fixture-complete'), legacy);
+    for (const args of [[f.cwd, 'boundary', 'key'], [f.cwd, 'other', 'key'], [f.cwd, 'transaction', 1],
+      ['', 'transaction', 'key'], [f.cwd, 'result', '']]) {
+      assert.throws(() => controller.recordCandidatePaths(...args), e => e instanceof controller.ControllerError && e.code === 'invalid-request');
+    }
+  });
+  test('canonical-completion-reads-only-target-candidates-beyond-unrelated-history-limits', () => {
+    const f = deliveredFixture(), read = () => clock.readDeliveries({ ...f, slices: ['S01'] });
+    assert.equal(read().proven.length, 1);
+    const directories = [controller.transactionDir(f.cwd), controller.resultDir(f.cwd)];
+    for (const [index, kind] of ['transaction', 'result'].entries()) {
+      for (let i = 0; i < 300; i++) fs.writeFileSync(controller.recordCandidatePaths(f.cwd, kind, 'unrelated-' + i)[0], JSON.stringify({ padding: 'x'.repeat(8192) }));
+      fs.writeFileSync(controller.recordCandidatePaths(f.cwd, kind, 'unrelated-oversize')[0], Buffer.alloc(1024 * 1024 + 1));
+      fs.writeFileSync(controller.recordCandidatePaths(f.cwd, kind, 'unrelated-malformed')[0], '{');
+      const names = fs.readdirSync(directories[index]).filter(name => name.endsWith('.json'));
+      assert(names.length > 256);
+      assert(names.filter(name => !controller.recordCandidatePaths(f.cwd, kind, 'fixture-complete').includes(path.join(directories[index], name)))
+        .reduce((bytes, name) => bytes + fs.statSync(path.join(directories[index], name)).size, 0) > phase.MAX_BYTES);
+    }
+    const before = snapshot(f.cwd), original = fs.readdirSync;
+    let recordEnumerations = 0;
+    try {
+      fs.readdirSync = function(file, ...args) {
+        if (directories.includes(path.resolve(String(file)))) recordEnumerations++;
+        return original.call(this, file, ...args);
+      };
+      for (const result of [read(), clock.readHistoricalDeliveries({ ...f, slices: ['S01'] })]) {
+        assert.equal(result.proven.length, 1, JSON.stringify(result)); assert.deepEqual(result.unproven, []);
+      }
+      assert.equal(recordEnumerations, 0);
+    } finally { fs.readdirSync = original; }
+    assert.deepEqual(snapshot(f.cwd), before);
+  });
+  test('canonical-completion-legacy-candidates-preserve-compatible-copies', () => {
+    const f = deliveredFixture(), read = () => clock.readDeliveries({ ...f, slices: ['S01'] });
+    const [hashed, legacy] = controller.recordCandidatePaths(f.cwd, 'transaction', 'fixture-complete');
+    const original = fs.readFileSync(hashed), record = controller.lookupRecord(f.cwd, 'transaction', 'fixture-complete');
+    assert.equal(read().proven.length, 1);
+    try { fs.writeFileSync(legacy, JSON.stringify(record)); assert.equal(read().proven.length, 1, 'identical checksum-free secondary legacy'); }
+    finally { fs.unlinkSync(legacy); }
+    assert.equal(read().proven.length, 1);
+    const anchored = { ...record, legacy_only: true };
+    try {
+      fs.writeFileSync(legacy, JSON.stringify(anchored));
+      controller.writeAtomic(hashed, record, false, { legacyRecordChecksum: controller.recordChecksum(anchored) });
+      assert.equal(read().proven.length, 1, 'anchored divergent legacy');
+    } finally { fs.writeFileSync(hashed, original); fs.unlinkSync(legacy); }
+    assert.equal(read().proven.length, 1);
+    fs.renameSync(hashed, legacy);
+    try {
+      assert.equal(read().proven.length, 1, 'checksummed legacy-only transaction');
+      fs.writeFileSync(legacy, JSON.stringify(record));
+      assert.equal(read().unproven[0].reason, 'delivery-completion-checksum-missing');
+    } finally { fs.writeFileSync(legacy, original); fs.renameSync(legacy, hashed); }
+    assert.equal(read().proven.length, 1);
+  });
+  test('canonical-completion-candidate-negatives-keep-exact-refusals', () => {
+    const f = deliveredFixture(), read = () => clock.readDeliveries({ ...f, slices: ['S01'] });
+    const [hashed, legacy] = controller.recordCandidatePaths(f.cwd, 'transaction', 'fixture-complete');
+    const record = JSON.parse(fs.readFileSync(hashed)), clean = controller.lookupRecord(f.cwd, 'transaction', 'fixture-complete');
+    const exercise = (file, contents, reason) => {
+      assert.equal(read().proven.length, 1);
+      const original = fs.existsSync(file) ? fs.readFileSync(file) : null;
+      try {
+        fs.writeFileSync(file, Buffer.isBuffer(contents) || typeof contents === 'string' ? contents : JSON.stringify(contents));
+        assert.equal(read().unproven[0].reason, reason, file);
+      } finally { if (original) fs.writeFileSync(file, original); else fs.unlinkSync(file); }
+      assert.equal(read().proven.length, 1);
+    };
+    exercise(hashed, Buffer.alloc(1024 * 1024 + 1), 'clock-source-limit');
+    exercise(legacy, Buffer.alloc(1024 * 1024 + 1), 'clock-source-limit');
+    exercise(hashed, '{', 'clock-source-json-invalid');
+    exercise(hashed, Buffer.from([255]), 'clock-source-encoding');
+    exercise(hashed, clean, 'delivery-completion-checksum-missing');
+    exercise(hashed, { ...record, storage_checksum: 'zz' }, 'delivery-completion-checksum-missing');
+    exercise(legacy, { ...record, storage_checksum: 'zz' }, 'delivery-completion-checksum-missing');
+    exercise(hashed, { ...record, storage_checksum: '0'.repeat(64) }, 'delivery-completion-invalid');
+    exercise(legacy, { ...record, storage_checksum: '0'.repeat(64) }, 'delivery-completion-invalid');
+    exercise(legacy, { ...clean, divergent: true }, 'delivery-completion-invalid');
+    exercise(legacy, null, 'delivery-completion-invalid');
+    exercise(hashed, fs.readFileSync(controller.transactionFile(f.cwd, 'fixture-begin')), 'delivery-completion-invalid');
+    assert.equal(read().proven.length, 1);
+    fs.mkdirSync(legacy);
+    try { assert.equal(read().unproven[0].reason, 'clock-source-invalid'); }
+    finally { fs.rmdirSync(legacy); }
+    assert.equal(read().proven.length, 1);
+    for (const kind of ['transaction', 'result']) {
+      const files = controller.recordCandidatePaths(f.cwd, kind, 'fixture-complete'), bytes = fs.readFileSync(files[0]);
+      assert(!fs.existsSync(files[1])); assert.equal(read().proven.length, 1);
+      try { fs.unlinkSync(files[0]); assert.equal(read().unproven[0].reason, 'delivery-completion-record-missing'); }
+      finally { fs.writeFileSync(files[0], bytes); }
+      assert.equal(read().proven.length, 1);
+    }
+    const directory = controller.transactionDir(f.cwd), moved = path.join(root(), 'transactions');
+    fs.renameSync(directory, moved);
+    try { assert.equal(read().unproven[0].reason, 'delivery-completion-record-missing'); }
+    finally { fs.renameSync(moved, directory); }
+    assert.equal(read().proven.length, 1);
+    for (const directoryLink of [false, true]) {
+      const linked = deliveredFixture(), observe = () => clock.readDeliveries({ ...linked, slices: ['S01'] });
+      assert.equal(observe().proven.length, 1);
+      const target = root(), candidate = controller.recordCandidatePaths(linked.cwd, 'transaction', 'fixture-complete')[1];
+      const link = directoryLink ? controller.transactionDir(linked.cwd) : candidate;
+      const saved = path.join(target, 'transactions');
+      if (directoryLink) fs.renameSync(link, saved);
+      try {
+        fs.symlinkSync(directoryLink ? saved : target, link, process.platform === 'win32' ? 'junction' : 'dir');
+        assert.equal(observe().unproven[0].reason, 'clock-path-link');
+      } finally {
+        fs.unlinkSync(link);
+        if (directoryLink) fs.renameSync(saved, link);
+      }
+      assert.equal(observe().proven.length, 1);
+    }
+  });
+  // Complete public fixtures for many slices of one milestone, each with its own plan,
+  // verification envelope, delivery input/projection and controller completion.
+  function manySlicesFixture(total) {
+    const f = setup(), cwd = f.cwd, ids = [];
+    write(cwd, '.gsd/forge/time/M001/contract.json', { ...contract(), ceiling_ms: 1e9 });
+    for (let i = 1; i <= total; i++) ids.push('S' + String(i).padStart(3, '0'));
+    let tick = 1;
+    for (const id of ids) {
+      const src = `scripts/result-${id}.js`; write(cwd, src, 'module.exports = 1;\n');
+      const planRef = `.gsd/milestones/M001/slices/${id}/${id}-PLAN.md`;
+      const plan = `---\nid: ${id}\nwrites:\n  - ${src}\nmust_haves:\n  truths:\n    - observable fixture behavior\n  artifacts:\n    - path: ${src}\n      provides: result\n      min_lines: 1\n  key_links: []\nexpected_output:\n  - ${src}\n---\n`;
+      write(cwd, planRef, plan);
+      const unit = { type: 'slice', id, milestone: M }, contents = fs.readFileSync(path.join(cwd, src));
+      const blob = crypto.createHash('sha1').update(Buffer.from(`blob ${contents.length}\0`)).update(contents).digest('hex');
+      const envelopeRef = `.gsd/milestones/M001/slices/${id}/verify.json`;
+      write(cwd, envelopeRef, { schema_version: 1, kind: 'verification', unit, plan_fingerprint: hash(plan), code_dir: cwd,
+        revision: 'fixture-revision', workspace: [{ path: src, hash: blob }], environment: 'hermetic-fixture', captured_at: iso(1),
+        result: { passed: true, checks: [{ command: 'fixture-observable-result', exit_code: 0 }] } });
+      const input = { schema_version: 1, unit, plan: planRef, plan_fingerprint: hash(plan), bindings: [
+        { criterion: { kind: 'truth', index: 0 }, aspect: 'default', coverage: 'behavioral', source: { kind: 'verification', path: envelopeRef, check_index: 0 } },
+        { criterion: { kind: 'artifact', index: 0 }, aspect: 'declared-property', coverage: 'structural', source: { kind: 'verification', path: envelopeRef, check_index: 0 } }] };
+      const deliveryRef = `.gsd/milestones/M001/slices/${id}/${id}-DELIVERY.json`;
+      write(cwd, deliveryRef.replace('-DELIVERY.json', '-DELIVERY-INPUT.json'), input);
+      write(cwd, deliveryRef, delivery.buildDelivery(input, { ownerRoot: cwd, codeDir: cwd }));
+      require('./forge-state').write(cwd, { milestone: M, kind: 'milestone', phase: 'complete-slice', active_slice: id, active_task: '—', next_action: 'complete', auto_mode: 'on' });
+      const request = { milestone: M, slice: id, unit: 'complete-slice/' + id, host_runtime: 'codex', owner_token: 'fixture-owner', session: 'fixture' };
+      const options = { now: () => BASE + 1 + tick++, prefsReader: () => ({ ok: true, prefs: {} }), inventoryReader: () => ({ slices: ids.map(s => ({ id: s, tasks: [] })) }) };
+      const begun = controller.begin(cwd, { ...request, idempotency_key: 'begin-' + id }, options);
+      const completed = controller.complete(cwd, { ...request, generation: begun.generation, idempotency_key: 'complete-' + id, result: { status: 'succeeded' } }, options);
+      assert.equal(completed.transaction.phase, 'committed');
+    }
+    return { ...f, ids, now: BASE + 100000, currentHashReader: fixtureCurrentHash };
+  }
+  test('absent-legacy-candidates-do-not-consume-existing-file-cache-slots', () => {
+    const f = manySlicesFixture(130), lstat = fs.lstatSync, present = new Set(), missing = new Set();
+    let result;
+    try {
+      fs.lstatSync = function(file, ...args) {
+        try {
+          const stat = lstat.call(this, file, ...args);
+          if (stat.isFile() && path.resolve(String(file)).startsWith(path.resolve(f.cwd) + path.sep)) present.add(path.resolve(String(file)));
+          return stat;
+        } catch (e) { if (e.code === 'ENOENT') missing.add(path.resolve(String(file))); throw e; }
+      };
+      result = clock.readDeliveries({ ...f, slices: f.ids });
+    } finally { fs.lstatSync = lstat; }
+    const cacheable = [...present].filter(file => !/[\\/](?:contract\.json|M001-events\.jsonl|STATE\.md|forge-state\.json)$/.test(file)
+      && /[\\/](?:slices|transactions|results)[\\/]|result-S\d+\.js$/.test(file));
+    const absent = [...missing].filter(file => /[\\/](?:transactions|results)[\\/]/.test(file));
+    // Calibrate the boundary from observed behavior: existing files alone fit in 1024
+    // entries while existing plus the absent optional candidates do not.
+    assert(cacheable.length < 1024, 'existing delivery sources fit the 1024-file cap: ' + cacheable.length);
+    assert(absent.length >= 1 && cacheable.length + absent.length > 1024, `absent candidates would cross the cap: ${cacheable.length}+${absent.length}`);
+    assert.equal(result.status, 'observed', JSON.stringify({ status: result.status, reason: result.reason }));
+    assert.equal(result.proven.length, f.ids.length); assert.deepEqual(result.unproven, []);
+  });
+  test('absent-candidate-appearing-before-final-reread-is-detected', () => {
+    const f = deliveredFixture(), read = () => clock.readDeliveries({ ...f, slices: ['S01'] });
+    assert.equal(read().proven.length, 1);
+    const legacy = controller.recordCandidatePaths(f.cwd, 'transaction', 'fixture-complete')[1];
+    assert.equal(fs.existsSync(legacy), false);
+    const bytes = fs.readFileSync(controller.transactionFile(f.cwd, 'fixture-complete')), lookup = controller.lookupRecord;
+    let intercepted = 0;
+    try {
+      controller.lookupRecord = function(cwd, kind, key, ...args) {
+        if (cwd === f.cwd && kind === 'transaction' && key === 'fixture-complete' && !intercepted++) fs.writeFileSync(legacy, bytes);
+        return lookup.call(this, cwd, kind, key, ...args);
+      };
+      const result = read();
+      assert.equal(intercepted >= 1, true);
+      assert.equal(result.status, 'unknown', JSON.stringify(result.unproven)); assert.equal(result.reason, 'clock-source-unstable'); assert.equal(result.proven.length, 0);
+    } finally { controller.lookupRecord = lookup; fs.rmSync(legacy, { force: true }); }
+    assert.equal(read().proven.length, 1);
+  });
+  test('canonical-completion-lookup-divergence-and-unchanged-chronology-checks-fail-closed', () => {
+    const f = deliveredFixture(), read = () => clock.readDeliveries({ ...f, slices: ['S01'] });
+    const file = controller.transactionFile(f.cwd, 'fixture-complete'), bytes = fs.readFileSync(file);
+    const record = controller.lookupRecord(f.cwd, 'transaction', 'fixture-complete'), lookup = controller.lookupRecord;
+    for (const changed of [false, true]) {
+      assert.equal(read().proven.length, 1);
+      let intercepted = 0;
+      try {
+        controller.lookupRecord = function(cwd, kind, key, ...args) {
+          if (cwd !== f.cwd || kind !== 'transaction' || key !== 'fixture-complete') return lookup.call(this, cwd, kind, key, ...args);
+          intercepted++;
+          try {
+            controller.writeAtomic(file, changed ? { ...record, benign_extra: true } : record);
+            return lookup.call(this, cwd, kind, key, ...args);
+          } finally { fs.writeFileSync(file, bytes); }
+        };
+        const result = read(); assert.equal(result.status, 'observed', 'restored cache revalidates');
+        if (changed) assert.equal(result.unproven[0].reason, 'delivery-completion-unproven');
+        else { assert.equal(result.proven.length, 1); assert.deepEqual(result.unproven, []); }
+        assert.equal(intercepted, 1);
+      } finally { controller.lookupRecord = lookup; }
+      assert.equal(read().proven.length, 1);
+    }
+    const resultFile = controller.resultFile(f.cwd, 'fixture-complete');
+    const mutations = [
+      [file, value => { value.boundary.committed_at = iso(0); }],
+      [file, value => { value.updated_at = iso(0); }],
+      [file, value => { value.boundary.handoff_ready = false; }],
+      [file, value => { value.boundary.result_ref = '.gsd/forge/results/foreign.json'; }],
+      [resultFile, value => { value.milestone = 'M002'; }],
+    ];
+    for (const [target, mutate] of mutations) {
+      assert.equal(read().proven.length, 1);
+      const original = fs.readFileSync(target), value = JSON.parse(original); delete value.storage_checksum;
+      try {
+        mutate(value); controller.writeAtomic(target, value);
+        assert.equal(read().unproven[0].reason, 'delivery-completion-unproven');
+      } finally { fs.writeFileSync(target, original); }
+      assert.equal(read().proven.length, 1);
+    }
+    const events = controller.eventsFile(f.cwd, M), originalEvents = fs.readFileSync(events);
+    try {
+      const rows = originalEvents.toString('utf8').trim().split('\n').map(JSON.parse);
+      rows.find(row => row.idempotency_key === 'fixture-complete').benign_extra = true;
+      fs.writeFileSync(events, rows.map(JSON.stringify).join('\n') + '\n');
+      assert.equal(read().unproven[0].reason, 'delivery-completion-unproven');
+    } finally { fs.writeFileSync(events, originalEvents); }
+    assert.equal(read().proven.length, 1);
+  });
   test('delivery-recursive-child-inputs-and-complete-slice-inventory', () => {
     const f = deliveredFixture(), unit = { type: 'task', id: 'T01', slice: 'S01', milestone: M };
     const childPlanRef = '.gsd/milestones/M001/slices/S01/tasks/T01/T01-PLAN.md';

@@ -150,6 +150,12 @@ function recordPaths(cwd, kind, key) {
   const legacy = `${encode(key)}.json`;
   return [file, ...(legacy.length <= 255 ? [path.join(path.dirname(file), legacy)] : [])];
 }
+// The same candidate list used by lookupRecord, saveRecord and readJson.
+function recordCandidatePaths(cwd, kind, key) {
+  if (!['transaction', 'result'].includes(kind) || typeof cwd !== 'string' || !cwd.trim()
+      || typeof key !== 'string' || !key.trim()) throw new ControllerError('invalid-request', 'candidatos exigem diretório, chave e tipo transaction/result válidos');
+  return Object.freeze([...recordPaths(cwd, kind, key)]);
+}
 function preferredRecordFile(cwd, kind, key) {
   const paths = recordPaths(cwd, kind, key);
   // Path selection must not read publications: diagnostic callers may locate
@@ -2271,10 +2277,12 @@ function failureAncestors(cwd, key) {
   while (failure) {
     if (keys.has(failure.idempotency_key)) throw new ControllerError('entry-ancestry-invalid', 'failure cycle');
     const checked = verifiedFailure(cwd, failure), begin = checked?.begin;
+    // Terminal failures encode the STATE no-slice sentinel as null.
+    const beginSlice = begin?.after?.state?.active_slice === '—' ? null : begin?.after?.state?.active_slice;
     if (!checked || begin.action !== 'begin' || begin.phase !== 'committed'
       || begin.unit.key !== failure.unit.key || begin.milestone !== failure.milestone
       || begin.owner_digest !== failure.owner_digest || begin.host_runtime !== failure.host_runtime
-      || begin.after.state.active_slice !== failure.terminal_failure.slice
+      || beginSlice !== failure.terminal_failure.slice
       || expected && (expected.failure_checksum !== sha(failure) || expected.unit !== failure.unit.key
         || expected.milestone !== failure.milestone || expected.slice !== failure.terminal_failure.slice
         || expected.owner_digest !== failure.owner_digest && !failure.owner_interruption || expected.host_runtime !== failure.host_runtime
@@ -3085,7 +3093,7 @@ module.exports = {
   withOwnerBoundary, verifyCommittedCompletionBoundary, pendingTransactions, incompleteUnits, pausePartial, pauseDecomposition, reconcilePartialSuccessors, inspectPausedAttempt, verifyCompletedAttempt, validatePausedEntry, projectLogicalHistory, logicalState, resolvePrefs,
   transactionDir, resultDir, boundaryDir, eventsFile, transactionFile,
   resultFile, boundaryFile, readEvents, readJson, writeAtomic,
-  lookupRecord, preflightPaths,
+  lookupRecord, recordCandidatePaths, preflightPaths,
   consumeFailure, reenter, failureProjection, validateLinkedEntry, validateTerminalLinkedEntry, inspectHistoricalLinkedEntry, recordChecksum, sliceClosure,
   // Issue 343 U5: the controller-terminal seam of a batch member's serial consolidation.
   prepareBatchTerminal, commitBatchTerminal,

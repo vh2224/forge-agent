@@ -1108,7 +1108,22 @@ The result's process-local `ownerTransfer` capability may be passed to
 scope and actual transfer evidence. A serialized capability grants nothing.
 After restart, revalidate current ownership and use the ordinary explicit bounded
 operator reconciliation for historical changes; never reconstruct a live handle
-from its JSON description. This is distinct from delivery-repair owner adoption.
+from its JSON description. If the transferred owner also stopped while the same
+attempt remained open, `resumeAttemptOwner` admits another distinct observed
+same-host owner only when the latest stopped-owner transfer ends at the current
+owner and binds the exact same request, parent receipt, begin and lease scope.
+That history supplies eligibility only: fresh authority, stopped-writer and
+pending-question callbacks, explicit owner-stop/quiescence attestations and all
+fenced source/claim/root checks remain required. The initial transfer still
+requires an inactive run. No active owner is deactivated from a JSON flag or age.
+If an exact `owner-delta-approval` was already answered before the new transfer,
+reconciliation may compose that approval with the latest live `ownerTransfer`.
+The capability captures the actual run and compatibility-mirror pre/postimages
+under the owner publication fence. Only those captured changes are projected back
+when matching the existing question's identity, text and delta. A different new
+note, receipt, scope or other metadata still needs its own matching approval;
+missing/serialized handles and unsupported historical chains grant nothing.
+This is distinct from delivery-repair owner adoption.
 
 `reconciliationDecision(request, operatorDecision, {hookEvidence})` can separate
 strictly attributed hook appends from the manual decision. `hookEvidence` contains
