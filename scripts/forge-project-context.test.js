@@ -63,7 +63,7 @@ for (const relative of active) {
   checkLinks(path.join(options.projectRoot, relative), file => projection.get(path.resolve(file)), file => projection.has(path.resolve(file)));
 }
 reconstruct(file => claude.stripOriginHeader(projection.get(path.resolve(options.projectRoot, file))));
-const successor = require('./fixtures/issue-439/distribution.cjs');
+const successor = require('./fixtures/issues-442-446/distribution.cjs');
 const currentSmoke = read('scripts/forge-smoke.js');
 assert.doesNotThrow(() => successor.previousSmoke(currentSmoke));
 assert.doesNotThrow(() => successor.predecessorSmoke(currentSmoke));
