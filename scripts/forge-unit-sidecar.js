@@ -2036,11 +2036,15 @@ function normalizedNativeFailure(request) {
       || typeof raw.reason_code !== 'string' || !/^[a-z0-9-]{1,80}$/.test(raw.reason_code)) {
     fail('native-memory-failure-invalid', 'Native memory failure requires a bounded machine-readable reason_code.');
   }
-  if (raw.provider_called === true) nativeMemoryIdentity(request, raw.telemetry);
+  const providerCalled = raw.provider_called === undefined ? 'unknown' : raw.provider_called;
+  if (providerCalled !== true && providerCalled !== false && providerCalled !== 'unknown') {
+    fail('native-memory-failure-invalid', 'Native memory failure provider_called must be true, false or unknown.');
+  }
+  if (providerCalled === true) nativeMemoryIdentity(request, raw.telemetry);
   const telemetry = memoryTelemetry({ telemetry: raw.telemetry || null });
   return {
     status: 'failure', reason_code: raw.reason_code,
-    provider_called: raw.provider_called === true,
+    provider_called: providerCalled,
     telemetry,
     publication: { status: 'noop', reason: 'worker-error' },
   };
