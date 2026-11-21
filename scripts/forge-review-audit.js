@@ -79,7 +79,7 @@ function expectedAlias(cwd) {
 function audit(events, cwd) {
   const expected = expectedAlias(cwd); let rows = [];
   try { rows = fs.readFileSync(events, 'utf8').split(/\r?\n/).filter(Boolean).map(x => { try { return JSON.parse(x); } catch { return null; } }); } catch { return { expected, drifts: [] }; }
-  return { expected, drifts: rows.filter(e => e && e.event === 'review' && 'advocate' in e && e.advocate !== expected).map(e => ({ milestone: e.milestone, slice: e.slice, advocate: e.advocate, expected })) };
+  return { expected, drifts: rows.filter(e => e && e.event === 'review' && 'advocate' in e && e.advocate !== expected).map(e => ({ ...(typeof e.unit === 'string' ? { unit: e.unit } : {}), milestone: e.milestone, slice: e.slice, advocate: e.advocate, expected })) };
 }
 function parse(args) {
   const o = {};

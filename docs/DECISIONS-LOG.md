@@ -583,3 +583,59 @@ inventariar a árvore, e a medição estrita continua recusando antes/depois. Is
 reproduz o limite de bytes, não o de500mil entradas. Fixtures sem provedor; revisão
 independente e integração permanecem gates separados. Não recupera o consumidor
 relatado nem resolve o limite global de20000entradas do owner observado no dogfood.
+
+### 2026-11-21 — Prova de conclusão lê só os candidatos canônicos (issue #445)
+
+**Problema.** A conclusão genuína podia ser recusada pelo censo de registros irmãos
+não relacionados, ao ultrapassar 256 nomes ou o orçamento agregado do histórico.
+
+**Decisão.** Remover a enumeração do histórico compartilhado, sem aumentar limites.
+O seam aditivo congelado recordCandidatePaths reutiliza o algoritmo do controller;
+o inventário exato da API inclui o export. Cada candidato do alvo passa pela leitura
+limitada antes de lookupRecord, que mantém checksum, identidade e âncora legada.
+Somente a cópia preferida exige storage_checksum; a secundária antiga pode omiti-lo.
+A comparação estável com a captura limitada recusa divergência entre leituras com
+delivery-completion-unproven. O guard agregado permanece como invariante defensivo:
+no máximo dois candidatos de 1 MiB somam o teto de 2 MiB; não se inventa teste que o
+acione sem mudar essa pré-condição estrutural. MAX_JSON, limite de slices (256) e
+cache (1024 arquivos/8 MiB) permanecem intactos.
+
+**Evidência e limite.** Fixtures herméticos cobrem histórico alheio acima dos dois
+limites antigos, arquivo alheio grande/malformado, compatibilidade legada, recusas
+exatas de tamanho/checksum/identidade/links e divergência entre leituras, incluindo
+restauração positiva e os checks de conclusão anteriores. Links em registros
+não relacionados deixam de ser inspecionados por esta prova; ancestrais e candidatos
+do alvo continuam rejeitados. A lacuna de hardlink é pré-existente: readSource e
+readBoundedStableFile não rejeitam nlink > 1; esta mudança não cria outra política.
+Fixture verde não é prova histórica real, nem de provider, CI, release ou instalação.
+Revisão independente e prova real do S01 ficam registradas pelo owner após o writer.
+
+**Pressão de cache por candidato legado ausente (q445-review-r1).** Mecanismo provado:
+cada conclusão inseria também os candidatos legados ausentes (transaction e result) em
+`deliveryCache.files`, e entradas sem bytes consumiam os 1024 slots reservados a
+arquivos existentes. Decisão: observações de ausência ficam em `deliveryCache.absent`,
+mapa separado, limitado a 1024 entradas (`delivery-source-limit`), sem bytes e sem
+ocupar `files`. A guarda `cache.files.size >= 1024 || cache.bytes > 8 * MAX_JSON`
+permanece idêntica; MAX_JSON, 256 slices e 8 MiB não mudam. A releitura final
+(`revalidateDeliveryCache`) cobre existentes e ausentes: candidato que aparece antes
+dela falha com `clock-source-unstable`. Compatibilidade legada, checksums, caminhos
+seguros e TOCTOU preservados.
+
+**Evidência e limite da reprodução.** RED antes da edição: milestone hermético com 130
+slices completas (fixtures públicos, controller real) comprovou só 113 das 130, e as
+demais recusaram por limite de cache; a calibração do teste afirma que os arquivos
+existentes cabem em 1024 mas existentes+ausentes não. GREEN depois: 130/130 provadas,
+mais teste de candidato legado que surge antes da releitura final. Isto prova o
+mecanismo de pressão no código atual. NÃO prova regressão contra o código antigo: não
+houve comparação completa antigo/atual, e a alegação original segue sem esse
+veredito. O wrapper source16 falhou aqui só por delta não relacionado
+(`.forge-claude-sidecar-*/prompt.txt` do próprio sidecar), não por esta mudança.
+
+
+## Standalone review telemetry scope (issue #446)
+
+Problem: the task review contract required `unit: task/<id>`, but the canonical emitter required milestone/slice and discarded the task unit. Callers could not meet both contracts without inventing scope or hand-writing an event.
+
+Decision: add an explicit, bounded `--unit task/<id>` mode, mutually exclusive with milestone/slice. Keep legacy milestone serialization and validation unchanged when no unit is supplied; use the same explicit task scope for unavailable-agent companions. Preserve the recorded task unit in advisory audit drift output. This adds no dispatch, authorization, provider, migration or preference behavior.
+
+Evidence: public builder/CLI coverage for task rows, companion rows, invalid/mixed scopes, no-write refusals, dry-run, and audit task identity, alongside existing byte-stable milestone tests. A disposable prototype demonstrated the old task-only refusal and the corrected behavior with zero provider calls. Actual source application is validated through the same repository tests before delivery; provider operation and client UI are outside this proof.

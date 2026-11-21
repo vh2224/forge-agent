@@ -1809,7 +1809,7 @@ that were actually produced, then re-run the two `forge-delivery.js` materializa
 `shared/forge-delivery.md`. Re-render `## Entrega por critério`; do not infer merge,
 installation or human acceptance, and do not turn review availability into criterion success.
 
-**Event log** — append the `review` line to `.gsd/forge/events.jsonl` (`shared/forge-review.md § Step 8`, with `"unit":"task/{TASK_ID}"`).
+**Event log** — call the canonical `forge-review-emit.js` writer (`shared/forge-review.md § Step 8`) with `--cwd "$WORKING_DIR" --unit "task/{TASK_ID}"`, plus the resolved review pairing, rounds, counts and actual effort arguments from that step. Omit `--milestone` and `--slice`: a standalone review does not acquire those axes. The unavailable-agent companion uses the same task unit.
 
 **Follow-up commit** (only if `auto_commit: true` AND a `{TASK_ID}-REVIEW.md` was written):
 ```bash

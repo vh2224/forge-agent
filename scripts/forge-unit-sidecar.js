@@ -494,6 +494,33 @@ function recoveryIdentity(request) {
   try { return require('./forge-code-roots').digest(require('./forge-attempt-recovery').requestIdentity(require('./forge-attempt-recovery').canonicalRequest(request))); }
   catch { return null; }
 }
+// Issue 440 (managed-surfaces-v1): the live attribution context of THIS exact
+// attempt (dispatch, fingerprint and recovery identity), or null. A refusal
+// handle, another attempt, a closed context or no context all yield null, and
+// every caller then keeps its legacy behavior byte for byte.
+function liveManagedAttempt(owner, dispatchId, fingerprint, recoveryIdentitySha) {
+  let live = null;
+  try { live = require('./forge-managed-attribution').currentAttribution(owner); } catch { return null; }
+  if (!live || live.active !== true || typeof dispatchId !== 'string' || live.attempt.dispatch_id !== dispatchId) return null;
+  if (fingerprint !== undefined && live.attempt.fingerprint !== fingerprint) return null;
+  if (recoveryIdentitySha !== undefined && live.attempt.recovery_identity_sha256 !== recoveryIdentitySha) return null;
+  return live;
+}
+// The owner-event writer is attributed only for a receipt of the live attempt
+// whose S0 (when it already exists) carries the v1 marker. A legacy receipt,
+// a standalone execution receipt or another attempt keeps the current channel.
+function managedOwnerEvents(root, record) {
+  if (!record || typeof record !== 'object' || record.execution?.protected_owner) return null;
+  const baseline = record.recovery_baseline;
+  if (baseline && !baseline.managed_surfaces) return null;
+  return liveManagedAttempt(root, record.dispatch_id, record.fingerprint);
+}
+// Native route: appends of another process are adopted only through the host's
+// live attestation adapter, and only inside a live context of this attempt.
+function attestNativeAppends(r, runtime) {
+  if (runtime?.managedAppendAttestation === undefined || !liveManagedAttempt(r.contextRoot || r.cwd, r.dispatchId)) return null;
+  return require('./forge-managed-attribution').attestManagedAppends();
+}
 function captureMilestoneBaseline(request, receipt, options = {}) {
   const roots = require('./forge-code-roots'), execution = require('./forge-task-execution');
   const checked = validateRecoveryRequest(request, options), contract = checked.contract;
@@ -504,12 +531,18 @@ function captureMilestoneBaseline(request, receipt, options = {}) {
   const state = require('./forge-surgical-reset').initState(stateFile, { cwd: request.cwd,
     attempt: request.dispatchId, executionContract: contract });
   const input = { path: checked.planFile, sha256: roots.digest(fs.readFileSync(checked.planFile)) };
+  // Additive v1 marker: only a new attempt running inside its own live attribution
+  // context. Member, broker, verification successor and recovery-ready receipts
+  // keep their own adoption and the previous S0 shape (no key at all).
+  const live = options.member === undefined && !request.ownerBroker && options.ownOwnerChannel !== true
+    ? liveManagedAttempt(contract.owner, request.dispatchId, receipt.fingerprint, recoveryIdentity(request)) : null;
   // Issue 343 U3b: a cohort member's owner is protected by the cohort's common signed stream (the
   // broker's S0 and every sibling's signed append), never by a private snapshot of a shared owner.
   return { schema_version: 1, state_file: stateFile, state_sha256: baselineDigest(state),
     execution_contract: contract, fingerprint: receipt.fingerprint, dispatch_id: receipt.dispatch_id, input,
     protected_owner: options.member !== undefined ? null : execution.protectedSnapshot(contract.owner),
-    protected_roots: contract.code_roots.map(root => ({ root_id: root.id, path: root.path, snapshot: execution.protectedSnapshot(root.path) })) };
+    protected_roots: contract.code_roots.map(root => ({ root_id: root.id, path: root.path, snapshot: execution.protectedSnapshot(root.path) })),
+    ...(live ? { managed_surfaces: { declaration: live.declaration, declaration_sha256: live.declaration_sha256 } } : {}) };
 }
 function reconcileMilestoneAttempt(request, receipt, runtime = {}) {
   if (runtime.ownerReconciliation !== undefined) {
@@ -2307,6 +2340,7 @@ async function runNativeExecutionTransport(r, runtime, execution, options, proce
     }
     const api = require('./forge-task-execution');
     if (stage !== 'publication') {
+      attestNativeAppends(r, runtime);
       api.assertProtected(r.contextRoot, initialRecord.recovery_baseline.protected_owner);
       for (const row of initialRecord.recovery_baseline.protected_roots) api.assertProtected(row.path, row.snapshot);
     }
@@ -2950,6 +2984,9 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
       .append('.gsd/forge/events.jsonl', line);
     const protectedOwner = record?.execution?.protected_owner || record?.recovery_baseline?.protected_owner;
     if (!protectedOwner) {
+      // Issue 440: before S0, the start events of a live v1 attempt still go
+      // through the declared writer, so its chain is continuous from the origin.
+      if (!record?.preparation_surface && managedOwnerEvents(root, record)) return appendProtectedOwnerEvents(root, receiptFile, record, [line]);
       const key = '.gsd/forge/events.jsonl';
       const surface = record?.preparation_surface;
       const previous = surface && typeof surface[key] === 'string' && fs.existsSync(eventsFile)
@@ -3521,7 +3558,12 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
     engine: route.resolved_worker_engine, transport: route.resolved_worker_engine === 'claude' ? 'claude-cli' : 'app-server' }, route, startedAt);
   else if (r.ownerBroker) await require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker).append('.gsd/forge/events.jsonl', JSON.stringify(dispatchEvent) + '\n');
   else if (recoveryReady?.appendOwnerEvent) recoveryReady.appendOwnerEvent(JSON.stringify(dispatchEvent) + '\n');
-  else fs.appendFileSync(eventsFile, JSON.stringify(dispatchEvent) + '\n');
+  else if (!loc.preparation && liveManagedAttempt(root, dispatchId)) {
+    // Issue 440: inside the live v1 context of this attempt, the declared writer.
+    const started = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+    if (managedOwnerEvents(root, started)) appendProtectedOwnerEvents(root, receiptFile, started, [JSON.stringify(dispatchEvent) + '\n']);
+    else fs.appendFileSync(eventsFile, JSON.stringify(dispatchEvent) + '\n');
+  } else fs.appendFileSync(eventsFile, JSON.stringify(dispatchEvent) + '\n');
   if (loc.preparation) {
     const saved = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
     saved.preparation_surface = preparationSurfaceSnapshot(r);
@@ -3720,7 +3762,8 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
     // snapshot is not the caller's durable recovery authority.
     if (transport.mode === 'execute') {
       const saved = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
-      const baseline = captureMilestoneBaseline(r, saved, { nativeInvocation: nativeBinding, ...(member ? { member } : {}) });
+      const baseline = captureMilestoneBaseline(r, saved, { nativeInvocation: nativeBinding, ...(member ? { member } : {}),
+        ...(verificationSuccessor || runtime.assertRecoveryReady ? { ownOwnerChannel: true } : {}) });
       json(receiptFile, { ...saved, recovery_baseline: baseline });
     }
     const authorizationReference = require('./forge-attempt-recovery').bindRecoveryAuthorization(runtime.recoveryAuthorization);
@@ -3818,7 +3861,10 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
         advanceLivenessEvents(protectedBefore);
         for (const code of codeProtectedBefore) if (fs.realpathSync(code.root) === root) advanceLivenessEvents(code.before);
         if (r.ownerBroker) require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker).verify();
-        else executionApi.assertProtected(root, protectedBefore);
+        else {
+          if (nativeExecution) attestNativeAppends(r, runtime);
+          executionApi.assertProtected(root, protectedBefore);
+        }
         for (const code of codeProtectedBefore) executionApi.assertProtected(code.root, code.before);
         const verifiedFiles = executionApi.verifyResult(cwd, execution, result);
         // Persist the validated writing response before delivery rendering, which
@@ -4105,6 +4151,17 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
         error.rejected_candidate.owner_receipt = 'evidence-write-failed';
       }
     }
+    // Issue 440: inside the live v1 context of THIS attempt, an external journal prefix
+    // change terminates as the canonical protected-metadata refusal with the named,
+    // sanitized journal diagnosis. The low-level writer code stays only as raw_reason_code;
+    // nothing is adopted, reset or appended, and every other path keeps its error as is.
+    if (error?.code === 'managed-surface-audit-prefix-changed' && !error.managed_surfaces && liveManagedAttempt(root, dispatchId)) {
+      let named = null;
+      try { named = require('./forge-managed-attribution').describeJournalMismatch(root); } catch { named = null; }
+      if (named) error = Object.assign(new Error('execution-protected-metadata'), { code: 'execution-protected-metadata',
+        managed_surfaces: named, raw_reason_code: error.code,
+        ...(typeof error.provider_called === 'boolean' ? { provider_called: error.provider_called } : {}) });
+    }
     // The Claude adapter rewraps any exception of its packaging step (where the last launch hook
     // runs, before its owned child) as its prompt I/O code. When this attempt's own hook refused,
     // that wrap reports no prompt I/O failure: the original typed refusal (code, provider_called
@@ -4245,10 +4302,25 @@ function appendProtectedOwnerEvents(root, receiptFile, record, lines) {
   if (!batch.length) return;
   xllm.validateResultFileTarget(receiptFile, root);
   const protectedOwner = record?.execution?.protected_owner || record?.recovery_baseline?.protected_owner;
-  if (!protectedOwner) fail('execution-protected-metadata');
+  // Issue 440: inside the live v1 context of this exact attempt, the exact appended
+  // bytes are written and attributed transactionally under the same owner lock. Before
+  // S0 exists (start and dispatch events) the in-memory chain head is the baseline.
+  const managed = managedOwnerEvents(root, record);
+  // A live v1 context cannot write a different attempt's marked receipt through
+  // the legacy branch. Refuse the binding before any owner event is appended.
+  if (!managed && record?.recovery_baseline?.managed_surfaces && !record.execution?.protected_owner
+      && require('./forge-managed-attribution').currentAttribution(root)?.active) fail('execution-protected-metadata');
+  if (!protectedOwner && !managed) fail('execution-protected-metadata');
   const eventsFile = target(root, '.gsd/forge/events.jsonl');
   const executionApi = require('./forge-task-execution');
+  const appendManaged = () => require('./forge-managed-attribution').writeManagedSurface({
+    surface: 'owner-events', path: '.gsd/forge/events.jsonl', writer: 'scripts/forge-unit-sidecar.js#appendProtectedOwnerEvents',
+    produce: before => Buffer.concat([before || Buffer.alloc(0), ...batch.map(line => Buffer.from(line))]) });
   return require('./forge-artifact-reconciliation').withOwnerLock(root, () => {
+    if (!protectedOwner) {
+      appendManaged();
+      return;
+    }
     const expected = { ...protectedOwner };
     const current = executionApi.protectedSnapshot(root);
     for (const item of record.artifacts || []) if (current[item.path] === hash(item.content)) {
@@ -4259,11 +4331,16 @@ function appendProtectedOwnerEvents(root, receiptFile, record, lines) {
     executionApi.assertProtected(root, expected);
     let appended = fs.readFileSync(eventsFile);
     if (hash(appended) !== expected['.gsd/forge/events.jsonl']) fail('execution-owner-event-raced');
-    for (const line of batch) {
-      if (!fs.readFileSync(eventsFile).equals(appended)) fail('execution-owner-event-raced');
-      fs.appendFileSync(eventsFile, line);
-      appended = Buffer.concat([appended, Buffer.from(line)]);
-      if (!fs.readFileSync(eventsFile).equals(appended)) fail('execution-owner-event-raced');
+    if (managed) {
+      appendManaged();
+      appended = fs.readFileSync(eventsFile);
+    } else {
+      for (const line of batch) {
+        if (!fs.readFileSync(eventsFile).equals(appended)) fail('execution-owner-event-raced');
+        fs.appendFileSync(eventsFile, line);
+        appended = Buffer.concat([appended, Buffer.from(line)]);
+        if (!fs.readFileSync(eventsFile).equals(appended)) fail('execution-owner-event-raced');
+      }
     }
     executionApi.assertProtected(root, { ...expected, '.gsd/forge/events.jsonl': hash(appended) });
     // Advance only exact caller bytes, never adopt a fresh owner snapshot.
@@ -4289,7 +4366,14 @@ async function runUnitSidecar(request, runtime = {}) {
   }
   const activity = require('./forge-protected-owner-activity');
   return activity.withReconciliationHandoff(request, runtime, () => activity.withExecutionActivity(request, runtime,
-    scoped => runUnitSidecarInsideOwnerWindow(request, scoped)));
+    scoped => withNativeAttribution(request, scoped, value => runUnitSidecarInsideOwnerWindow(request, value))));
+}
+// Issue 440: the native route gains a live attribution context only through the
+// host's live append-attestation adapter (an opaque handle, never request data).
+// Without the adapter, or on any other route, nothing changes.
+function withNativeAttribution(request, runtime, action) {
+  if (request?.route?.worker_mode !== 'native' || runtime?.managedAppendAttestation === undefined) return action(runtime);
+  return require('./forge-managed-attribution').withManagedAttribution(request, runtime, action);
 }
 async function runUnitSidecarInsideOwnerWindow(request, runtime = {}) {
   const linked = request?.linked_begin_key ? require('./forge-attempt-recovery').bindLinkedRequest(request, runtime.linkedEntryOptions) : request || {};

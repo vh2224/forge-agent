@@ -150,6 +150,12 @@ function recordPaths(cwd, kind, key) {
   const legacy = `${encode(key)}.json`;
   return [file, ...(legacy.length <= 255 ? [path.join(path.dirname(file), legacy)] : [])];
 }
+// The same candidate list used by lookupRecord, saveRecord and readJson.
+function recordCandidatePaths(cwd, kind, key) {
+  if (!['transaction', 'result'].includes(kind) || typeof cwd !== 'string' || !cwd.trim()
+      || typeof key !== 'string' || !key.trim()) throw new ControllerError('invalid-request', 'candidatos exigem diretório, chave e tipo transaction/result válidos');
+  return Object.freeze([...recordPaths(cwd, kind, key)]);
+}
 function preferredRecordFile(cwd, kind, key) {
   const paths = recordPaths(cwd, kind, key);
   // Path selection must not read publications: diagnostic callers may locate
@@ -3087,7 +3093,7 @@ module.exports = {
   withOwnerBoundary, verifyCommittedCompletionBoundary, pendingTransactions, incompleteUnits, pausePartial, pauseDecomposition, reconcilePartialSuccessors, inspectPausedAttempt, verifyCompletedAttempt, validatePausedEntry, projectLogicalHistory, logicalState, resolvePrefs,
   transactionDir, resultDir, boundaryDir, eventsFile, transactionFile,
   resultFile, boundaryFile, readEvents, readJson, writeAtomic,
-  lookupRecord, preflightPaths,
+  lookupRecord, recordCandidatePaths, preflightPaths,
   consumeFailure, reenter, failureProjection, validateLinkedEntry, validateTerminalLinkedEntry, inspectHistoricalLinkedEntry, recordChecksum, sliceClosure,
   // Issue 343 U5: the controller-terminal seam of a batch member's serial consolidation.
   prepareBatchTerminal, commitBatchTerminal,

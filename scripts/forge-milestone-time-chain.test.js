@@ -731,6 +731,14 @@ function withoutReadonly350Entry(changelog) {
   assert.equal(sha(Buffer.from(entries[0] + '\n', 'utf8')), READONLY_350_ENTRY_SHA, 'declared #350 entry matches measured bytes');
   return changelog.replace(entries[0] + '\n', '');
 }
+// Admit exactly the independently measured #440 line, preserving all older pins.
+const ISSUE_440_ENTRY_SHA = '59a47ea8059a06a4d8576e0da9f4134dcfbb7bc8a657d606eb99fd652c716666';
+function withoutIssue440Entry(changelog) {
+  const entries = changelog.split('\n').filter(line => line.startsWith('- Superfícies geridas versionadas (#440, M-20261119115538-revisar-fluxo-execucao, S01):'));
+  assert.equal(entries.length, 1, 'one declared #440 entry');
+  assert.equal(sha(Buffer.from(entries[0] + '\n', 'utf8')), ISSUE_440_ENTRY_SHA, 'declared #440 entry matches measured bytes');
+  return changelog.replace(entries[0] + '\n', '');
+}
 function documentationGroup() {
   const planning = read('docs/planning-cost-diagnosis.md');
   const at = planning.indexOf('## Deferred overlap\n');
@@ -743,17 +751,22 @@ function documentationGroup() {
   for (const reference of ['`docs/milestone-time-guide.md`', '`shared/forge-milestone-time.md`', '`CHANGELOG.md`']) assert.ok(overlap.includes(reference), reference);
   assert.ok(overlap.includes('Human UAT and actual\nfuture latency improvements require their own evidence.'));
   const changelog = read('CHANGELOG.md');
-  const priorFeatureScope = withoutReadonly350Entry(changelog);
+  const priorFeatureScope = withoutReadonly350Entry(withoutIssue440Entry(changelog));
   assert.ok(priorFeatureScope.startsWith('## Não lançado\n\n- Prazos de milestone (M-20261101111759-opcoes-prazo-milestones):'), 'feature entry first under Não lançado');
   const entry = priorFeatureScope.split('\n')[2];
   for (const topic of ['opções de prazo', 'governança de tempo', 'endpoint comprovado', 'task ligada', '`docs/milestone-time-guide.md`']) assert.ok(entry.includes(topic), topic);
   assert.ok(entry.includes('release, instalação e execução no cliente instalado não estão demonstradas') && entry.includes('UAT humano foi dispensado, não realizado'));
-  const assertHistory = text => assert.equal(sha(Buffer.from(withoutReviewFix341Entry(withoutReadonly350Entry(text)).replace(entry + '\n', ''), 'utf8')), CHANGELOG_PRE_SHA, 'only the declared feature entries were added; history unchanged');
+  const assertHistory = text => assert.equal(sha(Buffer.from(withoutReviewFix341Entry(withoutReadonly350Entry(withoutIssue440Entry(text))).replace(entry + '\n', ''), 'utf8')), CHANGELOG_PRE_SHA, 'only the declared feature entries were added; history unchanged');
   assertHistory(changelog);
   assert.throws(() => assertHistory(changelog + '\n- Unknown feature entry.\n'), /history unchanged/, 'unknown extra entry is not accepted');
   assert.throws(() => assertHistory(changelog.replace('orçamento de 50%', 'orçamento de 51%')), /measured bytes/, 'unmeasured review-fix entry is not accepted');
   assert.throws(() => assertHistory(changelog.replace('- Contexto pessoal:', '- Contexto pessoal adulterado:')), /history unchanged/, 'previous history is still immutable');
   assert.throws(() => assertHistory(changelog.replace('codex-readonly-context-unsupported', 'codex-readonly-context-tampered')), /measured bytes/, 'unmeasured #350 entry is not accepted');
+  const issue440Entry = changelog.split('\n').find(line => line.startsWith('- Superfícies geridas versionadas (#440,'));
+  assert.throws(() => assertHistory(changelog.replace('testadas offline em owners temporários.', 'testadas online em owners temporários.')), /measured bytes/, 'unmeasured #440 entry is not accepted');
+  assert.throws(() => assertHistory(changelog.replace(issue440Entry + '\n', '')), /one declared #440 entry/, 'missing #440 entry is not accepted');
+  assert.throws(() => assertHistory(changelog + issue440Entry + '\n'), /one declared #440 entry/, 'duplicate #440 entry is not accepted');
+  ok('chain-changelog-440-measured-entry-rejects-altered-missing-and-duplicate-lines');
   ok('chain-documentation-update-preserves-panel-qualification-and-unreleased-feature-scope');
 }
 // T07 worker inventory: the fourteen local verification commands, and the owner operations

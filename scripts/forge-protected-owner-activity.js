@@ -94,8 +94,28 @@ async function withExecutionActivity(request, runtime, action) {
   const relative = path.relative(owner, leaseFile).replace(/\\/g, '/');
   const requestHash = roots.digest({ owner, run: runId, unit, generation, dispatch: r.dispatchId,
     workflow: r.workflowId, contract: r.execution_contract, plan: planHash, claim: claimHash });
-  function assertLive() {
-    if (closed || !leaseWindow?.heartbeat().ok || sha(regular(leaseFile)) !== expectedLease) fail('protected-owner-lease-changed');
+  // Live managed-surfaces-v1 attribution (issue 440). Only a live v1 context
+  // changes anything below; a refusal handle keeps every current guard as-is.
+  const managed = require('./forge-managed-attribution');
+  let attribution = null;
+  const managedLive = () => attribution !== null && managed.isAttributionLive(attribution);
+  function assertLive(options) {
+    // Under a live v1 context the projected snapshot itself refuses a changed
+    // lease (execution-protected-metadata with a named diagnostic).
+    const leaseByProjection = options?.projection === true && managedLive();
+    // A manual lease edit of a live v1 attempt is diagnosed by name through the
+    // canonical protected-snapshot assert, from the trusted chain head, BEFORE any
+    // heartbeat/renewal or adoption of the untrusted bytes. Anything else, or a
+    // diagnosis that does not refuse, falls through to the unchanged legacy throw.
+    if (!closed && !options && managedLive()) {
+      let observed = null;
+      try { observed = sha(regular(leaseFile)); } catch { observed = null; }
+      if (observed !== null && observed !== expectedLease) {
+        const api = require('./forge-task-execution'), snapshot = api.protectedSnapshot(owner);
+        contexts.run(scope, () => managed.runWithAttribution(attribution, () => api.assertProtected(owner, { ...snapshot, [relative]: expectedLease })));
+      }
+    }
+    if (closed || !leaseWindow?.heartbeat().ok || (!leaseByProjection && sha(regular(leaseFile)) !== expectedLease)) fail('protected-owner-lease-changed');
     windows.withWindow(ownerWindow, () => {});
     const current = runs.get(owner, runId);
     if (!current?.active || current.session_id !== actor.sessionId || current.host_runtime !== actor.hostRuntime
@@ -155,21 +175,34 @@ async function withExecutionActivity(request, runtime, action) {
         return;
       }
       leaseWindow.close();
-      leaseWindow = lease.openProtectedWindow(owner, unit, token, generation, { durationMs: wanted.duration_ms });
-      if (!leaseWindow.ok) fail('protected-owner-lease-window-refused');
-      expectedLease = sha(regular(leaseFile)); knownLeaseHashes.add(expectedLease);
+      const reopen = () => {
+        const prior = managedLive() ? regular(leaseFile) : null;
+        leaseWindow = lease.openProtectedWindow(owner, unit, token, generation, { durationMs: wanted.duration_ms });
+        if (!leaseWindow.ok) fail('protected-owner-lease-window-refused');
+        const next = regular(leaseFile);
+        expectedLease = sha(next); knownLeaseHashes.add(expectedLease);
+        // Attributed under the same owner fence that published the lease.
+        if (prior) managed.runWithAttribution(attribution, () => managed.recordManagedWrite({ surface: 'unit-lease', path: relative,
+          writer: 'scripts/forge-unit-lease.js#openProtectedWindow', beforeBytes: prior, afterBytes: next }));
+      };
+      if (managedLive()) windows.withMutation(owner, reopen); else reopen();
     },
     expectedOwner(root, before) {
       if (roots.key(fs.realpathSync.native(root)) !== roots.key(owner)) return before;
       if (!before || !knownLeaseHashes.has(before[relative])) fail('protected-owner-baseline-unbound');
-      assertLive();
+      assertLive({ projection: true });
       return { ...before, [relative]: expectedLease };
     },
   });
   scopes.add(scope);
   let value, failure;
-  try { value = await windows.withWindow(ownerWindow, () => contexts.run(scope, () => action(runtime))); }
-  catch (error) { failure = error; }
+  try {
+    attribution = windows.withWindow(ownerWindow, () => windows.withMutation(owner, () => managed.createActivityAttribution({
+      request: r, owner, unit, revalidate: assertLive, claimGeneration: run.write_claim?.generation, leaseGeneration: generation,
+      version: runtime?.managedSurfacesVersion, attestation: runtime?.managedAppendAttestation,
+      onAdopt(file, digestValue) { if (file === relative && digestValue) { expectedLease = digestValue; knownLeaseHashes.add(digestValue); } } })));
+    value = await windows.withWindow(ownerWindow, () => contexts.run(scope, () => managed.runWithAttribution(attribution, () => action(runtime))));
+  } catch (error) { failure = error; }
   try {
     await scope.joinWriter();
     // Closing the coordination boundary does not renew/revive an expired lease.
@@ -179,7 +212,7 @@ async function withExecutionActivity(request, runtime, action) {
   } catch (error) {
     if (failure) { failure.owner_window = { status: 'held', reason_code: error.code || 'protected-owner-writer-unproven' }; }
     else failure = error;
-  }
+  } finally { if (attribution) managed.releaseAttribution(attribution); }
   if (failure) throw failure;
   return value;
 }
@@ -188,7 +221,9 @@ function expectedProtectedOwner(root, before) {
   const reconciliation = reconciliationContext.getStore();
   if (reconciliation) before = reconciliation.project(root, before);
   const scope = currentScope();
-  return scope && scopes.has(scope) ? scope.expectedOwner(root, before) : before;
+  const projected = scope && scopes.has(scope) ? scope.expectedOwner(root, before) : before;
+  // Exact attributed deltas only; returns its input unchanged without a live v1 context.
+  return require('./forge-managed-attribution').projectExpected(root, projected);
 }
 
 function hookAppendProof(owner, change, evidence, unit, dispatch) {
@@ -535,4 +570,4 @@ async function withReconciliationHandoff(request, runtime, action) {
 }
 module.exports = { withExecutionActivity, currentScope, assertPreflightAdmission, expectedProtectedOwner, reconciliationDecision,
   createOwnerReconciliation, assertOwnerReconciliationReady, withOwnerReconciliation, withReconciliationHandoff,
-  resumeAttemptOwner, inspectAttemptResume };
+  resumeAttemptOwner, inspectAttemptResume, hookAppendProof };
