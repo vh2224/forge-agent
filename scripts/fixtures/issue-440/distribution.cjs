@@ -2,7 +2,7 @@
 // Additive measurement only; published predecessors remain byte-identical.
 const fs=require('fs'),path=require('path'),crypto=require('crypto'),zlib=require('zlib'),assert=require('node:assert/strict');
 const previous=require('../issue-448/distribution.cjs'),data=require('./distribution-delta.json');
-const ROOT=path.resolve(__dirname,'../../..'),PIN='9f008d7a9f05f42dfa03a658852731f7e6b33b232f3a1dfd95ec8f691a9c88d8';
+const ROOT=path.resolve(__dirname,'../../..'),PIN='ad593f7b5eccaa5710b3e7535be255b4959a39e85e511708218c6c7b755a8c6b';
 const hash=value=>crypto.createHash('sha256').update(value).digest('hex'),read=file=>fs.readFileSync(path.join(ROOT,file));
 const normalize=value=>String(value).replace(/version=\d+\.\d+\.\d+/g,'version=<dynamic>');
 function check(value=data){assert.equal(hash(JSON.stringify(value)),PIN,'issue440 independent measured delta');assert.equal(hash(JSON.stringify(previous.issue448Layer)),value.predecessor_layer_sha256,'issue440 immutable predecessor');return value;}

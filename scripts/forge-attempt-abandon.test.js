@@ -537,7 +537,7 @@ async function ownerEvents() {
     assert.equal(invalid.reason_code, 'abandon-input-invalid', 'no record yet');
     // A refusal creates history; emitted events go through the guarded owner append.
     const first = await abandon.abandonAttempt(f.input({ emitEvents: true, recoveryAuthorization: undefined }));
-    assert.equal(first.reason_code, CUSTODY ? 'abandon-authority-missing' : 'abandon-descendants-unproved');
+    assert.equal(first.reason_code, 'abandon-authority-missing');
     const emitted = text(events).trim().split('\n').slice(-2).map(line => JSON.parse(line));
     assert.deepEqual(emitted.map(row => row.event), ['attempt-replay-refused', 'attempt-abandon-refused']);
     for (const row of emitted) {
