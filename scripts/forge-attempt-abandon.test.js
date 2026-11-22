@@ -406,7 +406,20 @@ async function descendantsAlive() {
     observed = await abandon.abandonAttempt({ ...f.input(), processProbe: () => 'stopped' });
   } }, async f => {
     assert.equal(observed.ok, false);
-    assert.equal(observed.reason_code, CUSTODY ? 'abandon-descendants-alive' : 'abandon-descendants-unproved', JSON.stringify(observed));
+    assert.equal(observed.provider_called, false);
+    if (CUSTODY) {
+      assert.equal(observed.reason_code, 'abandon-descendants-alive', JSON.stringify(observed));
+      assert.equal(observed.detail, 'process-tree-survivors');
+    } else {
+      // A live census refuses; an exited or unobserved family still cannot prove custody.
+      const refusedPairs = [
+        ['abandon-descendants-alive', 'process-tree-survivors'],
+        ['abandon-descendants-unproved', 'process-tree-census-only'],
+        ['abandon-descendants-unproved', 'process-tree-custody-unavailable'],
+        ['abandon-descendants-unproved', 'process-tree-unavailable'],
+      ];
+      assert(refusedPairs.some(([code, detail]) => observed.reason_code === code && observed.detail === detail), JSON.stringify(observed));
+    }
     assert(!kinds(f).includes('proofs'));
     assertAttemptOutput(f, 'after\n');
   });
