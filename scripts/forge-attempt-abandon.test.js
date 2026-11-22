@@ -255,7 +255,7 @@ async function prerequisites() {
     await refused(f, { ...input, processProbe: undefined }, 'abandon-writer-unknown', 'no live probe');
     for (const attestWriter of [() => null, () => { throw new Error('host refused'); }, () => ({ pid: f.child.pid }),
       challenge => ({ status: 'stopped', binding_sha256: digest(challenge), pid: f.child.pid })]) {
-      await refused(f, { ...input, adapter: liveAdapter(f, { attestWriter }) }, 'abandon-writer-unknown', 'writer attestation');
+      await refused(f, { ...input, adapter: liveAdapter(f, { attestWriter }) }, CUSTODY ? 'abandon-writer-unknown' : 'abandon-descendants-unproved', 'writer attestation');
     }
     // Descendants: no tree record at all (unknown), then a foreign binding.
     const treeRecord = `${f.files.resultFile}.process-tree.jsonl`;

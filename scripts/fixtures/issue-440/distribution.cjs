@@ -2,7 +2,7 @@
 // Additive measurement only; published predecessors remain byte-identical.
 const fs=require('fs'),path=require('path'),crypto=require('crypto'),zlib=require('zlib'),assert=require('node:assert/strict');
 const previous=require('../issue-448/distribution.cjs'),data=require('./distribution-delta.json');
-const ROOT=path.resolve(__dirname,'../../..'),PIN='85f15dde1d988a88249938f012d6a71ad7aa941afdf494763029a56f27b64ca9';
+const ROOT=path.resolve(__dirname,'../../..'),PIN='911f6ba41572da7a28a1c914d8db12ee0861c2bc2a6a4aea6fcdf8112191f7d7';
 const hash=value=>crypto.createHash('sha256').update(value).digest('hex'),read=file=>fs.readFileSync(path.join(ROOT,file));
 const normalize=value=>String(value).replace(/version=\d+\.\d+\.\d+/g,'version=<dynamic>');
 function check(value=data){assert.equal(hash(JSON.stringify(value)),PIN,'issue440 independent measured delta');assert.equal(hash(JSON.stringify(previous.issue448Layer)),value.predecessor_layer_sha256,'issue440 immutable predecessor');return value;}
@@ -28,7 +28,7 @@ function sampleAfter(pointer,prior){const old=previous.sampleAfter(pointer,prior
 function projectTrace(trace,reverse){const value=check(),result=structuredClone(trace),from=reverse?'after':'before',to=reverse?'before':'after';assert.equal(value.parity.rows.length,39);for(const row of value.parity.rows){const keys=row.path.slice(),key=keys.pop(),parent=keys.reduce((o,k)=>o[k],result);assert.deepEqual(parent[key],row[from],'issue440 exact trace '+row.path.join('.'));parent[key]=structuredClone(row[to]);}return result;}
 function parityAdapter(parity){return Object.freeze({...parity,beforeTrace:(trace,value)=>parity.beforeTrace(projectTrace(trace,true),value),afterTrace:(trace,value)=>projectTrace(parity.afterTrace(trace,value),false)});}
 
-function smokeProjection(method,text,...rest){const row=check().files['scripts/forge-smoke.js'];assert(row&&row.before!==null,'issue440 exact smoke predecessor');const original=before(row).toString('utf8'),projected=previous[method](original,...rest),digest=hash(text);assert(digest===row.before||digest===row.after,'unrecognized smoke changes: issue440 measured source');return projected;}
+function smokeProjection(method,text,...rest){const row=check().files['scripts/forge-smoke.js'];assert(row&&row.before!==null,'issue440 exact smoke predecessor');const original=before(row).toString('utf8'),digest=hash(text),projected=previous[method](digest===row.before||digest===row.after?original:text,...rest);assert(digest===row.before||digest===row.after,'unrecognized smoke changes: issue440 measured source');return projected;}
 function previousSmoke(text,...rest){return smokeProjection('previousSmoke',text,...rest);}
 function predecessorSmoke(text,...rest){return smokeProjection('predecessorSmoke',text,...rest);}
 function consumerProjection(file,text){const row=check().consumers[file];if(!row)return text;assert.equal(hash(text),row.before,'issue440 exact consumer before '+file);const bytes=zlib.gunzipSync(Buffer.from(row.after_gzip_base64,'base64'),{maxOutputLength:4*1024*1024});assert.equal(hash(bytes),row.after,'issue440 exact consumer adapter '+file);return bytes.toString('utf8');}

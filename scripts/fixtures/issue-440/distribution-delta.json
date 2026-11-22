@@ -162,9 +162,9 @@
     },
     "scripts/forge-attempt-abandon.test.js": {
       "before": null,
-      "after": "2aa3d05e1d2f7829385bb1ddf2191213d3e4d0766e1d0dc517b9744d084a286e",
+      "after": "7789033884f93b3c512738e3eaece2f429253415c219956f2d199a87e9a9ca5b",
       "attributed_before": null,
-      "attributed_after": "2aa3d05e1d2f7829385bb1ddf2191213d3e4d0766e1d0dc517b9744d084a286e",
+      "attributed_after": "7789033884f93b3c512738e3eaece2f429253415c219956f2d199a87e9a9ca5b",
       "before_gzip_base64": null
     },
     "scripts/forge-attempt-recovery.js": {
@@ -470,16 +470,16 @@
     },
     "scripts/forge-process-tree.js": {
       "before": null,
-      "after": "fb32b4e25f26364e8bede341d4f176065c62bf9e3490f289b9330229bd71f37c",
+      "after": "d5e8684242982e6cbbe93660ac135fc5332ea62b3c9c0670c66ff1bb9604b83a",
       "attributed_before": null,
-      "attributed_after": "fb32b4e25f26364e8bede341d4f176065c62bf9e3490f289b9330229bd71f37c",
+      "attributed_after": "d5e8684242982e6cbbe93660ac135fc5332ea62b3c9c0670c66ff1bb9604b83a",
       "before_gzip_base64": null
     },
     "scripts/forge-process-tree.test.js": {
       "before": null,
-      "after": "d9759ad332dfa8a12b6de781c7a49c526e579806be87d2e5179ade3ebe52acba",
+      "after": "27a8f02d33b46b00098bbc10c5dbb7736dd466fc1c2dc1df49b3725f596ff87e",
       "attributed_before": null,
-      "attributed_after": "d9759ad332dfa8a12b6de781c7a49c526e579806be87d2e5179ade3ebe52acba",
+      "attributed_after": "27a8f02d33b46b00098bbc10c5dbb7736dd466fc1c2dc1df49b3725f596ff87e",
       "before_gzip_base64": null
     },
     "scripts/forge-project-context.test.js": {

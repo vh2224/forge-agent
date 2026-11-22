@@ -329,15 +329,18 @@ const SUPERVISOR_BOOTSTRAP = [
   "$probeDiag=[Environment]::GetEnvironmentVariable('FORGE_PROCESS_TREE_PROBE_DIAGNOSTIC') -eq '1';[Environment]::SetEnvironmentVariable('FORGE_PROCESS_TREE_PROBE_DIAGNOSTIC',$null);if($probeDiag){[Console]::Error.WriteLine('forge-probe:bootstrap')}",
   "try{$n=[int][Environment]::GetEnvironmentVariable('FORGE_PROCESS_TREE_PARTS');[Environment]::SetEnvironmentVariable('FORGE_PROCESS_TREE_PARTS',$null)",
   "if($n -lt 1 -or $n -gt 256){throw 'parts'}",
-  "$s=New-Object Text.StringBuilder",
+  "if($probeDiag){[Console]::Error.WriteLine('forge-probe:parts-read')}",
+  "$s=[Text.StringBuilder]::new()",
+  "if($probeDiag){[Console]::Error.WriteLine('forge-probe:builder-ready')}",
   "for($i=0;$i -lt $n;$i++){$k='FORGE_PROCESS_TREE_'+$i;[void]$s.Append([Environment]::GetEnvironmentVariable($k));[Environment]::SetEnvironmentVariable($k,$null)}",
   "$t=$s.ToString();$d=$t.IndexOf(':');if($d -lt 1){throw 'packet'}",
+  "if($probeDiag){[Console]::Error.WriteLine('forge-probe:packet-ready')}",
   "if($probeDiag){[Console]::Error.WriteLine('forge-probe:assembly-load')}",
   '[void][Reflection.Assembly]::Load([Convert]::FromBase64String($t.Substring(0,$d)))',
   "if($probeDiag){[Console]::Error.WriteLine('forge-probe:native-entry')}",
   '$r=[ForgeProcessTree]::Entry($t.Substring($d+1))',
   "if($probeDiag){[Console]::Error.WriteLine('forge-probe:native-return')}",
-  'if($null -ne $r.Output){$o=[Console]::OpenStandardOutput();$b=(New-Object Text.UTF8Encoding($false)).GetBytes($r.Output);$o.Write($b,0,$b.Length);$o.Flush()}',
+  'if($null -ne $r.Output){$o=[Console]::OpenStandardOutput();$b=([Text.UTF8Encoding]::new($false)).GetBytes($r.Output);$o.Write($b,0,$b.Length);$o.Flush()}',
   '$code=$r.Code;[ForgeProcessTree]::Quit($code)}catch{}',
   'exit $code',
 ].join('\n');
@@ -447,7 +450,7 @@ function probeDiagnostic(result, probe) {
     'job-handle-inheritable', 'stdio', 'attributes', 'atomic-job-list', 'stdio-handle-list', 'root-create',
     'in-job', 'job-join', 'name-retained', 'name-check', 'internal'];
   const markers = String(result.stderr || '').split(/\r?\n/)
-    .filter(line => /^forge-probe:(bootstrap|assembly-load|native-entry|native-return)$/.test(line)).slice(0, 16);
+    .filter(line => /^forge-probe:(bootstrap|parts-read|builder-ready|packet-ready|assembly-load|native-entry|native-return)$/.test(line)).slice(0, 16);
   // Closed diagnostics only: never expose assembly, environment or raw streams.
   return Object.freeze({ schema_version: 1, timed_out: result.timedOut === true,
     status: Number.isInteger(result.status) ? result.status : null,

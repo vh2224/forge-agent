@@ -126,8 +126,10 @@ test('T0 contract methods codes and native supervisor pin', () => {
     'process-tree-custody-failed', 'process-tree-custody-unproved', 'process-tree-census-only']);
   assert(Object.isFrozen(tree.REASON_CODES) && Object.isFrozen(tree.NATIVE_SOURCE) && Object.isFrozen(tree.internals));
   assert.equal(tree.NATIVE_SHA256, sha(JSON.stringify([tree.NATIVE_SOURCE.csharp, tree.NATIVE_SOURCE.supervisor, tree.NATIVE_SOURCE.compile])));
-  const diagnosticLines = ["$probeDiag=[Environment]::GetEnvironmentVariable('FORGE_PROCESS_TREE_PROBE_DIAGNOSTIC') -eq '1';[Environment]::SetEnvironmentVariable('FORGE_PROCESS_TREE_PROBE_DIAGNOSTIC',$null);if($probeDiag){[Console]::Error.WriteLine('forge-probe:bootstrap')}","if($probeDiag){[Console]::Error.WriteLine('forge-probe:assembly-load')}","if($probeDiag){[Console]::Error.WriteLine('forge-probe:native-entry')}","if($probeDiag){[Console]::Error.WriteLine('forge-probe:native-return')}"];
-  const historicalSupervisor = tree.NATIVE_SOURCE.supervisor.split('\n').filter(line => !diagnosticLines.includes(line)).join('\n');
+  const diagnosticLines = ["$probeDiag=[Environment]::GetEnvironmentVariable('FORGE_PROCESS_TREE_PROBE_DIAGNOSTIC') -eq '1';[Environment]::SetEnvironmentVariable('FORGE_PROCESS_TREE_PROBE_DIAGNOSTIC',$null);if($probeDiag){[Console]::Error.WriteLine('forge-probe:bootstrap')}","if($probeDiag){[Console]::Error.WriteLine('forge-probe:parts-read')}","if($probeDiag){[Console]::Error.WriteLine('forge-probe:builder-ready')}","if($probeDiag){[Console]::Error.WriteLine('forge-probe:packet-ready')}","if($probeDiag){[Console]::Error.WriteLine('forge-probe:assembly-load')}","if($probeDiag){[Console]::Error.WriteLine('forge-probe:native-entry')}","if($probeDiag){[Console]::Error.WriteLine('forge-probe:native-return')}"];
+  for (const ctor of ['[Text.StringBuilder]::new()', '[Text.UTF8Encoding]::new($false)']) assert.equal(tree.NATIVE_SOURCE.supervisor.split(ctor).length, 2, 'one explicit supervisor constructor '+ctor);
+  assert(!tree.NATIVE_SOURCE.supervisor.includes('New-Object'), 'supervisor does not depend on cmdlet autoload');
+  const historicalSupervisor = tree.NATIVE_SOURCE.supervisor.split('\n').filter(line => !diagnosticLines.includes(line)).join('\n').replace('[Text.StringBuilder]::new()', 'New-Object Text.StringBuilder').replace('[Text.UTF8Encoding]::new($false)', 'New-Object Text.UTF8Encoding($false)');
   assert.equal(sha(JSON.stringify([tree.NATIVE_SOURCE.csharp, historicalSupervisor, tree.NATIVE_SOURCE.compile])), NATIVE_PIN, 'historical native bytes retained with diagnostic-only probe markers');
   for (const line of diagnosticLines) assert.equal(tree.NATIVE_SOURCE.supervisor.split('\n').filter(value => value === line).length, 1);
   // Fixed supervisor argv: System32 PowerShell, no profile, non-interactive, constant bootstrap.
@@ -390,7 +392,7 @@ test('T4 ignore form EOF ordering diagnostics argv cwd environment and executabl
     const s = start(cwd, ['report', ...argv], { stdio: ['ignore', 'pipe', 'pipe'], ...options }), b = await observe(s.child);
     const left = JSON.parse(a.out), right = JSON.parse(b.out);
     assert.deepEqual(right.argv, argv); assert.deepEqual(right, left, `${label}: argv, cwd, full effective environment (order included) and executable`);
-    assert(right.env.some(([key]) => key.toUpperCase() === 'SYSTEMROOT'), 'libuv required variables');
+    if (WIN) assert(right.env.some(([key]) => key.toUpperCase() === 'SYSTEMROOT'), 'libuv required variables');
     if (label === 'full') assert.equal(right.env.find(([key]) => key === 'PSModulePath')?.[1], process.env.PSModulePath, 'PSModulePath untouched by the supervisor');
     await s.tree.join();
   }
@@ -674,7 +676,7 @@ test('T6 injected supervision unavailability and unsupported forms use the plain
   const dir = attemptDir('unsupported');
   const s = tree.startAttemptTree({ command: `"${process.execPath}" "${HELPER}" exit 0`, args: [], options: { cwd: dir, shell: true, windowsHide: true }, resultFile: path.join(dir, 'r.json'), binding: binding(), roots: [OWNER] });
   track(s.child); await observe(s.child);
-  assert.equal(s.tree.mode, 'census-only'); assert.equal(tree.internals.recordLines(fs.readFileSync(s.tree.recordFile))[0].unsupported, 'shell');
+  assert.equal(s.tree.mode, 'census-only'); assert.equal(tree.internals.recordLines(fs.readFileSync(s.tree.recordFile))[0].unsupported, WIN ? 'shell' : 'platform');
   assert.notEqual((await s.tree.join()).status, 'stopped');
   // ENOENT / not-an-image / read-denied: same events as the plain spawn.
   const missing = async run => {
