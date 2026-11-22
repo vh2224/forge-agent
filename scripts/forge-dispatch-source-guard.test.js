@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/issue-448/distribution.cjs');
+const unitEntry = require('./fixtures/issue-440/distribution.cjs');
 
 // Standalone acceptance suite: only Node built-ins and production modules.
 const assert = require('assert');
@@ -1303,7 +1303,7 @@ test('linked-task scoped pins follow the owner pre-T06 capture and the measured 
   assertLinkedPinsAndSources({ before, declared, delta, golden, measured, readme, artifacts: report.artifacts });
 
   // Samples: only the four source.sha256 values move to the raw bytes of their source.
-  const sampleText = fs.readFileSync(path.join(ROOT, before.samples.file), 'utf8');
+  const sampleText = unitEntry.currentSamples(fs.readFileSync(path.join(ROOT, before.samples.file), 'utf8'));
   const samples = JSON.parse(sampleText);
   const sampleReadme = fs.readFileSync(path.join(ROOT, 'docs', 'communication-evaluation', 'README.md'), 'utf8');
   const allowed = before.samples.normalization.allowed_json_pointers;

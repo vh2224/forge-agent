@@ -22,7 +22,36 @@ const predecessorRelease = fs.readFileSync(path.join(__dirname, 'fixtures/ci-lat
 assert.strictEqual(hash(predecessorRelease), '635887910ef3fdb5b5c0b7731ee7e6dee86c39e6e675b6d701cacf8e4a321747');
 assert.strictEqual(hash(bytes.release), latencyLayer.release_after.sha256);
 assert.strictEqual(hash(predecessorCi), latencyLayer.ci_before.sha256);
-assert.strictEqual(hash(bytes.ci), latencyLayer.ci_after.sha256);
+// Issue 440 additive layer: current ci.yml = ci-latency ci_after plus exactly one
+// ' --verbose true' suffix on the existing Run test suites command.
+const verboseLayer = require('./fixtures/issue-440/workflow-layer.json');
+const gitBlob = value => crypto.createHash('sha1').update(`blob ${value.length}\0`).update(value).digest('hex');
+assert.strictEqual(hash(bytes.ci), verboseLayer.ci_after.sha256);
+assert.strictEqual(gitBlob(bytes.ci), verboseLayer.ci_after.oid);
+assert.deepStrictEqual(verboseLayer.ci_before, latencyLayer.ci_after, 'issue-440 layer chains onto the ci-latency layer');
+assert.strictEqual(verboseLayer.base, '4606de1ecac3ddee7bc957d9a8dea3207023d5b5');
+assert.strictEqual(verboseLayer.oldCommand, latencyLayer.newCommand);
+assert.strictEqual(verboseLayer.newCommand, verboseLayer.oldCommand + verboseLayer.delta);
+assert.strictEqual(verboseLayer.delta, ' --verbose true');
+const reconstructCi = text => {
+  const runLine = command => `        run: ${command}\n`;
+  if (text.split(runLine(verboseLayer.newCommand)).length !== 2) throw Error('issue-440-layer-command-not-unique');
+  return text.replace(runLine(verboseLayer.newCommand), runLine(verboseLayer.oldCommand));
+};
+const predecessorOfVerbose = Buffer.from(reconstructCi(texts.ci));
+assert.strictEqual(hash(predecessorOfVerbose), latencyLayer.ci_after.sha256, 'the single command delta reconstructs the ci-latency ci_after bytes');
+assert.strictEqual(gitBlob(predecessorOfVerbose), latencyLayer.ci_after.oid);
+// Negative: any second difference survives the single-delta reversal and fails the chain.
+for (const second of [
+  texts.ci.replace('          retention-days: 14\n', '          retention-days: 15\n'),
+  texts.ci.replace('      - name: Preserve bounded suite timing profile\n', '      - name: Second native run\n        run: node scripts/run-tests.js --verbose\n\n      - name: Preserve bounded suite timing profile\n'),
+  texts.ci.replace('--tool-plan true --jobs', '--tool-plan true --verbose true --jobs'),
+]) {
+  assert.notStrictEqual(second, texts.ci);
+  assert.notStrictEqual(hash(reconstructCi(second)), latencyLayer.ci_after.sha256, 'a second workflow difference is refused');
+}
+assert.throws(() => reconstructCi(texts.ci.replace(' --verbose true\n', '\n')), /issue-440-layer-command-not-unique/);
+assert.strictEqual(texts.ci.split(' --verbose true').length, 2, 'exactly one --verbose argument in the workflow');
 assert.strictEqual(latencyLayer.ci_before.sha256, 'aaebc13d224e26dc85fbf7c077a878b550fc041978dc30d9e6995da15d650fc8');
 assert(texts.ci.includes("if: runner.os == 'Windows' && steps.fixture_tools.outputs.needs_svn != 'false'"));
 assert(texts.ci.includes("if: runner.os != 'Windows' || steps.fixture_tools.outputs.needs_svn != 'false'"));
@@ -204,8 +233,11 @@ const testStep = texts.ci.match(/^      - name: Run test suites\n([\s\S]*?)(?=^ 
 assert(testStep.includes('        env:\n          FORGE_CI_JOB_NAME: Tests (${{ matrix.label }})\n'), 'raw worker logs bind the actual matrix display name');
 assert(texts.ci.includes('          path: ${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}/*\n'), 'both structured profiles and separate worker logs are retained');
 const command = testStep.match(/^        run: (.+)$/m)[1];
+assert.strictEqual(command, verboseLayer.newCommand);
 assert.strictEqual(command, 'node scripts/forge-ci-parallel.js --shard-index ${{ matrix.shard-index }} --shard-count ${{ matrix.shard-count }}'
-  + ' --jobs "${{ matrix.workers }}" --single-worker-jobs ${{ matrix.single-worker-jobs }} --profile-dir "${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}"');
+  + ' --jobs "${{ matrix.workers }}" --single-worker-jobs ${{ matrix.single-worker-jobs }} --profile-dir "${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}" --verbose true');
+assert.strictEqual(texts.ci.split('      - name: Run test suites\n').length, 2, 'no new test step');
+assert.strictEqual(texts.ci.split('node scripts/forge-ci-parallel.js --shard-index').length, 2, 'no second suite execution');
 const parallelSource = fs.readFileSync(path.join(__dirname, 'forge-ci-parallel.js'), 'utf8');
 for (const token of ["'--baseline', 'scripts/fixtures/ci-baseline/known-unit-failures.json'", "'--partition-suites'", "'--shard-profile', 'scripts/fixtures/ci-latency/shard-profile.json'", "'--profile-out'"]) assert(parallelSource.includes(token), token);
 assert(!/--(?:changed|match|fail-fast|inherit-home)\b/.test(parallelSource));

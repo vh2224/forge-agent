@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/issue-448/distribution.cjs');
+const unitEntry = require('./fixtures/issue-440/distribution.cjs');
 
 // forge-communication-surfaces.test.js — proves the orchestration and status
 // skills follow shared/forge-communication.md by POINTER, not by a second copy;
@@ -80,8 +80,8 @@ const golden = unitEntry.projectGolden(JSON.parse(read(goldenPath)));
 const planner = read('agents/forge-planner.md');
 const newMilestone = read('skills/forge-new-milestone/SKILL.md');
 const pinReadme = unitEntry.readme(read('scripts/fixtures/claude-renderer/README.md'));
-const sampleReadme = read('docs/communication-evaluation/README.md');
-const sampleBytes = fs.readFileSync(path.join(root, before.samples.file), 'utf8');
+const sampleReadme = unitEntry.readme(read('docs/communication-evaluation/README.md'));
+const sampleBytes = unitEntry.currentSamples(fs.readFileSync(path.join(root, before.samples.file), 'utf8'));
 const samples = JSON.parse(sampleBytes);
 const sourceGuard = require('./forge-dispatch-source-guard');
 const smoke = read('scripts/forge-smoke.js');

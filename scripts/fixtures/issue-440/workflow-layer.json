@@ -1,0 +1,18 @@
+{
+  "layer": "issue-440-ci-verbose",
+  "predecessor_layer": "scripts/fixtures/ci-latency/workflow-layer.json",
+  "base": "4606de1ecac3ddee7bc957d9a8dea3207023d5b5",
+  "ci_before": {
+    "sha256": "e085ab2faadf7439a7c80a97c20e8d6a0bfaf11d1578e6986cf174e3e7b744f6",
+    "oid": "90f4edfbfe35e00d41b3f463da2be46e07dda750"
+  },
+  "ci_after": {
+    "sha256": "aeac5912bba5a8d4a40bbe0d5952059b98de1afe7da418dfba649fe55c4738a7",
+    "oid": "595adbd95d8f777718d4be719a89664d16263349"
+  },
+  "step": "Run test suites",
+  "delta": " --verbose true",
+  "oldCommand": "node scripts/forge-ci-parallel.js --shard-index ${{ matrix.shard-index }} --shard-count ${{ matrix.shard-count }} --jobs \"${{ matrix.workers }}\" --single-worker-jobs ${{ matrix.single-worker-jobs }} --profile-dir \"${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}\"",
+  "newCommand": "node scripts/forge-ci-parallel.js --shard-index ${{ matrix.shard-index }} --shard-count ${{ matrix.shard-count }} --jobs \"${{ matrix.workers }}\" --single-worker-jobs ${{ matrix.single-worker-jobs }} --profile-dir \"${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}\" --verbose true",
+  "limits": "Additive layer over ci-latency: only the existing Run test suites command gains --verbose true in the same execution. No new step, no second native-v2 run; the existing forge-suite-profile-*/* upload retains the drained worker-N.log files. Hosted CI execution with this flag is pending (GF1-GF4)."
+}

@@ -164,8 +164,14 @@ for (const [file, minLines] of [
     for (const stub of ['TO' + 'DO', 'TB' + 'D', 'FIX' + 'ME']) assert(!text.includes(stub), file);
   });
 }
+function withoutIssue440S03Entry(changelog) {
+  const entries = changelog.split('\n').filter(line => line.startsWith("- E2E Windows host Claude → worker Codex e regressão do host Codex (#440, M-20261119115538-revisar-fluxo-execucao, S03):"));
+  assert.equal(entries.length, 1, 'one declared #440 S03 entry');
+  assert.equal(sha(entries[0] + '\n'), '4e5e159a44459a4b1cd4b029c78fe8365ebe020a6a06749fcb97a6eed967020d', 'declared #440 S03 entry matches measured bytes');
+  return changelog.replace(entries[0] + '\n', '');
+}
 test('docs-S02-changelog-single-measured-line-preserves-every-historical-byte-and-wires-pins', () => {
-  const changelog = read('CHANGELOG.md'), entry = changelog.split('\n')[2];
+  const changelog = withoutIssue440S03Entry(read('CHANGELOG.md')), entry = changelog.split('\n')[2];
   assert(entry.startsWith('- Recuperação replay-first e abandono seguro (#440, M-20261119115538-revisar-fluxo-execucao, S02):'));
   assert.equal(sha(entry + '\n'), '6cb3a2c48cf129ae8ac5e29fa79bbd514831057f8c29e774798d7a472a055e76');
   assert.equal(sha(changelog.replace(entry + '\n', '')), '68d384453f0766564d2738b4fa9171f171cb02768b482f77868fe0a5497da931');
@@ -174,5 +180,11 @@ test('docs-S02-changelog-single-measured-line-preserves-every-historical-byte-an
     assert(text.includes('withoutIssue440Entry(withoutIssue440S02Entry('), file + ' composed filters');
     assert(text.includes('6cb3a2c48cf129ae8ac5e29fa79bbd514831057f8c29e774798d7a472a055e76'));
   }
+});
+test('docs-S03-changelog-rejects-altered-missing-duplicate', () => {
+  const changelog = read('CHANGELOG.md'), entry = changelog.split('\n')[2];
+  assert.throws(() => withoutIssue440S03Entry(changelog.replace(entry, entry + ' altered')), /measured bytes/);
+  assert.throws(() => withoutIssue440S03Entry(changelog.replace(entry + '\n', '')), /one declared #440 S03 entry/);
+  assert.throws(() => withoutIssue440S03Entry(changelog + entry + '\n'), /one declared #440 S03 entry/);
 });
 console.log(passed + '/' + passed + ' forge-issue-440-docs checks passed (offline, no provider)');
