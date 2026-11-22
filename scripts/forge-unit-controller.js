@@ -2439,6 +2439,54 @@ function laterBegins(cwd, begin) {
     seen.add(row.idempotency_key); return row;
   });
 }
+// ── Issue 440 (S02/T06): read-only admission of a recovery successor ────────────
+// After a proved abandonment (forge-attempt-abandon) the recovery opens a NEW
+// attempt under the SAME controller begin the abandoned attempt held: same
+// committed begin, lease generation, owner and run write claim (DS4). This only
+// reads under the transaction mutex: no record, lease, claim or generation is
+// created or renewed. reenter (a new generation) is a different path.
+const ATTEMPT_SUCCESSOR_CODES = Object.freeze(['attempt-successor-begin-changed', 'attempt-successor-generation-changed',
+  'attempt-successor-claim-divergent', 'attempt-successor-terminal']);
+function admitAttemptSuccessor(cwd, input, options = {}) {
+  return withMutex(cwd, 'unit-controller-transactions', () => admitAttemptSuccessorInside(cwd, input, options || {}));
+}
+function admitAttemptSuccessorInside(cwd, input, options) {
+  const request = object(input, 'request');
+  const unit = forgeLease.normalizeUnitKey(opaque(request.unit, 'unit', true));
+  const milestone = opaque(request.milestone, 'milestone', true), beginKey = opaque(request.begin_key, 'begin_key', true);
+  const generation = opaque(request.lease_generation, 'lease_generation', true), ownerToken = opaque(request.owner_token, 'owner_token', true);
+  const hostRuntime = forgeRuntime.normalizeHostRuntime(request.host_runtime), runId = opaque(request.run_id, 'run_id', true);
+  const claim = object(request.claim, 'claim');
+  const refuse = (code, message) => { throw new ControllerError(code, message); };
+  if (pendingTransactions(cwd).length) refuse('transaction-pending', 'transação pendente impede o novo begin da recuperação');
+  const begin = lookupRecord(cwd, 'transaction', beginKey);
+  if (!begin || begin.action !== 'begin' || begin.phase !== 'committed' || begin.unit?.key !== unit || begin.milestone !== milestone
+      || begin.host_runtime !== hostRuntime || begin.owner_digest !== ownerDigest(ownerToken)) refuse('attempt-successor-begin-changed', 'begin original ausente, não commitado ou de outro owner');
+  if (begin.lease_generation !== generation) refuse('attempt-successor-generation-changed', 'geração de lease diferente da tentativa abandonada');
+  let later, events;
+  try { later = laterBegins(cwd, begin); events = readEvents(eventsFile(cwd, begin.milestone)); }
+  catch (error) { if (error instanceof ControllerError) refuse('attempt-successor-begin-changed', 'histórico do begin ambíguo'); throw error; }
+  if (later.some(row => row.unit.key === unit)) refuse('attempt-successor-begin-changed', 'a unidade já possui begin posterior');
+  const index = events.findIndex(row => row.idempotency_key === begin.idempotency_key && row.action === 'begin');
+  try { assertNoTerminal(cwd, begin, undefined, events.slice(index + 1)); }
+  catch (error) {
+    if (error?.code === 'terminal-conflict') refuse('attempt-successor-terminal', 'a unidade já possui transição terminal');
+    throw error;
+  }
+  const held = forgeLease.readLease(forgeLease.leaseFile(cwd, unit));
+  if (!held.record || !forgeLease.validRecord(held.record, unit) || held.record.generation !== generation
+      || held.record.owner_token !== ownerToken || held.record.request_id !== beginKey) refuse('attempt-successor-generation-changed', 'lease atual não é a geração do begin original');
+  const run = forgeRuns.get(cwd, runId);
+  if (!run?.active || !run.write_claim || run.write_claim.released || claim.released || claim.generation === undefined
+      || sha(run.write_claim) !== sha(claim)) refuse('attempt-successor-claim-divergent', 'claim de escrita do run diverge do claim da tentativa');
+  // The canonical transport admission (no boundary key): time always prevails.
+  let admission;
+  try { admission = decideTimeAdmission(cwd, { milestone, unit, now: options.now, kind: 'begin' }); }
+  catch { admission = { allowed: false, reason_code: 'milestone-time-invalid' }; }
+  if (!admission.allowed) throw new ControllerError(admission.reason_code, 'Entrada recusada pelo contrato de tempo da milestone', admission.details);
+  return Object.freeze({ ok: true, admitted: true, begin_key: beginKey, begin_checksum: sha(begin), lease_generation: generation,
+    owner_digest: begin.owner_digest, run_id: runId, claim_sha256: sha(run.write_claim), time_admission: admission.decision, provider_called: false });
+}
 function uninvokedEvidence(cwd, begin, successor, original, options) {
   if (successor.owner_digest !== begin.owner_digest || successor.host_runtime !== begin.host_runtime) throw new ControllerError('successor-owner-mismatch', 'successor owner differs');
   const context = options.inspectAttempt({ cwd, begin: clone(successor), references: { purpose: 'abandon-before-dispatch', original_begin_key: begin.idempotency_key } });
@@ -3101,6 +3149,12 @@ module.exports = {
   ownerInterruptionQuestions, archiveOwnerInterruptionWitnesses,
   dependencies: { forgeState, forgeRuns, forgePrefs, forgeRuntime, forgeIds, forgeLease },
 };
+// Issue 440 (S02/T06): exported non-enumerable so the pinned public inventory
+// (Object.keys of this module) stays byte-identical until its owner re-pins it.
+Object.defineProperties(module.exports, {
+  ATTEMPT_SUCCESSOR_CODES: { value: ATTEMPT_SUCCESSOR_CODES, enumerable: false },
+  admitAttemptSuccessor: { value: admitAttemptSuccessor, enumerable: false },
+});
 
 // Time-selection producer proofs can require this module during CLI selection.
 // Publish the same API as require() callers before entering that circular path.

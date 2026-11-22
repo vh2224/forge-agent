@@ -1048,7 +1048,7 @@ function nativePlanArtifactOrigin(request, root, options = {}) {
   const controller = require('./forge-unit-controller'), begin = controller.lookupRecord(root, 'transaction', classified.begin_key);
   if (!begin || begin.phase !== 'committed' || begin.action !== 'begin' || begin.unit?.key !== `plan-slice/${request.sliceId}`
       || begin.milestone !== request.milestoneId || begin.host_runtime !== request.route.host_runtime) invalid('native publication does not belong to this owner, unit or host');
-  const generation = planApi().verifyPlanGeneration(begin.plan_generation, { owner: root, milestone: request.milestoneId,
+  const generation = planApi().verifyPlanGeneration(begin.plan_generation, { owner: planOwner(root), milestone: request.milestoneId,
     slice: request.sliceId, begin_key: begin.idempotency_key, lease_generation: begin.lease_generation, owner_digest: begin.owner_digest });
   if (generation.generation_key !== classified.generation_key) invalid('native publication names another generation');
   if (classified.status === 'open') {
@@ -1321,6 +1321,20 @@ function artifactAttemptFiles(request) {
   return { cwd, root, resultFile, receiptFile };
 }
 
+// Issue 440 S02: canonical next step named on a recorded failed/started receipt.
+// Data only: nothing here inspects, replays, abandons or calls a provider; the
+// error keeps its original code and message and no receipt/result byte changes.
+function recordedAttemptNextAction() {
+  return Object.freeze({ action: 'recover-attempt', order: Object.freeze(['inspect', 'replay', 'abandon', 'new-begin']),
+    api: 'recoverUnitSidecar', refusal_set: require('./forge-replay-refusal').REFUSAL_SET_VERSION });
+}
+function withRecordedAttemptNextAction(error) {
+  error.next_action = recordedAttemptNextAction();
+  return error;
+}
+function failRecordedAttempt(code, hint) {
+  try { fail(code, hint); } catch (error) { throw withRecordedAttemptNextAction(error); }
+}
 function beginArtifactAttempt(...args) {
   return require('./forge-owner-transport-window').withMutation(args[0].contextRoot || args[0].cwd, () => beginArtifactAttemptInsideOwnerWindow(...args));
 }
@@ -1336,8 +1350,8 @@ function beginArtifactAttemptInsideOwnerWindow(request) {
     // requirement cannot disappear on replay. Legacy receipts are unchanged.
     require('./forge-request-retention').assertForReceipt(request, record);
     if (record.phase === 'ready') return { state: 'ready', record, loc, files, fingerprint };
-    if (record.phase === 'failed') fail(record.failure?.reason_code || 'artifact-attempt-failed');
-    fail('sidecar-attempt-interrupted', 'The attempt is started without a durable result; inspect it before a new dispatch.');
+    if (record.phase === 'failed') failRecordedAttempt(record.failure?.reason_code || 'artifact-attempt-failed');
+    failRecordedAttempt('sidecar-attempt-interrupted', 'The attempt is started without a durable result; inspect it before a new dispatch.');
   }
   const before = Object.fromEntries(loc.allowed.map(relative => [relative, fileHash(target(files.root, relative))]));
   const beforeState = Object.fromEntries(loc.allowed.map(relative => [relative, fileState(target(files.root, relative))]));
@@ -1427,8 +1441,8 @@ async function acceptArtifactResultCore(request, rawResult, metadata = {}, publi
     json(files.resultFile, result);
     return { result, record: existing, replayed: true, provider_called: false };
   }
-  if (existing.phase === 'failed') fail(existing.failure?.reason_code || 'artifact-attempt-failed');
-  if (existing.phase !== 'started') fail('sidecar-attempt-interrupted');
+  if (existing.phase === 'failed') failRecordedAttempt(existing.failure?.reason_code || 'artifact-attempt-failed');
+  if (existing.phase !== 'started') failRecordedAttempt('sidecar-attempt-interrupted');
   // Generic plan artifacts still refuse. The existing native facade is admitted
   // from its genuine controller generation and complete current task sources.
   const nativePlan = milestonePlanSlice(request) && nativePlanArtifactRoute(request);
@@ -2069,11 +2083,15 @@ function normalizedNativeFailure(request) {
       || typeof raw.reason_code !== 'string' || !/^[a-z0-9-]{1,80}$/.test(raw.reason_code)) {
     fail('native-memory-failure-invalid', 'Native memory failure requires a bounded machine-readable reason_code.');
   }
-  if (raw.provider_called === true) nativeMemoryIdentity(request, raw.telemetry);
+  const providerCalled = raw.provider_called === undefined ? 'unknown' : raw.provider_called;
+  if (providerCalled !== true && providerCalled !== false && providerCalled !== 'unknown') {
+    fail('native-memory-failure-invalid', 'Native memory failure provider_called must be true, false or unknown.');
+  }
+  if (providerCalled === true) nativeMemoryIdentity(request, raw.telemetry);
   const telemetry = memoryTelemetry({ telemetry: raw.telemetry || null });
   return {
     status: 'failure', reason_code: raw.reason_code,
-    provider_called: raw.provider_called === true,
+    provider_called: providerCalled,
     telemetry,
     publication: { status: 'noop', reason: 'worker-error' },
   };
@@ -3434,12 +3452,13 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
       const error = new Error('Recorded sidecar attempt failed; no provider was relaunched.');
       error.code = existing.failure.reason_code;
       error.diagnostic = diagnostic(existing.failure.diagnostic?.reason, existing.failure.diagnostic);
+      withRecordedAttemptNextAction(error);
       json(resultFile, existing.failure);
       // Follows the failure event recorded by the attempt itself; nothing is relaunched.
       notifyPhase('failed', { reason_code: existing.failure.reason_code });
       throw error;
     }
-    fail('sidecar-attempt-interrupted', 'Inspect the recorded heartbeat/process and recover this attempt before retrying with a new dispatch id. No worker was relaunched.');
+    failRecordedAttempt('sidecar-attempt-interrupted', 'Inspect the recorded heartbeat/process and recover this attempt before retrying with a new dispatch id. No worker was relaunched.');
   }
   // #350: after saved-receipt replay, before owner reads, receipt, announce and provider: a Codex
   // read-only artifacts profile that cannot receive its inputs is refused (identity only, no prompt).
@@ -4615,14 +4634,26 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     // recomputed here from the single source instead of trusting the argument.
     // The sixth argument is the recovery's single same-session resume (S05): only
     // a Claude sidecar route may carry it; runUnitSidecarCore revalidates the ref.
-    invoke: async (route, invocation, _ceiling, assertReady, reservationHash, resume) => {
+    // The seventh argument (issue 440) is only passed by the opt-in abandonment branch: the
+    // admitted successor dispatch. It must be exactly derived from this parent by
+    // recoveryDispatchId; any other value is refused before the invocation.
+    invoke: async (route, invocation, _ceiling, assertReady, reservationHash, resume, successor) => {
       if (resume != null && (route.worker_mode !== 'sidecar' || route.resolved_worker_engine !== 'claude')) fail('recovery-resume-route-invalid');
+      let successorContinuation;
+      if (successor != null) {
+        const id = successor.dispatch_id, marker = typeof id === 'string' ? id.lastIndexOf('-recovery-') : -1;
+        let derived = null;
+        try { derived = marker > 0 ? recoveryDispatchId(request.dispatchId, id.slice(marker + 10)) : null; } catch { derived = null; }
+        if (derived !== id || deliveryHelper) fail('recovery-successor-dispatch-invalid');
+        successorContinuation = id.slice(marker + 10);
+      }
       const routed = projectTransportOptions({ ...executionRequest, route }, executionRequest, invocation);
       asOriginal(routed, () => validateRecoveryRequest(routed, { verification: runtime.verification, nativeInvocation: invocation }));
       const ceiling = route.worker_mode === 'sidecar' ? ceilingFromRoute(route) : null;
       const next = deliveryHelper ? finalRequest(route) : projectTransportOptions({ ...executionRequest, recoveryStateFile: recovery.stateFile, route: ceiling
         ? { ...route, workers_timeout: ceiling.seconds, workers_timeout_source: ceiling.source } : route,
-        dispatchId: recoveryDispatchId(request.dispatchId), resultFile: `${request.resultFile}.recovery-${crypto.randomUUID()}.json`,
+        dispatchId: recoveryDispatchId(request.dispatchId, successorContinuation),
+        resultFile: `${request.resultFile}.recovery-${successorContinuation ?? crypto.randomUUID()}.json`,
         ...(resume != null ? { claudeResume: resume.session, resumedFrom: resume.resumed_from } : {}),
         // The successor carries only its actual parent: the admission returns the
         // parent's recorded decision for the same correction, never a new cycle.

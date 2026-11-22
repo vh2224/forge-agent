@@ -318,6 +318,19 @@ async function observeStoppedWriter(adapter, options) {
     fingerprint: receipt.fingerprint, receipt_sha256: receiptHash,
     execution_identity_sha256: receipt.recovery_identity_sha256,
     roots_sha256: digest(options.contract), route: receipt.route };
+  // Opt-in descendants proof (issue 440, S02/T02). Without options.descendants
+  // the challenge, attestation requirements, codes and handle stay identical.
+  // With it, only a LIVE process-tree proof handle that is `stopped` now binds
+  // the challenge; a serialized handle, a PID or anything else is refused.
+  const tree = options.descendants === undefined ? null : require('./forge-process-tree');
+  if (tree) {
+    let observed = null;
+    try { observed = tree.assertDescendants(options.descendants); } catch { observed = null; }
+    if (observed?.status !== 'stopped' || observed.method !== tree.CUSTODY_METHOD) fail('writer-observation-descendants-unproved');
+    challenge.descendants_sha256 = digest({ method: observed.method, status: observed.status,
+      record_sha256: observed.evidence.record_sha256, journal_sha256: observed.evidence.journal_sha256,
+      binding_sha256: observed.evidence.binding_sha256 });
+  }
   const previous = options.previous ? writerHandles.get(options.previous) : null;
   if (options.previous && !previous) fail('writer-observation-handle-invalid');
   if (previous && ['dispatch_id', 'fingerprint', 'execution_identity_sha256', 'roots_sha256']
@@ -327,6 +340,10 @@ async function observeStoppedWriter(adapter, options) {
     if (hashFile(options.receiptFile) !== receiptHash) fail('writer-observation-receipt-changed');
     const inspected = require('./forge-attempt-recovery').inspectReceipt(options.receiptFile, { request: options.request, processProbe: options.processProbe });
     if (inspected.process_stopped !== true) fail('writer-observation-not-stopped');
+    if (tree) {
+      // Live re-observation of the same custody: any change refuses by name.
+      try { tree.assertDescendants(options.descendants); } catch { fail('writer-observation-descendants-changed'); }
+    }
     options.assertUnchanged();
   };
   const refresh = async () => {
@@ -340,6 +357,7 @@ async function observeStoppedWriter(adapter, options) {
       || observed.receipt_sha256 !== challenge.receipt_sha256
       || observed.execution_identity_sha256 !== challenge.execution_identity_sha256
       || observed.roots_sha256 !== challenge.roots_sha256
+      || (tree && observed.descendants_sha256 !== challenge.descendants_sha256)
       || (writerIdentity && writerIdentity !== observed.writer_identity)) fail('writer-observation-unproved');
     writerIdentity = observed.writer_identity;
   };

@@ -778,6 +778,16 @@ Recovery state retains its original sidecar deadline, durable reservations and f
 
 Native recovery uses createRecoveryAuthorizationAdapter registration and createRecoveryAuthority revalidation below. Imported approved/authorized data creates no opaque exception. Functional pending questions remain separate.
 
+#### Replay, recusa operacional, abandono e novo begin
+
+Receipt `failed` ou `started` segue para `recoverUnitSidecar` com o adaptador vivo
+de abandono; nunca relance manualmente com dispatch id novo. A ordem do módulo
+obrigatório `shared/forge-procedure-recovery.md` é replay primeiro, recusa operacional
+fechada (`replay-refusal-v1`), abandono provado e novo begin na mesma geração de
+lease e claim. Exiba recusas pelo código. Autoridade, perguntas, writer/descendentes,
+owner e raízes, baseline, backup/reset, tempo e limites de review-fix continuam exigidos.
+Escopo, tabelas, stores e limites de evidência: `docs/issue-440/recovery-abandon.md`.
+
 ## Authorized continuity per unit
 
 Canonical contract: shared/forge-bidirectional-sidecar.md; authority and questions:

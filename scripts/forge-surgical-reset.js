@@ -689,6 +689,491 @@ function resetFromState(stateFile) {
   };
 }
 
+// ── claimed backup + reset (S02/T03, additive) ──────────────────────────────────
+//
+// The M013 engine above stays the ONLY diff/reset motor and is not modified. The
+// abandonment path (S02/T04) needs two guarantees its legacy callers never had:
+//   1. every byte about to be reverted is first copied into an exclusive,
+//      link-free backup that is re-read and verified (blobs + manifest);
+//   2. the reset touches ONLY paths the attempt concretely claimed, per root.
+// Both functions compose computePostChanges / computeResetTarget / executeReset /
+// verifyReset / captureAttemptSnapshot. Neither writes the state file: that is
+// why reconcileFailedAttempt (which persists `reconciliation`) is not reused.
+// Diagnostics carry closed codes, root ids, root-relative paths, counts and
+// hashes only — never absolute paths, file bytes or caller error messages.
+
+const BACKUP_RESET_CODES = Object.freeze([
+  'reset-unclaimed-change',
+  'reset-concrete-claims-required',
+  'backup-conflict',
+  'backup-target-invalid',
+  'backup-unverified',
+  'reset-target-changed',
+  'reset-partial',
+  // reused from the existing engine/reconciliation vocabulary
+  'reset-overlap',
+  'baseline-moved',
+  'reset-pre-dirty-changed',
+  'reset-unverified',
+  // internal integrity: the state/handles given to this API are not a v2
+  // attempt it can prove (schema, contract, strict SVN snapshot, callbacks)
+  'reset-input-invalid',
+]);
+const BACKUP_MANIFEST_VERSION = 1;
+const SHA256_RE = /^[a-f0-9]{64}$/;
+
+function sha256(bytes) {
+  return require('crypto').createHash('sha256').update(bytes).digest('hex');
+}
+
+function safeCode(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(value) ? value : null;
+}
+
+function resetRefusal(code, detail, extra = {}) {
+  const reason = BACKUP_RESET_CODES.includes(code) ? code : 'reset-input-invalid';
+  const error = new Error(reason);
+  error.code = reason;
+  error.reset_refusal = true;
+  error.detail = safeCode(detail);
+  error.extra = extra;
+  return error;
+}
+
+function refusalResult(error, fallback) {
+  if (error && error.reset_refusal) {
+    return { ok: false, reason_code: error.code, ...(error.detail ? { detail: error.detail } : {}), ...error.extra };
+  }
+  // Unexpected failure (I/O, VCS binary, snapshot limits): never an ok:true and
+  // never the original message, which may carry private paths.
+  return { ok: false, reason_code: fallback, ...(safeCode(error && error.code) ? { detail: error.code } : {}) };
+}
+
+function lstatOrNull(file) {
+  try { return fs.lstatSync(file, { bigint: true }); } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return null;
+    throw error;
+  }
+}
+
+/** Every EXISTING component of an absolute path, from the filesystem root, must be
+ * a plain directory. A symlink or junction anywhere could redirect the backup. */
+function assertNoLinkComponents(absolute, code) {
+  const parsed = path.parse(absolute);
+  let current = parsed.root;
+  for (const part of absolute.slice(parsed.root.length).split(/[\\/]+/).filter(Boolean)) {
+    current = path.join(current, part);
+    const stat = lstatOrNull(current);
+    if (!stat) return;
+    if (stat.isSymbolicLink() || !stat.isDirectory()) throw resetRefusal(code, 'backup-path-link');
+  }
+}
+
+/** The backup directory must be link-free and outside the owner and every root
+ * (both directions), measured on the physical path of its deepest existing ancestor. */
+function validateBackupDir(backupDir, contract) {
+  const roots = require('./forge-code-roots');
+  if (typeof backupDir !== 'string' || !path.isAbsolute(backupDir) || backupDir.includes('\0')) {
+    throw resetRefusal('backup-target-invalid', 'backup-dir-absolute-required');
+  }
+  const absolute = path.resolve(backupDir);
+  assertNoLinkComponents(absolute, 'backup-target-invalid');
+  let existing = absolute;
+  const rest = [];
+  while (!lstatOrNull(existing)) {
+    const parent = path.dirname(existing);
+    if (parent === existing) break;
+    rest.unshift(path.basename(existing));
+    existing = parent;
+  }
+  const physical = path.join(fs.realpathSync.native(existing), ...rest);
+  for (const guarded of [contract.owner, ...contract.code_roots.map((root) => root.path)]) {
+    if (roots.within(guarded, physical) || roots.within(physical, guarded)) {
+      throw resetRefusal('backup-target-invalid', 'backup-dir-inside-protected-root');
+    }
+  }
+  return absolute;
+}
+
+/** Read a backup file that must be a regular, singly-linked file. null = absent. */
+function readBackupFile(file, code) {
+  const stat = lstatOrNull(file);
+  if (!stat) return null;
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1n) throw resetRefusal(code, 'backup-file-link');
+  const bytes = fs.readFileSync(file);
+  const again = lstatOrNull(file);
+  if (!again || again.ino !== stat.ino || again.dev !== stat.dev || again.nlink !== 1n) throw resetRefusal(code, 'backup-file-replaced');
+  return bytes;
+}
+
+/** Exclusive publication (wx, 0o600). An existing file is accepted only when it is
+ * byte-identical (idempotence); anything else is a conflict. Always re-read. */
+function publishExclusive(file, bytes) {
+  try {
+    const fd = fs.openSync(file, 'wx', 0o600);
+    try { fs.writeFileSync(fd, bytes); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    const existing = readBackupFile(file, 'backup-target-invalid');
+    if (!existing || !existing.equals(bytes)) throw resetRefusal('backup-conflict');
+  }
+  const reread = readBackupFile(file, 'backup-target-invalid');
+  if (!reread || !reread.equals(bytes)) throw resetRefusal('backup-unverified', 'backup-reread-mismatch');
+}
+
+/** Current bytes of one reset target inside a root, or null when absent. The
+ * path is re-resolved through forge-code-roots (no link ancestor, no escape) and
+ * the leaf must be a regular singly-linked file read through the opened handle. */
+function readTargetBytes(contract, root, relPath) {
+  const roots = require('./forge-code-roots');
+  let resolved;
+  try { resolved = roots.resolvePath(contract, { root_id: root.id, path: relPath }); } catch (error) {
+    throw resetRefusal('backup-target-invalid', error.code || 'reset-target-path-invalid', { root_id: root.id });
+  }
+  const stat = lstatOrNull(resolved.absolute);
+  if (!stat) return null;
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1n) {
+    throw resetRefusal('backup-target-invalid', 'reset-target-not-regular-file', { root_id: root.id });
+  }
+  const fd = fs.openSync(resolved.absolute, 'r');
+  try {
+    const opened = fs.fstatSync(fd, { bigint: true });
+    if (opened.ino !== stat.ino || opened.size !== stat.size) {
+      throw resetRefusal('backup-target-invalid', 'reset-target-replaced', { root_id: root.id });
+    }
+    return fs.readFileSync(fd);
+  } finally { fs.closeSync(fd); }
+}
+
+function loadClaimedState(stateFile) {
+  const roots = require('./forge-code-roots');
+  let bytes; let state;
+  try { bytes = fs.readFileSync(stateFile); state = JSON.parse(bytes.toString('utf8')); } catch {
+    throw resetRefusal('reset-input-invalid', 'state-unreadable');
+  }
+  if (!state || state.schema_version !== 2 || !state.execution_contract || !Array.isArray(state.repos)) {
+    throw resetRefusal('reset-input-invalid', 'state-schema-unsupported');
+  }
+  let contract;
+  try { contract = roots.validateContract(state.execution_contract, { revalidate: true }); } catch (error) {
+    throw resetRefusal(error.code === 'root-identity-changed' ? 'baseline-moved' : 'reset-input-invalid', error.code || 'execution-contract-invalid');
+  }
+  return { state, stateSha: sha256(bytes), contract, contractSha: roots.digest(state.execution_contract) };
+}
+
+/** Claims are concrete per root: { root_id, path } or 'root::path'. Globs are
+ * refused (as inspectPreSpawn does); forge-code-roots normalizes separators,
+ * refuses protected/escaping paths and supplies the case-folding key. */
+function normalizeClaims(contract, claims) {
+  const roots = require('./forge-code-roots');
+  if (!Array.isArray(claims) || claims.length === 0) throw resetRefusal('reset-concrete-claims-required', 'claims-required');
+  return claims.map((claim) => {
+    const raw = typeof claim === 'string' ? claim : claim && claim.path;
+    if (typeof raw !== 'string' || /[*?]/.test(raw)) throw resetRefusal('reset-concrete-claims-required', 'claim-glob');
+    let resolved;
+    try { resolved = roots.resolvePath(contract, claim); } catch (error) {
+      throw resetRefusal('reset-concrete-claims-required', error.code || 'claim-invalid');
+    }
+    return { root_id: resolved.root_id, path: resolved.path, key: roots.key(resolved.path) };
+  });
+}
+
+function claimCovers(own, relPath) {
+  const k = require('./forge-code-roots').key(relPath);
+  return own.some((claim) => k === claim.key || k.startsWith(`${claim.key}/`));
+}
+
+function claimAncestor(own, relPath) {
+  const k = require('./forge-code-roots').key(relPath);
+  return own.some((claim) => k === '' || claim.key.startsWith(`${k}/`));
+}
+
+function sortedRows(rows) {
+  return JSON.stringify([...rows].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)));
+}
+
+/** Live inspection of one root, the same checks as reconcileFailedAttempt with
+ * claims replacing the ownership callback. Throws a named refusal; mutates nothing. */
+function inspectClaimedRoot(state, root, claims) {
+  const before = state.repos.find((repo) => repo.root_id === root.id);
+  if (!before || before.vcs !== root.vcs || typeof before.start_sha !== 'string' || !Array.isArray(before.pre_dirty)) {
+    throw resetRefusal('reset-input-invalid', 'state-root-missing', { root_id: root.id });
+  }
+  let baseline;
+  try { baseline = currentBaseline(root.path, root.vcs); } catch {
+    throw resetRefusal('baseline-moved', 'baseline-unavailable', { root_id: root.id });
+  }
+  if (baseline !== before.start_sha) throw resetRefusal('baseline-moved', null, { root_id: root.id });
+  const post = computePostChanges(root.path, before.start_sha, root.vcs);
+  const target = computeResetTarget(post, before.pre_dirty, (p) => hashObject(root.path, p, root.vcs));
+  if (target.overlap.length) throw resetRefusal('reset-overlap', null, { root_id: root.id, count: target.overlap.length });
+  const current = captureAttemptSnapshot(root.path, { vcsName: root.vcs });
+  const initial = new Map(before.pre_dirty.map((row) => [row.path, row.hash]));
+  const now = new Map(current.pre_dirty.map((row) => [row.path, row.hash]));
+  for (const [file, value] of initial) {
+    if (now.get(file) !== value) throw resetRefusal('reset-pre-dirty-changed', null, { root_id: root.id });
+  }
+  const own = claims.filter((claim) => claim.root_id === root.id);
+  const unclaimed = new Set();
+  if (root.vcs === 'svn') {
+    if (!vcs.validateSvnStrictSnapshot(before.svn_state)) throw resetRefusal('reset-input-invalid', 'svn-snapshot-required', { root_id: root.id });
+    const previous = new Map(before.svn_state.entries.map((row) => [row.path, row]));
+    const observed = new Map(current.svn_state.entries.map((row) => [row.path, row]));
+    for (const file of new Set([...previous.keys(), ...observed.keys()])) {
+      if (JSON.stringify(previous.get(file)) === JSON.stringify(observed.get(file))) continue;
+      if (initial.has(file)) throw resetRefusal('reset-pre-dirty-changed', null, { root_id: root.id });
+      // The backup keeps file bytes only and `svn revert` also rewinds properties, so a
+      // property value the worker produced would be lost with no copy. Refuse before any
+      // backup or reset mutation instead of declaring a verified backup.
+      const was = previous.get(file), now2 = observed.get(file);
+      const propertiesChanged = was && now2 ? was.properties_hash !== now2.properties_hash
+        : !!now2 && !!now2.status && now2.status.props !== 'none';
+      if (propertiesChanged) throw resetRefusal('reset-target-changed', 'svn-properties-unrecoverable', { root_id: root.id, paths: [file] });
+      const kind = (observed.get(file) || previous.get(file)).kind;
+      if (!claimCovers(own, file) && !(kind === 'dir' && claimAncestor(own, file))) unclaimed.add(file);
+    }
+  }
+  const restore = [...target.restore].sort();
+  const remove = [...target.remove].sort();
+  for (const file of [...restore, ...remove]) if (isGsdPath(file) || !claimCovers(own, file)) unclaimed.add(file);
+  if (unclaimed.size) {
+    throw resetRefusal('reset-unclaimed-change', null, { root_id: root.id, paths: [...unclaimed].sort() });
+  }
+  return { root, before, target: { restore, remove, preserved: target.preserved, overlap: [] } };
+}
+
+function entryFor(relPath, bytes) {
+  return { path: relPath, sha256: bytes ? sha256(bytes) : null, size: bytes ? bytes.length : 0 };
+}
+
+/**
+ * Exclusive, verified backup of every path a claimed reset would revert.
+ * Every refusal happens before any byte is written: no root changes, no
+ * backup directory or manifest is created. Repeating with identical content
+ * returns the same manifest sha (idempotent); any divergence is backup-conflict.
+ * @returns {{ok:true, manifest_file:string, manifest_sha256:string, entries:number}|{ok:false, reason_code:string}}
+ */
+function backupResetTargets(stateFile, { backupDir, claims } = {}) {
+  trackedInstallCache.clear();
+  try {
+    const { state, stateSha, contract, contractSha } = loadClaimedState(stateFile);
+    const dir = validateBackupDir(backupDir, contract);
+    const normalized = normalizeClaims(contract, claims);
+    // Global preflight: every root is proven claimable before anything is read
+    // into the backup, so a refusal on root N never leaves a backup of root 1.
+    const prepared = contract.code_roots.map((root) => inspectClaimedRoot(state, root, normalized));
+    const blobs = new Map();
+    const manifestRoots = prepared.map(({ root, before, target }) => {
+      const capture = (file, mustExist) => {
+        const bytes = readTargetBytes(contract, root, file);
+        if (!bytes && mustExist) throw resetRefusal('reset-target-changed', 'reset-target-vanished', { root_id: root.id });
+        const entry = entryFor(file, bytes);
+        if (bytes) blobs.set(entry.sha256, bytes);
+        return entry;
+      };
+      return {
+        root_id: root.id, vcs: root.vcs, start_sha: before.start_sha,
+        restore: target.restore.map((file) => capture(file, false)),
+        remove: target.remove.map((file) => capture(file, true)),
+      };
+    });
+    if (sha256(fs.readFileSync(stateFile)) !== stateSha) throw resetRefusal('backup-unverified', 'state-file-changed');
+    const manifest = {
+      schema_version: BACKUP_MANIFEST_VERSION,
+      state_file_sha256: stateSha,
+      contract_sha256: contractSha,
+      roots: manifestRoots,
+    };
+    const bytes = Buffer.from(`${JSON.stringify(manifest)}\n`, 'utf8');
+    const manifestFile = path.join(dir, 'manifest.json');
+    const existing = readBackupFile(manifestFile, 'backup-target-invalid');
+    if (existing && !existing.equals(bytes)) throw resetRefusal('backup-conflict');
+    // First filesystem write of this function.
+    const blobDir = path.join(dir, 'blobs');
+    fs.mkdirSync(blobDir, { recursive: true, mode: 0o700 });
+    assertNoLinkComponents(blobDir, 'backup-target-invalid');
+    validateBackupDir(dir, contract);
+    for (const [digest, content] of [...blobs].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+      const file = path.join(blobDir, digest);
+      publishExclusive(file, content);
+      if (sha256(readBackupFile(file, 'backup-unverified')) !== digest) throw resetRefusal('backup-unverified', 'blob-digest-mismatch');
+    }
+    publishExclusive(manifestFile, bytes);
+    const manifestSha = sha256(bytes);
+    verifyBackup({ manifest_file: manifestFile, manifest_sha256: manifestSha }, contract, stateSha, contractSha);
+    const entries = manifestRoots.reduce((sum, row) => sum + row.restore.length + row.remove.length, 0);
+    return { ok: true, manifest_file: manifestFile, manifest_sha256: manifestSha, entries };
+  } catch (error) {
+    return refusalResult(error, 'backup-unverified');
+  }
+}
+
+function validManifestEntry(entry, nullable) {
+  return entry && typeof entry.path === 'string' && entry.path && Number.isSafeInteger(entry.size) && entry.size >= 0
+    && (entry.sha256 === null ? nullable && entry.size === 0 : SHA256_RE.test(entry.sha256));
+}
+
+/** Re-read the manifest by its expected sha and every blob by its digest. */
+function verifyBackup(backup, contract, stateSha, contractSha) {
+  if (!backup || typeof backup.manifest_file !== 'string' || !SHA256_RE.test(String(backup.manifest_sha256 || ''))) {
+    throw resetRefusal('backup-unverified', 'backup-handle-invalid');
+  }
+  const manifestFile = path.resolve(backup.manifest_file);
+  if (path.basename(manifestFile) !== 'manifest.json') throw resetRefusal('backup-unverified', 'backup-handle-invalid');
+  const dir = validateBackupDir(path.dirname(manifestFile), contract);
+  assertNoLinkComponents(path.join(dir, 'blobs'), 'backup-unverified');
+  const bytes = readBackupFile(manifestFile, 'backup-unverified');
+  if (!bytes || sha256(bytes) !== backup.manifest_sha256) throw resetRefusal('backup-unverified', 'manifest-digest-mismatch');
+  let manifest;
+  try { manifest = JSON.parse(bytes.toString('utf8')); } catch { throw resetRefusal('backup-unverified', 'manifest-invalid'); }
+  if (`${JSON.stringify(manifest)}\n` !== bytes.toString('utf8') || manifest.schema_version !== BACKUP_MANIFEST_VERSION
+      || !Array.isArray(manifest.roots) || manifest.contract_sha256 !== contractSha) {
+    throw resetRefusal('backup-unverified', 'manifest-invalid');
+  }
+  if (manifest.state_file_sha256 !== stateSha) throw resetRefusal('backup-unverified', 'state-file-changed');
+  const ids = contract.code_roots.map((root) => root.id);
+  if (JSON.stringify(manifest.roots.map((row) => row && row.root_id)) !== JSON.stringify(ids)) {
+    throw resetRefusal('backup-unverified', 'manifest-roots-mismatch');
+  }
+  for (const row of manifest.roots) {
+    if (!Array.isArray(row.restore) || !Array.isArray(row.remove) || typeof row.start_sha !== 'string'
+        || !row.restore.every((entry) => validManifestEntry(entry, true)) || !row.remove.every((entry) => validManifestEntry(entry, false))) {
+      throw resetRefusal('backup-unverified', 'manifest-invalid');
+    }
+    for (const entry of [...row.restore, ...row.remove]) {
+      if (entry.sha256 === null) continue;
+      const blob = readBackupFile(path.join(dir, 'blobs', entry.sha256), 'backup-unverified');
+      if (!blob || blob.length !== entry.size || sha256(blob) !== entry.sha256) throw resetRefusal('backup-unverified', 'blob-digest-mismatch');
+    }
+  }
+  return manifest;
+}
+
+/** The live target must equal the manifest target or, on resumption, be a subset
+ * whose missing paths are already back at the baseline (computePostChanges no
+ * longer lists them). Every live path must still hold exactly the backed-up bytes. */
+function matchManifest(contract, item, recorded) {
+  const roots = require('./forge-code-roots');
+  const { root, before, target } = item;
+  if (!recorded || recorded.vcs !== root.vcs || recorded.start_sha !== before.start_sha) {
+    throw resetRefusal('backup-unverified', 'manifest-root-mismatch', { root_id: root.id });
+  }
+  const resumed = [];
+  for (const kind of ['restore', 'remove']) {
+    const byKey = new Map(recorded[kind].map((entry) => [roots.key(entry.path), entry]));
+    const live = new Set(target[kind].map((file) => roots.key(file)));
+    for (const file of target[kind]) {
+      const entry = byKey.get(roots.key(file));
+      if (!entry) throw resetRefusal('reset-target-changed', 'reset-target-outside-manifest', { root_id: root.id });
+      const bytes = readTargetBytes(contract, root, file);
+      if ((bytes ? sha256(bytes) : null) !== entry.sha256) throw resetRefusal('reset-target-changed', 'reset-target-bytes-changed', { root_id: root.id });
+    }
+    for (const entry of recorded[kind]) if (!live.has(roots.key(entry.path))) resumed.push(entry.path);
+  }
+  return resumed.sort();
+}
+
+/** Post-condition of one root: no leftover, the dirty set is exactly the baseline
+ * pre_dirty (so the unclaimed remainder is untouched) and, for SVN, the strict
+ * entries are identical to the attempt snapshot. */
+function proveRootReset(root, before) {
+  const checked = verifyReset(root.path, before.start_sha, before.pre_dirty, root.vcs);
+  if (!checked.verified) throw resetRefusal('reset-unverified', 'reset-leftover', { root_id: root.id, count: checked.leftover.length });
+  const after = captureAttemptSnapshot(root.path, { vcsName: root.vcs });
+  if (after.start_sha !== before.start_sha || sortedRows(after.pre_dirty) !== sortedRows(before.pre_dirty)) {
+    throw resetRefusal('reset-unverified', 'reset-snapshot-diverged', { root_id: root.id });
+  }
+  if (root.vcs === 'svn' && JSON.stringify(after.svn_state.entries) !== JSON.stringify(before.svn_state.entries)) {
+    throw resetRefusal('reset-unverified', 'reset-svn-state-diverged', { root_id: root.id });
+  }
+}
+
+/** Paths of an interrupted root that are observably back at the baseline. When the
+ * tree cannot be re-queried every target path is reported as possibly altered. */
+function observedAltered(item) {
+  const roots = require('./forge-code-roots');
+  const paths = [...item.target.restore, ...item.target.remove].sort();
+  try {
+    const post = new Set(computePostChanges(item.root.path, item.before.start_sha, item.root.vcs, { census: false })
+      .map((entry) => roots.key(entry.path)));
+    return { root_id: item.root.id, paths: paths.filter((file) => !post.has(roots.key(file))), exact: true };
+  } catch {
+    return { root_id: item.root.id, paths, exact: false };
+  }
+}
+
+function callAssertUnchanged(assertUnchanged, observation) {
+  try { assertUnchanged(Object.freeze(observation)); } catch (error) {
+    throw resetRefusal('reset-target-changed', 'assert-unchanged', {
+      ...(observation.root_id ? { root_id: observation.root_id } : {}),
+      ...(safeCode(error && error.code) ? { assert_code: error.code } : {}),
+    });
+  }
+}
+
+/**
+ * Surgical reset limited to claimed paths, from a verified backup. Calls
+ * assertUnchanged before the first mutation and before each root, re-inspects
+ * each root right before touching it and proves it afterwards. Never writes the
+ * state file. A failure after any root is proven is reset-partial with the
+ * altered/pending roots explicit; the same backup resumes it.
+ */
+function resetClaimedAttempt(stateFile, { backup, claims, assertUnchanged, onProgress } = {}) {
+  trackedInstallCache.clear();
+  const rootsDone = [];
+  const altered = [];
+  const alreadyReset = [];
+  let allRoots = [];
+  let inFlight = null;
+  let mutated = false;
+  const pending = () => allRoots.filter((id) => !rootsDone.includes(id));
+  try {
+    if (typeof assertUnchanged !== 'function') throw resetRefusal('reset-input-invalid', 'assert-unchanged-required');
+    if (onProgress !== undefined && typeof onProgress !== 'function') throw resetRefusal('reset-input-invalid', 'on-progress-invalid');
+    const { state, stateSha, contract, contractSha } = loadClaimedState(stateFile);
+    allRoots = contract.code_roots.map((root) => root.id);
+    const manifest = verifyBackup(backup, contract, stateSha, contractSha);
+    const normalized = normalizeClaims(contract, claims);
+    const recordedFor = (root) => manifest.roots.find((row) => row.root_id === root.id);
+    // Global preflight: no mutation until every root matches its manifest.
+    for (const root of contract.code_roots) matchManifest(contract, inspectClaimedRoot(state, root, normalized), recordedFor(root));
+    callAssertUnchanged(assertUnchanged, { phase: 'before-first-mutation', roots: [...allRoots] });
+    for (const root of contract.code_roots) {
+      // Revalidate this root immediately before touching it.
+      const item = inspectClaimedRoot(state, root, normalized);
+      const resumed = matchManifest(contract, item, recordedFor(root));
+      callAssertUnchanged(assertUnchanged, { phase: 'before-root', root_id: root.id });
+      const paths = [...item.target.restore, ...item.target.remove].sort();
+      if (paths.length) {
+        inFlight = item;
+        mutated = true;
+        executeReset(root.path, item.before.start_sha, item.target, root.vcs);
+      }
+      proveRootReset(root, item.before);
+      inFlight = null;
+      altered.push({ root_id: root.id, paths });
+      if (resumed.length) alreadyReset.push({ root_id: root.id, paths: resumed });
+      rootsDone.push(root.id);
+      if (onProgress) onProgress({ roots_done: [...rootsDone], pending_roots: pending() });
+    }
+    return { ok: true, verified: true, roots_done: [...rootsDone], pending_roots: [], altered, already_reset: alreadyReset,
+      manifest_sha256: backup.manifest_sha256 };
+  } catch (error) {
+    if (inFlight) altered.push(observedAltered(inFlight));
+    const refusal = refusalResult(error, 'reset-unverified');
+    const effects = { roots_done: [...rootsDone], pending_roots: pending(), altered, already_reset: alreadyReset };
+    if (rootsDone.length) {
+      const { reason_code: cause, ok, ...rest } = refusal;
+      return { ...rest, ok: false, reason_code: 'reset-partial', cause_code: cause, ...effects };
+    }
+    if (mutated) {
+      const { reason_code: cause, ok, ...rest } = refusal;
+      return { ...rest, ok: false, reason_code: 'reset-unverified', cause_code: cause, ...effects };
+    }
+    return { ...refusal, ...effects };
+  }
+}
+
 module.exports = {
   reconcileFailedAttempt,
   isGsdPath,
@@ -714,6 +1199,10 @@ module.exports = {
   resetFromState,
   resetMultiFromState,
   resetFailedAttempt,
+  // Additive (S02/T03): claimed backup + reset for attempt abandonment.
+  BACKUP_RESET_CODES,
+  backupResetTargets,
+  resetClaimedAttempt,
 };
 
 // ── CLI (manual argv parse, no deps — mold: forge-xllm.js) ───────────────────────

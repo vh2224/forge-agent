@@ -54,6 +54,11 @@ async function withExecutionActivity(request, runtime, action) {
       || r.ownerBroker || r.memberHandle !== undefined || r.route?.worker_mode === 'native'
       || fs.existsSync(`${r.resultFile}.receipt.json`)) return action(runtime);
   const owner = fs.realpathSync.native(r.contextRoot || r.cwd), unit = `execute-task/${r.taskId}`;
+  // Issue 440 (S02/T02): warm the process-family custody asynchronously (cached
+  // once per process) BEFORE every synchronous check below, any window and the
+  // synchronous scope.spawn path. Failure only means the plain spawn is used and
+  // descendants can never be `stopped`.
+  try { await require('./forge-process-tree').prepareCustody(); } catch { /* custody unavailable */ }
   // A known time refusal must reach the existing owner receipt path without
   // opening/renewing a writer lease or requiring writer identity. Carry the
   // exact canonical refusal privately, so a changing clock cannot turn this
@@ -89,7 +94,16 @@ async function withExecutionActivity(request, runtime, action) {
   const duration = timeout.protectedWindowMs(timeout.ceilingFromRoute(r.route).ms);
   if (!duration.covers) fail('protected-owner-window-ceiling-unsupported');
   let leaseWindow, ownerWindow, expectedLease, closed = false, spawnAttempted = false;
-  let child = null, failedSpawn = null, childClosed = false, join = null;
+  let child = null, failedSpawn = null, childClosed = false, join = null, attemptTree = null;
+  // Attempt binding from the same canonical sources as managed-surfaces-v1.
+  const treeBinding = () => {
+    const recovery = require('./forge-attempt-recovery');
+    const claimGeneration = run.write_claim?.generation;
+    return { dispatch_id: r.dispatchId, fingerprint: require('./forge-unit-sidecar').artifactFingerprint(r),
+      recovery_identity_sha256: roots.digest(recovery.requestIdentity(recovery.canonicalRequest(r))), unit,
+      claim_generation: claimGeneration === undefined ? null : claimGeneration, lease_generation: generation };
+  };
+  const treeRoots = () => [owner, ...r.execution_contract.code_roots.map(root => root.path)];
   const knownLeaseHashes = new Set();
   const relative = path.relative(owner, leaseFile).replace(/\\/g, '/');
   const requestHash = roots.digest({ owner, run: runId, unit, generation, dispatch: r.dispatchId,
@@ -139,8 +153,24 @@ async function withExecutionActivity(request, runtime, action) {
       assertLive();
       if (spawnAttempted) fail('protected-owner-writer-exists');
       spawnAttempted = true;
-      try { child = spawn(command, args, options); }
-      catch (error) { failedSpawn = ['ENOENT', 'EACCES', 'ENOEXEC'].includes(error.code) ? error.code : null; throw error; }
+      // The family custody starts the transport itself (supervisor on win32,
+      // plain spawn for forms it cannot reproduce). A module error BEFORE any
+      // spawn keeps today's plain spawn; a custody failure after the supervisor
+      // was chosen is a named refusal and never runs the transport uncontained.
+      let tree = null;
+      try {
+        tree = require('./forge-process-tree');
+        attemptTree = tree.startAttemptTree({ command, args, options, resultFile: r.resultFile, binding: treeBinding(), roots: treeRoots() });
+      } catch (error) {
+        attemptTree = null;
+        if (tree?.isSpawnError(error)) { failedSpawn = ['ENOENT', 'EACCES', 'ENOEXEC'].includes(error.code) ? error.code : null; throw error; }
+        if (tree?.isCustodyFailure(error)) throw error;
+      }
+      if (attemptTree) child = attemptTree.child;
+      else {
+        try { child = spawn(command, args, options); }
+        catch (error) { failedSpawn = ['ENOENT', 'EACCES', 'ENOEXEC'].includes(error.code) ? error.code : null; throw error; }
+      }
       child.once('error', error => { if (!child.pid && ['ENOENT', 'EACCES', 'ENOEXEC'].includes(error.code)) failedSpawn = error.code; });
       child.once('close', () => { childClosed = true; });
       return child;
@@ -160,7 +190,12 @@ async function withExecutionActivity(request, runtime, action) {
         require('./forge-xllm').terminateOwnedProcessTree(child);
         if (!await waitForExit(child, Date.now() + 10000)) fail('protected-owner-writer-unproven');
       }
-      return (join = Object.freeze({ joined: true, possible_writers: 0, pid: child.pid || null }));
+      // Additive, diagnostic-only key: no record/journal/proof failure changes
+      // joined, possible_writers, codes, the owner window or the lease.
+      let descendants = null;
+      try { descendants = attemptTree ? await attemptTree.tree.join() : null; } catch { descendants = null; }
+      if (!descendants) descendants = Object.freeze({ status: 'unknown', method: 'process-tree-census-v1', record_sha256: null });
+      return (join = Object.freeze({ joined: true, possible_writers: 0, pid: child.pid || null, descendants }));
     },
     verificationWindow(seal) {
       if (!join?.joined) fail('protected-owner-writer-unproven');

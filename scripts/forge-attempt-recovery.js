@@ -293,6 +293,8 @@ function legacyWindowIntact(state) {
 function validateState(state) {
   if (!state || !state.unit || !Number.isFinite(state.started_at)
       || !Array.isArray(state.attempts) || !Array.isArray(state.pending_questions)) fail('recovery-state-invalid');
+  // Issue 440 (S02/T06): additive append-only histories; absent in every legacy state.
+  if (['replay_refusals', 'abandonments'].some(key => Object.hasOwn(state, key) && !Array.isArray(state[key]))) fail('recovery-state-invalid');
   if (state.schema_version === 1) {
     if (!legacyWindowIntact(state)) fail('recovery-state-invalid');
     return state;
@@ -415,6 +417,28 @@ function createRecovery(options) {
       entry.observation = attempt.observation ? require('./forge-sidecar-diagnostic').observation(attempt.observation) : null;
       entry.reservation = state.reservations?.at(-1) || null;
       state.attempts.push(entry); state.phase = 'inspection'; return save();
+    },
+    // Issue 440 (S02/T06): the validated replay-refusal-v1 classification is data,
+    // never authority. Append-only: the existing prefix is kept and an identical
+    // classification is never appended twice (restart-safe). Returns whether it was new.
+    recordReplayRefusal(classification) {
+      require('./forge-replay-refusal').validateClassification(classification);
+      const rows = state.replay_refusals || [], hash = digest(classification);
+      if (rows.some(row => row.classification_sha256 === hash)) return false;
+      state.replay_refusals = [...rows, { classification_sha256: hash, ...JSON.parse(JSON.stringify(classification)), recorded_at: clock() }];
+      save(); return true;
+    },
+    // Reference to the T04 append-only abandonment record (history, not authority).
+    recordAbandonment(outcome) {
+      if (!outcome || outcome.ok !== true || outcome.status !== 'abandoned' || !/^[a-f0-9]{64}$/.test(outcome.record_sha256 || '')) fail('recovery-state-invalid');
+      const rows = state.abandonments || [];
+      if (rows.some(row => row.record_sha256 === outcome.record_sha256)) return false;
+      state.abandonments = [...rows, { record_sha256: outcome.record_sha256, receipt_sha256: outcome.receipt_sha256 ?? null,
+        request_identity_sha256: outcome.request_identity_sha256 ?? null, classification_code: outcome.classification_code ?? null,
+        manifest_sha256: outcome.manifest_sha256 ?? null, roots_reset: Array.isArray(outcome.roots_reset) ? [...outcome.roots_reset] : [],
+        original_provider_called: [true, false].includes(outcome.original_provider_called) ? outcome.original_provider_called : 'unknown',
+        recorded_at: clock() }];
+      save(); return true;
     },
     async next(input) {
       if (state.pending_questions.some(q => q.status === 'pending')) return { action: 'pending-questions', questions: state.pending_questions };
@@ -671,6 +695,10 @@ function createRecovery(options) {
         ...(handoffPending ? { handoff_pending: true } : {}),
         ...(decision.resume ? { session_sha256: decision.resume.session_sha256 } : {}),
         ...(decision.adapter_preflight ? { adapter_preflight: decision.adapter_preflight } : {}),
+        // Issue 440 (S02/T06): only the opt-in abandonment branch sets this binding.
+        ...(decision.abandonment ? { abandonment: { record_sha256: decision.abandonment.record_sha256,
+          successor_record_sha256: decision.abandonment.successor_admission?.record_sha256 ?? null,
+          successor_dispatch_id: decision.abandonment.successor_admission?.dispatch_id ?? null } } : {}),
         reserved_at: clock(), reason: decision.adapter_preflight ? 'adapter-preflight-incompatible' : decision.resume ? RESUME_RESERVATION : decision.silence_retry ? 'anomalous-silence-same-target'
           : decision.corrected ? 'offline-correction' : 'resolved-next-destination',
         provenance: decision.provenance || null, provider_called: 'unknown' };
@@ -714,7 +742,17 @@ function inspectReceipt(file, options = {}) {
     phase: receipt.phase, incomplete_execution: incomplete,
     valid_saved_response: !incomplete && (['ready', 'executed'].includes(receipt.phase) || !!receipt.saved_candidate),
     writer_possible: writer,
-    roots_reconciled: false, receipt };
+    roots_reconciled: false, retained_output: retainedOutput(receipt), receipt };
+}
+// Issue 440 (S02/T06), additive: which retained output the receipt names. `none`
+// is null (falsy) because the replay-refusal-v1 classifier treats any truthy
+// retained_output as retained output; a 'none' string would block every refusal.
+function retainedOutput(receipt) {
+  if (receipt.phase === 'ready') return 'ready';
+  if (receipt.phase === 'executed') return 'executed';
+  if (receipt.saved_candidate) return 'saved-candidate';
+  if (receipt.returned_response || receipt.failure?.returned_response) return 'returned-custody';
+  return null;
 }
 function captureFailure(options) {
   const fs = require('fs'), stateApi = require('./forge-xllm-state');
@@ -881,12 +919,214 @@ async function inspectPreSpawn(options, state, inspection) {
   }, challenge: Object.freeze(challenge), failure_id: digest({ receipt: challenge.receipt_sha256,
     request: challenge.request_sha256, reason: challenge.failure_reason }), contract };
 }
+// ── Issue 440 (S02/T06): opt-in replay → refusal → abandonment → successor ──
+// Only recovery.abandonment (the opaque T04 adapter handle; a JSON copy or a
+// look-alike is refused) enables this branch. Without it every decision, state
+// byte and reconcile call of recoverAttempt is the legacy one. The replay-refusal-v1
+// classification is data: abandonAttempt reclassifies and reproves everything
+// live, recordSuccessorAdmission reproves it again (a historical abandoned record
+// never authorizes a new begin), and the controller admission is read-only.
+const ABANDONMENT_EXCLUSIVE = Object.freeze(['transitions', 'environmentalCorrection', 'correction', 'resumeReservation', 'nativeRepackage']);
+const SUCCESSOR_STOPS = () => [...require('./forge-unit-controller').ATTEMPT_SUCCESSOR_CODES, 'transaction-pending',
+  ...require('./forge-milestone-time-admission').TRANSPORT_REFUSAL_CODES];
+function closedCode(value) { return typeof value === 'string' && /^[a-z0-9][a-z0-9-]{0,79}$/.test(value) ? value : null; }
+function triState(value) { return value === true || value === false ? value : 'unknown'; }
+// DS6/G2: other units, routes, legacy receipts and the other recovery modes are
+// refused by name and keep the current path.
+function abandonmentScope(options, request, receipt) {
+  if (ABANDONMENT_EXCLUSIVE.some(key => options[key])) return 'abandon-unit-unsupported';
+  if (request.scope !== 'milestone' || request.unitType !== 'execute-task' || request.phase !== 'execute' || request.reviewFix
+      || request.ownerBroker || request.linked_begin_key || request.route?.worker_mode !== 'sidecar'
+      || request.execution_contract?.schema_version !== 2) return 'abandon-unit-unsupported';
+  if (receipt?.recovery_baseline?.schema_version !== 1) return 'abandon-baseline-missing';
+  return null;
+}
+function createAbandonmentFlow({ options, request, inspection, session, clock }) {
+  const abandon = require('./forge-attempt-abandon'), refusalSet = require('./forge-replay-refusal');
+  const raw = options.request, receipt = inspection.receipt, unit = `execute-task/${request.taskId}`, owner = request.contextRoot;
+  const live = { request: raw, adapter: options.abandonment, processProbe: options.processProbe, recoveryAuthorization: options.recoveryAuthorization };
+  let abandoned = null, held = null;
+  const summary = () => abandoned && { status: 'abandoned', record_sha256: abandoned.record_sha256,
+    classification_code: abandoned.classification_code, manifest_sha256: abandoned.manifest_sha256, roots_reset: abandoned.roots_reset };
+  // Guarded owner append of T04 (window fence + owner lock); a busy fence is pending-window.
+  const event = (name, code) => {
+    const value = abandon.appendRecoveryEvent({ request: raw, event: name, reason_code: code });
+    return value.ok ? { event: name, owner_event: value.owner_event, record_sha256: value.record_sha256 }
+      : { event: name, owner_event: 'unavailable', reason_code: value.reason_code };
+  };
+  const refusalSummary = value => ({ code: value.code, eligible: value.eligible, class: value.class,
+    source_reason_code: value.source_reason_code, receipt_sha256: value.receipt_sha256, provider_called: value.provider_called,
+    ...(value.timeout_cause ? { timeout_cause: value.timeout_cause } : {}), classification_sha256: digest(value) });
+  // Live observations of this call (the same sources abandonAttempt reads again).
+  function facts() {
+    const current = session.inspect();
+    let identity = false;
+    try {
+      identity = receipt.dispatch_id === raw.dispatchId && receipt.recovery_identity_sha256 === digest(requestIdentity(request))
+        && receipt.fingerprint === require('./forge-unit-sidecar').artifactFingerprint(raw);
+    } catch { identity = false; }
+    const claim = raw.claim, run = require('./forge-runs').get(owner, raw.runId || raw.milestoneId);
+    let pending;
+    try {
+      pending = require('./forge-interaction').mergePendingQuestions(current.pending_questions,
+        [...(receipt.pending_questions || []), ...(receipt.input_pending_questions || [])]).filter(row => row.status !== 'resolved').map(row => row.id);
+    } catch { pending = ['questions-unreadable']; }
+    const binding = options.recoveryAuthorization, last = current.attempts.at(-1)?.failure_class;
+    return { identity_matches: identity, pending_questions: pending,
+      claim_matches: !!claim && !claim.released && claim.generation !== undefined && !!run?.active && !run.write_claim?.released
+        && digest(run.write_claim) === digest(claim),
+      authority_present: !!binding && typeof binding.adapter?.readStandingAuthorization === 'function'
+        && typeof binding.adapter?.issueRecoveryException === 'function' && typeof binding.reference === 'string' && !!binding.reference,
+      failure_class: last === 'interrupted' ? 'unknown' : last || 'unknown' };
+  }
+  function classify(replay) {
+    const value = refusalSet.classifyReplayRefusal({ version: refusalSet.REFUSAL_SET_VERSION, inspection, receipt, replay, facts: facts() });
+    refusalSet.validateClassification(value);
+    return value;
+  }
+  const observedReplay = error => ({ attempted: true, refused: true, reason_code: closedCode(error?.code),
+    provider_called: error?.provider_called === undefined ? false : triState(error.provider_called) });
+  // A blocking refusal stops with its own code: no abandonment, reset or begin.
+  // The T04 refusal-only seam anchors the record and appends the guarded event; it
+  // never proves a writer, backs up, resets or admits anything.
+  // A refused retained-output replay is not persisted here: the current publisher
+  // may itself have recorded its failure in the state during that replay.
+  async function refused(value, { persist = true } = {}) {
+    let emitted = null;
+    // The session list only de-duplicates its own history. The external refusal seam is
+    // idempotent by itself, so a failed earlier recording stays repairable on retry.
+    if (persist) session.recordReplayRefusal(value);
+    if (persist || abandon.readAbandonment({ request: raw }).status === 'none') {
+      const recorded = await abandon.recordRefusal({ request: raw, adapter: options.abandonment, classification: value, emitEvents: true });
+      emitted = recorded.ok === true ? { event: 'attempt-replay-refused', owner_event: recorded.owner_event, record_sha256: recorded.record_sha256 }
+        : { event: 'attempt-replay-refused', owner_event: 'unavailable', reason_code: recorded.reason_code };
+    }
+    const questions = value.code === 'replay-refusal-question-pending';
+    return { action: questions ? 'pending-questions' : 'stop', reason_code: value.code,
+      ...(questions ? { questions: session.inspect().pending_questions } : {}), classification: refusalSummary(value),
+      ...(emitted ? { owner_event: emitted } : {}), provider_called: false };
+  }
+  // The attempt a host crash left only as a started receipt is recorded from the
+  // receipt: its route and provider_called (or unknown); no model or success.
+  function recordReceiptAttempt() {
+    if (session.inspect().attempts.some(row => typeof row.receipt === 'string' && path.resolve(row.receipt) === path.resolve(options.receiptFile))) return;
+    const started = receipt.phase === 'started';
+    session.record({ failure_class: started ? 'interrupted' : 'unknown',
+      reason_code: started ? 'sidecar-attempt-interrupted' : closedCode(receipt.failure?.reason_code) || 'attempt-failed',
+      layer: 'attempt-receipt', route: receipt.route, request_sha256: null, request_bytes: null, context_sha256: null, context_bytes: null,
+      duration_ms: null, budgets: {}, caller_request_sha256: callerRequestHash(raw),
+      provider_called: triState(receipt.failure && Object.hasOwn(receipt.failure, 'provider_called') ? receipt.failure.provider_called : receipt.provider_called),
+      receipt: options.receiptFile, result: raw.resultFile, diagnostic: started ? 'sidecar-attempt-interrupted' : 'attempt-failed',
+      stderr: '', next_action: 'inspect-process-receipt-roots' });
+  }
+  return Object.freeze({
+    abandoned: () => !!abandoned,
+    summary,
+    // Inspection → replay of retained output (current path) → classification → abandonment.
+    async prepare() {
+      const probe = await abandon.abandonAttempt({ adapter: options.abandonment });
+      if (probe.reason_code === 'abandon-adapter-required') return { action: 'stop', reason_code: probe.reason_code, provider_called: false };
+      if (options.answers?.length) session.answer(options.answers);
+      // Restart after the successor admission: one successor per abandonment.
+      const status = abandon.readAbandonment({ request: raw });
+      if (status.ok && status.status === 'successor-admitted') {
+        const current = session.inspect();
+        const reservation = (current.reservations || []).find(row => row.abandonment?.record_sha256 === status.abandoned?.record_sha256);
+        const summarized = { status: 'successor-admitted', record_sha256: status.abandoned?.record_sha256 ?? null, successor_admitted: true };
+        if (reservation) {
+          // A real reservation exists: never a second one. It must carry the admitted identity.
+          if (reservation.abandonment?.successor_dispatch_id !== status.successor?.dispatch_id) {
+            return { action: 'stop', reason_code: 'abandon-record-conflict', abandonment: summarized, provider_called: false };
+          }
+          const consumed = current.attempts.some(row => row.reservation && digest(row.reservation) === digest(reservation));
+          return { action: 'stop', reason_code: consumed ? 'recovery-reservation-consumed' : 'recovery-reservation-pending',
+            abandonment: summarized, reservation_sha256: digest(reservation), provider_called: false };
+        }
+        // Admission without a reservation (a cut between them): nothing is reserved or invoked yet.
+        // Continue with the same deterministic identity; the admission, controller, time, authority and
+        // live custody origin are all proved again before the one reservation.
+        if (!status.abandoned) return { action: 'stop', reason_code: 'abandon-record-conflict', abandonment: summarized, provider_called: false };
+        const leases = require('./forge-unit-lease');
+        held = leases.readLease(leases.leaseFile(owner, unit)).record || null;
+        abandoned = status.abandoned;
+        inspection.roots_reconciled = true;
+        return null;
+      }
+      if (inspection.valid_saved_response) return null; // next() replays the retained output first
+      let replay;
+      try {
+        // Returned custody goes through the current publisher (#439 successor when the
+        // live repair capability exists); a failed/started receipt is only read.
+        const replayed = inspection.retained_output ? await options.replay(receipt)
+          : await require('./forge-unit-sidecar').replayArtifactAttempt(raw);
+        if (inspection.retained_output || replayed?.replayed === true) {
+          return { action: 'replay', provider_called: false, result: replayed, inspection: { ...inspection, receipt: undefined } };
+        }
+        replay = { attempted: true, refused: true, reason_code: null, provider_called: false };
+      } catch (error) { replay = observedReplay(error); }
+      const value = classify(replay);
+      if (!refusalSet.isEligible(value)) return refused(value, { persist: !inspection.retained_output });
+      session.recordReplayRefusal(value);
+      const leases = require('./forge-unit-lease');
+      held = leases.readLease(leases.leaseFile(owner, unit)).record || null;
+      const result = await abandon.abandonAttempt({ ...live, emitEvents: true });
+      if (result.ok !== true) {
+        return { action: 'stop', reason_code: result.reason_code, classification: refusalSummary(value), provider_called: false,
+          abandonment: { status: result.status, record_sha256: result.record_sha256 ?? null,
+            ...(result.effects ? { effects: result.effects, successor: false } : {}) } };
+      }
+      abandoned = result;
+      session.recordAbandonment(result);
+      recordReceiptAttempt();
+      inspection.roots_reconciled = true;
+      return null;
+    },
+    // A retained output the current publisher refused stops as retained output.
+    async replayRefused(error) { return refused(classify(observedReplay(error)), { persist: false }); },
+    // Read-only controller admission under the same begin, generation and claim.
+    admit() {
+      const controller = require('./forge-unit-controller');
+      const stop = code => ({ action: 'stop', reason_code: code, abandonment: summary(),
+        owner_event: event('attempt-successor-refused', code), provider_called: false });
+      if (!held) return { stop: stop('attempt-successor-generation-changed') };
+      try {
+        return { admitted: controller.admitAttemptSuccessor(owner, { milestone: raw.milestoneId, unit, begin_key: held.request_id,
+          lease_generation: held.generation, owner_token: held.owner_token, host_runtime: raw.route?.host_runtime,
+          run_id: raw.runId || raw.milestoneId, claim: raw.claim }, { now: clock }) };
+      } catch (error) {
+        if (!SUCCESSOR_STOPS().includes(error?.code)) throw error;
+        return { stop: stop(error.code) };
+      }
+    },
+    // Live T04 admission record right before the reservation. The successor dispatch is
+    // derived once from the parent and this abandonment (one successor per abandonment):
+    // the same id is admitted, reserved and then used verbatim by the unit invoke.
+    async admitSuccessor(decision) {
+      const dispatch = require('./forge-recovery-dispatch-id').recoveryDispatchId(raw.dispatchId, 'successor-' + abandoned.record_sha256.slice(0, 40));
+      const admitted = await abandon.recordSuccessorAdmission({ ...live, successor: { dispatch_id: dispatch, kind: 'successor-dispatch',
+        route_key: routeKey(decision.route), abandonment_record_sha256: abandoned.record_sha256 } });
+      if (admitted.ok !== true) return { stop: { action: 'stop', reason_code: admitted.reason_code, abandonment: summary(),
+        owner_event: event('attempt-successor-refused', admitted.reason_code), provider_called: false } };
+      return { abandonment: { ...summary(), successor_admission: { dispatch_id: dispatch, record_sha256: admitted.record_sha256 },
+        owner_event: event('attempt-successor-admitted', null) } };
+    },
+    // The admitted identity read back from the record right before the invocation.
+    assertSuccessor(dispatch) {
+      const status = abandon.readAbandonment({ request: raw });
+      if (status.status !== 'successor-admitted' || status.successor?.dispatch_id !== dispatch) fail('abandon-record-conflict');
+    },
+  });
+}
 async function recoverAttempt(options) {
   const stateApi = require('./forge-xllm-state');
   validateStateTarget(options.stateFile, options.request, options.executionContract);
-  const stateBytes = fs.readFileSync(options.stateFile);
-  const state = validateState(JSON.parse(stateBytes.toString('utf8')));
-  let expectedStateHash = digest(stateBytes);
+  // Issue 440 (S02/T06): only the opt-in branch tolerates a state a host crash
+  // never wrote (a started receipt); it is created by the first guarded save.
+  const optIn = options.abandonment !== undefined;
+  const deferredState = optIn && !fs.existsSync(options.stateFile);
+  const stateBytes = deferredState ? null : fs.readFileSync(options.stateFile);
+  const state = stateBytes ? validateState(JSON.parse(stateBytes.toString('utf8'))) : undefined;
+  let expectedStateHash = stateBytes ? digest(stateBytes) : null;
   let expectedRoots = digest(options.executionContract || { cwd: options.request.cwd });
   const inspection = inspectReceipt(options.receiptFile, { processProbe: options.processProbe, request: options.request });
   const savedWriter = typeof options.inspectSavedResult === 'function' ? await options.inspectSavedResult() : null;
@@ -895,6 +1135,8 @@ async function recoverAttempt(options) {
     inspection.valid_saved_response = inspection.incomplete_execution !== true;
   }
   if (inspection.process_stopped !== true) fail('recovery-process-receipt-inspection-required');
+  const unsupportedAbandonment = optIn ? abandonmentScope(options, canonicalRequest(options.request), inspection.receipt) : null;
+  if (deferredState && unsupportedAbandonment) fs.readFileSync(options.stateFile); // the legacy missing-state failure
   // The old review-fix producer recorded only {cwd}, even though recovery now
   // requires a held root contract. Preserve that historical identity only after
   // the actual unit adapter proves its already-completed reset, read-only.
@@ -917,7 +1159,7 @@ async function recoverAttempt(options) {
   if (options.transitions && state.pending_questions.some(row => row.status === 'pending') && !options.answers?.length)
     return { action: 'pending-questions', questions: state.pending_questions };
   if (inspection.incomplete_execution === true) {
-    if (state.pending_questions.some(row => row.status === 'pending')) return { action: 'pending-questions', questions: state.pending_questions };
+    if (state && state.pending_questions.some(row => row.status === 'pending')) return { action: 'pending-questions', questions: state.pending_questions };
     // Do not enter artifact disposition, environmental correction or surgical
     // reset. The owner can create a fresh bounded same-task continuation.
     return { action: 'partial-continuation-required', reason_code: 'execution-partial-continuation-required', provider_called: false };
@@ -969,7 +1211,8 @@ async function recoverAttempt(options) {
       }
       if (!guard) fail('recovery-state-busy');
       try {
-        if (digest(fs.readFileSync(options.stateFile)) !== expectedStateHash) fail('recovery-state-raced');
+        const observedState = expectedStateHash === null && !fs.existsSync(options.stateFile) ? null : digest(fs.readFileSync(options.stateFile));
+        if (observedState !== expectedStateHash) fail('recovery-state-raced');
         if (!lockApi.assertOwned(guard)) fail('recovery-state-lock-lost');
         stateApi.saveRecovery(options.stateFile, value);
         expectedStateHash = digest(fs.readFileSync(options.stateFile));
@@ -981,20 +1224,30 @@ async function recoverAttempt(options) {
   if (session.state_migration) session.snapshot();
   // A failed attempt whose owned process was not observed stopped deferred its
   // session removal here; the receipt/process inspection above now confirms it.
-  const deferred = state.attempts.filter(row => row.session_cleanup_pending === true);
+  const deferred = (state ? state.attempts : []).filter(row => row.session_cleanup_pending === true);
   const deferredCleanup = deferred.length ? cleanupSessions(deferred, options.sessionRemover || removeSession) : null;
   const tagMigration = value => session.state_migration ? { ...value, state_migration: session.state_migration } : value;
-  const tag = value => tagMigration(deferredCleanup ? { ...value, deferred_session_cleanup: deferredCleanup } : value);
+  // A handle on an unsupported unit/receipt is refused by name; the current path continues.
+  const tagAbandonment = value => unsupportedAbandonment
+    ? { ...value, abandonment: { status: 'not-applicable', reason_code: unsupportedAbandonment, provider_called: false } } : value;
+  const tag = value => tagAbandonment(tagMigration(deferredCleanup ? { ...value, deferred_session_cleanup: deferredCleanup } : value));
   if (transitionGuard) { session.transition(transition.handle); inspection.roots_reconciled = true; }
   if (preSpawn) inspection.roots_reconciled = true;
-  if (!preSpawn && !transitionGuard && inspection.writer_possible !== false && !inspection.valid_saved_response && options.reconcile) {
+  const abandonmentFlow = optIn && !unsupportedAbandonment
+    ? createAbandonmentFlow({ options, request, inspection, session, clock: options.clock || Date.now }) : null;
+  if (abandonmentFlow) {
+    // Replaces the legacy reconcile: the abandonment's proved claimed reset reconciles the roots.
+    const stop = await abandonmentFlow.prepare();
+    if (stop) return tag(stop);
+  }
+  if (!abandonmentFlow && !preSpawn && !transitionGuard && inspection.writer_possible !== false && !inspection.valid_saved_response && options.reconcile) {
     const reset = await options.reconcile(inspection.receipt);
     const contract = options.executionContract || inspection.receipt.execution?.execution_contract || inspection.receipt.recovery_baseline?.execution_contract;
     const declared = contract && require('./forge-code-roots').validateContract(contract, { revalidate: true }).code_roots;
     inspection.roots_reconciled = reset?.ok === true && !reset.pending_roots?.length && Array.isArray(declared)
       && declared.every(root => reset.roots?.some(row => row.root_id === root.id && row.reconciled === true));
   }
-  if (options.answers?.length) session.answer(options.answers);
+  if (!abandonmentFlow && options.answers?.length) session.answer(options.answers);
   let correction;
   if (preSpawn) {
     if (options.correction || typeof options.validateEnvironmentalCorrection !== 'function') fail('recovery-environment-validator-required');
@@ -1024,7 +1277,7 @@ async function recoverAttempt(options) {
     correction = { request_sha256: finalEvidence.request.sha256,
       offline_validated: true, evidence_reference: observed.evidence_reference };
   }
-  const reference = inspection.receipt.authorization_reference || state.authorization_reference;
+  const reference = inspection.receipt.authorization_reference || state?.authorization_reference;
   let exception = options.exception;
   const binding = options.recoveryAuthorization;
   if (binding && reference && binding.reference !== reference) fail('recovery-authorization-reference-mismatch');
@@ -1032,10 +1285,10 @@ async function recoverAttempt(options) {
   const candidateSet = !inspection.valid_saved_response && (!correction || preSpawn)
     && !session.snapshot().pending_questions.some(q => q.status === 'pending')
     // Active cuts resume the same route: no candidate list or exception issued.
-    && !sameSessionCut(state.attempts.at(-1))
+    && !sameSessionCut(state?.attempts.at(-1))
     // An input stop (S04/T02) never walks candidates: no list, no exception issued.
-    && state.attempts.at(-1)?.reason_code !== INPUT_REQUIRED_CODE
-    && (state.attempts.at(-1)?.service_failure_proven === true || exception || binding)
+    && state?.attempts.at(-1)?.reason_code !== INPUT_REQUIRED_CODE
+    && (state?.attempts.at(-1)?.service_failure_proven === true || exception || binding)
     ? resolveCandidates(transition?.resolution ? { ...transition.resolution.options, scope: request.scope, phase: request.phase }
       : options.resolverOptions, transitionGuard ? undefined : options.resolveDispatch, request) : undefined;
   if (binding && candidateSet) {
@@ -1051,6 +1304,11 @@ async function recoverAttempt(options) {
     session.authorization(authorizedReference);
   }
   preSpawn?.assertUnchanged();
+  // Abandonment → read-only controller admission of a successor in the same begin.
+  if (abandonmentFlow?.abandoned()) {
+    const admission = abandonmentFlow.admit();
+    if (admission.stop) return tag(admission.stop);
+  }
   const nextInput = { inspection, candidateSet, correction, exception, transition: transition?.handle,
     validateInvocation: options.validateInvocation };
   const internalDecision = options.resumeReservation
@@ -1066,18 +1324,33 @@ async function recoverAttempt(options) {
   if (decision.action === 'replay' && savedWriter) await transitions.assertWriterObservation(savedWriter).refresh();
   if (decision.action === 'replay') {
     if (typeof options.replay !== 'function') fail('recovery-replay-required');
+    if (abandonmentFlow) {
+      // Replay first; a retained output the current publisher refuses is never abandoned.
+      let replayed;
+      try { replayed = await options.replay(inspection.receipt); }
+      catch (error) { return tag(await abandonmentFlow.replayRefused(error)); }
+      return tag({ ...decision, result: replayed, inspection: { ...inspection, receipt: undefined } });
+    }
     return tag({ ...decision, result: await options.replay(inspection.receipt), inspection: { ...inspection, receipt: undefined } });
   }
   if (decision.action === 'stop' && SESSION_TERMINAL_STOPS.includes(decision.reason_code)) {
     return tag({ ...decision, session_cleanup: cleanupSessions(session.inspect().attempts, options.sessionRemover || removeSession) });
   }
-  if (decision.action !== 'invoke') return tag(decision);
+  // DS5: e.g. a single-candidate chain stops at recovery-candidates-exhausted; the abandonment stays recorded.
+  if (decision.action !== 'invoke') return tag(abandonmentFlow?.abandoned() ? { ...decision, abandonment: abandonmentFlow.summary() } : decision);
   // session persistence changes the recovery file itself; validate the original
   // bytes immediately before reservation, then bind the newly saved state too.
   preSpawn?.assertUnchanged();
+  if (abandonmentFlow?.abandoned()) {
+    // Live T04 admission (custody origin, writer, roots, authority, baseline) right before the reservation.
+    const admitted = await abandonmentFlow.admitSuccessor(decision);
+    if (admitted.stop) return tag(admitted.stop);
+    decision.abandonment = admitted.abandonment;
+  }
   if (!options.resumeReservation) {
     assertLegacyReviewFix?.();
-    const reserve = () => session.reserve(decision, correction?.request_sha256 || state.attempts.at(-1).request_sha256,
+    const reserve = () => session.reserve(decision, correction?.request_sha256 || (abandonmentFlow
+      ? session.inspect().attempts.at(-1)?.request_sha256 ?? null : state.attempts.at(-1).request_sha256),
       !!(preSpawn || transitionGuard) && options.externalNativeHandoff === true && decision.route.worker_mode === 'native');
     const saved = transitionGuard ? transitionGuard.withLock(reserve) : reserve();
     decision.reservation_sha256 = digest(saved.reservations.at(-1));
@@ -1128,9 +1401,14 @@ async function recoverAttempt(options) {
       assertAuthority(); session.saveDeliveryReceipt(receipt); reservedStateHash = expectedStateHash;
     } } : {}),
     ...(transitionGuard ? { appendOwnerEvent: line => transitionGuard.appendOwnerEvent(line) } : {}) });
-  const invoke = () => options.invoke(decision.route, decision.invocation, decision.sidecar_ceiling,
-    assertReady, decision.reservation_sha256,
-    decision.resume ? { ...decision.resume, session: resumeSession } : undefined);
+  const successorDispatch = decision.abandonment?.successor_admission?.dispatch_id;
+  const invoke = () => {
+    if (successorDispatch) abandonmentFlow.assertSuccessor(successorDispatch);
+    return options.invoke(decision.route, decision.invocation, decision.sidecar_ceiling,
+      assertReady, decision.reservation_sha256,
+      decision.resume ? { ...decision.resume, session: resumeSession } : undefined,
+      ...(successorDispatch ? [{ dispatch_id: successorDispatch }] : []));
+  };
   // The adapter repeats assertReady at the actual native callback. Do not hold
   // the publication mutex while awaiting a provider or its publication.
   transitionGuard?.withLock(() => {});

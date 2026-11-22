@@ -107,6 +107,8 @@ async function main() {
     await assert.rejects(unit.acceptNativeMemoryResult(foreign),e=>e.code==='native-memory-telemetry-mismatch');
     assert.strictEqual(fs.existsSync(foreign.resultFile+'.receipt.json'),false);
   }finally{fs.rmSync(memoryWork,{recursive:true,force:true});}
+  await nativeMemoryFailure444();
+  await nativeMemoryFailureCli444();
 
   assert.strictEqual(validateActiveCapabilities('codex', codexCapabilities).ok, true);
   assert.strictEqual(validateActiveCapabilities('codex', null).reason_code, 'native-capabilities-missing');
@@ -1031,4 +1033,137 @@ async function claudeEnvironmentJournalIdentity346() {
     }finally{fs.rmSync(agent.dir,{recursive:true,force:true});}
     console.log('PASS #346 stable journal identity: omitted->matching/unset, source refresh, unset->matching; fresh conflict zero calls, argument/request changes refused, other diagnostics bound; synthetic host only');
   } finally {fs.rmSync(work,{recursive:true,force:true});}
+}
+
+// #444 (issue 440 S02/T05): the reviewed 18 public API cases of the shipped
+// forge-native-memory-failure regression, transposed here with their original
+// assertions. Local synthetic telemetry only; zero provider calls.
+const sha444 = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+function inventory444(root) {
+  const strict = require('assert/strict'), result = {};
+  (function visit(dir) {
+    for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+      const file = path.join(dir, item.name); strict(!item.isSymbolicLink());
+      if (item.isDirectory()) visit(file); else result[path.relative(root, file)] = sha444(fs.readFileSync(file));
+    }
+  })(root);
+  return result;
+}
+const route444 = Object.freeze({ model: 'gpt-6-luna', model_requested: 'gpt-6-luna', model_resolved: 'gpt-6-luna', alias: null, effort: 'high',
+  dispatch_engine: 'codex', host_runtime: 'codex', resolved_worker_engine: 'codex', worker_mode: 'native', dispatch_allowed: true, config_ok: true });
+function request444(owner, lab, label, value, missing = false, telemetry) {
+  return { cwd: owner, contextRoot: owner, unitType: 'memory-extract', sourceUnitType: 'execute-task', sourceUnitId: 'T01', milestoneId: 'M001',
+    workflowId: 'fixture444', dispatchId: 'fixture444-' + label, route: { ...route444 }, resultFile: path.join(lab, label + '.json'),
+    nativeFailure: { reason_code: 'fixture-worker-error', ...(missing ? {} : { provider_called: value }), ...(telemetry === undefined ? {} : { telemetry }) } };
+}
+function telemetry444() {
+  const invocation = buildNativeInvocation({ hostRuntime: 'codex', resolvedDispatch: { ...route444 },
+    activeCapabilities: { available: true, tool: 'spawn_agent', source: 'synthetic-test-capabilities', models: [route444.model], reasoning_efforts: ['high'], fork_turns: ['none'] },
+    agentType: 'forge-memory', prompt: 'fixture only; no invocation' });
+  require('assert/strict').equal(invocation.ok, true);
+  return invocation.telemetry;
+}
+function lab444(prefix) {
+  const temp = fs.realpathSync.native(os.tmpdir()), lab = fs.mkdtempSync(path.join(temp, prefix)), owner = path.join(lab, 'owner');
+  fs.mkdirSync(owner);
+  return { temp, lab, owner, cleanup() {
+    const strict = require('assert/strict'), actual = fs.realpathSync.native(lab);
+    strict.equal(path.dirname(actual).toLowerCase(), temp.toLowerCase()); strict(path.basename(actual).startsWith(prefix));
+    fs.rmSync(actual, { recursive: true });
+  } };
+}
+async function nativeMemoryFailure444() {
+  const assert = require('assert/strict'), side = require('./forge-unit-sidecar');
+  const { lab, owner, cleanup } = lab444('forge-memory-failure-');
+  const request = (label, value, missing = false, telemetry) => request444(owner, lab, label, value, missing, telemetry);
+  let cases = 0;
+  async function accept(r, expected) {
+    const result = await side.acceptNativeMemoryResult(r), bytes = fs.readFileSync(r.resultFile + '.receipt.json');
+    assert.equal(result.provider_called, expected); assert.equal(JSON.parse(bytes).failure.provider_called, expected);
+    assert.equal((await side.acceptNativeMemoryResult(r)).provider_called, expected);
+    assert(bytes.equals(fs.readFileSync(r.resultFile + '.receipt.json')), 'replay preserves original receipt bytes'); cases++;
+  }
+  async function refuse(r, code) {
+    const before = inventory444(owner);
+    await assert.rejects(side.acceptNativeMemoryResult(r), e => e.code === code);
+    assert(!fs.existsSync(r.resultFile)); assert(!fs.existsSync(r.resultFile + '.receipt.json'));
+    assert.deepEqual(inventory444(owner), before, 'refusal must not append an owner event'); cases++;
+  }
+  try {
+    for (const [label, value, expected, missing] of [['false', false, false, false], ['unknown', 'unknown', 'unknown', false], ['missing', null, 'unknown', true]]) await accept(request(label, value, missing), expected);
+    console.log('PASS native memory failure false unknown and omitted provenance survive result receipt and replay');
+    for (const [label, value] of [['null', null], ['yes', 'yes'], ['one', 1], ['zero', 0], ['object', {}], ['array', []], ['empty', ''], ['false-string', 'false'], ['nan', NaN]]) await refuse(request(label, value), 'native-memory-failure-invalid');
+    console.log('PASS native memory failure nine invalid values refuse before result receipt and event');
+    const telemetry = telemetry444(); await accept(request('true', true, false, telemetry), true);
+    for (const [label, t, code] of [['missing-telemetry', undefined, 'native-memory-telemetry-invalid'], ['foreign-model', { ...telemetry, model_resolved: 'fixture-foreign-model' }, 'native-memory-telemetry-mismatch'],
+      ['foreign-effort', { ...telemetry, effort_resolved: 'low' }, 'native-memory-telemetry-mismatch'], ['extra-field', { ...telemetry, unexpected: 'fixture' }, 'native-memory-telemetry-invalid']]) await refuse(request(label, true, false, t), code);
+    console.log('PASS native memory failure true still requires exact closed route telemetry');
+    const historical = request('historical', false); await accept(historical, false);
+    const bytes = fs.readFileSync(historical.resultFile + '.receipt.json');
+    await assert.rejects(side.acceptNativeMemoryResult({ ...historical, nativeFailure: { ...historical.nativeFailure, provider_called: 'unknown' } }), e => e.code === 'dispatch-identity-conflict');
+    assert(bytes.equals(fs.readFileSync(historical.resultFile + '.receipt.json')), 'existing provenance is never rewritten');
+    console.log('PASS native memory failure conflicting provenance cannot rewrite an existing receipt');
+    assert.equal(cases, 18); console.log('native-memory-failure: 18 public API cases passed; provider calls: 0');
+  } finally { cleanup(); }
+}
+// #444 through the real CLI entry (`--accept-native-memory`): every call is a
+// new Node process reading only its request file. Zero provider calls.
+async function nativeMemoryFailureCli444() {
+  const assert = require('assert/strict'), side = require('./forge-unit-sidecar'), cp = require('child_process');
+  const { lab, owner, cleanup } = lab444('forge-memory-failure-cli-');
+  const cli = path.join(__dirname, 'forge-unit-sidecar.js');
+  const run = (label, r) => {
+    const file = path.join(lab, `${label}-${crypto.randomBytes(4).toString('hex')}.request.json`);
+    fs.writeFileSync(file, JSON.stringify(r));
+    const out = cp.spawnSync(process.execPath, [cli, '--accept-native-memory', file], { cwd: lab, encoding: 'utf8', windowsHide: true, timeout: 60000 });
+    assert.equal(out.error, undefined, String(out.error)); return out;
+  };
+  const accepted = (label, r, expected) => {
+    const out = run(label, r); assert.equal(out.status, 0, out.stderr);
+    const result = JSON.parse(out.stdout.trim()), receipt = fs.readFileSync(r.resultFile + '.receipt.json');
+    assert.equal(result.status, 'failure'); assert.equal(result.provider_called, expected);
+    assert.equal(JSON.parse(receipt).failure.provider_called, expected);
+    assert.deepEqual(JSON.parse(fs.readFileSync(r.resultFile, 'utf8')), result, 'CLI stdout is the durable result');
+    return { result, receipt };
+  };
+  const refused = (label, r, code) => {
+    const before = inventory444(owner), out = run(label, r);
+    assert.equal(out.status, 1); assert.equal(out.stdout, ''); assert(out.stderr.includes(`forge-unit-sidecar: ${code}\n`), out.stderr);
+    assert(!out.stderr.includes(lab) && !out.stderr.includes(owner), 'CLI refusal names only the code');
+    assert(!fs.existsSync(r.resultFile)); assert(!fs.existsSync(r.resultFile + '.receipt.json'));
+    assert.deepEqual(inventory444(owner), before, 'CLI refusal appends no owner event');
+  };
+  const request = (label, value, missing = false, telemetry) => request444(owner, lab, 'cli-' + label, value, missing, telemetry);
+  try {
+    for (const [label, value, expected, missing] of [['false', false, false, false], ['unknown', 'unknown', 'unknown', false], ['missing', null, 'unknown', true]]) {
+      const r = request(label, value, missing), first = accepted(label, r, expected);
+      const again = accepted(label + '-replay', r, expected);
+      assert(first.receipt.equals(again.receipt), 'a new process replays the persisted failure without rewriting it');
+      assert.deepEqual(again.result, first.result);
+    }
+    console.log('PASS #444 CLI --accept-native-memory: false, unknown and omitted stay distinct across new processes; receipt bytes stable');
+    // JSON cannot carry NaN; the remaining invalid types reach the CLI exactly.
+    for (const [label, value] of [['null', null], ['yes', 'yes'], ['one', 1], ['zero', 0], ['object', {}], ['array', []], ['empty', ''], ['false-string', 'false']]) {
+      refused(label, request(label, value), 'native-memory-failure-invalid');
+    }
+    console.log('PASS #444 CLI --accept-native-memory: eight invalid provider_called types refuse before result, receipt or event');
+    const telemetry = telemetry444();
+    accepted('true', request('true', true, false, telemetry), true);
+    refused('true-without-telemetry', request('true-without-telemetry', true), 'native-memory-telemetry-invalid');
+    refused('true-foreign-model', request('true-foreign-model', true, false, { ...telemetry, model_resolved: 'fixture-foreign-model' }), 'native-memory-telemetry-mismatch');
+    console.log('PASS #444 CLI --accept-native-memory: true keeps the exact closed route telemetry gate');
+    // A receipt persisted before #444 (unknown coerced to false) is history:
+    // the same payload replays the persisted value and is never rewritten.
+    const legacy = request('legacy', 'unknown'), probe = request('legacy-probe', 'unknown');
+    const persisted = await side.acceptNativeMemoryResult(probe);
+    const legacyBytes = Buffer.from(JSON.stringify({ phase: 'failed', fingerprint: side.nativeMemoryFingerprint(legacy), dispatch_id: legacy.dispatchId,
+      failure: { ...persisted, provider_called: false } }, null, 2) + '\n');
+    fs.writeFileSync(legacy.resultFile + '.receipt.json', legacyBytes, { flag: 'wx' });
+    const replayed = accepted('legacy-replay', legacy, false);
+    assert(replayed.receipt.equals(legacyBytes), 'historical failed receipt is never rewritten');
+    const conflict = run('legacy-conflict', { ...legacy, nativeFailure: { ...legacy.nativeFailure, provider_called: true, telemetry } });
+    assert.equal(conflict.status, 1); assert(conflict.stderr.includes('forge-unit-sidecar: dispatch-identity-conflict\n'), conflict.stderr);
+    assert(fs.readFileSync(legacy.resultFile + '.receipt.json').equals(legacyBytes), 'changed raw payload conflicts instead of replaying');
+    console.log('PASS #444 CLI --accept-native-memory: historical failed receipt replays its persisted value; changed payload conflicts; bytes unchanged');
+  } finally { cleanup(); }
 }
