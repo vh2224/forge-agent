@@ -1015,7 +1015,7 @@ function nativePlanArtifactOrigin(request, root, options = {}) {
   const controller = require('./forge-unit-controller'), begin = controller.lookupRecord(root, 'transaction', classified.begin_key);
   if (!begin || begin.phase !== 'committed' || begin.action !== 'begin' || begin.unit?.key !== `plan-slice/${request.sliceId}`
       || begin.milestone !== request.milestoneId || begin.host_runtime !== request.route.host_runtime) invalid('native publication does not belong to this owner, unit or host');
-  const generation = planApi().verifyPlanGeneration(begin.plan_generation, { owner: root, milestone: request.milestoneId,
+  const generation = planApi().verifyPlanGeneration(begin.plan_generation, { owner: planOwner(root), milestone: request.milestoneId,
     slice: request.sliceId, begin_key: begin.idempotency_key, lease_generation: begin.lease_generation, owner_digest: begin.owner_digest });
   if (generation.generation_key !== classified.generation_key) invalid('native publication names another generation');
   if (classified.status === 'open') {
