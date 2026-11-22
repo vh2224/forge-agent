@@ -221,6 +221,24 @@ function differentialCases(cases) {
   }
   pass('content-status-differential', 'status, summary, must_haves_status and declared files are identical across the three transports, published and in the receipt');
 
+  // Evidence projection is a privacy transform, not execute-result admission.
+  const project = require('./forge-e2e-evidence').projectFinalAnswer;
+  const projections = cases.map(f => {
+    const value = content(f.result);
+    return project(JSON.stringify({ status: value.status, summary: value.summary, must_haves_status: value.must_haves_status, files_changed: value.declared }));
+  });
+  assert(projections[0], 'wire-shaped evidence projects');
+  for (const projected of projections) assert.equal(projected, projections[0], 'same privacy projection across transport contents');
+  const projected = JSON.parse(projections[0]);
+  assert.equal(projected.status, PAYLOAD.status);
+  assert.match(projected.summary, /^<TEXT-[a-f0-9]{16}-[0-9]+>$/);
+  assert.match(projected.files_changed[0], /^<PATH-[a-f0-9]{16}-[0-9]+>$/);
+  assert(!projections[0].includes(PAYLOAD.summary));
+  assert.equal(project(projections[0]), projections[0], 'projection is idempotent');
+  assert.equal(project(JSON.stringify({ ...PAYLOAD, unexpected: true })), null, 'unknown field refused');
+  assert.equal(project(JSON.stringify({ ...PAYLOAD, status: 'invalid' })), null, 'unknown status refused');
+  pass('evidence-privacy-projection', 'closed evidence projection agrees across transport content and rejects extra fields and invalid status');
+
   for (const f of cases) assert.deepEqual(mustHavesSection(f.summary), PAYLOAD.must_haves_status, `${f.kind}: SUMMARY must-haves`);
   assert.equal(new Set(cases.map(f => f.summary.split('## Must haves')[1].split('\n\n')[1])).size, 1);
   pass('delivery-summary-differential', 'executeDeliveryArtifacts renders the same must-haves bytes into SUMMARY for every transport');

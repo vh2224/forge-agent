@@ -82,7 +82,12 @@ try {
     const reviewDelta = delta.files['shared/forge-procedure-review.md'];
     assert.strictEqual(reviewDelta.before, pinned.review);
     assert.strictEqual(reviewDelta.after, sha256(canonicalProcedureBytes(fs.readFileSync(path.join(ROOT, 'shared/forge-procedure-review.md')))));
-    assert.deepStrictEqual(Object.fromEntries(manifest.modules.map(item => [item.id, item.sha256])), { ...pinned, review: reviewDelta.after });
+    const recoveryMeasurement = JSON.parse(fs.readFileSync(path.join(ROOT, 'scripts/fixtures/issue-440/distribution-delta.json'), 'utf8'));
+    assert.strictEqual(recoveryMeasurement.kind, 'issue-440-measured-successor');
+    const recoveryDelta = recoveryMeasurement.files['shared/forge-procedure-recovery.md'];
+    assert.strictEqual(recoveryDelta.before, pinned.recovery);
+    assert.strictEqual(recoveryDelta.after, sha256(canonicalProcedureBytes(fs.readFileSync(path.join(ROOT, 'shared/forge-procedure-recovery.md')))));
+    assert.deepStrictEqual(Object.fromEntries(manifest.modules.map(item => [item.id, item.sha256])), { ...pinned, review: reviewDelta.after, recovery: recoveryDelta.after });
     for (const module of manifest.modules) assert.strictEqual(sha256(canonicalProcedureBytes(fs.readFileSync(path.join(ROOT, module.path)))), module.sha256, module.id);
     assert.deepStrictEqual(loadProcedureContext({ cwd: ROOT, phase: UNIT }).modules.map(item => item.id), ['core', 'planning']);
     const row = fs.readFileSync(path.join(ROOT, 'shared/forge-procedures.md'), 'utf8').split('\n').find(line => line.startsWith(`| ${UNIT} |`));

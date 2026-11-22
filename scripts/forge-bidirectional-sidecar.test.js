@@ -645,7 +645,7 @@ async function reviewFixMatrix() {
     assert.strictEqual(outcome.failure.recovery, 'items-deferred');
     outcome = await failure('codex', { ...fixedA, exit: 3 }, /app-server exited/);
     assertDeferred(outcome);
-    assert.strictEqual(outcome.failure.reason_code, 'sidecar-unit-failed');
+    assert.strictEqual(outcome.failure.reason_code, 'appserver-exit-nonzero');
     // A local app-server exit without a returned turn proves no provider acceptance.
     assert.strictEqual(outcome.failure.provider_called, 'unknown');
     for (const engine of ['claude', 'codex']) {

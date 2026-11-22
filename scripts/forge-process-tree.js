@@ -326,13 +326,17 @@ public static class ForgeProcessTree {
 // supervisor's environment; the command line is constant and pinned.
 const SUPERVISOR_BOOTSTRAP = [
   "$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';$code=1179669571",
+  "$probeDiag=[Environment]::GetEnvironmentVariable('FORGE_PROCESS_TREE_PROBE_DIAGNOSTIC') -eq '1';[Environment]::SetEnvironmentVariable('FORGE_PROCESS_TREE_PROBE_DIAGNOSTIC',$null);if($probeDiag){[Console]::Error.WriteLine('forge-probe:bootstrap')}",
   "try{$n=[int][Environment]::GetEnvironmentVariable('FORGE_PROCESS_TREE_PARTS');[Environment]::SetEnvironmentVariable('FORGE_PROCESS_TREE_PARTS',$null)",
   "if($n -lt 1 -or $n -gt 256){throw 'parts'}",
   "$s=New-Object Text.StringBuilder",
   "for($i=0;$i -lt $n;$i++){$k='FORGE_PROCESS_TREE_'+$i;[void]$s.Append([Environment]::GetEnvironmentVariable($k));[Environment]::SetEnvironmentVariable($k,$null)}",
   "$t=$s.ToString();$d=$t.IndexOf(':');if($d -lt 1){throw 'packet'}",
+  "if($probeDiag){[Console]::Error.WriteLine('forge-probe:assembly-load')}",
   '[void][Reflection.Assembly]::Load([Convert]::FromBase64String($t.Substring(0,$d)))',
+  "if($probeDiag){[Console]::Error.WriteLine('forge-probe:native-entry')}",
   '$r=[ForgeProcessTree]::Entry($t.Substring($d+1))',
+  "if($probeDiag){[Console]::Error.WriteLine('forge-probe:native-return')}",
   'if($null -ne $r.Output){$o=[Console]::OpenStandardOutput();$b=(New-Object Text.UTF8Encoding($false)).GetBytes($r.Output);$o.Write($b,0,$b.Length);$o.Flush()}',
   '$code=$r.Code;[ForgeProcessTree]::Quit($code)}catch{}',
   'exit $code',
@@ -401,21 +405,66 @@ const preparations = new WeakMap();
 let defaultPreparation = null;
 function collect(command, args, options, timeoutMs) {
   return new Promise(resolve => {
-    let child, out = [], size = 0, done = false;
-    const finish = value => { if (!done) { done = true; clearTimeout(timer); resolve(value); } };
-    const timer = setTimeout(() => { try { child?.kill(); } catch { /* gone */ } finish({ status: null, stdout: '', timedOut: true }); }, timeoutMs);
+    let child, out = [], err = [], size = 0, errSize = 0, done = false, timer, grace;
+    let spawned = false, exited = false, closed = false, timedOut = false, killRequested = false, spawnError = null;
+    const outHash = crypto.createHash('sha256'), errHash = crypto.createHash('sha256');
+    const errorCode = error => ['ENOENT', 'EACCES', 'EPERM', 'EINVAL', 'E2BIG'].includes(error?.code) ? error.code : 'other';
+    const finish = status => {
+      if (done) return;
+      done = true; clearTimeout(timer); clearTimeout(grace);
+      resolve({ status: timedOut ? null : status, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8'),
+        timedOut, spawned, exited, closed, child_joined: closed, kill_requested: killRequested, spawn_error_code: spawnError,
+        stdout_bytes: size, stderr_bytes: errSize, stdout_sha256: outHash.digest('hex'), stderr_sha256: errHash.digest('hex') });
+    };
+    timer = setTimeout(() => {
+      timedOut = true;
+      try { killRequested = child?.kill() === true; } catch { /* no observed termination */ }
+      // A request to kill is not proof of exit. Keep the captured bytes and wait
+      // briefly for the actual close; report unknown child join when absent.
+      grace = setTimeout(() => finish(null), 1000);
+    }, timeoutMs);
     timer.unref?.();
-    try { child = cp.spawn(command, args, { ...options, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, shell: false }); }
-    catch { finish({ status: null, stdout: '' }); return; }
-    child.on('error', () => finish({ status: null, stdout: '' }));
-    child.stdout.on('data', chunk => { size += chunk.length; if (size <= 4 * 1024 * 1024) out.push(chunk); });
-    child.on('close', status => finish({ status, stdout: Buffer.concat(out).toString('utf8') }));
+    try { child = cp.spawn(command, args, { ...options, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, shell: false }); }
+    catch (error) { spawnError = errorCode(error); finish(null); return; }
+    child.on('spawn', () => { spawned = true; });
+    child.on('error', error => { spawnError = errorCode(error); });
+    child.on('exit', () => { exited = true; });
+    child.stdout.on('data', chunk => {
+      if (done) return;
+      outHash.update(chunk); const remaining = Math.max(0, 4 * 1024 * 1024 - size);
+      if (remaining) out.push(chunk.subarray(0, remaining)); size += chunk.length;
+    });
+    child.stderr.on('data', chunk => {
+      if (done) return;
+      errHash.update(chunk); const remaining = Math.max(0, 16384 - errSize);
+      if (remaining) err.push(chunk.subarray(0, remaining)); errSize += chunk.length;
+    });
+    child.on('close', status => { closed = true; finish(status); });
   });
+}
+function probeDiagnostic(result, probe) {
+  const stages = ['job-create', 'job-collision', 'job-limit', 'job-reread', 'job-limit-mismatch', 'job-handle',
+    'job-handle-inheritable', 'stdio', 'attributes', 'atomic-job-list', 'stdio-handle-list', 'root-create',
+    'in-job', 'job-join', 'name-retained', 'name-check', 'internal'];
+  const markers = String(result.stderr || '').split(/\r?\n/)
+    .filter(line => /^forge-probe:(bootstrap|assembly-load|native-entry|native-return)$/.test(line)).slice(0, 16);
+  // Closed diagnostics only: never expose assembly, environment or raw streams.
+  return Object.freeze({ schema_version: 1, timed_out: result.timedOut === true,
+    status: Number.isInteger(result.status) ? result.status : null,
+    spawn_observed: result.spawned === true, exit_observed: result.exited === true, close_observed: result.closed === true,
+    child_joined: result.child_joined === true, descendants_joined: 'not-observed',
+    kill_requested: result.kill_requested === true, spawn_error_code: result.spawn_error_code || null,
+    stdout_bytes: result.stdout_bytes, stderr_bytes: result.stderr_bytes,
+    stdout_sha256: result.stdout_sha256, stderr_sha256: result.stderr_sha256, markers: Object.freeze(markers),
+    native_ok: probe?.ok === 1 ? 1 : probe?.ok === 0 ? 0 : null,
+    native_stage: stages.includes(probe?.stage) ? probe.stage : null,
+    native_error: Number.isInteger(probe?.native_error) ? probe.native_error : null });
 }
 function nativePacket(assembly, fields) { return `${assembly}:${fields.map(b64).join('.')}`; }
 async function prepareFresh(options) {
   const started = Date.now(), timings = {};
-  const unavailable = stage => Object.freeze({ available: false, reason_code: 'process-tree-custody-unavailable', stage,
+  const unavailable = (stage, diagnostic) => Object.freeze({ available: false, reason_code: 'process-tree-custody-unavailable', stage,
+    ...(diagnostic ? { probe_diagnostic: diagnostic } : {}),
     timings: Object.freeze({ ...timings, total_ms: Date.now() - started }) });
   if (process.platform !== 'win32') return unavailable('platform');
   try { if (!fs.statSync(POWERSHELL).isFile()) return unavailable('powershell'); } catch { return unavailable('powershell'); }
@@ -434,11 +483,11 @@ async function prepareFresh(options) {
   if (inject === 'probe') return unavailable('probe');
   const probeStart = Date.now(), probeJob = `Local\\ForgeProcessTree-probe-${crypto.randomBytes(16).toString('hex')}`;
   const probed = await collect(POWERSHELL, SUPERVISOR_ARGS, { cwd: NEUTRAL_CWD,
-    env: chunkEnv(nativePacket(assembly, ['1', 'probe', probeJob])) }, LIMITS.probe_timeout_ms);
+    env: { ...chunkEnv(nativePacket(assembly, ['1', 'probe', probeJob])), FORGE_PROCESS_TREE_PROBE_DIAGNOSTIC: '1' } }, LIMITS.probe_timeout_ms);
   timings.probe_ms = Date.now() - probeStart;
   let probe = null;
   try { probe = JSON.parse(probed.stdout); } catch { probe = null; }
-  if (probed.status !== 0 || probe?.ok !== 1) return unavailable('probe');
+  if (probed.status !== 0 || probed.timedOut || !probed.closed || probe?.ok !== 1) return unavailable('probe', probeDiagnostic(probed, probe));
   timings.probe_native_ms = probe.ms;
   const status = Object.freeze({ available: true, reason_code: null, stage: 'ready',
     assembly_sha256: sha(Buffer.from(assembly, 'base64')), assembly_bytes: Buffer.from(assembly, 'base64').length,

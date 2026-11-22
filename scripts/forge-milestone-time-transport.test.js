@@ -178,6 +178,36 @@ async function main() {
       assert.equal(replayed.status, 'partial'); assert.equal(providers, 1);
       xllm.invokeClaudeTransport = provider; providers = 0;
     });
+    // The cold refusal cases above prove zero helper/provider spawns. The cases
+    // below deliberately enter below cap with a provider stub: warm the real
+    // native capability separately, without changing or resetting either spy.
+    // prepareCustody alone is not proof of close on a timeout, so observe every
+    // actual preparation child and join it before reinstalling the blocking spy.
+    f.at = 1;
+    const blockedSpawn = cp.spawn, preparationChildren = [];
+    cp.spawn = (...args) => {
+      const child = spawn(...args);
+      const observation = { child, closed: false, done: null };
+      observation.done = new Promise(resolve => child.once('close', () => { observation.closed = true; resolve(); }));
+      preparationChildren.push(observation);
+      return child;
+    };
+    try {
+      await require('./forge-process-tree').prepareCustody();
+      for (const observed of preparationChildren) {
+        let timer;
+        await Promise.race([observed.done, new Promise(resolve => { timer = setTimeout(resolve, 5000); })]);
+        clearTimeout(timer);
+        if (!observed.closed) {
+          observed.child.kill();
+          await Promise.race([observed.done, new Promise(resolve => { timer = setTimeout(resolve, 2000); })]);
+          clearTimeout(timer);
+        }
+        assert(observed.closed, 'owned custody preparation child must close before warm transport assertions');
+      }
+      console.log('SETUP T06 real custody preparation children=' + preparationChildren.length + ' joined=' + preparationChildren.filter(x => x.closed).length + '; cold spies unchanged');
+    } finally { cp.spawn = blockedSpawn; }
+
     await test('below cap and no-contract legacy each call the same stub provider exactly once', async () => {
       for (const current of [f, fixture(false)]) {
         current.at = current === f ? 1 : 10000;

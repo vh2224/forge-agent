@@ -53,6 +53,9 @@ console.log('Section 1: known writers, by set equality\n');
 const KNOWN_EVIDENCE_WRITERS = Object.freeze([
   'scripts/forge-hook.js',
   'scripts/forge-evidence-materialize.js',
+  // This census covers canonical name construction too: the managed-surface
+  // binding is read-only for evidence logs, but constructs their exact unit name.
+  'scripts/forge-managed-surfaces.js',
   // 2026-08-23: the writer text moved VERBATIM out of skills/forge-auto/SKILL.md
   // when Branch C/D was extracted to the on-demand sidecar spec.
   'shared/forge-sidecar-auto.md',

@@ -54,11 +54,6 @@ async function withExecutionActivity(request, runtime, action) {
       || r.ownerBroker || r.memberHandle !== undefined || r.route?.worker_mode === 'native'
       || fs.existsSync(`${r.resultFile}.receipt.json`)) return action(runtime);
   const owner = fs.realpathSync.native(r.contextRoot || r.cwd), unit = `execute-task/${r.taskId}`;
-  // Issue 440 (S02/T02): warm the process-family custody asynchronously (cached
-  // once per process) BEFORE every synchronous check below, any window and the
-  // synchronous scope.spawn path. Failure only means the plain spawn is used and
-  // descendants can never be `stopped`.
-  try { await require('./forge-process-tree').prepareCustody(); } catch { /* custody unavailable */ }
   // A known time refusal must reach the existing owner receipt path without
   // opening/renewing a writer lease or requiring writer identity. Carry the
   // exact canonical refusal privately, so a changing clock cannot turn this
@@ -71,6 +66,11 @@ async function withExecutionActivity(request, runtime, action) {
         || !require('./forge-milestone-time-admission').TRANSPORT_REFUSAL_CODES.includes(error.code)) throw error;
     return preflightRefusals.run(error, () => action(runtime));
   }
+  // Warm cached process-family custody only AFTER the initial temporal admission,
+  // before any lease/window and the synchronous scope.spawn path. Final launch
+  // admission is still rechecked after this asynchronous preparation. A known
+  // time refusal starts no helper or provider; unavailable custody stays conservative.
+  try { await require('./forge-process-tree').prepareCustody(); } catch { /* custody unavailable */ }
   const leaseFile = lease.leaseFile(owner, unit), observed = lease.readLease(leaseFile);
   // Old adapter fixtures/legacy callers may execute without a controller begin.
   // They gain no lease exception or owner capability through this branch.

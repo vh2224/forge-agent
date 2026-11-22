@@ -126,7 +126,10 @@ test('T0 contract methods codes and native supervisor pin', () => {
     'process-tree-custody-failed', 'process-tree-custody-unproved', 'process-tree-census-only']);
   assert(Object.isFrozen(tree.REASON_CODES) && Object.isFrozen(tree.NATIVE_SOURCE) && Object.isFrozen(tree.internals));
   assert.equal(tree.NATIVE_SHA256, sha(JSON.stringify([tree.NATIVE_SOURCE.csharp, tree.NATIVE_SOURCE.supervisor, tree.NATIVE_SOURCE.compile])));
-  assert.equal(tree.NATIVE_SHA256, NATIVE_PIN, 'embedded C# + bootstrap PowerShell are pinned');
+  const diagnosticLines = ["$probeDiag=[Environment]::GetEnvironmentVariable('FORGE_PROCESS_TREE_PROBE_DIAGNOSTIC') -eq '1';[Environment]::SetEnvironmentVariable('FORGE_PROCESS_TREE_PROBE_DIAGNOSTIC',$null);if($probeDiag){[Console]::Error.WriteLine('forge-probe:bootstrap')}","if($probeDiag){[Console]::Error.WriteLine('forge-probe:assembly-load')}","if($probeDiag){[Console]::Error.WriteLine('forge-probe:native-entry')}","if($probeDiag){[Console]::Error.WriteLine('forge-probe:native-return')}"];
+  const historicalSupervisor = tree.NATIVE_SOURCE.supervisor.split('\n').filter(line => !diagnosticLines.includes(line)).join('\n');
+  assert.equal(sha(JSON.stringify([tree.NATIVE_SOURCE.csharp, historicalSupervisor, tree.NATIVE_SOURCE.compile])), NATIVE_PIN, 'historical native bytes retained with diagnostic-only probe markers');
+  for (const line of diagnosticLines) assert.equal(tree.NATIVE_SOURCE.supervisor.split('\n').filter(value => value === line).length, 1);
   // Fixed supervisor argv: System32 PowerShell, no profile, non-interactive, constant bootstrap.
   assert.equal(path.basename(tree.POWERSHELL).toLowerCase(), 'powershell.exe');
   assert(/System32[\\/]WindowsPowerShell[\\/]v1\.0$/i.test(path.dirname(tree.POWERSHELL)));
@@ -189,7 +192,17 @@ test('T1 libuv quoting executable search and effective environment tables', () =
 
 test('T0 adapters verification helpers and xllm bytes unchanged', () => {
   const root = path.resolve(__dirname, '..');
-  for (const [file, digestValue] of Object.entries(SOURCE_PINS)) assert.equal(sha(fs.readFileSync(path.join(root, file))), digestValue, file);
+  const delta = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/issue-440/distribution-delta.json'), 'utf8'));
+  for (const [file, digestValue] of Object.entries(SOURCE_PINS)) {
+    const actual = sha(fs.readFileSync(path.join(root, file)));
+    if (['scripts/forge-appserver-client.js', 'scripts/forge-claude-sidecar.js'].includes(file)) {
+      const row = delta.files[file];
+      assert.equal(row.before, digestValue, 'exact immutable adapter predecessor pin');
+      const preimage = require('zlib').gunzipSync(Buffer.from(row.before_gzip_base64, 'base64'), { maxOutputLength: 4 * 1024 * 1024 });
+      assert.equal(sha(preimage), digestValue, 'measured real historical adapter preimage');
+      assert.equal(actual, row.after, 'exact measured admitted adapter successor');
+    } else assert.equal(actual, digestValue, file);
+  }
 });
 
 test('T2 custody prepared once per process and measured', async () => {

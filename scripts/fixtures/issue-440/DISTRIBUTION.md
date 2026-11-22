@@ -34,6 +34,8 @@ Os dois arquivos de `e2e/` (manifest.json e recording.jsonl) foram reprojetados 
 
 ## Old18: falhas históricas, evolução qualificada e after
 
+Este quadro preserva a qualificação retida da T04 e seus limites de rótulos; não é uma declaração de aprovação da fonte posterior ao CI450. As falhas posteriores e os novos checks dirigidos são tratados na seção de compatibilidade ao final, sem reescrever os digests históricos.
+
 Fonte preservada: `t04-baseline-code-before.json`, SHA-256 `473427efcfe5ae33577680629df1ce53016a523b522c3e245ff389bb62990a3b`, revisão histórica `905660e4eec278ddb133b6cd5f9627d69c30a4f6`, Windows; todas as 18 execuções encerradas com joined/active_processes 0.
 Digest por linha: SHA-256 dos bytes UTF-8 de stdout + NUL + stderr. Não são novos before nem falhas atuais presumidas.
 Primeira asserção histórica: `campaign measured rendered source skills/forge-task/SKILL.md`.
@@ -197,16 +199,16 @@ Esta lista vem dos writes dos planos; indica responsabilidade estática, sem con
 
 O novo teste cobre fontes de S01/S02/S03, workflow/verificador/abandono, provenance, preimagens, fixture histórica, requires exatos, matriz e uma travessia do predecessor.
 Os seis comandos after do plano foram executados uma vez pelo owner depois que o writer original encerrou. Resultado retido: os outros cinco comandos passaram e foram unidos; o stderr autêntico do comando de consumidores reportou 28 executadas e 3 falhas. Os 25 aprovados são um agregado inferido desse stderr: o stdout original retido (limite de 10 KB) guardou só duas linhas PASS nomeadas, de modo que não há rótulo individual por suíte e as 3 falhas não são atribuídas a uma linha old18. As seis capturas originais ficam preservadas e imutáveis.
-Depois dessa execução houve três reparos técnicos históricos (V1, V2 e V3), todos registrados e nenhum apagando a falha original. A V1 executou 3 comandos atuais novos e reaproveitou 3 verificações anteriores. A V2 reteve 54/54 da suíte de comunicação (`forge-communication-surfaces.test.js`) e qualificou por fonte as verificações de integração e de sintaxe da V1. A V3 final executou apenas o guarda, a camada própria focada e os metadados novos, e qualificou por fonte (hashes de fonte e de projeção inalterados) os 24 consumidores aprovados e as cinco verificações originais aprovadas; isso é qualificação por fonte, não execução nova. A entrega estrita da T04 ficou provada para os 51 critérios sobre a fonte atual; ela não avalia a aceitação integrada.
+Depois dessa execução houve três reparos técnicos históricos (V1, V2 e V3), todos registrados e nenhum apagando a falha original. A V1 executou 3 comandos atuais novos e reaproveitou 3 verificações anteriores. A V2 reteve 54/54 da suíte de comunicação (`forge-communication-surfaces.test.js`) e qualificou por fonte as verificações de integração e de sintaxe da V1. A V3 final executou apenas o guarda, a camada própria focada e os metadados novos, e qualificou por fonte (hashes de fonte e de projeção inalterados) os 24 consumidores aprovados e as cinco verificações originais aprovadas; isso é qualificação por fonte, não execução nova. A entrega estrita da T04 foi registrada como proven para os 51 critérios na fonte daquele instante; esse registro é histórico e não prova a aceitação integrada nem os ramos opcionais e a precedência de recusas identificados posteriormente no CI450.
 O fix-s03 (R1–R4) não reexecuta as seis suítes de distribuição old18: ele roda só os casos focados que mudou (evidência E2E, censo de recusa de replay, harness E2E e a camada própria), e a camada própria é medida de novo depois deste texto.
 Nenhuma execução local completa, native198, A7 ou smoke adicional é feita por esta task.
-GF1: seis suítes adiadas e logs integrais — PENDENTE no CI final.
-GF2: custódia Windows remota — PENDENTE no CI final.
-GF3: 198 observações nativas integrais — PENDENTE no CI final.
-GF4: A7 contra baseline master — PENDENTE no CI final.
-GF5: run-tests completo nos três SOs — PENDENTE no CI final.
-GF6: revisão independente e correções — PENDENTE.
-GF7: complete-milestone, merge, release e atualização — PENDENTE.
+GF1: seis suítes adiadas e logs integrais — requisito vigente; os estados e as evidências correntes são registrados no relatório autenticado do owner, sem resultado antecipado neste documento.
+GF2: custódia Windows remota — requisito vigente; os estados e as evidências correntes são registrados no relatório autenticado do owner, sem resultado antecipado neste documento.
+GF3: 198 observações nativas integrais — requisito vigente; os estados e as evidências correntes são registrados no relatório autenticado do owner, sem resultado antecipado neste documento.
+GF4: A7 contra baseline master — requisito vigente; os estados e as evidências correntes são registrados no relatório autenticado do owner, sem resultado antecipado neste documento.
+GF5: run-tests completo nos três SOs — requisito vigente; os estados e as evidências correntes são registrados no relatório autenticado do owner, sem resultado antecipado neste documento.
+GF6: revisão independente e correções — requisito vigente; os estados e as evidências correntes são registrados no relatório autenticado do owner, sem resultado antecipado neste documento.
+GF7: complete-milestone, merge, release e atualização — requisito vigente; os estados e as evidências correntes são registrados no relatório autenticado do owner, sem resultado antecipado neste documento.
 Instalação e aceite humano exigem provas próprias; UAT manual permanece pendente.
 
 ## Delta técnico medido após a primeira verificação
@@ -222,7 +224,22 @@ forge-next sample attribution: owner baseline 22bddaebd4367ce2cc8729cfdc7f14131d
 
 Technical amendment:24 consumers comprise21 exact require-only migrations and3 explicitly pinned projection adapters. The source-guard sample reader now uses currentSamples at its direct citation check; every original assertion and historical sample byte remains intact.
 
-## Medição atual após o fix-s03
+## Medição do fix-s03 (registro anterior ao CI450)
 
 A camada `issue-440` ainda não foi lançada, então este fix atualiza a medição existente em vez de criar outra camada: nenhuma migração dos 24 imports, nenhuma reescrita da base4606 ou das preimagens e nenhum framework de normalização. Em `distribution-delta.json` mudam só as medições after e attributed-after das fontes reivindicadas que o fix alterou (resposta final E2E e seu verificador, censo de recusa de replay, harness E2E e documentos) e entra a linha de `scripts/forge-appserver-client.js`, com os bytes e a preimagem exatos da base4606. Toda outra linha, preimagem, rendered, superfície, registry, sample, parity e projeção de consumidor ficam como estavam; as 205 fixtures históricas e o quadro de reparo e de revisão retidos não mudam.
 Mudanças de produto medidas: `appserver-exit-nonzero` tipado no handler `close` de `startAppServerTurn` e uma linha no censo fechado de recusa de replay (R3), e a projeção estruturada segura da resposta final em `forge-e2e-evidence.js` com a gravação sanitizada reprojetada (R1). O código genérico `sidecar-unit-failed` não é fonte operacional. O texto desta seção e das anteriores é escrito antes da medição deste documento, que participa da medição. O PIN novo fica só no cjs excluído e no handoff do owner, e nenhum SHA final do delta é embutido aqui. Um registro privado antes→depois da medição é mantido à parte. CI final, native198, A7, complete-milestone, merge, release, instalação e UAT manual continuam pendentes e separados.
+
+
+## Compatibilidade CI450 e medição central
+
+O CI450 (run45067026957), na revisão e1a4197962377431a0f0c9466c486c5e3569bd40, concluiu com failure. O índice autêntico retido contém 23 shards com falha e 17 suítes distintas. Esse resultado posterior limita a qualificação histórica da T04; não foi transformado em aprovação.
+
+As 24 migrações originais do require issue448 permanecem 21 simples e 3 adaptadas, com as mesmas asserções. Dois consumidores adicionais, que não faziam parte dessas migrações, passam a usar APIs já medidas: forge-linked-task-parity.test.js aplica parityAdapter nos dois pontos before/after, e forge-communication-evaluation.test.js aplica currentSamples somente ao carregamento do corpus. O censo total é 26 consumidores normalizados e 5 consumidores com adaptador explícito. Não são26 migrações de require.
+
+O previousSamples valida primeiro o predecessor com os bytes de baseline pinados e depois recusa qualquer entrada que não seja exatamente histórica ou prospectiva; uma mutação do PIN antigo não pode ser mascarada pelo erro da entrada desconhecida. previousRegistry preserva e encaminha os argumentos opcionais de metadados. Essas correções não modificam os205 fixtures, os samples físicos, o baseline de parity, os goldens ou as asserções históricas. A antiga qualificação de fonte não comprova esses ramos opcionais e sua precedência: os controles negativos específicos e os dois novos consumidores precisam de validação dirigida real.
+
+As demais mudanças deste lote reconciliam os inventários e consumidores declarados, os contratos do nonzero tipado, os testes de prontidão fria/quente e os diagnósticos fechados da custódia. Nos cenários temporais, a recusa de tempo precede o aquecimento; os casos frios e os aquecidos abaixo do teto registram fatos distintos. Um probe positivo e a custódia Windows continuam obrigatórios. Os experimentos locais anteriores não reproduziram a falha de bootstrap do CI e não justificam presumir causa, aumentar o timeout nem dispensar o gate; os diagnósticos permitem observar a etapa real e o encerramento.
+
+Os estados correntes são registrados no relatório autenticado do owner e nos envelopes/logs íntegros da revisão correspondente, fora deste documento medido. A rodada dirigida valida os fluxos efetivamente alterados; o CI obrigatório da revisão final e a comparação integral qualificam GF1–GF5. Revisão, conclusão canônica, endpoint, merge, release e atualização têm provas próprias. Este texto não antecipa PASS, não transforma qualificação histórica em execução nova e não exige outro commit apenas para trocar um estado documental. UAT manual permanece pendente.
+
+A medição central usa os bytes atuais aceitos e preimagens reais da base4606; preserva todos os before/preimages existentes e os campos históricos/rendered/surfaces/registry/samples/parity. As duas novas projeções de consumidor partem dos bytes exatos de e1a4. Este texto final é medido antes de serializar o delta; o PIN atualizado fica somente no cjs excluído e no registro privado do owner. Nenhum digest final do próprio delta é embutido aqui.

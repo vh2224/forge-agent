@@ -68,6 +68,7 @@ observada nos símbolos lidos. Processos que não são `execute` não são lacun
 | C30 | `scripts/forge-native-recovery-delivery.js#criterionBindings` | n/a | recovery | kind/index das linhas milestone-recovery | nativo em recuperação | not-applicable | `not-applicable-profiles` |
 | C31 | `scripts/forge-native-recovery-delivery.js#prepare` | n/a | recovery | kind/index das linhas milestone-recovery | nativo em recuperação | not-applicable | `not-applicable-profiles` |
 | C32 | `scripts/forge-smoke.js#validateExecuteResult` | n/a | diagnóstico | autoteste do adaptador instalado | nenhum | not-applicable | `wire-boundary` |
+| C33 | `scripts/forge-e2e-evidence.js#projectFinalAnswer` | wire | diagnóstico | projeção de privacidade com esquema fechado; não admite resultado para execução | evidência app-server | not-applicable | `evidence-privacy-projection` |
 
 ## Notas por linha
 

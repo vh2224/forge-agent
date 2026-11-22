@@ -91,7 +91,7 @@ for(const digest of ['474e816338254dbf2e416c3615fca770d7cf9d02e19acc4e0801cb4770
 assert(doc.includes('21 migrações')&&doc.includes('3 consumidores com adaptador de projeção explícito'),'21 require-only plus 3 adapters');
 assert(!/Cada after difere somente no require/.test(doc)&&!doc.includes('PENDENTE: verify do owner')&&!doc.includes('serão executados'),'no stale all-require or future-tense claim');
 assert(doc.includes('28 executadas e 3 falhas')&&doc.includes('agregado inferido')&&doc.includes('qualificação por fonte, não execução nova'),'inferred aggregate vs source qualification');
-for(const gate of ['GF1','GF2','GF3','GF4','GF5','GF6','GF7'])assert(new RegExp(gate+':[^\\n]*PENDENTE').test(doc),'final gate stays pending '+gate);
+for(const gate of ['GF1','GF2','GF3','GF4','GF5','GF6','GF7'])assert(new RegExp(gate+':.*requisito vigente').test(doc),'all final gate requirements stay explicit '+gate);assert(doc.includes('Os estados correntes são registrados no relatório autenticado do owner'),'current state is not a source-code checkbox');
 assert(doc.includes('UAT manual permanece pendente'));
 for(const secret of [layer.PIN,hash(JSON.stringify(data)),hash(fs.readFileSync(path.join(__dirname,'fixtures/issue-440/distribution-delta.json')))])assert(!secret||!doc.includes(secret),'document never embeds the final delta digest');
 const appserverRow=data.files['scripts/forge-appserver-client.js'];assert(appserverRow&&appserverRow.before,'appserver client measured with a base preimage');
@@ -101,4 +101,48 @@ const e2eManifest=JSON.parse(read('scripts/fixtures/issue-440/e2e/manifest.json'
 assert.equal(e2eManifest.files[0].sha256,hash(e2eRecording),'e2e manifest binds the measured recording');assert.equal(data.files['scripts/fixtures/issue-440/e2e/recording.jsonl'].after,hash(e2eRecording));
 const e2eVerdict=require('./forge-e2e-evidence').verifyEvidence(path.join(root,'scripts/fixtures/issue-440/e2e'),{expect:'recorded'});assert.equal(e2eVerdict.ok,true,e2eVerdict.reason_code);
 console.log('PASS #440 DISTRIBUTION.md reconciled: old18 after recorded with limits, 21+3 consumers, gates pending, no embedded delta digest');
-assert.equal(Object.keys(data.consumers).length,3,'exact three consumer adapters');assert.equal(consumers.filter(([file])=>!Object.hasOwn(data.consumers,file)).length,21,'exact21 require-only migrations');assert(read('scripts/forge-dispatch-source-guard.test.js').toString('utf8').includes("const sampleText = unitEntry.currentSamples(fs.readFileSync(path.join(ROOT, before.samples.file), 'utf8'));"),'source guard directly consumes exact current sample projection');console.log('PASS #440 third source-guard adapter preserves all assertions and historical samples');
+assert.equal(Object.keys(data.consumers).length,5,'exact original and additional consumer adapter inventory');assert.deepEqual(Object.keys(data.consumers).sort(),["scripts/forge-communication-evaluation.test.js","scripts/forge-communication-surfaces.test.js","scripts/forge-dispatch-source-guard.test.js","scripts/forge-issues-403-407-integration.test.js","scripts/forge-linked-task-parity.test.js"],'literal exact accepted adapter pathset');assert.deepEqual(consumers.filter(([file])=>Object.hasOwn(data.consumers,file)).map(([file])=>file).sort(),["scripts/forge-communication-surfaces.test.js","scripts/forge-dispatch-source-guard.test.js","scripts/forge-issues-403-407-integration.test.js"],'original24 migration subset retains its same three adapters');assert.equal(consumers.filter(([file])=>!Object.hasOwn(data.consumers,file)).length,21,'exact21 require-only migrations');assert(read('scripts/forge-dispatch-source-guard.test.js').toString('utf8').includes("const sampleText = unitEntry.currentSamples(fs.readFileSync(path.join(ROOT, before.samples.file), 'utf8'));"),'source guard directly consumes exact current sample projection');console.log('PASS #440 third source-guard adapter preserves all assertions and historical samples');
+
+
+// PR450 compatibility: the new layer preserves inherited refusal provenance and optional metadata.
+{
+ const source=read(data.sample_projection.file).toString('utf8'),expected=parent.previousSamples(source);
+ assert.equal(layer.previousSamples(source),expected,'known historical sample still projects exactly');
+ assert.equal(layer.previousSamples(layer.currentSamples(source)),expected,'known prospective sample still projects exactly');
+ for(const foreign of ['{}',''])assert.throws(()=>layer.previousSamples(foreign),/issue440 exact historical or prospective samples/,'unknown sample is never replaced with a valid baseline');
+ const campaignRow=layer.issues403404Layer.files['scripts/forge-smoke.js'],savedCampaign=campaignRow.after;
+ try{campaignRow.after='0'.repeat(64);for(const foreign of ['{}',''])assert.throws(()=>layer.previousSamples(foreign),/campaign independent measured delta/,'predecessor independent PIN must not be masked by unknown input');}finally{campaignRow.after=savedCampaign;}
+ const issue407=layer.issue407Layer.provenance,saved407=issue407.base_revision;
+ try{issue407.base_revision='0'.repeat(40);assert.throws(()=>layer.previousSamples(''),/independent measured delta/,'issue407 direct projection preserves historical PIN refusal');}finally{issue407.base_revision=saved407;}
+ const rows=require('./forge-dispatch-source-guard.js').SOURCE_REGISTRY,validMetadata=parent.parallelismLayer;
+ assert.deepEqual(layer.previousRegistry(rows,validMetadata),parent.previousRegistry(rows,validMetadata),'explicit valid inherited metadata remains supported');
+ const forged=structuredClone(layer.nativeEffortLayer);forged.registry.before_rows[0].reason+=' forged';forged.registry.before_sha256=hash(JSON.stringify(forged.registry.before_rows));
+ assert.throws(()=>layer.previousRegistry(rows,forged),'forwarded historical row+metadata self-repin must remain refused');
+ assert.deepEqual(layer.previousRegistry(rows),parent.previousRegistry(rows),'default metadata still projects exactly after negative restoration');
+ console.log('PASS #440 PR450 inherited PIN precedence, exact unknown-sample refusal and optional registry metadata forwarding');
+}
+
+
+// CI450: two additional adapters are not two more issue448 require migrations.
+for(const file of ['scripts/forge-linked-task-parity.test.js','scripts/forge-communication-evaluation.test.js']){
+ const actual=read(file).toString('utf8');let priorText=actual;
+ if(file.includes('linked-task-parity')){const a="const routingParity=require('./fixtures/issue-440/distribution.cjs').parityAdapter(require('./fixtures/issues-403-407-integration/parity.cjs'));",b="const routingParity=require('./fixtures/issues-403-407-integration/parity.cjs');";assert.equal(priorText.split(a).length,3,'both parity sites use the existing measured adapter');priorText=priorText.split(a).join(b);const currentGuard="assert.strictEqual(sourceHash('shared/forge-procedures.json'), require('./fixtures/issue-440/distribution.cjs').after('files','shared/forge-procedures.json',manifest.after), 'only the measured manifest is accepted');",originalGuard="assert.strictEqual(sourceHash('shared/forge-procedures.json'), manifest.after, 'only the measured manifest is accepted');";assert.equal(priorText.split(currentGuard).length,2,'one exact measured manifest guard');priorText=priorText.replace(currentGuard,originalGuard);}
+ else{const a="const data = JSON.parse(require('./fixtures/issue-440/distribution.cjs').currentSamples(read('docs/communication-evaluation/samples.json')));",b="const data = JSON.parse(read('docs/communication-evaluation/samples.json'));";assert.equal(priorText.split(a).length,2,'only corpus loading is projected');priorText=priorText.replace(a,b);}
+ assert.equal(hash(priorText),data.consumers[file].before,'exact original e1a4 consumer before adapter '+file);
+ assert.equal(layer.consumerProjection(file,priorText),actual,'new adapter exact roundtrip '+file);
+ assert.throws(()=>layer.consumerProjection(file,priorText+'\n// foreign drift\n'),/issue440 exact consumer before/,'new adapter cannot hide foreign source drift '+file);
+}
+console.log('PASS #440 CI450 two additional consumer adapters: exact e1a4 roundtrip and foreign source refusal; original24 unchanged');
+
+// CI450: smoke accepts exactly its historical/current measured states, never foreign input.
+{
+ const file='scripts/forge-smoke.js',row=data.files[file],current=read(file).toString('utf8'),baseline=zlib.gunzipSync(Buffer.from(row.before_gzip_base64,'base64')).toString('utf8');
+ for(const method of ['previousSmoke','predecessorSmoke']){
+  assert.equal(layer[method](baseline),parent[method](baseline),'exact historical smoke remains accepted '+method);
+  assert.equal(layer[method](current),parent[method](baseline),'exact current smoke projects through the immutable predecessor '+method);
+  for(const foreign of ['',current+'\n// foreign outside Section8\n',current.replace('function smokeCliHelpers()','function smokeCliHelpersForeign()')]){assert.notEqual(foreign,current,'negative smoke fixture differs from the current source');assert.notEqual(foreign,baseline,'negative smoke fixture differs from the historical source');assert.throws(()=>layer[method](foreign),/unrecognized smoke changes/,'foreign smoke is never replaced with the measured baseline '+method);}
+ }
+ const manifest='shared/forge-procedures.json',pin=data.files[manifest];assert.equal(layer.after('files',manifest,pin.before),hash(read(manifest)),'exact manifest uses existing closed measured after chain');
+ assert.throws(()=>layer.after('files',manifest,'0'.repeat(64)),'foreign manifest remains refused by the measured after chain');
+ console.log('PASS #440 CI450 exact smoke predecessor projection and measured manifest guard preserve foreign-input refusal');
+}
