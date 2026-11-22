@@ -77,7 +77,7 @@ test('T1 producer census pins operational codes and literals inside named symbol
     ['sidecar-attempt-interrupted']);
   assert.deepEqual(api.SOURCES[prefix + 'transport-no-output'].map(row => row.reason_code),
     ['claude-timeout', 'claude-anomalous-silence', 'claude-exit-nonzero',
-      'claude-cancelled', 'appserver-anomalous-silence']);
+      'claude-cancelled', 'appserver-anomalous-silence', 'appserver-exit-nonzero']);
   for (const [code, rows] of Object.entries(api.SOURCES)) {
     for (const row of rows) {
       assert.equal(row.phase, code.endsWith('interrupted-no-output') ? 'started' : 'failed');
@@ -97,8 +97,14 @@ test('T1 producer census pins operational codes and literals inside named symbol
   const appserver = symbolSource('scripts/forge-appserver-client.js#startAppServerTurn');
   assert(appserver.includes('APPSERVER_LIVENESS_CODES.SILENCE'));
   assert(appserver.includes('timeout after ${seconds}s'));
+  // The typed nonzero-exit producer is the close handler, narrow to a real nonzero code (no signal, no zero exit).
+  assert(appserver.includes('APPSERVER_EXIT_CODES.NONZERO_EXIT'));
+  assert(appserver.includes('!signal && Number.isInteger(code) && code !== 0'));
+  const nonzero = api.SOURCES[prefix + 'transport-no-output'].find(row => row.reason_code === 'appserver-exit-nonzero');
+  assert.deepEqual([nonzero.phase, nonzero.timeout, nonzero.call_sites], ['failed', false,
+    ['scripts/forge-appserver-client.js#APPSERVER_EXIT_CODES']]);
   console.log('CENSUS interruption: started / beginArtifactAttemptInsideOwnerWindow, acceptArtifactResultCore, runUnitSidecarCore');
-  console.log('CENSUS transport: claude-timeout, claude-anomalous-silence, claude-exit-nonzero, claude-cancelled / runOwnedChild; appserver-anomalous-silence / APPSERVER_LIVENESS_CODES -> startAppServerTurn');
+  console.log('CENSUS transport: claude-timeout, claude-anomalous-silence, claude-exit-nonzero, claude-cancelled / runOwnedChild; appserver-anomalous-silence / APPSERVER_LIVENESS_CODES -> startAppServerTurn; appserver-exit-nonzero / APPSERVER_EXIT_CODES -> startAppServerTurn close handler');
   console.log('CENSUS remaining failures: dynamic receipt failure reason; unlisted codes stay unknown-code; caller facts block before table; time codes reuse canonical export; appserver untyped timeout is unknown-code');
 });
 test('T1 time codes reuse canonical list and input-required pins recovery literal', () => {
@@ -175,6 +181,49 @@ blocked('T2 failed source code mismatch', 'unknown-code', input => {
   input.replay.reason_code = 'claude-exit-nonzero';
 });
 blocked('T3 unknown source code', 'unknown-code', input => { input.replay.reason_code = 'fabricated-timeout'; });
+const nonzeroExit = (input, code = 'appserver-exit-nonzero') => {
+  input.receipt = { phase: 'failed', failure: { reason_code: code } };
+  input.inspection.phase = 'failed';
+  input.replay.reason_code = code;
+};
+test('T3 typed app-server nonzero exit is operational only through the full gates', () => {
+  const result = classify(input => nonzeroExit(input));
+  assert.equal(result.code, prefix + 'transport-no-output');
+  assert.equal(result.eligible, true);
+  assert.equal(result.source_reason_code, 'appserver-exit-nonzero');
+  assert.equal(result.timeout_cause, undefined, 'a nonzero exit is not a timeout');
+  assert.equal(api.validateClassification(result), true);
+  assert.equal(api.isEligible(result), true);
+  // The code alone never grants eligibility: every independent gate still blocks first.
+  for (const [name, change, code] of [
+    ['process not stopped', input => { input.inspection.process_stopped = false; }, 'inspection-required'],
+    ['replay not attempted', input => { input.replay.attempted = false; }, 'not-attempted'],
+    ['identity conflict', input => { input.facts.identity_matches = false; }, 'identity-conflict'],
+    ['claim divergent', input => { input.facts.claim_matches = false; }, 'claim-divergent'],
+    ['question pending', input => { input.facts.pending_questions = ['q']; }, 'question-pending'],
+    ['authority missing', input => { input.facts.authority_present = false; }, 'authority-missing'],
+    ['retained output', input => { input.receipt.returned_response = { content: 'x' }; }, 'retained-output'],
+    ['incomplete execution', input => { input.inspection.incomplete_execution = true; }, 'partial-continuation'],
+    ['caller defect', input => { input.facts.failure_class = 'caller'; }, 'caller-defect'],
+  ]) {
+    const blockedResult = classify(input => { nonzeroExit(input); change(input); });
+    assert.equal(blockedResult.code, prefix + code, name);
+    assert.equal(blockedResult.eligible, false, name);
+  }
+  // The receipt failure must carry the same typed code as the replay refusal.
+  assert.equal(classify(input => { nonzeroExit(input); input.receipt.failure.reason_code = 'claude-exit-nonzero'; }).code, prefix + 'unknown-code');
+});
+test('T3 generic sidecar-unit-failed and untyped exits stay blocking unknown', () => {
+  assert(!JSON.stringify(api.SOURCES).includes('sidecar-unit-failed'), 'the generic unit-sidecar fallback is never a census source');
+  for (const code of ['sidecar-unit-failed', 'app-server-exited', 'appserver-exit', 'appserver-exit-signal']) {
+    const result = classify(input => nonzeroExit(input, code));
+    assert.equal(result.code, prefix + 'unknown-code', code);
+    assert.equal(result.eligible, false, code);
+    assert.equal(result.source_reason_code, null, code);
+  }
+  assert.equal(classify(input => { nonzeroExit(input, 'appserver-exit-nonzero'); input.receipt.failure.reason_code = 'sidecar-unit-failed'; }).code,
+    prefix + 'unknown-code', 'typed replay code with the generic receipt fallback is not eligible');
+});
 test('T3 timeout has indeterminate cause and classification uses only census', () => {
   const result = classify(input => {
     input.receipt = { phase: 'failed', failure: { reason_code: 'claude-timeout' } };
@@ -329,6 +378,7 @@ test('T1 complete adapter code census defaults unlisted producers to blocking', 
   for (const site of ['scripts/forge-claude-sidecar.js#CLAUDE_SIDECAR_REASON_CODES',
     'scripts/forge-appserver-client.js#APPSERVER_LIVENESS_CODES',
     'scripts/forge-appserver-client.js#APPSERVER_TERMINAL_CODES',
+    'scripts/forge-appserver-client.js#APPSERVER_EXIT_CODES',
     'scripts/forge-appserver-client.js#APPSERVER_INPUT_CODES']) {
     const codes = [...symbolSource(site).matchAll(/\b[A-Z][A-Z_]+: '([^']+)'/g)].map(match => match[1]);
     assert(codes.length > 0, site);

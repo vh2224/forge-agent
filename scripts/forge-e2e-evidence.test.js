@@ -65,6 +65,10 @@ function cli(...args) {
 const FAKE_KEY = 'sk-' + 'SYNTHETICFAKEKEY0001';
 const FAKE_UUID = '1b4e28ba-2fa1-11d2-883f-0016d3cca427';
 const FAKE_MAIL = 'structural.user' + '@' + 'example.com';
+// A well-formed execute result whose free strings carry names and private content.
+const PRIVATE_FINAL = lab => JSON.stringify({ status: 'done', summary: `Jane Doe ordered ${FAKE_MAIL}`,
+  must_haves_status: [{ item: 'Pay Jane Doe', status: 'met', note: `wrote ${lab}\\out.md with ${FAKE_KEY} id ${FAKE_UUID}`, scope: 'task', reason: '' }],
+  files_changed: ['customers/Jane-Doe.txt'] });
 function structuralRaw(tag = 'a', overrides = {}) {
   const lab = `C:\\Users\\structural-user\\lab-${tag}`, forge = 'C:\\Users\\structural-user\\forge';
   return {
@@ -75,7 +79,7 @@ function structuralRaw(tag = 'a', overrides = {}) {
       JSON.stringify({ type: 'assistant', session_id: FAKE_UUID, message: { id: 'msg_structural', content: [
         { type: 'text', text: 'private assistant narration' },
         { type: 'tool_use', id: 'toolu_structural_1', name: 'Bash', input: {
-          command: `node ${forge}\\scripts\\forge-unit-sidecar.js --request ${lab}\\request.json`, description: 'private description' } }] } }),
+          command: `node ${forge}\\scripts\\forge-unit-sidecar.js --request ${lab}\\request.json --note ${FAKE_MAIL} ${FAKE_KEY} ${FAKE_UUID} /home/structural-user/x`, description: 'private description' } }] } }),
       JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_structural_1', is_error: false,
         content: 'private log line\n{"status":"done","artifact":"private"}' }] } }),
       'not json at all',
@@ -95,7 +99,7 @@ function structuralRaw(tag = 'a', overrides = {}) {
       { direction: 'server', offset_ms: 12, line: JSON.stringify({ method: 'item/completed', params: { threadId: 'thr_structural', turnId: 'turn_structural',
         item: { type: 'reasoning', id: 'item_reasoning', text: 'private reasoning text' } } }) },
       { direction: 'server', offset_ms: 15, line: JSON.stringify({ method: 'item/completed', params: { item: { type: 'agentMessage', id: 'item_final',
-        phase: 'final_answer', status: 'completed', text: `{"status":"done","note":"wrote ${lab}\\out.md for ${FAKE_MAIL} with ${FAKE_KEY} id ${FAKE_UUID} under /home/structural-user/x"}` } } }) },
+        phase: 'final_answer', status: 'completed', text: PRIVATE_FINAL(lab) } } }) },
       { direction: 'server', offset_ms: 18, line: JSON.stringify({ method: 'turn/completed', params: { turn: { id: 'turn_structural', status: 'completed',
         usage: { input_tokens: 50, output_tokens: 9 } } } }) },
       { direction: 'sideways', offset_ms: 1, line: '{}' },
@@ -252,10 +256,13 @@ try {
   refused(verifyEvidence(mutate(copyFixture(), null, m => { m.files[0].path = 'Recording.jsonl'; })), 'e2e-file-unsafe', 'manifest path differs from disk only by case');
   refused(verifyEvidence(mutate(copyFixture(), null, m => { m.files.push({ ...m.files[0], path: 'RECORDING.jsonl' }); })), 'e2e-file-unsafe', 'manifest lists a case collision');
   const hard = copyFixture();
+  let hardLinked = false;
   try {
     fs.linkSync(path.join(hard, 'recording.jsonl'), path.join(hard, 'alias.jsonl'));
-    refused(verifyEvidence(hard), 'e2e-file-unsafe', 'hard link (nlink 2)');
-  } catch (error) { if (error.code && /^E/.test(error.code)) console.log(`SKIP hard link: ${error.code}`); else throw error; }
+    hardLinked = true;
+  } catch (error) { if (['EPERM', 'EACCES', 'ENOSYS', 'EXDEV'].includes(error.code)) console.log(`SKIP hard link: ${error.code} (link creation unsupported)`); else throw error; }
+  // The assertion runs OUTSIDE the catch: a verifier regression must fail the suite, never become SKIP.
+  if (hardLinked) refused(verifyEvidence(hard), 'e2e-file-unsafe', 'hard link (nlink 2)');
   const symlinkDir = copyFixture();
   try {
     fs.renameSync(path.join(symlinkDir, 'recording.jsonl'), path.join(temp, `outside-${serial}.jsonl`));
@@ -342,6 +349,49 @@ try {
   assert.throws(() => sanitizeCapture({ host: [], worker: [] }), /e2e-record-invalid/);
   assert.throws(() => sanitizeCapture({ host: [], worker: [], attempt: [], placeholders: { 'C:\\x': 'lowercase' } }), /e2e-record-invalid/);
   pass('sanitizeCapture removes secrets, paths, e-mail and IDs deterministically and counts every discard');
+
+  // ── Final answer: safe structured projection, never regex-only free text ───
+  const finalOf = records => records.find(r => r.item_type === 'agentMessage' && r.phase === 'final_answer' && r.text);
+  const projectedFinal = finalOf(first.records).text;
+  assert.equal(evidence.projectFinalAnswer(projectedFinal), projectedFinal, 'projection is a fixed point');
+  for (const leaked of ['Jane', 'Doe', 'customers', 'out.md']) assert(!projectedFinal.includes(leaked), `projection leaks ${leaked}`);
+  const parsedFinal = JSON.parse(projectedFinal);
+  assert.equal(parsedFinal.status, 'done'); assert.equal(parsedFinal.must_haves_status[0].status, 'met');
+  assert.match(parsedFinal.summary, /^<TEXT-[a-f0-9]{16}-\d+>$/); assert.match(parsedFinal.files_changed[0], /^<PATH-[a-f0-9]{16}-\d+>$/);
+  const hashedOnly = (text, name) => {
+    const rawBad = structuralRaw('a');
+    rawBad.worker.find(w => w.line.includes('"final_answer"')).line = JSON.stringify({ method: 'item/completed', params: { item: { type: 'agentMessage', id: 'item_final',
+      phase: 'final_answer', status: 'completed', text } } });
+    const sanitizedBad = sanitizeCapture(rawBad);
+    assert.equal(finalOf(sanitizedBad.records), undefined, `${name}: no text published`);
+    const row = sanitizedBad.records.find(r => r.item_type === 'agentMessage');
+    assert.match(row.text_sha256, /^[a-f0-9]{64}$/, `${name}: hash only`);
+    assert(!serializeRecords(sanitizedBad.records).includes('Jane'), `${name}: private content absent`);
+  };
+  hashedOnly('{"customer":"Jane Doe"}', 'review example (unknown fields)');
+  hashedOnly('Jane Doe paid the invoice', 'unstructured prose');
+  hashedOnly('{"status":"done","summary":"Jane Doe","must_haves_status":[],"files_changed":[],"customer":"Jane Doe"}', 'extra top-level field');
+  hashedOnly('{"status":"done","summary":"Jane Doe","must_haves_status":[{"item":"x","status":"met","note":"y","owner":"Jane Doe"}],"files_changed":[]}', 'extra item field');
+  hashedOnly('{"status":"Jane Doe","summary":"s","must_haves_status":[],"files_changed":[]}', 'status outside the enum');
+  hashedOnly('{"status":"done","summary":"s","must_haves_status":[{"item":"x","status":"met","note":"y","scope":"Jane Doe"}],"files_changed":[]}', 'scope outside the enum');
+  hashedOnly('{"status":"done","summary":"s","must_haves_status":[],"files_changed":[{"path":"Jane Doe"}]}', 'files_changed entry not a string');
+  const privateText = '{"customer":"Jane Doe"}';
+  const captured = { ...first.records.find(r => r.item_type === 'agentMessage' && r.text), seq: 0 };
+  for (const text of [privateText, 'Jane Doe paid', '{"status":"done","summary":"Jane Doe","must_haves_status":[],"files_changed":[]}']) {
+    const result = scanRecords([{ ...captured, text }]);
+    assert(!result.ok && result.violations.some(v => v.code === 'e2e-sanitization-field' && v.field === 'text'), `captured free text refused: ${text.slice(0, 12)}`);
+  }
+  const privateDir = writeStructural(path.join(temp, 'structural-private-final'), structuralRaw('a'));
+  const privateVerdict = verifyEvidence(mutate(privateDir, records => { finalOf(records).text = privateText; }));
+  refused(privateVerdict, 'e2e-sanitization-field', 'review example {"customer":"Jane Doe"} in a captured final answer');
+  assert(!JSON.stringify(privateVerdict).includes('Jane'), 'diagnostics never carry the private content');
+  refused(verifyEvidence(mutate(writeStructural(path.join(temp, 'structural-unprojected-final'), structuralRaw('a')), records => {
+    finalOf(records).text = JSON.stringify({ status: 'done', summary: 'Jane Doe', must_haves_status: [], files_changed: [] }); })),
+  'e2e-sanitization-field', 'well-formed final answer with unprojected private strings');
+  refused(verifyEvidence(mutate(writeStructural(path.join(temp, 'structural-malformed-final'), structuralRaw('a')), records => {
+    finalOf(records).text = '{"status":"done"'; })), 'e2e-sanitization-field', 'malformed final answer');
+  assert.equal(verifyEvidence(writeStructural(path.join(temp, 'structural-projected-final'), structuralRaw('a'))).ok, true, 'the projection verifies');
+  pass('captured final answers keep only the closed structure with hashed free strings; unknown, private and malformed text is refused');
 
   // ── STRUCTURAL recorded (temp only) and live-only real ─────────────────────
   const recordedDir = writeStructural(path.join(temp, 'structural-recorded'), structuralRaw('a'));

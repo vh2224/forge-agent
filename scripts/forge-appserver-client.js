@@ -88,6 +88,14 @@ const APPSERVER_LIVENESS_CODES = Object.freeze({
 const APPSERVER_TERMINAL_CODES = Object.freeze({
   MODEL_NOT_FOUND: 'model-not-found',
 });
+// Typed verdict for the app-server child closing with a NONZERO exit code while its
+// turn was still unsettled (issue 440 R3). Narrow on purpose: signals, a zero exit,
+// timeouts and cancellations keep their own untyped/typed paths. Unlike the liveness
+// and terminal codes this is NOT a "fixed verdict" in forge-xllm: the message and the
+// spliced stderr tail stay exactly as before, so transient classification is intact.
+const APPSERVER_EXIT_CODES = Object.freeze({
+  NONZERO_EXIT: 'appserver-exit-nonzero',
+});
 const APPSERVER_TERMINAL_MESSAGES = Object.freeze({
   MODEL_NOT_FOUND: 'forge-appserver-client: turn ended with status failed (modelNotFound)',
 });
@@ -788,7 +796,9 @@ function startAppServerTurn(options) {
       // outstanding the child's exit means that request will never be answered, and
       // staying silent there would trade a wrong error for a hang until the timeout.
       if (!settled && !timedOut && !(matchedCompletion() && pending.size === 0)) {
-        fail(`app-server exited ${signal ? `by signal ${signal}` : `with code ${code}`}`, null, false);
+        const nonzeroExit = !signal && Number.isInteger(code) && code !== 0;
+        fail(`app-server exited ${signal ? `by signal ${signal}` : `with code ${code}`}`,
+          nonzeroExit ? { code: APPSERVER_EXIT_CODES.NONZERO_EXIT } : null, false);
       }
     });
     const secondsOf = ms => Number((ms / 1000).toFixed(3));
@@ -1046,6 +1056,7 @@ module.exports = {
   INTERRUPT_GRACE_MS,
   APPSERVER_LIVENESS_CODES,
   APPSERVER_TERMINAL_CODES,
+  APPSERVER_EXIT_CODES,
   APPSERVER_TERMINAL_MESSAGES,
   CODEX_TERMINAL_ERROR_INFO,
   INBOUND_REQUEST_CLASSES,

@@ -80,4 +80,25 @@ for(const row of data.registry.aliases){const actual={path:row.path,kind:row.kin
 
 assert.equal(layer.previousSamples(repairSample),parent.previousSamples(repairSample),'exact historical samples remain accepted');assert.equal(layer.previousSamples(projectedSample),layer.previousSamples(repairSample),'historical and prospective samples have identical predecessor projection');assert.throws(()=>layer.previousSamples(repairSample+'foreign'),/issue440 exact historical or prospective samples/);assert.throws(()=>layer.previousSamples(projectedSample+'foreign'),/issue440 exact historical or prospective samples/);console.log('PASS #440 exact historical and prospective sample states compose; foreign bytes in either state refused');
 
+// fix-s03 R4: the measured document is consistent with the measured delta and with the retained provenance.
+const doc=read('scripts/fixtures/issue-440/DISTRIBUTION.md').toString('utf8');
+const docSection=(from,to)=>{const a=doc.indexOf(from),b=doc.indexOf(to,a+from.length);assert(a>=0&&b>a,'doc section '+from);return doc.slice(a,b);};
+const old18=docSection('## Old18','## Qualificação upstream').split('\n').filter(x=>/^\| `forge-[\w-]+\.test\.js` \|/.test(x));
+assert.equal(old18.length,18,'old18 rows');
+for(const row of old18){const cells=row.split('|').map(x=>x.trim());assert.equal(cells.length,8,'old18 columns '+row.slice(0,48));assert(cells[6].length>20&&!/PENDENTE/.test(cells[6]),'old18 after is recorded, not pending: '+cells[1]);assert(/sem rótulo individual|54\/54/.test(cells[6]),'old18 after states the retained label limit: '+cells[1]);assert(Object.hasOwn(data.files,'scripts/'+cells[1].replace(/`/g,'')),'old18 suite is a measured consumer '+cells[1]);}
+assert.equal(old18.filter(x=>x.includes('b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1')).length,16,'old failing digests preserved');
+for(const digest of ['474e816338254dbf2e416c3615fca770d7cf9d02e19acc4e0801cb47709e3fac','316cfaa37548aa6e53ddb11efa4ee309a25507b1f8b3c9fb976018d60efe80c1'])assert.equal(old18.filter(x=>x.includes(digest)).length,1,'old failing digest preserved '+digest);
+assert(doc.includes('21 migrações')&&doc.includes('3 consumidores com adaptador de projeção explícito'),'21 require-only plus 3 adapters');
+assert(!/Cada after difere somente no require/.test(doc)&&!doc.includes('PENDENTE: verify do owner')&&!doc.includes('serão executados'),'no stale all-require or future-tense claim');
+assert(doc.includes('28 executadas e 3 falhas')&&doc.includes('agregado inferido')&&doc.includes('qualificação por fonte, não execução nova'),'inferred aggregate vs source qualification');
+for(const gate of ['GF1','GF2','GF3','GF4','GF5','GF6','GF7'])assert(new RegExp(gate+':[^\\n]*PENDENTE').test(doc),'final gate stays pending '+gate);
+assert(doc.includes('UAT manual permanece pendente'));
+for(const secret of [layer.PIN,hash(JSON.stringify(data)),hash(fs.readFileSync(path.join(__dirname,'fixtures/issue-440/distribution-delta.json')))])assert(!secret||!doc.includes(secret),'document never embeds the final delta digest');
+const appserverRow=data.files['scripts/forge-appserver-client.js'];assert(appserverRow&&appserverRow.before,'appserver client measured with a base preimage');
+const appserverBefore=zlib.gunzipSync(Buffer.from(appserverRow.before_gzip_base64,'base64')).toString('utf8');
+assert(!appserverBefore.includes('APPSERVER_EXIT_CODES')&&read('scripts/forge-appserver-client.js').toString('utf8').includes('APPSERVER_EXIT_CODES'),'appserver preimage is the base without the typed exit');
+const e2eManifest=JSON.parse(read('scripts/fixtures/issue-440/e2e/manifest.json').toString('utf8')),e2eRecording=read('scripts/fixtures/issue-440/e2e/recording.jsonl');
+assert.equal(e2eManifest.files[0].sha256,hash(e2eRecording),'e2e manifest binds the measured recording');assert.equal(data.files['scripts/fixtures/issue-440/e2e/recording.jsonl'].after,hash(e2eRecording));
+const e2eVerdict=require('./forge-e2e-evidence').verifyEvidence(path.join(root,'scripts/fixtures/issue-440/e2e'),{expect:'recorded'});assert.equal(e2eVerdict.ok,true,e2eVerdict.reason_code);
+console.log('PASS #440 DISTRIBUTION.md reconciled: old18 after recorded with limits, 21+3 consumers, gates pending, no embedded delta digest');
 assert.equal(Object.keys(data.consumers).length,3,'exact three consumer adapters');assert.equal(consumers.filter(([file])=>!Object.hasOwn(data.consumers,file)).length,21,'exact21 require-only migrations');assert(read('scripts/forge-dispatch-source-guard.test.js').toString('utf8').includes("const sampleText = unitEntry.currentSamples(fs.readFileSync(path.join(ROOT, before.samples.file), 'utf8'));"),'source guard directly consumes exact current sample projection');console.log('PASS #440 third source-guard adapter preserves all assertions and historical samples');

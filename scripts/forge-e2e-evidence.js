@@ -103,7 +103,20 @@ const SCANS = Object.freeze([
   ['e2e-sanitization-email', /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/],
   ['e2e-sanitization-identity', /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i],
 ]);
-const SECRET_KEY_RE = /^(?:.*_)?(?:token|authorization|api_?key|apikey|secret|password)$/i;
+// ── Final answer: explicit safe structured projection ────────────────────────
+// The worker's final answer is structured (execute result contract) but its free
+// strings (summary, must-have item/note, changed paths) may hold names or customer
+// content that no pattern scan can identify. A captured recording keeps only the
+// closed structure: enums verbatim, every free string replaced by a deterministic
+// hash token. Anything else is hashed out and never published.
+const FINAL_TOKEN = /^<(?:TEXT|PATH)-[a-f0-9]{16}-\d{1,5}>$/;
+const FINAL_KEYS = Object.freeze(['files_changed', 'must_haves_status', 'status', 'summary']);
+const FINAL_ITEM_KEYS = Object.freeze(['item', 'note', 'reason', 'scope', 'status']);
+const FINAL_STATUS = Object.freeze(['done', 'partial', 'blocked']);
+const FINAL_ITEM_STATUS = Object.freeze(['met', 'unmet', 'unknown']);
+const FINAL_SCOPE = Object.freeze(['task', 'environment']);
+const FINAL_REASON = Object.freeze(['', 'git-commit-required', 'gsd-write-refused', 'out-of-scope-test-failure', 'network-required', 'sandbox-exec-blocked']);
+const SECRET_KEY_RE =/^(?:.*_)?(?:token|authorization|api_?key|apikey|secret|password)$/i;
 
 class EvidenceError extends Error {
   constructor(code) { super(REASON_CODES.includes(code) ? code : 'e2e-manifest-invalid'); this.code = this.message; }
@@ -119,6 +132,29 @@ function canonicalJson(value) {
   return JSON.stringify(value);
 }
 function serializeRecords(records) { return records.map(record => canonicalJson(record) + '\n').join(''); }
+function finalToken(kind, value) {
+  if (FINAL_TOKEN.test(value)) return value; // already projected: fixed point
+  return `<${kind}-${sha256(`e2e-final-v1\0${kind}\0${value}`).slice(0, 16)}-${Math.min(Buffer.byteLength(value), 99999)}>`;
+}
+// Canonical projected JSON text, or null when the answer is not the closed
+// execute-result structure (unknown/missing field, wrong type or enum).
+function projectFinalAnswer(text) {
+  let value; try { value = JSON.parse(text); } catch { return null; }
+  const exact = (obj, keys, optional = []) => isObject(obj) && Object.keys(obj).every(k => keys.includes(k))
+    && keys.every(k => optional.includes(k) || Object.hasOwn(obj, k));
+  if (!exact(value, FINAL_KEYS) || !FINAL_STATUS.includes(value.status) || typeof value.summary !== 'string' || !value.summary.trim()
+      || !Array.isArray(value.must_haves_status) || value.must_haves_status.length > 256
+      || !Array.isArray(value.files_changed) || value.files_changed.length > 256 || !value.files_changed.every(f => typeof f === 'string')) return null;
+  const items = [];
+  for (const item of value.must_haves_status) {
+    if (!exact(item, FINAL_ITEM_KEYS, ['scope', 'reason']) || typeof item.item !== 'string' || typeof item.note !== 'string'
+        || !FINAL_ITEM_STATUS.includes(item.status) || (Object.hasOwn(item, 'scope') && !FINAL_SCOPE.includes(item.scope))
+        || (Object.hasOwn(item, 'reason') && !FINAL_REASON.includes(item.reason))) return null;
+    items.push({ ...item, item: finalToken('TEXT', item.item), note: finalToken('TEXT', item.note) });
+  }
+  return canonicalJson({ status: value.status, summary: finalToken('TEXT', value.summary), must_haves_status: items,
+    files_changed: value.files_changed.map(f => finalToken('PATH', f)) });
+}
 function deepFreeze(value) {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) { Object.freeze(value); for (const k of Object.keys(value)) deepFreeze(value[k]); }
   return value;
@@ -154,9 +190,13 @@ function scanRecords(records) {
       scanStrings(value, key, seq, violations, key);
     }
     for (const key of rule.required) if (!Object.hasOwn(record, key)) violations.push({ code: 'e2e-record-invalid', seq, field: key });
-    // Only the agent's final answer may carry free text, and only after this scan.
+    // Only the agent's final answer may carry text, and only after this scan.
     if (Object.hasOwn(record, 'text') && !(record.item_type === 'agentMessage' && record.phase === 'final_answer')) {
       violations.push({ code: 'e2e-sanitization-field', seq, field: 'text' });
+    } else if (record.origin === 'captured' && typeof record.text === 'string' && record.text !== ''
+        && projectFinalAnswer(record.text) !== record.text) {
+      // Captured text is never trusted free text: it must be the closed safe projection.
+      violations.push({ code: 'e2e-sanitization-field', seq, field: 'text', projection: true });
     }
   });
   return { ok: violations.length === 0, violations, records: records.length };
@@ -272,14 +312,16 @@ function sanitizeCapture(raw, { origin = 'captured' } = {}) {
     } else if (typeof obj.method === 'string') {
       const item = isObject(p.item) ? p.item : null, turn = isObject(p.turn) ? p.turn : null;
       drop(obj, ['jsonrpc', 'method', 'params']); drop(p, ['item', 'turn', 'usage', 'tokenUsage', 'threadId', 'turnId']);
-      const finalText = item && item.type === 'agentMessage' && item.phase === 'final_answer' && typeof item.text === 'string';
+      const finalAnswer = item && item.type === 'agentMessage' && item.phase === 'final_answer' && typeof item.text === 'string';
+      const projected = finalAnswer ? (item.text === '' ? '' : projectFinalAnswer(item.text)) : null;
+      const finalText = finalAnswer && projected !== null; // otherwise hashed only, never published
       if (item) drop(item, ['type', 'id', 'phase', 'status', 'text']);
-      if (item && typeof item.text === 'string' && !finalText) counts.hashed_texts++;
+      if (item && typeof item.text === 'string' && (!finalText || projected !== '')) counts.hashed_texts++;
       const error = turn && isObject(turn.error) ? turn.error : null;
       emit('worker', 'notification', { ...base, method: typed('token', obj.method), item_type: item ? typed('token', item.type) : undefined,
         item_id_sha256: item && item.id !== undefined ? idHash(item.id) : undefined, phase: item ? typed('token', item.phase) : undefined,
         status: typed('token', item ? item.status : turn ? turn.status : undefined),
-        text: finalText ? clean(item.text).slice(0, 8192) : undefined,
+        text: finalText ? projected : undefined,
         text_sha256: item && typeof item.text === 'string' && !finalText ? sha256(item.text) : undefined,
         text_bytes: item && typeof item.text === 'string' && !finalText ? Buffer.byteLength(item.text) : undefined,
         usage: usage(p.usage || (isObject(p.tokenUsage) ? p.tokenUsage.total || p.tokenUsage : undefined) || (turn ? turn.usage : undefined)),
@@ -473,9 +515,12 @@ function verifyEvidence(dir, { expect = null, live = null, limits = null } = {})
       files.push({ path: f.path, sha256: f.sha256, bytes: f.bytes, records: f.records });
     }
     const scan = scanRecords(records);
-    if (!scan.ok) refuse(scan.violations[0].code);
+    const early = scan.violations.find(v => !v.projection);
+    if (early) refuse(early.code);
     if (records.some(r => r.origin !== manifest.origin)) refuse('e2e-label-origin-mismatch');
     if (manifest.label !== 'mock' && syntheticMarkers(records)) refuse('e2e-synthetic-promotion');
+    // The captured final-answer projection is judged last so it cannot mask a label or promotion refusal.
+    if (!scan.ok) refuse(scan.violations[0].code);
     // Binding: manifest facts must be the content's facts; nothing is created from the manifest.
     const by = ch => records.filter(r => r.channel === ch);
     const actual = { records: records.length, host: by('host').length, worker: by('worker').length, attempt: by('attempt').length };
@@ -525,6 +570,6 @@ function main(argv = process.argv.slice(2), out = process.stdout) {
 module.exports = {
   EVIDENCE_VERSION, ALLOWLIST_VERSION, SANITIZER_VERSION, LABELS, ORIGINS, EXECUTION_MODES, CHANNELS, REASON_CODES,
   LABEL_RULES, LIMITS, ALLOWLIST, sanitizeCapture, scanRecords, createLiveObservation, verifyEvidence,
-  canonicalJson, serializeRecords, main,
+  canonicalJson, serializeRecords, projectFinalAnswer, main,
 };
 if (require.main === module) process.exitCode = main();

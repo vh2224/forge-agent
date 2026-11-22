@@ -91,8 +91,10 @@ worker Codex: 1 de no máximo 2. Nenhuma falha viva foi provocada.
 | claim_sha256 | `28cd311b700b48003e11cf3ca07e3547e0f74cf0653699693d6d9c4096959fa0` |
 | lease_generation | `48e3840124b148d78ff1ad374e18de70` |
 | raw_capture_sha256 | `97da6f6ab44b69396ff1f14ecffd7e6cfa821975f8d0f00a7c7ede5394b54186` |
-| manifest.json sha256 | `b6843fe5bf1fe1e8fb8cdbf450f51ed299edabb97db8b5fdc38d97cd338953df` |
-| recording.jsonl sha256 / bytes / registros | `32f716438697f49ab8a77263b35f954d701ffd5c6a7f5a34231c134bef153ca7` / 59397 / 194 |
+| manifest.json sha256 | `cd8db33bde19b7d9d147bf88c08160e3fe6b267a75572b364039726b089ef860` |
+| recording.jsonl sha256 / bytes / registros | `497af47109e4b81a13ad5adfebf9f9d4c8709f8a582c6931f86053c84799dd06` / 59263 / 194 |
+
+Reprojeção da resposta final (fix-s03, R1). A primeira projeção publicada (recording `32f716438697f49ab8a77263b35f954d701ffd5c6a7f5a34231c134bef153ca7`, 59397 bytes, manifest `b6843fe5bf1fe1e8fb8cdbf450f51ed299edabb97db8b5fdc38d97cd338953df`) mantinha o texto da resposta final como texto livre depois de uma varredura por padrões, que não identifica nomes nem conteúdo privado arbitrário. A projeção atual é derivada de forma determinística dos dados já sanitizados dessa gravação, sem acessar a captura bruta e sem nova captura: só o registro `item/completed` da resposta final muda (`projectFinalAnswer`), e os 193 outros registros, a contagem de 194 e a proveniência (captura bruta `97da6f6a…`, versões, tentativa e custódia) ficam como estavam. Os bytes antigos ficam preservados num backup privado fora do repositório versionado. A gravação continua `recorded`/`replay`; nada disso é uma nova captura viva nem um handle `real`.
 
 Modelo e esforço:
 
@@ -166,9 +168,18 @@ do harness, para que a T03 reproduza a resposta gravada sem edição.
 - allowlist `e2e-allowlist-v1`, sanitizer `e2e-sanitizer-v1`, contrato `e2e-evidence-v1`.
 - Entrada: host 45, worker 181, attempt 8. Registros: host 5, worker 181, attempt 8.
 - Linhas não interpretadas 0; linhas descartadas 40; campos descartados 710; textos
-  reduzidos a hash 4.
+  reduzidos a hash 4 (medido na sanitização original; a reprojeção da resposta final não
+  recontou a captura bruta).
 - Redações: caminho 3, segredo 0, e-mail 0, identidade 0.
 - Placeholders na gravação: `<NODE_BIN>`, `<FORGE_CODE>`, `<CAPTURE_LAB>`.
+- Resposta final do worker: só a estrutura fechada do resultado de execução é mantida
+  (`status`, `must_haves_status[].status`, `scope` e `reason` por enum). Toda string livre
+  (`summary`, `item`, `note` e cada caminho de `files_changed`) vira um token determinístico
+  `<TEXT-…>` ou `<PATH-…>` (sha256 truncado e tamanho). Campo desconhecido, tipo ou enum
+  inválido ou texto não JSON fazem o sanitizador publicar só hash e tamanho, e o verificador
+  recusa com `e2e-sanitization-field` qualquer texto capturado que não seja essa projeção.
+  Isso vale para `{"customer":"Jane Doe"}` e para texto livre com nomes. A varredura por
+  padrões continua, mas deixou de ser a única barreira.
 - `scanRecords` limpo sobre a projeção; só ela foi promovida. Nenhum fluxo bruto, caminho
   pessoal, ID de sessão ou conta, e-mail ou token entrou em arquivo versionado.
 

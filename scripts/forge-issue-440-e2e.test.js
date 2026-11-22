@@ -151,16 +151,22 @@ function windowStimulus() {
 }
 function cut() {
   cutting = true;
-  log.synthetic_stimuli.push('cut-before-final-answer', 'controlled-descendant-helper', 'remain-silent-for-real-watchdog');
+  const nonzero = control.mode === 'exit-nonzero';
+  log.synthetic_stimuli.push('cut-before-final-answer', 'controlled-descendant-helper',
+    nonzero ? 'exit-nonzero-app-server' : 'remain-silent-for-real-watchdog');
   save();
   const helper = cp.spawn(process.execPath, ['-e', control.helper, String(control.helperWaitMs), ...control.claimed], { stdio: 'ignore', windowsHide: true });
   helper.on('error', () => stop('e2e-transport-defect:helper-spawn', 5));
-  helper.on('exit', code => { log.helper_exit = code; log.outcome = 'cut-before-final'; save(); });
+  helper.on('exit', code => {
+    log.helper_exit = code;
+    if (nonzero) { log.exit_code = 7; stop('exit-nonzero', 7); return; } // the REAL child process exits nonzero mid-turn
+    log.outcome = 'cut-before-final'; save();
+  });
 }
 function pump() {
   while (cursor < records.length && records[cursor].direction === 'server') {
     const record = records[cursor];
-    if (control.mode === 'cut-before-final' && isFinal(record)) return cut();
+    if (['cut-before-final', 'exit-nonzero'].includes(control.mode) && isFinal(record)) return cut();
     if (control.mode === 'success' && isCommandDone(record)) { materialize(); windowStimulus(); }
     log.consumed_seqs.push(record.seq);
     if (cursor === records.length - 1) log.outcome = 'completed';
@@ -499,23 +505,24 @@ async function injectedFailureAbandonSuccessor() {
   const calls = replayerCalls();
   let failure = null;
   try {
-    setControl({ mode: 'cut-before-final', claimed: [f.a] });
-    // Existing test-only options tighten the real watchdog; keep the real
-    // parser, reducer, process tree and error producer. Restore before recovery.
-    const client = require('./forge-appserver-client'), originalStart = client.startAppServerTurn;
-    client.startAppServerTurn = options => originalStart({ ...options,
-      livenessPolicy: { suspectMs: 1000, deadMs: 2500 }, livenessIntervalMs: 50 });
+    // The REAL replayer child (the app-server stand-in) exits with a nonzero code in the
+    // middle of the turn, after the controlled descendant helper. The real client close
+    // handler, parser, process tree and error producer run unchanged; nothing is mocked.
+    setControl({ mode: 'exit-nonzero', claimed: [f.a] });
     try { await api.sidecar.runUnitSidecar(f.request, {}); } catch (error) { failure = error; }
-    finally { client.startAppServerTurn = originalStart; }
-    assert(failure, 'the cut stream must fail the attempt');
+    assert(failure, 'the nonzero app-server exit must fail the attempt');
     const cutLog = replayerLog(calls + 1);
-    assert.equal(cutLog.outcome, 'cut-before-final'); assert.equal(cutLog.helper_exit, 0);
+    assert.equal(cutLog.outcome, 'exit-nonzero'); assert.equal(cutLog.exit_code, 7); assert.equal(cutLog.helper_exit, 0);
     assert.deepEqual(cutLog.client_methods, state.recording.clientMethods);
     const custody = requireCustody(f, 'injected-failure-abandon-successor');
     const receiptBytes = fs.readFileSync(f.files.receiptFile), receipt = JSON.parse(receiptBytes);
     assert.equal(receipt.phase, 'failed', 'receipt failed');
-    assert.equal(failure.code, 'appserver-anomalous-silence', 'real watchdog typed failure');
-    assert.equal(receipt.failure.reason_code, 'appserver-anomalous-silence');
+    const typed = require('./forge-appserver-client').APPSERVER_EXIT_CODES.NONZERO_EXIT;
+    assert.equal(typed, 'appserver-exit-nonzero');
+    assert.equal(failure.code, typed, 'the real close handler typed the nonzero exit');
+    assert.match(failure.message, /app-server exited with code 7/);
+    assert.equal(receipt.failure.reason_code, typed, 'not the generic sidecar-unit-failed fallback');
+    assert.notEqual(receipt.failure.reason_code, 'sidecar-unit-failed');
     const inspected = api.recovery.inspectReceipt(f.files.receiptFile, { processProbe: () => 'stopped' });
     assert.equal(inspected.retained_output, null, 'no durable output retained');
     assert.equal(text(path.join(f.a, 'same.txt')), 'after\n', 'the controlled descendant wrote the claimed path');
@@ -527,8 +534,7 @@ async function injectedFailureAbandonSuccessor() {
     const questions = recoveryState(f).pending_questions;
     setControl({ mode: 'success', claimed: [f.a] });
     const value = await recover(f);
-    const stimuli = ['cut-before-final-answer', 'controlled-descendant-helper',
-      'remain-silent-for-real-watchdog', 'tighten-test-only-watchdog:suspectMs=1000,deadMs=2500,intervalMs=50'];
+    const stimuli = ['cut-before-final-answer', 'controlled-descendant-helper', 'exit-nonzero-app-server'];
     if (api.refusal.BLOCKING_CODES.includes(value.reason_code)) {
       // The real transport failure of the primary route was classified as a BLOCKING
       // replay refusal: abandonment and the successor are never reached. Prove that

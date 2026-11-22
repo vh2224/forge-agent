@@ -46,6 +46,11 @@ const SOURCES = deepFreeze({
       call_sites: ['scripts/forge-claude-sidecar.js#runOwnedChild'] },
     { reason_code: 'appserver-anomalous-silence', phase: 'failed', timeout: true,
       call_sites: ['scripts/forge-appserver-client.js#APPSERVER_LIVENESS_CODES'] },
+    // Typed nonzero exit of the app-server child (close handler). The generic
+    // `sidecar-unit-failed` fallback of the unit sidecar is NOT a source: it covers
+    // arbitrary caller errors and stays blocking `replay-refusal-unknown-code`.
+    { reason_code: 'appserver-exit-nonzero', phase: 'failed', timeout: false,
+      call_sites: ['scripts/forge-appserver-client.js#APPSERVER_EXIT_CODES'] },
   ],
 });
 const SOURCE_ROWS = Object.entries(SOURCES).flatMap(([code, rows]) => rows.map(row => ({ code, ...row })));

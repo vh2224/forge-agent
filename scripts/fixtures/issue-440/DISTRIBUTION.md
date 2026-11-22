@@ -24,6 +24,7 @@ Digest SHA-256 do objeto ordenado historical_fixtures: `b9a789c5f0a69679b084b862
 Os três arquivos S01 de issue-440 já pertencem a esse censo; são adições em relação à base4606, com before null.
 Sete arquivos novos T01/T02 ficam separados: e2e-mock/{README.md,manifest.json,recording.jsonl}, e2e/{README.md,manifest.json,recording.jsonl} e workflow-layer.json.
 Toda linha `files` sob scripts/fixtures tem before null. O censo lê os bytes projetados e recusa adulteração histórica.
+Os dois arquivos de `e2e/` (manifest.json e recording.jsonl) foram reprojetados pelo fix-s03 (R1): só o registro da resposta final do worker mudou, para a projeção estruturada segura, e as medições after dessas duas linhas refletem esses bytes. README.md de `e2e/` não foi reivindicado pelo fix-s03 e não foi alterado.
 
 ## Superfícies medidas
 
@@ -38,33 +39,34 @@ Digest por linha: SHA-256 dos bytes UTF-8 de stdout + NUL + stderr. Não são no
 Primeira asserção histórica: `campaign measured rendered source skills/forge-task/SKILL.md`.
 Esperado histórico `5f01959c4599f48597551162ae2dd3391159fd14e132b156d428a2b112294637`; observado histórico `cab6654fddd9af22c400c0c6d146481ebb55f9a5ebc4bbbe66e6c7bf6be1f43b`.
 Atribuição histórica qualificada: a primeira falha veio da evolução de skills/forge-task/SKILL.md por #446, já registrada no contexto da S02 e absorvida por issues-442-446 antes da base4606. Não foi causada por S03. A row publicada issues442446Layer.rendered[skills::skills/forge-task/SKILL.md] projeta after b79906fb446afbf08c3e6fe42802060025d75e9b6a7ddac8ab505bfa3d8937c5 para before 5f01959c4599f48597551162ae2dd3391159fd14e132b156d428a2b112294637; o after coincide com a medição atual. O renderer copia a fonte, sem incorporar módulos shared nessa skill. Por isso forge-task não tem nova row no delta440.
-Atribuição das diferenças atuais da milestone: S01/T02–T03 altera as costuras protegidas; S01/T04 e S02/T07 alteram o contrato bidirecional; S02/T01–T06 altera recuperação, custódia e resultado; S02/T07 altera as duas skills forge-auto/forge-next (as únicas duas rows rendered novas) e os procedimentos; S03/T01 altera CI/verificador; S03/T02–T03 adiciona gravação/docs/harness; S03/T04 altera somente os requires e os cinco arquivos já preservados. A tabela por fonte abaixo aponta os writes reais de cada task.
-As primeiras asserções podem mascarar falhas posteriores: nenhuma equivalência de execução atual é inferida. O after completo fica a cargo do adaptador do owner após o join.
+Atribuição das diferenças atuais da milestone: S01/T02–T03 altera as costuras protegidas; S01/T04 e S02/T07 alteram o contrato bidirecional; S02/T01–T06 altera recuperação, custódia e resultado; S02/T07 altera as duas skills forge-auto/forge-next (as únicas duas rows rendered novas) e os procedimentos; S03/T01 altera CI/verificador; S03/T02–T03 adiciona gravação/docs/harness; S03/T04 altera os requires, os três adaptadores de consumidor medidos e os arquivos já preservados; S03/fix-s03 (R1–R4) altera as fontes marcadas abaixo. A tabela por fonte abaixo aponta os writes reais de cada task.
+As primeiras asserções podem mascarar falhas posteriores: nenhuma equivalência de execução atual é inferida.
+A coluna “Depois atual” registra o que foi de fato retido e como cada resultado foi qualificado (veja “Verificação e estados independentes”). Execução original, qualificação por fonte e gates finais de CI são estados distintos; nenhuma linha é declarada verde sem a evidência indicada.
 
 | Suíte | Antes observado | Primeira asserção / superfície | Atribuição estática | Digest histórico | Depois atual |
 |---|---|---|---|---|---|
-| `forge-ci-latency-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | PENDENTE: verify do owner |
-| `forge-claude-renderer.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `474e816338254dbf2e416c3615fca770d7cf9d02e19acc4e0801cb47709e3fac` | PENDENTE: verify do owner |
-| `forge-communication-surfaces.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `316cfaa37548aa6e53ddb11efa4ee309a25507b1f8b3c9fb976018d60efe80c1` | PENDENTE: verify do owner |
-| `forge-incomplete-resume-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | PENDENTE: verify do owner |
-| `forge-issue-399-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | PENDENTE: verify do owner |
-| `forge-issue-401-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | PENDENTE: verify do owner |
-| `forge-issue-407-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | PENDENTE: verify do owner |
-| `forge-issue-414-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | PENDENTE: verify do owner |
-| `forge-issue-416-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | PENDENTE: verify do owner |
-| `forge-issue-418-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | PENDENTE: verify do owner |
-| `forge-issue-439-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | PENDENTE: verify do owner |
-| `forge-issue-campaign-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | PENDENTE: verify do owner |
-| `forge-issues-403-404-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | PENDENTE: verify do owner |
-| `forge-issues-405-406-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | PENDENTE: verify do owner |
-| `forge-issues-410-413-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | PENDENTE: verify do owner |
-| `forge-issues-420-424-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | PENDENTE: verify do owner |
-| `forge-issues-429-432-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | PENDENTE: verify do owner |
-| `forge-issues-434-436-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | PENDENTE: verify do owner |
+| `forge-ci-latency-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | migração só de require; after qualificado por fonte na V3 (fonte e projeção inalteradas, consumidor entre os 24 aprovados reutilizados); sem rótulo individual retido na execução original; não reexecutado individualmente |
+| `forge-claude-renderer.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `474e816338254dbf2e416c3615fca770d7cf9d02e19acc4e0801cb47709e3fac` | migração só de require; after qualificado por fonte na V3 (fonte e projeção inalteradas, consumidor entre os 24 aprovados reutilizados); sem rótulo individual retido na execução original; não reexecutado individualmente |
+| `forge-communication-surfaces.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `316cfaa37548aa6e53ddb11efa4ee309a25507b1f8b3c9fb976018d60efe80c1` | consumidor com adaptador explícito medido; 54/54 retido na captura host-v2 e qualificado por fonte na V3; não reexecutado individualmente |
+| `forge-incomplete-resume-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | migração só de require; after qualificado por fonte na V3 (fonte e projeção inalteradas, consumidor entre os 24 aprovados reutilizados); sem rótulo individual retido na execução original; não reexecutado individualmente |
+| `forge-issue-399-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | migração só de require; after qualificado por fonte na V3 (fonte e projeção inalteradas, consumidor entre os 24 aprovados reutilizados); sem rótulo individual retido na execução original; não reexecutado individualmente |
+| `forge-issue-401-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | migração só de require; after qualificado por fonte na V3 (fonte e projeção inalteradas, consumidor entre os 24 aprovados reutilizados); sem rótulo individual retido na execução original; não reexecutado individualmente |
+| `forge-issue-407-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | migração só de require; after qualificado por fonte na V3 (fonte e projeção inalteradas, consumidor entre os 24 aprovados reutilizados); sem rótulo individual retido na execução original; não reexecutado individualmente |
+| `forge-issue-414-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | migração só de require; after qualificado por fonte na V3 (fonte e projeção inalteradas, consumidor entre os 24 aprovados reutilizados); sem rótulo individual retido na execução original; não reexecutado individualmente |
+| `forge-issue-416-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | migração só de require; after qualificado por fonte na V3 (fonte e projeção inalteradas, consumidor entre os 24 aprovados reutilizados); sem rótulo individual retido na execução original; não reexecutado individualmente |
+| `forge-issue-418-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | migração só de require; after qualificado por fonte na V3 (fonte e projeção inalteradas, consumidor entre os 24 aprovados reutilizados); sem rótulo individual retido na execução original; não reexecutado individualmente |
+| `forge-issue-439-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | migração só de require; after qualificado por fonte na V3 (fonte e projeção inalteradas, consumidor entre os 24 aprovados reutilizados); sem rótulo individual retido na execução original; não reexecutado individualmente |
+| `forge-issue-campaign-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | migração só de require; after qualificado por fonte na V3 (fonte e projeção inalteradas, consumidor entre os 24 aprovados reutilizados); sem rótulo individual retido na execução original; não reexecutado individualmente |
+| `forge-issues-403-404-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | migração só de require; after qualificado por fonte na V3 (fonte e projeção inalteradas, consumidor entre os 24 aprovados reutilizados); sem rótulo individual retido na execução original; não reexecutado individualmente |
+| `forge-issues-405-406-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | migração só de require; after qualificado por fonte na V3 (fonte e projeção inalteradas, consumidor entre os 24 aprovados reutilizados); sem rótulo individual retido na execução original; não reexecutado individualmente |
+| `forge-issues-410-413-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | migração só de require; after qualificado por fonte na V3 (fonte e projeção inalteradas, consumidor entre os 24 aprovados reutilizados); sem rótulo individual retido na execução original; não reexecutado individualmente |
+| `forge-issues-420-424-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | migração só de require; after qualificado por fonte na V3 (fonte e projeção inalteradas, consumidor entre os 24 aprovados reutilizados); sem rótulo individual retido na execução original; não reexecutado individualmente |
+| `forge-issues-429-432-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | migração só de require; after qualificado por fonte na V3 (fonte e projeção inalteradas, consumidor entre os 24 aprovados reutilizados); sem rótulo individual retido na execução original; não reexecutado individualmente |
+| `forge-issues-434-436-distribution.test.js` | histórica exit 1 | campaign measured rendered source skills/forge-task/SKILL.md | #446 upstream absorvido; deltas S01–S03 por fonte abaixo | `b7a8f89965e474c96e47d314bf66775c6ed5acf065fd1037f94d9262087f76a1` | migração só de require; after qualificado por fonte na V3 (fonte e projeção inalteradas, consumidor entre os 24 aprovados reutilizados); sem rótulo individual retido na execução original; não reexecutado individualmente |
 
 ## Qualificação upstream e 24 migrações
 
-As 24 fontes before foram medidas contra os hashes do pacote e os bytes exatos da base4606. Cada after difere somente no require de issue-448 para issue-440; nenhuma asserção é removida.
+As 24 fontes before foram medidas contra os hashes do pacote e os bytes exatos da base4606. São 21 migrações em que o after difere somente no require de issue-448 para issue-440 e 3 consumidores com adaptador de projeção explícito e fixado (`forge-communication-surfaces.test.js`, `forge-issues-403-407-integration.test.js` e `forge-dispatch-source-guard.test.js`); nenhuma asserção é removida. A coluna after da tabela abaixo é a medição atual dessas 24 fontes, sem distinguir adaptadores.
 Os 24 consumidores têm evidência local upstream `SUCCESSOR-CHECKS.json`, exit 0, joined/active_processes 0. As seis adições upstream não são contadas como old18.
 CI upstream histórico: run44971929305, HEAD `fa75d68293654843629facedfb113e79de56d13d`, e run44972867644, master `4606de1ecac3ddee7bc957d9a8dea3207023d5b5`, ambos success49/49; isso não é o CI atual da milestone.
 A cadeia atual preserva a exportação de todos os predecessores, inclusive os validadores da primeira asserção. Antes/depois de cada require está em files; projeção de todo input alterado é medida e o teste exerce validate e validate414Snapshot.
@@ -105,24 +107,25 @@ Esta lista vem dos writes dos planos; indica responsabilidade estática, sem con
 | `.github/workflows/ci.yml` | S03/T01 |
 | `CHANGELOG.md` | S01/T04, S02/T07, S03/T04 |
 | `docs/issue-440/canonical-result-consumers.md` | S02/T05 |
-| `docs/issue-440/e2e-harness.md` | S03/T03 |
+| `docs/issue-440/e2e-harness.md` | S03/T03, S03/fix-s03 (R3) |
 | `docs/issue-440/managed-surfaces.md` | S01/T01 |
 | `docs/issue-440/recovery-abandon.md` | S02/T07 |
 | `docs/issue-440/route-matrix.md` | S03/T04 |
-| `docs/issue-440/windows-evidence.md` | S03/T02 |
+| `docs/issue-440/windows-evidence.md` | S03/T02, S03/fix-s03 (R1) |
 | `scripts/fixtures/issue-440/delta-cases.json` | S01/T01 |
 | `scripts/fixtures/issue-440/distribution-delta.json` | S03/T04 |
 | `scripts/fixtures/issue-440/distribution.cjs` | S03/T04 |
-| `scripts/fixtures/issue-440/DISTRIBUTION.md` | S03/T04 |
+| `scripts/fixtures/issue-440/DISTRIBUTION.md` | S03/T04, S03/fix-s03 (R4) |
 | `scripts/fixtures/issue-440/e2e-mock/manifest.json` | S03/T01 |
 | `scripts/fixtures/issue-440/e2e-mock/README.md` | S03/T01 |
 | `scripts/fixtures/issue-440/e2e-mock/recording.jsonl` | S03/T01 |
-| `scripts/fixtures/issue-440/e2e/manifest.json` | S03/T02 |
+| `scripts/fixtures/issue-440/e2e/manifest.json` | S03/T02, S03/fix-s03 (R1) |
 | `scripts/fixtures/issue-440/e2e/README.md` | S03/T02 |
-| `scripts/fixtures/issue-440/e2e/recording.jsonl` | S03/T02 |
+| `scripts/fixtures/issue-440/e2e/recording.jsonl` | S03/T02, S03/fix-s03 (R1) |
 | `scripts/fixtures/issue-440/README.md` | S01/T01 |
 | `scripts/fixtures/issue-440/surface-census.json` | S01/T01 |
 | `scripts/fixtures/issue-440/workflow-layer.json` | S03/T01 |
+| `scripts/forge-appserver-client.js` | S03/fix-s03 (R3) |
 | `scripts/forge-attempt-abandon.js` | S02/T04 |
 | `scripts/forge-attempt-abandon.test.js` | S02/T04 |
 | `scripts/forge-attempt-recovery.js` | S02/T06 |
@@ -135,8 +138,8 @@ Esta lista vem dos writes dos planos; indica responsabilidade estática, sem con
 | `scripts/forge-communication-surfaces.test.js` | S03/T04 |
 | `scripts/forge-dispatch-source-guard.js` | S03/T04 |
 | `scripts/forge-dispatch-source-guard.test.js` | S03/T04 |
-| `scripts/forge-e2e-evidence.js` | S03/T01 |
-| `scripts/forge-e2e-evidence.test.js` | S03/T01 |
+| `scripts/forge-e2e-evidence.js` | S03/T01, S03/fix-s03 (R1) |
+| `scripts/forge-e2e-evidence.test.js` | S03/T01, S03/fix-s03 (R1/R2) |
 | `scripts/forge-incomplete-resume-distribution.test.js` | S03/T04 |
 | `scripts/forge-issue-399-distribution.test.js` | S03/T04 |
 | `scripts/forge-issue-401-distribution.test.js` | S03/T04 |
@@ -148,7 +151,7 @@ Esta lista vem dos writes dos planos; indica responsabilidade estática, sem con
 | `scripts/forge-issue-440-attribution.test.js` | S01/T02 |
 | `scripts/forge-issue-440-distribution.test.js` | S03/T04 |
 | `scripts/forge-issue-440-docs.test.js` | S02/T07, S03/T04 |
-| `scripts/forge-issue-440-e2e.test.js` | S03/T03 |
+| `scripts/forge-issue-440-e2e.test.js` | S03/T03, S03/fix-s03 (R3) |
 | `scripts/forge-issue-440-recovery.test.js` | S02/T06 |
 | `scripts/forge-issue-440-result.test.js` | S02/T05 |
 | `scripts/forge-issue-440-review-fix.test.js` | S02/fix-s02 (R1/R2/R4/R5) |
@@ -175,8 +178,8 @@ Esta lista vem dos writes dos planos; indica responsabilidade estática, sem con
 | `scripts/forge-protected-owner-activity.js` | S01/T02, S02/T02 |
 | `scripts/forge-recovery-transition.js` | S02/T02 |
 | `scripts/forge-release-policy.js` | S03/T01 |
-| `scripts/forge-replay-refusal.js` | S02/T01 |
-| `scripts/forge-replay-refusal.test.js` | S02/T01 |
+| `scripts/forge-replay-refusal.js` | S02/T01, S03/fix-s03 (R3) |
+| `scripts/forge-replay-refusal.test.js` | S02/T01, S03/fix-s03 (R3) |
 | `scripts/forge-review-policy-distribution.test.js` | S01/T04, S02/T07, S03/T04 |
 | `scripts/forge-surgical-reset-backup.test.js` | S02/T03 |
 | `scripts/forge-surgical-reset.js` | S02/T03 |
@@ -193,7 +196,9 @@ Esta lista vem dos writes dos planos; indica responsabilidade estática, sem con
 ## Verificação e estados independentes
 
 O novo teste cobre fontes de S01/S02/S03, workflow/verificador/abandono, provenance, preimagens, fixture histórica, requires exatos, matriz e uma travessia do predecessor.
-Os seis comandos after do plano serão executados uma vez pelo owner após o writer encerrar. Até essa observação, a tabela after fica PENDENTE e não alega testes aprovados.
+Os seis comandos after do plano foram executados uma vez pelo owner depois que o writer original encerrou. Resultado retido: os outros cinco comandos passaram e foram unidos; o stderr autêntico do comando de consumidores reportou 28 executadas e 3 falhas. Os 25 aprovados são um agregado inferido desse stderr: o stdout original retido (limite de 10 KB) guardou só duas linhas PASS nomeadas, de modo que não há rótulo individual por suíte e as 3 falhas não são atribuídas a uma linha old18. As seis capturas originais ficam preservadas e imutáveis.
+Depois dessa execução houve três reparos técnicos históricos (V1, V2 e V3), todos registrados e nenhum apagando a falha original. A V1 executou 3 comandos atuais novos e reaproveitou 3 verificações anteriores. A V2 reteve 54/54 da suíte de comunicação (`forge-communication-surfaces.test.js`) e qualificou por fonte as verificações de integração e de sintaxe da V1. A V3 final executou apenas o guarda, a camada própria focada e os metadados novos, e qualificou por fonte (hashes de fonte e de projeção inalterados) os 24 consumidores aprovados e as cinco verificações originais aprovadas; isso é qualificação por fonte, não execução nova. A entrega estrita da T04 ficou provada para os 51 critérios sobre a fonte atual; ela não avalia a aceitação integrada.
+O fix-s03 (R1–R4) não reexecuta as seis suítes de distribuição old18: ele roda só os casos focados que mudou (evidência E2E, censo de recusa de replay, harness E2E e a camada própria), e a camada própria é medida de novo depois deste texto.
 Nenhuma execução local completa, native198, A7 ou smoke adicional é feita por esta task.
 GF1: seis suítes adiadas e logs integrais — PENDENTE no CI final.
 GF2: custódia Windows remota — PENDENTE no CI final.
@@ -216,3 +221,8 @@ São duas citações prospectivas forge-next, duas rows de registry e 39 folhas 
 forge-next sample attribution: owner baseline 22bddaebd4367ce2cc8729cfdc7f14131de2c155be62226c3d24c45f626ed2c5; measured raw before fe72edc9eedccfac3faa77dc9a619d0a0b98ee6fed052265dfd2700740a7d9e1; raw after b0eabff8a200b0cef4a52ccfea74e693bf5c2a4dd3b885863cd6597f207f0a59; attributed before 47c80adfef2ce723846c2ea58150a14c874e20a1cfcf3107ad480450938f4791; attributed after 32f8ea9b706854f886f1f16a7dcbc434515e982385175626b0e5a2f46450c364. Both current raw and attributed positive sample states remain documented.
 
 Technical amendment:24 consumers comprise21 exact require-only migrations and3 explicitly pinned projection adapters. The source-guard sample reader now uses currentSamples at its direct citation check; every original assertion and historical sample byte remains intact.
+
+## Medição atual após o fix-s03
+
+A camada `issue-440` ainda não foi lançada, então este fix atualiza a medição existente em vez de criar outra camada: nenhuma migração dos 24 imports, nenhuma reescrita da base4606 ou das preimagens e nenhum framework de normalização. Em `distribution-delta.json` mudam só as medições after e attributed-after das fontes reivindicadas que o fix alterou (resposta final E2E e seu verificador, censo de recusa de replay, harness E2E e documentos) e entra a linha de `scripts/forge-appserver-client.js`, com os bytes e a preimagem exatos da base4606. Toda outra linha, preimagem, rendered, superfície, registry, sample, parity e projeção de consumidor ficam como estavam; as 205 fixtures históricas e o quadro de reparo e de revisão retidos não mudam.
+Mudanças de produto medidas: `appserver-exit-nonzero` tipado no handler `close` de `startAppServerTurn` e uma linha no censo fechado de recusa de replay (R3), e a projeção estruturada segura da resposta final em `forge-e2e-evidence.js` com a gravação sanitizada reprojetada (R1). O código genérico `sidecar-unit-failed` não é fonte operacional. O texto desta seção e das anteriores é escrito antes da medição deste documento, que participa da medição. O PIN novo fica só no cjs excluído e no handoff do owner, e nenhum SHA final do delta é embutido aqui. Um registro privado antes→depois da medição é mantido à parte. CI final, native198, A7, complete-milestone, merge, release, instalação e UAT manual continuam pendentes e separados.
