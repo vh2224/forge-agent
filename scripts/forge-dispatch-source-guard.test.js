@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/issue-439/distribution.cjs');
+const unitEntry = require('./fixtures/issue-448/distribution.cjs');
 
 // Standalone acceptance suite: only Node built-ins and production modules.
 const assert = require('assert');

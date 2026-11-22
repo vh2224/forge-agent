@@ -639,3 +639,10 @@ Problem: the task review contract required `unit: task/<id>`, but the canonical 
 Decision: add an explicit, bounded `--unit task/<id>` mode, mutually exclusive with milestone/slice. Keep legacy milestone serialization and validation unchanged when no unit is supplied; use the same explicit task scope for unavailable-agent companions. Preserve the recorded task unit in advisory audit drift output. This adds no dispatch, authorization, provider, migration or preference behavior.
 
 Evidence: public builder/CLI coverage for task rows, companion rows, invalid/mixed scopes, no-write refusals, dry-run, and audit task identity, alongside existing byte-stable milestone tests. A disposable prototype demonstrated the old task-only refusal and the corrected behavior with zero provider calls. Actual source application is validated through the same repository tests before delivery; provider operation and client UI are outside this proof.
+
+
+## Native memory failure provenance remains tri-state — #444
+
+The native memory failure receiver converted every value except true to false, losing unknown provenance and accepting malformed values. Preserve explicit true, false and unknown; omitted provenance becomes unknown, and other values refuse before result, receipt or event publication. True continues to require the existing exact native telemetry identity. Existing receipts and replay identities remain unchanged.
+
+Validation:18 public-API cases cover false/unknown/omitted values, nine invalid values, valid true telemetry, telemetry failures, immutable replay and conflicting payload identity. Tests use isolated temporary roots and synthetic telemetry; no provider is called.

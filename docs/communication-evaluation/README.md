@@ -344,3 +344,10 @@ skills/forge-next/SKILL.md: before=598398fba42577af77dc68282ad02878996787b55abb9
 Earlier evidence remains above. Only current after-node source fingerprints are updated; no sample prose or human acceptance is changed.
 
 skills/forge-task/SKILL.md: before=d657fe3b191a675c2d2a62012ca00c71360d44b65cd65787fa4e75a81016b957 after=168dfdec333011062dd114e427c92f8baf0eb3b6d1511ad705fe592b50f6efef attributed_before=4e778c46a1db66ec35d49314129fb30aad6ce7c075cae72aa0e43f3d3d03e952 attributed_after=e64ab30c3f4c347a541e0238b8e177be556208fd66e9d8c040fb4c85519daaa4
+
+
+## Issues442443445446 source references
+
+Earlier evidence remains above. Only current task after-node source fingerprints change; sample prose and human acceptance remain unchanged.
+
+skills/forge-task/SKILL.md: before=168dfdec333011062dd114e427c92f8baf0eb3b6d1511ad705fe592b50f6efef after=ef0598d7da5bed2c5cc61374951143c89b76a1fab20068acf332f266935c3d91 attributed_before=e64ab30c3f4c347a541e0238b8e177be556208fd66e9d8c040fb4c85519daaa4 attributed_after=565f63002241d968741aa9484ec1a2ffd1ad9763cddba95433f54c47b921ad94

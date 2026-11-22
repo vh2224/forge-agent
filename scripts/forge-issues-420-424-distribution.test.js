@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
-const layer=require('./fixtures/issue-439/distribution.cjs');
+const layer=require('./fixtures/issue-448/distribution.cjs');
 // Intentional parent import: do not migrate this counter to its own layer.
 const parent=require('./fixtures/ci-latency/distribution.cjs'),root=path.resolve(__dirname,'..');
 const artifacts=require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts;
