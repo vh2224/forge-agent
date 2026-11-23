@@ -1982,6 +1982,11 @@ f) Release — call the loop adapter with `--command batch-ack` and the same sna
 
 #### 5. Process result
 
+Receipt `failed` ou `started`: use `recoverUnitSidecar` com o adaptador vivo de abandono;
+siga `shared/forge-procedure-recovery.md`: replay → recusa operacional fechada → abandono
+provado → novo begin na mesma geração. Nunca relance manualmente com dispatch id novo;
+exiba recusas pelo código, preservando todos os gates de autoridade, perguntas, tempo e review-fix.
+
 **Update timeline task** — mark the current task based on outcome:
 - `status: done` → `TaskUpdate({ taskId: current_task_id, status: "completed" })`
 - `status: partial` or `status: blocked` → leave task as `in_progress` (shows it was interrupted)

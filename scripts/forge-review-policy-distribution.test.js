@@ -374,8 +374,29 @@ function withoutReadonly350Entry(changelog) {
   return changelog.replace(entries[0] + '\n', '');
 }
 
+// The #440 delta is a single measured line; older order assertions stay intact.
+// Admit only the measured S02 line; compose before the unchanged S01 filter.
+function withoutIssue440S03Entry(changelog) {
+  const entries = changelog.split('\n').filter(line => line.startsWith("- E2E Windows host Claude → worker Codex e regressão do host Codex (#440, M-20261119115538-revisar-fluxo-execucao, S03):"));
+  assert.equal(entries.length, 1, 'one declared #440 S03 entry');
+  assert.equal(sha256(entries[0] + '\n'), '4e5e159a44459a4b1cd4b029c78fe8365ebe020a6a06749fcb97a6eed967020d', 'declared #440 S03 entry matches measured bytes');
+  return changelog.replace(entries[0] + '\n', '');
+}
+function withoutIssue440S02Entry(changelog) {
+  const entries = changelog.split('\n').filter(line => line.startsWith('- Recuperação replay-first e abandono seguro (#440, M-20261119115538-revisar-fluxo-execucao, S02):'));
+  assert.strictEqual(entries.length, 1, 'one declared #440 S02 entry');
+  assert.strictEqual(sha256(entries[0] + '\n'), '6cb3a2c48cf129ae8ac5e29fa79bbd514831057f8c29e774798d7a472a055e76', 'declared #440 S02 entry matches measured bytes');
+  return changelog.replace(entries[0] + '\n', '');
+}
+function withoutIssue440Entry(changelog) {
+  const entries = changelog.split('\n').filter(line => line.startsWith('- Superfícies geridas versionadas (#440, M-20261119115538-revisar-fluxo-execucao, S01):'));
+  assert.strictEqual(entries.length, 1, 'one declared #440 entry');
+  assert.strictEqual(sha256(entries[0] + '\n'), '59a47ea8059a06a4d8576e0da9f4134dcfbb7bc8a657d606eb99fd652c716666', 'declared #440 entry matches measured bytes');
+  return changelog.replace(entries[0] + '\n', '');
+}
+
 test('CHANGELOG: #341 entry right after the original first entry under Não lançado, without CI/merge/release/installation/UAT claims', () => {
-  const lines = withoutReadonly350Entry(read('CHANGELOG.md')).split('\n');
+  const lines = withoutReadonly350Entry(withoutIssue440Entry(withoutIssue440S02Entry(withoutIssue440S03Entry(read('CHANGELOG.md'))))).split('\n');
   assert.strictEqual(lines[0], '## Não lançado');
   assert(lines[2].startsWith('- Prazos de milestone (M-20261101111759-opcoes-prazo-milestones):'), 'the first entry stays first');
   const entry = lines[3];
@@ -395,6 +416,36 @@ test('CHANGELOG: the admitted #350 note rejects changed, missing and duplicate e
   assert.throws(() => withoutReadonly350Entry(changelog.replace('codex-readonly-context-unsupported', 'codex-readonly-context-tampered')), /measured bytes/);
   assert.throws(() => withoutReadonly350Entry(changelog.replace(entry + '\n', '')), /one declared #350 entry/);
   assert.throws(() => withoutReadonly350Entry(changelog + entry + '\n'), /one declared #350 entry/);
+});
+
+test('CHANGELOG: the admitted #440 note rejects changed, missing and duplicate entries', () => {
+  const changelog = read('CHANGELOG.md');
+  const entry = changelog.split('\n').find(line => line.startsWith('- Superfícies geridas versionadas (#440,'));
+  assert(entry, '#440 note exists');
+  assert.strictEqual(withoutIssue440S02Entry(withoutIssue440S03Entry(changelog)).split('\n')[2], entry, '#440 note is first under Não lançado');
+  assert(entry.includes('testadas offline em owners temporários.'));
+  assert(!/\b(?:CI|merge|release|instalação|UAT)\b/i.test(entry), 'no unsupported delivery claim');
+  assert.throws(() => withoutIssue440Entry(changelog.replace('testadas offline em owners temporários.', 'testadas online em owners temporários.')), /measured bytes/);
+  assert.throws(() => withoutIssue440Entry(changelog.replace(entry + '\n', '')), /one declared #440 entry/);
+  assert.throws(() => withoutIssue440Entry(changelog + entry + '\n'), /one declared #440 entry/);
+});
+
+test('CHANGELOG: #440 S02 measured line rejects altered, missing and duplicate entries', () => {
+  const changelog = read('CHANGELOG.md');
+  const entry = withoutIssue440S03Entry(changelog).split('\n')[2];
+  assert(entry.startsWith('- Recuperação replay-first e abandono seguro (#440,'));
+  assert(entry.includes('#444') && entry.includes('testada offline em owners temporários.'));
+  assert(!/\b(?:CI|merge|release|instalação|UAT)\b/i.test(entry));
+  assert.throws(() => withoutIssue440S02Entry(changelog.replace(entry, entry + ' altered')), /measured bytes/);
+  assert.throws(() => withoutIssue440S02Entry(changelog.replace(entry + '\n', '')), /one declared #440 S02 entry/);
+  assert.throws(() => withoutIssue440S02Entry(changelog + entry + '\n'), /one declared #440 S02 entry/);
+});
+
+test('CHANGELOG: #440 S03 measured line rejects altered, missing and duplicate entries', () => {
+  const changelog = read('CHANGELOG.md'), entry = changelog.split('\n')[2];
+  assert.throws(() => withoutIssue440S03Entry(changelog.replace(entry, entry + ' altered')), /measured bytes/);
+  assert.throws(() => withoutIssue440S03Entry(changelog.replace(entry + '\n', '')), /one declared #440 S03 entry/);
+  assert.throws(() => withoutIssue440S03Entry(changelog + entry + '\n'), /one declared #440 S03 entry/);
 });
 
 (async () => {

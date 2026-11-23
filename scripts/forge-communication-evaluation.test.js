@@ -268,7 +268,7 @@ function supportingRow(entry, name, pair) {
 }
 
 function run() {
-  const data = JSON.parse(read('docs/communication-evaluation/samples.json'));
+  const data = JSON.parse(require('./fixtures/issue-440/distribution.cjs').currentSamples(read('docs/communication-evaluation/samples.json')));
   const readme = read('docs/communication-evaluation/README.md');
   let passed = 0;
   const test = (name, fn) => { fn(); passed++; process.stdout.write(`PASS ${name}\n`); };

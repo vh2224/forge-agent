@@ -524,8 +524,12 @@ function discover(root) {
   return { root: base, candidates: found, documents };
 }
 
+// Exact measured S01 prose successors keep their historical excluded identities.
+// Discovery still reports the actual fingerprint/evidence; unknown tuples never alias.
+const MEASURED_PROSE_IDENTITIES = Object.freeze([{"path":"shared/forge-dispatch.md","kind":"agent","before":"sha256:aa1cbc5a83f5f4a6fec660ffad22bdf6956e736a5cd9d35abb653c161284d9ff","after":"sha256:41aa3f74b409e3327fdbfcd920185fcc778a6d096103aada444752b2953de7bf"},{"path":"shared/forge-dispatch.md","kind":"agent","before":"sha256:f456f34eae4e490c102be26ea31dfdd76a35b85a13b43e8d08d25393ec90222e","after":"sha256:923d551152cc1c4ed10f7cd1d61cb5d0978eac644183a53003aef105c80b59dd"}]);
 function identity(value) {
-  return `${value.path}\u0000${value.kind}\u0000${value.fingerprint}`;
+  const alias = MEASURED_PROSE_IDENTITIES.find(row => row.path === value.path && row.kind === value.kind && row.after === value.fingerprint);
+  return `${value.path}\u0000${value.kind}\u0000${alias ? alias.before : value.fingerprint}`;
 }
 
 function duplicates(values, keyOf) {

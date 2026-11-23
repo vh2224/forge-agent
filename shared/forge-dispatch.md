@@ -2890,6 +2890,19 @@ The three recovery layers are **mutually exclusive**. Every failure enters exact
 3. If worker returns `status: done` or `status: partial` → verification gate runs. If signals show must_have drift → Layer 3 only. The Retry Handler never sees verification results (Anti-recursion rule above).
 4. **`context_overflow` belongs to Layer 2, never Layer 3.** It is not a verification-signal failure — it is a capacity failure. Routing it to PRUNE would silently discard requirements under resource pressure. If the S03 context-monitor bridge reports severity CRITICAL, Node Repair **suppresses DECOMPOSE and PRUNE** entirely (see § Context-monitor suppression below) and forces RETRY or `blocked`.
 
+### Replay, operational refusal, abandonment and new begin
+
+For a failed or started receipt, call `recoverUnitSidecar` with the live abandonment
+adapter; never manually relaunch with a new dispatch id. The mandatory recovery
+procedure (`shared/forge-procedure-recovery.md`) governs the order: replay first,
+closed operational refusal (`replay-refusal-v1`), proved abandonment, then new begin
+in the same lease/claim generation. Surface refusals by code. This precedes choosing
+any retry/repair layer; no layer bypasses retained output, authority, questions,
+writer/descendant/root proofs, baseline, backup/reset, time admission or review-fix limits.
+The supported scope, code tables, stores and evidence limits are documented in
+`docs/issue-440/recovery-abandon.md`; that report grants no authority.
+Existing native, legacy and unsupported routes retain their guards and contracts.
+
 ### Strategy table
 
 The failure shape determines the strategy deterministically. `forge-repair.js --classify` implements this table:

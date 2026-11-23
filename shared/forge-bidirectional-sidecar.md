@@ -188,6 +188,40 @@ the evidence in the personal checkpoint and honor the user's recovery policy.
    This coordination is not an OS sandbox. Native, cohort, legacy uncoordinated
    and saved-attempt paths retain their own authority contracts.
 
+### Versioned managed owner surfaces
+
+`managed-surfaces-v1` declares only surfaces whose canonical writers were
+demonstrated in the [surface and writer inventory](../docs/issue-440/managed-surfaces.md).
+Attribution requires a live in-process capability bound to the attempt, or a
+live host adapter attesting a cross-process append. Imported JSON, matching
+schemas, hashes, timestamps and PIDs grant no authority. Writers revalidate the
+scope under the owner fence/lock, check the exact prior bytes and adopt only
+their own validated delta, never a fresh owner snapshot.
+
+Preimages and the prefix-checked append-only audit journal live in
+`<resultFile>.managed-surfaces/`, outside the owner and every code root. The
+attempt binding, declaration digest, sequence and before/after hashes connect
+each journal row to the exact write. Manual notes remain undeclared. The full
+protected snapshot and its 20000-entry limit remain unchanged: there is no
+exclusion by glob, manifest or file type, and this is not an OS sandbox.
+
+Named refusals include `managed-surface-undeclared`, `managed-surface-unattributed`,
+`managed-surface-field-unknown`, `managed-surface-append-rewrite`,
+`managed-surface-attribution-foreign` and `managed-surface-attribution-reused`.
+Protected metadata mismatches retain the top-level `execution-protected-metadata`
+code and message; the named reason is carried in
+`managed_surfaces.changes[].reason_code`, with before/after hashes and a sanitized
+diff limited to declared field names, counts, sizes and hashes, never content.
+
+Recovery classification is `attributed`, `legacy` or `unexplained`. Attributed
+requires the live context or a live revalidation adapter attesting the exact
+journal head and trusted receipt/begin/lease/claim binding, plus a valid chain.
+A receipt without the marker is legacy; evidence without that authority is
+unexplained. Unknown versions fail closed. Missing or broken journals, attempts
+started before the update and routes without a live context retain the existing
+guards and proven reconciliation byte for byte. Schema validity never creates
+a baseline, and missing historical baselines are never reconstructed.
+
 ## Result and recovery
 
 The adapter validates each unit's contract and persists the response before
@@ -743,6 +777,16 @@ CLI: node scripts/forge-attempt-recovery.js --inspect state.json receipt.json. P
 Recovery state retains its original sidecar deadline, durable reservations and factual final telemetry. Trusted standing authority permits recovery after operational timeout; inspect process and reconcile every possible writer root first.
 
 Native recovery uses createRecoveryAuthorizationAdapter registration and createRecoveryAuthority revalidation below. Imported approved/authorized data creates no opaque exception. Functional pending questions remain separate.
+
+#### Replay, recusa operacional, abandono e novo begin
+
+Receipt `failed` ou `started` segue para `recoverUnitSidecar` com o adaptador vivo
+de abandono; nunca relance manualmente com dispatch id novo. A ordem do módulo
+obrigatório `shared/forge-procedure-recovery.md` é replay primeiro, recusa operacional
+fechada (`replay-refusal-v1`), abandono provado e novo begin na mesma geração de
+lease e claim. Exiba recusas pelo código. Autoridade, perguntas, writer/descendentes,
+owner e raízes, baseline, backup/reset, tempo e limites de review-fix continuam exigidos.
+Escopo, tabelas, stores e limites de evidência: `docs/issue-440/recovery-abandon.md`.
 
 ## Authorized continuity per unit
 

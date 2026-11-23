@@ -13,8 +13,8 @@ const POLICY = {
   workflows: {
     ci: {
       filename: 'ci.yml', path: '.github/workflows/ci.yml',
-      blob_oid: '90f4edfbfe35e00d41b3f463da2be46e07dda750',
-      blob_sha256: 'e085ab2faadf7439a7c80a97c20e8d6a0bfaf11d1578e6986cf174e3e7b744f6',
+      blob_oid: '595adbd95d8f777718d4be719a89664d16263349',
+      blob_sha256: 'aeac5912bba5a8d4a40bbe0d5952059b98de1afe7da418dfba649fe55c4738a7',
       jobs: [
         { key: 'operational-offline', kind: 'native', needs: [],
           name: 'Offline ${{ matrix.host }} / ${{ matrix.platform }}',

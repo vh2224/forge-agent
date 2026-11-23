@@ -66,6 +66,11 @@ async function withExecutionActivity(request, runtime, action) {
         || !require('./forge-milestone-time-admission').TRANSPORT_REFUSAL_CODES.includes(error.code)) throw error;
     return preflightRefusals.run(error, () => action(runtime));
   }
+  // Warm cached process-family custody only AFTER the initial temporal admission,
+  // before any lease/window and the synchronous scope.spawn path. Final launch
+  // admission is still rechecked after this asynchronous preparation. A known
+  // time refusal starts no helper or provider; unavailable custody stays conservative.
+  try { await require('./forge-process-tree').prepareCustody(); } catch { /* custody unavailable */ }
   const leaseFile = lease.leaseFile(owner, unit), observed = lease.readLease(leaseFile);
   // Old adapter fixtures/legacy callers may execute without a controller begin.
   // They gain no lease exception or owner capability through this branch.
@@ -89,13 +94,42 @@ async function withExecutionActivity(request, runtime, action) {
   const duration = timeout.protectedWindowMs(timeout.ceilingFromRoute(r.route).ms);
   if (!duration.covers) fail('protected-owner-window-ceiling-unsupported');
   let leaseWindow, ownerWindow, expectedLease, closed = false, spawnAttempted = false;
-  let child = null, failedSpawn = null, childClosed = false, join = null;
+  let child = null, failedSpawn = null, childClosed = false, join = null, attemptTree = null;
+  // Attempt binding from the same canonical sources as managed-surfaces-v1.
+  const treeBinding = () => {
+    const recovery = require('./forge-attempt-recovery');
+    const claimGeneration = run.write_claim?.generation;
+    return { dispatch_id: r.dispatchId, fingerprint: require('./forge-unit-sidecar').artifactFingerprint(r),
+      recovery_identity_sha256: roots.digest(recovery.requestIdentity(recovery.canonicalRequest(r))), unit,
+      claim_generation: claimGeneration === undefined ? null : claimGeneration, lease_generation: generation };
+  };
+  const treeRoots = () => [owner, ...r.execution_contract.code_roots.map(root => root.path)];
   const knownLeaseHashes = new Set();
   const relative = path.relative(owner, leaseFile).replace(/\\/g, '/');
   const requestHash = roots.digest({ owner, run: runId, unit, generation, dispatch: r.dispatchId,
     workflow: r.workflowId, contract: r.execution_contract, plan: planHash, claim: claimHash });
-  function assertLive() {
-    if (closed || !leaseWindow?.heartbeat().ok || sha(regular(leaseFile)) !== expectedLease) fail('protected-owner-lease-changed');
+  // Live managed-surfaces-v1 attribution (issue 440). Only a live v1 context
+  // changes anything below; a refusal handle keeps every current guard as-is.
+  const managed = require('./forge-managed-attribution');
+  let attribution = null;
+  const managedLive = () => attribution !== null && managed.isAttributionLive(attribution);
+  function assertLive(options) {
+    // Under a live v1 context the projected snapshot itself refuses a changed
+    // lease (execution-protected-metadata with a named diagnostic).
+    const leaseByProjection = options?.projection === true && managedLive();
+    // A manual lease edit of a live v1 attempt is diagnosed by name through the
+    // canonical protected-snapshot assert, from the trusted chain head, BEFORE any
+    // heartbeat/renewal or adoption of the untrusted bytes. Anything else, or a
+    // diagnosis that does not refuse, falls through to the unchanged legacy throw.
+    if (!closed && !options && managedLive()) {
+      let observed = null;
+      try { observed = sha(regular(leaseFile)); } catch { observed = null; }
+      if (observed !== null && observed !== expectedLease) {
+        const api = require('./forge-task-execution'), snapshot = api.protectedSnapshot(owner);
+        contexts.run(scope, () => managed.runWithAttribution(attribution, () => api.assertProtected(owner, { ...snapshot, [relative]: expectedLease })));
+      }
+    }
+    if (closed || !leaseWindow?.heartbeat().ok || (!leaseByProjection && sha(regular(leaseFile)) !== expectedLease)) fail('protected-owner-lease-changed');
     windows.withWindow(ownerWindow, () => {});
     const current = runs.get(owner, runId);
     if (!current?.active || current.session_id !== actor.sessionId || current.host_runtime !== actor.hostRuntime
@@ -119,8 +153,24 @@ async function withExecutionActivity(request, runtime, action) {
       assertLive();
       if (spawnAttempted) fail('protected-owner-writer-exists');
       spawnAttempted = true;
-      try { child = spawn(command, args, options); }
-      catch (error) { failedSpawn = ['ENOENT', 'EACCES', 'ENOEXEC'].includes(error.code) ? error.code : null; throw error; }
+      // The family custody starts the transport itself (supervisor on win32,
+      // plain spawn for forms it cannot reproduce). A module error BEFORE any
+      // spawn keeps today's plain spawn; a custody failure after the supervisor
+      // was chosen is a named refusal and never runs the transport uncontained.
+      let tree = null;
+      try {
+        tree = require('./forge-process-tree');
+        attemptTree = tree.startAttemptTree({ command, args, options, resultFile: r.resultFile, binding: treeBinding(), roots: treeRoots() });
+      } catch (error) {
+        attemptTree = null;
+        if (tree?.isSpawnError(error)) { failedSpawn = ['ENOENT', 'EACCES', 'ENOEXEC'].includes(error.code) ? error.code : null; throw error; }
+        if (tree?.isCustodyFailure(error)) throw error;
+      }
+      if (attemptTree) child = attemptTree.child;
+      else {
+        try { child = spawn(command, args, options); }
+        catch (error) { failedSpawn = ['ENOENT', 'EACCES', 'ENOEXEC'].includes(error.code) ? error.code : null; throw error; }
+      }
       child.once('error', error => { if (!child.pid && ['ENOENT', 'EACCES', 'ENOEXEC'].includes(error.code)) failedSpawn = error.code; });
       child.once('close', () => { childClosed = true; });
       return child;
@@ -140,7 +190,12 @@ async function withExecutionActivity(request, runtime, action) {
         require('./forge-xllm').terminateOwnedProcessTree(child);
         if (!await waitForExit(child, Date.now() + 10000)) fail('protected-owner-writer-unproven');
       }
-      return (join = Object.freeze({ joined: true, possible_writers: 0, pid: child.pid || null }));
+      // Additive, diagnostic-only key: no record/journal/proof failure changes
+      // joined, possible_writers, codes, the owner window or the lease.
+      let descendants = null;
+      try { descendants = attemptTree ? await attemptTree.tree.join() : null; } catch { descendants = null; }
+      if (!descendants) descendants = Object.freeze({ status: 'unknown', method: 'process-tree-census-v1', record_sha256: null });
+      return (join = Object.freeze({ joined: true, possible_writers: 0, pid: child.pid || null, descendants }));
     },
     verificationWindow(seal) {
       if (!join?.joined) fail('protected-owner-writer-unproven');
@@ -155,21 +210,34 @@ async function withExecutionActivity(request, runtime, action) {
         return;
       }
       leaseWindow.close();
-      leaseWindow = lease.openProtectedWindow(owner, unit, token, generation, { durationMs: wanted.duration_ms });
-      if (!leaseWindow.ok) fail('protected-owner-lease-window-refused');
-      expectedLease = sha(regular(leaseFile)); knownLeaseHashes.add(expectedLease);
+      const reopen = () => {
+        const prior = managedLive() ? regular(leaseFile) : null;
+        leaseWindow = lease.openProtectedWindow(owner, unit, token, generation, { durationMs: wanted.duration_ms });
+        if (!leaseWindow.ok) fail('protected-owner-lease-window-refused');
+        const next = regular(leaseFile);
+        expectedLease = sha(next); knownLeaseHashes.add(expectedLease);
+        // Attributed under the same owner fence that published the lease.
+        if (prior) managed.runWithAttribution(attribution, () => managed.recordManagedWrite({ surface: 'unit-lease', path: relative,
+          writer: 'scripts/forge-unit-lease.js#openProtectedWindow', beforeBytes: prior, afterBytes: next }));
+      };
+      if (managedLive()) windows.withMutation(owner, reopen); else reopen();
     },
     expectedOwner(root, before) {
       if (roots.key(fs.realpathSync.native(root)) !== roots.key(owner)) return before;
       if (!before || !knownLeaseHashes.has(before[relative])) fail('protected-owner-baseline-unbound');
-      assertLive();
+      assertLive({ projection: true });
       return { ...before, [relative]: expectedLease };
     },
   });
   scopes.add(scope);
   let value, failure;
-  try { value = await windows.withWindow(ownerWindow, () => contexts.run(scope, () => action(runtime))); }
-  catch (error) { failure = error; }
+  try {
+    attribution = windows.withWindow(ownerWindow, () => windows.withMutation(owner, () => managed.createActivityAttribution({
+      request: r, owner, unit, revalidate: assertLive, claimGeneration: run.write_claim?.generation, leaseGeneration: generation,
+      version: runtime?.managedSurfacesVersion, attestation: runtime?.managedAppendAttestation,
+      onAdopt(file, digestValue) { if (file === relative && digestValue) { expectedLease = digestValue; knownLeaseHashes.add(digestValue); } } })));
+    value = await windows.withWindow(ownerWindow, () => contexts.run(scope, () => managed.runWithAttribution(attribution, () => action(runtime))));
+  } catch (error) { failure = error; }
   try {
     await scope.joinWriter();
     // Closing the coordination boundary does not renew/revive an expired lease.
@@ -179,7 +247,7 @@ async function withExecutionActivity(request, runtime, action) {
   } catch (error) {
     if (failure) { failure.owner_window = { status: 'held', reason_code: error.code || 'protected-owner-writer-unproven' }; }
     else failure = error;
-  }
+  } finally { if (attribution) managed.releaseAttribution(attribution); }
   if (failure) throw failure;
   return value;
 }
@@ -188,7 +256,9 @@ function expectedProtectedOwner(root, before) {
   const reconciliation = reconciliationContext.getStore();
   if (reconciliation) before = reconciliation.project(root, before);
   const scope = currentScope();
-  return scope && scopes.has(scope) ? scope.expectedOwner(root, before) : before;
+  const projected = scope && scopes.has(scope) ? scope.expectedOwner(root, before) : before;
+  // Exact attributed deltas only; returns its input unchanged without a live v1 context.
+  return require('./forge-managed-attribution').projectExpected(root, projected);
 }
 
 function hookAppendProof(owner, change, evidence, unit, dispatch) {
@@ -535,4 +605,4 @@ async function withReconciliationHandoff(request, runtime, action) {
 }
 module.exports = { withExecutionActivity, currentScope, assertPreflightAdmission, expectedProtectedOwner, reconciliationDecision,
   createOwnerReconciliation, assertOwnerReconciliationReady, withOwnerReconciliation, withReconciliationHandoff,
-  resumeAttemptOwner, inspectAttemptResume };
+  resumeAttemptOwner, inspectAttemptResume, hookAppendProof };

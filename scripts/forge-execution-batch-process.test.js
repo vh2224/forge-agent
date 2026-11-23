@@ -957,7 +957,34 @@ async function restartWitness(point) {
       console.log(`  fresh coordinator ${point}: pid=${cli.pid} exit=${cli.code}`);
       assert.strictEqual(cli.code, 0, `${point}: the fresh consolidation (stderr tail):\n${cli.stderr.slice(-4000)}`);
       const report = JSON.parse(cli.stdout.trim().split('\n').pop());
-      assert.deepStrictEqual([report.status, report.members.map(row => row.outcome)], ['consolidated', ['acknowledged', 'acknowledged']], point);
+      try {
+        assert.deepStrictEqual([report.status, report.members.map(row => row.outcome)], ['consolidated', ['acknowledged', 'acknowledged']], point);
+      } catch (originalError) {
+        // Observation only: preserve the member gate cause before the joined fixture is cleaned.
+        try {
+          const code = value => typeof value === 'string' && /^[a-z0-9-]{1,100}$/i.test(value) ? value : null;
+          const number = value => Number.isSafeInteger(value) ? value : null;
+          const rows = members => (Array.isArray(members) ? members : []).slice(0, 8).map(row => ({ task_id: /^T[0-9]{2}$/.test(row.task_id || '') ? row.task_id : null, outcome: code(row.outcome), barrier_outcome: code(row.barrier_outcome), reason_code: code(row.reason_code), cause_code: code(row.cause_code), stage: code(row.stage), progress_state: code(row.progress_state) }));
+          const receipts = PAIR.map(task => {
+            try {
+              const receiptFile = fx.inputs[task].resultFile + '.receipt.json', stat = fs.statSync(receiptFile);
+              if (!stat.isFile() || stat.size > 2 * 1024 * 1024) return { task_id: task, observation_error: 'diagnostic-receipt-size' };
+              const bytes = fs.readFileSync(receiptFile), receipt = JSON.parse(bytes.toString('utf8')), capture = receipt.delivery_capture;
+              const roots = (Array.isArray(capture?.gate?.roots) ? capture.gate.roots : []).slice(0, 4).map(root => ({
+                root_id: code(root.root_id), passed: root.result?.passed === true ? true : root.result?.passed === false ? false : null,
+                checks: (Array.isArray(root.result?.checks) ? root.result.checks : []).slice(0, 8).map(check => {
+                  const stdout = typeof check.stdout === 'string' ? check.stdout : '', stderr = typeof check.stderr === 'string' ? check.stderr : '';
+                  const knownCodes = [...new Set((stderr + ' ' + stdout).match(/\b(?:process-tree-custody-unavailable|verification-timeout|verification-job-[a-z-]{1,80}|batch-[a-z-]{1,80}|execution-[a-z-]{1,80})\b/g) || [])].slice(0, 16);
+                  return { exit_code: number(check.exitCode), error_code: code(check.error?.code || check.errorCode || check.error_code), cleanup: { status: code(check.cleanup?.status), reason: code(check.cleanup?.reason), active_processes: number(check.cleanup?.active_processes) }, stdout_bytes: Buffer.byteLength(stdout), stderr_bytes: Buffer.byteLength(stderr), stdout_sha256: digest(stdout), stderr_sha256: digest(stderr), known_failure_codes: knownCodes };
+                }),
+              }));
+              return { task_id: task, receipt_sha256: digest(bytes), phase: code(receipt.phase), failure_reason: code(receipt.failure?.reason_code), capture_passed: capture?.passed === true ? true : capture?.passed === false ? false : null, gate_passed: capture?.gate?.passed === true ? true : capture?.gate?.passed === false ? false : null, roots };
+            } catch (_) { return { task_id: task, observation_error: 'diagnostic-receipt-unreadable' }; }
+          });
+          process.stderr.write('restart-consolidation-diagnostic ' + JSON.stringify({ schema_version: 1, point, members: rows(report.members), barrier_members: rows(fx.report.members), receipts }) + '\n');
+        } catch (_) { try { process.stderr.write('restart-consolidation-diagnostic unavailable\n'); } catch (_) { /* preserve the original assertion */ } }
+        throw originalError;
+      }
       assert.strictEqual(report.broker.generation, 3, `${point}: the fresh process signs with a new generation, never the dead key`);
       for (const member of report.members) assert.strictEqual(member.ready_sha256,
         digest(fs.readFileSync(fx.inputs[member.task_id].resultFile + '.receipt.json')), `${point}: the replay preserved the signed READY pin`);

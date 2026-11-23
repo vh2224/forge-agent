@@ -609,6 +609,16 @@ function verifyModelIdentity(modelUsage, requested) {
 }
 
 function mapSpawnError(error) {
+  // Only the process-tree module's branded, authenticated custody failure (no root
+  // or provider ever started) is named; a bare exit number or error code is not.
+  let custody = false;
+  try { custody = require('./forge-process-tree').isCustodyFailure(error); } catch { custody = false; }
+  if (custody) {
+    const refused = sidecarError(CLAUDE_SIDECAR_REASON_CODES.SPAWN_FAILED);
+    refused.provider_called = false;
+    refused.custody_reason = 'process-tree-custody-failed';
+    return refused;
+  }
   return error && error.code === 'ENOENT'
     ? sidecarError(CLAUDE_SIDECAR_REASON_CODES.COMMAND_NOT_FOUND)
     : sidecarError(CLAUDE_SIDECAR_REASON_CODES.SPAWN_FAILED);

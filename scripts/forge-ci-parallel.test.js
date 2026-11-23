@@ -48,9 +48,11 @@ fs.writeFileSync('same-name.txt','owned-'+index);
  assert.equal(fs.readFileSync('same-name.txt','utf8'),'owned-'+index);
  if(fs.existsSync(path.join(channel,'fail'))&&index===0){process.exitCode=1;return;}
  await new Promise(r=>setTimeout(r,80));
- fs.writeFileSync(profile,JSON.stringify({index,count,cwd:process.cwd(),temp:require('node:os').tmpdir()}));
+ fs.writeFileSync(profile,JSON.stringify({index,count,cwd:process.cwd(),temp:require('node:os').tmpdir(),argv:args}));
  if(fs.existsSync(path.join(channel,'preserve')))fs.writeFileSync(path.join(require('node:os').tmpdir(),'preserved-fixture.txt'),'fixture explicitly left for diagnosis');
  console.log('Running 1 test suite sequentially...');
+ // The real runner reprints a passed suite's captured output only under --verbose.
+ if(args.includes('--verbose')){console.log('SYNTHETIC-VERBOSE-STDOUT passed suite output '+index);console.error('SYNTHETIC-VERBOSE-STDERR passed suite output '+index);}
  console.log('PASS synthetic.test.js (0.01s)');
  console.log('All 1 suites passed in 0.01s.');
  fs.writeFileSync(path.join(channel,'finished-'+index),'joined');
@@ -67,9 +69,20 @@ const remoteOnly=git(root,['commit-tree',git(root,['rev-parse','HEAD^{tree}']),'
 git(root,['update-ref','refs/remotes/origin/divergent',remoteOnly]);
 git(root,['config','http.https://example.invalid/.extraheader','fixture-secret-header']);
 const argv=['--shard-index','0','--shard-count','1','--jobs','2','--profile-dir',path.join(temp,'profiles')];
-assert.deepEqual(parseArgs(argv),{index:0,count:1,jobs:2,singleWorkerJobs:0,profileDir:path.join(temp,'profiles'),toolPlan:false});
+assert.deepEqual(parseArgs(argv),{index:0,count:1,jobs:2,singleWorkerJobs:0,profileDir:path.join(temp,'profiles'),toolPlan:false,verbose:false});
 assert.equal(parseArgs([...argv,'--tool-plan','true']).toolPlan,true);
 for(const value of ['yes','1','TRUE'])assert.throws(()=>parseArgs([...argv,'--tool-plan',value]));
+// --verbose true|false: default false, exact values only, never bare, never repeated.
+assert.equal(parseArgs(argv).verbose,false,'verbose defaults to false');
+assert.deepEqual(parseArgs([...argv,'--verbose','false']),parseArgs(argv),'explicit false equals the default');
+assert.deepEqual(parseArgs([...argv,'--verbose','true']),{...parseArgs(argv),verbose:true});
+assert.equal(parseArgs(['--verbose','true',...argv]).verbose,true,'pair order is free');
+for(const bad of [[...argv,'--verbose'],[...argv,'--verbose',''],...['yes','1','TRUE','False','true ',' true','on'].map(value=>[...argv,'--verbose',value]),
+  [...argv,'--verbose','true','--verbose','true'],[...argv,'--verbose','false','--verbose','true']])
+  assert.throws(()=>parseArgs(bad),/^Error: ci-parallel-arguments$/,JSON.stringify(bad.slice(argv.length)));
+const childArgv=(options,worker,verbose)=>['--baseline','scripts/fixtures/ci-baseline/known-unit-failures.json','--partition-suites',
+  '--shard-profile','scripts/fixtures/ci-latency/shard-profile.json','--shard-index',String(worker),'--shard-count','2',
+  '--profile-out',path.join(options.profileDir,`worker-${worker}.json`),...(verbose?['--verbose']:[])];
 const toolOptions={index:0,count:21,jobs:2,singleWorkerJobs:2};
 assert.equal(toolPlan(toolOptions,{platform:'linux',profileFile:'unread-invalid-path'}).needs_svn,true);
 assert.equal(toolPlan({...toolOptions,index:2},{platform:'win32',profileFile:'unread-invalid-path'}).needs_svn,true);
@@ -120,9 +133,29 @@ const streams={stdout:sink,stderr:sink};
     assert(profiles.every(row=>!fs.existsSync(row.cwd)),'successful joined workers are removed');
     assert(!fs.existsSync(path.join(root,'same-name.txt')));
     for(let index=0;index<2;index++){
-      const parsed=require('./forge-ci-profile').parseRunTestsLog(fs.readFileSync(path.join(temp,'profiles',`worker-${index}.log`),'utf8'));
+      const log=fs.readFileSync(path.join(temp,'profiles',`worker-${index}.log`),'utf8');
+      const parsed=require('./forge-ci-profile').parseRunTestsLog(log);
       assert.deepEqual(parsed.anomalies,[]);assert.equal(parsed.platform,'win32');assert.equal(parsed.suites_observed,1);
+      assert(!log.includes('SYNTHETIC-VERBOSE-'),'default mode never forwards --verbose to the child');
     }
+    assert.deepEqual(profiles.map((row,worker)=>row.argv),[0,1].map(worker=>childArgv(parseArgs(argv),worker,false)));
+    for(const file of fs.readdirSync(channel))fs.rmSync(path.join(channel,file));
+    // Same single execution with --verbose true: exactly one appended child flag, the rest unchanged,
+    // and the drained worker-N.log retains the passed suite's extra stdout and stderr.
+    const verboseOptions={...parseArgs([...argv,'--verbose','true']),profileDir:path.join(temp,'verbose-profiles')};
+    assert.equal(await run(verboseOptions,{source:root,temp,streams,jobName:fixtureJobName}),0);
+    const verboseProfiles=[0,1].map(i=>JSON.parse(fs.readFileSync(path.join(verboseOptions.profileDir,`worker-${i}.json`))));
+    assert.deepEqual(verboseProfiles.map(row=>row.argv),[0,1].map(worker=>childArgv(verboseOptions,worker,true)));
+    assert(verboseProfiles.every(row=>!fs.existsSync(row.cwd)),'verbose workers are joined and cleaned like the default');
+    for(let index=0;index<2;index++){
+      const log=fs.readFileSync(path.join(verboseOptions.profileDir,`worker-${index}.log`),'utf8');
+      const parsed=require('./forge-ci-profile').parseRunTestsLog(log);
+      assert.deepEqual(parsed.anomalies,[]);assert.equal(parsed.suites_observed,1);assert.equal(parsed.summary.failed,0);
+      for(const stream of ['STDOUT','STDERR'])
+        assert.match(log,new RegExp(`^\\d{4}-\\d\\d-\\d\\dT[0-9:.]+Z SYNTHETIC-VERBOSE-${stream} passed suite output ${index}$`,'m'),`worker-${index}.log drained ${stream}`);
+      assert(log.indexOf('SYNTHETIC-VERBOSE-STDOUT')<log.indexOf('PASS synthetic.test.js'),'extra output precedes the suite boundary');
+    }
+    assert.deepEqual(fs.readdirSync(verboseOptions.profileDir).sort(),['worker-0.json','worker-0.log','worker-1.json','worker-1.log'],'no extra artifact or second run');
     for(const file of fs.readdirSync(channel))fs.rmSync(path.join(channel,file));
     const tripleArgs=[...argv];tripleArgs[5]='3';
     const tripleOptions={...parseArgs(tripleArgs),profileDir:path.join(temp,'triple-profiles')};

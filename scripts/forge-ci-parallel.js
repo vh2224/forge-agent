@@ -22,7 +22,7 @@ function parseArgs(argv) {
   const options = {};
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i], value = argv[i + 1];
-    if (!['--shard-index', '--shard-count', '--jobs', '--single-worker-jobs', '--profile-dir', '--tool-plan'].includes(key) || !value || Object.hasOwn(options, key)) throw Error('ci-parallel-arguments');
+    if (!['--shard-index', '--shard-count', '--jobs', '--single-worker-jobs', '--profile-dir', '--tool-plan', '--verbose'].includes(key) || !value || Object.hasOwn(options, key)) throw Error('ci-parallel-arguments');
     options[key] = value;
   }
   if (!integer(options['--shard-index'], 63) || !integer(options['--shard-count'], 64)
@@ -30,8 +30,10 @@ function parseArgs(argv) {
       || +options['--shard-index'] >= +options['--shard-count']
       || (Object.hasOwn(options,'--single-worker-jobs') && !integer(options['--single-worker-jobs'],64))
       || (Object.hasOwn(options,'--tool-plan') && !['true','false'].includes(options['--tool-plan']))
+      // Exactly true|false: the flag only forwards the runner's existing --verbose.
+      || (Object.hasOwn(options,'--verbose') && !['true','false'].includes(options['--verbose']))
       || !options['--profile-dir']) throw Error('ci-parallel-arguments');
-  const result={ index: +options['--shard-index'], count: +options['--shard-count'], jobs: +options['--jobs'],singleWorkerJobs:+(options['--single-worker-jobs']||0), profileDir: path.resolve(options['--profile-dir']), toolPlan:options['--tool-plan']==='true' };
+  const result={ index: +options['--shard-index'], count: +options['--shard-count'], jobs: +options['--jobs'],singleWorkerJobs:+(options['--single-worker-jobs']||0), profileDir: path.resolve(options['--profile-dir']), toolPlan:options['--tool-plan']==='true', verbose:options['--verbose']==='true' };
   workerLayout(result);return result;
 }
 // This is setup metadata, never test selection or a passing test result.
@@ -160,7 +162,9 @@ async function run(options, { source = path.resolve(__dirname, '..'), temp = pat
       return runChild(checkout, ['--baseline', 'scripts/fixtures/ci-baseline/known-unit-failures.json',
         '--partition-suites', '--shard-profile', 'scripts/fixtures/ci-latency/shard-profile.json',
         '--shard-index', String(index), '--shard-count', String(count),
-        '--profile-out', path.join(options.profileDir, `worker-${worker}.json`)], streams, workerTemp,
+        '--profile-out', path.join(options.profileDir, `worker-${worker}.json`),
+        // Passed-suite output is retained in the same drained worker-N.log; no second run.
+        ...(options.verbose === true ? ['--verbose'] : [])], streams, workerTemp,
       path.join(options.profileDir, `worker-${worker}.log`), jobName);
     }));
     const ok = outcomes.every(row => row.status === 'fulfilled' && row.value.code === 0 && row.value.signal === null && !row.value.spawnError && !row.value.logError);
