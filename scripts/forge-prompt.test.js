@@ -61,6 +61,8 @@ function tempWorkspace(label) {
 }
 
 function test(name, fn) {
+  const match = process.argv.indexOf('--match');
+  if (match !== -1 && !name.includes(process.argv[match + 1] || '\0')) return;
   try {
     fn();
     passed += 1;
@@ -676,6 +678,18 @@ test('inserts the established isolation header directly after WORKING_DIR', () =
     () => renderPrompt({ ...baseOptions(cwd, 'execute-task'), isolationMode: 'worktree', branch: '../bad\nbranch', codeDir }),
     /Invalid branch/,
   );
+});
+
+test('worktree verification commands bind physical CODE_DIR and owner artifacts separately', () => {
+  const owner = tempWorkspace('verify-owner'), codeDir = tempWorkspace('verify-physical-code');
+  for (const unitType of ['execute-task', 'complete-slice']) {
+    const result = renderPrompt({ ...baseOptions(owner, unitType), isolationMode: 'worktree', branch: 'fixture', codeDir });
+    assert(result.prompt.includes(`--cwd "${codeDir}" --gsd-dir "${owner}/.gsd"`));
+    assert(!result.prompt.includes('{CODE_DIR}'));
+  }
+  const shared = renderPrompt(baseOptions(owner, 'execute-task'));
+  assert(shared.prompt.includes(`--cwd "${owner}" --gsd-dir "${owner}/.gsd"`));
+  assert.throws(() => renderPrompt({ ...baseOptions(owner, 'execute-task'), isolationMode: 'worktree', branch: 'fixture' }), /code_dir is required/);
 });
 
 test('materializes metadata and prompt atomically below .gsd/forge/prompts', () => {

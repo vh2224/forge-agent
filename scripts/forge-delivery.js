@@ -611,7 +611,14 @@ function buildDelivery(input, options = {}) {
   let planRaw = '';
   const diagnostics = [];
   if (planResolved.error) diagnostics.push(`plan_${planResolved.error}`);
-  else planRaw = fs.readFileSync(planResolved.path, 'utf8');
+  else {
+    // Keep the existing safe physical resolution and 1MiB delivery-source
+    // limit; the descriptor read must remain bounded if the file then grows.
+    const read = require('./forge-autonomy-sources').readBoundedStableFile(planResolved.path,
+      MAX_FILE_BYTES, { expectedReal: fs.realpathSync.native(planResolved.path) });
+    if (read.error) diagnostics.push(`plan_${read.error}`);
+    else planRaw = read.buffer.toString('utf8');
+  }
   const actualPlanFingerprint = planRaw ? sha256(planRaw) : null;
   if (!nonEmpty(input.plan_fingerprint)) diagnostics.push('plan_fingerprint_missing');
   else if (actualPlanFingerprint !== input.plan_fingerprint) diagnostics.push('plan_fingerprint_mismatch');

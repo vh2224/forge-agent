@@ -58,6 +58,9 @@ function testSelectionPhasesAndCanonicalPrefs() {
   assert.strictEqual(choose(missingResearch, { skip_slice_research: true }).unit.type, 'research-milestone');
   assert.strictEqual(choose(missingResearch, { skip_research: true, skip_slice_research: true }).unit.type, 'execute-task');
   assert.strictEqual(choose(missingResearch, { workflow: { skip_research: true } }).unit.type, 'execute-task', 'legacy aliases remain readable');
+  const unpreparedSlice={slices:[{...slice,plan_exists:false,research_exists:false}]};
+  assert.strictEqual(choose(unpreparedSlice).unit.type,'research-slice','slice research informs the first slice plan');
+  assert.strictEqual(choose(unpreparedSlice,{skip_slice_research:true}).unit.type,'plan-slice','explicitly skipped research retains planning');
 
   const nextSlice = { ...slice, id: 'S02', research_exists: false };
   for (const previous of [{ ...slice, checked: true }, { ...slice, tasks: [], summary_exists: true }]) {
@@ -2142,6 +2145,8 @@ function main() {
 }
 if (process.argv[2] === '--superseded-interruption-only') {
   testSupersededInterruptedOwner();
+} else if (process.argv[2] === '--selection-phases-only') {
+  test('phase ordering, canonical skip preferences and stale slice selection', testSelectionPhasesAndCanonicalPrefs);
 } else if (process.argv[2] === '--owner-interruption-fixture-child') {
   const fixture = interruptionFixture(process.argv[3]);
   assert.strictEqual(fixture.settle().status, 'interrupted-and-transferred');

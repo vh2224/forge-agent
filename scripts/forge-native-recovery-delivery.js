@@ -268,9 +268,9 @@ function packagePrompt(request, prompt, options = {}) {
   const sections = standalone ? [] : inputSections(request);
   const inputs = sections.map(([label, file]) => {
     if (!file) fail('milestone-payload-input-required');
-    return '\n## ' + label + '\n' + fs.readFileSync(file, 'utf8');
+    return '\n## ' + label + '\n' + readInput(file).toString('utf8');
   }).join('\n');
-  const plan = fs.readFileSync(request.planFile, 'utf8');
+  const plan = readInput(request.planFile).toString('utf8');
   const checked = roots.validatePlan(plan, contract);
   requireExplicitVerify(plan,request);
   if (execution) {
@@ -296,6 +296,12 @@ function inputSections(request) {
     'slices', request.sliceId, request.sliceId + '-RESEARCH.md');
   if (fs.existsSync(research)) sections.push(['Research', research]);
   return sections;
+}
+// Every mandatory native input observation uses a descriptor-bounded stable
+// read, including packaging, preparation and later lifecycle revalidation.
+const INPUT_MAX_BYTES = api('forge-unit-sidecar').EXECUTION_INPUT_MAX_BYTES;
+function readInput(file) {
+  return api('forge-unit-sidecar').readExecutionInput(file);
 }
 function verificationPolicy(request, plan) {
   const identity = {dispatch_id:request.dispatchId,unit_type:request.unitType,milestone_id:request.milestoneId,
@@ -482,7 +488,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
   side.validateRecoveryRequest(r,{nativeInvocation,linkedEntryOptions});
   if(r.linked_begin_key)r=api('forge-attempt-recovery').bindLinkedRequest(wireRequest,linkedEntryOptions);
   const preparedRecoveryIdentity=roots.digest(requestIdentity(r,linkedEntryOptions));
-  const plan=fs.readFileSync(r.planFile,'utf8'),context=fs.readFileSync(r.contextFile);
+  const plan=readInput(r.planFile).toString('utf8'),context=readInput(r.contextFile);
   requireExplicitVerify(plan,r);
   const checked=roots.validatePlan(plan,r.execution_contract);
   const standalone=r.scope==='standalone-task';
@@ -492,7 +498,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
     protected_owner:execution.protectedSnapshot(r.contextRoot),
     protected_roots:r.execution_contract.code_roots.map(root=>({root_id:root.id,path:root.path,snapshot:execution.protectedSnapshot(root.path)}))};
   const planHash=hash(plan),contextHash=hash(context);
-  const inputs = savedManifest?.inputs || (taskPreparation ? Object.keys(taskPreparation.inputs).map(file=>['Task input',file]) : inputSections(r)).map(([label,file]) => ({label,file,sha256:hash(fs.readFileSync(file))}));
+  const inputs = savedManifest?.inputs || (taskPreparation ? Object.keys(taskPreparation.inputs).map(file=>['Task input',file]) : inputSections(r)).map(([label,file]) => ({label,file,sha256:hash(readInput(file))}));
   const {identity:verificationIdentity,seal}=verificationPolicy(r,plan);
   const verificationExtra=verificationContinuation===undefined?null:verificationContinuations.get(verificationContinuation);
   if(verificationContinuation!==undefined&&(!verificationExtra||!savedManifest||documentary||coveragePolicy||supplementalCoverage
@@ -552,8 +558,8 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
     // other callbacks validate only claims, leases or a controller boundary.
     if(wireRequest.linked_begin_key)r=api('forge-attempt-recovery').bindLinkedRequest(wireRequest,linkedEntryOptions);
     side.validateRecoveryRequest(r,{nativeInvocation,linkedEntryOptions});
-    if(hash(fs.readFileSync(r.planFile))!==planHash||hash(fs.readFileSync(r.contextFile))!==contextHash)fail('milestone-input-changed');
-    if(inputs.some(row=>hash(fs.readFileSync(row.file))!==row.sha256))fail('milestone-input-changed');
+    if(hash(readInput(r.planFile))!==planHash||hash(readInput(r.contextFile))!==contextHash)fail('milestone-input-changed');
+    if(inputs.some(row=>hash(readInput(row.file))!==row.sha256))fail('milestone-input-changed');
     if(renewal)renewal.check(publishing);
     else if (!publishing) execution.assertProtected(r.contextRoot,prepared.protected_owner);
     for(const root of prepared.protected_roots)execution.assertProtected(root.path,root.snapshot);
@@ -956,4 +962,4 @@ async function replay({request,recovery,runtime,nativeOptions}) {
   const verified=successor(()=>session.verify(effectiveResult)),published=successor(()=>session.publish(effectiveResult));
   return {action:'replay',provider_called:false,result:{verified,published}};
 }
-module.exports={prepare,replay,requireExplicitVerify,criterionBindings,resultContract,packagePrompt,createLeaseRenewalReconciliation,reconcileLeaseRenewalSurface,createDocumentaryContinuation,createVerificationContinuation,isGlobalEvidenceLine,isObservedTestLine};
+module.exports={prepare,replay,requireExplicitVerify,criterionBindings,resultContract,packagePrompt,readInput,INPUT_MAX_BYTES,createLeaseRenewalReconciliation,reconcileLeaseRenewalSurface,createDocumentaryContinuation,createVerificationContinuation,isGlobalEvidenceLine,isObservedTestLine};

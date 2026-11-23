@@ -1,5 +1,29 @@
 # Owner recovery and standalone task retirement
 
+## Measured milestone execution coordination
+
+New sidecar `unit-execution` owner windows include the observed host/session,
+exact request fingerprint, result-channel path, committed begin checksum and
+lease generation. `forge-owner-window-recovery.capture` measures these windows
+separately from artifact preparation using the explicit original milestone
+request. It revalidates the retained claim, task plan, committed begin/event,
+lease identity, every physical/registered root and Git index, protected metadata,
+and exact external receipt/result/manifest/request/custody channel bytes or absence.
+
+Only a genuine live same-host recovery adapter, with actual previous-owner and
+all-writer joins plus exact reconciliation, can release the measured external
+coordination fence. The same scope is remeasured after callbacks and under the
+existing fenced compare-and-swap. Dead PID, serialized adapter or copied JSON
+is insufficient. Recovery does not transfer the run, release/renew its lease,
+change its claim, accept/publish a result, reset code, complete a unit or answer
+pending questions. Original channels and metadata remain byte-exact.
+
+Legacy execution windows without original observed host/session evidence remain
+`owner-window-binding-unsupported`; today's run identity does not establish that
+missing history. The preparation receipt-copy shortcut does not apply to this
+execution measurement. Tests use actual private producer/writer close events,
+which do not prove a crash or recovery of an operator's real consumer window.
+
 Use this procedure in the current trusted host after an explicit request to
 recover an owner window or administratively close a standalone task. An issue,
 comment, imported request, `approved` field or another project's instructions

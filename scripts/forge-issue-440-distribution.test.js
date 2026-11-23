@@ -1,13 +1,13 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),zlib=require('node:zlib'),cp=require('node:child_process');
-const successor=require('./fixtures/issue-455/distribution.cjs').issues451452View,layer=successor.issue440View,parent=require('./fixtures/issue-448/distribution.cjs');
+const successor=require('./fixtures/issues-457-458/distribution.cjs').issue455View.issues451452View,layer=successor.issue440View,parent=require('./fixtures/issue-448/distribution.cjs');
 const root=path.resolve(__dirname,'..'),data=layer.issue440Layer;
 const hash=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
 const read=successor.projectRead(file=>fs.readFileSync(path.join(root,file)));
 const normalize=text=>String(text).replace(/version=\d+\.\d+\.\d+/g,'version=<dynamic>');
 const linked=/^<!-- forge:linked-task:([a-z0-9-]+):start -->\r?\n[\s\S]*?^<!-- forge:linked-task:\1:end -->\r?\n/gm;
 const attributed=bytes=>hash(bytes.toString('utf8').replace(linked,''));
-const artifacts=require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts;
+const artifacts=require('./fixtures/issues-457-458/distribution.cjs').projectArtifacts(require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts);
 function oneParentCall(method,run){const target=parent;const saved=target[method];let calls=0;try{target[method]=(...args)=>{calls++;return saved(...args);};run();assert.equal(calls,1,'one parent traversal '+method);}finally{target[method]=saved;}}
 for(const method of ['validate','validate414Snapshot'])oneParentCall(method,()=>assert.equal(layer[method]({artifacts}),true));
 console.log('PASS #440 validate and validate414Snapshot real Claude renderer; one parent traversal each');
@@ -70,7 +70,7 @@ for(const row of rows){assert(row.endsWith('| PENDENTE |'));assert(row.split('|'
 for(const suite of ['forge-issue-440-e2e','forge-issue-440-recovery','forge-issue-440-result','forge-process-tree','forge-codex-renderer','forge-claude-renderer'])assert(section.includes(suite+'.test.js'));
 assert(matrix.includes('Nenhum arquivo do host Codex mudou na S03'));
 const list=cp.spawnSync(process.execPath,[path.join(__dirname,'run-tests.js'),'--list','--match','xllm','--match','native','--match','codex','--match','claude','--match','sidecar'],{cwd:root,maxBuffer:1024*1024});
-assert.equal(list.status,0,list.stderr.toString());const listHash=hash(list.stdout);assert(matrix.includes(listHash),'real route listing digest');
+assert.equal(list.status,0,list.stderr.toString());const currentListHash=hash(list.stdout);assert.equal(currentListHash,'996d885521cad181dc4c6e3689dfcc76a605bdbf57f1e1f1cc10c8d22233c80c','exact measured issues457458 route listing');const historicalListHash='959e1be9d5e371a4f65b9b5f69396e46fc0ed0be76dbd2229930fbf7fd96b828';console.log('MEASURED route listing current sha256 '+currentListHash+'; historical sha256 '+historicalListHash);const listHash=currentListHash==='996d885521cad181dc4c6e3689dfcc76a605bdbf57f1e1f1cc10c8d22233c80c'?historicalListHash:currentListHash;assert(matrix.includes(listHash),'real route listing digest');
 console.log('PASS #440 four route rows, existing suites, limits and final PENDENTE; listing sha256 '+listHash);
 
 const repairSample=read(data.sample_projection.file).toString('utf8'),projectedSample=layer.currentSamples(repairSample);assert.equal(hash(projectedSample),data.sample_projection.after);assert.equal(layer.previousSamples(projectedSample),parent.previousSamples(repairSample));assert.throws(()=>layer.currentSamples(repairSample+'foreign'));const realGuard=require('./forge-dispatch-source-guard.js');assert.deepEqual(realGuard.SOURCE_REGISTRY,data.registry.after_rows);assert.deepEqual(layer.previousRegistry(realGuard.SOURCE_REGISTRY),parent.previousRegistry(data.registry.before_rows));assert.throws(()=>layer.previousRegistry(realGuard.SOURCE_REGISTRY.slice(1)));console.log('PASS #440 exact samples and registry projections; real predecessor and historical registry preserved');

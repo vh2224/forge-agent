@@ -758,9 +758,15 @@ function assertResumeQuiescence(cwd, record, nextHost, noLeases, partialOptions)
     }
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
   if (controller.pendingTransactions(cwd).length) throw resumeError('owner-resume-transaction-pending');
-  if (require('./forge-write-claim').isHeld(record.write_claim)) {
-    if (!partialOptions) throw resumeError('owner-resume-claim-held');
-    if (partialOptions.deliveryRepair || partialOptions.attemptRecovery) { if(!repairScope)throw resumeError('owner-resume-claim-held'); }
+  const heldClaim = require('./forge-write-claim').isHeld(record.write_claim);
+  if (heldClaim) {
+    if (!partialOptions) {
+      try {
+        require('./forge-write-claim').validateHeldClaim(record.write_claim);
+        if (!record.write_claim.paths.length || !/^execute-task\/T\d+(?:\.\d+)?$/.test(record.write_claim.unit || '')) throw Error('invalid');
+      } catch { throw resumeError('owner-resume-claim-held'); }
+    }
+    else if (partialOptions.deliveryRepair || partialOptions.attemptRecovery) { if(!repairScope)throw resumeError('owner-resume-claim-held'); }
     else controller.inspectPausedAttempt(cwd, record, partialOptions);
   }
   if (record.worker || record.worker_started) throw resumeError('owner-resume-worker-unreconciled');
@@ -789,6 +795,13 @@ function assertResumeQuiescence(cwd, record, nextHost, noLeases, partialOptions)
   if (!terminal) throw resumeError('owner-resume-boundary-required');
   const handoff = controller.handoff(cwd, { unit: terminal.unit, next_host_runtime: nextHost });
   if (!handoff.ok || handoff.milestone !== record.id) throw resumeError('owner-resume-boundary-required');
+  if (heldClaim && !partialOptions) {
+    try {
+      const boundary=controller.readJson(controller.boundaryFile(cwd,record.write_claim.unit));
+      if (!boundary || boundary.milestone!==record.id) throw Error('foreign');
+      controller.verifyCommittedCompletionBoundary(cwd,boundary.idempotency_key,record.write_claim);
+    } catch { throw resumeError('owner-resume-claim-held'); }
+  }
   if (!noLeases()) throw resumeError('owner-resume-lease-present');
   return { unit: handoff.unit, result_checksum: handoff.result_checksum, committed_at: handoff.committed_at };
 }

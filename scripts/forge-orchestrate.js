@@ -758,6 +758,8 @@ function nextInside(inputValue, options) {
         && oldCompletion.milestone === input.milestone && oldCompletion.after?.state?.active_slice === selection.slice) {
       const refused = base('next', 'blocked', 'execution-delivery-recovery-required', input);
       refused.unit = selectedUnit; refused.details = { delivery: { begin_key: key, completion_key: key + ':complete',
+        ...(selection.delivery_repair_diagnostics?.some(row=>row.slice===selection.slice&&row.task===selectedUnit.id)
+          ? { cause: selection.delivery_repair_diagnostics.filter(row=>row.slice===selection.slice&&row.task===selectedUnit.id) } : {}),
         completion_sha256: checksum(oldCompletion), next_action: 'Use forge-completion-delivery-recovery with live owner/stopped-writer evidence for verification only; never backdate delivery or reexecute the task.' } };
       return refused;
     }

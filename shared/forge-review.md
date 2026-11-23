@@ -347,10 +347,19 @@ fi
 CHALLENGER="$RESOLVED_CHALLENGER"
 ADVOCATE_RESOLVED="$RESOLVED_ADVOCATE"
 
-# A configured external model is inert whenever the resolved challenger is claude.
-if [ -n "$CHALLENGER_MODEL" ] && [ "$RESOLVED_CHALLENGER" = claude ]; then
-  echo "⚠ review-config-inert: challenger_model ignored for resolved claude"
-  printf '{"ts":"%s","event":"review-config-inert","milestone":"%s","slice":"%s","reason":"challenger-resolved-claude"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "{M###}" "{S##}" >> "$WORKING_DIR/.gsd/forge/events.jsonl"
+# External and native challenger model arguments are separate.
+CHALLENGER_MODEL_EXTERNAL="$CHALLENGER_MODEL"
+# Before any native Claude challenger (initial or external fallback), the host
+# writes NATIVE_REVIEW_MODEL_INPUT with its observed reviewer binding/fingerprint,
+# live tool capabilities, cwd, leg and externalModel (history only).
+if [ "$RESOLVED_CHALLENGER" = claude ]; then
+  NATIVE_CHALLENGER_AVAILABLE=false
+  if NATIVE_REVIEW_MODEL=$(node "$FORGE_SCRIPTS_DIR/forge-review-native-model.js" --input "$NATIVE_REVIEW_MODEL_INPUT"); then
+    NATIVE_CHALLENGER_ALIAS=$(printf '%s' "$NATIVE_REVIEW_MODEL" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>process.stdout.write(JSON.parse(d).model_argument))")
+    NATIVE_CHALLENGER_AVAILABLE=true
+  else
+    echo "review-challenger-unavailable: native model binding refused" >&2
+  fi
 fi
 
 # Linha **Pairing:** do header (Step 6) — montada uma vez aqui, consumida boundary-agnóstica.
@@ -476,32 +485,24 @@ If `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-REVIEW.md` already e
 
 ## Step 1 — Compute the slice diff
 
-Detect the VCS of `WORKING_DIR` first, then compute `DIFF_CMD` accordingly. Git uses the
-run-branch range (`auto_commit: true`, branch still unmerged). SVN working copies have no
-run branch and no merge-base — the team works on trunk and holds commits — so the reviewable
-change is the uncommitted working copy. Run this from INSIDE `WORKING_DIR` (the diff target lives there).
+Detect the VCS of the physical `CODE_DIR` first. The owner artifact directory remains `WORKING_DIR`; the code diff, including untracked files with `auto_commit:false`, is read only from `CODE_DIR`. Both VCS branches use the bounded helper, which accepts all appended scope/shard flags without staging files.
 
 ```bash
-if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  # git — default to the run-branch range (auto_commit: true — common case, branch still unmerged)
-  BASE=$(git merge-base HEAD master 2>/dev/null || git merge-base HEAD main 2>/dev/null || echo HEAD~10)
-  DIFF_CMD="git diff ${BASE}...HEAD"
-  # Fallback for auto_commit: false (work uncommitted in the worktree) or an empty branch range:
-  if [ -z "$(eval "$DIFF_CMD" --name-only 2>/dev/null)" ]; then
-    DIFF_CMD="git diff HEAD"
-  fi
-elif svn info >/dev/null 2>&1; then
-  # svn — scoped to this slice's paths, new files included (M017 Phase 2).
-  DIFF_CMD="node \"$FORGE_SCRIPTS_DIR/forge-review-diff.js\" --cwd \"${CODE_DIR:-$WORKING_DIR}\" --unit-dir \"$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}\""
-  # Only this branch answers --scope-report; asking git would rely on where it
-  # happens to print its usage text.
-  SCOPE_REPORT=$(eval "$DIFF_CMD" --scope-report 2>/dev/null || echo "")
+REVIEW_CODE_DIR="${CODE_DIR:-$WORKING_DIR}"
+if git -C "$REVIEW_CODE_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  BASE=$(git -C "$REVIEW_CODE_DIR" merge-base HEAD master 2>/dev/null || git -C "$REVIEW_CODE_DIR" merge-base HEAD main 2>/dev/null || echo HEAD)
+  DIFF_CMD="node \"$FORGE_SCRIPTS_DIR/forge-review-diff.js\" --cwd \"$REVIEW_CODE_DIR\" --base \"$BASE\" --unit-dir \"$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}\""
+  SCOPE_REPORT=$(eval "$DIFF_CMD" --scope-report) || { echo "review-diff-unavailable" >&2; exit 1; }
+elif svn info "$REVIEW_CODE_DIR" >/dev/null 2>&1; then
+  DIFF_CMD="node \"$FORGE_SCRIPTS_DIR/forge-review-diff.js\" --cwd \"$REVIEW_CODE_DIR\" --unit-dir \"$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}\""
+  SCOPE_REPORT=$(eval "$DIFF_CMD" --scope-report) || { echo "review-diff-unavailable" >&2; exit 1; }
 else
-  # No VCS (or detection unavailable) is not Git and is not a clean review.
   VCS_UNAVAILABLE_REASON="vcs-unavailable:none-or-detection-failed"
   DIFF_CMD=""
 fi
 ```
+
+A helper failure is incomplete coverage, never an empty clean diff. Git includes committed changes against the resolved base, staged/unstaged changes and nonignored untracked files, excluding `.gsd/**`. Unsafe links, binary content and size/race failures require an explicit unavailable review artifact. Record `Escopo do diff (Git/SVN)` with scoped and excluded paths from the scope report.
 
 **Why the SVN branch is a program and not `svn diff`.** Three properties the bare command
 cannot deliver, each observed in the field:
@@ -634,11 +635,15 @@ you have AND record the unavailable shards (with their files) in the artifact un
 `## Cobertura incompleta` — a review missing a third of the diff must never render
 as clean. Only when **every** shard returns `NO_FLAGS` is the clean artifact correct.
 
+All read-only review agents use the physical `CODE_DIR` as their prompt `WORKING_DIR`, with the artifact owner separately named `OWNER_DIR`. External review calls likewise use `--cwd "{CODE_DIR}" --context-root "{WORKING_DIR}"`; the latter preserves owner preferences, telemetry and time/review gates. Never read surrounding code relative to the artifact owner when it is distinct.
+
 ### `challenger == 'claude'` (default agent)
 
+Before this call, including the single external-failure fallback, resolve `forge-review-native-model.js` from the exact observed `forge-reviewer` definition and live capabilities. Re-run that observation after fallback instead of passing `CHALLENGER_MODEL_EXTERNAL` (possibly GPT) to Claude. Invoke only when `NATIVE_CHALLENGER_AVAILABLE=true`. The helper validates the explicit definition model and effort via native adapters; failure follows `review-challenger-unavailable`, preserving incomplete coverage and the existing nonblocking completion behavior. Never omit model to inherit defaults.
+
 ```
-Agent({ subagent_type: 'forge-reviewer',
-  prompt: "WORKING_DIR: {WORKING_DIR}\nUNIT: complete-slice/{S##}\nDIFF_CMD: {DIFF_CMD}" })
+Agent({ subagent_type: 'forge-reviewer', model: NATIVE_CHALLENGER_ALIAS,
+  prompt: "WORKING_DIR: {CODE_DIR}\nOWNER_DIR: {WORKING_DIR}\nUNIT: complete-slice/{S##}\nDIFF_CMD: {DIFF_CMD}" })
 ```
 
 When `REVIEW_SHARDS > 1`, the prompt's `DIFF_CMD` is the shard-scoped form
@@ -664,9 +669,9 @@ Invoke the adapter (parsing is **not** reimplemented — the adapter of S01 alre
 
 ```bash
 if [ -n "$CHALLENGER_MODEL" ]; then
-  node scripts/forge-xllm.js --mode challenge --engine "$XLLM_ENGINE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --diff-cmd "{DIFF_CMD}" --cwd {WORKING_DIR} "${BUDGET_ARGS[@]}" --model "$CHALLENGER_MODEL"
+  node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode challenge --engine "$XLLM_ENGINE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --diff-cmd "{DIFF_CMD}" --cwd "{CODE_DIR}" --context-root "{WORKING_DIR}" "${BUDGET_ARGS[@]}" --model "$CHALLENGER_MODEL"
 else
-  node scripts/forge-xllm.js --mode challenge --engine "$XLLM_ENGINE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --diff-cmd "{DIFF_CMD}" --cwd {WORKING_DIR} "${BUDGET_ARGS[@]}"
+  node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode challenge --engine "$XLLM_ENGINE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --diff-cmd "{DIFF_CMD}" --cwd "{CODE_DIR}" --context-root "{WORKING_DIR}" "${BUDGET_ARGS[@]}"
 fi
 XLLM_EXIT=$?
 ```
@@ -688,9 +693,9 @@ Render the objections into a temp file (the same `OBJECTIONS` contract Step 2 pr
 ```bash
 XLLM_ENGINE_ADVOCATE=$([ "$RESOLVED_ADVOCATE" = "gemini" ] && echo agy || echo codex)
 if [ -n "$ADVOCATE_MODEL_EXTERNAL" ]; then
-  node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode defend --engine "$XLLM_ENGINE_ADVOCATE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --input "$DEFENSE_INPUT" --diff-cmd "{DIFF_CMD}" --cwd {WORKING_DIR} "${BUDGET_ARGS[@]}" --model "$ADVOCATE_MODEL_EXTERNAL"
+  node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode defend --engine "$XLLM_ENGINE_ADVOCATE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --input "$DEFENSE_INPUT" --diff-cmd "{DIFF_CMD}" --cwd "{CODE_DIR}" --context-root "{WORKING_DIR}" "${BUDGET_ARGS[@]}" --model "$ADVOCATE_MODEL_EXTERNAL"
 else
-  node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode defend --engine "$XLLM_ENGINE_ADVOCATE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --input "$DEFENSE_INPUT" --diff-cmd "{DIFF_CMD}" --cwd {WORKING_DIR} "${BUDGET_ARGS[@]}"
+  node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode defend --engine "$XLLM_ENGINE_ADVOCATE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --input "$DEFENSE_INPUT" --diff-cmd "{DIFF_CMD}" --cwd "{CODE_DIR}" --context-root "{WORKING_DIR}" "${BUDGET_ARGS[@]}"
 fi
 XLLM_DEFEND_EXIT=$?
 ```
@@ -730,7 +735,8 @@ Pass this prompt template verbatim as the canonical native invocation builder's 
 substituting the current boundary values and rendered objections:
 
 ```text
-WORKING_DIR: {WORKING_DIR}
+WORKING_DIR: {CODE_DIR}
+OWNER_DIR: {WORKING_DIR}
 UNIT: complete-slice/{S##}
 DIFF_CMD: {DIFF_CMD}
 DEFENSE_FILE: {DEFENSE_FILE}
@@ -796,7 +802,7 @@ remains never-blocking.
 
 ```
 Agent({ subagent_type: 'forge-reviewer',
-  prompt: "WORKING_DIR: {WORKING_DIR}\nUNIT: complete-slice/{S##}\nDIFF_CMD: {DIFF_CMD}\nOBJECTIONS:\n{OBJECTIONS}\nDEFENSE:\n{DEFENSE}" })
+  prompt: "WORKING_DIR: {CODE_DIR}\nOWNER_DIR: {WORKING_DIR}\nUNIT: complete-slice/{S##}\nDIFF_CMD: {DIFF_CMD}\nOBJECTIONS:\n{OBJECTIONS}\nDEFENSE:\n{DEFENSE}" })
 ```
 
 Fallback event:
@@ -813,9 +819,9 @@ Write the OBJECTIONS + DEFENSE dialogue to a temp file (the adapter reads the re
 
 ```bash
 if [ -n "$CHALLENGER_MODEL" ]; then
-  node scripts/forge-xllm.js --mode rebuttal --engine "$XLLM_ENGINE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --input "$REBUTTAL_INPUT" --cwd {WORKING_DIR} "${BUDGET_ARGS[@]}" --model "$CHALLENGER_MODEL"
+  node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode rebuttal --engine "$XLLM_ENGINE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --input "$REBUTTAL_INPUT" --cwd "{CODE_DIR}" --context-root "{WORKING_DIR}" "${BUDGET_ARGS[@]}" --model "$CHALLENGER_MODEL"
 else
-  node scripts/forge-xllm.js --mode rebuttal --engine "$XLLM_ENGINE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --input "$REBUTTAL_INPUT" --cwd {WORKING_DIR} "${BUDGET_ARGS[@]}"
+  node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode rebuttal --engine "$XLLM_ENGINE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --input "$REBUTTAL_INPUT" --cwd "{CODE_DIR}" --context-root "{WORKING_DIR}" "${BUDGET_ARGS[@]}"
 fi
 XLLM_EXIT=$?
 ```

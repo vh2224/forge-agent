@@ -258,9 +258,17 @@ function repairActorBinding(options, baseline, fresh) {
 // Read-only administrative admission. A locator/snapshot never supplies proof:
 // re-read the canonical records, published events, saved baseline and delivery.
 function verifyRepairCompletion(options = {}) {
+  return verifyCompletedRepair(options, false);
+}
+
+// Selection consumes a historical fact, never a writer capability. A later
+// task owns a different claim and a later owner has a different session; neither
+// changes the committed verification-only successor. Keep this mode private so
+// resume/publication callers retain the live actor checks above.
+function verifyCompletedRepair(options, historical) {
   const cwd = fs.realpathSync.native(options.cwd), block = options.block;
-  if (!block || typeof options.repairBeginKey !== 'string' || typeof options.ownerToken !== 'string'
-      || !options.ownerToken.trim() || !['claude','codex'].includes(options.hostRuntime)
+  if (!block || typeof options.repairBeginKey !== 'string' || !historical && (typeof options.ownerToken !== 'string'
+      || !options.ownerToken.trim() || !['claude','codex'].includes(options.hostRuntime))
       || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(options.milestone || '')) fail('delivery-recovery-unproven');
   const begin = controller.lookupRecord(cwd, 'transaction', block.begin_key), old = controller.lookupRecord(cwd, 'transaction', block.completion_key);
   if (!begin || !old || begin.action !== 'begin' || begin.phase !== 'committed' || begin.unit?.type !== 'execute-task'
@@ -272,22 +280,36 @@ function verifyRepairCompletion(options = {}) {
   const original = digest({ begin, complete: old }), prefix = `forge-delivery-verification:${original}:`;
   if (!options.repairBeginKey.startsWith(prefix) || !/^[a-f0-9]{64}$/.test(options.repairBeginKey.slice(prefix.length))) fail('delivery-recovery-unproven');
   const fresh = controller.lookupRecord(cwd, 'transaction', options.repairBeginKey), complete = controller.lookupRecord(cwd, 'transaction', options.repairBeginKey + ':complete');
-  const owner = require('crypto').createHash('sha256').update(options.ownerToken.normalize('NFC').trim()).digest('hex');
+  const owner = historical ? null : tokenDigest(options.ownerToken);
   if (!fresh || !complete || fresh.action !== 'begin' || complete.action !== 'complete' || fresh.phase !== 'committed' || complete.phase !== 'committed'
       || fresh.milestone !== begin.milestone || fresh.unit?.key !== begin.unit.key || complete.unit?.key !== fresh.unit.key
       || fresh.after?.state?.active_slice !== begin.after.state.active_slice || complete.after?.state?.active_slice !== begin.after.state.active_slice
-      || fresh.host_runtime !== options.hostRuntime || complete.host_runtime !== fresh.host_runtime
+      || !historical && fresh.host_runtime !== options.hostRuntime || complete.host_runtime !== fresh.host_runtime
       || complete.owner_digest !== fresh.owner_digest || complete.lease_generation !== fresh.lease_generation
       || complete.result?.status !== 'succeeded' || complete.boundary?.kind !== 'completed' || complete.boundary.handoff_ready !== true) fail('delivery-recovery-unproven');
   const directory = path.join(cwd, '.gsd', 'milestones', begin.milestone, 'slices', begin.after.state.active_slice, 'tasks', begin.unit.id);
   const baseline = readBaseline(path.join(directory, `.delivery-verification-${original}.json`));
   if (!baseline || digest(baseline) !== options.repairBeginKey.slice(prefix.length) || baseline.identity?.original_sha256 !== original
-      || baseline.identity?.host_runtime !== fresh.host_runtime) fail('delivery-recovery-baseline-unproven');
-  const actorBinding = repairActorBinding(options, baseline, fresh);
+      || baseline.identity?.host_runtime !== fresh.host_runtime || baseline.schema_version !== 1
+      || baseline.kind !== 'current-delivery-verification-baseline' || !Array.isArray(baseline.baseline)
+      || baseline.baseline_sha256 !== digest(baseline.baseline) || !Number.isFinite(Date.parse(baseline.created_at))
+      || !['owner_digest','plan_sha256','claim_sha256','execution_contract_sha256'].every(key => /^[a-f0-9]{64}$/.test(baseline.identity[key] || ''))
+      || typeof baseline.identity.run_id !== 'string' || !baseline.identity.run_id) fail('delivery-recovery-baseline-unproven');
+  const actorBinding = historical ? historicalRepairBinding(options, baseline, fresh) : repairActorBinding(options, baseline, fresh);
   const boundRun = require('./forge-runs').get(cwd, baseline.identity.run_id);
   const bindingRequired = boundRun?.owner_resume_history?.some(row=>row.boundary?.delivery_repair?.begin_key===fresh.idempotency_key);
-  if (!trustedRepairProofInputs.has(options) && (bindingRequired ? !actorBinding : fresh.owner_digest !== 'sha256:' + owner || baseline.identity.owner_digest !== owner)) fail('delivery-recovery-unproven');
-  const events = controller.readEvents(controller.eventsFile(cwd, begin.milestone));
+  if (historical ? bindingRequired ? !actorBinding : fresh.owner_digest !== 'sha256:' + baseline.identity.owner_digest
+    : !trustedRepairProofInputs.has(options) && (bindingRequired ? !actorBinding : fresh.owner_digest !== 'sha256:' + owner || baseline.identity.owner_digest !== owner)) fail('delivery-recovery-unproven');
+  let events;
+  try { events = controller.readEvents(controller.eventsFile(cwd, begin.milestone)); }
+  catch { fail('delivery-recovery-event-unproven'); }
+  const eventKeys = new Set();
+  for (const [index,event] of events.entries()) {
+    if (!event || event.sequence !== index + 1 || typeof event.idempotency_key !== 'string' || !event.idempotency_key
+        || eventKeys.has(event.idempotency_key)) fail('delivery-recovery-event-unproven');
+    eventKeys.add(event.idempotency_key);
+  }
+  const lineage = [];
   for (const pair of [[begin, old], [fresh, complete]]) {
     const published = pair.map(tx => {
       const rows = events.filter(event => event.idempotency_key === tx.idempotency_key);
@@ -297,7 +319,9 @@ function verifyRepairCompletion(options = {}) {
       return rows[0];
     });
     if (published[0].sequence >= published[1].sequence) fail('delivery-recovery-event-unproven');
+    lineage.push(published);
   }
+  if (lineage[0][1].sequence >= lineage[1][0].sequence) fail('delivery-recovery-event-unproven');
   const proof = require('./forge-milestone-time-clock').readHistoricalTaskDelivery({ cwd, milestone: begin.milestone,
     slice: begin.after.state.active_slice, task: begin.unit.id, completedAt: complete.event.ts });
   const binding = complete.result.output?.owner_delivery_proof;
@@ -306,6 +330,43 @@ function verifyRepairCompletion(options = {}) {
       || digest(binding.captures) !== digest(proof.captures.map(c => ({ reference: c.reference, sha256: c.sha256, captured_at: c.captured_at })))) fail('delivery-recovery-unproven');
   return { status: 'proven', original_completion_sha256: block.completion_sha256, repair_begin_key: fresh.idempotency_key,
     repair_completion_key: complete.idempotency_key, implementation_reexecuted: false };
+}
+
+// Validate the exact historical repair binding and the subsequent durable owner
+// chain. Current claim/source/lease bytes are deliberately not an input. This
+// read-only proof never admits a restart or supplies the previous owner's token.
+function historicalRepairBinding(options, baseline, fresh) {
+  const run = require('./forge-runs').get(options.cwd, baseline.identity.run_id), history = run?.owner_resume_history;
+  if (!run || !Array.isArray(history)) return null;
+  const bindings = history.map((row, index) => ({ row, index })).filter(({ row }) => {
+    const scope = row.boundary?.delivery_repair;
+    return row.mechanism === 'trusted-caller-attestation-v1' && row.workspace_quiescent_attested === true
+      && ['same-owner-reactivation','stopped-owner-transfer'].includes(row.kind)
+      && scope?.begin_key === fresh.idempotency_key && scope.run_id === run.id && scope.milestone === options.milestone
+      && roots.key(scope.cwd) === roots.key(fs.realpathSync.native(options.cwd))
+      && scope.actor_digest === row.current_session_sha256 && scope.host_runtime === row.current_host_runtime
+      && scope.baseline_state_sha256 === digest(baseline) && scope.baseline_sha256 === baseline.baseline_sha256
+      && scope.baseline_owner_digest === baseline.identity.owner_digest && scope.repair_owner_digest === fresh.owner_digest
+      && (scope.repair_generation === null || scope.repair_generation === fresh.lease_generation)
+      && scope.original_sha256 === baseline.identity.original_sha256 && scope.claim_sha256 === baseline.identity.claim_sha256
+      && scope.execution_contract_sha256 === baseline.identity.execution_contract_sha256;
+  });
+  if (!bindings.length) return null;
+  for (const { row: first, index } of bindings) {
+    let previous = null, valid = true;
+    for (const row of history.slice(index)) {
+      if (row.mechanism !== 'trusted-caller-attestation-v1'
+          || !['same-owner-reactivation','stopped-owner-transfer','interrupted-owner-transfer'].includes(row.kind)
+          || !['claude','codex'].includes(row.previous_host_runtime) || !['claude','codex'].includes(row.current_host_runtime)
+          || !/^[a-f0-9]{64}$/.test(row.previous_session_sha256 || '') || !/^[a-f0-9]{64}$/.test(row.current_session_sha256 || '')
+          || previous && (previous.current_session_sha256 !== row.previous_session_sha256 || previous.current_host_runtime !== row.previous_host_runtime)
+          || row.kind === 'same-owner-reactivation' && (row.previous_session_sha256 !== row.current_session_sha256 || row.previous_host_runtime !== row.current_host_runtime)
+          || row.kind === 'stopped-owner-transfer' && row.previous_owner_stopped_attested !== true) { valid = false; break; }
+      previous = row;
+    }
+    if (valid && previous?.current_session_sha256 === digest(run.session_id) && previous.current_host_runtime === run.host_runtime) return first.boundary.delivery_repair;
+  }
+  return null;
 }
 
 // A narrow preflight inside the existing fenced owner-transfer path. This
@@ -359,27 +420,42 @@ function resumeAndCreateRepair(options = {}) {
 // re-proven delivery-only successor; unchecked source inventory and imported
 // snapshots never skip a task on their own. This does not edit its checklist.
 function projectVerifiedRepairs(cwd,milestone,inventory,actor) {
-  if(!actor || !Array.isArray(inventory?.slices))return inventory;
+  if(!Array.isArray(inventory?.slices))return inventory;
   const history=require('./forge-runs').get(cwd,milestone)?.owner_resume_history || [];
-  return {...inventory,slices:inventory.slices.map(slice=>({...slice,tasks:(slice.tasks||[]).map(task=>{
+  if(!Array.isArray(history))fail('delivery-recovery-unproven');
+  const events=controller.readEvents(controller.eventsFile(cwd,milestone));
+  const diagnostics=[];
+  const slices=inventory.slices.map(slice=>({...slice,tasks:(slice.tasks||[]).map(task=>{
     if(task.checked || !/^T\d+(?:\.\d+)?$/.test(task.id||''))return task;
     const unit='execute-task/'+task.id,legacy=`forge-orchestrate-next:${milestone}:${unit}`;
-    const keys=new Set([legacy,legacy+':'+slice.id,...history.map(row=>row.boundary?.delivery_repair)
+    const keys=new Set([legacy,legacy+':'+slice.id,...events.filter(event=>event.action==='begin'&&event.unit===unit
+      && !event.idempotency_key?.startsWith('forge-delivery-verification:')).map(event=>event.idempotency_key),...history.map(row=>row.boundary?.delivery_repair)
       .filter(scope=>scope?.milestone===milestone&&scope.slice===slice.id&&scope.unit===unit).map(scope=>scope.original_begin_key)]);
     const proven=new Set();
+    const diagnosticStart=diagnostics.length;
     for(const key of keys)try{
       const begin=controller.lookupRecord(cwd,'transaction',key),old=controller.lookupRecord(cwd,'transaction',key+':complete');
       if(!begin||!old||begin.unit?.key!==unit||begin.after?.state?.active_slice!==slice.id)continue;
       const original=digest({begin,complete:old});
       const baseline=readBaseline(path.join(cwd,'.gsd/milestones',milestone,'slices',slice.id,'tasks',task.id,`.delivery-verification-${original}.json`));
-      if(!baseline)continue;
+      if(!baseline){
+        if(events.some(event=>event.idempotency_key?.startsWith(`forge-delivery-verification:${original}:`))
+            || history.some(row=>row.boundary?.delivery_repair?.original_begin_key===key))fail('delivery-recovery-baseline-unproven');
+        continue;
+      }
       const repairBeginKey=`forge-delivery-verification:${original}:${digest(baseline)}`;
-      verifyRepairCompletion({cwd,milestone,...actor,repairBeginKey,block:{begin_key:key,completion_key:key+':complete',completion_sha256:controller.recordChecksum(old)}});
-      const fresh=controller.lookupRecord(cwd,'transaction',repairBeginKey),complete=controller.lookupRecord(cwd,'transaction',repairBeginKey+':complete');
-      const current=require('./forge-milestone-time-clock').readCurrentTaskDelivery({cwd,milestone,slice:slice.id,task:task.id,begunAt:fresh.created_at,completedAt:complete.event.ts});
-      if(current.status==='proven')proven.add(repairBeginKey);
-    }catch{/* Missing/ambiguous/drifted repair leaves the original enforcing path. */}
-    return proven.size===1?{...task,checked:true}:task;
-  })}))};
+      verifyCompletedRepair({cwd,milestone,...actor,repairBeginKey,block:{begin_key:key,completion_key:key+':complete',completion_sha256:controller.recordChecksum(old)}},true);
+      proven.add(repairBeginKey);
+    }catch(cause){
+      // Only closed codes cross the command boundary, never paths, exception
+      // text or provider payload. Preserve the original failed proof stage.
+      const codes=['delivery-recovery-unproven','delivery-recovery-original-changed','delivery-recovery-baseline-unproven','delivery-recovery-event-unproven',
+        'delivery-repair-baseline-invalid','delivery-repair-baseline-changed','record-conflict'];
+      diagnostics.push({slice:slice.id,task:task.id,reason_code:codes.includes(cause?.code)?cause.code:'delivery-recovery-unproven'});
+    }
+    if(proven.size>1)diagnostics.push({slice:slice.id,task:task.id,reason_code:'delivery-recovery-unproven'});
+    return proven.size===1&&diagnostics.length===diagnosticStart?{...task,checked:true}:task;
+  })}));
+  return {...inventory,slices,...(diagnostics.length?{delivery_repair_diagnostics:diagnostics}:{})};
 }
 module.exports = { createRepair, verifyRepairCompletion, inspectRetainedClaimResume, publishPreparedResumeBaseline, resumeAndCreateRepair, projectVerifiedRepairs };

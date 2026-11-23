@@ -23,7 +23,7 @@ const TRISTATE = ['yes', 'no', 'unknown'];
 // Same line-ending normalization as the smoke readers: CRLF is not content.
 // Published changelog assertions retain their exact measured predecessor.
 const read = relative => (relative === 'CHANGELOG.md'
-  ? require('./fixtures/issue-455/distribution.cjs').issues451452View.projectRead(p => fs.readFileSync(path.join(ROOT, p)))(relative).toString('utf8')
+  ? require('./fixtures/issues-457-458/distribution.cjs').issue455View.issues451452View.projectRead(p => fs.readFileSync(path.join(ROOT, p)))(relative).toString('utf8')
   : fs.readFileSync(path.join(ROOT, relative), 'utf8')).replace(/\r\n?/g, '\n');
 const count = (text, needle) => text.split(needle).length - 1;
 const sha256 = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -313,7 +313,7 @@ test('smoke-pinned counts and literals of the touched texts are unchanged', () =
   assert.strictEqual([review, ...skills].reduce((sum, text) => sum + count(text, '--unit-type review-fix'), 0), 4);
   assert.strictEqual(count(review, 'Engine Fallback Discipline'), 2);
   for (const [needle, expected] of [['review-agent-unavailable', 11], ['review-advocate-unavailable', 9],
-    ['review-challenger-unavailable', 5], ['review-rebuttal-unavailable', 3]]) {
+    ['review-challenger-unavailable', 7], ['review-rebuttal-unavailable', 3]]) {
     assert.strictEqual(count(review, needle), expected, needle);
   }
   assert.strictEqual(count(review, 'NUNCA produz veredito de review no lugar de um agente indisponível'), 1);

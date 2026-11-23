@@ -143,7 +143,11 @@ async function withExecutionActivity(request, runtime, action) {
     expectedLease = sha(regular(leaseFile)); knownLeaseHashes.add(expectedLease);
     try {
       ownerWindow = windows.open(owner, { kind: 'unit-execution', task_id: runId,
+        coordination: 'observed-host-session-v1', host_runtime: actor.hostRuntime, host_session_sha256: roots.digest(actor.sessionId),
         dispatch_id: r.dispatchId, request_sha256: requestHash, unit_key: unit,
+        request_fingerprint: require('./forge-unit-sidecar').artifactFingerprint(r),
+        recovery_identity_sha256: treeBinding().recovery_identity_sha256, result_file_sha256: roots.digest(path.resolve(r.resultFile)),
+        begin_key: begin.idempotency_key, begin_sha256: controller.recordChecksum(begin),
         lease_generation: generation, owner_token_sha256: sha(token), lease_deadline_at: leaseWindow.deadline_at });
     } catch (error) { leaseWindow.close(); throw error; }
   });

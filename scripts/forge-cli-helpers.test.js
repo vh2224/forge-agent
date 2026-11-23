@@ -11,6 +11,11 @@ try {
   const first = helpers.resolveRunFromArgs(f.project, '', f.options);
   assert.strictEqual(first.reason, 'no-bindings');
   assert.strictEqual(first.status, 'none');
+  const emptyArg = require('child_process').spawnSync(process.execPath,
+    [path.join(__dirname, 'forge-cli-helpers.js'), '--resolve-args', '--args', '--cwd', f.project],
+    { env: f.env(), encoding: 'utf8', windowsHide: true, timeout: 10000 });
+  assert.strictEqual(emptyArg.status, 0, emptyArg.stderr);
+  assert.strictEqual(JSON.parse(emptyArg.stdout).reason, 'no-bindings', 'PS5 dropped empty --args must not become an ID named true');
   assert(!fs.existsSync(path.join(f.home, '.forge-personal')));
   const activeFile = path.join(f.project, '.gsd/forge/runs/M002.json'), activeBefore = fs.readFileSync(activeFile);
   assert.strictEqual(helpers.resolveRunFromArgs(f.project, 'M002', f.options).run_id, 'M002');
