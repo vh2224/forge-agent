@@ -31,6 +31,70 @@ async function fixture(action){return support.fixture(async f=>{
   assert(fs.readFileSync(path.join(f.owner,'.gsd/forge/questions',owner.identity_sha256+'.json')).equals(originalOwnerAnswer));
   support.unchanged(f,h);
 });}
+
+// Issue455: old resolved answers are reviewed DATA; only the fresh answer authorizes.
+function historyPaths(x,id){return['.json','.origin.json'].map(s=>path.join(x.f.owner,'.gsd/forge/questions',id+s));}
+function removeFixtureQuestions(x,ids){for(const id of ids)for(const file of historyPaths(x,id))if(fs.existsSync(file))fs.unlinkSync(file);}
+function oldHistory(x){
+  x.answer();
+  const owner=questions.openQuestions(activity.reconciliationDecision(x.h.request));
+  questions.answer({cwd:x.f.owner,identity:owner.identity_sha256,answers:[{id:'owner-delta-approval',answer:'nao',source:'tool-answer'}]});
+  const root=questions.openQuestions(activity.codeRootAppendDecision(x.h.request,{...x.rootOptions,ownerDecision:owner.identity_sha256}));
+  questions.answer({cwd:x.f.owner,identity:root.identity_sha256,answers:[{id:'code-root-append-approval',answer:'nao',source:'tool-answer'}]});
+  const ids=[x.rootOptions.ownerDecision,x.opened.identity_sha256,owner.identity_sha256,root.identity_sha256];
+  const pins=new Map(ids.flatMap(id=>historyPaths(x,id).map(file=>[file,fs.readFileSync(file)])));
+  for(const id of ids){const answer=questions.continuation({cwd:x.f.owner,identity:id});assert(answer.ok);
+    assert.equal(answer.identity.unit,'execute-task/T01');assert.equal(answer.identity.milestone,'M001');assert.equal(answer.identity.slice,'S01');assert.equal(answer.identity.task,'T01');assert.equal(answer.identity.workflow_id,'M001');
+    for(const field of ['dispatch_id','request_fingerprint','receipt_phase'])assert.equal(answer.identity[field],null,'owner-origin history cannot prove an exact old request');}
+  return{ids,pins,owner:owner.identity_sha256,root:root.identity_sha256};
+}
+function freshHistoryApproval(x,history,created=[],checkCoverage=true){
+  const decision=activity.reconciliationDecision(x.h.request);
+  if(checkCoverage){for(const[file,bytes]of history.pins){const relative=path.relative(x.f.owner,file).replace(/\\/g,'/');assert.equal(decision.changes.filter(row=>row.path===relative&&row.after===sha(bytes)).length,1,'both exact historical carrier hashes remain in reviewed');}
+    const digest=roots.digest({owner:fs.realpathSync.native(x.f.owner),unit:'execute-task/T01',dispatch_id:x.h.request.dispatchId,changes:decision.changes});
+    assert.equal(decision.delta_sha256,digest,'history must not be omitted from reviewed digest');assert.equal(decision.decision_set,'owner-delta/'+digest);}
+  const owner=questions.openQuestions(decision);created.push(owner.identity_sha256);
+  questions.answer({cwd:x.f.owner,identity:owner.identity_sha256,answers:[{id:'owner-delta-approval',answer:'aprovar',source:'tool-answer'}]});
+  const rootOptions={...x.rootOptions,ownerDecision:owner.identity_sha256};
+  const append=questions.openQuestions(activity.codeRootAppendDecision(x.h.request,rootOptions));created.push(append.identity_sha256);
+  questions.answer({cwd:x.f.owner,identity:append.identity_sha256,answers:[{id:'code-root-append-approval',answer:'aprovar',source:'tool-answer'}]});
+  const original=x.options();return{...original,operatorDecision:owner.identity_sha256,
+    attestChanges:challenge=>{const classified=original.attestChanges(challenge);return{...classified,changes:classified.changes.map(row=>history.ids.slice(0,2).some(id=>row.path.endsWith('/'+id+'.json')||row.path.endsWith('/'+id+'.origin.json'))?{...row,kind:'operator-reviewed'}:row)};},
+    codeRootAppendApproval:{...original.codeRootAppendApproval,...rootOptions,operatorDecision:append.identity_sha256}};
+}
+function refusedHistory(error){return typeof error?.code==='string'&&(/^(owner-reconciliation-|pending-question-|root-append-)/.test(error.code)||error.code==='ENOENT');}
+async function historicalCarrierNegatives(){return fixture(async x=>{
+  const history=oldHistory(x),stateFile=historyPaths(x,history.owner)[0],originFile=historyPaths(x,history.owner)[1];
+  assert.throws(()=>activity.createOwnerReconciliation(x.options()),refusedHistory,'an old positive answer is not current authority');
+  const extra=(name,patch={},resolved=true)=>{const d=activity.reconciliationDecision(x.h.request),q=questions.openQuestions({...d,...patch});
+    if(resolved)questions.answer({cwd:x.f.owner,identity:q.identity_sha256,answers:[{id:d.questions[0].id,answer:'nao',source:'tool-answer'}]});
+    return()=>removeFixtureQuestions(x,[q.identity_sha256]);};
+  const mutate=(file,change)=>{const bytes=fs.readFileSync(file);change(bytes);return()=>fs.writeFileSync(file,bytes);};
+  const cases=[
+    {name:'unresolved historical pair',prepare:()=>extra('pending',{},false)},
+    {name:'missing origin pair',prepare:()=>mutate(originFile,()=>fs.unlinkSync(originFile))},
+    {name:'corrupt canonical origin',prepare:()=>mutate(originFile,b=>{const v=JSON.parse(b);v.identity_sha256='f'.repeat(64);fs.writeFileSync(originFile,JSON.stringify(v));})},
+    {name:'canonical cross-unit history',prepare:()=>extra('unit',{unit:'execute-task/T02',task:'T02'})},
+    {name:'canonical cross-workflow history',prepare:()=>extra('workflow',{workflow_id:'M002'})},
+    {name:'canonical unknown decision purpose',prepare:()=>extra('purpose',{decision_set:'unrelated/'+sha('synthetic unknown purpose')})}
+  ];
+  for(const row of cases){const restore=row.prepare(),created=[];try{
+    assert.throws(()=>{const options=freshHistoryApproval(x,history,created,false);activity.createOwnerReconciliation(options);},refusedHistory,row.name);
+  }finally{removeFixtureQuestions(x,created);restore();}}
+  const created=[],options=freshHistoryApproval(x,history,created);
+  try{
+    const old=fs.readFileSync(stateFile);fs.appendFileSync(stateFile,' ');
+    assert.throws(()=>activity.createOwnerReconciliation(options),refusedHistory,'new current carrier hash was not approved');fs.writeFileSync(stateFile,old);
+    assert.throws(()=>activity.createOwnerReconciliation({...options,operatorDecision:undefined}),refusedHistory,'fresh current approval is mandatory');
+    const cap=activity.createOwnerReconciliation(options);activity.withOwnerReconciliationRead(cap,x.h.request,()=>{});
+    fs.appendFileSync(stateFile,' ');assert.throws(()=>activity.withOwnerReconciliationRead(cap,x.h.request,()=>{}),'historical state mutation after capability must refuse');fs.writeFileSync(stateFile,old);
+    const origin=fs.readFileSync(originFile);fs.unlinkSync(originFile);assert.throws(()=>activity.withOwnerReconciliationRead(cap,x.h.request,()=>{}),'historical origin deletion after capability must refuse');fs.writeFileSync(originFile,origin);
+    activity.withOwnerReconciliationRead(cap,x.h.request,()=>{});
+    for(const[file,bytes]of history.pins)assert(fs.readFileSync(file).equals(bytes),'all old answers/origins retained byte-exact');
+    console.log('PASS issue455 historical carrier negatives: unresolved/missing/corrupt/cross-unit/cross-workflow/purpose, fresh hashes, post-cap mutation/deletion; no old answer grants authority');
+  }finally{removeFixtureQuestions(x,created);}
+});}
+
 async function main(){
   await fixture(async x=>{
     assert.throws(()=>activity.createOwnerReconciliation(x.options()),/root-append-answer-required/,'unanswered cannot authorize');
@@ -68,7 +132,8 @@ async function main(){
     console.log('PASS root append: explicit live consent, exact bytes and all retained-root/CAS negatives');
   });
   await fixture(async x=>{
-    x.answer();const cap=activity.createOwnerReconciliation(x.options());
+    const history=oldHistory(x),current=freshHistoryApproval(x,history);
+    const cap=activity.createOwnerReconciliation(current);
     const repaired=require('./forge-sidecar-verification-repair').create(support.repairOptions(x.h,{ownerReconciliation:cap}));
     const bound=successor.bindOwnerReconciliation(repaired,x.h.request,cap);assert.equal(bound,repaired,'same genuine successor');
     assert.throws(()=>successor.bindOwnerReconciliation(repaired,x.h.request,{}),/reconciliation-mismatch/);
@@ -81,9 +146,13 @@ async function main(){
       const result=await require('./forge-unit-sidecar').runUnitSidecar(x.h.request,{verificationSuccessor:bound,ownerReconciliation:cap});
       assert.equal(result.status,'done');assert.equal(calls,0);assert(fs.readFileSync(x.file).equals(retained));
       assert.equal(JSON.parse(fs.readFileSync(view.receiptFile)).verification_successor.provider_called,false);
+      for(const[file,bytes]of history.pins)assert(fs.readFileSync(file).equals(bytes),'publication preserves both positive and negative historical answers and origins');
+      assert(fs.readFileSync(x.h.parentFile).equals(x.h.parentBytes));assert(fs.readFileSync(x.h.parent.recovery_baseline.state_file).equals(x.h.stateBytes));
+      console.log('PASS issue455 fresh current approval publishes retained result with exact historical positive/negative pairs as data, zero providers and original receipt/S0/event bytes');
       assert.throws(()=>view.check(),/capability-required/,'consumed reconciliation cannot be reused');
     }finally{xllm.runExecute=original;}
     console.log('PASS root append: same opaque approval reaches outside-context successor and actual zero-provider publication');
   });
+  await historicalCarrierNegatives();
 }
 module.exports={main};if(require.main===module)main().catch(error=>{console.error(error);process.exitCode=1;});

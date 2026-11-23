@@ -11,7 +11,7 @@ const renderer = require('./forge-codex-renderer');
 const ROOT = path.resolve(__dirname, '..');
 // Published changelog assertions retain their exact measured predecessor.
 const read = file => file === 'CHANGELOG.md'
-  ? require('./fixtures/issues-451-452/distribution.cjs').projectRead(p => fs.readFileSync(path.join(ROOT, p)))(file).toString('utf8')
+  ? require('./fixtures/issue-455/distribution.cjs').issues451452View.projectRead(p => fs.readFileSync(path.join(ROOT, p)))(file).toString('utf8')
   : fs.readFileSync(path.join(ROOT, file), 'utf8');
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const DOC = 'docs/issue-440/recovery-abandon.md';

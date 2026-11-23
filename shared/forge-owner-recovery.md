@@ -468,3 +468,20 @@ The focused fixture cases retain separate result/request/acceptance files and
 owners for release refusal before marker mutation, refusal after the real marker
 rename, and a reconciled post-publication error. Canonical Buffer/string/object
 digest semantics are tested directly; Buffer hashes are never JSON(Buffer).
+
+## Resolved historical question carriers
+
+A fresh owner-delta decision can include older resolved owner-delta and
+code-root-append question/origin pairs from the same canonical unit, milestone,
+slice, task and workflow. Both exact file hashes remain in the reviewed delta;
+the current explicit approval is required. Historical positive and negative
+answers are data and supply no authority. Pending, incomplete, malformed,
+out-of-scope or changed pairs refuse, and byte pins are checked again during
+capability use. Neither historical files nor the original receipt/S0 are rewritten.
+
+Owner-origin identities have no historical dispatch, request fingerprint or
+receipt phase. Their validation therefore does not certify the same past attempt
+or originating machine. Current live authority, writer reconciliation, claims,
+root-append consent and all publication gates remain required. The question
+directory marker is omitted consistently from question and validation digests;
+the contained historical files remain covered individually.

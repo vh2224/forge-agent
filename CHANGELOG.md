@@ -1,5 +1,7 @@
 ## Não lançado
 
+- Reconciliação de decisões históricas (#455): pares canônicos resolvidos da mesma unidade permanecem no delta coberto pela aprovação atual, com hashes revalidados; respostas antigas não autorizam a recuperação. Pergunta e validação usam o mesmo tratamento do marcador de diretório.
+
 - Recuperação legada opt-in (#442): cancelamento administrativo com origem local atestada por janela, observação atual do Windows, reconciliação de escritores e auditoria; não fabrica join histórico nem aceita artefatos. Falhas parciais de liberação ficam explícitas.
 - Append de eventos retido (#451): decisão separada sobre prefixo/sufixo exatos de uma raiz protegida, com resposta real observada pelo host e o mesmo handle opaco na verificação e publicação; recibo, S0 e aprovação original preservados.
 - Fixture do horizonte de task ligada (#454): casos parados usam o fechamento real do child e seu callback, sem pressupor ausência permanente do PID; o controle com PID realmente vivo continua recusando publicação e drenagem. Nenhum gate de produção foi alterado.

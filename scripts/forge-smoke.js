@@ -8208,6 +8208,7 @@ function smokePrefsCutoverGuards() {
     // Measured historical preimages are data, not a live preferences reader.
     'scripts/fixtures/issue-440/distribution-delta.json',
     'scripts/fixtures/issues-451-452/distribution-delta.json',
+    'scripts/fixtures/issue-455/distribution-delta.json',
   ]);
   const untrackedProbe = path.join(REPO, '.forge-smoke-untracked-prefs-probe');
   fs.writeFileSync(untrackedProbe, 'forge-agent-prefs.md\n', 'utf8');
