@@ -1,7 +1,7 @@
 'use strict';
 // Additive measured successor; all published fixtures and their contracts remain unchanged.
 const fs=require('fs'),path=require('path'),crypto=require('crypto'),zlib=require('zlib'),assert=require('node:assert/strict');
-const previous=require('../issue-440/distribution.cjs'),data=require('./distribution-delta.json'),ROOT=path.resolve(__dirname,'../../..'),PIN='82126876a4b6064ab96272ab053b3b72aaeabe62403c885f0c16745b157166c2';
+const previous=require('../issue-440/distribution.cjs'),data=require('./distribution-delta.json'),ROOT=path.resolve(__dirname,'../../..'),PIN='cbd7c96c6340e4cf10d57a46297078f9cf4eb60ee9d9e43843458d37c823bedc';
 const hash=b=>crypto.createHash('sha256').update(b).digest('hex'),read=file=>fs.readFileSync(path.join(ROOT,file));
 const linked=/^<!-- forge:linked-task:([a-z0-9-]+):start -->\r?\n[\s\S]*?^<!-- forge:linked-task:\1:end -->\r?\n/gm,attributed=b=>hash(b.toString('utf8').replace(linked,''));
 function check(value=data){assert.equal(hash(JSON.stringify(value)),PIN,'issues451452 independent measured delta');assert.equal(hash(JSON.stringify(previous.issue440Layer)),value.predecessor_layer_sha256,'issues451452 immutable issue440 predecessor');return value;}

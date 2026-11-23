@@ -687,6 +687,7 @@ module.exports = {
   checkArtifactRouting: (cwd, options) => require('./forge-artifact-routing-diagnostic').checkArtifactRouting(cwd, options),
   createOwnerRecoveryAdapter: options => require('./forge-owner-window-recovery').createObservedHostAdapter(options),
   createPreparationSettlementAdapter: options => require('./forge-owner-transport-window').createObservedPreparationAdapter(options),
+  retireLegacyPreparation: (options,host) => require('./forge-legacy-preparation-retirement').retire(options,host),
   settleFailedPreparation: (request, adapter) => require('./forge-owner-transport-window').settleFailedPreparation(request, adapter),
   inspectOwnerWindow: options => require('./forge-owner-window-recovery').inspect(options),
   recoverOwnerWindow: options => {
@@ -915,6 +916,15 @@ function formatResults(results) {
 
 function cliMain() {
   const args = parseArgs(process.argv.slice(2));
+
+  // New explicit operation; existing inspect/recover/retire flags remain strict.
+  if ('legacy-preparation-retirement' in args) {
+    const argv=process.argv.slice(2),allowed=new Set(['--legacy-preparation-retirement','--cwd','--request','--receipt-copy']),seen=new Set(),forward=[];let valid=true;
+    for(let i=0;i<argv.length;i++){const flag=argv[i];if(!allowed.has(flag)||seen.has(flag)){valid=false;break;}seen.add(flag);if(flag==='--legacy-preparation-retirement')continue;if(!argv[i+1]||argv[i+1].startsWith('--')){valid=false;break;}forward.push(flag,argv[++i]);}
+    if(!valid||!seen.has('--cwd')||!seen.has('--request')){process.stdout.write(JSON.stringify({status:'partial',reason_code:'legacy-retirement-cli-input-invalid'})+'\n');process.exitCode=2;return;}
+    return require('./forge-legacy-preparation-retirement').serve(forward).then(result=>{process.stdout.write(JSON.stringify(result)+'\n');if(result.status!=='retired')process.exitCode=1;},error=>{process.stdout.write(JSON.stringify({status:'partial',reason_code:/^[a-z0-9-]+$/.test(error.code||'')?error.code:'legacy-retirement-failed',historical_join:'not-observed'})+'\n');process.exitCode=1;});
+  }
+
 
   // These CLI entries inspect only. A live callback capability cannot be
   // serialized through flags or a request file and never comes from --apply.

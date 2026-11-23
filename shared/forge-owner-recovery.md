@@ -330,3 +330,141 @@ committed run reference is not terminal authority and cannot hide the task.
 Reconcile actual run/file state; a fresh authorized retry preserves the orphan
 record and obtains fresh live observations. An already published identical
 retirement returns `already-retired` without requesting the accepted decision again.
+
+## Legacy coordination retirement: explicit operator origin and current OS epoch
+
+This is a separate opt-in administrative path. It never supplies a historical
+join, accepts work, replays a result, resets code, or broadens the strict recovery
+adapters. Implementation approval for this feature is not consent for any window.
+
+Each use names the unchanged canonical request and the exact observed window.
+The current host presents the canonical per-window question returned by the
+operation, using its actually exposed permitted question tool or explicit user
+text. It records the real answer/reference, its question ID/hash and exact target.
+The operator separately attests that this old window originated on this current
+computer and authorizes cancellation of this task and retirement of this window.
+No historical machine ID is reconstructed: that origin remains human-attested.
+
+The module itself queries local Windows through a fixed bounded command and
+observes the actual child close. Root paths travel only as bounded base64 JSON
+in the child environment, never as interpolated PowerShell code. A closed SO
+observation includes every root ancestor's File.GetAttributes flags and current
+logical-volume filesystem/type/serial. Independent lstat/realpath.native walks
+before and after each identity measurement reject links, junctions, arbitrary
+reparse tags, aliases, device changes/mounts, unstable dev/ino/birth identity and
+unknown filesystems. Only observed fixed NTFS/ReFS roots qualify; inability to
+measure a root refuses instead of inferring locality from its drive letter.
+It binds current machine/boot observation, monotonic consistency, local physical
+volumes, exact request/receipt/run/window and root/control hashes. The old window
+must predate this boot. Current writers
+and native tool families still require genuine current-host observation and
+reconciliation. A reboot date, PID absence, transcript, feature answer, imported
+JSON, nonce, or a `coverage_complete` flag does not establish those observations.
+Any current writer or native agent that the host cannot account for is unknown
+and refuses. The OS census is a diagnostic input, not a native-agent inventory.
+
+Supported entry points after the feature is installed:
+
+```javascript
+const legacy = require(`${scripts}/forge-legacy-preparation-retirement`);
+const result = await legacy.retire({ owner, request, receiptCopy }, {
+  askExactOperatorDecision: currentHost.askExactOperatorDecision,
+  observeCurrentWriters: currentHost.observeCurrentWriters,
+  reconcileCurrentScope: currentHost.reconcileCurrentScope
+});
+```
+
+These are live functions from the current trusted host. They must actually ask
+or reuse an already observed answer for this exact window, account for the
+current native/CLI families and actual joins, and remeasure the current scope.
+They are not unconditional callbacks reconstructed from a past transcript. No
+function needs the former session's process handle: boot plus explicit origin
+is the separate legacy premise; current families still need current evidence.
+
+The same library is exposed as an owned, host-supervised Node stdio process:
+
+```text
+node <FORGE_SCRIPTS_DIR>/forge-doctor.js --legacy-preparation-retirement --cwd <owner> --request <unchanged-request.json>
+```
+
+An optional explicit `--receipt-copy` follows the existing bounded-copy rules.
+There are no `--approved`, `--joined`, `--local-origin` or `--force` shortcuts.
+While that exact process remains alive it emits `host-observation-required`
+messages with correlation ID, operation and frozen challenge. The actual host
+performs the indicated current question/observation/reconciliation using real
+tools, and replies on that process's owned stdin as
+`{id,kind:"actual-current-host-observation",result:...}`. The callbacks and opaque
+permit remain in that same Node process. The ID/JSON channel correlates an
+observation; it does not authenticate a human answer or prove a tool result.
+Those semantics remain the obligation of the actual supervising host.
+
+On Claude, use an actually available supervisor/runtime that can keep this
+owned process and deliver those real callback observations; no new Claude SDK
+or tool schema is assumed. Ordinary foreground Bash alone cannot manufacture
+current native-agent coverage or continue a process stdin it does not expose.
+When the current host cannot supervise those operations, refuse
+`legacy-retirement-live-current-host-required` or
+`legacy-retirement-current-writer-unmeasured`; keep the window. The library path
+with live current callbacks is available to a genuine host integration. Do not
+present the plain CLI as a universal unlock command.
+
+After revalidation under the existing reconciliation lock, a private capability
+uses the original exact binding/token/generation. It publishes the canonical
+cancelled task record with the new proof kind and coordination-only limitations,
+then uses the existing binding release primitive. The original
+failed receipt and code stay unchanged, the run becomes inactive, the task's
+canonical terminal record prevents a late replay, and all worktrees stay retained.
+The audit explicitly states `historical_join:not-observed`, operator-attested
+origin, `code_contents:unmeasured`, `artifacts_accepted:false` and
+`code_completed:false`. A publication exception is reconciled against the actual
+canonical record; a genuinely committed cancellation may continue, retaining a
+sanitized `publication_reconciled_after_error` diagnostic in result/audit.
+
+Binding restoration on release failure does not restore a marker or metadata
+already changed by the lock release operation. If cancellation was published
+but release fails, return `status:partial`, `cancellation_published:true`,
+`coordination_retired:false` when the original binding is actually observed, or
+`unknown` when it cannot be established. Retain the audit and a named release
+diagnostic, exit nonzero, and do not claim successful retirement or automatic
+retry. The strict lock engine is unchanged. An intact, already published exact
+terminal may be recognized by fresh valid observations without rewriting it;
+that does not promise recovery from partially removed lock metadata/markers.
+
+Tests distinguish pure policy fixtures, canonical mutation fixtures with a
+synthetic private OS observer, and a real Windows observer check. No fixture
+proves a real reboot or consent for another project's actual window. Existing
+strict recovery and SVN inventory limits are unchanged.
+
+## Exact retained resource append in a code root
+
+An existing owner approval does not authorize a later resource-event append in
+another protected root. The recovery caller preserves the original receipt, S0,
+owner answer and event bytes, and obtains a separate exact-byte decision:
+
+```javascript
+const question = activity.codeRootAppendDecision(request, {
+  ownerDecision, rootId, originalBytes, appendedBytes
+});
+```
+
+Present and persist that canonical question, then obtain its actual explicit
+answer. Pass its new identity through `codeRootAppendApproval` when creating the
+owner reconciliation, with the same root/prefix/suffix and a live
+`attestOperatorAnswer` callback. That callback must observe the real exact answer
+and bind the canonical challenge digest and host observation reference. Imported
+JSON, an old approval or a label claiming user text does not supply consent.
+
+After creating a genuine verification-repair or timeout successor, use
+`successor.bindOwnerReconciliation(actualSuccessor, request, sameReconciliation)`.
+Pass that same opaque reconciliation and genuine successor to verification-only
+recovery. A serialized replacement, another handle, changed question carrier,
+later append or any other protected-file difference refuses. Only the approved
+resource JSONL append is projected in the complete original root comparison;
+the old baselines and provenance stay unchanged. Existing writer reconciliation,
+claims, live authority, single-use and publication gates still apply. This API
+does not grant permission to recover another project's retained window.
+
+The focused fixture cases retain separate result/request/acceptance files and
+owners for release refusal before marker mutation, refusal after the real marker
+rename, and a reconciled post-publication error. Canonical Buffer/string/object
+digest semantics are tested directly; Buffer hashes are never JSON(Buffer).
