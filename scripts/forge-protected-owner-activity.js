@@ -282,6 +282,117 @@ function hookAppendProof(owner, change, evidence, unit, dispatch) {
       || observed.reference.length > 512 || /[\r\n]/.test(observed.reference)) fail('owner-reconciliation-hook-proof-required');
   return { path: change.path, before: change.before, original_sha256: sha(prior) };
 }
+// Separate operator consent for one retained non-owner resource-event append.
+// No assertion of historical authorship and no baseline/receipt rewrite.
+const validatedRootAppendApprovals = new WeakSet();
+function rootAppendView(request, options = {}) {
+  const view = reconciliationView(request, options.ownerDecision);
+  if (!/^[a-f0-9]{64}$/.test(options.ownerDecision || '')) fail('root-append-owner-decision-required');
+  const root = view.contract.code_roots.find(row => row.id === options.rootId);
+  if (!root || roots.key(root.path) === roots.key(view.owner)) fail('root-append-root-invalid');
+  const originals = view.baseline.protected_roots?.filter(row => row.root_id === root.id && roots.key(row.path) === roots.key(root.path));
+  if (originals?.length !== 1) fail('root-append-baseline-invalid');
+  const before = originals[0].snapshot, relative = '.gsd/forge/events.jsonl';
+  if (!Buffer.isBuffer(options.originalBytes) || !Buffer.isBuffer(options.appendedBytes)
+      || !/^[a-f0-9]{64}$/.test(before?.[relative] || '') || sha(options.originalBytes) !== before[relative]
+      || !options.appendedBytes.length || options.appendedBytes.length > 65536
+      || options.appendedBytes.at(-1) !== 10) fail('root-append-bytes-invalid');
+  const originalBytes = Buffer.from(options.originalBytes), appendedBytes = Buffer.from(options.appendedBytes);
+  const currentBytes = regular(path.join(root.path, relative));
+  if (!currentBytes.equals(Buffer.concat([originalBytes, appendedBytes]))) fail('root-append-bytes-invalid');
+  let rows;
+  try { rows = new TextDecoder('utf-8', { fatal: true }).decode(appendedBytes).trimEnd().split('\n').map(JSON.parse); }
+  catch { fail('root-append-events-invalid'); }
+  if (!rows.length || rows.length > 128 || rows.length % 3) fail('root-append-events-invalid');
+  const kinds = ['resource-admission', 'resource-pool-granted', 'resource-pool-released'];
+  const keys = ['kind,pressureLevel,reason,source,ts,workers', 'ceiling,granted,kind,reason,ts', 'granted,kind,reason,ts'];
+  for (const [i, row] of rows.entries()) {
+    if (!row || Object.keys(row).sort().join(',') !== keys[i % 3] || row.kind !== kinds[i % 3]
+        || !Number.isFinite(Date.parse(row.ts)) || Date.parse(row.ts) > Date.now()
+        || i && Date.parse(row.ts) < Date.parse(rows[i - 1].ts)
+        || typeof row.reason !== 'string' || !row.reason || row.reason.length > 128
+        || i % 3 === 0 && (typeof row.source !== 'string' || !row.source || row.source.length > 128
+          || row.pressureLevel !== null && ![1, 2, 4].includes(row.pressureLevel)
+          || !Number.isInteger(row.workers) || row.workers < 1 || row.workers > 1024)
+        || i % 3 !== 0 && (!Number.isInteger(row.granted) || row.granted < 1 || row.granted > 1024)
+        || i % 3 === 1 && (!Number.isInteger(row.ceiling) || row.ceiling < row.granted || row.ceiling > 1024)
+        || i % 3 === 2 && row.granted !== rows[i - 1].granted) fail('root-append-events-invalid');
+  }
+  const expected = { ...before, [relative]: sha(currentBytes) };
+  const execution = require('./forge-task-execution'), current = execution.protectedSnapshot(root.path);
+  if (roots.digest(current) !== roots.digest(expected)) fail('root-append-protected-delta-invalid');
+  const binding = { owner: view.owner, unit: `execute-task/${view.r.taskId}`, dispatch_id: view.r.dispatchId,
+    request_sha256: roots.digest(view.r), receipt_sha256: sha(view.receiptBytes), baseline_sha256: roots.digest(view.baseline),
+    owner_decision: options.ownerDecision, root_id: root.id, root_path: root.path, root_identity_sha256: root.identity_sha256,
+    path: relative, original_snapshot_sha256: roots.digest(before), current_snapshot_sha256: roots.digest(current),
+    original_sha256: sha(originalBytes), appended_sha256: sha(appendedBytes), current_sha256: sha(currentBytes),
+    original_bytes: originalBytes.length, appended_bytes: appendedBytes.length, event_count: rows.length };
+  return { view, root, before, expected, currentBytes, binding };
+}
+function rootAppendQuestion(proof) {
+  const r = proof.view.r, b = proof.binding, digest = roots.digest(b);
+  return { cwd: proof.view.owner, unit: b.unit, milestone: r.milestoneId, slice: r.sliceId, task: r.taskId,
+    workflow_id: r.milestoneId, decision_set: `code-root-append/${digest}`,
+    questions: [{ id: 'code-root-append-approval', question:
+      `Autorizar exclusivamente o sufixo retido de metadados ${digest} em ${b.root_id}:${b.root_path}/${b.path}, prefixo ${b.original_sha256}, sufixo ${b.appended_sha256} (${b.appended_bytes} bytes, ${b.event_count} linhas), atual ${b.current_sha256}? Esta decisao nao certifica autoria historica e nao autoriza outros arquivos, roots, codigo, planos ou claims.` }],
+    delta_sha256: digest, changes: [structuredClone(b)] };
+}
+function codeRootAppendDecision(request, options = {}) {
+  return rootAppendQuestion(rootAppendView(request, options));
+}
+function validateRootAppendApproval(request, ownerDecision, options) {
+  if (typeof options?.attestOperatorAnswer !== 'function') fail('root-append-live-answer-required');
+  const proof = rootAppendView(request, { ...options, ownerDecision });
+  return windows.withMutation(proof.view.owner, () => {
+    const decision = rootAppendQuestion(proof), api = require('./forge-pending-questions');
+    if (!/^[a-f0-9]{64}$/.test(options.operatorDecision || '') || options.operatorDecision === ownerDecision) fail('root-append-answer-required');
+    const answer = api.continuation({ cwd: proof.view.owner, identity: options.operatorDecision });
+    const expectedIdentity = { schema_version: 1, origin: 'owner', unit: decision.unit, milestone: decision.milestone,
+      slice: decision.slice, task: decision.task, workflow_id: decision.workflow_id, dispatch_id: null,
+      request_fingerprint: null, receipt_phase: null, decision_set: decision.decision_set };
+    if (!answer.ok || roots.digest(answer.identity) !== options.operatorDecision
+        || roots.digest(answer.identity) !== roots.digest(expectedIdentity) || answer.questions?.length !== 1
+        || answer.questions[0].id !== decision.questions[0].id || answer.questions[0].question !== decision.questions[0].question
+        || !['aprovar', 'aprovado', 'sim', 'autorizar'].includes(answer.questions[0].answer?.trim().toLowerCase())) fail('root-append-answer-required');
+    const carriers = [`.gsd/forge/questions/${options.operatorDecision}.json`, `.gsd/forge/questions/${options.operatorDecision}.origin.json`]
+      .map(relative => ({ relative, bytes: regular(path.join(proof.view.owner, relative)) }));
+    const challenge = Object.freeze({ ...proof.binding, decision_identity: options.operatorDecision,
+      answer_sha256: roots.digest(answer), carriers: carriers.map(row => ({ path: row.relative, sha256: sha(row.bytes) })) });
+    const observed = options.attestOperatorAnswer(structuredClone(challenge));
+    if (!observed || observed.then || observed.observed !== true || observed.challenge_sha256 !== roots.digest(challenge)
+        || typeof observed.reference !== 'string' || !observed.reference.trim() || observed.reference.length > 512
+        || /[\r\n]/.test(observed.reference)) fail('root-append-live-answer-required');
+    function check() {
+      roots.validateContract(proof.view.contract, { owner: proof.view.owner, revalidate: true });
+      for (const row of carriers) if (!regular(path.join(proof.view.owner, row.relative)).equals(row.bytes)) fail('root-append-answer-changed');
+      if (!regular(path.join(proof.root.path, proof.binding.path)).equals(proof.currentBytes)
+          || roots.digest(require('./forge-task-execution').protectedSnapshot(proof.root.path)) !== roots.digest(proof.expected)) fail('root-append-root-changed');
+    }
+    check();
+    const accepted = { ...proof, carriers, check, reference: observed.reference,
+      project(root, before) {
+        if (roots.key(fs.realpathSync.native(root)) !== roots.key(proof.root.path)) return before;
+        check();
+        if (![roots.digest(proof.before), roots.digest(proof.expected)].includes(roots.digest(before))) fail('root-append-baseline-unbound');
+        return { ...before, [proof.binding.path]: proof.binding.current_sha256 };
+      } };
+    validatedRootAppendApprovals.add(accepted); return accepted;
+  });
+}
+// Read/projection scope for a genuine successor outside an execution handoff.
+// It cannot accept a reset, change an observation or create a new capability.
+function withOwnerReconciliationRead(handle, request, action) {
+  if (typeof action !== 'function' || action.constructor?.name === 'AsyncFunction') fail('owner-reconciliation-sync-required');
+  const entry = reconciliationEntry(handle, request); entry.live(); entry.checkRoots();
+  if (entry.active) {
+    if (reconciliationContext.getStore() !== entry) fail('owner-reconciliation-operation-active');
+    return action();
+  }
+  entry.active = true;
+  try { const result = reconciliationContext.run(entry, action); if (result?.then) fail('owner-reconciliation-sync-required'); return result; }
+  finally { entry.active = false; }
+}
+
 function reconciliationView(request, operatorDecision, options = {}) {
   const sidecar = require('./forge-unit-sidecar'), r = require('./forge-attempt-recovery').canonicalRequest(request);
   if (r.scope !== 'milestone' || r.unitType !== 'execute-task' || !r.execution_contract) fail('owner-reconciliation-scope-invalid');
@@ -301,6 +412,9 @@ function reconciliationView(request, operatorDecision, options = {}) {
   const before = baseline.protected_owner;
   if (!before || typeof before !== 'object') fail('owner-reconciliation-baseline-invalid');
   const carriers = new Set(operatorDecision ? [`.gsd/forge/questions/${operatorDecision}.json`, `.gsd/forge/questions/${operatorDecision}.origin.json`] : []);
+  if (options.validatedRootAppend !== undefined && options.validatedRootAppend !== null
+      && !validatedRootAppendApprovals.has(options.validatedRootAppend)) fail('root-append-capability-required');
+  for (const row of options.validatedRootAppend?.carriers || []) carriers.add(row.relative);
   const changes = [...new Set([...Object.keys(before), ...Object.keys(current)])].sort()
     .filter(file => before[file] !== current[file]).map(file => ({ path: file, before: before[file] ?? null, after: current[file] ?? null }));
   const hooks = Object.keys(options.hookEvidence?.originalBytes || {}).sort().map(file => hookAppendProof(owner,
@@ -408,7 +522,9 @@ function resumeAttemptOwnerInside(options) {
 function createOwnerReconciliation(options = {}) {
   const { request, assertAuthority, attestStoppedWriter, readPendingQuestions, attestChanges } = options;
   if ([assertAuthority, attestStoppedWriter, readPendingQuestions, attestChanges].some(fn => typeof fn !== 'function')) fail('owner-reconciliation-live-adapter-required');
-  const view = reconciliationView(request, options.operatorDecision, options), r = view.r, unit = `execute-task/${r.taskId}`;
+  const rootAppend = options.codeRootAppendApproval === undefined ? null
+    : validateRootAppendApproval(request, options.operatorDecision, options.codeRootAppendApproval);
+  const view = reconciliationView(request, options.operatorDecision, { ...options, validatedRootAppend: rootAppend }), r = view.r, unit = `execute-task/${r.taskId}`;
   const leasePath = path.relative(view.owner, lease.leaseFile(view.owner, unit)).replace(/\\/g, '/');
   const runs = require('./forge-runs'), actor = runs.observeHostSession(options.hostRuntime || r.route?.host_runtime, process.env.FORGE_CLAUDE_OWNER_SESSION_ID);
   const record = runs.get(view.owner, r.runId || r.milestoneId);
@@ -419,6 +535,7 @@ function createOwnerReconciliation(options = {}) {
     delta_sha256: view.deltaSha, changes: structuredClone(view.changes) });
   let stateHash = sha(view.stateBytes);
   function live(acceptReset = false) {
+    if (rootAppend) rootAppend.check();
     if (assertAuthority(structuredClone(challenge)) !== true || attestStoppedWriter(structuredClone(challenge)) !== true) fail('owner-reconciliation-authority-required');
     const pending = readPendingQuestions(structuredClone(challenge));
     if (!Array.isArray(pending) || pending.some(q => q?.status !== 'resolved')) fail('owner-reconciliation-pending-questions');
@@ -534,20 +651,27 @@ function createOwnerReconciliation(options = {}) {
   let observedRoots = view.contract.code_roots.filter(root => roots.key(root.path) !== roots.key(view.owner)).map(root => {
     const baseline = originalRootRows.find(row => row.root_id === root.id && roots.key(row.path) === roots.key(root.path));
     if (!baseline) fail('owner-reconciliation-roots-missing');
-    execution.assertProtected(root.path, baseline.snapshot);
+    execution.assertProtected(root.path, rootAppend ? rootAppend.project(root.path, baseline.snapshot) : baseline.snapshot);
     return { path: root.path, protected: execution.protectedSnapshot(root.path), code: execution.replayState(root.path) };
   });
+  function checkRoots() {
+    if (rootAppend) rootAppend.check();
+    for (const row of observedRoots) if (roots.digest(execution.protectedSnapshot(row.path)) !== roots.digest(row.protected)
+        || roots.digest(execution.replayState(row.path)) !== roots.digest(row.code)) fail('owner-reconciliation-root-changed');
+  }
   function assertCurrent() {
     live();
     const current = execution.protectedSnapshot(view.owner);
     if (roots.digest(current) !== roots.digest(view.current)) fail('owner-reconciliation-observation-changed');
-    for (const row of observedRoots) if (roots.digest(execution.protectedSnapshot(row.path)) !== roots.digest(row.protected)
-        || roots.digest(execution.replayState(row.path)) !== roots.digest(row.code)) fail('owner-reconciliation-root-changed');
+    checkRoots();
   }
-  const entry = { requestHash: roots.digest(view.r), view, challenge, live, assertCurrent, active: false, consumed: false,
+  const entry = { requestHash: roots.digest(view.r), view, challenge, live, assertCurrent, checkRoots, active: false, consumed: false,
     project(root, before) {
       if (!entry.active) fail('owner-reconciliation-operation-inactive');
-      if (roots.key(fs.realpathSync.native(root)) !== roots.key(view.owner)) return before;
+      if (roots.key(fs.realpathSync.native(root)) !== roots.key(view.owner)) {
+        if (!rootAppend) return before;
+        live(); return rootAppend.project(root, before);
+      }
       live(); const expected = { ...before };
       for (const [file, row] of approved) {
         if (!row.values.has(before[file] ?? null)) fail('owner-reconciliation-baseline-unbound');
@@ -605,4 +729,5 @@ async function withReconciliationHandoff(request, runtime, action) {
 }
 module.exports = { withExecutionActivity, currentScope, assertPreflightAdmission, expectedProtectedOwner, reconciliationDecision,
   createOwnerReconciliation, assertOwnerReconciliationReady, withOwnerReconciliation, withReconciliationHandoff,
+  codeRootAppendDecision, withOwnerReconciliationRead,
   resumeAttemptOwner, inspectAttemptResume, hookAppendProof };

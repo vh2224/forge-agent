@@ -111,7 +111,7 @@ function create({request,timeoutMs,reference,assertAuthority,assertBoundary,atte
   };
   const capability=Object.freeze({});records.set(capability,{request_digest:roots.digest(r),check,assertRecord,expectedOwner,seal,info,receiptFile,resultFile,seed,used:false});return capability;
 }
-function read(capability,request){
+function readUnscoped(capability,request){
   const value=records.get(capability);if(!value)return require('./forge-sidecar-verification-repair').read(capability,request);
   if(roots.digest(request)!==value.request_digest)fail('verification-successor-capability-required');value.check();
   return {check:value.check,assertRecord:value.assertRecord,expectedOwner:value.expectedOwner,seal:structuredClone(value.seal),info:structuredClone(value.info),receiptFile:value.receiptFile,resultFile:value.resultFile,
@@ -119,4 +119,26 @@ function read(capability,request){
       fs.writeFileSync(value.receiptFile,JSON.stringify(value.seed,null,2)+'\n',{flag:'wx',mode:0o600});},
   };
 }
-module.exports={create,read};
+const ownerReconciliations = new WeakMap();
+function bindOwnerReconciliation(capability, request, ownerReconciliation) {
+  const activity = require('./forge-protected-owner-activity');
+  if (ownerReconciliations.has(capability)) {
+    if (ownerReconciliations.get(capability) !== ownerReconciliation) fail('verification-successor-reconciliation-mismatch');
+    return read(capability, request), capability;
+  }
+  activity.withOwnerReconciliationRead(ownerReconciliation, request, () => readUnscoped(capability, request));
+  ownerReconciliations.set(capability, ownerReconciliation);
+  return capability;
+}
+function read(capability, request) {
+  const ownerReconciliation = ownerReconciliations.get(capability);
+  if (!ownerReconciliation) return readUnscoped(capability, request);
+  const activity = require('./forge-protected-owner-activity');
+  const scoped = action => activity.withOwnerReconciliationRead(ownerReconciliation, request, action);
+  const value = scoped(() => readUnscoped(capability, request));
+  return { ...value, check: () => scoped(value.check), assertRecord: record => scoped(() => value.assertRecord(record)),
+    expectedOwner: (record, expected) => scoped(() => value.expectedOwner(record, expected)),
+    initialize: () => scoped(value.initialize) };
+}
+
+module.exports={create,read,bindOwnerReconciliation};

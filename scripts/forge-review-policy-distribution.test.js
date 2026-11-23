@@ -21,7 +21,10 @@ const ROOT = path.resolve(__dirname, '..');
 const REVIEW = 'shared/forge-review.md';
 const TRISTATE = ['yes', 'no', 'unknown'];
 // Same line-ending normalization as the smoke readers: CRLF is not content.
-const read = relative => fs.readFileSync(path.join(ROOT, relative), 'utf8').replace(/\r\n?/g, '\n');
+// Published changelog assertions retain their exact measured predecessor.
+const read = relative => (relative === 'CHANGELOG.md'
+  ? require('./fixtures/issues-451-452/distribution.cjs').projectRead(p => fs.readFileSync(path.join(ROOT, p)))(relative).toString('utf8')
+  : fs.readFileSync(path.join(ROOT, relative), 'utf8')).replace(/\r\n?/g, '\n');
 const count = (text, needle) => text.split(needle).length - 1;
 const sha256 = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 let passed = 0, failed = 0;

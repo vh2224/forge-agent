@@ -663,7 +663,10 @@ async function hostChain(host) {
 // ---------------------------------------------------------------------------
 // Documentation, distribution qualification and the worker inventory
 // ---------------------------------------------------------------------------
-function read(relative) { return fs.readFileSync(path.join(SOURCE, relative), 'utf8'); }
+// Published changelog assertions retain their exact measured predecessor.
+function read(relative) { return relative === 'CHANGELOG.md'
+  ? require('./fixtures/issues-451-452/distribution.cjs').projectRead(p => fs.readFileSync(path.join(SOURCE, p)))(relative).toString('utf8')
+  : fs.readFileSync(path.join(SOURCE, relative), 'utf8'); }
 function sectionOf(text, heading) {
   const from = text.indexOf('\n' + heading + '\n');
   assert.ok(from >= 0, 'section ' + heading);

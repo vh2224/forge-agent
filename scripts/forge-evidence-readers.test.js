@@ -143,7 +143,7 @@ test('statusline: two runs stale by heartbeat, both revived fresh by composite-f
   writeFreshEvidence(root, buildEvidenceFileName({ milestone: 'M-one', slice: 'S01', unit: 'T01' }));
   writeFreshEvidence(root, buildEvidenceFileName({ milestone: 'M-two', slice: 'S01', unit: 'T01' }));
   const out = runStatusline(root, 'sess-composite');
-  assert(out.includes('AUTO ×2'), `expected multi-run mode with both runs revived fresh, got: ${out}`);
+  assert(out.includes('RUNS ATIVOS ×2'), `expected multi-run mode with both runs revived fresh, got: ${out}`);
   cleanup(root);
 });
 
@@ -157,7 +157,7 @@ test('statusline: two runs stale by heartbeat, both revived fresh by LEGACY mile
   writeFreshEvidence(root, 'evidence-M-one-T01.jsonl');
   writeFreshEvidence(root, 'evidence-M-two-T01.jsonl');
   const out = runStatusline(root, 'sess-legacy');
-  assert(out.includes('AUTO ×2'), `expected multi-run mode revived by legacy names, got: ${out}`);
+  assert(out.includes('RUNS ATIVOS ×2'), `expected multi-run mode revived by legacy names, got: ${out}`);
   cleanup(root);
 });
 
@@ -168,7 +168,7 @@ test('statusline: unrecognized-form evidence file never revives a stale run (bot
   writeRun(root, activeRun('M-two', oneHour));
   writeFreshEvidence(root, 'evidence-.jsonl'); // unrecognized — empty body
   const out = runStatusline(root, 'sess-unrecognized');
-  assert(!out.includes('AUTO ×2'), `unrecognized-form file must not count as a freshness signal, got: ${out}`);
+  assert(!out.includes('RUNS ATIVOS ×2'), `unrecognized-form file must not count as a freshness signal, got: ${out}`);
   cleanup(root);
 });
 

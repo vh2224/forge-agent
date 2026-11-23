@@ -506,13 +506,16 @@ async function suite() {
     // =======================================================================
     const request = { unitType: 'execute-task', scope: 'standalone-task', taskId: T, cwd: F.code, contextRoot: F.owner, route: { host_runtime: 'claude' }, phase: 'execute' };
     const alive = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); children.push(alive);
-    const deadPid = spawnSync(process.execPath, ['-e', '0']).pid;
+    const stoppedChild = spawnSync(process.execPath, ['-e', '0']);
+    assert.equal(stoppedChild.status, 0, 'fixture child really joined');
+    // A historical PID may be reused; stopped receipts use the joined-child callback.
+    // The separate alive-PID control below retains the real OS refusal.
     const liveReceipt = receiptFor(F, 'alive', request, { phase: 'started', process_pid: alive.pid });
-    const deadReceipt = receiptFor(F, 'dead', request, { phase: 'failed', process_pid: deadPid, failure: { reason_code: 'worker-exited', provider_called: true } });
-    const savedReceipt = receiptFor(F, 'saved', request, { phase: 'ready', process_pid: deadPid, result: { status: 'done' } });
+    const deadReceipt = receiptFor(F, 'dead', request, { phase: 'failed', failure: { reason_code: 'worker-exited', provider_called: true } });
+    const savedReceipt = receiptFor(F, 'saved', request, { phase: 'ready', result: { status: 'done' } });
     const preReceipt = receiptFor(F, 'pre-provider', request, { phase: 'failed', failure: { reason_code: 'linked-task-budget-exhausted', provider_called: false } });
-    const foreignReceipt = write(F.root, 'receipts/foreign.json', { schema_version: 1, recovery_identity_sha256: 'a'.repeat(64), phase: 'ready', process_pid: deadPid });
-    const probe = r => (r.process_pid === alive.pid ? 'alive' : 'stopped');
+    const foreignReceipt = write(F.root, 'receipts/foreign.json', { schema_version: 1, recovery_identity_sha256: 'a'.repeat(64), phase: 'ready' });
+    const probe = r => (r.process_pid === alive.pid ? 'alive' : stoppedChild.status === 0 ? 'stopped' : 'unknown');
     const adapterOf = (attempts, o = {}) => ({ calls: 0, inspectAttempt(q) { this.calls++; assert.equal(q.task, T); if (o.during) o.during(); return typeof attempts === 'function' ? attempts() : attempts; },
       processProbe: o.probe || probe });
     const attempt = (receipt, extra = {}) => ({ unit, receipt_path: receipt, request: { ...request, ...extra } });
@@ -536,6 +539,9 @@ async function suite() {
     d = drainCase(adapterOf(Array.from({ length: 65 }, () => attempt(preReceipt))), 'overflow census');
     assert.ok(d.state === 'incomplete-unknown' && d.unknowns.includes('attempt-census-overflow'));
     d = drainCase(adapterOf([attempt(liveReceipt)]), 'live writer');
+    assert.deepEqual([d.state, d.writers[0].classification, d.writers[0].reason], ['draining', 'healthy', 'process-alive']);
+    const savedWithLivePid = receiptFor(F, 'saved-with-live-pid', request, { phase: 'ready', process_pid: alive.pid, result: { status: 'done' } });
+    d = drainCase(adapterOf([attempt(savedWithLivePid)], { probe: () => 'stopped' }), 'saved receipt with an actually live PID');
     assert.deepEqual([d.state, d.writers[0].classification, d.writers[0].reason], ['draining', 'healthy', 'process-alive']);
     process.kill(alive.pid, 0);
     assert.equal(alive.exitCode, null, 'the live writer survives every inspection');
@@ -562,12 +568,12 @@ async function suite() {
     // Negative controls: a same-generation released claim proves neither the publication of a stopped
     // ready/executed/saved_candidate result nor the consumption of a failed/abandoned receipt. Imported
     // published/consumed flags are data, never host evidence; each case stays draining and writes nothing.
-    const finished = receiptFor(F, 'finished', request, { phase: 'ready', process_pid: deadPid, result: { status: 'done' }, published: true });
-    const executed = receiptFor(F, 'executed', request, { phase: 'executed', process_pid: deadPid, provider_called: true, execution: { status: 'done' }, published: true });
-    const candidate = receiptFor(F, 'candidate', request, { phase: 'failed', process_pid: deadPid, saved_candidate: { status: 'done' },
+    const finished = receiptFor(F, 'finished', request, { phase: 'ready', result: { status: 'done' }, published: true });
+    const executed = receiptFor(F, 'executed', request, { phase: 'executed', provider_called: true, execution: { status: 'done' }, published: true });
+    const candidate = receiptFor(F, 'candidate', request, { phase: 'failed', saved_candidate: { status: 'done' },
       failure: { reason_code: 'worker-exited', provider_called: true }, published: true });
     const flagged = receiptFor(F, 'flagged', request, { phase: 'ready', provider_called: false, result: { status: 'done' } });
-    const failedAfter = receiptFor(F, 'failed-after', request, { phase: 'failed', process_pid: deadPid, failure: { reason_code: 'worker-exited', provider_called: true }, consumed: true });
+    const failedAfter = receiptFor(F, 'failed-after', request, { phase: 'failed', failure: { reason_code: 'worker-exited', provider_called: true }, consumed: true });
     const abandoned = receiptFor(F, 'abandoned', request, { phase: 'abandoned', failure: { reason_code: 'worker-abandoned', provider_called: false }, consumed: true });
     const own = { claim: v1claim };
     for (const [receipt, label] of [[finished, 'stopped ready'], [executed, 'stopped executed'], [candidate, 'stopped saved candidate'], [flagged, 'ready with a pre-provider flag']]) {

@@ -509,6 +509,51 @@ test('Windows unproved cleanup retains the budget and blocks all following comma
   } finally { api.runWindowsCommand = original; }
 });
 
+test('issue451 forwards the sink through acquisition and every joined release path', () => {
+  const strict = require('node:assert/strict'), real = require('./forge-resources');
+  const dir = mkTmpDir('forge-verify-resource-sink-'), events = path.join(dir, '.gsd', 'forge', 'events.jsonl');
+  fs.mkdirSync(path.dirname(events), { recursive: true });
+  fs.writeFileSync(events, '{"retained":true}\n');
+  const retained = fs.readFileSync(events);
+  fs.writeFileSync(path.join(dir, 'command.cjs'), 'process.exit(0);\n');
+  try {
+    for (const mode of ['joined', 'enforcement-off', 'admission-refused', 'intact', 'rewrite-throws']) {
+      const lines = []; let acquired = 0, released = 0;
+      const sink = line => lines.push(line);
+      const result = runVerificationGate({ cwd: dir, gsdDir: path.join(workDir, '.gsd'),
+        preferenceCommands: ['node command.cjs'], commandTimeoutMs: 10000, resourceEventSink: sink,
+        requireResources: () => ({
+          acquireCommandBudget(opts) {
+            strict.equal(opts.resourceEventSink, sink); acquired++;
+            const contract = real.acquireCommandBudget(opts);
+            strict(contract.pool?.handle?.slots.length > 0);
+            if (mode === 'enforcement-off') return { ...contract, enforcement: 'off' };
+            if (mode === 'admission-refused') return { ...contract, admit: false };
+            return contract;
+          },
+          releaseCommandBudget(handle, opts) {
+            strict.equal(opts.resourceEventSink, sink); released++;
+            return real.releaseCommandBudget(handle, opts);
+          }
+        }),
+        requireCommandRewrite: () => ({ looksLikeRunnerCommand: () => true,
+          planRewrite(command) {
+            if (mode === 'rewrite-throws') throw new Error('fixture-rewrite-failure');
+            return mode === 'intact' ? { outcome: 'intact', reason: 'fixture' }
+              : { outcome: 'rewritten', command, env: {}, reason: 'fixture', runner: 'fixture' };
+          }
+        }) });
+      strict.equal(result.passed, true, mode);
+      strict.equal(acquired, 1, mode); strict.equal(released, 1, mode);
+      strict.equal(require('./forge-resource-pool').poolStatus({ poolDir }).held, 0, mode);
+      strict.deepEqual(fs.readFileSync(events), retained, mode);
+      strict.deepEqual(lines.filter(x => ['resource-admission', 'resource-pool-granted', 'resource-pool-released'].includes(JSON.parse(x).kind)).map(x => JSON.parse(x).kind),
+        ['resource-admission', 'resource-pool-granted', 'resource-pool-released'], mode);
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+
 teardown();
 
 // ── Summary ──────────────────────────────────────────────────────────────────
