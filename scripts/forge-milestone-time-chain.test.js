@@ -665,7 +665,7 @@ async function hostChain(host) {
 // ---------------------------------------------------------------------------
 // Published changelog assertions retain their exact measured predecessor.
 function read(relative) { return relative === 'CHANGELOG.md'
-  ? require('./fixtures/issues-451-452/distribution.cjs').projectRead(p => fs.readFileSync(path.join(SOURCE, p)))(relative).toString('utf8')
+  ? require('./fixtures/issue-455/distribution.cjs').issues451452View.projectRead(p => fs.readFileSync(path.join(SOURCE, p)))(relative).toString('utf8')
   : fs.readFileSync(path.join(SOURCE, relative), 'utf8'); }
 function sectionOf(text, heading) {
   const from = text.indexOf('\n' + heading + '\n');

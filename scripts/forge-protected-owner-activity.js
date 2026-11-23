@@ -420,7 +420,7 @@ function reconciliationView(request, operatorDecision, options = {}) {
   const hooks = Object.keys(options.hookEvidence?.originalBytes || {}).sort().map(file => hookAppendProof(owner,
     { path: file, before: before[file] ?? null, after: current[file] ?? null }, options.hookEvidence, `execute-task/${r.taskId}`, r.dispatchId));
   const hookPaths = new Set(hooks.map(row => row.path));
-  const reviewed = changes.filter(row => !carriers.has(row.path) && !(operatorDecision && row.path === '.gsd/forge/questions/') && !hookPaths.has(row.path));
+  const reviewed = changes.filter(row => !carriers.has(row.path) && row.path !== '.gsd/forge/questions/' && !hookPaths.has(row.path));
   if (changes.length > 64) fail('owner-reconciliation-delta-limit');
   const deltaSha = roots.digest({ owner, unit: `execute-task/${r.taskId}`, dispatch_id: r.dispatchId, changes: reviewed,
     ...(hooks.length ? { hook_baselines: hooks } : {}) });
@@ -519,6 +519,56 @@ function resumeAttemptOwnerInside(options) {
     changes: [{ path: recordPath, beforeBytes, afterBytes }, { path: mirrorPath, beforeBytes: mirrorBefore, afterBytes: mirrorAfter }] });
   return Object.freeze({ status: resumed.status, ownerTransfer: transfer, scope: structuredClone(scope) });
 }
+// Historical questions are reviewed DATA, never a source of live authority.
+// Owner-origin identity omits dispatch/fingerprint/receipt phase, so no exact
+// historical attempt or machine provenance is inferred from the opaque digest.
+function historicalDecisionRecord(view, relative, pins) {
+  const match = /^\.gsd\/forge\/questions\/([a-f0-9]{64})(?:\.origin)?\.json$/.exec(relative);
+  if (!match) return false;
+  const hash = match[1];
+  if (pins.has(hash)) { checkHistoricalDecisionRecords(view, pins); return true; }
+  const names = [`.gsd/forge/questions/${hash}.json`, `.gsd/forge/questions/${hash}.origin.json`];
+  if (names.some(file => view.carriers.has(file))) return false;
+  const rows = [];
+  for (const file of names) {
+    const change = view.changes.find(row => row.path === file);
+    const reviewed = view.reviewed.find(row => row.path === file);
+    if (!change || !reviewed || !change.after || change.after !== reviewed.after
+        || change.before !== reviewed.before || view.current[file] !== change.after) return false;
+    const bytes = regular(path.join(view.owner, file));
+    if (sha(bytes) !== change.after) fail('owner-reconciliation-observation-changed');
+    rows.push({ relative: file, bytes });
+  }
+  const state = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(rows[0].bytes));
+  const answer = require('./forge-pending-questions').continuation({ cwd: view.owner, identity: hash });
+  const identity = answer.identity, r = view.r;
+  if (!answer.ok || identity?.origin !== 'owner' || roots.digest(identity) !== hash
+      || identity.unit !== `execute-task/${r.taskId}` || identity.milestone !== r.milestoneId
+      || identity.slice !== (r.sliceId ?? null) || identity.task !== r.taskId || identity.workflow_id !== r.milestoneId
+      || identity.dispatch_id !== null || identity.request_fingerprint !== null || identity.receipt_phase !== null) return false;
+  const purpose = /^(owner-delta|code-root-append)\/([a-f0-9]{64})$/.exec(identity.decision_set || '');
+  const questionId = purpose?.[1] === 'owner-delta' ? 'owner-delta-approval' : 'code-root-append-approval';
+  if (!purpose || answer.questions?.length !== 1 || answer.questions[0].id !== questionId
+      || answer.questions[0].status !== 'resolved' || !answer.questions[0].question.includes(purpose[2])
+      || roots.digest(answer.questions) !== roots.digest(state.questions)) return false;
+  // Response polarity deliberately supplies no authority. The already validated
+  // CURRENT owner approval covers both exact hashes, which stay in reviewed.
+  pins.set(hash, { rows, questions_sha256: roots.digest(answer.questions) });
+  checkHistoricalDecisionRecords(view, pins);
+  return true;
+}
+function checkHistoricalDecisionRecords(view, pins) {
+  for (const [hash, proof] of pins) {
+    const unchanged = () => proof.rows.every(row => regular(path.join(view.owner, row.relative)).equals(row.bytes));
+    if (!unchanged()) fail('owner-reconciliation-observation-changed');
+    // The canonical reader also refuses links/aliases, malformed origins and
+    // incomplete question state; byte pins prevent a later answer mutation.
+    const answer = require('./forge-pending-questions').continuation({ cwd: view.owner, identity: hash });
+    if (!answer.ok || roots.digest(answer.identity) !== hash
+        || roots.digest(answer.questions) !== proof.questions_sha256 || !unchanged()) fail('owner-reconciliation-observation-changed');
+  }
+}
+
 function createOwnerReconciliation(options = {}) {
   const { request, assertAuthority, attestStoppedWriter, readPendingQuestions, attestChanges } = options;
   if ([assertAuthority, attestStoppedWriter, readPendingQuestions, attestChanges].some(fn => typeof fn !== 'function')) fail('owner-reconciliation-live-adapter-required');
@@ -533,8 +583,10 @@ function createOwnerReconciliation(options = {}) {
   const challenge = Object.freeze({ owner: view.owner, unit, dispatch_id: r.dispatchId,
     request_sha256: roots.digest(r), receipt_sha256: sha(view.receiptBytes), baseline_sha256: roots.digest(view.baseline),
     delta_sha256: view.deltaSha, changes: structuredClone(view.changes) });
+  const historicalPins = new Map();
   let stateHash = sha(view.stateBytes);
   function live(acceptReset = false) {
+    checkHistoricalDecisionRecords(view, historicalPins);
     if (rootAppend) rootAppend.check();
     if (assertAuthority(structuredClone(challenge)) !== true || attestStoppedWriter(structuredClone(challenge)) !== true) fail('owner-reconciliation-authority-required');
     const pending = readPendingQuestions(structuredClone(challenge));
@@ -611,7 +663,10 @@ function createOwnerReconciliation(options = {}) {
     else if (row.kind === 'operator-reviewed') {
       const note = /^\.gsd\/(?:HANDOFF[-A-Za-z0-9_.]*\.md|sessions\/[A-Za-z0-9_.-]+\.md)$/.test(change.path);
       if (!operatorApproved || !note && !canonical(change.path) && change.path !== leasePath
-          && !/^\.gsd\/forge\/evidence[-~][A-Za-z0-9_.~-]+\.jsonl$/.test(change.path)) fail('owner-reconciliation-operator-decision-required');
+          && !/^\.gsd\/forge\/evidence[-~][A-Za-z0-9_.~-]+\.jsonl$/.test(change.path)
+          && !historicalDecisionRecord(view, change.path, historicalPins)) fail('owner-reconciliation-operator-decision-required');
+    } else if (row.kind === 'decision-record') {
+      if (!operatorApproved || !historicalDecisionRecord(view, change.path, historicalPins)) fail('owner-reconciliation-operator-decision-required');
     } else {
       const prior = options.originalBytes?.[change.path];
       if (!Buffer.isBuffer(prior) || change.before !== null && sha(prior) !== change.before
