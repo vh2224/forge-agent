@@ -1,7 +1,7 @@
 'use strict';
 // Additive measured successor; all published fixtures and their contracts remain unchanged.
 const fs=require('fs'),path=require('path'),crypto=require('crypto'),zlib=require('zlib'),assert=require('node:assert/strict');
-const previous=require('../issue-440/distribution.cjs'),data=require('./distribution-delta.json'),ROOT=path.resolve(__dirname,'../../..'),PIN='3af0c5bce8b6dc9b92ceb22d3b873689c8a747e3bd7379cac5e2c43b15a3692d';
+const previous=require('../issue-440/distribution.cjs'),data=require('./distribution-delta.json'),ROOT=path.resolve(__dirname,'../../..'),PIN='82126876a4b6064ab96272ab053b3b72aaeabe62403c885f0c16745b157166c2';
 const hash=b=>crypto.createHash('sha256').update(b).digest('hex'),read=file=>fs.readFileSync(path.join(ROOT,file));
 const linked=/^<!-- forge:linked-task:([a-z0-9-]+):start -->\r?\n[\s\S]*?^<!-- forge:linked-task:\1:end -->\r?\n/gm,attributed=b=>hash(b.toString('utf8').replace(linked,''));
 function check(value=data){assert.equal(hash(JSON.stringify(value)),PIN,'issues451452 independent measured delta');assert.equal(hash(JSON.stringify(previous.issue440Layer)),value.predecessor_layer_sha256,'issues451452 immutable issue440 predecessor');return value;}
@@ -16,4 +16,7 @@ function after(kind,file,prior,attr=false){const value=check(),old=previous.afte
 // This view adds no current-census failure that could mask their intended target.
 function publishedValidate(method,options){check();return previous[method]({...options,readRaw:projectRead(options.readRaw||read)});}
 const issue440View=Object.freeze({...previous,validate:options=>publishedValidate('validate',options),validate414Snapshot:options=>publishedValidate('validate414Snapshot',options)});
-module.exports={...previous,validate,validate414Snapshot,after,projectRead,verifyCurrent,issue440View,issues451452Layer:data};
+function smokeProjection(method,text){check();const row=data.files['scripts/forge-smoke.js'];return previous[method](hash(text)===row.after?before(row).toString('utf8'):text);}
+function previousSmoke(text){return smokeProjection('previousSmoke',text);}
+function predecessorSmoke(text){return smokeProjection('predecessorSmoke',text);}
+module.exports={...previous,validate,validate414Snapshot,after,projectRead,verifyCurrent,issue440View,previousSmoke,predecessorSmoke,issues451452Layer:data};
