@@ -412,9 +412,9 @@ async function attestedAppend() { return fixture(async f => {
 // The additive export proves nothing by itself and adopts nothing.
 async function hookProofExport() { return fixture(async f => {
   const { request } = attempt(f, 'codex');
-  assert.deepEqual(Object.keys(activity).sort(), ['assertOwnerReconciliationReady', 'assertPreflightAdmission', 'createOwnerReconciliation',
+  assert.deepEqual(Object.keys(activity).sort(), ['assertOwnerReconciliationReady', 'assertPreflightAdmission', 'codeRootAppendDecision', 'createOwnerReconciliation',
     'currentScope', 'expectedProtectedOwner', 'hookAppendProof', 'inspectAttemptResume', 'reconciliationDecision', 'resumeAttemptOwner',
-    'withExecutionActivity', 'withOwnerReconciliation', 'withReconciliationHandoff']);
+    'withExecutionActivity', 'withOwnerReconciliation', 'withOwnerReconciliationRead', 'withReconciliationHandoff']);
   const S0 = execution.protectedSnapshot(f.owner), suffix = childAppend(f, '{"hook":"direct"}\n');
   const change = { path: EVIDENCE, before: null, after: sha(suffix) };
   code(() => activity.hookAppendProof(f.owner, change, { originalBytes: { [EVIDENCE]: Buffer.alloc(0) } }, 'execute-task/T01', request.dispatchId),
