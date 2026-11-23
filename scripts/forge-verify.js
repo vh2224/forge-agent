@@ -336,6 +336,7 @@ function acquireClampForCommand(opts) {
         ? dirname(resolve(opts.gsdDir)) : resolveOwner(opts.cwd) || opts.cwd),
       commandTimeoutMs: opts.timeoutMs,
       session: opts.session,
+      resourceEventSink: opts.resourceEventSink,
     });
     if (contract && contract.pool && contract.pool.handle &&
         Array.isArray(contract.pool.handle.slots) && contract.pool.handle.slots.length) {
@@ -353,7 +354,7 @@ function acquireClampForCommand(opts) {
       // any other/unknown value leaves the control ON. D10: this reads the
       // value the resolver already returns; it derives nothing.
       if (handle) {
-        try { resourcesMod.releaseCommandBudget(handle, { cwd: opts.cwd }); } catch { /* MEM008 */ }
+        try { resourcesMod.releaseCommandBudget(handle, { cwd: opts.cwd, resourceEventSink: opts.resourceEventSink }); } catch { /* MEM008 */ }
       }
       appendResourceEvent(opts.cwd, opts.gsdDir, "resource-clamp-skipped", {
         reason: "intact:enforcement-off",
@@ -368,7 +369,7 @@ function acquireClampForCommand(opts) {
       // planner (which would silently produce full parallelism, since
       // `--maxWorkers=0`/`VITEST_MAX_FORKS=0` are falsy to the runners).
       if (handle) {
-        try { resourcesMod.releaseCommandBudget(handle, { cwd: opts.cwd }); } catch { /* MEM008 */ }
+        try { resourcesMod.releaseCommandBudget(handle, { cwd: opts.cwd, resourceEventSink: opts.resourceEventSink }); } catch { /* MEM008 */ }
       }
       appendResourceEvent(opts.cwd, opts.gsdDir, "resource-clamp-skipped", {
         reason: "intact:admission-refused-advisory",
@@ -383,7 +384,7 @@ function acquireClampForCommand(opts) {
       // Unrecognized/refused form — release immediately (W5, non-error
       // intact path) and run the original command byte-identical.
       if (handle) {
-        try { resourcesMod.releaseCommandBudget(handle, { cwd: opts.cwd }); } catch { /* MEM008 */ }
+        try { resourcesMod.releaseCommandBudget(handle, { cwd: opts.cwd, resourceEventSink: opts.resourceEventSink }); } catch { /* MEM008 */ }
       }
       appendResourceEvent(opts.cwd, opts.gsdDir, "resource-clamp-skipped", {
         reason: `intact:${plan.reason}`,
@@ -431,7 +432,7 @@ function acquireClampForCommand(opts) {
     // W5: release-on-error — a lease acquired above MUST be released here
     // before falling through with the command byte-identical.
     if (handle) {
-      try { resourcesMod.releaseCommandBudget(handle, { cwd: opts.cwd }); } catch { /* MEM008 */ }
+      try { resourcesMod.releaseCommandBudget(handle, { cwd: opts.cwd, resourceEventSink: opts.resourceEventSink }); } catch { /* MEM008 */ }
     }
     return passthrough;
   }
@@ -648,7 +649,7 @@ function runVerificationCommands(options) {
       // a descendant stopped. POSIX retains the existing synchronous behavior.
       const joined = process.platform !== "win32" || result?.cleanup?.status === "joined";
       if (joined && leaseHandle && leaseMod && typeof leaseMod.releaseCommandBudget === "function") {
-        try { leaseMod.releaseCommandBudget(leaseHandle, { cwd: options.cwd }); } catch { /* MEM008 */ }
+        try { leaseMod.releaseCommandBudget(leaseHandle, { cwd: options.cwd, resourceEventSink: options.resourceEventSink }); } catch { /* MEM008 */ }
       } else if (!joined && result?.cleanup && leaseHandle) {
         result.cleanup.budget_release = "deferred";
       }

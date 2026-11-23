@@ -1,5 +1,8 @@
 ## Não lançado
 
+- Eventos de recurso na verificação (#451): o coletor explícito recebe admissão, aquisição e liberação do pool, incluindo os caminhos de cleanup, sem escrita paralela na raiz protegida nem fallback em disco quando o coletor falha. O delta histórico já retido continua sujeito a reconciliação e autorização próprias.
+- Barra de status de runs retidos (#452): registros ativos aparecem como RUN ATIVO, inclusive no formato múltiplo, sem afirmar um loop vivo ou contar pausas desde o início original como tempo de execução. Os marcadores e as preferências do operador permanecem intactos.
+
 - E2E Windows host Claude → worker Codex e regressão do host Codex (#440, M-20261119115538-revisar-fluxo-execucao, S03): verificador de evidência com rótulos mock, recorded e real, gravação genuína sanitizada, harness determinístico sem rede (contrato v2, hook de evidência, falha injetada, replay, abandono e nova tentativa), matriz de rotas e saída integral das suítes no workflow com --verbose; testado offline com transporte reproduzido.
 - Recuperação replay-first e abandono seguro (#440, M-20261119115538-revisar-fluxo-execucao, S02): replay, recusa operacional, provas vivas, backup/reset e novo begin na mesma geração, com normalização do #444; testada offline em owners temporários.
 - Superfícies geridas versionadas (#440, M-20261119115538-revisar-fluxo-execucao, S01): atribuição viva, recusas nomeadas e transição legada testadas offline em owners temporários.

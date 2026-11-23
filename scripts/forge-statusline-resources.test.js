@@ -72,6 +72,30 @@ function appendEvent(gsdDir, obj) {
   fs.appendFileSync(file, JSON.stringify(obj) + '\n', 'utf8');
 }
 
+// Ownership transfer refreshes metadata, without proving a loop is running.
+for (const multiple of [false, true]) {
+  const dir = mkTmp(multiple ? 'retained-multiple' : 'retained-single');
+  const poolDir = mkTmp('retained-pool');
+  const profile = mkTmp('retained-profile');
+  try {
+    const started = Date.now() - 188 * 3600000;
+    const record = { active: true, started_at: started, last_heartbeat: Date.now(), worker: null, worker_started: null };
+    const marker = path.join(dir, '.gsd', 'forge', 'auto-mode.json');
+    const bytes = JSON.stringify(record);
+    fs.writeFileSync(marker, bytes);
+    if (multiple) {
+      const runs = path.join(dir, '.gsd', 'forge', 'runs');
+      fs.mkdirSync(runs);
+      for (const id of ['TASK-701', 'TASK-702']) fs.writeFileSync(path.join(runs, id + '.json'), JSON.stringify({ ...record, id, kind: 'task' }));
+    }
+    const result = runStatusline(dir, poolDir, { HOME: profile, USERPROFILE: profile, FORGE_HOME: path.join(profile, '.forge-agent') });
+    assert(result.status === 0, 'retained run renders successfully', result.stderr);
+    assert(result.stdout.includes(multiple ? 'RUNS ATIVOS ×2' : 'RUN ATIVO'), 'retained metadata has an honest active-run label', result.stdout);
+    assert(!result.stdout.includes('AUTO') && !result.stdout.includes('188h') && !/\$[\d.]+\/h/.test(result.stdout), 'retained history is not loop liveness or execution time', result.stdout);
+    assert(fs.readFileSync(marker, 'utf8') === bytes, 'statusline preserves the protected transferred marker');
+  } finally { cleanup(dir); cleanup(poolDir); cleanup(profile); }
+}
+
 // Grants a held slot in a fresh pool root via the real pool module — the
 // same code path production uses, not a hand-authored lease file.
 function grantHeldSlot(poolDir) {

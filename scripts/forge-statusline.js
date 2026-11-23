@@ -506,9 +506,8 @@ process.stdin.on('end', () => {
     if (pausePending) {
       autoPrefix = `${c.yellow}⏸ PAUSE SOLICITADO${c.reset} │ `;
     } else if (isMultiRunMode) {
-      // Multi-run compact line: ● AUTO ×N │ M065 ⚡T03 +12s │ M066 🔥S04 +1m
+      // Fresh active records describe retained runs, not observed live loops.
       // 4+ runs: truncate to "+N-2 mais"
-      const now = Date.now();
       const segments = multiRunActive.slice(0, 3).map(r => {
         let icon = '·';
         let unit = '';
@@ -517,20 +516,17 @@ process.stdin.on('end', () => {
           icon = tierIconFor(ut);
           unit = uid || ut || '';
         }
-        const wAge = r.heartbeat_age_ms > 0 ? fmtSecsShort(Math.round(r.heartbeat_age_ms / 1000)) : '0s';
-        return `${r.id} ${icon}${unit} +${wAge}`;
+        return `${r.id} ${icon}${unit}`;
       });
       const more = multiRunActive.length > 3 ? ` · +${multiRunActive.length - 3} mais` : '';
-      const dot = (Math.floor(Date.now() / 500) % 2 === 0) ? '●' : '○';
-      autoPrefix = `${c.red}${dot} AUTO ×${multiRunActive.length}${c.reset} │ ${segments.join(' │ ')}${more} │ `;
+      autoPrefix = `${c.yellow}○ RUNS ATIVOS ×${multiRunActive.length}${c.reset} │ ${segments.join(' │ ')}${more} │ `;
       // Disable single-run autoMode flag so middle/right segments don't double-render
       autoMode = false;
       autoWorker = '';
     } else if (autoMode) {
       // Legacy single-run rendering
-      const dot = autoElapsedSecs % 2 === 0 ? '●' : '○';
       const unitsSuffix = autoUnitsDone > 0 ? ` · ${autoUnitsDone}u` : '';
-      autoPrefix = `${c.red}${dot} AUTO ${autoElapsed}${unitsSuffix}${c.reset} │ `;
+      autoPrefix = `${c.yellow}○ RUN ATIVO${unitsSuffix}${c.reset} │ `;
     }
 
     // --- Middle segment: milestone progress + worker/retry/outcome ---
@@ -544,7 +540,6 @@ process.stdin.on('end', () => {
       if (autoMode && autoWorker) {
         const [ut, uid] = autoWorker.split('/');
         const icon = tierIconFor(ut);
-        const wt = fmtSecsShort(autoWorkerSecs);
         const events = readTailEvents();
         const retry = findActiveRetry(events);
         if (retry) {
@@ -552,7 +547,7 @@ process.stdin.on('end', () => {
           const attempt = retry.attempt || '?';
           rightPart = ` · ${c.yellow}↻${c.reset} ${icon}${uid || ut} retry ${attempt}/3 (${cls})`;
         } else {
-          rightPart = ` · ${c.green}${icon}${uid || ut} +${wt}${c.reset}`;
+          rightPart = ` · unid. ${icon}${uid || ut}`;
         }
       } else {
         // No active worker — show last outcome if recent (< 10 min)
@@ -586,9 +581,8 @@ process.stdin.on('end', () => {
     if (cost >= 5)      costCore = `${c.red}${costStr}${c.reset}`;
     else if (cost >= 1) costCore = `${c.yellow}${costStr}${c.reset}`;
     let costDisplay = costCore;
-    if (autoBurnRate > 0) {
-      costDisplay = `${costCore} ${c.dim}($${autoBurnRate.toFixed(2)}/h)${c.reset}`;
-    }
+    // A retained run's original start includes pauses; it is not execution time
+    // and cannot be used to present an execution burn rate.
 
     // --- Rate limits: 5h rolling session window + 7d weekly limit ---
     // Source: d.rate_limits.{five_hour,seven_day}.{used_percentage,resets_at}.

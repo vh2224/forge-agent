@@ -505,5 +505,50 @@ function mkTmpDirNoop() {
   }
 })();
 
+
+// Issue 451: real resource lifecycle telemetry never bypasses an explicit sink.
+(function testResourceEventSinkLifecycle() {
+  const strict = require('node:assert/strict');
+  for (const mode of ['sink', 'throwing-sink', 'no-sink', 'no-events', 'sink-without-gsd']) {
+    const dir = mkTmpDir(), poolDir = path.join(dir, 'pool');
+    const events = path.join(dir, '.gsd', 'forge', 'events.jsonl');
+    const sentinel = '{"retained":true}\n', lines = [];
+    let handle;
+    try {
+      if (mode !== 'sink-without-gsd') {
+        fs.mkdirSync(path.dirname(events), { recursive: true });
+        fs.writeFileSync(events, sentinel);
+      }
+      const sink = mode === 'no-sink' ? undefined : line => {
+        lines.push(line);
+        if (mode === 'throwing-sink') throw new Error('fixture-sink-failure');
+      };
+      const opts = { cwd: dir, poolDir, env: { FORGE_RESOURCES_PRESSURE: '1' },
+        ncpu: 2, commandTimeoutMs: 5000, noEvents: mode === 'no-events', resourceEventSink: sink };
+      resetResourceCache();
+      const acquired = acquireCommandBudget(opts);
+      handle = acquired.pool?.handle;
+      strict.equal(acquired.admit, true);
+      strict(handle?.slots.length > 0, 'real temporary pool acquired');
+      strict.equal(releaseCommandBudget(handle, opts).ok, true);
+      strict.equal(require('./forge-resource-pool').poolStatus({ poolDir }).held, 0);
+      handle = null;
+      const expectedKinds = ['resource-admission', 'resource-pool-granted', 'resource-pool-released'];
+      if (mode === 'no-sink') {
+        strict.deepEqual(fs.readFileSync(events, 'utf8').slice(sentinel.length).trimEnd().split('\n').map(x => JSON.parse(x).kind), expectedKinds);
+      } else {
+        strict.deepEqual(lines.map(x => JSON.parse(x).kind), mode === 'no-events' ? [] : expectedKinds);
+        strict(lines.every(x => x.endsWith('\n')));
+        if (mode === 'sink-without-gsd') strict.equal(fs.existsSync(path.join(dir, '.gsd')), false);
+        else strict.equal(fs.readFileSync(events, 'utf8'), sentinel, 'sink failure must not fall back to disk');
+      }
+      pass('issue451 resource lifecycle ' + mode);
+    } finally {
+      if (handle) releaseCommandBudget(handle, { cwd: dir, poolDir, noEvents: true });
+      cleanup(dir);
+    }
+  }
+})();
+
 process.stdout.write(`\nResults: ${passes} passed, ${fails} failed\n`);
 process.exitCode = fails > 0 ? 1 : 0;

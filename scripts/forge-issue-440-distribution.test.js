@@ -1,9 +1,9 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),zlib=require('node:zlib'),cp=require('node:child_process');
-const layer=require('./fixtures/issue-440/distribution.cjs'),parent=require('./fixtures/issue-448/distribution.cjs');
+const successor=require('./fixtures/issues-451-452/distribution.cjs'),layer=successor.issue440View,parent=require('./fixtures/issue-448/distribution.cjs');
 const root=path.resolve(__dirname,'..'),data=layer.issue440Layer;
 const hash=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
-const read=file=>fs.readFileSync(path.join(root,file));
+const read=successor.projectRead(file=>fs.readFileSync(path.join(root,file)));
 const normalize=text=>String(text).replace(/version=\d+\.\d+\.\d+/g,'version=<dynamic>');
 const linked=/^<!-- forge:linked-task:([a-z0-9-]+):start -->\r?\n[\s\S]*?^<!-- forge:linked-task:\1:end -->\r?\n/gm;
 const attributed=bytes=>hash(bytes.toString('utf8').replace(linked,''));
