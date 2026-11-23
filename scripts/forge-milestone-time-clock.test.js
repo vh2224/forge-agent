@@ -838,5 +838,77 @@ try {
     assert.equal(damaged.effort.worker.status, 'unknown'); assert.equal(damaged.effort.worker.reason, 'observation-record-invalid');
     write(f.cwd, dir + 'other.json', a); assert.equal(clock.readClock(f).effort.worker.reason, 'observation-record-unreadable');
   });
+
+  // Test-only compilation exposes private readers on a fresh Module, never the public module/cache.
+  {
+    const Module = require('module'), filename = require.resolve('./forge-milestone-time-clock');
+    const isolated = new Module(filename, module); isolated.filename = filename; isolated.paths = Module._nodeModulePaths(path.dirname(filename));
+    isolated._compile(fs.readFileSync(filename, 'utf8') + String.fromCharCode(10) + 'module.exports.endpointCacheFixture = { createEndpointDeliveryCaches, createEndpointDeliveryCache, deliverySource, revalidateDeliveryCache, expandedCaptureScope, revalidateGlobScopes, validateCurrentSources };' + String.fromCharCode(10), filename);
+    const cacheApi = isolated.exports.endpointCacheFixture, MB = 1024 * 1024;
+    const load = (cache, cwd, file, limit = MB) => cacheApi.deliverySource({ deliveryCache: cache }, cwd, file, limit);
+    const revalidate = cache => cacheApi.revalidateDeliveryCache({ deliveryCache: cache });
+    const rejected = fn => assert.throws(fn, error => error.code === 'delivery-source-limit');
+    test('endpoint-split-cache-real-six-plus-six-MiB-and-cache-hits', () => {
+      const cwd = fs.realpathSync.native(root()), pair = cacheApi.createEndpointDeliveryCaches();
+      for (let i = 0; i < 6; i++) { const file = 'history/' + i; write(cwd, file, Buffer.alloc(MB, 120)); assert.equal(load(pair.history, cwd, file).bytes, MB); }
+      for (let i = 0; i < 3; i++) { const file = 'current/' + i; write(cwd, file, Buffer.alloc(2 * MB, 121)); assert.equal(load(pair.current, cwd, file, 2 * MB).bytes, 2 * MB); }
+      assert.equal(pair.history.bytes, 6 * MB); assert.equal(pair.current.bytes, 6 * MB);
+      const before = { ...pair.history.endpointBudget }; load(pair.history, cwd, 'history/0'); load(pair.current, cwd, 'current/0', 2 * MB);
+      assert.deepEqual(pair.history.endpointBudget, before, 'hits never charge shared counters twice'); revalidate(pair.history); revalidate(pair.current);
+    });
+    test('endpoint-each-eight-MiB-boundary-plus-one-and-per-file-caps', () => {
+      for (const role of ['history', 'current']) {
+        const cwd = fs.realpathSync.native(root()), pair = cacheApi.createEndpointDeliveryCaches(), cache = pair[role], limit = role === 'history' ? MB : 2 * MB;
+        for (let i = 0; i < 8 * MB / limit; i++) { const file = 'data/' + i; write(cwd, file, Buffer.alloc(limit, 97)); load(cache, cwd, file, limit); }
+        assert.equal(cache.bytes, 8 * MB); const before = { ...cache.endpointBudget }; write(cwd, 'plus-one', 'x'); rejected(() => load(cache, cwd, 'plus-one', limit)); assert.deepEqual(cache.endpointBudget, before);
+        write(cwd, 'too-large', Buffer.alloc(limit + 1, 98)); assert.throws(() => load(cache, cwd, 'too-large', limit), error => error.code === 'clock-source-limit'); assert.deepEqual(cache.endpointBudget, before);
+      }
+    });
+    test('endpoint-shared-sixteen-MiB-boundary-is-finite', () => {
+      const cwd = fs.realpathSync.native(root()), pair = cacheApi.createEndpointDeliveryCaches();
+      for (const role of ['history', 'current']) for (let i = 0; i < 8; i++) { const file = role + '/' + i; write(cwd, file, Buffer.alloc(MB, 99)); load(pair[role], cwd, file); }
+      assert.equal(pair.history.endpointBudget.bytes, 16 * MB); const before = { ...pair.history.endpointBudget };
+      // Production creates exactly two caches; a private third cache exercises the shared guard independently.
+      const third = cacheApi.createEndpointDeliveryCache(pair.history.endpointBudget); write(cwd, 'extra-byte', 'x'); rejected(() => load(third, cwd, 'extra-byte')); assert.deepEqual(pair.history.endpointBudget, before); assert.equal(third.files.size, 0);
+    });
+    test('endpoint-shared-existing-and-absent-entry-caps-and-hit-accounting', () => {
+      const cwd = fs.realpathSync.native(root()), pair = cacheApi.createEndpointDeliveryCaches(); fs.mkdirSync(path.join(cwd, 'missing'));
+      for (let i = 0; i < 1024; i++) { const cache = i % 2 ? pair.history : pair.current, file = 'files/' + i; write(cwd, file, 'x'); load(cache, cwd, file); load(cache, cwd, 'missing/' + i); }
+      assert.equal(pair.history.endpointBudget.existing, 1024); assert.equal(pair.history.endpointBudget.absent, 1024); const before = { ...pair.history.endpointBudget };
+      load(pair.current, cwd, 'files/0'); load(pair.current, cwd, 'missing/0'); assert.deepEqual(pair.history.endpointBudget, before);
+      write(cwd, 'files/extra', 'x'); rejected(() => load(pair.history, cwd, 'files/extra')); rejected(() => load(pair.current, cwd, 'missing/extra')); assert.deepEqual(pair.history.endpointBudget, before);
+    });
+    test('endpoint-both-cache-rereads-detect-mutation-removal-and-absent-creation', () => {
+      for (const role of ['history', 'current']) {
+        const cwd = fs.realpathSync.native(root()), cache = cacheApi.createEndpointDeliveryCaches()[role]; write(cwd, 'present', 'before'); load(cache, cwd, 'present'); load(cache, cwd, 'absent'); revalidate(cache);
+        write(cwd, 'present', 'after'); assert.throws(() => revalidate(cache), error => error.code === 'clock-source-unstable'); write(cwd, 'present', 'before'); revalidate(cache);
+        fs.unlinkSync(path.join(cwd, 'present')); assert.throws(() => revalidate(cache), error => error.code === 'clock-source-unstable'); write(cwd, 'present', 'before');
+        write(cwd, 'absent', 'new'); assert.throws(() => revalidate(cache), error => error.code === 'clock-source-unstable'); fs.unlinkSync(path.join(cwd, 'absent')); revalidate(cache);
+      }
+    });
+    test('endpoint-current-cache-glob-growth-is-revalidated', () => {
+      const cwd = fs.realpathSync.native(root()), git = args => require('./forge-git-process').git(cwd, args); git(['init', '--quiet']); write(cwd, 'src/one.js', 'module.exports=1;' + String.fromCharCode(10)); git(['add', '.']); git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'fixture']);
+      const envelope = { revision: git(['rev-parse', 'HEAD']).trim(), workspace: [] }, pair = cacheApi.createEndpointDeliveryCaches(), options = { deliveryCache: pair.current, proofMode: 'current-source-strict' };
+      assert.deepEqual(cacheApi.expandedCaptureScope(options, envelope, cwd, ['src/**']).scope, ['src/one.js']); cacheApi.revalidateGlobScopes(options); write(cwd, 'src/two.js', 'module.exports=2;' + String.fromCharCode(10)); assert.throws(() => cacheApi.revalidateGlobScopes(options), error => error.code === 'delivery-current-source-changed');
+    });
+
+    test('endpoint-large-current-source-keeps-ordinary-two-MiB-and-endpoint-eight-MiB-limits', () => {
+      const cwd = fs.realpathSync.native(root()), git = args => require('./forge-git-process').git(cwd, args), file = 'src/large.txt';
+      git(['init', '--quiet']); git(['config', 'core.autocrlf', 'false']); write(cwd, file, Buffer.alloc(2 * MB + 1, 120)); git(['add', '.']); git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'large-source-fixture']);
+      const envelope = { code_dir: cwd, revision: git(['rev-parse', 'HEAD']).trim(), workspace: [] }, pair = cacheApi.createEndpointDeliveryCaches();
+      const options = { cwd, codeDir: cwd, deliveryCache: pair.current, proofMode: 'current-source-strict' };
+      cacheApi.validateCurrentSources(options, envelope, [file]); assert.equal(pair.current.files.size, 1); assert.equal(pair.current.bytes, 2 * MB + 1); revalidate(pair.current);
+      const ordinary = { files: new Map(), hashes: new Map(), blobs: new Map(), bytes: 0 };
+      assert.throws(() => cacheApi.validateCurrentSources({ ...options, deliveryCache: ordinary }, envelope, [file]), error => error.code === 'clock-source-limit'); assert.equal(ordinary.files.size, 0);
+      write(cwd, file, Buffer.alloc(2 * MB + 1, 121)); assert.throws(() => revalidate(pair.current), error => error.code === 'clock-source-unstable');
+      const bounded = cacheApi.createEndpointDeliveryCaches(), counters = { ...bounded.current.endpointBudget }; write(cwd, file, Buffer.alloc(8 * MB + 1, 122));
+      assert.throws(() => cacheApi.validateCurrentSources({ ...options, deliveryCache: bounded.current }, envelope, [file]), error => error.code === 'clock-source-limit'); assert.equal(bounded.current.files.size, 0); assert.equal(bounded.current.bytes, 0); assert.deepEqual(bounded.current.endpointBudget, counters, 'oversize source is refused before admission');
+    });
+    test('endpoint-caller-cannot-inject-cache-or-budget-overrides', () => {
+      const f = setup(), options = { cwd: f.cwd, milestone: M, now: BASE + 12 }, expected = clock.readEndpointProof(options), hostile = { ...options };
+      for (const name of ['deliveryCache', 'endpointBudget', 'historyCache', 'currentCache', 'maxBytes']) Object.defineProperty(hostile, name, { get() { throw new Error('caller override must never be read'); } });
+      assert.deepEqual(clock.readEndpointProof(hostile), expected);
+    });
+  }
 } finally { for (const dir of roots) fs.rmSync(dir, { recursive: true, force: true }); }
 console.log(`PASS milestone-clock-complete: ${count} named checks; bounded readonly evidence and temporary real Git, no network`);

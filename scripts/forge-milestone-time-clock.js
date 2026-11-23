@@ -55,6 +55,15 @@ function readSource(root, reference, limit = MAX_JSON, json = false) {
   return result;
 }
 function publicSource(source) { const { buffer, value, ...metadata } = source; return metadata; }
+function createEndpointDeliveryCache(endpointBudget) {
+  return { files: new Map(), absent: new Map(), hashes: new Map(), blobs: new Map(), bytes: 0, endpointBudget };
+}
+function createEndpointDeliveryCaches() {
+  // Endpoint history and current code each retain the existing8MiB budget.
+  // Their private shared budget additionally bounds16MiB and1024 entries of each species.
+  const budget = { existing: 0, absent: 0, bytes: 0 };
+  return { history: createEndpointDeliveryCache(budget), current: createEndpointDeliveryCache(budget) };
+}
 function deliverySource(options, root, reference, limit = MAX_JSON, json = false) {
   const key = path.resolve(root) + '\0' + reference, cache = options.deliveryCache;
   cache.absent ||= new Map();
@@ -64,12 +73,16 @@ function deliverySource(options, root, reference, limit = MAX_JSON, json = false
     if (source.status === 'absent') {
       // An optional absent candidate is only a revalidated observation: it holds no bytes and
       // never takes one of the 1024 slots reserved for existing delivery source files.
-      if (cache.absent.size >= 1024) fail('delivery-source-limit');
+      if (cache.absent.size >= 1024 || cache.endpointBudget?.absent >= 1024) fail('delivery-source-limit');
       result = { root, reference, limit, source }; cache.absent.set(key, result);
+      if (cache.endpointBudget) cache.endpointBudget.absent++;
     } else {
-      cache.bytes += source.bytes;
-      if (cache.files.size >= 1024 || cache.bytes > 8 * MAX_JSON) fail('delivery-source-limit');
+      const bytes = cache.bytes + source.bytes, budget = cache.endpointBudget;
+      if (cache.files.size >= 1024 || bytes > 8 * MAX_JSON
+          || budget && (budget.existing >= 1024 || budget.bytes + source.bytes > 16 * MAX_JSON)) fail('delivery-source-limit');
       result = { root, reference, limit, source }; cache.files.set(key, result);
+      cache.bytes = bytes;
+      if (budget) { budget.existing++; budget.bytes += source.bytes; }
     }
   }
   if (result.source.bytes > limit) fail('delivery-source-limit');
@@ -177,11 +190,11 @@ function capturedSourceHash(options, envelope, relative, root) {
   return cache.blobs.get(key);
 }
 function validateCurrentSources(options, envelope, fullScope) {
-  const cache = options.deliveryCache, { codeRoot, scope } = captureScope(options, envelope, fullScope);
+  const cache = options.deliveryCache, { codeRoot, scope } = captureScope(options, envelope, fullScope), sourceLimit = cache.endpointBudget ? 8 * MAX_JSON : phaseCost.MAX_BYTES;
   if (!envelope || !Array.isArray(envelope.workspace) || !scope.length) fail('delivery-current-source-binding-missing');
   if (!sameRoot(envelope.code_dir, codeRoot)) fail('delivery-code-root-mismatch');
   for (const relative of scope) {
-    const source = deliverySource(options, codeRoot, relative, phaseCost.MAX_BYTES);
+    const source = deliverySource(options, codeRoot, relative, sourceLimit);
     if (source.status !== 'valid') fail('delivery-current-source-changed');
     const expected = capturedSourceHash(options, envelope, relative, codeRoot);
     const key = codeRoot + '\0' + relative;
@@ -190,7 +203,7 @@ function validateCurrentSources(options, envelope, fullScope) {
       const read = (options.currentHashReader || ((cwd, file) => require('./forge-vcs').hashPath(cwd, file,
         { vcs: 'git', maxBuffer: 1024, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_NO_REPLACE_OBJECTS: '1' } })))(codeRoot, relative);
       if (!read?.ok || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(read.hash)) fail('delivery-current-source-unreadable');
-      if (readSource(codeRoot, relative, phaseCost.MAX_BYTES).sha256 !== source.sha256) fail('clock-source-unstable');
+      if (readSource(codeRoot, relative, sourceLimit).sha256 !== source.sha256) fail('clock-source-unstable');
       cache.hashes.set(key, read.hash);
     }
     if (cache.hashes.get(key) !== expected) fail('delivery-current-source-changed');
@@ -733,7 +746,8 @@ function readEndpointProof(options = {}) {
     try { time.timePaths(options); } catch { refuse('endpoint-milestone-invalid'); }
     const M = options.milestone, owner = options.cwd, dir = `.gsd/milestones/${M}`;
     const delivery = require('./forge-delivery'), roots = require('./forge-code-roots'), controller = require('./forge-unit-controller');
-    Object.assign(options, { proofMode: 'historical-delivery', deliveryCache: { files: new Map(), hashes: new Map(), blobs: new Map(), bytes: 0 } });
+    const endpointCaches = createEndpointDeliveryCaches();
+    Object.assign(options, { proofMode: 'historical-delivery', deliveryCache: endpointCaches.history });
     // milestone_cleanup archive/delete moves or removes these before any proof: a named refusal.
     for (const ref of [dir, `${dir}/${M}-events.jsonl`, `${dir}/${M}-ROADMAP.md`]) {
       try { fs.lstatSync(safeFile(owner, ref)); } catch (e) { if (e.code === 'ENOENT') refuse('endpoint-sources-missing', { detail: ref }); throw e; }
@@ -830,7 +844,7 @@ function readEndpointProof(options = {}) {
       roots: measured.code_roots.map(r => ({ root_id: r.id, commands: [...commands.get(r.id)] })) };
     // Completed child deliveries stay historical; integrated endpoint envelopes
     // independently prove the current source universe, including glob additions.
-    const scopeOptions = { ...options, proofMode: 'current-source-strict', executionContract: measured }, committedAt = instant(completion.boundary.committed_at);
+    const scopeOptions = { ...options, proofMode: 'current-source-strict', executionContract: measured, deliveryCache: endpointCaches.current }, committedAt = instant(completion.boundary.committed_at);
     const rootRows = [];
     for (const root of measured.code_roots) {
       const envelopeRef = ENDPOINT_PROOF_POLICY.envelope.replace(/\{milestone\}/g, M).replace('{root}', root.id);
@@ -856,7 +870,7 @@ function readEndpointProof(options = {}) {
       try { scope = captureScope(scopeOptions, e, [...union]).scope; } catch { refuse('endpoint-scope-missing', { root_id: root.id, detail: 'scope-root-unresolved' }); }
       if (scope.length > 256) refuse('endpoint-scope-limit', { root_id: root.id });
       for (const relative of scope) {
-        if (deliverySource(options, root.path, relative, phaseCost.MAX_BYTES).status !== 'valid') refuse('endpoint-scope-missing', { root_id: root.id, path: relative });
+        if (deliverySource(scopeOptions, root.path, relative, 8 * MAX_JSON).status !== 'valid') refuse('endpoint-scope-missing', { root_id: root.id, path: relative });
       }
       if (scope.length) {
         try { validateCurrentSources(scopeOptions, e, [...union]); }
@@ -874,7 +888,9 @@ function readEndpointProof(options = {}) {
         checks: checks.length, scope: scope.map(relative => ({ path: relative, hash: capturedSourceHash(scopeOptions, e, relative, root.path) })) });
     }
     revalidateGlobScopes(options);
+    revalidateGlobScopes(scopeOptions);
     revalidateDeliveryCache(options);
+    revalidateDeliveryCache(scopeOptions);
     const after = time.readContract(options);
     if (after.status !== 'valid' || after.sha256 !== contract.sha256) fail('clock-source-unstable');
     const units = new Map(options.proof.units.map(row => [row.unit, row]));
