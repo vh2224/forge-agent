@@ -2,7 +2,7 @@
 // Test-only successor. Published fixtures and production modules stay unchanged.
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),zlib=require('node:zlib'),assert=require('node:assert/strict');
 const ROOT=path.resolve(__dirname,'../../..'),OWN='scripts/fixtures/docs-cleanup',data=require('./distribution-delta.json');
-const PIN='a48eedd1eb9f8b7de9df5835c932f0e0eba23f7bc10ae87c6cf48d2bda320932',hash=b=>crypto.createHash('sha256').update(b).digest('hex');
+const PIN='ea37ef4c2c5c319b442a2e3ee3828e3778264d9d5b812dd8bb71c280bd6ee799',hash=b=>crypto.createHash('sha256').update(b).digest('hex');
 const previous=require('../issues-457-458/distribution.cjs');
 function target(file,absent=false){
  assert(typeof file==='string'&&!path.isAbsolute(file)&&!/[\\:\x00-\x1f]/.test(file));
@@ -61,36 +61,52 @@ function verifyCleanup(options={}){
  function walk(dir){for(const e of fs.readdirSync(path.join(ROOT,dir),{withFileTypes:true})){const f=dir+'/'+e.name;if(f===OWN)continue;assert(!e.isSymbolicLink());if(e.isDirectory())walk(f);else{assert(e.isFile());found.push(f);}}}
  walk('scripts/fixtures');assert.deepEqual(found.sort(),Object.keys(value.historical_fixtures).sort(),'docs cleanup complete published inventory');return true;
 }
-// Legacy read callbacks may intentionally expose an exact earlier measured world.
-// This is not current-state authority: verifyCleanup independently checks real bytes first.
-const knownHistorical=new Map();
-for(const value of Object.values(previous))if(value&&typeof value==='object'&&value.files)for(const[f,row]of Object.entries(value.files)){
- if(!row||typeof row!=='object')continue;const set=knownHistorical.get(f)||new Set();for(const h of [row.before,row.after])if(typeof h==='string')set.add(h);knownHistorical.set(f,set);
+// Current physical inputs are authenticated here. Virtual negative callbacks remain
+// authoritative inputs of the unchanged predecessor validator, including its cause.
+function delegate(object,method,implementation,options={}){
+ verifyCleanup(options);
+ return implementation.call(object,{...options,readRaw:projectCleanupRead(options.readRaw||read)});
 }
-function checkReader(readRaw){
- if(!readRaw)return;
- for(const[file,row]of Object.entries(data.files)){
-  let b;try{b=readRaw(file);}catch(e){if(row.after===null&&e.code==='ENOENT'&&target(file,true)===null)continue;throw e;}
-  const h=hash(b);assert(h===row.after||h===row.before||knownHistorical.get(file)?.has(h),'docs cleanup foreign source reader '+file);
+const views=new WeakMap(),implementations=new WeakMap();
+function invoke(object,key,implementation,args,current){
+ if(['validate','validate414Snapshot','verifyCurrent'].includes(key))return delegate(object,key,implementation,args[0]);
+ if(key==='projectRead')return implementation.call(object,projectCleanupRead(args[0]===undefined?read:args[0]),...args.slice(1));
+ if(key==='loadHistoricalFixture')return view(implementation.call(object,...args));
+ if(current&&key==='after'){
+  const value=check(),[kind,file,prior,attr=false]=args,old=implementation.call(object,...args),row=kind==='files'?value.files[file]:null;
+  if(!row||row.before===null||row.after===null)return old;
+  assert.equal(old,row[attr?'attributed_before':'before'],'docs cleanup exact predecessor source '+file);
+  return row[attr?'attributed_after':'after'];
  }
- for(const[file,row]of Object.entries(data.historical_fixtures))assert.equal(hash(readRaw(file)),row.sha256,'docs cleanup immutable published fixture '+file);
+ if(current&&key==='readme'){
+  check();const row=data.files[OWN+'/README.md'],bytes=read(OWN+'/README.md');
+  assert(row&&row.before===null,'docs cleanup own measured README');assert.equal(hash(bytes),row.after,'docs cleanup exact current README');
+  assert.equal(hash(bytes.toString('utf8').replace(/^<!-- forge:linked-task:([a-z0-9-]+):start -->\r?\n[\s\S]*?^<!-- forge:linked-task:\1:end -->\r?\n/gm,'')),row.attributed_after,'docs cleanup attributed README');
+  const old=implementation.call(object,...args),rows=Object.entries(data.files).map(([file,r])=>[file,r.before,r.after,r.attributed_before,r.attributed_after].filter(x=>x!==null&&x!==undefined).join(' | '));
+  return old+'\n'+bytes.toString('utf8')+'\n'+rows.join('\n')+'\n';
+ }
+ return implementation.apply(object,args);
 }
-function delegate(object,method,options={}){
- verifyCleanup(options);checkReader(options.readRaw);
- return object[method]({...options,readRaw:projectCleanupRead(options.readRaw||read)});
-}
-const views=new WeakMap();
-function view(object){
- if(!object||typeof object!=='object')return object;if(views.has(object))return views.get(object);
- const result={...object};views.set(object,result);
- for(const[key,value]of Object.entries(object))if(key.endsWith('View')&&value&&typeof value==='object')result[key]=view(value);
- for(const method of ['validate','validate414Snapshot','verifyCurrent'])if(typeof object[method]==='function')result[method]=options=>delegate(object,method,options);
- if(typeof object.projectRead==='function')result.projectRead=(readRaw=read)=>object.projectRead(projectCleanupRead(readRaw));
- if(typeof object.loadHistoricalFixture==='function')result.loadHistoricalFixture=file=>view(object.loadHistoricalFixture(file));
- // Preserve existing readme call-count observations through the same private predecessor.
- if(typeof object.readme==='function')Object.defineProperty(result,'readme',{enumerable:true,configurable:true,get:()=>object.readme,set:fn=>{object.readme=fn;}});
+function view(object,current=false){
+ if(!object||typeof object!=='object')return object;
+ if(!current&&views.has(object))return views.get(object);
+ const result={};if(!current)views.set(object,result);
+ for(const[key,value]of Object.entries(object)){
+  if(key.endsWith('View')&&value&&typeof value==='object'){result[key]=view(value);continue;}
+  if(typeof value!=='function'){result[key]=value;continue;}
+  const transformed=['validate','validate414Snapshot','verifyCurrent','projectRead','loadHistoricalFixture'].includes(key)||(current&&['after','readme'].includes(key));
+  // Current exports have normal local assignment semantics; saved wrappers never
+  // become an implementation in the predecessor. Its live functions are read on call.
+  if(current&&transformed){result[key]=(...args)=>invoke(object,key,object[key],args,true);continue;}
+  let last,wrapped;const descriptor=Object.getOwnPropertyDescriptor(object,key);
+  Object.defineProperty(result,key,{enumerable:true,configurable:true,get(){
+   const implementation=object[key];if(!transformed)return implementation;
+   if(last!==implementation){last=implementation;wrapped=(...args)=>invoke(object,key,implementation,args,false);implementations.set(wrapped,implementation);}
+   return wrapped;
+  },...(descriptor.writable||descriptor.set?{set:fn=>{object[key]=implementations.get(fn)||fn;}}:{})});
+ }
  return result;
 }
-const api=view(previous);
-Object.assign(api,{docsCleanupLayer:data,verifyCleanup,projectCleanupRead});
+const api=view(previous,true);
+Object.assign(api,{docsCleanupLayer:data,verifyCleanup,projectCleanupRead,baselineView:view(previous)});
 module.exports=api;
