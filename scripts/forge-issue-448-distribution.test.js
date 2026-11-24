@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
-const layer=require('./fixtures/docs-cleanup/distribution.cjs'),parent=require('./fixtures/docs-cleanup/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issues-442-446/distribution.cjs'),root=path.resolve(__dirname,'..');
+const layer=require('./fixtures/issue-461/distribution.cjs'),parent=require('./fixtures/issue-461/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issues-442-446/distribution.cjs'),root=path.resolve(__dirname,'..');
 const artifacts=require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts;
 assert.equal(layer.validate({artifacts}),true);assert.equal(layer.validate414Snapshot({artifacts}),true);
 for(const file of ['scripts/forge-unit-sidecar.js','scripts/forge-issue-407-distribution.test.js']){

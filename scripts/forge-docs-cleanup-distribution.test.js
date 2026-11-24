@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
-const ROOT=path.resolve(__dirname,'..'),layer=require('./fixtures/docs-cleanup/distribution.cjs'),parent=require('./fixtures/issues-457-458/distribution.cjs');
+const ROOT=path.resolve(__dirname,'..'),successor=require('./fixtures/issue-461/distribution.cjs'),layer=successor.docsCleanupView,parent=require('./fixtures/issues-457-458/distribution.cjs');
 const hash=b=>crypto.createHash('sha256').update(b).digest('hex'),read=f=>fs.readFileSync(path.join(ROOT,f)),data=layer.docsCleanupLayer;
 assert.equal(data.base_revision,'b8f1df6d0020d0a8fb0d7d2ecdcdd7027459445e');
 assert.equal(data.provenance.consumer_paths.length,34);
@@ -91,7 +91,7 @@ for(const [method,args]of [['after',['files',changed,prior]],['readme',['foreign
 }
 const ownReadme=path.join(ROOT,'scripts/fixtures/docs-cleanup/README.md'),originalReadme=fs.readFileSync(ownReadme),originalStat=fs.lstatSync(ownReadme),probe=Buffer.concat([originalReadme,Buffer.from('\nowned README negative '+crypto.randomUUID()+'\n')]);
 let rejectedReadmeCalls=0;
-try{parent.readme=()=>{rejectedReadmeCalls++;return 'ancestor should not run';};fs.writeFileSync(ownReadme,probe);assert.throws(()=>layer.readme('caller text'),/docs cleanup exact current README/);assert.equal(rejectedReadmeCalls,0);}
+try{parent.readme=()=>{rejectedReadmeCalls++;return 'ancestor should not run';};fs.writeFileSync(ownReadme,probe);assert.throws(()=>successor.readme('caller text'),/issue461 immutable published fixture scripts\/fixtures\/docs-cleanup\/README\.md/);assert.equal(rejectedReadmeCalls,0);assert.throws(()=>require('./fixtures/docs-cleanup/distribution.cjs').readme('caller text'),/docs cleanup exact current README/);assert.equal(rejectedReadmeCalls,0);}
 finally{parent.readme=readmeOriginal;const now=fs.lstatSync(ownReadme);assert.equal(now.dev,originalStat.dev);assert.equal(now.ino,originalStat.ino);assert.equal(hash(fs.readFileSync(ownReadme)),hash(probe));fs.writeFileSync(ownReadme,originalReadme);}
 assert.equal(layer.verifyCleanup(),true,'README exact bytes restored after isolated negative');
 for(const digest of [row.before,row.after,row.attributed_before,row.attributed_after])assert(layer.readme('foreign text').includes(digest),'measured source hashes documented');

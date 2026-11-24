@@ -23,7 +23,7 @@ const TRISTATE = ['yes', 'no', 'unknown'];
 // Same line-ending normalization as the smoke readers: CRLF is not content.
 // Published changelog assertions retain their exact measured predecessor.
 const read = relative => (relative === 'CHANGELOG.md'
-  ? require('./fixtures/docs-cleanup/distribution.cjs').issue455View.issues451452View.projectRead(p => fs.readFileSync(path.join(ROOT, p)))(relative).toString('utf8')
+  ? require('./fixtures/issue-461/distribution.cjs').issue455View.issues451452View.projectRead(p => fs.readFileSync(path.join(ROOT, p)))(relative).toString('utf8')
   : fs.readFileSync(path.join(ROOT, relative), 'utf8')).replace(/\r\n?/g, '\n');
 const count = (text, needle) => text.split(needle).length - 1;
 const sha256 = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
