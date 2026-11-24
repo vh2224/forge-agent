@@ -106,7 +106,7 @@ observed 21.6% is not a guaranteed saving from consolidation.
 
 ## Deferred overlap
 
-`docs/milestone-time-options.md` is no longer deferred: its time options, milestone
+The time options, milestone
 time governance, proven endpoint and linked task are implemented in milestone
 M-20261101111759-opcoes-prazo-milestones (S01 to S03). Operation is described in
 `docs/milestone-time-guide.md` and the canonical contract is
