@@ -1,5 +1,7 @@
 ## Não lançado
 
+- Contexto pessoal concorrente (#460): a leitura valida a contenção dos diretórios sem exigir que o mutex continue existindo entre observações; liberação, nova aquisição e criação concorrente dos diretórios não se tornam erros de namespace. Folhas simbólicas de mutex e pais inválidos continuam recusados.
+
 - Continuidade de milestones em worktree sem commits (#457/#458, itens1,2,4): reparos concluídos usam prova histórica autenticada após novos claims, sessões e reescritas posteriores; a retomada entre unidades preserva o claim e exige conclusão comprovada e quiescência. A recusa preserva a causa, enquanto reparos ativos e novas entregas continuam estritos.
 - Execução, verificação e revisão no worktree (#458, itens5,6,8,15,16): entrada de publicação nativa pelo owner, comandos no CODE_DIR com artefatos no owner, schema explícito para plano de slice legado, revisão Git com arquivos novos sem commit e modelo nativo compatível no fallback do challenger.
 - Globs e verificações no Windows (#458, itens3,9): inventário ignorado contemporâneo vinculado à captura; atribuições iniciais literais de ambiente passam ao child supervisionado. Capturas antigas ambíguas, expansões e cadeias com semântica não demonstrada continuam recusadas.

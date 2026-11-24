@@ -1676,7 +1676,7 @@ async function reviewFixMatrix() {
   await reviewFixMatrix();
 
   // Actual controller/lease lifecycle: Codex selects research, delegates to a
-  // mock Claude CLI, acknowledges completion, then selects plan-slice.
+  // mock Claude CLI, then completes slice research before selecting plan-slice.
   const flowDir = setup(), flow = request(flowDir, 'research-milestone');
   fs.unlinkSync(path.join(flowDir, '.gsd/milestones/M001/slices/S01/S01-PLAN.md'));
   state.write(flowDir, { milestone: 'M001', phase: 'idle', active_slice: 'S01', active_task: '—', auto_mode: 'off' });
@@ -1704,9 +1704,22 @@ async function reviewFixMatrix() {
   const replay = loop.invoke('codex', 'auto', 'complete', { ...input, result: delivered }, selected.snapshot).result;
   assert.strictEqual(replay.action, 'continue', JSON.stringify(replay));
   const next = loop.invoke('codex', 'auto', 'next', input, completion.snapshot).result;
-  assert.strictEqual(next.unit?.type, 'plan-slice', JSON.stringify(next));
+  assert.strictEqual(next.unit?.key, 'research-slice/S01', JSON.stringify(next));
   assert.strictEqual(next.snapshot.workflow_id, flow.workflowId);
   assert.strictEqual(next.host_runtime, 'codex');
+  const sliceResearch = request(flowDir, 'research-slice');
+  assert.strictEqual(sliceResearch.workflowId, flow.workflowId);
+  assert.notStrictEqual(sliceResearch.dispatchId, flow.dispatchId);
+  assert.notStrictEqual(sliceResearch.resultFile, flow.resultFile);
+  write(path.join(flowDir, 'payload.json'), payload(sliceResearch));
+  const sliceDelivered = await unit.runUnitSidecar(sliceResearch);
+  assert.strictEqual(sliceDelivered.status, 'done');
+  const sliceCompleted = loop.invoke('codex', 'auto', 'complete', { ...input, result: sliceDelivered }, next.snapshot).result;
+  assert.strictEqual(sliceCompleted.action, 'continue', JSON.stringify(sliceCompleted));
+  const planNext = loop.invoke('codex', 'auto', 'next', input, sliceCompleted.snapshot).result;
+  assert.strictEqual(planNext.unit?.type, 'plan-slice', JSON.stringify(planNext));
+  assert.strictEqual(planNext.snapshot.workflow_id, flow.workflowId);
+  assert.strictEqual(planNext.host_runtime, 'codex');
   console.log('Bidirectional contracts, artifact replay/conflicts, review-fix delivery matrix, failure classification and Codex forge-auto progression passed (fixture providers only).');
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => {
   accounts.resolveLaunch = originalLookup; xllm.invokeCodexAppServer = originalCodex; xllm.authorizeSidecar = originalAuthorize;

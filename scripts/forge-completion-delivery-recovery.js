@@ -421,6 +421,10 @@ function resumeAndCreateRepair(options = {}) {
 // snapshots never skip a task on their own. This does not edit its checklist.
 function projectVerifiedRepairs(cwd,milestone,inventory,actor) {
   if(!Array.isArray(inventory?.slices))return inventory;
+  // Completed inventories need no repair projection. Keep legacy milestone-close
+  // discovery independent of strict repair-event parsing when no task can change.
+  if(!inventory.slices.some(slice=>(slice.tasks||[]).some(task=>
+    !task.checked && /^T\d+(?:\.\d+)?$/.test(task.id||''))))return inventory;
   const history=require('./forge-runs').get(cwd,milestone)?.owner_resume_history || [];
   if(!Array.isArray(history))fail('delivery-recovery-unproven');
   const events=controller.readEvents(controller.eventsFile(cwd,milestone));

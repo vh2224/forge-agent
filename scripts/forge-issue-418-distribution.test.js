@@ -10,7 +10,7 @@ for(const file of ['scripts/forge-sidecar-identity.js','shared/forge-bidirection
 const bad=structuredClone(layer.issue418Layer);bad.provenance.issues=[];
 assert.throws(()=>layer.validate({artifacts,issue418LayerValue:bad}));
 // A successor must not add another complete ancestral traversal per projection.
-const previous=require('./fixtures/issue-416/distribution.cjs'),originalAfter=previous.after;
+const previous=require('./fixtures/issues-457-458/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issue-416/distribution.cjs'),originalAfter=previous.after;
 let traversals=0;
 try {
  previous.after=(...args)=>{traversals++;return originalAfter(...args);};

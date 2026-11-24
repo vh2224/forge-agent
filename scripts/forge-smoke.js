@@ -9526,7 +9526,7 @@ function smokeReviewModelDiscipline() {
   const repo = path.dirname(SCRIPTS); const files = ['skills/forge-auto/SKILL.md', 'skills/forge-next/SKILL.md', 'skills/forge-task/SKILL.md', 'shared/forge-review.md'];
   for (const rel of files) { const text = readRepoText(path.join(repo, rel)); assert(!/forge-(advocate|reviewer).*model:\s*['"](sonnet|opus|fable|haiku)['"]/.test(text), `${rel}: no literal review model`); }
   const review = readRepoText(path.join(repo, 'shared/forge-review.md'));
-  assert(review.includes('review-config-inert') && review.includes('intra_family_debate') && review.includes('Adversarialidade reduzida'), 'review visibility fields wired');
+  assert(review.includes('forge-review-native-model.js') && review.includes('NATIVE_CHALLENGER_AVAILABLE=true') && review.includes('native model binding refused') && review.includes('intra_family_debate') && review.includes('Adversarialidade reduzida'), 'review visibility fields wired');
   const resolver = fs.readFileSync(path.join(repo, 'scripts/forge-dispatch-resolve.js'), 'utf8');
   assert(resolver.includes("'review-fix': 'standard'"), 'review-fix tier declared');
   assert((review + readRepoText(path.join(repo, 'skills/forge-auto/SKILL.md')) + readRepoText(path.join(repo, 'skills/forge-next/SKILL.md')) + readRepoText(path.join(repo, 'skills/forge-task/SKILL.md'))).split('--unit-type review-fix').length - 1 === 4, 'four review-fix resolver sites');
@@ -10372,7 +10372,7 @@ function smokeReviewAgentUnavailable() {
     // the gate, one naming the only condition under which it may still be emitted. Added
     // when DEFENSE_FILE made a truncated defense recoverable instead of total loss.
     ['review-advocate-unavailable', { 'shared/forge-dispatch.md': 1, 'shared/forge-review.md': 9 }],
-    ['review-challenger-unavailable', { 'shared/forge-dispatch.md': 1, 'shared/forge-review.md': 5 }],
+    ['review-challenger-unavailable', { 'shared/forge-dispatch.md': 1, 'shared/forge-review.md': 7 }],
     ['review-rebuttal-unavailable', { 'shared/forge-dispatch.md': 1, 'shared/forge-review.md': 3 }],
   ];
   for (const [needle, expected] of REASONS) {

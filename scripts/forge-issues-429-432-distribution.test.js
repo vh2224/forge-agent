@@ -1,7 +1,7 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
 const layer=require('./fixtures/issues-457-458/distribution.cjs');
-const parent=require('./fixtures/issues-420-424/distribution.cjs'),root=path.resolve(__dirname,'..');
+const parent=require('./fixtures/issues-457-458/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issues-420-424/distribution.cjs'),root=path.resolve(__dirname,'..');
 const artifacts=require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts;
 assert.equal(layer.validate({artifacts}),true);assert.equal(layer.validate414Snapshot({artifacts}),true);
 for(const file of ['scripts/forge-protected-owner-activity.js','scripts/forge-prompt.js','shared/templates/dispatch/plan-slice.md']){

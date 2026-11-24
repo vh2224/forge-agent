@@ -37,7 +37,113 @@ function fixture() {
   return { root, project, home, otherHome, options, work, bind, env,
     cleanup() { fs.rmSync(root, { recursive: true, force: true }); } };
 }
+function testMutexLeafNamespaceObservation() {
+  const script = String.raw`
+const fs=require('fs'),path=require('path'),os=require('os'),assert=require('assert/strict'),crypto=require('crypto');
+const scripts=process.argv[1],temporary=fs.realpathSync.native(os.tmpdir());
+const root=fs.realpathSync.native(fs.mkdtempSync(path.join(temporary,'forge-personal-mutex-'))),marker=crypto.randomUUID();
+fs.writeFileSync(path.join(root,'.fixture-owner'),marker,{flag:'wx'});
+const savedEnv={...process.env},native={exists:fs.existsSync,lstat:fs.lstatSync};let held=null,lock=null,restoreMode=null;
+try {
+ const bootHome=path.join(root,'boot-home');fs.mkdirSync(bootHome);
+ Object.assign(process.env,{HOME:bootHome,USERPROFILE:bootHome,CODEX_HOME:path.join(bootHome,'.codex'),CLAUDE_CONFIG_DIR:path.join(bootHome,'.claude'),FORGE_HOME:path.join(root,'forge'),FORGE_KEYCHAIN_DISABLED:'1'});
+ for(const file of ['forge-personal-context.js','forge-lock.js','forge-home.js'])assert.equal(require.cache[require.resolve(path.join(scripts,file))],undefined,'isolated child imports only');
+ const personal=require(path.join(scripts,'forge-personal-context.js'));lock=require(path.join(scripts,'forge-lock.js'));
+ let permissionObserved=false;const verified=[];
+ for(const scenario of ['parents-born','locks-born']) {
+  const home=path.join(root,scenario),project=path.join(home,'project');fs.mkdirSync(project,{recursive:true});
+  const namespace=path.join(home,'.forge-personal'),gsd=path.join(namespace,'.gsd'),parent=path.join(gsd,'.locks');
+  const options={project,cwd:project,userHome:home,env:{HOME:home,USERPROFILE:home,FORGE_HOME:process.env.FORGE_HOME}},read=()=>personal.readPersonalSnapshot(options);
+  assert.equal(read().reason,'no-bindings','before namespace exists');
+  assert.equal(native.exists(namespace),false);
+  if(scenario==='locks-born')fs.mkdirSync(gsd,{recursive:true});
+  let born=false;
+  fs.existsSync=function(file){
+   const actual=native.exists.call(fs,file);
+   if(!born&&!actual&&typeof file==='string'&&path.resolve(file)===path.resolve(parent)){
+    born=true;fs.mkdirSync(gsd,{recursive:true});held=lock.acquireSync(namespace,'context');assert(lock.assertOwned(held));
+   }
+   return actual;
+  };
+  let observed;
+  try{observed=read();}finally{fs.existsSync=native.exists;}
+  assert(born,'real acquisition follows the last actual parent absence');
+  assert.equal(observed.status,'ok');assert.equal(observed.reason,'no-bindings');assert(lock.assertOwned(held));
+  assert.equal(native.exists(path.join(namespace,'context.json')),false);
+  assert.equal(lock.releaseHandle(held).ok,true);held=null;verified.push(scenario);
+ }
+ for(const scenario of ['disappear','contained-parent-alias','reacquired-leaf','second-release','dangling-leaf','escaped-leaf','changed-parent','non-directory-parent','permission-parent']) {
+  const home=path.join(root,scenario),project=path.join(home,'project');fs.mkdirSync(project,{recursive:true});
+  const namespace=path.join(home,'.forge-personal'),gsd=path.join(namespace,'.gsd'),parent=path.join(gsd,'.locks'),leaf=path.join(parent,'context');
+  const options={project,cwd:project,userHome:home,env:{HOME:home,USERPROFILE:home,FORGE_HOME:process.env.FORGE_HOME}},read=()=>personal.readPersonalSnapshot(options);
+  assert.equal(read().reason,'no-bindings');fs.mkdirSync(gsd,{recursive:true});
+  if(scenario==='contained-parent-alias'){const target=path.join(namespace,'private-locks');fs.mkdirSync(target);fs.symlinkSync(target,parent,process.platform==='win32'?'junction':'dir');}
+  held=lock.acquireSync(namespace,'context');assert(lock.assertOwned(held));assert.equal(read().reason,'no-bindings');
+  let released=false,changed=false,permission=false,secondReleased=false;
+  function atObservation(file){
+   if(released||typeof file!=='string'||path.resolve(file)!==path.resolve(leaf))return;
+   released=true;const result=lock.releaseHandle(held);assert.equal(result.ok,true);assert.equal(result.reason,'released');held=null;
+   if(scenario==='dangling-leaf'||scenario==='escaped-leaf'){
+    const target=path.join(root,scenario==='dangling-leaf'?'absent-target':'outside-namespace');
+    if(scenario==='escaped-leaf')fs.mkdirSync(target);
+    fs.symlinkSync(target,leaf,process.platform==='win32'?'junction':'dir');changed=true;
+   }else if(scenario==='changed-parent'){
+    fs.renameSync(parent,parent+'.old');fs.mkdirSync(parent);changed=true;
+   }else if(scenario==='non-directory-parent'){
+    fs.rmdirSync(parent);fs.writeFileSync(parent,'not a directory\n');changed=true;
+   }else if(scenario==='permission-parent'&&process.platform!=='win32'&&typeof process.getuid==='function'&&process.getuid()!==0){
+    const mode=fs.statSync(parent).mode&0o777;fs.chmodSync(parent,0);restoreMode={parent,mode};
+    try{native.lstat(leaf);}catch(error){permission=error.code==='EACCES';}
+    if(!permission){fs.chmodSync(parent,mode);restoreMode=null;}
+    permissionObserved=permission;
+   }
+  }
+  fs.existsSync=function(file){const value=native.exists.call(fs,file);if(value)atObservation(file);return value;};
+  fs.lstatSync=function(file,...args){
+   // A real new holder arrives before the fresh physical leaf observation.
+   if(released&&!changed&&['reacquired-leaf','second-release'].includes(scenario)&&typeof file==='string'&&path.resolve(file)===path.resolve(leaf)){
+    changed=true;held=lock.acquireSync(namespace,'context');assert(lock.assertOwned(held));
+   }
+   const value=native.lstat.call(fs,file,...args);
+   if(released&&changed&&held&&scenario==='second-release'&&!secondReleased&&typeof file==='string'&&path.resolve(file)===path.resolve(leaf)){
+    assert(value.isDirectory()&&!value.isSymbolicLink(),'fresh real directory was actually observed');
+    secondReleased=true;const release=lock.releaseHandle(held);assert.equal(release.ok,true);assert.equal(release.reason,'released');held=null;
+   }
+   atObservation(file);return value;
+  };
+  let observed;
+  try{observed=read();}finally{fs.existsSync=native.exists;fs.lstatSync=native.lstat;if(restoreMode){fs.chmodSync(restoreMode.parent,restoreMode.mode);restoreMode=null;}}
+  assert(released,'real release seam exercised '+scenario);
+  const harmless=['disappear','contained-parent-alias','reacquired-leaf','second-release'].includes(scenario)||scenario==='permission-parent'&&!permission;
+  if(harmless){assert.equal(observed.status,'ok');assert.equal(observed.reason,'no-bindings');}
+  else{assert.equal(observed.status,'error',scenario);assert.equal(observed.reason,'namespace-invalid',scenario);}
+  if(['reacquired-leaf','second-release','dangling-leaf','escaped-leaf','changed-parent','non-directory-parent'].includes(scenario))assert(changed,'real interleaving state exercised '+scenario);
+  if(scenario==='second-release')assert(secondReleased,'real second release follows fresh lstat');
+  if(held){assert.equal(lock.releaseHandle(held).ok,true);held=null;}
+  assert.equal(native.exists(path.join(namespace,'context.json')),false,'no personal bindings or payload created');
+  verified.push(scenario);
+ }
+ console.log(JSON.stringify({verified,permission_denial_observed:permissionObserved,unobserved:permissionObserved?[]:['effective EACCES control unavailable on this platform/identity'],real_lock_release:true,personal_bindings_created:0}));
+}finally{
+ fs.existsSync=native.exists;fs.lstatSync=native.lstat;if(restoreMode)fs.chmodSync(restoreMode.parent,restoreMode.mode);
+ if(held&&lock)assert.equal(lock.releaseHandle(held).ok,true);
+ process.env=savedEnv;const physical=fs.realpathSync.native(root);assert.equal(physical,root);assert.equal(path.dirname(physical),temporary);assert.equal(fs.readFileSync(path.join(root,'.fixture-owner'),'utf8'),marker);fs.rmSync(physical,{recursive:true});
+}
+`;
+  const result = require('child_process').spawnSync(process.execPath, ['-e', script, __dirname], {
+    env: { ...process.env }, encoding: 'utf8', windowsHide: true, timeout: 30000, maxBuffer: 1024 * 1024,
+  });
+  assert.strictEqual(result.status, 0, result.stderr || result.stdout);
+  const proof = JSON.parse(result.stdout.trim());
+  assert.strictEqual(proof.real_lock_release, true);
+  assert.strictEqual(proof.personal_bindings_created, 0);
+  assert.strictEqual(proof.verified.length, 11);
+  console.log('PASS personal mutex disappearance, contained parent alias and real-state refusal controls; effective EACCES observed: ' + proof.permission_denial_observed);
+}
+
+
 async function main() {
+  testMutexLeafNamespaceObservation();
   const f = fixture();
   try {
     const a = f.work('TASK-001'); f.work('TASK-002');
