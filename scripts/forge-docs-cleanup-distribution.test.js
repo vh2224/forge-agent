@@ -6,6 +6,20 @@ assert.equal(data.base_revision,'b8f1df6d0020d0a8fb0d7d2ecdcdd7027459445e');
 assert.equal(data.provenance.consumer_paths.length,34);
 assert.equal(Object.keys(data.historical_fixtures).length,224,'all published ancestors, including unchanged457, retained');
 assert.equal(layer.verifyCleanup(),true);
+const rawStorage=read('scripts/fixtures/docs-cleanup/distribution-delta.json'),storage=JSON.parse(rawStorage),capsule=storage.historical_fixtures;
+assert(!/forge-agent-prefs\.md/i.test(rawStorage.toString('utf8')),'encoded inventory has zero literal legacy filename mentions');
+assert.equal(hash(JSON.stringify(data)),'ea37ef4c2c5c319b442a2e3ee3828e3778264d9d5b812dd8bb71c280bd6ee799','complete public logical data unchanged from689');
+assert.equal(hash(JSON.stringify(data.historical_fixtures)),'ff568d3e2b3ff71fea7afc4795dfe995bb98972f7439d919bcd9418242155c16','exact original224-member JSON preimage');
+assert.equal(Buffer.byteLength(JSON.stringify(data.historical_fixtures)),32481);
+assert.deepEqual(layer.decodeHistoricalFixtures(capsule),data.historical_fixtures);
+for(const mutate of [v=>{v.encoding='future';},v=>{v.extra=true;},v=>{v.sha256='0'.repeat(64);},v=>{v.bytes++;},v=>{v.count--;},v=>{v.gzip_base64+=' ';}]){
+ const forged=structuredClone(capsule);mutate(forged);assert.throws(()=>layer.decodeHistoricalFixtures(forged),'foreign capsule is not current-state authority');
+}
+assert.throws(()=>layer.decodeHistoricalFixtures({...capsule,bytes:128*1024+1}),/decoded inventory bound/);
+assert.throws(()=>layer.decodeHistoricalFixtures({...capsule,gzip_base64:Buffer.alloc(64*1024+1).toString('base64')}),/compressed inventory bound/);
+const bomb=require('node:zlib').gzipSync(Buffer.alloc(128*1024+1));
+assert.throws(()=>layer.decodeHistoricalFixtures({...capsule,bytes:128*1024,gzip_base64:bomb.toString('base64')}),'actual stream output exceeds the hard decoded bound');
+
 const proposal=read('scripts/fixtures/docs-cleanup/proposal.md');
 assert.equal(proposal.length,13754);
 assert.equal(hash(proposal),'fc0b24c8eac217b8e8a263a44ed10f5bad2b1ac942447160237bbee37b487d51');
@@ -25,6 +39,17 @@ try{
  const negative=options=>{const before=calls;assert.throws(()=>layer.validate(options));assert.equal(calls,before,'current refusal precedes ancestor call');};
  const metadata=structuredClone(data);metadata.files[retired[0]].after='0'.repeat(64);negative({docsCleanupLayerValue:metadata});
  const future=structuredClone(data);future.files['docs/foreign.md']=future.files[retired[0]];negative({docsCleanupLayerValue:future});
+ // Physical storage tamper is rejected both warm and on a real cold import,
+ // before the predecessor module is loaded. This is a declared fourth probe.
+ const storageFile=path.join(ROOT,'scripts/fixtures/docs-cleanup/distribution-delta.json'),storageStat=fs.lstatSync(storageFile),forgedStorage=structuredClone(storage);
+ forgedStorage.historical_fixtures.count--;
+ const forgedStorageBytes=Buffer.from(JSON.stringify(forgedStorage,null,2)+'\n');
+ try{
+  fs.writeFileSync(storageFile,forgedStorageBytes);negative({});
+  const script="const a=require('node:assert/strict');a.throws(()=>require(process.argv[1]),/docs cleanup independently pinned storage/);a.equal(require.cache[require.resolve(process.argv[2])],undefined);process.stdout.write('cold storage refusal before parent\\n');";
+  const child=require('node:child_process').spawnSync(process.execPath,['-e',script,path.join(ROOT,'scripts/fixtures/docs-cleanup/distribution.cjs'),path.join(ROOT,'scripts/fixtures/issues-457-458/distribution.cjs')],{cwd:ROOT,env:process.env,encoding:'utf8',windowsHide:true});
+  assert.equal(child.error,undefined);assert.equal(child.signal,null);assert.equal(child.status,0,child.stderr);assert.equal(child.stdout,'cold storage refusal before parent\n');
+ }finally{const now=fs.lstatSync(storageFile);assert.equal(now.dev,storageStat.dev);assert.equal(now.ino,storageStat.ino);assert.equal(hash(fs.readFileSync(storageFile)),hash(forgedStorageBytes));fs.writeFileSync(storageFile,rawStorage);}
  // Physical inventory controls are synchronous and restore their exact owned file.
  // This test is a temporary source writer; endpoint equality is not a no-write claim.
  for(const dir of ['scripts/fixtures/docs-cleanup','scripts/fixtures']){

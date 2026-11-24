@@ -1,9 +1,9 @@
 'use strict';
 // Test-only successor. Published fixtures and production modules stay unchanged.
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),zlib=require('node:zlib'),assert=require('node:assert/strict');
-const ROOT=path.resolve(__dirname,'../../..'),OWN='scripts/fixtures/docs-cleanup',data=require('./distribution-delta.json');
-const PIN='ea37ef4c2c5c319b442a2e3ee3828e3778264d9d5b812dd8bb71c280bd6ee799',hash=b=>crypto.createHash('sha256').update(b).digest('hex');
-const previous=require('../issues-457-458/distribution.cjs');
+const ROOT=path.resolve(__dirname,'../../..'),OWN='scripts/fixtures/docs-cleanup',stored=require('./distribution-delta.json');
+const PIN='ea37ef4c2c5c319b442a2e3ee3828e3778264d9d5b812dd8bb71c280bd6ee799',STORAGE_PIN='45a2d39c1b7289cd7d87a0db45b96b1da5f306a35540bfde19c6d89975b9a613',hash=b=>crypto.createHash('sha256').update(b).digest('hex');
+
 function target(file,absent=false){
  assert(typeof file==='string'&&!path.isAbsolute(file)&&!/[\\:\x00-\x1f]/.test(file));
  const parts=file.split('/');assert(parts.every(p=>p&&p!=='.'&&p!=='..'));
@@ -25,9 +25,35 @@ function read(file){
   assert.equal(target(file),name);return b.subarray(0,n);
  }finally{fs.closeSync(fd);}
 }
+// Storage is encoded historical provenance; the public logical224-map is unchanged.
+const MAX_INVENTORY_BYTES=128*1024,MAX_INVENTORY_GZIP_BYTES=64*1024;
+function decodeHistoricalFixtures(capsule){
+ assert(capsule&&typeof capsule==='object'&&!Array.isArray(capsule),'docs cleanup inventory capsule');
+ assert.deepEqual(Object.keys(capsule).sort(),['bytes','count','encoding','gzip_base64','sha256']);
+ assert.equal(capsule.encoding,'gzip-base64','docs cleanup inventory encoding');
+ assert(Number.isSafeInteger(capsule.bytes)&&capsule.bytes>0&&capsule.bytes<=MAX_INVENTORY_BYTES,'docs cleanup decoded inventory bound');
+ assert.equal(capsule.count,224,'docs cleanup exact inventory count');assert(/^[a-f0-9]{64}$/.test(capsule.sha256),'docs cleanup inventory hash shape');
+ assert(typeof capsule.gzip_base64==='string'&&capsule.gzip_base64.length<=4*Math.ceil(MAX_INVENTORY_GZIP_BYTES/3),'docs cleanup compressed inventory bound');
+ const packed=Buffer.from(capsule.gzip_base64,'base64');assert(packed.length<=MAX_INVENTORY_GZIP_BYTES,'docs cleanup compressed inventory bound');
+ assert.equal(packed.toString('base64'),capsule.gzip_base64,'docs cleanup canonical inventory base64');
+ const bytes=zlib.gunzipSync(packed,{maxOutputLength:capsule.bytes});assert.equal(bytes.length,capsule.bytes,'docs cleanup exact inventory bytes');
+ assert.equal(hash(bytes),capsule.sha256,'docs cleanup exact inventory hash');
+ const result=JSON.parse(bytes.toString('utf8'));assert(result&&typeof result==='object'&&!Array.isArray(result));
+ assert.equal(Object.keys(result).length,capsule.count,'docs cleanup decoded inventory count');assert.equal(JSON.stringify(result),bytes.toString('utf8'),'docs cleanup canonical inventory JSON');
+ return result;
+}
+function checkStorage(){
+ assert.equal(hash(JSON.stringify(stored)),STORAGE_PIN,'docs cleanup independently pinned storage');
+ assert.equal(read(OWN+'/distribution-delta.json').toString('utf8'),JSON.stringify(stored,null,2)+'\n','docs cleanup exact metadata file');
+}
+// Both authorities are checked before loading any predecessor fixture.
+checkStorage();
+const data={...stored,historical_fixtures:decodeHistoricalFixtures(stored.historical_fixtures)};
+assert.equal(hash(JSON.stringify(data)),PIN,'docs cleanup independently pinned logical metadata');
+const previous=require('../issues-457-458/distribution.cjs');
 function check(value=data){
+ checkStorage();
  assert.equal(hash(JSON.stringify(value)),PIN,'docs cleanup independently pinned metadata');
- assert.equal(read(OWN+'/distribution-delta.json').toString('utf8'),JSON.stringify(data,null,2)+'\n','docs cleanup exact metadata file');
  return value;
 }
 function before(row,bytes){
@@ -108,5 +134,5 @@ function view(object,current=false){
  return result;
 }
 const api=view(previous,true);
-Object.assign(api,{docsCleanupLayer:data,verifyCleanup,projectCleanupRead,baselineView:view(previous)});
+Object.assign(api,{decodeHistoricalFixtures,docsCleanupLayer:data,verifyCleanup,projectCleanupRead,baselineView:view(previous)});
 module.exports=api;
