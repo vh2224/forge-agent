@@ -305,6 +305,10 @@ function verifyCompletedRepair(options, historical) {
   catch { fail('delivery-recovery-event-unproven'); }
   const eventKeys = new Set();
   for (const [index,event] of events.entries()) {
+    // #461: the same stream carries the orchestrator-side records of forge-auto § 6a
+    // (no sequence, no idempotency key). The controller numbers by stream position,
+    // so they are skipped here; every keyed controller event stays strict.
+    if (event && typeof event === 'object' && !Object.hasOwn(event, 'sequence') && !Object.hasOwn(event, 'idempotency_key')) continue;
     if (!event || event.sequence !== index + 1 || typeof event.idempotency_key !== 'string' || !event.idempotency_key
         || eventKeys.has(event.idempotency_key)) fail('delivery-recovery-event-unproven');
     eventKeys.add(event.idempotency_key);

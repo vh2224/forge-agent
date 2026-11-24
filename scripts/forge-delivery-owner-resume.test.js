@@ -90,6 +90,23 @@ for(const host of eventOnly||schemaOnly?['codex']:['claude','codex'])for(const a
  rejectStream(rows=>{[rows[0],rows[1]]=[rows[1],rows[0]];});
  rejectStream(rows=>{const original=rows.findIndex(row=>row.idempotency_key===beginKey+':complete'),repairBegin=rows.findIndex(row=>row.idempotency_key===started.begin_key);[rows[original],rows[repairBegin]]=[rows[repairBegin],rows[original]];rows.forEach((row,index)=>{row.sequence=index+1;});});
  rejectStream(rows=>{rows.push({...rows.at(-1),sequence:rows.length+1});});
+ // #461: forge-auto § 6a appends orchestrator records (no sequence, no key) to this
+ // same stream and the controller numbers by stream position. Interleaved records
+ // are accepted; a keyed row stays strict and a half-shaped row still refuses.
+ function interleave(rows){
+  const record=unit=>({ts:new Date(base).toISOString(),unit,agent:'forge-executor',milestone,status:'done',summary:'orchestrator record'});
+  const out=[record('estimate-milestone/'+milestone)];
+  rows.forEach((row,index)=>{out.push(row);if(index%2===1)out.push(record(String(row.idempotency_key)));});
+  out.forEach((row,index)=>{if(Object.hasOwn(row,'idempotency_key'))row.sequence=index+1;});
+  return out;
+ }
+ {const mixed=interleave(eventsBytes.toString('utf8').trimEnd().split('\n').map(JSON.parse));
+  fs.writeFileSync(eventsFile,mixed.map(row=>JSON.stringify(row)).join('\n')+'\n');
+  assert.equal(readOnlyChoose().unit.id,'T02','interleaved orchestrator records do not reselect the repaired task');count++;
+  fs.writeFileSync(eventsFile,eventsBytes);}
+ rejectStream(rows=>{const mixed=interleave(rows);rows.splice(0,rows.length,...mixed);rows[0].sequence=1;});
+ rejectStream(rows=>{const mixed=interleave(rows);rows.splice(0,rows.length,...mixed);rows[0].idempotency_key='orchestrator-without-sequence';});
+ rejectStream(rows=>{const mixed=interleave(rows);const keyed=mixed.findIndex(row=>row.idempotency_key===started.begin_key);mixed[keyed].sequence+=1;rows.splice(0,rows.length,...mixed);});
  const baselineFile=path.join(f.owner,files.base,'.delivery-verification-'+repair.scope.original_sha256+'.json'),baselineBytes=fs.readFileSync(baselineFile);
  fs.unlinkSync(baselineFile);const absent=readOnlyChoose();assert.equal(absent.unit.id,'T01');assert(absent.delivery_repair_diagnostics.some(row=>row.reason_code==='delivery-recovery-baseline-unproven'));count++;
  fs.writeFileSync(baselineFile,baselineBytes,{flag:'wx'});assert.equal(choose().unit.id,'T02');
