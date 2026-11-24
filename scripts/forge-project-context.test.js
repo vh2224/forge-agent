@@ -63,12 +63,12 @@ for (const relative of active) {
   checkLinks(path.join(options.projectRoot, relative), file => projection.get(path.resolve(file)), file => projection.has(path.resolve(file)));
 }
 reconstruct(file => claude.stripOriginHeader(projection.get(path.resolve(options.projectRoot, file))));
-const successor = require('./fixtures/issues-457-458/distribution.cjs');
+const successor = require('./fixtures/docs-cleanup/distribution.cjs');
 const currentSmoke = read('scripts/forge-smoke.js');
 assert.doesNotThrow(() => successor.previousSmoke(currentSmoke));
 assert.doesNotThrow(() => successor.predecessorSmoke(currentSmoke));
 const historicalSmoke = require('zlib').gunzipSync(Buffer.from(successor.projectContextLayer.files['scripts/forge-smoke.js'].before_gzip_base64, 'base64')).toString('utf8');
-const historicalDistribution = require('./fixtures/issues-457-458/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issues-434-436/distribution.cjs');
+const historicalDistribution = require('./fixtures/docs-cleanup/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issues-434-436/distribution.cjs');
 assert.doesNotThrow(() => historicalDistribution.previousSmoke(historicalSmoke));
 assert.doesNotThrow(() => historicalDistribution.predecessorSmoke(historicalSmoke));
 assert.throws(() => successor.previousSmoke(historicalSmoke), /unrecognized smoke changes: project context measured source/);

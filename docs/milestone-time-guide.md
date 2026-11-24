@@ -5,7 +5,7 @@ M-20261101111759-opcoes-prazo-milestones. O contrato canônico, distribuído aos
 hosts (Claude e Codex), é `shared/forge-milestone-time.md`; este guia explica o
 fluxo de operação e não substitui o contrato. Texto de guia, de skill ou de JSON
 importado não concede autoridade, não aprova extensão e não substitui a guarda
-executável. A proposta original fica em `docs/milestone-time-options.md`.
+executável.
 
 ## Adesão e opções de prazo
 

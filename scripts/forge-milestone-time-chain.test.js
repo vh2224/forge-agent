@@ -665,7 +665,7 @@ async function hostChain(host) {
 // ---------------------------------------------------------------------------
 // Published changelog assertions retain their exact measured predecessor.
 function read(relative) { return relative === 'CHANGELOG.md'
-  ? require('./fixtures/issues-457-458/distribution.cjs').issue455View.issues451452View.projectRead(p => fs.readFileSync(path.join(SOURCE, p)))(relative).toString('utf8')
+  ? require('./fixtures/docs-cleanup/distribution.cjs').issue455View.issues451452View.projectRead(p => fs.readFileSync(path.join(SOURCE, p)))(relative).toString('utf8')
   : fs.readFileSync(path.join(SOURCE, relative), 'utf8'); }
 function sectionOf(text, heading) {
   const from = text.indexOf('\n' + heading + '\n');
@@ -762,8 +762,8 @@ function documentationGroup() {
   assert.equal(sha(Buffer.from(planning.slice(0, at), 'utf8')), PLANNING_PREFIX_SHA, 'everything before Deferred overlap is the immutable preimage');
   const overlap = planning.slice(at);
   assert.ok(overlap.includes(PANEL_SENTENCE), 'the panel distribution qualification is preserved verbatim');
-  assert.ok(overlap.includes('`docs/milestone-time-options.md` is no longer deferred'), 'the time feature is no longer called deferred');
-  assert.ok(!/milestone-time-options\.md` remains deferred/.test(overlap));
+  assert.ok(overlap.includes('are implemented in milestone\nM-20261101111759-opcoes-prazo-milestones (S01 to S03)'), 'the time feature is documented as implemented');
+  assert.ok(!overlap.includes('docs/milestone-time-options.md'), 'the retired proposal is not an active documentation reference');
   for (const reference of ['`docs/milestone-time-guide.md`', '`shared/forge-milestone-time.md`', '`CHANGELOG.md`']) assert.ok(overlap.includes(reference), reference);
   assert.ok(overlap.includes('Human UAT and actual\nfuture latency improvements require their own evidence.'));
   const changelog = read('CHANGELOG.md');
