@@ -1,7 +1,7 @@
 'use strict';
 // One additive measured layer; published predecessor fixtures stay immutable.
 const fs=require('fs'),path=require('path'),crypto=require('crypto'),zlib=require('zlib'),assert=require('node:assert/strict');
-const data=require('./distribution-delta.json'),ROOT=path.resolve(__dirname,'../../..'),PIN='2b3e492783316059aac6946ef69d0324badf90cffce123febb64891227b5467a';
+const data=require('./distribution-delta.json'),ROOT=path.resolve(__dirname,'../../..'),PIN='0a2d569fac4b72f4150a93dee40167fe85ec8254c06ddf32bdb6416e179f0886';
 const hash=b=>crypto.createHash('sha256').update(b).digest('hex'),read=file=>fs.readFileSync(path.join(ROOT,file));
 // Private authenticated historical graph. No writes to Node require.cache or
 // Module._cache; the real current guard and its audit closure stay unchanged.

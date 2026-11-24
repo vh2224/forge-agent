@@ -109,7 +109,7 @@ console.log('PASS #381/#346 native-effort terminal: independent pins, four citat
  const review=JSON.parse(fs.readFileSync(path.join(root,'scripts/fixtures/review-policy/distribution-delta.json'))),file='skills/forge-next/SKILL.md',historic=review.files[file].after,actual=hash(fs.readFileSync(path.join(root,file)));
  assert.notStrictEqual(historic,actual);assert.strictEqual(layer.after('files',file,historic),actual);assert.strictEqual(layer.after('files',file,historic),actual);
  assert.throws(()=>layer.after('files',file,'0'.repeat(64)),'unknown historical hash remains refused');
- const guard=require(path.join(root,'scripts/forge-dispatch-source-guard.js')),current=guard.SOURCE_REGISTRY,old=layer.previousRegistry(current);assert.equal(current.length,254);assert.equal(old.length,248);
+ const guard=require(path.join(root,'scripts/forge-dispatch-source-guard.js')),current=guard.SOURCE_REGISTRY,old=layer.previousRegistry(current);assert.equal(current.length,256);assert.equal(layer.projectRegistry(current).length,254);assert.equal(old.length,248);
  assert.deepStrictEqual(layer.previousRegistry(current),old,'repeated projection changes neither source nor history');
  assert.throws(()=>layer.previousRegistry(current.slice(1)),'omitted current registry row');
  assert.throws(()=>layer.previousRegistry([...current,current[0]]),'extra/duplicated current registry row');
@@ -175,7 +175,7 @@ console.log('PASS #376 initialization bounded span: '+initialization376Cases+' d
 // #376 exact full registry: current254 -> native predecessor252 -> history248.
 {
  const rows=require(path.join(root,'scripts/forge-dispatch-source-guard.js')).SOURCE_REGISTRY;
- assert.equal(rows.length,254);assert.equal(layer.previousRegistry(rows).length,248);
+ assert.equal(rows.length,256);assert.equal(layer.projectRegistry(rows).length,254);assert.equal(layer.previousRegistry(rows).length,248);
  for(const changed of [rows.slice(1),[...rows,rows[0]],rows.map((r,i)=>i?{...r}:{...r,classification:'foreign'})])assert.throws(()=>layer.previousRegistry(changed));
  for(const mutate of [v=>{v.registry.after_rows[0].classification='foreign';v.registry.after_sha256=hash(JSON.stringify(v.registry.after_rows));},v=>{v.registry.before_rows[0].reason+=' forged';v.registry.before_sha256=hash(JSON.stringify(v.registry.before_rows));},v=>{v.registry.foreign=true;}]){const value=structuredClone(layer.ownerRecoveryLayer);mutate(value);assert.throws(()=>layer.previousRegistry(rows,value));}
 }
@@ -201,7 +201,7 @@ for(const file of ['scripts/fixtures/owner-recovery/distribution.cjs','scripts/f
 }
 {
  const rows=require(path.join(root,'scripts/forge-dispatch-source-guard.js')).SOURCE_REGISTRY;
- assert.equal(rows.length,254);assert.equal(layer.ownerRecoveryLayer.registry.before_count,252);assert.equal(layer.previousRegistry(rows).length,248);
+ assert.equal(rows.length,256);assert.equal(layer.projectRegistry(rows).length,254);assert.equal(layer.ownerRecoveryLayer.registry.before_count,252);assert.equal(layer.previousRegistry(rows).length,248);
  for(const changed of [rows.slice(1),[...rows,rows[0]],rows.map((row,i)=>i?row:{...row,classification:'foreign'})]){assert.throws(()=>layer.previousRegistry(changed));requestRetentionCases++;}
 }
 assert.equal(layer.validate({artifacts}),true);
@@ -228,7 +228,7 @@ for(const file of ['scripts/fixtures/request-retention/distribution.cjs','script
 }
 {
  const rows=require(path.join(root,'scripts/forge-dispatch-source-guard.js')).SOURCE_REGISTRY;
- assert.equal(rows.length,254);assert.equal(layer.ownerRecoveryLayer.registry.before_count,252);assert.equal(layer.previousRegistry(rows).length,248);
+ assert.equal(rows.length,256);assert.equal(layer.projectRegistry(rows).length,254);assert.equal(layer.ownerRecoveryLayer.registry.before_count,252);assert.equal(layer.previousRegistry(rows).length,248);
  for(const changed of [rows.slice(1),[...rows,rows[0]],rows.map((row,i)=>i?row:{...row,classification:'foreign'})]){assert.throws(()=>layer.previousRegistry(changed));fullGuardCases++;}
 }
 assert.equal(layer.validate({artifacts}),true);
