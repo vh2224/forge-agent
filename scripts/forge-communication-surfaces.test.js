@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/issue-455/distribution.cjs');
+const unitEntry = require('./fixtures/issues-457-458/distribution.cjs');
 
 // forge-communication-surfaces.test.js — proves the orchestration and status
 // skills follow shared/forge-communication.md by POINTER, not by a second copy;
@@ -759,6 +759,10 @@ function checkSamples(fixture = {}) {
     const raw = sourceBytes[source.file] || fs.readFileSync(path.join(root, source.file));
     const attributedHash = hash(attributedBytes(source.file, () => raw));
     const rawHash = hash(raw);
+    // Only a measured Next successor can supply the corpus historical view; attribution and text stay current.
+    const citationRawHash = source.file === 'skills/forge-next/SKILL.md'
+      ? hash(unitEntry.projectRead(() => raw)(source.file)) : rawHash;
+    const hasMeasuredHistory = source.file === 'skills/forge-next/SKILL.md' && citationRawHash !== rawHash;
     const text = raw.toString('utf8').replace(/\r\n/g, '\n');
     // Strict historical attribution in BOTH sample states: outside its linked blocks the source is the pre-T06 file
     // (#341: or the measured delta after of that declared file, whose before is the pre-T06 value).
@@ -777,13 +781,14 @@ function checkSamples(fixture = {}) {
       }
       assert.strictEqual(typeof current.text, 'string', `${pointer} quotes text`);
       assert(text.includes(current.text), `${pointer}: quotation remains literal in ${source.file}`);
-      assert(current.source.sha256 === attributedHash || current.source.sha256 === rawHash,
+      assert(current.source.sha256 === attributedHash || current.source.sha256 === rawHash
+        || (hasMeasuredHistory && current.source.sha256 === citationRawHash),
         `${pointer}: source.sha256 ${current.source.sha256} is neither the attributed ${attributedHash} nor the raw ${rawHash}`);
       if (current.source.sha256 !== baselineHash) {
         assert(readme.includes(baselineHash) && readme.includes(current.source.sha256), `document actual ${source.file} source hashes`);
       }
       const node341 = delta && delta.samples ? delta.samples.nodes.find(row => row.pointer === pointer) : null;
-      if (node341 && current.source.sha256 === rawHash) {
+      if (node341 && current.source.sha256 === citationRawHash) {
         assert.strictEqual(node341.file, source.file, `#341 sample ${pointer} cites ${source.file}`);
         assert.strictEqual(current.source.sha256, identitySampleAfter(pointer, node341.after), `#341 sample ${pointer} cites the measured after`);
         assert(readme.includes(node341.before) && readme.includes(node341.after), `#341 documented sample ${pointer}`);
@@ -1560,7 +1565,7 @@ function t06Projections() {
     t06Rendered = {
       claude: Object.fromEntries(ALL.map(name => [name, pick(claude, 'Claude', name)])),
       codex: Object.fromEntries(ALL.map(name => [name, pick(codex, 'Codex', name)])),
-      claudeSurfaces: claude.artifacts.map(row => ({ source_id: row.source_id, source: row.source, content: row.content })),
+      claudeSurfaces: claude.artifacts.map(row => ({ ...row })),
     };
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
   return t06Rendered;
@@ -1891,7 +1896,9 @@ t06('two-host-literals-main-exports-and-old-retention', () => {
   assert.deepStrictEqual(normalize(rawSamples), normalize(sampleBytes), 'every other parsed field and text is preserved');
   const rawReadme = `${sampleReadme}\n${rawTask}\n${rawNext}\n`;
   const ok = (label, fixture, state) => { const got = checkSamples({ sourceBytes, ...fixture }); assert.strictEqual(got.state, state, label); return got; };
-  ok('current attributed samples pass', { sampleBytes: attributedSamples }, 'attributed');
+  // This synthetic current-attributed view documents its canonical hashes, as the raw view below does.
+  ok('current attributed samples pass', { sampleBytes: attributedSamples,
+    sampleReadme: `${sampleReadme}\n${attributedOf[taskSource.file]}\n${attributedOf[nextSource.file]}\n` }, 'attributed');
   ok('actual checked-in samples pass', {}, sampleState.state);
   const future = ok('genuine raw re-pin of all four task and next nodes passes', { sampleBytes: rawSamples, sampleReadme: rawReadme }, 'raw-repinned');
   assert.deepStrictEqual(future.repinnedNodes, { [taskSource.file]: 2, [nextSource.file]: 2 }, 'two forge-task and two forge-next nodes re-pinned');

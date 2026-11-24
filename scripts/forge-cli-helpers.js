@@ -207,7 +207,9 @@ Flags:
 
   try {
     if (args['resolve-args']) {
-      const r = resolveRunFromArgs(cwd, args.args || '', { command: args.command });
+      // PowerShell 5.1 drops an explicitly empty native argument. For this
+      // optional text flag only, a valueless --args means the empty input.
+      const r = resolveRunFromArgs(cwd, args.args === true ? '' : (args.args || ''), { command: args.command });
       process.stdout.write(JSON.stringify(r, null, 2) + '\n');
     } else if (args['list-active-summary']) {
       process.stdout.write(listActiveSummary(cwd) + '\n');

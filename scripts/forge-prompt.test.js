@@ -61,6 +61,8 @@ function tempWorkspace(label) {
 }
 
 function test(name, fn) {
+  const match = process.argv.indexOf('--match');
+  if (match !== -1 && !name.includes(process.argv[match + 1] || '\0')) return;
   try {
     fn();
     passed += 1;
@@ -678,6 +680,18 @@ test('inserts the established isolation header directly after WORKING_DIR', () =
   );
 });
 
+test('worktree verification commands bind physical CODE_DIR and owner artifacts separately', () => {
+  const owner = tempWorkspace('verify-owner'), codeDir = tempWorkspace('verify-physical-code');
+  for (const unitType of ['execute-task', 'complete-slice']) {
+    const result = renderPrompt({ ...baseOptions(owner, unitType), isolationMode: 'worktree', branch: 'fixture', codeDir });
+    assert(result.prompt.includes(`--cwd "${codeDir}" --gsd-dir "${owner}/.gsd"`));
+    assert(!result.prompt.includes('{CODE_DIR}'));
+  }
+  const shared = renderPrompt(baseOptions(owner, 'execute-task'));
+  assert(shared.prompt.includes(`--cwd "${owner}" --gsd-dir "${owner}/.gsd"`));
+  assert.throws(() => renderPrompt({ ...baseOptions(owner, 'execute-task'), isolationMode: 'worktree', branch: 'fixture' }), /code_dir is required/);
+});
+
 test('materializes metadata and prompt atomically below .gsd/forge/prompts', () => {
   const cwd = tempWorkspace('materialize');
   const result = materializePrompt({
@@ -694,7 +708,7 @@ test('materializes metadata and prompt atomically below .gsd/forge/prompts', () 
   assert.strictEqual(result.prompt_id, 'dispatch-S01-T01-001');
   assert.strictEqual(result.dispatch_group_id, 'dispatch-S01-T01-001');
   assert.ok(artifact.includes(`input_tokens: ${result.input_tokens}`));
-  assert.ok(artifact.includes('Execute GSD task T01'));
+  assert.ok(artifact.includes('Execute M001/S01/T01.'));
   assert.deepStrictEqual(fs.readdirSync(expectedRoot).filter(name => name.endsWith('.tmp')), []);
 });
 
@@ -929,7 +943,11 @@ test('zero and minimum budgets disable providers and direct data without pruning
       memoryProvider: () => { calls++; throw Error('must not run'); } });
     assert.strictEqual(calls, 0);
     assert(rendered.prompt.includes('Security Checklist'));
-    assert(rendered.prompt.includes('mandatory execution procedure'));
+    assert(rendered.prompt.includes('Execute M001/S01/T01.'));
+    assert(rendered.prompt.includes('Follow mandatory procedure'));
+    assert.strictEqual(rendered.procedure_context.phase, 'execute-task');
+    const mandatory = loadProcedureContext({ cwd, phase: 'execute-task' });
+    assert(rendered.prompt.includes(mandatory.content), 'zero/minimum optional budgets retain the complete canonical execute-task content');
     const direct = renderPrompt({ ...baseOptions(cwd, 'execute-task'), ...setting, memories: 'DROP-ME' });
     assert(!direct.prompt.includes('DROP-ME'));
   }
@@ -1030,7 +1048,7 @@ test('composition reuse rejects forged markers, duplicate modules and canonical 
 test('twelve final prompts deliver canonical core and phase modules once with exact hashes and artifact clauses', () => {
   const cwd = tempWorkspace('mandatory-nine');
   const clauses = {
-    'execute-task': ['execution procedure', 'verification', 'Security Checklist'],
+    'execute-task': ['Execute M001/S01/T01.', 'Follow mandatory procedure', 'verification', 'Security Checklist'],
     'execute-loose-task': ['forge-task-execution.prepare', '.gsd/tasks/', 'SECURITY.md'],
     'discuss-milestone': ['M###-CONTEXT.md', '3-5 unresolved gray areas', 'explicit answer'],
     'discuss-slice': ['S##-CONTEXT.md', '3-5 unresolved gray areas', 'stable ID'],

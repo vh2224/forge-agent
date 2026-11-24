@@ -52,6 +52,8 @@ explicitly supplied ID, bind with --intent explicit-resume before loading existi
 state or handoff artifacts. Inspecting an ID does not bind. Reconcile stale/missing evidence or
 pending decisions before dispatch; preserve prior acceptances. Global locks/census
 remain concurrency guards, never personal selection inputs.
+Personal acceptances must cite immutable question/decision evidence JSON or a stable plan-gate record, never mutable `*-STATE.md` or generated `.gsd/decisions/<M>.md`. Preserve the accepted decision and exact historical hash. Existing stale captures require explicit canonical recapture/reconciliation of that same acceptance; do not ask for the accepted decision again, silently rebind its source, or weaken the stale-source checker.
+
 All references below to STATE mean `.gsd/milestones/{RUN_ID}/{RUN_ID}-STATE.md`.
 RUN_ID is mandatory; historical empty-ID/legacy branches below are unreachable.
 After run/isolation registration, bind idempotently to capture validated worktree aliases.
@@ -695,8 +697,8 @@ execução é governada por `parallelism.claim_gate`).
 
 **Overlap advisory (before complete-slice):** grave o toque desta run e confronte com as demais runs ativas — o sinal existe para ser visto **antes do merge**.
 ```bash
-node "{WORKING_DIR}/scripts/forge-touch.js" --record "{RUN_ID}" --cwd "{WORKING_DIR}" || true
-node "{WORKING_DIR}/scripts/forge-overlap.js" --check --cwd "{WORKING_DIR}" || true
+node "$FORGE_SCRIPTS_DIR/forge-touch.js" --record "{RUN_ID}" --cwd "{WORKING_DIR}" || true
+node "$FORGE_SCRIPTS_DIR/forge-overlap.js" --check --cwd "{WORKING_DIR}" || true
 ```
 Imprima o veredicto ao operador e **siga**. O sinal é advisory: **nunca** bloqueia o `complete-slice`, nunca ordena runs, nunca faz merge. Verdict `inconclusive` significa "não havia o que comparar" e **não** deve ser lido como limpo.
 
@@ -712,7 +714,7 @@ Imprima o veredicto ao operador e **siga**. O sinal é advisory: **nunca** bloqu
    - Challenge → `Agent({ subagent_type: 'forge-reviewer', … })`
    - Defense → `Agent({ subagent_type: 'forge-advocate', … })` — pass `DEFENSE_FILE` (crash rail, `shared/forge-review.md § Step 3`); a defense that comes back missing/short/scoreboard-only is **salvaged from that file** before `review-advocate-unavailable` may be emitted.
    - Rebuttal × `rounds` → `forge-reviewer` in rebuttal mode (DEFENSE injected)
-   - The `model:` of `forge-advocate`/`forge-reviewer` comes exclusively from resolved `$ADVOCATE_ALIAS`/`$CHALLENGER_MODEL`; literals are a violation detected by `forge-review-audit.js`.
+   - The native `model:` of `forge-advocate`/`forge-reviewer` comes exclusively from resolved `$ADVOCATE_ALIAS`/`$NATIVE_CHALLENGER_ALIAS`; `$CHALLENGER_MODEL` belongs only to the external challenger. Preserve its original value as history after fallback; literals are a violation detected by `forge-review-audit.js`.
    - Resolve (Step 5 truth table), write `{S##}-REVIEW.md` (Step 6).
    - **CONCEDED items → fix now (Step 7a):** bind `RF_UNIT_ID` to `{S##}` (or `{M###}-triage` at the milestone triage boundary), then consume **`shared/forge-review.md § Step 7a → Runtime resolver gate`** before the claim gate. The shared section owns the runtime posture; do not reproduce its host/worker leg table here. Its executable caller seam in step mode is:
      ```bash
@@ -1389,6 +1391,15 @@ Use `$MODEL_ID` resolved by Tier Resolution (step 1.5) above. Do NOT look up mod
 
 **Heartbeat — record active worker** before dispatching (same block as `forge-auto/SKILL.md § Heartbeat — record active worker`; replicate the form, do not invent another).
 
+**Existing step run owner before ensure-step-run (issue458).** When argument resolution reports `resume`, use the same canonical owner-resume procedure as forge-auto before the heartbeat block below. Inspect without mutation:
+
+```bash
+OWNER_RESUME=$(node "$FORGE_SCRIPTS_DIR/forge-runs.js" --inspect-owner-resume "$RUN_ID" --observed-owner --host-runtime "$HOST_RUNTIME" ${FORGE_CLAUDE_OWNER_SESSION_ID:+--expected-owner-session "$FORGE_CLAUDE_OWNER_SESSION_ID"} --cwd "$WORKING_DIR") || exit 1
+OWNER_RESUME_SHA=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).record_sha256)" "$OWNER_RESUME")
+```
+
+`same-owner-active` needs no transfer. For `same-owner-inactive`, the trusted host first reconciles processes, receipts and every possible writer root, reusing valid saved output. Only after actually observing workspace quiescence may it invoke `--resume-owner "$RUN_ID" --observed-owner --host-runtime "$HOST_RUNTIME" --expected-record-sha256 "$OWNER_RESUME_SHA" --confirm-workspace-quiescent --cwd "$WORKING_DIR"`. For `transfer-required`, first prove the previous owner and possible writers stopped, then use that same operation with `--confirm-owner-stopped`. These flags attest observations; they are not process proof, and neither inactivity nor standing permission supplies those observations. Preserve a retained completed-unit claim byte for byte. An unknown writer or refused canonical resume blocks dispatch, not independent diagnosis. Only after the operation succeeds may `--ensure-step-run` and heartbeat run; never relax its owner check or ask again for an already authorized transfer. New runs retain their existing ensure-step-run creation path.
+
 Until S01/T02 this skill had **zero** invocations of `forge-runs.js` (measured: `grep -c "forge-runs.js" skills/forge-next/SKILL.md` → `0`), so in step mode `run.worker` was never written and `forge-hook.js::resolveUnitContext` resolved **every** dispatch to `adhoc` — every tool call of every step-mode unit landed in one shared `evidence-…-adhoc.jsonl`. That is cause (a) of IN-2:
 ```bash
 # One spawn (2026-08-24). Step mode NEVER falls back to auto-mode.json (see note
@@ -1508,6 +1519,8 @@ failure and stops; it never recurses into the native call, retries mid-unit, or 
 The sidecar emitter consequently records the actual final `worker_mode:"sidecar"`.
 
 ---
+
+**Fresh milestone execute-task publication (issue458).** For `execute-task` in milestone scope, the owner MUST call `forge-native-execution.run({request, invocationOptions, invokeNative, assertBoundary, assertAuthority, persistDeliveryReceipt, procedureContext: rendered.procedure_context, executionPlanGate})` before the generic native path below. Preserve the selected controller begin/lease, exact route, observed capabilities, plan/security/claim gates and execution contract. `invocationOptions.resolvedDispatch` is the same request route; the callback invokes the actual host tool with the returned arguments unchanged. The owner performs start, supervised native invocation, retained return, root verification and publication. A worker never writes `.gsd`; do not handcraft a successful delivery proof. Only `published:true` permits controller complete. Partial/failure keeps the original manifest/outcome/receipts for canonical stopped-writer recovery/replay, without a second inference or recaptured baseline. When plan is skipped for `auto-defer`, pass the current host-created opaque `executionPlanGate` from the actual observed auto choice; serialized approval/deferred flags are insufficient. The existing exact-scope async adapter reattests the request at the normal gate seams; a missing, forged or foreign binding refuses without inference. Other native phases keep the path below.
 
 **Native dispatch (`WORKER_MODE == native`)** — canonical host form and fallback target.
 Initialize `NATIVE_TO_SIDECAR_COUNT=0` before the first call. The allowance check above is a hard

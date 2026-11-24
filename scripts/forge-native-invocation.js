@@ -149,9 +149,11 @@ function observeClaudeAgentBinding(options) {
   let source;
   try {
     realPath = fs.realpathSync(agentPath);
-    const stat = fs.statSync(realPath);
-    if (!stat.isFile()) throw new Error('not-file');
-    source = fs.readFileSync(realPath, 'utf8');
+    const io = Object.create(fs);
+    io.openSync = file => fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+    const read = require('./forge-autonomy-sources').readBoundedStableFile(realPath, 1024 * 1024, { expectedReal: fs.realpathSync.native(realPath), io });
+    if (read.error || fs.realpathSync(agentPath) !== realPath) throw new Error('source-unmeasured');
+    source = read.buffer.toString('utf8');
   } catch (_) {
     return refusal('claude', 'native-effort-binding-source-unreadable',
       'The supplied Claude agent definition could not be read as a regular file.');

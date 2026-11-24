@@ -37,11 +37,56 @@ function unanchoredProject(options) {
 }
 function paths(options = {}) {
   const home = resolveUserHome(options);
-  const root = path.join(home, '.forge-personal');
-  for (const entry of [root, path.join(root, 'context.json'), path.join(root, '.gsd'), path.join(root, '.gsd', '.locks'), path.join(root, '.gsd', '.locks', 'context')]) {
-    if (fs.existsSync(entry) && !within(canonical(entry), path.join(canonical(home), '.forge-personal'))) throw new Error('personal-namespace-escape');
+  const root = path.join(home, '.forge-personal'), file = path.join(root, 'context.json');
+  const parents = [root, path.join(root, '.gsd'), path.join(root, '.gsd', '.locks')];
+  const pins = [];
+  let boundary;
+  for (const entry of [root, file, ...parents.slice(1)]) {
+    if (!fs.existsSync(entry)) continue;
+    const physical = canonical(entry);
+    boundary = boundary || path.join(canonical(home), '.forge-personal');
+    if (!within(physical, boundary)) throw new Error('personal-namespace-escape');
+    if (parents.includes(entry)) {
+      const link = fs.lstatSync(entry), target = fs.statSync(entry);
+      if (!target.isDirectory()) throw new Error('personal-namespace-parent-invalid');
+      pins.push({ entry, physical, link, target });
+    }
   }
-  return { root, file: path.join(root, 'context.json') };
+  const leaf = path.join(parents[2], 'context');
+  const same = (before, after) => ['dev', 'ino', 'birthtimeMs'].every(field => before[field] === after[field]);
+  const checkParents = () => {
+    for (const pin of pins) {
+      const link = fs.lstatSync(pin.entry), target = fs.statSync(pin.entry);
+      if (!target.isDirectory() || !same(pin.link, link) || !same(pin.target, target)
+          || canonical(pin.entry) !== pin.physical || !within(pin.physical, boundary))
+        throw new Error('personal-namespace-parent-changed');
+    }
+  };
+  const observeLeaf = () => {
+    let stat;
+    try { stat = fs.lstatSync(leaf); }
+    catch (error) { if (error.code === 'ENOENT') return; throw error; }
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('personal-context-lock-invalid');
+    if (pins.length !== parents.length) {
+      // A concurrent first bind can create parents after their absence was
+      // observed. Pin each newly present contained parent once, not a lease.
+      checkParents();
+      for (const entry of parents) {
+        if (pins.some(pin => pin.entry === entry)) continue;
+        const link = fs.lstatSync(entry), target = fs.statSync(entry), physical = canonical(entry);
+        boundary = boundary || path.join(canonical(home), '.forge-personal');
+        if (!target.isDirectory() || !within(physical, boundary)) throw new Error('personal-namespace-parent-invalid');
+        pins.push({ entry, physical, link, target });
+      }
+      checkParents();
+    }
+  };
+  // The literal last segment cannot escape a contained physical parent unless
+  // it is a link. Do not resolve or bind the lifetime/identity of a mutex holder.
+  // Two bounded observations cover release/reacquisition without retrying it.
+  observeLeaf(); checkParents();
+  observeLeaf(); checkParents();
+  return { root, file };
 }
 function readJson(file) {
   try { return { status: 'ok', value: JSON.parse(fs.readFileSync(file, 'utf8')) }; }

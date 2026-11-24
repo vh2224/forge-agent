@@ -646,3 +646,21 @@ Evidence: public builder/CLI coverage for task rows, companion rows, invalid/mix
 The native memory failure receiver converted every value except true to false, losing unknown provenance and accepting malformed values. Preserve explicit true, false and unknown; omitted provenance becomes unknown, and other values refuse before result, receipt or event publication. True continues to require the existing exact native telemetry identity. Existing receipts and replay identities remain unchanged.
 
 Validation:18 public-API cases cover false/unknown/omitted values, nine invalid values, valid true telemetry, telemetry failures, immutable replay and conflicting payload identity. Tests use isolated temporary roots and synthetic telemetry; no provider is called.
+
+## Historical completion and current writer authority remain separate — #457/#458
+
+Problem: a verified repair was projected through the current claim/session and current source hashes. A later task's claim, legitimate owner transfer or authorized source rewrite therefore reselected an already completed task. Worktree execution/review callers also confused artifact ownership with the physical code directory, and source globs treated ordinary ignore rules as inherently unknowable.
+
+Decision: validate historical completions through the immutable repair baseline, committed begin/complete events, run lineage and captured historical delivery. Preserve live actor/claim/current-source checks for active repair and new completion. An ordinary between-unit owner transfer with a retained claim additionally proves that exact claimed unit's authenticated terminal delivery and absence of pending activity, preserving claim bytes. Legacy single-root captures under current structured claims require exact matching physical roots; they cannot prove multiple roots.
+
+Native execution uses an explicit owner-side delivery entry over the existing strict protocol. Verification and review identify CODE_DIR and artifact owner separately; Git review includes nonignored untracked files without staging. New captures bind their ignored-source inventory to revision and workspace; legacy ambiguous captures remain refused. Windows environment promotion supports a closed literal-prefix grammar and refuses semantics it cannot preserve. Acceptance evidence is stable and attributable; strict stale observation is unchanged. External data and command budgets remain declared requirements, not inferred environment.
+
+Evidence: targeted historical-repair/resume/security tests, source-scope and supervised Windows verification tests, native delivery and Git review fixtures, and the integrated real-worktree regression in scripts/forge-issues-457-458-integration.test.js. These are repository checks with simulated providers; independent review, genuine CI, release, installation and consumer acceptance retain their own gates. The numbered disposition is docs/issue-458-checkup.md.
+
+## Personal namespace validation does not bind an ephemeral mutex holder — #460
+
+Problem: another legitimate context operation can release the mutex directory after the namespace reader observes it and before realpath. The resulting ENOENT was reported as namespace-invalid, including during concurrent CLI binds. A private real acquire/release reproducer confirmed that interleaving in the published source.
+
+Decision: validate the contained physical parent namespace and reject symbolic or non-directory lock leaves, without resolving or binding the identity/lifetime of the ephemeral holder. Bounded observations allow legitimate release, reacquisition and initial parent creation; they retain the existing namespace failure distinction for unsafe parents, links and real read errors. This is observed path validation, not OS atomicity or an anti-ABA guarantee.
+
+Verification: deterministic private fixtures exercise actual lock acquisition/release, repeated release, safe contained parent aliases and parent creation, with refusal controls for links, changed/invalid parents and effective permission errors when the platform permits them. The original concurrent CLI-bind regression remains intact. Local checks, independent review and real CI are recorded separately; fixtures do not access the operator profile or invoke a provider.

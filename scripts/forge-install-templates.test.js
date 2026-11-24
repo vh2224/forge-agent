@@ -37,6 +37,24 @@ function treeContains(root, pattern) {
     try { return pattern.test(fs.readFileSync(file, 'utf8')); } catch (_) { return false; }
   });
 }
+function assertDeliveryPrompt(prompt, unitType, codeDir) {
+  if (unitType !== 'execute-task') {
+    for (const token of ['forge-delivery.js', '--owner-root', '--code-dir']) assert(prompt.includes(token), token);
+    return;
+  }
+  assert.match(prompt, /^DELIVERY_MODE: owner-managed-worker-result$/m);
+  assert(prompt.includes(`CODE_DIR: ${path.resolve(codeDir)}`), 'explicit task CODE_DIR');
+  const workerStart = prompt.indexOf('## Worker instructions');
+  const ownerStart = prompt.indexOf('## Owner publication reference');
+  assert(workerStart >= 0 && ownerStart > workerStart, 'separate worker and owner publication sections');
+  const worker = prompt.slice(workerStart, ownerStart);
+  assert.match(worker, /The worker must not create or modify owner \.gsd files/);
+  assert.match(worker, /Return the validated result to the owner instead/);
+  assert.doesNotMatch(worker, /forge-delivery\.js|DELIVERY-INPUT\.json/);
+  const owner = prompt.slice(ownerStart);
+  assert.match(owner, /\[DATA FROM "owner-publication-reference"/);
+  assert.match(owner, /native owner delivery API or the declared sidecar owner adapter/);
+}
 function nativePowerShell() {
   for (const command of process.platform === 'win32' ? ['pwsh.exe', 'powershell.exe'] : ['pwsh', 'powershell']) {
     const result = spawnSync(command, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()'], { encoding: 'utf8' });
@@ -90,6 +108,9 @@ test('temporary Claude and Codex installs carry delivery helper, contract and op
   assert(fs.existsSync(path.join(options.forgeHome, 'scripts', 'forge-task-preparation.js')));
   const nativeInvocationPath = path.join(options.forgeHome, 'scripts', 'forge-native-invocation.js');
   assert(fs.existsSync(nativeInvocationPath));
+  for (const helper of ['forge-native-execution.js', 'forge-native-recovery-delivery.js', 'forge-phase-cost.js', 'forge-autonomy-sources.js']) {
+    assert(fs.existsSync(path.join(options.forgeHome, 'scripts', helper)), `${helper} missing from installed owner delivery dependencies`);
+  }
   assert(fs.existsSync(path.join(options.forgeHome, 'shared', 'forge-delivery.md')));
   assert(fs.existsSync(path.join(options.forgeHome, 'shared', 'forge-task-preparation.md')));
   const contract = fs.readFileSync(path.join(options.forgeHome, 'shared', 'forge-delivery.md'), 'utf8');
@@ -196,7 +217,7 @@ test('temporary Claude and Codex installs carry delivery helper, contract and op
     for (const unitType of ['execute-task', 'complete-slice', 'complete-milestone']) {
       const rendered = installedRenderer.renderPrompt({ cwd: options.projectRoot, forgeHome: options.forgeHome, unitType, milestoneId: 'M001', sliceId: 'S01', taskId: 'T01' });
       assert.strictEqual(rendered.procedure_context.root, fs.realpathSync(options.forgeHome));
-      for (const token of ['forge-delivery.js', '--owner-root', '--code-dir']) assert(rendered.prompt.includes(token), token);
+      assertDeliveryPrompt(rendered.prompt, unitType, options.projectRoot);
     }
     assert.strictEqual(installedLoader.loadProcedureContext({ cwd: options.projectRoot, forgeHome: options.forgeHome, phase: 'memory-extract' }).root, fs.realpathSync(options.forgeHome));
     for (const [relative, code] of [['shared/forge-procedures.json', 'procedure-manifest-missing'], ['shared/forge-procedure-memory.md', 'procedure-file-unreadable']]) {
@@ -265,9 +286,7 @@ test('delivery references cover native, sidecar and headless task/slice/mileston
   }
   for (const unitType of ['execute-task', 'complete-slice', 'complete-milestone']) {
     const source = require('./forge-prompt').renderPrompt({ cwd: ROOT, unitType, milestoneId: 'M001', sliceId: 'S01', taskId: 'T01' }).prompt;
-    assert.match(source, /forge-delivery\.js/);
-    assert.match(source, /--owner-root/);
-    assert.match(source, /--code-dir/);
+    assertDeliveryPrompt(source, unitType, ROOT);
   }
 });
 

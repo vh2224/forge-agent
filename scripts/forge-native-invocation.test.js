@@ -63,7 +63,29 @@ function dispatch(model, effort, engine, alias) {
   };
 }
 
+function boundedAgentSourceObservations() {
+  const f=agentFixture('forge-reviewer','medium'),saved={open:fs.openSync,read:fs.readSync,readFile:fs.readFileSync};
+  const input={agentType:'forge-reviewer',agentPath:f.filename,sourceFingerprint:f.fingerprint},limit=1024*1024;
+  try {
+    assert.strictEqual(observeClaudeAgentBinding(input).ok,true);
+    const alias=path.join(f.dir,'hardlink.md');fs.linkSync(f.filename,alias);
+    assert.strictEqual(observeClaudeAgentBinding({...input,agentPath:alias}).ok,true,'existing resolved-file observation does not introduce a new hardlink access policy');fs.unlinkSync(alias);
+    const bytes=fs.readFileSync(f.filename);
+    for(const mode of ['grow','replace']){
+      fs.writeFileSync(f.filename,bytes);let targetFd,changed=false,total=0;
+      fs.openSync=function(file,...args){const fd=saved.open.call(this,file,...args),reading=args[0]==='r'||typeof args[0]==='number'&&(args[0]&3)===fs.constants.O_RDONLY;if(path.resolve(String(file))===f.filename&&reading)targetFd=fd;return fd;};
+      fs.readFileSync=function(file,...args){assert.notStrictEqual(typeof file==='string'?path.resolve(file):null,f.filename,'observer must not use an unbounded source read');return saved.readFile.call(this,file,...args);};
+      fs.readSync=function(fd,...args){if(fd===targetFd&&!changed){changed=true;if(mode==='grow')fs.appendFileSync(f.filename,Buffer.alloc(limit+4096,65));else{fs.renameSync(f.filename,f.filename+'.old');fs.writeFileSync(f.filename,'replacement\n');}}const n=saved.read.call(this,fd,...args);if(fd===targetFd)total+=n;return n;};
+      try{const result=observeClaudeAgentBinding(input);assert.strictEqual(result.ok,false);assert.strictEqual(result.reason_code,'native-effort-binding-source-unreadable');assert(changed);assert(total>0&&total<=limit+1,'one descriptor reads at most the configured limit plus its overflow byte');}
+      finally{fs.openSync=saved.open;fs.readSync=saved.read;fs.readFileSync=saved.readFile;if(fs.existsSync(f.filename+'.old'))fs.unlinkSync(f.filename+'.old');}
+    }
+    fs.writeFileSync(f.filename,Buffer.alloc(limit+1,65));assert.strictEqual(observeClaudeAgentBinding(input).reason_code,'native-effort-binding-source-unreadable');
+    console.log('PASS bounded agent observer: exact fingerprint, preserved resolved-file semantics, descriptor growth/replacement and oversized source refusals');
+  } finally {fs.openSync=saved.open;fs.readSync=saved.read;fs.readFileSync=saved.readFile;fs.rmSync(f.dir,{recursive:true,force:true});}
+}
+
 async function main() {
+  boundedAgentSourceObservations();
   await claudeEnvironmentJournalIdentity346();
   await claudeEffortEnvironmentAndResume346();
   await claudeArgumentPlanPublication346();
@@ -858,7 +880,8 @@ async function main() {
   process.stdout.write('forge-native-invocation: ok\n');
 }
 
-main().catch((error) => {
+if(process.argv[2]==='--bounded-agent-source-only')boundedAgentSourceObservations();
+else main().catch((error) => {
   process.stderr.write(`${error.stack || error}\n`);
   process.exit(1);
 });

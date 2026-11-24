@@ -278,7 +278,7 @@ test('checkSkillWiring bites in both directions on a fixture copy', () => {
     const real = fs.readFileSync(SKILL_PATHS[0], 'utf8');
     assert.ok(checkSkillWiring(real), 'sanity: the real file passes before mutation');
 
-    const stripped = real.replace(/node "\{WORKING_DIR\}\/scripts\/forge-touch\.js" --record[^\n]*\n/, '');
+    const stripped = real.replace(/node "\$FORGE_SCRIPTS_DIR\/forge-touch\.js" --record[^\n]*\n/, '');
     assert.notStrictEqual(stripped, real, 'sanity: the strip must actually remove a line');
     const fixture = path.join(root, 'SKILL-stripped.md');
     fs.writeFileSync(fixture, stripped, 'utf8');

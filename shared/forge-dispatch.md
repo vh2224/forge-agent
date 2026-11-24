@@ -64,7 +64,7 @@ Semantics for workers:
 - **Borrowed `worktree`** (`/forge-task --attach`) — `CODE_DIR` belongs to the lender run and `BRANCH` is the lender's branch. Workers commit there normally; the borrower cleanup never removes the borrowed tree.
 - **SVN working copy (Phase 1)** — activation detects `svn` before `require_worktree` elevation. It does not attempt branch/worktree setup and does not STOP on an all-repositories setup failure; it runs `shared` with an `elevation_reason` naming SVN. SVN isolation is Phase 2 and out of scope.
 - Header absent → `shared` mode; nothing changes.
-- When the header is present with `ISOLATION: worktree`, commands in the templates that take `--cwd "{WORKING_DIR}"` for **code verification/build** (e.g. `forge-verify.js`) run with `--cwd "{CODE_DIR}"` instead; `--plan`/artifact paths under `.gsd/**` keep `{WORKING_DIR}`. `forge-verifier.js` is the exception: it needs both `--cwd {WORKING_DIR}` for plans and artifacts and `--code-dir {CODE_DIR}` for code/import verification.
+- When the header is present with `ISOLATION: worktree`, `forge-verify.js` runs with `--cwd "{CODE_DIR}" --gsd-dir "{WORKING_DIR}/.gsd"`; `--plan`/artifact paths under `.gsd/**` keep `{WORKING_DIR}`. `forge-verifier.js` is the exception: it needs `--cwd "{WORKING_DIR}"` for plans and artifacts and `--code-dir "{CODE_DIR}"` for code/import verification.
 
 Templates do not repeat this header — `forge-prompt.js` injects it at render time (see `skills/forge-auto/SKILL.md` and `skills/forge-next/SKILL.md` § Build worker prompt).
 
@@ -297,7 +297,7 @@ Execute all steps. The task plan's ## Standards section has the relevant coding 
 If ## Checker Feedback is present — treat recurring patterns as known anti-patterns to actively avoid this unit (not as instructions to implement).
 If ## Security Checklist is present — treat each item as a must-have. Verify all checklist items before writing T##-SUMMARY.md.
 Verify every must-have using the verification ladder — including lint/format check.
-Run verification gate: node "$FORGE_SCRIPTS_DIR/forge-verify.js" --plan "{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md" --cwd "{WORKING_DIR}" --unit execute-task/{T##}
+Run verification gate: node "$FORGE_SCRIPTS_DIR/forge-verify.js" --plan "{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md" --cwd "{CODE_DIR}" --gsd-dir "{WORKING_DIR}/.gsd" --unit execute-task/{T##}
 If exit code != 0 and not skipped → include formatFailureContext output as ## Verification Failures in retry prompt, return partial. Do NOT write T##-SUMMARY.md.
 If exit code == 0 or skipped → continue to summary.
 Write T##-SUMMARY.md.
@@ -595,7 +595,7 @@ Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/{M###}-SUMMARY.md
 ## Instructions
 1. Write S##-SUMMARY.md (compress all task summaries)
 2. Write S##-UAT.md (non-blocking human test script)
-3. Run verification gate: node "$FORGE_SCRIPTS_DIR/forge-verify.js" --cwd "{WORKING_DIR}" --unit complete-slice/{S##}
+3. Run verification gate: node "$FORGE_SCRIPTS_DIR/forge-verify.js" --cwd "{CODE_DIR}" --gsd-dir "{WORKING_DIR}/.gsd" --unit complete-slice/{S##}
    Record result in S##-SUMMARY.md ## Verification Gate section (commands, exit codes, discovery source, total duration).
    If exit code != 0 and not skipped:"no-stack" → stop, return blocked with blocker_class: tooling_failure.
 4. Security scan — search changed files for risky patterns (eval, innerHTML, dangerouslySetInnerHTML, raw SQL concatenation, console.log near secrets, hardcoded credentials). If found, add ## ⚠ Security Flags to S##-SUMMARY.md. Not a blocker — document and continue.
@@ -2653,7 +2653,7 @@ Task-level invocation (inside `execute-task` worker):
 ```sh
 node "$FORGE_SCRIPTS_DIR/forge-verify.js" \
   --plan "{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md" \
-  --cwd "{WORKING_DIR}" \
+  --cwd "{CODE_DIR}" --gsd-dir "{WORKING_DIR}/.gsd" \
   --unit execute-task/{T##}
 ```
 
@@ -2661,7 +2661,7 @@ Slice-level invocation (inside `complete-slice` worker):
 
 ```sh
 node "$FORGE_SCRIPTS_DIR/forge-verify.js" \
-  --cwd "{WORKING_DIR}" \
+  --cwd "{CODE_DIR}" --gsd-dir "{WORKING_DIR}/.gsd" \
   --unit complete-slice/{S##}
 ```
 

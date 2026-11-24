@@ -382,7 +382,7 @@ Given all `T##-SUMMARY.md` files from the slice, also read every complete siblin
 3. **Verification gate** — invoke:
    ```bash
    FORGE_SCRIPTS_DIR=$([ -f scripts/forge-verify.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
-   node "$FORGE_SCRIPTS_DIR/forge-verify.js" --cwd {WORKING_DIR} --unit complete-slice/{S##}
+   node "$FORGE_SCRIPTS_DIR/forge-verify.js" --cwd "{CODE_DIR}" --gsd-dir "{WORKING_DIR}/.gsd" --unit complete-slice/{S##}
    ```
    Parse result:
    - `passed: true` → record the gate result in `S##-SUMMARY.md` under `## Verification Gate` (commands, exit codes, discovery source, total duration, timestamp). Continue to step 4.
@@ -431,6 +431,7 @@ for the actual step-3 gate result and retain the exact step-1.8 verifier result 
 Create `{S##}-DELIVERY-INPUT.json` beside the SUMMARY with:
 
 - the slice plan and its exact SHA-256;
+- `schema_version: 1` with captured v1 envelopes for a legacy prose S-PLAN; structured execution plans retain schema2 validation;
 - explicit bindings for slice-owned criteria only;
 - `expected_children` listing every task in the slice and its complete `T##-DELIVERY.json`,
   including expected children whose delivery is missing;
@@ -456,26 +457,8 @@ failure is `partial` with its diagnostic, not an omitted section.
 
 8. Mark slice `[x]` in `M###-ROADMAP.md`
 
-9. Update `CLAUDE.md` — rewrite the `## Estado atual` section only (preserve everything else):
-   - Read `M###-ROADMAP.md` to find the next pending slice `[ ]`
-   - If a next slice exists:
-     ```markdown
-     ## Estado atual
+9. Keep consumer instruction files unchanged. The owner advances canonical per-milestone state, SUMMARY and personal checkpoint; do not rewrite `CLAUDE.md`.
 
-     - **Milestone ativo:** M### — <milestone title>
-     - **Slice ativo:** S## — <next slice title>
-     - **Fase:** execute
-     - **Próxima ação:** Executar `/forge-next` para iniciar S##.
-     ```
-   - If no next slice remains (this was the last slice):
-     ```markdown
-     ## Estado atual
-
-     - **Milestone ativo:** M### — <milestone title>
-     - **Slice ativo:** —
-     - **Fase:** validate — todos os slices concluídos. Aguarda validação/encerramento.
-     - **Próxima ação:** Executar `/forge-next` para fechar M### ou `/forge-new-milestone` para o próximo milestone.
-     ```
 
 ## Git boundary — complete-slice
 

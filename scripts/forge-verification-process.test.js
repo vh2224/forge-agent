@@ -37,6 +37,42 @@ for (const change of [row => ({ ...row, joined: false, active: 1 }), row => ({ .
   assert.strictEqual(result.stop, true); assert.strictEqual(result.cleanup.status, 'unproved');
 }
 {
+  const f = mockRunner(), originalEnv = { EXAMPLE: 'value', WDMA_ROOT: 'old', empty: 'old' };
+  const command = `  WDMA_ROOT="C:\\SVN\\CMA\\space data" WDMA_REQUIRED=1 EMPTY=\tWDMA_REQUIRED=2 node check.cjs`;
+  assert.strictEqual(f.run(command, { ...options, env: originalEnv }).status, 0);
+  const run = f.calls.find(call => call.mode === 'Run');
+  assert.strictEqual(JSON.parse(run.options.input).command, 'node check.cjs');
+  assert.deepStrictEqual({ ...run.options.env }, { EXAMPLE: 'value', WDMA_ROOT: 'C:\\SVN\\CMA\\space data', EMPTY: '', WDMA_REQUIRED: '2' });
+  assert.deepStrictEqual(originalEnv, { EXAMPLE: 'value', WDMA_ROOT: 'old', empty: 'old' });
+  assert.strictEqual(Object.getPrototypeOf(run.options.env), null);
+  const single = mockRunner();
+  single.run("A='literal path' node check.cjs", options);
+  assert.strictEqual(single.calls[1].options.env.A, 'literal path');
+  console.log('PASS literal env prefix: multiple, empty, quoted Windows paths, repeated names, case-insensitive overlay and unchanged caller environment');
+}
+{
+  for (const command of ['A=$HOME node check.cjs', 'A=$(echo bad) node check.cjs', 'A=`echo bad` node check.cjs',
+    'A=%PATH% node check.cjs', 'A=!PATH! node check.cjs', 'A="unterminated node check.cjs', 'A=x',
+    'A=x node check.cjs && node following.cjs', 'A=x node check.cjs; node following.cjs', 'A=x node check.cjs | node other.cjs',
+    'A=x node check.cjs\nnode following.cjs', 'A=x node ^& next.cjs',
+    'A=x %CHAIN%', 'A=x !CHAIN!', 'A=x echo "%CHAIN%"', 'A=x cmd /v:on /c "echo !CHAIN!"']) {
+    const f = mockRunner(), result = f.run(command, options);
+    assert.strictEqual(result.error.code, 'EVERIFYENV', command);
+    assert.strictEqual(result.cleanup.reason, 'verification-env-prefix-unprovable');
+    assert.strictEqual(result.cleanup.started, false); assert.strictEqual(result.cleanup.status, 'joined');
+    assert.strictEqual(f.calls.length, 0, 'no compiler or requested command on unsupported prefix: ' + command);
+  }
+  const f = mockRunner(), original = 'node check.cjs && node following.cjs';
+  assert.strictEqual(f.run(original, options).status, 0);
+  assert.strictEqual(JSON.parse(f.calls[1].options.input).command, original);
+  assert.strictEqual(f.calls[1].options.env, options.env);
+  const dynamic = mockRunner(), unchanged = 'echo %CHAIN%';
+  assert.strictEqual(dynamic.run(unchanged, { ...options, env: { CHAIN: 'echo FIRST && set A' } }).status, 0);
+  assert.strictEqual(JSON.parse(dynamic.calls[1].options.input).command, unchanged);
+  console.log('PASS unsupported env expansion/chains refuse before spawn; commands without prefix retain exact established behavior');
+}
+if (process.argv.includes('--env-prefix-only')) process.exit(0);
+{
   const f = mockRunner();
   const opted = f.run('fixture', { ...options, disableAutoRun: true });
   assert.strictEqual(JSON.parse(f.calls[1].options.input).disableAutoRun, true);
@@ -76,6 +112,11 @@ if (process.platform === 'win32') {
     assert.strictEqual(/\s\/d(?:\s|$)/i.test(legacyShell.stdout), false);
     assert.strictEqual(Object.hasOwn(legacyShell.cleanup, 'autorun_disabled'), false);
     console.log('PASS real Windows command line: requested /d is present, legacy default is unchanged; no registry edits');
+    fs.writeFileSync(path.join(dir, 'env-prefix.cjs'), "const assert=require('assert');assert.equal(process.env.FORGE_WDMA,'C:\\\\SVN\\\\space data');assert.equal(process.env.FORGE_REQUIRED,'1');assert.equal(process.env.FORGE_EMPTY,'');console.log('PASS literal env Windows child');");
+    const literal = runWindowsCommand('FORGE_WDMA="C:\\SVN\\space data" FORGE_REQUIRED=1 FORGE_EMPTY= node env-prefix.cjs', { cwd: dir, env: process.env, timeoutMs: 5000 });
+    assert.strictEqual(literal.status, 0, literal.stderr); assert.strictEqual(literal.cleanup.status, 'joined');
+    assert(literal.stdout.includes('PASS literal env Windows child')); assert.strictEqual(process.env.FORGE_REQUIRED, undefined);
+    console.log('PASS actual Windows literal prefix: quoted external path and required flag observed by joined child');
     const child = path.join(dir, 'child.cjs'), beat = path.join(dir, 'heartbeat.txt');
     fs.writeFileSync(child, `const cp=require('child_process'),fs=require('fs');
 if(process.argv[2]==='writer'){fs.appendFileSync(process.argv[3],'start\\n');setInterval(()=>fs.appendFileSync(process.argv[3],'tick\\n'),20);}

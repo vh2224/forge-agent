@@ -466,8 +466,8 @@ function selectNextUnit(input) {
     }
     if ((inventory.deferred_slices || []).includes(slice.id)) reasons.push('failure-deferred');
     if (reasons.length) { blocked.push({ slice: slice.id, reasons }); continue; }
-    if (!slice.plan_exists) return selected('plan-slice', slice.id, milestone, current, slice.id);
     if (!slice.research_exists && !skipSliceResearch) return selected('research-slice', slice.id, milestone, current, slice.id);
+    if (!slice.plan_exists) return selected('plan-slice', slice.id, milestone, current, slice.id);
     const tasks = admissibleTasks(slice, inventory);
     if (tasks.status === 'decomposition') return { ok: false, reason: 'decomposition-verification-required', done: false, milestone,
       slice: slice.id, decomposition: { parent_tasks: tasks.parents, required: 'all-child-completions-and-original-parent-contract-verification' } };
@@ -906,14 +906,15 @@ function select(cwd, request, options) {
   const current = forgeState.read(cwd, milestone);
   if (!current) throw new ControllerError('invalid-request', `STATE ausente para ${milestone}`);
   let inventory = options && typeof options.inventoryReader === 'function' ? options.inventoryReader(cwd, milestone, current) : discoverInventory(cwd, milestone, current, options);
-  if(options?.deliveryRepairActor) inventory=require('./forge-completion-delivery-recovery').projectVerifiedRepairs(cwd,milestone,inventory,options.deliveryRepairActor);
+  inventory=require('./forge-completion-delivery-recovery').projectVerifiedRepairs(cwd,milestone,inventory,options?.deliveryRepairActor);
   inventory.deferred_slices = failureProjection(cwd, milestone).filter(item => !item.entry).map(item => item.slice).filter(Boolean);
   const selection = selectNextUnit({ state: current, inventory, prefs: prefsResult.prefs });
   // Issue 343 U1: an opted-in caller (orchestrate next in auto mode) also receives the same
   // enumeration the execute-task was picked from; nothing here selects, admits or begins more.
   const cohort = input.cohort === true && selection.ok && !selection.decomposition_verification && selection.unit.type === 'execute-task'
     ? cohortOf(cwd, milestone, inventory, selection.slice, options) : null;
-  return { ...selection, id_kind, ...(cohort ? { cohort } : {}) };
+  return { ...selection, id_kind, ...(cohort ? { cohort } : {}),
+    ...(inventory.delivery_repair_diagnostics?.length ? { delivery_repair_diagnostics: inventory.delivery_repair_diagnostics } : {}) };
 }
 // The pending tasks of the selected slice (canonical S-plan order), the admissible ones and
 // the tasks whose scoped committed completion plus historical delivery prove them; a
@@ -1783,10 +1784,64 @@ function resumeInside(cwd, request, options) {
   return { ok: true, reason: records.length ? 'transition-committed' : 'already-committed', recovered: results.length, results };
 }
 
+// A local task key has no slice identity in a claim. Authenticate the exact
+// completed task plan first, then compare canonical declaration sets. Claim
+// birth is provenance data from the canonical caller, not a signature: a
+// newer claim or an ambiguous repeated local key cannot reuse this boundary.
+function heldClaimPlanScope(cwd, tx, proof, heldClaim, contract, records) {
+  const codeRoots=require('./forge-code-roots'), delivery=require('./forge-delivery');
+  const reject=detail=>{throw new ControllerError('boundary-not-transferable',detail);};
+  const completionAt=Date.parse(tx.event?.ts);
+  if (!Number.isFinite(completionAt) || !(heldClaim.at>0 && heldClaim.at<completionAt)) reject('held claim completion time is not attributable');
+  const journal=readEvents(eventsFile(cwd,tx.milestone));
+  for (const other of records) {
+    if (other.milestone!==tx.milestone || other.unit?.key!==tx.unit.key || other.action!=='complete' || other.phase!=='committed'
+        || other.result?.status!=='succeeded' || other.after?.state?.active_slice===tx.after.state.active_slice) continue;
+    const events=journal.filter(row=>row.idempotency_key===other.idempotency_key), at=Date.parse(other.event?.ts);
+    const published=events.length===1?{...events[0]}:null;if(published)delete published.sequence;
+    if (!/^S\d{2,}$/.test(other.after?.state?.active_slice||'') || other.boundary?.kind!=='completed' || other.boundary.handoff_ready!==true
+        || !Number.isFinite(at) || !published || sha(published)!==sha(other.event)) {
+      reject('held claim repeated local task history is unproven');
+    }
+    if (heldClaim.at<=at) reject('held claim repeated local task scope is ambiguous');
+  }
+  const slice=tx.after.state.active_slice, task=tx.unit.id, base=`.gsd/milestones/${tx.milestone}/slices/${slice}/tasks/${task}`;
+  const planReference=`${base}/${task}-PLAN.md`, deliveryReference=`${base}/${task}-DELIVERY.json`;
+  const read=reference=>{
+    const file=path.resolve(cwd,reference), observed=require('./forge-autonomy-sources').readBoundedStableFile(file,2*1024*1024,{expectedReal:file});
+    if(observed.error)throw new ControllerError('record-conflict','held claim plan evidence changed');return observed.buffer;
+  };
+  const deliveryBytes=read(deliveryReference), planBytes=read(planReference);let stored;
+  try{stored=JSON.parse(deliveryBytes.toString('utf8'));}catch{throw new ControllerError('record-conflict','held claim plan evidence changed');}
+  if (proof.reference!==deliveryReference || stored.delivery_fingerprint!==proof.fingerprint
+      || delivery.finalizeOutput(stored).delivery_fingerprint!==proof.fingerprint
+      || delivery.unitKey(stored.unit)!==delivery.unitKey({type:'task',id:task,slice,milestone:tx.milestone})
+      || stored.plan?.reference!==planReference || stored.plan.fingerprint!==codeRoots.digest(planBytes)) {
+    reject('held claim exact task plan is not authenticated');
+  }
+  try {
+    const measured=contract||codeRoots.singleContract(cwd,heldClaim.code_dir);
+    // Observe historical declarations; do not re-admit an old task as a new
+    // plan merely to read its known writes. Missing writes remain unknown.
+    const fields=require('./forge-must-haves').parseExecutionFields(planBytes.toString('utf8')), modern=fields.roots_schema!==undefined;
+    if (!Array.isArray(fields.writes)||!fields.writes.length) reject('held claim task writes are unproven');
+    if (modern) {
+      if(String(fields.roots_schema)!=='2')reject('held claim task roots are unproven');
+      const declaredRoots=codeRoots.validateContract({schema_version:2,owner:measured.owner,primary_root_id:fields.primary_root_id,code_roots:fields.code_roots});
+      if(codeRoots.digest(declaredRoots)!==codeRoots.digest(measured))reject('held claim task roots differ');
+    }else if(measured.code_roots.length!==1)reject('held claim legacy task roots are ambiguous');
+    const writes=fields.writes.map(value=>codeRoots.wire(codeRoots.resolvePath(measured,value,{legacy:!modern})));
+    const declared=heldClaim.paths.map(value=>codeRoots.wire(codeRoots.resolvePath(measured,value,{legacy:heldClaim.schema_version!==2})));
+    const normalized=rows=>[...new Set(rows.map(row=>JSON.stringify([row.root_id,codeRoots.key(row.path)])))].sort();
+    if (sha(normalized(declared))!==sha(normalized(writes))) reject('held claim differs from the authenticated task writes');
+  } catch(error) { if(error instanceof ControllerError)throw error;reject('held claim task writes are unproven'); }
+  return()=>{if(!read(planReference).equals(planBytes)||!read(deliveryReference).equals(deliveryBytes))throw new ControllerError('record-conflict','held claim plan evidence changed');};
+}
+
 // Validate an immutable completed boundary even while its separately verified
 // delivery-only successor is open. This is not a current handoff/zero-lease
 // assertion and does not release or transfer any lease.
-function verifyCommittedCompletionBoundary(cwd, completionKey) {
+function verifyCommittedCompletionBoundary(cwd, completionKey, heldClaim) {
   const tx=lookupRecord(cwd,'transaction',completionKey), boundary=tx?.boundary;
   if (!tx || tx.phase!=='committed' || tx.action!=='complete' || tx.result?.status!=='succeeded'
       || boundary?.kind!=='completed' || boundary.handoff_ready!==true || boundary.idempotency_key!==completionKey
@@ -1796,6 +1851,74 @@ function verifyCommittedCompletionBoundary(cwd, completionKey) {
   const event=events.length===1?{...events[0]}:null;if(event)delete event.sequence;
   if (!result || sha(result)!==boundary.result_checksum || !event || sha(event)!==boundary.event_checksum
       || sha(event)!==sha(tx.event)) throw new ControllerError('record-conflict','original completion evidence changed');
+  if (heldClaim) {
+    // Between units an uncommitted workspace is intentional. Transfer the owner,
+    // not the claim: only its exact completed task's historical owner proof can
+    // authorize retaining these bytes. A legacy success marker alone cannot.
+    const claims = require('./forge-write-claim');
+    try { claims.validateHeldClaim(heldClaim); } catch { throw new ControllerError('boundary-not-transferable','held claim is invalid'); }
+    if (!heldClaim.paths.length || heldClaim.unit !== tx.unit.key || tx.unit.type !== 'execute-task'
+        || !/^S\d{2,}$/.test(tx.after?.state?.active_slice || '') || !LOCAL_TASK_ID.test(tx.unit.id || '')) {
+      throw new ControllerError('boundary-not-transferable','held claim does not identify this completed task');
+    }
+    const slice=tx.after.state.active_slice, proof=require('./forge-milestone-time-clock').readHistoricalTaskDelivery({cwd,
+      milestone:tx.milestone,slice,task:tx.unit.id,completedAt:tx.event.ts});
+    const binding=tx.result.output?.owner_delivery_proof;
+    const records=discoverRecords(cwd,'transaction');
+    if (!scopedCompletion(cwd,tx.milestone,slice,tx.unit.id,records)
+        || proof.status!=='proven' || !binding || binding.delivery_fingerprint!==proof.fingerprint
+        || binding.current_source_conformity!=='matched' || binding.begin_key===undefined
+        || sha(binding.captures)!==sha(proof.captures.map(c=>({reference:c.reference,sha256:c.sha256,captured_at:c.captured_at})))) {
+      throw new ControllerError('boundary-not-transferable','held claim completion delivery is not proven');
+    }
+    const begin=lookupRecord(cwd,'transaction',binding.begin_key);
+    if (!begin || begin.action!=='begin' || begin.phase!=='committed' || binding.begin_sha256!==sha(begin)
+        || begin.milestone!==tx.milestone || begin.unit.key!==tx.unit.key || begin.lease_generation!==tx.lease_generation
+        || begin.owner_digest!==tx.owner_digest || begin.host_runtime!==tx.host_runtime) {
+      throw new ControllerError('boundary-not-transferable','held claim begin lineage is not proven');
+    }
+    const codeRoots=require('./forge-code-roots'), contract=heldClaim.schema_version===2
+      ? codeRoots.validateContract(heldClaim.execution_contract,{owner:cwd,revalidate:true}) : null;
+    const expectedRoot=contract?null:heldClaim.code_dir&&codeRoots.key(fs.realpathSync.native(heldClaim.code_dir));
+    if (!contract && !expectedRoot) throw new ControllerError('boundary-not-transferable','held claim root is unknown');
+    if (contract && (typeof heldClaim.code_dir!=='string'
+        || codeRoots.key(fs.realpathSync.native(heldClaim.code_dir))!==codeRoots.key(contract.code_roots.find(root=>root.id===contract.primary_root_id).path))) {
+      throw new ControllerError('boundary-not-transferable','held claim primary root is inconsistent');
+    }
+    const assertPlanScope=heldClaimPlanScope(cwd,tx,proof,heldClaim,contract,records);
+    const modernRoots = new Set();
+    let legacyCaptures = 0;
+    for (const capture of proof.captures) {
+      const file=path.resolve(cwd,capture.reference);
+      const read=require('./forge-autonomy-sources').readBoundedStableFile(file,2*1024*1024,{expectedReal:file});
+      if (read.error || crypto.createHash('sha256').update(read.buffer).digest('hex')!==capture.sha256) throw new ControllerError('record-conflict','held claim capture changed');
+      const envelope=JSON.parse(read.buffer.toString('utf8'));
+      const legacyRoot=envelope.schema_version===1 && typeof envelope.code_dir==='string' && path.isAbsolute(envelope.code_dir)
+        ? codeRoots.key(fs.realpathSync.native(envelope.code_dir)) : null;
+      // Root-qualified source envelopes retain schema1. Presence of even one
+      // explicit binding field selects the modern contract; partial/foreign
+      // fields can never fall back to physical-only legacy admission.
+      const modern=['root_id','root_identity_sha256','execution_contract_sha256'].some(field=>own(envelope,field));
+      const root=modern&&contract?.code_roots.find(row=>row.id===envelope.root_id);
+      const rootsMatch=modern
+        ? envelope.schema_version===1 && root && envelope.execution_contract_sha256===codeRoots.digest(contract)
+          && envelope.root_identity_sha256===root.identity_sha256 && typeof envelope.code_dir==='string'
+          && path.isAbsolute(envelope.code_dir) && legacyRoot===codeRoots.key(root.path)
+        // A pure legacy capture predates explicit root binding. Its measured
+        // physical root must be the sole root; never adopt it into multiroot.
+        : contract ? contract.code_roots.length===1 && legacyRoot===codeRoots.key(contract.code_roots[0].path)
+        : legacyRoot===expectedRoot;
+      if (!rootsMatch) {
+        throw new ControllerError('boundary-not-transferable','held claim capture root differs');
+      }
+      if (modern) modernRoots.add(root.id); else legacyCaptures++;
+    }
+    if (modernRoots.size && (legacyCaptures || modernRoots.size!==contract.code_roots.length
+        || contract.code_roots.some(root=>!modernRoots.has(root.id)))) {
+      throw new ControllerError('boundary-not-transferable','held claim capture root set differs');
+    }
+    assertPlanScope();
+  }
   return {unit:tx.unit.key,milestone:tx.milestone,result_checksum:boundary.result_checksum,committed_at:boundary.committed_at};
 }
 

@@ -432,9 +432,11 @@ test('issue343 U1-3 native primary, next, standalone, other phases, legacy, unme
   const loose = owner('standalone');
   const refused = adapter.invoke('codex', 'task', 'next', { cwd: loose, owner_token: TOKEN, workflow_id: 'loose' }, null, {}).result;
   assert.deepStrictEqual([refused.reason_code, refused.controller_result], ['task-scope-unsupported', null]);
-  // Other phases: plan-slice selected in auto mode.
+  // Other phases: required slice research precedes planning in auto mode.
   const phase = next('codex', owner('phase'));
-  assert.deepStrictEqual([phase.unit.key, decisionOf(phase).reason_code], [`plan-slice/${S}`, 'unit-not-execute-task']);
+  assert.deepStrictEqual([phase.unit.key, decisionOf(phase).reason_code], [`research-slice/${S}`, 'unit-not-execute-task']);
+  assert.strictEqual(decisionOf(phase).decision, 'single');
+  assert.strictEqual(phase.snapshot.current_batch, undefined, 'research is not admitted as a cohort');
   // Legacy: owner plan bytes without an enrolled plan-slice lineage stay sequential.
   const legacy = owner('legacy');
   writePlan(legacy, independent(['T01', 'T02']));

@@ -58,6 +58,9 @@ function testSelectionPhasesAndCanonicalPrefs() {
   assert.strictEqual(choose(missingResearch, { skip_slice_research: true }).unit.type, 'research-milestone');
   assert.strictEqual(choose(missingResearch, { skip_research: true, skip_slice_research: true }).unit.type, 'execute-task');
   assert.strictEqual(choose(missingResearch, { workflow: { skip_research: true } }).unit.type, 'execute-task', 'legacy aliases remain readable');
+  const unpreparedSlice={slices:[{...slice,plan_exists:false,research_exists:false}]};
+  assert.strictEqual(choose(unpreparedSlice).unit.type,'research-slice','slice research informs the first slice plan');
+  assert.strictEqual(choose(unpreparedSlice,{skip_slice_research:true}).unit.type,'plan-slice','explicitly skipped research retains planning');
 
   const nextSlice = { ...slice, id: 'S02', research_exists: false };
   for (const previous of [{ ...slice, checked: true }, { ...slice, tasks: [], summary_exists: true }]) {
@@ -132,6 +135,26 @@ function testCumulativeSummaryDoesNotCloseMilestone() {
     fs.mkdirSync(path.join(fixture.cwd, '.gsd', 'ledger'), { recursive: true });
     fs.writeFileSync(path.join(fixture.cwd, '.gsd', 'ledger', `${fixture.milestone}.md`), 'closed\n');
     assert.strictEqual(pick().done, true, 'ledger fragment written by complete-milestone proves the close');
+  } finally { cleanup(fixture.cwd); }
+}
+
+function testMalformedRepairEventsRemainStrictForUncheckedTask() {
+  const fixture = setup();
+  try {
+    const dir = path.join(fixture.cwd, '.gsd', 'milestones', fixture.milestone);
+    fs.writeFileSync(path.join(dir, fixture.milestone + '-ROADMAP.md'), '- [ ] **S01: Work**\n');
+    fs.mkdirSync(path.join(dir, 'slices', 'S01'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'slices', 'S01', 'S01-PLAN.md'), '- [ ] T01: Work\n');
+    const events = controller.eventsFile(fixture.cwd, fixture.milestone);
+    fs.writeFileSync(events, 'not json\n');
+    const stateFile = state.statePath(fixture.cwd, fixture.milestone);
+    const beforeState = fs.readFileSync(stateFile), beforeEvents = fs.readFileSync(events);
+    const options = { prefsReader: () => ({ ok: true, prefs: { skip_discuss: true, skip_research: true, skip_slice_research: true } }) };
+    assert.throws(() => controller.select(fixture.cwd, { milestone: fixture.milestone }, options),
+      error => error.code === 'invalid-request' && error.message.includes(events),
+      'an unchecked task still requires the strict repair event stream');
+    assert.deepStrictEqual(fs.readFileSync(stateFile), beforeState, 'refused selection must not alter state');
+    assert.deepStrictEqual(fs.readFileSync(events), beforeEvents, 'malformed evidence must not be rewritten');
   } finally { cleanup(fixture.cwd); }
 }
 
@@ -2121,6 +2144,7 @@ function main() {
   test('phase ordering, canonical skip preferences and stale slice selection', testSelectionPhasesAndCanonicalPrefs);
   test('artifact discovery selects without leases or STATE writes', testSelectionDiscoversArtifactsWithoutWriting);
   test('cumulative milestone SUMMARY does not skip complete-milestone', testCumulativeSummaryDoesNotCloseMilestone);
+  test('unchecked task selection retains strict malformed repair-event refusal', testMalformedRepairEventsRemainStrictForUncheckedTask);
   test('begin/complete/handoff/resume', testBeginCompleteHandoffAndResume);
   test('lease negative and boundary deny', testLeaseNegativeAndBoundaryDeny);
   test('pause and failure boundaries', testPauseAndFailureBoundaries);
@@ -2142,6 +2166,8 @@ function main() {
 }
 if (process.argv[2] === '--superseded-interruption-only') {
   testSupersededInterruptedOwner();
+} else if (process.argv[2] === '--selection-phases-only') {
+  test('phase ordering, canonical skip preferences and stale slice selection', testSelectionPhasesAndCanonicalPrefs);
 } else if (process.argv[2] === '--owner-interruption-fixture-child') {
   const fixture = interruptionFixture(process.argv[3]);
   assert.strictEqual(fixture.settle().status, 'interrupted-and-transferred');

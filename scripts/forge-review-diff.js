@@ -77,7 +77,7 @@
  *   node forge-review-diff.js --cwd <dir> [--paths-file <f>] [--unit-dir <d>]
  *                             [--name-only] [--scope-report] [-- <files...>]
  *
- * Exit codes: 0 produced output (possibly empty), 2 bad arguments or not SVN.
+ * Exit codes: 0 produced output (possibly empty), 2 unavailable/unsafe review.
  */
 
 const fs = require('fs');
@@ -91,6 +91,76 @@ const MAX_BUFFER = 32 * 1024 * 1024;
 // Windows CreateProcess caps the command line near 32K. Batch well below it.
 const ARGV_BUDGET = 6000;
 const MAX_UNTRACKED_BYTES = 2 * 1024 * 1024;
+
+function git(cwd, args) {
+  const result = spawnSync('git', ['--no-pager', '-c', 'core.quotepath=false', ...args], {
+    cwd, encoding: 'utf8', maxBuffer: MAX_BUFFER, timeout: 30000, windowsHide: true,
+  });
+  if (result.status !== 0 || result.error) throw new Error('git-review-command-failed');
+  return result.stdout || '';
+}
+function safeGitPath(cwd, rel, { missing = false } = {}) {
+  if (!rel || /[\x00-\x1f\x7f:]/.test(rel) || rel.includes('\\') || path.isAbsolute(rel)
+      || rel.split('/').some(p => !p || p === '.' || p === '..')) throw new Error('git-review-path-invalid');
+  let file = cwd;
+  const parts = rel.split('/');
+  for (let index = 0; index < parts.length; index++) {
+    file = path.join(file, parts[index]);
+    let stat;
+    try { stat = fs.lstatSync(file); }
+    catch (error) { if (missing && error.code === 'ENOENT') return null; throw new Error('git-review-file-unreadable'); }
+    if (stat.isSymbolicLink()) throw new Error('git-review-link');
+    if (index < parts.length - 1 && !stat.isDirectory()) throw new Error('git-review-path-invalid');
+    if (index === parts.length - 1 && (!stat.isFile() || stat.nlink !== 1)) throw new Error('git-review-file-type');
+  }
+  return file;
+}
+function gitState(cwd, base = 'HEAD') {
+  const revision = git(cwd, ['rev-parse', '--verify', '--end-of-options', `${base}^{commit}`]).trim();
+  if (!/^[a-f0-9]{40,64}$/.test(revision)) throw new Error('git-review-baseline-invalid');
+  const tracked = git(cwd, ['diff', '--no-ext-diff', '--no-textconv', '--name-only', '-z', revision, '--']).split('\0').filter(Boolean);
+  const fresh = git(cwd, ['ls-files', '--others', '--exclude-standard', '-z']).split('\0').filter(Boolean);
+  let gsdExcluded = 0;
+  const keep = values => [...new Set(values)].filter(rel => {
+    if (isGsdPath(rel)) { gsdExcluded++; return false; }
+    safeGitPath(cwd, rel, { missing: true }); return true;
+  }).sort();
+  return { ok: true, versioned: keep(tracked), untracked: keep(fresh), gsdExcluded, revision };
+}
+function gitDiff(cwd, scope, revision) {
+  let out = '';
+  for (const rel of scope.versioned) {
+    const text = git(cwd, ['diff', '--no-ext-diff', '--no-textconv', '--no-renames', revision, '--', rel]);
+    if (/^(?:Binary files |GIT binary patch|(?:new|deleted) file mode (?:120000|160000)|(?:old|new) mode (?:120000|160000))/m.test(text))
+      throw new Error('git-review-content-unavailable');
+    out += `Index: ${rel}\n${'='.repeat(67)}\n${text}`;
+    if (Buffer.byteLength(out) > MAX_BUFFER) throw new Error('git-review-output-limit');
+  }
+  for (const rel of scope.untracked) {
+    const file = safeGitPath(cwd, rel), before = fs.lstatSync(file);
+    if (before.size > MAX_UNTRACKED_BYTES) throw new Error('git-review-file-limit');
+    const io = Object.create(fs);
+    io.openSync = target => fs.openSync(target, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+    const read = require('./forge-autonomy-sources').readBoundedStableFile(file, MAX_UNTRACKED_BYTES, { expectedReal: fs.realpathSync.native(file), io });
+    if (read.error) throw new Error(read.error === 'source_too_large' ? 'git-review-file-limit' : 'git-review-file-changed');
+    const data = read.buffer, after = fs.lstatSync(file);
+    safeGitPath(cwd, rel);
+    if (after.isSymbolicLink() || after.nlink !== 1 || read.stat.nlink !== 1
+      || [read.stat, after].some(stat => before.dev !== stat.dev || before.ino !== stat.ino || before.size !== stat.size
+        || before.mtimeMs !== stat.mtimeMs || before.ctimeMs !== stat.ctimeMs))
+      throw new Error('git-review-file-changed');
+    if (data.includes(0)) throw new Error('git-review-content-unavailable');
+    const value = data.toString('utf8'), newline = value.endsWith('\n'), lines = value.split(/\r?\n/);
+    if (newline) lines.pop();
+    out += `Index: ${rel}\n${'='.repeat(67)}\n--- ${rel}\t(nonexistent)\n+++ ${rel}\t(working copy)\n`;
+    if (value) {
+      out += `@@ -0,0 +1,${lines.length} @@\n` + lines.map(line => '+' + line + '\n').join('');
+      if (!newline) out += '\\ No newline at end of file\n';
+    }
+    if (Buffer.byteLength(out) > MAX_BUFFER) throw new Error('git-review-output-limit');
+  }
+  return out;
+}
 
 function svn(cwd, args) {
   const result = spawnSync('svn', ['--non-interactive', ...args], {
@@ -454,9 +524,10 @@ function main(argv) {
   const args = parseArgs(argv);
 
   if (args.help) {
-    process.stdout.write(`forge-review-diff — reviewable diff of one unit in an SVN working copy
+    process.stdout.write(`forge-review-diff — reviewable diff of one unit in Git or SVN
 
   --cwd <dir>          working copy (default: process.cwd())
+  --base <commit>      Git baseline (default HEAD); includes current dirty and untracked files
   --paths-file <f>     manifest: one path per line (e.g. files_changed)
   --unit-dir <d>       unit artifact dir; declared outputs are read from its
                        *-PLAN.md / *-SUMMARY.md and unioned into the manifest
@@ -472,13 +543,12 @@ Diffs against BASE; the SVN baseline marker is intentionally inert (see header).
   const cwd = typeof args.cwd === 'string' ? path.resolve(args.cwd) : process.cwd();
 
   const vcs = detectVcs(cwd);
-  if (vcs !== 'svn') {
-    process.stderr.write(`forge-review-diff: ${cwd} is not an SVN working copy (detected: ${vcs}). `
-      + 'The git boundary computes DIFF_CMD directly and must not route through this program.\n');
+  if (!['svn', 'git'].includes(vcs)) {
+    process.stderr.write('forge-review-diff: vcs-unavailable:none-or-detection-failed\n');
     return 2;
   }
 
-  const state = changedEntries(cwd);
+  const state = vcs === 'git' ? gitState(cwd, typeof args.base === 'string' ? args.base : 'HEAD') : changedEntries(cwd);
   if (!state.ok) {
     process.stderr.write(`forge-review-diff: ${state.error}\n`);
     return 2;
@@ -488,7 +558,7 @@ Diffs against BASE; the SVN baseline marker is intentionally inert (see header).
   if (typeof args['paths-file'] === 'string') for (const p of readPathsFile(args['paths-file'])) manifest.add(p);
   if (typeof args['unit-dir'] === 'string') for (const p of collectUnitDeclaredPaths(path.resolve(args['unit-dir']), cwd)) manifest.add(p);
 
-  const untrackedFiles = expandUntracked(cwd, state.untracked);
+  const untrackedFiles = vcs === 'git' ? state.untracked : expandUntracked(cwd, state.untracked);
   const scope = computeScope({
     versioned: state.versioned,
     untracked: untrackedFiles,
@@ -498,8 +568,8 @@ Diffs against BASE; the SVN baseline marker is intentionally inert (see header).
 
   if (args['scope-report']) {
     process.stdout.write(JSON.stringify({
-      vcs: 'svn',
-      baseline: 'BASE',
+      vcs,
+      baseline: vcs === 'git' ? state.revision : 'BASE',
       reason: scope.reason,
       manifest_size: manifest.size,
       gsd_excluded: state.gsdExcluded,
@@ -516,7 +586,7 @@ Diffs against BASE; the SVN baseline marker is intentionally inert (see header).
     return 0;
   }
 
-  process.stdout.write(versionedDiff(cwd, scope.versioned) + untrackedDiff(cwd, scope.untracked));
+  process.stdout.write(vcs === 'git' ? gitDiff(cwd, scope, state.revision) : versionedDiff(cwd, scope.versioned) + untrackedDiff(cwd, scope.untracked));
   return 0;
 }
 
@@ -532,4 +602,10 @@ module.exports = {
   collectDiffEntries,
 };
 
-if (require.main === module) process.exitCode = main(process.argv.slice(2));
+if (require.main === module) {
+  try { process.exitCode = main(process.argv.slice(2)); }
+  catch (error) {
+    const code = /^git-review-[a-z-]+$/.test(error.message) ? error.message : 'review-diff-unavailable';
+    process.stderr.write(`forge-review-diff: ${code}\n`); process.exitCode = 2;
+  }
+}

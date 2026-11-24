@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/issue-455/distribution.cjs');
+const unitEntry = require('./fixtures/issues-457-458/distribution.cjs');
 
 // Standalone acceptance suite: only Node built-ins and production modules.
 const assert = require('assert');
@@ -1318,12 +1318,12 @@ test('linked-task scoped pins follow the owner pre-T06 capture and the measured 
     assert.strictEqual(node.label, prior.label);
     assert.deepStrictEqual({ ...node.source, sha256: prior.source.sha256 }, prior.source, `${prior.pointer} metadata`);
     const [, afterSha] = OWNER_POST_T06.contributors[prior.source.file];
-    // #341: a declared node moves from the owner after measurement to the measured raw bytes of its source.
+    // #341 cites historical source bytes; only the exact current Next row rewinds to that measured view.
     const node341 = nodes341.get(prior.pointer) || null;
     if (node341) {
       assert.strictEqual(node341.file, prior.source.file, `${prior.pointer}: #341 node cites the same source`);
       assert.strictEqual(node341.before, afterSha, `${prior.pointer}: #341 before is the owner after measurement`);
-      assert.strictEqual(identitySampleAfter(prior.pointer, node341.after), sha256(fs.readFileSync(path.join(ROOT, prior.source.file))), `${prior.pointer}: #341 after is the raw source bytes`);
+      assert.strictEqual(identitySampleAfter(prior.pointer, node341.after), sha256(prior.source.file === 'skills/forge-next/SKILL.md' ? unitEntry.projectRead(file => fs.readFileSync(path.join(ROOT, file)))(prior.source.file) : fs.readFileSync(path.join(ROOT, prior.source.file))), `${prior.pointer}: #341 after is the raw source bytes`);
       assert(sampleReadme.includes(node341.before) && sampleReadme.includes(node341.after), `samples README records the #341 ${prior.pointer}`);
     }
     const cited = identitySampleAfter(prior.pointer, node341 ? node341.after : afterSha);

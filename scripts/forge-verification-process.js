@@ -8,6 +8,57 @@ const MAX_OUTPUT = 1024 * 1024;
 const script = path.join(__dirname, 'forge-verification-job.ps1');
 const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
 
+// POSIX-style leading literal assignments are data for the requested child,
+// never cmd syntax. This narrow scanner differs from the POSIX rewrite
+// tokenizer deliberately: quoted Windows paths retain their backslashes.
+// Chained commands are refused because one shell-wide env overlay would leak
+// the assignment to later commands, unlike a POSIX per-command prefix.
+function leadingEnvironment(command, environment) {
+  const refuse = () => { throw Object.assign(new Error('verification-env-prefix-unprovable'), { code: 'EVERIFYENV' }); };
+  let at = 0;
+  const assignments = [];
+  while (true) {
+    while (command[at] === ' ' || command[at] === '\t') at++;
+    const match = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(command.slice(at));
+    if (!match) break;
+    at += match[0].length;
+    let value = '', quote = null;
+    while (at < command.length) {
+      const char = command[at];
+      if (!quote && (char === ' ' || char === '\t')) break;
+      if (/[\x00-\x1f$`%!^]/.test(char) || !quote && /[&|;<>]/.test(char)) refuse();
+      if (char === '"' || char === "'") {
+        if (quote === char) quote = null;
+        else if (!quote) quote = char;
+        else value += char;
+      } else value += char;
+      at++;
+    }
+    if (quote) refuse();
+    assignments.push([match[1], value]);
+  }
+  if (!assignments.length) return { command, env: environment };
+  const remaining = command.slice(at);
+  // cmd expands these before recognizing operators, even inside double
+  // quotes. A literal scan cannot prove that %CHAIN% or !CHAIN! stays one
+  // command, so the prefix grammar must refuse expansion in the remainder.
+  if (!remaining || /[\r\n\0%!]/.test(remaining)) refuse();
+  const tokenized = require('./forge-command-rewrite').tokenizeCommand(remaining);
+  if (tokenized.ok && tokenized.segments.length !== 1) refuse();
+  let quote = false;
+  for (const char of remaining) {
+    if (char === '"') quote = !quote;
+    else if (!quote && /[&|;^()]/.test(char)) refuse();
+  }
+  if (quote) refuse();
+  const env = Object.assign(Object.create(null), environment || process.env);
+  for (const [key, value] of assignments) {
+    for (const present of Object.keys(env)) if (present.toLowerCase() === key.toLowerCase()) delete env[present];
+    env[key] = value;
+  }
+  return { command: remaining, env };
+}
+
 function createWindowsRunner({ spawnSyncImpl = spawnSync } = {}) {
   let compiled = null;
   const invoke = (mode, input, options, timeout) => spawnSyncImpl(powershell,
@@ -26,6 +77,13 @@ function createWindowsRunner({ spawnSyncImpl = spawnSync } = {}) {
       || !Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > 2147453647
       || options.disableAutoRun !== undefined && typeof options.disableAutoRun !== 'boolean') {
       return failed('invalid-supervisor-input', { joined: true, started: false });
+    }
+    try {
+      const literal = leadingEnvironment(command, options.env);
+      command = literal.command;
+      if (literal.env !== options.env) options = { ...options, env: literal.env };
+    } catch (error) {
+      return { ...failed('verification-env-prefix-unprovable', { joined: true, started: false }), error };
     }
     let sourceHash;
     try { sourceHash = crypto.createHash('sha256').update(fs.readFileSync(script)).digest('hex'); }

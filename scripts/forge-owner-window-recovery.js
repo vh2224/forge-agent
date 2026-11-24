@@ -63,19 +63,99 @@ function measureTask({owner,request,receiptCopy}){
   ...surface,...(channels?.candidate?{retained_candidate_channels:channels}:{})};
  return{owner,run,request:q,receipt,scope};
 }
+// Execution recovery is a separate measurement, not a preparation waiver. It
+// can release only the external coordination fence; all execution evidence,
+// lease/claim authority and pending questions remain exactly as observed.
+function measureExecution({owner,request,receiptCopy,binding}){
+ if(receiptCopy!==undefined)fail('owner-window-execution-receipt-copy-unsupported');
+ const attempt=require('./forge-attempt-recovery'),side=require('./forge-unit-sidecar'),controller=require('./forge-unit-controller'),lease=require('./forge-unit-lease');
+ const q=attempt.canonicalRequest(request),unit=`execute-task/${q.taskId}`;
+ if(request.scope!=='milestone'||request.phase!=='execute'||q.unitType!=='execute-task'||!/^T\d+(?:\.\d+)?$/.test(q.taskId||'')
+   ||!/^S\d{2,}$/.test(q.sliceId||'')||!require('./forge-ids').isValid(q.milestoneId)||q.runId!==q.milestoneId
+   ||q.ownerBroker||q.memberHandle!==undefined||q.batch_id!==undefined||q.route?.worker_mode!=='sidecar'
+   ||roots.key(roots.realDirectory(q.contextRoot))!==roots.key(owner)||!q.execution_contract)fail('owner-window-execution-scope-mismatch');
+ const exactRead=(file,limit=65536,optional=false)=>{const bytes=read(file,limit,optional);if(bytes&&fs.lstatSync(file).nlink!==1)fail('owner-window-evidence-link');return bytes;};
+ const runBytes=exactRead(runs.runFile(owner,q.runId)),run=JSON.parse(runBytes),contract=roots.validateContract(q.execution_contract,{owner,revalidate:true});
+ if(run.id!==binding.task_id||run.id!==q.runId||run.kind!=='milestone'||run.active!==true
+   ||run.host_runtime!==binding.host_runtime||q.route?.host_runtime!==binding.host_runtime
+   ||digest(run.session_id||'')!==binding.host_session_sha256||run.batch_locator)fail('owner-window-run-binding-mismatch');
+ if(digest(run.write_claim)!==digest(q.claim))fail('owner-window-execution-claim-mismatch');
+ require('./forge-write-claim').validateHeldClaim(run.write_claim);
+ if(q.claim?.schema_version!==2||!q.claim.generation||!q.claim.paths.length||q.claim.unit!==unit
+   ||digest(q.claim.execution_contract)!==digest(contract))fail('owner-window-execution-claim-mismatch');
+ side.validateRecoveryRequest(q);
+ const plan=exactRead(q.planFile,2*1024*1024),planHash=digest(plan);
+ const leaseFile=lease.leaseFile(owner,unit),leaseBytes=exactRead(leaseFile),held=JSON.parse(leaseBytes);
+ const begin=controller.lookupRecord(owner,'transaction',binding.begin_key);
+ if(!lease.validRecord(held,unit)||held.generation!==binding.lease_generation||digest(held.owner_token)!==binding.owner_token_sha256
+   ||held.request_id!==binding.begin_key||held.host_runtime!==binding.host_runtime
+   ||!begin||begin.action!=='begin'||begin.phase!=='committed'||begin.unit?.key!==unit||begin.milestone!==q.milestoneId
+   ||begin.after?.state?.active_slice!==q.sliceId||begin.host_runtime!==held.host_runtime||begin.lease_generation!==held.generation
+   ||begin.owner_digest!=='sha256:'+digest(held.owner_token)||controller.recordChecksum(begin)!==binding.begin_sha256
+   ||!controller.incompleteUnits(owner,q.milestoneId).some(row=>row.idempotency_key===begin.idempotency_key))fail('owner-window-execution-lineage-mismatch');
+ const published=controller.readEvents(controller.eventsFile(owner,q.milestoneId)).filter(row=>row.idempotency_key===begin.idempotency_key);
+ const event=published.length===1?{...published[0]}:null;if(event)delete event.sequence;
+ if(!event||!Number.isSafeInteger(published[0].sequence)||published[0].sequence<1||digest(event)!==digest(begin.event)
+   ||controller.pendingTransactions(owner).length)fail('owner-window-execution-lineage-mismatch');
+ const fingerprint=side.artifactFingerprint(q),recoveryIdentity=digest(attempt.requestIdentity(q));
+ const requestHash=digest({owner,run:q.runId,unit,generation:held.generation,dispatch:q.dispatchId,workflow:q.workflowId,contract:q.execution_contract,plan:planHash,claim:digest(run.write_claim)});
+ if(binding.unit_key!==unit||binding.dispatch_id!==q.dispatchId||binding.request_sha256!==requestHash||binding.request_fingerprint!==fingerprint
+   ||binding.recovery_identity_sha256!==recoveryIdentity||binding.result_file_sha256!==digest(path.resolve(q.resultFile)))fail('owner-window-request-mismatch');
+ const census=require('./forge-owner-recovery-roots').measure({owner,contract,run});
+ const suffixes=['','.receipt.json','.returned.json','.manifest.json','.request.json','.receipt.json.response-anchor.json','.process-tree.jsonl','.process-tree.custody.jsonl'];
+ const channels=suffixes.map(suffix=>{
+  const file=path.resolve(q.resultFile+suffix);for(const root of [owner,...census.roots.map(row=>row.path)])require('./forge-xllm').validateResultFileTarget(file,root);
+  const bytes=exactRead(file,8*1024*1024,true);return{file,present:bytes!==null,sha256:bytes?digest(bytes):null,bytes:bytes?.length||0};
+ });
+ const receiptChannel=channels.find(row=>row.file===path.resolve(q.resultFile+'.receipt.json'));
+ let receipt=null;if(receiptChannel.present){
+  const bytes=exactRead(receiptChannel.file,8*1024*1024);if(digest(bytes)!==receiptChannel.sha256)fail('owner-window-evidence-changed');
+  try{receipt=JSON.parse(bytes);}catch{fail('owner-window-receipt-mismatch');}
+  if(receipt.dispatch_id!==q.dispatchId||receipt.fingerprint!==fingerprint
+    ||receipt.recovery_identity_sha256!==recoveryIdentity)fail('owner-window-receipt-mismatch');
+  if(receipt.retained_request)require('./forge-request-retention').assertForReceipt(q,receipt);
+ }
+ for(const suffix of ['', '.returned.json','.manifest.json']){
+  const channel=channels.find(row=>row.file===path.resolve(q.resultFile+suffix));if(!channel.present)continue;
+  const bytes=exactRead(channel.file,8*1024*1024);if(digest(bytes)!==channel.sha256)fail('owner-window-evidence-changed');
+  // Malformed output remains retained data, not a result we accept. Any present
+  // identity header, however, must describe this exact attempt.
+  let value;try{value=JSON.parse(bytes);}catch{continue;}
+  for(const[key,wanted]of [['dispatch_id',q.dispatchId],['fingerprint',fingerprint],['request_fingerprint',fingerprint],['recovery_identity_sha256',recoveryIdentity]]){
+   if(value?.[key]!==undefined&&value[key]!==null&&value[key]!==wanted)fail('owner-window-execution-channel-mismatch');
+  }
+  if(suffix==='.manifest.json'&&value?.request){
+   if(side.artifactFingerprint(attempt.canonicalRequest(value.request))!==fingerprint
+     ||digest(path.resolve(value.request.resultFile||''))!==binding.result_file_sha256)fail('owner-window-execution-channel-mismatch');
+  }
+ }
+ for(const[key,suffix]of [['manifest_sha256','.manifest.json'],['returned_response','.returned.json']]){
+  const wanted=key==='returned_response'?receipt?.returned_response?.sha256:receipt?.[key];
+  if(wanted!==undefined&&wanted!==null&&wanted!==channels.find(row=>row.file===path.resolve(q.resultFile+suffix)).sha256)fail('owner-window-execution-channel-mismatch');
+ }
+ const scope={schema_version:3,measurement_profile:'milestone-execution-coordination-v1',owner,task_id:q.runId,milestone_id:q.milestoneId,
+  slice_id:q.sliceId,unit,dispatch_id:q.dispatchId,previous_host_runtime:run.host_runtime,previous_host_session_sha256:digest(run.session_id),
+  owner_identity_sha256:identity(owner),run_sha256:digest(runBytes),request_sha256:requestHash,request_fingerprint:fingerprint,recovery_identity_sha256:recoveryIdentity,
+  plan_sha256:planHash,claim_sha256:digest(run.write_claim),claim_generation:q.claim.generation,begin_key:begin.idempotency_key,
+  begin_sha256:controller.recordChecksum(begin),lease_sha256:digest(leaseBytes),lease_generation:held.generation,execution_contract_sha256:digest(contract),
+  receipt:{file:receiptChannel.file,sha256:receiptChannel.sha256,phase:receipt?.phase||'missing'},retained_channels:channels,worktree_bindings:census.bindings,
+  coverage:{authority:'coordination-only',artifacts_accepted:false,code_completed:false,writer_proof:'live-host-joins-required'},
+  owner_surface_sha256:digest(require('./forge-task-execution').protectedSnapshot(owner)),code_states:census.roots.map(stableSnapshot).sort((a,b)=>a.root_id.localeCompare(b.root_id))};
+ return{owner,run,request:q,receipt,scope};
+}
 function capture({owner,request,receiptCopy}){
  if(receiptCopy!==undefined&&!request)fail('owner-window-request-required');
  owner=roots.realDirectory(owner);const seen=windows.observed(owner);if(!seen)return{owner,seen:null};
  const binding=seen.binding;
- if(binding.kind!=='artifact-preparation'||binding.coordination!=='observed-host-session-v1'
+ if(!['artifact-preparation','unit-execution'].includes(binding.kind)||binding.coordination!=='observed-host-session-v1'
    ||!['codex','claude'].includes(binding.host_runtime)||!/^[a-f0-9]{64}$/.test(binding.host_session_sha256||''))fail('owner-window-binding-unsupported');
  const metadata=require('./forge-lock').status(windows.controlRoot(owner),'owner-transport-window').metadata;
  if(!metadata?.owner_token||!metadata.generation)fail('owner-window-unmeasured');
  const runFile=runs.runFile(owner,binding.task_id),runBytes=read(runFile),run=JSON.parse(runBytes);
- if(run.id!==binding.task_id||run.kind!=='task'||run.host_runtime!==binding.host_runtime||digest(run.session_id||'')!==binding.host_session_sha256)fail('owner-window-run-binding-mismatch');
+ if(run.id!==binding.task_id||run.kind!==(binding.kind==='unit-execution'?'milestone':'task')||run.host_runtime!==binding.host_runtime||digest(run.session_id||'')!==binding.host_session_sha256)fail('owner-window-run-binding-mismatch');
  if(!request)return{owner,seen,run,metadata};
- const measured=measureTask({owner,request,receiptCopy}),q=measured.request;
- if(q.taskId!==binding.task_id||q.dispatchId!==binding.dispatch_id||q.hostRuntime!==binding.host_runtime
+ const measured=binding.kind==='unit-execution'?measureExecution({owner,request,receiptCopy,binding}):measureTask({owner,request,receiptCopy}),q=measured.request;
+ if((binding.kind==='unit-execution'?q.runId:q.taskId)!==binding.task_id||q.dispatchId!==binding.dispatch_id||(binding.kind==='unit-execution'?q.route?.host_runtime:q.hostRuntime)!==binding.host_runtime
    ||measured.scope.request_sha256!==binding.request_sha256||measured.scope.run_sha256!==digest(runBytes))fail('owner-window-request-mismatch');
  const scope={...measured.scope,binding_sha256:seen.sha256,binding,custody:{owner_token:metadata.owner_token,generation:metadata.generation}};
  return{...measured,seen,metadata,scope,observation_sha256:digest(scope)};

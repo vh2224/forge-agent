@@ -133,6 +133,7 @@ const TEMPLATE_FILES = Object.freeze({
 
 const ALLOWED_PLACEHOLDERS = new Set([
   'WORKING_DIR',
+  'CODE_DIR',
   'FORGE_SCRIPTS_DIR',
   'M###',
   'S##',
@@ -661,12 +662,15 @@ function validateRenderOptions(rawOptions) {
   if (!['shared', 'branch', 'worktree'].includes(options.isolationMode)) {
     throw new Error(`Invalid isolation_mode: ${options.isolationMode}`);
   }
+  if (options.isolationMode === 'worktree' && !options.codeDir) {
+    throw new Error('code_dir is required for worktree isolation');
+  }
+  options.codeDir = assertDirectory(options.codeDir || options.cwd, 'code_dir');
   if (options.isolationMode !== 'shared') {
     options.branch = validateText(options.branch || '', 'branch', 255);
     if (!options.branch || /[\r\n]/.test(options.branch) || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(options.branch)) {
       throw new Error(`Invalid branch for ${options.isolationMode} isolation`);
     }
-    options.codeDir = assertDirectory(options.codeDir || options.cwd, 'code_dir');
   }
   return options;
 }
@@ -950,6 +954,7 @@ function buildValues(options, template) {
   const timeSelection = !template.includes('{TIME_SELECTION}') || binding === '' ? '' : resolveTimeSelection(options);
   return {
     WORKING_DIR: options.cwd,
+    CODE_DIR: options.codeDir,
     FORGE_SCRIPTS_DIR: scriptsDir,
     'M###': options.milestoneId,
     'S##': options.sliceId,
@@ -1008,7 +1013,7 @@ function renderPrompt(rawOptions) {
   const planning = appendPlanningQuestions(appendPendingContext(applyIsolationHeader(basePrompt, options), options), options);
   const pendingPrompt = planning.prompt;
   const resolvedPrompt = options.unitType.startsWith('complete-')
-    ? `${pendingPrompt}\n## Procedure path bindings\nResolve procedure path variables using these literal values:\nWORKING_DIR: ${values.WORKING_DIR}\nFORGE_SCRIPTS_DIR: ${values.FORGE_SCRIPTS_DIR}\n`
+    ? `${pendingPrompt}\n## Procedure path bindings\nResolve procedure path variables using these literal values:\nWORKING_DIR: ${values.WORKING_DIR}\nCODE_DIR: ${values.CODE_DIR}\nFORGE_SCRIPTS_DIR: ${values.FORGE_SCRIPTS_DIR}\n`
     : pendingPrompt;
   // Validate DATA boundaries after every substitution and pending insertion,
   // before materialization or native file-reading delivery can publish anything.

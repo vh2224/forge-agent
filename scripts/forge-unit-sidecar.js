@@ -295,6 +295,20 @@ function milestonePlanFile(request) {
 
 // Pure readiness check over the wire representation, after caller assembly.
 // Without an identity this is diagnostic policy, never a reusable dispatch seal.
+// The controller's PLAN observation ceiling, distinct from prompt token budgets
+// and the smaller authority/model-source observation limit.
+const EXECUTION_INPUT_MAX_BYTES = require('./forge-phase-cost').MAX_BYTES;
+function readExecutionInput(file) {
+  let real, stat;
+  try { stat = fs.lstatSync(file); real = fs.realpathSync.native(file); }
+  catch { fail('execution-input-source_unreadable'); }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) fail('execution-input-source_identity');
+  const read = require('./forge-autonomy-sources').readBoundedStableFile(file, EXECUTION_INPUT_MAX_BYTES, { expectedReal: real });
+  if (read.error) fail('execution-input-' + read.error);
+  if (read.stat.nlink !== 1 || ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'].some(key => read.stat[key] !== stat[key]))
+    fail('execution-input-source_changed_during_read');
+  return read.buffer;
+}
 function preflightExecutionVerification(raw, options = {}) {
   const request = JSON.parse(JSON.stringify(raw));
   if (!request.execution_contract || request.unitType !== 'execute-task') return null;
@@ -310,7 +324,7 @@ function preflightExecutionVerification(raw, options = {}) {
   } else planFile = milestonePlanFile(request);
   const runtimeVerification = options.verification === undefined ? undefined : JSON.parse(JSON.stringify(options.verification));
   // Issue 343 U3b: a cohort member's seal also binds the runtime view minted by its live handle.
-  const planText = fs.readFileSync(planFile, 'utf8');
+  const planText = readExecutionInput(planFile).toString('utf8');
   const seal = require('./forge-verify').normalizeExecutionVerification(request.execution_contract,
     planText, request.verification, runtimeVerification, options.identity || {},
     options.memberView !== undefined ? { memberView: options.memberView } : undefined);
@@ -400,7 +414,7 @@ function validateRecoveryRequest(raw, options = {}) {
       const contract = request.execution_contract ? roots.validateContract(request.execution_contract, { owner: request.contextRoot, revalidate: true })
         : roots.singleContract(request.contextRoot, request.cwd);
       const planFile = milestonePlanFile(request);
-      const plan = fs.readFileSync(planFile, 'utf8');
+      const plan = readExecutionInput(planFile).toString('utf8');
       const checked = roots.validatePlan(plan, contract);
       if (request.execution_contract) {
         const claim = request.claim;
@@ -417,7 +431,7 @@ function validateRecoveryRequest(raw, options = {}) {
             || checked.writes.some(p => !claim.paths.some(c => roots.covers(c, p))))
             && !custody.coversRetainedExecution(held,contract,checked.writes)) fail('execution-held-claim-mismatch');
         const gateFile = planFile.replace(/-PLAN\.md$/, '-PLAN-GATE.md');
-        const gate = fs.existsSync(gateFile) ? fs.readFileSync(gateFile, 'utf8') : '';
+        const gate = fs.existsSync(gateFile) ? readExecutionInput(gateFile).toString('utf8') : '';
         if (!/^status:\s*approved\s*$/m.test(gate)
             && !(request.gates?.plan === 'skipped' && request.gates?.planSkipReason === 'interactive-off')
             && !require('./forge-task-execution').autoGateAllowed(request)) fail('execution-plan-gate-required');
@@ -425,7 +439,7 @@ function validateRecoveryRequest(raw, options = {}) {
         if (approvedHash && approvedHash !== hash(plan)) fail('execution-plan-gate-stale');
         if (request.gates?.claim !== 'proceed' || !['passed', 'not-applicable'].includes(request.gates?.security)) fail('execution-gates-required');
         if (request.gates.security === 'passed'
-            && (!request.securityFile || !fs.readFileSync(request.securityFile, 'utf8').trim())) fail('execution-security-required');
+            && (!request.securityFile || !readExecutionInput(request.securityFile).toString('utf8').trim())) fail('execution-security-required');
       }
       const effective = require('./forge-transport-capabilities').executionCapability(request.route, contract, options);
       if (!effective.supported) fail(effective.reason_code);
@@ -663,7 +677,7 @@ function assertMilestoneDeliveryReplay(request, record) {
   if (!record.milestone_delivery) return;
   const saved = record.milestone_delivery, api = require('./forge-task-execution');
   require('./forge-code-roots').validateContract(request.execution_contract, { revalidate: true });
-  if (hash(fs.readFileSync(request.planFile)) !== saved.plan_sha256) fail('execution-input-changed');
+  if (hash(readExecutionInput(request.planFile)) !== saved.plan_sha256) fail('execution-input-changed');
   for (const entry of saved.protected_roots) api.assertProtected(entry.path, entry.snapshot);
   if (JSON.stringify(api.replayState(request.cwd, request.execution_contract)) !== JSON.stringify(saved.code_state)) fail('execution-replay-baseline-changed');
 }
@@ -728,7 +742,7 @@ function executeDeliveryArtifacts(request, loc, result, root, cwd, captured, opt
   if (!planReference || path.isAbsolute(planReference) || planReference === '..' || planReference.startsWith('../')) {
     fail('delivery-plan-outside-context');
   }
-  const planText = fs.readFileSync(planFile, 'utf8');
+  const planText = readExecutionInput(planFile).toString('utf8');
   const input = {
     schema_version: 1,
     unit: loc.rules[loc.delivery.input].unit,
@@ -4759,7 +4773,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
   });
 }
 module.exports = { appendProtectedOwnerEvents, preflightExecutionVerification, schema, memorySchema, memorySchemaV2, NEW_MEMORY_SCHEMA_VERSION, memoryExtractionSchema, memoryResponseSchema,
-  memoryTransportSchema, memoryEvidenceContract, MEMORY_QUALITY_CONTRACT, locations, milestonePlanFile, validateRecoveryRequest, projectTransportOptions, captureMilestoneBaseline, reconcileMilestoneAttempt, validateArtifacts, inspectArtifacts, inspectDeliveryContent, executeDeliveryArtifacts, MAX_ARTIFACT_BYTES,
+  memoryTransportSchema, memoryEvidenceContract, MEMORY_QUALITY_CONTRACT, locations, milestonePlanFile, validateRecoveryRequest, readExecutionInput, EXECUTION_INPUT_MAX_BYTES, projectTransportOptions, captureMilestoneBaseline, reconcileMilestoneAttempt, validateArtifacts, inspectArtifacts, inspectDeliveryContent, executeDeliveryArtifacts, MAX_ARTIFACT_BYTES,
   MAX_ARTIFACT_PAYLOAD_BYTES, target, markChecked, createTaskMarker, verifyTaskMarker, materialize, memoryPrompt, memorySourceContext,
   publishReadyRecord, prepareReadyMemoryPublication, applyReadyMemoryPublication, nativeMemoryFingerprint, acceptNativeMemoryResult, candidateFromNativeResult, runNativeMemory,
   routeIdentity, artifactFingerprint, artifactAttemptFiles, beginArtifactAttempt, replayArtifactAttempt, reconcileLegacyReviewFix,

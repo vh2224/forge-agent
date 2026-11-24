@@ -127,8 +127,8 @@ the evidence in the personal checkpoint and honor the user's recovery policy.
    and pending-context bindings. Save the fully rendered prompt. For
    `execute-task`, retain its plan, security and context bundle bindings.
 4. Allocate a result file **outside both CODE_DIR and WORKING_DIR**, in an
-   operator-owned temporary directory. Keep it and its `.receipt.json` sibling
-   until completion is acknowledged. Never reuse them for another attempt.
+   operator-owned persistent attempt directory that survives host-session/scratchpad cleanup. Keep the original result, manifest and all receipt siblings at their original paths
+   until completion/ACK and recovery are closed; outside-root validation does not itself prove storage durability. Do not relocate historical receipts to claim continuity. Never reuse them for another attempt.
 5. Write a UTF-8 JSON request file using the host's structured file tool or
    `JSON.stringify`, with these fields (values below describe the bindings):
 
