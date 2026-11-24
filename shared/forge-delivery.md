@@ -1,5 +1,150 @@
 # Forge delivery by acceptance criterion
 
+## Committed task without delivery: current verification successor
+
+New single-task sidecar execution uses the unit adapter on both engines. The
+workflow's `complete` refuses a successful execute-task without canonical delivery
+before creating a completion intent; the existing begin and lease remain held.
+Publish through the unit adapter and complete that same begin, not a new inference.
+For a new or incomplete completion, captures must be inside that begin's time
+window and their declared source blobs must match the current workspace. The
+owner records the begin checksum and exact capture fingerprints in its completion
+result; worker-provided fields cannot substitute this measured binding. Already
+committed history keeps historical validation and is not compared to later code.
+
+An old release may already have committed completion before delivery existed.
+The next selection now returns `execution-delivery-recovery-required` with exact
+begin/completion locators instead of dispatching the same task again. Preserve
+that original transaction, event, result, SUMMARY, source changes and timestamps.
+An envelope captured today cannot prove that earlier completion.
+
+The trusted host may use `forge-completion-delivery-recovery.createRepair` for an
+explicit **verification-only** successor. It composes the real serial controller
+begin and workflow complete; it does not invoke a provider or replay implementation.
+Use this API in one owner process, not serialized JSON approvals:
+
+```js
+const repair = require('./scripts/forge-completion-delivery-recovery').createRepair({
+  cwd: owner, milestone, slice, task, runId, ownerToken, hostRuntime,
+  beginKey: originalBeginKey, completionKey: originalCompletionKey,
+  executionContract, assertAuthority, attestStoppedWriter, readPendingQuestions,
+});
+const next = repair.start(); // verify-only, distinct deterministic begin_key
+// Run the plan's real checks now. Build/reverify the canonical delivery with
+// contemporaneous root/workspace/source captures and explicit criterion bindings.
+const completed = repair.complete();
+```
+
+After that genuine completion, resume the **same saved loop snapshot** with the
+existing loop adapter's `resume-delivery` command and `repair_begin_key` from
+`start()`. This read-only administrative admission revalidates the old block,
+new published lineage, saved baseline digest, owner capture binding and canonical
+historical delivery. It clears only that delivery block, preserves workflow ID,
+step count, time budgets and pending questions, and returns `continue`. Then use
+normal `next`; no worker step is charged by the administrative resume. A missing
+or forged successor cannot resume the workflow. Do not edit the snapshot to idle
+or start another workflow to escape the blocked state.
+
+The callbacks are live host adapters. `assertAuthority(scope)` revalidates the
+operator's existing authorization, owned run, held nonempty claim, isolation and
+absence of conflicting writers for every physical root. `attestStoppedWriter`
+must return true only after actual writer/process join and reconciliation in all
+roots; PID absence, an inactive run or a JSON flag are insufficient.
+`readPendingQuestions` must inspect the original receipt/checkpoint and current
+continuation; every unresolved question still blocks. Do not supply empty stubs
+for a real user task. Unknown authority, process state or questions means stop.
+
+Retain any invalid old delivery/captures by exact bytes and hash before current
+publication. Reuse the unchanged plan and source work; do not run the executor.
+The helper validates the physical execution contract, held claim, original
+published lineage, current code snapshots and original plan/records across both
+operations. New captures must be at or after the new begin and before its new
+completion. It refuses code/claim/root/plan/history drift or pending questions.
+Before that new begin, it saves a bounded baseline under the task's existing
+artifact directory. The baseline digest forms part of the new begin identity.
+Restart reuses that exact saved state and compares current roots and code to it;
+missing, changed or linked baseline files refuse instead of capturing a new basis.
+Do not edit or delete this state to accept changed code. A changed claim or source
+needs a separately reconciled owner continuation, not a silent baseline refresh.
+The old completion stays unproven and immutable; the new completion records
+current verification, never backdated implementation evidence. No saved worker
+receipt is invented. A crash keeps the canonical new begin/transaction for
+reconciliation; it does not authorize another executor or an automatic reset.
+
+## Retained partial execution
+
+An `executed` standalone partial with a failed delivery capture retains valuable
+code but cannot publish by replay. Recovery returns
+`execution-partial-continuation-required` before any reset, disposition or model
+fallback. A complete saved response still replays; an unverified partial may run
+verification once, and a verified environment-only partial keeps the existing
+`forge-env-promote` checks without requiring another writer.
+
+The owner handles this result using `forge-execution-continuation.create`:
+
+```js
+const continuation = require(FORGE_SCRIPTS_DIR + '/forge-execution-continuation.js').create({
+  request: originalRequest,
+  paths: residualQualifiedPaths,
+  processProbe: joinedProcessObservation
+});
+const result = await require(FORGE_SCRIPTS_DIR + '/forge-unit-sidecar.js').runUnitSidecar(
+  continuation.request, { ...liveRuntime, partialContinuation: continuation.capability });
+```
+
+Derive the exact residual file paths from unmet implementation criteria and the
+original plan, not from a newly broadened scope. The live process callback must
+prove the actual previous writer joined; unknown/live processes refuse. The
+helper rechecks original source hashes, every code root, held claim generation,
+pending task questions and receipt identity. The child uses a separate immutable
+request/result/receipt and native prompt file with the same explicit route; normal
+plan, security, claim and verification admission still run. Exact residual paths
+are enforced on declarations and independently observed deltas. Its deterministic
+identity replays an existing child rather than creating another inference.
+Preserve the original receipt/result/state; never patch a failed capture to pass.
+
+## Protected-window hook observations
+
+During a coordinated native preparation or ordinary v2 execution window, `forge-hook` retains observational
+tool evidence under `forge-owner-transport-window.controlRoot(owner)` in
+`hook-evidence/<binding_sha256>/<canonical-evidence-name>.jsonl`. This private
+external journal survives window settlement; it is not replayed as an authorized
+owner append and grants no consent or publication authority. The strict owner
+snapshot and live join requirements remain in force. Other `.gsd` writes still
+refuse. Legacy uncoordinated embedding must supply the supported owner transport
+adapter; absence of a protected window is not evidence of compatibility.
+
+### Reconcile an attributed owner delta
+
+`forge-protected-owner-activity.createOwnerReconciliation` creates a private,
+single-use observation for a milestone execute-task attempt. It requires live
+owner authority, stopped-writer and pending-question adapters, plus an exact
+delta attestation bound to the request, original receipt and baseline hashes.
+Saved JSON assertions are not adapters. All possible writer roots must have
+been reconciled before a successor writer starts.
+
+Known lease-clock, append-only hook and canonical stop deltas require their
+original bytes and an attributable host reference. A changed lease must still
+belong to the original, open controller begin. A manual HANDOFF/session note or
+missing preimage requires the exact scoped decision produced by
+`reconciliationDecision`: present it through the owner's question channel and
+save the explicit answer with `forge-pending-questions`. The decision binds the
+reviewed delta hash; pending, negative or foreign answers refuse. Plans, claims,
+code and unrelated metadata cannot be approved through this API.
+
+Pass the private handle as `runtime.ownerReconciliation` to
+`reconcileMilestoneAttempt` and the eligible `recoverUnitSidecar` continuation.
+The overlay accepts only the observed paths/bytes; another edit invalidates it.
+It preserves original receipt/S0 evidence, permits only the canonical reset's
+reconciliation annotation, and transfers to fresh successor guards once. It
+does not grant routing permission or turn raw `returned.json` into a validated
+delivery. Reuse still requires the existing saved-result eligibility and all
+verification/publication gates.
+
+Zero verification bindings cannot establish a task's criteria: both the current
+delivery reader and controller completion gate require every criterion to be
+verified. A successful command alone does not supply missing bindings.
+
 This contract builds a deterministic delivery projection for review, QA and human
 acceptance. It does not change verification gates, workflow state or approval. The
 projection lives beside the unit SUMMARY as `<unit>-DELIVERY.json`; the SUMMARY
@@ -272,3 +417,43 @@ revision mismatches. As with behavioral captures, local envelope fingerprints
 detect changes; they are not cryptographic authentication.
 
 forge-verify.captureRootDelivery(execution_contract,planText,options) gera envelopes próprios de verification/artifact por root_id, identidade física, contract hash, cwd real, revisão/workspace, environment e captured_at contemporâneos. Os comandos rodam em cada checkout e expected_output é conferido em sua raiz. Input de delivery v2 conserva execution_contract e bindings com root_id; fonte estrangeira ou identidade alterada falha. Truth global requer binding explícito para cada raiz; artifact requer sua raiz e key_link as raízes de from/to. Um comando global, sucesso de outra raiz ou mero arquivo existente não cobre comportamento. CI/review/merge/install/aceite humano continuam fatos independentes.
+
+Na captura Git, uma política raiz `.gitignore` suja é persistida como o blob
+exato vinculado ao hash do snapshot, após leitura regular, limitada e estável.
+Isso não altera working tree nem index e não persiste todos os arquivos sujos.
+As leituras current/historical não escrevem objetos nem usam regras atuais para
+preencher uma política histórica ausente. O glob mantém seu universo capturado;
+uma regra de ignore só é descartada quando seu prefixo raiz literal é
+comprovadamente disjunto. Regras relevantes ou ambíguas continuam recusadas.
+
+## Critérios antes do provedor e reparo de verificação
+
+O preflight de execute-task com execution_contract v2 valida as declarações de
+bindings com o mesmo inventário, seletores, aspectos e raízes da entrega. Cada
+critério precisa de cobertura em todas as raízes exigidas; índice de comando,
+fonte, aspecto e cobertura inválidos são recusados antes do spawn. Isso verifica
+prontidão, não o resultado: a captura real e o gate de entrega continuam exigidos.
+Suplementos runtime não fornecem nem substituem bindings do pedido. Receipts
+históricos conservam a verificação de identidade e replay, sem backfill silencioso.
+
+Uma tentativa milestone v2 já executada sem bindings pode usar
+`forge-sidecar-verification-repair.create({request, bindings, reference,
+assertAuthority, attestStoppedWriter, readPendingQuestions, ownerReconciliation})`.
+O owner observado deve manter o claim exato e provar todos os writers parados.
+Qualquer delta protegido exige antes a reconciliação limitada correspondente;
+não é preciso resetar os arquivos do worker. O reparo valida plano, S0, pedido,
+receipt, resposta retida, censo completo de alterações e raízes. Um returned.json
+isolado não basta: o hash/canal do receipt original deve ancorá-lo e a resposta,
+seus arquivos e todas as superfícies são novamente validados. Pending questions,
+arquivos omitidos, mudanças fora do claim ou originais adulterados recusam.
+
+Passe a capacidade privada retornada como `verificationSuccessor` ao
+`runUnitSidecar` do pedido original e, quando usada na criação, mantenha também
+`ownerReconciliation`. O caminho executa somente a captura e a publicação
+canônicas, com bindings separados no sucessor. A entrada do provedor é recusada.
+Pedido, fingerprint, receipt, resultado e S0 originais não são reescritos; o código
+devolvido não é apagado. O sucessor tem canais próprios, origem e hashes, e só um
+ready produzido pelo gate vivo pode publicar. Não reutilize ou serialize a
+capacidade, não aceite uma captura salva como autoridade e não confunda o reparo
+com o sucessor existente para timeout. Uma falha de verificação permanece falha;
+o complete do begin original ainda exige entrega comprovada.

@@ -43,7 +43,10 @@ function runsDir(cwd) {
  * Forge project the moment a run is registered against it. Creating `.gsd/` is
  * `/forge-init`'s job and nothing else's.
  */
-function ensureRunsDir(cwd) {
+function ensureRunsDir(...args) {
+  return require('./forge-owner-transport-window').withMutation(args[0], () => ensureRunsDirInsideOwnerWindow(...args));
+}
+function ensureRunsDirInsideOwnerWindow(cwd) {
   const gsd = path.join(cwd, '.gsd');
   if (!fs.existsSync(gsd)) {
     const err = new Error(
@@ -96,6 +99,8 @@ function runFile(cwd, id) {
  */
 function withAddressDefaults(rec) {
   if (!rec || typeof rec !== 'object') return rec;
+  if (rec.batch_locator != null) validateBatchLocator(rec.batch_locator, rec.id);
+  if (rec.batch_retirements !== undefined) validateBatchRetirements(rec.batch_retirements, rec.id);
   return Object.assign({}, rec, {
     branch:  (rec.branch  === undefined || rec.branch  === '') ? null : rec.branch,
     root:    (rec.root    === undefined || rec.root    === '') ? null : rec.root,
@@ -220,14 +225,99 @@ function resolveBySessionId(cwd, sessionId) {
   return listActive(cwd).find(r => r.session_id === sessionId) || null;
 }
 
-function oldestActive(cwd) {
-  const active = listActive(cwd);
+// Host identity is observed only from this process, never selected from a run.
+function observeHostSession(hostRuntime, expectedSession) {
+  if (hostRuntime === 'claude') {
+    const value = process.env.FORGE_CLAUDE_OWNER_SESSION_ID;
+    return process.env.FORGE_CLAUDE_OWNER_SOURCE === 'claude-sessionstart-env-v1'
+      && typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/.test(value)
+      && expectedSession === value ? { sessionId: value, hostRuntime: 'claude', source: 'claude-sessionstart-env-v1' } : null;
+  }
+  if (hostRuntime !== 'codex') return null;
+  for (const source of ['CODEX_THREAD_ID', 'CODEX_SESSION_ID']) {
+    const value = process.env[source];
+    if (typeof value === 'string' && value.trim() && value.length <= 1024 && !/[\r\n\0]/.test(value)) return { sessionId: value, hostRuntime: 'codex', source };
+  }
+  return null;
+}
+
+function validSessionOwner(owner) {
+  return !!owner && typeof owner.sessionId === 'string' && owner.sessionId.trim() !== '' && ['claude', 'codex'].includes(owner.hostRuntime);
+}
+
+function matchesSessionOwner(record, owner) {
+  return validSessionOwner(owner) && record?.active === true && record.session_id === owner.sessionId && record.host_runtime === owner.hostRuntime;
+}
+
+function resolveBySessionOwner(cwd, owner) {
+  if (!validSessionOwner(owner)) return null;
+  const census = boundedCensus(cwd);
+  if (census.unparseable.length) return null;
+  const matches = census.parsed.filter(record => matchesSessionOwner(record, owner));
+  return matches.length === 1 && typeof matches[0].id === 'string' && ids.isValid(matches[0].id) ? matches[0] : null;
+}
+
+function bumpOwnedHeartbeat(cwd, id, owner, timestamp, guard) {
+  const now = timestamp === undefined ? Date.now() : timestamp;
+  if (!validSessionOwner(owner) || !ids.isValid(id) || !Number.isSafeInteger(now) || now <= 0) return { updated: false, record: null };
+  // The trusted caller supplies its observed host/session, not a serialized
+  // authorization. Recheck both axes and uniqueness INSIDE the existing mutex.
+  return updateWith(cwd, id, current => {
+    if (!matchesSessionOwner(current, owner) || resolveBySessionOwner(cwd, owner)?.id !== id) return null;
+    if (Number.isFinite(current.last_heartbeat) && now <= current.last_heartbeat) return null;
+    return { last_heartbeat: now };
+  }, guard);
+}
+
+function registryPresent(cwd) {
+  try { fs.lstatSync(runsDir(cwd)); return true; }
+  catch (error) { return error.code !== 'ENOENT'; }
+}
+
+function legacyOwnedRecord(cwd, owner) {
+  if (!validSessionOwner(owner) || registryPresent(cwd)) return null;
+  try {
+    const root = fs.realpathSync.native(cwd), file = path.join(root, '.gsd', 'forge', ALIAS_FILE);
+    for (const relative of ['.gsd', '.gsd/forge', '.gsd/forge/' + ALIAS_FILE]) {
+      const stat = fs.lstatSync(path.join(root, relative));
+      if (stat.isSymbolicLink() || (relative.endsWith(ALIAS_FILE) ? !stat.isFile() || stat.size > 65536 : !stat.isDirectory())) return null;
+    }
+    const read = require('./forge-autonomy-sources').readBoundedStableFile(file, 65536, { expectedReal: fs.realpathSync.native(file) });
+    if (read.error) return null;
+    const record = JSON.parse(read.buffer.toString('utf8'));
+    return matchesSessionOwner(record, owner) ? record : null;
+  } catch { return null; }
+}
+
+function bumpLegacyOwnedHeartbeat(cwd, owner, timestamp) {
+  const now = timestamp === undefined ? Date.now() : timestamp;
+  if (!Number.isSafeInteger(now) || now <= 0 || !legacyOwnedRecord(cwd, owner)) return false;
+  // add/update share this fence: a newly created registry cannot race a legacy
+  // alias write. An absent/mismatched identity never creates even the mutex.
+  return withRegistryFence(cwd, () => {
+    const record = legacyOwnedRecord(cwd, owner);
+    if (!record || Number.isFinite(record.last_heartbeat) && now <= record.last_heartbeat) return false;
+    writeAtomic(path.join(cwd, '.gsd', 'forge', ALIAS_FILE), { ...record, last_heartbeat: now });
+    return true;
+  });
+}
+
+function oldestActiveRecord(records) {
+  const active = records.filter(r => r.active === true);
   if (active.length === 0) return null;
   return active.reduce((a, b) => (a.started_at <= b.started_at ? a : b));
 }
+function oldestActive(cwd) {
+  return oldestActiveRecord(listAll(cwd));
+}
 
 // ── Write (atomic via temp+rename) ──────────────────────────────────────────
-function writeAtomic(filePath, record) {
+function writeAtomic(...args) {
+  return require('./forge-owner-transport-window').withMutation(require('./forge-owner-transport-window').metadataOwner(args[0]), () => writeAtomicInsideOwnerWindow(...args));
+}
+function writeAtomicInsideOwnerWindow(filePath, record) {
+  if (record.batch_locator != null) validateBatchLocator(record.batch_locator, record.id);
+  if (record.batch_retirements !== undefined) validateBatchRetirements(record.batch_retirements, record.id);
   const dir  = path.dirname(filePath);
   const base = path.basename(filePath);
   // Random suffix avoids collisions if two writers hit the same id concurrently
@@ -238,6 +328,9 @@ function writeAtomic(filePath, record) {
 
 function normalizeMetadataPatch(patch) {
   const next = Object.assign({}, patch || {});
+  if (Object.prototype.hasOwnProperty.call(next, 'batch_locator') && next.batch_locator != null) {
+    next.batch_locator = validateBatchLocator(next.batch_locator);
+  }
   if (Object.prototype.hasOwnProperty.call(next, 'host_runtime')) {
     if (next.host_runtime === undefined || next.host_runtime === null || next.host_runtime === '') delete next.host_runtime;
     else next.host_runtime = normalizeHostRuntime(next.host_runtime);
@@ -248,7 +341,57 @@ function normalizeMetadataPatch(patch) {
   return next;
 }
 
-function withRunLock(cwd, id, fn) {
+// A locator is data, never a serialized execution capability. Keep it additive:
+// old records are neither migrated nor given a fabricated batch field on read.
+function validateBatchLocator(value, runId) {
+  const keys = ['schema', 'phase', 'run_id', 'batch_id', 'manifest_sha256', 'isolation_ref', 'isolation_sha256', 'claim_generation', 'claim_sha256'];
+  const invalid = () => { throw Object.assign(new Error('batch-locator-invalid'), { code: 'batch-locator-invalid' }); };
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+      || Object.keys(value).sort().join(',') !== keys.sort().join(',')
+      || value.schema !== 'forge-batch-locator-v1' || !['preparing', 'prepared'].includes(value.phase)
+      || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value.run_id || '')
+      || runId !== undefined && value.run_id !== runId || !/^batch-[a-f0-9]{32}$/.test(value.batch_id || '')
+      || !['manifest_sha256', 'claim_sha256'].every(key => /^[a-f0-9]{64}$/.test(value[key] || ''))
+      || (value.phase === 'preparing' ? value.isolation_sha256 !== null : !/^[a-f0-9]{64}$/.test(value.isolation_sha256 || ''))
+      || typeof value.claim_generation !== 'string' || !/^[a-f0-9-]{36}$/.test(value.claim_generation)
+      || value.isolation_ref !== `.gsd/forge/batches/${value.batch_id}/isolation.json`) invalid();
+  return { ...value };
+}
+
+// Historical custody is not a live batch locator or permission to restart it.
+function validateBatchRetirements(value, runId) {
+  const invalid = () => { throw Object.assign(new Error('batch-custody-invalid'), { code: 'batch-custody-invalid' }); };
+  if (!Array.isArray(value) || value.length > 64) invalid();
+  const seen = new Set();
+  for (const row of value) {
+    if (!row || Object.keys(row).sort().join(',') !== 'broker_manifest_sha256,locator,operation_sequence,post_unit,retained_roots,retirement_id,witness_ref'
+        || !/^[a-f0-9]{64}$/.test(row.retirement_id || '') || seen.has(row.retirement_id)
+        || !/^[a-f0-9]{64}$/.test(row.broker_manifest_sha256 || '') || !Number.isSafeInteger(row.operation_sequence) || row.operation_sequence < 1) invalid();
+    const locator = validateBatchLocator(row.locator, runId);
+    if (locator.phase !== 'prepared' || row.witness_ref !== `.gsd/forge/batches/${locator.batch_id}/retirement.json`
+        || !Array.isArray(row.retained_roots) || row.retained_roots.length > 14 || !Array.isArray(row.post_unit)) invalid();
+    const paths = new Set();
+    for (const root of row.retained_roots) {
+      if (!root || Object.keys(root).sort().join(',') !== 'identity_sha256,path,root_id' || typeof root.root_id !== 'string'
+          || !path.isAbsolute(root.path || '') || !/^[a-f0-9]{64}$/.test(root.identity_sha256 || '') || paths.has(root.path)) invalid();
+      paths.add(root.path);
+    }
+    const units = new Set();
+    for (const member of row.post_unit) {
+      if (!member || Object.keys(member).sort().join(',') !== 'key,member_index,unit' || !Number.isSafeInteger(member.member_index)
+          || member.member_index < 0 || typeof member.unit !== 'string' || units.has(member.unit)
+          || member.key !== `${row.retirement_id}:${member.member_index}:post-unit`) invalid();
+      units.add(member.unit);
+    }
+    seen.add(row.retirement_id);
+  }
+  return value;
+}
+
+function withRunLock(...args) {
+  return require('./forge-owner-transport-window').withMutation(args[0], () => withRunLockInsideOwnerWindow(...args));
+}
+function withRunLockInsideOwnerWindow(cwd, id, fn) {
   const handle = lock.acquireSync(cwd, `run-${id}`, { holderRunId: id, retries: 80 });
   try { return fn(); } finally { handle.release(); }
 }
@@ -258,7 +401,10 @@ function registryKey(cwd) {
   const actual = fs.realpathSync.native(cwd);
   return process.platform === 'win32' ? actual.toLowerCase() : actual;
 }
-function withRegistryFence(cwd, callback, guard) {
+function withRegistryFence(...args) {
+  return require('./forge-owner-transport-window').withMutation(args[0], () => withRegistryFenceInsideOwnerWindow(...args));
+}
+function withRegistryFenceInsideOwnerWindow(cwd, callback, guard) {
   const key = registryKey(cwd);
   const held = guard && registryGuards.get(guard);
   if (held && held.key === key && lock.assertOwned(held.handle)) return callback(guard);
@@ -276,6 +422,13 @@ function add(cwd, record, guard) {
   if (!fs.existsSync(path.join(cwd, '.gsd'))) ensureRunsDir(cwd);
   return withRegistryFence(cwd, () => withRunLock(cwd, record.id, () => {
   ensureRunsDir(cwd);
+  // Registration is create-only under the registry fence AND the run lock.
+  // Existence, including unreadable/corrupt records or links, is never consent
+  // to replace ownership, pending work, or an unreleased claim.
+  try {
+    fs.lstatSync(runFile(cwd, record.id));
+    throw Object.assign(new Error(`forge-runs.add: run already exists: ${record.id}; inspect and resume it`), { code: 'ERUNEXISTS' });
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
   const now = Date.now();
   const supplied = normalizeMetadataPatch(record);
   const full = Object.assign({}, supplied, {
@@ -329,11 +482,18 @@ function add(cwd, record, guard) {
   }), guard);
 }
 
+function assertRetiredTransition(current, next) {
+  if (!current?.task_retirement) return;
+  for (const key of ['active','worker','worker_started','worker_slice','session_id','session','host_runtime','kind','id','task_retirement','write_claim']) {
+    if (JSON.stringify(current[key]) !== JSON.stringify(next[key])) throw new Error('run-retired');
+  }
+}
 function update(cwd, id, patch, guard) {
   return withRegistryFence(cwd, () => withRunLock(cwd, id, () => {
     const current = get(cwd, id);
     if (!current) throw new Error(`forge-runs.update: run ${id} not found`);
     const next = Object.assign({}, current, normalizeMetadataPatch(patch));
+    assertRetiredTransition(current, next);
     writeAtomic(runFile(cwd, id), next);
     refreshLegacyAlias(cwd);
     return next;
@@ -369,9 +529,11 @@ function updateWith(cwd, id, mutator, guard) {
   return withRegistryFence(cwd, () => withRunLock(cwd, id, () => {
     const current = get(cwd, id);
     if (!current) throw new Error(`forge-runs.updateWith: run ${id} not found`);
+    const retiredBefore = current.task_retirement ? JSON.parse(JSON.stringify(current)) : null;
     const patch = mutator(current);
     if (patch === null || patch === undefined) return { updated: false, record: current };
     const next = Object.assign({}, current, normalizeMetadataPatch(patch));
+    assertRetiredTransition(retiredBefore, next);
     writeAtomic(runFile(cwd, id), next);
     refreshLegacyAlias(cwd);
     return { updated: true, record: next };
@@ -381,7 +543,10 @@ function updateWith(cwd, id, mutator, guard) {
 function remove(cwd, id, guard) {
   return withRegistryFence(cwd, () => withRunLock(cwd, id, () => {
     const f = runFile(cwd, id);
-    if (fs.existsSync(f)) fs.unlinkSync(f);
+    if (fs.existsSync(f)) {
+      require('./forge-unit-controller').archiveOwnerInterruptionWitnesses(cwd, id);
+      fs.unlinkSync(f);
+    }
     refreshLegacyAlias(cwd);
   }), guard);
 }
@@ -404,13 +569,7 @@ function cleanupStale(cwd, thresholdMs) {
 }
 
 // ── Legacy alias (auto-mode.json mirror of oldest active) ───────────────────
-function refreshLegacyAlias(cwd) {
-  // Best-effort mirror: silently no-op without .gsd/ rather than manufacture it.
-  // Unlike ensureRunsDir this must never throw — remove()/cleanupStale() call it
-  // from paths that must not hard-fail (skills chain these with `|| true`).
-  if (!fs.existsSync(path.join(cwd, '.gsd'))) return;
-  const aliasPath = path.join(cwd, '.gsd', 'forge', ALIAS_FILE);
-  const oldest = oldestActive(cwd);
+function legacyAliasProjection(oldest) {
   let mirror;
   if (oldest) {
     mirror = {
@@ -430,6 +589,20 @@ function refreshLegacyAlias(cwd) {
   } else {
     mirror = { active: false };
   }
+  return mirror;
+}
+
+function refreshLegacyAlias(...args) {
+  return require('./forge-owner-transport-window').withMutation(args[0], () => refreshLegacyAliasInsideOwnerWindow(...args));
+}
+function refreshLegacyAliasInsideOwnerWindow(cwd) {
+  // Best-effort mirror: silently no-op without .gsd/ rather than manufacture it.
+  // Unlike ensureRunsDir this must never throw — remove()/cleanupStale() call it
+  // from paths that must not hard-fail (skills chain these with `|| true`).
+  if (!fs.existsSync(path.join(cwd, '.gsd'))) return;
+  const aliasPath = path.join(cwd, '.gsd', 'forge', ALIAS_FILE);
+  const oldest = oldestActive(cwd);
+  const mirror = legacyAliasProjection(oldest);
   try {
     fs.mkdirSync(path.dirname(aliasPath), { recursive: true });
     writeAtomic(aliasPath, mirror);
@@ -439,7 +612,10 @@ function refreshLegacyAlias(cwd) {
 // ── Migration ───────────────────────────────────────────────────────────────
 // Detect a pre-M004 STATE.md and migrate to M###-STATE.md + dashboard regen.
 // Idempotent: if STATE.md already has the AUTO-GENERATED marker, no-op.
-function migrateLegacyState(cwd) {
+function migrateLegacyState(...args) {
+  return require('./forge-owner-transport-window').withMutation(args[0], () => migrateLegacyStateInsideOwnerWindow(...args));
+}
+function migrateLegacyStateInsideOwnerWindow(cwd) {
   const statePath = path.join(cwd, '.gsd', 'STATE.md');
   if (!fs.existsSync(statePath)) return { migrated: false, reason: 'no STATE.md' };
 
@@ -500,6 +676,274 @@ Run record migrated by forge-runs.js on ${nowIso}. Legacy single-run STATE.md wa
 }
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
+
+// Explicit resume is a different operation from an ordinary targeted update.
+// Its flags are trusted-caller attestations, like claim-recovery's flags; they
+// are not OS observations and cannot be inferred from inactive/age/imported JSON.
+function resumeError(reason) { return Object.assign(new Error(reason), { code: reason }); }
+function resumeDigest(bytes) { return require('crypto').createHash('sha256').update(bytes).digest('hex'); }
+function resumeRecord(cwd, id) {
+  if (typeof id !== 'string' || !ids.isValid(id)) throw resumeError('owner-resume-id-invalid');
+  for (const relative of ['.gsd','.gsd/forge','.gsd/forge/runs']) {
+    const stat = fs.lstatSync(path.join(cwd,relative));
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw resumeError('owner-resume-registry-unknown');
+  }
+  const census = boundedCensus(cwd);
+  if (census.unparseable.length || census.parsed.filter(row => row.id === id).length !== 1) throw resumeError('owner-resume-registry-unknown');
+  const file = runFile(cwd, id);
+  const read = require('./forge-autonomy-sources').readBoundedStableFile(file, 65536, { expectedReal: fs.realpathSync.native(file) });
+  if (read.error) throw resumeError('owner-resume-record-unknown');
+  let record; try { record = JSON.parse(read.buffer.toString('utf8')); } catch { throw resumeError('owner-resume-record-unknown'); }
+  if (record.id !== id || !['milestone','task'].includes(record.kind)) throw resumeError('owner-resume-record-unknown');
+  return { record, sha256: resumeDigest(read.buffer) };
+}
+function ensureStepRun(cwd, id, hostRuntime) {
+  const kind = require('./forge-ids').entityKind(id);
+  if (!['milestone', 'task'].includes(kind)) throw new Error('step-run-id-invalid');
+  const actor = observeHostSession(hostRuntime, process.env.FORGE_CLAUDE_OWNER_SESSION_ID);
+  if (!actor) throw new Error('owner-session-unavailable');
+  const existing = get(cwd, id);
+  if (existing) {
+    if (existing.task_retirement) throw new Error('run-retired');
+    if (existing.host_runtime !== actor.hostRuntime || existing.session_id !== actor.sessionId)
+      throw new Error('step-run-owner-mismatch');
+    return existing;
+  }
+  return add(cwd, { id, kind, session_id: actor.sessionId, host_runtime: actor.hostRuntime,
+    owner_session_source: actor.source, cwd, root: cwd, isolation_mode: 'shared' });
+}
+function observedResumeOwner(options) {
+  const observed = observeHostSession(options.hostRuntime, options.expectedSession);
+  if (!observed || options.expectedSession !== undefined && observed.sessionId !== options.expectedSession) throw resumeError('owner-session-unavailable');
+  return observed;
+}
+function knownResumeBinding(record) {
+  return typeof record.active === 'boolean' && typeof record.session_id === 'string' && record.session_id.trim() !== ''
+    && (record.host_runtime === 'codex' && record.session_id.length <= 1024 && !/[\r\n\0]/.test(record.session_id)
+      && ['CODEX_THREAD_ID','CODEX_SESSION_ID'].includes(record.owner_session_source)
+      || record.host_runtime === 'claude' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/.test(record.session_id)
+      && record.owner_session_source === 'claude-sessionstart-env-v1');
+}
+function inspectOwnerResume(cwd, id, options = {}) {
+  const observed = observedResumeOwner(options), current = resumeRecord(cwd, id), record = current.record;
+  if (!knownResumeBinding(record)) throw resumeError('owner-resume-binding-unknown');
+  const same = record.session_id === observed.sessionId && record.host_runtime === observed.hostRuntime;
+  return { status: same ? record.active === true ? 'same-owner-active' : 'same-owner-inactive' : 'transfer-required',
+    record_sha256: current.sha256, current_host: observed.hostRuntime,
+    previous_host: record.host_runtime, previous_session_sha256: resumeDigest(record.session_id),
+    required_attestations: same ? record.active === true ? [] : ['workspace-quiescent'] : ['owner-stopped','workspace-quiescent'],
+    attestation_is_os_proof: false };
+}
+function assertResumeQuiescence(cwd, record, nextHost, noLeases, partialOptions) {
+  const controller = require('./forge-unit-controller');
+  if (controller.pendingOwnerInterruptions(cwd).length) throw resumeError('owner-interruption-pending');
+  const repairScope = partialOptions?.deliveryRepair
+    ? require('./forge-completion-delivery-recovery').inspectRetainedClaimResume(cwd,record,partialOptions.deliveryRepair)
+    : partialOptions?.attemptRecovery ? require('./forge-protected-owner-activity').inspectAttemptResume(cwd, record, partialOptions.attemptRecovery) : null;
+  const empty = directory => {
+    let handle;
+    try { const stat = fs.lstatSync(directory); if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
+      handle = fs.opendirSync(directory); return handle.readSync() === null;
+    } catch (error) { return error.code === 'ENOENT' && !handle; }
+    finally { if (handle) handle.closeSync(); }
+  };
+  if (!noLeases(repairScope)) throw resumeError('owner-resume-lease-present');
+  const transactions = controller.transactionDir(cwd);
+  try {
+    const stat = fs.lstatSync(transactions);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw resumeError('owner-resume-transactions-unknown');
+    for (const name of fs.readdirSync(transactions)) {
+      const entry = fs.lstatSync(path.join(transactions,name));
+      if (!name.endsWith('.json') || !entry.isFile() || entry.isSymbolicLink()) throw resumeError('owner-resume-transactions-unknown');
+    }
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (controller.pendingTransactions(cwd).length) throw resumeError('owner-resume-transaction-pending');
+  const heldClaim = require('./forge-write-claim').isHeld(record.write_claim);
+  if (heldClaim) {
+    if (!partialOptions) {
+      try {
+        require('./forge-write-claim').validateHeldClaim(record.write_claim);
+        if (!record.write_claim.paths.length || !/^execute-task\/T\d+(?:\.\d+)?$/.test(record.write_claim.unit || '')) throw Error('invalid');
+      } catch { throw resumeError('owner-resume-claim-held'); }
+    }
+    else if (partialOptions.deliveryRepair || partialOptions.attemptRecovery) { if(!repairScope)throw resumeError('owner-resume-claim-held'); }
+    else controller.inspectPausedAttempt(cwd, record, partialOptions);
+  }
+  if (record.worker || record.worker_started) throw resumeError('owner-resume-worker-unreconciled');
+  // Legacy file locks and unreadable/debris entries cannot prove quiescence.
+  if (!empty(path.join(cwd, '.gsd/forge/file-locks'))) throw resumeError('owner-resume-file-lock-present');
+  if (record.kind !== 'milestone') throw resumeError('owner-resume-boundary-required');
+  const eventsFile = controller.eventsFile(cwd, record.id);
+  const eventBytes = fs.existsSync(eventsFile) ? fs.readFileSync(eventsFile) : Buffer.alloc(0);
+  const intervals = require('./forge-phase-cost').analyzeEventIntervals(eventBytes);
+  if (intervals.open.some(row=>!repairScope || row.begin_key!==repairScope.begin_key || row.unit!==repairScope.unit || row.milestone!==record.id || row.host!==(repairScope.kind === 'attempt-recovery' ? repairScope.host_runtime : nextHost))
+      || intervals.ambiguous.length || intervals.milestones.some(id => id !== record.id)) throw resumeError('owner-resume-history-unreconciled');
+  if (repairScope) {
+    if (repairScope.kind === 'attempt-recovery') {
+      const begin = controller.lookupRecord(cwd, 'transaction', repairScope.begin_key);
+      if (!begin || begin.phase !== 'committed' || begin.action !== 'begin'
+          || !controller.incompleteUnits(cwd, record.id).some(row => row.idempotency_key === repairScope.begin_key)
+          || !noLeases(repairScope)) throw resumeError('owner-resume-boundary-required');
+      return { unit: repairScope.unit, attempt_recovery: repairScope };
+    }
+    const original=controller.verifyCommittedCompletionBoundary(cwd,repairScope.original_completion_key);
+    if(original.unit!==repairScope.unit || original.milestone!==record.id || !noLeases(repairScope)) throw resumeError('owner-resume-boundary-required');
+    return {...original,delivery_repair:repairScope};
+  }
+  const events = controller.readEvents(eventsFile);
+  const terminal = events.filter(event => ['complete','pause','fail','expired-safe'].includes(event.action)).at(-1);
+  if (!terminal) throw resumeError('owner-resume-boundary-required');
+  const handoff = controller.handoff(cwd, { unit: terminal.unit, next_host_runtime: nextHost });
+  if (!handoff.ok || handoff.milestone !== record.id) throw resumeError('owner-resume-boundary-required');
+  if (heldClaim && !partialOptions) {
+    try {
+      const boundary=controller.readJson(controller.boundaryFile(cwd,record.write_claim.unit));
+      if (!boundary || boundary.milestone!==record.id) throw Error('foreign');
+      controller.verifyCommittedCompletionBoundary(cwd,boundary.idempotency_key,record.write_claim);
+    } catch { throw resumeError('owner-resume-claim-held'); }
+  }
+  if (!noLeases()) throw resumeError('owner-resume-lease-present');
+  return { unit: handoff.unit, result_checksum: handoff.result_checksum, committed_at: handoff.committed_at };
+}
+// Administrative interruption is deliberately separate from resumeOwner and
+// receipt-backed partial recovery. The actor does not acquire an old token.
+const ownerInterruptionAuthorities = new WeakMap();
+function assertOwnerInterruptionAuthority(handle, cwd, unit) {
+  const held = ownerInterruptionAuthorities.get(handle);
+  if (!held || held.cwd !== fs.realpathSync.native(cwd)) throw resumeError('owner-interruption-authority-required');
+  held.assertCurrent();
+  if (unit === undefined) return { record: held.record, actor: held.actor, expectedRecordSha256: held.sha256 };
+  const target = held.basis?.targets.find(row => row.unit === unit);
+  if (!target) throw resumeError('owner-interruption-scope-mismatch');
+  return JSON.parse(JSON.stringify(target));
+}
+function bindOwnerInterruptionAuthority(handle, cwd, basis) {
+  const held = ownerInterruptionAuthorities.get(handle);
+  assertOwnerInterruptionAuthority(handle, cwd);
+  if (held.basis || basis.run_before_sha256 !== held.sha256 || basis.milestone !== held.record.id) throw resumeError('owner-interruption-scope-mismatch');
+  held.basis = JSON.parse(JSON.stringify(basis));
+}
+function interruptedOwnerSize(record, patch) {
+  // Match updateWith/get's exact normalization and writeAtomic's JSON format,
+  // including additive read defaults materialized by the eventual write.
+  return Buffer.byteLength(JSON.stringify(Object.assign({}, withAddressDefaults(record), normalizeMetadataPatch(patch)), null, 2));
+}
+function interruptedOwnerPatch(record, actor, snapshotSha256, interruption, questions, clock) {
+  const evidence = { kind: 'interrupted-owner-transfer', at: clock.at,
+    previous_record_sha256: snapshotSha256, previous_session_sha256: resumeDigest(record.session_id),
+    previous_host_runtime: record.host_runtime, current_session_sha256: resumeDigest(actor.sessionId),
+    current_host_runtime: actor.hostRuntime, mechanism: 'trusted-caller-attestation-v1',
+    os_process_death_proven: false, artifacts_accepted: false, ...interruption };
+  return { evidence, patch: { session_id: actor.sessionId, host_runtime: actor.hostRuntime, owner_session_source: actor.source,
+    active: true, last_heartbeat: clock.last_heartbeat, worker: null, worker_started: null, worker_slice: null,
+    pending_questions: questions, owner_resume_history: (record.owner_resume_history || []).concat(evidence) } };
+}
+function assertOwnerInterruptionCapacity(handle, cwd, basis) {
+  const held = ownerInterruptionAuthorities.get(handle);
+  assertOwnerInterruptionAuthority(handle, cwd);
+  if (!held.basis || basis.operation_id !== held.basis.operation_id) throw resumeError('owner-interruption-scope-mismatch');
+  const controller = require('./forge-unit-controller'), questions = controller.ownerInterruptionQuestions(basis);
+  // Every unknown terminal/manifest hash is lowercase hexadecimal of exactly64
+  // bytes in the final JSON. All other bytes and the clock are already fixed.
+  const preview = { operation_id: basis.operation_id, milestone: basis.milestone, manifest_sha256: '0'.repeat(64),
+    terminals: basis.targets.map(target => ({ key: target.terminal_key, sha256: '0'.repeat(64) })) };
+  const planned = interruptedOwnerPatch(held.record, held.actor, held.sha256, preview, questions, held.transferClock);
+  const bytes = interruptedOwnerSize(held.record, planned.patch);
+  if (bytes > 65536) throw resumeError('owner-resume-history-limit');
+  held.capacity = { bytes, questions_sha256: controller.ownerInterruptionIdentity(basis.milestone, held.sha256, questions) };
+}
+
+function settleInterruptedOwner(cwd, id, options = {}) {
+  const actor = observedResumeOwner(options);
+  if (!/^[a-f0-9]{64}$/.test(options.expectedRecordSha256 || '')) throw resumeError('owner-resume-snapshot-required');
+  if (typeof options.inspectInterruption !== 'function' || typeof options.processProbe !== 'function'
+    || typeof options.reconcileRoots !== 'function' || typeof options.attestOwnerInterruption !== 'function') throw resumeError('owner-interruption-inspector-required');
+  return require('./forge-unit-controller').withOwnerBoundary(cwd, boundaryGuard => withRegistryFence(cwd, registryGuard => {
+    const controller = require('./forge-unit-controller'), snapshot = resumeRecord(cwd, id), record = snapshot.record;
+    if (!knownResumeBinding(record) || record.kind !== 'milestone') throw resumeError('owner-resume-binding-unknown');
+    const historical = record.owner_resume_history || [];
+    if (!Array.isArray(historical)) throw resumeError('owner-resume-history-unknown');
+    const previous = historical.find(row => row.kind === 'interrupted-owner-transfer'
+      && row.previous_record_sha256 === options.expectedRecordSha256);
+    if (previous) {
+      if (record.session_id !== actor.sessionId || record.host_runtime !== actor.hostRuntime) throw resumeError('owner-interruption-actor-mismatch');
+      const identity = controller.ownerInterruptionIdentity(id, options.expectedRecordSha256, options.lineage);
+      if (identity !== previous.operation_id) throw resumeError('owner-interruption-lineage-invalid');
+      controller.verifyOwnerInterruption(cwd, previous);
+      return { status: 'already-settled', record: get(cwd, id), interruption: previous };
+    }
+    if (snapshot.sha256 !== options.expectedRecordSha256) throw resumeError('owner-resume-snapshot-changed');
+    if (record.host_runtime !== actor.hostRuntime) throw resumeError('owner-interruption-cross-host-unsupported');
+    const handle = Object.freeze({});
+    const assertCurrent = () => {
+      const fenced = registryGuards.get(registryGuard);
+      if (!fenced || !lock.assertOwned(fenced.handle)) throw resumeError('owner-interruption-fence-lost');
+      const current = observedResumeOwner(options);
+      if (current.sessionId !== actor.sessionId || current.hostRuntime !== actor.hostRuntime || current.source !== actor.source) throw resumeError('owner-session-unavailable');
+      if (resumeRecord(cwd, id).sha256 !== snapshot.sha256) throw resumeError('owner-resume-snapshot-changed');
+    };
+    ownerInterruptionAuthorities.set(handle, { cwd: fs.realpathSync.native(cwd), record, actor, sha256: snapshot.sha256, assertCurrent,
+      transferClock: { at: new Date().toISOString(), last_heartbeat: Date.now() } });
+    try {
+      const interruption = controller.settleInterruptedLineage(cwd, handle, options);
+      controller.verifyOwnerInterruption(cwd, { ...interruption, previous_record_sha256: snapshot.sha256 });
+      assertCurrent();
+      if (!boundaryGuard.noLeases()) throw resumeError('owner-resume-lease-present');
+      const held = ownerInterruptionAuthorities.get(handle), basis = controller.verifyOwnerInterruption(cwd, { ...interruption, previous_record_sha256: snapshot.sha256 });
+      const questions = controller.ownerInterruptionQuestions(basis);
+      const { evidence, patch } = interruptedOwnerPatch(record, actor, snapshot.sha256, interruption, questions, held.transferClock);
+      if (!held.capacity || held.capacity.questions_sha256 !== controller.ownerInterruptionIdentity(id, snapshot.sha256, questions)
+        || interruptedOwnerSize(record, patch) !== held.capacity.bytes) throw resumeError('owner-interruption-capacity-changed');
+      const result = updateWith(cwd, id, () => { assertCurrent(); return patch; }, registryGuard);
+      return { status: 'interrupted-and-transferred', record: result.record, interruption: evidence };
+    } finally { ownerInterruptionAuthorities.delete(handle); }
+  }), options);
+}
+
+function resumeOwner(cwd, id, options = {}) {
+  const observed = observedResumeOwner(options);
+  if (!/^[a-f0-9]{64}$/.test(options.expectedRecordSha256 || '')) throw resumeError('owner-resume-snapshot-required');
+  // Same lock order as canonical begin/terminal publication: controller,
+  // registry fence, run lock. Direct registry writers cannot change the snapshot
+  // and canonical new begin cannot interleave the final quiescence recheck.
+  return require('./forge-unit-controller').withOwnerBoundary(cwd, boundaryGuard => {
+    return withRegistryFence(cwd, guard => {
+      const snapshot = resumeRecord(cwd, id), current = snapshot.record;
+      if (snapshot.sha256 !== options.expectedRecordSha256) throw resumeError('owner-resume-snapshot-changed');
+      if (!knownResumeBinding(current)) throw resumeError('owner-resume-binding-unknown');
+      const same = current.session_id === observed.sessionId && current.host_runtime === observed.hostRuntime;
+      if (same && current.active === true && !options.deliveryRepair && !options.attemptRecovery) return { status: 'unchanged', record: get(cwd,id) };
+      if (!same && options.confirmOwnerStopped !== true) throw resumeError('owner-resume-owner-stop-attestation-required');
+      if (options.confirmWorkspaceQuiescent !== true) throw resumeError('owner-resume-workspace-quiescent-attestation-required');
+      const boundary = assertResumeQuiescence(cwd, current, observed.hostRuntime, boundaryGuard.noLeases,
+        options.deliveryRepair ? { deliveryRepair: options.deliveryRepair } : options.attemptRecovery ? { attemptRecovery: options.attemptRecovery } : same && typeof options.inspectAttempt === 'function' ? options : null);
+      const history = current.owner_resume_history === undefined ? [] : current.owner_resume_history;
+      if (!Array.isArray(history)) throw resumeError('owner-resume-history-unknown');
+      if(options.deliveryRepair) require('./forge-completion-delivery-recovery').publishPreparedResumeBaseline(cwd,current,options.deliveryRepair,boundary.delivery_repair);
+      const evidence = { at: new Date().toISOString(), previous_record_sha256: snapshot.sha256,
+        previous_session_sha256: resumeDigest(current.session_id), previous_host_runtime: current.host_runtime,
+        current_session_sha256: resumeDigest(observed.sessionId), current_host_runtime: observed.hostRuntime,
+        kind: same ? 'same-owner-reactivation' : 'stopped-owner-transfer', boundary,
+        workspace_quiescent_attested: true, previous_owner_stopped_attested: !same,
+        mechanism: 'trusted-caller-attestation-v1', os_process_death_proven: false };
+      const patch = { session_id: observed.sessionId, host_runtime: observed.hostRuntime,
+        owner_session_source: observed.source, active: true, last_heartbeat: Date.now(), owner_resume_history: [...history, evidence] };
+      if (Buffer.byteLength(JSON.stringify({ ...current, ...patch }, null, 2)) > 65536) throw resumeError('owner-resume-history-limit');
+      const result = updateWith(cwd, id, record => {
+        // Recheck after acquiring the run lock, preserving all claims, receipts,
+        // pending questions and unrelated metadata. No JSON supplies authority.
+        if (resumeRecord(cwd,id).sha256 !== options.expectedRecordSha256) throw resumeError('owner-resume-snapshot-changed');
+        const live = observedResumeOwner(options);
+        if (live.sessionId !== observed.sessionId || live.hostRuntime !== observed.hostRuntime || live.source !== observed.source) throw resumeError('owner-session-unavailable');
+        assertResumeQuiescence(cwd, record, observed.hostRuntime, boundaryGuard.noLeases,
+          options.deliveryRepair ? { deliveryRepair: options.deliveryRepair } : options.attemptRecovery ? { attemptRecovery: options.attemptRecovery } : same && typeof options.inspectAttempt === 'function' ? options : null);
+        return patch;
+      }, guard);
+      return { status: same ? 'reactivated' : 'transferred', record: result.record };
+    });
+  });
+}
+
 function parseArgs(argv) {
   const args = {};
   for (let i = 0; i < argv.length; i++) {
@@ -528,6 +972,10 @@ Flags:
         [--branch <git-branch>] [--root <root>] [--project <path>]          create
                            (address fields are recorded as given — never derived here;
                             see forge-run-address.js --address for resolution)
+  --inspect-owner-resume <id> --observed-owner --host-runtime claude|codex
+  --resume-owner <id> --observed-owner --host-runtime claude|codex --expected-record-sha256 <sha>
+       --confirm-workspace-quiescent [--confirm-owner-stopped]
+       trusted caller attestations after actual process/receipt/root reconciliation; not OS proof
   --update <id> --json <patch-json>                       update fields
   --remove <id>            delete record
   --bump <id>              bump last_heartbeat to now
@@ -543,7 +991,26 @@ Flags:
   }
 
   try {
-    if (args.list) {
+    const observedOwner = args['observed-owner'] ? observeHostSession(args['host-runtime'], args['expected-owner-session']) : null;
+    if (args['observed-owner'] && (!observedOwner || args.session && args.session !== observedOwner.sessionId)) throw new Error('owner-session-unavailable-or-mismatch');
+    if (args['inspect-owner-resume'] || args['resume-owner']) {
+      if (!args['observed-owner']) throw resumeError('owner-session-observation-required');
+      if (args.json !== undefined) throw resumeError('owner-resume-json-not-authority');
+      const allowed = new Set(['inspect-owner-resume','resume-owner','observed-owner','host-runtime','expected-owner-session','expected-record-sha256','confirm-owner-stopped','confirm-workspace-quiescent','cwd']);
+      if (args['inspect-owner-resume'] && args['resume-owner'] || Object.keys(args).some(key => !allowed.has(key))) throw resumeError('owner-resume-arguments-invalid');
+      const options = { hostRuntime: args['host-runtime'], expectedSession: args['expected-owner-session'],
+        expectedRecordSha256: args['expected-record-sha256'], confirmOwnerStopped: args['confirm-owner-stopped'] === true,
+        confirmWorkspaceQuiescent: args['confirm-workspace-quiescent'] === true };
+      const result = args['inspect-owner-resume'] ? inspectOwnerResume(cwd, args['inspect-owner-resume'], options)
+        : resumeOwner(cwd, args['resume-owner'], options);
+      process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+    } else if (args['ensure-step-run']) {
+      process.stdout.write(JSON.stringify(ensureStepRun(cwd, args['ensure-step-run'], args['host-runtime'])) + '\n');
+    } else if (args['owner-session']) {
+      const observed = observeHostSession(args['host-runtime'], args['expected-owner-session']);
+      if (!observed) throw new Error('owner-session-unavailable');
+      process.stdout.write(observed.sessionId + '\n');
+    } else if (args.list) {
       process.stdout.write(JSON.stringify(listAll(cwd), null, 2) + '\n');
     } else if (args['list-active']) {
       process.stdout.write(JSON.stringify(listActive(cwd), null, 2) + '\n');
@@ -569,7 +1036,8 @@ Flags:
       const r = add(cwd, {
         id: args.id,
         kind: args.kind,
-        session_id: args.session,
+        session_id: observedOwner ? observedOwner.sessionId : args.session,
+        ...(observedOwner ? { host_runtime: observedOwner.hostRuntime, owner_session_source: observedOwner.source } : {}),
         isolation_mode: args['isolation-mode'] || 'shared',
         task_description: args['task-description'],
         account: (typeof args.account === 'string') ? args.account : (process.env.FORGE_ACCOUNT || null),
@@ -584,7 +1052,18 @@ Flags:
       process.stdout.write(JSON.stringify(r, null, 2) + '\n');
     } else if (args.update) {
       const patch = args.json ? JSON.parse(args.json) : {};
-      const r = update(cwd, args.update, patch);
+      let r;
+      if (observedOwner) {
+        // This command has an explicit target: check that exact active owner,
+        // even when it owns another run. Reactivation/transfer use resumeOwner;
+        // implicit hook lookup remains ambiguity-sensitive.
+        const changed = updateWith(cwd, args.update, current => {
+          if (!matchesSessionOwner(current, observedOwner)) return null;
+          return { ...patch, session_id: observedOwner.sessionId, host_runtime: observedOwner.hostRuntime, owner_session_source: observedOwner.source };
+        });
+        if (!changed.updated) throw new Error('owner-session-binding-unknown-or-mismatch');
+        r = changed.record;
+      } else r = update(cwd, args.update, patch);
       process.stdout.write(JSON.stringify(r, null, 2) + '\n');
     } else if (args.remove) {
       remove(cwd, args.remove);
@@ -654,16 +1133,18 @@ Flags:
   }
 }
 
-if (require.main === module) cliMain();
-
 module.exports = {
-  listAll, listAllDetailed, boundedCensus, withRegistryFence, listActive, get,
+  listAll, listAllDetailed, boundedCensus, withRegistryFence, listActive, get, validateBatchLocator, validateBatchRetirements,
   add, update, updateWith, remove,
   bumpHeartbeat, cleanupStale,
-  resolveBySessionId, oldestActive,
-  refreshLegacyAlias, migrateLegacyState,
+  inspectOwnerResume, resumeOwner, knownResumeBinding, settleInterruptedOwner,
+  assertOwnerInterruptionAuthority, bindOwnerInterruptionAuthority, assertOwnerInterruptionCapacity,
+  observeHostSession, ensureStepRun, resolveBySessionId, resolveBySessionOwner, bumpOwnedHeartbeat, bumpLegacyOwnedHeartbeat, oldestActive,
+  refreshLegacyAlias, migrateLegacyState, oldestActiveRecord, legacyAliasProjection,
   withAddressDefaults,
   runsDir, runFile, writeAtomic, withRunLock, normalizeMetadataPatch,
   STALE_THRESHOLD_MS,
   ACTIVE_THRESHOLD_MS,
 };
+
+if (require.main === module) cliMain();

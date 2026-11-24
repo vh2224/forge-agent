@@ -268,9 +268,9 @@ function packagePrompt(request, prompt, options = {}) {
   const sections = standalone ? [] : inputSections(request);
   const inputs = sections.map(([label, file]) => {
     if (!file) fail('milestone-payload-input-required');
-    return '\n## ' + label + '\n' + fs.readFileSync(file, 'utf8');
+    return '\n## ' + label + '\n' + readInput(file).toString('utf8');
   }).join('\n');
-  const plan = fs.readFileSync(request.planFile, 'utf8');
+  const plan = readInput(request.planFile).toString('utf8');
   const checked = roots.validatePlan(plan, contract);
   requireExplicitVerify(plan,request);
   if (execution) {
@@ -296,6 +296,12 @@ function inputSections(request) {
     'slices', request.sliceId, request.sliceId + '-RESEARCH.md');
   if (fs.existsSync(research)) sections.push(['Research', research]);
   return sections;
+}
+// Every mandatory native input observation uses a descriptor-bounded stable
+// read, including packaging, preparation and later lifecycle revalidation.
+const INPUT_MAX_BYTES = api('forge-unit-sidecar').EXECUTION_INPUT_MAX_BYTES;
+function readInput(file) {
+  return api('forge-unit-sidecar').readExecutionInput(file);
 }
 function verificationPolicy(request, plan) {
   const identity = {dispatch_id:request.dispatchId,unit_type:request.unitType,milestone_id:request.milestoneId,
@@ -481,8 +487,8 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
   if(leaseRenewal!==undefined&&(!renewal||!savedManifest||renewal.manifest_digest!==roots.digest(savedManifest)))fail('lease-renewal-capability-required');
   side.validateRecoveryRequest(r,{nativeInvocation,linkedEntryOptions});
   if(r.linked_begin_key)r=api('forge-attempt-recovery').bindLinkedRequest(wireRequest,linkedEntryOptions);
-  requestIdentity(r,linkedEntryOptions);
-  const plan=fs.readFileSync(r.planFile,'utf8'),context=fs.readFileSync(r.contextFile);
+  const preparedRecoveryIdentity=roots.digest(requestIdentity(r,linkedEntryOptions));
+  const plan=readInput(r.planFile).toString('utf8'),context=readInput(r.contextFile);
   requireExplicitVerify(plan,r);
   const checked=roots.validatePlan(plan,r.execution_contract);
   const standalone=r.scope==='standalone-task';
@@ -492,7 +498,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
     protected_owner:execution.protectedSnapshot(r.contextRoot),
     protected_roots:r.execution_contract.code_roots.map(root=>({root_id:root.id,path:root.path,snapshot:execution.protectedSnapshot(root.path)}))};
   const planHash=hash(plan),contextHash=hash(context);
-  const inputs = savedManifest?.inputs || (taskPreparation ? Object.keys(taskPreparation.inputs).map(file=>['Task input',file]) : inputSections(r)).map(([label,file]) => ({label,file,sha256:hash(fs.readFileSync(file))}));
+  const inputs = savedManifest?.inputs || (taskPreparation ? Object.keys(taskPreparation.inputs).map(file=>['Task input',file]) : inputSections(r)).map(([label,file]) => ({label,file,sha256:hash(readInput(file))}));
   const {identity:verificationIdentity,seal}=verificationPolicy(r,plan);
   const verificationExtra=verificationContinuation===undefined?null:verificationContinuations.get(verificationContinuation);
   if(verificationContinuation!==undefined&&(!verificationExtra||!savedManifest||documentary||coveragePolicy||supplementalCoverage
@@ -552,8 +558,8 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
     // other callbacks validate only claims, leases or a controller boundary.
     if(wireRequest.linked_begin_key)r=api('forge-attempt-recovery').bindLinkedRequest(wireRequest,linkedEntryOptions);
     side.validateRecoveryRequest(r,{nativeInvocation,linkedEntryOptions});
-    if(hash(fs.readFileSync(r.planFile))!==planHash||hash(fs.readFileSync(r.contextFile))!==contextHash)fail('milestone-input-changed');
-    if(inputs.some(row=>hash(fs.readFileSync(row.file))!==row.sha256))fail('milestone-input-changed');
+    if(hash(readInput(r.planFile))!==planHash||hash(readInput(r.contextFile))!==contextHash)fail('milestone-input-changed');
+    if(inputs.some(row=>hash(readInput(row.file))!==row.sha256))fail('milestone-input-changed');
     if(renewal)renewal.check(publishing);
     else if (!publishing) execution.assertProtected(r.contextRoot,prepared.protected_owner);
     for(const root of prepared.protected_roots)execution.assertProtected(root.path,root.snapshot);
@@ -575,6 +581,23 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
     }
     persistDeliveryReceipt({file,sha256});
     return {file,sha256};
+  };
+  // Private diagnostic retention of a contract-valid done result refused by the
+  // integrity guard. Never a receipt, publication, acceptance or replay source;
+  // any retention error is swallowed so the original refusal propagates as is.
+  const retainRefusedReturn=(result,error)=>{
+    try{
+      if(error?.code!=='execution-protected-metadata'||result?.status!=='done'||!resultContract.validate(result).ok)return;
+      const envelope={schema_version:1,kind:'native-returned-response-retained',accepted:false,
+        trust:'worker-normalized; integrity-refused; not accepted; no receipt, publication or replay authority',
+        refusal:{reason_code:error.code},dispatch_id:r.dispatchId,fingerprint:side.artifactFingerprint(r),
+        recovery_identity_sha256:preparedRecoveryIdentity,route:r.route,manifest_sha256:hash(fs.readFileSync(manifestFile)),result};
+      const bytes=JSON.stringify(envelope)+'\n',file=path.join(path.dirname(r.resultFile),'forge-returned-'+hash(bytes)+'.json');
+      for(const root of [r.contextRoot,...r.execution_contract.code_roots.map(row=>row.path)])api('forge-xllm').validateResultFileTarget(file,root);
+      try{fs.writeFileSync(file,bytes,{flag:'wx',mode:0o600});}
+      catch(writeError){if(writeError.code!=='EEXIST'||!fs.lstatSync(file).isFile()||fs.lstatSync(file).isSymbolicLink()
+        ||fs.readFileSync(file,'utf8')!==bytes)throw writeError;}
+    }catch{/* retention never replaces the original refusal */}
   };
   let refusedClosure=null;
   const open=()=>{if(refusedClosure)fail('native-refusal-closed');};
@@ -703,7 +726,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       if(verificationExtra)fail('verification-continuation-replay-only');
       if(artifactReview)fail('artifact-advisory-replay-only');
       if(supplement)fail('supplemental-replay-only');
-      guard();
+      try{guard();}catch(error){retainRefusedReturn(result,error);throw error;}
       if(!resultContract.validate(result).ok)fail('native-result-invalid');
       persist({kind:standalone?'standalone-native-continuation':'milestone-native-continuation',phase:'executed',dispatch_id:r.dispatchId,
         ...(renewal?{lease_reconciliation:renewal.evidence}:{}),
@@ -882,8 +905,9 @@ async function replay({request,recovery,runtime,nativeOptions}) {
   if(hash(manifestBytes)!==binding.manifest_sha256)fail('milestone-replay-manifest-binding');
   const manifest=JSON.parse(manifestBytes), record=JSON.parse(receiptBytes), wireRequest=manifest.request;
   const r=wireRequest.linked_begin_key?recoveryApi.bindLinkedRequest(wireRequest,runtime.linkedEntryOptions):wireRequest;
-  const expectedRequest={...request,route:r.route,recoveryStateFile:recovery.stateFile,
-    dispatchId:api('forge-recovery-dispatch-id').recoveryDispatchId(request.dispatchId,recovery.resumeReservation.sha256),resultFile:expected};
+  // Issue 328: rebuild the same projected successor that finalRequest produced.
+  const expectedRequest=api('forge-unit-sidecar').projectTransportOptions({...request,route:r.route,recoveryStateFile:recovery.stateFile,
+    dispatchId:api('forge-recovery-dispatch-id').recoveryDispatchId(request.dispatchId,recovery.resumeReservation.sha256),resultFile:expected},request);
   delete expectedRequest.linkedEntryBinding;
   if(roots.digest(wireRequest)!==roots.digest(expectedRequest)||record.manifest_sha256!==binding.manifest_sha256
       || record.dispatch_id!==r.dispatchId||record.fingerprint!==api('forge-unit-sidecar').artifactFingerprint(r)
@@ -938,4 +962,4 @@ async function replay({request,recovery,runtime,nativeOptions}) {
   const verified=successor(()=>session.verify(effectiveResult)),published=successor(()=>session.publish(effectiveResult));
   return {action:'replay',provider_called:false,result:{verified,published}};
 }
-module.exports={prepare,replay,requireExplicitVerify,criterionBindings,resultContract,packagePrompt,createLeaseRenewalReconciliation,reconcileLeaseRenewalSurface,createDocumentaryContinuation,createVerificationContinuation,isGlobalEvidenceLine,isObservedTestLine};
+module.exports={prepare,replay,requireExplicitVerify,criterionBindings,resultContract,packagePrompt,readInput,INPUT_MAX_BYTES,createLeaseRenewalReconciliation,reconcileLeaseRenewalSurface,createDocumentaryContinuation,createVerificationContinuation,isGlobalEvidenceLine,isObservedTestLine};

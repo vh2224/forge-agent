@@ -1,7 +1,6 @@
 ---
 name: forge-skills
 description: "Lista skills disponiveis e detalhes de uso."
-disable-model-invocation: true
 allowed-tools: Read, Bash, Glob
 ---
 

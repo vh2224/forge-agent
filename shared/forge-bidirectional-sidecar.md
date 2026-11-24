@@ -1,7 +1,7 @@
 # Bidirectional unit delivery
 
 This contract takes precedence over the historical Codex-only Branch C/D for
-**Claude sidecars**, artifact units, and memory extraction on either engine. Native delivery
+**all supported sidecars including Codex execute-task**, artifact units, and memory extraction on either engine. Native delivery
 still uses the host's native agent tool. Neither model family nor a CLI's
 presence grants delivery: `forge-dispatch-resolve` and the sidecar entrypoint
 consult `forge-transport-capabilities.js` for the actual unit contract.
@@ -41,7 +41,7 @@ Antes de disparar um sidecar, anuncie fase/unidade, engine, modelo enviado, esfo
 
 Depois, leia o stderr completo do processo, inclusive em `run_in_background` pela ferramenta de saída do host. Cada estágio aceito chega como a linha técnica `[forge-sidecar]` seguida da linha humana `[forge-agente]`. Repasse literalmente, na conversa, cada linha que começa com `[forge-agente]`, incluindo `recusado`, `falhou` e `reaproveitado`. Mantenha `[forge-sidecar]` como registro técnico no stderr e repasse-a literalmente quando o usuário pedir detalhes, quando não houver linha `[forge-agente]` correspondente ou quando o adaptador instalado ainda não a emitir. Se nenhuma das duas linhas aparecer, diga que falta prova do adaptador. Preserve `observado=nao-confirmado` e `aplicação não confirmada` e diga **modelo enviado**; não afirme que o provedor aplicou o modelo. O sidecar é acompanhado nesta conversa; não crie abas nem threads nativas para ele.
 
-As linhas `[forge-sidecar]` registram identidade e estágio; `[forge-agente]` reapresenta os mesmos campos em pt-BR, sem acrescentar prova. A causa continua na linha `forge-xllm:` ou `forge-unit-sidecar:` e no result-file. Preserve ambos os canais. Nunca redirecione o stderr do comando de despacho para `/dev/null`. Se o stdout for capturado com `$(...)`, ainda leia e exponha as linhas de identidade do stderr.
+As linhas `[forge-sidecar]` registram identidade e estágio completos. A linha humana do pedido apresenta a identidade em pt-BR; o início usa um aviso curto quando fase, unidade, engine, transporte, modelos, esforço, host e indicação retroativa permanecem iguais. Se algum desses campos mudar, o início reapresenta a identidade completa. Falhas, recusas e reaproveitamentos preservam os detalhes. Uma referência curta correlaciona os avisos de cada despacho; serve somente à apresentação, pode colidir e nunca substitui o ID completo nem decide deduplicação. Despachos distintos continuam visíveis, mesmo com a mesma rota. Nenhuma dessas linhas acrescenta prova de aplicação do modelo. A causa continua na linha `forge-xllm:` ou `forge-unit-sidecar:` e no result-file. Preserve ambos os canais. Nunca redirecione o stderr do comando de despacho para `/dev/null`. Se o stdout for capturado com `$(...)`, ainda leia e exponha as linhas de identidade do stderr.
 
 As linhas de fase (executando agente, verificando a entrega, publicando evidência, concluído ou falhou) e as linhas de atividade também usam `[forge-agente]` e seguem o mesmo repasse literal; a atividade só aparece em transição de fase ou de liveness, no máximo 20 linhas por unidade, e nenhuma fase vira evento durável. A linha `[forge-verify-progress]` é registro técnico do progresso por comando de verificação (índice, total, rótulo seguro, código de saída, duração e `timed_out`), consultado quando o usuário pergunta ou a espera é longa; `timed_out` não prova que processos filhos terminaram.
 
@@ -127,8 +127,8 @@ the evidence in the personal checkpoint and honor the user's recovery policy.
    and pending-context bindings. Save the fully rendered prompt. For
    `execute-task`, retain its plan, security and context bundle bindings.
 4. Allocate a result file **outside both CODE_DIR and WORKING_DIR**, in an
-   operator-owned temporary directory. Keep it and its `.receipt.json` sibling
-   until completion is acknowledged. Never reuse them for another attempt.
+   operator-owned persistent attempt directory that survives host-session/scratchpad cleanup. Keep the original result, manifest and all receipt siblings at their original paths
+   until completion/ACK and recovery are closed; outside-root validation does not itself prove storage durability. Do not relocate historical receipts to claim continuity. Never reuse them for another attempt.
 5. Write a UTF-8 JSON request file using the host's structured file tool or
    `JSON.stringify`, with these fields (values below describe the bindings):
 
@@ -174,6 +174,53 @@ the evidence in the personal checkpoint and honor the user's recovery policy.
    Use the retained private generation from the begin transaction, never a
    public observation as authorization. A lease renewal refusal stops delivery
    and enters recovery; the provider heartbeat does not renew a workflow lease.
+
+   For a fresh, ordinary milestone v2 execute-task with an actual controller
+   begin, `runUnitSidecar` opens a `forge-protected-owner-activity` boundary before
+   S0. Its private lease window covers the resolved worker ceiling; polling the
+   same owner/generation checks that lease without rewriting it. Hook observations
+   go to the external owner-window journal. Both supported process adapters spawn
+   through the boundary, which joins its actual child before changing to the
+   sealed verification budget. Only that boundary's exact lease hash chain may
+   advance the expected snapshot. Other protected writes still refuse. A failed
+   join retains the fence; JSON/PIDs supplied by a worker cannot release it.
+
+   This coordination is not an OS sandbox. Native, cohort, legacy uncoordinated
+   and saved-attempt paths retain their own authority contracts.
+
+### Versioned managed owner surfaces
+
+`managed-surfaces-v1` declares only surfaces whose canonical writers were
+demonstrated in the [surface and writer inventory](../docs/issue-440/managed-surfaces.md).
+Attribution requires a live in-process capability bound to the attempt, or a
+live host adapter attesting a cross-process append. Imported JSON, matching
+schemas, hashes, timestamps and PIDs grant no authority. Writers revalidate the
+scope under the owner fence/lock, check the exact prior bytes and adopt only
+their own validated delta, never a fresh owner snapshot.
+
+Preimages and the prefix-checked append-only audit journal live in
+`<resultFile>.managed-surfaces/`, outside the owner and every code root. The
+attempt binding, declaration digest, sequence and before/after hashes connect
+each journal row to the exact write. Manual notes remain undeclared. The full
+protected snapshot and its 20000-entry limit remain unchanged: there is no
+exclusion by glob, manifest or file type, and this is not an OS sandbox.
+
+Named refusals include `managed-surface-undeclared`, `managed-surface-unattributed`,
+`managed-surface-field-unknown`, `managed-surface-append-rewrite`,
+`managed-surface-attribution-foreign` and `managed-surface-attribution-reused`.
+Protected metadata mismatches retain the top-level `execution-protected-metadata`
+code and message; the named reason is carried in
+`managed_surfaces.changes[].reason_code`, with before/after hashes and a sanitized
+diff limited to declared field names, counts, sizes and hashes, never content.
+
+Recovery classification is `attributed`, `legacy` or `unexplained`. Attributed
+requires the live context or a live revalidation adapter attesting the exact
+journal head and trusted receipt/begin/lease/claim binding, plus a valid chain.
+A receipt without the marker is legacy; evidence without that authority is
+unexplained. Unknown versions fail closed. Missing or broken journals, attempts
+started before the update and routes without a live context retain the existing
+guards and proven reconciliation byte for byte. Schema validity never creates
+a baseline, and missing historical baselines are never reconstructed.
 
 ## Result and recovery
 
@@ -643,6 +690,63 @@ by owner publication through the canonical fragment transaction. Missing auth,
 unsupported native model/effort, invalid output and publication failures remain
 nonblocking for the completed source unit and never switch engines silently.
 
+**Codex read-only artifact context (#350):** the Codex artifacts turn appends a
+delivery contract that forbids running commands and runs with the app-server
+sandbox `{type: readOnly, networkAccess: false}`, so the worker has no tool to read
+owner files, run commands, investigate code, run verification or generate delivery
+input. A new dispatch of such a profile is refused before any owner read, receipt,
+`solicitado` announcement or provider call with `codex-readonly-context-unsupported`
+(`stage: capability`, `provider_called: false`); the diagnostic names only the profile
+and its needs. Refused profiles: every milestone artifacts unit (`research-milestone`,
+`research-slice`, `discuss-milestone`, `discuss-slice`, `plan-milestone`,
+`estimate-milestone`, `plan-check`, `complete-slice`, `complete-milestone`) and the
+standalone `research` phase, which needs code investigation. An explicit `prompt` or
+`promptFile`, or a claim of complete context, does not change the classification,
+which comes only from engine, worker mode, transport mode, scope, phase and unit type
+(`CODEX_READONLY_ARTIFACT_PROFILES` in `scripts/forge-transport-capabilities.js`; an
+unknown profile is refused as `unclassified`). Owner-packaged and still admitted: the
+standalone `brainstorm`, `discuss` and `plan` phases, whose canonical caller inlines
+their inputs into the composed prompt. A saved `ready` (or `failed`) receipt replays
+first, without new inference. Claude (`Read,Glob,Grep`), native workers and the plan,
+execute, review-fix and memory transports are unchanged. Nothing is packaged by this
+rule, and no route, preference, sandbox or permission changes; choosing another
+engine stays with the existing routing and recovery policy. Verified offline with
+simulated transports only; no live provider reproduction.
+
+**Resolver parity and explicit artifact routing (#404):** the dispatch guard now
+uses this same classification before advertising a route as allowed. An
+incompatible Codex sidecar artifact keeps its chosen model, engine, tier, effort
+and chain but returns `dispatch_allowed:false` with the exact
+`codex-readonly-context-unsupported` reason, profile/needs and a configuration
+hint. The transport still enforces its own check; stale or forged route metadata
+cannot authorize it. The human `[forge-agente]` line retains this closed cause.
+This deterministic configuration refusal is not a provider failure and does not
+silently walk the artifact chain or substitute Claude. Execution/plan-slice
+Layer2 recovery remains separate and unchanged.
+
+Milestone artifact units can now use exact named cells in `routing`, separately
+from `executor` and `planner`: `research-milestone`, `research-slice`,
+`discuss-milestone`, `discuss-slice`, `plan-milestone`, `estimate-milestone`,
+`plan-check`, `complete-slice` and `complete-milestone`. An absent cell still
+uses the normal domain/default/tier-model resolution. Cells select by unit type:
+standalone preparation aliases reuse `discuss-milestone`, `research-milestone`,
+`plan-milestone` and `plan-slice` for discuss/research/plan/brainstorm respectively;
+their admission still uses the actual standalone scope and phase.
+`plan-milestone` is its own
+cell, never `planner`; its default tier remains `max`. No existing preference is
+rewritten. An operator can explicitly select a supported artifact model without
+moving GPT execution/planning choices out of their existing cells.
+
+Use `forge-doctor.js --check artifact-routing --runtime claude --cwd <owner> --json`
+for the actual host, or explicitly request `--runtime both`. The advisory names
+each selected incompatible profile and its routing cell in the default domain;
+an actual dispatch also names its effective domain/tier cell in the refusal hint.
+Unknown resolution stays
+inconclusive. Structural prefs validation recognizes the exact phase cells and
+warns on unknown or malformed cells. A GPT tier is not universally invalid: its
+native Codex route has different capabilities, so host-dependent compatibility
+belongs in this diagnostic rather than a blanket static prefs rejection.
+
 Install/synchronize the updated Forge sources on **both** hosts. Updating only
 the guard or copying one adapter leaves stale skills and incomplete delivery.
 
@@ -658,6 +762,14 @@ O owner chama forge-artifact-reconciliation.startBroker({owner,manifestFile,disp
 
 acceptArtifactResult salva o candidato antes de marcar falha de superfície. Depois de processo encerrado, reconcileArtifactAttempt(request,{manifest,proofs,trust}) verifica todos os spans, inputs, roots e targets e cria receipt filho por CAS. O failed original fica imutável; replay do filho é idempotente e não chama provider. Proofs assinados permanecem verificáveis após broker.close/crash; append sem proof, token antigo, truncamento, target ou input alterado recusam publicação. Nunca reclassifique receipt como ready editando JSON.
 
+### Cohort de execute-task (forge-auto, issue 343)
+
+Só `execute-task` do forge-auto, a partir da decisão canônica `dispatch_batch` do controller, entra aqui; o caminho único continua exatamente como acima. O host chama `node scripts/forge-execution-batch.js run --batch <ref> --request <arquivo>` com um request JSON limitado, fora de toda raiz, com os campos fechados `schema` (`forge-execution-batch-run-request-v1`), `cwd`, `milestone`, `host_runtime`, `owner_token`, `run_id`, `code_root` opcional, `manifest_sha256` e `members`. Por membro, o host fornece só os próprios campos da tentativa (`dispatchId`, `workflowId`, `resultFile` absoluto, `prompt` ou `promptFile`, `securityFile`/`contextFile` opcionais, `gates`, `verification`, `budgets`, `procedure_context` e `constraints` com `auto_commit:false` e `deploy:false`; outro valor é recusado como `batch-member-constraints-unsupported` antes de qualquer provider). Rota, modelo, tier, effort, roots, plano, begin, lease e claim vêm sempre dos registros do owner daquele membro; dispatch e canais são exclusivos por membro. O token do owner fica só no arquivo e em memória.
+
+O broker existente roda em modo membro (`forge-artifact-reconciliation startBatchBroker`): registra todos os membros antes do primeiro spawn, verifica um único stream assinado completo e uma âncora imutável por tentativa de membro, e recusa append bruto, sem assinatura, truncado, reordenado ou de outro membro, manifesto trocado e segunda resposta. A chave privada não entra em argumento, ambiente, receipt ou arquivo público do worker. Cada membro chama o `runUnitSidecar` real pelo seu handle opaco e sua view física validada; um membro terminado fica **retido** (registro executado mais selo), sem SUMMARY, DELIVERY, marker, conclusão do controller ou resultado done enquanto irmãos executam. Resposta salva sozinha não é autoridade de replay. Quatro estados ficam distintos: resposta custodial devolvida, executado e selado, verificado pronto e publicado/integrado/ACK.
+
+A verificação pesada só começa depois da barreira, em `consolidate --batch <ref> --request <arquivo>` (o mesmo request com `schema` `forge-execution-batch-consolidate-request-v1` e `broker_manifest_sha256` do relatório do run): verificação, publicação por operações tipadas de bytes exatos, integração no alvo do próprio run e ACK em série, na ordem do manifesto. Saídas tipadas: o run reporta `retained|partial|failed|blocked|serial` e, por membro, `acknowledged|retained|failed|needs-input|blocked`; a consolidação reporta `consolidated|partial|failed|conflict` e, por membro, `acknowledged|failed|needs-input|pending`. `needs-input` preserva a pergunta pendente e nunca vira aprovação. Repetir `consolidate` depois de crash retoma pelos registros duráveis, sem segunda inferência, publicação, commit ou ACK.
+
 ### Recuperação compartilhada
 
 CLI: node scripts/forge-attempt-recovery.js --inspect state.json receipt.json. Para preparar novamente: --preparation recovery-request.json; para execução: --unit recovery-request.json. O arquivo contém request canônico, state_file, receipt_file e, se pertinente, answers e correction. correction não é prova de validação: o wrapper valida o pedido concreto offline e calcula seu hash. A API recoverStandaloneTask/recoverUnitSidecar recebe callbacks vivos processProbe, reconcile, validateNativeInvocation/invokeNative quando o host os fornece. O CLI sozinho não atesta que um processo desconhecido terminou.
@@ -665,6 +777,16 @@ CLI: node scripts/forge-attempt-recovery.js --inspect state.json receipt.json. P
 Recovery state retains its original sidecar deadline, durable reservations and factual final telemetry. Trusted standing authority permits recovery after operational timeout; inspect process and reconcile every possible writer root first.
 
 Native recovery uses createRecoveryAuthorizationAdapter registration and createRecoveryAuthority revalidation below. Imported approved/authorized data creates no opaque exception. Functional pending questions remain separate.
+
+#### Replay, recusa operacional, abandono e novo begin
+
+Receipt `failed` ou `started` segue para `recoverUnitSidecar` com o adaptador vivo
+de abandono; nunca relance manualmente com dispatch id novo. A ordem do módulo
+obrigatório `shared/forge-procedure-recovery.md` é replay primeiro, recusa operacional
+fechada (`replay-refusal-v1`), abandono provado e novo begin na mesma geração de
+lease e claim. Exiba recusas pelo código. Autoridade, perguntas, writer/descendentes,
+owner e raízes, baseline, backup/reset, tempo e limites de review-fix continuam exigidos.
+Escopo, tabelas, stores e limites de evidência: `docs/issue-440/recovery-abandon.md`.
 
 ## Authorized continuity per unit
 
@@ -1008,3 +1130,52 @@ recovery, invocation and CLI entrypoints. Its shared factory lives in
 patch production module loading. Inference/host observation are synthetic;
 controlled child Node process, filesystem/VCS and link checks are local evidence.
 A passing fixture is neither a real provider execution nor human UAT.
+
+## Failed execute-task: retain the open begin across sessions
+
+For an anchored milestone v2 attempt, a stopped owner may be replaced without
+closing its original begin. Use `forge-protected-owner-activity.resumeAttemptOwner`
+with the original `request`, an observed `hostRuntime`/`expectedSession`, the
+`inspectOwnerResume` record hash, the existing stop/quiescence attestations and
+live `assertAuthority`, `attestStoppedWriter`, `readPendingQuestions` callbacks.
+These callbacks must prove the exact attempt and every possible writer root;
+TTL, an inactive flag and imported JSON are not proof. This path retains
+the original owner host runtime; a different host is refused before transfer.
+It does not rewrite the original request/transport into another host's request.
+The helper rechecks under the controller and registry fences. Only the original begin/lease/generation and
+retained claim are admitted; another lease, pending transaction or unknown writer
+refuses. No administrative interruption, reset or new inference is performed.
+
+The result's process-local `ownerTransfer` capability may be passed to
+`createOwnerReconciliation`; classify the exact run delta as
+`canonical-owner-transfer` and supply its original S0 bytes. Preserve the returned
+scope and actual transfer evidence. A serialized capability grants nothing.
+After restart, revalidate current ownership and use the ordinary explicit bounded
+operator reconciliation for historical changes; never reconstruct a live handle
+from its JSON description. If the transferred owner also stopped while the same
+attempt remained open, `resumeAttemptOwner` admits another distinct observed
+same-host owner only when the latest stopped-owner transfer ends at the current
+owner and binds the exact same request, parent receipt, begin and lease scope.
+That history supplies eligibility only: fresh authority, stopped-writer and
+pending-question callbacks, explicit owner-stop/quiescence attestations and all
+fenced source/claim/root checks remain required. The initial transfer still
+requires an inactive run. No active owner is deactivated from a JSON flag or age.
+If an exact `owner-delta-approval` was already answered before the new transfer,
+reconciliation may compose that approval with the latest live `ownerTransfer`.
+The capability captures the actual run and compatibility-mirror pre/postimages
+under the owner publication fence. Only those captured changes are projected back
+when matching the existing question's identity, text and delta. A different new
+note, receipt, scope or other metadata still needs its own matching approval;
+missing/serialized handles and unsupported historical chains grant nothing.
+This is distinct from delivery-repair owner adoption.
+
+`reconciliationDecision(request, operatorDecision, {hookEvidence})` can separate
+strictly attributed hook appends from the manual decision. `hookEvidence` contains
+`originalBytes` keyed by the exact evidence journal path and a live `attestAppend`
+callback returning `{observed:true, reference}` for the supplied byte/hash
+challenge. Register the same journal/preimage at decision generation and use;
+pass the same proof contract to `createOwnerReconciliation`. Every suffix must be
+bounded valid JSONL preserving the original prefix. The decision binds that
+prefix plus every manual delta. Appends alone leave it stable; changed manual
+bytes, a new journal or invalid/unattributed append refuse or require a new
+decision. No journal is globally ignored and no previous answer is retargeted.

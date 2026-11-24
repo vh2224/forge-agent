@@ -1,0 +1,17 @@
+{
+  "unit_run": "44236577264",
+  "unit_run_head": "439ff6dadf4b129509287530b4bacfe04463705f",
+  "unit_run_conclusion": "success",
+  "sources": 61,
+  "unit_profiles": 61,
+  "original_profiles": 0,
+  "collector": "forge-ci-profile.readInput/sourceFrom/profileFromSources",
+  "profile_sha256": "563530d16e29e1736c4e8a37087ef8e205c4c50307dcc04b2ccd8f0a87621dbd",
+  "limits": [
+    "All518 current units and129 registered cases executed exactly once perplatform in a successful complete run.",
+    "FullCI took601seconds: strict ten-minute target was missed byone second, not hidden.",
+    "Only61 successful current profiles are inputs; failed-run timings are not observations in this refreshed profile.",
+    "Newlinked-v2 identities are now measured; their memberships match the current catalog exactly.",
+    "Predictions exclude queue/setup and hardware variability; native macOS concurrency is limited externally."
+  ]
+}

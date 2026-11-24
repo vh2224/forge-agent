@@ -10,7 +10,7 @@ Read if exists: {WORKING_DIR}/.gsd/REQUIREMENTS.md
 Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/{M###}-CONTEXT.md
 Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/{M###}-BRAINSTORM.md
 Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/{M###}-SCOPE.md
-Delivered: `node {WORKING_DIR}/scripts/forge-projection.js --render ledger --cwd {WORKING_DIR}` stdout.
+Delivered: `node "{FORGE_SCRIPTS_DIR}/forge-projection.js" --render ledger --cwd "{WORKING_DIR}"` stdout.
 
 ## Directory Conventions & Asset Map
 

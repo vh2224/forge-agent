@@ -1,0 +1,206 @@
+{
+  "description": "Históricos sintéticos nomeados da review-fix-policy-v1. Cada caso materializa eventos do owner (.gsd/forge/events.jsonl), eventos da milestone e registros de transação em root temporário, executa as admissões em ordem e confere a decisão e o status. Abreviações: execute = par unit-began/unit-transition de execute-task com begin committed do controller (record:false omite o registro → não atribuível); legacy = evento dispatch de review-fix com par sidecar-unit started→done (terminal:false omite o terminal; no_id omite o dispatch_id); after_minutes = tentativa medida gravada depois de uma admissão. raw_owner_events/raw_milestone_events são linhas literais. Nenhum dado real.",
+  "defaults": { "milestone": "M001", "execute_start": "2026-11-04T01:12:00.000Z", "review_start": "2026-11-04T02:45:00.000Z" },
+  "item_presets": {
+    "fix-now": { "r": "R1", "path": "src/a.js", "claim": "falha real em uso normal", "verdict": { "resolution": "conceded", "severity": "high", "reachable": "yes", "reproduced": "yes", "in_scope": "yes" } },
+    "critical": { "r": "R3", "path": "src/c.js", "claim": "perda de dados", "verdict": { "resolution": "conceded", "severity": "critical", "reachable": "yes", "reproduced": "no", "in_scope": "yes" } },
+    "medium": { "r": "R2", "path": "src/b.js", "claim": "qualidade", "verdict": { "resolution": "conceded", "severity": "medium", "reachable": "yes", "reproduced": "yes", "in_scope": "yes" } },
+    "theoretical": { "r": "R4", "path": "src/d.js", "claim": "corrida entre processos do próprio operador", "verdict": { "resolution": "conceded", "severity": "high", "reachable": "no", "reproduced": "no", "in_scope": "yes" } },
+    "operator": { "r": "R5", "path": "src/e.js", "claim": "decisão humana Refatorar agora", "basis": "operator-decision", "verdict": { "resolution": "open", "severity": "medium", "reachable": "yes", "reproduced": "no", "in_scope": "yes" } },
+    "triage": { "r": "R1", "path": "src/a.js", "review_file": ".gsd/milestones/M001/slices/S01/S01-REVIEW.md", "claim": "triagem final", "verdict": { "resolution": "conceded", "severity": "low", "reachable": "unknown", "in_scope": "yes" } }
+  },
+  "cases": [
+    {
+      "name": "ciclos-0-1-2-3-com-1h30-de-execute-recusa-o-terceiro",
+      "boundary": { "boundary": "slice", "milestone": "M001", "slice": "S01" },
+      "execute": [{ "task": "T01", "slice": "S01", "minutes": 90 }],
+      "steps": [
+        { "dispatch_id": "rf-a1", "items": ["fix-now"], "after_minutes": 10, "expect": { "decision": "admitted", "mode": "new", "counted": true, "cycle": 1, "budget_status": "complete", "line": "⚖ Review S01: ciclo 1/2 · review-fix 0 min / execute 1 h 30 min (0%)" } },
+        { "dispatch_id": "rf-a2", "items": ["fix-now", "critical"], "after_minutes": 10, "expect": { "decision": "admitted", "mode": "new", "counted": true, "cycle": 2, "budget_status": "complete", "line": "⚖ Review S01: ciclo 2/2 · review-fix 10 min / execute 1 h 30 min (11%)" } },
+        { "dispatch_id": "rf-a3", "items": ["fix-now"], "expect": { "decision": "refused", "reason_code": "review-fix-cycle-limit", "counted": false, "cycle": 2, "event_written": true, "line": "⚖ Review S01: ciclo 2/2 · review-fix 20 min / execute 1 h 30 min (22%)" } },
+        { "dispatch_id": "rf-a3", "items": ["fix-now"], "expect": { "decision": "refused", "reason_code": "review-fix-cycle-limit", "counted": false, "cycle": 2, "event_written": true } },
+        { "dispatch_id": "rf-a1", "items": ["fix-now"], "expect": { "decision": "admitted", "mode": "replay", "counted": false, "cycle": 1, "event_written": false } }
+      ],
+      "expect_status": { "cycles": 2, "refusals": 2, "budget_status": "complete", "execute_ms": 5400000, "review_fix_ms": 1200000, "budget_reasons": [], "admission_events": 4 }
+    },
+    {
+      "name": "orcamento-44-min-de-90-admite",
+      "boundary": { "boundary": "slice", "milestone": "M001", "slice": "S01" },
+      "execute": [{ "task": "T01", "slice": "S01", "minutes": 90 }],
+      "legacy": [{ "dispatch_id": "legacy-1", "minutes": 44 }],
+      "steps": [{ "dispatch_id": "rf-b2", "items": ["fix-now"], "expect": { "decision": "admitted", "counted": true, "cycle": 2, "budget_status": "complete" } }],
+      "expect_status": { "cycles": 2, "budget_status": "unknown", "budget_reasons": ["review-fix-unmeasured"] },
+      "expect_before": { "cycles": 1, "budget_status": "complete", "execute_ms": 5400000, "review_fix_ms": 2640000, "line": "⚖ Review S01: ciclo 1/2 · review-fix 44 min / execute 1 h 30 min (49%)" }
+    },
+    {
+      "name": "orcamento-45-min-de-90-exatamente-50-recusa",
+      "boundary": { "boundary": "slice", "milestone": "M001", "slice": "S01" },
+      "execute": [{ "task": "T01", "slice": "S01", "minutes": 90 }],
+      "legacy": [{ "dispatch_id": "legacy-1", "minutes": 45 }],
+      "steps": [{ "dispatch_id": "rf-c2", "items": ["fix-now"], "expect": { "decision": "refused", "reason_code": "review-fix-budget-exhausted", "counted": false, "cycle": 1, "line": "⚖ Review S01: ciclo 1/2 · review-fix 45 min / execute 1 h 30 min (50%)" } }],
+      "expect_status": { "cycles": 1, "refusals": 1, "budget_status": "complete", "execute_ms": 5400000, "review_fix_ms": 2700000 }
+    },
+    {
+      "name": "orcamento-50-min-de-90-acima-de-50-recusa",
+      "boundary": { "boundary": "slice", "milestone": "M001", "slice": "S01" },
+      "execute": [{ "task": "T01", "slice": "S01", "minutes": 60 }, { "task": "T02", "slice": "S01", "minutes": 30 }],
+      "legacy": [{ "dispatch_id": "legacy-1", "minutes": 50 }],
+      "steps": [{ "dispatch_id": "rf-d2", "items": ["fix-now"], "expect": { "decision": "refused", "reason_code": "review-fix-budget-exhausted", "cycle": 1, "line": "⚖ Review S01: ciclo 1/2 · review-fix 50 min / execute 1 h 30 min (56%)" } }],
+      "expect_status": { "cycles": 1, "budget_status": "complete", "execute_ms": 5400000, "review_fix_ms": 3000000 }
+    },
+    {
+      "name": "sem-inicio-de-execute-orcamento-desconhecido-so-o-teto-governa",
+      "boundary": { "boundary": "slice", "milestone": "M001", "slice": "S01" },
+      "legacy": [{ "dispatch_id": "legacy-1", "minutes": 45 }],
+      "steps": [
+        { "dispatch_id": "rf-e2", "items": ["fix-now"], "expect": { "decision": "admitted", "counted": true, "cycle": 2, "budget_status": "unknown", "line": "⚖ Review S01: ciclo 2/2 · review-fix 45 min / execute desconhecido (desconhecido)" } },
+        { "dispatch_id": "rf-e3", "items": ["fix-now"], "expect": { "decision": "refused", "reason_code": "review-fix-cycle-limit", "cycle": 2 } }
+      ],
+      "expect_before": { "cycles": 1, "budget_status": "unknown", "execute_ms": null, "review_fix_ms": 2700000, "budget_reasons": ["execute-unobserved"], "line": "⚖ Review S01: ciclo 1/2 · review-fix 45 min / execute desconhecido (desconhecido)" }
+    },
+    {
+      "name": "execute-aberto-e-desconhecido",
+      "boundary": { "boundary": "slice", "milestone": "M001", "slice": "S01" },
+      "execute": [{ "task": "T01", "slice": "S01", "minutes": 90 }],
+      "raw_milestone_events": [{ "ts": "2026-11-04T03:00:00.000Z", "event": "unit-began", "action": "begin", "unit": "execute-task/T02", "milestone": "M001", "idempotency_key": "forge-orchestrate-next:M001:execute-task/T02:S01" }],
+      "legacy": [{ "dispatch_id": "legacy-1", "minutes": 60 }],
+      "steps": [{ "dispatch_id": "rf-f2", "items": ["fix-now"], "expect": { "decision": "admitted", "cycle": 2, "budget_status": "unknown" } }],
+      "expect_before": { "cycles": 1, "budget_status": "unknown", "execute_ms": null, "budget_reasons_include": ["execute-open"] }
+    },
+    {
+      "name": "execute-ambiguo-e-desconhecido",
+      "boundary": { "boundary": "slice", "milestone": "M001", "slice": "S01" },
+      "raw_milestone_events": [
+        { "ts": "2026-11-04T01:00:00.000Z", "event": "unit-began", "action": "begin", "unit": "execute-task/T01", "milestone": "M001", "idempotency_key": "begin-a" },
+        { "ts": "2026-11-04T01:10:00.000Z", "event": "unit-began", "action": "begin", "unit": "execute-task/T01", "milestone": "M001", "idempotency_key": "begin-b" },
+        { "ts": "2026-11-04T02:00:00.000Z", "event": "unit-transition", "action": "complete", "unit": "execute-task/T01", "milestone": "M001", "idempotency_key": "complete-a" }
+      ],
+      "steps": [],
+      "expect_before": { "cycles": 0, "budget_status": "unknown", "execute_ms": null, "budget_reasons_include": ["execute-ambiguous"] }
+    },
+    {
+      "name": "execute-negativo-e-desconhecido",
+      "boundary": { "boundary": "slice", "milestone": "M001", "slice": "S01" },
+      "raw_milestone_events": [
+        { "ts": "2026-11-04T02:00:00.000Z", "event": "unit-began", "action": "begin", "unit": "execute-task/T01", "milestone": "M001", "idempotency_key": "begin-neg" },
+        { "ts": "2026-11-04T01:00:00.000Z", "event": "unit-transition", "action": "complete", "unit": "execute-task/T01", "milestone": "M001", "idempotency_key": "complete-neg" }
+      ],
+      "steps": [],
+      "expect_before": { "cycles": 0, "budget_status": "unknown", "budget_reasons_include": ["execute-negative"] }
+    },
+    {
+      "name": "execute-sem-registro-do-controller-nao-e-atribuivel",
+      "boundary": { "boundary": "slice", "milestone": "M001", "slice": "S01" },
+      "execute": [{ "task": "T01", "slice": "S01", "minutes": 90, "record": false }],
+      "steps": [],
+      "expect_before": { "cycles": 0, "budget_status": "unknown", "execute_ms": null, "budget_reasons_include": ["execute-unattributable"] }
+    },
+    {
+      "name": "mesmo-T01-de-outra-slice-nao-conta",
+      "boundary": { "boundary": "slice", "milestone": "M001", "slice": "S01" },
+      "execute": [{ "task": "T01", "slice": "S02", "minutes": 90 }],
+      "steps": [],
+      "expect_before": { "cycles": 0, "budget_status": "unknown", "execute_ms": null, "budget_reasons": ["execute-unobserved"] }
+    },
+    {
+      "name": "tentativa-sem-terminal-e-desconhecida-e-conta",
+      "boundary": { "boundary": "slice", "milestone": "M001", "slice": "S01" },
+      "execute": [{ "task": "T01", "slice": "S01", "minutes": 90 }],
+      "legacy": [{ "dispatch_id": "legacy-open", "minutes": 80, "terminal": false }],
+      "steps": [{ "dispatch_id": "rf-g2", "items": ["fix-now"], "expect": { "decision": "admitted", "cycle": 2, "budget_status": "unknown" } }],
+      "expect_before": { "cycles": 1, "budget_status": "unknown", "execute_ms": 5400000, "review_fix_ms": null, "budget_reasons": ["review-fix-unmeasured"] }
+    },
+    {
+      "name": "legado-com-recovery-nao-conta-ciclo-mas-soma-tempo",
+      "boundary": { "boundary": "slice", "milestone": "M001", "slice": "S01" },
+      "execute": [{ "task": "T01", "slice": "S01", "minutes": 90 }],
+      "legacy": [{ "dispatch_id": "legacy-1", "minutes": 10 }, { "dispatch_id": "legacy-1-recovery-c1", "minutes": 5 }],
+      "steps": [{ "dispatch_id": "rf-h2", "items": ["fix-now"], "expect": { "decision": "admitted", "cycle": 2 } }],
+      "expect_before": { "cycles": 1, "budget_status": "complete", "review_fix_ms": 900000, "line": "⚖ Review S01: ciclo 1/2 · review-fix 15 min / execute 1 h 30 min (17%)" }
+    },
+    {
+      "name": "legado-sem-dispatch-id-conta-e-fica-desconhecido",
+      "boundary": { "boundary": "slice", "milestone": "M001", "slice": "S01" },
+      "execute": [{ "task": "T01", "slice": "S01", "minutes": 90 }],
+      "legacy": [{ "no_id": true, "minutes": 10 }],
+      "steps": [],
+      "expect_before": { "cycles": 1, "budget_status": "unknown", "budget_reasons": ["review-fix-unmeasured"] }
+    },
+    {
+      "name": "mesma-S03-em-outra-milestone-tem-contagem-propria",
+      "boundary": { "boundary": "slice", "milestone": "M001", "slice": "S03" },
+      "legacy": [{ "dispatch_id": "other-1", "minutes": 30, "milestone": "M002", "slice": "S03" }, { "dispatch_id": "other-2", "minutes": 30, "milestone": "M002", "slice": "S03" }],
+      "steps": [{ "dispatch_id": "rf-i1", "items": ["fix-now"], "expect": { "decision": "admitted", "cycle": 1 } }],
+      "expect_before": { "cycles": 0, "budget_status": "unknown", "review_fix_ms": 0 }
+    },
+    {
+      "name": "task-avulsa-tem-contagem-propria-e-tempo-desconhecido",
+      "boundary": { "boundary": "task", "task": "T-20261106000000-avulsa" },
+      "legacy": [
+        { "dispatch_id": "slice-1", "minutes": 20, "milestone": "M001", "slice": "S01" },
+        { "dispatch_id": "slice-2", "minutes": 20, "milestone": "M001", "slice": "S01" },
+        { "dispatch_id": "task-1", "minutes": 20, "unit": "review-fix/T-20261106000000-avulsa", "milestone": null }
+      ],
+      "steps": [
+        { "dispatch_id": "rf-j2", "items": ["fix-now"], "expect": { "decision": "admitted", "cycle": 2, "budget_status": "unknown", "line": "⚖ Review T-20261106000000-avulsa: ciclo 2/2 · review-fix 20 min / execute desconhecido (desconhecido)" } },
+        { "dispatch_id": "rf-j3", "items": ["fix-now"], "expect": { "decision": "refused", "reason_code": "review-fix-cycle-limit", "cycle": 2 } }
+      ],
+      "expect_before": { "cycles": 1, "budget_status": "unknown", "budget_reasons": ["standalone-task-execute-unknown"] }
+    },
+    {
+      "name": "slice-nao-herda-despachos-da-task-avulsa",
+      "boundary": { "boundary": "slice", "milestone": "M001", "slice": "S01" },
+      "legacy": [
+        { "dispatch_id": "task-1", "minutes": 20, "unit": "review-fix/T-20261106000000-avulsa", "milestone": null },
+        { "dispatch_id": "task-2", "minutes": 20, "unit": "review-fix/T-20261106000000-avulsa", "milestone": null }
+      ],
+      "steps": [{ "dispatch_id": "rf-k1", "items": ["fix-now"], "expect": { "decision": "admitted", "cycle": 1 } }],
+      "expect_before": { "cycles": 0 }
+    },
+    {
+      "name": "item-nao-fix-now-recusa-o-request-inteiro-e-nao-conta",
+      "boundary": { "boundary": "slice", "milestone": "M001", "slice": "S01" },
+      "execute": [{ "task": "T01", "slice": "S01", "minutes": 90 }],
+      "steps": [
+        { "dispatch_id": "rf-l1", "items": ["fix-now", "medium", "theoretical"], "expect": { "decision": "refused", "reason_code": "review-fix-not-fix-now", "cycle": 0,
+          "refused_items": [{ "r": "R2", "reasons": ["severity-below-high"] }, { "r": "R4", "reasons": ["not-reachable"] }] } },
+        { "dispatch_id": "rf-l2", "items": ["fix-now"], "expect": { "decision": "admitted", "cycle": 1 } }
+      ],
+      "expect_status": { "cycles": 1, "refusals": 1 }
+    },
+    {
+      "name": "decisao-do-operador-dispensa-filtro-e-conta-no-ciclo",
+      "boundary": { "boundary": "slice", "milestone": "M001", "slice": "S01" },
+      "legacy": [{ "dispatch_id": "legacy-1", "minutes": 10 }],
+      "steps": [
+        { "dispatch_id": "rf-m2", "items": ["operator"], "expect": { "decision": "admitted", "counted": true, "cycle": 2 } },
+        { "dispatch_id": "rf-m3", "items": ["operator"], "expect": { "decision": "refused", "reason_code": "review-fix-cycle-limit" } }
+      ],
+      "expect_status": { "cycles": 2 }
+    },
+    {
+      "name": "triagem-final-fora-do-filtro-e-do-teto-e-registrada",
+      "boundary": { "boundary": "milestone-triage", "milestone": "M001" },
+      "legacy": [{ "dispatch_id": "legacy-1", "minutes": 10 }, { "dispatch_id": "legacy-2", "minutes": 10 }],
+      "steps": [
+        { "dispatch_id": "triage-1", "items": ["triage"], "expect": { "decision": "admitted", "mode": "new", "counted": false, "cycle": null, "event_written": true } },
+        { "dispatch_id": "triage-2", "items": ["triage"], "expect": { "decision": "admitted", "mode": "new", "counted": false, "cycle": null, "event_written": true } }
+      ]
+    },
+    {
+      "name": "incidente-25-despachos-24h-contra-1h30-de-execute",
+      "boundary": { "boundary": "slice", "milestone": "M-20261101111759-opcoes-prazo-milestones", "slice": "S03" },
+      "execute": [{ "task": "T03", "slice": "S03", "minutes": 90 }],
+      "incident": { "dispatches": 25, "minutes_each": 57.6 },
+      "steps": [{ "dispatch_id": "rf-incident-26", "items": ["fix-now"], "expect": { "decision": "refused", "reason_code": "review-fix-cycle-limit", "cycle": 25 } }],
+      "expect_before": { "cycles": 25, "budget_status": "complete", "execute_ms": 5400000, "review_fix_ms": 86400000, "line": "⚖ Review S03: ciclo 25/2 · review-fix 24 h / execute 1 h 30 min (1600%)" }
+    },
+    {
+      "name": "linhas-malformadas-sao-contadas-e-expostas",
+      "boundary": { "boundary": "slice", "milestone": "M001", "slice": "S01" },
+      "raw_owner_lines": ["isto não é json", "[1,2,3]", "{\"event\":\"dispatch\",\"unit\":\"execute-task/T01\",\"milestone\":\"M001\"}"],
+      "steps": [{ "dispatch_id": "rf-n1", "items": ["fix-now"], "expect": { "decision": "admitted", "cycle": 1, "malformed_lines": 2 } }],
+      "expect_before": { "cycles": 0, "malformed_lines": 2 }
+    }
+  ]
+}

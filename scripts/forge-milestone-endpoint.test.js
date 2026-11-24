@@ -101,6 +101,7 @@ function fixture(opts = {}) {
   const children = [], envelopes = [], revisions = [];
   const tasks = [{ id: 'T01', writes: ['scripts/result.js', 'scripts/check.js'], verify: ['node scripts/check.js'] },
     { id: 'T02', writes: ['scripts/result.js'], verify: ['node scripts/check.js', 'node scripts/check.js 2'], source: 'module.exports = 2;\n' }];
+  if (opts.glob) tasks[0].writes = ['scripts/**'];
   if (docs) tasks.push({ id: 'T03', root: 'docs', writes: ['check.js', 'notes.js'], verify: ['node check.js'], output: 'notes.js' });
   for (const task of tasks) {
     if (task.source) { write(cwd, 'scripts/result.js', task.source); commit(git, 'B legitimately changes the source verified by A'); }
@@ -298,6 +299,14 @@ try {
     const result = expectProof(f, 'unproven', 'endpoint-verification-unavailable', 'every root needs declared commands');
     assert.deepEqual([result.detail, result.root_id], ['commands-empty', 'docs']);
   });
+  const globFixture = fixture({ glob: true });
+  assert.equal(endpoint.writeEndpointVerification({ cwd: globFixture.cwd, milestone: M }).status, 'verified');
+  expectProof(globFixture, 'proven', null, 'integrated endpoint glob binds concrete source universe');
+  write(globFixture.cwd, 'scripts/new.js', 'module.exports = 3;\n');
+  assert.equal(proof(globFixture).status, 'unproven', 'endpoint must reject a new glob source after capture');
+  fs.unlinkSync(file(globFixture.cwd, 'scripts/new.js'));
+  expectProof(globFixture, 'proven', null, 'endpoint glob recovers after exact source restoration');
+  pass('endpoint-glob-current-universe');
   const written = endpoint.writeEndpointVerification({ cwd, milestone: M });
   assert.equal(written.status, 'verified', JSON.stringify(written));
   assert.deepEqual(written.envelopes, [{ root_id: 'primary', reference: ENVELOPE, passed: true, checks: 2 }]);
@@ -869,14 +878,18 @@ try {
     pass('endpoint-at-cap-unknown-census-status');
   }
 
-  // ---- Truth 7 (part): only sliceClosure is a new controller export; clock adds two.
-  assert.deepEqual(Object.keys(controller), ['PROTOCOL_VERSION', 'BOUNDARY_KINDS', 'ACTIONS', 'PHASES', 'REASON_CODES', 'TIME_ADMISSION_CODES', 'ControllerError',
-    'selectNextUnit', 'discoverInventory', 'select', 'begin', 'transition', 'persistResult', 'complete', 'pause', 'fail', 'expireSafe', 'resume', 'handoff',
-    'pendingTransactions', 'projectLogicalHistory', 'logicalState', 'resolvePrefs', 'transactionDir', 'resultDir', 'boundaryDir', 'eventsFile', 'transactionFile',
-    'resultFile', 'boundaryFile', 'readEvents', 'readJson', 'writeAtomic', 'lookupRecord', 'preflightPaths', 'consumeFailure', 'reenter', 'failureProjection',
-    'validateLinkedEntry', 'validateTerminalLinkedEntry', 'sliceClosure', 'dependencies']);
+  // ---- Truth 7 (part): endpoint adds sliceClosure; ownership adds withOwnerBoundary; clock adds two.
+  assert.equal(typeof controller.withOwnerBoundary, 'function', 'the reviewed owner boundary remains an actual callable seam');
+  assert.equal(typeof controller.verifyCommittedCompletionBoundary, 'function', 'delivery repair proves the immutable committed boundary independently of an open repair lease');
+  for (const name of ['beginSerial', 'incompleteUnits', 'pausePartial', 'reconcilePartialSuccessors', 'inspectPausedAttempt', 'verifyCompletedAttempt', 'validatePausedEntry']) assert.equal(typeof controller[name], 'function', name + ' is the explicit additive #367 API');
+  for (const name of ["settleInterruptedLineage","verifyOwnerInterruption","pendingOwnerInterruptions","ownerInterruptionIdentity","ownerInterruptionQuestions","archiveOwnerInterruptionWitnesses"]) assert.equal(typeof controller[name], 'function', name + ' is the explicit additive #375 administrative API');
+  for (const name of ["prepareBatchTerminal","commitBatchTerminal"]) assert.equal(typeof controller[name], "function", name + " is the exact343 batch terminal API");
+  for (const name of ['inspectHistoricalLinkedEntry', 'recordChecksum', 'pauseDecomposition']) assert.equal(typeof controller[name], 'function', name + ' is an explicit additive382/R9 API');
+  assert.equal(typeof controller.recordCandidatePaths, 'function', 'recordCandidatePaths is the explicit additive #445 candidate seam');
+  assert.deepEqual(Object.keys(controller), ["PROTOCOL_VERSION","BOUNDARY_KINDS","ACTIONS","PHASES","REASON_CODES","TIME_ADMISSION_CODES","ControllerError","selectNextUnit","discoverInventory","select","begin","beginSerial","transition","persistResult","complete","pause","fail","expireSafe","resume","handoff","withOwnerBoundary","verifyCommittedCompletionBoundary","pendingTransactions","incompleteUnits","pausePartial","pauseDecomposition","reconcilePartialSuccessors","inspectPausedAttempt","verifyCompletedAttempt","validatePausedEntry","projectLogicalHistory","logicalState","resolvePrefs","transactionDir","resultDir","boundaryDir","eventsFile","transactionFile","resultFile","boundaryFile","readEvents","readJson","writeAtomic","lookupRecord","recordCandidatePaths","preflightPaths","consumeFailure","reenter","failureProjection","validateLinkedEntry","validateTerminalLinkedEntry","inspectHistoricalLinkedEntry","recordChecksum","sliceClosure","prepareBatchTerminal","commitBatchTerminal","settleInterruptedLineage","verifyOwnerInterruption","pendingOwnerInterruptions","ownerInterruptionIdentity","ownerInterruptionQuestions","archiveOwnerInterruptionWitnesses","dependencies"]);
   assert.deepEqual(Object.keys(clock), ['CLOCK_POLICY', 'FORECAST_POLICY', 'DELIVERY_PROOF_MODES', 'computeClock', 'readClock', 'readDeliveries',
-    'readHistoricalDeliveries', 'readHistoricalTaskDelivery', 'computeForecast', 'readForecast', 'main', 'ENDPOINT_PROOF_POLICY', 'readEndpointProof']);
+    'readHistoricalDeliveries', 'readHistoricalTaskDelivery', 'readCurrentTaskDelivery', 'computeForecast', 'readForecast', 'main', 'ENDPOINT_PROOF_POLICY', 'readEndpointProof']);
+  assert.strictEqual(typeof clock.readCurrentTaskDelivery, 'function', '405 current-source completion proof is an additive API');
   assert(Object.isFrozen(clock.ENDPOINT_PROOF_POLICY) && Object.isFrozen(clock.ENDPOINT_PROOF_POLICY.limitations));
   assert(f.envelopes.every(row => row.envelope.kind === 'verification' && /^[a-f0-9]{40}$/.test(row.envelope.revision)), 'real runRootVerification envelopes');
   for (const [name, minimum, stubs] of [['forge-milestone-time-clock.js', 680, true], ['forge-unit-controller.js', 1781, true], ['forge-milestone-endpoint.js', 180, true],

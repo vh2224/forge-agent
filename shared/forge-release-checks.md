@@ -66,12 +66,15 @@ Release is source policy only and is never an awaited remote gate.
 | Workflow/key | Rendered API names | Kind |
 | --- | --- | --- |
 | CI / operational-offline | Offline both / linux, darwin, win32 | 3 native |
-| CI / test | Tests (ubuntu-latest), Tests (macos-latest), Tests (windows-latest, shard 1/2), Tests (windows-latest, shard 2/2) | 4 native/sharded |
+| CI / test | Tests (ubuntu-latest); Tests (macos-latest, shard 1/2), Tests (macos-latest, shard 2/2); Tests (windows-latest, shard 1/4), Tests (windows-latest, shard 2/4), Tests (windows-latest, shard 3/4), Tests (windows-latest, shard 4/4) | 7 native/sharded |
 | CI / required-offline-windows | Offline claude / linux, darwin, win32; Offline codex / linux, darwin, win32 | 6 aliases needing operational-offline |
 | CI / required-tests-windows | Tests (windows-latest) | 1 alias needing test |
+| CI / required-tests-macos | Tests (macos-latest) | 1 alias needing test |
 | app / app | Swift app and PTY regressions | 1 native, macos-26 |
 
-There are 14 CI executions; seven aliases do not replace seven native executions.
+There are 18 CI executions: ten native/sharded executions and eight aliases.
+The aliases do not replace the native executions. The reviewed current mapping
+is `scripts/forge-release-policy.js` together with `.github/workflows/ci.yml`.
 A numeric API job ID identifies an execution, never the semantic YAML job key.
 The API does not provide that key; mapping uses the pinned source and unique name.
 
@@ -167,13 +170,19 @@ Coordinator has contents:read/actions:read; publisher needs coordinator and has
 contents:write/actions:read. That permission is job-wide, including actions that
 can access github.token even without a visible GH_TOKEN environment variable.
 persist-credentials:false prevents stored checkout credentials, not job privilege.
-The authenticated GET-only wait is a separate coordinator step with GH_TOKEN.
-Its collector shares an explicit 30 minute deadline and never waits for Release.
-A subsequent prepare has empty GH_TOKEN/GITHUB_TOKEN and rejects other secret env.
-It generates local gate/report/receipt together with scrubbed child environments.
-The publisher independently resolves notes and runs its own token-free prepare.
+The publisher independently resolves notes and starts its own token-free prepare
+while CI runs. Prepare has empty GH_TOKEN/GITHUB_TOKEN, rejects other secret env,
+and generates local gate/report/receipt with scrubbed child environments.
+The authenticated GET-only wait follows preparation in the same publisher job.
+It receives GH_TOKEN, never waits for Release itself, and is bounded by the
+publisher deadline. The standalone collector retains its explicit 60 minute
+default (`scripts/forge-release-github.js`, `DEFAULT_LIMITS.deadlineMs`).
 No report, receipt, nonce or artifact is transferred from coordinator to publisher.
-Only the final apply receives explicit GH_TOKEN in the publisher.
+After the wait, a token-free step validates the original current-job preparation.
+If less than two minutes of its TTL remain, it creates a new complete preparation
+and nonce. It preserves the old receipt and never extends its timestamps.
+Foreign, tampered, backdated or credential-bearing input refuses before renewal.
+The final apply receives explicit GH_TOKEN for effects, separately from the read-only wait.
 This is credential propagation discipline; it is not a privilege sandbox.
 
 ## Receipt, retry and residual races
@@ -181,8 +190,14 @@ This is credential propagation discipline; it is not a privilege sandbox.
 Prepare binds the physical checkout, policy/source digests, complete candidate SHA,
 report/notes/package bytes, repository/workflow identity and current run/attempt/job.
 The unique fixed job key plus current authenticated run/attempt is the job identity.
-Receipt TTL is ten minutes after generation; each job timeout is 45 minutes.
-Apply receives only that prepare step's state/nonce outputs, never an imported report.
+Receipt TTL is ten minutes after generation. The coordinator job timeout is
+five minutes; the publisher job timeout is seventy-five minutes, as declared in
+`.github/workflows/release.yml`.
+This preserves the collector's full sixty-minute safety wait plus preparation,
+renewal and publication margin; it is not the normal latency target.
+Apply receives only the current-job freshness step's validated state/nonce outputs,
+never an imported report. An expired receipt can be inspected for renewal only;
+the publication path always enforces its original ten-minute expiry.
 It validates identity, containment, unchanged clean HEAD, source bytes and expiry,
 claims the receipt once exclusively and rechecks current gates around each effect.
 Apply never regenerates offline evidence or mints a replacement receipt.
@@ -259,7 +274,7 @@ cancel-in-progress:false preserve active publication. The existing limitation
 release-pending-may-be-replaced remains: a third arrival can replace a pending
 candidate while the first publishes. This is not durable FIFO and does not
 promise publication for every push. No collector deadline or queue policy changes.
-The seven CI aliases remain unchanged; their always() behavior on cancelled PR
+The eight current CI aliases retain their always() behavior on cancelled PR
 runs may leave failed checks on superseded SHAs, an expected effect to observe in
 hosted validation. Unknown remote consumers are not evidence to remove a check.
 The app's existing PR path filter, cache, build and PTY commands remain unchanged;
@@ -276,9 +291,12 @@ fallback when this profile is present. New unprofiled suites receive the default
 weight; stale entries are reported, not manually repaired. No selection by path,
 changed, match or fail-fast flags is introduced. CI triggers have no path filter.
 
-Job keys, rendered names, runners, needs, all 14 CI executions plus app, matrices,
-seven aliases, two Windows shards, offline gates, SVN provisioning and smoke
-steps remain unchanged. Section 76 of the smoke receives structural checks here;
+In the historical S04 change, job mappings, fourteen CI executions, seven aliases
+and two Windows shards remained unchanged. That is historical evidence, not the
+current required matrix: use the eighteen-execution matrix above, including four
+Windows shards, two macOS shards and eight aliases. Offline gates, SVN provisioning
+and smoke remain required by their current workflow declarations.
+Section 76 of the smoke received structural checks in S04;
 the full smoke is not executed by this task. CI/app SHA-256 and Git blob SHA-1 pins
 are updated together with this workflow change and unchanged semantic mappings.
 Until the owner commits those bytes, the release-checks suite must take

@@ -501,7 +501,7 @@ async function main() {
     }
   });
 
-  await test('real preparation caller preserves all four task phases and verified procedure provenance', async () => {
+  await test('real Codex sidecar caller admits owner-packaged brainstorm/discuss/plan and refuses research before the provider (#350)', async () => {
     const original = xllm.invokeCodexAppServer;
     try {
       for (const phase of ['brainstorm', 'discuss', 'research', 'plan']) {
@@ -515,10 +515,158 @@ async function main() {
           return { finalText: JSON.stringify({ status: 'partial', summary: 'Fixture reached provider', questions: [], artifacts: [] }) };
         };
         const result = await prep.prepareStandaloneTask(request);
+        if (phase === 'research') {
+          assert.equal(result.ok, false, JSON.stringify(result));
+          assert.equal(result.reason_code, 'codex-readonly-context-unsupported');
+          assert.equal(result.diagnostic.stage, 'resolution');
+          assert.equal(result.provider_called, false);
+          assert.equal(calls, 0);
+          assert(!fs.existsSync(`${request.resultFile}.receipt.json`));
+          assert(!fs.existsSync(artifactPath(request)));
+          continue;
+        }
         assert.equal(result.status, 'partial', `${phase}: ${JSON.stringify(result)}`);
         assert.equal(result.provider_called, true);
         assert.equal(calls, 1);
       }
+    } finally { xllm.invokeCodexAppServer = original; }
+  });
+
+  await test('Codex sidecar preparation keeps context health in memory under the read-only surface census', async () => {
+    // The real app-server transport persists `.gsd/forge/context/codex/*` under the
+    // owner unless the caller passes `persistContext:false` (forge-xllm.js). The
+    // preparation surface census covers the whole owner `.gsd/`, so that write used
+    // to refuse the provider's valid answer as artifact-direct-write-detected.
+    const original = xllm.invokeCodexAppServer;
+    try {
+      for (const phase of ['brainstorm', 'discuss', 'plan']) {
+        const request = fixture({ phase, hostRuntime: 'claude', model: 'gpt-5.6-sol' });
+        const seen = [];
+        xllm.invokeCodexAppServer = async options => {
+          seen.push(options.persistContext);
+          if (options.persistContext !== false) {
+            const dir = path.join(request.contextRoot, '.gsd', 'forge', 'context', 'codex');
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(path.join(dir, 'thread-fixture.json'), '{}\n');
+          }
+          return { finalText: JSON.stringify(envelope(request)) };
+        };
+        const result = await prep.prepareStandaloneTask(request);
+        assert.deepEqual(seen, [false], `${phase}: preparation must not persist context health`);
+        assert.equal(result.ok, true, `${phase}: ${JSON.stringify(result)}`);
+        assert.equal(fs.readFileSync(artifactPath(request), 'utf8'), content(phase, request.taskId));
+        assert(!fs.existsSync(path.join(request.contextRoot, '.gsd', 'forge', 'context')), `${phase}: no context dir in the owner`);
+      }
+    } finally { xllm.invokeCodexAppServer = original; }
+  });
+
+  await test('standalone research on the Codex sidecar is refused by start, prepare and the transport entrypoint (#350)', async () => {
+    const sentinel = 'SENTINEL-350-RESEARCH-PROMPT-CONTENT';
+    const original = xllm.invokeCodexAppServer;
+    let calls = 0;
+    xllm.invokeCodexAppServer = async () => { calls++; throw Error('research must not reach Codex'); };
+    try {
+      for (const entry of ['start', 'prepare']) {
+        const request = fixture({ phase: 'research', hostRuntime: 'claude', model: 'gpt-5.6-sol' });
+        request.prompt = `COMPLETE CONTEXT ASSERTED ${sentinel}`;
+        request.context_complete = true;
+        const result = entry === 'start'
+          ? await prep.startStandaloneTaskPreparation(request)
+          : await prep.prepareStandaloneTask(request, { invokeSidecar: async () => { calls++; throw Error('must not invoke'); } });
+        assert.equal(result.ok, false, `${entry}: ${JSON.stringify(result)}`);
+        assert.equal(result.reason_code, 'codex-readonly-context-unsupported', entry);
+        assert.equal(result.diagnostic.stage, 'resolution', entry);
+        assert.equal(result.provider_called, false, entry);
+        assert.equal(result.route.resolved_worker_engine, 'codex', entry);
+        assert.equal(result.route.worker_mode, 'sidecar', entry);
+        assert(!JSON.stringify(result).includes(sentinel), entry);
+        assert(!fs.existsSync(`${request.resultFile}.receipt.json`), entry);
+        assert(!fs.existsSync(artifactPath(request)), entry);
+      }
+      // A research delivery request built by the canonical caller cannot bypass the start gate.
+      const request = fixture({ phase: 'research', hostRuntime: 'claude', model: 'gpt-5.6-sol' });
+      request.prompt = `COMPLETE CONTEXT ASSERTED ${sentinel}`;
+      const validated = prep.validateRequest(request);
+      const route = { ...resolveDispatch({ cwd: request.contextRoot, unitType: 'research-milestone', hostRuntime: 'claude',
+        scope: 'standalone-task', phase: 'research', unitId: request.taskId, taskId: request.taskId }), unit_type: 'research-milestone' };
+      assert.equal(route.resolved_worker_engine, 'codex');
+      const delivery = prep.deliveryRequest(validated, route, prep.buildPreparationPrompt(validated));
+      await assert.rejects(() => unit.runUnitSidecar(delivery), error => {
+        assert.equal(error.code, 'codex-readonly-context-unsupported');
+        assert.equal(error.provider_called, false);
+        assert.equal(error.profile, 'standalone-task:research');
+        assert(!error.message.includes(sentinel));
+        return true;
+      });
+      assert(!fs.existsSync(`${request.resultFile}.receipt.json`));
+      assert(!fs.existsSync(request.resultFile));
+      assert.equal(calls, 0);
+    } finally { xllm.invokeCodexAppServer = original; }
+  });
+
+  await test('admitted standalone discuss reaches the real read-only Codex turn with owner content and physical CODE_DIR (#350)', async () => {
+    const request = fixture({ phase: 'discuss', hostRuntime: 'claude', model: 'gpt-5.6-sol' });
+    const sentinel = 'SENTINEL-350-OWNER-DECISIONS-INLINED';
+    request.prompt = `## Decisions (owner)\n\n${sentinel}`;
+    const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: request.cwd, phase: 'task-discuss' });
+    const client = require('./forge-appserver-client');
+    const originalTurn = client.startAppServerTurn;
+    const hadBin = Object.prototype.hasOwnProperty.call(process.env, 'FORGE_XLLM_CODEX_BIN');
+    const originalBin = process.env.FORGE_XLLM_CODEX_BIN;
+    process.env.FORGE_XLLM_CODEX_BIN = path.join(path.dirname(request.cwd), 'missing-codex-fixture.js');
+    const captured = [];
+    client.startAppServerTurn = async opts => {
+      captured.push({ cwd: opts.cwd, threadParams: opts.threadParams, turnParams: opts.turnParams('fixture-thread') });
+      throw Object.assign(new Error('fixture app-server stop'), { code: 'fixture-appserver-stop' });
+    };
+    try {
+      const result = await prep.prepareStandaloneTask(request);
+      assert.equal(result.ok, false, JSON.stringify(result));
+      assert.equal(captured.length, 1, JSON.stringify(result));
+      const [turn] = captured;
+      const text = turn.turnParams.input.map(item => item.text).join('\n');
+      assert(text.includes(sentinel));
+      assert(text.includes(procedure.content));
+      assert.equal(fs.realpathSync(turn.cwd), fs.realpathSync(request.cwd));
+      assert.notEqual(fs.realpathSync(turn.cwd), fs.realpathSync(request.contextRoot));
+      assert.deepStrictEqual(turn.turnParams.sandboxPolicy, { type: 'readOnly', networkAccess: false });
+      assert(!Object.prototype.hasOwnProperty.call(turn.turnParams.sandboxPolicy, 'writableRoots'));
+      assert.equal(turn.threadParams.approvalPolicy, 'never');
+      assert.equal(result.route.model_resolved, 'gpt-5.6-sol');
+      assert.equal(turn.turnParams.model, result.route.model_resolved);
+      assert.equal(turn.threadParams.model, result.route.model_resolved);
+      assert.equal(typeof result.route.effort, 'string');
+      assert.equal(turn.turnParams.effort, result.route.effort);
+    } finally {
+      client.startAppServerTurn = originalTurn;
+      if (hadBin) process.env.FORGE_XLLM_CODEX_BIN = originalBin;
+      else delete process.env.FORGE_XLLM_CODEX_BIN;
+    }
+  });
+
+  await test('a saved Codex standalone research ready receipt replays without route resolution or inference (#350)', async () => {
+    const request = fixture({ phase: 'research', hostRuntime: 'claude', model: 'gpt-5.6-sol' });
+    const validated = prep.validateRequest(request);
+    const route = { ...resolveDispatch({ cwd: request.contextRoot, unitType: 'research-milestone', hostRuntime: 'claude',
+      scope: 'standalone-task', phase: 'research', unitId: request.taskId, taskId: request.taskId }), unit_type: 'research-milestone' };
+    assert.equal(route.resolved_worker_engine, 'codex');
+    // Historical receipt predates early resolver admission (#404). No new
+    // invocation is authorized by this persisted route during the replay.
+    route.dispatch_allowed = true;
+    const delivery = prep.deliveryRequest(validated, route, prep.buildPreparationPrompt(validated));
+    assert.equal(unit.beginArtifactAttempt(delivery).state, 'started');
+    await unit.acceptArtifactResult(delivery, envelope(request), { providerCalled: true, maxPayloadBytes: unit.MAX_ARTIFACT_PAYLOAD_BYTES });
+    assert.equal(JSON.parse(fs.readFileSync(`${request.resultFile}.receipt.json`, 'utf8')).phase, 'ready');
+    const original = xllm.invokeCodexAppServer;
+    let calls = 0;
+    xllm.invokeCodexAppServer = async () => { calls++; throw Error('ready replay must not infer'); };
+    try {
+      const replay = await prep.startStandaloneTaskPreparation(request, { resolveDispatch() { throw Error('ready replay must not resolve'); } });
+      assert.equal(replay.ok, true, JSON.stringify(replay));
+      assert.equal(replay.replayed, true);
+      assert.equal(replay.provider_called, false);
+      assert.equal(calls, 0);
+      assert.equal(fs.readFileSync(artifactPath(request), 'utf8'), content('research', request.taskId));
     } finally { xllm.invokeCodexAppServer = original; }
   });
 
@@ -565,7 +713,7 @@ async function main() {
   });
 
   await test('GPT configured on Claude selects Codex sidecar without changing identity', async () => {
-    const request = fixture({ phase: 'research', hostRuntime: 'claude', model: 'gpt-5.6-sol' });
+    const request = fixture({ phase: 'discuss', hostRuntime: 'claude', model: 'gpt-5.6-sol' });
     const result = await prep.prepareStandaloneTask(request, { invokeSidecar: async delivery => {
       assert.equal(delivery.route.resolved_worker_engine, 'codex');
       assert.equal(delivery.route.worker_mode, 'sidecar');
@@ -700,6 +848,32 @@ async function main() {
     assert.equal(result.ok, true, JSON.stringify(result));
     assert.equal(result.transport, 'native');
     assert.equal(calls, 1);
+  });
+
+  await test('Claude native telemetry with policy diagnostics survives a JSON round trip at acceptance', async () => {
+    // The CLI --accept-native path receives telemetry parsed from a file, so arrays
+    // such as policy_diagnostics are never the same reference as the recomputed ones.
+    const request = fixture({ phase: 'discuss', hostRuntime: 'claude', model: 'claude-sonnet-5-5' });
+    request.activeCapabilities = { available: true, tool: 'Agent', source: 'fixture-tool-schema',
+      model_aliases: ['sonnet'], effort_transports: ['agent-argument'], reasoning_efforts: ['medium', 'high'] };
+    const started = await prep.startStandaloneTaskPreparation(request);
+    assert.equal(started.action, 'invoke-native', JSON.stringify(started));
+    const telemetry = JSON.parse(JSON.stringify(started.invocation.telemetry));
+    assert(Array.isArray(started.invocation.telemetry.policy_diagnostics) && started.invocation.telemetry.policy_diagnostics.length > 0,
+      'Sonnet 5.5 alias path must carry policy_diagnostics: ' + JSON.stringify(started.invocation.telemetry));
+    const result = await prep.acceptStandaloneTaskPreparation(request, { route: started.route,
+      rawResult: framed(envelope(request)), invocationTelemetry: telemetry, providerCalled: true });
+    assert.equal(result.ok, true, JSON.stringify(result));
+
+    const tampered = fixture({ phase: 'discuss', hostRuntime: 'claude', model: 'claude-sonnet-5-5' });
+    tampered.activeCapabilities = request.activeCapabilities;
+    const tamperedStart = await prep.startStandaloneTaskPreparation(tampered);
+    const altered = JSON.parse(JSON.stringify(tamperedStart.invocation.telemetry));
+    altered.policy_diagnostics = [{ code: 'altered-by-caller' }];
+    const refused = await prep.acceptStandaloneTaskPreparation(tampered, { route: tamperedStart.route,
+      rawResult: framed(envelope(tampered)), invocationTelemetry: altered, providerCalled: true });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.reason_code, 'native-preparation-telemetry-mismatch');
   });
 
   await test('canonical, sequential and dashed timestamp task IDs publish without a milestone', async () => {
@@ -1120,7 +1294,7 @@ async function main() {
   });
 
   await test('production sidecar heartbeat without adapter evidence stays unknown in result, receipt, event and replay', async () => {
-    const request = fixture({ phase: 'research', hostRuntime: 'claude', model: 'gpt-5.6-sol' });
+    const request = fixture({ phase: 'discuss', hostRuntime: 'claude', model: 'gpt-5.6-sol' });
     const original = xllm.invokeCodexAppServer;
     let providerInvocations = 0;
     const identityLines = [];
@@ -1137,7 +1311,7 @@ async function main() {
       assert.equal(result.reason_code, 'provider-exit');
       assert.equal(result.provider_called, 'unknown');
       assert.deepStrictEqual(identityLines.map(line => line.match(/^\[forge-sidecar\] (\w+)/)[1]), ['solicitado', 'iniciado', 'falhou']);
-      assert(identityLines.every(line => line.includes('fase=research')));
+      assert(identityLines.every(line => line.includes('fase=discuss')));
       assert(identityLines[2].includes('causa=provider-exit provider_called=unknown'));
       const receipt = JSON.parse(fs.readFileSync(`${request.resultFile}.receipt.json`, 'utf8'));
       assert.equal(receipt.failure.provider_called, 'unknown');
@@ -1160,7 +1334,7 @@ async function main() {
 
   await test('production sidecar separates output validation from publication conflict', async () => {
     const original = xllm.invokeCodexAppServer;
-    const invalid = fixture({ phase: 'research', hostRuntime: 'claude', model: 'gpt-5.6-sol' });
+    const invalid = fixture({ phase: 'discuss', hostRuntime: 'claude', model: 'gpt-5.6-sol' });
     xllm.invokeCodexAppServer = async options => {
       options.onHeartbeat(43212);
       return { finalText: JSON.stringify({ status: 'done', summary: 'Incomplete', questions: [], artifacts: [] }) };
@@ -1171,7 +1345,7 @@ async function main() {
       assert.equal(result.provider_called, true);
     } finally { xllm.invokeCodexAppServer = original; }
 
-    const conflict = fixture({ phase: 'research', hostRuntime: 'claude', model: 'gpt-5.6-sol' });
+    const conflict = fixture({ phase: 'discuss', hostRuntime: 'claude', model: 'gpt-5.6-sol' });
     xllm.invokeCodexAppServer = async options => {
       options.onHeartbeat(43213);
       fs.mkdirSync(path.dirname(artifactPath(conflict)), { recursive: true });
@@ -1224,6 +1398,43 @@ async function main() {
       assert.equal(JSON.parse(fs.readFileSync(f.receiptFile)).phase, 'failed');
       assert.equal(f.request.milestoneId, undefined);
     } finally { f.cleanup(); }
+  });
+  await test('#382 both transports retain exact delivery and caller preimages before started; capture refusal precedes the provider', async () => {
+    const sha = value => crypto.createHash('sha256').update(value).digest('hex');
+    for (const transport of ['sidecar', 'native']) {
+      const request = fixture(transport === 'native' ? { model: 'gpt-5.6-sol' } : {});
+      if (transport === 'native') request.activeCapabilities = codexCapabilities();
+      const archive = `${request.resultFile}.request.json`, receiptFile = `${request.resultFile}.receipt.json`;
+      let observed = null;
+      const capture = () => { observed = { archive: fs.existsSync(archive), phase: JSON.parse(fs.readFileSync(receiptFile, 'utf8')).phase }; };
+      const result = await prep.prepareStandaloneTask(request, transport === 'native'
+        ? { invokeNative: async () => { capture(); return framed(envelope(request)); } }
+        : { invokeSidecar: async () => { capture(); return envelope(request); } });
+      assert.equal(result.ok, true, JSON.stringify(result));
+      assert.deepEqual(observed, { archive: true, phase: 'started' }, `${transport}: archive durable before the provider turn`);
+      const bytes = fs.readFileSync(archive), data = JSON.parse(bytes), receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+      assert.equal(receipt.phase, 'ready');
+      assert.equal(receipt.retained_request.sha256, sha(bytes));
+      assert.equal(data.preparation_input, 'captured');
+      assert.equal(sha(data.preparation_json), receipt.request_fingerprint, 'caller preimage reproduces the historical preparation hash');
+      assert.equal(sha(data.delivery_json), receipt.fingerprint, 'delivery preimage reproduces the artifact fingerprint');
+      assert.equal(JSON.parse(data.preparation_json).prompt, request.prompt);
+      const replay = await prep.startStandaloneTaskPreparation(request, { resolveDispatch() { throw Error('replay must not resolve'); },
+        invokeNative() { throw Error('replay must not invoke'); }, invokeSidecar() { throw Error('replay must not invoke'); } });
+      assert.equal(replay.replayed, true, JSON.stringify(replay));
+      assert(fs.readFileSync(archive).equals(bytes), `${transport}: archive immutable through replay`);
+      // A conflicting orphan from an earlier crash is never overwritten or used.
+      const orphaned = fixture(transport === 'native' ? { model: 'gpt-5.6-sol' } : {});
+      if (transport === 'native') orphaned.activeCapabilities = codexCapabilities();
+      fs.writeFileSync(`${orphaned.resultFile}.request.json`, '{"partial":');
+      let calls = 0;
+      const refused = await prep.prepareStandaloneTask(orphaned, { invokeNative: async () => { calls++; throw Error('must not invoke'); },
+        invokeSidecar: async () => { calls++; throw Error('must not invoke'); } });
+      assert.equal(refused.ok, false); assert.equal(refused.reason_code, 'request-retention-conflict');
+      assert.equal(refused.provider_called, false); assert.equal(calls, 0);
+      assert(!fs.existsSync(`${orphaned.resultFile}.receipt.json`), `${transport}: no started receipt after capture refusal`);
+      assert.equal(fs.readFileSync(`${orphaned.resultFile}.request.json`, 'utf8'), '{"partial":');
+    }
   });
 }
 

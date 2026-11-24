@@ -165,7 +165,7 @@
     {
       "id": "recovery",
       "path": "shared/forge-procedure-recovery.md",
-      "sha256": "47e906cd647767f8dec63df6a065d8faa99b14fafaf4924e00b41b0e23944d22",
+      "sha256": "83be64144392d75aace62a5eb8254eb28af446b47559864dce7556aa24389ea4",
       "status": "ready",
       "owner": "T04",
       "dependencies": [
@@ -185,7 +185,7 @@
     {
       "id": "review",
       "path": "shared/forge-procedure-review.md",
-      "sha256": "ae657aceae8d212d254daf46d293308a7e5bc64152d7798f2a50ddc381c28030",
+      "sha256": "9b382d9c5f6074adb8605782614ade3047c6ffa18095d0abdd903474eb2839a2",
       "status": "ready",
       "owner": "T05",
       "dependencies": [

@@ -94,6 +94,7 @@ function seedRun(root, extra) {
     id: MILESTONE,
     kind: 'milestone',
     session_id: SESSION,
+    host_runtime: 'claude', // This fixture represents the Claude hook owner.
     cwd: root,
   }, extra || {}));
 }
@@ -330,10 +331,13 @@ test('skills/forge-next/SKILL.md invokes forge-runs.js (measured 0 before the fi
   const src = fs.readFileSync(path.join(__dirname, '..', 'skills', 'forge-next', 'SKILL.md'), 'utf8');
   const count = src.split('forge-runs.js').length - 1;
   assert(count > 0, `cause (a) not fixed: forge-runs.js invocations in forge-next/SKILL.md = ${count}`);
-  // 2026-08-24 heartbeat consolidation: the block is now the one-spawn
-  // `--heartbeat` CLI form; the worker value travels as --worker "UNIT_TYPE/UNIT_ID".
-  assert(src.includes('--heartbeat --run "$RUN_ID" --worker "UNIT_TYPE/UNIT_ID"'),
-    'the record-worker heartbeat block must be present');
+  // The first step bootstraps its observed owner before the owned heartbeat.
+  // Keep checking the worker and slice axes without requiring the legacy flag order.
+  const bootstrap = src.indexOf('--ensure-step-run "$RUN_ID" --host-runtime "$HOST_RUNTIME"');
+  const heartbeat = src.indexOf('--heartbeat --observed-owner --host-runtime "$HOST_RUNTIME"');
+  assert(bootstrap >= 0 && heartbeat > bootstrap, 'observed step owner must exist before the heartbeat');
+  assert(src.slice(heartbeat).split('\n')[0].includes('--run "$RUN_ID" --worker "UNIT_TYPE/UNIT_ID"'),
+    'the owned heartbeat must still record the active worker');
   assert(src.includes('--worker-slice'), 'the slice axis must be emitted by step mode too');
 });
 

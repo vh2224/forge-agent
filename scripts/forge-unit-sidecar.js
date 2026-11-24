@@ -91,6 +91,8 @@ function atomic(file, value) {
   finally { try { fs.unlinkSync(tmp); } catch { /* preserve the publication error */ } }
 }
 function json(file, value) { atomic(file, JSON.stringify(value, null, 2) + '\n'); }
+const verificationFailures = new WeakMap();
+function verificationFailureRef(error) { return verificationFailures.get(error) || null; }
 function fileHash(file) { return fs.existsSync(file) ? hash(fs.readFileSync(file)) : null; }
 function fileState(file) {
   if (!fs.existsSync(file)) return null;
@@ -293,6 +295,20 @@ function milestonePlanFile(request) {
 
 // Pure readiness check over the wire representation, after caller assembly.
 // Without an identity this is diagnostic policy, never a reusable dispatch seal.
+// The controller's PLAN observation ceiling, distinct from prompt token budgets
+// and the smaller authority/model-source observation limit.
+const EXECUTION_INPUT_MAX_BYTES = require('./forge-phase-cost').MAX_BYTES;
+function readExecutionInput(file) {
+  let real, stat;
+  try { stat = fs.lstatSync(file); real = fs.realpathSync.native(file); }
+  catch { fail('execution-input-source_unreadable'); }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) fail('execution-input-source_identity');
+  const read = require('./forge-autonomy-sources').readBoundedStableFile(file, EXECUTION_INPUT_MAX_BYTES, { expectedReal: real });
+  if (read.error) fail('execution-input-' + read.error);
+  if (read.stat.nlink !== 1 || ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'].some(key => read.stat[key] !== stat[key]))
+    fail('execution-input-source_changed_during_read');
+  return read.buffer;
+}
 function preflightExecutionVerification(raw, options = {}) {
   const request = JSON.parse(JSON.stringify(raw));
   if (!request.execution_contract || request.unitType !== 'execute-task') return null;
@@ -307,8 +323,46 @@ function preflightExecutionVerification(raw, options = {}) {
         !== require('./forge-code-roots').key(fs.realpathSync.native(planFile))) fail('execution-plan-path-mismatch');
   } else planFile = milestonePlanFile(request);
   const runtimeVerification = options.verification === undefined ? undefined : JSON.parse(JSON.stringify(options.verification));
-  return require('./forge-verify').normalizeExecutionVerification(request.execution_contract,
-    fs.readFileSync(planFile, 'utf8'), request.verification, runtimeVerification, options.identity || {});
+  // Issue 343 U3b: a cohort member's seal also binds the runtime view minted by its live handle.
+  const planText = readExecutionInput(planFile).toString('utf8');
+  const seal = require('./forge-verify').normalizeExecutionVerification(request.execution_contract,
+    planText, request.verification, runtimeVerification, options.identity || {},
+    options.memberView !== undefined ? { memberView: options.memberView } : undefined);
+  const loc = locations(request);
+  const effectivePlan = options.memberView?.runtime_plan_text || planText;
+  require('./forge-delivery').validateExecutionBindings(effectivePlan, request.execution_contract,
+    loc.rules[loc.delivery.input].unit, request.verification?.bindings, seal);
+  return seal;
+}
+// Issue 343 U3b: the milestone execute preflight of a sidecar cohort member. The live member
+// operations (forge-execution-batch memberSidecar, never imported data) hold the runtime view its
+// handle validated: the canonical plan and gate bytes against the integration origin, mapped to
+// this member's own roots, under the held aggregate claim and the member's begin and lease. The
+// request must be exactly the bound attempt; the gates and the execution capability are the same
+// as on the single path.
+function validateMemberRequest(request, transport, options) {
+  const roots = require('./forge-code-roots'), member = options.member;
+  if (!require('./forge-execution-batch').isMemberSidecar(member) || !member.matches(request)) fail('execution-member-handle-required');
+  const view = member.view();
+  const contract = roots.validateContract(request.execution_contract, { owner: request.contextRoot, revalidate: true });
+  const planFile = milestonePlanFile(request);
+  const plan = fs.readFileSync(planFile, 'utf8');
+  if (roots.digest(contract) !== roots.digest(member.contract()) || view.runtime_contract_sha256 !== roots.digest(contract)
+      || view.canonical_plan_sha256 !== hash(plan)) fail('execution-member-view-stale');
+  const gateFile = planFile.replace(/-PLAN\.md$/, '-PLAN-GATE.md');
+  const gate = fs.existsSync(gateFile) ? fs.readFileSync(gateFile, 'utf8') : '';
+  if (request.gates?.plan === 'skipped' && request.gates.planSkipReason === 'auto-defer') {
+    if (!require('./forge-task-execution').autoGateAllowed(request)) fail('execution-plan-gate-required');
+  } else {
+    if (!/^status:\s*approved\s*$/m.test(gate)) fail('execution-plan-gate-required');
+    if (gate.match(/^plan_sha256:\s*([a-f0-9]{64})\s*$/m)?.[1] !== hash(plan)) fail('execution-plan-gate-stale');
+  }
+  if (request.gates?.claim !== 'proceed' || !['passed', 'not-applicable'].includes(request.gates?.security)) fail('execution-gates-required');
+  if (request.gates.security === 'passed'
+      && (!request.securityFile || !fs.readFileSync(request.securityFile, 'utf8').trim())) fail('execution-security-required');
+  const effective = require('./forge-transport-capabilities').executionCapability(request.route, contract, options);
+  if (!effective.supported) fail(effective.reason_code);
+  return { ...transport, contract, planFile };
 }
 function validateRecoveryRequest(raw, options = {}) {
   const attempt = require('./forge-attempt-recovery');
@@ -353,10 +407,14 @@ function validateRecoveryRequest(raw, options = {}) {
       return { ...transport, contract: prepared.execution_contract, planFile: request.planFile };
     } else {
       const roots = require('./forge-code-roots');
+      // Issue 343 U3b: a cohort member consumes its live validated runtime view; a request naming
+      // a batch, an aggregate claim or a run under a batch never takes the single path without it.
+      if (options.member !== undefined) return validateMemberRequest(request, transport, options);
+      if (request.batch_id !== undefined || request.claim?.batch_roots) fail('execution-member-handle-required');
       const contract = request.execution_contract ? roots.validateContract(request.execution_contract, { owner: request.contextRoot, revalidate: true })
         : roots.singleContract(request.contextRoot, request.cwd);
       const planFile = milestonePlanFile(request);
-      const plan = fs.readFileSync(planFile, 'utf8');
+      const plan = readExecutionInput(planFile).toString('utf8');
       const checked = roots.validatePlan(plan, contract);
       if (request.execution_contract) {
         const claim = request.claim;
@@ -365,11 +423,15 @@ function validateRecoveryRequest(raw, options = {}) {
         if (!held || held.active !== true || held.write_claim?.released
             || held.write_claim?.generation !== claim.generation
             || roots.digest(held.write_claim) !== roots.digest(claim)) fail('execution-claim-generation-stale');
+        if (held.batch_locator) fail('execution-member-handle-required');
         roots.claimGroups(claim);
-        if (roots.digest(claim.execution_contract) !== roots.digest(contract)
-            || checked.writes.some(p => !claim.paths.some(c => roots.covers(c, p)))) fail('execution-held-claim-mismatch');
+        const custody=require('./forge-write-claim');
+        if(!custody.ordinaryRetainedProjection(held,contract))fail('execution-member-handle-required');
+        if ((roots.digest(claim.execution_contract) !== roots.digest(contract)
+            || checked.writes.some(p => !claim.paths.some(c => roots.covers(c, p))))
+            && !custody.coversRetainedExecution(held,contract,checked.writes)) fail('execution-held-claim-mismatch');
         const gateFile = planFile.replace(/-PLAN\.md$/, '-PLAN-GATE.md');
-        const gate = fs.existsSync(gateFile) ? fs.readFileSync(gateFile, 'utf8') : '';
+        const gate = fs.existsSync(gateFile) ? readExecutionInput(gateFile).toString('utf8') : '';
         if (!/^status:\s*approved\s*$/m.test(gate)
             && !(request.gates?.plan === 'skipped' && request.gates?.planSkipReason === 'interactive-off')
             && !require('./forge-task-execution').autoGateAllowed(request)) fail('execution-plan-gate-required');
@@ -377,7 +439,7 @@ function validateRecoveryRequest(raw, options = {}) {
         if (approvedHash && approvedHash !== hash(plan)) fail('execution-plan-gate-stale');
         if (request.gates?.claim !== 'proceed' || !['passed', 'not-applicable'].includes(request.gates?.security)) fail('execution-gates-required');
         if (request.gates.security === 'passed'
-            && (!request.securityFile || !fs.readFileSync(request.securityFile, 'utf8').trim())) fail('execution-security-required');
+            && (!request.securityFile || !readExecutionInput(request.securityFile).toString('utf8').trim())) fail('execution-security-required');
       }
       const effective = require('./forge-transport-capabilities').executionCapability(request.route, contract, options);
       if (!effective.supported) fail(effective.reason_code);
@@ -387,6 +449,57 @@ function validateRecoveryRequest(raw, options = {}) {
   if (request.cwd && request.resultFile) artifactAttemptFiles(request);
   return transport;
 }
+// Issue 328: claudePermissions is a Claude-only transport option. A fresh
+// recovery destination copy for a non-Claude engine omits it only when the
+// original already satisfies the rule above (pure re-evaluation, no authority).
+// Every other value, origin or destination is returned unchanged and is still
+// decided by validateRecoveryRequest/runUnitSidecarCore. Inputs never mutate.
+function projectTransportOptions(value, original, nativeInvocation) {
+  let projected = value;
+  if (value?.claudePermissions === 'verification') {
+    const engine = value.route?.resolved_worker_engine;
+    const source = require('./forge-attempt-recovery').canonicalRequest(original);
+    const mode = capability(source.route?.resolved_worker_engine, source.unitType,
+      source.scope === 'milestone' ? {} : source).mode;
+    if (typeof engine === 'string' && engine && engine !== 'claude'
+        && source.claudePermissions === 'verification' && source.route?.resolved_worker_engine === 'claude'
+        && ['execute', 'fix'].includes(mode) && source.execution_contract) {
+      const { claudePermissions: transportOnly, ...rest } = value;
+      projected = rest;
+    }
+  }
+  // Local #369 control derivative: rederive only a NEW native route's memo.
+  // The original memo must independently match the current plan/physical roots
+  // and its original sidecar capability. This is data projection, not authority;
+  // prepare and the actual native adapter still validate the held claim/binding.
+  if (original.plan_contract && original.route?.worker_mode === 'sidecar'
+      && projected.route?.worker_mode === 'native' && nativeInvocation !== undefined) {
+    const roots = require('./forge-code-roots');
+    const contract = roots.validateContract(original.execution_contract, { revalidate: true });
+    const validated = roots.validatePlan(fs.readFileSync(original.planFile, 'utf8'), contract);
+    const oldCapability = require('./forge-transport-capabilities').executionCapability(original.route, contract);
+    const memo = original.plan_contract;
+    if (!oldCapability.supported || memo.plan_sha256 !== validated.plan_sha256
+        || memo.contract_sha256 !== validated.contract_sha256
+        || memo.capabilities_sha256 !== roots.digest(oldCapability)
+        || roots.digest(projected.plan_contract) !== roots.digest(memo)
+        || roots.digest(projected.execution_contract) !== roots.digest(contract)
+        || path.resolve(projected.planFile) !== path.resolve(original.planFile)
+        || projected.route.host_runtime !== original.route.host_runtime
+        || projected.route.tier !== original.route.tier || projected.route.effort !== original.route.effort) fail('execution-preflight-stale');
+    const route = projected.route, telemetry = nativeInvocation?.telemetry;
+    if (nativeInvocation?.ok !== true || nativeInvocation.host_runtime !== route.host_runtime
+        || !nativeInvocation.tool || !nativeInvocation.args
+        || telemetry?.model_resolved !== (route.model_resolved || route.model)
+        || telemetry?.effort_resolved !== route.effort
+        || (route.host_runtime === 'codex' && (nativeInvocation.args.model !== (route.model_resolved || route.model)
+          || nativeInvocation.args.reasoning_effort !== route.effort))) fail('native-execution-binding-mismatch');
+    const nextCapability = require('./forge-transport-capabilities').executionCapability(route, contract, { nativeInvocation });
+    if (!nextCapability.supported) fail(nextCapability.reason_code);
+    projected = { ...projected, plan_contract: { ...memo, capabilities_sha256: roots.digest(nextCapability) } };
+  }
+  return projected;
+}
 function baselineDigest(state) {
   const { reconciliation, ...baseline } = state;
   return require('./forge-code-roots').digest(baseline);
@@ -394,6 +507,33 @@ function baselineDigest(state) {
 function recoveryIdentity(request) {
   try { return require('./forge-code-roots').digest(require('./forge-attempt-recovery').requestIdentity(require('./forge-attempt-recovery').canonicalRequest(request))); }
   catch { return null; }
+}
+// Issue 440 (managed-surfaces-v1): the live attribution context of THIS exact
+// attempt (dispatch, fingerprint and recovery identity), or null. A refusal
+// handle, another attempt, a closed context or no context all yield null, and
+// every caller then keeps its legacy behavior byte for byte.
+function liveManagedAttempt(owner, dispatchId, fingerprint, recoveryIdentitySha) {
+  let live = null;
+  try { live = require('./forge-managed-attribution').currentAttribution(owner); } catch { return null; }
+  if (!live || live.active !== true || typeof dispatchId !== 'string' || live.attempt.dispatch_id !== dispatchId) return null;
+  if (fingerprint !== undefined && live.attempt.fingerprint !== fingerprint) return null;
+  if (recoveryIdentitySha !== undefined && live.attempt.recovery_identity_sha256 !== recoveryIdentitySha) return null;
+  return live;
+}
+// The owner-event writer is attributed only for a receipt of the live attempt
+// whose S0 (when it already exists) carries the v1 marker. A legacy receipt,
+// a standalone execution receipt or another attempt keeps the current channel.
+function managedOwnerEvents(root, record) {
+  if (!record || typeof record !== 'object' || record.execution?.protected_owner) return null;
+  const baseline = record.recovery_baseline;
+  if (baseline && !baseline.managed_surfaces) return null;
+  return liveManagedAttempt(root, record.dispatch_id, record.fingerprint);
+}
+// Native route: appends of another process are adopted only through the host's
+// live attestation adapter, and only inside a live context of this attempt.
+function attestNativeAppends(r, runtime) {
+  if (runtime?.managedAppendAttestation === undefined || !liveManagedAttempt(r.contextRoot || r.cwd, r.dispatchId)) return null;
+  return require('./forge-managed-attribution').attestManagedAppends();
 }
 function captureMilestoneBaseline(request, receipt, options = {}) {
   const roots = require('./forge-code-roots'), execution = require('./forge-task-execution');
@@ -405,12 +545,27 @@ function captureMilestoneBaseline(request, receipt, options = {}) {
   const state = require('./forge-surgical-reset').initState(stateFile, { cwd: request.cwd,
     attempt: request.dispatchId, executionContract: contract });
   const input = { path: checked.planFile, sha256: roots.digest(fs.readFileSync(checked.planFile)) };
+  // Additive v1 marker: only a new attempt running inside its own live attribution
+  // context. Member, broker, verification successor and recovery-ready receipts
+  // keep their own adoption and the previous S0 shape (no key at all).
+  const live = options.member === undefined && !request.ownerBroker && options.ownOwnerChannel !== true
+    ? liveManagedAttempt(contract.owner, request.dispatchId, receipt.fingerprint, recoveryIdentity(request)) : null;
+  // Issue 343 U3b: a cohort member's owner is protected by the cohort's common signed stream (the
+  // broker's S0 and every sibling's signed append), never by a private snapshot of a shared owner.
   return { schema_version: 1, state_file: stateFile, state_sha256: baselineDigest(state),
     execution_contract: contract, fingerprint: receipt.fingerprint, dispatch_id: receipt.dispatch_id, input,
-    protected_owner: execution.protectedSnapshot(contract.owner),
-    protected_roots: contract.code_roots.map(root => ({ root_id: root.id, path: root.path, snapshot: execution.protectedSnapshot(root.path) })) };
+    protected_owner: options.member !== undefined ? null : execution.protectedSnapshot(contract.owner),
+    protected_roots: contract.code_roots.map(root => ({ root_id: root.id, path: root.path, snapshot: execution.protectedSnapshot(root.path) })),
+    ...(live ? { managed_surfaces: { declaration: live.declaration, declaration_sha256: live.declaration_sha256 } } : {}) };
 }
 function reconcileMilestoneAttempt(request, receipt, runtime = {}) {
+  if (runtime.ownerReconciliation !== undefined) {
+    return require('./forge-protected-owner-activity').withOwnerReconciliation(runtime.ownerReconciliation, request,
+      () => reconcileMilestoneAttemptInside(request, receipt, runtime));
+  }
+  return reconcileMilestoneAttemptInside(request, receipt, runtime);
+}
+function reconcileMilestoneAttemptInside(request, receipt, runtime = {}) {
   const baseline = receipt.recovery_baseline, roots = require('./forge-code-roots');
   if (!baseline || baseline.schema_version !== 1) fail('recovery-baseline-required');
   const contract = roots.validateContract(baseline.execution_contract, { owner: request.contextRoot || request.cwd, revalidate: true });
@@ -425,7 +580,8 @@ function reconcileMilestoneAttempt(request, receipt, runtime = {}) {
   const execution = require('./forge-task-execution');
   const protectedOwner = receipt.execution?.protected_owner || baseline.protected_owner;
   // Only the core-owned event hash may advance from the original baseline.
-  const withoutEvent = snapshot => Object.entries(snapshot).filter(([key]) => key !== '.gsd/forge/events.jsonl').sort();
+  const withoutEvent = snapshot => Object.entries(require('./forge-protected-owner-activity').expectedProtectedOwner(contract.owner, snapshot))
+    .filter(([key]) => key !== '.gsd/forge/events.jsonl').sort();
   if (roots.digest(withoutEvent(protectedOwner)) !== roots.digest(withoutEvent(baseline.protected_owner))) fail('recovery-owner-snapshot-mismatch');
   execution.assertProtected(contract.owner, protectedOwner);
   if (baseline.protected_roots.length !== contract.code_roots.length) fail('recovery-baseline-roots-missing');
@@ -479,11 +635,49 @@ function reconcileLegacyReviewFix(request, receipt, executionContract) {
       || roots.digest(normalize(observed.pre_dirty)) !== roots.digest(normalize(state.pre_dirty))) fail('review-fix-recovery-baseline-changed');
   return { ok: true, roots: [{ root_id: root.id, reconciled: true }], pending_roots: [] };
 }
+// Issue 343 U5: executable modes are member execution evidence, captured with the verified
+// bytes before the immutable executed anchor. Windows has no executable-mode authority: null.
+// Ordinary single-unit receipts keep their historical shape and behavior.
+function captureMemberModes(request, verifiedFiles) {
+  const roots = require('./forge-code-roots');
+  if (!verifiedFiles || typeof verifiedFiles !== 'object' || Array.isArray(verifiedFiles)) fail('batch-member-mode-invalid');
+  roots.validateContract(request.execution_contract, { revalidate: true });
+  const entries = [];
+  for (const qualified of Object.keys(verifiedFiles).sort()) {
+    const expected = verifiedFiles[qualified], resolved = roots.resolvePath(request.execution_contract, qualified);
+    let before;
+    try { before = fs.lstatSync(resolved.absolute); }
+    catch (error) { if (error && error.code === 'ENOENT') before = null; else throw error; }
+    if (expected === null) {
+      if (before) fail('batch-member-mode-changed');
+      entries.push([qualified, null]);
+      continue;
+    }
+    if (typeof expected !== 'string' || !/^[a-f0-9]{64}$/.test(expected) || !before || !before.isFile() || before.isSymbolicLink()) fail('batch-member-mode-invalid');
+    const bytes = fs.readFileSync(resolved.absolute), after = fs.lstatSync(resolved.absolute);
+    if (!after.isFile() || after.isSymbolicLink() || ['dev', 'ino', 'size', 'mtimeMs', 'mode'].some(key => before[key] !== after[key])
+        || hash(bytes) !== expected) fail('batch-member-mode-changed');
+    entries.push([qualified, process.platform === 'win32' ? null : (Number(after.mode) & 0o100) !== 0]);
+  }
+  return Object.fromEntries(entries);
+}
+function assertMemberModes(request, record) {
+  const saved = record.milestone_delivery, files = saved && saved.verified_files, modes = saved && saved.verified_modes;
+  if (!files || typeof files !== 'object' || Array.isArray(files) || !modes || typeof modes !== 'object' || Array.isArray(modes)
+      || Object.keys(files).sort().join('\n') !== Object.keys(modes).sort().join('\n')) fail('batch-member-mode-required');
+  for (const qualified of Object.keys(files)) {
+    const mode = modes[qualified];
+    if (files[qualified] === null || process.platform === 'win32') {
+      if (mode !== null) fail('batch-member-mode-invalid');
+    } else if (typeof mode !== 'boolean') fail('batch-member-mode-invalid');
+  }
+  if (canonicalDigest(captureMemberModes(request, files)) !== canonicalDigest(modes)) fail('batch-member-mode-changed');
+}
 function assertMilestoneDeliveryReplay(request, record) {
   if (!record.milestone_delivery) return;
   const saved = record.milestone_delivery, api = require('./forge-task-execution');
   require('./forge-code-roots').validateContract(request.execution_contract, { revalidate: true });
-  if (hash(fs.readFileSync(request.planFile)) !== saved.plan_sha256) fail('execution-input-changed');
+  if (hash(readExecutionInput(request.planFile)) !== saved.plan_sha256) fail('execution-input-changed');
   for (const entry of saved.protected_roots) api.assertProtected(entry.path, entry.snapshot);
   if (JSON.stringify(api.replayState(request.cwd, request.execution_contract)) !== JSON.stringify(saved.code_state)) fail('execution-replay-baseline-changed');
 }
@@ -539,7 +733,8 @@ function inspectArtifacts(value, allowed, required, maxPayloadBytes = Infinity, 
 function validateArtifacts(value, allowed, required, maxPayloadBytes, rules, options) {
   return inspectArtifacts(value, allowed, required, maxPayloadBytes, rules, options).ok;
 }
-function executeDeliveryArtifacts(request, loc, result, root, cwd, captured) {
+// options.memberView (issue 343 U3b): a cohort member's delivery consumes its minted runtime view.
+function executeDeliveryArtifacts(request, loc, result, root, cwd, captured, options = {}) {
   if (result.status !== 'done') return [];
   if (!loc.delivery || !request.planFile) fail('delivery-plan-required');
   const planFile = fs.realpathSync(request.planFile);
@@ -547,7 +742,7 @@ function executeDeliveryArtifacts(request, loc, result, root, cwd, captured) {
   if (!planReference || path.isAbsolute(planReference) || planReference === '..' || planReference.startsWith('../')) {
     fail('delivery-plan-outside-context');
   }
-  const planText = fs.readFileSync(planFile, 'utf8');
+  const planText = readExecutionInput(planFile).toString('utf8');
   const input = {
     schema_version: 1,
     unit: loc.rules[loc.delivery.input].unit,
@@ -579,7 +774,8 @@ function executeDeliveryArtifacts(request, loc, result, root, cwd, captured) {
     });
   }
   const delivery = require('./forge-delivery');
-  const output = delivery.buildDelivery(input, { ownerRoot: root, codeDir: cwd, sourceEnvelopes: sources });
+  const output = delivery.buildDelivery(input, { ownerRoot: root, codeDir: cwd, sourceEnvelopes: sources,
+    ...(options && options.memberView !== undefined ? { memberView: options.memberView } : {}) });
   const deliveryReference = `./${path.posix.basename(loc.delivery.output)}`;
   // Canonical SUMMARY/replay bytes keep the historical table-only rendering.
   const deliverySection = delivery.renderDeliveryMarkdown(output, { detailReference: deliveryReference, summary: false });
@@ -607,17 +803,27 @@ function taskMarkerPath(request) {
   if (loc.execution || !loc.slice) fail('task-marker-scope-invalid');
   return `${loc.slice}/${request.sliceId}-PLAN.md`;
 }
-function createTaskMarker(request, root, preimageSha256) {
+// Issue 343 U5: `chain` (a cohort member only) lists, in manifest order, the sibling markers the
+// cohort's own committed member-artifacts operations already published on this slice plan
+// ({ before, after } from the broker's signed journal). They are the only admissible changes since
+// the member's recorded preimage; the marker is then rebased on the last one. Any other edit stays
+// the operator's and refuses exactly as before.
+function createTaskMarker(request, root, preimageSha256, chain) {
   const relative = taskMarkerPath(request);
   if (typeof preimageSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(preimageSha256)) fail('task-marker-preimage-required');
+  let expected = preimageSha256;
+  for (const link of chain || []) {
+    if (!link || link.before !== expected || typeof link.after !== 'string' || !/^[a-f0-9]{64}$/.test(link.after)) fail('task-marker-chain-invalid');
+    expected = link.after;
+  }
   const file = target(root, relative);
   const bytes = fs.existsSync(file) ? fs.readFileSync(file) : null;
   // Never recapture: an edit since the recorded preimage stays the operator's.
-  if (!bytes || hash(bytes) !== preimageSha256) fail('task-marker-preimage-changed', 'O plano da slice mudou desde a preimagem registrada; a marcação não foi aplicada.');
+  if (!bytes || hash(bytes) !== expected) fail('task-marker-preimage-changed', 'O plano da slice mudou desde a preimagem registrada; a marcação não foi aplicada.');
   const preimage = bytes.toString('utf8');
   if (!Buffer.from(preimage, 'utf8').equals(bytes)) fail('task-marker-preimage-invalid');
   const content = markChecked(preimage, request.taskId);
-  return content === preimage ? null : { path: relative, content, before: preimageSha256 };
+  return content === preimage ? null : { path: relative, content, before: expected };
 }
 function verifyTaskMarker(request, artifact, preimageSha256) {
   const invalid = () => fail('task-marker-invalid', 'O marcador não corresponde ao artefato canônico desta task.');
@@ -639,6 +845,373 @@ function verifyTaskMarker(request, artifact, preimageSha256) {
   if (!candidates.some(preimage => hash(preimage) === preimageSha256 && markChecked(preimage, request.taskId) === artifact.content)) invalid();
   return true;
 }
+// ── Strict new-plan generation (issue 343 U0c) ────────────────────────────────
+// A new milestone plan-slice attempt records the owner's plan_generation requirement
+// (the marker) in its started receipt: the current requirement bound to this attempt
+// (request fingerprint, dispatch, workflow), its trusted scope (physical owner key,
+// milestone, slice) and, when the in-process owner supplies one, the committed
+// controller begin enrollment. The returned candidate is admitted again here,
+// independently of the transport, and its exact bytes become the receipt's
+// plan_validation evidence before the ready record exists. Publication rechecks
+// marker, evidence and candidate bytes under the owner lock before any artifact byte;
+// replay uses only the saved content. Neither record is ever taken from a worker. A
+// ready receipt with neither is pre-requirement only when the controller's canonical
+// classification shows no enrolled lineage for the slice (U0d; see
+// assertPlanGenerationPublication for the explicit limit): it then replays with its
+// historical semantics and is never rewritten. A standalone brainstorm also carries
+// unitType plan-slice, but it is an artifacts contract and stays outside this block.
+// U0d: the marker's begin is the slice's open enrolled controller lineage whenever one
+// exists, and the execute recheck shares the native first execute's classification.
+const PLAN_GENERATION_KIND = 'sidecar-plan-generation';
+const PLAN_VALIDATION_KIND = 'sidecar-plan-validation';
+const PLAN_OWNER_FIELDS = Object.freeze(['plan_generation', 'plan_validation']);
+const PLAN_MARKER_KEYS = Object.freeze(['schema_version', 'kind', 'requirement', 'requirement_sha256', 'fingerprint',
+  'dispatch_id', 'workflow_id', 'owner', 'milestone', 'slice', 'begin', 'marker_sha256']);
+const PLAN_BEGIN_KEYS = Object.freeze(['generation_key', 'begin_key', 'lease_generation']);
+const PLAN_EVIDENCE_KEYS = Object.freeze(['schema_version', 'kind', 'requirement', 'requirement_sha256', 'marker_sha256',
+  'fingerprint', 'dispatch_id', 'workflow_id', 'owner', 'milestone', 'slice', 'source', 'task_ids', 'graph_sha256',
+  'semantic_sha256', 'validation_sha256']);
+// Read-only pre-spawn refusals of a milestone execute-task (provider_called false).
+const PLAN_GENERATION_STAGE = 'plan-generation-admission';
+function planApi() { return require('./forge-plan-validation'); }
+function milestonePlanSlice(request) { return request.unitType === 'plan-slice' && request.scope !== 'standalone-task'; }
+function canonicalJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalJson(value[key])]));
+}
+function canonicalDigest(value) { return hash(JSON.stringify(canonicalJson(value))); }
+function exactFields(value, keys) {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).sort().join('\n') === [...keys].sort().join('\n');
+}
+// Closed validation diagnostic; the named code and detail never carry provider prose.
+function planRefusal(code, detail, extra = {}) {
+  throw Object.assign(new Error(`${code}: ${detail}`), { code, detail, diagnostic: { reason: 'validator-failed' } }, extra);
+}
+function planGenerationRefusal(error) { return error?.stage === PLAN_GENERATION_STAGE && error.provider_called === false; }
+function planOwner(root) { return fs.realpathSync.native(root); }
+function planScope(request, root) { return { owner: planOwner(root), milestone: request.milestoneId, slice: request.sliceId }; }
+// Issue 343 U0d: the slice's canonical controller classification (forge-plan-validation
+// classifySliceGeneration, shared with the native first execute). Outside the enrollment
+// segment grammar no enrolled begin can exist, so such a scope is unenrolled.
+function planSliceClassification(request, root) {
+  const api = planApi(), owner = planOwner(root);
+  if (!api.isScopeSegment(request.milestoneId) || !api.isScopeSegment(request.sliceId)) return { status: 'unenrolled' };
+  return api.classifySliceGeneration(owner, { owner, milestone: request.milestoneId, slice: request.sliceId });
+}
+// The committed controller begin this plan-slice attempt belongs to: the slice's OPEN
+// enrolled lineage (issue 343 U0d), reused whenever it exists, whether or not the
+// in-process owner also supplies its plan_generation; a supplied enrollment must be
+// exactly what that open begin carries. Without an enrolled lineage the attempt is an
+// unlinked producer and its marker says begin:null; that null proves no origin by itself.
+function planGenerationBegin(request, runtime, root) {
+  const api = planApi(), owner = planOwner(root), invalid = detail => planRefusal('plan-generation-begin-invalid', detail);
+  const supplied = runtime.planGeneration !== undefined;
+  let classified, enrolled, begin;
+  try { classified = planSliceClassification(request, root); }
+  catch (error) { invalid(`the slice enrollment is not classifiable (${error?.code || 'error'})`); }
+  if (supplied) {
+    try { enrolled = api.verifyPlanGeneration(runtime.planGeneration, { owner, milestone: request.milestoneId, slice: request.sliceId }); }
+    catch (error) { invalid(`the enrollment does not verify (${error?.code || 'error'})`); }
+  } else if (classified.status !== 'open') return null;
+  const beginKey = supplied ? enrolled.begin_key : classified.begin_key;
+  try { begin = require('./forge-unit-controller').lookupRecord(owner, 'transaction', beginKey); }
+  catch (error) { invalid(`the begin transaction is unreadable (${error?.code || 'error'})`); }
+  const carried = begin && begin[api.TRANSACTION_FIELDS.generation];
+  if (!supplied && carried) {
+    try { enrolled = api.verifyPlanGeneration(carried, { owner, milestone: request.milestoneId, slice: request.sliceId }); }
+    catch (error) { invalid(`the open enrollment does not verify (${error?.code || 'error'})`); }
+  }
+  if (!begin || !enrolled || begin.phase !== 'committed' || begin.action !== 'begin' || begin.milestone !== request.milestoneId
+      || begin.unit?.key !== `plan-slice/${request.sliceId}` || begin.idempotency_key !== enrolled.begin_key
+      || begin.lease_generation !== enrolled.lease_generation || begin.owner_digest !== enrolled.owner_digest
+      || !carried || canonicalDigest(carried) !== canonicalDigest(enrolled)) {
+    invalid('the enrollment is not the committed plan-slice begin of this slice');
+  }
+  if (classified.status !== 'open' || classified.begin_key !== enrolled.begin_key) {
+    invalid('the enrollment is not the open plan-slice lineage of this slice');
+  }
+  return { generation_key: enrolled.generation_key, begin_key: enrolled.begin_key, lease_generation: enrolled.lease_generation };
+}
+// A non-null marker begin must still name the committed enrolled begin of this slice.
+function verifyMarkerBegin(marker, request, root) {
+  const api = planApi(), owner = planOwner(root), invalid = detail => planRefusal('plan-generation-marker-invalid', detail);
+  let begin;
+  try { begin = require('./forge-unit-controller').lookupRecord(owner, 'transaction', marker.begin.begin_key); }
+  catch (error) { invalid(`the bound begin is unreadable (${error?.code || 'error'})`); }
+  const carried = begin && begin[api.TRANSACTION_FIELDS.generation];
+  if (!begin || begin.phase !== 'committed' || begin.action !== 'begin' || begin.milestone !== request.milestoneId
+      || begin.unit?.key !== `plan-slice/${request.sliceId}` || begin.lease_generation !== marker.begin.lease_generation
+      || !carried || carried.generation_key !== marker.begin.generation_key || carried.begin_key !== marker.begin.begin_key) {
+    invalid('the marker names no committed enrolled begin of this slice');
+  }
+}
+function buildPlanGenerationMarker(request, { fingerprint, dispatchId, root, begin }) {
+  const api = planApi();
+  const marker = { schema_version: 1, kind: PLAN_GENERATION_KIND, requirement: api.REQUIREMENT,
+    requirement_sha256: api.REQUIREMENT_SHA256, fingerprint, dispatch_id: dispatchId, workflow_id: request.workflowId,
+    owner: require('./forge-code-roots').key(planOwner(root)), milestone: request.milestoneId, slice: request.sliceId, begin };
+  marker.marker_sha256 = canonicalDigest(marker);
+  return marker;
+}
+// The marker of this exact attempt: its fields, current requirement and own digest,
+// the request fingerprint and dispatch the record also names, workflow and scope.
+function verifyPlanGenerationMarker(marker, request, record, root) {
+  const api = planApi(), invalid = detail => planRefusal('plan-generation-marker-invalid', detail);
+  if (!exactFields(marker, PLAN_MARKER_KEYS)) invalid('the marker fields are not the closed set');
+  const { marker_sha256: digest, ...body } = marker;
+  if (marker.schema_version !== 1 || marker.kind !== PLAN_GENERATION_KIND) invalid('unknown marker schema');
+  if (marker.requirement !== api.REQUIREMENT || marker.requirement_sha256 !== api.REQUIREMENT_SHA256) invalid('not the current requirement');
+  if (digest !== canonicalDigest(body)) invalid('marker_sha256 does not bind the marker');
+  if (marker.begin !== null && (!exactFields(marker.begin, PLAN_BEGIN_KEYS)
+      || PLAN_BEGIN_KEYS.some(key => typeof marker.begin[key] !== 'string' || !marker.begin[key]))) invalid('begin is not a committed enrollment');
+  if (marker.fingerprint !== artifactFingerprint(request) || marker.fingerprint !== record.fingerprint) invalid('another request');
+  if (marker.dispatch_id !== request.dispatchId || marker.dispatch_id !== record.dispatch_id) invalid('another dispatch');
+  if (marker.workflow_id !== request.workflowId) invalid('another workflow');
+  if (marker.owner !== require('./forge-code-roots').key(planOwner(root)) || marker.milestone !== request.milestoneId
+      || marker.slice !== request.sliceId) invalid('another owner or slice');
+  return marker;
+}
+function buildPlanValidationEvidence(marker, admission) {
+  const api = planApi();
+  const evidence = { schema_version: 1, kind: PLAN_VALIDATION_KIND, requirement: api.REQUIREMENT,
+    requirement_sha256: api.REQUIREMENT_SHA256, marker_sha256: marker.marker_sha256, fingerprint: marker.fingerprint,
+    dispatch_id: marker.dispatch_id, workflow_id: marker.workflow_id, owner: marker.owner, milestone: marker.milestone,
+    slice: marker.slice, source: JSON.parse(JSON.stringify(admission.source)), task_ids: [...admission.task_ids],
+    graph_sha256: admission.graph_sha256, semantic_sha256: admission.semantic_sha256 };
+  evidence.validation_sha256 = canonicalDigest(evidence);
+  return evidence;
+}
+function verifyPlanValidationEvidence(evidence, marker) {
+  const invalid = detail => planRefusal('plan-validation-invalid', detail);
+  if (!exactFields(evidence, PLAN_EVIDENCE_KEYS)) invalid('the evidence fields are not the closed set');
+  const { validation_sha256: digest, ...body } = evidence;
+  if (evidence.schema_version !== 1 || evidence.kind !== PLAN_VALIDATION_KIND) invalid('unknown evidence schema');
+  if (digest !== canonicalDigest(body)) invalid('validation_sha256 does not bind the evidence');
+  for (const key of ['requirement', 'requirement_sha256', 'marker_sha256', 'fingerprint', 'dispatch_id', 'workflow_id', 'owner', 'milestone', 'slice']) {
+    if (evidence[key] !== marker[key]) invalid(`${key} does not follow the marker`);
+  }
+  const source = evidence.source;
+  if (!exactFields(source, ['slice_plan', 'task_plans']) || !source.slice_plan || !Array.isArray(source.task_plans)
+      || !Array.isArray(evidence.task_ids) || source.task_plans.length !== evidence.task_ids.length) invalid('source does not follow task_ids');
+  return evidence;
+}
+// The shared strict admission of returned bytes under the trusted scope.
+function admitReturnedPlan(request, root, slicePlan, taskPlans, extra = {}) {
+  try {
+    return planApi().validateNewSlicePlan({ slice_plan: { content: slicePlan },
+      task_plans: taskPlans.map(plan => ({ id: plan.id, content: plan.content })) }, planScope(request, root));
+  } catch (error) {
+    if (error && typeof error === 'object') Object.assign(error, { diagnostic: { reason: 'validator-failed' }, stage: 'plan-admission' }, extra);
+    throw error;
+  }
+}
+// Compatibility producer for the established native plan-slice artifacts facade.
+// This admission is created AFTER return, from the real controller begin and
+// current canonical task sources. It never pretends to be a pre-provider marker.
+const NATIVE_PLAN_ADMISSION_FIELD = 'native_plan_admission';
+const NATIVE_PLAN_ADMISSION_KEYS = Object.freeze(['kind', 'fingerprint', 'dispatch_id', 'workflow_id', 'begin_key', 'begin_checksum', 'generation', 'validation']);
+function nativePlanArtifactRoute(request) {
+  const route = request.route;
+  return milestonePlanSlice(request) && request.scope === 'milestone' && request.phase === 'plan'
+    && route?.worker_mode === 'native' && route.dispatch_allowed === true
+    && route.resolved_worker_engine === route.host_runtime
+    && (!request.hostRuntime || request.hostRuntime === route.host_runtime)
+    && capability(route.resolved_worker_engine, request.unitType).mode === 'plan'
+    && evaluateDispatchGuard({ ...route, unit_type: request.unitType }).dispatch_allowed === true;
+}
+// Verify the already-resolved scope, never re-select a model or reread its
+// resolution sources/preferences after the native host has invoked it.
+function assertNativePlanArtifactContext(request) {
+  const resolver = require('./forge-dispatch-resolve'), route = request.route;
+  const expected = resolver.resolutionContext({ unitType: request.unitType, milestoneId: request.milestoneId,
+    unitId: request.taskId || request.sliceId || request.milestoneId, cwd: request.contextRoot || request.cwd,
+    planPath: request.planFile, roadmapPath: request.roadmapFile });
+  if (!route?.resolution_context || !route.resolution_options
+      || canonicalDigest(route.resolution_context) !== canonicalDigest(expected)
+      || canonicalDigest(resolver.resolutionContext(route.resolution_options)) !== canonicalDigest(expected)) {
+    planRefusal('plan-generation-begin-invalid', 'native publication must retain its originally resolved owner, unit and plan scope');
+  }
+}
+// An unenrolled STARTED native attempt keeps the public historical validation.
+// Its origin still requires a unique real unfinished controller begin and the
+// same reserved lease; absence of a new field never selects this branch.
+function assertLegacyNativePlanArtifactOrigin(request, record, root) {
+  const invalid = detail => planRefusal('plan-generation-begin-invalid', detail);
+  if (planSliceClassification(request, root).status !== 'unenrolled') invalid('an enrolled lineage cannot become historical');
+  assertNativePlanArtifactContext(request);
+  require('./forge-request-retention').assertForReceipt(request, record);
+  if (record.fingerprint !== artifactFingerprint(request) || record.dispatch_id !== request.dispatchId
+      || canonicalDigest(record.route) !== canonicalDigest(request.route)) invalid('historical native request or original route differs');
+  const controller = require('./forge-unit-controller');
+  const begins = controller.incompleteUnits(root, request.milestoneId).filter(row => row.action === 'begin'
+    && row.phase === 'committed' && row.unit?.key === ('plan-slice/' + request.sliceId));
+  if (begins.length !== 1) invalid('historical native publication needs exactly one genuine unfinished begin');
+  const begin = controller.lookupRecord(root, 'transaction', begins[0].idempotency_key);
+  if (!begin || Object.hasOwn(begin, 'plan_generation') || begin.host_runtime !== request.route.host_runtime
+      || begin.milestone !== request.milestoneId) invalid('historical native begin does not belong to this host and milestone');
+  const held = require('./forge-unit-lease').observe(root, begin.unit.key).lease;
+  if (!held || held.generation !== begin.lease_generation || held.host_runtime !== begin.host_runtime) invalid('historical native begin no longer holds its reserved lease');
+  return begin;
+}
+function nativePlanArtifactOrigin(request, root, options = {}) {
+  const invalid = detail => planRefusal('plan-generation-begin-invalid', detail);
+  const classified = planSliceClassification(request, root);
+  if (!(options.replay ? ['open', 'completed'] : ['open']).includes(classified.status)) invalid('native plan artifacts require the genuine current controller generation');
+  const controller = require('./forge-unit-controller'), begin = controller.lookupRecord(root, 'transaction', classified.begin_key);
+  if (!begin || begin.phase !== 'committed' || begin.action !== 'begin' || begin.unit?.key !== `plan-slice/${request.sliceId}`
+      || begin.milestone !== request.milestoneId || begin.host_runtime !== request.route.host_runtime) invalid('native publication does not belong to this owner, unit or host');
+  const generation = planApi().verifyPlanGeneration(begin.plan_generation, { owner: planOwner(root), milestone: request.milestoneId,
+    slice: request.sliceId, begin_key: begin.idempotency_key, lease_generation: begin.lease_generation, owner_digest: begin.owner_digest });
+  if (generation.generation_key !== classified.generation_key) invalid('native publication names another generation');
+  if (classified.status === 'open') {
+    const held = require('./forge-unit-lease').observe(root, begin.unit.key).lease;
+    if (!held || held.generation !== begin.lease_generation || held.host_runtime !== begin.host_runtime) invalid('native begin no longer holds its own lease');
+  } else planApi().assertSliceGeneration(root, planScope(request, root));
+  return { begin, generation, checksum: controller.recordChecksum(begin) };
+}
+function admitNativeArtifactPlan(request, record, root) {
+  const artifacts = record.artifacts || record.result?.artifacts;
+  const loc = locations(request), expected = loc.required[0];
+  if (!Array.isArray(artifacts) || artifacts.length !== 1 || artifacts[0].path !== expected || typeof artifacts[0].content !== 'string') {
+    planRefusal('plan-generation-transport-required', 'native compatibility accepts the slice artifact and canonical existing task sources only');
+  }
+  const slice = artifacts[0].content, tasks = planApi().listedTaskIds(slice).map(id => {
+    const source = planApi().readOwnerTaskPlan(root, { milestone: request.milestoneId, slice: request.sliceId, task: id });
+    if (source.status !== 'ok') planRefusal('plan-validation-source-mismatch', 'native plan task source is absent or unreadable');
+    return { id, content: source.content };
+  });
+  const admission = admitReturnedPlan(request, root, slice, tasks);
+  for (const source of admission.source.task_plans) {
+    const observed = planApi().readOwnerTaskPlan(root, { milestone: request.milestoneId, slice: request.sliceId, task: source.id });
+    if (observed.status !== 'ok' || observed.sha256 !== source.sha256) planRefusal('plan-validation-source-mismatch', 'native task sources changed during admission');
+  }
+  return admission;
+}
+function buildNativeArtifactPlanAdmission(request, rawResult, existing, root) {
+  if (!nativePlanArtifactRoute(request)) planRefusal('plan-generation-transport-required', 'milestone plan artifacts require the established native route');
+  // Native callback/metadata authentication stays with the current trusted host
+  // contract. No imported allowNative/legacy/approved flag enters this producer.
+  assertNativePlanArtifactContext(request);
+  if (rawResult.status !== 'done') {
+    if (Object.hasOwn(existing, NATIVE_PLAN_ADMISSION_FIELD)) planRefusal('plan-validation-invalid', 'a saved native plan admission cannot be stripped');
+    return null; // a partial response publishes no plan and completes no generation
+  }
+  if (Object.hasOwn(existing, NATIVE_PLAN_ADMISSION_FIELD)) {
+    verifyNativeArtifactPlanPublication(request, { ...existing, result: rawResult, artifacts: rawResult.artifacts }, root);
+    return existing[NATIVE_PLAN_ADMISSION_FIELD];
+  }
+  if (planSliceClassification(request, root).status === 'unenrolled') {
+    assertLegacyNativePlanArtifactOrigin(request, existing, root);
+    return null; // historical semantics, no enrollment or admission backfill
+  }
+  const origin = nativePlanArtifactOrigin(request, root), admission = admitNativeArtifactPlan(request, { result: rawResult }, root);
+  return { kind: 'native-artifact-plan-admission-v1', fingerprint: artifactFingerprint(request), dispatch_id: request.dispatchId,
+    workflow_id: request.workflowId, begin_key: origin.begin.idempotency_key, begin_checksum: origin.checksum,
+    generation: origin.generation, validation: planApi().buildPlanValidation(origin.generation, admission, { validatedAt: new Date().toISOString() }) };
+}
+function verifyNativeArtifactPlanPublication(request, record, root) {
+  const proof = record[NATIVE_PLAN_ADMISSION_FIELD], invalid = detail => planRefusal('plan-validation-invalid', detail);
+  assertNativePlanArtifactContext(request);
+  require('./forge-request-retention').assertForReceipt(request, record);
+  if (!nativePlanArtifactRoute(request) || !exactFields(proof, NATIVE_PLAN_ADMISSION_KEYS) || proof.kind !== 'native-artifact-plan-admission-v1') invalid('native plan admission is not a route or a permission flag');
+  if (PLAN_OWNER_FIELDS.some(key => Object.hasOwn(record, key))) invalid('native admission cannot be mixed with sidecar generation markers');
+  if (proof.fingerprint !== artifactFingerprint(request) || proof.fingerprint !== record.fingerprint || proof.dispatch_id !== request.dispatchId
+      || proof.dispatch_id !== record.dispatch_id || proof.workflow_id !== request.workflowId) invalid('native admission belongs to another request');
+  const origin = nativePlanArtifactOrigin(request, root, { replay: true });
+  if (proof.begin_key !== origin.begin.idempotency_key || proof.begin_checksum !== origin.checksum
+      || canonicalDigest(proof.generation) !== canonicalDigest(origin.generation)) invalid('native admission belongs to another real begin');
+  const checked = planApi().verifyPlanValidation(proof.validation, origin.generation), admission = admitNativeArtifactPlan(request, record, root);
+  const current = planApi().buildPlanValidation(origin.generation, admission, { validatedAt: checked.validated_at });
+  if (canonicalDigest(current) !== canonicalDigest(checked)) planRefusal('plan-validation-source-mismatch', 'native plan source bytes changed since admission');
+  return admission;
+}
+
+// Publication check of a ready record, under the owner lock and before any artifact
+// byte. null: not a plan-slice generation record, or one with no independent new origin.
+//
+// Issue 343 U0d — provenance of a ready record WITHOUT either owner record. Its own shape,
+// a begin:null, its timestamps or an imported flag prove neither age nor newness; only the
+// controller's canonical classification of the slice is independent. With an enrolled
+// lineage (open, ended or completed) the slice's plans belong to the new requirement, so
+// the record is a known-new receipt with both owner records stripped (or a stale one
+// replayed over an enrolled slice) and refuses. EXPLICIT LIMIT: when the slice has no
+// enrolled lineage (a genuine pre-requirement slice, or an unlinked producer that ran
+// without any controller begin), nothing canonical distinguishes a historical receipt
+// from a stripped new one; it replays with its historical semantics, unrewritten. This
+// seam does not promise universal detection and never revalidates or backfills history.
+function assertPlanGenerationPublication(request, record, root) {
+  if (Object.hasOwn(record, NATIVE_PLAN_ADMISSION_FIELD)) return verifyNativeArtifactPlanPublication(request, record, root);
+  const present = PLAN_OWNER_FIELDS.filter(key => Object.hasOwn(record, key));
+  if (!milestonePlanSlice(request)) {
+    if (present.length) planRefusal('plan-generation-marker-invalid', 'only a milestone plan-slice record carries plan generation records');
+    return null;
+  }
+  if (!present.length) {
+    let anchor;
+    try { anchor = planSliceClassification(request, root).status; }
+    catch (error) {
+      planRefusal(typeof error?.code === 'string' ? error.code : 'plan-generation-evidence-invalid',
+        typeof error?.detail === 'string' ? error.detail : 'the slice enrollment is not classifiable');
+    }
+    if (anchor !== 'unenrolled') {
+      planRefusal('plan-generation-marker-missing', `the slice has an enrolled controller generation (${anchor}); a record without its owner records is not historical`);
+    }
+    return null;
+  }
+  if (!Object.hasOwn(record, 'plan_generation')) planRefusal('plan-generation-marker-missing', 'plan_validation without its plan_generation marker');
+  if (!Object.hasOwn(record, 'plan_validation')) planRefusal('plan-validation-missing', 'a plan_generation marker without plan_validation evidence');
+  const marker = verifyPlanGenerationMarker(record.plan_generation, request, record, root);
+  if (marker.begin !== null) verifyMarkerBegin(marker, request, root);
+  const evidence = verifyPlanValidationEvidence(record.plan_validation, marker);
+  // The candidate is exactly the admitted source set, byte for byte, at its canonical paths.
+  const sources = [evidence.source.slice_plan, ...evidence.source.task_plans];
+  const artifacts = Array.isArray(record.artifacts) ? record.artifacts : [];
+  const byPath = new Map(artifacts.map(item => [item && item.path, item]));
+  if (byPath.size !== artifacts.length || artifacts.length !== sources.length) {
+    planRefusal('plan-validation-source-mismatch', 'the artifacts are not exactly the admitted plan set');
+  }
+  for (const entry of sources) {
+    const item = entry && byPath.get(entry.path);
+    if (!item || typeof item.content !== 'string' || hash(item.content) !== entry.sha256
+        || Buffer.byteLength(item.content, 'utf8') !== entry.bytes) {
+      planRefusal('plan-validation-source-mismatch', 'an artifact is not the admitted byte content');
+    }
+  }
+  // Independent re-admission of exactly those bytes: digests alone never authorize.
+  const admission = admitReturnedPlan(request, root, byPath.get(evidence.source.slice_plan.path).content,
+    evidence.source.task_plans.map(entry => ({ id: entry.id, content: byPath.get(entry.path).content })));
+  if (admission.semantic_sha256 !== evidence.semantic_sha256 || admission.graph_sha256 !== evidence.graph_sha256
+      || canonicalDigest(admission.source) !== canonicalDigest(evidence.source)
+      || canonicalDigest(admission.task_ids) !== canonicalDigest(evidence.task_ids)) {
+    planRefusal('plan-validation-invalid', 'the admitted content does not reproduce its evidence');
+  }
+  return admission;
+}
+// Read-only recheck of an enrolled plan-slice generation immediately before a milestone
+// execute-task spawns, beside the live last-spawn admission, through the SAME canonical
+// classification as the native first execute (forge-plan-validation assertSliceGeneration,
+// issue 343 U0d): an enrolled lineage whose completion is missing, pending, corrupt,
+// foreign or ambiguous refuses, and a completed one must be current. Only a slice with no
+// enrolled lineage keeps its historical behavior; nothing returns null as permission.
+// Reads only: no record is written inside the protected window.
+function assertExecutionPlanGeneration(request, root) {
+  if (request.unitType !== 'execute-task' || request.scope === 'standalone-task' || !request.milestoneId) return null;
+  const api = planApi(), owner = planOwner(root);
+  const refuse = (code, detail, cause) => {
+    throw Object.assign(new Error(`${code}: ${detail}`), { code, detail, cause_code: cause || null,
+      provider_called: false, stage: PLAN_GENERATION_STAGE, layer: PLAN_GENERATION_STAGE });
+  };
+  // Outside the enrollment segment grammar no enrolled begin can exist for the milestone.
+  if (!api.isScopeSegment(request.milestoneId)) return { status: 'unenrolled', milestone: request.milestoneId, slice: null };
+  const slice = api.isScopeSegment(request.sliceId) ? request.sliceId : null;
+  try { return api.assertSliceGeneration(owner, { owner, milestone: request.milestoneId, slice }); }
+  catch (error) {
+    return refuse(typeof error?.code === 'string' ? error.code : 'plan-generation-evidence-invalid',
+      typeof error?.detail === 'string' ? error.detail : 'the enrolled generation is not current', error?.cause_code);
+  }
+}
 function materialize(request, record, publicationGuard, publicationLock, options = {}) {
   assertVerificationSuccessorPublication(request, record, options);
   if (record.kind === 'memory-extraction') fail('memory-publication-required', 'Use publishReadyRecord for memory extraction receipts.');
@@ -646,12 +1219,20 @@ function materialize(request, record, publicationGuard, publicationLock, options
   const root = fs.realpathSync(request.contextRoot || request.cwd);
   return require('./forge-artifact-reconciliation').withOwnerLock(root, () => {
   publicationGuard?.();
+  // Issue 343 U0c: a new plan-slice generation publishes only its admitted bytes.
+  assertPlanGenerationPublication(request, record, root);
   assertMilestoneDeliveryReplay(request, record);
   if (record.execution || record.milestone_delivery) {
     if (record.execution) require('./forge-task-execution').assertReplay(request, record);
     if (request.ownerBroker) require('./forge-artifact-reconciliation').assertBroker(request.ownerBroker)
       .verify({ canonicalArtifacts: record.artifacts });
-    else {
+    // Issue 343 U5: a cohort member publishes inside its typed member-artifacts operation; the owner
+    // surface is the post-barrier broker's (S0, signed lines, committed operations, this intent).
+    else if (options.memberPublication !== undefined) {
+      if (!require('./forge-execution-batch').isMemberSidecar(options.memberPublication)) fail('execution-member-handle-required');
+      options.memberPublication.assertOwnerSurface();
+      assertMemberModes(request, record);
+    } else {
       const protectedOwner = (record.execution || record.milestone_delivery).protected_owner;
       if (!protectedOwner) fail('execution-owner-baseline-required');
       let expected = { ...protectedOwner };
@@ -731,7 +1312,8 @@ function unitLabel(request, loc) {
 function artifactFingerprint(request) {
   const linked = request.linked_begin_key
     ? require('./forge-attempt-recovery').requestIdentity(require('./forge-attempt-recovery').canonicalRequest(request)).linked_entry : null;
-  return require('./forge-request-fingerprint').projectFingerprint(request, linked);
+  const base = require('./forge-request-fingerprint').projectFingerprint(request, linked);
+  return request.partialContinuation === undefined ? base : hash(JSON.stringify({ base, partialContinuation: request.partialContinuation }));
 }
 
 function artifactAttemptFiles(request) {
@@ -753,7 +1335,24 @@ function artifactAttemptFiles(request) {
   return { cwd, root, resultFile, receiptFile };
 }
 
-function beginArtifactAttempt(request) {
+// Issue 440 S02: canonical next step named on a recorded failed/started receipt.
+// Data only: nothing here inspects, replays, abandons or calls a provider; the
+// error keeps its original code and message and no receipt/result byte changes.
+function recordedAttemptNextAction() {
+  return Object.freeze({ action: 'recover-attempt', order: Object.freeze(['inspect', 'replay', 'abandon', 'new-begin']),
+    api: 'recoverUnitSidecar', refusal_set: require('./forge-replay-refusal').REFUSAL_SET_VERSION });
+}
+function withRecordedAttemptNextAction(error) {
+  error.next_action = recordedAttemptNextAction();
+  return error;
+}
+function failRecordedAttempt(code, hint) {
+  try { fail(code, hint); } catch (error) { throw withRecordedAttemptNextAction(error); }
+}
+function beginArtifactAttempt(...args) {
+  return require('./forge-owner-transport-window').withMutation(args[0].contextRoot || args[0].cwd, () => beginArtifactAttemptInsideOwnerWindow(...args));
+}
+function beginArtifactAttemptInsideOwnerWindow(request) {
   const loc = locations(request);
   const files = artifactAttemptFiles(request);
   const fingerprint = artifactFingerprint(request);
@@ -761,9 +1360,12 @@ function beginArtifactAttempt(request) {
   if (fs.existsSync(files.receiptFile)) {
     const record = JSON.parse(fs.readFileSync(files.receiptFile, 'utf8'));
     if (record.fingerprint !== fingerprint) fail('dispatch-identity-conflict');
+    // A retained archive must still match exactly; its recorded broker/linked
+    // requirement cannot disappear on replay. Legacy receipts are unchanged.
+    require('./forge-request-retention').assertForReceipt(request, record);
     if (record.phase === 'ready') return { state: 'ready', record, loc, files, fingerprint };
-    if (record.phase === 'failed') fail(record.failure?.reason_code || 'artifact-attempt-failed');
-    fail('sidecar-attempt-interrupted', 'The attempt is started without a durable result; inspect it before a new dispatch.');
+    if (record.phase === 'failed') failRecordedAttempt(record.failure?.reason_code || 'artifact-attempt-failed');
+    failRecordedAttempt('sidecar-attempt-interrupted', 'The attempt is started without a durable result; inspect it before a new dispatch.');
   }
   const before = Object.fromEntries(loc.allowed.map(relative => [relative, fileHash(target(files.root, relative))]));
   const beforeState = Object.fromEntries(loc.allowed.map(relative => [relative, fileState(target(files.root, relative))]));
@@ -774,7 +1376,11 @@ function beginArtifactAttempt(request) {
         || hash(JSON.stringify(broker.manifest.execution_contract)) !== hash(JSON.stringify(request.execution_contract || null))) fail('broker-attempt-binding');
     broker.verify();
   }
+  // Exact inputs become durable (exclusive write + fsync) before started exists;
+  // a capture refusal leaves no receipt and never reaches a provider.
+  const retainedRequest = require('./forge-request-retention').retain(request);
   const record = { phase: 'started', fingerprint, dispatch_id: request.dispatchId, before,
+    retained_request: retainedRequest,
     recovery_identity_sha256: recoveryIdentity(request),
     ...(request.ownerBroker ? { broker_manifest_sha256: require('./forge-artifact-reconciliation').assertBroker(request.ownerBroker).manifest_sha256,
       broker_plan_sha256: request.ownerBroker.manifest.plan_sha256 } : {}),
@@ -842,21 +1448,29 @@ async function acceptArtifactResultCore(request, rawResult, metadata = {}, publi
   if (!fs.existsSync(files.receiptFile)) fail('artifact-attempt-not-started');
   const existing = JSON.parse(fs.readFileSync(files.receiptFile, 'utf8'));
   if (existing.fingerprint !== fingerprint) fail('dispatch-identity-conflict');
+  require('./forge-request-retention').assertForReceipt(request, existing);
   if (existing.phase === 'ready') {
     if (request.ownerBroker) request.ownerBroker.verify({ canonicalArtifacts: existing.artifacts || [] });
     const result = await publishReadyRecord(request, existing, undefined, publicationLock);
     json(files.resultFile, result);
     return { result, record: existing, replayed: true, provider_called: false };
   }
-  if (existing.phase === 'failed') fail(existing.failure?.reason_code || 'artifact-attempt-failed');
-  if (existing.phase !== 'started') fail('sidecar-attempt-interrupted');
+  if (existing.phase === 'failed') failRecordedAttempt(existing.failure?.reason_code || 'artifact-attempt-failed');
+  if (existing.phase !== 'started') failRecordedAttempt('sidecar-attempt-interrupted');
+  // Generic plan artifacts still refuse. The existing native facade is admitted
+  // from its genuine controller generation and complete current task sources.
+  const nativePlan = milestonePlanSlice(request) && nativePlanArtifactRoute(request);
+  if (milestonePlanSlice(request) && !nativePlan) fail('plan-generation-transport-required', 'Milestone slice plans require an admitted native generation or the plan transport.');
   if (metadata.providerCalled !== true) fail('artifact-provider-call-unconfirmed');
+  if (nativePlan && [...PLAN_OWNER_FIELDS, NATIVE_PLAN_ADMISSION_FIELD].some(key => Object.hasOwn(rawResult || {}, key))) planRefusal('plan-generation-marker-untrusted', 'worker output cannot carry owner plan admission');
   xllm.assertUntrustedOutputBarrier(rawResult);
   if (/(?:token|secret|password|credential)\s*[:=]\s*[^\s"}]+/i.test(JSON.stringify(rawResult))) fail('secret-output');
   const checked = inspectArtifacts(rawResult, loc.allowed, loc.required,
     metadata.maxPayloadBytes === undefined ? Infinity : metadata.maxPayloadBytes, loc.rules,
     { forbidArtifactsOnNonDone: loc.preparation === true });
   if (!checked.ok) fail('invalid-artifact-result', checked.reason);
+  const nativeAdmission = nativePlan ? buildNativeArtifactPlanAdmission(request, rawResult, existing, files.root) : null;
+  if (nativeAdmission) existing[NATIVE_PLAN_ADMISSION_FIELD] = nativeAdmission;
   // Save validated bytes before checking owner drift. Failure keeps this exact
   // response, allowing proved owner appends to be reconciled without inference.
   const responseAnchor = request.ownerBroker
@@ -886,7 +1500,15 @@ async function acceptArtifactResultCore(request, rawResult, metadata = {}, publi
       const broker = require('./forge-artifact-reconciliation').assertBroker(request.ownerBroker);
       if (broker.manifest_sha256 !== existing.broker_manifest_sha256) fail('broker-manifest-changed');
       broker.verify();
-    } else if (JSON.stringify(preparationSurfaceSnapshot(request)) !== JSON.stringify(existing.preparation_surface)) fail('artifact-direct-write-detected');
+    } else {
+      const observed = preparationSurfaceSnapshot(request);
+      if (JSON.stringify(observed) !== JSON.stringify(existing.preparation_surface)) {
+        existing.preparation_surface_drift = { scope: 'whole-owner', attribution: 'unproven',
+          expected_sha256: hash(JSON.stringify(existing.preparation_surface)), observed_sha256: hash(JSON.stringify(observed)) };
+        json(files.receiptFile, existing);
+        fail('artifact-direct-write-detected');
+      }
+    }
   }
   if (/(?:token|secret|password|credential)\s*[:=]\s*[^\s"}]+/i.test(JSON.stringify(rawResult))) {
     const error = new Error('Secret-like provider output refused.');
@@ -905,11 +1527,13 @@ async function acceptArtifactResultCore(request, rawResult, metadata = {}, publi
   }
   xllm.assertUntrustedOutputBarrier(rawResult);
   const artifacts = rawResult.status === 'done' ? rawResult.artifacts : [];
-  const planContract = request.phase === 'plan' && rawResult.status === 'done'
+  const planContract = request.scope === 'standalone-task' && request.phase === 'plan' && rawResult.status === 'done'
     ? require('./forge-task-preparation').preflightPlan(request, artifacts[0].content) : null;
   const pendingQuestions = require('./forge-interaction').mergePendingQuestions(request.pending_questions || [], rawResult.questions || []);
   const record = { phase: 'ready', fingerprint, dispatch_id: request.dispatchId,
-    ...(planContract ? { plan_contract: planContract } : {}), pending_questions: pendingQuestions,
+    ...(existing.retained_request ? { retained_request: existing.retained_request } : {}),
+    ...(planContract ? { plan_contract: planContract } : {}),
+    ...(nativeAdmission ? { [NATIVE_PLAN_ADMISSION_FIELD]: nativeAdmission } : {}), pending_questions: pendingQuestions,
     input_pending_questions: request.pending_questions || [],
     request_fingerprint: request.preparationRequestFingerprint || null,
     preparation_identity: request.preparationIdentity || existing.preparation_identity || null,
@@ -918,11 +1542,16 @@ async function acceptArtifactResultCore(request, rawResult, metadata = {}, publi
     artifacts: artifacts.map(artifact => ({ ...artifact, before: existing.before[artifact.path] ?? null })) };
   if (metadata.telemetry?.calibration_proposal) record.calibration_proposal = metadata.telemetry.calibration_proposal;
   json(files.receiptFile, record);
-  const result = await publishReadyRecord(request, record, undefined, publicationLock);
+  const legacyNativeGuard = nativePlan && rawResult.status === 'done' && !nativeAdmission
+    ? () => assertLegacyNativePlanArtifactOrigin(request, existing, files.root) : undefined;
+  const result = await publishReadyRecord(request, record, legacyNativeGuard, publicationLock);
   json(files.resultFile, result);
   return { result, record, replayed: false, provider_called: true };
 }
 async function reconcileArtifactAttempt(request, options) {
+  // Reconciliation uses the SAME computed native admission and publisher;
+  // nonnative plan artifacts never gain this compatibility path.
+  if (milestonePlanSlice(request) && !nativePlanArtifactRoute(request)) fail('plan-generation-transport-required', 'Milestone slice plans require an admitted native generation or the plan transport.');
   const files = artifactAttemptFiles(request), loc = locations(request);
   return require('./forge-artifact-reconciliation').reconcile({ ...options, receiptFile: files.receiptFile,
     async publish(child, publicationGuard) {
@@ -931,9 +1560,22 @@ async function reconcileArtifactAttempt(request, options) {
       xllm.assertUntrustedOutputBarrier(result);
       const checked = inspectArtifacts(result, loc.allowed, loc.required, Infinity, loc.rules, { forbidArtifactsOnNonDone: loc.preparation === true });
       if (!checked.ok) fail('invalid-artifact-result');
-      if (request.phase === 'plan' && result.status === 'done') require('./forge-task-preparation').preflightPlan(request, result.artifacts[0].content);
-      const record = { result, artifacts: result.artifacts.map(a => ({ ...a, before: child.before[a.path] ?? null })) };
-      await publishReadyRecord(request, record, undefined, publicationGuard);
+      if (request.scope === 'standalone-task' && request.phase === 'plan' && result.status === 'done') require('./forge-task-preparation').preflightPlan(request, result.artifacts[0].content);
+      const savedBytes = milestonePlanSlice(request) ? fs.readFileSync(files.receiptFile) : null;
+      if (savedBytes && hash(savedBytes) !== child.original_receipt_sha256) fail('reconciliation-receipt-raced');
+      const saved = savedBytes ? JSON.parse(savedBytes) : null;
+      if (saved) require('./forge-request-retention').assertForReceipt(request, saved);
+      const record = { ...(saved && Object.hasOwn(saved, NATIVE_PLAN_ADMISSION_FIELD) ? { fingerprint: saved.fingerprint, dispatch_id: saved.dispatch_id, ...(saved.retained_request ? { retained_request: saved.retained_request } : {}), [NATIVE_PLAN_ADMISSION_FIELD]: saved[NATIVE_PLAN_ADMISSION_FIELD] } : {}),
+        result, artifacts: result.artifacts.map(a => ({ ...a, before: child.before[a.path] ?? null })) };
+      if (milestonePlanSlice(request)) {
+        if (!Object.hasOwn(record, NATIVE_PLAN_ADMISSION_FIELD)) {
+          if (planSliceClassification(request, files.root).status !== 'unenrolled') planRefusal('plan-generation-marker-missing', 'reconciliation cannot invent a prior native admission');
+          assertLegacyNativePlanArtifactOrigin(request, saved, files.root);
+        } else verifyNativeArtifactPlanPublication(request, record, files.root);
+      }
+      const legacyNativeGuard = milestonePlanSlice(request) && !Object.hasOwn(record, NATIVE_PLAN_ADMISSION_FIELD)
+        ? () => assertLegacyNativePlanArtifactOrigin(request, saved, files.root) : undefined;
+      await publishReadyRecord(request, record, legacyNativeGuard, publicationGuard);
       json(files.resultFile, result);
     } });
 }
@@ -1100,7 +1742,7 @@ function memoryPublicationReason(publication) {
   }
   return 'memory-publication-detail-redacted';
 }
-function appendMemoryPublicationEvent(request, record, result) {
+function appendMemoryPublicationEvent(request, record, result, preview = false) {
   if (!memoryBoundarySafe(request) || result.publication?.status === 'deferred') return null;
   const root = fs.realpathSync(request.contextRoot || request.cwd);
   const eventsFile = target(root, '.gsd/forge/events.jsonl');
@@ -1136,9 +1778,50 @@ function appendMemoryPublicationEvent(request, record, result) {
     memory_contract_version: record.memory_contract?.schema_version === NEW_MEMORY_SCHEMA_VERSION ? NEW_MEMORY_SCHEMA_VERSION : null,
     ...telemetry,
   };
+  if (preview) return event;
   fs.mkdirSync(path.dirname(eventsFile), { recursive: true });
   fs.appendFileSync(eventsFile, JSON.stringify(event) + '\n');
   return event;
+}
+// A cohort's post-unit publisher consumes only an already validated READY memory
+// response. This seam never invokes a worker, marks a receipt ready, or changes it.
+// The same request fingerprint/telemetry and fragment producer as ordinary replay
+// are used; the batch broker signs the fragment and event effects before apply.
+function prepareReadyMemoryPublication(request) {
+  const r = request || {}, loc = locations({ ...r, unitType: 'memory-extract' });
+  if (!memoryBoundarySafe(r)) fail('memory-publication-boundary-required');
+  const native = r.route?.worker_mode === 'native';
+  const files = native ? nativeReceiptFiles(r) : artifactAttemptFiles(r);
+  const stat = fs.lstatSync(files.receiptFile);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_ARTIFACT_PAYLOAD_BYTES) fail('memory-ready-invalid');
+  const bytes = fs.readFileSync(files.receiptFile), record = JSON.parse(bytes);
+  const fingerprint = native ? nativeMemoryFingerprint(r)
+    : memoryRequestFingerprint(artifactFingerprint(r), memoryEvidenceContract(r, loc.sourceUnit));
+  if (record.phase !== 'ready' || record.kind !== 'memory-extraction' || record.fingerprint !== fingerprint
+      || record.dispatch_id !== r.dispatchId || record.source_unit !== loc.sourceUnit) fail('dispatch-identity-conflict');
+  if (native) {
+    const identity = nativeMemoryIdentity(r, record.telemetry);
+    if (record.model !== identity.model || record.effort !== identity.effort) fail('native-memory-telemetry-mismatch');
+  }
+  const options = { cwd: r.contextRoot || r.cwd, extraction: record.extraction, sourceContext: memorySourceContext(r, record) };
+  const preview = require('./forge-memory-extraction').prepareExtractionPublication(options);
+  const publication = preview.status === 'prepared' ? preview.publication : preview;
+  const event = appendMemoryPublicationEvent(r, record, { status: record.extraction.status, extraction: record.extraction, publication }, true);
+  if (hash(fs.readFileSync(files.receiptFile)) !== hash(bytes)) fail('memory-ready-changed');
+  return { schema: 'forge-ready-memory-publication-v1', receipt_file: files.receiptFile,
+    receipt_sha256: hash(bytes), request: r, prepared: preview.prepared || null, publication, event };
+}
+function applyReadyMemoryPublication(prepared) {
+  if (!prepared || prepared.schema !== 'forge-ready-memory-publication-v1') fail('memory-ready-invalid');
+  const current = prepareReadyMemoryPublication(prepared.request);
+  if (current.receipt_sha256 !== prepared.receipt_sha256) fail('memory-ready-changed');
+  if (prepared.prepared) {
+    const record = JSON.parse(fs.readFileSync(prepared.receipt_file, 'utf8'));
+    return require('./forge-memory-extraction').applyPreparedExtractionPublication({ cwd: prepared.request.contextRoot || prepared.request.cwd,
+      extraction: record.extraction, sourceContext: memorySourceContext(prepared.request, record) }, prepared.prepared);
+  }
+  if (prepared.publication?.status === 'deferred') fail('memory-publication-deferred');
+  return prepared.publication;
 }
 // Review-fix publication, parent-owned and replayable from a ready receipt:
 //   1. commit (only git + auto_commit) with a durable intent persisted first and
@@ -1253,7 +1936,9 @@ async function publishReadyRecord(request, record, publicationGuard, publication
     ...result.transport_telemetry,
     observation: require('./forge-sidecar-calibration').observation(record.telemetry.observation),
   } };
-  if (record.calibration_proposal && result.status === 'done'
+  // Issue 343 U5: a cohort member's calibration is no effect of its typed member-artifacts
+  // operation; it stays in the member's receipt (never an unproved owner write).
+  if (record.calibration_proposal && result.status === 'done' && options.memberPublication === undefined
       && !['deferred', 'quarantined', 'conflict'].includes(result.publication?.status)) {
     const outcome = await require('./forge-sidecar-calibration').commitAccepted(record.calibration_proposal, {
       fingerprint: record.fingerprint, receipt: options.receiptFile || artifactAttemptFiles(request).receiptFile,
@@ -1380,19 +2065,27 @@ function nativeMemoryIdentity(request, durableTelemetry) {
     || telemetry.effort_binding_observed !== null
     || telemetry.effort_binding_observed_source !== null
     || telemetry.effort_binding_observed_fingerprint !== null);
+  const claudeEffortMismatch = telemetry.effort_transport === 'native-argument'
+    ? telemetry.effort_argument !== identity.effort
+      || telemetry.effort_transport_value !== identity.effort
+      || typeof telemetry.effort_transport_source !== 'string' || !telemetry.effort_transport_source
+      || telemetry.effort_binding_observed !== null
+      || telemetry.effort_binding_observed_source !== null
+      || telemetry.effort_binding_observed_fingerprint !== null
+    : telemetry.effort_argument !== null
+      || telemetry.effort_transport !== 'agent-frontmatter'
+      || telemetry.effort_transport_value !== identity.effort
+      || telemetry.effort_binding_observed !== identity.effort
+      || typeof telemetry.effort_transport_source !== 'string' || !telemetry.effort_transport_source
+      || typeof telemetry.effort_binding_observed_source !== 'string' || !telemetry.effort_binding_observed_source
+      || telemetry.effort_binding_observed_source !== telemetry.effort_transport_source
+      || typeof telemetry.effort_binding_observed_fingerprint !== 'string'
+      || !/^sha256:[a-f0-9]{64}$/.test(telemetry.effort_binding_observed_fingerprint);
   // Claude: the alias, or the exact resolved id when the active tool listed it.
   const claudeMismatch = host === 'claude' && ((telemetry.model_argument !== route.alias
       && telemetry.model_argument !== identity.model)
     || (telemetry.model_argument === identity.model && Object.prototype.hasOwnProperty.call(telemetry, 'model_version_proof'))
-    || telemetry.effort_argument !== null
-    || telemetry.effort_transport !== 'agent-frontmatter'
-    || telemetry.effort_transport_value !== identity.effort
-    || telemetry.effort_binding_observed !== identity.effort
-    || typeof telemetry.effort_transport_source !== 'string' || !telemetry.effort_transport_source
-    || typeof telemetry.effort_binding_observed_source !== 'string' || !telemetry.effort_binding_observed_source
-    || telemetry.effort_binding_observed_source !== telemetry.effort_transport_source
-    || typeof telemetry.effort_binding_observed_fingerprint !== 'string'
-    || !/^sha256:[a-f0-9]{64}$/.test(telemetry.effort_binding_observed_fingerprint));
+    || claudeEffortMismatch);
   if (!['codex', 'claude'].includes(host) || commonMismatch || codexMismatch || claudeMismatch) {
     fail('native-memory-telemetry-mismatch', 'Native memory telemetry must describe the exact resolved route and adapter transport.');
   }
@@ -1404,11 +2097,15 @@ function normalizedNativeFailure(request) {
       || typeof raw.reason_code !== 'string' || !/^[a-z0-9-]{1,80}$/.test(raw.reason_code)) {
     fail('native-memory-failure-invalid', 'Native memory failure requires a bounded machine-readable reason_code.');
   }
-  if (raw.provider_called === true) nativeMemoryIdentity(request, raw.telemetry);
+  const providerCalled = raw.provider_called === undefined ? 'unknown' : raw.provider_called;
+  if (providerCalled !== true && providerCalled !== false && providerCalled !== 'unknown') {
+    fail('native-memory-failure-invalid', 'Native memory failure provider_called must be true, false or unknown.');
+  }
+  if (providerCalled === true) nativeMemoryIdentity(request, raw.telemetry);
   const telemetry = memoryTelemetry({ telemetry: raw.telemetry || null });
   return {
     status: 'failure', reason_code: raw.reason_code,
-    provider_called: raw.provider_called === true,
+    provider_called: providerCalled,
     telemetry,
     publication: { status: 'noop', reason: 'worker-error' },
   };
@@ -1675,6 +2372,7 @@ async function runNativeExecutionTransport(r, runtime, execution, options, proce
     }
     const api = require('./forge-task-execution');
     if (stage !== 'publication') {
+      attestNativeAppends(r, runtime);
       api.assertProtected(r.contextRoot, initialRecord.recovery_baseline.protected_owner);
       for (const row of initialRecord.recovery_baseline.protected_roots) api.assertProtected(row.path, row.snapshot);
     }
@@ -1818,7 +2516,300 @@ function admissionRefusal(error) {
     || error?.stage === 'linked-task-admission' && error.layer === 'milestone-time-admission' && error.provider_called === false;
 }
 
-async function runUnitSidecarCore(request, runtime, identity) {
+// ── Retained cohort member execution (issue 343 U3b, B3 part 2) ──────────────
+//
+// A sidecar cohort member (its opaque handle travels beside the request, never inside it) runs
+// through the same core with an explicit member branch: its owner events are signed lines of the
+// cohort stream, its owner surface is the broker's common verification, its plan is the runtime
+// view its handle validated, and a finished member stops at the retained executed record plus seal
+// (forge-execution-batch memberSidecar retain). It produces no .gsd artifact, task marker,
+// controller completion, owner event or done result while its siblings run; the heavy verification
+// (verifyRetainedExecution) exists only after the cohort barrier and publication belongs to the
+// serial post-barrier publisher. returned.json stays custody, never replay authority.
+
+// The live member operations of a request (forge-execution-batch), resolved from its handle.
+function memberExecution(handle, request) {
+  return require('./forge-execution-batch').memberSidecar(handle, request);
+}
+// A member's execution always carries a real seal bound to its runtime view: the historical
+// tolerance of an absent seal never applies to it, and a single seal never verifies a member.
+function verifyMemberSeal(request, record, identity, runtimeVerification, view) {
+  if (!record || !record.verification_seal) fail('verification-provenance-insufficient');
+  if (record.verification_successor) fail('verification-successor-capability-required');
+  const verificationApi = require('./forge-verify'), plan = fs.readFileSync(request.planFile, 'utf8');
+  verificationApi.assertExecutionVerification(record.verification_seal, request.execution_contract, plan, identity, { memberView: view });
+  if (runtimeVerification !== undefined) {
+    const supplied = verificationApi.normalizeExecutionVerification(request.execution_contract, plan, request.verification,
+      runtimeVerification, identity, { memberView: view });
+    if (supplied.sha256 !== record.verification_seal.sha256) fail('verification-policy-changed');
+  }
+  if (record.delivery_capture && record.delivery_capture.verification_policy_sha256 !== record.verification_seal.sha256) fail('verification-capture-binding');
+}
+// The executed record a later receipt derives from: only the core's own fields (delivery_capture,
+// then phase ready and its artifacts) may differ from the anchored executed bytes.
+function executedBase(record) {
+  const { phase, delivery_capture: capture, artifacts, ...base } = record;
+  return base;
+}
+function sameExecutedBase(candidate, executed) {
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate) || !executed || executed.phase !== 'executed'
+      || !['executed', 'ready'].includes(candidate.phase) || (candidate.phase === 'executed' && candidate.artifacts !== undefined)) return false;
+  return canonicalDigest(executedBase(candidate)) === canonicalDigest(executedBase(executed));
+}
+
+// The validated core of a writing unit's completion, with an explicit context: the request, its
+// locations and physical roots, the receipt channel, the verification identity and seal check
+// (with the runtime policy), the delivery renderer, the member's live view (null on the single
+// path) and the event emitters. Callers: finishExecute and the executed replay of
+// runUnitSidecarCore (the single context, its exact previous behavior) and verifyRetainedExecution
+// (a cohort member after the barrier, owner events deferred). It never publishes.
+function retainFailedVerification(context, record, deliveryCapture) {
+  const { request: r, root, receiptFile, verificationIdentity } = context;
+  const resultFile = r.resultFile, dispatchId = verificationIdentity.dispatch_id, fingerprint = verificationIdentity.fingerprint;
+  // Observation only. Never replace a raw native result or historical receipt,
+  // and never treat a negative capture as replay/publication authority.
+  const value = { schema_version: 1, kind: 'failed-verification-observation',
+    dispatch_id: dispatchId, fingerprint, captured_at: new Date().toISOString(),
+    original_receipt_sha256: hash(fs.readFileSync(receiptFile)),
+    request_identity_sha256: require('./forge-code-roots').digest(require('./forge-attempt-recovery').requestIdentity(r)),
+    verification_policy_sha256: record.verification_seal.sha256, delivery_capture: deliveryCapture };
+  const bytes = JSON.stringify(value, null, 2) + '\n', sha256 = hash(bytes);
+  const file = resultFile + '.verification-failed-' + sha256 + '.json';
+  // Current result-target admission already requires this parent outside
+  // owner and every code root. Recheck the private sibling before writing.
+  for (const cwd of new Set([root, r.cwd, ...(r.execution_contract?.code_roots || []).map(row => row.path)])) xllm.validateResultFileTarget(file, cwd);
+  if (fs.existsSync(file)) { if (hash(fs.readFileSync(file)) !== sha256) fail('verification-diagnostic-collision'); }
+  else fs.writeFileSync(file, bytes, { flag: 'wx', mode: 0o600 });
+  return Object.freeze({ file, sha256 });
+}
+
+async function completeExecutionCore(context, record, deferredEvents = null) {
+  const r = context.request, loc = context.loc, root = context.root, cwd = context.cwd, member = context.member || null;
+  const verificationRequest = context.verificationSuccessor?.bindings
+    ? { ...r, verification: { ...r.verification, bindings: context.verificationSuccessor.bindings } } : r;
+  const persist = context.persist === undefined ? !deferredEvents : context.persist === true;
+  context.verifySeal(record);
+  if (record.execution) require('./forge-task-execution').assertReplay(r, record);
+  else if (record.milestone_delivery) {
+    const api = require('./forge-task-execution');
+    const saved = record.milestone_delivery;
+    assertMilestoneDeliveryReplay(r, record);
+    // A cohort member's owner surface is the cohort's common signed stream, after the barrier.
+    if (member) {
+      assertMemberModes(r, record);
+      await member.verifyOwner('sealed');
+    }
+    else api.assertProtected(root, context.verificationSuccessor
+      ? context.verificationSuccessor.expectedOwner(record, saved.protected_owner) : saved.protected_owner);
+  }
+  if (r.execution_contract && (!record.delivery_capture || !record.delivery_capture.passed)) {
+    const resourceEvents = [];
+    context.notifyPhase('verifying');
+    const deliveryCapture = require('./forge-verify').captureRootDelivery(r.execution_contract,
+      fs.readFileSync(r.planFile, 'utf8'), { ...verificationRequest.verification, verificationSeal: record.verification_seal,
+        verificationIdentity: context.verificationIdentity, unit: loc.rules[loc.delivery.input].unit,
+        resourceEventSink: line => resourceEvents.push(line),
+        ...(typeof context.onVerificationCheck === 'function' ? { onCheck: context.onVerificationCheck } : {}),
+        ...(member ? { memberView: member.view() } : {}) });
+    record = { ...record, delivery_capture: deliveryCapture };
+    // Retain stdout, cleanup and the actual failing check before throwing.
+    // A failed capture never satisfies replay: the gate runs again above.
+    if (persist) json(context.receiptFile, record);
+    if (deferredEvents) deferredEvents.push(...resourceEvents);
+    else await context.appendOwnedEvents(resourceEvents, record);
+    if (!deliveryCapture.passed) {
+      const error = Object.assign(new Error('execution-verification-failed'), { code: 'execution-verification-failed' });
+      if (deferredEvents) {
+        const retained = retainFailedVerification(context, record, deliveryCapture);
+        error.diagnostic = diagnostic('verification-capture-failed', { verification_capture_sha256: retained.sha256 });
+        error.verification_diagnostic = retained;
+        verificationFailures.set(error, retained);
+      }
+      throw error;
+    }
+    if (record.execution) require('./forge-task-execution').assertReplay(r, record);
+    if (persist) json(context.receiptFile, record);
+  }
+  if (member && record.milestone_delivery) assertMemberModes(r, record);
+  const artifacts = executeDeliveryArtifacts(verificationRequest, loc, record.result, root, cwd, record.delivery_capture,
+    member ? { memberView: member.view() } : undefined);
+  const ready = { ...record, phase: 'ready', artifacts: artifacts.map(a => ({ ...a, before: record.before[a.path] ?? null })) };
+  // Milestone v2 only: the owner marker enters the durable record after the
+  // validated delivery artifacts and last, so a checked task implies delivery.
+  if (r.execution_contract && record.milestone_delivery && !record.execution && record.result?.status === 'done') {
+    const marker = createTaskMarker(r, root, record.before?.[taskMarkerPath(r)], member ? context.markerChain : undefined);
+    if (marker) ready.artifacts.push(marker);
+  }
+  if (persist) json(context.receiptFile, ready);
+  if (context.verificationSuccessor) verificationSuccessorReady.set(ready, {
+    cap: context.successorCapability, record: require('./forge-code-roots').digest(ready),
+    request: require('./forge-code-roots').digest(r),
+  });
+  return ready;
+}
+
+// A ready cache is not authority to cross the cohort barrier. Reproduce it from
+// the anchored executed base through the canonical core, without persistence,
+// capture or publication; a changed workspace/artifact cache is refused.
+async function assertRetainedReady(context, record, retained) {
+  if (retained.phase !== 'sealed') fail('batch-member-barrier-open');
+  if (record.delivery_capture?.passed !== true || !Array.isArray(record.artifacts)) fail('batch-member-retained-invalid');
+  const ready = await completeExecutionCore({ ...context, persist: false }, record, []);
+  if (canonicalDigest(ready) !== canonicalDigest(record)) fail('batch-member-retained-changed');
+}
+
+/**
+ * Issue 343 U3b: the post-barrier verification of one retained sidecar cohort member (the serial
+ * coordinator calls it, one member at a time). The request is the member's exact bound attempt
+ * with its live `memberHandle` beside the data. It requires the sealed barrier and the anchored
+ * retained execution, revalidates the original executed record, seal and preconditions with the
+ * member's current runtime view, and then runs the real completion core: the captured delivery,
+ * artifacts and task marker of a verified ready record, written only to the attempt's own receipt
+ * channel. It publishes nothing, appends no owner event (its resource events are returned), calls
+ * no provider, and a failing capture never becomes ready.
+ *
+ * @returns {Promise<{ status: 'retained', stage: 'ready', ready_sha256, deferred_events, ... }>}
+ */
+async function verifyRetainedExecution(request, runtime = {}) {
+  if (!request || typeof request !== 'object' || !Object.prototype.hasOwnProperty.call(request, 'memberHandle')) fail('execution-member-handle-required');
+  const { memberHandle, ...r } = request;
+  const member = memberExecution(memberHandle, r);
+  const route = r.route || {};
+  const transport = capability(route.resolved_worker_engine, r.unitType, r.scope === 'milestone' ? {} : r);
+  if (!transport.supported || transport.mode !== 'execute' || r.scope !== 'milestone' || !r.execution_contract
+      || runtime.verificationSuccessor !== undefined) fail('batch-member-operation-unsupported');
+  if (!r.dispatchId || !r.workflowId) fail('dispatch-identity-required');
+  const cwd = fs.realpathSync(r.cwd), root = fs.realpathSync(r.contextRoot || cwd);
+  const resultFile = xllm.validateResultFileTarget(r.resultFile, cwd);
+  xllm.validateResultFileTarget(resultFile, root);
+  artifactAttemptFiles(r);
+  member.assertChannels(resultFile);
+  const receiptFile = `${resultFile}.receipt.json`;
+  const loc = locations(r);
+  const dispatchId = xllm.normalizeDispatchId(r.dispatchId, 'unit');
+  const fingerprint = artifactFingerprint(r);
+  const verificationIdentity = { dispatch_id: dispatchId, fingerprint, recovery_identity_sha256: recoveryIdentity(r) };
+  // The heavy capture exists only after the barrier, and only for an anchored retained execution:
+  // a saved returned response alone (custody) is never the record verified here.
+  if (!member.barrierSealed()) fail('batch-member-barrier-open');
+  const retained = await member.retained();
+  if (!retained) fail('batch-member-retained-required');
+  if (retained.phase !== 'sealed') fail('batch-member-barrier-open');
+  const executed = retained.executed_record;
+  if (executed.phase !== 'executed' || executed.fingerprint !== fingerprint || executed.dispatch_id !== dispatchId
+      || !executed.milestone_delivery || executed.result?.status !== 'done') fail('batch-member-retained-invalid');
+  if (!fs.existsSync(receiptFile)) fail('batch-member-retained-invalid');
+  const current = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+  if (!sameExecutedBase(current, executed)) fail('batch-member-retained-changed');
+  const verifySeal = record => verifyMemberSeal(r, record, verificationIdentity, runtime.verification, member.view());
+  const deferredEvents = [];
+  // Issue 343 U5: the sibling markers the cohort's committed operations already published (signed journal).
+  const markerChain = member.markerChain(taskMarkerPath(r));
+  if (current.phase === 'ready') await assertRetainedReady({ request: r, loc, root, cwd, receiptFile, verificationIdentity,
+    verificationSuccessor: null, member, markerChain, verifySeal, notifyPhase: () => {}, appendOwnedEvents: () => fail('batch-member-owner-event-deferred') }, current, retained);
+  else {
+    const notify = phase => {
+      if (typeof runtime.onPhase !== 'function') return;
+      try {
+        runtime.onPhase(Object.freeze({ schema_version: 1, phase, dispatch_id: dispatchId, unit: unitLabel(r, loc), worker_mode: 'sidecar',
+          at: new Date().toISOString() }));
+      } catch { /* observer errors never affect the unit */ }
+    };
+    await completeExecutionCore({ request: r, loc, root, cwd, receiptFile, verificationIdentity, verificationSuccessor: null,
+      member, markerChain, persist: true, verifySeal, notifyPhase: notify,
+      appendOwnedEvents: () => fail('batch-member-owner-event-deferred'), onVerificationCheck: runtime.onVerificationCheck },
+    current, deferredEvents);
+  }
+  // Verification wrote nothing into the owner: the cohort stream still proves its whole surface.
+  await member.verifyOwner('sealed');
+  const receiptBytes = fs.readFileSync(receiptFile), ready = JSON.parse(receiptBytes.toString('utf8'));
+  if (ready.phase !== 'ready' || !sameExecutedBase(ready, executed) || ready.delivery_capture?.passed !== true) fail('batch-member-retained-changed');
+  const result = { status: 'retained', stage: 'ready', dispatch_id: dispatchId, batch_id: retained.batch_id, member_ref: retained.member_ref,
+    task_id: retained.task_id, retained_ref: { path: retained.ref_path, sha256: retained.ref_sha256 }, anchor_sha256: retained.anchor.sha256,
+    ready_sha256: hash(receiptBytes), provider_called: false };
+  json(resultFile, result);
+  return { ...result, deferred_events: deferredEvents };
+}
+
+// ── Serial publication of a verified cohort member (issue 343 U5, B5) ─────────
+//
+// The post-barrier coordinator (forge-execution-batch consolidateCohort) publishes one member at a
+// time through the canonical publisher. retainedPublication validates the verified ready record again
+// from the anchored executed record through the real completion core (no capture repeated, nothing
+// written) and returns its exact effects (artifact path, preimage, post-image digest; the task marker
+// last) for the member's typed member-artifacts intent. publishRetainedMember runs publishReadyRecord /
+// materialize only while that signed intent is in flight for exactly this member and ready record;
+// the publisher's owner guard is the cohort broker's whole-surface verification. No provider call, no
+// owner event, no controller completion here.
+function retainedRequest(request, runtime) {
+  if (!request || typeof request !== 'object' || !Object.prototype.hasOwnProperty.call(request, 'memberHandle')) fail('execution-member-handle-required');
+  const { memberHandle, ...r } = request;
+  const member = memberExecution(memberHandle, r);
+  const route = r.route || {};
+  const transport = capability(route.resolved_worker_engine, r.unitType, r.scope === 'milestone' ? {} : r);
+  if (!transport.supported || transport.mode !== 'execute' || r.scope !== 'milestone' || !r.execution_contract
+      || runtime.verificationSuccessor !== undefined) fail('batch-member-operation-unsupported');
+  if (!r.dispatchId || !r.workflowId) fail('dispatch-identity-required');
+  const cwd = fs.realpathSync(r.cwd), root = fs.realpathSync(r.contextRoot || cwd);
+  const resultFile = xllm.validateResultFileTarget(r.resultFile, cwd);
+  xllm.validateResultFileTarget(resultFile, root);
+  artifactAttemptFiles(r);
+  member.assertChannels(resultFile);
+  const dispatchId = xllm.normalizeDispatchId(r.dispatchId, 'unit');
+  const fingerprint = artifactFingerprint(r);
+  return { r, member, cwd, root, resultFile, receiptFile: `${resultFile}.receipt.json`, loc: locations(r), dispatchId, fingerprint,
+    verificationIdentity: { dispatch_id: dispatchId, fingerprint, recovery_identity_sha256: recoveryIdentity(r) } };
+}
+async function retainedReady(context, runtime) {
+  const { r, member, receiptFile, dispatchId, fingerprint, verificationIdentity } = context;
+  if (!member.barrierSealed()) fail('batch-member-barrier-open');
+  const retained = await member.retained();
+  if (!retained) fail('batch-member-retained-required');
+  if (retained.phase !== 'sealed') fail('batch-member-barrier-open');
+  const executed = retained.executed_record;
+  if (executed.phase !== 'executed' || executed.fingerprint !== fingerprint || executed.dispatch_id !== dispatchId
+      || !executed.milestone_delivery || executed.result?.status !== 'done') fail('batch-member-retained-invalid');
+  if (!fs.existsSync(receiptFile)) fail('batch-member-ready-required');
+  const bytes = fs.readFileSync(receiptFile), ready = JSON.parse(bytes.toString('utf8'));
+  if (ready.phase !== 'ready' || !sameExecutedBase(ready, executed) || ready.delivery_capture?.passed !== true
+      || !Array.isArray(ready.artifacts) || !ready.artifacts.length) fail('batch-member-ready-required');
+  const verifySeal = record => verifyMemberSeal(r, record, verificationIdentity, runtime.verification, member.view());
+  verifySeal(ready);
+  assertMemberModes(r, ready);
+  return { retained, ready, ready_sha256: hash(bytes), verifySeal };
+}
+function publicationEffects(ready) {
+  return ready.artifacts.map(item => ({ path: item.path, before: typeof item.before === 'string' ? item.before : null,
+    after: { sha256: hash(item.content) } }));
+}
+/** Issue 343 U5: the exact typed effects of a verified member's publication (read-only). */
+async function retainedPublication(request, runtime = {}) {
+  const context = retainedRequest(request, runtime);
+  const { r, member, loc, root, cwd, receiptFile, verificationIdentity } = context;
+  if (member.pendingOperation()) fail('batch-member-publication-pending');
+  const prepared = await retainedReady(context, runtime);
+  // The ready record must be exactly what the real completion core derives now from the anchored record.
+  await assertRetainedReady({ request: r, loc, root, cwd, receiptFile, verificationIdentity, verificationSuccessor: null, member,
+    markerChain: member.markerChain(taskMarkerPath(r)), verifySeal: prepared.verifySeal, notifyPhase: () => {},
+    appendOwnedEvents: () => fail('batch-member-owner-event-deferred') }, prepared.ready, prepared.retained);
+  return { task_id: r.taskId, dispatch_id: context.dispatchId, member_ref: member.member_ref, ready_sha256: prepared.ready_sha256,
+    effects: publicationEffects(prepared.ready) };
+}
+/** Issue 343 U5: the canonical publication of one member inside its signed, in-flight member-artifacts intent. */
+async function publishRetainedMember(request, runtime = {}) {
+  const context = retainedRequest(request, runtime);
+  const { r, member } = context;
+  const prepared = await retainedReady(context, runtime);
+  const pending = member.pendingOperation(), intent = pending && pending.payload;
+  if (!intent || intent.species !== 'member-artifacts' || intent.member_ref !== member.member_ref || !intent.producer
+      || intent.producer.ready_sha256 !== prepared.ready_sha256
+      || canonicalDigest(intent.effects) !== canonicalDigest(publicationEffects(prepared.ready))) fail('batch-member-publication-intent-required');
+  const result = await publishReadyRecord(r, prepared.ready, () => member.assertOwnerSurface(), undefined, { memberPublication: member });
+  return { status: 'published', task_id: r.taskId, dispatch_id: context.dispatchId, member_ref: member.member_ref,
+    ready_sha256: prepared.ready_sha256, result_status: result && typeof result.status === 'string' ? result.status : null, provider_called: false };
+}
+
+async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
   let verificationSuccessor = null;
   let transportReturned = false;
   let partialFixResult = false;
@@ -1837,8 +2828,23 @@ async function runUnitSidecarCore(request, runtime, identity) {
   // The typed pre-provider refusal raised by this attempt's own last launch hook, kept so that an
   // adapter that rewraps foreign exceptions of its packaging step cannot erase it (see the catch).
   let packagingRefusal = null;
+  const admitFinalLaunch = () => {
+    try {
+      require('./forge-protected-owner-activity').assertPreflightAdmission();
+      if (r.scope !== 'standalone-task' && r.milestoneId) require('./forge-milestone-time-admission').assertTransportEntry({
+        cwd: r.contextRoot || r.cwd, milestone: r.milestoneId, unit: unitLabel(r, locations(r)), now: runtime.now });
+      else admitTaskLaunch();
+      // Issue 343 U0c: beside the live last-spawn admission, the read-only recheck of the
+      // enrolled plan-slice generation of a milestone execute-task, immediately before spawn.
+      if (transport.mode === 'execute') assertExecutionPlanGeneration(r, root);
+    } catch (refusal) {
+      if ((admissionRefusal(refusal) || planGenerationRefusal(refusal)) && refusal.provider_called === false) packagingRefusal = refusal;
+      throw refusal;
+    }
+  };
   const enterTransport = () => {
     packagingRefusal = null;
+    require('./forge-protected-owner-activity').assertPreflightAdmission();
     if (verificationSuccessor) fail('verification-successor-no-inference');
     if (r.scope !== 'standalone-task' && r.milestoneId) require('./forge-milestone-time-admission').assertTransportEntry({
       cwd: r.contextRoot || r.cwd, milestone: r.milestoneId, unit: unitLabel(r, locations(r)), now: runtime.now });
@@ -1846,11 +2852,28 @@ async function runUnitSidecarCore(request, runtime, identity) {
     // native execution callback and recovery): a linked task outside its horizon refuses here,
     // before any spawn.
     else admitTaskLaunch();
+    // Issue 343 U0c: the same read-only generation recheck at every actual execute entry.
+    if (transport.mode === 'execute') assertExecutionPlanGeneration(r, root);
+    // Issue 343 U3b: a cohort member's complete seam again at its launch (claim, begin and lease,
+    // physical map and plan view), before any provider: a refusal here called none.
+    if (member) {
+      try { member.resolve(); }
+      catch (refusal) { if (typeof refusal?.provider_called !== 'boolean') refusal.provider_called = false; throw refusal; }
+    }
     recoveryReady?.();
     recoveryReady = null;
     if (!executingObserved) { executingObserved = true; notifyPhase('executing'); }
   };
   const r = request || {}, route = r.route || {};
+  if (r.partialContinuation !== undefined || runtime.partialContinuation !== undefined)
+    require('./forge-execution-continuation').validate(runtime.partialContinuation, r);
+  // Issue 343 U3b: the explicit cohort-member branch exists only with the member's live handle
+  // (beside the request, never inside it); a request naming a batch or an aggregate claim never
+  // takes the single path without it, and combinations not yet integrated refuse before any write.
+  const member = memberHandle === undefined ? null : memberExecution(memberHandle, r);
+  if (!member && (r.batch_id !== undefined || r.claim?.batch_roots)) fail('execution-member-handle-required');
+  if (member && (r.scope !== 'milestone' || runtime.verificationSuccessor !== undefined || r.ownerBroker
+      || runtime.assertRecoveryReady || runtime.savedNativeResult)) fail('batch-member-operation-unsupported');
   if (!fs.existsSync(`${r.resultFile}.receipt.json`)) require('./forge-dispatch-resolve').assertMilestoneContext(r);
   const transport = capability(route.resolved_worker_engine, r.unitType, r.scope === 'milestone' ? {} : r);
   if (!transport.supported) fail(transport.reason_code, transport.hint);
@@ -1861,10 +2884,20 @@ async function runUnitSidecarCore(request, runtime, identity) {
   const nativeAuthority = () => hash(JSON.stringify({ request: r, capabilities: runtime.activeCapabilities, verification: runtime.verification }));
   const nativeAuthorityHash = nativeExecution ? nativeAuthority() : null;
   const nativePromptIdentity = nativeExecution && r.nativePromptFile && fs.existsSync(r.nativePromptFile) ? physicalFileIdentity(r.nativePromptFile) : null;
-  if (route.dispatch_allowed !== true || (!nativeExecution && (route.worker_mode !== 'sidecar' || !route.sidecar_declared))
-    || !guard.dispatch_allowed) fail(guard.reason_code || 'route-refused', guard.hint);
+  // Read-only artifact admission remains after saved-receipt replay below.
+  // A newly refused route cannot enter; historical ready receipts may replay.
+  if (route.dispatch_allowed !== true && guard.artifact_admission) {
+    require('./forge-transport-capabilities').assertReadOnlyArtifactContext({ engine: route.resolved_worker_engine,
+      workerMode: route.worker_mode, mode: transport.mode, scope: r.scope, phase: r.phase, unitType: r.unitType });
+  }
+  if (route.dispatch_allowed !== true || (!guard.dispatch_allowed && !guard.artifact_admission)) fail(guard.reason_code || 'route-refused', guard.hint);
+  if (!nativeExecution && (route.worker_mode !== 'sidecar' || !route.sidecar_declared)) {
+    fail('execution-entrypoint-incompatible', route.worker_mode === 'native' && r.scope === 'milestone'
+      ? 'Native milestone execution requires the native owner delivery API (forge-native-execution), not runUnitSidecar.'
+      : 'This execution entrypoint requires a declared sidecar route or standalone native execution.');
+  }
   if (transport.mode === 'execute' && !fs.existsSync(`${r.resultFile}.receipt.json`)) {
-    preflightExecutionVerification(r, { verification: runtime.verification });
+    preflightExecutionVerification(r, { verification: runtime.verification, ...(member ? { memberView: member.view() } : {}) });
   }
   const authoritativeModel = route.model_resolved || route.model;
   if (!authoritativeModel
@@ -1887,6 +2920,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
   // Both code and context roots are worker-readable; neither owns the result.
   xllm.validateResultFileTarget(resultFile, root);
   artifactAttemptFiles(r); // Validate all attempt channels against every declared root before writes.
+  // Issue 343 U3b: a member's channels also stay outside every sibling, integration and evidence root.
+  if (member) member.assertChannels(resultFile);
   const loc = locations(r);
   const dispatchId = xllm.normalizeDispatchId(r.dispatchId, 'unit');
   identity.dispatch_id = dispatchId;
@@ -1974,11 +3009,16 @@ async function runUnitSidecarCore(request, runtime, identity) {
       json(receiptFile, record);
       return;
     }
+    // Issue 343 U3b: every owner event of a cohort member is a signed line of the cohort stream.
+    if (member) return member.appendEvent(line);
     if (recoveryReady?.appendOwnerEvent) return recoveryReady.appendOwnerEvent(line);
     if (r.ownerBroker) return require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker)
       .append('.gsd/forge/events.jsonl', line);
     const protectedOwner = record?.execution?.protected_owner || record?.recovery_baseline?.protected_owner;
     if (!protectedOwner) {
+      // Issue 440: before S0, the start events of a live v1 attempt still go
+      // through the declared writer, so its chain is continuous from the origin.
+      if (!record?.preparation_surface && managedOwnerEvents(root, record)) return appendProtectedOwnerEvents(root, receiptFile, record, [line]);
       const key = '.gsd/forge/events.jsonl';
       const surface = record?.preparation_surface;
       const previous = surface && typeof surface[key] === 'string' && fs.existsSync(eventsFile)
@@ -2002,7 +3042,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
     const batch = lines.slice();
     await livenessQueue;
     const protectedOwner = record?.execution?.protected_owner || record?.recovery_baseline?.protected_owner;
-    if (verificationSuccessor || recoveryReady?.appendOwnerEvent || r.ownerBroker || !protectedOwner) {
+    if (verificationSuccessor || recoveryReady?.appendOwnerEvent || r.ownerBroker || member || !protectedOwner) {
       for (const line of batch) await appendOwnedEvent(line, record);
     } else return appendProtectedOwnerEvents(root, receiptFile, record, batch);
   }
@@ -2127,7 +3167,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
     const detail = diagnostic(error.diagnostic?.reason || (code === 'untrusted-output-barrier'
       ? 'control-data-output' : code === 'artifact-direct-write-detected' ? 'validator-failed'
         : ['ready', 'executed'].includes(record.phase) ? 'publication-failed' : 'adapter-failed'), error.diagnostic);
-    const replayable = ['ready', 'executed'].includes(record.phase);
+    const incompleteExecution = require('./forge-execution-continuation').incomplete(record);
+    const replayable = ['ready', 'executed'].includes(record.phase) && !incompleteExecution;
     if (replayable) error.stage = 'publication';
     error.diagnostic = detail;
     if (record.final_evidence) record.final_evidence = { ...record.final_evidence,
@@ -2137,11 +3178,12 @@ async function runUnitSidecarCore(request, runtime, identity) {
     let failure = { status: 'adapter-failed', dispatch_id: dispatchId, reason_code: code,
       ...(retained ? { provisional_terminal: { present: true, state: retained.state, accepted: false } } : {}),
       ...(record.returned_response ? { returned_response: record.returned_response } : {}),
+      ...(record.rejected_candidate ? { rejected_candidate: record.rejected_candidate } : {}),
       ...(record.plan_task_diagnostic ? { plan_task_diagnostic: record.plan_task_diagnostic } : {}),
       provider_called: typeof error.provider_called === 'boolean' ? error.provider_called : record.provider_called === true ? true : 'unknown',
       error_class: xllm.classifyErrorClass(error.message), diagnostic: detail,
       final_evidence: record.final_evidence || null,
-      layer: replayable ? 'publication' : 'transport-adapter',
+      layer: error.stage === 'plan-admission' ? 'plan-admission' : replayable ? 'publication' : 'transport-adapter',
       duration_ms: record.started_at ? Date.now() - Date.parse(record.started_at) : null,
       ...(record.execution ? { request_sha256: fingerprint, packaged_context: record.execution.packaged_context || null,
         budgets: record.execution.budgets, layer: replayable ? 'publication' : 'writing-adapter',
@@ -2149,7 +3191,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
         duration_ms: record.started_at ? Date.now() - Date.parse(record.started_at) : null } : {}),
       recovery: replayable ? 'replay-publication' : 'operator-required',
       failed_at: new Date().toISOString(), ...(replayable ? {} : (extra || {})),
-      ...(admissionRefusal(error) ? { layer: 'milestone-time-admission' } : {}) };
+      ...(admissionRefusal(error) ? { layer: 'milestone-time-admission' }
+        : planGenerationRefusal(error) ? { layer: PLAN_GENERATION_STAGE } : {}) };
     if (retained?.private_ref) {
       if (!transaction) {
         transaction = { record, failure, complete: false };
@@ -2159,7 +3202,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
     const failedSessionSha = sessionShaOf(null, error);
     if (failedSessionSha) record.session_sha256 = failedSessionSha;
     // Never overwrite the validated response if publication was interrupted.
-    if (!replayable && !transaction?.receiptDone) {
+    if (!replayable && !incompleteExecution && !transaction?.receiptDone) {
       writeSameJson(receiptFile, { ...record, phase: 'failed', failure });
       if (transaction) transaction.receiptDone = true;
     }
@@ -2179,7 +3222,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       else {
         failure.recovery = 'unavailable';
         failure.recovery_reason_code = require('./forge-attempt-telemetry').code(captureError.code, 'recovery-capture-failed');
-        if (!replayable) writeSameJson(receiptFile, { ...record, phase: 'failed', failure });
+        if (!replayable && !incompleteExecution) writeSameJson(receiptFile, { ...record, phase: 'failed', failure });
         writeSameJson(resultFile, failure);
       }
     }
@@ -2189,7 +3232,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       // no recovery state or authorization is fabricated for an invalid identity.
       failure.recovery = 'unavailable';
       failure.recovery_reason_code = transaction.captureOutcome.code;
-      if (!replayable) writeSameJson(receiptFile, { ...record, phase: 'failed', failure });
+      if (!replayable && !incompleteExecution) writeSameJson(receiptFile, { ...record, phase: 'failed', failure });
       writeSameJson(resultFile, failure);
     }
     if (!transaction?.cleanupDone) {
@@ -2211,7 +3254,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
   // Local-only evidence, not a delivery or a replay authorization. Persist before
   // unit validation can reject a transport-normalized response and overwrite its
   // result channel. Exclusive creation prevents a later attempt replacing it.
-  async function preserveReturnedResponse(result) {
+  async function preserveReturnedResponse(result, { recordTelemetry = true } = {}) {
     const file = `${resultFile}.returned.json`;
     const envelope = { version: 1, dispatch_id: dispatchId, request_fingerprint: fingerprint,
       result, trust: 'transport-normalized; unit-validation-pending' };
@@ -2224,7 +3267,11 @@ async function runUnitSidecarCore(request, runtime, identity) {
     const record = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
     record.returned_response = { version: 1, sha256: hash(bytes), bytes: bytes.length,
       channel: 'resultFile.returned.json', unit_validation: 'pending' };
-    if (result.transport_telemetry) record.telemetry = result.transport_telemetry;
+    if (recordTelemetry && result.transport_telemetry) record.telemetry = result.transport_telemetry;
+    if (recordTelemetry && result.transport_telemetry && record.final_evidence) {
+      record.final_evidence = { ...record.final_evidence,
+        model_observed: observedModelTelemetry(result.transport_telemetry).model_observed, stage: 'returned' };
+    }
     json(receiptFile, record);
   }
   function writeProvisionalAnchor(file, bytes) {
@@ -2245,6 +3292,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
   const verificationApi = require('./forge-verify');
   const verifySeal = record => {
     if (transport.mode !== 'execute' || !r.execution_contract) return;
+    // Issue 343 U3b: a cohort member always verifies a real seal bound to its current runtime view.
+    if (member) return verifyMemberSeal(r, record, verificationIdentity, runtime.verification, member.view());
     if (record.verification_successor || verificationSuccessor) {
       if (!verificationSuccessor) fail('verification-successor-capability-required');
       verificationSuccessor.assertRecord(record);
@@ -2283,53 +3332,77 @@ async function runUnitSidecarCore(request, runtime, identity) {
           || hash(fs.readFileSync(r.nativePromptFile)) !== record.execution.packaged_context.sha256) fail('native-prompt-file-changed');
     }
   };
+  // The extracted completion core with this attempt's single context (its exact previous behavior).
+  // A cohort member never completes here: it is retained, and verified only after the barrier.
   async function completeExecution(record, deferredEvents = null) {
+    if (member) fail('batch-member-operation-unsupported');
+    return completeExecutionCore({ request: r, loc, root, cwd, receiptFile, verificationIdentity, verificationSuccessor,
+      successorCapability: runtime.verificationSuccessor, member: null, verifySeal, notifyPhase, appendOwnedEvents,
+      onVerificationCheck: runtime.onVerificationCheck }, record, deferredEvents);
+  }
+  // Issue 343 U3b: the retained result of a cohort member (never a done delivery) on its channel.
+  function retainedResult(stage, retained, providerCalled) {
+    const residual = retained.executed_record?.residual || (stage === 'residual' ? JSON.parse(fs.readFileSync(receiptFile,'utf8')).residual : null);
+    const result = { status: residual ? residual.result_status : 'retained', stage, dispatch_id: dispatchId, batch_id: retained.batch_id, member_ref: retained.member_ref,
+      ...(residual ? {result_status:residual.result_status,reason_code:residual.reason_code,reason:residual.reason,pending_questions:residual.pending_questions} : {}),
+      task_id: retained.task_id, retained_ref: { path: retained.ref_path, sha256: retained.ref_sha256 },
+      anchor_sha256: retained.anchor.sha256, provider_called: residual ? residual.provider_called : providerCalled,
+      ...(residual && providerCalled === false ? { replay_provider_called: false } : {}) };
+    json(resultFile, result);
+    notifyPhase('waiting');
+    return result;
+  }
+  // Issue 343 U3b: a finished cohort member is retained as its executed record plus its real seal:
+  // the exact executed bytes (copied immutably) and the RetainedRef in the cohort batch area, bound
+  // by the broker's single anchor of the attempt once its attached writer joined. No .gsd artifact,
+  // task marker, controller completion, owner event or done result; returned.json stays custody.
+  async function retainExecuted(record, telemetry = null, providerCalled = true) {
     verifySeal(record);
-    if (record.execution) require('./forge-task-execution').assertReplay(r, record);
-    else if (record.milestone_delivery) {
-      const api = require('./forge-task-execution');
-      const saved = record.milestone_delivery;
-      assertMilestoneDeliveryReplay(r, record);
-      api.assertProtected(root, verificationSuccessor
-        ? verificationSuccessor.expectedOwner(record, saved.protected_owner) : saved.protected_owner);
+    assertMemberModes(r, record);
+    const bytes = fs.readFileSync(receiptFile);
+    if (!bytes.equals(Buffer.from(`${JSON.stringify(record, null, 2)}\n`, 'utf8')) || !['executed','residual'].includes(record.phase)
+        || !record.milestone_delivery || !record.recovery_baseline) fail('batch-member-executed-changed');
+    const response = record.returned_response, responseFile = `${resultFile}.returned.json`;
+    if (!response || !fs.existsSync(responseFile) || hash(fs.readFileSync(responseFile)) !== response.sha256) fail('batch-member-response-changed');
+    const digest = require('./forge-code-roots').digest;
+    const retained = await member.retain({ executed: bytes, response: { path: responseFile, sha256: response.sha256 },
+      seal_sha256: record.verification_seal.sha256, baseline_sha256: digest(record.recovery_baseline),
+      delta_sha256: digest({ verified_files: record.milestone_delivery.verified_files,
+        verified_modes: record.milestone_delivery.verified_modes, code_state: record.milestone_delivery.code_state }) });
+    if (telemetry) await sessionCleanupEvent(telemetry.session?.cleanup, sessionShaOf(telemetry));
+    return retainedResult(record.phase, retained, providerCalled);
+  }
+  // Issue 343 U3b: the replay of a cohort member respects the barrier. A saved executed record is
+  // revalidated and stays (or, saved before its retention completed, becomes) the retained
+  // execution; a verified ready record stays unpublished. Zero provider calls, no completion.
+  async function replayRetainedMember(saved) {
+    verifySeal(saved);
+    await runtime.announce?.('reaproveitado', { ...identity, provider_called: false });
+    const retained = await member.retained();
+    if (retained && !sameExecutedBase(saved, retained.executed_record)) fail('batch-member-retained-changed');
+    if (saved.phase === 'ready') {
+      if (!retained) fail('batch-member-retained-required');
+      await assertRetainedReady({ request: r, loc, root, cwd, receiptFile, verificationIdentity, verificationSuccessor: null,
+        member, markerChain: member.markerChain(taskMarkerPath(r)), verifySeal, notifyPhase, appendOwnedEvents }, saved, retained);
+      return retainedResult('ready', retained, false);
     }
-    if (r.execution_contract && (!record.delivery_capture || !record.delivery_capture.passed)) {
-      const resourceEvents = [];
-      notifyPhase('verifying');
-      const deliveryCapture = require('./forge-verify').captureRootDelivery(r.execution_contract,
-        fs.readFileSync(r.planFile, 'utf8'), { ...r.verification, verificationSeal: record.verification_seal, verificationIdentity, unit: loc.rules[loc.delivery.input].unit,
-          resourceEventSink: line => resourceEvents.push(line),
-          ...(typeof runtime.onVerificationCheck === 'function' ? { onCheck: runtime.onVerificationCheck } : {}) });
-      record = { ...record, delivery_capture: deliveryCapture };
-      // Retain stdout, cleanup and the actual failing check before throwing.
-      // A failed capture never satisfies replay: the gate runs again above.
-      if (!deferredEvents) json(receiptFile, record);
-      if (deferredEvents) deferredEvents.push(...resourceEvents);
-      else await appendOwnedEvents(resourceEvents, record);
-      if (!deliveryCapture.passed) fail('execution-verification-failed');
-      if (record.execution) require('./forge-task-execution').assertReplay(r, record);
-      if (!deferredEvents) json(receiptFile, record);
-    }
-    const artifacts = executeDeliveryArtifacts(r, loc, record.result, root, cwd, record.delivery_capture);
-    const ready = { ...record, phase: 'ready', artifacts: artifacts.map(a => ({ ...a, before: record.before[a.path] ?? null })) };
-    // Milestone v2 only: the owner marker enters the durable record after the
-    // validated delivery artifacts and last, so a checked task implies delivery.
-    if (r.execution_contract && record.milestone_delivery && !record.execution && record.result?.status === 'done') {
-      const marker = createTaskMarker(r, root, record.before?.[taskMarkerPath(r)]);
-      if (marker) ready.artifacts.push(marker);
-    }
-    if (!deferredEvents) json(receiptFile, ready);
-    if (verificationSuccessor) verificationSuccessorReady.set(ready, {
-      cap: runtime.verificationSuccessor, record: require('./forge-code-roots').digest(ready),
-      request: require('./forge-code-roots').digest(r),
-    });
-    return ready;
+    assertMilestoneDeliveryReplay(r, saved);
+    if (retained) return retainedResult(saved.phase === 'residual' ? 'residual' : 'executed', retained, false);
+    if (member.barrierSealed()) fail('batch-member-retained-required');
+    await member.verifyOwner('execution');
+    return retainExecuted(saved, null, false);
   }
   if (existing) {
     if (existing.fingerprint !== fingerprint && !(memoryContract && (legacyMemoryReceipt(existing, legacyFingerprint)
         || historicalV2MemoryReceipt(existing, r, loc.sourceUnit, legacyFingerprint)))) {
       fail('dispatch-identity-conflict');
     }
+    if (existing.retained_request) require('./forge-request-retention').assertForReceipt(r, existing);
+    // Issue 343 U3b: a cohort member's saved delivery record replays only as its retention.
+    if (member && existing.milestone_delivery && ['executed','ready','residual'].includes(existing.phase)) {
+      return await replayRetainedMember(existing);
+    }
+    if (require('./forge-execution-continuation').incomplete(existing)) fail('execution-partial-continuation-required');
     if (existing.phase === 'ready' || existing.phase === 'executed') {
       if (nativeExecution) {
         const { native: ignoredNative, dispatch_id: ignoredDispatch, workflow_id: ignoredWorkflow,
@@ -2393,13 +3466,17 @@ async function runUnitSidecarCore(request, runtime, identity) {
       const error = new Error('Recorded sidecar attempt failed; no provider was relaunched.');
       error.code = existing.failure.reason_code;
       error.diagnostic = diagnostic(existing.failure.diagnostic?.reason, existing.failure.diagnostic);
+      withRecordedAttemptNextAction(error);
       json(resultFile, existing.failure);
       // Follows the failure event recorded by the attempt itself; nothing is relaunched.
       notifyPhase('failed', { reason_code: existing.failure.reason_code });
       throw error;
     }
-    fail('sidecar-attempt-interrupted', 'Inspect the recorded heartbeat/process and recover this attempt before retrying with a new dispatch id. No worker was relaunched.');
+    failRecordedAttempt('sidecar-attempt-interrupted', 'Inspect the recorded heartbeat/process and recover this attempt before retrying with a new dispatch id. No worker was relaunched.');
   }
+  // #350: after saved-receipt replay, before owner reads, receipt, announce and provider: a Codex
+  // read-only artifacts profile that cannot receive its inputs is refused (identity only, no prompt).
+  require('./forge-transport-capabilities').assertReadOnlyArtifactContext({ engine: route.resolved_worker_engine, workerMode: route.worker_mode, mode: transport.mode, scope: r.scope, phase: r.phase, unitType: r.unitType });
   const before = Object.fromEntries(loc.allowed.map(p => [p, fileHash(target(root, p))]));
   // Pre-capture every existing task target. New targets have a null baseline;
   // a concurrently created plan is a conflict, not permission to overwrite it.
@@ -2414,12 +3491,15 @@ async function runUnitSidecarCore(request, runtime, identity) {
     : r.unitType === 'execute-task' && !loc.execution ? `${loc.slice}/${r.sliceId}-PLAN.md` : null;
   const bookkeepingText = bookkeeping && fs.readFileSync(target(root, bookkeeping), 'utf8');
   if (bookkeeping) before[bookkeeping] = hash(bookkeepingText);
-  // Review-fix: boundary and claim are validated, then the surgical-reset state
-  // is captured, all BEFORE the started receipt. A refusal here leaves no
-  // receipt and never reaches a provider.
+  // Review-fix: boundary and claim are validated here (write-free); the policy
+  // admission and then the surgical-reset state follow the permission checks,
+  // all BEFORE the started receipt. A refusal leaves no receipt and never
+  // reaches a provider.
   const fix = transport.mode === 'fix' ? prepareReviewFix(r, loc, { cwd, root, resultFile, route, dispatchId }) : null;
   const executionApi = loc.execution ? require('./forge-task-execution') : null;
   const execution = executionApi ? executionApi.prepare({ ...r, ...(nativeBinding ? { nativeInvocation: nativeBinding } : {}) }, root, cwd) : null;
+  const partialContinuation = runtime.partialContinuation === undefined ? null
+    : require('./forge-execution-continuation').apply(runtime.partialContinuation, r, execution);
   let executeProcedure;
   if (transport.mode === 'execute') {
     executeProcedure = require('./forge-procedure-context').loadProcedureContext({ cwd,
@@ -2457,20 +3537,41 @@ async function runUnitSidecarCore(request, runtime, identity) {
   const permissionRequested = r.claudePermissions !== undefined;
   if (claudeWriter && transport.mode === 'fix' && r.verification !== undefined && !permissionRequested) fail('claude-verification-permission-required');
   if (permissionRequested && (r.claudePermissions !== 'verification' || !claudeWriter || !r.execution_contract)) fail('claude-permission-policy-invalid');
+  // Issue 343 U3b: a cohort member's seal and permission policy bind the runtime view its handle
+  // validated (the original plan hash stays); the multiroot Claude refusal is unchanged.
+  const memberViewOption = member ? { memberView: member.view() } : {};
   const verificationSeal = r.execution_contract && transport.mode === 'execute'
-    ? preflightExecutionVerification(r, { verification: runtime.verification, identity: verificationIdentity })
+    ? preflightExecutionVerification(r, { verification: runtime.verification, identity: verificationIdentity, ...memberViewOption })
     : r.execution_contract && transport.mode === 'fix' && permissionRequested
       ? verificationApi.normalizeExecutionVerification(r.execution_contract, '', r.verification, runtime.verification, verificationIdentity) : null;
   // Resolve permissions before creating a receipt or entering a transport.
   // Legacy requests without a root contract gain no shell permission.
   const permissionPolicy = permissionRequested && verificationSeal
-    ? require('./forge-claude-permissions').createPolicy({ seal: verificationSeal, contract: r.execution_contract, identity: verificationIdentity, cwd }) : null;
+    ? require('./forge-claude-permissions').createPolicy({ seal: verificationSeal, contract: r.execution_contract, identity: verificationIdentity, cwd,
+      ...memberViewOption }) : null;
+  // Review-fix policy admission (last gate), then the reset state.
+  if (fix) {
+    admitReviewFix(r, loc, fix, { root, dispatchId });
+    createReviewFixResetState(fix, { dispatchId });
+  }
+  // Issue 343 U0c: a new milestone plan-slice attempt records the owner's requirement
+  // marker in its started receipt; an invalid begin enrollment refuses before any receipt.
+  const planGeneration = transport.mode === 'plan'
+    ? buildPlanGenerationMarker(r, { fingerprint, dispatchId, root, begin: planGenerationBegin(r, runtime, root) }) : null;
+  // #382: artifact attempts retain their exact inputs (exclusive write + fsync)
+  // after every refusal gate and before started/provider. Other transports keep
+  // their own receipt contracts unchanged.
+  const retainedRequest = transport.mode === 'artifacts' && !verificationSuccessor
+    ? require('./forge-request-retention').retain(r) : null;
   const startedAt = new Date().toISOString();
   // Exclusive creation arbitrates concurrent invocations of the same attempt.
   fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'started', fingerprint, dispatch_id: dispatchId, before, started_at: startedAt,
+    ...(retainedRequest ? { retained_request: retainedRequest } : {}),
     recovery_identity_sha256: recoveryIdentity(r), route, ...(verificationSeal ? { verification_seal: verificationSeal } : {}),
+    ...(planGeneration ? { plan_generation: planGeneration } : {}),
     ...(resumedFrom ? { resumed_from: resumedFrom, session_sha256: resumeSessionSha } : {}),
     ...(execution ? { execution: { inputs: execution.inputs, budgets: execution.budgets }, reset_state_file: executionStateFile } : {}),
+    ...(partialContinuation ? { partial_continuation: partialContinuation } : {}),
     input_pending_questions: r.pending_questions || [],
     request_fingerprint: r.preparationRequestFingerprint || null,
     preparation_identity: r.preparationIdentity || null,
@@ -2484,9 +3585,18 @@ async function runUnitSidecarCore(request, runtime, identity) {
     slice: r.sliceId, dispatchId, model, engine: route.resolved_worker_engine,
     transport: nativeExecution ? 'native-tool' : route.resolved_worker_engine === 'claude' ? 'claude-cli' : 'app-server',
   }, route, startedAt);
-  if (r.ownerBroker) await require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker).append('.gsd/forge/events.jsonl', JSON.stringify(dispatchEvent) + '\n');
+  // Issue 343 U3b: a cohort member's dispatch event is the canonical member builder's, signed by
+  // the cohort broker (its cohort fields come from the broker registry, its route is its own).
+  if (member) await member.appendDispatch({ unit: label, milestone: r.milestoneId, slice: r.sliceId, dispatchId, model,
+    engine: route.resolved_worker_engine, transport: route.resolved_worker_engine === 'claude' ? 'claude-cli' : 'app-server' }, route, startedAt);
+  else if (r.ownerBroker) await require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker).append('.gsd/forge/events.jsonl', JSON.stringify(dispatchEvent) + '\n');
   else if (recoveryReady?.appendOwnerEvent) recoveryReady.appendOwnerEvent(JSON.stringify(dispatchEvent) + '\n');
-  else fs.appendFileSync(eventsFile, JSON.stringify(dispatchEvent) + '\n');
+  else if (!loc.preparation && liveManagedAttempt(root, dispatchId)) {
+    // Issue 440: inside the live v1 context of this attempt, the declared writer.
+    const started = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+    if (managedOwnerEvents(root, started)) appendProtectedOwnerEvents(root, receiptFile, started, [JSON.stringify(dispatchEvent) + '\n']);
+    else fs.appendFileSync(eventsFile, JSON.stringify(dispatchEvent) + '\n');
+  } else fs.appendFileSync(eventsFile, JSON.stringify(dispatchEvent) + '\n');
   if (loc.preparation) {
     const saved = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
     saved.preparation_surface = preparationSurfaceSnapshot(r);
@@ -2501,7 +3611,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
   let finishContinuation = null;
   const options = { enterTransport: () => { enterTransport(); transportEntered = true; }, cwd, contextRoot: root, engine: route.resolved_worker_engine,
     permissionPolicy, permissionIdentity: permissionPolicy ? verificationIdentity : undefined,
-    unitType: r.unitType,
+    unitType: r.unitType, scope: r.scope, phase: r.phase,
     calibrationOptions: runtime.calibrationOptions,
     provisionalStoreRoot: runtime.provisionalStoreRoot,
     onProgress: snapshot => {
@@ -2525,16 +3635,13 @@ async function runUnitSidecarCore(request, runtime, identity) {
       json(receiptFile, { ...saved, final_evidence: packaged.final_evidence,
         ...(saved.execution ? { execution: { ...saved.execution, packaged_context: packaged } } : {}) });
       const observed = runtime.onPackagedContext?.(packaged);
-      // Last launch hook: the adapters call it synchronously after packaging and before the
-      // spawn/turn/callback, so a refusal here is fail-closed (provider_called false). The refusal
-      // is recorded before it propagates: the Claude adapter catches it in its packaging step.
-      try { admitTaskLaunch(); }
-      catch (refusal) {
-        if (admissionRefusal(refusal) && refusal.provider_called === false) packagingRefusal = refusal;
-        throw refusal;
-      }
+      // Packaging admission remains useful, but Claude still prepares provisional
+      // retention and calibration afterwards. Its final spawn hook rechecks the same
+      // live owner boundary after all of that work, immediately before spawn.
+      admitFinalLaunch();
       return observed;
     },
+    onBeforeSpawn: admitFinalLaunch,
     hostRuntime: route.host_runtime, sidecarDeclared: true, model,
     effort: route.effort, timeoutSecs: ceilingFromRoute(route).seconds, resultFile, dispatchId,
     constraints: r.constraints || { auto_commit: false, deploy: false },
@@ -2600,6 +3707,11 @@ async function runUnitSidecarCore(request, runtime, identity) {
           effort_resolved: route.effort || null, effort_reason: route.effort_reason || null },
         artifacts: artifacts.map(a => ({ ...a, before: before[a.path] ?? null })) };
     const previous = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+    // Issue 343 U0c: the plan marker and evidence come only from this owner's receipt,
+    // never from the generic spread of a returned result.
+    if (transport.mode === 'plan') for (const key of PLAN_OWNER_FIELDS) {
+      if (Object.hasOwn(previous, key)) record[key] = previous[key]; else delete record[key];
+    }
     if (previous.provisional_replay) record.provisional_replay = previous.provisional_replay;
     if (transportTelemetry) record.telemetry = {...record.telemetry, observation: transportTelemetry.observation ? require('./forge-sidecar-calibration').observation(transportTelemetry.observation) : null};
     if (transportTelemetry?.calibration_proposal) record.calibration_proposal = transportTelemetry.calibration_proposal;
@@ -2648,7 +3760,17 @@ async function runUnitSidecarCore(request, runtime, identity) {
       const channels = artifactAttemptFiles(publicationRequest);
       if (!initial) {
         const { failure, provisional_terminal, ...kept } = parent.failed;
-        initial = JSON.stringify({ ...kept, phase: 'started', provisional_replay: {
+        // A provisional continuation has its own exact result/archive sibling.
+        // Preserve the failed parent's receipt and archive byte-for-byte; a
+        // legacy parent without retained data gains no inferred backfill.
+        let retainedRequest = null;
+        if (parent.failed.retained_request) {
+          const retention = require('./forge-request-retention');
+          const original = retention.read(parent.failed, r, { receiptPath: parentReceipt });
+          retainedRequest = retention.retain(publicationRequest, original.preparation_input === 'captured'
+            ? { preparationPreimage: original.preparation_json } : {});
+        }
+        initial = JSON.stringify({ ...kept, ...(retainedRequest ? { retained_request: retainedRequest } : {}), phase: 'started', provisional_replay: {
           parent_receipt_sha256: parent.receipt, parent_result_sha256: parent.result,
           inference_performed: false, provisional_id: metadata.id } }, null, 2) + '\n';
       }
@@ -2673,7 +3795,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
     // snapshot is not the caller's durable recovery authority.
     if (transport.mode === 'execute') {
       const saved = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
-      const baseline = captureMilestoneBaseline(r, saved, { nativeInvocation: nativeBinding });
+      const baseline = captureMilestoneBaseline(r, saved, { nativeInvocation: nativeBinding, ...(member ? { member } : {}),
+        ...(verificationSuccessor || runtime.assertRecoveryReady ? { ownOwnerChannel: true } : {}) });
       json(receiptFile, { ...saved, recovery_baseline: baseline });
     }
     const authorizationReference = require('./forge-attempt-recovery').bindRecoveryAuthorization(runtime.recoveryAuthorization);
@@ -2748,6 +3871,18 @@ async function runUnitSidecarCore(request, runtime, identity) {
         let artifacts;
       transportReturned = true;
       await livenessQueue;
+      const ownerActivity = require('./forge-protected-owner-activity').currentScope();
+      if (ownerActivity) {
+        await ownerActivity.joinWriter();
+        ownerActivity.verificationWindow(verificationSeal);
+      }
+       // A completed app-server turn can resolve while its local process is
+       // still draining/being terminated. Verify immutable deltas only after
+       // the real member writer exited and its PID is gone.
+       if (member) {
+         const processScope=require('./forge-execution-batch').currentMemberProcessScope();
+         if(processScope)await processScope.joinWriter();
+       }
       transportTelemetry = result.transport_telemetry || null;
       const trustedTransportRecord = transportTelemetry ? {
         telemetry: { ...observedModelTelemetry(transportTelemetry),
@@ -2759,7 +3894,10 @@ async function runUnitSidecarCore(request, runtime, identity) {
         advanceLivenessEvents(protectedBefore);
         for (const code of codeProtectedBefore) if (fs.realpathSync(code.root) === root) advanceLivenessEvents(code.before);
         if (r.ownerBroker) require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker).verify();
-        else executionApi.assertProtected(root, protectedBefore);
+        else {
+          if (nativeExecution) attestNativeAppends(r, runtime);
+          executionApi.assertProtected(root, protectedBefore);
+        }
         for (const code of codeProtectedBefore) executionApi.assertProtected(code.root, code.before);
         const verifiedFiles = executionApi.verifyResult(cwd, execution, result);
         // Persist the validated writing response before delivery rendering, which
@@ -2789,33 +3927,49 @@ async function runUnitSidecarCore(request, runtime, identity) {
         completed(result);
         return result;
       }
-      if (r.execution_contract && result.status === 'done') {
+      if (r.execution_contract && (result.status === 'done' || member && ['partial','blocked'].includes(result.status))) {
+        // Retain the returned object privately before integrity checks can refuse it;
+        // receipts gain only the hash reference. Not an acceptance or replay source.
+        await preserveReturnedResponse(result, { recordTelemetry: false });
         const api = require('./forge-task-execution');
         const saved = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
-        api.assertProtected(root, saved.recovery_baseline.protected_owner);
+        // Issue 343 U3b: a cohort member's owner surface is the cohort's common signed stream (S0
+        // and every sibling's signed append, through the broker), which also revalidates its seam.
+        if (member) await member.verifyOwner('execution');
+        else api.assertProtected(root, saved.recovery_baseline.protected_owner);
         for (const entry of saved.recovery_baseline.protected_roots) api.assertProtected(entry.path, entry.snapshot);
         const roots = require('./forge-code-roots');
         const baseline = saved.recovery_baseline;
         const state = require('./forge-surgical-reset').readState(baseline.state_file);
         if (baseline.state_sha256 !== baselineDigest(state)) fail('recovery-baseline-binding');
         if (baseline.input.sha256 !== roots.digest(fs.readFileSync(baseline.input.path))) fail('execution-input-changed');
-        const checked = roots.validatePlan(fs.readFileSync(r.planFile, 'utf8'), r.execution_contract);
+        // A cohort member's claims are its validated runtime view of the canonical plan.
+        const checked = member ? member.view().checked_runtime_plan : roots.validatePlan(fs.readFileSync(r.planFile, 'utf8'), r.execution_contract);
         const verifiedFiles = api.verifyResult(cwd, { execution_contract: r.execution_contract,
           claims: checked.writes, snapshots: state.repos }, result);
         // Save the validated response before checks/publication. A failing gate
         // must replay delivery, never infer again or capture a new writer baseline.
-        const executed = { ...saved, phase: 'executed', provider_called: true, ...trustedTransportRecord,
+        const isResidual = member && ['partial','blocked'].includes(result.status);
+        const residual = isResidual ? {result_status:result.status,reason_code:typeof result.reason_code==='string'?result.reason_code:'worker-'+result.status,
+          reason:typeof result.reason==='string'?result.reason:(result.must_haves_status || []).find(item=>item.reason)?.reason || null,
+          pending_questions:result.pending_questions || [],provider_called:true} : null;
+        const executed = { ...saved, phase: isResidual ? 'residual' : 'executed', provider_called: true, ...trustedTransportRecord,
+          ...(residual ? {residual} : {}),
           final_evidence: saved.final_evidence ? { ...saved.final_evidence, stage: 'returned', provider_called: true,
             duration_ms: Date.now() - Date.parse(startedAt),
             model_observed: result.transport_telemetry?.model_observed || result.appserver?.transport_telemetry?.model_observed || null } : null,
           milestone_delivery: { plan_sha256: hash(fs.readFileSync(r.planFile)),
             verified_files: verifiedFiles,
-            protected_owner: api.protectedSnapshot(root),
+            ...(member ? { verified_modes: captureMemberModes(r, verifiedFiles) } : {}),
+            protected_owner: member ? null : api.protectedSnapshot(root),
             protected_roots: saved.recovery_baseline.protected_roots,
             code_state: api.replayState(cwd, r.execution_contract) },
           result: { ...result, dispatch_id: dispatchId, workflow_id: r.workflowId,
             host_runtime: route.host_runtime, worker_engine: options.engine } };
         json(receiptFile, executed);
+        // Issue 343 U3b: a cohort member stops here, retained executed plus seal. Its heavy
+        // verification, publication and completion exist only after the cohort barrier.
+        if (member) return await retainExecuted(executed, transportTelemetry);
         const ready = await completeExecution(executed);
         result = await publish(ready, () => { assertNativePublication(ready); options.assertNativePublication?.(); });
         json(resultFile, result);
@@ -2866,7 +4020,31 @@ async function runUnitSidecarCore(request, runtime, identity) {
           if (fs.existsSync(legacy)) fail('legacy-task-plan-conflict', 'Migrate the explicitly selected legacy plan before publishing a second source.');
           return { path: `${loc.slice}/tasks/${p.id}/${p.id}-PLAN.md`, content: p.content };
         })];
+        if (result.status === 'done') recordPlanValidation(result);
         return finalizeUnitResult(result, artifacts, result.transport_telemetry || null);
+      }
+      // Issue 343 U0c: the returned bytes (already preserved above) are admitted again,
+      // independently of the transport, under the trusted scope; the receipt then gains
+      // plan_validation from those exact bytes and its own marker, before the ready record.
+      // The evidence is deterministic, so a continuation that reenters after it was saved
+      // reproduces it exactly; any other prior evidence refuses.
+      function recordPlanValidation(result) {
+        for (const key of PLAN_OWNER_FIELDS) {
+          if (Object.hasOwn(result, key)) planRefusal('plan-generation-marker-untrusted', `the returned result carries ${key}`, { provider_called: true });
+        }
+        const saved = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+        if (!Object.hasOwn(saved, 'plan_generation')) planRefusal('plan-generation-marker-missing', 'the started receipt carries no plan_generation', { provider_called: true });
+        const marker = verifyPlanGenerationMarker(saved.plan_generation, r, saved, root);
+        const admission = admitReturnedPlan(r, root, result.slice_plan.content, result.task_plans, { provider_called: true });
+        const evidence = buildPlanValidationEvidence(marker, admission);
+        if (Object.hasOwn(saved, 'plan_validation')) {
+          if (canonicalDigest(saved.plan_validation) !== canonicalDigest(evidence)) {
+            planRefusal('plan-validation-invalid', 'the receipt already carries other plan_validation evidence', { provider_called: true });
+          }
+          return;
+        }
+        saved.plan_validation = evidence;
+        json(receiptFile, saved);
       }
       finishContinuation = finishPlan;
       const promptDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'forge-plan-procedure-'));
@@ -2919,8 +4097,16 @@ async function runUnitSidecarCore(request, runtime, identity) {
           plan_sha256: r.ownerBroker?.manifest?.plan_sha256 || null };
         json(receiptFile, saved);
         if (r.ownerBroker) require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker).verify();
-        else if (JSON.stringify(preparationSurfaceSnapshot(r)) !== JSON.stringify(saved.preparation_surface)) fail('artifact-direct-write-detected');
-        if (r.phase === 'plan' && result.status === 'done') saved.plan_contract = require('./forge-task-preparation').preflightPlan(r, result.artifacts[0].content);
+        else {
+          const observed = preparationSurfaceSnapshot(r);
+          if (JSON.stringify(observed) !== JSON.stringify(saved.preparation_surface)) {
+            saved.preparation_surface_drift = { scope: 'whole-owner', attribution: 'unproven',
+              expected_sha256: hash(JSON.stringify(saved.preparation_surface)), observed_sha256: hash(JSON.stringify(observed)) };
+            json(receiptFile, saved);
+            fail('artifact-direct-write-detected');
+          }
+        }
+        if (r.scope === 'standalone-task' && r.phase === 'plan' && result.status === 'done') saved.plan_contract = require('./forge-task-preparation').preflightPlan(r, result.artifacts[0].content);
         saved.pending_questions = require('./forge-interaction').mergePendingQuestions(r.pending_questions || [], result.questions || []);
         json(receiptFile, saved);
       }
@@ -2946,7 +4132,11 @@ async function runUnitSidecarCore(request, runtime, identity) {
       } else {
         enterTransport();
         transportEntered = true;
-        const output = await xllm.invokeCodexAppServer({ ...options, prompt, schema, sandbox: 'read-only', onHeartbeat: heartbeat });
+        // Read-only delivery under the owner surface census: context health stays in
+        // memory, or its .gsd/forge/context/codex/* write refuses the valid answer as
+        // artifact-direct-write-detected (same class runExecute closed in f3c9968).
+        const output = await xllm.invokeCodexAppServer({ ...options, prompt, schema, sandbox: 'read-only', onHeartbeat: heartbeat,
+          persistContext: false });
         transportReturned = true;
         await livenessQueue;
         result = xllm.extractLastJsonBlock(output.finalText || output.agentTexts);
@@ -2971,6 +4161,40 @@ async function runUnitSidecarCore(request, runtime, identity) {
     // A transport failure can leave a queued liveness append: settle it before
     // the failed receipt and the terminal event are written.
     await livenessQueue;
+    if (transport.mode === 'plan' && error.rejected_candidate && error.stage === 'plan-admission') {
+      transportReturned = true;
+      if (error.plan_candidate) {
+        try { await preserveReturnedResponse(error.plan_candidate); }
+        catch { error.rejected_candidate.owner_retention = 'evidence-write-failed'; }
+      }
+      try {
+      const retained = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+      retained.rejected_candidate = error.rejected_candidate;
+      if (retained.returned_response) retained.returned_response.unit_validation = 'rejected';
+      if (error.transport_telemetry) {
+        retained.telemetry = error.transport_telemetry;
+        if (retained.final_evidence) retained.final_evidence = { ...retained.final_evidence,
+          ...observedModelTelemetry(error.transport_telemetry), stage: 'returned' };
+      }
+      json(receiptFile, retained);
+      } catch {
+        // Receipt I/O is secondary to the already observed semantic refusal.
+        // Keep the original error and telemetry; normal failure publication is
+        // attempted below and may retain evidence on its independent channel.
+        error.rejected_candidate.owner_receipt = 'evidence-write-failed';
+      }
+    }
+    // Issue 440: inside the live v1 context of THIS attempt, an external journal prefix
+    // change terminates as the canonical protected-metadata refusal with the named,
+    // sanitized journal diagnosis. The low-level writer code stays only as raw_reason_code;
+    // nothing is adopted, reset or appended, and every other path keeps its error as is.
+    if (error?.code === 'managed-surface-audit-prefix-changed' && !error.managed_surfaces && liveManagedAttempt(root, dispatchId)) {
+      let named = null;
+      try { named = require('./forge-managed-attribution').describeJournalMismatch(root); } catch { named = null; }
+      if (named) error = Object.assign(new Error('execution-protected-metadata'), { code: 'execution-protected-metadata',
+        managed_surfaces: named, raw_reason_code: error.code,
+        ...(typeof error.provider_called === 'boolean' ? { provider_called: error.provider_called } : {}) });
+    }
     // The Claude adapter rewraps any exception of its packaging step (where the last launch hook
     // runs, before its owned child) as its prompt I/O code. When this attempt's own hook refused,
     // that wrap reports no prompt I/O failure: the original typed refusal (code, provider_called
@@ -2988,7 +4212,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
     let extra = execution ? { reset_state_file: executionStateFile,
       possible_writes: providerCalled ? 'unknown' : false,
       reconciliation_required: providerCalled !== false }
-      : admissionRefusal(error) && transport.mode === 'execute' && providerCalled === false
+      : (admissionRefusal(error) || planGenerationRefusal(error)) && transport.mode === 'execute' && providerCalled === false
         ? { possible_writes: false, reconciliation_required: false } : null;
     const phase = fix ? JSON.parse(fs.readFileSync(receiptFile, 'utf8')).phase : null;
     if (fix && phase !== 'ready') {
@@ -3027,16 +4251,24 @@ async function runUnitSidecarCore(request, runtime, identity) {
     if (retained) registerContinuation(error, finishContinuation);
     try { await recordFailure(error, extra); }
     catch (secondary) {
-      if (!retained) throw secondary;
-      error.provisional_handoff = { status: 'pending', reason_code: 'failure-handoff-unavailable',
-        secondary_code: require('./forge-attempt-telemetry').code(secondary.code, 'unknown') };
+      if (transport.mode === 'plan' && error.rejected_candidate && error.stage === 'plan-admission') {
+        error.rejected_candidate.owner_receipt = 'evidence-write-failed';
+        try { json(resultFile, { status: 'adapter-failed', dispatch_id: dispatchId,
+          reason_code: error.code || 'plan-admission-failed', layer: 'plan-admission', provider_called: true,
+          rejected_candidate: error.rejected_candidate, telemetry: observedModelTelemetry(error.transport_telemetry),
+          recovery: 'operator-required', retention_diagnostic: 'receipt-unavailable' }); } catch { /* original refusal remains primary */ }
+      } else {
+        if (!retained) throw secondary;
+        error.provisional_handoff = { status: 'pending', reason_code: 'failure-handoff-unavailable',
+          secondary_code: require('./forge-attempt-telemetry').code(secondary.code, 'unknown') };
+      }
     }
     throw error;
   }
 }
 
-// Validate the review-fix request against the claim the parent can re-derive,
-// then capture the surgical-reset state beside the result channel.
+// Validate the review-fix request against the claim the parent can re-derive.
+// Write-free: the surgical-reset state is created only after the admission.
 function prepareReviewFix(request, loc, context) {
   const reviewFix = require('./forge-review-fix');
   const spec = request.reviewFix;
@@ -3058,7 +4290,6 @@ function prepareReviewFix(request, loc, context) {
   xllm.validateResultFileTarget(stateFile, context.root);
   const writable = Array.isArray(request.writableRoots) ? request.writableRoots.map(root => fs.realpathSync(root)) : [];
   const repoRoots = [context.cwd, ...writable];
-  require('./forge-surgical-reset').initState(stateFile, { cwd: context.cwd, attempt: context.dispatchId, repoRoots });
   const brief = reviewFix.buildBrief({ boundary: loc.reviewFix.boundary, unitLabel: loc.reviewFix.unitLabel,
     items, claimPaths: supplied, route: context.route });
   // REVIEW.md bytes before the provider turn: publication (and any replay)
@@ -3069,6 +4300,28 @@ function prepareReviewFix(request, loc, context) {
     catch { fail('review-fix-review-item-missing', `${reviewFile} is not readable; no worker was launched.`); }
   }
   return { items, brief, stateFile, repoRoots, cwd: context.cwd, reviewSnapshot };
+}
+
+// review-fix-policy-v1 admission: the last gate after validation and the
+// permission/seal checks, before the reset state, the started receipt, the
+// events and the provider. Replay and recovery return the recorded decision
+// without a new cycle. A refusal leaves no receipt: the affected items get the
+// deferral line (snapshot guarded) and the error carries the named code.
+function admitReviewFix(request, loc, fix, context) {
+  const reviewFix = require('./forge-review-fix');
+  const decision = require('./forge-review-policy').admitCorrection({ owner: context.root,
+    ...reviewFix.admissionScope(request, loc.reviewFix.boundary), dispatch_id: context.dispatchId, brief: fix.brief,
+    items: request.reviewFix.items, ...(request.reviewFixRecoveryOf !== undefined ? { recovery_of: request.reviewFixRecoveryOf } : {}) });
+  if (decision.allowed) return decision;
+  throw reviewFix.correctionAdmissionError({
+    request, decision,
+    expectedHashes: fix.reviewSnapshot,
+  });
+}
+
+function createReviewFixResetState(fix, context) {
+  require('./forge-surgical-reset').initState(fix.stateFile, { cwd: fix.cwd, attempt: context.dispatchId, repoRoots: fix.repoRoots });
+  return fix;
 }
 
 function reviewFixItemsTotal(request) {
@@ -3082,10 +4335,25 @@ function appendProtectedOwnerEvents(root, receiptFile, record, lines) {
   if (!batch.length) return;
   xllm.validateResultFileTarget(receiptFile, root);
   const protectedOwner = record?.execution?.protected_owner || record?.recovery_baseline?.protected_owner;
-  if (!protectedOwner) fail('execution-protected-metadata');
+  // Issue 440: inside the live v1 context of this exact attempt, the exact appended
+  // bytes are written and attributed transactionally under the same owner lock. Before
+  // S0 exists (start and dispatch events) the in-memory chain head is the baseline.
+  const managed = managedOwnerEvents(root, record);
+  // A live v1 context cannot write a different attempt's marked receipt through
+  // the legacy branch. Refuse the binding before any owner event is appended.
+  if (!managed && record?.recovery_baseline?.managed_surfaces && !record.execution?.protected_owner
+      && require('./forge-managed-attribution').currentAttribution(root)?.active) fail('execution-protected-metadata');
+  if (!protectedOwner && !managed) fail('execution-protected-metadata');
   const eventsFile = target(root, '.gsd/forge/events.jsonl');
   const executionApi = require('./forge-task-execution');
+  const appendManaged = () => require('./forge-managed-attribution').writeManagedSurface({
+    surface: 'owner-events', path: '.gsd/forge/events.jsonl', writer: 'scripts/forge-unit-sidecar.js#appendProtectedOwnerEvents',
+    produce: before => Buffer.concat([before || Buffer.alloc(0), ...batch.map(line => Buffer.from(line))]) });
   return require('./forge-artifact-reconciliation').withOwnerLock(root, () => {
+    if (!protectedOwner) {
+      appendManaged();
+      return;
+    }
     const expected = { ...protectedOwner };
     const current = executionApi.protectedSnapshot(root);
     for (const item of record.artifacts || []) if (current[item.path] === hash(item.content)) {
@@ -3096,11 +4364,16 @@ function appendProtectedOwnerEvents(root, receiptFile, record, lines) {
     executionApi.assertProtected(root, expected);
     let appended = fs.readFileSync(eventsFile);
     if (hash(appended) !== expected['.gsd/forge/events.jsonl']) fail('execution-owner-event-raced');
-    for (const line of batch) {
-      if (!fs.readFileSync(eventsFile).equals(appended)) fail('execution-owner-event-raced');
-      fs.appendFileSync(eventsFile, line);
-      appended = Buffer.concat([appended, Buffer.from(line)]);
-      if (!fs.readFileSync(eventsFile).equals(appended)) fail('execution-owner-event-raced');
+    if (managed) {
+      appendManaged();
+      appended = fs.readFileSync(eventsFile);
+    } else {
+      for (const line of batch) {
+        if (!fs.readFileSync(eventsFile).equals(appended)) fail('execution-owner-event-raced');
+        fs.appendFileSync(eventsFile, line);
+        appended = Buffer.concat([appended, Buffer.from(line)]);
+        if (!fs.readFileSync(eventsFile).equals(appended)) fail('execution-owner-event-raced');
+      }
     }
     executionApi.assertProtected(root, { ...expected, '.gsd/forge/events.jsonl': hash(appended) });
     // Advance only exact caller bytes, never adopt a fresh owner snapshot.
@@ -3110,14 +4383,41 @@ function appendProtectedOwnerEvents(root, receiptFile, record, lines) {
       record.recovery_baseline.protected_owner = advanced;
       for (const row of record.recovery_baseline.protected_roots) if (path.resolve(row.path) === path.resolve(root)) row.snapshot = advanced;
     }
-    if (record.milestone_delivery) record.milestone_delivery.protected_owner = advanced;
+    if (record.milestone_delivery) record.milestone_delivery.protected_owner = {
+      ...record.milestone_delivery.protected_owner, '.gsd/forge/events.jsonl': hash(appended),
+    };
     // Saved-native failures keep their original failed/started receipt until here.
     json(receiptFile, record);
   });
 }
 
 async function runUnitSidecar(request, runtime = {}) {
-  const r = request?.linked_begin_key ? require('./forge-attempt-recovery').bindLinkedRequest(request, runtime.linkedEntryOptions) : request || {};
+  const windows = require('./forge-owner-transport-window');
+  if (request?.scope === 'standalone-task' && ['brainstorm','discuss','research','plan'].includes(request.phase)) {
+    windows.assertMutationAllowed(request.contextRoot || request.cwd);
+    if (runtime.ownerTransportAdapter) return windows.protectPreparation(request, runtime.ownerTransportAdapter, () => runUnitSidecarInsideOwnerWindow(request, runtime));
+  }
+  const activity = require('./forge-protected-owner-activity');
+  return activity.withReconciliationHandoff(request, runtime, () => activity.withExecutionActivity(request, runtime,
+    scoped => withNativeAttribution(request, scoped, value => runUnitSidecarInsideOwnerWindow(request, value))));
+}
+// Issue 440: the native route gains a live attribution context only through the
+// host's live append-attestation adapter (an opaque handle, never request data).
+// Without the adapter, or on any other route, nothing changes.
+function withNativeAttribution(request, runtime, action) {
+  if (request?.route?.worker_mode !== 'native' || runtime?.managedAppendAttestation === undefined) return action(runtime);
+  return require('./forge-managed-attribution').withManagedAttribution(request, runtime, action);
+}
+async function runUnitSidecarInsideOwnerWindow(request, runtime = {}) {
+  const linked = request?.linked_begin_key ? require('./forge-attempt-recovery').bindLinkedRequest(request, runtime.linkedEntryOptions) : request || {};
+  // Issue 343 U3b: a cohort member's opaque handle is an in-process capability, never request data:
+  // it leaves the request before any fingerprint, receipt or serialization of the attempt.
+  const memberHandle = linked && Object.prototype.hasOwnProperty.call(linked, 'memberHandle') ? linked.memberHandle : undefined;
+  let r = linked;
+  if (memberHandle !== undefined) {
+    const { memberHandle: liveHandle, ...data } = linked;
+    r = data;
+  }
   const route = r.route || {};
   const identity = { phase: r.preparationIdentity?.phase, unit: r.unitType === 'review-fix' ? reviewFixUnitLabel(r)
     : `${r.unitType || '-'}/${r.taskId || r.sliceId || r.milestoneId || r.sourceUnit || '-'}`,
@@ -3132,7 +4432,7 @@ async function runUnitSidecar(request, runtime = {}) {
     if (['recusado', 'falhou', 'reaproveitado'].includes(stage)) terminal = true;
     runtime.announce?.(stage, fields);
   } };
-  try { return await runUnitSidecarCore(r, scopedRuntime, identity); }
+  try { return await runUnitSidecarCore(r, scopedRuntime, identity, memberHandle); }
   catch (error) {
     if (typeof error.provider_called !== 'boolean') error.provider_called = transportRequested ? 'unknown' : false;
     scopedRuntime.announce('recusado', { ...identity, model_sent: '-', reason_code: error.code || 'sidecar-unit-failed',
@@ -3141,6 +4441,8 @@ async function runUnitSidecar(request, runtime = {}) {
   }
 }
 async function recoverUnitSidecar(request, recovery, runtime = {}) {
+  if (runtime.ownerReconciliation !== undefined) require('./forge-protected-owner-activity')
+    .assertOwnerReconciliationReady(runtime.ownerReconciliation, request);
   if (request.linked_begin_key) request = require('./forge-attempt-recovery').bindLinkedRequest(request, runtime.linkedEntryOptions);
   // Mandatory obligations fail closed before process/receipt inspection.
   const recoveryProcedure = require('./forge-procedure-context').loadProcedureContext({ cwd: request.cwd, phase: 'recovery',
@@ -3182,8 +4484,8 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     ? require('./forge-native-recovery-delivery') : null;
   let retainedRequest = null;
   const finalRequest = route => {
-    const current = { ...executionRequest, route, recoveryStateFile: recovery.stateFile,
-      dispatchId: recoveryDispatchId(request.dispatchId, continuationId), resultFile: `${request.resultFile}.recovery-${continuationId}.json` };
+    const current = projectTransportOptions({ ...executionRequest, route, recoveryStateFile: recovery.stateFile,
+      dispatchId: recoveryDispatchId(request.dispatchId, continuationId), resultFile: `${request.resultFile}.recovery-${continuationId}.json` }, executionRequest);
     return retainedRequest ? require('./forge-native-repackage').preserveRequest(current, retainedRequest) : current;
   };
   // This selects transport only; authority and the exact invocation hash are
@@ -3295,8 +4597,12 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     validateEnvironmentalCorrection: runtime.validateEnvironmentalCorrection,
     // Reached synchronously through transitionGuard.assertAuthority, also from
     // inside a successor scope: the original keeps its own fresh exact scope.
-    validateExecutionAuthority: () => asOriginal(executionRequest, () => validateRecoveryRequest(executionRequest, { verification: runtime.verification, nativeInvocation: request.route.worker_mode === 'native'
-      ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route)) : undefined })),
+    validateExecutionAuthority: () => {
+      if (runtime.ownerReconciliation !== undefined) require('./forge-protected-owner-activity')
+        .assertOwnerReconciliationReady(runtime.ownerReconciliation, request);
+      return asOriginal(executionRequest, () => validateRecoveryRequest(executionRequest, { verification: runtime.verification, nativeInvocation: request.route.worker_mode === 'native'
+        ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route)) : undefined }));
+    },
     reconcile: receipt => {
       if (canonical.unitType === 'review-fix' && !receipt.recovery_baseline)
         return reconcileLegacyReviewFix(request, receipt, executionRequest.execution_contract);
@@ -3326,7 +4632,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       const invocation = route.worker_mode === 'native'
         ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(route)) : { ok: true };
       if (!invocation.ok) return invocation;
-      const candidate = { ...executionRequest, route };
+      const candidate = projectTransportOptions({ ...executionRequest, route }, executionRequest, invocation);
       try { asOriginal(candidate, () => validateRecoveryRequest(candidate, { verification: runtime.verification, nativeInvocation: invocation })); }
       catch (error) { return { ok: false, reason_code: error.code || 'unit-contract-refused', provider_called: false }; }
       return invocation;
@@ -3342,15 +4648,30 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     // recomputed here from the single source instead of trusting the argument.
     // The sixth argument is the recovery's single same-session resume (S05): only
     // a Claude sidecar route may carry it; runUnitSidecarCore revalidates the ref.
-    invoke: async (route, invocation, _ceiling, assertReady, reservationHash, resume) => {
+    // The seventh argument (issue 440) is only passed by the opt-in abandonment branch: the
+    // admitted successor dispatch. It must be exactly derived from this parent by
+    // recoveryDispatchId; any other value is refused before the invocation.
+    invoke: async (route, invocation, _ceiling, assertReady, reservationHash, resume, successor) => {
       if (resume != null && (route.worker_mode !== 'sidecar' || route.resolved_worker_engine !== 'claude')) fail('recovery-resume-route-invalid');
-      const routed = { ...executionRequest, route };
+      let successorContinuation;
+      if (successor != null) {
+        const id = successor.dispatch_id, marker = typeof id === 'string' ? id.lastIndexOf('-recovery-') : -1;
+        let derived = null;
+        try { derived = marker > 0 ? recoveryDispatchId(request.dispatchId, id.slice(marker + 10)) : null; } catch { derived = null; }
+        if (derived !== id || deliveryHelper) fail('recovery-successor-dispatch-invalid');
+        successorContinuation = id.slice(marker + 10);
+      }
+      const routed = projectTransportOptions({ ...executionRequest, route }, executionRequest, invocation);
       asOriginal(routed, () => validateRecoveryRequest(routed, { verification: runtime.verification, nativeInvocation: invocation }));
       const ceiling = route.worker_mode === 'sidecar' ? ceilingFromRoute(route) : null;
-      const next = deliveryHelper ? finalRequest(route) : { ...executionRequest, recoveryStateFile: recovery.stateFile, route: ceiling
+      const next = deliveryHelper ? finalRequest(route) : projectTransportOptions({ ...executionRequest, recoveryStateFile: recovery.stateFile, route: ceiling
         ? { ...route, workers_timeout: ceiling.seconds, workers_timeout_source: ceiling.source } : route,
-        dispatchId: recoveryDispatchId(request.dispatchId), resultFile: `${request.resultFile}.recovery-${crypto.randomUUID()}.json`,
-        ...(resume != null ? { claudeResume: resume.session, resumedFrom: resume.resumed_from } : {}) };
+        dispatchId: recoveryDispatchId(request.dispatchId, successorContinuation),
+        resultFile: `${request.resultFile}.recovery-${successorContinuation ?? crypto.randomUUID()}.json`,
+        ...(resume != null ? { claudeResume: resume.session, resumedFrom: resume.resumed_from } : {}),
+        // The successor carries only its actual parent: the admission returns the
+        // parent's recorded decision for the same correction, never a new cycle.
+        ...(canonical.unitType === 'review-fix' ? { reviewFixRecoveryOf: request.dispatchId } : {}) }, executionRequest, invocation);
       if (route.worker_mode === 'native') {
         if (deliveryHelper) {
           // The successor has a new dispatch: an auto-deferred one needs the
@@ -3452,12 +4773,12 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
   });
 }
 module.exports = { appendProtectedOwnerEvents, preflightExecutionVerification, schema, memorySchema, memorySchemaV2, NEW_MEMORY_SCHEMA_VERSION, memoryExtractionSchema, memoryResponseSchema,
-  memoryTransportSchema, memoryEvidenceContract, MEMORY_QUALITY_CONTRACT, locations, milestonePlanFile, validateRecoveryRequest, captureMilestoneBaseline, reconcileMilestoneAttempt, validateArtifacts, inspectArtifacts, inspectDeliveryContent, executeDeliveryArtifacts, MAX_ARTIFACT_BYTES,
+  memoryTransportSchema, memoryEvidenceContract, MEMORY_QUALITY_CONTRACT, locations, milestonePlanFile, validateRecoveryRequest, readExecutionInput, EXECUTION_INPUT_MAX_BYTES, projectTransportOptions, captureMilestoneBaseline, reconcileMilestoneAttempt, validateArtifacts, inspectArtifacts, inspectDeliveryContent, executeDeliveryArtifacts, MAX_ARTIFACT_BYTES,
   MAX_ARTIFACT_PAYLOAD_BYTES, target, markChecked, createTaskMarker, verifyTaskMarker, materialize, memoryPrompt, memorySourceContext,
-  publishReadyRecord, nativeMemoryFingerprint, acceptNativeMemoryResult, candidateFromNativeResult, runNativeMemory,
+  publishReadyRecord, prepareReadyMemoryPublication, applyReadyMemoryPublication, nativeMemoryFingerprint, acceptNativeMemoryResult, candidateFromNativeResult, runNativeMemory,
   routeIdentity, artifactFingerprint, artifactAttemptFiles, beginArtifactAttempt, replayArtifactAttempt, reconcileLegacyReviewFix,
   failArtifactAttempt, acceptArtifactResult, reconcileArtifactAttempt, runUnitSidecar, recoverUnitSidecar, reviewFixUnitLabel, effortTelemetry,
-  cliObservers };
+  cliObservers, verificationFailureRef, verifyRetainedExecution, retainedPublication, publishRetainedMember };
 // Default CLI observers: stderr only, never through the announcer. Phase lines and
 // activity lines use the sanitized T03 formatters; activity is written only on a
 // phase or liveness-state transition, at most 20 lines per unit. Verification
@@ -3497,5 +4818,5 @@ if (require.main === module) {
     return process.argv[2] === '--accept-native-memory' ? acceptNativeMemoryResult(request) : runUnitSidecar(request, { announce, ...cliObservers() });
   }).then(result => {
     process.stdout.write(`${JSON.stringify(result)}\n`);
-  }).catch(error => { process.stderr.write(`forge-unit-sidecar: ${error.code || 'sidecar-unit-failed'}\n`); process.exitCode = 1; });
+  }).catch(error => { const retained = verificationFailureRef(error); if (retained) process.stderr.write(`[forge-verification-failure] ${JSON.stringify(retained)}\n`); process.stderr.write(`forge-unit-sidecar: ${error.code || 'sidecar-unit-failed'}\n`); process.exitCode = 1; });
 }

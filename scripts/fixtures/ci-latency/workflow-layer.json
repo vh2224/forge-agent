@@ -1,0 +1,407 @@
+{
+  "base": "63fc4ebcbd0c33e0bc9f91873bfd4d5ab8b56dc8",
+  "ci_before": {
+    "sha256": "aaebc13d224e26dc85fbf7c077a878b550fc041978dc30d9e6995da15d650fc8",
+    "oid": "ccb36bc99476b31c83c790321b9a816d4a4402ea"
+  },
+  "ci_after": {
+    "sha256": "e085ab2faadf7439a7c80a97c20e8d6a0bfaf11d1578e6986cf174e3e7b744f6",
+    "oid": "90f4edfbfe35e00d41b3f463da2be46e07dda750"
+  },
+  "release_before": {
+    "sha256": "635887910ef3fdb5b5c0b7731ee7e6dee86c39e6e675b6d701cacf8e4a321747",
+    "oid": "a0abdda28d8c37df0907f216ff445528ea3c7fd3"
+  },
+  "release_after": {
+    "sha256": "fed157d55bd63ea53dd9d52b3c5efff28f9ca521013fe4f9943deb4f6edf1d09",
+    "oid": "5744ef2dab6a61eb506a44fb55bc6334238be275"
+  },
+  "matrix_before": [
+    {
+      "os": "ubuntu-latest",
+      "platform": "linux",
+      "shard-index": 0,
+      "shard-count": 1,
+      "label": "ubuntu-latest"
+    },
+    {
+      "os": "macos-latest",
+      "platform": "darwin",
+      "shard-index": 0,
+      "shard-count": 2,
+      "label": "macos-latest, shard 1/2"
+    },
+    {
+      "os": "macos-latest",
+      "platform": "darwin",
+      "shard-index": 1,
+      "shard-count": 2,
+      "label": "macos-latest, shard 2/2"
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 0,
+      "shard-count": 4,
+      "label": "windows-latest, shard 1/4"
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 1,
+      "shard-count": 4,
+      "label": "windows-latest, shard 2/4"
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 2,
+      "shard-count": 4,
+      "label": "windows-latest, shard 3/4"
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 3,
+      "shard-count": 4,
+      "label": "windows-latest, shard 4/4"
+    }
+  ],
+  "matrix_after": [
+    {
+      "os": "ubuntu-latest",
+      "platform": "linux",
+      "shard-index": 0,
+      "shard-count": 5,
+      "label": "ubuntu-latest, shard 1/5",
+      "workers": 2,
+      "single-worker-jobs": 4
+    },
+    {
+      "os": "ubuntu-latest",
+      "platform": "linux",
+      "shard-index": 1,
+      "shard-count": 5,
+      "label": "ubuntu-latest, shard 2/5",
+      "workers": 2,
+      "single-worker-jobs": 4
+    },
+    {
+      "os": "ubuntu-latest",
+      "platform": "linux",
+      "shard-index": 2,
+      "shard-count": 5,
+      "label": "ubuntu-latest, shard 3/5",
+      "workers": 2,
+      "single-worker-jobs": 4
+    },
+    {
+      "os": "ubuntu-latest",
+      "platform": "linux",
+      "shard-index": 3,
+      "shard-count": 5,
+      "label": "ubuntu-latest, shard 4/5",
+      "workers": 2,
+      "single-worker-jobs": 4
+    },
+    {
+      "os": "ubuntu-latest",
+      "platform": "linux",
+      "shard-index": 4,
+      "shard-count": 5,
+      "label": "ubuntu-latest, shard 5/5",
+      "workers": 2,
+      "single-worker-jobs": 4
+    },
+    {
+      "os": "macos-latest",
+      "platform": "darwin",
+      "shard-index": 0,
+      "shard-count": 5,
+      "label": "macos-latest, shard 1/5",
+      "workers": 3,
+      "single-worker-jobs": 0
+    },
+    {
+      "os": "macos-latest",
+      "platform": "darwin",
+      "shard-index": 1,
+      "shard-count": 5,
+      "label": "macos-latest, shard 2/5",
+      "workers": 3,
+      "single-worker-jobs": 0
+    },
+    {
+      "os": "macos-latest",
+      "platform": "darwin",
+      "shard-index": 2,
+      "shard-count": 5,
+      "label": "macos-latest, shard 3/5",
+      "workers": 3,
+      "single-worker-jobs": 0
+    },
+    {
+      "os": "macos-latest",
+      "platform": "darwin",
+      "shard-index": 3,
+      "shard-count": 5,
+      "label": "macos-latest, shard 4/5",
+      "workers": 3,
+      "single-worker-jobs": 0
+    },
+    {
+      "os": "macos-latest",
+      "platform": "darwin",
+      "shard-index": 4,
+      "shard-count": 5,
+      "label": "macos-latest, shard 5/5",
+      "workers": 3,
+      "single-worker-jobs": 0
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 0,
+      "shard-count": 27,
+      "label": "windows-latest, shard 1/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 1,
+      "shard-count": 27,
+      "label": "windows-latest, shard 2/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 2,
+      "shard-count": 27,
+      "label": "windows-latest, shard 3/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 3,
+      "shard-count": 27,
+      "label": "windows-latest, shard 4/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 4,
+      "shard-count": 27,
+      "label": "windows-latest, shard 5/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 5,
+      "shard-count": 27,
+      "label": "windows-latest, shard 6/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 6,
+      "shard-count": 27,
+      "label": "windows-latest, shard 7/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 7,
+      "shard-count": 27,
+      "label": "windows-latest, shard 8/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 8,
+      "shard-count": 27,
+      "label": "windows-latest, shard 9/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 9,
+      "shard-count": 27,
+      "label": "windows-latest, shard 10/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 10,
+      "shard-count": 27,
+      "label": "windows-latest, shard 11/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 11,
+      "shard-count": 27,
+      "label": "windows-latest, shard 12/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 12,
+      "shard-count": 27,
+      "label": "windows-latest, shard 13/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 13,
+      "shard-count": 27,
+      "label": "windows-latest, shard 14/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 14,
+      "shard-count": 27,
+      "label": "windows-latest, shard 15/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 15,
+      "shard-count": 27,
+      "label": "windows-latest, shard 16/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 16,
+      "shard-count": 27,
+      "label": "windows-latest, shard 17/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 17,
+      "shard-count": 27,
+      "label": "windows-latest, shard 18/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 18,
+      "shard-count": 27,
+      "label": "windows-latest, shard 19/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 19,
+      "shard-count": 27,
+      "label": "windows-latest, shard 20/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 20,
+      "shard-count": 27,
+      "label": "windows-latest, shard 21/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 21,
+      "shard-count": 27,
+      "label": "windows-latest, shard 22/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 22,
+      "shard-count": 27,
+      "label": "windows-latest, shard 23/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 23,
+      "shard-count": 27,
+      "label": "windows-latest, shard 24/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 24,
+      "shard-count": 27,
+      "label": "windows-latest, shard 25/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 25,
+      "shard-count": 27,
+      "label": "windows-latest, shard 26/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    },
+    {
+      "os": "windows-latest",
+      "platform": "win32",
+      "shard-index": 26,
+      "shard-count": 27,
+      "label": "windows-latest, shard 27/27",
+      "workers": 2,
+      "single-worker-jobs": 14
+    }
+  ],
+  "oldCommand": "node scripts/run-tests.js --baseline scripts/fixtures/ci-baseline/known-failures.json --shard-profile scripts/fixtures/ci-shards/shard-profile.json --shard-index ${{ matrix.shard-index }} --shard-count ${{ matrix.shard-count }} --profile-out \"${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}.json\"",
+  "newCommand": "node scripts/forge-ci-parallel.js --shard-index ${{ matrix.shard-index }} --shard-count ${{ matrix.shard-count }} --jobs \"${{ matrix.workers }}\" --single-worker-jobs ${{ matrix.single-worker-jobs }} --profile-dir \"${{ runner.temp }}/forge-suite-profile-${{ matrix.os }}-${{ matrix.shard-index }}\""
+}

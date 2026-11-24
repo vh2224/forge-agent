@@ -42,12 +42,12 @@ try {
   console.log('PASS issue277 phases CLI retains a valid custom domain named tier_models');
 
   const estimate = valid.rows.filter(row => row.unit_type === 'estimate-milestone');
-  assert.strictEqual(estimate.length, 1);
+  assert.strictEqual(estimate.length, valid.domains.length);
   assert.strictEqual(estimate[0].tier, 'max');
-  assert.strictEqual(estimate[0].routable, false);
+  assert(estimate.every(row => row.routable === true && row.config_key === 'tier_models.max'));
   const note = run(false).split('\n').find(line => line.includes('tem tier fixo max'));
-  assert(note.includes('plan-milestone') && note.includes('estimate-milestone') && note.includes('tier_models.max'));
-  console.log('PASS estimate-milestone appears once as non-routable max with the fixed-tier planning note');
+  assert(note.includes('plan-milestone') && note.includes('estimate-milestone') && note.includes('tier_models.max') && note.includes('routing.<domínio>.<unit_type>.max'));
+  console.log('PASS estimate-milestone is domain-routable with fixed max and unconfigured tier_models fallback');
 
   fs.writeFileSync(localFile, JSON.stringify({ routing: { customer_operations_backend: { executor: { standard: 'gpt-6-luna' } } } }));
   assert(run(false).includes('routing.customer_operations_backend.executor.standard: expected an array of nonempty model strings'));

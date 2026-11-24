@@ -249,12 +249,12 @@ function appServerInputCodes() {
 // Only adapter vocabulary and re-sanitized diagnostic fields cross the CLI.
 // A local process/elapsed duration does not establish a remote provider call.
 function reviewFailureDiagnostic(error = {}) {
-  const safeDiagnostic = diagnostic(error.diagnostic?.reason, error.diagnostic);
+  const safeDiagnostic = diagnostic(error.code === 'review-diff-too-large' ? error.code : error.diagnostic?.reason, error.diagnostic);
   const timeRefusalCodes = require('./forge-milestone-time-admission').TRANSPORT_REFUSAL_CODES;
   const knownCodes = [...Object.values(CLAUDE_SIDECAR_REASON_CODES),
     'procedure-manifest-missing', 'procedure-manifest-invalid', 'procedure-file-unreadable',
     'procedure-module-pending', 'procedure-integrity-mismatch', 'procedure-phase-unmapped',
-    'review-prefs-invalid', 'review-effort-invalid', 'effort-transport-unsupported',
+    'review-prefs-invalid', 'review-effort-invalid', 'review-diff-too-large', 'effort-transport-unsupported',
     'effort-unsupported-by-model', 'native-effort-binding-missing', 'invalid-native-invocation-input',
     'native-capabilities-missing', 'native-tool-unavailable', 'native-capabilities-invalid',
     'native-host-unsupported', 'native-model-unsupported', 'native-effort-unsupported',
@@ -270,12 +270,30 @@ function reviewFailureDiagnostic(error = {}) {
     'thinking-mode-unknown', 'agy-output-empty', ...Object.values(AGY_REASON_CODES), ...appServerLivenessCodes(),
     ...appServerTerminalCodes(), ...appServerInputCodes(),
     ...timeRefusalCodes];
-  return { reason_code: knownCodes.includes(error.code) ? error.code : 'adapter-failed',
+  // Review-leg guard (#341): the two closed codes, plus the guard's own fail-closed code
+  // only when it carries the review-policy layer. Never the guard message or details.
+  const reviewPolicy = reviewLegPolicyCode(error);
+  return { reason_code: knownCodes.includes(error.code) || reviewPolicy ? error.code : 'adapter-failed',
     ...(timeRefusalCodes.includes(error.code) ? { layer: 'milestone-time-admission' } : {}),
+    ...(reviewPolicy ? { layer: 'review-policy' } : {}),
     diagnostic: safeDiagnostic,
     provider_called: typeof error.provider_called === 'boolean' ? error.provider_called : null,
     model_observed: safeDiagnostic.model_observed || null,
     ...pendingOwnership(error) };
+}
+
+function reviewLegPolicyCode(error) {
+  const { REVIEW_LEG_CODES } = require('./forge-review-policy');
+  return REVIEW_LEG_CODES.includes(error.code)
+    || error.code === 'review-fix-policy-invalid' && error.layer === 'review-policy';
+}
+
+// Pre-provider review-leg guard (#341, D7). Runs after the milestone time admission (its
+// codes prevail) and before `attempted`/transport. Acts only with a declared milestone
+// context; a task context or no context changes nothing. A refusal is never a reviewer
+// outage: no retry, no fallback, no clean REVIEW.
+function assertReviewLegEntry(mode, opts) {
+  require('./forge-review-policy').assertReviewLeg({ context: opts.milestoneTimeContext, mode, now: opts.now });
 }
 
 // Only an unconfirmed agy exit carries pending ownership: a boolean and a positive integer pid.
@@ -463,7 +481,8 @@ function acquireDiff(diffCmd, cwd) {
   }
   const lines = out.split('\n');
   if (lines.length > MAX_DIFF_LINES) {
-    return lines.slice(0, MAX_DIFF_LINES).join('\n') + '\n[diff truncated at 4000 lines]\n';
+    throw Object.assign(new Error('Review diff exceeds 4000 lines; use complete whole-file shards or explicitly split an oversized file.'),
+      { code: 'review-diff-too-large', provider_called: false });
   }
   return out;
 }
@@ -545,8 +564,25 @@ function validateObjections(obj) {
     if (typeof item.suggested_fix !== 'string') return false;
     if (typeof item.challenge !== 'string') return false;
     if (!SEVERITY_ENUM.includes(item.severity)) return false;
+    if (!dualVerdictFieldsValid(item, CHALLENGE_VERDICT_FIELDS)) return false;
   }
   return true;
+}
+
+// Dual-verdict fields (#341). The schema files sent to the transport require them; the
+// validators keep them optional so a legacy answer without them stays valid (the policy
+// reads an absent field as unknown), and closed to yes|no|unknown when present.
+const CHALLENGE_VERDICT_FIELDS = Object.freeze(['reachable', 'reproduced', 'in_scope']);
+const CONTEST_VERDICT_FIELDS = Object.freeze(['reachable', 'in_scope']);
+function dualVerdictFieldsValid(item, fields) {
+  const { TRISTATE } = require('./forge-review-policy');
+  return fields.every(key => !Object.prototype.hasOwnProperty.call(item, key) || TRISTATE.includes(item[key]));
+}
+// Carried only when present, after validation, so a legacy result stays byte-identical.
+function presentDualVerdictFields(item, fields) {
+  const carried = {};
+  for (const key of fields) if (Object.prototype.hasOwnProperty.call(item, key)) carried[key] = item[key];
+  return carried;
 }
 
 /**
@@ -562,6 +598,7 @@ function validateVerdicts(obj, allowed) {
     if (typeof item.id !== 'string' || !item.id) return false;
     if (!enumeration.includes(item.verdict)) return false;
     if (typeof item.rationale !== 'string') return false;
+    if (!dualVerdictFieldsValid(item, CONTEST_VERDICT_FIELDS)) return false;
   }
   return true;
 }
@@ -597,6 +634,29 @@ function validateExecuteResult(obj) {
     if (typeof f !== 'string') return false;
   }
   return true;
+}
+
+/**
+ * Validate an execute result in the transport-assembled shape that
+ * `assembleExecuteResult` produces and every owner channel retains
+ * (receipt result, `resultFile.returned.json`). The model-returned part is
+ * validated with the same field-by-field gate as the raw response, using the
+ * declared list it carried (`files_changed_declared`); `files_changed` is the
+ * adapter's own VCS-derived delta. A historical raw-shaped result (no
+ * `files_changed_declared`) is still validated as before.
+ * @param {*} obj
+ * @returns {boolean}
+ */
+function validateAssembledExecuteResult(obj) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
+  if (!Object.prototype.hasOwnProperty.call(obj, 'files_changed_declared')) return validateExecuteResult(obj);
+  if (!validateExecuteResult({ ...obj, files_changed: obj.files_changed_declared })) return false;
+  if (!Array.isArray(obj.files_changed)) return false;
+  return obj.files_changed.every(entry => typeof entry === 'string' && entry.length > 0
+    || entry && typeof entry === 'object' && !Array.isArray(entry)
+      && ['A', 'M', 'D'].includes(entry.status) && typeof entry.path === 'string' && entry.path.length > 0
+      && (entry.root_id === undefined || typeof entry.root_id === 'string' && entry.root_id.length > 0)
+      && (entry.repo === undefined || typeof entry.repo === 'string' && entry.repo.length > 0));
 }
 
 /**
@@ -636,6 +696,32 @@ function validatePlanResult(obj) {
   return true;
 }
 
+// Strict new-plan admission at the planner transport (issue 343 U0c): the one shared
+// owner gate, forge-plan-validation validateNewSlicePlan, runs after the untrusted-output
+// barrier, the shape validation and the must_haves check, and before the success
+// result-file, for both engines and for the Claude provisional finalizer (all three
+// reach finishPlan). Its order is fixed in code; no option, flag or imported field
+// selects another profile. The decision never depends on the milestone/slice values —
+// they only label evidence paths, which this transport discards — so every transport
+// call (the unit owner's, the historical Branch D CLI, a direct runPlan) is admitted
+// under the same fixed labels, never a canonical milestone or slice ID. The owner
+// publisher (forge-unit-sidecar) admits the returned bytes again under its trusted
+// scope. A refusal keeps its named code, with provider_called true: the planner ran.
+const TRANSPORT_PLAN_LABEL = 'transport-unscoped';
+function admitPlanCandidate(parsed, owner) {
+  const candidate = {
+    slice_plan: { content: parsed.slice_plan.content },
+    task_plans: parsed.task_plans.map(tp => ({ id: tp.id, content: tp.content })),
+  };
+  try {
+    return require('./forge-plan-validation').validateNewSlicePlan(candidate,
+      { owner, milestone: TRANSPORT_PLAN_LABEL, slice: TRANSPORT_PLAN_LABEL });
+  } catch (error) {
+    if (error && typeof error === 'object') Object.assign(error, { provider_called: true, stage: 'plan-admission' });
+    throw error;
+  }
+}
+
 // ── Prompt builders ───────────────────────────────────────────────────────────
 
 function buildChallengePrompt(diffText) {
@@ -644,10 +730,17 @@ function buildChallengePrompt(diffText) {
     'structured findings only. Assign each finding a stable id (R1, R2, ... in',
     'severity-then-order sequence). For each finding include: id, path_line',
     '("path:line"), claim (full issue text), suggested_fix, challenge (the one',
-    'question that decides whether this is real), severity (critical|high|medium|low).',
+    'question that decides whether this is real), severity (critical|high|medium|low),',
+    'and the dual-verdict fields, each "yes"|"no"|"unknown" (never omit one; write "unknown"):',
+    ' reachable  — reachable in NORMAL USE of the tool by its operator. A theoretical finding is',
+    '              "no": manual tampering with a local file, a race between the operator\'s own',
+    '              processes, a FIFO or special file where a regular one is expected, an impossible input.',
+    ' reproduced — "yes" only when you actually reproduced it; "no" for a static trace only.',
+    '              It is recorded, never a condition for fixing.',
+    ' in_scope   — "yes" when this change introduced or surfaced it; "no" for pre-existing code.',
     '',
     'Respond with ONLY a single JSON object of the exact shape:',
-    '{ "objections": [ { "id", "path_line", "claim", "suggested_fix", "challenge", "severity" } ] }',
+    '{ "objections": [ { "id", "path_line", "claim", "suggested_fix", "challenge", "severity", "reachable", "reproduced", "in_scope" } ] }',
     'No prose outside the JSON. Empty objections array is a valid outcome if the diff has no issues.',
     '',
     '--- DIFF START ---',
@@ -683,8 +776,14 @@ function buildDefendPrompt(inputText) {
     '',
     'Conceding every objection and refuting every objection are both failure modes.',
     '',
+    'With every verdict give your own assessment of the reviewer\'s reachable and in_scope,',
+    'each "yes"|"no"|"unknown". Conceding "it is real" is not conceding "fix it now":',
+    ' reachable — reachable in NORMAL USE; a theoretical path (manual tampering with a local file,',
+    '             a race between the operator\'s own processes, a FIFO, an impossible input) is "no".',
+    ' in_scope  — "yes" when this change introduced or surfaced it; "no" for pre-existing code.',
+    '',
     'Respond with ONLY a single JSON object of the exact shape:',
-    '{ "verdicts": [ { "id", "verdict": "refuted"|"conceded"|"open", "rationale" } ] }',
+    '{ "verdicts": [ { "id", "verdict": "refuted"|"conceded"|"open", "rationale", "reachable", "in_scope" } ] }',
     'One entry per objection, reusing the objection ids exactly. No prose outside the JSON.',
     '',
     '--- OBJECTIONS START ---',
@@ -700,9 +799,12 @@ function buildRebuttalPrompt(inputText) {
     'You are re-litigating your own prior review objections after seeing the author\'s',
     'defense. For each objection, decide ONLY "maintained" (defense did not hold) or',
     '"withdrawn" (defense holds). No other verdict values are allowed.',
+    'With every verdict restate your current reachable and in_scope ("yes"|"no"|"unknown",',
+    'same definitions as the challenge: reachable in NORMAL USE, a theoretical path is "no";',
+    'in_scope "yes" only when this change introduced or surfaced it) in light of the defense.',
     '',
     'Respond with ONLY a single JSON object of the exact shape:',
-    '{ "verdicts": [ { "id", "verdict": "maintained"|"withdrawn", "rationale" } ] }',
+    '{ "verdicts": [ { "id", "verdict": "maintained"|"withdrawn", "rationale", "reachable", "in_scope" } ] }',
     'No prose outside the JSON.',
     '',
     '--- OBJECTIONS + DEFENSES START ---',
@@ -956,6 +1058,8 @@ function buildPlanPrompt(contextText) {
     ' 2. Produce ONE slice plan file (S##-PLAN.md) and ONE task plan file (T##-PLAN.md)',
     '    per task. Return the FULL markdown content of every file — you write NOTHING to',
     '    disk; the orchestrator materializes your output.',
+    '    The slice task list MUST use one canonical checkbox per task:',
+    '    - [ ] **T01: Task title** (and T02, etc.). Headings or tables alone do not list tasks.',
     ' 3. Every T##-PLAN.md MUST carry a YAML frontmatter block with this exact structured',
     '    schema (the executor enforces it — a missing or malformed block fails the task).',
     '    INDENTATION IS PART OF THE CONTRACT. `must_haves:` has EXACTLY THREE children:',
@@ -1783,6 +1887,7 @@ function normalizeChallenge(obj) {
         issue: o.claim,
         fix: o.suggested_fix,
         challenge: o.challenge,
+        ...presentDualVerdictFields(o, CHALLENGE_VERDICT_FIELDS),
       };
     }),
   };
@@ -1794,6 +1899,7 @@ function normalizeRebuttal(obj) {
       id: v.id,
       verdict: v.verdict,
       reason: v.rationale,
+      ...presentDualVerdictFields(v, CONTEST_VERDICT_FIELDS),
     })),
   };
 }
@@ -1808,6 +1914,7 @@ function normalizeDefense(obj) {
       id: v.id,
       verdict: v.verdict,
       rationale: v.rationale,
+      ...presentDualVerdictFields(v, CONTEST_VERDICT_FIELDS),
     })),
   };
 }
@@ -2042,6 +2149,7 @@ function authorizeSidecar(mode, opts = {}) {
       challenge: 'review-challenger', defend: 'review-advocate', rebuttal: 'review-rebuttal' })[mode];
     const guard = require('./forge-dispatch-guard').evaluateDispatchGuard({
       host_runtime: opts.hostRuntime, worker_engine: workerEngine, worker_mode: 'sidecar', unit_type: unitType,
+      ...(opts.scope === 'standalone-task' ? { scope: opts.scope, phase: opts.phase } : {}),
     });
     if (!guard.dispatch_allowed) throw boundaryError(guard.reason_code, guard.hint);
   }
@@ -2103,6 +2211,7 @@ async function runChallengeCore(opts) {
   const procedure = loadReviewProcedure('challenge', opts);
   const prompt = composeProcedurePrompt(buildChallengePrompt(diffText), procedure);
   require('./forge-milestone-time-admission').assertOwnerTransportEntry(opts);
+  assertReviewLegEntry('challenge', opts);
   opts._sidecarIdentity.attempted = true;
   let transportTelemetry = null;
   const rawContent = await invokeEngine(engine, {
@@ -2170,6 +2279,7 @@ async function runDefendCore(opts) {
   const procedure = loadReviewProcedure('defend', opts);
   const prompt = composeProcedurePrompt(buildDefendPrompt(inputText), procedure);
   require('./forge-milestone-time-admission').assertOwnerTransportEntry(opts);
+  assertReviewLegEntry('defend', opts);
   opts._sidecarIdentity.attempted = true;
   let transportTelemetry = null;
   const rawContent = await invokeEngine(engine, {
@@ -2229,6 +2339,7 @@ async function runRebuttalCore(opts) {
   const procedure = loadReviewProcedure('rebuttal', opts);
   const prompt = composeProcedurePrompt(buildRebuttalPrompt(inputText), procedure);
   require('./forge-milestone-time-admission').assertOwnerTransportEntry(opts);
+  assertReviewLegEntry('rebuttal', opts);
   opts._sidecarIdentity.attempted = true;
   let transportTelemetry = null;
   const rawContent = await invokeEngine(engine, {
@@ -2434,41 +2545,50 @@ function executeContract(opts) {
     invalidClaudeMessage: 'Claude worker block failed execute-result validation',
     noResultMessage: 'no parseable/valid execute result in app-server output',
     assemble(parsed, common) {
-      return {
-        status: parsed.status,
-        protocol_version: PROTOCOL_VERSION,
-        summary: parsed.summary,
-        must_haves_status: parsed.must_haves_status,
-        files_changed: common.derived,
-        files_changed_declared: parsed.files_changed,
-        pre_dirty: common.preDirty,
-        ...common.multiRepo,
-        start_sha: common.startSha,
-        head_sha: common.headSha,
-        ...common.vcsField,
-        started_at: common.startedAt,
-        finished_at: common.finishedAt,
-        duration_secs: common.durationSecs,
-        dispatch_id: common.dispatchId,
-        input_tokens: common.inputTokens,
-        output_tokens: common.outputTokens,
-        token_method: 'heuristic-chars-4',
-        parse_path: common.parsePath,
-        ...(common.degradation ? { degradation: common.degradation } : {}),
-        capability: cap.capability,
-        ...(cap.declared !== cap.capability ? { capability_declared: cap.declared } : {}),
-        ...(cap.event ? { capability_event: cap.event } : {}),
-        appserver: common.appserver,
-        // Claude only: the proven model rides here. A codex result never gets the
-        // key, so the frozen BASELINE_RESULT_KEYS set of that transport is unchanged.
-        ...(common.transportTelemetry ? { transport_telemetry: common.transportTelemetry } : {}),
-        // ADDITIVE, same mold as parse_path/degradation/capability/appserver above:
-        // no existing key changes name or shape, and validateExecuteResult does NOT
-        // require this one (it validates the JSON the MODEL returns; this field is
-        // the adapter's own). A reader that ignores it sees a byte-identical result.
-        ...(common.runtimeEvidence ? { runtime_evidence: common.runtimeEvidence } : {}),
-      };
+      return assembleExecuteResult(parsed, common, cap);
     },
+  };
+}
+
+/**
+ * The single execute-result shape every owner channel retains. Exported so
+ * consumers and regressions use the real assembled shape, never a hand-built one.
+ * Validate it with `validateAssembledExecuteResult`.
+ */
+function assembleExecuteResult(parsed, common, cap) {
+  return {
+    status: parsed.status,
+    protocol_version: PROTOCOL_VERSION,
+    summary: parsed.summary,
+    must_haves_status: parsed.must_haves_status,
+    files_changed: common.derived,
+    files_changed_declared: parsed.files_changed,
+    pre_dirty: common.preDirty,
+    ...common.multiRepo,
+    start_sha: common.startSha,
+    head_sha: common.headSha,
+    ...common.vcsField,
+    started_at: common.startedAt,
+    finished_at: common.finishedAt,
+    duration_secs: common.durationSecs,
+    dispatch_id: common.dispatchId,
+    input_tokens: common.inputTokens,
+    output_tokens: common.outputTokens,
+    token_method: 'heuristic-chars-4',
+    parse_path: common.parsePath,
+    ...(common.degradation ? { degradation: common.degradation } : {}),
+    capability: cap.capability,
+    ...(cap.declared !== cap.capability ? { capability_declared: cap.declared } : {}),
+    ...(cap.event ? { capability_event: cap.event } : {}),
+    appserver: common.appserver,
+    // Claude only: the proven model rides here. A codex result never gets the
+    // key, so the frozen BASELINE_RESULT_KEYS set of that transport is unchanged.
+    ...(common.transportTelemetry ? { transport_telemetry: common.transportTelemetry } : {}),
+    // ADDITIVE, same mold as parse_path/degradation/capability/appserver above:
+    // no existing key changes name or shape, and validateExecuteResult does NOT
+    // require this one (it validates the JSON the MODEL returns; this field is
+    // the adapter's own). A reader that ignores it sees a byte-identical result.
+    ...(common.runtimeEvidence ? { runtime_evidence: common.runtimeEvidence } : {}),
   };
 }
 
@@ -2713,7 +2833,7 @@ async function runWriteContractCore(opts, contract) {
       claudeOutput = await invokeClaudeTransport({
         provisionalStoreRoot: opts.provisionalStoreRoot,
         onProgress: opts.onProgress, calibrationOptions: opts.calibrationOptions, calibrationOptions: opts.calibrationOptions,
-    onPackagedContext: opts.onPackagedContext, telemetryIdentity: opts.telemetryIdentity,
+    onPackagedContext: opts.onPackagedContext, onBeforeSpawn: opts.onBeforeSpawn, telemetryIdentity: opts.telemetryIdentity,
         telemetryRoute: opts.telemetryRoute, budgets: opts.executionContext?.budgets || opts.budgets,
         prompt,
         resultProfile: contract.mode === 'fix' ? 'fix' : 'execute',
@@ -2957,7 +3077,10 @@ async function runWriteContractCore(opts, contract) {
  * forge-must-haves.js BEFORE exit 0 — this is the enforcing gate (S03 requirement #1):
  * a legacy or malformed plan aborts with a throw → exit 2 → orchestrator falls back to
  * the Claude planner. The must_haves check runs on the CONTENT string directly (no temp
- * file — parseMustHaves accepts a string).
+ * file — parseMustHaves accepts a string). Issue 343 U0c then admits the whole candidate
+ * through the shared strict gate (admitPlanCandidate): missing or invalid depends/writes,
+ * a task list that does not match the task plans, or an invalid task graph refuses with
+ * its named code before the success result-file, on both engines.
  *
  * @param {object} opts
  * @param {string} opts.planContextFile  path to the planning-context markdown
@@ -3051,6 +3174,7 @@ async function runPlanCore(opts) {
   // dispatch report `no-transport-field` forever.
   const planOptions = {
     provisionalStoreRoot: opts.provisionalStoreRoot,
+    ...(engine === 'claude' ? { onBeforeSpawn: opts.onBeforeSpawn } : {}),
     onProgress: opts.onProgress, calibrationOptions: opts.calibrationOptions,
     onPackagedContext: opts.onPackagedContext, telemetryIdentity: opts.telemetryIdentity,
     telemetryRoute: opts.telemetryRoute, budgets: opts.budgets,
@@ -3073,9 +3197,13 @@ async function runPlanCore(opts) {
     // Claude-only keys: planOptions also feeds the app-server branch unchanged.
     // The plan unit's session opt-in comes only from its owner (S05); review
     // legs never call runPlanCore and never receive `session`.
+    // #330: the owner-supplied contextRoot reaches only this read-only Claude call
+    // (buildClaudeArgs turns it into `--add-dir <owner>`); absent stays absent, and
+    // planOptions keeps it away from the app-server's context observation.
     try {
       const claudeOutput = await invokeClaudeJson({ ...planOptions, onLiveness: opts.onLiveness,
-      localProofIgnore: opts.localProofIgnore, ...(opts.claudeSession ? { session: opts.claudeSession } : {}) }, validatePlanResult);
+      localProofIgnore: opts.localProofIgnore, ...(opts.contextRoot ? { contextRoot: opts.contextRoot } : {}),
+      ...(opts.claudeSession ? { session: opts.claudeSession } : {}) }, validatePlanResult);
       acceptClaudePlanOutput(claudeOutput);
     } catch (error) {
       if (require('./forge-claude-provisional').describe(error)?.private_ref) {
@@ -3133,6 +3261,7 @@ async function runPlanCore(opts) {
   // returned T##-PLAN must carry a structured, well-formed must_haves block or we abort
   // BEFORE exit 0 so the orchestrator falls back to the Claude planner.
   const { hasStructuredMustHaves, parseMustHaves } = require('./forge-must-haves.js');
+  try {
   for (const tp of parsed.task_plans) {
     if (!hasStructuredMustHaves(tp.content)) {
       throw new Error(`${tp.id} is legacy — GPT plan must carry a structured must_haves block`);
@@ -3142,6 +3271,38 @@ async function runPlanCore(opts) {
     } catch (e) {
       throw new Error(`${tp.id} must_haves invalid: ${e.message}`);
     }
+  }
+  // Issue 343 U0c: explicit depends/writes, canonical membership and a valid task graph,
+  // still before any success byte (named refusal, provider_called true).
+  admitPlanCandidate(parsed, path.resolve(opts.contextRoot || cwd));
+  } catch (error) {
+    // A closed, structurally valid transport response is useful evidence even
+    // when strict semantic admission rejects it. Never label this ready.
+    const candidate = { ...parsed, protocol_version: PROTOCOL_VERSION,
+      dispatch_id: dispatchId, started_at: startedAt,
+      ...(transportTelemetry ? { transport_telemetry: transportTelemetry } : {}) };
+    const bytes = Buffer.from(JSON.stringify({ version: 1, trust: 'rejected-unpublishable',
+      reason_code: error.code || 'plan-admission-failed', result: candidate }, null, 2));
+    const retained = `${resultFile}.rejected.json`;
+    error.provider_called = true;
+    error.stage = 'plan-admission';
+    error.transport_telemetry = transportTelemetry;
+    error.rejected_candidate = { channel: 'resultFile.rejected.json', bytes: bytes.length,
+      sha256: require('crypto').createHash('sha256').update(bytes).digest('hex'), status: 'too-large' };
+    // The response schema is already bounded by the transport. Bound this
+    // additional private evidence too, without publishing or printing payloads.
+    if (bytes.length <= 8 * 1024 * 1024) {
+      error.plan_candidate = candidate;
+      try {
+        if (fs.existsSync(retained)) {
+          const stat = fs.lstatSync(retained);
+          if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== bytes.length || !fs.readFileSync(retained).equals(bytes))
+            throw new Error('candidate-conflict');
+        } else fs.writeFileSync(retained, bytes, { flag: 'wx', mode: 0o600 });
+        error.rejected_candidate.status = 'retained';
+      } catch { error.rejected_candidate.status = 'evidence-write-failed'; }
+    }
+    throw error;
   }
 
   const finishedAt = normalizedFinishedAt ||= new Date().toISOString();
@@ -3193,6 +3354,10 @@ module.exports = {
   runRebuttal,
   buildDefendPrompt,
   normalizeDefense,
+  buildChallengePrompt,
+  buildRebuttalPrompt,
+  normalizeChallenge,
+  normalizeRebuttal,
   DEFEND_VERDICT_ENUM,
   runExecute,
   runFix,
@@ -3210,6 +3375,8 @@ module.exports = {
   validateObjections,
   validateVerdicts,
   validateExecuteResult,
+  validateAssembledExecuteResult,
+  assembleExecuteResult,
   validatePlanResult,
   buildPlanPrompt,
   captureDirtySnapshot,

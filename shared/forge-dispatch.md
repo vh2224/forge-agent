@@ -1,6 +1,7 @@
 # Forge Dispatch — Shared Dispatch Control Flow
 
-> Bidirectional entry: for Claude sidecars and artifact units on either engine,
+> Bidirectional entry: for ALL supported sidecars, including Codex execute-task,
+> and artifact units on either engine,
 > read `shared/forge-bidirectional-sidecar.md` first and use its unit adapter.
 > This supported branch takes precedence over the historical Codex-only
 > conditions below; never apply their implicit Claude fallback to this branch.
@@ -63,7 +64,7 @@ Semantics for workers:
 - **Borrowed `worktree`** (`/forge-task --attach`) — `CODE_DIR` belongs to the lender run and `BRANCH` is the lender's branch. Workers commit there normally; the borrower cleanup never removes the borrowed tree.
 - **SVN working copy (Phase 1)** — activation detects `svn` before `require_worktree` elevation. It does not attempt branch/worktree setup and does not STOP on an all-repositories setup failure; it runs `shared` with an `elevation_reason` naming SVN. SVN isolation is Phase 2 and out of scope.
 - Header absent → `shared` mode; nothing changes.
-- When the header is present with `ISOLATION: worktree`, commands in the templates that take `--cwd "{WORKING_DIR}"` for **code verification/build** (e.g. `forge-verify.js`) run with `--cwd "{CODE_DIR}"` instead; `--plan`/artifact paths under `.gsd/**` keep `{WORKING_DIR}`. `forge-verifier.js` is the exception: it needs both `--cwd {WORKING_DIR}` for plans and artifacts and `--code-dir {CODE_DIR}` for code/import verification.
+- When the header is present with `ISOLATION: worktree`, `forge-verify.js` runs with `--cwd "{CODE_DIR}" --gsd-dir "{WORKING_DIR}/.gsd"`; `--plan`/artifact paths under `.gsd/**` keep `{WORKING_DIR}`. `forge-verifier.js` is the exception: it needs `--cwd "{WORKING_DIR}"` for plans and artifacts and `--code-dir "{CODE_DIR}"` for code/import verification.
 
 Templates do not repeat this header — `forge-prompt.js` injects it at render time (see `skills/forge-auto/SKILL.md` and `skills/forge-next/SKILL.md` § Build worker prompt).
 
@@ -296,7 +297,7 @@ Execute all steps. The task plan's ## Standards section has the relevant coding 
 If ## Checker Feedback is present — treat recurring patterns as known anti-patterns to actively avoid this unit (not as instructions to implement).
 If ## Security Checklist is present — treat each item as a must-have. Verify all checklist items before writing T##-SUMMARY.md.
 Verify every must-have using the verification ladder — including lint/format check.
-Run verification gate: node "$FORGE_SCRIPTS_DIR/forge-verify.js" --plan "{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md" --cwd "{WORKING_DIR}" --unit execute-task/{T##}
+Run verification gate: node "$FORGE_SCRIPTS_DIR/forge-verify.js" --plan "{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md" --cwd "{CODE_DIR}" --gsd-dir "{WORKING_DIR}/.gsd" --unit execute-task/{T##}
 If exit code != 0 and not skipped → include formatFailureContext output as ## Verification Failures in retry prompt, return partial. Do NOT write T##-SUMMARY.md.
 If exit code == 0 or skipped → continue to summary.
 Write T##-SUMMARY.md.
@@ -594,7 +595,7 @@ Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/{M###}-SUMMARY.md
 ## Instructions
 1. Write S##-SUMMARY.md (compress all task summaries)
 2. Write S##-UAT.md (non-blocking human test script)
-3. Run verification gate: node "$FORGE_SCRIPTS_DIR/forge-verify.js" --cwd "{WORKING_DIR}" --unit complete-slice/{S##}
+3. Run verification gate: node "$FORGE_SCRIPTS_DIR/forge-verify.js" --cwd "{CODE_DIR}" --gsd-dir "{WORKING_DIR}/.gsd" --unit complete-slice/{S##}
    Record result in S##-SUMMARY.md ## Verification Gate section (commands, exit codes, discovery source, total duration).
    If exit code != 0 and not skipped:"no-stack" → stop, return blocked with blocker_class: tooling_failure.
 4. Security scan — search changed files for risky patterns (eval, innerHTML, dangerouslySetInnerHTML, raw SQL concatenation, console.log near secrets, hardcoded credentials). If found, add ## ⚠ Security Flags to S##-SUMMARY.md. Not a blocker — document and continue.
@@ -1320,12 +1321,12 @@ Applicability by `unit_type`:
 
 | `unit_type` | Engine routing | Sidecar dispatch |
 |-------------|----------------|--------------------------|
-| `execute-task` | **active** | yes — `WORKER_MODE == sidecar` plus the codex adapter selection reaches `--mode execute` (Branch C) |
+| `execute-task` | **active** | yes — single-task sidecars on both engines use the canonical unit-adapter request interface; raw `--mode execute` is a lower-level transport, not the workflow publisher |
 | `plan-slice` | **active** (S03) | yes — `WORKER_MODE == sidecar` plus the codex adapter selection reaches read-only `--mode plan` (Branch D) |
 | `memory-extract` | resolved from `tier_models.light` | yes when the resolver selects a declared sidecar; native otherwise |
 | other preparation/closure units | resolved per unit | only when `forge-transport-capabilities.js` declares that exact unit; unsupported preparation routes refuse explicitly |
 
-`plan-milestone` and `estimate-milestone` are **never** covered by `workers:` (locked) — they stay on tier `max`, with the model resolved through `tier_models.max`.
+`plan-milestone` and `estimate-milestone` are **never** covered by `workers:` (locked) — they stay on tier `max`, with the model resolved through the exact-unit routing cell or fallback `tier_models.max`.
 
 The `native` path passes the resolver result through
 `forge-native-invocation.js`; the adapter validates the actual host tool and
@@ -1336,6 +1337,24 @@ write/read-only behavior, artifact units return bounded content, and
 without a declared transport refuse explicitly.
 
 #### Single-call resolver — `forge-routing.js` (ONE call per dispatch)
+
+Routing cells use `executor` for `execute-task`, `planner` for `plan-slice`, and
+the exact unit type for milestone artifacts: `research-milestone`,
+`research-slice`, `discuss-milestone`, `discuss-slice`, `plan-milestone`,
+`estimate-milestone`, `plan-check`, `complete-slice`, `complete-milestone`.
+For example, `routing.default.research-milestone.standard` can explicitly name
+a supported Claude model while existing executor/planner cells keep their GPT
+choices. Missing cells preserve normal tier fallback; memory and unknown phases
+do not gain a routing cell. `plan-milestone` retains its `max` tier and has no
+relationship to the `planner` cell. The cascade still replaces a whole domain:
+use the canonical prefs editing helper to preserve the effective domain and its
+existing sibling cells; do not replace a domain with an isolated example fragment.
+
+The dispatch guard also checks the selected transport's deterministic artifact
+profile. A Codex sidecar profile refused by #350 is already refused by resolution
+with its exact reason/hint, without changing that route or contacting a provider.
+Configure a supported per-unit route explicitly, then resolve again. No automatic
+artifact fallback or weakening of the transport's read-only context is implied.
 
 The Engine Resolution (the old step 1.45) and the tier-chain resolution of § Tier Resolution (the old step 4, `forge-tier-chain.js --json`) **collapse into ONE call** to `forge-routing.js`. The resolver is a **superset** of `readTierChain()`: the chain it returns already carries the `engine` per member, so the wiring calls the CLI **once** with all inputs and consumes the chain — never re-resolving mid-unit (`--next-after` is used only on a failure trigger; see § Cross-engine chain walk).
 
@@ -1456,6 +1475,16 @@ CODEX_MODEL=$(printf '%s' "$PREFS_JSON" | node -e "let d='';process.stdin.on('da
 **JSONC shape:** the parser exposes the per-unit-type engine as `.prefs.workers[<unit_type>]`; `timeout` as `.prefs.workers.timeout`; `codex_model` as `.prefs.workers.codex_model`. Without a `workers:` block the defaults are `WORKERS_ENGINE=claude`, `CODEX_MODEL=""`. `WORKERS_TIMEOUT` is always the resolver's `workers_timeout` (the dispatch resolver's `--shell-exports`), i.e. the **safety ceiling** computed by `scripts/forge-worker-timeout.js resolveWorkerCeiling`: absent/null → the route tier's ceiling (light/standard/heavy/max = 900/1800/3600/5400 s, `WORKERS_TIMEOUT_SOURCE=tier-default`); an explicit 1..86400 overrides the tier (`explicit`); the legacy value `300` is ignored with a warning and the tier ceiling applies (`legacy-300-ignored`, message in `WORKERS_TIMEOUT_WARNING`); an invalid value falls back to the tier ceiling with a warning. Liveness (60/120/240 s without a signal) is the primary kill authority; the ceiling only acts on a worker that is still alive.
 
 #### Sidecar dispatch state machine (`WORKER_MODE == sidecar && UNIT_TYPE == execute-task`)
+
+**Workflow entry:** use `forge-unit-sidecar.js` through the canonical request CLI
+in [bidirectional delivery](forge-bidirectional-sidecar.md#supported-contracts)
+for both supported engines and for a single task. Follow that contract
+for the full execution request, held claims, gates, root verification and criterion
+bindings. That adapter publishes canonical delivery/captures before `complete`.
+The workflow refuses missing delivery before committing success. The raw xllm
+mechanics below describe the lower-level primitive only; they cannot replace this
+owner publisher. Old committed tasks lacking proof use the current-verification
+successor in `forge-delivery.md`, without backdating or rerunning implementation.
 
 **Sidecar environment policy (canonical — mirrors reference this, never copy).** Todo spawn de
 sidecar recebe `env: buildSidecarEnv(policy)`. A resolução é `--env-policy` >
@@ -2122,7 +2151,7 @@ Materialization is **orchestrator-only** — codex never touches `.gsd/**`. Afte
 | `workers.timeout` | int (seconds) \| null | `null` (→ tier ceiling) | **Safety ceiling** per sidecar attempt, forwarded as `--timeout` via the resolver's `$WORKERS_TIMEOUT`. Absent/null → route tier ceiling (light/standard/heavy/max = 900/1800/3600/5400 s); explicit 1..86400 overrides; legacy `300` ignored with warning `legacy-300-ignored`; invalid → tier ceiling with warning. Source: `scripts/forge-worker-timeout.js resolveWorkerCeiling` (`WORKERS_TIMEOUT_SOURCE`). Liveness is the primary kill authority; reaching the ceiling with a live stream ends as `budget-exceeded-while-active` |
 | `workers.codex_model` | string (model id) | unset (`null`) | Legacy fallback for the sidecar `--model` when no routed Codex chain member leads; unset **and** no Codex chain → Codex CLI default. The flag itself is driven by `$SIDECAR_MODEL` (`sidecarModelFor`) |
 
-`plan-milestone` and `estimate-milestone` are intentionally **absent** from this table — neither is routed through `workers:` (locked tier `max`, model through `tier_models.max`). The scaffold that documents these keys (commented) ships in `forge-agent-prefs.jsonc § Workers Settings` (S05); the reader operates with the safe defaults above without it.
+`plan-milestone` and `estimate-milestone` are intentionally **absent** from this table — neither is routed through `workers:` (locked tier `max`, model through the exact-unit routing cell or fallback `tier_models.max`). The scaffold that documents these keys (commented) ships in `forge-agent-prefs.jsonc § Workers Settings` (S05); the reader operates with the safe defaults above without it.
 
 #### Domain metadata — format fixed by S02, emitted by S03
 
@@ -2455,7 +2484,7 @@ of its protected specification occurrences is inside the real marker pair.
 
 ```bash
 # Pass ROUTE_JSON and active tool capabilities to buildNativeInvocation. Invoke
-# its returned tool/args unchanged. For Claude, first read the actual exposed
+# its returned tool/args unchanged. For Claude without an observed per-call Agent effort argument, read the actual exposed
 # agents/<agent>.md (repo or installed Forge copy), hash those same bytes with
 # SHA-256, and pass { transport:'agent-frontmatter', agentPath,
 # sourceFingerprint } as effortBinding. buildNativeInvocation re-reads that
@@ -2525,7 +2554,7 @@ An explicit `--effort-<unit-type>` CLI argument (or the matching own key in API 
 1. **Unit-type default.** `EFFORT = PREFS.effort[unit_type]` (the `EFFORT_MAP` built at Load Context from `.prefs.effort` — sourced off the one canonical `forge-prefs.js --resolved` object, see [§ Per-unit prefs resolution](#per-unit-prefs-resolution), never a per-file merge of `forge-agent-prefs.jsonc § Effort Settings`). Fall back to the built-in defaults: planning/review phases and `execute-task` use `medium`; auxiliary phases retain their declared defaults. `execute-task: medium` matches the real `forge-executor` agent binding. Explicit prefs, plan frontmatter and CLI inputs still take precedence. `EFFORT_REASON = "unit-type:<unit_type>"`.
 2. **Dedicated frontmatter axis (`execute-task` only).** If no explicit argument exists for this unit and `effort:` is present in the `T##-PLAN.md` frontmatter → `EFFORT = PLAN_EFFORT`, `EFFORT_REASON = "frontmatter-effort:<val>"`. This is the planner's per-task complexity judgement and wins over the unit-type default. Independent of `tier:` — a task may be `tier: standard` + `effort: medium` or `tier: heavy` + `effort: high` in any combination.
 3. **Risk escalation sync (`plan-slice` only).** Without an explicit effort argument for this unit, when Tier Resolution escalated the slice to `max` (`REASON == "risk-escalation:high"`), the effort also jumps to `max`. A `risk:high` slice plan is the highest leverage-per-dollar spot for frontier reasoning.
-4. **Model capability policy.** The ceiling, the `thinking_header` and the transport limits come from the versioned `scripts/forge-model-policy.js` (`policy_version`, `policy_entry`, `policy_diagnostics` in the resolver JSON; `effort_requested` keeps the pre-policy value). Documented entries: `claude-sonnet-5-5` and `claude-sonnet-5` accept the full scale up to `max`; `claude-sonnet-4-6` documents low/medium/high/max and an `xhigh` request is refused before dispatch (`effort-unsupported-by-model`), never lowered silently. `claude-sonnet-5-5` emits `thinking_header: adaptive`; an explicit `thinking.sonnet_phases: disabled` refuses (`thinking-disabled-incompatible`) and `between_tools` on any Claude transport refuses (`thinking-transport-unsupported`). Legacy entries (`claude-haiku-4-5`, `claude-opus-5`, `claude-fable-5`) and ids without an entry keep the historical rule: `claude-haiku*`/`claude-sonnet*` without an entry cap at `medium`, `claude-opus*`/`claude-fable*` allow `max`, plus `model-policy-unknown` for ids without an entry. When the clamp lowers the value, append `|clamped:model-cap` to `EFFORT_REASON` (diagnostic `effort-clamped-by-policy`). The model is never changed. Requested, resolved and sent are distinct; the applied effort stays unknown without provider readback. Native Claude legs are checked before launch with `preflightNativeBinding`: the frontmatter effort binding must equal the resolved effort; the full model id is sent only when the active tool capabilities list it in `model_ids` (otherwise the alias path, recorded as `model_version_proof: alias-only` for Sonnet 5.5); a frontmatter `thinking:` line is not a per-subagent control (thinking is inherited from the session), so it never refuses a launch and only yields the `native-thinking-declaration-inert` diagnostic when it contradicts the policy — explicit operator intent is the thinking pref, refused by the resolver.
+4. **Model capability policy.** The ceiling, the `thinking_header` and the transport limits come from the versioned `scripts/forge-model-policy.js` (`policy_version`, `policy_entry`, `policy_diagnostics` in the resolver JSON; `effort_requested` keeps the pre-policy value). Documented entries: `claude-sonnet-5-5` and `claude-sonnet-5` accept the full scale up to `max`; `claude-sonnet-4-6` documents low/medium/high/max and an `xhigh` request is refused before dispatch (`effort-unsupported-by-model`), never lowered silently. `claude-sonnet-5-5` emits `thinking_header: adaptive`; an explicit `thinking.sonnet_phases: disabled` refuses (`thinking-disabled-incompatible`) and `between_tools` on any Claude transport refuses (`thinking-transport-unsupported`). Legacy entries (`claude-haiku-4-5`, `claude-opus-5`, `claude-fable-5`) and ids without an entry keep the historical rule: `claude-haiku*`/`claude-sonnet*` without an entry cap at `medium`, `claude-opus*`/`claude-fable*` allow `max`, plus `model-policy-unknown` for ids without an entry. When the clamp lowers the value, append `|clamped:model-cap` to `EFFORT_REASON` (diagnostic `effort-clamped-by-policy`). The model is never changed. Requested, resolved and sent are distinct; the applied effort stays unknown without provider readback. Native Claude legs are checked before launch with `preflightNativeBinding`: an observed per-call Agent effort argument carries the exact resolved effort, or the fallback frontmatter binding must equal it; the full model id is sent only when the active tool capabilities list it in `model_ids` (otherwise the alias path, recorded as `model_version_proof: alias-only` for Sonnet 5.5); a frontmatter `thinking:` line is not a per-subagent control (thinking is inherited from the session), so it never refuses a launch and only yields the `native-thinking-declaration-inert` diagnostic when it contradicts the policy — explicit operator intent is the thinking pref, refused by the resolver.
 
 #### Frontmatter field
 
@@ -2624,7 +2653,7 @@ Task-level invocation (inside `execute-task` worker):
 ```sh
 node "$FORGE_SCRIPTS_DIR/forge-verify.js" \
   --plan "{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md" \
-  --cwd "{WORKING_DIR}" \
+  --cwd "{CODE_DIR}" --gsd-dir "{WORKING_DIR}/.gsd" \
   --unit execute-task/{T##}
 ```
 
@@ -2632,7 +2661,7 @@ Slice-level invocation (inside `complete-slice` worker):
 
 ```sh
 node "$FORGE_SCRIPTS_DIR/forge-verify.js" \
-  --cwd "{WORKING_DIR}" \
+  --cwd "{CODE_DIR}" --gsd-dir "{WORKING_DIR}/.gsd" \
   --unit complete-slice/{S##}
 ```
 
@@ -2737,7 +2766,7 @@ SHAPE=$(printf '%s' "$CLASSIFY" | node -pe "JSON.parse(require('fs').readFileSyn
 | `shape` | Meaning | Route |
 |---------|---------|-------|
 | `complete` | Marker present, `status` in the closed enum | Normal path — Layer 0 does not fire |
-| `status-missing` | Marker present, no status in the enum (the block itself was cut) | Layer 0 |
+| `status-missing` | Marker present, status absent or outside the closed enum (`done`, `partial`, `blocked`; `complete` and `ok` are invalid) | Layer 0 |
 | `absent` | No marker anywhere in the return | Layer 0 |
 | `empty` | No non-whitespace return at all | Layer 0 |
 
@@ -2780,11 +2809,45 @@ Each rung is tried in order; the first that yields a status wins, and the run re
 
 ### Repair wording (rungs 2 and 3)
 
-Ask for the **complete** answer, and forbid only the expensive part:
+Choose the variant from the unit's actual output contract, never from the model
+family. Preserve scope, claims, pending questions and transport restrictions.
 
-> Re-emit your COMPLETE final answer in ONE message: every inline deliverable your agent instructions require, followed by the `---GSD-WORKER-RESULT---` block. Do not re-run tools or redo investigation — restate the conclusions you already reached. A message containing only the result block discards your work: the orchestrator reads this message and nothing else.
+**Inline deliverables** (review findings, advocate verdicts): ask for the complete
+answer and forbid repeat investigation:
+
+> Re-emit your COMPLETE final answer in ONE message: every inline deliverable your agent instructions require, followed by the `---GSD-WORKER-RESULT---` block. The block must contain `status: done | partial | blocked`; choose exactly one accepted status (`complete` and `ok` are invalid). Do not re-run tools or redo investigation — restate the conclusions you already reached. A message containing only the result block discards your work: the orchestrator reads this message and nothing else.
 
 Wording is load-bearing and the failure it avoids was measured. An earlier version said "emit the missing structured block", which a compliant agent obeys literally — it emits the block **alone**. For agents whose deliverable is inline prose in that same message (`forge-advocate` verdicts, `forge-reviewer` findings), the orchestrator then reads a scoreboard with the payload stripped off. M018 lost six advocate defenses that way, three returning exactly `refuted=3 conceded=2 open=1` and nothing else. Keep the two clauses together: *complete answer* **and** *no re-running tools*.
+
+**File artifacts** (native researcher/planner with authorized writes):
+
+> Finalize the conclusions already reached. Writing and checking EVERY required
+> artifact in the existing unit contract is permitted and required. Read your
+> existing draft/checkpoint only as needed to finalize; do not repeat research,
+> searches, probes or implementation. Preserve the same CODE_DIR, write scope,
+> claims and decisions. Account for all required paths, including every task plan
+> and any authorized standards update; one parent file is not the whole roster.
+> Write canonical artifacts only when their content is complete and valid. Return
+> your COMPLETE final report plus `---GSD-WORKER-RESULT---`, with exactly one status:
+> `done | partial | blocked`. Report missing files/checks as partial, never done.
+
+For a sidecar whose artifacts are returned in JSON, finalization means returning
+all required artifact entries through that existing schema; it never permits
+direct `.gsd` writes or relaxes read-only admission. An inline restatement alone
+does not satisfy a native file-output contract. Drafts can guide the same worker's
+recovery, but salvage never promotes draft presence to a worker verdict or gate.
+
+**Unfinished investigation, same live session only:** when the preserved worker
+explicitly reports unfinished research, finalize-only wording cannot complete it.
+If the real host exposes a resume/follow-up tool, request at most 8 additional turns
+in that same session: use existing findings first, perform only the named missing
+checks, reserve the final 3 turns for ALL required outputs and the result block,
+then return partial/blocked for remaining gaps. Preserve the same model/effort,
+scope, writer reconciliation, budgets and unanswered decisions. This is a bounded
+prompt request, not a runtime-enforced turn override; configured maxTurns and
+transport ceilings still apply. Without a resumable session/tool, use the existing
+ladder and no-write reconciliation rules; do not silently re-run over drafts or
+changed code. A necessary human decision still requires its explicit answer.
 
 ### Events
 
@@ -2826,6 +2889,19 @@ The three recovery layers are **mutually exclusive**. Every failure enters exact
 2. If worker returns `status: blocked` → Layer 2 only. Never reaches Layer 1 or 3.
 3. If worker returns `status: done` or `status: partial` → verification gate runs. If signals show must_have drift → Layer 3 only. The Retry Handler never sees verification results (Anti-recursion rule above).
 4. **`context_overflow` belongs to Layer 2, never Layer 3.** It is not a verification-signal failure — it is a capacity failure. Routing it to PRUNE would silently discard requirements under resource pressure. If the S03 context-monitor bridge reports severity CRITICAL, Node Repair **suppresses DECOMPOSE and PRUNE** entirely (see § Context-monitor suppression below) and forces RETRY or `blocked`.
+
+### Replay, operational refusal, abandonment and new begin
+
+For a failed or started receipt, call `recoverUnitSidecar` with the live abandonment
+adapter; never manually relaunch with a new dispatch id. The mandatory recovery
+procedure (`shared/forge-procedure-recovery.md`) governs the order: replay first,
+closed operational refusal (`replay-refusal-v1`), proved abandonment, then new begin
+in the same lease/claim generation. Surface refusals by code. This precedes choosing
+any retry/repair layer; no layer bypasses retained output, authority, questions,
+writer/descendant/root proofs, baseline, backup/reset, time admission or review-fix limits.
+The supported scope, code tables, stores and evidence limits are documented in
+`docs/issue-440/recovery-abandon.md`; that report grants no authority.
+Existing native, legacy and unsupported routes retain their guards and contracts.
 
 ### Strategy table
 
@@ -2925,13 +3001,15 @@ This event schema is **additive**: existing readers that process `"verify"` and 
 
 ## Parallel Task Execution
 
-Execute-task dispatches may run **in parallel** when the ready set has ≥2 tasks with satisfied `depends:[]` and non-overlapping `writes:[]`. This section is the canonical spec for parallelism — both `forge-auto` and `forge-next` reference it.
+Execute-task dispatches may run **in parallel** when the ready set has ≥2 tasks with satisfied `depends:[]` and non-overlapping `writes:[]`. This section is the canonical spec for parallelism — both `forge-auto` and `forge-next` reference it. Two mechanisms exist and never mix: the existing **native batch** of a native primary, and the **sidecar cohort** of a sidecar primary, decided canonically by the controller (§ Sidecar cohort through the batch CLI below).
 
 ### Scope
 
 - **Parallel:** `forge-auto` only. When `forge-parallelism.js` returns `mode: parallel`, the orchestrator dispatches N `Agent()` calls in a single response message.
 - **Sequential (depends-aware):** `forge-next` always. It invokes `forge-parallelism.js --max-concurrent 1` to pick the first pending task whose deps are satisfied — never more than one dispatch per `/forge-next` invocation. This is deliberate — `forge-next` is a debug/manual-control mode.
 - **Other unit types** (`plan-slice`, `research-slice`, `complete-slice`, etc.) are always sequential. Parallelism applies strictly within `execute-task`.
+
+- **Sidecar cohort (issue 343):** `forge-auto` `execute-task` only, from the controller's durable `dispatch_batch` decision, through `forge-execution-batch.js run --batch <ref>` and then `consolidate --batch <ref>`. `forge-next`, standalone tasks, plan/research/review-fix/complete units, native primaries, legacy plans, SVN roots and unsupported materialization keep their current single/native path with one closed reason. A native writer window and a sidecar cohort never run together.
 
 ### Contract — plan frontmatter
 
@@ -2946,7 +3024,8 @@ writes:               # every file/glob this task will create, modify, or delete
 
 - `depends` is a flat array of task IDs. Empty array means no predecessors.
 - `writes` uses literal paths OR globs (`*`, `**`). Paths use forward slashes (Windows-safe).
-- Both fields are emitted by `forge-planner` on every plan, even when empty (`writes: []` for docs-only tasks).
+- Both fields are emitted explicitly on every new plan, by `forge-planner` and by the direct creators (`/forge-add-task`, `/forge-add-slice`, decompose); `writes: []` only when the task writes no product file.
+- New output is admitted by the owner gate before any success (`shared/forge-plan-gate.md § New task declarations`): both planner transports and the owner sidecar publisher, the native `complete(plan-slice)`, the first execute begin and sidecar pre-spawn, and the creators' `begin-mutation`/`finish-mutation` pair refuse missing, bare-empty, scalar, duplicate or malformed declarations, unknown/self references, cycles and protected product paths by name. A refused new plan never becomes `legacy`.
 - `T##-SUMMARY.md` existence = task done. `forge-parallelism.js` uses this as the done signal.
 
 ### Algorithm
@@ -2959,6 +3038,8 @@ writes:               # every file/glob this task will create, modify, or delete
 4. **Build ready set** — pending tasks whose `depends` are all satisfied (each dep has a `T##-SUMMARY.md`).
 5. **Greedy conflict-free batch** — iterate `ready` in plan order; include a task iff its `writes` don't overlap any already-claimed task's `writes`. Stop at `max-concurrent`.
 6. **Return** `{mode, batch, reason, details?}`.
+
+The picker reads the same shared structural decoder as the owner gate (`forge-must-haves.js parseExecutionFields`), and its glob intersection is conservative and bounded: exhausted or undecidable work counts as a conflict. It stays a read-only compatibility picker — it never creates a cohort, begin, lease or claim, and in `forge-auto` it never overrides the controller's canonical decision.
 
 ### Output modes
 
@@ -2973,11 +3054,11 @@ writes:               # every file/glob this task will create, modify, or delete
 
 ### Backward compatibility — legacy semantics
 
-Tasks created before the parallelism schema existed lack `depends`/`writes` in their frontmatter. The script detects this at slice-scope: **if ANY task in the slice is missing either field, the entire slice runs sequentially** — preserving exact pre-parallelism behavior for in-flight milestones. No backfill is required. Only newly-planned slices benefit from parallelism. This is intentional: mixing old/new within a slice is too risky for the race conditions we'd unlock.
+Tasks created before the parallelism schema existed lack `depends`/`writes` in their frontmatter. The script detects this at slice-scope: **if ANY task in the slice is missing either field, the entire slice runs sequentially** — preserving exact pre-parallelism behavior for in-flight milestones. No backfill is required. Only newly-planned slices benefit from parallelism. This is intentional: mixing old/new within a slice is too risky for the race conditions we'd unlock. Legacy is a property of genuine historical plans only (the controller names an unenrolled slice generation `legacy-plan-sequential`); newly generated plans with a missing or invalid field are refused at admission and never reach this path.
 
 ### Parallel dispatch semantics (forge-auto only)
 
-When `mode == parallel` and `BATCH.length > 1`:
+When the primary is native, `mode == parallel` and `BATCH.length > 1` (native entries only; a sidecar entry is removed from the batch before its gates and stays pending):
 
 1. **Per-task prep** — build a worker prompt, resolve tier (`{TIER, MODEL_ID, REASON}`), run the security gate, and create a `TaskCreate` entry for each batch member.
 2. **Single heartbeat write** — `auto-mode.json` gets one `BATCH:<csv-of-units>` label so the statusline surfaces the parallel group without special-casing.
@@ -2994,7 +3075,16 @@ When `mode == parallel` and `BATCH.length > 1`:
 {"ts":"...","event":"dispatch","dispatch_id":"execute-task-T01-4f90ac-a1","prompt_id":"execute-task-T01-4f90ac","attempt":1,"status":"done","unit":"execute-task/T01","model":"...","host_runtime":"claude","worker_mode":"native","dispatch_allowed":true,"tier":"...","reason":"...","input_tokens":1234,"output_tokens":5678,"token_method":"heuristic-chars-4","batch_size":3}
 ```
 
-Readers that don't know about `batch_size` ignore it (additive by design). Sequential dispatches omit the field entirely.
+Readers that don't know about `batch_size` ignore it (additive by design). Sequential dispatches omit the field entirely. A sidecar cohort member's `dispatch` line additionally carries `batch_id` and `member_ref`, both or neither, with `batch_size` between 2 and 8; it is appended only through the live cohort broker by that member's own handle, with exactly that member's resolved model, tier, effort and worker axes.
+
+### Sidecar cohort through the batch CLI (forge-auto execute-task only)
+
+Issue 343. This documents the implemented path; it adds no new concurrency to any other unit or skill.
+
+- **Decision.** `forge-orchestrate next`, in the loop's `auto` mode, calls the `dispatch` function of `scripts/forge-execution-batch.js` for the canonically selected `execute-task` (the primary). A sidecar primary with independent ready sidecar siblings of the same slice gets one immutable manifest (`.gsd/forge/batches/<batch_id>/manifest.json`), published before any lease, then one committed begin and one live lease per member under one controller transaction. The loop answers `dispatch-batch` with `details.dispatch_batch`, holds `current_batch` separately from `current_unit` and charges `max_steps` once per member; a replay of the same request returns the same manifest without a second begin. Every other case keeps the single path with one closed `reason_code` (`single-candidate`, `primary-native`, `mode-not-auto`, `unit-not-execute-task`, `legacy-plan-sequential`, `plan-generation-invalid`, `dependency-unmet`, `writes-overlap`, `route-not-sidecar`, `route-stale`, `svn-isolation-unavailable`, `vcs-isolation-unavailable`, `isolation-policy`, `materialization-unsupported`, `roots-limit`, `max-concurrent`, `max-steps`, `time-admission`, `lease-scope-collision`, `claim-gate-conflict`, `pending-question`, `member-begin-refused`). Each member keeps exactly its own resolved route, model, tier and effort; native candidates stay pending with theirs unchanged.
+- **Isolation.** Before any child and before the common snapshot S0, the CLI captures the measured dirty base and gives each member one exclusive worktree and index per physical Git root reproducing staged, unstaged, legitimate untracked, binary, deleted, renamed and mode changes; the integration HEAD, index and working tree stay byte-identical, with no commit, stash or branch move. An unrepresentable base or root answers `serial` with a named reason. The parent run holds one aggregate live claim generation with its batch locator; a member acts only through its opaque in-process handle and its separately validated runtime view, while canonical plan and gate bytes stay unchanged. The parent's union reservation never becomes a member's write permission. The 14-root budget reduces the cohort; no limit is enlarged.
+- **Run.** `run --batch <ref> --request <file>` opens one cohort broker (one complete signed stream, one immutable anchor per member attempt, private key only in the broker process) and calls the real `runUnitSidecar` per member under the resolved `max_concurrent`, each member in its own process scope; aborting one member terminates only its own scope. A finished member is retained as its executed record plus seal: no SUMMARY, DELIVERY, marker, controller completion or done result while siblings run, and heavy verification waits for the barrier, sealed only after every writer really exited.
+- **Consolidation.** `consolidate --batch <ref> --request <file>` never starts a provider. In manifest order it verifies each retained member, checks the original integration target, publishes through typed exact-byte owner operations, integrates the verified delta into the run's own target, rechecks the integrated delivery and acknowledges through the controller's own completion — one member at a time. A failed member, a moved target or a pending question preserves the successful siblings, responses, seals and worktrees; a rerun after any crash performs zero second inference, publication, commit or ACK, never refreshes a protected baseline and never ignores `.gsd/events`. Cleanup removes a member root only with reader-safe evidence after ACK and retains dirty or historically needed worktrees.
 
 ### Memory extraction and safe publication
 
@@ -3015,7 +3105,7 @@ parallelism:
   max_concurrent: 3   # integer 1–8; default 3. Caps batch size in forge-auto.
 ```
 
-Setting `max_concurrent: 1` disables parallelism in `forge-auto` while still honoring depends-aware picking. Setting it higher than 3 works but has diminishing returns — most slices rarely have more than 3 independently-writable tasks ready simultaneously.
+Setting `max_concurrent: 1` disables parallelism in `forge-auto` while still honoring depends-aware picking. Setting it higher than 3 works but has diminishing returns — most slices rarely have more than 3 independently-writable tasks ready simultaneously. The same resolved value bounds the sidecar cohort: the decision cuts members from the tail for `max_steps`, `max_concurrent` and the 14-root budget, and the pool only ever tightens it. The preference, its default and its range are unchanged.
 
 ### Authoring guidance for planners
 
@@ -3025,7 +3115,7 @@ When decomposing a slice:
 2. **List every file each task writes** — literal paths or globs. Be **explicit and realistic**. Underreporting `writes` causes race conditions; overreporting only sequentializes unnecessarily.
 3. **If two tasks share a file in `writes`** (e.g., both registering exports in a barrel file), either (a) order them with `depends`, or (b) split the shared-file responsibility into a third task that both depend on.
 
-`writes` conflicts are checked bidirectionally — glob on either side matches literal path on the other, and vice versa. `src/auth/**` conflicts with `src/auth/jwt.ts`.
+`writes` conflicts are checked bidirectionally — glob on either side matches literal path on the other, and vice versa. `src/auth/**` conflicts with `src/auth/jwt.ts`. Two globs conflict whenever they can match a common path (`src/*.js` and `src/a*` conflict); proved-disjoint literal segments do not; empty, `.` and malformed paths conflict. Every new task declares `depends` and `writes` explicitly, and the owner gate refuses a missing or invalid declaration instead of treating the plan as legacy.
 
 ## Pre-dispatch capability policy
 
@@ -3202,3 +3292,19 @@ garantia do horizonte. Este texto distribui o contrato; ele não demonstra execu
 compreensão no cliente instalado, que continuam desconhecidas.
 
 <!-- forge:linked-task:dispatch-budget:end -->
+
+
+### Claude Agent per-call effort
+
+When the active Claude Agent schema exposes a per-call effort parameter, report both effort_transports:['agent-argument'] (alongside any observed frontmatter transport) and reasoning_efforts with its exact observed enum. buildNativeInvocation prefers that argument and sends the resolved effort unchanged. Without this observation, retain the fingerprinted agent-frontmatter binding and its strict mismatch refusal. Do not infer capability from another session, installed version or prompt text. Before opening a new lease, preflightNativeBinding with these same observed capabilities; keep ordinary native preparation/publication and pending-decision gates.
+
+The optional doctor diagnostic observes frontmatter only; its mismatch does not prove that an unobserved per-call argument is unavailable. Runtime authorization, actual tool compatibility, argument sent and provider-applied effort remain distinct facts. `effort_applied` stays unknown without provider readback.
+
+
+#### Claude effort environment and resumed agents
+
+The official [Claude Code effort contract](https://code.claude.com/docs/en/sub-agents#choose-an-effort-level) documents per-call effort for non-fork subagents since2.1.292, retention on resume, and CLAUDE_CODE_EFFORT_LEVEL taking precedence over both the argument and frontmatter. Version/docs do not prove that the active tool exposes the parameter.
+
+If the embedding host can actually observe its environment, include the optional activeCapabilities.claude_effort_environment object with exactly {source:<bounded host observation ID>,override:null|<literal effort>}. Null means that host actually observed the variable unset; it must not be inferred from absence in a Node child. An unavailable observation is omitted; it remains unknown, without adding a default diagnostic or changing historical invocation JSON/journal identity. Absence of a diagnostic is not evidence that the host variable is unset. A known conflict refuses before invocation (including resume); no environment or preference is edited. Invalid observations refuse rather than establishing compatibility.
+
+An absent or matching observed override still does not prove provider-applied effort: effort_requested, effort_resolved and effort_argument are recorded separately and effort_applied stays unknown. Supply a fresh actual-host observation before each invocation/resume. Canonical native supervision reattaches only the same journal identity/binding; it does not invent a new tool call or assert that Claude applied effort. Native review callers that cannot forward an Agent effort argument remain restricted to verified frontmatter per their own helper.

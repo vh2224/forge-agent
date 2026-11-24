@@ -1073,7 +1073,8 @@ function svnStrictPostChanges(cwd, snapshot, opts) {
 function svnHashPath(cwd, relPath) {
   const abs = path.resolve(cwd, relPath);
   try {
-    const stat = fs.statSync(abs);
+    const stat = fs.lstatSync(abs);
+    if (stat.isSymbolicLink()) return { ok: true, hash: crypto.createHash('sha256').update('link\0' + fs.readlinkSync(abs)).digest('hex') };
     if (stat.isDirectory()) return { ok: true, hash: 'dir' };
     return { ok: true, hash: crypto.createHash('sha256').update(fs.readFileSync(abs)).digest('hex') };
   } catch (error) {
@@ -1095,13 +1096,48 @@ function svnStatusEntries(cwd, opts) {
   return parseSvnStatusXml(result.stdout);
 }
 
+// SVN collapses an unversioned tree to its directory. Execution and reset must
+// observe its leaves, including changes inside a tree that was already dirty.
+// Never follow links or silently return a partial census.
+function svnLeafStatusEntries(cwd, opts) {
+  const status = svnStatusEntries(cwd, opts);
+  if (!status.ok) return status;
+  const entries = [], seen = new Set();
+  let count = 0;
+  const visit = (entry, depth) => {
+    if (excluded(opts, entry.path)) return;
+    if (++count > 100000 || depth > 64) throw new Error('svn-leaf-inventory-limit');
+    const abs = path.resolve(cwd, entry.path);
+    if (!isWithinCwd(cwd, entry.path)) throw new Error('svn-leaf-inventory-escape');
+    const stat = fs.lstatSync(abs);
+    if (stat.isDirectory() && !stat.isSymbolicLink()) {
+      const children = fs.readdirSync(abs).sort();
+      // Empty containers still matter; nonempty unversioned containers have no
+      // independent VCS delta and must not broaden exact child-file claims.
+      if (children.length) {
+        for (const child of children) visit({ ...entry, path: `${entry.path}/${child}` }, depth + 1);
+        return;
+      }
+    }
+    if (!seen.has(entry.path)) { entries.push(entry); seen.add(entry.path); }
+  };
+  try {
+    for (const raw of status.entries) {
+      const entry = { ...raw, path: raw.path.replace(/\\/g, '/') };
+      if (entry.item === 'unversioned') visit(entry, 0);
+      else if (!seen.has(entry.path)) { entries.push(entry); seen.add(entry.path); }
+    }
+    return { ok: true, entries };
+  } catch (error) { return { ok: false, error: error.code || error.message || 'svn-leaf-inventory-failed' }; }
+}
+
 /**
- * SVN status is always against BASE. Directories are deliberately included in
+ * SVN status is always against BASE. Versioned/empty directories are included in
  * this snapshot and use the non-hash sentinel `dir`; callers compare it like
  * any other hash so file↔directory replacement is a divergence.
  */
 function svnCaptureDirty(cwd, opts) {
-  const status = svnStatusEntries(cwd, opts);
+  const status = svnLeafStatusEntries(cwd, opts);
   if (!status.ok) return status;
   const entries = [];
   for (const entry of status.entries) {
@@ -1118,7 +1154,7 @@ function svnCaptureDirty(cwd, opts) {
 
 /** SVN `baseline` is intentionally inert: status is always compared to BASE. */
 function svnPostChanges(cwd, baseline, opts) { // eslint-disable-line no-unused-vars
-  const status = svnStatusEntries(cwd, opts);
+  const status = svnLeafStatusEntries(cwd, opts);
   if (!status.ok) return status;
   const entries = [];
   for (const entry of status.entries) {
@@ -1183,6 +1219,14 @@ function svnRestoreAndRemove(cwd, baseline, target, opts) { // baseline is inten
   const restored = [];
   const removed = [];
   if (!guard.ok) return { ok: false, restored, removed, error: guard.error };
+  // The leaf census expands unversioned trees for exact reset ownership, but
+  // SVN has no metadata to revert for those leaves. Strict SVN builds reject
+  // them with E155010. Measure status before any mutation; scheduled additions
+  // remain versioned revert targets, and status failure never authorizes removal.
+  const status = svnStatusEntries(cwd, opts);
+  if (!status.ok) return { ok: false, restored, removed, error: status.error };
+  const unversionedRoots = status.entries.filter(entry => entry.item === 'unversioned')
+    .map(entry => entry.path.replace(/\\/g, '/').replace(/\/+$/, ''));
   const all = Array.from(new Set([...target.restore, ...target.remove])).filter((p) => !excluded(opts, p));
   const preservedSet = new Set(target.preserved || []);
   const isDirTarget = (p) => {
@@ -1198,6 +1242,8 @@ function svnRestoreAndRemove(cwd, baseline, target, opts) { // baseline is inten
   const infinityPaths = [];
   const emptyPaths = [];
   for (const p of all) {
+    const relative = String(p).replace(/\\/g, '/');
+    if (unversionedRoots.some(root => root && (relative === root || relative.startsWith(root + '/')))) continue;
     if (isDirTarget(p) && hasPreservedDescendant(p)) emptyPaths.push(p);
     else infinityPaths.push(p);
   }
@@ -1414,10 +1460,11 @@ function workingStatus(cwd, opts = {}) {
         let kind = null;
         if (xy === '??') kind = 'untracked';
         else if (xy === '!!') kind = 'ignored';
-        // Index A is checked before the generic worktree-modified branch:
+        // Intent-to-add is exactly ` A`; index A is checked before the generic
+        // worktree-modified branch:
         // both `A ` and `AM` are additions not yet committed, not ordinary
         // local modifications.
-        else if (xy[0] === 'A') kind = 'added';
+        else if (xy === ' A' || xy[0] === 'A') kind = 'added';
         else if (xy.includes('D')) kind = 'deleted';
         else if (/[MRCU]/.test(xy)) kind = 'modified';
         else return { vcs, ok: false, entries: [], error: `git-status-unhandled:${xy}` };

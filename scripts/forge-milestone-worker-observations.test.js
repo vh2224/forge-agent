@@ -278,15 +278,29 @@ async function main() {
     lease.acquire = (cwd, unit, options) => acquire(cwd, unit, { ...options, tokenFactory: () => 'baseline-generation' });
     try {
       for (const host of ['claude', 'codex']) {
+        const f = flow.fixture(host, false); cleanup.push(f.cwd);
+        f.at = 1; const selected = flow.invoke(f, 'next');
+        // New plan_validation binds the physical owner and its generation. Compare
+        // two fresh completions of this SAME private begin, not hashes of foreign owners.
+        const gsd = path.join(f.cwd, '.gsd');
+        const checkpoint = fs.mkdtempSync(path.join(path.dirname(f.cwd), 'forge-observation-comparison-')); cleanup.push(checkpoint);
+        fs.cpSync(gsd, path.join(checkpoint, 'gsd'), { recursive: true });
         const run = handle => {
-          const f = flow.fixture(host, false); cleanup.push(f.cwd);
-          f.at = 1; const selected = flow.invoke(f, 'next'); f.at = 2;
+          f.at = 2;
           const result = flow.invoke(f, 'complete', selected.snapshot, { result: { status: 'done' } }, { ...f.options, ...(handle ? { workerObservationReader: handle(f) } : {}) });
           const text = JSON.stringify(result).split(JSON.stringify(f.cwd).slice(1, -1)).join('<root>');
-          return { f, text, events: fs.readFileSync(path.join(f.cwd, '.gsd/milestones', M, M + '-events.jsonl'), 'utf8') };
+          return { f, text, completionKey: result.boundary.idempotency_key, events: fs.readFileSync(path.join(f.cwd, '.gsd/milestones', M, M + '-events.jsonl'), 'utf8') };
         };
         let called = 0;
-        const plain = run(null), observed = run(f => workers.createObservationReader(() => { called++; return { inventory: 'complete', sources: [] }; },
+        const plain = run(null);
+        // Restore only a synthetic fixture's pre-completion input; no real attempt,
+        // worker history or producer receipt is reset by this counterfactual control.
+        assert.equal(path.dirname(gsd), f.cwd); assert.equal(path.basename(gsd), '.gsd');
+        assert(path.basename(f.cwd).startsWith('forge-time-flow-'));
+        fs.rmSync(gsd, { recursive: true, force: true });
+        fs.cpSync(path.join(checkpoint, 'gsd'), gsd, { recursive: true });
+        assert.equal(controller.lookupRecord(f.cwd, 'transaction', plain.completionKey), null, 'the observed completion must be fresh, not an idempotent cached response');
+        const observed = run(f => workers.createObservationReader(() => { called++; return { inventory: 'complete', sources: [] }; },
           { roots: [fs.realpathSync.native(f.cwd)] }));
         assert.equal(observed.text, plain.text); assert.equal(observed.events, plain.events); assert.equal(called, 0);
         assert(!JSON.parse(plain.text).controller_result.details?.time);

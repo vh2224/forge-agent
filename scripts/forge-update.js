@@ -9,6 +9,7 @@ const installer = require('./forge-installer.js');
 const { resolveForgeHome } = require('./forge-home.js');
 const { resolveExecutable } = require('./forge-capabilities.js');
 const remoteUpdater = require('./forge-update-remote.js');
+const updateCheck = require('./forge-update-check.js');
 const vscodePanel = require('./forge-vscode-install.js');
 
 const SOURCE_MANIFEST = 'forge-source-manifest.json';
@@ -283,7 +284,30 @@ function update(input = {}, dependencies = {}) {
   // Core and panel outcomes stay separate: a panel failure never alters ok.
   const components = { core: { status: preview ? 'planned' : 'applied', changed: installed.changed }, vscode_panel: installed.vscode_panel || null };
   if (preview) return { ...plan, source_repo: sourceRepo, remote_source: input.remoteProvenance || null, applied: false, installer: installed, retirements, components };
-  return { ...plan, source_repo: sourceRepo, remote_source: input.remoteProvenance || null, applied: true, changed: installed.changed, backup: installed.backup, installer: installed, retirements, components };
+  // Invalidation is a post-commit effect: previews never mutate it, installer
+  // failures never reach it, and its own failure cannot turn an applied update
+  // into a false installer failure. The generation fence prevents an older
+  // detached refresh from republishing the superseded verdict.
+  let cache_invalidation;
+  try {
+    const invalidate = dependencies.invalidateUpdateCache
+      || updateCheck.invalidateCache;
+    const resolveContext = dependencies.resolveUpdateContext
+      || updateCheck.resolveConsumerContext;
+    const consumerContext = resolveContext(input.cwd || process.cwd(), {
+      forgeHome: resolveForgeHome(input),
+      userHome: input.userHome,
+      env: input.env,
+      platform: input.platform,
+      readPrefs: dependencies.readPrefs,
+    });
+    cache_invalidation = invalidate(consumerContext);
+  } catch (_) {
+    cache_invalidation = { invalidated: false, reason: 'invalidation-failed' };
+  }
+  return { ...plan, source_repo: sourceRepo, remote_source: input.remoteProvenance || null,
+    applied: true, changed: installed.changed, backup: installed.backup, installer: installed,
+    retirements, components, cache_invalidation };
 }
 
 // The clone's own state for explicit local/recovery mode. `behind_tracking` is

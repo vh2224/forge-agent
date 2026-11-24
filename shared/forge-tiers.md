@@ -35,10 +35,11 @@ unless overridden (see [Override Precedence](#override-precedence)).
 
 ### Domain-routable vs tier_models-only
 
-`execute-task` (mapped to `executor`) and `plan-slice` (mapped to `planner`) are
-the only unit types captured by the `routing` block. The other eight unit types
-always resolve through `tier_models.<tier>`. `plan-milestone` has a fixed `max`
-tier, as does `estimate-milestone`; their models remain configurable through `tier_models.max`. For the
+`execute-task` maps to `executor`, `plan-slice` maps to `planner`, and artifact
+units use their exact unit type as the phase key (see `forge-dispatch.md`).
+An absent routing cell falls back to `tier_models.<tier>`; memory units remain
+tier-models-only. `plan-milestone` and `estimate-milestone` keep the fixed `max`
+tier, with optional exact-unit routing cells and fallback `tier_models.max`. For the
 live workspace resolution, including domain inheritance, run `/forge-prefs phases`.
 
 `routing.<domain>.<role>.<tier>` is a literal list of IDs: `tier_models.<tier>` does not affect it. To change a Claude fallback in a routing chain, edit that chain's Claude member, not `tier_models`.

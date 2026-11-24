@@ -76,7 +76,9 @@ function allIgnorePaths() {
 function svnWcRoot(dir) {
   try {
     const out = _execFileSync('svn',
-      ['info', '--show-item', 'wc-root', '--non-interactive', dir],
+      // Local paths also accept peg revisions: make every @ literal, including
+      // one at the end of a directory name (e.g. ChartIQ@1.0.0 or literal@).
+      ['info', '--show-item', 'wc-root', '--non-interactive', '--', `${path.resolve(dir)}@`],
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     const root = String(out || '').trim();
     return root || null;
@@ -333,6 +335,7 @@ module.exports = {
   LOCAL_IGNORE_PATHS,
   PROJECTION_IGNORE_PATHS,
   detectVcs,
+  svnWcRoot,
   applyIgnore,
   validateIgnore,
   svnIsVersioned,

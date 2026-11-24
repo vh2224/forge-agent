@@ -19,6 +19,7 @@
 'use strict';
 
 const fs   = require('fs');
+const crypto = require('crypto');
 const path = require('path');
 const lock = require('./forge-lock.js');
 const { normalizeHostRuntime } = require('./forge-runtime.js');
@@ -113,7 +114,7 @@ function writeAtomic(file, content) {
   fs.renameSync(temp, file);
 }
 
-function render(cwd, state) {
+function render(cwd, state, options = {}) {
   if (!state.milestone) throw new Error('forge-state.write: state.milestone required');
   const milestoneId = state.milestone;
   const dir = path.dirname(statePath(cwd, milestoneId));
@@ -123,7 +124,10 @@ function render(cwd, state) {
     throw new Error(`forge-state.write: invalid phase "${state.phase}"`);
   }
 
-  const nowIso = new Date().toISOString();
+  const nowIso = options.at === undefined ? new Date().toISOString() : options.at;
+  if (typeof nowIso !== 'string' || !Number.isFinite(Date.parse(nowIso)) || new Date(Date.parse(nowIso)).toISOString() !== nowIso) {
+    throw new Error('forge-state.render: explicit at must be canonical ISO');
+  }
   const fm = Object.assign({}, state._frontmatter || {}, {
     milestone: milestoneId,
     kind: state.kind || 'milestone',
@@ -190,6 +194,53 @@ function updateFields(cwd, milestoneId, patch) {
     writeAtomic(rendered.file, rendered.content);
     return read(cwd, milestoneId);
   } finally { handle.release(); }
+}
+
+// Exact canonical STATE postimages for a prepared controller transaction. These
+// records are data, not authorization: the controller still validates begin/lease/owner.
+const stateDigest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+function preparedShape(prepared) {
+  if (!prepared || typeof prepared !== 'object' || Array.isArray(prepared)
+      || Object.keys(prepared).sort().join(',') !== 'after_sha256,before_sha256,content'
+      || !/^[a-f0-9]{64}$/.test(prepared.before_sha256) || !/^[a-f0-9]{64}$/.test(prepared.after_sha256)
+      || typeof prepared.content !== 'string' || stateDigest(Buffer.from(prepared.content, 'utf8')) !== prepared.after_sha256) {
+    throw new Error('forge-state: invalid prepared postimage');
+  }
+  return prepared;
+}
+function withStateMutex(cwd, milestoneId, callback) {
+  const handle = lock.acquireSync(cwd, 'state-' + milestoneId, { holderRunId: milestoneId, retries: 80 });
+  try { return callback(); } finally { handle.release(); }
+}
+function prepareUpdateFields(cwd, milestoneId, patch, options = {}) {
+  return withStateMutex(cwd, milestoneId, () => {
+    const current = read(cwd, milestoneId);
+    if (!current) throw new Error('forge-state.prepareUpdateFields: ' + milestoneId + ' not found');
+    const file = statePath(cwd, milestoneId), before = fs.readFileSync(file);
+    const rendered = render(cwd, Object.assign({}, current, patch), options);
+    if (rendered.file !== file) throw new Error('forge-state: prepared path mismatch');
+    return { before_sha256: stateDigest(before), after_sha256: stateDigest(Buffer.from(rendered.content, 'utf8')), content: rendered.content };
+  });
+}
+function inspectPreparedUpdate(cwd, milestoneId, patch, prepared, options) {
+  preparedShape(prepared);
+  const file = statePath(cwd, milestoneId), bytes = fs.readFileSync(file), currentSha = stateDigest(bytes);
+  if (currentSha !== prepared.before_sha256 && currentSha !== prepared.after_sha256) throw new Error('forge-state: prepared preimage mismatch');
+  const current = read(cwd, milestoneId);
+  if (!current) throw new Error('forge-state: prepared STATE missing');
+  const rendered = render(cwd, Object.assign({}, current, patch), options);
+  if (rendered.file !== file || rendered.content !== prepared.content) throw new Error('forge-state: prepared canonical postimage mismatch');
+  return { file, currentSha };
+}
+function assertPreparedUpdate(cwd, milestoneId, patch, prepared, options = {}) {
+  return withStateMutex(cwd, milestoneId, () => { inspectPreparedUpdate(cwd, milestoneId, patch, prepared, options); return true; });
+}
+function commitPreparedUpdate(cwd, milestoneId, patch, prepared, options = {}) {
+  return withStateMutex(cwd, milestoneId, () => {
+    const checked = inspectPreparedUpdate(cwd, milestoneId, patch, prepared, options);
+    if (checked.currentSha !== prepared.after_sha256) writeAtomic(checked.file, prepared.content);
+    return read(cwd, milestoneId);
+  });
 }
 
 // Push a one-line entry to "Recent units" section, keep last 10
@@ -322,6 +373,6 @@ Flags:
 if (require.main === module) cliMain();
 
 module.exports = {
-  read, write, updateFields, pushRecentUnit, readLegacyStateFile,
+  read, write, updateFields, prepareUpdateFields, assertPreparedUpdate, commitPreparedUpdate, pushRecentUnit, readLegacyStateFile,
   statePath, VALID_PHASES, writeAtomic,
 };

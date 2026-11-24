@@ -51,6 +51,8 @@ explicitly supplied ID, bind with --intent explicit-resume before loading existi
 state or handoff artifacts. Inspecting an ID does not bind. Reconcile stale/missing evidence or
 pending decisions before dispatch; preserve prior acceptances. Global locks/census
 remain concurrency guards, never personal selection inputs.
+Personal acceptances must cite immutable question/decision evidence JSON or a stable plan-gate record, never mutable `*-STATE.md` or generated `.gsd/decisions/<M>.md`. Preserve the accepted decision and exact historical hash. Existing stale captures require explicit canonical recapture/reconciliation of that same acceptance; do not ask for the accepted decision again, silently rebind its source, or weaken the stale-source checker.
+
 All references below to STATE mean `.gsd/milestones/{RUN_ID}/{RUN_ID}-STATE.md`.
 RUN_ID is mandatory; historical empty-ID/legacy branches below are unreachable.
 After run/isolation registration, bind idempotently to capture validated worktree aliases.
@@ -220,13 +222,40 @@ materializa as opções na fronteira segura; enquanto não há escolha, ele devo
 3. Grave só a resposta explícita do operador com
    `--answer --round <ID> --response "<texto exato do operador>" --source user-text|tool-answer`;
    resposta vazia, estrangeira ou conflitante não avança. Nova rodada, mesmo fluxo.
-4. Registre a escolha com `--decide` pelo host que embute `main(argv, io, liveAdapter)`
-   com `liveAdapter.getDecisionHandle`. A CLI avulsa recusa com
-   `time-decision-attestation-required`: a decisão continua pendente.
+4. O próprio caller do host registra a escolha por `decideObserved`, conforme o
+   exemplo executável em `shared/forge-milestone-time.md § Ponte viva dos hosts`.
+   Monte o callback com a resposta real já observada no canal nativo ou na conversa;
+   o operador não precisa escrever um adaptador. A CLI avulsa `--decide` continua
+   recusando JSON/flags como autoridade com `time-decision-attestation-required`.
+   Nunca repita essa CLI para destravar o fluxo.
 5. Continue com `forge-long-workflow-adapter.js --command resume-time-option` e o mesmo snapshot do loop;
    `time-option-ready` segue para `plan-milestone`, `time-option-reestimate-ready` para
    a nova estimativa, e qualquer outro código para e mostra a pendência.
 Nenhum JSON, flag, `approved:true`, texto de prompt ou silêncio aprova uma opção.
+
+### Conclusão de task sem entrega comprovada
+
+`execution-delivery-required` em complete conserva o begin e a lease: verifique
+e publique a entrega canônica do mesmo trabalho, depois complete o mesmo begin.
+Não redispare implementação para gerar um recibo. Todo sidecar de execução,
+inclusive Codex single-task, usa o unit adapter de `shared/forge-bidirectional-sidecar.md`.
+
+`execution-delivery-recovery-required` em next identifica conclusão antiga já
+committed. Preserve snapshot, código, registros e horários. Carregue o procedimento
+recovery e siga `shared/forge-delivery.md § Committed task without delivery`:
+o host monta os callbacks vivos de autoridade, perguntas e join/reconciliação de
+todos os writers/roots, conserva claim e isolamento e usa createRepair para
+verificação atual, sem executor nem inferência. Para dono diferente ou inativo,
+use a ponte canônica `resumeAndCreateRepair` de
+`shared/forge-completion-delivery-recovery.md`, com os três callbacks vivos e o
+snapshot exato de owner; ela conserva o claim e a linhagem committed. Não libere
+claim para contornar transferência. Ausência de prova do host continua
+pendente; PID ausente e JSON approved não autorizam recuperação.
+
+Após a conclusão genuína do sucessor, use o comando `resume-delivery` do mesmo
+adaptador de loop, com o snapshot salvo e o `repair_begin_key` retornado por start.
+Ele valida a publicação e retorna continue; só então chame next normalmente.
+Não edite lifecycle, workflow ID, contadores ou relógio para desbloquear.
 
 Mensagens das opções de prazo (pt-BR, uma decisão por rodada):
 - Decisão: `Decisão de prazo da milestone {M}: {pergunta}. Recomendo {opção} porque {motivo}. Escolha uma, sem pré-seleção: {opção 1} ({consequência}); {opção 2} ({consequência}){; opção 3}. Decisão pendente: {ID}. Sem resposta explícita, o roadmap não é planejado.`
@@ -461,19 +490,38 @@ Branch on `$STATUS`:
 - **`none`** - display the personal reason and stop without mutation. Legacy/global fallback is forbidden.
 - **`activate-new`** — register the new run:
   ```bash
-  SESSION_ID="${CLAUDE_SESSION_ID:-$(node -e "process.stdout.write(require('crypto').randomBytes(8).toString('hex'))")}"
-  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --add --id "$RUN_ID" --kind "$RUN_KIND" --session "$SESSION_ID" --isolation-mode "$ISOLATION_MODE" --account "${FORGE_ACCOUNT:-}" --worktrees "$WORKTREES_JSON" --branch "${RUN_BRANCH:-}" --cwd "$WORKING_DIR" > /dev/null || { echo "Run registration/update failed; stop before dispatch." >&2; exit 1; }
+  SESSION_ID=$(node "$FORGE_SCRIPTS_DIR/forge-runs.js" --owner-session --host-runtime claude --expected-owner-session '${CLAUDE_SESSION_ID}') || { echo "owner-session-unavailable: current Claude host identity was not attested; stop before registration." >&2; exit 2; }
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --add --observed-owner --host-runtime claude --expected-owner-session '${CLAUDE_SESSION_ID}' --id "$RUN_ID" --kind "$RUN_KIND" --session "$SESSION_ID" --isolation-mode "$ISOLATION_MODE" --account "${FORGE_ACCOUNT:-}" --worktrees "$WORKTREES_JSON" --branch "${RUN_BRANCH:-}" --cwd "$WORKING_DIR" > /dev/null || { echo "Run registration/update failed; stop before dispatch." >&2; exit 1; }
   echo "$MSG"
   ```
   Then continue to legacy activation (which writes auto-mode-started.txt + alias).
-- **`resume`** — emit `$MSG`, set `RUN_ID` (already set). Update the existing registry entry with the new session_id (the previous orchestrator process exited; this is a fresh session that needs to own heartbeat updates) and the freshly-resolved isolation mode:
+- **`resume`** — emit `$MSG`, keep the explicitly selected `RUN_ID` and observe the current host session. Inspect the target before changing its owner:
   ```bash
-  SESSION_ID="${CLAUDE_SESSION_ID:-$(node -e "process.stdout.write(require('crypto').randomBytes(8).toString('hex'))")}"
-  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json "{\"session_id\":\"$SESSION_ID\",\"active\":true,\"isolation_mode\":\"$ISOLATION_MODE\",\"worktrees\":$WORKTREES_JSON,\"branch\":\"$RUN_BRANCH\"}" --cwd "$WORKING_DIR" > /dev/null || { echo "Run registration/update failed; stop before dispatch." >&2; exit 1; }
+  OWNER_RESUME=$(node "$FORGE_SCRIPTS_DIR/forge-runs.js" --inspect-owner-resume "$RUN_ID" --observed-owner --host-runtime claude --expected-owner-session '${CLAUDE_SESSION_ID}' --cwd "$WORKING_DIR") || exit 1
+  OWNER_RESUME_STATUS=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).status)" "$OWNER_RESUME")
+  OWNER_RESUME_SHA=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).record_sha256)" "$OWNER_RESUME")
+  ```
+  `same-owner-active` proceeds directly to the strict update below, even if this session owns another run: this command has an explicit target. Hooks without a target still refuse ambiguous ownership.
+
+  `same-owner-inactive` is a reactivation, not a transfer: do not attest that the current owner died. The trusted host first inspects its processes, receipts and every possible writer root; replay/publish saved results or perform the existing reconciliation when needed. Only after observing workspace quiescence, run the following actual operation and then the strict update below:
+  ```bash
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --resume-owner "$RUN_ID" --observed-owner --host-runtime claude --expected-owner-session '${CLAUDE_SESSION_ID}' --expected-record-sha256 "$OWNER_RESUME_SHA" --confirm-workspace-quiescent --cwd "$WORKING_DIR" || exit 1
+  ```
+  `transfer-required` needs the prior owner's actual end and the same process/receipt/root reconciliation. Reuse existing explicit authorization, but do not infer facts from authorization, inactive, mtime, an empty active-run list, imported JSON or this skill. If the host cannot establish those facts, preserve the run and report `owner-resume-owner-stop-attestation-required` or `owner-resume-workspace-quiescent-attestation-required`; do not dispatch or clear claims/questions/receipts. Only after the trusted host actually establishes both facts, use this operation instead of the reactivation command:
+  ```bash
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --resume-owner "$RUN_ID" --observed-owner --host-runtime claude --expected-owner-session '${CLAUDE_SESSION_ID}' --expected-record-sha256 "$OWNER_RESUME_SHA" --confirm-owner-stopped --confirm-workspace-quiescent --cwd "$WORKING_DIR" || exit 1
+  ```
+  These flags are caller attestations, in the same trust model as claim recovery; they are not automatic OS evidence. The operation rechecks the exact run snapshot, canonical handoff/history, leases, pending transactions, retained claim and file locks under the controller/registry fences. A stale snapshot requires fresh inspection and revalidation of the facts; it is never silently retried. Unknown legacy binding or absent canonical boundary is preserved/refused, not healed or adopted. The prior process may still exist only after its real ownership tenure and possible writers have ended; no in-flight owner is transferred.
+
+  After the selected operation succeeds (or `same-owner-active`), refresh only the metadata resolved for this run:
+
+  ```bash
+  SESSION_ID=$(node "$FORGE_SCRIPTS_DIR/forge-runs.js" --owner-session --host-runtime claude --expected-owner-session '${CLAUDE_SESSION_ID}') || { echo "owner-session-unavailable: current Claude host identity was not attested; stop before registration." >&2; exit 2; }
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --observed-owner --host-runtime claude --expected-owner-session '${CLAUDE_SESSION_ID}' --json "{\"session_id\":\"$SESSION_ID\",\"active\":true,\"isolation_mode\":\"$ISOLATION_MODE\",\"worktrees\":$WORKTREES_JSON,\"branch\":\"$RUN_BRANCH\"}" --cwd "$WORKING_DIR" > /dev/null || { echo "Run registration/update failed; stop before dispatch." >&2; exit 1; }
   ```
   `branch` is refreshed here for the same reason `isolation_mode` is: it is what the
   setup just resolved, and a record created before the field existed carries `null`.
-  Re-recording it on resume heals those without a migration pass. In `shared` mode
+  Refreshing this address metadata after ownership is established fills those fields without a migration pass. In `shared` mode
   `$RUN_BRANCH` is empty and the field is written on disk as `""` (this interpolation
   bypasses `add()`'s `|| null`) — `forge-runs.js`'s `withAddressDefaults` normalizes
   `''` to `null` on every read (`get()`/`listAll()`), so it is read back as "no
@@ -721,9 +769,17 @@ fi
 > HTTP 400 on an explicit `thinking: disabled` at any effort, and `claude-opus-5` returns HTTP 400
 > when `disabled` is paired with effort `xhigh`/`max` (Opus 4.7/4.8 accept it at any effort).
 
-`unit_effort` (and `$EFFORT`/`$EFFORT_REASON` for the dispatch event) are set by the resolver above. The prompt may carry `effort: {unit_effort}` as diagnostic metadata and, for opus/fable phases, `thinking: {THINKING_OPUS}`. That text never satisfies Claude's effort binding; only the fingerprinted agent-frontmatter observation at the native adapter does.
+`unit_effort` (and `$EFFORT`/`$EFFORT_REASON` for the dispatch event) are set by the resolver above. The prompt may carry `effort: {unit_effort}` as diagnostic metadata and, for opus/fable phases, `thinking: {THINKING_OPUS}`. That text never satisfies Claude's effort binding; only an observed per-call Agent effort argument or a fingerprinted matching agent-frontmatter binding does.
+
+The following compatibility batch paragraph applies only to a native primary. Sidecar primaries use the canonical cohort protocol below and must not use this native batch computation.
 
 **Batch determination (step 1.6 — execute-task only):** When `unit_type == execute-task`, the dispatch is no longer strictly single-task. Invoke `scripts/forge-parallelism.js` to compute a **ready batch** — a set of tasks in the active slice whose `depends:[]` are satisfied AND whose `writes:[]` don't overlap with each other.
+
+**Canonical batch decision first (issue 343, auto mode only).** The adapter's `next` already applied the controller's durable decision for this `execute-task` selection; this step only consumes it:
+- Action `dispatch-batch` (reason `batch-ready`): `controller_result.details.dispatch_batch` names the published immutable manifest of a **sidecar primary** and its independent ready sidecar siblings (`batch_id`, `manifest_ref`, `manifest_sha256`, `replay`, `slice`, `primary`, `limits`, `members`, `excluded`). The snapshot holds it as `current_batch` and keeps `current_unit` empty. Do not run `forge-parallelism.js`, the per-task resolution or any branch of step 4 for it: follow **§ 4-C. Sidecar cohort flow**.
+- Action `dispatch`: the single path. `controller_result.details.batch` records `{decision: 'single', reason_code}` with one closed reason (for example `primary-native`, `single-candidate`, `legacy-plan-sequential`, `dependency-unmet`, `writes-overlap`, `roots-limit`, `svn-isolation-unavailable`, `materialization-unsupported`). A **sidecar** primary on this path dispatches alone: `BATCH = [{id: unit_id}]` and Branch C, never siblings borrowed from `forge-parallelism.js`. Only a **native** primary keeps the existing native batch below, and that batch launches only its native entries.
+
+`forge-parallelism.js` stays a read-only compatibility picker: it creates no cohort, begin, lease or claim, and its output never overrides, extends or re-routes the controller's decision. Models, tiers, efforts and routes stay exactly as the resolver returned them for each task.
 
 ```bash
 SLICE_PLAN=".gsd/milestones/${M###}/slices/${S##}/${S##}-PLAN.md"
@@ -739,9 +795,9 @@ Parse the JSON. Field semantics:
 
 | `mode` | Meaning | Action |
 |--------|---------|--------|
-| `parallel` | `batch.length ≥ 2` — multiple ready tasks, no `writes` conflicts | Parallel dispatch path (Step 4 branch B) |
+| `parallel` | `batch.length ≥ 2` — multiple ready tasks, no `writes` conflicts | Native primary only: native parallel dispatch (Step 4-P). A sidecar primary ignores it (single Branch C, or § 4-C when the adapter returned `dispatch-batch`) |
 | `single` | `batch.length == 1` — modern plan, only one task currently ready | Single dispatch path (Step 4 branch A) |
-| `legacy` | At least one task in slice is missing `depends` or `writes` frontmatter | Single dispatch with `batch[0]` — preserves behavior for pre-parallelism plans |
+| `legacy` | At least one task in slice is missing `depends` or `writes` frontmatter | Single dispatch with `batch[0]` — preserves behavior for genuine pre-parallelism plans. Newly generated plans never reach this mode: the owner gate refuses missing/invalid declarations first (`shared/forge-plan-gate.md § New task declarations`) |
 | `blocked` | Pending tasks exist but none have satisfied deps (or all ready tasks were filtered out) | Error — emit `reason` to user, deactivate auto-mode, stop loop |
 | `none` | All tasks complete | Advance STATE, re-derive unit_type (should flip to `complete-slice`) |
 | `error` | Script crash | Stop loop, surface reason |
@@ -802,7 +858,7 @@ for ENTRY in "${BATCH[@]}"; do
 done
 ```
 
-These maps are immutable dispatch inputs for the rest of this batch. Security checks still loop over every task. Partition delivery by `BATCH_WORKER_MODE[$ENTRY_ID]`: all `native` entries use the projected native batch mechanism; each `sidecar` entry is handled serially through the loaded Branch C/D mirror. Never read the scalar values left by the last loop iteration to choose a task's route or write its event.
+These maps are immutable dispatch inputs for the rest of this batch. Security checks still loop over every task. Partition delivery by `BATCH_WORKER_MODE[$ENTRY_ID]`: all `native` entries use the projected native batch mechanism. A `sidecar` entry is never launched from a native batch window, neither concurrently nor serially afterwards: remove it from `BATCH` before the security and claim gates below, keep its resolved route unchanged and let the controller's next canonical selection return it (single Branch C, or its cohort in § 4-C). When only the native primary remains, `BATCH.length == 1` and the single-task native flow applies. Never read the scalar values left by the last loop iteration to choose a task's route or write its event.
 
 **Risk radar gate (plan-slice only):** If `unit_type == plan-slice` and the slice is tagged `risk:high` in ROADMAP, check if `S##-RISK.md` already exists. If not:
 ```
@@ -828,16 +884,17 @@ Batch order (spec § Step 1 — fixed, not an implementation detail): (1) record
 ```bash
 FORGE_SCRIPTS_DIR=$([ -f scripts/forge-claim-gate.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 
-# B2: --code-dir carries ONLY a value THIS dispatch already resolved. At this point (step 1.7 runs
-# BEFORE Step 4's per-unit CODE_DIR resolution) only `shared` isolation already has one — WORKING_DIR
-# itself. `worktree`/`branch` modes have not resolved the per-unit CODE_DIR yet, so the flag is
-# omitted here on purpose (code_dir: null -> scope unknown -> fail closed, spec contract #7). NEVER
-# $WORKTREE_DIR, NEVER a value derived from root+branch+isolation_mode (explicitly prohibited).
+# B2: resolve every selected plan from the actual isolation result BEFORE the
+# union claim. Never infer a path from branch/root or reuse a preceding unit.
+# Different physical roots require the schema-v2 claim path; stop this legacy
+# single-root batch instead of choosing one root or recording code_dir:null.
 # Médio 2 (PR #110): the value travels QUOTED. `$GATE_CODE_DIR_FLAG` unquoted word-split a CODE_DIR
 # containing a space, producing a truncated `code_dir` -> fabricated `different-code-dir` -> the pair
 # left scope -> silent `proceed`. The canonical shape is the spec's own: `${CODE_DIR:+--code-dir "$CODE_DIR"}`.
-GATE_CODE_DIR="" 
-[ "$ISOLATION_MODE" = "shared" ] && [ -n "$CODE_DIR" ] && GATE_CODE_DIR="$CODE_DIR"
+GATE_PLANS=$(node -e "process.stdout.write(JSON.stringify(process.argv.slice(1)))" "${BATCH_PLAN_PATHS[@]}") || exit 1
+GATE_ROOT=$(node "$FORGE_SCRIPTS_DIR/forge-code-dir.js" --resolve --iso-result "$ISO_RESULT" \
+  --claim-plans-json "$GATE_PLANS" --run "$RUN_ID" --cwd "$WORKING_DIR") || exit 1
+GATE_CODE_DIR=$(node -e "const r=JSON.parse(process.argv[1]);if(!['ok','shared'].includes(r.status)||!r.code_dir)process.exit(1);process.stdout.write(r.code_dir)" "$GATE_ROOT") || exit 1
 
 # Claim extraction, used by every union computation below. `--evaluate` and `--check-only` both carry
 # `.claim` (the derived, normalised claim). FAIL CLOSED: a missing/invalid `.claim.paths` exits != 0
@@ -958,8 +1015,8 @@ fi
 
 **Overlap advisory (before complete-slice):** grave o toque desta run e confronte com as demais runs ativas — o sinal existe para ser visto **antes do merge**.
 ```bash
-node "{WORKING_DIR}/scripts/forge-touch.js" --record "{RUN_ID}" --cwd "{WORKING_DIR}" || true
-node "{WORKING_DIR}/scripts/forge-overlap.js" --check --cwd "{WORKING_DIR}" || true
+node "$FORGE_SCRIPTS_DIR/forge-touch.js" --record "{RUN_ID}" --cwd "{WORKING_DIR}" || true
+node "$FORGE_SCRIPTS_DIR/forge-overlap.js" --check --cwd "{WORKING_DIR}" || true
 ```
 Imprima o veredicto ao operador e **siga**. O sinal é advisory: **nunca** bloqueia o `complete-slice`, nunca ordena runs, nunca faz merge. Verdict `inconclusive` significa "não havia o que comparar" e **não** deve ser lido como limpo.
 
@@ -975,7 +1032,7 @@ Imprima o veredicto ao operador e **siga**. O sinal é advisory: **nunca** bloqu
    - Challenge → `Agent({ subagent_type: 'forge-reviewer', … })`
    - Defense → `Agent({ subagent_type: 'forge-advocate', … })` — pass `DEFENSE_FILE` (crash rail, `shared/forge-review.md § Step 3`); a defense that comes back missing/short/scoreboard-only is **salvaged from that file** before `review-advocate-unavailable` may be emitted.
    - Rebuttal × `rounds` → `forge-reviewer` in rebuttal mode (DEFENSE injected)
-   - The `model:` of `forge-advocate`/`forge-reviewer` comes exclusively from resolved `$ADVOCATE_ALIAS`/`$CHALLENGER_MODEL`; literals are a violation detected by `forge-review-audit.js`.
+   - The native `model:` of `forge-advocate`/`forge-reviewer` comes exclusively from resolved `$ADVOCATE_ALIAS`/`$NATIVE_CHALLENGER_ALIAS`; `$CHALLENGER_MODEL` belongs only to the external challenger. Preserve its original value as history after fallback; literals are a violation detected by `forge-review-audit.js`.
    - Resolve (Step 5 truth table), write `{S##}-REVIEW.md` (Step 6).
    - **CONCEDED items → fix now (Step 7a):** immediately before either a slice `review-fix/{S##}` or the milestone `review-fix/{M###}-triage`, resolve and gate the repair dispatch with the same canonical host seam:
      ```bash
@@ -1003,6 +1060,25 @@ Imprima o veredicto ao operador e **siga**. O sinal é advisory: **nunca** bloqu
        exit 1
      fi
      ```
+
+     Política executável de review-fix (`shared/forge-review.md § Política executável de review-fix`, `review-fix-policy-v1`) na fronteira `slice`; a triagem do Step 9 segue a regra própria descrita no gate de triagem abaixo:
+     1. Classifique os concedidos antes do ciclo. Monte o `verdict` de cada R# a partir do Step 5 (ou do retorno do Engine workflow) e decida pela CLI, nunca pela prosa:
+        ```bash
+        node "$FORGE_SCRIPTS_DIR/forge-review-policy.js" --classify --input "$RF_VERDICTS_FILE"
+        ```
+     2. Com `ask_in_auto: pause`, faça antes as perguntas do Step 7b: cada resposta `Refatorar agora` entra no mesmo ciclo com `basis: operator-decision`. Com `defer` não há resposta e o item segue para o Step 9.
+     3. Concedido que não é fix-now não entra no request. Publique a deferência dele, `**Correção:** não aplicada — deferida para triagem final (<motivo>)`, em vez de despachá-lo:
+        ```bash
+        node "$FORGE_SCRIPTS_DIR/forge-review-fix.js" --defer "$RF_DEFER_REQUEST"
+        ```
+     4. Um ciclo é um único request agrupado (concedidos fix-now com `basis: dual-verdict` mais as respostas `Refatorar agora`) com um único `dispatchId`, gerado uma vez e reutilizado no replay; o request de `--prepare-native` leva esse `dispatchId`. O claim gate abaixo usa só os itens desse request. No máximo 2 ciclos por slice, dentro do orçamento medido de 50%.
+     5. A admissão roda dentro do despacho (adaptador sidecar ou `--prepare-native`), nunca no lugar dele. Uma recusa nomeada (`review-fix-cycle-limit`, `review-fix-budget-exhausted`, `review-fix-not-fix-now`, `review-fix-policy-invalid`) não lança nada: sem retry, sem bypass, sem correção inline e sem outro worker. Os itens ficam `não aplicada — deferida para triagem final (<código>)` e vão para o Step 9. Em `review-fix-not-fix-now`, reconstrua o request só com os itens admissíveis e repita o claim gate.
+     6. Depois de cada decisão, admitida ou recusada, repasse verbatim a linha `⚖` desta leitura somente leitura (`RF_MILESTONE_ID` = `${RUN_ID:-{M###}}`):
+        ```bash
+        node "$FORGE_SCRIPTS_DIR/forge-review-policy.js" --status --cwd "$WORKING_DIR" --milestone "$RF_MILESTONE_ID" --slice "$RF_UNIT_ID"
+        ```
+     7. Depois do fix roda só a verificação dirigida dos itens corrigidos (`verify_paths`, comandos ligados aos itens e regressão dirigida), sem nova revisão. Falha deixa o item `falhou — deferida para triagem final`; achado ou regressão nova vai para a triagem final com a evidência.
+
      Set `RF_UNIT_ID` to `{S##}` for Step 7a and `{M###}-triage` for Step 9. Only after this runtime gate, run the cross-run claim gate exactly as `shared/forge-review.md § Step 7a` prescribes (it in turn references `shared/forge-claim-gate.md § Step 1` for the `--conceded` claim derivation — the path derivation is not repeated here). With the claim-gate decision `proceed`: when `WORKER_MODE == sidecar` (engine claude|codex) run `shared/forge-review.md § Sidecar review-fix branch` from `RF_ROUTE_JSON_SAVED` (boundary `slice` or `milestone-triage`; the adapter publishes the per-R# lines, a failure defers the items without blocking and without fallback); when `WORKER_MODE == native` first run `forge-review-fix.js --prepare-native` exactly as
 `shared/forge-review.md § Mandatory native preparation (before build/invoke)` prescribes,
 with explicit VCS and items including `verify_paths`. Stop the fixer before build/invoke
@@ -1019,6 +1095,8 @@ allows only `auto_commit:false`. Native SVN preparation uses the bounded claim-c
    - **Política deste modo (`MODE = auto`):** advogado indisponível — **só depois** de a salvage do `DEFENSE_FILE` não render nenhum veredito (`shared/forge-review.md § Step 3`) — ⇒ objeções ficam `open` cruas, Rebuttal é PULADO, e cada uma é deferida (`**Decisão:** deferido → triagem no fim da milestone`) — o loop **não pausa**, e a triagem final da milestone as apresenta ao operador. Challenger indisponível ⇒ `{S##}-REVIEW.md` mínimo registrando a indisponibilidade (proibido renderizar como limpo — ausência de review não é aprovação) e segue para `complete-slice`.
 
 > Fires ONLY when the derived unit is `complete-slice`. Boundary is per-slice; standalone `/forge-task` keeps its own step-5.5 review. After the gate, dispatch `forge-completer` normally.
+>
+> Em milestone, a revisão dialética roda só aqui, uma vez por slice (`shared/forge-review.md § Política executável de review-fix → Fronteira de revisão`); revisão por task dentro da milestone exige `review.milestone_task_review: true`. Uma perna recusada com `review-per-task-in-milestone` ou `review-already-completed` (exit 2, `provider_called:false`) para antes do provider: não é indisponibilidade de revisor, não tem retry nem fallback para outro revisor ou família e não produz `{S##}-REVIEW.md` limpo nem mínimo.
 
 **Slice git guard (around complete-slice):** `complete-slice` never integrates a branch — no unit of the loop does; integration is the operator's act on the delivered `forge/{run}` branch (`agents/forge-completer.md § Git boundary — complete-slice`). Snapshot the checkout **before** dispatching, verify **after** the worker returns:
 
@@ -1033,10 +1111,10 @@ The snapshot is written to `.gsd/forge/` on purpose — shell variables do not s
 
 **Review triage gate (before complete-milestone):** If `unit_type == complete-milestone`, run the **milestone-final triage** (`shared/forge-review.md § Step 9`) BEFORE dispatching `forge-completer` — i.e., before the milestone is finalized "de fato" (final close-out, LEDGER entry, cleanup):
 
-1. Scan all `{S##}-REVIEW.md` under `.gsd/milestones/{M###}/slices/*/` for pending items: `Decisão: deferido → triagem no fim da milestone`, `Correção: falhou — deferida para triagem final`, or legacy `Decisão: deferido (auto-mode)`.
+1. Scan all `{S##}-REVIEW.md` under `.gsd/milestones/{M###}/slices/*/` for pending items: `Decisão: deferido → triagem no fim da milestone`, `Correção: falhou — deferida para triagem final`, `Correção: não aplicada — deferida para triagem final (<motivo>)` (concedido sem fix-now ou recusado por teto, orçamento ou política), or legacy `Decisão: deferido (auto-mode)`.
 2. Zero pending → skip silently and dispatch `complete-milestone` normally.
 3. Otherwise **fire push (call-site 2):** use Push helper with message `"Forge {RUN_ID} — {N} item(ns) de review aguardam sua triagem antes de fechar a milestone."` (N = count of pending items). Then print the digest table (slice · R# · path:line · objeção · status) and triage each item via `AskUserQuestion` (batched up to 4, header `Review M###`): `Manter abordagem atual` / `Refatorar agora` / `Criar follow-up`.
-4. `Refatorar agora` items → ONE `review-fix/{M###}-triage` dispatch to `forge-executor` (nothing has been integrated at this point — the fix commits on the still-checked-out `forge/{run}` branch). **Before dispatching**, set `RF_UNIT_ID={M###}-triage`, run the canonical review-fix resolver/export/allowance gate above, then run the cross-run claim gate exactly as `shared/forge-review.md § Step 9` prescribes (it references `shared/forge-claim-gate.md § Step 1` for the `--conceded` claim derivation of the triage items — not repeated here); launch only after both gates allow it. Write every decision back into the R#'s `**Decisão:**` line; `Criar follow-up` items create an item per `shared/forge-review.md § Item capture` (source `review/{S##}/{R#}`, status `inbox`, provenance from the digest row) and append ONLY the pointer line `- {I-id} — {title}` to `.gsd/KNOWLEDGE.md § Review follow-ups` (create the section if missing — this survives `milestone_cleanup`; the item is the single destination for full content).
+4. `Refatorar agora` items → ONE `review-fix/{M###}-triage` dispatch to `forge-executor` (nothing has been integrated at this point — the fix commits on the still-checked-out `forge/{run}` branch). **Before dispatching**, set `RF_UNIT_ID={M###}-triage`, run the canonical review-fix resolver/export/allowance gate above, then run the cross-run claim gate exactly as `shared/forge-review.md § Step 9` prescribes (it references `shared/forge-claim-gate.md § Step 1` for the `--conceded` claim derivation of the triage items — not repeated here); launch only after both gates allow it. Esta é a decisão explícita do operador: a fronteira `milestone-triage` fica fora do filtro corrigir-agora e do teto por slice, é admitida com `counted:false` e registrada, continua num único despacho agrupado e, depois dele, roda só a verificação dirigida (§ Política executável de review-fix). Write every decision back into the R#'s `**Decisão:**` line; `Criar follow-up` items create an item per `shared/forge-review.md § Item capture` (source `review/{S##}/{R#}`, status `inbox`, provenance from the digest row) and append ONLY the pointer line `- {I-id} — {title}` to `.gsd/KNOWLEDGE.md § Review follow-ups` (create the section if missing — this survives `milestone_cleanup`; the item is the single destination for full content).
 5. Append the `review-triage` event to `events.jsonl`. The triage **never blocks** the milestone close-out.
 
 > **This gate is the explicit exception to the AUTONOMY RULE** — at this point every slice is done; asking the operator here is the designed arbitration moment that `defer` postponed to. It does not fire on pause/blocked/partial exits — only when the derived unit is `complete-milestone`.
@@ -1401,6 +1479,8 @@ Do NOT read artifact files here — templates now pass paths; workers read their
 
 Any unsupported `WORKER_MODE`, or `sidecar` for a unit without Branch C/D, follows `dispatch_refusal_stop` and stops. It never substitutes a model family, host, or inline implementation.
 
+Sidecar cohort (issue 343): the adapter action `dispatch-batch` never enters the branches above; follow § 4-C. Under the controller's canonical decision the batch bullet's serial handling of `sidecar` entries no longer applies: a `sidecar` entry of a native batch stays pending with its resolved route until the next canonical selection. `BATCH.length == 1` still takes the single paths above, and a native writer window never runs while a sidecar cohort is active.
+
 ---
 
 **Per-unit `CODE_DIR` resolution (multi-repo precondition)** — executable mirror of `shared/forge-dispatch.md § Sidecar dispatch state machine step 0.5` (contract prose lives there, never restated here). Runs HERE because `$PLAN_PATH` is only known per unit — the bootstrap `WORKTREE_DIR` is derived before any plan exists and stays untouched:
@@ -1468,6 +1548,8 @@ stop boundary. It never enters the sidecar or executes inline. The sidecar emitt
 the final actual mode `sidecar`, not the stale initial `native` value.
 
 ---
+
+**Fresh milestone execute-task publication (issue458).** For `execute-task` in milestone scope, the owner MUST call `forge-native-execution.run({request, invocationOptions, invokeNative, assertBoundary, assertAuthority, persistDeliveryReceipt, procedureContext: rendered.procedure_context, executionPlanGate})` before the generic native path below. Preserve the selected controller begin/lease, exact route, observed capabilities, plan/security/claim gates and execution contract. `invocationOptions.resolvedDispatch` is the same request route; the callback invokes the actual host tool with the returned arguments unchanged. The owner performs start, supervised native invocation, retained return, root verification and publication. A worker never writes `.gsd`; do not handcraft a successful delivery proof. Only `published:true` permits controller complete. Partial/failure keeps the original manifest/outcome/receipts for canonical stopped-writer recovery/replay, without a second inference or recaptured baseline. When plan is skipped for `auto-defer`, pass the current host-created opaque `executionPlanGate` from the actual observed auto choice; serialized approval/deferred flags are insufficient. The existing exact-scope async adapter reattests the request at the normal gate seams; a missing, forged or foreign binding refuses without inference. Other native phases keep the path below.
 
 **Single-task native flow (`BATCH.length == 1 && WORKER_MODE == native`):**
 
@@ -1594,10 +1676,7 @@ tool capabilities, agent type and prompt to `buildNativeInvocation`. Refuse when
 unsupported. Invoke the returned tool and structured arguments unchanged.
 Pass `forkTurns:'none'`; Codex receives the full model ID, separate
 `reasoning_effort`, and `fork_turns:'none'`;
-Claude aliases stay inside the Claude adapter. Before every Claude native call,
-read the actual exposed `agents/<agent>.md` (repo or installed Forge copy), hash
-those same bytes with SHA-256, call `observeClaudeAgentBinding`, and pass the
-successful observation as `effortBinding`. Prompt text is not an effort API; a
+Claude aliases stay inside the Claude adapter. When the active schema exposes Agent effort, supply the observed agent-argument capability and exact reasoning_efforts enum. Otherwise, before every Claude native call, read the actual exposed agent file, compute SHA-256 over those exact bytes, call `observeClaudeAgentBinding`, and pass the successful observation as `effortBinding`. Prompt text is not an effort API; a
 missing, stale, or mismatched binding is a named refusal. Never omit an explicit
 configured model to inherit agent frontmatter. Use a description with the same icon:
 - Format: `{icon} {unit_id} · {one-liner}`
@@ -1724,7 +1803,7 @@ for ENTRY_ID in "${BATCH_TASK_IDS[@]}"; do
 done
 ```
 
-Process `SIDECAR_BATCH_IDS` sequentially through `shared/forge-sidecar-auto.md` before or after the native group, never concurrently with it. For each entry bind `$PLAN_PATH` and the other task inputs from that entry, parse its stored `BATCH_ROUTE_JSON[$ENTRY_ID]` with the flag-free `--shell-exports` transform, immediately re-check `DISPATCH_ALLOWED`, then load Branch C. This re-binding cannot borrow another task's scalars and does not re-resolve or change the route.
+`SIDECAR_BATCH_IDS` must be empty here: step 1.6 already removed every `sidecar` entry from a native batch (issue 343). The runtime-modes note above therefore means that a sidecar task runs single-task through Branch C only as the canonical primary of its own iteration, or as a cohort member through § 4-C. The former serial loop that loaded Branch C for those entries before or after the native group is replaced by the canonical cohort path: the controller selects them again, and a sidecar primary with independent ready sidecar siblings runs through `node "$FORGE_SCRIPTS_DIR/forge-execution-batch.js" run --batch <ref>` in § 4-C, never inside this native window. A non-empty `SIDECAR_BATCH_IDS` is a caller defect: before any launch, stop through `dispatch_refusal_stop` with the partition's existing `invalid-worker-mode` code and a hint naming those entries, keeping every route, begin and lease untouched (never a serial run or a fallback). Every step below iterates only `NATIVE_BATCH_IDS`.
 
 **b) Create N timeline tasks** — emit one `TaskCreate` per batch member in the single-task form above (icon `⚡`, descrição humana do T##-PLAN.md, executor e modelo da rota já resolvida desse membro; campo ausente fica `desconhecido`). Store returned IDs in parallel array `task_ids = [id1, id2, ...]`. Mark each `in_progress` via `TaskUpdate`.
 
@@ -1871,9 +1950,46 @@ done
 
 **k) Re-enter the dispatch loop** — after all results are processed, loop back to step 1 (derive next unit). The next iteration will usually be another `execute-task` in the same slice (batch exhausted → possibly a new batch) or a `complete-slice` if this batch finished all tasks.
 
+#### 4-C. Sidecar cohort flow (execute-task only, adapter action `dispatch-batch`)
+
+This flow runs ONLY when the loop adapter returned `dispatch-batch` for an `execute-task` selection of `forge-auto` (step 1.6). The controller already published the immutable manifest, committed one begin and one live lease per member and charged `max_steps` once per member; the snapshot names the cohort in `current_batch` while `current_unit` stays empty. Nothing here selects, re-routes, adds or drops a member, opens a native writer window or writes STATE. `forge-next`, standalone tasks, plan/research/review-fix/complete units and native primaries never enter this flow.
+
+a) Per-member inputs — for each member of `dispatch_batch.members`, in manifest order, apply the same gates as a single sidecar `execute-task`: the security gate, the plan and symbol-check gates of the slice, and the step 1.7 cross-run claim gate over the union of every member's writes, recorded under this run's ID, with `proceed` for every member (the CLI refuses `batch-parent-claim-required` or `batch-claim-gate-conflict` otherwise). The run's reservation is only that union fence: each member writes solely through its own worktree view. Then prepare the member's own prompt file exactly as Step 3 renders it for that member's plan, plus its own `dispatchId`, `workflowId`, absolute `resultFile` outside every root, optional `securityFile`/`contextFile`, `gates`, `verification`, `budgets`, `procedure_context` and `constraints` carrying the run's real `auto_commit` and `deploy`. Route, model, tier, effort, roots, plan, begin, lease and claim never come from these inputs; the CLI reads them from that member's owner records.
+
+b) Run request — write one bounded UTF-8 JSON file outside every root with exactly the closed fields `schema: "forge-execution-batch-run-request-v1"`, `cwd` (`WORKING_DIR`), `milestone`, `host_runtime`, `owner_token`, `run_id`, optional `code_root`, `manifest_sha256` and `members` (the inputs above keyed by task ID, exactly the members still `admitido`). The owner token lives only in that file and in memory: never an argument, an output or an environment variable.
+
+c) Auto-deferred plans use the host API. When any member has `gates.plan: skipped` and `planSkipReason: auto-defer`, plain CLI JSON cannot carry its process-local authorization. In the host process create `require('./forge-task-execution').createAutoPlanGateAdapter(attestObservedAutoAuthorization)` from the real live auto authorization, then call `await require('./forge-execution-batch').runCohort(scope, { members, autoPlanGateAdapter, stream })`. The callback verifies the actual owner, plan/hash, origin or registered member root/contract, milestone/slice/task, workflow, dispatch, host and authorization reference from its challenge before returning `{ authorized, mode: 'auto', reference }`. The authorization must cover the physical member roots as well as their origin. It cannot return an unconditional true or reconstruct consent from the request file. If the host has no actual in-process binding for this callback, refuse before attempting the CLI; preserve the cohort and its real authorization for a capable continuation. On restart create a fresh adapter from the observed authorization and pass it again to `consolidateCohort(scope, { members, broker_manifest_sha256, autoPlanGateAdapter })`, or to `resumeMemberExecution` trusted options with the full member inputs. No approved marker, callback, adapter or serialized proof is persisted. The same callback is re-attested at each canonical origin gate and the physical member execution. Manual approved plans retain the ordinary CLI below.
+
+c) Bounded concurrent run — one foreground call (`BATCH_MANIFEST_REF` is `dispatch_batch.manifest_ref`):
+```bash
+BATCH_RUN_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-execution-batch.js" run --batch "$BATCH_MANIFEST_REF" --request "$BATCH_REQUEST_FILE")
+BATCH_RUN_EXIT=$?
+```
+The CLI prepares every member's exclusive worktree and index before the common snapshot S0 (or reports `status: serial` with one named reason and runs nothing), opens one cohort broker and calls the real `runUnitSidecar` once per member, never more than the resolved `max_concurrent` members at once (the decision's limit, only ever tightened), each in its own process scope with its own route, model, effort, cwd and sanitized environment. A finished member is retained as its executed record plus seal while siblings run; nothing is published, integrated or acknowledged before the barrier, and members' sidecar events are signed appends of the cohort broker, never lines written by this skill. Relay each member's `[forge-agente]` stderr lines as the sidecar identity contract says. stdout is one JSON report (`schema: forge-execution-batch-run-v1`, `status` ∈ `retained|partial|failed|blocked|serial`, `broker`, `barrier`, `members[]` whose `outcome` ∈ `acknowledged|retained|failed|needs-input|blocked` carries a closed `reason_code`). Exit 1 means `blocked`, or a refusal printed only as `forge-execution-batch: <code>` on stderr before any provider of the run started.
+
+d) Serial consolidation — once the report shows a sealed barrier, write the same request with `schema: "forge-execution-batch-consolidate-request-v1"` plus the run's `broker.manifest_sha256` as `broker_manifest_sha256`, then:
+```bash
+BATCH_CONSOLIDATION_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-execution-batch.js" consolidate --batch "$BATCH_MANIFEST_REF" --request "$BATCH_CONSOLIDATE_FILE")
+BATCH_CONSOLIDATION_EXIT=$?
+```
+It never starts a provider. Member by member, in manifest order, it verifies the retained execution, checks the original integration target, publishes the artifacts through typed exact-byte owner operations (task marker last), integrates the verified delta into this run's own target (never HEAD, the index or a commit), rechecks the integrated delivery and acknowledges the member through the controller's own completion. The report's `status` ∈ `consolidated|partial|failed|conflict` and each member's `outcome` ∈ `acknowledged|failed|needs-input|pending`; exit 1 only for `conflict`. After any crash, rerun the same `consolidate` command: the durable records resume it with zero inference and no second publication, delta, commit or ACK.
+
+e) Post-unit — defer every owner metadata write until all cohort writers have actually joined, all members have durable controller terminals and the canonical retirement has removed the active locator while retaining its physical custody. The consolidation itself consumes the retirement's stable per-member queue: decisions use the canonical fragment merge; memory selection uses the current deterministic policy; both are signed exact-byte `post-unit` operations, including the publisher's actual lock directories and exact global-event spans. STATE and milestone transition events are already controller effects: do not repeat Step 6a/b, append arbitrary events, or write a marker/`continue.md` by hand. Timeline updates stay client-only and must describe the actual member outcome.
+
+If `post_unit.status` is `pending`, read each `awaiting-memory` ledger's `source.file` at its exact `source.sha256`. Resolve memory extraction by the ordinary Step 6d policy/routing procedure, once per stable queue key, using the actual ready result serialized with `JSON.stringify`, its full retained task-SUMMARY artifact, the ledger's `source.fingerprint`, and the original milestone/task IDs. Inference writes only its external response/READY receipt: set `publicationSafe:false` until the actual ended/joined boundary is observed; retain that same request/receipt for replay, never infer again merely to publish it. Do not dispatch a new protected code writer meanwhile. After the real join, save that request with its genuine publication boundary in an external pinned JSON file and rerun the SAME consolidate request with optional `memory_publications:{T01:{file:<absolute request>,sha256:<exact bytes>},...}`. The embedded `consolidateCohort(scope,{members,broker_manifest_sha256,memory_publications})` API accepts the same fields. It verifies the original source, READY fingerprint/telemetry, canonical fragment preimage and event append before applying and deduplicates after a crash. Missing or changed evidence keeps the queue pending. A canonical deferred/grouped-member READY outcome settles only that queue attempt after revalidating the exact receipt and grouped target: retain both unchanged, record the signed deferred outcome, and never label it published or accepted. A saved partial memory outcome remains partial/noop evidence rather than a successful extraction. There is no blanket S0 exception or generic owner-write capability.
+
+Only the signed `post-unit-complete` witness ends this historical cohort boundary. Later history reads preserve it without claiming that current owner bytes still equal its old S0, and grant no right to reopen its broker. Residual members keep their actual receipts, questions and exclusive roots; a pending question is never approval. Report one line per member with the actual outcome and reason.
+
+f) Release — call the loop adapter with `--command batch-ack` and the same snapshot. Only members whose own progress reached `ack` with a committed controller completion leave `current_batch`; a partial ACK refreshes both the active roster and its cached decision from the original manifest, preserving member indices/routes and step charges. While a member is not terminal the adapter answers `batch-members-pending`; after retirement but before the signed post-unit final it answers `batch-post-unit-pending` (`--command batch-status` observes without writing). Once those proofs hold, re-enter the dispatch loop (step 1): dependents and `complete-slice` see only integrated, rechecked deliveries. Dirty retained worktrees remain fenced; ordinary single work uses only its declared projection, and the next cohort has a fresh manifest/broker with the same additive parent reservation.
+
 ---
 
 #### 5. Process result
+
+Receipt `failed` ou `started`: use `recoverUnitSidecar` com o adaptador vivo de abandono;
+siga `shared/forge-procedure-recovery.md`: replay → recusa operacional fechada → abandono
+provado → novo begin na mesma geração. Nunca relance manualmente com dispatch id novo;
+exiba recusas pelo código, preservando todos os gates de autoridade, perguntas, tempo e review-fix.
 
 **Update timeline task** — mark the current task based on outcome:
 - `status: done` → `TaskUpdate({ taskId: current_task_id, status: "completed" })`
@@ -1898,6 +2014,22 @@ SALVAGE=$(node "$FORGE_SCRIPTS_DIR/forge-worker-result.js" --salvage \
 ```
 
 A rung that yields a status hands back a `recovered.block` — parse **that** with the rows below and continue the loop normally; the run is not stopped for a contract miss that was recovered. **This gate never pauses to ask the user** (AUTONOMY RULE intact): every rung is mechanical, and rung 4 is the existing `blocked` path with its existing item capture. `agent_id` for the resume rung, when needed, comes from the last `phase: "escaped"` line in `.gsd/forge/contract-miss.jsonl`.
+
+Before a returned `partial` or `blocked` result stops this unit, settle its
+CURRENT controller begin through the embedded long-workflow adapter's `complete`
+command with the actual result, original snapshot and live attempt/process/root
+inspection callbacks. Require the durable paused boundary and zero current lease;
+preserve the original request, receipt, questions and returned snapshot in the
+continuation. A status string, an inactive run or lease expiry proves no stopped
+writer. Missing evidence is a named refusal; preserve the begin/claim and report
+that limit rather than editing STATE or lease files to imitate a pause.
+Resume unfinished `execute-task` and `complete-slice` with
+`resume_intent:'execute'` from that boundary, never with an answer-as-result or
+a fresh `next`. If the old loop snapshot is missing, use the canonical durable
+locator and live callbacks described in `docs/lifecycle-resume.md`; JSON CLI flags
+cannot supply these callbacks or assume ownership. Known same-owner inactive runs
+with a retained claim use the proved partial-boundary branch of `resumeOwner`;
+legacy unknown ownership and unreconciled writers still refuse.
 
 Parse the `---GSD-WORKER-RESULT---` block:
 - `status: done` → proceed to post-unit housekeeping, then **immediately continue loop** (do NOT pause or ask user)
@@ -2003,6 +2135,19 @@ Auto-recovery attempts (context_overflow, model_refusal, 429, 400) count as unit
        + "\n\nMODE: decompose\nTARGET_TASK: {T##}\n\n## Unmet Must-Haves\n{diff list}\n\n## Why it failed\n{result/SUMMARY excerpt}" })
      ```
      After return, re-derive next unit (sub-tasks `T##.1`, `T##.2` … now visible via `forge-parallelism.js` — regex extended in T03).
+     Safe single-task repair continuation (issue343 R9): before any owner mutation, stop/join the original worker and every possible descendant, keep its original request and receipt, and reconcile all physical roots using the host's actual attempt adapters. Call the real host API `forge-long-workflow-adapter.invoke(hostRuntime, loopMode, 'decompose-pause', currentOwnerInput, snapshot, liveAttemptOptions).result` and persist ONLY its returned snapshot. `liveAttemptOptions` supplies the original begin-bound `inspectAttempt`, actual `processProbe` and per-root `reconcileRoots` callbacks already used by the controller. It must observe the real ready/done attempt; JSON flags, inactivity and a done string are not proof. Without these real callbacks preserve the current dispatch and refuse. The exact original execution plan-input hash must be present; current plan bytes may differ only by the canonical repair_count increment proven against that real hash. Unknown legacy hashes and changed original goals remain refused. This administrative pause records cancelled repair intent, releases that exact begin/lease and leaves the parent unchecked; it never accepts the parent's delivery. The workflow and current step count are retained. A missing/foreign attempt, unreconciled root or pending decision refuses before mutation.
+
+     Owner mutation gate around this dispatch (issue 343, mandatory): after the idempotency guard and before the banner and planner above, choose the 2–4 sub-task IDs (`{T##}.1`, `{T##}.2`, …), open the owner intent and add the line `ANNOUNCED_SUBTASKS: {T##}.1,{T##}.2` to that planner prompt; after the planner returns and before re-deriving the next unit, admit exactly those bytes:
+     ```bash
+     MUTATION_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-plan-validation.js" begin-mutation --operation decompose \
+       --milestone "{M###}" --slice "{S##}" --parent "{T##}" --task "{T##}.1" --task "{T##}.2" \
+       --owner "$WORKING_DIR" --cwd "$WORKING_DIR") || stop
+     MUTATION_REF=$(node -pe 'JSON.parse(process.argv[1]).mutation.mutation_ref' "$MUTATION_JSON")
+     node "$FORGE_SCRIPTS_DIR/forge-plan-validation.js" finish-mutation --ref "$MUTATION_REF" --cwd "$WORKING_DIR" || stop
+     ```
+     The canonical first child substitutes only the cancelled parent's already bound step reservation; max_steps and the counter are not reset or increased. Other children and the fresh parent verification charge normal steps and stop at the actual budget. After strict finish, use the same host adapter's `decompose-continue` command with the exact mutation_ref and paused snapshot plus fresh live attempt callbacks. Persist its returned child dispatch; no manual snapshot/step reset or parent done marker. Existing sub-task files do not prove admission. Unknown child proof keeps `decomposition-verification-required`; independent work can continue. When all child completions/deliveries are genuine, the controller automatically selects a fresh real parent execute-task bound to those proofs. Run its existing resolved worker to verify the original contract and complete normally. Only that actual new completion releases dependents; no old receipt, parent done marker or human acceptance is fabricated.
+
+     `begin-mutation` runs only at the owner safe boundary (`plan-mutation-boundary-deferred` while a begin, lease or transaction is open) and the same request replays its open intent. `finish-mutation` admits the sub-tasks strictly (new announced IDs, explicit `depends`/`writes`, parent bytes unchanged except the `DECOMPOSED` line, no unknown reference or cycle) or refuses by name, writing nothing and keeping the intent and candidate bytes for correction. Until the admission exists the slice stays unready across restart: never re-derive or dispatch a sub-task over an open or refused intent, and never edit the mutation chain by hand.
    - `prune` → write entry to `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-CONTEXT.md § Decisions` (WORKING_DIR, not CODE_DIR) naming pruned requirement + rationale + task ID. In `forge-auto` with `review.ask_in_auto: defer`: **do NOT pause** — register and continue (AUTONOMY RULE).
    - `blocked` → fall through to existing `blocked → human` path.
 
@@ -2336,8 +2481,8 @@ If the cleanup output contains `status: "error"` entries, surface them in the fi
 Validação: {n de m critérios verificados nos S##-DELIVERY.json}{; pendências: IDs}
 Fatos separados: implementação {estado}; revisão {estado}; CI {estado}; merge {estado}; instalação {estado}; aceite humano {estado}
 
-Entregável: branch `forge/{run}` — pronta para push e PR.
-Pronta para PR — a integração na branch default é do OPERADOR; o loop nunca integra.
+Entregável: {CODE_DIR e branch observados}; commits {quantidade observada}.
+Com `auto_commit:false`, informe código sem commits quando aplicável; não declare a branch pronta para push/PR sem conferir os commits. A integração na branch default é do OPERADOR; o loop nunca integra.
 
 Slices entregues:
 | Slice | Título | Tasks |
@@ -2415,3 +2560,7 @@ checklist; personal and interaction contracts still own live authority and quest
 Keep the existing unit/roots/claims, receipt, historical deadline and pending IDs.
 This composition alone authorizes neither host execution nor preference rewrites.
 Separately authorized Forge maintenance follows `shared/forge-direct-actions.md`.
+
+
+<!-- forge346-native-effort -->
+When the active Claude Agent schema exposes a per-call effort parameter, report both effort_transports:['agent-argument'] (alongside any observed frontmatter transport) and reasoning_efforts with its exact observed enum. buildNativeInvocation prefers that argument and sends the resolved effort unchanged. Without this observation, retain the fingerprinted agent-frontmatter binding and its strict mismatch refusal. Do not infer capability from another session, installed version or prompt text. Before opening a new lease, preflightNativeBinding with these same observed capabilities; keep ordinary native preparation/publication and pending-decision gates.

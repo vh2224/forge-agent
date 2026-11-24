@@ -330,8 +330,13 @@ function acquireClampForCommand(opts) {
   try {
     const contract = resourcesMod.acquireCommandBudget({
       cwd: opts.cwd,
+      // Policy belongs to WORKING_DIR; cwd still selects the command's real
+      // package and resource lifecycle. A worktree need not contain .gsd.
+      prefsResult: require('./forge-prefs').readPrefsCached(opts.gsdDir
+        ? dirname(resolve(opts.gsdDir)) : resolveOwner(opts.cwd) || opts.cwd),
       commandTimeoutMs: opts.timeoutMs,
       session: opts.session,
+      resourceEventSink: opts.resourceEventSink,
     });
     if (contract && contract.pool && contract.pool.handle &&
         Array.isArray(contract.pool.handle.slots) && contract.pool.handle.slots.length) {
@@ -349,7 +354,7 @@ function acquireClampForCommand(opts) {
       // any other/unknown value leaves the control ON. D10: this reads the
       // value the resolver already returns; it derives nothing.
       if (handle) {
-        try { resourcesMod.releaseCommandBudget(handle, { cwd: opts.cwd }); } catch { /* MEM008 */ }
+        try { resourcesMod.releaseCommandBudget(handle, { cwd: opts.cwd, resourceEventSink: opts.resourceEventSink }); } catch { /* MEM008 */ }
       }
       appendResourceEvent(opts.cwd, opts.gsdDir, "resource-clamp-skipped", {
         reason: "intact:enforcement-off",
@@ -364,7 +369,7 @@ function acquireClampForCommand(opts) {
       // planner (which would silently produce full parallelism, since
       // `--maxWorkers=0`/`VITEST_MAX_FORKS=0` are falsy to the runners).
       if (handle) {
-        try { resourcesMod.releaseCommandBudget(handle, { cwd: opts.cwd }); } catch { /* MEM008 */ }
+        try { resourcesMod.releaseCommandBudget(handle, { cwd: opts.cwd, resourceEventSink: opts.resourceEventSink }); } catch { /* MEM008 */ }
       }
       appendResourceEvent(opts.cwd, opts.gsdDir, "resource-clamp-skipped", {
         reason: "intact:admission-refused-advisory",
@@ -372,13 +377,14 @@ function acquireClampForCommand(opts) {
       return passthrough;
     }
 
-    const plan = rewriteMod.planRewrite(opts.command, contract, { cwd: opts.cwd });
+    const plan = rewriteMod.planRewrite(opts.command, contract, { cwd: opts.cwd,
+      ...(process.platform === 'win32' ? { envMode: 'spawn' } : {}) });
 
     if (plan.outcome !== "rewritten") {
       // Unrecognized/refused form — release immediately (W5, non-error
       // intact path) and run the original command byte-identical.
       if (handle) {
-        try { resourcesMod.releaseCommandBudget(handle, { cwd: opts.cwd }); } catch { /* MEM008 */ }
+        try { resourcesMod.releaseCommandBudget(handle, { cwd: opts.cwd, resourceEventSink: opts.resourceEventSink }); } catch { /* MEM008 */ }
       }
       appendResourceEvent(opts.cwd, opts.gsdDir, "resource-clamp-skipped", {
         reason: `intact:${plan.reason}`,
@@ -389,10 +395,11 @@ function acquireClampForCommand(opts) {
     // Overlay: NODE_OPTIONS is never overwritten if the parent already
     // defines it — a human's choice always wins (same rule S03 conceded
     // three times, R3/R4).
-    const overlay = {};
+    const overlay = { ...(plan.env || {}) };
     let nodeOptionsReason = null;
     let rewrittenCommand = plan.command;
     if (process.env.NODE_OPTIONS) {
+      delete overlay.NODE_OPTIONS;
       nodeOptionsReason = "node-options-preserved-parent-defined";
       // forge-command-rewrite.js's vitest env-prefix embeds a LITERAL
       // `NODE_OPTIONS='...'` assignment directly in the rewritten command
@@ -425,7 +432,7 @@ function acquireClampForCommand(opts) {
     // W5: release-on-error — a lease acquired above MUST be released here
     // before falling through with the command byte-identical.
     if (handle) {
-      try { resourcesMod.releaseCommandBudget(handle, { cwd: opts.cwd }); } catch { /* MEM008 */ }
+      try { resourcesMod.releaseCommandBudget(handle, { cwd: opts.cwd, resourceEventSink: opts.resourceEventSink }); } catch { /* MEM008 */ }
     }
     return passthrough;
   }
@@ -642,7 +649,7 @@ function runVerificationCommands(options) {
       // a descendant stopped. POSIX retains the existing synchronous behavior.
       const joined = process.platform !== "win32" || result?.cleanup?.status === "joined";
       if (joined && leaseHandle && leaseMod && typeof leaseMod.releaseCommandBudget === "function") {
-        try { leaseMod.releaseCommandBudget(leaseHandle, { cwd: options.cwd }); } catch { /* MEM008 */ }
+        try { leaseMod.releaseCommandBudget(leaseHandle, { cwd: options.cwd, resourceEventSink: options.resourceEventSink }); } catch { /* MEM008 */ }
       } else if (!joined && result?.cleanup && leaseHandle) {
         result.cleanup.budget_release = "deferred";
       }
@@ -914,11 +921,28 @@ function formatEvidenceYaml(entries) {
 
 // ── Exports ───────────────────────────────────────────────────────────────────
 
+// Issue 343 U3b: the physical runtime view of a sidecar cohort member. Only a view minted by
+// forge-execution-batch through the member's live handle (validateMemberPlan or
+// resolveMemberExecution) is accepted, never a copy or JSON. It must bind this exact canonical
+// plan text, whose hash every record keeps, and this measured physical contract. Without one,
+// every caller below behaves exactly as before.
+function memberRuntimeView(options, measured, planText) {
+  if (!options || options.memberView === undefined) return null;
+  const roots = require('./forge-code-roots'), view = options.memberView;
+  if (!require('./forge-execution-batch').isMemberView(view) || view.canonical_plan_sha256 !== roots.digest(planText)
+      || view.runtime_contract_sha256 !== roots.digest(measured)) {
+    throw Object.assign(new Error('verification-member-view-invalid'), { code: 'verification-member-view-invalid', provider_called: false });
+  }
+  return view;
+}
+
 // A verification policy is fixed before a writer starts. Runtime options may
 // extend explicit command lists, never remove or replace their prefix.
-function normalizeExecutionVerification(contract, planText, declared = {}, runtime = {}, identity = {}) {
+// options.memberView (issue 343 U3b): a cohort member's seal also binds its runtime view.
+function normalizeExecutionVerification(contract, planText, declared = {}, runtime = {}, identity = {}, options = {}) {
   const roots = require('./forge-code-roots');
   const measured = roots.validateContract(contract, { revalidate: true });
+  const view = memberRuntimeView(options, measured, planText);
   const fail = code => { throw Object.assign(new Error(code), { code, provider_called: false }); };
   const allowed = ['preferenceCommands', 'commandsByRoot', 'commandTimeoutMs'];
   const validate = value => {
@@ -988,16 +1012,26 @@ function normalizeExecutionVerification(contract, planText, declared = {}, runti
   });
   const policy = { schema_version: 1, execution_contract_sha256: roots.digest(measured), plan_sha256: roots.digest(planText),
     identity, roots: rows, command_timeout_ms: timeout,
-    timeout_origin: declared.commandTimeoutMs !== undefined ? 'request' : runtime.commandTimeoutMs !== undefined ? 'runtime' : 'default' };
+    timeout_origin: declared.commandTimeoutMs !== undefined ? 'request' : runtime.commandTimeoutMs !== undefined ? 'runtime' : 'default',
+    ...(view ? { runtime_view_sha256: view.runtime_view_sha256 } : {}) };
   return { ...policy, sha256: roots.digest(policy) };
 }
-function assertExecutionVerification(seal, contract, planText, identity) {
+function assertExecutionVerification(seal, contract, planText, identity, options = {}) {
   const roots = require('./forge-code-roots');
   const { sha256, ...policy } = seal || {};
+  const insufficient = () => {
+    throw Object.assign(new Error('verification-provenance-insufficient'), { code: 'verification-provenance-insufficient', provider_called: false });
+  };
   if (policy.schema_version !== 1 || sha256 !== roots.digest(policy)
     || policy.execution_contract_sha256 !== roots.digest(roots.validateContract(contract, { revalidate: true }))
     || policy.plan_sha256 !== roots.digest(planText) || roots.digest(policy.identity) !== roots.digest(identity)) {
-    throw Object.assign(new Error('verification-provenance-insufficient'), { code: 'verification-provenance-insufficient', provider_called: false });
+    insufficient();
+  }
+  // Issue 343 U3b: a member seal verifies only with that member's current minted view, and a
+  // single seal never verifies a member (nor a member seal a single caller).
+  if (policy.runtime_view_sha256 !== undefined || (options && options.memberView !== undefined)) {
+    const view = memberRuntimeView(options, roots.validateContract(contract, { revalidate: true }), planText);
+    if (!view || policy.runtime_view_sha256 !== view.runtime_view_sha256) insufficient();
   }
   return seal;
 }
@@ -1023,6 +1057,7 @@ function runRootVerification(contract, options = {}) {
   const results = measured.code_roots.map(root => {
     const sealed = options.verificationSeal?.roots.find(row => row.root_id === root.id);
     const snapshot = require('./forge-surgical-reset').captureAttemptSnapshot(root.path);
+    const sourceInventory = require('./forge-delivery-source-policy').capture(root.path, snapshot);
     const result = runVerificationGate({ ...options, cwd: root.path, gsdDir: require('path').join(measured.owner, '.gsd'), checkRootId: root.id,
       preferenceCommands: sealed?.commands || options.commandsByRoot?.[root.id] || options.preferenceCommands,
       ...(sealed ? { taskPlanVerify: null, commandTimeoutMs: options.verificationSeal.command_timeout_ms } : {}) });
@@ -1030,6 +1065,7 @@ function runRootVerification(contract, options = {}) {
       ...(options.verificationSeal ? { verification_policy_sha256: options.verificationSeal.sha256 } : {}),
       root_id: root.id, root_identity_sha256: root.identity_sha256, execution_contract_sha256: roots.digest(measured),
       code_dir: root.path, revision: snapshot.start_sha, workspace: snapshot.pre_dirty,
+      ...(sourceInventory ? { source_inventory: sourceInventory } : {}),
       environment: options.environment || `${process.platform}/${process.version}`, captured_at: new Date().toISOString(), result };
   });
   roots.validateContract(measured, { revalidate: true });
@@ -1039,10 +1075,16 @@ function runRootVerification(contract, options = {}) {
 function captureRootDelivery(contract, planText, options = {}) {
   const fs = require('fs');
   const roots = require('./forge-code-roots');
-  if (options.verificationSeal) assertExecutionVerification(options.verificationSeal, contract, planText, options.verificationIdentity);
-  const checked = roots.validatePlan(planText, contract);
+  // Issue 343 U3b: a cohort member's capture validates the canonical plan through its minted
+  // runtime view (member roots); the fingerprint and the criteria stay the original plan's.
+  const { memberView: suppliedView, ...captureOptions } = options;
+  const view = suppliedView === undefined ? null
+    : memberRuntimeView({ memberView: suppliedView }, roots.validateContract(contract, { revalidate: true }), planText);
+  if (captureOptions.verificationSeal) assertExecutionVerification(captureOptions.verificationSeal, contract, planText,
+    captureOptions.verificationIdentity, view ? { memberView: view } : undefined);
+  const checked = roots.validatePlan(view ? view.runtime_plan_text : planText, contract);
   const parsed = require('./forge-must-haves').parseMustHaves(planText);
-  const gate = runRootVerification(contract, { ...options, taskPlanVerify: parsePlanVerify(planText), planFingerprint: roots.digest(planText) });
+  const gate = runRootVerification(contract, { ...captureOptions, taskPlanVerify: parsePlanVerify(planText), planFingerprint: roots.digest(planText) });
   const artifacts = gate.roots.map(envelope => {
     const entries = checked.artifacts.filter(row => row.root_id === envelope.root_id);
     const result = require('./forge-verifier').verifyArtifact({ ...parsed, artifacts: entries, key_links: [] }, [], { cwd: envelope.code_dir });
@@ -1053,7 +1095,9 @@ function captureRootDelivery(contract, planText, options = {}) {
     }).map(row => ({ path: roots.qualified(row), reason: 'expected_output_missing' }));
     result.passed = result.missing.length === 0 && result.rows.every(row => row.exists === true);
     const observed = require('./forge-surgical-reset').captureAttemptSnapshot(envelope.code_dir);
+    const sourceInventory = require('./forge-delivery-source-policy').capture(envelope.code_dir, observed);
     return { ...envelope, kind: 'artifact', revision: observed.start_sha, workspace: observed.pre_dirty,
+      ...(sourceInventory ? { source_inventory: sourceInventory } : {}),
       captured_at: new Date().toISOString(), result };
   });
   return { ...(options.verificationSeal ? { verification_policy_sha256: options.verificationSeal.sha256 } : {}), gate, artifacts, passed: gate.passed && artifacts.every(row => row.result.passed) };

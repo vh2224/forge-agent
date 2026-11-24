@@ -1,0 +1,6 @@
+{
+  "_comment": "HUMAN, versioned baseline for --partition-suites CI units. Every entry must name the exact discovered unit and the same issue as its source entry in known-failures.json. forge-ci-parallel validates both universes and refuses source/issue drift. Failures and healed entries are compared in BOTH directions; no automatic additions.",
+  "win32": [],
+  "darwin": [],
+  "linux": []
+}

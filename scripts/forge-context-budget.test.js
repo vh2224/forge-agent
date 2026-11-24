@@ -8,7 +8,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const { countTokens } = require('./forge-tokens.js');
-const { TEMPLATE_FILES, renderPrompt, separateProcedurePrompt } = require('./forge-prompt.js');
+const { TEMPLATE_FILES, renderPrompt, separateProcedurePrompt, separateOptionalPromptContext } = require('./forge-prompt.js');
 
 const { loadProcedureContext } = require('./forge-procedure-context');
 const MANDATORY_TOKEN_CEILINGS = Object.freeze({
@@ -32,7 +32,7 @@ const PLANNING_READINESS_TOKEN_LIMIT = 97;
 const PLANNING_PHASES = new Set(['plan-slice', 'plan-milestone', 'plan-check', 'estimate-milestone']);
 function optionalTokens(rendered, phase) {
   const procedure = loadProcedureContext({ cwd: root, phase });
-  const optional = separateProcedurePrompt(rendered.prompt, procedure, rendered.procedure_context);
+  const optional = separateOptionalPromptContext(rendered.prompt, procedure, rendered.procedure_context);
   assert(rendered.prompt.includes(procedure.content), `${phase}: canonical mandatory bytes`);
   const hasReadiness = PLANNING_PHASES.has(phase);
   const supplement = hasReadiness ? PLANNING_READINESS_SUPPLEMENT : '';
@@ -192,9 +192,9 @@ process.stdout.write('\n=== Forge context-budget regression tests ===\n\n');
     for (const part of PARTS) assert(binding.includes(part), part);
     const requiredTokens = countTokens(binding);
     assert(requiredTokens > MAX_BASELINE_RENDERED_TOKENS, `required DATA ${requiredTokens} is larger than the optional allowance and still whole`);
-    // Optional context (everything but the mandatory procedure and the required binding) stays inside the unchanged 1500.
+    // Optional context excludes the canonical procedure, required result-status frame and required binding; its ceiling remains 1500.
     const procedure = loadProcedureContext({ cwd: codeDir, phase: 'plan-slice' });
-    const optional = separateProcedurePrompt(rendered.prompt, procedure, rendered.procedure_context);
+    const optional = separateOptionalPromptContext(rendered.prompt, procedure, rendered.procedure_context);
     const optionalTokens = countTokens(optional.replace(binding, ''));
     process.stdout.write(`    plan-slice opted-in: optional ${optionalTokens} tokens, required binding ${requiredTokens} tokens, full frame ${rendered.input_tokens}\n`);
     assert(optionalTokens <= MAX_BASELINE_RENDERED_TOKENS, `optional ${optionalTokens}`);
@@ -206,6 +206,7 @@ process.stdout.write('\n=== Forge context-budget regression tests ===\n\n');
     assert.strictEqual(rendered.input_tokens, countTokens(rendered.prompt));
     const packaged = materializePrompt({ ...options, dispatchId: 't07-budget' });
     assert.strictEqual(packaged.input_tokens, rendered.input_tokens);
+    assert(fs.readFileSync(packaged.prompt_path, 'utf8').includes(require('./forge-worker-result').resultStatusInstruction()), 'materialized full frame keeps the required status instruction');
     assert(fs.readFileSync(packaged.prompt_path, 'utf8').includes(binding));
     // Required data that cannot be delivered whole refuses before any prompt artifact: no clipping, no optional loan.
     const Module = require('module'), load = Module._load, real = selection;
@@ -263,6 +264,28 @@ test('every renderer unit has an unchanged mandatory ceiling and planning units 
   assert.deepStrictEqual(Object.keys(MANDATORY_TOKEN_CEILINGS).sort(), Object.keys(TEMPLATE_FILES).sort());
   for (const phase of PLANNING_PHASES) assert.strictEqual(MANDATORY_TOKEN_CEILINGS[phase], 1300, phase);
   assert.deepStrictEqual(loadProcedureContext({ cwd: root, phase: 'estimate-milestone' }).modules.map(item => item.id), ['core', 'planning']);
+});
+
+
+test('required result status is a separate frame in every renderer unit without changing delivery or ceilings', () => {
+  const instruction = require('./forge-worker-result').resultStatusInstruction();
+  for (const phase of Object.keys(TEMPLATE_FILES)) {
+    const rendered = renderPrompt(baseOptions(phase));
+    const procedure = loadProcedureContext({ cwd: root, phase });
+    const deliveryContext = separateProcedurePrompt(rendered.prompt, procedure, rendered.procedure_context);
+    const optional = separateOptionalPromptContext(rendered.prompt, procedure, rendered.procedure_context);
+    assert.strictEqual(deliveryContext, optional.replace(/\s+$/, '') + '\n\n' + instruction + '\n\n\n', phase + ': exact mandatory suffix');
+    assert.strictEqual(rendered.input_tokens, countTokens(rendered.prompt), phase + ': actual full-frame measurement');
+    assert(deliveryContext.includes(instruction), phase + ': delivery path retains the contract');
+    for (const broken of [rendered.prompt.replace(instruction, 'status: complete'), rendered.prompt.replace(instruction, ''), rendered.prompt + 'foreign trailing context']) {
+      assert.throws(() => separateOptionalPromptContext(broken, procedure, rendered.procedure_context), /result-status frame|procedure/i, phase + ': malformed mandatory frame refuses');
+    }
+    // The same words supplied as optional DATA remain charged to optional
+    // context; accounting removes only the renderer's final mandatory frame.
+    const quoted = '[DATA FROM "quoted-status"]\n' + instruction + '\n[END DATA FROM "quoted-status"]\n\n' + rendered.prompt;
+    const quotedOptional = separateOptionalPromptContext(quoted, procedure, rendered.procedure_context);
+    assert(quotedOptional.includes(instruction), phase + ': optional quoted instruction is not subtracted');
+  }
 });
 
 test(`baseline optional prompts stay below ${MAX_BASELINE_RENDERED_TOKENS} heuristic tokens`, () => {

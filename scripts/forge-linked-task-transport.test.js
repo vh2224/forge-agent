@@ -82,13 +82,17 @@ function liveAdapter(cwd, o = {}) {
   } };
 }
 function transaction(cwd, key, fields) {
-  const state = {}, unit = fields.unit;
-  const record = { protocol_version: '1.0.0', idempotency_key: key, action: fields.action, unit, milestone: fields.milestone, host_runtime: 'codex',
-    owner_digest: 'sha256:' + 'f'.repeat(64), lease_generation: 'fixture-generation', phase: 'committed', created_at: iso(fields.at), updated_at: iso(fields.at),
-    before: { state_checksum: ssha(state), state }, after: { state_checksum: ssha(state), state, state_patch: {} },
-    result: fields.result ? { idempotency_key: key, unit: unit.key, milestone: fields.milestone, status: fields.result } : null,
-    event: { idempotency_key: key, unit: unit.key, milestone: fields.milestone, action: fields.action } };
-  m().controller.writeAtomic(m().controller.transactionFile(cwd, key), record, false);
+  // Estimation is part of the fixture's real controller history as well: a
+  // hand-written committed ledger is not a lease-free, handoff-ready boundary.
+  const controller = m().controller, state = require('./forge-state');
+  if (!state.read(cwd, fields.milestone)) state.write(cwd, { milestone: fields.milestone, kind: 'milestone',
+    phase: 'estimate-milestone', active_slice: '—', active_task: '—', auto_mode: 'on' });
+  const request = { milestone: fields.milestone, unit: fields.unit, host_runtime: 'codex', owner_token: 'fixture-owner', idempotency_key: key };
+  const options = { now: () => fields.at, prefsReader: () => ({ ok: true, prefs: {} }) };
+  if (fields.action === 'begin') return controller.begin(cwd, request, options);
+  assert.equal(fields.action, 'complete');
+  const begin = controller.lookupRecord(cwd, 'transaction', key.slice(0, -':complete'.length));
+  return controller.complete(cwd, { ...request, generation: begin.lease_generation, result: { status: fields.result } }, options);
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +277,7 @@ function nativeExecutionRequest(f, host, label, o = {}) {
   r.nativeInvocation = require('./forge-native-invocation').buildNativeInvocation({ hostRuntime: host, resolvedDispatch: route, activeCapabilities: caps,
     agentType: 'forge-executor', taskName, forkTurns: 'none', prompt: 'binding preflight', ...(host === 'claude' ? { effortBinding: r.effortBinding } : {}) });
   assert.equal(r.nativeInvocation.ok, true, JSON.stringify(r.nativeInvocation).slice(0, 300));
+  require('./fixtures/issues-434-436/execution-fixtures.cjs').declareBindings(r);
   if (host === 'claude') assert.equal(r.nativeInvocation.telemetry.effort_binding_observed, 'medium', 'the observed forge-executor frontmatter effort');
   return r;
 }
@@ -596,6 +601,13 @@ async function suite() {
           const raw = prepRequest(F, 'claude', phase, phase + '-' + label, parent ? { prompt: parent } : {});
           const count = s.prompts.length;
           const done = await prep.prepareStandaloneTask(raw, { now });
+          // #350: standalone research needs code investigation, so the Codex read-only sidecar refuses it
+          // before any provider; the other three phases are owner-packaged and still reach the seam.
+          if (phase === 'research') {
+            assert.deepEqual([done.ok, done.reason_code, done.provider_called], [false, 'codex-readonly-context-unsupported', false]);
+            assert.equal(s.prompts.length, count, 'research never reaches the Codex seam');
+            continue;
+          }
           assert.equal(done.ok, true, phase + ' ' + JSON.stringify(done).slice(0, 300));
           const sent = s.prompts[count];
           assert.equal(sent.split(block).length, 2, phase + '/' + label + ': exactly one consumed block');
@@ -603,10 +615,10 @@ async function suite() {
           assert.ok(sent.includes('nunca autoriza nada'), 'framed evidence that grants no authority');
         }
       }
-      assert.equal(s.calls.codex, 8, 'the claude host reaches the codex sidecar seam');
+      assert.equal(s.calls.codex, 6, 'the claude host reaches the codex sidecar seam');
       // A marker out of place is refused before any route or provider.
       {
-        const raw = prepRequest(F, 'claude', 'research', 'misplaced', { prompt: 'Texto ' + lts.HANDOFF_MARKERS.start + ' fora do lugar\n' });
+        const raw = prepRequest(F, 'claude', 'discuss', 'misplaced', { prompt: 'Texto ' + lts.HANDOFF_MARKERS.start + ' fora do lugar\n' });
         const calls = s.total(), refused = await prep.startStandaloneTaskPreparation(raw, { now });
         assert.deepEqual([refused.ok, refused.reason_code, refused.provider_called], [false, 'linked-task-handoff-tampered', false]);
         assert.equal(s.total(), calls);
@@ -628,7 +640,7 @@ async function suite() {
         const decide = horizon.decideLinkedTaskEntry;
         horizon.decideLinkedTaskEntry = function (input) { order.push('admission'); return decide.call(this, input); };
         try {
-          const freshRequest = prepRequest(F, 'claude', 'research', 'at-cap');
+          const freshRequest = prepRequest(F, 'claude', 'discuss', 'at-cap');
           const capped = await prep.startStandaloneTaskPreparation(freshRequest, { now, resolveDispatch() { order.push('resolve'); resolved++; throw new Error('must not resolve'); } });
           assert.deepEqual([capped.ok, capped.status, capped.stage, capped.reason_code, capped.provider_called], [false, 'failure', 'linked-task-admission', 'linked-task-budget-exhausted', false]);
           assert.equal(capped.diagnostic.stage, 'linked-task-admission');
@@ -641,7 +653,7 @@ async function suite() {
         assert.equal(resolved, 0);
       }
       line('preparation consults linked admission after replay and continuation checks before dispatch resolution');
-      line('all four preparation phase adapters receive exactly one consumed handoff block');
+      line('brainstorm, discuss and plan adapters receive exactly one consumed handoff block; Codex read-only research is refused before the provider');
 
       // =====================================================================
       // Truth 3 / key link 1: every sidecar launch rechecks before spawn (both engines).
@@ -664,7 +676,7 @@ async function suite() {
         for (const [host, model] of [['claude', 'gpt-5.6-sol'], ['codex', 'claude-sonnet-5']]) {
           prefs(F, model);
           clock = below;
-          const raw = prepRequest(F, host, 'research', host + '-late-cap');
+          const raw = prepRequest(F, host, 'discuss', host + '-late-cap');
           const selected = await prep.startStandaloneTaskPreparation(raw, { now });
           assert.equal(selected.action, 'invoke-sidecar', JSON.stringify(selected).slice(0, 300));
           late[host] = { raw, delivery: selected.delivery_request };
@@ -681,7 +693,7 @@ async function suite() {
           assert.equal(s.total(), calls);
           // Admitted control: the same engine seam is reached below the cap.
           clock = below;
-          const control = prepRequest(F, host, 'research', host + '-admitted');
+          const control = prepRequest(F, host, 'discuss', host + '-admitted');
           const startedControl = await prep.startStandaloneTaskPreparation(control, { now });
           const enginesBefore = s.calls.claude + s.calls.codex;
           await unit.runUnitSidecar(startedControl.delivery_request, { now });
@@ -696,7 +708,7 @@ async function suite() {
           prefs(F, 'gpt-5.6-sol');
           for (const crossing of [true, false]) {
             clock = below;
-            const raw = prepRequest(F, 'claude', 'research', crossing ? 'packaging-late' : 'packaging-admitted');
+            const raw = prepRequest(F, 'claude', 'discuss', crossing ? 'packaging-late' : 'packaging-admitted');
             const selected = await prep.startStandaloneTaskPreparation(raw, { now });
             assert.equal(selected.delivery_request.route.resolved_worker_engine, 'codex', JSON.stringify(selected.delivery_request.route).slice(0, 200));
             let packaged = 0;

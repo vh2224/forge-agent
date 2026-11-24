@@ -1,7 +1,6 @@
 ---
 name: forge-codebase
 description: "Qualidade do codebase — lint, nomenclatura. Flags: --fix, --paths."
-disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Bash, Glob
 ---
 

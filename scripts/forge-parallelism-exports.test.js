@@ -7,9 +7,13 @@
 //   2. CLI parity: spawning the script (no args / bad --slice-plan / real fixture) produces the
 //      same shape of output as before the guard existed — asserted by spawn, matching the style
 //      of forge-parallelism.test.js.
-//   3. Exports smoke: the 7 named exports exist and behave as expected.
+//   3. Exports smoke: the pinned export list (issue 343 U0a added validateTaskDag) exists
+//      exactly and behaves as expected.
 //   4. Bite in both directions: reverting the guard on a disposable copy makes the
-//      require-without-effect assertion fail; restoring it makes it pass again.
+//      require-without-effect assertion fail; restoring it makes it pass again. The copy
+//      sits alone in an empty directory, so the module must keep loading without its
+//      lazily required forge-must-haves sibling, and its bounded pathsOverlap (issue 343
+//      U0a-r1) must decide there without any sibling either.
 
 'use strict';
 
@@ -125,12 +129,19 @@ console.log('\nConcern 2: CLI parity — no args / bad --slice-plan / fixture');
 console.log('\nConcern 3: named exports smoke');
 {
   const mod = require(SCRIPT);
-  const names = ['globToRegex', 'normalizePath', 'normalizeFilesystemPath', 'canonicalizeClaimPath', 'pathsOverlap', 'writesConflict',
-    'parseTaskFrontmatter', 'parseListField', 'discoverTasks'];
+  // issue 343 U0a: the list is pinned on purpose; validateTaskDag is the one addition.
+  const names = ['globToRegex', 'normalizePath', 'normalizeFilesystemPath', 'canonicalizeClaimPath', 'claimPathMatches', 'pathsOverlap',
+    'writesConflict', 'parseTaskFrontmatter', 'parseListField', 'discoverTasks', 'validateTaskDag'];
+  test('export list is exactly the pinned list', () => assertEq(Object.keys(mod), names));
   for (const n of names) {
     test(`exports.${n} is a function`, () => assertEq(typeof mod[n], 'function'));
   }
   test('pathsOverlap glob match', () => assertEq(mod.pathsOverlap('src/a/**', 'src/a/b.ts'), true));
+  test('validateTaskDag smoke: a two-task chain is a valid graph in dependency order', () => {
+    const dag = mod.validateTaskDag([{ id: 'T01', depends: [], writes: ['src/x.ts'] }, { id: 'T02', depends: ['T01'], writes: ['src/y.ts'] }],
+      { scopeTaskIds: ['T01', 'T02'] });
+    assertEq([dag.status, dag.topological_order], ['valid', ['T01', 'T02']]);
+  });
 
   const fixturePlan = path.join(ROOT, 'frontmatter-fixture.md');
   fs.writeFileSync(
@@ -191,6 +202,13 @@ console.log('\nConcern 4: bite — reverted guard fails the require-without-effe
     const r = requireProbe(bitePath);
     assertEq(r.stdout.trim(), 'function', `stdout: ${JSON.stringify(r.stdout)}`);
     assert(!/"mode":"error"/.test(r.stdout), `stdout: ${r.stdout}`);
+  });
+  test('restored copy alone: bounded pathsOverlap decides without any sibling module', () => {
+    const code = `const p = require(${JSON.stringify(bitePath)}); const k = '?*'.repeat(120); `
+      + `process.stdout.write(JSON.stringify([p.pathsOverlap('src/' + k + 'y', 'src/' + k + 'x'), p.pathsOverlap('src/a.js', 'src/b.js'), `
+      + `p.pathsOverlap('src/*.js', 'src/a*')]));`;
+    const r = spawnSync(process.execPath, ['-e', code], { encoding: 'utf8' });
+    assertEq([r.status, r.stdout], [0, '[true,false,true]'], `stderr: ${r.stderr}`);
   });
 
   try { fs.rmSync(biteDir, { recursive: true, force: true }); } catch (_) {}

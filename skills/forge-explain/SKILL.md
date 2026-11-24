@@ -1,7 +1,6 @@
 ---
 name: forge-explain
 description: "Explica artefatos GSD: M###, S##, T##, decisions, state."
-disable-model-invocation: true
 allowed-tools: Read, Glob
 ---
 

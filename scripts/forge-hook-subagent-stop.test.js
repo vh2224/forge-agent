@@ -15,8 +15,8 @@ const hookPath = path.join(__dirname, 'forge-hook.js');
 const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-subagent-stop-'));
 let passed = 0;
 
-function run(input) {
-  const result = spawnSync(process.execPath, [hookPath, 'subagent-stop'], {
+function run(input, script = hookPath, extraEnv = {}) {
+  const result = spawnSync(process.execPath, [script, 'subagent-stop'], {
     cwd,
     input: JSON.stringify({
       session_id: `subagent-stop-test-${process.pid}`,
@@ -24,6 +24,7 @@ function run(input) {
       ...input,
     }),
     encoding: 'utf8',
+    env: { ...process.env, ...extraEnv },
   });
   assert.strictEqual(result.status, 0, result.stderr);
   return result.stdout.trim();
@@ -60,6 +61,41 @@ try {
       last_assistant_message: '---GSD-WORKER-RESULT---\nstatus: done\nsummary: planned',
     });
     assert.strictEqual(output, '');
+  });
+
+  test('invalid status gets complete-answer feedback with the classifier enum', () => {
+    for (const status of ['complete', 'ok', '']) {
+      const parsed = JSON.parse(run({ agent_type: 'forge-researcher', stop_hook_active: false,
+        last_assistant_message: `Research retained.\n---GSD-WORKER-RESULT---\nstatus: ${status}` }));
+      assert.strictEqual(parsed.decision, 'block');
+      assert(parsed.reason.includes(require('./forge-worker-result').resultStatusInstruction()));
+      assert(parsed.reason.includes('COMPLETE final answer'));
+      assert(parsed.reason.includes('Do not re-run tools'));
+    }
+    for (const status of ['done', 'partial', 'blocked']) assert.strictEqual(run({ agent_type: 'forge-researcher',
+      last_assistant_message: `---GSD-WORKER-RESULT---\nstatus: ${status}` }), '');
+  });
+
+  test('both installed hook paths load the same result classifier', () => {
+    for (const explicit of [true, false]) {
+      const userHome = path.join(cwd, explicit ? 'explicit-user' : 'default-user');
+      const home = path.join(userHome, '.claude');
+      const forgeHome = explicit ? path.join(cwd, 'separate Forge core') : path.join(userHome, '.forge-agent');
+      fs.mkdirSync(path.join(forgeHome, 'scripts'), { recursive: true });
+      for (const file of ['forge-worker-result.js', 'forge-home.js']) fs.copyFileSync(path.join(__dirname, file), path.join(forgeHome, 'scripts', file));
+      const env = { HOME: userHome, USERPROFILE: userHome, FORGE_HOME: explicit ? forgeHome : '' };
+      for (const relative of ['forge-hook.js', 'hooks/forge-hook.js']) {
+        const installed = path.join(home, relative);
+        fs.mkdirSync(path.dirname(installed), { recursive: true });
+        fs.copyFileSync(hookPath, installed);
+        assert(!fs.existsSync(path.join(home, 'scripts')), 'the retired Claude-home runtime is absent');
+        const response = JSON.parse(run({ agent_type: 'forge-researcher',
+          last_assistant_message: '---GSD-WORKER-RESULT---\nstatus: complete' }, installed, env));
+        assert.strictEqual(response.decision, 'block');
+        assert(response.reason.includes(require('./forge-worker-result').resultStatusInstruction()));
+        assert.strictEqual(run({ agent_type: 'forge-researcher', last_assistant_message: '---GSD-WORKER-RESULT---\nstatus: done' }, installed, env), '');
+      }
+    }
   });
 
   test('second hook pass is an escape hatch', () => {
@@ -106,6 +142,15 @@ try {
   });
 
   fs.mkdirSync(path.join(cwd, '.gsd', 'forge'), { recursive: true });
+
+  test('invalid-status escape remains bounded and records a miss instead of done', () => {
+    const before = fs.existsSync(missFile) ? readMisses().length : 0;
+    assert.strictEqual(run({ agent_type: 'forge-researcher', stop_hook_active: true,
+      last_assistant_message: 'Research retained.\n---GSD-WORKER-RESULT---\nstatus: complete' }), '');
+    assert.strictEqual(readLive().status, 'contract-missed');
+    assert.strictEqual(readMisses().length, before + 1);
+    assert.strictEqual(readMisses().at(-1).phase, 'escaped');
+  });
 
   test('the escape pass records `contract-missed`, not `done`', () => {
     const output = run({

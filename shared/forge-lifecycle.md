@@ -54,8 +54,10 @@ lease or write STATE, and is not permission to bypass dispatch or approval gates
 
 The selector applies canonical `skip_discuss`, `skip_research` and
 `skip_slice_research` preferences. The two research preferences are independent.
-The existing `forge-parallelism.js` picker remains responsible for task
-dependencies and batches, after phase selection and before dispatch. A live
+In `forge-auto`, the controller's canonical batch decision owns `execute-task`
+cohorts (§ Execute-task cohort below); the existing `forge-parallelism.js`
+picker remains a read-only compatibility picker for task dependencies and the
+native batch, after phase selection and before dispatch. A live
 controller lease must never be retargeted to a different task or slice by a
 second picker; stop on a mismatch and preserve the snapshot for recovery.
 
@@ -65,6 +67,34 @@ use `forge-planner`, `discuss-*` uses `forge-discusser`, `research-*` uses
 `forge-completer`. Model/engine/effort still come from `forge-dispatch-resolve.js`;
 these agent names do not select a host, delivery mode or model.
 Standalone `/forge-task` remains outside milestone selection.
+
+## Execute-task cohort (issue 343)
+
+Only `forge-auto` in `auto` mode reaches it, and only for `execute-task`. When
+`next` selects a sidecar primary whose independent ready sidecar siblings are
+admitted, the loop returns `outcome: dispatch_required`, `reason_code: batch-ready`
+and action `dispatch-batch`, whose `controller_result` (reason `batch-selected`)
+carries `details.dispatch_batch`; the snapshot holds
+`current_batch` while `current_unit` stays empty, and single-unit commands
+refuse `batch-active` until the batch is released. Every other selection keeps
+the single unit and names one closed reason in `details.batch`. `forge-next`,
+`task` mode, standalone tasks and every non-execute phase never form a cohort.
+
+Each member advances through its own progress chain:
+`preparado → admitido → executando → retido → publicacao-pendente → publicado → integrado → ack`,
+with `needs-input` (a pending functional question: never a failure, never an
+approval), `verificacao-falhou`, `falhou` and `bloqueado` as named exits;
+`ack`, `falhou` and `bloqueado` are terminal. `retido` is the executed record
+plus seal held while siblings run — distinct from verified ready, which exists
+only after the barrier — and `ack` exists only after publication, integration
+and the controller's own completion of that member's begin.
+
+`batch-status` observes the manifest, progress, begins and leases without
+writing. `batch-ack` releases from `current_batch` exactly the members whose
+progress is `ack` with a committed completion, and completes only when every
+member is terminal (`batch-acked`); otherwise it answers `batch-members-pending`
+and stops. A fresh process resumes from these records: replay never begins,
+infers, publishes or acknowledges a member twice.
 
 ## Milestone time option choice
 

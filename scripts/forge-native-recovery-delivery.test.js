@@ -67,6 +67,7 @@ async function fixture(options = {}) {
   f.originalOptions={cwd:f.owner,unitType:r.unitType,scope:r.scope,phase:r.phase,hostRuntime:'codex',milestoneId:'M901',unitId:'T01',planPath:planFile,roadmapPath:f.roadmap};
   if (standalone) {delete f.originalOptions.milestoneId;delete f.originalOptions.roadmapPath;f.originalOptions.unitId=taskId;}
   r.route=require('./forge-dispatch-resolve').resolveDispatch(standalone?f.originalOptions:{...f.originalOptions,scope:undefined,phase:undefined});
+  require('./fixtures/issues-434-436/execution-fixtures.cjs').declareBindings(r);
   f.request=r;f.stateFile=r.resultFile+'.recovery.json';f.receiptFile=r.resultFile+'.receipt.json';
   if (standalone) {
     f.assertBoundary=()=>{

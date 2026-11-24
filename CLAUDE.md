@@ -1,5 +1,3 @@
-<!-- forge-source:claude-instructions source=CLAUDE.md version=4.49.7 -->
-
 # Forge Agent — entrada do projeto
 
 Forge organiza contexto, preparação, execução, revisão e continuidade de trabalho para hosts compatíveis.

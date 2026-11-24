@@ -517,10 +517,10 @@ withHermeticHome((cliEnv) => {
     assertEqual(estimate.tier, 'max', 'estimate-milestone resolved tier max');
     assertEqual(estimate.effort, 'medium', 'estimate-milestone resolved effort medium');
     assertEqual(estimate.route_source, 'tier_models', 'estimate-milestone routing uses tier_models');
-    assertEqual(require('./forge-routing').mapPhase('estimate-milestone'), null, 'estimate-milestone mapPhase is null');
+    assertEqual(require('./forge-routing').mapPhase('estimate-milestone'), 'estimate-milestone', 'estimate-milestone has its own explicit artifact cell');
     const routing = require('./forge-routing');
     const route = routing.resolveRoute({ unitType: 'estimate-milestone', tier: 'max', cwd: f.dir });
-    assert(route.reason.includes('phase-not-routable'), 'estimate-milestone is phase-not-routable', route.reason);
+    assert(route.reason.includes('tier_models'), 'missing estimate-milestone cell preserves the tier_models chain', route.reason);
     for (const key of ['model', 'chain', 'chain_len', 'workers_timeout', 'workers_timeout_source']) {
       nodeAssert.deepStrictEqual(estimate[key], planning[key], key);
     }
@@ -596,7 +596,9 @@ withHermeticHome((cliEnv) => {
           assertEqual(r.resolved_worker_engine, 'codex', `${unit.unitType}/${hostRuntime} keeps GPT worker family`);
           assertEqual(r.worker_mode, hostRuntime === 'codex' ? 'native' : 'sidecar',
             `${unit.unitType}/${hostRuntime} derives the correct host transport`);
-          assertEqual(r.dispatch_allowed, true, `${unit.unitType}/${hostRuntime} transport is supported`);
+          const readonlyRefused = hostRuntime === 'claude' && unit.unitType !== 'memory-extract';
+          assertEqual(r.dispatch_allowed, !readonlyRefused, `${unit.unitType}/${hostRuntime} respects the actual delivery profile`);
+          if (readonlyRefused) assertEqual(r.dispatch_reason_code, 'codex-readonly-context-unsupported', 'unsupported artifacts retain the exact pre-provider cause');
         }
       }
       cleanup(f);

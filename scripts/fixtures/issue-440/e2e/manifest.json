@@ -1,0 +1,97 @@
+{
+  "evidence_version": "e2e-evidence-v1",
+  "origin": "captured",
+  "route": {
+    "host": "claude-code",
+    "worker": "codex",
+    "transport": "app-server",
+    "worker_mode": "sidecar"
+  },
+  "provenance": {
+    "captured_at": "2026-11-22T09:12:58.461Z",
+    "method": "claude-tool-canonical-codex-capture",
+    "tools": [
+      {
+        "name": "root-controlled-capture",
+        "sha256": "24d8329968baf9602352520be7c8651b1680b04b83ab5a4dbcfac26165466a4d"
+      },
+      {
+        "name": "codex-transparent-tee",
+        "sha256": "c91a6e24bb4b270bef6e936117dbf4f48e8bd7fb5d9165bc8f8ef3d1c05f7135"
+      },
+      {
+        "name": "capture-binding",
+        "sha256": "aa47bc9364708da92201c5bb14135e813058775f091ec112b1cc60deb7221f6c"
+      },
+      {
+        "name": "T01-evidence-api",
+        "sha256": "835008e8fdcc79cfdb6bd88fb51ecfef4d375525517c5a419d8f2e1600b44326"
+      }
+    ],
+    "versions": {
+      "host": "2.1.322",
+      "worker": "0.170.0",
+      "node": "v24.14.1",
+      "appserver_schema_pin": {
+        "path": "shared/schemas/codex-appserver-pin.json",
+        "sha256": "a49d57fb088d73935c734442a51af70a91e7db89f7e23870ba5e0ab32c387538",
+        "codex_version": "0.166.0"
+      },
+      "forge": {
+        "revision": "fa33d14ead04ce8829a855a771713cac71e58b34",
+        "dirty": true
+      },
+      "os": {
+        "platform": "win32",
+        "release": "10.0.26300",
+        "arch": "x64"
+      }
+    },
+    "attempt": {
+      "dispatch_sha256": "38c91d54448c3e457c8c4a669c249792cd0eb73a0d860adcd1f5e4547c36d0e6",
+      "fingerprint_sha256": "1d15ef40d1ef35548b51155016abf5c58a90d3d27f3eeaec152818c29cd0b0e9",
+      "recovery_identity_sha256": "cdfe6e837fb5ef4e676ab0a2c2899923e7a509a5491e99e4d0bd7d12d0523f72",
+      "claim_sha256": "28cd311b700b48003e11cf3ca07e3547e0f74cf0653699693d6d9c4096959fa0",
+      "lease_generation": "48e3840124b148d78ff1ad374e18de70"
+    },
+    "raw_capture_sha256": "97da6f6ab44b69396ff1f14ecffd7e6cfa821975f8d0f00a7c7ede5394b54186",
+    "sanitizer": {
+      "version": "e2e-sanitizer-v1",
+      "allowlist_version": "e2e-allowlist-v1"
+    },
+    "environment_overrides": [
+      "ANTHROPIC_AUTH_TOKEN",
+      "FORGE_ACCOUNT",
+      "FORGE_CLAUDE_OWNER_SESSION_ID",
+      "FORGE_CLAUDE_OWNER_SOURCE",
+      "FORGE_XLLM_CODEX_BIN",
+      "TEMP",
+      "TMP"
+    ]
+  },
+  "files": [
+    {
+      "path": "recording.jsonl",
+      "sha256": "497af47109e4b81a13ad5adfebf9f9d4c8709f8a582c6931f86053c84799dd06",
+      "bytes": 59263,
+      "records": 194
+    }
+  ],
+  "counts": {
+    "records": 194,
+    "host": 5,
+    "worker": 181,
+    "attempt": 8
+  },
+  "limits": {
+    "max_files": 8,
+    "max_file_bytes": 4194304,
+    "max_line_bytes": 65536,
+    "max_records": 20000,
+    "max_manifest_bytes": 65536,
+    "max_pin_bytes": 4194304,
+    "max_dir_entries": 256
+  },
+  "label": "recorded",
+  "execution_mode": "replay"
+}

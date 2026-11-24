@@ -19,6 +19,8 @@ const {
   salvageUnit,
   formatResultBlock,
   parseBlockFields,
+  resultStatusInstruction,
+  STATUS_VALUES,
 } = require('./forge-worker-result');
 
 const scriptPath = path.join(__dirname, 'forge-worker-result.js');
@@ -41,6 +43,28 @@ function write(rel, content) {
 const OUTCOMES = new Set(['hit', 'miss', 'unavailable']);
 
 try {
+  test('prompt and agent instructions declare the exact classifier enum', () => {
+    const instruction = resultStatusInstruction();
+    assert(instruction.includes(`status: ${[...STATUS_VALUES].join(' | ')}`));
+    const agents = ['advocate', 'completer', 'discusser', 'executor', 'plan-checker', 'planner', 'researcher', 'reviewer', 'worker'];
+    for (const name of agents) {
+      const body = fs.readFileSync(path.join(__dirname, '../agents', `forge-${name}.md`), 'utf8');
+      assert(body.includes(instruction), `forge-${name} must receive the same closed status instruction`);
+    }
+    const repo = path.resolve(__dirname, '..');
+    for (const host of ['claude', 'codex']) {
+      const artifacts = require(`./forge-${host}-renderer`).render({ repo, projectRoot: tmp,
+        claudeHome: path.join(tmp, 'claude'), codexHome: path.join(tmp, 'codex'), forgeHome: path.join(tmp, 'forge'),
+        ...(host === 'codex' ? { agentInvocation: 'spawn_agent(', hostRuntime: 'codex' } : {}) }).artifacts;
+      for (const name of agents) {
+        const agent = artifacts.find(item => item.source_id === 'agents' && item.source === `agents/forge-${name}.md`);
+        assert(agent && agent.content.includes(instruction), `${host} projection of forge-${name} retains the enum`);
+      }
+      const memory = artifacts.find(item => item.source_id === 'agents' && item.source === 'agents/forge-memory.md');
+      assert(memory && !memory.content.includes(instruction), `${host} command-only memory keeps its own contract`);
+    }
+    for (const status of ['complete', 'ok']) assert.strictEqual(classifyReturn(`---GSD-WORKER-RESULT---\nstatus: ${status}`).shape, 'status-missing');
+  });
   // ── classifyReturn ──────────────────────────────────────────────────────────
 
   test('empty return is `empty`, not `absent`', () => {

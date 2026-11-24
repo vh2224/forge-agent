@@ -221,7 +221,16 @@ accounts.resolveLaunch = () => ({ name: 'fixture-account', token: 'fixture-token
         const request = requestFor(prep, scenario.projection, { ...scenario, prompt: sentinel });
         const payload = artifactEnvelope(prep, request);
         write(path.join(request.cwd, 'provider-payload.json'), payload);
+        const codexBefore = codexPrompts.length;
         const result = await prep.prepareStandaloneTask(request);
+        // #350: standalone research needs code investigation, so the installed Codex read-only
+        // sidecar refuses it before any provider call; research-claude keeps its delivery.
+        if (scenario.label === 'research-gpt') {
+          assert.deepEqual([result.ok, result.reason_code, result.provider_called], [false, 'codex-readonly-context-unsupported', false], JSON.stringify(result));
+          assert.equal(codexPrompts.length, codexBefore);
+          assert(!fs.existsSync(`${request.resultFile}.receipt.json`));
+          continue;
+        }
         assert.equal(result.ok, true, JSON.stringify(result));
         assert.equal(result.transport, 'sidecar');
         assert.equal(result.provider_called, true);

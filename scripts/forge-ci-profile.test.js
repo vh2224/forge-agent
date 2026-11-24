@@ -28,15 +28,17 @@ const collector = require('./forge-ci-profile.js');
 originals.forEach(([module, name, original]) => { module[name] = original; });
 
 const fixtures = path.join(__dirname, 'fixtures', 'ci-profile');
-const versioned = path.join(__dirname, 'fixtures', 'ci-shards', 'shard-profile.json');
+const versioned = path.join(__dirname, 'fixtures', 'ci-latency', 'shard-profile.json');
 const tempRoot = fs.realpathSync(os.tmpdir());
 const root = fs.mkdtempSync(path.join(tempRoot, 'forge-ci-profile-'));
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 const rawFixture = name => fs.readFileSync(path.join(fixtures, name), 'utf8');
 // In-memory synthetic current-policy names; retain historical fixture bytes.
 // These parser fixtures still exercise a two-way synthetic partition, not CI timing.
+const currentWindowsNames=release.expandJobs(release.POLICY.workflows.ci).filter(job=>job.key==='test'&&job.matrix.platform==='win32').map(job=>job.name);
+assert(currentWindowsNames.length>=2);
 const fixture = name => rawFixture(name).replace(/Tests \(windows-latest, shard ([12])\/2\)/g,
-  'Tests (windows-latest, shard $1/4)');
+  (_,index)=>currentWindowsNames[Number(index)-1]);
 const json = name => JSON.parse(fixture(name));
 let passed = 0, failed = 0;
 function test(name, body) {
@@ -68,7 +70,7 @@ try {
   test('S04-T05 truth:0 exact log parse BOM timestamps ANSI counts failures metadata and fail-closed ambiguity', () => {
     const first = collector.parseRunTestsLog(fixture('windows-shard-1.log'), { name: 'windows-shard-1.log' });
     assert.strictEqual(first.platform, 'win32'); assert.strictEqual(first.semantic_key, 'test');
-    assert.strictEqual(first.job_name, 'Tests (windows-latest, shard 1/4)');
+    assert.strictEqual(first.job_name, currentWindowsNames[0]);
     assert.strictEqual(first.runner_image, 'windows-synthetic');
     assert.strictEqual(first.runner_image_version, '20261001.1');
     assert.strictEqual(first.node_version, 'v22.23.3');
@@ -258,7 +260,8 @@ try {
     for (const source of profile.doc.sources) {
       assert.strictEqual(path.basename(source.name), source.name); assert(!/[\\/]/.test(source.name));
       assert(/^[a-f0-9]{64}$/.test(source.sha256)); assert(Number.isSafeInteger(source.bytes));
-      assert(names.has(source.job_name)); assert.strictEqual(source.kind, 'run-tests-log');
+      if (source.kind === 'suite-profile') assert.strictEqual(source.job_name, 'test', 'structured artifacts retain the observed workflow job ID, not an invented display name');
+      else { assert(names.has(source.job_name)); assert.strictEqual(source.kind, 'run-tests-log'); }
       // validateShardProfile above enforces UTC syntax, ordering and null reasons.
       assert(Number.isSafeInteger(source.suites_failed)); assert(source.suites_failed >= 0);
     }
@@ -282,6 +285,33 @@ try {
     }
   });
 
+  test('unit allocation comparisons use the same measured/estimated/default costs', () => {
+    const profile=loaded(),count=24;
+    const units=require('./forge-ci-units').expandSuites(runner.discoverTests([])),weights=profile.doc.platforms.win32;
+    // Exercise all three cost paths even when every current unit is measured.
+    const estimated=units.find(unit=>unit.source==='forge-native-repackage.test.js');
+    const measuredId='forge-ci-parallel.test.js',defaultId='forge-ci-profile.test.js';
+    assert(estimated&&estimated.id!==estimated.source);
+    assert(units.some(unit=>unit.id===measuredId)&&units.some(unit=>unit.id===defaultId));
+    weights.weights_ms[measuredId]=3000;
+    weights.weights_ms[estimated.source]=6000;
+    delete weights.weights_ms[estimated.id];
+    delete weights.weights_ms[defaultId];
+    profile.sha256=hash(JSON.stringify(profile.doc));
+    assert(shards.validateShardProfile(profile.doc).ok);
+    const report=collector.buildProfileReport({shard_profile:profile,partitions:[{platform:'win32',count}],partition_suites:true});
+    const prediction=report.predictions[0];
+    const positional=shards.planShards({suites:units.map(unit=>unit.id),index:0,count,platform:'win32'});
+    const cost=id=>Object.hasOwn(weights.weights_ms,id)?weights.weights_ms[id]:Object.hasOwn(prediction.estimated_unit_weights,id)?prediction.estimated_unit_weights[id]:weights.default_weight_ms;
+    assert(Object.keys(prediction.estimated_unit_weights).length>0);
+    assert.equal(prediction.estimated_unit_weights[estimated.id],Math.ceil(6000/estimated.divisor));
+    assert(!Object.hasOwn(prediction.estimated_unit_weights,defaultId));
+    assert(prediction.weighted.unprofiled.includes(defaultId));
+    assert.equal(cost(measuredId),3000);
+    assert.equal(cost(defaultId),weights.default_weight_ms);
+    assert.deepEqual(prediction.positional.predicted_ms,positional.shards.map(shard=>shard.reduce((sum,id)=>sum+cost(id),0)));
+    assert.equal(prediction.positional.predicted_ms.reduce((a,b)=>a+b,0),prediction.weighted.predicted_ms.reduce((a,b)=>a+b,0));
+  });
   test('issue 219 replaceable profile dates obey schema, not historical fixture dates', () => {
     const profile = loaded().doc;
     const hashes = profile.sources.map(source => source.sha256);

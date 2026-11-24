@@ -286,3 +286,7 @@ The 10 dimensions above are LOCKED for M003. Future milestones (M004+) may exten
 - **`MUST_HAVES_CHECK_RESULTS` JSON parse error**: same treatment as absent.
 - **Optional file missing** (`M###-CONTEXT.md`, `S##-CONTEXT.md`, `S##-RISK.md`, `M###-SCOPE.md`): continue; score dependent dimensions as `pass` with note "file not present — dimension not applicable" OR use `S##-PLAN.md § Boundary Map § Produces` as fallback for `scope_alignment`.
 - **`Glob` returns zero results** for task plans: score `completeness` as `fail` (no task plan files found). Still write `S##-PLAN-CHECK.md` with all remaining dimensions scored as `warn` (insufficient data).
+
+## Worker result status
+
+The ---GSD-WORKER-RESULT--- block must contain status: done | partial | blocked. Choose exactly one accepted status; complete and ok are invalid.

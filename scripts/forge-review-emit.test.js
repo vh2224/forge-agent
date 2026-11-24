@@ -253,4 +253,53 @@ for (const payload of [
   assert.strictEqual(fs.existsSync(eventsOf(malformedDir)), false, `malformed efforts wrote a row: ${payload}`);
 }
 
+// Standalone task reviews must not borrow a milestone/slice identity.
+const taskUnit = 'task/T-20260101000000-review-fixture';
+const taskOptions = { unit: taskUnit, ts: base.ts, authorEngine: 'codex', challenger: 'codex', advocate: 'opus' };
+const taskBuilt = buildReviewEvent(taskOptions);
+assert.deepStrictEqual(taskBuilt.errors, []);
+assert.strictEqual(taskBuilt.event.unit, taskUnit);
+assert.strictEqual(Object.hasOwn(taskBuilt.event, 'milestone'), false);
+assert.strictEqual(Object.hasOwn(taskBuilt.event, 'slice'), false);
+assert.deepStrictEqual(Object.keys(taskBuilt.event), ['ts', 'event', 'unit', ...CANONICAL_KEYS.slice(4)]);
+const taskCliDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-review-emit-task-'));
+const taskArgs = ['--cwd', taskCliDir, '--unit', taskUnit, '--author-engine', 'codex', '--challenger', 'codex', '--advocate', 'opus', '--ts', base.ts, '--json'];
+const taskWritten = run(taskArgs);
+assert.strictEqual(taskWritten.code, 0, taskWritten.out);
+assert.deepStrictEqual(JSON.parse(taskWritten.out), taskBuilt.event);
+assert.deepStrictEqual(JSON.parse(fs.readFileSync(eventsOf(taskCliDir), 'utf8')), taskBuilt.event);
+
+const unavailableTaskDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-review-emit-task-unavailable-'));
+const unavailableTask = run([...taskArgs, '--cwd', unavailableTaskDir, '--unavailable-reason', 'review-advocate-unavailable', '--attempts', '1']);
+assert.strictEqual(unavailableTask.code, 0, unavailableTask.out);
+const taskRows = fs.readFileSync(eventsOf(unavailableTaskDir), 'utf8').trim().split('\n').map(JSON.parse);
+assert.strictEqual(taskRows.length, 2);
+for (const row of taskRows) {
+  assert.strictEqual(row.unit, taskUnit);
+  assert.strictEqual(Object.hasOwn(row, 'milestone'), false);
+  assert.strictEqual(Object.hasOwn(row, 'slice'), false);
+}
+assert.strictEqual(taskRows[1].event, 'review-agent-unavailable');
+
+const taskRefusedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-review-emit-task-refused-'));
+for (const args of [
+  ['--unit', 'task/../other'], ['--unit', 'execute-task/T01'], ['--unit', 'task/'],
+  ['--unit', 'task/' + 'x'.repeat(129)], ['--unit', 'task/T\nother'], ['--unit'],
+  ['--unit', taskUnit, '--milestone', 'M134'], ['--unit', taskUnit, '--slice', 'S02'],
+  ['--unit', taskUnit, '--milestone', ''], ['--unit', taskUnit, '--slice'],
+]) {
+  const refused = run(['--cwd', taskRefusedDir, '--author-engine', 'codex', ...args]);
+  assert.strictEqual(refused.code, 2, 'invalid or ambiguous task scope must refuse: ' + JSON.stringify(args));
+  assert.strictEqual(fs.existsSync(eventsOf(taskRefusedDir)), false);
+}
+const taskDryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-review-emit-task-dry-'));
+assert.strictEqual(run([...taskArgs, '--cwd', taskDryDir, '--dry-run']).code, 0);
+assert.strictEqual(fs.existsSync(eventsOf(taskDryDir)), false);
+
+// The audit must keep the task identity when it reports a recorded alias drift.
+const taskDriftDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-review-emit-task-audit-'));
+appendEvents(eventsOf(taskDriftDir), [{ ...taskBuilt.event, advocate: 'unit-drift-probe' }]);
+const taskDrifts = audit(eventsOf(taskDriftDir), taskDriftDir).drifts;
+assert.strictEqual(taskDrifts.length, 1);
+assert.strictEqual(taskDrifts[0].unit, taskUnit);
 console.log('forge-review-emit tests passed');

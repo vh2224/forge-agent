@@ -403,16 +403,19 @@ process.stdin.on('end', () => {
       // parseLegacyValue — old mantinha aspas literais e o update-check falhava
       // calado em path citado (ex.: valor quoted "foo/bar"). Comportamento novo é
       // uma melhoria e permanece; documentado aqui só para não ficar implícito.
-      const repo = typeof resolvedPrefs.prefs.repo_path === 'string'
-        ? resolvedPrefs.prefs.repo_path.trim() : '';
-      if (repo) {
-        let updateProvider;
-        try { updateProvider = require('./scripts/forge-update-check'); }
-        catch { updateProvider = require('./forge-update-check'); }
-        const cache = updateProvider.cachedUpdate(updateProvider.resolveRepoPath(resolvedPrefs.prefs, cwd || process.cwd()));
-        forgeVersion = cache.version || '';
-        if (cache.has_update && cache.remote_version) forgeUpdate = `\u2191 ${cache.remote_version}`;
-      }
+      let updateProvider;
+      try { updateProvider = require('./scripts/forge-update-check'); }
+      catch { updateProvider = require('./forge-update-check'); }
+      // The renderer supplies only already-resolved local context. The provider
+      // reads cache synchronously and delegates manifest parsing and every Git or
+      // remote operation to its detached refresh subprocess.
+      const cache = updateProvider.cachedUpdate({
+        cwd: cwd || process.cwd(),
+        prefs: resolvedPrefs.prefs,
+        forgeHome: process.env.FORGE_HOME,
+      });
+      forgeVersion = cache.version || '';
+      if (cache.has_update && cache.remote_version) forgeUpdate = `\u2191 ${cache.remote_version}`;
     } catch {}
 
     // --- ANSI colors (used sparingly, only for critical info) ---
@@ -503,9 +506,8 @@ process.stdin.on('end', () => {
     if (pausePending) {
       autoPrefix = `${c.yellow}⏸ PAUSE SOLICITADO${c.reset} │ `;
     } else if (isMultiRunMode) {
-      // Multi-run compact line: ● AUTO ×N │ M065 ⚡T03 +12s │ M066 🔥S04 +1m
+      // Fresh active records describe retained runs, not observed live loops.
       // 4+ runs: truncate to "+N-2 mais"
-      const now = Date.now();
       const segments = multiRunActive.slice(0, 3).map(r => {
         let icon = '·';
         let unit = '';
@@ -514,20 +516,17 @@ process.stdin.on('end', () => {
           icon = tierIconFor(ut);
           unit = uid || ut || '';
         }
-        const wAge = r.heartbeat_age_ms > 0 ? fmtSecsShort(Math.round(r.heartbeat_age_ms / 1000)) : '0s';
-        return `${r.id} ${icon}${unit} +${wAge}`;
+        return `${r.id} ${icon}${unit}`;
       });
       const more = multiRunActive.length > 3 ? ` · +${multiRunActive.length - 3} mais` : '';
-      const dot = (Math.floor(Date.now() / 500) % 2 === 0) ? '●' : '○';
-      autoPrefix = `${c.red}${dot} AUTO ×${multiRunActive.length}${c.reset} │ ${segments.join(' │ ')}${more} │ `;
+      autoPrefix = `${c.yellow}○ RUNS ATIVOS ×${multiRunActive.length}${c.reset} │ ${segments.join(' │ ')}${more} │ `;
       // Disable single-run autoMode flag so middle/right segments don't double-render
       autoMode = false;
       autoWorker = '';
     } else if (autoMode) {
       // Legacy single-run rendering
-      const dot = autoElapsedSecs % 2 === 0 ? '●' : '○';
       const unitsSuffix = autoUnitsDone > 0 ? ` · ${autoUnitsDone}u` : '';
-      autoPrefix = `${c.red}${dot} AUTO ${autoElapsed}${unitsSuffix}${c.reset} │ `;
+      autoPrefix = `${c.yellow}○ RUN ATIVO${unitsSuffix}${c.reset} │ `;
     }
 
     // --- Middle segment: milestone progress + worker/retry/outcome ---
@@ -541,7 +540,6 @@ process.stdin.on('end', () => {
       if (autoMode && autoWorker) {
         const [ut, uid] = autoWorker.split('/');
         const icon = tierIconFor(ut);
-        const wt = fmtSecsShort(autoWorkerSecs);
         const events = readTailEvents();
         const retry = findActiveRetry(events);
         if (retry) {
@@ -549,7 +547,7 @@ process.stdin.on('end', () => {
           const attempt = retry.attempt || '?';
           rightPart = ` · ${c.yellow}↻${c.reset} ${icon}${uid || ut} retry ${attempt}/3 (${cls})`;
         } else {
-          rightPart = ` · ${c.green}${icon}${uid || ut} +${wt}${c.reset}`;
+          rightPart = ` · unid. ${icon}${uid || ut}`;
         }
       } else {
         // No active worker — show last outcome if recent (< 10 min)
@@ -583,9 +581,8 @@ process.stdin.on('end', () => {
     if (cost >= 5)      costCore = `${c.red}${costStr}${c.reset}`;
     else if (cost >= 1) costCore = `${c.yellow}${costStr}${c.reset}`;
     let costDisplay = costCore;
-    if (autoBurnRate > 0) {
-      costDisplay = `${costCore} ${c.dim}($${autoBurnRate.toFixed(2)}/h)${c.reset}`;
-    }
+    // A retained run's original start includes pauses; it is not execution time
+    // and cannot be used to present an execution burn rate.
 
     // --- Rate limits: 5h rolling session window + 7d weekly limit ---
     // Source: d.rate_limits.{five_hour,seven_day}.{used_percentage,resets_at}.

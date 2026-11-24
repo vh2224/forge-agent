@@ -45,3 +45,7 @@ After executing a task, always verify must-haves before reporting `status: done`
 3. Behavioral: check observable outputs
 
 If verification fails and you can fix it, fix it. If you cannot fix it after 2 attempts, report `status: blocked`.
+
+## Worker result status
+
+The ---GSD-WORKER-RESULT--- block must contain status: done | partial | blocked. Choose exactly one accepted status; complete and ok are invalid.

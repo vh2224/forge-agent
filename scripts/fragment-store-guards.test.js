@@ -250,16 +250,21 @@ test('detectVcs recognizes an SVN working-copy subdirectory via wc-root probe', 
   try {
     assert(ignore.detectVcs(sub) === 'svn', 'subdirectory should resolve to svn');
     assert(calls.length === 1, `expected one probe, got ${calls.length}`);
-    assert(calls[0].args.join('|') === ['info', '--show-item', 'wc-root', '--non-interactive', sub].join('|'),
+    assert(calls[0].args.join('|') === ['info', '--show-item', 'wc-root', '--non-interactive', '--', `${path.resolve(sub)}@`].join('|'),
       `probe args mismatch: ${calls[0].args.join(' ')}`);
   } finally { ignore.__setExecFileSync(restore); rmrf(tmp); }
 });
 
 test('detectVcs fails closed when the SVN wc-root probe throws', () => {
   const tmp = mkTmp();
-  const restore = ignore.__setExecFileSync(() => { throw new Error('svn unavailable'); });
+  fs.mkdirSync(path.join(tmp, '.svn'));
+  const sub = path.join(tmp, 'sub');
+  fs.mkdirSync(sub);
+  let calls = 0;
+  const restore = ignore.__setExecFileSync(() => { calls++; throw new Error('svn unavailable'); });
   try {
-    assert(ignore.detectVcs(tmp) === 'none', 'failed probe should return none');
+    assert(ignore.detectVcs(sub) === 'none', 'failed probe should return none');
+    assert(calls === 1, 'the ancestor candidate must actually reach the failing probe');
   } finally { ignore.__setExecFileSync(restore); rmrf(tmp); }
 });
 

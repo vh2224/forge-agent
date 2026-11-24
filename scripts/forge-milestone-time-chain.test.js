@@ -249,7 +249,7 @@ function taskPlan(f, slice, task, node, spec) {
 function taskWork(f, slice, task) {
   const prefix = `.gsd/milestones/${M}/slices/${slice}/tasks/${task}/${task}`, plan = fs.readFileSync(file(f.owner, prefix + '-PLAN.md'), 'utf8');
   const unit = { type: 'task', id: task, slice, milestone: M };
-  const gate = verify.runRootVerification(f.execution, { unit, planFingerprint: sha(plan), taskPlanVerify: verify.parsePlanVerify(plan), commandTimeoutMs: 60000 });
+  const gate = withInjectedClock(f, () => verify.runRootVerification(f.execution, { unit, planFingerprint: sha(plan), taskPlanVerify: verify.parsePlanVerify(plan), commandTimeoutMs: 60000 }));
   assert.equal(gate.passed, true, JSON.stringify(gate.roots.map(r => r.result.checks.map(c => [c.command, c.exitCode, c.stderr]))));
   write(f.owner, prefix + '-VERIFY-ENVELOPE.json', gate.roots[0]);
   const input = { schema_version: 2, execution_contract: f.execution, unit, plan: prefix + '-PLAN.md', plan_fingerprint: sha(plan),
@@ -573,7 +573,7 @@ async function hostChain(host) {
     assert.ok(f.clock() - startedAt < taskCeiling / 2, 'preparation happens below the task cap');
     const now = () => f.clock();
     preparationPrefs(f, sidecarModel(f));
-    const sidecarRequest = prepRequest(f, T, 'research', host + '-sidecar');
+    const sidecarRequest = prepRequest(f, T, 'discuss', host + '-sidecar');
     const count = s.prompts.length;
     const prepared = await prep.prepareStandaloneTask(sidecarRequest, { now });
     assert.equal(prepared.ok, true, JSON.stringify(prepared).slice(0, 400));
@@ -588,7 +588,7 @@ async function hostChain(host) {
     assert.equal(JSON.stringify(nativeSeen[0]).split(JSON.stringify(block).slice(1, -1)).length, 2, 'the native callback received the consumed block exactly once');
     // Late cap: both entries selected below the task cap, the injected clock crosses it before the provider.
     preparationPrefs(f, sidecarModel(f));
-    const selectedSidecar = await prep.startStandaloneTaskPreparation(prepRequest(f, T, 'research', host + '-late-sidecar'), { now });
+    const selectedSidecar = await prep.startStandaloneTaskPreparation(prepRequest(f, T, 'discuss', host + '-late-sidecar'), { now });
     assert.equal(selectedSidecar.action, 'invoke-sidecar', JSON.stringify(selectedSidecar).slice(0, 300));
     const selectedNative = await prep.startStandaloneTaskPreparation(nativeRequest(f, T, host + '-late-native'), { now });
     assert.equal(selectedNative.action, 'invoke-native', JSON.stringify(selectedNative).slice(0, 300));
@@ -646,7 +646,7 @@ async function hostChain(host) {
     } finally { Object.assign(time, originals); }
     preparationPrefs(f, sidecarModel(f));
     const plainCount = s.prompts.length;
-    const plainPrepared = await prep.prepareStandaloneTask(prepRequest(f, plain, 'research', host + '-plain'), { now });
+    const plainPrepared = await prep.prepareStandaloneTask(prepRequest(f, plain, 'discuss', host + '-plain'), { now });
     assert.equal(plainPrepared.ok, true, JSON.stringify(plainPrepared).slice(0, 300));
     assert.equal(s.prompts.length, plainCount + 1);
     assert.ok(!s.prompts[plainCount].includes(lts.HANDOFF_MARKERS.start), 'unlinked preparation carries no handoff block');
@@ -663,7 +663,10 @@ async function hostChain(host) {
 // ---------------------------------------------------------------------------
 // Documentation, distribution qualification and the worker inventory
 // ---------------------------------------------------------------------------
-function read(relative) { return fs.readFileSync(path.join(SOURCE, relative), 'utf8'); }
+// Published changelog assertions retain their exact measured predecessor.
+function read(relative) { return relative === 'CHANGELOG.md'
+  ? require('./fixtures/docs-cleanup/distribution.cjs').issue455View.issues451452View.projectRead(p => fs.readFileSync(path.join(SOURCE, p)))(relative).toString('utf8')
+  : fs.readFileSync(path.join(SOURCE, relative), 'utf8'); }
 function sectionOf(text, heading) {
   const from = text.indexOf('\n' + heading + '\n');
   assert.ok(from >= 0, 'section ' + heading);
@@ -714,6 +717,44 @@ function guideGroup() {
 const PLANNING_PREFIX_SHA = 'c429aae73e3a80cccef63fab2eca388764ee5b1306c1d2fbc1ec5a803a97fbb8';
 const CHANGELOG_PRE_SHA = '1b8a571086f8e8a3770f418f46aeedb22d074c382ccf3495b75a63612029be2c';
 const PANEL_SENTENCE = 'Likewise,\n`docs/forge-communication-panel-distribution.md` remains deferred; this change\nadds no panel installation or release-distribution feature.';
+// Declared #341 delta: the new entry is measured independently; the pre-T07
+// history pin below remains unchanged. Unknown entries/text still fail closed.
+const REVIEW_FIX_341_ENTRY_SHA = '5c6ee47a8ee14b6e4488cf5929851fa347b03641733040a59c1fa4a2c814968b';
+function withoutReviewFix341Entry(changelog) {
+  const entries = changelog.split('\n').filter(line => line.startsWith("- Review-fix com limites executáveis (#341, M-20261106040502-review-fix-limites):"));
+  assert.equal(entries.length, 1, 'one declared review-fix entry');
+  assert.equal(sha(Buffer.from(entries[0] + '\n', 'utf8')), REVIEW_FIX_341_ENTRY_SHA, 'declared review-fix entry matches measured bytes');
+  return changelog.replace(entries[0] + '\n', '');
+}
+// The only additional admitted history delta is the measured #350 release note.
+const READONLY_350_ENTRY_SHA = 'f020516ccf39b0986d43f9ca26a4fc9d861f6c7919176b10d80b1b422ec40f82';
+function withoutReadonly350Entry(changelog) {
+  const entries = changelog.split('\n').filter(line => line.startsWith('- Contexto de artefatos no Codex somente leitura (#350):'));
+  assert.equal(entries.length, 1, 'one declared #350 entry');
+  assert.equal(sha(Buffer.from(entries[0] + '\n', 'utf8')), READONLY_350_ENTRY_SHA, 'declared #350 entry matches measured bytes');
+  return changelog.replace(entries[0] + '\n', '');
+}
+// Admit exactly the independently measured #440 line, preserving all older pins.
+const ISSUE_440_ENTRY_SHA = '59a47ea8059a06a4d8576e0da9f4134dcfbb7bc8a657d606eb99fd652c716666';
+// Admit only the measured S02 line; compose before the unchanged S01 filter.
+function withoutIssue440S03Entry(changelog) {
+  const entries = changelog.split('\n').filter(line => line.startsWith("- E2E Windows host Claude → worker Codex e regressão do host Codex (#440, M-20261119115538-revisar-fluxo-execucao, S03):"));
+  assert.equal(entries.length, 1, 'one declared #440 S03 entry');
+  assert.equal(sha(Buffer.from(entries[0] + '\n', 'utf8')), '4e5e159a44459a4b1cd4b029c78fe8365ebe020a6a06749fcb97a6eed967020d', 'declared #440 S03 entry matches measured bytes');
+  return changelog.replace(entries[0] + '\n', '');
+}
+function withoutIssue440S02Entry(changelog) {
+  const entries = changelog.split('\n').filter(line => line.startsWith('- Recuperação replay-first e abandono seguro (#440, M-20261119115538-revisar-fluxo-execucao, S02):'));
+  assert.equal(entries.length, 1, 'one declared #440 S02 entry');
+  assert.equal(sha(Buffer.from(entries[0] + '\n', 'utf8')), '6cb3a2c48cf129ae8ac5e29fa79bbd514831057f8c29e774798d7a472a055e76', 'declared #440 S02 entry matches measured bytes');
+  return changelog.replace(entries[0] + '\n', '');
+}
+function withoutIssue440Entry(changelog) {
+  const entries = changelog.split('\n').filter(line => line.startsWith('- Superfícies geridas versionadas (#440, M-20261119115538-revisar-fluxo-execucao, S01):'));
+  assert.equal(entries.length, 1, 'one declared #440 entry');
+  assert.equal(sha(Buffer.from(entries[0] + '\n', 'utf8')), ISSUE_440_ENTRY_SHA, 'declared #440 entry matches measured bytes');
+  return changelog.replace(entries[0] + '\n', '');
+}
 function documentationGroup() {
   const planning = read('docs/planning-cost-diagnosis.md');
   const at = planning.indexOf('## Deferred overlap\n');
@@ -721,16 +762,37 @@ function documentationGroup() {
   assert.equal(sha(Buffer.from(planning.slice(0, at), 'utf8')), PLANNING_PREFIX_SHA, 'everything before Deferred overlap is the immutable preimage');
   const overlap = planning.slice(at);
   assert.ok(overlap.includes(PANEL_SENTENCE), 'the panel distribution qualification is preserved verbatim');
-  assert.ok(overlap.includes('`docs/milestone-time-options.md` is no longer deferred'), 'the time feature is no longer called deferred');
-  assert.ok(!/milestone-time-options\.md` remains deferred/.test(overlap));
+  assert.ok(overlap.includes('are implemented in milestone\nM-20261101111759-opcoes-prazo-milestones (S01 to S03)'), 'the time feature is documented as implemented');
+  assert.ok(!overlap.includes('docs/milestone-time-options.md'), 'the retired proposal is not an active documentation reference');
   for (const reference of ['`docs/milestone-time-guide.md`', '`shared/forge-milestone-time.md`', '`CHANGELOG.md`']) assert.ok(overlap.includes(reference), reference);
   assert.ok(overlap.includes('Human UAT and actual\nfuture latency improvements require their own evidence.'));
   const changelog = read('CHANGELOG.md');
-  assert.ok(changelog.startsWith('## Não lançado\n\n- Prazos de milestone (M-20261101111759-opcoes-prazo-milestones):'), 'feature entry first under Não lançado');
-  const entry = changelog.split('\n')[2];
+  const priorFeatureScope = withoutReadonly350Entry(withoutIssue440Entry(withoutIssue440S02Entry(withoutIssue440S03Entry(changelog))));
+  assert.ok(priorFeatureScope.startsWith('## Não lançado\n\n- Prazos de milestone (M-20261101111759-opcoes-prazo-milestones):'), 'feature entry first under Não lançado');
+  const entry = priorFeatureScope.split('\n')[2];
   for (const topic of ['opções de prazo', 'governança de tempo', 'endpoint comprovado', 'task ligada', '`docs/milestone-time-guide.md`']) assert.ok(entry.includes(topic), topic);
   assert.ok(entry.includes('release, instalação e execução no cliente instalado não estão demonstradas') && entry.includes('UAT humano foi dispensado, não realizado'));
-  assert.equal(sha(Buffer.from(changelog.replace(entry + '\n', ''), 'utf8')), CHANGELOG_PRE_SHA, 'only the feature entry was added; history unchanged');
+  const assertHistory = text => assert.equal(sha(Buffer.from(withoutReviewFix341Entry(withoutReadonly350Entry(withoutIssue440Entry(withoutIssue440S02Entry(withoutIssue440S03Entry(text))))).replace(entry + '\n', ''), 'utf8')), CHANGELOG_PRE_SHA, 'only the declared feature entries were added; history unchanged');
+  assertHistory(changelog);
+  assert.throws(() => assertHistory(changelog + '\n- Unknown feature entry.\n'), /history unchanged/, 'unknown extra entry is not accepted');
+  assert.throws(() => assertHistory(changelog.replace('orçamento de 50%', 'orçamento de 51%')), /measured bytes/, 'unmeasured review-fix entry is not accepted');
+  assert.throws(() => assertHistory(changelog.replace('- Contexto pessoal:', '- Contexto pessoal adulterado:')), /history unchanged/, 'previous history is still immutable');
+  assert.throws(() => assertHistory(changelog.replace('codex-readonly-context-unsupported', 'codex-readonly-context-tampered')), /measured bytes/, 'unmeasured #350 entry is not accepted');
+  const issue440Entry = changelog.split('\n').find(line => line.startsWith('- Superfícies geridas versionadas (#440,'));
+  assert.throws(() => assertHistory(changelog.replace('testadas offline em owners temporários.', 'testadas online em owners temporários.')), /measured bytes/, 'unmeasured #440 entry is not accepted');
+  assert.throws(() => assertHistory(changelog.replace(issue440Entry + '\n', '')), /one declared #440 entry/, 'missing #440 entry is not accepted');
+  assert.throws(() => assertHistory(changelog + issue440Entry + '\n'), /one declared #440 entry/, 'duplicate #440 entry is not accepted');
+  const s02Entry = withoutIssue440S03Entry(changelog).split('\n')[2];
+  assert.throws(() => assertHistory(changelog.replace(s02Entry, s02Entry + ' altered')), /measured bytes/);
+  assert.throws(() => assertHistory(changelog.replace(s02Entry + '\n', '')), /one declared #440 S02 entry/);
+  assert.throws(() => assertHistory(changelog + s02Entry + '\n'), /one declared #440 S02 entry/);
+  const s03Entry = changelog.split('\n')[2];
+  assert.throws(() => assertHistory(changelog.replace(s03Entry, s03Entry + ' altered')), /measured bytes/);
+  assert.throws(() => assertHistory(changelog.replace(s03Entry + '\n', '')), /one declared #440 S03 entry/);
+  assert.throws(() => assertHistory(changelog + s03Entry + '\n'), /one declared #440 S03 entry/);
+  ok('chain-changelog-440-s03-measured-entry-rejects-altered-missing-and-duplicate-lines');
+  ok('chain-changelog-440-s02-measured-entry-rejects-altered-missing-and-duplicate-lines');
+  ok('chain-changelog-440-measured-entry-rejects-altered-missing-and-duplicate-lines');
   ok('chain-documentation-update-preserves-panel-qualification-and-unreleased-feature-scope');
 }
 // T07 worker inventory: the fourteen local verification commands, and the owner operations

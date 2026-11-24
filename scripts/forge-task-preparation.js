@@ -244,10 +244,15 @@ function validatePhaseContent(phase, taskId, content) {
   return inspectPhaseContent(phase, taskId, content).ok;
 }
 
-function preparationRequestFingerprint(request) {
+// Exact preimage of the historical preparation hash; retained privately (#382)
+// so a later inspector never has to re-infer the caller's original input.
+function preparationRequestPreimage(request) {
   const copy = { ...request };
   for (const key of ['contract', 'route', 'readback', 'ownerBroker', 'pending_questions']) delete copy[key];
-  return crypto.createHash('sha256').update(JSON.stringify(copy)).digest('hex');
+  return JSON.stringify(copy);
+}
+function preparationRequestFingerprint(request) {
+  return crypto.createHash('sha256').update(preparationRequestPreimage(request)).digest('hex');
 }
 
 // The consumed handoff block of a started linked task enters each of the four phase prompts exactly
@@ -500,6 +505,7 @@ async function startStandaloneTaskPreparationCore(rawRequest, deps = {}) {
   try {
     route = resolveDispatch(resolverOptions(request, request.contract));
     route = validateRoute(route, request.contract, request);
+    transportApi.assertReadOnlyArtifactContext({ engine: route.resolved_worker_engine, workerMode: route.worker_mode, mode: 'artifacts', scope: request.scope, phase: request.phase, unitType: request.contract.unitType });
   } catch (error) {
     return refused(error.stage || 'resolution', error.code || 'preparation-resolution-failed', route);
   }
@@ -507,14 +513,26 @@ async function startStandaloneTaskPreparationCore(rawRequest, deps = {}) {
   try { prompt = buildPreparationPrompt(request); }
   catch (error) { return refused('procedure', error.code || 'procedure-context-invalid', route, false); }
   const delivery = deliveryRequest(request, route, prompt);
+  // #382: both exact inputs (delivery preimage and caller preparation preimage)
+  // become durable before either transport creates started. An existing receipt
+  // keeps its original replay/interrupted policy; nothing is backfilled.
+  const retainExactInputs = () => {
+    if (fs.existsSync(unit.artifactAttemptFiles(delivery).receiptFile)) return null;
+    try { require('./forge-request-retention').retain(delivery, { preparationPreimage: preparationRequestPreimage(request) }); return null; }
+    catch (error) { return refused('publication', error.code || 'request-retention-failed', route, false); }
+  };
   const authorizationReference = require('./forge-attempt-recovery').bindRecoveryAuthorization(deps.recoveryAuthorization);
   if (route.worker_mode === 'sidecar') {
+    const captureRefusal = retainExactInputs();
+    if (captureRefusal) return captureRefusal;
     return { ok: true, action: 'invoke-sidecar', transport: 'sidecar', status: 'ready',
       reason_code: 'sidecar-invocation-ready', provider_called: false, route, delivery_request: delivery };
   }
   const options = nativeOptions(request, route, prompt);
   const invocation = nativeApi.buildNativeInvocation(options);
   if (!invocation.ok) return refused('native', invocation.reason_code, route, false);
+  const captureRefusal = retainExactInputs();
+  if (captureRefusal) return captureRefusal;
   try {
     const replay = await unit.replayArtifactAttempt(delivery);
     if (replay.replayed) return completed('native', route, replay);
@@ -557,6 +575,23 @@ function preparationIdentity(request, route = {}) {
 }
 
 async function startStandaloneTaskPreparation(rawRequest, deps = {}) {
+  const windows = require('./forge-owner-transport-window');
+  // Legacy --start/--accept remains strict and byte-compatible in its receipts.
+  // A live host opts into the retained protected-window capability, never JSON.
+  let request;
+  try { request = validateRequest(rawRequest); }
+  catch (error) { return refused(error.stage || 'input', error.code || 'invalid-preparation-request'); }
+  if (deps.ownerTransportAdapter) return windows.protectPreparation(request, deps.ownerTransportAdapter, () => startStandaloneTaskPreparationInsideOwnerWindow(rawRequest, deps));
+  try {
+    const cap = windows.coordinatePreparation(request, preparationRequestFingerprint(request),
+      { create: !fs.existsSync(unit.artifactAttemptFiles(request).receiptFile), operation: 'start' });
+    if (!cap) return startStandaloneTaskPreparationInsideOwnerWindow(rawRequest, deps);
+    const result = await windows.withWindow(cap, () => startStandaloneTaskPreparationInsideOwnerWindow(rawRequest, deps));
+    return windows.coordinationResult(cap, typeof result.invoke === 'function'
+      ? { ...result, invoke: callback => windows.withWindow(cap, () => result.invoke(callback)) } : result);
+  } catch (error) { return refused('coordination', error.code || 'owner-window-unmeasured'); }
+}
+async function startStandaloneTaskPreparationInsideOwnerWindow(rawRequest, deps = {}) {
   const result = await startStandaloneTaskPreparationCore(rawRequest, deps);
   if (typeof deps.announce === 'function') {
     const route = result.route || {};
@@ -589,7 +624,14 @@ function validateNativeTelemetry(actual, expected) {
   }
   for (const key of expectedKeys) {
     if (['model_observed', 'model_observed_source', 'effort_applied', 'effort_applied_source'].includes(key)) continue;
-    if (actual[key] !== expected[key]) throw preparationError('native-preparation-telemetry-mismatch', 'native');
+    // Non-primitive fields (e.g. policy_diagnostics) cross JSON, so compare by
+    // content with sorted keys: a reference check can never match a recomputed array.
+    const a = actual[key], e = expected[key];
+    const canonical = value => JSON.stringify(value, (_, v) => (v && typeof v === 'object' && !Array.isArray(v)
+      ? Object.fromEntries(Object.keys(v).sort().map(k => [k, v[k]])) : v));
+    const same = a === e || (a !== null && e !== null && typeof a === 'object' && typeof e === 'object'
+      && canonical(a) === canonical(e));
+    if (!same) throw preparationError('native-preparation-telemetry-mismatch', 'native');
   }
   for (const [valueKey, sourceKey] of [['model_observed', 'model_observed_source'],
     ['effort_applied', 'effort_applied_source']]) {
@@ -642,6 +684,14 @@ function candidateFromPreparationResult(raw, delivery) {
 }
 
 async function acceptStandaloneTaskPreparation(rawRequest, acceptance) {
+  const windows = require('./forge-owner-transport-window');
+  let request, cap;
+  try { request = validateRequest(rawRequest); cap = windows.coordinatePreparation(request, preparationRequestFingerprint(request), { create: false }); }
+  catch (error) { return refused('coordination', error.code || 'owner-window-unmeasured', undefined, 'unknown'); }
+  return cap ? windows.withWindow(cap, async () => windows.coordinationResult(cap, await acceptStandaloneTaskPreparationInsideOwnerWindow(rawRequest, acceptance)))
+    : acceptStandaloneTaskPreparationInsideOwnerWindow(rawRequest, acceptance);
+}
+async function acceptStandaloneTaskPreparationInsideOwnerWindow(rawRequest, acceptance) {
   let request;
   try { request = validateRequest(rawRequest); }
   catch (error) { return refused(error.stage || 'input', error.code || 'invalid-preparation-request'); }
@@ -699,6 +749,23 @@ async function acceptStandaloneTaskPreparation(rawRequest, acceptance) {
 }
 
 async function prepareStandaloneTask(rawRequest, deps = {}) {
+  const windows = require('./forge-owner-transport-window');
+  // Legacy --start/--accept remains strict and byte-compatible in its receipts.
+  // A live host opts into the retained protected-window capability, never JSON.
+  let request;
+  try { request = validateRequest(rawRequest); }
+  catch (error) { return refused(error.stage || 'input', error.code || 'invalid-preparation-request'); }
+  if (deps.ownerTransportAdapter) return windows.protectPreparation(request, deps.ownerTransportAdapter, () => prepareStandaloneTaskInsideOwnerWindow(rawRequest, deps));
+  try {
+    const cap = windows.coordinatePreparation(request, preparationRequestFingerprint(request),
+      { create: !fs.existsSync(unit.artifactAttemptFiles(request).receiptFile), operation: 'start' });
+    if (!cap) return prepareStandaloneTaskInsideOwnerWindow(rawRequest, deps);
+    const result = await windows.withWindow(cap, () => prepareStandaloneTaskInsideOwnerWindow(rawRequest, deps));
+    return windows.coordinationResult(cap, typeof result.invoke === 'function'
+      ? { ...result, invoke: callback => windows.withWindow(cap, () => result.invoke(callback)) } : result);
+  } catch (error) { return refused('coordination', error.code || 'owner-window-unmeasured'); }
+}
+async function prepareStandaloneTaskInsideOwnerWindow(rawRequest, deps = {}) {
   const started = await startStandaloneTaskPreparation(rawRequest, deps);
   if (!started.ok || started.action === 'complete' || started.action === 'invoke-native' && !deps.invokeNative) return started;
   const request = validateRequest(rawRequest);
@@ -872,7 +939,7 @@ async function cli(argv, deps = {}) {
 
 module.exports = {
   REQUEST_SCHEMA_VERSION, PHASE_CONTRACTS, phaseContract, validateRequest,
-  requiredArtifact, validatePhaseContent, inspectPhaseContent, preparationRequestFingerprint,
+  requiredArtifact, validatePhaseContent, inspectPhaseContent, preparationRequestFingerprint, preparationRequestPreimage,
   buildPreparationPrompt, deliveryRequest, nativeOptions, preflightPlan,
   candidateFromPreparationResult, startStandaloneTaskPreparation,
   acceptStandaloneTaskPreparation, prepareStandaloneTask, recoverStandaloneTask,

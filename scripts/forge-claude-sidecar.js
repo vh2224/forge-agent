@@ -609,6 +609,16 @@ function verifyModelIdentity(modelUsage, requested) {
 }
 
 function mapSpawnError(error) {
+  // Only the process-tree module's branded, authenticated custody failure (no root
+  // or provider ever started) is named; a bare exit number or error code is not.
+  let custody = false;
+  try { custody = require('./forge-process-tree').isCustodyFailure(error); } catch { custody = false; }
+  if (custody) {
+    const refused = sidecarError(CLAUDE_SIDECAR_REASON_CODES.SPAWN_FAILED);
+    refused.provider_called = false;
+    refused.custody_reason = 'process-tree-custody-failed';
+    return refused;
+  }
   return error && error.code === 'ENOENT'
     ? sidecarError(CLAUDE_SIDECAR_REASON_CODES.COMMAND_NOT_FOUND)
     : sidecarError(CLAUDE_SIDECAR_REASON_CODES.SPAWN_FAILED);
@@ -640,13 +650,25 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
   onLiveness, livenessIntervalMs = DEFAULT_LIVENESS_INTERVAL_MS, livenessPolicy,
   proofRoots = [], localProofIgnore = [], localProofFactory = null,
   localProofIntervalMs = DEFAULT_LOCAL_PROOF_INTERVAL_MS, progressIntervalMs = DEFAULT_PROGRESS_INTERVAL_MS,
-  provisionalControl = null }) {
+  provisionalControl = null, onBeforeSpawn }) {
   if (signal?.aborted) return Promise.reject(sidecarError(CLAUDE_SIDECAR_REASON_CODES.CANCELLED));
+  // All packaging/provisional/calibration work is complete at this boundary.
+  // The trusted owner hook is synchronous; a refusal cannot launch a child.
+  try {
+    const admitted = onBeforeSpawn?.();
+    if (admitted && typeof admitted.then === 'function') {
+      Promise.resolve(admitted).catch(() => {});
+      return Promise.reject(preSpawnRefusal(CLAUDE_SIDECAR_REASON_CODES.PROMPT_IO));
+    }
+  } catch (error) { return Promise.reject(error); }
   let child;
   try {
-    child = spawn(cmd, args, { cwd, shell: false, env, stdio: ['ignore', 'pipe', 'pipe'],
+    const memberScope = require('./forge-execution-batch').currentMemberProcessScope();
+    const ownerScope = require('./forge-protected-owner-activity').currentScope();
+    const spawnProvider = memberScope ? memberScope.spawn : ownerScope ? ownerScope.spawn : spawn;
+    child = spawnProvider(cmd, args, { cwd, shell: false, env, stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true, detached: process.platform !== 'win32' });
-  } catch (error) { return Promise.reject(mapSpawnError(error)); }
+  } catch (error) { return Promise.reject(String(error.code || '').startsWith('batch-') ? error : mapSpawnError(error)); }
   try { provisionalControl?.start(child); } catch { provisionalControl = null; }
 
   return new Promise((resolve, reject) => {
@@ -790,7 +812,15 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
         : reason === 'authentication-failed' ? CLAUDE_SIDECAR_REASON_CODES.AUTH_FAILED
         : reason === 'output-empty' ? CLAUDE_SIDECAR_REASON_CODES.EMPTY_OUTPUT
         : CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT;
-      terminate(sidecarError(code, reason));
+      const failure = sidecarError(code, reason);
+      if (code === CLAUDE_SIDECAR_REASON_CODES.OUTPUT_LIMIT && !closed) {
+        // Use the same current proof/progress derivation as an active ceiling.
+        // The original output-limit code and every output bound stay unchanged.
+        const { state, reason: currentReason } = tracker.assess(reducer.snapshot(), livenessInputs());
+        failure.liveness = { version: 1, state, reason: currentReason };
+        livenessView = { version: 1, state, since_ms: livenessView.since_ms, reason: currentReason ?? null };
+      }
+      terminate(failure);
     }
     const cancel = () => terminate(sidecarError(CLAUDE_SIDECAR_REASON_CODES.CANCELLED));
     signal?.addEventListener('abort', cancel, { once: true });
@@ -1111,10 +1141,10 @@ async function invokeClaudeSidecar(opts) {
   // argv, environment, or a fallback branch.
   let account;
   try { account = resolveLaunch(null); }
-  catch { throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.ACCOUNT_UNAVAILABLE); }
+  catch { throw preSpawnRefusal(CLAUDE_SIDECAR_REASON_CODES.ACCOUNT_UNAVAILABLE); }
   if (!account || typeof account.name !== 'string' || !account.name.trim()
     || typeof account.token !== 'string' || !account.token) {
-    throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.ACCOUNT_UNAVAILABLE);
+    throw preSpawnRefusal(CLAUDE_SIDECAR_REASON_CODES.ACCOUNT_UNAVAILABLE);
   }
 
   const cwd = path.resolve(typeof options.cwd === 'string' && options.cwd ? options.cwd : process.cwd());
@@ -1288,7 +1318,20 @@ async function invokeClaudeSidecar(opts) {
     // Observe the actual CLI packaging, after instruction/argv construction.
     // Account credentials exist only in env and never enter this measurement.
     // A resume has no prompt file: its packaged context is the fixed instruction.
-    const finalEvidence = require('./forge-attempt-telemetry').observeFinal(options, { cmd, args },
+    const observedOptions = typeof options.onPackagedContext !== 'function' ? options : { ...options, onPackagedContext: evidence => {
+      try { return options.onPackagedContext(evidence); }
+      catch (cause) {
+        // This callback ran before runOwnedChild: no provider was launched.
+        // Retain the actual cause for private API callers, never raw text in
+        // the closed diagnostic/receipt/CLI projection. No retry is authorized.
+        const refused = preSpawnRefusal(CLAUDE_SIDECAR_REASON_CODES.PROMPT_IO);
+        Object.defineProperty(refused, 'cause', { value: cause, writable: true, configurable: true });
+        refused.diagnostic = diagnostic('host-observation-failed', { observer_stage: 'packaged-context',
+          observer_error_sha256: require('crypto').createHash('sha256').update(String(cause?.name || '') + '\0' + String(cause?.message || '')).digest('hex') });
+        throw refused;
+      }
+    } };
+    const finalEvidence = require('./forge-attempt-telemetry').observeFinal(observedOptions, { cmd, args },
       resumeRef ? instruction : fs.readFileSync(promptFile, 'utf8'), 'claude-cli');
     try {
       provisionalControl = provisional.prepare({
@@ -1315,7 +1358,7 @@ async function invokeClaudeSidecar(opts) {
       calibration: readCalibration({ model, effort: effort || 'medium', phase }, options.calibrationOptions),
       onLiveness, livenessIntervalMs, livenessPolicy: options.livenessPolicy,
       proofRoots, localProofIgnore, localProofFactory, localProofIntervalMs, progressIntervalMs,
-      provisionalControl,
+      provisionalControl, onBeforeSpawn: options.onBeforeSpawn,
     });
     // The stream only confirms the Forge-generated id; it never replaces it.
     return finalizeOutput(output);
@@ -1335,10 +1378,13 @@ async function invokeClaudeSidecar(opts) {
     provisional.transferFailure(error, primaryError);
     if (provisional.describe(primaryError)?.private_ref) provisional.addFinalizer(primaryError, value => finalizeOutput(value, true), { cache: true });
     if (sessionRef) {
-      // Only an active stream that hit the safety ceiling under the confirmed
-      // id keeps its session, for the single same-session resume (S05). A
-      // resume never keeps it: at most one resume per unit.
-      if (!resumeRef && primaryError.code === CLAUDE_SIDECAR_REASON_CODES.BUDGET_EXCEEDED
+      // Only confirmed active cuts retain the first session. Output exhaustion
+      // uses the existing active-ceiling predicate without relabelling its cause.
+      // A resume never retains it again: at most one resume per unit.
+      const activeOutput = primaryError.code === CLAUDE_SIDECAR_REASON_CODES.OUTPUT_LIMIT
+        && liveness.classifyTermination({ cause: 'ceiling', state: primaryError.liveness?.state })
+          === CLAUDE_SIDECAR_REASON_CODES.BUDGET_EXCEEDED;
+      if (!resumeRef && (primaryError.code === CLAUDE_SIDECAR_REASON_CODES.BUDGET_EXCEEDED || activeOutput)
         && observedSessionId === sessionId) {
         primaryError.session = sessionRef;
       } else if (typeof awaitExit === 'function'

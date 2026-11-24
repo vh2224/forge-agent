@@ -979,4 +979,46 @@ test('bounded SVN refuses unavailable coverage, malformed XML and linked source 
   fs.unlinkSync(path.join(lab.wc, 'linked'));
 }));
 
+test('workingStatus supports real intent-to-add without broadening unknown statuses', () => {
+  const cwd = fixture();
+  try {
+    fs.writeFileSync(path.join(cwd, 'rename-before.txt'), 'rename\n');
+    run(cwd, ['add', 'rename-before.txt']);
+    run(cwd, ['-c', 'user.name=Forge Test', '-c', 'user.email=forge@example.invalid', 'commit', '-qm', 'rename base']);
+    fs.writeFileSync(path.join(cwd, 'intent empty.txt'), '');
+    fs.writeFileSync(path.join(cwd, 'intent data.txt'), 'new\n');
+    run(cwd, ['add', '-N', '--', 'intent empty.txt', 'intent data.txt']);
+    fs.writeFileSync(path.join(cwd, 'staged.txt'), 'staged\n');
+    fs.writeFileSync(path.join(cwd, 'staged-modified.txt'), 'staged\n');
+    run(cwd, ['add', 'staged.txt', 'staged-modified.txt']);
+    fs.appendFileSync(path.join(cwd, 'staged-modified.txt'), 'modified\n');
+    fs.appendFileSync(path.join(cwd, 'modified.txt'), 'modified\n');
+    run(cwd, ['rm', 'deleted.txt']);
+    run(cwd, ['mv', 'rename-before.txt', 'rename-after.txt']);
+    const status = vcs.workingStatus(cwd, { vcs: 'git' });
+    assert.strictEqual(status.ok, true, JSON.stringify(status));
+    const rows = new Map(status.entries.map(row => [row.path, row]));
+    for (const file of ['intent empty.txt', 'intent data.txt']) {
+      assert.strictEqual(rows.get(file).code, ' A');
+      assert.strictEqual(rows.get(file).kind, 'added');
+    }
+    for (const file of ['staged.txt', 'staged-modified.txt']) assert.strictEqual(rows.get(file).kind, 'added');
+    assert.strictEqual(rows.get('staged-modified.txt').code, 'AM');
+    assert.strictEqual(rows.get('modified.txt').kind, 'modified');
+    assert.strictEqual(rows.get('deleted.txt').kind, 'deleted');
+    for (const file of ['rename-before.txt', 'rename-after.txt']) assert.strictEqual(rows.get(file).kind, 'modified');
+    // Real index symlink versus ordinary worktree file: no OS symlink privilege
+    // is needed, and an unsupported T category must still fail closed.
+    run(cwd, ['config', 'core.symlinks', 'true']);
+    const blob = spawnSync('git', ['-C', cwd, 'hash-object', '-w', '--stdin'], { input: 'target\n', encoding: 'utf8' });
+    assert.strictEqual(blob.status, 0, blob.stderr);
+    run(cwd, ['update-index', '--add', '--cacheinfo', '120000', blob.stdout.trim(), 'type.txt']);
+    run(cwd, ['-c', 'user.name=Forge Test', '-c', 'user.email=forge@example.invalid', 'commit', '-qm', 'type base']);
+    fs.writeFileSync(path.join(cwd, 'type.txt'), 'ordinary\n');
+    const unknown = vcs.workingStatus(cwd, { vcs: 'git' });
+    assert.strictEqual(unknown.ok, false);
+    assert.match(unknown.error, /^git-status-unhandled:.*T/);
+  } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+});
+
 process.stdout.write(`\n${passed} passed, 0 failed, ${skipped} skipped\n`);

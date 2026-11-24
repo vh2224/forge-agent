@@ -240,9 +240,131 @@ function normalizeReleased(input) {
 
 /** Derive AND persist — the ONLY function in this module that writes. */
 function recordClaim(cwd, runId, input) {
-  const write_claim = normalizeClaim(input);
-  runs.update(cwd, runId, { write_claim });
+  let write_claim = normalizeClaim(input);
+  runs.updateWith(cwd, runId, current => {
+    if (current.batch_locator) throw new Error('batch-claim-owner-operation-required');
+    if (current.batch_retirements?.length) write_claim = retainBatchCustody(current, write_claim);
+    return { write_claim };
+  });
   return write_claim;
+}
+
+// A new unit may add protection but cannot erase the retained physical roots
+// or their original baselines when the active cohort locator is retired.
+function retainBatchCustody(run, incoming) {
+  runs.validateBatchRetirements(run.batch_retirements, run.id);
+  const roots = require('./forge-code-roots'), held = run.write_claim;
+  validateHeldClaim(held); validateHeldClaim(incoming);
+  if (held.schema_version !== 2 || incoming.schema_version !== 2 || held.released || incoming.released
+      || roots.key(held.execution_contract.owner) !== roots.key(incoming.execution_contract.owner)) throw new Error('batch-custody-claim-required');
+  const previous = roots.claimGroups(held), additions = roots.claimGroups(incoming);
+  const union = held.execution_contract.code_roots.map(root => ({ ...root })), mapping = new Map();
+  for (const root of incoming.execution_contract.code_roots) {
+    const existing = union.find(row => row.identity_sha256 === root.identity_sha256);
+    if (existing) mapping.set(root.id, existing.id);
+    else {
+      if (union.some(row => row.id === root.id)) throw new Error('batch-custody-root-id-conflict');
+      union.push(root); mapping.set(root.id, root.id);
+    }
+  }
+  const contract = roots.validateContract({ ...held.execution_contract, code_roots: union }, { revalidate: true });
+  const paths = held.paths.map(row => ({ ...row }));
+  for (const row of incoming.paths) {
+    const mapped = { root_id: mapping.get(row.root_id), path: row.path };
+    if (!paths.some(existing => roots.covers(existing, mapped))) paths.push(mapped);
+  }
+  const baselines = { ...held.root_baselines };
+  for (const group of additions) {
+    const id = mapping.get(group.id);
+    if (!previous.some(row => row.identity_sha256 === group.identity_sha256)) baselines[id] = incoming.root_baselines[group.id];
+  }
+  const next = { ...incoming, execution_contract: contract, code_dir: contract.code_roots.find(row => row.id === contract.primary_root_id).path,
+    paths, root_baselines: baselines, vcs_baseline: baselines[contract.primary_root_id] };
+  validateHeldClaim(next);
+  return next;
+}
+
+// A retained union is reservation, not permission to write all its roots. The
+// current unit keeps its own declared contract/capability and a physical subset.
+function coversRetainedExecution(run, contract, paths) {
+  if (!run?.batch_retirements?.length || run.batch_locator || !isHeld(run.write_claim)) return false;
+  try {
+    runs.validateBatchRetirements(run.batch_retirements, run.id);
+    const roots = require('./forge-code-roots'), claim = run.write_claim;
+    const checked = roots.validateContract(contract, { revalidate: true, owner: claim.execution_contract.owner });
+    if (!ordinaryRetainedProjection(run, checked)) return false;
+    const groups = roots.claimGroups(claim), mapping = new Map();
+    for (const root of checked.code_roots) {
+      const group = groups.find(row => row.identity_sha256 === root.identity_sha256);
+      if (!group) return false;
+      mapping.set(root.id, group);
+    }
+    return paths.every(row => {
+      const group = mapping.get(row.root_id);
+      return group && group.paths.some(path => roots.covers({ root_id: group.id, path }, { root_id: group.id, path: row.path }));
+    });
+  } catch { return false; }
+}
+
+// Historical member custody never becomes an ordinary writable root, even if
+// the caller submits the complete retained union as its execution contract.
+// A resumed member needs the separate controller-bound member continuation.
+function ordinaryRetainedProjection(run, contract) {
+  if (!run?.batch_retirements?.length) return true;
+  try {
+    runs.validateBatchRetirements(run.batch_retirements, run.id);
+    const roots=require('./forge-code-roots'),checked=roots.validateContract(contract,{revalidate:true,owner:run.write_claim.execution_contract.owner});
+    const retained=new Set(run.batch_retirements.flatMap(row=>row.retained_roots.map(root=>root.identity_sha256)));
+    return checked.code_roots.every(root=>!retained.has(root.identity_sha256));
+  } catch { return false; }
+}
+
+// Replace the ONE parent reservation, not a slot per child. The expected digest
+// includes paths and release state, not only generation. Normalize the union
+// before this call; a replay must not manufacture another generation/baseline.
+function replaceBatchClaim(cwd, runId, { expected, union, batchLocator }, guard) {
+  const roots = require('./forge-code-roots');
+  const invalid = code => { throw Object.assign(new Error(code), { code }); };
+  validateHeldClaim(union);
+  if (union.schema_version !== 2 || !expected || typeof expected.generation !== 'string'
+      || !/^[a-f0-9]{64}$/.test(expected.sha256 || '')) invalid('batch-claim-cas-invalid');
+  const locator = runs.validateBatchLocator(batchLocator, runId);
+  if (locator.phase !== 'prepared' || locator.claim_generation !== union.generation || locator.claim_sha256 !== roots.digest(union)) invalid('batch-claim-locator-mismatch');
+  let outcome;
+  runs.updateWith(cwd, runId, current => {
+    const held = current.write_claim;
+    if (current.active !== true || !isHeld(held) || held?.generation !== expected.generation || roots.digest(held) !== expected.sha256) {
+      outcome = { ok: false, reason: 'stale-claim' }; return null;
+    }
+    validateHeldClaim(held);
+    if (current.batch_locator) {
+      if (roots.digest(current.batch_locator) === roots.digest(locator) && roots.digest(held) === roots.digest(union)) {
+        outcome = { ok: true, replay: true, claim: held, batch_locator: current.batch_locator }; return null;
+      }
+      if (current.batch_locator.phase !== 'preparing' || current.batch_locator.batch_id !== locator.batch_id
+          || current.batch_locator.manifest_sha256 !== locator.manifest_sha256
+          || current.batch_locator.claim_generation !== held.generation || current.batch_locator.claim_sha256 !== roots.digest(held)) {
+        invalid('batch-claim-owner-operation-required');
+      }
+    }
+    // Match by physical identity, not by logical root IDs of different namespaces.
+    const groups = roots.claimGroups(union);
+    for (const prior of roots.claimGroups(held)) {
+      const next = groups.find(row => row.identity_sha256 === prior.identity_sha256);
+      if (!next || prior.paths.some(p => !next.paths.some(c => roots.covers({ root_id: next.id, path: c }, { root_id: next.id, path: p })))) {
+        invalid('batch-claim-protection-lost');
+      }
+      const priorBaseline = held.root_baselines[prior.id], nextBaseline = union.root_baselines[next.id];
+      if (roots.digest(priorBaseline) !== roots.digest(nextBaseline)) invalid('batch-claim-baseline-changed');
+    }
+    // This is the pure evaluation path: no counterpart release, event or nested
+    // registry write while the controller -> registry -> run fence is held.
+    const gate = require('./forge-claim-gate').previewGate({ cwd, runId, claim: union, enforcement: 'enforcing' });
+    if (gate.decision !== 'proceed') { outcome = { ok: false, reason: 'claim-gate-conflict', gate }; return null; }
+    outcome = { ok: true, replay: false, claim: union, batch_locator: locator };
+    return { write_claim: union, batch_locator: locator };
+  }, guard);
+  return outcome;
 }
 
 /**
@@ -268,7 +390,10 @@ function readClaim(rec) {
  * envelope onto it.
  */
 function clearClaim(cwd, runId) {
-  runs.update(cwd, runId, { write_claim: null });
+  runs.updateWith(cwd, runId, current => {
+    if (current.batch_locator || current.batch_retirements?.some(row => row.retained_roots.length)) throw new Error('batch-claim-owner-operation-required');
+    return { write_claim: null };
+  });
   return null;
 }
 
@@ -343,6 +468,7 @@ function releaseClaim(cwd, runId, release, opts) {
 
   let outcome = null;
   const result = runs.updateWith(cwd, runId, (current) => {
+    if (current.batch_locator || current.batch_retirements?.some(row => row.retained_roots.length)) { outcome = { ok: false, reason: 'batch-claim-owner-operation-required' }; return null; }
     const claim = readClaim(current);
     if (claim === null) { outcome = { ok: false, reason: 'no-claim' }; return null; }
     const found = claimIdentity(claim);
@@ -377,7 +503,7 @@ function recoverClaim(cwd, runId, expectedRecord, release, opts) {
   let result;
   try {
     result = runs.updateWith(cwd, runId, (current) => {
-      if (current.active !== true || JSON.stringify(current) !== expectedRecordJson) return null;
+      if (current.active !== true || current.batch_locator || JSON.stringify(current) !== expectedRecordJson) return null;
       if (!isHeld(current.write_claim)) return null;
       // Executes while the run lock is held, immediately before publication.
       // Recovery uses this for the final dirty-scope measurement.
@@ -432,6 +558,7 @@ function validateHeldClaim(claim) {
     if (!claim.generation) throw new Error('claim-generation-required');
     for (const group of require('./forge-code-roots').claimGroups(claim)) {
       if (!normalizeVcsBaseline(claim.root_baselines?.[group.id])) throw new Error('claim-root-baseline-required');
+      require('./forge-claim-overlap').exclusiveMemberRoot(claim, group.id);
     }
   }
   normalizeVcsBaseline(claim.vcs_baseline);
@@ -568,8 +695,10 @@ if (require.main === module) process.exit(main(process.argv.slice(2)));
 module.exports = {
   normalizeClaim,
   recordClaim,
+  replaceBatchClaim,
   readClaim,
   clearClaim,
+  retainBatchCustody, coversRetainedExecution, ordinaryRetainedProjection,
   releaseClaim,
   recoverClaim,
   isHeld,

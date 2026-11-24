@@ -98,6 +98,7 @@ async function canonicalContinuation() {
         verification: { preferenceCommands: ['node -e "process.exit(0)"'] } });
       const slice = path.join(base, 'slices/S01'); fs.mkdirSync(path.join(slice, 'tasks/T01'), { recursive: true });
       request.planFile = path.join(slice, 'tasks/T01/T01-PLAN.md'); fs.writeFileSync(request.planFile, fixtures.plan(lab.contract).replace('depends: []', 'worker: claude\ndepends: []'));
+      require('./fixtures/issues-434-436/execution-fixtures.cjs').declareBindings(request);
       fs.writeFileSync(path.join(slice, 'S01-PLAN.md'), '# Slice\n- [ ] **T01** — fixture\n');
       request.runId = 'provisional-writing';
       request.claim = { schema_version: 2, generation: require('crypto').randomUUID(), execution_contract: lab.contract,
@@ -184,6 +185,9 @@ async function canonicalContinuation() {
       }
       return originalWrite(file, ...args);
     };
+    const derivedAnchors = () => fs.readdirSync(path.dirname(request.resultFile)).filter(name =>
+      name.startsWith(path.basename(request.resultFile) + '.provisional-') && name.endsWith('.returned.json'));
+    let anchorBeforeRetry = null;
     let resumed;
     try {
       if (['execute-output', 'execute-checkpoint', 'artifact-ready', 'artifact-return', 'artifact-consume', 'plan-anchor-receipt'].includes(mode)) {
@@ -210,6 +214,10 @@ async function canonicalContinuation() {
         try { await assert.rejects(api.resume(failure, live), { code: 'EIO' }); assert(injected, mode + ': intended boundary was reached'); }
         finally { fs.renameSync = realRename; fs.openSync = realOpen; }
         assert.equal(api.describe(failure).state, 'unvalidated', 'failed finalization keeps the original candidate');
+        if (mode === 'execute-checkpoint') {
+          assert.equal(derivedAnchors().length, 1, 'derived anchor precedes the interrupted checkpoint');
+          anchorBeforeRetry = fs.readFileSync(path.join(path.dirname(request.resultFile), derivedAnchors()[0]));
+        }
       }
       resumed = await api.resume(failure, live);
     }
@@ -220,6 +228,17 @@ async function canonicalContinuation() {
       assert.equal(fs.readFileSync(path.join(lab.a, 'same.txt'), 'utf8'), 'retained alpha\n');
       assert.equal(fs.readFileSync(path.join(lab.b, 'same.txt'), 'utf8'), 'retained beta\n');
       assert(fs.readFileSync(path.join(base, 'slices/S01/S01-PLAN.md'), 'utf8').includes('- [x]'));
+      // Issue 337: the derived channel anchors the returned object; the failed parent stays anchor-free.
+      const anchors = derivedAnchors();
+      assert.equal(anchors.length, 1, mode + ': exactly one derived anchor');
+      const anchorFile = path.join(path.dirname(request.resultFile), anchors[0]), anchorBytes = fs.readFileSync(anchorFile);
+      const derivedReceipt = JSON.parse(fs.readFileSync(anchorFile.slice(0, -'.returned.json'.length) + '.receipt.json', 'utf8'));
+      assert.equal(derivedReceipt.returned_response.sha256, require('crypto').createHash('sha256').update(anchorBytes).digest('hex'));
+      const anchor = JSON.parse(anchorBytes);
+      assert.equal(anchor.dispatch_id, request.dispatchId); assert.equal(anchor.result.status, 'done');
+      assert.equal(fs.existsSync(request.resultFile + '.returned.json'), false, 'failed parent channel gains no anchor');
+      if (mode === 'execute-checkpoint') assert.deepEqual(anchorBytes, anchorBeforeRetry, 'retry reuses the derived anchor byte for byte');
+      console.log(`PASS issue337 provisional ${mode}: derived resultFile.returned.json is bound to the derived receipt and reused byte-identically; the failed parent channel gains no anchor`);
     } else if (isPlan) assert.equal(fs.readFileSync(path.join(base, 'slices/S01/tasks/T01/T01-PLAN.md'), 'utf8'), candidate.task_plans[0].content);
     else if (isArtifacts) assert.equal(fs.readFileSync(path.join(lab.owner, artifact), 'utf8'), content);
     assert.deepEqual(fs.readFileSync(receiptFile), receiptBefore); assert.deepEqual(fs.readFileSync(request.resultFile), resultBefore);

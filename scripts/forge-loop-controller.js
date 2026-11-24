@@ -7,9 +7,17 @@ const orchestrateDefault = require('./forge-orchestrate.js');
 const runtime = require('./forge-runtime.js');
 
 const PROTOCOL_VERSION = runtime.PROTOCOL_VERSION;
-const MODES = Object.freeze(['auto', 'task']);
-const COMMANDS = Object.freeze(['next', 'pause', 'resume', 'status', 'complete', 'consume-failure', 'reenter', 'resume-budget', 'resume-time-option']);
+// Step keeps the same durable administrative flow; each advance still returns
+// at one dispatch and the host stops after completing that unit. Its cumulative
+// safety budget is not a one-step budget that could hide the next question.
+const MODES = Object.freeze(['auto', 'task', 'step']);
+const COMMANDS = Object.freeze(['next', 'pause', 'resume', 'status', 'complete', 'decompose-pause', 'decompose-continue', 'consume-failure', 'reenter', 'resume-budget', 'resume-time-option',
+  'batch-status', 'batch-ack', 'resume-delivery']);
 const TERMINAL = new Set(['completed', 'blocked', 'failed']);
+// Issue 343 U1: while a dispatched batch is active, every command that acts on one unit is
+// refused by name (no delegation); only next (replay), status and the batch commands run.
+const SINGLE_UNIT_COMMANDS = new Set(['decompose-pause', 'decompose-continue', 'pause', 'resume', 'complete', 'consume-failure', 'reenter', 'resume-budget', 'resume-time-option', 'resume-delivery']);
+const BATCH_ID = /^batch-[a-f0-9]{32}$/;
 // S02 owner blocks that the named resume-time-option command may continue: the
 // pending/invalid selection, roadmap conformance, the scoped task DAG and a review
 // mode incompatible with the active contract. Budget blocks keep their own
@@ -56,6 +64,16 @@ function validateSnapshot(value) {
   if (value.protocol_version !== PROTOCOL_VERSION) throw error('invalid-snapshot', 'protocol_version incompatível');
   mode(value.mode); host(value.host_runtime); cleanText(value.workflow_id, 'workflow_id');
   if (!Number.isInteger(value.step_count) || value.step_count < 0 || !Number.isInteger(value.max_steps) || value.max_steps < 1) throw error('invalid-snapshot', 'contadores inválidos');
+  // Issue 343 U1: an older snapshot has no current_batch. A present one is only a locator of
+  // a published manifest (the owner records decide), kept apart from current_unit.
+  if (own(value, 'current_batch') && value.current_batch !== null) {
+    const batch = value.current_batch;
+    if (!batch || typeof batch !== 'object' || Array.isArray(batch) || !BATCH_ID.test(String(batch.batch_id)) || !HASH.test(String(batch.manifest_sha256))
+        || !Array.isArray(batch.members) || !batch.members.length || batch.members.some(item => typeof item !== 'string' || !item.trim())) {
+      throw error('invalid-snapshot', 'current_batch inválido');
+    }
+    if (value.current_unit) throw error('invalid-snapshot', 'current_batch e current_unit são exclusivos');
+  }
   return JSON.parse(JSON.stringify(value));
 }
 function publicResult(command, state, outcome, reason, action, delegate) {
@@ -70,10 +88,15 @@ function publicResult(command, state, outcome, reason, action, delegate) {
     lifecycle: state.lifecycle,
     action,
     unit: safeUnit(state.current_unit),
+    ...(state.current_batch ? { batch: state.current_batch } : {}),
     boundary: state.boundary || null,
     snapshot: state,
     controller_result: delegate || null,
   };
+}
+// The loop's own budget and mode, passed to orchestrate as a trusted in-process option.
+function workflowOf(state) {
+  return { mode: state.mode, workflow_id: state.workflow_id, remaining_steps: Math.max(0, state.max_steps - state.step_count) };
 }
 function delegateInput(input, state) {
   const payload = { ...(input || {}), host_runtime: state.host_runtime };
@@ -110,6 +133,16 @@ function next(state, input, orchestrate) {
     return { ...state.last_decision, snapshot: state };
   }
   if (state.lifecycle === 'paused') return publicResult('next', state, 'needs_input', 'pause-active', 'pause', null);
+  if (state.lifecycle === 'completed' && orchestrate.validateTerminal) {
+    let checked;
+    try { checked = orchestrate.validateTerminal(delegateInput(input, state)); }
+    catch (cause) { checked = { ok: false, reason: cause.code || 'terminal-validation-failed' }; }
+    if (!checked.ok) {
+      state.lifecycle = 'blocked';
+      if (checked.pending_questions) state.pending_questions = checked.pending_questions;
+      return publicResult('next', state, 'blocked', checked.reason, 'stop', { details: checked });
+    }
+  }
   if (TERMINAL.has(state.lifecycle)) return publicResult('next', state, state.lifecycle, 'workflow-terminal', 'stop', null);
   const refusedNext = taskScopeRefusal(state, input, 'next');
   if (refusedNext) return refusedNext;
@@ -117,7 +150,29 @@ function next(state, input, orchestrate) {
     state.lifecycle = 'blocked';
     return publicResult('next', state, 'blocked', 'step-budget-exhausted', 'stop', null);
   }
-  const delegated = orchestrate.run('next', delegateInput(input, state));
+  const delegated = orchestrate.run('next', delegateInput(input, state), { workflow: workflowOf(state) });
+  // Issue 343 U1: a dispatched batch charges max_steps once per admitted member and is held as
+  // current_batch; current_unit stays empty. Replay returns last_decision above, uncharged.
+  const batch = delegated.outcome === 'completed' && delegated.details && delegated.details.dispatch_batch;
+  if (batch) {
+    const members = Array.isArray(batch.members) ? batch.members : [];
+    const keys = members.map(member => member && member.unit && member.unit.key);
+    if (!members.length || !BATCH_ID.test(String(batch.batch_id)) || !HASH.test(String(batch.manifest_sha256))
+        || keys.some(key => typeof key !== 'string' || !key)) {
+      state.lifecycle = 'failed';
+      return publicResult('next', state, 'failed', 'batch-dispatch-invalid', 'stop', delegated);
+    }
+    if (members.length > state.max_steps - state.step_count) {
+      state.lifecycle = 'blocked';
+      return publicResult('next', state, 'blocked', 'step-budget-exhausted', 'stop', delegated);
+    }
+    state.lifecycle = 'dispatch_required'; state.current_unit = null; state.step_count += members.length;
+    state.current_batch = { batch_id: batch.batch_id, manifest_sha256: batch.manifest_sha256, members: keys };
+    const result = publicResult('next', state, 'dispatch_required', 'batch-ready', 'dispatch-batch', delegated);
+    const { snapshot: _snapshot, ...decision } = result;
+    state.last_decision = decision;
+    result.snapshot = state; return result;
+  }
   if (delegated.outcome === 'completed' && delegated.unit) {
     state.lifecycle = 'dispatch_required'; state.current_unit = safeUnit(delegated.unit); state.step_count += 1;
     const result = publicResult('next', state, 'dispatch_required', 'unit-ready', 'dispatch', delegated);
@@ -134,6 +189,10 @@ function next(state, input, orchestrate) {
     return publicResult('next', state, 'completed', delegated.reason_code || 'no-next-unit', 'stop', delegated);
   }
   state.lifecycle = delegated.outcome === 'failed' ? 'failed' : 'blocked';
+  if (state.lifecycle === 'blocked' && delegated.reason_code === 'execution-delivery-recovery-required') {
+    state.delivery_block = { milestone: delegated.milestone, ...delegated.details.delivery };
+  }
+  if (delegated.details?.pending_questions) state.pending_questions = delegated.details.pending_questions;
   if (['milestone-budget-exhausted', 'milestone-budget-draining'].includes(delegated.reason_code)) {
     const details = delegated.details?.time;
     state.time_block = { milestone: delegated.milestone, contract_version: details?.contract_version,
@@ -154,6 +213,14 @@ function resumeTimeOption(state, input, orchestrate) {
   if (delegated.outcome !== 'completed') return publicResult('resume-time-option', state, 'blocked', delegated.reason_code || 'time-option-resume-invalid', 'stop', delegated);
   state.lifecycle = 'idle'; delete state.time_option_block;
   return next(state, input, orchestrate);
+}
+function resumeDelivery(state, input, orchestrate) {
+  if (state.lifecycle !== 'blocked' || !state.delivery_block) return publicResult('resume-delivery', state, 'blocked', 'delivery-resume-invalid', 'stop', null);
+  if (state.pending_questions?.some(q => q.status !== 'resolved')) return publicResult('resume-delivery', state, 'blocked', 'pending-questions', 'stop', null);
+  const delegated = orchestrate.run('resume-delivery', { ...delegateInput(input, state), delivery_block: state.delivery_block });
+  if (delegated.outcome !== 'completed') return publicResult('resume-delivery', state, 'blocked', delegated.reason_code || 'delivery-recovery-unproven', 'stop', delegated);
+  state.lifecycle = 'idle'; state.current_unit = null; state.last_decision = null; state.boundary = null; delete state.delivery_block;
+  return publicResult('resume-delivery', state, 'resumed', 'delivery-recovery-ready', 'continue', delegated);
 }
 // The same persisted snapshot continues after an extension. A failure consumed
 // by this workflow is not skipped through next: the owner names the required
@@ -178,27 +245,62 @@ function resumeBudget(state, input, orchestrate) {
   state.lifecycle = 'idle'; delete state.time_block;
   return next(state, input, orchestrate);
 }
+function decompose(state, input, orchestrate, command) {
+  const paused = command === 'decompose-continue', decision = state.last_decision?.controller_result;
+  const binding = state.decomposition?.transaction || decision?.details?.transaction, parent = state.decomposition?.unit || state.current_unit;
+  if (state.current_batch || !binding || parent?.type !== 'execute-task' || (!paused && state.lifecycle !== 'dispatch_required')
+      || paused && (!state.decomposition || state.lifecycle !== 'paused')) return publicResult(command, state, 'blocked', 'unit-identity-mismatch', 'stop', null);
+  if ((state.pending_questions || []).some(row => row.status === 'pending')) return publicResult(command, state, 'blocked', 'pending-questions', 'stop', null);
+  const locator = { unit: parent, transaction: binding, ...(state.decomposition?.pause || {}), ...(paused ? { mutation_ref: input.mutation_ref } : {}) };
+  const delegated = orchestrate.run(command, { ...delegateInput(input, state), decomposition: locator },
+    { workflow: { ...workflowOf(state), step_count: state.step_count, max_steps: state.max_steps } });
+  if (!paused) {
+    if (delegated.outcome !== 'needs_input' || !delegated.details?.decomposition_pause) return publicResult(command, state, 'blocked', delegated.reason_code, 'stop', delegated);
+    state.decomposition = { unit: parent, transaction: binding, pause: delegated.details.decomposition_pause };
+    state.lifecycle = 'paused';state.boundary = delegated.boundary;
+    state.pending_questions = require('./forge-interaction').mergePendingQuestions(state.pending_questions || [], delegated.details.pending_questions || []);
+    return publicResult(command, state, 'needs_input', 'needs-input', 'pause', delegated);
+  }
+  if (delegated.outcome !== 'completed' || !delegated.details?.decomposition_entry) return publicResult(command, state, 'blocked', delegated.reason_code, 'stop', delegated);
+  // The first child replaces this cancelled parent's existing one-step
+  // reservation. Further children and the fresh parent verification use next
+  // and charge normally. Canonical pause/entry data bind this substitution.
+  delete state.decomposition;state.current_unit = safeUnit(delegated.unit);state.boundary = null;state.lifecycle = 'dispatch_required';
+  const result = publicResult(command, state, 'dispatch_required', 'unit-ready', 'dispatch', delegated);
+  const { snapshot: ignored, ...cached } = result;state.last_decision = cached;return result;
+}
 function pause(state, input, orchestrate) {
   if (state.lifecycle === 'paused') return publicResult('pause', state, 'needs_input', 'already-paused', 'pause', null);
   if (TERMINAL.has(state.lifecycle)) return publicResult('pause', state, state.lifecycle, 'workflow-terminal', 'stop', null);
   const refusedPause = taskScopeRefusal(state, input, 'pause');
   if (refusedPause) return refusedPause;
-  const delegated = orchestrate.run('next', { ...delegateInput(input, state), needs_input: true });
+  const located = state.lifecycle === 'idle' ? input.pause_current : null;
+  if (located && !['partial', 'blocked'].includes(input.result?.status)) return publicResult('pause', state, 'blocked', 'settled-result-required', 'stop', null);
+  const current = state.lifecycle === 'dispatch_required' ? state.last_decision?.controller_result?.details?.transaction : located?.transaction;
+  if (state.lifecycle === 'dispatch_required' && !current) return publicResult('pause', state, 'blocked', 'unit-identity-mismatch', 'stop', null);
+  const delegated = orchestrate.run('next', { ...delegateInput(input, state), ...(current
+    ? { pause_current: { unit: state.current_unit || located.unit, transaction: current } }
+    : { needs_input: true }) });
   if (delegated.outcome !== 'needs_input' || !delegated.boundary) {
-    state.lifecycle = delegated.outcome === 'failed' ? 'failed' : 'blocked';
-    return publicResult('pause', state, state.lifecycle, delegated.reason_code || 'pause-refused', 'stop', delegated);
+    return publicResult('pause', state, delegated.outcome === 'failed' ? 'failed' : 'blocked', delegated.reason_code || 'pause-refused', 'stop', delegated);
   }
   state.lifecycle = 'paused'; state.current_unit = safeUnit(delegated.unit); state.boundary = delegated.boundary;
+  state.pending_questions = delegated.details?.pending_questions || [];
   return publicResult('pause', state, 'needs_input', delegated.reason_code || 'needs-input', 'pause', delegated);
 }
 function resume(state, input, orchestrate) {
   if (state.lifecycle !== 'paused' || !state.boundary) return publicResult('resume', state, 'blocked', 'boundary-missing', 'stop', null);
-  if (!own(input, 'response')) return publicResult('resume', state, 'blocked', 'response-required', 'pause', null);
+  if (!own(input, 'response') && input.resume_intent === undefined) return publicResult('resume', state, 'blocked', ['execute-task', 'complete-slice'].includes(state.current_unit?.type) ? 'execution-resume-intent-required' : 'response-required', 'pause', null);
   const targetHost = host(input.host_runtime || input.hostRuntime || state.host_runtime);
-  const delegated = orchestrate.run('next', { ...delegateInput(input, { ...state, host_runtime: targetHost }), boundary: state.boundary, response: input.response });
+  const delegated = orchestrate.run('next', { ...delegateInput(input, { ...state, host_runtime: targetHost }), boundary: state.boundary, ...(own(input, 'response') ? { response: input.response } : {}) });
   if (delegated.outcome !== 'completed') {
-    state.lifecycle = delegated.outcome === 'failed' ? 'failed' : 'blocked';
-    return publicResult('resume', state, state.lifecycle, delegated.reason_code || 'resume-refused', 'stop', delegated);
+    return publicResult('resume', state, delegated.outcome === 'failed' ? 'failed' : 'blocked', delegated.reason_code || 'resume-refused', 'pause', delegated);
+  }
+  if (delegated.details?.resume_execution === true) {
+    state.host_runtime = targetHost; state.boundary = null; state.current_unit = safeUnit(delegated.unit); state.lifecycle = 'dispatch_required';
+    state.pending_questions = delegated.details.pending_questions || [];
+    const result = publicResult('resume', state, 'dispatch_required', delegated.reason_code, 'dispatch', delegated);
+    const { snapshot: _snapshot, ...decision } = result; state.last_decision = decision; result.snapshot = state; return result;
   }
   state.host_runtime = targetHost; state.boundary = delegated.boundary || null; state.current_unit = null; state.last_decision = null;
   state.lifecycle = state.mode === 'task' ? 'completed' : 'idle';
@@ -213,6 +315,11 @@ function complete(state, input, orchestrate) {
   const decision = state.last_decision && state.last_decision.controller_result;
   const beginKey = decision && decision.details && decision.details.transaction && decision.details.transaction.idempotency_key;
   const delegated = orchestrate.run('complete', { ...delegateInput(input, state), unit: state.current_unit, begin_key: beginKey });
+  if (delegated.outcome === 'needs_input' && delegated.boundary) {
+    state.lifecycle = 'paused'; state.boundary = delegated.boundary;
+    state.pending_questions = delegated.details?.pending_questions || [];
+    return publicResult('complete', state, 'needs_input', delegated.reason_code, 'pause', delegated);
+  }
   if (delegated.outcome !== 'completed') return publicResult('complete', state, 'blocked', delegated.reason_code, 'stop', delegated);
   state.current_unit = null; state.last_decision = null; state.boundary = delegated.boundary;
   state.lifecycle = state.mode === 'task' ? 'completed' : 'idle';
@@ -247,6 +354,46 @@ function reenter(state, input, orchestrate) {
   const { snapshot: _snapshot, ...decision } = result; state.last_decision = decision;
   return result;
 }
+// Issue 343 U1: the additive batch commands. The snapshot's current_batch is the only locator
+// delegated (never caller JSON); a response, a done result or an approved flag in the input
+// never completes, acknowledges or clears a member — only the owner's member records do.
+function batchLocator(state) { return { batch_id: state.current_batch.batch_id, manifest_sha256: state.current_batch.manifest_sha256 }; }
+function batchStatus(state, input, orchestrate) {
+  if (!state.current_batch) return publicResult('batch-status', state, 'blocked', 'batch-not-active', 'stop', null);
+  const delegated = orchestrate.run('batch-status', { ...delegateInput(input, state), batch: batchLocator(state) });
+  if (delegated.outcome !== 'completed') return publicResult('batch-status', state, 'blocked', delegated.reason_code || 'batch-manifest-invalid', 'stop', delegated);
+  return publicResult('batch-status', state, 'status', delegated.reason_code, 'observe', delegated);
+}
+// Issue 343 U5: the members the owner acknowledged (its ack progress AND the controller's committed
+// completion of that member's own begin, checked by forge-orchestrate) leave current_batch one by one;
+// any other member stays, and the batch itself clears only once every member is terminal.
+function acknowledgedOf(delegated) {
+  const listed = delegated && delegated.details && Array.isArray(delegated.details.acknowledged) ? delegated.details.acknowledged : [];
+  return new Set(listed.filter(key => typeof key === 'string' && key));
+}
+function batchAck(state, input, orchestrate) {
+  if (!state.current_batch) return publicResult('batch-ack', state, 'blocked', 'batch-not-active', 'stop', null);
+  const delegated = orchestrate.run('batch-ack', { ...delegateInput(input, state), batch: batchLocator(state) });
+  if (delegated.outcome !== 'completed') {
+    const acknowledged = acknowledgedOf(delegated);
+    const remaining = state.current_batch.members.filter(key => !acknowledged.has(key));
+    if (acknowledged.size || delegated.details?.batch?.members) {
+      if (typeof orchestrate.projectBatchPending !== 'function') return publicResult('batch-ack', state, 'blocked', 'batch-pending-projection-required', 'stop', delegated);
+      const projected = orchestrate.projectBatchPending(delegateInput(input, state), state.last_decision?.controller_result);
+      if (!projected.ok) return publicResult('batch-ack', state, 'blocked', projected.reason || 'batch-dispatch-invalid', 'stop', delegated);
+      // Commit the retention locator and cached active roster in one snapshot.
+      state.last_decision = { ...state.last_decision, controller_result: projected.decision };
+    }
+    if (remaining.length && remaining.length < state.current_batch.members.length) {
+      state.current_batch = { ...state.current_batch, members: remaining };
+      state.last_decision = { ...state.last_decision, batch: state.current_batch };
+    }
+    return publicResult('batch-ack', state, 'blocked', delegated.reason_code || 'batch-members-pending', 'stop', delegated);
+  }
+  delete state.current_batch; state.current_unit = null; state.last_decision = null; state.boundary = null;
+  state.lifecycle = state.mode === 'task' ? 'completed' : 'idle';
+  return publicResult('batch-ack', state, 'completed', delegated.reason_code, state.lifecycle === 'idle' ? 'continue' : 'stop', delegated);
+}
 function advance(snapshot, commandValue, input = {}, dependencies = {}) {
   const state = validateSnapshot(snapshot);
   const command = String(commandValue || '').toLowerCase();
@@ -256,16 +403,24 @@ function advance(snapshot, commandValue, input = {}, dependencies = {}) {
   const controller = dependencies.orchestrate || orchestrateDefault;
   if (!controller || typeof controller.run !== 'function') throw error('invalid-controller', 'forge-orchestrate indisponível');
   const trusted = {};
-  for (const name of ['prefsReader', 'inventoryReader', 'now', 'failpoint', 'inspectAttempt', 'processProbe', 'replaySavedResponse', 'reconcileRoots', 'captureEntryBaseline', 'entryAuthority', 'questionStateAdapter', 'reconcileRetainedClaim', 'userHome', 'env', 'workerObservationReader']) {
+  for (const name of ['prefsReader', 'inventoryReader', 'now', 'failpoint', 'inspectAttempt', 'observeOriginalAttempt', 'processProbe', 'replaySavedResponse', 'reconcileRoots', 'captureEntryBaseline', 'entryAuthority', 'questionStateAdapter', 'reconcileRetainedClaim', 'userHome', 'env', 'workerObservationReader', 'routeResolver']) {
     if (dependencies[name] !== undefined) trusted[name] = dependencies[name];
   }
-  const orchestrate = { run: (operation, payload) => controller.run(operation, payload, trusted),
-    ...(typeof controller.validatePending === 'function' ? { validatePending: (payload, decision) => controller.validatePending(payload, decision, trusted) } : {}) };
+  // A call-scoped extra (the loop's own workflow mode/budget) joins the trusted options only.
+  const orchestrate = { run: (operation, payload, extra) => controller.run(operation, payload, extra ? { ...trusted, ...extra } : trusted),
+    ...(typeof controller.validatePending === 'function' ? { validatePending: (payload, decision) => controller.validatePending(payload, decision, trusted) } : {}),
+    ...(typeof controller.projectBatchPending === 'function' ? { projectBatchPending: (payload, decision) => controller.projectBatchPending(payload, decision, trusted) } : {}),
+    ...(typeof controller.validateTerminal === 'function' ? { validateTerminal: payload => controller.validateTerminal(payload, trusted) } : {}) };
+  if (state.current_batch && SINGLE_UNIT_COMMANDS.has(command)) return publicResult(command, state, 'blocked', 'batch-active', 'stop', null);
+  if (command === 'batch-status') return batchStatus(state, input, orchestrate);
+  if (command === 'batch-ack') return batchAck(state, input, orchestrate);
   if (command === 'consume-failure') return consumeFailure(state, input, orchestrate);
   if (command === 'reenter') return reenter(state, input, orchestrate);
   if (command === 'resume-budget') return resumeBudget(state, input, orchestrate);
   if (command === 'resume-time-option') return resumeTimeOption(state, input, orchestrate);
+  if (command === 'resume-delivery') return resumeDelivery(state, input, orchestrate);
   if (command === 'next') return next(state, input, orchestrate);
+  if (command === 'decompose-pause' || command === 'decompose-continue') return decompose(state, input, orchestrate, command);
   if (command === 'pause') return pause(state, input, orchestrate);
   if (command === 'resume') return resume(state, input, orchestrate);
   if (command === 'complete') return complete(state, input, orchestrate);

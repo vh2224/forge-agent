@@ -345,8 +345,10 @@ function linkFree(root, relative) {
 function percentile(sorted, q) { return sorted[Math.max(0, Math.ceil(q * sorted.length) - 1)]; }
 // Successful samples come only from action complete. A unit paused and later completed
 // contributes the sum of its active segments: the paused gap lies outside every interval.
+// Issue 342: each published sample also keeps internal details (active segments and
+// their begin keys) for the review-fix attribution; they never reach row, history or record.
 function samplesOf(read, accept) {
-  const result = { samples: Object.create(null), failures: 0, excluded: { open: read.open.length, ambiguous: read.ambiguous.length, unfinished_paused: 0, zero_duration: 0 } };
+  const result = { samples: Object.create(null), details: [], failures: 0, excluded: { open: read.open.length, ambiguous: read.ambiguous.length, unfinished_paused: 0, zero_duration: 0 } };
   const carry = new Map();
   // Interval pairing proves a host's segment, not a cross-host continuation
   // (nor its slice/attempt lineage). Never publish just the last segment as
@@ -366,13 +368,19 @@ function samplesOf(read, accept) {
       continue;
     }
     const key = JSON.stringify([row.milestone, row.unit, row.host]), duration = row.end - row.start;
-    if (row.action === 'pause') { carry.set(key, (carry.get(key) || 0) + duration); continue; }
-    const paused = carry.get(key) || 0; carry.delete(key);
+    const held = carry.get(key) || { paused: 0, segments: [], begin_keys: [] };
+    if (row.action === 'pause') {
+      carry.set(key, { paused: held.paused + duration, segments: [...held.segments, [row.start, row.end]], begin_keys: [...held.begin_keys, row.begin_key] });
+      continue;
+    }
+    const paused = held.paused; carry.delete(key);
     if (row.action !== 'complete') { result.failures++; continue; }
     if (!MEASURABLE_PHASES.includes(row.phase)) continue;
     const total = duration + paused;
     if (total <= 0) { result.excluded.zero_duration++; continue; }
     (result.samples[row.phase] ||= []).push(total);
+    result.details.push({ phase: row.phase, milestone: row.milestone, unit: row.unit, total, segments: [...held.segments, [row.start, row.end]],
+      begin_keys: [...held.begin_keys, row.begin_key] });
   }
   result.excluded.unfinished_paused = carry.size;
   return result;
@@ -400,7 +408,105 @@ function readSource(owner, relative, kind, remaining, accept) {
   const sampled = samplesOf(analysis, accept);
   row.status = 'available'; row.failures = sampled.failures; row.excluded = sampled.excluded;
   row.samples = Object.fromEntries(MEASURABLE_PHASES.filter(p => sampled.samples[p]).map(p => [p, sampled.samples[p].length]));
-  return { row, bytes: row.bytes, samples: sampled.samples };
+  return { row, bytes: row.bytes, samples: sampled.samples, details: sampled.details };
+}
+// Issue 342: the only interval helper. Pieces of [start, end] inside the union of `within`
+// and outside the union of `minus`, with their total in milliseconds.
+function intervalPieces(start, end, within, minus) {
+  const merge = list => list.map(([a, b]) => [Math.max(a, start), Math.min(b, end)]).filter(([a, b]) => b > a).sort((x, y) => x[0] - y[0] || x[1] - y[1])
+    .reduce((out, [a, b]) => { const last = out[out.length - 1]; if (last && a <= last[1]) last[1] = Math.max(last[1], b); else out.push([a, b]); return out; }, []);
+  const pieces = [], cuts = merge(minus);
+  for (const [a, b] of merge(within)) {
+    let cursor = a;
+    for (const [c, d] of cuts) { if (d <= cursor || c >= b) continue; if (c > cursor) pieces.push([cursor, c]); cursor = Math.max(cursor, d); }
+    if (cursor < b) pieces.push([cursor, b]);
+  }
+  return { pieces, ms: pieces.reduce((t, [a, b]) => t + b - a, 0) };
+}
+// Issue 342: the owner global log is an attribution source with its own reader and
+// 16 MiB bound, independent of the 2 MiB shared-tasks phase source (same file for tasks).
+function reviewFixSource(owner) {
+  const relative = '.gsd/forge/events.jsonl', source = { path: relative, sha256: null, bytes: null, max_bytes: null, malformed_lines: null };
+  const closed = (status, reason) => ({ status, reason, source, attempts: [], counts: null });
+  let policy;
+  try { policy = require('./forge-review-policy'); source.max_bytes = policy.MAX_OWNER_EVENTS_BYTES; } catch { return closed('unavailable', 'review-fix-source-unreadable'); }
+  const links = linkFree(owner, relative);
+  if (links === 'missing') return closed('absent', null);
+  if (links !== 'ok') return closed('unavailable', links === 'link' ? 'review-fix-source-link' : 'review-fix-source-unreadable');
+  let read;
+  try { read = policy.reviewFixAttempts(owner); } catch { read = { status: 'unavailable', reason: null }; }
+  if (read.status === 'absent') return closed('absent', null);
+  if (read.status !== 'available') {
+    const reasons = { source_too_large: 'review-fix-source-too-large', source_changed_during_read: 'review-fix-source-unstable', source_not_file: 'review-fix-source-not-file', source_encoding: 'review-fix-source-invalid' };
+    if (read.reason === 'source_too_large') { try { source.bytes = fs.lstatSync(path.join(owner, relative)).size; } catch { source.bytes = null; } }
+    return closed('unavailable', reasons[read.reason] || 'review-fix-source-unreadable');
+  }
+  Object.assign(source, { sha256: read.sha256, bytes: read.bytes, max_bytes: read.max_bytes, malformed_lines: read.malformed_lines });
+  return { status: 'available', reason: null, source, attempts: read.attempts, counts: read.counts };
+}
+// Issue 342: discount only measured review-fix attempts whose scope is proven (dispatch scope,
+// then the committed begin transaction for a slice or the task identity of the shared source).
+// One attempt adjusts at most one sample; a per-boundary millisecond ledger forbids double counting.
+function separateReviewFix(owner, source, targets) {
+  const counted = { measured: 0, used: 0, partial: 0, unmeasured: 0, missing_dispatch: 0, invalid_scope: 0, ambiguous: 0, missing_proof: 0, foreign: 0, triage: 0, no_sample: 0, no_overlap: 0 };
+  const block = { status: source.status === 'available' ? 'none' : source.status, reason: source.reason, source: source.source, attempts: counted,
+    samples_adjusted: 0, samples_consumed: 0, measured_ms: 0, discounted_ms: 0,
+    by_phase: { 'execute-task': { samples_adjusted: 0, discounted_ms: 0 }, 'complete-slice': { samples_adjusted: 0, discounted_ms: 0 } }, added_to_ranges: false };
+  if (source.status !== 'available') return block;
+  for (const [k, n] of Object.entries(source.counts || {})) if (Object.hasOwn(counted, k) && Number.isSafeInteger(n)) counted[k] += n;
+  counted.measured = source.attempts.length;
+  const order = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+  const pool = targets.flatMap(t => t.details.filter(d => Object.hasOwn(block.by_phase, d.phase) && d.total > 0).map(d => ({ relative: t.relative, kind: t.kind, d })))
+    .sort((x, y) => order(x.relative, y.relative) || order(x.d.phase, y.d.phase) || order(x.d.milestone, y.d.milestone) || order(x.d.unit, y.d.unit) || x.d.segments[0][0] - y.d.segments[0][0]);
+  const records = new Map(), ledgers = new Map(), discounts = new Map();
+  const lookup = key => {
+    if (!records.has(key)) {
+      let tx = null;
+      try { tx = typeof key === 'string' && key ? require('./forge-unit-controller').lookupRecord(owner, 'transaction', key) : null; } catch { tx = null; }
+      records.set(key, tx);
+    }
+    return records.get(key);
+  };
+  // Same committed-begin criterion as forge-review-policy measureExecute; every segment must agree.
+  const proofOf = (d, slice) => {
+    const slices = d.begin_keys.map(key => {
+      const tx = lookup(key);
+      return object(tx) && tx.phase === 'committed' && tx.action === 'begin' && tx.milestone === d.milestone && object(tx.unit) && tx.unit.key === d.unit
+        && object(tx.after) && object(tx.after.state) && typeof tx.after.state.active_slice === 'string' ? tx.after.state.active_slice : null;
+    });
+    if (!slices.length || slices.some(s => s === null)) return 'missing_proof';
+    if (new Set(slices).size > 1) return 'ambiguous';
+    return slices[0] === slice ? 'proven' : 'foreign';
+  };
+  const attempts = [...source.attempts].sort((a, b) => a.start - b.start || a.end - b.end || order(a.dispatch_id, b.dispatch_id));
+  for (const a of attempts) {
+    if (a.boundary === 'milestone-triage') { counted.triage++; continue; }
+    const slice = a.boundary === 'slice', work = slice ? a.milestone : a.task, relative = slice ? '.gsd/milestones/' + a.milestone + '/' + a.milestone + '-events.jsonl' : null;
+    // Scope before time: a slice attempt only meets its milestone source, a task attempt only the shared task source.
+    const scoped = pool.filter(x => (slice ? x.kind === 'milestone' && x.relative === relative : x.kind === 'shared-tasks') && x.d.milestone === work);
+    if (!scoped.length) { counted.no_sample++; continue; }
+    const ledger = ledgers.get(a.key) || [];
+    const fresh = scoped.map(x => ({ x, cut: intervalPieces(a.start, a.end, x.d.segments, ledger) })).filter(c => c.cut.ms > 0);
+    if (!fresh.length) { counted.no_overlap++; continue; }
+    const proven = [], refusals = new Set();
+    for (const c of fresh) { const proof = slice ? proofOf(c.x.d, a.slice) : 'proven'; if (proof === 'proven') proven.push(c); else refusals.add(proof); }
+    if (!proven.length) { counted[['missing_proof', 'ambiguous', 'foreign'].find(r => refusals.has(r))]++; continue; }
+    const best = Math.max(...proven.map(c => c.cut.ms)), top = proven.filter(c => c.cut.ms === best);
+    if (top.length > 1) { counted.ambiguous++; continue; }
+    const { x, cut } = top[0];
+    x.d.total -= cut.ms;
+    ledgers.set(a.key, [...ledger, ...cut.pieces]);
+    discounts.set(x, (discounts.get(x) || 0) + cut.ms);
+    counted.used++; block.measured_ms += a.end - a.start; block.discounted_ms += cut.ms;
+    // The part of the attempt outside the chosen sample's active segments stays where it is.
+    if (intervalPieces(a.start, a.end, x.d.segments, []).ms < a.end - a.start) counted.partial++;
+  }
+  for (const [x, discounted] of discounts) {
+    block.samples_adjusted++; block.by_phase[x.d.phase].samples_adjusted++; block.by_phase[x.d.phase].discounted_ms += discounted;
+    if (x.d.total <= 0) block.samples_consumed++;
+  }
+  if (block.discounted_ms > 0) block.status = 'applied';
+  return block;
 }
 function readHistory(options = {}) {
   const milestone = options.milestone;
@@ -430,6 +536,8 @@ function readHistory(options = {}) {
   }
   history.omitted_sources = Math.max(0, candidates.length - HISTORY_LIMITS.max_sources);
   const pooled = Object.create(null), contributors = Object.create(null);
+  // Issue 342: one read of the attribution source; its bytes never count toward HISTORY_LIMITS.
+  const attribution = reviewFixSource(owner), targets = [];
   for (const candidate of candidates.slice(0, HISTORY_LIMITS.max_sources)) {
     const read = readSource(owner, candidate.relative, candidate.kind, HISTORY_LIMITS.max_total_bytes - history.total_bytes, candidate.accept);
     history.sources.push(read.row);
@@ -437,7 +545,15 @@ function readHistory(options = {}) {
     if (read.row.status !== 'available') continue;
     history.failures += read.row.failures;
     for (const [k, count] of Object.entries(read.row.excluded)) history.excluded[k] = (history.excluded[k] || 0) + count;
-    for (const [phase, list] of Object.entries(read.samples)) { (pooled[phase] ||= []).push(...list); (contributors[phase] ||= []).push(candidate.relative); }
+    targets.push({ relative: candidate.relative, kind: candidate.kind, details: read.details, row: read.row });
+  }
+  history.review_fix = separateReviewFix(owner, attribution, targets);
+  // Only published samples count: a sample entirely covered by measured review-fix leaves the pool.
+  for (const target of targets) {
+    const samples = Object.create(null);
+    for (const d of target.details) if (d.total > 0) (samples[d.phase] ||= []).push(d.total);
+    target.row.samples = Object.fromEntries(MEASURABLE_PHASES.filter(p => samples[p]).map(p => [p, samples[p].length]));
+    for (const [phase, list] of Object.entries(samples)) { (pooled[phase] ||= []).push(...list); (contributors[phase] ||= []).push(target.relative); }
   }
   for (const phase of MEASURABLE_PHASES) {
     const list = (pooled[phase] || []).slice().sort((a, b) => a - b);
@@ -455,6 +571,15 @@ function readHistory(options = {}) {
   if (history.excluded.continuation_unknown) history.limitations.push('Segmentos entre hosts sem prova da continuidade de slice e tentativa foram excluídos; custo completo desconhecido');
   history.limitations.push('Intervalos do controller incluem trabalho do owner; consumo não é tempo de parede');
   history.limitations.push('Só lacunas de pausa explícita são excluídas; esperas sem classificação (humana, CI, externa) seguem nas amostras e são desconhecidas');
+  const rf = history.review_fix, tried = rf.attempts;
+  if (rf.discounted_ms > 0) history.limitations.push('Review-fix medido e atribuído foi retirado das amostras de execução e é apresentado à parte; não foi somado a nenhuma faixa nem nó');
+  if (tried.partial > 0) history.limitations.push('Só a interseção provada de cada tentativa de review-fix com os segmentos ativos de uma única amostra foi descontada; o restante ficou nas amostras');
+  if (rf.samples_consumed > 0) history.limitations.push('Amostra(s) inteiramente coberta(s) por review-fix medido saíram do conjunto; o custo está à parte');
+  if (tried.unmeasured + tried.missing_dispatch + tried.invalid_scope + tried.ambiguous + tried.missing_proof + tried.foreign > 0) {
+    history.limitations.push('Tentativas de review-fix sem prova suficiente (ausente, ambígua, estrangeira ou sem medição) não foram descontadas e podem permanecer nas amostras');
+  }
+  if (rf.status === 'unavailable') history.limitations.push('Log global do owner indisponível (' + rf.reason + '): review-fix não separado das amostras; custo desconhecido');
+  if (rf.status === 'absent' && history.observations > 0) history.limitations.push('Sem log global do owner: review-fix não pôde ser separado das amostras');
   return history;
 }
 
@@ -630,16 +755,18 @@ function recordView(record) {
   return { sha: digest(record), positions: record.proposal.positions.map(p => ({ p, e: record.estimate.positions.find(x => x.position_id === p.id) })) };
 }
 function renderOptionsMarkdown(record) {
-  const { sha, positions } = recordView(record), proposal = record.proposal, out = [];
+  const { sha, positions } = recordView(record), proposal = record.proposal, out = [], h = record.history;
   const bullet = list => list.length ? list.map(x => '  - ' + x) : ['  - (nenhum)'];
+  // Issue 342: records without history.review_fix render exactly as before.
+  const rf = object(h) && object(h.review_fix) ? h.review_fix : null, separated = rf !== null && Number.isSafeInteger(rf.discounted_ms) && rf.discounted_ms > 0;
   out.push('# Opções de prazo — ' + record.milestone, '',
     '- Registro: `' + sha + '`; proposta `' + record.proposal_sha256 + '`; política ' + record.policy.id + ' v' + record.policy.version + '.',
     '- Materializado em ' + record.materialized_at + '; produtor `' + record.producer_basis.producer + '` congelado antes do início (' + record.producer_basis.frozen_at + '), sem atestação pelo worker.',
     proposal.recommended ? '- Recomendação: ' + proposal.recommended + ' — ' + proposal.recommendation_reason + ' (nenhuma opção vem pré-selecionada).' : '- Sem recomendação; nenhuma opção vem pré-selecionada.',
-    '- Números: consumo de trabalho e coordenação identificáveis, não tempo de parede; só pausas explicitamente registradas ficam fora; esperas humanas, de CI, externas ou sem classificação não são separadas por esta evidência (desconhecidas) e podem permanecer nas amostras; overhead desconhecido fica explícito.', '',
+    '- Números: consumo de trabalho e coordenação identificáveis, não tempo de parede; só pausas explicitamente registradas ficam fora; esperas humanas, de CI, externas ou sem classificação não são separadas por esta evidência (desconhecidas) e podem permanecer nas amostras; overhead desconhecido fica explícito.'
+      + (separated ? ' Além das pausas, só o review-fix medido e atribuído sai das amostras de execução; aparece à parte em Histórico usado e não entra em faixa.' : ''), '',
     '## Marco final (entrega verificada e integrada)', '');
   for (const k of Object.keys(ITEM_LABELS)) out.push('- ' + ITEM_LABELS[k] + ': ' + (STATE_LABELS[proposal.endpoint.items[k]] || proposal.endpoint.items[k]));
-  const h = record.history;
   out.push('', '## Histórico usado', '', '- Situação: ' + h.status + '; amostras: ' + (h.observations || 0) + '; fontes lidas: ' + h.sources.filter(s => s.status === 'available').length
     + '; indisponíveis: ' + h.sources.filter(s => s.status !== 'available').length + '; fora do limite: ' + (h.omitted_sources || 0) + '.');
   for (const s of h.sources) out.push('- Fonte `' + s.path + '`: ' + (s.status === 'available' ? 'sha256 ' + s.sha256.slice(0, 12) + ', ' + s.bytes + ' bytes, amostras '
@@ -647,6 +774,15 @@ function renderOptionsMarkdown(record) {
   for (const p of MEASURABLE_PHASES) {
     const s = h.phases[p];
     if (s && s.n) out.push('- Fase ' + p + ': n=' + s.n + ', p50 ' + formatDuration(s.p50_ms) + ', p90 ' + formatDuration(s.p90_ms) + ', dispersão ' + (s.dispersion ?? '—') + '.');
+  }
+  if (rf !== null) {
+    const n = v => Number.isSafeInteger(v) ? v : 0, a = object(rf.attempts) ? rf.attempts : {}, phase = k => object(rf.by_phase) && object(rf.by_phase[k]) ? n(rf.by_phase[k].samples_adjusted) : 0;
+    const state = { applied: 'aplicado', none: 'nenhum desconto', absent: 'log ausente' }[rf.status] || 'indisponível (' + (rf.reason || 'motivo desconhecido') + ')';
+    const src = object(rf.source) && typeof rf.source.sha256 === 'string' ? 'sha256 ' + rf.source.sha256.slice(0, 12) + ', ' + n(rf.source.bytes) + ' bytes' : 'indisponível';
+    const unproven = ['unmeasured', 'missing_dispatch', 'invalid_scope', 'ambiguous', 'missing_proof', 'foreign'].reduce((t, k) => t + n(a[k]), 0);
+    out.push('- Review-fix separado (fora de faixas e nós): ' + state + '; descontado ' + formatDuration(n(rf.discounted_ms)) + ' de ' + n(rf.samples_adjusted) + ' amostra(s) (execute-task '
+      + phase('execute-task') + ', complete-slice ' + phase('complete-slice') + '); tentativas usadas ' + n(a.used) + ', parciais ' + n(a.partial) + ', sem prova ' + unproven
+      + ', triagem ' + n(a.triage) + '; fonte `.gsd/forge/events.jsonl` ' + src + '.');
   }
   for (const l of h.limitations || []) out.push('- Limitação: ' + l);
   for (const id of POSITION_IDS) {

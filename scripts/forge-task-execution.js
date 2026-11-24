@@ -10,7 +10,8 @@ const ids = require('./forge-ids');
 const parallel = require('./forge-parallelism');
 const roots = require('./forge-code-roots');
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
-function fail(code) { throw Object.assign(new Error(code), { code }); }
+function fail(code, offendingPath) { throw Object.assign(new Error(code), { code,
+  ...(offendingPath ? { offending_path: offendingPath } : {}) }); }
 const autoPlanGate = new AsyncLocalStorage();
 // Shared with the milestone adapter: identical canonical/legacy selection,
 // conflict, supplied-path and no-link rules. No dependency back to the adapter.
@@ -156,21 +157,25 @@ function physical(root, file) {
 }
 function read(file) { return fs.readFileSync(file, 'utf8'); }
 function prepare(r, root, cwd) {
-  const loc = locations(r);
+  const member = r.memberHandle ? require('./forge-execution-batch').resolveMemberExecution(r.memberHandle, r) : null;
+  if (!member && (r.batch_id || r.claim?.batch_roots)) fail('execution-member-handle-required');
+  const memberPlan = member ? milestonePlanFile(r) : null;
+  const loc = member ? { task: relative(root, path.dirname(memberPlan)) } : locations(r);
   if (r.writableRoots?.length && !r.execution_contract) fail('standalone-execution-multiple-code-roots');
-  const contract = r.execution_contract
+  const contract = member ? member.execution_contract : r.execution_contract
     ? roots.validateContract(r.execution_contract, { owner: root }) : roots.singleContract(root, cwd);
   const primary = contract.code_roots.find(entry => entry.id === contract.primary_root_id);
   if (roots.key(fs.realpathSync.native(cwd)) !== roots.key(primary.path)) fail('execution-primary-root-mismatch');
   const extras = contract.code_roots.filter(entry => entry.id !== contract.primary_root_id).map(entry => entry.path);
   if (r.writableRoots?.some(p => !extras.some(e => roots.key(e) === roots.key(fs.realpathSync.native(p))))) fail('execution-extra-root-undeclared');
-  const planFile = path.join(root, loc.task, `${r.taskId}-PLAN.md`);
+  const planFile = memberPlan || path.join(root, loc.task, `${r.taskId}-PLAN.md`);
   physical(root, planFile);
   if (!r.planFile) fail('execution-plan-path-mismatch');
   const suppliedPlan = path.resolve(r.planFile);
   // Canonicalize only the owner prefix; physical() rejects links inside it.
   const suppliedOwner = path.resolve(path.dirname(suppliedPlan), '../../..');
-  if (roots.key(path.join(suppliedOwner, loc.task, r.taskId + '-PLAN.md')) !== roots.key(suppliedPlan)
+  if (member ? roots.key(suppliedPlan) !== roots.key(memberPlan)
+    : roots.key(path.join(suppliedOwner, loc.task, r.taskId + '-PLAN.md')) !== roots.key(suppliedPlan)
       || roots.key(fs.realpathSync.native(suppliedOwner)) !== roots.key(fs.realpathSync.native(root))) fail('execution-plan-path-mismatch');
   const plan = read(planFile);
   // Preserve the existing plan gate's off/skip policy, but require the caller to
@@ -185,7 +190,7 @@ function prepare(r, root, cwd) {
   if (approvedHash && approvedHash !== hash(plan)) fail('execution-plan-gate-stale');
   if (r.gates?.claim !== 'proceed' || !['passed', 'not-applicable'].includes(r.gates?.security)) fail('execution-gates-required');
   if (!r.constraints || typeof r.constraints.auto_commit !== 'boolean' || r.constraints.deploy !== false) fail('execution-constraints-required');
-  const validated = roots.validatePlan(plan, contract);
+  const validated = member ? member.runtime_view.checked_runtime_plan : roots.validatePlan(plan, contract);
   const claims = validated.writes;
   if (r.execution_contract) {
     const claim = r.claim;
@@ -194,16 +199,19 @@ function prepare(r, root, cwd) {
     if (!held || held.active !== true || held.write_claim?.generation !== claim.generation || held.write_claim.released
         || roots.digest(held.write_claim) !== roots.digest(claim)) fail('execution-claim-generation-stale');
     roots.claimGroups(claim);
-    if (roots.digest(claim.execution_contract) !== roots.digest(contract)
-        || claims.some(p => !claim.paths.some(c => roots.covers(c, p)))) fail('execution-held-claim-mismatch');
+    if (!member && held.batch_locator) fail('execution-member-handle-required');
+    if (!member && !require('./forge-write-claim').ordinaryRetainedProjection(held,contract)) fail('execution-member-handle-required');
+    if (!member && (roots.digest(claim.execution_contract) !== roots.digest(contract)
+        || claims.some(p => !claim.paths.some(c => roots.covers(c, p))))
+        && !require('./forge-write-claim').coversRetainedExecution(held, contract, claims)) fail('execution-held-claim-mismatch');
     const capability = require('./forge-transport-capabilities').executionCapability(r.route, contract, { nativeInvocation: r.nativeInvocation });
     if (!capability.supported) fail(capability.reason_code);
-    if (r.plan_contract && (r.plan_contract.plan_sha256 !== validated.plan_sha256
+    if (r.plan_contract && (r.plan_contract.plan_sha256 !== (member ? member.runtime_view.canonical_plan_sha256 : validated.plan_sha256)
         || r.plan_contract.contract_sha256 !== validated.contract_sha256
         || r.plan_contract.capabilities_sha256 !== roots.digest(capability))) fail('execution-preflight-stale');
   }
   const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd,
-    phase: 'execute-loose-task', forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
+    phase: member ? 'execute-task' : 'execute-loose-task', forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
   const { content: procedureText, ...procedure_context } = procedure;
   const context = [];
   const inputs = { [planFile]: hash(plan), ...(gate ? { [gateFile]: hash(gate) } : {}) };
@@ -233,14 +241,17 @@ function prepare(r, root, cwd) {
     context.push(`Full coding standards: ${standardsFile}`);
   }
   context.unshift(`CODE_DIR: ${cwd}\nARTIFACT_OWNER: ${root}\nExecution contract: ${JSON.stringify(contract)}\nClaimed paths (only writes allowed): ${JSON.stringify(claims)}`);
+  if (member) context.unshift('Batch member execution: the operational roots above are exclusive to this member. Canonical plan root paths describe the integration origin; all product writes use the validated member runtime view.');
   if (r.prompt) require('./forge-prompt').composeProcedurePrompt(r.prompt, procedure, r.procedure_context);
   const snapshotApi = require('./forge-surgical-reset');
   const ordered = [primary, ...contract.code_roots.filter(entry => entry.id !== primary.id)];
   const snapshots = (ordered.length > 1 ? snapshotApi.captureMultiAttemptSnapshot(ordered.map(entry => entry.path), { attemptId: r.dispatchId })
     : [snapshotApi.captureAttemptSnapshot(cwd, { attemptId: r.dispatchId })]).map((snapshot, i) => ({ ...snapshot, root_id: ordered[i].id }));
-  return { claims, execution_contract: contract, writableRoots: extras, snapshots, inputs, contextText: context.join('\n\n'), securityText,
+  const prepared = { claims, execution_contract: contract, writableRoots: extras, snapshots, inputs, contextText: context.join('\n\n'), securityText,
     procedureText, procedure_context,
-    budgets: { coding_standards: standardsTokens }, plan_hash: hash(plan) };
+    budgets: { coding_standards: standardsTokens }, plan_hash: hash(plan), ...(member ? { runtime_view: member.runtime_view } : {}) };
+  if (member) Object.defineProperties(prepared, { memberHandle: { value: r.memberHandle }, memberRequest: { value: r } });
+  return prepared;
 }
 
 // Content census of the owner's control tree, including ignored files. Memory
@@ -322,9 +333,23 @@ function protectedSnapshot(root) {
   return result;
 }
 function assertProtected(root, before) {
-  if (roots.digest(Object.entries(protectedSnapshot(root)).sort()) !== roots.digest(Object.entries(before).sort())) fail('execution-protected-metadata');
+  const expected = require('./forge-protected-owner-activity').expectedProtectedOwner(root, before);
+  const current = protectedSnapshot(root);
+  if (roots.digest(Object.entries(current).sort()) === roots.digest(Object.entries(expected).sort())) return;
+  // Same code and message always. Only a live managed-surfaces-v1 context adds
+  // a sanitized, named diagnostic; without one the throw is exactly the legacy one.
+  let managed = null;
+  try { managed = require('./forge-managed-attribution').describeMismatch(root, expected, current, before); } catch { managed = null; }
+  if (!managed) fail('execution-protected-metadata');
+  try { fail('execution-protected-metadata'); } catch (error) { error.managed_surfaces = managed; throw error; }
 }
 function verifyResult(cwd, prepared, result) {
+  if (prepared.runtime_view) {
+    const member = require('./forge-execution-batch').resolveMemberExecution(prepared.memberHandle, prepared.memberRequest);
+    if (member.runtime_view.runtime_view_sha256 !== prepared.runtime_view.runtime_view_sha256
+        || roots.digest(member.execution_contract) !== roots.digest(prepared.execution_contract)
+        || roots.digest(member.claims) !== roots.digest(prepared.claims)) fail('execution-member-view-stale');
+  }
   const files = {};
   roots.validateContract(prepared.execution_contract, { revalidate: true });
   for (const entry of result.files_changed || []) {
@@ -332,7 +357,8 @@ function verifyResult(cwd, prepared, result) {
     if (multiple && (typeof entry === 'string' ? !entry.includes('::') : !entry.root_id)) fail('execution-result-root-required');
     const resolved = roots.resolvePath(prepared.execution_contract, typeof entry === 'string' ? entry
       : { root_id: entry.root_id || prepared.execution_contract.primary_root_id, path: entry.path }, { legacy: !multiple });
-    if (!prepared.claims.some(claim => roots.covers(claim, resolved))) fail('execution-outside-claim');
+    if (!prepared.claims.some(claim => roots.covers(claim, resolved))
+        || prepared.continuation_paths && !prepared.continuation_paths.includes(roots.qualified(resolved))) fail('execution-outside-claim', roots.wire(resolved));
     files[roots.qualified(resolved)] = fs.existsSync(resolved.absolute) ? hash(fs.readFileSync(resolved.absolute)) : null;
   }
   // Independently inspect every checkout; a caller's files_changed is never the
@@ -344,22 +370,36 @@ function verifyResult(cwd, prepared, result) {
     const after = new Map(now.pre_dirty.map(p => [p.path, p.hash]));
     for (const rel of new Set([...before.keys(), ...after.keys()])) {
       if (before.get(rel) === after.get(rel)) continue;
+      // An empty unversioned directory's sentinel can appear/disappear when its
+      // first/last leaf changes. Ignore only a proved surviving container whose
+      // prior directory identity is present; never file/directory replacement.
+      const container = path.resolve(snapshot.code_dir, rel);
+      if ((before.get(rel) === 'dir' && !after.has(rel)
+          || after.get(rel) === 'dir' && !before.has(rel) && [...before.keys()].some(p => p.startsWith(rel + '/')))
+          && fs.existsSync(container) && fs.lstatSync(container).isDirectory() && !fs.lstatSync(container).isSymbolicLink()) continue;
       const resolved = roots.resolvePath(prepared.execution_contract, { root_id: snapshot.root_id, path: rel });
-      if (!prepared.claims.some(claim => roots.covers(claim, resolved))) fail('execution-outside-claim');
+      if (!prepared.claims.some(claim => roots.covers(claim, resolved))
+          || prepared.continuation_paths && !prepared.continuation_paths.includes(roots.qualified(resolved))) fail('execution-outside-claim', roots.wire(resolved));
       const q = roots.qualified(resolved);
       const observed = fs.existsSync(resolved.absolute) ? hash(fs.readFileSync(resolved.absolute)) : null;
-      if (!(q in files)) fail('execution-result-omitted-delta');
+      if (!(q in files)) fail('execution-result-omitted-delta', roots.wire(resolved));
       if (files[q] !== observed) fail('execution-result-raced');
     }
   }
   return files;
 }
 function assertReplay(r, record) {
+  if (r.memberHandle) {
+    const member = require('./forge-execution-batch').resolveMemberExecution(r.memberHandle, r);
+    if (!record.execution.runtime_view || member.runtime_view.runtime_view_sha256 !== record.execution.runtime_view.runtime_view_sha256
+        || roots.digest(member.execution_contract) !== roots.digest(record.execution.execution_contract)) fail('execution-member-view-stale');
+  } else if (record.execution.runtime_view || r.batch_id || r.claim?.batch_roots) fail('execution-member-handle-required');
   if (r.execution_contract) {
     const held = r.runId && require('./forge-runs').get(r.contextRoot || r.cwd, r.runId);
     if (!held || !held.active || !r.claim?.generation || held.write_claim?.released
         || roots.digest(held.write_claim) !== roots.digest(r.claim)) fail('execution-claim-generation-stale');
     roots.claimGroups(held.write_claim);
+    if (!r.memberHandle && held.batch_locator) fail('execution-member-handle-required');
   }
   for (const [file, expected] of Object.entries(record.execution.inputs)) {
     if (!fs.existsSync(file) || hash(fs.readFileSync(file)) !== expected) fail('execution-input-changed');

@@ -1,0 +1,59 @@
+{
+  "evidence_version": "e2e-evidence-v1",
+  "label": "mock",
+  "origin": "synthetic",
+  "execution_mode": "synthetic",
+  "route": {
+    "host": "claude-code",
+    "worker": "codex",
+    "transport": "app-server",
+    "worker_mode": "sidecar"
+  },
+  "provenance": {
+    "captured_at": "synthetic",
+    "method": "synthetic-hand-written",
+    "tools": [
+      { "name": "mock-tool-forge-e2e-evidence", "sha256": "24f40be2b699811b20faa1844504c8d5bc240b849ae08b56289bc106d49a6ad3" }
+    ],
+    "versions": {
+      "host": "mock-claude-code-0.0.0",
+      "worker": "mock-codex-0.0.0",
+      "appserver_schema_pin": {
+        "path": "shared/schemas/codex-appserver-pin.json",
+        "sha256": "a49d57fb088d73935c734442a51af70a91e7db89f7e23870ba5e0ab32c387538",
+        "codex_version": "0.166.0"
+      },
+      "node": "mock-node-0.0.0",
+      "forge": { "revision": "mock-revision", "dirty": false },
+      "os": { "platform": "mock-platform", "release": "mock-release", "arch": "mock-arch" }
+    },
+    "attempt": {
+      "dispatch_sha256": "f8fdf1b36eea2f901a520acfcfd94b835f4d67a8e46ff6de4e5fc8d74986b3e6",
+      "fingerprint_sha256": "cfd07b939cf720171f2ca016b42d2a52c513a6bc74f5341766d91593906e5ee7",
+      "recovery_identity_sha256": "a85e6a80a932d065329cf9371a3e0e6044d1df6b12a6c4260e405299da4617cb",
+      "claim_sha256": "696117f0a906a91b70a3279dec7f66514a95595fdf6216003ab070f0b1970d2d",
+      "lease_generation": 1
+    },
+    "raw_capture_sha256": "a266d4067c994408ff655bd0a1d8a9e54d144d7793191449f8be93fa414e4072",
+    "sanitizer": { "version": "e2e-sanitizer-v1", "allowlist_version": "e2e-allowlist-v1" },
+    "environment_overrides": []
+  },
+  "files": [
+    {
+      "path": "recording.jsonl",
+      "sha256": "de287d41b5c6590d4ff92200383fbc08194c89329e63fb3518d9dddc1c416e7c",
+      "bytes": 4579,
+      "records": 19
+    }
+  ],
+  "counts": { "records": 19, "host": 4, "worker": 9, "attempt": 6 },
+  "limits": {
+    "max_files": 8,
+    "max_file_bytes": 4194304,
+    "max_line_bytes": 65536,
+    "max_records": 20000,
+    "max_manifest_bytes": 65536,
+    "max_pin_bytes": 4194304,
+    "max_dir_entries": 256
+  }
+}

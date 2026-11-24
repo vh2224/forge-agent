@@ -236,6 +236,21 @@ function observe(cwd, unitInput, options) {
 
 function heartbeat(cwd, unitInput, ownerToken, generation, options) {
   const unit = normalizeUnitKey(unitInput); const values = normalizedOptions(options); const token = opaque(ownerToken, 'owner_token', true); const gen = opaque(generation, 'generation', true); const file = leaseFile(cwd, unit);
+  const local = activeProtectedWindows.get(protectedKey(cwd, unit));
+  if (local) {
+    const held = protectedWindows.get(local);
+    return held?.ownerToken === token && held.generation === gen ? held.check() : result(false, 'owner-mismatch');
+  }
+  // A CLI parent may poll from a different process. This binding grants no
+  // write or extension: observe the already-held exact lease read-only while
+  // its execution window is advertised by the canonical owner fence.
+  const window = require('./forge-owner-transport-window').observed(cwd);
+  if (window?.binding.kind === 'unit-execution' && window.binding.unit_key === unit) {
+    const read = readLease(file);
+    if (window.binding.lease_generation !== gen || window.binding.owner_token_sha256 !== digest(token)
+        || !validRecord(read.record, unit) || !sameOwner(read.record, token, gen) || isExpired(read.record, values.now)) return result(false, 'owner-mismatch');
+    return result(true, 'lease-active', { generation: gen, protected: true });
+  }
   return withGuard(cwd, unit, guard => {
     clearTemporaryFiles(file); const read = readLease(file);
     if (!read.record) return result(false, 'already-released');
@@ -287,6 +302,34 @@ function releaseTerminal(handle, cwd, unitInput, ownerToken, generation) {
   removeQuarantine(saved);
   return result(true, 'released', { generation });
 }
+// Only the named administrative operation can mint this process-local scope.
+// The old owner credential is neither returned nor used as the caller identity.
+function inspectInterrupted(handle, authority, cwd, unitInput) {
+  const held = assertTerminalGuard(handle, cwd, unitInput);
+  const target = require('./forge-runs').assertOwnerInterruptionAuthority(authority, cwd, held.unit);
+  const file = leaseFile(cwd, held.unit), read = readLease(file);
+  if (read.corrupt || read.record && !validRecord(read.record, held.unit)) return result(false, 'lease-corrupt');
+  if (!read.record) {
+    if (target.lease_sha256 !== null) {
+      const terminal = require('./forge-unit-controller').lookupRecord(cwd, 'transaction', target.terminal_key);
+      if (!terminal?.owner_interruption || terminal.owner_interruption.operation_id !== target.operation_id
+        || !['lease-release-pending','lease-released','boundary-ready','committed'].includes(terminal.phase)) return result(false, 'lease-required');
+    }
+    return result(true, 'lease-absent', { present: false });
+  }
+  if (read.record.generation !== target.generation || digest(fs.readFileSync(file)) !== target.lease_sha256) return result(false, 'owner-mismatch');
+  return result(true, 'lease-matching', { present: true, generation: target.generation });
+}
+function releaseInterrupted(handle, authority, cwd, unitInput) {
+  const held = assertTerminalGuard(handle, cwd, unitInput);
+  const checked = inspectInterrupted(handle, authority, cwd, held.unit);
+  if (!checked.ok || !checked.present) return checked;
+  const saved = quarantine(leaseFile(cwd, held.unit), 'interrupted-' + checked.generation);
+  if (!saved) return result(false, 'contended-recovery');
+  removeQuarantine(saved);
+  return result(true, 'released', { generation: checked.generation });
+}
+
 function withTerminalGuard(cwd, unitInput, callback) {
   const unit = normalizeUnitKey(unitInput);
   return withGuard(cwd, unit, guard => {
@@ -297,9 +340,12 @@ function withTerminalGuard(cwd, unitInput, callback) {
 }
 
 // The parent must route its own scheduled heartbeat through this process-local
-// handle while protected snapshots are in use. Other processes remain subject
-// to ordinary ownership checks; this is coordination, not a global lock.
+// handle while protected snapshots are in use. The canonical execution fence
+// also makes same-owner polling read-only in other processes; it grants no write
+// authority. This is coordination, not an OS sandbox.
 const protectedWindows = new WeakMap();
+const activeProtectedWindows = new Map();
+function protectedKey(cwd, unit) { return fs.realpathSync.native(cwd) + '\0' + normalizeUnitKey(unit); }
 function assertProtectedWindow(handle, cwd, unit) {
   const held = protectedWindows.get(handle);
   if (!held || path.relative(held.cwd, fs.realpathSync.native(cwd)) !== '' || normalizeUnitKey(unit) !== held.unit || !held.check().ok) {
@@ -316,6 +362,21 @@ function openProtectedWindow(cwd, unitInput, ownerToken, generation, options = {
   if (!Number.isInteger(duration) || duration <= 0 || duration > MAX_PROTECTED_WINDOW_MS) throw new Error('forge-unit-lease: invalid protected duration');
   const unit = normalizeUnitKey(unitInput), file = leaseFile(cwd, unit);
   const token = opaque(ownerToken, 'owner_token', true), gen = opaque(generation, 'generation', true);
+  const key = protectedKey(cwd, unit);
+  let active = activeProtectedWindows.get(key);
+  if (active && !protectedWindows.get(active)?.check().ok) { activeProtectedWindows.delete(key); active = null; }
+  if (active && options.reuseExisting === true) {
+    const prior = protectedWindows.get(active);
+    if (prior?.ownerToken !== token || prior.generation !== gen
+        || !prior.check().ok || prior.deadline_at - nowOf(options) < duration - 60000) throw new Error('forge-unit-lease: protected-window-active');
+    let closed = false;
+    const check = () => closed ? result(false, 'owner-mismatch') : prior.check();
+    const borrowed = Object.freeze({ ok: true, reason: 'lease-active', generation: gen,
+      deadline_at: prior.deadline_at, borrowed: true, check, heartbeat: check,
+      close() { const result = check(); closed = true; return result; } });
+    protectedWindows.set(borrowed, { ...prior, check });
+    return borrowed;
+  }
   const opened = withGuard(cwd, unit, guard => {
     const now = nowOf(options), deadline = now + duration;
     const read = readLease(file);
@@ -335,9 +396,10 @@ function openProtectedWindow(cwd, unitInput, ownerToken, generation, options = {
   };
   const handle = Object.freeze({ ...opened, check,
     heartbeat: check,
-    close() { const checked = check(); closed = true; return checked; },
+    close() { const checked = check(); closed = true; if (activeProtectedWindows.get(key) === handle) activeProtectedWindows.delete(key); return checked; },
   });
-  protectedWindows.set(handle, { cwd: fs.realpathSync.native(cwd), unit, generation: gen, deadline_at: opened.deadline_at, check });
+  protectedWindows.set(handle, { cwd: fs.realpathSync.native(cwd), unit, ownerToken: token, generation: gen, deadline_at: opened.deadline_at, check });
+  activeProtectedWindows.set(key, handle);
   return handle;
 }
 
@@ -391,7 +453,10 @@ if (require.main === module) cliMain();
  *   successor because the complete record is compared while the mutex is held.
  *
  * recover(cwd, unit, options)
- *   Is the only operation that deletes a non-owner record. Its injected clock
+ *   Is the expiry-based operation that deletes a non-owner record. The named
+ *   administrative interruption can instead release an exact observed target
+ *   only inside a live, nonserializable controller/registry authority.
+ *   Its injected clock
  *   must be beyond expiry plus grace. The implementation intentionally never
  *   asks whether a PID exists or whether a run registry row looks current.
  *
@@ -417,5 +482,5 @@ module.exports = {
   PROTOCOL_VERSION, DEFAULT_TTL_MS, DEFAULT_GRACE_MS, REASON_CODES,
   normalizeUnitKey, leasesDir, leaseFile, mutexName, acquire, observe,
   heartbeat, release, recover, publicLease, validRecord, readLease, openProtectedWindow, assertProtectedWindow,
-  withTerminalGuard, assertTerminalGuard, inspectTerminal, releaseTerminal,
+  withTerminalGuard, assertTerminalGuard, inspectTerminal, releaseTerminal, inspectInterrupted, releaseInterrupted,
 };

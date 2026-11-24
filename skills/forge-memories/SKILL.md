@@ -1,7 +1,6 @@
 ---
 name: forge-memories
 description: "Gerencia memorias auto-aprendidas do projeto GSD."
-disable-model-invocation: true
 allowed-tools: Read, Write, Edit
 ---
 

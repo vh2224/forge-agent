@@ -792,6 +792,16 @@ function operandOwnership(value, ownClaim, cpClaim, ownRunId, cpRunId) {
  *   readyAlternatives (number; absent => 0, fail closed).
  */
 function evaluateGate(opts) {
+  return evaluateGateCore(opts, true);
+}
+
+// Owner CAS uses this read-only path under its registry fence. Ordinary callers
+// retain the measured counterpart-release effect, without reacquiring that fence.
+function previewGate(opts) {
+  return evaluateGateCore(opts, false);
+}
+
+function evaluateGateCore(opts, persistReleases) {
   const o = opts || {};
   const cwd = o.cwd || process.cwd();
   const runId = o.runId || null;
@@ -829,7 +839,12 @@ function evaluateGate(opts) {
   const released_counterparts = [];
 
   for (const c of candidates) {
-    const { scope, note } = codeDirScope(claim, c.claim);
+    const record = activeById.get(c.id) || runs.get(cwd, c.id);
+    // The intent is persisted before creating member roots. Until the complete
+    // physical union is committed, a different integration root is no proof
+    // that this contender is outside the owner's unfinished reservation.
+    const provisioning = record?.batch_locator?.phase === 'preparing';
+    const { scope, note } = provisioning ? { scope: 'unknown', note: 'code-dir-unresolved' } : codeDirScope(claim, c.claim);
     if (note) {
       // The note comes from S03's closed set and is carried verbatim. Checked
       // at the seam so a value added there without being taught here surfaces
@@ -837,7 +852,8 @@ function evaluateGate(opts) {
       if (!CLAIM_NOTE_REASONS.includes(note)) {
         throw new Error(`forge-claim-gate: note de escopo fora de CLAIM_NOTE_REASONS: ${note}`);
       }
-      notes.push({ id: `${runId} × ${c.id}`, reason: note });
+      notes.push({ id: `${runId} × ${c.id}`, reason: note,
+        ...(provisioning ? { detail: 'batch-member-provisioning-pending' } : {}) });
     }
     if (scope === 'different') {
       // The ONLY way out of scope: two absolutes resolved real-vs-real that
@@ -847,13 +863,12 @@ function evaluateGate(opts) {
       continue;
     }
 
-    const record = activeById.get(c.id) || runs.get(cwd, c.id);
-
     // ── Release probe — AFTER the scope skip, on purpose (T03-PLAN step 2) ──
     // `different-code-dir` is cheap and I/O-free; probing first would spend a
     // VCS round-trip on pairs that are out of scope anyway, and would grow the
     // census with release facts about runs this evaluation never had to judge.
-    const rel = counterpartRelease(c.claim, {
+    const rel = record?.batch_locator || record?.batch_retirements?.some(row => row.retained_roots.length)
+      ? { released: false, note: null } : counterpartRelease(c.claim, {
       cwd,
       runId: c.id,
       runRecord: record,
@@ -892,7 +907,7 @@ function evaluateGate(opts) {
       // and `manual` asserts no measurement at all — writing either from a
       // counterpart's gate would carve a verdict this gate did not corroborate
       // into a foreign record.
-      if (rel.mechanism === 'committed') {
+      if (rel.mechanism === 'committed' && persistReleases) {
         const p = persistCounterpartRelease(cwd, c.id, c.claim, rel, o);
         // ADDITIVE on the entry: `persisted` says whether the RECORD now agrees
         // with the verdict. It never restates the verdict — the skip above is
@@ -915,6 +930,7 @@ function evaluateGate(opts) {
       scope,
       note: note || null,
       record,
+      provisioning,
     });
   }
 
@@ -1002,7 +1018,7 @@ function evaluateGate(opts) {
   const matchedPaths = [];
 
   for (const c of inScope) {
-    const hit = claimsConflict(claim, c.claim);
+    const hit = c.provisioning ? { cause: 'overlap', paths: [] } : claimsConflict(claim, c.claim);
     if (hit) {
       // Same seam check as the scope note: S03 owns this set, and a cause it
       // grows without teaching this gate must be loud, not silently ignored by
@@ -1837,6 +1853,7 @@ function main(argv) {
 }
 
 module.exports = {
+  previewGate,
   deriveClaimFromPlan,
   deriveClaimFromConcededItems,
   resolvePosture,

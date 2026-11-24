@@ -248,6 +248,12 @@ function roundState(owner, milestone, head) {
   }
   fail('time-option-round-limit');
 }
+function roundPresentation(round, question) {
+  return { round_id: round.id, type: round.type, question: { id: question.question_id, identity_sha256: question.identity_sha256 },
+    response_format: round.free_text ? 'operator-ceiling' : 'option-label',
+    options: (round.options || []).map(option => ({ label: option.label, canonical_answer: option.answer })),
+    ...(round.minimum_ms ? { minimum_ms: round.minimum_ms } : {}) };
+}
 function cleanText(value) { return String(value).replace(/[\x00-\x1f\x7f]/g, ' ').replace(MARKER, '[marcador removido]'); }
 function markerFree(value) { MARKER.lastIndex = 0; const found = MARKER.test(JSON.stringify(value)); MARKER.lastIndex = 0; return !found; }
 function decisionOf(round, question) {
@@ -330,7 +336,9 @@ function preselectionState(owner, milestone, base, options) {
         const outcome = rounds.outcome && { choice: rounds.outcome.choice, option_id: rounds.outcome.option_id, position_id: rounds.outcome.position_id,
           ceiling: rounds.outcome.ceiling, activation_answer: rounds.outcome.activation_answer, linked_task_authorization: rounds.outcome.linked_task_authorization };
         return { state: { ...base, status: 'decision-pending', options_sha256: chain.head.options_sha256, round: rounds.round || null,
-          question: rounds.question || null, answered_rounds: rounds.rounds.length, outcome: outcome || null }, head: chain.head, rounds };
+          question: rounds.question || null, answered_rounds: rounds.rounds.length,
+          decision_rounds: [...rounds.rounds, ...(rounds.round ? [{ round: rounds.round, question: rounds.question }] : [])]
+            .map(row => roundPresentation(row.round, row.question)), outcome: outcome || null }, head: chain.head, rounds };
       }
       reason = 're-estimate-requested'; scopeReduction = rounds.outcome.scope_reduction ?? null;
       const o = rounds.outcome;
@@ -629,7 +637,7 @@ function liveHandle(owner, milestone, liveAdapter, row, now) {
   try {
     handle = liveAdapter.getDecisionHandle({ cwd: owner, milestone, kind: row.kind, request: structuredClone(row.request), request_sha256: digest(row.request),
       question: { ...row.question }, expected: [...row.expected] });
-  } catch { fail('time-decision-attestation-required'); }
+  } catch (error) { fail(require('./forge-time-decision-errors').safeDecisionFailure(error)); }
   const decision = time().verifyDecision({ cwd: owner, milestone, now, handle, kind: row.kind, request: row.request, expected: row.expected });
   if (!same(decision.question, row.question)) fail('time-decision-scope-mismatch');
   return { handle, decision };
@@ -655,6 +663,44 @@ function resumeActivation(owner, milestone, read, input, now) {
     return { status: 'decided', milestone, choice: 'option', resumed: true, selection_sha256: read.state.selection_sha256, contract_sha256: contract.sha256 };
   });
 }
+// Concrete host bridge. The callback belongs to the live host and must observe
+// the actual answer (including a resumed transcript). Files/CLI flags cannot
+// create this function or an opaque decision handle.
+function decideObserved(input = {}) {
+  if (typeof input.observeAnswer !== 'function') return refused(input.milestone, 'time-decision-attestation-required');
+  const clock = input.clock || Date.now;
+  const liveAdapter = { getDecisionHandle(challenge) {
+    const reference = 'host-' + challenge.question.id;
+    const read = inspect(challenge.cwd, challenge.milestone, { code: input.code });
+    const optionsSha = challenge.request.options_sha256 || challenge.request.option?.options_sha256 || read?.selection?.options_sha256;
+    const head = time().readOptions({ cwd: challenge.cwd, milestone: challenge.milestone, options_sha256: optionsSha });
+    if (head.status !== 'valid') fail('time-options-invalid');
+    // Reconstruct from immutable options and the exact persisted owner rounds,
+    // including after selection publication and activation-pending recovery.
+    const original = roundState(challenge.cwd, challenge.milestone, head);
+    const row = original.rounds.find(r => r.round.id === challenge.question.id
+      && r.question.identity_sha256 === challenge.question.identity_sha256);
+    if (!row) fail('time-decision-scope-mismatch');
+    const resolver = () => {
+      const observed = input.observeAnswer(Object.freeze(structuredClone(challenge)));
+      if (!observed || observed.status !== 'resolved' || !same(observed.question, challenge.question)
+          || !['user-text', 'tool-answer'].includes(observed.source)) fail('time-decision-attestation-required');
+      const current = time().readOptions({ cwd: challenge.cwd, milestone: challenge.milestone, options_sha256: optionsSha });
+      if (current.status !== 'valid' || !same(current.record, head.record)) fail('time-options-stale');
+      const answer = offers().canonicalAnswer(row.round, observed.response);
+      if (answer === null || !challenge.expected.includes(answer)) fail('time-decision-answer-mismatch');
+      return { reference, status: 'resolved', question: { ...challenge.question }, answer,
+        source: observed.source, resolved_at: observed.resolved_at };
+    };
+    return time().createDecisionAuthority(resolver).issue(reference, { milestone: challenge.milestone,
+      kind: challenge.kind, request_sha256: challenge.request_sha256, expires_at: clock() + 60000 }, clock);
+  } };
+  const result = decide({ ...input, liveAdapter, now: clock() });
+  const linked = result.status === 'decided' && result.choice === 'option' ? linkedCreation({ ...input, now: clock() }, liveAdapter) : null;
+  return linked ? { ...result, linked_task: linked, ...(!['created', 'unchanged', 'resumed'].includes(linked.status)
+    ? { status: 'partial', selection_status: result.status, reason: linked.reason } : {}) } : result;
+}
+
 function decide(input = {}) {
   const milestone = object(input) ? input.milestone : undefined;
   try {
@@ -860,7 +906,9 @@ function linkedCreation(options, liveAdapter) {
   try { selected = time().readSelection({ cwd: ownerRoot(options.cwd), milestone: options.milestone }); } catch { selected = null; }
   const authorization = selected?.status === 'valid' ? selected.selection.linked_task_authorization : null;
   if (!['create-and-start-after-proven-completion', 'create-without-auto-start'].includes(authorization)) return null;
-  const created = require('./forge-linked-task').createLinkedTask({ cwd: options.cwd, milestone: options.milestone, liveAdapter });
+  const created = require('./forge-linked-task').createLinkedTask({ cwd: options.cwd, milestone: options.milestone, liveAdapter,
+    ...(options.now !== undefined ? { now: options.now } : {}),
+    ...(options.userHome ? { userHome: options.userHome } : {}), ...(options.env ? { env: options.env } : {}) });
   return { status: created.status, task_id: created.task_id ?? null, reason: created.reason ?? null };
 }
 function main(argv = process.argv.slice(2), io = process, liveAdapter) {
@@ -917,6 +965,6 @@ function main(argv = process.argv.slice(2), io = process, liveAdapter) {
 }
 
 module.exports = { TIME_OPTION_REASON_CODES, TIME_OPTION_RESUME_CODES, SELECTION_STATUSES, ROADMAP_STATUSES, ESTIMATE_UNIT,
-  estimateKeySuffix, estimateBeginKey, readSelectionState, enroll, prepareBoundary, nextRound, answerRound, decide, promptBlock,
+  estimateKeySuffix, estimateBeginKey, readSelectionState, enroll, prepareBoundary, nextRound, answerRound, decide, decideObserved, promptBlock,
   roadmapRule, taskBindingContext, contractCompatibility, resumeCheck, ownerRoot, ownerBoundary, main };
 if (require.main === module) process.exitCode = main();

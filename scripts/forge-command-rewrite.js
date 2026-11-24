@@ -532,7 +532,13 @@ function planRewrite(cmd, budget, opts = {}) {
 
   // Insertion-only splice: copy untouched bytes verbatim between insertion
   // points, insert new text, never re-serialize anything the tokenizer saw.
-  const sortedInsertions = [...insertions].sort((a, b) => a.at - b.at);
+  // A Windows shell cannot execute POSIX NAME=value prefixes. The caller may
+  // request spawn-environment delivery; remove only our exact generated
+  // insertions, never assignments or bytes authored in the original command.
+  const spawnEnv = opts.envMode === 'spawn' && insertions.some(i => i.text === vitestEnvPrefix(budget));
+  const env = spawnEnv ? { VITEST_MAX_FORKS: String(budget.workers), VITEST_MAX_THREADS: String(budget.workers),
+    NODE_OPTIONS: `--max-old-space-size=${budget.heapMb}` } : null;
+  const sortedInsertions = insertions.filter(i => !spawnEnv || i.text !== vitestEnvPrefix(budget)).sort((a, b) => a.at - b.at);
   let command = '';
   let cursor = 0;
   for (const ins of sortedInsertions) {
@@ -547,6 +553,7 @@ function planRewrite(cmd, budget, opts = {}) {
     insertions: sortedInsertions,
     runner: primaryRunner,
     reason: primaryReason,
+    ...(env ? { env } : {}),
   };
 }
 

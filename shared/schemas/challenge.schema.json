@@ -7,7 +7,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "path_line", "claim", "suggested_fix", "challenge", "severity"],
+        "required": ["id", "path_line", "claim", "suggested_fix", "challenge", "severity", "reachable", "reproduced", "in_scope"],
         "additionalProperties": false,
         "properties": {
           "id": { "type": "string", "description": "Stable id R1, R2, ... severity-then-order" },
@@ -15,7 +15,10 @@
           "claim": { "type": "string", "description": "Full text of the issue" },
           "suggested_fix": { "type": "string" },
           "challenge": { "type": "string", "description": "The one question that decides whether this is real" },
-          "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] }
+          "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] },
+          "reachable": { "type": "string", "enum": ["yes", "no", "unknown"], "description": "Reachable in normal use; theoretical is no" },
+          "reproduced": { "type": "string", "enum": ["yes", "no", "unknown"], "description": "Actually reproduced; recorded only" },
+          "in_scope": { "type": "string", "enum": ["yes", "no", "unknown"], "description": "Inside the scope of the reviewed change" }
         }
       }
     }

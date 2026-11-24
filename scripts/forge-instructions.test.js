@@ -623,8 +623,9 @@ test('recovery contract sync preserves standing personal authorization bytes and
   assert(once.startsWith(prefix), 'personal authorization bytes changed');
   assert(!once.includes('60000ms'), 'projected recovery contract carries no cumulative 60000ms clock');
   for (const term of ['createRecoveryAuthorizationAdapter', 'registerStandingAuthorization', 'tier safety ceiling', 'Standing permission never answers a functional question']) {
-    assert(once.includes(term), `missing ${term}`);
+    assert(mod.readContext('interaction').content.includes(term), `missing ${term}`);
   }
+  assert(once.includes('--context interaction'), 'missing mandatory context reader');
   assertEqual(syncFile(file, { host: 'codex' }).outcome, 'unchanged', 'second sync');
   assertEqual(fs.readFileSync(file, 'utf8'), once, 'byte identity');
 });
@@ -695,7 +696,9 @@ test('communication sync both hosts preserves CRLF and every operator byte', () 
     const found = findBlock(content);
     assertEqual(content.slice(0, found.start), prefix, 'operator prefix');
     assert(content.slice(found.end).startsWith(suffix), 'operator suffix');
-    assertEqual(content.replace(/\r\n/g, '\n').split(canonical).length - 1, 1, 'canonical bytes exactly once');
+    assertEqual(content.replace(/\r\n/g, '\n').split(canonical).length - 1, 0, 'canonical bytes not eagerly inlined');
+    assertEqual(mod.readContext('communication').content, canonical, 'complete canonical bytes via loader');
+    assert(content.includes('`communication` no boot'), 'communication load is mandatory');
     assert(!content.replace(/\r\n/g, '').includes('\n'), 'lone LF in CRLF file');
   }
   assertEqual(syncInstructions(root, { host: 'both' }).changed, 0, 'second sync');
@@ -739,7 +742,8 @@ test('communication renderer and real sync compose one current contract', () => 
     codexHome: path.join(root, 'host'), forgeHome: path.join(root, 'forge'), ...renderer.PRODUCTION_DISPATCH_DIALECT });
   const instructions = report.artifacts.find(item => item.kind === 'instructions');
   const canonical = mod.renderCommunicationContract();
-  assertEqual(instructions.content.split(canonical).length - 1, 1, 'renderer canonical count');
+  assertEqual(instructions.content.split(canonical).length - 1, 0, 'renderer has no eager canonical prose');
+  assertEqual(mod.readContext('communication').content, canonical, 'renderer context source');
   const prefix = '# Operador preservado Ω\n\n';
   const file = path.join(root, 'AGENTS.md');
   fs.writeFileSync(file, prefix + instructions.content);
@@ -753,20 +757,22 @@ test('communication renderer and real sync compose one current contract', () => 
     fs.readFileSync = function (name, ...args) {
       return path.resolve(String(name)) === sourceFile ? updated + '\r\n' : originalRead.call(this, name, ...args);
     };
-    assertEqual(syncFile(file, { host: 'codex' }).outcome, 'updated', 'source update');
+    assertEqual(syncFile(file, { host: 'codex' }).outcome, 'unchanged', 'entry remains stable while context source updates');
     const once = read(root, 'AGENTS.md');
     assert(once.startsWith(prefix), 'operator prefix lost');
-    assertEqual(once.split(updated).length - 1, 1, 'current canonical once');
-    assertEqual(once.split(canonical).length - 1, 1, 'no stale duplicate');
+    assertEqual(mod.readContext('communication').content, updated, 'current canonical loaded at call time');
+    assertEqual(once.split(canonical).length - 1, 0, 'no stale inlined duplicate');
     assertEqual(syncFile(file, { host: 'codex' }).outcome, 'unchanged', 'updated second sync');
     assertEqual(read(root, 'AGENTS.md'), once, 'updated bytes stable');
     const claudeFile = path.join(root, 'CLAUDE.md');
     syncFile(claudeFile, { host: 'claude' });
     const claudeBlock = read(root, 'CLAUDE.md');
-    assertEqual(claudeBlock.replace(/\r\n/g, '\n').split(updated).length - 1, 1, 'Claude same canonical source');
+    assertEqual(claudeBlock.replace(/\r\n/g, '\n').split(updated).length - 1, 0, 'Claude also uses the context source');
+    assert(claudeBlock.includes('`communication` no boot'), 'Claude missing context load');
     const rerendered = renderer.render({ repo: path.join(__dirname, '..'), projectRoot: root,
       codexHome: path.join(root, 'host'), forgeHome: path.join(root, 'forge'), ...renderer.PRODUCTION_DISPATCH_DIALECT }).artifacts.find(item => item.kind === 'instructions');
-    assertEqual(rerendered.content.split(updated).length - 1, 1, 'updated renderer');
+    assertEqual(rerendered.content.split(updated).length - 1, 0, 'updated renderer remains bounded');
+    assert(rerendered.content.includes('`communication` no boot'), 'renderer missing context load');
   } finally { fs.readFileSync = originalRead; }
   console.log('PASS communication composition: Codex render then real sync unchanged, updated source replaces owned block once, second sync stable and Claude bytes identical');
 });

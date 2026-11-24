@@ -134,7 +134,8 @@ try {
     assert.deepStrictEqual(localImports, [], 'local dependencies must be lazy at import');
   });
   test('proposal-document-sha256-preserved-owner-contribution', () => {
-    const bytes = fs.readFileSync(path.join(__dirname, '../docs/milestone-time-options.md'));
+    // Retired operator proposal, archived byte-for-byte from v4.52.3 for this historical check.
+    const bytes = fs.readFileSync(path.join(__dirname, 'fixtures/docs-cleanup/proposal.md'));
     // The owner's original 12496 bytes stay as the exact prefix (same SHA-256 as SOURCE-PROPOSAL);
     // only an appended implementation-status section follows, never a rewrite of the record.
     const ORIGINAL_BYTES = 12496;
@@ -151,7 +152,7 @@ try {
     assert.ok(suffix.includes('`## Não lançado`') && /dispensado e não foi realizado/.test(suffix), 'unreleased delivery and waived UAT stated');
   });
   test('declared-artifacts-exist-minimum-lines-and-no-module-stubs', () => {
-    for (const [file, minimum] of [['shared/schemas/forge-milestone-time.schema.json', 60], ['scripts/forge-milestone-time.js', 260], ['scripts/forge-milestone-time.test.js', 220], ['docs/milestone-time-options.md', 100]]) {
+    for (const [file, minimum] of [['shared/schemas/forge-milestone-time.schema.json', 60], ['scripts/forge-milestone-time.js', 260], ['scripts/forge-milestone-time.test.js', 220], ['scripts/fixtures/docs-cleanup/proposal.md', 100]]) {
       const source = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
       assert.ok(source.split('\n').length >= minimum, file);
       if (file === 'scripts/forge-milestone-time.js') assert.ok(!/TODO|TBD|FIXME/.test(source));

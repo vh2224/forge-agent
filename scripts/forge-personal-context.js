@@ -37,11 +37,56 @@ function unanchoredProject(options) {
 }
 function paths(options = {}) {
   const home = resolveUserHome(options);
-  const root = path.join(home, '.forge-personal');
-  for (const entry of [root, path.join(root, 'context.json'), path.join(root, '.gsd'), path.join(root, '.gsd', '.locks'), path.join(root, '.gsd', '.locks', 'context')]) {
-    if (fs.existsSync(entry) && !within(canonical(entry), path.join(canonical(home), '.forge-personal'))) throw new Error('personal-namespace-escape');
+  const root = path.join(home, '.forge-personal'), file = path.join(root, 'context.json');
+  const parents = [root, path.join(root, '.gsd'), path.join(root, '.gsd', '.locks')];
+  const pins = [];
+  let boundary;
+  for (const entry of [root, file, ...parents.slice(1)]) {
+    if (!fs.existsSync(entry)) continue;
+    const physical = canonical(entry);
+    boundary = boundary || path.join(canonical(home), '.forge-personal');
+    if (!within(physical, boundary)) throw new Error('personal-namespace-escape');
+    if (parents.includes(entry)) {
+      const link = fs.lstatSync(entry), target = fs.statSync(entry);
+      if (!target.isDirectory()) throw new Error('personal-namespace-parent-invalid');
+      pins.push({ entry, physical, link, target });
+    }
   }
-  return { root, file: path.join(root, 'context.json') };
+  const leaf = path.join(parents[2], 'context');
+  const same = (before, after) => ['dev', 'ino', 'birthtimeMs'].every(field => before[field] === after[field]);
+  const checkParents = () => {
+    for (const pin of pins) {
+      const link = fs.lstatSync(pin.entry), target = fs.statSync(pin.entry);
+      if (!target.isDirectory() || !same(pin.link, link) || !same(pin.target, target)
+          || canonical(pin.entry) !== pin.physical || !within(pin.physical, boundary))
+        throw new Error('personal-namespace-parent-changed');
+    }
+  };
+  const observeLeaf = () => {
+    let stat;
+    try { stat = fs.lstatSync(leaf); }
+    catch (error) { if (error.code === 'ENOENT') return; throw error; }
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('personal-context-lock-invalid');
+    if (pins.length !== parents.length) {
+      // A concurrent first bind can create parents after their absence was
+      // observed. Pin each newly present contained parent once, not a lease.
+      checkParents();
+      for (const entry of parents) {
+        if (pins.some(pin => pin.entry === entry)) continue;
+        const link = fs.lstatSync(entry), target = fs.statSync(entry), physical = canonical(entry);
+        boundary = boundary || path.join(canonical(home), '.forge-personal');
+        if (!target.isDirectory() || !within(physical, boundary)) throw new Error('personal-namespace-parent-invalid');
+        pins.push({ entry, physical, link, target });
+      }
+      checkParents();
+    }
+  };
+  // The literal last segment cannot escape a contained physical parent unless
+  // it is a link. Do not resolve or bind the lifetime/identity of a mutex holder.
+  // Two bounded observations cover release/reacquisition without retrying it.
+  observeLeaf(); checkParents();
+  observeLeaf(); checkParents();
+  return { root, file };
 }
 function readJson(file) {
   try { return { status: 'ok', value: JSON.parse(fs.readFileSync(file, 'utf8')) }; }
@@ -266,14 +311,29 @@ function inspectWork(project, binding) {
     } catch (error) { return failure(error.code === 'ENOENT' ? 'missing' : 'unreadable', error); }
   };
   const registry = read(path.join('.gsd', 'forge', 'runs', `${binding.id}.json`));
-  let activity = 'unknown', runDiagnostic = registry.reason || null;
+  let activity = 'unknown', runDiagnostic = registry.reason || null, runRecord = null;
   if (registry.status === 'ok') {
     try {
       const run = JSON.parse(registry.content);
       if (!object(run) || run.id !== binding.id || run.kind !== binding.kind || typeof run.active !== 'boolean') throw new Error('run-schema');
       if (run.project && (!path.isAbsolute(run.project) || canonical(run.project) !== project.path)) throw new Error('run-project-mismatch');
       activity = run.active ? 'active' : 'inactive';
+      runRecord = run;
     } catch { runDiagnostic = 'corrupt'; }
+  }
+  if (runRecord?.task_retirement) {
+    const retirement = require('./forge-task-retirement').readPublished(project.path, runRecord);
+    if (!retirement?.valid) return { id: binding.id, kind: binding.kind, activity, runDiagnostic, checkpoint,
+      workStatus: 'unknown', reliability: 'needs-reconciliation', state: null, lastResult: null,
+      nextAction: { text: 'Inspecionar a evidência inválida de encerramento da task; não retomar nem ocultar.', validity: 'uncertain' },
+      terminalEvidence: { reason: retirement?.reason || 'task-retirement-evidence-invalid' } };
+    const record = retirement.record;
+    return { id: binding.id, kind: binding.kind, activity, runDiagnostic, checkpoint,
+      workStatus: record.intent.outcome, reliability: 'current', state: null, nextAction: null,
+      lastResult: { text: record.intent.outcome === 'superseded' ? `Task absorvida pela milestone ${record.intent.successor_id}; artefatos e worktree preservados sem aceite de implementação.` : 'Task cancelada; artefatos e worktree preservados sem aceite de implementação.',
+        source: retirement.file, hash: retirement.sha256, validity: 'current' },
+      terminalEvidence: { source: retirement.file, hash: retirement.sha256, completed: false, retired: true },
+      retirement: { outcome: record.intent.outcome, successor_id: record.intent.successor_id, worktree_disposition: 'retained', questions_disposition: 'retained-unanswered-history' } };
   }
   const terminalFile = binding.kind === 'task'
     ? path.join('.gsd', 'tasks', binding.id, `${binding.id}-PLAN.md`)
@@ -345,8 +405,9 @@ function selectPersonalWork(options = {}) {
   const snapshot = readPersonalSnapshot(options);
   if (snapshot.status !== 'ok') return snapshot;
   const candidates = snapshot.works.filter(w => w.workStatus === 'open' && w.reliability === 'current');
-  const unresolved = snapshot.works.some(w => w.workStatus !== 'completed');
-  return { ...snapshot, reason: candidates.length > 1 ? 'selection-required' : candidates.length ? 'selected' : unresolved ? 'attention-required' : snapshot.works.length ? 'all-completed' : 'no-bindings',
+  const unresolved = snapshot.works.some(w => !['completed','cancelled','superseded'].includes(w.workStatus));
+  const closedReason = snapshot.works.some(w => ['cancelled','superseded'].includes(w.workStatus)) ? 'all-closed' : 'all-completed';
+  return { ...snapshot, reason: candidates.length > 1 ? 'selection-required' : candidates.length ? 'selected' : unresolved ? 'attention-required' : snapshot.works.length ? closedReason : 'no-bindings',
     candidates: candidates.map(w => ({ id: w.id, kind: w.kind })), selected: candidates.length === 1 ? candidates[0] : null };
 }
 

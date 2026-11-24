@@ -182,4 +182,70 @@ test('success and conditional warnings preserve the legacy presentation', () => 
   } finally { good.cleanup(); bad.cleanup(); }
 });
 
+
+// #381: actual CLI previews must leave the COMPLETE project tree byte/metadata-identical.
+const doctor381Root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-doctor-dryrun-')));
+const doctor381Script = path.join(__dirname, 'forge-doctor.js');
+const doctor381Env = require('./run-tests.js').childEnv(path.join(doctor381Root, 'isolated-home'), 'forge-doctor.test.js');
+const doctor381ForgeHome = path.join(doctor381Root, 'forge-home');fs.mkdirSync(doctor381ForgeHome);
+fs.cpSync(path.join(__dirname, '..', 'shared'), path.join(doctor381ForgeHome, 'shared'), { recursive: true });
+Object.assign(doctor381Env, { FORGE_HOME: doctor381ForgeHome });
+function doctor381Snapshot(root) {
+ const rows = [];
+ function visit(relative) {
+  const file = path.join(root, relative), stat = fs.lstatSync(file);assert(!stat.isSymbolicLink());
+  rows.push({ path: relative.replace(/\\/g, '/'), type: stat.isDirectory() ? 'directory' : 'file', mode: stat.mode,
+    size: stat.isFile() ? stat.size : null, mtime: stat.mtimeMs, bytes: stat.isFile() ? fs.readFileSync(file).toString('base64') : null });
+  if (stat.isDirectory()) for (const name of fs.readdirSync(file).sort()) visit(path.join(relative, name));
+ }
+ visit('');return rows;
+}
+function doctor381Run(root, args) {
+ return require('child_process').spawnSync(process.execPath, [doctor381Script, '--cwd', root, ...args],
+  { cwd: root, env: doctor381Env, encoding: 'utf8', windowsHide: true, timeout: 15000, maxBuffer: 1024 * 1024 });
+}
+function doctor381Fixture(name, setup, action) {
+ const root = fs.mkdtempSync(path.join(doctor381Root, name + '-'));setup(root);
+ try { action(root); }
+ finally { const relative = path.relative(doctor381Root, fs.realpathSync.native(root));assert(relative && relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative));fs.rmSync(root, { recursive: true, force: true }); }
+}
+function doctor381Monoliths(root) {
+ fs.mkdirSync(path.join(root, '.gsd'));
+ fs.writeFileSync(path.join(root, '.gsd', 'LEDGER.md'), '## M-20260101000000-preview — Preview milestone\n\n**Slices:** S01\n\n**Key files:** scripts/forge-doctor.js\n\n**Key decisions:** D12\n');
+ fs.writeFileSync(path.join(root, '.gsd', 'DECISIONS.md'), '# Forge Decisions Log\n\n| # | When | Scope | Decision | Choice | Rationale | Revisable? |\n|---|------|-------|----------|--------|-----------|------------|\n| 1 | 2026-01-01 | M-20260101000000-preview | Keep preview read-only | Yes | Safety | No |\n');
+ fs.writeFileSync(path.join(root, '.gsd', 'AUTO-MEMORY.md'), '# Forge Auto-Memory\n\n- [MEM001] (convention) confidence:0.90 hits:3 — Preview entry\n  source: task/T01 | updated: 2026-01-01\n');
+}
+test('#381 --fix --dry-run does not even create missing .gsd; real --fix still applies', () => {
+ doctor381Fixture('missing', () => {}, root => {
+  const before = doctor381Snapshot(root), dry = doctor381Run(root, ['--fix', '--dry-run']);assert.strictEqual(dry.status, 0, dry.stderr);
+  assert.deepStrictEqual(doctor381Snapshot(root), before);assert.match(dry.stdout, /dry-run; no files written/);assert.match(dry.stdout, /Would create/);assert(!fs.existsSync(path.join(root, '.gsd')));
+  const applied = doctor381Run(root, ['--fix']);assert.strictEqual(applied.status, 0, applied.stderr);assert.strictEqual(fs.readFileSync(path.join(root, '.gsd', 'SCHEMA-VERSION'), 'utf8'), doctor.CURRENT_SCHEMA + '\n');
+ });
+});
+test('#381 existing missing, outdated and current schema previews preserve all project bytes and timestamps', () => {
+ for (const current of [null, '0.0.1\n', doctor.CURRENT_SCHEMA + '\n']) doctor381Fixture('existing', root => {
+  fs.mkdirSync(path.join(root, '.gsd'));if(current !== null)fs.writeFileSync(path.join(root, '.gsd', 'SCHEMA-VERSION'), current);fs.writeFileSync(path.join(root, '.gsd', 'sentinel.json'), '{"retained":true}\n');
+ }, root => { const before = doctor381Snapshot(root), dry = doctor381Run(root, ['--fix', '--dry-run']);assert.strictEqual(dry.status, 0, dry.stderr);assert.deepStrictEqual(doctor381Snapshot(root), before);assert.match(dry.stdout, /dry-run; no files written/);assert(current === doctor.CURRENT_SCHEMA + '\n' ? dry.stdout.includes('already at') : dry.stdout.includes(current === null ? 'Would create' : 'Would update')); });
+});
+test('#381 unmigrated preview without --migrate preserves the refusal and original monoliths', () => {
+ doctor381Fixture('refusal', doctor381Monoliths, root => {const before = doctor381Snapshot(root), dry = doctor381Run(root, ['--fix', '--dry-run']);assert.strictEqual(dry.status, 1);assert.match(dry.stdout, /Refusing to stamp/);assert.match(dry.stdout, /dry-run; no files written/);assert.deepStrictEqual(doctor381Snapshot(root), before);});
+});
+test('#381 --fix --migrate --dry-run forwards true to real migrations; actual apply still migrates', () => {
+ doctor381Fixture('migrate', doctor381Monoliths, root => {
+  const before = doctor381Snapshot(root), dry = doctor381Run(root, ['--fix', '--migrate', '--dry-run']);assert.strictEqual(dry.status, 0, dry.stderr);assert.deepStrictEqual(doctor381Snapshot(root), before);
+  assert.match(dry.stdout, /dry-run; no files written/);for(const store of ['ledger','decisions','memory'])assert.match(dry.stdout, new RegExp(store + ': [1-9][0-9]* fragment\\(s\\) would be written'));
+  assert(!dry.stdout.includes('SCHEMA-VERSION stamped:'));assert(!fs.existsSync(path.join(root, '.gsd', 'SCHEMA-VERSION')));
+  const applied = doctor381Run(root, ['--fix', '--migrate']);assert.strictEqual(applied.status, 0, applied.stderr);assert.match(applied.stdout, /ledger: [1-9][0-9]* fragment\(s\) written/);assert.strictEqual(fs.readFileSync(path.join(root, '.gsd', 'SCHEMA-VERSION'), 'utf8'), doctor.CURRENT_SCHEMA + '\n');assert(fs.existsSync(path.join(root, '.gsd', 'LEDGER.md.bak')));
+ });
+});
+test('#381 migration preview preserves an existing backup and every other file', () => {
+ doctor381Fixture('backup', root => {doctor381Monoliths(root);fs.copyFileSync(path.join(root, '.gsd', 'LEDGER.md'), path.join(root, '.gsd', 'LEDGER.md.bak'));}, root => {const before = doctor381Snapshot(root), dry = doctor381Run(root, ['--fix', '--migrate', '--dry-run']);assert.strictEqual(dry.status, 0, dry.stderr);assert.deepStrictEqual(doctor381Snapshot(root), before);assert.match(dry.stdout, /would be written/);});
+});
+test('#381 unknown fix modifiers, malformed dry-run values and unsupported action mixes refuse before writes', () => {
+ const invalid = [['--fix','--dry-rnu'],['--fix','--dry-run=false'],['--fix','--dry-run','false'],['--fix','--dry-run','--regen-projection'],['--fix','--dry-run','--recover-claim','M001','--apply'],['--regen-projection','--dry-run']];
+ for(const args of invalid)doctor381Fixture('invalid', () => {}, root => {const before = doctor381Snapshot(root), result = doctor381Run(root,args);assert.strictEqual(result.status,2,result.stdout+result.stderr);assert.deepStrictEqual(doctor381Snapshot(root),before);});
+});
+// The suite owns only this fresh disposable root; every child was synchronously joined.
+assert(path.basename(doctor381Root).startsWith('forge-doctor-dryrun-'));fs.rmSync(doctor381Root, { recursive: true, force: true });
+
 process.stdout.write(`\n${passed} passed, 0 failed\n`);

@@ -100,34 +100,29 @@ assert.deepStrictEqual(offlineCells, [
 assert.match(offlineBlock, /forge-offline-ci\.js --host \$\{\{ matrix\.host \}\}/);
 
 const testBlock = workflow.slice(workflow.indexOf('\n  test:'));
-const testCells = [...testBlock.matchAll(/- os: ([^\s]+)\s+platform: (linux|darwin|win32)\s+shard-index: (\d+)\s+shard-count: (\d+)\s+label: ([^\r\n]+)/g)]
-  .map((match) => ({ os: match[1], platform: match[2], shardIndex: Number(match[3]), shardCount: Number(match[4]), label: match[5] }));
-assert.deepStrictEqual(testCells, [
-  { os: 'ubuntu-latest', platform: 'linux', shardIndex: 0, shardCount: 1, label: 'ubuntu-latest' },
-  { os: 'macos-latest', platform: 'darwin', shardIndex: 0, shardCount: 2, label: 'macos-latest, shard 1/2' },
-  { os: 'macos-latest', platform: 'darwin', shardIndex: 1, shardCount: 2, label: 'macos-latest, shard 2/2' },
-  { os: 'windows-latest', platform: 'win32', shardIndex: 0, shardCount: 4, label: 'windows-latest, shard 1/4' },
-  { os: 'windows-latest', platform: 'win32', shardIndex: 1, shardCount: 4, label: 'windows-latest, shard 2/4' },
-  { os: 'windows-latest', platform: 'win32', shardIndex: 2, shardCount: 4, label: 'windows-latest, shard 3/4' },
-  { os: 'windows-latest', platform: 'win32', shardIndex: 3, shardCount: 4, label: 'windows-latest, shard 4/4' },
-]);
-assert.match(testBlock, /run-tests\.js[^\r\n]+--shard-index \$\{\{ matrix\.shard-index \}\} --shard-count \$\{\{ matrix\.shard-count \}\}/);
+const testCells = [...testBlock.matchAll(/- os: ([^\s]+)\s+platform: (linux|darwin|win32)\s+shard-index: (\d+)\s+shard-count: (\d+)\s+label: ([^\r\n]+)\s+workers: (\d+)\s+single-worker-jobs: (\d+)/g)]
+  .map((match) => ({ os: match[1], platform: match[2], shardIndex: Number(match[3]), shardCount: Number(match[4]), label: match[5], workers:Number(match[6]),singleWorkerJobs:Number(match[7]) }));
+assert.deepStrictEqual(testCells, [['ubuntu-latest','linux',5,2,4],['macos-latest','darwin',5,3,0],['windows-latest','win32',27,2,14]]
+  .flatMap(([os,platform,shardCount,workers,singleWorkerJobs])=>Array.from({length:shardCount},(_,shardIndex)=>({os,platform,shardIndex,shardCount,label:`${os}, shard ${shardIndex+1}/${shardCount}`,workers,singleWorkerJobs}))));
+assert.match(testBlock, /forge-ci-parallel\.js --shard-index \$\{\{ matrix\.shard-index \}\} --shard-count \$\{\{ matrix\.shard-count \}\} --jobs "\$\{\{ matrix\.workers \}\}"/);
+assert.match(testBlock,/--single-worker-jobs \$\{\{ matrix\.single-worker-jobs \}\}/);
 const compatibilityBlock = workflow.slice(workflow.indexOf('\n  required-offline-windows:'));
 assert.match(compatibilityBlock, /name: Offline \$\{\{ matrix\.host \}\} \/ \$\{\{ matrix\.platform \}\}/);
 assert.match(compatibilityBlock, /platform:\s*\r?\n\s+- linux\s*\r?\n\s+- darwin\s*\r?\n\s+- win32/);
 assert.match(compatibilityBlock, /host:\s*\r?\n\s+- claude\s*\r?\n\s+- codex/);
 assert.match(compatibilityBlock, /name: Tests \(windows-latest\)/);
 assert.match(compatibilityBlock, /name: Tests \(macos-latest\)/);
+assert.match(compatibilityBlock, /name: Tests \(ubuntu-latest\)/);
 assert.match(compatibilityBlock, /needs: operational-offline/);
 assert.match(compatibilityBlock, /needs: test/);
-assert.strictEqual((compatibilityBlock.match(/if: \$\{\{ always\(\) \}\}/g) || []).length, 3);
-assert.strictEqual((compatibilityBlock.match(/\.result \}\}" = success/g) || []).length, 3,
+assert.strictEqual((compatibilityBlock.match(/if: \$\{\{ always\(\) \}\}/g) || []).length, 4);
+assert.strictEqual((compatibilityBlock.match(/\.result \}\}" = success/g) || []).length, 4,
   'required-check compatibility jobs must fail when their real dependency fails');
 const testsAlias = (key, label) => `  ${key}:\n    name: Tests (${label})\n    needs: test\n    if: \${{ always() }}\n`
   + '    runs-on: ubuntu-latest\n    steps:\n      - name: Preserve required-check contract\n'
   + '        run: test "${{ needs.test.result }}" = success\n';
-assert(workflow.replace(/\r\n/g, '\n').endsWith(`${testsAlias('required-tests-windows', 'windows-latest')}\n${testsAlias('required-tests-macos', 'macos-latest')}`),
-  'macOS tests alias must follow the unchanged Windows alias at the end of the workflow');
+assert(workflow.replace(/\r\n/g, '\n').endsWith(`${testsAlias('required-tests-windows', 'windows-latest')}\n${testsAlias('required-tests-macos', 'macos-latest')}\n${testsAlias('required-tests-linux', 'ubuntu-latest')}`),
+  'all existing required names must retain enforcing aliases after matrix expansion');
 // This assertion replaces `assert.match(workflow, /shell:\s*pwsh/)`, which is exactly the
 // kind of guard that proves the wrong property: it matched the TEXT of a workflow GitHub
 // refused to schedule, so it stayed green across two runs on PR #71 that died at the

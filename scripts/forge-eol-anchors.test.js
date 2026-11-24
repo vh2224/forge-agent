@@ -496,12 +496,27 @@ test('R2: a regex quoted inside a comment is prose, never a call site', () => {
     'a slash pair inside a comment must not enter the census');
   assert.strictEqual(synthetic.call_sites.length, 1, 'only the executed construct is a call site');
 
-  // The named in-tree specimens, both verbatim comment quotations.
-  for (const [file, line] of [['forge-must-haves.test.js', 991], ['forge-smoke.js', 1399]]) {
+  // Locate the actual comment quotations, rather than an unrelated line that
+  // happens to contain no calls. Keep an independent anti-vacuity check and
+  // exercise relocation without asking the classifier to select its specimen.
+  const specimens = [
+    ['forge-must-haves.test.js', String.raw`// extractFrontmatter normalizes /\r\n?/g`],
+    ['forge-smoke.js', String.raw`// Regex: /forge-runs\.js[^\n]*--update`],
+  ];
+  for (const [file, quotation] of specimens) {
     const target = path.join(__dirname, file);
-    const scanned = anchors.classifyFile({ path: target, content: fs.readFileSync(target, 'utf8') });
-    assert.strictEqual(scanned.call_sites.filter((site) => site.line === line).length, 0,
-      `${file}:${line} is a comment quotation and must not inflate exposed/required_form counts`);
+    const content = fs.readFileSync(target, 'utf8');
+    for (const prefix of ['', '// unrelated lines before the specimen\n\n']) {
+      const relocated = prefix + content;
+      const matches = relocated.split(/\r?\n/)
+        .map((text, index) => ({ line: index + 1, text }))
+        .filter(({ text }) => text.trimStart().startsWith(quotation));
+      assert.strictEqual(matches.length, 1, file + ' must contain exactly one named comment quotation');
+      const { line } = matches[0];
+      const scanned = anchors.classifyFile({ path: target, content: relocated });
+      assert.strictEqual(scanned.call_sites.filter((site) => site.line === line).length, 0,
+        `${file}:${line} is a comment quotation and must not inflate exposed/required_form counts`);
+    }
   }
 });
 

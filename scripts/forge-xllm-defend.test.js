@@ -60,6 +60,21 @@ assert.ok(/both failure modes/i.test(prompt), 'agree-with-everything is called o
 assert.ok(/verify claims against the actual code/i.test(prompt), 'told to check the code');
 assert.ok(prompt.includes('R1 — src/a.js:10 — claim'), 'objections embedded verbatim');
 
+// ── #341 dual verdict: the author contests reachable/in_scope; legacy stays identical ──
+assert.ok(prompt.includes('"rationale", "reachable", "in_scope"'), 'defense asks reachable and in_scope per verdict');
+assert.ok(/NORMAL USE/.test(prompt) && /theoretical path/.test(prompt) && /not conceding "fix it now"/.test(prompt));
+const contested = { verdicts: [{ id: 'R1', verdict: 'conceded', rationale: 'real bug', reachable: 'no', in_scope: 'yes' }] };
+assert.ok(validateVerdicts(contested, DEFEND_VERDICT_ENUM), 'contest fields accepted');
+for (const bad of [{ reachable: 'maybe' }, { in_scope: 'YES' }, { reachable: null }]) {
+  assert.ok(!validateVerdicts({ verdicts: [{ ...defenseObj.verdicts[0], ...bad }] }, DEFEND_VERDICT_ENUM), `invalid ${JSON.stringify(bad)} rejected`);
+}
+assert.deepStrictEqual(normalizeDefense(contested).verdicts[0],
+  { id: 'R1', verdict: 'conceded', rationale: 'real bug', reachable: 'no', in_scope: 'yes' }, 'contest carried when present');
+assert.strictEqual(JSON.stringify(normalizeDefense(defenseObj)),
+  '{"verdicts":[{"id":"R1","verdict":"conceded","rationale":"real bug"}]}', 'legacy defense byte-identical');
+const defendSchema = verdictSchema(DEFEND_VERDICT_ENUM).properties.verdicts.items;
+assert.ok(['reachable', 'in_scope'].every(key => defendSchema.required.includes(key)), 'strict transport schema requires the contest');
+
 // ── Missing --input is a caller error, not a silent empty defense ────────────
 // runDefend became async in M018 S05 (codex moved to the app-server transport), so
 // an argument error arrives as a REJECTION, not a synchronous throw. The assertion

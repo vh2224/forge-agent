@@ -156,6 +156,25 @@ test('loose decision text remains the complete original fragment', () => {
   assert.ok(text.includes('Decision 2'));
 });
 
+test('review R18 decisions prepare is read-only and apply deduplicates exact bytes while rejecting stale or foreign plans', () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-decisions-prepared-'));
+  const fragment = { unit_id:'M001', decisions:[{when:'2026-11-10',scope:'task',decision:'Retain custody',choice:'yes',rationale:'joined cohort',revisable:'yes'}] };
+  const prepared = decisions.prepareFragment(cwd, fragment).prepared;
+  assert.strictEqual(fs.existsSync(path.join(cwd,'.gsd')),false,'preview must not create directories or locks');
+  const applied = decisions.applyPreparedFragment(cwd,fragment,prepared);
+  const before = fs.readFileSync(applied.path);
+  assert.strictEqual(decisions.applyPreparedFragment(cwd,fragment,prepared).created,false);
+  assert.deepStrictEqual(fs.readFileSync(applied.path),before);
+  assert.strictEqual(decisions.readFragment(cwd,'M001').decisions.length,1,'replay keeps one canonical decision');
+  assert.throws(()=>decisions.applyPreparedFragment(cwd,fragment,{...prepared,path:path.join(cwd,'foreign.md')}),/prepared|conflict|stale/i);
+  const revised = {...fragment,decisions:[...fragment.decisions,{...fragment.decisions[0],decision:'Second fact'}]};
+  assert.throws(()=>decisions.applyPreparedFragment(cwd,revised,prepared),/prepared|conflict|stale/i);
+  fs.appendFileSync(applied.path,'foreign\n');
+  const foreign = fs.readFileSync(applied.path);
+  assert.throws(()=>decisions.applyPreparedFragment(cwd,fragment,prepared),/prepared|conflict|stale/i);
+  assert.deepStrictEqual(fs.readFileSync(applied.path),foreign);
+});
+
 if (failed) {
   for (const failure of failures) console.error(`- ${failure.name}: ${failure.error.message}`);
   process.exitCode = 1;

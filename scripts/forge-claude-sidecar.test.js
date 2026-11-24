@@ -2112,6 +2112,53 @@ test('session: budget-exceeded-while-active keeps the session and returns a froz
   assert.strictEqual(fs.existsSync(run.file), false);
 });
 
+
+// Issue373: real bounded synthetic CLI, private transcript, no provider/network.
+function activeOutputSessionFixture(mode) {
+  return writeFixture('claude active output ' + mode + '.js', `
+'use strict';
+const fs=require('fs'),path=require('path'),args=process.argv.slice(2);
+const at=args.indexOf('--session-id'),resume=args.indexOf('--resume');
+const id=at>=0?args[at+1]:resume>=0?args[resume+1]:null;
+const home=process.platform==='win32'?process.env.USERPROFILE:process.env.HOME;
+const key=require(${JSON.stringify(require.resolve('./forge-claude-session'))}).projectKey(process.cwd());
+const dir=path.join(home,'.claude','projects',key),file=path.join(dir,id+'.jsonl');
+if(resume>=0&&!fs.existsSync(file))process.exit(2);
+fs.mkdirSync(dir,{recursive:true});fs.appendFileSync(file,'{"fixture":true}\\n');
+const out=v=>process.stdout.write(JSON.stringify(v)+'\\n');
+out({type:'system',subtype:'init',session_id:${JSON.stringify(mode)}==='unconfirmed'?undefined:${JSON.stringify(mode)}==='wrong'?${JSON.stringify(OTHER_SESSION_ID)}:id});
+if(${JSON.stringify(mode)}!=='starting')out({type:'stream_event',event:{type:'message_start',message:{id:'output-active',role:'assistant'}}});
+// Each frame is below the line cap; total stdout crosses the unchanged16MiB cap.
+const frame=JSON.stringify({type:'system',subtype:'status',padding:'x'.repeat(60000)})+'\\n';
+let count=0;function flood(){if(++count<=300){process.stdout.write(frame);setImmediate(flood);}}
+setTimeout(flood,20);setInterval(()=>{},1000);
+`);
+}
+test('issue373 active output cap retains exact confirmed session once without changing reason or bounds', async () => {
+  assert.strictEqual(require('./forge-claude-stream').LIMITS.stdout,16777216);
+  const fixture=activeOutputSessionFixture('active');
+  const first=await runSession(fixture,{session:{persist:true},timeoutMs:15000});
+  try {
+    assert.strictEqual(first.error.code,'claude-output-limit');
+    assert.strictEqual(first.error.session.id,first.id);
+    assert.strictEqual(first.error.diagnostic.reason,'output-limit');
+    assert(['working','slow-suspect'].includes(first.error.liveness.state));
+    assert.strictEqual(fs.existsSync(first.file),true);
+    const second=await runSession(fixture,{session:{resume:first.error.session},timeoutMs:15000},null,first.home);
+    assert.strictEqual(second.error.code,'claude-output-limit');
+    assert.strictEqual(second.error.session,undefined,'one resume only');
+    assert.strictEqual(fs.existsSync(first.file),false,'resumed output failure cleans the exact transcript');
+  } finally { if(first.error?.session)SESSION_MODULE.removeSession(first.error.session); }
+});
+test('issue373 output cap before activity or without matching session confirmation never retains a ref', async () => {
+  for(const mode of ['starting','unconfirmed','wrong']){
+    const run=await runSession(activeOutputSessionFixture(mode),{session:{persist:true},timeoutMs:15000});
+    assert.strictEqual(run.error.code,'claude-output-limit');
+    assert.strictEqual(run.error.session,undefined,mode);
+    assert.strictEqual(fs.existsSync(run.file),false,mode+' cleans only its transcript');
+  }
+});
+
 test('session: dead-silence removes the session and never attaches a ref', async () => {
   const run = await runSession(SESSION_SILENT_FIXTURE, { session: { persist: true } },
     acceleratedClock(200, { fromFirstRemote: true }));
@@ -2241,6 +2288,57 @@ test('resume: argv equals the start argv except --resume <id> and the fixed -p i
   assert.strictEqual(contexts[0].input_tokens,
     Math.ceil(require('./forge-claude-sidecar').CLAUDE_RESUME_INSTRUCTION.length / 4), 'telemetry measures the instruction');
   assert.strictEqual(fs.existsSync(file), false, 'session removed after the resume');
+});
+
+// #330: the read-only owner directory rides the real child argv as ONE --add-dir
+// pair; same-cwd and absent owners add nothing, and the rest of the argv keeps
+// its values and order. buildClaudeArgs stays private: only the recorded spawn.
+test('SEC330 argv: external owner is one --add-dir pair; same-cwd/absent add none; other argv unchanged', async () => {
+  const owner = path.join(ROOT, 'SEC330 external owner with spaces');
+  fs.mkdirSync(owner, { recursive: true });
+  const readOnlyPlan = { readOnly: true, effort: 'medium' };
+  const runs = {};
+  for (const [label, extra] of [['absent', {}], ['same-cwd', { contextRoot: WORKSPACE }], ['external', { contextRoot: owner }]]) {
+    runs[label] = await runSession(SESSION_OK_FIXTURE, { ...readOnlyPlan, ...extra });
+    assert.strictEqual(runs[label].error, null, `${label}: ${runs[label].error && runs[label].error.code}`);
+    assert.strictEqual(runs[label].records.length, 1, `${label}: exactly one inference spawn`);
+  }
+  const args = (label) => runs[label].records[0].args;
+  const addDirs = (list) => list.reduce((found, arg, index) => arg === '--add-dir' ? [...found, index] : found, []);
+
+  // SEC330-1: exactly one pair, the exact owner as a single argument (spaces kept).
+  const external = args('external');
+  assert.deepStrictEqual(addDirs(external).length, 1, 'SEC330-1: exactly one --add-dir pair');
+  const at = addDirs(external)[0];
+  assert.strictEqual(external[at + 1], path.resolve(owner), 'SEC330-1: exact owner directory');
+  ok(external[at + 1].includes(' '), 'SEC330-1: the owner with spaces stays one argument');
+  // Current executable order: --model, --add-dir (when present), --effort.
+  assert.deepStrictEqual(external.slice(at - 2, at + 4),
+    ['--model', FIXTURE_MODEL, '--add-dir', path.resolve(owner), '--effort', 'medium'], 'SEC330-1: model/add-dir/effort order');
+
+  // SEC330-2: absent and same-cwd owners emit no --add-dir and share one argv.
+  assert.deepStrictEqual(addDirs(args('absent')), [], 'SEC330-2: absent owner adds no --add-dir');
+  assert.deepStrictEqual(addDirs(args('same-cwd')), [], 'SEC330-2: same-cwd owner adds no --add-dir');
+  assert.deepStrictEqual(withoutSession(args('same-cwd')), withoutSession(args('absent')), 'SEC330-2: same-cwd keeps the baseline argv');
+  // SEC330-2: removing only the owner pair leaves every other value and position.
+  const stripped = external.slice();
+  stripped.splice(at, 2);
+  assert.deepStrictEqual(withoutSession(stripped), withoutSession(args('absent')),
+    'SEC330-2: model/effort/schema/tools/permissions/settings keep values and order');
+  for (const flag of ['--json-schema', '--settings', '--setting-sources', '--mcp-config', '--no-session-persistence']) {
+    ok(external.includes(flag), `SEC330-2: ${flag} still present`);
+  }
+
+  // SEC330-3: read-only tools only; no write grant or permission mode appears.
+  for (const label of Object.keys(runs)) {
+    const list = args(label);
+    assert.strictEqual(list[list.indexOf('--tools') + 1], 'Read,Glob,Grep', `SEC330-3: ${label} --tools`);
+    assert.strictEqual(list[list.indexOf('--allowedTools') + 1], 'Read,Glob,Grep', `SEC330-3: ${label} --allowedTools`);
+    assert.strictEqual(list.filter((arg) => arg === '--allowedTools').length, 1, `SEC330-3: ${label} one allow list`);
+    ok(!list.includes('--permission-mode'), `SEC330-3: ${label} no acceptEdits`);
+    ok(!list.some((arg) => /^(?:Read|Glob|Grep|Edit|Write|Bash)(?:,|$)/.test(arg) && /Edit|Write|Bash/.test(arg)),
+      `SEC330-3: ${label} no tool list grants a write tool`);
+  }
 });
 
 test('resume: invalid ref, other account, other config dir, other cwd and ineligible phase refuse before any spawn', async () => {

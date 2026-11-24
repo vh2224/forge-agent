@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "issue": 347,
+  "provenance": {
+    "base_revision": "ad62d774fc37ec6fcf5a85347d69eaf5c8a8c675",
+    "method": "measured LF source bytes and pure Claude render; distribution proof only"
+  },
+  "surfaces": {
+    "agents": {
+      "before": "30d0fb3fecdb88a4d2ac76dbb5a1ee6669aa3455f1fa41461137f89a164921c0",
+      "after": "91dd5d2a3ece86df030fcf5e374041c3bb496da040baf3f3a2830445061c8c5e",
+      "attributed_before": "30d0fb3fecdb88a4d2ac76dbb5a1ee6669aa3455f1fa41461137f89a164921c0",
+      "attributed_after": "91dd5d2a3ece86df030fcf5e374041c3bb496da040baf3f3a2830445061c8c5e"
+    },
+    "hooks": {
+      "before": "c149db9dd45bed13f05931987217d224a6f23d805dc6e8900e46b32893a41c48",
+      "after": "228bceb55413320b8f3b47564711989f454a841d9946ebdfde92f690b733ad1e",
+      "attributed_before": "c149db9dd45bed13f05931987217d224a6f23d805dc6e8900e46b32893a41c48",
+      "attributed_after": "228bceb55413320b8f3b47564711989f454a841d9946ebdfde92f690b733ad1e"
+    }
+  },
+  "files": {
+    "agents/forge-advocate.md": {
+      "before": "3cb47445f6bc4ddbd8a2ade71ce553f2d1eb5b60e59b3166f7251cc2c989471f",
+      "after": "3223b72ff9ed9d9784448f5a57950ea8deb3dd1be5b1dc4a29fe4b7d37acf4f9",
+      "attributed_before": "3cb47445f6bc4ddbd8a2ade71ce553f2d1eb5b60e59b3166f7251cc2c989471f",
+      "attributed_after": "3223b72ff9ed9d9784448f5a57950ea8deb3dd1be5b1dc4a29fe4b7d37acf4f9"
+    },
+    "agents/forge-completer.md": {
+      "before": "576c9be21fdab8d128302cd72582dec72f2d3560b142736fcecdfd8710c11a4c",
+      "after": "4e3774ea642689b2f17399ec7d17970b0c5fb371257afcac990f5057b849798a",
+      "attributed_before": "576c9be21fdab8d128302cd72582dec72f2d3560b142736fcecdfd8710c11a4c",
+      "attributed_after": "4e3774ea642689b2f17399ec7d17970b0c5fb371257afcac990f5057b849798a"
+    },
+    "agents/forge-discusser.md": {
+      "before": "cf015bf24fb5c3472787d01222f9afa7fb52d166d82a1fd337488a70cebd4979",
+      "after": "1b996cfedd939cb97c6398aa0060fc9af34b66e8376f30c1025583bca5dc7f46",
+      "attributed_before": "cf015bf24fb5c3472787d01222f9afa7fb52d166d82a1fd337488a70cebd4979",
+      "attributed_after": "1b996cfedd939cb97c6398aa0060fc9af34b66e8376f30c1025583bca5dc7f46"
+    },
+    "agents/forge-executor.md": {
+      "before": "40cc7485dc0b67815db6ffdbd3a43b14671d85010c647e795863426cc5aba0dc",
+      "after": "fe0a24473a935c32a0cdca8f364cf8b2731800194d30cda3194e6bc64c6fa2a9",
+      "attributed_before": "40cc7485dc0b67815db6ffdbd3a43b14671d85010c647e795863426cc5aba0dc",
+      "attributed_after": "fe0a24473a935c32a0cdca8f364cf8b2731800194d30cda3194e6bc64c6fa2a9"
+    },
+    "agents/forge-plan-checker.md": {
+      "before": "d31f7b7025cdd24a7a42c476204a54b684f083417c57df95244782c05802ffcb",
+      "after": "dc8551ed54b1d360bb6b1dab49e877feeda82d7114987e903570192c2f921426",
+      "attributed_before": "d31f7b7025cdd24a7a42c476204a54b684f083417c57df95244782c05802ffcb",
+      "attributed_after": "dc8551ed54b1d360bb6b1dab49e877feeda82d7114987e903570192c2f921426"
+    },
+    "agents/forge-planner.md": {
+      "before": "e97cb09294ef4cea8afc79896a8854836a78122bb5c4451b24fa37daf3fbd02e",
+      "after": "45ceadf4a8299115a9a492a9beab4e4c83e29748ca68af03763144b5e904e4cb",
+      "attributed_before": "e97cb09294ef4cea8afc79896a8854836a78122bb5c4451b24fa37daf3fbd02e",
+      "attributed_after": "45ceadf4a8299115a9a492a9beab4e4c83e29748ca68af03763144b5e904e4cb"
+    },
+    "agents/forge-researcher.md": {
+      "before": "40cc2294610659f9de44538e00c9f3cc22a52c27bd7768e68c8a767234db8947",
+      "after": "7f603420819aaf6cc6f79680461189d47014ef89ccc58ed791441b50e221063f",
+      "attributed_before": "40cc2294610659f9de44538e00c9f3cc22a52c27bd7768e68c8a767234db8947",
+      "attributed_after": "7f603420819aaf6cc6f79680461189d47014ef89ccc58ed791441b50e221063f"
+    },
+    "agents/forge-reviewer.md": {
+      "before": "d2d92895ae7b9a5fb6faa56fa4a3c256d337941bbf1c7386bcab555bd9c5ddf9",
+      "after": "1f8f0a50d33df7ad3e6dc0b1b1a622c0109692251dcf5de80665d313ab4c5812",
+      "attributed_before": "d2d92895ae7b9a5fb6faa56fa4a3c256d337941bbf1c7386bcab555bd9c5ddf9",
+      "attributed_after": "1f8f0a50d33df7ad3e6dc0b1b1a622c0109692251dcf5de80665d313ab4c5812"
+    },
+    "agents/forge-worker.md": {
+      "before": "5924147d58486e2bb16bf16811730a80f20b964c89d553ae39b6ca27cb23e29f",
+      "after": "76c27c606ec7b28fd8e3f78666f15237ce7909811c1200c7ff110c6acafc6ce4",
+      "attributed_before": "5924147d58486e2bb16bf16811730a80f20b964c89d553ae39b6ca27cb23e29f",
+      "attributed_after": "76c27c606ec7b28fd8e3f78666f15237ce7909811c1200c7ff110c6acafc6ce4"
+    },
+    "scripts/forge-hook.js": {
+      "before": "6d95cf27d00e39d7f20487bd30695436a81cbcc8ef6b5bf9340f2fa5178edfd0",
+      "after": "1ab156ae4fd74c01c656ce3b378691a2ab126d39343f38d8a19e43ac1ef0a946",
+      "attributed_before": "6d95cf27d00e39d7f20487bd30695436a81cbcc8ef6b5bf9340f2fa5178edfd0",
+      "attributed_after": "1ab156ae4fd74c01c656ce3b378691a2ab126d39343f38d8a19e43ac1ef0a946"
+    },
+    "shared/forge-dispatch.md": {
+      "before": "04c89ff6107ee798a00c7ab52a1ac644356d0c3269a7965e9b4fe73f6b37cafe",
+      "after": "2bfbff7c78c7e231bf1a5bc99ae558715adc36e25546a505eea808feda874e87",
+      "attributed_before": "e53e8989da10f313ba3d8183a43341b814c3b57c4d08b7b5395e9626ab307373",
+      "attributed_after": "341b9df44bc997e961ee2132abbbf849e94fde6c06dbc2160a7ced548fc0cf66"
+    }
+  },
+  "unchanged_surfaces": [
+    "commands",
+    "skills",
+    "dispatch-templates",
+    "mcp",
+    "claude-instructions",
+    "claude-settings",
+    "configuration"
+  ]
+}

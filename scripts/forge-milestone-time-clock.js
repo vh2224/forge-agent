@@ -55,20 +55,48 @@ function readSource(root, reference, limit = MAX_JSON, json = false) {
   return result;
 }
 function publicSource(source) { const { buffer, value, ...metadata } = source; return metadata; }
+function createEndpointDeliveryCache(endpointBudget) {
+  return { files: new Map(), absent: new Map(), hashes: new Map(), blobs: new Map(), bytes: 0, endpointBudget };
+}
+function createEndpointDeliveryCaches() {
+  // Endpoint history and current code each retain the existing8MiB budget.
+  // Their private shared budget additionally bounds16MiB and1024 entries of each species.
+  const budget = { existing: 0, absent: 0, bytes: 0 };
+  return { history: createEndpointDeliveryCache(budget), current: createEndpointDeliveryCache(budget) };
+}
 function deliverySource(options, root, reference, limit = MAX_JSON, json = false) {
   const key = path.resolve(root) + '\0' + reference, cache = options.deliveryCache;
-  let result = cache.files.get(key);
+  cache.absent ||= new Map();
+  let result = cache.files.get(key) || cache.absent.get(key);
   if (!result) {
     const source = readSource(root, reference, limit, json);
-    cache.bytes += source.bytes;
-    if (cache.files.size >= 1024 || cache.bytes > 8 * MAX_JSON) fail('delivery-source-limit');
-    result = { root, reference, limit, source }; cache.files.set(key, result);
+    if (source.status === 'absent') {
+      // An optional absent candidate is only a revalidated observation: it holds no bytes and
+      // never takes one of the 1024 slots reserved for existing delivery source files.
+      if (cache.absent.size >= 1024 || cache.endpointBudget?.absent >= 1024) fail('delivery-source-limit');
+      result = { root, reference, limit, source }; cache.absent.set(key, result);
+      if (cache.endpointBudget) cache.endpointBudget.absent++;
+    } else {
+      const bytes = cache.bytes + source.bytes, budget = cache.endpointBudget;
+      if (cache.files.size >= 1024 || bytes > 8 * MAX_JSON
+          || budget && (budget.existing >= 1024 || budget.bytes + source.bytes > 16 * MAX_JSON)) fail('delivery-source-limit');
+      result = { root, reference, limit, source }; cache.files.set(key, result);
+      cache.bytes = bytes;
+      if (budget) { budget.existing++; budget.bytes += source.bytes; }
+    }
   }
   if (result.source.bytes > limit) fail('delivery-source-limit');
   if (json && result.source.value === undefined && result.source.buffer) {
     try { result.source.value = JSON.parse(result.source.buffer.toString('utf8')); } catch { fail('clock-source-json-invalid'); }
   }
   return result.source;
+}
+// Reread every cached existing source and every observed-absent candidate; a candidate that
+// appeared (or changed) since the first read makes the whole proof unstable.
+function revalidateDeliveryCache(options) {
+  for (const read of [...options.deliveryCache.files.values(), ...(options.deliveryCache.absent?.values() || [])]) {
+    if (readSource(read.root, read.reference, read.limit).sha256 !== read.source.sha256) fail('clock-source-unstable');
+  }
 }
 function revisionBlobHash(cwd, revision, relative) {
   const { git } = require('./forge-git-process');
@@ -115,7 +143,7 @@ function sameRoot(left, right) {
 // Multiroot envelopes bind one contract root; scope paths are mapped into it.
 function captureScope(options, envelope, scope) {
   const contract = options.executionContract;
-  if (!contract) return { codeRoot: options.codeDir || options.cwd, scope };
+  if (!contract) return expandedCaptureScope(options, envelope, options.codeDir || options.cwd, scope);
   const row = contract.code_roots.find(r => r.id === envelope?.root_id);
   if (!row) fail('delivery-code-root-mismatch');
   const mapped = [];
@@ -125,7 +153,23 @@ function captureScope(options, envelope, scope) {
     catch { fail('delivery-code-root-mismatch'); }
     if (resolved.root_id === row.id) mapped.push(resolved.path);
   }
-  return { codeRoot: row.path, scope: mapped };
+  return expandedCaptureScope(options, envelope, row.path, mapped);
+}
+function expandedCaptureScope(options, envelope, codeRoot, declared) {
+  const sourceScope = require('./forge-delivery-source-scope');
+  const expanded = sourceScope.expand(codeRoot, envelope, declared, { current: options.proofMode === 'current-source-strict' });
+  if (expanded.globs.length && options.proofMode === 'current-source-strict') {
+    options.deliveryCache.globScopes ||= new Map();
+    const key = codeRoot + '\0' + JSON.stringify([envelope.revision, envelope.workspace, declared]);
+    if (options.deliveryCache.globScopes.size >= 64 && !options.deliveryCache.globScopes.has(key)) fail('delivery-source-inventory-limit');
+    options.deliveryCache.globScopes.set(key, { codeRoot, envelope, declared });
+  }
+  return { codeRoot, scope: expanded.paths, globs: expanded.globs };
+}
+function revalidateGlobScopes(options) {
+  for (const row of options.deliveryCache.globScopes?.values() || []) {
+    require('./forge-delivery-source-scope').expand(row.codeRoot, row.envelope, row.declared, { current: true });
+  }
 }
 function capturedSourceHash(options, envelope, relative, root) {
   const cache = options.deliveryCache, codeRoot = root || options.codeDir || options.cwd;
@@ -146,11 +190,11 @@ function capturedSourceHash(options, envelope, relative, root) {
   return cache.blobs.get(key);
 }
 function validateCurrentSources(options, envelope, fullScope) {
-  const cache = options.deliveryCache, { codeRoot, scope } = captureScope(options, envelope, fullScope);
+  const cache = options.deliveryCache, { codeRoot, scope } = captureScope(options, envelope, fullScope), sourceLimit = cache.endpointBudget ? 8 * MAX_JSON : phaseCost.MAX_BYTES;
   if (!envelope || !Array.isArray(envelope.workspace) || !scope.length) fail('delivery-current-source-binding-missing');
   if (!sameRoot(envelope.code_dir, codeRoot)) fail('delivery-code-root-mismatch');
   for (const relative of scope) {
-    const source = deliverySource(options, codeRoot, relative, phaseCost.MAX_BYTES);
+    const source = deliverySource(options, codeRoot, relative, sourceLimit);
     if (source.status !== 'valid') fail('delivery-current-source-changed');
     const expected = capturedSourceHash(options, envelope, relative, codeRoot);
     const key = codeRoot + '\0' + relative;
@@ -159,7 +203,7 @@ function validateCurrentSources(options, envelope, fullScope) {
       const read = (options.currentHashReader || ((cwd, file) => require('./forge-vcs').hashPath(cwd, file,
         { vcs: 'git', maxBuffer: 1024, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_NO_REPLACE_OBJECTS: '1' } })))(codeRoot, relative);
       if (!read?.ok || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(read.hash)) fail('delivery-current-source-unreadable');
-      if (readSource(codeRoot, relative, phaseCost.MAX_BYTES).sha256 !== source.sha256) fail('clock-source-unstable');
+      if (readSource(codeRoot, relative, sourceLimit).sha256 !== source.sha256) fail('clock-source-unstable');
       cache.hashes.set(key, read.hash);
     }
     if (cache.hashes.get(key) !== expected) fail('delivery-current-source-changed');
@@ -169,7 +213,7 @@ function validateCurrentSources(options, envelope, fullScope) {
 // it to today's files, and cannot stand in for integrated verification/review.
 function historicalCapture(options, reference, read, fullScope, expected) {
   const envelope = read.value;
-  const { codeRoot, scope } = captureScope(options, envelope, fullScope);
+  const { codeRoot, scope, globs } = captureScope(options, envelope, fullScope);
   if (!Array.isArray(envelope?.workspace) || envelope.workspace.length > 256
       || !sameRoot(envelope.code_dir, codeRoot)) fail('delivery-current-source-binding-missing');
   const capturedAt = instant(envelope.captured_at);
@@ -186,7 +230,7 @@ function historicalCapture(options, reference, read, fullScope, expected) {
   return { unit: require('./forge-delivery').unitKey(expected), reference, sha256: read.sha256,
     revision: /^(?:[a-f0-9]{40}|[a-f0-9]{64}|[a-z][a-z0-9.-]{0,99})$/.test(envelope.revision) ? envelope.revision : null,
     workspace, workspace_scope: 'declared-source-paths-only', captured_at: envelope.captured_at,
-    plan_fingerprint: envelope.plan_fingerprint, source_bindings: bindings, current_source_conformity: 'not-evaluated' };
+    plan_fingerprint: envelope.plan_fingerprint, source_bindings: bindings, ...(globs.length ? { scope_globs: globs } : {}), current_source_conformity: 'not-evaluated' };
 }
 function sourceReason(error) {
   return /^(?:clock-|phase-cost-|time-|delivery-)/.test(error.code || '') ? error.code : 'clock-source-unreadable';
@@ -488,34 +532,44 @@ function validateDelivery(options, reference, expected, seen = new Set()) {
 // unit: the last succeeded complete event of this milestone, its committed transaction,
 // succeeded result and the checksummed completed/handoff-ready boundary the transaction
 // retains, the published event identical but for sequence, and the order of the recorded
-// instants (created <= event <= committed <= updated <= now). Paths and sizes are bounded
-// before the canonical controller readers run.
+// instants (created <= event <= committed <= updated <= now). Only the target canonical
+// candidates are bounded and validated before the controller readers run; shared record
+// history is never enumerated.
 function canonicalCompletion(options, rows, unit) {
   const controller = require('./forge-unit-controller');
   const event = rows.filter(r => r.milestone === options.milestone && r.unit === unit && r.event === 'unit-transition'
     && r.action === 'complete' && r.outcome === 'succeeded').at(-1);
   if (!event || typeof event.idempotency_key !== 'string') fail('delivery-completion-missing');
-  // Guard parent paths and sizes before calling canonical controller readers.
+  const bounded = {};
   for (const kind of ['transaction', 'result']) {
-    const file = kind === 'transaction' ? controller.transactionFile(options.cwd, event.idempotency_key)
-      : controller.resultFile(options.cwd, event.idempotency_key);
-    const ref = path.relative(options.cwd, file).split(path.sep).join('/');
-    const read = deliverySource(options, options.cwd, ref, MAX_JSON, true); if (read.status !== 'valid') fail('delivery-completion-record-missing');
-    if (!/^[a-f0-9]{64}$/.test(read.value?.storage_checksum)) fail('delivery-completion-checksum-missing');
-    // lookupRecord may also inspect a legacy copy. Bound and reject links
-    // in the record directory without implementing its storage parser.
-    const directory = path.dirname(file), directoryRef = path.relative(options.cwd, directory).split(path.sep).join('/');
-    safeFile(options.cwd, directoryRef);
-    const names = fs.readdirSync(directory);
-    if (names.length > 256) fail('delivery-record-limit');
-    let bytes = 0;
-    for (const name of names.filter(n => n.endsWith('.json'))) {
-      bytes += deliverySource(options, options.cwd, directoryRef + '/' + name, MAX_JSON).bytes;
+    const candidates = controller.recordCandidatePaths(options.cwd, kind, event.idempotency_key);
+    safeFile(options.cwd, path.relative(options.cwd, path.dirname(candidates[0])).split(path.sep).join('/'));
+    let preferred = null, bytes = 0;
+    for (const file of candidates) {
+      const ref = path.relative(options.cwd, file).split(path.sep).join('/');
+      const read = deliverySource(options, options.cwd, ref, MAX_JSON, true);
+      if (read.status === 'absent') continue;
+      bytes += read.bytes;
+      // At most two 1 MiB candidates equal the 2 MiB phase cap today. Keep the
+      // aggregate guard as defense if the canonical candidate seam grows.
       if (bytes > phaseCost.MAX_BYTES) fail('delivery-record-limit');
+      if (!preferred) {
+        if (!/^[a-f0-9]{64}$/.test(read.value?.storage_checksum)) fail('delivery-completion-checksum-missing');
+        preferred = read;
+      } else {
+        if (!read.value || typeof read.value !== 'object' || Array.isArray(read.value)) fail('delivery-completion-invalid');
+        if (Object.hasOwn(read.value, 'storage_checksum') && !/^[a-f0-9]{64}$/.test(read.value.storage_checksum)) fail('delivery-completion-checksum-missing');
+      }
     }
+    if (!preferred) fail('delivery-completion-record-missing');
+    const { storage_checksum, storage_legacy_checksum, ...record } = preferred.value;
+    bounded[kind] = record;
   }
   const tx = controller.lookupRecord(options.cwd, 'transaction', event.idempotency_key);
   const result = controller.lookupRecord(options.cwd, 'result', event.idempotency_key);
+  for (const [kind, record] of [['transaction', tx], ['result', result]]) {
+    if (record && require('./forge-delivery').fingerprint(record) !== require('./forge-delivery').fingerprint(bounded[kind])) fail('delivery-completion-unproven');
+  }
   // The committed transaction retains its checksummed boundary. The public
   // handoff slot is mutable and may now describe another milestone's S01.
   const boundary = tx?.boundary;
@@ -573,9 +627,8 @@ function readDeliveries(options) {
           history: options.proof.units, captures: options.proof.captures });
       } catch (e) { unproven.push({ slice, reason: sourceReason(e) === 'clock-source-unreadable' ? 'delivery-completion-invalid' : sourceReason(e) }); }
     }
-    for (const read of options.deliveryCache.files.values()) {
-      if (readSource(read.root, read.reference, read.limit).sha256 !== read.source.sha256) fail('clock-source-unstable');
-    }
+    revalidateGlobScopes(options);
+    revalidateDeliveryCache(options);
     if (proofKind === 'current-source-strict') purpose.current_source_conformity =
       unproven.some(row => row.reason === 'delivery-current-source-changed') ? 'changed' : unproven.length || !proven.length ? 'unknown' : 'matched';
     return { status: 'observed', ...purpose, proven, unproven, sources };
@@ -589,8 +642,18 @@ function readHistoricalDeliveries(options) { return readDeliveries({ ...options,
 // fully covered by its root captures, and verification/artifact captures of one root agreeing on
 // revision, identity and source bindings. Today's sources are never compared, so a later
 // legitimate code change keeps the history; the caller supplies the committed completion instant.
-function readHistoricalTaskDelivery(options = {}) {
-  const purpose = { proof_kind: 'historical-delivery', current_source_conformity: 'not-evaluated', current_integrated_acceptance: 'not-evaluated' };
+function readHistoricalTaskDelivery(options = {}) { return readTaskDelivery(options, 'historical-delivery'); }
+function readCurrentTaskDelivery(options = {}) {
+  const currentHashReader = (cwd, file) => {
+    const vcs = require('./forge-vcs'), kind = vcs.detectVcs(cwd);
+    if (!['git', 'svn'].includes(kind)) return { ok: false, error: 'current-vcs-unknown' };
+    return vcs.hashPath(cwd, file, { vcs: kind, maxBuffer: 1024,
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_NO_REPLACE_OBJECTS: '1' } });
+  };
+  return readTaskDelivery({ ...options, currentHashReader }, 'current-source-strict');
+}
+function readTaskDelivery(options, proofMode) {
+  const purpose = { proof_kind: proofMode, current_source_conformity: proofMode === 'historical-delivery' ? 'not-evaluated' : 'unknown', current_integrated_acceptance: 'not-evaluated' };
   try {
     options = observationOptions(options);
     const { milestone, slice, task } = options;
@@ -598,7 +661,9 @@ function readHistoricalTaskDelivery(options = {}) {
     time.timePaths(options);
     const completionAt = instant(options.completedAt);
     if (!Number.isFinite(completionAt)) fail('delivery-completion-time-invalid');
-    Object.assign(options, { proofMode: 'historical-delivery', completionAt, proof: { units: [], captures: [] },
+    const beginAt = proofMode === 'current-source-strict' ? instant(options.begunAt) : null;
+    if (proofMode === 'current-source-strict' && (!Number.isFinite(beginAt) || beginAt > completionAt)) fail('delivery-begin-time-invalid');
+    Object.assign(options, { proofMode, completionAt, proof: { units: [], captures: [] },
       deliveryCache: { files: new Map(), hashes: new Map(), blobs: new Map(), bytes: 0 } });
     const delivery = require('./forge-delivery'), roots = require('./forge-code-roots');
     const expected = { type: 'task', id: task, slice, milestone }, key = delivery.unitKey(expected);
@@ -614,6 +679,7 @@ function readHistoricalTaskDelivery(options = {}) {
     if (!scope.length) fail('delivery-source-inventory-missing');
     const captures = options.proof.captures.filter(c => c.unit === key);
     if (!captures.length) fail('delivery-source-capture-missing');
+    if (proofMode === 'current-source-strict' && captures.some(c => instant(c.captured_at) < beginAt)) fail('delivery-capture-before-begin');
     // Every declared path is bound by a capture of the root that owns it.
     const contract = input.schema_version === 2 ? roots.validateContract(input.execution_contract, { owner: fs.realpathSync.native(options.cwd), revalidate: true }) : null;
     const envelopeOf = capture => deliverySource(options, options.cwd, capture.reference, MAX_JSON, true).value;
@@ -624,7 +690,8 @@ function readHistoricalTaskDelivery(options = {}) {
         try { const r = roots.resolvePath(contract, relative, { legacy: contract.code_roots.length === 1 }); root = r.root_id; mapped = r.path; }
         catch { fail('delivery-code-root-mismatch'); }
       }
-      if (!captures.some(c => rootOf(c) === root && c.source_bindings.some(b => b.path === mapped))) fail('delivery-source-inventory-incomplete');
+      if (!captures.some(c => rootOf(c) === root && (require('./forge-delivery-source-scope').isGlob(mapped)
+        ? c.scope_globs?.some(g => g.pattern === mapped) : c.source_bindings.some(b => b.path === mapped)))) fail('delivery-source-inventory-incomplete');
     }
     // Captures of one root describe one workspace: identical identity, revision and scoped blobs,
     // and the artifact capture never precedes the verification capture.
@@ -638,10 +705,9 @@ function readHistoricalTaskDelivery(options = {}) {
       const at = kind => group.filter(c => envelopeOf(c).kind === kind).map(c => instant(c.captured_at));
       if (at('verification').length && at('artifact').length && Math.max(...at('verification')) > Math.min(...at('artifact'))) fail('delivery-capture-inconsistent');
     }
-    for (const read of options.deliveryCache.files.values()) {
-      if (readSource(read.root, read.reference, read.limit).sha256 !== read.source.sha256) fail('clock-source-unstable');
-    }
-    return { status: 'proven', ...purpose, unit: key, reference, fingerprint: projection.delivery_fingerprint, completed_at: options.completedAt,
+    revalidateGlobScopes(options);
+    revalidateDeliveryCache(options);
+    return { status: 'proven', ...purpose, current_source_conformity: proofMode === 'current-source-strict' ? 'matched' : 'not-evaluated', unit: key, reference, fingerprint: projection.delivery_fingerprint, completed_at: options.completedAt,
       coverage: { criteria: projection.criteria.length, captures: captures.length, sources: scope.length },
       captures: captures.map(c => ({ reference: c.reference, sha256: c.sha256, captured_at: c.captured_at, revision: c.revision })) };
   } catch (e) { return { status: 'unproven', ...purpose, reason: sourceReason(e) }; }
@@ -680,7 +746,8 @@ function readEndpointProof(options = {}) {
     try { time.timePaths(options); } catch { refuse('endpoint-milestone-invalid'); }
     const M = options.milestone, owner = options.cwd, dir = `.gsd/milestones/${M}`;
     const delivery = require('./forge-delivery'), roots = require('./forge-code-roots'), controller = require('./forge-unit-controller');
-    Object.assign(options, { proofMode: 'historical-delivery', deliveryCache: { files: new Map(), hashes: new Map(), blobs: new Map(), bytes: 0 } });
+    const endpointCaches = createEndpointDeliveryCaches();
+    Object.assign(options, { proofMode: 'historical-delivery', deliveryCache: endpointCaches.history });
     // milestone_cleanup archive/delete moves or removes these before any proof: a named refusal.
     for (const ref of [dir, `${dir}/${M}-events.jsonl`, `${dir}/${M}-ROADMAP.md`]) {
       try { fs.lstatSync(safeFile(owner, ref)); } catch (e) { if (e.code === 'ENOENT') refuse('endpoint-sources-missing', { detail: ref }); throw e; }
@@ -775,7 +842,9 @@ function readEndpointProof(options = {}) {
     if (!union.size) refuse('endpoint-scope-missing', { detail: 'scope-empty' });
     plan = { execution_contract_sha256: contractSha, plan_fingerprint: projection.delivery_fingerprint,
       roots: measured.code_roots.map(r => ({ root_id: r.id, commands: [...commands.get(r.id)] })) };
-    const scopeOptions = { ...options, executionContract: measured }, committedAt = instant(completion.boundary.committed_at);
+    // Completed child deliveries stay historical; integrated endpoint envelopes
+    // independently prove the current source universe, including glob additions.
+    const scopeOptions = { ...options, proofMode: 'current-source-strict', executionContract: measured, deliveryCache: endpointCaches.current }, committedAt = instant(completion.boundary.committed_at);
     const rootRows = [];
     for (const root of measured.code_roots) {
       const envelopeRef = ENDPOINT_PROOF_POLICY.envelope.replace(/\{milestone\}/g, M).replace('{root}', root.id);
@@ -801,7 +870,7 @@ function readEndpointProof(options = {}) {
       try { scope = captureScope(scopeOptions, e, [...union]).scope; } catch { refuse('endpoint-scope-missing', { root_id: root.id, detail: 'scope-root-unresolved' }); }
       if (scope.length > 256) refuse('endpoint-scope-limit', { root_id: root.id });
       for (const relative of scope) {
-        if (deliverySource(options, root.path, relative, phaseCost.MAX_BYTES).status !== 'valid') refuse('endpoint-scope-missing', { root_id: root.id, path: relative });
+        if (deliverySource(scopeOptions, root.path, relative, 8 * MAX_JSON).status !== 'valid') refuse('endpoint-scope-missing', { root_id: root.id, path: relative });
       }
       if (scope.length) {
         try { validateCurrentSources(scopeOptions, e, [...union]); }
@@ -818,9 +887,10 @@ function readEndpointProof(options = {}) {
       rootRows.push({ root_id: root.id, root_identity_sha256: root.identity_sha256, revision: e.revision, branch, envelope_sha256: read.sha256,
         checks: checks.length, scope: scope.map(relative => ({ path: relative, hash: capturedSourceHash(scopeOptions, e, relative, root.path) })) });
     }
-    for (const read of options.deliveryCache.files.values()) {
-      if (readSource(read.root, read.reference, read.limit).sha256 !== read.source.sha256) fail('clock-source-unstable');
-    }
+    revalidateGlobScopes(options);
+    revalidateGlobScopes(scopeOptions);
+    revalidateDeliveryCache(options);
+    revalidateDeliveryCache(scopeOptions);
     const after = time.readContract(options);
     if (after.status !== 'valid' || after.sha256 !== contract.sha256) fail('clock-source-unstable');
     const units = new Map(options.proof.units.map(row => [row.unit, row]));
@@ -894,6 +964,6 @@ function main(argv = process.argv.slice(2), io = process, options = {}) {
   const result = { clock: readClock(input), forecast: readForecast(input) };
   io.stdout.write(JSON.stringify(result) + '\n'); return 0;
 }
-module.exports = { CLOCK_POLICY, FORECAST_POLICY, DELIVERY_PROOF_MODES, computeClock, readClock, readDeliveries, readHistoricalDeliveries, readHistoricalTaskDelivery, computeForecast, readForecast, main,
+module.exports = { CLOCK_POLICY, FORECAST_POLICY, DELIVERY_PROOF_MODES, computeClock, readClock, readDeliveries, readHistoricalDeliveries, readHistoricalTaskDelivery, readCurrentTaskDelivery, computeForecast, readForecast, main,
   ENDPOINT_PROOF_POLICY, readEndpointProof };
 if (require.main === module) process.exitCode = main();

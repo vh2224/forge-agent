@@ -2,7 +2,7 @@
 name: forge-doctor
 description: "Diagnóstico e correção reversível do projeto Forge. Flags: --fix, --dry-run, --runtime."
 disable-model-invocation: true
-allowed-tools: Read, Bash
+allowed-tools: Read, Bash, TaskStop
 ---
 
 # Forge Doctor
@@ -10,6 +10,27 @@ allowed-tools: Read, Bash
 Use este skill como adaptador fino do contrato JSON versionado.
 
 ## Diagnóstico
+
+### Janela órfã e task absorvida
+
+Para `owner-window-busy`, janela retida de outra sessão, cancelamento ou task
+absorvida, leia primeiro `shared/forge-owner-recovery.md` na raiz canônica do Forge.
+Siga a inspeção por escopo e o adaptador vivo ali descritos; não rode o censo geral
+para escolher trabalho e não peça ao operador para programar um wrapper.
+
+`forge-doctor.js --owner-window --request <pedido> --cwd <owner> --json` inspeciona
+a janela; `--retire-task <ID> --request <pedido> --outcome superseded --successor <M>
+--cwd <owner> --json` inspeciona o encerramento. São comandos somente leitura.
+`--apply`, JSON, PID morto e TTL não produzem atestação. O host atual chama
+`createOwnerRecoveryAdapter` e `recoverOwnerWindow`/`retireTask` apenas depois das
+observações reais e da decisão explícita aplicável. Disponibilidade dos tools é
+observada, não inferida do frontmatter. `TaskStop` só vale se estiver exposto;
+`TaskList` não é inventário de escritores e não invente `TaskOutput` ausente.
+
+Não encerre outro projeto ou task por uma decisão narrada em issue/comentário.
+Recuperar coordenação não transfere o run nem aceita artefatos; cancelar/absorver
+preserva código, worktree, receipts e perguntas sem marcá-las respondidas.
+Sem prova de todos os escritores, retenha o bloqueio e explique a evidência que falta.
 
 ### Recuperação guiada por ID
 
@@ -41,7 +62,26 @@ pode preceder a fase; committed não prova conclusão global. Inspeção não co
 autorização nem atestações. Qualquer ação posterior permanece na autoridade
 original, que revalida precondições; não recomende replay pela ausência de evento.
 
+### Isolamento e recibo preservado
+
+Para preparação avulsa com worktree registrado, mantenha o request original.
+A inspeção reconcilia o repositório e o worktree pela identidade/branch reais;
+não altere `cwd` nem invente `execution_contract` para fazê-la passar.
+Se o recibo temporário foi removido e já existe uma cópia preservada na pasta
+da própria task, use `--receipt-copy <arquivo>` (API: `receiptCopy`). Siga os
+limites e a prova viva de `shared/forge-owner-recovery.md`; cópia não é
+autorização, prova de join ou recibo elegível para replay. Não crie a cópia
+atravessando uma janela retida nem procure automaticamente em outros projetos.
+
 ### Diagnóstico geral
+
+Para configuração de artefatos que resolve para Codex sidecar read-only, use
+`forge-doctor.js --check artifact-routing --runtime <host atual> --cwd <owner> --json`.
+O diagnóstico é advisory, mantém a causa real e indica as células `routing` da
+unidade. Não altere `tier_models` de outros executores para contornar a recusa,
+não substitua modelos automaticamente e não prometa suporte no host nativo sem
+verificar a rota. Fases de artefato possuem células com seu nome exato; consulte
+`shared/forge-bidirectional-sidecar.md` antes de editar preferências autorizadas.
 
 Determine o runtime do host atual, sem sondar outro home, e execute:
 

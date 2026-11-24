@@ -2,13 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:forge:linked-task-handoff:v1",
   "title": "Forge linked task lifecycle records v1",
-  "description": "Immutable owner records below .gsd/forge/time/<M>/linked-task/: handoff.json (produced at the milestone closure after the proven endpoint), start-witness.json (independent witness of the complete start, published before it), start.json (published last by the reattested start), chain-closure.json (explicit attested chain closure) and closure.json (verified canonical task delivery). Public data only: no absolute path, credential, session or live handle. A record never grants authority. Validated by scripts/forge-linked-task-start.js.",
+  "description": "Immutable owner records below .gsd/forge/time/<M>/linked-task/: handoff.json (produced at the milestone closure after the proven endpoint), start-witness.json (independent witness of the complete start, published before it), start.json (published last by the reattested start), chain-closure.json (explicit attested chain closure) and closure.json (verified canonical task delivery; never authoritative without its matching private witness in linked-task-bindings/closure.json). Public data only: no absolute path, credential, session or live handle. A record never grants authority. Validated by scripts/forge-linked-task-start.js.",
   "oneOf": [
     { "$ref": "#/$defs/handoff" },
     { "$ref": "#/$defs/start" },
     { "$ref": "#/$defs/start_witness" },
     { "$ref": "#/$defs/chain_closure" },
-    { "$ref": "#/$defs/closure" }
+    { "$ref": "#/$defs/closure" },
+    { "$ref": "#/$defs/closure_witness" }
   ],
   "$defs": {
     "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
@@ -159,6 +160,19 @@
         "link_sha256": { "$ref": "#/$defs/sha256" },
         "start_sha256": { "$ref": "#/$defs/sha256" },
         "start": { "$ref": "#/$defs/start" }
+      }
+    },
+    "closure_witness": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "kind", "milestone", "task_id", "link_sha256", "closure_sha256", "closure"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "kind": { "const": "forge-linked-task-closure-witness" },
+        "milestone": { "$ref": "#/$defs/milestone" },
+        "task_id": { "$ref": "#/$defs/task" },
+        "link_sha256": { "$ref": "#/$defs/sha256" },
+        "closure_sha256": { "$ref": "#/$defs/sha256" },
+        "closure": { "$ref": "#/$defs/closure" }
       }
     },
     "chain_closure": {

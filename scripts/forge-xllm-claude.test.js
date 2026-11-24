@@ -167,7 +167,8 @@ function mockClaudeMain(config) {
 
   mockFs.appendFileSync(config.invocationsFile, String(process.pid) + '\n', 'utf8');
 
-  const payload = {
+  // The read-only planning scenario answers with the plan contract instead.
+  const payload = config.behavior === 'plan' ? config.planPayload : {
     status: 'done',
     summary: config.resultSummary,
     must_haves_status: [config.resultMustHave],
@@ -283,6 +284,8 @@ function mockClaudeMain(config) {
     // A write worker that finished its edits on a model other than --model.
     mockFs.writeFileSync(mockPath.join(process.cwd(), config.mockOutput), 'substituted output\n', 'utf8');
     mockFs.appendFileSync(mockPath.join(process.cwd(), config.operatorFile), 'worker edit\n', 'utf8');
+  } else if (config.behavior === 'plan') {
+    // Read-only planning: the child writes nothing and only returns the plan.
   } else {
     process.stderr.write('unknown fixture behavior\n');
     process.exit(92);
@@ -317,6 +320,7 @@ function writeMock(mockFile, fixture) {
     mockOutput: MOCK_OUTPUT,
     operatorFile: OPERATOR_FILE,
     substituteModel: SUBSTITUTE_MODEL,
+    planPayload: fixture.planPayload || null,
     selectedEnvKeys: [
       ...AUTH_KEYS,
       'FORGE_ACCOUNTS_REGISTRY',
@@ -446,6 +450,12 @@ function createFixture(scenarioDir, label, behavior, accountMode) {
     registryFile, tokenFile, mockFile, captureFile, invocationsFile, planFile,
     resultFile, temp, appData, localAppData, xdgConfig, accountName, baseline,
     planText,
+    planPayload: behavior === 'plan' ? {
+      status: 'done',
+      summary: 'fixture read-only plan',
+      slice_plan: { filename: 'S01-PLAN.md', content: '# Slice\n- [ ] **T01** fixture\n' },
+      task_plans: [{ id: 'T01', filename: 'T01-PLAN.md', content: planText }],
+    } : null,
   };
   writeMock(mockFile, fixture);
   fixture.env = makeCliEnv(fixture);
@@ -1079,6 +1089,122 @@ async function ceilingDefaultPath(root) {
   }
 }
 
+// #330 driver: the public runPlan, run in a child with the isolated fixture env.
+// It only observes the options the Claude adapter receives and then delegates to
+// the real adapter, so the local mock CLI records the real child argv.
+function planOwnerDriverMain() {
+  'use strict';
+  const driverFs = require('fs');
+  const driverPath = require('path');
+  const [scriptsDir, configFile] = process.argv.slice(2);
+  const config = JSON.parse(driverFs.readFileSync(configFile, 'utf8'));
+  const adapter = require(driverPath.join(scriptsDir, 'forge-claude-sidecar.js'));
+  const realInvoke = adapter.invokeClaudeSidecar;
+  const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+  let seen = null;
+  adapter.invokeClaudeSidecar = (options) => {
+    seen = { calls: (seen ? seen.calls : 0) + 1, context_root_own: own(options, 'contextRoot'),
+      context_root: own(options, 'contextRoot') ? options.contextRoot : null, cwd: options.cwd,
+      read_only: options.readOnly, sandbox: options.sandbox, result_profile: options.resultProfile,
+      writable_roots_own: own(options, 'writableRoots'), permission_policy_own: own(options, 'permissionPolicy') };
+    return realInvoke(options);
+  };
+  const xllm = require(driverPath.join(scriptsDir, 'forge-xllm.js'));
+  const write = (value) => driverFs.writeFileSync(config.outFile, JSON.stringify({ ...value, seen }));
+  xllm.runPlan({ planContextFile: config.planContextFile, resultFile: config.resultFile, cwd: config.cwd,
+    engine: 'claude', hostRuntime: 'codex', sidecarDeclared: true, model: 'claude-sonnet-5', effort: 'medium',
+    timeoutSecs: 12, envPolicy: 'minimal', dispatchId: config.dispatchId,
+    ...(config.contextRoot ? { contextRoot: config.contextRoot } : {}) })
+    .then((result) => write({ ok: true, status: result.status, transport: result.appserver.transport }),
+      (error) => write({ ok: false, code: error.code || null, message: error.message }));
+}
+
+async function runPlanOwnerCase(root, label, ownerFor) {
+  const scenarioDir = fs.mkdtempSync(path.join(root, `plan-owner-${label}-`));
+  try {
+    const fixture = createFixture(scenarioDir, `plan-owner-${label}`, 'plan', 'configured');
+    // The unit owner hands runPlan realpath'd cwd/contextRoot: same canonical form here.
+    const cwd = fs.realpathSync(fixture.workspace);
+    const contextRoot = ownerFor(scenarioDir, cwd);
+    const ownerBefore = contextRoot && contextRoot !== cwd ? fs.readdirSync(contextRoot) : null;
+    const driverFile = path.join(scenarioDir, 'plan-owner-driver.js');
+    fs.writeFileSync(driverFile, `'use strict';\n(${planOwnerDriverMain.toString()})();\n`, 'utf8');
+    const configFile = path.join(scenarioDir, 'plan-owner-config.json');
+    const outFile = path.join(scenarioDir, 'plan-owner-out.json');
+    writeJson(configFile, { planContextFile: fixture.planFile, resultFile: fixture.resultFile, cwd,
+      dispatchId: `fixture-plan-owner-${label}`, outFile, ...(contextRoot ? { contextRoot } : {}) });
+    const run = await runDriver(fixture, driverFile, configFile);
+    assert.ok(fs.existsSync(outFile), `${label}: driver wrote no outcome (exit ${run.code}): ${run.stderr.slice(0, 800)}`);
+    const outcome = JSON.parse(fs.readFileSync(outFile, 'utf8'));
+    assert.strictEqual(outcome.ok, true, `${label}: ${JSON.stringify(outcome)}`);
+    assert.strictEqual(outcome.status, 'done');
+    assert.strictEqual(outcome.transport, 'claude-cli');
+    const capture = readCapture(fixture);
+    assert.strictEqual(capture.fixture_error, null);
+    assert.strictEqual(capture.token_in_argv, false);
+    assert.strictEqual(capture.plan_passed_inline, false);
+    assert.deepStrictEqual(invocationPids(fixture), [capture.pid], `${label}: the mock CLI ran exactly once`);
+    assert.strictEqual(readTerminalResult(fixture).value.status, 'done');
+    if (ownerBefore) assert.deepStrictEqual(fs.readdirSync(contextRoot), ownerBefore, `${label}: the read-only owner is untouched`);
+    return { cwd, contextRoot, outcome, argv: capture.argv };
+  } finally {
+    removeOwnedFixture(root, scenarioDir);
+  }
+}
+
+async function planOwnerContextRootPath(root) {
+  const cases = {
+    absent: await runPlanOwnerCase(root, 'absent', () => null),
+    'same-cwd': await runPlanOwnerCase(root, 'same-cwd', (_dir, cwd) => cwd),
+    external: await runPlanOwnerCase(root, 'external', (dir) => {
+      const owner = path.join(dir, 'external owner with spaces');
+      fs.mkdirSync(path.join(owner, '.gsd'), { recursive: true });
+      return fs.realpathSync(owner);
+    }),
+  };
+  const addDirs = (argv) => argv.reduce((found, arg, index) => arg === '--add-dir' ? [...found, index] : found, []);
+  const withoutInstruction = (argv) => argv.slice(0, argv.indexOf('-p'));
+
+  // SEC330-1: the exact explicit owner reaches the Claude transport and argv once.
+  const external = cases.external;
+  assert.strictEqual(external.outcome.seen.calls, 1);
+  assert.strictEqual(external.outcome.seen.context_root_own, true, 'SEC330-1: runPlan forwards contextRoot to Claude');
+  assert.strictEqual(external.outcome.seen.context_root, external.contextRoot, 'SEC330-1: exact owner value, not inferred');
+  assert.strictEqual(addDirs(external.argv).length, 1, 'SEC330-1: exactly one --add-dir pair');
+  const at = addDirs(external.argv)[0];
+  assert.strictEqual(external.argv[at + 1], external.contextRoot, 'SEC330-1: the owner with spaces is one argument');
+  assert.ok(external.argv[at + 1].includes(' '));
+  assert.deepStrictEqual(external.argv.slice(at - 2, at + 4),
+    ['--model', 'claude-sonnet-5', '--add-dir', external.contextRoot, '--effort', 'medium'], 'SEC330-1: current argv order');
+
+  // SEC330-2: absent stays absent; absent and same-cwd emit no --add-dir and share the baseline.
+  assert.strictEqual(cases.absent.outcome.seen.context_root_own, false, 'SEC330-2: absent contextRoot is not even undefined');
+  assert.strictEqual(cases['same-cwd'].outcome.seen.context_root, cases['same-cwd'].cwd);
+  assert.deepStrictEqual(addDirs(cases.absent.argv), [], 'SEC330-2: absent owner adds no --add-dir');
+  assert.deepStrictEqual(addDirs(cases['same-cwd'].argv), [], 'SEC330-2: same-cwd owner adds no --add-dir');
+  assert.deepStrictEqual(withoutInstruction(cases['same-cwd'].argv), withoutInstruction(cases.absent.argv),
+    'SEC330-2: same-cwd keeps the baseline argv');
+  // SEC330-2: only the owner pair differs; every other value keeps its position.
+  const stripped = external.argv.slice();
+  stripped.splice(at, 2);
+  assert.deepStrictEqual(withoutInstruction(stripped), withoutInstruction(cases.absent.argv),
+    'SEC330-2: model/effort/schema/tools/permissions/settings unchanged');
+
+  // SEC330-3: the planning call stays read-only, without writable roots or write grants.
+  for (const [label, entry] of Object.entries(cases)) {
+    const { seen } = entry.outcome;
+    assert.strictEqual(seen.read_only, true, `SEC330-3: ${label} readOnly`);
+    assert.strictEqual(seen.sandbox, 'read-only', `SEC330-3: ${label} read-only sandbox`);
+    assert.strictEqual(seen.result_profile, 'plan');
+    assert.strictEqual(seen.writable_roots_own, false, `SEC330-3: ${label} no writableRoots`);
+    assert.strictEqual(seen.permission_policy_own, false, `SEC330-3: ${label} no permission grant`);
+    assert.strictEqual(entry.argv[entry.argv.indexOf('--tools') + 1], 'Read,Glob,Grep', `SEC330-3: ${label} --tools`);
+    assert.strictEqual(entry.argv[entry.argv.indexOf('--allowedTools') + 1], 'Read,Glob,Grep', `SEC330-3: ${label} --allowedTools`);
+    assert.strictEqual(entry.argv.filter((arg) => arg === '--allowedTools').length, 1);
+    assert.ok(!entry.argv.includes('--permission-mode'), `SEC330-3: ${label} no acceptEdits`);
+  }
+}
+
 async function main() {
   const root = fs.mkdtempSync(path.join(PROJECT_ROOT, '.forge-xllm-claude-test-'));
   assertPathInside(PROJECT_ROOT, root, 'suite fixture root');
@@ -1093,6 +1219,7 @@ async function main() {
     ['Claude review legs and plan forward onLiveness (plan also localProofIgnore)', reviewLegsLiveness],
     ['Claude review legs publish the liveness block in the host progress line (no-progress)', reviewLegsLivenessProgress],
     ['plan/execute default to the tier ceiling and the CLI warns on a legacy 300 pref', ceilingDefaultPath],
+    ['SEC330 public runPlan forwards an explicit owner only as one read-only Claude --add-dir', planOwnerContextRootPath],
   ];
   let passed = 0;
   const failures = [];

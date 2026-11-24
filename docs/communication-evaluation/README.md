@@ -181,3 +181,173 @@ Repondo esses quatro valores, os bytes do arquivo voltam ao SHA-256 da captura
 (`3f4640b4c1383652e4890827d9e8456ae75c54f2493a9bdafa48931542fed10e`). Textos,
 rótulos, referências, rubricas e o aceite humano pending-final-round ficam iguais.
 É proveniência de fonte, não observação de cliente nem aceite humano.
+
+## Review-fix com limites executáveis (#341, S01/T05 de M-20261106040502-review-fix-limites)
+
+A T05 espelhou a política `review-fix-policy-v1` nas skills `forge-task` (Step 5.5) e
+`forge-next` (gate de revisão e triagem). Os textos citados continuam literais nas duas
+skills; só os mesmos quatro `source.sha256` mudam, de novo para o SHA-256 dos bytes reais de
+cada arquivo. O valor anterior é o versionado na base `563ac2752722ac7c29848f62520c8446185bc15c`
+(o valor novo da tabela da T07 acima); o novo foi medido sobre os bytes finais da T05. O delta
+completo, com proveniência, fica em `scripts/fixtures/review-policy/distribution-delta.json`.
+
+| Amostra (campo) | Fonte | SHA-256 anterior (#341) | SHA-256 novo (#341) |
+|---|---|---|---|
+| entries[1].supporting.timeline.after.source.sha256 | skills/forge-task/SKILL.md#modelo-literal | af9cf1d0b0b9f68ba751394f935e2c324050b226409f7bea9095700d13ea62ae | 2f3a10c2e2d906b77778077af83d00bb6578f124d92cee4b40b638e787593754 |
+| entries[5].supporting.timeline.after.source.sha256 | skills/forge-task/SKILL.md#modelo-literal | af9cf1d0b0b9f68ba751394f935e2c324050b226409f7bea9095700d13ea62ae | 2f3a10c2e2d906b77778077af83d00bb6578f124d92cee4b40b638e787593754 |
+| entries[2].supporting.partial.after.source.sha256 | skills/forge-next/SKILL.md#parcial | d824741df528de5b38f35aec9e00e9df80349ae8ed4687e0bf6fdb1cb69dc59a | 61d13a04a7cfd6c3f8543fadf6de12ac8d27e856e23a7946028a965bd34755a1 |
+| entries[6].supporting.partial.after.source.sha256 | skills/forge-next/SKILL.md#parcial | d824741df528de5b38f35aec9e00e9df80349ae8ed4687e0bf6fdb1cb69dc59a | 61d13a04a7cfd6c3f8543fadf6de12ac8d27e856e23a7946028a965bd34755a1 |
+
+Sem os blocos `forge:linked-task` da T06 (medição atribuída que as camadas históricas
+conferem), `skills/forge-task/SKILL.md` passa de `d81556180d9bb16d45a8f81ba6b5faa12ece7f6601a510963f29eb50fe10679b`
+a `f85dce7a8bed7c53fd1253183c520f6017e52902b0e2d083ae0a587224269329`, e
+`skills/forge-next/SKILL.md` de `e8d04241493f4fa7c5a1db28e075487759fea1dd87dfafdbb750aa06aa723d0f`
+a `fad7ae40c8495226402cce4fbf0c849e1823450172e130195503af6e072cadee`.
+
+Repondo esses quatro valores pelos anteriores da #341, o arquivo volta aos bytes da base; e,
+repondo os da tabela da T07, à captura acima. Textos, rótulos, referências, rubricas e o
+aceite humano pending-final-round ficam iguais. É proveniência de fonte, não observação de
+cliente, CI nem aceite humano.
+
+## Identity and lifecycle citation update
+
+Artifact base: `20ae504cbd4e546aaa49f9643955ded1062e67ce`. Only the two forge-task timeline-after
+`source.sha256` literals change from `2f3a10c2e2d906b77778077af83d00bb6578f124d92cee4b40b638e787593754`
+to `109262eb2c60a498b7775527988b1b1b5a3b57b4a6ce3d890b83282f333dc854`. Quotes, labels, metadata, layout and
+forge-next citations stay byte-identical. Full samples.json SHA-256:
+`c0a3cdd57bc64ea98691f216712665013a52ee570fdf233ffe6c8c13b1e449ff` to `0a0d5ccb39fc880642d6a338153ed0e91bc72f39f978bda94ddcddb9ce242f3c`.
+The retained attribution-state proof removes only the historical linked blocks;
+that task source measures `f85dce7a8bed7c53fd1253183c520f6017e52902b0e2d083ae0a587224269329`
+before and `e6114c0603df23f99697e6264d13d496427ef139f86f99c033209173b8bcedb5` after this update.
+The checked-in citations use the raw after hash above.
+The bounded update is recorded in `scripts/fixtures/identity-lifecycle/distribution-delta.json`;
+it proves source attribution and distribution, not client execution or acceptance.
+
+
+## Identity citation after maintenance correction 090bd42f9eb4
+
+Only the existing two forge-task timeline-after source.sha256 literal spans are eligible for this remeasurement. Quotes, labels, metadata, layout and forge-next nodes retain the immutable sample restoration proof.
+
+Raw task after: `109262eb2c60a498b7775527988b1b1b5a3b57b4a6ce3d890b83282f333dc854`; attributed task after: `e6114c0603df23f99697e6264d13d496427ef139f86f99c033209173b8bcedb5`.
+Full samples before: `c0a3cdd57bc64ea98691f216712665013a52ee570fdf233ffe6c8c13b1e449ff`; after: `0a0d5ccb39fc880642d6a338153ed0e91bc72f39f978bda94ddcddb9ce242f3c`.
+This records source attribution following maintenance corrections; review, client behavior and acceptance remain separate facts.
+
+
+## #368 — bounded forge-next citation update
+
+Base52a69e79e92c58914da7fcb69f112219a4fd508b. Only the two existing forge-next source.sha256 literals change from `61d13a04a7cfd6c3f8543fadf6de12ac8d27e856e23a7946028a965bd34755a1` to `3ffd7bef2befcbfdf49e865435b538da9b3305d5207036d488507c741fdb1e6e`; quotations, metadata and all other bytes are preserved. Full samples `0a0d5ccb39fc880642d6a338153ed0e91bc72f39f978bda94ddcddb9ce242f3c` → `40d879d0b390068d8133de40e2d2c70ae9afab012d0d3770050af0d65def65bc`. Measured layer: scripts/fixtures/unit-entry/distribution-delta.json; distribution only, no client/UAT proof.
+
+The attributed forge-next source, with only its existing linked-task blocks removed, changes from `fad7ae40c8495226402cce4fbf0c849e1823450172e130195503af6e072cadee` to `0d9fed221f4fa52227184fc1d68a6aadac6f7ba917ce294b9dc837d04fb27eb4`. Both attributed and raw sample states remain documented and checked.
+
+
+## #367 — bounded continuation citation update
+
+Base8856ddb3bdbed8e6c0a19802e9764fe950f67172. Only the two existing forge-next source.sha256 literals change from `3ffd7bef2befcbfdf49e865435b538da9b3305d5207036d488507c741fdb1e6e` to `26cd95c5cbb829eae5dbefad7e115e77c496d10af41b5a033fd336a6e2d553f1`; quotations, metadata and all other sample bytes remain unchanged. Full samples `40d879d0b390068d8133de40e2d2c70ae9afab012d0d3770050af0d65def65bc` → `38bb2dea9d9c6ea56ff672eae2452a0a6f6a2bfbe5697830724a49a43039e405`. Raw skills `019035d20f0f70239fe0e035478af988ec6fdd5efea8b7f78e8eff6c8a64e052` → `4b1446cf4fcfc99184596bf84aeb936d497f79aab1dcde46c2fb1f72a2a23fd8`; attributed skills `bc8e2f9ebbb1a189a435417c9b3ef258531cb8db67046ccf5b26cc48f99ca5bd` → `01041828db52aa6e6c477ad222fa46ab09b8e95b53c51f65f60087ef2dbea6d8`. Measured layer: scripts/fixtures/incomplete-resume/distribution-delta.json; distribution only, not client/UAT proof.
+
+The forge-next SOURCE attributed bytes also change from `0d9fed221f4fa52227184fc1d68a6aadac6f7ba917ce294b9dc837d04fb27eb4` to `e7bd4bd148db233e2896c4dd7c553abce729a4a52e266e2c148de2d920f42fde`; both raw and attributed citation states remain explicitly documented.
+
+
+## Measured381/346 native effort terminal
+
+Prior revision: a36033d41fd779cf4b1262d3e01455c54016786d
+Previous layer: scripts/fixtures/superseded-owner/distribution-delta.json
+Only the four existing task/next source.sha256 citation literals change. All other sample bytes are retained.
+/entries/1/supporting/timeline/after/source/sha256 before 109262eb2c60a498b7775527988b1b1b5a3b57b4a6ce3d890b83282f333dc854 after 850589544a3e7698971bee85931c1fe99b8ba110a8f1ec94ecd5f42419fc9168
+/entries/5/supporting/timeline/after/source/sha256 before 109262eb2c60a498b7775527988b1b1b5a3b57b4a6ce3d890b83282f333dc854 after 850589544a3e7698971bee85931c1fe99b8ba110a8f1ec94ecd5f42419fc9168
+/entries/2/supporting/partial/after/source/sha256 before 26cd95c5cbb829eae5dbefad7e115e77c496d10af41b5a033fd336a6e2d553f1 after 1d3fc660ccfd9bb411f4f6911660b03ce53afc3b118915715081ba5e33947d71
+/entries/6/supporting/partial/after/source/sha256 before 26cd95c5cbb829eae5dbefad7e115e77c496d10af41b5a033fd336a6e2d553f1 after 1d3fc660ccfd9bb411f4f6911660b03ce53afc3b118915715081ba5e33947d71
+skills/forge-task/SKILL.md attributed before e6114c0603df23f99697e6264d13d496427ef139f86f99c033209173b8bcedb5 attributed after 9b092ac794b0139a2b29158808229bdd4374fc596d9a258c9cdd28d2400975d3
+skills/forge-next/SKILL.md attributed before e7bd4bd148db233e2896c4dd7c553abce729a4a52e266e2c148de2d920f42fde attributed after c74b137205734a1cf266a1befcc8d14decfef6b07b335807e3ab1aa3b1321417
+samples before 38bb2dea9d9c6ea56ff672eae2452a0a6f6a2bfbe5697830724a49a43039e405
+samples after de86e803156d05f2b1e9bbb016801026529360db9e5fb0030377c4ddac578cec
+
+
+## Measured owner-recovery terminal
+
+Actual public predecessor b0e3dd9a5970d07014f63a0a2240764cf22df211
+Previous layer scripts/fixtures/native-effort/distribution-delta.json
+Only the 2 existing changed source.sha256 literals move; every other sample byte is retained.
+/entries/1/supporting/timeline/after/source/sha256 before 850589544a3e7698971bee85931c1fe99b8ba110a8f1ec94ecd5f42419fc9168 after d657fe3b191a675c2d2a62012ca00c71360d44b65cd65787fa4e75a81016b957
+/entries/5/supporting/timeline/after/source/sha256 before 850589544a3e7698971bee85931c1fe99b8ba110a8f1ec94ecd5f42419fc9168 after d657fe3b191a675c2d2a62012ca00c71360d44b65cd65787fa4e75a81016b957
+skills/forge-task/SKILL.md attributed before 9b092ac794b0139a2b29158808229bdd4374fc596d9a258c9cdd28d2400975d3 attributed after 4e778c46a1db66ec35d49314129fb30aad6ce7c075cae72aa0e43f3d3d03e952
+samples before de86e803156d05f2b1e9bbb016801026529360db9e5fb0030377c4ddac578cec
+samples after f7c143e50413e1eb00391e6857bbd9cd995a233078409ab2957153f676844cdf
+
+
+## Measured request-retention terminal (#382)
+
+Actual public predecessor 421a8ec3af341fa8ec3a71fd0feee7f985e5d1eb
+Previous layer scripts/fixtures/owner-recovery/distribution-delta.json
+Only 0 existing changed after/source.sha256 citation literals move; all other sample bytes remain exact.
+samples before f7c143e50413e1eb00391e6857bbd9cd995a233078409ab2957153f676844cdf
+samples after f7c143e50413e1eb00391e6857bbd9cd995a233078409ab2957153f676844cdf
+
+
+## Measured FULL guard / legacy-alias terminal (#385+#387)
+
+Actual public predecessor 61da5cf036fcab26f4cb63a01084b09cae7e4781
+Previous layer scripts/fixtures/request-retention/distribution-delta.json
+Only 0 existing changed after/source.sha256 citation literals move; all other sample bytes remain exact.
+samples before f7c143e50413e1eb00391e6857bbd9cd995a233078409ab2957153f676844cdf
+samples after f7c143e50413e1eb00391e6857bbd9cd995a233078409ab2957153f676844cdf
+
+
+## Measured parallelism terminal (#343)
+
+Actual public predecessor 1da8887ebb537f986627488f8c00e37a11e96480
+Previous layer scripts/fixtures/full-guard/distribution-delta.json
+Only 2 existing after/source.sha256 citation literals move; all other sample bytes remain exact.
+/entries/2/supporting/partial/after/source/sha256 before 1d3fc660ccfd9bb411f4f6911660b03ce53afc3b118915715081ba5e33947d71 after c83b01e327117e3bde566b0c652fb98166f516a172583ca77df929ee95a68f63
+/entries/6/supporting/partial/after/source/sha256 before 1d3fc660ccfd9bb411f4f6911660b03ce53afc3b118915715081ba5e33947d71 after c83b01e327117e3bde566b0c652fb98166f516a172583ca77df929ee95a68f63
+source skills/forge-next/SKILL.md
+before 1d3fc660ccfd9bb411f4f6911660b03ce53afc3b118915715081ba5e33947d71
+after c83b01e327117e3bde566b0c652fb98166f516a172583ca77df929ee95a68f63
+attributed_before c74b137205734a1cf266a1befcc8d14decfef6b07b335807e3ab1aa3b1321417
+attributed_after edd4982a5adb81f98aa8c118c7fddbdcb7cebad25378747b1c2ca9e39db7361d
+samples before f7c143e50413e1eb00391e6857bbd9cd995a233078409ab2957153f676844cdf
+samples after ddc67c70370a150ace0b050c698cee8666f646c79ae51aa0e61468862f7c74e0
+surface agents
+before 5a340f4af8ad04071f5d3f39573f72e849c5e97a40e33364da787a14d2ef8de2
+after a4cdcf70a37c309b9a67c818fcc1fdafda24eaf2abbedb775b576530c5d275d1
+attributed_before 5a340f4af8ad04071f5d3f39573f72e849c5e97a40e33364da787a14d2ef8de2
+attributed_after a4cdcf70a37c309b9a67c818fcc1fdafda24eaf2abbedb775b576530c5d275d1
+surface skills
+before 6ce7d63557e93202f5bd9e7da5cab474cfe04e15af1721eb8bb7fb90f95eadfb
+after 10307a0e28fdc0347e16b636917e80547b6eed764872b2080cb925a980ac7df5
+attributed_before 0bf4e84ef8801daeabc97887304b71abb3b6c3df850eabbafa354bdec043a071
+attributed_after 5eafbfc0eea766b0c23093d5625bb2e512c3b3a04926335299e4a3fed9aea58e
+
+
+## Grouped issue campaign 390–397 current source references
+
+Earlier evidence remains above. Only current after-node source fingerprints are updated; no sample prose or human acceptance is changed.
+
+skills/forge-next/SKILL.md: before=c83b01e327117e3bde566b0c652fb98166f516a172583ca77df929ee95a68f63 after=05c13bbcd0d39435f6cccac14f5828b805fcd5efe1c421d0d59c3eeb695d1c00 attributed_before=edd4982a5adb81f98aa8c118c7fddbdcb7cebad25378747b1c2ca9e39db7361d attributed_after=68d07271e590070913bc62c15e704c0d67e4f7fc2d3c4727b9927d2b4f1e33c0
+
+
+## Owner recovery issues405406 current source references
+
+Earlier evidence remains above. Only current after-node source fingerprints are updated; no sample prose or human acceptance is changed.
+
+skills/forge-next/SKILL.md: before=05c13bbcd0d39435f6cccac14f5828b805fcd5efe1c421d0d59c3eeb695d1c00 after=598398fba42577af77dc68282ad02878996787b55abb9caf4787d302c61d2a49 attributed_before=68d07271e590070913bc62c15e704c0d67e4f7fc2d3c4727b9927d2b4f1e33c0 attributed_after=ea25b3d92b2946066b61c1a0e6e8f28cf29e9d8995b3fa3ea384b9b0cae11cca
+
+
+## Owner recovery issue407 current source references
+
+Earlier evidence remains above. Only current after-node source fingerprints are updated; no sample prose or human acceptance is changed.
+
+skills/forge-next/SKILL.md: before=598398fba42577af77dc68282ad02878996787b55abb9caf4787d302c61d2a49 after=fe72edc9eedccfac3faa77dc9a619d0a0b98ee6fed052265dfd2700740a7d9e1 attributed_before=ea25b3d92b2946066b61c1a0e6e8f28cf29e9d8995b3fa3ea384b9b0cae11cca attributed_after=47c80adfef2ce723846c2ea58150a14c874e20a1cfcf3107ad480450938f4791
+
+
+## Issue416 standalone deferral source references
+
+Earlier evidence remains above. Only current after-node source fingerprints are updated; no sample prose or human acceptance is changed.
+
+skills/forge-task/SKILL.md: before=d657fe3b191a675c2d2a62012ca00c71360d44b65cd65787fa4e75a81016b957 after=168dfdec333011062dd114e427c92f8baf0eb3b6d1511ad705fe592b50f6efef attributed_before=4e778c46a1db66ec35d49314129fb30aad6ce7c075cae72aa0e43f3d3d03e952 attributed_after=e64ab30c3f4c347a541e0238b8e177be556208fd66e9d8c040fb4c85519daaa4
+
+
+## Issues442443445446 source references
+
+Earlier evidence remains above. Only current task after-node source fingerprints change; sample prose and human acceptance remain unchanged.
+
+skills/forge-task/SKILL.md: before=168dfdec333011062dd114e427c92f8baf0eb3b6d1511ad705fe592b50f6efef after=ef0598d7da5bed2c5cc61374951143c89b76a1fab20068acf332f266935c3d91 attributed_before=e64ab30c3f4c347a541e0238b8e177be556208fd66e9d8c040fb4c85519daaa4 attributed_after=565f63002241d968741aa9484ec1a2ffd1ad9763cddba95433f54c47b921ad94

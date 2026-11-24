@@ -47,7 +47,7 @@ const SCHEMA_FILE = '.gsd/SCHEMA-VERSION';
 // Single source of truth for the check names this CLI accepts via `--check`.
 // `runCheck` dispatches these; the unknown-check message and `--help` text
 // must both be derived from this array — never hand-repeated.
-const VALID_CHECKS = ['schema', 'projection-versioned', 'review-model-drift', 'plan-repo-declared', 'capabilities', 'workspace-consistency', 'run-overlap', 'resources', 'memory-quarantine', 'claim-stuck'];
+const VALID_CHECKS = ['schema', 'projection-versioned', 'review-model-drift', 'plan-repo-declared', 'capabilities', 'workspace-consistency', 'run-overlap', 'resources', 'memory-quarantine', 'claim-stuck', 'artifact-routing'];
 
 // ── checkSchema ───────────────────────────────────────────────────────────────
 /**
@@ -612,6 +612,64 @@ function checkMemoryQuarantine(cwd) {
   };
 }
 
+
+// Explicit read-only diagnostic, not native-tool capability detection or a
+// controller gate. The resolver and observed agent bytes keep their authority.
+function checkNativeBinding(cwd, options = {}) {
+  const families = { 'plan-milestone': 'forge-planner', 'plan-slice': 'forge-planner', 'execute-task': 'forge-executor' };
+  const unitType = options.unitType, host = options.hostRuntime;
+  const report = { check: 'native-binding', ok: false, status: 'unknown', reason_code: 'native-binding-input-invalid',
+    unit_type: Object.hasOwn(families, unitType) ? unitType : null, agent_type: Object.hasOwn(families, unitType) ? families[unitType] : null,
+    host_runtime: ['claude', 'codex'].includes(host) ? host : null, worker_mode: null, runtime_authorized: null,
+    model_requested: null, model_resolved: null, effort_requested: null, effort_resolved: null, effort_reason: null,
+    effort_observed: null, source_sha256: null, native_tool_availability: 'unknown', provider_called: false,
+    effect: 'read-only-binding-diagnosis', message: 'Informe unidade e host explícitos para diagnosticar somente o binding.' };
+  if (!report.unit_type || !report.host_runtime) return report;
+  const safe = value => typeof value === 'string' && /^[a-z0-9][a-z0-9_.:|\-]{0,159}$/i.test(value)
+    && !/(?:token|credential|password|secret)/i.test(value) ? value : null;
+  let route;
+  try {
+    const input = { cwd: path.resolve(cwd || process.cwd()), unitType, hostRuntime: host };
+    for (const key of ['unitId','milestoneId','planPath','roadmapPath','workerMode','workerEngine','sidecarDeclared']) {
+      if (options[key] !== undefined) input[key] = options[key];
+    }
+    route = require('./forge-dispatch-resolve').resolveDispatch(input);
+  } catch { return { ...report, reason_code: 'native-binding-resolution-failed', message: 'Não foi possível resolver a unidade; nenhum binding ou ferramenta foi declarado compatível.' }; }
+  // A fallback route is not evidence of the operator's current preferences.
+  // Fail before reporting authorization, model/effort or observing a binding.
+  if (route.prefs_ok !== true) return { ...report, reason_code: 'native-binding-preferences-invalid',
+    message: 'As preferências não puderam ser validadas; a rota e o binding atuais permanecem desconhecidos. Nenhum modelo ou esforço foi substituído.' };
+  Object.assign(report, { worker_mode: route.worker_mode || null, runtime_authorized: route.dispatch_allowed === true,
+    model_requested: safe(route.model_requested), model_resolved: safe(route.model_resolved || route.model),
+    effort_requested: safe(route.effort_requested), effort_resolved: safe(route.effort), effort_reason: safe(route.effort_reason) });
+  if (route.config_ok !== true || route.dispatch_allowed !== true) return { ...report,
+    reason_code: safe(route.dispatch_reason_code) || 'resolved-dispatch-refused', message: 'A resolução não autoriza a rota; nenhum modelo, esforço ou transporte foi substituído.' };
+  if (route.host_runtime !== 'claude' || route.resolved_worker_engine !== 'claude' || route.worker_mode !== 'native') {
+    return { ...report, ok: true, status: 'not-applicable', reason_code: 'native-agent-binding-not-applicable',
+      message: 'Esta rota não usa frontmatter de agente Claude nativo; a disponibilidade real do transporte continua desconhecida.' };
+  }
+  if (typeof options.agentPath !== 'string' || !options.agentPath.trim()) return { ...report,
+    reason_code: 'native-effort-binding-evidence-missing', message: 'Forneça o arquivo de agente efetivamente selecionado pelo host; nenhuma definição foi presumida.' };
+  let file, fingerprint, observed;
+  try {
+    file = path.resolve(cwd || process.cwd(), options.agentPath);
+    const stat = fs.statSync(file); if (!stat.isFile() || stat.size > 256 * 1024) throw Error('invalid binding source');
+    fingerprint = options.agentSha256 === undefined
+      ? require('crypto').createHash('sha256').update(fs.readFileSync(file)).digest('hex') : options.agentSha256;
+    observed = require('./forge-native-invocation').observeClaudeAgentBinding({ agentType: families[unitType], agentPath: file, sourceFingerprint: fingerprint });
+  } catch { return { ...report, reason_code: 'native-effort-binding-source-unreadable', message: 'O arquivo de agente indicado não pôde ser observado de forma limitada e somente leitura.' }; }
+  if (!observed.ok) return { ...report, reason_code: safe(observed.reason_code) || 'native-effort-binding-evidence-missing',
+    message: 'A observação do arquivo de agente foi recusada; nenhum binding foi aceito.' };
+  const efforts = require('./forge-model-policy').EFFORT_SCALE;
+  if (!efforts.includes(observed.effort)) return { ...report, reason_code: 'native-effort-binding-evidence-missing',
+    message: 'O esforço declarado pelo agente não pertence ao contrato reconhecido; o valor bruto não é exposto.' };
+  Object.assign(report, { effort_observed: observed.effort, source_sha256: observed.source_fingerprint });
+  if (observed.effort !== route.effort) return { ...report, status: 'incompatible', reason_code: 'native-effort-binding-mismatch',
+    message: 'O esforço resolvido diverge do frontmatter observado. Um caller com Agent effort observado no schema ativo pode usar agent-argument; este CLI não observa essa ferramenta e não prova incompatibilidade desse argumento. A rota foi preservada; este diagnóstico não inicia nem altera leases.' };
+  return { ...report, ok: true, status: 'compatible-binding', reason_code: 'native-agent-binding-compatible',
+    message: 'Somente o binding de esforço coincide com os bytes observados. A ferramenta nativa e o despacho real ainda não foram validados.' };
+}
+
 // ── module.exports ────────────────────────────────────────────────────────────
 module.exports = {
   CURRENT_SCHEMA,
@@ -620,11 +678,27 @@ module.exports = {
   checkProjectionVersioned,
   checkPlanRepoDeclared,
   checkCapabilities,
+  checkNativeBinding,
   checkWorkspaceConsistency,
   checkRunOverlap,
   checkResources,
   checkMemoryQuarantine,
   checkClaimStuck,
+  checkArtifactRouting: (cwd, options) => require('./forge-artifact-routing-diagnostic').checkArtifactRouting(cwd, options),
+  createOwnerRecoveryAdapter: options => require('./forge-owner-window-recovery').createObservedHostAdapter(options),
+  createPreparationSettlementAdapter: options => require('./forge-owner-transport-window').createObservedPreparationAdapter(options),
+  retireLegacyPreparation: (options,host) => require('./forge-legacy-preparation-retirement').retire(options,host),
+  settleFailedPreparation: (request, adapter) => require('./forge-owner-transport-window').settleFailedPreparation(request, adapter),
+  inspectOwnerWindow: options => require('./forge-owner-window-recovery').inspect(options),
+  recoverOwnerWindow: options => {
+    const api = require('./forge-owner-window-recovery'), inspection = api.inspect(options);
+    return api.recover({ ...options, expected: options.expected || inspection.observation_sha256 });
+  },
+  inspectTaskRetirement: options => require('./forge-task-retirement').inspect(options),
+  retireTask: options => {
+    const api = require('./forge-task-retirement'), inspection = api.inspect(options);
+    return api.closeTask({ ...options, expected: options.expected || inspection.observation_sha256 });
+  },
   // Additive export (R1 guard): lets the regression test assert the RENDERED
   // icon, not just the check result shape. No existing signature changed.
   formatResults,
@@ -735,6 +809,8 @@ function runCheck(name, cwd, options = {}) {
       results.push({ check: c, ...r });
       // Advisory: `r.ok` is always true, so this never flips `allOk`.
       if (!r.ok) allOk = false;
+    } else if (c === 'artifact-routing') {
+      results.push({ check: c, ...module.exports.checkArtifactRouting(cwd, options) });
     } else if (c === 'capabilities') {
       const r = checkCapabilities(cwd, options);
       results.push(r);
@@ -791,6 +867,7 @@ function formatResults(results) {
     // warn on anything short of a genuinely clean/measured result; exit code
     // stays 0 in every case (advisory posture unchanged).
     const advisoryWarn = (r.check === 'plan-repo-declared' && Array.isArray(r.plans) && r.plans.length > 0)
+      || (r.check === 'artifact-routing' && r.verdict !== 'compatible')
       || (r.check === 'workspace-consistency' && r.divergentCount > 0)
       || (r.check === 'run-overlap' && (r.verdict === 'overlap' || r.verdict === 'inconclusive'))
       || (r.check === 'resources' && ((r.verdict && r.verdict !== 'clean') || Boolean(r.skipped)))
@@ -840,6 +917,84 @@ function formatResults(results) {
 function cliMain() {
   const args = parseArgs(process.argv.slice(2));
 
+  // New explicit operation; existing inspect/recover/retire flags remain strict.
+  if ('legacy-preparation-retirement' in args) {
+    const argv=process.argv.slice(2),allowed=new Set(['--legacy-preparation-retirement','--cwd','--request','--receipt-copy']),seen=new Set(),forward=[];let valid=true;
+    for(let i=0;i<argv.length;i++){const flag=argv[i];if(!allowed.has(flag)||seen.has(flag)){valid=false;break;}seen.add(flag);if(flag==='--legacy-preparation-retirement')continue;if(!argv[i+1]||argv[i+1].startsWith('--')){valid=false;break;}forward.push(flag,argv[++i]);}
+    if(!valid||!seen.has('--cwd')||!seen.has('--request')){process.stdout.write(JSON.stringify({status:'partial',reason_code:'legacy-retirement-cli-input-invalid'})+'\n');process.exitCode=2;return;}
+    return require('./forge-legacy-preparation-retirement').serve(forward).then(result=>{process.stdout.write(JSON.stringify(result)+'\n');if(result.status!=='retired')process.exitCode=1;},error=>{process.stdout.write(JSON.stringify({status:'partial',reason_code:/^[a-z0-9-]+$/.test(error.code||'')?error.code:'legacy-retirement-failed',historical_join:'not-observed'})+'\n');process.exitCode=1;});
+  }
+
+
+  // These CLI entries inspect only. A live callback capability cannot be
+  // serialized through flags or a request file and never comes from --apply.
+  if ('owner-window' in args || 'retire-task' in args) {
+    const allowed = new Set(['owner-window','retire-task','request','receipt-copy','outcome','successor','cwd','json','apply']);
+    const argv = process.argv.slice(2), seen = new Set(); let invalid = false;
+    for (let i = 0; i < argv.length; i++) {
+      const flag = argv[i], key = flag.slice(2);
+      if (!flag.startsWith('--') || !allowed.has(key) || seen.has(key)) { invalid = true; break; }
+      seen.add(key);
+      if (!['owner-window','json','apply'].includes(key) && (!argv[++i] || argv[i].startsWith('--'))) { invalid = true; break; }
+    }
+    const windowMode = args['owner-window'] === true;
+    if (invalid || ('owner-window' in args) === ('retire-task' in args)
+      || ('owner-window' in args && !windowMode) || windowMode && ('outcome' in args || 'successor' in args)
+      || !windowMode && (typeof args['retire-task'] !== 'string' || typeof args.request !== 'string')
+      || !windowMode && args.outcome !== undefined && !['cancelled','superseded'].includes(args.outcome)
+      || ('json' in args && args.json !== true) || ('apply' in args && args.apply !== true)) {
+      process.stderr.write('forge-doctor: owner recovery inspection accepts one mode, --request, --cwd, --json and retirement intent; no duplicate or unknown flags.\n');
+      process.exitCode = 2; return;
+    }
+    try {
+      const recovery = require('./forge-owner-window-recovery');
+      const request = args.request ? JSON.parse(recovery.readEvidence(path.resolve(args.request), 8 * 1024 * 1024)) : undefined;
+      const receiptCopy = args['receipt-copy'] ? path.resolve(args['receipt-copy']) : undefined;
+      if (!windowMode && request.taskId !== args['retire-task']) throw Object.assign(new Error(), { code: 'task-retirement-request-mismatch' });
+      const owner = path.resolve(args.cwd || process.cwd());
+      const report = windowMode ? module.exports.inspectOwnerWindow({ owner, request, receiptCopy })
+        : module.exports.inspectTaskRetirement({ owner, request, receiptCopy, outcome: args.outcome || (args.successor ? 'superseded' : 'cancelled'), successorId: args.successor });
+      if (args.apply) {
+        process.stdout.write(JSON.stringify({ status: 'blocked', reason_code: 'owner-window-live-host-required', inspection: report,
+          message: 'A ação exige o adaptador vivo do host; --apply e arquivos não atestam escritores nem decisões.' }) + '\n');
+        process.exitCode = 2; return;
+      }
+      const message = windowMode ? report.status === 'absent' ? 'Nenhuma janela do owner observada; isto não atesta escritores encerrados.'
+        : 'Janela do owner retida. Recupere pelo adaptador vivo após comprovar join e reconciliar o escopo exato.'
+        : report.closed ? 'Task encerrada administrativamente; código e evidências preservados sem aceite de implementação.'
+        : 'Task aberta. Encerramento exige decisão explícita, join e reconciliação; worktree será preservado.';
+      process.stdout.write(args.json ? JSON.stringify(report) + '\n' : message + '\n');
+    } catch (error) {
+      const reason = /^[A-Za-z0-9_-]{1,120}$/.test(error.code || '') ? error.code : 'owner-recovery-diagnostic-failed';
+      process.stdout.write(JSON.stringify({ status: 'partial', reason_code: reason }) + '\n'); process.exitCode = 1;
+    }
+    return;
+  }
+
+
+  // A named exclusive diagnostic accepts explicit unit context. It never
+  // observes or fabricates active tool capabilities, dispatches or opens leases.
+  if ('diagnose-native-binding' in args) {
+    const allowed = new Set(['diagnose-native-binding','runtime','cwd','agent','agent-sha256','unit-id','milestone','plan','roadmap','worker-mode','json']);
+    const argv = process.argv.slice(2), seen = new Set(); let invalid = false;
+    for (let i = 0; i < argv.length; i++) {
+      const flag = argv[i];
+      if (!flag.startsWith('--') || !allowed.has(flag.slice(2)) || seen.has(flag)) { invalid = true; break; }
+      seen.add(flag);
+      if (flag !== '--json' && (!argv[++i] || argv[i].startsWith('--'))) { invalid = true; break; }
+    }
+    if (invalid || !['plan-milestone','plan-slice','execute-task'].includes(args['diagnose-native-binding'])
+      || !['claude','codex'].includes(args.runtime) || ('json' in args && args.json !== true)) {
+      process.stderr.write('forge-doctor: --diagnose-native-binding exige unidade e --runtime explícitos; aceita somente contexto, arquivo de agente e --json.\n');
+      process.exitCode = 2; return;
+    }
+    const report = checkNativeBinding(args.cwd, { unitType: args['diagnose-native-binding'], hostRuntime: args.runtime,
+      agentPath: args.agent, agentSha256: args['agent-sha256'], unitId: args['unit-id'], milestoneId: args.milestone,
+      planPath: args.plan, roadmapPath: args.roadmap, workerMode: args['worker-mode'] });
+    process.stdout.write(args.json ? JSON.stringify(report) + '\n' : report.message + '\n');
+    process.exitCode = report.ok ? 0 : 1; return;
+  }
+
   // Exclusive read-only mode: reject conflicts before any existing dispatch.
   if ('diagnose-recovery' in args || 'controller-key' in args) {
     const diagnostic = require('./forge-recovery-diagnostic');
@@ -875,19 +1030,31 @@ function cliMain() {
     process.stdout.write(`forge-doctor — Forge schema-version and projection-versioned checks
 
 Flags:
+  --owner-window [--request <json>] [--receipt-copy <file>] [--cwd <dir>] [--json]
+                                 inspect the exact held owner window, read-only
+  --retire-task <id> --request <json> [--outcome cancelled|superseded]
+    [--successor <milestone-id>] [--receipt-copy <file>]
+                                 inspect administrative closure, read-only
+                                 --apply cannot supply the required live host proof;
+                                 use shared/forge-owner-recovery.md host adapter
   --check <name> [--cwd <dir>]   run check: ${VALID_CHECKS.join(' | ')} |
                                  all
   --runtime <name>               capabilities host: claude | codex | both
   --json                         emit deterministic JSON for capability checks
+  --diagnose-native-binding <plan-milestone|plan-slice|execute-task>
+    --runtime <claude|codex> [--agent <file>] [--agent-sha256 <digest>]
+    [--plan <file>] [--roadmap <file>] [--unit-id <id>] [--milestone <id>]
+    [--worker-mode <native|sidecar>] [--cwd <dir>] [--json]
+                                 read-only binding diagnosis; tool availability unknown
   --diagnose-recovery <id>        diagnóstico somente leitura; texto pt-BR ou --json
     [--controller-key <key>]      controller por chave explícita, só milestones
                                  exclusivo; não autoriza ações nem atestações
   --recover-claim <run-id>       preview manual recovery of a stuck live claim
     --apply --confirm-owner-stopped --confirm-workspace-quiescent
   --restore-claim <run-id>       preview; apply requires --confirm-workspace-quiescent
-  --fix [--cwd <dir>] [--migrate]  write SCHEMA-VERSION if missing; suggest ignore
+  --fix [--cwd <dir>] [--migrate] [--dry-run]\n                                 write SCHEMA-VERSION if missing; suggest ignore
                                  fixes. Refuses to stamp an unmigrated store unless
-                                 --migrate is given (then runs forge-migrate first).
+                                 --migrate is given (then runs forge-migrate first).\n  --dry-run                      preview --fix/--fix --migrate only; no project writes
   --regen-projection [--cwd <dir>] [--force]  regenerate monolith projections from
                                  fragment store (refuses to overwrite a populated
                                  monolith from an empty store unless --force)
@@ -904,6 +1071,22 @@ Exit codes:
     return;
   }
 
+  // Fix previews are explicit, boolean and exclusive. A misspelled/unsupported
+  // modifier must never be silently ignored at a writing command boundary.
+  if ('fix' in args) {
+    const allowed = new Set(['fix', 'migrate', 'dry-run', 'cwd']);
+    if (Object.keys(args).some(key => !allowed.has(key)) || args.fix !== true
+      || ('migrate' in args && args.migrate !== true)
+      || ('dry-run' in args && args['dry-run'] !== true)
+      || ('cwd' in args && (typeof args.cwd !== 'string' || !args.cwd))) {
+      process.stderr.write('forge-doctor: --fix accepts only --migrate, --dry-run and --cwd <dir>; boolean flags take no value.\n');
+      process.exitCode = 2; return;
+    }
+  } else if ('dry-run' in args) {
+    process.stderr.write('forge-doctor: --dry-run is supported only with --fix [--migrate]; no action taken.\n');
+    process.exitCode = 2; return;
+  }
+  const dryRun = args['dry-run'] === true;
   const cwdArg = typeof args.cwd === 'string' ? path.resolve(args.cwd) : process.cwd();
 
   if (args['recover-claim'] || args['restore-claim']) {
@@ -925,9 +1108,10 @@ Exit codes:
     const schemaPath = path.join(cwdArg, SCHEMA_FILE);
     const gsdDir = path.join(cwdArg, '.gsd');
     let fixed = [];
+    const fixHeading = `forge-doctor --fix${dryRun ? ' (dry-run; no files written)' : ''}:\n`;
 
     // Ensure .gsd/ exists
-    if (!fs.existsSync(gsdDir)) {
+    if (!dryRun && !fs.existsSync(gsdDir)) {
       fs.mkdirSync(gsdDir, { recursive: true });
     }
 
@@ -943,7 +1127,7 @@ Exit codes:
         .map(([name, s]) => `${name} (${s.monolithPath}: ${s.monolithEntries} entries, 0 fragments)`);
 
       if (!args.migrate) {
-        process.stdout.write('forge-doctor --fix:\n');
+        process.stdout.write(fixHeading);
         process.stdout.write('  Refusing to stamp SCHEMA-VERSION — fragment store is not migrated.\n');
         process.stdout.write('  The following monoliths still hold the source of truth:\n');
         for (const u of unmig) process.stdout.write(`    - ${u}\n`);
@@ -962,7 +1146,7 @@ Exit codes:
       const { migrateAll } = require('./forge-migrate');
       let results;
       try {
-        results = migrateAll(cwdArg, {});
+        results = migrateAll(cwdArg, { dryRun });
       } catch (e) {
         process.stderr.write(`forge-doctor --fix --migrate: migration failed: ${e.message}\n`);
         process.exit(1);
@@ -971,28 +1155,30 @@ Exit codes:
       const migErr = ['ledger', 'decisions', 'memory'].find(n => results[n] && results[n].error);
       if (migErr) {
         process.stderr.write(`forge-doctor --fix --migrate: ${migErr} migration errored: ${results[migErr].error}\n`);
-        process.stderr.write('  Partial state preserved; .bak files kept. See above.\n');
+        process.stderr.write(dryRun ? '  Dry-run wrote no files; resolve the migration error before apply.\n' : '  Partial state preserved; .bak files kept. See above.\n');
         process.exit(1);
         return;
       }
-      process.stdout.write('forge-doctor --fix --migrate:\n');
+      process.stdout.write(`forge-doctor --fix --migrate${dryRun ? ' (dry-run; no files written)' : ''}:\n`);
       for (const n of ['ledger', 'decisions', 'memory']) {
         const r = results[n];
-        if (r) process.stdout.write(`  ${n}: ${r.written} fragment(s) written, verification: ${r.verification}\n`);
+        if (r) process.stdout.write(dryRun
+          ? `  ${n}: ${r.would_write || 0} fragment(s) would be written, verification: ${r.verification}\n`
+          : `  ${n}: ${r.written} fragment(s) written, verification: ${r.verification}\n`);
       }
-      process.stdout.write(`  SCHEMA-VERSION stamped: ${results.schema_version_written}\n`);
+      process.stdout.write(`  SCHEMA-VERSION ${dryRun ? 'preview' : 'stamped'}: ${results.schema_version_written}\n`);
       process.exit(0);
       return;
     }
 
     if (!fs.existsSync(schemaPath)) {
-      fs.writeFileSync(schemaPath, CURRENT_SCHEMA + '\n', 'utf8');
-      fixed.push(`Created ${SCHEMA_FILE} with "${CURRENT_SCHEMA}"`);
+      if (!dryRun) fs.writeFileSync(schemaPath, CURRENT_SCHEMA + '\n', 'utf8');
+      fixed.push(`${dryRun ? 'Would create' : 'Created'} ${SCHEMA_FILE} with "${CURRENT_SCHEMA}"`);
     } else {
       const current = fs.readFileSync(schemaPath, 'utf8').trim();
       if (current !== CURRENT_SCHEMA) {
-        fs.writeFileSync(schemaPath, CURRENT_SCHEMA + '\n', 'utf8');
-        fixed.push(`Updated ${SCHEMA_FILE}: "${current}" → "${CURRENT_SCHEMA}"`);
+        if (!dryRun) fs.writeFileSync(schemaPath, CURRENT_SCHEMA + '\n', 'utf8');
+        fixed.push(`${dryRun ? 'Would update' : 'Updated'} ${SCHEMA_FILE}: "${current}" → "${CURRENT_SCHEMA}"`);
       } else {
         fixed.push(`${SCHEMA_FILE} already at "${CURRENT_SCHEMA}" — no change`);
       }
@@ -1001,13 +1187,13 @@ Exit codes:
     // Suggest ignore fixes for tracked projections
     const projResult = checkProjectionVersioned(cwdArg);
     if (!projResult.ok && projResult.tracked.length > 0) {
-      process.stdout.write(`forge-doctor --fix:\n`);
+      process.stdout.write(fixHeading);
       for (const f of fixed) process.stdout.write(`  ${f}\n`);
       process.stdout.write(`\nProjection monoliths tracked by VCS:\n`);
       for (const t of projResult.tracked) process.stdout.write(`  - ${t}\n`);
       process.stdout.write(`\nTo fix, run:\n  node scripts/forge-ignore.js --apply\n`);
     } else {
-      process.stdout.write(`forge-doctor --fix:\n`);
+      process.stdout.write(fixHeading);
       for (const f of fixed) process.stdout.write(`  ${f}\n`);
     }
     process.exit(0);

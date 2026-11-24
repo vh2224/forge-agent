@@ -7,7 +7,7 @@
     {
       "source_id": "agents",
       "target": "agents",
-      "sha256": "64bbdc40320fe629f19c9e0ceb50256f03544d9d9b0385d416f1563b2abbd41a"
+      "sha256": "5a340f4af8ad04071f5d3f39573f72e849c5e97a40e33364da787a14d2ef8de2"
     },
     {
       "source_id": "commands",
@@ -17,7 +17,7 @@
     {
       "source_id": "skills",
       "target": "skills",
-      "sha256": "4b1a158a3faedb66b0aab2033974917cedb4251d3352e90b5f019970330ae548"
+      "sha256": "f0d6e8f36cadc8c4f4c66d5e9a5b4da486b2843434af49d68d6875109d982f7c"
     },
     {
       "source_id": "dispatch-templates",
@@ -27,7 +27,7 @@
     {
       "source_id": "hooks",
       "target": "hooks/forge-hook.js",
-      "sha256": "c149db9dd45bed13f05931987217d224a6f23d805dc6e8900e46b32893a41c48"
+      "sha256": "b7c42a1e5f13383c13d6099655bbd05481bf584c19d90ecf74a4bdefb99d5c36"
     },
     {
       "source_id": "mcp",
@@ -47,7 +47,7 @@
     {
       "source_id": "configuration",
       "target": "forge-capabilities.json;forge-prefs.schema.json",
-      "sha256": "c76a23d540a2602293ba45f8821419aa00d738eb08c538b85627596bcc560c3d"
+      "sha256": "e3f1fdcfe1b6404d242fec5e1925a6e424d9f9fc8bcaec23d7f6711ee0d2e280"
     }
   ]
 }

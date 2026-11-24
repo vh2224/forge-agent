@@ -12,7 +12,9 @@
 //   { mode: "parallel" | "single" | "legacy" | "blocked" | "none",
 //     batch: [{id, planPath}],
 //     reason: string,
-//     details?: object }
+//     details?: object,
+//     dag_status?: "valid" | "legacy" | "invalid",   (issue 343, additive)
+//     diagnostics?: string[] }                       (issue 343, additive)
 //
 // Modes:
 //   parallel  — batch.length >= 2, orchestrator dispatches multiple Agent() in one message
@@ -20,11 +22,31 @@
 //   legacy    — any task in slice is missing depends OR writes frontmatter → force sequential
 //   blocked   — there are pending tasks but none have all deps satisfied (shouldn't happen in valid plans)
 //   none      — all tasks already marked done
+//
+// issue 343 U0a: depends/writes come from the shared parseExecutionFields decoder
+// (forge-must-haves decodeDeclarationList) and the pure validateTaskDag decides
+// legacy (absent declarations) apart from invalid (malformed declarations or
+// unknown, self or cyclic references). An invalid graph never yields `parallel`: it
+// stays sequential, one ready task at a time. This CLI is a compatibility reader;
+// the canonical batch decision does not depend on it.
+//
+// issue 343 U0a-r1: parseTaskFrontmatter is a scheduling reader with a fixed
+// projection. A YAML-null value (`writes:` with no list) is never read as `[]`, and
+// a list with a leading or interior blank line — readable, but refused by the
+// temporal guard — is named too; a task with any such diagnostic is never ready.
+// Only an explicit `writes: []` declares no writes. pathsOverlap bounds its work
+// explicitly (GLOB_BOUNDS) and reports exhausted or undecided work as a conflict.
 
 'use strict';
 
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+
+// issue 343 U0a: forge-must-haves is required only inside the readers. This module
+// must keep loading alone (forge-parallelism-exports.test.js copies it to an empty
+// directory) and forge-code-roots requires it at top level.
+function sharedDecoder() { return require('./forge-must-haves'); }
 
 function parseArgs(argv) {
   const args = {};
@@ -103,32 +125,90 @@ function claimPathMatches(claimPath, realPath) {
   try { return globToRegex(claim).test(real); } catch { return false; }
 }
 
-// Two write-declarations conflict iff any literal-or-glob on one side matches the other.
-function pathsOverlap(a, b) {
-  let na; let nb;
-  try { na = canonicalizeClaimPath(a); nb = canonicalizeClaimPath(b); } catch { return true; }
-  if (!na || !nb) return true; // defensive: empty path = unknown = conflict
-  if (na === '.' || nb === '.') return true; // workspace claim overlaps every path
-  if (na === nb) return true;
+// issue 343 U0a-r1: explicit bounds on the glob intersection, checked before
+// anything is allocated. A declaration longer than `inputChars`, a segment pair
+// whose product automaton would exceed `states`, or one comparison spending more
+// than `work` steps (compared literal characters plus explored states, cumulative
+// over all its segments) is undecided — and undecided is a conflict, never a
+// disjointness. Real declarations stay far below them; only adversarial input
+// reaches them, and it is then serialized.
+const GLOB_BOUNDS = Object.freeze({ inputChars: 4096, states: 65536, work: 32768 });
 
-  // Directory prefix: "src/" should conflict with anything under it.
-  if (na.endsWith('/*') || na.endsWith('/**')) {
-    const prefix = na.replace(/\/\*\*?$/, '') + '/';
-    if (nb === prefix.slice(0, -1) || nb.startsWith(prefix)) return true;
+// issue 343 U0a: a write declaration as written — `path`, `root::path` or
+// { root_id, path }. Returns { root, path } with a canonical relative path, or null
+// when it is empty, malformed, absolute, escaping or longer than the input bound
+// (unknown = conflict).
+const ROOT_ID = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+function declaredTarget(value) {
+  let root = null, relative;
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    if (typeof value.root_id !== 'string' || !ROOT_ID.test(value.root_id) || typeof value.path !== 'string') return null;
+    if (value.path.length > GLOB_BOUNDS.inputChars) return null;
+    root = value.root_id; relative = value.path;
+  } else {
+    relative = String(value || '');
+    if (relative.length > GLOB_BOUNDS.inputChars) return null;
+    const at = relative.indexOf('::');
+    if (at >= 0) {
+      root = relative.slice(0, at); relative = relative.slice(at + 2);
+      if (!ROOT_ID.test(root)) return null;
+    }
   }
-  if (nb.endsWith('/*') || nb.endsWith('/**')) {
-    const prefix = nb.replace(/\/\*\*?$/, '') + '/';
-    if (na === prefix.slice(0, -1) || na.startsWith(prefix)) return true;
-  }
+  if (relative.includes('::')) return null;
+  let canonical;
+  try { canonical = canonicalizeClaimPath(relative); } catch (_) { return null; }
+  return canonical ? { root, path: canonical } : null;
+}
 
-  // Bidirectional glob match (either side may be the pattern).
-  try {
-    if (globToRegex(na).test(nb)) return true;
-    if (globToRegex(nb).test(na)) return true;
-  } catch (_) {
-    return true; // malformed glob → treat as conflict
+// Emptiness test of the product of two single-segment glob automata over `*` (any
+// run), `?` (one character) and literals: is there one name both match? Returns
+// true, false, or null when the bounds are exhausted (undecided). Two literal
+// segments compare directly; otherwise the product size is checked before its
+// visited table is allocated, and every explored state spends one unit of the
+// comparison's shared `budget`.
+function segmentsIntersect(left, right, budget) {
+  if (!/[*?]/.test(left) && !/[*?]/.test(right)) {
+    budget.work -= left.length + right.length;
+    return budget.work < 0 ? null : left === right;
+  }
+  const width = right.length + 1, states = (left.length + 1) * width;
+  if (states > GLOB_BOUNDS.states) return null;
+  const seen = new Uint8Array(states), stack = [0];
+  while (stack.length) {
+    if (--budget.work < 0) return null;
+    const key = stack.pop();
+    if (seen[key]) continue;
+    seen[key] = 1;
+    const i = Math.floor(key / width), j = key % width;
+    if (i === left.length && j === right.length) return true;
+    const a = left[i], b = right[j];
+    if (a === '*') { stack.push(key + width); if (j < right.length && b !== '*') stack.push(key + 1); }
+    if (b === '*') { stack.push(key + 1); if (i < left.length && a !== '*') stack.push(key + width); }
+    if (i < left.length && j < right.length && a !== '*' && b !== '*' && (a === '?' || b === '?' || a === b)) stack.push(key + width + 1);
   }
   return false;
+}
+
+// Two write-declarations conflict unless they provably name disjoint paths
+// (issue 343 U0a: conservative segment-wise intersection). Declarations are
+// possibly-directory patterns, as in claimPathMatches: ancestry conflicts. Disjoint
+// only when both name different declared roots of the one execution contract, or
+// when, at some depth before any `**`, the two segment patterns share no name.
+// Literals compare case-insensitively (the file system may fold case); anything
+// undecided — including work beyond GLOB_BOUNDS (U0a-r1) — is a conflict.
+function pathsOverlap(a, b) {
+  const left = declaredTarget(a), right = declaredTarget(b);
+  if (!left || !right) return true; // defensive: empty/malformed/oversized path = unknown = conflict
+  if (left.path === '.' || right.path === '.') return true; // workspace claim overlaps every path
+  if (left.root !== null && right.root !== null && left.root !== right.root) return false;
+  const sa = left.path.split('/'), sb = right.path.split('/'), budget = { work: GLOB_BOUNDS.work };
+  for (let i = 0; i < Math.min(sa.length, sb.length); i++) {
+    if (sa[i].includes('**') || sb[i].includes('**')) return true; // compatible prefix up to a globstar
+    const shared = segmentsIntersect(sa[i].toLowerCase(), sb[i].toLowerCase(), budget);
+    if (shared === null) return true; // bounds exhausted: undecided = conflict
+    if (!shared) return false;
+  }
+  return true; // equal, or one is an ancestor of the other
 }
 
 function writesConflict(writesA, writesB) {
@@ -142,8 +222,21 @@ function writesConflict(writesA, writesB) {
   return false;
 }
 
-// Parse the YAML frontmatter of a task plan. Returns { depends, writes } where each is an
-// array or null (null = field absent → legacy).
+function copyItems(items) {
+  return items.map(item => (typeof item === 'string' ? item : { ...item }));
+}
+
+// Parse the YAML frontmatter of a task plan. Returns { depends, writes, diagnostics }
+// where each list is an array or null (null without a diagnostic = field absent →
+// legacy). issue 343: both come from the shared structural decoder through this
+// scheduling reader's fixed projection (U0a-r1). A complete list keeps every item,
+// blank lines included, so write-coverage still observes each declared write; a
+// YAML-null value (`writes:` with no list) or a malformed declaration is null.
+// Every decoder diagnostic becomes an additive `diagnostics` entry
+// (`<key>:<name>`): declaration-empty-value, the named error of a malformed
+// declaration and the blank gaps the temporal guard refuses
+// (declaration-leading-blank, declaration-interior-blank). A diagnosed task never
+// becomes ready and never enters a batch.
 function parseTaskFrontmatter(planPath) {
   if (!planPath || !fs.existsSync(planPath)) return null;
   let text;
@@ -152,40 +245,34 @@ function parseTaskFrontmatter(planPath) {
   } catch (_) {
     return null;
   }
-  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (!m) return null;
-  const fm = m[1];
-
-  const depends = parseListField(fm, 'depends');
-  const writes = parseListField(fm, 'writes');
-  return { depends, writes };
+  const must = sharedDecoder();
+  const fm = must.extractFrontmatter(text);
+  if (fm === null) return null;
+  const result = { depends: null, writes: null, diagnostics: [] };
+  for (const key of ['depends', 'writes']) {
+    const decoded = must.decodeDeclarationList(fm, key);
+    if (decoded.status === 'valid') result[key] = copyItems(decoded.items);
+    for (const name of decoded.diagnostics) result.diagnostics.push(`${key}:${name}`);
+  }
+  return result;
 }
 
 // Parse either inline (`key: [a, b]`) or block (`key:\n  - a\n  - b`) YAML list.
-// Returns array (possibly empty) or null if key not present.
+// Returns the array (possibly empty) or null if the key is not present. issue 343:
+// the shared decoder reads it (the frontmatter passes through extractFrontmatter,
+// the one CRLF normalizer). A complete list keeps every item, blank lines
+// included; a YAML-null value or a malformed declaration throws
+// plan-declaration-<key>-invalid (detail: the decoder diagnostic), never [].
 function parseListField(fm, key) {
-  const inlineRe = new RegExp('^' + key + ':\\s*\\[([^\\]]*)\\]\\s*$', 'm');
-  const mi = fm.match(inlineRe);
-  if (mi) {
-    const raw = mi[1].trim();
-    if (!raw) return [];
-    return raw.split(',').map(s => s.trim().replace(/^["']|["']$/g, '')).filter(Boolean);
+  const must = sharedDecoder();
+  const normalized = must.extractFrontmatter(`---\n${String(fm)}\n---`);
+  const decoded = must.decodeDeclarationList(normalized === null ? '' : normalized, key);
+  if (decoded.status === 'absent') return null;
+  if (decoded.status !== 'valid') {
+    const detail = decoded.diagnostics[0];
+    throw Object.assign(new Error(`plan-declaration-${key}-invalid: ${detail}`), { code: `plan-declaration-${key}-invalid`, detail });
   }
-  // Block form
-  const blockRe = new RegExp('^' + key + ':\\s*\\n((?:[ \\t]+-[ \\t]+.+\\n?)+)', 'm');
-  const mb = fm.match(blockRe);
-  if (mb) {
-    const items = [];
-    for (const line of mb[1].split(/\r?\n/)) {
-      const mm = line.match(/^[ \t]+-[ \t]+(.+?)\s*$/);
-      if (mm) items.push(mm[1].replace(/^["']|["']$/g, ''));
-    }
-    return items;
-  }
-  // Also accept `key:` with empty value as []
-  const emptyRe = new RegExp('^' + key + ':\\s*$', 'm');
-  if (emptyRe.test(fm)) return [];
-  return null;
+  return copyItems(decoded.items);
 }
 
 // Discover tasks by scanning the sibling `tasks/T##/` directories on disk.
@@ -226,6 +313,100 @@ function discoverTasks(sliceDir) {
   return tasks;
 }
 
+// issue 343 U0a: the pure task DAG of one slice. `rows` are { id, depends, writes,
+// invalid? } (null depends/writes = absent declaration; `invalid` = decoder
+// diagnostics); `scopeTaskIds` is the canonical actionable S-plan set, not a
+// directory scan. Status: `invalid` for any diagnostic (bad or duplicate IDs, set
+// mismatch, missing plan, malformed declaration, unknown/self reference, cycle);
+// `legacy` when declarations are absent and `legacyPolicy` is 'sequential' (the
+// default 'refuse' makes them invalid); else `valid`. The graph digest covers task
+// IDs, edges and legacy IDs only — never checkbox or done state. No prefs, lease,
+// claim, worker or filesystem access.
+const LOCAL_TASK_ID = /^T\d+(?:\.\d+)?$/;
+const DAG_LEGACY_POLICIES = Object.freeze(['refuse', 'sequential']);
+function deepFreezeDag(value) {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const item of Object.values(value)) deepFreezeDag(item);
+  }
+  return value;
+}
+function validateTaskDag(rows, options) {
+  const opts = options || {}, policy = opts.legacyPolicy === undefined ? 'refuse' : opts.legacyPolicy;
+  const result = (status, taskIds, edges, order, legacy, diagnostics) => deepFreezeDag({
+    status, task_ids: taskIds, edges, topological_order: order,
+    graph_sha256: status === 'invalid' ? null : crypto.createHash('sha256').update(JSON.stringify({
+      schema: 'forge-task-dag-v1', task_ids: taskIds, edges: edges.map(edge => [edge.task, edge.depends_on]), legacy_task_ids: legacy,
+    }), 'utf8').digest('hex'),
+    legacy_task_ids: legacy, diagnostics,
+  });
+  if (!Array.isArray(rows) || !Array.isArray(opts.scopeTaskIds) || !DAG_LEGACY_POLICIES.includes(policy)) {
+    return result('invalid', [], [], null, [], ['dag-input-invalid']);
+  }
+  const diagnostics = [], taskIds = [], scoped = new Set();
+  for (const id of opts.scopeTaskIds) {
+    if (typeof id !== 'string' || !LOCAL_TASK_ID.test(id)) { diagnostics.push(`dag-task-id-invalid:${String(id)}`); continue; }
+    if (scoped.has(id)) { diagnostics.push(`dag-scope-duplicate:${id}`); continue; }
+    scoped.add(id); taskIds.push(id);
+  }
+  const byId = new Map();
+  for (const row of rows) {
+    const id = row && row.id;
+    if (typeof id !== 'string' || !LOCAL_TASK_ID.test(id)) { diagnostics.push(`dag-task-id-invalid:${String(id)}`); continue; }
+    if (byId.has(id)) { diagnostics.push(`dag-task-id-duplicate:${id}`); continue; }
+    byId.set(id, row);
+    if (!scoped.has(id)) diagnostics.push(`dag-task-unlisted:${id}`);
+  }
+  const position = new Map(taskIds.map((id, index) => [id, index]));
+  const legacy = [], edges = [], prerequisites = new Map();
+  for (const id of taskIds) {
+    const row = byId.get(id);
+    if (!row) { diagnostics.push(`dag-plan-missing:${id}`); continue; }
+    const invalid = Array.isArray(row.invalid) ? row.invalid : [];
+    for (const entry of invalid) diagnostics.push(`dag-declaration-invalid:${id}:${entry}`);
+    if (invalid.length) continue;
+    const absent = ['depends', 'writes'].filter(key => row[key] === null || row[key] === undefined);
+    for (const key of ['depends', 'writes']) {
+      if (!absent.includes(key) && !Array.isArray(row[key])) diagnostics.push(`dag-declaration-invalid:${id}:${key}`);
+    }
+    if (absent.length && policy === 'sequential') legacy.push(id);
+    else for (const key of absent) diagnostics.push(`dag-declaration-missing:${id}:${key}`);
+    if (!Array.isArray(row.depends)) continue;
+    const own = new Set();
+    for (const dependency of row.depends) {
+      if (typeof dependency !== 'string' || !LOCAL_TASK_ID.test(dependency)) { diagnostics.push(`dag-reference-invalid:${id}`); continue; }
+      if (dependency === id) { diagnostics.push(`dag-reference-self:${id}`); continue; }
+      if (!scoped.has(dependency)) { diagnostics.push(`dag-reference-unknown:${id}:${dependency}`); continue; }
+      own.add(dependency);
+    }
+    const sorted = [...own].sort((x, y) => position.get(x) - position.get(y));
+    prerequisites.set(id, sorted);
+    for (const dependency of sorted) edges.push({ task: id, depends_on: dependency });
+  }
+  // One deterministic cycle report (depth-first, canonical order).
+  const state = new Map();
+  let cycle = null;
+  const visit = (id, trail) => {
+    if (cycle || state.get(id) === 2) return;
+    if (state.get(id) === 1) { cycle = [...trail.slice(trail.indexOf(id)), id]; return; }
+    state.set(id, 1); trail.push(id);
+    for (const next of prerequisites.get(id) || []) visit(next, trail);
+    trail.pop(); state.set(id, 2);
+  };
+  for (const id of taskIds) visit(id, []);
+  if (cycle) diagnostics.push(`dag-cycle:${cycle.join('>')}`);
+  if (diagnostics.length) return result('invalid', taskIds, edges, null, legacy, diagnostics);
+  if (legacy.length) return result('legacy', taskIds, edges, null, legacy, diagnostics);
+  // Kahn order with the canonical S-plan order as the tie-break.
+  const remaining = new Set(taskIds), order = [];
+  while (remaining.size) {
+    const next = taskIds.find(id => remaining.has(id) && (prerequisites.get(id) || []).every(dependency => !remaining.has(dependency)));
+    if (next === undefined) return result('invalid', taskIds, edges, null, legacy, ['dag-cycle:unresolved']);
+    order.push(next); remaining.delete(next);
+  }
+  return result('valid', taskIds, edges, order, legacy, diagnostics);
+}
+
 function main() {
   const args = parseArgs(process.argv);
   const slicePlanPath = args['slice-plan'];
@@ -249,17 +430,14 @@ function main() {
   }
 
   // Enrich with frontmatter. Use forward-slash paths in output.
-  let anyMissing = false;
   const enriched = tasks.map(t => {
     const fm = parseTaskFrontmatter(t.planPath);
-    const depends = fm && fm.depends !== null ? fm.depends : null;
-    const writes = fm && fm.writes !== null ? fm.writes : null;
-    if (depends === null || writes === null) anyMissing = true;
     return {
       id: t.id,
       done: t.done,
-      depends,
-      writes,
+      depends: fm ? fm.depends : null,
+      writes: fm ? fm.writes : null,
+      invalid: fm ? fm.diagnostics : [],
       planPath: normalizeFilesystemPath(t.planPath),
     };
   });
@@ -270,22 +448,28 @@ function main() {
     return;
   }
 
+  // issue 343 U0a: this compatibility reader's scope is the discovered task set.
+  const dag = validateTaskDag(enriched.map(t => ({ id: t.id, depends: t.depends, writes: t.writes, invalid: t.invalid })),
+    { scopeTaskIds: enriched.map(t => t.id), legacyPolicy: 'sequential' });
+  const graph = { dag_status: dag.status, diagnostics: [...dag.diagnostics] };
+
   // Legacy mode: any task in the slice is missing depends/writes → force sequential.
-  if (anyMissing) {
+  if (dag.status === 'legacy') {
     const next = pending[0];
     emit({
       mode: 'legacy',
       batch: [{ id: next.id, planPath: next.planPath }],
       reason: 'legacy plan — at least one task missing depends/writes frontmatter; forcing sequential',
+      ...graph,
     });
     return;
   }
 
-  // Modern mode: build ready set.
+  // Modern mode: build ready set. A task whose declarations are malformed is never ready.
   const doneIds = new Set(enriched.filter(t => t.done).map(t => t.id));
   const knownIds = new Set(enriched.map(t => t.id));
   const ready = pending.filter(t =>
-    (t.depends || []).every(d => doneIds.has(d))
+    t.invalid.length === 0 && Array.isArray(t.depends) && Array.isArray(t.writes) && t.depends.every(d => doneIds.has(d))
   );
 
   if (ready.length === 0) {
@@ -300,17 +484,20 @@ function main() {
           unmet: (t.depends || []).filter(d => !doneIds.has(d)),
         })),
       },
+      ...graph,
     });
     return;
   }
 
-  // Conflict resolution — greedy pick preserving plan order.
+  // Conflict resolution — greedy pick preserving plan order. An invalid graph is
+  // sequential: one task at a time, never a parallel batch.
+  const limit = dag.status === 'valid' ? maxConcurrent : 1;
   const batch = [];
   const claimed = [];
   const skipped = [];
   for (const t of ready) {
-    if (batch.length >= maxConcurrent) {
-      skipped.push({ id: t.id, reason: 'max-concurrent reached' });
+    if (batch.length >= limit) {
+      skipped.push({ id: t.id, reason: dag.status === 'valid' ? 'max-concurrent reached' : 'sequential: invalid task graph' });
       continue;
     }
     const w = t.writes || [];
@@ -336,6 +523,7 @@ function main() {
       batch: [],
       reason: 'all ready tasks filtered out (conflicts or stray deps)',
       details: { skipped },
+      ...graph,
     });
     return;
   }
@@ -353,15 +541,8 @@ function main() {
       maxConcurrent,
       skipped,
     },
+    ...graph,
   });
-}
-
-if (require.main === module) {
-  try {
-    main();
-  } catch (e) {
-    emit({ mode: 'error', batch: [], reason: 'parser error: ' + (e && e.message || String(e)) }, 1);
-  }
 }
 
 module.exports = {
@@ -375,4 +556,13 @@ module.exports = {
   parseTaskFrontmatter,
   parseListField,
   discoverTasks,
+  validateTaskDag,
 };
+
+if (require.main === module) {
+  try {
+    main();
+  } catch (e) {
+    emit({ mode: 'error', batch: [], reason: 'parser error: ' + (e && e.message || String(e)) }, 1);
+  }
+}

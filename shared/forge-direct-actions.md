@@ -126,3 +126,8 @@ contract's distribution, not that a host will classify arbitrary prose correctly
 Validate actual host behavior with a trivial request, a known UAT correction,
 an ambiguous work item, and a small high-risk request before claiming end-to-end
 coverage.
+
+
+## Protected owner metadata window
+
+Before the first direct owner metadata write, use `forge-owner-transport-window.withMutation(owner, synchronousTransaction)`. This acquires the same external publication fence used by canonical preparation. `owner-window-busy` or `owner-window-unmeasured` refuses that mutation; it does not imply a provider error or require a new user authorization. Never use another run active flag, TTL or parent death as a substitute for actual stopped/joined evidence. No raw host filesystem sandbox is claimed: writes outside the API remain the host's obligation and are still detected by global owner snapshots. Do not weaken global S0 or manufacture saved-response anchors.

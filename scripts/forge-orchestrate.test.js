@@ -205,6 +205,7 @@ try {
   delete sequential.idempotency_key;
   const firstTask = orchestrate.next(sequential);
   const firstKey = firstTask.details.transaction.idempotency_key;
+  require('./fixtures/completion-delivery.cjs').publish(sequential.cwd, { milestone, slice: 'S01', task: 'T01' });
   assert.strictEqual(orchestrate.run('complete', { ...sequential, unit: firstTask.unit, begin_key: firstKey, result: { status: 'done' } }).outcome, 'completed');
   sequential.inventory.slices[0].checked = true;
   sequential.inventory.slices.push({ ...sequential.inventory.slices[0], id: 'S02', checked: false });

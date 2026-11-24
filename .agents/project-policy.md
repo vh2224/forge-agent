@@ -1,5 +1,3 @@
-<!-- forge-source:claude-instructions source=.agents/project-policy.md version=4.51.11 -->
-
 # Política do repositório Forge
 
 Leia antes de alterar o Forge. Em projetos consumidores, prevalecem as regras locais do produto; as regras de repositório abaixo se aplicam somente ao próprio forge-agent.
@@ -22,10 +20,6 @@ Leia antes de alterar o Forge. Em projetos consumidores, prevalecem as regras lo
 - Declare fontes/destinos em forge-source-manifest.json. Projeções exigem prova de propriedade; destino do operador sem prova gera conflito nomeado, sem sobrescrita silenciosa. Use instaladores canônicos; teste mudanças de cópia em dry-run.
 - Ao editar install.ps1, evite strings que introduzam form-feed e confira bytes. Execute verificações proporcionais; testes não provam CI, merge, instalação ou aceite humano.
 - Novas decisões vão para docs/DECISIONS-LOG.md com problema, decisão e evidência. Na entrada ficam só invariantes necessários. Closes #N somente se o merge resolver a issue; Refs #N para avanço parcial ou decisão pendente.
-
-## Procedimentos locais
-
-Se existir `issue-campaign.md` nesta pasta, leia-o antes de tratar levas de issues. Esse arquivo contém preferências locais do operador e não é distribuído com o repositório.
 
 ## Consulta por assunto
 

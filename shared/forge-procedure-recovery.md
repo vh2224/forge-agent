@@ -71,3 +71,11 @@ Changing effort/tier never re-enables an already attempted destination. Terminat
 the finite candidate list, destination exclusions, at most one corrected retry per destination,
 the single silence retry and expiry of the canonical exception. A native candidate still needs
 a live exception and a real compatible invocation.
+
+Replay first: publish valid retained output through canonical replay before any new inference.
+Only a closed operational replay-refusal-v1 refusal permits proved abandonment with live adapters.
+Require stopped writer and custody-proved descendants, owner and every root, authority,
+no pending questions, intact baseline, explained deltas, verified backup and claimed reset.
+Then admit a new begin in the same lease/claim generation through recoverUnitSidecar.
+Retained output, caller/identity/claim defects, pending input, missing authority, unknown
+processes or codes, time admission and review-fix limits never enable abandonment.

@@ -257,10 +257,19 @@ Order matters — do these in sequence:
 **a) AUTO-MEMORY prune events**
 
 For each entry classified as `prune`:
+
+Use the fragment's actual `unit_id` and owning `milestone_id` (JSON `null` for a
+standalone fragment; omit the field when the source has none). Preserve the
+owning identity; a prune event alone is not a fragment. Do not substitute the
+currently active milestone for a historical fragment's owner.
 ```bash
-echo '{"kind":"prune","mem_id":"<mem_id>","ts":"<ISO8601>","reason":"<below-threshold|single-file-ref>"}' \
+echo '{"unit_id":"<owning-unit-id>","milestone_id":null,"facts":[],"stats":[{"kind":"prune","mem_id":"<mem_id>","ts":"<ISO8601>","reason":"<below-threshold|single-file-ref>"}]}' \
   | node scripts/forge-memory.js --write --cwd .
 ```
+
+The example above is standalone. For a milestone-owned fragment replace JSON
+`null` with its actual quoted owning milestone ID before invoking it (for example
+`"milestone_id":"M001"` for `M001__T01.md`); keep `unit_id` as `T01`.
 
 Se a CLI sair **0** e o JSON do stdout trouxer `"quarantined": true`, o evento **não foi gravado**: a unidade vive num container agrupado e a escrita foi recusada por desenho (o fato ficou no sidecar de quarentena apontado por `path`). Isso **não é falha** — não retente e não aborte o sweep: registre no log a recusa nomeando `container` e `remedy` do próprio JSON e siga para o próximo. (O exit 0 é deliberado — decisão S03/IN-14; o sinal é o campo, não `$?`.)
 
@@ -276,7 +285,7 @@ Skip entirely. Log: "DECISIONS sweep skipped (no-op — S05 pending)".
 
 For each dimension record classified as `prune`:
 ```bash
-echo '{"kind":"prune","dimension":"<dimension>","slice":"<slice>","ts":"<ISO8601>","reason":"stale"}' \
+echo '{"milestoneId":"<owning-milestone-id>","events":[{"kind":"prune","dimension":"<dimension>","slice":"<slice>","ts":"<ISO8601>","reason":"stale"}]}' \
   | node scripts/forge-checker-memory.js --write --cwd .
 ```
 

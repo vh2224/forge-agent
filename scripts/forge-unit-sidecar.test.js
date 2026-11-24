@@ -1,6 +1,6 @@
 'use strict';
 // A selector runs exactly one recovery scenario; no arguments retain full coverage.
-const scenarioSelectors = ['--owner-event-batch', '--milestone-auto-gate', '--review-fix-recovery', '--delivery-publication-limits', '--recovery-contracts', '--pre-spawn-sidecar', '--pre-spawn-native', '--no-progress-event', '--owner-event-reconcile', '--ceiling-route', '--claude-session', '--claude-resume', '--liveness-heartbeat', '--memory-evidence'];
+const scenarioSelectors = ['--review-fix-admission', '--owner-event-batch', '--milestone-auto-gate', '--review-fix-recovery', '--delivery-publication-limits', '--recovery-contracts', '--pre-spawn-sidecar', '--pre-spawn-native', '--no-progress-event', '--owner-event-reconcile', '--ceiling-route', '--claude-session', '--claude-resume', '--liveness-heartbeat', '--memory-evidence'];
 const scenarioArgs = process.argv.slice(2);
 if (scenarioArgs.length > 1 || (scenarioArgs.length === 1 && !scenarioSelectors.includes(scenarioArgs[0]))) {
   console.error(`Usage: node forge-unit-sidecar.test.js [${scenarioSelectors.join('|')}]`);
@@ -42,6 +42,7 @@ const sidecar = require('./forge-unit-sidecar');
   } finally { fixtures.cleanup(f); }
 }
 function resolveContext(request) {
+  require('./fixtures/issues-434-436/execution-fixtures.cjs').declareBindings(request);
   request.route = require('./forge-dispatch-resolve').resolveDispatch({ cwd: request.contextRoot, unitType: request.unitType,
     milestoneId: request.milestoneId, unitId: request.taskId || request.sliceId || request.milestoneId,
     planPath: request.planFile, roadmapPath: request.roadmapFile, hostRuntime: 'codex' });
@@ -390,8 +391,43 @@ async function recoveryContracts() {
     const rejectedPlan = { status: 'done', summary: 'local-only explanation',
       slice_plan: { content: '# Slice\n- [ ] T03: mismatch\n' },
       task_plans: [{ id: 'T02', content: fixtures.plan(lab.contract) }],
-      transport_telemetry: { model_observed: 'fixture-model' } };
+      transport_telemetry: { model_observed: 'fixture-model', model_observed_source: 'fixture-closed-transport' } };
     const mismatch = { ...planning, dispatchId: 'plan-mismatch', resultFile: path.join(lab.dir, 'mismatch.json') };
+    const semanticRefusal = { ...planning, dispatchId: 'plan-semantic-refusal', resultFile: path.join(lab.dir, 'semantic-refusal.json') };
+    xllm.runPlan = async options => { require('./forge-attempt-telemetry').observeFinal(options,
+      { fixture: 'closed plan transport' }, fs.readFileSync(options.planContextFile, 'utf8'), 'fixture-closed');
+      throw Object.assign(new Error('plan-task-list-empty'), {
+      code: 'plan-task-list-empty', stage: 'plan-admission', provider_called: true, plan_candidate: rejectedPlan,
+      transport_telemetry: rejectedPlan.transport_telemetry,
+      rejected_candidate: { status: 'retained', channel: 'resultFile.rejected.json', bytes: 100, sha256: 'a'.repeat(64) } }); };
+    await assert.rejects(sidecar.runUnitSidecar(resolveContext(semanticRefusal)), e => e.code === 'plan-task-list-empty');
+    const semanticReceipt = JSON.parse(fs.readFileSync(semanticRefusal.resultFile + '.receipt.json'));
+    assert.strictEqual(semanticReceipt.phase, 'failed');
+    assert.strictEqual(semanticReceipt.returned_response.unit_validation, 'rejected');
+    assert.strictEqual(semanticReceipt.telemetry.model_observed, 'fixture-model');
+    assert.strictEqual(semanticReceipt.final_evidence.model_observed, 'fixture-model');
+    assert.strictEqual(semanticReceipt.saved_candidate, undefined, 'rejected semantic response cannot gain replay authority');
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(semanticRefusal.resultFile + '.returned.json')).result, rejectedPlan);
+    const receiptIo = { ...planning, dispatchId: 'plan-receipt-io', resultFile: path.join(lab.dir, 'plan-receipt-io.json') };
+    const realRead = fs.readFileSync; let fault = false;
+    xllm.runPlan = async options => {
+      require('./forge-attempt-telemetry').observeFinal(options, { fixture: 'closed plan transport' }, fs.readFileSync(options.planContextFile, 'utf8'), 'fixture-closed');
+      fault = true;
+      throw Object.assign(new Error('plan-task-list-empty'), { code: 'plan-task-list-empty', stage: 'plan-admission', provider_called: true,
+        plan_candidate: rejectedPlan, transport_telemetry: rejectedPlan.transport_telemetry,
+        rejected_candidate: { status: 'retained', channel: 'resultFile.rejected.json' } });
+    };
+    fs.readFileSync = function(file, ...args) {
+      if (fault && typeof file === 'string' && path.resolve(file) === path.resolve(receiptIo.resultFile + '.receipt.json'))
+        throw Object.assign(new Error('synthetic receipt I/O failure'), { code: 'EACCES' });
+      return realRead.call(this, file, ...args);
+    };
+    try { await assert.rejects(sidecar.runUnitSidecar(resolveContext(receiptIo)), e => e.code === 'plan-task-list-empty' && e.provider_called === true); }
+    finally { fs.readFileSync = realRead; }
+    const receiptFailure = JSON.parse(fs.readFileSync(receiptIo.resultFile));
+    assert.strictEqual(receiptFailure.layer, 'plan-admission');assert.strictEqual(receiptFailure.reason_code, 'plan-task-list-empty');
+    assert.strictEqual(receiptFailure.provider_called, true);assert.strictEqual(receiptFailure.telemetry.model_observed, 'fixture-model');
+    assert.strictEqual(receiptFailure.retention_diagnostic, 'receipt-unavailable');
     xllm.runPlan = async () => rejectedPlan;
     await assert.rejects(sidecar.runUnitSidecar(resolveContext(mismatch)), /plan-task-list-mismatch/);
     const rejectedBytes = fs.readFileSync(mismatch.resultFile + '.returned.json');
@@ -426,6 +462,10 @@ async function recoveryContracts() {
     sidecar.beginArtifactAttempt(replayable);
     const candidate = { status: 'partial', summary: 'Saved fixture response', questions: [], artifacts: [] };
     await sidecar.acceptArtifactResult(replayable, candidate, { providerCalled: true });
+    // #382: the ready receipt keeps the locator/hash of the exact input captured before started.
+    const retainedRef = JSON.parse(fs.readFileSync(replayable.resultFile + '.receipt.json')).retained_request;
+    assert.strictEqual(retainedRef.sha256, crypto.createHash('sha256').update(fs.readFileSync(replayable.resultFile + '.request.json')).digest('hex'));
+    assert.strictEqual(retainedRef.delivery_fingerprint, sidecar.artifactFingerprint(replayable));
     const replayReceipt = replayable.resultFile + '.receipt.json', replayState = replayable.resultFile + '.recovery.json';
     recovery.captureFailure({ stateFile: replayState, receiptFile: replayReceipt, request: replayable,
       unit: 'research-milestone/M001', route: replayable.route, error: { code: 'publication-interrupted' } });
@@ -1103,6 +1143,7 @@ async function ownerEventReconcileContracts(batchOnly = false) {
         fs.mkdirSync(path.join(base, 'tasks/T01'), { recursive: true });
         request.planFile = path.join(base, 'tasks/T01/T01-PLAN.md');
         fs.writeFileSync(request.planFile, fixtures.plan(contract));
+        require('./fixtures/issues-434-436/execution-fixtures.cjs').declareBindings(request);
         fs.writeFileSync(path.join(base, 'S01-PLAN.md'), '# Slice\n- [ ] **T01** — fixture\n');
         fs.writeFileSync(path.join(lab.a, '.gsd/forge-prefs.jsonc'), JSON.stringify({ tier_models: Object.fromEntries(
           ['light', 'standard', 'heavy', 'max'].map(tier => [tier, ['claude-sonnet-5']])), effort: { 'plan-slice': 'medium' } }));
@@ -2027,7 +2068,7 @@ async function memoryEvidenceContracts() {
   }
 }
 
-async function reviewFixRecoveryContracts(standalone=false,contractBearing=false) {
+async function reviewFixRecoveryContracts(standalone=false,contractBearing=false,permission=false) {
   const fs = require('fs'), path = require('path'), crypto = require('crypto');
   const fixtures = require('./forge-code-roots.test'), roots = require('./forge-code-roots');
   const recovery = require('./forge-attempt-recovery'), xllm = require('./forge-xllm'), runs = require('./forge-runs');
@@ -2044,12 +2085,16 @@ async function reviewFixRecoveryContracts(standalone=false,contractBearing=false
   const request = resolveContext({ unitType: 'review-fix', ...(standalone?{scope:'standalone-task',phase:'review-fix',taskId}:{milestoneId: 'M001', sliceId: 'S01'}),
     cwd: lab.a, contextRoot: lab.owner, resultFile: path.join(lab.dir, 'fix.json'), workflowId: 'fixture', dispatchId: 'fix-legacy',
     constraints: { auto_commit: false }, reviewFix: { boundary: standalone?'task':'slice', decision: 'proceed', claimPaths: ['same.txt'],
-      items: [{ r: 'R1', path: 'same.txt', claim: 'broken', action: 'repair' }] } });
+      items: [{ r: 'R1', path: 'same.txt', claim: 'broken', action: 'repair', verdict: { resolution: 'conceded', severity: 'high', reachable: 'yes', reproduced: 'yes', in_scope: 'yes' } }] } });
   const executionAuthority = { execution_contract: contract, runId: 'fixture-fixer',
     claim: { schema_version: 2, generation: crypto.randomUUID(), execution_contract: contract, paths: [{ root_id: 'primary', path: 'same.txt' }] },
     gates: { claim: 'proceed', security: 'not-applicable' } };
   runs.add(lab.owner, { id: executionAuthority.runId, kind: 'milestone', session_id: 'fixture', write_claim: executionAuthority.claim });
   if(contractBearing)Object.assign(request,executionAuthority);
+  // Issue 328: the historical Claude fix carries the legitimate option and a
+  // sealed single-root command before any producer creates its receipt.
+  if(permission)Object.assign(request,{ claudePermissions: 'verification', verification: { preferenceCommands: ['node check.js'] } });
+  const { claudePermissions: omittedPermission, ...withoutPermission } = request;
   const receiptFile = request.resultFile + '.receipt.json', stateFile = request.resultFile + '.recovery.json';
   let nativeCalls = 0, nativeMode = 'object', textual = null;
   const textualReport = { status: 'done', items: [{ r: 'R1', outcome: 'fixed', note: 'fixture' }] };
@@ -2061,7 +2106,7 @@ async function reviewFixRecoveryContracts(standalone=false,contractBearing=false
         transport_telemetry: { model_observed: 'fix-fixture-model' } };
     };
     const collisionRequest = { ...request, dispatchId: 'fix-archive-collision', resultFile: path.join(lab.dir, 'collision.json') };
-    const permissionRequest = { ...request, dispatchId: 'fix-missing-permission', resultFile: path.join(lab.dir, 'permission.json'), verification: {} };
+    const permissionRequest = { ...withoutPermission, dispatchId: 'fix-missing-permission', resultFile: path.join(lab.dir, 'permission.json'), verification: {} };
     assert.strictEqual(request.route.resolved_worker_engine, 'claude');
     await assert.rejects(sidecar.runUnitSidecar(permissionRequest), error => error.code === 'claude-verification-permission-required');
     assert(!fs.existsSync(permissionRequest.resultFile + '.receipt.json'));
@@ -2128,6 +2173,13 @@ async function reviewFixRecoveryContracts(standalone=false,contractBearing=false
         readStandingAuthorization: () => ({}), issueRecoveryException: (reference, scope) => authority.issue(reference, scope) } },
       invokeNative: async (next, binding, guards) => {
         nativeCalls++;
+        assert.strictEqual(next.reviewFixRecoveryOf, request.dispatchId);
+        if (permission) {
+          assert(!Object.hasOwn(next, 'claudePermissions'), 'native review-fix successor carries no Claude-only option');
+          assert.deepStrictEqual(next.verification, request.verification);
+          assert.strictEqual(binding.args.reasoning_effort, next.route.effort);
+        }
+        const admissionBefore = fs.readFileSync(path.join(lab.owner, '.gsd/forge/events.jsonl'));
         assert.strictEqual(binding.args.model, 'gpt-6-sol');
         assert(binding.args.message.includes('same.txt'));
         assert(binding.args.message.includes(`CODE_DIR (physical working directory): ${JSON.stringify(request.cwd)}`));
@@ -2141,6 +2193,8 @@ async function reviewFixRecoveryContracts(standalone=false,contractBearing=false
         // Invalid textual output is rejected by the real supervision terminal contract.
         if (nativeMode === 'malformed') return '---GSD-WORKER-RESULT---\nstatus: done\nresult_json: {"status":\n---END-RESULT---';
         const nativePreparation = fix.prepareNativeReviewFix({ ...next, vcs: 'git' });
+        assert.strictEqual(nativePreparation.admission.recovery_of, request.dispatchId);
+        assert(fs.readFileSync(path.join(lab.owner, '.gsd/forge/events.jsonl')).equals(admissionBefore));
         fs.writeFileSync(path.join(lab.a, 'same.txt'), 'fixed\n');
         guards.assertAuthority(); // Post-write authority does not reassert the old baseline.
         const reviewBeforeRevocation = fs.readFileSync(path.join(lab.owner, reviewFile));
@@ -2208,7 +2262,111 @@ async function reviewFixRecoveryContracts(standalone=false,contractBearing=false
     assert(fs.readFileSync(baselineFile).equals(baselineBytes));
     assert.strictEqual(JSON.parse(fs.readFileSync(stateFile)).roots_sha256, roots.digest(contractBearing?contract:{ cwd: request.cwd }));
     console.log('PASS '+(standalone?'standalone':'legacy')+(contractBearing?' contract-bearing':'')+' review-fix: real failed/reset producer, exact dirty restoration, held claim, pending questions, native prompt and public prepare/accept; historical bytes unchanged');
+    if (permission) {
+      assert.strictEqual(receipt.fingerprint, sidecar.artifactFingerprint(request));
+      assert.notStrictEqual(receipt.fingerprint, sidecar.artifactFingerprint(withoutPermission));
+      assert.throws(() => sidecar.reconcileLegacyReviewFix(withoutPermission, receipt, contract), /review-fix-recovery-binding/);
+      console.log('PASS issue328 review-fix seam: legacy Claude fix keeps its historical fingerprint binding and its native successor carries no claudePermissions');
+    }
   } finally { xllm.runFix = originalRunFix; lab.cleanup(); }
+}
+
+async function reviewFixAdmissionContracts() {
+  const fs = require('fs'), path = require('path');
+  const policy = require('./forge-review-policy'), fix = require('./forge-review-fix');
+  const xllm = require('./forge-xllm'), lab = require('./forge-code-roots.test').fixture();
+  const runFix = xllm.runFix;
+  let calls = 0;
+  const verdict = { resolution: 'conceded', severity: 'high', reachable: 'yes', reproduced: 'yes', in_scope: 'yes' };
+  const review = '# Review\n\n### R1 — bug\n- **Veredito:** CONCEDED\n\n### R2 — bug\n- **Veredito:** CONCEDED\n';
+  const taskId = 'T-20261106000000-admission';
+  const write = (relative, content) => { const file = path.join(lab.owner, relative); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, content); };
+  const requestFor = (id, scope = 'slice', milestoneId = 'M001') => {
+    const ids = scope === 'task' ? { taskId } : { milestoneId, sliceId: 'S01' };
+    const request = resolveContext({ unitType: 'review-fix', ...ids, cwd: lab.a, contextRoot: lab.owner,
+      workflowId: 'fixture', dispatchId: id, resultFile: path.join(lab.dir, `${id}.json`), constraints: { auto_commit: false },
+      reviewFix: { boundary: scope, decision: 'proceed', claimPaths: ['same.txt'],
+        items: [{ r: 'R1', path: 'same.txt', verdict }, { r: 'R2', path: 'same.txt', verdict }] } });
+    return request;
+  };
+  const eventFile = path.join(lab.owner, '.gsd/forge/events.jsonl');
+  const events = () => fs.existsSync(eventFile) ? fs.readFileSync(eventFile, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
+  const counted = () => events().filter(row => row.event === policy.ADMISSION_EVENT && row.counted).length;
+  const reviewPath = request => sidecar.locations(request).reviewFix.reviewFiles[0];
+  const assertNoLaunch = async (request, code) => {
+    const before = calls;
+    await assert.rejects(sidecar.runUnitSidecar(request), error => {
+      assert.strictEqual(error.code, code); assert.strictEqual(error.provider_called, false);
+      assert.strictEqual(error.stage, 'review-fix-admission'); assert.strictEqual(error.layer, 'review-fix-admission');
+      return true;
+    });
+    assert.strictEqual(calls, before);
+    assert(!fs.existsSync(request.resultFile + '.receipt.json'));
+    assert(!fs.existsSync(request.resultFile + '.reset-state.json'));
+  };
+  try {
+    write('.gsd/forge-prefs.jsonc', JSON.stringify({ tier_models: Object.fromEntries(['light', 'standard', 'heavy', 'max'].map(tier => [tier, ['claude-sonnet-5', 'gpt-6-sol']])) }));
+    for (const m of ['M001', 'M002']) write(`.gsd/milestones/${m}/${m}-ROADMAP.md`, '# Roadmap\n\n- [ ] **S01: Work** `depends:[]`\n');
+    const first = requestFor('admission-first');
+    write(reviewPath(first), review);
+    xllm.runFix = async ({ brief }) => {
+      calls++;
+      assert.strictEqual(events().filter(row => row.event === policy.ADMISSION_EVENT && row.decision === 'admitted').length, counted());
+      return { status: 'done', summary: 'fixture', items: brief.items.map(item => ({ r: item.r, outcome: 'skipped', verified: false })),
+        verified_paths: [], files_changed: [], pre_dirty: [], vcs: 'git' };
+    };
+    const mixed = requestFor('admission-mixed');
+    mixed.reviewFix.items[1] = { ...mixed.reviewFix.items[1], verdict: { ...verdict, severity: 'medium' } };
+    await assertNoLaunch(mixed, 'review-fix-not-fix-now');
+    assert.strictEqual(counted(), 0);
+    const deferred = fs.readFileSync(path.join(lab.owner, reviewPath(first)), 'utf8');
+    assert(!deferred.split('### R2')[0].includes('**Correção:**'));
+    assert.match(deferred.split('### R2')[1], /não aplicada — deferida para triagem final \(review-fix-not-fix-now/);
+    write(reviewPath(first), review);
+    await sidecar.runUnitSidecar(first);
+    assert.strictEqual(calls, 1); assert.strictEqual(counted(), 1);
+    assert.strictEqual(events().find(row => row.dispatch_id === first.dispatchId && row.event === policy.ADMISSION_EVENT).cycle, 1);
+    const eventBytes = fs.readFileSync(eventFile);
+    await sidecar.runUnitSidecar(first);
+    assert.strictEqual(calls, 1); assert(fs.readFileSync(eventFile).equals(eventBytes));
+    // Remove only this admission to model a genuine pre-policy ready receipt.
+    fs.writeFileSync(eventFile, events().filter(row => !(row.event === policy.ADMISSION_EVENT && row.dispatch_id === first.dispatchId)).map(JSON.stringify).join('\n') + '\n');
+    const legacyEvents = fs.readFileSync(eventFile);
+    const legacyRequest = { ...first, reviewFix: { ...first.reviewFix,
+      items: first.reviewFix.items.map(({ verdict: ignoredVerdict, basis: ignoredBasis, ...item }) => item) } };
+    const legacyReceiptFile = first.resultFile + '.receipt.json';
+    const legacyReceipt = JSON.parse(fs.readFileSync(legacyReceiptFile));
+    legacyReceipt.fingerprint = sidecar.artifactFingerprint(legacyRequest);
+    assert.strictEqual(legacyReceipt.review_fix_identity, fix.buildBrief({ boundary: 'slice', unitLabel: 'review-fix/S01',
+      items: fix.normalizeItems(legacyRequest.reviewFix.items), claimPaths: ['same.txt'], route: legacyRequest.route }).identity);
+    fs.writeFileSync(legacyReceiptFile, JSON.stringify(legacyReceipt));
+    await sidecar.runUnitSidecar(legacyRequest);
+    assert.strictEqual(calls, 1); assert(fs.readFileSync(eventFile).equals(legacyEvents));
+    assert.strictEqual(policy.readHistory(lab.owner, { boundary: 'slice', milestone: 'M001', slice: 'S01' }).consumed, 1);
+    const second = requestFor('admission-second');
+    await sidecar.runUnitSidecar(second);
+    const third = requestFor('admission-third');
+    await assertNoLaunch(third, 'review-fix-cycle-limit');
+    assert.match(fs.readFileSync(path.join(lab.owner, reviewPath(third)), 'utf8'), /review-fix-cycle-limit/);
+    assert.strictEqual(policy.readHistory(lab.owner, { boundary: 'slice', milestone: 'M001', slice: 'S01' }).consumed, 2);
+    const task = requestFor('admission-task', 'task'), other = requestFor('admission-other', 'slice', 'M002');
+    write(reviewPath(task), review); write(reviewPath(other), review);
+    await sidecar.runUnitSidecar(task); await sidecar.runUnitSidecar(other);
+    assert.strictEqual(policy.readHistory(lab.owner, { boundary: 'task', task: taskId }).consumed, 1);
+    assert.strictEqual(policy.readHistory(lab.owner, { boundary: 'slice', milestone: 'M002', slice: 'S01' }).consumed, 1);
+    const successor = { ...second, dispatchId: second.dispatchId + '-recovery-local', reviewFixRecoveryOf: second.dispatchId,
+      resultFile: path.join(lab.dir, 'admission-successor.json') };
+    const beforeRecovery = counted(); await sidecar.runUnitSidecar(successor);
+    assert.strictEqual(counted(), beforeRecovery, 'sidecar recovery successor reuses parent admission');
+    assert(!events().some(row => row.event === policy.ADMISSION_EVENT && row.dispatch_id === successor.dispatchId));
+    const failedRequest = requestFor('admission-failed', 'task');
+    xllm.runFix = async () => { calls++; return { status: 'partial', summary: 'fixture', items: [], files_changed: [] }; };
+    await assert.rejects(sidecar.runUnitSidecar(failedRequest), error => error.code === 'review-fix-worker-partial');
+    const failedEvents = fs.readFileSync(eventFile), beforeReplay = calls;
+    await assert.rejects(sidecar.runUnitSidecar(failedRequest), error => error.code === 'review-fix-worker-partial');
+    assert.strictEqual(calls, beforeReplay); assert(fs.readFileSync(eventFile).equals(failedEvents));
+    console.log('PASS review-fix admission: pre-receipt/pre-reset/provider refusal, affected-only defer, cycle cap, ready/legacy/failed replay, sidecar recovery and slice/task/milestone isolation');
+  } finally { xllm.runFix = runFix; lab.cleanup(); }
 }
 
 async function runScenarios() {
@@ -2219,7 +2377,9 @@ async function runScenarios() {
   process.env.CODEX_HOME = path.join(profile, '.codex'); process.env.CLAUDE_CONFIG_DIR = path.join(profile, '.claude');
   process.env.FORGE_HOME = path.resolve(__dirname, '..');
   try {
-    if (!selectedScenario || selectedScenario === '--review-fix-recovery') {for(const standalone of [false,true])for(const contractBearing of [false,true])await reviewFixRecoveryContracts(standalone,contractBearing);}
+    if (!selectedScenario || selectedScenario === '--review-fix-admission') await reviewFixAdmissionContracts();
+    if (!selectedScenario || selectedScenario === '--review-fix-recovery') {for(const standalone of [false,true])for(const contractBearing of [false,true])await reviewFixRecoveryContracts(standalone,contractBearing);
+      await reviewFixRecoveryContracts(false,true,true);}
     if (!selectedScenario || selectedScenario === '--delivery-publication-limits') await deliveryPublicationLimits();
     if (!selectedScenario || selectedScenario === '--recovery-contracts') await recoveryContracts();
     if (!selectedScenario || selectedScenario === '--pre-spawn-sidecar') await preSpawnRecoveryContracts();

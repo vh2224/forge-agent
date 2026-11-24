@@ -145,6 +145,7 @@ function sidecarRequest(f) {
   r.route = require('./forge-dispatch-resolve').resolveDispatch({ cwd: f.owner, unitType: 'execute-task', milestoneId: M,
     unitId: 'T01', planPath: f.plan, hostRuntime: f.host });
   assert.equal(r.route.resolved_worker_engine, f.engine); assert.equal(r.route.worker_mode, 'sidecar');
+  require('./fixtures/issues-434-436/execution-fixtures.cjs').declareBindings(r);
   return r;
 }
 function beginOf(f, result) { return controller.lookupRecord(f.owner, 'transaction', result.controller_result.details.transaction.idempotency_key); }
@@ -317,6 +318,21 @@ async function completedWriter(host) {
   for (const root of [f.a, f.b]) write(root, 'same.txt', 'after\n');
   const head = root => cp.spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8', timeout: 15000 }).stdout.trim();
   const heads = [head(f.a), head(f.b)], runBytes = fs.readFileSync(f.runFile);
+  // New completion requires real current-source proof in both physical roots.
+  const verify = require('./forge-verify'), delivery = require('./forge-delivery');
+  const unit = {type:'task',id:'T01',slice:'S01',milestone:M}, planText=fs.readFileSync(f.plan,'utf8');
+  const RealDate=global.Date;
+  global.Date=class extends RealDate {constructor(...args){super(...(args.length?args:[BASE+119]));}static now(){return BASE+119;}};
+  let capture;try{capture=verify.captureRootDelivery(f.contract,planText,{unit,preferenceCommands:[`node -e "require('assert').equal(require('fs').readFileSync('same.txt','utf8').trim(),'after')"`],commandTimeoutMs:10000});}finally{global.Date=RealDate;}
+  assert.equal(capture.passed,true);
+  const taskDir=path.dirname(f.plan),bindings=[];
+  for(const envelope of [...capture.gate.roots,...capture.artifacts]) {
+    const target=write(taskDir,`${envelope.kind}-${envelope.root_id}.json`,envelope),reference=path.relative(f.owner,target).replace(/\\/g,'/');
+    if(envelope.kind==='verification')bindings.push({criterion:{kind:'truth',index:0},aspect:'default',coverage:'behavioral',source:{kind:'verification',path:reference,check_index:0}});
+    else {const index=f.contract.code_roots.findIndex(root=>root.id===envelope.root_id);bindings.push({criterion:{kind:'artifact',index},coverage:'structural',source:{kind:'artifact',path:reference,row_index:0,property:'exists'}});}
+  }
+  const input={schema_version:2,execution_contract:f.contract,unit,plan:path.relative(f.owner,f.plan).replace(/\\/g,'/'),plan_fingerprint:delivery.sha256(planText),bindings};
+  write(taskDir,'T01-DELIVERY-INPUT.json',input);const built=delivery.buildDelivery(input,{ownerRoot:f.owner,codeDir:f.a});assert.deepEqual(built.diagnostics,[]);assert(built.criteria.every(row=>row.status==='verificado'));write(taskDir,'T01-DELIVERY.json',built);
   f.at = 120; const completed = invoke(f, 'complete', selected.snapshot, { result: { status: 'done' } });
   assert.equal(completed.outcome, 'completed', JSON.stringify(completed));
   f.at = 150;

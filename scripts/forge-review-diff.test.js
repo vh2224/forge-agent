@@ -30,6 +30,8 @@ let passed = 0;
 let failed = 0;
 
 function test(name, fn) {
+  const match = process.argv.indexOf('--match');
+  if (match !== -1 && !name.includes(process.argv[match + 1] || '\0')) return;
   try {
     fn();
     passed += 1;
@@ -42,7 +44,7 @@ function test(name, fn) {
 
 // ── Pure-unit and text guards run everywhere ────────────────────────────────
 
-test('git branch of BOTH boundaries is byte-identical (zero regression, asserted not assumed)', () => {
+test('task Git boundary remains unchanged and slice Git uses physical-root bounded inventory', () => {
   // Acceptance: "Git: comportamento byte-idêntico ao atual". The SVN work must
   // not touch these lines, so they are pinned literally.
   const task = fs.readFileSync(path.join(REPO_ROOT, 'skills', 'forge-task', 'SKILL.md'), 'utf8');
@@ -55,13 +57,75 @@ test('git branch of BOTH boundaries is byte-identical (zero regression, asserted
   }
 
   const shared = fs.readFileSync(path.join(REPO_ROOT, 'shared', 'forge-review.md'), 'utf8');
-  for (const line of [
-    'BASE=$(git merge-base HEAD master 2>/dev/null || git merge-base HEAD main 2>/dev/null || echo HEAD~10)',
-    'DIFF_CMD="git diff ${BASE}...HEAD"',
-    'DIFF_CMD="git diff HEAD"',
-  ]) {
-    assert.ok(shared.includes(line), `slice git branch changed — missing: ${line}`);
+  assert.ok(shared.includes('REVIEW_CODE_DIR="${CODE_DIR:-$WORKING_DIR}"'));
+  assert.ok(shared.includes('git -C "$REVIEW_CODE_DIR" rev-parse'));
+  assert.ok(shared.includes('--base \\"$BASE\\"'), 'branch changes and dirty/untracked changes share one helper');
+  assert.ok(!shared.includes('DIFF_CMD="git diff HEAD"'), 'untracked-only work must not silently disappear');
+});
+
+test('Git worktree diff includes untracked, staged and unstaged code without changing index or owner artifacts', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-rd-git-'));
+  const owner = path.join(root, 'owner'), code = path.join(root, 'code'); fs.mkdirSync(owner);
+  const git = args => {
+    const value = spawnSync('git', args, { cwd: owner, encoding: 'utf8', windowsHide: true, timeout: 15000 });
+    assert.strictEqual(value.status, 0, value.stderr); return value.stdout.trim();
+  };
+  const run = args => spawnSync(process.execPath, [SCRIPT, '--cwd', code, ...args], { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+  try {
+    git(['init', '-q']); fs.writeFileSync(path.join(owner, 'tracked.js'), 'before\n'); git(['add', 'tracked.js']);
+    git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture']);
+    git(['worktree', 'add', '--detach', code, 'HEAD']);
+    fs.mkdirSync(path.join(code, 'src')); fs.writeFileSync(path.join(code, 'src/new.js'), 'export const untracked = 42;\n');
+    fs.mkdirSync(path.join(code, '.gsd')); fs.writeFileSync(path.join(code, '.gsd/private.md'), 'owner metadata sentinel');
+    const initial = run([]); assert.strictEqual(initial.status, 0, initial.stderr);
+    assert(initial.stdout.includes('+export const untracked = 42;')); assert(!initial.stdout.includes('owner metadata sentinel'));
+    const codeGit = args => {
+      const out = spawnSync('git', args, { cwd: code, encoding: 'utf8', windowsHide: true, timeout: 15000 });
+      assert.strictEqual(out.status, 0, out.stderr); return out.stdout;
+    };
+    fs.writeFileSync(path.join(code, 'tracked.js'), 'staged\n'); codeGit(['add', 'tracked.js']);
+    fs.appendFileSync(path.join(code, 'tracked.js'), 'unstaged\n');
+    const before = codeGit(['status', '--porcelain=v1']), index = codeGit(['diff', '--cached', '--binary']);
+    const diff = run([]); assert.strictEqual(diff.status, 0, diff.stderr);
+    for (const text of ['+staged', '+unstaged', '+export const untracked = 42;']) assert(diff.stdout.includes(text), text);
+    const names = run(['--name-only']); assert.strictEqual(names.status, 0, names.stderr);
+    assert.deepStrictEqual(names.stdout.trim().split(/\r?\n/), ['src/new.js', 'tracked.js']);
+    const shard = run(['--', 'src/new.js']); assert.strictEqual(shard.status, 0, shard.stderr);
+    assert(shard.stdout.includes('+export const untracked = 42;')); assert(!shard.stdout.includes('tracked.js\n'));
+    assert.strictEqual(codeGit(['status', '--porcelain=v1']), before); assert.strictEqual(codeGit(['diff', '--cached', '--binary']), index);
+    fs.writeFileSync(path.join(code, 'binary.bin'), Buffer.from([0, 1, 2]));
+    const binary = run([]); assert.strictEqual(binary.status, 2); assert(binary.stderr.includes('git-review-content-unavailable'));
+    fs.unlinkSync(path.join(code, 'binary.bin'));
+    fs.linkSync(path.join(code, 'src/new.js'), path.join(code, 'alias.js'));
+    const linked = run([]); assert.strictEqual(linked.status, 2); assert(linked.stderr.includes('git-review-file-type'));
+  } finally {
+    assert(path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep)); fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('Git bounded untracked reads refuse growth and replacement through actual CLI', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-rd-bound-')), code = path.join(root, 'code'); fs.mkdirSync(code);
+  const target = path.join(code, 'new.js'), preload = path.join(root, 'preload.cjs'), limit = 2 * 1024 * 1024;
+  const git = args => { const r = spawnSync('git', args, { cwd: code, encoding: 'utf8', windowsHide: true }); assert.strictEqual(r.status, 0, r.stderr); };
+  try {
+    git(['init', '-q']); git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'fixture']);
+    fs.writeFileSync(preload, `const fs=require('fs'),path=require('path'),target=${JSON.stringify(target)},limit=${limit};
+const open=fs.openSync,read=fs.readSync,readFile=fs.readFileSync;let fd,changed=false,total=0;
+fs.openSync=function(file,...args){const reading=args[0]==='r'||typeof args[0]==='number'&&(args[0]&3)===fs.constants.O_RDONLY,match=path.resolve(String(file))===target&&reading;if(match&&process.env.FORGE_RD_CASE==='replace'&&!changed){changed=true;fs.renameSync(target,target+'.old');fs.writeFileSync(target,'replacement\\n');}const actual=open.call(this,file,...args);if(match)fd=actual;return actual;};
+fs.readFileSync=function(file,...args){if(typeof file==='string'&&path.resolve(file)===target)throw Error('unbounded-target-read');return readFile.call(this,file,...args);};
+fs.readSync=function(descriptor,...args){if(descriptor===fd&&!changed&&process.env.FORGE_RD_CASE==='grow'){changed=true;fs.appendFileSync(target,Buffer.alloc(limit+4096,65));}const n=read.call(this,descriptor,...args);if(descriptor===fd)total+=n;return n;};
+process.once('exit',()=>process.stderr.write('RD-READ-BYTES='+total+'\\n'));
+`);
+    for (const mode of ['grow', 'replace']) {
+      fs.writeFileSync(target, 'initial\n');
+      const result = spawnSync(process.execPath, ['-r', preload, SCRIPT, '--cwd', code], { encoding: 'utf8', windowsHide: true,
+        env: { ...process.env, FORGE_RD_CASE: mode }, timeout: 15000, maxBuffer: 4096 });
+      assert.strictEqual(result.status, 2, result.stderr); assert.strictEqual(result.stdout, '', 'unsafe data never reaches a reviewer');
+      assert(result.stderr.includes(mode === 'grow' ? 'git-review-file-limit' : 'git-review-file-changed'), result.stderr);
+      const bytes = Number(/RD-READ-BYTES=(\d+)/.exec(result.stderr)?.[1]); assert(Number.isFinite(bytes) && bytes > 0 && bytes <= limit + 1);
+      if (fs.existsSync(target + '.old')) fs.unlinkSync(target + '.old');
+    }
+  } finally { assert(path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep)); fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test('both boundaries route SVN through this program and keep the appended-arg consumers', () => {
@@ -250,12 +314,12 @@ test('a new file is rendered as an added-file hunk, and a binary one is not dump
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('a non-SVN directory is refused instead of silently producing nothing', () => {
+test('a no-VCS directory is refused instead of silently producing nothing', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-rd-nonsvn-'));
   try {
     const r = spawnSync(process.execPath, [SCRIPT, '--cwd', dir], { encoding: 'utf8' });
     assert.strictEqual(r.status, 2, 'must exit 2, not exit 0 with an empty diff');
-    assert.ok(/not an SVN working copy/.test(r.stderr), 'stderr names the reason');
+    assert.ok(/vcs-unavailable:none-or-detection-failed/.test(r.stderr), 'stderr names the reason');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 

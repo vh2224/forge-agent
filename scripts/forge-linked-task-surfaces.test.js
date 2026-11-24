@@ -365,7 +365,7 @@ async function suite() {
     // public preparation start; it is entered later, at the cap, to produce the genuine
     // pre-provider refusal receipt that the drain inspects.
     fx.prefs(F, 'gpt-5.6-sol');
-    const drainRaw = fx.prepRequest(F, 'claude', 'research', 'drain-attempt');
+    const drainRaw = fx.prepRequest(F, 'claude', 'discuss', 'drain-attempt');
     const drainSelected = await prep.startStandaloneTaskPreparation(drainRaw, { now: () => S + 60000 });
     assert.equal(drainSelected.action, 'invoke-sidecar', JSON.stringify(drainSelected).slice(0, 300));
     // exhausted at the cap (frozen milestone consumption, live task consumption).

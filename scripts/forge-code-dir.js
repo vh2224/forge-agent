@@ -24,7 +24,7 @@
 //   parseDeclaredPaths(planText) → { paths: string[], source: 'writes+expected_output'|'files-to-change'|'none' }
 //   parseFilesToChange(planText) → string[]
 //   attributeRepo(absPath, repos) → repo|null   (longest-prefix, boundary-aware)
-//   parseListField(fm, key) → string[]|null     (copied from forge-parallelism.js — see below)
+//   parseListField(fm, key) → string[]|null     (shared structural execution parser)
 //   parseScalarField(fm, key) → string|null
 //   matchDeclaredRepo(value, usable, cwd, repoIndex) → { repo, status, path }
 //   scorePath(root, repoPath) → number
@@ -76,15 +76,13 @@
 // verdict, a status or an exit code — same refusal, better explanation. Additive: it is on
 // every result with default '' and nothing reads it to decide anything.
 //
-// NOTE: `parseListField` / `normalizePath` are COPIED from scripts/forge-parallelism.js
-// rather than required: that module calls main() at top level with no `require.main`
-// guard, so requiring it would print JSON into our stdout and process.exit().
+// Declaration lists use forge-must-haves' shared structural parser.
 
 'use strict';
 
 const fs   = require('fs');
 const path = require('path');
-const { hasStructuredMustHaves, parseMustHaves } = require('./forge-must-haves.js');
+const { hasStructuredMustHaves, parseMustHaves, parseExecutionDeclaration } = require('./forge-must-haves.js');
 
 const REASON_CROSS_REPO  = 'sidecar-multirepo-unsupported';
 const REASON_UNDECLARED  = 'sidecar-code-dir-undeclared';
@@ -97,35 +95,14 @@ function normalizePath(p) {
 
 // Parse either inline (`key: [a, b]`) or block (`key:\n  - a\n  - b`) YAML list.
 // Returns array (possibly empty) or null if key not present.
-// (copied from forge-parallelism.js:137-160)
+// Shared structural declaration parsing; no second list/comment scanner here.
 function parseListField(fm, key) {
-  const inlineRe = new RegExp('^' + key + ':\\s*\\[([^\\]]*)\\]\\s*$', 'm');
-  const mi = fm.match(inlineRe);
-  if (mi) {
-    const raw = mi[1].trim();
-    if (!raw) return [];
-    return raw.split(',').map(s => s.trim().replace(/^["']|["']$/g, '')).filter(Boolean);
-  }
-  // Form A-inplace (S03/T05): the repetition terminator must accept CRLF. `.` in
-  // JavaScript excludes \r as a line terminator, so on a CRLF plan `.+` stops
-  // before the \r and the optional `\n?` cannot bridge it — the repetition ends
-  // after the FIRST item and every later declared path is silently dropped.
-  // Measured: a two-entry CRLF `writes:` parsed to one entry, which made a
-  // cross-repo plan look single-repo (forge-code-dir-repo.test.js "R12 — exit 4"
-  // came back 0). Silent under-reporting of declared paths, not a parse error.
-  const blockRe = new RegExp('^' + key + ':[ \\t]*\\r?\\n((?:[ \\t]+-[ \\t]+.+\\r?\\n?)+)', 'm');
-  const mb = fm.match(blockRe);
-  if (mb) {
-    const items = [];
-    for (const line of mb[1].split(/\r?\n/)) {
-      const mm = line.match(/^[ \t]+-[ \t]+(.+?)\s*$/);
-      if (mm) items.push(mm[1].replace(/^["']|["']$/g, ''));
-    }
-    return items;
-  }
-  const emptyRe = new RegExp('^' + key + ':\\s*$', 'm');
-  if (emptyRe.test(fm)) return [];
-  return null;
+  const read = parseExecutionDeclaration('---\n' + String(fm).replace(/\r\n?/g, '\n') + '\n---', key);
+  if (read.status === 'absent') return null;
+  if (read.status === 'empty') return []; // historical bare-empty CODE_DIR list
+  if (read.status === 'invalid') throw new Error(read.error);
+  if (read.items.some(value => typeof value !== 'string')) throw new Error('code-dir-root-contract-required');
+  return read.items;
 }
 
 // Parse a simple YAML scalar, accepting quotes and stripping an inline comment.
@@ -690,6 +667,31 @@ function readIsoArg(raw) {
   return raw;
 }
 
+// Resolve the actual root before recording a serial/batch claim. A batch
+// spanning physical roots needs a schema-v2 claim, never a guessed first root.
+function resolveClaimCodeDir(options = {}) {
+  const plans=options.planPaths;
+  if (!Array.isArray(plans)||!plans.length||plans.length>64||plans.some(p=>typeof p!=='string'||!p||p.includes('\0'))) throw new Error('claim-plans-invalid');
+  if(!['shared','branch','worktree'].includes(options.isoResult?.mode))return emptyResult({status:'undeclared',reason:REASON_UNDECLARED});
+  let iso=options.isoResult;
+  if(iso.mode==='branch'){
+    if(!Array.isArray(iso.repos)||!iso.repos.length||iso.repos.some(r=>!r||r.status==='error'||!path.isAbsolute(r.path||'')))return emptyResult({status:'undeclared',reason:REASON_UNDECLARED});
+    if(iso.repos.length!==1)return emptyResult({status:'cross-repo',reason:REASON_CROSS_REPO});
+    try{if(normalizePath(fs.realpathSync.native(iso.repos[0].path))!==normalizePath(fs.realpathSync.native(options.cwd||process.cwd())))return emptyResult({status:'undeclared',reason:REASON_UNDECLARED});}
+    catch{return emptyResult({status:'undeclared',reason:REASON_UNDECLARED});}
+    // Legacy multi-repo branch claims need schema-v2 root-qualified paths.
+    // Never advertise the workspace root as a substitute physical repository.
+    iso={...iso,mode:'worktree',repos:iso.repos.map(r=>({...r,worktree:r.path}))};
+  }
+  const rows=plans.map(p=>resolveCodeDir({...options,isoResult:iso,planPath:path.resolve(options.cwd||process.cwd(),p)}));
+  const refused=rows.find(row=>!['ok','shared'].includes(row.status));if(refused)return refused;
+  const measured=new Map();for(const row of rows){let real;try{
+    if(row.status==='shared'&&options.isoResult.mode==='worktree')throw Error();
+    real=fs.realpathSync.native(row.status==='shared'?path.resolve(options.cwd||process.cwd()):row.code_dir);if(!fs.statSync(real).isDirectory())throw Error();
+  }catch{return emptyResult({status:'undeclared',reason:REASON_UNDECLARED});}measured.set(normalizePath(real),real);}
+  if(measured.size!==1)return emptyResult({status:'cross-repo',reason:REASON_CROSS_REPO});
+  return {...rows[0],code_dir:[...measured.values()][0],claim_scope:'resolved-plans',plans_resolved:rows.length};
+}
 function cliMain() {
   const args = parseArgs(process.argv.slice(2));
 
@@ -752,9 +754,10 @@ Exit: 0 ok/shared · 4 cross-repo · 5 undeclared · 2 usage/parse error
 
   let out;
   try {
-    out = resolveCodeDir({
+    out = (args['claim-plans-json'] ? resolveClaimCodeDir : resolveCodeDir)({
       isoResult,
       repoIndex,
+      ...(args['claim-plans-json'] ? { planPaths: JSON.parse(args['claim-plans-json']) } : {}),
       planPath: typeof args.plan === 'string' ? args.plan : '',
       cwd: typeof args.cwd === 'string' ? args.cwd : process.cwd(),
       // --run is echoed for auditability ONLY; it never triggers any re-derivation.
@@ -773,6 +776,7 @@ Exit: 0 ok/shared · 4 cross-repo · 5 undeclared · 2 usage/parse error
 if (require.main === module) cliMain();
 
 module.exports = {
+  resolveClaimCodeDir,
   resolveCodeDir,
   parseDeclaredPaths,
   parseFilesToChange,

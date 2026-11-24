@@ -49,6 +49,7 @@ function milestone(dispatchId) {
     planFile: path.join(base, 'tasks/T01/T01-PLAN.md'), verification: { preferenceCommands: ['node -e "process.exit(0)"'] } };
   // The frontmatter pins the Claude sidecar family so routing stays a sidecar.
   fs.writeFileSync(request.planFile, rootsFixtures.plan(lab.contract).replace('tier: standard\n', 'tier: standard\nworker: claude\n'));
+  require('./fixtures/issues-434-436/execution-fixtures.cjs').declareBindings(request);
   fs.writeFileSync(path.join(lab.owner, '.gsd/forge-prefs.jsonc'), JSON.stringify({ tier_models: Object.fromEntries(
     ['light', 'standard', 'heavy', 'max'].map(tier => [tier, ['claude-sonnet-5']])), effort: { 'plan-slice': 'medium' } }));
   request.route = require('./forge-dispatch-resolve').resolveDispatch({ cwd: request.contextRoot, unitType: request.unitType,
@@ -678,7 +679,7 @@ async function publicIdentityChannels() {
 
 // ── Standalone native transport through runUnitSidecar (harness) ─────────────
 async function standaloneNative() {
-  const { createFixtureHarness } = require('./fixtures/forge-native-execution');
+  const { createFixtureHarness } = require('./fixtures/issues-434-436/execution-fixtures.cjs');
   const harness = createFixtureHarness();
   let completed = false;
   try {

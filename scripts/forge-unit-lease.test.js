@@ -420,6 +420,17 @@ function testRequestBoundReleaseAndSuccessor() {
 }
 
 async function main() {
+  await test('interruption cannot release with a serialized or foreign authority', () => sandbox(cwd => {
+    fs.mkdirSync(path.join(cwd, '.gsd'), { recursive: true });
+    const held = lease.acquire(cwd, 'plan-slice/S02', { ownerToken: 'old', hostRuntime: 'codex' });
+    const original = fs.readFileSync(lease.leaseFile(cwd, 'plan-slice/S02'));
+    lease.withTerminalGuard(cwd, 'plan-slice/S02', guard => {
+      for (const authority of [{}, { approved: true, generation: held.generation }, JSON.parse(JSON.stringify({}))]) {
+        assert.throws(() => lease.releaseInterrupted(guard, authority, cwd, 'plan-slice/S02'), error => error.code === 'owner-interruption-authority-required');
+        assert(fs.readFileSync(lease.leaseFile(cwd, 'plan-slice/S02')).equals(original));
+      }
+    });
+  }));
   console.log(`forge-unit-lease tests on ${process.platform}`);
   await test('persisted shape and sanitized observe', testPersistedShapeAndSanitizedObserve);
   await test('owner token and generation authorize lifecycle', testOwnerTokenAndGenerationAreAuthorization);

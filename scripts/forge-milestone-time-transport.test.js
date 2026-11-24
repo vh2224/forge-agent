@@ -53,9 +53,11 @@ function fixture(contract = true, base = BASE) {
   fs.mkdirSync(path.join(lab.owner, '.gsd/forge'), { recursive: true });
   if (contract) activate(lab.owner, base);
   corpus(lab.a);
-  const f = { ...lab, at: 1, base };
-  const plan = write(lab.owner, '.gsd/milestones/M001/slices/S01/tasks/T01/T01-PLAN.md', fixtures.plan(lab.contract));
-  write(lab.owner, '.gsd/milestones/M001/slices/S01/S01-PLAN.md', '# Slice\n- [ ] **T01** fixture\n');
+  const f = { ...lab, at: 1, base, hasTimeContract: contract };
+  const plan = write(lab.owner, '.gsd/milestones/M001/slices/S01/tasks/T01/T01-PLAN.md', fixtures.plan(lab.contract).replace('id: T-roots', 'id: T01'));
+  // Both execution IDs belong to the admitted generation before any transport probe.
+  write(lab.owner, '.gsd/milestones/M001/slices/S01/tasks/T01.1/T01.1-PLAN.md', fixtures.plan(lab.contract).replace('id: T-roots', 'id: T01.1'));
+  write(lab.owner, '.gsd/milestones/M001/slices/S01/S01-PLAN.md', '# Slice\n- [ ] **T01** fixture\n- [ ] **T01.1** dotted fixture\n');
   f.plan = plan;
   require('./forge-state').write(lab.owner, { milestone: M, kind: 'milestone', phase: 'idle', active_slice: 'S01', active_task: 'T01', auto_mode: 'on' });
   f.begin = controller.begin(lab.owner, { milestone: M, slice: 'S01', unit: 'plan-slice/S01',
@@ -66,6 +68,18 @@ function fixture(contract = true, base = BASE) {
   return f;
 }
 function request(f, engine, unitType = 'research-milestone', taskId = 'T01') {
+  // Above-cap cases retain their original LIVE planning writer for draining.
+  // Only a positive executor entry first completes its actual native generation.
+  if (unitType === 'execute-task' && !f.completed && (f.at === 1 || !f.hasTimeContract)) {
+    f.completed = controller.complete(f.owner, { milestone: M, slice: 'S01', unit: 'plan-slice/S01',
+      host_runtime: 'codex', owner_token: 'fixture', generation: f.begin.generation, idempotency_key: 'before-cap:complete',
+      result: { status: 'succeeded' } }, { now: () => f.base + f.at, prefsReader: () => ({ ok: true, prefs: {} }) });
+    assert.equal(f.completed.ok, true, JSON.stringify(f.completed));
+    const begun = controller.lookupRecord(f.owner, 'transaction', 'before-cap');
+    const completion = controller.lookupRecord(f.owner, 'transaction', 'before-cap:complete');
+    require('./forge-plan-validation').verifyPlanValidation(completion.result.plan_validation, begun.plan_generation);
+    assert(!Object.hasOwn(completion, 'plan_validation'), 'native evidence is result-checksum covered');
+  }
   const host = engine === 'claude' ? 'codex' : 'claude';
   const model = engine === 'claude' ? 'claude-sonnet-5' : 'gpt-6-sol';
   const tiers = Object.fromEntries(['light', 'standard', 'heavy', 'max'].map(tier => [tier, [model]]));
@@ -81,10 +95,18 @@ function request(f, engine, unitType = 'research-milestone', taskId = 'T01') {
   if (unitType === 'execute-task') {
     r.phase = 'execute'; r.taskId = taskId; r.planFile = f.plan; r.execution_contract = f.contract;
     r.verification = { preferenceCommands: ['node --version'] }; r.runId = 'fixture-run';
+    require('./fixtures/issues-434-436/execution-fixtures.cjs').declareBindings(r);
     r.claim = { schema_version: 2, generation: 'budget-claim', execution_contract: f.contract,
       paths: ['alpha', 'beta'].map(root_id => ({ root_id, path: 'same.txt' })) };
     r.gates = { plan: 'skipped', planSkipReason: 'interactive-off', claim: 'proceed', security: 'not-applicable' };
-    require('./forge-runs').add(f.owner, { id: r.runId, kind: 'milestone', session_id: 'fixture', write_claim: r.claim });
+    const runs = require('./forge-runs'), existing = runs.get(f.owner, r.runId);
+    if (!existing) runs.add(f.owner, { id: r.runId, kind: 'milestone', session_id: 'fixture', write_claim: r.claim });
+    else {
+      // This fixture reuses one owner and the SAME held claim across attempts;
+      // registration is create-only and must never replace another record.
+      assert.equal(existing.session_id, 'fixture'); assert.equal(existing.active, true);
+      assert.deepEqual(existing.write_claim, r.claim);
+    }
   }
   r.route = resolver.resolveDispatch({ cwd: f.owner, unitType, milestoneId: M,
     unitId: r.taskId || r.sliceId || M, planPath: r.planFile, hostRuntime: host });
@@ -123,12 +145,25 @@ async function main() {
   xllm.terminateOwnedProcessTree = () => { kills++; throw Error('unexpected process termination'); };
   try {
     f.at = 101;
-    for (const [engine, unit, seam] of [['claude', 'research-milestone', 'invokeClaudeTransport'], ['codex', 'research-milestone', 'invokeCodexAppServer'],
+    for (const [engine, unit, seam] of [['claude', 'research-milestone', 'invokeClaudeTransport'],
       ['claude', 'plan-slice', 'runPlan'], ['codex', 'execute-task', 'runExecute']]) {
       await test('controller begin below cap then ' + seam + ' refused beyond cap with failed receipt and recovery stop', async () => {
         await stopped(f, request(f, engine, unit)); assert.equal(providers, 0); assert.equal(spawns, 0); assert.equal(kills, 0);
       });
     }
+    // #350: the Codex read-only research-milestone profile is refused by the context admission
+    // before the time guard, below and beyond the cap: no receipt and no provider.
+    await test('Codex read-only research-milestone is refused by context admission before the time guard', async () => {
+      for (const at of [1, 101]) {
+        f.at = at; const stages = [], r = request(f, 'codex', 'research-milestone'), before = providers;
+        await assert.rejects(sidecar.runUnitSidecar(r, runtime(f, stages)), error =>
+          error.code === 'codex-readonly-context-unsupported' && error.provider_called === false);
+        assert.equal(providers, before); assert.equal(fs.existsSync(r.resultFile + '.receipt.json'), false);
+        assert(stages.some(row => row.stage === 'recusado' && row.reason_code === 'codex-readonly-context-unsupported'));
+        assert(!stages.some(row => row.stage === 'solicitado'));
+      }
+      f.at = 101; assert.equal(spawns, 0); assert.equal(kills, 0);
+    });
     await test('every transport entry rechecks before recoveryReady; saved ready replay and publication remain allowed beyond cap', async () => {
       f.at = 1; const r = request(f, 'claude'); let ready = 0;
       xllm.invokeClaudeTransport = async options => {
@@ -143,10 +178,40 @@ async function main() {
       assert.equal(replayed.status, 'partial'); assert.equal(providers, 1);
       xllm.invokeClaudeTransport = provider; providers = 0;
     });
+    // The cold refusal cases above prove zero helper/provider spawns. The cases
+    // below deliberately enter below cap with a provider stub: warm the real
+    // native capability separately, without changing or resetting either spy.
+    // prepareCustody alone is not proof of close on a timeout, so observe every
+    // actual preparation child and join it before reinstalling the blocking spy.
+    f.at = 1;
+    const blockedSpawn = cp.spawn, preparationChildren = [];
+    cp.spawn = (...args) => {
+      const child = spawn(...args);
+      const observation = { child, closed: false, done: null };
+      observation.done = new Promise(resolve => child.once('close', () => { observation.closed = true; resolve(); }));
+      preparationChildren.push(observation);
+      return child;
+    };
+    try {
+      await require('./forge-process-tree').prepareCustody();
+      for (const observed of preparationChildren) {
+        let timer;
+        await Promise.race([observed.done, new Promise(resolve => { timer = setTimeout(resolve, 5000); })]);
+        clearTimeout(timer);
+        if (!observed.closed) {
+          observed.child.kill();
+          await Promise.race([observed.done, new Promise(resolve => { timer = setTimeout(resolve, 2000); })]);
+          clearTimeout(timer);
+        }
+        assert(observed.closed, 'owned custody preparation child must close before warm transport assertions');
+      }
+      console.log('SETUP T06 real custody preparation children=' + preparationChildren.length + ' joined=' + preparationChildren.filter(x => x.closed).length + '; cold spies unchanged');
+    } finally { cp.spawn = blockedSpawn; }
+
     await test('below cap and no-contract legacy each call the same stub provider exactly once', async () => {
       for (const current of [f, fixture(false)]) {
         current.at = current === f ? 1 : 10000;
-        for (const [engine, unit] of [['claude', 'research-milestone'], ['codex', 'research-milestone'],
+        for (const [engine, unit] of [['claude', 'research-milestone'],
           ['claude', 'plan-slice'], ['codex', 'execute-task']]) {
         const r = request(current, engine, unit);
         const before = providers;
@@ -158,7 +223,7 @@ async function main() {
     });
     await test('canonical dotted task id T01.1 passes real transport entry below cap and is refused beyond it', async () => {
       const savedPlan = f.plan;
-      f.plan = write(f.owner, '.gsd/milestones/M001/slices/S01/tasks/T01.1/T01.1-PLAN.md', fixtures.plan(f.contract));
+      f.plan = write(f.owner, '.gsd/milestones/M001/slices/S01/tasks/T01.1/T01.1-PLAN.md', fixtures.plan(f.contract).replace('id: T-roots', 'id: T01.1'));
       try {
         f.at = 1; const r = request(f, 'codex', 'execute-task', 'T01.1');
         const before = providers;
@@ -305,7 +370,8 @@ async function reviewEntries(f) {
     client.startAppServerTurn = () => { calls++; throw Object.assign(Error('fixture provider reached'), { code: 'fixture-provider-reached' }); };
     cp.spawn = () => { spawns++; throw Error('unexpected provider spawn'); };
     try {
-    const context = { cwd: f.owner, milestone: M, unit: 'review-slice/S01' };
+    // The milestone review gate unit is complete-slice/S## (#341 review-leg guard).
+    const context = { cwd: f.owner, milestone: M, unit: 'complete-slice/S01' };
     f.at = 1; admission.assertOwnerTransportEntry({ milestoneTimeContext: context, now: () => BASE + f.at });
     f.at = 101;
     const input = write(f.dir, 'review-input.json', { objections: [] });
@@ -339,7 +405,7 @@ async function reviewEntries(f) {
         '--mode', mode, '--engine', 'codex', '--host-runtime', 'claude', '--sidecar-declared',
         '--model', 'gpt-6-sol', '--effort', 'medium', '--cwd', cliFixture.a, '--context-root', cliFixture.owner,
         '--diff-cmd', 'git diff', '--input', input, '--budget-owner', cliFixture.owner,
-        '--budget-milestone', M, '--budget-unit', 'review-slice/S01'], { encoding: 'utf8', timeout: 20000 });
+        '--budget-milestone', M, '--budget-unit', 'complete-slice/S01'], { encoding: 'utf8', timeout: 20000 });
       assert.equal(result.status, 2, result.stderr); assert.equal(result.stdout, '');
       assert(/milestone-budget-(exhausted|draining)/.test(result.stderr), result.stderr);
       assert(!result.stderr.includes('provider-spawn-forbidden'), result.stderr);

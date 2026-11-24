@@ -122,6 +122,13 @@ function request(owner, code, unitType, engine) {
   return r;
 }
 function receiptPhase(r) { const file = r.resultFile + '.receipt.json'; return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')).phase : null; }
+// #350: a Codex read-only milestone artifacts dispatch is refused before receipt and provider.
+function assertCodexContextRefusal(run) {
+  assert.equal(run.error?.code, 'codex-readonly-context-unsupported', `codex: ${run.error?.code || 'accepted'}`);
+  assert.equal(run.error.provider_called, false);
+  assert.equal(run.seen.calls, 0);
+  assert.equal(receiptPhase(run.r), null);
+}
 async function viaSidecar(owner, code, unitType, engine, candidate) {
   const r = request(owner, code, unitType, engine), seen = { calls: 0, validated: null };
   xllm.invokeClaudeTransport = async options => { seen.calls++; seen.validated = options.validateCandidate(candidate); return { candidate, telemetry: null }; };
@@ -171,6 +178,7 @@ async function refusedEverywhere(owner, code, unitType, candidate, typed) {
   assert.deepEqual(inspected, { ok: false, reason: typed });
   for (const engine of ['claude', 'codex']) {
     const run = await viaSidecar(owner, code, unitType, engine, candidate);
+    if (engine === 'codex') { assertCodexContextRefusal(run); assert.equal(fs.existsSync(target), false, engine); continue; }
     assert.equal(run.error?.code, 'invalid-artifact-result', `${engine}: ${run.error?.code || 'accepted'}`);
     assert.deepEqual([run.error.diagnostic.stage, run.error.diagnostic.reason], ['validation', 'delivery-artifact-invalid']);
     assert.ok(!/PRIVATE/.test(run.error.message + JSON.stringify(run.error.diagnostic)), 'refusals never echo worker values');
@@ -195,6 +203,7 @@ async function acceptedEverywhere(owner, code, unitType, candidate) {
   const relative = candidate.artifacts[0].path, target = path.join(owner, relative), content = candidate.artifacts[0].content;
   for (const engine of ['claude', 'codex']) {
     const run = await viaSidecar(owner, code, unitType, engine, candidate);
+    if (engine === 'codex') { assertCodexContextRefusal(run); assert.equal(fs.existsSync(target), false, engine); continue; }
     assert.equal(run.error, undefined, `${engine}: ${run.error && (run.error.code || run.error.message)}`);
     assert.equal(run.result.status, 'done'); assert.equal(receiptPhase(run.r), 'ready');
     assert.equal(fs.readFileSync(target, 'utf8'), content); fs.unlinkSync(target);
@@ -376,6 +385,7 @@ async function main() {
     const partial = { status: 'partial', summary: 'Decisão funcional necessária', questions: [{ id: 'scope-choice', question: 'Qual escopo manter?' }], artifacts: [] };
     for (const engine of ['claude', 'codex']) {
       const run = await viaSidecar(owner, code, 'estimate-milestone', engine, partial);
+      if (engine === 'codex') { assertCodexContextRefusal(run); assert.equal(fs.existsSync(path.join(owner, OPTIONS)), false); continue; }
       assert.equal(run.error, undefined, run.error && run.error.code);
       assert.equal(run.result.status, 'partial'); assert.ok(JSON.stringify(run.result).includes('scope-choice'), 'questions preserved');
       assert.equal(fs.existsSync(path.join(owner, OPTIONS)), false, 'partial publishes nothing');
@@ -423,7 +433,7 @@ async function main() {
     // Partial without artifacts keeps its questions and publishes nothing dependent.
     const partial = { status: 'partial', summary: 'Aguardando escolha', questions: [{ id: 'time-choice', question: 'Qual opção?' }], artifacts: [] };
     const run = await viaSidecar(early, code, 'plan-milestone', 'codex', partial);
-    assert.equal(run.result.status, 'partial'); assert.equal(fs.existsSync(path.join(early, ROADMAP)), false);
+    assertCodexContextRefusal(run); assert.equal(fs.existsSync(path.join(early, ROADMAP)), false);
   });
 
   await test('estimate-milestone sidecar delivery packages the owner-captured source manifest of a distinct CODE_DIR and refuses a forged one before any transport', async () => {

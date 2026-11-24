@@ -821,7 +821,22 @@ function buildPublication(current, extraction, context) {
   };
 }
 
-function publishExtraction(options) {
+function publishExtraction(options) { return publishExtractionCore(options, null); }
+function prepareExtractionPublication(options) {
+  try {
+    const { prepared = null, ...publication } = publishExtractionCore(options, { prepare: true });
+    return { status: 'prepared', prepared, publication };
+  }
+  catch (error) {
+    if (error?.code !== 'MEMORY_PREPARE_GROUPED') throw error;
+    return { status: 'deferred', reason: 'grouped-member', mappings: {}, counts: { facts: 0, events: 0 } };
+  }
+}
+function applyPreparedExtractionPublication(options, prepared) {
+  if (!prepared) throw new TypeError('prepared memory publication required');
+  return publishExtractionCore(options, { prepared });
+}
+function publishExtractionCore(options, mode) {
   if (!isPlainObject(options)) throw new TypeError('publishExtraction options must be an object');
   assertKeys(options, ['cwd', 'extraction', 'sourceContext'], [], 'publishExtraction');
   if (typeof options.cwd !== 'string' || options.cwd.length === 0 || options.cwd.length > 32768 || /[\u0000]/.test(options.cwd)) {
@@ -849,7 +864,10 @@ function publishExtraction(options) {
     const registry = sourceContext.evidence === null ? null
       : verifyEvidenceRegistry(sourceContext.evidence, sourceContext.source);
     if (registry) policy = 'v2';
-    const written = memory.transactFragment(
+    const transact = mode?.prepare ? memory.prepareFragmentTransaction
+      : mode?.prepared ? (cwd, fragment, opts, update) => memory.applyPreparedFragmentTransaction(cwd, fragment, opts, update, mode.prepared)
+        : memory.transactFragment;
+    const written = transact(
       cwd,
       { unit_id: sourceContext.unitId, ...(sourceContext.milestoneId ? { milestone_id: sourceContext.milestoneId } : {}) },
       {
@@ -881,7 +899,8 @@ function publishExtraction(options) {
       schema_version: version,
       promotion_policy: policy,
       ...transaction,
-      state: publishedState(cwd, namespace),
+      state: mode?.prepare ? null : publishedState(cwd, namespace),
+      ...(mode?.prepare ? { prepared: written.prepared } : {}),
     };
   } catch (error) {
     if (['MEMORY_PUBLICATION_CONFLICT', 'MEMORY_FACT_CONFLICT', 'MEMORY_EVENT_CONFLICT', 'MEMORY_EVENT_INVALID', 'MEMORY_QUARANTINE_CONFLICT'].includes(error && error.code)) {
@@ -914,7 +933,7 @@ module.exports = {
   validateExtractionResult,
   normalizeEvidenceRegistry,
   evidenceSourceFingerprint,
-  publishExtraction,
+  publishExtraction, prepareExtractionPublication, applyPreparedExtractionPublication,
   MemoryExtractionError,
   MemoryPublicationConflict,
   MemoryEvidenceRegistryError,

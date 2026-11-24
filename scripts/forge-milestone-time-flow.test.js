@@ -53,6 +53,11 @@ function fixture(host = 'codex', contract = true) {
   }
   fs.mkdirSync(path.join(cwd, '.gsd/milestones', M), { recursive: true });
   state.write(cwd, { milestone: M, kind: 'milestone', phase: 'idle', active_slice: 'S01', active_task: '—', auto_mode: 'on', created: iso(0), heartbeat: iso(0) });
+  // The injected inventory still selects planning; these are its legitimate eventual outputs.
+  for (const slice of ['S01', 'S02', 'S03']) {
+    write(cwd, `.gsd/milestones/${M}/slices/${slice}/${slice}-PLAN.md`, `# ${slice}\n- [ ] **T01**: Fixture\n`);
+    write(cwd, `.gsd/milestones/${M}/slices/${slice}/tasks/T01/T01-PLAN.md`, '---\nid: T01\ndepends: []\nwrites:\n  - src/result.js\nmust_haves:\n  truths:\n    - Time fixture behavior is observable.\n  artifacts: []\n  key_links: []\nexpected_output:\n  - src/result.js\n---\n# T01\n');
+  }
   return f;
 }
 function optionsOf(f) {
@@ -83,35 +88,39 @@ function omitVolatile(value) {
   return Object.fromEntries(Object.entries(value).filter(([k]) => !['lease_generation', 'storage_checksum'].includes(k))
     .map(([k, v]) => [k, omitVolatile(v)]));
 }
-function noContractTrace(host) {
+function noContractTrace(host, bridge = { controller, adapter }) {
   const f = fixture(host, false), oldAcquire = lease.acquire;
+  const call = (command, snapshot, extra = {}) => bridge.adapter.invoke(f.host, 'auto', command,
+    { ...f.input, ...extra }, snapshot, f.options).result;
   // Generation affects derived checksums as well as its own field. Keep the
   // native lease token deterministic rather than removing additional fields.
   lease.acquire = (cwd, unit, options) => oldAcquire(cwd, unit, { ...options, tokenFactory: () => 'baseline-generation' });
   try {
-    f.at = 1; const first = invoke(f, 'next');
+    f.at = 1; const first = call('next');
     assert.equal(first.outcome, 'dispatch_required'); assert(!first.controller_result.details.time);
-    f.at = 2; invoke(f, 'complete', first.snapshot, { result: { status: 'done' } });
-    f.nextSlice = 'S02'; f.at = 3; const paused = invoke(f, 'pause');
+    f.at = 2; call('complete', first.snapshot, { result: { status: 'done' } });
+    f.nextSlice = 'S02'; f.at = 3; const paused = call('pause');
     assert.equal(paused.outcome, 'needs_input');
-    f.at = 4; const resumed = invoke(f, 'resume', paused.snapshot, { response: 'yes' });
+    f.at = 4; const resumed = call('resume', paused.snapshot, { response: 'yes' });
     assert.equal(resumed.outcome, 'resumed');
-    f.nextSlice = 'S03'; f.at = 5; const failed = invoke(f, 'next');
-    const begin = controller.lookupRecord(f.cwd, 'transaction', failed.controller_result.details.transaction.idempotency_key);
-    f.at = 6; controller.transition(f.cwd, { action: 'fail', milestone: M, unit: failed.unit, host_runtime: host,
+    f.nextSlice = 'S03'; f.at = 5; const failed = call('next');
+    const begin = bridge.controller.lookupRecord(f.cwd, 'transaction', failed.controller_result.details.transaction.idempotency_key);
+    f.at = 6; bridge.controller.transition(f.cwd, { action: 'fail', milestone: M, unit: failed.unit, host_runtime: host,
       owner_token: f.input.owner_token, generation: begin.lease_generation, idempotency_key: 'baseline-fail', result: { status: 'failed' } }, f.options);
-    const directory = controller.transactionDir(f.cwd);
+    const directory = bridge.controller.transactionDir(f.cwd);
     const transactions = fs.readdirSync(directory).filter(name => name.endsWith('.json'))
-      .map(name => omitVolatile(controller.readJson(path.join(directory, name))))
+      .map(name => omitVolatile(bridge.controller.readJson(path.join(directory, name))))
       .sort((a, b) => a.idempotency_key.localeCompare(b.idempotency_key));
     const events = fs.readFileSync(path.join(f.cwd, '.gsd/milestones', M, M + '-events.jsonl'), 'utf8');
     assert(!fs.existsSync(path.join(f.cwd, '.gsd/forge/time')));
+    const replay = replayHistoricalTrace(f);
+    assert.deepStrictEqual(replay, { transactions, events }, 'current committed replay preserves original trace');
     return { transactions, events };
   } finally { lease.acquire = oldAcquire; }
 }
 function baseline() {
   const file = path.join(__dirname, 'fixtures/milestone-time/no-contract-baseline.json');
-  const trace = Object.fromEntries(['claude', 'codex'].map(host => [host, noContractTrace(host)]));
+  const trace = withBaselineBridge(bridge => Object.fromEntries(['claude', 'codex'].map(host => [host, noContractTrace(host, bridge)])));
   if (process.argv.includes('--capture-baseline')) {
     assert.equal(digest(fs.readFileSync(require.resolve('./forge-unit-controller'))), '19b64b7b540f1133e3900ac6e682dd7d115f74cc56de9eef2b28c12345c185ac', 'capture requires unchanged 14260f8 controller');
     assert.equal(digest(fs.readFileSync(require.resolve('./forge-orchestrate'))), '98026cd8638c8f1b10306742653c20a118dd9ec775c6e013783a04b175c59652', 'capture requires unchanged 14260f8 orchestrate');
@@ -167,7 +176,7 @@ function linkedTrace(f, bridge) {
   try {
     const call = (command, snapshot, extra = {}, options = f.options) => bridge.adapter.invoke(f.host, 'auto', command,
       { ...f.input, ...extra }, snapshot, options).result;
-    f.at = 1; const selected = call('next'); liveReceipt(f, selected, 'failed'); f.at = 2;
+    f.at = 1; const selected = bridge.begin ? bridge.begin() : call('next'); liveReceipt(f, selected, 'failed'); f.at = 2;
     const options = entryOptions(f), consumed = call('consume-failure', selected.snapshot, {}, options);
     assert.equal(consumed.reason_code, 'failure-consumed');
     f.at = 3;
@@ -184,18 +193,49 @@ function linkedTrace(f, bridge) {
     return { transactions, events: fs.readFileSync(path.join(f.cwd, '.gsd/milestones/M001/M001-events.jsonl'), 'utf8') };
   } finally { lease.acquire = oldAcquire; }
 }
+function replayHistoricalTrace(f) {
+  const directory = controller.transactionDir(f.cwd), files = fs.readdirSync(directory).filter(name => name.endsWith('.json'));
+  const before = new Map(files.map(name => [name, fs.readFileSync(path.join(directory, name))]));
+  const eventFile = controller.eventsFile(f.cwd, M), eventsBefore = fs.readFileSync(eventFile);
+  for (const name of files) {
+    const row = controller.readJson(path.join(directory, name));
+    assert(!Object.hasOwn(row, 'plan_generation'), 'actual historical producer did not enroll its begin');
+    assert.deepStrictEqual(controller.lookupRecord(f.cwd, 'transaction', row.idempotency_key), row);
+    if (row.action !== 'begin') {
+      const replay = controller.transition(f.cwd, { action: row.action, milestone: M, unit: row.unit, host_runtime: row.host_runtime,
+        owner_token: f.input.owner_token, generation: row.lease_generation, idempotency_key: row.idempotency_key, result: row.result }, f.options);
+      assert.equal(replay.reason, 'already-committed');
+    }
+  }
+  assert.deepStrictEqual(fs.readdirSync(directory).filter(name => name.endsWith('.json')).sort(), files.sort(), 'zero new transactions');
+  for (const [name, bytes] of before) assert.deepStrictEqual(fs.readFileSync(path.join(directory, name)), bytes);
+  assert.deepStrictEqual(fs.readFileSync(eventFile), eventsBefore, 'historical replay adds zero events');
+  return { transactions: files.map(name => omitVolatile(controller.readJson(path.join(directory, name))))
+    .sort((a, b) => a.idempotency_key.localeCompare(b.idempotency_key)), events: eventsBefore.toString('utf8') };
+}
 function linkedBaseline(host) {
   const f = fixture(host, false);
   const original = withBaselineBridge(bridge => linkedTrace(f, bridge));
-  // Preserve the actual root and its inode. Only this test's own GSD contents
-  // are reset; no lease/claim from any product workspace participates.
+  // Preserve the same owner/inode; reset only this test's disposable GSD, as before.
   assert(roots.includes(f.cwd));
   fs.rmSync(path.join(f.cwd, '.gsd'), { recursive: true, force: true });
   fs.mkdirSync(path.join(f.cwd, '.gsd/milestones/M001'), { recursive: true });
   state.write(f.cwd, { milestone: M, kind: 'milestone', phase: 'idle', active_slice: 'S01', active_task: '—',
     auto_mode: 'on', created: iso(0), heartbeat: iso(0) });
-  const current = linkedTrace(f, { controller, adapter });
+  for (const slice of ['S01', 'S02', 'S03']) {
+    write(f.cwd, `.gsd/milestones/${M}/slices/${slice}/${slice}-PLAN.md`, `# ${slice}\n- [ ] **T01**: Fixture\n`);
+    write(f.cwd, `.gsd/milestones/${M}/slices/${slice}/tasks/T01/T01-PLAN.md`, '---\nid: T01\ndepends: []\nwrites:\n  - src/result.js\nmust_haves:\n  truths:\n    - Time fixture behavior is observable.\n  artifacts: []\n  key_links: []\nexpected_output:\n  - src/result.js\n---\n# T01\n');
+  }
+  // Only the predecessor begin comes from the actual immutable old producer.
+  // consume-failure and reenter below execute NOW through current adapter/controller.
+  const current = linkedTrace(f, { controller, adapter, begin: () => withBaselineBridge(bridge =>
+    bridge.adapter.invoke(f.host, 'auto', 'next', f.input, null, f.options).result) });
   assert.deepStrictEqual(current, original);
+  const records = fs.readdirSync(controller.transactionDir(f.cwd)).filter(name => name.endsWith('.json'))
+    .map(name => controller.readJson(path.join(controller.transactionDir(f.cwd), name)));
+  assert(records.some(row => row.linked_entry && row.phase === 'committed'), 'CURRENT linked reentry committed');
+  assert(records.every(row => !Object.hasOwn(row, 'plan_generation')), 'current continuation inherits actual historical predecessor classification');
+  assert.deepStrictEqual(replayHistoricalTrace(f), current, 'current continuation is byte-identical under committed replay');
 }
 function transition(f, selected, action) {
   const begun = beginRecord(f, selected);
@@ -214,8 +254,22 @@ function restart(f, snapshotFile, command, extra = {}) {
   assert.equal(child.status, 0, child.stderr); return JSON.parse(child.stdout);
 }
 function main() {
-  test('no-contract-byte-events-and-transactions-only-two-volatile-fields', baseline);
+  test('historical-producer-no-contract-golden-and-current-readonly-committed-replay', baseline);
   if (process.argv.includes('--capture-baseline')) return;
+  test('current-no-contract-native-plan-enrolled-and-completed-through-canonical-result', () => {
+    for (const host of ['claude', 'codex']) {
+      const f = fixture(host, false); f.at = 1;
+      const selected = invoke(f, 'next'), begin = beginRecord(f, selected);
+      assert(begin.plan_generation, 'a newly produced native begin is enrolled even without a time contract');
+      f.at = 2;
+      const completed = invoke(f, 'complete', selected.snapshot, { result: { status: 'done' } });
+      assert.equal(completed.outcome, 'completed', JSON.stringify(completed));
+      const record = controller.lookupRecord(f.cwd, 'transaction', begin.idempotency_key + ':complete');
+      require('./forge-plan-validation').verifyPlanValidation(record.result.plan_validation, begin.plan_generation);
+      assert(!Object.hasOwn(record, 'plan_validation'), 'no top-level evidence alias');
+      assert(!selected.controller_result.details.time, 'the real begin has no time contract admission');
+    }
+  });
   test('declared-artifacts-and-key-links-substantive', () => {
     for (const [name, minimum] of [['forge-unit-controller.js', 1400], ['forge-orchestrate.js', 475],
       ['forge-milestone-time-flow.test.js', 260], ['fixtures/milestone-time/no-contract-baseline.json', 20]]) {

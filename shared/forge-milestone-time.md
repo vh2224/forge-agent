@@ -220,6 +220,60 @@ não carrega testemunha; nunca se fabrica resultado de worker.
 
 ## Opções de prazo antes do roadmap (S02)
 
+### Ponte viva dos hosts
+
+Depois de `--round`, apresente a pergunta real pelo canal nativo permitido. Depois
+da resposta explícita e de `--answer`, o caller Claude/Codex executa o helper abaixo
+no próprio processo. Use os valores exatos observados pelo host, incluindo a
+identidade da rodada aberta e o instante da resposta. Em retomada, reateste a
+resposta efetivamente vista na conversa; um arquivo de perguntas não prova isso.
+Não copie valores de exemplos, não leia respostas de JSON para esse callback e
+não use uma opção recomendada como resposta. Resposta async `accepted:true` sem
+resposta do operador permanece pendente e encerra a rodada economicamente.
+
+```js
+const selection = require(FORGE_SCRIPTS_DIR + '/forge-milestone-time-selection.js');
+// observedAnswer vem da resposta real do canal/conversa presenciada pelo caller:
+// {question:{identity_sha256,id}, response:<rótulo exibido ou teto livre>, source, resolved_at}.
+// Para mais de uma decisão, selecione pela identidade exata, sem ecoar challenge.
+const result = selection.decideObserved({ cwd: WORKING_DIR, milestone: RUN_ID,
+  observeAnswer(challenge) {
+    const actual = observedAnswers.find(a =>
+      a.question.id === challenge.question.id &&
+      a.question.identity_sha256 === challenge.question.identity_sha256);
+    return actual ? { ...actual, status: 'resolved' } : null;
+  }
+});
+```
+
+`response` é o rótulo apresentado em `round.options[].label`, com o sufixo
+` (Recomendado)` opcional. Por exemplo, `Sem contrato` e
+`Sem contrato (Recomendado)` são aceitos nessa rodada; `no-contract` é a resposta
+canônica persistida e não é um rótulo aceito por essa interface. Para uma rodada
+de teto livre, use o texto observado aceito pelo parser (`90m`, `2h`, `1d` ou
+milissegundos inteiros, respeitando os limites e o mínimo da rodada).
+
+Na retomada, `details.time_options.decision_rounds` expõe as identidades e os
+rótulos originais, inclusive quando `round:null` e todas as respostas já foram
+persistidas. No adaptador auto/step, esse campo fica em
+`controller_result.details.time_options`. Cada rodada informa `response_format`
+(`option-label` ou `operator-ceiling`) e opções `{label,canonical_answer}`.
+Essa projeção somente leitura não escolhe uma opção, não reabre uma decisão e
+não substitui a observação viva da resposta pelo host.
+
+Recusas distinguem `time-decision-answer-mismatch`,
+`time-decision-scope-mismatch`, `time-options-stale` e `time-options-invalid`.
+Falta de autoridade ou uma exceção desconhecida continua
+`time-decision-attestation-required`. Apenas esses códigos seguros atravessam
+as fronteiras de callback; mensagem, stack e códigos arbitrários não são publicados.
+
+O helper canonicaliza o texto da resposta contra a rodada original, emite e
+revalida o handle opaco, confere a resposta persistida e mantém os gates normais.
+Uma resposta ausente, conflitante ou de outra rodada recusa antes de publicar.
+Essa API é a ponte do caller, não uma promessa de integração automática da UI.
+`--mode step` do adaptador conserva o snapshot e permite materialização/perguntas
+administrativas entre unidades; cada `/forge-next` executa uma única unidade.
+
 Módulos: `scripts/forge-milestone-time-selection.js` (adesão, fronteira do owner,
 rodadas, decisão, bloco de prompt, regra do roadmap, projeção de vínculo e retomada),
 `scripts/forge-milestone-options.js` (validador, estimador, render e rodadas),
@@ -303,6 +357,16 @@ rodadas, decisão, bloco de prompt, regra do roadmap, projeção de vínculo e r
   bloco `json`: opção, posição, hash das opções, hash do contrato BASE, alocação por
   slice, integração, revisão e correções (positiva, até o teto, sem piso obrigatório),
   dependências, adiados e a divisão com a task ligada inalterada, sem adiamento novo.
+- A ordem das linhas de alocação declara a cronologia das dependências; o tipo
+  restringe o papel, sem impor uma fase global por tipo. Isso permite revisão e
+  correções entre slices, seguidas de integração. Cada linha pré-requisito deve
+  preceder sua dependente; entre slices distintas também se exige alcance pelo
+  grafo do ROADMAP, inclusive nos caminhos transitivos por nós de qualidade.
+  Linhas distintas da mesma slice também respeitam a cronologia; uma linha de
+  slice compartilhada mantém a ordem interna das tasks, mas uma única linha
+  de qualidade não prova ordem entre dois nós. Partes refinadas preservam o papel
+  original e todas devem respeitar as dependências. Isso não executa nem dispensa
+  gates do lifecycle; a conformidade continua exigindo o DAG e os hashes aceitos.
 - A conformidade é validada no aceite (sidecar, nativo e reconciliação), na seleção do
   controlador e na fronteira do owner: `time-roadmap-nonconformant`,
   `time-allocation-pending` e `time-scope-unallocated` bloqueiam.
@@ -330,6 +394,15 @@ rodadas, decisão, bloco de prompt, regra do roadmap, projeção de vínculo e r
   `time-option-resume-invalid` e os bloqueios do DAG de tasks do controlador.
 - Sem crédito de paralelismo; histórico só de milestones fechadas, com leitor limitado
   (até 64 fontes, 2 MiB por fonte) e sem truncamento silencioso.
+- Review-fix separado (#342): as tentativas `dispatch` + `sidecar-unit` started→terminal
+  do log global do owner (`.gsd/forge/events.jsonl`, leitor próprio de 16 MiB,
+  independente dos 2 MiB por fonte) descontam só a interseção provada com os segmentos
+  ativos de uma amostra de `execute-task`/`complete-slice` da mesma slice (transação
+  `begin` comprometida com `active_slice`) ou da mesma task standalone. Cada tentativa
+  ajusta no máximo uma amostra e nenhum milissegundo conta duas vezes. O custo fica à
+  parte em `history.review_fix`, fora de faixas e nós. Prova ausente, ambígua,
+  estrangeira ou sem medição não desconta; espera sem classificação continua
+  desconhecida.
 - Milestones sem adesão ou com roadmap existente ficam fora do fluxo; painel, dashboard,
   statusline e app não ganham campos de tempo.
 

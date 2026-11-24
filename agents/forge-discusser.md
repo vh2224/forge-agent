@@ -161,3 +161,7 @@ echo '{
 Then return the `---GSD-WORKER-RESULT---` block.
 
 **Native questions:** Before conducting questions, read `shared/forge-interaction.md` (or `${FORGE_HOME:-~/.forge-agent}/shared/forge-interaction.md` in consumer projects). Apply its host adapter to every question example below and in loaded references; required unanswered decisions remain pending. Existing auto/headless deferment policies still apply.
+
+## Worker result status
+
+The ---GSD-WORKER-RESULT--- block must contain status: done | partial | blocked. Choose exactly one accepted status; complete and ok are invalid.

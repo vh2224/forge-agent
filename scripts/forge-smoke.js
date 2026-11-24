@@ -533,8 +533,11 @@ function smokeCliHelpers() {
     f.work('M001', 'milestone');
     assert(resolve().status === 'none', 'no personal bindings means none, never a legacy team fallback');
     assert(!fs.existsSync(path.join(f.home, '.forge-personal')), 'unbound query is read-only');
+    const legacyFile = path.join(f.project, '.gsd', 'forge', 'runs', 'M001.json');
+    const legacyBytes = fs.readFileSync(legacyFile);
     const explicit = resolve('M001');
-    assert(explicit.status === 'activate-new' && explicit.run_id === 'M001', 'explicit M001 activates an inactive milestone');
+    assert(explicit.status === 'refuse' && explicit.reason === 'owner-resume-binding-unknown' && explicit.run_id === 'M001', 'explicit inactive legacy M001 refuses unknown ownership');
+    assert(fs.readFileSync(legacyFile).equals(legacyBytes), 'unknown inactive M001 inspection preserves the exact registry bytes');
     assert(personal.readPersonalSnapshot(f.options).works.length === 0, 'explicit inspection does not bind');
     f.work('M001', 'milestone', true);
     f.work('M002', 'milestone', true);
@@ -553,13 +556,38 @@ function smokeCliHelpers() {
     assert(resolve('M001').run_id === 'M001', 'explicit choice resolves personal ambiguity');
     const tsMs = 'M-20260522143012-oauth';
     f.work(tsMs, 'milestone');
+    const timestampFile = path.join(f.project, '.gsd', 'forge', 'runs', tsMs + '.json'), timestampBytes = fs.readFileSync(timestampFile);
     const timestamp = resolve(tsMs);
-    assert(timestamp.status === 'activate-new' && timestamp.run_id === tsMs && timestamp.kind === 'milestone', 'timestamp milestone retains activate-new semantics');
+    assert(timestamp.status === 'refuse' && timestamp.reason === 'owner-resume-binding-unknown' && timestamp.run_id === tsMs && timestamp.kind === 'milestone', 'inactive timestamp milestone refuses unknown ownership');
+    assert(fs.readFileSync(timestampFile).equals(timestampBytes), 'inactive timestamp milestone inspection preserves the exact registry bytes');
     const tsTask = 'T-20260522143012-fix-typo';
     f.work(tsTask);
+    const taskFile = path.join(f.project, '.gsd', 'forge', 'runs', tsTask + '.json'), taskBytes = fs.readFileSync(taskFile);
     const task = resolve(tsTask);
-    assert(task.kind === 'task' && task.status === 'resume', 'explicit registered timestamp task resumes');
+    assert(task.kind === 'task' && task.status === 'refuse' && task.reason === 'owner-resume-binding-unknown', 'inactive timestamp task refuses unknown ownership');
+    assert(fs.readFileSync(taskFile).equals(taskBytes), 'inactive timestamp task inspection preserves the exact registry bytes');
     assert(!personal.readPersonalSnapshot(f.options).works.some(w => w.id === tsMs || w.id === tsTask), 'timestamp inspection also leaves bindings unchanged');
+    // Creation and resume are separate: these are fresh private fixture cases,
+    // never an adoption or repair of the unknown legacy records checked above.
+    const runs = require('./forge-runs');
+    for (const [knownId, kind] of [['M003', 'milestone'], ['M-20260522143013-known', 'milestone'], ['T-20260522143013-known-task', 'task']]) {
+      f.work(knownId, kind);
+      const file = path.join(f.project, '.gsd', 'forge', 'runs', knownId + '.json');
+      assert(JSON.parse(fs.readFileSync(file)).write_claim === undefined, 'known-owner fixture has no claim to discard');
+      fs.unlinkSync(file); // f.work prepared artifacts; canonical registration creates the NEW row.
+      runs.add(f.project, { id: knownId, kind, active: false, session_id: 'smoke-known-owner', host_runtime: 'codex', owner_session_source: 'CODEX_THREAD_ID' });
+      const bytes = fs.readFileSync(file), known = resolve(knownId);
+      assert(known.status === 'resume' && known.run_id === knownId && known.kind === kind, 'known inactive ' + knownId + ' selects resume inspection');
+      assert(fs.readFileSync(file).equals(bytes), 'known inactive ' + knownId + ' classification does not activate or replace its owner');
+    }
+    for (const newId of ['M004', 'M-20260522143014-new']) {
+      f.work(newId, 'milestone');
+      const file = path.join(f.project, '.gsd', 'forge', 'runs', newId + '.json');
+      assert(JSON.parse(fs.readFileSync(file)).write_claim === undefined, 'new-milestone fixture has no claim to discard');
+      fs.unlinkSync(file); const fresh = resolve(newId);
+      assert(fresh.status === 'activate-new' && fresh.run_id === newId, 'absent milestone ' + newId + ' keeps activate-new classification');
+      assert(!fs.existsSync(file), 'absent milestone classification remains read-only');
+    }
     const id = runScript('forge-ids.js', ['--new-task', 'fix typo in readme', '--format', 'timestamp'], { env: f.env() });
     assert(/^T-\d{14}(-[a-z0-9-]+)?$/.test(id.stdout.trim()), 'newTaskId format is T-<14digits>-<slug>');
   } finally { f.cleanup(); }
@@ -3850,6 +3878,9 @@ async function smokeXllmPlan() {
     'id: T01',
     'slice: S99',
     'milestone: M999',
+    'depends: []',
+    'writes:',
+    '  - src/thing.js',
     'must_haves:',
     '  truths:',
     '    - "the thing works"',
@@ -3897,7 +3928,7 @@ async function smokeXllmPlan() {
     return JSON.stringify({
       status: 'done',
       summary: 'planned the slice',
-      slice_plan: { filename: 'S99-PLAN.md', content: '# S99: slice plan\n\ntasks: T01\n' },
+      slice_plan: { filename: 'S99-PLAN.md', content: '# S99: slice plan\n\n- [ ] **T01**: do the thing\n' },
       task_plans: [{ id: 'T01', filename: 'T01-PLAN.md', content: taskPlanContent }],
     });
   }
@@ -4057,7 +4088,8 @@ function smokeXllmSvn() {
     files_changed: ['sidecar-file.txt'],
   });
   const taskPlan = [
-    '---', 'id: T01', 'slice: S99', 'milestone: M999', 'must_haves:',
+    '---', 'id: T01', 'slice: S99', 'milestone: M999',
+    'depends: []', 'writes:', '  - src/thing.js', 'must_haves:',
     '  truths:', '    - "the thing works"', '  artifacts:', '    - path: "src/thing.js"',
     '      provides: "the thing"', '      min_lines: 5', '  key_links:',
     '    - from: "src/thing.js"', '      to: "src/other.js"', '      via: "import"',
@@ -4065,7 +4097,7 @@ function smokeXllmSvn() {
   ].join('\n');
   const planPayload = JSON.stringify({
     status: 'done', summary: 'SVN plan completed',
-    slice_plan: { filename: 'S99-PLAN.md', content: '# S99\n' },
+    slice_plan: { filename: 'S99-PLAN.md', content: '# S99\n\n- [ ] **T01**: fixture\n' },
     task_plans: [{ id: 'T01', filename: 'T01-PLAN.md', content: taskPlan }],
   });
   const readJson = (file) => {
@@ -5141,27 +5173,27 @@ function smokeRouting() {
   assert(kCli.status === 0, '(k) CLI com fallback inválido ainda sai 0', `status=${kCli.status}`);
   cleanup(dirK);
 
-  // (l) plan-milestone NUNCA é capturado pelo routing, mesmo com célula presente
+  // (l) exact artifact phase routing is independent from the planner cell.
   const dirL = mkTmp('routing-l');
   writeRoutingPrefs(dirL,
     '  default:\n' +
-    '    plan:\n' +
+    '    plan-milestone:\n' +
     '      standard: [claude-fable-5]\n'
   );
   const rL = resolveRoute({ unitType: 'plan-milestone', tier: 'standard', domain: 'backend', cwd: dirL });
-  assert(/phase-not-routable/.test(rL.reason), '(l) plan-milestone → phase-not-routable (nunca célula do routing)', rL.reason);
+  assert(rL.source === 'routing' && rL.phase === 'plan-milestone' && rL.chain[0].id === 'claude-fable-5', '(l) exact plan-milestone routing cell selects its own model', rL.reason);
   const cliL = runScript('forge-routing.js', ['--unit-type', 'plan-milestone', '--tier', 'standard', '--domain', 'backend', '--cwd', dirL]);
   qStatuses.push(cliL.status);
   let parsedL = null;
   try { parsedL = JSON.parse(cliL.stdout); } catch {}
-  assert(cliL.status === 0 && parsedL !== null && /phase-not-routable/.test(parsedL.reason),
-    '(l) CLI contrato JSON confirma phase-not-routable, sai 0', `status=${cliL.status} stdout=${cliL.stdout}`);
+  assert(cliL.status === 0 && parsedL !== null && parsedL.source === 'routing' && parsedL.phase === 'plan-milestone',
+    '(l) CLI confirms exact artifact phase routing', `status=${cliL.status} stdout=${cliL.stdout}`);
   cleanup(dirL);
 
-  // (m) fases claude-only (discuss-slice, memory) também são phase-not-routable
+  // (m) absent artifact cells fall back; memory remains non-routable.
   const dirM = mkTmp('routing-m');
   const rM1 = resolveRoute({ unitType: 'discuss-slice', tier: 'standard', cwd: dirM });
-  assert(/phase-not-routable/.test(rM1.reason), '(m) discuss-slice → phase-not-routable', rM1.reason);
+  assert(rM1.source === 'tier_models' && rM1.phase === 'discuss-slice', '(m) unconfigured discuss-slice uses tier_models', rM1.reason);
   const rM2 = resolveRoute({ unitType: 'memory', tier: 'standard', cwd: dirM });
   assert(/phase-not-routable/.test(rM2.reason), '(m) memory → phase-not-routable', rM2.reason);
   cleanup(dirM);
@@ -8159,6 +8191,10 @@ function smokePrefsCutoverGuards() {
     // what past entries said when the legacy filename was current — the same
     // audited-not-rewritten status the CLAUDE.md entry above already had.
     'docs/DECISIONS-LOG.md',
+    // Exact, byte-pinned parts of the former CLAUDE.md entry. These retain
+    // historical mentions; instructions-map.json and project-context tests
+    // verify their original bodies rather than treating them as live readers.
+    '.agents/reference/legacy-02.md', '.agents/reference/legacy-04.md',
     // The index-green allowed-misses list keys each accepted miss as
     // `<mem_id>::<normalized mention>`, and one accepted miss IS a memory fact
     // that mentions the legacy prefs filename. The occurrence is a RECORD of
@@ -8169,6 +8205,11 @@ function smokePrefsCutoverGuards() {
     // Immutable historical provenance records the legacy preference names;
     // this exact data fixture is not a production preference reader.
     'scripts/fixtures/linked-task/unlinked-baseline.json',
+    // Measured historical preimages are data, not a live preferences reader.
+    'scripts/fixtures/issue-440/distribution-delta.json',
+    'scripts/fixtures/issues-451-452/distribution-delta.json',
+    'scripts/fixtures/issue-455/distribution-delta.json',
+    'scripts/fixtures/issues-457-458/distribution-delta.json',
   ]);
   const untrackedProbe = path.join(REPO, '.forge-smoke-untracked-prefs-probe');
   fs.writeFileSync(untrackedProbe, 'forge-agent-prefs.md\n', 'utf8');
@@ -9485,7 +9526,7 @@ function smokeReviewModelDiscipline() {
   const repo = path.dirname(SCRIPTS); const files = ['skills/forge-auto/SKILL.md', 'skills/forge-next/SKILL.md', 'skills/forge-task/SKILL.md', 'shared/forge-review.md'];
   for (const rel of files) { const text = readRepoText(path.join(repo, rel)); assert(!/forge-(advocate|reviewer).*model:\s*['"](sonnet|opus|fable|haiku)['"]/.test(text), `${rel}: no literal review model`); }
   const review = readRepoText(path.join(repo, 'shared/forge-review.md'));
-  assert(review.includes('review-config-inert') && review.includes('intra_family_debate') && review.includes('Adversarialidade reduzida'), 'review visibility fields wired');
+  assert(review.includes('forge-review-native-model.js') && review.includes('NATIVE_CHALLENGER_AVAILABLE=true') && review.includes('native model binding refused') && review.includes('intra_family_debate') && review.includes('Adversarialidade reduzida'), 'review visibility fields wired');
   const resolver = fs.readFileSync(path.join(repo, 'scripts/forge-dispatch-resolve.js'), 'utf8');
   assert(resolver.includes("'review-fix': 'standard'"), 'review-fix tier declared');
   assert((review + readRepoText(path.join(repo, 'skills/forge-auto/SKILL.md')) + readRepoText(path.join(repo, 'skills/forge-next/SKILL.md')) + readRepoText(path.join(repo, 'skills/forge-task/SKILL.md'))).split('--unit-type review-fix').length - 1 === 4, 'four review-fix resolver sites');
@@ -10331,7 +10372,7 @@ function smokeReviewAgentUnavailable() {
     // the gate, one naming the only condition under which it may still be emitted. Added
     // when DEFENSE_FILE made a truncated defense recoverable instead of total loss.
     ['review-advocate-unavailable', { 'shared/forge-dispatch.md': 1, 'shared/forge-review.md': 9 }],
-    ['review-challenger-unavailable', { 'shared/forge-dispatch.md': 1, 'shared/forge-review.md': 5 }],
+    ['review-challenger-unavailable', { 'shared/forge-dispatch.md': 1, 'shared/forge-review.md': 7 }],
     ['review-rebuttal-unavailable', { 'shared/forge-dispatch.md': 1, 'shared/forge-review.md': 3 }],
   ];
   for (const [needle, expected] of REASONS) {
@@ -10474,8 +10515,8 @@ function smokePhasesTable() {
     assert(table.rows.filter((row) => tierOnly.has(row.unit_type)).every((row) => /^tier_models\./.test(row.config_key)),
       '(b) non-routable unit types configure through tier_models');
     const milestone = table.rows.find((row) => row.unit_type === 'plan-milestone');
-    assert(milestone && milestone.config_key === 'tier_models.max' && milestone.routable === false,
-      '(c) plan-milestone is non-routable and configures through tier_models.max', JSON.stringify(milestone));
+    assert(milestone && milestone.config_key === 'tier_models.max' && milestone.routable === true,
+      '(c) unconfigured plan-milestone keeps max tier_models fallback while allowing exact phase routing', JSON.stringify(milestone));
     assert(!/travado|locked/i.test(renderPhases(root)),
       '(c) rendered plan-milestone note has no misleading locked configuration key');
     assert(renderPhases(root).includes(`tem tier fixo ${TIER_DEFAULTS['plan-milestone']}`)
@@ -10502,7 +10543,7 @@ function smokePhasesTable() {
     const skill = readRepoText(path.join(repoRoot, 'skills', 'forge-prefs', 'SKILL.md'));
     const resolver = fs.readFileSync(path.join(SCRIPTS, 'forge-dispatch-resolve.js'), 'utf8');
     assert(/### Domain-routable vs tier_models-only/.test(tierDoc), '(f) tier documentation has routability subsection');
-    assert(schema.properties.routing.description.includes('Somente execute-task (executor) e plan-slice (planner)'),
+    assert(['executor','planner',...require('./forge-transport-capabilities').ARTIFACT_UNITS].every(phase => schema.properties.routing.description.includes(phase)),
       '(f) routing schema description explains captured phases');
     assert(/### "phases"/.test(skill) && !skill.includes('Fase legada'),
       '(f) prefs skill exposes phases and removes the drifted legacy table');
@@ -10666,7 +10707,10 @@ function smokeSvnFixture() {
   // Match executable provisioning steps, scoped independently to each runner.
   const steps = ci.match(/^      - name:[^\n]*(?:\n(?!      - name:)[^\n]*)*/gm) || [];
   const suitesIndex = ci.indexOf('      - name: Run test suites');
-  const smokeIndex = ci.indexOf('      - name: Smoke suite');
+  const serialSmokeIndex = ci.indexOf('      - name: Smoke suite');
+  const allocatedSmoke = require('./run-tests').discoverTests([]).includes('forge-ci-smoke.test.js');
+  const smokeIndex = serialSmokeIndex >= 0 ? serialSmokeIndex : allocatedSmoke
+    ? ci.indexOf('node scripts/forge-ci-parallel.js', suitesIndex) : -1;
   for (const { platform, command } of [
     { platform: 'Linux', command: /run:\s*sudo apt-get update && sudo apt-get install -y subversion/ },
     { platform: 'macOS', command: /run:\s*brew install subversion/ },
@@ -10697,9 +10741,15 @@ function smokeSvnFixture() {
     && windowsInstall.includes('-FilePath $env:GITHUB_PATH'),
     '(h) validated Windows SVN precedes PATH export');
   const verifySteps = steps.filter(step => /svn --version --quiet/.test(step) && /svnadmin --version --quiet/.test(step));
-  assert(verifySteps.length === 1 && !/^\s*if:/m.test(verifySteps[0])
+  assert(verifySteps.length === 1
+    && verifySteps[0].includes("if: runner.os != 'Windows' || steps.fixture_tools.outputs.needs_svn != 'false'")
     && ci.indexOf(verifySteps[0]) >= 0 && ci.indexOf(verifySteps[0]) < suitesIndex,
     '(h) svn and svnadmin are verified before test suites', JSON.stringify(verifySteps));
+  assert(windowsInstall.includes("if: runner.os == 'Windows' && steps.fixture_tools.outputs.needs_svn != 'false'"),
+    '(h) only explicit Git-only Windows metadata can omit SVN installation');
+  const actualSuites = steps.find(step => step.includes('run: node scripts/forge-ci-parallel.js') && !step.includes('--tool-plan')) || '';
+  assert(actualSuites && !/^\s*if:/m.test(actualSuites),
+    '(h) fixture tool metadata never skips the actual test step', actualSuites);
 
   const decisionMatch = source.match(/function svnGateDecision\(env, platform, present\) \{[\s\S]*?\n\}/);
   assert(!!decisionMatch, '(h) svn gate decision can be extracted from source');
@@ -15066,13 +15116,23 @@ async function t02WaitForFile(file, timeoutMs) {
 // amostragem — feita PELO PROCESSO PAI, nunca pelo peer que está prestes a
 // morrer de SIGKILL — que dá o carimbo de "o pid deixou de existir" contra o
 // qual o `at` do turn/interrupt registrado pelo mock é comparado.
-async function t02WatchDeath(pid, maxWaitMs) {
+async function t02WatchDeath(pid, maxWaitMs, finished) {
   const start = Date.now();
-  while (Date.now() - start < maxWaitMs) {
+  let settled = false;
+  if (finished) Promise.resolve(finished).then(() => { settled = true; }, () => { settled = true; });
+  while (Date.now() - start < maxWaitMs && !settled) {
     if (!t02Alive(pid)) return Date.now();
     await t02Sleep(5);
   }
-  return null;
+  return !t02Alive(pid) ? Date.now() : null;
+}
+
+function t02ObserveScenarioDeath(pid, driverPromise, watchdogMs) {
+  // Keep sampling for the actual scenario, including the existing 200 ms kernel
+  // visibility grace after driver close. The same scenario watchdog is the cap;
+  // an unresolved driver cannot leave this observer waiting indefinitely.
+  const finished = Promise.resolve(driverPromise).then(() => t02Sleep(200));
+  return t02WatchDeath(pid, watchdogMs, finished);
 }
 
 // WATCHDOG (S07 review R5). Resolver só em `close`/`error` deixava esta seção
@@ -15177,7 +15237,7 @@ async function smokeTurnInterrupt() {
       const driverPromise = t02SpawnDriverAsync(driverPath, baseEnv(mode, stem, timeoutMs, graceMs), watchdogMs);
       const rawPid = await t02WaitForFile(pidFile, 3000);
       const pid = rawPid ? Number(rawPid) : null;
-      const deathPromise = pid ? t02WatchDeath(pid, 5000) : Promise.resolve(null);
+      const deathPromise = pid ? t02ObserveScenarioDeath(pid, driverPromise, watchdogMs) : Promise.resolve(null);
       const [driverResult, deathAt] = await Promise.all([driverPromise, deathPromise]);
       assert(driverResult.timedOut === false,
         `(watchdog) ${label}: o driver terminou por conta própria — um travamento aqui apagaria o sinal da suíte inteira`,
@@ -17254,8 +17314,10 @@ function smokeRoutingContractProjection() {
     const bytes = fs.readFileSync(path.join(root, 'CLAUDE.md'), 'utf8');
     assert(bytes.includes('<!-- forge:routing-contract:start -->'), '(a) emits the exact stable marker');
     assert(!bytes.includes('forge:routing-contract:start version='), '(a) stable output carries no version');
-    assert(bytes.includes('forge-dispatch-resolve.js') && bytes.includes('worker-engine-fallback'),
-      '(a) o bloco escrito nomeia o resolvedor e o fallback nomeado');
+    assert(bytes.includes('--context <nome>') && bytes.includes('`routing` antes de preparar/despachar/recuperar')
+      && mod.readContext('routing').content.includes('forge-dispatch-resolve.js')
+      && mod.readContext('routing').content.includes('worker-engine-fallback'),
+      '(a) entrada exige carregar roteamento completo com resolvedor e fallback nomeado');
     const second = mod.syncInstructions(root);
     assert(second.changed === 0 && fs.readFileSync(path.join(root, 'CLAUDE.md'), 'utf8') === bytes,
       '(a) o segundo sync é byte-idêntico');
@@ -17442,7 +17504,9 @@ function smokeIntentEntryAssessment() {
     for (const name of ['CLAUDE.md', 'AGENTS.md']) {
       const text = fs.readFileSync(path.join(consumer, name), 'utf8');
       assert(text.startsWith('# Operador\n'), `(c) ${name}: bytes do operador preservados`);
-      assert(text.includes(contract), `(c) ${name} carrega o contrato de entrada`);
+      assert(text.includes('`entry` antes de classificar uma nova demanda')
+        && instructions.readContext('entry').content === contract,
+      `(c) ${name} exige contexto de entrada completo antes de classificar`);
     }
     assert(instructions.syncInstructions(consumer, { host: 'both' }).changed === 0, '(c) o segundo sync é inerte');
     assert(readRepoText(path.join(repoRoot, 'commands/forge.md')).includes('shared/forge-intent-entry.md'),

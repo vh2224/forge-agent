@@ -15,6 +15,7 @@ const packaging = require('./forge-package.js');
 const { readBoundedStableFile } = require('./forge-autonomy-sources.js');
 
 const TTL_MS = 10 * 60 * 1000;
+const FRESHNESS_MARGIN_MS = 2 * 60 * 1000;
 const MAX_BYTES = 4 * 1024 * 1024;
 const MAX_PACKAGE_BYTES = 128 * 1024 * 1024;
 const DIGEST = /^[a-f0-9]{64}$/;
@@ -218,7 +219,8 @@ async function preparePublication(options = {}, dependencies = {}) {
   return { status: 'prepared', state, nonce, intent: receipt.intent, expires_at: receipt.expires_at };
 }
 
-function loadState(rt, options, previous) {
+function inspectPreparedState(rt, options, previous, mode) {
+  requireTrue(mode === 'publish' || mode === 'refresh', 'receipt-context');
   requireTrue(typeof options.nonce === 'string' && NONCE.test(options.nonce), 'nonce-invalid');
   const state = physical(options.state); const directory = path.dirname(state);
   requireTrue(path.basename(state) === 'receipt.json' && /^forge-release-[A-Za-z0-9]+$/.test(path.basename(directory)) &&
@@ -231,7 +233,7 @@ function loadState(rt, options, previous) {
   requireTrue([now, receipt.generation_started_at, receipt.generation_completed_at, receipt.created_at, receipt.expires_at].every(Number.isSafeInteger) &&
     receipt.generation_started_at > 0 && receipt.generation_completed_at >= receipt.generation_started_at &&
     receipt.created_at === receipt.generation_completed_at && receipt.expires_at === receipt.created_at + TTL_MS &&
-    now >= receipt.created_at && now < receipt.expires_at && (!previous || now >= previous.observedAt), 'receipt-expired');
+    now >= receipt.created_at && (mode === 'refresh' || now < receipt.expires_at) && (!previous || now >= previous.observedAt), 'receipt-expired');
   requireTrue(receipt.binding && receipt.binding.job && receipt.binding.job.role === 'publisher', 'publisher-required');
   const facts = localFacts(rt, rt.env.GITHUB_SHA);
   requireTrue(equal(boundFacts(facts, rt), receipt.binding), 'receipt-context');
@@ -247,6 +249,28 @@ function loadState(rt, options, previous) {
     (intent.skip || (typeof intent.tag === 'string' && /^v\d+\.\d+\.\d+$/.test(intent.tag))), 'receipt-intent');
   if (intent.tag) version.checkDeclaredVersion({ new_tag: intent.tag, skip: intent.skip }, intent.product_version);
   return { receipt, receiptDigest: digest(bytes), facts, directory, observedAt: now };
+}
+function loadState(rt, options, previous) {
+  return inspectPreparedState(rt, options, previous, 'publish');
+}
+async function ensureFreshPreparation(options = {}, dependencies = {}) {
+  rejectImported(options, ['cwd', 'env', 'sha', 'notes', 'state', 'nonce']);
+  const env = options.env || process.env;
+  requireTrue(!Object.entries(env).some(([key, value]) => SECRET.test(key) && value), 'prepare-credentials');
+  const rt = runtime(options, dependencies);
+  // An expired receipt may be inspected only to rebuild, never to publish.
+  // Even that inspection validates nonce, original job/origin, notes, report,
+  // package and checkout. A foreign or tampered receipt refuses instead.
+  const loaded = inspectPreparedState(rt, options, null, 'refresh');
+  requireTrue(options.sha === loaded.facts.candidate.candidate_sha, 'receipt-context');
+  const notes = options.notes ? readFile(path.resolve(options.notes), rt.runnerTemp) : Buffer.alloc(0);
+  requireTrue(digest(notes) === loaded.receipt.notes_sha256, 'notes-changed');
+  if (loaded.receipt.expires_at - loaded.observedAt >= FRESHNESS_MARGIN_MS) {
+    return { status: 'prepared', state: path.join(loaded.directory, 'receipt.json'), nonce: loaded.receipt.nonce,
+      intent: loaded.receipt.intent, expires_at: loaded.receipt.expires_at, reused: true };
+  }
+  const prepared = await preparePublication({ cwd: rt.cwd, env, sha: options.sha, notes: options.notes }, dependencies);
+  return { ...prepared, reused: false };
 }
 async function currentRun(reader, session, loaded, rt) {
   const { candidate } = loaded.facts; const job = loaded.facts.job;
@@ -329,16 +353,18 @@ async function publishRelease(options = {}, dependencies = {}) {
 }
 
 async function main(argv = process.argv.slice(2), environment = process.env, dependencies = {}) {
-  const [mode, ...args] = argv; requireTrue(['prepare', 'apply'].includes(mode), 'cli-arguments');
+  const [mode, ...args] = argv; requireTrue(['prepare', 'ensure-fresh', 'apply'].includes(mode), 'cli-arguments');
   const values = {};
   for (let i = 0; i < args.length; i += 2) {
-    const name = args[i]; const allowed = mode === 'prepare' ? ['--sha', '--notes', '--github-output'] : ['--state', '--nonce'];
+    const name = args[i]; const allowed = mode === 'prepare' ? ['--sha', '--notes', '--github-output'] :
+      mode === 'ensure-fresh' ? ['--sha', '--notes', '--state', '--nonce', '--github-output'] : ['--state', '--nonce'];
     requireTrue(allowed.includes(name) && !Object.hasOwn(values, name) && typeof args[i + 1] === 'string' && !args[i + 1].startsWith('--'), 'cli-arguments');
     values[name] = args[i + 1];
   }
   const common = { env: environment, cwd: dependencies.cwd || process.cwd() };
   const result = mode === 'prepare' ? await preparePublication({ ...common, sha: values['--sha'], notes: values['--notes'] }, dependencies) :
-    await publishRelease({ ...common, state: values['--state'], nonce: values['--nonce'] }, dependencies);
+    mode === 'ensure-fresh' ? await ensureFreshPreparation({ ...common, sha: values['--sha'], notes: values['--notes'], state: values['--state'], nonce: values['--nonce'] }, dependencies) :
+      await publishRelease({ ...common, state: values['--state'], nonce: values['--nonce'] }, dependencies);
   if (values['--github-output']) {
     const file = physical(values['--github-output']);
     requireTrue(file === physical(environment.GITHUB_OUTPUT) && inside(physical(environment.RUNNER_TEMP), file), 'output-path');
@@ -350,7 +376,7 @@ async function main(argv = process.argv.slice(2), environment = process.env, dep
 // The receipt is continuity evidence in a trusted runner, not a signature or a
 // sandbox against same-UID code. Separate HTTP reads/writes are not transactional
 // against external tag writers. Never move/delete a ref to imitate rollback.
-module.exports = { TTL_MS, validateReport, preparePublication, publishRelease, main };
+module.exports = { TTL_MS, FRESHNESS_MARGIN_MS, validateReport, preparePublication, ensureFreshPreparation, publishRelease, main };
 if (require.main === module) main().then(result => {
   process.stdout.write(`${JSON.stringify(result)}\n`);
   if (['blocked', 'partial-effect'].includes(result.status)) process.exitCode = 1;

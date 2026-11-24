@@ -348,6 +348,10 @@ function reasonForForced(level) {
 function appendEvent(opts, cwd, kind, payload) {
   try {
     if (opts && opts.noEvents) return;
+    if (typeof opts?.resourceEventSink === 'function') {
+      opts.resourceEventSink(JSON.stringify({ ts: new Date().toISOString(), kind, ...payload }) + '\n');
+      return;
+    }
     const gsdDir = path.join(cwd, '.gsd');
     if (!fs.existsSync(gsdDir)) return;
     const forgeDir = path.join(gsdDir, 'forge');

@@ -545,6 +545,35 @@ test('captureRootDelivery forwards onCheck per root with per-root index and tota
   } finally { f.cleanup(); }
 });
 
+test('root envelopes capture ignored inventory against their exact revision and workspace', () => {
+  const strict = require('assert'), lab = require('./forge-code-roots.test'), f = lab.fixture(), api = require('./forge-verify');
+  try {
+    const captured = api.captureRootDelivery(f.contract, lab.plan(f.contract), { unit: { type: 'task', id: 'T-inventory' }, resourceEventSink() {},
+      commandsByRoot: { alpha: ['node -e "process.exit(0)"'], beta: ['node -e "process.exit(0)"'] } });
+    strict.strictEqual(captured.passed, true);
+    for (const envelope of [...captured.gate.roots, ...captured.artifacts]) {
+      const inventory = envelope.source_inventory, { sha256, ...body } = inventory;
+      strict.strictEqual(inventory.schema_version, 1); strict.strictEqual(inventory.revision, envelope.revision);
+      strict.strictEqual(inventory.workspace_sha256, require('./forge-code-roots').digest(envelope.workspace));
+      strict.strictEqual(sha256, require('./forge-code-roots').digest(body)); strict.deepStrictEqual(inventory.ignored, []);
+    }
+    console.log('PASS root verification/artifact envelopes bind contemporaneous ignored inventory');
+  } finally { f.cleanup(); }
+});
+
+if (process.platform === 'win32') test('Windows verify preserves accepted literal env command and observes external-data variables', () => {
+  const strict = require('assert'), f = checkFixture(), api = require('./forge-verify');
+  try {
+    fs.writeFileSync(path.join(f.cwd, 'prefix.cjs'), "const assert=require('assert');assert.equal(process.env.FORGE_DATA_ROOT,'C:\\\\SVN\\\\space data');assert.equal(process.env.FORGE_DATA_REQUIRED,'1');console.log('PASS explicit external-data environment');");
+    const command = 'FORGE_DATA_ROOT="C:\\SVN\\space data" FORGE_DATA_REQUIRED=1 node prefix.cjs';
+    const result = api.runVerificationGate({ cwd: f.cwd, gsdDir: f.gsdDir, preferenceCommands: [command], resourceEventSink() {} });
+    strict.strictEqual(result.passed, true); strict.strictEqual(result.checks[0].command, command);
+    strict(result.checks[0].stdout.includes('PASS explicit external-data environment'));
+    strict.strictEqual(result.checks[0].cleanup.status, 'joined'); strict.strictEqual(process.env.FORGE_DATA_REQUIRED, undefined);
+    console.log('PASS Windows gate keeps original command evidence with literal required env observed and cleanup joined');
+  } finally { f.cleanup(); }
+});
+
 console.log(`${passed} passed, ${failed} failed`);
 if (failed > 0) {
   console.log('\nFailures:');
