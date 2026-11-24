@@ -678,7 +678,8 @@ function atPointer(value, pointer) {
 }
 // Fixture seams (T06-R1): the defaults are the real checked-in pins, README, render and
 // sources; the T06 group passes in-memory variants only, never writing any pin.
-function checkPins(fixture = {}) {
+function checkPins(fixture) { return unitEntry.validateSourceConsumer(() => checkPinsBody(fixture)); }
+function checkPinsBody(fixture = {}) {
   const entryDelta = fixture.entryDelta === undefined ? ENTRY_347 : fixture.entryDelta;
   const artifactDelta = fixture.artifactDelta === undefined ? ARTIFACT_348 : fixture.artifactDelta;
   const identityDelta = fixture.identityDelta === undefined ? IDENTITY : fixture.identityDelta;

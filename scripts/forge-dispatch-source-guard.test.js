@@ -1178,7 +1178,8 @@ function validateEntry347(delta, earlier, { measure, readRaw, readme, renderMemb
 
 // Pins and captured sources of the linked-task proof. The defaults read the real bytes; the
 // #341 negative fixtures only pass in-memory golden, README, delta or file variants.
-function assertLinkedPinsAndSources({ before, declared, delta, golden, measured, readme, artifacts, entryDelta = ENTRY_347, artifactDelta = ARTIFACT_348, identityDelta = IDENTITY,
+function assertLinkedPinsAndSources(input) { return unitEntry.validateSourceConsumer(() => assertLinkedPinsAndSourcesBody(input)); }
+function assertLinkedPinsAndSourcesBody({ before, declared, delta, golden, measured, readme, artifacts, entryDelta = ENTRY_347, artifactDelta = ARTIFACT_348, identityDelta = IDENTITY,
   identitySampleText = fs.readFileSync(path.join(ROOT, 'docs/communication-evaluation/samples.json'), 'utf8'),
   identitySampleReadme = fs.readFileSync(path.join(ROOT, 'docs/communication-evaluation/README.md'), 'utf8'),
   readRaw = (relative) => fs.readFileSync(path.join(ROOT, relative)) }) {
