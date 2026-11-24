@@ -19,8 +19,8 @@ Sete suítes locais concluídas com exit0: forge-project-context, forge-instruct
 
 A entrega do Forge está isolada. Não houve merge, push, instalação global ou atualização das duas sessões ativas. Depois da integração desta branch e da atualização canônica da instalação, sincronizar as entradas do checkout compartilhado quando as sessões puderem relê-las; conferir novamente seus bytes particulares e idempotência. Um forge-update anterior à integração não contém esta mudança. Padrões grandes consultados por assunto em .gsd não foram editados durante trabalho alheio.
 
-Lembrete operacional aberto: [pendência de aplicação](../PENDENCIA-CONTEXTO-DE-ENTRADA.md).
+Lembrete operacional encerrado: aplicação concluída pela PR #438, na release v4.51.11. O registro local de pendência foi retirado após a conclusão.
 
 ## Retomada autorizada em 18/11/2026
 
-A integração foi conciliada com a base oficial 0d8d21ebbb1a675f15bf43f25214b34d2a47179f (v4.51.10). A camada nova de distribuição compõe sobre issues434-436, preservando todas as190fixtures históricas e os perfis de tempo. O fluxo de aplicação exige nova verificação local, CI, merge e atualização canônica; o estado de cada ambiente é registrado em docs/PENDENCIA-CONTEXTO-DE-ENTRADA.md. A seção anterior registra somente a preparação de17/11. Relatórios de outros projetos não integram esta publicação.
+A integração foi conciliada com a base oficial 0d8d21ebbb1a675f15bf43f25214b34d2a47179f (v4.51.10). A camada nova de distribuição compõe sobre issues434-436, preservando todas as190fixtures históricas e os perfis de tempo. A aplicação foi concluída em 19/11/2026 pela PR #438, na release v4.51.11, com atualização canônica e preservação das configurações locais. A seção anterior registra somente a preparação de17/11. Relatórios de outros projetos não integram esta publicação.

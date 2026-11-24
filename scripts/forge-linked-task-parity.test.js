@@ -451,7 +451,7 @@ function reviewPolicyExpected(expected, delta) {
   const record = delta.unlinked_task_parity, manifest = delta.files['shared/forge-procedures.json'];
   assert.strictEqual(record.fixture, 'scripts/fixtures/linked-task/unlinked-baseline.json');
   assert.strictEqual(sha256(fs.readFileSync(FIXTURE)), record.fixture_sha256, 'immutable capture bytes retained');
-  assert.strictEqual(sourceHash('shared/forge-procedures.json'), require('./fixtures/issues-457-458/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issue-440/distribution.cjs').after('files','shared/forge-procedures.json',manifest.after), 'only the measured manifest is accepted');
+  assert.strictEqual(sourceHash('shared/forge-procedures.json'), require('./fixtures/docs-cleanup/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issue-440/distribution.cjs').after('files','shared/forge-procedures.json',manifest.after), 'only the measured manifest is accepted');
   const allowed = new Set();
   for (const phase of PHASES) for (const host of HOSTS) for (const mode of ['sidecar', 'native']) {
     const base = '$.phases.' + phase + '.' + host + '.' + mode;
@@ -493,7 +493,7 @@ function issue350Expected(expected) {
 }
 function reviewPolicyDeltaChecks(trace, expected, delta) {
   const assert = require('assert'), clone = value => JSON.parse(JSON.stringify(value));
-  const routingParity=require('./fixtures/issues-457-458/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issue-440/distribution.cjs').parityAdapter(require('./fixtures/issues-457-458/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issues-403-407-integration/parity.cjs'));
+  const routingParity=require('./fixtures/docs-cleanup/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issue-440/distribution.cjs').parityAdapter(require('./fixtures/docs-cleanup/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issues-403-407-integration/parity.cjs'));
   const check = (current, proposed = delta) => assert.deepStrictEqual(routingParity.beforeTrace(current), issue350Expected(reviewPolicyExpected(expected, proposed)));
   check(trace);
   const variants = [
@@ -532,7 +532,7 @@ async function parityCheck() {
   // The stored bytes and digest stay immutable; only the comparison is projected (see personalCaseProjection).
   const projectedTrace = personalCaseProjection(trace), historicalExpected = personalCaseProjection(expected);
   const delta = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/review-policy/distribution-delta.json'), 'utf8'));
-  const routingParity=require('./fixtures/issues-457-458/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issue-440/distribution.cjs').parityAdapter(require('./fixtures/issues-457-458/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issues-403-407-integration/parity.cjs'));
+  const routingParity=require('./fixtures/docs-cleanup/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issue-440/distribution.cjs').parityAdapter(require('./fixtures/docs-cleanup/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issues-403-407-integration/parity.cjs'));
   const projectedExpected = routingParity.afterTrace(issue350Expected(reviewPolicyExpected(historicalExpected, delta)));
   reviewPolicyDeltaChecks(projectedTrace, historicalExpected, delta);
   assert.strictEqual(traceDigest(projectedTrace), traceDigest(projectedExpected), 'unlinked trace differs from the owner baseline at ' + firstDifference(projectedTrace, projectedExpected));
