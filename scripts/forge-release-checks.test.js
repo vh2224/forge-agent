@@ -160,7 +160,7 @@ test('policy-matrix-complete-ci-one-native-app-and-local-inventory', () => {
   assert.strictEqual(ci.filter(job => job.kind === 'alias').length, 9);
   assert.strictEqual(new Set(ci.map(job => job.name)).size, 53);
   assert.deepStrictEqual(ci.filter(job => job.key === 'test').map(job => job.name),
-    [['ubuntu-latest',6],['macos-latest',8],['windows-latest',27]].flatMap(([os,count])=>Array.from({length:count},(_,index)=>`Tests (${os}, shard ${index+1}/${count})`)));
+    [['ubuntu-latest',7],['macos-latest',8],['windows-latest',26]].flatMap(([os,count])=>Array.from({length:count},(_,index)=>`Tests (${os}, shard ${index+1}/${count})`)));
   assert.deepStrictEqual(ci.filter(job => job.key.startsWith('required-tests-')).map(job => [job.key, job.name, job.kind, job.needs]), [
     ['required-tests-windows', 'Tests (windows-latest)', 'alias', ['test']],
     ['required-tests-macos', 'Tests (macos-latest)', 'alias', ['test']],
@@ -266,7 +266,7 @@ test('policy-bounded-coordinator-publisher-permissions-and-needs', () => {
 test('checks-complete-current-attempt-source-key-name-execution-id', () => {
   const f = facts(); const result = checks.evaluateChecks(f);
   assert.strictEqual(result.allowed, true); assert.strictEqual(result.checks.length, 54);
-  const job = result.checks.find(item => item.name === 'Tests (windows-latest, shard 1/27)');
+  const job = result.checks.find(item => item.name === 'Tests (windows-latest, shard 1/26)');
   assert.strictEqual(job.job_key, 'test'); assert.strictEqual(job.kind, 'native');
   assert.strictEqual(job.execution_id, f.workflows.ci.jobs.find(item => item.name === job.name).id);
   assert.strictEqual(job.attempt, 2); assert.strictEqual(job.run_id, 11);
