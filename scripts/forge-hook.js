@@ -529,6 +529,107 @@ const buildSchemaWarning = (res) => {
 module.exports = { resolveUnitContext, sanitizeRunId, resolveRunForSession, resolveOwnerDir };
 if (require.main !== module) return;
 
+// This explicit relay entry is fail-closed and does not use the ordinary hook
+// fail-open path. It retains no authority from serialized joined/provider flags.
+if (phase === 'native-live') {
+  // This separate exec-form entry is fail-closed only for a live native window.
+  // A locator is data. The Bridge authenticates the fixed hook producer and rechecks bootstrap within the cooperative boundary.
+  const phases = { pre: 'PreToolUse', post: 'PostToolUse', 'post-failure': 'PostToolUseFailure',
+    'permission-denied': 'PermissionDenied', 'subagent-start': 'SubagentStart',
+    'subagent-stop': 'SubagentStop', stop: 'Stop', 'session-end': 'SessionEnd',
+    'config-change': 'ConfigChange', 'pre-model-switch': 'PreModelSwitch', 'post-model-switch': 'PostModelSwitch' };
+  const livePhase = process.argv[3], limit = 2 * 1024 * 1024;
+  let chunks = [], size = 0, over = false, done = false;
+  const refuse = error => {
+    if (done) return; done = true;
+    const code = /^[a-z0-9-]{1,100}$/.test(error?.code || '') ? error.code : 'native-host-hook-refused';
+    process.stdout.write('{}\n'); process.stderr.write(code + '\n'); process.exitCode = 2;
+  };
+  if (process.argv.length !== 4 || !Object.hasOwn(phases, livePhase)) {
+    refuse({ code: 'native-host-hook-arguments' }); return;
+  }
+  process.stdin.on('data', bytes => {
+    size += bytes.length;
+    if (size > limit) over = true;
+    if (!over) chunks.push(bytes);
+  });
+  process.stdin.on('error', refuse);
+  process.stdin.on('end', () => {
+    if (done) return; // An earlier stdin failure cannot dispatch on later end.
+    Promise.resolve().then(async () => {
+      if (done) return;
+      if (over) throw Object.assign(new Error('native-host-hook-input-limit'), { code: 'native-host-hook-input-limit' });
+      // Retain original bytes before routing-only decoding; the owner retains
+      // the same capture before semantic/terminal parsing and prewrite admission.
+      const bytes = Buffer.concat(chunks); chunks = [];
+      const capture = bytes.toString('utf8');
+      if (!Buffer.from(capture).equals(bytes)) throw Object.assign(new Error('native-host-hook-utf8'), { code: 'native-host-hook-utf8' });
+      let data; try { data = JSON.parse(capture); } catch { throw Object.assign(new Error('native-host-hook-json'), { code: 'native-host-hook-json' }); }
+      if (!data || typeof data !== 'object' || Array.isArray(data) || data.hook_event_name !== phases[livePhase]
+          || typeof data.cwd !== 'string' || !path.isAbsolute(data.cwd) || typeof data.session_id !== 'string')
+        throw Object.assign(new Error('native-host-hook-routing'), { code: 'native-host-hook-routing' });
+      // Before a window exists, a compound Bash prepare could outlive the
+      // prepare child and run an unobserved suffix after the window opens.
+      // This shared PURE grammar guard grants no authority, capability or join.
+      // The owner separately authenticates the actual original OS/argv/ancestry.
+      if (livePhase === 'pre' && data.tool_name === 'Bash') {
+        const bridge = loadCoreModule('forge-native-host-bridge.js');
+        const command = data.tool_input?.command;
+        if (typeof bridge?.validateInitialPrepareCommand === 'function') {
+          bridge.validateInitialPrepareCommand(command);
+        } else if (typeof command === 'string' && command.includes('forge-native-host-bridge.js')) {
+          throw Object.assign(new Error('native-host-prepare-command-validator-unavailable'), { code: 'native-host-prepare-command-validator-unavailable' });
+        }
+      }
+      const owner = resolveOwnerDir(data.cwd, data.session_id);
+      if (!owner) { if (!done) { done = true; process.stdout.write('{}\n'); } return; }
+      const windows = loadCoreModule('forge-owner-transport-window.js');
+      if (typeof windows?.observed !== 'function') throw Object.assign(new Error('native-host-hook-window-unavailable'), { code: 'native-host-hook-window-unavailable' });
+      const observed = windows.observed(owner);
+      if (!observed?.binding?.native_host_relay) { if (!done) { done = true; process.stdout.write('{}\n'); } return; }
+      const bridge = loadCoreModule('forge-native-host-bridge.js');
+      if (typeof bridge?.relayCurrentHostHook !== 'function') throw Object.assign(new Error('native-host-live-relay-unavailable'), { code: 'native-host-live-relay-unavailable' });
+      const reply = await bridge.relayCurrentHostHook({ owner, phase: livePhase, capture, hookSource: __filename });
+      if (!reply || typeof reply !== 'object' || ![0, 2].includes(reply.exit_code)
+          || !reply.hook_output || typeof reply.hook_output !== 'object' || Array.isArray(reply.hook_output)
+          || Buffer.byteLength(JSON.stringify(reply.hook_output)) > 16384)
+        throw Object.assign(new Error('native-host-live-relay-response'), { code: 'native-host-live-relay-response' });
+      if (!done) { done = true; process.stdout.write(JSON.stringify(reply.hook_output) + '\n'); process.exitCode = reply.exit_code; }
+    }).catch(refuse);
+  });
+  return;
+}
+
+if (phase === '--native-host-relay') {
+  try {
+    const argv = process.argv.slice(3), values = new Map();
+    if (argv.length !== 4) throw Object.assign(new Error('native-host-hook-arguments'), { code: 'native-host-hook-arguments' });
+    for (let i = 0; i < argv.length; i += 2) {
+      const flag = argv[i], value = argv[i + 1];
+      if (!['--attempt', '--observation'].includes(flag) || values.has(flag)
+          || typeof value !== 'string' || !path.isAbsolute(value))
+        throw Object.assign(new Error('native-host-hook-arguments'), { code: 'native-host-hook-arguments' });
+      values.set(flag, value);
+    }
+    if (values.size !== 2) throw Object.assign(new Error('native-host-hook-arguments'), { code: 'native-host-hook-arguments' });
+    const bridge = loadCoreModule('forge-native-host-bridge.js');
+    if (typeof bridge?.relayHookObservation !== 'function')
+      throw Object.assign(new Error('native-host-hook-relay-unavailable'), { code: 'native-host-hook-relay-unavailable' });
+    Promise.resolve(bridge.relayHookObservation({ attempt: values.get('--attempt'),
+      observation: values.get('--observation'), hookSource: __filename })).then(() => {
+      // Relay admission is not writer join, successful verification or ready.
+      process.stdout.write(JSON.stringify({ ok: true, kind: 'native-host-hook-relay-retained' }) + '\n');
+    }).catch(error => {
+      const code = /^[a-z0-9-]{1,100}$/.test(error?.code || '') ? error.code : 'native-host-hook-relay-failed';
+      process.stderr.write(code + '\n'); process.exitCode = 1;
+    });
+  } catch (error) {
+    const code = /^[a-z0-9-]{1,100}$/.test(error?.code || '') ? error.code : 'native-host-hook-relay-failed';
+    process.stderr.write(code + '\n'); process.exitCode = 1;
+  }
+  return;
+}
+
 process.stdin.setEncoding('utf8');
 let raw = '';
 process.stdin.on('data', chunk => (raw += chunk));
@@ -562,7 +663,55 @@ function publishClaudeOwnerEnvironment(data) {
     descriptor = fs.openSync(target, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | (fs.constants.O_NOFOLLOW || 0), 0o600);
     const opened = fs.fstatSync(descriptor), current = fs.lstatSync(target);
     if (!opened.isFile() || current.isSymbolicLink() || current.dev !== opened.dev || current.ino !== opened.ino || opened.size > 65536) return false;
-    fs.writeSync(descriptor, "\nexport FORGE_CLAUDE_OWNER_SESSION_ID='" + id + "'\nexport FORGE_CLAUDE_OWNER_SOURCE='claude-sessionstart-env-v1'\n");
+    let nativeEnvironment = '';
+    try {
+      const bridge = loadCoreModule('forge-native-host-bridge.js');
+      if (typeof bridge?.collectOriginalHookBootstrap === 'function') {
+        const data = bridge.collectOriginalHookBootstrap({ hookSource: __filename });
+        const fields = ['schema_version','kind','pid','started','exe','exe_sha256','hook_source','hook_sha256','config_dir'];
+        if (!data || typeof data !== 'object' || Array.isArray(data)
+            || Object.keys(data).length !== fields.length || fields.some(key => !Object.hasOwn(data,key))
+            || data.schema_version !== 1 || data.kind !== 'claude-hook-bootstrap'
+            || !Number.isSafeInteger(data.pid) || data.pid <= 0
+            || typeof data.started !== 'string' || !data.started || data.started.length > 128 || /[\r\n\0]/.test(data.started)
+            || ![data.exe_sha256,data.hook_sha256].every(value => /^[a-f0-9]{64}$/.test(value))
+            || ![data.exe,data.hook_source,data.config_dir].every(value => typeof value === 'string' && path.isAbsolute(value) && !/[\r\n\0]/.test(value)))
+          throw new Error('native-host-bootstrap-shape');
+        const values = { FORGE_NATIVE_HOST_PID: String(data.pid), FORGE_NATIVE_HOST_STARTED: data.started,
+          FORGE_NATIVE_HOST_EXE: data.exe, FORGE_NATIVE_HOST_EXE_SHA256: data.exe_sha256,
+          FORGE_NATIVE_HOST_HOOK: data.hook_source, FORGE_NATIVE_HOST_HOOK_SHA256: data.hook_sha256,
+          FORGE_NATIVE_HOST_CONFIG_DIR: data.config_dir, FORGE_NATIVE_HOST_BOOTSTRAP_SOURCE: 'claude-sessionstart-process-v1' };
+        const quote = value => "'" + value.replace(/'/g, "'\"'\"'") + "'";
+        nativeEnvironment = Object.entries(values).map(([key,value]) => 'export ' + key + '=' + quote(value) + '\n').join('');
+      }
+    } catch (error) {
+      // Keep the ordinary session environment and exit posture. Diagnostic
+      // evidence is typed/scalar only: never Error.message, CIM, argv or paths.
+      try {
+        const own = (value, key) => value && typeof value === 'object'
+          ? Object.getOwnPropertyDescriptor(value, key)?.value : undefined;
+        const safeString = value => typeof value === 'string' && /^[A-Za-z0-9_.-]{1,160}$/.test(value);
+        const code = own(error, 'code'), stage = own(error, 'stage'), provider = own(error, 'provider_called');
+        const diagnostic = { kind: 'forge-native-bootstrap-refused',
+          code: safeString(code) ? code : 'native-host-bootstrap-unavailable',
+          ...(safeString(stage) ? { stage } : {}),
+          provider_called: [true, false, 'unknown'].includes(provider) ? provider : 'unknown' };
+        const observed = own(error, 'os_diagnostic'), facts = {};
+        for (const key of ['action','spawn_code','signal','typed_error','exception_type']) {
+          const value = own(observed, key); if (value === null || safeString(value)) facts[key] = value;
+        }
+        for (const key of ['status','hresult','stderr_captured_bytes']) {
+          const value = own(observed, key); if (value === null || Number.isSafeInteger(value)) facts[key] = value;
+        }
+        const hash = own(observed, 'stderr_captured_sha256'), truncated = own(observed, 'stderr_may_be_truncated');
+        if (typeof hash === 'string' && /^[a-f0-9]{64}$/.test(hash)) facts.stderr_captured_sha256 = hash;
+        if (typeof truncated === 'boolean') facts.stderr_may_be_truncated = truncated;
+        if (Object.keys(facts).length) diagnostic.os_diagnostic = facts;
+        const line = JSON.stringify(diagnostic) + '\n';
+        if (Buffer.byteLength(line) <= 2048) process.stderr.write(line);
+      } catch { /* Diagnostic failure must not erase ordinary session identity. */ }
+    }
+    fs.writeSync(descriptor, "\nexport FORGE_CLAUDE_OWNER_SESSION_ID='" + id + "'\nexport FORGE_CLAUDE_OWNER_SOURCE='claude-sessionstart-env-v1'\n" + nativeEnvironment);
     return true;
   } catch { return false; }
   finally { if (descriptor !== undefined) fs.closeSync(descriptor); }

@@ -187,10 +187,74 @@ function observeClaudeAgentBinding(options) {
   };
 }
 
+// This branch constructs arguments from a genuine, current supported intent.
+// It never fabricates active-tool capabilities or grants execution admission.
+// Actual execution is admitted only by the original authenticated PreToolUse.
+function buildNativeHostIntent(input, host, dispatch) {
+  if (host !== 'claude') return refusal(host, 'native-host-intent-host', 'The native file-worker intent belongs to the Claude Agent transport.');
+  if (!dispatch || typeof dispatch !== 'object' || Array.isArray(dispatch)
+      || dispatch.config_ok !== true || dispatch.dispatch_allowed !== true
+      || text(dispatch.host_runtime).toLowerCase() !== host
+      || text(dispatch.resolved_worker_engine).toLowerCase() !== host
+      || text(dispatch.worker_mode).toLowerCase() !== 'native'
+      || text(dispatch.dispatch_engine).toLowerCase() && text(dispatch.dispatch_engine).toLowerCase() !== host) {
+    return refusal(host, 'native-host-intent-route', 'A canonical allowed native route for this same host and worker is required.');
+  }
+  let facts;
+  try {
+    const profile = require('./forge-native-host-profile');
+    facts = profile.assertInvocationIntent(input.nativeHostIntent, { request: input.nativeHostRequest });
+    if (!facts || facts.profile_id !== profile.LIVE_PROFILE_ID || facts.tool !== 'Agent'
+        || facts.agent_type !== 'forge-native-files' || facts.execution_admitted !== false
+        || facts.effort_transport !== 'agent-argument'
+        || typeof facts.source_fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(facts.source_fingerprint)) {
+      return refusal(host, 'native-host-intent-facts', 'The genuine profile did not return the closed file-worker intent.');
+    }
+  } catch (error) {
+    const reason = typeof error.code === 'string' && /^[a-z0-9-]{1,160}$/.test(error.code)
+      ? error.code : 'native-host-intent-unverified';
+    return refusal(host, reason, 'A genuine current profile and its bound request are required; JSON does not authorize a native host.');
+  }
+  const model = text(dispatch.model_resolved || dispatch.model), effort = text(dispatch.effort);
+  const promptValue = input.prompt !== undefined ? input.prompt : input.message;
+  const prompt = typeof promptValue === 'string' ? promptValue : '';
+  const agentType = text(input.agentType || input.agent_type || input.subagentType || input.subagent_type);
+  if (model !== facts.model_resolved || effort !== facts.effort || !effort
+      || agentType !== facts.agent_type || !prompt.trim()) {
+    return refusal(host, 'native-host-intent-input', 'Explicit route model, effort, prompt and file-worker type must match the genuine intent.');
+  }
+  const canonicalAlias = modelToAlias(model), alias = text(canonicalAlias.alias);
+  const transport = modelPolicy.transportSupport({ model, transport: 'claude-native' });
+  if (!canonicalAlias.mapped || !alias || !stringSet(facts.model_aliases).has(alias)
+      || text(dispatch.alias) && text(dispatch.alias) !== alias || transport.supported !== true) {
+    return refusal(host, 'native-host-intent-model', 'The canonical model policy and genuine intent must support the same explicit Agent alias.');
+  }
+  const request = input.nativeHostRequest;
+  const unitType = text(request && request.unitType), unitId = text(request && request.taskId);
+  if (!unitType || !unitId || unitType.length > 64 || unitId.length > 64 || /[\r\n]/.test(unitType + unitId)) {
+    return refusal(host, 'native-host-intent-unit', 'The genuine request must identify its canonical unit before argument construction.');
+  }
+  const args = { description: 'Forge ' + unitType + ': ' + unitId,
+    subagent_type: agentType, prompt, model: alias, effort };
+  const telemetry = baseTelemetry(dispatch, alias, effort, { source: 'genuine-native-host-intent' });
+  telemetry.effort_transport = 'native-argument';
+  telemetry.effort_transport_value = effort;
+  telemetry.effort_transport_source = 'profile:' + facts.source_fingerprint;
+  if (transport.version_proof === 'alias-only') {
+    telemetry.model_version_proof = 'alias-only';
+    telemetry.policy_diagnostics = transport.diagnostics.filter(item => item.code === 'native-alias-not-version-proof');
+  }
+  return { ok: true, host_runtime: host, tool: 'Agent', args, telemetry,
+    reason_code: 'native-invocation-ready', admission_phase: 'supported-intent',
+    execution_admitted: false, intent_source_fingerprint: facts.source_fingerprint,
+    hint: 'Expose these sealed arguments to the original host; authenticated PreToolUse must admit execution before Agent runs.' };
+}
+
 function buildNativeInvocation(options) {
   const input = options || {};
   const host = text(input.hostRuntime || input.host_runtime).toLowerCase();
   const dispatch = input.resolvedDispatch || input.resolved_dispatch;
+  if (input.nativeHostIntent !== undefined) return buildNativeHostIntent(input, host, dispatch);
   const checked = validateActiveCapabilities(host, input.activeCapabilities || input.active_capabilities);
   if (!checked.ok) return checked;
   if (!dispatch || typeof dispatch !== 'object' || Array.isArray(dispatch)) {
@@ -502,6 +566,9 @@ async function invokeNative(options, invoke) {
       identity: supervision.digest(JSON.stringify({ invocation: journalInvocation(invocation), identity: options.telemetryIdentity || null })),
       route: options.resolvedDispatch, terminal: options.terminalResult,
       dispatchId: options.telemetryIdentity?.dispatchId ?? null,
+      ...(options.nativeHostAdmission === undefined ? {} : {
+        nativeHostAdmission: options.nativeHostAdmission, nativeHostRequest: options.nativeHostRequest,
+      }),
     }, observer => {
       try {
         require('./forge-milestone-time-admission').assertOwnerTransportEntry(options);
@@ -540,11 +607,11 @@ async function invokeNative(options, invoke) {
     const source = readback && typeof readback === 'object' ? text(readback.source) : '';
     return {
       ...invocation,
-      provider_called: true,
+      provider_called: supervised.provider_called,
       result,
       lifecycle: supervised.lifecycle,
       ...hostIdentity(),
-      final_evidence: { ...evidence, stage: 'returned', provider_called: true, duration_ms: Date.now() - started,
+      final_evidence: { ...evidence, stage: 'returned', provider_called: supervised.provider_called, duration_ms: Date.now() - started,
         model_observed: observed && source ? telemetryApi.code(observed) : null },
       telemetry: {
         ...invocation.telemetry,

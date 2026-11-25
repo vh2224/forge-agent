@@ -13,6 +13,8 @@ const DEFINITIONS = Object.freeze({
   'forge-native-repackage.test.js': { parts: 6, kind: 'cases' },
   'forge-native-execution.test.js': { args: [['--core'], ['--saved'], ['--extra'], ['--recovery']], revision:'native-v2',
     costDivisors:{0:2,1:2,2:4,3:1}, timingEstimates:[['forge-native-execution.ci-01-of-3.test.js',2],['forge-native-execution.ci-01-of-3.test.js',2],['forge-native-execution.ci-02-of-3.test.js',1],['forge-native-execution.ci-03-of-3.test.js',1]] },
+  'forge-dispatch-source-guard.test.js': { args: [['--sourceguard-core'], ...Array.from({length:8},(_,i)=>['--sourceguard-negative='+i+'/8'])], revision: 'guard-v1', divisor: 1 },
+  'forge-native-host-bridge.test.js': { args: [['--bridge-cohort', 'full'], ['--bridge-cohort', 'partial']], revision: 'host-v1', divisor: 1 },
   'forge-native-recovery-delivery.test.js': { args: [['--cohort', '0'], ['--cohort', '1'], ['--cohort', '2']], divisor: 1 },
   'forge-agent-phase.test.js': { args: ['identity', 'recovery', 'native', 'sidecar'].map(name => [`--phase-cohort=${name}`]), divisor: 2 },
   'forge-communication-surfaces.test.js': { parts: 4, kind: 'cases' },
@@ -22,6 +24,15 @@ const DEFINITIONS = Object.freeze({
 // Explicit initial estimates, not observations of this new wrapper. The prior
 // smoke steps in run44163993587 took56s on Linux and153s on macOS.
 const INITIAL_COSTS = Object.freeze({
+  // Planning estimate for each new independent core/negative cohort, NOT hosted timing.
+  // Actual whole Sourceguard r5 passed31 cases in1409454ms; immutable old profile
+  // describes the whole source, not these9 units. Current measured unit weights win.
+  'forge-dispatch-source-guard.test.js': Object.freeze({linux:750000,darwin:750000,win32:750000}),
+  // Planning estimate per full/partial cohort, NOT hosted timing. The first
+  // unpartitioned local case failed after 558844ms (native463-bridge-r6-causal);
+  // 750000ms reserves ~34% over that incomplete run on every platform. Actual
+  // completion costs remain unknown; current measured unit timings still win.
+  'forge-native-host-bridge.test.js': Object.freeze({ linux: 750000, darwin: 750000, win32: 750000 }),
   // Initial estimate, not a hosted timing or a rewrite of the published profile.
   'forge-issues-434-436.test.js': Object.freeze({ linux: 30000, darwin: 30000, win32: 30000 }),
   'forge-issues-429-432.test.js': Object.freeze({ linux: 30000, darwin: 30000, win32: 30000 }),

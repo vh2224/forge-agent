@@ -1,6 +1,9 @@
 'use strict';
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+
 const assert=require('node:assert/strict'),fs=require('fs'),path=require('path'),crypto=require('crypto'),zlib=require('zlib');
-const ROOT=path.resolve(__dirname,'..'),cleanup=require('./fixtures/issue-461/distribution.cjs'),layer=cleanup.baselineView,previous=layer.loadHistoricalFixture('scripts/fixtures/issue-455/distribution.cjs'),data=layer.issues457458Layer;
+const ROOT=path.resolve(__dirname,'..'),cleanup=require('./fixtures/issue-463/distribution.cjs'),layer=cleanup.baselineView,previous=layer.loadHistoricalFixture('scripts/fixtures/issue-455/distribution.cjs'),data=layer.issues457458Layer;
 const read=cleanup.projectCleanupRead(file=>fs.readFileSync(path.join(ROOT,file))),hash=b=>crypto.createHash('sha256').update(b).digest('hex');
 assert.equal(data.provenance.base_revision,"c28568951f060f631527470a975af181113e69e7");assert.equal(data.provenance.source_head,"613ee82328d2ee2bebf405328d751cfe6fee6ff2");assert.deepEqual(data.provenance.issues,[457,458,460]);
 assert.equal(data.predecessor_layer_sha256,hash(JSON.stringify(previous.issue455Layer)));assert.strictEqual(layer.issue455Layer,previous.issue455Layer);
@@ -106,3 +109,4 @@ for(const method of ['previousSmoke','predecessorSmoke']){
 }
 for(const key of ['rendered','surfaces','samples','sample_projection','registry','parity'])assert.deepEqual(layer.issue440Layer[key],previous.issue440Layer[key]);
 console.log('PASS #457/#458 additive distribution: one predecessor delegation, exact census, existing/new-file drift negatives, historical views and immutable published fixtures');
+});

@@ -95,8 +95,130 @@ async function historicalCarrierNegatives(){return fixture(async x=>{
   }finally{removeFixtureQuestions(x,created);}
 });}
 
+// These are real module calls with invalid handles, not an injected profile.
+// They prove refusal precedes the action and all owner-window/lease writes.
+async function nativeProfileForgeryNegatives(x){
+  const windows=require('./forge-owner-transport-window');
+  assert.equal(windows.observed(x.f.owner),null);
+  const before=execution.protectedSnapshot(x.f.owner),request={...structuredClone(x.h.request),
+    scope:'milestone',unitType:'execute-task',phase:'execute',route:{...x.h.request.route,worker_mode:'native'}};
+  let calls=0;
+  const forged=[{},Object.freeze({joined:true,provider_called:false}),
+    JSON.parse(JSON.stringify({profile_id:'forge-native463-fixture-foreground-v1',joined:true,possible_writers:0})),
+    Object.freeze({assertJoined:()=>({joined:true}),assertActivityAdmission:()=>true})];
+  for(const handle of forged){
+    await assert.rejects(activity.withNativeExecutionActivity(request,handle,async()=>{calls++;}),
+      error=>error.code==='native-host-profile-required');
+    assert.equal(calls,0);assert.equal(windows.observed(x.f.owner),null);
+    assert.deepEqual(execution.protectedSnapshot(x.f.owner),before,'forged profile cannot open or extend a lease/window');
+  }
+  console.log('PASS native activity refuses JSON/facts/function-shaped profiles before action or owner writes');
+}
+
+// Independent observation for the actual isolated Bridge CLI integration.
+// This helper never mints profile/join/publication/settlement authority. In
+// particular an absent external window alone does not prove native settlement.
+function assertFixtureNativeCoordination({fixtureRoot,owner,dispatchId,unit,generation,phase}){
+  const os=require('node:os'),lease=require('./forge-unit-lease'),windows=require('./forge-owner-transport-window');
+  const root=fs.realpathSync.native(fixtureRoot),tmp=fs.realpathSync.native(os.tmpdir());
+  assert.equal(path.dirname(root),tmp);assert.match(path.basename(root),/^forge-native463-fixture-[A-Za-z0-9_-]+$/);
+  assert(!fs.lstatSync(root).isSymbolicLink());
+  const marker=path.join(root,'FIXTURE-ORIGIN.json'),stat=fs.lstatSync(marker);
+  assert(stat.isFile()&&!stat.isSymbolicLink()&&stat.nlink===1&&stat.size<=4096);
+  assert.deepEqual(JSON.parse(fs.readFileSync(marker)),{schema_version:1,kind:'forge-native463-isolated-fixture',root});
+  const physicalOwner=fs.realpathSync.native(owner),rel=path.relative(root,physicalOwner);
+  assert(rel&&rel!=='..'&&!rel.startsWith('..'+path.sep)&&!path.isAbsolute(rel));
+  assert.equal(path.resolve(owner),physicalOwner);assert.match(unit,/^execute-task\/T\d+(?:\.\d+)?$/);
+  assert.equal(typeof dispatchId,'string');assert(dispatchId);assert.equal(typeof generation,'string');assert(generation);
+  assert(['held','absent','held-with-lease-drift','held-live-relay'].includes(phase));
+  const observed=windows.observed(physicalOwner),held=lease.readLease(lease.leaseFile(physicalOwner,unit));
+  // The negative phase deliberately leaves lease corruption to the REAL runtime
+  // guard below, while still proving exact fixture/window identity here.
+  if(phase!=='held-with-lease-drift'){assert(lease.validRecord(held.record,unit));assert.equal(held.record.generation,generation);}
+  if(phase!=='absent'){
+    assert(observed);assert.equal(observed.binding.kind,'unit-execution');
+    assert.equal(observed.binding.coordination,'native-host-profile-v1');
+    assert.equal(observed.binding.dispatch_id,dispatchId);assert.equal(observed.binding.unit_key,unit);
+    assert.equal(observed.binding.lease_generation,generation);
+    if(phase==='held-live-relay')assert.equal(observed.binding.native_host_relay?.profile_id,'claude-agent-files-foreground-v1');
+  }else assert.equal(observed,null);
+  return Object.freeze({phase,lease_generation:generation,authority:false});
+}
+
+// Assertion bodies for the REAL Bridge owner fixture, not a producer or driver.
+// The genuine opaque profile and live runtime must already exist in that owner
+// process; no JSON object, injected invoke callback or test factory is accepted.
+// These interop phases are drafts until exercised by the canonical CLI fixture.
+async function assertGenuineNativeActivityPhase(runtime,profileHandle,expected){
+  const {phase,request,publicationAttemptWitness,publicationWitness,...fixture}=expected;
+  assert(['before-terminal','joined-before-publication','ready-before-or-after','pending-unrelated-drift','published-upgrade','settled','owner-drift','lease-drift','live-relay-bound'].includes(phase));
+  assertFixtureNativeCoordination({...fixture,phase:phase==='settled'?'absent':phase==='lease-drift'?'held-with-lease-drift':phase==='live-relay-bound'?'held-live-relay':'held'});
+  const profile=require('./forge-native-host-profile');
+  if(phase==='pending-unrelated-drift'){
+    const refuses=error=>['native-host-publication-owner-changed','execution-protected-metadata'].includes(error.code);
+    assert.throws(()=>runtime.assertReplayAdmission(),refuses);await assert.rejects(runtime.reconcile(),refuses);return;
+  }
+  if(phase==='lease-drift'){
+    await assert.rejects(runtime.reconcile(),error=>error.code==='protected-owner-lease-changed');
+    // Use a separate real fixture/profile for this destructive negative. The
+    // profile's live lease refusal also discriminates a forged profile handle.
+    assert.throws(()=>profile.assertJoined(profileHandle),error=>error.code==='native-host-lease-required');
+    return;
+  }
+  const capability=profile.assertCapabilityAdmission(profileHandle); // genuine intent/current sources, not execution/join
+  if(capability.profile_id===profile.FIXTURE_PROFILE_ID&&phase!=='settled'){
+    const window=require('./forge-owner-transport-window').observed(fixture.owner);
+    assert(!Object.hasOwn(window.binding,'native_host_relay'),'fixture binding remains unchanged');
+  }
+  if(phase==='live-relay-bound'){
+    const admission=profile.assertActivityAdmission(profileHandle,request),ref=admission.live_relay_reference;
+    assert.equal(admission.profile_id,'claude-agent-files-foreground-v1');assert(ref);
+    const observed=require('./forge-owner-transport-window').observed(fixture.owner);
+    assert.deepEqual(observed.binding.native_host_relay,ref,'same genuine current profile/request relay is the locator in the actual window');
+    assert.equal(ref.request_sha256,roots.digest(request));assert.equal(ref.dispatch_id,fixture.dispatchId);
+    assert.equal(ref.host_session_sha256,observed.binding.host_session_sha256);
+    assert.deepEqual(Object.keys(ref).sort(),['protocol_version','kind','directory','endpoint','attempt_id','dispatch_id','request_sha256','host_session_sha256','profile_id'].sort());
+    assert.throws(()=>runtime.assertSettled(),error=>error.code==='native-owner-activity-not-settled','relay metadata alone never settles the activity');
+  }else if(phase==='before-terminal'){
+    assert.throws(()=>profile.assertJoined(profileHandle),error=>error.code==='native-host-writer-unproven');
+    await assert.rejects(runtime.observeJoined({joined:true}),error=>error.code==='native-owner-profile-foreign');
+    assert.throws(()=>runtime.assertReplayAdmission({joined:true}),error=>error.code==='native-owner-replay-arguments');
+    await assert.rejects(runtime.reconcile({joined:true}),error=>error.code==='native-owner-reconcile-arguments');
+    assert.throws(()=>runtime.assertReplayAdmission(),error=>error.code==='native-host-writer-unproven');
+    assert.throws(()=>runtime.assertSettled(),error=>error.code==='native-owner-activity-not-settled');
+    assert.throws(()=>runtime.spawn(),error=>error.code==='native-owner-process-spawn-forbidden');
+  }else if(phase==='joined-before-publication'){
+    assert.equal(profile.assertJoined(profileHandle).joined,true);
+    await runtime.observeJoined(profileHandle);
+    runtime.assertReplayAdmission();await runtime.reconcile();
+    assert.throws(()=>runtime.assertSettled(),error=>error.code==='native-owner-activity-not-settled');
+  }else if(phase==='ready-before-or-after'){
+    assert.equal(profile.assertJoined(profileHandle).joined,true);
+    assert.throws(()=>runtime.observePublicationAttempt({}),error=>error.code==='native-original-publication-attempt-required');
+    const pending=runtime.observePublicationAttempt(publicationAttemptWitness);
+    assert(!pending?.then,'original ready callback must remain synchronous');assert.equal(pending.pending,true);
+    assert.equal(profile.assertPublicationAttemptCurrent(profileHandle,publicationAttemptWitness).joined,true);
+    runtime.assertReplayAdmission();await runtime.reconcile();
+    await assert.rejects(runtime.retrySettlement(),error=>error.code==='native-owner-publication-pending');
+    assert.throws(()=>runtime.assertSettled(),error=>error.code==='native-owner-activity-not-settled');
+    assertFixtureNativeCoordination({...fixture,phase:'held'});
+  }else if(phase==='published-upgrade'){
+    await runtime.observePublication(publicationWitness);await runtime.reconcile();
+    assert.equal(profile.assertPublicationCurrent(profileHandle,publicationWitness).joined,true);
+    assert.throws(()=>runtime.assertSettled(),error=>error.code==='native-owner-activity-not-settled');
+  }else if(phase==='owner-drift'){
+    assert.equal(profile.assertJoined(profileHandle).joined,true);
+    assert.throws(()=>runtime.assertReplayAdmission(),error=>error.code==='execution-protected-metadata');
+    await assert.rejects(runtime.reconcile(),error=>error.code==='execution-protected-metadata');
+  }else{
+    assert.equal(runtime.assertSettled(),true);
+    assert.throws(()=>runtime.assertReplayAdmission(),error=>error.code==='native-owner-replay-window-required');
+  }
+}
+
 async function main(){
   await fixture(async x=>{
+    await nativeProfileForgeryNegatives(x);
     assert.throws(()=>activity.createOwnerReconciliation(x.options()),/root-append-answer-required/,'unanswered cannot authorize');
     const pending=fs.readFileSync(x.answerFile);
     questions.answer({cwd:x.f.owner,identity:x.opened.identity_sha256,answers:[{id:'code-root-append-approval',answer:'nao',source:'tool-answer'}]});
@@ -155,4 +277,4 @@ async function main(){
   });
   await historicalCarrierNegatives();
 }
-module.exports={main};if(require.main===module)main().catch(error=>{console.error(error);process.exitCode=1;});
+module.exports={main,assertFixtureNativeCoordination,assertGenuineNativeActivityPhase};if(require.main===module)main().catch(error=>{console.error(error);process.exitCode=1;});

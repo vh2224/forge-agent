@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/issue-461/distribution.cjs');
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+
+const unitEntry = require('./fixtures/issue-463/distribution.cjs');
 
 // Standalone acceptance suite: only Node built-ins and production modules.
 const assert = require('assert');
@@ -22,10 +25,31 @@ const HISTORICAL_GOLDEN_PATH = path.join(__dirname, 'fixtures', 'claude-renderer
 const GOLDEN_PATH = path.join(__dirname, 'fixtures', 'claude-renderer', 'claude-memory-v2.golden.json');
 const PRE_REPIN_SKILLS_SHA = '940cc9f4348ffe52fc4b57e8d247431992dc81ab32eee9474d2149922edb1bf2';
 
+const SOURCEGUARD_NEGATIVE_TEST="#341 linked-task layer refuses edits outside the delta, wrong pins, bad delta before values and undocumented re-pins";
+function sourceguardCohort(argv){
+  if(argv.length===0)return{kind:'all'};
+  if(argv.length===1&&argv[0]==='--sourceguard-core')return{kind:'core'};
+  if(argv.length===1){const match=/^--sourceguard-negative=([0-7])\/8$/.exec(argv[0]);if(match)return{kind:'negative',index:Number(match[1]),count:8};}
+  throw new Error('sourceguard-ci-cohort-invalid');
+}
+const SOURCEGUARD_COHORT=sourceguardCohort(process.argv.slice(2)),sourceguardTopNames=[],sourceguardSelectedNames=[];
+// Selection controls protect the CI coverage boundary, never native authority.
+assert.deepStrictEqual(sourceguardCohort([]),{kind:'all'});
+assert.deepStrictEqual(sourceguardCohort(['--sourceguard-core']),{kind:'core'});
+for(let i=0;i<8;i++)assert.deepStrictEqual(sourceguardCohort(['--sourceguard-negative='+i+'/8']),{kind:'negative',index:i,count:8});
+for(const argv of [['unknown'],['--sourceguard-negative=8/8'],['--sourceguard-negative=0/7'],['--sourceguard-negative=01/8'],['--sourceguard-core','--sourceguard-core']])assert.throws(()=>sourceguardCohort(argv),/sourceguard-ci-cohort-invalid/);
+const sourceguardUnits=require('./forge-ci-units').unitsForSuite('forge-dispatch-source-guard.test.js');
+assert.deepStrictEqual(sourceguardUnits.map(row=>row.args),[['--sourceguard-core'],...Array.from({length:8},(_,i)=>['--sourceguard-negative='+i+'/8'])]);
+assert.strictEqual(new Set(sourceguardUnits.map(row=>row.id)).size,9);
+assert(sourceguardUnits.every(row=>row.divisor===1));
+
 let passed = 0;
 let failed = 0;
 
 function test(name, fn) {
+  assert(!sourceguardTopNames.includes(name),'unique registered sourceguard case');sourceguardTopNames.push(name);
+  if(SOURCEGUARD_COHORT.kind==='core'&&name===SOURCEGUARD_NEGATIVE_TEST||SOURCEGUARD_COHORT.kind==='negative'&&name!==SOURCEGUARD_NEGATIVE_TEST)return;
+  sourceguardSelectedNames.push(name);
   try {
     fn();
     passed += 1;
@@ -315,7 +339,7 @@ test('registry and every nested entry are deeply frozen with explicit exclusions
     assert(Object.isFrozen(entry), `${entry.id} is mutable`);
     assert.match(entry.id, /^[a-z0-9-]+$/);
     assert(guard.SCOPED_FILES.includes(entry.path), entry.path);
-    assert(['resolver', 'agent', 'adapter', 'emitter', 'native', 'preparation', 'unit-sidecar'].includes(entry.kind), entry.kind);
+    assert(['resolver', 'agent', 'adapter', 'emitter', 'native', 'preparation', 'unit-sidecar', 'native-host'].includes(entry.kind), entry.kind);
     assert(['operational', 'excluded'].includes(entry.classification), entry.classification);
     assert.match(entry.fingerprint, /^sha256:[a-f0-9]{64}$/);
     if (entry.classification === 'excluded') assert.notStrictEqual(entry.reason.trim(), '', entry.id);
@@ -329,7 +353,7 @@ test('real disk discovery equals the frozen registry in both directions', () => 
   assert.deepStrictEqual(report.missing, []);
   assert.deepStrictEqual(report.errors, []);
   const discoveredKinds = new Set(guard.discover(ROOT).candidates.map((item) => item.kind));
-  assert.deepStrictEqual([...discoveredKinds].sort(), ['adapter', 'agent', 'emitter', 'native', 'preparation', 'resolver', 'unit-sidecar']);
+  assert.deepStrictEqual([...discoveredKinds].sort(), ['adapter', 'agent', 'emitter', 'native', 'native-host', 'preparation', 'resolver', 'unit-sidecar']);
   const nativeBuilders = guard.discover(ROOT).candidates.filter((item) =>
     item.kind === 'native' && /buildNativeInvocation\s*\(/.test(item.evidence));
   assert.strictEqual(nativeBuilders.length, 3, 'all structured native builder sites remain visible');
@@ -339,6 +363,39 @@ test('real disk discovery equals the frozen registry in both directions', () => 
   }
 });
 
+test('native-host CLI and prepared-control sites are measured and closed', () => {
+  const sites=guard.discover(ROOT).candidates.filter(row=>row.kind==='native-host');
+  assert.strictEqual(sites.length,10,'two actual skill branches each have one read-only budget query plus four operational sites');
+  for(const site of sites)assert.strictEqual(guard.SOURCE_REGISTRY.find(row=>guard.identity(row)===guard.identity(site))?.classification,'operational');
+});
+
+test('an unregistered native-host CLI anywhere in the scoped sources is reported', () => withFixture(root => {
+  appendSeparated(root,'shared/forge-dispatch.md','```bash\nnode "$FORGE_SCRIPTS_DIR/forge-native-host-bridge.js" arbitrary --approved yes\n```');
+  const result=guard.audit({root});assert(result.unexpected.some(row=>row.kind==='native-host'));
+}));
+
+test('even re-registered native-host mutations cannot widen literal argv or returned controls', () => {
+  const relative='skills/forge-auto/SKILL.md';
+  const examples=[
+    ["Bash({command: '\"{NODE_EXECUTABLE_ABS}\" \"{FORGE_SCRIPTS_DIR_ABS}/forge-native-host-bridge.js\" prepare --input \"{NATIVE_HOST_INPUT_ABS}\"', timeout: NATIVE_HOST_PREPARE_BUDGET.prepare_timeout_ms})","Bash({command: \"'{NODE_EXECUTABLE_ABS}' '{FORGE_SCRIPTS_DIR_ABS}/forge-native-host-bridge.js' prepare --input '{NATIVE_HOST_INPUT_ABS}'\", timeout: NATIVE_HOST_PREPARE_BUDGET.prepare_timeout_ms})"],
+    ['timeout: NATIVE_HOST_PREPARE_BUDGET.prepare_timeout_ms','timeout: 120000'],
+    ['prepare-budget --input','prepare-budget --approved yes --input'],
+    ["Bash({command: '\"{NODE_EXECUTABLE_ABS}\" \"{FORGE_SCRIPTS_DIR_ABS}/forge-native-host-bridge.js\" prepare --input \"{NATIVE_HOST_INPUT_ABS}\"', timeout: NATIVE_HOST_PREPARE_BUDGET.prepare_timeout_ms})","Bash({command: '\"{NODE_EXECUTABLE_ABS}\" \"{FORGE_SCRIPTS_DIR_ABS}/forge-native-host-bridge.js\" prepare --input \"{FOREIGN_INPUT_ABS}\"', timeout: NATIVE_HOST_PREPARE_BUDGET.prepare_timeout_ms})"],
+    ["Bash({command: '\"{NODE_EXECUTABLE_ABS}\" \"{FORGE_SCRIPTS_DIR_ABS}/forge-native-host-bridge.js\" prepare --input \"{NATIVE_HOST_INPUT_ABS}\"', timeout: NATIVE_HOST_PREPARE_BUDGET.prepare_timeout_ms})","Bash({command: '\"{UNOBSERVED_NODE_ABS}\" \"{FORGE_SCRIPTS_DIR_ABS}/forge-native-host-bridge.js\" prepare --input \"{NATIVE_HOST_INPUT_ABS}\"', timeout: NATIVE_HOST_PREPARE_BUDGET.prepare_timeout_ms})"],
+    ['prepare --input','prepare --approved yes --input'],
+    ["Bash({command: '\"{NODE_EXECUTABLE_ABS}\" \"{FORGE_SCRIPTS_DIR_ABS}/forge-native-host-bridge.js\" prepare --input \"{NATIVE_HOST_INPUT_ABS}\"', timeout: NATIVE_HOST_PREPARE_BUDGET.prepare_timeout_ms})","Bash({command: 'RESULT=$(\"{NODE_EXECUTABLE_ABS}\" \"{FORGE_SCRIPTS_DIR_ABS}/forge-native-host-bridge.js\" prepare --input \"{NATIVE_HOST_INPUT_ABS}\"', timeout: NATIVE_HOST_PREPARE_BUDGET.prepare_timeout_ms})"],
+    ['NATIVE_HOST_PREPARED.control_commands.accept','NATIVE_HOST_PREPARED.control_commands.arbitrary'],
+    ['Bash({command: NATIVE_HOST_PREPARED.control_commands.accept})','Bash({command: NATIVE_HOST_PREPARED.control_commands.accept + " --candidate forged"})'],
+    ["// canonical-native-host-literals: node=NODE_EXECUTABLE_ABS; scripts=FORGE_SCRIPTS_DIR_ABS; input=NATIVE_HOST_INPUT_ABS\nBash({command: '\"{NODE_EXECUTABLE_ABS}\" \"{FORGE_SCRIPTS_DIR_ABS}/forge-native-host-bridge.js\" prepare --input \"{NATIVE_HOST_INPUT_ABS}\"', timeout: NATIVE_HOST_PREPARE_BUDGET.prepare_timeout_ms})","// absent canonical source citation\nBash({command: '\"{NODE_EXECUTABLE_ABS}\" \"{FORGE_SCRIPTS_DIR_ABS}/forge-native-host-bridge.js\" prepare --input \"{NATIVE_HOST_INPUT_ABS}\"', timeout: NATIVE_HOST_PREPARE_BUDGET.prepare_timeout_ms})"],
+  ];
+  for(const [before,after] of examples)withFixture(root=>{
+    const text=read(relative,root);assert.strictEqual(text.split(before).length,2);write(relative,text.replace(before,after),root);
+    const actual=guard.discover(root).candidates.filter(row=>row.kind==='native-host'&&row.path===relative);
+    const registry=guard.SOURCE_REGISTRY.filter(row=>row.kind!=='native-host'||row.path!==relative).concat(actual.map(row=>registerCandidate(row)));
+    const result=guard.audit({root,registry});assert.strictEqual(result.ok,false);
+    assert(result.errors.some(message=>message.includes('native-host')),JSON.stringify(result.errors));
+  });
+});
 test('injecting a native invocation is reported as an unexpected candidate', () => withFixture((root) => {
   const relative = 'shared/forge-review.md';
   appendSeparated(root, relative, 'injected = buildNativeInvocation({ hostRuntime: HOST_RUNTIME })');
@@ -717,7 +774,7 @@ test('Claude historical repin is preserved and current memory/instruction report
   // #347 adds only the measured hooks surface; the chained proof below binds
   // that delta independently and keeps the original 4.19.0 golden immutable.
   assert.deepStrictEqual(golden.surfaces.filter(surface => historicalHashes.get(surface.source_id) !== surface.sha256)
-    .map(surface => surface.source_id), ['agents', 'commands', 'skills', 'dispatch-templates', 'hooks', 'claude-instructions', 'configuration']);
+    .map(surface => surface.source_id), ['agents', 'commands', 'skills', 'dispatch-templates', 'hooks', 'claude-instructions', 'claude-settings', 'configuration']);
   const report = claudeRenderer.render({
     repo: ROOT,
     projectRoot: path.join(ROOT, 'scripts', '.guard-golden-project'),
@@ -1139,7 +1196,7 @@ function entry347After(kind, key, prior, delta = ENTRY_347, attributed = false) 
   assert.match(row[afterKey], /^[0-9a-f]{64}$/, '#347 measured after');
   return artifact348After(kind, key, row[afterKey], ARTIFACT_348, attributed);
 }
-function validateEntry347(delta, earlier, { measure, readRaw, readme, renderMembers, artifactDelta = ARTIFACT_348 }) {
+function validateEntry347(delta, earlier, { measure, readRaw, readme, renderMembers, artifacts, artifactDelta = ARTIFACT_348 }) {
   validateArtifact348(artifactDelta, delta, { measure, readRaw, readme });
   assert.deepStrictEqual(Object.keys(delta).sort(), ['schema_version', 'issue', 'provenance', 'surfaces', 'files', 'unchanged_surfaces'].sort(), '#347 closed delta shape');
   assert.strictEqual(delta.schema_version, 1); assert.strictEqual(delta.issue, 347);
@@ -1149,7 +1206,28 @@ function validateEntry347(delta, earlier, { measure, readRaw, readme, renderMemb
   assert.deepStrictEqual(Object.keys(delta.files).sort(), [...ENTRY_347_FILES].sort(), '#347 exact changed files');
   assert.deepStrictEqual([...delta.unchanged_surfaces].sort(), [...ENTRY_347_UNCHANGED], '#347 exact untouched surfaces');
   assert.deepStrictEqual(Object.keys(renderMembers).sort(), ['agents', 'hooks'], '#347 exact rendered member groups');
-  for (const [id, expected] of Object.entries(ENTRY_347_RENDER_MEMBERS)) assert.deepStrictEqual([...renderMembers[id]].sort(), [...expected].sort(), '#347 exact rendered members ' + id);
+  for (const [id, expected] of Object.entries(ENTRY_347_RENDER_MEMBERS)) {
+    // Hash validation below remains at the real current stage. Only identity
+    // membership composes the immutable347 roster with measured new identities.
+    const added = [];
+    for (const native of Object.values(unitEntry.issue463Layer.rendered).filter(row => row.host === 'claude' && row.source_id === id && row.before === null)) {
+      const source = unitEntry.issue463Layer.files[native.source];
+      assert(source && source.before === null, '#347 current native identity has no invented Source predecessor');
+      assert(!expected.includes(native.source), '#347 current native identity is absent historical member roster');
+      assert.strictEqual(sha256(readRaw(native.source)), source.after, '#347 current native member Source');
+      const current = artifacts.filter(item => item.source_id === id && item.source === native.source);
+      assert.strictEqual(current.length, native.after_copies, '#347 exact current native copy count');
+      for (const item of current) {
+        assert(Object.hasOwn(item, 'bytes') && Object.hasOwn(item, 'origin'), '#347 current native identity is a Claude artifact');
+        assert.strictEqual(item.kind ?? null, native.kind, '#347 current native artifact kind');
+        assert.strictEqual(item.newline, native.newline, '#347 current native artifact newline');
+        assert.strictEqual(typeof item.content, 'string');
+        assert.strictEqual(sha256(item.content.replace(/version=\d+\.\d+\.\d+/g, 'version=<dynamic>')), native.after, '#347 current native rendered bytes');
+        added.push(native.source);
+      }
+    }
+    assert.deepStrictEqual([...renderMembers[id]].sort(), [...expected, ...added].sort(), '#347 exact rendered members ' + id);
+  }
   for (const [kind, anchors] of [['surfaces', ENTRY_347_BEFORE_SURFACES], ['files', ENTRY_347_BEFORE_FILES]]) {
     for (const [key, anchor] of Object.entries(anchors)) {
       const row = delta[kind][key];
@@ -1178,7 +1256,7 @@ function validateEntry347(delta, earlier, { measure, readRaw, readme, renderMemb
 
 // Pins and captured sources of the linked-task proof. The defaults read the real bytes; the
 // #341 negative fixtures only pass in-memory golden, README, delta or file variants.
-function assertLinkedPinsAndSources(input) { return unitEntry.validateSourceConsumer(() => assertLinkedPinsAndSourcesBody(input)); }
+function assertLinkedPinsAndSources(input) { return assertLinkedPinsAndSourcesBody(input); }
 function assertLinkedPinsAndSourcesBody({ before, declared, delta, golden, measured, readme, artifacts, entryDelta = ENTRY_347, artifactDelta = ARTIFACT_348, identityDelta = IDENTITY,
   identitySampleText = fs.readFileSync(path.join(ROOT, 'docs/communication-evaluation/samples.json'), 'utf8'),
   identitySampleReadme = fs.readFileSync(path.join(ROOT, 'docs/communication-evaluation/README.md'), 'utf8'),
@@ -1188,7 +1266,7 @@ function assertLinkedPinsAndSourcesBody({ before, declared, delta, golden, measu
     measureAttributed: id => sha256(artifacts.filter(a => a.source_id === id).sort((a,b) => a.source.localeCompare(b.source)).map(a => a.source + '\0' + a.content.replace(LINKED_BLOCK_RE, '').replace(/version=\d+\.\d+\.\d+/g, 'version=<dynamic>')).join('\0')),
     readRaw, readme, renderMembers: Object.fromEntries(['hooks','skills'].map(id => [id, artifacts.filter(a => a.source_id === id).map(a => a.source)])),
     sampleText: identitySampleText, sampleReadme: identitySampleReadme });
-  validateEntry347(entryDelta, delta, { measure: id => measured.get(id), readRaw, readme, artifactDelta,
+  validateEntry347(entryDelta, delta, { measure: id => measured.get(id), readRaw, readme, artifactDelta, artifacts,
     renderMembers: Object.fromEntries(['agents', 'hooks'].map(id => [id, artifacts.filter(item => item.source_id === id).map(item => item.source)])) });
   // Pins: every new layer starts at the independently retained preceding value.
   for (const surface of golden.surfaces) {
@@ -1259,6 +1337,14 @@ test('linked-task scoped pins follow the owner pre-T06 capture and the measured 
     const changedMembers = row.source_members
       .filter((member) => sha256(fs.readFileSync(path.join(ROOT, member.source))) !== member.sha256)
       .map((member) => member.source);
+    // Newly measured rendered identities have no member in the immutable old capture.
+    for (const native of Object.values(unitEntry.issue463Layer.rendered).filter(item => item.host === 'claude' && item.source_id === surface.source_id && item.before === null)) {
+      const sourceRow = unitEntry.issue463Layer.files[native.source];
+      assert(sourceRow && sourceRow.before === null, `new measured member has no invented Source predecessor: ${native.source}`);
+      assert.strictEqual(sha256(fs.readFileSync(path.join(ROOT, native.source))), sourceRow.after, `new measured member Source: ${native.source}`);
+      assert(!changedMembers.includes(native.source), `new measured member is absent old capture: ${native.source}`);
+      changedMembers.push(native.source);
+    }
     for (const member of changedMembers) {
       assert(declared.has(member) || declared341.has(member) || ENTRY_347_FILES.includes(member) || unitEntry.files.includes(member), `drift of ${surface.source_id} is attributed to a declared T06 path: ${member}`);
       contributors.add(member);
@@ -1269,7 +1355,8 @@ test('linked-task scoped pins follow the owner pre-T06 capture and the measured 
   }
   // #341: the affected surfaces are the owner after map plus exactly the surfaces the delta declares.
   const captureOrder = before.active_golden_before.surfaces.map((surface) => surface.source_id);
-  const campaignSurface = id => Object.hasOwn(unitEntry.campaignLayer.surfaces, id) || Object.hasOwn(unitEntry.issue407Layer.surfaces, id);
+  const nativeSurfaces = unitEntry.issue463Layer.surfaces.claude;
+  const campaignSurface = id => Object.hasOwn(unitEntry.campaignLayer.surfaces, id) || Object.hasOwn(unitEntry.issue407Layer.surfaces, id) || Boolean(nativeSurfaces[id] && nativeSurfaces[id].before !== nativeSurfaces[id].after);
   assert.deepStrictEqual(affected, captureOrder.filter((id) => id in OWNER_POST_T06.surfaces || delta341Row(delta, 'surfaces', id) || entry347Row(ENTRY_347, 'surfaces', id) || campaignSurface(id)),
     'measured affected surfaces equal the historical owner/deltas plus the independently pinned campaign surfaces');
   assert.deepStrictEqual(affected.filter((id) => !delta341Row(delta, 'surfaces', id) && !entry347Row(ENTRY_347, 'surfaces', id) && !campaignSurface(id)),
@@ -1372,8 +1459,15 @@ test('#341 linked-task layer refuses edits outside the delta, wrong pins, bad de
   const base = { before, declared, delta, golden, measured, readme, artifacts: report.artifacts };
   assertLinkedPinsAndSources(base);
   // In-memory variants only: no pin, README, capture or source file is written.
-  const refused = (label, overrides) => assert.throws(() => assertLinkedPinsAndSources({ ...base, ...overrides }),
-    (error) => error instanceof assert.AssertionError, `${label} must be refused`);
+  const negativeNames=[],selectedNegativeNames=[];
+  // Every variant is registered in the same order in every independent process.
+  // Default execution immediately performs every original assertion in that order.
+  const runNegativeVariant=(name,fn)=>{
+    assert(!negativeNames.includes(name),'unique sourceguard negative variant');const index=negativeNames.length;negativeNames.push(name);
+    if(SOURCEGUARD_COHORT.kind!=='negative'||index%SOURCEGUARD_COHORT.count===SOURCEGUARD_COHORT.index){selectedNegativeNames.push(name);return fn();}
+  };
+  const refused = (label, overrides) => runNegativeVariant('linked:'+label,()=>assert.throws(() => assertLinkedPinsAndSources({ ...base, ...overrides }),
+    (error) => error instanceof assert.AssertionError, `${label} must be refused`));
   const variant = (mutate) => { const copy = JSON.parse(JSON.stringify(delta)); mutate(copy); return copy; };
   const readRaw = (relative) => fs.readFileSync(path.join(ROOT, relative));
   const edited = (target) => (relative) => (relative === target ? Buffer.concat([readRaw(relative), Buffer.from('\nedit outside the measured delta\n')]) : readRaw(relative));
@@ -1397,6 +1491,14 @@ test('#341 linked-task layer refuses edits outside the delta, wrong pins, bad de
   refused('#347 omitted file', { entryDelta: variant347(d => { delete d.files[ENTRY_347_FILES[0]]; }) });
   refused('#347 extra rendered member', { artifacts: [...report.artifacts, { ...report.artifacts.find(item => item.source_id === 'agents'), source: 'agents/foreign.md' }] });
   refused('#347 omitted rendered member', { artifacts: report.artifacts.filter(item => item.source !== ENTRY_347_MEMBERS.agents[0]) });
+  for (const native of Object.values(unitEntry.issue463Layer.rendered).filter(row => row.host === 'claude' && ['agents', 'hooks'].includes(row.source_id) && row.before === null)) {
+    const matches = item => item.source_id === native.source_id && item.source === native.source;
+    const member = report.artifacts.find(matches);assert(member, '#347 measured current native member exists');
+    refused('#347 omitted measured native member', { artifacts: report.artifacts.filter(item => !matches(item)) });
+    refused('#347 duplicate measured native member', { artifacts: [...report.artifacts, { ...member }] });
+    refused('#347 edited measured native rendered bytes', { artifacts: report.artifacts.map(item => matches(item) ? { ...item, content: item.content + '\nforeign native render' } : item) });
+    refused('#347 edited measured native Source', { readRaw: edited(native.source) });
+  }
   refused('#347 wrong file before', { entryDelta: variant347(d => { d.files[ENTRY_347_FILES[0]].before = wrong; }) });
   refused('#347 invented file after', { entryDelta: variant347(d => { d.files[ENTRY_347_FILES[0]].after = wrong; d.files[ENTRY_347_FILES[0]].attributed_after = wrong; }) });
   refused('#347 declared file edited', { readRaw: edited(ENTRY_347_FILES[0]) });
@@ -1406,7 +1508,7 @@ test('#341 linked-task layer refuses edits outside the delta, wrong pins, bad de
 
   // #348 is checked against the retained #347 end state, not a rewritten fixture.
   const variant348 = mutate => { const copy = JSON.parse(JSON.stringify(ARTIFACT_348)); mutate(copy); return copy; };
-  const refused348 = (label, overrides) => assert.throws(() => assertLinkedPinsAndSources({ ...base, ...overrides }), error => error instanceof assert.AssertionError, '#348 ' + label + ' must be refused');
+  const refused348 = (label, overrides) => runNegativeVariant('artifact348:'+label,()=>assert.throws(() => assertLinkedPinsAndSources({ ...base, ...overrides }), error => error instanceof assert.AssertionError, '#348 ' + label + ' must be refused'));
   const wrong348 = sha256('not a measured348 value');
   refused348('foreign before', { artifactDelta: variant348(d => { d.surfaces.agents.before = wrong348; d.surfaces.agents.attributed_before = wrong348; }) });
   refused348('invented after', { artifactDelta: variant348(d => { d.surfaces.agents.after = wrong348; d.surfaces.agents.attributed_after = wrong348; }) });
@@ -1428,7 +1530,7 @@ test('#341 linked-task layer refuses edits outside the delta, wrong pins, bad de
 
   // Strong terminal-layer negatives retain every historical negative above.
   const identityVariant = mutate => { const copy = JSON.parse(JSON.stringify(IDENTITY)); mutate(copy); return copy; };
-  const refuseIdentity = (label, overrides) => assert.throws(() => assertLinkedPinsAndSources({ ...base, ...overrides }), e => e instanceof assert.AssertionError, 'identity ' + label + ' must be refused');
+  const refuseIdentity = (label, overrides) => runNegativeVariant('identity:'+label,()=>assert.throws(() => assertLinkedPinsAndSources({ ...base, ...overrides }), e => e instanceof assert.AssertionError, 'identity ' + label + ' must be refused'));
   const wrongIdentity = sha256('unmeasured identity value');
   const identityRead = rel => fs.readFileSync(path.join(ROOT, rel));
   const identityEdit = target => rel => rel === target ? Buffer.concat([identityRead(rel), Buffer.from('\nforeign identity edit\n')]) : identityRead(rel);
@@ -1469,6 +1571,9 @@ test('#341 linked-task layer refuses edits outside the delta, wrong pins, bad de
   refuseIdentity('unrelated sample node edit', { identitySampleText: withSampleShas(identitySampleText, [['/entries/2/supporting/partial/after', wrongIdentity]]) });
   refuseIdentity('undocumented samples', { identitySampleReadme: identitySampleDoc.split(IDENTITY.files['skills/forge-task/SKILL.md'].after).join('') });
 
+  assert(negativeNames.length>0&&selectedNegativeNames.length>0,'nonempty sourceguard negative partition');
+  if(SOURCEGUARD_COHORT.kind==='all')assert.deepStrictEqual(selectedNegativeNames,negativeNames,'default retains every negative in original order');
+  process.stdout.write('CI sourceguard negative roster: '+JSON.stringify({cohort:SOURCEGUARD_COHORT,all:negativeNames,selected:selectedNegativeNames})+'\n');
   process.stdout.write('ok - issue-347-linked-task-layer-chains-exact-members-and-refuses-tampering\n');
 });
 
@@ -1494,6 +1599,11 @@ test('guard CLI returns parseable JSON and release-gate status', () => {
   });
 });
 
+assert(sourceguardSelectedNames.length>0,'nonempty sourceguard top-case partition');
+assert.strictEqual(sourceguardTopNames.filter(name=>name===SOURCEGUARD_NEGATIVE_TEST).length,1,'exactly one heavy in-memory negative case');
+assert.deepStrictEqual(sourceguardSelectedNames,sourceguardTopNames.filter(name=>SOURCEGUARD_COHORT.kind==='all'||(SOURCEGUARD_COHORT.kind==='core'?name!==SOURCEGUARD_NEGATIVE_TEST:name===SOURCEGUARD_NEGATIVE_TEST)),'exact top-case partition');
+process.stdout.write('CI sourceguard top roster: '+JSON.stringify({cohort:SOURCEGUARD_COHORT,all:sourceguardTopNames,selected:sourceguardSelectedNames})+'\n');
 process.stdout.write(`\n${passed} passed, ${failed} failed\n`);
 process.stdout.write('Local source/render acceptance only: no network or real provider process was used.\n');
 if (failed > 0) process.exitCode = 1;
+});

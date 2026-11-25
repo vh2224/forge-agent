@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/issue-461/distribution.cjs');
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+
+const unitEntry = require('./fixtures/issue-463/distribution.cjs');
 
 // forge-communication-surfaces.test.js — proves the orchestration and status
 // skills follow shared/forge-communication.md by POINTER, not by a second copy;
@@ -2309,3 +2312,4 @@ if (failed > 0) {
   for (const f of failures) console.log(`  FAIL ${f.name}: ${f.error}`);
   process.exit(1);
 }
+});

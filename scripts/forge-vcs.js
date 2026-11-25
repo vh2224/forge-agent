@@ -32,7 +32,7 @@ function isGsdPath(p) {
 }
 
 function optionsFor(opts) {
-  const out = { encoding: 'buffer', maxBuffer: opts.maxBuffer == null ? DEFAULT_MAX_BUFFER : opts.maxBuffer, shell: false };
+  const out = { encoding: 'buffer', maxBuffer: opts.maxBuffer == null ? DEFAULT_MAX_BUFFER : opts.maxBuffer, shell: false, windowsHide: true };
   // Do not turn an absent env into {}; spawnSync must retain process.env exactly.
   if (opts.env !== undefined) out.env = opts.env;
   return out;

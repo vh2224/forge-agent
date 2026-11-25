@@ -21,6 +21,10 @@ async function run(host){
   const held=windows.observed(f.owner);assert.equal(held.binding.kind,'unit-execution');assert.equal(held.binding.host_runtime,host);assert.equal(held.binding.host_session_sha256,roots.digest(previous));
   actor(host,'current-execution-'+host);
   const capture=()=>api.capture({owner:f.owner,request:q}),current=capture();assert.equal(current.scope.measurement_profile,'milestone-execution-coordination-v1');
+  // The generic execution orphan profile remains sidecar-only. A locator or
+  // native route does not establish Agent join or permit adopting this window.
+  assert.throws(()=>api.capture({owner:f.owner,request:{...q,route:{...q.route,worker_mode:'native'}}}),error=>error.code==='owner-window-execution-scope-mismatch');
+  assert.equal(windows.observed(f.owner).sha256,held.sha256,'native refusal does not settle or alter the sidecar window');
   assert.equal(current.scope.retained_channels.length,8);assert(current.scope.retained_channels.some(row=>row.present));assert(current.scope.retained_channels.some(row=>!row.present));
   const observe=challenge=>({coverage_complete:true,previous_session_sha256:challenge.scope.previous_host_session_sha256,previous_owner_stopped:ownerExited,
    writers:[{state:ownerExited?'joined':'active',reference:'actual old producer ChildProcess.close'},{state:writerClosed?'joined':'active',reference:'actual separately tracked writer ChildProcess.close'}],

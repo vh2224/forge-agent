@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 'use strict';
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+
 
 // #341 (S01/T03) distribution suite: the canonical review spec, the review
 // schemas, the native agents, the mandatory `review` procedure module and the
@@ -23,7 +26,7 @@ const TRISTATE = ['yes', 'no', 'unknown'];
 // Same line-ending normalization as the smoke readers: CRLF is not content.
 // Published changelog assertions retain their exact measured predecessor.
 const read = relative => (relative === 'CHANGELOG.md'
-  ? require('./fixtures/issue-461/distribution.cjs').issue455View.issues451452View.projectRead(p => fs.readFileSync(path.join(ROOT, p)))(relative).toString('utf8')
+  ? require('./fixtures/issue-463/distribution.cjs').issue455View.issues451452View.projectRead(p => fs.readFileSync(path.join(ROOT, p)))(relative).toString('utf8')
   : fs.readFileSync(path.join(ROOT, relative), 'utf8')).replace(/\r\n?/g, '\n');
 const count = (text, needle) => text.split(needle).length - 1;
 const sha256 = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -456,3 +459,4 @@ test('CHANGELOG: #440 S03 measured line rejects altered, missing and duplicate e
   console.log(`\nforge-review-policy-distribution: ${passed}/${passed + failed} checks passed`);
   if (failed) process.exitCode = 1;
 })();
+});

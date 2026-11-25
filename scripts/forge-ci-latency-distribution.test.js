@@ -1,6 +1,9 @@
 'use strict';
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
-const entry=require('./fixtures/issue-461/distribution.cjs');
+const entry=require('./fixtures/issue-463/distribution.cjs');
 const root=path.resolve(__dirname,'..');
 const artifacts=require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts;
 assert.equal(entry.validate({artifacts}),true);
@@ -31,3 +34,4 @@ for(const file of ['scripts/forge-task-preparation.js','scripts/forge-task-prepa
  assert.throws(()=>entry.validate({artifacts,readRaw:relative=>relative===file?Buffer.from('foreign telemetry drift'):fs.readFileSync(path.join(root,relative))}),'upstream native telemetry changes remain guarded');
 }
 console.log('PASS additive CI source layer, undeclared source drift, four independent pin mutations and historical-layer tamper refusal');
+});

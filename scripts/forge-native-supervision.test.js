@@ -269,6 +269,15 @@ async function run() {
     }
   }
   console.log('PASS issue297 supervision resume: 124/128 journals resume with the exact dispatch; foreign, truncated and 129 dispatches refused without reattach');
+  for (const forged of [{}, { joined: true, provider_called: true }, Object.freeze({})]) {
+    const denied = base(clock()); let invoked = 0;
+    await assert.rejects(() => api.supervise({ ...denied, nativeHostAdmission: forged, nativeHostRequest: {} },
+      () => { invoked++; return { status: 'done' }; }), /native-host-native-admission-required/);
+    assert.equal(invoked, 0); assert.equal(fs.existsSync(denied.journal.file), false, 'forged handle cannot create a journal');
+    assert.throws(() => api.journalStore(denied.journal, denied.identity,
+      { nativeHostAdmission: forged, nativeHostRequest: {} }), /native-host-native-admission-required/);
+    assert.equal(fs.existsSync(denied.journal.file), false);
+  }
   console.log('native supervision discriminating tests passed');
 }
 if (require.main === module) run().catch(error => { console.error(error); process.exitCode = 1; });

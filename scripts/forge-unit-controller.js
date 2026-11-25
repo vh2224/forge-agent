@@ -162,6 +162,46 @@ function preferredRecordFile(cwd, kind, key) {
   // a path before deciding whether that publication is in their scope.
   return paths.find(file => fs.existsSync(file)) || paths[0];
 }
+// Optional original workflow identity. Only beginSerial consumes the loop's
+// in-process option; remaining_steps is a changing budget, never identity.
+function workflowProjection(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+      || Object.getPrototypeOf(value) !== Object.prototype
+      || Reflect.ownKeys(value).some(key => typeof key !== 'string'
+        || !['mode', 'workflow_id', 'remaining_steps', 'step_count', 'max_steps'].includes(key))
+      || Object.values(Object.getOwnPropertyDescriptors(value)).some(d => !own(d, 'value'))
+      || !['auto', 'task', 'step'].includes(value.mode)
+      || typeof value.workflow_id !== 'string' || !value.workflow_id.trim() || value.workflow_id.includes('\u0000')
+      || ['remaining_steps', 'step_count', 'max_steps'].some(key => own(value, key)
+        && (!Number.isSafeInteger(value[key]) || value[key] < 0))) {
+    throw new ControllerError('invalid-request', 'invalid original workflow context');
+  }
+  return { workflow_id: value.workflow_id, mode: value.mode };
+}
+function workflowBinding(transaction, workflow) {
+  return { schema_version: 1, ...workflow, begin_key: transaction.idempotency_key,
+    unit_key: transaction.unit.key, milestone: transaction.milestone,
+    slice: transaction.after.state.active_slice && transaction.after.state.active_slice !== '\u2014'
+      ? transaction.after.state.active_slice : null, host_runtime: transaction.host_runtime,
+    owner_digest: transaction.owner_digest, lease_generation: transaction.lease_generation };
+}
+function assertWorkflowBinding(transaction) {
+  const present = own(transaction, 'workflow_binding');
+  const eventPresent = own(transaction.event, 'workflow_binding_sha256');
+  if (!present && !eventPresent) return; // immutable legacy record, not bridge authority
+  const binding = transaction.workflow_binding;
+  let projected;
+  try { projected = workflowProjection(binding && { mode: binding.mode, workflow_id: binding.workflow_id }); } catch {}
+  if (!present || !eventPresent || transaction.action !== 'begin' || !projected
+      || !binding || typeof binding !== 'object' || Array.isArray(binding)
+      || Object.getPrototypeOf(binding) !== Object.prototype
+      || stableStringify(Object.keys(binding).sort()) !== stableStringify(Object.keys(workflowBinding(transaction, projected)).sort())
+      || stableStringify(binding) !== stableStringify(workflowBinding(transaction, projected))
+      || transaction.event.workflow_binding_sha256 !== sha(binding)) {
+    throw new ControllerError('record-conflict', 'original workflow binding diverges from begin/event');
+  }
+}
+
 function validateRecord(record, kind, key, options) {
   const identity = kind === 'boundary' ? record.unit : record.idempotency_key;
   if (identity !== key) throw new ControllerError('record-conflict', `identidade divergente em ${kind}`);
@@ -177,6 +217,7 @@ function validateRecord(record, kind, key, options) {
         (record.boundary && (sha(record.result) !== record.boundary.result_checksum || sha(record.event) !== record.boundary.event_checksum))) {
       throw new ControllerError('record-conflict', 'checksum/identidade da transação inválido');
     }
+    assertWorkflowBinding(record);
     // Issue 343 U0d: a stored plan_generation enrollment belongs to exactly the plan-slice
     // begin that carries it; its digest is recomposed from its own fields. The completion
     // evidence lives inside result, so the result checksum above already covers it.
@@ -1493,6 +1534,9 @@ function beginMembersInside(cwd, request, options) {
 function beginInside(cwd, request, options, extra = {}) {
   const serialBoundary = extra.serialBoundary === SERIAL_BEGIN_CONTEXT;
   const input = object(request, 'request');
+  if (own(input, 'workflow_binding')) throw new ControllerError('invalid-request', 'workflow binding is emitted by canonical serial entry');
+  const originalWorkflow = serialBoundary && options && own(options, 'workflow')
+    ? workflowProjection(options.workflow) : null;
   const selection = input.unit ? { ok: true, milestone: input.milestone, unit: unitFromRequest(input), slice: input.slice || null }
     : select(cwd, input, options);
   if (!selection.ok) return selection;
@@ -1561,6 +1605,12 @@ function beginInside(cwd, request, options, extra = {}) {
     }
     fail(options, 'serial-lineage-checked');
   }
+  if (existing && own(existing, 'workflow_binding') && originalWorkflow
+      && stableStringify(originalWorkflow) !== stableStringify(workflowProjection({
+        mode: existing.workflow_binding.mode, workflow_id: existing.workflow_binding.workflow_id }))) {
+    throw new ControllerError('record-conflict', 'original workflow cannot be rebound');
+  }
+  // A legacy BEGIN is never retrofitted when replayed by a newer loop.
   if (existing) return runTransaction(cwd, existing, ownerToken,
     input.generation || (serialBoundary || boundBatch ? existing.lease_generation : undefined), options);
   const otherPending = pendingTransactions(cwd);
@@ -1594,6 +1644,11 @@ function beginInside(cwd, request, options, extra = {}) {
   try {
     fail(options, 'before-make-transaction');
     transaction = makeTransaction(cwd, input, 'begin', unit, key, ownerToken, acquired.generation, hostRuntime, nowOf(options));
+    if (originalWorkflow) {
+      transaction.workflow_binding = workflowBinding(transaction, originalWorkflow);
+      transaction.event.workflow_binding_sha256 = sha(transaction.workflow_binding);
+      assertWorkflowBinding(transaction);
+    }
     if (resumed) transaction.resumed_pause = resumed;
     if (decomposed) transaction.decomposition_entry = decomposed;
     if (parentVerification) transaction.decomposition_verification = parentVerification;

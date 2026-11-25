@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 'use strict';
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+
 
 // S03/T07: composed end-to-end proof of the milestone time options, the milestone
 // time governance, the proven endpoint and the linked task, on host `claude` and
@@ -665,7 +668,7 @@ async function hostChain(host) {
 // ---------------------------------------------------------------------------
 // Published changelog assertions retain their exact measured predecessor.
 function read(relative) { return relative === 'CHANGELOG.md'
-  ? require('./fixtures/issue-461/distribution.cjs').issue455View.issues451452View.projectRead(p => fs.readFileSync(path.join(SOURCE, p)))(relative).toString('utf8')
+  ? require('./fixtures/issue-463/distribution.cjs').issue455View.issues451452View.projectRead(p => fs.readFileSync(path.join(SOURCE, p)))(relative).toString('utf8')
   : fs.readFileSync(path.join(SOURCE, relative), 'utf8'); }
 function sectionOf(text, heading) {
   const from = text.indexOf('\n' + heading + '\n');
@@ -863,3 +866,4 @@ if (!isMainThread) {
       else console.log('milestone time chain: both hosts, documentation and inventory passed (temporary roots, simulated transports, no provider)');
     });
 }
+});

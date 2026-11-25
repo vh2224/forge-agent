@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 'use strict';
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -63,12 +66,12 @@ for (const relative of active) {
   checkLinks(path.join(options.projectRoot, relative), file => projection.get(path.resolve(file)), file => projection.has(path.resolve(file)));
 }
 reconstruct(file => claude.stripOriginHeader(projection.get(path.resolve(options.projectRoot, file))));
-const successor = require('./fixtures/issue-461/distribution.cjs');
+const successor = require('./fixtures/issue-463/distribution.cjs');
 const currentSmoke = read('scripts/forge-smoke.js');
 assert.doesNotThrow(() => successor.previousSmoke(currentSmoke));
 assert.doesNotThrow(() => successor.predecessorSmoke(currentSmoke));
 const historicalSmoke = require('zlib').gunzipSync(Buffer.from(successor.projectContextLayer.files['scripts/forge-smoke.js'].before_gzip_base64, 'base64')).toString('utf8');
-const historicalDistribution = require('./fixtures/issue-461/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issues-434-436/distribution.cjs');
+const historicalDistribution = require('./fixtures/issue-463/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issues-434-436/distribution.cjs');
 assert.doesNotThrow(() => historicalDistribution.previousSmoke(historicalSmoke));
 assert.doesNotThrow(() => historicalDistribution.predecessorSmoke(historicalSmoke));
 assert.throws(() => successor.previousSmoke(historicalSmoke), /unrecognized smoke changes: project context measured source/);
@@ -86,3 +89,4 @@ assert(generated.content.includes('Se existir .agents/project-policy.md'));
 assert(Buffer.byteLength(generated.content) < 8192);
 assert(!codexResult.artifacts.some(row => row.source.startsWith('.agents/reference/')), 'history is not automatic host context');
 console.log('PASS project context: exact preservation, corruption/missing negatives, budgets, idempotence, source/Claude links, portable historical reconstruction and Codex conditional policy');
+});

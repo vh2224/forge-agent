@@ -13,7 +13,13 @@ const digest = value => crypto.createHash('sha256').update(String(value)).digest
 function fail(code) { throw Object.assign(new Error(code), { code }); }
 const systemClock = { wall: Date.now, monotonic: () => performance.now(), setTimeout, clearTimeout };
 
-function journalStore(journal, identity) {
+function hostAdmission(options) {
+  if (options.nativeHostAdmission === undefined) return null;
+  return require('./forge-native-host-bridge').assertNativeAdmission(options.nativeHostAdmission, options.nativeHostRequest);
+}
+
+function journalStore(journal, identity, options = {}) {
+  const admission = hostAdmission(options);
   if (!journal) return null;
   const root = path.resolve(journal.root || ''), file = path.resolve(journal.file || '');
   if (typeof journal.authorize !== 'function' || journal.authorize({ root, file, identity }) !== true) fail('native-journal-authority-required');
@@ -26,16 +32,24 @@ function journalStore(journal, identity) {
         || !fs.statSync(file).isFile() || key(fs.realpathSync.native(file)) !== key(file))) fail('native-journal-path');
   };
   validate();
+  const admittedWrite = (state, staging, action) => {
+    if (!admission) return action();
+    const bytes = Buffer.byteLength(JSON.stringify(state));
+    const reservation = admission.reserve('lifecycle-journal', bytes, file, staging);
+    try { action(); admission.commit(reservation); }
+    catch (error) { admission.reconcile(reservation); throw error; }
+  };
   return {
     reference: digest(identity + '\0' + file),
     read() { validate(); if (!fs.existsSync(file)) return null;
       if (fs.statSync(file).size > 32768) fail('native-journal-size');
       try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { fail('native-journal-invalid'); } },
-    create(state) { validate(); try { fs.writeFileSync(file, JSON.stringify(state), { flag: 'wx', mode: 0o600 }); }
-      catch { fail('native-journal-collision'); } },
+    create(state) { validate();
+      admittedWrite(state, [], () => { try { fs.writeFileSync(file, JSON.stringify(state), { flag: 'wx', mode: 0o600 }); }
+        catch { fail('native-journal-collision'); } }); },
     save(state) { validate();
       if (fs.existsSync(path.join(root, `.${path.basename(file)}.${process.pid}.tmp`))) fail('native-journal-temp-collision');
-      writeJsonAtomic(file, state); },
+      admittedWrite(state, [path.join(root, `.${path.basename(file)}.${process.pid}.tmp`)], () => writeJsonAtomic(file, state)); },
   };
 }
 
@@ -54,7 +68,9 @@ async function supervise(options, invoke) {
   const ceiling = ceilingFromRoute(options.route), policy = liveness.normalizePolicy(options.policy);
   // Trusted request binding for an observed host identity; unsafe values bind nothing.
   const dispatchId = require('./forge-attempt-telemetry').dispatchCode(options.dispatchId);
-  const store = journalStore(options.journal, identity), previous = store?.read();
+  // Native-host handles are validated before any lifecycle journal creation.
+  const admission = hostAdmission(options);
+  const store = journalStore(options.journal, identity, options), previous = store?.read();
   const caps = Object.fromEntries(['result', 'remote_events', 'open_tools', 'cancel', 'resume', 'stop_proof']
     .map(key => [key, adapter?.capabilities?.[key] === true ? 'available' : 'unknown']));
   let state = { schema_version: 1, identity, start_wall_ms: wall, last_wall_ms: wall,
@@ -115,15 +131,29 @@ async function supervise(options, invoke) {
     if (dispose) { try { dispose(); } catch { /* no host text in evidence */ } dispose = null; } };
   const finish = (ok, reason, result) => {
     if (finished) return;
+    let provider = state.provider_called ?? 'unknown';
+    if (ok) {
+      try {
+        provider = admission ? admission.providerObservation() : true;
+        if (![true, false, 'unknown'].includes(provider)) fail('native-provider-observation-invalid');
+      } catch (error) {
+        ok = false; provider = 'unknown';
+        reason = /^[a-z0-9-]{1,100}$/.test(error?.code || '') ? error.code : 'native-provider-observation-invalid';
+      }
+    }
     finished = true; clean(); state.phase = ok ? 'terminal' : 'interrupted';
     state.reason_code = reason; if (ok) { state.possible_writer = false; state.stopped = 'terminal'; }
     try { save(); } catch { ok = false; reason = 'native-journal-write-failed'; }
-    resolveOutcome({ ok, reason_code: reason, provider_called: ok ? true : state.provider_called ?? 'unknown',
+    resolveOutcome({ ok, reason_code: reason, provider_called: provider,
       ...(ok ? { result } : {}), lifecycle: snapshot() });
   };
   const terminalResult = value => { try { return terminal(value) === true; } catch { return false; } };
   const receiveTerminal = value => {
     if (!terminalResult(value)) return false;
+    if (admission) {
+      try { if (admission.assertTerminalAdmission() !== true) fail('native-host-terminal-admission-required'); }
+      catch (error) { if (!finished) finish(false, /^[a-z0-9-]{1,100}$/.test(error?.code || '') ? error.code : 'native-host-terminal-admission-required'); return true; }
+    }
     // Validate clocks and startup/silence/ceiling limits against existing timestamps first.
     if (!finished) tick();
     if (!finished) finish(true, 'native-terminal', value);

@@ -1,4 +1,7 @@
 'use strict';
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+
 
 const assert = require('assert');
 const fs = require('fs');
@@ -26,7 +29,7 @@ assert.strictEqual(hash(predecessorCi), latencyLayer.ci_before.sha256);
 // ' --verbose true' suffix on the existing Run test suites command.
 const verboseLayer = require('./fixtures/issue-440/workflow-layer.json');
 const gitBlob = value => crypto.createHash('sha1').update(`blob ${value.length}\0`).update(value).digest('hex');
-const ciHistoryView = require('./fixtures/issue-461/distribution.cjs');
+const ciHistoryView = require('./fixtures/issue-463/distribution.cjs');
 const historicalCi = bytes => ciHistoryView.projectIssue461Read(() => bytes)('.github/workflows/ci.yml');
 assert.strictEqual(hash(bytes.ci), '0c2deeaa3f7b429ba1d7c208836159f80ca48f0cae36ab171b4a1d26b18dc8ad');
 assert.strictEqual(gitBlob(bytes.ci), '9b968e1cd62509edca22cffd8b779a3a25063b50');
@@ -368,3 +371,4 @@ assert.strictEqual(invalidCli.status, 2);
 assert(invalidCli.stderr.includes('cli-argument-invalid'));
 marker('truth', 4, 'CI app pins and semantic mappings preserved; smoke section 76 structure and S04 contract checked; remote validation pending');
 console.log('forge-ci-workflow: all assertions passed (local model and structural checks; no hosted workflow execution)');
+});

@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 'use strict';
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+
 
 const assert = require('assert/strict');
 const fs = require('fs');
@@ -581,7 +584,7 @@ try {
     for (const term of ['challenge', 'defense', 'rebuttal', '--mode full', '--allow-append .gsd/forge/events.jsonl', '--allow-publication', 'DEFENSE_FILE', '--own-lease', '--own-run', '--writer-stopped', 'saída 3 ou 4', 'REVIEW', 'review-fix', 'reconciliação', 'Claude', 'opcional']) assert.ok(inserted.includes(term), term);
     assert.ok(!inserted.split('\n').some(line => /^(#|\*\*)/.test(line)));
     const sourceGuard = require('./forge-dispatch-source-guard');
-    const historicalRegistry = require('./fixtures/issue-461/distribution.cjs').loadHistoricalFixture('scripts/fixtures/owner-recovery/distribution.cjs').previousRegistry(require('./fixtures/issue-461/distribution.cjs').projectRegistry(sourceGuard.SOURCE_REGISTRY));
+    const historicalRegistry = require('./fixtures/issue-463/distribution.cjs').loadHistoricalFixture('scripts/fixtures/owner-recovery/distribution.cjs').previousRegistry(require('./fixtures/issue-463/distribution.cjs').projectRegistry(sourceGuard.SOURCE_REGISTRY));
     assert.equal(historicalRegistry.length, 248, 'exact historical inventory remains preserved');
     assert.deepEqual(sourceGuard.audit(), { ok: true, root: path.resolve(__dirname, '..'), discovered_count: 256, registered_count: 256, unexpected: [], missing: [], errors: [] });
   });
@@ -612,3 +615,4 @@ try {
   assert.ok(path.resolve(temporary).startsWith(path.resolve(fs.realpathSync.native(os.tmpdir())) + path.sep));
   fs.rmSync(temporary, { recursive: true, force: true, maxRetries: 3 });
 }
+});

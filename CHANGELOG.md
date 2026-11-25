@@ -1,5 +1,7 @@
 ## Não lançado
 
+- Integração nativa de arquivos (#463, em preparação): owner retido com entrada por BEGIN canônico, intenção separada da admissão observada, hooks diretos e retorno capturado. Join, verificação, publicação e settlement permanecem independentes. O perfil cooperativo não é sandbox do sistema; validação integrada, comportamento do host e instalação continuam pendentes.
+
 - Recuperação de entregas concluídas (#461): reconhece os registros descritivos de execução, checkpoint, handoff e reparo no stream do milestone. A numeração continua considerando todas as posições físicas; identidade, unicidade, digests e ordem dos eventos canônicos permanecem obrigatórios.
 
 - Contexto pessoal concorrente (#460): a leitura valida a contenção dos diretórios sem exigir que o mutex continue existindo entre observações; liberação, nova aquisição e criação concorrente dos diretórios não se tornam erros de namespace. Folhas simbólicas de mutex e pais inválidos continuam recusados.

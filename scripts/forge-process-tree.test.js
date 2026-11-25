@@ -1,4 +1,7 @@
 'use strict';
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+
 // Temporary-root contract suite for the process-family proof (issue 440, S02/T02).
 // Every owner, checkout, record, journal and helper lives in a fresh temporary
 // laboratory removed in finally. Helper processes are real and report their own
@@ -196,7 +199,7 @@ test('T0 adapters verification helpers and xllm bytes unchanged', () => {
   const root = path.resolve(__dirname, '..');
   const delta = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/issue-440/distribution-delta.json'), 'utf8'));
   for (const [file, digestValue] of Object.entries(SOURCE_PINS)) {
-    const actual = sha(file === 'scripts/forge-verification-process.js' ? require('./fixtures/issue-461/distribution.cjs').projectRead(p => fs.readFileSync(path.join(root, p)))(file) : fs.readFileSync(path.join(root, file)));
+    const actual = sha(file === 'scripts/forge-verification-process.js' ? require('./fixtures/issue-463/distribution.cjs').projectRead(p => fs.readFileSync(path.join(root, p)))(file) : fs.readFileSync(path.join(root, file)));
     if (['scripts/forge-appserver-client.js', 'scripts/forge-claude-sidecar.js'].includes(file)) {
       const row = delta.files[file];
       assert.equal(row.before, digestValue, 'exact immutable adapter predecessor pin');
@@ -913,3 +916,4 @@ async function main() {
   if (failed) process.exitCode = 1;
 }
 main();
+});

@@ -75,6 +75,87 @@ const FORGE_MATCHERS = {
   PostToolUse: ['Agent', 'Bash', 'Write', 'Edit'],
 };
 
+
+// Native host observations use direct exec-form hooks: no shell may sit between
+// Claude and the fixed Node hook producer. The reference they relay is passive;
+// the Bridge validates live process/source custody and authenticates each body.
+const LIVE_HOOKS = [
+  { event: 'PreToolUse', phase: 'pre', matcher: '*' },
+  { event: 'PostToolUse', phase: 'post', matcher: '*' },
+  { event: 'PostToolUseFailure', phase: 'post-failure', matcher: '*' },
+  { event: 'PermissionDenied', phase: 'permission-denied', matcher: '*' },
+  { event: 'SubagentStart', phase: 'subagent-start' },
+  { event: 'SubagentStop', phase: 'subagent-stop' },
+  { event: 'Stop', phase: 'stop' },
+  { event: 'SessionEnd', phase: 'session-end' },
+  { event: 'ConfigChange', phase: 'config-change' },
+  { event: 'PreModelSwitch', phase: 'pre-model-switch' },
+  { event: 'PostModelSwitch', phase: 'post-model-switch' },
+];
+const OWN_PHASES = new Set([...LIFECYCLE_HOOKS, ...TOOL_HOOKS].map(row => row.phase));
+const LIVE_PHASES = new Set(LIVE_HOOKS.map(row => row.phase));
+
+function isNodeCommand(command) {
+  return typeof command === 'string' && /^(?:node(?:\.exe)?|.*[\\/]node(?:\.exe)?)$/i.test(command);
+}
+function hookPhase(hook) {
+  if (!hook || hook.type !== 'command' || typeof hook.command !== 'string') return null;
+  if (Array.isArray(hook.args)) {
+    if (!isNodeCommand(hook.command) || typeof hook.args[0] !== 'string'
+        || path.basename(hook.args[0].replace(/\\/g, '/')) !== FORGE_HOOK_MARKER) return null;
+    if (hook.args.length === 2 && OWN_PHASES.has(hook.args[1])) return hook.args[1];
+    if (hook.args.length === 3 && hook.args[1] === 'native-live' && LIVE_PHASES.has(hook.args[2])) return 'native-live:' + hook.args[2];
+    return null;
+  }
+  // Recognize the historical command we emitted, not arbitrary commands that
+  // merely mention this filename. Unknown operator commands remain untouched.
+  const match = /^node (?:~\/\.claude\/forge-hook\.js|"[^"\r\n]+[\\/]forge-hook\.js") ([a-z-]+)$/.exec(hook.command);
+  return match && OWN_PHASES.has(match[1]) ? match[1] : null;
+}
+function hookExec(args) {
+  const runtimeHome = forgeHome
+    ? forgeHome.resolveRuntimeHome('claude', process.env.CLAUDE_CONFIG_DIR ? { claudeHome: process.env.CLAUDE_CONFIG_DIR } : {})
+    : (process.env.CLAUDE_CONFIG_DIR || path.join(require('os').homedir(), '.claude'));
+  return { type: 'command', command: fs.realpathSync.native(process.execPath),
+    args: [path.join(runtimeHome, FORGE_HOOK_MARKER), ...args], onFailure: 'block' };
+}
+function ownedAt(event, entry, phase) {
+  return LIFECYCLE_HOOKS.some(row => row.event === event && row.phase === phase && entry.matcher === undefined)
+    || TOOL_HOOKS.some(row => row.event === event && row.phase === phase && (FORGE_MATCHERS[event] || ['Agent']).includes(entry.matcher))
+    || LIVE_HOOKS.some(row => row.event === event && 'native-live:' + row.phase === phase && entry.matcher === row.matcher);
+}
+function removeManaged(eventHooks, accepts) {
+  return eventHooks.filter(entry => {
+    if (!Array.isArray(entry.hooks)) return true;
+    const hadManaged = entry.hooks.some(hook => accepts(hookPhase(hook), entry));
+    entry.hooks = entry.hooks.filter(hook => !accepts(hookPhase(hook), entry));
+    return !hadManaged || entry.hooks.length > 0;
+  });
+}
+function mergeManaged(eventHooks, phase, matcher, hookEntry) {
+  const matcherMatches = entry => matcher === undefined ? entry.matcher === undefined : entry.matcher === matcher;
+  let installed = false;
+  const retained = eventHooks.filter(entry => {
+    // Scope the update to this exact matcher; Write never removes Agent.
+    if (!matcherMatches(entry) || !Array.isArray(entry.hooks)) return true;
+    let removed = false;
+    entry.hooks = entry.hooks.flatMap(hook => {
+      if (hookPhase(hook) !== phase) return [hook];
+      removed = true;
+      if (installed) return [];
+      installed = true;
+      return [hookEntry];
+    });
+    return !removed || entry.hooks.length > 0;
+  });
+  if (!installed) {
+    let target = retained.find(entry => matcherMatches(entry) && Array.isArray(entry.hooks));
+    if (!target) { target = matcher === undefined ? { hooks: [] } : { matcher, hooks: [] }; retained.push(target); }
+    target.hooks.push(hookEntry);
+  }
+  eventHooks.splice(0, eventHooks.length, ...retained);
+}
+
 // ── MCP operations ──────────────────────────────────────────────────────────
 if (mcpAdd || mcpRemove || mcpList) {
   if (!settings.mcpServers) settings.mcpServers = {};
@@ -152,37 +233,12 @@ if (remove) {
     if (Object.keys(settings.permissions).length === 0) delete settings.permissions;
   }
 
-  // Remove forge hooks from tool-use events (matchers: Agent, Write)
-  for (const { event } of TOOL_HOOKS) {
-    const eventHooks = settings.hooks?.[event];
-    if (!Array.isArray(eventHooks)) continue;
-
-    const matchers = FORGE_MATCHERS[event] || ['Agent'];
-    for (const entry of eventHooks) {
-      if (matchers.includes(entry.matcher) && Array.isArray(entry.hooks)) {
-        entry.hooks = entry.hooks.filter(h => !h.command?.includes(FORGE_HOOK_MARKER));
-      }
-    }
-
-    // Clean up empty matcher entries
-    settings.hooks[event] = eventHooks.filter(
-      e => !(matchers.includes(e.matcher) && e.hooks?.length === 0)
-    );
-    if (settings.hooks[event].length === 0) delete settings.hooks[event];
-  }
-
-  // Remove forge hooks from lifecycle events (no matcher)
-  for (const { event } of LIFECYCLE_HOOKS) {
-    const eventHooks = settings.hooks?.[event];
-    if (!Array.isArray(eventHooks)) continue;
-
-    settings.hooks[event] = eventHooks.filter(entry => {
-      if (!Array.isArray(entry.hooks)) return true;
-      const hadForgeHook = entry.hooks.some(h => h.command?.includes(FORGE_HOOK_MARKER));
-      if (!hadForgeHook) return true;
-      entry.hooks = entry.hooks.filter(h => !h.command?.includes(FORGE_HOOK_MARKER));
-      return entry.hooks.length > 0;
-    });
+  // Remove only managed hook elements, preserving foreign siblings and group metadata.
+  const managedEvents = new Set([...TOOL_HOOKS, ...LIFECYCLE_HOOKS, ...LIVE_HOOKS].map(row => row.event));
+  for (const event of managedEvents) {
+    const entries = settings.hooks?.[event];
+    if (!Array.isArray(entries)) continue;
+    settings.hooks[event] = removeManaged(entries, (phase, entry) => ownedAt(event, entry, phase));
     if (settings.hooks[event].length === 0) delete settings.hooks[event];
   }
 
@@ -253,37 +309,14 @@ settings.permissions.defaultMode = 'bypassPermissions';
 
 if (!settings.hooks) settings.hooks = {};
 
-// Tool-use hooks: one matcher entry per tool name
+// Replace managed elements in place, without replacing their mixed group.
 function mergeToolHook(eventHooks, phase, matcher) {
-  let matcherEntry = eventHooks.find(e => e.matcher === matcher);
-  if (!matcherEntry) {
-    matcherEntry = { matcher, hooks: [] };
-    eventHooks.push(matcherEntry);
-  }
-
-  const existingIdx = matcherEntry.hooks.findIndex(
-    h => h.command?.includes(FORGE_HOOK_MARKER)
-  );
-  const hookEntry = { type: 'command', command: `node ~/.claude/forge-hook.js ${phase}` };
-
-  if (existingIdx >= 0) matcherEntry.hooks[existingIdx] = hookEntry;
-  else                  matcherEntry.hooks.push(hookEntry);
+  mergeManaged(eventHooks, phase, matcher, { type: 'command', command: 'node ~/.claude/forge-hook.js ' + phase });
 }
-
-// Lifecycle hooks: no matcher (fire for all agents)
 function mergeLifecycleHook(eventHooks, phase) {
-  const existingIdx = eventHooks.findIndex(
-    e => e.hooks?.some(h => h.command?.includes(FORGE_HOOK_MARKER))
-  );
-  const hookEntry = { hooks: [{ type: 'command', command: `node ~/.claude/forge-hook.js ${phase}` }] };
-
-  if (existingIdx >= 0) {
-    const entry = eventHooks[existingIdx];
-    const hookIdx = entry.hooks.findIndex(h => h.command?.includes(FORGE_HOOK_MARKER));
-    entry.hooks[hookIdx] = hookEntry.hooks[0];
-  } else {
-    eventHooks.push(hookEntry);
-  }
+  const hook = phase === 'session-start' ? hookExec([phase])
+    : { type: 'command', command: 'node ~/.claude/forge-hook.js ' + phase };
+  mergeManaged(eventHooks, phase, undefined, hook);
 }
 
 for (const { event, phase } of TOOL_HOOKS) {
@@ -297,6 +330,11 @@ for (const { event, phase } of TOOL_HOOKS) {
 for (const { event, phase } of LIFECYCLE_HOOKS) {
   if (!Array.isArray(settings.hooks[event])) settings.hooks[event] = [];
   mergeLifecycleHook(settings.hooks[event], phase);
+}
+
+for (const { event, phase, matcher } of LIVE_HOOKS) {
+  if (!Array.isArray(settings.hooks[event])) settings.hooks[event] = [];
+  mergeManaged(settings.hooks[event], 'native-live:' + phase, matcher, hookExec(['native-live', phase]));
 }
 
 fs.mkdirSync(path.dirname(settingsFile), { recursive: true });

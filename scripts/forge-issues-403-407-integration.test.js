@@ -1,6 +1,9 @@
 'use strict';
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+
 const assert=require('node:assert/strict'),fs=require('fs'),path=require('path');
-const root=path.resolve(__dirname,'..'),layer=require('./fixtures/issue-461/distribution.cjs');
+const root=path.resolve(__dirname,'..'),layer=require('./fixtures/issue-463/distribution.cjs');
 const artifacts=require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts;
 assert.equal(layer.validate({artifacts}),true);
 const saved=layer.issues403404Layer.provenance.base_revision;
@@ -15,3 +18,4 @@ async function main(){const trace=await require('./forge-linked-task-parity.test
  assert.equal(layer.validate({artifacts}),true);console.log('PASS current and ancestor independent PINs, exact17-field routing parity projection and every field drift refused; historical captures unchanged');
 }
 main().catch(e=>{console.error(e.message);process.exitCode=1;});
+});

@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/issue-461/distribution.cjs');
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+
+const unitEntry = require('./fixtures/issue-463/distribution.cjs');
 
 const assert = require('assert');
 const crypto = require('crypto');
@@ -444,3 +447,4 @@ try {
 } finally {
   cleanup();
 }
+});

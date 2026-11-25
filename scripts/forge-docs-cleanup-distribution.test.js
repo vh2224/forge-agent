@@ -1,6 +1,9 @@
 'use strict';
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
-const ROOT=path.resolve(__dirname,'..'),successor=require('./fixtures/issue-461/distribution.cjs'),layer=successor.docsCleanupView,parent=require('./fixtures/issues-457-458/distribution.cjs');
+const ROOT=path.resolve(__dirname,'..'),successor=require('./fixtures/issue-463/distribution.cjs'),layer=successor.docsCleanupView,parent=require('./fixtures/issues-457-458/distribution.cjs');
 const hash=b=>crypto.createHash('sha256').update(b).digest('hex'),read=f=>fs.readFileSync(path.join(ROOT,f)),data=layer.docsCleanupLayer;
 assert.equal(data.base_revision,'b8f1df6d0020d0a8fb0d7d2ecdcdd7027459445e');
 assert.equal(data.provenance.consumer_paths.length,34);
@@ -97,3 +100,4 @@ assert.equal(layer.verifyCleanup(),true,'README exact bytes restored after isola
 for(const digest of [row.before,row.after,row.attributed_before,row.attributed_after])assert(layer.readme('foreign text').includes(digest),'measured source hashes documented');
 assert.strictEqual(layer.loadHistoricalFixture('scripts/fixtures/issue-455/distribution.cjs'),layer.loadHistoricalFixture('scripts/fixtures/issue-455/distribution.cjs'),'cached private historical identity');
 console.log('PASS docs cleanup: exact archive,224 immutable ancestors, complete fixture census, one delegation, current/foreign/future refusal controls');
+});

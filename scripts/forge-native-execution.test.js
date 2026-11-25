@@ -77,12 +77,86 @@ async function savedFixture(phase = 'failed', options = {}) {
     baseline: f => fs.appendFileSync(f.r.resultFile + '.reset-state.json', ' '),
     metadata: f => fs.appendFileSync(path.join(f.owner, '.gsd/forge/events.jsonl'), '{}\n'),
   };
+async function nativeProducerWitnessCases() {
+  const wrapper=require('./forge-native-execution'),make=require('./forge-native-milestone.test').fixture;
+  const f=make();let callbackWitness;
+  try {
+    const original=f.options.invokeNative;
+    f.options.invokeNative=async(args,invocation,observer,witness)=>{
+      callbackWitness=witness;
+      const proof=wrapper.assertOriginalCallbackWitness(witness,{request:f.request});
+      assert.strictEqual(proof.arguments_sha256,roots.digest(args));assert.strictEqual(proof.invocation_sha256,roots.digest(invocation));
+      assert.throws(()=>wrapper.assertOriginalCallbackWitness({}, {request:f.request}),/original-callback-required/);
+      return original(args,invocation,observer);
+    };
+    const actual=await wrapper.run(f.options);assert.strictEqual(actual.published,true);assert(callbackWitness);
+    const witness=wrapper.getPublicationWitness(actual,{request:f.request}),proof=wrapper.assertOriginalPublicationWitness(witness,{request:f.request});
+    assert.strictEqual(proof.request_sha256,roots.digest(f.request));assert.strictEqual(proof.result_sha256,roots.digest(actual.delivery.result));
+    assert.strictEqual(wrapper.getPublicationWitness(actual,{request:f.request}),witness);
+    assert.throws(()=>wrapper.getPublicationWitness(JSON.parse(JSON.stringify(actual)),{request:f.request}),/original-publication-required/);
+    assert.throws(()=>wrapper.assertOriginalPublicationWitness({}, {request:f.request}),/original-publication-required/);
+    const foreign={...f.request,dispatchId:'foreign'};
+    assert.throws(()=>wrapper.assertOriginalPublicationWitness(witness,{request:foreign}),/original-publication-required/);
+    console.log('PASS native producer witnesses: real original callback and native.run return; JSON/foreign refuse');
+  }finally{f.cleanup();}
+  const absent=make();
+  try{
+    fs.unlinkSync(absent.request.securityFile);delete absent.request.securityFile;absent.request.gates.security='not-applicable';
+    absent.options.invokeNative=async args=>{
+      assert(!args.message.includes('## Security'),'canonical N/A omits absent optional file');
+      for(const root of absent.contract.code_roots)fs.writeFileSync(path.join(root.path,'same.txt'),'after\n');
+      return absent.result();
+    };
+    assert.strictEqual((await wrapper.run(absent.options)).published,true);
+  }finally{absent.cleanup();}
+  const required=make();
+  try{
+    fs.unlinkSync(required.request.securityFile);
+    await assert.rejects(()=>wrapper.run(required.options));
+    assert.strictEqual(required.calls(),0);assert(!fs.existsSync(required.request.resultFile+'.manifest.json'));
+  }finally{required.cleanup();}
+  const ordinaryChannel=make();
+  try{
+    const original=ordinaryChannel.options.invokeNative;
+    const options={...ordinaryChannel.options,nativeHostOutputChannel:'captured-original-tool-return',invokeNative:async(...args)=>{
+      const prompt=args[0].message||args[0].prompt;
+      assert(prompt.includes('Write the response only to this validated TEMP result path: '+ordinaryChannel.request.resultFile),'a JSON channel label cannot remove the ordinary file transport');
+      return original(...args);
+    }};
+    assert.strictEqual((await wrapper.run(options)).published,true);
+  }finally{ordinaryChannel.cleanup();}
+  const forged=make();
+  try{
+    await assert.rejects(()=>wrapper.run({...forged.options,nativeHostAdmission:{}}),/native-host-native-admission-required/);
+    assert.strictEqual(forged.calls(),0);assert(!fs.existsSync(forged.request.resultFile+'.manifest.json'));
+  }finally{forged.cleanup();}
+  for(const invalid of ['missing','foreign-line']){
+    const evidence=make();
+    try{
+      const original=evidence.options.invokeNative;
+      const options={...evidence.options,invokeNative:async(...args)=>{
+        const result=await original(...args),truth=result.must_haves_status.find(row=>row.kind==='truth');
+        assert(truth&&truth.evidence.length,'the fixture has a real behavioral criterion');
+        if(invalid==='missing')truth.evidence=[];else truth.evidence[0].stdout_line='PASS not emitted by the actual owner check';
+        return result;
+      }};
+      await assert.rejects(()=>wrapper.run(options),error=>error.code===(invalid==='missing'?'criterion-observed-evidence-required':'criterion-unobserved-evidence'));
+      const captures=fs.readdirSync(path.dirname(evidence.request.resultFile)).filter(name=>/^forge-verification-[a-f0-9]{64}\.json$/.test(name));
+      assert.strictEqual(captures.length,1,'owner retains actual verification before refusing a missing/false selector');
+      const capture=JSON.parse(fs.readFileSync(path.join(path.dirname(evidence.request.resultFile),captures[0]),'utf8'));
+      assert.strictEqual(capture.capture.passed,true,'a worker selector is not proof: actual owner checks ran first');
+      assert(!fs.existsSync(path.join(path.dirname(evidence.request.planFile),'T01-SUMMARY.md')),'invalid selector never publishes');
+    }finally{evidence.cleanup();}
+  }
+}
 async function main() {
+  if(process.argv.includes('--native-host-producers'))return nativeProducerWitnessCases();
   if (process.argv.includes('--review-r1')) return reviewReadinessCases();
   if (process.argv.includes('--review-r2')) return reviewVerificationCases();
   if (process.argv.includes('--review-r3')) return reviewOwnerSnapshotCases();
   console.log(JSON.stringify({ label: 'matrix-applicability', fresh_native: 'No earlier writer/process or recovery authorization exists; claims/gates/caps/binding still checked.', recovered_native: 'Proven service failure permits next routed candidate without a recovery exception; live standing authorization is covered separately by attempt-recovery tests.', provider: 'synthetic', child_process: 'local retained handle', human_uat: 'not exercised' }));
   if (!process.argv.some(arg => ['--saved', '--extra', '--recovery'].includes(arg))) {
+  await nativeProducerWitnessCases();
   const positive = nativeFixture();
   const announcements=[];
   positive.runtime.announce=(stage,fields)=>announcements.push({stage,...fields});

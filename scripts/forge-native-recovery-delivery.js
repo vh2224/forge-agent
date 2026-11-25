@@ -259,6 +259,16 @@ const resultContract = api('forge-worker-result-contract').contract('milestone-r
   })),
 }));
 function packagePrompt(request, prompt, options = {}) {
+  // A string/flag cannot select the file-only captured channel. The same live,
+  // request-bound WeakMap admission used by actual writers must be current.
+  const captured = options.nativeHostAdmission !== undefined;
+  if(captured){
+    api('forge-native-host-bridge').assertNativeAdmission(options.nativeHostAdmission,request);
+    const checks='Claimed CODE_DIR product edits only; run plan checks.';
+    if(typeof prompt!=='string'||prompt.split(checks).length!==2)fail('native-host-file-worker-prompt-shape');
+    prompt=prompt.replace(checks,()=> 'Claimed CODE_DIR product edits only; the owner runs plan checks after the original tool return.');
+    prompt='File-only captured-original-tool-return: use only admitted Read/Write. Do not run commands or claim they ran. Command names and stdout_line entries in must_haves_status.evidence are EXPECTED owner-verification selectors, not proof of execution. State that limitation explicitly in each relevant note; the owner must execute the exact checks and match actual retained output before any behavioral criterion passes.\n\n'+prompt;
+  }
   const roots = api('forge-code-roots');
   const contract = roots.validateContract(request.execution_contract, { owner: request.contextRoot, revalidate: true });
   for (const root of [contract.owner, ...contract.code_roots.map(row => row.path)])
@@ -287,11 +297,12 @@ function packagePrompt(request, prompt, options = {}) {
   }
   return prompt + '\n## Execution boundaries\nPhysical CODE_DIR: ' + request.cwd
     + '\nOwner (parent publication only): ' + contract.owner + '\nDeclared writes: ' + JSON.stringify(checked.writes)
-    + '\nDo not edit owner metadata. Write the response only to this validated TEMP result path: ' + request.resultFile
+    + (captured ? '\nDo not edit owner metadata or write any TEMP/spool response file. Return the exact native result envelope through the ORIGINAL Agent tool response. The owner retains the original capture and writes its already-admitted spool; only the owner verifies commands and publishes.' : '\nDo not edit owner metadata. Write the response only to this validated TEMP result path: ' + request.resultFile)
     + '\nVerification policy: ' + JSON.stringify(verificationPolicy(request, plan).seal) + inputs + '\n' + resultContract.instruction();
 }
 function inputSections(request) {
-  const sections = [['Plan', request.planFile], ['Context', request.contextFile], ['Security', request.securityFile]];
+  const sections = [['Plan', request.planFile], ['Context', request.contextFile]];
+  if (request.securityFile || request.gates?.security !== 'not-applicable') sections.push(['Security', request.securityFile]);
   const research = request.researchFile || path.join(request.contextRoot, '.gsd', 'milestones', request.milestoneId,
     'slices', request.sliceId, request.sliceId + '-RESEARCH.md');
   if (fs.existsSync(research)) sections.push(['Research', research]);
@@ -468,8 +479,85 @@ function phaseNotifier(onPhase,r){
   return phase=>{try{onPhase(Object.freeze({schema_version:1,phase,dispatch_id:r.dispatchId,unit:r.unitType+'/'+r.taskId,
     worker_mode:'native',at:new Date().toISOString()}));}catch{/* observer errors never affect delivery */}};
 }
-function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linkedEntryOptions,savedManifest,persistDeliveryReceipt,leaseRenewal,documentaryContinuation,coveragePolicy,supplementalCoverage,verificationContinuation,artifactAdvisoryReview,onPhase,onCheck}={}){
+const publicationAttempts=new WeakMap(),publicationResults=new WeakMap(),publicationWitnesses=new WeakMap(),attemptWitnesses=new WeakMap();
+function publicationRead(file,maxBytes){
+  if(typeof file!=='string'||!path.isAbsolute(file)||path.resolve(file)!==file)fail('native-publication-path');
+  const physical=()=>{let cursor=path.parse(file).root;
+    const parts=file.slice(cursor.length).split(path.sep).filter(Boolean);
+    for(let i=0;i<parts.length;i++){
+      cursor=path.join(cursor,parts[i]);const stat=fs.lstatSync(cursor);
+      if(stat.isSymbolicLink()||(i<parts.length-1?!stat.isDirectory():!stat.isFile()||stat.nlink!==1))fail('native-publication-path-type');
+    }
+  };physical();
+  const observed=api('forge-autonomy-sources').readBoundedStableFile(file,maxBytes,{expectedReal:file});
+  if(observed.error)fail('native-publication-read-'+observed.error);
+  if(observed.stat.nlink!==1)fail('native-publication-path-type');physical();
+  return observed.buffer;
+}
+function artifactTarget(owner,relative){
+  if(typeof relative!=='string'||!relative.startsWith('.gsd/')||relative.includes('\\')
+      ||path.posix.normalize(relative)!==relative||relative.split('/').some(part=>!part||part==='.'||part==='..'))fail('native-publication-artifact-path');
+  const target=path.resolve(owner,...relative.split('/')),rel=path.relative(owner,target);
+  if(rel==='..'||rel.startsWith('..'+path.sep)||path.isAbsolute(rel))fail('native-publication-artifact-path');
+  return target;
+}
+function absentPublicationTarget(file){
+  let cursor=path.parse(file).root;
+  for(const part of file.slice(cursor.length).split(path.sep).filter(Boolean)){
+    cursor=path.join(cursor,part);let stat;
+    try{stat=fs.lstatSync(cursor);}catch(error){if(error.code==='ENOENT')return true;throw error;}
+    if(stat.isSymbolicLink()||!stat.isDirectory()&&cursor!==file)fail('native-publication-path-type');
+  }
+  return false;
+}
+function publicationFacts(entry,request,complete){
+  const roots=api('forge-code-roots');
+  if(!request||roots.digest(request)!==entry.facts.request_sha256
+      ||roots.digest(entry.liveRequest)!==entry.facts.request_sha256||roots.digest(entry.record)!==entry.record_sha256)fail('native-original-publication-required');
+  if(!publicationRead(entry.facts.manifest.file,entry.manifestBytes.length).equals(entry.manifestBytes)
+      ||!publicationRead(entry.facts.receipt.file,entry.receiptBytes.length).equals(entry.receiptBytes))fail('native-publication-evidence-changed');
+  for(const artifact of entry.artifacts){
+    if(absentPublicationTarget(artifact.file)){
+      if(complete||artifact.before!==null)fail('native-publication-artifact-changed');
+      continue;
+    }
+    const bytes=publicationRead(artifact.file,Math.max(artifact.afterBytes.length,artifact.beforeBytes?.length||INPUT_MAX_BYTES));
+    const after=bytes.equals(artifact.afterBytes),before=artifact.before!==null&&hash(bytes)===artifact.before;
+    if(!after&&(complete||!before))fail('native-publication-artifact-changed');
+  }
+  for(const input of entry.inputs){
+    const artifact=entry.artifacts.find(a=>a.file===input.file);
+    if(artifact&&artifact.before===input.sha256)continue; // Exactly measured publication transition only.
+    if(hash(readInput(input.file))!==input.sha256)fail('native-publication-input-changed');
+  }
+  const facts=structuredClone(entry.facts);
+  Object.freeze(facts.manifest);Object.freeze(facts.receipt);facts.artifacts.forEach(Object.freeze);Object.freeze(facts.artifacts);
+  return Object.freeze(facts);
+}
+function getPublicationWitness(actualResult,{request}={}){
+  const witness=actualResult&&publicationResults.get(actualResult);
+  if(!witness)fail('native-original-publication-required');assertOriginalPublicationWitness(witness,{request});return witness;
+}
+function assertOriginalPublicationWitness(witness,{request}={}){
+  const entry=witness&&publicationWitnesses.get(witness);if(!entry)fail('native-original-publication-required');
+  return publicationFacts(entry,request,true);
+}
+function getPublicationAttemptWitness(originalPointer,{request}={}){
+  const witness=originalPointer&&publicationAttempts.get(originalPointer);
+  if(!witness)fail('native-original-publication-attempt-required');assertOriginalPublicationAttemptWitness(witness,{request});return witness;
+}
+function assertOriginalPublicationAttemptWitness(witness,{request}={}){
+  const entry=witness&&attemptWitnesses.get(witness);if(!entry)fail('native-original-publication-attempt-required');
+  return publicationFacts(entry,request,false);
+}
+function writeAttemptSpool(request,handle,role,file,bytes,options){
+  if(handle===undefined)return fs.writeFileSync(file,bytes,options);
+  const admission=api('forge-native-host-bridge').assertNativeAdmission(handle,request);
+  return admission.writeImmutable(role,file,Buffer.isBuffer(bytes)?bytes:Buffer.from(bytes));
+}
+function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linkedEntryOptions,savedManifest,persistDeliveryReceipt,leaseRenewal,documentaryContinuation,coveragePolicy,supplementalCoverage,verificationContinuation,artifactAdvisoryReview,onPhase,onCheck,nativeHostAdmission}={}){
   if(typeof assertBoundary!=='function'||typeof assertAuthority!=='function')fail('live-controller-boundary-required');
+  if(nativeHostAdmission!==undefined)api('forge-native-host-bridge').assertNativeAdmission(nativeHostAdmission,request);
   let r=structuredClone(request);
   const phase=phaseNotifier(onPhase,r);
   delete r.linkedEntryBinding;
@@ -572,15 +660,52 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
   const manifestFile=r.resultFile+'.manifest.json', receiptFile=r.resultFile+'.receipt.json';
   for(const file of [manifestFile,receiptFile])for(const root of [r.contextRoot,...r.execution_contract.code_roots.map(row=>row.path)])
     api('forge-xllm').validateResultFileTarget(file,root);
+  const attemptByRecord=new WeakMap();
+  const mintAttempt=(record,pointer,bytes)=>{
+    if(record.phase!=='ready')return;
+    if(record.dispatch_id!==r.dispatchId||record.recovery_identity_sha256!==preparedRecoveryIdentity
+        ||record.fingerprint!==side.artifactFingerprint(r)||roots.digest(record.route)!==roots.digest(r.route)
+        ||record.manifest_sha256!==hash(JSON.stringify(manifest))||!resultContract.validate(record.result).ok)fail('native-publication-record-binding');
+    if(!Array.isArray(record.artifacts)||!record.artifacts.length)fail('native-publication-artifact-shape');
+    const artifacts=record.artifacts.map(artifact=>{
+      if(!artifact||Object.keys(artifact).sort().join(',')!=='before,content,path'||typeof artifact.content!=='string'
+          ||artifact.before!==null&&!/^[a-f0-9]{64}$/.test(artifact.before||''))fail('native-publication-artifact-shape');
+      const file=artifactTarget(r.contextRoot,artifact.path),afterBytes=Buffer.from(artifact.content);
+      // Bound BEFORE reads by the existing prepared preimage; no guessed preimage.
+      let beforeBytes=null;
+      if(artifact.before!==null&&!absentPublicationTarget(file)){
+        const now=readInput(file);if(hash(now)===artifact.before)beforeBytes=Buffer.from(now);
+      }
+      return{path:artifact.path,file,before:artifact.before,beforeBytes,afterBytes};
+    });
+    if(new Set(artifacts.map(a=>a.path)).size!==artifacts.length)fail('native-publication-artifact-shape');
+    const entry={liveRequest:request,record,record_sha256:roots.digest(record),manifestBytes:Buffer.from(JSON.stringify(manifest)),
+      receiptBytes:Buffer.from(bytes),inputs:structuredClone(inputs),artifacts,
+      facts:{dispatch_id:r.dispatchId,request_sha256:roots.digest(request),result_sha256:roots.digest(record.result),
+        unit_type:r.unitType,scope:effectiveIdentity.scope,milestone_id:r.milestoneId||null,slice_id:r.sliceId||null,task_id:r.taskId,
+        route_sha256:roots.digest(r.route),manifest:{file:manifestFile,sha256:record.manifest_sha256},receipt:{file:pointer.file,sha256:pointer.sha256},
+        artifacts:artifacts.map(a=>({path:a.path,before:a.before,after_sha256:hash(a.afterBytes)}))}};
+    publicationFacts(entry,request,false);
+    const witness=Object.freeze(Object.create(null));attemptWitnesses.set(witness,entry);
+    publicationAttempts.set(pointer,witness);attemptByRecord.set(record,entry);
+  };
+  const mintPublished=record=>{
+    let entry=attemptByRecord.get(record);
+    if(!entry){const bytes=JSON.stringify(record),pointer={file:receiptFile+'.'+hash(bytes)+'.json',sha256:hash(bytes)};mintAttempt(record,pointer,bytes);entry=attemptByRecord.get(record);}
+    publicationFacts(entry,request,true);
+    const existing=publicationResults.get(record);if(existing){assertOriginalPublicationWitness(existing,{request});return record;}
+    const witness=Object.freeze(Object.create(null));publicationWitnesses.set(witness,entry);publicationResults.set(record,witness);return record;
+  };
   const persist=record=>{
     if(typeof persistDeliveryReceipt!=='function')fail('milestone-receipt-persistence-required');
     const bytes=JSON.stringify(record), sha256=hash(bytes), file=receiptFile+'.'+sha256+'.json';
     for(const root of [r.contextRoot,...r.execution_contract.code_roots.map(row=>row.path)])api('forge-xllm').validateResultFileTarget(file,root);
-    try {fs.writeFileSync(file,bytes,{flag:'wx'});}catch(error){
+    try {writeAttemptSpool(request,nativeHostAdmission,'native-receipt',file,bytes,{flag:'wx'});}catch(error){
       if(error.code!=='EEXIST'||fs.readFileSync(file,'utf8')!==bytes)throw error;
     }
-    persistDeliveryReceipt({file,sha256});
-    return {file,sha256};
+    const pointer={file,sha256};mintAttempt(record,pointer,bytes);
+    persistDeliveryReceipt(pointer);
+    return pointer;
   };
   // Private diagnostic retention of a contract-valid done result refused by the
   // integrity guard. Never a receipt, publication, acceptance or replay source;
@@ -594,7 +719,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
         recovery_identity_sha256:preparedRecoveryIdentity,route:r.route,manifest_sha256:hash(fs.readFileSync(manifestFile)),result};
       const bytes=JSON.stringify(envelope)+'\n',file=path.join(path.dirname(r.resultFile),'forge-returned-'+hash(bytes)+'.json');
       for(const root of [r.contextRoot,...r.execution_contract.code_roots.map(row=>row.path)])api('forge-xllm').validateResultFileTarget(file,root);
-      try{fs.writeFileSync(file,bytes,{flag:'wx',mode:0o600});}
+      try{writeAttemptSpool(request,nativeHostAdmission,'native-refused-return',file,bytes,{flag:'wx',mode:0o600});}
       catch(writeError){if(writeError.code!=='EEXIST'||!fs.lstatSync(file).isFile()||fs.lstatSync(file).isSymbolicLink()
         ||fs.readFileSync(file,'utf8')!==bytes)throw writeError;}
     }catch{/* retention never replaces the original refusal */}
@@ -647,7 +772,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       check();initialReview={check,evidence,derived};
       const reviewFile=r.resultFile+'.documentary-review.'+evidence.fingerprint+'.json',bytes=JSON.stringify({evidence,derived,returned_receipt:returnedReceiptFile});
       for(const root of [r.contextRoot,...r.execution_contract.code_roots.map(row=>row.path)])api('forge-xllm').validateResultFileTarget(reviewFile,root);
-      try{fs.writeFileSync(reviewFile,bytes,{flag:'wx'});}catch(error){if(error.code!=='EEXIST'||fs.readFileSync(reviewFile,'utf8')!==bytes)throw error;}
+      try{writeAttemptSpool(request,nativeHostAdmission,'native-review',reviewFile,bytes,{flag:'wx'});}catch(error){if(error.code!=='EEXIST'||fs.readFileSync(reviewFile,'utf8')!==bytes)throw error;}
       return {result:structuredClone(derived),review_file:reviewFile,provider_called:false};
     },
     restoreDocumentary(){
@@ -659,8 +784,10 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
         const resolved=roots.resolvePath(r.execution_contract,doc.path);
         const root=r.execution_contract.code_roots.find(row=>row.id===resolved.root_id);
         const target=path.join(root.path,resolved.path);
+        if(nativeHostAdmission!==undefined)api('forge-native-host-bridge').assertNativeAdmission(nativeHostAdmission,request).assertCurrent();
         fs.mkdirSync(path.dirname(target),{recursive:true});
         roots.resolvePath(r.execution_contract,doc.path);
+        if(nativeHostAdmission!==undefined)api('forge-native-host-bridge').assertNativeAdmission(nativeHostAdmission,request).assertCurrent();
         fs.writeFileSync(target,doc.content);
       }
       guard();return structuredClone(documentary.derived);
@@ -669,7 +796,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
     start(){
       open();guard();
       const bytes=JSON.stringify(manifest);
-      try {fs.writeFileSync(manifestFile,bytes,{flag:'wx'});}catch(error){
+      try {writeAttemptSpool(request,nativeHostAdmission,'native-manifest',manifestFile,bytes,{flag:'wx'});}catch(error){
         if(error.code!=='EEXIST'||fs.readFileSync(manifestFile,'utf8')!==bytes)throw error;
       }
       phase('executing');
@@ -756,7 +883,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
         manifest_sha256:hash(fs.readFileSync(manifestFile)),result_sha256:hash(JSON.stringify(result)),capture};
       const captureBytes=JSON.stringify(captured)+'\n',retained=path.join(path.dirname(r.resultFile),'forge-verification-'+hash(captureBytes)+'.json');
       for(const root of [r.contextRoot,...r.execution_contract.code_roots.map(row=>row.path)])api('forge-xllm').validateResultFileTarget(retained,root);
-      try{fs.writeFileSync(retained,captureBytes,{flag:'wx',mode:0o600});}
+      try{writeAttemptSpool(request,nativeHostAdmission,'native-verification',retained,captureBytes,{flag:'wx',mode:0o600});}
       catch(error){if(error.code!=='EEXIST'||!fs.lstatSync(retained).isFile()||fs.lstatSync(retained).isSymbolicLink()
         ||fs.readFileSync(retained,'utf8')!==captureBytes)throw error;}
       guard();if(!capture.passed)verificationFailure(capture);
@@ -780,6 +907,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       return structuredClone({capture,delta,resourceEvents,bindings});
     },
     publish(result){
+      if(nativeHostAdmission!==undefined)api('forge-native-host-bridge').assertNativeAdmission(nativeHostAdmission,request).assertTerminalAdmission();
       open();
       if(!verified||verified.resultHash!==roots.digest(result))fail('verified-result-required');
       guard();execution.verifyResult(r.cwd,prepared,result);
@@ -805,9 +933,10 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       side.materialize(verified.publicationRequest,record,()=>guard(true),undefined,renewal?{leaseRenewal}:undefined);
       for(const artifact of artifacts)if(fs.readFileSync(path.join(r.contextRoot,artifact.path),'utf8')!==artifact.content)fail('publication-readback-mismatch');
       phase('completed');
-      return record;
+      return mintPublished(record);
     },
     replayReady(record){
+      if(nativeHostAdmission!==undefined)api('forge-native-host-bridge').assertNativeAdmission(nativeHostAdmission,request).assertTerminalAdmission();
       open();guard(true);
       if(Boolean(record.verification_continuation)!==Boolean(verificationExtra)
         ||verificationExtra&&roots.digest(record.verification_continuation)!==roots.digest(verificationExtra.evidence))fail('verification-continuation-replay-authority-required');
@@ -873,13 +1002,20 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       phase('publishing');
       side.materialize(r,record,()=>guard(true),undefined,renewal?{leaseRenewal}:undefined);
       phase('completed');
-      return record;
+      return mintPublished(record);
     },
   };
 }
 // A returned continuation may only replay under fresh host authority and a live
 // stopped-writer census. It never reserves or invokes another model.
 async function replay({request,recovery,runtime,nativeOptions}) {
+  // This retained-state path writes a separate atomic recovery state/lock, not
+  // the warm original Bridge session. Until its writer owns staging admission,
+  // never silently ignore a genuine (or forged) native-host handle here.
+  if(runtime?.nativeHostAdmission!==undefined){
+    api('forge-native-host-bridge').assertNativeAdmission(runtime.nativeHostAdmission,request);
+    fail('native-host-recovery-state-admission-required');
+  }
   const roots=api('forge-code-roots'), recoveryApi=api('forge-attempt-recovery');
   let stateBytes=fs.readFileSync(recovery.stateFile);
   const state=JSON.parse(stateBytes);
@@ -962,4 +1098,4 @@ async function replay({request,recovery,runtime,nativeOptions}) {
   const verified=successor(()=>session.verify(effectiveResult)),published=successor(()=>session.publish(effectiveResult));
   return {action:'replay',provider_called:false,result:{verified,published}};
 }
-module.exports={prepare,replay,requireExplicitVerify,criterionBindings,resultContract,packagePrompt,readInput,INPUT_MAX_BYTES,createLeaseRenewalReconciliation,reconcileLeaseRenewalSurface,createDocumentaryContinuation,createVerificationContinuation,isGlobalEvidenceLine,isObservedTestLine};
+module.exports={prepare,replay,getPublicationWitness,assertOriginalPublicationWitness,getPublicationAttemptWitness,assertOriginalPublicationAttemptWitness,requireExplicitVerify,criterionBindings,resultContract,packagePrompt,readInput,INPUT_MAX_BYTES,createLeaseRenewalReconciliation,reconcileLeaseRenewalSurface,createDocumentaryContinuation,createVerificationContinuation,isGlobalEvidenceLine,isObservedTestLine};

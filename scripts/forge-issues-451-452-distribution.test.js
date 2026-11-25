@@ -1,6 +1,9 @@
 'use strict';
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+
 const assert=require('node:assert/strict'),fs=require('fs'),path=require('path'),crypto=require('crypto'),zlib=require('zlib');
-const root=path.resolve(__dirname,'..'),successor=require('./fixtures/issue-461/distribution.cjs'),layer=successor.issues451452View,previous=require('./fixtures/issue-461/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issue-440/distribution.cjs'),data=layer.issues451452Layer;
+const root=path.resolve(__dirname,'..'),successor=require('./fixtures/issue-463/distribution.cjs'),layer=successor.issues451452View,previous=require('./fixtures/issue-463/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issue-440/distribution.cjs'),data=layer.issues451452Layer;
 const read=successor.issue455View.projectRead(file=>fs.readFileSync(path.join(root,file))),hash=b=>crypto.createHash('sha256').update(b).digest('hex');
 const artifacts=require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts;
 assert.equal(data.provenance.base_revision,'0fa00e3de485bd23a6a351d033d8aa8c8021fb25');assert.deepEqual(data.provenance.issues,[442,451,452,454]);assert.equal(data.predecessor_layer_sha256,hash(JSON.stringify(previous.issue440Layer)));assert.strictEqual(layer.issue440Layer,previous.issue440Layer);
@@ -17,3 +20,4 @@ const forged=structuredClone(data);forged.provenance.issues=[];assert.throws(()=
 const target='scripts/forge-unit-sidecar.js',readPublished=layer.projectRead();assert.throws(()=>layer.issue440View.validate({artifacts,readRaw:file=>file===target?Buffer.concat([readPublished(file),Buffer.from('\nforeign\n')]):readPublished(file)}));assert.equal(layer.issue440View.validate({artifacts}),true);
 for(const key of ['rendered','surfaces','samples','sample_projection','registry','parity'])assert.deepStrictEqual(layer.issue440Layer[key],previous.issue440Layer[key]);
 console.log('PASS #451/#452 measured successor: source_sha256, consumers25(24 require-only + published440 view), scope51, published215 exact; real validate/validate414, all48 measured-source drift negatives and foreign projection refusal');
+});

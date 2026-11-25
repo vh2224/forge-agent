@@ -1,6 +1,9 @@
 'use strict';
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+
 const assert=require('node:assert/strict'),fs=require('fs'),path=require('path');
-const root=path.resolve(__dirname,'..'),layer=require('./fixtures/issue-461/distribution.cjs');
+const root=path.resolve(__dirname,'..'),layer=require('./fixtures/issue-463/distribution.cjs');
 const artifacts=require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts;
 assert.equal(layer.validate({artifacts}),true);
 let cases=0;
@@ -233,3 +236,4 @@ for(const file of ['scripts/fixtures/request-retention/distribution.cjs','script
 }
 assert.equal(layer.validate({artifacts}),true);
 console.log('PASS #385+#387 full-guard terminal: exact parent/core/registry/citations with '+fullGuardCases+' additive negatives');
+});

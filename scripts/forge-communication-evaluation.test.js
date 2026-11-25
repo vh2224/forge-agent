@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 'use strict';
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+
 
 // Read-only offline corpus validation. Renderers are called in memory; no host,
 // provider, question tool, installer or controller is invoked by this suite.
@@ -184,7 +187,7 @@ function validateSample(sample, side) {
     assert.strictEqual(sample.text, reproduce(sample), 'rendered bytes drift');
   } else if (sample.label === 'modelo-da-skill') {
     assert([ARCHIVE, ...['auto', 'next', 'task', 'status'].map(name => `skills/forge-${name}/SKILL.md`)].includes(sample.source.file));
-    const bytes = sample.source.file === 'skills/forge-next/SKILL.md' ? require('./fixtures/issue-461/distribution.cjs').projectRead(p => fs.readFileSync(path.join(ROOT, p)))(sample.source.file).toString('utf8') : read(sample.source.file);
+    const bytes = sample.source.file === 'skills/forge-next/SKILL.md' ? require('./fixtures/issue-463/distribution.cjs').projectRead(p => fs.readFileSync(path.join(ROOT, p)))(sample.source.file).toString('utf8') : read(sample.source.file);
     assert.strictEqual(sample.source.sha256, delivery.sha256(bytes), 'literal source drift');
     assert(bytes.includes(sample.text), 'not a literal skill quotation');
     assert.strictEqual(sample.human_view.rule, 'complete-v1');
@@ -268,7 +271,7 @@ function supportingRow(entry, name, pair) {
 }
 
 function run() {
-  const data = JSON.parse(require('./fixtures/issue-461/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issue-440/distribution.cjs').currentSamples(read('docs/communication-evaluation/samples.json')));
+  const data = JSON.parse(require('./fixtures/issue-463/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issue-440/distribution.cjs').currentSamples(read('docs/communication-evaluation/samples.json')));
   const readme = read('docs/communication-evaluation/README.md');
   let passed = 0;
   const test = (name, fn) => { fn(); passed++; process.stdout.write(`PASS ${name}\n`); };
@@ -587,3 +590,4 @@ module.exports = { volume, dumps, bulkCount, reproduce, extractHumanView, valida
 if (require.main === module) {
   try { run(); } catch (error) { process.stderr.write(`${error.stack}\n`); process.exitCode = 1; }
 }
+});

@@ -1,0 +1,37 @@
+'use strict';
+// Pure wire checks and capability non-forgeability; no injected host callbacks.
+const assert=require('node:assert/strict'),path=require('node:path'),fs=require('node:fs'),os=require('node:os'),crypto=require('node:crypto');
+const saved={...process.env},root=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'forge-native463-profile-'))),marker=crypto.randomBytes(16).toString('hex');fs.writeFileSync(path.join(root,'OWNED'),marker);
+for(const key of ['HOME','USERPROFILE','CODEX_HOME','CLAUDE_CONFIG_DIR','FORGE_HOME']){process.env[key]=path.join(root,key.toLowerCase());fs.mkdirSync(process.env[key],{recursive:true});}
+const profile=require('./forge-native-host-profile');
+function digest(x){const order=v=>Array.isArray(v)?v.map(order):v&&typeof v==='object'?Object.fromEntries(Object.keys(v).sort().map(k=>[k,order(v[k])])):v;return crypto.createHash('sha256').update(JSON.stringify(order(x))).digest('hex');}
+const schema={type:'object',properties:{prompt:{type:'string'},subagent_type:{type:'string'},model:{enum:['sonnet']}},required:['prompt','subagent_type','model']};
+const value={schema_version:1,profile_id:profile.FIXTURE_PROFILE_ID,host_session:'fixture-session',host_binary:{physical_path:path.join(root,'host.cjs'),sha256:'1'.repeat(64),observed_version:'fixture-only'},active_tool:{name:'Agent',schema_sha256:digest(schema),schema,observation_reference:path.join(root,'schema.json')},mode_support:{requested_mode:'foreground',effective_configuration_sha256:'2'.repeat(64),observation_reference:path.join(root,'configuration.json')},effort_observation:{transport:'agent-frontmatter',value:'high',source_fingerprint:'3'.repeat(64),observation_reference:path.join(root,'agent.md')},agent_definition:{agent_type:'forge-executor',physical_path:path.join(root,'agent.md'),sha256:'3'.repeat(64)},provenance:'fixture-origin'};
+try{
+ assert.deepEqual(profile.normalizeHostObservation(value),value);
+ for(const change of [v=>{v.joined=true;},v=>{v.provider_called=true;},v=>{v.mode_support.requested_mode='background';},v=>{v.profile_id='unknown';},v=>{v.active_tool.schema_sha256='0'.repeat(64);},v=>{v.host_binary.physical_path='relative';}]){const candidate=structuredClone(value);change(candidate);assert.throws(()=>profile.normalizeHostObservation(candidate));}
+ const accessor=Object.defineProperty({...value},'host_session',{enumerable:true,get(){throw Error('must not invoke getter');}});assert.throws(()=>profile.normalizeHostObservation(accessor),e=>e.code==='native-host-observation-schema');
+ assert.throws(()=>profile.enrollForegroundProfile({},value));
+ for(const call of [()=>profile.assertCapabilityAdmission({}),()=>profile.assertActivityAdmission({},{}),()=>profile.invocationOptions({},{}),()=>profile.bindSealedInvocation({},{},{},{args:{},invocation:{}}),()=>profile.assertLaunchAdmission({}),()=>profile.admitObservation({},value),()=>profile.admitCandidate({},value),()=>profile.subscribe({},()=>{}),()=>profile.assertJoined({}),()=>profile.assertPublicationAttemptCurrent({},{}),()=>profile.assertPublicationCurrent({},{}),()=>profile.terminalResult({},{status:'done'})])assert.throws(call);
+ assert.throws(()=>profile.awaitJoinedReturn({}));
+ // DATA-only access to the original private synchronous frame helpers. This
+ // does not expose profiles/WeakMap factories or mint an enrolled profile.
+ const Module=require('node:module'),filename=require.resolve('./forge-native-host-profile'),sourceBytes=fs.readFileSync(filename),copy=new Module(filename+'#frame-data',module);copy.filename=filename;copy.paths=Module._nodeModulePaths(path.dirname(filename));copy._compile(sourceBytes.toString('utf8')+'\nmodule.exports.__frameData={withIntentFrame,canBorrowIntent};\n',filename);const frameData=copy.exports.__frameData;
+ const scratch={},handle=Object.freeze({}),otherHandle=Object.freeze({}),request=Object.freeze({kind:'synthetic-DATA-only'}),otherRequest=Object.freeze({kind:'synthetic-DATA-only'});
+ assert.equal(frameData.canBorrowIntent(scratch,handle,request),false);
+ assert.equal(frameData.withIntentFrame(scratch,handle,request,()=>{assert.equal(frameData.canBorrowIntent(scratch,handle,request),true);assert.equal(frameData.canBorrowIntent(scratch,otherHandle,request),false);assert.equal(frameData.canBorrowIntent(scratch,handle,otherRequest),false);assert.throws(()=>copy.exports.assertInvocationIntent(handle,{request}),e=>e.code==='native-host-profile-required','a scratch frame cannot forge the real profile WeakMap');return 7;}),7);assert.equal(scratch.intentFrame,undefined);
+ const sentinel=new Error('DATA-only-sentinel');assert.throws(()=>frameData.withIntentFrame(scratch,handle,request,()=>{throw sentinel;}),e=>e===sentinel);assert.equal(scratch.intentFrame,undefined);
+ frameData.withIntentFrame(scratch,handle,request,()=>{const outer=scratch.intentFrame;frameData.withIntentFrame(scratch,otherHandle,otherRequest,()=>{assert.equal(frameData.canBorrowIntent(scratch,handle,request),false);assert.equal(frameData.canBorrowIntent(scratch,otherHandle,otherRequest),true);});assert.strictEqual(scratch.intentFrame,outer);assert.equal(frameData.canBorrowIntent(scratch,handle,request),true);});assert.equal(scratch.intentFrame,undefined);
+ const escaped=frameData.withIntentFrame(scratch,handle,request,()=>()=>frameData.canBorrowIntent(scratch,handle,request));assert.equal(escaped(),false);
+ assert.throws(()=>frameData.withIntentFrame(scratch,handle,request,()=>({then(){}})),e=>e.code==='native-host-intent-sync-required');assert.equal(scratch.intentFrame,undefined);
+ let getterCalls=0;const getter=Object.defineProperty({},'then',{get(){getterCalls++;throw sentinel;}});assert.throws(()=>frameData.withIntentFrame(scratch,handle,request,()=>getter),e=>e===sentinel);assert.equal(getterCalls,1);assert.equal(scratch.intentFrame,undefined);
+ frameData.withIntentFrame(scratch,handle,request,()=>{scratch.invalid=sentinel;assert.equal(frameData.canBorrowIntent(scratch,handle,request),false);delete scratch.invalid;});assert.equal(scratch.intentFrame,undefined);
+ assert.equal(crypto.createHash('sha256').update(fs.readFileSync(filename)).digest('hex'),crypto.createHash('sha256').update(sourceBytes).digest('hex'),'private DATA inspection leaves actual Source untouched');
+ assert.equal(profile.prepareTimeoutCapMs(),300000,'existing initial prepare protocol cap remains unchanged');
+ assert.equal(profile.LIVE_PROFILE_ID,'claude-agent-files-foreground-v1');
+ assert.throws(()=>profile.assertInvocationIntent(Object.freeze({}),{request:{}}),e=>e.code==='native-host-profile-required');
+ assert.throws(()=>profile.assertSealedIntent(Object.freeze({})),e=>e.code==='native-host-profile-required');
+ assert.throws(()=>profile.admitLiveObservation(Object.freeze({}),Object.freeze({})),e=>e.code==='native-host-profile-required');
+ const claimedLive={...value,profile_id:profile.LIVE_PROFILE_ID,provenance:'observed-host'};assert.throws(()=>profile.normalizeHostObservation(claimedLive),e=>e.code==='native-host-profile-unsupported','LIVE source/OS brand cannot be minted by schema JSON');
+ console.log('forge-native-host-profile schema/non-forgeability tests passed; full ingress/join matrix belongs to real CLI tests');
+}finally{process.env=saved;assert.equal(fs.readFileSync(path.join(root,'OWNED'),'utf8'),marker);assert(!fs.lstatSync(root).isSymbolicLink());assert.equal(path.dirname(root),fs.realpathSync.native(os.tmpdir()));fs.rmSync(root,{recursive:true,force:true});}

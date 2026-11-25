@@ -247,6 +247,10 @@ async function isolatedMain(){
 async function ordinaryPublication(){
   const f=await fixture();
   try{
+    const initial='Ordinary worker prompt.',legacy=delivery.packagePrompt(f.request,initial);
+    assert(legacy.includes('Write the response only to this validated TEMP result path: '+f.request.resultFile));
+    assert.equal(delivery.packagePrompt(f.request,initial,{outputChannel:'captured-original-tool-return',approved:true}),legacy,'JSON labels/approval never select captured transport');
+    assert.throws(()=>delivery.packagePrompt(f.request,initial,{nativeHostAdmission:{}}),{code:'native-host-native-admission-required'},'direct packaging rejects a counterfeit admission before changing transport');
     let calls=0;
     f.runtime.invokeNative=async(next,binding,session)=>{
       calls++;
@@ -652,8 +656,16 @@ async function nativeTaskMarker() {
     write(slicePlan,'# Slice\n- [ ] **T01** — fixture\n- [ ] **T02** — next\n');
     const nativeInvocation=require('./forge-native-invocation').buildNativeInvocation({hostRuntime:'codex',resolvedDispatch:request.route,
       activeCapabilities:capabilities,prompt:'Native marker fixture',forkTurns:'none',taskName:'fixture',agentType:'forge-executor'});
+    let pendingBeforePublication;
     const receipts=[],options={request,nativeInvocation,assertBoundary:f.assertBoundary,assertAuthority:f.assertBoundary,
-      persistDeliveryReceipt:receipt=>receipts.push(receipt)};
+      persistDeliveryReceipt:pointer=>{
+        receipts.push(pointer);const receipt=JSON.parse(fs.readFileSync(pointer.file,'utf8'));
+        if(receipt.phase==='ready'){
+          pendingBeforePublication=delivery.getPublicationAttemptWitness(pointer,{request});
+          delivery.assertOriginalPublicationAttemptWitness(pendingBeforePublication,{request});
+          assert.throws(()=>delivery.getPublicationWitness(receipt,{request}),/original-publication-required/);
+        }
+      }};
     const session=delivery.prepare(options);session.start();
     const preimage=fs.readFileSync(slicePlan),taskPlan=fs.readFileSync(request.planFile),manifest=session.manifest();
     assert.equal(manifest.prepared.protected_owner[SLICE_PLAN],sha256(preimage));
@@ -671,6 +683,29 @@ async function nativeTaskMarker() {
     console.log('PASS native marker CAS: a slice plan edited since prepare fails closed before persist, keeping operator bytes without recapture');
 
     const published=session.publish(result);
+    const witness=delivery.getPublicationWitness(published,{request}),proof=delivery.assertOriginalPublicationWitness(witness,{request});
+    assert.equal(proof.result_sha256,roots.digest(result));assert.equal(proof.request_sha256,roots.digest(request));
+    assert.equal(delivery.getPublicationWitness(published,{request}),witness,'stable opaque published witness');
+    const pointer=receipts.at(-1),pending=delivery.getPublicationAttemptWitness(pointer,{request});
+    assert.equal(pending,pendingBeforePublication,'original callback received a genuine pending witness before materialization');
+    assert.throws(()=>delivery.getPublicationAttemptWitness({...pointer},{request}),/original-publication-attempt-required/);
+    assert.throws(()=>delivery.getPublicationWitness(structuredClone(published),{request}),/original-publication-required/);
+    assert.throws(()=>delivery.assertOriginalPublicationWitness(pending,{request}),/original-publication-required/);
+    assert.throws(()=>delivery.assertOriginalPublicationWitness(witness,{request:{...request,dispatchId:'foreign'}}),/original-publication-required/);
+    const publishedPlan=fs.readFileSync(slicePlan);
+    try{
+      fs.writeFileSync(slicePlan,preimage);
+      delivery.assertOriginalPublicationAttemptWitness(pending,{request}); // Genuine exact BEFORE remains pending, never published.
+      assert.throws(()=>delivery.assertOriginalPublicationWitness(witness,{request}),/artifact-changed/);
+      fs.appendFileSync(slicePlan,'foreign');
+      assert.throws(()=>delivery.assertOriginalPublicationAttemptWitness(pending,{request}),/artifact-changed/);
+    }finally{fs.writeFileSync(slicePlan,publishedPlan);}
+    for(const pointer of [proof.manifest,proof.receipt]){
+      const bytes=fs.readFileSync(pointer.file);
+      try{fs.appendFileSync(pointer.file,' ');assert.throws(()=>delivery.assertOriginalPublicationWitness(witness,{request}),/publication-(read|evidence)/);}
+      finally{fs.writeFileSync(pointer.file,bytes);}
+    }
+    delivery.assertOriginalPublicationWitness(witness,{request});
     const marker=published.artifacts.at(-1);
     assert.deepEqual(marker,{path:SLICE_PLAN,content:'# Slice\n- [x] **T01** — fixture\n- [ ] **T02** — next\n',before:sha256(preimage)});
     assert.equal(marker.before,published.milestone_delivery.protected_owner[SLICE_PLAN]);

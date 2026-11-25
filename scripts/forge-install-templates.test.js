@@ -8,6 +8,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
+// Establish isolated homes before any Forge module import; these are test
+// directories, not enrollment/capability proofs for a real host.
+const ISOLATED_HOME = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-install-owner-home-')));
+for (const [key,value] of Object.entries({ HOME:ISOLATED_HOME, USERPROFILE:ISOLATED_HOME, CODEX_HOME:path.join(ISOLATED_HOME,'codex'), CLAUDE_CONFIG_DIR:path.join(ISOLATED_HOME,'claude'), FORGE_HOME:path.join(ISOLATED_HOME,'.forge-agent') })) process.env[key]=value;
 const { TEMPLATE_FILES } = require('./forge-prompt.js');
 const installer = require('./forge-installer.js');
 
@@ -15,7 +19,7 @@ const ROOT = path.resolve(__dirname, '..');
 const INSTALL_SH = path.join(ROOT, 'install.sh');
 const INSTALL_PS1 = path.join(ROOT, 'install.ps1');
 const TEMPLATE_SRC = path.join(ROOT, 'shared', 'templates', 'dispatch');
-const roots = [];
+const roots = [ISOLATED_HOME];
 let passed = 0;
 let skipped = 0;
 function tempRoot(label) { const root = fs.mkdtempSync(path.join(os.tmpdir(), `forge-install-${label}-`)); roots.push(root); return root; }
@@ -106,6 +110,37 @@ test('temporary Claude and Codex installs carry delivery helper, contract and op
   assert.strictEqual(result.ok, true);
   assert(fs.existsSync(path.join(options.forgeHome, 'scripts', 'forge-delivery.js')));
   assert(fs.existsSync(path.join(options.forgeHome, 'scripts', 'forge-task-preparation.js')));
+  for (const helper of ['forge-native-host-request.js','forge-native-host-profile.js','forge-native-host-bridge.js']) {
+    assert(fs.existsSync(path.join(options.forgeHome,'scripts',helper)), helper + ' missing from managed Core');
+    assert(!fs.existsSync(path.join(options.forgeHome,'scripts',helper.replace(/\.js$/,'.test.js'))), 'test must not be installed');
+  }
+  const fileWorker=fs.readFileSync(path.join(options.claudeHome,'agents','forge-native-files.md'),'utf8');
+  assert.match(fileWorker,/^---\nname: forge-native-files\n/m);
+  assert.match(fileWorker,/^tools: Read, Write$/m);assert.match(fileWorker,/^model: sonnet$/m);
+  assert.match(fileWorker,/^effort: high$/m);assert.match(fileWorker,/^background: false$/m);
+  assert.match(fileWorker,/forge-source:agents source=agents\/forge-native-files\.md/);
+  assert.match(fileWorker,/Do not run commands, spawn agents, use MCP tools/);
+  assert.match(fileWorker,/Do not write those surfaces directly/);
+  const agentSource=JSON.parse(fs.readFileSync(path.join(ROOT,'forge-source-manifest.json'),'utf8')).sources.find(row=>row.source_id==='agents');
+  assert(agentSource.inputs.includes('agents')&&agentSource.render_targets.some(row=>row.path==='agents'&&row.recursive));
+  const settingsFile=path.join(options.claudeHome,'settings.json');
+  // install() projects the operator-owned JSONC template. Contribute executable
+  // hooks through the actual installed merger before inspecting those hooks.
+  const merged=spawnSync(process.execPath,[path.join(options.forgeHome,'scripts','merge-settings.js'),settingsFile],{
+    cwd:options.projectRoot,encoding:'utf8',stdio:'pipe',windowsHide:true,timeout:20000,
+    env:{...options.env,FORGE_HOME:options.forgeHome,CLAUDE_CONFIG_DIR:options.claudeHome,CODEX_HOME:options.codexHome},
+  });
+  assert.ifError(merged.error);assert.strictEqual(merged.signal,null);assert.strictEqual(merged.status,0,'installed settings merger must complete');
+  const parsedSettings=require('./forge-prefs.js').parseJsonc(fs.readFileSync(settingsFile,'utf8'));
+  assert.strictEqual(parsedSettings.ok,true,'installed settings must parse through the canonical JSONC reader');
+  const settings=parsedSettings.value;
+  const node=fs.realpathSync.native(process.execPath),hook=path.join(options.claudeHome,'forge-hook.js');
+  const bootstrap=settings.hooks.SessionStart.flatMap(row=>row.hooks).find(row=>row.args?.[1]==='session-start');
+  assert.deepStrictEqual(bootstrap.args,[hook,'session-start']);assert.strictEqual(bootstrap.command,node);assert.strictEqual(bootstrap.onFailure,'block');
+  for(const [event,phase] of [['PreToolUse','pre'],['PostToolUse','post'],['PostToolUseFailure','post-failure'],['PermissionDenied','permission-denied'],['SubagentStart','subagent-start'],['SubagentStop','subagent-stop'],['Stop','stop'],['SessionEnd','session-end'],['ConfigChange','config-change'],['PreModelSwitch','pre-model-switch'],['PostModelSwitch','post-model-switch']]) {
+    const rows=settings.hooks[event].flatMap(row=>row.hooks).filter(row=>row.args?.[1]==='native-live');assert.strictEqual(rows.length,1,event);
+    assert.deepStrictEqual(rows[0].args,[hook,'native-live',phase]);assert.strictEqual(rows[0].command,node);assert.strictEqual(rows[0].onFailure,'block');
+  }
   const nativeInvocationPath = path.join(options.forgeHome, 'scripts', 'forge-native-invocation.js');
   assert(fs.existsSync(nativeInvocationPath));
   for (const helper of ['forge-native-execution.js', 'forge-native-recovery-delivery.js', 'forge-phase-cost.js', 'forge-autonomy-sources.js']) {

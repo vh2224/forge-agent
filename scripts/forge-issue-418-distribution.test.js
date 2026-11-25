@@ -1,6 +1,9 @@
 'use strict';
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+
 const assert=require('assert/strict'),fs=require('fs'),path=require('path');
-const root=path.resolve(__dirname,'..'),layer=require('./fixtures/issue-461/distribution.cjs');
+const root=path.resolve(__dirname,'..'),layer=require('./fixtures/issue-463/distribution.cjs');
 const artifacts=require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts;
 assert.equal(layer.validate({artifacts}),true);
 assert.equal(layer.issue418Layer.provenance.base_revision,'63fc4ebcbd0c33e0bc9f91873bfd4d5ab8b56dc8');
@@ -10,7 +13,7 @@ for(const file of ['scripts/forge-sidecar-identity.js','shared/forge-bidirection
 const bad=structuredClone(layer.issue418Layer);bad.provenance.issues=[];
 assert.throws(()=>layer.validate({artifacts,issue418LayerValue:bad}));
 // A successor must not add another complete ancestral traversal per projection.
-const previous=require('./fixtures/issue-461/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issue-416/distribution.cjs'),originalAfter=previous.after;
+const previous=require('./fixtures/issue-463/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issue-416/distribution.cjs'),originalAfter=previous.after;
 let traversals=0;
 try {
  previous.after=(...args)=>{traversals++;return originalAfter(...args);};
@@ -31,3 +34,4 @@ try {
  for(const project of projections)assert.throws(project,/campaign independent measured delta predecessor/);
 } finally { ancestor.schema_version=schema; }
 console.log('PASS418 predecessor history preserved; changed source and measured layer drift rejected');
+});
