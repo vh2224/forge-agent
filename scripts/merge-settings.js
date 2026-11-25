@@ -176,9 +176,13 @@ if (remove) {
     const eventHooks = settings.hooks?.[event];
     if (!Array.isArray(eventHooks)) continue;
 
-    settings.hooks[event] = eventHooks.filter(
-      e => !e.hooks?.some(h => h.command?.includes(FORGE_HOOK_MARKER))
-    );
+    settings.hooks[event] = eventHooks.filter(entry => {
+      if (!Array.isArray(entry.hooks)) return true;
+      const hadForgeHook = entry.hooks.some(h => h.command?.includes(FORGE_HOOK_MARKER));
+      if (!hadForgeHook) return true;
+      entry.hooks = entry.hooks.filter(h => !h.command?.includes(FORGE_HOOK_MARKER));
+      return entry.hooks.length > 0;
+    });
     if (settings.hooks[event].length === 0) delete settings.hooks[event];
   }
 
@@ -273,8 +277,13 @@ function mergeLifecycleHook(eventHooks, phase) {
   );
   const hookEntry = { hooks: [{ type: 'command', command: `node ~/.claude/forge-hook.js ${phase}` }] };
 
-  if (existingIdx >= 0) eventHooks[existingIdx] = hookEntry;
-  else                  eventHooks.push(hookEntry);
+  if (existingIdx >= 0) {
+    const entry = eventHooks[existingIdx];
+    const hookIdx = entry.hooks.findIndex(h => h.command?.includes(FORGE_HOOK_MARKER));
+    entry.hooks[hookIdx] = hookEntry.hooks[0];
+  } else {
+    eventHooks.push(hookEntry);
+  }
 }
 
 for (const { event, phase } of TOOL_HOOKS) {

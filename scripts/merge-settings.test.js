@@ -311,6 +311,46 @@ test('S03/T05 enable never activates or changes optional subagent row', () => {
   console.log('PASS S03/T05 merge enable keeps optional subagent setting untouched and evidence matchers unchanged');
 });
 
+test('R7: mixed lifecycle entries preserve foreign hooks and group metadata', () => {
+  for (const [event, phase] of [
+    ['SessionStart', 'session-start'], ['SubagentStart', 'subagent-start'],
+    ['SubagentStop', 'subagent-stop'], ['PreCompact', 'pre-compact'],
+    ['PostCompact', 'post-compact'], ['Stop', 'stop'],
+  ]) {
+    const foreignBefore = { type: 'command', command: 'echo operator-before', timeout: 17 };
+    const foreignAfter = { type: 'command', command: 'echo operator-after', timeout: 29 };
+    const seedData = { hooks: { [event]: [
+      { timeout: 91, hooks: [foreignBefore, { type: 'command', command: 'node ~/.claude/forge-hook.js ' + phase }, foreignAfter] },
+      { matcher: 'operator', hooks: [{ type: 'command', command: 'echo independent-entry' }] },
+    ] }, operatorSetting: 'preserved' };
+    // Removal from the original mixed entry must be safe even without enable.
+    for (const enableFirst of [false, true]) {
+      const file = seed(mktmp(), seedData);
+      if (enableFirst) {
+        const enabled = run(file);
+        assertEqual(enabled.status, 0);
+        const mixed = enabled.settings.hooks[event][0];
+        assertEqual(mixed.timeout, 91, event + ' group metadata preserved');
+        assertEqual(JSON.stringify(mixed.hooks[0]), JSON.stringify(foreignBefore));
+        assertEqual(JSON.stringify(mixed.hooks[2]), JSON.stringify(foreignAfter));
+        const once = fs.readFileSync(file, 'utf8');
+        assertEqual(run(file).status, 0);
+        assertEqual(fs.readFileSync(file, 'utf8'), once, event + ' enable idempotent');
+      }
+      const removed = run(file, ['--remove']);
+      assertEqual(removed.status, 0);
+      assertEqual(JSON.stringify(removed.settings.hooks[event]), JSON.stringify([
+        { timeout: 91, hooks: [foreignBefore, foreignAfter] }, seedData.hooks[event][1],
+      ]), event + ' removal preserves both foreign hooks and independent entry');
+      assertEqual(removed.settings.operatorSetting, 'preserved');
+    }
+    const managedOnly = seed(mktmp(), { hooks: { [event]: [{ hooks: [{ type: 'command', command: 'node ~/.claude/forge-hook.js ' + phase }] }] } });
+    const removedOnly = run(managedOnly, ['--remove']);
+    assertEqual(removedOnly.status, 0);
+    assert(!removedOnly.settings.hooks, event + ' empty managed group removed');
+  }
+});
+
 // ── summary ─────────────────────────────────────────────────────────────────
 cleanup();
 console.log(`\nmerge-settings.test.js: ${passed} passed, ${failed} failed`);
