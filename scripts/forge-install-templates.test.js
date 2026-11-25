@@ -135,6 +135,22 @@ test('temporary Claude and Codex installs carry delivery helper, contract and op
   assert.strictEqual(parsedSettings.ok,true,'installed settings must parse through the canonical JSONC reader');
   const settings=parsedSettings.value;
   const node=fs.realpathSync.native(process.execPath),hook=path.join(options.claudeHome,'forge-hook.js');
+  // Exercise the ACTUAL projected Hook with its separate managed Core. Source-
+  // sibling tests cannot detect an installed owner resolver that silently no-ops.
+  assert(!fs.existsSync(path.join(options.claudeHome,'scripts','forge-workspace.js')));
+  assert(!fs.existsSync(path.join(options.claudeHome,'forge-workspace.js')));
+  assert(fs.existsSync(path.join(options.forgeHome,'scripts','forge-workspace.js')));
+  const ownerProject=path.join(options.projectRoot,'hook-owner');
+  fs.mkdirSync(path.join(ownerProject,'.gsd'),{recursive:true});
+  fs.writeFileSync(path.join(ownerProject,'.gsd','PROJECT.md'),'# Private installer owner fixture\n');
+  const resolveInstalledOwner=spawnSync(process.execPath,['-e',
+    'const hook=require(process.argv[1]);process.stdout.write(JSON.stringify({owner:hook.resolveOwnerDir(process.argv[2],"installer-private-session")}));',
+    hook,ownerProject],{cwd:options.projectRoot,encoding:'utf8',stdio:'pipe',windowsHide:true,timeout:15000,
+    env:{...options.env,FORGE_HOME:options.forgeHome,CLAUDE_CONFIG_DIR:options.claudeHome,CODEX_HOME:options.codexHome}});
+  assert.ifError(resolveInstalledOwner.error);assert.strictEqual(resolveInstalledOwner.signal,null);
+  assert.strictEqual(resolveInstalledOwner.status,0,'installed Hook owner resolution must complete');
+  assert.strictEqual(JSON.parse(resolveInstalledOwner.stdout).owner,ownerProject,'installed Hook resolves the real private project through managed Core');
+
   const bootstrap=settings.hooks.SessionStart.flatMap(row=>row.hooks).find(row=>row.args?.[1]==='session-start');
   assert.deepStrictEqual(bootstrap.args,[hook,'session-start']);assert.strictEqual(bootstrap.command,node);assert.strictEqual(bootstrap.onFailure,'block');
   for(const [event,phase] of [['PreToolUse','pre'],['PostToolUse','post'],['PostToolUseFailure','post-failure'],['PermissionDenied','permission-denied'],['SubagentStart','subagent-start'],['SubagentStop','subagent-stop'],['Stop','stop'],['SessionEnd','session-end'],['ConfigChange','config-change'],['PreModelSwitch','pre-model-switch'],['PostModelSwitch','post-model-switch']]) {

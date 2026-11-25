@@ -24,7 +24,15 @@ const forgedRelease=structuredClone(data);forgedRelease.rendered_provenance.rele
 assert.strictEqual(layer.loadHistoricalFixture('scripts/fixtures/issue-455/distribution.cjs'),previous,'same private historical predecessor instance');
 assert.strictEqual(layer.loadHistoricalFixture('scripts/fixtures/owner-recovery/distribution.cjs').ownerRecoveryLayer,previous.ownerRecoveryLayer,'shared nested historical defaults');
 for(const file of ['scripts/forge-dispatch-source-guard.js','scripts/fixtures/foreign/distribution.cjs','scripts/fixtures/../forge-dispatch-source-guard.js'])assert.throws(()=>layer.loadHistoricalFixture(file),'unknown/escaping request refuses');
-const rawRegistry=require('./forge-dispatch-source-guard.js').SOURCE_REGISTRY,registryNode=data.registry;
+const physicalRegistry=require('./forge-dispatch-source-guard.js').SOURCE_REGISTRY,registryNode=data.registry,nativeRegistry=cleanup.issue463Layer.registry;
+assert.deepEqual(physicalRegistry,nativeRegistry.after_rows,'real complete current native operational registry');
+assert.equal(hash(JSON.stringify(physicalRegistry)),nativeRegistry.after_sha256,'exact whole native registry after pin');
+assert.deepEqual(nativeRegistry.before_rows,registryNode.after_rows,'native predecessor is exactly published457458 registry stage');
+assert.equal(hash(JSON.stringify(nativeRegistry.before_rows)),nativeRegistry.before_sha256);assert.equal(nativeRegistry.before_sha256,registryNode.after_sha256);
+assert.deepEqual(layer.projectRegistry(physicalRegistry),registryNode.before_rows,'genuine native and original parent registry projection composes to BASE254');
+const physicalForeign=structuredClone(physicalRegistry);physicalForeign[0].reason+=' foreign native registry drift';assert.strictEqual(layer.projectRegistry(physicalForeign),physicalForeign,'unknown physical current registry is never adopted');
+const physicalExtra=[...physicalRegistry,{...physicalRegistry[0],id:'foreign-native-extra'}];assert.strictEqual(layer.projectRegistry(physicalExtra),physicalExtra,'unknown physical extra is never filtered');
+const rawRegistry=structuredClone(nativeRegistry.before_rows); // Explicit authenticated published465 input for the original historical registry cases.
 assert.deepEqual(rawRegistry,registryNode.after_rows,'real complete current operational registry');
 assert.equal(registryNode.before_count,254);assert.equal(registryNode.after_count,256);assert.equal(registryNode.changed.length,12);assert.equal(registryNode.added.length,2);
 assert.equal(hash(JSON.stringify(rawRegistry)),registryNode.after_sha256);assert.equal(hash(JSON.stringify(registryNode.before_rows)),registryNode.before_sha256);
@@ -49,7 +57,34 @@ assert.deepEqual(layer.files.slice(0,predecessorReadme.files.length),predecessor
 assert.deepEqual(layer.files.slice(predecessorReadme.files.length).sort(),['agents/forge-executor.md','shared/templates/dispatch/complete-slice.md','shared/templates/dispatch/execute-task.md'],'only the three measured new Claude members are added');
 assert.strictEqual(layer.issue455View.files,predecessorReadme.files,'historical455 view retains its original member array');
 const normalized=value=>String(value).replace(/version=\d+\.\d+\.\d+/g,'version=<dynamic>');
-const hostArtifacts={claude:artifacts,codex:require('./forge-codex-renderer').render({repo:ROOT,projectRoot:ROOT,codexHome:path.join(ROOT,'unused-host'),forgeHome:path.join(ROOT,'unused-core'),...require('./forge-codex-renderer').PRODUCTION_DISPATCH_DIALECT}).artifacts};
+// Only direct historical measurements select published465 artifacts. Genuine validate/delegation above retains actual current artifacts.
+function nativePredecessorArtifacts(items,host){
+ const rows=Object.values(cleanup.issue463Layer.rendered).filter(row=>row.host===host);
+ for(const row of rows){assert.equal(items.filter(item=>item.source_id===row.source_id&&item.source===row.source&&(item.kind??null)===row.kind&&item.newline===row.newline).length,row.after_copies,'exact current native rendered multiplicity');}
+ return items.flatMap(item=>{
+  const row=rows.find(row=>row.source_id===item.source_id&&row.source===item.source&&(item.kind??null)===row.kind&&item.newline===row.newline);
+  if(!row||typeof item.content!=='string'||hash(normalized(item.content))!==row.after)return[item];
+  assert.equal(Buffer.byteLength(normalized(item.content)),row.after_bytes,'exact native after bytes');
+  if(row.before===null){assert.equal(row.before_bytes,null);assert.equal(row.before_gzip_base64,null);return[];}
+  assert(Number.isSafeInteger(row.before_bytes)&&row.before_bytes>0&&row.before_bytes<=16*1024*1024,'bounded pinned rendered preimage');
+  const bytes=zlib.gunzipSync(Buffer.from(row.before_gzip_base64,'base64'),{maxOutputLength:row.before_bytes});
+  assert.equal(bytes.length,row.before_bytes);assert.equal(hash(bytes),row.before,'exact native rendered predecessor pin');
+  return[{...item,content:bytes.toString('utf8'),...(Object.hasOwn(item,'bytes')?{bytes:bytes.length}:{})}];
+ });
+}
+const actualHostArtifacts={claude:artifacts,codex:require('./forge-codex-renderer').render({repo:ROOT,projectRoot:ROOT,codexHome:path.join(ROOT,'unused-host'),forgeHome:path.join(ROOT,'unused-core'),...require('./forge-codex-renderer').PRODUCTION_DISPATCH_DIALECT}).artifacts};
+const hostArtifacts=Object.fromEntries(Object.entries(actualHostArtifacts).map(([host,items])=>[host,nativePredecessorArtifacts(items,host)]));
+for(const[host,items]of Object.entries(actualHostArtifacts)){
+ const known=Object.values(cleanup.issue463Layer.rendered).filter(row=>row.host===host);assert(known.length>0,'actual measured native rendered rows exercised');
+ for(const row of known){
+  const item=items.find(item=>item.source_id===row.source_id&&item.source===row.source&&(item.kind??null)===row.kind&&item.newline===row.newline);assert(item);
+  const foreign={...item,content:item.content+'\nforeign native rendered drift\n'},variant=items.map(current=>current===item?foreign:current);
+  assert(nativePredecessorArtifacts(variant,host).includes(foreign),'foreign current rendered bytes retain exact object identity');
+  if(row.before!==null){const bytes=zlib.gunzipSync(Buffer.from(row.before_gzip_base64,'base64'),{maxOutputLength:row.before_bytes}),baseline={...item,content:bytes.toString('utf8')};
+   assert(nativePredecessorArtifacts(items.map(current=>current===item?baseline:current),host).includes(baseline),'already predecessor rendered bytes retain exact object identity');}
+ }
+ const unknown={...items[0],source:'foreign/unknown-native-member.md'};assert(nativePredecessorArtifacts([...items,unknown],host).includes(unknown),'unknown identity is not filtered');
+}
 for(const[key,row]of Object.entries(data.rendered)){
  const matches=hostArtifacts[row.host].filter(item=>item.source_id===row.source_id&&item.source===row.source&&(item.kind??null)===row.kind);
  assert.equal(matches.length,row.copies,'exact rendered multiplicity '+key);assert.equal(new Set(row.target_ids).size,row.copies);
@@ -75,7 +110,7 @@ const projected=layer.projectRead();for(const[file,row]of Object.entries(data.fi
  const foreign=Buffer.concat([read(file),Buffer.from('\n// foreign unmeasured drift\n')]),readRaw=p=>p===file?foreign:read(p);
  assert(layer.projectRead(readRaw)(file).equals(foreign),'foreign bytes are never rewound '+file);assert.throws(()=>layer.verifyCurrent({readRaw}),/issues457458 measured current source/);
 }
-const fixturePaths=[];function walk(dir){for(const entry of fs.readdirSync(path.join(ROOT,dir),{withFileTypes:true})){const file=dir+'/'+entry.name;if(file==='scripts/fixtures/issue-461'){assert.deepEqual(fs.readdirSync(path.join(ROOT,file)).sort(),['README.md','distribution-delta.json','distribution.cjs'],'exact deferred issue461 folder');continue;}if(file==='scripts/fixtures/docs-cleanup'){assert.deepEqual(fs.readdirSync(path.join(ROOT,file)).sort(),['README.md','distribution-delta.json','distribution.cjs','proposal.md'],'exact deferred docs-only folder');continue;}if(file==='scripts/fixtures/issues-457-458'){assert.deepEqual(fs.readdirSync(path.join(ROOT,file)).sort(),['README.md','distribution-delta.json','distribution.cjs'],'only the three declared own fixture files may be outside the historical census');continue;}assert(!entry.isSymbolicLink());if(entry.isDirectory())walk(file);else{assert(entry.isFile());fixturePaths.push(file);}}}walk('scripts/fixtures');fixturePaths.sort();assert.deepEqual(fixturePaths,Object.keys(data.historical_fixtures).sort(),'no published fixture removed or unknown fixture added');
+const fixturePaths=[];function walk(dir){for(const entry of fs.readdirSync(path.join(ROOT,dir),{withFileTypes:true})){const file=dir+'/'+entry.name;if(['scripts/fixtures/issue-463/README.md','scripts/fixtures/issue-463/distribution-delta.json','scripts/fixtures/issue-463/distribution.cjs'].includes(file)){assert(entry.isFile()&&!entry.isSymbolicLink(),'exact own463 regular member already authenticated by the current Top guard');continue;}if(file==='scripts/fixtures/issue-461'){assert.deepEqual(fs.readdirSync(path.join(ROOT,file)).sort(),['README.md','distribution-delta.json','distribution.cjs'],'exact deferred issue461 folder');continue;}if(file==='scripts/fixtures/docs-cleanup'){assert.deepEqual(fs.readdirSync(path.join(ROOT,file)).sort(),['README.md','distribution-delta.json','distribution.cjs','proposal.md'],'exact deferred docs-only folder');continue;}if(file==='scripts/fixtures/issues-457-458'){assert.deepEqual(fs.readdirSync(path.join(ROOT,file)).sort(),['README.md','distribution-delta.json','distribution.cjs'],'only the three declared own fixture files may be outside the historical census');continue;}assert(!entry.isSymbolicLink());if(entry.isDirectory())walk(file);else{assert(entry.isFile());fixturePaths.push(file);}}}walk('scripts/fixtures');fixturePaths.sort();assert.deepEqual(fixturePaths,Object.keys(data.historical_fixtures).sort(),'no published fixture removed or unknown fixture added');
 for(const[file,row]of Object.entries(data.historical_fixtures)){const b=read(file);assert.equal(hash(b),row.sha256);assert.equal(b.length,row.bytes);}
 assert.equal(hash(fixturePaths.join('\n')+'\n'),data.provenance.historical_list_sha256);
 const historical='scripts/fixtures/issue-455/distribution-delta.json';assert.throws(()=>layer.verifyCurrent({readRaw:file=>file===historical?Buffer.concat([read(file),Buffer.from(' ')]):read(file)}),/immutable published fixture/);

@@ -11,6 +11,14 @@ const stateApi = require('./forge-xllm-state');
 const side = require('./forge-unit-sidecar');
 const delivery = require('./forge-native-recovery-delivery');
 const { write, capabilities } = fixtures;
+function retainLegacyReadyFixture(request, record) {
+  // Model a genuinely persisted historical receipt, not only an in-memory
+  // mutation of a newer ready record. Production replay reads these exact bytes.
+  const bytes=JSON.stringify(record),sha256=crypto.createHash('sha256').update(bytes).digest('hex');
+  const file=request.resultFile+'.receipt.json.'+sha256+'.json';
+  fs.writeFileSync(file,bytes,{flag:'wx'});
+  assert.equal(fs.readFileSync(file,'utf8'),bytes);return {file,sha256};
+}
 async function fixture(options = {}) {
   const f = fixtures.setup();
   const standalone = options.standalone === true;
@@ -420,13 +428,17 @@ async function documentaryContinuation(){
     assert.equal(published.artifacts.at(-1).path,SLICE_PLAN);
     assert.equal(published.artifacts.at(-1).before,sha256(slicePreimage));
     const afterReady=reopen(),legacy=structuredClone(published);legacy.artifacts.pop();
+    const legacyReceipt=retainLegacyReadyFixture(request,legacy);
     const verifier=require('./forge-verify'),capture=verifier.captureRootDelivery;
     const originalInvoke=f.runtime.invokeNative;
     let calls=0;
     try {
       verifier.captureRootDelivery=()=>{calls++;throw Error('unexpected replay verification');};
       f.runtime.invokeNative=()=>{calls++;throw Error('unexpected replay native invocation');};
-      afterReady.replayReady(legacy);
+      const legacyPublished=afterReady.replayReady(legacy);
+      const legacyProof=delivery.assertOriginalPublicationWitness(delivery.getPublicationWitness(legacyPublished,{request}),{request});
+      assert.deepEqual(legacyProof.receipt,legacyReceipt,'genuine original publication witness reads the exact persisted historical receipt');
+      assert(!legacyProof.artifacts.some(row=>row.path===SLICE_PLAN),'legacy witness does not invent a slice marker');
       assert.deepEqual(fs.readFileSync(sliceFile),slicePreimage,'legacy documentary ready never acquires a marker');
       const files=published.artifacts.map(a=>path.join(f.owner,a.path));
       const stamp=()=>files.map(file=>[fs.readFileSync(file,'utf8'),fs.statSync(file).mtimeMs]);
@@ -730,7 +742,10 @@ async function nativeTaskMarker() {
     const deliveryStamp=()=>deliveryFiles.map(file=>fs.readFileSync(file,'utf8'));
     const delivered=deliveryStamp();
     const legacy=structuredClone(published);legacy.artifacts.pop();
-    reopen().replayReady(legacy);
+    const legacyReceipt=retainLegacyReadyFixture(request,legacy),legacyPublished=reopen().replayReady(legacy);
+    const legacyProof=delivery.assertOriginalPublicationWitness(delivery.getPublicationWitness(legacyPublished,{request}),{request});
+    assert.deepEqual(legacyProof.receipt,legacyReceipt,'native legacy replay retains original persisted receipt custody');
+    assert(!legacyProof.artifacts.some(row=>row.path===SLICE_PLAN),'legacy replay witness carries no invented marker');
     assert.deepEqual(fs.readFileSync(slicePlan),preimage,'legacy ready never gains a marker');
     console.log('PASS legacy native ready: a record without marker replays idempotently and never marks the slice plan');
     const forged=change=>{const record=structuredClone(published);change(record);return record;};

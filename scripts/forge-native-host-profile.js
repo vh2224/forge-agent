@@ -3,7 +3,7 @@
 // Actual Claude foreground/descendant semantics remain unknown and refuse.
 const crypto=require('node:crypto'),path=require('node:path');
 const profiles=new WeakMap(),PROFILE_ID='claude-agent-foreground-v1',FIXTURE_PROFILE_ID='forge-native463-fixture-foreground-v1',MAX_INPUT=2*1024*1024,METADATA_BYTES=2048;
-const INITIAL_PREPARE_TIMEOUT_CAP_MS=300000;
+const INITIAL_PREPARE_TIMEOUT_CAP_MS=600000;
 function prepareTimeoutCapMs(){return INITIAL_PREPARE_TIMEOUT_CAP_MS;}
 function fail(code){throw Object.assign(new Error(code),{code,stage:'native-host-profile'});}
 function plain(value){return value!==null&&typeof value==='object'&&Object.getPrototypeOf(value)===Object.prototype&&Reflect.ownKeys(value).every(k=>typeof k==='string')&&Object.values(Object.getOwnPropertyDescriptors(value)).every(d=>Object.hasOwn(d,'value')&&d.enumerable);}
@@ -277,7 +277,7 @@ function admitLiveObservation(handle,witness){const row=current(handle);if(!row.
  if(phase==='subagent-start'){if(l.started||l.returned||!l.agentTool||raw.agent_type!=='forge-native-files')fail('native-host-live-descendant-unsupported');text(raw.agent_id,128);l.agentId=raw.agent_id;l.started=true;row.toolUseId=l.agentTool;row.rootWorker=raw.agent_id;row.workers.set(raw.agent_id,{parent:null,stopped:false});}
  else if(phase==='subagent-stop'){if(!l.started||l.stopped||raw.agent_id!==l.agentId||raw.agent_type!=='forge-native-files'||l.pending.size||!Array.isArray(raw.background_tasks)||raw.background_tasks.length||!Array.isArray(raw.session_crons)||raw.session_crons.length)fail('native-host-live-descendants-pending');l.stopped=true;row.workers.get(l.agentId).stopped=true;/* Stop is not terminal/join authority. */}
  else if(raw.tool_name==='Agent'){
-  if(raw.agent_id!==undefined||raw.agent_type!==undefined)fail('native-host-live-nested-agent');text(raw.tool_use_id,128);if(rootsDigest(raw.tool_input)!==rootsDigest(row.liveArgs))fail('native-host-live-original-args-mismatch');
+  if(raw.agent_id!==undefined||raw.agent_type!==undefined)fail('native-host-live-nested-agent');text(raw.tool_use_id,128);if(digest(raw.tool_input)!==digest(row.liveArgs))fail('native-host-live-original-args-mismatch');
   if(phase==='pre'){if(!l.prepareAcknowledged)fail('native-host-original-prepare-handoff-required');if(l.agentTool||l.returned)fail('native-host-live-agent-count');l.agentTool=raw.tool_use_id;row.executionAdmitted=true;assertLaunchAdmission(handle);}
   else{if(raw.tool_use_id!==l.agentTool||l.returned)fail('native-host-live-agent-id');const result=liveReturnSchema(raw.tool_response,row);row.capture={raw:privateBytes(result.raw),parsed:parsedReturn(result.raw),sha256:hash(result.raw)};row.providerObservation=result.provider_called;row.observedModel=result.observed_model;l.returned=true;notify(row);return{capture:privateBytes(result.raw),provider_called:result.provider_called};}
  }else if(raw.agent_id===undefined){

@@ -61,42 +61,42 @@ jobs:
             shard-count: 6
             label: ubuntu-latest, shard 1/6
             workers: 2
-            single-worker-jobs: 4
+            single-worker-jobs: 0
           - os: ubuntu-latest
             platform: linux
             shard-index: 1
             shard-count: 6
             label: ubuntu-latest, shard 2/6
             workers: 2
-            single-worker-jobs: 4
+            single-worker-jobs: 0
           - os: ubuntu-latest
             platform: linux
             shard-index: 2
             shard-count: 6
             label: ubuntu-latest, shard 3/6
             workers: 2
-            single-worker-jobs: 4
+            single-worker-jobs: 0
           - os: ubuntu-latest
             platform: linux
             shard-index: 3
             shard-count: 6
             label: ubuntu-latest, shard 4/6
             workers: 2
-            single-worker-jobs: 4
+            single-worker-jobs: 0
           - os: ubuntu-latest
             platform: linux
             shard-index: 4
             shard-count: 6
             label: ubuntu-latest, shard 5/6
             workers: 2
-            single-worker-jobs: 4
+            single-worker-jobs: 0
           - os: ubuntu-latest
             platform: linux
             shard-index: 5
             shard-count: 6
             label: ubuntu-latest, shard 6/6
             workers: 2
-            single-worker-jobs: 4
+            single-worker-jobs: 0
           - os: macos-latest
             platform: darwin
             shard-index: 0
@@ -159,189 +159,189 @@ jobs:
             shard-count: 27
             label: windows-latest, shard 1/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 1
             shard-count: 27
             label: windows-latest, shard 2/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 2
             shard-count: 27
             label: windows-latest, shard 3/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 3
             shard-count: 27
             label: windows-latest, shard 4/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 4
             shard-count: 27
             label: windows-latest, shard 5/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 5
             shard-count: 27
             label: windows-latest, shard 6/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 6
             shard-count: 27
             label: windows-latest, shard 7/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 7
             shard-count: 27
             label: windows-latest, shard 8/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 8
             shard-count: 27
             label: windows-latest, shard 9/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 9
             shard-count: 27
             label: windows-latest, shard 10/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 10
             shard-count: 27
             label: windows-latest, shard 11/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 11
             shard-count: 27
             label: windows-latest, shard 12/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 12
             shard-count: 27
             label: windows-latest, shard 13/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 13
             shard-count: 27
             label: windows-latest, shard 14/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 14
             shard-count: 27
             label: windows-latest, shard 15/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 15
             shard-count: 27
             label: windows-latest, shard 16/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 16
             shard-count: 27
             label: windows-latest, shard 17/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 17
             shard-count: 27
             label: windows-latest, shard 18/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 18
             shard-count: 27
             label: windows-latest, shard 19/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 19
             shard-count: 27
             label: windows-latest, shard 20/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 20
             shard-count: 27
             label: windows-latest, shard 21/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 21
             shard-count: 27
             label: windows-latest, shard 22/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 22
             shard-count: 27
             label: windows-latest, shard 23/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 23
             shard-count: 27
             label: windows-latest, shard 24/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 24
             shard-count: 27
             label: windows-latest, shard 25/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 25
             shard-count: 27
             label: windows-latest, shard 26/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
           - os: windows-latest
             platform: win32
             shard-index: 26
             shard-count: 27
             label: windows-latest, shard 27/27
             workers: 2
-            single-worker-jobs: 14
+            single-worker-jobs: 18
 
     steps:
       - name: Check out repository

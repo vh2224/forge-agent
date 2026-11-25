@@ -235,7 +235,7 @@ function buildNativeHostIntent(input, host, dispatch) {
     return refusal(host, 'native-host-intent-unit', 'The genuine request must identify its canonical unit before argument construction.');
   }
   const args = { description: 'Forge ' + unitType + ': ' + unitId,
-    subagent_type: agentType, prompt, model: alias, effort };
+    subagent_type: agentType, prompt, model: alias, effort, run_in_background: false };
   const telemetry = baseTelemetry(dispatch, alias, effort, { source: 'genuine-native-host-intent' });
   telemetry.effort_transport = 'native-argument';
   telemetry.effort_transport_value = effort;

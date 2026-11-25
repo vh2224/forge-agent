@@ -520,7 +520,16 @@ test('Codex classification is distributed exactly where the renderer projects th
     const sourceIds = new Set(report.artifacts.map((artifact) => artifact.source_id));
     const { catalog } = api.loadCatalog(REPO);
     const projected = catalog.capabilities.filter((entry) => ['skill', 'agent', 'command'].includes(entry.kind));
-    assert.strictEqual(projected.length, 43);
+    // Compare both directions with the actual declared/rendered Source probes;
+    // distributed Codex files do not establish a Native host execution profile.
+    let renderedProjected = 0;
+    for (const [kind, sourceId] of [['skill', 'skills'], ['agent', 'agents'], ['command', 'commands']]) {
+      const expectedProbes = report.artifacts.filter(artifact => artifact.source_id === sourceId).map(artifact => artifact.source).sort();
+      assert.strictEqual(new Set(expectedProbes).size, expectedProbes.length, sourceId + ': one projection per declared Source');
+      assert.deepStrictEqual(projected.filter(entry => entry.kind === kind).map(entry => entry.probe.path).sort(), expectedProbes, kind + ': exact catalog-to-rendered probe inventory');
+      renderedProjected += expectedProbes.length;
+    }
+    assert.strictEqual(projected.length, renderedProjected);
     for (const entry of projected) {
       assert.strictEqual(entry.hosts.codex === 'distributed', sources.has(entry.probe.path), `${entry.capability_id}: codex ${entry.hosts.codex} vs rendered ${sources.has(entry.probe.path)}`);
       assert.strictEqual(entry.hosts.codex, 'distributed', entry.capability_id);

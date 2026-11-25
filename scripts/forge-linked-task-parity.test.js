@@ -130,13 +130,14 @@ function textDigest(value) { return typeof value === 'string' ? { sha256: sha256
 // ---------------------------------------------------------------------------
 // Trace of the unlinked flow
 // ---------------------------------------------------------------------------
-function stageProcedures(destination) {
-  const manifest = JSON.parse(fs.readFileSync(path.join(REPO, 'shared/forge-procedures.json'), 'utf8'));
+function stageProcedures(destination, readProcedures = relative => fs.readFileSync(path.join(REPO, relative))) {
+  const manifestBytes = readProcedures('shared/forge-procedures.json');
+  const manifest = JSON.parse(manifestBytes.toString('utf8'));
   fs.mkdirSync(path.join(destination, 'shared'), { recursive: true });
-  fs.copyFileSync(path.join(REPO, 'shared/forge-procedures.json'), path.join(destination, 'shared/forge-procedures.json'));
+  fs.writeFileSync(path.join(destination, 'shared/forge-procedures.json'), manifestBytes);
   for (const module of manifest.modules.filter(item => item.status === 'ready')) {
     fs.mkdirSync(path.dirname(path.join(destination, module.path)), { recursive: true });
-    fs.copyFileSync(path.join(REPO, module.path), path.join(destination, module.path));
+    fs.writeFileSync(path.join(destination, module.path), readProcedures(module.path));
   }
 }
 function owner(root, name, model) {
@@ -189,7 +190,7 @@ function briefText(taskId, description) {
   return `---\nid: ${taskId}\ndescription: ${description}\ncreated: ${CLOCK}\nskip_brainstorm: false\nskip_research: false\n---\n\n# ${description}\n`;
 }
 
-async function computeTrace() {
+async function computeTrace({ readProcedures } = {}) {
   const prep = require('./forge-task-preparation'), unit = require('./forge-unit-sidecar'), execution = require('./forge-task-execution');
   const admission = require('./forge-milestone-time-admission'), personal = require('./forge-personal-context');
   const summary = require('./forge-personal-summary'), status = require('./forge-status'), runs = require('./forge-runs');
@@ -202,7 +203,7 @@ async function computeTrace() {
     process.env.HOME = home; process.env.USERPROFILE = home; process.env.FORGE_HOME = REPO;
     const normalize = normalizer([[root, '<root>'], [REPO, '<forge>']]);
     const code = path.join(root, 'code'), results = path.join(root, 'results');
-    fs.mkdirSync(code); fs.mkdirSync(results); stageProcedures(code);
+    fs.mkdirSync(code); fs.mkdirSync(results); stageProcedures(code, readProcedures);
     const owners = { claude: owner(root, 'owner-claude', 'claude-sonnet-5'), gpt: owner(root, 'owner-gpt', 'gpt-5.6-sol') };
     const agent = path.join(results, 'agents', 'forge-agent.md');
     const request = (ownerDir, host, phase, label, extra = {}) => ({ schema_version: 1, scope: 'standalone-task', phase,

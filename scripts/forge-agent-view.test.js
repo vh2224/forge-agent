@@ -279,6 +279,8 @@ check('conditional navigation and bounded plain human lines', () => {
 check('role catalog exactly matches agents and has safe TOML descriptions', () => {
   const names = fs.readdirSync(path.join(__dirname, '../agents')).filter(name => name.endsWith('.md')).map(name => name.slice(0, -3)).sort();
   assert.deepStrictEqual(Object.keys(view.AGENT_ROLES).sort(), names);
+  assert.strictEqual(view.AGENT_ROLES['forge-native-files'].label, 'Arquivos nativos');
+  assert.match(view.AGENT_ROLES['forge-native-files'].description, /arquivos autorizados.*verificação/);
   for (const role of Object.values(view.AGENT_ROLES)) {
     assert(role.label); assert(role.description.length <= 120);
     assert(!/["'\n\r]|gpt|claude|sonnet|opus|effort|somente leitura|isolamento/i.test(role.description));

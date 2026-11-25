@@ -78,7 +78,7 @@ test('docs-input-guards-have-separate-exact-literal-tables', () => {
 });
 test('docs-recovery-procedure-seven-English-lines-UTF8-LF-and-only-inventory-sha', () => {
   const file = 'shared/forge-procedure-recovery.md';
-  const bytes = fs.readFileSync(path.join(ROOT, file));
+  const bytes = require('./fixtures/issue-463/distribution.cjs').projectIssue463Read(relative => fs.readFileSync(path.join(ROOT, relative)))(file);
   assert.notEqual(bytes.subarray(0, 3).toString('hex'), 'efbbbf');
   const text = bytes.toString('utf8');
   assert(!text.includes('\r'));

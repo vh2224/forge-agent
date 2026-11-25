@@ -8210,6 +8210,10 @@ function smokePrefsCutoverGuards() {
     'scripts/fixtures/issues-451-452/distribution-delta.json',
     'scripts/fixtures/issue-455/distribution-delta.json',
     'scripts/fixtures/issues-457-458/distribution-delta.json',
+    // Own463 metadata documents the complete source inventory, including the
+    // immutable installer/claude-3.1.4 legacy prefs fixture filename. This exact
+    // pinned distribution record is documentary data, never a preference reader.
+    'scripts/fixtures/issue-463/distribution-delta.json',
   ]);
   const untrackedProbe = path.join(REPO, '.forge-smoke-untracked-prefs-probe');
   fs.writeFileSync(untrackedProbe, 'forge-agent-prefs.md\n', 'utf8');

@@ -549,7 +549,7 @@ function entry347After(kind, key, prior, delta = ENTRY_347, attributed = false) 
   assert.match(row[afterKey], /^[0-9a-f]{64}$/, '#347 measured after');
   return artifact348After(kind, key, row[afterKey], ARTIFACT_348, attributed);
 }
-function validateEntry347(delta, earlier, { measure, readRaw, readme, renderMembers, artifactDelta = ARTIFACT_348 }) {
+function validateEntry347(delta, earlier, { measure, readRaw, readme, renderMembers, artifacts, artifactDelta = ARTIFACT_348 }) {
   validateArtifact348(artifactDelta, delta, { measure, readRaw, readme });
   assert.deepStrictEqual(Object.keys(delta).sort(), ['schema_version', 'issue', 'provenance', 'surfaces', 'files', 'unchanged_surfaces'].sort(), '#347 closed delta shape');
   assert.strictEqual(delta.schema_version, 1); assert.strictEqual(delta.issue, 347);
@@ -559,7 +559,28 @@ function validateEntry347(delta, earlier, { measure, readRaw, readme, renderMemb
   assert.deepStrictEqual(Object.keys(delta.files).sort(), [...ENTRY_347_FILES].sort(), '#347 exact changed files');
   assert.deepStrictEqual([...delta.unchanged_surfaces].sort(), [...ENTRY_347_UNCHANGED], '#347 exact untouched surfaces');
   assert.deepStrictEqual(Object.keys(renderMembers).sort(), ['agents', 'hooks'], '#347 exact rendered member groups');
-  for (const [id, expected] of Object.entries(ENTRY_347_RENDER_MEMBERS)) assert.deepStrictEqual([...renderMembers[id]].sort(), [...expected].sort(), '#347 exact rendered members ' + id);
+  for (const [id, expected] of Object.entries(ENTRY_347_RENDER_MEMBERS)) {
+    // Hash validation below remains at the real current stage. Only identity
+    // membership composes the immutable347 roster with measured new identities.
+    const added = [];
+    for (const native of Object.values(unitEntry.issue463Layer.rendered).filter(row => row.host === 'claude' && row.source_id === id && row.before === null)) {
+      const source = unitEntry.issue463Layer.files[native.source];
+      assert(source && source.before === null, '#347 current native identity has no invented Source predecessor');
+      assert(!expected.includes(native.source), '#347 current native identity is absent historical member roster');
+      assert.strictEqual(hash(readRaw(native.source)), source.after, '#347 current native member Source');
+      const current = artifacts.filter(item => item.source_id === id && item.source === native.source);
+      assert.strictEqual(current.length, native.after_copies, '#347 exact current native copy count');
+      for (const item of current) {
+        assert(Object.hasOwn(item, 'bytes') && Object.hasOwn(item, 'origin'), '#347 current native identity is a Claude artifact');
+        assert.strictEqual(item.kind ?? null, native.kind, '#347 current native artifact kind');
+        assert.strictEqual(item.newline, native.newline, '#347 current native artifact newline');
+        assert.strictEqual(typeof item.content, 'string');
+        assert.strictEqual(hash(item.content.replace(/version=\d+\.\d+\.\d+/g, 'version=<dynamic>')), native.after, '#347 current native rendered bytes');
+        added.push(native.source);
+      }
+    }
+    assert.deepStrictEqual([...renderMembers[id]].sort(), [...expected, ...added].sort(), '#347 exact rendered members ' + id);
+  }
   for (const [kind, anchors] of [['surfaces', ENTRY_347_BEFORE_SURFACES], ['files', ENTRY_347_BEFORE_FILES]]) {
     for (const [key, anchor] of Object.entries(anchors)) {
       const row = delta[kind][key];
@@ -703,7 +724,7 @@ function checkPinsBody(fixture = {}) {
     sampleReadme: fixture.identitySampleReadme === undefined ? sampleReadme : fixture.identitySampleReadme });
   validateEntry347(entryDelta, delta, { measure: id => surfaceHash(artifacts, id, true),
     renderMembers: Object.fromEntries(['agents', 'hooks'].map(id => [id, artifacts.filter(item => item.source_id === id).map(item => item.source)])),
-    readRaw: fixture.readSource || (rel => fs.readFileSync(path.join(root, rel))), readme, artifactDelta });
+    readRaw: fixture.readSource || (rel => fs.readFileSync(path.join(root, rel))), readme, artifacts, artifactDelta });
   assert.strictEqual(pins.surfaces.length, 9);
   assert.deepStrictEqual(pins.surfaces.map(({ sha256, ...identity }) => identity),
     before.active_golden_before.surfaces.map(({ sha256, ...identity }) => identity));
@@ -2256,6 +2277,16 @@ test('#347 distribution delta: exact chain, members and tamper refusals', () => 
   const wrong = hash('not a measured #347 value');
   const variant = mutate => { const copy = JSON.parse(JSON.stringify(ENTRY_347)); mutate(copy); return copy; };
   const refused = (label, fixture) => assert.throws(() => checkPins({ artifacts, ...fixture }), error => error instanceof assert.AssertionError, '#347 ' + label + ' must be refused');
+  const nativeAdditions = Object.values(unitEntry.issue463Layer.rendered).filter(row => row.host === 'claude' && ['agents','hooks'].includes(row.source_id) && row.before === null);
+  assert(nativeAdditions.length > 0, '#347 exercises the actual measured native after-only membership');
+  for (const native of nativeAdditions) {
+    const current = artifacts.find(item => item.source_id === native.source_id && item.source === native.source);
+    assert(current, '#347 actual current native member exists');
+    refused('omitted native member', { artifacts: artifacts.filter(item => !(item.source_id === native.source_id && item.source === native.source)) });
+    refused('duplicate native member', { artifacts: [...artifacts, { ...current }] });
+    refused('edited native member', { artifacts: artifacts.map(item => item === current ? { ...item, content: item.content + '\nforeign native drift\n' } : item) });
+    refused('edited native Source', { readSource: rel => { const raw = fs.readFileSync(path.join(root, rel)); return rel === native.source ? Buffer.concat([raw, Buffer.from('\nforeign native Source\n')]) : raw; } });
+  }
   refused('foreign before', { entryDelta: variant(d => { d.surfaces.agents.before = wrong; }) });
   refused('coherent invented after', { entryDelta: variant(d => { d.surfaces.agents.after = wrong; d.surfaces.agents.attributed_after = wrong; }) });
   refused('extra surface', { entryDelta: variant(d => { d.surfaces.commands = { ...d.surfaces.agents }; }) });

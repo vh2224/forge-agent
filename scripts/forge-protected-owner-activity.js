@@ -352,9 +352,13 @@ async function withNativeExecutionActivity(request, profileHandle, action) {
     if (value && typeof value.then === 'function') fail('native-owner-profile-sync-required');
     return value;
   }
-  function assertLive() {
+  let ingressOwnerChecks = false;
+  function assertOwnerAuthority() {
     if (settled || coordinationClosed || leaseClosed || !leaseWindow?.heartbeat().ok) fail('protected-owner-lease-changed');
     windows.withWindow(ownerWindow, () => {});sameActorClaim();
+  }
+  function assertLive() {
+    assertOwnerAuthority();
     if (publicationWitness) syncProfile('assertPublicationCurrent', profileHandle, publicationWitness);
     else if (publicationAttemptWitness) syncProfile('assertPublicationAttemptCurrent', profileHandle, publicationAttemptWitness);
     else syncProfile('assertActivityAdmission', profileHandle, r);
@@ -448,6 +452,17 @@ async function withNativeExecutionActivity(request, profileHandle, action) {
   const scope = Object.freeze({
     kind: 'native-execution', owner, unit, generation,
     spawn() { fail('native-owner-process-spawn-forbidden'); },
+    assertIngressCurrent() {
+      if (arguments.length) fail('native-owner-ingress-arguments');
+      if (ingressOwnerChecks) fail('native-owner-ingress-reentrant');
+      return enter(() => {
+        // Only this closed synchronous owner check can borrow owner validation.
+        // Host/source/profile freshness remains in the genuine Bridge/Profile ingress.
+        ingressOwnerChecks = true;
+        try { assertOwnerAuthority();assertOwnerSurface();assertOwnerAuthority();return true; }
+        finally { ingressOwnerChecks = false; }
+      });
+    },
     async observeJoined(handle) {
       if (arguments.length !== 1 || handle !== profileHandle) fail('native-owner-profile-foreign');
       return enter(() => {
@@ -528,7 +543,7 @@ async function withNativeExecutionActivity(request, profileHandle, action) {
     expectedOwner(root, before) {
       if (roots.key(fs.realpathSync.native(root)) !== roots.key(owner)) return before;
       if (!before || !knownLeaseHashes.has(before[relative])) fail('protected-owner-baseline-unbound');
-      assertLive();return projectedOwner(before);
+      if (ingressOwnerChecks) assertOwnerAuthority();else assertLive();return projectedOwner(before);
     },
     projectPublicationLease(root, before) {
       // Internal read-side producer for Request's original owner snapshot. It

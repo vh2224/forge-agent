@@ -635,6 +635,19 @@ async function publicImmediateGate({ short = false, identity = 'observed', recei
       console.log('PASS issue288 immediate identity: refused publication cannot append identity');
       return;
     }
+    if (receipt !== 'intact') {
+      // completed is an observer notification; it cannot bless a mutated original receipt.
+      const refusal = receipt === 'foreign' ? 'native-publication-evidence-changed' : 'native-publication-read-source_too_large';
+      try {
+        await assert.rejects(sidecar.recoverUnitSidecar(f.request, f.recovery, runtime), error => error.code === refusal);
+        assert.equal(calls, 1);
+        assert(retainedReceipt && intactReceipt, 'the genuine completed observer performed the intended receipt mutation');
+        assert.equal(lines(path.join(f.owner, '.gsd/forge/events.jsonl')).filter(row => row.event === 'agent-identity').length, 0);
+        assert.deepEqual(fs.readFileSync(f.receiptFile), receiptBefore, 'original retained input receipt remains unchanged');
+      } finally { if (retainedReceipt && intactReceipt) fs.writeFileSync(retainedReceipt, intactReceipt); }
+      console.log('PASS issue288 publication receipt tamper: exact original evidence guard refuses before minting published authority; no identity appended');
+      return;
+    }
     const result = await sidecar.recoverUnitSidecar(f.request, f.recovery, runtime);
     assert.equal(calls, 1);
     assert.equal(result.result.published.phase, 'ready'); assert(result.result.verified.capture.passed);

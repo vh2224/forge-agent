@@ -61,12 +61,9 @@ catch {
 // still must never crash on (MEM008), so it is swallowed too but never mistaken
 // for "the module tried and lied" — resolveOwnerDir() below treats a null
 // workspaceMod as "no owner resolvable", same as resolveOwner() returning null.
-let workspaceMod = null;
-try { workspaceMod = require(path.join(__dirname, 'scripts', 'forge-workspace.js')); }
-catch (err1) {
-  try { workspaceMod = require(path.join(__dirname, 'forge-workspace.js')); }
-  catch (err2) { workspaceMod = null; }
-}
+// Installed runtime projections have no scripts directory. Use the same
+// canonical Core resolver as run/session and native-window dependencies.
+let workspaceMod = loadCoreModule('forge-workspace.js');
 
 // ── Resolve context-monitor module — same dev/installed pattern ──
 let ctxMonitor = null;

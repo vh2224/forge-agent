@@ -30,9 +30,12 @@ assert.strictEqual(hash(predecessorCi), latencyLayer.ci_before.sha256);
 const verboseLayer = require('./fixtures/issue-440/workflow-layer.json');
 const gitBlob = value => crypto.createHash('sha1').update(`blob ${value.length}\0`).update(value).digest('hex');
 const ciHistoryView = require('./fixtures/issue-463/distribution.cjs');
-const historicalCi = bytes => ciHistoryView.projectIssue461Read(() => bytes)('.github/workflows/ci.yml');
-assert.strictEqual(hash(bytes.ci), '0c2deeaa3f7b429ba1d7c208836159f80ca48f0cae36ab171b4a1d26b18dc8ad');
-assert.strictEqual(gitBlob(bytes.ci), '9b968e1cd62509edca22cffd8b779a3a25063b50');
+// Only the immutable ancestor pin chain selects the authenticated Native
+// predecessor. bytes.ci/texts.ci below remain the actual current workflow.
+const nativePredecessorCi = bytes => ciHistoryView.projectIssue463Read(() => bytes)('.github/workflows/ci.yml');
+const historicalCi = bytes => ciHistoryView.projectIssue461Read(() => nativePredecessorCi(bytes))('.github/workflows/ci.yml');
+assert.strictEqual(hash(nativePredecessorCi(bytes.ci)), '0c2deeaa3f7b429ba1d7c208836159f80ca48f0cae36ab171b4a1d26b18dc8ad');
+assert.strictEqual(gitBlob(nativePredecessorCi(bytes.ci)), '9b968e1cd62509edca22cffd8b779a3a25063b50');
 assert.strictEqual(hash(historicalCi(bytes.ci)), verboseLayer.ci_after.sha256);
 assert.strictEqual(gitBlob(historicalCi(bytes.ci)), verboseLayer.ci_after.oid);
 assert.deepStrictEqual(verboseLayer.ci_before, latencyLayer.ci_after, 'issue-440 layer chains onto the ci-latency layer');
@@ -320,7 +323,7 @@ for (const [platform,platformCells] of cells) {
   const cell=platformCells[0],layouts=platformCells.map(row=>workerLayout({index:row['shard-index'],count:row['shard-count'],jobs:row.workers,singleWorkerJobs:row['single-worker-jobs']}));
   const count=layouts[0].count;assert(layouts.every(row=>row.count===count));
   assert.deepStrictEqual(layouts.flatMap(row=>Array.from({length:row.workers},(_,i)=>row.start+i)).sort((a,b)=>a-b),Array.from({length:count},(_,i)=>i));
-  assert.strictEqual(count,{linux:8,darwin:16,win32:40}[platform]);totalWorkers+=count;
+  assert.strictEqual(count,{linux:12,darwin:16,win32:36}[platform]);totalWorkers+=count;
   const plans = Array.from({ length: count }, (_, index) => planShards({
     suites, index, count, platform, profile, estimatedWeights: unitWeights(unitInventory, profile, platform) }));
   assert(plans.every(plan => plan.fallback === null && plan.algorithm === 'weighted-lpt-v1'));

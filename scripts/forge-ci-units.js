@@ -24,10 +24,11 @@ const DEFINITIONS = Object.freeze({
 // Explicit initial estimates, not observations of this new wrapper. The prior
 // smoke steps in run44163993587 took56s on Linux and153s on macOS.
 const INITIAL_COSTS = Object.freeze({
-  // Planning estimate for each new independent core/negative cohort, NOT hosted timing.
-  // Actual whole Sourceguard r5 passed31 cases in1409454ms; immutable old profile
-  // describes the whole source, not these9 units. Current measured unit weights win.
-  'forge-dispatch-source-guard.test.js': Object.freeze({linux:750000,darwin:750000,win32:750000}),
+  // Explicit planning estimate, not a rewrite of the immutable published profile.
+  // CI467 core/negative cohorts passed on macOS and Windows; largest observed
+  // cohort350725ms +~28%margin =>450000ms. Linux one cohort is still unmeasured.
+  // New independent cohort observations, when available, retain precedence.
+  'forge-dispatch-source-guard.test.js': Object.freeze({linux:450000,darwin:450000,win32:450000}),
   // Planning estimate per full/partial cohort, NOT hosted timing. The first
   // unpartitioned local case failed after 558844ms (native463-bridge-r6-causal);
   // 750000ms reserves ~34% over that incomplete run on every platform. Actual

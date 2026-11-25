@@ -27,7 +27,7 @@ try{
  let getterCalls=0;const getter=Object.defineProperty({},'then',{get(){getterCalls++;throw sentinel;}});assert.throws(()=>frameData.withIntentFrame(scratch,handle,request,()=>getter),e=>e===sentinel);assert.equal(getterCalls,1);assert.equal(scratch.intentFrame,undefined);
  frameData.withIntentFrame(scratch,handle,request,()=>{scratch.invalid=sentinel;assert.equal(frameData.canBorrowIntent(scratch,handle,request),false);delete scratch.invalid;});assert.equal(scratch.intentFrame,undefined);
  assert.equal(crypto.createHash('sha256').update(fs.readFileSync(filename)).digest('hex'),crypto.createHash('sha256').update(sourceBytes).digest('hex'),'private DATA inspection leaves actual Source untouched');
- assert.equal(profile.prepareTimeoutCapMs(),300000,'existing initial prepare protocol cap remains unchanged');
+ assert.equal(profile.prepareTimeoutCapMs(),600000,'initial prepare protocol cap matches the documented Bash maximum; resolved lower limits remain required');
  assert.equal(profile.LIVE_PROFILE_ID,'claude-agent-files-foreground-v1');
  assert.throws(()=>profile.assertInvocationIntent(Object.freeze({}),{request:{}}),e=>e.code==='native-host-profile-required');
  assert.throws(()=>profile.assertSealedIntent(Object.freeze({})),e=>e.code==='native-host-profile-required');

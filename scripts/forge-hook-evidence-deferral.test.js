@@ -52,13 +52,13 @@ try{
    const r=transport(input);assert.equal(r.status,2);assert(r.stderr.includes(code));assert(!fs.existsSync(captureFile),'invalid capture never invokes relay');assert.deepEqual(JSON.parse(r.stdout),{});
  }
  const inert=transport(exact,{TEST_TRANSPORT_WINDOW:'none'});assert.equal(inert.status,0);assert(!fs.existsSync(captureFile));
- const literal=value=>"'"+value.split(path.sep).join('/')+"'";
+ const literal=value=>'"'+value.split(path.sep).join('/')+'"';
  const inputFile=path.join(lab,'initial-owner-input.json');fs.writeFileSync(inputFile,'{}');
  const prepareCommand=literal(fs.realpathSync.native(process.execPath))+' '+literal(actualBridge)+' prepare --input '+literal(inputFile);
  function noWindowPre(command){return transport(Buffer.from(JSON.stringify({...payload,tool_name:'Bash',tool_input:{command}})),{TEST_TRANSPORT_OWNER:'',TEST_TRANSPORT_WINDOW:'none'});}
  const validPrepare=noWindowPre(prepareCommand);assert.equal(validPrepare.status,0,validPrepare.stderr);assert(!fs.existsSync(captureFile),'syntax acceptance never calls live relay');
  const ordinary=noWindowPre('echo ordinary-non-native');assert.equal(ordinary.status,0,ordinary.stderr);assert(!fs.existsSync(captureFile));
- for(const command of ['env X=1 '+prepareCommand,prepareCommand+'; echo suffix',prepareCommand+' && echo suffix',prepareCommand+' | cat',prepareCommand+' > redirected',prepareCommand+' --extra yes',prepareCommand.replace(literal(inputFile),"'relative-input.json'")]){
+ for(const command of [prepareCommand.replace(/"/g,"'"),'env X=1 '+prepareCommand,prepareCommand+'; echo suffix',prepareCommand+' && echo suffix',prepareCommand+' | cat',prepareCommand+' > redirected',prepareCommand+' --extra yes',prepareCommand.replace(literal(inputFile),'"relative-input.json"')]){
    const denied=noWindowPre(command);assert.equal(denied.status,2,command);assert.match(denied.stderr,/native-host-initial-prepare-command/);assert(!fs.existsSync(captureFile));assert.deepEqual(JSON.parse(denied.stdout),{});
  }
  const badReply=transport(exact,{TEST_REPLY:'bad'});assert.equal(badReply.status,2);assert.match(badReply.stderr,/native-host-live-relay-response/);
