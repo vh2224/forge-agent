@@ -296,13 +296,13 @@ for(const platform of ['Linux','macOS','Windows'])for(const output of [undefined
   assert.strictEqual(verify,!(platform==='Windows'&&output==='false'),'missing or unknown setup metadata always keeps verification');
 }
 const rows = expandJobs(POLICY.workflows.ci);
-assert.strictEqual(rows.length, 74);
+assert.strictEqual(rows.length, 86);
 assert.strictEqual(rows.filter(row => row.kind === 'alias').length, 9);
 assert.deepStrictEqual(rows.filter(row => row.key === 'test').map(row => row.name),
-  [['ubuntu-latest', 13], ['macos-latest', 15], ['windows-latest', 34]].flatMap(([os, count]) => Array.from({length:count}, (_, i) => `Tests (${os}, shard ${i+1}/${count})`)));
+  [['ubuntu-latest', 17], ['macos-latest', 19], ['windows-latest', 38]].flatMap(([os, count]) => Array.from({length:count}, (_, i) => `Tests (${os}, shard ${i+1}/${count})`)));
 assert.strictEqual(rows.filter(row => row.name === 'Tests (ubuntu-latest)' && row.kind === 'alias').length, 1);
-assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'win32').map(row => row.matrix['shard-count']), Array(34).fill(34));
-assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'darwin').map(row => row.matrix['shard-count']), Array(15).fill(15));
+assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'win32').map(row => row.matrix['shard-count']), Array(38).fill(38));
+assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'darwin').map(row => row.matrix['shard-count']), Array(19).fill(19));
 // Smoke condition evaluated per policy cell: exactly one Linux and one macOS run, never Windows.
 const runnerOs = { 'ubuntu-latest': 'Linux', 'macos-latest': 'macOS', 'windows-latest': 'Windows' };
 const smokeCells = rows.filter(row => row.key === 'test'
@@ -323,7 +323,7 @@ for (const [platform,platformCells] of cells) {
   const cell=platformCells[0],layouts=platformCells.map(row=>workerLayout({index:row['shard-index'],count:row['shard-count'],jobs:row.workers,singleWorkerJobs:row['single-worker-jobs']}));
   const count=layouts[0].count;assert(count<=64);assert(layouts.every(row=>row.count===count));
   assert.deepStrictEqual(layouts.flatMap(row=>Array.from({length:row.workers},(_,i)=>row.start+i)).sort((a,b)=>a-b),Array.from({length:count},(_,i)=>i));
-  assert.strictEqual(count,{linux:24,darwin:28,win32:52}[platform]);totalWorkers+=count;
+  assert.strictEqual(count,{linux:32,darwin:36,win32:60}[platform]);totalWorkers+=count;
   const plans = Array.from({ length: count }, (_, index) => planShards({
     suites, index, count, platform, profile, estimatedWeights: unitWeights(unitInventory, profile, platform),
     planningOverrides: loadPlanningOverrides(profile, platform, suites) }));
@@ -333,7 +333,7 @@ for (const [platform,platformCells] of cells) {
   console.log(`PASS partition ${cell.platform}/${cell['shard-count']} universe=${suites.length} unprofiled=${plans[0].unprofiled.length} stale=${plans[0].stale.length} partition_sha256=${plans[0].partition_sha256}`);
 }
 // Logical partitions may queue; each platform retains the existing64-part bound.
-assert.strictEqual(totalWorkers,104);
+assert.strictEqual(totalWorkers,128);
 const maxParallel=Number(/max-parallel: (\d+)/.exec(texts.ci.slice(texts.ci.indexOf('\n  test:')))[1]);
 assert.strictEqual(maxParallel,32);
 assert(maxParallel*Math.max(...rows.filter(row=>row.key==='test').map(row=>row.matrix.workers))<=64,'at most64 active test processes');

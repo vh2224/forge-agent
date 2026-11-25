@@ -2294,7 +2294,7 @@ test('#341 distribution: identity sample metadata and fingerprint negatives', ()
 });
 
 test('#341 distribution: identity sample bytes quotation and documentation negatives', () => {
-  const { refuseIdentity, identityVariant, identitySampleText, identitySampleDoc } = issue341NegativeFixture();
+  const { refuseIdentity, identityVariant, wrongIdentity, identitySampleText, identitySampleDoc } = issue341NegativeFixture();
   const identityTampered = identitySampleText.replace('"entries"', '"entries" ');
   refuseIdentity('sample bytes coherently repinned', { identitySampleText: identityTampered, identityDelta: identityVariant(d => { d.samples.after = hash(identityTampered); }) });
   const identityQuoteTampered = identitySampleText.replace('"text": "', '"text": "foreign ');

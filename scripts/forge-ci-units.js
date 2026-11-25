@@ -6,6 +6,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const DEFINITIONS = Object.freeze({
   'forge-issues-451-452-distribution.test.js': { parts: 12, kind: 'cases', revision: 'distribution-v1' },
+  'forge-issues-457-458-distribution.test.js': { parts: 13, kind: 'cases', revision: 'distribution-v1' },
   'forge-issues-434-436.test.js': { parts: 10, kind: 'cases', revision: 'recovery-v1' },
   'forge-issues-429-432.test.js': { parts: 14, kind: 'cases', revision: 'owner-v1' },
   'forge-issues-420-424.test.js': { parts: 17, kind: 'cases', revision: 'delivery-v2' },

@@ -2,7 +2,7 @@
 // Test-only measured successor. No global filesystem/module/cache mutation.
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),zlib=require('node:zlib'),assert=require('node:assert/strict'),Module=require('node:module');
 const ROOT=path.resolve(__dirname,'../../..'),OWN='scripts/fixtures/issue-463',stored=require('./distribution-delta.json');
-const PIN='ea98b7621e65c4c7b558a3181f6ca470c2380b1f4191f330909009e0b2a2c0e3',STORAGE_PIN='70cdb99bb240d2b6dc17f1136fbe91a90c3cd3511a45a70cf1cdaa9e37eacb46',hash=b=>crypto.createHash('sha256').update(b).digest('hex');
+const PIN='73639eeca33d95bdf49a2b3f12d500e063204c646a428cabf426934311ac09ce',STORAGE_PIN='3a63eb71cc0f5de0b47e6530ab5781b893a13cf94fedea5823085604857b73c6',hash=b=>crypto.createHash('sha256').update(b).digest('hex');
 const {readBoundedStableFile}=require('../../forge-autonomy-sources');
 function target(file){assert(typeof file==='string'&&!path.isAbsolute(file)&&!/[\\:\x00-\x1f]/.test(file));const parts=file.split('/');assert(parts.every(p=>p&&p!=='.'&&p!=='..'));let at=ROOT;for(let n=0;n<parts.length;n++){at=path.join(at,parts[n]);const s=fs.lstatSync(at);assert(!s.isSymbolicLink());assert(n===parts.length-1?s.isFile()&&s.nlink===1:s.isDirectory());}assert.equal(fs.realpathSync.native(at).toLowerCase(),at.toLowerCase());return at;}
 function read(file){const name=target(file),value=readBoundedStableFile(name,4*1024*1024,{expectedReal:name});assert(!value.error,value.error);assert.equal(value.stat.nlink,1);return value.buffer;}
@@ -12,6 +12,7 @@ checkStorage();
 const data={...stored,historical_fixtures:decodeHistoricalInventory(stored.historical_fixtures)};
 function check(value=data){checkStorage();assert.equal(hash(JSON.stringify(value)),PIN,'issue463 independently pinned logical metadata');return value;}
 check();
+const authenticatedLogicalSerialization=JSON.stringify(data);assert.equal(hash(authenticatedLogicalSerialization),PIN,'issue463 independently pinned logical metadata');
 let validationDepth=0;
 // Cold code trust is the externally reviewed Source pin. Bind all own members
 // after load for warm type/identity/byte checks, without a circular metadata hash.
@@ -75,7 +76,7 @@ const views=new WeakMap(),implementations=new WeakMap();
 // Synchronous private validator transaction: full physical authority at entry/exit.
 // Reader authority is evaluated at USE time; no exported switch or async scope.
 const validatorMethods=new Set(['validate','validate414Snapshot','verifyCurrent','verifyCleanup','verifyIssue461']);
-function useGuard(options={}){if(validationDepth===0)return verifyIssue463(options);assert.equal(hash(JSON.stringify(options.issue463LayerValue||data)),PIN,'issue463 independently pinned logical metadata');return true;}
+function useGuard(options={}){if(validationDepth===0)return verifyIssue463(options);const serialized=JSON.stringify(options.issue463LayerValue||data);if(serialized!==authenticatedLogicalSerialization)assert.equal(hash(serialized),PIN,'issue463 independently pinned logical metadata');return true;}
 function invoke(object,key,implementation,args,current){if(!validatorMethods.has(key))return invokeBody(object,key,implementation,args,current);const options=args[0]&&typeof args[0]==='object'&&!Array.isArray(args[0])?args[0]:{};verifyIssue463(options);validationDepth++;try{return invokeBody(object,key,implementation,args,current);}finally{validationDepth--;verifyIssue463(options);}}
 // Test-only synchronous assertion operation. Named validator guards remain byte-exact.
 // It authenticates physical Source at ENTRY/EXIT and never awaits a callback.
