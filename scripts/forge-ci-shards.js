@@ -200,7 +200,7 @@ function loadPlanningOverrides(profile, platform, suites, { knownSuites = suites
   if (!PLATFORMS.includes(platform)) return {};
   return Object.fromEntries(suites.filter(id => Object.hasOwn(doc.platforms[platform], id)).map(id => [id, doc.platforms[platform][id]]));
 }
-function textualPlanningSource(value) { return typeof value === 'string' && value.length > 0 && value.length <= 2048 && !/[ -]/.test(value); }
+function textualPlanningSource(value) { return typeof value === 'string' && value.length > 0 && value.length <= 2048 && !/[\x00-\x1f]/.test(value); }
 
 function universeFingerprint(suites) {
   return hash(JSON.stringify([...suites].sort(compareCodeUnits)));
