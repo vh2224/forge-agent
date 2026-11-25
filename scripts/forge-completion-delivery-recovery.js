@@ -261,6 +261,32 @@ function verifyRepairCompletion(options = {}) {
   return verifyCompletedRepair(options, false);
 }
 
+// forge-auto writes these descriptive records to the controller's milestone
+// stream (§6a, context checkpoint, account handoff and Node Repair). They never
+// prove a transition. Admit only those shapes; an unknown extra field, either
+// controller identity field or a controller-shaped event stays on the strict path.
+function isOrchestratorEvent(event, milestone) {
+  if (!event || typeof event !== 'object' || Array.isArray(event)
+      || Object.hasOwn(event, 'sequence') || Object.hasOwn(event, 'idempotency_key')) return false;
+  const text = value => typeof value === 'string' && value.trim().length > 0 && !/[\0\r\n]/.test(value);
+  const line = value => typeof value === 'string' && !/[\0\r\n]/.test(value);
+  const shape = fields => Object.keys(event).length === fields.length && fields.every(field => Object.hasOwn(event, field));
+  if (event.milestone !== milestone || !text(event.ts) || !Number.isFinite(Date.parse(event.ts))) return false;
+  if (shape(['ts','unit','agent','milestone','status','summary'])) {
+    if (!text(event.unit) || !text(event.agent) || !line(event.summary)) return false;
+    if (event.unit === 'checkpoint') return event.agent === 'orchestrator' && event.status === 'checkpoint';
+    if (event.unit === 'account-handoff') return event.agent === 'orchestrator' && event.status === 'handoff';
+    // Unit and agent names are descriptive, not a closed capability registry.
+    return event.unit.split('/').length >= 2 && event.unit.split('/').every(text)
+      && ['done','blocked','partial'].includes(event.status);
+  }
+  return shape(['ts','event','unit','milestone','slice','task','strategy','repair_count','reason'])
+    && event.event === 'repair' && text(event.slice) && /^S\d{2,}$/.test(event.slice)
+    && text(event.task) && /^T\d+(?:\.\d+)?$/.test(event.task)
+    && event.unit === 'execute-task/' + event.task && ['retry','decompose','prune','blocked'].includes(event.strategy)
+    && Number.isSafeInteger(event.repair_count) && event.repair_count > 0 && line(event.reason);
+}
+
 // Selection consumes a historical fact, never a writer capability. A later
 // task owns a different claim and a later owner has a different session; neither
 // changes the committed verification-only successor. Keep this mode private so
@@ -305,6 +331,8 @@ function verifyCompletedRepair(options, historical) {
   catch { fail('delivery-recovery-event-unproven'); }
   const eventKeys = new Set();
   for (const [index,event] of events.entries()) {
+    // Controller sequence numbers include descriptive records' physical positions.
+    if (isOrchestratorEvent(event, begin.milestone)) continue;
     if (!event || event.sequence !== index + 1 || typeof event.idempotency_key !== 'string' || !event.idempotency_key
         || eventKeys.has(event.idempotency_key)) fail('delivery-recovery-event-unproven');
     eventKeys.add(event.idempotency_key);
@@ -432,8 +460,8 @@ function projectVerifiedRepairs(cwd,milestone,inventory,actor) {
   const slices=inventory.slices.map(slice=>({...slice,tasks:(slice.tasks||[]).map(task=>{
     if(task.checked || !/^T\d+(?:\.\d+)?$/.test(task.id||''))return task;
     const unit='execute-task/'+task.id,legacy=`forge-orchestrate-next:${milestone}:${unit}`;
-    const keys=new Set([legacy,legacy+':'+slice.id,...events.filter(event=>event.action==='begin'&&event.unit===unit
-      && !event.idempotency_key?.startsWith('forge-delivery-verification:')).map(event=>event.idempotency_key),...history.map(row=>row.boundary?.delivery_repair)
+    const keys=new Set([legacy,legacy+':'+slice.id,...events.filter(event=>event?.action==='begin'&&event.unit===unit
+      && typeof event.idempotency_key==='string' && !event.idempotency_key.startsWith('forge-delivery-verification:')).map(event=>event.idempotency_key),...history.map(row=>row.boundary?.delivery_repair)
       .filter(scope=>scope?.milestone===milestone&&scope.slice===slice.id&&scope.unit===unit).map(scope=>scope.original_begin_key)]);
     const proven=new Set();
     const diagnosticStart=diagnostics.length;

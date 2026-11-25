@@ -26,8 +26,12 @@ assert.strictEqual(hash(predecessorCi), latencyLayer.ci_before.sha256);
 // ' --verbose true' suffix on the existing Run test suites command.
 const verboseLayer = require('./fixtures/issue-440/workflow-layer.json');
 const gitBlob = value => crypto.createHash('sha1').update(`blob ${value.length}\0`).update(value).digest('hex');
-assert.strictEqual(hash(bytes.ci), verboseLayer.ci_after.sha256);
-assert.strictEqual(gitBlob(bytes.ci), verboseLayer.ci_after.oid);
+const ciHistoryView = require('./fixtures/issue-461/distribution.cjs');
+const historicalCi = bytes => ciHistoryView.projectIssue461Read(() => bytes)('.github/workflows/ci.yml');
+assert.strictEqual(hash(bytes.ci), '0c2deeaa3f7b429ba1d7c208836159f80ca48f0cae36ab171b4a1d26b18dc8ad');
+assert.strictEqual(gitBlob(bytes.ci), '9b968e1cd62509edca22cffd8b779a3a25063b50');
+assert.strictEqual(hash(historicalCi(bytes.ci)), verboseLayer.ci_after.sha256);
+assert.strictEqual(gitBlob(historicalCi(bytes.ci)), verboseLayer.ci_after.oid);
 assert.deepStrictEqual(verboseLayer.ci_before, latencyLayer.ci_after, 'issue-440 layer chains onto the ci-latency layer');
 assert.strictEqual(verboseLayer.base, '4606de1ecac3ddee7bc957d9a8dea3207023d5b5');
 assert.strictEqual(verboseLayer.oldCommand, latencyLayer.newCommand);
@@ -38,7 +42,7 @@ const reconstructCi = text => {
   if (text.split(runLine(verboseLayer.newCommand)).length !== 2) throw Error('issue-440-layer-command-not-unique');
   return text.replace(runLine(verboseLayer.newCommand), runLine(verboseLayer.oldCommand));
 };
-const predecessorOfVerbose = Buffer.from(reconstructCi(texts.ci));
+const predecessorOfVerbose = Buffer.from(reconstructCi(historicalCi(bytes.ci).toString('utf8')));
 assert.strictEqual(hash(predecessorOfVerbose), latencyLayer.ci_after.sha256, 'the single command delta reconstructs the ci-latency ci_after bytes');
 assert.strictEqual(gitBlob(predecessorOfVerbose), latencyLayer.ci_after.oid);
 // Negative: any second difference survives the single-delta reversal and fails the chain.
@@ -48,7 +52,7 @@ for (const second of [
   texts.ci.replace('--tool-plan true --jobs', '--tool-plan true --verbose true --jobs'),
 ]) {
   assert.notStrictEqual(second, texts.ci);
-  assert.notStrictEqual(hash(reconstructCi(second)), latencyLayer.ci_after.sha256, 'a second workflow difference is refused');
+  assert.notStrictEqual(hash(reconstructCi(historicalCi(Buffer.from(second)).toString('utf8'))), latencyLayer.ci_after.sha256, 'a second workflow difference is refused');
 }
 assert.throws(() => reconstructCi(texts.ci.replace(' --verbose true\n', '\n')), /issue-440-layer-command-not-unique/);
 assert.strictEqual(texts.ci.split(' --verbose true').length, 2, 'exactly one --verbose argument in the workflow');
@@ -239,7 +243,7 @@ assert.strictEqual(command, 'node scripts/forge-ci-parallel.js --shard-index ${{
 assert.strictEqual(texts.ci.split('      - name: Run test suites\n').length, 2, 'no new test step');
 assert.strictEqual(texts.ci.split('node scripts/forge-ci-parallel.js --shard-index').length, 2, 'no second suite execution');
 const parallelSource = fs.readFileSync(path.join(__dirname, 'forge-ci-parallel.js'), 'utf8');
-for (const token of ["'--baseline', 'scripts/fixtures/ci-baseline/known-unit-failures.json'", "'--partition-suites'", "'--shard-profile', 'scripts/fixtures/ci-latency/shard-profile.json'", "'--profile-out'"]) assert(parallelSource.includes(token), token);
+for (const token of ["'--baseline', 'scripts/fixtures/ci-baseline/known-unit-failures.json'", "'--partition-suites'", "'--shard-profile', 'scripts/ci-profiles/issue-461-d046.json'", "'--profile-out'"]) assert(parallelSource.includes(token), token);
 assert(!/--(?:changed|match|fail-fast|inherit-home)\b/.test(parallelSource));
 assert(!/--(?:changed|match|fail-fast|inherit-home)\b/.test(command));
 assert(!/\b(?:paths|paths-ignore|branches-ignore):/.test(texts.ci.split('\npermissions:')[0]));
@@ -286,13 +290,13 @@ for(const platform of ['Linux','macOS','Windows'])for(const output of [undefined
   assert.strictEqual(verify,!(platform==='Windows'&&output==='false'),'missing or unknown setup metadata always keeps verification');
 }
 const rows = expandJobs(POLICY.workflows.ci);
-assert.strictEqual(rows.length, 49);
+assert.strictEqual(rows.length, 53);
 assert.strictEqual(rows.filter(row => row.kind === 'alias').length, 9);
 assert.deepStrictEqual(rows.filter(row => row.key === 'test').map(row => row.name),
-  [['ubuntu-latest', 5], ['macos-latest', 5], ['windows-latest', 27]].flatMap(([os, count]) => Array.from({length:count}, (_, i) => `Tests (${os}, shard ${i+1}/${count})`)));
+  [['ubuntu-latest', 6], ['macos-latest', 8], ['windows-latest', 27]].flatMap(([os, count]) => Array.from({length:count}, (_, i) => `Tests (${os}, shard ${i+1}/${count})`)));
 assert.strictEqual(rows.filter(row => row.name === 'Tests (ubuntu-latest)' && row.kind === 'alias').length, 1);
 assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'win32').map(row => row.matrix['shard-count']), Array(27).fill(27));
-assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'darwin').map(row => row.matrix['shard-count']), Array(5).fill(5));
+assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'darwin').map(row => row.matrix['shard-count']), Array(8).fill(8));
 // Smoke condition evaluated per policy cell: exactly one Linux and one macOS run, never Windows.
 const runnerOs = { 'ubuntu-latest': 'Linux', 'macos-latest': 'macOS', 'windows-latest': 'Windows' };
 const smokeCells = rows.filter(row => row.key === 'test'
@@ -302,17 +306,18 @@ marker('key_link', 2, 'CI source test command triggers concurrency SVN ordering 
 
 const unitInventory = expandSuites(discoverTests([]));
 const suites = unitInventory.map(unit => unit.id);
-const profilePath = 'scripts/fixtures/ci-latency/shard-profile.json';
-assert.strictEqual(profilePath, 'scripts/fixtures/ci-latency/shard-profile.json');
+const profilePath = 'scripts/ci-profiles/issue-461-d046.json';
+assert.strictEqual(profilePath, 'scripts/ci-profiles/issue-461-d046.json');
 const profile = loadShardProfile(path.join(root, profilePath));
 assert.strictEqual(profile.state, 'loaded');
+assert.strictEqual(profile.sha256, 'c5438665a4bba363efdc617310a612125049a831c9ae079bcdf41712c01b4366', 'exact current measured default profile');
 const cells=new Map();for(const row of rows.filter(row=>row.key==='test')){const key=row.matrix.platform;if(!cells.has(key))cells.set(key,[]);cells.get(key).push(row.matrix);}
 let totalWorkers=0;
 for (const [platform,platformCells] of cells) {
   const cell=platformCells[0],layouts=platformCells.map(row=>workerLayout({index:row['shard-index'],count:row['shard-count'],jobs:row.workers,singleWorkerJobs:row['single-worker-jobs']}));
   const count=layouts[0].count;assert(layouts.every(row=>row.count===count));
   assert.deepStrictEqual(layouts.flatMap(row=>Array.from({length:row.workers},(_,i)=>row.start+i)).sort((a,b)=>a-b),Array.from({length:count},(_,i)=>i));
-  assert.strictEqual(count,{linux:6,darwin:15,win32:40}[platform]);totalWorkers+=count;
+  assert.strictEqual(count,{linux:8,darwin:16,win32:40}[platform]);totalWorkers+=count;
   const plans = Array.from({ length: count }, (_, index) => planShards({
     suites, index, count, platform, profile, estimatedWeights: unitWeights(unitInventory, profile, platform) }));
   assert(plans.every(plan => plan.fallback === null && plan.algorithm === 'weighted-lpt-v1'));
@@ -320,7 +325,7 @@ for (const [platform,platformCells] of cells) {
   assert(verifyPartition(suites, plans.map(plan => plan.selected)).ok);
   console.log(`PASS partition ${cell.platform}/${cell['shard-count']} universe=${suites.length} unprofiled=${plans[0].unprofiled.length} stale=${plans[0].stale.length} partition_sha256=${plans[0].partition_sha256}`);
 }
-assert.strictEqual(totalWorkers,61);assert(totalWorkers<=64);
+assert.strictEqual(totalWorkers,64);assert(totalWorkers<=64);
 marker('truth', 3, 'baseline and versioned profile wired; full matrix coverage disjoint with equal fingerprints and fallback null; CI structure preserved');
 marker('key_link', 1, 'loadShardProfile planShards and verifyPartition exercise every real matrix platform/count/index');
 marker('key_link', 5, 'Run test suites invokes run-tests with baseline profile and final shard-index/count flags');

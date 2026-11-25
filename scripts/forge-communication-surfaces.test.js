@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/docs-cleanup/distribution.cjs');
+const unitEntry = require('./fixtures/issue-461/distribution.cjs');
 
 // forge-communication-surfaces.test.js — proves the orchestration and status
 // skills follow shared/forge-communication.md by POINTER, not by a second copy;
@@ -678,7 +678,8 @@ function atPointer(value, pointer) {
 }
 // Fixture seams (T06-R1): the defaults are the real checked-in pins, README, render and
 // sources; the T06 group passes in-memory variants only, never writing any pin.
-function checkPins(fixture = {}) {
+function checkPins(fixture) { return unitEntry.validateSourceConsumer(() => checkPinsBody(fixture)); }
+function checkPinsBody(fixture = {}) {
   const entryDelta = fixture.entryDelta === undefined ? ENTRY_347 : fixture.entryDelta;
   const artifactDelta = fixture.artifactDelta === undefined ? ARTIFACT_348 : fixture.artifactDelta;
   const identityDelta = fixture.identityDelta === undefined ? IDENTITY : fixture.identityDelta;

@@ -81,13 +81,15 @@ for(const bad of [[...argv,'--verbose'],[...argv,'--verbose',''],...['yes','1','
   [...argv,'--verbose','true','--verbose','true'],[...argv,'--verbose','false','--verbose','true']])
   assert.throws(()=>parseArgs(bad),/^Error: ci-parallel-arguments$/,JSON.stringify(bad.slice(argv.length)));
 const childArgv=(options,worker,verbose)=>['--baseline','scripts/fixtures/ci-baseline/known-unit-failures.json','--partition-suites',
-  '--shard-profile','scripts/fixtures/ci-latency/shard-profile.json','--shard-index',String(worker),'--shard-count','2',
+  '--shard-profile','scripts/ci-profiles/issue-461-d046.json','--shard-index',String(worker),'--shard-count','2',
   '--profile-out',path.join(options.profileDir,`worker-${worker}.json`),...(verbose?['--verbose']:[])];
 const toolOptions={index:0,count:21,jobs:2,singleWorkerJobs:2};
 assert.equal(toolPlan(toolOptions,{platform:'linux',profileFile:'unread-invalid-path'}).needs_svn,true);
 assert.equal(toolPlan({...toolOptions,index:2},{platform:'win32',profileFile:'unread-invalid-path'}).needs_svn,true);
 assert.equal(toolPlan(toolOptions,{platform:'win32',profileFile:path.join(temp,'absent-profile')}).needs_svn,true);
-const toolProfile=JSON.parse(fs.readFileSync(path.join(__dirname,'fixtures/ci-latency/shard-profile.json')));
+const toolProfile=JSON.parse(fs.readFileSync(path.join(__dirname,'ci-profiles/issue-461-d046.json')));
+assert.equal(require('./forge-ci-shards').loadShardProfile(path.join(__dirname,'ci-profiles/issue-461-d046.json')).sha256,'c5438665a4bba363efdc617310a612125049a831c9ae079bcdf41712c01b4366','exact current measured default profile');
+assert.equal(toolProfile.sources.length,64);for(const p of ['win32','linux','darwin']){assert.equal(toolProfile.platforms[p].observations,601);assert.equal(Object.keys(toolProfile.platforms[p].weights_ms).length,601);}
 for(const id of Object.keys(toolProfile.platforms.win32.weights_ms))toolProfile.platforms.win32.weights_ms[id]=1;
 const linkedCoreId=require('./forge-ci-units').unitsForSuite('forge-linked-task-start.test.js')[0].id;
 toolProfile.platforms.win32.weights_ms[linkedCoreId]=800000;

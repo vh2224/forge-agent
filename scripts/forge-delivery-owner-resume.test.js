@@ -1,5 +1,17 @@
 'use strict';
-const assert=require('assert/strict'),fs=require('fs'),path=require('path');const lab=require('./forge-code-roots.test'),fixture=require('./fixtures/completion-delivery.cjs');
+const assert=require('assert/strict'),fs=require('fs'),path=require('path'),os=require('os'),crypto=require('crypto');
+// Storage paths and destructured account resolvers are fixed at import time.
+// Isolate them before any Forge import, including the laboratory helper.
+const originalEnv={...process.env},testHome=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'forge-owner-resume-home-')));
+const homeMarker=crypto.randomBytes(16).toString('hex');fs.writeFileSync(path.join(testHome,'.fixture-owner'),homeMarker);
+let accounts,originalLaunch;
+try{
+Object.assign(process.env,{HOME:testHome,USERPROFILE:testHome,FORGE_HOME:path.join(testHome,'core'),CODEX_HOME:path.join(testHome,'.codex'),CLAUDE_CONFIG_DIR:path.join(testHome,'.claude'),FORGE_KEYCHAIN_DISABLED:'1',FORGE_ACCOUNTS_REGISTRY:path.join(testHome,'.claude','accounts.json')});
+fs.mkdirSync(process.env.CODEX_HOME);fs.mkdirSync(process.env.CLAUDE_CONFIG_DIR);
+assert.equal(require.cache[require.resolve('./forge-accounts')],undefined,'run this fixture in a fresh process');
+accounts=require('./forge-accounts');originalLaunch=accounts.resolveLaunch;
+accounts.resolveLaunch=()=>{throw Error('owner-resume fixture must not launch a provider');};
+const lab=require('./forge-code-roots.test'),fixture=require('./fixtures/completion-delivery.cjs');
 const runs=require('./forge-runs'),claims=require('./forge-write-claim'),controller=require('./forge-unit-controller'),api=require('./forge-completion-delivery-recovery');let count=0;
 const eventOnly=process.argv.includes('--event-sequence-only'),schemaOnly=process.argv.includes('--claim-schema-only');
 for(const host of eventOnly||schemaOnly?['codex']:['claude','codex'])for(const active of schemaOnly?[true]:eventOnly?[false]:[true,false]){const f=lab.fixture(),env={...process.env},RealDate=Date;try{
@@ -80,19 +92,73 @@ for(const host of eventOnly||schemaOnly?['codex']:['claude','codex'])for(const a
  fs.writeFileSync(eventsFile,eventsBytes);assert.equal(choose().unit.id,'T02');
  // Pair-local order alone is insufficient: the global canonical stream is
  // unique/ordered and the original completion precedes its repair begin.
- function rejectStream(mutate){
+ function rejectStream(mutate,label='invalid recovery stream'){
   const changed=eventsBytes.toString('utf8').trimEnd().split('\n').map(JSON.parse);mutate(changed);
-  fs.writeFileSync(eventsFile,changed.map(row=>JSON.stringify(row)).join('\n')+'\n');
-  const refused=readOnlyChoose();assert.equal(refused.unit.id,'T01');assert(refused.delivery_repair_diagnostics.some(row=>row.reason_code==='delivery-recovery-event-unproven'));count++;
-  fs.writeFileSync(eventsFile,eventsBytes);assert.equal(readOnlyChoose().unit.id,'T02');
+  try{
+   fs.writeFileSync(eventsFile,changed.map(row=>JSON.stringify(row)).join('\n')+'\n');
+   const refused=readOnlyChoose();assert.equal(refused.unit.id,'T01',label);assert(refused.delivery_repair_diagnostics.some(row=>row.reason_code==='delivery-recovery-event-unproven'),label);count++;
+  }finally{fs.writeFileSync(eventsFile,eventsBytes);}
+  assert.equal(readOnlyChoose().unit.id,'T02','restored canonical stream');
  }
  rejectStream(rows=>{const oldBegin=rows.find(row=>row.idempotency_key===beginKey),oldComplete=rows.find(row=>row.idempotency_key===beginKey+':complete');rows.find(row=>row.idempotency_key===started.begin_key).sequence=oldBegin.sequence;rows.find(row=>row.idempotency_key===started.completion_key).sequence=oldComplete.sequence;});
  rejectStream(rows=>{[rows[0],rows[1]]=[rows[1],rows[0]];});
  rejectStream(rows=>{const original=rows.findIndex(row=>row.idempotency_key===beginKey+':complete'),repairBegin=rows.findIndex(row=>row.idempotency_key===started.begin_key);[rows[original],rows[repairBegin]]=[rows[repairBegin],rows[original]];rows.forEach((row,index)=>{row.sequence=index+1;});});
  rejectStream(rows=>{rows.push({...rows.at(-1),sequence:rows.length+1});});
+ // #461: actual forge-auto writer shapes share the milestone stream. They are
+ // descriptive only; no metadata field can replace any of the four keyed proofs.
+ const record=(unit='execute-task/T01',status='done')=>({ts:new Date(base).toISOString(),unit,agent:'forge-executor',milestone,status,summary:'orchestrator record'});
+ const repairRecord=strategy=>({ts:new Date(base).toISOString(),event:'repair',unit:'execute-task/T01',milestone,slice,task,strategy,repair_count:1,reason:'verification drift'});
+ const descriptive=[record('estimate-milestone/'+milestone),record('review/T01','blocked'),record('execute-task/T01','partial'),
+  {...record('checkpoint','checkpoint'),agent:'orchestrator'},{...record('account-handoff','handoff'),agent:'orchestrator'},
+  ...['retry','decompose','prune','blocked'].map(repairRecord),record('future-unit/future-id')];
+ const renumber=rows=>rows.forEach((row,index)=>{if(row&&Object.hasOwn(row,'idempotency_key'))row.sequence=index+1;});
+ function interleave(rows){
+  const logs=descriptive.map(row=>({...row})),out=[logs[0]];
+  rows.forEach((row,index)=>{out.push(row);if(index===Math.floor(rows.length/2))out.push(...logs.slice(1,6));});
+  out.push(...logs.slice(6));renumber(out);
+  return out;
+ }
+ {const mixed=interleave(eventsBytes.toString('utf8').trimEnd().split('\n').map(JSON.parse));
+  try{
+   fs.writeFileSync(eventsFile,mixed.map(row=>JSON.stringify(row)).join('\n')+'\n');
+   assert.equal(readOnlyChoose().unit.id,'T02','documented records before/between/after controller events do not reselect repaired T01');
+   assert.deepEqual(readOnlyChoose(),choose(),'descriptive records do not require a current actor to prove history');count++;
+  }finally{fs.writeFileSync(eventsFile,eventsBytes);}}
+ rejectStream(rows=>{const mixed=interleave(rows);rows.splice(0,rows.length,...mixed);rows[0].sequence=1;});
+ rejectStream(rows=>{const mixed=interleave(rows);rows.splice(0,rows.length,...mixed);rows[0].idempotency_key='orchestrator-without-sequence';});
+ rejectStream(rows=>{const mixed=interleave(rows);const keyed=mixed.findIndex(row=>row.idempotency_key===started.begin_key);mixed[keyed].sequence+=1;rows.splice(0,rows.length,...mixed);});
+ rejectStream(rows=>{const mixed=interleave(rows);let sequence=0;mixed.forEach(row=>{if(Object.hasOwn(row,'idempotency_key'))row.sequence=++sequence;});rows.splice(0,rows.length,...mixed);},'controller numbering must include descriptive positions');
+ for(const value of [null,false,7,'text',[],{},['array'],{event:'unit-transition',action:'complete',unit:'execute-task/T01'}]){
+  rejectStream(rows=>rows.push(value),'unknown/non-record metadata is not a documented writer');
+ }
+ for(const extra of ['event','action','protocol_version','owner_digest','lease_generation','unknown']){
+  rejectStream(rows=>rows.push({...record(),[extra]:'unproved'}),'unknown/controller extra field: '+extra);
+ }
+ for(const patch of [{milestone:'M999'},{ts:'not-a-time'},{agent:''},{status:'succeeded'},{unit:'execute-task'},{summary:null},
+  {unit:'checkpoint',status:'checkpoint'},{unit:'account-handoff',agent:'orchestrator',status:'done'}]){
+  rejectStream(rows=>rows.push({...record(),...patch}),'malformed or foreign descriptive record');
+ }
+ for(const patch of [{event:'unit-began'},{task:'T02'},{slice:'foreign'},{strategy:'unknown'},{repair_count:0},{repair_count:-1},
+  {repair_count:1.5},{repair_count:Number.MAX_SAFE_INTEGER+1},{reason:null},{task:{toString:null}}]){
+  rejectStream(rows=>rows.push({...repairRecord('retry'),...patch}),'malformed repair record');
+ }
+ rejectStream(rows=>rows.push({...rows[0],idempotency_key:0,sequence:rows.length+1}),'non-string controller identity');
+ for(const key of [beginKey,beginKey+':complete',started.begin_key,started.completion_key]){
+  rejectStream(rows=>{rows.splice(rows.findIndex(row=>row.idempotency_key===key),1);renumber(rows);},'missing required event: '+key);
+  rejectStream(rows=>{const row=rows.find(row=>row.idempotency_key===key);delete row.sequence;delete row.idempotency_key;renumber(rows);},'controller event cannot be relabeled as descriptive');
+ }
+ rejectStream(rows=>{rows.find(row=>row.idempotency_key===started.completion_key).reason_code='tampered';},'required event digest must match committed transaction');
  const baselineFile=path.join(f.owner,files.base,'.delivery-verification-'+repair.scope.original_sha256+'.json'),baselineBytes=fs.readFileSync(baselineFile);
  fs.unlinkSync(baselineFile);const absent=readOnlyChoose();assert.equal(absent.unit.id,'T01');assert(absent.delivery_repair_diagnostics.some(row=>row.reason_code==='delivery-recovery-baseline-unproven'));count++;
  fs.writeFileSync(baselineFile,baselineBytes,{flag:'wx'});assert.equal(choose().unit.id,'T02');
  runs.update(f.owner,milestone,{session_id:'foreign-owner'});assert.throws(()=>repair.start(),/authority-required/);count++;
 }finally{global.Date=RealDate;process.env=env;f.cleanup();}}
 console.log('PASS '+count+' retained completed claim transfer/repair controls, '+(schemaOnly?'selected Codex/original-schema2 fixture':eventOnly?'selected Codex/inactive fixture':'both observed hosts')+'; original claim and completion unchanged');
+}finally{
+ if(accounts)accounts.resolveLaunch=originalLaunch;
+ process.env=originalEnv;
+ assert.equal(fs.realpathSync.native(testHome),testHome);
+ assert.equal(fs.lstatSync(testHome).isSymbolicLink(),false);
+ assert.equal(fs.readFileSync(path.join(testHome,'.fixture-owner'),'utf8'),homeMarker);
+ fs.rmSync(testHome,{recursive:true});
+}

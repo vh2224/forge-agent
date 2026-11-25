@@ -44,7 +44,7 @@ function toolPlan(options, { source=path.resolve(__dirname,'..'), platform=proce
   if(platform!=='win32'||layout.workers!==1) return {needs_svn:true,reason:'conservative-platform-or-parallel-default'};
   const unitsApi=require(path.join(source,'scripts/forge-ci-units'));
   const {loadShardProfile,planShards}=require(path.join(source,'scripts/forge-ci-shards'));
-  const profile=loadShardProfile(profileFile||path.join(source,'scripts/fixtures/ci-latency/shard-profile.json'));
+  const profile=loadShardProfile(profileFile||path.join(source,'scripts/ci-profiles/issue-461-d046.json'));
   if(profile.state!=='loaded')return {needs_svn:true,reason:'profile-unavailable'};
   const units=unitsApi.expandSuites(require(path.join(source,'scripts/run-tests')).discoverTests([]));
   const plan=planShards({suites:units.map(u=>u.id),index:layout.start,count:layout.count,platform,profile,estimatedWeights:unitsApi.unitWeights(units,profile,platform)});
@@ -160,7 +160,7 @@ async function run(options, { source = path.resolve(__dirname, '..'), temp = pat
       fs.mkdirSync(workerTemp);
       streams.stdout.write(`CI isolated worker ${worker + 1}/${layout.workers}; global shard ${index + 1}/${count}; candidate ${sha}\n`);
       return runChild(checkout, ['--baseline', 'scripts/fixtures/ci-baseline/known-unit-failures.json',
-        '--partition-suites', '--shard-profile', 'scripts/fixtures/ci-latency/shard-profile.json',
+        '--partition-suites', '--shard-profile', 'scripts/ci-profiles/issue-461-d046.json',
         '--shard-index', String(index), '--shard-count', String(count),
         '--profile-out', path.join(options.profileDir, `worker-${worker}.json`),
         // Passed-suite output is retained in the same drained worker-N.log; no second run.

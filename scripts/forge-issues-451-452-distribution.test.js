@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('fs'),path=require('path'),crypto=require('crypto'),zlib=require('zlib');
-const root=path.resolve(__dirname,'..'),successor=require('./fixtures/docs-cleanup/distribution.cjs'),layer=successor.issues451452View,previous=require('./fixtures/docs-cleanup/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issue-440/distribution.cjs'),data=layer.issues451452Layer;
+const root=path.resolve(__dirname,'..'),successor=require('./fixtures/issue-461/distribution.cjs'),layer=successor.issues451452View,previous=require('./fixtures/issue-461/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issue-440/distribution.cjs'),data=layer.issues451452Layer;
 const read=successor.issue455View.projectRead(file=>fs.readFileSync(path.join(root,file))),hash=b=>crypto.createHash('sha256').update(b).digest('hex');
 const artifacts=require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts;
 assert.equal(data.provenance.base_revision,'0fa00e3de485bd23a6a351d033d8aa8c8021fb25');assert.deepEqual(data.provenance.issues,[442,451,452,454]);assert.equal(data.predecessor_layer_sha256,hash(JSON.stringify(previous.issue440Layer)));assert.strictEqual(layer.issue440Layer,previous.issue440Layer);

@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('fs'),path=require('path'),crypto=require('crypto'),zlib=require('zlib');
-const ROOT=path.resolve(__dirname,'..'),successor=require('./fixtures/docs-cleanup/distribution.cjs'),layer=successor.issue455View,previous=require('./fixtures/docs-cleanup/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issues-451-452/distribution.cjs'),data=layer.issue455Layer;
+const ROOT=path.resolve(__dirname,'..'),successor=require('./fixtures/issue-461/distribution.cjs'),layer=successor.issue455View,previous=require('./fixtures/issue-461/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issues-451-452/distribution.cjs'),data=layer.issue455Layer;
 const read=successor.projectRead(file=>fs.readFileSync(path.join(ROOT,file))),hash=b=>crypto.createHash('sha256').update(b).digest('hex');
 assert.equal(data.provenance.base_revision,"18db6e64aa3f62ad3f94b9747f8aec5d5fad3675");assert.equal(data.provenance.source_head,"18db6e64aa3f62ad3f94b9747f8aec5d5fad3675");assert.deepEqual(data.provenance.issues,[455]);
 assert.equal(data.predecessor_layer_sha256,hash(JSON.stringify(previous.issues451452Layer)));assert.strictEqual(layer.issues451452Layer,previous.issues451452Layer);
@@ -16,7 +16,7 @@ const projected=layer.projectRead();for(const[file,row]of Object.entries(data.fi
  const foreign=Buffer.concat([read(file),Buffer.from('\n// foreign unmeasured drift\n')]),readRaw=p=>p===file?foreign:read(p);
  assert(layer.projectRead(readRaw)(file).equals(foreign),'foreign bytes are never rewound '+file);assert.throws(()=>layer.verifyCurrent({readRaw}),/issue455 measured current source/);
 }
-const fixturePaths=[];function walk(dir){for(const entry of fs.readdirSync(path.join(ROOT,dir),{withFileTypes:true})){const file=dir+'/'+entry.name;if(file==='scripts/fixtures/issue-455'||file==='scripts/fixtures/issues-457-458'||file==='scripts/fixtures/docs-cleanup')continue;assert(!entry.isSymbolicLink());if(entry.isDirectory())walk(file);else{assert(entry.isFile());fixturePaths.push(file);}}}walk('scripts/fixtures');fixturePaths.sort();assert.deepEqual(fixturePaths,Object.keys(data.historical_fixtures).sort(),'no published fixture removed or unknown fixture added');
+const fixturePaths=[];function walk(dir){for(const entry of fs.readdirSync(path.join(ROOT,dir),{withFileTypes:true})){const file=dir+'/'+entry.name;if(file==='scripts/fixtures/issue-455'||file==='scripts/fixtures/issues-457-458'||file==='scripts/fixtures/docs-cleanup'||file==='scripts/fixtures/issue-461')continue;assert(!entry.isSymbolicLink());if(entry.isDirectory())walk(file);else{assert(entry.isFile());fixturePaths.push(file);}}}walk('scripts/fixtures');fixturePaths.sort();assert.deepEqual(fixturePaths,Object.keys(data.historical_fixtures).sort(),'no published fixture removed or unknown fixture added');
 for(const[file,row]of Object.entries(data.historical_fixtures)){const b=read(file);assert.equal(hash(b),row.sha256);assert.equal(b.length,row.bytes);}
 assert.equal(hash(fixturePaths.join('\n')+'\n'),data.provenance.historical_list_sha256);
 const historical='scripts/fixtures/issues-451-452/distribution-delta.json';assert.throws(()=>layer.verifyCurrent({readRaw:file=>file===historical?Buffer.concat([read(file),Buffer.from(' ')]):read(file)}),/immutable published fixture/);
