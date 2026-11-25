@@ -586,7 +586,7 @@ try {
     const sourceGuard = require('./forge-dispatch-source-guard');
     const historicalRegistry = require('./fixtures/issue-463/distribution.cjs').loadHistoricalFixture('scripts/fixtures/owner-recovery/distribution.cjs').previousRegistry(require('./fixtures/issue-463/distribution.cjs').projectRegistry(sourceGuard.SOURCE_REGISTRY));
     assert.equal(historicalRegistry.length, 248, 'exact historical inventory remains preserved');
-    assert.deepEqual(sourceGuard.audit(), { ok: true, root: path.resolve(__dirname, '..'), discovered_count: 256, registered_count: 256, unexpected: [], missing: [], errors: [] });
+    assert.deepEqual(sourceGuard.audit(), { ok: true, root: path.resolve(__dirname, '..'), discovered_count: 266, registered_count: 266, unexpected: [], missing: [], errors: [] });
   });
   check('permissions document G2-1 modes exact allowances limits review and renderer anchors', () => {
     const doc = fs.readFileSync(path.join(__dirname, '..', 'docs', 'codex-agent-permissions.md'), 'utf8');
