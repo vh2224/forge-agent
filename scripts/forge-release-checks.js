@@ -138,25 +138,33 @@ function assertJobMapping(source, workflow) {
     const header = blocks[index][2].split(/^    steps:[ \t]*\r?$/m)[0];
     const observed = { name: undefined, runner: undefined, needs: [], matrix: null };
     const fields = new Set();
-    let axis; let cell; let inPermissions = false;
+    let axis; let cell; let inPermissions = false; let inStrategy = false; let maxParallel;
     for (const raw of header.split(/\r?\n/)) {
       if (!raw.trim() || raw.trimStart().startsWith('#')) continue;
       let match;
       if ((match = /^    (name|runs-on|needs): (.+)$/.exec(raw))) {
         if (fields.has(match[1])) fail('policy-yaml-unsupported', 'Campo de job repetido.');
-        fields.add(match[1]); inPermissions = false;
+        fields.add(match[1]); inPermissions = false; inStrategy = false;
         const value = scalar(match[2]);
         if (match[1] === 'name') observed.name = value;
         else if (match[1] === 'runs-on') observed.runner = value;
         else observed.needs = [value];
       } else if (/^    permissions:$/.test(raw)) {
         if (fields.has('permissions')) fail('policy-yaml-unsupported', 'Permissões repetidas.');
-        fields.add('permissions'); inPermissions = true; observed.permissions = {};
+        fields.add('permissions'); inPermissions = true; inStrategy = false; observed.permissions = {};
       } else if (inPermissions && (match = /^      (contents|actions): (read|write)$/.exec(raw))) {
         if (Object.hasOwn(observed.permissions, match[1]) || (match[1] === 'actions' && match[2] !== 'read')) fail('policy-yaml-unsupported', 'Permissão repetida ou não suportada.');
         observed.permissions[match[1]] = match[2];
-      } else if (/^    (if: .+|timeout-minutes: \d+|strategy:)$/.test(raw) || (!inPermissions && /^      (fail-fast: (true|false)|matrix:)$/.test(raw))) {
+      } else if (/^    strategy:$/.test(raw)) {
+        if (fields.has('strategy')) fail('policy-yaml-unsupported', 'Repeated strategy.');
+        fields.add('strategy'); inPermissions = false; inStrategy = true;
+      } else if (!inPermissions && inStrategy && (match = /^      max-parallel: ([1-9]\d*)$/.exec(raw))) {
+        const value = Number(match[1]);
+        if (fields.has('max-parallel') || !positiveInteger(value) || value > 64) fail('policy-yaml-unsupported', 'Invalid or repeated max-parallel.');
+        fields.add('max-parallel'); maxParallel = value;
+      } else if (/^    (if: .+|timeout-minutes: \d+)$/.test(raw) || (!inPermissions && /^      (fail-fast: (true|false)|matrix:)$/.test(raw))) {
         inPermissions = false;
+        if (/^    [^ ]/.test(raw)) inStrategy = false;
         // These fixed header forms do not change matrix expansion. Their exact
         // semantics/bytes (including if) remain covered by the full-blob pin.
       } else if ((match = /^        ([A-Za-z0-9_-]+):$/.exec(raw))) {
@@ -181,6 +189,11 @@ function assertJobMapping(source, workflow) {
     }
     const expected = { name: job.name, runner: job.runner, needs: job.needs, matrix: job.matrix };
     if (job.permissions) expected.permissions = { contents: job.permissions.contents, actions: job.permissions.actions };
+    if (maxParallel !== undefined) observed.max_parallel = maxParallel;
+    if (Object.hasOwn(job, 'max_parallel')) {
+      if (!positiveInteger(job.max_parallel) || job.max_parallel > 64) fail('policy-job-mapping', 'Invalid max-parallel policy.');
+      expected.max_parallel = job.max_parallel;
+    }
     if (JSON.stringify(observed) !== JSON.stringify(expected)) fail('policy-job-mapping', `Mapeamento divergente: ${job.key}`);
   }
 }

@@ -5,6 +5,7 @@
 const path = require('node:path');
 const crypto = require('node:crypto');
 const DEFINITIONS = Object.freeze({
+  'forge-issues-451-452-distribution.test.js': { parts: 12, kind: 'cases', revision: 'distribution-v1' },
   'forge-issues-434-436.test.js': { parts: 10, kind: 'cases', revision: 'recovery-v1' },
   'forge-issues-429-432.test.js': { parts: 14, kind: 'cases', revision: 'owner-v1' },
   'forge-issues-420-424.test.js': { parts: 17, kind: 'cases', revision: 'delivery-v2' },
@@ -17,7 +18,7 @@ const DEFINITIONS = Object.freeze({
   'forge-native-host-bridge.test.js': { args: [['--bridge-cohort', 'full'], ['--bridge-cohort', 'partial']], revision: 'host-v1', divisor: 1 },
   'forge-native-recovery-delivery.test.js': { args: [['--cohort', '0'], ['--cohort', '1'], ['--cohort', '2']], divisor: 1 },
   'forge-agent-phase.test.js': { args: ['identity', 'recovery', 'native', 'sidecar'].map(name => [`--phase-cohort=${name}`]), divisor: 2 },
-  'forge-communication-surfaces.test.js': { parts: 4, kind: 'cases' },
+  'forge-communication-surfaces.test.js': { parts: 12, kind: 'cases' },
   'forge-linked-task-start.test.js': { args: [['--lts-cohort=core'], ['--lts-cohort=regressions'], ['--lts-cohort=closures']], revision:'linked-v2', costDivisors: {0:1,1:3,2:4},
     timingEstimates:[['forge-linked-task-start.ci-01-of-2.test.js',1],['forge-linked-task-start.ci-02-of-2.test.js',1],['forge-linked-task-start.ci-01-of-2.test.js',4]] },
 });

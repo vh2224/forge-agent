@@ -292,7 +292,7 @@ async function execute(f, key, mutate = () => {}) {
     assert(app.includes("  pull_request:\n    paths:\n      - 'app/**'\n      - '.github/workflows/app.yml'"));
     for (const text of ['  app:', 'name: Swift app and PTY regressions', 'runs-on: macos-26', 'timeout-minutes: 20',
       'actions/cache@v4', 'app/.build', 'swift build --package-path app --product Forge', 'swift run --package-path app ForgeKitTests']) assert(app.includes(text));
-    assert.strictEqual(checks.expandJobs(checks.POLICY.workflows.ci).length, 53);
+    assert.strictEqual(checks.expandJobs(checks.POLICY.workflows.ci).length, 74);
     const ci = fs.readFileSync(path.join(ROOT, checks.POLICY.workflows.ci.path));
     assert.strictEqual(crypto.createHash('sha256').update(ci).digest('hex'), checks.POLICY.workflows.ci.blob_sha256);
     assert(ci.toString().includes('baseline')); assert.strictEqual(checks.POLICY.local.suites.length, 11);

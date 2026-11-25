@@ -338,18 +338,20 @@ test('S04-T02 key_link:1 real-discovery-and-positional-oracle', () => {
 test('planning overrides are separate, bound, complete and fail closed', () => {
   const baseFile = path.join(__dirname, 'ci-profiles/issue-461-d046.json'), before = fs.readFileSync(baseFile), published = loadShardProfile(baseFile);
   const overlayFile = path.join(__dirname, 'ci-profiles/issue-467-planning-r4.json'), doc = JSON.parse(fs.readFileSync(overlayFile)), suites = doc.suite_ids;
-  assert.equal(doc.base_profile_sha256, published.sha256); assert.equal(suites.length, 614);
-  assert.deepEqual(doc.retired_ids, ['forge-dispatch-source-guard.test.js']);
+  assert.equal(doc.base_profile_sha256, published.sha256); assert.equal(suites.length, 633);
+  assert.deepEqual(doc.retired_ids, ['forge-communication-surfaces.ci-01-of-4.test.js', 'forge-communication-surfaces.ci-02-of-4.test.js', 'forge-communication-surfaces.ci-03-of-4.test.js', 'forge-communication-surfaces.ci-04-of-4.test.js', 'forge-dispatch-source-guard.test.js', 'forge-issues-451-452-distribution.test.js']);
   for (const platform of PLATFORMS) {
     const overrides = loadPlanningOverrides(published, platform, suites);
     assert.deepEqual(overrides, doc.platforms[platform]); assert.equal(Object.keys(published.doc.platforms[platform].weights_ms).length, 601);
     const plan = planShards({ suites, index: 0, count: 8, platform, profile: published, planningOverrides: overrides });
     const cost = id => Object.hasOwn(overrides, id) ? overrides[id] : published.doc.platforms[platform].weights_ms[id];
     assert.deepEqual(plan.predicted_ms, plan.shards.map(shard => shard.reduce((sum, id) => sum + cost(id), 0))); assert(verifyPartition(suites, plan.shards).ok);
-    assert.equal(overrides['forge-native-host-bridge.ci-host-v1-02-of-2.test.js'], 750000);
+    assert.equal(overrides['forge-native-host-bridge.ci-host-v1-02-of-2.test.js'], { linux: 78907, darwin: 149453, win32: 502063 }[platform], 'complete platform PASS costs plus10percent; immutable601 unchanged');
     const subset = suites.slice(0, 3); assert.deepEqual(loadPlanningOverrides(published, platform, subset, { knownSuites: suites }), Object.fromEntries(subset.filter(id => Object.hasOwn(overrides, id)).map(id => [id, overrides[id]])));
   }
-  assert.equal(doc.platforms.linux['forge-dispatch-source-guard.ci-guard-v1-05-of-9.test.js'], 450000);
+  assert.equal(doc.platforms.linux['forge-dispatch-source-guard.ci-guard-v1-05-of-9.test.js'], 262240, 'completed Linux PASS plus10percent');
+  assert(!Object.hasOwn(published.doc.platforms.linux.weights_ms, 'forge-communication-surfaces.ci-01-of-12.test.js'));
+  assert.equal(doc.platforms.linux['forge-communication-surfaces.ci-01-of-12.test.js'], 450000, 'new unobserved CI timing remains an explicit estimate');
   let reads = 0; const noRead = { lstatSync() { reads++; throw Error('unexpected overlay read'); } };
   assert.deepEqual(loadPlanningOverrides(loaded(), 'win32', ['a.test.js'], { io: noRead }), {}); assert.equal(reads, 0);
   throwsCode(() => loadPlanningOverrides(published, 'win32', suites, { io: noRead }), 'shard-planning-overrides-unreadable');
