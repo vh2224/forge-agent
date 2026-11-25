@@ -7,7 +7,7 @@ const path = require('path');
 const crypto = require('crypto');
 const {
   SHARD_PROFILE_SCHEMA, ALGORITHMS, PLATFORMS, LIMITS, SUITE_ID_RE, compareCodeUnits,
-  validateShardProfile, loadShardProfile, planShards, verifyPartition,
+  validateShardProfile, loadShardProfile, loadPlanningOverrides, planShards, verifyPartition,
   universeFingerprint, partitionFingerprint, formatShardPlanLine, parseShardPlanLine, buildShardProfile,
 } = require('./forge-ci-shards.js');
 const { discoverTests, suitesForShard } = require('./run-tests.js');
@@ -333,6 +333,38 @@ test('S04-T02 key_link:1 real-discovery-and-positional-oracle', () => {
     assert(verifyPartition(suites, positional.shards).ok);
     assert(verifyPartition(suites, weighted.shards).ok);
   }
+});
+
+test('planning overrides are separate, bound, complete and fail closed', () => {
+  const baseFile = path.join(__dirname, 'ci-profiles/issue-461-d046.json'), before = fs.readFileSync(baseFile), published = loadShardProfile(baseFile);
+  const overlayFile = path.join(__dirname, 'ci-profiles/issue-467-planning-r4.json'), doc = JSON.parse(fs.readFileSync(overlayFile)), suites = doc.suite_ids;
+  assert.equal(doc.base_profile_sha256, published.sha256); assert.equal(suites.length, 614);
+  assert.deepEqual(doc.retired_ids, ['forge-dispatch-source-guard.test.js']);
+  for (const platform of PLATFORMS) {
+    const overrides = loadPlanningOverrides(published, platform, suites);
+    assert.deepEqual(overrides, doc.platforms[platform]); assert.equal(Object.keys(published.doc.platforms[platform].weights_ms).length, 601);
+    const plan = planShards({ suites, index: 0, count: 8, platform, profile: published, planningOverrides: overrides });
+    const cost = id => Object.hasOwn(overrides, id) ? overrides[id] : published.doc.platforms[platform].weights_ms[id];
+    assert.deepEqual(plan.predicted_ms, plan.shards.map(shard => shard.reduce((sum, id) => sum + cost(id), 0))); assert(verifyPartition(suites, plan.shards).ok);
+    assert.equal(overrides['forge-native-host-bridge.ci-host-v1-02-of-2.test.js'], 750000);
+    const subset = suites.slice(0, 3); assert.deepEqual(loadPlanningOverrides(published, platform, subset, { knownSuites: suites }), Object.fromEntries(subset.filter(id => Object.hasOwn(overrides, id)).map(id => [id, overrides[id]])));
+  }
+  assert.equal(doc.platforms.linux['forge-dispatch-source-guard.ci-guard-v1-05-of-9.test.js'], 450000);
+  let reads = 0; const noRead = { lstatSync() { reads++; throw Error('unexpected overlay read'); } };
+  assert.deepEqual(loadPlanningOverrides(loaded(), 'win32', ['a.test.js'], { io: noRead }), {}); assert.equal(reads, 0);
+  throwsCode(() => loadPlanningOverrides(published, 'win32', suites, { io: noRead }), 'shard-planning-overrides-unreadable');
+  const input = value => ({ lstatSync: () => ({ isFile: () => true, isSymbolicLink: () => false, size: 1 }), readFileSync: () => Buffer.from(JSON.stringify(value)) });
+  for (const mutate of [d => { d.base_profile_sha256 = '0'.repeat(64); }, d => { d.platforms.win32.foreign = 1; }, d => { delete d.platforms.win32['forge-native-host-bridge.ci-host-v1-02-of-2.test.js']; }, d => { d.retired_ids = []; }, d => { d.suite_ids.push(d.suite_ids[0]); }, d => { d.universe_sha256 = '0'.repeat(64); }, d => { d.extra = true; }]) { const forged = clone(doc); mutate(forged); throwsCode(() => loadPlanningOverrides(published, 'win32', suites, { io: input(forged) }), 'shard-planning-overrides-invalid'); }
+  for (const bad of [0, -1, 1.5, null, 86400001]) { const forged = clone(doc); forged.platforms.win32[suites[0]] = bad; throwsCode(() => loadPlanningOverrides(published, 'win32', suites, { io: input(forged) }), 'shard-planning-overrides-invalid'); }
+  throwsCode(() => loadPlanningOverrides(published, 'win32', ['foreign.test.js']), 'shard-planning-overrides-invalid');
+  assert(fs.readFileSync(baseFile).equals(before), 'observed profile bytes never rewritten');
+});
+test('direct planning overrides preserve legacy default and precedence', () => {
+  const suites = ['a.test.js','b.test.js','c.test.js'], profile = loaded(), args = { suites, index: 0, count: 2, platform: 'win32', profile, estimatedWeights: { 'a.test.js': 1, 'c.test.js': 5 } };
+  assert.deepEqual(planShards(args), planShards({ ...args, planningOverrides: {} }));
+  const changed = planShards({ ...args, planningOverrides: { 'a.test.js': 2, 'c.test.js': 20 } });
+  assert.deepEqual(changed.predicted_ms, [20,4]); assert.deepEqual(changed.unprofiled, ['c.test.js']);
+  for (const planningOverrides of [null, [], { 'foreign.test.js': 1 }, { 'a.test.js': NaN }, { 'a.test.js': Infinity }, { 'a.test.js': 0 }, { 'a.test.js': 1.2 }]) throwsCode(() => planShards({ ...args, planningOverrides }), 'shard-planning-override-invalid');
 });
 
 console.log(`${passes} passed, ${failures} failed`);

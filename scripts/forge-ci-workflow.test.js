@@ -10,7 +10,7 @@ const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 const concurrency = require('./forge-ci-concurrency.js');
 const { POLICY, expandJobs, assertJobMapping } = require('./forge-release-checks.js');
-const { loadShardProfile, planShards, verifyPartition } = require('./forge-ci-shards.js');
+const { loadShardProfile, planShards, verifyPartition, loadPlanningOverrides } = require('./forge-ci-shards.js');
 const { discoverTests } = require('./run-tests.js');
 const { expandSuites, unitWeights } = require('./forge-ci-units.js');
 const { workerLayout } = require('./forge-ci-parallel.js');
@@ -299,9 +299,9 @@ const rows = expandJobs(POLICY.workflows.ci);
 assert.strictEqual(rows.length, 53);
 assert.strictEqual(rows.filter(row => row.kind === 'alias').length, 9);
 assert.deepStrictEqual(rows.filter(row => row.key === 'test').map(row => row.name),
-  [['ubuntu-latest', 6], ['macos-latest', 8], ['windows-latest', 27]].flatMap(([os, count]) => Array.from({length:count}, (_, i) => `Tests (${os}, shard ${i+1}/${count})`)));
+  [['ubuntu-latest', 7], ['macos-latest', 8], ['windows-latest', 26]].flatMap(([os, count]) => Array.from({length:count}, (_, i) => `Tests (${os}, shard ${i+1}/${count})`)));
 assert.strictEqual(rows.filter(row => row.name === 'Tests (ubuntu-latest)' && row.kind === 'alias').length, 1);
-assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'win32').map(row => row.matrix['shard-count']), Array(27).fill(27));
+assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'win32').map(row => row.matrix['shard-count']), Array(26).fill(26));
 assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'darwin').map(row => row.matrix['shard-count']), Array(8).fill(8));
 // Smoke condition evaluated per policy cell: exactly one Linux and one macOS run, never Windows.
 const runnerOs = { 'ubuntu-latest': 'Linux', 'macos-latest': 'macOS', 'windows-latest': 'Windows' };
@@ -323,9 +323,10 @@ for (const [platform,platformCells] of cells) {
   const cell=platformCells[0],layouts=platformCells.map(row=>workerLayout({index:row['shard-index'],count:row['shard-count'],jobs:row.workers,singleWorkerJobs:row['single-worker-jobs']}));
   const count=layouts[0].count;assert(layouts.every(row=>row.count===count));
   assert.deepStrictEqual(layouts.flatMap(row=>Array.from({length:row.workers},(_,i)=>row.start+i)).sort((a,b)=>a-b),Array.from({length:count},(_,i)=>i));
-  assert.strictEqual(count,{linux:12,darwin:16,win32:36}[platform]);totalWorkers+=count;
+  assert.strictEqual(count,{linux:13,darwin:16,win32:35}[platform]);totalWorkers+=count;
   const plans = Array.from({ length: count }, (_, index) => planShards({
-    suites, index, count, platform, profile, estimatedWeights: unitWeights(unitInventory, profile, platform) }));
+    suites, index, count, platform, profile, estimatedWeights: unitWeights(unitInventory, profile, platform),
+    planningOverrides: loadPlanningOverrides(profile, platform, suites) }));
   assert(plans.every(plan => plan.fallback === null && plan.algorithm === 'weighted-lpt-v1'));
   assert.strictEqual(new Set(plans.map(plan => plan.partition_sha256)).size, 1);
   assert(verifyPartition(suites, plans.map(plan => plan.selected)).ok);

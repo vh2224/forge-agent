@@ -753,7 +753,9 @@ function checkPinsBody(fixture = {}) {
       assert(readme.includes(old.get(surface.source_id)) && readme.includes(surface.sha256), `documented actual ${surface.source_id}`);
     }
   }
-  assert.deepStrictEqual(changed.sort(), [...new Set([...before.allowed_active_changes, ...Object.keys(entryDelta.surfaces), ...Object.keys(unitEntry.issue407Layer.surfaces)])].sort(), 'historical changes plus exactly the #347 and independently pinned407 surfaces');
+  const nativeChangedSurfaces = Object.entries(unitEntry.issue463Layer.surfaces.claude)
+    .filter(([, row]) => row.before !== row.after).map(([id]) => id);
+  assert.deepStrictEqual(changed.sort(), [...new Set([...before.allowed_active_changes, ...Object.keys(entryDelta.surfaces), ...Object.keys(unitEntry.issue407Layer.surfaces), ...nativeChangedSurfaces])].sort(), 'historical changes plus exactly #347, independently pinned407 and measured Native surfaces');
   for (const historical of before.historical_goldens) assert.strictEqual(hash(fs.readFileSync(path.join(root, historical.path))), historical.sha256, historical.path);
   // Every unrelated input captured by the owner still has its exact original bytes.
   const allowed = new Set([goldenPath, 'agents/forge-planner.md', 'agents/forge-worker.md', 'skills/forge-auto/SKILL.md',

@@ -285,6 +285,17 @@ try {
     }
   });
 
+  test('published planning overlay feeds weighted and positional estimates identically', () => {
+    const base = shards.loadShardProfile(path.join(__dirname, 'ci-profiles/issue-461-d046.json'));
+    const units = require('./forge-ci-units').expandSuites(runner.discoverTests([])), suites = units.map(unit => unit.id);
+    const report = collector.buildProfileReport({ shard_profile: base, partitions: [{ platform: 'win32', count: 8 }], partition_suites: true });
+    const prediction = report.predictions[0], overrides = shards.loadPlanningOverrides(base, 'win32', suites), row = base.doc.platforms.win32;
+    assert.deepEqual(prediction.planning_overrides, overrides);
+    const positional = shards.planShards({ suites, index: 0, count: 8, platform: 'win32' });
+    const cost = id => Object.hasOwn(overrides,id) ? overrides[id] : Object.hasOwn(row.weights_ms,id) ? row.weights_ms[id] : Object.hasOwn(prediction.estimated_unit_weights,id) ? prediction.estimated_unit_weights[id] : row.default_weight_ms;
+    assert.deepEqual(prediction.positional.predicted_ms, positional.shards.map(shard => shard.reduce((sum,id) => sum + cost(id),0)));
+    assert.equal(prediction.positional.predicted_ms.reduce((a,b)=>a+b,0), prediction.weighted.predicted_ms.reduce((a,b)=>a+b,0));
+  });
   test('unit allocation comparisons use the same measured/estimated/default costs', () => {
     const profile=loaded(),count=24;
     const units=require('./forge-ci-units').expandSuites(runner.discoverTests([])),weights=profile.doc.platforms.win32;

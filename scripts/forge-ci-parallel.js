@@ -43,11 +43,11 @@ function toolPlan(options, { source=path.resolve(__dirname,'..'), platform=proce
   const layout=workerLayout(options);
   if(platform!=='win32'||layout.workers!==1) return {needs_svn:true,reason:'conservative-platform-or-parallel-default'};
   const unitsApi=require(path.join(source,'scripts/forge-ci-units'));
-  const {loadShardProfile,planShards}=require(path.join(source,'scripts/forge-ci-shards'));
+  const {loadShardProfile,loadPlanningOverrides,planShards}=require(path.join(source,'scripts/forge-ci-shards'));
   const profile=loadShardProfile(profileFile||path.join(source,'scripts/ci-profiles/issue-461-d046.json'));
   if(profile.state!=='loaded')return {needs_svn:true,reason:'profile-unavailable'};
   const units=unitsApi.expandSuites(require(path.join(source,'scripts/run-tests')).discoverTests([]));
-  const plan=planShards({suites:units.map(u=>u.id),index:layout.start,count:layout.count,platform,profile,estimatedWeights:unitsApi.unitWeights(units,profile,platform)});
+  const plan=planShards({suites:units.map(u=>u.id),index:layout.start,count:layout.count,platform,profile,estimatedWeights:unitsApi.unitWeights(units,profile,platform),planningOverrides:loadPlanningOverrides(profile,platform,units.map(u=>u.id))});
   const byId=new Map(units.map(u=>[u.id,u]));
   const selected=plan.selected.map(id=>byId.get(id));
   const needs_svn=!selected.length||selected.some(unit=>!unit||unit.source!=='forge-linked-task-start.test.js');

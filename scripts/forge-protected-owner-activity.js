@@ -394,6 +394,16 @@ async function withNativeExecutionActivity(request, profileHandle, action) {
     return roots.digest({ dispatch_id: proof.dispatch_id, request_sha256: proof.request_sha256,
       result_sha256: proof.result_sha256, manifest: proof.manifest, receipt: proof.receipt, artifacts: proof.artifacts });
   }
+  function admitPublication(witness) {
+  if (settling || coordinationClosed || !joinedCustody) fail('native-owner-joined-custody-required');
+  const proof = checkedPublication(witness);sameActorClaim(proof, false);
+  if (proof.result_sha256 !== joinedCustody.result_sha256) fail('native-owner-publication-return-mismatch');
+  if (publicationAttempt && publicationIdentity(proof) !== publicationIdentity(publicationAttempt)) fail('native-owner-publication-upgrade-mismatch');
+  syncProfile('assertPublicationCurrent', profileHandle, witness);
+  if (publicationWitness && publicationWitness !== witness) fail('native-owner-publication-witness-changed');
+  publicationWitness = witness;publication = proof;assertLive();assertOwnerSurface();
+  return Object.freeze({ admitted: true, reference: 'native-publication:' + r.dispatchId });
+  }
   function projectedOwner(before) {
     const expected = { ...before, [relative]: expectedLease };
     const proof = publication || publicationAttempt, pending = !publication;
@@ -490,16 +500,7 @@ async function withNativeExecutionActivity(request, profileHandle, action) {
     },
     async observePublication(witness) {
       if (arguments.length !== 1) fail('native-owner-publication-arguments');
-      return enter(() => {
-        if (settling || coordinationClosed || !joinedCustody) fail('native-owner-joined-custody-required');
-        const proof = checkedPublication(witness);sameActorClaim(proof, false);
-        if (proof.result_sha256 !== joinedCustody.result_sha256) fail('native-owner-publication-return-mismatch');
-        if (publicationAttempt && publicationIdentity(proof) !== publicationIdentity(publicationAttempt)) fail('native-owner-publication-upgrade-mismatch');
-        syncProfile('assertPublicationCurrent', profileHandle, witness);
-        if (publicationWitness && publicationWitness !== witness) fail('native-owner-publication-witness-changed');
-        publicationWitness = witness;publication = proof;assertLive();assertOwnerSurface();
-        return Object.freeze({ admitted: true, reference: 'native-publication:' + r.dispatchId });
-      });
+      return enter(() => admitPublication(witness));
     },
     assertReplayAdmission() {
       if (arguments.length) fail('native-owner-replay-arguments');
@@ -509,6 +510,19 @@ async function withNativeExecutionActivity(request, profileHandle, action) {
         if (settled || coordinationClosed || leaseClosed) fail('native-owner-replay-window-required');
         assertLive();readJoinedCustody();assertOwnerSurface();assertLive();
         return Object.freeze({ joined: true, reference: 'native-replay-admission:' + r.dispatchId });
+      });
+    },
+    replayPublication(operation) {
+      if (arguments.length !== 1) fail('native-owner-replay-operation-arguments');
+      return enter(() => {
+        scope.assertReplayAdmission();
+        // The canonical Bridge alone produces/consumes this closed sync operation.
+        const result = require('./forge-native-host-bridge').runOriginalReplayPublication(operation, scope, r);
+        if (!result || typeof result.then === 'function') fail('native-owner-replay-sync-required');
+        // Upgrade this activity with the same original witness before its fresh
+        // EXIT check, matching the canonical Request/Profile complete transition.
+        admitPublication(result.witness);
+        scope.assertReplayAdmission();return result;
       });
     },
     async reconcile() {

@@ -709,8 +709,14 @@ async function nativeTaskMarker() {
       fs.writeFileSync(slicePlan,preimage);
       delivery.assertOriginalPublicationAttemptWitness(pending,{request}); // Genuine exact BEFORE remains pending, never published.
       assert.throws(()=>delivery.assertOriginalPublicationWitness(witness,{request}),/artifact-changed/);
+      assert.equal(publishedPlan.length,preimage.length,'the genuine checkbox update keeps the exact byte length');
+      const sameSizeForeign=Buffer.from(preimage);sameSizeForeign[0]^=1;
+      fs.writeFileSync(slicePlan,sameSizeForeign);
+      assert.throws(()=>delivery.assertOriginalPublicationAttemptWitness(pending,{request}),{code:'native-publication-artifact-changed'},'in-bound third-state bytes still fail the original artifact guard');
+      fs.writeFileSync(slicePlan,preimage);
       fs.appendFileSync(slicePlan,'foreign');
-      assert.throws(()=>delivery.assertOriginalPublicationAttemptWitness(pending,{request}),/artifact-changed/);
+      assert(fs.statSync(slicePlan).size>Math.max(publishedPlan.length,preimage.length),'the original appended third state exceeds the exact retained read bound');
+      assert.throws(()=>delivery.assertOriginalPublicationAttemptWitness(pending,{request}),{code:'native-publication-read-source_too_large'});
     }finally{fs.writeFileSync(slicePlan,publishedPlan);}
     for(const pointer of [proof.manifest,proof.receipt]){
       const bytes=fs.readFileSync(pointer.file);

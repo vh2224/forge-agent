@@ -470,16 +470,33 @@ async function executeOwner(row) {
   if(result.published!==true){checkpoint(row,'returned_not_ready',{status:result.status,provider_called:result.outcome?.provider_called??'unknown'});const refusal=Object.assign(new Error('native-host-result-not-ready'),{code:'native-host-result-not-ready',provider_called:row.joined?.provider_called??'unknown'});row.lastError=safeError(refusal);signalCompletion(row,refusal);return result;}
   const proof=readback(row,result.delivery);if(!row.publicationWitness||!row.publicationReadback)fail('native-host-publication-witness-required');row.ready={kind:'execution-ready',...proof};checkpoint(row,'ready',row.ready);signalCompletion(row);return result;
 }
+// Only queueReplay mints this ephemeral operation; it carries no serialized authority.
+const replayPublications=new WeakMap();
+function runOriginalReplayPublication(operation,runtime,request){
+  const entry=operation&&replayPublications.get(operation);
+  if(!entry||entry.row.activity!==runtime||api('protected-owner-activity').currentScope()!==runtime
+      ||!entry.row.replaying||entry.row.phase!=='publication_pending'||entry.row.receipt?.record!==entry.receipt
+      ||nativeDigest(request)!==entry.request_sha256)fail('native-host-replay-operation-required');
+  replayPublications.delete(operation); // one use, including a throwing publication
+  const row=entry.row;currentChannel(row);terminalAdmission(row);
+  const current=api('native-host-request').readExecutionRequest(row.requestHandle);
+  if(nativeDigest(current)!==entry.request_sha256)fail('native-host-replay-request-changed');
+  const manifest=parse(read(current.resultFile+'.manifest.json'));
+  const session=api('native-recovery-delivery').prepare({request:current,nativeInvocation:row.originalInvocation,savedManifest:manifest,
+    ...api('native-host-request').ownerAdapters(row.context),persistDeliveryReceipt:pointer=>persistReceipt(row,pointer),nativeHostAdmission:row.admission});
+  const actual=session.replayReady(entry.receipt),witness=publicationCurrent(row,actual,current),proof=readback(row,actual);
+  return {witness,proof};
+}
 function queueReplay(row) {
   if(row.replaying||row.phase!=='publication_pending'||!row.receipt||!row.originalInvocation||!row.joined)fail('native-host-replay-not-ready');
   row.replaying=true;
   Promise.resolve().then(async()=>{
     currentChannel(row);terminalAdmission(row);
-    if(typeof row.activity?.assertReplayAdmission!=='function')fail('native-host-replay-admission-unavailable');row.activity.assertReplayAdmission();
-    const request=api('native-host-request').readExecutionRequest(row.requestHandle),manifest=parse(read(request.resultFile+'.manifest.json'));
-    const session=api('native-recovery-delivery').prepare({request,nativeInvocation:row.originalInvocation,savedManifest:manifest,
-      ...api('native-host-request').ownerAdapters(row.context),persistDeliveryReceipt:pointer=>persistReceipt(row,pointer),nativeHostAdmission:row.admission});
-    const actual=session.replayReady(row.receipt.record),witness=publicationCurrent(row,actual,request),proof=readback(row,actual);
+    if(typeof row.activity?.replayPublication!=='function')fail('native-host-replay-admission-unavailable');
+    const request=api('native-host-request').readExecutionRequest(row.requestHandle),operation=Object.freeze(Object.create(null));
+    replayPublications.set(operation,{row,request_sha256:nativeDigest(request),receipt:row.receipt.record});
+    let publication;try{publication=row.activity.replayPublication(operation);}finally{replayPublications.delete(operation);}
+    const {witness,proof}=publication;
     if(typeof row.activity.observePublication!=='function'||typeof row.activity.retrySettlement!=='function')fail('native-host-publication-settlement-unavailable');
     await row.activity.observePublication(witness);await row.activity.retrySettlement();assertActivitySettled(row.activity);
     row.ready={kind:'replay-ready',...proof};checkpoint(row,'ready',row.ready);signalCompletion(row);
@@ -632,9 +649,33 @@ function originalHook(phase,hookSource){
  if(liveArgv(parent.command_line).some(v=>/^--(?:agents|plugin-dir|agent|settings|setting-sources)(?:=|$)/.test(v)))fail('native-host-agent-source-override-unsupported');
  return{p,parent,hook,hook_sha256:hash(read(hook)),bridge_sha256:hash(read(__filename))};
 }
-function collectOriginalHookBootstrap({hookSource}={}){
- const {parent,hook,hook_sha256}=originalHook('session-start',hookSource),config=liveRuntimeHome();
+// Shared LOWLEVEL packaging only. The caller supplies the lexical result of
+// originalHook for the ACTUAL event; this does not mint a SessionStart or actor.
+function originalHookBootstrap(who){
+ const {parent,hook,hook_sha256}=who,config=liveRuntimeHome();
  return{schema_version:1,kind:'claude-hook-bootstrap',pid:parent.pid,started:parent.started,exe:parent.exe,exe_sha256:CLAUDE_BINARY_SHA,hook_source:hook,hook_sha256,config_dir:config};
+}
+function collectOriginalHookBootstrap({hookSource}={}){
+ return originalHookBootstrap(originalHook('session-start',hookSource));
+}
+// DATA comparisons only. Neither this helper nor its output is a capability.
+function checkedHookCarrier(sessionId,bootstrap,env){
+ if(typeof sessionId!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/.test(sessionId))fail('native-host-live-hook-binding');
+ const expected=canonicalPrepareSessionValues({hostRuntime:'claude',sessionId},bootstrap),present=expected.filter(([key])=>Object.hasOwn(env,key));
+ if(present.length!==0&&present.length!==expected.length)fail('native-host-live-hook-binding');
+ if(present.length)for(const[key,value]of expected){const descriptor=Object.getOwnPropertyDescriptor(env,key);if(!descriptor||!Object.hasOwn(descriptor,'value')||descriptor.value!==value)fail('native-host-live-hook-binding');}
+ return{sessionId,pid:bootstrap.pid,started:bootstrap.started,source_kind:present.length?'sessionstart-env-current-os':'original-hook-current-os'};
+}
+function assertOriginalHookSession(sessionId,argv){
+ const selected=[];for(let i=1;i<argv.length;i++){if(argv[i]==='--session-id'){if(i+1===argv.length)fail('native-host-live-hook-binding');selected.push(argv[++i]);}else if(argv[i].startsWith('--session-id='))selected.push(argv[i].slice('--session-id='.length));}
+ if(selected.length>1||selected.length===1&&selected[0]!==sessionId)fail('native-host-live-hook-binding');
+ // Auto-generated interactive session IDs have no CLI selector. The original
+ // SDK session still binds the active reference and the original server below.
+}
+function originalHookBinding(who,raw){
+ const measured=originalHookBootstrap(who),bootstrap={pid:measured.pid,started:measured.started,exe:measured.exe,exe_sha256:measured.exe_sha256,hook:measured.hook_source,hook_sha256:measured.hook_sha256,config:measured.config_dir};
+ assertOriginalHookSession(raw.session_id,liveArgv(who.parent.command_line));
+ return checkedHookCarrier(raw.session_id,bootstrap,process.env);
 }
 function liveBootstrap(facts){
  if(process.env.FORGE_NATIVE_HOST_BOOTSTRAP_SOURCE!=='claude-sessionstart-process-v1'||process.env.FORGE_CLAUDE_OWNER_SOURCE!=='claude-sessionstart-env-v1'||process.env.FORGE_CLAUDE_OWNER_SESSION_ID!==facts.actor.sessionId)fail('native-host-original-bootstrap-required');
@@ -723,7 +764,7 @@ function serveLiveHook(row,socket,first){
 async function relayCurrentHostHook({owner,phase,capture,hookSource}={}){
  const observed=api('owner-transport-window').observed(owner),ref=observed?.binding?.native_host_relay;if(!ref)return{exit_code:0,hook_output:{}};
  if(typeof capture!=='string'||Buffer.byteLength(capture)>LIMIT.body||!LIVE_PHASES.includes(phase))fail('native-host-live-capture-bound');
- const who=originalHook(phase,hookSource),raw=parse(Buffer.from(capture),LIMIT.body);if(raw.session_id!==process.env.FORGE_CLAUDE_OWNER_SESSION_ID||nativeDigest(raw.session_id)!==ref.host_session_sha256||who.parent.pid!==Number(process.env.FORGE_NATIVE_HOST_PID)||who.parent.started!==process.env.FORGE_NATIVE_HOST_STARTED||ref.profile_id!==LIVE_ID||ref.endpoint!==endpoint(physical(ref.directory,true)))fail('native-host-live-hook-binding');
+ const who=originalHook(phase,hookSource),raw=parse(Buffer.from(capture),LIMIT.body),carrier=originalHookBinding(who,raw);if(raw.session_id!==carrier.sessionId||nativeDigest(raw.session_id)!==ref.host_session_sha256||who.parent.pid!==carrier.pid||who.parent.started!==carrier.started||ref.profile_id!==LIVE_ID||ref.endpoint!==endpoint(physical(ref.directory,true)))fail('native-host-live-hook-binding');
  const keyDir=liveKeyDirectory(ref.attempt_id);liveACL(keyDir,true);liveACL(path.join(keyDir,'ingress.key'));const key=copyBuffer(read(path.join(keyDir,'ingress.key'),32));if(key.length!==32)fail('native-host-key-length');
  try{return await new Promise((resolve,reject)=>{const socket=net.connect(ref.endpoint);let buffer=Buffer.alloc(0),sent=false,done=false;socket.setTimeout(20000,()=>socket.destroy(Object.assign(Error('native-host-live-ipc-cap'),{code:'native-host-live-ipc-cap'})));socket.once('connect',()=>socket.write(json({protocol_version:1,kind:'live-hook',phase})));
   let issued;const readyState={};socket.on('data',chunk=>{try{buffer=Buffer.concat([buffer,chunk]);if(buffer.length>LIMIT.header*2)fail('native-host-live-ack-bound');let at;while((at=buffer.indexOf(10))>=0){const value=parse(buffer.subarray(0,at),LIMIT.header);buffer=buffer.subarray(at+1);if(!sent){const early=unverifiedPrechallengeRefusal(value);if(early)throw early;const {server_mac,...unsigned}=value;checkLiveMac(key,{domain:LIVE_DOMAIN+'/challenge',...unsigned},server_mac);if(value.kind!=='native-host-live-challenge'||value.binding.attempt_id!==ref.attempt_id||value.binding.dispatch_id!==ref.dispatch_id||value.binding.request_sha256!==ref.request_sha256||value.binding.session_sha256!==ref.host_session_sha256||value.binding.window_sha256!==observed.sha256)fail('native-host-live-challenge');issued=value;const a={domain:LIVE_DOMAIN,binding:value.binding,sequence:value.sequence,nonce:value.nonce,phase,raw_sha256:hash(Buffer.from(capture)),raw_bytes:Buffer.byteLength(capture),sender:{pid:who.p.pid,started:who.p.started,exe_sha256:hash(read(process.execPath,128*1024*1024)),hook_sha256:who.hook_sha256,bridge_sha256:who.bridge_sha256,argv_sha256:nativeDigest(process.argv)}};socket.write(json({authentication:a,capture,mac:macLive(key,a).toString('hex')}));sent=true;}else{const {server_mac,...response}=value;checkLiveMac(key,{domain:LIVE_DOMAIN+'/ack',nonce:issued.nonce,sequence:issued.sequence,response},server_mac);if(value.ack==='live-completion-pending'){if(phase!=='post'||readyState.pending)fail('native-host-live-ack-order');readyState.pending=true;socket.setTimeout(0);continue;}if(['live-ready','live-ready-confirmed'].includes(value.ack)){if(!readyState.pending||phase!=='post')fail('native-host-live-ack-order');if(!receiveReadyFrame(socket,key,issued,value,readyState))continue;done=true;resolve({exit_code:0,hook_output:value.hook_output});socket.end();continue;}if(!['live-retained','refused'].includes(value.ack))fail('native-host-live-ack');done=true;resolve({exit_code:value.ack==='live-retained'?0:2,hook_output:value.hook_output||liveHookOutput(phase,false)});socket.end();}}}catch(error){socket.destroy(error);}});socket.once('error',reject);socket.once('close',()=>{if(!done)reject(Object.assign(Error('native-host-live-owner-unavailable'),{code:'native-host-live-owner-unavailable'}));});});}finally{key.fill(0);}
@@ -782,7 +823,7 @@ function observedMSYSPath(value){
 }
 // Same literal quoting as canonical forge-hook.js SessionStart. This is data
 // serialization, not enrollment: only measureOriginalPrepare supplies live facts.
-function canonicalPrepareSessionExports(actor,bootstrap){
+function canonicalPrepareSessionValues(actor,bootstrap){
  if(actor?.hostRuntime!=='claude'||!Number.isSafeInteger(bootstrap?.pid)||bootstrap.pid<1||typeof bootstrap.started!=='string'||!/^\d{1,128}$/.test(bootstrap.started)||![bootstrap.exe_sha256,bootstrap.hook_sha256].every(v=>typeof v==='string'&&/^[a-f0-9]{64}$/.test(v))||![bootstrap.exe,bootstrap.hook,bootstrap.config].every(v=>typeof v==='string'&&path.isAbsolute(v)))fail('native-host-prepare-session-exports');
  const values=[
   ['FORGE_CLAUDE_OWNER_SESSION_ID',actor.sessionId],
@@ -796,6 +837,10 @@ function canonicalPrepareSessionExports(actor,bootstrap){
   ['FORGE_NATIVE_HOST_CONFIG_DIR',bootstrap.config],
   ['FORGE_NATIVE_HOST_BOOTSTRAP_SOURCE','claude-sessionstart-process-v1'],
  ];
+ return values;
+}
+function canonicalPrepareSessionExports(actor,bootstrap){
+ const values=canonicalPrepareSessionValues(actor,bootstrap);
  const quote=value=>{if(typeof value!=='string'||!value||Buffer.byteLength(value)>4096||/[\r\n\0]/.test(value))fail('native-host-prepare-session-exports');return "'"+value.replace(/'/g,"'\"'\"'")+"'";};
  return values.map(([key,value])=>'export '+key+'='+quote(value)).join('\n')+'\n:';
 }
@@ -957,5 +1002,5 @@ function fixtureCompletionReply(row,socket,result,releaseAdmission){
  waitForCompletion(row,socket).then(facts=>{let bytes=Buffer.alloc(0),done=false;socket.on('data',chunk=>{if(done)return;bytes=Buffer.concat([bytes,chunk]);if(bytes.length>LIMIT.header){done=true;socket.destroy();return;}const at=bytes.indexOf(10);if(at<0)return;done=true;try{const ack=parse(bytes.subarray(0,at),LIMIT.header);closed(ack,['kind','ready_sha256'],'native-host-fixture-ready-receipt');if(ack.kind!=='fixture-ready-received'||ack.ready_sha256!==nativeDigest(currentReadyFacts(row)))fail('native-host-fixture-ready-receipt');row.readyReceiptObserved=true;socket.end();releaseAdmission();closeAfterReadyReceipt(row);}catch{socket.destroy();}});reply(socket,{protocol_version:1,ack:'retained',phase:row.phase,ready:true,completion_receipt:facts,sha256:result?.sha256||null});},error=>{if(error.code==='native-host-ready-observer-lost')return;reply(socket,{protocol_version:1,ack:'retained',phase:row.phase,ready:false,error:safeError(error),sha256:result?.sha256||null});releaseAdmission();socket.end();});
 }
 
-module.exports={prepareTransportBudget,validateInitialPrepareCommand,assertOriginalPreparePost,collectOriginalHookBootstrap,relayCurrentHostHook,assertLiveRelayReference,assertLiveControlCommand,main,LIMIT,relayHookObservation,assertOwnedChannel,assertNativeAdmission,assertHostObservation,assertIngressCapability,assertHostObservationAndIngress,assertObservation,assertCandidate};
+module.exports={runOriginalReplayPublication,prepareTransportBudget,validateInitialPrepareCommand,assertOriginalPreparePost,collectOriginalHookBootstrap,relayCurrentHostHook,assertLiveRelayReference,assertLiveControlCommand,main,LIMIT,relayHookObservation,assertOwnedChannel,assertNativeAdmission,assertHostObservation,assertIngressCapability,assertHostObservationAndIngress,assertObservation,assertCandidate};
 if(require.main===module)main().catch(error=>{process.stderr.write(JSON.stringify(safeError(error))+'\n');process.exitCode=1;});

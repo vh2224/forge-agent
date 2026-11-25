@@ -1,6 +1,6 @@
 # SVN capability matrix (Phase 4 closure)
 
-Phase 4 closes every inventoried surface with an executable or explicit VCS-neutral/limitation verdict. Human-readable details remain in `docs/svn-parity-evidence/phase-04-full-gates.md`; each matrix row selects the structured `svn-focused` claim from `docs/svn-parity-evidence/phase-04-full-gates.results.json`. Platform CI is never accepted as SVN evidence.
+Phase 4 closes every inventoried surface with an executable or explicit VCS-neutral/limitation verdict. Human-readable details remain in `docs/svn-parity-evidence/phase-04-full-gates.md`; historical verified rows select the structured `svn-focused` claim from `docs/svn-parity-evidence/phase-04-full-gates.results.json`. Later declared-limitation rows may cite their source-contract documentation directly and do not inherit passed structured SVN evidence. Platform CI is never accepted as SVN evidence.
 
 | ID | Surface | Primitive | Applicability | Probe | E2E | Verdict | Action |
 |---|---|---|---|---|---|---|---|
@@ -38,6 +38,7 @@ Phase 4 closes every inventoried surface with an executable or explicit VCS-neut
 | agent-forge-discusser | agent/planning | agents/forge-discusser.md | VCS-neutral | catalog + full regression gate | phase-04-full-gates.results.json#claim=svn-focused | verified-neutral | no direct VCS primitive |
 | agent-forge-executor | agent/execution | agents/forge-executor.md | applicable | shared VCS and verification focused gates | phase-04-full-gates.results.json#claim=svn-focused | verified | delegates repository operations to verified helpers |
 | agent-forge-memory | agent/memory | agents/forge-memory.md | VCS-neutral | catalog + full regression gate | phase-04-full-gates.results.json#claim=svn-focused | verified-neutral | no direct VCS primitive |
+| agent-forge-native-files | agent/execution | agents/forge-native-files.md | VCS-neutral | docs/issue-463-native-host-bridge.md | Native SVN E2E unverified; agents/forge-native-files.md | declared-limitation | Read/Write-only worker; the owner retains verification, VCS operations and publication; file-tool distribution is not SVN delivery evidence |
 | agent-forge-plan-checker | agent/quality | agents/forge-plan-checker.md | VCS-neutral | catalog + full regression gate | phase-04-full-gates.results.json#claim=svn-focused | verified-neutral | validates artifacts, no direct VCS primitive |
 | agent-forge-planner | agent/planning | agents/forge-planner.md | VCS-neutral | catalog + full regression gate | phase-04-full-gates.results.json#claim=svn-focused | verified-neutral | no direct VCS primitive |
 | agent-forge-researcher | agent/research | agents/forge-researcher.md | VCS-neutral | catalog + full regression gate | phase-04-full-gates.results.json#claim=svn-focused | verified-neutral | no direct VCS primitive |
@@ -78,4 +79,6 @@ Phase 4 closes every inventoried surface with an executable or explicit VCS-neut
 
 ## Current catalog extension — 2026-10-31
 
-The historical Phase4 counts above remain52. The current catalog has53 expected/observed IDs after adding integration-vscode-panel; all seven additional families remain. The new row declares its live SVN rendering limitation and does not inherit historical passed claims. Issue308 tracks this dependent-matrix integration omission.
+The historical Phase4 counts above remain52. The panel extension brought the catalog to53 expected/observed IDs after adding integration-vscode-panel; all seven additional families remain. That row declares its live SVN rendering limitation and does not inherit historical passed claims. Issue308 tracks this dependent-matrix integration omission.
+
+The current catalog has54 expected/observed IDs after adding agent-forge-native-files. Its Read/Write-only worker contract leaves VCS operations, verification and publication with the owner. Native SVN E2E remains unverified; neither private Git fixtures nor distribution of the Agent surface establish SVN execution or delivery. The seven additional families and historical Phase4 claims remain unchanged.

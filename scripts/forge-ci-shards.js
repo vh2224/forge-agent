@@ -171,6 +171,37 @@ function loadShardProfile(file, io = fs) {
   return { state: 'loaded', doc, sha256: hash(bytes) };
 }
 
+// This is a separate planning overlay, never an observed shard profile.
+const PLANNING_BASE_SHA256 = 'c5438665a4bba363efdc617310a612125049a831c9ae079bcdf41712c01b4366';
+const DEFAULT_PLANNING_OVERLAY = path.join(__dirname, 'ci-profiles', 'issue-467-planning-r4.json');
+function loadPlanningOverrides(profile, platform, suites, { knownSuites = suites, file = DEFAULT_PLANNING_OVERLAY, io = fs } = {}) {
+  // Custom/synthetic profiles and legacy callers must not read production data.
+  if (!profile || profile.state !== 'loaded' || profile.sha256 !== PLANNING_BASE_SHA256) return {};
+  let bytes;
+  try { const stat = io.lstatSync(file); if (!stat.isFile() || stat.isSymbolicLink() || stat.size > LIMITS.maxProfileBytes) throw Error(); bytes = io.readFileSync(file); }
+  catch { throw namedError('shard-planning-overrides-unreadable'); }
+  const invalid = () => { throw namedError('shard-planning-overrides-invalid'); };
+  if (!Buffer.isBuffer(bytes) || bytes.length > LIMITS.maxProfileBytes) invalid();
+  const text = bytes.toString('utf8'); if (!Buffer.from(text).equals(bytes)) invalid();
+  let doc; try { doc = JSON.parse(text); } catch { invalid(); }
+  const keys = ['schema','base_profile_sha256','suite_ids','universe_sha256','retired_ids','platforms','provenance'];
+  if (!plain(doc) || Object.keys(doc).sort().join() !== keys.sort().join() || doc.schema !== 'forge-shard-planning-overrides/v1' || doc.base_profile_sha256 !== profile.sha256) invalid();
+  const validIds = ids => list(ids) && ids.length <= LIMITS.maxSuites && ids.every(id => typeof id === 'string' && SUITE_ID_RE.test(id)) && new Set(ids).size === ids.length;
+  if (!validIds(doc.suite_ids) || !validIds(doc.retired_ids) || !validIds(suites) || !validIds(knownSuites) || !HASH_RE.test(doc.universe_sha256) || universeFingerprint(doc.suite_ids) !== doc.universe_sha256 || universeFingerprint(knownSuites) !== doc.universe_sha256) invalid();
+  const ids = new Set(doc.suite_ids), retired = new Set(doc.retired_ids);
+  if (suites.some(id => !ids.has(id)) || doc.retired_ids.some(id => ids.has(id)) || !plain(doc.platforms) || Object.keys(doc.platforms).sort().join() !== [...PLATFORMS].sort().join() || !plain(doc.provenance) || doc.provenance.kind !== 'planning-estimates-not-observed-profile' || !HASH_RE.test(doc.provenance.source_sha256) || !textualPlanningSource(doc.provenance.source) || !textualPlanningSource(doc.provenance.qualification)) invalid();
+  if (!validateShardProfile(profile.doc).ok) invalid();
+  for (const p of PLATFORMS) {
+    const base = profile.doc.platforms[p], map = doc.platforms[p];
+    if (!base || base.status !== 'observed' || !plain(map) || Object.entries(map).some(([id, ms]) => !ids.has(id) || !integer(ms, 1, LIMITS.maxWeightMs))) invalid();
+    const measured = Object.keys(base.weights_ms), active = measured.filter(id => !retired.has(id)), added = doc.suite_ids.filter(id => !Object.hasOwn(base.weights_ms, id));
+    if (doc.retired_ids.some(id => !Object.hasOwn(base.weights_ms, id)) || active.some(id => !ids.has(id)) || added.some(id => !Object.hasOwn(map, id)) || active.length + added.length !== doc.suite_ids.length) invalid();
+  }
+  if (!PLATFORMS.includes(platform)) return {};
+  return Object.fromEntries(suites.filter(id => Object.hasOwn(doc.platforms[platform], id)).map(id => [id, doc.platforms[platform][id]]));
+}
+function textualPlanningSource(value) { return typeof value === 'string' && value.length > 0 && value.length <= 2048 && !/[ -]/.test(value); }
+
 function universeFingerprint(suites) {
   return hash(JSON.stringify([...suites].sort(compareCodeUnits)));
 }
@@ -187,11 +218,12 @@ function verifyPartition(universe, shards) {
   return { ok: !missing.length && !duplicated.length && !unknown.length, missing, duplicated, unknown };
 }
 
-function planShards({ suites, index, count, platform, profile = null, estimatedWeights = {} }) {
+function planShards({ suites, index, count, platform, profile = null, estimatedWeights = {}, planningOverrides = {} }) {
   if (!plain(estimatedWeights) || Object.entries(estimatedWeights).some(([id, ms]) => !suites.includes(id) || !integer(ms, 1, LIMITS.maxWeightMs))) throw namedError('shard-estimated-weight-invalid');
   if (!Array.isArray(suites) || suites.length > LIMITS.maxSuites || !list(suites) || suites.some(id => typeof id !== 'string')
     || new Set(suites).size !== suites.length || !integer(count, 1, LIMITS.maxShards)
     || !integer(index, 0, count - 1)) throw namedError('shard-input-invalid');
+  if (!plain(planningOverrides) || Object.entries(planningOverrides).some(([id, ms]) => !suites.includes(id) || !integer(ms, 1, LIMITS.maxWeightMs))) throw namedError('shard-planning-override-invalid');
   let algorithm = ALGORITHMS.positional;
   let fallback = null;
   let profileSha = null;
@@ -216,7 +248,8 @@ function planShards({ suites, index, count, platform, profile = null, estimatedW
   let stale = [];
   if (algorithm === ALGORITHMS.weighted) {
     const universe = new Set(suites);
-    const weight = id => Object.hasOwn(row.weights_ms, id) ? row.weights_ms[id]
+    const weight = id => Object.hasOwn(planningOverrides, id) ? planningOverrides[id]
+      : Object.hasOwn(row.weights_ms, id) ? row.weights_ms[id]
       : Object.hasOwn(estimatedWeights, id) ? estimatedWeights[id] : row.default_weight_ms;
     unprofiled = suites.filter(id => !Object.hasOwn(row.weights_ms, id)).sort(compareCodeUnits);
     stale = Object.keys(row.weights_ms).filter(id => !universe.has(id)).sort(compareCodeUnits);
@@ -336,6 +369,6 @@ function buildShardProfile({ observations, sources }) {
 
 module.exports = {
   SHARD_PROFILE_SCHEMA, ALGORITHMS, PLATFORMS, LIMITS, SUITE_ID_RE, compareCodeUnits,
-  validateShardProfile, loadShardProfile, planShards, verifyPartition,
+  validateShardProfile, loadShardProfile, loadPlanningOverrides, planShards, verifyPartition,
   universeFingerprint, partitionFingerprint, formatShardPlanLine, parseShardPlanLine, buildShardProfile,
 };

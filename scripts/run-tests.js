@@ -14,7 +14,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { loadShardProfile, planShards, verifyPartition, formatShardPlanLine,
+const { loadShardProfile, loadPlanningOverrides, planShards, verifyPartition, formatShardPlanLine,
   universeFingerprint } = require('./forge-ci-shards.js');
 const { observeCondition, buildSuiteProfile, writeSuiteProfile } = require('./forge-suite-profile.js');
 
@@ -475,7 +475,9 @@ function main(argv) {
     try {
       shardPlan = planShards({ suites: tests, index: options.shardIndex,
         count: options.shardCount, platform: process.platform, profile,
-        estimatedWeights: unitApi ? unitApi.unitWeights(units, profile, process.platform) : {} });
+        estimatedWeights: unitApi ? unitApi.unitWeights(units, profile, process.platform) : {},
+        planningOverrides: unitApi ? loadPlanningOverrides(profile, process.platform, tests,
+          { knownSuites: unitApi.expandSuites(discoverTests([])).map(unit => unit.id) }) : {} });
       if (!verifyPartition(tests, shardPlan.shards).ok) throw new Error('shard-partition-invalid');
       if (options.shardProfile !== null) {
         const output = options.list ? process.stderr : process.stdout;

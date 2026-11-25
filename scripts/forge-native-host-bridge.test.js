@@ -85,6 +85,7 @@ async function waitReady(attempt){
   for(let i=0;i<200;i++){
     const r=await cli('status',['--attempt',attempt]);if(r.value.ready===true&&r.value.completion_receipt&&!r.value.historical)return r.value;
     if(r.value.phase==='failed')assert.fail('owner refused; inspect retained private channel');
+    if(r.value.replay_diagnostic?.error){const reported=r.value.replay_diagnostic.error.code,code=typeof reported==='string'&&/^[a-z0-9_-]{1,96}$/.test(reported)?reported:'unrecognized';assert.fail('recorded replay refusal: '+code);}
     await new Promise(resolve=>setTimeout(resolve,50));
   }
   assert.fail('fixture status did not observe readiness; not a worker-timeout attribution');
@@ -92,8 +93,19 @@ async function waitReady(attempt){
 
 // Data-only access to ORIGINAL private normalizers/policy. No channel, profile,
 // witness factory, mock producer or approved handle is exposed or used here.
-function readonlyBridgeData(){const Module=require('node:module'),filename=require.resolve('./forge-native-host-bridge'),raw=fs.readFileSync(filename);assert(raw.length<2*1024*1024);const copy=new Module(filename+'#readonly-data',module);copy.filename=filename;copy.paths=Module._nodeModulePaths(path.dirname(filename));copy._compile(raw.toString('utf8').replace(/^\uFEFF/,'').replace(/^#![^\n]*(?:\n|$)/,'')+'\nmodule.exports.__readonlyData={normalizeReference,liveRuntimeHome,liveHistoricalStatusAllowed,safeError,validateInitialPrepareCommand,assertClosedPrepareShell,assertNativePreSettings,validateInitialPreparePost,parseObservedPrepareBody,canonicalPrepareSessionExports,validateObservedPrepareSnapshot,calculatePrepareBudget,assertInitialPrepareTimeout,unverifiedPrechallengeRefusal,macLive,checkLiveMac};\n',filename);assert.equal(hash(fs.readFileSync(filename)),hash(raw));return copy.exports.__readonlyData;}
+function readonlyBridgeData(){const Module=require('node:module'),filename=require.resolve('./forge-native-host-bridge'),raw=fs.readFileSync(filename);assert(raw.length<2*1024*1024);const copy=new Module(filename+'#readonly-data',module);copy.filename=filename;copy.paths=Module._nodeModulePaths(path.dirname(filename));copy._compile(raw.toString('utf8').replace(/^\uFEFF/,'').replace(/^#![^\n]*(?:\n|$)/,'')+'\nmodule.exports.__readonlyData={normalizeReference,liveRuntimeHome,liveHistoricalStatusAllowed,safeError,validateInitialPrepareCommand,assertClosedPrepareShell,assertNativePreSettings,validateInitialPreparePost,parseObservedPrepareBody,canonicalPrepareSessionExports,canonicalPrepareSessionValues,checkedHookCarrier,assertOriginalHookSession,validateObservedPrepareSnapshot,calculatePrepareBudget,assertInitialPrepareTimeout,unverifiedPrechallengeRefusal,macLive,checkLiveMac};\n',filename);assert.equal(hash(fs.readFileSync(filename)),hash(raw));return copy.exports.__readonlyData;}
 function assertLiveDataRegressions(ref,request){const data=readonlyBridgeData();
+ // Pure DATA controls exercise the actual comparison helpers, not originalHook,
+ // an OS producer, enrollment, admission, HMAC, Agent or a genuine SDK session.
+ const carrierSession='fixture-carrier-session',carrierBootstrap={pid:321,started:'123456789012345678',exe:path.resolve('fixture-claude.exe'),exe_sha256:'a'.repeat(64),hook:path.resolve('fixture-forge-hook.js'),hook_sha256:'b'.repeat(64),config:path.resolve('fixture-claude-home')};
+ const carrierValues=data.canonicalPrepareSessionValues({hostRuntime:'claude',sessionId:carrierSession},carrierBootstrap),carrierEnv=Object.fromEntries(carrierValues);assert.equal(carrierValues.length,10);
+ assert.deepEqual(data.checkedHookCarrier(carrierSession,carrierBootstrap,{}),{sessionId:carrierSession,pid:321,started:carrierBootstrap.started,source_kind:'original-hook-current-os'});
+ assert.equal(data.checkedHookCarrier(carrierSession,carrierBootstrap,carrierEnv).source_kind,'sessionstart-env-current-os');
+ for(const[key]of carrierValues){const missing={...carrierEnv};delete missing[key];assert.throws(()=>data.checkedHookCarrier(carrierSession,carrierBootstrap,missing),e=>e.code==='native-host-live-hook-binding');const wrong={...carrierEnv,[key]:'foreign'};assert.throws(()=>data.checkedHookCarrier(carrierSession,carrierBootstrap,wrong),e=>e.code==='native-host-live-hook-binding');assert.throws(()=>data.checkedHookCarrier(carrierSession,carrierBootstrap,{[key]:''}),e=>e.code==='native-host-live-hook-binding');}
+ let carrierGetterReads=0;const carrierGetter={...carrierEnv};Object.defineProperty(carrierGetter,carrierValues[0][0],{enumerable:true,get(){carrierGetterReads++;return carrierSession;}});assert.throws(()=>data.checkedHookCarrier(carrierSession,carrierBootstrap,carrierGetter),e=>e.code==='native-host-live-hook-binding');assert.equal(carrierGetterReads,0);
+ for(const bad of [undefined,'',carrierSession+'\n','x'.repeat(257)])assert.throws(()=>data.checkedHookCarrier(bad,carrierBootstrap,{}),e=>e.code==='native-host-live-hook-binding');
+ for(const argv of [['claude.exe'],['claude.exe','--session-id',carrierSession],['claude.exe','--session-id='+carrierSession]])assert.doesNotThrow(()=>data.assertOriginalHookSession(carrierSession,argv));
+ for(const argv of [['claude.exe','--session-id'],['claude.exe','--session-id','foreign'],['claude.exe','--session-id=foreign'],['claude.exe','--session-id',carrierSession,'--session-id='+carrierSession]])assert.throws(()=>data.assertOriginalHookSession(carrierSession,argv),e=>e.code==='native-host-live-hook-binding');
  const cap=require('./forge-native-host-profile').prepareTimeoutCapMs();assert.equal(cap,600000);
  const combined=require('./forge-native-host-bridge').assertHostObservationAndIngress;assert.equal(typeof combined,'function');assert.throws(()=>combined(Object.freeze({}),Object.freeze({})),e=>e.code==='native-host-host-witness-required');
  assert.equal(data.calculatePrepareBudget(1800000,{}).prepare_timeout_ms,cap);
@@ -203,6 +215,27 @@ function fixtureGitFailureObserver(fixtureRoot,sourceRoot,privateParent){
   child.spawnSync=function(...args){let result;try{result=Reflect.apply(original,this,args);}catch(error){observe(args,null,error);throw error;}if(result&&(own(result,'error')||own(result,'status')!==0))observe(args,result,null);return result;};
 }
 
+const { get: fixtureNativeStackGet, set: fixtureNativeStackSet } =
+  Object.getOwnPropertyDescriptor(new Error(),'stack') || {};
+function fixtureTestSourceError(error) {
+  if (!error || !['object','function'].includes(typeof error)) return null;
+  let descriptor;try { descriptor=Object.getOwnPropertyDescriptor(error,'stack'); } catch { return null; }
+  let stack=descriptor&&Object.hasOwn(descriptor,'value')?descriptor.value:null;
+  if (descriptor && typeof fixtureNativeStackGet==='function'
+      && descriptor.get===fixtureNativeStackGet && descriptor.set===fixtureNativeStackSet) {
+    try { stack=Reflect.apply(fixtureNativeStackGet,error,[]); } catch { return null; }
+  }
+  if (typeof stack!=='string'||stack.length>32768) return null;
+  const prefix=__filename+':',frames=[];
+  for (const line of stack.split('\n').slice(1,65)) {
+    if (!/^\s*at\s/.test(line)) continue;
+    const index=line.lastIndexOf(prefix);if(index<0||index>0&&!/[\s(]/.test(line[index-1]))continue;
+    const location=/^([1-9]\d{0,6}):([1-9]\d{0,6})\)?$/.exec(line.slice(index+prefix.length));if(!location)continue;
+    frames.push({file:path.basename(__filename),line:Number(location[1]),column:Number(location[2])});
+    if(frames.length===4)break;
+  }
+  return frames.length?{kind:'native463-fixture-test-source-error-v1',frames}:null;
+}
 async function main({partialPublication=false}={}){
   assertBridgeCohortSelectors();
   // Unix socket paths have a small OS byte limit. Keep the entirely owned
@@ -231,6 +264,7 @@ async function main({partialPublication=false}={}){
       // No native callback/result/approval is injected, and the fixture retains
       // the genuine ready pointer from before publication acknowledgement.
       fs.appendFileSync(preload,"\nconst side=require("+JSON.stringify(path.join(__dirname,'forge-unit-sidecar.js'))+");\nconst originalMaterialize=side.materialize;let faultOnce=true;side.materialize=(...args)=>{const result=originalMaterialize(...args);if(faultOnce){faultOnce=false;throw Object.assign(new Error('fixture-publication-ack-lost'),{code:'fixture-publication-ack-lost'});}return result;};\n");
+      fs.appendFileSync(preload,"const replayAssert=require('node:assert/strict'),replayFs=require('node:fs'),replayWindows=require(REPLAY_WINDOWS),replayActivity=require(REPLAY_ACTIVITY);\nconst replayOutside=new (require('node:async_hooks').AsyncResource)('fixture-replay-outside-native-scope');\nconst originalNativeActivity=replayActivity.withNativeExecutionActivity;\nreplayActivity.withNativeExecutionActivity=(request,profile,action)=>originalNativeActivity(request,profile,runtime=>{\n  const replayBridge=require(REPLAY_BRIDGE),originalReplay=replayBridge.runOriginalReplayPublication;\n  replayBridge.runOriginalReplayPublication=(operation,actualRuntime,actualRequest)=>{\n    const refused=error=>error.code==='native-host-replay-operation-required';\n    replayAssert.throws(()=>replayOutside.runInAsyncScope(()=>originalReplay(operation,actualRuntime,actualRequest)),refused,'outside scope cannot consume genuine operation');\n    replayAssert.throws(()=>originalReplay({},actualRuntime,actualRequest),refused,'foreign operation refused');\n    replayAssert.equal(actualRuntime,runtime);replayAssert.equal(replayActivity.currentScope(),runtime);\n    replayAssert.equal(replayWindows.assertMutationAllowed(runtime.owner),true,'genuine replay runs in original held owner window');\n    const result=originalReplay(operation,actualRuntime,actualRequest);replayAssert(result&&!result.then);\n    replayAssert.throws(()=>originalReplay(operation,actualRuntime,actualRequest),refused,'operation is one-use');\n    replayFs.writeFileSync(REPLAY_LEDGER,JSON.stringify({checks:5,original_runtime:true,synchronous:true}));return result;\n  };return action(runtime);\n});".replaceAll('REPLAY_WINDOWS',JSON.stringify(path.join(__dirname,'forge-owner-transport-window.js'))).replaceAll('REPLAY_ACTIVITY',JSON.stringify(path.join(__dirname,'forge-protected-owner-activity.js'))).replaceAll('REPLAY_BRIDGE',JSON.stringify(path.join(__dirname,'forge-native-host-bridge.js'))).replaceAll('REPLAY_LEDGER',JSON.stringify(path.join(root,'replay-window-checks.json')))+'\n');
     }
     process.env.NODE_OPTIONS='--require '+JSON.stringify(preload);
     // Parent and every CLI/retained owner child observe failed Git status before the same account stub.
@@ -362,15 +396,26 @@ async function main({partialPublication=false}={}){
         assert.equal(JSON.parse(refusal.stderr.toString().trim()).code,'native-host-publication-owner-changed');
       }finally{if(createdForeign)fs.unlinkSync(foreign);}
       try{
+        assert.equal(after.length,before.length,'genuine checkbox publication preserves the retained byte bound');
+        const sameSizeForeign=Buffer.from(before);sameSizeForeign[0]^=1;
+        assert.equal(sameSizeForeign.length,Math.max(before.length,after.length));
+        assert.notEqual(hash(sameSizeForeign),hash(before));assert.notEqual(hash(sameSizeForeign),hash(after));
+        fs.writeFileSync(markerFile,sameSizeForeign);
+        const changed=await cli('status',['--attempt',prepared.value.reference_file],{expect:1});
+        assert.equal(JSON.parse(changed.stderr.toString().trim()).code,'native-publication-artifact-changed','in-bound third-state bytes reach the artifact guard');
+        fs.writeFileSync(markerFile,after);
         fs.appendFileSync(markerFile,'third state');
+        assert(fs.statSync(markerFile).size>Math.max(before.length,after.length),'original appended state exceeds the exact retained read bound');
         const refusal=await cli('status',['--attempt',prepared.value.reference_file],{expect:1});
-        assert.equal(JSON.parse(refusal.stderr.toString().trim()).code,'native-publication-artifact-changed');
+        assert.equal(JSON.parse(refusal.stderr.toString().trim()).code,'native-publication-read-source_too_large');
         fs.writeFileSync(markerFile,before);
         assert.equal((await cli('status',['--attempt',prepared.value.reference_file])).value.ready,false,'exact BEFORE with other artifacts AFTER remains only pending');
       }finally{fs.writeFileSync(markerFile,after);}
       await cli('replay',['--attempt',prepared.value.reference_file]);
     }
-    const ready=await waitReady(prepared.value.reference_file);assert.equal(ready.ready,true);assert.notEqual(ready.historical,true);assert.equal(ready.completion_receipt.kind,'native-host-ready');assert.equal(ready.completion_receipt.origin,'fixture-origin');assert.equal(ready.completion_receipt.request_sha256,require('./forge-code-roots').digest(request));assert.equal(ready.completion_receipt.activity,'settled');assert.equal(ready.completion_receipt.readback,'verified');if(!partialPublication){const cut=JSON.parse(fs.readFileSync(path.join(root,'ack-observer-cut.json'),'utf8'));assert.equal(cut.ready_received,false);assert.equal(cut.socket_close_observed,true);}
+    const ready=await waitReady(prepared.value.reference_file);
+    if(partialPublication)assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root,'replay-window-checks.json'),'utf8')),{checks:5,original_runtime:true,synchronous:true});
+    assert.equal(ready.ready,true);assert.notEqual(ready.historical,true);assert.equal(ready.completion_receipt.kind,'native-host-ready');assert.equal(ready.completion_receipt.origin,'fixture-origin');assert.equal(ready.completion_receipt.request_sha256,require('./forge-code-roots').digest(request));assert.equal(ready.completion_receipt.activity,'settled');assert.equal(ready.completion_receipt.readback,'verified');if(!partialPublication){const cut=JSON.parse(fs.readFileSync(path.join(root,'ack-observer-cut.json'),'utf8'));assert.equal(cut.ready_received,false);assert.equal(cut.socket_close_observed,true);}
     for(const r of f.contract.code_roots)assert.equal(fs.readFileSync(path.join(r.path,'same.txt'),'utf8'),'after\n');
     const checkpoints=fs.readdirSync(ref.directory).filter(n=>/^checkpoint-\d{2}\.json$/.test(n)).sort().map(n=>JSON.parse(fs.readFileSync(path.join(ref.directory,n),'utf8')));
     const final=checkpoints.at(-1);assert.equal(final.phase,'ready');assert.equal(final.details.kind,partialPublication?'replay-ready':'execution-ready');
@@ -417,5 +462,5 @@ if(require.main===module){
   const kind=process.argv[2],file=process.argv[3];
   if(kind==='--fixture-worker')fixtureWorker(JSON.parse(fs.readFileSync(file,'utf8')));
   else if(kind==='--fixture-host')fixtureHost(JSON.parse(fs.readFileSync(file,'utf8'))).catch(e=>{console.error(e.code||e.message);process.exitCode=1;});
-  else runBridgeCohort(process.argv.slice(2)).catch(e=>{const code=typeof e.code==='string'&&/^[A-Za-z0-9_.-]{1,160}$/.test(e.code)?e.code:'native463-fixture-failed';console.error(JSON.stringify({code,...(e.native463_diagnostic?{diagnostic:e.native463_diagnostic}:{})}));process.exitCode=1;});
+  else runBridgeCohort(process.argv.slice(2)).catch(e=>{const code=typeof e.code==='string'&&/^[A-Za-z0-9_.-]{1,160}$/.test(e.code)?e.code:'native463-fixture-failed';const testSourceError=fixtureTestSourceError(e);console.error(JSON.stringify({code,...(testSourceError?{test_source_error:testSourceError}:{}),...(e.native463_diagnostic?{diagnostic:e.native463_diagnostic}:{})}));process.exitCode=1;});
 }
