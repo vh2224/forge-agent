@@ -243,7 +243,7 @@ assert.strictEqual(command, 'node scripts/forge-ci-parallel.js --shard-index ${{
 assert.strictEqual(texts.ci.split('      - name: Run test suites\n').length, 2, 'no new test step');
 assert.strictEqual(texts.ci.split('node scripts/forge-ci-parallel.js --shard-index').length, 2, 'no second suite execution');
 const parallelSource = fs.readFileSync(path.join(__dirname, 'forge-ci-parallel.js'), 'utf8');
-for (const token of ["'--baseline', 'scripts/fixtures/ci-baseline/known-unit-failures.json'", "'--partition-suites'", "'--shard-profile', 'scripts/fixtures/ci-latency/shard-profile.json'", "'--profile-out'"]) assert(parallelSource.includes(token), token);
+for (const token of ["'--baseline', 'scripts/fixtures/ci-baseline/known-unit-failures.json'", "'--partition-suites'", "'--shard-profile', 'scripts/ci-profiles/issue-461-d046.json'", "'--profile-out'"]) assert(parallelSource.includes(token), token);
 assert(!/--(?:changed|match|fail-fast|inherit-home)\b/.test(parallelSource));
 assert(!/--(?:changed|match|fail-fast|inherit-home)\b/.test(command));
 assert(!/\b(?:paths|paths-ignore|branches-ignore):/.test(texts.ci.split('\npermissions:')[0]));
@@ -306,10 +306,11 @@ marker('key_link', 2, 'CI source test command triggers concurrency SVN ordering 
 
 const unitInventory = expandSuites(discoverTests([]));
 const suites = unitInventory.map(unit => unit.id);
-const profilePath = 'scripts/fixtures/ci-latency/shard-profile.json';
-assert.strictEqual(profilePath, 'scripts/fixtures/ci-latency/shard-profile.json');
+const profilePath = 'scripts/ci-profiles/issue-461-d046.json';
+assert.strictEqual(profilePath, 'scripts/ci-profiles/issue-461-d046.json');
 const profile = loadShardProfile(path.join(root, profilePath));
 assert.strictEqual(profile.state, 'loaded');
+assert.strictEqual(profile.sha256, 'c5438665a4bba363efdc617310a612125049a831c9ae079bcdf41712c01b4366', 'exact current measured default profile');
 const cells=new Map();for(const row of rows.filter(row=>row.key==='test')){const key=row.matrix.platform;if(!cells.has(key))cells.set(key,[]);cells.get(key).push(row.matrix);}
 let totalWorkers=0;
 for (const [platform,platformCells] of cells) {
