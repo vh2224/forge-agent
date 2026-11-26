@@ -706,3 +706,12 @@ executados e recusados com PrivilegeNotHeld; o controle físico negativo de ACL
 mais amplo não foi exercitado e não houve nova tentativa. Esses dados não provam o perfil operacional integral, esforço efetivamente
 aplicado, CI, merge, instalação ou aceite. Código e procedimentos preparados
 exigem revisão e checks canônicos após rebind da base; nada declara uma release.
+
+
+### 2026-11-26 — CI feedback and publication duration (#470)
+
+Problem: short per-job deadlines forced repeated partitioning and discarded valid work, while queue/setup overhead dominated total delivery time. The historical M2 replay selects 5 Linux, 5 macOS and 10 Windows jobs, with three isolated workers each (60 total), unchanged 696-unit coverage and required compatibility aliases. Replay estimates are planning evidence, not a runtime promise.
+
+Decision: omit test-job and waiting-publisher timeouts and remove the default collector total deadline. GitHub hosted-job platform limits still apply. A caller may explicitly contract a collector deadline. Per-request timeouts, cumulative IO limits, exact current-attempt/source provenance, terminal failures, receipt TTL and renewal remain enforced. Duration is reported for issue follow-up instead of becoming an artificial headroom eligibility gate. Published base601 measurements stay immutable; planning overrides use qualified M2 measurements.
+
+Validation: directly affected contracts and one real candidate CI; additional work requires a concrete failure. Existing release provenance has no PR-tree reuse seam: exact push/master checks remain required, so this change does not substitute PR validation for post-merge release evidence.

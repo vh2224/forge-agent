@@ -10,6 +10,9 @@ const DEFAULT_TTL_MS = 30_000;
 const DEFAULT_RETRIES = 10;
 const DEFAULT_BACKOFF_MIN = 100;
 const DEFAULT_BACKOFF_MAX = 300;
+// Only an error from the initial Windows mkdir is eligible for bounded retry.
+// Keep the original Error object and diagnostics untouched.
+const initialMkdirRefusals = new WeakSet();
 
 function locksDir(cwd) { return path.join(cwd, '.gsd', '.locks'); }
 function ensureLocksDir(cwd) {
@@ -82,7 +85,11 @@ function create(cwd, name, opts) {
   const lockDir = lockPath(cwd, name);
   const now = nowOf(opts);
   const metadata = { name, generation: tokenOf(opts), owner_token: tokenOf(opts), acquired_at: now, renewed_at: now, ttl_ms: positive(opts && opts.ttlMs, DEFAULT_TTL_MS, 'ttl'), holder_pid: (opts && opts.holderPid) || process.pid, holder_run_id: (opts && opts.holderRunId) || null };
-  fs.mkdirSync(lockDir);
+  try { fs.mkdirSync(lockDir); }
+  catch (error) {
+    if (process.platform === 'win32' && error.code === 'EPERM') initialMkdirRefusals.add(error);
+    throw error;
+  }
   try { fs.mkdirSync(markerPath(lockDir, metadata.owner_token)); writeAtomic(metaPath(lockDir), metadata); }
   catch (error) { removeTree(lockDir); throw error; }
   return makeHandle(cwd, name, lockDir, metadata);
@@ -128,18 +135,28 @@ function acquireSync(cwd, name, opts) {
   const acquisitionBudget = opts.acquisitionBudget;
   if (acquisitionBudget && (!Number.isInteger(acquisitionBudget.remaining_attempts) || acquisitionBudget.remaining_attempts < 0 || !Number.isFinite(acquisitionBudget.deadline_ms))) throw new Error('forge-lock: invalid shared acquisition budget');
   const sleeper = new Int32Array(new SharedArrayBuffer(4));
+  let lastMkdirRefusal = null;
   for (let attempt = 0; attempt < retries; attempt++) {
     if (acquisitionBudget) {
       if (acquisitionBudget.remaining_attempts === 0 || Date.now() >= acquisitionBudget.deadline_ms) break;
       acquisitionBudget.remaining_attempts--;
     }
-    const handle = tryAcquireSync(cwd, name, { ...opts, ttlMs });
+    let handle;
+    try {
+      handle = tryAcquireSync(cwd, name, { ...opts, ttlMs });
+      lastMkdirRefusal = null; // A later ordinary busy result is not the earlier syscall failure.
+    } catch (error) {
+      if (!initialMkdirRefusals.has(error)) throw error;
+      initialMkdirRefusals.delete(error);
+      lastMkdirRefusal = error;
+    }
     if (handle) return handle;
     if (attempt + 1 < retries && (!acquisitionBudget || acquisitionBudget.remaining_attempts > 0)) {
       const wait = acquisitionBudget ? Math.min(jitter(backoffMin, backoffMax), Math.max(0, acquisitionBudget.deadline_ms - Date.now())) : jitter(backoffMin, backoffMax);
       if (wait > 0) Atomics.wait(sleeper, 0, 0, wait);
     }
   }
+  if (lastMkdirRefusal) throw lastMkdirRefusal;
   const error = new Error(`forge-lock: mutex ocupado para "${name}"`);
   error.code = 'LOCK_BUSY';
   throw error;

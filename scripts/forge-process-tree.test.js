@@ -113,7 +113,20 @@ function observe(child) {
 // the EOF-before-exit case checks ordering explicitly).
 const shape = events => events.filter(e => e[0] !== 'first').map(e => e[0] === 'exit' ? ['exit', e[1], e[2]] : e[0] === 'end' ? ['end'] : e)
   .map(e => JSON.stringify(e)).sort();
-async function waitFile(file, ms = 30000) { const until = Date.now() + ms; while (!fs.existsSync(file)) { if (Date.now() > until) throw new Error('marker timeout ' + path.basename(file)); await wait(20); } return JSON.parse(fs.readFileSync(file, 'utf8')); }
+// The optional dependencies are private TEST-only seams for deterministic polling checks.
+async function waitFile(file, ms = 30000, { read = target => fs.readFileSync(target, 'utf8'), now = Date.now, pause = wait } = {}) {
+  const until = now() + ms;
+  let lastError;
+  for (;;) {
+    try { return JSON.parse(read(file)); }
+    catch (error) {
+      if (error?.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
+      lastError = error;
+    }
+    if (now() >= until) throw new Error('marker timeout ' + path.basename(file), { cause: lastError });
+    await pause(20);
+  }
+}
 function journal(file) { return fs.readFileSync(file, 'utf8').trim().split('\n').map(line => JSON.parse(line)); }
 function expectCode(fn, code) { assert.throws(fn, error => { assert.equal(error?.code, code, `${error?.code} ${error?.message}`); return true; }); }
 
@@ -896,6 +909,29 @@ test('T9 observeStoppedWriter with live descendants handle binds revalidates and
   fs.writeFileSync(s.tree.journalFile, bytes);
   transition.assertWriterObservation(handle);
   expectCode(() => tree.assertDescendants({ kind: 'process-tree-proof' }), 'process-tree-record-invalid');
+});
+
+test('T0 marker polling retries incomplete JSON with a bounded deterministic clock', async () => {
+  const marker = path.join(LAB, 'deterministic-marker.json');
+  const absent = Object.assign(new Error('fixture marker absent'), { code: 'ENOENT' });
+  const values = [absent, '', '{"pid":', JSON.stringify({ pid: process.pid })];
+  let reads = 0, clock = 0; const pauses = [];
+  const options = { read() { const value = values[reads++]; if (value instanceof Error) throw value; return value; },
+    now: () => clock, pause: async ms => { pauses.push(ms); clock += ms; } };
+  assert.deepEqual(await waitFile(marker, 30000, options), { pid: process.pid });
+  assert.equal(reads, 4); assert.deepEqual(pauses, [20, 20, 20]);
+  clock = 0; reads = 0;
+  await assert.rejects(() => waitFile(marker, 40, { read() { reads++; return '{'; }, now: () => clock,
+    pause: async ms => { clock += ms; } }), error => {
+    assert.equal(error.message, 'marker timeout ' + path.basename(marker));
+    assert(error.cause instanceof SyntaxError, 'last parse error is preserved'); return true;
+  });
+  assert.equal(reads, 3, 'persistent malformed JSON ends at the original polling deadline');
+  await assert.rejects(() => waitFile(marker, 0, { read() { throw absent; }, now: () => 0,
+    pause: async () => assert.fail('expired marker wait must not pause') }), error => error.cause === absent);
+  const denied = Object.assign(new Error('fixture access denied'), { code: 'EACCES' });
+  await assert.rejects(() => waitFile(marker, 30000, { read() { throw denied; }, now: () => 0,
+    pause: async () => assert.fail('non-transient IO must not retry') }), error => error === denied);
 });
 
 // ── Runner ──────────────────────────────────────────────────────────────────

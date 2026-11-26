@@ -1,7 +1,7 @@
 'use strict';
 // Genuine canonical owner test. No channel/profile/callback capability is mocked.
 const assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),crypto=require('node:crypto');
-function createOwnerFixture({root=null,legacy=false,workflow='M901',mode='step'}={}){
+function createOwnerFixture({root=null,legacy=false,workflow='M901',mode='step',securityScope=false}={}){
  if(root){root=fs.realpathSync.native(root);for(const key of ['HOME','USERPROFILE','CODEX_HOME','CLAUDE_CONFIG_DIR']){const rel=path.relative(root,path.resolve(process.env[key]||''));if(!rel||rel==='..'||rel.startsWith('..'+path.sep)||path.isAbsolute(rel))throw Error('fixture homes must be isolated before Forge imports');}}
  const controller=require('./forge-unit-controller'),runs=require('./forge-runs'),claims=require('./forge-write-claim'),lab=require('./forge-code-roots.test');
  const put=(file,text)=>{fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,typeof text==='string'?text:JSON.stringify(text));};
@@ -13,8 +13,18 @@ function createOwnerFixture({root=null,legacy=false,workflow='M901',mode='step'}
  f={dir,owner,a,b,contract,cleanup(){assert.equal(path.dirname(fs.realpathSync.native(dir)),root);assert(!fs.lstatSync(dir).isSymbolicLink());assert.equal(fs.readFileSync(path.join(dir,'OWNED'),'utf8'),mark);fs.rmSync(dir,{recursive:true,force:true});}};
  }
  const milestone='M901',slice='S01',task='T01',base=path.join(f.owner,'.gsd/milestones',milestone,'slices',slice),planFile=path.join(base,'tasks',task,task+'-PLAN.md');
- const plan=lab.plan(f.contract).replace('id: T-roots','id: T01').replace('effort: medium','effort: high').replace('must_haves:',"verify:\n  - node check.cjs\nmust_haves:");
+ const plan=lab.plan(f.contract).replace('id: T-roots','id: T01').replace('effort: medium','effort: high').replace('must_haves:',"verify:\n  - node check.cjs\nmust_haves:")+(securityScope?'\nFixture security scope: sessionToken.\n':'');
  put(planFile,plan);put(planFile.replace('-PLAN.md','-PLAN-GATE.md'),'status: approved\nplan_sha256: '+crypto.createHash('sha256').update(plan).digest('hex')+'\n');
+ const securityFile=planFile.replace('-PLAN.md','-SECURITY.md'),securitySpec=fs.readFileSync(path.join(__dirname,'../shared/forge-dispatch.md'),'utf8'),
+   securityScan=require('./forge-native-host-request').scanSecurityPlan(plan,securitySpec);
+ let securitySha256=null;
+ if(securityScan.required){
+  const skill=fs.readFileSync(path.join(__dirname,'../skills/forge-security/SKILL.md'),'utf8'),
+    templates=[...skill.matchAll(/```markdown\r?\n(# Security Checklist \u2014 [\s\S]*?)\r?\n```/g)].map(match=>match[1]);
+  assert.equal(templates.length,2,'both canonical security checklist templates remain available');
+  const checklist=templates[0].replaceAll('{T## or S##}',task).replaceAll('{T##}',task).replaceAll('{title}','Native fixture');
+  put(securityFile,checklist);securitySha256=crypto.createHash('sha256').update(checklist).digest('hex');
+ }
  put(path.join(base,slice+'-PLAN.md'),'# Slice\n- [ ] **T01** — fixture\n');put(path.join(base,slice+'-CONTEXT.md'),'# Context\n## Decisions\nPreserve exact claimed files.\n');
  put(path.join(f.owner,'.gsd/milestones',milestone,milestone+'-ROADMAP.md'),'# Roadmap\n- [ ] **S01: Native** '+String.fromCharCode(96)+'depends:[]'+String.fromCharCode(96)+'\n');
  put(path.join(f.owner,'.gsd/forge-prefs.jsonc'),{tier_models:{standard:['claude-sonnet-5-5']},effort:{'execute-task':'high'},auto_commit:false});
@@ -28,7 +38,7 @@ function createOwnerFixture({root=null,legacy=false,workflow='M901',mode='step'}
  {root_id:'beta',criterion:{kind:'truth',index:0},aspect:'default',coverage:'behavioral',source:{kind:'verification',check_index:0}},
  {root_id:'alpha',criterion:{kind:'artifact',index:0},aspect:'declared-property',coverage:'structural',source:{kind:'verification',check_index:0}},
  {root_id:'beta',criterion:{kind:'artifact',index:1},aspect:'declared-property',coverage:'structural',source:{kind:'verification',check_index:0}}]};
- return{...f,milestone,workflow,base,planFile,input,begin,key};
+ return{...f,milestone,workflow,base,planFile,input,begin,key,securityFile,securityScan,securitySha256};
 }
 module.exports={createOwnerFixture};
 function main(){
@@ -57,7 +67,7 @@ try{
  const f=fixture();try{
   const context=request.buildOwnerContext(f.input),one=request.assertOwnerContext(context),two=request.assertOwnerContext(context);
   assert.deepEqual(two,one,'complete real canonical owner and route remain stable');
-  assert.equal(one.workflow_id,f.workflow);assert.equal(one.gates.security,'not-applicable');assert.equal(one.input_hashes.security,null);
+  assert.equal(one.workflow_id,f.workflow);assert.equal(one.gates.security,f.securityScan.required?'passed':'not-applicable');assert.equal(one.input_hashes.security,f.securitySha256);
   const {workflow_id,dispatch_id,...withoutSelectors}=f.input;assert.equal(request.assertOwnerContext(request.buildOwnerContext(withoutSelectors)).workflow_id,f.workflow);
   code('verification-declarations-schema',()=>request.normalizeOwnerInput({...f.input,verification_bindings:[{...f.input.verification_bindings[0],approved:true}]}));
   code('verification-declarations-schema',()=>request.normalizeOwnerInput({...f.input,verification_bindings:[{...f.input.verification_bindings[0],status:'met'}]}));
@@ -84,6 +94,20 @@ try{
   assert.equal(runtimeCalls,0,'runtime cannot enter through options or function-shaped JSON');
   assert.deepEqual(request.assertOwnerContext(context),one,'failed pending brand/options cannot replace initial authority');
  }finally{f.cleanup();}
+ const securitySpec=fs.readFileSync(path.join(source,'shared/forge-dispatch.md'),'utf8');
+ assert.equal(request.scanSecurityPlan('Neutral fixture scope.',securitySpec).required,false);
+ assert.equal(request.scanSecurityPlan('Fixture scope: sessionToken.',securitySpec).required,true);
+ const sensitive=fixture({securityScope:true});try{
+  assert.equal(sensitive.securityScan.required,true,'literal scope is scanned in the actual owner plan');
+  const checklist=fs.readFileSync(sensitive.securityFile),context=request.buildOwnerContext(sensitive.input);
+  assert.equal(request.assertOwnerContext(context).gates.security,'passed');
+  assert.equal(request.assertOwnerContext(context).input_hashes.security,sensitive.securitySha256);
+  fs.unlinkSync(sensitive.securityFile);code('execution-security-required',()=>request.buildOwnerContext(sensitive.input));
+  assert.throws(()=>request.assertOwnerContext(context),'removing required evidence invalidates an existing context');
+  put(sensitive.securityFile,'');code('execution-security-required',()=>request.buildOwnerContext(sensitive.input));
+  put(sensitive.securityFile,'unstructured text cannot mean readiness');code('security-checklist-unready',()=>request.buildOwnerContext(sensitive.input));
+  put(sensitive.securityFile,checklist);assert.equal(request.assertOwnerContext(request.buildOwnerContext(sensitive.input)).gates.security,'passed');
+ }finally{sensitive.cleanup();}
  for(const [name,mutate]of[
   ['actor',f=>runs.update(f.owner,f.milestone,{session_id:'foreign-session'})],
   ['claim',f=>{const claim=claims.readClaim(runs.get(f.owner,f.milestone));claims.recordClaim(f.owner,f.milestone,{...claim,paths:[{root_id:f.contract.primary_root_id,path:'other.txt'}]});}],

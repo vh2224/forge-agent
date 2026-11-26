@@ -361,12 +361,12 @@ test('planning overrides are separate, bound, complete and fail closed', () => {
     const plan = planShards({ suites, index: 0, count: 8, platform, profile: published, planningOverrides: overrides });
     const cost = id => Object.hasOwn(overrides, id) ? overrides[id] : published.doc.platforms[platform].weights_ms[id];
     assert.deepEqual(plan.predicted_ms, plan.shards.map(shard => shard.reduce((sum, id) => sum + cost(id), 0))); assert(verifyPartition(suites, plan.shards).ok);
-    assert.equal(overrides['forge-native-host-bridge.ci-host-v1-02-of-2.test.js'], 700000, 'explicit conservative partial-Bridge planning floor; immutable601 unchanged');
+    assert.equal(overrides['forge-native-host-bridge.ci-host-v1-02-of-2.test.js'], {linux:93187,darwin:169073,win32:564990}[platform], 'qualified prior M2 partial-Bridge cost; immutable601 unchanged');
     const subset = suites.slice(0, 3); assert.deepEqual(loadPlanningOverrides(published, platform, subset, { knownSuites: suites }), Object.fromEntries(subset.filter(id => Object.hasOwn(overrides, id)).map(id => [id, overrides[id]])));
   }
-  assert.equal(doc.platforms.linux['forge-dispatch-source-guard.ci-guard-v1-05-of-9.test.js'], 262240, 'completed Linux PASS plus10percent');
+  assert.equal(doc.platforms.linux['forge-dispatch-source-guard.ci-guard-v1-05-of-9.test.js'], 271663, 'qualified prior M2 Linux PASS cost');
   assert(!Object.hasOwn(published.doc.platforms.linux.weights_ms, 'forge-communication-surfaces.ci-01-of-12.test.js'));
-  assert.equal(doc.platforms.linux['forge-communication-surfaces.ci-01-of-12.test.js'], 450000, 'new unobserved CI timing remains an explicit estimate');
+  assert.equal(doc.platforms.linux['forge-communication-surfaces.ci-01-of-12.test.js'], 28235, 'qualified prior M2 Linux PASS cost; not a new Source measurement');
   let reads = 0; const noRead = { lstatSync() { reads++; throw Error('unexpected overlay read'); } };
   assert.deepEqual(loadPlanningOverrides(loaded(), 'win32', ['a.test.js'], { io: noRead }), {}); assert.equal(reads, 0);
   throwsCode(() => loadPlanningOverrides(published, 'win32', suites, { io: noRead }), 'shard-planning-overrides-unreadable');

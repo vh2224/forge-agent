@@ -207,6 +207,8 @@ function sanitizeCommand(cmd) {
  */
 function discoverCommands(options) {
   const cwd = options.cwd;
+  let rejected = [];
+  const found = (commands, source) => ({ commands, source, ...(rejected.length ? { rejected } : {}) });
 
   // 1. Task plan verify field (untrusted — sanitize each segment)
   if (options.taskPlanVerify && options.taskPlanVerify.trim()) {
@@ -217,9 +219,9 @@ function discoverCommands(options) {
     const commands = segments.filter(c => sanitizeCommand(c) !== null);
     // `rejected` names plan segments that were not accepted, so a caller that
     // seals verification can refuse instead of silently running less.
-    const rejected = segments.filter(c => sanitizeCommand(c) === null);
+    rejected = segments.filter(c => sanitizeCommand(c) === null);
     if (commands.length > 0) {
-      return { commands, source: "task-plan", ...(rejected.length ? { rejected } : {}) };
+      return found(commands, "task-plan");
     }
   }
 
@@ -229,7 +231,7 @@ function discoverCommands(options) {
       .map(c => c.trim())
       .filter(Boolean);
     if (filtered.length > 0) {
-      return { commands: filtered, source: "preference" };
+      return found(filtered, "preference");
     }
   }
 
@@ -248,7 +250,7 @@ function discoverCommands(options) {
           }
         }
         if (commands.length > 0) {
-          return { commands, source: "package-json" };
+          return found(commands, "package-json");
         }
       }
     } catch {
@@ -270,7 +272,7 @@ function discoverCommands(options) {
     if (Array.isArray(argv) && argv.length > 0) {
       // argv is guaranteed shell-safe by resolveVerifyCommand (it rejects any
       // command needing shell parsing), so a lossless space-join is exact.
-      return { commands: [argv.join(" ")], source: "stack-probe" };
+      return found([argv.join(" ")], "stack-probe");
     }
   } catch (error) {
     const missingSelf = error && error.code === "MODULE_NOT_FOUND"
@@ -279,7 +281,7 @@ function discoverCommands(options) {
   }
 
   // 5. Nothing found anywhere — genuine docs-only repo signal.
-  return { commands: [], source: "none" };
+  return found([], "none");
 }
 
 // ── Resource wiring (S04/T02) ───────────────────────────────────────────────

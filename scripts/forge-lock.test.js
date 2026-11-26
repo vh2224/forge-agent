@@ -184,8 +184,80 @@ async function testLiveInitializingWriterIsNeverAutomaticallyRecovered() {
     assert.strictEqual(lock.status(cwd, 'initializing').held, false);
   } finally { proc.kill(); await completion; remove(cwd); }
 }
+function testInitialWindowsMkdirRetry() {
+  const source = fs.readFileSync(require.resolve('./forge-lock.js'), 'utf8');
+  function fixture(label, { platform = 'win32', code = 'EPERM', phase = 'initial', failures = Infinity, retries = 3, budget = null, held = false } = {}) {
+    const cwd = temporary(), name = `mkdir-${label}`, target = lock.lockPath(cwd, name);
+    const original = Object.assign(new Error(`injected ${phase} failure`), { code, syscall: phase === 'initial' ? 'mkdir' : 'write', path: target });
+    const originalStack = original.stack;
+    let attempts = 0, waits = 0, clock = 1000, uuid = 0, probes = 0;
+    const fakeFs = Object.create(fs);
+    fakeFs.mkdirSync = function(file, ...args) {
+      if (file === target) {
+        attempts++;
+        if (phase === 'initial' && attempts <= failures) throw original;
+      }
+      if (phase === 'owner' && path.dirname(file) === target && path.basename(file).startsWith('owner-')) throw original;
+      return fs.mkdirSync(file, ...args);
+    };
+    fakeFs.writeFileSync = function(file, ...args) {
+      if (phase === 'metadata' && path.dirname(file) === target && path.basename(file).startsWith('metadata.json.')) throw original;
+      return fs.writeFileSync(file, ...args);
+    };
+    const module = {}, request = { retries, backoffMin: 1, backoffMax: 1 };
+    if (budget) request.acquisitionBudget = { remaining_attempts: budget, deadline_ms: clock + 100 };
+    const context = {
+      module, exports: module.exports = {}, console,
+      require(name) {
+        if (name === 'fs') return fakeFs;
+        if (name === 'path') return path;
+        if (name === 'crypto') return { randomUUID: () => `fixture-${++uuid}` };
+        throw Error('unexpected lock dependency');
+      },
+      process: { platform, pid: 424242, kill(pid, signal) { probes++; assert.strictEqual(signal, 0); } },
+      Date: { now: () => clock },
+      Atomics: { wait(array, index, expected, ms) { waits++; clock += ms; } },
+    };
+    const holder = held ? lock.tryAcquireSync(cwd, name, { allowStaleRecovery: false }) : null;
+    try {
+      require('vm').runInNewContext(source, context, { filename: require.resolve('./forge-lock.js') });
+      let handle = null, error = null;
+      try { handle = module.exports.acquireProcessSync(cwd, name, request); } catch (caught) { error = caught; }
+      assert.strictEqual(original.stack, originalStack, 'original syscall diagnostic was not rewritten');
+      assert.strictEqual(original.code, code); assert.strictEqual(original.path, target);
+      if (handle) {
+        assert.strictEqual(error, null); assert.strictEqual(module.exports.assertOwned(handle), true);
+        assert.strictEqual(handle.release().ok, true);
+      }
+      return { error, original, attempts, waits, probes, remaining: request.acquisitionBudget?.remaining_attempts, acquired: !!handle };
+    } finally { holder?.release(); remove(cwd); }
+  }
+  const transient = fixture('transient', { failures: 1 });
+  assert.strictEqual(transient.acquired, true); assert.strictEqual(transient.attempts, 2);
+  assert.strictEqual(transient.waits, 1); assert.strictEqual(transient.probes, 0);
+  const persistent = fixture('persistent', { retries: 10, budget: 2 });
+  assert.strictEqual(persistent.error, persistent.original, 'exhaustion rethrows the exact original Error');
+  assert.strictEqual(persistent.attempts, 2); assert.strictEqual(persistent.waits, 1);
+  assert.strictEqual(persistent.remaining, 0); assert.strictEqual(persistent.probes, 0);
+  for (const phase of ['owner', 'metadata']) {
+    const later = fixture(phase, { phase });
+    assert.strictEqual(later.error, later.original); assert.strictEqual(later.attempts, 1);
+    assert.strictEqual(later.waits, 0); assert.strictEqual(later.probes, 0);
+  }
+  for (const opts of [{ platform: 'linux' }, { platform: 'darwin' }, { code: 'EACCES' }]) {
+    const unchanged = fixture(`unchanged-${opts.platform || opts.code}`, opts);
+    assert.strictEqual(unchanged.error, unchanged.original); assert.strictEqual(unchanged.attempts, 1);
+    assert.strictEqual(unchanged.waits, 0);
+  }
+  const busy = fixture('later-busy', { failures: 1, retries: 2, held: true });
+  assert.strictEqual(busy.error.code, 'LOCK_BUSY', 'later genuine contention clears earlier EPERM');
+  assert.notStrictEqual(busy.error, busy.original); assert.strictEqual(busy.attempts, 2);
+  assert.strictEqual(busy.probes, 1);
+}
+
 async function main() {
   console.log(`forge-lock tests on ${process.platform}`);
+  testInitialWindowsMkdirRetry();
   const processRoot = temporary();
   try {
     const held = lock.acquireProcessSync(processRoot, 'process-owner', { ttlMs: 1 });
