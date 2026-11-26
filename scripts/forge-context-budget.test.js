@@ -6,6 +6,7 @@
 
 const assert = require('assert');
 const fs = require('fs');
+const crypto = require('node:crypto');
 const path = require('path');
 const { countTokens } = require('./forge-tokens.js');
 const { TEMPLATE_FILES, renderPrompt, separateProcedurePrompt, separateOptionalPromptContext } = require('./forge-prompt.js');
@@ -30,6 +31,52 @@ const PLANNING_READINESS_SUPPLEMENT = [
 ].join('\n') + '\n';
 const PLANNING_READINESS_TOKEN_LIMIT = 97;
 const PLANNING_PHASES = new Set(['plan-slice', 'plan-milestone', 'plan-check', 'estimate-milestone']);
+// #463: exact reviewed Native owner text is mandatory, in addition to the
+// unchanged 2000-token execution baseline. It is neither optional nor truncated.
+const NATIVE_OWNER_SUPPLEMENT = [
+  "",
+  "## Retained file-tools host owner",
+  "",
+  "For the supported native milestone execution profile, the normal controller BEGIN",
+  "precedes the retained owner factory and carries the existing workflow binding.",
+  "Owner input is a closed set of selectors and optional verification coverage data;",
+  "the factory reobserves actor, run, claim/generation, roots, BEGIN/lease, route,",
+  "questions, security readiness and effective plan gate before opening the window.",
+  "A prepared intent is not invocation admission: the actual authenticated hook and",
+  "original callback seal bind tool arguments before execution. Model/effort and phase",
+  "remain the resolver's; neither agent defaults nor JSON approval supply authority.",
+  "",
+  "Only the dedicated file-tools worker performs measured Read/Write operations.",
+  "The parent consumes returned exact control commands and the retained captured",
+  "result, without writing a candidate/receipt in the protected window. Returned,",
+  "joined, verified, published and settled are separate facts. Full publication uses",
+  "original opaque producer witnesses and physical manifest/receipt/artifact readback;",
+  "pending publication admits only the exact recorded before-or-after artifacts.",
+  "Reobserve owner authority and the same genuine profile at every boundary. Keep",
+  "raw diagnostic bytes on parse/refusal; unknown provider activity remains unknown.",
+  "File-path locators, HMAC under a cooperative boundary and PID exit do not prove",
+  "kernel identity, arbitrary same-account isolation, Agent join or applied effort.",
+  "",
+].join('\n');
+const NATIVE_OWNER_SUPPLEMENT_TOKEN_LIMIT = 400;
+const NATIVE_EXECUTION_PHASES = new Set(['execute-task', 'execute-loose-task']);
+function nativeOwnerSupplement(procedure, phase) {
+  if (!NATIVE_EXECUTION_PHASES.has(phase)) return '';
+  assert.strictEqual(procedure.phase, phase, phase + ': exact canonical phase');
+  const execution = procedure.modules.find(module => module.id === 'execution');
+  assert(execution, phase + ': canonical execution module required');
+  const marker = '<!-- forge-procedure:execution -->\n';
+  assert.strictEqual(procedure.content.split(marker).length, 2, phase + ': unique canonical execution frame');
+  const body = procedure.content.split(marker)[1];
+  assert.strictEqual(Buffer.byteLength(body), execution.bytes, phase + ': complete execution module bytes');
+  assert.strictEqual(crypto.createHash('sha256').update(body).digest('hex'), execution.sha256, phase + ': canonical execution module hash');
+  assert.strictEqual(body.split(NATIVE_OWNER_SUPPLEMENT).length, 2, phase + ': exact Native supplement occurs once');
+  assert(body.endsWith(NATIVE_OWNER_SUPPLEMENT), phase + ': Native supplement is the exact final execution section');
+  assert.strictEqual(procedure.content.split(NATIVE_OWNER_SUPPLEMENT).length, 2, phase + ': no duplicate Native accounting');
+  assert.strictEqual(countTokens(NATIVE_OWNER_SUPPLEMENT), 373, 'reviewed exact Native owner text');
+  assert(countTokens(NATIVE_OWNER_SUPPLEMENT) <= NATIVE_OWNER_SUPPLEMENT_TOKEN_LIMIT, 'bounded mandatory Native allocation');
+  return NATIVE_OWNER_SUPPLEMENT;
+}
 function optionalTokens(rendered, phase) {
   const procedure = loadProcedureContext({ cwd: root, phase });
   const optional = separateOptionalPromptContext(rendered.prompt, procedure, rendered.procedure_context);
@@ -42,12 +89,13 @@ function optionalTokens(rendered, phase) {
       `${phase}: the reviewed readiness supplement occurs exactly once`);
     assert.strictEqual(countTokens(supplement), PLANNING_READINESS_TOKEN_LIMIT);
   }
-  const baselineMandatory = hasReadiness
-    ? procedure.content.replace(supplement, '') : procedure.content;
+  const nativeSupplement = nativeOwnerSupplement(procedure, phase);
+  const baselineMandatory = procedure.content.replace(supplement, '').replace(nativeSupplement, '');
   assert(countTokens(baselineMandatory) <= MANDATORY_TOKEN_CEILINGS[phase],
     `${phase}: baseline mandatory content exceeded its unchanged allocation`);
   assert(countTokens(procedure.content) <= MANDATORY_TOKEN_CEILINGS[phase]
-    + (hasReadiness ? PLANNING_READINESS_TOKEN_LIMIT : 0),
+    + (hasReadiness ? PLANNING_READINESS_TOKEN_LIMIT : 0)
+    + (nativeSupplement ? NATIVE_OWNER_SUPPLEMENT_TOKEN_LIMIT : 0),
     `${phase}: total mandatory content exceeded reviewed allocations`);
   assert.strictEqual(rendered.input_tokens, countTokens(rendered.prompt));
   return countTokens(optional);
@@ -266,6 +314,32 @@ test('every renderer unit has an unchanged mandatory ceiling and planning units 
   assert.deepStrictEqual(loadProcedureContext({ cwd: root, phase: 'estimate-milestone' }).modules.map(item => item.id), ['core', 'planning']);
 });
 
+
+test('Native owner supplement is exact mandatory execution text, never a generic budget subtraction', () => {
+  assert.deepStrictEqual([...NATIVE_EXECUTION_PHASES], ['execute-task', 'execute-loose-task']);
+  assert.strictEqual(NATIVE_OWNER_SUPPLEMENT_TOKEN_LIMIT, 400);
+  for (const phase of NATIVE_EXECUTION_PHASES) {
+    assert.strictEqual(MANDATORY_TOKEN_CEILINGS[phase], 2000);
+    const procedure = loadProcedureContext({ cwd: root, phase });
+    assert.strictEqual(nativeOwnerSupplement(procedure, phase), NATIVE_OWNER_SUPPLEMENT);
+    for (const content of [procedure.content.replace(NATIVE_OWNER_SUPPLEMENT, ''),
+      procedure.content.replace(NATIVE_OWNER_SUPPLEMENT, NATIVE_OWNER_SUPPLEMENT + NATIVE_OWNER_SUPPLEMENT),
+      procedure.content.replace(NATIVE_OWNER_SUPPLEMENT, NATIVE_OWNER_SUPPLEMENT + 'foreign mandatory tail')]) {
+      assert.throws(() => nativeOwnerSupplement({ ...procedure, content }, phase), /execution module|Native/);
+    }
+    const foreignHash = { ...procedure, modules: procedure.modules.map(module => module.id === 'execution' ? { ...module, sha256: '0'.repeat(64) } : module) };
+    assert.throws(() => nativeOwnerSupplement(foreignHash, phase), /canonical execution module hash/);
+    assert.throws(() => nativeOwnerSupplement({ ...procedure, modules: procedure.modules.filter(module => module.id !== 'execution') }, phase), /execution module required/);
+    const rendered = renderPrompt(baseOptions(phase));
+    assert(rendered.prompt.includes(procedure.content), 'the full canonical Native module is still sent');
+    const quoted = '[DATA FROM "quoted-native-owner"]\n' + NATIVE_OWNER_SUPPLEMENT + '\n[END DATA FROM "quoted-native-owner"]\n\n' + rendered.prompt;
+    const optional = separateOptionalPromptContext(quoted, procedure, rendered.procedure_context);
+    assert(optional.includes(NATIVE_OWNER_SUPPLEMENT), 'quoted optional DATA is not subtracted as mandatory');
+  }
+  for (const phase of Object.keys(TEMPLATE_FILES).filter(phase => !NATIVE_EXECUTION_PHASES.has(phase))) {
+    assert.strictEqual(nativeOwnerSupplement(loadProcedureContext({ cwd: root, phase }), phase), '', phase + ': no Native allocation');
+  }
+});
 
 test('required result status is a separate frame in every renderer unit without changing delivery or ceilings', () => {
   const instruction = require('./forge-worker-result').resultStatusInstruction();

@@ -712,10 +712,12 @@ test('issue343 R9 single repair decomposes through real auto and next adapter wi
         assert.strictEqual(firstDone.lifecycle, 'completed');assert.strictEqual(firstDone.snapshot.step_count, 1);assert.strictEqual(firstDone.snapshot.max_steps, 1);
         assert.strictEqual(controller.incompleteUnits(dir, M).length, 0, 'one genuine substituted child delivery closes forge-next');
       } else {
-      assert.throws(() => controller.beginSerial(dir, { milestone: M, slice: S, unit: 'execute-task/T01.2', host_runtime: HOST,
+      const repeatedReservation = workflow => controller.beginSerial(dir, { milestone: M, slice: S, unit: 'execute-task/T01.2', host_runtime: HOST,
         owner_token: input.owner_token, idempotency_key: 'r9-forged-second-slot', state_patch: { active_slice: S },
         decomposition_from: { pause_key: child.decomposition_entry.pause_key, pause_checksum: child.decomposition_entry.pause_checksum, mutation_ref: mutation.mutation_ref } },
-      { ...live, workflow: { workflow_id: input.workflow_id, step_count: 1, max_steps: 5 } }), error => error.code === 'record-conflict', 'the second child cannot reuse the parent reservation');
+      { ...live, workflow });
+      assert.throws(() => repeatedReservation({ workflow_id: input.workflow_id, step_count: 1, max_steps: 5 }), error => error.code === 'invalid-request', 'missing workflow mode is rejected before reservation admission');
+      assert.throws(() => repeatedReservation({ mode, workflow_id: input.workflow_id, step_count: 1, max_steps: 5 }), error => error.code === 'record-conflict', 'the second child cannot reuse the parent reservation');
       const second = invoke('next', firstDone.snapshot);assert.strictEqual(second.unit.key, 'execute-task/T01.2', JSON.stringify(second));
       const secondDone = finishReal(second, 'T01.2', 2);
       const expectedVerification = controller.select(dir, { milestone: M }, { prefsReader }).decomposition_verification;

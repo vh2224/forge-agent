@@ -285,6 +285,17 @@ try {
     }
   });
 
+  test('published planning overlay feeds weighted and positional estimates identically', () => {
+    const base = shards.loadShardProfile(path.join(__dirname, 'ci-profiles/issue-461-d046.json'));
+    const units = require('./forge-ci-units').expandSuites(runner.discoverTests([])), suites = units.map(unit => unit.id);
+    const report = collector.buildProfileReport({ shard_profile: base, partitions: [{ platform: 'win32', count: 8 }], partition_suites: true });
+    const prediction = report.predictions[0], overrides = shards.loadPlanningOverrides(base, 'win32', suites), row = base.doc.platforms.win32;
+    assert.deepEqual(prediction.planning_overrides, overrides);
+    const positional = shards.planShards({ suites, index: 0, count: 8, platform: 'win32' });
+    const cost = id => Object.hasOwn(overrides,id) ? overrides[id] : Object.hasOwn(row.weights_ms,id) ? row.weights_ms[id] : Object.hasOwn(prediction.estimated_unit_weights,id) ? prediction.estimated_unit_weights[id] : row.default_weight_ms;
+    assert.deepEqual(prediction.positional.predicted_ms, positional.shards.map(shard => shard.reduce((sum,id) => sum + cost(id),0)));
+    assert.equal(prediction.positional.predicted_ms.reduce((a,b)=>a+b,0), prediction.weighted.predicted_ms.reduce((a,b)=>a+b,0));
+  });
   test('unit allocation comparisons use the same measured/estimated/default costs', () => {
     const profile=loaded(),count=24;
     const units=require('./forge-ci-units').expandSuites(runner.discoverTests([])),weights=profile.doc.platforms.win32;
@@ -356,6 +367,13 @@ try {
     assert.strictEqual(result.status, 0, result.stderr);
   });
 
+  test('report CLI accepts logical65/96 partition estimates', () => {
+    for(const count of [65,96]){
+      const result=cli(['report','--partition',`win32:${count}`]);
+      assert.strictEqual(result.status,0,result.stderr);
+    }
+  });
+
   test('bounded explicit files strict UTF8 link refusal and closed CLI output safety', () => {
     const good = write('good.log', fixture('windows-shard-1.log'));
     assert.strictEqual(collector.readInput(good).bytes, fs.statSync(good).size);
@@ -378,7 +396,8 @@ try {
     } finally { fs.lstatSync = original; }
     const before = hash(fs.readFileSync(good));
     for (const args of [[], ['unknown'], ['report', '--wat', 'x'], ['report', '--input'],
-      ['report', '--partition', 'win32:65'], ['report', '--partition', 'other:2'],
+      ['report', '--partition', 'win32:97'], ['report', '--partition', 'win32:0'],
+      ['report', '--partition', 'win32:-1'], ['report', '--partition'], ['report', '--partition', 'other:2'],
       ['report', '--json', path.join(root, 'same'), '--markdown', path.join(root, 'same')],
       ['report', '--input', good, '--json', good], ['build-shard-profile', '--input', good, '--out', good],
       ['build-shard-profile', '--input', path.join(fixtures, 'local-run.log'), '--out', path.join(root, 'bad.json')]]) {

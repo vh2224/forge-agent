@@ -31,9 +31,25 @@ function runFixture(options) {
 
 function evidence(claims) { return { schema: 'forge-svn-evidence/v1', claims }; }
 
+// Independently enumerate the declared catalog and physical matrix; do not
+// derive the expected count from the auditor result being tested.
+const catalogIds = JSON.parse(fs.readFileSync(path.join(root, 'forge-capabilities.json'), 'utf8'))
+  .capabilities.map(row => row.capability_id).sort();
+assert.strictEqual(new Set(catalogIds).size, catalogIds.length, 'catalog IDs are unique');
+const catalogIdSet = new Set(catalogIds);
+const matrixRows = fs.readFileSync(matrix, 'utf8').split(/\r?\n/)
+  .filter(line => line.startsWith('| ')).map(line => line.split('|').slice(1, -1).map(cell => cell.trim()));
+const matrixCatalogIds = matrixRows.map(cells => cells[0]).filter(id => catalogIdSet.has(id)).sort();
+assert.deepStrictEqual(matrixCatalogIds, catalogIds, 'every catalog ID has exactly one matrix row');
+const nativeFilesRow = matrixRows.find(cells => cells[0] === 'agent-forge-native-files');
+assert(nativeFilesRow, 'the file-only worker is inventoried without claiming Native SVN execution');
+assert.strictEqual(nativeFilesRow[3], 'VCS-neutral');
+assert.strictEqual(nativeFilesRow[6], 'declared-limitation');
+assert(nativeFilesRow[5].includes('Native SVN E2E unverified'));
+assert(nativeFilesRow[4].includes('docs/issue-463-native-host-bridge.md'));
 const good = audit(root, matrix);
-assert.strictEqual(good.expected_ids, 53);
-assert.strictEqual(good.observed_ids, 53);
+assert.strictEqual(good.expected_ids, catalogIds.length);
+assert.strictEqual(good.observed_ids, catalogIds.length);
 for (const key of ['missing', 'duplicates', 'incomplete', 'invalid_applicability', 'invalid_verdict', 'unresolved_evidence', 'semantic_evidence_errors']) assert.deepStrictEqual(good[key], []);
 assert.strictEqual(good.additional_families, 7);
 assert.strictEqual(good.ok, true);

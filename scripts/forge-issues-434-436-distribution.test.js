@@ -1,7 +1,10 @@
 'use strict';
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
-const layer=require('./fixtures/issue-461/distribution.cjs');
-const parent=require('./fixtures/issue-461/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issues-429-432/distribution.cjs'),root=path.resolve(__dirname,'..');
+const layer=require('./fixtures/issue-463/distribution.cjs');
+const parent=require('./fixtures/issue-463/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issues-429-432/distribution.cjs'),root=path.resolve(__dirname,'..');
 const artifacts=require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts;
 assert.equal(layer.validate({artifacts}),true);assert.equal(layer.validate414Snapshot({artifacts}),true);
 for(const file of ['scripts/forge-protected-owner-activity.js','scripts/forge-sidecar-verification-repair.js','shared/forge-delivery.md']){
@@ -16,3 +19,4 @@ const historical=structuredClone(layer.issue414Layer);historical.provenance.issu
 assert.throws(()=>layer.validate({artifacts,issue414LayerValue:historical}));
 assert.throws(()=>layer.validate414Snapshot({artifacts,issue414LayerValue:historical}));
 console.log('PASS owner successor: current source/rendered controls, drift/historical negatives, one parent traversal');
+});

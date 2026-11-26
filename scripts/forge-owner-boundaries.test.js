@@ -155,17 +155,23 @@ async function main() {
   const claudeAddLine = claudeAuto.split('\n').find(line => line.includes('forge-runs.js" --add '));
   assert(claudeSessionLine.includes("--expected-owner-session '${CLAUDE_SESSION_ID}'"));
   const settingsFile = path.join(installedHome, '.claude/settings.json');
-  const merge = spawnSync(process.execPath, [path.join(__dirname, 'merge-settings.js'), settingsFile], { encoding: 'utf8', env: { ...process.env, HOME: installedHome, USERPROFILE: installedHome, FORGE_HOME: root }, windowsHide: true });
+  const merge = spawnSync(process.execPath, [path.join(__dirname, 'merge-settings.js'), settingsFile], { encoding: 'utf8', env: { ...process.env, HOME: installedHome, USERPROFILE: installedHome, CLAUDE_CONFIG_DIR: path.join(installedHome, '.claude'), FORGE_HOME: root }, windowsHide: true });
   assert.equal(merge.status, 0, merge.stderr);
   const settings = JSON.parse(fs.readFileSync(settingsFile));
-  assert(JSON.stringify(settings.hooks.SessionStart).includes('forge-hook.js session-start'), 'the actual installer settings wire SessionStart');
+  // SessionStart is the canonical direct exec-form hook, not a shell string.
+  const sessionStartHooks = settings.hooks.SessionStart.flatMap(group => group.hooks);
+  const sessionStartCandidates = sessionStartHooks.filter(hook => hook.type === 'command' && Array.isArray(hook.args) && hook.args[1] === 'session-start');
+  assert.equal(sessionStartCandidates.length, 1, 'exactly one managed installed SessionStart hook');
+  const sessionStartHook = sessionStartCandidates[0];
+  assert.deepEqual(sessionStartHook, { type: 'command', command: fs.realpathSync.native(process.execPath),
+    args: [projectedHooks[0], 'session-start'], onFailure: 'block' }, 'the actual installer settings wire SessionStart with the physical Node and installed Hook');
   function claudeActivate({ label, native = 'claude-current-336', payload = native, event = 'SessionStart', bridge = true, source = true }) {
     const target = path.join(lab, label); fs.mkdirSync(target); fs.mkdirSync(path.join(target, '.gsd'));
     const envFile = path.join(lab, label + '.env'); fs.writeFileSync(envFile, "export KEEP_OTHER_HOOK='preserved'\n");
-    const env = { ...withoutIdentity(), FORGE_HOME: root, HOME: installedHome, USERPROFILE: installedHome, TEMP: hookTemp, TMP: hookTemp };
+    const env = { ...withoutIdentity(), FORGE_HOME: root, HOME: installedHome, USERPROFILE: installedHome, CLAUDE_CONFIG_DIR: path.join(installedHome, '.claude'), TEMP: hookTemp, TMP: hookTemp };
     delete env.CLAUDE_SESSION_ID; delete env.FORGE_CLAUDE_OWNER_SESSION_ID; delete env.FORGE_CLAUDE_OWNER_SOURCE;
     if (bridge) env.CLAUDE_ENV_FILE = envFile; else delete env.CLAUDE_ENV_FILE;
-    const invoked = spawnSync(process.execPath, [projectedHooks[0], 'session-start'], { encoding: 'utf8', env, input: JSON.stringify({ hook_event_name: event, session_id: payload, cwd: target }), timeout: 30000, windowsHide: true });
+    const invoked = spawnSync(sessionStartHook.command, sessionStartHook.args, { encoding: 'utf8', env, input: JSON.stringify({ hook_event_name: event, session_id: payload, cwd: target }), timeout: 30000, windowsHide: true });
     assert.ifError(invoked.error); assert.equal(invoked.status, 0, invoked.stderr);
     const contents = fs.readFileSync(envFile, 'utf8'); assert(contents.startsWith("export KEEP_OTHER_HOOK='preserved'\n"));
     const lines = (claudeSessionLine + '\n' + claudeAddLine).replaceAll('${CLAUDE_SESSION_ID}', native);

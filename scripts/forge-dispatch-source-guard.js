@@ -43,6 +43,8 @@ const TOKEN = Object.freeze({
   // sidecar declaration travel inside the validated resolver JSON the request
   // embeds, so it is checked structurally on that data path, not on argv flags.
   'unit-sidecar': /forge-unit-sidecar\.js"?\s+--request\b/g,
+  // Closed CLI producer or verbatim consumption of its prepared controls.
+  'native-host': /forge-native-host-bridge\.js\b|\bNATIVE_HOST_PREPARED\.control_commands(?:\.[A-Za-z_]\w*)?/g,
 });
 
 function deepFreeze(value) {
@@ -308,8 +310,18 @@ const REGISTRY_ROWS = [
   ["skills-forge-task-skill-md-native-3edeb4fd2dce","skills/forge-task/SKILL.md","native","excluded","sha256:3edeb4fd2dced521c3dd26624c8705fcc419eeba4cb51ee35b393a61b132a221","explanatory Agent effort capability policy paragraph; it describes buildNativeInvocation but contains no native invocation statement",""],
   ["skills-forge-task-skill-md-native-31f04c27752b","skills/forge-task/SKILL.md","native","excluded","sha256:31f04c27752bb1b4145b9ca340507ef329da4da8e0e84c951ac53bc104631abd","documentation names the live callback option in the runCliPreparation signature; it executes no native tool or route",""],
   ["skills-forge-task-skill-md-native-f58cacc1c95e","skills/forge-task/SKILL.md","native","excluded","sha256:f58cacc1c95e5a93cf195338f2e37fa8fb715acd25fa2db49b47ca2565e09729","documentation describes the trusted host callback contract and its actual invocation binding; it is not an executable native invocation statement",""],
-  ["skills-forge-auto-skill-md-native-70182a11d934","skills/forge-auto/SKILL.md","native","operational","sha256:70182a11d934f0903182005d953f3b3de8f24919ba064de64e086e59b6a0427c","",""],
-  ["skills-forge-next-skill-md-native-dae01f2aa3f7","skills/forge-next/SKILL.md","native","operational","sha256:dae01f2aa3f7bc7e4b50dcdbac10efdf85ede73829b957d9363ec05b5d9aeab4","",""],
+  ["skills-forge-auto-skill-md-native-70182a11d934","skills/forge-auto/SKILL.md","native","operational","sha256:c735caa7f1c041112f7616b631a89ce4c14ff90a08978a1f6ec9624f551d7e53","",""],
+  ["skills-forge-next-skill-md-native-dae01f2aa3f7","skills/forge-next/SKILL.md","native","operational","sha256:4e9852d2b5e581be416e82ed192677a81a0920f63a7f2e992116a56c8731765e","",""],
+  ["skills-forge-auto-md-native-host-c037ef87fa9e","skills/forge-auto/SKILL.md","native-host","operational","sha256:78efc4824e90800e6e0c1830d73d482b68f0826a523169da5bbdf69df84755ab","",""],
+  ["skills-forge-auto-md-native-host-budget-d77f4c98213f","skills/forge-auto/SKILL.md","native-host","operational","sha256:d77f4c98213fea8d2e8acdcd4d3d8aff6084b91c35b9d0b97abd1581427d331a","",""],
+  ["skills-forge-auto-md-native-host-7ac8bc203cb5","skills/forge-auto/SKILL.md","native-host","operational","sha256:be1ef5abd7b3c981e2c104fa1b6da73939b9db70166449273a8a0cc1685dfdbb","",""],
+  ["skills-forge-auto-md-native-host-43ee3a60c7b5","skills/forge-auto/SKILL.md","native-host","operational","sha256:48d7558ebcbe018621cde8cac28dcc56cb3c3f170eeb1bca3775ec4fe79bd225","",""],
+  ["skills-forge-auto-md-native-host-4fe5bd431f08","skills/forge-auto/SKILL.md","native-host","operational","sha256:0d23019e17f6d477711a03aeb12b965433a84f80fc9a286ec02e7187a05134b8","",""],
+  ["skills-forge-next-md-native-host-c037ef87fa9e","skills/forge-next/SKILL.md","native-host","operational","sha256:0ac5951e0c55da005bd9263ff0952c196297214bcfa29d152c60102ed1c1f014","",""],
+  ["skills-forge-next-md-native-host-budget-a95f99200e74","skills/forge-next/SKILL.md","native-host","operational","sha256:a95f99200e74ce2e0696a79003d634e96f6fa73dbd046088ca7517791cf18941","",""],
+  ["skills-forge-next-md-native-host-7ac8bc203cb5","skills/forge-next/SKILL.md","native-host","operational","sha256:20e9b2d61d43effc728c32dfbd885c37e99067042aaa216f2b668a5c4aad27f5","",""],
+  ["skills-forge-next-md-native-host-43ee3a60c7b5","skills/forge-next/SKILL.md","native-host","operational","sha256:2a8f2802bb96405ffabf8317c1451f7c022427a78ce84b65903a05f5ba6d04a0","",""],
+  ["skills-forge-next-md-native-host-4fe5bd431f08","skills/forge-next/SKILL.md","native-host","operational","sha256:48fb8e0cf5c3ec74b4619204edfc8a88896dd61b89b60520a4ede9cd716f3175","",""],
 ];
 
 const SOURCE_REGISTRY = deepFreeze(REGISTRY_ROWS.map((row) => ({
@@ -456,7 +468,7 @@ function fencedBlock(lines, index) {
 function candidate(pathName, kind, lines, lineIndex, column) {
   let context;
   if (kind === 'native') context = nativeCallContext(lines, lineIndex);
-  else if (kind === 'unit-sidecar') context = fencedBlock(lines, lineIndex) || '';
+  else if (kind === 'unit-sidecar' || kind === 'native-host') context = fencedBlock(lines, lineIndex) || '';
   else context = commandContext(lines, lineIndex);
   return {
     path: pathName,
@@ -517,6 +529,7 @@ function discover(root) {
     if (ADAPTER_FILES.has(relative)) found.push(...tokenCandidates(relative, 'adapter', lines));
     if (NATIVE_FILES.has(relative)) found.push(...tokenCandidates(relative, 'native', lines));
     if (ADAPTER_FILES.has(relative)) found.push(...tokenCandidates(relative, 'unit-sidecar', lines));
+    found.push(...tokenCandidates(relative, 'native-host', lines));
     if (PROJECTED_SKILLS.includes(relative)) found.push(...tokenCandidates(relative, 'preparation', lines));
     found.push(...emitterCandidates(relative, lines));
   }
@@ -580,6 +593,24 @@ function structuralErrors(entry, discovered, document) {
     }
     if (/invokeNative\s*\(/.test(discovered.evidence) && !/\.args\b|nativeOptions|invocation/.test(discovered.context)) {
       errors.push(`${location} native invocation does not consume a prepared structured invocation`);
+    }
+  }
+  if (entry.kind === 'native-host') {
+    if (projected && !inside(document.markers.pair, discovered.line - 1)) {
+      errors.push(`${location} native-host caller lies outside the real dispatch markers`);
+    }
+    const prepare = discovered.evidence === "Bash({command: '\"{NODE_EXECUTABLE_ABS}\" \"{FORGE_SCRIPTS_DIR_ABS}/forge-native-host-bridge.js\" prepare --input \"{NATIVE_HOST_INPUT_ABS}\"', timeout: NATIVE_HOST_PREPARE_BUDGET.prepare_timeout_ms})";
+    const budget = discovered.evidence === "Bash({command: '\"{NODE_EXECUTABLE_ABS}\" \"{FORGE_SCRIPTS_DIR_ABS}/forge-native-host-bridge.js\" prepare-budget --input \"{NATIVE_HOST_INPUT_ABS}\"'})";
+    const control = /^Bash\(\{command: NATIVE_HOST_PREPARED\.control_commands\.(?:accept|status|replay)\}\)$/.test(discovered.evidence);
+    if (!discovered.context) errors.push(`${location} native-host caller lies outside a fenced command block`);
+    if (!prepare && !budget && !control) errors.push(`${location} native-host caller lacks closed prepare argv or an unchanged prepared control command`);
+    if ((prepare || budget) && !/\/\/ canonical-native-host-literals: node=NODE_EXECUTABLE_ABS; scripts=FORGE_SCRIPTS_DIR_ABS; input=NATIVE_HOST_INPUT_ABS/.test(discovered.context)) {
+      errors.push(`${location} native-host prepare lacks canonical host-literal source citation`);
+    }
+    // Registry membership is not a bypass for caller-created candidates,
+    // approval flags, callbacks or retyped route/model/effort values.
+    if (/--(?:candidate|approved|host-observation|model|effort|worker-mode|host-runtime)\b|invokeNative\s*:|joined\s*:\s*true/.test(discovered.context)) {
+      errors.push(`${location} native-host caller supplies forbidden authority or route overrides`);
     }
   }
   if (entry.kind === 'preparation') {

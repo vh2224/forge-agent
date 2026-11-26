@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 'use strict';
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+
 // Text-only S02/T07 checks. No provider, network, git or real owner writes.
 // Renderer outputs stay in an exclusive temporary root, cleaned in finally.
 const assert = require('assert/strict');
@@ -11,8 +14,8 @@ const renderer = require('./forge-codex-renderer');
 const ROOT = path.resolve(__dirname, '..');
 // Published changelog assertions retain their exact measured predecessor.
 const read = file => file === 'CHANGELOG.md'
-  ? require('./fixtures/issue-461/distribution.cjs').issue455View.issues451452View.projectRead(p => fs.readFileSync(path.join(ROOT, p)))(file).toString('utf8')
-  : require('./fixtures/issue-461/distribution.cjs').projectRead(p => fs.readFileSync(path.join(ROOT, p)))(file).toString('utf8');
+  ? require('./fixtures/issue-463/distribution.cjs').issue455View.issues451452View.projectRead(p => fs.readFileSync(path.join(ROOT, p)))(file).toString('utf8')
+  : require('./fixtures/issue-463/distribution.cjs').projectRead(p => fs.readFileSync(path.join(ROOT, p)))(file).toString('utf8');
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const DOC = 'docs/issue-440/recovery-abandon.md';
 const document = read(DOC);
@@ -75,7 +78,7 @@ test('docs-input-guards-have-separate-exact-literal-tables', () => {
 });
 test('docs-recovery-procedure-seven-English-lines-UTF8-LF-and-only-inventory-sha', () => {
   const file = 'shared/forge-procedure-recovery.md';
-  const bytes = fs.readFileSync(path.join(ROOT, file));
+  const bytes = require('./fixtures/issue-463/distribution.cjs').projectIssue463Read(relative => fs.readFileSync(path.join(ROOT, relative)))(file);
   assert.notEqual(bytes.subarray(0, 3).toString('hex'), 'efbbbf');
   const text = bytes.toString('utf8');
   assert(!text.includes('\r'));
@@ -191,3 +194,4 @@ test('docs-S03-changelog-rejects-altered-missing-duplicate', () => {
   assert.throws(() => withoutIssue440S03Entry(changelog + entry + '\n'), /one declared #440 S03 entry/);
 });
 console.log(passed + '/' + passed + ' forge-issue-440-docs checks passed (offline, no provider)');
+});

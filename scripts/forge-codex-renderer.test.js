@@ -116,7 +116,11 @@ try {
   const report = renderer.render({ repo: root, projectRoot: project, codexHome: codex, forgeHome: forge, ...PRODUCTION_DISPATCH_DIALECT });
   const { AGENT_ROLES } = require('./forge-agent-view');
   const roleAgents = report.artifacts.filter(item => item.kind === 'agent');
-  assert.strictEqual(roleAgents.length, 10);
+  // Inventory/distribution only: this does not establish a Codex Native files transport.
+  const declaredAgentNames = markdownFiles(path.join(root, 'agents')).map(file => path.basename(file, '.md')).sort();
+  assert.strictEqual(declaredAgentNames.length, 11, 'reviewed Markdown agent inventory includes the Native files role');
+  assert.strictEqual(roleAgents.length, declaredAgentNames.length);
+  assert.deepStrictEqual(roleAgents.map(item => path.basename(item.destination, '.toml')).sort(), declaredAgentNames);
   assert.deepStrictEqual(roleAgents.map(item => path.basename(item.destination, '.toml')).sort(), Object.keys(AGENT_ROLES).sort());
   for (const item of roleAgents) {
     const name = path.basename(item.destination, '.toml');
@@ -138,7 +142,7 @@ try {
   const unknown = renderer.render({ repo: unknownRepo, manifest: unknownManifest, projectRoot: project,
     codexHome: codex, forgeHome: forge, ...PRODUCTION_DISPATCH_DIALECT }).artifacts.find(item => item.kind === 'agent');
   assert(unknown.content.includes('description = "Forge · agente forge-unknown"'));
-  console.log('PASS S03/T05 Codex ten role descriptions unknown fallback quoted scalars inherited sandbox and instructions');
+  console.log('PASS S03/T05 Codex eleven distributed role descriptions unknown fallback quoted scalars inherited sandbox and instructions');
   const standing = require('./forge-instructions');
   const canonicalCommunication = standing.renderCommunicationContract();
   const instructionsArtifact = report.artifacts.find(item => item.kind === 'instructions');

@@ -784,6 +784,8 @@ function nextInside(inputValue, options) {
       batchDecision = { decision: 'single', reason_code: decided.reason_code, ...(decided.excluded && decided.excluded.length ? { excluded: decided.excluded } : {}) };
     }
     stage = 'begin';
+    // The existing loop option remains in txOptions. It is not read from request JSON;
+    // beginSerial binds its immutable workflow projection to the real lease/BEGIN.
     const begun = forgeController.beginSerial(input.cwd, request, txOptions);
     let paused = null;
     if (input.needs_input) {
@@ -811,7 +813,8 @@ function nextInside(inputValue, options) {
     const durableBegin = forgeController.lookupRecord(input.cwd, 'transaction', key);
     result.details = { transaction: begun.transaction ? { idempotency_key: key, phase: begun.transaction.phase,
       begin_checksum: checksum(durableBegin), generation: durableBegin.lease_generation, owner_digest: durableBegin.owner_digest,
-      host_runtime: durableBegin.host_runtime, milestone: durableBegin.milestone, unit: durableBegin.unit.key } : null, selection_reason: selection.reason,
+      host_runtime: durableBegin.host_runtime, milestone: durableBegin.milestone, unit: durableBegin.unit.key,
+      ...(durableBegin.workflow_binding ? { workflow_binding_sha256: durableBegin.event.workflow_binding_sha256 } : {}) } : null, selection_reason: selection.reason,
       batch: batchDecision };
     if (!input.needs_input) {
       const valid = pendingLineage(input, durableBegin);

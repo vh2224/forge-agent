@@ -26,6 +26,7 @@ const AGENT_ROLES = Object.freeze(Object.fromEntries([
   ['discusser', 'Discussão', 'Examina alternativas e registra decisões de arquitetura'],
   ['executor', 'Executor', 'Implementa a tarefa e verifica seus critérios de entrega'],
   ['memory', 'Memória', 'Extrai aprendizados verificáveis para a memória do projeto'],
+  ['native-files', 'Arquivos nativos', 'Edita arquivos autorizados e retorna o resultado para verificação pelo responsável'],
   ['plan-checker', 'Verificador do plano', 'Confere escopo dependências e critérios do plano'],
   ['planner', 'Planejador', 'Organiza tarefas dependências e critérios verificáveis'],
   ['researcher', 'Pesquisador', 'Investiga fontes atuais e registra achados e incertezas'],

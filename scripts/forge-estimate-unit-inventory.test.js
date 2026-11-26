@@ -61,14 +61,14 @@ try {
     assert.doesNotThrow(() => prompt.renderTemplate(content, Object.fromEntries(used.map(name => [name, 'x'])), file));
   });
 
-  test('procedure manifest phase and matrix row load core plus planning with unchanged module hashes', () => {
+  test('procedure manifest phase and matrix row load core plus planning with measured module successors', () => {
     const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'shared/forge-procedures.json'), 'utf8'));
     const phase = manifest.phases.find(item => item.id === UNIT);
     assert.deepStrictEqual(phase.modules, ['planning']);
     assert.deepStrictEqual(phase.consumers, ['scripts/forge-prompt.js', 'scripts/forge-unit-sidecar.js']);
     const model = manifest.phases.find(item => item.id === 'plan-milestone');
     assert.deepStrictEqual([phase.preconditions, phase.postconditions], [model.preconditions, model.postconditions]);
-    // Module bytes and digests are the pre-T05 values: adding a phase never touches a module.
+    // Retain pre-T05 pins; later procedure changes require measured successor chains.
     const pinned = { core: '80854d0df7837fb869f5befa55df3a857827691585a69a740e3f34ac92677baf', personal: 'f2d12a942d39bda746e506c5e8240a926c7d20072c265d05ec4ece02d44bdb72',
       planning: 'cdef6fe80c3abae71de6be8739d835be3cfd2de2089fbc234013dc6818d749b2', 'task-preparation': '1d9f39dd7e782f761e43762b09f7253abaa0d152446ca7e3e9fa33109d4b38f7',
       execution: '66a61fce0b7c071d29297dd6fa87358cc4eab2380815e72a4bccd7d6569aad98', verification: 'cf0214f68d12d65d5af2075495cb8c1e15921122909b6acc68e230e076b8347a',
@@ -86,8 +86,18 @@ try {
     assert.strictEqual(recoveryMeasurement.kind, 'issue-440-measured-successor');
     const recoveryDelta = recoveryMeasurement.files['shared/forge-procedure-recovery.md'];
     assert.strictEqual(recoveryDelta.before, pinned.recovery);
-    assert.strictEqual(recoveryDelta.after, sha256(canonicalProcedureBytes(fs.readFileSync(path.join(ROOT, 'shared/forge-procedure-recovery.md')))));
-    assert.deepStrictEqual(Object.fromEntries(manifest.modules.map(item => [item.id, item.sha256])), { ...pinned, review: reviewDelta.after, recovery: recoveryDelta.after });
+    // The current strict successor authenticates physical Source before exposing
+    // its measured layer; published #341/#440 fixture bytes remain untouched.
+    const nativeMeasurement = require('./fixtures/issue-463/distribution.cjs').issue463Layer;
+    assert.strictEqual(nativeMeasurement.schema_version, 1);
+    assert.strictEqual(nativeMeasurement.issue, 463);
+    const currentRecovery = nativeMeasurement.files['shared/forge-procedure-recovery.md'];
+    const currentExecution = nativeMeasurement.files['shared/forge-procedure-execution.md'];
+    assert.strictEqual(currentRecovery.before, recoveryDelta.after);
+    assert.strictEqual(currentExecution.before, pinned.execution);
+    assert.strictEqual(currentRecovery.after, sha256(canonicalProcedureBytes(fs.readFileSync(path.join(ROOT, 'shared/forge-procedure-recovery.md')))));
+    assert.strictEqual(currentExecution.after, sha256(canonicalProcedureBytes(fs.readFileSync(path.join(ROOT, 'shared/forge-procedure-execution.md')))));
+    assert.deepStrictEqual(Object.fromEntries(manifest.modules.map(item => [item.id, item.sha256])), { ...pinned, review: reviewDelta.after, recovery: currentRecovery.after, execution: currentExecution.after });
     for (const module of manifest.modules) assert.strictEqual(sha256(canonicalProcedureBytes(fs.readFileSync(path.join(ROOT, module.path)))), module.sha256, module.id);
     assert.deepStrictEqual(loadProcedureContext({ cwd: ROOT, phase: UNIT }).modules.map(item => item.id), ['core', 'planning']);
     const row = fs.readFileSync(path.join(ROOT, 'shared/forge-procedures.md'), 'utf8').split('\n').find(line => line.startsWith(`| ${UNIT} |`));

@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/issue-461/distribution.cjs');
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+
+const unitEntry = require('./fixtures/issue-463/distribution.cjs');
 
 // forge-communication-surfaces.test.js — proves the orchestration and status
 // skills follow shared/forge-communication.md by POINTER, not by a second copy;
@@ -546,7 +549,7 @@ function entry347After(kind, key, prior, delta = ENTRY_347, attributed = false) 
   assert.match(row[afterKey], /^[0-9a-f]{64}$/, '#347 measured after');
   return artifact348After(kind, key, row[afterKey], ARTIFACT_348, attributed);
 }
-function validateEntry347(delta, earlier, { measure, readRaw, readme, renderMembers, artifactDelta = ARTIFACT_348 }) {
+function validateEntry347(delta, earlier, { measure, readRaw, readme, renderMembers, artifacts, artifactDelta = ARTIFACT_348 }) {
   validateArtifact348(artifactDelta, delta, { measure, readRaw, readme });
   assert.deepStrictEqual(Object.keys(delta).sort(), ['schema_version', 'issue', 'provenance', 'surfaces', 'files', 'unchanged_surfaces'].sort(), '#347 closed delta shape');
   assert.strictEqual(delta.schema_version, 1); assert.strictEqual(delta.issue, 347);
@@ -556,7 +559,28 @@ function validateEntry347(delta, earlier, { measure, readRaw, readme, renderMemb
   assert.deepStrictEqual(Object.keys(delta.files).sort(), [...ENTRY_347_FILES].sort(), '#347 exact changed files');
   assert.deepStrictEqual([...delta.unchanged_surfaces].sort(), [...ENTRY_347_UNCHANGED], '#347 exact untouched surfaces');
   assert.deepStrictEqual(Object.keys(renderMembers).sort(), ['agents', 'hooks'], '#347 exact rendered member groups');
-  for (const [id, expected] of Object.entries(ENTRY_347_RENDER_MEMBERS)) assert.deepStrictEqual([...renderMembers[id]].sort(), [...expected].sort(), '#347 exact rendered members ' + id);
+  for (const [id, expected] of Object.entries(ENTRY_347_RENDER_MEMBERS)) {
+    // Hash validation below remains at the real current stage. Only identity
+    // membership composes the immutable347 roster with measured new identities.
+    const added = [];
+    for (const native of Object.values(unitEntry.issue463Layer.rendered).filter(row => row.host === 'claude' && row.source_id === id && row.before === null)) {
+      const source = unitEntry.issue463Layer.files[native.source];
+      assert(source && source.before === null, '#347 current native identity has no invented Source predecessor');
+      assert(!expected.includes(native.source), '#347 current native identity is absent historical member roster');
+      assert.strictEqual(hash(readRaw(native.source)), source.after, '#347 current native member Source');
+      const current = artifacts.filter(item => item.source_id === id && item.source === native.source);
+      assert.strictEqual(current.length, native.after_copies, '#347 exact current native copy count');
+      for (const item of current) {
+        assert(Object.hasOwn(item, 'bytes') && Object.hasOwn(item, 'origin'), '#347 current native identity is a Claude artifact');
+        assert.strictEqual(item.kind ?? null, native.kind, '#347 current native artifact kind');
+        assert.strictEqual(item.newline, native.newline, '#347 current native artifact newline');
+        assert.strictEqual(typeof item.content, 'string');
+        assert.strictEqual(hash(item.content.replace(/version=\d+\.\d+\.\d+/g, 'version=<dynamic>')), native.after, '#347 current native rendered bytes');
+        added.push(native.source);
+      }
+    }
+    assert.deepStrictEqual([...renderMembers[id]].sort(), [...expected, ...added].sort(), '#347 exact rendered members ' + id);
+  }
   for (const [kind, anchors] of [['surfaces', ENTRY_347_BEFORE_SURFACES], ['files', ENTRY_347_BEFORE_FILES]]) {
     for (const [key, anchor] of Object.entries(anchors)) {
       const row = delta[kind][key];
@@ -678,7 +702,7 @@ function atPointer(value, pointer) {
 }
 // Fixture seams (T06-R1): the defaults are the real checked-in pins, README, render and
 // sources; the T06 group passes in-memory variants only, never writing any pin.
-function checkPins(fixture) { return unitEntry.validateSourceConsumer(() => checkPinsBody(fixture)); }
+function checkPins(fixture) { return checkPinsBody(fixture); }
 function checkPinsBody(fixture = {}) {
   const entryDelta = fixture.entryDelta === undefined ? ENTRY_347 : fixture.entryDelta;
   const artifactDelta = fixture.artifactDelta === undefined ? ARTIFACT_348 : fixture.artifactDelta;
@@ -700,7 +724,7 @@ function checkPinsBody(fixture = {}) {
     sampleReadme: fixture.identitySampleReadme === undefined ? sampleReadme : fixture.identitySampleReadme });
   validateEntry347(entryDelta, delta, { measure: id => surfaceHash(artifacts, id, true),
     renderMembers: Object.fromEntries(['agents', 'hooks'].map(id => [id, artifacts.filter(item => item.source_id === id).map(item => item.source)])),
-    readRaw: fixture.readSource || (rel => fs.readFileSync(path.join(root, rel))), readme, artifactDelta });
+    readRaw: fixture.readSource || (rel => fs.readFileSync(path.join(root, rel))), readme, artifacts, artifactDelta });
   assert.strictEqual(pins.surfaces.length, 9);
   assert.deepStrictEqual(pins.surfaces.map(({ sha256, ...identity }) => identity),
     before.active_golden_before.surfaces.map(({ sha256, ...identity }) => identity));
@@ -729,7 +753,9 @@ function checkPinsBody(fixture = {}) {
       assert(readme.includes(old.get(surface.source_id)) && readme.includes(surface.sha256), `documented actual ${surface.source_id}`);
     }
   }
-  assert.deepStrictEqual(changed.sort(), [...new Set([...before.allowed_active_changes, ...Object.keys(entryDelta.surfaces), ...Object.keys(unitEntry.issue407Layer.surfaces)])].sort(), 'historical changes plus exactly the #347 and independently pinned407 surfaces');
+  const nativeChangedSurfaces = Object.entries(unitEntry.issue463Layer.surfaces.claude)
+    .filter(([, row]) => row.before !== row.after).map(([id]) => id);
+  assert.deepStrictEqual(changed.sort(), [...new Set([...before.allowed_active_changes, ...Object.keys(entryDelta.surfaces), ...Object.keys(unitEntry.issue407Layer.surfaces), ...nativeChangedSurfaces])].sort(), 'historical changes plus exactly #347, independently pinned407 and measured Native surfaces');
   for (const historical of before.historical_goldens) assert.strictEqual(hash(fs.readFileSync(path.join(root, historical.path))), historical.sha256, historical.path);
   // Every unrelated input captured by the owner still has its exact original bytes.
   const allowed = new Set([goldenPath, 'agents/forge-planner.md', 'agents/forge-worker.md', 'skills/forge-auto/SKILL.md',
@@ -2093,16 +2119,47 @@ t06('real-two-host-projection-tests', () => {
 // The delta's before values must be the versioned historical ones and its after values the
 // current measurement; the six other surfaces, the historical goldens and every captured byte
 // outside the delta stay as they were. In-memory variants only: no pin or fixture is written.
-test('#341 distribution delta: versioned before, measured after, untouched surfaces byte-identical, out-of-delta edits refused', () => {
+// Each selected #341 case owns fresh rendered artifacts and in-memory variants.
+// No validator result is cached and no case depends on a previous case.
+function issue341Artifacts() {
+  const renderer = require('./forge-claude-renderer');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-341-pins-')); temps.push(temp);
+  const artifacts = renderer.render({ repo: root, projectRoot: temp, claudeHome: path.join(temp, 'host'), forgeHome: path.join(temp, 'forge') }).artifacts;
+  return artifacts;
+}
+function issue341NegativeFixture() {
+  const delta = delta341;
+  const artifacts = issue341Artifacts();
+  const refused = (label, fn) => assert.throws(fn, error => error instanceof assert.AssertionError, `${label} must be refused`);
+  const variant = mutate => { const copy = JSON.parse(JSON.stringify(delta)); mutate(copy); return copy; };
+  const readRaw = rel => fs.readFileSync(path.join(root, rel));
+  const edited = target => rel => (rel === target ? Buffer.concat([readRaw(rel), Buffer.from('\nedit outside the measured delta\n')]) : readRaw(rel));
+  const wrong = hash('not a measured #341 value');
+  const variant348 = mutate => { const copy = JSON.parse(JSON.stringify(ARTIFACT_348)); mutate(copy); return copy; };
+  const refused348 = (label, overrides) => assert.throws(() => checkPins({ artifacts, ...overrides }), error => error instanceof assert.AssertionError, '#348 ' + label + ' must be refused');
+  const wrong348 = hash('not a measured348 value');
+  const read348 = rel => fs.readFileSync(path.join(root, rel));
+  const edit348 = target => rel => rel === target ? Buffer.concat([read348(rel), Buffer.from('\nforeign348 edit\n')]) : read348(rel);
+  const identityVariant = mutate => { const copy = JSON.parse(JSON.stringify(IDENTITY)); mutate(copy); return copy; };
+  const refuseIdentity = (label, overrides) => assert.throws(() => checkPins({ artifacts, ...overrides }), e => e instanceof assert.AssertionError, 'identity ' + label + ' must be refused');
+  const wrongIdentity = hash('unmeasured identity value');
+  const identityRead = rel => fs.readFileSync(path.join(root, rel));
+  const identityEdit = target => rel => rel === target ? Buffer.concat([identityRead(rel), Buffer.from('\nforeign identity edit\n')]) : identityRead(rel);
+  const identitySampleText = fs.readFileSync(path.join(root, 'docs/communication-evaluation/samples.json'), 'utf8');
+  const identitySampleDoc = fs.readFileSync(path.join(root, 'docs/communication-evaluation/README.md'), 'utf8');
+  return { delta, artifacts, refused, variant, edited, wrong,
+    variant348, refused348, wrong348, edit348,
+    identityVariant, refuseIdentity, wrongIdentity, identityEdit,
+    identitySampleText, identitySampleDoc };
+}
+
+test('#341 distribution: positive measured sources surfaces and samples', () => {
   const delta = delta341;
   assert.strictEqual(delta.kind, 'issue-341-measured-distribution-delta');
   assert.strictEqual(delta.provenance.base_revision, '563ac2752722ac7c29848f62520c8446185bc15c');
   assert.strictEqual(delta.provenance.not_post_change_ci, true);
   for (const key of ['before_policy', 'after_policy', 'render_method', 'attributed_method']) assert(delta.provenance[key], `provenance ${key}`);
-  const renderer = require('./forge-claude-renderer');
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-341-pins-')); temps.push(temp);
-  const artifacts = renderer.render({ repo: root, projectRoot: temp, claudeHome: path.join(temp, 'host'), forgeHome: path.join(temp, 'forge') }).artifacts;
-
+  const artifacts = issue341Artifacts();
   // Surfaces: exactly agents, skills and configuration move; the other six keep the pre-#341 pin and render.
   assert.deepStrictEqual(Object.keys(delta.surfaces).sort(), ['agents', 'configuration', 'skills']);
   assert.deepStrictEqual([...Object.keys(delta.surfaces), ...delta.unchanged_surfaces].sort(), golden.surfaces.map(row => row.source_id).sort());
@@ -2150,13 +2207,11 @@ test('#341 distribution delta: versioned before, measured after, untouched surfa
 
   // The real state passes every layered historical check.
   checkPins({ artifacts }); checkSamples(); checkRegistry();
+  console.log('note - #341 distribution only: agents, skills and configuration re-pinned to measured values; client execution, CI, installation and human acceptance remain unknown.');
+});
 
-  // Negative fixtures: edits outside the delta, wrong or undeclared pins and undocumented re-pins are refused.
-  const refused = (label, fn) => assert.throws(fn, error => error instanceof assert.AssertionError, `${label} must be refused`);
-  const variant = mutate => { const copy = JSON.parse(JSON.stringify(delta)); mutate(copy); return copy; };
-  const readRaw = rel => fs.readFileSync(path.join(root, rel));
-  const edited = target => rel => (rel === target ? Buffer.concat([readRaw(rel), Buffer.from('\nedit outside the measured delta\n')]) : readRaw(rel));
-  const wrong = hash('not a measured #341 value');
+test('#341 distribution: review-policy source pin sample and registry negatives', () => {
+  const { delta, artifacts, refused, variant, edited, wrong } = issue341NegativeFixture();
   refused('captured source edit outside the delta', () => checkPins({ artifacts, readSource: edited('commands/forge.md') }));
   refused('declared path edited after its measurement', () => checkPins({ artifacts, readSource: edited('agents/forge-reviewer.md') }));
   refused('untouched surface edit', () => checkPins({ artifacts: artifacts.map(item => item.source_id === 'hooks' ? { ...item, content: `${item.content}\n// edit\n` } : item) }));
@@ -2171,11 +2226,10 @@ test('#341 distribution delta: versioned before, measured after, untouched surfa
   refused('undocumented sample re-pin', () => checkSamples({ sampleReadme: sampleReadme.split(delta.files['skills/forge-task/SKILL.md'].after).join('') }));
   refused('registry count changed', () => checkRegistry({ delta: variant(copy => { copy.registry.count = 249; }) }));
   refused('fabricated registry drift', () => checkRegistry({ delta: variant(copy => { copy.registry.drifted_rows = [{ after_id: before.dispatch_registry.rows[0].id }]; }) }));
+});
 
-  // #348 is checked against the retained #347 end state, not a rewritten fixture.
-  const variant348 = mutate => { const copy = JSON.parse(JSON.stringify(ARTIFACT_348)); mutate(copy); return copy; };
-  const refused348 = (label, overrides) => assert.throws(() => checkPins({ artifacts, ...overrides }), error => error instanceof assert.AssertionError, '#348 ' + label + ' must be refused');
-  const wrong348 = hash('not a measured348 value');
+test('#341 distribution: artifact-contract metadata and membership negatives', () => {
+  const { variant348, refused348, wrong348 } = issue341NegativeFixture();
   refused348('foreign before', { artifactDelta: variant348(d => { d.surfaces.agents.before = wrong348; d.surfaces.agents.attributed_before = wrong348; }) });
   refused348('invented after', { artifactDelta: variant348(d => { d.surfaces.agents.after = wrong348; d.surfaces.agents.attributed_after = wrong348; }) });
   refused348('extra surface', { artifactDelta: variant348(d => { d.surfaces.hooks = { ...d.surfaces.agents }; }) });
@@ -2185,25 +2239,27 @@ test('#341 distribution delta: versioned before, measured after, untouched surfa
   refused348('foreign file before', { artifactDelta: variant348(d => { d.files['agents/forge-planner.md'].before = wrong348; d.files['agents/forge-planner.md'].attributed_before = wrong348; }) });
   refused348('invented file after', { artifactDelta: variant348(d => { d.files['agents/forge-planner.md'].after = wrong348; d.files['agents/forge-planner.md'].attributed_after = wrong348; }) });
   refused348('extra untouched surface', { artifactDelta: variant348(d => { d.unchanged_surfaces.push('imaginary'); }) });
-  const read348 = rel => fs.readFileSync(path.join(root, rel));
-  const edit348 = target => rel => rel === target ? Buffer.concat([read348(rel), Buffer.from('\nforeign348 edit\n')]) : read348(rel);
+});
+
+test('#341 distribution: artifact-contract source and stale-pin negatives', () => {
+  const { refused348, edit348 } = issue341NegativeFixture();
   refused348('planner edited after measure', { readSource: edit348('agents/forge-planner.md') });
   refused348('edit outside measure', { readSource: edit348('agents/forge-memory.md') });
   refused348('prior fixture rewritten', { readSource: edit348('scripts/fixtures/entry-contracts/distribution-delta.json') });
   refused348('stale pin', { golden: { ...golden, surfaces: golden.surfaces.map(row => row.source_id === 'agents' ? { ...row, sha256: ARTIFACT_348.surfaces.agents.before } : row) } });
   refused348('stale docs', { pinReadme: pinReadme.split(ARTIFACT_348.surfaces.agents.after).join('') });
+});
 
-
-  // Strong terminal-layer negatives retain every historical negative above.
-  const identityVariant = mutate => { const copy = JSON.parse(JSON.stringify(IDENTITY)); mutate(copy); return copy; };
-  const refuseIdentity = (label, overrides) => assert.throws(() => checkPins({ artifacts, ...overrides }), e => e instanceof assert.AssertionError, 'identity ' + label + ' must be refused');
-  const wrongIdentity = hash('unmeasured identity value');
-  const identityRead = rel => fs.readFileSync(path.join(root, rel));
-  const identityEdit = target => rel => rel === target ? Buffer.concat([identityRead(rel), Buffer.from('\nforeign identity edit\n')]) : identityRead(rel);
+test('#341 distribution: identity measured-field negatives', () => {
+  const { refuseIdentity, identityVariant, wrongIdentity } = issue341NegativeFixture();
   for (const field of ['before','attributed_before','after','attributed_after']) {
     refuseIdentity('foreign surface ' + field, { identityDelta: identityVariant(d => { d.surfaces.skills[field] = wrongIdentity; }) });
     refuseIdentity('foreign file ' + field, { identityDelta: identityVariant(d => { d.files['skills/forge-task/SKILL.md'][field] = wrongIdentity; }) });
   }
+});
+
+test('#341 distribution: identity membership retained-span and rendered negatives', () => {
+  const { artifacts, refuseIdentity, identityVariant, wrongIdentity } = issue341NegativeFixture();
   refuseIdentity('extra surface', { identityDelta: identityVariant(d => { d.surfaces.commands = { ...d.surfaces.skills }; }) });
   refuseIdentity('omitted surface', { identityDelta: identityVariant(d => { delete d.surfaces.skills; }) });
   refuseIdentity('extra file', { identityDelta: identityVariant(d => { d.files['commands/forge.md'] = { ...d.files['skills/forge-task/SKILL.md'] }; }) });
@@ -2214,11 +2270,19 @@ test('#341 distribution delta: versioned before, measured after, untouched surfa
   refuseIdentity('extra untouched surface', { identityDelta: identityVariant(d => { d.unchanged_surfaces.push('imaginary'); }) });
   refuseIdentity('extra rendered member', { artifacts: [...artifacts, { ...artifacts.find(a => a.source_id === 'skills'), source:'skills/foreign/SKILL.md' }] });
   refuseIdentity('omitted rendered member', { artifacts: artifacts.filter(a => a.source !== IDENTITY_MEMBERS.skills[0]) });
+});
+
+test('#341 distribution: identity source-history and documented-pin negatives', () => {
+  const { refuseIdentity, identityEdit } = issue341NegativeFixture();
   for (const file of Object.keys(IDENTITY.files)) refuseIdentity('postmeasure ' + file, { readSource: identityEdit(file) });
   refuseIdentity('outside measured sources', { readSource: identityEdit('commands/forge.md') });
   for (const file of Object.keys(IDENTITY_PRIOR_DELTAS)) refuseIdentity('earlier fixture ' + file, { readSource: identityEdit(file) });
   refuseIdentity('stale active pin', { golden: { ...golden, surfaces: golden.surfaces.map(row => row.source_id === 'hooks' ? { ...row, sha256: IDENTITY.surfaces.hooks.before } : row) } });
   for (const field of ['before','after']) refuseIdentity('undocumented pin ' + field, { pinReadme: pinReadme.split(IDENTITY.surfaces.hooks[field]).join('') });
+});
+
+test('#341 distribution: identity sample metadata and fingerprint negatives', () => {
+  const { refuseIdentity, identityVariant, wrongIdentity } = issue341NegativeFixture();
   refuseIdentity('extra sample node', { identityDelta: identityVariant(d => { d.samples.nodes.push({ ...d.samples.nodes[0], pointer:'/foreign' }); }) });
   refuseIdentity('omitted sample node', { identityDelta: identityVariant(d => { d.samples.nodes.pop(); }) });
   refuseIdentity('foreign sample pointer', { identityDelta: identityVariant(d => { d.samples.nodes[0].pointer = '/entries/2/supporting/partial/after'; }) });
@@ -2227,8 +2291,10 @@ test('#341 distribution delta: versioned before, measured after, untouched surfa
     refuseIdentity('wrong sample full ' + field, { identityDelta: identityVariant(d => { d.samples[field] = wrongIdentity; }) });
     refuseIdentity('wrong sample node ' + field, { identityDelta: identityVariant(d => { d.samples.nodes[0][field] = wrongIdentity; }) });
   }
-  const identitySampleText = fs.readFileSync(path.join(root, 'docs/communication-evaluation/samples.json'), 'utf8');
-  const identitySampleDoc = fs.readFileSync(path.join(root, 'docs/communication-evaluation/README.md'), 'utf8');
+});
+
+test('#341 distribution: identity sample bytes quotation and documentation negatives', () => {
+  const { refuseIdentity, identityVariant, wrongIdentity, identitySampleText, identitySampleDoc } = issue341NegativeFixture();
   const identityTampered = identitySampleText.replace('"entries"', '"entries" ');
   refuseIdentity('sample bytes coherently repinned', { identitySampleText: identityTampered, identityDelta: identityVariant(d => { d.samples.after = hash(identityTampered); }) });
   const identityQuoteTampered = identitySampleText.replace('"text": "', '"text": "foreign ');
@@ -2236,9 +2302,8 @@ test('#341 distribution delta: versioned before, measured after, untouched surfa
   refuseIdentity('stale sample citation', { identitySampleText: withSampleShas(identitySampleText, [[IDENTITY_SAMPLE_POINTERS[0], IDENTITY.files['skills/forge-task/SKILL.md'].before]]) });
   refuseIdentity('unrelated sample node edit', { identitySampleText: withSampleShas(identitySampleText, [['/entries/2/supporting/partial/after', wrongIdentity]]) });
   refuseIdentity('undocumented samples', { identitySampleReadme: identitySampleDoc.split(IDENTITY.files['skills/forge-task/SKILL.md'].after).join('') });
-
-  console.log('note - #341 distribution only: agents, skills and configuration re-pinned to measured values; client execution, CI, installation and human acceptance remain unknown.');
 });
+
 
 
 test('#347 distribution delta: exact chain, members and tamper refusals', () => {
@@ -2253,6 +2318,16 @@ test('#347 distribution delta: exact chain, members and tamper refusals', () => 
   const wrong = hash('not a measured #347 value');
   const variant = mutate => { const copy = JSON.parse(JSON.stringify(ENTRY_347)); mutate(copy); return copy; };
   const refused = (label, fixture) => assert.throws(() => checkPins({ artifacts, ...fixture }), error => error instanceof assert.AssertionError, '#347 ' + label + ' must be refused');
+  const nativeAdditions = Object.values(unitEntry.issue463Layer.rendered).filter(row => row.host === 'claude' && ['agents','hooks'].includes(row.source_id) && row.before === null);
+  assert(nativeAdditions.length > 0, '#347 exercises the actual measured native after-only membership');
+  for (const native of nativeAdditions) {
+    const current = artifacts.find(item => item.source_id === native.source_id && item.source === native.source);
+    assert(current, '#347 actual current native member exists');
+    refused('omitted native member', { artifacts: artifacts.filter(item => !(item.source_id === native.source_id && item.source === native.source)) });
+    refused('duplicate native member', { artifacts: [...artifacts, { ...current }] });
+    refused('edited native member', { artifacts: artifacts.map(item => item === current ? { ...item, content: item.content + '\nforeign native drift\n' } : item) });
+    refused('edited native Source', { readSource: rel => { const raw = fs.readFileSync(path.join(root, rel)); return rel === native.source ? Buffer.concat([raw, Buffer.from('\nforeign native Source\n')]) : raw; } });
+  }
   refused('foreign before', { entryDelta: variant(d => { d.surfaces.agents.before = wrong; }) });
   refused('coherent invented after', { entryDelta: variant(d => { d.surfaces.agents.after = wrong; d.surfaces.agents.attributed_after = wrong; }) });
   refused('extra surface', { entryDelta: variant(d => { d.surfaces.commands = { ...d.surfaces.agents }; }) });
@@ -2309,3 +2384,4 @@ if (failed > 0) {
   for (const f of failures) console.log(`  FAIL ${f.name}: ${f.error}`);
   process.exit(1);
 }
+});

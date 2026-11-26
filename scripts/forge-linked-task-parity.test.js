@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 'use strict';
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+
 
 // S03/T01 parity of UNLINKED standalone tasks. The trace below exercises the
 // public preparation, transport, personal-context and status APIs for a task
@@ -127,13 +130,14 @@ function textDigest(value) { return typeof value === 'string' ? { sha256: sha256
 // ---------------------------------------------------------------------------
 // Trace of the unlinked flow
 // ---------------------------------------------------------------------------
-function stageProcedures(destination) {
-  const manifest = JSON.parse(fs.readFileSync(path.join(REPO, 'shared/forge-procedures.json'), 'utf8'));
+function stageProcedures(destination, readProcedures = relative => fs.readFileSync(path.join(REPO, relative))) {
+  const manifestBytes = readProcedures('shared/forge-procedures.json');
+  const manifest = JSON.parse(manifestBytes.toString('utf8'));
   fs.mkdirSync(path.join(destination, 'shared'), { recursive: true });
-  fs.copyFileSync(path.join(REPO, 'shared/forge-procedures.json'), path.join(destination, 'shared/forge-procedures.json'));
+  fs.writeFileSync(path.join(destination, 'shared/forge-procedures.json'), manifestBytes);
   for (const module of manifest.modules.filter(item => item.status === 'ready')) {
     fs.mkdirSync(path.dirname(path.join(destination, module.path)), { recursive: true });
-    fs.copyFileSync(path.join(REPO, module.path), path.join(destination, module.path));
+    fs.writeFileSync(path.join(destination, module.path), readProcedures(module.path));
   }
 }
 function owner(root, name, model) {
@@ -186,7 +190,7 @@ function briefText(taskId, description) {
   return `---\nid: ${taskId}\ndescription: ${description}\ncreated: ${CLOCK}\nskip_brainstorm: false\nskip_research: false\n---\n\n# ${description}\n`;
 }
 
-async function computeTrace() {
+async function computeTrace({ readProcedures, procedureReadScope = operation => operation() } = {}) {
   const prep = require('./forge-task-preparation'), unit = require('./forge-unit-sidecar'), execution = require('./forge-task-execution');
   const admission = require('./forge-milestone-time-admission'), personal = require('./forge-personal-context');
   const summary = require('./forge-personal-summary'), status = require('./forge-status'), runs = require('./forge-runs');
@@ -199,7 +203,7 @@ async function computeTrace() {
     process.env.HOME = home; process.env.USERPROFILE = home; process.env.FORGE_HOME = REPO;
     const normalize = normalizer([[root, '<root>'], [REPO, '<forge>']]);
     const code = path.join(root, 'code'), results = path.join(root, 'results');
-    fs.mkdirSync(code); fs.mkdirSync(results); stageProcedures(code);
+    fs.mkdirSync(code); fs.mkdirSync(results); procedureReadScope(() => stageProcedures(code, readProcedures));
     const owners = { claude: owner(root, 'owner-claude', 'claude-sonnet-5'), gpt: owner(root, 'owner-gpt', 'gpt-5.6-sol') };
     const agent = path.join(results, 'agents', 'forge-agent.md');
     const request = (ownerDir, host, phase, label, extra = {}) => ({ schema_version: 1, scope: 'standalone-task', phase,
@@ -444,14 +448,14 @@ async function captureUtilityChecks() {
 // #341 changes the full procedure manifest even for preparation phases whose
 // procedure content is unchanged. Preserve the original capture and declare only
 // its 24 manifest references and 16 derived artifact fingerprints as measured.
-function reviewPolicyExpected(expected, delta) {
+function reviewPolicyExpected(expected, delta, readProcedures = issue463SourceConsumer.projectIssue463Read()) {
   const assert = require('assert');
   assert.strictEqual(delta.kind, 'issue-341-measured-distribution-delta');
   assert.strictEqual(delta.provenance.base_revision, '563ac2752722ac7c29848f62520c8446185bc15c');
   const record = delta.unlinked_task_parity, manifest = delta.files['shared/forge-procedures.json'];
   assert.strictEqual(record.fixture, 'scripts/fixtures/linked-task/unlinked-baseline.json');
   assert.strictEqual(sha256(fs.readFileSync(FIXTURE)), record.fixture_sha256, 'immutable capture bytes retained');
-  assert.strictEqual(sourceHash('shared/forge-procedures.json'), require('./fixtures/issue-461/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issue-440/distribution.cjs').after('files','shared/forge-procedures.json',manifest.after), 'only the measured manifest is accepted');
+  assert.strictEqual(sha256(readProcedures('shared/forge-procedures.json')), require('./fixtures/issue-463/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issue-440/distribution.cjs').after('files','shared/forge-procedures.json',manifest.after), 'only the measured manifest is accepted');
   const allowed = new Set();
   for (const phase of PHASES) for (const host of HOSTS) for (const mode of ['sidecar', 'native']) {
     const base = '$.phases.' + phase + '.' + host + '.' + mode;
@@ -493,9 +497,17 @@ function issue350Expected(expected) {
 }
 function reviewPolicyDeltaChecks(trace, expected, delta) {
   const assert = require('assert'), clone = value => JSON.parse(JSON.stringify(value));
-  const routingParity=require('./fixtures/issue-461/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issue-440/distribution.cjs').parityAdapter(require('./fixtures/issue-461/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issues-403-407-integration/parity.cjs'));
-  const check = (current, proposed = delta) => assert.deepStrictEqual(routingParity.beforeTrace(current), issue350Expected(reviewPolicyExpected(expected, proposed)));
+  const routingParity=require('./fixtures/issue-463/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issue-440/distribution.cjs').parityAdapter(require('./fixtures/issue-463/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issues-403-407-integration/parity.cjs'));
+  const check = (current, proposed = delta, readProcedures) => assert.deepStrictEqual(routingParity.beforeTrace(current), issue350Expected(reviewPolicyExpected(expected, proposed, readProcedures)));
   check(trace);
+  // Unknown bytes must pass through the projection and fail the same historical
+  // manifest assertion; a matching hash is never invented for a foreign input.
+  const manifestPath = 'shared/forge-procedures.json';
+  const foreign = Buffer.concat([fs.readFileSync(path.join(REPO, manifestPath)), Buffer.from('\nforeign parity reader bytes\n')]);
+  const foreignReader = issue463SourceConsumer.projectIssue463Read(relative =>
+    relative === manifestPath ? foreign : fs.readFileSync(path.join(REPO, relative)));
+  assert(foreignReader(manifestPath).equals(foreign), 'foreign procedure bytes are not projected');
+  assert.throws(() => check(trace, delta, foreignReader), /only the measured manifest is accepted/, 'foreign manifest is refused');
   const variants = [
     ['missing path', d => { d.unlinked_task_parity.changes.pop(); }],
     ['duplicate path', d => { d.unlinked_task_parity.changes[1] = d.unlinked_task_parity.changes[0]; }],
@@ -511,35 +523,50 @@ function reviewPolicyDeltaChecks(trace, expected, delta) {
     ['fingerprint drift', t => { t.phases.brainstorm.claude.sidecar.artifact_fingerprint = '0'.repeat(64); }],
     ['manifest drift', t => { t.phases.brainstorm.claude.sidecar.delivery_request.procedure_context.manifest_sha256 = '0'.repeat(64); }],
   ]) { const changed = clone(trace); mutate(changed); assert.throws(() => check(changed), undefined, name); }
-  process.stdout.write('ok - issue-341-parity-declared-delta: 40 leaves; 10 negative controls; immutable capture retained\n');
+  process.stdout.write('ok - issue-341-parity-declared-delta: 40 leaves; 11 negative controls; immutable capture retained\n');
 }
 
 async function parityCheck() {
   const assert = require('assert');
-  const trace = await computeTrace();
+  // Replay the exact published pre-Native procedure closure through the existing
+  // byte-checked projection; production staging/computeTrace defaults stay current.
+  // Each read set is synchronous. The SourceConsumer frame closes before
+  // computeTrace awaits transport; the next read set opens a fresh frame.
+  const procedureReadScope = operation => issue463SourceConsumer.validateSourceConsumer(operation);
+  const readProcedures = procedureReadScope(() => {
+    const read = issue463SourceConsumer.projectIssue463Read();
+    const manifest = JSON.parse(read('shared/forge-procedures.json').toString('utf8'));
+    for (const module of manifest.modules.filter(item => item.status === 'ready')) {
+      assert.strictEqual(sha256(read(module.path)), module.sha256, 'complete measured procedure closure ' + module.path);
+    }
+    return read;
+  });
+  const trace = await computeTrace({ readProcedures, procedureReadScope });
   // Two independent traces in fresh temporary roots are identical: the projection is deterministic.
-  const second = await computeTrace();
-  assert.strictEqual(JSON.stringify(second), JSON.stringify(trace), 'unlinked trace is not deterministic at ' + firstDifference(second, trace));
-  // Every unlinked phase, both hosts and both routes are present, healthy and never called a provider;
-  // the only refused start is the declared #350 Codex read-only research cell.
-  assert.deepStrictEqual(traceProblems(trace), [ISSUE_350_PROBLEM]);
-  assert.deepStrictEqual(Object.keys(trace.phases), [...PHASES]);
-  for (const phase of PHASES) assert.deepStrictEqual(Object.keys(trace.phases[phase]), [...HOSTS]);
-  // The normal mode only reads the owner baseline; it never captures or rewrites it.
-  const stored = readDocument(FIXTURE);
-  assert.strictEqual(stored.status, 'valid', 'baseline fixture must exist and be valid: ' + (stored.reason || stored.status));
-  const expected = stored.document.trace;
-  // The stored bytes and digest stay immutable; only the comparison is projected (see personalCaseProjection).
-  const projectedTrace = personalCaseProjection(trace), historicalExpected = personalCaseProjection(expected);
-  const delta = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/review-policy/distribution-delta.json'), 'utf8'));
-  const routingParity=require('./fixtures/issue-461/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issue-440/distribution.cjs').parityAdapter(require('./fixtures/issue-461/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issues-403-407-integration/parity.cjs'));
-  const projectedExpected = routingParity.afterTrace(issue350Expected(reviewPolicyExpected(historicalExpected, delta)));
-  reviewPolicyDeltaChecks(projectedTrace, historicalExpected, delta);
-  assert.strictEqual(traceDigest(projectedTrace), traceDigest(projectedExpected), 'unlinked trace differs from the owner baseline at ' + firstDifference(projectedTrace, projectedExpected));
-  assert.strictEqual(JSON.stringify(projectedTrace), JSON.stringify(projectedExpected));
-  // The raw stored digest still binds the immutable captured bytes.
-  assert.strictEqual(traceDigest(expected), stored.document.trace_sha256);
-  personalCaseProjectionChecks(assert);
+  const second = await computeTrace({ readProcedures, procedureReadScope });
+  procedureReadScope(() => {
+    assert.strictEqual(JSON.stringify(second), JSON.stringify(trace), 'unlinked trace is not deterministic at ' + firstDifference(second, trace));
+    // Every unlinked phase, both hosts and both routes are present, healthy and never called a provider;
+    // the only refused start is the declared #350 Codex read-only research cell.
+    assert.deepStrictEqual(traceProblems(trace), [ISSUE_350_PROBLEM]);
+    assert.deepStrictEqual(Object.keys(trace.phases), [...PHASES]);
+    for (const phase of PHASES) assert.deepStrictEqual(Object.keys(trace.phases[phase]), [...HOSTS]);
+    // The normal mode only reads the owner baseline; it never captures or rewrites it.
+    const stored = readDocument(FIXTURE);
+    assert.strictEqual(stored.status, 'valid', 'baseline fixture must exist and be valid: ' + (stored.reason || stored.status));
+    const expected = stored.document.trace;
+    // The stored bytes and digest stay immutable; only the comparison is projected (see personalCaseProjection).
+    const projectedTrace = personalCaseProjection(trace), historicalExpected = personalCaseProjection(expected);
+    const delta = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/review-policy/distribution-delta.json'), 'utf8'));
+    const routingParity=require('./fixtures/issue-463/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issue-440/distribution.cjs').parityAdapter(require('./fixtures/issue-463/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issues-403-407-integration/parity.cjs'));
+    const projectedExpected = routingParity.afterTrace(issue350Expected(reviewPolicyExpected(historicalExpected, delta)));
+    reviewPolicyDeltaChecks(projectedTrace, historicalExpected, delta);
+    assert.strictEqual(traceDigest(projectedTrace), traceDigest(projectedExpected), 'unlinked trace differs from the owner baseline at ' + firstDifference(projectedTrace, projectedExpected));
+    assert.strictEqual(JSON.stringify(projectedTrace), JSON.stringify(projectedExpected));
+    // The raw stored digest still binds the immutable captured bytes.
+    assert.strictEqual(traceDigest(expected), stored.document.trace_sha256);
+    personalCaseProjectionChecks(assert);
+  });
 }
 function personalCaseProjectionChecks(assert) {
   const id = 'T-20261103120000-parity-personal', low = id.toLowerCase();
@@ -597,3 +624,4 @@ if (require.main === module) {
     process.exitCode = 1;
   });
 }
+});

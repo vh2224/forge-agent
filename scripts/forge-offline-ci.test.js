@@ -102,10 +102,21 @@ assert.match(offlineBlock, /forge-offline-ci\.js --host \$\{\{ matrix\.host \}\}
 const testBlock = workflow.slice(workflow.indexOf('\n  test:'));
 const testCells = [...testBlock.matchAll(/- os: ([^\s]+)\s+platform: (linux|darwin|win32)\s+shard-index: (\d+)\s+shard-count: (\d+)\s+label: ([^\r\n]+)\s+workers: (\d+)\s+single-worker-jobs: (\d+)/g)]
   .map((match) => ({ os: match[1], platform: match[2], shardIndex: Number(match[3]), shardCount: Number(match[4]), label: match[5], workers:Number(match[6]),singleWorkerJobs:Number(match[7]) }));
-assert.deepStrictEqual(testCells, [['ubuntu-latest','linux',6,2,4],['macos-latest','darwin',8,2,0],['windows-latest','win32',27,2,14]]
+assert.deepStrictEqual(testCells, [['ubuntu-latest','linux',33,2,2],['macos-latest','darwin',41,2,2],['windows-latest','win32',56,2,16]]
   .flatMap(([os,platform,shardCount,workers,singleWorkerJobs])=>Array.from({length:shardCount},(_,shardIndex)=>({os,platform,shardIndex,shardCount,label:`${os}, shard ${shardIndex+1}/${shardCount}`,workers,singleWorkerJobs}))));
 assert.match(testBlock, /forge-ci-parallel\.js --shard-index \$\{\{ matrix\.shard-index \}\} --shard-count \$\{\{ matrix\.shard-count \}\} --jobs "\$\{\{ matrix\.workers \}\}"/);
 assert.match(testBlock,/--single-worker-jobs \$\{\{ matrix\.single-worker-jobs \}\}/);
+const workerPools = Object.fromEntries(['linux', 'darwin', 'win32'].map(platform => [platform,
+  testCells.filter(cell => cell.platform === platform).reduce((sum, cell) =>
+    sum + (cell.shardIndex < cell.singleWorkerJobs ? 1 : cell.workers), 0)]));
+assert.deepStrictEqual(workerPools, { linux: 64, darwin: 80, win32: 96 });
+assert.strictEqual(Object.values(workerPools).reduce((sum, count) => sum + count, 0), 240);
+assert(Object.values(workerPools).every(count=>count<=96));
+const maxParallel=Number(/max-parallel: (\d+)/.exec(testBlock)[1]);assert.strictEqual(maxParallel,32);
+assert(maxParallel*Math.max(...testCells.map(cell=>cell.workers))<=64);
+const releaseChecks = require('./forge-release-checks.js');
+releaseChecks.assertJobMapping(workflow, releaseChecks.POLICY.workflows.ci);
+assert.strictEqual(releaseChecks.expandJobs(releaseChecks.POLICY.workflows.ci).length, 142);
 const compatibilityBlock = workflow.slice(workflow.indexOf('\n  required-offline-windows:'));
 assert.match(compatibilityBlock, /name: Offline \$\{\{ matrix\.host \}\} \/ \$\{\{ matrix\.platform \}\}/);
 assert.match(compatibilityBlock, /platform:\s*\r?\n\s+- linux\s*\r?\n\s+- darwin\s*\r?\n\s+- win32/);

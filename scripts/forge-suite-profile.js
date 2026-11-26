@@ -155,7 +155,7 @@ function validateSuiteProfile(doc) {
   }
   if (doc.shard !== null && closed(doc.shard, ['index', 'count', 'algorithm', 'fallback', 'profile_sha256', 'partition_sha256', 'predicted_ms', 'unprofiled', 'stale'], errors, 'shard')) {
     const s = doc.shard;
-    if (!integer(s.count, 1, 64) || !integer(s.index, 0, s.count - 1)) errors.push('shard: indice-invalido');
+    if (!integer(s.count, 1, 96) || !integer(s.index, 0, s.count - 1)) errors.push('shard: indice-invalido');
     if (!['positional-v1', 'weighted-lpt-v1'].includes(s.algorithm)
       || ![null, 'profile-absent', 'platform-missing', 'platform-unavailable'].includes(s.fallback)) errors.push('shard: algoritmo-invalido');
     if ((s.profile_sha256 !== null && !matches(s.profile_sha256, HASH_RE)) || !matches(s.partition_sha256, HASH_RE)) errors.push('shard: hash-invalido');

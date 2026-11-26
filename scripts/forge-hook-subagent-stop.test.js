@@ -13,6 +13,7 @@ const { spawnSync } = require('child_process');
 
 const hookPath = path.join(__dirname, 'forge-hook.js');
 const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-subagent-stop-'));
+for (const [key,value] of Object.entries({HOME:cwd,USERPROFILE:cwd,CODEX_HOME:path.join(cwd,'codex'),CLAUDE_CONFIG_DIR:path.join(cwd,'claude'),FORGE_HOME:path.join(cwd,'missing-core')})) process.env[key]=value;
 let passed = 0;
 
 function run(input, script = hookPath, extraEnv = {}) {
@@ -24,7 +25,8 @@ function run(input, script = hookPath, extraEnv = {}) {
       ...input,
     }),
     encoding: 'utf8',
-    env: { ...process.env, ...extraEnv },
+    windowsHide: true, timeout: 20000,
+    env: { ...process.env, HOME: cwd, USERPROFILE: cwd, CODEX_HOME: path.join(cwd, 'codex'), CLAUDE_CONFIG_DIR: path.join(cwd, 'claude'), FORGE_HOME: path.join(cwd, 'missing-core'), ...extraEnv },
   });
   assert.strictEqual(result.status, 0, result.stderr);
   return result.stdout.trim();
@@ -123,6 +125,24 @@ try {
       last_assistant_message: '',
     });
     assert.strictEqual(output, '');
+  });
+
+  test('native file profile is not assigned the legacy worker-block repair contract', () => {
+    assert.strictEqual(run({ agent_type: 'forge-native-files', stop_hook_active: false,
+      last_assistant_message: '{"status":"partial"}' }), '');
+  });
+
+  test('LIVE SubagentStop outside a native window is inert, never a joined acknowledgement', () => {
+    const input = { hook_event_name: 'SubagentStop', cwd, session_id: 'native-stop-' + process.pid,
+      agent_type: 'forge-native-files', agent_id: 'observed-child', stop_hook_active: true };
+    const options = { cwd, input: JSON.stringify(input), encoding: 'utf8', windowsHide: true, timeout: 20000,
+      env: { ...process.env, HOME: cwd, USERPROFILE: cwd, CLAUDE_CONFIG_DIR: path.join(cwd,'claude'), FORGE_HOME: path.join(cwd, 'missing-core') } };
+    const result = spawnSync(process.execPath, [hookPath, 'native-live', 'subagent-stop'], options);
+    assert.strictEqual(result.status, 0, result.stderr); assert.deepStrictEqual(JSON.parse(result.stdout), {});
+    assert.doesNotMatch(result.stdout, /joined|terminal|provider_called|published/);
+    const mismatch = spawnSync(process.execPath, [hookPath, 'native-live', 'stop'], options);
+    assert.strictEqual(mismatch.status, 2); assert.match(mismatch.stderr, /native-host-hook-routing/);
+    assert.deepStrictEqual(JSON.parse(mismatch.stdout), {});
   });
 
   // ── Failing open is not the same as succeeding ─────────────────────────────

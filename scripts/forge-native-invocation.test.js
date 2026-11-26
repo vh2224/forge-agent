@@ -85,6 +85,19 @@ function boundedAgentSourceObservations() {
 }
 
 async function main() {
+  // These are forgery negatives, not a live-host positive. The actual positive
+  // requires the original Bridge/Profile/Hook flow and cannot be minted here.
+  for (const intent of [null, {}, { profile_id: 'claude-agent-files-foreground-v1', execution_admitted: false }]) {
+    const result = buildNativeInvocation({ hostRuntime: 'claude',
+      resolvedDispatch: dispatch('claude-sonnet-5-5', 'high', 'claude'),
+      agentType: 'forge-native-files', prompt: 'fixture intent forgery',
+      activeCapabilities: { ...claudeCapabilities, effort_transports: ['agent-argument'], reasoning_efforts: ['high'] },
+      nativeHostIntent: intent, nativeHostRequest: {} });
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.reason_code, 'native-host-profile-required');
+    assert.strictEqual(result.args, null);
+  }
+  console.log('PASS native host intent refuses JSON even when legacy capabilities are supplied');
   boundedAgentSourceObservations();
   await claudeEnvironmentJournalIdentity346();
   await claudeEffortEnvironmentAndResume346();
@@ -571,6 +584,12 @@ async function main() {
 
   const options = { hostRuntime: 'codex', resolvedDispatch: dispatch('gpt-6-luna', 'medium', 'codex'),
     activeCapabilities: codexCapabilities, agentType: 'forge-worker', prompt: 'Fixture only.', forkTurns: 'none' };
+  let forgedCalls = 0;
+  const forgedNativeHost = await invokeNative({ ...options, nativeHostAdmission: { joined: true, provider_called: true }, nativeHostRequest: {} },
+    () => { forgedCalls++; return { status: 'done' }; });
+  assert.equal(forgedNativeHost.ok, false); assert.equal(forgedCalls, 0);
+  assert.equal(forgedNativeHost.provider_called, false, 'admission refusal before original callback is not a provider call');
+  assert.equal(forgedNativeHost.reason_code, 'native-host-native-admission-required');
   let ackReadback = 0;
   const acknowledged = await invokeNative({ ...options, readback: () => { ackReadback++; return null; } },
     async () => ({ agent_id: 'ack-is-not-a-result' }));

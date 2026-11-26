@@ -31,6 +31,31 @@ function nextInput(cwd, host) {
 function withoutVolatile(value) { const copy = JSON.parse(JSON.stringify(value)); delete copy.details?.project_created; return copy; }
 
 try {
+  // Real loop normalpath persists its workflow at the canonical BEGIN, not from payload JSON.
+  for (const workflow of ['canonical-corre\u00e7\u00e3o', 'canonical-correc\u0327a\u0303o']) for (const mode of ['auto', 'task', 'step']) {
+    const loop = require('./forge-loop-controller'), controller = require('./forge-unit-controller');
+    const owner = setup(), payload = nextInput(owner, 'claude');
+    payload.inventory.slices[0].tasks = [];
+    payload.inventory.slices[0].plan_exists = false;
+    payload.inventory.slices[0].research_exists = true;
+    payload.workflow_id = 'payload-is-not-authority';
+    const snapshot = loop.create({ mode, workflow_id: workflow + '-' + mode, host_runtime: 'claude', max_steps: 12 });
+    const decision = loop.advance(snapshot, 'next', payload);
+    const tx = controller.lookupRecord(owner, 'transaction', payload.idempotency_key);
+    assert(tx, 'real loop reached canonical begin');
+    assert.strictEqual(tx.workflow_binding.workflow_id, snapshot.workflow_id);
+    assert(Buffer.from(tx.workflow_binding.workflow_id).equals(Buffer.from(workflow + '-' + mode)), 'loop/BEGIN preserve exact normalization form');
+    assert.strictEqual(tx.workflow_binding.mode, mode);
+    assert.notStrictEqual(tx.workflow_binding.workflow_id, payload.workflow_id);
+    assert.strictEqual(tx.event.workflow_binding_sha256, controller.recordChecksum(tx.workflow_binding));
+    assert(decision.snapshot || decision.workflow_id, 'real loop returned its normal protocol');
+    assert.strictEqual(decision.controller_result.details.transaction.workflow_binding_sha256, tx.event.workflow_binding_sha256);
+    const before = fs.readFileSync(controller.transactionFile(owner, payload.idempotency_key));
+    const retry = orchestrate.next(payload, { workflow: { mode, workflow_id: snapshot.workflow_id, remaining_steps: 1 } });
+    assert.notStrictEqual(retry.outcome, 'failed');
+    assert(fs.readFileSync(controller.transactionFile(owner, payload.idempotency_key)).equals(before));
+  }
+
   // Synthetic controller failure: retain safe context, never arbitrary exception data.
   const diagnosticRoot = setup(), diagnosticInput = nextInput(diagnosticRoot, 'codex');
   const synthetic = Object.assign(new Error('secret-token C:/private/source payload\n' + 'x'.repeat(10000)),

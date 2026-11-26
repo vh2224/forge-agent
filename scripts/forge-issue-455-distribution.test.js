@@ -1,7 +1,18 @@
 'use strict';
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
 const assert=require('node:assert/strict'),fs=require('fs'),path=require('path'),crypto=require('crypto'),zlib=require('zlib');
-const ROOT=path.resolve(__dirname,'..'),successor=require('./fixtures/issue-461/distribution.cjs'),layer=successor.issue455View,previous=require('./fixtures/issue-461/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issues-451-452/distribution.cjs'),data=layer.issue455Layer;
+const {selectCases}=require('./forge-ci-units');
+const CASES=[];
+function test(name,run){CASES.push({name,run});}
+function fixture(){
+ const ROOT=path.resolve(__dirname,'..'),successor=issue463SourceConsumer,layer=successor.issue455View,data=layer.issue455Layer;
 const read=successor.projectRead(file=>fs.readFileSync(path.join(ROOT,file))),hash=b=>crypto.createHash('sha256').update(b).digest('hex');
+ return {ROOT,layer,data,read,hash};
+}
+
+test('#455 core provenance, complete positive delegates, projections and census',()=>{
+ const {ROOT,layer,data,read,hash}=fixture();
+const previous=issue463SourceConsumer.loadHistoricalFixture('scripts/fixtures/issues-451-452/distribution.cjs');
 assert.equal(data.provenance.base_revision,"18db6e64aa3f62ad3f94b9747f8aec5d5fad3675");assert.equal(data.provenance.source_head,"18db6e64aa3f62ad3f94b9747f8aec5d5fad3675");assert.deepEqual(data.provenance.issues,[455]);
 assert.equal(data.predecessor_layer_sha256,hash(JSON.stringify(previous.issues451452Layer)));assert.strictEqual(layer.issues451452Layer,previous.issues451452Layer);
 assert.deepEqual(data.provenance.source_paths,["CHANGELOG.md","scripts/forge-protected-owner-activity.js","scripts/forge-protected-owner-activity.test.js","scripts/forge-smoke.js","shared/forge-owner-recovery.md"]);assert.deepEqual(data.provenance.consumer_paths,["scripts/forge-ci-latency-distribution.test.js","scripts/forge-claude-renderer.test.js","scripts/forge-communication-surfaces.test.js","scripts/forge-dispatch-source-guard.test.js","scripts/forge-incomplete-resume-distribution.test.js","scripts/forge-issue-399-distribution.test.js","scripts/forge-issue-401-distribution.test.js","scripts/forge-issue-407-distribution.test.js","scripts/forge-issue-414-distribution.test.js","scripts/forge-issue-416-distribution.test.js","scripts/forge-issue-418-distribution.test.js","scripts/forge-issue-439-distribution.test.js","scripts/forge-issue-440-distribution.test.js","scripts/forge-issue-440-docs.test.js","scripts/forge-issue-448-distribution.test.js","scripts/forge-issue-campaign-distribution.test.js","scripts/forge-issues-403-404-distribution.test.js","scripts/forge-issues-403-407-integration.test.js","scripts/forge-issues-405-406-distribution.test.js","scripts/forge-issues-410-413-distribution.test.js","scripts/forge-issues-414-418-integration.test.js","scripts/forge-issues-420-424-distribution.test.js","scripts/forge-issues-429-432-distribution.test.js","scripts/forge-issues-434-436-distribution.test.js","scripts/forge-issues-442-446-distribution.test.js","scripts/forge-issues-451-452-distribution.test.js","scripts/forge-milestone-time-chain.test.js","scripts/forge-project-context.test.js","scripts/forge-review-policy-distribution.test.js"]);
@@ -13,19 +24,11 @@ const projected=layer.projectRead();for(const[file,row]of Object.entries(data.fi
  assert.equal(hash(read(file)),row.after);
  if(row.before===null){assert.equal(row.attributed_before,null);assert.equal(row.before_gzip_base64,null);assert(projected(file).equals(read(file)),'new measured file is retained '+file);}
  else{const before=zlib.gunzipSync(Buffer.from(row.before_gzip_base64,'base64'));assert.equal(hash(before),row.before);assert(projected(file).equals(before),'exact prior bytes '+file);}
- const foreign=Buffer.concat([read(file),Buffer.from('\n// foreign unmeasured drift\n')]),readRaw=p=>p===file?foreign:read(p);
- assert(layer.projectRead(readRaw)(file).equals(foreign),'foreign bytes are never rewound '+file);assert.throws(()=>layer.verifyCurrent({readRaw}),/issue455 measured current source/);
 }
-const fixturePaths=[];function walk(dir){for(const entry of fs.readdirSync(path.join(ROOT,dir),{withFileTypes:true})){const file=dir+'/'+entry.name;if(file==='scripts/fixtures/issue-455'||file==='scripts/fixtures/issues-457-458'||file==='scripts/fixtures/docs-cleanup'||file==='scripts/fixtures/issue-461')continue;assert(!entry.isSymbolicLink());if(entry.isDirectory())walk(file);else{assert(entry.isFile());fixturePaths.push(file);}}}walk('scripts/fixtures');fixturePaths.sort();assert.deepEqual(fixturePaths,Object.keys(data.historical_fixtures).sort(),'no published fixture removed or unknown fixture added');
+const fixturePaths=[];function walk(dir){for(const entry of fs.readdirSync(path.join(ROOT,dir),{withFileTypes:true})){const file=dir+'/'+entry.name;if(['scripts/fixtures/issue-463/README.md','scripts/fixtures/issue-463/distribution-delta.json','scripts/fixtures/issue-463/distribution.cjs'].includes(file)){assert(entry.isFile()&&!entry.isSymbolicLink(),'exact own463 regular member already authenticated by the current Top guard');continue;}if(file==='scripts/fixtures/issue-455'||file==='scripts/fixtures/issues-457-458'||file==='scripts/fixtures/docs-cleanup'||file==='scripts/fixtures/issue-461')continue;assert(!entry.isSymbolicLink());if(entry.isDirectory())walk(file);else{assert(entry.isFile());fixturePaths.push(file);}}}walk('scripts/fixtures');fixturePaths.sort();assert.deepEqual(fixturePaths,Object.keys(data.historical_fixtures).sort(),'no published fixture removed or unknown fixture added');
 for(const[file,row]of Object.entries(data.historical_fixtures)){const b=read(file);assert.equal(hash(b),row.sha256);assert.equal(b.length,row.bytes);}
 assert.equal(hash(fixturePaths.join('\n')+'\n'),data.provenance.historical_list_sha256);
-const historical='scripts/fixtures/issues-451-452/distribution-delta.json';assert.throws(()=>layer.verifyCurrent({readRaw:file=>file===historical?Buffer.concat([read(file),Buffer.from(' ')]):read(file)}),/immutable published fixture/);
 for(const[file,replacements]of Object.entries(data.provenance.consumer_replacements)){let before=zlib.gunzipSync(Buffer.from(data.files[file].before_gzip_base64,'base64')).toString('utf8');for(const change of replacements){assert.equal(before.split(change.before).length,2);before=before.replace(change.before,change.after);}assert.equal(read(file).toString('utf8'),before,'only declared consumer changes '+file);}
-const forged=structuredClone(data);forged.provenance.issues=[];assert.throws(()=>layer.validate({artifacts,issue455LayerValue:forged}),/independent measured delta/);
-// Preserve the predecessor's own negative target rather than masking it with this census.
-const target=previous.issues451452Layer.provenance.source_paths[0],priorRead=layer.projectRead();
-assert.throws(()=>layer.issues451452View.validate({artifacts,readRaw:file=>file===target?Buffer.concat([priorRead(file),Buffer.from('\nforeign\n')]):priorRead(file)}));
-assert.equal(layer.issues451452View.validate({artifacts}),true);
 const smokeRow=data.files['scripts/forge-smoke.js'],smokeCurrent=read('scripts/forge-smoke.js').toString('utf8'),smokeBefore=zlib.gunzipSync(Buffer.from(smokeRow.before_gzip_base64,'base64')).toString('utf8');
 assert.notEqual(hash(smokeCurrent),hash(smokeBefore));
 const whitelist="    'scripts/fixtures/issues-451-452/distribution-delta.json',",added="    'scripts/fixtures/issue-455/distribution-delta.json',",nl=smokeBefore.includes('\r\n')?'\r\n':'\n';assert.equal(smokeBefore.split(whitelist).length,2);assert(!smokeBefore.includes(added));assert.equal(smokeCurrent,smokeBefore.replace(whitelist,whitelist+nl+added),'exact one-line smoke whitelist, no broader source adoption');
@@ -36,4 +39,33 @@ for(const method of ['previousSmoke','predecessorSmoke']){
  const inherited=observe(()=>previous[method](foreign)),current=observe(()=>layer[method](foreign));assert.deepEqual(current,inherited,'foreign smoke retains the actual predecessor return or named refusal '+method);assert.notDeepEqual(current,{kind:'returned',value:expected},'foreign smoke cannot become the valid projection '+method);
 }
 for(const key of ['rendered','surfaces','samples','sample_projection','registry','parity'])assert.deepEqual(layer.issue440Layer[key],previous.issue440Layer[key]);
+});
+
+for(let group=0;group<5;group++)test(`#455 source drift negatives ${group+1}/5`,()=>{
+ const {layer,data,read}=fixture();
+ const files=Object.entries(data.files);assert.equal(files.length,35);
+ for(const[file,row]of files.slice(group*7,(group+1)*7)){
+ const foreign=Buffer.concat([read(file),Buffer.from('\n// foreign unmeasured drift\n')]),readRaw=p=>p===file?foreign:read(p);
+ assert(layer.projectRead(readRaw)(file).equals(foreign),'foreign bytes are never rewound '+file);assert.throws(()=>layer.verifyCurrent({readRaw}),/issue455 measured current source/);
+ }
+});
+
+test('#455 immutable history, forged provenance and predecessor negatives',()=>{
+ const {ROOT,layer,data,read}=fixture();
+const previous=issue463SourceConsumer.loadHistoricalFixture('scripts/fixtures/issues-451-452/distribution.cjs');
+const artifacts=require('./forge-claude-renderer').render({repo:ROOT,projectRoot:ROOT,claudeHome:path.join(ROOT,'unused-host'),forgeHome:path.join(ROOT,'unused-core')}).artifacts;
+const historical='scripts/fixtures/issues-451-452/distribution-delta.json';assert.throws(()=>layer.verifyCurrent({readRaw:file=>file===historical?Buffer.concat([read(file),Buffer.from(' ')]):read(file)}),/immutable published fixture/);
+const forged=structuredClone(data);forged.provenance.issues=[];assert.throws(()=>layer.validate({artifacts,issue455LayerValue:forged}),/independent measured delta/);
+// Preserve the predecessor's own negative target rather than masking it with this census.
+const target=previous.issues451452Layer.provenance.source_paths[0],priorRead=layer.projectRead();
+assert.throws(()=>layer.issues451452View.validate({artifacts,readRaw:file=>file===target?Buffer.concat([priorRead(file),Buffer.from('\nforeign\n')]):priorRead(file)}));
+assert.equal(layer.issues451452View.validate({artifacts}),true);
+});
+
+issue463SourceConsumer.validateSourceConsumer(()=>{
+ const selected=selectCases(CASES);
+ for(const row of selected){row.run();console.log('PASS '+row.name);}
+ if(selected.length===CASES.length){
 console.log('PASS #455 additive distribution: one predecessor delegation, exact census, existing/new-file drift negatives, historical views and immutable published fixtures');
+ }
+});

@@ -36,3 +36,25 @@ Timestamp proximity never proves authorship; preserve historical recovery budget
 Honor auto_commit and deployment constraints. Owner publication validates the
 scoped result, protected metadata, exact inputs and code delta independently.
 Return root-qualified changes and evidence; preserve STATE and controller state.
+
+## Retained file-tools host owner
+
+For the supported native milestone execution profile, the normal controller BEGIN
+precedes the retained owner factory and carries the existing workflow binding.
+Owner input is a closed set of selectors and optional verification coverage data;
+the factory reobserves actor, run, claim/generation, roots, BEGIN/lease, route,
+questions, security readiness and effective plan gate before opening the window.
+A prepared intent is not invocation admission: the actual authenticated hook and
+original callback seal bind tool arguments before execution. Model/effort and phase
+remain the resolver's; neither agent defaults nor JSON approval supply authority.
+
+Only the dedicated file-tools worker performs measured Read/Write operations.
+The parent consumes returned exact control commands and the retained captured
+result, without writing a candidate/receipt in the protected window. Returned,
+joined, verified, published and settled are separate facts. Full publication uses
+original opaque producer witnesses and physical manifest/receipt/artifact readback;
+pending publication admits only the exact recorded before-or-after artifacts.
+Reobserve owner authority and the same genuine profile at every boundary. Keep
+raw diagnostic bytes on parse/refusal; unknown provider activity remains unknown.
+File-path locators, HMAC under a cooperative boundary and PID exit do not prove
+kernel identity, arbitrary same-account isolation, Agent join or applied effort.

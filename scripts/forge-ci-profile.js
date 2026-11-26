@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { TextDecoder } = require('util');
-const { buildShardProfile, validateShardProfile, parseShardPlanLine, planShards,
+const { buildShardProfile, validateShardProfile, parseShardPlanLine, planShards, loadPlanningOverrides,
   PLATFORMS, SUITE_ID_RE, compareCodeUnits } = require('./forge-ci-shards.js');
 const { parseSuiteProfile, SUITE_PROFILE_SCHEMA } = require('./forge-suite-profile.js');
 const { expandJobs, POLICY } = require('./forge-release-checks.js');
@@ -292,14 +292,16 @@ function buildProfileReport({ sources = [], jobs = [], runs = [], api_sources = 
   for (const { platform, count } of partitions) {
     const positional = planShards({ suites, index: 0, count, platform });
     const estimates = unitApi ? unitApi.unitWeights(unitInventory, shard_profile, platform) : {};
-    const weighted = planShards({ suites, index: 0, count, platform, profile: shard_profile || { state: 'absent' }, estimatedWeights: estimates });
+    const planningOverrides = unitApi ? loadPlanningOverrides(shard_profile, platform, suites) : {};
+    const weighted = planShards({ suites, index: 0, count, platform, profile: shard_profile || { state: 'absent' }, estimatedWeights: estimates, planningOverrides });
     const weights = shard_profile && shard_profile.doc.platforms[platform];
     const positionalMs = weights && weights.status === 'observed' ? positional.shards.map(shard => shard.reduce((total, suite) => total
-      + (Object.hasOwn(weights.weights_ms, suite) ? weights.weights_ms[suite]
+      + (Object.hasOwn(planningOverrides, suite) ? planningOverrides[suite]
+        : Object.hasOwn(weights.weights_ms, suite) ? weights.weights_ms[suite]
         : Object.hasOwn(estimates, suite) ? estimates[suite] : weights.default_weight_ms), 0)) : null;
-    predictions.push({ status: 'estimated', label: 'Estimativa sobre pesos históricos PASS; não é medição hospedada nem ganho comprovado.',
+    predictions.push({ status: 'estimated', label: 'Estimativa sobre pesos históricos PASS e overrides explícitos de planejamento quando presentes; não é medição hospedada nem ganho comprovado.',
       platform, count, universe_size: suites.length, profile_sha256: weighted.profile_sha256,
-      ...(partition_suites ? { partition_suites: true, estimated_unit_weights: estimates } : {}),
+      ...(partition_suites ? { partition_suites: true, estimated_unit_weights: estimates, planning_overrides: planningOverrides } : {}),
       positional: { algorithm: positional.algorithm, suite_counts: positional.shards.map(row => row.length), predicted_ms: positionalMs },
       weighted: { algorithm: weighted.algorithm, fallback: weighted.fallback, suite_counts: weighted.shards.map(row => row.length),
         predicted_ms: weighted.predicted_ms, unprofiled: weighted.unprofiled, stale: weighted.stale } });
@@ -457,7 +459,7 @@ function main(args = process.argv.slice(2)) {
       }
       const partitions = options.partition.map(value => {
         const match = /^(win32|linux|darwin):([1-9]\d?)$/.exec(value);
-        if (!match || +match[2] > 64) fail('ci-profile-usage');
+        if (!match || +match[2] > 96) fail('ci-profile-usage');
         return { platform: match[1], count: +match[2] };
       });
       const apiSources = reads.filter(row => ['jobs', 'runs'].includes(row.type)).map(row => ({

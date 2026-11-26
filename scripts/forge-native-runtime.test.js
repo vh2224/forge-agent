@@ -185,6 +185,22 @@ test('native Claude contracts remain represented in the capability catalog', () 
     assert.strictEqual(entry.hosts.codex, codex, `${id} Codex status must match the projected surface`);
     assert(!['implemented', 'demonstrated'].includes(entry.hosts.codex), `${id} must not claim a Codex implementation early`);
   }
+  // This is an optional file-only profile, not generic native dispatch.
+  // Codex receives its declaration but has no executable LIVE bridge claim.
+  const fileWorker = byId.get('agent-forge-native-files');
+  assert(fileWorker, 'the published native file worker must remain cataloged');
+  assert.strictEqual(fileWorker.kind, 'agent');assert.strictEqual(fileWorker.owner, 'execution');
+  assert.strictEqual(fileWorker.required, false, 'the specialized profile is not a global host requirement');
+  assert.strictEqual(fileWorker.classification, 'conditional');
+  assert.deepStrictEqual(fileWorker.hosts, { claude: 'conditional', codex: 'distributed' });
+  assert.deepStrictEqual(fileWorker.platforms, { macos: 'unavailable', windows: 'conditional', linux: 'unavailable' });
+  assert.deepStrictEqual(fileWorker.probe, { kind: 'filesystem', path: 'agents/forge-native-files.md' });
+  assert(!fileWorker.evidence, 'catalog presence is not demonstrated host execution');
+  const fileDefinition = read('agents/forge-native-files.md');
+  assert.match(fileDefinition, /^tools: Read, Write$/m);assert.match(fileDefinition, /^background: false$/m);
+  assert.match(fileDefinition, /Do not run commands, spawn agents, use MCP tools/);
+  assert.match(fileDefinition, /ORIGINAL Agent tool response/);
+  assert.match(fileDefinition, /owner runs verification commands/);
   for (const agent of agentFiles) {
     const id = `agent-${path.basename(agent, '.md')}`;
     assert(byId.has(id), `${agent} must remain represented by the catalog`);

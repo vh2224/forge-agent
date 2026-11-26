@@ -83,7 +83,7 @@
     {
       "id": "execution",
       "path": "shared/forge-procedure-execution.md",
-      "sha256": "66a61fce0b7c071d29297dd6fa87358cc4eab2380815e72a4bccd7d6569aad98",
+      "sha256": "9106c005734d9a81c8b3e33a2487694afe368ae26235135b43a1d0947cc529fd",
       "status": "ready",
       "owner": "T03",
       "dependencies": [
@@ -165,7 +165,7 @@
     {
       "id": "recovery",
       "path": "shared/forge-procedure-recovery.md",
-      "sha256": "83be64144392d75aace62a5eb8254eb28af446b47559864dce7556aa24389ea4",
+      "sha256": "12e64fca52c72c72e41cea3f59eacd62b784d6b0b9815c7acfd35bcef4ad6441",
       "status": "ready",
       "owner": "T04",
       "dependencies": [

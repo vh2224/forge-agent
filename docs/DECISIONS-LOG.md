@@ -676,3 +676,33 @@ Nos testes de distribuição, uma amostra privada de `checkPins()` atingiu o lim
 A capacidade do CI mantém os mesmos testes, perfis publicados, gates e timeout de 15 minutos por job. A matriz passa a Linux6/jobs2/single4, macOS8/jobs2/single0 e Windows27/jobs2/single14: são 8+16+40=64 lanes agregadas, preservando o limite existente, e 53 checks de CI, incluindo os nove aliases obrigatórios. A projeção offline sobre os resultados observados encontrou, para as 16 lanes macOS, máximo de 791,931 s; somar o overhead de referência de 46,604 s deixa margem projetada de 61,465 s, sem pressupor ganho por menor contenção. Essa projeção orienta a capacidade e não prova duração futura nem CI aprovado; filas, setup e variação de execução continuam exigindo observação real. A alternativa com três workers macOS foi rejeitada antes de gerar Source porque exigiria 72 lanes e violaria o limite64. Os novos bytes de workflow, política e testes são medidos na própria camada461, com retorno exato aos preimages fca e recusa de diferenças adicionais; os 228 fixtures históricos permanecem imutáveis.
 
 O perfil corrente de pesos do CI passa a scripts/ci-profiles/issue-461-d046.json, fora dos fixtures publicados, gerado pelas APIs canônicas a partir dos64 JSON completos da tentativa1 do run45520609582 (head d04642c71d400c73e8774978973b2a3bd39f37dc; checkout e97429c2987be07324e74d1da415a45c64f716ab). São601 unidades PASS por plataforma/1803 observações, sem misturar pesos históricos ou preencher dados censurados. A topologia53jobs/64lanes, weighted-lpt-v1 e timeout15min permanecem iguais; o replay prevê máximo497145ms, sem provar setup/contenção/duração futura ou aprovação de CI. O perfil publicado563530 e os228 fixtures continuam imutáveis; o novo arquivo tem ausência fca comprovada, guard físico do postimage atual e nenhuma preimage inventada.
+
+### 2026-11-25 — Owner nativo retido e perfil de ferramentas de arquivo (#463)
+
+Problema: uma intenção de despacho, retorno textual ou PID encerrado não prova
+que um Agent e seus escritores conhecidos retornaram, nem publica artefatos com
+as autoridades correntes. O caminho usa BEGIN/workflow/lease/claim já canônicos,
+um owner retido e entrada fechada de seletores/declarações. A preparação produz
+intenção selada; a admissão exige observação genuína do hook antes da execução.
+O worker dedicado usa Read/Write e o parent consome apenas os comandos de controle
+exatos emitidos pelo produtor, sem escrever resultado/candidato/recibo ou owner
+.gsd. O owner retém bytes antes de parsear e verifica/publica separadamente.
+
+Decisão: testemunhos opacos originais vinculam retorno, ready pendente e publicação.
+Somente transições exatas before/after de artefatos e lease conhecida podem ser
+projetadas; nenhum drift global é ignorado. Replay é do owner/attempt original
+vivo, sem reserva/inferência nova; perda do owner continua recusa quando faltam
+custódia e join. Recuperação genérica de janela órfã permanece sidecar-only.
+O hook direto reobserva o produtor fixo e bootstrap, usando HMAC em fronteira
+cooperativa. Não oferece autenticação de peer do kernel nem sandbox contra a
+mesma conta. Nonce e localizador são correlação/dados, não autoridade.
+
+Evidência e limites: o probe privado observado capturou operações e uso real,
+mas o resultado original recusou extras de schema e o parent foi interrompido;
+o reprocessamento DATA-ONLY aceitou a captura, sem converter a execução em PASS
+ou demonstrar join. Fixtures privadas de IPC têm controles positivos/negativos;
+um controle de ACL recusado foi preservado. R2 e o controle ACL-only foram
+executados e recusados com PrivilegeNotHeld; o controle físico negativo de ACL
+mais amplo não foi exercitado e não houve nova tentativa. Esses dados não provam o perfil operacional integral, esforço efetivamente
+aplicado, CI, merge, instalação ou aceite. Código e procedimentos preparados
+exigem revisão e checks canônicos após rebind da base; nada declara uma release.

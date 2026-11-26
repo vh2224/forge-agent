@@ -635,6 +635,19 @@ async function publicImmediateGate({ short = false, identity = 'observed', recei
       console.log('PASS issue288 immediate identity: refused publication cannot append identity');
       return;
     }
+    if (receipt !== 'intact') {
+      // completed is an observer notification; it cannot bless a mutated original receipt.
+      const refusal = receipt === 'foreign' ? 'native-publication-evidence-changed' : 'native-publication-read-source_too_large';
+      try {
+        await assert.rejects(sidecar.recoverUnitSidecar(f.request, f.recovery, runtime), error => error.code === refusal);
+        assert.equal(calls, 1);
+        assert(retainedReceipt && intactReceipt, 'the genuine completed observer performed the intended receipt mutation');
+        assert.equal(lines(path.join(f.owner, '.gsd/forge/events.jsonl')).filter(row => row.event === 'agent-identity').length, 0);
+        assert.deepEqual(fs.readFileSync(f.receiptFile), receiptBefore, 'original retained input receipt remains unchanged');
+      } finally { if (retainedReceipt && intactReceipt) fs.writeFileSync(retainedReceipt, intactReceipt); }
+      console.log('PASS issue288 publication receipt tamper: exact original evidence guard refuses before minting published authority; no identity appended');
+      return;
+    }
     const result = await sidecar.recoverUnitSidecar(f.request, f.recovery, runtime);
     assert.equal(calls, 1);
     assert.equal(result.result.published.phase, 'ready'); assert(result.result.verified.capture.passed);
@@ -671,8 +684,10 @@ async function publicImmediateGate({ short = false, identity = 'observed', recei
 }
 
 async function publicIdentityChannels() {
+  let caseIndex = 0;
   for (const options of [{ short: true }, { identity: 'unknown' }, { identity: 'conflicting' },
     { receipt: 'altered' }, { receipt: 'foreign' }, { receipt: 'open' }, { publication: 'failed' }]) {
+    console.log(JSON.stringify({ kind: 'agent-phase-identity-case', index: caseIndex++, options }));
     await publicImmediateGate(options);
   }
 }
@@ -776,6 +791,25 @@ async function runCohort(name) {
     await observerParity(); cliLimits(); cliFreshness();
   } finally { xllm.runExecute = realRunExecute; }
 }
+function closedVerificationDiagnostic(error) {
+  try {
+    const diagnostic = error?.diagnostic;
+    const categories = new Set(['root-unverified', 'command-failed', 'root-failed', 'expected-output-missing', 'artifact-failed', 'capture-failed']);
+    const integer = value => Number.isSafeInteger(value) ? value : null;
+    return { code: error?.code === 'verification-failed' ? 'verification-failed' : 'other',
+      diagnostic: diagnostic && typeof diagnostic === 'object' ? {
+        schema_version: diagnostic.schema_version === 1 ? 1 : null,
+        stage: diagnostic.stage === 'verification' ? 'verification' : 'unknown',
+        failures: Array.isArray(diagnostic.failures) ? diagnostic.failures.slice(0, 32).map(row => ({
+          category: categories.has(row?.category) ? row.category : 'unknown',
+          ...(Object.hasOwn(row || {}, 'root_index') ? { root_index: integer(row.root_index) } : {}),
+          ...(Object.hasOwn(row || {}, 'check_index') ? { check_index: integer(row.check_index) } : {}),
+          ...(Object.hasOwn(row || {}, 'exit_code') ? { exit_code: integer(row.exit_code) } : {}),
+        })) : null,
+        truncated: typeof diagnostic.truncated === 'boolean' ? diagnostic.truncated : null,
+      } : null };
+  } catch { return { code: 'unknown', diagnostic: null }; }
+}
 async function main() {
   const selected = process.argv.find(arg => arg.startsWith('--review-regression='));
   if (selected) {
@@ -801,5 +835,6 @@ main().then(() => console.log(process.argv.some(arg => arg.startsWith('--review-
   : process.argv.some(arg => arg.startsWith('--phase-cohort=')) ? 'forge-agent-phase: cohort passed; full suite not run'
     : 'forge-agent-phase: all scenarios passed')).catch(error => {
   console.error(error);
+  console.error('forge-agent-phase diagnostic: ' + JSON.stringify(closedVerificationDiagnostic(error)));
   process.exitCode = 1;
 });

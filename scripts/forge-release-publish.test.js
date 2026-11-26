@@ -93,7 +93,11 @@ function fixture(options = {}) {
       kind = 'run'; const key = url.pathname.endsWith('/101') ? 'ci' : 'app'; response = { data: clone(state.runs[key][0]) };
     } else if (/\/actions\/runs\/(101|202)\/attempts\/\d+\/jobs$/.test(url.pathname)) {
       kind = 'jobs'; const key = url.pathname.includes('/101/') ? 'ci' : 'app';
-      response = { data: { total_count: state.jobs[key].length, jobs: clone(state.jobs[key]) } };
+      const page = Number(url.searchParams.get('page') || '1'), perPage = Number(url.searchParams.get('per_page') || '100');
+      assert(Number.isSafeInteger(page) && page > 0); assert(Number.isSafeInteger(perPage) && perPage > 0 && perPage <= 100);
+      const start = (page - 1) * perPage, next = new URL(url); next.searchParams.set('page', String(page + 1));
+      response = { data: { total_count: state.jobs[key].length, jobs: clone(state.jobs[key].slice(start, start + perPage)) },
+        headers: start + perPage < state.jobs[key].length ? { link: `<${next.href}>; rel="next"` } : {} };
     } else if (url.pathname.startsWith(`${BASE}/git/ref/tags/`)) {
       kind = 'tag'; response = state.tag ? { data: clone(state.tag) } : notFound();
     } else if (url.pathname.startsWith(`${BASE}/releases/tags/`)) {

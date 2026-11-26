@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 'use strict';
-const unitEntry = require('./fixtures/issue-461/distribution.cjs');
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+
+const unitEntry = require('./fixtures/issue-463/distribution.cjs');
 
 const assert = require('assert');
 const crypto = require('crypto');
@@ -192,7 +195,12 @@ try {
   const hook = first.artifacts.find((item) => item.source === 'scripts/forge-hook.js');
   assert(!settings.content.startsWith('<!--'));
   assert(!hook.content.startsWith('<!--'));
-  assert.match(settings.content, /CLAUDE_PROJECT_DIR/);
+  // This operator JSONC projection is passive. The real merge-settings CLI
+  // owns executable physical Node/runtime-home hooks and is tested separately.
+  const projectedSettings = require('./forge-prefs').parseJsonc(settings.content);
+  assert.strictEqual(projectedSettings.ok, true, 'the passive settings projection is valid canonical JSONC');
+  assert.deepStrictEqual(projectedSettings.value, { hooks: {} });
+  assert.doesNotMatch(settings.content, /CLAUDE_PROJECT_DIR/, 'the projection contains no unresolved executable project placeholder');
 
   // Claude-only rendering does not resolve, read or create a Codex home.
   const codexHome = path.join(root, 'Codex Home Ω');
@@ -275,7 +283,11 @@ try {
     fs.rmSync(operatorSettings, { force: true });
     renderer.write({ ...opts, update: true, migrateLegacy: true });
     assert(fs.existsSync(operatorSettings), 'instalação limpa deixou de projetar settings.json');
-    JSON.parse(fs.readFileSync(operatorSettings, 'utf8')); // strict JSON — a `//` comment here is a defect
+    // The fresh renderer projection is passive JSONC. merge-settings owns the
+    // strict executable installed settings; all existing operator bytes above remain protected.
+    const freshSettings = require('./forge-prefs').parseJsonc(fs.readFileSync(operatorSettings, 'utf8'));
+    assert.strictEqual(freshSettings.ok, true, 'fresh projection uses the canonical JSONC parser');
+    assert.deepStrictEqual(freshSettings.value, { hooks: {} }, 'fresh passive settings do not invent executable hooks');
     fs.rmSync(home, { recursive: true, force: true });
   }
 
@@ -444,3 +456,4 @@ try {
 } finally {
   cleanup();
 }
+});

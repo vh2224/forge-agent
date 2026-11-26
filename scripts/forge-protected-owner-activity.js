@@ -256,6 +256,371 @@ async function withExecutionActivity(request, runtime, action) {
   return value;
 }
 
+// Native custody is a distinct live scope. No PID, skipped spawn or serialized
+// joined flag can close this window. The caller still owns normal lifecycle.
+async function withNativeExecutionActivity(request, profileHandle, action) {
+  if (typeof action !== 'function' || !request || request.scope !== 'milestone'
+      || request.unitType !== 'execute-task' || request.phase !== 'execute'
+      || request.route?.worker_mode !== 'native' || !request.execution_contract
+      || request.ownerBroker || request.memberHandle !== undefined || request.batch_id !== undefined) fail('native-owner-activity-scope-required');
+  const profile = require('./forge-native-host-profile');
+  if (typeof profile.assertActivityAdmission !== 'function') fail('native-owner-profile-admission-unavailable');
+  const initialAdmission = syncProfile('assertActivityAdmission', profileHandle, request); // genuine intent, no call IDs yet
+  const r = structuredClone(request), requestSha = roots.digest(r);
+  const owner = fs.realpathSync.native(r.contextRoot || r.cwd), unit = 'execute-task/' + r.taskId;
+  const runs = require('./forge-runs'), controller = require('./forge-unit-controller');
+  const execution = require('./forge-task-execution'), managed = require('./forge-managed-attribution');
+  // An inherited managed journal is a separately selected external writer. Do
+  // not activate an unadmitted .managed-surfaces directory inside the channel.
+  if (managed.currentAttribution(owner)?.active) fail('native-owner-managed-admission-unavailable');
+  require('./forge-milestone-time-admission').assertTransportEntry({ cwd: owner, milestone: r.milestoneId, unit });
+  const leaseFile = lease.leaseFile(owner, unit), observed = lease.readLease(leaseFile);
+  if (!lease.validRecord(observed.record, unit)) fail('native-owner-lease-required');
+  const original = observed.record, token = original.owner_token, generation = original.generation;
+  const initialLeaseBytes = regular(leaseFile);
+  if (roots.digest(JSON.parse(initialLeaseBytes)) !== roots.digest(original)) fail('protected-owner-source-unstable');
+  const begin = controller.lookupRecord(owner, 'transaction', original.request_id);
+  if (!begin || begin.action !== 'begin' || begin.phase !== 'committed' || begin.unit?.key !== unit
+      || begin.milestone !== r.milestoneId || begin.lease_generation !== generation
+      || begin.owner_digest !== 'sha256:' + sha(token) || begin.host_runtime !== r.route.host_runtime) fail('protected-owner-begin-mismatch');
+  const beginSha = controller.recordChecksum(begin), runId = r.runId || r.milestoneId;
+  const run = runs.get(owner, runId), actor = runs.observeHostSession(r.route.host_runtime, run?.session_id);
+  if (!actor || !run?.active || run.session_id !== actor.sessionId || run.host_runtime !== actor.hostRuntime) fail('protected-owner-session-required');
+  function relayReference(admission) {
+    if (!admission || typeof admission !== 'object' || Array.isArray(admission)
+        || Object.getPrototypeOf(admission) !== Object.prototype
+        || Object.values(Object.getOwnPropertyDescriptors(admission)).some(d => !Object.hasOwn(d, 'value'))) fail('native-owner-relay-admission-shape');
+    const ref = admission.live_relay_reference, live = 'claude-agent-files-foreground-v1';
+    if (ref === undefined) { if (admission.profile_id === live) fail('native-owner-live-relay-required');return null; }
+    const fields = ['protocol_version','kind','directory','endpoint','attempt_id','dispatch_id','request_sha256','host_session_sha256','profile_id'];
+    if (!ref || typeof ref !== 'object' || Array.isArray(ref) || Object.getPrototypeOf(ref) !== Object.prototype
+        || Reflect.ownKeys(ref).some(k => typeof k !== 'string')
+        || Object.values(Object.getOwnPropertyDescriptors(ref)).some(d => !Object.hasOwn(d, 'value') || !d.enumerable)
+        || Object.keys(ref).sort().join(',') !== [...fields].sort().join(',')) fail('native-owner-live-relay-shape');
+    if (ref.protocol_version !== 1 || ref.kind !== 'native-host-live-relay' || ref.profile_id !== live
+        || admission.profile_id !== live || ref.dispatch_id !== r.dispatchId || ref.request_sha256 !== requestSha
+        || ref.host_session_sha256 !== roots.digest(actor.sessionId)
+        || typeof ref.attempt_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(ref.attempt_id)
+        || typeof ref.dispatch_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(ref.dispatch_id)) fail('native-owner-live-relay-binding');
+    for (const key of ['directory','endpoint']) if (typeof ref[key] !== 'string' || !ref[key]
+        || ref[key].length > (key === 'directory' ? 4096 : 4096 + path.sep.length + 'owner.sock'.length)
+        || /[\x00-\x1f\x7f]/.test(ref[key])) fail('native-owner-live-relay-path');
+    if (!path.isAbsolute(ref.directory) || roots.key(fs.realpathSync.native(ref.directory)) !== roots.key(ref.directory)
+        || roots.key(ref.directory) !== roots.key(path.dirname(r.resultFile))) fail('native-owner-live-relay-directory');
+    const stat = fs.lstatSync(ref.directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) fail('native-owner-live-relay-directory');
+    for (const root of [owner, ...r.execution_contract.code_roots.map(row => row.path)])
+      if (roots.key(root) === roots.key(ref.directory) || roots.within(root, ref.directory)) fail('native-owner-live-relay-inside-root');
+    const endpoint = process.platform === 'win32' ? '\\\\.\\pipe\\forge-native-' + sha(ref.directory) : path.join(ref.directory, 'owner.sock');
+    if (ref.endpoint !== endpoint) fail('native-owner-live-relay-endpoint');
+    // Locator data only. Caller/parent/source/actor/window authentication and
+    // actual native execution admission remain in the receiving host ingress.
+    return Object.freeze(Object.fromEntries(fields.map(key => [key, ref[key]])));
+  }
+  const liveRelay = relayReference(initialAdmission);
+  const claimSha = roots.digest(run.write_claim), planSha = sha(regular(r.planFile, 2 * 1024 * 1024));
+  const timeout = require('./forge-worker-timeout'), duration = timeout.protectedWindowMs(timeout.ceilingFromRoute(r.route).ms);
+  if (!duration.covers) fail('protected-owner-window-ceiling-unsupported');
+  const recovery = require('./forge-attempt-recovery'), identity = recovery.requestIdentity(recovery.canonicalRequest(r));
+  const relative = path.relative(owner, leaseFile).split(path.sep).join('/'), knownLeaseHashes = new Set([sha(initialLeaseBytes)]);
+  let ownerWindow = null, leaseWindow = null, expectedLease = sha(initialLeaseBytes), ownerBefore = null;
+  let joinedCustody = null, publicationWitness = null, publication = null;
+  let publicationAttemptWitness = null, publicationAttempt = null;
+  let coordinationClosed = false, leaseClosed = false, settled = false, settling = null;
+  function sameActorClaim(provedPublication = publication || publicationAttempt, pending = !publication) {
+    if (roots.digest(request) !== requestSha) fail('native-owner-request-changed');
+    const current = runs.get(owner, runId), currentActor = runs.observeHostSession(r.route.host_runtime, actor.sessionId);
+    if (!current?.active || !currentActor || currentActor.sessionId !== actor.sessionId || currentActor.hostRuntime !== actor.hostRuntime
+        || currentActor.source !== actor.source || current.session_id !== actor.sessionId || current.host_runtime !== actor.hostRuntime
+        || roots.digest(current.write_claim) !== claimSha) fail('protected-owner-authority-changed');
+    roots.validateContract(r.execution_contract, { owner, revalidate: true });
+    const currentBegin = controller.lookupRecord(owner, 'transaction', original.request_id);
+    if (!currentBegin || controller.recordChecksum(currentBegin) !== beginSha) fail('native-owner-begin-changed');
+    const held = lease.readLease(leaseFile);
+    if (!lease.validRecord(held.record, unit) || held.record.generation !== generation
+        || held.record.owner_token !== token || held.record.request_id !== begin.idempotency_key
+        || sha(regular(leaseFile)) !== expectedLease) fail('protected-owner-lease-changed');
+    const planRelative = path.relative(owner, r.planFile).split(path.sep).join('/');
+    const planArtifact = provedPublication?.artifacts.find(row => row.path === planRelative);
+    const currentPlan = sha(regular(r.planFile, 2 * 1024 * 1024));
+    if (planArtifact ? currentPlan !== planArtifact.after_sha256 && (!pending || currentPlan !== planArtifact.before)
+      : currentPlan !== planSha) fail('protected-owner-authority-changed');
+  }
+  function syncProfile(method, ...args) {
+    if (typeof profile[method] !== 'function') fail('native-owner-' + method + '-unavailable');
+    const value = profile[method](...args);
+    if (value && typeof value.then === 'function') fail('native-owner-profile-sync-required');
+    return value;
+  }
+  let ingressOwnerChecks = false;
+  function assertOwnerAuthority() {
+    if (settled || coordinationClosed || leaseClosed || !leaseWindow?.heartbeat().ok) fail('protected-owner-lease-changed');
+    windows.withWindow(ownerWindow, () => {});sameActorClaim();
+  }
+  function assertLive() {
+    assertOwnerAuthority();
+    if (publicationWitness) syncProfile('assertPublicationCurrent', profileHandle, publicationWitness);
+    else if (publicationAttemptWitness) syncProfile('assertPublicationAttemptCurrent', profileHandle, publicationAttemptWitness);
+    else syncProfile('assertActivityAdmission', profileHandle, r);
+  }
+  function enter(fn) {
+    const run = () => contexts.run(scope, fn);
+    return coordinationClosed ? run() : windows.withWindow(ownerWindow, run);
+  }
+  function checkedPublication(witness, pending = false) {
+    const native = require('./forge-native-execution');
+    const method = pending ? 'assertOriginalPublicationAttemptWitness' : 'assertOriginalPublicationWitness';
+    if (typeof native[method] !== 'function') fail('native-owner-publication-producer-unavailable');
+    const proof = native[method](witness, { request: r });
+    if (!proof || proof.dispatch_id !== r.dispatchId || proof.request_sha256 !== requestSha
+        || !/^[a-f0-9]{64}$/.test(proof.result_sha256 || '') || !Array.isArray(proof.artifacts)
+        || proof.manifest?.file !== r.resultFile + '.manifest.json'
+        || !/^[a-f0-9]{64}$/.test(proof.manifest?.sha256 || '')
+        || !/^[a-f0-9]{64}$/.test(proof.receipt?.sha256 || '')
+        || proof.receipt.file !== r.resultFile + '.receipt.json.' + proof.receipt.sha256 + '.json') fail('native-owner-publication-binding');
+    const seen = new Set();
+    for (const item of proof.artifacts) {
+      if (!item || typeof item.path !== 'string' || !item.path.startsWith('.gsd/') || item.path.includes('\\')
+          || path.posix.normalize(item.path) !== item.path
+          || !roots.within(owner, path.resolve(owner, item.path)) || path.resolve(owner, item.path) === owner
+          || seen.has(item.path) || !/^[a-f0-9]{64}$/.test(item.after_sha256 || '')
+          || !(item.before === null || /^[a-f0-9]{64}$/.test(item.before))) fail('native-owner-publication-artifact');
+      seen.add(item.path);
+      if (ownerBefore && (ownerBefore[item.path] ?? null) !== item.before) fail('native-owner-publication-preimage');
+    }
+    return proof;
+  }
+  function publicationIdentity(proof) {
+    return roots.digest({ dispatch_id: proof.dispatch_id, request_sha256: proof.request_sha256,
+      result_sha256: proof.result_sha256, manifest: proof.manifest, receipt: proof.receipt, artifacts: proof.artifacts });
+  }
+  function admitPublication(witness) {
+  if (settling || coordinationClosed || !joinedCustody) fail('native-owner-joined-custody-required');
+  const proof = checkedPublication(witness);sameActorClaim(proof, false);
+  if (proof.result_sha256 !== joinedCustody.result_sha256) fail('native-owner-publication-return-mismatch');
+  if (publicationAttempt && publicationIdentity(proof) !== publicationIdentity(publicationAttempt)) fail('native-owner-publication-upgrade-mismatch');
+  syncProfile('assertPublicationCurrent', profileHandle, witness);
+  if (publicationWitness && publicationWitness !== witness) fail('native-owner-publication-witness-changed');
+  publicationWitness = witness;publication = proof;assertLive();assertOwnerSurface();
+  return Object.freeze({ admitted: true, reference: 'native-publication:' + r.dispatchId });
+  }
+  function projectedOwner(before) {
+    const expected = { ...before, [relative]: expectedLease };
+    const proof = publication || publicationAttempt, pending = !publication;
+    const current = proof && pending ? execution.protectedSnapshot(owner) : null;
+    if (proof) for (const item of proof.artifacts) {
+      const value = before[item.path] ?? null;
+      if (value !== item.before && value !== item.after_sha256) fail('native-owner-publication-baseline-unbound');
+      const admitted = pending ? current[item.path] ?? null : item.after_sha256;
+      if (pending && admitted !== item.before && admitted !== item.after_sha256) fail('native-owner-publication-readback');
+      if (admitted === null) delete expected[item.path];else expected[item.path] = admitted;
+      let directory = path.posix.dirname(item.path);
+      while (directory !== '.') {
+        if (before[directory + '/'] !== undefined && before[directory + '/'] !== 'directory') fail('native-owner-publication-directory');
+        if (!pending || current[directory + '/'] !== undefined) {
+          if (pending && current[directory + '/'] !== 'directory') fail('native-owner-publication-directory');
+          expected[directory + '/'] = 'directory';
+        }
+        directory = path.posix.dirname(directory);
+      }
+    }
+    return expected;
+  }
+  function assertOwnerSurface() { if (ownerBefore) execution.assertProtected(owner, projectedOwner(ownerBefore)); }
+  function readJoinedCustody() {
+    const observed = publicationWitness
+      ? syncProfile('assertPublicationCurrent', profileHandle, publicationWitness)
+      : publicationAttemptWitness ? syncProfile('assertPublicationAttemptCurrent', profileHandle, publicationAttemptWitness)
+      : syncProfile('assertJoined', profileHandle);
+    if (!observed || observed.joined !== true || !Buffer.isBuffer(observed.raw)
+        || !/^[a-f0-9]{64}$/.test(observed.candidate_sha256 || '')) fail('protected-owner-writer-unproven');
+    const parsed = require('./forge-worker-result').parseJsonEnvelope(observed.raw.toString('utf8'));
+    if (!parsed.ok || parsed.status !== parsed.payload?.status
+        || !require('./forge-native-recovery-delivery').resultContract.validate(parsed.payload).ok) fail('native-owner-return-contract');
+    const custody = Object.freeze({ candidate_sha256: observed.candidate_sha256,
+      raw_sha256: sha(observed.raw), result_sha256: roots.digest(parsed.payload) });
+    if (joinedCustody && roots.digest(custody) !== roots.digest(joinedCustody)) fail('native-owner-joined-custody-changed');
+    return custody;
+  }
+  windows.withMutation(owner, () => {
+    sameActorClaim();
+    leaseWindow = lease.openProtectedWindow(owner, unit, token, generation, { durationMs: duration.duration_ms, reuseExisting: true });
+    if (!leaseWindow.ok) fail('protected-owner-lease-window-refused');
+    expectedLease = sha(regular(leaseFile));knownLeaseHashes.add(expectedLease);
+    try {
+      const currentRelay = relayReference(syncProfile('assertActivityAdmission', profileHandle, r));
+      if (roots.digest(currentRelay) !== roots.digest(liveRelay)) fail('native-owner-live-relay-changed');
+      ownerWindow = windows.open(owner, { kind: 'unit-execution', task_id: runId,
+        coordination: 'native-host-profile-v1', host_runtime: actor.hostRuntime, host_session_sha256: roots.digest(actor.sessionId),
+        dispatch_id: r.dispatchId, request_sha256: requestSha, unit_key: unit,
+        request_fingerprint: require('./forge-unit-sidecar').artifactFingerprint(r), recovery_identity_sha256: roots.digest(identity),
+        result_file_sha256: roots.digest(path.resolve(r.resultFile)), begin_key: begin.idempotency_key, begin_sha256: beginSha,
+        lease_generation: generation, owner_token_sha256: sha(token), lease_deadline_at: leaseWindow.deadline_at,
+        ...(liveRelay ? { native_host_relay: liveRelay } : {}) });
+    } catch (error) { leaseWindow.close();throw error; }
+  });
+  const scope = Object.freeze({
+    kind: 'native-execution', owner, unit, generation,
+    spawn() { fail('native-owner-process-spawn-forbidden'); },
+    assertIngressCurrent() {
+      if (arguments.length) fail('native-owner-ingress-arguments');
+      if (ingressOwnerChecks) fail('native-owner-ingress-reentrant');
+      return enter(() => {
+        // Only this closed synchronous owner check can borrow owner validation.
+        // Host/source/profile freshness remains in the genuine Bridge/Profile ingress.
+        ingressOwnerChecks = true;
+        try { assertOwnerAuthority();assertOwnerSurface();assertOwnerAuthority();return true; }
+        finally { ingressOwnerChecks = false; }
+      });
+    },
+    async observeJoined(handle) {
+      if (arguments.length !== 1 || handle !== profileHandle) fail('native-owner-profile-foreign');
+      return enter(() => {
+        assertLive();joinedCustody = readJoinedCustody();
+        assertLive();return Object.freeze({ joined: true, reference: 'native-profile:' + r.dispatchId });
+      });
+    },
+    async joinWriter() { if (arguments.length) fail('native-owner-join-arguments');return scope.observeJoined(profileHandle); },
+    observePublicationAttempt(witness) {
+      if (arguments.length !== 1) fail('native-owner-publication-attempt-arguments');
+      return enter(() => {
+        if (settling || settled || coordinationClosed || leaseClosed || !leaseWindow?.heartbeat().ok
+            || !joinedCustody || publicationWitness) fail('native-owner-publication-attempt-state');
+        const proof = checkedPublication(witness, true);sameActorClaim(proof, true);
+        if (proof.result_sha256 !== joinedCustody.result_sha256) fail('native-owner-publication-return-mismatch');
+        if (publicationAttemptWitness && (publicationAttemptWitness !== witness
+            || publicationIdentity(proof) !== publicationIdentity(publicationAttempt))) fail('native-owner-publication-attempt-conflict');
+        // Seal only genuine ready facts before reentering Request/Profile. This
+        // private transition admits no unknown delta and never closes a window.
+        publicationAttemptWitness = witness;publicationAttempt = proof;
+        syncProfile('assertPublicationAttemptCurrent', profileHandle, witness);
+        assertLive();readJoinedCustody();assertOwnerSurface();
+        return Object.freeze({ pending: true, reference: 'native-ready-pending:' + r.dispatchId });
+      });
+    },
+    async observePublication(witness) {
+      if (arguments.length !== 1) fail('native-owner-publication-arguments');
+      return enter(() => admitPublication(witness));
+    },
+    assertReplayAdmission() {
+      if (arguments.length) fail('native-owner-replay-arguments');
+      return enter(() => {
+        // Replay writes still belong inside this live window. An already closed
+        // activity needs its own canonical replay window, not a saved JSON flag.
+        if (settled || coordinationClosed || leaseClosed) fail('native-owner-replay-window-required');
+        assertLive();readJoinedCustody();assertOwnerSurface();assertLive();
+        return Object.freeze({ joined: true, reference: 'native-replay-admission:' + r.dispatchId });
+      });
+    },
+    replayPublication(operation) {
+      if (arguments.length !== 1) fail('native-owner-replay-operation-arguments');
+      return enter(() => {
+        scope.assertReplayAdmission();
+        // The canonical Bridge alone produces/consumes this closed sync operation.
+        const result = require('./forge-native-host-bridge').runOriginalReplayPublication(operation, scope, r);
+        if (!result || typeof result.then === 'function') fail('native-owner-replay-sync-required');
+        // Upgrade this activity with the same original witness before its fresh
+        // EXIT check, matching the canonical Request/Profile complete transition.
+        admitPublication(result.witness);
+        scope.assertReplayAdmission();return result;
+      });
+    },
+    async reconcile() {
+      if (arguments.length) fail('native-owner-reconcile-arguments');
+      return enter(async () => {
+        assertLive();
+        if (publicationWitness) {
+          const proof = checkedPublication(publicationWitness);
+          if (roots.digest(proof) !== roots.digest(publication)) fail('native-owner-publication-changed');
+          syncProfile('assertPublicationCurrent', profileHandle, publicationWitness);
+        } else if (publicationAttemptWitness) {
+          const proof = checkedPublication(publicationAttemptWitness, true);
+          if (publicationIdentity(proof) !== publicationIdentity(publicationAttempt)) fail('native-owner-publication-attempt-conflict');
+          syncProfile('assertPublicationAttemptCurrent', profileHandle, publicationAttemptWitness);readJoinedCustody();
+        } else await scope.observeJoined(profileHandle);
+        assertLive();assertOwnerSurface();return Object.freeze({ joined: true, reference: 'native-custody:' + r.dispatchId });
+      });
+    },
+    verificationWindow(seal) {
+      if (!joinedCustody || publicationWitness || publicationAttemptWitness) fail('protected-owner-writer-unproven');assertLive();
+      const commands = Array.isArray(seal?.roots) ? seal.roots.reduce((sum, root) => sum + (root.commands?.length || 0), 0) : 0;
+      if (!Number.isSafeInteger(seal?.command_timeout_ms) || seal.command_timeout_ms <= 0) fail('protected-owner-verification-window-invalid');
+      const wanted = timeout.protectedWindowMs(Math.max(1, commands) * seal.command_timeout_ms);
+      if (!wanted.covers) fail('protected-owner-verification-window-limit');
+      if (leaseWindow.borrowed) { if (leaseWindow.deadline_at - Date.now() < wanted.duration_ms) fail('protected-owner-verification-window-limit');return; }
+      windows.withMutation(owner, () => {
+        leaseWindow.close();leaseWindow = lease.openProtectedWindow(owner, unit, token, generation, { durationMs: wanted.duration_ms });
+        if (!leaseWindow.ok) fail('protected-owner-lease-window-refused');
+        expectedLease = sha(regular(leaseFile));knownLeaseHashes.add(expectedLease);
+      });
+    },
+    expectedOwner(root, before) {
+      if (roots.key(fs.realpathSync.native(root)) !== roots.key(owner)) return before;
+      if (!before || !knownLeaseHashes.has(before[relative])) fail('protected-owner-baseline-unbound');
+      if (ingressOwnerChecks) assertOwnerAuthority();else assertLive();return projectedOwner(before);
+    },
+    projectPublicationLease(root, before) {
+      // Internal read-side producer for Request's original owner snapshot. It
+      // deliberately never calls Profile/Request/expectedOwner, avoiding cycles.
+      if (arguments.length !== 2 || roots.key(fs.realpathSync.native(root)) !== roots.key(owner)
+          || !before || !knownLeaseHashes.has(before[relative])) fail('native-owner-lease-projection-unbound');
+      return enter(() => {
+        sameActorClaim();
+        if (!coordinationClosed) {
+          if (leaseClosed || !leaseWindow?.heartbeat().ok) fail('protected-owner-lease-changed');
+          windows.withWindow(ownerWindow, () => {});
+        } else if (!settled || !leaseClosed || windows.observed(owner)) fail('native-owner-activity-not-settled');
+        return { ...before, [relative]: expectedLease };
+      });
+    },
+    async retrySettlement() {
+      if (arguments.length) fail('native-owner-settlement-arguments');
+      if (settled) return scope.assertSettled();
+      if (settling) return settling;
+      settling = enter(async () => {
+        await scope.reconcile();
+        if (publicationAttemptWitness && !publicationWitness) fail('native-owner-publication-pending');
+        windows.close(ownerWindow, challenge => {
+          assertLive();if (!joinedCustody) fail('protected-owner-writer-unproven');
+          return { challenge_sha256: roots.digest(challenge), joined: true, possible_writers: 0,
+            reference: 'native-execution:' + r.dispatchId + ':actual-profile-join' };
+        });coordinationClosed = true;
+        const closedLease = leaseWindow.close();leaseClosed = true;
+        if (!closedLease.ok) fail('native-owner-lease-settlement-refused');
+        sameActorClaim();
+        settled = true;scopes.delete(scope);return scope.assertSettled();
+      });
+      try { return await settling; } finally { settling = null; }
+    },
+    assertSettled() {
+      if (arguments.length || !settled || !coordinationClosed || !leaseClosed || publicationAttemptWitness && !publicationWitness) fail('native-owner-activity-not-settled');
+      sameActorClaim();if (windows.observed(owner)) fail('native-owner-new-window');
+      if (publicationWitness) { checkedPublication(publicationWitness);syncProfile('assertPublicationCurrent', profileHandle, publicationWitness); }
+      else readJoinedCustody();
+      assertOwnerSurface();
+      return true;
+    },
+  });
+  scopes.add(scope);
+  let value, failure;
+  try { value = await enter(() => { ownerBefore = execution.protectedSnapshot(owner);return action(scope); }); }
+  catch (error) { failure = error; }
+  try {
+    // A failed action may have retained a ready receipt. Keep its exact live
+    // custody/window for real replay; only retrySettlement after its readback can
+    // close it. Failure never becomes no-spawn/join or a synthetic publication.
+    if (failure) throw failure;
+    if (value?.published === true && !publicationWitness) fail('native-owner-publication-witness-required');
+    await scope.retrySettlement();
+  } catch (error) {
+    if (!failure) failure = error;
+    failure.owner_window = { status: coordinationClosed ? 'closed-lease-unsettled' : 'held',
+      reason_code: error.code || 'protected-owner-writer-unproven', possible_native_writers: joinedCustody ? 'observed-joined' : 'unknown' };
+  }
+  if (failure) throw failure;
+  return value;
+}
+
 function expectedProtectedOwner(root, before) {
   const reconciliation = reconciliationContext.getStore();
   if (reconciliation) before = reconciliation.project(root, before);
@@ -786,7 +1151,7 @@ async function withReconciliationHandoff(request, runtime, action) {
   try { return await handoffs.run(entry, action); }
   finally { entry.consumed = true; }
 }
-module.exports = { withExecutionActivity, currentScope, assertPreflightAdmission, expectedProtectedOwner, reconciliationDecision,
+module.exports = { withExecutionActivity, withNativeExecutionActivity, currentScope, assertPreflightAdmission, expectedProtectedOwner, reconciliationDecision,
   createOwnerReconciliation, assertOwnerReconciliationReady, withOwnerReconciliation, withReconciliationHandoff,
   codeRootAppendDecision, withOwnerReconciliationRead,
   resumeAttemptOwner, inspectAttemptResume, hookAppendProof };

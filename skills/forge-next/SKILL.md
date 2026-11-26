@@ -1520,6 +1520,94 @@ The sidecar emitter consequently records the actual final `worker_mode:"sidecar"
 
 ---
 
+
+Foreground file-tools host branch (#463): for a milestone execute-task whose
+canonical route and observed supported host select this profile, use the retained
+owner path below BEFORE the generic native path. Other phases, task/step modes,
+hosts and models keep their canonical routing; this branch never forces a model,
+effort, phase or worker mode. Do not dispatch the same unit through both paths.
+
+The owner first creates the normal controller BEGIN, with its existing workflow
+binding, lease and enforcing held claim. Before opening a window, use the ordinary
+file tool to write a private absolute input file. Its CLOSED declaration schema is
+schema_version, owner, run_id, milestone_id, slice_id, task_id, begin_key,
+expected_begin_sha256, optional workflow_id, optional dispatch_id and optional
+verification_bindings. Values come from that actual selected BEGIN and canonical
+plan/criteria/check commands; optional selectors are not authority. Declarations
+are coverage DATA, never verification outcomes or approval. Missing declarations,
+questions, gates, schema, host support or producer evidence refuse by name.
+No lifecycle ID is copied from an unrelated run or invented by the caller.
+
+Finish input creation and physical path discovery in a SEPARATE prior host
+operation, and wait for its actual close BEFORE prepare. Resolve
+NODE_EXECUTABLE_ABS to the physical Node executable observed by the host; resolve
+FORGE_SCRIPTS_DIR_ABS through the canonical current installation's scripts path;
+resolve NATIVE_HOST_INPUT_ABS to that selected private input file, physically and
+absolutely. All three are host-observed literal values, not shell variables or
+approvals. Substitute the three braces below BEFORE calling the real Bash tool.
+Use forward slashes on Windows. If a path contains a single quote, use literal
+double quotes for that path instead; unsupported shell metacharacters require a
+named refusal, not escaping into a different command.
+
+First run the read-only budget query below in a SEPARATE host operation and wait for its actual close. Parse ONLY its actual returned JSON as NATIVE_HOST_PREPARE_BUDGET; it is data, never admission or a new BEGIN. Require its typed positive prepare_timeout_ms. It is the minimum of the unchanged profile cap, canonical unit ceiling and effective Bash environment cap. Do not invent a value, change globals or use background.
+```javascript
+// canonical-native-host-literals: node=NODE_EXECUTABLE_ABS; scripts=FORGE_SCRIPTS_DIR_ABS; input=NATIVE_HOST_INPUT_ABS
+// canonical-native-host-budget: read-only; no-admission
+Bash({command: '"{NODE_EXECUTABLE_ABS}" "{FORGE_SCRIPTS_DIR_ABS}/forge-native-host-bridge.js" prepare-budget --input "{NATIVE_HOST_INPUT_ABS}"'})
+```
+
+Make the following a NEW Bash call with ONLY the exact command and returned numeric timeout tool option: no
+assignments, printf, variable expansion, comments, environment prefixes,
+redirections, pipes, chaining, command substitution or appended commands. The
+owner measures that actual Node prepare process before opening the window and
+binds its one genuine PostBash handoff; there was no live PreBash to synthesize.
+That handoff never counts as Agent join and never admits unknown Post events.
+```javascript
+// canonical-native-host-literals: node=NODE_EXECUTABLE_ABS; scripts=FORGE_SCRIPTS_DIR_ABS; input=NATIVE_HOST_INPUT_ABS
+Bash({command: '"{NODE_EXECUTABLE_ABS}" "{FORGE_SCRIPTS_DIR_ABS}/forge-native-host-bridge.js" prepare --input "{NATIVE_HOST_INPUT_ABS}"', timeout: NATIVE_HOST_PREPARE_BUDGET.prepare_timeout_ms})
+```
+
+The stdout of THAT exact Bash response is already the producer's prepared JSON.
+Retain those bytes and parse them in host context as NATIVE_HOST_PREPARED; do not
+copy a later file/response or reconstruct its arguments. Require kind prepared,
+status pending-host, the actual reference_file and original arguments. Pending-host is
+only a sealed intent: the genuine authenticated PreToolUse observation performs
+separate admission. Invoke the actual host Agent tool with the returned arguments
+UNCHANGED, preserving the route's full model/effort/phase and foreground contract.
+Do not inject a Node callback, retype prompt/model/effort or treat a JSON flag as
+approval. During this native window the parent cannot Write controls, result,
+receipts or owner .gsd; workers use only the measured file-tools paths. Keep raw
+return/capture bytes before parsing even on refusal.
+
+Only after the actual return is retained, consume the exact prepared control
+command below through the host's real Bash tool. The string comes verbatim from
+the retained producer, not a reconstructed command, candidate file or JSON proof.
+```javascript
+Bash({command: NATIVE_HOST_PREPARED.control_commands.accept})
+```
+
+For progress, use the corresponding returned command; historical-only status
+keeps owner_live/writer_join unknown and does not authorize another writer.
+```javascript
+Bash({command: NATIVE_HOST_PREPARED.control_commands.status})
+```
+
+Replay first from the SAME live retained original attempt, only after canonical
+current authority and joined-writer reconciliation; never prepare/start again to
+adopt a receipt after owner loss. Readback of a saved ready row alone is not join.
+```javascript
+Bash({command: NATIVE_HOST_PREPARED.control_commands.replay})
+```
+
+Only the canonical published result/readback plus settled window permits normal
+controller completion. A partial publication needs the original opaque ready
+witness and exact artifact before-or-after transition; unrelated drift refuses.
+Unknown return, descendants, join or publication remains HELD. Stop, Handback,
+parent PID exit, a nonce, locator fields and model output do not establish join.
+Generic orphan recovery remains sidecar-only and cannot adopt this native owner.
+The cooperative hook/HMAC boundary is not kernel peer authentication or an OS
+sandbox; it cannot establish applied effort or provider activity without evidence.
+
 **Fresh milestone execute-task publication (issue458).** For `execute-task` in milestone scope, the owner MUST call `forge-native-execution.run({request, invocationOptions, invokeNative, assertBoundary, assertAuthority, persistDeliveryReceipt, procedureContext: rendered.procedure_context, executionPlanGate})` before the generic native path below. Preserve the selected controller begin/lease, exact route, observed capabilities, plan/security/claim gates and execution contract. `invocationOptions.resolvedDispatch` is the same request route; the callback invokes the actual host tool with the returned arguments unchanged. The owner performs start, supervised native invocation, retained return, root verification and publication. A worker never writes `.gsd`; do not handcraft a successful delivery proof. Only `published:true` permits controller complete. Partial/failure keeps the original manifest/outcome/receipts for canonical stopped-writer recovery/replay, without a second inference or recaptured baseline. When plan is skipped for `auto-defer`, pass the current host-created opaque `executionPlanGate` from the actual observed auto choice; serialized approval/deferred flags are insufficient. The existing exact-scope async adapter reattests the request at the normal gate seams; a missing, forged or foreign binding refuses without inference. Other native phases keep the path below.
 
 **Native dispatch (`WORKER_MODE == native`)** — canonical host form and fallback target.

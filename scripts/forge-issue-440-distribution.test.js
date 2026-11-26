@@ -1,13 +1,16 @@
 'use strict';
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),zlib=require('node:zlib'),cp=require('node:child_process');
-const successor=require('./fixtures/issue-461/distribution.cjs').issue455View.issues451452View,layer=successor.issue440View,parent=require('./fixtures/issue-461/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issue-448/distribution.cjs');
+const successor=require('./fixtures/issue-463/distribution.cjs').issue455View.issues451452View,layer=successor.issue440View,parent=require('./fixtures/issue-463/distribution.cjs').loadHistoricalFixture('scripts/fixtures/issue-448/distribution.cjs');
 const root=path.resolve(__dirname,'..'),data=layer.issue440Layer;
 const hash=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
 const read=successor.projectRead(file=>fs.readFileSync(path.join(root,file)));
 const normalize=text=>String(text).replace(/version=\d+\.\d+\.\d+/g,'version=<dynamic>');
 const linked=/^<!-- forge:linked-task:([a-z0-9-]+):start -->\r?\n[\s\S]*?^<!-- forge:linked-task:\1:end -->\r?\n/gm;
 const attributed=bytes=>hash(bytes.toString('utf8').replace(linked,''));
-const artifacts=require('./fixtures/issue-461/distribution.cjs').projectArtifacts(require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts);
+const artifacts=require('./fixtures/issue-463/distribution.cjs').projectArtifacts(require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts);
 function oneParentCall(method,run){const target=parent;const saved=target[method];let calls=0;try{target[method]=(...args)=>{calls++;return saved(...args);};run();assert.equal(calls,1,'one parent traversal '+method);}finally{target[method]=saved;}}
 for(const method of ['validate','validate414Snapshot'])oneParentCall(method,()=>assert.equal(layer[method]({artifacts}),true));
 console.log('PASS #440 validate and validate414Snapshot real Claude renderer; one parent traversal each');
@@ -69,11 +72,39 @@ for(const label of ['host Claude → worker Codex app-server (prioritária)','ho
 for(const row of rows){assert(row.endsWith('| PENDENTE |'));assert(row.split('|')[6].trim(),'route limits');for(const suite of row.matchAll(/forge-[\w-]+\.test\.js/g))assert(fs.existsSync(path.join(__dirname,suite[0])),'route suite exists '+suite[0]);}
 for(const suite of ['forge-issue-440-e2e','forge-issue-440-recovery','forge-issue-440-result','forge-process-tree','forge-codex-renderer','forge-claude-renderer'])assert(section.includes(suite+'.test.js'));
 assert(matrix.includes('Nenhum arquivo do host Codex mudou na S03'));
+// The route matrix owns published465's listing. Preserve actual current
+// discovery, then compose only authenticated Native after-only test identities.
+function projectNativeRouteListing(bytes,native=issue463SourceConsumer.issue463Layer){
+ assert.equal(hash(JSON.stringify(native)),hash(JSON.stringify(issue463SourceConsumer.issue463Layer)),'exact independently guarded native metadata only');
+ const matches=name=>name.endsWith('.test.js')&&['xllm','native','codex','claude','sidecar'].some(term=>name.toLowerCase().includes(term));
+ const rows=Object.entries(native.files).filter(([file,row])=>row.before===null&&path.posix.dirname(file)==='scripts'&&matches(path.posix.basename(file)));
+ assert(rows.length>0,'exercise the actual measured Native after-only route tests');
+ const additions=new Set(rows.map(([file])=>path.posix.basename(file)));assert.equal(additions.size,rows.length);
+ for(const[file,row]of rows)assert.equal(hash(fs.readFileSync(path.join(root,file))),row.after,'exact current measured new route test Source');
+ const text=bytes.toString('utf8'),names=text?text.slice(0,-1).split('\n'):[];
+ assert.equal(text,names.length?names.join('\n')+'\n':'','canonical listing newline');
+ assert(names.every(matches),'only route-selected test names');assert.equal(new Set(names).size,names.length,'listing has no duplicate');
+ assert.deepEqual(names,[...names].sort((a,b)=>a.localeCompare(b,'en')),'canonical discovery order');
+ const expected='996d885521cad181dc4c6e3689dfcc76a605bdbf57f1e1f1cc10c8d22233c80c';
+ if(hash(bytes)===expected)return bytes; // Already authenticated historical stage retains identity.
+ for(const name of additions)assert.equal(names.filter(item=>item===name).length,1,'each measured current after-only test appears once');
+ const prior=names.filter(name=>!additions.has(name)),projected=Buffer.from(prior.length?prior.join('\n')+'\n':'');
+ assert.equal(hash(projected),expected,'exact complete historical route roster; no unknown additions or omissions');
+ return projected;
+}
 const list=cp.spawnSync(process.execPath,[path.join(__dirname,'run-tests.js'),'--list','--match','xllm','--match','native','--match','codex','--match','claude','--match','sidecar'],{cwd:root,maxBuffer:1024*1024});
-assert.equal(list.status,0,list.stderr.toString());const currentListHash=hash(list.stdout);assert.equal(currentListHash,'996d885521cad181dc4c6e3689dfcc76a605bdbf57f1e1f1cc10c8d22233c80c','exact measured issues457458 route listing');const historicalListHash='959e1be9d5e371a4f65b9b5f69396e46fc0ed0be76dbd2229930fbf7fd96b828';console.log('MEASURED route listing current sha256 '+currentListHash+'; historical sha256 '+historicalListHash);const listHash=currentListHash==='996d885521cad181dc4c6e3689dfcc76a605bdbf57f1e1f1cc10c8d22233c80c'?historicalListHash:currentListHash;assert(matrix.includes(listHash),'real route listing digest');
+assert.equal(list.status,0,list.stderr.toString());const historicalRouteListing=projectNativeRouteListing(list.stdout);
+assert.strictEqual(projectNativeRouteListing(historicalRouteListing),historicalRouteListing,'already historical route bytes pass unchanged');
+const routeNames=list.stdout.toString('utf8').trimEnd().split('\n'),routeBytes=names=>Buffer.from(names.join('\n')+'\n');
+assert.throws(()=>projectNativeRouteListing(routeBytes([...routeNames,'foreign-native.test.js'].sort((a,b)=>a.localeCompare(b,'en')))),'unknown new route test is not filtered');
+assert.throws(()=>projectNativeRouteListing(routeBytes([...routeNames,routeNames[0]].sort((a,b)=>a.localeCompare(b,'en')))),'duplicate route identity is refused');
+const reorderedRoutes=[...routeNames];[reorderedRoutes[0],reorderedRoutes[1]]=[reorderedRoutes[1],reorderedRoutes[0]];assert.throws(()=>projectNativeRouteListing(routeBytes(reorderedRoutes)),'canonical discovery order remains required');
+const forgedRouteLayer=structuredClone(issue463SourceConsumer.issue463Layer),newRoute=Object.entries(forgedRouteLayer.files).find(([file,row])=>row.before===null&&/^scripts\/.*native.*\.test\.js$/.test(file));assert(newRoute);newRoute[1].before=newRoute[1].after;assert.throws(()=>projectNativeRouteListing(list.stdout,forgedRouteLayer),'invented before cannot redefine the measured roster');
+console.log('MEASURED native route listing sha256 '+hash(list.stdout)+'; composed published465 listing sha256 '+hash(historicalRouteListing));
+const currentListHash=hash(historicalRouteListing);assert.equal(currentListHash,'996d885521cad181dc4c6e3689dfcc76a605bdbf57f1e1f1cc10c8d22233c80c','exact measured issues457458 route listing');const historicalListHash='959e1be9d5e371a4f65b9b5f69396e46fc0ed0be76dbd2229930fbf7fd96b828';console.log('MEASURED route listing current sha256 '+currentListHash+'; historical sha256 '+historicalListHash);const listHash=currentListHash==='996d885521cad181dc4c6e3689dfcc76a605bdbf57f1e1f1cc10c8d22233c80c'?historicalListHash:currentListHash;assert(matrix.includes(listHash),'real route listing digest');
 console.log('PASS #440 four route rows, existing suites, limits and final PENDENTE; listing sha256 '+listHash);
 
-const repairSample=read(data.sample_projection.file).toString('utf8'),projectedSample=layer.currentSamples(repairSample);assert.equal(hash(projectedSample),data.sample_projection.after);assert.equal(layer.previousSamples(projectedSample),parent.previousSamples(repairSample));assert.throws(()=>layer.currentSamples(repairSample+'foreign'));const rawRealGuard=require('./forge-dispatch-source-guard.js'),realGuard={...rawRealGuard,SOURCE_REGISTRY:require('./fixtures/issue-461/distribution.cjs').projectRegistry(rawRealGuard.SOURCE_REGISTRY)};assert.deepEqual(realGuard.SOURCE_REGISTRY,data.registry.after_rows);assert.deepEqual(layer.previousRegistry(realGuard.SOURCE_REGISTRY),parent.previousRegistry(data.registry.before_rows));assert.throws(()=>layer.previousRegistry(realGuard.SOURCE_REGISTRY.slice(1)));console.log('PASS #440 exact samples and registry projections; real predecessor and historical registry preserved');
+const repairSample=read(data.sample_projection.file).toString('utf8'),projectedSample=layer.currentSamples(repairSample);assert.equal(hash(projectedSample),data.sample_projection.after);assert.equal(layer.previousSamples(projectedSample),parent.previousSamples(repairSample));assert.throws(()=>layer.currentSamples(repairSample+'foreign'));const rawRealGuard=require('./forge-dispatch-source-guard.js'),realGuard={...rawRealGuard,SOURCE_REGISTRY:require('./fixtures/issue-463/distribution.cjs').projectRegistry(rawRealGuard.SOURCE_REGISTRY)};assert.deepEqual(realGuard.SOURCE_REGISTRY,data.registry.after_rows);assert.deepEqual(layer.previousRegistry(realGuard.SOURCE_REGISTRY),parent.previousRegistry(data.registry.before_rows));assert.throws(()=>layer.previousRegistry(realGuard.SOURCE_REGISTRY.slice(1)));console.log('PASS #440 exact samples and registry projections; real predecessor and historical registry preserved');
 const traceBase=JSON.parse(zlib.gunzipSync(Buffer.from(data.parity.base_trace_gzip_base64,'base64'))),traceCurrent=JSON.parse(zlib.gunzipSync(Buffer.from(data.parity.current_trace_gzip_base64,'base64'))),oldParity=require('./fixtures/issues-403-407-integration/parity.cjs'),adapter=layer.parityAdapter(oldParity);assert.deepEqual(adapter.beforeTrace(traceCurrent),oldParity.beforeTrace(traceBase));assert.deepEqual(adapter.afterTrace(oldParity.beforeTrace(traceBase)),traceCurrent);for(const row of data.parity.rows){const changed=structuredClone(traceCurrent),keys=row.path.slice(),key=keys.pop(),obj=keys.reduce((o,k)=>o[k],changed);obj[key]='foreign';assert.throws(()=>adapter.beforeTrace(changed),/issue440 exact trace/);}console.log('PASS #440 thirty-nine measured trace leaves and every drift refused; old parity assertions preserved');
 
 for(const row of data.registry.aliases){const actual={path:row.path,kind:row.kind,fingerprint:row.after},historical={...actual,fingerprint:row.before};assert.equal(realGuard.identity(actual),realGuard.identity(historical));for(const foreign of [{...actual,path:'shared/foreign.md'},{...actual,kind:'native'},{...actual,fingerprint:'sha256:'+ '0'.repeat(64)}])assert.notEqual(realGuard.identity(foreign),realGuard.identity(historical),'only exact measured tuple aliases');assert(realGuard.discover(root).candidates.some(c=>c.path===row.path&&c.kind===row.kind&&c.fingerprint===row.after),'actual discovery fingerprint remains visible');}console.log('PASS #440 exactly two measured prose identities; foreign fingerprint/path/kind refused and actual evidence preserved');
@@ -115,10 +146,10 @@ assert.equal(Object.keys(data.consumers).length,5,'exact original and additional
  const issue407=layer.issue407Layer.provenance,saved407=issue407.base_revision;
  try{issue407.base_revision='0'.repeat(40);assert.throws(()=>layer.previousSamples(''),/independent measured delta/,'issue407 direct projection preserves historical PIN refusal');}finally{issue407.base_revision=saved407;}
  const rows=require('./forge-dispatch-source-guard.js').SOURCE_REGISTRY,validMetadata=parent.parallelismLayer;
- assert.deepEqual(layer.previousRegistry(rows,validMetadata),parent.previousRegistry(require('./fixtures/issue-461/distribution.cjs').projectRegistry(rows),validMetadata),'explicit valid inherited metadata remains supported');
+ assert.deepEqual(layer.previousRegistry(rows,validMetadata),parent.previousRegistry(require('./fixtures/issue-463/distribution.cjs').projectRegistry(rows),validMetadata),'explicit valid inherited metadata remains supported');
  const forged=structuredClone(layer.nativeEffortLayer);forged.registry.before_rows[0].reason+=' forged';forged.registry.before_sha256=hash(JSON.stringify(forged.registry.before_rows));
  assert.throws(()=>layer.previousRegistry(rows,forged),'forwarded historical row+metadata self-repin must remain refused');
- assert.deepEqual(layer.previousRegistry(rows),parent.previousRegistry(require('./fixtures/issue-461/distribution.cjs').projectRegistry(rows)),'default metadata still projects exactly after negative restoration');
+ assert.deepEqual(layer.previousRegistry(rows),parent.previousRegistry(require('./fixtures/issue-463/distribution.cjs').projectRegistry(rows)),'default metadata still projects exactly after negative restoration');
  console.log('PASS #440 PR450 inherited PIN precedence, exact unknown-sample refusal and optional registry metadata forwarding');
 }
 
@@ -146,3 +177,4 @@ console.log('PASS #440 CI450 two additional consumer adapters: exact e1a4 roundt
  assert.throws(()=>layer.after('files',manifest,'0'.repeat(64)),'foreign manifest remains refused by the measured after chain');
  console.log('PASS #440 CI450 exact smoke predecessor projection and measured manifest guard preserve foreign-input refusal');
 }
+});

@@ -126,6 +126,57 @@ test('R1 entry deixada FORA de todo bloco casado é resíduo, não uma resposta 
 
 // ── fim do bloco R1; o restante da suíte segue byte-idêntico ──────────────
 
+test('Git hides its console and preserves real buffered results and caller environment', () => {
+  const Module = require('module');
+  const filename = require.resolve('./forge-vcs.js'), bytes = fs.readFileSync(filename), calls = [];
+  // This private module observes the real child-process call without replacing
+  // results or mutating the shared module cache or process environment.
+  const copy = new Module(filename + '#git-option-observation', module);
+  copy.filename = filename; copy.paths = Module._nodeModulePaths(path.dirname(filename));
+  copy.require = function (name) {
+    if (name === 'child_process' || name === 'node:child_process') return {
+      spawnSync: function (...args) {
+        const result = Reflect.apply(spawnSync, this, args);
+        calls.push({ command: args[0], argv: args[1], options: args[2], stdoutBuffer: Buffer.isBuffer(result.stdout), stderrBuffer: Buffer.isBuffer(result.stderr) });
+        return result;
+      },
+    };
+    return Module.prototype.require.call(this, name);
+  };
+  copy._compile(bytes.toString('utf8').replace(/^\uFEFF/, '').replace(/^#![^\n]*(?:\n|$)/, ''), filename);
+  const observed = copy.exports, cwd = fixture(), originalMarker = process.env.FORGE_VCS_ENV_PROBE;
+  try {
+    const baseline = observed.baselineId(cwd);
+    assert(baseline.ok, 'real Git baseline succeeds');
+    const defaults = calls.at(-1);
+    assert.strictEqual(defaults.command, 'git');
+    assert.deepStrictEqual(defaults.argv, ['-C', cwd, 'rev-parse', 'HEAD']);
+    assert.strictEqual(defaults.options.maxBuffer, 32 * 1024 * 1024);
+    assert(!Object.hasOwn(defaults.options, 'env'), 'absent env preserves native process inheritance');
+    const inherited = observed.baselineId(cwd, { env: undefined });
+    assert(inherited.ok);assert.strictEqual(inherited.id, baseline.id);
+    assert(!Object.hasOwn(calls.at(-1).options, 'env'), 'explicit undefined still leaves env absent');
+    const env = { ...process.env, FORGE_VCS_ENV_PROBE: 'private-git-option-observation' };
+    const explicit = observed.baselineId(cwd, { env, maxBuffer: 1024 * 1024 });
+    assert(explicit.ok);assert.strictEqual(explicit.id, baseline.id);
+    assert(calls.at(-1).options.env === env, 'same explicit environment reference reaches the original spawn');
+    assert.strictEqual(calls.at(-1).options.maxBuffer, 1024 * 1024);
+    assert(process.env.FORGE_VCS_ENV_PROBE === originalMarker, 'caller environment remains unchanged');
+    fs.writeFileSync(path.join(cwd, 'modified.txt'), 'after\n');
+    fs.writeFileSync(path.join(cwd, 'new.txt'), 'new\n');
+    const dirty = observed.captureDirty(cwd, { env, maxBuffer: 1024 * 1024 });
+    assert(dirty.ok);assert.deepStrictEqual(dirty, vcs.captureDirty(cwd, { env, maxBuffer: 1024 * 1024 }));
+    assert.deepStrictEqual(dirty.entries.map(row => row.path).sort(), ['modified.txt', 'new.txt']);
+    for (const call of calls) {
+      assert.strictEqual(call.command, 'git');assert.strictEqual(call.options.windowsHide, true);
+      assert.strictEqual(call.options.shell, false);assert.strictEqual(call.options.encoding, 'buffer');
+      assert(call.stdoutBuffer && call.stderrBuffer, 'original Git stdout and stderr remain Buffers');
+      for (const field of ['detached', 'timeout', 'signal']) assert(!Object.hasOwn(call.options, field), 'no added process lifecycle option: ' + field);
+    }
+    assert(fs.readFileSync(filename).equals(bytes), 'observation leaves Source bytes unchanged');
+  } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+});
+
 test('baselineId succeeds in a fixture and failures are normalized', () => {
   const cwd = fixture();
   const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-vcs-empty-'));

@@ -87,10 +87,12 @@ function cleanup() {
   }
 }
 
+const RUN_HOME = mktmp('merge-settings-private-');
+
 /** Run the real CLI against a settings file; return { status, settings }. */
 function run(settingsFile, extraArgs, env) {
   const r = spawnSync(process.execPath, [MODULE, settingsFile, ...(extraArgs || [])],
-    { encoding: 'utf8', stdio: 'pipe', env: env ? { ...process.env, ...env } : process.env });
+    { encoding: 'utf8', stdio: 'pipe', windowsHide: true, timeout: 20000, env: { ...process.env, HOME: RUN_HOME, USERPROFILE: RUN_HOME, FORGE_HOME: '', CLAUDE_CONFIG_DIR: path.join(RUN_HOME, '.claude'), ...env } });
   let settings = null;
   try { settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8')); } catch { /* asserted by caller */ }
   return { status: r.status, settings, stderr: r.stderr };
@@ -231,12 +233,27 @@ test('R5b control: FORGE_HOME pointing AT the conventional home keeps the tilde'
   // implementation could satisfy R5 by absolutizing everyone — silently
   // destroying the portability of every settings.json that syncs across
   // machines, which is the whole reason the tilde is there.
-  const conventional = path.join(os.homedir(), '.forge-agent');
+  // run() supplies RUN_HOME as both HOME and USERPROFILE to the child.
+  // Its canonical conventional home is not the parent process os.homedir().
+  const conventional = path.join(RUN_HOME, '.forge-agent');
   const file = seed(mktmp(), {});
   const { status, settings } = run(file, [], { FORGE_HOME: conventional });
   assertEqual(status, 0, 'enable exits 0');
   assertEqual(settings.statusLine.command, MAINTAINED_COMMAND,
     'an explicitly-conventional FORGE_HOME must collapse back to the portable tilde form');
+});
+
+test('R5b isolation control: another private home is relocated for the child', () => {
+  // Model the old parent/child mismatch entirely with fresh private paths.
+  const parentHome = mktmp('merge-settings-parent-home-');
+  assert(path.resolve(parentHome) !== path.resolve(RUN_HOME), 'parent fixture and child private home differ');
+  const configured = path.join(parentHome, '.forge-agent');
+  const file = seed(mktmp(), {});
+  const { status, settings } = run(file, [], { FORGE_HOME: configured });
+  assertEqual(status, 0, 'enable exits 0 for an explicitly different home');
+  const expected = 'node "' + path.join(configured, 'scripts', 'forge-statusline.js').split(path.sep).join('/') + '"';
+  assertEqual(settings.statusLine.command, expected, 'a conventional home belonging to another parent is an exact absolute relocation for this child');
+  assert(settings.statusLine.command !== MAINTAINED_COMMAND, 'a different home must not collapse to the child tilde');
 });
 
 test('R5c control: with no FORGE_HOME the emitted command is byte-identical to before', () => {
@@ -273,7 +290,7 @@ test('PostToolUse registers the evidence matchers (Agent + Bash + Write + Edit)'
   fs.writeFileSync(file, '{}');
   const { settings } = run(file);
   const matchers = (settings.hooks.PostToolUse || []).map((e) => e.matcher).sort();
-  const expected = ['Agent', 'Bash', 'Edit', 'Write'];
+  const expected = ['*', 'Agent', 'Bash', 'Edit', 'Write'];
   if (JSON.stringify(matchers) !== JSON.stringify(expected)) {
     throw new Error(`PostToolUse matchers drifted: ${JSON.stringify(matchers)} (expected ${JSON.stringify(expected)})`);
   }
@@ -349,6 +366,42 @@ test('R7: mixed lifecycle entries preserve foreign hooks and group metadata', ()
     assertEqual(removedOnly.status, 0);
     assert(!removedOnly.settings.hooks, event + ' empty managed group removed');
   }
+});
+
+test('R8: native hooks retain exact ordinary matchers, foreign siblings and idempotence', () => {
+  const runtimeHome = path.join(mktmp(), "private Claude home ' with spaces");
+  const foreign = { type: 'command', command: 'echo forge-hook.js documentation only', timeout: 37 };
+  const customScope = { matcher: 'operator-only', hooks: [{ type: 'command', command: 'node ~/.claude/forge-hook.js pre', if: 'Read(seed)' }] };
+  const file = seed(mktmp(), { hooks: { PreToolUse: [{ matcher: '*', timeout: 73, hooks: [foreign] }, customScope] }, custom: { keep: true } });
+  const env = { CLAUDE_CONFIG_DIR: runtimeHome };
+  const first = run(file, [], env); assertEqual(first.status, 0);
+  const once = fs.readFileSync(file, 'utf8'); assertEqual(run(file, [], env).status, 0);
+  assertEqual(fs.readFileSync(file, 'utf8'), once, 'repeat is byte-identical');
+  for (const [event, matchers] of [['PreToolUse', ['Agent', 'Write']], ['PostToolUse', ['Agent', 'Bash', 'Write', 'Edit']]]) {
+    for (const matcher of matchers) {
+      const rows = first.settings.hooks[event].filter(row => row.matcher === matcher);
+      assertEqual(rows.flatMap(row => row.hooks).filter(h => h.command === 'node ~/.claude/forge-hook.js ' + (event === 'PreToolUse' ? 'pre' : 'post')).length, 1, event + '/' + matcher);
+    }
+  }
+  const events = [
+    ['PreToolUse','pre','*'], ['PostToolUse','post','*'], ['PostToolUseFailure','post-failure','*'], ['PermissionDenied','permission-denied','*'],
+    ['SubagentStart','subagent-start'], ['SubagentStop','subagent-stop'], ['Stop','stop'], ['SessionEnd','session-end'],
+    ['ConfigChange','config-change'], ['PreModelSwitch','pre-model-switch'], ['PostModelSwitch','post-model-switch'],
+  ];
+  for (const [event, phase, matcher] of events) {
+    const hooks = first.settings.hooks[event].filter(row => row.matcher === matcher).flatMap(row => row.hooks).filter(h => h.args?.[1] === 'native-live');
+    assertEqual(hooks.length, 1, event + ' exactly once');
+    assertEqual(hooks[0].command, fs.realpathSync.native(process.execPath));
+    assertEqual(JSON.stringify(hooks[0].args), JSON.stringify([path.join(runtimeHome, 'forge-hook.js'), 'native-live', phase]));
+    assertEqual(hooks[0].onFailure, 'block'); assert(!Object.hasOwn(hooks[0], 'async'));
+  }
+  assert(!first.settings.hooks.PermissionRequest, 'permission request is not a permission denial');
+  const bootstrap = first.settings.hooks.SessionStart.flatMap(row => row.hooks).filter(h => h.args?.[1] === 'session-start');
+  assertEqual(bootstrap.length, 1); assertEqual(bootstrap[0].command, fs.realpathSync.native(process.execPath));
+  assertEqual(JSON.stringify(bootstrap[0].args), JSON.stringify([path.join(runtimeHome, 'forge-hook.js'), 'session-start']));
+  const removed = run(file, ['--remove'], env); assertEqual(removed.status, 0);
+  assertEqual(JSON.stringify(removed.settings.hooks), JSON.stringify({ PreToolUse: [{ matcher: '*', timeout: 73, hooks: [foreign] }, customScope] }));
+  assertEqual(JSON.stringify(removed.settings.custom), JSON.stringify({ keep: true }));
 });
 
 // ── summary ─────────────────────────────────────────────────────────────────

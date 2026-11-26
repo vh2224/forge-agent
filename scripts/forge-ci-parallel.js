@@ -12,9 +12,9 @@ const { validateBaselinePair } = require('./forge-ci-units');
 function integer(value, max) { return /^\d+$/.test(value || '') && Number.isSafeInteger(+value) && +value <= max; }
 function workerLayout({index,count,jobs,singleWorkerJobs=0}) {
   if (![index,count,jobs,singleWorkerJobs].every(Number.isSafeInteger) || index<0 || count<1 || jobs<1 || jobs>3
-      || index>=count || singleWorkerJobs<0 || singleWorkerJobs>count) throw Error('ci-parallel-arguments');
+      || index>=count || count>64 || singleWorkerJobs<0 || singleWorkerJobs>count) throw Error('ci-parallel-arguments');
   const total=singleWorkerJobs+(count-singleWorkerJobs)*jobs;
-  if(total>64)throw Error('ci-parallel-arguments');
+  if(total>96)throw Error('ci-parallel-arguments');
   return {start:index<singleWorkerJobs?index:singleWorkerJobs+(index-singleWorkerJobs)*jobs,
     workers:index<singleWorkerJobs?1:jobs,count:total};
 }
@@ -43,11 +43,11 @@ function toolPlan(options, { source=path.resolve(__dirname,'..'), platform=proce
   const layout=workerLayout(options);
   if(platform!=='win32'||layout.workers!==1) return {needs_svn:true,reason:'conservative-platform-or-parallel-default'};
   const unitsApi=require(path.join(source,'scripts/forge-ci-units'));
-  const {loadShardProfile,planShards}=require(path.join(source,'scripts/forge-ci-shards'));
+  const {loadShardProfile,loadPlanningOverrides,planShards}=require(path.join(source,'scripts/forge-ci-shards'));
   const profile=loadShardProfile(profileFile||path.join(source,'scripts/ci-profiles/issue-461-d046.json'));
   if(profile.state!=='loaded')return {needs_svn:true,reason:'profile-unavailable'};
   const units=unitsApi.expandSuites(require(path.join(source,'scripts/run-tests')).discoverTests([]));
-  const plan=planShards({suites:units.map(u=>u.id),index:layout.start,count:layout.count,platform,profile,estimatedWeights:unitsApi.unitWeights(units,profile,platform)});
+  const plan=planShards({suites:units.map(u=>u.id),index:layout.start,count:layout.count,platform,profile,estimatedWeights:unitsApi.unitWeights(units,profile,platform),planningOverrides:loadPlanningOverrides(profile,platform,units.map(u=>u.id))});
   const byId=new Map(units.map(u=>[u.id,u]));
   const selected=plan.selected.map(id=>byId.get(id));
   const needs_svn=!selected.length||selected.some(unit=>!unit||unit.source!=='forge-linked-task-start.test.js');

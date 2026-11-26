@@ -1,15 +1,11 @@
+// Operator settings remain user-owned. Canonical merge-settings.js produces
+// executable hook entries using physical Node and the actual runtime home.
+// SessionStart: command = realpath(process.execPath), args = [hook, session-start].
+// LIVE: args = [hook, native-live, phase], onFailure = block. Events: PreToolUse,
+// PostToolUse, PostToolUseFailure, PermissionDenied, SubagentStart, SubagentStop,
+// Stop, SessionEnd, ConfigChange, PreModelSwitch, PostModelSwitch.
+// Do not insert unresolved executable placeholders or replace settings wholesale.
+// The passive relay locator and subscriptions grant no authority or writer join.
 {
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PROJECT_DIR}/scripts/forge-hook.js\""
-          }
-        ]
-      }
-    ]
-  }
+  "hooks": {}
 }

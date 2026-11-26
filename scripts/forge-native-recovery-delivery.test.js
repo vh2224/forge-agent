@@ -11,6 +11,14 @@ const stateApi = require('./forge-xllm-state');
 const side = require('./forge-unit-sidecar');
 const delivery = require('./forge-native-recovery-delivery');
 const { write, capabilities } = fixtures;
+function retainLegacyReadyFixture(request, record) {
+  // Model a genuinely persisted historical receipt, not only an in-memory
+  // mutation of a newer ready record. Production replay reads these exact bytes.
+  const bytes=JSON.stringify(record),sha256=crypto.createHash('sha256').update(bytes).digest('hex');
+  const file=request.resultFile+'.receipt.json.'+sha256+'.json';
+  fs.writeFileSync(file,bytes,{flag:'wx'});
+  assert.equal(fs.readFileSync(file,'utf8'),bytes);return {file,sha256};
+}
 async function fixture(options = {}) {
   const f = fixtures.setup();
   const standalone = options.standalone === true;
@@ -247,6 +255,10 @@ async function isolatedMain(){
 async function ordinaryPublication(){
   const f=await fixture();
   try{
+    const initial='Ordinary worker prompt.',legacy=delivery.packagePrompt(f.request,initial);
+    assert(legacy.includes('Write the response only to this validated TEMP result path: '+f.request.resultFile));
+    assert.equal(delivery.packagePrompt(f.request,initial,{outputChannel:'captured-original-tool-return',approved:true}),legacy,'JSON labels/approval never select captured transport');
+    assert.throws(()=>delivery.packagePrompt(f.request,initial,{nativeHostAdmission:{}}),{code:'native-host-native-admission-required'},'direct packaging rejects a counterfeit admission before changing transport');
     let calls=0;
     f.runtime.invokeNative=async(next,binding,session)=>{
       calls++;
@@ -416,13 +428,17 @@ async function documentaryContinuation(){
     assert.equal(published.artifacts.at(-1).path,SLICE_PLAN);
     assert.equal(published.artifacts.at(-1).before,sha256(slicePreimage));
     const afterReady=reopen(),legacy=structuredClone(published);legacy.artifacts.pop();
+    const legacyReceipt=retainLegacyReadyFixture(request,legacy);
     const verifier=require('./forge-verify'),capture=verifier.captureRootDelivery;
     const originalInvoke=f.runtime.invokeNative;
     let calls=0;
     try {
       verifier.captureRootDelivery=()=>{calls++;throw Error('unexpected replay verification');};
       f.runtime.invokeNative=()=>{calls++;throw Error('unexpected replay native invocation');};
-      afterReady.replayReady(legacy);
+      const legacyPublished=afterReady.replayReady(legacy);
+      const legacyProof=delivery.assertOriginalPublicationWitness(delivery.getPublicationWitness(legacyPublished,{request}),{request});
+      assert.deepEqual(legacyProof.receipt,legacyReceipt,'genuine original publication witness reads the exact persisted historical receipt');
+      assert(!legacyProof.artifacts.some(row=>row.path===SLICE_PLAN),'legacy witness does not invent a slice marker');
       assert.deepEqual(fs.readFileSync(sliceFile),slicePreimage,'legacy documentary ready never acquires a marker');
       const files=published.artifacts.map(a=>path.join(f.owner,a.path));
       const stamp=()=>files.map(file=>[fs.readFileSync(file,'utf8'),fs.statSync(file).mtimeMs]);
@@ -652,8 +668,16 @@ async function nativeTaskMarker() {
     write(slicePlan,'# Slice\n- [ ] **T01** — fixture\n- [ ] **T02** — next\n');
     const nativeInvocation=require('./forge-native-invocation').buildNativeInvocation({hostRuntime:'codex',resolvedDispatch:request.route,
       activeCapabilities:capabilities,prompt:'Native marker fixture',forkTurns:'none',taskName:'fixture',agentType:'forge-executor'});
+    let pendingBeforePublication;
     const receipts=[],options={request,nativeInvocation,assertBoundary:f.assertBoundary,assertAuthority:f.assertBoundary,
-      persistDeliveryReceipt:receipt=>receipts.push(receipt)};
+      persistDeliveryReceipt:pointer=>{
+        receipts.push(pointer);const receipt=JSON.parse(fs.readFileSync(pointer.file,'utf8'));
+        if(receipt.phase==='ready'){
+          pendingBeforePublication=delivery.getPublicationAttemptWitness(pointer,{request});
+          delivery.assertOriginalPublicationAttemptWitness(pendingBeforePublication,{request});
+          assert.throws(()=>delivery.getPublicationWitness(receipt,{request}),/original-publication-required/);
+        }
+      }};
     const session=delivery.prepare(options);session.start();
     const preimage=fs.readFileSync(slicePlan),taskPlan=fs.readFileSync(request.planFile),manifest=session.manifest();
     assert.equal(manifest.prepared.protected_owner[SLICE_PLAN],sha256(preimage));
@@ -671,6 +695,35 @@ async function nativeTaskMarker() {
     console.log('PASS native marker CAS: a slice plan edited since prepare fails closed before persist, keeping operator bytes without recapture');
 
     const published=session.publish(result);
+    const witness=delivery.getPublicationWitness(published,{request}),proof=delivery.assertOriginalPublicationWitness(witness,{request});
+    assert.equal(proof.result_sha256,roots.digest(result));assert.equal(proof.request_sha256,roots.digest(request));
+    assert.equal(delivery.getPublicationWitness(published,{request}),witness,'stable opaque published witness');
+    const pointer=receipts.at(-1),pending=delivery.getPublicationAttemptWitness(pointer,{request});
+    assert.equal(pending,pendingBeforePublication,'original callback received a genuine pending witness before materialization');
+    assert.throws(()=>delivery.getPublicationAttemptWitness({...pointer},{request}),/original-publication-attempt-required/);
+    assert.throws(()=>delivery.getPublicationWitness(structuredClone(published),{request}),/original-publication-required/);
+    assert.throws(()=>delivery.assertOriginalPublicationWitness(pending,{request}),/original-publication-required/);
+    assert.throws(()=>delivery.assertOriginalPublicationWitness(witness,{request:{...request,dispatchId:'foreign'}}),/original-publication-required/);
+    const publishedPlan=fs.readFileSync(slicePlan);
+    try{
+      fs.writeFileSync(slicePlan,preimage);
+      delivery.assertOriginalPublicationAttemptWitness(pending,{request}); // Genuine exact BEFORE remains pending, never published.
+      assert.throws(()=>delivery.assertOriginalPublicationWitness(witness,{request}),/artifact-changed/);
+      assert.equal(publishedPlan.length,preimage.length,'the genuine checkbox update keeps the exact byte length');
+      const sameSizeForeign=Buffer.from(preimage);sameSizeForeign[0]^=1;
+      fs.writeFileSync(slicePlan,sameSizeForeign);
+      assert.throws(()=>delivery.assertOriginalPublicationAttemptWitness(pending,{request}),{code:'native-publication-artifact-changed'},'in-bound third-state bytes still fail the original artifact guard');
+      fs.writeFileSync(slicePlan,preimage);
+      fs.appendFileSync(slicePlan,'foreign');
+      assert(fs.statSync(slicePlan).size>Math.max(publishedPlan.length,preimage.length),'the original appended third state exceeds the exact retained read bound');
+      assert.throws(()=>delivery.assertOriginalPublicationAttemptWitness(pending,{request}),{code:'native-publication-read-source_too_large'});
+    }finally{fs.writeFileSync(slicePlan,publishedPlan);}
+    for(const pointer of [proof.manifest,proof.receipt]){
+      const bytes=fs.readFileSync(pointer.file);
+      try{fs.appendFileSync(pointer.file,' ');assert.throws(()=>delivery.assertOriginalPublicationWitness(witness,{request}),/publication-(read|evidence)/);}
+      finally{fs.writeFileSync(pointer.file,bytes);}
+    }
+    delivery.assertOriginalPublicationWitness(witness,{request});
     const marker=published.artifacts.at(-1);
     assert.deepEqual(marker,{path:SLICE_PLAN,content:'# Slice\n- [x] **T01** — fixture\n- [ ] **T02** — next\n',before:sha256(preimage)});
     assert.equal(marker.before,published.milestone_delivery.protected_owner[SLICE_PLAN]);
@@ -695,7 +748,10 @@ async function nativeTaskMarker() {
     const deliveryStamp=()=>deliveryFiles.map(file=>fs.readFileSync(file,'utf8'));
     const delivered=deliveryStamp();
     const legacy=structuredClone(published);legacy.artifacts.pop();
-    reopen().replayReady(legacy);
+    const legacyReceipt=retainLegacyReadyFixture(request,legacy),legacyPublished=reopen().replayReady(legacy);
+    const legacyProof=delivery.assertOriginalPublicationWitness(delivery.getPublicationWitness(legacyPublished,{request}),{request});
+    assert.deepEqual(legacyProof.receipt,legacyReceipt,'native legacy replay retains original persisted receipt custody');
+    assert(!legacyProof.artifacts.some(row=>row.path===SLICE_PLAN),'legacy replay witness carries no invented marker');
     assert.deepEqual(fs.readFileSync(slicePlan),preimage,'legacy ready never gains a marker');
     console.log('PASS legacy native ready: a record without marker replays idempotently and never marks the slice plan');
     const forged=change=>{const record=structuredClone(published);change(record);return record;};

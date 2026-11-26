@@ -1,8 +1,11 @@
 'use strict';
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
-const layer=require('./fixtures/issue-461/distribution.cjs');
+const layer=require('./fixtures/issue-463/distribution.cjs');
 // Intentional parent import: do not migrate this counter to its own layer.
-const parent=require('./fixtures/issue-461/distribution.cjs').loadHistoricalFixture('scripts/fixtures/ci-latency/distribution.cjs'),root=path.resolve(__dirname,'..');
+const parent=require('./fixtures/issue-463/distribution.cjs').loadHistoricalFixture('scripts/fixtures/ci-latency/distribution.cjs'),root=path.resolve(__dirname,'..');
 const artifacts=require('./forge-claude-renderer').render({repo:root,projectRoot:root,claudeHome:path.join(root,'unused-host'),forgeHome:path.join(root,'unused-core')}).artifacts;
 assert.equal(layer.validate({artifacts}),true);assert.equal(layer.validate414Snapshot({artifacts}),true);
 for(const file of ['scripts/forge-completion-delivery-recovery.js','scripts/forge-delivery-source-policy.js','scripts/forge-xllm.js','scripts/forge-issue-427.test.js']){
@@ -17,3 +20,4 @@ const historical=structuredClone(layer.issue414Layer);historical.provenance.issu
 assert.throws(()=>layer.validate({artifacts,issue414LayerValue:historical}));
 assert.throws(()=>layer.validate414Snapshot({artifacts,issue414LayerValue:historical}));
 console.log('PASS repair successor: real source/rendered positive controls, drift and historical tamper negatives, one parent traversal');
+});

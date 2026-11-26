@@ -79,3 +79,21 @@ no pending questions, intact baseline, explained deltas, verified backup and cla
 Then admit a new begin in the same lease/claim generation through recoverUnitSidecar.
 Retained output, caller/identity/claim defects, pending input, missing authority, unknown
 processes or codes, time admission and review-fix limits never enable abandonment.
+
+## Retained native file-tools attempts
+
+A live retained original native attempt may publish/replay through its own owner
+only, after genuine join and current actor/run/claim/roots/lease revalidation.
+The original ready callback may retain an opaque pending-publication witness;
+physical artifacts must each equal the authenticated before OR after bytes and
+an upgrade must bind that same request/result/manifest/receipt/artifact set.
+A pending witness is not a successful publication, settled window or permission
+to infer again. Unknown writers or unrelated drift keep the attempt HELD.
+
+After owner loss, historical status reports historical provenance and unknown
+owner/join; it does not recreate opaque handles, lease custody or a live host.
+The generic execution-window orphan recovery profile still measures SIDECAR
+milestone execution only. A native request is explicitly unsupported there.
+Do not expand that profile or release a native window using Stop, Handback, PID
+absence, saved JSON/nonce or a locator as writer-join proof. Preserve the original
+receipt/capture and named refusal; no new reservation or actor adoption occurs.

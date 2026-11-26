@@ -134,6 +134,16 @@ test('S04-T03 truth:2 privacy closed fields and named suite byte field limits', 
   assert.throws(() => buildSuiteProfile({ ...input(), stdout: 'private' }), { code: 'suite-profile-invalid' });
 });
 
+test('logical65/96 structured profiles retain the existing closed schema and parser', () => {
+  for(const count of [65,96]){
+    const value=input();value.selection.discovered=288;
+    Object.assign(value.shard,{index:count-1,count});
+    const doc=buildSuiteProfile(value);
+    assert.equal(validateSuiteProfile(doc).ok,true);
+    assert.deepStrictEqual(parseSuiteProfile(JSON.stringify(doc)),doc);
+  }
+});
+
 test('closed schema and every suite count clock execution ordinal shard coherence rule', () => {
   const changes = [
     d => { d.schema = 'forge-suite-profile/v2'; }, d => { d.sources = []; },
@@ -149,7 +159,8 @@ test('closed schema and every suite count clock execution ordinal shard coherenc
     d => { d.totals.executed = 1; }, d => { d.totals.not_run = 0; }, d => { d.totals.passed = 2; },
     d => { d.started_at = '2026-10-26T12:00:00.000Z'; }, d => { d.finished_at = 'invalid'; },
     d => { d.started_at = '2026-02-30T12:00:00.000Z'; }, d => { d.elapsed_ms = -1; },
-    d => { d.shard.index = 2; }, d => { d.shard.count = 65; }, d => { d.shard.count = 0; },
+    d => { d.shard.index = 2; }, d => { d.shard.count = 97; }, d => { d.shard.count = 0; },
+    d => { d.shard.count = -1; }, d => { delete d.shard.count; },
     d => { d.shard.algorithm = 'other'; }, d => { d.shard.predicted_ms = 1; },
     d => { d.shard.partition_sha256 = null; }, d => { d.shard.fallback = 'private'; },
     d => { d.mode.isolation = '/private'; }, d => { d.mode.match = 'private'; },

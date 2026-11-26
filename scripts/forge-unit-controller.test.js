@@ -2117,6 +2117,80 @@ function testSupersededInterruptedOwner() {
   } finally { if (oldSession === undefined) delete process.env.CODEX_THREAD_ID; else process.env.CODEX_THREAD_ID = oldSession; }
 }
 
+
+function testOriginalSerialWorkflowBinding() {
+  const forms = ['fluxo-corre\u00e7\u00e3o-\u6e2c\u8a66', 'fluxo-correc\u0327a\u0303o-\u6e2c\u8a66'];
+  assert.notStrictEqual(forms[0], forms[1]);
+  assert.strictEqual(forms[0].normalize('NFD'), forms[1].normalize('NFD'));
+  assert(!Buffer.from(forms[0]).equals(Buffer.from(forms[1])), 'normalization forms are distinct byte identities');
+  for (const [formIndex, workflow] of forms.entries()) for (const mode of ['auto', 'task', 'step']) {
+    const f = setup();
+    try {
+      const key = 'workflow-' + formIndex + '-' + mode, input = request(f, { unit: 'plan-slice/S01', idempotency_key: key });
+      const options = { prefsReader, workflow: { mode, workflow_id: workflow + '-' + mode, remaining_steps: 12 } };
+      const started = controller.beginSerial(f.cwd, input, options);
+      assert.strictEqual(started.ok, true);
+      const tx = controller.lookupRecord(f.cwd, 'transaction', key), b = tx.workflow_binding;
+      assert.strictEqual(b.workflow_id, options.workflow.workflow_id);
+      assert(Buffer.from(b.workflow_id).equals(Buffer.from(options.workflow.workflow_id)), 'producer bytes are not normalized');
+      assert.strictEqual(b.mode, mode); assert.strictEqual(b.begin_key, key);
+      assert.strictEqual(b.unit_key, tx.unit.key); assert.strictEqual(b.lease_generation, tx.lease_generation);
+      assert.strictEqual(b.owner_digest, tx.owner_digest); assert.strictEqual(b.host_runtime, tx.host_runtime);
+      assert.strictEqual(tx.event.workflow_binding_sha256, controller.recordChecksum(b));
+      const bytes = fs.readFileSync(controller.transactionFile(f.cwd, key));
+      controller.beginSerial(f.cwd, input, { ...options, workflow: { ...options.workflow, remaining_steps: 3 } });
+      assert(fs.readFileSync(controller.transactionFile(f.cwd, key)).equals(bytes), 'remaining budget cannot rebind identity');
+      assert.throws(() => controller.beginSerial(f.cwd, input, { ...options, workflow: { ...options.workflow, workflow_id: 'foreign-loop' } }), /record-conflict|rebound/);
+      assert.throws(() => controller.beginSerial(f.cwd, input, { ...options, workflow: { ...options.workflow,
+        workflow_id: forms[1 - formIndex] + '-' + mode } }), /record-conflict|rebound/, 'visually equivalent normalization form cannot rebind the original');
+      assert(fs.readFileSync(controller.transactionFile(f.cwd, key)).equals(bytes));
+      for (const change of [
+        t => { t.workflow_binding = null; },
+        t => { t.workflow_binding = []; },
+        t => { t.workflow_binding.schema_version = 2; },
+        t => { delete t.workflow_binding.lease_generation; },
+        t => { t.workflow_binding.unit_key = 'plan-slice/S99'; },
+        t => { t.workflow_binding.owner_digest = 'sha256:' + '0'.repeat(64); },
+        t => { t.event.workflow_binding_sha256 = '0'.repeat(64); },
+        t => { delete t.workflow_binding; },
+        t => { delete t.event.workflow_binding_sha256; },
+      ]) {
+        const changed = JSON.parse(bytes.toString('utf8')); change(changed);
+        // Keep independent storage/event checks coherent so this negative
+        // discriminates assertWorkflowBinding, not an earlier checksum guard.
+        if (changed.boundary) changed.boundary.event_checksum = controller.recordChecksum(changed.event);
+        delete changed.storage_checksum;
+        changed.storage_checksum = controller.recordChecksum(changed);
+        fs.writeFileSync(controller.transactionFile(f.cwd, key), JSON.stringify(changed));
+        try { assert.throws(() => controller.lookupRecord(f.cwd, 'transaction', key), error => error.code === 'record-conflict'
+          && error.message.includes('original workflow binding diverges from begin/event')); }
+        finally { fs.writeFileSync(controller.transactionFile(f.cwd, key), bytes); }
+      }
+      const events = controller.readEvents(controller.eventsFile(f.cwd, f.milestone));
+      assert.strictEqual(events.filter(e => e.idempotency_key === key).length, 1);
+    } finally { cleanup(f.cwd); }
+  }
+  const legacy = setup();
+  try {
+    const input = request(legacy, { unit: 'plan-slice/S01', idempotency_key: 'legacy-without-workflow' });
+    controller.beginSerial(legacy.cwd, input, { prefsReader });
+    const before = fs.readFileSync(controller.transactionFile(legacy.cwd, input.idempotency_key));
+    controller.beginSerial(legacy.cwd, input, { prefsReader, workflow: { mode: 'auto', workflow_id: 'new-loop', remaining_steps: 9 } });
+    assert(fs.readFileSync(controller.transactionFile(legacy.cwd, input.idempotency_key)).equals(before));
+    assert(!Object.hasOwn(controller.lookupRecord(legacy.cwd, 'transaction', input.idempotency_key), 'workflow_binding'));
+  } finally { cleanup(legacy.cwd); }
+  const crash = setup();
+  try {
+    const input = request(crash, { unit: 'plan-slice/S01', idempotency_key: 'workflow-crash' });
+    assert.throws(() => controller.beginSerial(crash.cwd, input, { prefsReader, workflow: { mode: 'step', workflow_id: 'original-crash', remaining_steps: 5 }, failpoint: p => p === 'after-intent' }), /failpoint/);
+    const intent = controller.lookupRecord(crash.cwd, 'transaction', input.idempotency_key);
+    controller.resume(crash.cwd, { idempotency_key: input.idempotency_key, owner_token: 'owner-a', generation: intent.lease_generation }, { prefsReader });
+    const done = controller.lookupRecord(crash.cwd, 'transaction', input.idempotency_key);
+    assert.deepStrictEqual(done.workflow_binding, intent.workflow_binding);
+    assert.deepStrictEqual(done.event, intent.event);
+  } finally { cleanup(crash.cwd); }
+}
+
 function main() {
   test('378: superseded blocked receipt, live native-partial attestation, evidence retention and replay refusals', testSupersededInterruptedOwner);
   test('interrupted owner review R1/R2/R3: successor questions, cleanup archive and prepublication capacity', testInterruptedOwnerReviewGuards);
@@ -2140,6 +2214,7 @@ function main() {
   test('S02 guard R59: completed local subtasks prove dependencies safely', testCompletedLocalSubtasksProveDependencies);
   test('S02 guard: ROADMAP written after enrollment without a choice is not legacy', testRogueRoadmapAfterEnrollment);
   test('S02 guard: rogue ROADMAP refuses reentry before lease or transaction', testRogueRoadmapBlocksReentry);
+  test('original serial workflow binding, replay budgets, legacy and crash', testOriginalSerialWorkflowBinding);
   test('pure deterministic selection', testPureSelection);
   test('phase ordering, canonical skip preferences and stale slice selection', testSelectionPhasesAndCanonicalPrefs);
   test('artifact discovery selects without leases or STATE writes', testSelectionDiscoversArtifactsWithoutWriting);

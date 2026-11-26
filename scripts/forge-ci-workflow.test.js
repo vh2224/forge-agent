@@ -1,4 +1,7 @@
 'use strict';
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+
 
 const assert = require('assert');
 const fs = require('fs');
@@ -7,7 +10,7 @@ const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 const concurrency = require('./forge-ci-concurrency.js');
 const { POLICY, expandJobs, assertJobMapping } = require('./forge-release-checks.js');
-const { loadShardProfile, planShards, verifyPartition } = require('./forge-ci-shards.js');
+const { loadShardProfile, planShards, verifyPartition, loadPlanningOverrides } = require('./forge-ci-shards.js');
 const { discoverTests } = require('./run-tests.js');
 const { expandSuites, unitWeights } = require('./forge-ci-units.js');
 const { workerLayout } = require('./forge-ci-parallel.js');
@@ -26,10 +29,13 @@ assert.strictEqual(hash(predecessorCi), latencyLayer.ci_before.sha256);
 // ' --verbose true' suffix on the existing Run test suites command.
 const verboseLayer = require('./fixtures/issue-440/workflow-layer.json');
 const gitBlob = value => crypto.createHash('sha1').update(`blob ${value.length}\0`).update(value).digest('hex');
-const ciHistoryView = require('./fixtures/issue-461/distribution.cjs');
-const historicalCi = bytes => ciHistoryView.projectIssue461Read(() => bytes)('.github/workflows/ci.yml');
-assert.strictEqual(hash(bytes.ci), '0c2deeaa3f7b429ba1d7c208836159f80ca48f0cae36ab171b4a1d26b18dc8ad');
-assert.strictEqual(gitBlob(bytes.ci), '9b968e1cd62509edca22cffd8b779a3a25063b50');
+const ciHistoryView = require('./fixtures/issue-463/distribution.cjs');
+// Only the immutable ancestor pin chain selects the authenticated Native
+// predecessor. bytes.ci/texts.ci below remain the actual current workflow.
+const nativePredecessorCi = bytes => ciHistoryView.projectIssue463Read(() => bytes)('.github/workflows/ci.yml');
+const historicalCi = bytes => ciHistoryView.projectIssue461Read(() => nativePredecessorCi(bytes))('.github/workflows/ci.yml');
+assert.strictEqual(hash(nativePredecessorCi(bytes.ci)), '0c2deeaa3f7b429ba1d7c208836159f80ca48f0cae36ab171b4a1d26b18dc8ad');
+assert.strictEqual(gitBlob(nativePredecessorCi(bytes.ci)), '9b968e1cd62509edca22cffd8b779a3a25063b50');
 assert.strictEqual(hash(historicalCi(bytes.ci)), verboseLayer.ci_after.sha256);
 assert.strictEqual(gitBlob(historicalCi(bytes.ci)), verboseLayer.ci_after.oid);
 assert.deepStrictEqual(verboseLayer.ci_before, latencyLayer.ci_after, 'issue-440 layer chains onto the ci-latency layer');
@@ -290,13 +296,13 @@ for(const platform of ['Linux','macOS','Windows'])for(const output of [undefined
   assert.strictEqual(verify,!(platform==='Windows'&&output==='false'),'missing or unknown setup metadata always keeps verification');
 }
 const rows = expandJobs(POLICY.workflows.ci);
-assert.strictEqual(rows.length, 53);
+assert.strictEqual(rows.length, 142);
 assert.strictEqual(rows.filter(row => row.kind === 'alias').length, 9);
 assert.deepStrictEqual(rows.filter(row => row.key === 'test').map(row => row.name),
-  [['ubuntu-latest', 6], ['macos-latest', 8], ['windows-latest', 27]].flatMap(([os, count]) => Array.from({length:count}, (_, i) => `Tests (${os}, shard ${i+1}/${count})`)));
+  [['ubuntu-latest', 33], ['macos-latest', 41], ['windows-latest', 56]].flatMap(([os, count]) => Array.from({length:count}, (_, i) => `Tests (${os}, shard ${i+1}/${count})`)));
 assert.strictEqual(rows.filter(row => row.name === 'Tests (ubuntu-latest)' && row.kind === 'alias').length, 1);
-assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'win32').map(row => row.matrix['shard-count']), Array(27).fill(27));
-assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'darwin').map(row => row.matrix['shard-count']), Array(8).fill(8));
+assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'win32').map(row => row.matrix['shard-count']), Array(56).fill(56));
+assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'darwin').map(row => row.matrix['shard-count']), Array(41).fill(41));
 // Smoke condition evaluated per policy cell: exactly one Linux and one macOS run, never Windows.
 const runnerOs = { 'ubuntu-latest': 'Linux', 'macos-latest': 'macOS', 'windows-latest': 'Windows' };
 const smokeCells = rows.filter(row => row.key === 'test'
@@ -315,17 +321,22 @@ const cells=new Map();for(const row of rows.filter(row=>row.key==='test')){const
 let totalWorkers=0;
 for (const [platform,platformCells] of cells) {
   const cell=platformCells[0],layouts=platformCells.map(row=>workerLayout({index:row['shard-index'],count:row['shard-count'],jobs:row.workers,singleWorkerJobs:row['single-worker-jobs']}));
-  const count=layouts[0].count;assert(layouts.every(row=>row.count===count));
+  const count=layouts[0].count;assert(count<=96);assert(layouts.every(row=>row.count===count));
   assert.deepStrictEqual(layouts.flatMap(row=>Array.from({length:row.workers},(_,i)=>row.start+i)).sort((a,b)=>a-b),Array.from({length:count},(_,i)=>i));
-  assert.strictEqual(count,{linux:8,darwin:16,win32:40}[platform]);totalWorkers+=count;
+  assert.strictEqual(count,{linux:64,darwin:80,win32:96}[platform]);totalWorkers+=count;
   const plans = Array.from({ length: count }, (_, index) => planShards({
-    suites, index, count, platform, profile, estimatedWeights: unitWeights(unitInventory, profile, platform) }));
+    suites, index, count, platform, profile, estimatedWeights: unitWeights(unitInventory, profile, platform),
+    planningOverrides: loadPlanningOverrides(profile, platform, suites) }));
   assert(plans.every(plan => plan.fallback === null && plan.algorithm === 'weighted-lpt-v1'));
   assert.strictEqual(new Set(plans.map(plan => plan.partition_sha256)).size, 1);
   assert(verifyPartition(suites, plans.map(plan => plan.selected)).ok);
   console.log(`PASS partition ${cell.platform}/${cell['shard-count']} universe=${suites.length} unprofiled=${plans[0].unprofiled.length} stale=${plans[0].stale.length} partition_sha256=${plans[0].partition_sha256}`);
 }
-assert.strictEqual(totalWorkers,64);assert(totalWorkers<=64);
+// Logical partitions may queue; each platform retains the reviewed96-part bound.
+assert.strictEqual(totalWorkers,240);
+const maxParallel=Number(/max-parallel: (\d+)/.exec(texts.ci.slice(texts.ci.indexOf('\n  test:')))[1]);
+assert.strictEqual(maxParallel,32);
+assert(maxParallel*Math.max(...rows.filter(row=>row.key==='test').map(row=>row.matrix.workers))<=64,'at most64 active test processes');
 marker('truth', 3, 'baseline and versioned profile wired; full matrix coverage disjoint with equal fingerprints and fallback null; CI structure preserved');
 marker('key_link', 1, 'loadShardProfile planShards and verifyPartition exercise every real matrix platform/count/index');
 marker('key_link', 5, 'Run test suites invokes run-tests with baseline profile and final shard-index/count flags');
@@ -342,6 +353,8 @@ for (const id of ['ci', 'app', 'release']) {
 // Reconstruct only the authorized Windows and macOS matrix changes and remove the macOS
 // tests alias before historical pinning.
 const historicalJobs = JSON.parse(JSON.stringify(Object.fromEntries(Object.entries(POLICY.workflows).map(([key, value]) => [key, value.jobs]))));
+assert.strictEqual(historicalJobs.ci.find(job => job.key === 'test').max_parallel, 32);
+delete historicalJobs.ci.find(job => job.key === 'test').max_parallel;
 historicalJobs.ci = historicalJobs.ci.filter(job => job.key !== 'required-tests-linux');
 historicalJobs.ci.find(job => job.key === 'test').matrix.include = latencyLayer.matrix_before;
 assert.strictEqual(historicalJobs.ci.filter(job => job.key === 'required-tests-macos').length, 1);
@@ -368,3 +381,4 @@ assert.strictEqual(invalidCli.status, 2);
 assert(invalidCli.stderr.includes('cli-argument-invalid'));
 marker('truth', 4, 'CI app pins and semantic mappings preserved; smoke section 76 structure and S04 contract checked; remote validation pending');
 console.log('forge-ci-workflow: all assertions passed (local model and structural checks; no hosted workflow execution)');
+});
