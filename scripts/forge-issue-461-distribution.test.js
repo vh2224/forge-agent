@@ -1,8 +1,9 @@
 'use strict';
-const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
-issue463SourceConsumer.validateSourceConsumer(() => {
-
+// CI cohorts register only immutable names/functions; product setup is lazy.
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),os=require('node:os'),cp=require('node:child_process'),crypto=require('node:crypto');
+const ROOT=path.resolve(__dirname,'..'),hash=b=>crypto.createHash('sha256').update(b).digest('hex');
+const TAMPER_FILES=["scripts/ci-profiles/issue-461-d046.json",".github/workflows/ci.yml","scripts/forge-release-policy.js","scripts/forge-completion-delivery-recovery.js","scripts/fixtures/docs-cleanup/README.md","scripts/fixtures/issue-461/README.md","scripts/fixtures/issue-461/distribution-delta.json"];
+function runCore(issue463SourceConsumer){
 const ROOT=path.resolve(__dirname,'..'),layer=require('./fixtures/issue-463/distribution.cjs').issue461View,data=layer.issue461Layer,read=f=>fs.readFileSync(path.join(ROOT,f)),hash=b=>crypto.createHash('sha256').update(b).digest('hex');
 assert.equal(data.base_revision,'fca31a92e56de523f3a9e1172107659807014cbe');assert.equal(Object.keys(data.historical_fixtures).length,228);assert.equal(layer.verifyIssue461(),true);
 assert.equal(hash(JSON.stringify(layer.docsCleanupLayer)),'ea37ef4c2c5c319b442a2e3ee3828e3778264d9d5b812dd8bb71c280bd6ee799');
@@ -23,32 +24,52 @@ for(const name of ['scripts/fixtures/issues-442-446/distribution.cjs','scripts/f
 for(const method of ['after','readme']){const original=layer[method],args=method==='after'?['files','__issue461_counter__','']:['foreign caller text'],expected=original(...args);let count=0;try{layer[method]=(...input)=>{count++;return original(...input);};assert.equal(layer[method](...args),expected);assert.equal(count,1);}finally{layer[method]=original;}assert.strictEqual(layer[method],original);assert.equal(layer[method](...args),expected);}
 // A historical live view must restore the identical cached function after a spy.
 for(const method of ['after','readme']){const object=layer.docsCleanupView,original=object[method],args=method==='after'?['files','__issue461_history_counter__','']:['foreign historical caller text'],expected=original(...args);let count=0;try{object[method]=(...input)=>{count++;return original(...input);};assert.equal(object[method](...args),expected);assert.equal(count,1);}finally{object[method]=original;}assert.strictEqual(object[method],original,'historical export restore preserves cached wrapper identity');assert.equal(object[method](...args),expected,'historical restored wrapper composes once');for(const value of [null,undefined,17]){try{object[method]=value;assert.strictEqual(object[method],value,'historical writable property preserves non-function assignment');}finally{object[method]=original;}assert.strictEqual(object[method],original,'restoration after non-function keeps original cached identity');}}
-// Physical negative controls run in one private complete Source copy, never in
-// the shared checkout. Only the original existing Docs test has Source probes.
+const artifacts=require('./forge-claude-renderer').render({repo:ROOT,projectRoot:ROOT,claudeHome:path.join(ROOT,'unused-host'),forgeHome:path.join(ROOT,'unused-core')}).artifacts;
+const public457=layer.docsCleanupView.baselineView,saved457=public457.validate;let capturedError=null,outerError=null,virtualCalls=0,foreignReads=0;
+assert.strictEqual(layer.issues457458Layer,public457.issues457458Layer,'same live public457 instance');
+for(const operation of [fn=>fn(),fn=>layer.validateSourceConsumer(fn)]){capturedError=null;outerError=null;virtualCalls=0;foreignReads=0;operation(()=>{try{public457.validate=(...args)=>{virtualCalls++;try{return saved457(...args);}catch(error){capturedError=error;throw error;}};try{layer.validate({artifacts,readRaw:file=>{if(file==='scripts/forge-completion-delivery-recovery.js'){foreignReads++;return foreign;}return read(file);}});}catch(error){outerError=error;}assert.equal(virtualCalls,1);assert(foreignReads>0,'foreign callback reached ancestor validation');assert(capturedError);assert.strictEqual(outerError,capturedError,'original ancestor refusal identity is preserved');}finally{public457.validate=saved457;}});}
+let realCalls=0;
+try{parent.validate=(...args)=>{realCalls++;return saved(...args);};assert.equal(layer.validate({artifacts}),true);assert.equal(realCalls,1);}finally{parent.validate=saved;}
+}
+// Each selected physical case owns a fresh complete Source copy and namespace.
+// This factory MUST NOT open a cloned validateSourceConsumer frame: escaped
+// readers below are used after their original cloned frame has actually ended.
+function runPrivateCase(name,tamperFile){
+ if(name==='tamper-a'||name==='tamper-b')assert(TAMPER_FILES.includes(tamperFile),'closed tamper member');
 const lab=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'issue461-controls-'))),copy=path.join(lab,'source'),marker=crypto.randomUUID();fs.writeFileSync(path.join(lab,'.owner'),marker);fs.mkdirSync(copy);let completed=false;
-try{const names=cp.execFileSync('git',['--no-replace-objects','ls-files','--cached','--others','--exclude-standard','-z'],{cwd:ROOT,encoding:'utf8',env:{...process.env,GIT_NO_REPLACE_OBJECTS:'1',GIT_OPTIONAL_LOCKS:'0'}}).split('\0').filter(Boolean);for(const file of names){const source=path.join(ROOT,file);if(!fs.existsSync(source))continue;const dest=path.join(copy,file);fs.mkdirSync(path.dirname(dest),{recursive:true});fs.copyFileSync(source,dest);}const cloned=require(path.join(copy,'scripts/fixtures/issue-463/distribution.cjs')).issue461View,prior=cloned.docsCleanupView,original=prior.validate;let count=0;prior.validate=()=>{count++;return true;};assert.equal(cloned.validate({}),true);assert.equal(count,1);
+try{const names=cp.execFileSync('git',['--no-replace-objects','ls-files','--cached','--others','--exclude-standard','-z'],{cwd:ROOT,encoding:'utf8',env:{...process.env,GIT_NO_REPLACE_OBJECTS:'1',GIT_OPTIONAL_LOCKS:'0'}}).split('\0').filter(Boolean);for(const file of names){const source=path.join(ROOT,file);if(!fs.existsSync(source))continue;const dest=path.join(copy,file);fs.mkdirSync(path.dirname(dest),{recursive:true});fs.copyFileSync(source,dest);}const cloned=require(path.join(copy,'scripts/fixtures/issue-463/distribution.cjs')).issue461View,prior=cloned.docsCleanupView,original=prior.validate;let count=0;prior.validate=()=>{count++;return true;};
  const refusal=fn=>{const before=count;assert.throws(fn);assert.equal(count,before,'physical current refusal before predecessor');};
- const retained={projectRead:cloned.projectRead(),projectCleanupRead:cloned.projectCleanupRead(),projectIssue461Read:cloned.projectIssue461Read()};
+ const retained=['tamper-a','profile','workflow'].includes(name)?{projectRead:cloned.projectRead(),projectCleanupRead:cloned.projectCleanupRead(),projectIssue461Read:cloned.projectIssue461Read()}:null;
+ if(name==='future'){
  for(const relative of ['scripts/fixtures/issue-461/future.md','scripts/fixtures/future-issue461.md']){const target=path.join(copy,relative);fs.writeFileSync(target,'private future probe\n',{flag:'wx'});try{refusal(()=>cloned.validate({}));}finally{assert.equal(fs.readFileSync(target,'utf8'),'private future probe\n');fs.unlinkSync(target);}}
- for(const relative of ['scripts/ci-profiles/issue-461-d046.json','.github/workflows/ci.yml','scripts/forge-release-policy.js','scripts/forge-completion-delivery-recovery.js','scripts/fixtures/docs-cleanup/README.md','scripts/fixtures/issue-461/README.md','scripts/fixtures/issue-461/distribution-delta.json']){const target=path.join(copy,relative),bytes=fs.readFileSync(target),stat=fs.lstatSync(target),probe=Buffer.concat([bytes,Buffer.from('\nprivate foreign probe\n')]);fs.writeFileSync(target,probe);try{refusal(()=>cloned.validate({}));for(const reader of Object.values(retained))refusal(()=>reader('forge-source-manifest.json'));for(const method of ['after','readme','verifyCleanup','projectRead','projectCleanupRead'])refusal(()=>cloned[method](...({after:['files','__probe__',''],readme:['text'],verifyCleanup:[],projectRead:[],projectCleanupRead:[]}[method])));}finally{assert.equal(fs.lstatSync(target).ino,stat.ino);assert.equal(hash(fs.readFileSync(target)),hash(probe));fs.writeFileSync(target,bytes);}}
+ }else if(name==='tamper-a'||name==='tamper-b'){
+ for(const relative of [tamperFile]){const target=path.join(copy,relative),bytes=fs.readFileSync(target),stat=fs.lstatSync(target),probe=Buffer.concat([bytes,Buffer.from('\nprivate foreign probe\n')]);fs.writeFileSync(target,probe);try{if(name==='tamper-a'){refusal(()=>cloned.validate({}));for(const reader of Object.values(retained))refusal(()=>reader('forge-source-manifest.json'));}else{for(const method of ['after','readme','verifyCleanup','projectRead','projectCleanupRead'])refusal(()=>cloned[method](...({after:['files','__probe__',''],readme:['text'],verifyCleanup:[],projectRead:[],projectCleanupRead:[]}[method])));}}finally{assert.equal(fs.lstatSync(target).ino,stat.ino);assert.equal(hash(fs.readFileSync(target)),hash(probe));fs.writeFileSync(target,bytes);}}
+ }else if(name==='profile'){
   const addedTarget=path.join(copy,'scripts/ci-profiles/issue-461-d046.json'),addedHeld=addedTarget+'.held',addedBytes=fs.readFileSync(addedTarget),addedStat=fs.lstatSync(addedTarget);fs.renameSync(addedTarget,addedHeld);try{refusal(()=>cloned.validate({}));for(const reader of Object.values(retained))refusal(()=>reader('forge-source-manifest.json'));}finally{assert.equal(hash(fs.readFileSync(addedHeld)),hash(addedBytes));fs.renameSync(addedHeld,addedTarget);assert.equal(fs.lstatSync(addedTarget).ino,addedStat.ino);}const oversizedProfile=Buffer.alloc(4*1024*1024+1,65);fs.writeFileSync(addedTarget,oversizedProfile);try{refusal(()=>cloned.validate({}));for(const reader of Object.values(retained))refusal(()=>reader('forge-source-manifest.json'));}finally{assert.equal(fs.lstatSync(addedTarget).ino,addedStat.ino);assert.equal(hash(fs.readFileSync(addedTarget)),hash(oversizedProfile));fs.writeFileSync(addedTarget,addedBytes);assert.equal(hash(fs.readFileSync(addedTarget)),hash(addedBytes));}assert.equal(cloned.verifyIssue461(),true);
+ }else if(name==='workflow'){
  // Exact fca bytes are a historical view, never an accepted physical current workflow.
  const historicalWorkflowFile='.github/workflows/ci.yml',historicalWorkflowTarget=path.join(copy,historicalWorkflowFile),currentWorkflowBytes=fs.readFileSync(historicalWorkflowTarget),currentWorkflowStat=fs.lstatSync(historicalWorkflowTarget),exactFcaWorkflow=cloned.projectIssue461Read()(historicalWorkflowFile);assert.equal(hash(exactFcaWorkflow),'aeac5912bba5a8d4a40bbe0d5952059b98de1afe7da418dfba649fe55c4738a7');assert(!exactFcaWorkflow.equals(currentWorkflowBytes));
  fs.writeFileSync(historicalWorkflowTarget,exactFcaWorkflow);try{refusal(()=>cloned.validate({}));for(const reader of Object.values(retained))refusal(()=>reader('forge-source-manifest.json'));}finally{assert.equal(fs.lstatSync(historicalWorkflowTarget).ino,currentWorkflowStat.ino);assert(fs.readFileSync(historicalWorkflowTarget).equals(exactFcaWorkflow));fs.writeFileSync(historicalWorkflowTarget,currentWorkflowBytes);assert.equal(hash(fs.readFileSync(historicalWorkflowTarget)),hash(currentWorkflowBytes));}assert.equal(cloned.verifyIssue461(),true);
+ }else if(name==='own'){
+ assert.equal(cloned.validate({}),true);assert.equal(count,1);
  const own=path.join(copy,'scripts/fixtures/issue-461/distribution.cjs'),held=own+'.held';fs.renameSync(own,held);fs.mkdirSync(own);try{assert.throws(()=>cloned.verifyIssue461(),/issue(?:461 own member type|463 immutable published fixture type)/);assert.equal(count,1);}finally{assert.equal(fs.readdirSync(own).length,0);fs.rmdirSync(own);fs.renameSync(held,own);}const ownBytes=fs.readFileSync(own);fs.appendFileSync(own,'\n// private warm code probe\n');try{assert.throws(()=>cloned.verifyIssue461(),/issue(?:461 own member bytes|463 immutable published fixture)/);}finally{fs.writeFileSync(own,ownBytes);}assert.equal(cloned.verifyIssue461(),true);
+ }else{
  // Private synchronous transaction controls; no shared Source writes.
  const validators=['validate','validate414Snapshot','verifyCurrent','verifyCleanup'],leaked={};let scopeCalls=0;
- for(const method of validators){const savedMethod=prior[method];try{prior[method]=()=>{scopeCalls++;leaked[method]=cloned.projectIssue461Read();assert(leaked[method]('forge-source-manifest.json').equals(fs.readFileSync(path.join(copy,'forge-source-manifest.json'))));return true;};assert.equal(cloned[method]({}),true);}finally{prior[method]=savedMethod;}}
- assert.equal(scopeCalls,validators.length,'named synchronous validator scopes preserve one predecessor call');
  const currentFile='scripts/forge-completion-delivery-recovery.js',currentTarget=path.join(copy,currentFile),currentBytes=fs.readFileSync(currentTarget),currentStat=fs.lstatSync(currentTarget),persistentProbe=Buffer.concat([currentBytes,Buffer.from('\nprivate persistent callback mutation\n')]);
  const restoreCurrent=()=>{assert.equal(fs.lstatSync(currentTarget).ino,currentStat.ino);assert.equal(hash(fs.readFileSync(currentTarget)),hash(persistentProbe));fs.writeFileSync(currentTarget,currentBytes);assert.equal(hash(fs.readFileSync(currentTarget)),hash(currentBytes));};
+  if(name==='named'){
+ for(const method of validators){const savedMethod=prior[method];try{prior[method]=()=>{scopeCalls++;leaked[method]=cloned.projectIssue461Read();assert(leaked[method]('forge-source-manifest.json').equals(fs.readFileSync(path.join(copy,'forge-source-manifest.json'))));return true;};assert.equal(cloned[method]({}),true);}finally{prior[method]=savedMethod;}}
+ assert.equal(scopeCalls,validators.length,'named synchronous validator scopes preserve one predecessor call');
  const savedValidate=prior.validate;let wrote=false,physicalCalls=0;
  try{prior.validate=options=>{physicalCalls++;options.readRaw(currentFile);return true;};assert.throws(()=>cloned.validate({readRaw:file=>{if(file===currentFile&&!wrote){fs.writeFileSync(currentTarget,persistentProbe);wrote=true;}return fs.readFileSync(path.join(copy,file));}}),/issue(?:461|463) current source/);assert(wrote);assert.equal(physicalCalls,1);for(const reader of Object.values(leaked))assert.throws(()=>reader('forge-source-manifest.json'),/issue(?:461|463) current source/,'reader created inside scope must use a full guard after exit/postguard throw');}finally{prior.validate=savedValidate;if(wrote)restoreCurrent();}
  const sentinel=new Error('private original ancestor sentinel');let caught=null;
  try{prior.validate=()=>{leaked.throwing=cloned.projectIssue461Read();throw sentinel;};try{cloned.validate({});}catch(error){caught=error;}assert.strictEqual(caught,sentinel,'stable Source preserves the same original exception');}finally{prior.validate=savedValidate;}
  fs.writeFileSync(currentTarget,persistentProbe);try{assert.throws(()=>leaked.throwing('forge-source-manifest.json'),/issue(?:461|463) current source/,'throw resets scope before escaped reader use');}finally{restoreCurrent();}
+  }else{
  // Explicit source-consumer operation: exact return/error, nested guards and no async lifetime.
   let operationCalls=0;const value={privateSourceAssertion:true},innerSentinel=new Error('private nested operation sentinel');
+   if(name==='consumer-basic'){
   assert.strictEqual(cloned.validateSourceConsumer(()=>{operationCalls++;return value;}),value);
   assert.equal(operationCalls,1);assert.throws(()=>cloned.validateSourceConsumer(null),/callback required/);
   let asyncCalls=0,thenCalls=0;assert.throws(()=>cloned.validateSourceConsumer(async()=>{asyncCalls++;}),/must be synchronous/);assert.equal(asyncCalls,0);
@@ -59,6 +80,7 @@ try{const names=cp.execFileSync('git',['--no-replace-objects','ls-files','--cach
   let operationCaught=null;try{cloned.validateSourceConsumer(()=>{throw innerSentinel;});}catch(error){operationCaught=error;}assert.strictEqual(operationCaught,innerSentinel);
   // ENTRY refuses foreign physical Source before the explicit callback runs.
   fs.writeFileSync(currentTarget,persistentProbe);try{assert.throws(()=>cloned.validateSourceConsumer(()=>{operationCalls++;}),/issue(?:461|463) current source/);assert.equal(operationCalls,1);}finally{restoreCurrent();}
+   }else if(name==='consumer-nested'){
   const savedNested=prior.validate;let nestedCalls=0,nestedCaught=null,outerEntered=false;
   try{prior.validate=()=>{nestedCalls++;throw innerSentinel;};
     assert.throws(()=>cloned.validateSourceConsumer(()=>{outerEntered=true;const bad=structuredClone(cloned.issue461Layer);bad.files['foreign/future.js']=bad.files[currentFile];assert.throws(()=>cloned.validate({issue461LayerValue:bad}),/independently pinned logical metadata/);assert.equal(nestedCalls,0,'foreign nested options refuse before inner delegation');
@@ -67,19 +89,54 @@ try{const names=cp.execFileSync('git',['--no-replace-objects','ls-files','--cach
       return true;
     }),/issue(?:461|463) current source/,'persistent callback drift refuses at outer EXIT');assert(outerEntered);assert.throws(()=>leaked.operation('forge-source-manifest.json'),/issue(?:461|463) current source/,'outer EXIT refusal resets before escaped reader use');
   }finally{prior.validate=savedNested;if(hash(fs.readFileSync(currentTarget))===hash(persistentProbe))restoreCurrent();}
+   }else if(name==='consumer-reader'){
   // An operation-created reader used after successful return must be fresh/full.
   const operationReader=cloned.validateSourceConsumer(()=>cloned.projectIssue461Read());fs.writeFileSync(currentTarget,persistentProbe);try{assert.throws(()=>operationReader('forge-source-manifest.json'),/issue(?:461|463) current source/);}finally{restoreCurrent();}
   assert.equal(cloned.validateSourceConsumer(()=>cloned.validateSourceConsumer(()=>true)),true,'explicit nested operation returns once and resets');
+   }else if(name==='consumer-legacy'){
   const savedLegacyDrift=prior.validate;try{prior.validate=()=>{fs.writeFileSync(currentTarget,persistentProbe);throw innerSentinel;};assert.equal(cloned.validateSourceConsumer(()=>{let legacyDriftError=null;try{cloned.validate({});}catch(error){legacyDriftError=error;}assert(legacyDriftError);assert.notStrictEqual(legacyDriftError,innerSentinel,'unchanged named-validator fullpostguard overrides sentinel when nested callback drifts Source');assert.match(legacyDriftError.message,/issue(?:461|463) current source/);restoreCurrent();return true;}),true);}finally{prior.validate=savedLegacyDrift;if(hash(fs.readFileSync(currentTarget))===hash(persistentProbe))restoreCurrent();}
   assert.equal(cloned.verifyIssue461(),true);
-
+   }else assert.fail('unknown private issue461 case');
+  }
+ }
  prior.validate=original;completed=true;
 }finally{if(completed){assert.equal(fs.readFileSync(path.join(lab,'.owner'),'utf8'),marker);assert.equal(path.dirname(fs.realpathSync.native(copy)),lab);assert(!fs.lstatSync(lab).isSymbolicLink());fs.rmSync(lab,{recursive:true});}else console.error('Preserved private issue461 controls: '+lab);}
-const artifacts=require('./forge-claude-renderer').render({repo:ROOT,projectRoot:ROOT,claudeHome:path.join(ROOT,'unused-host'),forgeHome:path.join(ROOT,'unused-core')}).artifacts;
-const public457=issue463SourceConsumer.loadHistoricalFixture('scripts/fixtures/issues-457-458/distribution.cjs'),saved457=public457.validate;let capturedError=null,outerError=null,virtualCalls=0,foreignReads=0;
-assert.strictEqual(layer.issues457458Layer,public457.issues457458Layer,'same live public457 instance');
-for(const operation of [fn=>fn(),fn=>layer.validateSourceConsumer(fn)]){capturedError=null;outerError=null;virtualCalls=0;foreignReads=0;operation(()=>{try{public457.validate=(...args)=>{virtualCalls++;try{return saved457(...args);}catch(error){capturedError=error;throw error;}};try{layer.validate({artifacts,readRaw:file=>{if(file==='scripts/forge-completion-delivery-recovery.js'){foreignReads++;return foreign;}return read(file);}});}catch(error){outerError=error;}assert.equal(virtualCalls,1);assert(foreignReads>0,'foreign callback reached ancestor validation');assert(capturedError);assert.strictEqual(outerError,capturedError,'original ancestor refusal identity is preserved');}finally{public457.validate=saved457;}});}
-let realCalls=0;
-try{parent.validate=(...args)=>{realCalls++;return saved(...args);};assert.equal(layer.validate({artifacts}),true);assert.equal(realCalls,1);}finally{parent.validate=saved;}
+}
+const CASES = [
+  { name: "core-structural-historical-and-real-ancestor", fn: runCore },
+  { name: "physical-future-members", fn: () => runPrivateCase("future") },
+  { name: "physical-tamper-01-a", fn: () => runPrivateCase("tamper-a", "scripts/ci-profiles/issue-461-d046.json") },
+  { name: "physical-tamper-01-b", fn: () => runPrivateCase("tamper-b", "scripts/ci-profiles/issue-461-d046.json") },
+  { name: "physical-tamper-02-a", fn: () => runPrivateCase("tamper-a", ".github/workflows/ci.yml") },
+  { name: "physical-tamper-02-b", fn: () => runPrivateCase("tamper-b", ".github/workflows/ci.yml") },
+  { name: "physical-tamper-03-a", fn: () => runPrivateCase("tamper-a", "scripts/forge-release-policy.js") },
+  { name: "physical-tamper-03-b", fn: () => runPrivateCase("tamper-b", "scripts/forge-release-policy.js") },
+  { name: "physical-tamper-04-a", fn: () => runPrivateCase("tamper-a", "scripts/forge-completion-delivery-recovery.js") },
+  { name: "physical-tamper-04-b", fn: () => runPrivateCase("tamper-b", "scripts/forge-completion-delivery-recovery.js") },
+  { name: "physical-tamper-05-a", fn: () => runPrivateCase("tamper-a", "scripts/fixtures/docs-cleanup/README.md") },
+  { name: "physical-tamper-05-b", fn: () => runPrivateCase("tamper-b", "scripts/fixtures/docs-cleanup/README.md") },
+  { name: "physical-tamper-06-a", fn: () => runPrivateCase("tamper-a", "scripts/fixtures/issue-461/README.md") },
+  { name: "physical-tamper-06-b", fn: () => runPrivateCase("tamper-b", "scripts/fixtures/issue-461/README.md") },
+  { name: "physical-tamper-07-a", fn: () => runPrivateCase("tamper-a", "scripts/fixtures/issue-461/distribution-delta.json") },
+  { name: "physical-tamper-07-b", fn: () => runPrivateCase("tamper-b", "scripts/fixtures/issue-461/distribution-delta.json") },
+  { name: "added-profile-missing-and-oversized", fn: () => runPrivateCase("profile") },
+  { name: "physical-exact-historical-workflow-refused", fn: () => runPrivateCase("workflow") },
+  { name: "own-cjs-positive-directory-and-warm-bytes", fn: () => runPrivateCase("own") },
+  { name: "named-scopes-persistent-drift-and-escaped-readers", fn: () => runPrivateCase("named") },
+  { name: "consumer-return-errors-thenables-and-entry", fn: () => runPrivateCase("consumer-basic") },
+  { name: "consumer-nested-frame-restoration-and-exit", fn: () => runPrivateCase("consumer-nested") },
+  { name: "consumer-successful-escaped-reader-and-nesting", fn: () => runPrivateCase("consumer-reader") },
+  { name: "consumer-nested-legacy-postguard", fn: () => runPrivateCase("consumer-legacy") }
+];
+function main(){
+ assert.equal(CASES.length,24,'complete atomic source roster');
+ const selected=require('./forge-ci-units').selectCases(CASES);
+const issue463SourceConsumer = require('./fixtures/issue-463/distribution.cjs');
+issue463SourceConsumer.validateSourceConsumer(() => {
+ for(const {fn}of selected)fn(issue463SourceConsumer);
+ if(selected.length===CASES.length){
 console.log('PASS issue461: exact measured Source,228 immutable fixtures, private physical future/tamper controls, live predecessor spy/restore, full canonical ancestor validation');
+ }else console.log('PASS issue461 selected atomic cohorts: '+selected.map(row=>row.name).join(', '));
 });
+}
+main();
