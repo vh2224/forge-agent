@@ -23,7 +23,7 @@ const latencyLayer = require('./fixtures/ci-latency/workflow-layer.json');
 const predecessorCi = fs.readFileSync(path.join(__dirname, 'fixtures/ci-latency/predecessor-ci.yml'), 'utf8');
 const predecessorRelease = fs.readFileSync(path.join(__dirname, 'fixtures/ci-latency/predecessor-release.yml'), 'utf8');
 assert.strictEqual(hash(predecessorRelease), '635887910ef3fdb5b5c0b7731ee7e6dee86c39e6e675b6d701cacf8e4a321747');
-assert.strictEqual(hash(bytes.release), latencyLayer.release_after.sha256);
+assert.strictEqual(hash(issue463SourceConsumer.projectIssue463Read(() => bytes.release)('.github/workflows/release.yml')), latencyLayer.release_after.sha256);
 assert.strictEqual(hash(predecessorCi), latencyLayer.ci_before.sha256);
 // Issue 440 additive layer: current ci.yml = ci-latency ci_after plus exactly one
 // ' --verbose true' suffix on the existing Run test suites command.
@@ -296,13 +296,13 @@ for(const platform of ['Linux','macOS','Windows'])for(const output of [undefined
   assert.strictEqual(verify,!(platform==='Windows'&&output==='false'),'missing or unknown setup metadata always keeps verification');
 }
 const rows = expandJobs(POLICY.workflows.ci);
-assert.strictEqual(rows.length, 142);
+assert.strictEqual(rows.length, 32);
 assert.strictEqual(rows.filter(row => row.kind === 'alias').length, 9);
 assert.deepStrictEqual(rows.filter(row => row.key === 'test').map(row => row.name),
-  [['ubuntu-latest', 33], ['macos-latest', 41], ['windows-latest', 56]].flatMap(([os, count]) => Array.from({length:count}, (_, i) => `Tests (${os}, shard ${i+1}/${count})`)));
+  [['ubuntu-latest', 5], ['macos-latest', 5], ['windows-latest', 10]].flatMap(([os, count]) => Array.from({length:count}, (_, i) => `Tests (${os}, shard ${i+1}/${count})`)));
 assert.strictEqual(rows.filter(row => row.name === 'Tests (ubuntu-latest)' && row.kind === 'alias').length, 1);
-assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'win32').map(row => row.matrix['shard-count']), Array(56).fill(56));
-assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'darwin').map(row => row.matrix['shard-count']), Array(41).fill(41));
+assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'win32').map(row => row.matrix['shard-count']), Array(10).fill(10));
+assert.deepStrictEqual(rows.filter(row => row.key === 'test' && row.matrix.platform === 'darwin').map(row => row.matrix['shard-count']), Array(5).fill(5));
 // Smoke condition evaluated per policy cell: exactly one Linux and one macOS run, never Windows.
 const runnerOs = { 'ubuntu-latest': 'Linux', 'macos-latest': 'macOS', 'windows-latest': 'Windows' };
 const smokeCells = rows.filter(row => row.key === 'test'
@@ -323,7 +323,7 @@ for (const [platform,platformCells] of cells) {
   const cell=platformCells[0],layouts=platformCells.map(row=>workerLayout({index:row['shard-index'],count:row['shard-count'],jobs:row.workers,singleWorkerJobs:row['single-worker-jobs']}));
   const count=layouts[0].count;assert(count<=96);assert(layouts.every(row=>row.count===count));
   assert.deepStrictEqual(layouts.flatMap(row=>Array.from({length:row.workers},(_,i)=>row.start+i)).sort((a,b)=>a-b),Array.from({length:count},(_,i)=>i));
-  assert.strictEqual(count,{linux:64,darwin:80,win32:96}[platform]);totalWorkers+=count;
+  assert.strictEqual(count,{linux:15,darwin:15,win32:30}[platform]);totalWorkers+=count;
   const plans = Array.from({ length: count }, (_, index) => planShards({
     suites, index, count, platform, profile, estimatedWeights: unitWeights(unitInventory, profile, platform),
     planningOverrides: loadPlanningOverrides(profile, platform, suites) }));
@@ -333,9 +333,9 @@ for (const [platform,platformCells] of cells) {
   console.log(`PASS partition ${cell.platform}/${cell['shard-count']} universe=${suites.length} unprofiled=${plans[0].unprofiled.length} stale=${plans[0].stale.length} partition_sha256=${plans[0].partition_sha256}`);
 }
 // Logical partitions may queue; each platform retains the reviewed96-part bound.
-assert.strictEqual(totalWorkers,240);
+assert.strictEqual(totalWorkers,60);
 const maxParallel=Number(/max-parallel: (\d+)/.exec(texts.ci.slice(texts.ci.indexOf('\n  test:')))[1]);
-assert.strictEqual(maxParallel,32);
+assert.strictEqual(maxParallel,20);
 assert(maxParallel*Math.max(...rows.filter(row=>row.key==='test').map(row=>row.matrix.workers))<=64,'at most64 active test processes');
 marker('truth', 3, 'baseline and versioned profile wired; full matrix coverage disjoint with equal fingerprints and fallback null; CI structure preserved');
 marker('key_link', 1, 'loadShardProfile planShards and verifyPartition exercise every real matrix platform/count/index');
@@ -353,7 +353,7 @@ for (const id of ['ci', 'app', 'release']) {
 // Reconstruct only the authorized Windows and macOS matrix changes and remove the macOS
 // tests alias before historical pinning.
 const historicalJobs = JSON.parse(JSON.stringify(Object.fromEntries(Object.entries(POLICY.workflows).map(([key, value]) => [key, value.jobs]))));
-assert.strictEqual(historicalJobs.ci.find(job => job.key === 'test').max_parallel, 32);
+assert.strictEqual(historicalJobs.ci.find(job => job.key === 'test').max_parallel, 20);
 delete historicalJobs.ci.find(job => job.key === 'test').max_parallel;
 historicalJobs.ci = historicalJobs.ci.filter(job => job.key !== 'required-tests-linux');
 historicalJobs.ci.find(job => job.key === 'test').matrix.include = latencyLayer.matrix_before;

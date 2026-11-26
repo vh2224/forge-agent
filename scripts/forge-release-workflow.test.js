@@ -196,12 +196,11 @@ async function execute(f, key, mutate = () => {}) {
   breakingSha = git(['rev-parse', 'HEAD']);
   git(['commit', '--allow-empty', '-m', 'fix: regression']);
   fs.writeFileSync(path.join(versionRepo, 'VERSION'), '2.0.0\n');
-  await test('workflow-master-only-permissions-needs-deadlines-and-no-self-wait', () => {
+  await test('workflow-master-only-permissions-needs-observational-duration-and-no-self-wait', () => {
     assert(source.startsWith('name: Release\n\non:\n  push:\n    branches: [master]\n\npermissions: {}\n'));
     assert(!/tags:|workflow_run:|pull_request|download-artifact|continue-on-error|cancel-in-progress: true/.test(source));
     assert(source.includes('group: release\n  cancel-in-progress: false'));
-    assert.strictEqual((source.match(/timeout-minutes: 75/g) || []).length, 1);
-    assert(75*60000 >= github.DEFAULT_LIMITS.deadlineMs + publisher.TTL_MS,'publisher retains the full collector wait plus preparation and renewal margin');
+    assert(!/timeout-minutes:/.test(source.slice(source.indexOf('\n  publisher:'))),'publisher uses only the platform job limit while awaiting legitimate CI');
     assert(source.includes('name: Release coordinator\n    runs-on: ubuntu-latest\n    timeout-minutes: 5'));
     assert(source.includes('name: Wait for complete CI and app (publisher deadline)'));
     assert(source.includes('publisher:\n    name: Release publisher\n    needs: coordinator'));
@@ -227,8 +226,7 @@ async function execute(f, key, mutate = () => {}) {
       assert(!source.includes('forge-release-gate.js --report'));
       assert(key === 'coordinator' || steps.at(-1).run.includes('apply --state "$RELEASE_STATE" --nonce "$RELEASE_NONCE"'));
     }
-    assert.strictEqual(github.DEFAULT_LIMITS.deadlineMs, 3600000);
-    assert(75*60000>=github.DEFAULT_LIMITS.deadlineMs+15*60000,'job retains setup/prepare margin');
+    assert.strictEqual(github.DEFAULT_LIMITS.deadlineMs, null);
     assert.strictEqual(publisher.TTL_MS, 600000);
   });
   await test('workflow-origin-rejections-before-candidate-code-both-jobs', async () => {
@@ -292,7 +290,7 @@ async function execute(f, key, mutate = () => {}) {
     assert(app.includes("  pull_request:\n    paths:\n      - 'app/**'\n      - '.github/workflows/app.yml'"));
     for (const text of ['  app:', 'name: Swift app and PTY regressions', 'runs-on: macos-26', 'timeout-minutes: 20',
       'actions/cache@v4', 'app/.build', 'swift build --package-path app --product Forge', 'swift run --package-path app ForgeKitTests']) assert(app.includes(text));
-    assert.strictEqual(checks.expandJobs(checks.POLICY.workflows.ci).length, 142);
+    assert.strictEqual(checks.expandJobs(checks.POLICY.workflows.ci).length, 32);
     const ci = fs.readFileSync(path.join(ROOT, checks.POLICY.workflows.ci.path));
     assert.strictEqual(crypto.createHash('sha256').update(ci).digest('hex'), checks.POLICY.workflows.ci.blob_sha256);
     assert(ci.toString().includes('baseline')); assert.strictEqual(checks.POLICY.local.suites.length, 11);

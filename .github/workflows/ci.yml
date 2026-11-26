@@ -50,922 +50,151 @@ jobs:
   test:
     name: Tests (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
     strategy:
       fail-fast: false
-      max-parallel: 32
+      max-parallel: 20
       matrix:
         include:
           - os: ubuntu-latest
             platform: linux
             shard-index: 0
-            shard-count: 33
-            label: ubuntu-latest, shard 1/33
-            workers: 2
-            single-worker-jobs: 2
+            shard-count: 5
+            label: ubuntu-latest, shard 1/5
+            workers: 3
+            single-worker-jobs: 0
           - os: ubuntu-latest
             platform: linux
             shard-index: 1
-            shard-count: 33
-            label: ubuntu-latest, shard 2/33
-            workers: 2
-            single-worker-jobs: 2
+            shard-count: 5
+            label: ubuntu-latest, shard 2/5
+            workers: 3
+            single-worker-jobs: 0
           - os: ubuntu-latest
             platform: linux
             shard-index: 2
-            shard-count: 33
-            label: ubuntu-latest, shard 3/33
-            workers: 2
-            single-worker-jobs: 2
+            shard-count: 5
+            label: ubuntu-latest, shard 3/5
+            workers: 3
+            single-worker-jobs: 0
           - os: ubuntu-latest
             platform: linux
             shard-index: 3
-            shard-count: 33
-            label: ubuntu-latest, shard 4/33
-            workers: 2
-            single-worker-jobs: 2
+            shard-count: 5
+            label: ubuntu-latest, shard 4/5
+            workers: 3
+            single-worker-jobs: 0
           - os: ubuntu-latest
             platform: linux
             shard-index: 4
-            shard-count: 33
-            label: ubuntu-latest, shard 5/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 5
-            shard-count: 33
-            label: ubuntu-latest, shard 6/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 6
-            shard-count: 33
-            label: ubuntu-latest, shard 7/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 7
-            shard-count: 33
-            label: ubuntu-latest, shard 8/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 8
-            shard-count: 33
-            label: ubuntu-latest, shard 9/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 9
-            shard-count: 33
-            label: ubuntu-latest, shard 10/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 10
-            shard-count: 33
-            label: ubuntu-latest, shard 11/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 11
-            shard-count: 33
-            label: ubuntu-latest, shard 12/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 12
-            shard-count: 33
-            label: ubuntu-latest, shard 13/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 13
-            shard-count: 33
-            label: ubuntu-latest, shard 14/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 14
-            shard-count: 33
-            label: ubuntu-latest, shard 15/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 15
-            shard-count: 33
-            label: ubuntu-latest, shard 16/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 16
-            shard-count: 33
-            label: ubuntu-latest, shard 17/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 17
-            shard-count: 33
-            label: ubuntu-latest, shard 18/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 18
-            shard-count: 33
-            label: ubuntu-latest, shard 19/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 19
-            shard-count: 33
-            label: ubuntu-latest, shard 20/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 20
-            shard-count: 33
-            label: ubuntu-latest, shard 21/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 21
-            shard-count: 33
-            label: ubuntu-latest, shard 22/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 22
-            shard-count: 33
-            label: ubuntu-latest, shard 23/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 23
-            shard-count: 33
-            label: ubuntu-latest, shard 24/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 24
-            shard-count: 33
-            label: ubuntu-latest, shard 25/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 25
-            shard-count: 33
-            label: ubuntu-latest, shard 26/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 26
-            shard-count: 33
-            label: ubuntu-latest, shard 27/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 27
-            shard-count: 33
-            label: ubuntu-latest, shard 28/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 28
-            shard-count: 33
-            label: ubuntu-latest, shard 29/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 29
-            shard-count: 33
-            label: ubuntu-latest, shard 30/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 30
-            shard-count: 33
-            label: ubuntu-latest, shard 31/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 31
-            shard-count: 33
-            label: ubuntu-latest, shard 32/33
-            workers: 2
-            single-worker-jobs: 2
-          - os: ubuntu-latest
-            platform: linux
-            shard-index: 32
-            shard-count: 33
-            label: ubuntu-latest, shard 33/33
-            workers: 2
-            single-worker-jobs: 2
+            shard-count: 5
+            label: ubuntu-latest, shard 5/5
+            workers: 3
+            single-worker-jobs: 0
           - os: macos-latest
             platform: darwin
             shard-index: 0
-            shard-count: 41
-            label: macos-latest, shard 1/41
-            workers: 2
-            single-worker-jobs: 2
+            shard-count: 5
+            label: macos-latest, shard 1/5
+            workers: 3
+            single-worker-jobs: 0
           - os: macos-latest
             platform: darwin
             shard-index: 1
-            shard-count: 41
-            label: macos-latest, shard 2/41
-            workers: 2
-            single-worker-jobs: 2
+            shard-count: 5
+            label: macos-latest, shard 2/5
+            workers: 3
+            single-worker-jobs: 0
           - os: macos-latest
             platform: darwin
             shard-index: 2
-            shard-count: 41
-            label: macos-latest, shard 3/41
-            workers: 2
-            single-worker-jobs: 2
+            shard-count: 5
+            label: macos-latest, shard 3/5
+            workers: 3
+            single-worker-jobs: 0
           - os: macos-latest
             platform: darwin
             shard-index: 3
-            shard-count: 41
-            label: macos-latest, shard 4/41
-            workers: 2
-            single-worker-jobs: 2
+            shard-count: 5
+            label: macos-latest, shard 4/5
+            workers: 3
+            single-worker-jobs: 0
           - os: macos-latest
             platform: darwin
             shard-index: 4
-            shard-count: 41
-            label: macos-latest, shard 5/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 5
-            shard-count: 41
-            label: macos-latest, shard 6/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 6
-            shard-count: 41
-            label: macos-latest, shard 7/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 7
-            shard-count: 41
-            label: macos-latest, shard 8/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 8
-            shard-count: 41
-            label: macos-latest, shard 9/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 9
-            shard-count: 41
-            label: macos-latest, shard 10/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 10
-            shard-count: 41
-            label: macos-latest, shard 11/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 11
-            shard-count: 41
-            label: macos-latest, shard 12/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 12
-            shard-count: 41
-            label: macos-latest, shard 13/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 13
-            shard-count: 41
-            label: macos-latest, shard 14/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 14
-            shard-count: 41
-            label: macos-latest, shard 15/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 15
-            shard-count: 41
-            label: macos-latest, shard 16/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 16
-            shard-count: 41
-            label: macos-latest, shard 17/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 17
-            shard-count: 41
-            label: macos-latest, shard 18/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 18
-            shard-count: 41
-            label: macos-latest, shard 19/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 19
-            shard-count: 41
-            label: macos-latest, shard 20/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 20
-            shard-count: 41
-            label: macos-latest, shard 21/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 21
-            shard-count: 41
-            label: macos-latest, shard 22/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 22
-            shard-count: 41
-            label: macos-latest, shard 23/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 23
-            shard-count: 41
-            label: macos-latest, shard 24/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 24
-            shard-count: 41
-            label: macos-latest, shard 25/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 25
-            shard-count: 41
-            label: macos-latest, shard 26/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 26
-            shard-count: 41
-            label: macos-latest, shard 27/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 27
-            shard-count: 41
-            label: macos-latest, shard 28/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 28
-            shard-count: 41
-            label: macos-latest, shard 29/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 29
-            shard-count: 41
-            label: macos-latest, shard 30/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 30
-            shard-count: 41
-            label: macos-latest, shard 31/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 31
-            shard-count: 41
-            label: macos-latest, shard 32/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 32
-            shard-count: 41
-            label: macos-latest, shard 33/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 33
-            shard-count: 41
-            label: macos-latest, shard 34/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 34
-            shard-count: 41
-            label: macos-latest, shard 35/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 35
-            shard-count: 41
-            label: macos-latest, shard 36/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 36
-            shard-count: 41
-            label: macos-latest, shard 37/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 37
-            shard-count: 41
-            label: macos-latest, shard 38/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 38
-            shard-count: 41
-            label: macos-latest, shard 39/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 39
-            shard-count: 41
-            label: macos-latest, shard 40/41
-            workers: 2
-            single-worker-jobs: 2
-          - os: macos-latest
-            platform: darwin
-            shard-index: 40
-            shard-count: 41
-            label: macos-latest, shard 41/41
-            workers: 2
-            single-worker-jobs: 2
+            shard-count: 5
+            label: macos-latest, shard 5/5
+            workers: 3
+            single-worker-jobs: 0
           - os: windows-latest
             platform: win32
             shard-index: 0
-            shard-count: 56
-            label: windows-latest, shard 1/56
-            workers: 2
-            single-worker-jobs: 16
+            shard-count: 10
+            label: windows-latest, shard 1/10
+            workers: 3
+            single-worker-jobs: 0
           - os: windows-latest
             platform: win32
             shard-index: 1
-            shard-count: 56
-            label: windows-latest, shard 2/56
-            workers: 2
-            single-worker-jobs: 16
+            shard-count: 10
+            label: windows-latest, shard 2/10
+            workers: 3
+            single-worker-jobs: 0
           - os: windows-latest
             platform: win32
             shard-index: 2
-            shard-count: 56
-            label: windows-latest, shard 3/56
-            workers: 2
-            single-worker-jobs: 16
+            shard-count: 10
+            label: windows-latest, shard 3/10
+            workers: 3
+            single-worker-jobs: 0
           - os: windows-latest
             platform: win32
             shard-index: 3
-            shard-count: 56
-            label: windows-latest, shard 4/56
-            workers: 2
-            single-worker-jobs: 16
+            shard-count: 10
+            label: windows-latest, shard 4/10
+            workers: 3
+            single-worker-jobs: 0
           - os: windows-latest
             platform: win32
             shard-index: 4
-            shard-count: 56
-            label: windows-latest, shard 5/56
-            workers: 2
-            single-worker-jobs: 16
+            shard-count: 10
+            label: windows-latest, shard 5/10
+            workers: 3
+            single-worker-jobs: 0
           - os: windows-latest
             platform: win32
             shard-index: 5
-            shard-count: 56
-            label: windows-latest, shard 6/56
-            workers: 2
-            single-worker-jobs: 16
+            shard-count: 10
+            label: windows-latest, shard 6/10
+            workers: 3
+            single-worker-jobs: 0
           - os: windows-latest
             platform: win32
             shard-index: 6
-            shard-count: 56
-            label: windows-latest, shard 7/56
-            workers: 2
-            single-worker-jobs: 16
+            shard-count: 10
+            label: windows-latest, shard 7/10
+            workers: 3
+            single-worker-jobs: 0
           - os: windows-latest
             platform: win32
             shard-index: 7
-            shard-count: 56
-            label: windows-latest, shard 8/56
-            workers: 2
-            single-worker-jobs: 16
+            shard-count: 10
+            label: windows-latest, shard 8/10
+            workers: 3
+            single-worker-jobs: 0
           - os: windows-latest
             platform: win32
             shard-index: 8
-            shard-count: 56
-            label: windows-latest, shard 9/56
-            workers: 2
-            single-worker-jobs: 16
+            shard-count: 10
+            label: windows-latest, shard 9/10
+            workers: 3
+            single-worker-jobs: 0
           - os: windows-latest
             platform: win32
             shard-index: 9
-            shard-count: 56
-            label: windows-latest, shard 10/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 10
-            shard-count: 56
-            label: windows-latest, shard 11/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 11
-            shard-count: 56
-            label: windows-latest, shard 12/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 12
-            shard-count: 56
-            label: windows-latest, shard 13/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 13
-            shard-count: 56
-            label: windows-latest, shard 14/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 14
-            shard-count: 56
-            label: windows-latest, shard 15/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 15
-            shard-count: 56
-            label: windows-latest, shard 16/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 16
-            shard-count: 56
-            label: windows-latest, shard 17/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 17
-            shard-count: 56
-            label: windows-latest, shard 18/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 18
-            shard-count: 56
-            label: windows-latest, shard 19/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 19
-            shard-count: 56
-            label: windows-latest, shard 20/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 20
-            shard-count: 56
-            label: windows-latest, shard 21/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 21
-            shard-count: 56
-            label: windows-latest, shard 22/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 22
-            shard-count: 56
-            label: windows-latest, shard 23/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 23
-            shard-count: 56
-            label: windows-latest, shard 24/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 24
-            shard-count: 56
-            label: windows-latest, shard 25/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 25
-            shard-count: 56
-            label: windows-latest, shard 26/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 26
-            shard-count: 56
-            label: windows-latest, shard 27/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 27
-            shard-count: 56
-            label: windows-latest, shard 28/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 28
-            shard-count: 56
-            label: windows-latest, shard 29/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 29
-            shard-count: 56
-            label: windows-latest, shard 30/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 30
-            shard-count: 56
-            label: windows-latest, shard 31/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 31
-            shard-count: 56
-            label: windows-latest, shard 32/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 32
-            shard-count: 56
-            label: windows-latest, shard 33/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 33
-            shard-count: 56
-            label: windows-latest, shard 34/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 34
-            shard-count: 56
-            label: windows-latest, shard 35/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 35
-            shard-count: 56
-            label: windows-latest, shard 36/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 36
-            shard-count: 56
-            label: windows-latest, shard 37/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 37
-            shard-count: 56
-            label: windows-latest, shard 38/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 38
-            shard-count: 56
-            label: windows-latest, shard 39/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 39
-            shard-count: 56
-            label: windows-latest, shard 40/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 40
-            shard-count: 56
-            label: windows-latest, shard 41/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 41
-            shard-count: 56
-            label: windows-latest, shard 42/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 42
-            shard-count: 56
-            label: windows-latest, shard 43/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 43
-            shard-count: 56
-            label: windows-latest, shard 44/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 44
-            shard-count: 56
-            label: windows-latest, shard 45/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 45
-            shard-count: 56
-            label: windows-latest, shard 46/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 46
-            shard-count: 56
-            label: windows-latest, shard 47/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 47
-            shard-count: 56
-            label: windows-latest, shard 48/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 48
-            shard-count: 56
-            label: windows-latest, shard 49/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 49
-            shard-count: 56
-            label: windows-latest, shard 50/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 50
-            shard-count: 56
-            label: windows-latest, shard 51/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 51
-            shard-count: 56
-            label: windows-latest, shard 52/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 52
-            shard-count: 56
-            label: windows-latest, shard 53/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 53
-            shard-count: 56
-            label: windows-latest, shard 54/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 54
-            shard-count: 56
-            label: windows-latest, shard 55/56
-            workers: 2
-            single-worker-jobs: 16
-          - os: windows-latest
-            platform: win32
-            shard-index: 55
-            shard-count: 56
-            label: windows-latest, shard 56/56
-            workers: 2
-            single-worker-jobs: 16
+            shard-count: 10
+            label: windows-latest, shard 10/10
+            workers: 3
+            single-worker-jobs: 0
 
     steps:
       - name: Check out repository

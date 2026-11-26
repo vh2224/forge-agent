@@ -174,9 +174,10 @@ The publisher independently resolves notes and starts its own token-free prepare
 while CI runs. Prepare has empty GH_TOKEN/GITHUB_TOKEN, rejects other secret env,
 and generates local gate/report/receipt with scrubbed child environments.
 The authenticated GET-only wait follows preparation in the same publisher job.
-It receives GH_TOKEN, never waits for Release itself, and is bounded by the
-publisher deadline. The standalone collector retains its explicit 60 minute
-default (`scripts/forge-release-github.js`, `DEFAULT_LIMITS.deadlineMs`).
+It receives GH_TOKEN and never waits for Release itself. Neither the publisher
+job nor the collector imposes an artificial total CI-duration deadline. Hosted
+platform job limits remain; an explicit collector `deadlineMs` may be contracted.
+Per-request timeouts, cumulative IO limits and terminal-state refusal remain.
 No report, receipt, nonce or artifact is transferred from coordinator to publisher.
 After the wait, a token-free step validates the original current-job preparation.
 If less than two minutes of its TTL remain, it creates a new complete preparation
@@ -190,11 +191,10 @@ This is credential propagation discipline; it is not a privilege sandbox.
 Prepare binds the physical checkout, policy/source digests, complete candidate SHA,
 report/notes/package bytes, repository/workflow identity and current run/attempt/job.
 The unique fixed job key plus current authenticated run/attempt is the job identity.
-Receipt TTL is ten minutes after generation. The coordinator job timeout is
-five minutes; the publisher job timeout is seventy-five minutes, as declared in
-`.github/workflows/release.yml`.
-This preserves the collector's full sixty-minute safety wait plus preparation,
-renewal and publication margin; it is not the normal latency target.
+Receipt TTL is ten minutes after generation. The read-only coordinator timeout
+remains five minutes. The waiting publisher omits an explicit job timeout and
+uses the hosted platform limit. This does not extend a receipt: freshness is
+revalidated after complete CI and a new preparation is generated when needed.
 Apply receives only the current-job freshness step's validated state/nonce outputs,
 never an imported report. An expired receipt can be inspected for renewal only;
 the publication path always enforces its original ten-minute expiry.
@@ -313,7 +313,8 @@ Cross-event reuse is not enabled. The only path is the exact-candidate
 push/master barrier (`collectChecks` → `evaluateChecks`); it is the full CI fallback.
 There is no eligible item, no reuse manifest in `POLICY`, no reuse API,
 no new workflow and no new permission. Job counts come from `POLICY`; the
-collector bound comes from `DEFAULT_LIMITS.deadlineMs`. Neither changes here.
+collector uses `DEFAULT_LIMITS` for independent API and IO bounds. Its total
+deadline is optional; the cross-event reuse design does not change that policy.
 No latency or runner-time gain is claimed. Implementation, local tests, hosted CI,
 review, merge and UAT remain separate facts; this design establishes none of them.
 
@@ -428,7 +429,7 @@ reviewed manifest in `POLICY` (which changes `policyDigest`).
 | Job missing, duplicate or skipped | Blocks | Existing job tests and `checks-cross-event-evidence-and-annotations-never-substitute-constituents` | Complete current-attempt jobs |
 | Mutable embedded metadata | Inert | `github-embedded-pr-metadata-mutation-is-inert` | Never read as provenance |
 | Unclassified item | Exact-only | Empty eligible set; `POLICY` has no reuse manifest | Reviewed manifest entry |
-| Exact-only check without an exact run | Blocks at deadline | PR-only world in `github-cross-event-approved-pr-evidence-never-substitutes-exact-push` | Exact push run required |
+| Exact-only check without an exact run | Never eligible; waits within contracted IO/platform limits | PR-only world in `github-cross-event-approved-pr-evidence-never-substitutes-exact-push` | Exact push run required |
 | PR context publishes | Rejected at origin | `workflow-origin-rejections-before-candidate-code-both-jobs`, `origin-rejects-tag-pr-fork-ref-before-candidate-git` | Publisher only on push/master |
 
 Positive: `github-complete-exact-sha-current-attempt-public-apis-and-get-only`
