@@ -9,7 +9,7 @@ const SHARD_PROFILE_SCHEMA = 'forge-shard-profile/v1';
 const ALGORITHMS = Object.freeze({ positional: 'positional-v1', weighted: 'weighted-lpt-v1' });
 const PLATFORMS = Object.freeze(['win32', 'darwin', 'linux']);
 const LIMITS = Object.freeze({
-  maxProfileBytes: 1024 * 1024, maxSuites: 5000, maxShards: 64,
+  maxProfileBytes: 1024 * 1024, maxSuites: 5000, maxShards: 96,
   maxWeightMs: 86400000, maxSources: 64,
 });
 const SUITE_ID_RE = /^(?=.{1,200}$)[^\\/:*?"'<>|\x00-\x1f\x7f-\x9f]*\.test\.js$/u;

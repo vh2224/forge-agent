@@ -367,6 +367,13 @@ try {
     assert.strictEqual(result.status, 0, result.stderr);
   });
 
+  test('report CLI accepts logical65/96 partition estimates', () => {
+    for(const count of [65,96]){
+      const result=cli(['report','--partition',`win32:${count}`]);
+      assert.strictEqual(result.status,0,result.stderr);
+    }
+  });
+
   test('bounded explicit files strict UTF8 link refusal and closed CLI output safety', () => {
     const good = write('good.log', fixture('windows-shard-1.log'));
     assert.strictEqual(collector.readInput(good).bytes, fs.statSync(good).size);
@@ -389,7 +396,8 @@ try {
     } finally { fs.lstatSync = original; }
     const before = hash(fs.readFileSync(good));
     for (const args of [[], ['unknown'], ['report', '--wat', 'x'], ['report', '--input'],
-      ['report', '--partition', 'win32:65'], ['report', '--partition', 'other:2'],
+      ['report', '--partition', 'win32:97'], ['report', '--partition', 'win32:0'],
+      ['report', '--partition', 'win32:-1'], ['report', '--partition'], ['report', '--partition', 'other:2'],
       ['report', '--json', path.join(root, 'same'), '--markdown', path.join(root, 'same')],
       ['report', '--input', good, '--json', good], ['build-shard-profile', '--input', good, '--out', good],
       ['build-shard-profile', '--input', path.join(fixtures, 'local-run.log'), '--out', path.join(root, 'bad.json')]]) {

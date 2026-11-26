@@ -12,9 +12,9 @@ const { validateBaselinePair } = require('./forge-ci-units');
 function integer(value, max) { return /^\d+$/.test(value || '') && Number.isSafeInteger(+value) && +value <= max; }
 function workerLayout({index,count,jobs,singleWorkerJobs=0}) {
   if (![index,count,jobs,singleWorkerJobs].every(Number.isSafeInteger) || index<0 || count<1 || jobs<1 || jobs>3
-      || index>=count || singleWorkerJobs<0 || singleWorkerJobs>count) throw Error('ci-parallel-arguments');
+      || index>=count || count>64 || singleWorkerJobs<0 || singleWorkerJobs>count) throw Error('ci-parallel-arguments');
   const total=singleWorkerJobs+(count-singleWorkerJobs)*jobs;
-  if(total>64)throw Error('ci-parallel-arguments');
+  if(total>96)throw Error('ci-parallel-arguments');
   return {start:index<singleWorkerJobs?index:singleWorkerJobs+(index-singleWorkerJobs)*jobs,
     workers:index<singleWorkerJobs?1:jobs,count:total};
 }

@@ -156,11 +156,11 @@ test('app-only-complete-empty-authenticated-diff-is-na', () => {
 
 test('policy-matrix-complete-ci-one-native-app-and-local-inventory', () => {
   const ci = checks.expandJobs(checks.POLICY.workflows.ci);
-  assert.strictEqual(ci.length, 102); assert.strictEqual(ci.filter(job => job.kind === 'native').length, 93);
+  assert.strictEqual(ci.length, 142); assert.strictEqual(ci.filter(job => job.kind === 'native').length, 133);
   assert.strictEqual(ci.filter(job => job.kind === 'alias').length, 9);
-  assert.strictEqual(new Set(ci.map(job => job.name)).size, 102);
+  assert.strictEqual(new Set(ci.map(job => job.name)).size, 142);
   assert.deepStrictEqual(ci.filter(job => job.key === 'test').map(job => job.name),
-    [['ubuntu-latest',24],['macos-latest',26],['windows-latest',40]].flatMap(([os,count])=>Array.from({length:count},(_,index)=>`Tests (${os}, shard ${index+1}/${count})`)));
+    [['ubuntu-latest',33],['macos-latest',41],['windows-latest',56]].flatMap(([os,count])=>Array.from({length:count},(_,index)=>`Tests (${os}, shard ${index+1}/${count})`)));
   assert.deepStrictEqual(ci.filter(job => job.key.startsWith('required-tests-')).map(job => [job.key, job.name, job.kind, job.needs]), [
     ['required-tests-windows', 'Tests (windows-latest)', 'alias', ['test']],
     ['required-tests-macos', 'Tests (macos-latest)', 'alias', ['test']],
@@ -197,7 +197,7 @@ test('policy-synthetic-candidate-bytes-mapping-and-checkout-eol-independent', ()
   };
   const source = checks.assertPolicySources(candidate(), synthetic);
   assert.strictEqual(source.verified, true);
-  assert.strictEqual(source.workflows.ci.jobs.length, 102);
+  assert.strictEqual(source.workflows.ci.jobs.length, 142);
   for (const [key, workflow] of Object.entries(policy.workflows)) {
     const bytes = blobs[workflow.path];
     assert.notStrictEqual(sha256(bytes), sha256(Buffer.from(bytes.toString().replace(/\n/g, '\r\n'))));
@@ -224,7 +224,7 @@ test(committedMatches ? 'policy-committed-head-source-matches' : 'policy-pending
   if (committedMatches) {
     const source = checks.assertPolicySources(committedCandidate, { cwd: ROOT });
     assert.strictEqual(source.verified, true);
-    assert.strictEqual(source.workflows.ci.jobs.length, 102);
+    assert.strictEqual(source.workflows.ci.jobs.length, 142);
   } else {
     assert.throws(() => checks.assertPolicySources(committedCandidate, { cwd: ROOT }), { code: 'policy-source-drift' });
   }
@@ -279,8 +279,8 @@ test('policy-bounded-coordinator-publisher-permissions-and-needs', () => {
 
 test('checks-complete-current-attempt-source-key-name-execution-id', () => {
   const f = facts(); const result = checks.evaluateChecks(f);
-  assert.strictEqual(result.allowed, true); assert.strictEqual(result.checks.length, 103);
-  const job = result.checks.find(item => item.name === 'Tests (windows-latest, shard 1/40)');
+  assert.strictEqual(result.allowed, true); assert.strictEqual(result.checks.length, 143);
+  const job = result.checks.find(item => item.name === 'Tests (windows-latest, shard 1/56)');
   assert.strictEqual(job.job_key, 'test'); assert.strictEqual(job.kind, 'native');
   assert.strictEqual(job.execution_id, f.workflows.ci.jobs.find(item => item.name === job.name).id);
   assert.strictEqual(job.attempt, 2); assert.strictEqual(job.run_id, 11);
@@ -313,7 +313,7 @@ test('checks-missing-native-alias-only-duplicate-new-job-block', () => {
 });
 
 test('checks-macos-shards-required-even-when-alias-succeeds', () => {
-  const shards = ['Tests (macos-latest, shard 1/26)', 'Tests (macos-latest, shard 2/26)'];
+  const shards = ['Tests (macos-latest, shard 1/41)', 'Tests (macos-latest, shard 2/41)'];
   const alias = 'Tests (macos-latest)';
   assert.strictEqual(checks.evaluateChecks(facts()).allowed, true);
   for (const name of shards) {

@@ -459,7 +459,7 @@ function main(args = process.argv.slice(2)) {
       }
       const partitions = options.partition.map(value => {
         const match = /^(win32|linux|darwin):([1-9]\d?)$/.exec(value);
-        if (!match || +match[2] > 64) fail('ci-profile-usage');
+        if (!match || +match[2] > 96) fail('ci-profile-usage');
         return { platform: match[1], count: +match[2] };
       });
       const apiSources = reads.filter(row => ['jobs', 'runs'].includes(row.type)).map(row => ({

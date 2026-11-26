@@ -108,11 +108,23 @@ assert.equal(toolCli.status,0,toolCli.stderr);assert.equal(fs.readFileSync(toolO
 assert(!fs.existsSync(unusedProfiles),'tool metadata mode never starts tests or creates timing profiles');
 for(let count=1;count<=32;count++)for(let jobs=1;jobs<=3;jobs++)for(let singleWorkerJobs=0;singleWorkerJobs<=count;singleWorkerJobs++){
   const total=singleWorkerJobs+(count-singleWorkerJobs)*jobs;
-  if(total>64){assert.throws(()=>workerLayout({index:0,count,jobs,singleWorkerJobs}),/arguments/);continue;}
+  if(total>96){assert.throws(()=>workerLayout({index:0,count,jobs,singleWorkerJobs}),/arguments/);continue;}
   const indices=Array.from({length:count},(_,index)=>workerLayout({index,count,jobs,singleWorkerJobs}))
     .flatMap(row=>Array.from({length:row.workers},(_,i)=>{assert.equal(row.count,total);return row.start+i;}));
   assert.deepEqual(indices,Array.from({length:total},(_,i)=>i),'single-worker prefixes preserve exact complete global coverage');
 }
+// Logical partitions may queue; physical coordinates and per-job workers keep their bounds.
+for(const [count,singleWorkerJobs,total] of [[33,1,65],[48,0,96],[56,16,96]]){
+  const indices=Array.from({length:count},(_,index)=>{
+    const parsed=parseArgs(['--shard-index',String(index),'--shard-count',String(count),'--jobs','2','--single-worker-jobs',String(singleWorkerJobs),'--profile-dir',path.join(temp,'logical-boundary')]);
+    const layout=workerLayout(parsed);assert.equal(layout.count,total);assert(layout.workers<=2);
+    return Array.from({length:layout.workers},(_,worker)=>layout.start+worker);
+  }).flat();
+  assert.deepEqual(indices,Array.from({length:total},(_,index)=>index),'logical65/96 retain complete nonduplicated worker mapping');
+}
+assert.throws(()=>workerLayout({index:0,count:49,jobs:2,singleWorkerJobs:1}),/arguments/,'logical97 refused');
+assert.throws(()=>workerLayout({index:0,count:65,jobs:1,singleWorkerJobs:0}),/arguments/,'physical65 refused even when logical65 is permitted');
+assert.throws(()=>parseArgs(['--shard-index','0','--shard-count','65','--jobs','1','--profile-dir',temp]),/arguments/,'CLI physical65 still refused');
 for(const value of ['-1','2','1.5','NaN'])assert.throws(()=>parseArgs([...argv,'--single-worker-jobs',value]));
 assert.throws(()=>logHeader('injected\nComplete job name: foreign'),/job-name/);
 for(const bad of [[],['--jobs','4'],[...argv,'--jobs','1'],argv.map(v=>v==='--jobs'?'--unknown':v),argv.map(v=>v==='1'?'0':v)])assert.throws(()=>parseArgs(bad));
