@@ -265,15 +265,36 @@ function test(name, fn) {
     || name.startsWith('review R5 fresh coordinator recovers each new claim ');
   CASES.push({ name, fn, group: shared ? 'shared-u5-consolidation' : claims ? 'claim-restart-witnesses' : name });
 }
+// Diagnostic only: registered names and closed states, never worker/error prose.
+const CASE_DIAGNOSTIC = { stage: 'registered', name: null, pending: false };
+function caseDiagnostic(event, error, exitCode = null) {
+  try {
+    const code = error?.code, kind = error?.name;
+    const row = { schema_version: 1, kind: 'batch-process-test-diagnostic', event,
+      stage: CASE_DIAGNOSTIC.stage, case: CASE_DIAGNOSTIC.name, pending: CASE_DIAGNOSTIC.pending,
+      passed, failed, exit_code: Number.isInteger(exitCode) && exitCode >= 0 && exitCode <= 255 ? exitCode : null,
+      error_code: code == null ? null : ['ERR_ASSERTION', 'ETIMEDOUT', 'ENOBUFS', 'EVERIFYCLEANUP', 'EVERIFYENV', 'FIXTURE_CRASH'].includes(code) ? code : 'other',
+      error_class: kind == null ? null : ['Error', 'AssertionError', 'TypeError', 'RangeError', 'SyntaxError'].includes(kind) ? kind : 'other' };
+    fs.writeSync(2, JSON.stringify(row) + '\n');
+  } catch (_) { /* EPIPE/EBADF/diagnostics never alter execution or cleanup */ }
+}
+process.once('exit', code => caseDiagnostic('process-exit', null, code));
 async function runCases() {
+  CASE_DIAGNOSTIC.stage = 'selecting';
   for (const { name, fn } of require('./forge-ci-units').selectCases(CASES)) {
+    Object.assign(CASE_DIAGNOSTIC, { stage: 'case-running', name, pending: true });
+    caseDiagnostic('case-start');
     const started = Date.now();
     try {
       await fn();
       passed++;
+      Object.assign(CASE_DIAGNOSTIC, { stage: 'case-passed', pending: false });
+      caseDiagnostic('case-settled');
       console.log(`  ✓ ${name} (${Date.now() - started} ms)`);
     } catch (error) {
       failed++;
+      Object.assign(CASE_DIAGNOSTIC, { stage: 'case-failed', pending: false });
+      caseDiagnostic('case-failed', error);
       console.log(`  ✗ ${name}`);
       console.log(`      ${error && error.stack ? error.stack : error}`);
       console.log(`      member observer tail: ${SINK.tail.slice(-1500).replace(/\n/g, '\n      ')}`);
@@ -1922,6 +1943,8 @@ test('review R18 post-unit queue waits for real ready memory and publishes canon
   try {
     await runCases();
   } finally {
+    CASE_DIAGNOSTIC.stage = 'suite-cleanup';
+    caseDiagnostic('suite-cleanup');
     console.log(`\n${passed} passed, ${failed} failed`);
     for (const [name, value] of Object.entries(SAVED_ENV)) {
       if (value === undefined) delete process.env[name];
@@ -1931,4 +1954,4 @@ test('review R18 post-unit queue waits for real ready memory and publishes canon
     else try { fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); } catch { /* best-effort cleanup of joined synthetic fixtures */ }
     if (failed) process.exitCode = 1;
   }
-})().catch(error => { console.error(error); process.exitCode = 1; });
+})().catch(error => { CASE_DIAGNOSTIC.stage = 'suite-rejected'; caseDiagnostic('suite-rejected', error); console.error(error); process.exitCode = 1; });
