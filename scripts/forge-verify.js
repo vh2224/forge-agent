@@ -128,7 +128,14 @@ const KNOWN_COMMAND_PREFIXES = new Set([
  * Ported verbatim from GSD-2 verification-gate.js lines 151–176.
  */
 function isLikelyCommand(cmd) {
-  const trimmed = cmd.trim();
+  // A leading POSIX environment prefix (`NAME=value cmd`) is data for the
+  // child, not the command: classify what follows it. The Windows runner
+  // applies the same prefix through leadingEnvironment and POSIX `sh -c`
+  // applies it natively. Before this, the uppercase first token read as prose
+  // and the whole task-plan command was silently dropped.
+  const parsed = splitEnvironmentPrefix(cmd);
+  if (!parsed) return false;
+  const trimmed = parsed.trim();
   if (!trimmed) return false;
   const tokens = trimmed.split(/\s+/);
   const firstToken = tokens[0];
@@ -153,6 +160,19 @@ function isLikelyCommand(cmd) {
   if (/[A-Z]/.test(firstToken) && !firstToken.includes("/")) return false;
 
   return true;
+}
+
+/**
+ * The command that follows a leading environment prefix, using the exact
+ * grammar the Windows verification runner enforces (forge-verification-process
+ * leadingEnvironment). Returns the command unchanged when there is no prefix
+ * and null when a prefix is present but would be refused at run time.
+ */
+function splitEnvironmentPrefix(cmd) {
+  const text = String(cmd);
+  if (!/^[ 	]*[A-Za-z_][A-Za-z0-9_]*=/.test(text)) return text;
+  try { return require("./forge-verification-process").leadingEnvironment(text, {}).command; }
+  catch { return null; }
 }
 
 /**
@@ -190,13 +210,16 @@ function discoverCommands(options) {
 
   // 1. Task plan verify field (untrusted — sanitize each segment)
   if (options.taskPlanVerify && options.taskPlanVerify.trim()) {
-    const commands = options.taskPlanVerify
+    const segments = options.taskPlanVerify
       .split("&&")
       .map(c => c.trim())
-      .filter(Boolean)
-      .filter(c => sanitizeCommand(c) !== null);
+      .filter(Boolean);
+    const commands = segments.filter(c => sanitizeCommand(c) !== null);
+    // `rejected` names plan segments that were not accepted, so a caller that
+    // seals verification can refuse instead of silently running less.
+    const rejected = segments.filter(c => sanitizeCommand(c) === null);
     if (commands.length > 0) {
-      return { commands, source: "task-plan" };
+      return { commands, source: "task-plan", ...(rejected.length ? { rejected } : {}) };
     }
   }
 
@@ -993,6 +1016,9 @@ function normalizeExecutionVerification(contract, planText, declared = {}, runti
     });
     const discovered = discoverCommands({ cwd: root.path, gsdDir: join(measured.owner, '.gsd'),
       taskPlanVerify: parsePlanVerify(planText), preferenceCommands: explicit });
+    // A sealed execution must run every verify the plan declares. Dropping a
+    // rejected segment silently would seal (and later prove) less than planned.
+    if (discovered.rejected?.length) fail('verification-plan-command-rejected');
     let commands = discovered.commands;
     let origins = commands.map(() => discovered.source);
     if (discovered.source === 'task-plan' && explicit) {

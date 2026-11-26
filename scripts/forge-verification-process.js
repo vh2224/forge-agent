@@ -137,4 +137,4 @@ function createWindowsRunner({ spawnSyncImpl = spawnSync } = {}) {
   };
 }
 
-module.exports = { createWindowsRunner, runWindowsCommand: createWindowsRunner(), MAX_OUTPUT };
+module.exports = { createWindowsRunner, runWindowsCommand: createWindowsRunner(), leadingEnvironment, MAX_OUTPUT };
