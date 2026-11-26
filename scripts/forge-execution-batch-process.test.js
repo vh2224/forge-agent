@@ -976,6 +976,19 @@ async function restartWitness(point) {
         pid: cli.pid, exit_code: cli.code, signal: cli.signal, actual_child_close: true,
         stdout_sha256: digest(cli.stdout), stderr_sha256: digest(cli.stderr) }));
       console.log(`  fresh coordinator ${point}: pid=${cli.pid} exit=${cli.code}`);
+      (function beforeExitAssert(fx,cli,point){
+ if(cli.code===0)return;
+ try{
+  const fs=require('fs'),hash=b=>require('crypto').createHash('sha256').update(b).digest('hex');
+  const safeNumber=n=>Number.isSafeInteger(n)?n:null,phases=new Set(['ready','done','failed','retained','captured','published','acknowledged','joined','not-started','conflict','consolidated','partial','blocked']),phase=x=>phases.has(x)?x:null;
+  const receipts=['T01','T02'].map(task=>{try{
+   const file=fx.inputs[task].resultFile+'.receipt.json',st=fs.lstatSync(file);if(!st.isFile()||st.isSymbolicLink()||st.size>2*1024*1024)return{task_id:task,observation_error:'receipt-shape-or-size'};
+   const bytes=fs.readFileSync(file),receipt=JSON.parse(bytes.toString('utf8')),capture=receipt.delivery_capture;
+   return{task_id:task,receipt_sha256:hash(bytes),receipt_bytes:bytes.length,phase:phase(receipt.phase),capture_passed:typeof capture?.passed==='boolean'?capture.passed:null,gate_passed:typeof capture?.gate?.passed==='boolean'?capture.gate.passed:null,roots:(Array.isArray(capture?.gate?.roots)?capture.gate.roots:[]).slice(0,4).map(root=>({passed:typeof root.result?.passed==='boolean'?root.result.passed:null,checks:(Array.isArray(root.result?.checks)?root.result.checks:[]).slice(0,8).map(check=>{const stdout=typeof check.stdout==='string'?check.stdout:'',stderr=typeof check.stderr==='string'?check.stderr:'';return{exit_code:safeNumber(check.exitCode),stdout_bytes:Buffer.byteLength(stdout),stderr_bytes:Buffer.byteLength(stderr),stdout_sha256:hash(stdout),stderr_sha256:hash(stderr),cleanup_status:phase(check.cleanup?.status),active_processes:safeNumber(check.cleanup?.active_processes)};})}))};
+  }catch(_){return{task_id:task,observation_error:'receipt-unreadable'};}});
+  process.stderr.write(JSON.stringify({schema_version:1,kind:'private-restart-before-exit-assert',point:point==='controller-terminal-applied'?point:null,pid:safeNumber(cli.pid),exit_code:safeNumber(cli.code),signal:['SIGTERM','SIGKILL','SIGABRT','SIGSEGV','SIGINT'].includes(cli.signal)?cli.signal:null,stdout_bytes:Buffer.byteLength(cli.stdout),stderr_bytes:Buffer.byteLength(cli.stderr),stdout_sha256:hash(cli.stdout),stderr_sha256:hash(cli.stderr),receipts})+'\n');
+ }catch(_){try{process.stderr.write('{"schema_version":1,"kind":"private-restart-before-exit-assert","observation_error":"observer-failed"}\n');}catch(__){}}
+})(fx,cli,point);
       assert.strictEqual(cli.code, 0, `${point}: the fresh consolidation (stderr tail):\n${cli.stderr.slice(-4000)}`);
       const report = JSON.parse(cli.stdout.trim().split('\n').pop());
       try {

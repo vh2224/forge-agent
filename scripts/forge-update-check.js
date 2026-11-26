@@ -11,7 +11,8 @@ const { git } = require('./forge-git-process');
 const { compareSemver, parseStableTags } = require('./forge-update-remote');
 
 const TTL_MS = 600000;
-const REFRESH_TIMEOUT_MS = 60000;
+// Refresh ownership is process-based; marker age never proves absence.
+const REFRESH_MARKER_SUFFIX = '.refresh-v2'; // Fixed protocol, never a release version.
 const TRANSIENT_RETRY_MS = 60000;
 const MAX_FILE_BYTES = 65536;
 const MAX_REMOTE_LENGTH = 2048;
@@ -562,6 +563,61 @@ function targetFromRequest(request) {
     prefs: request && request.prefsRepo ? { repo_path: request.prefsRepo } : {} };
 }
 
+// Every marker read/reclaim/publication/release is synchronous under this short
+// process mutex. The child refresh itself never runs while the mutex is held.
+function withRefreshGuard(file, action, retries = 1) {
+  ensureCacheDirectory(file);
+  const directory = path.resolve(path.dirname(file)), mutex = require('./forge-lock');
+  const guard = mutex.acquireProcessSync(directory, `update-${digest(path.basename(file))}`, {
+    processDirectory: directory, retries,
+  });
+  try { return action(); } finally { guard.release(); }
+}
+
+function refreshMarker(marker) {
+  try {
+    const row = JSON.parse(readPrivateFile(marker, 512));
+    if (!row || typeof row !== 'object' || Array.isArray(row)
+        || Object.keys(row).sort().join(',') !== 'child_pid,nonce,owner_pid,schema_version'
+        || row.schema_version !== 1 || !GENERATION_PATTERN.test(row.nonce)
+        || !Number.isSafeInteger(row.owner_pid) || row.owner_pid < 1
+        || row.child_pid !== null && (!Number.isSafeInteger(row.child_pid) || row.child_pid < 1))
+      return { state: 'unknown' };
+    return { state: 'known', row };
+  } catch (error) { return { state: error.code === 'ENOENT' ? 'absent' : 'unknown' }; }
+}
+
+function markerAvailable(marker) {
+  const current = refreshMarker(marker);
+  if (current.state === 'absent') return true;
+  if (current.state !== 'known' || current.row.child_pid === null) return false;
+  try { process.kill(current.row.child_pid, 0); return false; }
+  catch (error) { if (error.code !== 'ESRCH') return false; }
+  // No contender can replace this generation until the same guard is released.
+  fs.unlinkSync(marker);
+  return true;
+}
+
+function releaseRefreshMarker(marker, nonce, role) {
+  const current = refreshMarker(marker);
+  if (current.state !== 'known' || current.row.nonce !== nonce) return false;
+  const row = current.row;
+  if (role === 'child' ? row.child_pid !== process.pid
+    : role !== 'spawn-failed' || row.owner_pid !== process.pid || row.child_pid !== null) return false;
+  fs.unlinkSync(marker);
+  return true;
+}
+
+function publishRefreshChild(marker, nonce, pid) {
+  if (!Number.isSafeInteger(pid) || pid < 1) return false;
+  const current = refreshMarker(marker);
+  if (current.state !== 'known' || current.row.nonce !== nonce
+      || current.row.owner_pid !== process.pid
+      || current.row.child_pid !== null && current.row.child_pid !== pid) return false;
+  publish(marker, JSON.stringify({ ...current.row, child_pid: pid }));
+  return true;
+}
+
 function cachedUpdate(target, options = {}) {
   const context = renderContext(target, options);
   const paths = cachePaths(context, options.cacheDir);
@@ -573,20 +629,42 @@ function cachedUpdate(target, options = {}) {
     ? Date.now() >= cache.retry_after
     : Date.now() - cache.ts >= TTL_MS);
   if (due) {
-    const marker = `${file}.refresh`;
+    const marker = `${file}${REFRESH_MARKER_SUFFIX}`;
+    let child;
     try {
-      try { if (Date.now() - fs.statSync(marker).mtimeMs > REFRESH_TIMEOUT_MS) fs.unlinkSync(marker); } catch (_) { /* absent */ }
-      const fd = fs.openSync(marker, 'wx', 0o600);
-      fs.closeSync(fd);
-      const launch = options.spawn || spawn;
-      try {
+      withRefreshGuard(file, () => {
+        if (!markerAvailable(marker)) return;
+        const nonce = crypto.randomUUID(), launch = options.spawn || spawn;
+        const fd = fs.openSync(marker, 'wx', 0o600);
+        try { fs.writeFileSync(fd, JSON.stringify({ schema_version: 1, nonce,
+          owner_pid: process.pid, child_pid: null })); } finally { fs.closeSync(fd); }
         const request = Buffer.from(JSON.stringify(spawnRequest(context))).toString('base64url');
-        const child = launch(process.execPath, [__filename, '--refresh', request, path.dirname(file)],
-          { stdio: 'ignore', windowsHide: true, detached: true });
-        child.on('error', () => { try { fs.unlinkSync(marker); } catch (_) { /* best effort */ } });
-        child.unref();
-      } catch (_) { try { fs.unlinkSync(marker); } catch (_) { /* best effort */ } }
-    } catch (_) { /* another renderer already scheduled the refresh */ }
+        try {
+          child = launch(process.execPath, [__filename, '--refresh', request, path.dirname(file), nonce],
+            { stdio: 'ignore', windowsHide: true, detached: true });
+        } catch (_) { releaseRefreshMarker(marker, nonce, 'spawn-failed'); return; }
+        let spawned = Number.isSafeInteger(child.pid) && child.pid > 0;
+        // Attach the error listener BEFORE any fallible marker publication.
+        child.on('error', () => {
+          if (spawned || Number.isSafeInteger(child.pid) && child.pid > 0) return;
+          try { withRefreshGuard(file, () => releaseRefreshMarker(marker, nonce, 'spawn-failed')); }
+          catch (_) { /* uncertain guard/record remains held */ }
+          child.unref();
+        });
+        child.on('spawn', () => {
+          spawned = true;
+          try { withRefreshGuard(file, () => publishRefreshChild(marker, nonce, child.pid)); }
+          catch (_) { /* child can confirm its own nonce/PID; otherwise preserve uncertainty */ }
+          child.unref();
+        });
+        publishRefreshChild(marker, nonce, child.pid);
+      });
+    } catch (_) { /* another renderer or unknown marker/guard: skip without reaping by age */ }
+    finally {
+      // Release the guard before unref, including when PID publication failed.
+      // No waiting, release of uncertain ownership, or child termination occurs here.
+      if (child && Number.isSafeInteger(child.pid) && child.pid > 0) child.unref();
+    }
   }
   return cache || unknown;
 }
@@ -600,14 +678,26 @@ function decodeRequest(value) {
 }
 
 if (require.main === module && process.argv[2] === '--refresh') {
-  let target;
+  let target, file;
+  const nonce = process.argv[5];
   try {
     target = targetFromRequest(decodeRequest(process.argv[3]));
+    file = cachePath(target, process.argv[4]);
+    if (nonce !== undefined) withRefreshGuard(file, () => {
+      const current = refreshMarker(`${file}${REFRESH_MARKER_SUFFIX}`);
+      if (!GENERATION_PATTERN.test(nonce) || current.state !== 'known'
+          || current.row.nonce !== nonce
+          || current.row.child_pid !== null && current.row.child_pid !== process.pid)
+        throw new Error('refresh_marker_owner_mismatch');
+      publish(`${file}${REFRESH_MARKER_SUFFIX}`, JSON.stringify({ ...current.row, child_pid: process.pid }));
+    }, 10);
     refresh(target, { cacheDir: process.argv[4] });
   } finally {
-    try {
-      if (target) fs.unlinkSync(`${cachePath(target, process.argv[4])}.refresh`);
-    } catch (_) { /* best effort */ }
+    // Manual --refresh carries no ownership nonce and cannot release any marker.
+    if (file && nonce !== undefined) {
+      try { withRefreshGuard(file, () => releaseRefreshMarker(`${file}${REFRESH_MARKER_SUFFIX}`, nonce, 'child'), 10); }
+      catch (_) { /* next guarded renderer can reclaim an identified child only after ESRCH */ }
+    }
   }
 }
 

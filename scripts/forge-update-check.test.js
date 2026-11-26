@@ -80,6 +80,18 @@ function tag(sha, version) {
   return `${sha}\trefs/tags/v${version}\n`;
 }
 
+function refreshCliFixtureSource() {
+  const source = fs.readFileSync(require.resolve('./forge-update-check'), 'utf8');
+  const start = source.indexOf("if (require.main === module && process.argv[2] === '--refresh')");
+  const end = source.indexOf("if (require.main === module && process.argv[2] === '--invalidate')", start);
+  const helpersStart = source.indexOf('function withRefreshGuard(');
+  const helpersEnd = source.indexOf('function cachedUpdate(', helpersStart);
+  const suffix = source.match(/const REFRESH_MARKER_SUFFIX = '([^']+)';/);
+  assert(start >= 0 && end > start && helpersStart >= 0 && helpersEnd > helpersStart && suffix);
+  assert.strictEqual(suffix[1], '.refresh-v2', 'one fixed protocol namespace');
+  return { block: source.slice(start, end), helpers: source.slice(helpersStart, helpersEnd), suffix: suffix[1] };
+}
+
 try {
   const origin = path.join(ROOT, 'origin with spaces');
   const repo = path.join(ROOT, 'local with spaces');
@@ -313,7 +325,7 @@ try {
     assert.strictEqual(fs.existsSync(pathsB.file), true, 'logical invalidation does not scan or delete siblings');
     assert.strictEqual(provider.cachedUpdate(targetOther, { cacheDir,
       spawn() { throw new Error('another installation must remain warm'); } }).state, 'equal');
-    fs.rmSync(`${pathsB.file}.refresh`, { force: true });
+    fs.rmSync(`${pathsB.file}.refresh-v2`, { force: true });
   });
 
   test('stale shared-generation publication and transient retention are rejected', () => {
@@ -338,7 +350,7 @@ try {
       return { on() {}, unref() {} };
     } }).state, 'unknown');
     assert.strictEqual(launches, 1);
-    fs.rmSync(`${file}.refresh`, { force: true });
+    fs.rmSync(`${file}.refresh-v2`, { force: true });
     const transient = provider.refresh(targetA, { cacheDir, git() { throw new Error('network down'); } });
     assert.strictEqual(transient.state, 'unknown');
     assert.strictEqual(transient.has_update, false);
@@ -385,7 +397,7 @@ try {
         return { on() {}, unref() {} };
       } }).state, 'unknown');
       assert.strictEqual(launches, 1);
-      fs.rmSync(`${file}.refresh`, { force: true });
+      fs.rmSync(`${file}.refresh-v2`, { force: true });
     }
     const direct = provider.refresh(repo, { cacheDir });
     assert.strictEqual(direct.installation_generation, null);
@@ -497,7 +509,7 @@ try {
       return { on() {}, unref() {} };
     } }).state, 'unknown');
     assert.strictEqual(launches, 1, 'CLI invalidates sibling consumers through the shared fence');
-    fs.rmSync(`${provider.cachePath(otherTarget, cliCache)}.refresh`, { force: true });
+    fs.rmSync(`${provider.cachePath(otherTarget, cliCache)}.refresh-v2`, { force: true });
   });
 
   test('missing, malformed and oversized manifests are unknown without Git', () => {
@@ -743,7 +755,7 @@ try {
       assert.strictEqual(launches, 1, 'retry becomes eligible at the fixed boundary');
     } finally {
       Date.now = originalNow;
-      fs.rmSync(`${provider.cachePath(target, cacheDir)}.refresh`, { force: true });
+      fs.rmSync(`${provider.cachePath(target, cacheDir)}.refresh-v2`, { force: true });
     }
   });
 
@@ -846,7 +858,7 @@ try {
     } });
     assert.strictEqual(value.state, 'unknown');
     assert.strictEqual(launches, 1);
-    fs.rmSync(`${file}.refresh`, { force: true });
+    fs.rmSync(`${file}.refresh-v2`, { force: true });
   });
 
   test('generation invalidation rejects an older concurrent publication', () => {
@@ -866,7 +878,163 @@ try {
     } });
     assert.strictEqual(value.state, 'unknown');
     assert.strictEqual(launches, 1);
-    fs.rmSync(`${file}.refresh`, { force: true });
+    fs.rmSync(`${file}.refresh-v2`, { force: true });
+  });
+
+  test('refresh guard reclaims only an identified absent child without trusting age', () => {
+    const nonce = '11111111-1111-4111-8111-111111111111', childPid = 2147483000;
+    const originalKill = process.kill;
+    for (const state of ['live', 'EPERM', 'EIO', 'ESRCH', 'pending', 'legacy', 'malformed', 'oversized']) {
+      const target = { forgeHome: path.join(ROOT, `guard-state-${state}`) };
+      const file = provider.cachePath(target, cacheDir), marker = `${file}.refresh-v2`;
+      const row = { schema_version: 1, nonce, owner_pid: process.pid, child_pid: state === 'pending' ? null : childPid };
+      const contents = state === 'legacy' ? '' : state === 'malformed' ? '{' : state === 'oversized' ? 'x'.repeat(513) : JSON.stringify(row);
+      fs.writeFileSync(marker, contents, { mode: 0o600 }); fs.utimesSync(marker, 1, 1);
+      let probes = 0, launches = 0;
+      try {
+        process.kill = (pid, signal) => {
+          probes++; assert.strictEqual(pid, childPid); assert.strictEqual(signal, 0);
+          if (state !== 'live') throw Object.assign(Error('fixture process state'), { code: state });
+        };
+        provider.cachedUpdate(target, { cacheDir, spawn() {
+          launches++; const child = new (require('events').EventEmitter)();
+          child.pid = process.pid; child.unref = () => {}; return child;
+        } });
+        assert.strictEqual(launches, state === 'ESRCH' ? 1 : 0, state);
+        assert.strictEqual(probes, ['pending', 'legacy', 'malformed', 'oversized'].includes(state) ? 0 : 1, state);
+        if (state === 'ESRCH') assert.notStrictEqual(JSON.parse(fs.readFileSync(marker, 'utf8')).nonce, nonce);
+        else assert.strictEqual(fs.readFileSync(marker, 'utf8'), contents);
+      } finally { process.kill = originalKill; fs.rmSync(marker, { force: true }); }
+    }
+  });
+
+  test('refresh callbacks are owner scoped and missing child PID remains unknown', () => {
+    const target = { forgeHome: path.join(ROOT, 'guard-callbacks') };
+    const marker = `${provider.cachePath(target, cacheDir)}.refresh-v2`;
+    const child = new (require('events').EventEmitter)(); child.unref = () => {};
+    let launches = 0;
+    const spawn = () => { launches++; return child; };
+    const originalKill = process.kill;
+    try {
+      process.kill = () => { throw Error('pending PID must not be probed'); };
+      provider.cachedUpdate(target, { cacheDir, spawn }); fs.utimesSync(marker, 1, 1);
+      provider.cachedUpdate(target, { cacheDir, spawn }); assert.strictEqual(launches, 1);
+      const pending = JSON.parse(fs.readFileSync(marker, 'utf8')); assert.strictEqual(pending.child_pid, null);
+      child.emit('error', Object.assign(Error('fixture spawn failure'), { code: 'ENOENT' }));
+      assert.strictEqual(fs.existsSync(marker), false, 'proven no-child error releases its pending generation');
+      const successor = { ...pending, nonce: '22222222-2222-4222-8222-222222222222', child_pid: process.pid };
+      fs.writeFileSync(marker, JSON.stringify(successor), { mode: 0o600 });
+      child.emit('error', Error('late duplicate error'));
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(marker, 'utf8')), successor, 'old callback preserves successor');
+    } finally { process.kill = originalKill; fs.rmSync(marker, { force: true }); }
+  });
+
+  test('refresh attaches an error listener before fallible child PID publication', () => {
+    const target = { forgeHome: path.join(ROOT, 'guard-publication-failure') };
+    const marker = `${provider.cachePath(target, cacheDir)}.refresh-v2`;
+    const child = new (require('events').EventEmitter)(); child.pid = process.pid;
+    let unrefs = 0; child.unref = () => { unrefs++; };
+    const originalRename = fs.renameSync;
+    try {
+      fs.renameSync = function(from, to) {
+        if (to === marker) throw Object.assign(Error('fixture publication failure'), { code: 'EIO' });
+        return originalRename.call(fs, from, to);
+      };
+      assert.doesNotThrow(() => provider.cachedUpdate(target, { cacheDir, spawn() { return child; } }));
+      assert.strictEqual(child.listenerCount('error'), 1);
+      assert.strictEqual(unrefs, 1, 'guard released before detaching an uncertain child');
+      const pending = fs.readFileSync(marker, 'utf8');
+      assert.strictEqual(JSON.parse(pending).child_pid, null);
+      assert.doesNotThrow(() => child.emit('error', Error('later async error')));
+      assert.strictEqual(fs.readFileSync(marker, 'utf8'), pending, 'publication failure is not absence');
+    } finally { fs.renameSync = originalRename; fs.rmSync(marker, { force: true }); }
+  });
+
+  test('fixed v2 protocol admits one worker while preserving an unknown legacy marker', () => {
+    const target = { forgeHome: path.join(ROOT, 'guard-legacy-transition') };
+    const file = provider.cachePath(target, cacheDir), marker = file + '.refresh-v2', legacy = file + '.refresh';
+    fs.writeFileSync(legacy, '', { mode: 0o600 }); fs.utimesSync(legacy, 1, 1);
+    const child = new (require('events').EventEmitter)(); child.pid = process.pid; child.unref = () => {};
+    const originalKill = process.kill; let launches = 0;
+    try {
+      process.kill = (pid, signal) => { assert.strictEqual(pid, process.pid); assert.strictEqual(signal, 0); };
+      const spawn = () => { launches++; return child; };
+      provider.cachedUpdate(target, { cacheDir, spawn }); fs.utimesSync(marker, 1, 1);
+      provider.cachedUpdate(target, { cacheDir, spawn }); provider.cachedUpdate(target, { cacheDir, spawn });
+      assert.strictEqual(launches, 1); assert.strictEqual(fs.readFileSync(legacy, 'utf8'), '');
+      assert.strictEqual(JSON.parse(fs.readFileSync(marker, 'utf8')).child_pid, process.pid);
+    } finally { process.kill = originalKill; fs.rmSync(marker, { force: true }); fs.rmSync(legacy, { force: true }); }
+  });
+
+  test('owned CLI executes the real nonce/PID branches and refreshes outside its guard', () => {
+    const { helpers, block, suffix } = refreshCliFixtureSource();
+    const nonce = '33333333-3333-4333-8333-333333333333', pid = 2147482000;
+    for (const state of ['matching', 'pending', 'wrong-nonce', 'wrong-pid']) {
+      const file = path.join(cacheDir, `owned-cli-${state}`), marker = file + suffix;
+      const supplied = state === 'wrong-nonce' ? '44444444-4444-4444-8444-444444444444' : nonce;
+      const original = { schema_version: 1, nonce, owner_pid: 2147481000,
+        child_pid: state === 'pending' ? null : state === 'wrong-pid' ? pid - 1 : pid };
+      const store = new Map([[marker, JSON.stringify(original)]]);
+      let guarded = false, refreshes = 0, releases = 0, writes = 0, unlinks = 0;
+      const module = {}, requireMock = name => {
+        assert.strictEqual(name, './forge-lock');
+        return { acquireProcessSync(directory, name, opts) {
+          assert.strictEqual(directory, path.resolve(cacheDir)); assert.strictEqual(opts.processDirectory, directory);
+          assert.strictEqual(guarded, false); guarded = true;
+          return { release() { assert.strictEqual(guarded, true); guarded = false; releases++; } };
+        } };
+      };
+      requireMock.main = module;
+      const context = {
+        require: requireMock, module, path, REFRESH_MARKER_SUFFIX: suffix,
+        GENERATION_PATTERN: provider._private.GENERATION_PATTERN,
+        process: { pid, argv: ['node', 'provider', '--refresh', 'encoded', cacheDir, supplied],
+          kill() { throw Error('CLI does not infer process absence'); } },
+        ensureCacheDirectory(value) { assert.strictEqual(value, file); },
+        digest: value => require('crypto').createHash('sha256').update(value).digest('hex'),
+        readPrivateFile(value, limit) {
+          assert.strictEqual(guarded, true); assert.strictEqual(value, marker); assert.strictEqual(limit, 512);
+          if (!store.has(value)) throw Object.assign(Error('fixture missing'), { code: 'ENOENT' });
+          return store.get(value);
+        },
+        publish(value, bytes) { assert.strictEqual(guarded, true); assert.strictEqual(value, marker); writes++; store.set(value, bytes); },
+        fs: { unlinkSync(value) { assert.strictEqual(guarded, true); assert.strictEqual(value, marker); unlinks++; store.delete(value); } },
+        decodeRequest: () => ({}), targetFromRequest: value => value, cachePath: () => file,
+        refresh() {
+          assert.strictEqual(guarded, false); refreshes++;
+          assert.strictEqual(JSON.parse(store.get(marker)).child_pid, pid, 'pending child published before refresh');
+        },
+      };
+      const run = () => require('vm').runInNewContext(helpers + '\n' + block, context);
+      const owns = state === 'matching' || state === 'pending';
+      if (owns) assert.doesNotThrow(run); else assert.throws(run, /refresh_marker_owner_mismatch/);
+      assert.strictEqual(guarded, false); assert.strictEqual(releases, 2);
+      assert.strictEqual(refreshes, owns ? 1 : 0); assert.strictEqual(writes, owns ? 1 : 0); assert.strictEqual(unlinks, owns ? 1 : 0);
+      if (owns) assert.strictEqual(store.has(marker), false);
+      else assert.deepStrictEqual(JSON.parse(store.get(marker)), original, 'foreign nonce/PID retained');
+    }
+  });
+
+  test('manual refresh without a nonce never unlinks foreign protocol or legacy markers', () => {
+    const { block, suffix } = refreshCliFixtureSource(), file = path.join(cacheDir, 'manual-foreign');
+    const marker = file + suffix, legacy = file + '.refresh';
+    fs.writeFileSync(marker, 'foreign v2 marker', { mode: 0o600 });
+    fs.writeFileSync(legacy, 'legacy foreign marker', { mode: 0o600 });
+    for (const fail of [false, true]) {
+      let refreshes = 0; const module = {};
+      const run = () => require('vm').runInNewContext(block, {
+        require: { main: module }, module, REFRESH_MARKER_SUFFIX: suffix,
+        process: { argv: ['node', 'provider', '--refresh', 'encoded', cacheDir] },
+        decodeRequest: () => ({}), targetFromRequest: value => value, cachePath: () => file,
+        refresh() { refreshes++; if (fail) throw Error('fixture refresh failure'); },
+        withRefreshGuard() { throw Error('manual refresh has no marker ownership'); },
+        releaseRefreshMarker() { throw Error('manual refresh must not release'); },
+      });
+      if (fail) assert.throws(run, /fixture refresh failure/); else assert.doesNotThrow(run);
+      assert.strictEqual(refreshes, 1); assert.strictEqual(fs.readFileSync(marker, 'utf8'), 'foreign v2 marker');
+      assert.strictEqual(fs.readFileSync(legacy, 'utf8'), 'legacy foreign marker');
+    }
+    fs.unlinkSync(marker); fs.unlinkSync(legacy);
   });
 
   test('renderer reads cache only and starts one detached refresh without repo_path', () => {
@@ -882,13 +1050,13 @@ try {
       assert.strictEqual(options.stdio, 'ignore');
       assert.strictEqual(options.windowsHide, true);
       assert.strictEqual(options.detached, true);
-      return { on() {}, unref() { unrefs++; } };
+      return { pid: process.pid, on() {}, unref() { unrefs++; } };
     };
     assert.strictEqual(provider.cachedUpdate(target, { cacheDir, spawn }).state, 'unknown');
     assert.strictEqual(provider.cachedUpdate(target, { cacheDir, spawn }).state, 'unknown');
     assert.strictEqual(launches, 1);
     assert.strictEqual(unrefs, 1);
-    fs.rmSync(`${provider.cachePath(target, cacheDir)}.refresh`, { force: true });
+    fs.rmSync(`${provider.cachePath(target, cacheDir)}.refresh-v2`, { force: true });
   });
 
   test('real render process exits while its detached refresh child remains alive', () => {

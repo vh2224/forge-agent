@@ -14,8 +14,20 @@ const DEFAULT_BACKOFF_MAX = 300;
 // Keep the original Error object and diagnostics untouched.
 const initialMkdirRefusals = new WeakSet();
 
-function locksDir(cwd) { return path.join(cwd, '.gsd', '.locks'); }
-function ensureLocksDir(cwd) {
+function locksDir(cwd, opts = {}) {
+  if (opts.processDirectory === undefined) return path.join(cwd, '.gsd', '.locks');
+  if (opts.processOwnerOnly !== true || typeof opts.processDirectory !== 'string'
+      || !path.isAbsolute(opts.processDirectory)) throw new Error('forge-lock: invalid process directory');
+  const directory = path.resolve(opts.processDirectory), stat = fs.lstatSync(directory);
+  if (!stat.isDirectory() || stat.isSymbolicLink()
+      || (process.platform !== 'win32' && ((stat.mode & 0o077)
+        || typeof process.getuid === 'function' && stat.uid !== process.getuid())))
+    throw new Error('forge-lock: unsafe process directory');
+  // Windows retains the cache caller's existing path policy; POSIX modes do not attest its ACL.
+  return directory;
+}
+function ensureLocksDir(cwd, opts = {}) {
+  if (opts.processDirectory !== undefined) { locksDir(cwd, opts); return; }
   const gsd = path.join(cwd, '.gsd');
   if (!fs.existsSync(gsd)) {
     const error = new Error(`forge-lock: ${cwd} has no .gsd/ — refusing to create one (run /forge-init first)`);
@@ -24,7 +36,12 @@ function ensureLocksDir(cwd) {
   }
   fs.mkdirSync(locksDir(cwd), { recursive: true });
 }
-function lockPath(cwd, name) { return path.join(locksDir(cwd), validateName(name).replace(/[^\w.-]/g, '_')); }
+function lockPath(cwd, name, opts) {
+  const directory = locksDir(cwd, opts), component = validateName(name).replace(/[^\w.-]/g, '_');
+  if (opts?.processDirectory !== undefined && (component === '.' || component === '..'))
+    throw new Error('forge-lock: invalid process lock name');
+  return path.join(directory, component);
+}
 function metaPath(lockDir) { return path.join(lockDir, 'metadata.json'); }
 function markerPath(lockDir, token) { return path.join(lockDir, `owner-${token}`); }
 function nowOf(opts) { return opts && typeof opts.now === 'function' ? opts.now() : Date.now(); }
@@ -82,7 +99,7 @@ function makeHandle(cwd, name, lockDir, metadata) {
   return handle;
 }
 function create(cwd, name, opts) {
-  const lockDir = lockPath(cwd, name);
+  const lockDir = lockPath(cwd, name, opts);
   const now = nowOf(opts);
   const metadata = { name, generation: tokenOf(opts), owner_token: tokenOf(opts), acquired_at: now, renewed_at: now, ttl_ms: positive(opts && opts.ttlMs, DEFAULT_TTL_MS, 'ttl'), holder_pid: (opts && opts.holderPid) || process.pid, holder_run_id: (opts && opts.holderRunId) || null };
   try { fs.mkdirSync(lockDir); }
@@ -97,6 +114,7 @@ function create(cwd, name, opts) {
 
 async function acquire(cwd, name, opts) {
   opts = opts || {}; validateName(name);
+  if (opts.processDirectory !== undefined) throw new Error('forge-lock: process directory requires synchronous process ownership');
   const ttlMs = positive(opts.ttlMs, DEFAULT_TTL_MS, 'ttl');
   const retries = positive(opts.retries, DEFAULT_RETRIES, 'retries');
   const backoffMin = positive(opts.backoffMin, DEFAULT_BACKOFF_MIN, 'backoff');
@@ -115,8 +133,8 @@ async function acquire(cwd, name, opts) {
 }
 function tryAcquireSync(cwd, name, opts) {
   opts = opts || {}; validateName(name); const ttlMs = positive(opts.ttlMs, DEFAULT_TTL_MS, 'ttl');
-  try { ensureLocksDir(cwd); } catch (error) { if (error.code === 'ENOGSD') return null; throw error; }
-  const dir = lockPath(cwd, name);
+  try { ensureLocksDir(cwd, opts); } catch (error) { if (error.code === 'ENOGSD') return null; throw error; }
+  const dir = lockPath(cwd, name, opts);
   try { return create(cwd, name, { ...opts, ttlMs }); }
   catch (error) { if (error.code !== 'EEXIST') throw error; if (opts.processOwnerOnly ? recoverDeadProcess(dir) : opts.allowStaleRecovery !== false && stealIfStale(dir, ttlMs, nowOf(opts))) { try { return create(cwd, name, { ...opts, ttlMs }); } catch { } } return null; }
 }
@@ -199,7 +217,7 @@ function status(cwd, name, opts) { const dir = lockPath(cwd, name); if (!fs.exis
 // allowDeadProcessOwner is reserved for short process mutexes, never leases.
 function recoverIncompleteLock(cwd, name, opts = {}) {
   if (opts.confirmStopped !== true) return { ok: false, reason: 'recovery_requires_stopped_writers' };
-  const dir = lockPath(cwd, name);
+  const dir = lockPath(cwd, name, opts);
   try {
     const stat = fs.lstatSync(dir);
     if (!stat.isDirectory() || stat.isSymbolicLink()) return { ok: false, reason: 'guard_not_directory' };

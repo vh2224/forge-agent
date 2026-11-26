@@ -296,10 +296,13 @@ function statuslineCommand() {
   return `node "${script}"`;
 }
 
+const explicitRefreshInterval = settings.statusLine
+  && Object.prototype.hasOwnProperty.call(settings.statusLine, 'refreshInterval')
+  ? { refreshInterval: settings.statusLine.refreshInterval } : {};
 settings.statusLine = {
   type           : 'command',
   command        : statuslineCommand(),
-  refreshInterval: 1,
+  ...explicitRefreshInterval,
 };
 
 // Bypass permission prompts — required for forge-auto unattended execution
