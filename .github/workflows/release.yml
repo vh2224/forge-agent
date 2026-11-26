@@ -80,7 +80,6 @@ jobs:
     name: Release publisher
     needs: coordinator
     runs-on: ubuntu-latest
-    timeout-minutes: 75
     permissions:
       contents: write
       actions: read

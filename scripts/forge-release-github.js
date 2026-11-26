@@ -13,10 +13,10 @@ const { scrubEnvironment } = require('./forge-offline-ci.js');
 
 const ORIGIN = 'https://api.github.com';
 const API_VERSION = '2026-03-10';
-// Windows full-suite jobs have exceeded 30 minutes before aggregate scheduling.
-// Keep one bounded clock and all cumulative IO limits; allow the observed CI
-// critical path to finish without weakening exact-candidate eligibility.
-const DEFAULT_LIMITS = Object.freeze({ deadlineMs: 3600000, requestMs: 15000, pollMs: 15000,
+// CI duration is observational, not a publication eligibility deadline.
+// Explicit callers may contract a deadline; per-request and cumulative IO
+// bounds remain independent, as do exact-candidate and terminal-state checks.
+const DEFAULT_LIMITS = Object.freeze({ deadlineMs: null, requestMs: 15000, pollMs: 15000,
   maxPages: 10, maxItems: 1000, maxBytes: 32 * 1024 * 1024, responseBytes: 4 * 1024 * 1024,
   maxRequests: 10000, maxTagDepth: 8 });
 const STATUSES = new Set(['queued', 'in_progress', 'completed', 'waiting', 'requested', 'pending']);
@@ -65,21 +65,25 @@ function createGitHubReader(options = {}) {
   const token = options.token;
   if (typeof token !== 'string' || !token || token.length > 16384 || /[\r\n\x00]/.test(token)) fail('authentication-failed');
   const limits = { ...DEFAULT_LIMITS, ...options.limits };
-  for (const key of Object.keys(limits)) if (!Object.hasOwn(DEFAULT_LIMITS, key) || !integer(limits[key]) || limits[key] > DEFAULT_LIMITS[key]) fail('invalid-limits');
+  for (const key of Object.keys(limits)) {
+    if (!Object.hasOwn(DEFAULT_LIMITS, key)) fail('invalid-limits');
+    if (key === 'deadlineMs') { if (limits[key] !== null && !integer(limits[key])) fail('invalid-limits'); }
+    else if (!integer(limits[key]) || limits[key] > DEFAULT_LIMITS[key]) fail('invalid-limits');
+  }
   const clock = options.clock || (() => performance.now());
   const sleep = options.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms)));
   const request = options.request || requestHttps;
   const sessions = new WeakSet();
   const startSession = () => {
     const started = clock(); if (!Number.isFinite(started)) fail('invalid-clock');
-    const session = { started, observed: started, deadline: started + limits.deadlineMs, bytes: 0, requests: 0, pages: 0 };
+    const session = { started, observed: started, deadline: limits.deadlineMs === null ? null : started + limits.deadlineMs, bytes: 0, requests: 0, pages: 0 };
     sessions.add(session); return session;
   };
   const remaining = session => {
     if (!sessions.has(session)) fail('invalid-session');
     const now = clock(); if (!Number.isFinite(now) || now < session.observed) fail('invalid-clock');
-    session.observed = now; if (now >= session.deadline) fail('deadline-exhausted');
-    return session.deadline - now;
+    session.observed = now; if (session.deadline !== null && now >= session.deadline) fail('deadline-exhausted');
+    return session.deadline === null ? Infinity : session.deadline - now;
   };
   const pause = async (session, milliseconds) => {
     const left = remaining(session);
@@ -310,7 +314,7 @@ async function collectChecks(options = {}) {
       snapshot: { schema_version: 1, api_version: API_VERSION, candidate_sha: candidate.candidate_sha,
         policy_sha256: checks.policyDigest(policy), sources_sha256: sha256(Buffer.from(JSON.stringify(sources))),
         workflows, complete: true, collection: { bytes: session.bytes, pages: session.pages, requests: session.requests,
-          elapsed_ms: session.observed - session.started, deadline_ms: session.deadline - session.started } } };
+          elapsed_ms: session.observed - session.started, deadline_ms: session.deadline === null ? null : session.deadline - session.started } } };
   } catch (error) { return diagnostic(error); }
 }
 
