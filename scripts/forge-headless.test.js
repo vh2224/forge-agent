@@ -14,9 +14,58 @@ function base(root, runtime, scenario = 'success') {
   return { runtime, dispatchId: `dispatch-${runtime}`, workspaceRoot: root, cwd: root, sandbox: 'workspace-write', approval: 'never', binary: { command: process.execPath, args: [fake, scenario] }, prompt: 'PROMPT_SENTINEL', env: { ...process.env, SECRET_TOKEN: 'ENV_SENTINEL' }, timeoutMs: 1500 };
 }
 
+// Controlled owned ChildProcess seam: real Writable emits async EPIPE, no OS child.
+async function earlyStdin(root, runtime, { exitCode, partial = false, synchronous = false, programmer = false }) {
+  const { EventEmitter } = require('events'), { PassThrough, Writable } = require('stream');
+  const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
+  let resolved = false, closeObserved = false, kills = 0, closeResolve;
+  const closed = new Promise(resolve => { closeResolve = resolve; });
+  child.kill = () => { kills++; };
+  const finish = () => setImmediate(() => {
+    assert.strictEqual(resolved, false, 'pipe error alone must not settle the operation');
+    closeObserved = true; child.emit('close', exitCode, null); closeResolve();
+  });
+  const failure = () => Object.assign(new Error('PROMPT_SENTINEL ENV_SENTINEL private stdin error'), { code: 'EPIPE' });
+  if (synchronous || programmer) {
+    child.stdin = new EventEmitter();
+    child.stdin.end = () => { finish(); if (programmer) throw new TypeError('private programmer error'); throw failure(); };
+  } else child.stdin = new Writable({ write(_chunk, _encoding, callback) {
+    if (partial) {
+      const values = runtime === 'codex'
+        ? [{ type: 'thread.started', thread_id: 'pipe-thread' }, { type: 'item.completed', item: { type: 'agent_message', text: 'partial-safe' } }, { type: 'usage', usage: { input_tokens: 2, output_tokens: 1 } }]
+        : [{ type: 'system', subtype: 'init', session_id: 'pipe-session' }, { type: 'assistant', message: { content: [{ type: 'text', text: 'partial-safe' }], usage: { input_tokens: 2, output_tokens: 1 } } }];
+      child.stdout.write(values.map(value => JSON.stringify(value) + '\n').join(''));
+    }
+    callback(failure()); finish();
+  } });
+  const pending = headless.run(base(root, runtime), { spawn() { return child; } });
+  if (programmer) {
+    await assert.rejects(pending, TypeError); await closed; assert.strictEqual(kills, 0); return;
+  }
+  pending.then(() => { resolved = true; });
+  const result = await pending; await closed;
+  assert.strictEqual(closeObserved, true); assert.strictEqual(kills, 0);
+  assert.strictEqual(result.status, 'failed');
+  assert.strictEqual(result.reason_code, runtime + (exitCode === 0 ? '-orphan' : '-exit-nonzero'));
+  assert.deepStrictEqual(result.stdin_error, { stage: 'stdin-write', code: 'EPIPE', child_close: { exit_code: exitCode, signal: null } });
+  assert.strictEqual(Object.hasOwn(result, 'provider_called'), false, 'pipe reset is not evidence of a provider call or no-spawn');
+  assert(!JSON.stringify(result).includes('PROMPT_SENTINEL')); assert(!JSON.stringify(result).includes('ENV_SENTINEL'));
+  if (partial) { assert.strictEqual(result.output, 'partial-safe'); assert.strictEqual(result.usage.input_tokens, 2); assert.strictEqual(result.usage.output_tokens, 1); }
+  const before = JSON.stringify(result);
+  assert.doesNotThrow(() => child.stdin.emit('error', failure()), 'late owned stream error remains handled');
+  assert.strictEqual(JSON.stringify(result), before, 'late error cannot rewrite earlier result');
+}
+
 (async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-headless Ω-'));
   try {
+    for (const runtime of ['claude', 'codex']) {
+      await test(runtime + ' owned stdin EPIPE waits for actual close and preserves failure/partial result', async () => {
+        for (const config of [{ exitCode: 0 }, { exitCode: 7 }, { exitCode: 7, partial: true }, { exitCode: 7, synchronous: true }])
+          await earlyStdin(root, runtime, config);
+      });
+    }
+    await test('unrelated synchronous stdin programmer error still rejects', () => earlyStdin(root, 'codex', { exitCode: 7, programmer: true }));
     for (const platform of ['win32', 'darwin', 'linux']) {
       await test(`${platform} invocation is argv-only, sandboxed and offline`, async () => {
         const invocation = headless.buildInvocation({ ...base(root, 'codex'), platform, claudeHome: path.join(root, 'absent-claude'), codexHome: path.join(root, 'absent-codex') });
