@@ -65,10 +65,24 @@ function createWindowsRunner({ spawnSyncImpl = spawnSync } = {}) {
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, '-Mode', mode],
     { cwd: options.cwd, env: options.env, windowsHide: true, encoding: 'utf8', input,
       timeout, maxBuffer: 4 * 1024 * 1024, stdio: 'pipe' });
-  function failed(reason, { joined = false, started = 'unknown', supervisorPid = null, jobName = null } = {}) {
+  function compileDiagnostic(result, parseState, exception) {
+    const output = value => {
+      if (typeof value !== 'string' && !Buffer.isBuffer(value)) return { bytes: null, sha256: null };
+      const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value, 'utf8');
+      return { bytes: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') };
+    };
+    const code = (result?.error || exception)?.code;
+    return { stage: 'Compile', parse_state: parseState,
+      status: Number.isSafeInteger(result?.status) && result.status >= -2147483648 && result.status <= 2147483647 ? result.status : null,
+      signal: result?.signal == null ? null : ['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGABRT', 'SIGBREAK'].includes(result.signal) ? result.signal : 'other',
+      error_code: code == null ? null : ['ETIMEDOUT', 'ENOBUFS', 'ENOENT', 'EACCES', 'EPERM', 'EIO', 'ENOSYS'].includes(code) ? code : 'other',
+      stdout: output(result?.stdout), stderr: output(result?.stderr) };
+  }
+  function failed(reason, { joined = false, started = 'unknown', supervisorPid = null, jobName = null, compile = null } = {}) {
     const error = Object.assign(new Error(`verification process supervision: ${reason}`), { code: 'EVERIFYCLEANUP' });
     return { status: null, stdout: '', stderr: '', error, signal: null, stop: true,
-      cleanup: { platform: 'win32', status: joined ? 'joined' : 'unproved', started, reason, supervisor_pid: supervisorPid, job_name: jobName } };
+      cleanup: { platform: 'win32', status: joined ? 'joined' : 'unproved', started, reason, supervisor_pid: supervisorPid, job_name: jobName,
+        ...(compile ? { supervisor_diagnostic: compile } : {}) } };
   }
   return function run(command, options = {}) {
     let invocationAttempted = false;
@@ -95,11 +109,13 @@ function createWindowsRunner({ spawnSyncImpl = spawnSync } = {}) {
       try {
         result = invoke('Compile', '', options, 15000);
         packet = JSON.parse(result.stdout || '');
-      } catch { return failed('supervisor-compile-failed', { started: false, supervisorPid: result?.pid || null }); }
+      } catch (error) { return failed('supervisor-compile-failed', { started: false, supervisorPid: result?.pid || null,
+        compile: compileDiagnostic(result, result ? 'invalid-json' : 'unavailable', error) }); }
       if (result.status !== 0 || packet.schema !== 1 || typeof packet.assembly !== 'string'
         || !/^[A-Za-z0-9+/]+={0,2}$/.test(packet.assembly) || packet.assembly.length > 2 * MAX_OUTPUT
         || crypto.createHash('sha256').update(fs.readFileSync(script)).digest('hex') !== sourceHash) {
-        return failed('supervisor-compile-failed', { started: false, supervisorPid: result?.pid || null });
+        return failed('supervisor-compile-failed', { started: false, supervisorPid: result?.pid || null,
+          compile: compileDiagnostic(result, 'parsed') });
       }
       compiled = { sourceHash, assembly: packet.assembly };
     }

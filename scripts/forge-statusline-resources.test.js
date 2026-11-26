@@ -361,6 +361,7 @@ process.stdout.write('forge-statusline-resources.test.js\n');
           spawn(command, args, options) {
             const result = { context, command, args, options, unref: false };
             return {
+              pid: process.pid,
               on() {},
               unref() { unref = true; result.unref = true; fs.writeFileSync(${JSON.stringify(record)}, JSON.stringify(result)); },
             };

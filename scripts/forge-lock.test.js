@@ -255,9 +255,53 @@ function testInitialWindowsMkdirRetry() {
   assert.strictEqual(busy.probes, 1);
 }
 
+async function testPrivateProcessDirectory() {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'forge private process lock-'));
+  const directory = path.join(parent, 'cache'); fs.mkdirSync(directory, { mode: 0o700 });
+  const opts = { processDirectory: directory, retries: 1, ttlMs: 1 };
+  const originalKill = process.kill;
+  try {
+    assert.strictEqual(lock.lockPath(parent, 'default'), path.join(parent, '.gsd', '.locks', 'default'));
+    const first = lock.acquireProcessSync(parent, 'refresh', opts);
+    assert.strictEqual(first.lockDir, path.join(directory, 'refresh'));
+    assert.strictEqual(fs.existsSync(path.join(parent, '.gsd')), false, 'no synthetic project state');
+    process.kill = (pid, signal) => { assert.strictEqual(pid, process.pid); assert.strictEqual(signal, 0); };
+    assert.throws(() => lock.acquireProcessSync(parent, 'refresh', { ...opts, now: () => Date.now() + 86400000 }),
+      error => error.code === 'LOCK_BUSY', 'age cannot take a live process mutex');
+    for (const code of ['EPERM', 'EIO']) {
+      process.kill = () => { throw Object.assign(Error('fixture inaccessible'), { code }); };
+      assert.throws(() => lock.acquireProcessSync(parent, 'refresh', opts), error => error.code === 'LOCK_BUSY');
+    }
+    process.kill = () => { throw Object.assign(Error('fixture absent'), { code: 'ESRCH' }); };
+    const next = lock.acquireProcessSync(parent, 'refresh', opts);
+    assert.notStrictEqual(next.generation, first.generation);
+    assert.deepStrictEqual(first.release(), { ok: false, reason: 'owner_mismatch' });
+    assert.strictEqual(lock.assertOwned(next), true); assert.strictEqual(next.release().ok, true);
+    process.kill = originalKill;
+    const pending = lock.lockPath(parent, 'pending', { ...opts, processOwnerOnly: true });
+    fs.mkdirSync(pending); fs.utimesSync(pending, 1, 1);
+    process.kill = () => { throw Error('a missing PID is not absence proof'); };
+    assert.throws(() => lock.acquireProcessSync(parent, 'pending', opts), error => error.code === 'LOCK_BUSY');
+    process.kill = originalKill;
+    assert.throws(() => lock.acquireProcessSync(parent, '..', opts), /invalid process lock name/);
+    assert.throws(() => lock.acquireProcessSync(parent, 'relative', { ...opts, processDirectory: 'relative' }), /invalid process directory/);
+    const regular = path.join(parent, 'regular'); fs.writeFileSync(regular, '');
+    assert.throws(() => lock.acquireProcessSync(parent, 'file', { ...opts, processDirectory: regular }), /unsafe process directory/);
+    const link = path.join(parent, 'link'); fs.symlinkSync(directory, link, process.platform === 'win32' ? 'junction' : 'dir');
+    assert.throws(() => lock.acquireProcessSync(parent, 'link', { ...opts, processDirectory: link }), /unsafe process directory/);
+    if (process.platform !== 'win32') {
+      fs.chmodSync(directory, 0o755);
+      assert.throws(() => lock.acquireProcessSync(parent, 'public', opts), /unsafe process directory/);
+      fs.chmodSync(directory, 0o700);
+    }
+    await assert.rejects(lock.acquire(parent, 'async', { ...opts, processOwnerOnly: true }), /requires synchronous process ownership/);
+  } finally { process.kill = originalKill; remove(parent); }
+}
+
 async function main() {
   console.log(`forge-lock tests on ${process.platform}`);
   testInitialWindowsMkdirRetry();
+  await testPrivateProcessDirectory();
   const processRoot = temporary();
   try {
     const held = lock.acquireProcessSync(processRoot, 'process-owner', { ttlMs: 1 });

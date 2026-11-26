@@ -115,6 +115,23 @@ test('R1: enable wires statusLine at the Forge home core, never the frozen flat 
     'statusLine.command points at the installer-maintained copy');
   assert(settings.statusLine.command !== FROZEN_COMMAND,
     'the un-maintained ~/.claude flat path is gone from the enable path');
+  assert(!Object.prototype.hasOwnProperty.call(settings.statusLine, 'refreshInterval'),
+    'new settings use host event refresh without forcing an additional timer');
+});
+
+test('R1: explicit refresh intervals survive enable and a second merge', () => {
+  for (const refreshInterval of [1, 5, 60, null]) {
+    const file = seed(mktmp(), {
+      statusLine: { type: 'command', command: FROZEN_COMMAND, refreshInterval },
+    });
+    const first = run(file);
+    assertEqual(first.status, 0, 'enable succeeds');
+    assertEqual(first.settings.statusLine.refreshInterval, refreshInterval,
+      'an existing value is preserved without assuming ownership');
+    const once = fs.readFileSync(file, 'utf8');
+    assertEqual(run(file).status, 0, 'second enable succeeds');
+    assertEqual(fs.readFileSync(file, 'utf8'), once, 'preserved interval is idempotent');
+  }
 });
 
 test('R1: the wired path has a repo counterpart the core recopy can serve', () => {

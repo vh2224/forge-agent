@@ -100,6 +100,34 @@ if (process.argv.includes('--env-prefix-only')) process.exit(0);
   assert.strictEqual(calls, 1, 'invalid command/cwd must not invoke compiler or process');
   console.log('PASS failed compile/preflight launches no requested command; unknown join/protocol never declares stopped');
 }
+{
+  // Injected Compile results only: no PowerShell/compiler/requested command.
+  const digest = value => require('crypto').createHash('sha256').update(value).digest('hex');
+  const samples = [
+    { name: 'invalid-json', response: { status: 0, signal: null, stdout: 'private not-json', stderr: 'private compiler output' }, parse: 'invalid-json', code: null },
+    { name: 'status7', response: { status: 7, signal: null, stdout: JSON.stringify({ schema: 1, assembly: 'YWJj' }), stderr: 'private status7 output' }, parse: 'parsed', code: null },
+    { name: 'timeout', response: { status: null, signal: 'SIGTERM', error: Object.assign(new Error('private exception message'), { code: 'ETIMEDOUT' }), stdout: '', stderr: 'private timeout output' }, parse: 'invalid-json', code: 'ETIMEDOUT' },
+  ];
+  for (const sample of samples) {
+    const modes = [], run = createWindowsRunner({ spawnSyncImpl(_file, args) { modes.push(args.at(-1)); return sample.response; } });
+    const result = run('must never execute', options), observed = result.cleanup.supervisor_diagnostic;
+    assert.deepStrictEqual(modes, ['Compile'], sample.name);
+    assert.strictEqual(result.status, null); assert.strictEqual(result.signal, null);
+    assert.strictEqual(result.error.code, 'EVERIFYCLEANUP'); assert.strictEqual(result.stop, true);
+    assert.strictEqual(result.stdout, ''); assert.strictEqual(result.stderr, '');
+    assert.strictEqual(result.cleanup.status, 'unproved'); assert.strictEqual(result.cleanup.started, false);
+    assert.strictEqual(result.cleanup.reason, 'supervisor-compile-failed');
+    assert.deepStrictEqual(observed, { stage: 'Compile', parse_state: sample.parse,
+      status: sample.response.status, signal: sample.response.signal, error_code: sample.code,
+      stdout: { bytes: Buffer.byteLength(sample.response.stdout, 'utf8'), sha256: digest(sample.response.stdout) },
+      stderr: { bytes: Buffer.byteLength(sample.response.stderr, 'utf8'), sha256: digest(sample.response.stderr) } });
+    assert(!JSON.stringify(result).includes('private'), 'no output/error message in retained diagnostic');
+  }
+  const foreign = createWindowsRunner({ spawnSyncImpl() { return { status: 7, signal: 'PRIVATE_SIGNAL', error: { code: 'PRIVATE_CODE' }, stdout: '{}', stderr: '' }; } })
+    ('must never execute', options).cleanup.supervisor_diagnostic;
+  assert.strictEqual(foreign.signal, 'other'); assert.strictEqual(foreign.error_code, 'other');
+  console.log('PASS Compile failure diagnostic status/signal/code/hash without raw content or Run');
+}
 if (process.platform === 'win32') {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-verification-job-'));
   try {
