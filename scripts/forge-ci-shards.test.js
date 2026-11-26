@@ -353,7 +353,7 @@ test('S04-T02 key_link:1 real-discovery-and-positional-oracle', () => {
 test('planning overrides are separate, bound, complete and fail closed', () => {
   const baseFile = path.join(__dirname, 'ci-profiles/issue-461-d046.json'), before = fs.readFileSync(baseFile), published = loadShardProfile(baseFile);
   const overlayFile = path.join(__dirname, 'ci-profiles/issue-467-planning-r4.json'), doc = JSON.parse(fs.readFileSync(overlayFile)), suites = doc.suite_ids;
-  assert.equal(doc.base_profile_sha256, published.sha256); assert.equal(suites.length, 695);
+  assert.equal(doc.base_profile_sha256, published.sha256); assert.equal(suites.length, 696);
   assert.deepEqual(doc.retired_ids, ["forge-communication-surfaces.ci-01-of-4.test.js","forge-communication-surfaces.ci-02-of-4.test.js","forge-communication-surfaces.ci-03-of-4.test.js","forge-communication-surfaces.ci-04-of-4.test.js","forge-dispatch-source-guard.test.js","forge-incomplete-resume-distribution.test.js","forge-issue-455-distribution.test.js","forge-issue-461-distribution.test.js","forge-issues-451-452-distribution.test.js","forge-issues-457-458-distribution.test.js"]);
   for (const platform of PLATFORMS) {
     const overrides = loadPlanningOverrides(published, platform, suites);
