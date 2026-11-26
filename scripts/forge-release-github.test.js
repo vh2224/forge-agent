@@ -152,6 +152,38 @@ function manyRuns(f, total) {
     assert(f.state.calls.some(call => call.url.includes('/jobs?per_page=100&page=3')));
     assert(!f.state.calls.some(call => call.url.includes('status=success')));
   });
+  await test('github-real-numeric-repository-link-stays-bound-and-requests-canonical-paths', async () => {
+    const policy = clone(checks.POLICY); policy.workflows.ci.jobs = Array.from({ length: 201 }, (_, i) => ({ key: 'job-' + i, name: 'Job ' + i, runner: 'ubuntu-latest', kind: 'native', needs: [], matrix: null }));
+    const f = fixture({ policy, hook: ({ kind, url, response }) => {
+      if (!['runs', 'jobs'].includes(kind) || !response.headers.link) return;
+      const total = response.data.total_count, next = new URL(url), last = new URL(url);
+      next.searchParams.set('page', String(Number(url.searchParams.get('page')) + 1)); last.searchParams.set('page', String(Math.ceil(total / 100)));
+      for (const link of [next, last]) link.pathname = link.pathname.replace(BASE, '/repositories/' + REPO.id);
+      response.headers.link = '<' + next.href + '>; rel="next", <' + last.href + '>; rel="last"';
+    } });
+    manyRuns(f, 201); const result = await f.collect(); assert(result.allowed, JSON.stringify(result));
+    assert.strictEqual(result.snapshot.workflows.ci.collection.jobs.pages, 3);
+    assert(f.state.calls.every(call => new URL(call.url).pathname.startsWith(BASE + '/') || new URL(call.url).pathname === BASE));
+    assert(!f.state.calls.some(call => new URL(call.url).pathname.startsWith('/repositories/')), 'numeric header is validated, never followed');
+  });
+  await test('github-numeric-link-wrong-id-origin-credentials-hash-endpoint-query-and-page-refuse', async () => {
+    for (const defect of ['id', 'origin', 'credentials', 'hash', 'endpoint', 'query', 'page']) {
+      const f = fixture({ hook: ({ kind, url, response }) => {
+        if (kind !== 'jobs' || Number(url.searchParams.get('page')) !== 1 || !response.headers.link) return;
+        const link = new URL(url); link.pathname = link.pathname.replace(BASE, '/repositories/' + REPO.id); link.searchParams.set('page', '2');
+        if (defect === 'id') link.pathname = link.pathname.replace('/repositories/42/', '/repositories/43/');
+        if (defect === 'origin') link.hostname = 'evil.example';
+        if (defect === 'credentials') link.username = 'foreign';
+        if (defect === 'hash') link.hash = 'foreign';
+        if (defect === 'endpoint') link.pathname = link.pathname.replace('/runs/101/', '/runs/999/');
+        if (defect === 'query') link.searchParams.set('extra', '1');
+        if (defect === 'page') link.searchParams.set('page', '1');
+        response.headers.link = '<' + link.href + '>; rel="next"';
+      } });
+      const result = await f.collect(); code(result, ['id', 'origin', 'credentials', 'hash'].includes(defect) ? 'unsafe-url' : 'pagination-link');
+      assert(!f.state.calls.some(call => new URL(call.url).pathname.startsWith('/repositories/')));
+    }
+  });
   await test('github-pagination-truncation-missing-pages-changing-count-duplicates-and-bounds', async () => {
     for (const defect of ['short', 'count', 'duplicate', 'missing-link', 'cycle', 'foreign', 'foreign-prev']) {
       const f = fixture({ hook: ({ kind, url, response }) => {

@@ -141,7 +141,7 @@ function createGitHubReader(options = {}) {
   return Object.freeze({ get, authenticate, startSession, remaining, pause, limits: Object.freeze(limits) });
 }
 
-function paginationLinks(header, current, totalPages) {
+function paginationLinks(header, current, totalPages, authenticatedRepository) {
   const expected = Number(current.searchParams.get('page'));
   if (header === undefined) { if (expected < totalPages) fail('pagination-missing'); return; }
   if (typeof header !== 'string' || header.length > 4096) fail('pagination-link');
@@ -150,7 +150,13 @@ function paginationLinks(header, current, totalPages) {
     const match = /^\s*<([^>]+)>;\s*rel="(next|prev|first|last)"\s*$/.exec(part);
     if (!match || relations.has(match[2])) fail('pagination-link');
     relations.add(match[2]);
-    const link = safeUrl(match[1]); const page = link.searchParams.get('page');
+    let value = match[1];
+    // GitHub's Link header may use only this authenticated numeric alias.
+    if (authenticatedRepository && integer(authenticatedRepository.id)) {
+      const prefix = ORIGIN + '/repositories/' + authenticatedRepository.id + '/';
+      if (value.startsWith(prefix)) value = ORIGIN + repoPath(authenticatedRepository) + '/' + value.slice(prefix.length);
+    }
+    const link = safeUrl(value); const page = link.searchParams.get('page');
     if (!/^[1-9]\d*$/.test(page || '') || Number(page) > totalPages) fail('pagination-link');
     const normalized = new URL(current); normalized.searchParams.set('page', page);
     if (normalized.href !== link.href || (match[2] === 'next' && Number(page) !== expected + 1) ||
@@ -160,7 +166,7 @@ function paginationLinks(header, current, totalPages) {
   if (relations.has('next') !== (expected < totalPages)) fail('pagination-missing');
 }
 
-async function listPages(reader, endpoint, field, session, filteredRuns = false) {
+async function listPages(reader, endpoint, field, session, filteredRuns = false, authenticatedRepository = null) {
   const rows = []; const ids = new Set(); const digests = new Set(); let total; let pages = 1;
   for (let page = 1; page <= pages; page++) {
     const url = safeUrl(endpoint); url.searchParams.set('per_page', '100'); url.searchParams.set('page', String(page));
@@ -171,7 +177,7 @@ async function listPages(reader, endpoint, field, session, filteredRuns = false)
       if (total > reader.limits.maxItems || pages > reader.limits.maxPages || (filteredRuns && total >= 1000)) fail('pagination-limit');
     } else if (data.total_count !== total) fail('pagination-count-changed');
     if (data[field].length !== Math.min(100, total - rows.length)) fail('pagination-incomplete');
-    paginationLinks(headers.link, url, pages);
+    paginationLinks(headers.link, url, pages, authenticatedRepository);
     const digest = sha256(Buffer.from(JSON.stringify(data[field])));
     if (digests.has(digest)) fail('pagination-repeated'); digests.add(digest);
     for (const row of data[field]) {
@@ -245,8 +251,8 @@ async function collectChecks(options = {}) {
     const initial = checks.evaluateChecks({ candidate, sources, applicability, workflows: {} }, policy);
     if (initial.reasons.some(reason => reason.code !== 'workflow-missing')) fail('policy-unverified');
     const session = options.session || reader.startSession();
-    await reader.authenticate(candidate.repository, session);
-    const base = repoPath(candidate.repository); const workflows = {}; const remoteIds = new Set(); const jobIds = new Set();
+    const authenticatedRepository = await reader.authenticate(candidate.repository, session);
+    const base = repoPath(authenticatedRepository); const workflows = {}; const remoteIds = new Set(); const jobIds = new Set();
     const required = ['ci', ...(initial.app_required ? ['app'] : [])]; const indices = [];
     for (const key of required) {
       const expected = policy.workflows[key]; const lookup = options.workflowIds && options.workflowIds[key] !== undefined ? options.workflowIds[key] : expected.filename;
@@ -256,7 +262,7 @@ async function collectChecks(options = {}) {
           metadata.state !== 'active' || remoteIds.has(metadata.id)) fail('workflow-identity');
       remoteIds.add(metadata.id);
       const endpoint = `${base}/actions/workflows/${metadata.id}/runs?head_sha=${candidate.candidate_sha}&event=push&branch=${policy.branch}`;
-      const listed = await listPages(reader, endpoint, 'workflow_runs', session, true);
+      const listed = await listPages(reader, endpoint, 'workflow_runs', session, true, authenticatedRepository);
       for (const run of listed.rows) validateRun(run, metadata, candidate);
       listed.rows = listed.rows.map(runFact);
       const run = selectRun(listed.rows);
@@ -264,7 +270,7 @@ async function collectChecks(options = {}) {
       if (!run) continue;
       const current = (await reader.get(`${base}/actions/runs/${run.id}`, session)).data;
       validateRun(current, metadata, candidate); if (runSignature(current) !== runSignature(run)) fail('snapshot-changed');
-      const jobs = await listPages(reader, `${base}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs`, 'jobs', session);
+      const jobs = await listPages(reader, `${base}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs`, 'jobs', session, false, authenticatedRepository);
       const names = new Set();
       for (const job of jobs.rows) {
         validateJob(job, run, sources.workflows[key]);
@@ -288,7 +294,7 @@ async function collectChecks(options = {}) {
         validateRun(current, index.metadata, candidate);
         if (runSignature(current) !== runSignature(index.run)) fail('snapshot-changed');
       }
-      const latest = await listPages(reader, index.endpoint, 'workflow_runs', session, true);
+      const latest = await listPages(reader, index.endpoint, 'workflow_runs', session, true, authenticatedRepository);
       for (const run of latest.rows) validateRun(run, index.metadata, candidate);
       const before = index.listed.rows.map(runSignature).sort(); const after = latest.rows.map(runFact).map(runSignature).sort();
       if (JSON.stringify(before) !== JSON.stringify(after)) fail('snapshot-changed');
