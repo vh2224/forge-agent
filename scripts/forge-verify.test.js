@@ -574,6 +574,90 @@ if (process.platform === 'win32') test('Windows verify preserves accepted litera
   } finally { f.cleanup(); }
 });
 
+// ── Task-plan verify with a leading environment prefix ───────────────────────
+// Regression: `WDMA_ROOT=C:/x WDMA_REQUIRED=1 npm test` in a plan's verify list
+// was classified as prose (uppercase first token) and silently dropped, so the
+// execution seal ran fewer checks than the plan declared and nothing said so.
+
+test('isLikelyCommand classifies the command after an accepted environment prefix', () => {
+  const { isLikelyCommand } = require('./forge-verify.js'), assertTrue = (v, m) => require('assert').ok(v, m);
+  assertTrue(isLikelyCommand('WDMA_ROOT=C:/SVN/CMA/WDMA WDMA_REQUIRED=1 npm test'), 'unquoted prefix + npm');
+  assertTrue(isLikelyCommand('DATA_ROOT="C:\\SVN\\space data" node check.cjs'), 'quoted Windows path value');
+  assertTrue(!isLikelyCommand('A=1'), 'assignment alone is not a command');
+  assertTrue(!isLikelyCommand('A=%X% npm test'), 'cmd expansion in a value is refused');
+  assertTrue(!isLikelyCommand('A=1 npm test & calc'), 'chained remainder is refused');
+  assertTrue(!isLikelyCommand('A=1 Run the tests and confirm'), 'prose after a prefix stays prose');
+  assertTrue(!isLikelyCommand('Run the tests and confirm'), 'unchanged prose rule');
+});
+
+test('discoverCommands keeps an env-prefixed plan segment and reports rejected ones', () => {
+  const { discoverCommands } = require('./forge-verify.js');
+  const kept = discoverCommands({ cwd: process.cwd(),
+    taskPlanVerify: 'npm run typecheck && npm test && WDMA_ROOT=C:/SVN/CMA/WDMA WDMA_REQUIRED=1 npm test' });
+  assertEqual(JSON.stringify(kept.commands),
+    JSON.stringify(['npm run typecheck', 'npm test', 'WDMA_ROOT=C:/SVN/CMA/WDMA WDMA_REQUIRED=1 npm test']));
+  assertEqual(kept.source, 'task-plan');
+  assertEqual(kept.rejected, undefined);
+  const partial = discoverCommands({ cwd: process.cwd(), taskPlanVerify: 'npm test && A=%X% npm test' });
+  assertEqual(JSON.stringify(partial.commands), JSON.stringify(['npm test']));
+  assertEqual(JSON.stringify(partial.rejected), JSON.stringify(['A=%X% npm test']));
+});
+
+test('execution seal includes the env-prefixed verify and refuses a dropped segment', () => {
+  const strict = require('assert'), api = require('./forge-verify.js');
+  const roots = require('./forge-code-roots'), lab = require('./forge-code-roots.test').fixture();
+  try {
+    const contract = roots.singleContract(lab.owner, lab.a);
+    const plan = cmds => `---\nid: T01\nverify:\n${cmds.map(c => `  - ${c}`).join('\n')}\n---\n# T01\n`;
+    const seal = api.normalizeExecutionVerification(contract,
+      plan(['npm test', 'WDMA_ROOT=C:/SVN/CMA/WDMA WDMA_REQUIRED=1 npm test']), {}, undefined, {});
+    strict.deepStrictEqual(seal.roots[0].commands, ['npm test', 'WDMA_ROOT=C:/SVN/CMA/WDMA WDMA_REQUIRED=1 npm test']);
+    strict.deepStrictEqual(seal.roots[0].origins, ['task-plan', 'task-plan']);
+    strict.throws(() => api.normalizeExecutionVerification(contract, plan(['npm test', 'A=%X% npm test']), {}, undefined, {}),
+      error => error.code === 'verification-plan-command-rejected' && error.provider_called === false);
+  } finally { lab.cleanup(); }
+});
+
+test('all-rejected plan commands refuse sealing with preference and package fallbacks', () => {
+  const strict = require('assert'), api = require('./forge-verify.js');
+  const roots = require('./forge-code-roots'), lab = require('./forge-code-roots.test').fixture();
+  try {
+    const contract = roots.singleContract(lab.owner, lab.a), rejected = 'A=%X% npm test';
+    const plan = `---\nid: T01\nverify:\n  - ${rejected}\n---\n# T01\n`;
+    const preferences = { preferenceCommands: ['npm test'] };
+    const fromPrefs = api.discoverCommands({ cwd: lab.a, taskPlanVerify: rejected, ...preferences });
+    strict.deepStrictEqual(fromPrefs, { commands: ['npm test'], source: 'preference', rejected: [rejected] });
+    const refusal = error => error.code === 'verification-plan-command-rejected' && error.provider_called === false;
+    strict.throws(() => api.normalizeExecutionVerification(contract, plan, preferences, undefined, {}), refusal);
+    fs.writeFileSync(path.join(lab.a, 'package.json'), JSON.stringify({ scripts: { test: 'node -e "process.exit(0)"' } }));
+    const fromPackage = api.discoverCommands({ cwd: lab.a, taskPlanVerify: rejected });
+    strict.deepStrictEqual(fromPackage, { commands: ['npm run test'], source: 'package-json', rejected: [rejected] });
+    strict.throws(() => api.normalizeExecutionVerification(contract, plan, {}, undefined, {}), refusal);
+    for (const taskPlanVerify of [undefined, '', '   ']) {
+      strict.deepStrictEqual(api.discoverCommands({ cwd: lab.a, taskPlanVerify, ...preferences }),
+        { commands: ['npm test'], source: 'preference' }, 'legitimate empty plan preserves the original result shape');
+      strict.deepStrictEqual(api.discoverCommands({ cwd: lab.a, taskPlanVerify }),
+        { commands: ['npm run test'], source: 'package-json' }, 'empty plan still uses package fallback');
+    }
+    const emptyPlan = '---\nid: T01\nverify: []\n---\n# T01\n';
+    const seal = api.normalizeExecutionVerification(contract, emptyPlan, preferences, undefined, {});
+    strict.deepStrictEqual(seal.roots[0].commands, ['npm test']);
+  } finally { lab.cleanup(); }
+});
+
+test('POSIX and Windows runners apply an accepted plan prefix to the child', () => {
+  const strict = require('assert'), f = checkFixture(), api = require('./forge-verify');
+  try {
+    fs.writeFileSync(path.join(f.cwd, 'env.cjs'), "process.exit(process.env.FORGE_T_ROOT==='C:/data/root'&&process.env.FORGE_T_REQUIRED==='1'?0:7)");
+    const plan = '---\nid: T01\nverify:\n  - FORGE_T_ROOT=C:/data/root FORGE_T_REQUIRED=1 node env.cjs\n---\n';
+    const result = api.runVerificationGate({ cwd: f.cwd, gsdDir: f.gsdDir, taskPlanVerify: api.parsePlanVerify(plan), resourceEventSink() {} });
+    strict.strictEqual(result.checks.length, 1);
+    strict.strictEqual(result.checks[0].exitCode, 0);
+    strict.strictEqual(result.passed, true);
+    strict.strictEqual(process.env.FORGE_T_REQUIRED, undefined);
+  } finally { f.cleanup(); }
+});
+
 console.log(`${passed} passed, ${failed} failed`);
 if (failed > 0) {
   console.log('\nFailures:');
