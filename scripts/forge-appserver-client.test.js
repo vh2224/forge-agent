@@ -56,6 +56,7 @@ if (grandchildPidFile) {
 }
 let initialized = false;
 let sawInboundReply = false;
+let finishInboundReply = null;
 // S07 liveness modes: an acknowledged interrupt stops the stream, like a real server.
 const LIVENESS_MODES = ['active-stream', 'silent-after-started', 'silent-after-events', 'tool-open', 'tool-loop'];
 // S07/T03: tool items carry a sentinel command so leaks into liveness are detectable.
@@ -100,6 +101,9 @@ process.stdin.on('data', chunk => {
     if (Object.prototype.hasOwnProperty.call(message, 'jsonrpc')) process.exit(92);
     if (message.id === 77 && message.error && message.error.code === -32601) sawInboundReply = true;
     logMethod(message);
+    if (sawInboundReply && finishInboundReply) {
+      const finish = finishInboundReply; finishInboundReply = null; finish();
+    }
     if (message.method === 'turn/interrupt') {
       // interrupt-ignored deliberately never answers: that is what makes the grace
       // expire instead of being acknowledged.
@@ -341,15 +345,23 @@ process.stdin.on('data', chunk => {
       // and a response to an id the client never issued.
       send({ note: 'neither id nor method' });
       send({ id: 4242, result: { stray: true } });
-      setTimeout(() => {
-        if (!sawInboundReply) { process.stderr.write('client silently ignored inbound request'); process.exit(93); return; }
+      // Completion follows the actual refusal, not a scheduler-dependent 12ms race.
+      // Missing replies still fail within the existing 1500ms caller budget.
+      const inboundReplyTimeout = setTimeout(() => {
+        process.stderr.write('client silently ignored inbound request'); process.exit(93);
+      }, 1500);
+      finishInboundReply = () => {
+        clearTimeout(inboundReplyTimeout);
         if (mode === 'formal-compaction') {
           send({ method: 'item/started', params: { item: { id: 'compact-1', type: 'contextCompaction' } } });
           send({ method: 'item/completed', params: { item: { id: 'compact-1', type: 'contextCompaction' } } });
         }
         send({ method: 'item/completed', params: { item: { id: 'item-1', type: 'message' } } });
         send({ method: 'turn/completed', params: { turn: { id: 'turn-1', status: 'completed' } } });
-      }, 12);
+      };
+      if (sawInboundReply) {
+        const finish = finishInboundReply; finishInboundReply = null; finish();
+      }
     }
   }
 });
@@ -358,6 +370,62 @@ setInterval(() => {}, 1000);
   const file = path.join(dir, 'mock-app-server.js');
   fs.writeFileSync(file, mock, 'utf8');
   return file;
+}
+
+function testMockInboundReplyHandshake(mock) {
+  // Run the exact generated mock with virtual time and IO; no process or sleep.
+  const source = fs.readFileSync(mock, 'utf8');
+  function peer(mode = 'happy') {
+    let now = 0;
+    const timers = [], handlers = {}, output = [], exits = [], errors = [];
+    const schedule = (fn, ms) => { const timer = { at: now + ms, fn, cancelled: false }; timers.push(timer); return timer; };
+    require('vm').runInNewContext(source, {
+      require(name) { assert.strictEqual(name, 'fs'); return {}; }, Buffer,
+      setTimeout: schedule, clearTimeout(timer) { timer.cancelled = true; }, setInterval() {},
+      process: { env: { FORGE_APPSERVER_MOCK_MODE: mode },
+        stdin: { setEncoding() {}, on(event, fn) { handlers[event] = fn; } },
+        stdout: { write(value) { output.push(String(value)); } },
+        stderr: { write(value) { errors.push(String(value)); } },
+        exit(code) { exits.push(code); } },
+    }, { filename: mock });
+    const input = value => handlers.data(JSON.stringify(value) + '\n');
+    input({ id: 1, method: 'initialize' }); input({ method: 'initialized' });
+    input({ id: 2, method: 'thread/start', params: {} });
+    input({ id: 3, method: 'turn/start', params: { input: [] } });
+    const messages = () => output.join('').split('\n').filter(line => line.startsWith('{')).map(line => JSON.parse(line));
+    const completed = () => messages().filter(row => row.method === 'turn/completed');
+    return { input, messages, completed, exits, errors,
+      advance(ms) {
+        const until = now + ms;
+        for (;;) {
+          const timer = timers.filter(row => !row.cancelled && row.at <= until).sort((a, b) => a.at - b.at)[0];
+          if (!timer) break;
+          timer.cancelled = true; now = timer.at; timer.fn();
+        }
+        now = until;
+      } };
+  }
+  for (const mode of ['happy', 'formal-compaction']) {
+    const p = peer(mode);
+    assert(p.messages().some(row => row.id === 77 && row.method === 'execCommandApproval'));
+    p.advance(25); // This deterministically fails with the original 12ms timer.
+    assert.deepStrictEqual(p.exits, []); assert.strictEqual(p.completed().length, 0);
+    p.input({ id: 76, error: { code: -32601 } });
+    p.input({ id: 77, error: { code: -32001 } }); p.advance(25);
+    assert.deepStrictEqual(p.exits, []); assert.strictEqual(p.completed().length, 0);
+    p.input({ id: 77, error: { code: -32601 } });
+    assert.strictEqual(p.completed().length, 1);
+    if (mode === 'formal-compaction') assert.deepStrictEqual(
+      p.messages().filter(row => row.params?.item?.type === 'contextCompaction').map(row => row.method),
+      ['item/started', 'item/completed']);
+    p.input({ id: 77, error: { code: -32601 } }); p.advance(2000);
+    assert.strictEqual(p.completed().length, 1); assert.deepStrictEqual(p.exits, []);
+  }
+  const absent = peer();
+  absent.advance(1499); assert.deepStrictEqual(absent.exits, []);
+  absent.advance(1); assert.deepStrictEqual(absent.exits, [93]);
+  assert.strictEqual(absent.completed().length, 0);
+  assert.deepStrictEqual(absent.errors, ['client silently ignored inbound request']);
 }
 
 async function testFormalCompactionNotifications(mock, dir) {
@@ -1790,6 +1858,7 @@ async function main() {
   const mock = writeMockAppServer(dir);
   try {
     await testHelpers();
+    testMockInboundReplyHandshake(mock);
     await testHappyPath(mock, dir);
     await testFormalCompactionNotifications(mock, dir);
     await testTurnParamsFunction(mock, dir);
