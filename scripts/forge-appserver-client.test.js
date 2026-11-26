@@ -7,14 +7,18 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawnSync } = require('child_process');
+const childProcess = require('child_process');
+const crypto = require('crypto');
+const ownedMocks = createOwnedMockTracker();
+const grandchildReleases = [];
+let activeMockFile = null, activeRegistryFile = null;
 const {
   startAppServerTurn, encodeMessage, decodeLine, INTERRUPT_OUTCOMES, INTERRUPT_GRACE_MS,
   RETENTION_LIMITS, TURN_STATUS_SUCCESS, STDERR_TAIL_BYTES, tailBytes,
   isContextNotification, APPSERVER_LIVENESS_CODES, LIVENESS_INTERVAL_MS, LOCAL_PROOF_INTERVAL_MS,
   DEFAULT_PROGRESS_INTERVAL_MS, APPSERVER_TERMINAL_CODES, APPSERVER_TERMINAL_MESSAGES, CODEX_TERMINAL_ERROR_INFO,
   INBOUND_REQUEST_CLASSES, APPSERVER_INPUT_CODES, APPSERVER_INPUT_MESSAGES,
-} =require('./forge-appserver-client');
+} = loadTrackedAppServerClient();
 const { classifyError, isTransient } = require('./forge-classify-error');
 const { observation, progressLine, readProgressLine } = require('./forge-sidecar-diagnostic');
 
@@ -22,6 +26,35 @@ assert.strictEqual(isContextNotification({ method: 'item/started', params: { ite
 assert.strictEqual(isContextNotification({ method: 'item/completed', params: { item: { id: 'cmp-1', type: 'contextCompaction' } } }), true);
 assert.strictEqual(isContextNotification({ method: 'item/completed', params: { item: { id: 'm-1', type: 'agentMessage' } } }), false);
 assert.strictEqual(isContextNotification({ method: 'thread/compacted', params: { item: { id: 'cmp-1', type: 'contextCompaction' } } }), false);
+
+// Capture only this fixture's actual ChildProcess objects. The temporary wrapper
+// is installed before the original module destructures spawn, then restored.
+function createOwnedMockTracker() {
+  const children = new Set();
+  return {
+    track(child) {
+      children.add(child);
+      const retire = () => children.delete(child);
+      child.once('exit', retire); child.once('close', retire);
+      return child;
+    },
+    has: child => children.has(child),
+    live: () => [...children],
+  };
+}
+function loadTrackedAppServerClient() {
+  const filename = require.resolve('./forge-appserver-client');
+  assert.strictEqual(require.cache[filename], undefined, 'fixture spawn tracking must precede the original client import');
+  const originalSpawn = childProcess.spawn;
+  childProcess.spawn = function(command, args, options) {
+    const child = originalSpawn.call(childProcess, command, args, options);
+    if (command === process.execPath && activeMockFile && Array.isArray(args)
+        && args.length === 2 && args[0] === activeMockFile && args[1] === 'app-server'
+        && options?.env?.FORGE_APPSERVER_REGISTRY_FILE === activeRegistryFile) ownedMocks.track(child);
+    return child;
+  };
+  try { return require(filename); } finally { childProcess.spawn = originalSpawn; }
+}
 
 function makeTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'forge-appserver-client-test-'));
@@ -37,11 +70,10 @@ const fs = require('fs');
 const mode = process.env.FORGE_APPSERVER_MOCK_MODE || 'happy';
 const pidFile = process.env.FORGE_APPSERVER_PID_FILE;
 if (pidFile) fs.writeFileSync(pidFile, String(process.pid));
-// Independent of any scenario-specific pid file: every mock instance this suite spawns
-// registers itself here, so the finally-block sweep can find and kill survivors of ANY
-// scenario, not only the ones that happened to opt into FORGE_APPSERVER_PID_FILE. This
-// is a safety net for the process table, not a substitute for a scenario's own
-// waitForDeath assertion -- those still fail on their own if a kill path regresses.
+// Historical registrations are diagnostic counts only. The outer test retains
+// actual owned ChildProcess handles; it must never treat a cached numeric PID
+// as authority to terminate a process. Scenario waitForDeath assertions remain
+// separate from teardown cleanup.
 const registryFile = process.env.FORGE_APPSERVER_REGISTRY_FILE;
 if (registryFile) fs.appendFileSync(registryFile, String(process.pid) + '\n');
 // A grandchild in the same process group, spawned before the first reply so it is
@@ -50,7 +82,14 @@ if (registryFile) fs.appendFileSync(registryFile, String(process.pid) + '\n');
 // so it belongs to the group the client created and dies with process.kill(-pid).
 const grandchildPidFile = process.env.FORGE_APPSERVER_GRANDCHILD_PID_FILE;
 if (grandchildPidFile) {
-  const grandchild = require('child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000);'], { stdio: 'ignore' });
+  // A teardown request is private to this fixture and is sent only AFTER the
+  // original process-group assertions. It cannot make a broken product kill pass.
+  const releaseFile = process.env.FORGE_APPSERVER_GRANDCHILD_RELEASE_FILE;
+  const releaseNonce = process.env.FORGE_APPSERVER_GRANDCHILD_RELEASE_NONCE;
+  if (!releaseFile || !releaseNonce) process.exit(94);
+  const grandchildCode = "const fs=require('fs');const [file,nonce]=process.argv.slice(1);setInterval(()=>{try{if(fs.readFileSync(file,'utf8')===nonce)process.exit(0);}catch{}},10);";
+  const grandchild = require('child_process').spawn(process.execPath,
+    ['-e', grandchildCode, releaseFile, releaseNonce], { stdio: 'ignore' });
   fs.writeFileSync(grandchildPidFile, String(grandchild.pid));
   if (registryFile) fs.appendFileSync(registryFile, String(grandchild.pid) + '\n');
 }
@@ -369,6 +408,7 @@ setInterval(() => {}, 1000);
 `;
   const file = path.join(dir, 'mock-app-server.js');
   fs.writeFileSync(file, mock, 'utf8');
+  activeMockFile = file;
   return file;
 }
 
@@ -637,10 +677,28 @@ const alive = (target) => { try { process.kill(target, 0); return true; } catch 
 // it) are not bounded by 150ms on a loaded machine. Polling asserts the SAME
 // property -- it must die -- but waits for the observable fact instead of a
 // guess, and still fails loudly if it never happens.
+// Cache only an actual ESRCH observation on this exact fixture/nonce record.
+// A later fixture with the same numeric PID starts with a different record.
+function observeGrandchildAbsence(rows = grandchildReleases, probe = pid => process.kill(pid, 0)) {
+  for (const row of rows) {
+    if (row.absent === true) continue;
+    if (!Number.isInteger(row.pid) || row.pid < 1) {
+      try {
+        const pid = Number(fs.readFileSync(row.pidFile, 'utf8'));
+        if (Number.isInteger(pid) && pid > 0) row.pid = pid;
+      } catch { /* no published identity means unknown */ }
+    }
+    if (!Number.isInteger(row.pid) || row.pid < 1) continue;
+    try { probe(row.pid); }
+    catch (error) { if (error.code === 'ESRCH') row.absent = true; }
+  }
+}
+
 async function waitForDeath(pid, message, deadlineMs = 5000) {
   const until = Date.now() + deadlineMs;
   while (Date.now() < until && alive(pid)) await pause(10);
   assert.strictEqual(alive(pid), false, message);
+  observeGrandchildAbsence(); // Read-only, after the original death assertion; never emits teardown requests.
 }
 
 async function readPidFileWhenWritten(file, message, deadlineMs = 5000) {
@@ -699,7 +757,13 @@ async function runTimedOutTurn({ mock, dir, mode, label, budget, graceFactor, wa
     const grandchildPidFile = `${stem}.grandchild.pid`;
     const env = { ...process.env, FORGE_APPSERVER_MOCK_MODE: mode, FORGE_APPSERVER_LOG_FILE: logFile };
     if (wantPid) env.FORGE_APPSERVER_PID_FILE = pidFile;
-    if (wantGrandchild) env.FORGE_APPSERVER_GRANDCHILD_PID_FILE = grandchildPidFile;
+    if (wantGrandchild) {
+      const releaseFile = `${stem}.grandchild.release`, nonce = crypto.randomUUID();
+      env.FORGE_APPSERVER_GRANDCHILD_PID_FILE = grandchildPidFile;
+      env.FORGE_APPSERVER_GRANDCHILD_RELEASE_FILE = releaseFile;
+      env.FORGE_APPSERVER_GRANDCHILD_RELEASE_NONCE = nonce;
+      grandchildReleases.push({ releaseFile, nonce, pidFile: grandchildPidFile, pid: null, absent: false });
+    }
     const interruptGraceMs = Math.max(120, Math.round(timeoutMs * graceFactor));
     let error;
     try {
@@ -1814,38 +1878,88 @@ async function testProgressObserverIsBestEffort(mock, dir) {
   assert.strictEqual(asyncResult.turnStatus, TURN_STATUS_SUCCESS);
 }
 
-// Best-effort hard kill of one pid, by both routes killProcessTree itself uses: the
-// negative-pid group signal (catches a detached grandchild) and the direct signal
-// (catches a process that is not a group leader). Either or both may legitimately
-// no-op if the process is already gone -- that is success, not a fallthrough to hide.
-function killPidHard(pid) {
-  if (process.platform === 'win32') {
-    try { spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { shell: false }); } catch { /* best effort */ }
-    return;
+// Only original live ChildProcess handles are termination authority. Historical
+// numeric registry entries are counts, never kill targets or identity proofs.
+async function sweepSurvivors(registryFile, { tracker = ownedMocks, grandchildren = grandchildReleases,
+  now = Date.now, pauseFor = pause, deadlineMs = 3000, probe = pid => process.kill(pid, 0) } = {}) {
+  const pids = fs.existsSync(registryFile) ? [...new Set(
+    fs.readFileSync(registryFile, 'utf8').split('\n').filter(Boolean).map(Number),
+  )] : [];
+  let requested = 0;
+  for (const child of tracker.live()) {
+    if (!tracker.has(child)) continue;
+    requested++;
+    try { child.kill('SIGKILL'); } catch { /* keep unjoined ownership visible */ }
   }
-  try { process.kill(-pid, 'SIGKILL'); } catch { /* not a group leader, or already gone */ }
-  try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+  const descendants = grandchildren.map(row => ({ ...row, pid: row.pid ?? null, absent: row.absent === true, requestWritten: false }));
+  for (const row of descendants) {
+    if (row.absent) continue; // This fixture was already observed absent before any later PID reuse.
+    try {
+      try { fs.writeFileSync(row.releaseFile, row.nonce, { flag: 'wx', mode: 0o600 }); }
+      catch (error) {
+        if (error.code !== 'EEXIST' || fs.readFileSync(row.releaseFile, 'utf8') !== row.nonce) throw error;
+      }
+      row.requestWritten = true;
+      const pid = Number(fs.readFileSync(row.pidFile, 'utf8'));
+      if (Number.isInteger(pid) && pid > 0) row.pid = pid;
+    } catch { /* missing/foreign/partial identity is unknown; preserve the laboratory */ }
+  }
+  const unconfirmed = () => descendants.filter(row => {
+    if (row.absent) return false;
+    if (row.requestWritten && row.pid !== null) {
+      try { probe(row.pid); }
+      catch (error) { if (error.code === 'ESRCH') { row.absent = true; return false; } }
+    }
+    return true; // Alive, reused PID, EPERM and every other error remain unproved.
+  });
+  const until = now() + deadlineMs;
+  while ((tracker.live().length || unconfirmed().length) && now() < until) await pauseFor(10);
+  return { registered: pids.length, swept: requested,
+    stillAlive: tracker.live().map(child => child.pid), unconfirmedGrandchildren: unconfirmed().length };
 }
 
-// The safety net, not the test. This reads every pid ANY mock instance registered
-// this run (see FORGE_APPSERVER_REGISTRY_FILE in the mock source above) and kills
-// whatever is still alive. It must never be mistaken for proof that a kill path
-// works: the scenario-specific waitForDeath assertions above are what fail loudly
-// when a kill path regresses. This only stops leftovers from outliving the process
-// when something -- a broken kill path, an assertion that threw mid-scenario -- left
-// one behind.
-async function sweepSurvivors(registryFile) {
-  if (!fs.existsSync(registryFile)) return { registered: 0, swept: 0 };
-  const pids = [...new Set(
-    fs.readFileSync(registryFile, 'utf8').split('\n').filter(Boolean).map(Number),
-  )];
-  const survivors = pids.filter(alive);
-  survivors.forEach(killPidHard);
-  if (survivors.length > 0) {
-    const until = Date.now() + 3000;
-    while (Date.now() < until && survivors.some(alive)) await pause(10);
-  }
-  return { registered: pids.length, swept: survivors.length, stillAlive: survivors.filter(alive) };
+async function testCleanupRetiresOriginalChildren(dir) {
+  const EventEmitter = require('events'), tracker = createOwnedMockTracker();
+  const registry = path.join(dir, 'reused-pid-registry.log'), pid = 424242;
+  fs.writeFileSync(registry, String(pid) + '\n');
+  let staleStops = 0, replacementStops = 0, numericLookups = 0, clock = 0;
+  const old = new EventEmitter(); old.pid = pid; old.kill = () => { staleStops++; return true; };
+  tracker.track(old); old.emit('exit', 0, null);
+  const replacement = new EventEmitter(); replacement.pid = pid;
+  replacement.kill = () => { replacementStops++; return true; };
+  const originalKill = process.kill;
+  try {
+    process.kill = () => { numericLookups++; return true; }; // Never touches the OS, even under a bad regression.
+    const options = { tracker, grandchildren: [], now: () => clock, pauseFor: async ms => { clock += ms; }, deadlineMs: 30 };
+    const retired = await sweepSurvivors(registry, options);
+    assert.strictEqual(retired.swept, 0); assert.deepStrictEqual(retired.stillAlive, []);
+    assert.strictEqual(staleStops, 0); assert.strictEqual(replacementStops, 0); assert.strictEqual(numericLookups, 0);
+    let ownedStops = 0;
+    const live = new EventEmitter(); live.pid = pid;
+    live.kill = () => { ownedStops++; live.killed = true; return true; };
+    tracker.track(live);
+    const notJoined = await sweepSurvivors(registry, options);
+    assert.strictEqual(ownedStops, 1); assert.strictEqual(notJoined.stillAlive.length, 1, 'killed=true is not an exit/close join');
+    live.emit('close', 0, 'SIGKILL');
+    const joined = await sweepSurvivors(registry, options);
+    assert.strictEqual(joined.swept, 0); assert.deepStrictEqual(joined.stillAlive, []);
+    assert.strictEqual(replacementStops, 0); assert.strictEqual(numericLookups, 0);
+    const record = { releaseFile: path.join(dir, 'old-grandchild.release'), nonce: 'fixture-old',
+      pidFile: path.join(dir, 'old-grandchild.pid'), pid, absent: false };
+    observeGrandchildAbsence([record], () => { throw Object.assign(Error('inaccessible'), { code: 'EPERM' }); });
+    assert.strictEqual(record.absent, false);
+    observeGrandchildAbsence([record], () => { throw Object.assign(Error('gone'), { code: 'ESRCH' }); });
+    assert.strictEqual(record.absent, true);
+    const newFixture = { releaseFile: path.join(dir, 'new-grandchild.release'), nonce: 'fixture-new',
+      pidFile: path.join(dir, 'new-grandchild.pid'), pid, absent: false };
+    let observations = 0;
+    observeGrandchildAbsence([record, newFixture], () => { observations++; });
+    assert.strictEqual(observations, 1); assert.strictEqual(newFixture.absent, false, 'reused PID cannot inherit another fixture absence');
+    const cached = await sweepSurvivors(registry, { ...options, grandchildren: [record],
+      probe() { throw Error('historically absent fixture must not look up a reused PID'); } });
+    assert.strictEqual(cached.unconfirmedGrandchildren, 0);
+    assert.strictEqual(fs.existsSync(record.releaseFile), false, 'no teardown request was needed for an absent fixture');
+  } finally { process.kill = originalKill; fs.rmSync(registry, { force: true }); }
 }
 
 async function main() {
@@ -1855,9 +1969,11 @@ async function main() {
   // inspection, not assumed), so setting this once here reaches every mock instance
   // this run spawns without editing any of those call sites individually.
   process.env.FORGE_APPSERVER_REGISTRY_FILE = registryFile;
+  activeRegistryFile = registryFile;
   const mock = writeMockAppServer(dir);
   try {
     await testHelpers();
+    await testCleanupRetiresOriginalChildren(dir);
     testMockInboundReplyHandshake(mock);
     await testHappyPath(mock, dir);
     await testFormalCompactionNotifications(mock, dir);
@@ -1923,15 +2039,15 @@ async function main() {
     // fails its OWN assertion first (waitForDeath, above) -- this only prevents
     // whatever it left behind from surviving the process.
     const sweep = await sweepSurvivors(registryFile);
-    if (sweep.swept > 0) {
-      process.stderr.write(
-        `forge-appserver-client.test.js: WARNING swept ${sweep.swept} leaked mock process(es) ` +
-        `out of ${sweep.registered} registered (still alive after sweep: ${(sweep.stillAlive || []).length}). ` +
-        'This is a leak signal even on an otherwise-green run.\n',
-      );
-    }
+    if (sweep.swept > 0) process.stderr.write(
+      `forge-appserver-client.test.js: cleanup requested for ${sweep.swept} original owned mock child(ren); ` +
+      `${sweep.registered} historical PID registrations are diagnostic only.\n`);
+    const unproved = sweep.stillAlive.length || sweep.unconfirmedGrandchildren;
     delete process.env.FORGE_APPSERVER_REGISTRY_FILE;
-    fs.rmSync(dir, { recursive: true, force: true });
+    if (unproved) {
+      process.stderr.write('forge-appserver-client.test.js: owned-mock-cleanup-unproved; laboratory preserved.\n');
+      process.exitCode = 1;
+    } else fs.rmSync(dir, { recursive: true, force: true });
   }
 }
 

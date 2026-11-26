@@ -165,9 +165,21 @@ function run(options = {}, dependencies = {}) {
     let timedOut = false;
     let child;
     let timer = null;
-    const complete = (result) => { if (settled) return; settled = true; if (timer) clearTimeout(timer); resolve(result); };
+    let stdinError = null, childClose = null;
+    const inputCodes = new Set(['EPIPE', 'ECONNRESET', 'EBADF', 'EIO', 'ERR_STREAM_DESTROYED', 'ERR_STREAM_WRITE_AFTER_END']);
+    const inputError = (error) => {
+      if (!stdinError) stdinError = { stage: 'stdin-write', code: inputCodes.has(error && error.code) ? error.code : 'other' };
+    };
+    const complete = (result) => {
+      if (settled) return;
+      settled = true; if (timer) clearTimeout(timer);
+      resolve(stdinError ? { ...result, stdin_error: { ...stdinError, child_close: childClose } } : result);
+    };
     try { child = spawnFn(invocation.command, invocation.args, { cwd: invocation.cwd, shell: false, env: invocation.env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }); }
     catch (_) { complete(parser.result('failed', `${options.runtime}-exit-nonzero`)); return; }
+    // This stream is owned by this invocation. Keep its listener after settlement:
+    // a late pipe error cannot escape or retroactively mutate the returned result.
+    child.stdin.on('error', inputError);
     timer = setTimeout(() => {
       timedOut = true;
       try { child.kill(); } catch (_) {}
@@ -177,12 +189,21 @@ function run(options = {}, dependencies = {}) {
       try { parser.push(chunk); } catch (_) { try { child.kill(); } catch (_) {}; complete(parser.result('failed', 'output-invalid')); }
     });
     child.on('error', () => complete(parser.result('failed', `${options.runtime}-exit-nonzero`)));
-    child.on('close', (code) => {
+    child.on('close', (code, signal) => {
+      childClose = { exit_code: Number.isSafeInteger(code) ? code : null,
+        signal: signal == null ? null : ['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGABRT', 'SIGPIPE', 'SIGHUP', 'SIGBREAK'].includes(signal) ? signal : 'other' };
       if (timedOut || settled) return;
       try { complete(parser.finish(code)); } catch (_) { complete(parser.result('failed', 'output-invalid')); }
     });
     const prompt = String(options.prompt || '');
+    try {
     child.stdin.end(options.runtime === 'claude' ? `${JSON.stringify({ type: 'user', message: { role: 'user', content: prompt } })}\n` : prompt);
+    } catch (error) {
+      // Preserve rejection for unrelated programmer errors; stream failures wait
+      // for the existing close/parser or timeout path, never a retry or new kill.
+      if (!inputCodes.has(error && error.code)) throw error;
+      inputError(error);
+    }
   });
 }
 
