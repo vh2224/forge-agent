@@ -16178,12 +16178,34 @@ function smokeHookPathManaged() {
   const renderer = require('./forge-claude-renderer.js');
   const { MANAGED_CORE } = require('./forge-installer.js');
 
-  // (a) every `node ~/…forge-*.js` command merge-settings.js emits, mined from
-  //     its source — any forge script, not one enumerated filename.
+  // (a) Mine the actual default configuration emitted by the enable CLI. A
+  // migration reader may legitimately contain an old command without wiring it.
   const MINER = /node\s+(~\/[^\s`'"]*forge-[^\s`'"/]*\.js)/g;
-  const merge = readRepoText(path.join(SCRIPTS, 'merge-settings.js'));
-  const wired = [...merge.matchAll(MINER)].map((m) => m[1]);
-  const wiredPaths = [...new Set(wired)];
+  const mergeFile = path.join(SCRIPTS, 'merge-settings.js');
+  function emittedSettings(legacyDefault = false) {
+    const home = mkTmp('hookpath-enable'), file = path.join(home, '.claude', 'settings.json');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    try {
+      const emitter = [
+        "const fs=require('fs'),path=require('path'),Module=require('module'),assert=require('assert/strict');",
+        "const file=process.argv[1],target=process.argv[2];let source=fs.readFileSync(file,'utf8');",
+        "if(process.argv[3]==='legacy'){const before=" + JSON.stringify("const STATUSLINE_CONVENTIONAL = 'node ~/.forge-agent/scripts/forge-statusline.js';")
+          + ",after=" + JSON.stringify("const STATUSLINE_CONVENTIONAL = 'node ~/.claude/forge-statusline.js';")
+          + ";assert.equal(source.split(before).length,2);source=source.replace(before,()=>after);}",
+        "process.argv=[process.execPath,file,target];const unit=new Module(file,module);unit.filename=file;unit.paths=Module._nodeModulePaths(path.dirname(file));unit._compile(source,file);",
+      ].join('\n');
+      const env = { ...process.env, HOME: home, USERPROFILE: home, FORGE_HOME: path.join(home, '.forge-agent'),
+        CLAUDE_CONFIG_DIR: path.join(home, '.claude'), CODEX_HOME: path.join(home, '.codex'), FORGE_KEYCHAIN_DISABLED: '1' };
+      for (const key of ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN']) delete env[key];
+      const cli = spawnSync(process.execPath, ['-e', emitter, mergeFile, file, legacyDefault ? 'legacy' : 'current'], {
+        cwd: home, env, encoding: 'utf8', windowsHide: true, timeout: 20000, maxBuffer: 16384,
+      });
+      assert(cli.status === 0 && !cli.signal && !cli.error, '(a) private enable CLI completed without invoking configured commands');
+      return JSON.parse(fs.readFileSync(file, 'utf8'));
+    } finally { cleanup(home); }
+  }
+  const mineSettings = settings => [...JSON.stringify(settings).matchAll(MINER)].map(m => m[1]);
+  const wiredPaths = [...new Set(mineSettings(emittedSettings()))];
   assert(wiredPaths.some((p) => /\bforge-hook\.js$/.test(p)),
     '(a) the miner still sees the hook commands — not blind to the family the old regex covered');
   assert(wiredPaths.some((p) => /\bforge-statusline\.js$/.test(p)),
@@ -16247,6 +16269,9 @@ function smokeHookPathManaged() {
   const minedSample = [...'run: node ~/.claude/forge-anything.js phase'.matchAll(MINER)].map((m) => m[1]);
   assert(minedSample.length === 1 && minedSample[0] === '~/.claude/forge-anything.js',
     '(d control) the widened miner catches an arbitrary forge-*.js command the old forge-hook-only regex ignored');
+  const legacyPaths = mineSettings(emittedSettings(true));
+  assert(legacyPaths.includes('~/.claude/forge-statusline.js') && !maintained('~/.claude/forge-statusline.js'),
+    '(d control) a genuinely emitted legacy default is still rejected by the same maintenance predicate');
   assert(maintained('~/.claude/forge-nonexistent.js') === false,
     '(d control) an unprojected ~/.claude path is NOT maintained — the (c) loop can go red');
   assert(maintainedByCore('~/.forge-agent/scripts/forge-statusline.js') === true,
