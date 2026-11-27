@@ -99,6 +99,17 @@ function coordinatePreparation(request,requestSha,{create=true,operation='accept
  const cap=Object.freeze({});caps.set(cap,{owner,binding:seen.binding,binding_sha256:seen.sha256,lock});return cap;
 }
 function coordinationResult(cap,result){const row=held(cap);return row.binding.coordination==='observed-host-session-v1'?{...result,owner_window:{status:'held',binding_sha256:row.binding_sha256,settlement:'live-host-join-required'}}:result;}
+// The window this very call opened, for a start refused before any attempt:
+// no receipt means no started attempt, so no provider, sidecar or native child
+// was launched and this process is the only writer, now returning. Anything
+// else (a receipt, a reattached window, a provider call) keeps the live-host
+// settlement.
+function releasePreAttemptRefusal(cap,receiptFile,result){
+ const row=held(cap);
+ if(row.binding.coordination!=='observed-host-session-v1'||result?.ok===true||result?.provider_called!==false||fs.existsSync(receiptFile))return null;
+ const reason=String(result.reason_code||'unknown').slice(0,200);
+ return close(cap,challenge=>{if(fs.existsSync(receiptFile))throw error('owner-window-receipt-changed');return{challenge_sha256:digest(challenge),joined:true,possible_writers:0,reference:'pre-attempt-refusal:'+reason+':receipt-absent:same-process'};});
+}
 function createTransportAdapter(attestStopped){if(typeof attestStopped!=='function')throw error('owner-window-live-host-required');const handle=Object.freeze({});adapters.set(handle,attestStopped);return handle;}
 function createObservedPreparationAdapter({hostRuntime,observeWriters,reconcile}={}){
  const runs=require('./forge-runs'),actor=()=>runs.observeHostSession(hostRuntime,process.env.FORGE_CLAUDE_OWNER_SESSION_ID),initial=actor();
@@ -136,6 +147,20 @@ async function settlePreparationInside(rawRequest,adapter,cliJoins){
  const entry=held(cap);if(entry.binding.coordination!=='observed-host-session-v1'||entry.binding.request_sha256!==fingerprint)throw error('owner-window-coordination-mismatch');
  const file=require('./forge-unit-sidecar').artifactAttemptFiles(request).receiptFile;
  const read=()=>{const stat=fs.lstatSync(file);if(!stat.isFile()||stat.isSymbolicLink())throw error('owner-window-receipt-untrusted');return fs.readFileSync(file);};
+ // A start refused before its attempt existed (e.g. an invalid continuation)
+ // never created a receipt. Without this branch the window stayed held with no
+ // same-session exit: settle needed a receipt and recover refers back to settle.
+ // The live host still has to attest that every possible writer has joined.
+ if(!fs.existsSync(file)){
+  const absent={file,state:'absent'};
+  attestJoined({operation:'join-cli-settlement-no-attempt',owner:entry.owner,binding_sha256:entry.binding_sha256,request_sha256:fingerprint,receipt:absent,cli_joins:cliJoins},attest);
+  return close(cap,challenge=>{
+   if(fs.existsSync(file))throw error('owner-window-receipt-changed');
+   const reference=attestJoined({...challenge,operation:'settle-cli-preparation-no-attempt',request_sha256:fingerprint,receipt:absent,cli_joins:cliJoins},attest);
+   if(fs.existsSync(file))throw error('owner-window-receipt-changed');
+   return{challenge_sha256:digest(challenge),joined:true,possible_writers:0,reference};
+  });
+ }
  const bytes=read(),receipt=JSON.parse(bytes);
  if(receipt.phase==='failed'&&require('./forge-preparation-custody-profile').eligible(receipt)){
   const recovery=require('./forge-owner-window-recovery'),current=recovery.capture({owner:entry.owner,request:rawRequest});
@@ -224,5 +249,5 @@ async function runCliPreparation(requestFile,{acceptanceFile,invokeNative,ownerT
 
 function ensureTask(owner,taskId){const ids=require('./forge-ids');if(!ids.isValid(taskId)||ids.entityKind(taskId)!=='task'||/[\\/\0]/.test(taskId))throw error('owner-task-id-required');return withMutation(owner,()=>{let directory=ownerOf(owner);for(const part of ['.gsd','tasks',taskId]){directory=path.join(directory,part);if(fs.existsSync(directory)){const stat=fs.lstatSync(directory);if(stat.isSymbolicLink()||!stat.isDirectory())throw error('owner-task-path-untrusted');}else{if(part==='.gsd')throw error('owner-project-required');fs.mkdirSync(directory);}}return{directory,created:true};});}
 function writeBrief(owner,taskId,bytes){return withMutation(owner,()=>{const ensured=ensureTask(owner,taskId),file=path.join(ensured.directory,taskId+'-BRIEF.md');if(fs.existsSync(file)){const stat=fs.lstatSync(file);if(stat.isSymbolicLink()||!stat.isFile())throw error('owner-task-path-untrusted');if(!fs.readFileSync(file).equals(bytes))throw error('owner-brief-exists');return{file,unchanged:true};}fs.writeFileSync(file,bytes,{flag:'wx'});return{file,created:true};});}
-module.exports={retireLegacyCoordination,open,withWindow,withMutation,assertMutationAllowed,currentPublicationGuard,withPublicationContext,close,recover,observed,controlRoot,metadataOwner,coordinatePreparation,coordinationResult,createTransportAdapter,createObservedPreparationAdapter,protectPreparation,settlePreparation,settleFailedPreparation,runCliPreparation,ensureTask,writeBrief,appendHookEvidence};
+module.exports={retireLegacyCoordination,open,withWindow,withMutation,assertMutationAllowed,currentPublicationGuard,withPublicationContext,close,recover,observed,controlRoot,metadataOwner,coordinatePreparation,coordinationResult,releasePreAttemptRefusal,createTransportAdapter,createObservedPreparationAdapter,protectPreparation,settlePreparation,settleFailedPreparation,runCliPreparation,ensureTask,writeBrief,appendHookEvidence};
 if(require.main===module){try{const[mode,owner,taskId,source]=process.argv.slice(2);const result=mode==='--ensure-task'&&!source?ensureTask(owner,taskId):mode==='--write-brief'&&source?writeBrief(owner,taskId,fs.readFileSync(source)):null;if(!result)throw error('owner-window-usage');process.stdout.write(JSON.stringify(result)+'\n');}catch(e){process.stdout.write(JSON.stringify({ok:false,reason_code:e.code||'owner-window-failed',provider_called:false})+'\n');process.exitCode=1;}}

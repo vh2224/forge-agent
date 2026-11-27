@@ -583,10 +583,19 @@ async function startStandaloneTaskPreparation(rawRequest, deps = {}) {
   catch (error) { return refused(error.stage || 'input', error.code || 'invalid-preparation-request'); }
   if (deps.ownerTransportAdapter) return windows.protectPreparation(request, deps.ownerTransportAdapter, () => startStandaloneTaskPreparationInsideOwnerWindow(rawRequest, deps));
   try {
+    // Opened by this call (not reattached): a refusal before any attempt releases it below.
+    const opened = !windows.observed(request.contextRoot || request.cwd);
     const cap = windows.coordinatePreparation(request, preparationRequestFingerprint(request),
       { create: !fs.existsSync(unit.artifactAttemptFiles(request).receiptFile), operation: 'start' });
     if (!cap) return startStandaloneTaskPreparationInsideOwnerWindow(rawRequest, deps);
     const result = await windows.withWindow(cap, () => startStandaloneTaskPreparationInsideOwnerWindow(rawRequest, deps));
+    if (opened) {
+      let released = null;
+      // A receipt appearing in between keeps the window held and the original refusal.
+      try { released = windows.releasePreAttemptRefusal(cap, unit.artifactAttemptFiles(request).receiptFile, result); } catch { released = null; }
+      // A nested start may already have stamped owner_window:held on this result.
+      if (released) { const { owner_window: _released, ...rest } = result; return rest; }
+    }
     return windows.coordinationResult(cap, typeof result.invoke === 'function'
       ? { ...result, invoke: callback => windows.withWindow(cap, () => result.invoke(callback)) } : result);
   } catch (error) { return refused('coordination', error.code || 'owner-window-unmeasured'); }
@@ -757,10 +766,19 @@ async function prepareStandaloneTask(rawRequest, deps = {}) {
   catch (error) { return refused(error.stage || 'input', error.code || 'invalid-preparation-request'); }
   if (deps.ownerTransportAdapter) return windows.protectPreparation(request, deps.ownerTransportAdapter, () => prepareStandaloneTaskInsideOwnerWindow(rawRequest, deps));
   try {
+    // Opened by this call (not reattached): a refusal before any attempt releases it below.
+    const opened = !windows.observed(request.contextRoot || request.cwd);
     const cap = windows.coordinatePreparation(request, preparationRequestFingerprint(request),
       { create: !fs.existsSync(unit.artifactAttemptFiles(request).receiptFile), operation: 'start' });
     if (!cap) return prepareStandaloneTaskInsideOwnerWindow(rawRequest, deps);
     const result = await windows.withWindow(cap, () => prepareStandaloneTaskInsideOwnerWindow(rawRequest, deps));
+    if (opened) {
+      let released = null;
+      // A receipt appearing in between keeps the window held and the original refusal.
+      try { released = windows.releasePreAttemptRefusal(cap, unit.artifactAttemptFiles(request).receiptFile, result); } catch { released = null; }
+      // A nested start may already have stamped owner_window:held on this result.
+      if (released) { const { owner_window: _released, ...rest } = result; return rest; }
+    }
     return windows.coordinationResult(cap, typeof result.invoke === 'function'
       ? { ...result, invoke: callback => windows.withWindow(cap, () => result.invoke(callback)) } : result);
   } catch (error) { return refused('coordination', error.code || 'owner-window-unmeasured'); }
