@@ -266,28 +266,62 @@ test('oversized whole-file and combined shards retain coverage but are explicitl
   assert.strictEqual(binary.dispatchable, true); assert.strictEqual(binary.line_count_kind, 'estimate');
 });
 
-test('review procedure keeps original indices and scoped eligible remainder before single shortcuts', () => {
+test('review procedure applies engine-specific size eligibility and preserves original coverage', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'shared', 'forge-review.md'), 'utf8');
   const guard = source.indexOf('**Before either dispatch path, including the single-shard shortcut:**');
   const shortcut = source.indexOf('When no shard was blocked, `REVIEW_SHARDS <= 1`');
-  assert(guard > 0 && shortcut > guard, 'blocked coverage is handled before ordinary single dispatch');
+  assert(guard > 0 && shortcut > guard);
   assert(source.includes('An eligible remainder must remain scoped even if only one is eligible.'));
   assert(source.includes('If all original shards are blocked, dispatch none'));
   const match = source.match(/shard_dispatchable\(\) \{ node -e "([^"]+)"/);
-  assert(match, 'execute the actual documented metadata projection');
+  const blockedMatch = source.match(/shard_blocked_count\(\) \{ node -e "([^"]+)"/);
+  assert(match && blockedMatch, 'execute both actual documented helpers, not copied predicates');
+  const evaluate = (code, argv) => { let out = ''; require('vm').runInNewContext(code, {
+    process: { argv: ['node', ...argv], stdout: { write(value) { out += value; } } }
+  }); return out; };
+  const declared = source.match(/^\s*([A-Z_]+)="\$RESOLVED_CHALLENGER"\s*$/m);
+  const blockedBinding = source.match(/REVIEW_BLOCKED_SHARDS=\$\(shard_blocked_count "\$([A-Za-z_]+)"\)/);
+  const primaryBinding = source.match(/Use .shard_dispatchable \$i "\$([A-Za-z_]+)"/);
+  assert(declared && blockedBinding && primaryBinding, 'bind helpers to actual Step0 declaration and shell call sites');
+  assert.strictEqual(declared[1], 'CHALLENGER');
+  assert.strictEqual(blockedBinding[1], declared[1]); assert.strictEqual(primaryBinding[1], declared[1]);
+  const boundEngine = (name, engine) => ({ [declared[1]]: engine }[name] || '');
+  const project = (shards, index, engine) => evaluate(match[1], [JSON.stringify({ shards }), String(index), boundEngine(primaryBinding[1], engine)]);
+  const blockedCount = (shards, engine) => Number(evaluate(blockedMatch[1], [JSON.stringify({ shards }), boundEngine(blockedBinding[1], engine)]));
+  const large = planReviewShards([file('data/large.json', 4500)]);
+  const small = planReviewShards([file('src/small.js', 3900)]);
+  assert.strictEqual(large[0].dispatchable, false, 'planning metadata and production sharder unchanged');
+  assert.strictEqual(evaluate(match[1], [JSON.stringify({ shards: large }), '0', boundEngine('challenger', 'claude')]), 'false', 'regression: lowercase unset shell binding must not masquerade as Native');
+  for (const engine of ['claude', 'codex', 'gemini']) {
+    assert.strictEqual(project(large, 0, engine), engine === 'claude' ? 'true' : 'false');
+    assert.strictEqual(blockedCount(large, engine), engine === 'claude' ? 0 : 1);
+    assert.strictEqual(project(small, 0, engine), 'true');
+    assert.strictEqual(blockedCount(small, engine), 0);
+    assert.strictEqual(project(large, 9, engine), 'false', 'missing original row is never covered');
+    assert.strictEqual(blockedCount([null], engine), 1);
+  }
   const rows = planReviewShards([file('data/big.json', 23000), file('src/small.js', 900)]);
-  assert.strictEqual(rows.length, 2, 'retain the complete original roster');
-  const project = (shards, index) => { let out = '';
-    require('vm').runInNewContext(match[1], { process: { argv: ['node', JSON.stringify({ shards }), String(index)],
-      stdout: { write(value) { out += value; } } } }); return out; };
-  assert.strictEqual(project(rows, 0), 'false'); assert.strictEqual(project(rows, 1), 'true');
-  assert.deepStrictEqual(rows[1].files, ['src/small.js']);
+  assert.strictEqual(rows.length, 2); assert.deepStrictEqual(rows[1].files, ['src/small.js']);
+  assert.strictEqual(project(rows, 0, 'codex'), 'false'); assert.strictEqual(project(rows, 1, 'codex'), 'true');
+  assert.strictEqual(project(rows, 0, 'claude'), 'true'); assert.strictEqual(blockedCount(rows, 'claude'), 0);
   const blocked = planReviewShards([file('first.json', 5000), file('second.json', 4500)]);
-  assert(blocked.every((row, i) => project(blocked, i) === 'false'));
+  for (const engine of ['codex', 'gemini']) {
+    assert(blocked.every((row, i) => project(blocked, i, engine) === 'false'));
+    assert.strictEqual(blockedCount(blocked, engine), 2);
+    project(blocked, 0, 'claude');
+    assert.strictEqual(blockedCount(blocked, engine), 2, 'one Native fallback does not clear other external blocked scopes');
+  }
   assert.strictEqual(blocked.flatMap(row => row.files).length, 2);
-  for (const phrase of ['Only write a clean artifact when no original shard was blocked or unavailable',
-    'Empty `objections` does not erase blocked or unavailable coverage',
-    '`no_flags: true` never overrides blocked or unavailable original shards']) assert(source.includes(phrase), phrase);
+  for (const [a, b] of [
+    ['- `NO_FLAGS` → no objections', '- otherwise → capture'],
+    ['- **exit 0** → stdout is JSON', '- **exit != 0 with'],
+    ['- `no_flags: true` never overrides', '## ']
+  ]) {
+    const start = source.indexOf(a); assert(start >= 0, a);
+    let end = source.indexOf(b, start + a.length); if (end < 0) end = source.length;
+    assert(source.slice(start, end).includes('REVIEW_BLOCKED_SHARDS == 0'), 'each actual clean-result branch requires the computed blocked count');
+  }
+  assert(source.includes('Do not clear global missing coverage merely because one'));
 });
 
 test('planning estimates never replace the actual unchanged challenger 4000-line guard', () => {
