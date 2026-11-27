@@ -10,6 +10,21 @@ function plain(value){return value!==null&&typeof value==='object'&&Object.getPr
 function closed(value,keys){if(!plain(value)||Object.keys(value).sort().join(',')!==[...keys].sort().join(','))fail('native-host-observation-schema');}
 function text(value,max=256){if(typeof value!=='string'||!value.trim()||Buffer.byteLength(value)>max||/[\x00-\x1f\x7f]/.test(value))fail('native-host-observation-text');
 return value;}
+function normalizeObservedHostVersion(value){const match=typeof value==='string'&&/^(0|[1-9][0-9]{0,3})[.](0|[1-9][0-9]{0,3})[.](0|[1-9][0-9]{0,5})$/.exec(value);if(!match||match[0]!==value)fail('native-host-observed-version-invalid');return value;}
+function parseHostVersionOutput(value){
+ if(typeof value!=='string'&&!Buffer.isBuffer(value))fail('native-host-binary-version-unsupported');
+ if((typeof value==='string'?Buffer.byteLength(value):value.length)>256)fail('native-host-binary-version-unsupported');
+ const bytes=Buffer.isBuffer(value)?value:Buffer.from(value,'utf8');let output=bytes.toString('utf8');
+ if(!Buffer.from(output,'utf8').equals(bytes)||output.charCodeAt(0)===65279)fail('native-host-binary-version-unsupported');
+ if(output.endsWith('\r\n'))output=output.slice(0,-2);else if(output.endsWith('\n'))output=output.slice(0,-1);
+ const suffix=' (Claude Code)';if(!output.endsWith(suffix))fail('native-host-binary-version-unsupported');
+ const version=output.slice(0,-suffix.length);try{return normalizeObservedHostVersion(version);}catch{fail('native-host-binary-version-unsupported');}
+}
+function assertLiveHostBinary(value){
+ if(!plain(value)||Object.keys(value).sort().join(',')!=='observed_version,physical_path,sha256')fail('native-host-live-binary-schema');
+ if(typeof value.physical_path!=='string'||!path.isAbsolute(value.physical_path)||Buffer.byteLength(value.physical_path)>4096||/[\x00-\x1f\x7f]/.test(value.physical_path)||typeof value.sha256!=='string'||!/^[a-f0-9]{64}$/.test(value.sha256))fail('native-host-live-binary-schema');
+ normalizeObservedHostVersion(value.observed_version);
+}
 function hash(value){return crypto.createHash('sha256').update(value).digest('hex');}
 function canonical(value,depth=0,seen=new Set()){if(depth>32)fail('native-host-observation-depth');
 if(value===null||typeof value==='boolean'||typeof value==='string'||typeof value==='number'&&Number.isFinite(value))return value;
@@ -225,6 +240,7 @@ function liveCount(v,max=1000000000){if(!Number.isSafeInteger(v)||v<0||v>max)fai
 function liveHostState(context,witness,host,source){
  const facts=requestApi().assertOwnerContext(context),v=host.observation;
  liveKeys(v,['schema_version','profile_id','host_session','provenance','host_binary','agent_definition','effort_requested','model_requested']);
+ assertLiveHostBinary(v.host_binary);
  if(v.schema_version!==1||v.profile_id!==LIVE_PROFILE_ID||v.provenance!=='observed-host'||host.provenance!=='observed-host'||source.provenance!=='observed-host'||facts.actor.hostRuntime!=='claude'||facts.actor.sessionId!==v.host_session||source.host_session!==v.host_session||v.effort_requested!==facts.route.effort||v.model_requested!==(facts.route.model_resolved||facts.route.model))fail('native-host-live-binding');
  const binding=require('./forge-native-invocation').observeClaudeAgentBinding({agentType:v.agent_definition.agent_type,agentPath:v.agent_definition.physical_path,sourceFingerprint:v.agent_definition.sha256});
  if(binding.ok!==true||v.agent_definition.agent_type!=='forge-native-files')fail('native-host-agent-definition-unproved');
@@ -295,4 +311,4 @@ function admitLiveObservation(handle,witness){const row=current(handle);if(!row.
 function liveFileResponse(raw,row,target){const v=raw.tool_response;if(raw.tool_name==='Read'){liveKeys(v,['type','file']);liveKeys(v.file,['filePath','content','numLines','startLine','totalLines']);if(v.type!=='text'||!samePath(v.file.filePath,target.absolute)||typeof v.file.content!=='string'||Buffer.byteLength(v.file.content)>MAX_INPUT)fail('native-host-live-read-response');for(const k of ['numLines','startLine','totalLines'])liveCount(v.file[k]);}
  else{liveKeys(v,['type','filePath','content','structuredPatch','originalFile','userModified']);if(!['create','update'].includes(v.type)||!samePath(v.filePath,target.absolute)||v.content!==raw.tool_input.content||!Array.isArray(v.structuredPatch)||v.structuredPatch.length>4096||v.originalFile!==null&&typeof v.originalFile!=='string'||typeof v.userModified!=='boolean'||!physicalFile(target.absolute).equals(Buffer.from(raw.tool_input.content)))fail('native-host-live-write-response');}}
 
-module.exports={prepareTimeoutCapMs,LIVE_PROFILE_ID,assertInvocationIntent,assertSealedIntent,admitLiveObservation,PROFILE_ID,FIXTURE_PROFILE_ID,normalizeHostObservation,normalizeRelayMessage,enrollForegroundProfile,assertCapabilityAdmission,assertActivityAdmission,invocationOptions,bindSealedInvocation,assertLaunchAdmission,describeProfile,admitObservation,admitCandidate,subscribe,awaitJoinedReturn,assertJoined,assertPublicationAttemptCurrent,assertPublicationCurrent,terminalResult};
+module.exports={prepareTimeoutCapMs,LIVE_PROFILE_ID,assertInvocationIntent,assertSealedIntent,admitLiveObservation,PROFILE_ID,FIXTURE_PROFILE_ID,normalizeHostObservation,normalizeRelayMessage,enrollForegroundProfile,assertCapabilityAdmission,assertActivityAdmission,invocationOptions,bindSealedInvocation,assertLaunchAdmission,describeProfile,admitObservation,admitCandidate,subscribe,awaitJoinedReturn,assertJoined,assertPublicationAttemptCurrent,assertPublicationCurrent,terminalResult,normalizeObservedHostVersion,parseHostVersionOutput};

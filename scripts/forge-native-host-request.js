@@ -132,7 +132,7 @@ const gateFile=planFile.replace(/-PLAN\.md$/,'-PLAN-GATE.md'),gateBytes=read(gat
 let planDecision={plan:'approved'};
 if(!/^status:\s*approved\s*$/m.test(gateText)){
 if(policy.planGateInteractive==='off')planDecision={plan:'skipped',planSkipReason:'interactive-off'};
-else if(begin.workflow_binding.mode==='auto')fail('native-host-auto-plan-gate-producer-unavailable');
+else if(begin.workflow_binding.mode==='auto')planDecision={plan:'skipped',planSkipReason:'auto-defer',authorizationReference:'native-host-auto/'+input.expected_begin_sha256};
 else if(policy.planGateInteractive==='auto')fail('native-host-plan-gate-decision-unavailable');
 else fail('native-host-plan-gate-required');}
 const approvedHash=gateText.match(/^plan_sha256:\s*([a-f0-9]{64})\s*$/m)?.[1];
@@ -215,8 +215,20 @@ if(current.stamp!==row.initial.stamp)fail('native-host-owner-authority-changed')
 if(admitted){row.publicationRuntime=admitted.runtime;row.publicationIdentity=admitted.identity;if(complete)row.publicationWitness=complete;else row.publicationAttemptWitness=pending;}
 return current.facts;}
 function describeOwnerContext(handle){return structuredClone(assertOwnerContext(handle));}
-function ownerAdapters(handle){assertOwnerContext(handle);
-return Object.freeze({assertAuthority(){assertOwnerContext(handle);},assertBoundary(){assertOwnerContext(handle);}});}
+function executionPlanGateAdapter(context){const owner=contexts.get(context);if(!owner)fail('native-host-owner-context-required');
+const facts=assertOwnerContext(context);if(facts.gates.planSkipReason!=='auto-defer')return null;
+if(!owner.executionPlanGate)owner.executionPlanGate=require('./forge-task-execution').createAutoPlanGateAdapter(scope=>{
+ // This is a live producer bound to the genuine private request/channel. A JSON
+ // gate, copied adapter or another invocation cannot attest the current scope.
+ if(!owner.request)fail('native-host-auto-plan-gate-request-required');
+ const r=assertExecutionRequest(owner.request),roots=require('./forge-code-roots');
+ if(r.gates.plan!=='skipped'||r.gates.planSkipReason!=='auto-defer')fail('native-host-auto-plan-gate-scope-changed');
+ const expected={scope:r.scope,phase:r.phase,unitType:r.unitType,milestoneId:r.milestoneId||null,sliceId:r.sliceId||null,taskId:r.taskId,workflowId:r.workflowId,dispatchId:r.dispatchId,host:r.route.host_runtime,owner:fs.realpathSync(r.contextRoot||r.cwd),codeDir:fs.realpathSync(r.cwd),planFile:fs.realpathSync(r.planFile),planSha256:hash(read(r.planFile)),executionContractSha256:roots.digest(r.execution_contract),reference:r.gates.authorizationReference};
+ if(digest(scope)!==digest(expected))fail('native-host-auto-plan-gate-scope-changed');
+ return{authorized:true,mode:'auto',reference:scope.reference};
+});return owner.executionPlanGate;}
+function ownerAdapters(handle){assertOwnerContext(handle);const adapter=executionPlanGateAdapter(handle);
+return Object.freeze({assertAuthority(){assertOwnerContext(handle);},assertBoundary(){assertOwnerContext(handle);},...(adapter?{executionPlanGate:adapter}:{})});}
 function channelState(channel,context){const bridge=require('./forge-native-host-bridge');
 if(typeof bridge.assertOwnedChannel!=='function')fail('native-host-owned-channel-producer-unavailable');
 const row=bridge.assertOwnedChannel(channel,context);
@@ -254,5 +266,6 @@ if(digest(row.request)!==row.sha256)fail('native-host-request-changed');return s
 function readExecutionRequest(handle){return assertExecutionRequest(handle);}
 function validateExecutionRequest(handle,nativeInvocation){const r=assertExecutionRequest(handle);
 if(!nativeInvocation||nativeInvocation.ok!==true)fail('native-host-preflight-required');
-const check=require('./forge-unit-sidecar').validateRecoveryRequest(r,{nativeInvocation});if(check.supported!==true)fail('native-host-request-preflight-refused');return r;}
+const validate=()=>require('./forge-unit-sidecar').validateRecoveryRequest(r,{nativeInvocation}),adapter=executionPlanGateAdapter(requests.get(handle).context);
+const check=adapter?require('./forge-task-execution').withAutoPlanGateAdapterSync(adapter,r,validate):validate();if(check.supported!==true)fail('native-host-request-preflight-refused');return r;}
 module.exports={normalizeOwnerInput,scanSecurityPlan,buildOwnerContext,assertOwnerContext,describeOwnerContext,ownerAdapters,buildExecutionRequest,assertExecutionRequest,readExecutionRequest,validateExecutionRequest};

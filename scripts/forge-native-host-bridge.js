@@ -45,15 +45,22 @@ function parse(bytes, max = LIMIT.input) {
   let value; try { value = JSON.parse(text); } catch { fail('native-host-json-invalid'); }
   if (!plain(value)) fail('native-host-json-object'); return value;
 }
-function binaryPin(file, expected) {
+function binaryMeasure(file) {
   physical(file); const fd = fs.openSync(file, 'r'), h = crypto.createHash('sha256');
   try { const a = fs.fstatSync(fd); if (a.size > 512 * 1024 * 1024) fail('native-host-binary-bound');
     const chunk = Buffer.alloc(65536); let count, bytes = 0;
     while ((count = fs.readSync(fd, chunk, 0, chunk.length, null)) > 0) { bytes += count; if (bytes > a.size) fail('native-host-binary-raced'); h.update(chunk.subarray(0, count)); }
     const b = fs.fstatSync(fd), c = fs.lstatSync(file);
     if (bytes !== a.size || ['dev','ino','size','mtimeMs','ctimeMs'].some(k => a[k] !== b[k] || b[k] !== c[k])) fail('native-host-binary-raced');
-    if (h.digest('hex') !== sha(expected)) fail('native-host-binary-changed'); physical(file);
+    physical(file);return{sha256:h.digest('hex'),identity:{dev:a.dev,ino:a.ino,size:a.size,mtimeMs:a.mtimeMs,ctimeMs:a.ctimeMs}};
   } finally { fs.closeSync(fd); }
+}
+function binaryPin(file,expected){const measured=binaryMeasure(file);if(measured.sha256!==sha(expected))fail('native-host-binary-changed');}
+function versionProbeEnv(){const env={};for(const key of ['PATH','Path','HOME','TMPDIR','LANG','LC_ALL','LC_CTYPE','SystemRoot','SYSTEMROOT','ComSpec','COMSPEC','PATHEXT','APPDATA','LOCALAPPDATA','USERPROFILE','TEMP','TMP'])if(typeof process.env[key]==='string')env[key]=process.env[key];return env;}
+function observeHostVersion(exe){
+ physical(exe);let result;try{result=child.spawnSync(exe,['--version'],{cwd:path.dirname(exe),shell:false,windowsHide:true,stdio:['ignore','pipe','pipe'],encoding:'utf8',env:versionProbeEnv(),timeout:5000,maxBuffer:4096});}catch(error){throw Object.assign(new Error('native-host-binary-version-unobserved'),{code:'native-host-binary-version-unobserved',os_diagnostic:osFailureFacts({action:'version'},{error,status:null,signal:null,stderr:''})});}
+ if(!result||result.error||result.signal||result.status!==0)throw Object.assign(new Error('native-host-binary-version-unobserved'),{code:'native-host-binary-version-unobserved',os_diagnostic:osFailureFacts({action:'version'},result||{})});
+ try{return api('native-host-profile').parseHostVersionOutput(result.stdout);}catch(error){throw Object.assign(error,{os_diagnostic:osFailureFacts({action:'version'},result)});}
 }
 function api(name) { return require('./forge-' + name); }
 function contextFacts(context) { return api('native-host-request').assertOwnerContext(context); }
@@ -604,19 +611,42 @@ async function main(argv=process.argv.slice(2)) {
 // LIVE cooperative same-account boundary. HMAC authenticates the fixed enrolled
 // hook producer under this threat; it is neither kernel peer auth nor a sandbox.
 const LIVE_ID='claude-agent-files-foreground-v1',LIVE_DOMAIN='forge-native463-original-hook/v1';
-const CLAUDE_BINARY_SHA='345996b4bdbae21d817f750fae2f34cbf8d81224a5444c78136091d121beb298';
 const LIVE_PHASES=['pre','post','post-failure','permission-denied','subagent-start','subagent-stop','stop','session-end','config-change','pre-model-switch','post-model-switch'];
 const LIVE_OS_SCRIPT=String.raw`
 $ErrorActionPreference='Stop'
 try {
  $p=[Console]::In.ReadToEnd()|ConvertFrom-Json
  $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
- if($p.action -eq 'process'){
-  $v=Get-CimInstance Win32_Process -Filter ('ProcessId='+[int]$p.pid)
-  if(-not $v){throw 'process-missing'}
-  $s=Invoke-CimMethod -InputObject $v -MethodName GetOwnerSid
-  if($s.ReturnValue -ne 0){throw 'process-owner'}
-  @{pid=[int]$v.ProcessId;ppid=[int]$v.ParentProcessId;started=$v.CreationDate.ToUniversalTime().ToFileTimeUtc().ToString();exe=[string]$v.ExecutablePath;command_line=[string]$v.CommandLine;sid=[string]$s.Sid}|ConvertTo-Json -Compress
+ function Read-NativeValue($item){
+  if($item.action -ceq 'process'){
+   $v=Get-CimInstance Win32_Process -Filter ('ProcessId='+[int]$item.pid)
+   if(-not $v){throw 'process-missing'}
+   $s=Invoke-CimMethod -InputObject $v -MethodName GetOwnerSid
+   if($s.ReturnValue -ne 0){throw 'process-owner'}
+   return @{pid=[int]$v.ProcessId;ppid=[int]$v.ParentProcessId;started=$v.CreationDate.ToUniversalTime().ToFileTimeUtc().ToString();exe=[string]$v.ExecutablePath;command_line=[string]$v.CommandLine;sid=[string]$s.Sid}
+  }
+  if($item.action -cne 'acl'){throw 'action-invalid'}
+  $a=Get-Acl -LiteralPath $item.file
+  return @{owner=[string]$a.GetOwner([Security.Principal.SecurityIdentifier]).Value;current_user=[string]$sid.Value;protected=[bool]$a.AreAccessRulesProtected;rules=@($a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])|ForEach-Object{@{sid=[string]$_.IdentityReference.Value;kind=[string]$_.AccessControlType}})}
+ }
+ if($p.action -ceq 'pair'){
+  if((@($p.PSObject.Properties.Name|Sort-Object) -join ',') -cne 'action,items' -or $p.items -isnot [array] -or $p.items.Count -ne 2){throw 'pair-invalid'}
+  foreach($item in $p.items){
+   $keys=@($item.PSObject.Properties.Name|Sort-Object) -join ','
+   if($item.action -ceq 'process'){if($keys -cne 'action,pid' -or ($item.pid -isnot [int] -and $item.pid -isnot [long]) -or $item.pid -le 0){throw 'pair-invalid'}}
+   elseif($item.action -ceq 'acl'){if($keys -cne 'action,file' -or $item.file -isnot [string] -or -not $item.file){throw 'pair-invalid'}}else{throw 'pair-invalid'}
+  }
+  $encoded=@();for($i=0;$i -lt 2;$i++){
+   $item=$p.items[$i];$subject=if($item.action -ceq 'process'){$item.pid}else{$item.file}
+   try{$value=Read-NativeValue $item;$entry=@{index=$i;action=$item.action;subject=$subject;value=$value}}
+   catch{$entry=@{index=$i;action=$item.action;subject=$subject;error='native-host-os-observation-refused';exception_type=$_.Exception.GetType().FullName;hresult=$_.Exception.HResult}}
+   $raw=$entry|ConvertTo-Json -Depth 6 -Compress
+   if([Text.Encoding]::UTF8.GetByteCount($raw) -gt 7680){$raw=@{index=$i;action=$item.action;subject=$subject;error='native-host-os-item-overflow';exception_type=$null;hresult=$null}|ConvertTo-Json -Compress}
+   $encoded+=,$raw
+  }
+  [Console]::Out.WriteLine('{"kind":"native-host-os-pair-v1","items":['+($encoded -join ',')+']}')
+ }elseif($p.action -ceq 'process'){
+  Read-NativeValue $p|ConvertTo-Json -Compress
  }else{
   if($p.action -eq 'protect'){
    if(-not [IO.Directory]::Exists($p.file) -or [IO.Directory]::GetFileSystemEntries($p.file).Length -ne 0){throw 'empty-directory-required'}
@@ -624,8 +654,7 @@ try {
    [void]$a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,[Security.AccessControl.FileSystemRights]::FullControl,[Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit',[Security.AccessControl.PropagationFlags]::None,[Security.AccessControl.AccessControlType]::Allow))
    Set-Acl -LiteralPath $p.file -AclObject $a
   }elseif($p.action -ne 'acl'){throw 'action-invalid'}
-  $a=Get-Acl -LiteralPath $p.file
-  @{owner=[string]$a.GetOwner([Security.Principal.SecurityIdentifier]).Value;current_user=[string]$sid.Value;protected=[bool]$a.AreAccessRulesProtected;rules=@($a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])|ForEach-Object{@{sid=[string]$_.IdentityReference.Value;kind=[string]$_.AccessControlType}})}|ConvertTo-Json -Depth 4 -Compress
+  Read-NativeValue ([pscustomobject]@{action='acl';file=$p.file})|ConvertTo-Json -Depth 4 -Compress
  }
 }catch{@{error='native-host-os-observation-refused';exception_type=$_.Exception.GetType().FullName;hresult=$_.Exception.HResult;action=[string]$p.action}|ConvertTo-Json -Compress;exit 2}
 `;
@@ -635,25 +664,50 @@ function liveOS(packet){
  if(result.error||result.status!==0)throw Object.assign(new Error('native-host-os-observation-refused'),{code:'native-host-os-observation-refused',os_diagnostic:osFailureFacts(packet,result)});return parse(Buffer.from(result.stdout.replace(/^\uFEFF/,'')),16384);
 }
 function liveArgv(command){const out=[];let i=0;while(i<command.length){while(/\s/.test(command[i]||''))i++;if(i===command.length)break;let value='',q=false;while(i<command.length&&(q||!/\s/.test(command[i]))){let n=0;while(command[i]==='\\'){n++;i++;}if(command[i]==='"'){value+='\\'.repeat(n>>1);if(n%2)value+='"';else q=!q;i++;}else{value+='\\'.repeat(n);if(i<command.length)value+=command[i++];}}if(q)fail('native-host-live-argv');out.push(value);}return out;}
-function liveProcess(pid){if(!Number.isSafeInteger(pid)||pid<=0)fail('native-host-process-id');const p=liveOS({action:'process',pid});if(p.pid!==pid||!Number.isSafeInteger(p.ppid)||typeof p.started!=='string'||!/^\d+$/.test(p.started)||typeof p.sid!=='string'||typeof p.command_line!=='string')fail('native-host-process-observation');physical(p.exe);return p;}
-function liveACL(file,directory=false){physical(file,directory);const a=liveOS({action:'acl',file});if(a.owner!==a.current_user||directory&&!a.protected||!Array.isArray(a.rules)||!a.rules.length||a.rules.some(r=>r.sid!==a.current_user||r.kind!=='Allow'))fail('native-host-key-acl');return a;}
+function checkedProcess(pid,p){if(!plain(p)||p.pid!==pid||!Number.isSafeInteger(p.ppid)||typeof p.started!=='string'||!/^\d+$/.test(p.started)||typeof p.sid!=='string'||typeof p.command_line!=='string')fail('native-host-process-observation');physical(p.exe);return p;}
+function checkedACL(file,directory,a){if(!plain(a)||a.owner!==a.current_user||directory&&!a.protected||!Array.isArray(a.rules)||!a.rules.length||a.rules.some(r=>!plain(r)||r.sid!==a.current_user||r.kind!=='Allow'))fail('native-host-key-acl');return a;}
+function pairData(v,keys){return plain(v)&&Reflect.ownKeys(v).every(k=>typeof k==='string')&&Object.values(Object.getOwnPropertyDescriptors(v)).every(d=>Object.hasOwn(d,'value')&&d.enumerable)&&Object.keys(v).sort().join(',')===[...keys].sort().join(',');}
+function pairFailure(code,index,action,facts){return Object.assign(new Error(code),{code,stage:'native-host-bridge',os_diagnostic:safeOSDiagnostic({action,item_index:index,...facts})});}
+function livePair(items){
+ if(!Array.isArray(items)||Object.getPrototypeOf(items)!==Array.prototype||items.length!==2||[0,1].some(i=>!Object.hasOwn(Object.getOwnPropertyDescriptor(items,String(i))||{},'value')))fail('native-host-os-pair-request');
+ const packet={action:'pair',items:items.map(item=>{
+  if(!plain(item)||!Object.hasOwn(Object.getOwnPropertyDescriptor(item,'action')||{},'value'))fail('native-host-os-pair-request');
+  if(item.action==='process'){if(!pairData(item,['action','pid']))fail('native-host-os-pair-request');if(!Number.isSafeInteger(item.pid)||item.pid<=0)fail('native-host-process-id');return{action:'process',pid:item.pid};}
+  if(item.action==='acl'){const keys=Object.hasOwn(item,'directory')?['action','file','directory']:['action','file'];if(!pairData(item,keys)||Object.hasOwn(item,'directory')&&typeof item.directory!=='boolean')fail('native-host-os-pair-request');physical(item.file,item.directory===true);return{action:'acl',file:item.file};}
+  fail('native-host-os-pair-request');
+ })};
+ let response;try{response=liveOS(packet);}catch(error){if(error?.code==='native-host-live-os-unsupported')throw error;throw pairFailure('native-host-os-observation-refused',null,'pair',error.os_diagnostic||{});}
+ if(!pairData(response,['kind','items'])||response.kind!=='native-host-os-pair-v1'||!Array.isArray(response.items))throw pairFailure('native-host-os-pair-response',null,'pair');
+ if(response.items.length!==2){const index=Math.min(response.items.length,2);throw pairFailure('native-host-os-pair-response',index,packet.items[Math.min(index,1)].action);}
+ const values=[];for(let i=0;i<2;i++){
+  const entry=response.items[i],item=packet.items[i],subject=item.action==='process'?item.pid:item.file;
+  if(!plain(entry)||!pairData(entry,Object.hasOwn(entry,'value')?['index','action','subject','value']:['index','action','subject','error','exception_type','hresult'])||entry.index!==i||entry.action!==item.action||entry.subject!==subject)throw pairFailure('native-host-os-pair-response',i,item.action);
+  if(!Object.hasOwn(entry,'value')){if(typeof entry.error!=='string'||!/^[A-Za-z0-9_.-]{1,160}$/.test(entry.error)||!(entry.exception_type===null||typeof entry.exception_type==='string'&&/^[A-Za-z0-9_.-]{1,160}$/.test(entry.exception_type))||!(entry.hresult===null||Number.isSafeInteger(entry.hresult)))throw pairFailure('native-host-os-pair-response',i,item.action);throw pairFailure('native-host-os-observation-refused',i,item.action,{typed_error:entry.error,exception_type:entry.exception_type,hresult:entry.hresult});}
+  try{values.push(item.action==='process'?checkedProcess(item.pid,entry.value):checkedACL(item.file,items[i].directory===true,entry.value));}catch(error){throw pairFailure(error.code||'native-host-os-pair-response',i,item.action);}
+ }
+ return values;
+}
+function liveProcess(pid){if(!Number.isSafeInteger(pid)||pid<=0)fail('native-host-process-id');return checkedProcess(pid,liveOS({action:'process',pid}));}
+function liveACL(file,directory=false){physical(file,directory);return checkedACL(file,directory,liveOS({action:'acl',file}));}
 function originalHook(phase,hookSource){
  const hook=path.join(liveRuntimeHome(),'forge-hook.js'),main=require.main?.filename;
  const expected=phase==='session-start'?[process.execPath,hook,'session-start']:[process.execPath,hook,'native-live',phase];
  if(hookSource!==hook||!main||path.resolve(main)!==hook||process.execArgv.length||process.env.NODE_OPTIONS||process.env.NODE_PATH||process.argv.length!==expected.length||process.argv.some((v,i)=>v!==expected[i])||phase!=='session-start'&&!LIVE_PHASES.includes(phase))fail('native-host-original-hook-required');
  physical(hook);physical(main);
- const p=liveProcess(process.pid),parent=liveProcess(process.ppid),args=liveArgv(p.command_line);
+ const [p,parent]=livePair([{action:'process',pid:process.pid},{action:'process',pid:process.ppid}]),args=liveArgv(p.command_line);
  if(p.ppid!==parent.pid||p.sid!==parent.sid||args.length!==expected.length||args.some((v,i)=>i<2?path.resolve(v).toLowerCase()!==path.resolve(expected[i]).toLowerCase():v!==expected[i]))fail('native-host-hook-process-unproved');
- binaryPin(parent.exe,CLAUDE_BINARY_SHA);
  // In-memory argv is used only to refuse ambiguous source/mode overrides.
  if(liveArgv(parent.command_line).some(v=>/^--(?:agents|plugin-dir|agent|settings|setting-sources)(?:=|$)/.test(v)))fail('native-host-agent-source-override-unsupported');
- return{p,parent,hook,hook_sha256:hash(read(hook)),bridge_sha256:hash(read(__filename))};
+ const measured=binaryMeasure(parent.exe);let version;
+ if(phase==='session-start'){version=observeHostVersion(parent.exe);const after=binaryMeasure(parent.exe),current=liveProcess(parent.pid);if(measured.sha256!==after.sha256||nativeDigest(measured.identity)!==nativeDigest(after.identity)||['pid','started','exe','sid'].some(k=>current[k]!==parent[k]))fail('native-host-binary-version-unbound');}
+ else{try{version=api('native-host-profile').normalizeObservedHostVersion(process.env.FORGE_NATIVE_HOST_EXE_VERSION);}catch{fail('native-host-live-hook-binding');}}
+ return{p,parent,hook,hook_sha256:hash(read(hook)),bridge_sha256:hash(read(__filename)),exe_sha256:measured.sha256,exe_version:version};
 }
-// Shared LOWLEVEL packaging only. The caller supplies the lexical result of
-// originalHook for the ACTUAL event; this does not mint a SessionStart or actor.
+// Shared LOWLEVEL packaging only. Only the actual original SessionStart observes
+// the version; a later hook compares complete carrier data and fresh OS bytes.
 function originalHookBootstrap(who){
  const {parent,hook,hook_sha256}=who,config=liveRuntimeHome();
- return{schema_version:1,kind:'claude-hook-bootstrap',pid:parent.pid,started:parent.started,exe:parent.exe,exe_sha256:CLAUDE_BINARY_SHA,hook_source:hook,hook_sha256,config_dir:config};
+ return{schema_version:1,kind:'claude-hook-bootstrap',pid:parent.pid,started:parent.started,exe:parent.exe,exe_sha256:who.exe_sha256,exe_version:who.exe_version,hook_source:hook,hook_sha256,config_dir:config};
 }
 function collectOriginalHookBootstrap({hookSource}={}){
  return originalHookBootstrap(originalHook('session-start',hookSource));
@@ -661,7 +715,7 @@ function collectOriginalHookBootstrap({hookSource}={}){
 // DATA comparisons only. Neither this helper nor its output is a capability.
 function checkedHookCarrier(sessionId,bootstrap,env){
  if(typeof sessionId!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/.test(sessionId))fail('native-host-live-hook-binding');
- const expected=canonicalPrepareSessionValues({hostRuntime:'claude',sessionId},bootstrap),present=expected.filter(([key])=>Object.hasOwn(env,key));
+ let expected;try{expected=canonicalPrepareSessionValues({hostRuntime:'claude',sessionId},bootstrap);}catch{fail('native-host-live-hook-binding');}const present=expected.filter(([key])=>Object.hasOwn(env,key));
  if(present.length!==0&&present.length!==expected.length)fail('native-host-live-hook-binding');
  if(present.length)for(const[key,value]of expected){const descriptor=Object.getOwnPropertyDescriptor(env,key);if(!descriptor||!Object.hasOwn(descriptor,'value')||descriptor.value!==value)fail('native-host-live-hook-binding');}
  return{sessionId,pid:bootstrap.pid,started:bootstrap.started,source_kind:present.length?'sessionstart-env-current-os':'original-hook-current-os'};
@@ -673,18 +727,21 @@ function assertOriginalHookSession(sessionId,argv){
  // SDK session still binds the active reference and the original server below.
 }
 function originalHookBinding(who,raw){
- const measured=originalHookBootstrap(who),bootstrap={pid:measured.pid,started:measured.started,exe:measured.exe,exe_sha256:measured.exe_sha256,hook:measured.hook_source,hook_sha256:measured.hook_sha256,config:measured.config_dir};
+ const measured=originalHookBootstrap(who),bootstrap={pid:measured.pid,started:measured.started,exe:measured.exe,exe_sha256:measured.exe_sha256,exe_version:measured.exe_version,hook:measured.hook_source,hook_sha256:measured.hook_sha256,config:measured.config_dir};
  assertOriginalHookSession(raw.session_id,liveArgv(who.parent.command_line));
  return checkedHookCarrier(raw.session_id,bootstrap,process.env);
 }
 function liveBootstrap(facts){
  if(process.env.FORGE_NATIVE_HOST_BOOTSTRAP_SOURCE!=='claude-sessionstart-process-v1'||process.env.FORGE_CLAUDE_OWNER_SOURCE!=='claude-sessionstart-env-v1'||process.env.FORGE_CLAUDE_OWNER_SESSION_ID!==facts.actor.sessionId)fail('native-host-original-bootstrap-required');
- const pid=Number(process.env.FORGE_NATIVE_HOST_PID),p=liveProcess(pid),exe=physical(process.env.FORGE_NATIVE_HOST_EXE),hook=physical(process.env.FORGE_NATIVE_HOST_HOOK);
- if(p.started!==process.env.FORGE_NATIVE_HOST_STARTED||p.exe.toLowerCase()!==exe.toLowerCase()||process.env.FORGE_NATIVE_HOST_EXE_SHA256!==CLAUDE_BINARY_SHA||hook!==physical(path.join(liveRuntimeHome(),'forge-hook.js'))||hash(read(hook))!==process.env.FORGE_NATIVE_HOST_HOOK_SHA256)fail('native-host-bootstrap-changed');
- binaryPin(exe,CLAUDE_BINARY_SHA);if(liveArgv(p.command_line).some(v=>/^--(?:agents|plugin-dir|agent|settings|setting-sources)(?:=|$)/.test(v)))fail('native-host-agent-source-override-unsupported');
- const ownProcess=liveProcess(process.pid);if(p.sid!==ownProcess.sid)fail('native-host-bootstrap-os-identity');
+ const pid=Number(process.env.FORGE_NATIVE_HOST_PID),exe=physical(process.env.FORGE_NATIVE_HOST_EXE),hook=physical(process.env.FORGE_NATIVE_HOST_HOOK),expected=process.env.FORGE_NATIVE_HOST_EXE_SHA256;let version;
+ if(typeof expected!=='string'||!/^[a-f0-9]{64}$/.test(expected))fail('native-host-bootstrap-changed');
+ try{version=api('native-host-profile').normalizeObservedHostVersion(process.env.FORGE_NATIVE_HOST_EXE_VERSION);}catch{fail('native-host-bootstrap-version-invalid');}
+ const [p,ownProcess]=livePair([{action:'process',pid},{action:'process',pid:process.pid}]);
+ if(p.started!==process.env.FORGE_NATIVE_HOST_STARTED||p.exe.toLowerCase()!==exe.toLowerCase()||hook!==physical(path.join(liveRuntimeHome(),'forge-hook.js'))||hash(read(hook))!==process.env.FORGE_NATIVE_HOST_HOOK_SHA256)fail('native-host-bootstrap-changed');
+ binaryPin(exe,expected);if(liveArgv(p.command_line).some(v=>/^--(?:agents|plugin-dir|agent|settings|setting-sources)(?:=|$)/.test(v)))fail('native-host-agent-source-override-unsupported');
+ if(p.sid!==ownProcess.sid)fail('native-host-bootstrap-os-identity');
  const config=liveRuntimeHome();if(process.env.FORGE_NATIVE_HOST_CONFIG_DIR&&physical(path.resolve(process.env.FORGE_NATIVE_HOST_CONFIG_DIR),true)!==config)fail('native-host-bootstrap-config-changed');
- return{pid:p.pid,started:p.started,exe,exe_sha256:CLAUDE_BINARY_SHA,hook,hook_sha256:hash(read(hook)),sid_sha256:hash(p.sid),config};
+ return{pid:p.pid,started:p.started,exe,exe_sha256:expected,exe_version:version,hook,hook_sha256:hash(read(hook)),sid_sha256:hash(p.sid),config};
 }
 function liveSources(facts,bootstrap){
  const candidates=[path.join(bootstrap.config,'agents','forge-native-files.md'),...[facts.owner,...facts.execution_contract.code_roots.map(r=>r.path)].map(p=>path.join(p,'.claude','agents','forge-native-files.md'))];
@@ -697,11 +754,11 @@ function liveSources(facts,bootstrap){
  return{agent,agent_sha256:hash(raw),pins:files.map(file=>({file:physical(file),sha256:hash(read(file))}))};
 }
 function enrollLiveHost(context){const facts=contextFacts(context);if(facts.actor.hostRuntime!=='claude')fail('native-host-live-actor');const bootstrap=liveBootstrap(facts),sources=liveSources(facts,bootstrap),witness=own({}),capability=own({});
- const observation={schema_version:1,profile_id:LIVE_ID,host_session:facts.actor.sessionId,provenance:'observed-host',host_binary:{physical_path:bootstrap.exe,sha256:bootstrap.exe_sha256,observed_version:'2.1.322'},agent_definition:{agent_type:'forge-native-files',physical_path:sources.agent,sha256:sources.agent_sha256},effort_requested:facts.route.effort,model_requested:facts.route.model_resolved||facts.route.model};
+ const observation={schema_version:1,profile_id:LIVE_ID,host_session:facts.actor.sessionId,provenance:'observed-host',host_binary:{physical_path:bootstrap.exe,sha256:bootstrap.exe_sha256,observed_version:bootstrap.exe_version},agent_definition:{agent_type:'forge-native-files',physical_path:sources.agent,sha256:sources.agent_sha256},effort_requested:facts.route.effort,model_requested:facts.route.model_resolved||facts.route.model};
  const row={live:true,context,bootstrap,liveSources:sources,observation,capability,fixture:null,sources:[]};hostWitnesses.set(witness,row);capabilities.set(capability,row);return witness;}
 function currentLiveHost(row){const fresh=liveBootstrap(contextFacts(row.context));if(nativeDigest(fresh)!==nativeDigest(row.bootstrap))fail('native-host-bootstrap-changed');const sources=liveSources(contextFacts(row.context),fresh);if(nativeDigest(sources)!==nativeDigest(row.liveSources))fail('native-host-agent-source-changed');}
 function liveKeyDirectory(attempt){return path.join(fs.realpathSync.native(os.tmpdir()),'forge-native463-auth-'+id(attempt));}
-function liveKey(row){const dir=liveKeyDirectory(row.attempt),file=path.join(dir,'ingress.key');liveACL(dir,true);liveACL(file);const bytes=read(file,32);if(bytes.length!==32||hash(bytes)!==row.keySha)fail('native-host-key-changed');return copyBuffer(bytes);}
+function liveKey(row){const dir=liveKeyDirectory(row.attempt),file=path.join(dir,'ingress.key');livePair([{action:'acl',file:dir,directory:true},{action:'acl',file}]);const bytes=read(file,32);if(bytes.length!==32||hash(bytes)!==row.keySha)fail('native-host-key-changed');return copyBuffer(bytes);}
 function createLiveKey(row){const dir=liveKeyDirectory(row.attempt);if(rootList(contextFacts(row.context)).some(p=>inside(p,dir))||fs.existsSync(dir))fail('native-host-key-location');fs.mkdirSync(dir,{mode:0o700});liveOS({action:'protect',file:dir});liveACL(dir,true);const key=Buffer.alloc(32);crypto.randomFillSync(key);try{fs.writeFileSync(path.join(dir,'ingress.key'),key,{flag:'wx',mode:0o600});row.keySha=hash(key);liveKey(row).fill(0);}finally{key.fill(0);}}
 function liveWindow(row){const value=api('owner-transport-window').observed(contextFacts(row.context).owner),b=value?.binding;if(!b||b.dispatch_id!==row.dispatch||b.request_sha256!==nativeDigest(api('native-host-request').readExecutionRequest(row.requestHandle))||b.host_session_sha256!==nativeDigest(row.enrollment.observation.host_session)||nativeDigest(b.native_host_relay)!==nativeDigest(liveRelayReference(row)))fail('native-host-live-window-required');return value;}
 function liveRelayReference(row){return{protocol_version:1,kind:'native-host-live-relay',directory:row.directory,endpoint:endpoint(row.directory),attempt_id:row.attempt,dispatch_id:row.dispatch,request_sha256:nativeDigest(api('native-host-request').readExecutionRequest(row.requestHandle)),host_session_sha256:nativeDigest(row.enrollment.observation.host_session),profile_id:LIVE_ID};}
@@ -730,7 +787,7 @@ function unverifiedPrechallengeRefusal(value){
 }
 function macLive(key,authentication){return crypto.createHmac('sha256',key).update(Buffer.from(LIVE_DOMAIN+'\n'+JSON.stringify(stable(authentication)))).digest();}
 function checkLiveMac(key,a,mac){if(typeof mac!=='string'||!/^[a-f0-9]{64}$/.test(mac))fail('native-host-live-mac');const actual=Buffer.from(mac,'hex'),expected=macLive(key,a);if(!crypto.timingSafeEqual(actual,expected))fail('native-host-live-mac');}
-function verifyLiveSender(row,sender,phase){closed(sender,['pid','started','exe_sha256','hook_sha256','bridge_sha256','argv_sha256'],'native-host-live-sender');const p=liveProcess(sender.pid),host=liveProcess(row.enrollment.bootstrap.pid),expected=[process.execPath,row.enrollment.bootstrap.hook,'native-live',phase],argv=liveArgv(p.command_line);
+function verifyLiveSender(row,sender,phase){closed(sender,['pid','started','exe_sha256','hook_sha256','bridge_sha256','argv_sha256'],'native-host-live-sender');const [p,host]=livePair([{action:'process',pid:sender.pid},{action:'process',pid:row.enrollment.bootstrap.pid}]),expected=[process.execPath,row.enrollment.bootstrap.hook,'native-live',phase],argv=liveArgv(p.command_line);
  if(p.ppid!==host.pid||p.started!==sender.started||host.started!==row.enrollment.bootstrap.started||hash(p.sid)!==row.enrollment.bootstrap.sid_sha256||hash(host.sid)!==row.enrollment.bootstrap.sid_sha256||sender.hook_sha256!==row.enrollment.bootstrap.hook_sha256||hash(read(__filename))!==sender.bridge_sha256||hash(read(expected[1]))!==sender.hook_sha256||nativeDigest(expected)!==sender.argv_sha256||argv.length!==expected.length||argv.some((v,i)=>i<2?path.resolve(v).toLowerCase()!==path.resolve(expected[i]).toLowerCase():v!==expected[i]))fail('native-host-live-signer-unproved');binaryPin(p.exe,sender.exe_sha256);binaryPin(host.exe,row.enrollment.bootstrap.exe_sha256);}
 function liveBinding(row,window){const facts=contextFacts(row.context);return{attempt_id:row.attempt,actor_sha256:nativeDigest(facts.actor),session_sha256:nativeDigest(facts.actor.sessionId),window_sha256:window.sha256,request_sha256:nativeDigest(api('native-host-request').readExecutionRequest(row.requestHandle)),dispatch_id:row.dispatch};}
 function liveHookOutput(phase,allowed){return phase==='pre'?{hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:allowed?'allow':'deny',permissionDecisionReason:allowed?'Native files profile admitted':'Native files profile refused'}}:{};}
@@ -765,7 +822,7 @@ async function relayCurrentHostHook({owner,phase,capture,hookSource}={}){
  const observed=api('owner-transport-window').observed(owner),ref=observed?.binding?.native_host_relay;if(!ref)return{exit_code:0,hook_output:{}};
  if(typeof capture!=='string'||Buffer.byteLength(capture)>LIMIT.body||!LIVE_PHASES.includes(phase))fail('native-host-live-capture-bound');
  const who=originalHook(phase,hookSource),raw=parse(Buffer.from(capture),LIMIT.body),carrier=originalHookBinding(who,raw);if(raw.session_id!==carrier.sessionId||nativeDigest(raw.session_id)!==ref.host_session_sha256||who.parent.pid!==carrier.pid||who.parent.started!==carrier.started||ref.profile_id!==LIVE_ID||ref.endpoint!==endpoint(physical(ref.directory,true)))fail('native-host-live-hook-binding');
- const keyDir=liveKeyDirectory(ref.attempt_id);liveACL(keyDir,true);liveACL(path.join(keyDir,'ingress.key'));const key=copyBuffer(read(path.join(keyDir,'ingress.key'),32));if(key.length!==32)fail('native-host-key-length');
+ const keyDir=liveKeyDirectory(ref.attempt_id);livePair([{action:'acl',file:keyDir,directory:true},{action:'acl',file:path.join(keyDir,'ingress.key')}]);const key=copyBuffer(read(path.join(keyDir,'ingress.key'),32));if(key.length!==32)fail('native-host-key-length');
  try{return await new Promise((resolve,reject)=>{const socket=net.connect(ref.endpoint);let buffer=Buffer.alloc(0),sent=false,done=false;socket.setTimeout(20000,()=>socket.destroy(Object.assign(Error('native-host-live-ipc-cap'),{code:'native-host-live-ipc-cap',ipc_diagnostic:{schema_version:1,stage:sent?'envelope-queued':'envelope-not-queued'}})));socket.once('connect',()=>socket.write(json({protocol_version:1,kind:'live-hook',phase})));
   let issued;const readyState={};socket.on('data',chunk=>{try{buffer=Buffer.concat([buffer,chunk]);if(buffer.length>LIMIT.header*2)fail('native-host-live-ack-bound');let at;while((at=buffer.indexOf(10))>=0){const value=parse(buffer.subarray(0,at),LIMIT.header);buffer=buffer.subarray(at+1);if(!sent){const early=unverifiedPrechallengeRefusal(value);if(early)throw early;const {server_mac,...unsigned}=value;checkLiveMac(key,{domain:LIVE_DOMAIN+'/challenge',...unsigned},server_mac);if(value.kind!=='native-host-live-challenge'||value.binding.attempt_id!==ref.attempt_id||value.binding.dispatch_id!==ref.dispatch_id||value.binding.request_sha256!==ref.request_sha256||value.binding.session_sha256!==ref.host_session_sha256||value.binding.window_sha256!==observed.sha256)fail('native-host-live-challenge');issued=value;const a={domain:LIVE_DOMAIN,binding:value.binding,sequence:value.sequence,nonce:value.nonce,phase,raw_sha256:hash(Buffer.from(capture)),raw_bytes:Buffer.byteLength(capture),sender:{pid:who.p.pid,started:who.p.started,exe_sha256:hash(read(process.execPath,128*1024*1024)),hook_sha256:who.hook_sha256,bridge_sha256:who.bridge_sha256,argv_sha256:nativeDigest(process.argv)}};socket.write(json({authentication:a,capture,mac:macLive(key,a).toString('hex')}));sent=true;}else{const {server_mac,...response}=value;checkLiveMac(key,{domain:LIVE_DOMAIN+'/ack',nonce:issued.nonce,sequence:issued.sequence,response},server_mac);if(value.ack==='live-completion-pending'){if(phase!=='post'||readyState.pending)fail('native-host-live-ack-order');readyState.pending=true;socket.setTimeout(0);continue;}if(['live-ready','live-ready-confirmed'].includes(value.ack)){if(!readyState.pending||phase!=='post')fail('native-host-live-ack-order');if(!receiveReadyFrame(socket,key,issued,value,readyState))continue;done=true;resolve({exit_code:0,hook_output:value.hook_output});socket.end();continue;}if(!['live-retained','refused'].includes(value.ack))fail('native-host-live-ack');done=true;resolve({exit_code:value.ack==='live-retained'?0:2,hook_output:value.hook_output||liveHookOutput(phase,false)});socket.end();}}}catch(error){socket.destroy(error);}});socket.once('error',reject);socket.once('close',()=>{if(!done)reject(Object.assign(Error('native-host-live-owner-unavailable'),{code:'native-host-live-owner-unavailable'}));});});}finally{key.fill(0);}
 }
@@ -789,15 +846,15 @@ function serveLiveControl(row,socket,first){
 }
 
 function liveControlClient(ref,command){
- if(require.main!==module||process.execArgv.length||process.env.NODE_OPTIONS||process.env.NODE_PATH)fail('native-host-original-control-main-required');const expected=[process.execPath,__filename,command,'--attempt',process.argv[4]];if(process.argv.length!==5||process.argv.some((v,i)=>v!==expected[i]))fail('native-host-original-control-argv');const self=liveProcess(process.pid),keyDir=liveKeyDirectory(ref.attempt_id);liveACL(keyDir,true);liveACL(path.join(keyDir,'ingress.key'));const key=copyBuffer(read(path.join(keyDir,'ingress.key'),32));if(key.length!==32)fail('native-host-key-length');
+ if(require.main!==module||process.execArgv.length||process.env.NODE_OPTIONS||process.env.NODE_PATH)fail('native-host-original-control-main-required');const expected=[process.execPath,__filename,command,'--attempt',process.argv[4]];if(process.argv.length!==5||process.argv.some((v,i)=>v!==expected[i]))fail('native-host-original-control-argv');const self=liveProcess(process.pid),keyDir=liveKeyDirectory(ref.attempt_id);livePair([{action:'acl',file:keyDir,directory:true},{action:'acl',file:path.join(keyDir,'ingress.key')}]);const key=copyBuffer(read(path.join(keyDir,'ingress.key'),32));if(key.length!==32)fail('native-host-key-length');
  return new Promise((resolve,reject)=>{const socket=net.connect(ref.endpoint);let buffer=Buffer.alloc(0),issued=null,done=false;const readyState={};socket.setTimeout(20000,()=>socket.destroy(Object.assign(Error('native-host-live-ipc-cap'),{code:'native-host-live-ipc-cap'})));socket.once('connect',()=>socket.write(json({protocol_version:1,kind:'live-control',command})));socket.on('data',chunk=>{try{buffer=Buffer.concat([buffer,chunk]);if(buffer.length>LIMIT.header*2)fail('native-host-live-ack-bound');let at;while((at=buffer.indexOf(10))>=0){const value=parse(buffer.subarray(0,at),LIMIT.header);buffer=buffer.subarray(at+1);const {server_mac,...unsigned}=value;if(!issued){const early=unverifiedPrechallengeRefusal(value);if(early)throw early;checkLiveMac(key,{domain:LIVE_DOMAIN+'/challenge',...unsigned},server_mac);if(value.kind!=='native-host-live-control-challenge'||value.command!==command||value.binding.attempt_id!==ref.attempt_id||value.binding.dispatch_id!==ref.dispatch_id||value.binding.request_sha256!==ref.request_sha256||value.binding.session_sha256!==ref.host_session_sha256)fail('native-host-live-control-challenge');issued=value;const a={domain:LIVE_DOMAIN+'/control',binding:value.binding,nonce:value.nonce,sequence:value.sequence,command,tool_use_id:value.tool_use_id,sender:{pid:self.pid,started:self.started,exe_sha256:hash(read(process.execPath,128*1024*1024)),bridge_sha256:hash(read(__filename)),argv_sha256:nativeDigest(process.argv),host_session_sha256:nativeDigest(process.env.FORGE_CLAUDE_OWNER_SESSION_ID||'')}};socket.write(json({authentication:a,mac:macLive(key,a).toString('hex')}));}else{checkLiveMac(key,{domain:LIVE_DOMAIN+'/ack',nonce:issued.nonce,sequence:issued.sequence,response:unsigned},server_mac);if(value.ack==='refused')throw Object.assign(new Error(value.error.code),value.error);if(['live-ready','live-ready-confirmed'].includes(value.ack)){if(command!=='status')fail('native-host-live-control-ack');if(!receiveReadyFrame(socket,key,issued,value,readyState))continue;done=true;resolve({...unsigned,phase:'ready',ready:true});socket.end();continue;}if(value.ack!=='live-control-retained')fail('native-host-live-control-ack');done=true;resolve(unsigned);socket.end();}}}catch(error){socket.destroy(error);}});socket.once('error',reject);socket.once('close',()=>{key.fill(0);if(!done)reject(Object.assign(Error('native-host-owner-unavailable'),{code:'native-host-owner-unavailable'}));});});
 }
 
 
 function liveRuntimeHome(){const options=typeof process.env.CLAUDE_CONFIG_DIR==='string'&&process.env.CLAUDE_CONFIG_DIR.trim()?{claudeHome:process.env.CLAUDE_CONFIG_DIR}:{};return physical(api('home').resolveRuntimeHome('claude',options),true);}
 function liveHistoricalStatusAllowed(command,error){return command==='status'&&['ENOENT','ECONNREFUSED','native-host-owner-unavailable'].includes(error?.code);}
-function safeOSDiagnostic(v){if(!plain(v))return null;const result={};for(const key of ['action','spawn_code','signal','typed_error','exception_type'])if(v[key]===null)result[key]=null;else if(typeof v[key]==='string'&&/^[A-Za-z0-9_.-]{1,160}$/.test(v[key]))result[key]=v[key];for(const key of ['status','hresult','stderr_captured_bytes','stdout_captured_bytes'])if(v[key]===null)result[key]=null;else if(Number.isSafeInteger(v[key]))result[key]=v[key];for(const key of ['stderr_captured_sha256','stdout_captured_sha256'])if(typeof v[key]==='string'&&/^[a-f0-9]{64}$/.test(v[key]))result[key]=v[key];if(typeof v.stderr_may_be_truncated==='boolean')result.stderr_may_be_truncated=v.stderr_may_be_truncated;return Object.keys(result).length?result:null;}
-function osFailureFacts(packet,result){let observed=null;try{if(typeof result.stdout==='string'&&Buffer.byteLength(result.stdout)<=16384)observed=JSON.parse(result.stdout);}catch{}const stderr=typeof result.stderr==='string'?Buffer.from(result.stderr):Buffer.isBuffer(result.stderr)?result.stderr:Buffer.alloc(0);return safeOSDiagnostic({action:['process','acl','protect'].includes(packet.action)?packet.action:'unknown',status:Number.isSafeInteger(result.status)?result.status:null,signal:result.signal||null,spawn_code:result.error?.code||null,typed_error:observed?.error,exception_type:observed?.exception_type,hresult:observed?.hresult,stderr_captured_bytes:stderr.length,stderr_captured_sha256:hash(stderr),stderr_may_be_truncated:result.error?.code==='ENOBUFS'});}
+function safeOSDiagnostic(v){if(!plain(v))return null;const result={};for(const key of ['action','spawn_code','signal','typed_error','exception_type'])if(v[key]===null)result[key]=null;else if(typeof v[key]==='string'&&/^[A-Za-z0-9_.-]{1,160}$/.test(v[key]))result[key]=v[key];for(const key of ['status','hresult','stderr_captured_bytes','stdout_captured_bytes'])if(v[key]===null)result[key]=null;else if(Number.isSafeInteger(v[key]))result[key]=v[key];for(const key of ['stderr_captured_sha256','stdout_captured_sha256'])if(typeof v[key]==='string'&&/^[a-f0-9]{64}$/.test(v[key]))result[key]=v[key];if(v.item_index===null||Number.isSafeInteger(v.item_index)&&v.item_index>=0&&v.item_index<=2)result.item_index=v.item_index;if(typeof v.stderr_may_be_truncated==='boolean')result.stderr_may_be_truncated=v.stderr_may_be_truncated;return Object.keys(result).length?result:null;}
+function osFailureFacts(packet,result){let observed=null;try{if(typeof result.stdout==='string'&&Buffer.byteLength(result.stdout)<=16384)observed=JSON.parse(result.stdout);}catch{}const stderr=typeof result.stderr==='string'?Buffer.from(result.stderr):Buffer.isBuffer(result.stderr)?result.stderr:Buffer.alloc(0);return safeOSDiagnostic({action:['process','acl','protect','pair','version'].includes(packet.action)?packet.action:'unknown',status:Number.isSafeInteger(result.status)?result.status:null,signal:result.signal||null,spawn_code:result.error?.code||null,typed_error:observed?.error,exception_type:observed?.exception_type,hresult:observed?.hresult,stderr_captured_bytes:stderr.length,stderr_captured_sha256:hash(stderr),stderr_may_be_truncated:result.error?.code==='ENOBUFS'});}
 
 // Pure command classification is DATA, not an admission/capability producer.
 function initialPathKey(file){const p=path.resolve(file);return process.platform==='win32'?p.toLowerCase():p;}
@@ -825,6 +882,7 @@ function observedMSYSPath(value){
 // serialization, not enrollment: only measureOriginalPrepare supplies live facts.
 function canonicalPrepareSessionValues(actor,bootstrap){
  if(actor?.hostRuntime!=='claude'||!Number.isSafeInteger(bootstrap?.pid)||bootstrap.pid<1||typeof bootstrap.started!=='string'||!/^\d{1,128}$/.test(bootstrap.started)||![bootstrap.exe_sha256,bootstrap.hook_sha256].every(v=>typeof v==='string'&&/^[a-f0-9]{64}$/.test(v))||![bootstrap.exe,bootstrap.hook,bootstrap.config].every(v=>typeof v==='string'&&path.isAbsolute(v)))fail('native-host-prepare-session-exports');
+ let version;try{version=api('native-host-profile').normalizeObservedHostVersion(bootstrap.exe_version);}catch{fail('native-host-prepare-session-exports');}
  const values=[
   ['FORGE_CLAUDE_OWNER_SESSION_ID',actor.sessionId],
   ['FORGE_CLAUDE_OWNER_SOURCE','claude-sessionstart-env-v1'],
@@ -832,6 +890,7 @@ function canonicalPrepareSessionValues(actor,bootstrap){
   ['FORGE_NATIVE_HOST_STARTED',bootstrap.started],
   ['FORGE_NATIVE_HOST_EXE',bootstrap.exe],
   ['FORGE_NATIVE_HOST_EXE_SHA256',bootstrap.exe_sha256],
+  ['FORGE_NATIVE_HOST_EXE_VERSION',version],
   ['FORGE_NATIVE_HOST_HOOK',bootstrap.hook],
   ['FORGE_NATIVE_HOST_HOOK_SHA256',bootstrap.hook_sha256],
   ['FORGE_NATIVE_HOST_CONFIG_DIR',bootstrap.config],
@@ -911,7 +970,7 @@ function assertInitialPrepareTimeout(value,expected){
 function measureOriginalPrepare(enrollment,inputFile){
  const expectedOwner=[process.execPath,__filename,'owner','--input',inputFile];if(require.main!==module||!process.send||process.execArgv.length||process.env.NODE_OPTIONS||process.env.NODE_PATH||process.argv.length!==expectedOwner.length||process.argv.some((v,i)=>v!==expectedOwner[i]))fail('native-host-original-prepare-factory-required');
  currentLiveHost(enrollment);
- physical(inputFile);const owner=liveProcess(process.pid),parent=liveProcess(process.ppid),expected=[process.execPath,__filename,'prepare','--input',inputFile],actual=liveArgv(parent.command_line),facts=contextFacts(enrollment.context);
+ physical(inputFile);const [owner,parent]=livePair([{action:'process',pid:process.pid},{action:'process',pid:process.ppid}]),expected=[process.execPath,__filename,'prepare','--input',inputFile],actual=liveArgv(parent.command_line),facts=contextFacts(enrollment.context);
  if(parent.pid!==owner.ppid||hash(parent.sid)!==enrollment.bootstrap.sid_sha256||owner.sid!==parent.sid||actual.length!==expected.length||actual.some((v,i)=>i<2||i===4?initialPathKey(v)!==initialPathKey(expected[i]):v!==expected[i]))fail('native-host-original-prepare-process');binaryPin(parent.exe,hash(read(process.execPath,128*1024*1024)));
  const proof={context:enrollment.context,input:physical(inputFile),input_sha256:hash(read(inputFile)),node_exe:physical(parent.exe),node_pid:parent.pid,node_started:parent.started,argv_sha256:nativeDigest(expected),source_sha256:hash(read(__filename)),binding_sha256:originalPrepareBinding(facts),prepare_timeout_ms:prepareBudgetForFacts(facts).prepare_timeout_ms,session_exports:canonicalPrepareSessionExports(facts.actor,enrollment.bootstrap),consumed:false};
  // Measure every still-live shell between the original prepare and Claude.

@@ -41,7 +41,7 @@ function createOwnerFixture({root=null,legacy=false,workflow='M901',mode='step',
  return{...f,milestone,workflow,base,planFile,input,begin,key,securityFile,securityScan,securitySha256};
 }
 module.exports={createOwnerFixture};
-function main(){
+function main({autoOnly=false}={}){
 const saved={...process.env},privateRoot=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'forge-native463-request-'))),marker=crypto.randomBytes(16).toString('hex');
 fs.writeFileSync(path.join(privateRoot,'OWNED'),marker);
 for(const [key,rel]of Object.entries({HOME:'home',USERPROFILE:'home',CODEX_HOME:'home/codex',CLAUDE_CONFIG_DIR:'home/claude',FORGE_HOME:'forge'})){process.env[key]=path.join(privateRoot,rel);fs.mkdirSync(process.env[key],{recursive:true});}
@@ -63,7 +63,22 @@ const accounts=require('./forge-accounts'),oldLaunch=accounts.resolveLaunch;acco
 const request=require('./forge-native-host-request'),controller=require('./forge-unit-controller'),runs=require('./forge-runs'),claims=require('./forge-write-claim'),questions=require('./forge-pending-questions'),lab=require('./forge-code-roots.test');
 const fixture=options=>createOwnerFixture(options);
 function code(name,fn){assert.throws(fn,error=>typeof error.code==='string'&&error.code.includes(name));}
+function assertAutoPlanGateOwner(){const auto=fixture({mode:'auto'});try{
+ const gateFile=auto.planFile.replace('-PLAN.md','-PLAN-GATE.md');fs.unlinkSync(gateFile);
+ const context=request.buildOwnerContext(auto.input),facts=request.assertOwnerContext(context),adapters=request.ownerAdapters(context);
+ assert.equal(facts.gates.plan,'skipped');assert.equal(facts.gates.planSkipReason,'auto-defer');
+ assert.equal(facts.gates.authorizationReference,'native-host-auto/'+auto.input.expected_begin_sha256);
+ assert.equal(fs.existsSync(gateFile),false,'auto creates no human approval marker');
+ assert(adapters.executionPlanGate&&Object.isFrozen(adapters.executionPlanGate));
+ const execution=require('./forge-task-execution'),r={phase:'execute',scope:'milestone',unitType:'execute-task',cwd:facts.execution_contract.code_roots.find(v=>v.id===facts.execution_contract.primary_root_id).path,contextRoot:facts.owner,milestoneId:facts.milestone_id,sliceId:facts.slice_id,taskId:facts.task_id,workflowId:facts.workflow_id,dispatchId:'unissued-fixture-dispatch',route:facts.route,planFile:facts.plan_file,execution_contract:facts.execution_contract,gates:facts.gates};
+ code('auto-plan-gate-request-required',()=>execution.withAutoPlanGateAdapterSync(adapters.executionPlanGate,r,()=>assert.fail('unissued channel must not grant execution')));
+ for(const foreign of [{},JSON.parse(JSON.stringify(adapters.executionPlanGate))])code('auto-gate-adapter-required',()=>execution.withAutoPlanGateAdapterSync(foreign,r,()=>assert.fail('JSON is not gate authority')));
+ put(auto.planFile,fs.readFileSync(auto.planFile,'utf8')+'\nChanged plan after adapter production.\n');
+ assert.throws(()=>request.ownerAdapters(context),'current plan drift refuses the old context');
+ }finally{auto.cleanup();}}
+
 try{
+ if(autoOnly){assertAutoPlanGateOwner();console.log('forge-native-host-request auto owner context/closed adapter regressions passed; full-channel positive remains integration evidence');return;}
  const f=fixture();try{
   const context=request.buildOwnerContext(f.input),one=request.assertOwnerContext(context),two=request.assertOwnerContext(context);
   assert.deepEqual(two,one,'complete real canonical owner and route remain stable');
@@ -144,7 +159,7 @@ try{
    put(security.planFile.replace('-PLAN.md','-SECURITY.md'),checklist.replace('\u2014','?'));
    code('security-checklist-unready',()=>request.buildOwnerContext(security.input));
  }finally{security.cleanup();}}
- const auto=fixture({mode:'auto'});try{fs.unlinkSync(auto.planFile.replace('-PLAN.md','-PLAN-GATE.md'));code('auto-plan-gate-producer-unavailable',()=>request.buildOwnerContext(auto.input));}finally{auto.cleanup();}
+ assertAutoPlanGateOwner();
  const legacy=fixture({legacy:true});try{code('workflow-binding-unavailable',()=>request.buildOwnerContext(legacy.input));assert(!Object.hasOwn(controller.lookupRecord(legacy.owner,'transaction',legacy.key),'workflow_binding'));}finally{legacy.cleanup();}
  for(const workflow of ['fluxo-corre\u00e7\u00e3o-\u6e2c\u8a66','fluxo-correc\u0327a\u0303o-\u6e2c\u8a66']){const unicode=fixture({workflow});try{
   const bytes=fs.readFileSync(controller.transactionFile(unicode.owner,unicode.key));
@@ -159,4 +174,4 @@ try{
 }
 
 }
-if(require.main===module)main();
+if(require.main===module){const args=process.argv.slice(2);assert(args.length===0||args.length===1&&args[0]==='--auto-plan-gate-only','unknown request test selector');main({autoOnly:args.length===1});}

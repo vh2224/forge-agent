@@ -370,6 +370,7 @@
     "forge-issues-457-458-distribution.ci-distribution-v1-12-of-13.test.js",
     "forge-issues-457-458-distribution.ci-distribution-v1-13-of-13.test.js",
     "forge-issues-457-458-integration.test.js",
+    "forge-issues-480-471.test.js",
     "forge-items.test.js",
     "forge-jsonl.test.js",
     "forge-keychain-diagnostics.test.js",
@@ -700,7 +701,7 @@
     "run-tests-changed.test.js",
     "run-tests-shards.test.js"
   ],
-  "universe_sha256": "41f2de558e892c2b7f4ec64634afd306973a571dc0f1de706f0f3bced4b0d01a",
+  "universe_sha256": "36990485a3e43800aa9c654a00417de0aa0c103f0b5e3e3ec7cd54b2014378a0",
   "retired_ids": [
     "forge-communication-surfaces.ci-01-of-4.test.js",
     "forge-communication-surfaces.ci-02-of-4.test.js",
@@ -1411,7 +1412,8 @@
       "merge-settings.test.js": 3928,
       "run-tests-changed.test.js": 61,
       "run-tests-shards.test.js": 6483,
-      "forge-sidecar-verification-policy-correction.test.js": 82921
+      "forge-sidecar-verification-policy-correction.test.js": 82921,
+      "forge-issues-480-471.test.js": 10000
     },
     "darwin": {
       "forge-accounts.test.js": 1531,
@@ -2110,7 +2112,8 @@
       "merge-settings.test.js": 1784,
       "run-tests-changed.test.js": 55,
       "run-tests-shards.test.js": 5268,
-      "forge-sidecar-verification-policy-correction.test.js": 21517
+      "forge-sidecar-verification-policy-correction.test.js": 21517,
+      "forge-issues-480-471.test.js": 10000
     },
     "linux": {
       "forge-accounts.test.js": 589,
@@ -2809,13 +2812,14 @@
       "merge-settings.test.js": 2229,
       "run-tests-changed.test.js": 45,
       "run-tests-shards.test.js": 4075,
-      "forge-sidecar-verification-policy-correction.test.js": 13569
+      "forge-sidecar-verification-policy-correction.test.js": 13569,
+      "forge-issues-480-471.test.js": 10000
     }
   },
   "provenance": {
     "kind": "planning-estimates-not-observed-profile",
     "source": "MEASURED-WEIGHTS.json",
     "source_sha256": "69be548e0245c39459188d98a7491a50b37a8b8e7cf76777ce796be1fb471b2a",
-    "qualification": "Exact 696-unit per-platform costs extracted from M2 CI run45768330771 attempt1; macOS18 missing profile recovered from preserved real PASS log durations at 0.01-second precision. Prior execution evidence, not new head PASS or an upper bound; directly changed CI/release tests remain estimates. Immutable observed601 base unchanged. Layout5/5/10 jobs with3 isolated workers (15/15/30 weighted-LPT lanes), not assignments from old64/80/96 layout. Queue/setup/three-worker CPU sensitivity is represented in the separate historical capacity replay; one real candidate CI verifies behavior. PR499 adds one verification-policy-correction suite (current universe697); only that new suite uses the existing verification-successor per-platform cost as an explicit planning estimate, not an observed run or upper bound. All original696 costs, observed601 profile, matrix layout and execution evidence remain unchanged."
+    "qualification": "Exact 696-unit per-platform costs extracted from M2 CI run45768330771 attempt1; macOS18 missing profile recovered from preserved real PASS log durations at 0.01-second precision. Prior execution evidence, not new head PASS or an upper bound; directly changed CI/release tests remain estimates. Immutable observed601 base unchanged. Layout5/5/10 jobs with3 isolated workers (15/15/30 weighted-LPT lanes), not assignments from old64/80/96 layout. Queue/setup/three-worker CPU sensitivity is represented in the separate historical capacity replay; one real candidate CI verifies behavior. PR499 adds one verification-policy-correction suite (current universe697); only that new suite uses the existing verification-successor per-platform cost as an explicit planning estimate, not an observed run or upper bound. All original696 costs, observed601 profile, matrix layout and execution evidence remain unchanged. Native intermediate draft adds only forge-issues-480-471.test.js to the actual698-unit universe; its10000ms per-platform cost is an explicit planning estimate, not a hosted observation/upper bound. Prior697 costs,601 observed profile, retired IDs and CI topology remain unchanged. I6/docs acceptance is pending."
   }
 }

@@ -56,11 +56,28 @@ try{
   }
   if(process.env.TEST_REPLY==='bad')return{exit_code:0,hook_output:[]};return{exit_code:Number(process.env.TEST_REPLY||0),hook_output:{}};
  };
- exports.collectOriginalHookBootstrap=function(){if(process.env.TEST_BOOTSTRAP==='throw')throw Object.assign(Error('fixture unavailable'),{code:'native-host-os-observation-refused',os_diagnostic:{action:'process',status:2,spawn_code:null,signal:null,typed_error:'native-host-os-observation-refused',exception_type:'System.InvalidOperationException',hresult:-1,stderr_captured_bytes:0,stderr_captured_sha256:'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',stderr_may_be_truncated:false,unexpected_field:{unsupported:true}}});return {schema_version:1,kind:'claude-hook-bootstrap',pid:process.pid,started:"fixture-start'quoted",exe:process.execPath,exe_sha256:'a'.repeat(64),hook_source:__filename,hook_sha256:'b'.repeat(64),config_dir:process.env.CLAUDE_CONFIG_DIR};};
+ exports.collectOriginalHookBootstrap=function(){
+  const mode=process.env.TEST_BOOTSTRAP;
+  if(mode==='throw'||mode==='pair-item')throw Object.assign(Error('fixture unavailable'),{code:'native-host-os-observation-refused',os_diagnostic:{action:'process',status:2,spawn_code:null,signal:null,typed_error:'native-host-os-observation-refused',exception_type:'System.InvalidOperationException',hresult:-1,stderr_captured_bytes:0,stderr_captured_sha256:'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',stderr_may_be_truncated:false,...(mode==='pair-item'?{item_index:1}:{}),unexpected_field:{unsupported:true}}});
+  const value={schema_version:1,kind:'claude-hook-bootstrap',pid:mode==='ok'?process.pid:321,started:mode==='ok'?"fixture-start'quoted":'123456789012345678',exe:process.execPath,exe_sha256:'a'.repeat(64),exe_version:'3.2.41',hook_source:__filename,hook_sha256:'b'.repeat(64),config_dir:process.env.CLAUDE_CONFIG_DIR};
+  if(mode==='other-pid')value.pid=322;
+  if(mode==='other-started')value.started='123456789012345679';
+  if(mode==='other-sha')value.exe_sha256='c'.repeat(64);
+  if(mode==='other-hook-sha')value.hook_sha256='d'.repeat(64);
+  if(mode==='other-version')value.exe_version='3.2.42';
+  if(mode==='other-exe')value.exe=require('path').join(require('path').dirname(process.execPath),'fixture-other.exe');
+  if(mode==='other-config')value.config_dir=require('path').join(process.env.CLAUDE_CONFIG_DIR,'other');
+  if(mode==='bad-version')value.exe_version='03.2.41';
+  if(mode==='extra-field')value.raw='PRIVATE_BOOTSTRAP_MUST_NOT_ESCAPE';
+  if(mode==='missing-version')delete value.exe_version;
+  if(mode==='digest-object')value.exe_sha256={get toString(){fs.writeFileSync(process.env.TEST_GETTER_CAPTURE,'getter-read');return()=> 'a'.repeat(64);}};
+  return value;
+ };
  `);
  // Delegate the syntax operation to the actual shared Bridge parser; no copied
  // parser, fake enrollment, capability or lifecycle producer is introduced.
  const actualBridge=fs.realpathSync.native(path.join(__dirname,'forge-native-host-bridge.js'));
+ fs.writeFileSync(path.join(installed,'forge-native-host-profile.js'), "if(process.env.TEST_PROFILE_UNAVAILABLE==='1')throw Error('fixture unavailable');module.exports=require("+JSON.stringify(path.join(__dirname,'forge-native-host-profile.js'))+");\n");
  fs.appendFileSync(path.join(installed,'forge-native-host-bridge.js'), '\nexports.validateInitialPrepareCommand=require('+JSON.stringify(actualBridge)+').validateInitialPrepareCommand;\n');
  const transportEnv={...process.env,TEST_TRANSPORT_OWNER:owner,TEST_TRANSPORT_WINDOW:'live',TEST_CAPTURE:captureFile};
  const payload={hook_event_name:'PreToolUse',cwd:owner,session_id:session,tool_name:'Read',tool_input:{file_path:'seed'}};
@@ -116,5 +133,38 @@ try{
    }
    if(!unavailable){assert(env.includes("'fixture-start'\"'\"'quoted'"),'bootstrap shell data is quoted');assert(env.includes("FORGE_NATIVE_HOST_BOOTSTRAP_SOURCE='claude-sessionstart-process-v1'"));}
  }
+ // Actual installed hook/canonical bridge DATA coherence; no LIVE capability.
+ const Module=require('module'),bridgeRaw=fs.readFileSync(actualBridge),bridgeCopy=new Module(actualBridge+'#carrier-data',module);
+ bridgeCopy.filename=actualBridge;bridgeCopy.paths=Module._nodeModulePaths(path.dirname(actualBridge));
+ bridgeCopy._compile(bridgeRaw.toString('utf8')+'\nmodule.exports.__carrier={canonicalPrepareSessionExports,parseObservedPrepareBody};\n',actualBridge);
+ const carrierData=bridgeCopy.exports.__carrier,canonicalBootstrap={pid:321,started:'123456789012345678',exe:process.execPath,exe_sha256:'a'.repeat(64),exe_version:'3.2.41',hook:path.join(installed,'forge-native-host-bridge.js'),hook_sha256:'b'.repeat(64),config:process.env.CLAUDE_CONFIG_DIR};
+ const canonicalExports=carrierData.canonicalPrepareSessionExports({hostRuntime:'claude',sessionId:session},canonicalBootstrap),nativeBlock='\n'+canonicalExports.replace(/\n:$/,'\n');
+ function startSession(file,mode='canonical',id=session,extra={}){
+  return transport(Buffer.from(JSON.stringify({hook_event_name:'SessionStart',cwd:lab,session_id:id})),{CLAUDE_ENV_FILE:file,TEST_BOOTSTRAP:mode,...extra},['session-start']);
+ }
+ function freshEnv(name,contents=''){const file=path.join(lab,name);fs.writeFileSync(file,contents,{flag:'wx'});return file;}
+ const coherent=freshEnv('carrier-coherence'),first=startSession(coherent);assert.equal(first.status,0,first.stderr);assert.equal(fs.readFileSync(coherent,'utf8'),nativeBlock);assert.equal(first.stderr,'');
+ const repeated=startSession(coherent);assert.equal(repeated.status,0,repeated.stderr);assert.equal(repeated.stderr,'');assert.equal(fs.readFileSync(coherent,'utf8'),nativeBlock,'identical SessionStart appends nothing');
+ if(process.platform==='win32'){
+  const body="source /c/fixture/shell-snapshots/snapshot-bash-1234567890123-Abc123.sh 2>/dev/null || true && export TEMP='C:/fixture/tmp' TMP='C:/fixture/tmp' && "+canonicalExports+" && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'which'; \\builtin unset -f -- 'which'; } >/dev/null 2>&1 || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval '"+prepareCommand+"' < /dev/null && pwd -P >| /c/fixture/tmp/claude-ab12-cwd";
+  assert.equal(carrierData.parseObservedPrepareBody(body,{input:inputFile,node_exe:fs.realpathSync.native(process.execPath),session_exports:canonicalExports}).session_exports_sha256,crypto.createHash('sha256').update(canonicalExports).digest('hex'));
+ }
+ for(const mode of ['other-pid','other-started','other-sha','other-hook-sha','other-version','other-exe','other-config','other-session']){
+  const file=freshEnv('conflict-'+mode);assert.equal(startSession(file).status,0);const original=fs.readFileSync(file,'utf8');
+  const result=startSession(file,mode==='other-session'?'canonical':mode,mode==='other-session'?session+'-other':session);assert.equal(result.status,0,result.stderr);
+  const after=fs.readFileSync(file,'utf8');assert(after.startsWith(original));assert.equal((after.match(/export FORGE_NATIVE_HOST_PID=/g)||[]).length,1);
+  const diagnostic=JSON.parse(result.stderr.trim());assert.equal(diagnostic.code,'native-host-session-pin-conflict');assert(!result.stderr.includes(file));assert(!result.stderr.includes(process.execPath));
+ }
+ for(const contents of ["export FORGE_NATIVE_HOST_UNKNOWN='private'\n","export FORGE_NATIVE_HOST_UNKNOWN='private'\n"+nativeBlock]){
+  const file=freshEnv('foreign-native-'+crypto.randomBytes(4).toString('hex'),contents),result=startSession(file);assert.equal(result.status,0);assert.equal(JSON.parse(result.stderr.trim()).code,'native-host-session-pin-conflict');assert.equal((fs.readFileSync(file,'utf8').match(/export FORGE_NATIVE_HOST_PID=/g)||[]).length,contents.includes('FORGE_NATIVE_HOST_PID=')?1:0);
+ }
+ const newSession=freshEnv('new-session-own-pin'),own=startSession(newSession,'other-version',session+'-new');assert.equal(own.status,0,own.stderr);assert(fs.readFileSync(newSession,'utf8').includes("FORGE_NATIVE_HOST_EXE_VERSION='3.2.42'"));
+ for(const mode of ['bad-version','extra-field','missing-version','digest-object']){
+  const file=freshEnv('shape-'+mode),result=startSession(file,mode,session,{TEST_GETTER_CAPTURE:getterCapture});assert.equal(result.status,0);assert(!fs.readFileSync(file,'utf8').includes('FORGE_NATIVE_HOST_PID='));assert(fs.readFileSync(file,'utf8').includes('FORGE_CLAUDE_OWNER_SESSION_ID='));assert.equal(JSON.parse(result.stderr.trim()).kind,'forge-native-bootstrap-refused');assert(!fs.existsSync(getterCapture),'non-string digest never coerces a getter');assert(!result.stderr.includes('PRIVATE_BOOTSTRAP_MUST_NOT_ESCAPE'));
+ }
+ const unavailableFile=freshEnv('profile-unavailable'),unavailable=startSession(unavailableFile,'canonical',session,{TEST_PROFILE_UNAVAILABLE:'1'});assert.equal(unavailable.status,0);assert(!fs.readFileSync(unavailableFile,'utf8').includes('FORGE_NATIVE_HOST_PID='));assert.equal(JSON.parse(unavailable.stderr.trim()).kind,'forge-native-bootstrap-refused');
+ const pairFile=freshEnv('pair-diagnostic'),pairResult=startSession(pairFile,'pair-item');assert.equal(pairResult.status,0);const pairDiagnostic=JSON.parse(pairResult.stderr.trim());assert.equal(pairDiagnostic.os_diagnostic.action,'process');assert.equal(pairDiagnostic.os_diagnostic.item_index,1);assert(!Object.hasOwn(pairDiagnostic.os_diagnostic,'unexpected_field'));
+ assert.equal(crypto.createHash('sha256').update(fs.readFileSync(actualBridge)).digest('hex'),crypto.createHash('sha256').update(bridgeRaw).digest('hex'));
+ console.log('PASS original installed SessionStart: version shape/profile, canonical carrier/parser, identical repetition, pin conflicts, fresh session, getter refusal and closed pair diagnostic; DATA only');
  console.log('PASS hook-only LIVE bounds, replies, stdin fatal/end, byte custody and optional bootstrap; no live authority assertion');
 }finally{assert.equal(path.dirname(lab),fs.realpathSync.native(os.tmpdir()));fs.rmSync(lab,{recursive:true,force:true});}
