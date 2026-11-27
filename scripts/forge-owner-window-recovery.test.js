@@ -15,6 +15,11 @@ const actor=(host,name)=>{process.env.CODEX_THREAD_ID=name;process.env.FORGE_CLA
   windows.ensureTask(owner,task);runs.add(owner,{id:task,kind:'task',session_id:previous.sessionId,host_runtime:host,owner_session_source:previous.source,cwd:owner,root:owner});
   const q={schema_version:1,scope:'standalone-task',phase:'brainstorm',taskId:task,cwd:code,contextRoot:owner,hostRuntime:host,workflowId:'fixture399',dispatchId:'dispatch-'+host,resultFile:path.join(lab,host,'channel/result.json'),inputs:{brief:'Isolated recovery fixture'},constraints:{auto_commit:false,deploy:false}};
   fs.mkdirSync(path.dirname(q.resultFile));const validated=require('./forge-task-preparation').validateRequest(q),fingerprint=require('./forge-task-preparation').preparationRequestFingerprint(validated);
+  // The factor is the existing canonical root/state census, with equal explicit
+  // or implicit representations. DATA alone never grants settlement authority.
+  const codeBefore=api.measurePreparationCodeState({owner,request:q}),explicitCode=api.measurePreparationCodeState({owner,request:{...q,execution_contract:roots.singleContract(owner,code)}});
+  assert.deepEqual(explicitCode,codeBefore);assert.equal(codeBefore.code_states[0].path,fs.realpathSync.native(code));assert(codeBefore.code_states[0].pre_dirty.some(x=>x.path==='index.txt'));
+  const beforeMarker=path.join(code,'before-factor-change.txt');put(beforeMarker,'private changed file');assert.notDeepEqual(api.measurePreparationCodeState({owner,request:q}),codeBefore);fs.unlinkSync(beforeMarker);assert.deepEqual(api.measurePreparationCodeState({owner,request:q}),codeBefore);
   const receiptFile=q.resultFile+'.receipt.json';put(receiptFile,JSON.stringify({phase:'failed',dispatch_id:q.dispatchId,request_fingerprint:fingerprint,failure:{reason_code:'artifact-direct-write-detected'}}));const receiptBefore=fs.readFileSync(receiptFile);
   const binding={kind:'artifact-preparation',coordination:'observed-host-session-v1',task_id:task,dispatch_id:q.dispatchId,request_sha256:fingerprint,host_runtime:host,host_session_sha256:roots.digest(previous.sessionId)};
   const qfile=path.join(lab,host,'binding.json');put(qfile,JSON.stringify(binding));
