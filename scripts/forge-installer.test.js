@@ -1471,4 +1471,40 @@ test('non-generated content at the Codex report path stays preserved with a user
   } finally { data.cleanup(); }
 });
 
+test('Claude update migrates only the recognized legacy statusline command with backup and dry-run', () => {
+  const data = fixture();
+  try {
+    const initial = installer.install({ ...data.options, runtime: 'claude' });
+    const ownership = require('./forge-projection-ownership');
+    const initialOwnership = JSON.parse(JSON.stringify(initial.manifest.ownership));
+    const file = path.join(data.claudeHome, 'settings.json');
+    const original = '{\r\n "statusLine":{"type":"command","command":"node ~/.claude/forge-statusline.js","refreshInterval":1,"custom":true},\r\n "permissions":{"defaultMode":"default"},"hooks":{"Keep":[{"command":"custom"}]},"other":[1,2]\r\n}\r\n';
+    fs.writeFileSync(file, original);
+    const preview = installer.install({ ...data.options, runtime: 'claude', update: true, dryRun: true, env: { FORGE_HOME: path.join(data.root, 'wrong ambient home') } });
+    assert(preview.statusline_migration.changed && preview.statusline_migration.dry_run);
+    assert.strictEqual(fs.readFileSync(file, 'utf8'), original);
+    assert(!fs.existsSync(preview.statusline_migration.backup));
+    const applied = installer.install({ ...data.options, runtime: 'claude', update: true, env: { FORGE_HOME: path.join(data.root, 'wrong ambient home') } });
+    const command = `node "${path.join(data.forgeHome, 'scripts', 'forge-statusline.js').split(path.sep).join('/')}"`;
+    assert.strictEqual(fs.readFileSync(file, 'utf8'), original.replace(JSON.stringify('node ~/.claude/forge-statusline.js'), JSON.stringify(command)));
+    assert.strictEqual(fs.readFileSync(applied.statusline_migration.backup, 'utf8'), original);
+    assert.strictEqual(applied.statusline_migration.command, command);
+    assert(applied.statusline_migration.active_entrypoint_sha256);
+    assert.strictEqual(applied.manifest.ownership[ownership.keyFor(file)], initialOwnership[ownership.keyFor(file)], 'migration must preserve prior ownership history without adopting new operator bytes');
+    assert.notStrictEqual(applied.manifest.ownership[ownership.keyFor(file)], ownership.digest(fs.readFileSync(file, 'utf8')));
+    assert(applied.manifest.adapters.claude.conflicts.some(row => row.destination === file && row.reason === 'user_owned'));
+    const second = installer.install({ ...data.options, runtime: 'claude', update: true });
+    assert.strictEqual(second.statusline_migration.changed, false);
+    const current = fs.readFileSync(file, 'utf8');
+    fs.writeFileSync(file, current.replace(JSON.stringify(command), JSON.stringify('node my-own-statusline.js')));
+    const custom = fs.readFileSync(file, 'utf8'), preserved = installer.install({ ...data.options, runtime: 'claude', update: true });
+    assert.strictEqual(preserved.statusline_migration.changed, false); assert.strictEqual(fs.readFileSync(file, 'utf8'), custom);
+    const hard = path.join(data.root, 'linked-settings.json'); fs.linkSync(file, hard);
+    const linked = installer.install({ ...data.options, runtime: 'claude', update: true });
+    assert.strictEqual(linked.statusline_migration.reason, 'settings-untrusted-preserved');
+    assert.strictEqual(fs.readFileSync(file, 'utf8'), custom);
+  } finally { data.cleanup(); }
+});
+
+
 process.stdout.write(`\n${passed} passed, 0 failed\n`);

@@ -421,6 +421,100 @@ test('R8: native hooks retain exact ordinary matchers, foreign siblings and idem
   assertEqual(JSON.stringify(removed.settings.custom), JSON.stringify({ keep: true }));
 });
 
+// Delivery correction: exercise the actual restricted CLI, not an enable replay.
+function migrationFixture(conventional = false) {
+  const root = mktmp('merge-statusline migration-'), home = path.join(root, conventional ? '.forge-agent' : 'Relocated Core');
+  fs.mkdirSync(path.join(home, 'scripts'), { recursive: true });
+  fs.copyFileSync(path.join(__dirname, 'forge-statusline.js'), path.join(home, 'scripts', 'forge-statusline.js'));
+  const file = path.join(root, 'settings.json'), backup = path.join(home, 'backups', 'migration', 'settings.json');
+  const original = '{\r\n\t"statusLine": {"type":"command", "command":"node ~/.claude/forge-statusline.js", "refreshInterval":1, "extra":{"keep":"Ω"}},\r\n "permissions":{"defaultMode":"default"},"hooks":{"Custom":[{"command":"keep-custom"}]},"operator":true\r\n}\r\n';
+  fs.writeFileSync(file, original);
+  const invoke = (args = [], extraEnv = {}) => {
+    const result = spawnSync(process.execPath, [MODULE, file, '--migrate-statusline-command-only', ...args], {
+      encoding: 'utf8', windowsHide: true, timeout: 20000,
+      env: { ...process.env, HOME: root, USERPROFILE: root, FORGE_HOME: home, ...extraEnv },
+    });
+    let report; try { report = JSON.parse(result.stdout); } catch (_) {}
+    return { ...result, report };
+  };
+  return { root, home, file, backup, original, invoke };
+}
+
+test('migration-only changes one legacy token, preserves bytes and backs up; second run is a noop', () => {
+  for (const conventional of [true, false]) {
+    const f = migrationFixture(conventional), preview = f.invoke(['--dry-run']);
+    assertEqual(preview.status, 0); assert(preview.report.changed);
+    assertEqual(fs.readFileSync(f.file, 'utf8'), f.original); assert(!fs.existsSync(path.dirname(f.backup)));
+    const expected = conventional ? MAINTAINED_COMMAND : `node "${path.join(f.home, 'scripts', 'forge-statusline.js').split(path.sep).join('/')}"`;
+    assertEqual(preview.report.command, expected);
+    const applied = f.invoke(['--backup', f.backup, '--expected-sha256', preview.report.before_sha256]);
+    assertEqual(applied.status, 0); assert(applied.report.changed && applied.report.active_entrypoint_sha256);
+    assertEqual(fs.readFileSync(f.file, 'utf8'), f.original.replace(JSON.stringify(FROZEN_COMMAND), JSON.stringify(expected)));
+    assertEqual(fs.readFileSync(f.backup, 'utf8'), f.original);
+    const again = f.invoke(['--backup', f.backup, '--expected-sha256', preview.report.before_sha256]);
+    assertEqual(again.status, 0); assertEqual(again.report.changed, false);
+  }
+});
+
+test('migration-only conservatively preserves custom, ambiguous, duplicate, escaped and invalid settings', () => {
+  const f = migrationFixture();
+  const cases = [
+    '{"statusLine":{"type":"command","command":"node custom.js"}}',
+    '{"statusLine":{"type":"prompt","command":"node ~/.claude/forge-statusline.js"}}',
+    '{"statusLine":{"type":"command","command":"node ~/.claude/forge-statusline.js"},"note":"node ~/.claude/forge-statusline.js"}',
+    '{"statusLine":{"type":"command","command":"custom","command":"node ~/.claude/forge-statusline.js"}}',
+    String.raw`{"statusLine":{"type":"command","command":"custom","comm\u0061nd":"node ~/.claude/forge-statusline.js"}}`,
+    String.raw`{"statusLine":{"type":"command","command":"node ~\/.claude/forge-statusline.js"}}`,
+    String.raw`{"status\u004cine":{"type":"command","command":"node ~/.claude/forge-statusline.js"}}`,
+    '{"statusLine":{"type":"command","command":"custom"},"statusLine":{"type":"command","command":"node ~/.claude/forge-statusline.js"}}',
+    '{"statusLine":',
+  ];
+  for (const bytes of cases) {
+    fs.writeFileSync(f.file, bytes); const result = f.invoke(['--dry-run']);
+    assertEqual(result.status, 0); assertEqual(result.report.changed, false); assertEqual(fs.readFileSync(f.file, 'utf8'), bytes);
+  }
+});
+
+test('migration-only refuses an existing backup and observed target drift without changing the current target', () => {
+  const f = migrationFixture(), preview = f.invoke(['--dry-run']);
+  fs.mkdirSync(path.dirname(f.backup), { recursive: true }); fs.writeFileSync(f.backup, 'foreign-backup');
+  const refused = f.invoke(['--backup', f.backup, '--expected-sha256', preview.report.before_sha256]);
+  assertEqual(refused.status, 1); assertEqual(refused.report.reason, 'statusline-migration-backup-failed');
+  assertEqual(fs.readFileSync(f.file, 'utf8'), f.original); assertEqual(fs.readFileSync(f.backup, 'utf8'), 'foreign-backup');
+  const g = migrationFixture(), before = g.invoke(['--dry-run']), drift = g.original + ' ';
+  fs.writeFileSync(g.file, drift);
+  const changed = g.invoke(['--backup', g.backup, '--expected-sha256', before.report.before_sha256]);
+  assertEqual(changed.status, 1); assertEqual(changed.report.reason, 'statusline-migration-file-changed');
+  assertEqual(fs.readFileSync(g.file, 'utf8'), drift); assert(!fs.existsSync(g.backup));
+});
+
+test('migration-only rejects file links and does not enter the full enable/remove paths', () => {
+  const f = migrationFixture(), other = path.join(f.root, 'other-settings.json'); fs.linkSync(f.file, other);
+  const linked = f.invoke(['--dry-run']); assertEqual(linked.status, 1); assertEqual(linked.report.reason, 'statusline-migration-untrusted-file');
+  assertEqual(fs.readFileSync(f.file, 'utf8'), f.original);
+  const g = migrationFixture(), mixed = g.invoke(['--remove']); assertEqual(mixed.status, 1);
+  assertEqual(fs.readFileSync(g.file, 'utf8'), g.original);
+  const h = migrationFixture(), target = path.join(h.root, 'target.json'); fs.renameSync(h.file, target);
+  try { fs.symlinkSync(target, h.file, 'file'); }
+  catch (error) { if (!['EPERM', 'EACCES', 'ENOSYS'].includes(error.code)) throw error; return; }
+  const symlink = h.invoke(['--dry-run']); assertEqual(symlink.status, 1); assertEqual(symlink.report.reason, 'statusline-migration-untrusted-file');
+  assertEqual(fs.readFileSync(target, 'utf8'), h.original);
+});
+
+test('migration-only qualifies Windows path-device zero but keeps descriptor identity strict', () => {
+  for (const mode of ['windows-zero', 'nonzero-mismatch', 'posix-zero', 'descriptor-drift']) {
+    const f = migrationFixture(), preload = path.join(f.root, 'fs-identity.cjs');
+    const source = `'use strict';const fs=require('fs');const target=${JSON.stringify(f.file)};const l=fs.lstatSync,f=fs.fstatSync,o=fs.openSync;let descriptor=null,calls=0;Object.defineProperty(process,'platform',{value:${JSON.stringify(mode === 'posix-zero' ? 'linux' : 'win32')}});fs.openSync=function(p,...a){const fd=o.call(this,p,...a);if(p===target)descriptor=fd;return fd;};fs.lstatSync=function(p,...a){const s=l.call(this,p,...a);if(p===target){const copy=Object.assign(Object.create(Object.getPrototypeOf(s)),s);copy.dev=${mode === 'nonzero-mismatch' ? 's.dev+1n' : '0n'};return copy;}return s;};fs.fstatSync=function(fd,...a){const s=f.call(this,fd,...a);if(fd===descriptor&&++calls>1&&${JSON.stringify(mode)}==='descriptor-drift')return {...s,dev:s.dev+1n};return s;};`;
+    fs.writeFileSync(preload, source);
+    const option = '--require ' + JSON.stringify(preload.split(path.sep).join('/'));
+    const result = f.invoke(['--dry-run'], { NODE_OPTIONS: [process.env.NODE_OPTIONS || '', option].filter(Boolean).join(' ') });
+    if (mode === 'windows-zero') { assertEqual(result.status, 0); assertEqual(result.report.changed, true); }
+    else { assertEqual(result.status, 1); assertEqual(result.report.reason, 'statusline-migration-file-changed'); }
+    assertEqual(fs.readFileSync(f.file, 'utf8'), f.original);
+  }
+});
+
+
 // ── summary ─────────────────────────────────────────────────────────────────
 cleanup();
 console.log(`\nmerge-settings.test.js: ${passed} passed, ${failed} failed`);
