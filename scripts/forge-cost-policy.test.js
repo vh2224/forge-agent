@@ -253,4 +253,59 @@ test('decideReview carries the shards, and skip computes none', () => {
   assert.deepStrictEqual(skipped.shards, []);
 });
 
+test('oversized whole-file and combined shards retain coverage but are explicitly non-dispatchable', () => {
+  const single = planReviewShards([file('data/big.json', 23000)])[0];
+  assert.deepStrictEqual(single.files, ['data/big.json']);
+  assert.strictEqual(single.oversized, true); assert.strictEqual(single.dispatchable, false);
+  assert.strictEqual(single.max_diff_lines, 4000); assert.strictEqual(single.line_count_kind, 'estimate');
+  const combined = planReviewShards(many(30, 1000));
+  assert(combined.length <= 6 && combined.every(row => row.files.length > 1 && row.oversized && !row.dispatchable));
+  assert.strictEqual(new Set(combined.flatMap(row => row.files)).size, 30);
+  assert.strictEqual(combined.flatMap(row => row.files).length, 30);
+  const binary = planReviewShards([{ file: 'a.png', binary: true }])[0];
+  assert.strictEqual(binary.dispatchable, true); assert.strictEqual(binary.line_count_kind, 'estimate');
+});
+
+test('review procedure keeps original indices and scoped eligible remainder before single shortcuts', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'shared', 'forge-review.md'), 'utf8');
+  const guard = source.indexOf('**Before either dispatch path, including the single-shard shortcut:**');
+  const shortcut = source.indexOf('When no shard was blocked, `REVIEW_SHARDS <= 1`');
+  assert(guard > 0 && shortcut > guard, 'blocked coverage is handled before ordinary single dispatch');
+  assert(source.includes('An eligible remainder must remain scoped even if only one is eligible.'));
+  assert(source.includes('If all original shards are blocked, dispatch none'));
+  const match = source.match(/shard_dispatchable\(\) \{ node -e "([^"]+)"/);
+  assert(match, 'execute the actual documented metadata projection');
+  const rows = planReviewShards([file('data/big.json', 23000), file('src/small.js', 900)]);
+  assert.strictEqual(rows.length, 2, 'retain the complete original roster');
+  const project = (shards, index) => { let out = '';
+    require('vm').runInNewContext(match[1], { process: { argv: ['node', JSON.stringify({ shards }), String(index)],
+      stdout: { write(value) { out += value; } } } }); return out; };
+  assert.strictEqual(project(rows, 0), 'false'); assert.strictEqual(project(rows, 1), 'true');
+  assert.deepStrictEqual(rows[1].files, ['src/small.js']);
+  const blocked = planReviewShards([file('first.json', 5000), file('second.json', 4500)]);
+  assert(blocked.every((row, i) => project(blocked, i) === 'false'));
+  assert.strictEqual(blocked.flatMap(row => row.files).length, 2);
+  for (const phrase of ['Only write a clean artifact when no original shard was blocked or unavailable',
+    'Empty `objections` does not erase blocked or unavailable coverage',
+    '`no_flags: true` never overrides blocked or unavailable original shards']) assert(source.includes(phrase), phrase);
+});
+
+test('planning estimates never replace the actual unchanged challenger 4000-line guard', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'forge-xllm.js'), 'utf8');
+  const limit = source.match(/const MAX_DIFF_LINES = (\d+);/); assert(limit);
+  assert.strictEqual(Number(limit[1]), 4000);
+  const start = source.indexOf('function acquireDiff('), end = source.indexOf('\n}', start) + 2;
+  assert(start > 0 && end > start);
+  let output = Array.from({ length: 4001 }, () => '+line').join('\n');
+  const context = { MAX_DIFF_LINES: Number(limit[1]), MAX_BUFFER: 16 * 1024 * 1024,
+    execSync() { return output; } };
+  require('vm').runInNewContext(source.slice(start, end) + '\nthis.acquire = acquireDiff;', context);
+  const estimated = planReviewShards([file('src/framed.js', 3900)])[0];
+  assert.strictEqual(estimated.dispatchable, true); assert.strictEqual(estimated.line_count_kind, 'estimate');
+  assert.throws(() => context.acquire('fixture', 'private-fixture'), error =>
+    error.code === 'review-diff-too-large' && error.provider_called === false);
+  output = Array.from({ length: 4000 }, () => '+line').join('\n');
+  assert.strictEqual(context.acquire('fixture', 'private-fixture'), output);
+});
+
 process.stdout.write(`\n${passed} passed, 0 failed\n`);

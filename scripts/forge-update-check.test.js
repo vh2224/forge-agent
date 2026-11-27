@@ -13,8 +13,12 @@ const cacheDir = path.join(ROOT, 'cache');
 fs.mkdirSync(cacheDir, { mode: 0o700 });
 let passed = 0;
 let skipped = 0;
+const STAT_IDENTITY_ONLY = process.argv.includes('--stat-identity-only');
+if (STAT_IDENTITY_ONLY) console.log('Selected stat identity regressions and original identity-swap guard only');
 
 function test(name, fn) {
+  if (STAT_IDENTITY_ONLY && !name.startsWith('stat identity:')
+      && name !== 'manifest identity swap between lstat and open is unknown without Git') return;
   fn();
   passed++;
   console.log(`PASS ${name}`);
@@ -1114,6 +1118,79 @@ try {
     assert.deepStrictEqual(context.prefs, {});
     assert.strictEqual(context.forgeHome, installed);
     assert(rendered.stdout.includes('v2.0.0'), rendered.stdout);
+  });
+
+  test('stat identity: real bounded reader allows only the Windows pathname-device exception', () => {
+    const source = fs.readFileSync(require.resolve('./forge-update-check'), 'utf8');
+    const start = source.indexOf('function sameFile(');
+    const end = source.indexOf('\nfunction readManifestFile(', start);
+    assert(start > 0 && end > start, 'exercise the actual reader and its identity helper');
+    const bytes = Buffer.from('fixture');
+    const inode = 9007199254740993n;
+    const cases = [
+      { name: 'Windows pathname zero', platform: 'win32', pathDev: 0n, openedDev: 17n, finalDev: 17n, ok: true },
+      { name: 'ordinary exact identity', platform: 'linux', pathDev: 17n, openedDev: 17n, finalDev: 17n, ok: true },
+      { name: 'positive device mismatch', pathDev: 18n, openedDev: 17n, finalDev: 17n },
+      { name: 'non-Windows zero mismatch', platform: 'linux', pathDev: 0n, openedDev: 17n, finalDev: 17n },
+      { name: 'different 64-bit inode', pathDev: 0n, openedDev: 17n, finalDev: 17n, openedIno: inode + 1n },
+      { name: 'final descriptor zero', pathDev: 0n, openedDev: 17n, finalDev: 0n },
+      { name: 'descriptor zero is not pathname zero', pathDev: 0n, openedDev: 0n, finalDev: 17n, finalCheck: true },
+      { name: 'final inode changes', pathDev: 0n, openedDev: 17n, finalDev: 17n, finalIno: inode + 1n },
+      { name: 'symbolic link', pathDev: 0n, openedDev: 17n, finalDev: 17n, symbolic: true },
+      { name: 'non-file', pathDev: 0n, openedDev: 17n, finalDev: 17n, notFile: true },
+      { name: 'oversized file', pathDev: 0n, openedDev: 17n, finalDev: 17n, size: 129n },
+      { name: 'foreign owner', pathDev: 0n, openedDev: 17n, finalDev: 17n, uid: 8n },
+      { name: 'unsafe POSIX permissions', platform: 'linux', pathDev: 17n, openedDev: 17n, finalDev: 17n, mode: 0o602n },
+    ];
+    for (const row of cases) {
+      let descriptors = 0, reads = 0, closes = 0, opened = false;
+      const stat = (dev, ino = inode) => ({ dev, ino, size: row.size ?? BigInt(bytes.length),
+        uid: row.uid ?? 7n, mode: row.mode ?? 0o600n,
+        isFile: () => !row.notFile, isSymbolicLink: () => !!row.symbolic });
+      const context = { Buffer, MAX_FILE_BYTES: 65536,
+        process: { platform: row.platform || 'win32', getuid: () => 7 },
+        fs: { constants: { O_RDONLY: 0, O_NOFOLLOW: 0 },
+          lstatSync(file, opts) { assert.strictEqual(file, 'private-fixture'); assert.strictEqual(opts.bigint, true); return stat(row.pathDev); },
+          openSync() { opened = true; return 7; },
+          fstatSync(fd, opts) { assert.strictEqual(fd, 7); assert.strictEqual(opts.bigint, true); descriptors++;
+            return descriptors === 1 ? stat(row.openedDev, row.openedIno ?? inode) : stat(row.finalDev, row.finalIno ?? row.openedIno ?? inode); },
+          readSync(fd, buffer) { reads++; if (reads > 1) return 0; bytes.copy(buffer); return bytes.length; },
+          closeSync(fd) { assert.strictEqual(fd, 7); closes++; },
+        } };
+      require('vm').runInNewContext(source.slice(start, end) + '\nthis.readFixture = readBoundedFile;', context);
+      const invoke = () => context.readFixture('private-fixture', 128,
+        { error: 'fixture-unsafe', forbiddenMode: 0o077, allowForeignOwner: false });
+      if (row.ok) assert.strictEqual(invoke(), bytes.toString('utf8'), row.name);
+      else assert.throws(invoke, /fixture-unsafe/, row.name);
+      assert.strictEqual(closes, opened ? 1 : 0, row.name + ': descriptor closed');
+      if (row.finalCheck) assert(reads > 0 && descriptors === 2, 'strict second comparison was reached');
+    }
+  });
+
+  test('stat identity: compatible Windows cache publishes and a fresh render launches no child', () => {
+    if (process.platform !== 'win32') { skip('stat identity: Windows cache publication', 'Windows-specific integration; portable injected reader matrix ran'); return; }
+    const home = path.join(ROOT, 'device-zero-home'), isolatedCache = path.join(ROOT, 'device-zero-cache');
+    writeManifest(home, remoteManifest());
+    const originals = { lstatSync: fs.lstatSync, fstatSync: fs.fstatSync, openSync: fs.openSync, closeSync: fs.closeSync };
+    const privateFds = new Set(), inRoot = file => { if (typeof file !== 'string') return false;
+      const relative = path.relative(ROOT, path.resolve(file));
+      return !path.isAbsolute(relative) && relative !== '..' && !relative.startsWith('..' + path.sep); };
+    const changed = (stat, dev) => Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { dev });
+    let gitCalls = 0, launches = 0;
+    try {
+      fs.lstatSync = function(file, opts) { const stat = originals.lstatSync.call(fs, file, opts);
+        return opts && opts.bigint && inRoot(file) ? changed(stat, 0n) : stat; };
+      fs.openSync = function(file, ...args) { const fd = originals.openSync.call(fs, file, ...args); if (inRoot(file)) privateFds.add(fd); return fd; };
+      fs.fstatSync = function(fd, opts) { const stat = originals.fstatSync.call(fs, fd, opts);
+        return opts && opts.bigint && privateFds.has(fd) ? changed(stat, 17n) : stat; };
+      fs.closeSync = function(fd) { privateFds.delete(fd); return originals.closeSync.call(fs, fd); };
+      const target = { forgeHome: home }, git = (...args) => { gitCalls++; return remoteGit(tag('1'.repeat(40), '1.2.3'))(...args); };
+      const refreshed = provider.refresh(target, { cacheDir: isolatedCache, git });
+      assert.strictEqual(refreshed.state, 'equal'); assert.strictEqual(gitCalls, 1);
+      assert(fs.existsSync(provider.cachePath(target, isolatedCache)), 'actual cache was published');
+      const cached = provider.cachedUpdate(target, { cacheDir: isolatedCache, spawn() { launches++; throw Error('fresh cache must not spawn'); } });
+      assert.strictEqual(cached.state, 'equal'); assert.strictEqual(launches, 0);
+    } finally { Object.assign(fs, originals); }
   });
 
   console.log(`${passed} update-check tests passed`);

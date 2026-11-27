@@ -58,8 +58,11 @@ let skipped = 0;
 let svnToolchainAvailable;
 let passed = 0;
 let failed = 0;
+const NATIVE_RESULT_INPUT_ONLY = process.argv.includes('--native-result-input-only');
+if (NATIVE_RESULT_INPUT_ONLY) process.stdout.write('Selected native result input regression group only\n');
 
 function test(name, fn) {
+  if (NATIVE_RESULT_INPUT_ONLY && !name.startsWith('native result input:')) return;
   try {
     if (fn() === SKIP_SVN) {
       skipped += 1;
@@ -1054,6 +1057,81 @@ test('defer API and CLI are atomic, bounded, parent-derived and idempotent', () 
     assert.strictEqual(code(() => rf.publishDeferredOutcomes(publication)), 'review-fix-review-conflict');
   } finally { fs.unlinkSync(file); }
 }));
+
+test('native result input: malformed containers refuse before runner, locations or getters', () => {
+  const Module = require('module'), originalLoad = Module._load;
+  let locations = 0, runners = 0, getters = 0;
+  try {
+    Module._load = function(name, parent, ...rest) {
+      if (name === './forge-unit-sidecar' && parent && parent.filename === require.resolve('./forge-review-fix')) {
+        locations++; throw Error('locations must not run for malformed input');
+      }
+      return originalLoad.call(this, name, parent, ...rest);
+    };
+    const options = Object.defineProperty({}, 'runner', { get() { runners++; throw Error('runner must not be read'); } });
+    const values = ['PRIVATE_WORKER_BLOCK', [], null, 7, false, undefined, () => {}, new Date(), Object.create({ status: 'done' })];
+    for (const value of values) {
+      const request = Object.defineProperty({ rawResult: value }, 'cwd', { get() { getters++; throw Error('cwd must not be read'); } });
+      let error; try { rf.acceptNativeReviewFix(request, options); } catch (caught) { error = caught; }
+      assert(error); assert.strictEqual(error.code, 'review-fix-native-result-input-invalid');
+      assert.strictEqual(error.message, error.code);
+      for (const key of ['result', 'outcomes', 'provider_called']) assert(!Object.prototype.hasOwnProperty.call(error, key));
+    }
+    const request = Object.defineProperty({}, 'rawResult', { get() { getters++; throw Error('PRIVATE_GETTER'); } });
+    assert.strictEqual(code(() => rf.acceptNativeReviewFix(request, options)), 'review-fix-native-result-input-invalid');
+    const value = new Proxy({}, { getPrototypeOf() { throw Error('PRIVATE_PROXY'); } });
+    assert.strictEqual(code(() => rf.acceptNativeReviewFix({ rawResult: value }, options)), 'review-fix-native-result-input-invalid');
+    assert.strictEqual(locations, 0); assert.strictEqual(runners, 0); assert.strictEqual(getters, 0);
+  } finally { Module._load = originalLoad; }
+});
+
+test('native result input: corrected parsed object reuses unchanged multi-review preparation', () => {
+  const dir = repo();
+  try {
+    const files = ['.gsd/milestones/M001/slices/S01/S01-REVIEW.md', '.gsd/milestones/M001/slices/S02/S02-REVIEW.md'];
+    for (const file of files) { fs.mkdirSync(path.dirname(path.join(dir, file)), { recursive: true }); fs.writeFileSync(path.join(dir, file), REVIEW); }
+    const request = { cwd: dir, contextRoot: dir, vcs: 'git', milestoneId: 'M001', constraints: { auto_commit: false },
+      reviewFix: { boundary: 'milestone-triage', decision: 'proceed', claimPaths: ['src/a.js', 'src/b.js'],
+        items: files.map((review_file, i) => ({ r: 'R1', review_file, path: i ? 'src/b.js' : 'src/a.js' })) } };
+    request.nativePreparation = prepareFixture(request);
+    const preparation = JSON.stringify(request.nativePreparation);
+    fs.writeFileSync(path.join(dir, 'src/a.js'), 'worker fixed a\n');
+    const metadata = () => {
+      const found = {};
+      function visit(relative) { for (const item of fs.readdirSync(path.join(dir, relative), { withFileTypes: true })) {
+        const next = relative + '/' + item.name; if (item.isDirectory()) visit(next); else found[next] = sha256(fs.readFileSync(path.join(dir, next))); } }
+      visit('.gsd'); return JSON.stringify(Object.fromEntries(Object.entries(found).sort(([a], [b]) => a.localeCompare(b))));
+    };
+    const before = metadata();
+    request.rawResult = '---GSD-WORKER-RESULT---\nPRIVATE_WORKER_BLOCK';
+    assert.strictEqual(code(() => rf.acceptNativeReviewFix(request)), 'review-fix-native-result-input-invalid');
+    assert(metadata() === before, 'malformed acceptance changes no REVIEW/event/preparation metadata');
+    assert(JSON.stringify(request.nativePreparation) === preparation, 'same preparation is retained');
+    request.rawResult = Object.assign(Object.create(null), { status: 'done', commit_sha: null,
+      items: [{ r: 'R1', review_file: files[0], outcome: 'fixed', note: 'checked' },
+        { r: 'R1', review_file: files[1], outcome: 'skipped', note: 'unchanged' }] });
+    const result = rf.acceptNativeReviewFix(request);
+    assert.deepStrictEqual(result.items.map(item => [item.review_file, item.verified]), [[files[0], true], [files[1], false]]);
+    assert.match(fs.readFileSync(path.join(dir, files[0]), 'utf8'), /aplicada/);
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'src/a.js'), 'utf8'), 'worker fixed a\n');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('native result input: absent rawResult retains the documented worker-failure publication', () => {
+  const dir = repo();
+  try {
+    const file = '.gsd/milestones/M001/slices/S01/S01-REVIEW.md';
+    fs.mkdirSync(path.dirname(path.join(dir, file)), { recursive: true }); fs.writeFileSync(path.join(dir, file), REVIEW);
+    const request = { cwd: dir, contextRoot: dir, vcs: 'git', milestoneId: 'M001', constraints: { auto_commit: false },
+      reviewFix: { boundary: 'milestone-triage', decision: 'proceed', claimPaths: ['src/a.js'],
+        items: [{ r: 'R1', review_file: file, path: 'src/a.js' }] } };
+    request.nativePreparation = prepareFixture(request);
+    let error; try { rf.acceptNativeReviewFix(request); } catch (caught) { error = caught; }
+    assert(error); assert.strictEqual(error.code, 'review-fix-native-unverified');
+    assert(error.result && error.result.items.every(item => item.outcome === 'failed' && item.verified === false));
+    assert.match(fs.readFileSync(path.join(dir, file), 'utf8'), /dispatch falhou/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
 
 test('declared T02 artifacts: both consumers and three suites are substantive', () => {
   for (const [file, minimum] of [['forge-review-fix.js', 990], ['forge-unit-sidecar.js', 3525],
