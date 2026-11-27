@@ -46,6 +46,18 @@ function stableSnapshot(root){
   worktree_metadata:snapshot.pre_dirty.map(entry=>pathMetadata(root.path,entry.path)).sort((a,b)=>a.path.localeCompare(b.path)),
   ...(index?{git_index:index}:{}),...(snapshot.svn_state?{svn_state_sha256:digest(snapshot.svn_state)}:{})};
 }
+// DATA measurement only; never enrollment, ownership transfer or a writer proof.
+function measurePreparationCodeState({owner,request}){
+ owner=roots.realDirectory(owner);const q=require('./forge-task-preparation').validateRequest(request);
+ if(roots.key(roots.realDirectory(q.contextRoot||q.cwd))!==roots.key(owner))fail('owner-window-request-mismatch');
+ const run=JSON.parse(read(runs.runFile(owner,q.taskId)));
+ if(run.id!==q.taskId||run.kind!=='task'||!['claude','codex'].includes(run.host_runtime)||typeof run.session_id!=='string')fail('owner-window-run-binding-mismatch');
+ const contract=q.execution_contract||roots.singleContract(owner,q.cwd);roots.validateContract(contract,{revalidate:true});
+ const census=require('./forge-owner-recovery-roots').measure({owner,contract,run});
+ return{execution_contract_sha256:digest(contract),worktree_bindings:census.bindings,
+  code_states:census.roots.map(stableSnapshot).sort((a,b)=>a.root_id.localeCompare(b.root_id))};
+}
+
 function measureTask({owner,request,receiptCopy}){
  owner=roots.realDirectory(owner);const prep=require('./forge-task-preparation'),q=prep.validateRequest(request),fingerprint=prep.preparationRequestFingerprint(q);
  if(roots.key(roots.realDirectory(q.contextRoot||q.cwd))!==roots.key(owner))fail('owner-window-request-mismatch');
@@ -232,4 +244,4 @@ async function recover({owner,request,receiptCopy,expected,adapter}={}){
  audit.outcome='recovered';let auditSaved=true;try{fs.writeFileSync(file,JSON.stringify(audit,null,2)+'\n',{mode:0o600});}catch{auditSaved=false;}
  return{status:'recovered',recovered:result.recovered,audit_file:file,audit_saved:auditSaved,binding_sha256:current.seen.sha256};
 }
-module.exports={inspect,recover,createHostAdapter,createObservedHostAdapter,capture,measureTask,assertAdapter,observeStopped,actorWire,readEvidence:read,freezeChallenge:freeze};
+module.exports={inspect,recover,createHostAdapter,createObservedHostAdapter,capture,measureTask,measurePreparationCodeState,assertAdapter,observeStopped,actorWire,readEvidence:read,freezeChallenge:freeze};

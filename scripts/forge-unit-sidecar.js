@@ -1379,19 +1379,24 @@ function beginArtifactAttemptInsideOwnerWindow(request) {
   // Exact inputs become durable (exclusive write + fsync) before started exists;
   // a capture refusal leaves no receipt and never reaches a provider.
   const retainedRequest = require('./forge-request-retention').retain(request);
+  const preparationCodeState = request.scope === 'standalone-task' && request.route?.worker_mode === 'native'
+    ? require('./forge-owner-transport-window').retainPreparationCodeState(request) : null;
   const record = { phase: 'started', fingerprint, dispatch_id: request.dispatchId, before,
     retained_request: retainedRequest,
     recovery_identity_sha256: recoveryIdentity(request),
     ...(request.ownerBroker ? { broker_manifest_sha256: require('./forge-artifact-reconciliation').assertBroker(request.ownerBroker).manifest_sha256,
       broker_plan_sha256: request.ownerBroker.manifest.plan_sha256 } : {}),
     before_state: beforeState,
+    ...(preparationCodeState ? { preparation_code_state: preparationCodeState } : {}),
     preparation_surface: request.scope === 'standalone-task' && request.route?.worker_mode === 'native'
       ? preparationSurfaceSnapshot(request) : null,
     input_pending_questions: request.pending_questions || [],
     request_fingerprint: request.preparationRequestFingerprint || null,
     preparation_identity: request.preparationIdentity || null,
     route: request.route, route_identity: routeIdentity(request.route, request.unitType), provider_called: false };
-  fs.writeFileSync(files.receiptFile, JSON.stringify(record, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
+  const serialized = JSON.stringify(record, null, 2) + '\n';
+  if (record.preparation_code_state && Buffer.byteLength(serialized) > 8 * 1024 * 1024) fail('preparation-code-state-bound');
+  fs.writeFileSync(files.receiptFile, serialized, { flag: 'wx', mode: 0o600 });
   return { state: 'started', record, loc, files, fingerprint };
 }
 
