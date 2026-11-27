@@ -51,7 +51,17 @@ function crypt(bytes, decrypt = false) {
   const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   const r = spawnSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(source, 'utf16le').toString('base64')],
     { input: bytes.toString('base64'), encoding: 'utf8', timeout: 5000, maxBuffer: 3 * MAX_BYTES, windowsHide: true });
-  if (r.status !== 0 || r.error || !/^[A-Za-z0-9+/]+={0,2}$/.test(r.stdout || '')) fail('provisional-private-storage-unavailable');
+  if (r.status !== 0 || r.error || !/^[A-Za-z0-9+/]+={0,2}$/.test(r.stdout || '')) {
+    const code = 'provisional-private-storage-unavailable';
+    const signal = r.signal == null ? null : ['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGHUP', 'SIGABRT', 'SIGBREAK'].includes(r.signal) ? r.signal : 'other';
+    const errorCode = r.error?.code;
+    throw Object.assign(new Error(code), { code, private_storage_diagnostic: Object.freeze({
+      schema_version: 1, operation: decrypt ? 'unprotect' : 'protect',
+      reason: r.error ? 'child-error' : r.status !== 0 ? 'nonzero-status' : 'invalid-output',
+      status: Number.isInteger(r.status) && Number.isFinite(r.status) ? r.status : null,
+      signal, error_code: errorCode == null ? null : ['ETIMEDOUT', 'ENOENT', 'EACCES', 'EPERM', 'ENOBUFS', 'EINVAL', 'EIO', 'ENOEXEC', 'E2BIG', 'EAGAIN', 'ENOMEM'].includes(errorCode) ? errorCode : 'other',
+    }) });
+  }
   return Buffer.from(r.stdout, 'base64');
 }
 function signedBytes(value, keys) {

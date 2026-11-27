@@ -605,31 +605,39 @@ likely to hide a defect. The policy object from Step 1.5 already carries the spl
 ```bash
 REVIEW_SHARDS=$(node -e "process.stdout.write(String((JSON.parse(process.argv[1]).shards||[]).length))" "$REVIEW_POLICY")
 shard_files() { node -e "process.stdout.write(((JSON.parse(process.argv[1]).shards||[])[Number(process.argv[2])]||{files:[]}).files.join(' '))" "$REVIEW_POLICY" "$1"; }
-shard_dispatchable() { node -e "const shard=(JSON.parse(process.argv[1]).shards||[])[Number(process.argv[2])];process.stdout.write(String(!!shard && shard.dispatchable !== false))" "$REVIEW_POLICY" "$1"; }
+shard_dispatchable() { node -e "const shard=(JSON.parse(process.argv[1]).shards||[])[Number(process.argv[2])];process.stdout.write(String(!!shard && (process.argv[3] === 'claude' || shard.dispatchable !== false)))" "$REVIEW_POLICY" "$1" "$2"; }
+shard_blocked_count() { node -e "const native=process.argv[2] === 'claude';process.stdout.write(String((JSON.parse(process.argv[1]).shards||[]).filter(shard => !shard || (!native && shard.dispatchable === false)).length))" "$REVIEW_POLICY" "$1"; }
+REVIEW_BLOCKED_SHARDS=$(shard_blocked_count "$CHALLENGER")
 ```
 
 **Before either dispatch path, including the single-shard shortcut:** retain the
 original indexed shard roster. Each current-policy row includes `oversized`,
-`dispatchable`, `max_diff_lines: 4000` and `line_count_kind: estimate`. A row with
-`dispatchable: false` / `oversized: true` must not be dispatched on any engine.
-Record its original index, all files, estimated lines and limit under
-`## Cobertura incompleta` before considering the eligible rows. This is missing
-coverage, not a successful review, a policy skip, or an unavailable provider.
+`dispatchable`, `max_diff_lines: 4000` and `line_count_kind: estimate`. These size
+flags describe the Codex/Gemini XLLM input limit, not a Native Claude limit.
+For an external challenger, a row with `dispatchable: false` / `oversized: true`
+must not be dispatched. Record its original index, all files, estimated lines
+and limit under `## Cobertura incompleta` before considering eligible rows.
+For `challenger == 'claude'`, oversized metadata alone does not block a shard;
+keep every original file and the same file-level sharding. Compute the actual
+engine's size-blocked count with `shard_blocked_count "$CHALLENGER"`.
+A missing shard or unavailable review is still incomplete coverage on any engine.
 Never filter the roster and then recompute `REVIEW_SHARDS` from the survivors.
 
 The line estimate comes from numstat/review lines; it does not prove that an
-unflagged serialized diff fits. The challenger's actual 4000-line input guard
-remains authoritative, including framing and binary/untracked uncertainty.
+unflagged serialized diff fits. The external challengers' actual 4000-line input
+guard remains authoritative, including framing and binary/untracked uncertainty.
+Native Claude keeps its existing agent/model/context contract; this change adds
+no `max_lines` override, timeout, alias or provider retry.
 There is no supported hunk-range split in this procedure: keep the file whole
-and name its uncovered scope rather than issuing a known-invalid call.
+and name any genuinely uncovered scope.
 
 When no shard was blocked, `REVIEW_SHARDS <= 1` → **dispatch exactly as before**,
 one challenger with the original unscoped `$DIFF_CMD`. The ordinary small/empty
 case stays byte-identical.
 
 `REVIEW_SHARDS > 1`, **or any blocked shard**, → dispatch only eligible original
-indices, each with `DIFF_CMD -- <files>`. Use `shard_dispatchable $i` before either
-native or external dispatch, and `shard_files $i` for that original index.
+indices, each with `DIFF_CMD -- <files>`. Use `shard_dispatchable $i "$CHALLENGER"`
+before primary dispatch and `shard_files $i` for that original index.
 An eligible remainder must remain scoped even if only one is eligible.
 If all original shards are blocked, dispatch none and retain the explicit
 incomplete-coverage artifact; never produce global `NO_FLAGS` or a clean result.
@@ -669,8 +677,12 @@ Agent({ subagent_type: 'forge-reviewer', model: NATIVE_CHALLENGER_ALIAS,
 
 When `REVIEW_SHARDS > 1` or any original shard was blocked, the prompt's `DIFF_CMD`
 is the shard-scoped form `{DIFF_CMD} -- $(shard_files $i)`, one `Agent()` only for
-each dispatchable original index `i`. Keep this scope for a single eligible
-remainder. Everything else about the agent contract is unchanged.
+each eligible original index `i`, checked with `shard_dispatchable $i claude`.
+Keep this scope for a single eligible remainder. A Native fallback for one scoped
+external failure does not cover other original shards: preserve their existing
+blocked/unavailable ledger and `REVIEW_BLOCKED_SHARDS` until those scopes are
+actually reviewed. Do not clear global missing coverage merely because one
+fallback engine is Claude. Everything else about the agent contract is unchanged.
 
 Capture the completed subagent's `agent_id` as `REVIEWER_AGENT_ID`. Claude Code
 returns this id with a custom subagent result. It is used in Step 4 to resume the
@@ -680,7 +692,7 @@ on every rebuttal round. If no id is returned, leave `REVIEWER_AGENT_ID` empty a
 use the compatibility fallback documented in Step 4.
 
 Parse the result:
-- `NO_FLAGS` → no objections for the dispatched scope. Only write a clean artifact when no original shard was blocked or unavailable and every original shard returned successfully. Otherwise retain `## Cobertura incompleta` and the uncovered files; do not turn a scoped clean result into global `NO_FLAGS`. Proceed without claiming complete coverage.
+- `NO_FLAGS` → no objections for the dispatched scope. Only write a clean artifact when `REVIEW_BLOCKED_SHARDS == 0` for the actually reviewed original scopes, no original shard was unavailable and every original shard returned successfully. Otherwise retain `## Cobertura incompleta` and the uncovered files; do not turn a scoped clean result into global `NO_FLAGS`. Proceed without claiming complete coverage.
 - otherwise → capture the severity buckets as `OBJECTIONS` (each line carries a stable id `R#`, a `path:line`, the claim, and a `challenge:` question — see `agents/forge-reviewer.md § Output format`).
 
 If the `Agent()` call **throws** → apply **§ Agent unavailability (review-agent-unavailable)** above: retry first (Retry Handler), and only if the agent stays unavailable emit `review-challenger-unavailable` and write a `{S##}-REVIEW.md` **mínimo que registra a indisponibilidade** — never the `NO_FLAGS` clean-artifact branch above (ausência de review não é aprovação). **Review failures never abort `complete-slice`.**
@@ -698,7 +710,7 @@ fi
 XLLM_EXIT=$?
 ```
 
-- **exit 0** → stdout is JSON `{objections:[{id,severity,file,line,issue,fix,challenge}]}` (already normalized by the adapter). Map each objection into the same `OBJECTIONS` contract the Claude branch produces — id (`R#`), `path:line` (`file:line`), severity, claim (`issue`), suggested fix (`fix`), and the `challenge` question — so Steps 3/5/6 consume it identically. Empty `objections` does not erase blocked or unavailable coverage. Treat it as `NO_FLAGS` only for that dispatched scope; a global clean artifact still requires every original shard to have completed successfully. Otherwise preserve `## Cobertura incompleta` and proceed.
+- **exit 0** → stdout is JSON `{objections:[{id,severity,file,line,issue,fix,challenge}]}` (already normalized by the adapter). Map each objection into the same `OBJECTIONS` contract the Claude branch produces — id (`R#`), `path:line` (`file:line`), severity, claim (`issue`), suggested fix (`fix`), and the `challenge` question — so Steps 3/5/6 consume it identically. Empty `objections` does not erase blocked or unavailable coverage. Treat it as `NO_FLAGS` only for that dispatched scope; a global clean artifact requires `REVIEW_BLOCKED_SHARDS == 0`, no unavailable original scope and every original shard to have completed successfully. Otherwise preserve `## Cobertura incompleta` and proceed.
 - **exit != 0 with `reason_code: "agy-process-exit-unconfirmed"`** → **no fallback**: apply the Reconciliation barrier (trigger b above) and reconcile the owned tree associated with the reported `pid` first.
 - **exit != 0** (any other reason) → **single fallback** (no retry) to `Agent("forge-reviewer")` (the `challenger == 'claude'` invocation above), echo `⚠ challenger: $CHALLENGER indisponível (exit ≠ 0) — usando forge-reviewer`, and append a `review-challenger-fallback` event with `reason: "{challenger}-exit-nonzero"` (`codex-exit-nonzero` or `gemini-exit-nonzero`; cause is on the adapter's stderr). See **Fallback challenger (review-challenger-fallback)** (trigger b). The gate then continues with the agent's objections.
 
@@ -1044,7 +1056,7 @@ O orquestrador monta o `verdict` de cada item conforme § Política executável 
 review-fix e nunca decide "corrigir agora" pela prosa.
 
 **Render by the orchestrator** (same Step 6 template):
-- `no_flags: true` never overrides blocked or unavailable original shards. Write a clean artifact only with complete original coverage; otherwise retain `## Cobertura incompleta` and its files.
+- `no_flags: true` never overrides blocked or unavailable original shards. Require `REVIEW_BLOCKED_SHARDS == 0` and complete original coverage before writing a clean artifact; otherwise retain `## Cobertura incompleta` and its files.
 - Otherwise: group `items` by `resolution` into the Abertas / Concedidas / Resolvidas sections of Step 6, filling Objeção/Defesa/Réplica from the full-text fields.
 - `**Reviewed:**` stamped with `date +%Y-%m-%d` (bash in the orchestrator — **never inside the script**).
 - `Outcome` in the header calculated from item counts.

@@ -102,8 +102,23 @@ function accountBadge(envAcct) {
 
 process.stdin.setEncoding('utf8');
 let raw = '';
-process.stdin.on('data', chunk => (raw += chunk));
+let inputFrameFinished = false;
+const inputFrameDeadline = setTimeout(() => finishInputFrame(false), 5000);
+function finishInputFrame(render) {
+  if (inputFrameFinished) return false;
+  inputFrameFinished = true;
+  clearTimeout(inputFrameDeadline);
+  if (!render) {
+    raw = '';
+    process.stdin.destroy();
+  }
+  return render;
+}
+process.stdin.on('data', chunk => { if (!inputFrameFinished) raw += chunk; });
+process.stdin.on('error', () => finishInputFrame(false));
+process.stdin.on('close', () => finishInputFrame(false));
 process.stdin.on('end', () => {
+  if (!finishInputFrame(true)) return;
   try {
     const d = JSON.parse(raw);
 

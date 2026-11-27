@@ -5,6 +5,81 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
+function cryptDiagnostic() {
+  const vm = require('vm'), crypto = require('crypto');
+  const source = fs.readFileSync(path.join(__dirname, 'forge-claude-provisional.js'), 'utf8');
+  const sentinel = 'private-payload-sentinel', input = Buffer.from(sentinel);
+  const expectedCommands = {"protect":"8b7bebfdd35627e3d29ea7c88c43d53b5d87e2eab9d4953baee5209a43385328","unprotect":"dc2739cec531a4a8c7dfdbd3d464462fd6d59fced9f7ef90adab770471dec3a6"};
+  let checked = 0;
+  function fixture(response, platform = 'win32') {
+    const calls = [], forbidden = () => { throw new Error('unexpected storage access'); };
+    const context = { Buffer, process: { platform, env: { SystemRoot: 'C:\\Windows' } }, module: { exports: {} },
+      require(name) {
+        if (name === 'fs') return new Proxy({}, { get: () => forbidden });
+        if (name === 'path') return path;
+        if (name === 'crypto') return crypto;
+        if (name === 'child_process') return { spawnSync(...args) { calls.push(args); return response; } };
+        if (name === './forge-home') return { resolveUserHome: forbidden };
+        if (name === './forge-autonomy-sources') return { readBoundedStableFile: forbidden };
+        throw new Error('unexpected dependency');
+      } };
+    vm.runInNewContext(source + '\nglobalThis.testCrypt = crypt;', context, { timeout: 1000 });
+    return { crypt: context.testCrypt, calls, exports: context.module.exports };
+  }
+  function assertSpawn(calls, decrypt) {
+    assert.equal(calls.length, 1);
+    const [command, args, options] = calls[0];
+    assert.equal(command, path.join('C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'));
+    assert.deepEqual(Array.from(args.slice(0, 4)), ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand']);
+    assert.equal(args.length, 5);
+    assert.equal(crypto.createHash('sha256').update(args[4]).digest('hex'), expectedCommands[decrypt ? 'unprotect' : 'protect']);
+    assert.deepEqual(JSON.parse(JSON.stringify(options)), { input: input.toString('base64'), encoding: 'utf8', timeout: 5000, maxBuffer: 3 * 1048576, windowsHide: true });
+  }
+  function refused(decrypt, response, expected) {
+    const f = fixture({ stdout: sentinel, stderr: sentinel, ...response });
+    let error;
+    try { f.crypt(input, decrypt); } catch (value) { error = value; }
+    assert(error);
+    assert.equal(error.code, 'provisional-private-storage-unavailable');
+    assert.equal(error.message, error.code);
+    assert.deepEqual(Object.keys(error).sort(), ['code', 'private_storage_diagnostic']);
+    const d = error.private_storage_diagnostic;
+    assert(Object.isFrozen(d));
+    assert.deepEqual(JSON.parse(JSON.stringify(d)), { schema_version: 1, operation: decrypt ? 'unprotect' : 'protect', ...expected });
+    const serialized = JSON.stringify(error);
+    assert(!serialized.includes(sentinel));
+    assert(!serialized.includes(input.toString('base64')));
+    assert(!serialized.includes('powershell'));
+    assert(!serialized.includes('secret-path'));
+    assertSpawn(f.calls, decrypt);
+    checked++;
+  }
+  for (const decrypt of [false, true]) {
+    const success = fixture({ status: 0, signal: null, stdout: 'AAECA/8=' });
+    assert(success.crypt(input, decrypt).equals(Buffer.from([0, 1, 2, 3, 255])));
+    assertSpawn(success.calls, decrypt);
+    assert(!Object.hasOwn(success.exports, 'crypt'));
+    checked++;
+    for (const code of ['ETIMEDOUT', 'ENOENT', 'EACCES', 'EPERM', 'ENOBUFS', 'EINVAL', 'EIO', 'ENOEXEC', 'E2BIG', 'EAGAIN', 'ENOMEM']) {
+      refused(decrypt, { status: null, signal: null, error: { code, message: sentinel, path: 'secret-path' } }, { reason: 'child-error', status: null, signal: null, error_code: code });
+    }
+    refused(decrypt, { status: 7, signal: 'SIGTERM', error: { code: 'ETIMEDOUT', message: sentinel } }, { reason: 'child-error', status: 7, signal: 'SIGTERM', error_code: 'ETIMEDOUT' });
+    refused(decrypt, { status: null, signal: 'SECRET_SIGNAL', error: { code: sentinel } }, { reason: 'child-error', status: null, signal: 'other', error_code: 'other' });
+    refused(decrypt, { status: 7, signal: null }, { reason: 'nonzero-status', status: 7, signal: null, error_code: null });
+    refused(decrypt, { status: null, signal: 'SIGKILL' }, { reason: 'nonzero-status', status: null, signal: 'SIGKILL', error_code: null });
+    for (const status of [Infinity, 0.5, undefined]) refused(decrypt, { status, signal: null }, { reason: 'nonzero-status', status: null, signal: null, error_code: null });
+    for (const stdout of ['', '%%invalid%%', 'AQID\n']) refused(decrypt, { status: 0, signal: null, stdout }, { reason: 'invalid-output', status: 0, signal: null, error_code: null });
+  }
+  const nonWindows = fixture(null, 'linux');
+  assert.equal(nonWindows.crypt(input), input);
+  assert.equal(nonWindows.calls.length, 0);
+  checked++;
+  console.log('PASS provisional crypt diagnostic VM controls=' + checked + '; real child/storage operations=0');
+}
+if (process.argv.length === 3 && process.argv[2] === '--crypt-diagnostic') {
+  cryptDiagnostic();
+  process.exit(0);
+}
 const api = require('./forge-claude-provisional');
 
 const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-provisional-test-')));
