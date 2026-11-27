@@ -235,12 +235,19 @@ function normalizeReviewConfig(review) {
 const SHARD_MIN_LINES   = 1500; // below this a single challenger is comfortable
 const SHARD_TARGET_LINES = 800; // aim per shard once splitting
 const SHARD_MAX          = 6;   // ceiling on parallel challengers per review
+const REVIEW_DIFF_MAX_LINES = 4000; // mirrors the final challenger input guard
 
 function planReviewShards(entries, opts) {
   const o = opts || {};
   const minLines = positiveInt(o.minLines, SHARD_MIN_LINES);
   const target = positiveInt(o.targetLines, SHARD_TARGET_LINES);
   const maxShards = positiveInt(o.maxShards, SHARD_MAX);
+  // Numstat/review_lines are planning estimates, not a serialized-diff proof.
+  // Preserve every whole-file bin; callers record blocked coverage before any
+  // single-shard shortcut instead of paying for a known-invalid dispatch.
+  const boundedShard = shard => ({ ...shard, max_diff_lines: REVIEW_DIFF_MAX_LINES,
+    line_count_kind: 'estimate', oversized: shard.lines > REVIEW_DIFF_MAX_LINES,
+    dispatchable: shard.lines <= REVIEW_DIFF_MAX_LINES });
   const list = (Array.isArray(entries) ? entries : [])
     .map((entry) => ({
       file: normalizePath(entry && entry.file),
@@ -251,7 +258,7 @@ function planReviewShards(entries, opts) {
     .filter((entry) => entry.file);
   const total = list.reduce((sum, entry) => sum + entry.lines, 0);
   if (list.length <= 1 || total < minLines) {
-    return list.length ? [{ files: list.map((e) => e.file), lines: total }] : [];
+    return list.length ? [boundedShard({ files: list.map((e) => e.file), lines: total })] : [];
   }
   const count = Math.max(2, Math.min(maxShards, list.length, Math.ceil(total / target)));
   const shards = Array.from({ length: count }, () => ({ files: [], lines: 0 }));
@@ -263,7 +270,7 @@ function planReviewShards(entries, opts) {
   }
   // A shard can end up empty when files < count is impossible by construction,
   // but stay defensive: never hand the caller a dispatch with no files.
-  return shards.filter((shard) => shard.files.length > 0);
+  return shards.filter((shard) => shard.files.length > 0).map(boundedShard);
 }
 
 function decideReview(input) {

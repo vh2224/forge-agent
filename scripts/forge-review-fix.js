@@ -886,6 +886,22 @@ function observeNativeSvn(request, preparation, cwd) {
 // Git retains its commit policy; SVN requires strict local evidence and no SHA.
 function acceptNativeReviewFix(request, options) {
   const r = request || {};
+  // A malformed, explicitly supplied container is a caller defect, not a
+  // worker failure to publish. Inspect its own descriptor without invoking a
+  // rawResult getter, before locations, observers, runner or metadata writes.
+  let raw = {};
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(r, 'rawResult');
+    if (descriptor) {
+      const value = descriptor.value;
+      if (!Object.prototype.hasOwnProperty.call(descriptor, 'value')
+          || value === null || typeof value !== 'object' || Array.isArray(value)
+          || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) {
+        throw refusal('review-fix-native-result-input-invalid');
+      }
+      raw = value;
+    }
+  } catch (_) { throw refusal('review-fix-native-result-input-invalid'); }
   const opts = options || {};
   const runner = opts.runner || spawnSync;
   const unit = require('./forge-unit-sidecar');
@@ -911,7 +927,6 @@ function acceptNativeReviewFix(request, options) {
     assertRecordedAdmission(r, loc, buildBrief({ boundary: loc.reviewFix.boundary, unitLabel: loc.reviewFix.unitLabel, items,
       claimPaths: claim.paths, route: r.route }), root, preparation);
   }
-  const raw = r.rawResult || {};
   const status = raw.status;
   const sha = typeof (raw.commit_sha ?? raw.sha) === 'string' ? (raw.commit_sha ?? raw.sha).trim().toLowerCase() : '';
   const autoCommit = Boolean(r.constraints && r.constraints.auto_commit === true);

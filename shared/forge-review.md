@@ -605,16 +605,37 @@ likely to hide a defect. The policy object from Step 1.5 already carries the spl
 ```bash
 REVIEW_SHARDS=$(node -e "process.stdout.write(String((JSON.parse(process.argv[1]).shards||[]).length))" "$REVIEW_POLICY")
 shard_files() { node -e "process.stdout.write(((JSON.parse(process.argv[1]).shards||[])[Number(process.argv[2])]||{files:[]}).files.join(' '))" "$REVIEW_POLICY" "$1"; }
+shard_dispatchable() { node -e "const shard=(JSON.parse(process.argv[1]).shards||[])[Number(process.argv[2])];process.stdout.write(String(!!shard && shard.dispatchable !== false))" "$REVIEW_POLICY" "$1"; }
 ```
 
-`REVIEW_SHARDS <= 1` → **dispatch exactly as before**, one challenger, unscoped
-`$DIFF_CMD`. Nothing below applies. This is the common case and stays byte-identical.
+**Before either dispatch path, including the single-shard shortcut:** retain the
+original indexed shard roster. Each current-policy row includes `oversized`,
+`dispatchable`, `max_diff_lines: 4000` and `line_count_kind: estimate`. A row with
+`dispatchable: false` / `oversized: true` must not be dispatched on any engine.
+Record its original index, all files, estimated lines and limit under
+`## Cobertura incompleta` before considering the eligible rows. This is missing
+coverage, not a successful review, a policy skip, or an unavailable provider.
+Never filter the roster and then recompute `REVIEW_SHARDS` from the survivors.
 
-`REVIEW_SHARDS > 1` → dispatch one challenger **per shard**, each with the diff
-scoped to its own files (`DIFF_CMD -- <files>`), and merge. Shards are files, never
-hunks: an agent must never see half a function. Splitting is deterministic
-(`planReviewShards`, files sorted by size into the lightest shard), so a resumed
-review re-derives the identical split. Cap: 6 challengers.
+The line estimate comes from numstat/review lines; it does not prove that an
+unflagged serialized diff fits. The challenger's actual 4000-line input guard
+remains authoritative, including framing and binary/untracked uncertainty.
+There is no supported hunk-range split in this procedure: keep the file whole
+and name its uncovered scope rather than issuing a known-invalid call.
+
+When no shard was blocked, `REVIEW_SHARDS <= 1` → **dispatch exactly as before**,
+one challenger with the original unscoped `$DIFF_CMD`. The ordinary small/empty
+case stays byte-identical.
+
+`REVIEW_SHARDS > 1`, **or any blocked shard**, → dispatch only eligible original
+indices, each with `DIFF_CMD -- <files>`. Use `shard_dispatchable $i` before either
+native or external dispatch, and `shard_files $i` for that original index.
+An eligible remainder must remain scoped even if only one is eligible.
+If all original shards are blocked, dispatch none and retain the explicit
+incomplete-coverage artifact; never produce global `NO_FLAGS` or a clean result.
+Shards are files, never hunks: an agent must never see half a function. Splitting
+is deterministic (`planReviewShards`, files sorted by size into the lightest
+shard), so a resumed review re-derives the identical split. Cap: 6 challengers.
 
 **Merging.** Renumber the surviving objections sequentially in shard order (`R1`,
 `R2`, …) so Steps 3–5 keep one flat, stably-identified list — they are unchanged and
@@ -646,9 +667,10 @@ Agent({ subagent_type: 'forge-reviewer', model: NATIVE_CHALLENGER_ALIAS,
   prompt: "WORKING_DIR: {CODE_DIR}\nOWNER_DIR: {WORKING_DIR}\nUNIT: complete-slice/{S##}\nDIFF_CMD: {DIFF_CMD}" })
 ```
 
-When `REVIEW_SHARDS > 1`, the prompt's `DIFF_CMD` is the shard-scoped form
-`{DIFF_CMD} -- $(shard_files $i)`, one `Agent()` per shard `i`. Everything else about
-the agent contract is unchanged.
+When `REVIEW_SHARDS > 1` or any original shard was blocked, the prompt's `DIFF_CMD`
+is the shard-scoped form `{DIFF_CMD} -- $(shard_files $i)`, one `Agent()` only for
+each dispatchable original index `i`. Keep this scope for a single eligible
+remainder. Everything else about the agent contract is unchanged.
 
 Capture the completed subagent's `agent_id` as `REVIEWER_AGENT_ID`. Claude Code
 returns this id with a custom subagent result. It is used in Step 4 to resume the
@@ -658,7 +680,7 @@ on every rebuttal round. If no id is returned, leave `REVIEWER_AGENT_ID` empty a
 use the compatibility fallback documented in Step 4.
 
 Parse the result:
-- `NO_FLAGS` → no objections. Write a clean `{S##}-REVIEW.md` ("Reviewer found nothing to challenge."), proceed. Done.
+- `NO_FLAGS` → no objections for the dispatched scope. Only write a clean artifact when no original shard was blocked or unavailable and every original shard returned successfully. Otherwise retain `## Cobertura incompleta` and the uncovered files; do not turn a scoped clean result into global `NO_FLAGS`. Proceed without claiming complete coverage.
 - otherwise → capture the severity buckets as `OBJECTIONS` (each line carries a stable id `R#`, a `path:line`, the claim, and a `challenge:` question — see `agents/forge-reviewer.md § Output format`).
 
 If the `Agent()` call **throws** → apply **§ Agent unavailability (review-agent-unavailable)** above: retry first (Retry Handler), and only if the agent stays unavailable emit `review-challenger-unavailable` and write a `{S##}-REVIEW.md` **mínimo que registra a indisponibilidade** — never the `NO_FLAGS` clean-artifact branch above (ausência de review não é aprovação). **Review failures never abort `complete-slice`.**
@@ -676,7 +698,7 @@ fi
 XLLM_EXIT=$?
 ```
 
-- **exit 0** → stdout is JSON `{objections:[{id,severity,file,line,issue,fix,challenge}]}` (already normalized by the adapter). Map each objection into the same `OBJECTIONS` contract the Claude branch produces — id (`R#`), `path:line` (`file:line`), severity, claim (`issue`), suggested fix (`fix`), and the `challenge` question — so Steps 3/5/6 consume it identically. Empty `objections` array → treat as `NO_FLAGS` (write a clean `{S##}-REVIEW.md`, proceed).
+- **exit 0** → stdout is JSON `{objections:[{id,severity,file,line,issue,fix,challenge}]}` (already normalized by the adapter). Map each objection into the same `OBJECTIONS` contract the Claude branch produces — id (`R#`), `path:line` (`file:line`), severity, claim (`issue`), suggested fix (`fix`), and the `challenge` question — so Steps 3/5/6 consume it identically. Empty `objections` does not erase blocked or unavailable coverage. Treat it as `NO_FLAGS` only for that dispatched scope; a global clean artifact still requires every original shard to have completed successfully. Otherwise preserve `## Cobertura incompleta` and proceed.
 - **exit != 0 with `reason_code: "agy-process-exit-unconfirmed"`** → **no fallback**: apply the Reconciliation barrier (trigger b above) and reconcile the owned tree associated with the reported `pid` first.
 - **exit != 0** (any other reason) → **single fallback** (no retry) to `Agent("forge-reviewer")` (the `challenger == 'claude'` invocation above), echo `⚠ challenger: $CHALLENGER indisponível (exit ≠ 0) — usando forge-reviewer`, and append a `review-challenger-fallback` event with `reason: "{challenger}-exit-nonzero"` (`codex-exit-nonzero` or `gemini-exit-nonzero`; cause is on the adapter's stderr). See **Fallback challenger (review-challenger-fallback)** (trigger b). The gate then continues with the agent's objections.
 
@@ -1022,7 +1044,7 @@ O orquestrador monta o `verdict` de cada item conforme § Política executável 
 review-fix e nunca decide "corrigir agora" pela prosa.
 
 **Render by the orchestrator** (same Step 6 template):
-- `no_flags: true` → write a clean `{S##}-REVIEW.md` ("Reviewer found nothing to challenge.").
+- `no_flags: true` never overrides blocked or unavailable original shards. Write a clean artifact only with complete original coverage; otherwise retain `## Cobertura incompleta` and its files.
 - Otherwise: group `items` by `resolution` into the Abertas / Concedidas / Resolvidas sections of Step 6, filling Objeção/Defesa/Réplica from the full-text fields.
 - `**Reviewed:**` stamped with `date +%Y-%m-%d` (bash in the orchestrator — **never inside the script**).
 - `Outcome` in the header calculated from item counts.
@@ -1484,7 +1506,8 @@ Agent({ subagent_type: 'forge-executor',
   prompt: "WORKING_DIR: {WORKING_DIR}\nUNIT: review-fix/{S##}\n{isolation header lines when ISOLATION_MODE != shared}\nFix ONLY the conceded review items listed below. Minimal diffs — no refactors, no scope creep beyond the listed items. Run the lint/format commands if configured. Honor constraints.auto_commit: when true, commit only claimed fixes with message fix(review): {S##} conceded items; when false, leave changes uncommitted and return no commit SHA\nCLAIM_PATHS: {claimPaths}\nCONSTRAINTS: {constraints}\n\n## Conceded items\n{for each CONCEDED review_file/R# pair: review_file (when supplied), R# — path:line — verify_paths — objeção: <claim> — ação: <suggested_fix (use advocate concession rationale when suggested_fix is absent, e.g. in agents engine)> — contexto: <defense.rationale>}\n\nReturn ---GSD-WORKER-RESULT--- with status: done|partial|blocked, commit_sha: <actual SHA when constraints.auto_commit=true and status=done; null otherwise>, and items: [{r: R#, review_file: <copy when supplied>, outcome: fixed|failed|skipped, note: <verification evidence>}]. Include exactly one items entry per listed review_file/R# pair; repeated R# in different review files are distinct. Report fixed only after verifying that item. Do not create task PLAN/SUMMARY or modify Forge metadata; this is a review-fix unit." })
 ```
 
-- On success → the parent adds the exact `nativePreparation` and `rawResult` (worker block, including `commit_sha` and one `items[{r,review_file?,outcome,note}]` per review-file/R# pair) to the same request and runs `node "$FORGE_SCRIPTS_DIR/forge-review-fix.js" --accept-native "$RF_NATIVE_REQUEST"`. Git retains its SHA/ancestry/reachability and dirty-content checks for both commit policies. SVN requires the strict preparation, refuses any SHA (`review-fix-svn-unexpected-sha`), baseline movement (`review-fix-baseline-moved`), missing/mismatched preparation (`review-fix-native-preparation-invalid`) or invalid/incomplete snapshot (`review-fix-native-snapshot-invalid`). Both repeat the physical guard; changed `.gsd` descendants receive `review-fix-protected-metadata` before generic `review-fix-outside-claim`. Only reported `fixed` with an observed primary-path change is verified. The parent alone publishes per-R# outcomes, guarded by the original REVIEW hashes (`review-fix-review-conflict`) and review_file/R# correlation. SVN verified fixes remain uncommitted.
+- On success → the parent adds the exact `nativePreparation` and `rawResult` (the parsed plain object from the worker block, including `commit_sha` and one `items[{r,review_file?,outcome,note}]` per review-file/R# pair) to the same request and runs `node "$FORGE_SCRIPTS_DIR/forge-review-fix.js" --accept-native "$RF_NATIVE_REQUEST"`. Git retains its SHA/ancestry/reachability and dirty-content checks for both commit policies. SVN requires the strict preparation, refuses any SHA (`review-fix-svn-unexpected-sha`), baseline movement (`review-fix-baseline-moved`), missing/mismatched preparation (`review-fix-native-preparation-invalid`) or invalid/incomplete snapshot (`review-fix-native-snapshot-invalid`). Both repeat the physical guard; changed `.gsd` descendants receive `review-fix-protected-metadata` before generic `review-fix-outside-claim`. Only reported `fixed` with an observed primary-path change is verified. The parent alone publishes per-R# outcomes, guarded by the original REVIEW hashes (`review-fix-review-conflict`) and review_file/R# correlation. SVN verified fixes remain uncommitted. A delimited worker-result text string is not this object.
+- On `review-fix-native-result-input-invalid` → caller input was refused before observation/publication. Correct the parsing/container and retry the same prepared acceptance. Do not write failure outcomes, restore REVIEW bytes, invoke another worker, or infer `provider_called: false`: the worker may already have run. An explicitly present value must be a plain object; absence alone keeps the documented worker-failure path.
 - On `Agent()` throw, `status != done` or `review-fix-native-unverified` → update each: `**Correção:** falhou — deferida para triagem final`. These items join the OPEN items in the milestone-final triage (Step 9). **Never blocks** — the gate proceeds to `complete-slice` regardless.
 
 ### Sidecar review-fix branch (`RF_WORKER_MODE == sidecar`, engine claude|codex)

@@ -96,8 +96,13 @@ function ensureCacheDirectory(file) {
 
 // Stats are read with { bigint: true }: on Windows/NTFS the 64-bit file ID loses precision as a
 // Number, so two distinct files can compare equal and a swap between lstat and open goes unnoticed.
-function sameFile(left, right) {
-  return String(left.dev) === String(right.dev) && String(left.ino) === String(right.ino);
+function sameFile(left, right, allowPathDeviceZero = false) {
+  // Node 22 on Windows can report zero for lstat's device but the real volume
+  // for fstat. This exception belongs only to pathname-to-descriptor checks;
+  // descriptor-to-descriptor identity remains exact, including zero devices.
+  const sameDevice = String(left.dev) === String(right.dev)
+    || (allowPathDeviceZero && process.platform === 'win32' && left.dev === 0n && right.dev > 0n);
+  return sameDevice && String(left.ino) === String(right.ino);
 }
 
 function validateBoundedFile(stat, maxBytes, policy) {
@@ -120,7 +125,7 @@ function readBoundedFile(file, maxBytes, policy) {
   try {
     const opened = fs.fstatSync(fd, { bigint: true });
     validateBoundedFile(opened, maxBytes, policy);
-    if (!sameFile(before, opened)) throw new Error(policy.error);
+    if (!sameFile(before, opened, true)) throw new Error(policy.error);
     const buffer = Buffer.alloc(maxBytes + 1);
     let length = 0;
     while (length <= maxBytes) {
