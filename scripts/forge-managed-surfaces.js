@@ -134,7 +134,7 @@ const DECLARATION_TEXT = String.raw`
       "mutable_fields": [],
       "schema_fields": [],
       "validator": "append-jsonl-v1",
-      "limits": { "max_bytes": 1048576, "max_append_bytes": 65536, "max_append_lines": 128, "max_line_bytes": 2048 },
+      "limits": { "max_bytes": 2097152, "max_append_bytes": 1048576, "max_append_lines": 4096, "max_line_bytes": 2048 },
       "writers": ["scripts/forge-owner-transport-window.js#appendHookEvidence"],
       "capability": "host-attested-append",
       "attestation": "scripts/forge-protected-owner-activity.js#hookAppendProof"

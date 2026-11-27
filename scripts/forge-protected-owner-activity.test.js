@@ -7,10 +7,10 @@ const roots=require('./forge-code-roots'),runs=require('./forge-runs'),execution
 const support=require('./forge-issues-434-436.test'),successor=require('./forge-sidecar-verification-successor');
 const sha=b=>crypto.createHash('sha256').update(b).digest('hex');
 const put=(file,bytes)=>{fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,bytes);};
-async function fixture(action){return support.fixture(async f=>{
+async function fixture(action,answers={}){return support.fixture(async f=>{
   const file=path.join(f.a,'.gsd/forge/events.jsonl'),prefix=Buffer.from('{"retained":true}\n');put(file,prefix);
   const h=support.historical(f),decision=activity.reconciliationDecision(h.request),owner=questions.openQuestions(decision);
-  questions.answer({cwd:f.owner,identity:owner.identity_sha256,answers:[{id:'owner-delta-approval',answer:'aprovar',source:'tool-answer'}]});
+  questions.answer({cwd:f.owner,identity:owner.identity_sha256,answers:[{id:'owner-delta-approval',answer:answers.ownerAnswer??'aprovar',source:'tool-answer'}]});
   const ts=new Date().toISOString(),triple=[{ts,kind:'resource-admission',reason:'platform-unsupported:win32',source:'platform-degraded',workers:2,pressureLevel:null},
     {ts,kind:'resource-pool-granted',granted:2,ceiling:2,reason:'pool-granted'},
     {ts,kind:'resource-pool-released',granted:2,reason:'pool-released'}];
@@ -20,7 +20,7 @@ async function fixture(action){return support.fixture(async f=>{
   const proposal=activity.codeRootAppendDecision(h.request,rootOptions),opened=questions.openQuestions(proposal);
   const answerFile=path.join(f.owner,'.gsd/forge/questions',opened.identity_sha256+'.json');
   const originFile=path.join(f.owner,'.gsd/forge/questions',opened.identity_sha256+'.origin.json');
-  const answer=()=>questions.answer({cwd:f.owner,identity:opened.identity_sha256,answers:[{id:'code-root-append-approval',answer:'aprovar',source:'tool-answer'}]});
+  const answer=()=>questions.answer({cwd:f.owner,identity:opened.identity_sha256,answers:[{id:'code-root-append-approval',answer:answers.rootAnswer??'aprovar',source:'tool-answer'}]});
   const options=()=>({request:h.request,hostRuntime:'codex',operatorDecision:owner.identity_sha256,
     assertAuthority:()=>true,attestStoppedWriter:()=>true,readPendingQuestions:()=>[],originalBytes:h.originalBytes,
     attestChanges:challenge=>({challenge_sha256:roots.digest(challenge),changes:challenge.changes.map(row=>({...row,
@@ -216,7 +216,60 @@ async function assertGenuineNativeActivityPhase(runtime,profileHandle,expected){
   }
 }
 
+
+// Issues 501/502: canonical immutable answers and both real hook consumers.
+async function approvalLabelCases() {
+  const positive=['aprovar','aprovado','sim','autorizar','Autorizar (Recomendado)','Aprovar (Recommended)'];
+  for(const answer of positive)await fixture(async x=>{
+    x.answer();const pins=[x.answerFile,x.originFile].map(file=>[file,fs.readFileSync(file)]);
+    const cap=activity.createOwnerReconciliation(x.options());activity.withOwnerReconciliationRead(cap,x.h.request,()=>{});
+    for(const[file,bytes]of pins)assert(fs.readFileSync(file).equals(bytes),'saved answer/origin stays byte-exact');
+  },{ownerAnswer:answer,rootAnswer:answer});
+  for(const answer of ['nao','Autorizar somente estes arquivos','Autorizar (Recommended) extra','Autorizar (Recomendado) (Recommended)','Autorizar\n(Recomendado)']){
+    await fixture(async x=>{x.answer();assert.throws(()=>activity.createOwnerReconciliation(x.options()),/owner-reconciliation-operator-decision-required/);},{ownerAnswer:answer});
+    await fixture(async x=>{x.answer();assert.throws(()=>activity.createOwnerReconciliation(x.options()),/root-append-answer-required/);},{rootAnswer:answer});
+  }
+  console.log('PASS approval labels: exact enum/one PT or EN suffix; negatives and immutable canonical answers');
+}
+async function hookAppendBudgetCases() {await support.fixture(async f=>{
+  const relative='.gsd/forge/evidence-budget.jsonl',file=path.join(f.owner,relative),prefix=Buffer.from('{"retained":true}\n');let calls=0,last;
+  const attestAppend=challenge=>{calls++;last=challenge;return{observed:true,reference:'synthetic bounded hook observation'};};
+  function proof(suffix,{original=prefix,before=original,bytes=Buffer.concat([before,suffix]),attest=attestAppend}={}){
+    put(file,bytes);return activity.hookAppendProof(f.owner,{path:relative,before:sha(original),after:sha(bytes)},
+      {originalBytes:{[relative]:original},attestAppend:attest},'execute-task/T01','fixture-dispatch');
+  }
+  const medium=Buffer.from(Array.from({length:193},(_,i)=>JSON.stringify({i,pad:'x'.repeat(230)})+'\n').join(''));
+  proof(medium);assert.equal(last.rows,193);assert.equal(last.appended_sha256,sha(medium));assert(fs.readFileSync(file).subarray(0,prefix.length).equals(prefix));
+  proof(Buffer.from('{}\n'.repeat(4096)));assert.equal(last.rows,4096);
+  const base=Buffer.from(JSON.stringify({payload:''})+'\n'),max=1024*1024;
+  const sized=n=>Buffer.from(JSON.stringify({payload:'x'.repeat(n-base.length)})+'\n');
+  const exact=Buffer.from(sized(2048).toString().repeat(512));assert.equal(exact.length,max);proof(exact);assert.equal(last.rows,512);assert.equal(last.appended_sha256,sha(exact));
+  const largerPrefix=Buffer.from(sized(2048).toString().repeat(768)),remaining=Buffer.from(sized(2048).toString().repeat(256));
+  proof(remaining,{original:largerPrefix});assert.equal(fs.statSync(file).size,2*max);assert.equal(last.original_sha256,sha(largerPrefix));
+  assert.throws(()=>proof(Buffer.concat([remaining,Buffer.from('{}\n')]),{original:largerPrefix}),/protected-owner-source-invalid/);
+  for(const suffix of [Buffer.from('{}\n'.repeat(4097)),sized(max+1),Buffer.from('{invalid}\n'),Buffer.from('{}')]){
+    const priorCalls=calls;assert.throws(()=>proof(suffix),/owner-reconciliation-(?:delta-limit|append-invalid)|protected-owner-source-invalid/);assert.equal(calls,priorCalls,'invalid append never reaches attestation');
+  }
+  assert.throws(()=>proof(Buffer.from('{}\n'),{before:Buffer.from('wrong-prefix\n')}),/append-invalid/);
+  assert.throws(()=>proof(Buffer.from('{}\n'),{attest:()=>({observed:false})}),/hook-proof-required/);
+  console.log('PASS hook budget:193/4096 lines, exact1MiB suffix/2MiB total with1.5MiB prefix, over-limit/JSON/LF/prefix/attestation negatives');
+});}
+async function classifiedHookBudgetCase(){await support.fixture(async f=>{
+  const journal='.gsd/forge/evidence-budget.jsonl',file=path.join(f.owner,journal),prefix=Buffer.from('{"retained":true}\n');put(file,prefix);
+  const h=support.historical(f),suffix=Buffer.from('{}\n'.repeat(193));fs.appendFileSync(file,suffix);
+  const decision=activity.reconciliationDecision(h.request),opened=questions.openQuestions(decision);
+  questions.answer({cwd:f.owner,identity:opened.identity_sha256,answers:[{id:'owner-delta-approval',answer:'Autorizar (Recomendado)',source:'tool-answer'}]});
+  const answerFile=path.join(f.owner,'.gsd/forge/questions',opened.identity_sha256+'.json'),answerBytes=fs.readFileSync(answerFile);
+  const options={request:h.request,hostRuntime:'codex',operatorDecision:opened.identity_sha256,assertAuthority:()=>true,attestStoppedWriter:()=>true,readPendingQuestions:()=>[],originalBytes:h.originalBytes,
+    attestChanges:challenge=>({challenge_sha256:roots.digest(challenge),changes:challenge.changes.map(row=>({...row,
+      kind:row.path.includes('/questions')?'decision-record':row.path.includes('/runs/')?'canonical-stop':row.path===journal?'hook-append':row.path.includes('/leases/')?'same-unit-lease-clock':row.path==='.gsd/forge/auto-mode.json'?'canonical-stop':'operator-reviewed',reference:'synthetic exact classified hook observation'}))})};
+  const cap=activity.createOwnerReconciliation(options);activity.withOwnerReconciliationRead(cap,h.request,()=>{});
+  assert(fs.readFileSync(file).equals(Buffer.concat([prefix,suffix])));assert(fs.readFileSync(answerFile).equals(answerBytes));support.unchanged(f,h);
+  console.log('PASS classified hook-append consumer admits193 exact retained rows with fresh scoped answer');
+});}
+
 async function main(){
+  await approvalLabelCases();await hookAppendBudgetCases();await classifiedHookBudgetCase();
   await fixture(async x=>{
     await nativeProfileForgeryNegatives(x);
     assert.throws(()=>activity.createOwnerReconciliation(x.options()),/root-append-answer-required/,'unanswered cannot authorize');
