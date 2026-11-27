@@ -235,6 +235,19 @@ function normalizeReviewConfig(review) {
 const SHARD_MIN_LINES   = 1500; // below this a single challenger is comfortable
 const SHARD_TARGET_LINES = 800; // aim per shard once splitting
 const SHARD_MAX          = 6;   // ceiling on parallel challengers per review
+// The external challenger adapter (forge-xllm.js MAX_DIFF_LINES) refuses any diff
+// above this many lines with review-diff-too-large before calling a provider. The
+// shard cap can still pack more than that into one shard (or one file can exceed
+// it alone), so such a shard is marked here: dispatching it can only fail, and the
+// procedure records it as incomplete coverage instead. Changed lines are a lower
+// bound on the diff's own line count, so a marked shard is always refused.
+const CHALLENGER_MAX_DIFF_LINES = 4000;
+
+function markOversized(shard) {
+  return shard.lines > CHALLENGER_MAX_DIFF_LINES
+    ? { ...shard, oversized: true, max_lines: CHALLENGER_MAX_DIFF_LINES }
+    : shard;
+}
 
 function planReviewShards(entries, opts) {
   const o = opts || {};
@@ -251,7 +264,7 @@ function planReviewShards(entries, opts) {
     .filter((entry) => entry.file);
   const total = list.reduce((sum, entry) => sum + entry.lines, 0);
   if (list.length <= 1 || total < minLines) {
-    return list.length ? [{ files: list.map((e) => e.file), lines: total }] : [];
+    return list.length ? [markOversized({ files: list.map((e) => e.file), lines: total })] : [];
   }
   const count = Math.max(2, Math.min(maxShards, list.length, Math.ceil(total / target)));
   const shards = Array.from({ length: count }, () => ({ files: [], lines: 0 }));
@@ -263,7 +276,7 @@ function planReviewShards(entries, opts) {
   }
   // A shard can end up empty when files < count is impossible by construction,
   // but stay defensive: never hand the caller a dispatch with no files.
-  return shards.filter((shard) => shard.files.length > 0);
+  return shards.filter((shard) => shard.files.length > 0).map(markOversized);
 }
 
 function decideReview(input) {
@@ -452,6 +465,7 @@ module.exports = {
   normalizeReviewConfig,
   decideReview,
   planReviewShards,
+  CHALLENGER_MAX_DIFF_LINES,
   decideMemory,
   failOpenOnDiffError,
   runCli,

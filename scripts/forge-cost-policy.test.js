@@ -13,6 +13,7 @@ const {
   decideMemory,
   failOpenOnDiffError,
   planReviewShards,
+  CHALLENGER_MAX_DIFF_LINES,
 } = require('./forge-cost-policy.js');
 
 let passed = 0;
@@ -238,6 +239,33 @@ test('one oversized file stays whole — never half a function', () => {
   const shards = planReviewShards([file('src/huge.ts', 50000, 0)]);
   assert.strictEqual(shards.length, 1);
   assert.deepStrictEqual(shards[0].files, ['src/huge.ts']);
+});
+
+// #485: the shard cap can pack more lines into one shard than the external
+// challenger accepts; such a shard is refused before any provider call, so the
+// policy must say so instead of handing the caller a dispatch that cannot succeed.
+test('a shard above the challenger diff limit is marked oversized', () => {
+  const single = planReviewShards([file('src/huge.ts', 50000, 0)]);
+  assert.strictEqual(single[0].oversized, true);
+  assert.strictEqual(single[0].max_lines, CHALLENGER_MAX_DIFF_LINES);
+  const packed = planReviewShards(many(500, 900));
+  assert.ok(packed.some((s) => s.lines > CHALLENGER_MAX_DIFF_LINES), 'fixture must exceed the limit');
+  for (const shard of packed) {
+    assert.strictEqual(shard.oversized === true, shard.lines > CHALLENGER_MAX_DIFF_LINES, `shard ${shard.lines}`);
+  }
+});
+
+test('shards within the challenger limit carry no oversized marker', () => {
+  for (const shard of planReviewShards(many(20, 400))) {
+    assert.ok(!('oversized' in shard) && !('max_lines' in shard));
+  }
+});
+
+test('the oversized limit matches the challenger adapter refusal', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'forge-xllm.js'), 'utf8');
+  const m = src.match(/const MAX_DIFF_LINES = (\d+);/);
+  assert.ok(m, 'forge-xllm.js MAX_DIFF_LINES not found');
+  assert.strictEqual(Number(m[1]), CHALLENGER_MAX_DIFF_LINES);
 });
 
 test('a binary file is charged a line so it cannot look free', () => {

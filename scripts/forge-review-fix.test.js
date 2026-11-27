@@ -513,6 +513,29 @@ test('native prompts supply the complete result contract accepted for repeated r
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('native acceptance refuses an unparsed rawResult before publishing any REVIEW outcome', () => {
+  const dir = repo();
+  try {
+    const files = ['.gsd/milestones/M001/slices/S01/S01-REVIEW.md'];
+    const items = [{ r: 'R1', review_file: files[0], path: 'src/a.js' }];
+    fs.mkdirSync(path.dirname(path.join(dir, files[0])), { recursive: true }); fs.writeFileSync(path.join(dir, files[0]), REVIEW);
+    const startSha = git(dir, 'rev-parse', 'HEAD');
+    const preDirty = require('./forge-xllm').captureDirtySnapshot(dir);
+    fs.writeFileSync(path.join(dir, 'src/a.js'), 'fixed\n');
+    const base = { cwd: dir, contextRoot: dir, milestoneId: 'M001', startSha, preDirty, constraints: { auto_commit: false },
+      reviewFix: { boundary: 'milestone-triage', decision: 'proceed', items, claimPaths: ['src/a.js'] } };
+    const block = '---GSD-WORKER-RESULT---\nstatus: done\ncommit_sha: null\nitems:\n- r: R1\n  outcome: fixed\n';
+    for (const rawResult of [block, [{ r: 'R1', outcome: 'fixed' }], null, 7]) {
+      assert.strictEqual(code(() => rf.acceptNativeReviewFix({ ...base, rawResult })), 'review-fix-native-result-invalid');
+      assert.strictEqual(fs.readFileSync(path.join(dir, files[0]), 'utf8'), REVIEW);
+    }
+    // The corrected object is then accepted against the untouched REVIEW.
+    const accepted = rf.acceptNativeReviewFix({ ...base, rawResult: { status: 'done', commit_sha: null,
+      items: [{ r: 'R1', review_file: files[0], outcome: 'fixed', note: 'checked' }] } });
+    assert.deepStrictEqual(accepted.items.map(item => item.verified), [true]);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('verify_paths survives normalization, claim, identity and prompt with literal limits', () => {
   const items = rf.normalizeItems([{ r: 'R1', path: 'src/a.js', verify_paths: ['test\\b.js', 'test/a.js', 'test/b.js'] }]);
   assert.deepStrictEqual(items[0].verify_paths, ['test/a.js', 'test/b.js']);

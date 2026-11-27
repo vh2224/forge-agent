@@ -905,6 +905,13 @@ function acceptNativeReviewFix(request, options) {
   const preparation = r.nativePreparation;
   const expectedHashes = preparation ? preparation.reviewSnapshot : r.reviewSnapshot;
   if (!r.reviewFix || r.reviewFix.decision !== 'proceed') throw refusal('review-fix-claim-mismatch', 'claim gate decision must be proceed');
+  // A present rawResult must already be the parsed worker object. Text, arrays
+  // or other shapes are a caller defect: refuse before any REVIEW.md write so the
+  // corrected acceptance is not blocked by its own failure publication.
+  // An absent rawResult remains the documented worker-failure path.
+  if (r.rawResult !== undefined && (!r.rawResult || typeof r.rawResult !== 'object' || Array.isArray(r.rawResult))) {
+    throw refusal('review-fix-native-result-invalid', 'rawResult must be the parsed worker result object {status, commit_sha, items}');
+  }
   // Slice and task publish only for a recorded admitted decision; refused here,
   // before any observation or REVIEW.md write. milestone-triage is unchanged.
   if (['slice', 'task'].includes(loc.reviewFix.boundary)) {
