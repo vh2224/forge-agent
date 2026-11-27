@@ -776,7 +776,17 @@ function reconciliationView(request, operatorDecision, options = {}) {
   const { reconciliation: ignored, ...immutableState } = state;
   if (roots.digest(immutableState) !== baseline.state_sha256 || state.attempt !== r.dispatchId
       || roots.digest(state.execution_contract) !== roots.digest(contract)
-      || roots.key(baseline.input.path) !== roots.key(r.planFile) || sha(regular(r.planFile)) !== baseline.input.sha256) fail('owner-reconciliation-baseline-invalid');
+      || roots.key(baseline.input.path) !== roots.key(r.planFile)) fail('owner-reconciliation-baseline-invalid');
+  // Issue 498: an approved verify-policy correction may leave the plan at its
+  // corrected bytes; the original attempt bytes must still prove the baseline.
+  const planBytes = regular(r.planFile), planSha = sha(planBytes), correction = options.policyCorrection;
+  if (correction !== undefined && (!Buffer.isBuffer(correction?.originalPlanBytes) || sha(correction.originalPlanBytes) !== baseline.input.sha256
+      || planSha === baseline.input.sha256)) fail('owner-reconciliation-policy-correction-invalid');
+  if (planSha !== baseline.input.sha256 && correction === undefined) fail('owner-reconciliation-baseline-invalid');
+  if (correction !== undefined) {
+    const stripVerify = require('./forge-sidecar-verification-successor').withoutVerifyBlock;
+    if (stripVerify(correction.originalPlanBytes.toString('utf8')) !== stripVerify(planBytes.toString('utf8'))) fail('owner-reconciliation-policy-correction-scope');
+  }
   const execution = require('./forge-task-execution'), current = execution.protectedSnapshot(owner);
   const before = baseline.protected_owner;
   if (!before || typeof before !== 'object') fail('owner-reconciliation-baseline-invalid');
@@ -793,13 +803,16 @@ function reconciliationView(request, operatorDecision, options = {}) {
   if (changes.length > 64) fail('owner-reconciliation-delta-limit');
   const deltaSha = roots.digest({ owner, unit: `execute-task/${r.taskId}`, dispatch_id: r.dispatchId, changes: reviewed,
     ...(hooks.length ? { hook_baselines: hooks } : {}) });
-  return { r, owner, contract, receiptFile, receiptBytes, receipt, baseline, stateBytes, current, before, changes, reviewed, carriers, deltaSha, hooks };
+  return { r, owner, contract, receiptFile, receiptBytes, receipt, baseline, stateBytes, current, before, changes, reviewed, carriers, deltaSha, hooks,
+    planSha, policyCorrection: correction !== undefined };
 }
 function decisionForView(view, deltaSha = view.deltaSha, changes = view.reviewed) {
   const r = view.r;
   return { cwd: view.owner, unit: `execute-task/${r.taskId}`, milestone: r.milestoneId,
     slice: r.sliceId, task: r.taskId, workflow_id: r.milestoneId, decision_set: `owner-delta/${deltaSha}`,
-    questions: [{ id: 'owner-delta-approval', question: `Autorizar somente os deltas de metadados revisados ${deltaSha} para ${r.milestoneId}/${r.taskId}? Nenhum plano, claim ou código será aceito como alterado.` }],
+    questions: [{ id: 'owner-delta-approval', question: view.policyCorrection
+      ? `Autorizar somente os deltas de metadados revisados ${deltaSha} para ${r.milestoneId}/${r.taskId}, incluindo a correção do bloco verify: do plano (${view.baseline.input.sha256} → ${view.planSha})? Nenhum outro plano, claim ou código será aceito como alterado.`
+      : `Autorizar somente os deltas de metadados revisados ${deltaSha} para ${r.milestoneId}/${r.taskId}? Nenhum plano, claim ou código será aceito como alterado.` }],
     delta_sha256: deltaSha, changes };
 }
 function reconciliationDecision(request, operatorDecision, options = {}) {
@@ -962,7 +975,7 @@ function createOwnerReconciliation(options = {}) {
     if (!Array.isArray(pending) || pending.some(q => q?.status !== 'resolved')) fail('owner-reconciliation-pending-questions');
     const current = runs.get(view.owner, r.runId || r.milestoneId), currentActor = runs.observeHostSession(actor.hostRuntime, process.env.FORGE_CLAUDE_OWNER_SESSION_ID);
     if (!current?.active || current.session_id !== actor.sessionId || currentActor?.sessionId !== actor.sessionId
-        || roots.digest(current.write_claim) !== roots.digest(r.claim) || sha(regular(r.planFile)) !== view.baseline.input.sha256) fail('owner-reconciliation-authority-changed');
+        || roots.digest(current.write_claim) !== roots.digest(r.claim) || sha(regular(r.planFile)) !== view.planSha) fail('owner-reconciliation-authority-changed');
     roots.validateContract(view.contract, { owner: view.owner, revalidate: true });
     const receipt = regular(view.receiptFile, 8 * 1024 * 1024);
     if (!receipt.equals(view.receiptBytes)) fail('owner-reconciliation-parent-changed');
@@ -1029,6 +1042,17 @@ function createOwnerReconciliation(options = {}) {
     }
     const isDecision = view.carriers.has(change.path) || options.operatorDecision && change.path === '.gsd/forge/questions/';
     if (isDecision) { if (!operatorApproved || row.kind !== 'decision-record') fail('owner-reconciliation-operator-decision-required'); }
+    else if (row.kind === 'policy-correction') {
+      // Issue 498: only the corrected plan (exact original -> corrected bytes) and
+      // its task plan gate, under an approved owner decision with the correction.
+      const planRelative = path.relative(view.owner, r.planFile).replace(/\\/g, '/');
+      const gateRelative = planRelative.replace(/-PLAN\.md$/, '-PLAN-GATE.md');
+      const gateText = change.path === gateRelative ? regular(path.join(view.owner, gateRelative)).toString('utf8') : '';
+      const gateOk = change.path === gateRelative && sha(Buffer.from(gateText)) === change.after && /^status:\s*approved\s*$/m.test(gateText)
+        && gateText.match(/^plan_sha256:\s*([a-f0-9]{64})\s*$/m)?.[1] === view.planSha;
+      if (!view.policyCorrection || !operatorApproved
+          || !(change.path === planRelative && change.before === view.baseline.input.sha256 && change.after === view.planSha || gateOk)) fail('owner-reconciliation-policy-correction-invalid');
+    }
     else if (row.kind === 'operator-reviewed') {
       const note = /^\.gsd\/(?:HANDOFF[-A-Za-z0-9_.]*\.md|sessions\/[A-Za-z0-9_.-]+\.md)$/.test(change.path);
       if (!operatorApproved || !note && !canonical(change.path) && change.path !== leasePath

@@ -457,3 +457,31 @@ ready produzido pelo gate vivo pode publicar. Não reutilize ou serialize a
 capacidade, não aceite uma captura salva como autoridade e não confunda o reparo
 com o sucessor existente para timeout. Uma falha de verificação permanece falha;
 o complete do begin original ainda exige entrega comprovada.
+
+### Correção da política de verificação (#498)
+
+Quando a tentativa milestone executada falhou porque o bloco `verify:` do plano
+nunca poderia passar (defeito do chamador ou do plano, não do worker), use
+`forge-sidecar-verification-successor.create({..., policyCorrection:{originalPlanBytes,
+approveCorrection}})` em vez de `timeoutMs` (os dois juntos recusam com
+`verification-successor-policy-mixing`). Regras:
+
+- `originalPlanBytes` são os bytes exatos do plano da tentativa: o hash precisa
+  bater com `recovery_baseline.input.sha256` e o selo reconstruído com eles
+  precisa ser igual ao `verification_seal` do receipt.
+- O plano atual só pode diferir no bloco `verify:` do frontmatter; qualquer outro
+  byte (frontmatter, must_haves, writes, corpo) recusa com
+  `verification-successor-correction-scope`. Selo igual ao original recusa com
+  `verification-successor-correction-unchanged`.
+- O selo novo é derivado do plano corrigido com o mesmo pedido, identidade e
+  bindings, que são revalidados contra ele antes da captura.
+- `attestFailure` observa a falha real (exit diferente de 0 no comando original)
+  e ela precisa bater com a captura retida.
+- `approveCorrection(challenge)` é o callback vivo que observa a decisão explícita
+  do operador sobre os hashes dos dois planos, dos dois selos e os comandos novos;
+  só `{approved:true, reference}` cria a capacidade.
+- Na publicação, o hash do plano corrigido só é aceito a partir da capacidade viva
+  (nunca do JSON do registro), e o snapshot protegido do owner admite apenas a
+  transição exata daquele plano (original → corrigido).
+
+Nenhuma inferência nova acontece; receipt, resultado e S0 originais ficam intactos.

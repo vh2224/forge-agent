@@ -673,11 +673,17 @@ function assertMemberModes(request, record) {
   }
   if (canonicalDigest(captureMemberModes(request, files)) !== canonicalDigest(modes)) fail('batch-member-mode-changed');
 }
-function assertMilestoneDeliveryReplay(request, record) {
+// Issue 498: `policyCorrection` comes only from a live verification successor
+// capability (never from the record JSON). It admits exactly the approved
+// corrected plan bytes of the original attempt's plan.
+function assertMilestoneDeliveryReplay(request, record, policyCorrection = null) {
   if (!record.milestone_delivery) return;
   const saved = record.milestone_delivery, api = require('./forge-task-execution');
   require('./forge-code-roots').validateContract(request.execution_contract, { revalidate: true });
-  if (hash(readExecutionInput(request.planFile)) !== saved.plan_sha256) fail('execution-input-changed');
+  const planSha = hash(readExecutionInput(request.planFile));
+  const corrected = policyCorrection && policyCorrection.original_plan_sha256 === saved.plan_sha256
+    && policyCorrection.corrected_plan_sha256 === planSha;
+  if (planSha !== saved.plan_sha256 && !corrected) fail('execution-input-changed');
   for (const entry of saved.protected_roots) api.assertProtected(entry.path, entry.snapshot);
   if (JSON.stringify(api.replayState(request.cwd, request.execution_contract)) !== JSON.stringify(saved.code_state)) fail('execution-replay-baseline-changed');
 }
@@ -1221,7 +1227,8 @@ function materialize(request, record, publicationGuard, publicationLock, options
   publicationGuard?.();
   // Issue 343 U0c: a new plan-slice generation publishes only its admitted bytes.
   assertPlanGenerationPublication(request, record, root);
-  assertMilestoneDeliveryReplay(request, record);
+  assertMilestoneDeliveryReplay(request, record, record.verification_successor && options.verificationSuccessor
+    ? require('./forge-sidecar-verification-successor').read(options.verificationSuccessor, request).info.policy_correction || null : null);
   if (record.execution || record.milestone_delivery) {
     if (record.execution) require('./forge-task-execution').assertReplay(request, record);
     if (request.ownerBroker) require('./forge-artifact-reconciliation').assertBroker(request.ownerBroker)
@@ -2598,7 +2605,7 @@ async function completeExecutionCore(context, record, deferredEvents = null) {
   else if (record.milestone_delivery) {
     const api = require('./forge-task-execution');
     const saved = record.milestone_delivery;
-    assertMilestoneDeliveryReplay(r, record);
+    assertMilestoneDeliveryReplay(r, record, context.verificationSuccessor?.info?.policy_correction || null);
     // A cohort member's owner surface is the cohort's common signed stream, after the barrier.
     if (member) {
       assertMemberModes(r, record);
