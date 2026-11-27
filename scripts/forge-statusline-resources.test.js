@@ -72,6 +72,65 @@ function appendEvent(gsdDir, obj) {
   fs.appendFileSync(file, JSON.stringify(obj) + '\n', 'utf8');
 }
 
+// Input lifetime regression: execute the actual read loop with a renderer stub.
+// No subprocess, real stdin, project reads, refresh or OS observation is needed.
+(() => {
+  const vm = require('node:vm');
+  const { EventEmitter } = require('node:events');
+  const source = fs.readFileSync(STATUSLINE, 'utf8');
+  const start = source.indexOf("process.stdin.setEncoding('utf8');\n");
+  const body = source.indexOf('  try {\n    const d = JSON.parse(raw);', start);
+  assert(start >= 0 && body > start, '(input) original input/render boundary exists');
+  if (start < 0 || body <= start) return;
+  const script = new vm.Script(source.slice(start, body) + '  process.stdout.write(raw);\n});\n', { filename: STATUSLINE });
+  function fixture() {
+    const stdin = new EventEmitter(), timers = [], output = [];
+    let now = 0, destroys = 0, unrefs = 0, encoding = null;
+    stdin.setEncoding = value => { encoding = value; };
+    stdin.destroy = () => { destroys++; stdin.emit('close'); };
+    script.runInNewContext({
+      process: { stdin, stdout: { write: value => output.push(value) } },
+      setTimeout(fn, ms) { const timer = { fn, at: now + ms, ms, cleared: false, fired: false, unref() { unrefs++; } }; timers.push(timer); return timer; },
+      clearTimeout(timer) { timer.cleared = true; },
+    });
+    return { stdin, timers, output,
+      advance(ms) { now += ms; for (const timer of timers) if (!timer.cleared && !timer.fired && timer.at <= now) { timer.fired = true; timer.fn(); } },
+      facts() { return { destroys, unrefs, encoding }; },
+    };
+  }
+  for (const partial of ['', '{"model":']) {
+    const f = fixture();
+    if (partial) f.stdin.emit('data', partial);
+    assert(f.timers.length === 1 && f.timers[0].ms === 5000 && f.facts().unrefs === 0, '(input) one referenced five-second frame deadline');
+    f.advance(4999);
+    assert(f.output.length === 0 && f.facts().destroys === 0, '(input) an open frame remains unread before deadline');
+    f.advance(1);
+    assert(f.output.length === 0 && f.facts().destroys === 1 && f.timers[0].cleared, '(input) deadline discards frame and destroys only own stdin');
+    f.stdin.emit('data', 'late'); f.stdin.emit('end'); f.stdin.emit('error', new Error('late')); f.stdin.emit('close');
+    assert(f.output.length === 0 && f.facts().destroys === 1, '(input) no output or second destroy after timeout and late events');
+  }
+  {
+    const f = fixture(), first = '{"model":{"display_name":"', last = '"}}', label = String.fromCodePoint(0x1f528);
+    f.stdin.emit('data', first); f.stdin.emit('data', label); f.stdin.emit('data', last); f.stdin.emit('end');
+    assert(f.facts().encoding === 'utf8' && f.output.length === 1 && f.output[0] === first + label + last, '(input) EOF passes exact accumulated UTF-8 frame to original renderer boundary');
+    assert(f.timers[0].cleared && f.facts().destroys === 0, '(input) normal EOF clears deadline without destroying completed stream');
+    f.advance(5000); f.timers[0].fn(); f.stdin.emit('data', 'late'); f.stdin.emit('end'); f.stdin.emit('close'); f.stdin.emit('error', new Error('late'));
+    assert(f.output.length === 1 && f.facts().destroys === 0, '(input) completed EOF cannot render twice or abort after stale callbacks');
+  }
+  for (const event of ['error', 'close']) {
+    const f = fixture(); f.stdin.emit('data', '{"model":');
+    if (event === 'error') f.stdin.emit(event, new Error('fixture input failure')); else f.stdin.emit(event);
+    assert(f.output.length === 0 && f.facts().destroys === 1 && f.timers[0].cleared, `(input) ${event} aborts silently and clears deadline`);
+    f.stdin.emit('data', 'late'); f.stdin.emit('end'); f.stdin.emit('error', new Error('late')); f.stdin.emit('close'); f.advance(5000); f.timers[0].fn();
+    assert(f.output.length === 0 && f.facts().destroys === 1, `(input) ${event} plus late EOF/error/close/timeout settles once`);
+  }
+})();
+
+if (process.argv.includes('--input-frame-only')) {
+  process.stdout.write(`\n${passed} passed, ${failed} failed\n`);
+  process.exit(failed === 0 ? 0 : 1);
+}
+
 // Ownership transfer refreshes metadata, without proving a loop is running.
 for (const multiple of [false, true]) {
   const dir = mkTmp(multiple ? 'retained-multiple' : 'retained-single');
