@@ -28,6 +28,11 @@ const remove       = process.argv.includes('--remove');
 const mcpAdd       = process.argv.includes('--mcp-add');
 const mcpRemove    = process.argv.includes('--mcp-remove');
 const mcpList      = process.argv.includes('--mcp-list');
+const migrateStatuslineOnly = process.argv.includes('--migrate-statusline-command-only');
+if (migrateStatuslineOnly && (remove || mcpAdd || mcpRemove || mcpList)) {
+  fs.writeSync(1, JSON.stringify({ ok: false, changed: false, reason: 'statusline-migration-invalid-arguments' }) + '\n');
+  process.exit(1);
+}
 
 if (!settingsFile) {
   console.error('Usage: node merge-settings.js <settings.json path> [--remove]');
@@ -40,7 +45,7 @@ if (!settingsFile) {
 // Read existing settings (or start fresh)
 let settings = {};
 try {
-  settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+  if (!migrateStatuslineOnly) settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
 } catch { /* file doesn't exist or invalid — start empty */ }
 
 const FORGE_HOOK_MARKER = 'forge-hook.js';
@@ -294,6 +299,125 @@ function statuslineCommand() {
   if (resolved === conventional) return STATUSLINE_CONVENTIONAL;
   const script = path.join(resolved, 'scripts', 'forge-statusline.js').split(path.sep).join('/');
   return `node "${script}"`;
+}
+
+function migrateLegacyStatuslineCommand() {
+  const crypto = require('crypto'), equal = require('util').isDeepStrictEqual;
+  const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+  const fail = code => { throw Object.assign(new Error(code), { code }); };
+  const legacy = 'node ~/.claude/forge-statusline.js';
+  const args = process.argv.slice(3), opts = { dryRun: false };
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--migrate-statusline-command-only') continue;
+    if (args[i] === '--dry-run' && !opts.dryRun) { opts.dryRun = true; continue; }
+    const key = args[i] === '--backup' ? 'backup' : args[i] === '--expected-sha256' ? 'expected' : null;
+    if (!key || opts[key] !== undefined || !args[i + 1]) fail('statusline-migration-invalid-arguments');
+    opts[key] = args[++i];
+  }
+  const signature = st => [st.dev, st.ino, st.mode, st.nlink, st.size, st.mtimeNs, st.ctimeNs].map(String).join(':');
+  // Match the delivered update-check rule: only Windows pathname device zero
+  // may differ at the path-to-descriptor boundary. Open descriptor checks stay exact.
+  const pathMatches = (left, right) => (String(left.dev) === String(right.dev)
+    || process.platform === 'win32' && left.dev === 0n && right.dev > 0n)
+    && [left.ino, left.mode, left.nlink, left.size, left.mtimeNs, left.ctimeNs].map(String).join(':')
+      === [right.ino, right.mode, right.nlink, right.size, right.mtimeNs, right.ctimeNs].map(String).join(':');
+  function checkedRead(file) {
+    const st = fs.lstatSync(file, { bigint: true });
+    if (!st.isFile() || st.isSymbolicLink() || st.nlink !== 1n || st.size > 1024n * 1024n) fail('statusline-migration-untrusted-file');
+    const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+    try {
+      const opened = fs.fstatSync(fd, { bigint: true });
+      if (!pathMatches(st, opened)) fail('statusline-migration-file-changed');
+      const bytes = fs.readFileSync(fd);
+      if (signature(fs.fstatSync(fd, { bigint: true })) !== signature(opened)) fail('statusline-migration-file-changed');
+      return { bytes, stat: st, signature: signature(st), real: fs.realpathSync.native(file) };
+    } finally { fs.closeSync(fd); }
+  }
+  if (!forgeHome) fail('statusline-migration-helper-unavailable');
+  let before;
+  try { before = checkedRead(settingsFile); } catch (error) {
+    if (error.code === 'ENOENT') return { ok: true, changed: false, reason: 'settings-missing' };
+    throw error;
+  }
+  if (require('./forge-projection-self').isSelfProjection({ repo: path.resolve(__dirname, '..'), source: 'shared/templates/claude/settings.jsonc', destination: settingsFile })) fail('statusline-migration-self-target');
+  const text = before.bytes.toString('utf8');
+  if (!Buffer.from(text).equals(before.bytes)) return { ok: true, changed: false, reason: 'unsupported-encoding' };
+  let data;
+  try { data = JSON.parse(text); } catch (_) { return { ok: true, changed: false, reason: 'settings-invalid-json' }; }
+  if (!data || typeof data !== 'object' || Array.isArray(data) || !data.statusLine || typeof data.statusLine !== 'object' || Array.isArray(data.statusLine)
+      || data.statusLine.type !== 'command' || data.statusLine.command !== legacy) return { ok: true, changed: false, reason: 'not-exact-legacy-command' };
+  const token = JSON.stringify(legacy), offset = text.indexOf(token);
+  if (offset < 0 || text.indexOf(token, offset + token.length) !== -1 || (text.match(/"statusLine"\s*:/g) || []).length !== 1) return { ok: true, changed: false, reason: 'ambiguous-legacy-command' };
+  // JSON is already valid. This local span check only rejects duplicate/escaped
+  // target keys; it is not a replacement JSON parser or a config editor.
+  const strings = [];
+  const masked = text.replace(/"(?:\\.|[^"\\])*"/g, (raw, start) => {
+    strings.push({ raw, start, end: start + raw.length, value: JSON.parse(raw) });
+    return ' '.repeat(raw.length);
+  });
+  let depth = 0, cursor = 0;
+  for (let i = 0; i < masked.length; i++) {
+    if (cursor < strings.length && strings[cursor].start === i) strings[cursor++].depth = depth;
+    if (masked[i] === '{' || masked[i] === '[') depth++;
+    else if (masked[i] === '}' || masked[i] === ']') depth--;
+  }
+  const nonspace = (start, source = masked) => { while (start < source.length && /[ \t\r\n]/.test(source[start])) start++; return start; };
+  const key = token => masked[nonspace(token.end)] === ':';
+  const roots = strings.filter(t => t.depth === 1 && t.value === 'statusLine' && key(t));
+  if (roots.length !== 1 || roots[0].raw !== '"statusLine"') return { ok: true, changed: false, reason: 'ambiguous-legacy-command' };
+  const open = nonspace(nonspace(roots[0].end) + 1);
+  let close = open, level = 0;
+  for (; close < masked.length; close++) {
+    if (masked[close] === '{' || masked[close] === '[') level++;
+    else if (masked[close] === '}' || masked[close] === ']') level--;
+    if (level === 0) break;
+  }
+  const commands = strings.filter(t => t.start > open && t.end < close && t.depth === 2 && t.value === 'command' && key(t));
+  if (masked[open] !== '{' || commands.length !== 1 || commands[0].raw !== '"command"'
+      || nonspace(nonspace(commands[0].end) + 1, text) !== offset) return { ok: true, changed: false, reason: 'ambiguous-legacy-command' };
+
+  const command = statuslineCommand(), candidate = text.slice(0, offset) + JSON.stringify(command) + text.slice(offset + token.length);
+  const expected = JSON.parse(text); expected.statusLine.command = command;
+  if (!equal(JSON.parse(candidate), expected)) return { ok: true, changed: false, reason: 'ambiguous-legacy-command' };
+  const bytes = Buffer.from(candidate), sourceScript = path.join(__dirname, 'forge-statusline.js'), script = path.join(path.resolve(forgeHome.resolveForgeHome({})), 'scripts', 'forge-statusline.js');
+  const sourceHash = hash(fs.readFileSync(sourceScript)), result = { ok: true, changed: true, reason: 'legacy-statusline-command', before_sha256: hash(before.bytes), after_sha256: hash(bytes), command, entrypoint: script, expected_entrypoint_sha256: sourceHash, dry_run: opts.dryRun };
+  if (opts.dryRun) return result;
+  if (!opts.expected || !/^[a-f0-9]{64}$/.test(opts.expected) || opts.expected !== result.before_sha256) fail('statusline-migration-file-changed');
+  if (!opts.backup || !path.isAbsolute(opts.backup)) fail('statusline-migration-backup-required');
+  const backupRoot = path.resolve(forgeHome.resolveForgeHome({}), 'backups'), relative = path.relative(backupRoot, path.resolve(opts.backup));
+  if (!relative || relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) fail('statusline-migration-backup-untrusted');
+  const target = checkedRead(script);
+  if (hash(target.bytes) !== sourceHash) fail('statusline-migration-entrypoint-mismatch');
+  function unchanged() {
+    const current = checkedRead(settingsFile);
+    if (current.real !== before.real || current.signature !== before.signature || hash(current.bytes) !== result.before_sha256) fail('statusline-migration-file-changed');
+  }
+  unchanged();
+  let directory = path.resolve(forgeHome.resolveForgeHome({}));
+  for (const part of ['backups', ...path.dirname(relative).split(path.sep).filter(p => p !== '.')]) {
+    directory = path.join(directory, part);
+    if (!fs.existsSync(directory)) fs.mkdirSync(directory, { mode: 0o700 });
+    const st = fs.lstatSync(directory);
+    if (!st.isDirectory() || st.isSymbolicLink()) fail('statusline-migration-backup-untrusted');
+  }
+  try { fs.writeFileSync(opts.backup, before.bytes, { flag: 'wx', mode: 0o600 }); }
+  catch (_) { fail('statusline-migration-backup-failed'); }
+  if (hash(checkedRead(opts.backup).bytes) !== result.before_sha256) fail('statusline-migration-backup-failed');
+  unchanged();
+  const temp = path.join(path.dirname(settingsFile), '.forge-statusline-' + crypto.randomUUID() + '.tmp');
+  fs.writeFileSync(temp, bytes, { flag: 'wx', mode: Number(before.stat.mode & 0o777n) });
+  try { unchanged(); fs.renameSync(temp, settingsFile); }
+  finally { if (fs.existsSync(temp)) { try { if (hash(checkedRead(temp).bytes) === result.after_sha256) fs.unlinkSync(temp); } catch (_) { /* preserve an unrecognized temporary */ } } }
+  if (hash(checkedRead(settingsFile).bytes) !== result.after_sha256) fail('statusline-migration-write-verification-failed');
+  return { ...result, backup: opts.backup, active_entrypoint_sha256: sourceHash };
+}
+
+if (migrateStatuslineOnly) {
+  try { fs.writeSync(1, JSON.stringify(migrateLegacyStatuslineCommand()) + '\n'); process.exit(0); }
+  catch (error) {
+    const reason = typeof error.code === 'string' && /^statusline-migration-[a-z-]+$/.test(error.code) ? error.code : 'statusline-migration-io-failed';
+    fs.writeSync(1, JSON.stringify({ ok: false, changed: false, reason }) + '\n'); process.exit(1);
+  }
 }
 
 const explicitRefreshInterval = settings.statusLine

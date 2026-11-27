@@ -359,6 +359,51 @@ function installApp(repo, plan, options, platform) {
   return { requested: true, status: 'installed', script, destination: '/Applications/Forge.app' };
 }
 
+function migrateLegacyStatusline(repo, paths, backupRoot, plan, options) {
+  const file = path.join(paths.claudeHome, 'settings.json');
+  if (!exists(file)) return { changed: false, reason: 'settings-missing' };
+  let stat;
+  try { stat = fs.lstatSync(file); } catch (_) { return { changed: false, reason: 'settings-unreadable' }; }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > 1024 * 1024) {
+    return { changed: false, reason: 'settings-untrusted-preserved' };
+  }
+  if (require('./forge-projection-self').isSelfProjection({ repo, source: 'shared/templates/claude/settings.jsonc', destination: file })) {
+    return { changed: false, reason: 'settings-self-target-preserved' };
+  }
+  let settings;
+  try { settings = JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch (_) { return { changed: false, reason: 'settings-invalid-json' }; }
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings)
+      || settings.statusLine?.type !== 'command' || settings.statusLine.command !== 'node ~/.claude/forge-statusline.js') {
+    return { changed: false, reason: 'not-exact-legacy-command' };
+  }
+  const script = path.join(repo, 'scripts', 'merge-settings.js');
+  const env = { ...process.env, ...options.env, FORGE_HOME: paths.forgeHome, HOME: paths.userHome, USERPROFILE: paths.userHome };
+  function invoke(args) {
+    const result = spawnSync(process.execPath, [script, file, '--migrate-statusline-command-only', ...args], {
+      cwd: repo, env, encoding: 'utf8', windowsHide: true, shell: false, timeout: 15000, maxBuffer: 16384,
+    });
+    let report;
+    try { report = JSON.parse(result.stdout || ''); } catch (_) { /* named refusal below, never raw stderr */ }
+    if (result.status !== 0 || result.signal || result.error || !report || report.ok !== true) {
+      const reason = report && typeof report.reason === 'string' && /^statusline-migration-[a-z-]+$/.test(report.reason)
+        ? report.reason : 'statusline-migration-helper-failed';
+      throw Object.assign(new Error(reason), { code: reason });
+    }
+    return report;
+  }
+  const preview = invoke(['--dry-run']);
+  if (!preview.changed) return preview;
+  const backup = path.join(backupRoot, 'adapters', 'claude', 'settings.json');
+  const applied = options.dryRun ? preview : invoke(['--backup', backup, '--expected-sha256', preview.before_sha256]);
+  if (!applied.changed || applied.before_sha256 !== preview.before_sha256 || applied.after_sha256 !== preview.after_sha256
+      || applied.command !== preview.command) throw Object.assign(new Error('statusline-migration-file-changed'), { code: 'statusline-migration-file-changed' });
+  plan.push({ op: 'copy', source: file, destination: backup, reason: 'legacy-statusline-command-backup', ...(options.dryRun ? { dry_run: true } : {}) });
+  plan.push({ op: 'write', destination: file, reason: 'legacy-statusline-command-migration', managed_fields: ['statusLine.command'],
+    before_sha256: preview.before_sha256, after_sha256: preview.after_sha256, ...(options.dryRun ? { dry_run: true } : {}) });
+  return { ...applied, backup };
+}
+
 function install(input = {}) {
   const options = { ...input };
   const runtime = options.runtime || 'claude';
@@ -482,6 +527,8 @@ function install(input = {}) {
     if (fs.statSync(source).isDirectory()) copyTree(source, destination, plan, options, relative => isRuntimeFile(path.join(item, relative)));
     else copyFile(source, destination, plan, options);
   }
+  const statuslineMigration = options.update && selected.includes('claude')
+    ? migrateLegacyStatusline(repo, paths, backupRoot, plan, options) : null;
   if (options.update && options.deferDevelopmentRetirement !== true) retireDevelopmentFiles(repo, paths.forgeHome, backupRoot, plan, options);
   else if (options.update) plan.push({ op: 'skip', reason: 'development-retirement-deferred', destination: paths.forgeHome });
   // Review schemas historically lived under shared/schemas in the repository,
@@ -655,7 +702,7 @@ function install(input = {}) {
   }));
   const backupPath = path.resolve(backupRoot);
   const hasBackup = options.update && plan.some((entry) => entry.destination && (path.resolve(entry.destination) === backupPath || path.resolve(entry.destination).startsWith(`${backupPath}${path.sep}`)));
-  return { ok: true, changed: plan.some((entry) => entry.op === 'copy' || entry.op === 'write' || entry.op === 'app-build' || entry.op === 'vscode-panel-install'), dry_run: Boolean(options.dryRun), runtime, selected, forge_home: paths.forgeHome, runtime_homes: Object.fromEntries(selected.map((host) => [host, paths.runtimeHomes[host]])), backup: hasBackup ? backupRoot : null, capabilities, presentation, plan, manifest, app, vscode_panel: panel };
+  return { ok: true, changed: plan.some((entry) => entry.op === 'copy' || entry.op === 'write' || entry.op === 'app-build' || entry.op === 'vscode-panel-install'), dry_run: Boolean(options.dryRun), runtime, selected, forge_home: paths.forgeHome, runtime_homes: Object.fromEntries(selected.map((host) => [host, paths.runtimeHomes[host]])), backup: hasBackup ? backupRoot : null, capabilities, presentation, statusline_migration: statuslineMigration, plan, manifest, app, vscode_panel: panel };
 }
 
 /**
@@ -676,6 +723,7 @@ function planLines(report) {
 
 function render(report) {
   const lines = [`Forge Agent Installer ${VERSION}`, `runtime: ${report.runtime}`, `Forge home: ${report.forge_home}`];
+  if (report.statusline_migration) lines.push(`status line command: ${report.statusline_migration.changed ? 'legacy command migrated' : 'preserved (' + report.statusline_migration.reason + ')'}`);
   if (report.capabilities) {
     const state = report.capabilities.ok ? 'ok' : `failed (${report.capabilities.required_failures.join(', ') || 'inconclusive'})`;
     lines.push(`Capabilities: ${state}`);
