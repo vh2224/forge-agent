@@ -12,9 +12,9 @@ accounts.resolveLaunch=()=>({name:'fixture376',token:'fixture-not-a-real-token'}
 const prep=require('./forge-task-preparation'),unit=require('./forge-unit-sidecar'),windows=require('./forge-owner-transport-window'),runs=require('./forge-runs'),controller=require('./forge-unit-controller'),execution=require('./forge-task-execution');
 accounts.resolveLaunch=realResolve;
 const digest=value=>crypto.createHash('sha256').update(typeof value==='string'?value:JSON.stringify(value)).digest('hex');
-const selectors={native:'native live',distributed:'distributed native',legacy:'legacy separate',claude:'real production',raw:'unknown cleanup',broker:'cohort owner',budget:'mutation acquisition',prestart:'pre-attempt refusal'},selector=process.argv[2];
+const selectors={native:'native live',distributed:'distributed native',legacy:'legacy separate',claude:'real production',raw:'unknown cleanup',broker:'cohort owner',budget:'mutation acquisition',prestart:'pre-attempt refusal',refused:'native refused'},selector=process.argv[2];
 if(selector&&!selectors[selector])throw new Error('unknown fixture selector');
-process.once('beforeExit',()=>{if(results.length!==(selector?1:8)){process.exitCode=1;fs.writeFileSync(path.join(lab,'INCOMPLETE.json'),JSON.stringify({completed:results,children:children.map(row=>({pid:row.child.pid,closed:row.closed,exitCode:row.child.exitCode,connected:row.child.connected}))},null,2));}});
+process.once('beforeExit',()=>{if(results.length!==(selector?1:9)){process.exitCode=1;fs.writeFileSync(path.join(lab,'INCOMPLETE.json'),JSON.stringify({completed:results,children:children.map(row=>({pid:row.child.pid,closed:row.closed,exitCode:row.child.exitCode,connected:row.child.connected}))},null,2));}});
 const summary=value=>JSON.stringify({ok:value?.ok,reason_code:value?.reason_code,diagnostic:value?.diagnostic});
 function command(bin,args,cwd){const r=cp.spawnSync(bin,args,{cwd,encoding:'utf8',env:{...process.env},windowsHide:true,timeout:20000});assert.equal(r.status,0,r.stderr||String(r.error));return r.stdout;}
 let seq=0;
@@ -148,6 +148,30 @@ async function run(name,action){if(selector&&!name.startsWith(selectors[selector
    assert.equal(closed.closed,true);assert.equal(windows.observed(c.contextRoot),null);assert.deepEqual(ops,['join-cli-settlement-no-attempt','settle-cli-preparation-no-attempt']);
    const d=refusing();windows.coordinatePreparation(prep.validateRequest(d),prep.preparationRequestFingerprint(prep.validateRequest(d)),{create:true,operation:'start'});
    await assert.rejects(()=>windows.settlePreparation(d,windows.createTransportAdapter(ch=>({challenge_sha256:digest(ch),joined:false,possible_writers:1,reference:'unknown'}))),e=>e.code==='owner-window-writer-unproven');assert(windows.observed(d.contextRoot),'still held');
+  }finally{if(saved===undefined)delete process.env.CODEX_THREAD_ID;else process.env.CODEX_THREAD_ID=saved;}
+ });
+ // Regression: a native attempt whose result the owner refused (receipt failed,
+ // operator-required) must settle in the same session once nothing was written.
+ await run('native refused attempt settles through the live host only while the owner surface is untouched',async()=>{
+  const saved=process.env.CODEX_THREAD_ID,q=fixture();process.env.CODEX_THREAD_ID='fixture376-refused-'+seq;runs.add(q.contextRoot,{id:q.taskId,kind:'task',session_id:process.env.CODEX_THREAD_ID,host_runtime:'codex'});
+  try{
+   const requestFile=path.join(path.dirname(q.resultFile),'request.json');fs.writeFileSync(requestFile,JSON.stringify(q));const start=cli(['--start',requestFile]);assert.equal(start.value.action,'invoke-native',JSON.stringify(start));
+   const invalid=candidate(q);invalid.artifacts[0].content=invalid.artifacts[0].content.replace('## Out of Scope','## Not Covered');
+   const packetFile=path.join(path.dirname(q.resultFile),'acceptance.json');fs.writeFileSync(packetFile,JSON.stringify({route:start.value.route,rawResult:invalid,invocationTelemetry:start.value.invocation.telemetry,providerCalled:true}));
+   const refused=cli(['--accept-native',requestFile,packetFile]);assert.equal(refused.value.ok,false);assert.equal(refused.value.provider_called,true);assert.equal(refused.value.reason_code,'typed-standalone-preparation-sections');
+   const receipt=JSON.parse(fs.readFileSync(q.resultFile+'.receipt.json','utf8'));assert.equal(receipt.phase,'failed');assert.equal(receipt.failure.recovery,'operator-required');assert(windows.observed(q.contextRoot),'held after refusal');
+   const ops=[],adapter=windows.createTransportAdapter(ch=>{ops.push(ch.operation);return{challenge_sha256:digest(ch),joined:true,possible_writers:0,reference:'fixture: synthetic worker returned',reconciled:true,reconciliation_reference:'fixture: no writes'};});
+   // A change on the protected owner surface after the attempt keeps the window held.
+   const stray=path.join(q.contextRoot,'.gsd','stray.md');fs.writeFileSync(stray,'x');
+   await assert.rejects(()=>windows.settlePreparation(q,adapter),e=>e.code==='owner-window-surface-drift');assert(windows.observed(q.contextRoot),'still held');assert.deepEqual(ops,[]);
+   fs.rmSync(stray);
+   // A retained candidate is never discarded by this release.
+   const receiptFile=q.resultFile+'.receipt.json',original=fs.readFileSync(receiptFile);fs.writeFileSync(receiptFile,JSON.stringify({...JSON.parse(original),saved_candidate:{sha256:'0'.repeat(64)}}));
+   await assert.rejects(()=>windows.settlePreparation(q,adapter),e=>e.code==='owner-window-saved-candidate-retained');fs.writeFileSync(receiptFile,original);assert.deepEqual(ops,[]);
+   // Without reconciliation the live host proof is insufficient.
+   await assert.rejects(()=>windows.settlePreparation(q,windows.createTransportAdapter(ch=>({challenge_sha256:digest(ch),joined:true,possible_writers:0,reference:'fixture'}))),e=>e.code==='owner-window-reconciliation-required');assert(windows.observed(q.contextRoot));
+   const closed=await windows.settlePreparation(q,adapter);assert.equal(closed.closed,true);assert.equal(windows.observed(q.contextRoot),null);
+   assert.deepEqual(ops,['settle-cli-preparation-refused-attempt']);assert(!fs.existsSync(path.join(q.contextRoot,prep.requiredArtifact(q))));
   }finally{if(saved===undefined)delete process.env.CODEX_THREAD_ID;else process.env.CODEX_THREAD_ID=saved;}
  });
  await run('mutation acquisition budget preserves controller serialization, guard identity and exclusive legacy publications',async()=>{

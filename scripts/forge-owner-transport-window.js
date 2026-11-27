@@ -179,6 +179,42 @@ async function settlePreparationInside(rawRequest,adapter,cliJoins){
    return{challenge_sha256:digest(challenge),joined:true,possible_writers:0,reference};
   });
  }
+ // A native preparation whose worker ran but whose result the owner refused
+ // (receipt failed, operator-required) had no same-session exit: settle needed
+ // a ready receipt and recover refers back to settle. Release only when no
+ // candidate is retained, the declared artifacts and the protected owner surface
+ // still match the pre-attempt snapshot, and the live host proves the join and
+ // reconciliation of every possible writer.
+ if(receipt.phase==='failed'&&receipt.failure?.provider_called===true&&receipt.failure.recovery==='operator-required'){
+  if(receipt.request_fingerprint!==fingerprint||receipt.dispatch_id!==request.dispatchId)throw error('owner-window-coordination-mismatch');
+  if(['result','returned','saved_result','saved_candidate','candidate','provisional_terminal'].some(key=>receipt[key]!==undefined&&receipt[key]!==null))throw error('owner-window-saved-candidate-retained');
+  // Only the owner surface is measured here, as in native acceptance; declared
+  // code roots cannot be measured by preparation, so they keep the window held.
+  if(request.execution_contract?.code_roots?.length)throw error('owner-window-code-roots-unmeasured');
+  if(!receipt.preparation_surface||!receipt.before_state||typeof receipt.before_state!=='object')throw error('owner-window-writer-unproven');
+  if(receipt.preparation_surface_drift)throw error('owner-window-surface-drift');
+  const root=fs.realpathSync.native(request.contextRoot||request.cwd);
+  const untouched=()=>{
+   for(const[relative,before]of Object.entries(receipt.before_state)){
+    const target=path.resolve(root,relative);if(path.isAbsolute(relative)||!roots.within(root,target))throw error('owner-window-writer-unproven');
+    const now=fs.existsSync(target)?sha(fs.readFileSync(target)):null;
+    if((before===null)!==(now===null)||(before!==null&&before.hash!==now))throw error('owner-window-surface-drift');
+   }
+   if(JSON.stringify(require('./forge-task-execution').protectedSnapshot(root))!==JSON.stringify(receipt.preparation_surface))throw error('owner-window-surface-drift');
+   if(!read().equals(bytes))throw error('owner-window-receipt-changed');
+  };
+  untouched();
+  const bound={operation:'settle-cli-preparation-refused-attempt',owner:entry.owner,binding_sha256:entry.binding_sha256,request_sha256:fingerprint,
+   receipt_sha256:sha(bytes),reason_code:receipt.failure.reason_code||null,cli_joins:cliJoins};
+  const proof=attest(freezeTree(bound));
+  const reference=attestJoined(bound,()=>proof);
+  if(proof.reconciled!==true||typeof proof.reconciliation_reference!=='string'||!proof.reconciliation_reference.trim()||proof.reconciliation_reference.length>2048)throw error('owner-window-reconciliation-required');
+  untouched();
+  return close(cap,challenge=>{
+   untouched();
+   return{challenge_sha256:digest(challenge),joined:true,possible_writers:0,reference};
+  });
+ }
  if(receipt.phase!=='ready'||receipt.request_fingerprint!==fingerprint||receipt.dispatch_id!==request.dispatchId)throw error('owner-window-terminal-receipt-required');
  // A ready flag cannot authorize release. Reuse canonical replay validation,
  // then obtain a live proof bound to request, exact receipt and CLI closes.
