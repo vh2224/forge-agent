@@ -196,4 +196,4 @@ function read(capability, request) {
     initialize: () => scoped(value.initialize) };
 }
 
-module.exports={create,read,bindOwnerReconciliation};
+module.exports={create,read,bindOwnerReconciliation,withoutVerifyBlock};

@@ -12,9 +12,9 @@ accounts.resolveLaunch=()=>({name:'fixture376',token:'fixture-not-a-real-token'}
 const prep=require('./forge-task-preparation'),unit=require('./forge-unit-sidecar'),windows=require('./forge-owner-transport-window'),runs=require('./forge-runs'),controller=require('./forge-unit-controller'),execution=require('./forge-task-execution');
 accounts.resolveLaunch=realResolve;
 const digest=value=>crypto.createHash('sha256').update(typeof value==='string'?value:JSON.stringify(value)).digest('hex');
-const selectors={native:'native live',distributed:'distributed native',legacy:'legacy separate',claude:'real production',raw:'unknown cleanup',broker:'cohort owner',budget:'mutation acquisition'},selector=process.argv[2];
+const selectors={native:'native live',distributed:'distributed native',legacy:'legacy separate',claude:'real production',raw:'unknown cleanup',broker:'cohort owner',budget:'mutation acquisition',prestart:'pre-attempt refusal',refused:'native refused'},selector=process.argv[2];
 if(selector&&!selectors[selector])throw new Error('unknown fixture selector');
-process.once('beforeExit',()=>{if(results.length!==(selector?1:7)){process.exitCode=1;fs.writeFileSync(path.join(lab,'INCOMPLETE.json'),JSON.stringify({completed:results,children:children.map(row=>({pid:row.child.pid,closed:row.closed,exitCode:row.child.exitCode,connected:row.child.connected}))},null,2));}});
+process.once('beforeExit',()=>{if(results.length!==(selector?1:9)){process.exitCode=1;fs.writeFileSync(path.join(lab,'INCOMPLETE.json'),JSON.stringify({completed:results,children:children.map(row=>({pid:row.child.pid,closed:row.closed,exitCode:row.child.exitCode,connected:row.child.connected}))},null,2));}});
 const summary=value=>JSON.stringify({ok:value?.ok,reason_code:value?.reason_code,diagnostic:value?.diagnostic});
 function command(bin,args,cwd){const r=cp.spawnSync(bin,args,{cwd,encoding:'utf8',env:{...process.env},windowsHide:true,timeout:20000});assert.equal(r.status,0,r.stderr||String(r.error));return r.stdout;}
 let seq=0;
@@ -32,6 +32,7 @@ async function run(name,action){if(selector&&!name.startsWith(selectors[selector
  await run('native live handoff protects actual child lifetime and refuses real canonical bootstrap/run/controller before write',async()=>{
   const a=fixture(),b=fixture(a.contextRoot);runs.add(b.contextRoot,{id:b.taskId,kind:'task',session_id:'other-active-owner'});assert.equal(runs.get(b.contextRoot,b.taskId).active,true);
   const adapter=windows.createTransportAdapter(attest),handoff=await prep.startStandaloneTaskPreparation(a,{ownerTransportAdapter:adapter});assert.equal(handoff.action,'invoke-native');
+  assert(!Object.hasOwn(JSON.parse(fs.readFileSync(a.resultFile+'.receipt.json')),'preparation_code_state'),'generic adapter receipt shape is unchanged');
   const worker=path.join(path.dirname(a.resultFile),'worker.cjs');fs.writeFileSync(worker,"process.stdout.write('ready\\n');process.stdin.once('data',()=>{process.stdout.write("+JSON.stringify(JSON.stringify(candidate(a)))+"+'\\n');process.stdin.pause();});");
   let started;const ready=new Promise(resolve=>{started=resolve;});let workerChild;
   const pending=handoff.invoke(async()=>{workerChild=cp.spawn(process.execPath,[worker],{env:{...process.env},stdio:['pipe','pipe','pipe'],windowsHide:true});let output='';workerChild.stdout.on('data',bytes=>{output+=bytes;if(output.includes('ready\n'))started();});await new Promise((resolve,reject)=>{workerChild.once('close',resolve);workerChild.once('error',reject);});return JSON.parse(output.trim().split('\n').at(-1));});
@@ -52,6 +53,7 @@ async function run(name,action){if(selector&&!name.startsWith(selectors[selector
   assert.equal(require('./forge-lock').status(windows.controlRoot(q.contextRoot),'owner-transport-window').metadata.holder_pid,start.pid);
   const oldReceipt=digest(fs.readFileSync(q.resultFile+'.receipt.json'));
   const wrongRequest=path.join(path.dirname(q.resultFile),'wrong-request.json');fs.writeFileSync(wrongRequest,JSON.stringify({...q,dispatchId:crypto.randomUUID()}));assert.equal(cli(['--start',wrongRequest]).value.reason_code,'owner-window-coordination-mismatch');assert.equal(digest(fs.readFileSync(q.resultFile+'.receipt.json')),oldReceipt);
+  const beforeActualChild=JSON.parse(fs.readFileSync(q.resultFile+'.receipt.json'));assert.equal(beforeActualChild.phase,'started');assert.equal(beforeActualChild.provider_called,false);assert(beforeActualChild.preparation_code_state);assert.equal(require('./forge-code-roots').digest(beforeActualChild.preparation_code_state),binding.binding.preparation_code_state_sha256,'original baseline is sealed before the actual child is spawned');
   const worker=path.join(path.dirname(q.resultFile),'response.cjs');fs.writeFileSync(worker,"process.stdout.write('ready\\n');process.stdin.once('data',()=>{process.stdout.write("+JSON.stringify(JSON.stringify(candidate(q)))+"+'\\n');process.stdin.pause();});");
   const external=cp.spawn(process.execPath,[worker],{env:{...process.env},stdio:['pipe','pipe','pipe'],windowsHide:true});let text='';await new Promise(resolve=>external.stdout.on('data',bytes=>{text+=bytes;if(text.includes('ready\n'))resolve();}));
   assert.throws(()=>recover(q),e=>e.code==='owner-window-writer-unproven');assert(windows.observed(q.contextRoot),'start parent exit does not prove the separately observed child stopped');external.stdin.end('finish');await new Promise(resolve=>external.once('close',resolve));const response=JSON.parse(text.trim().split('\n').at(-1));
@@ -128,6 +130,68 @@ async function run(name,action){if(selector&&!name.startsWith(selectors[selector
   assert.equal((await windows.withWindow(cap,()=>unit.acceptArtifactResult(q,candidate(q),{providerCalled:true,enforceReadOnlySurface:true}))).record.phase,'ready');
   const exits=children.filter(row=>!joined(row)).map(row=>new Promise(resolve=>row.child.once(row.broker?'exit':'close',resolve)));await broker.close();fs.writeFileSync(path.join(lab,'BROKER-AFTER-CLOSE.json'),JSON.stringify(children.map(row=>({pid:row.child.pid,closed:row.closed,exited:row.exited,broker:row.broker,exitCode:row.child.exitCode,connected:row.child.connected})),null,2));
   let timer;try{await Promise.race([Promise.all(exits),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('fixture broker close event unobserved')),5000);})]);}finally{clearTimeout(timer);}windows.close(cap,attest);assert.equal(windows.observed(q.contextRoot),null);
+ });
+ // Regression: a start refused before its attempt exists (no receipt, provider_called:false)
+ // must not leave the observed owner window held with no same-session exit.
+ await run('pre-attempt refusal releases the window it opened, and a held window without receipt settles through the live host',async()=>{
+  const saved=process.env.CODEX_THREAD_ID;
+  const refusing=()=>{const q=fixture();q.phase='discuss';process.env.CODEX_THREAD_ID='fixture376-prestart-'+seq;runs.add(q.contextRoot,{id:q.taskId,kind:'task',session_id:process.env.CODEX_THREAD_ID,host_runtime:'codex'});
+   q.continuation={from_dispatch_id:'never-dispatched',result_file:path.join(path.dirname(q.resultFile),'missing.json'),answers:[{id:'q1',answer:'synthetic answer'}]};return q;};
+  try{
+   const a=refusing(),refused=await prep.startStandaloneTaskPreparation(a);
+   assert.equal(refused.ok,false);assert.equal(refused.provider_called,false);assert.match(refused.reason_code,/^preparation-continuation-/);
+   assert.equal(refused.owner_window,undefined,'no held window reported');assert.equal(windows.observed(a.contextRoot),null,'window released');assert(!fs.existsSync(a.resultFile+'.receipt.json'));
+   const again=await prep.startStandaloneTaskPreparation({...a,dispatchId:crypto.randomUUID()});assert.notEqual(again.reason_code,'owner-window-coordination-mismatch');assert.equal(windows.observed(a.contextRoot),null);
+   const b=refusing(),nested=await prep.prepareStandaloneTask(b);
+   assert.equal(nested.ok,false);assert.equal(nested.provider_called,false);assert.equal(nested.owner_window,undefined,'nested start must not report a stale held window');assert.equal(windows.observed(b.contextRoot),null);
+   // Pre-fix state: an observed window for a dispatch that never got a receipt.
+   const c=refusing();windows.coordinatePreparation(prep.validateRequest(c),prep.preparationRequestFingerprint(prep.validateRequest(c)),{create:true,operation:'start'});assert(windows.observed(c.contextRoot));
+   const ops=[],closed=await windows.settlePreparation(c,windows.createTransportAdapter(ch=>{ops.push(ch.operation);return{challenge_sha256:digest(ch),joined:true,possible_writers:0,reference:'fixture: no child launched'};}));
+   assert.equal(closed.closed,true);assert.equal(windows.observed(c.contextRoot),null);assert.deepEqual(ops,['join-cli-settlement-no-attempt','settle-cli-preparation-no-attempt']);
+   const d=refusing();windows.coordinatePreparation(prep.validateRequest(d),prep.preparationRequestFingerprint(prep.validateRequest(d)),{create:true,operation:'start'});
+   await assert.rejects(()=>windows.settlePreparation(d,windows.createTransportAdapter(ch=>({challenge_sha256:digest(ch),joined:false,possible_writers:1,reference:'unknown'}))),e=>e.code==='owner-window-writer-unproven');assert(windows.observed(d.contextRoot),'still held');
+  }finally{if(saved===undefined)delete process.env.CODEX_THREAD_ID;else process.env.CODEX_THREAD_ID=saved;}
+ });
+ // Same-session release needs an original before-provider seal, including the
+ // implicit legacy cwd. A generic joined/reconciled assertion cannot bypass it.
+ await run('native refused attempt settles only while original explicit or implicit code roots are unchanged',async()=>{
+  const saved=process.env.CODEX_THREAD_ID;
+  try{for(const explicit of [false,true]){
+   const q=fixture();if(explicit)q.execution_contract=require('./forge-code-roots').singleContract(q.contextRoot,q.cwd);
+   process.env.CODEX_THREAD_ID='fixture376-refused-'+seq;runs.add(q.contextRoot,{id:q.taskId,kind:'task',session_id:process.env.CODEX_THREAD_ID,host_runtime:'codex'});
+   const requestFile=path.join(path.dirname(q.resultFile),'request.json');fs.writeFileSync(requestFile,JSON.stringify(q));const start=cli(['--start',requestFile]);assert.equal(start.value.action,'invoke-native',JSON.stringify(start));
+   const receiptFile=q.resultFile+'.receipt.json',started=JSON.parse(fs.readFileSync(receiptFile)),binding=windows.observed(q.contextRoot),baseline=started.preparation_code_state;
+   assert.equal(started.phase,'started');assert.equal(started.provider_called,false,'baseline exists before the native result is returned');
+   assert.equal(require('./forge-code-roots').digest(baseline),binding.binding.preparation_code_state_sha256);
+   assert.equal(baseline.generation,require('./forge-lock').status(windows.controlRoot(q.contextRoot),'owner-transport-window').metadata.generation);
+   const invalid=candidate(q);invalid.artifacts[0].content=invalid.artifacts[0].content.replace('## Out of Scope','## Not Covered');
+   const packetFile=path.join(path.dirname(q.resultFile),'acceptance.json');fs.writeFileSync(packetFile,JSON.stringify({route:start.value.route,rawResult:invalid,invocationTelemetry:start.value.invocation.telemetry,providerCalled:true}));
+   const refused=cli(['--accept-native',requestFile,packetFile]);assert.equal(refused.value.ok,false);assert.equal(refused.value.provider_called,true);assert.equal(refused.value.reason_code,'typed-standalone-preparation-sections');
+   const original=fs.readFileSync(receiptFile),receipt=JSON.parse(original);assert.equal(receipt.phase,'failed');assert.equal(receipt.failure.recovery,'operator-required');assert.deepEqual(receipt.preparation_code_state,baseline);assert.equal(windows.observed(q.contextRoot).sha256,binding.sha256);
+   const ops=[],proof=ch=>({challenge_sha256:digest(ch),joined:true,possible_writers:0,reference:'fixture: synthetic native response and joined CLI children',reconciled:true,reconciliation_reference:'fixture: original before/current owner and code state unchanged'}),adapter=windows.createTransportAdapter(ch=>{ops.push(ch);return proof(ch);});
+   const sameBinding=()=>assert.equal(windows.observed(q.contextRoot).sha256,binding.sha256,'the original fence remains held');
+   for(const alter of [r=>{delete r.preparation_code_state;},r=>{r.preparation_code_state.generation='different-generation';},r=>{r.preparation_code_state.state.code_states[0].start_sha='0'.repeat(40);}]){
+    const changed=JSON.parse(original);alter(changed);fs.writeFileSync(receiptFile,JSON.stringify(changed));
+    await assert.rejects(()=>windows.settlePreparation(q,adapter),e=>e.code==='owner-window-code-roots-unmeasured');sameBinding();assert.equal(ops.length,0);fs.writeFileSync(receiptFile,original);
+   }
+   // This write is outside owner/.gsd, which stays byte-identical. Even a fully
+   // joined/reconciled generic adapter cannot release either root representation.
+   const ownerBefore=execution.protectedSnapshot(q.contextRoot),strayCode=path.join(q.cwd,'unmeasured-worker-write.txt');fs.writeFileSync(strayCode,'changed by the private regression');
+   assert.deepEqual(execution.protectedSnapshot(q.contextRoot),ownerBefore);
+   await assert.rejects(()=>windows.settlePreparation(q,adapter),e=>e.code==='owner-window-code-roots-drift');sameBinding();assert.equal(ops.length,0);fs.unlinkSync(strayCode);
+   const indexName=command('git',['rev-parse','--git-path','index'],q.cwd).trim(),index=path.resolve(q.cwd,indexName),indexBefore=fs.existsSync(index)?fs.readFileSync(index):null;
+   fs.writeFileSync(strayCode,'staged private regression');command('git',['add','--',path.basename(strayCode)],q.cwd);
+   await assert.rejects(()=>windows.settlePreparation(q,adapter),e=>e.code==='owner-window-code-roots-drift');sameBinding();fs.unlinkSync(strayCode);if(indexBefore)fs.writeFileSync(index,indexBefore);else fs.unlinkSync(index);
+   const stray=path.join(q.contextRoot,'.gsd','stray.md');fs.writeFileSync(stray,'x');
+   await assert.rejects(()=>windows.settlePreparation(q,adapter),e=>e.code==='owner-window-surface-drift');sameBinding();assert.equal(ops.length,0);fs.unlinkSync(stray);
+   fs.writeFileSync(receiptFile,JSON.stringify({...receipt,saved_candidate:{sha256:'0'.repeat(64)}}));
+   await assert.rejects(()=>windows.settlePreparation(q,adapter),e=>e.code==='owner-window-saved-candidate-retained');sameBinding();fs.writeFileSync(receiptFile,original);assert.equal(ops.length,0);
+   await assert.rejects(()=>windows.settlePreparation(q,windows.createTransportAdapter(ch=>({challenge_sha256:digest(ch),joined:true,possible_writers:0,reference:'fixture'}))),e=>e.code==='owner-window-reconciliation-required');sameBinding();
+   const raced=windows.createTransportAdapter(ch=>{fs.writeFileSync(strayCode,'changed after the host proof');return proof(ch);});
+   await assert.rejects(()=>windows.settlePreparation(q,raced),e=>e.code==='owner-window-code-roots-drift');sameBinding();fs.unlinkSync(strayCode);
+   const closed=await windows.settlePreparation(q,adapter);assert.equal(closed.closed,true);assert.equal(windows.observed(q.contextRoot),null);assert.equal(ops.length,1);assert.equal(ops[0].operation,'settle-cli-preparation-refused-attempt');
+   assert.equal(ops[0].code_state.before_sha256,binding.binding.preparation_code_state_sha256);assert.equal(ops[0].code_state.generation,baseline.generation);assert(ops[0].code_state.state.code_states.length>=1);assert(!fs.existsSync(path.join(q.contextRoot,prep.requiredArtifact(q))));
+  }}finally{if(saved===undefined)delete process.env.CODEX_THREAD_ID;else process.env.CODEX_THREAD_ID=saved;}
  });
  await run('mutation acquisition budget preserves controller serialization, guard identity and exclusive legacy publications',async()=>{
   const lock=require('./forge-lock'),recon=require('./forge-artifact-reconciliation'),owner=fixture().contextRoot,foreign=fixture().contextRoot;

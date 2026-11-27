@@ -109,6 +109,11 @@ async function withOwnerDelta(){
     // Without the correction binding the reconciliation keeps refusing the changed plan.
     assert.throws(()=>activity.reconciliationDecision(r),/baseline-invalid/);
     assert.throws(()=>activity.reconciliationDecision(r,undefined,{policyCorrection:{originalPlanBytes:Buffer.from(goodPlan)}}),/policy-correction-invalid/);
+    // The exported reconciliation API itself must reject non-verify changes,
+    // before presenting an approval or admitting a broader owner projection.
+    fs.writeFileSync(planFile,goodPlan+'\nScope creep.\n');
+    assert.throws(()=>activity.reconciliationDecision(r,undefined,{policyCorrection}),{code:'owner-reconciliation-policy-correction-scope'});
+    fs.writeFileSync(planFile,goodPlan);
     const description=activity.reconciliationDecision(r,undefined,{policyCorrection});
     assert.match(description.questions[0].question,/correção do bloco verify:/);
     const changedPaths=description.changes.map(row=>row.path);

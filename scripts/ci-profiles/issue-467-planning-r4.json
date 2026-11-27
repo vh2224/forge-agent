@@ -598,6 +598,7 @@
     "forge-sidecar-identity.test.js",
     "forge-sidecar-liveness.test.js",
     "forge-sidecar-local-proof.test.js",
+    "forge-sidecar-verification-policy-correction.test.js",
     "forge-sidecar-verification-successor-standalone.test.js",
     "forge-sidecar-verification-successor.test.js",
     "forge-skill-invocation.test.js",
@@ -699,7 +700,7 @@
     "run-tests-changed.test.js",
     "run-tests-shards.test.js"
   ],
-  "universe_sha256": "870333c7afb905ec7a5894382c76ae50f924999242562807b94fbb9255276cd3",
+  "universe_sha256": "41f2de558e892c2b7f4ec64634afd306973a571dc0f1de706f0f3bced4b0d01a",
   "retired_ids": [
     "forge-communication-surfaces.ci-01-of-4.test.js",
     "forge-communication-surfaces.ci-02-of-4.test.js",
@@ -1409,7 +1410,8 @@
       "fragment-store-guards.test.js": 3555,
       "merge-settings.test.js": 3928,
       "run-tests-changed.test.js": 61,
-      "run-tests-shards.test.js": 6483
+      "run-tests-shards.test.js": 6483,
+      "forge-sidecar-verification-policy-correction.test.js": 82921
     },
     "darwin": {
       "forge-accounts.test.js": 1531,
@@ -2107,7 +2109,8 @@
       "fragment-store-guards.test.js": 1592,
       "merge-settings.test.js": 1784,
       "run-tests-changed.test.js": 55,
-      "run-tests-shards.test.js": 5268
+      "run-tests-shards.test.js": 5268,
+      "forge-sidecar-verification-policy-correction.test.js": 21517
     },
     "linux": {
       "forge-accounts.test.js": 589,
@@ -2805,13 +2808,14 @@
       "fragment-store-guards.test.js": 607,
       "merge-settings.test.js": 2229,
       "run-tests-changed.test.js": 45,
-      "run-tests-shards.test.js": 4075
+      "run-tests-shards.test.js": 4075,
+      "forge-sidecar-verification-policy-correction.test.js": 13569
     }
   },
   "provenance": {
     "kind": "planning-estimates-not-observed-profile",
     "source": "MEASURED-WEIGHTS.json",
     "source_sha256": "69be548e0245c39459188d98a7491a50b37a8b8e7cf76777ce796be1fb471b2a",
-    "qualification": "Exact 696-unit per-platform costs extracted from M2 CI run45768330771 attempt1; macOS18 missing profile recovered from preserved real PASS log durations at 0.01-second precision. Prior execution evidence, not new head PASS or an upper bound; directly changed CI/release tests remain estimates. Immutable observed601 base unchanged. Layout5/5/10 jobs with3 isolated workers (15/15/30 weighted-LPT lanes), not assignments from old64/80/96 layout. Queue/setup/three-worker CPU sensitivity is represented in the separate historical capacity replay; one real candidate CI verifies behavior."
+    "qualification": "Exact 696-unit per-platform costs extracted from M2 CI run45768330771 attempt1; macOS18 missing profile recovered from preserved real PASS log durations at 0.01-second precision. Prior execution evidence, not new head PASS or an upper bound; directly changed CI/release tests remain estimates. Immutable observed601 base unchanged. Layout5/5/10 jobs with3 isolated workers (15/15/30 weighted-LPT lanes), not assignments from old64/80/96 layout. Queue/setup/three-worker CPU sensitivity is represented in the separate historical capacity replay; one real candidate CI verifies behavior. PR499 adds one verification-policy-correction suite (current universe697); only that new suite uses the existing verification-successor per-platform cost as an explicit planning estimate, not an observed run or upper bound. All original696 costs, observed601 profile, matrix layout and execution evidence remain unchanged."
   }
 }

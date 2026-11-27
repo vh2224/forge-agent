@@ -99,6 +99,17 @@ function coordinatePreparation(request,requestSha,{create=true,operation='accept
  const cap=Object.freeze({});caps.set(cap,{owner,binding:seen.binding,binding_sha256:seen.sha256,lock});return cap;
 }
 function coordinationResult(cap,result){const row=held(cap);return row.binding.coordination==='observed-host-session-v1'?{...result,owner_window:{status:'held',binding_sha256:row.binding_sha256,settlement:'live-host-join-required'}}:result;}
+// The window this very call opened, for a start refused before any attempt:
+// no receipt means no started attempt, so no provider, sidecar or native child
+// was launched and this process is the only writer, now returning. Anything
+// else (a receipt, a reattached window, a provider call) keeps the live-host
+// settlement.
+function releasePreAttemptRefusal(cap,receiptFile,result){
+ const row=held(cap);
+ if(row.binding.coordination!=='observed-host-session-v1'||result?.ok===true||result?.provider_called!==false||fs.existsSync(receiptFile))return null;
+ const reason=String(result.reason_code||'unknown').slice(0,200);
+ return close(cap,challenge=>{if(fs.existsSync(receiptFile))throw error('owner-window-receipt-changed');return{challenge_sha256:digest(challenge),joined:true,possible_writers:0,reference:'pre-attempt-refusal:'+reason+':receipt-absent:same-process'};});
+}
 function createTransportAdapter(attestStopped){if(typeof attestStopped!=='function')throw error('owner-window-live-host-required');const handle=Object.freeze({});adapters.set(handle,attestStopped);return handle;}
 function createObservedPreparationAdapter({hostRuntime,observeWriters,reconcile}={}){
  const runs=require('./forge-runs'),actor=()=>runs.observeHostSession(hostRuntime,process.env.FORGE_CLAUDE_OWNER_SESSION_ID),initial=actor();
@@ -128,6 +139,46 @@ async function protectPreparation(request,adapter,action){
  }catch(e){if(caps.has(cap)){try{settle();}catch(secondary){e.owner_window={status:'held',reason_code:secondary.code||'owner-window-writer-unproven',binding_sha256:held(cap).binding_sha256};}}throw e;}
 }
 // CLI custody is observed here; host tools still require a real live bridge.
+// Only this current observed-session cap can seal the first before-provider state.
+// The receipt carries DATA; the existing opaque cap/binding retains its digest.
+function retainPreparationCodeState(request){
+ const cap=context.getStore()?.cap;if(!cap||request.scope!=='standalone-task'||request.route?.worker_mode!=='native')return null;
+ const entry=held(cap);if(entry.binding.coordination!=='observed-host-session-v1')return null;
+ const requestSha=request.preparationRequestFingerprint;
+ if(entry.owner!==ownerOf(request.contextRoot||request.cwd)||entry.binding.kind!=='artifact-preparation'
+  ||entry.binding.task_id!==request.taskId||entry.binding.dispatch_id!==request.dispatchId
+  ||typeof requestSha!=='string'||entry.binding.request_sha256!==requestSha)throw error('owner-window-coordination-mismatch');
+ const receiptFile=require('./forge-unit-sidecar').artifactAttemptFiles(request).receiptFile;
+ if(fs.existsSync(receiptFile)||Object.hasOwn(entry.binding,'preparation_code_state_sha256'))throw error('owner-window-code-state-already-sealed');
+ const generation=entry.lock.generation;if(typeof generation!=='string'||!generation)throw error('owner-window-unmeasured');
+ const before={schema_version:1,kind:'preparation-code-state-v1',original_binding_sha256:entry.binding_sha256,
+  request_sha256:requestSha,dispatch_id:request.dispatchId,generation,
+  state:require('./forge-owner-window-recovery').measurePreparationCodeState({owner:entry.owner,request})};
+ const beforeSha=roots.digest(before),next={...entry.binding,preparation_code_state_sha256:beforeSha},bytes=Buffer.from(JSON.stringify(next)+'\n');
+ return withMutation(entry.owner,()=>{
+  held(cap);if(fs.existsSync(receiptFile)||Object.hasOwn(entry.binding,'preparation_code_state_sha256'))throw error('owner-window-code-state-already-sealed');
+  const file=windowFile(entry.owner),temp=file+'.'+crypto.randomUUID()+'.next';
+  fs.writeFileSync(temp,bytes,{flag:'wx',mode:0o600});
+  try{held(cap);if(fs.existsSync(receiptFile))throw error('owner-window-code-state-already-sealed');fs.renameSync(temp,file);}
+  catch(e){try{if(fs.existsSync(temp)&&sha(fs.readFileSync(temp))===sha(bytes))fs.unlinkSync(temp);}catch{}throw e;}
+  // Same opaque cap and same token/generation; all following held() calls see
+  // exactly the binding just written. No imported JSON can create this seal.
+  entry.binding=next;entry.binding_sha256=sha(bytes);held(cap);return before;
+ });
+}
+function assertPreparationCodeState(entry,request,before){
+ if(!before||typeof before!=='object'||Array.isArray(before)
+  ||Object.keys(before).sort().join(',')!=='dispatch_id,generation,kind,original_binding_sha256,request_sha256,schema_version,state'
+  ||before.schema_version!==1||before.kind!=='preparation-code-state-v1'
+  ||before.request_sha256!==entry.binding.request_sha256||before.dispatch_id!==entry.binding.dispatch_id
+  ||before.generation!==entry.lock.generation||roots.digest(before)!==entry.binding.preparation_code_state_sha256)throw error('owner-window-code-roots-unmeasured');
+ const {preparation_code_state_sha256:_seal,...original}=entry.binding;
+ if(before.original_binding_sha256!==sha(Buffer.from(JSON.stringify(original)+'\n')))throw error('owner-window-code-roots-unmeasured');
+ const current=require('./forge-owner-window-recovery').measurePreparationCodeState({owner:entry.owner,request});
+ if(roots.digest(current)!==roots.digest(before.state))throw error('owner-window-code-roots-drift');
+ return{before_sha256:roots.digest(before),current_state_sha256:roots.digest(current),state:current,generation:entry.lock.generation};
+}
+
 async function settlePreparationInside(rawRequest,adapter,cliJoins){
  const attest=adapters.get(adapter);if(!attest)throw error('owner-window-live-host-required');
  const prep=require('./forge-task-preparation'),request=prep.validateRequest(rawRequest),fingerprint=prep.preparationRequestFingerprint(request);
@@ -136,6 +187,20 @@ async function settlePreparationInside(rawRequest,adapter,cliJoins){
  const entry=held(cap);if(entry.binding.coordination!=='observed-host-session-v1'||entry.binding.request_sha256!==fingerprint)throw error('owner-window-coordination-mismatch');
  const file=require('./forge-unit-sidecar').artifactAttemptFiles(request).receiptFile;
  const read=()=>{const stat=fs.lstatSync(file);if(!stat.isFile()||stat.isSymbolicLink())throw error('owner-window-receipt-untrusted');return fs.readFileSync(file);};
+ // A start refused before its attempt existed (e.g. an invalid continuation)
+ // never created a receipt. Without this branch the window stayed held with no
+ // same-session exit: settle needed a receipt and recover refers back to settle.
+ // The live host still has to attest that every possible writer has joined.
+ if(!fs.existsSync(file)){
+  const absent={file,state:'absent'};
+  attestJoined({operation:'join-cli-settlement-no-attempt',owner:entry.owner,binding_sha256:entry.binding_sha256,request_sha256:fingerprint,receipt:absent,cli_joins:cliJoins},attest);
+  return close(cap,challenge=>{
+   if(fs.existsSync(file))throw error('owner-window-receipt-changed');
+   const reference=attestJoined({...challenge,operation:'settle-cli-preparation-no-attempt',request_sha256:fingerprint,receipt:absent,cli_joins:cliJoins},attest);
+   if(fs.existsSync(file))throw error('owner-window-receipt-changed');
+   return{challenge_sha256:digest(challenge),joined:true,possible_writers:0,reference};
+  });
+ }
  const bytes=read(),receipt=JSON.parse(bytes);
  if(receipt.phase==='failed'&&require('./forge-preparation-custody-profile').eligible(receipt)){
   const recovery=require('./forge-owner-window-recovery'),current=recovery.capture({owner:entry.owner,request:rawRequest});
@@ -151,6 +216,43 @@ async function settlePreparationInside(rawRequest,adapter,cliJoins){
   unchanged();
   return close(cap,challenge=>{
    unchanged();
+   return{challenge_sha256:digest(challenge),joined:true,possible_writers:0,reference};
+  });
+ }
+ // A native preparation whose worker ran but whose result the owner refused
+ // (receipt failed, operator-required) had no same-session exit: settle needed
+ // a ready receipt and recover refers back to settle. Release only when no
+ // candidate is retained, the declared artifacts and the protected owner surface
+ // still match the pre-attempt snapshot, and the live host proves the join and
+ // reconciliation of every possible writer.
+ if(receipt.phase==='failed'&&receipt.failure?.provider_called===true&&receipt.failure.recovery==='operator-required'){
+  if(receipt.request_fingerprint!==fingerprint||receipt.dispatch_id!==request.dispatchId)throw error('owner-window-coordination-mismatch');
+  if(['result','returned','saved_result','saved_candidate','candidate','provisional_terminal'].some(key=>receipt[key]!==undefined&&receipt[key]!==null))throw error('owner-window-saved-candidate-retained');
+  // No legacy backfill: only a before-provider seal in this same cap/generation
+  // permits equality checks of explicit or implicit code roots.
+  const codeState=assertPreparationCodeState(entry,request,receipt.preparation_code_state);
+  if(!receipt.preparation_surface||!receipt.before_state||typeof receipt.before_state!=='object')throw error('owner-window-writer-unproven');
+  if(receipt.preparation_surface_drift)throw error('owner-window-surface-drift');
+  const root=fs.realpathSync.native(request.contextRoot||request.cwd);
+  const untouched=()=>{
+   assertPreparationCodeState(entry,request,receipt.preparation_code_state);
+   for(const[relative,before]of Object.entries(receipt.before_state)){
+    const target=path.resolve(root,relative);if(path.isAbsolute(relative)||!roots.within(root,target))throw error('owner-window-writer-unproven');
+    const now=fs.existsSync(target)?sha(fs.readFileSync(target)):null;
+    if((before===null)!==(now===null)||(before!==null&&before.hash!==now))throw error('owner-window-surface-drift');
+   }
+   if(JSON.stringify(require('./forge-task-execution').protectedSnapshot(root))!==JSON.stringify(receipt.preparation_surface))throw error('owner-window-surface-drift');
+   if(!read().equals(bytes))throw error('owner-window-receipt-changed');
+  };
+  untouched();
+  const bound={operation:'settle-cli-preparation-refused-attempt',owner:entry.owner,binding_sha256:entry.binding_sha256,request_sha256:fingerprint,
+   receipt_sha256:sha(bytes),reason_code:receipt.failure.reason_code||null,code_state:codeState,cli_joins:cliJoins};
+  const proof=attest(freezeTree(bound));
+  const reference=attestJoined(bound,()=>proof);
+  if(proof.reconciled!==true||typeof proof.reconciliation_reference!=='string'||!proof.reconciliation_reference.trim()||proof.reconciliation_reference.length>2048)throw error('owner-window-reconciliation-required');
+  untouched();
+  return close(cap,challenge=>{
+   untouched();
    return{challenge_sha256:digest(challenge),joined:true,possible_writers:0,reference};
   });
  }
@@ -224,5 +326,5 @@ async function runCliPreparation(requestFile,{acceptanceFile,invokeNative,ownerT
 
 function ensureTask(owner,taskId){const ids=require('./forge-ids');if(!ids.isValid(taskId)||ids.entityKind(taskId)!=='task'||/[\\/\0]/.test(taskId))throw error('owner-task-id-required');return withMutation(owner,()=>{let directory=ownerOf(owner);for(const part of ['.gsd','tasks',taskId]){directory=path.join(directory,part);if(fs.existsSync(directory)){const stat=fs.lstatSync(directory);if(stat.isSymbolicLink()||!stat.isDirectory())throw error('owner-task-path-untrusted');}else{if(part==='.gsd')throw error('owner-project-required');fs.mkdirSync(directory);}}return{directory,created:true};});}
 function writeBrief(owner,taskId,bytes){return withMutation(owner,()=>{const ensured=ensureTask(owner,taskId),file=path.join(ensured.directory,taskId+'-BRIEF.md');if(fs.existsSync(file)){const stat=fs.lstatSync(file);if(stat.isSymbolicLink()||!stat.isFile())throw error('owner-task-path-untrusted');if(!fs.readFileSync(file).equals(bytes))throw error('owner-brief-exists');return{file,unchanged:true};}fs.writeFileSync(file,bytes,{flag:'wx'});return{file,created:true};});}
-module.exports={retireLegacyCoordination,open,withWindow,withMutation,assertMutationAllowed,currentPublicationGuard,withPublicationContext,close,recover,observed,controlRoot,metadataOwner,coordinatePreparation,coordinationResult,createTransportAdapter,createObservedPreparationAdapter,protectPreparation,settlePreparation,settleFailedPreparation,runCliPreparation,ensureTask,writeBrief,appendHookEvidence};
+module.exports={retireLegacyCoordination,open,withWindow,withMutation,assertMutationAllowed,currentPublicationGuard,withPublicationContext,close,recover,observed,controlRoot,metadataOwner,coordinatePreparation,coordinationResult,releasePreAttemptRefusal,createTransportAdapter,createObservedPreparationAdapter,protectPreparation,retainPreparationCodeState,settlePreparation,settleFailedPreparation,runCliPreparation,ensureTask,writeBrief,appendHookEvidence};
 if(require.main===module){try{const[mode,owner,taskId,source]=process.argv.slice(2);const result=mode==='--ensure-task'&&!source?ensureTask(owner,taskId):mode==='--write-brief'&&source?writeBrief(owner,taskId,fs.readFileSync(source)):null;if(!result)throw error('owner-window-usage');process.stdout.write(JSON.stringify(result)+'\n');}catch(e){process.stdout.write(JSON.stringify({ok:false,reason_code:e.code||'owner-window-failed',provider_called:false})+'\n');process.exitCode=1;}}

@@ -779,10 +779,14 @@ function reconciliationView(request, operatorDecision, options = {}) {
       || roots.key(baseline.input.path) !== roots.key(r.planFile)) fail('owner-reconciliation-baseline-invalid');
   // Issue 498: an approved verify-policy correction may leave the plan at its
   // corrected bytes; the original attempt bytes must still prove the baseline.
-  const planSha = sha(regular(r.planFile)), correction = options.policyCorrection;
+  const planBytes = regular(r.planFile), planSha = sha(planBytes), correction = options.policyCorrection;
   if (correction !== undefined && (!Buffer.isBuffer(correction?.originalPlanBytes) || sha(correction.originalPlanBytes) !== baseline.input.sha256
       || planSha === baseline.input.sha256)) fail('owner-reconciliation-policy-correction-invalid');
   if (planSha !== baseline.input.sha256 && correction === undefined) fail('owner-reconciliation-baseline-invalid');
+  if (correction !== undefined) {
+    const stripVerify = require('./forge-sidecar-verification-successor').withoutVerifyBlock;
+    if (stripVerify(correction.originalPlanBytes.toString('utf8')) !== stripVerify(planBytes.toString('utf8'))) fail('owner-reconciliation-policy-correction-scope');
+  }
   const execution = require('./forge-task-execution'), current = execution.protectedSnapshot(owner);
   const before = baseline.protected_owner;
   if (!before || typeof before !== 'object') fail('owner-reconciliation-baseline-invalid');
