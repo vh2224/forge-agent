@@ -236,7 +236,39 @@ function fixtureTestSourceError(error) {
   }
   return frames.length?{kind:'native463-fixture-test-source-error-v1',frames}:null;
 }
+async function assertLiveIPCTimeoutDiagnostics(){
+ // Exercise the ORIGINAL relay and its actual timeout callback with a synthetic
+ // socket/clock. These doubles grant no LIVE, OS, HMAC, provider or SDK authority.
+ const vm=require('node:vm'),{EventEmitter}=require('node:events'),file=path.join(__dirname,'forge-native-host-bridge.js'),raw=fs.readFileSync(file,'utf8');
+ const begin='async function relayCurrentHostHook(',end='\nfunction liveChallenge(';
+ assert.equal(raw.split(begin).length,2);const start=raw.indexOf(begin),finish=raw.indexOf(end,start);assert(finish>start);
+ const original=raw.slice(start,finish),sourceHash=hash(raw),capture=JSON.stringify({session_id:'fixture-session'});
+ for(const queued of [false,true]){
+  const calls=[],writes=[];let callback=null,keyCopy=null,timeoutError=null;
+  class Socket extends EventEmitter{
+   setTimeout(ms,fn){calls.push(['timeout',ms]);assert.equal(ms,20000);assert.equal(typeof fn,'function');callback=fn;return this;}
+   write(bytes){writes.push(JSON.parse(Buffer.from(bytes).toString('utf8')));return true;}
+   destroy(error){timeoutError=error;this.emit('error',error);this.emit('close');return this;}
+   end(){assert.fail('A timeout cannot complete the relay successfully');}
+  }
+  const socket=new Socket(),ref={attempt_id:'fixture-attempt',dispatch_id:'fixture-dispatch',request_sha256:'fixture-request',host_session_sha256:'digest-session',profile_id:'fixture-profile',endpoint:'fixture-pipe',directory:'fixture-directory'},observed={sha256:'fixture-window',binding:{native_host_relay:ref}},who={parent:{pid:7,started:'parent-start'},p:{pid:8,started:'hook-start'},hook_sha256:'hook-hash',bridge_sha256:'bridge-hash'};
+  const context={Buffer,process:{execPath:'fixture-node',argv:['node','hook','native-live','post']},LIVE_ID:'fixture-profile',LIVE_DOMAIN:'fixture-domain',LIVE_PHASES:['post'],LIMIT:{body:2048,header:4096},
+   api:name=>{assert.equal(name,'owner-transport-window');return{observed:()=>observed};},
+   originalHook:()=>{calls.push('original-hook');return who;},originalHookBinding:()=>({sessionId:'fixture-session',pid:7,started:'parent-start'}),nativeDigest:value=>value==='fixture-session'?'digest-session':'fixture-argv',physical:value=>value,endpoint:()=>ref.endpoint,
+   liveKeyDirectory:()=>'/fixture-key',liveACL:()=>calls.push('ACL'),path,read:(name,size)=>name.endsWith('ingress.key')?Buffer.alloc(32,9):Buffer.from('fixture-node'),copyBuffer:bytes=>(keyCopy=Buffer.from(bytes)),
+   net:{connect:name=>{assert.equal(name,ref.endpoint);calls.push('connect');return socket;}},parse:bytes=>JSON.parse(bytes.toString('utf8')),json:value=>Buffer.from(JSON.stringify(value)+'\n'),hash,
+   unverifiedPrechallengeRefusal:()=>{calls.push('prechallenge-check');return null;},checkLiveMac:(key,value,mac)=>{assert.equal(key,keyCopy);assert.equal(value.domain,'fixture-domain/challenge');assert.equal(mac,'fixture-mac');calls.push('challenge-authenticated');},macLive:()=>{calls.push('envelope-mac');return Buffer.from('fixture-envelope-mac');},
+   fail:code=>{throw Object.assign(Error(code),{code});},liveHookOutput:()=>{assert.fail('No success/refusal frame was supplied');},receiveReadyFrame:()=>{assert.fail('No ready frame was supplied');}};
+  const relay=vm.runInNewContext('('+original+')',context,{filename:file}),pending=relay({owner:'fixture-owner',phase:'post',capture,hookSource:'fixture-hook'}).then(()=>{assert.fail('Timeout must reject');},error=>error);
+  assert.equal(typeof callback,'function');socket.emit('connect');assert.equal(writes.length,1);assert.equal(writes[0].kind,'live-hook');
+  if(queued){socket.emit('data',Buffer.from(JSON.stringify({protocol_version:1,kind:'native-host-live-challenge',binding:{attempt_id:ref.attempt_id,dispatch_id:ref.dispatch_id,request_sha256:ref.request_sha256,session_sha256:ref.host_session_sha256,window_sha256:observed.sha256},sequence:1,nonce:'fixture-nonce',server_mac:'fixture-mac'})+'\n'));assert.equal(writes.length,2);assert.equal(writes[1].capture,capture);assert(calls.includes('challenge-authenticated'));assert(calls.includes('envelope-mac'));}
+  callback();const error=await pending;assert.equal(error,timeoutError);assert.equal(error.code,'native-host-live-ipc-cap');assert.equal(error.message,'native-host-live-ipc-cap');assert.deepEqual(JSON.parse(JSON.stringify(error.ipc_diagnostic)),{schema_version:1,stage:queued?'envelope-queued':'envelope-not-queued'});assert.deepEqual(calls.filter(Array.isArray),[['timeout',20000]]);assert.equal(writes.length,queued?2:1);assert(keyCopy.every(byte=>byte===0),'Original finally clears the key after rejection');
+ }
+ assert.equal(hash(fs.readFileSync(file,'utf8')),sourceHash);console.log('PASS actual relay timeout callback: both client-local queue stages, unchanged code/20s/rejection/key clearing; synthetic only');
+}
+
 async function main({partialPublication=false}={}){
+  await assertLiveIPCTimeoutDiagnostics();
   assertBridgeCohortSelectors();
   // Unix socket paths have a small OS byte limit. Keep the entirely owned
   // fixture parent short even when the CI worker's TMPDIR is deeply nested.

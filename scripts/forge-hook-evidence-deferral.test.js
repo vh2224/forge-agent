@@ -33,7 +33,29 @@ try{
  fs.writeFileSync(path.join(installed,'forge-owner-transport-window.js'),"exports.observed=()=>process.env.TEST_TRANSPORT_WINDOW==='live'?{binding:{native_host_relay:{protocol_version:1}}}:null;");
  fs.writeFileSync(path.join(installed,'forge-native-host-bridge.js'),String.raw`
  const fs=require('fs');
- exports.relayCurrentHostHook=async function(input){fs.writeFileSync(process.env.TEST_CAPTURE,input.capture);if(process.env.TEST_REPLY==='bad')return{exit_code:0,hook_output:[]};return{exit_code:Number(process.env.TEST_REPLY||0),hook_output:{}};};
+ exports.relayCurrentHostHook=async function(input){
+  fs.writeFileSync(process.env.TEST_CAPTURE,input.capture);
+  const mode=process.env.TEST_IPC_DIAGNOSTIC;
+  if(mode){
+   const marker='PRIVATE_DIAGNOSTIC_MUST_NOT_ESCAPE',error=Object.assign(Error(marker),{code:mode==='other-code'?'native-host-test-other':'native-host-live-ipc-cap'}),touch=()=>{fs.writeFileSync(process.env.TEST_GETTER_CAPTURE,'getter-read');throw Error(marker);};
+   let diagnostic={schema_version:1,stage:mode==='queued'?'envelope-queued':'envelope-not-queued'};
+   if(mode==='extra')diagnostic.raw=marker;
+   if(mode==='unknown-stage')diagnostic.stage=marker;
+   if(mode==='bad-schema')diagnostic.schema_version=2;
+   if(mode==='array')diagnostic=[];
+   if(mode==='symbol')diagnostic[Symbol('private')]=marker;
+   if(mode==='stage-getter')Object.defineProperty(diagnostic,'stage',{enumerable:true,get:touch});
+   if(mode==='schema-getter')Object.defineProperty(diagnostic,'schema_version',{enumerable:true,get:touch});
+   if(mode==='inherited-stage')diagnostic=Object.create({stage:'envelope-queued'},{schema_version:{value:1,enumerable:true}});
+   if(mode==='projection-throw')diagnostic=new Proxy(diagnostic,{ownKeys:touch});
+   if(mode==='property-getter')Object.defineProperty(error,'ipc_diagnostic',{get:touch});
+   else if(mode==='inherited-property')Object.setPrototypeOf(error,{ipc_diagnostic:diagnostic});
+   else error.ipc_diagnostic=diagnostic;
+   if(mode==='write-throw'){const write=process.stderr.write;process.stderr.write=function(value,...args){if(String(value).startsWith('{"schema_version":1,"kind":"forge-native-live-ipc-timeout"'))throw Object.assign(Error(marker),{code:'EPIPE'});return write.call(this,value,...args);};}
+   throw error;
+  }
+  if(process.env.TEST_REPLY==='bad')return{exit_code:0,hook_output:[]};return{exit_code:Number(process.env.TEST_REPLY||0),hook_output:{}};
+ };
  exports.collectOriginalHookBootstrap=function(){if(process.env.TEST_BOOTSTRAP==='throw')throw Object.assign(Error('fixture unavailable'),{code:'native-host-os-observation-refused',os_diagnostic:{action:'process',status:2,spawn_code:null,signal:null,typed_error:'native-host-os-observation-refused',exception_type:'System.InvalidOperationException',hresult:-1,stderr_captured_bytes:0,stderr_captured_sha256:'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',stderr_may_be_truncated:false,unexpected_field:{unsupported:true}}});return {schema_version:1,kind:'claude-hook-bootstrap',pid:process.pid,started:"fixture-start'quoted",exe:process.execPath,exe_sha256:'a'.repeat(64),hook_source:__filename,hook_sha256:'b'.repeat(64),config_dir:process.env.CLAUDE_CONFIG_DIR};};
  `);
  // Delegate the syntax operation to the actual shared Bridge parser; no copied
@@ -61,6 +83,18 @@ try{
  for(const command of [prepareCommand.replace(/"/g,"'"),'env X=1 '+prepareCommand,prepareCommand+'; echo suffix',prepareCommand+' && echo suffix',prepareCommand+' | cat',prepareCommand+' > redirected',prepareCommand+' --extra yes',prepareCommand.replace(literal(inputFile),'"relative-input.json"')]){
    const denied=noWindowPre(command);assert.equal(denied.status,2,command);assert.match(denied.stderr,/native-host-initial-prepare-command/);assert(!fs.existsSync(captureFile));assert.deepEqual(JSON.parse(denied.stdout),{});
  }
+ // Typed client-local stage propagation; no LIVE/SDK capability is supplied.
+ const getterCapture=path.join(lab,'diagnostic-getter-read');
+ for(const [mode,stage]of [['before','envelope-not-queued'],['queued','envelope-queued']]){
+   const r=transport(exact,{TEST_IPC_DIAGNOSTIC:mode,TEST_GETTER_CAPTURE:getterCapture});assert.equal(r.status,2);assert.equal(r.stdout,'{}\n');const lines=r.stderr.trimEnd().split('\n');assert.equal(lines[0],'native-host-live-ipc-cap');assert.equal(lines.length,2);assert.deepEqual(JSON.parse(lines[1]),{schema_version:1,kind:'forge-native-live-ipc-timeout',stage});assert(fs.readFileSync(captureFile).equals(exact));assert(!r.stderr.includes('PRIVATE_DIAGNOSTIC_MUST_NOT_ESCAPE'));
+ }
+ for(const mode of ['extra','unknown-stage','bad-schema','array','symbol','stage-getter','schema-getter','inherited-stage','property-getter','inherited-property','other-code','write-throw']){
+   const r=transport(exact,{TEST_IPC_DIAGNOSTIC:mode,TEST_GETTER_CAPTURE:getterCapture});assert.equal(r.status,2);assert.equal(r.stdout,'{}\n');assert.equal(r.stderr,(mode==='other-code'?'native-host-test-other':'native-host-live-ipc-cap')+'\n');assert(!fs.existsSync(getterCapture),'Diagnostic accessors are never invoked');assert(!r.stderr.includes('PRIVATE_DIAGNOSTIC_MUST_NOT_ESCAPE'));
+ }
+ // Projection may throw through a Proxy trap; it still cannot replace the refusal.
+ const projection=transport(exact,{TEST_IPC_DIAGNOSTIC:'projection-throw',TEST_GETTER_CAPTURE:getterCapture});assert.equal(projection.status,2);assert.equal(projection.stdout,'{}\n');assert.equal(projection.stderr,'native-host-live-ipc-cap\n');assert(fs.existsSync(getterCapture));fs.unlinkSync(getterCapture);
+ console.log('PASS native-live IPC diagnostics: original refusal, closed stages/schema, no getters/raw and ignored projection/write errors');
+
  const badReply=transport(exact,{TEST_REPLY:'bad'});assert.equal(badReply.status,2);assert.match(badReply.stderr,/native-host-live-relay-response/);
  // Real private child; only its stdin error/end interleaving is instrumented.
  // No Source module or retained hook bytes are patched by this test.
