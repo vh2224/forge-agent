@@ -541,6 +541,23 @@ if (phase === 'native-live') {
     if (done) return; done = true;
     const code = /^[a-z0-9-]{1,100}$/.test(error?.code || '') ? error.code : 'native-host-hook-refused';
     process.stdout.write('{}\n'); process.stderr.write(code + '\n'); process.exitCode = 2;
+    // Optional client-local observation only. Own data descriptors avoid getters;
+    // malformed diagnostics never change the original code/stdout/exit refusal.
+    try {
+      if (code === 'native-host-live-ipc-cap') {
+        const property = Object.getOwnPropertyDescriptor(error, 'ipc_diagnostic');
+        const value = property && Object.hasOwn(property, 'value') ? property.value : null;
+        if (value && typeof value === 'object' && !Array.isArray(value)
+            && [Object.prototype, null].includes(Object.getPrototypeOf(value))) {
+          const keys = Reflect.ownKeys(value), schema = Object.getOwnPropertyDescriptor(value, 'schema_version'), stage = Object.getOwnPropertyDescriptor(value, 'stage');
+          if (keys.length === 2 && keys.includes('schema_version') && keys.includes('stage')
+              && schema && Object.hasOwn(schema, 'value') && schema.value === 1
+              && stage && Object.hasOwn(stage, 'value') && ['envelope-not-queued', 'envelope-queued'].includes(stage.value)) {
+            process.stderr.write(JSON.stringify({ schema_version: 1, kind: 'forge-native-live-ipc-timeout', stage: stage.value }) + '\n');
+          }
+        }
+      }
+    } catch (_) { /* Optional diagnostics cannot replace the original refusal. */ }
   };
   if (process.argv.length !== 4 || !Object.hasOwn(phases, livePhase)) {
     refuse({ code: 'native-host-hook-arguments' }); return;
