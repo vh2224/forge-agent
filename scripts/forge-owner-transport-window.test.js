@@ -12,9 +12,9 @@ accounts.resolveLaunch=()=>({name:'fixture376',token:'fixture-not-a-real-token'}
 const prep=require('./forge-task-preparation'),unit=require('./forge-unit-sidecar'),windows=require('./forge-owner-transport-window'),runs=require('./forge-runs'),controller=require('./forge-unit-controller'),execution=require('./forge-task-execution');
 accounts.resolveLaunch=realResolve;
 const digest=value=>crypto.createHash('sha256').update(typeof value==='string'?value:JSON.stringify(value)).digest('hex');
-const selectors={native:'native live',distributed:'distributed native',legacy:'legacy separate',claude:'real production',raw:'unknown cleanup',broker:'cohort owner',budget:'mutation acquisition'},selector=process.argv[2];
+const selectors={native:'native live',distributed:'distributed native',legacy:'legacy separate',claude:'real production',raw:'unknown cleanup',broker:'cohort owner',budget:'mutation acquisition',prestart:'pre-attempt refusal'},selector=process.argv[2];
 if(selector&&!selectors[selector])throw new Error('unknown fixture selector');
-process.once('beforeExit',()=>{if(results.length!==(selector?1:7)){process.exitCode=1;fs.writeFileSync(path.join(lab,'INCOMPLETE.json'),JSON.stringify({completed:results,children:children.map(row=>({pid:row.child.pid,closed:row.closed,exitCode:row.child.exitCode,connected:row.child.connected}))},null,2));}});
+process.once('beforeExit',()=>{if(results.length!==(selector?1:8)){process.exitCode=1;fs.writeFileSync(path.join(lab,'INCOMPLETE.json'),JSON.stringify({completed:results,children:children.map(row=>({pid:row.child.pid,closed:row.closed,exitCode:row.child.exitCode,connected:row.child.connected}))},null,2));}});
 const summary=value=>JSON.stringify({ok:value?.ok,reason_code:value?.reason_code,diagnostic:value?.diagnostic});
 function command(bin,args,cwd){const r=cp.spawnSync(bin,args,{cwd,encoding:'utf8',env:{...process.env},windowsHide:true,timeout:20000});assert.equal(r.status,0,r.stderr||String(r.error));return r.stdout;}
 let seq=0;
@@ -128,6 +128,27 @@ async function run(name,action){if(selector&&!name.startsWith(selectors[selector
   assert.equal((await windows.withWindow(cap,()=>unit.acceptArtifactResult(q,candidate(q),{providerCalled:true,enforceReadOnlySurface:true}))).record.phase,'ready');
   const exits=children.filter(row=>!joined(row)).map(row=>new Promise(resolve=>row.child.once(row.broker?'exit':'close',resolve)));await broker.close();fs.writeFileSync(path.join(lab,'BROKER-AFTER-CLOSE.json'),JSON.stringify(children.map(row=>({pid:row.child.pid,closed:row.closed,exited:row.exited,broker:row.broker,exitCode:row.child.exitCode,connected:row.child.connected})),null,2));
   let timer;try{await Promise.race([Promise.all(exits),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('fixture broker close event unobserved')),5000);})]);}finally{clearTimeout(timer);}windows.close(cap,attest);assert.equal(windows.observed(q.contextRoot),null);
+ });
+ // Regression: a start refused before its attempt exists (no receipt, provider_called:false)
+ // must not leave the observed owner window held with no same-session exit.
+ await run('pre-attempt refusal releases the window it opened, and a held window without receipt settles through the live host',async()=>{
+  const saved=process.env.CODEX_THREAD_ID;
+  const refusing=()=>{const q=fixture();q.phase='discuss';process.env.CODEX_THREAD_ID='fixture376-prestart-'+seq;runs.add(q.contextRoot,{id:q.taskId,kind:'task',session_id:process.env.CODEX_THREAD_ID,host_runtime:'codex'});
+   q.continuation={from_dispatch_id:'never-dispatched',result_file:path.join(path.dirname(q.resultFile),'missing.json'),answers:[{id:'q1',answer:'synthetic answer'}]};return q;};
+  try{
+   const a=refusing(),refused=await prep.startStandaloneTaskPreparation(a);
+   assert.equal(refused.ok,false);assert.equal(refused.provider_called,false);assert.match(refused.reason_code,/^preparation-continuation-/);
+   assert.equal(refused.owner_window,undefined,'no held window reported');assert.equal(windows.observed(a.contextRoot),null,'window released');assert(!fs.existsSync(a.resultFile+'.receipt.json'));
+   const again=await prep.startStandaloneTaskPreparation({...a,dispatchId:crypto.randomUUID()});assert.notEqual(again.reason_code,'owner-window-coordination-mismatch');assert.equal(windows.observed(a.contextRoot),null);
+   const b=refusing(),nested=await prep.prepareStandaloneTask(b);
+   assert.equal(nested.ok,false);assert.equal(nested.provider_called,false);assert.equal(nested.owner_window,undefined,'nested start must not report a stale held window');assert.equal(windows.observed(b.contextRoot),null);
+   // Pre-fix state: an observed window for a dispatch that never got a receipt.
+   const c=refusing();windows.coordinatePreparation(prep.validateRequest(c),prep.preparationRequestFingerprint(prep.validateRequest(c)),{create:true,operation:'start'});assert(windows.observed(c.contextRoot));
+   const ops=[],closed=await windows.settlePreparation(c,windows.createTransportAdapter(ch=>{ops.push(ch.operation);return{challenge_sha256:digest(ch),joined:true,possible_writers:0,reference:'fixture: no child launched'};}));
+   assert.equal(closed.closed,true);assert.equal(windows.observed(c.contextRoot),null);assert.deepEqual(ops,['join-cli-settlement-no-attempt','settle-cli-preparation-no-attempt']);
+   const d=refusing();windows.coordinatePreparation(prep.validateRequest(d),prep.preparationRequestFingerprint(prep.validateRequest(d)),{create:true,operation:'start'});
+   await assert.rejects(()=>windows.settlePreparation(d,windows.createTransportAdapter(ch=>({challenge_sha256:digest(ch),joined:false,possible_writers:1,reference:'unknown'}))),e=>e.code==='owner-window-writer-unproven');assert(windows.observed(d.contextRoot),'still held');
+  }finally{if(saved===undefined)delete process.env.CODEX_THREAD_ID;else process.env.CODEX_THREAD_ID=saved;}
  });
  await run('mutation acquisition budget preserves controller serialization, guard identity and exclusive legacy publications',async()=>{
   const lock=require('./forge-lock'),recon=require('./forge-artifact-reconciliation'),owner=fixture().contextRoot,foreign=fixture().contextRoot;
