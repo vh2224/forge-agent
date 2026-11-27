@@ -106,22 +106,32 @@ async function withOwnerDelta(){
     fs.writeFileSync(planFile.replace(/-PLAN\.md$/,'-PLAN-GATE.md'),`---\nstatus: approved\nplan_sha256: ${hash(goodPlan)}\n---\nreapproved\n`);
     const note='.gsd/HANDOFF-fixture.md';fs.mkdirSync(path.join(f.owner,'.gsd'),{recursive:true});fs.writeFileSync(path.join(f.owner,note),'operator note after the attempt\n');
     const originalPlanBytes=Buffer.from(badPlan),policyCorrection={originalPlanBytes};
+    // Issue 502: one host hook row per tool call; a real recovery spans hundreds.
+    const journal='.gsd/forge/evidence~fixture~_no-slice_~adhoc.jsonl',journalFile=path.join(f.owner,journal);
+    fs.mkdirSync(path.dirname(journalFile),{recursive:true});
+    fs.writeFileSync(journalFile,Array.from({length:300},(_,i)=>JSON.stringify({ts:i,tool:'Bash',cmd:'echo '+i,file:null,ok:true,interrupted:false})+'\n').join(''));
+    let hookAttests=0;const hookEvidence={originalBytes:{[journal]:Buffer.alloc(0)},attestAppend:challenge=>{hookAttests++;assert.equal(challenge.rows,300);return{observed:true,reference:'fixture:host-hook-rows'};}};
     // Without the correction binding the reconciliation keeps refusing the changed plan.
     assert.throws(()=>activity.reconciliationDecision(r),/baseline-invalid/);
     assert.throws(()=>activity.reconciliationDecision(r,undefined,{policyCorrection:{originalPlanBytes:Buffer.from(goodPlan)}}),/policy-correction-invalid/);
     // The exported reconciliation API itself must reject non-verify changes,
     // before presenting an approval or admitting a broader owner projection.
     fs.writeFileSync(planFile,goodPlan+'\nScope creep.\n');
-    assert.throws(()=>activity.reconciliationDecision(r,undefined,{policyCorrection}),{code:'owner-reconciliation-policy-correction-scope'});
+    assert.throws(()=>activity.reconciliationDecision(r,undefined,{policyCorrection,hookEvidence}),{code:'owner-reconciliation-policy-correction-scope'});
     fs.writeFileSync(planFile,goodPlan);
-    const description=activity.reconciliationDecision(r,undefined,{policyCorrection});
+    const description=activity.reconciliationDecision(r,undefined,{policyCorrection,hookEvidence});
+    assert(!description.changes.some(row=>row.path===journal),'hook journal stays out of the reviewed delta');assert(hookAttests>0);
+    // A malformed hook row is still refused at the larger bound.
+    const goodJournal=fs.readFileSync(journalFile);fs.appendFileSync(journalFile,'not json\n');
+    assert.throws(()=>activity.reconciliationDecision(r,undefined,{policyCorrection,hookEvidence}),{code:'owner-reconciliation-append-invalid'});
+    fs.writeFileSync(journalFile,goodJournal);
     assert.match(description.questions[0].question,/correção do bloco verify:/);
     const changedPaths=description.changes.map(row=>row.path);
     assert(changedPaths.includes(note),JSON.stringify(changedPaths));assert(changedPaths.some(p=>p.endsWith('T01-PLAN.md')),JSON.stringify(changedPaths));
     const opened=questions.openQuestions(description);
-    questions.answer({cwd:f.owner,identity:opened.identity_sha256,answers:[{id:'owner-delta-approval',answer:'aprovado',source:'user-text'}]});
+    questions.answer({cwd:f.owner,identity:opened.identity_sha256,answers:[{id:'owner-delta-approval',answer:'Autorizar (Recomendado)',source:'tool-answer'}]});
     const reconciliation=activity.createOwnerReconciliation({request:r,hostRuntime:r.route.host_runtime,assertAuthority:()=>true,
-      attestStoppedWriter:()=>true,readPendingQuestions:()=>[],operatorDecision:opened.identity_sha256,policyCorrection,
+      attestStoppedWriter:()=>true,readPendingQuestions:()=>[],operatorDecision:opened.identity_sha256,policyCorrection,hookEvidence,
       attestChanges:challenge=>({challenge_sha256:roots.digest(challenge),changes:challenge.changes.map(row=>({...row,
         kind:row.path.includes('/questions')?'decision-record':/-PLAN(-GATE)?.md$/.test(row.path)?'policy-correction':'operator-reviewed',reference:'fixture explicit bounded decision'}))})});
     const observe=challenge=>({observed:true,reason_code:'execution-verification-failed',exit_code:1,timed_out:false,
@@ -140,5 +150,11 @@ async function withOwnerDelta(){
     console.log('PASS owner reconciliation accepts the approved corrected plan and composes with the correction successor');
   }finally{if(previousThread===undefined)delete process.env.CODEX_THREAD_ID;else process.env.CODEX_THREAD_ID=previousThread;xllm.runExecute=original;f.cleanup();}
 }
-async function all(){await main();await withOwnerDelta();}
+function approvalWords(){
+  const {approvalAnswer}=require('./forge-protected-owner-activity');
+  for(const ok of ['Autorizar','autorizar (Recomendado)','Aprovar (recommended)',' sim ','Aprovado (Recomendada)'])assert.equal(approvalAnswer(ok),true,ok);
+  for(const bad of ['Não autorizar','Autorizar talvez','Autorizar (Recomendado) mas não','(Recomendado)','Autorizar (outro)','',null,undefined,1])assert.equal(approvalAnswer(bad),false,String(bad));
+  console.log('PASS approval answer accepts only the approval word plus the contract recommendation suffix');
+}
+async function all(){approvalWords();await main();await withOwnerDelta();}
 module.exports={main:all};if(require.main===module)all().catch(e=>{console.error(e);process.exitCode=1;});

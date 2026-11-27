@@ -1,5 +1,7 @@
 ## Não lançado
 
+- Reconciliação do owner em recuperação longa (#501, #502): a aprovação `owner-delta-approval` aceita a palavra de aprovação com o sufixo de recomendação exigido pelo contrato de interação (`Autorizar (Recomendado)`), sem ampliar texto livre; o sufixo de diário de evidência anexado pelo hook do host passa a comportar até 4096 linhas e 1 MiB, ainda exato, terminado em nova linha, JSON por linha e atestado ao vivo.
+
 - Correção da política de verificação (#498): uma tentativa `execute-task` de milestone já executada, cujo `verify:` do plano nunca poderia passar, pode ser reverificada com o bloco `verify:` corrigido por um sucessor só de verificação (`policyCorrection`), com decisão viva do operador, sem nova inferência. Só o bloco `verify:` pode mudar; o selo novo vem do plano corrigido, a publicação aceita o hash corrigido apenas pela capacidade viva e o snapshot do owner admite só a transição exata do plano. Receipt, resultado e S0 originais ficam intactos. Testado offline em owners temporários.
 
 - Integração nativa de arquivos (#463, em preparação): owner retido com entrada por BEGIN canônico, intenção separada da admissão observada, hooks diretos e retorno capturado. Join, verificação, publicação e settlement permanecem independentes. O perfil cooperativo não é sandbox do sistema; validação integrada, comportamento do host e instalação continuam pendentes.

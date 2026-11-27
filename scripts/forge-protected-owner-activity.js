@@ -20,6 +20,19 @@ const attemptResumes = new WeakMap();
 const ownerTransfers = new WeakMap();
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 function fail(code) { throw Object.assign(new Error(code), { code }); }
+// Issue 501: the interaction contract labels the recommended option, so a native
+// tool answer may carry exactly that suffix. Only the approval word plus that one
+// suffix is accepted; free text is never widened.
+const APPROVAL_WORDS = Object.freeze(['aprovar', 'aprovado', 'sim', 'autorizar']);
+function approvalAnswer(value) {
+  if (typeof value !== 'string') return false;
+  const text = value.trim().toLowerCase().replace(/\s+\((?:recomendado|recomendada|recommended)\)$/, '');
+  return APPROVAL_WORDS.includes(text);
+}
+// Issue 502: the host PostToolUse hook appends one evidence row per tool call, so a
+// real recovery spans hundreds of rows. The suffix stays exact, newline-terminated,
+// JSON per row and live-attested; only the bound covers a real recovery.
+const HOOK_APPEND_MAX_BYTES = 1024 * 1024, HOOK_APPEND_MAX_ROWS = 4096;
 function currentScope() { return contexts.getStore() || null; }
 function assertPreflightAdmission() {
   const refusal = preflightRefusals.getStore();
@@ -641,9 +654,9 @@ function hookAppendProof(owner, change, evidence, unit, dispatch) {
   if (current.equals(prior)) return { path: change.path, before: change.before, original_sha256: sha(prior) };
   if (current.at(-1) !== 10) fail('owner-reconciliation-append-invalid');
   const suffix = current.subarray(prior.length);
-  if (suffix.length > 65536) fail('owner-reconciliation-delta-limit');
+  if (suffix.length > HOOK_APPEND_MAX_BYTES) fail('owner-reconciliation-delta-limit');
   const lines = suffix.toString('utf8').trimEnd().split('\n');
-  if (lines.length > 128) fail('owner-reconciliation-delta-limit');
+  if (lines.length > HOOK_APPEND_MAX_ROWS) fail('owner-reconciliation-delta-limit');
   for (const line of lines) { try { JSON.parse(line); } catch { fail('owner-reconciliation-append-invalid'); } }
   const challenge = Object.freeze({ owner, unit, dispatch_id: dispatch, ...change, original_sha256: sha(prior), appended_sha256: sha(suffix), rows: lines.length });
   const observed = evidence.attestAppend(challenge);
@@ -722,7 +735,7 @@ function validateRootAppendApproval(request, ownerDecision, options) {
     if (!answer.ok || roots.digest(answer.identity) !== options.operatorDecision
         || roots.digest(answer.identity) !== roots.digest(expectedIdentity) || answer.questions?.length !== 1
         || answer.questions[0].id !== decision.questions[0].id || answer.questions[0].question !== decision.questions[0].question
-        || !['aprovar', 'aprovado', 'sim', 'autorizar'].includes(answer.questions[0].answer?.trim().toLowerCase())) fail('root-append-answer-required');
+        || !approvalAnswer(answer.questions[0].answer)) fail('root-append-answer-required');
     const carriers = [`.gsd/forge/questions/${options.operatorDecision}.json`, `.gsd/forge/questions/${options.operatorDecision}.origin.json`]
       .map(relative => ({ relative, bytes: regular(path.join(proof.view.owner, relative)) }));
     const challenge = Object.freeze({ ...proof.binding, decision_identity: options.operatorDecision,
@@ -994,7 +1007,7 @@ function createOwnerReconciliation(options = {}) {
     const q = answer.questions?.find(row => row.id === expected.questions[0].id);
     if (!answer.ok || identity?.origin !== 'owner' || identity.unit !== unit || identity.milestone !== r.milestoneId
         || identity.slice !== r.sliceId || identity.task !== r.taskId
-        || !q || !['aprovar', 'aprovado', 'sim', 'autorizar'].includes(q.answer?.trim().toLowerCase())) fail('owner-reconciliation-operator-decision-required');
+        || !q || !approvalAnswer(q.answer)) fail('owner-reconciliation-operator-decision-required');
     const matches = candidate => identity.decision_set === candidate.decision_set && q.question === candidate.questions[0].question;
     if (!matches(expected)) {
       // Compose an already answered EXACT historical delta with only the new
@@ -1073,8 +1086,8 @@ function createOwnerReconciliation(options = {}) {
       } else if (row.kind === 'hook-append') {
         if (!/^\.gsd\/forge\/evidence[-~][A-Za-z0-9_.~-]+\.jsonl$/.test(change.path)
             || current.length < prior.length || !current.subarray(0, prior.length).equals(prior) || current.at(-1) !== 10) fail('owner-reconciliation-append-invalid');
-        const suffix = current.subarray(prior.length).toString('utf8').trimEnd().split('\n');
-        if (suffix.length > 128) fail('owner-reconciliation-delta-limit');
+        const suffixBytes = current.subarray(prior.length), suffix = suffixBytes.toString('utf8').trimEnd().split('\n');
+        if (suffixBytes.length > HOOK_APPEND_MAX_BYTES || suffix.length > HOOK_APPEND_MAX_ROWS) fail('owner-reconciliation-delta-limit');
         for (const line of suffix) { try { JSON.parse(line); } catch { fail('owner-reconciliation-append-invalid'); } }
       } else if (row.kind === 'canonical-owner-transfer') {
         const proof = ownerTransfers.get(options.ownerTransfer);
@@ -1175,7 +1188,7 @@ async function withReconciliationHandoff(request, runtime, action) {
   try { return await handoffs.run(entry, action); }
   finally { entry.consumed = true; }
 }
-module.exports = { withExecutionActivity, withNativeExecutionActivity, currentScope, assertPreflightAdmission, expectedProtectedOwner, reconciliationDecision,
+module.exports = { approvalAnswer, HOOK_APPEND_MAX_BYTES, HOOK_APPEND_MAX_ROWS, withExecutionActivity, withNativeExecutionActivity, currentScope, assertPreflightAdmission, expectedProtectedOwner, reconciliationDecision,
   createOwnerReconciliation, assertOwnerReconciliationReady, withOwnerReconciliation, withReconciliationHandoff,
   codeRootAppendDecision, withOwnerReconciliationRead,
   resumeAttemptOwner, inspectAttemptResume, hookAppendProof };
