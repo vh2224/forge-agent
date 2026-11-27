@@ -1,5 +1,7 @@
 ## Não lançado
 
+- Correção da política de verificação (#498): uma tentativa `execute-task` de milestone já executada, cujo `verify:` do plano nunca poderia passar, pode ser reverificada com o bloco `verify:` corrigido por um sucessor só de verificação (`policyCorrection`), com decisão viva do operador, sem nova inferência. Só o bloco `verify:` pode mudar; o selo novo vem do plano corrigido, a publicação aceita o hash corrigido apenas pela capacidade viva e o snapshot do owner admite só a transição exata do plano. Receipt, resultado e S0 originais ficam intactos. Testado offline em owners temporários.
+
 - Integração nativa de arquivos (#463, em preparação): owner retido com entrada por BEGIN canônico, intenção separada da admissão observada, hooks diretos e retorno capturado. Join, verificação, publicação e settlement permanecem independentes. O perfil cooperativo não é sandbox do sistema; validação integrada, comportamento do host e instalação continuam pendentes.
 
 - Recuperação de entregas concluídas (#461): reconhece os registros descritivos de execução, checkpoint, handoff e reparo no stream do milestone. A numeração continua considerando todas as posições físicas; identidade, unicidade, digests e ordem dos eventos canônicos permanecem obrigatórios.
