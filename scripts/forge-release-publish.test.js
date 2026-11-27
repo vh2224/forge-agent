@@ -20,7 +20,10 @@ const BASE = '/repos/example/forge-agent'; const TAG = `v${VERSION}`;
 const ROOT = path.resolve(__dirname, '..');
 const clone = value => JSON.parse(JSON.stringify(value));
 let count = 0;
-async function test(name, run) { await run(); count++; process.stdout.write(`PASS ${name}\n`); }
+async function test(name, run) {
+  if (process.argv.includes('--metadata-bound-only') && name !== 'publish-issue463-metadata-bound-is-exact-and-payload-rechecked') return;
+  await run(); count++; process.stdout.write(`PASS ${name}\n`);
+}
 
 function completeReport(manifest) {
   return { schema_version: gate.SCHEMA_VERSION, ok: true,
@@ -164,6 +167,44 @@ function existing(f) {
 }
 
 (async () => {
+  await test('publish-issue463-metadata-bound-is-exact-and-payload-rechecked', async () => {
+    const metadataPath = 'scripts/fixtures/issue-463/distribution-delta.json';
+    const currentMetadata = fs.readFileSync(path.join(ROOT, metadataPath));
+    const cases = [
+      { component: 'core', file: metadataPath, bytes: currentMetadata, allowed: true },
+      { component: 'core', file: metadataPath, bytes: Buffer.alloc(8 * 1024 * 1024), allowed: true },
+      { component: 'core', file: metadataPath, bytes: Buffer.alloc(8 * 1024 * 1024 + 1), allowed: false },
+      { component: 'core', file: 'ordinary.bin', bytes: Buffer.alloc(4 * 1024 * 1024), allowed: true },
+      { component: 'core', file: 'ordinary.bin', bytes: Buffer.alloc(4 * 1024 * 1024 + 1), allowed: false },
+      { component: 'adapter-claude', file: metadataPath, bytes: Buffer.alloc(4 * 1024 * 1024 + 1), allowed: false },
+      { component: 'core', file: 'scripts/fixtures/issue-463/distribution-delta.json.other', bytes: Buffer.alloc(4 * 1024 * 1024 + 1), allowed: false },
+    ];
+    for (const item of cases) await withFixture(async f => {
+      f.manifest.files = [{ component: item.component, path: item.file, bytes: item.bytes.length,
+        sha256: packaging.sha256(item.bytes) }];
+      f.manifest.package_sha256 = packaging.packageChecksum(f.manifest.files);
+      f.state.packageHook = built => { built.sources = new Map([[item.component + '/' + item.file, { bytes: item.bytes }]]); };
+      if (!item.allowed) {
+        await assert.rejects(f.prepare(), { code: 'package-entry' });
+        assert.strictEqual(f.state.mutations.length, 0);
+        return;
+      }
+      const prepared = await f.prepare();
+      assert.deepStrictEqual(fs.readFileSync(path.join(path.dirname(prepared.state), 'package', 'payload',
+        item.component, ...item.file.split('/'))), item.bytes);
+      assert.strictEqual((await f.apply(prepared)).status, 'published-verified');
+      assert.strictEqual(f.state.mutations.length, 2);
+    });
+    await withFixture(async f => {
+      f.manifest.files = [{ component: 'core', path: metadataPath, bytes: currentMetadata.length,
+        sha256: packaging.sha256(currentMetadata) }];
+      f.manifest.package_sha256 = packaging.packageChecksum(f.manifest.files);
+      f.state.packageHook = built => { built.sources = new Map([['core/' + metadataPath, { bytes: currentMetadata }]]); };
+      const prepared = await f.prepare();
+      fs.appendFileSync(path.join(path.dirname(prepared.state), 'package', 'payload', 'core', ...metadataPath.split('/')), 'changed');
+      blocked(await f.apply(prepared), f);
+    });
+  });
   await test('publish-overlap-reuses-only-a-valid-current-job-preparation', () => withFixture(async f => {
     const p=await f.prepare();
     const ready=await publisher.ensureFreshPreparation({...f.prepareOptions,state:p.state,nonce:p.nonce},f.dependencies);
