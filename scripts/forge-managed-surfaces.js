@@ -497,6 +497,31 @@ function sanitizedDiff(ref, before, after, options = {}) {
   if (!result.diff) fail(result.reason_code);
   return result.diff;
 }
+// Digest-only observers (preparation surface, SVN strict snapshot) keep no
+// preimage of the hook-evidence journal. Recover it from the current bytes: the
+// prior sha256 (null = absent) must be a line-boundary prefix, every later
+// observed sha256 a boundary at or after it, and the suffix complete JSON-object
+// lines within the hook writer's own line cap. Any rewrite, truncation, foreign
+// name, link or hardlink answers false. A verdict only; callers keep authority.
+const HOOK_APPEND_LIMITS = Object.freeze({ max_bytes: 16 * 1024 * 1024, max_append_bytes: 16 * 1024 * 1024,
+  max_append_lines: 65536, max_line_bytes: SURFACES.get('hook-evidence').limits.max_line_bytes });
+function hookEvidenceAppendOnly(owner, relative, prior, observed = []) {
+  try {
+    if (!PATTERNS.get('hook-evidence').test(normalizeRelative(relative)) || !hexOrNull(prior)
+        || !Array.isArray(observed) || observed.some(value => !HEX64.test(value))) return false;
+    const target = physicalTarget(owner, relative);
+    if (!target.exists) return false;
+    const bytes = fs.readFileSync(target.absolute), digest = crypto.createHash('sha256'), offsets = new Map([[sha(EMPTY), 0]]);
+    for (let start = 0, end; start < bytes.length; start = end) {
+      end = bytes.indexOf(0x0a, start); end = end < 0 ? bytes.length : end + 1;
+      digest.update(bytes.subarray(start, end));
+      if (bytes[end - 1] === 0x0a) offsets.set(digest.copy().digest('hex'), end);
+    }
+    const from = prior === null ? 0 : offsets.get(prior);
+    if (from === undefined || observed.some(value => !(offsets.get(value) >= from))) return false;
+    return validateTransition({ validator: 'append-jsonl-v1', limits: { ...HOOK_APPEND_LIMITS } }, null, bytes.subarray(from)).ok;
+  } catch { return false; }
+}
 
 // ── External store: exclusive preimages and the attribution journal ─────────
 // The store lives outside the owner; only components INSIDE it are checked.
@@ -791,7 +816,7 @@ module.exports = {
   VALIDATOR_ONLY, ManagedSurfaceError,
   getDeclaration, declarationDigest, assertDeclaration,
   normalizeRelative, resolveSurface, surfacePath, physicalTarget, readSurface,
-  validateTransition, sanitizedDiff,
+  validateTransition, sanitizedDiff, hookEvidenceAppendOnly,
   retainPreimage, readPreimage, appendJournalRow, readJournal,
   snapshotDigest, attributionRowDigest, validateAttributionRow, createAttributionRow, verifyAttributionChain,
   cli,
