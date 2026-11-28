@@ -310,6 +310,16 @@ function loadReviewProcedure(mode, opts) {
     forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
 }
 
+function sidecarFailureReason(error) {
+  const field = error && typeof error === 'object' ? Object.getOwnPropertyDescriptor(error, 'code') : null;
+  if (field && Object.hasOwn(field, 'value') && typeof field.value === 'string'
+      && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(field.value)) return field.value;
+  const client = require('./forge-appserver-client');
+  if (client.explicitCodexUpgrade(error)) return client.APPSERVER_TERMINAL_CODES.CLIENT_UPGRADE_REQUIRED;
+  const message = error && typeof error === 'object' ? Object.getOwnPropertyDescriptor(error, 'message') : null;
+  return classifyError(message && Object.hasOwn(message, 'value') && typeof message.value === 'string' ? message.value : '').kind || 'sidecar-failed';
+}
+
 async function withSidecarIdentity(mode, opts, driver) {
   const dispatchId = opts.identity?.dispatch_id || opts.dispatchId || normalizeDispatchId(null, mode);
   const context = { requested: false, started: false, attempted: false, fields: null };
@@ -326,7 +336,7 @@ async function withSidecarIdentity(mode, opts, driver) {
       model_sent: '-', effort: opts.effort, host: opts.hostRuntime, dispatch_id: dispatchId };
     const reviewFailure = (opts.engine === 'claude' || ['challenge', 'defend', 'rebuttal', 'fix'].includes(mode)) ? reviewFailureDiagnostic(error) : null;
     identityStage(runOpts, context.started ? 'falhou' : 'recusado', {
-      reason_code: reviewFailure ? reviewFailure.reason_code : error.code || classifyError(error.message) || 'sidecar-failed',
+      reason_code: reviewFailure ? reviewFailure.reason_code : sidecarFailureReason(error),
       ...(reviewFailure ? { provider_called: reviewFailure.provider_called } : {}),
       ...(!reviewFailure && error.layer ? { layer: error.layer } : {}),
       ...(error.reviewEffort ? { effort_requested: error.reviewEffort.effort_requested,
@@ -3431,6 +3441,7 @@ function classifyErrorClass(msg) {
   // A missing requested model (S01/T04) is a terminal failure of the route, anchored
   // on the client's fixed message: no retry in place and no model swap.
   if (/^forge-appserver-client: turn ended with status failed \(modelNotFound\)$/.test(msg || '')) return 'terminal';
+  if (msg === 'forge-appserver-client: requested model requires a newer version of Codex; upgrade the app or CLI') return 'terminal';
   // A refused inbound input request (S04/T02) waits for the owner, never a retry:
   // anchored on the client's fixed message, before any keyword heuristic.
   if (/^forge-appserver-client: inbound input request refused; owner decision required$/.test(msg || '')) return 'terminal';

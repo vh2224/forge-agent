@@ -22,7 +22,7 @@ const NATIVE_PIN = 'a5e9c02e8b926992e52fe2e459afba306e63c8d6721eb4502178491b4b3f
 const SOURCE_PINS = {
   'scripts/forge-verification-job.ps1': '46cc4463ec5398689f04474c7f0742768241d5acfe72c9acb7c2c0d36d36b7ff',
   'scripts/forge-verification-process.js': 'ea13826a77554241cee75c15f4617cdb0d2d27753ec1733cc8109bc04179c09f',
-  'scripts/forge-xllm.js': '54860adba381f3406b5ae30537a9220944d3590123c2d6901fe8e82292ca4afe',
+  'scripts/forge-xllm.js': '96f11f6a3eb94ad1a6fc69ab22cba49f1646e5017e40acaf09844cf7a982f8f4',
   'scripts/forge-appserver-client.js': '1888564771fcc310cbc1e1fcc084a939a0ff3b189e0c94aa04d3ed19c2040c31',
   'scripts/forge-claude-sidecar.js': '2a6e7042e86b050076a2c68a54e8c5f6593c72be0a6ee44c26219711eef22ae4',
 };
@@ -218,7 +218,8 @@ test('T0 adapters verification helpers and xllm bytes unchanged', () => {
       assert.equal(row.before, digestValue, 'exact immutable adapter predecessor pin');
       const preimage = require('zlib').gunzipSync(Buffer.from(row.before_gzip_base64, 'base64'), { maxOutputLength: 4 * 1024 * 1024 });
       assert.equal(sha(preimage), digestValue, 'measured real historical adapter preimage');
-      assert.equal(actual, row.after, 'exact measured admitted adapter successor');
+      const admittedPredecessor = require('./fixtures/issue-463/distribution.cjs').projectIssue463Read(p => fs.readFileSync(path.join(root, p)))(file);
+      assert.equal(sha(admittedPredecessor), row.after, 'exact measured current-layer adapter predecessor');
     } else assert.equal(actual, digestValue, file);
   }
 });

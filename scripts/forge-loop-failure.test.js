@@ -98,7 +98,44 @@ function worker(f, operation) {
   return { child, ready, exited };
 }
 
+async function testLinkedExecutionActivity(){
+  const previousThread=process.env.CODEX_THREAD_ID;process.env.CODEX_THREAD_ID='fixture-linked-activity-owner';
+  const f=fixture('codex','auto',true),outputDir=fs.mkdtempSync(path.join(os.tmpdir(),'forge-linked-execute-output-')),
+    xllm=require('./forge-xllm'),sidecar=require('./forge-unit-sidecar'),original=xllm.runExecute,activity=require('./forge-protected-owner-activity'),originalActivity=activity.withExecutionActivity;
+  try{
+    const binding=f.selected.snapshot.last_decision.controller_result.details.transaction;
+    f.selected.snapshot.last_decision.controller_result.details.transaction={idempotency_key:binding.idempotency_key,phase:binding.phase};
+    const consumed=consume(f),entered=invoke(f,'reenter',consumed.snapshot,entryInput(f,consumed));
+    assert.strictEqual(entered.outcome,'dispatch_required');assert.strictEqual(entered.unit.key,'execute-task/T01');
+    const git=args=>{const result=spawnSync('git',args,{cwd:f.cwd,encoding:'utf8',windowsHide:true});assert.strictEqual(result.status,0,result.stderr);};
+    fs.writeFileSync(path.join(f.cwd,'.gitignore'),'.gsd/\n');fs.mkdirSync(path.join(f.cwd,'scripts'));fs.writeFileSync(path.join(f.cwd,'scripts/result.js'),'// private fixture preimage\n');
+    git(['init','-q']);git(['add','--','.gitignore','scripts/result.js']);git(['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture baseline']);
+    const roots=require('./forge-code-roots'),runs=require('./forge-runs'),contract=roots.singleContract(f.cwd,f.cwd),rootId=contract.primary_root_id,
+      taskDir=path.join(f.cwd,'.gsd/milestones',f.milestone,'slices/S03/tasks/T01'),planFile=path.join(taskDir,'T01-PLAN.md');
+    fs.mkdirSync(taskDir,{recursive:true});fs.writeFileSync(planFile,'---\nid: T01\nworker: claude\ndepends: []\nwrites:\n  - scripts/result.js\nmust_haves:\n  truths:\n    - Linked execution reaches its transport boundary.\n  artifacts: []\n  key_links: []\nexpected_output:\n  - scripts/result.js\n---\n# T01\n\n## Verify\n\n`node -e "process.exit(0)"`\n');
+    fs.writeFileSync(planFile.replace('-PLAN.md','-PLAN-GATE.md'),'---\nstatus: approved\n---\n');
+    runs.add(f.cwd,{id:f.milestone,kind:'milestone',session_id:process.env.CODEX_THREAD_ID,host_runtime:'codex',owner_session_source:'CODEX_THREAD_ID',active:true,root:f.cwd});
+    fs.writeFileSync(path.join(f.cwd,'.gsd/forge-prefs.jsonc'),JSON.stringify({tier_models:Object.fromEntries(['light','standard','heavy','max'].map(tier=>[tier,['claude-opus-5-5']]))}));
+    const gate=require('./forge-claim-gate').recordAndEvaluate({cwd:f.cwd,runId:f.milestone,unit:'execute-task/T01',source:'plan-writes',codeDir:f.cwd,executionContract:contract,paths:roots.validatePlan(fs.readFileSync(planFile,'utf8'),contract).writes.map(roots.wire),readyAlternatives:0,wait:false});assert.strictEqual(gate.decision,'proceed');
+    const route=require('./forge-dispatch-resolve').resolveDispatch({cwd:f.cwd,hostRuntime:'codex',workerEngine:'claude',unitType:'execute-task',milestoneId:f.milestone,unitId:'T01',planPath:planFile});assert.strictEqual(route.dispatch_allowed,true,route.dispatch_reason_code);assert.strictEqual(route.worker_mode,'sidecar');
+    const promptFile=path.join(outputDir,'prompt.md');fs.writeFileSync(promptFile,'Private linked execution fixture.');
+    const request={...f.request,runId:f.milestone,execution_contract:contract,claim:runs.get(f.cwd,f.milestone).write_claim,planFile,promptFile,workflowId:'failure-fixture',dispatchId:'linked-execution-activity',resultFile:path.join(outputDir,'new-result.json'),route,
+      gates:{plan:'approved',security:'not-applicable',claim:'proceed'},verification:{preferenceCommands:['node -e "process.exit(0)"'],bindings:[{root_id:rootId,criterion:{kind:'truth',index:0},aspect:'default',coverage:'behavioral',source:{kind:'verification',check_index:0}}]},linked_begin_key:entered.controller_result.details.transaction.idempotency_key};
+    const linkedEntryOptions={...liveOptions(f),ownerToken:f.input.owner_token},oldReceipt=fs.readFileSync(f.receiptFile),oldRecovery=fs.readFileSync(f.recoveryFile);let calls=0,seen;
+    activity.withExecutionActivity=(bound,options,action)=>{if(bound.dispatchId===request.dispatchId){seen=bound;assert(bound.linkedEntryBinding);assert.strictEqual(recovery.bindLinkedRequest(bound,linkedEntryOptions),bound,'fresh revalidation preserves the same request/opaque handle');}return originalActivity(bound,options,action);};
+    xllm.runExecute=async()=>{calls++;throw Object.assign(Error('private fixture stop at transport'),{code:'fixture-transport-stop',provider_called:false});};
+    await assert.rejects(sidecar.runUnitSidecar(request,{linkedEntryOptions}),error=>{if(error.code!=='fixture-transport-stop')throw error;return true;});assert.strictEqual(calls,1,'real linked authority crosses activity validation and reaches the stub once');
+    assert.strictEqual(recovery.requestIdentity(recovery.canonicalRequest(seen)).linked_entry.entry_id,'fixture-entry-1');
+    await assert.rejects(sidecar.runUnitSidecar({...request,dispatchId:'copied-linked-handle',linkedEntryBinding:JSON.parse(JSON.stringify(seen.linkedEntryBinding))},{linkedEntryOptions}),error=>error.code==='linked-entry-binding-required');assert.strictEqual(calls,1);
+    await assert.rejects(sidecar.runUnitSidecar({...request,dispatchId:'missing-linked-authority'},{}),/authority|required/);assert.strictEqual(calls,1);
+    await assert.rejects(sidecar.runUnitSidecar({...request,dispatchId:'forged-linked-authority'},{linkedEntryOptions:{...linkedEntryOptions,entryAuthority:{approved:true}}}),/authority|required/);assert.strictEqual(calls,1);
+    await assert.rejects(sidecar.runUnitSidecar({...request,dispatchId:'linked-functional-question'},{linkedEntryOptions:{...linkedEntryOptions,questionStateAdapter:()=>({answers:[],questions:[{id:'fixture-choice',question:'Choice remains pending'}]})}}),error=>error.code==='pending-questions');assert.strictEqual(calls,1);
+    assert(fs.readFileSync(f.receiptFile).equals(oldReceipt));assert(fs.readFileSync(f.recoveryFile).equals(oldRecovery));
+  }finally{activity.withExecutionActivity=originalActivity;xllm.runExecute=original;cleanup(f);fs.rmSync(outputDir,{recursive:true,force:true});if(previousThread===undefined)delete process.env.CODEX_THREAD_ID;else process.env.CODEX_THREAD_ID=previousThread;}
+}
+
 async function main() {
+  await testLinkedExecutionActivity();
   if (process.argv.includes('--terminal-linked')) return terminalLinkedRestarts();
   test('211 R1: deleting or truncating current state cannot erase a dispatch question', () => {
     for (const mutation of ['delete', 'truncate']) for (const boundary of ['cached', 'binding']) {
@@ -802,6 +839,9 @@ function terminalLinkedNegatives(f) {
 if (require.main === module) {
   if (['--linked-consume-worker', '--linked-resume-worker', '--linked-negative-worker'].includes(process.argv[2])) {
     const f = JSON.parse(fs.readFileSync(path.join(process.argv[3], 'fixture.json')));
+    // A fresh process reloads the request from disk: the parent's opaque handle does not survive
+    // serialization, so the worker rebinds from live authority (a copied handle is refused).
+    if (f.request) delete f.request.linkedEntryBinding;
     if (process.argv[2] === '--linked-consume-worker') {
       f.request = recovery.bindLinkedRequest(f.request, { ...liveOptions(f), ownerToken: f.input.owner_token });
       if (process.argv[4] === 'after-release-before-phase') {
@@ -838,6 +878,7 @@ if (require.main === module) {
       assert.strictEqual(consume(f).reason_code, 'failure-consumed');
     } else consume(f, liveOptions(f, { failpoint: point => { if (point === process.argv[4]) process.exit(23); return false; } }));
     if (process.connected) process.disconnect();
-  } else main().catch(error => { console.error(error); process.exitCode = 1; });
+  } else if(process.argv[2]==='--linked-execution-activity-only')testLinkedExecutionActivity().then(()=>console.log('PASS private linked execute activity: real entry/contract and external transport stub; not Native/LIVE')).catch(error=>{console.error(error.code||error.message);process.exitCode=1;});
+  else main().catch(error => { console.error(error); process.exitCode = 1; });
 }
 module.exports = { fixture, liveOptions, invoke, consume, entryInput, history, cleanup, main };

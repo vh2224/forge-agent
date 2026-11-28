@@ -33,4 +33,17 @@ test('sidecar input telemetry counts the actual built prompt', () => {
   assert(Number.isInteger(countTokens(prompt)) && countTokens(prompt) > 0);
 });
 
-process.stdout.write(`\n${passed} passed, 0 failed\n`);
+async function testFailureIdentityReasonCodes(){
+  const fs=require('fs'),path=require('path'),Module=require('module'),filename=require.resolve('./forge-xllm'),raw=fs.readFileSync(filename,'utf8'),copy=new Module(filename+'#failure-reason-data',module);copy.filename=filename;copy.paths=Module._nodeModulePaths(path.dirname(filename));
+  copy._compile(raw.replace(/^#![^\n]*(?:\n|$)/,'')+'\nmodule.exports.__failureReasonTest={withSidecarIdentity,sidecarFailureReason};\n',filename);
+  const api=copy.exports.__failureReasonTest,events=[];let coerced=0,getters=0;
+  const codes=[{value:{toString(){coerced++;throw Error('no object coercion');}},message:'network connection failed',expected:'network'},
+    {value:'fixture-known-code',message:'network',expected:'fixture-known-code'},
+    {value:'private invalid code with spaces',message:'unclassified fixture failure',expected:'unknown'},
+    {value:400,message:"The 'arbitrary-model-token' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again.",expected:'codex-client-upgrade-required'}];
+  for(const row of codes){const error=Object.assign(Error(row.message),{code:row.value});await assert.rejects(api.withSidecarIdentity('execute',{engine:'codex',model:'fixture-model',effort:'medium',hostRuntime:'codex',announce:(stage,fields)=>events.push({stage,fields})},async()=>{throw error;}),caught=>caught===error);assert.strictEqual(events.at(-1).fields.reason_code,row.expected);assert.strictEqual(typeof events.at(-1).fields.reason_code,'string');}
+  const error=Error('network connection failed');Object.defineProperty(error,'code',{get(){getters++;return{bad:true};}});assert.strictEqual(api.sidecarFailureReason(error),'network');assert.strictEqual(getters,0);assert.strictEqual(coerced,0);assert(!JSON.stringify(events).includes('[object Object]'));assert(!JSON.stringify(events).includes('private invalid'));
+  const {classifyErrorClass,reviewFailureDiagnostic}=require('./forge-xllm'),client=require('./forge-appserver-client');assert.strictEqual(classifyErrorClass(client.APPSERVER_TERMINAL_MESSAGES.CLIENT_UPGRADE_REQUIRED),'terminal');assert.strictEqual(reviewFailureDiagnostic({code:'codex-client-upgrade-required'}).reason_code,'codex-client-upgrade-required');
+}
+
+testFailureIdentityReasonCodes().then(()=>{passed++;process.stdout.write(`\n${passed} passed, 0 failed\n`);}).catch(error=>{console.error(error.code||error.message);process.exitCode=1;});

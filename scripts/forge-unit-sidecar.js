@@ -4404,6 +4404,9 @@ function appendProtectedOwnerEvents(root, receiptFile, record, lines) {
 }
 
 async function runUnitSidecar(request, runtime = {}) {
+  // Bind before activity fingerprints/tree custody; the inside entry revalidates
+  // through the same producer without replacing this genuine opaque handle.
+  if (request?.linked_begin_key) request = require('./forge-attempt-recovery').bindLinkedRequest(request, runtime.linkedEntryOptions);
   const windows = require('./forge-owner-transport-window');
   if (request?.scope === 'standalone-task' && ['brainstorm','discuss','research','plan'].includes(request.phase)) {
     windows.assertMutationAllowed(request.contextRoot || request.cwd);

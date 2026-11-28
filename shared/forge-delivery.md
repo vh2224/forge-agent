@@ -485,3 +485,45 @@ approveCorrection}})` em vez de `timeoutMs` (os dois juntos recusam com
   transição exata daquele plano (original → corrigido).
 
 Nenhuma inferência nova acontece; receipt, resultado e S0 originais ficam intactos.
+
+### Scratch do worker fora do claim (#510)
+
+Quando a execute-task de milestone (worker sidecar) terminou `done`, mas o
+`verifyResult` recusou com `execution-outside-claim` só porque o próprio worker
+deixou scratch atribuível à tentativa dentro do CODE_DIR (por exemplo caches de
+`TEMP`), o receipt fica `failed` com a resposta normalizada retida em
+`resultFile.returned.json`. Replay, abandono (`replay-refusal-retained-output`) e
+recuperação (`recovery-cause-unproved`) recusam. O caminho canônico é:
+
+1. O owner para o writer, confere o scratch e o remove (ou move para fora do CODE_DIR).
+2. `forge-sidecar-verification-successor.create({request, reference, assertAuthority,
+   assertBoundary, attestStoppedWriter, scratchReconciliation:{prefix, approveScratch}})`,
+   sem `timeoutMs`, `policyCorrection` nem `attestFailure` (misturar recusa com
+   `verification-successor-policy-mixing`). Um pedido com `linked_begin_key` já vinculado
+   é aceito; o vínculo opaco é preservado.
+3. Se lease ou `events.jsonl` do owner mudaram desde o S0 sem prova própria, a
+   capacidade só é usável depois de `bindOwnerReconciliation` com uma reconciliação
+   do owner aprovada (`verification-successor-owner-reconciliation-required`).
+4. `runUnitSidecar(request, {verificationSuccessor: cap})` publica pela verificação
+   selada original e pela publicação normal, sem nova inferência.
+
+Regras (recusas nomeadas `verification-successor-*`):
+
+- o receipt é `failed` com `execution-outside-claim`, sem `milestone_delivery`, e o
+  hash de `returned.json` bate com `failure.returned_response.sha256`; a resposta é `done`;
+- `prefix` é um caminho relativo único da raiz primária git, fora de `.gsd/` e `.git/`,
+  sem `..`, e nenhum claim o cobre ou fica dentro dele (`scratch-prefix-invalid`,
+  `scratch-prefix-claimed`);
+- toda entrada de `files_changed` fora do claim está sob o prefixo, como arquivo
+  adicionado (`scratch-outside-prefix`, `scratch-not-added`, `scratch-unchanged`);
+- o prefixo não existia na revisão inicial nem na sujeira pré-tentativa
+  (`scratch-tracked`, `scratch-preexisting`) e não existe mais agora (`scratch-present`);
+- o restante passa pelo censo normal de `verifyResult` contra a árvore atual
+  (delta extra continua `execution-outside-claim`);
+- `approveScratch(challenge)` observa a decisão explícita do operador sobre o hash da
+  resposta, o prefixo, a contagem e o hash das entradas removidas, os caminhos do
+  claim e o hash dos arquivos verificados; só `{approved:true, reference}` cria a capacidade.
+
+O receipt falho, o resultado e `returned.json` ficam intactos; o novo registro
+`executed` mora no receipt do sucessor e guarda `verification_successor.scratch_reconciliation`.
+O selo de verificação não muda.
