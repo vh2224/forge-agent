@@ -2744,9 +2744,17 @@ async function runWriteContractCore(opts, contract) {
   // This snapshot is AUDIT ONLY — exposed as `pre_dirty` in the result JSON for the
   // orchestrator to cross-check. The AUTHORITATIVE snapshot that drives the post-failure
   // surgical reset lives in the orchestrator's state file (T03/T04); the adapter NEVER resets.
+  // A review-fix on SVN observes the claim-derived containers of the native
+  // profile (derived from the validated brief), never the whole shared checkout.
+  let svnReviewScope = null;
+  if (contract.mode === 'fix' && vcsName === 'svn') {
+    try { svnReviewScope = { code_dir: cwd, observation: vcs.deriveSvnReviewObservation(opts.brief.claim_paths) }; }
+    catch { throw boundaryError('svn-review-scope-invalid', 'The claim cannot form the SVN review observation scope'); }
+  }
+  const scopeOption = svnReviewScope ? { svnReviewScope } : {};
   const attemptSnapshots = repoRoots.length > 1
-    ? require('./forge-surgical-reset').captureMultiAttemptSnapshot(repoRoots, { attemptId: dispatchId })
-    : [captureAttemptSnapshot(cwd, { attemptId: dispatchId, vcsName })];
+    ? require('./forge-surgical-reset').captureMultiAttemptSnapshot(repoRoots, { attemptId: dispatchId, ...scopeOption })
+    : [captureAttemptSnapshot(cwd, { attemptId: dispatchId, vcsName, ...scopeOption })];
   const attemptSnapshot = attemptSnapshots[0];
   const preDirty = attemptSnapshot.pre_dirty;
   const preDirtyByRepo = attemptSnapshots.map(snapshot => ({ repo: snapshot.code_dir, entries: snapshot.pre_dirty }));

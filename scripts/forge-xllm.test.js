@@ -441,4 +441,51 @@ async function claudeSessionForwarding() {
     fs.rmSync(lab, { recursive: true, force: true });
   }
 }
-claudeSessionForwarding().catch((error) => { console.error(error); process.exitCode = 1; });
+
+// A review-fix on SVN observes the claim-derived source containers (the native
+// profile), never the whole shared checkout: unrelated ignored trees cannot
+// exhaust the strict snapshot, and a write outside the claim is still refused.
+async function svnReviewFixScopedCapture() {
+  const svnLab = require('./forge-svn-lab'), vcs = require('./forge-vcs');
+  if (!svnLab.hasSvnToolchain()) { console.log('SKIP forge-xllm SVN review-fix scoped capture: svn and svnadmin are required'); return; }
+  const adapterPath = require.resolve('./forge-claude-sidecar.js'), xllmPath = require.resolve('./forge-xllm.js');
+  const adapter = require(adapterPath), realInvoke = adapter.invokeClaudeSidecar, cachedXllm = require.cache[xllmPath];
+  const originalCapture = vcs.captureDirty, limits = { maxEntries: 40 };
+  const lab = svnLab.createLab('forge-xllm-svn-fix-');
+  let completed = false, calls = 0, worker = () => {};
+  try {
+    svnLab.initializeSvn(lab);
+    const svn = (...args) => { const r = svnLab.run(['svn', '--non-interactive', '--config-dir', lab.config, ...args], { cwd: lab.wc }); assert.strictEqual(r.exit, 0, r.stderr); };
+    const write = (file, content) => { const target = path.join(lab.wc, file); fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, content); };
+    write('src/a.js', 'base\n'); write('src/other.js', 'other\n');
+    svn('add', 'src'); svn('propset', 'svn:ignore', 'vendor', '.'); svn('commit', '-m', 'base fixture'); svn('update');
+    for (let i = 0; i < 60; i += 1) write(`vendor/pkg${i}/index.js`, 'dependency\n');
+    // Test-lowered strict policy through the existing limit injection.
+    vcs.captureDirty = (cwd, opts) => originalCapture(cwd, opts.strict ? { ...opts, strictLimits: limits } : opts);
+    assert.strictEqual(vcs.captureDirty(lab.wc, { vcs: 'svn', strict: true }).error, 'svn-snapshot-limit', 'whole checkout exceeds the lowered limit');
+    assert.strictEqual(vcs.captureDirty(lab.wc, { vcs: 'svn', strict: true, reviewObservation: vcs.deriveSvnReviewObservation(['src/a.js']) }).ok, true,
+      'claim-scoped capture fits the same limit');
+    adapter.invokeClaudeSidecar = async () => { calls += 1; worker();
+      return { candidate: { status: 'done', summary: 'fixture', items: [{ r: 'R1', outcome: 'fixed', note: 'fixture' }], files_changed: ['src/a.js'] }, telemetry: null }; };
+    delete require.cache[xllmPath];
+    const fresh = require(xllmPath);
+    const base = { engine: 'claude', hostRuntime: 'codex', sidecarDeclared: true, model: 'claude-sonnet-5', effort: 'medium', envPolicy: 'minimal',
+      cwd: lab.wc, brief: { items: [{ r: 'R1', path: 'src/a.js' }], claim_paths: ['src/a.js'] } };
+    worker = () => write('src/a.js', 'fixed\n');
+    const result = await fresh.runFix({ ...base, resultFile: path.join(lab.evidence, 'fix.json'), dispatchId: 'svn-scoped-fix' });
+    assert.strictEqual(calls, 1, 'the provider is reached: no svn-snapshot-limit before it');
+    assert.deepStrictEqual(result.verified_paths, ['src/a.js']); assert.strictEqual(result.vcs, 'svn');
+    svn('revert', 'src/a.js');
+    worker = () => { write('src/a.js', 'fixed\n'); write('src/other.js', 'outside claim\n'); };
+    await assert.rejects(fresh.runFix({ ...base, resultFile: path.join(lab.evidence, 'outside.json'), dispatchId: 'svn-scoped-outside' }),
+      error => error.code === 'review-fix-outside-claim' && error.outside.includes('src/other.js'));
+    assert.strictEqual(calls, 2);
+    completed = true;
+    console.log('forge-xllm SVN review-fix scoped capture passed (claim scope fits a lowered limit the whole checkout exceeds; outside-claim write still refused)');
+  } finally {
+    vcs.captureDirty = originalCapture; adapter.invokeClaudeSidecar = realInvoke;
+    delete require.cache[xllmPath]; if (cachedXllm) require.cache[xllmPath] = cachedXllm;
+    if (completed) svnLab.cleanupChildren(lab); else process.stderr.write(`Preserved failing SVN lab: ${lab.root}\n`);
+  }
+}
+claudeSessionForwarding().then(svnReviewFixScopedCapture).catch((error) => { console.error(error); process.exitCode = 1; });
