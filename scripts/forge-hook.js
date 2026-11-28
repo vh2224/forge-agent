@@ -677,7 +677,7 @@ function publishClaudeOwnerEnvironment(data) {
     descriptor = fs.openSync(target, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | (fs.constants.O_NOFOLLOW || 0), 0o600);
     const opened = fs.fstatSync(descriptor), current = fs.lstatSync(target);
     if (!opened.isFile() || current.isSymbolicLink() || current.dev !== opened.dev || current.ino !== opened.ino || opened.size > 65536) return false;
-    let nativeEnvironment = '';
+    let nativeEnvironment = '', preserveNativeCarrier = false;
     try {
       const bridge = loadCoreModule('forge-native-host-bridge.js');
       if (typeof bridge?.collectOriginalHookBootstrap === 'function') {
@@ -714,9 +714,31 @@ function publishClaudeOwnerEnvironment(data) {
           prior = bytes.toString('utf8');
         } finally { fs.closeSync(reader); }
         if (prior.includes('FORGE_NATIVE_HOST_')) {
-          const block = "\nexport FORGE_CLAUDE_OWNER_SESSION_ID='" + id + "'\nexport FORGE_CLAUDE_OWNER_SOURCE='claude-sessionstart-env-v1'\n" + nativeEnvironment;
+          const newline = String.fromCharCode(10), slash = String.fromCharCode(92);
+          const ownerBlock = newline + "export FORGE_CLAUDE_OWNER_SESSION_ID='" + id + "'" + newline + "export FORGE_CLAUDE_OWNER_SOURCE='claude-sessionstart-env-v1'" + newline;
+          const block = ownerBlock + nativeEnvironment;
           if (prior.endsWith(block) && !prior.slice(0,-block.length).includes('FORGE_NATIVE_HOST_')) return true;
-          throw Object.assign(new Error('native-host-session-pin-conflict'),{code:'native-host-session-pin-conflict'});
+          // Recognize only complete generations produced by this exact writer.
+          // Stable binary/source/config pins never rotate in this narrow seam.
+          const escape = value => Array.from(value, character => ('.*+?^${}()|[]' + slash).includes(character) ? slash + character : character).join('');
+          const stableTail = nativeEnvironment.split(newline).slice(2).join(newline);
+          const pattern = new RegExp(escape(ownerBlock) + "export FORGE_NATIVE_HOST_PID='([1-9][0-9]{0,15})'" + newline + "export FORGE_NATIVE_HOST_STARTED='([1-9][0-9]{0,127})'" + newline + escape(stableTail), 'g');
+          let last;
+          const remaining = prior.replace(pattern, (whole,pid,started) => { if (!Number.isSafeInteger(Number(pid))) throw new Error('native-host-session-pin-conflict'); last={pid,started}; return ''; });
+          const ordinary = remaining.split(ownerBlock).join('');
+          if (!last || ordinary.includes('FORGE_NATIVE_HOST_') || ordinary.includes('FORGE_CLAUDE_OWNER_SESSION_ID') || ordinary.includes('FORGE_CLAUDE_OWNER_SOURCE'))
+            throw Object.assign(new Error('native-host-session-pin-conflict'),{code:'native-host-session-pin-conflict'});
+          if (last.pid === String(data.pid) && last.started === data.started) return true;
+          try {
+            if (typeof bridge.assertOriginalHookResumeBootstrap !== 'function' || bridge.assertOriginalHookResumeBootstrap(data,{sessionId:id,previousProcess:{pid:Number(last.pid),started:last.started}}) !== true)
+              throw Object.assign(new Error('native-host-session-pin-conflict'),{code:'native-host-session-pin-conflict'});
+          } catch (error) {
+            const code = error && typeof error === 'object' ? Object.getOwnPropertyDescriptor(error,'code')?.value : undefined;
+            if (['native-host-resume-prior-alive','native-host-resume-prior-unknown','native-host-resume-prior-invalid'].includes(code)) preserveNativeCarrier = true;
+            throw error;
+          }
+          if (Buffer.byteLength(prior) + Buffer.byteLength(block) > 65536)
+            throw Object.assign(new Error('native-host-session-env-bound'),{code:'native-host-session-env-bound'});
         }
       }
     } catch (error) {
@@ -749,6 +771,7 @@ function publishClaudeOwnerEnvironment(data) {
         if (Buffer.byteLength(line) <= 2048) process.stderr.write(line);
       } catch { /* Diagnostic failure must not erase ordinary session identity. */ }
     }
+    if (preserveNativeCarrier) return false;
     fs.writeSync(descriptor, "\nexport FORGE_CLAUDE_OWNER_SESSION_ID='" + id + "'\nexport FORGE_CLAUDE_OWNER_SOURCE='claude-sessionstart-env-v1'\n" + nativeEnvironment);
     return true;
   } catch { return false; }

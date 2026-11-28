@@ -710,8 +710,39 @@ function originalHookBootstrap(who){
  const {parent,hook,hook_sha256}=who,config=liveRuntimeHome();
  return{schema_version:1,kind:'claude-hook-bootstrap',pid:parent.pid,started:parent.started,exe:parent.exe,exe_sha256:who.exe_sha256,exe_version:who.exe_version,hook_source:hook,hook_sha256,config_dir:config};
 }
+const originalHookBootstraps=new WeakMap();
 function collectOriginalHookBootstrap({hookSource}={}){
- return originalHookBootstrap(originalHook('session-start',hookSource));
+ const who=originalHook('session-start',hookSource),value=originalHookBootstrap(who);
+ originalHookBootstraps.set(value,{who,facts:{...value}});return value;
+}
+function assertPreviousBootstrapEnded(previous){
+ if(!pairData(previous,['pid','started'])||!Number.isSafeInteger(previous.pid)||previous.pid<=0||typeof previous.started!=='string'||!/^[1-9][0-9]{0,127}$/.test(previous.started))fail('native-host-resume-prior-invalid');
+ try{if(process.kill(previous.pid,0)!==true)fail('native-host-resume-prior-unknown');}
+ catch(error){if(error&&Object.getOwnPropertyDescriptor(error,'code')?.value==='ESRCH')return;fail('native-host-resume-prior-unknown');}
+ // A CIM refusal (including process-missing) never proves absence. Only a
+ // complete current observation can prove that the old PID identity was reused.
+ let current;try{current=liveProcess(previous.pid);}catch{fail('native-host-resume-prior-unknown');}
+ if(!/^[1-9][0-9]{0,127}$/.test(current.started))fail('native-host-resume-prior-unknown');
+ if(current.started===previous.started)fail('native-host-resume-prior-alive');
+}
+function assertOriginalHookResumeBootstrap(value,{sessionId,previousProcess}={}){
+ const record=value&&typeof value==='object'?originalHookBootstraps.get(value):null;
+ if(!record||typeof sessionId!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/.test(sessionId))fail('native-host-resume-bootstrap-required');
+ const fields=Object.keys(record.facts);
+ if(Reflect.ownKeys(value).length!==fields.length||fields.some(key=>{const d=Object.getOwnPropertyDescriptor(value,key);return!d||!Object.hasOwn(d,'value')||!d.enumerable||d.value!==record.facts[key];}))fail('native-host-resume-bootstrap-changed');
+ const args=liveArgv(record.who.parent.command_line);assertOriginalHookSession(sessionId,args);
+ let selected=null;
+ for(let i=1;i<args.length;i++){
+  if(args[i]==='--resume'){if(selected!==null||!args[i+1]||args[i+1].startsWith('--'))fail('native-host-resume-bootstrap-required');selected=args[++i];}
+  else if(/^--resume=/.test(args[i])||/^--fork-session(?:=|$)/.test(args[i]))fail('native-host-resume-bootstrap-required');
+ }
+ if(selected!==sessionId)fail('native-host-resume-bootstrap-required');
+ assertPreviousBootstrapEnded(previousProcess);
+ // Re-observe the genuine caller AFTER the old-identity check. The WeakMap
+ // stores provenance, never authority reusable across this boundary.
+ const fresh=originalHook('session-start',record.facts.hook_source),facts=originalHookBootstrap(fresh);
+ if(fields.some(key=>facts[key]!==record.facts[key])||fresh.p.pid!==record.who.p.pid||fresh.p.started!==record.who.p.started||fresh.p.sid!==record.who.p.sid||fresh.parent.sid!==record.who.parent.sid||fresh.p.ppid!==fresh.parent.pid||nativeDigest(liveArgv(fresh.parent.command_line))!==nativeDigest(args))fail('native-host-resume-bootstrap-changed');
+ originalHookBootstraps.delete(value);return true;
 }
 // DATA comparisons only. Neither this helper nor its output is a capability.
 function checkedHookCarrier(sessionId,bootstrap,env){
@@ -1062,5 +1093,5 @@ function fixtureCompletionReply(row,socket,result,releaseAdmission){
  waitForCompletion(row,socket).then(facts=>{let bytes=Buffer.alloc(0),done=false;socket.on('data',chunk=>{if(done)return;bytes=Buffer.concat([bytes,chunk]);if(bytes.length>LIMIT.header){done=true;socket.destroy();return;}const at=bytes.indexOf(10);if(at<0)return;done=true;try{const ack=parse(bytes.subarray(0,at),LIMIT.header);closed(ack,['kind','ready_sha256'],'native-host-fixture-ready-receipt');if(ack.kind!=='fixture-ready-received'||ack.ready_sha256!==nativeDigest(currentReadyFacts(row)))fail('native-host-fixture-ready-receipt');row.readyReceiptObserved=true;socket.end();releaseAdmission();closeAfterReadyReceipt(row);}catch{socket.destroy();}});reply(socket,{protocol_version:1,ack:'retained',phase:row.phase,ready:true,completion_receipt:facts,sha256:result?.sha256||null});},error=>{if(error.code==='native-host-ready-observer-lost')return;reply(socket,{protocol_version:1,ack:'retained',phase:row.phase,ready:false,error:safeError(error),sha256:result?.sha256||null});releaseAdmission();socket.end();});
 }
 
-module.exports={runOriginalReplayPublication,prepareTransportBudget,validateInitialPrepareCommand,assertOriginalPreparePost,collectOriginalHookBootstrap,relayCurrentHostHook,assertLiveRelayReference,assertLiveControlCommand,main,LIMIT,relayHookObservation,assertOwnedChannel,assertNativeAdmission,assertHostObservation,assertIngressCapability,assertHostObservationAndIngress,assertObservation,assertCandidate};
+module.exports={runOriginalReplayPublication,prepareTransportBudget,validateInitialPrepareCommand,assertOriginalPreparePost,collectOriginalHookBootstrap,assertOriginalHookResumeBootstrap,relayCurrentHostHook,assertLiveRelayReference,assertLiveControlCommand,main,LIMIT,relayHookObservation,assertOwnedChannel,assertNativeAdmission,assertHostObservation,assertIngressCapability,assertHostObservationAndIngress,assertObservation,assertCandidate};
 if(require.main===module)main().catch(error=>{process.stderr.write(JSON.stringify(safeError(error))+'\n');process.exitCode=1;});
