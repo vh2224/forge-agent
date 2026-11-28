@@ -333,7 +333,9 @@ function protectedSnapshot(root) {
   return result;
 }
 function assertProtected(root, before) {
-  const expected = require('./forge-protected-owner-activity').expectedProtectedOwner(root, before);
+  const activity = require('./forge-protected-owner-activity');
+  if (activity.assertNativeProtectedOwner(root, before)) return;
+  const expected = activity.expectedProtectedOwner(root, before);
   const current = protectedSnapshot(root);
   if (roots.digest(Object.entries(current).sort()) === roots.digest(Object.entries(expected).sort())) return;
   // Same code and message always. Only a live managed-surfaces-v1 context adds

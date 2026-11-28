@@ -244,10 +244,11 @@ function synchronousReadPreludeActive(handle,profileHandle){
  require('./forge-artifact-reconciliation').lock.assertGuard(frame.owner,frame.guard);return true;
 }
 function runSynchronousReadPrelude(handle,profileHandle,kind,expectedRequest){
- if(!['execute-owner-preflight','activity-admission'].includes(kind)||kind==='execute-owner-preflight'&&expectedRequest!==undefined)fail('native-host-read-prelude-operation');
+ if(!['execute-owner-preflight','activity-admission','activity-owner-check'].includes(kind)||kind==='execute-owner-preflight'&&expectedRequest!==undefined)fail('native-host-read-prelude-operation');
  if(activeReadPrelude)fail('native-host-read-prelude-nested');
  // Clone caller-owned DATA before a fence/frame exists; no getter/Proxy callback is admitted inside it.
- const expectedData=kind==='activity-admission'?structuredClone(expectedRequest):undefined;
+ const expectedData=kind==='execute-owner-preflight'?undefined:structuredClone(expectedRequest);
+ if(kind==='activity-owner-check'&&(!plain(expectedData)||Object.keys(expectedData).sort().join(',')!=='baseline,request'||!plain(expectedData.baseline)||!plain(expectedData.request)))fail('native-host-owner-check-data');
  const request=requests.get(handle),row=request&&contexts.get(request.context);
  if(!row||row.request!==handle)fail('native-host-request-handle-required');
  if(row.readPrelude)fail('native-host-read-prelude-nested');
@@ -263,6 +264,13 @@ function runSynchronousReadPrelude(handle,profileHandle,kind,expectedRequest){
    if(kind==='execute-owner-preflight'){
     const current=readExecutionRequest(handle),options=profile.invocationOptions(profileHandle,handle),preflight=require('./forge-native-invocation').buildNativeInvocation(options);
     validateExecutionRequest(handle,preflight);profile.assertCapabilityAdmission(profileHandle);value={request:current,options};
+   }else if(kind==='activity-owner-check'){
+    const activity=require('./forge-protected-owner-activity');
+    if(!activity.nativeOwnerCheckEligible(owner,expectedData.request))fail('native-host-owner-check-scope-changed');
+    // expectedProtectedOwner performs the original full native assertLive/profile checks, now inside this frame.
+    const projected=activity.expectedProtectedOwner(owner,expectedData.baseline);
+    if(require('./forge-code-roots').digest(Object.entries(before).sort())!==require('./forge-code-roots').digest(Object.entries(projected).sort()))throw Object.assign(new Error('execution-protected-metadata'),{code:'execution-protected-metadata'});
+    value=true;
    }else value=profile.assertActivityAdmission(profileHandle,expectedData);
    if(value&&typeof value.then==='function')fail('native-host-read-prelude-sync-required');return value;
   }finally{

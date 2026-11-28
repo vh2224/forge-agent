@@ -554,6 +554,17 @@ async function withNativeExecutionActivity(request, profileHandle, action) {
         expectedLease = sha(regular(leaseFile));knownLeaseHashes.add(expectedLease);
       });
     },
+    canAssertProtectedOwner(root, request) {
+      return typeof root === 'string' && roots.key(fs.realpathSync.native(root)) === roots.key(owner)
+        && !ingressOwnerChecks && !publicationWitness && !publicationAttemptWitness && !publication && !publicationAttempt
+        && !settling && !settled && !coordinationClosed && !leaseClosed
+        && !Object.hasOwn(r, 'linked_begin_key') && !Object.hasOwn(r, 'linkedEntryBinding')
+        && (request === undefined || roots.digest(request) === requestSha);
+    },
+    assertProtectedOwner(root, before) {
+      if (!scope.canAssertProtectedOwner(root)) return false;
+      return syncProfile('assertProtectedOwner', profileHandle, r, before);
+    },
     expectedOwner(root, before) {
       if (roots.key(fs.realpathSync.native(root)) !== roots.key(owner)) return before;
       if (!before || !knownLeaseHashes.has(before[relative])) fail('protected-owner-baseline-unbound');
@@ -621,6 +632,17 @@ async function withNativeExecutionActivity(request, profileHandle, action) {
   return value;
 }
 
+// No caller callback, snapshot authority or retained read view crosses this operation.
+function nativeOwnerCheckEligible(root, request) {
+  const scope = currentScope();
+  if (!scope || !scopes.has(scope) || scope.kind !== 'native-execution'
+      || typeof scope.canAssertProtectedOwner !== 'function' || !scope.canAssertProtectedOwner(root, request)) return false;
+  return !reconciliationContext.getStore() && require('./forge-managed-attribution').currentAttribution(root) === null;
+}
+function assertNativeProtectedOwner(root, before) {
+  if (!nativeOwnerCheckEligible(root)) return false;
+  return currentScope().assertProtectedOwner(root, before);
+}
 function expectedProtectedOwner(root, before) {
   const reconciliation = reconciliationContext.getStore();
   if (reconciliation) before = reconciliation.project(root, before);
@@ -1190,7 +1212,7 @@ async function withReconciliationHandoff(request, runtime, action) {
   try { return await handoffs.run(entry, action); }
   finally { entry.consumed = true; }
 }
-module.exports = { withExecutionActivity, withNativeExecutionActivity, currentScope, assertPreflightAdmission, expectedProtectedOwner, reconciliationDecision,
+module.exports = { nativeOwnerCheckEligible, assertNativeProtectedOwner, withExecutionActivity, withNativeExecutionActivity, currentScope, assertPreflightAdmission, expectedProtectedOwner, reconciliationDecision,
   createOwnerReconciliation, assertOwnerReconciliationReady, withOwnerReconciliation, withReconciliationHandoff,
   codeRootAppendDecision, withOwnerReconciliationRead,
   resumeAttemptOwner, inspectAttemptResume, hookAppendProof };

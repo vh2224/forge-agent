@@ -2,7 +2,7 @@
 // Test-only measured successor. No global filesystem/module/cache mutation.
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),zlib=require('node:zlib'),assert=require('node:assert/strict'),Module=require('node:module');
 const ROOT=path.resolve(__dirname,'../../..'),OWN='scripts/fixtures/issue-463',stored=require('./distribution-delta.json');
-const PIN='3fd38db1875c71395a9cb2f03ceaf720d42412d66442c104ae20364f523fd66e',STORAGE_PIN='7d90fbb707546e2bfcf8be9e99a6092ebc73537c66804285edc6d21fe6c6db11',hash=b=>crypto.createHash('sha256').update(b).digest('hex');
+const PIN='f569929da25f5ece8d2a58d81e37bc0a9c5a8a2e933953b0f9c699504eb95bf8',STORAGE_PIN='00460c1bd073c8dfdeec3fa7fc1a730da63d6f7c37f920dee7e19ccf028658be',hash=b=>crypto.createHash('sha256').update(b).digest('hex');
 const {readBoundedStableFile}=require('../../forge-autonomy-sources');
 function target(file){assert(typeof file==='string'&&!path.isAbsolute(file)&&!/[\\:\x00-\x1f]/.test(file));const parts=file.split('/');assert(parts.every(p=>p&&p!=='.'&&p!=='..'));let at=ROOT;for(let n=0;n<parts.length;n++){at=path.join(at,parts[n]);const s=fs.lstatSync(at);assert(!s.isSymbolicLink());assert(n===parts.length-1?s.isFile()&&s.nlink===1:s.isDirectory());}assert.equal(fs.realpathSync.native(at).toLowerCase(),at.toLowerCase());return at;}
 function read(file){const name=target(file),value=readBoundedStableFile(name,file===OWN+'/distribution-delta.json'?8*1024*1024:4*1024*1024,{expectedReal:name});assert(!value.error,value.error);assert.equal(value.stat.nlink,1);return value.buffer;}

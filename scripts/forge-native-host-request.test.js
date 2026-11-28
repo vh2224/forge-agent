@@ -48,9 +48,11 @@ function assertSynchronousReadPrelude(){
  const owner=path.join(root,'owner'),spool=path.join(root,'spool');fs.mkdirSync(owner);fs.mkdirSync(path.join(owner,'.gsd'));fs.mkdirSync(spool);
  const contextFile=path.join(spool,'context.md'),text='TEST ONLY: no live authority';fs.writeFileSync(contextFile,text);
  const filename=require.resolve('./forge-native-host-request'),raw=fs.readFileSync(filename,'utf8'),hash=x=>crypto.createHash('sha256').update(x).digest('hex'),copy=new Module(filename+'#prelude-data',module);copy.filename=filename;copy.paths=Module._nodeModulePaths(path.dirname(filename));
- const context={},handle={},profile={},badProfile={},request={contextFile,resultFile:path.join(spool,'result'),dispatchId:'TEST-ONLY',verification:{bindings:[1]}},state={generation:1},calls={inspect:0,profile:0,builder:0,sidecar:0};let action=null,active=false;
+ const context={},handle={},profile={},badProfile={},request={contextFile,resultFile:path.join(spool,'result'),dispatchId:'TEST-ONLY',verification:{bindings:[1]}},state={generation:1},calls={inspect:0,profile:0,builder:0,sidecar:0,snapshots:0,activityFresh:0};let action=null,active=false;
  const initial={owner,actor:{sessionId:'TEST-ONLY'},gates:{plan:'approved'},claim_generation:1};let api;
- const actualRequire=copy.require.bind(copy),fakeProfile={
+ const actualRequire=copy.require.bind(copy);let ownerCheckEligible=true,ownerCheckRequest;
+ const realExecution=actualRequire('./forge-task-execution'),fakeActivity={nativeOwnerCheckEligible(root,r){ownerCheckRequest=r;return ownerCheckEligible&&root===owner&&JSON.stringify(r)===JSON.stringify(request);},expectedProtectedOwner(root,before){assert.equal(root,owner);calls.activityFresh++;fakeProfile.assertActivityAdmission(profile,ownerCheckRequest);return{...before};}};
+ const fakeProfile={
   assertSynchronousReadBinding(p,c,h){assert.equal(p,profile);assert.equal(c,context);assert.equal(h,handle);return true;},
   invocationOptions(p,h){calls.profile++;assert(api.synchronousReadPreludeActive(h,p));for(let i=0;i<8;i++)assert.equal(api.assertOwnerContext(context).claim_generation,1);if(action)action();return{nativeHostIntent:p,nativeHostRequest:request};},
   assertCapabilityAdmission(){assert.equal(api.assertOwnerContext(context).claim_generation,1);return{};},
@@ -58,6 +60,8 @@ function assertSynchronousReadPrelude(){
  };
  copy.require=id=>{
   if(id==='./forge-native-host-profile')return fakeProfile;
+  if(id==='./forge-protected-owner-activity')return fakeActivity;
+  if(id==='./forge-task-execution')return{...realExecution,protectedSnapshot(root){calls.snapshots++;return realExecution.protectedSnapshot(root);}};
   if(id==='./forge-native-invocation')return{buildNativeInvocation(){calls.builder++;api.assertOwnerContext(context);return{ok:true};}};
   if(id==='./forge-unit-sidecar')return{validateRecoveryRequest(){calls.sidecar++;api.assertOwnerContext(context);return{supported:true};}};
   return actualRequire(id);
@@ -95,8 +99,48 @@ function assertSynchronousReadPrelude(){
   const target=path.join(owner,'.gsd','TEST-ONLY-TAMPER');action=()=>fs.writeFileSync(target,'intrusion');refusal('native-host-read-prelude-owner-changed',run);action=null;fs.unlinkSync(target);
   assert.equal(api.synchronousReadPreludeActive(handle,profile),false);assert.equal(windows.currentPublicationGuard(owner,true),undefined);run();
   assert.equal(hash(fs.readFileSync(filename)),hash(raw),'test private module leaves Source unchanged');
+  // Closed owner-check DATA uses the real fence/snapshot producer. No LIVE profile is minted.
+  const baseline=actualRequire('./forge-task-execution').protectedSnapshot(owner),ownerCheck=(before=baseline)=>api.runSynchronousReadPrelude(handle,profile,'activity-owner-check',{request,baseline:before});
+  const checkStart=calls.snapshots;assert.equal(ownerCheck(),true);assert.equal(calls.snapshots-checkStart,2,'covered comparison needs only complete ENTRY/EXIT snapshots');
+  assert.equal(api.synchronousReadPreludeActive(handle,profile),false);
+  const freshCount=calls.activityFresh,secondSnapshotStart=calls.snapshots;ownerCheck();assert(calls.activityFresh>freshCount,'next call fully revalidates again');assert.equal(calls.snapshots-secondSnapshotStart,2,'second call recaptures both complete snapshots');
+  refusal('execution-protected-metadata',()=>ownerCheck({...baseline,extra:undefined}));
+  refusal('execution-protected-metadata',()=>ownerCheck({...baseline,extra:'a'.repeat(64)}));
+  ownerCheckEligible=false;refusal('native-host-owner-check-scope-changed',ownerCheck);ownerCheckEligible=true;
+  refusal('native-host-owner-check-data',()=>api.runSynchronousReadPrelude(handle,profile,'activity-owner-check',{request,baseline:[],extra:true}));
+  let ownerGetterInside=0;const getterBaseline={...baseline};Object.defineProperty(getterBaseline,'TEST_ONLY',{enumerable:true,get(){if(api.synchronousReadPreludeActive(handle,profile))ownerGetterInside++;return undefined;}});
+  refusal('execution-protected-metadata',()=>ownerCheck(getterBaseline));assert.equal(ownerGetterInside,0,'baseline clone callbacks stay outside the frame');
+  const ownerSentinel=new Error('TEST_OWNER_CHECK_SENTINEL');action=()=>{throw ownerSentinel;};const throwStart=calls.snapshots;assert.throws(ownerCheck,e=>e===ownerSentinel);assert.equal(calls.snapshots-throwStart,2,'throw retains EXIT');action=null;
+  action=()=>{state.generation++;};refusal('native-host-owner-authority-changed',ownerCheck);state.generation=1;action=null;
+  action=()=>fs.writeFileSync(target,'owner-check intrusion');refusal('native-host-read-prelude-owner-changed',ownerCheck);action=null;fs.unlinkSync(target);
+  assert.equal(api.synchronousReadPreludeActive(handle,profile),false);ownerCheck();
   console.log('PASS closed synchronous Native prelude: real owner fence/snapshot ENTRY EXIT, bounded inspection reuse, no cross-boundary reuse, genuine-handle binding, throw/nested/thenable/generation/tamper refusal; TEST DATA only');
  }finally{process.env=saved;assert.equal(fs.readFileSync(path.join(root,'OWNED'),'utf8'),marker);assert(!fs.lstatSync(root).isSymbolicLink());assert.equal(path.dirname(fs.realpathSync.native(root)),fs.realpathSync.native(os.tmpdir()));fs.rmSync(root,{recursive:true,force:true});}
+}
+
+function assertOwnerCheckEligibilityFallbacks(){
+ const Module=require('node:module'),filename=require.resolve('./forge-protected-owner-activity'),raw=fs.readFileSync(filename,'utf8'),copy=new Module(filename+'#owner-check-data',module);copy.filename=filename;copy.paths=Module._nodeModulePaths(path.dirname(filename));
+ const actualRequire=copy.require.bind(copy),root=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'forge-owner-check-data-'))),other=path.join(root,'other');fs.mkdirSync(other);let attribution=null;
+ assert.equal(actualRequire('./forge-managed-attribution').currentAttribution(root),null,'actual API has null without attribution');
+ copy.require=name=>name==='./forge-managed-attribution'?{currentAttribution(){return attribution;},projectExpected(_root,before){return before;}}:actualRequire(name);
+ copy._compile(raw+'\nmodule.exports.__ownerCheckData={seed:s=>scopes.add(s),run:(s,fn)=>contexts.run(s,fn),reconcile:(s,fn)=>reconciliationContext.run(s,fn)};\n',filename);
+ const api=copy.exports,data=api.__ownerCheckData,method=/    canAssertProtectedOwner\(root, request\) \{[\s\S]*?\n    \},/.exec(raw);assert(method,'original Native eligibility method is present exactly once');
+ const request={scope:'milestone'},roots=actualRequire('./forge-code-roots'),requestSha=roots.digest(request);
+ // Evaluate the original pure predicate with closed TEST DATA, not a production scope/enrollment.
+ const predicate=changes=>{const env={roots,fs,owner:root,r:request,requestSha,ingressOwnerChecks:false,publicationWitness:null,publicationAttemptWitness:null,publication:null,publicationAttempt:null,settling:false,settled:false,coordinationClosed:false,leaseClosed:false,...changes};return Function(...Object.keys(env),'return ({'+method[0]+'}).canAssertProtectedOwner;')(...Object.values(env));};
+ let checks=0;const scope=Object.freeze({kind:'native-execution',canAssertProtectedOwner:predicate({}),assertProtectedOwner(){checks++;return true;}});data.seed(scope);
+ try{
+  assert.equal(api.assertNativeProtectedOwner(root,{}),false,'no scope falls back');
+  data.run({...scope},()=>assert.equal(api.assertNativeProtectedOwner(root,{}),false,'JSON/function-shaped scope is not branded'));
+  data.run(scope,()=>{assert.equal(api.nativeOwnerCheckEligible(root,request),true);assert.equal(api.assertNativeProtectedOwner(root,{}),true);assert.equal(checks,1);assert.equal(api.assertNativeProtectedOwner(other,{}),false);assert.equal(api.nativeOwnerCheckEligible(root,{changed:true}),false);});
+  for(const key of ['ingressOwnerChecks','publicationWitness','publicationAttemptWitness','publication','publicationAttempt','settling','settled','coordinationClosed','leaseClosed'])assert.equal(predicate({[key]:true})(root,request),false,key+' retains full fallback');
+  for(const key of ['linked_begin_key','linkedEntryBinding'])assert.equal(predicate({r:{...request,[key]:'TEST-ONLY'}})(root),false,'linked case retains fallback');
+  data.run(scope,()=>{attribution={active:true};assert.equal(api.assertNativeProtectedOwner(root,{}),false);attribution={active:false};assert.equal(api.assertNativeProtectedOwner(root,{}),false);attribution=null;data.reconcile({},()=>assert.equal(api.assertNativeProtectedOwner(root,{}),false));assert.equal(checks,1);});
+  const nonnative=Object.freeze({...scope,kind:'external'});data.seed(nonnative);data.run(nonnative,()=>assert.equal(api.assertNativeProtectedOwner(root,{}),false));
+  assert.equal(hashBytes(fs.readFileSync(filename)),hashBytes(raw),'private DATA review leaves Source intact');
+  console.log('PASS Native owner-check scope eligibility/fallback DATA; no production capability enrollment');
+ }finally{fs.rmdirSync(other);fs.rmdirSync(root);}
+ function hashBytes(x){return crypto.createHash('sha256').update(x).digest('hex');}
 }
 
 function main({autoOnly=false}={}){
@@ -232,4 +276,4 @@ try{
 }
 
 }
-if(require.main===module){const args=process.argv.slice(2);assert(args.length===0||args.length===1&&['--auto-plan-gate-only','--synchronous-prelude-only'].includes(args[0]),'unknown request test selector');assertSynchronousReadPrelude();if(args[0]!=='--synchronous-prelude-only')main({autoOnly:args.length===1});}
+if(require.main===module){const args=process.argv.slice(2);assert(args.length===0||args.length===1&&['--auto-plan-gate-only','--synchronous-prelude-only'].includes(args[0]),'unknown request test selector');assertSynchronousReadPrelude();assertOwnerCheckEligibilityFallbacks();if(args[0]!=='--synchronous-prelude-only')main({autoOnly:args.length===1});}
