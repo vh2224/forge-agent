@@ -359,8 +359,8 @@ async function versionUnknown() { return fixture(async f => {
 // ── Cross-process append attested by a live host adapter ────────────────────
 function childAppend(f, line) {
   const target = path.join(f.owner, ...EVIDENCE.split('/'));
-  const result = cp.spawnSync(process.execPath, ['-e', "require('fs').appendFileSync(process.argv[1], process.argv[2])", target, line],
-    { cwd: f.a, encoding: 'utf8', windowsHide: true, timeout: 30000 });
+  const result = cp.spawnSync(process.execPath, ['-e', "const fs=require('fs');fs.appendFileSync(process.argv[1],fs.readFileSync(0))", target],
+    { cwd: f.a, encoding: 'utf8', windowsHide: true, timeout: 30000, input: line });
   assert.equal(result.status, 0, result.stderr);
   return Buffer.from(line);
 }
@@ -375,10 +375,11 @@ async function attestedAppend() { return fixture(async f => {
   await session('accepted', challenge => { challenges.push(challenge); return { observed: true, reference: 'synthetic host observation of child append' }; }, async scoped => {
     const S0 = execution.protectedSnapshot(f.owner), live = managed.currentAttribution(f.owner);
     assert.equal(live.active, true); assert.equal(live.kind, 'attested-append');
-    const suffix = childAppend(f, '{"hook":"post-tool-use"}\n');
+    const suffix = childAppend(f, Array.from({length:193},()=>JSON.stringify({hook:'post-tool-use',pad:'x'.repeat(230)})+'\n').join(''));
+    assert(suffix.length>49*1024&&suffix.length<65536);
     const [accepted] = managed.attestManagedAppends();
     assert.equal(accepted.path, EVIDENCE); assert.equal(accepted.before_sha256, null);
-    assert.equal(challenges.length, 1); assert.equal(challenges[0].appended_sha256, sha(suffix)); assert.equal(challenges[0].dispatch_id, request.dispatchId);
+    assert.equal(challenges.length, 1); assert.equal(challenges[0].rows,193); assert.equal(challenges[0].appended_sha256, sha(suffix)); assert.equal(challenges[0].dispatch_id, request.dispatchId);
     assert(Object.isFrozen(challenges[0]));
     execution.assertProtected(f.owner, S0);
     assert.equal(journalRows(scoped).at(-1).surface_id, 'hook-evidence');
