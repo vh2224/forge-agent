@@ -27,7 +27,7 @@ const PINS = Object.freeze({
     validateExecuteResult: 'dea6127a07ac421dfddd993a0c25d05c129cccbfd2c48eabc71a082bddf36627',
   }),
   files: Object.freeze({
-    'scripts/forge-xllm.js': '54860adba381f3406b5ae30537a9220944d3590123c2d6901fe8e82292ca4afe',
+    'scripts/forge-xllm.js': '87bdf6ac58ba16b339fff1865a32579ac448f0e81c856de7ade120abe8c6e562',
     'scripts/forge-sidecar-verification-repair.js': 'e7e4e1a0da21193c9e6898bae773b52a42254809d8f3a1207af2590b742b076e',
   }),
 });

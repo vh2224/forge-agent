@@ -22,7 +22,7 @@ const NATIVE_PIN = 'a5e9c02e8b926992e52fe2e459afba306e63c8d6721eb4502178491b4b3f
 const SOURCE_PINS = {
   'scripts/forge-verification-job.ps1': '46cc4463ec5398689f04474c7f0742768241d5acfe72c9acb7c2c0d36d36b7ff',
   'scripts/forge-verification-process.js': 'ea13826a77554241cee75c15f4617cdb0d2d27753ec1733cc8109bc04179c09f',
-  'scripts/forge-xllm.js': '54860adba381f3406b5ae30537a9220944d3590123c2d6901fe8e82292ca4afe',
+  'scripts/forge-xllm.js': '87bdf6ac58ba16b339fff1865a32579ac448f0e81c856de7ade120abe8c6e562',
   'scripts/forge-appserver-client.js': '1888564771fcc310cbc1e1fcc084a939a0ff3b189e0c94aa04d3ed19c2040c31',
   'scripts/forge-claude-sidecar.js': '2a6e7042e86b050076a2c68a54e8c5f6593c72be0a6ee44c26219711eef22ae4',
 };
