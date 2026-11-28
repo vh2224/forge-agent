@@ -1748,7 +1748,9 @@ OUTPUT_TOKENS=$(node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --inline "$result")
 mkdir -p .gsd/forge/
 # shared/forge-dispatch.md § DISPATCH_VCS prelude (canonical — VCS-agnostic)
 DISPATCH_VCS=$(node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --detect --field vcs --cwd "${CODE_DIR:-$WORKING_DIR}" 2>/dev/null || echo "unknown")
-node "$FORGE_SCRIPTS_DIR/forge-dispatch-event.js" --route-json "$ROUTE_JSON" \
+# The full resolver route (~70 KB) does not fit in argv ("Argument list too long"): pass it by file.
+ROUTE_JSON_FILE=$(mktemp); printf '%s' "$ROUTE_JSON" > "$ROUTE_JSON_FILE"
+node "$FORGE_SCRIPTS_DIR/forge-dispatch-event.js" --route-json-file "$ROUTE_JSON_FILE" \
   --unit "${unit_type}/${unit_id}" --model "$MODEL_ID" --tier "$TIER" --reason "$REASON" \
   --effort "$EFFORT" --effort-reason "$EFFORT_REASON" --engine "${ENGINE:-claude}" \
   --domain "$DOMAIN_USED" --route-source "$ROUTE_SOURCE" --chain-len "$CHAIN_LEN" \
