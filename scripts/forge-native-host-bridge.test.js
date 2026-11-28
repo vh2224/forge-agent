@@ -94,11 +94,24 @@ async function waitReady(attempt){
 // Data-only access to ORIGINAL private normalizers/policy. No channel, profile,
 // witness factory, mock producer or approved handle is exposed or used here.
 function readonlyBridgeData(){const Module=require('node:module'),filename=require.resolve('./forge-native-host-bridge'),raw=fs.readFileSync(filename);assert(raw.length<2*1024*1024);const copy=new Module(filename+'#readonly-data',module);copy.filename=filename;copy.paths=Module._nodeModulePaths(path.dirname(filename));copy._compile(raw.toString('utf8').replace(/^\uFEFF/,'').replace(/^#![^\n]*(?:\n|$)/,'')+'\nmodule.exports.__readonlyData={normalizeReference,liveRuntimeHome,liveHistoricalStatusAllowed,safeError,validateInitialPrepareCommand,assertClosedPrepareShell,assertNativePreSettings,validateInitialPreparePost,parseObservedPrepareBody,canonicalPrepareSessionExports,canonicalPrepareSessionValues,checkedHookCarrier,assertOriginalHookSession,validateObservedPrepareSnapshot,calculatePrepareBudget,assertInitialPrepareTimeout,unverifiedPrechallengeRefusal,macLive,checkLiveMac};\n',filename);assert.equal(hash(fs.readFileSync(filename)),hash(raw));return copy.exports.__readonlyData;}
+function assertPrepareBudgetRegressions(data=readonlyBridgeData()){
+ const cap=require('./forge-native-host-profile').prepareTimeoutCapMs();assert.equal(cap,1800000);
+ assert.equal(data.calculatePrepareBudget(1800000,{}).prepare_timeout_ms,600000);
+ assert.equal(data.calculatePrepareBudget(90000,{}).prepare_timeout_ms,90000);
+ assert.equal(data.calculatePrepareBudget(1800000,{BASH_DEFAULT_TIMEOUT_MS:'120000',BASH_MAX_TIMEOUT_MS:'180000'}).prepare_timeout_ms,180000,'applied lower Bash cap is preserved');
+ assert.equal(data.calculatePrepareBudget(1800000,{BASH_DEFAULT_TIMEOUT_MS:'60000',BASH_MAX_TIMEOUT_MS:'90000'}).prepare_timeout_ms,90000,'both applied lower limits are preserved');
+ assert.equal(data.calculatePrepareBudget(1800000,{BASH_MAX_TIMEOUT_MS:'2400000'}).prepare_timeout_ms,cap,'larger host allowance cannot exceed the profile cap');
+ assert.equal(data.calculatePrepareBudget(1800000,{BASH_MAX_TIMEOUT_MS:'1.2e5',BASH_DEFAULT_TIMEOUT_MS:'240_000'}).prepare_timeout_ms,240000);
+ for(const raw of ['0','-1','Infinity','2;writer','1__2'])assert.throws(()=>data.calculatePrepareBudget(1800000,{BASH_MAX_TIMEOUT_MS:raw}),e=>e.code==='native-host-prepare-bash-timeout-invalid');
+ for(const value of [90000,180000,240000,cap])assert.doesNotThrow(()=>data.assertInitialPrepareTimeout(value,value));for(const raw of [undefined,'1800000','600000',0,600000,1799999,1800001])assert.throws(()=>data.assertInitialPrepareTimeout(raw,cap),e=>e.code==='native-host-original-prepare-timeout-mismatch');
+ assert.equal(data.calculatePrepareBudget(1800000,{BASH_MAX_TIMEOUT_MS:'1800000'}).prepare_timeout_ms,1800000,'real host allowance and canonical unit ceiling permit the bounded prepare');
+ assert.equal(data.calculatePrepareBudget(90000,{BASH_MAX_TIMEOUT_MS:'1800000'}).prepare_timeout_ms,90000,'larger host allowance does not enlarge a smaller unit ceiling');
+}
 function assertLiveDataRegressions(ref,request){const data=readonlyBridgeData();
  // Pure DATA controls exercise the actual comparison helpers, not originalHook,
  // an OS producer, enrollment, admission, HMAC, Agent or a genuine SDK session.
- const carrierSession='fixture-carrier-session',carrierBootstrap={pid:321,started:'123456789012345678',exe:path.resolve('fixture-claude.exe'),exe_sha256:'a'.repeat(64),hook:path.resolve('fixture-forge-hook.js'),hook_sha256:'b'.repeat(64),config:path.resolve('fixture-claude-home')};
- const carrierValues=data.canonicalPrepareSessionValues({hostRuntime:'claude',sessionId:carrierSession},carrierBootstrap),carrierEnv=Object.fromEntries(carrierValues);assert.equal(carrierValues.length,10);
+ const carrierSession='fixture-carrier-session',carrierBootstrap={pid:321,started:'123456789012345678',exe:path.resolve('fixture-claude.exe'),exe_sha256:'a'.repeat(64),exe_version:'3.2.41',hook:path.resolve('fixture-forge-hook.js'),hook_sha256:'b'.repeat(64),config:path.resolve('fixture-claude-home')};
+ const carrierValues=data.canonicalPrepareSessionValues({hostRuntime:'claude',sessionId:carrierSession},carrierBootstrap),carrierEnv=Object.fromEntries(carrierValues);assert.equal(carrierValues.length,11);
  assert.deepEqual(data.checkedHookCarrier(carrierSession,carrierBootstrap,{}),{sessionId:carrierSession,pid:321,started:carrierBootstrap.started,source_kind:'original-hook-current-os'});
  assert.equal(data.checkedHookCarrier(carrierSession,carrierBootstrap,carrierEnv).source_kind,'sessionstart-env-current-os');
  for(const[key]of carrierValues){const missing={...carrierEnv};delete missing[key];assert.throws(()=>data.checkedHookCarrier(carrierSession,carrierBootstrap,missing),e=>e.code==='native-host-live-hook-binding');const wrong={...carrierEnv,[key]:'foreign'};assert.throws(()=>data.checkedHookCarrier(carrierSession,carrierBootstrap,wrong),e=>e.code==='native-host-live-hook-binding');assert.throws(()=>data.checkedHookCarrier(carrierSession,carrierBootstrap,{[key]:''}),e=>e.code==='native-host-live-hook-binding');}
@@ -106,16 +119,8 @@ function assertLiveDataRegressions(ref,request){const data=readonlyBridgeData();
  for(const bad of [undefined,'',carrierSession+'\n','x'.repeat(257)])assert.throws(()=>data.checkedHookCarrier(bad,carrierBootstrap,{}),e=>e.code==='native-host-live-hook-binding');
  for(const argv of [['claude.exe'],['claude.exe','--session-id',carrierSession],['claude.exe','--session-id='+carrierSession]])assert.doesNotThrow(()=>data.assertOriginalHookSession(carrierSession,argv));
  for(const argv of [['claude.exe','--session-id'],['claude.exe','--session-id','foreign'],['claude.exe','--session-id=foreign'],['claude.exe','--session-id',carrierSession,'--session-id='+carrierSession]])assert.throws(()=>data.assertOriginalHookSession(carrierSession,argv),e=>e.code==='native-host-live-hook-binding');
- const cap=require('./forge-native-host-profile').prepareTimeoutCapMs();assert.equal(cap,600000);
  const combined=require('./forge-native-host-bridge').assertHostObservationAndIngress;assert.equal(typeof combined,'function');assert.throws(()=>combined(Object.freeze({}),Object.freeze({})),e=>e.code==='native-host-host-witness-required');
- assert.equal(data.calculatePrepareBudget(1800000,{}).prepare_timeout_ms,cap);
- assert.equal(data.calculatePrepareBudget(90000,{}).prepare_timeout_ms,90000);
- assert.equal(data.calculatePrepareBudget(1800000,{BASH_DEFAULT_TIMEOUT_MS:'120000',BASH_MAX_TIMEOUT_MS:'180000'}).prepare_timeout_ms,180000,'applied lower Bash cap is preserved');
- assert.equal(data.calculatePrepareBudget(1800000,{BASH_DEFAULT_TIMEOUT_MS:'60000',BASH_MAX_TIMEOUT_MS:'90000'}).prepare_timeout_ms,90000,'both applied lower limits are preserved');
- assert.equal(data.calculatePrepareBudget(1800000,{BASH_MAX_TIMEOUT_MS:'900000'}).prepare_timeout_ms,cap,'larger host allowance cannot exceed the profile cap');
- assert.equal(data.calculatePrepareBudget(1800000,{BASH_MAX_TIMEOUT_MS:'1.2e5',BASH_DEFAULT_TIMEOUT_MS:'240_000'}).prepare_timeout_ms,240000);
- for(const raw of ['0','-1','Infinity','2;writer','1__2'])assert.throws(()=>data.calculatePrepareBudget(1800000,{BASH_MAX_TIMEOUT_MS:raw}),e=>e.code==='native-host-prepare-bash-timeout-invalid');
- for(const value of [90000,180000,240000,cap])assert.doesNotThrow(()=>data.assertInitialPrepareTimeout(value,value));for(const raw of [undefined,'600000','300000',0,300000,599999,600001])assert.throws(()=>data.assertInitialPrepareTimeout(raw,cap),e=>e.code==='native-host-original-prepare-timeout-mismatch');
+ assertPrepareBudgetRegressions(data);
  const quoted=value=>'"'+value.replace(/\\/g,'/')+'"',command=quoted(process.execPath)+' '+quoted(require.resolve('./forge-native-host-bridge'))+' prepare --input '+quoted(request.contextFile);const selected=data.validateInitialPrepareCommand(command);assert.equal(path.resolve(selected.nodeToken),path.resolve(process.execPath));assert.equal(path.resolve(selected.script),require.resolve('./forge-native-host-bridge'));assert.equal(path.resolve(selected.input),path.resolve(request.contextFile));assert.equal(data.validateInitialPrepareCommand('git status'),null);
  for(const bad of [command+'; echo writer',command+' | cat',command+' > out','ENV=value '+command,'node '+quoted(require.resolve('./forge-native-host-bridge'))+' prepare --input '+quoted(request.contextFile),command.replace(quoted(request.contextFile),'relative.json')])assert.throws(()=>data.validateInitialPrepareCommand(bad),e=>e.code==='native-host-initial-prepare-command');
  const shell='"C:/fixture/bash.exe" -lc "'+command.replace(/"/g,'\\"')+'"',proof={input:request.contextFile,node_exe:process.execPath};assert.doesNotThrow(()=>data.assertClosedPrepareShell(shell,proof));for(const bad of ['"C:/fixture/bash.exe" -lc "'+command.replace(/"/g,'\\"')+'; echo writer"','"C:/fixture/bash.exe" /tmp/unknown-script.sh'])assert.throws(()=>data.assertClosedPrepareShell(bad,proof));
@@ -127,12 +132,12 @@ function assertLiveDataRegressions(ref,request){const data=readonlyBridgeData();
   const parsed=data.parseObservedPrepareBody(body,proof);assert.equal(parsed.command_sha256,hash(Buffer.from(command)));assert.equal(path.basename(parsed.snapshot),'snapshot-bash-1234567890123-Abc123.sh');
   // Pure DATA controls; the real factory alone derives its private expected
   // block from current branded enrollment/actor, never these fixture objects.
-  const actor={hostRuntime:'claude',sessionId:'00000000-0000-4000-8000-000000000001'},bootstrap={pid:321,started:'123456789012345678',exe:path.resolve('fixture-claude.exe'),exe_sha256:'a'.repeat(64),hook:path.resolve('fixture-forge-hook.js'),hook_sha256:'b'.repeat(64),config:path.resolve('fixture-claude-home')};
-  const exported=data.canonicalPrepareSessionExports(actor,bootstrap),lines=exported.split('\n');assert.equal(lines.length,11);assert.equal(lines[10],':');assert.equal(lines[0],"export FORGE_CLAUDE_OWNER_SESSION_ID='"+actor.sessionId+"'");assert.equal(lines[2],"export FORGE_NATIVE_HOST_PID='321'");
-  const names=['FORGE_CLAUDE_OWNER_SESSION_ID','FORGE_CLAUDE_OWNER_SOURCE','FORGE_NATIVE_HOST_PID','FORGE_NATIVE_HOST_STARTED','FORGE_NATIVE_HOST_EXE','FORGE_NATIVE_HOST_EXE_SHA256','FORGE_NATIVE_HOST_HOOK','FORGE_NATIVE_HOST_HOOK_SHA256','FORGE_NATIVE_HOST_CONFIG_DIR','FORGE_NATIVE_HOST_BOOTSTRAP_SOURCE'];assert.deepEqual(lines.slice(0,10).map(line=>/^export ([A-Z0-9_]+)=/.exec(line)[1]),names);
+  const actor={hostRuntime:'claude',sessionId:'00000000-0000-4000-8000-000000000001'},bootstrap={pid:321,started:'123456789012345678',exe:path.resolve('fixture-claude.exe'),exe_sha256:'a'.repeat(64),exe_version:'3.2.41',hook:path.resolve('fixture-forge-hook.js'),hook_sha256:'b'.repeat(64),config:path.resolve('fixture-claude-home')};
+  const exported=data.canonicalPrepareSessionExports(actor,bootstrap),lines=exported.split('\n');assert.equal(lines.length,12);assert.equal(lines[11],':');assert.equal(lines[0],"export FORGE_CLAUDE_OWNER_SESSION_ID='"+actor.sessionId+"'");assert.equal(lines[2],"export FORGE_NATIVE_HOST_PID='321'");
+  const names=['FORGE_CLAUDE_OWNER_SESSION_ID','FORGE_CLAUDE_OWNER_SOURCE','FORGE_NATIVE_HOST_PID','FORGE_NATIVE_HOST_STARTED','FORGE_NATIVE_HOST_EXE','FORGE_NATIVE_HOST_EXE_SHA256','FORGE_NATIVE_HOST_EXE_VERSION','FORGE_NATIVE_HOST_HOOK','FORGE_NATIVE_HOST_HOOK_SHA256','FORGE_NATIVE_HOST_CONFIG_DIR','FORGE_NATIVE_HOST_BOOTSTRAP_SOURCE'];assert.deepEqual(lines.slice(0,11).map(line=>/^export ([A-Z0-9_]+)=/.exec(line)[1]),names);
   const at=' && shopt -u extglob',withBlock=block=>body.replace(at,' && '+block+at),canonical=withBlock(exported),bound={...proof,session_exports:exported},result=data.parseObservedPrepareBody(canonical,bound);assert.equal(result.command_sha256,parsed.command_sha256);assert.equal(result.session_exports_sha256,hash(Buffer.from(exported)));assert.deepEqual(data.parseObservedPrepareBody(body,bound),parsed,'legacy R7 is byte-equivalent data');
   assert.throws(()=>data.parseObservedPrepareBody(canonical,proof),e=>e.code==='native-host-prepare-shell-wrapper-unsupported');
-  for(let i=0;i<10;i++){const bad=[...lines];bad[i]+='foreign';assert.throws(()=>data.parseObservedPrepareBody(withBlock(bad.join('\n')),bound),e=>e.code==='native-host-prepare-shell-wrapper-unsupported');}
+  for(let i=0;i<11;i++){const bad=[...lines];bad[i]+='foreign';assert.throws(()=>data.parseObservedPrepareBody(withBlock(bad.join('\n')),bound),e=>e.code==='native-host-prepare-shell-wrapper-unsupported');}
   const swapped=[...lines];[swapped[0],swapped[1]]=[swapped[1],swapped[0]];
   for(const block of [lines.slice(1).join('\n'),[lines[0],...lines].join('\n'),swapped.join('\n'),exported+'\nexport EXTRA=1',exported.replace(/\n:$/,'\ntrue'),exported+'; echo writer',exported.replace(/\n/g,'\r\n'),exported.replace("'321'","'322'"),exported.replace("'"+actor.sessionId+"'","'foreign-session'")])assert.throws(()=>data.parseObservedPrepareBody(withBlock(block),bound),e=>e.code==='native-host-prepare-shell-wrapper-unsupported');
   for(const bad of [canonical.replace(' && { \\builtin unalias', ' && '+exported+' && { \\builtin unalias'),body.replace(' && { \\builtin unalias',' && '+exported+' && { \\builtin unalias'),canonical+'; echo writer',canonical.replace(command,command+'; echo writer')])assert.throws(()=>data.parseObservedPrepareBody(bad,bound),e=>/^native-host-(prepare-|initial-prepare-)/.test(e.code));
@@ -140,7 +145,7 @@ function assertLiveDataRegressions(ref,request){const data=readonlyBridgeData();
   const wrongHead=body.replace(' && eval ', ' && '+exported+' && eval ');assert.throws(()=>data.parseObservedPrepareBody(wrongHead,bound),e=>e.code==='native-host-prepare-shell-wrapper-unsupported');
   const foreignSession=data.canonicalPrepareSessionExports({...actor,sessionId:'00000000-0000-4000-8000-000000000002'},bootstrap);assert.throws(()=>data.parseObservedPrepareBody(canonical,{...proof,session_exports:foreignSession}),e=>e.code==='native-host-prepare-shell-wrapper-unsupported');
   for(const stale of [{...bootstrap,pid:322},{...bootstrap,started:'123456789012345679'},{...bootstrap,hook_sha256:'c'.repeat(64)}])assert.throws(()=>data.parseObservedPrepareBody(canonical,{...proof,session_exports:data.canonicalPrepareSessionExports(actor,stale)}),e=>e.code==='native-host-prepare-shell-wrapper-unsupported');
-  for(const bad of [{...bootstrap,pid:0},{...bootstrap,started:'not-time'},{...bootstrap,hook:'relative-hook.js'},{...bootstrap,exe_sha256:'unknown'}])assert.throws(()=>data.canonicalPrepareSessionExports(actor,bad),e=>e.code==='native-host-prepare-session-exports');
+  for(const bad of [{...bootstrap,pid:0},{...bootstrap,started:'not-time'},{...bootstrap,hook:'relative-hook.js'},{...bootstrap,exe_sha256:'unknown'},{...bootstrap,exe_version:'03.2.41'},{...bootstrap,exe_version:undefined}])assert.throws(()=>data.canonicalPrepareSessionExports(actor,bad),e=>e.code==='native-host-prepare-session-exports');
 
   for(const bad of [body+'; echo writer',body.replace('source ','source evil; '),body.replace("TMP='C:/fixture/tmp'","TMP='C:/different'"),body.replace('claude-ab12-cwd','unbound-output'),body.replace('1234567890123-Abc123','unknown'),body.replace(command,command+'; echo writer')])assert.throws(()=>data.parseObservedPrepareBody(bad,proof),e=>/^native-host-(prepare-|initial-prepare-)/.test(e.code));
  }
@@ -255,7 +260,7 @@ async function assertLiveIPCTimeoutDiagnostics(){
   const context={Buffer,process:{execPath:'fixture-node',argv:['node','hook','native-live','post']},LIVE_ID:'fixture-profile',LIVE_DOMAIN:'fixture-domain',LIVE_PHASES:['post'],LIMIT:{body:2048,header:4096},
    api:name=>{assert.equal(name,'owner-transport-window');return{observed:()=>observed};},
    originalHook:()=>{calls.push('original-hook');return who;},originalHookBinding:()=>({sessionId:'fixture-session',pid:7,started:'parent-start'}),nativeDigest:value=>value==='fixture-session'?'digest-session':'fixture-argv',physical:value=>value,endpoint:()=>ref.endpoint,
-   liveKeyDirectory:()=>'/fixture-key',liveACL:()=>calls.push('ACL'),path,read:(name,size)=>name.endsWith('ingress.key')?Buffer.alloc(32,9):Buffer.from('fixture-node'),copyBuffer:bytes=>(keyCopy=Buffer.from(bytes)),
+   liveKeyDirectory:()=>'/fixture-key',livePair:items=>{assert.deepEqual(JSON.parse(JSON.stringify(items)),[{action:'acl',file:'/fixture-key',directory:true},{action:'acl',file:path.join('/fixture-key','ingress.key')}]);calls.push('ACL-pair');return[{},{}];},path,read:(name,size)=>name.endsWith('ingress.key')?Buffer.alloc(32,9):Buffer.from('fixture-node'),copyBuffer:bytes=>(keyCopy=Buffer.from(bytes)),
    net:{connect:name=>{assert.equal(name,ref.endpoint);calls.push('connect');return socket;}},parse:bytes=>JSON.parse(bytes.toString('utf8')),json:value=>Buffer.from(JSON.stringify(value)+'\n'),hash,
    unverifiedPrechallengeRefusal:()=>{calls.push('prechallenge-check');return null;},checkLiveMac:(key,value,mac)=>{assert.equal(key,keyCopy);assert.equal(value.domain,'fixture-domain/challenge');assert.equal(mac,'fixture-mac');calls.push('challenge-authenticated');},macLive:()=>{calls.push('envelope-mac');return Buffer.from('fixture-envelope-mac');},
    fail:code=>{throw Object.assign(Error(code),{code});},liveHookOutput:()=>{assert.fail('No success/refusal frame was supplied');},receiveReadyFrame:()=>{assert.fail('No ready frame was supplied');}};
@@ -267,7 +272,81 @@ async function assertLiveIPCTimeoutDiagnostics(){
  assert.equal(hash(fs.readFileSync(file,'utf8')),sourceHash);console.log('PASS actual relay timeout callback: both client-local queue stages, unchanged code/20s/rejection/key clearing; synthetic only');
 }
 
-async function main({partialPublication=false}={}){
+async function assertSynchronousPreludeWiring(){
+ const Module=require('node:module'),filename=require.resolve('./forge-native-host-bridge'),raw=fs.readFileSync(filename,'utf8'),copy=new Module(filename+'#closed-prelude-data',module);copy.filename=filename;copy.paths=Module._nodeModulePaths(path.dirname(filename));
+ const requestHandle={},profileHandle={},request={test_only:true},options={},calls=[],sentinel=Object.assign(new Error('TEST_STOP_BEFORE_NATIVE_RUN'),{code:'TEST_STOP_BEFORE_NATIVE_RUN'}),actualRequire=copy.require.bind(copy);
+ copy.require=name=>name==='./forge-native-host-request'?{runSynchronousReadPrelude(h,p,kind){assert.equal(h,requestHandle);assert.equal(p,profileHandle);assert.equal(kind,'execute-owner-preflight');calls.push(kind);return{request,options};}}:name==='./forge-native-host-profile'?{}:name==='./forge-native-execution'?{}:name==='./forge-protected-owner-activity'?{async withNativeExecutionActivity(r,p){assert.equal(r,request);assert.equal(p,profileHandle);assert(options.lifecycle?.journal);assert.equal(typeof options.lifecycle.adapter.subscribe,'function');calls.push('activity');throw sentinel;}}:actualRequire(name);
+ copy._compile(raw.replace(/^#![^\n]*(?:\n|$)/,'')+'\nmodule.exports.__preludeExecuteOwner=executeOwner;\n',filename);
+ await assert.rejects(copy.exports.__preludeExecuteOwner({requestHandle,profile:profileHandle,directory:path.dirname(filename),attempt:'TEST-ONLY'}),e=>e===sentinel);
+ assert.deepEqual(calls,['execute-owner-preflight','activity']);
+ assert.equal(hash(fs.readFileSync(filename)),hash(raw));
+ console.log('PASS bridge closed synchronous preflight wiring before activity/native.run; TEST DATA only');
+}
+
+// Private Module DATA exercises the original spool functions. These rows are
+// never exported by production or admitted as a host/profile/Agent capability.
+async function assertManifestSpoolBounds(){
+ const Module=require('node:module'),filename=require.resolve('./forge-native-host-bridge'),raw=fs.readFileSync(filename,'utf8'),copy=new Module(filename+'#manifest-spool-data',module);
+ copy.filename=filename;copy.paths=Module._nodeModulePaths(path.dirname(filename));
+ const context={},request={resultFile:null,route:{fixture:true}},realRequire=copy.require.bind(copy);
+ copy.require=name=>name==='./forge-native-host-request'?{assertOwnerContext(value){assert.equal(value,context);return{};},assertExecutionRequest(){return request;}}:name==='./forge-unit-sidecar'?{artifactFingerprint(){return'fixture';}}:name==='./forge-attempt-recovery'?{canonicalRequest:r=>r,requestIdentity:()=>({fixture:true})}:realRequire(name);
+ copy._compile(raw.replace(/^#![^\n]*(?:\n|$)/,'')+'\nmodule.exports.__spoolData={writeImmutable,reserve,reconcile,read,parse,persistReceipt,spoolBound};\n',filename);
+ const d=copy.exports.__spoolData,limit=copy.exports.LIMIT,root=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'forge-manifest-bound-'))),st=fs.statSync(root),row={context,directory:root,identity:{dev:st.dev,ino:st.ino},reservations:new Set(),dispatch:'fixture'};
+ const target=path.join(root,'native-result.manifest.json'),clear=()=>{for(const name of fs.readdirSync(root))fs.unlinkSync(path.join(root,name));};request.resultFile=path.join(root,'native-result');
+ try{
+  assert.equal(limit.manifest,8*1024*1024);assert.equal(limit.input,2*1024*1024);assert.equal(limit.aggregate,16*1024*1024);assert.equal(limit.body,1024*1024);
+  // Representative 19,940-entry owner metadata map: no source/provider contents.
+  const map={};for(let i=0;i<19940;i++)map[('.gsd/fixture/'+String(i).padStart(5,'0')+'/').padEnd(100,'x')+(i<1547?'/':'')]=i<1547?'directory':'a'.repeat(64);
+  const manifest=Buffer.from(JSON.stringify({request,prepared:{protected_owner:map}}));assert(manifest.length>3247653&&manifest.length<limit.manifest);
+  const written=d.writeImmutable(row,'native-manifest',target,manifest);assert.equal(written.sha256,hash(manifest));assert.equal(row.reservations.size,0);assert.equal(Object.keys(d.parse(d.read(target,limit.manifest),limit.manifest).prepared.protected_owner).length,19940);
+  assert.throws(()=>d.read(target),e=>e.code==='native-host-read-bound');assert.throws(()=>d.parse(manifest),e=>e.code==='native-host-json-bound');
+  assert.deepEqual(d.writeImmutable(row,'native-manifest',target,manifest),written);
+  const tampered=Buffer.from(manifest);tampered[tampered.length-2]^=1;fs.writeFileSync(target,tampered);assert.throws(()=>d.writeImmutable(row,'native-manifest',target,manifest),e=>e.code==='native-host-immutable-conflict');clear();
+  for(const size of [limit.manifest-1,limit.manifest]){const bytes=Buffer.from('{"padding":"'+'x'.repeat(size-14)+'"}');assert.equal(bytes.length,size);d.writeImmutable(row,'native-manifest',target,bytes);assert.equal(d.parse(d.read(target,limit.manifest),limit.manifest).padding.length,size-14);clear();}
+  assert.throws(()=>d.writeImmutable(row,'native-manifest',target,Buffer.alloc(limit.manifest+1)),e=>e.code==='native-host-spool-bound');assert(!fs.existsSync(target));
+  for(const role of ['context','sealed','native-evidence','native-receipt','native-review','native-verification','unknown'])assert.throws(()=>d.reserve(row,role,limit.input+1,target),e=>e.code==='native-host-spool-bound');
+  for(const role of ['candidate','return'])assert.throws(()=>d.reserve(row,role,limit.body+1,target),e=>e.code==='native-host-spool-bound');assert.throws(()=>d.reserve(row,'checkpoint',limit.terminal+1,target),e=>e.code==='native-host-spool-bound');
+  for(const size of [-1,NaN,Infinity,1.5])assert.throws(()=>d.reserve(row,'native-manifest',size,target),e=>e.code==='native-host-spool-bound');assert.throws(()=>d.reserve(row,'native-manifest',0,target,Array(5).fill(path.join(root,'stage'))),e=>e.code==='native-host-spool-bound');
+  const reservation=d.reserve(row,'native-manifest',manifest.length,target);fs.writeFileSync(target,manifest);assert.equal(d.reconcile(row,reservation),true,'failed-write reconciliation uses the manifest role bound');assert.equal(row.reservations.size,0);clear();
+  fs.writeFileSync(path.join(root,'occupied'),Buffer.alloc(9*1024*1024));assert.throws(()=>d.reserve(row,'native-manifest',limit.manifest,target),e=>e.code==='native-host-spool-aggregate');clear();
+  fs.writeFileSync(target,'{');assert.throws(()=>d.parse(d.read(target,limit.manifest),limit.manifest),e=>e.code==='native-host-json-invalid');clear();
+  d.writeImmutable(row,'native-manifest',target,manifest);
+  const record={phase:'failed',dispatch_id:row.dispatch,fingerprint:'fixture',route:request.route,manifest_sha256:hash(manifest),recovery_identity_sha256:require('./forge-code-roots').digest({fixture:true})};
+  const receipt=Buffer.from(JSON.stringify(record)),receiptSHA=hash(receipt),receiptFile=request.resultFile+'.receipt.json.'+receiptSHA+'.json';fs.writeFileSync(receiptFile,receipt);const pointer={file:receiptFile,sha256:receiptSHA};
+  assert.doesNotThrow(()=>d.persistReceipt(row,pointer),'actual receipt consumer reads and parses the larger manifest');
+  fs.writeFileSync(target,tampered);assert.throws(()=>d.persistReceipt(row,pointer),e=>e.code==='native-host-json-invalid'||e.code==='native-host-receipt-binding');fs.writeFileSync(target,manifest);
+  fs.writeFileSync(receiptFile,Buffer.from(receipt.toString().replace('failed','FAILED')));assert.throws(()=>d.persistReceipt(row,pointer),e=>e.code==='native-host-receipt-pointer-hash');
+  assert(raw.includes("parse(read(current.resultFile+'.manifest.json',LIMIT.manifest),LIMIT.manifest)"),'replay uses the same explicit manifest read/parse budget');
+  console.log('PASS manifest spool DATA: metadata19940,8MiBboundary,otherroles,aggregate,reconcile,receipt,malformed/hash/tamper; not LIVE');
+ }finally{clear();fs.rmdirSync(root);}
+}
+
+async function assertAutoManifestStart(f,observationFile){
+ const Module=require('node:module'),filename=require.resolve('./forge-native-host-bridge'),raw=fs.readFileSync(filename,'utf8'),cached=require.cache[filename],copy=new Module(filename+'#private-auto-manifest',module);
+ copy.filename=filename;copy.paths=Module._nodeModulePaths(path.dirname(filename));
+ copy._compile(raw.replace(/^#![^\n]*(?:\n|$)/,'')+'\nmodule.exports.__manifestFixture={enrollHost,originalOwnerChannel,row:c=>channels.get(c),executeOwner};\n',filename);
+ const execution=require('./forge-task-execution'),delivery=require('./forge-native-recovery-delivery'),originalSnapshot=execution.protectedSnapshot,originalAssert=execution.assertProtected,originalPrepare=delivery.prepare;
+ const stop=Object.assign(new Error('TEST_ONLY_STOP_AFTER_REAL_MANIFEST_START'),{code:'TEST_ONLY_STOP_AFTER_REAL_MANIFEST_START'}),extraPrefix='.gsd/fixture-spool-metadata/',metrics={snapshots:0,guards:0,start:0,Agent:0,ownerChecks:0};
+ require.cache[filename]=copy;
+ try{
+  const requestApi=require('./forge-native-host-request'),profileApi=require('./forge-native-host-profile'),context=requestApi.buildOwnerContext(f.input),facts=requestApi.assertOwnerContext(context);
+  assert.equal(facts.gates.plan,'skipped');assert.equal(facts.gates.planSkipReason,'auto-defer');
+  const host=copy.exports.__manifestFixture.enrollHost(context,observationFile),channel=copy.exports.__manifestFixture.originalOwnerChannel(context,host,'fixture-only-input'),row=copy.exports.__manifestFixture.row(channel);
+  row.profile=profileApi.enrollForegroundProfile(context,host);row.requestHandle=requestApi.buildExecutionRequest(context,channel);profileApi.assertCapabilityAdmission(row.profile);
+  // The private fixture keeps the ORIGINAL snapshot producer and all its real
+  // rechecks. Synthetic hash-only metadata pads that snapshot to the real-world
+  // shape; it never mints owner authority or claims filesystem entries exist.
+  execution.protectedSnapshot=root=>{const map=originalSnapshot(root);metrics.snapshots++;if(path.resolve(root)===path.resolve(f.owner))for(let i=0;i<19940;i++)map[(extraPrefix+String(i).padStart(5,'0')).padEnd(100,'x')]='a'.repeat(64);return map;};
+  execution.assertProtected=(root,expected)=>{metrics.guards++;if(require('./forge-protected-owner-activity').nativeOwnerCheckEligible(root)){const before=metrics.snapshots,result=originalAssert(root,expected);assert.equal(metrics.snapshots-before,2,'genuine Native scope owner check uses ENTRY/EXIT only');metrics.ownerChecks++;return result;}const real=Object.fromEntries(Object.entries(expected).filter(([key])=>!key.startsWith(extraPrefix)));return originalAssert(root,real);};
+  delivery.prepare=options=>{const session=originalPrepare(options);return{...session,start(){const result=session.start(),bytes=fs.readFileSync(result.manifest_file),manifest=JSON.parse(bytes);metrics.start++;assert(bytes.length>3247653&&bytes.length<=copy.exports.LIMIT.manifest);assert.equal(manifest.request.gates.planSkipReason,'auto-defer');assert.equal(result.manifest_sha256,hash(bytes));assert(Object.keys(manifest.prepared.protected_owner).length>=19940);assert(metrics.ownerChecks>=1);const before=metrics.snapshots;assert.throws(()=>originalAssert(f.owner,{...manifest.prepared.protected_owner,extra:undefined}),error=>error.code==='execution-protected-metadata');assert.equal(metrics.snapshots-before,2,'baseline refusal retains complete EXIT');throw stop;}};};
+  await assert.rejects(copy.exports.__manifestFixture.executeOwner(row),error=>error===stop);
+  assert(metrics.snapshots>0&&metrics.guards>0);assert.equal(metrics.start,1);assert.equal(row.sealed,null,'stop is BEFORE original Agent callback');
+  console.log('PASS private combined auto-defer + synchronous prelude + ORIGINAL snapshot/guards + native.run/prepare/start with padded owner metadata; stop before Agent, not LIVE');
+ }finally{execution.protectedSnapshot=originalSnapshot;execution.assertProtected=originalAssert;delivery.prepare=originalPrepare;if(cached)require.cache[filename]=cached;else delete require.cache[filename];}
+}
+
+async function main({partialPublication=false,manifestOnly=false}={}){
+  await assertSynchronousPreludeWiring();
   await assertLiveIPCTimeoutDiagnostics();
   assertBridgeCohortSelectors();
   // Unix socket paths have a small OS byte limit. Keep the entirely owned
@@ -309,7 +388,8 @@ async function main({partialPublication=false}={}){
       ['assertHostObservation',[{},{}]],['assertIngressCapability',[{},{}]],['assertObservation',[{},{}]],['assertCandidate',[{},{}]],['assertOriginalPreparePost',[{}, {}, 'not an authority']]])
       assert.throws(()=>bridge[name](...args),e=>/^native-host-/.test(e.code),'plain JSON cannot forge '+name);
     const marker={schema_version:1,kind:'forge-native463-isolated-fixture',root};put(path.join(root,'FIXTURE-ORIGIN.json'),marker);
-    f=require('./forge-native-host-request.test').createOwnerFixture({root});
+    f=require('./forge-native-host-request.test').createOwnerFixture({root,mode:partialPublication?'step':'auto'});
+    if(!partialPublication)fs.unlinkSync(f.planFile.replace('-PLAN.md','-PLAN-GATE.md')); // Full tests real auto producer; partial retains approved step path.
     const requestApi=require('./forge-native-host-request'),isolationApi=require('./forge-isolation'),primary=f.contract.code_roots.find(row=>row.id===f.contract.primary_root_id),primaryBranch=isolationApi.gitCurrentBranch(primary.path);
     assert.equal(typeof primaryBranch,'string');assert(primaryBranch);
     const branchContext=requestApi.buildOwnerContext(f.input),renderIsolation=requestApi.assertOwnerContext(branchContext).render_isolation;
@@ -334,9 +414,10 @@ async function main({partialPublication=false}={}){
       effort_observation:{transport:'agent-argument',value:'high',source_fingerprint:hash(fs.readFileSync(effortFile)),observation_reference:effortFile},
       agent_definition:{agent_type:'forge-executor',physical_path:agentFile,sha256:hash(fs.readFileSync(agentFile))},provenance:'fixture-origin'};
     const observationFile=path.join(root,'host-observation.json');put(observationFile,observation);
+    if(manifestOnly){await assertAutoManifestStart(f,observationFile);return;}
     const ownerDigest=()=>{const rows=[];function walk(dir){for(const name of fs.readdirSync(dir).sort()){const file=path.join(dir,name),st=fs.lstatSync(file);assert(!st.isSymbolicLink());if(st.isDirectory())walk(file);else rows.push([path.relative(f.owner,file),hash(fs.readFileSync(file))]);}}walk(f.owner);return digest(rows);};
     const beforeBudget=ownerDigest(),budget=await cli('prepare-budget',['--input',input],{env:{...process.env,BASH_DEFAULT_TIMEOUT_MS:'240_000',BASH_MAX_TIMEOUT_MS:'120000'}});
-    assert.equal(budget.value.kind,'native-host-prepare-budget');assert.equal(budget.value.prepare_timeout_ms,240000);assert.equal(budget.value.profile_cap_ms,600000);assert.equal(budget.value.admission,false);assert.equal(ownerDigest(),beforeBudget,'budget lookup creates no run/claim/BEGIN/publication/spool or owner metadata');
+    assert.equal(budget.value.kind,'native-host-prepare-budget');assert.equal(budget.value.prepare_timeout_ms,240000);assert.equal(budget.value.profile_cap_ms,1800000);assert.equal(budget.value.admission,false);assert.equal(ownerDigest(),beforeBudget,'budget lookup creates no run/claim/BEGIN/publication/spool or owner metadata');
     const malformedBudget=await cli('prepare-budget',['--input',input],{expect:1,env:{...process.env,BASH_MAX_TIMEOUT_MS:'unknown'}});assert.equal(JSON.parse(malformedBudget.stderr.toString().trim()).code,'native-host-prepare-bash-timeout-invalid');assert.equal(ownerDigest(),beforeBudget);
     // No genuine SessionStart OS bootstrap exists in this isolated fixture.
     const noBootstrap=await cli('prepare',['--input',input],{expect:1});
@@ -493,6 +574,9 @@ module.exports={main};
 if(require.main===module){
   const kind=process.argv[2],file=process.argv[3];
   if(kind==='--fixture-worker')fixtureWorker(JSON.parse(fs.readFileSync(file,'utf8')));
+  else if(kind==='--manifest-spool-only')assertManifestSpoolBounds().then(()=>main({manifestOnly:true})).catch(e=>{console.error(e.code||e.message);process.exitCode=1;});
+  else if(kind==='--prepare-budget-only')assertPrepareBudgetRegressions();
+  else if(kind==='--synchronous-prelude-only')assertSynchronousPreludeWiring().catch(e=>{console.error(e.code||'prelude-data-failed');process.exitCode=1;});
   else if(kind==='--fixture-host')fixtureHost(JSON.parse(fs.readFileSync(file,'utf8'))).catch(e=>{console.error(e.code||e.message);process.exitCode=1;});
   else runBridgeCohort(process.argv.slice(2)).catch(e=>{const code=typeof e.code==='string'&&/^[A-Za-z0-9_.-]{1,160}$/.test(e.code)?e.code:'native463-fixture-failed';const testSourceError=fixtureTestSourceError(e);console.error(JSON.stringify({code,...(testSourceError?{test_source_error:testSourceError}:{}),...(e.native463_diagnostic?{diagnostic:e.native463_diagnostic}:{})}));process.exitCode=1;});
 }

@@ -265,7 +265,7 @@ function discoverRecords(cwd, kind) {
   if (!fs.existsSync(dir)) return [];
   const records = new Map();
   for (const name of fs.readdirSync(dir).filter(item => item.endsWith('.json')).sort()) {
-    const record = readJson(path.join(dir, name));
+    const record = readRecordJson(path.join(dir, name));
     if (!record || typeof record.idempotency_key !== 'string' ||
         !recordPaths(cwd, kind, record.idempotency_key).includes(path.join(dir, name))) throw new ControllerError('record-conflict', `endereço/identidade inválido: ${name}`);
     records.set(record.idempotency_key, lookupRecord(cwd, kind, record.idempotency_key));

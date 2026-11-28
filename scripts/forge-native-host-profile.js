@@ -3,13 +3,28 @@
 // Actual Claude foreground/descendant semantics remain unknown and refuse.
 const crypto=require('node:crypto'),path=require('node:path');
 const profiles=new WeakMap(),PROFILE_ID='claude-agent-foreground-v1',FIXTURE_PROFILE_ID='forge-native463-fixture-foreground-v1',MAX_INPUT=2*1024*1024,METADATA_BYTES=2048;
-const INITIAL_PREPARE_TIMEOUT_CAP_MS=600000;
+const INITIAL_PREPARE_TIMEOUT_CAP_MS=1800000;
 function prepareTimeoutCapMs(){return INITIAL_PREPARE_TIMEOUT_CAP_MS;}
 function fail(code){throw Object.assign(new Error(code),{code,stage:'native-host-profile'});}
 function plain(value){return value!==null&&typeof value==='object'&&Object.getPrototypeOf(value)===Object.prototype&&Reflect.ownKeys(value).every(k=>typeof k==='string')&&Object.values(Object.getOwnPropertyDescriptors(value)).every(d=>Object.hasOwn(d,'value')&&d.enumerable);}
 function closed(value,keys){if(!plain(value)||Object.keys(value).sort().join(',')!==[...keys].sort().join(','))fail('native-host-observation-schema');}
 function text(value,max=256){if(typeof value!=='string'||!value.trim()||Buffer.byteLength(value)>max||/[\x00-\x1f\x7f]/.test(value))fail('native-host-observation-text');
 return value;}
+function normalizeObservedHostVersion(value){const match=typeof value==='string'&&/^(0|[1-9][0-9]{0,3})[.](0|[1-9][0-9]{0,3})[.](0|[1-9][0-9]{0,5})$/.exec(value);if(!match||match[0]!==value)fail('native-host-observed-version-invalid');return value;}
+function parseHostVersionOutput(value){
+ if(typeof value!=='string'&&!Buffer.isBuffer(value))fail('native-host-binary-version-unsupported');
+ if((typeof value==='string'?Buffer.byteLength(value):value.length)>256)fail('native-host-binary-version-unsupported');
+ const bytes=Buffer.isBuffer(value)?value:Buffer.from(value,'utf8');let output=bytes.toString('utf8');
+ if(!Buffer.from(output,'utf8').equals(bytes)||output.charCodeAt(0)===65279)fail('native-host-binary-version-unsupported');
+ if(output.endsWith('\r\n'))output=output.slice(0,-2);else if(output.endsWith('\n'))output=output.slice(0,-1);
+ const suffix=' (Claude Code)';if(!output.endsWith(suffix))fail('native-host-binary-version-unsupported');
+ const version=output.slice(0,-suffix.length);try{return normalizeObservedHostVersion(version);}catch{fail('native-host-binary-version-unsupported');}
+}
+function assertLiveHostBinary(value){
+ if(!plain(value)||Object.keys(value).sort().join(',')!=='observed_version,physical_path,sha256')fail('native-host-live-binary-schema');
+ if(typeof value.physical_path!=='string'||!path.isAbsolute(value.physical_path)||Buffer.byteLength(value.physical_path)>4096||/[\x00-\x1f\x7f]/.test(value.physical_path)||typeof value.sha256!=='string'||!/^[a-f0-9]{64}$/.test(value.sha256))fail('native-host-live-binary-schema');
+ normalizeObservedHostVersion(value.observed_version);
+}
 function hash(value){return crypto.createHash('sha256').update(value).digest('hex');}
 function canonical(value,depth=0,seen=new Set()){if(depth>32)fail('native-host-observation-depth');
 if(value===null||typeof value==='boolean'||typeof value==='string'||typeof value==='number'&&Number.isFinite(value))return value;
@@ -151,7 +166,17 @@ function invocationOptionsRow(handle,row,requestHandle){if(row.state.live)return
  const options={hostRuntime:'claude',resolvedDispatch:request.route,activeCapabilities:structuredClone(row.state.caps),agentType:row.state.observation.agent_definition.agent_type,prompt:request.prompt,promptContext:request.prompt,effortBinding:{transport:row.state.observation.effort_observation.transport,agentPath:row.state.observation.agent_definition.physical_path,sourceFingerprint:row.state.observation.agent_definition.sha256},telemetryIdentity:{dispatchId:request.dispatchId,workflowId:request.workflowId,runId:request.runId,unitType:request.unitType,unitId:request.taskId}};
  const binding=require('./forge-native-invocation').buildNativeInvocation(options);if(binding.ok!==true)fail(binding.reason_code);requestApi().validateExecutionRequest(requestHandle,binding);return options;
 }
-function assertActivityAdmission(handle,request){return withProfileOperation(handle,row=>{if(!row.preparedRequestHandle)fail('native-host-preflight-required');const original=requestApi().assertExecutionRequest(row.preparedRequestHandle,{context:row.context});if(rootsDigest(original)!==rootsDigest(request))fail('native-host-activity-request-mismatch');invocationOptionsRow(handle,row,row.preparedRequestHandle);return{...capabilityAdmissionRow(row),...(row.state.live?{live_relay_reference:bridge().assertLiveRelayReference(row.observationWitness,row.context,request)}:{})};});}
+function assertSynchronousReadBinding(handle,context,requestHandle){
+ const row=profiles.get(handle);if(!row||row.context!==context||row.preparedRequestHandle&&row.preparedRequestHandle!==requestHandle)fail('native-host-read-prelude-profile-binding');if(row.invalid)throw row.invalid;return true;
+}
+// Closed same-call owner comparison: the genuine profile retains the opaque request handle.
+function assertProtectedOwner(handle,request,baseline){
+ const row=profiles.get(handle);if(!row)fail('native-host-profile-required');if(row.invalid)throw row.invalid;
+ if(!row.preparedRequestHandle)fail('native-host-preflight-required');
+ if(requestApi().synchronousReadPreludeActive(row.preparedRequestHandle,handle))return false;
+ return requestApi().runSynchronousReadPrelude(row.preparedRequestHandle,handle,'activity-owner-check',{request,baseline});
+}
+function assertActivityAdmission(handle,request){const row=profiles.get(handle);if(!row)fail('native-host-profile-required');if(row.invalid)throw row.invalid;if(!row.preparedRequestHandle)fail('native-host-preflight-required');if(!requestApi().synchronousReadPreludeActive(row.preparedRequestHandle,handle))return requestApi().runSynchronousReadPrelude(row.preparedRequestHandle,handle,'activity-admission',request);return withProfileOperation(handle,row=>{if(!row.preparedRequestHandle)fail('native-host-preflight-required');const original=requestApi().assertExecutionRequest(row.preparedRequestHandle,{context:row.context});if(rootsDigest(original)!==rootsDigest(request))fail('native-host-activity-request-mismatch');invocationOptionsRow(handle,row,row.preparedRequestHandle);return{...capabilityAdmissionRow(row),...(row.state.live?{live_relay_reference:bridge().assertLiveRelayReference(row.observationWitness,row.context,request)}:{})};});}
 function bindSealedInvocation(handle,requestHandle,witness,call){return withProfileOperation(handle,row=>{const request=requestApi().assertExecutionRequest(requestHandle,{context:row.context});
  const execution=require('./forge-native-execution'),proof=requireFunction(execution,'assertOriginalCallbackWitness','native-host-original-callback-producer-unavailable')(witness,{request});
  if(!plain(call)||Object.keys(call).sort().join(',')!=='args,invocation'||!plain(call.args)||!plain(call.invocation))fail('native-host-original-callback-data');
@@ -225,6 +250,7 @@ function liveCount(v,max=1000000000){if(!Number.isSafeInteger(v)||v<0||v>max)fai
 function liveHostState(context,witness,host,source){
  const facts=requestApi().assertOwnerContext(context),v=host.observation;
  liveKeys(v,['schema_version','profile_id','host_session','provenance','host_binary','agent_definition','effort_requested','model_requested']);
+ assertLiveHostBinary(v.host_binary);
  if(v.schema_version!==1||v.profile_id!==LIVE_PROFILE_ID||v.provenance!=='observed-host'||host.provenance!=='observed-host'||source.provenance!=='observed-host'||facts.actor.hostRuntime!=='claude'||facts.actor.sessionId!==v.host_session||source.host_session!==v.host_session||v.effort_requested!==facts.route.effort||v.model_requested!==(facts.route.model_resolved||facts.route.model))fail('native-host-live-binding');
  const binding=require('./forge-native-invocation').observeClaudeAgentBinding({agentType:v.agent_definition.agent_type,agentPath:v.agent_definition.physical_path,sourceFingerprint:v.agent_definition.sha256});
  if(binding.ok!==true||v.agent_definition.agent_type!=='forge-native-files')fail('native-host-agent-definition-unproved');
@@ -295,4 +321,4 @@ function admitLiveObservation(handle,witness){const row=current(handle);if(!row.
 function liveFileResponse(raw,row,target){const v=raw.tool_response;if(raw.tool_name==='Read'){liveKeys(v,['type','file']);liveKeys(v.file,['filePath','content','numLines','startLine','totalLines']);if(v.type!=='text'||!samePath(v.file.filePath,target.absolute)||typeof v.file.content!=='string'||Buffer.byteLength(v.file.content)>MAX_INPUT)fail('native-host-live-read-response');for(const k of ['numLines','startLine','totalLines'])liveCount(v.file[k]);}
  else{liveKeys(v,['type','filePath','content','structuredPatch','originalFile','userModified']);if(!['create','update'].includes(v.type)||!samePath(v.filePath,target.absolute)||v.content!==raw.tool_input.content||!Array.isArray(v.structuredPatch)||v.structuredPatch.length>4096||v.originalFile!==null&&typeof v.originalFile!=='string'||typeof v.userModified!=='boolean'||!physicalFile(target.absolute).equals(Buffer.from(raw.tool_input.content)))fail('native-host-live-write-response');}}
 
-module.exports={prepareTimeoutCapMs,LIVE_PROFILE_ID,assertInvocationIntent,assertSealedIntent,admitLiveObservation,PROFILE_ID,FIXTURE_PROFILE_ID,normalizeHostObservation,normalizeRelayMessage,enrollForegroundProfile,assertCapabilityAdmission,assertActivityAdmission,invocationOptions,bindSealedInvocation,assertLaunchAdmission,describeProfile,admitObservation,admitCandidate,subscribe,awaitJoinedReturn,assertJoined,assertPublicationAttemptCurrent,assertPublicationCurrent,terminalResult};
+module.exports={assertProtectedOwner,assertSynchronousReadBinding,prepareTimeoutCapMs,LIVE_PROFILE_ID,assertInvocationIntent,assertSealedIntent,admitLiveObservation,PROFILE_ID,FIXTURE_PROFILE_ID,normalizeHostObservation,normalizeRelayMessage,enrollForegroundProfile,assertCapabilityAdmission,assertActivityAdmission,invocationOptions,bindSealedInvocation,assertLaunchAdmission,describeProfile,admitObservation,admitCandidate,subscribe,awaitJoinedReturn,assertJoined,assertPublicationAttemptCurrent,assertPublicationCurrent,terminalResult,normalizeObservedHostVersion,parseHostVersionOutput};

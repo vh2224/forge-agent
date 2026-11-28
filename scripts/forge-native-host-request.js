@@ -132,7 +132,7 @@ const gateFile=planFile.replace(/-PLAN\.md$/,'-PLAN-GATE.md'),gateBytes=read(gat
 let planDecision={plan:'approved'};
 if(!/^status:\s*approved\s*$/m.test(gateText)){
 if(policy.planGateInteractive==='off')planDecision={plan:'skipped',planSkipReason:'interactive-off'};
-else if(begin.workflow_binding.mode==='auto')fail('native-host-auto-plan-gate-producer-unavailable');
+else if(begin.workflow_binding.mode==='auto')planDecision={plan:'skipped',planSkipReason:'auto-defer',authorizationReference:'native-host-auto/'+input.expected_begin_sha256};
 else if(policy.planGateInteractive==='auto')fail('native-host-plan-gate-decision-unavailable');
 else fail('native-host-plan-gate-required');}
 const approvedHash=gateText.match(/^plan_sha256:\s*([a-f0-9]{64})\s*$/m)?.[1];
@@ -206,6 +206,11 @@ if(!row)fail('native-host-owner-context-required');
 if(!plain(options)||Object.keys(options).some(key=>!['publicationWitness','publicationAttemptWitness'].includes(key))||options.publicationWitness!==undefined&&options.publicationAttemptWitness!==undefined)fail('native-host-owner-context-options');
 const complete=options.publicationWitness===undefined?row.publicationWitness:options.publicationWitness;
 const pending=options.publicationAttemptWitness===undefined?row.publicationAttemptWitness:options.publicationAttemptWitness;
+const frame=row.readPrelude;
+if(frame){
+ if(complete!==frame.publicationWitness||pending!==frame.publicationAttemptWitness||!synchronousReadPreludeActive(frame.requestHandle,frame.profileHandle))fail('native-host-read-prelude-binding-changed');
+ return structuredClone(frame.facts);
+}
 if(row.publicationWitness&&complete!==row.publicationWitness||row.publicationAttemptWitness&&pending!==row.publicationAttemptWitness)fail('native-host-publication-witness-conflict');
 if(row.publicationWitness&&options.publicationAttemptWitness!==undefined)fail('native-host-publication-downgrade');
 const admitted=complete?publicationTransition(row,complete):pending?publicationTransition(row,pending,true):null;
@@ -215,8 +220,71 @@ if(current.stamp!==row.initial.stamp)fail('native-host-owner-authority-changed')
 if(admitted){row.publicationRuntime=admitted.runtime;row.publicationIdentity=admitted.identity;if(complete)row.publicationWitness=complete;else row.publicationAttemptWitness=pending;}
 return current.facts;}
 function describeOwnerContext(handle){return structuredClone(assertOwnerContext(handle));}
-function ownerAdapters(handle){assertOwnerContext(handle);
-return Object.freeze({assertAuthority(){assertOwnerContext(handle);},assertBoundary(){assertOwnerContext(handle);}});}
+function executionPlanGateAdapter(context){const owner=contexts.get(context);if(!owner)fail('native-host-owner-context-required');
+const facts=assertOwnerContext(context);if(facts.gates.planSkipReason!=='auto-defer')return null;
+if(!owner.executionPlanGate)owner.executionPlanGate=require('./forge-task-execution').createAutoPlanGateAdapter(scope=>{
+ // This is a live producer bound to the genuine private request/channel. A JSON
+ // gate, copied adapter or another invocation cannot attest the current scope.
+ if(!owner.request)fail('native-host-auto-plan-gate-request-required');
+ const r=assertExecutionRequest(owner.request),roots=require('./forge-code-roots');
+ if(r.gates.plan!=='skipped'||r.gates.planSkipReason!=='auto-defer')fail('native-host-auto-plan-gate-scope-changed');
+ const expected={scope:r.scope,phase:r.phase,unitType:r.unitType,milestoneId:r.milestoneId||null,sliceId:r.sliceId||null,taskId:r.taskId,workflowId:r.workflowId,dispatchId:r.dispatchId,host:r.route.host_runtime,owner:fs.realpathSync(r.contextRoot||r.cwd),codeDir:fs.realpathSync(r.cwd),planFile:fs.realpathSync(r.planFile),planSha256:hash(read(r.planFile)),executionContractSha256:roots.digest(r.execution_contract),reference:r.gates.authorizationReference};
+ if(digest(scope)!==digest(expected))fail('native-host-auto-plan-gate-scope-changed');
+ return{authorized:true,mode:'auto',reference:scope.reference};
+});return owner.executionPlanGate;}
+
+// Closed, synchronous read operations only: no caller callback or serialized proof.
+// The owner fence and complete protected snapshot bracket every borrowed read.
+let activeReadPrelude=null;
+function synchronousReadPreludeActive(handle,profileHandle){
+ const request=requests.get(handle),row=request&&contexts.get(request.context),frame=row?.readPrelude;
+ if(!frame||activeReadPrelude!==frame||frame.requestHandle!==handle||frame.profileHandle!==profileHandle)return false;
+ const windows=require('./forge-owner-transport-window');
+ if(windows.currentPublicationGuard(frame.owner,true)!==frame.guard)fail('native-host-read-prelude-guard-changed');
+ require('./forge-artifact-reconciliation').lock.assertGuard(frame.owner,frame.guard);return true;
+}
+function runSynchronousReadPrelude(handle,profileHandle,kind,expectedRequest){
+ if(!['execute-owner-preflight','activity-admission','activity-owner-check'].includes(kind)||kind==='execute-owner-preflight'&&expectedRequest!==undefined)fail('native-host-read-prelude-operation');
+ if(activeReadPrelude)fail('native-host-read-prelude-nested');
+ // Clone caller-owned DATA before a fence/frame exists; no getter/Proxy callback is admitted inside it.
+ const expectedData=kind==='execute-owner-preflight'?undefined:structuredClone(expectedRequest);
+ if(kind==='activity-owner-check'&&(!plain(expectedData)||Object.keys(expectedData).sort().join(',')!=='baseline,request'||!plain(expectedData.baseline)||!plain(expectedData.request)))fail('native-host-owner-check-data');
+ const request=requests.get(handle),row=request&&contexts.get(request.context);
+ if(!row||row.request!==handle)fail('native-host-request-handle-required');
+ if(row.readPrelude)fail('native-host-read-prelude-nested');
+ const profile=require('./forge-native-host-profile');profile.assertSynchronousReadBinding(profileHandle,request.context,handle);
+ const owner=row.initial.facts.owner,windows=require('./forge-owner-transport-window'),execution=require('./forge-task-execution'),recon=require('./forge-artifact-reconciliation');
+ return windows.withMutation(owner,()=>{
+  const guard=windows.currentPublicationGuard(owner,true);if(!guard)fail('native-host-read-prelude-guard-required');recon.lock.assertGuard(owner,guard);
+  const before=execution.protectedSnapshot(owner),facts=assertOwnerContext(request.context);
+  const frame={requestHandle:handle,profileHandle,owner,guard,facts,publicationWitness:row.publicationWitness,publicationAttemptWitness:row.publicationAttemptWitness};
+  row.readPrelude=frame;activeReadPrelude=frame;
+  try{
+   let value;
+   if(kind==='execute-owner-preflight'){
+    const current=readExecutionRequest(handle),options=profile.invocationOptions(profileHandle,handle),preflight=require('./forge-native-invocation').buildNativeInvocation(options);
+    validateExecutionRequest(handle,preflight);profile.assertCapabilityAdmission(profileHandle);value={request:current,options};
+   }else if(kind==='activity-owner-check'){
+    const activity=require('./forge-protected-owner-activity');
+    if(!activity.nativeOwnerCheckEligible(owner,expectedData.request))fail('native-host-owner-check-scope-changed');
+    // expectedProtectedOwner performs the original full native assertLive/profile checks, now inside this frame.
+    const projected=activity.expectedProtectedOwner(owner,expectedData.baseline);
+    if(require('./forge-code-roots').digest(Object.entries(before).sort())!==require('./forge-code-roots').digest(Object.entries(projected).sort()))throw Object.assign(new Error('execution-protected-metadata'),{code:'execution-protected-metadata'});
+    value=true;
+   }else value=profile.assertActivityAdmission(profileHandle,expectedData);
+   if(value&&typeof value.then==='function')fail('native-host-read-prelude-sync-required');return value;
+  }finally{
+   // Clear before EXIT, including throws/refusals. No authority survives this turn.
+   row.readPrelude=null;activeReadPrelude=null;
+   recon.lock.assertGuard(owner,guard);if(windows.currentPublicationGuard(owner,true)!==guard)fail('native-host-read-prelude-guard-changed');
+   assertOwnerContext(request.context);
+   if(digest(execution.protectedSnapshot(owner))!==digest(before))fail('native-host-read-prelude-owner-changed');
+  }
+ });
+}
+
+function ownerAdapters(handle){assertOwnerContext(handle);const adapter=executionPlanGateAdapter(handle);
+return Object.freeze({assertAuthority(){assertOwnerContext(handle);},assertBoundary(){assertOwnerContext(handle);},...(adapter?{executionPlanGate:adapter}:{})});}
 function channelState(channel,context){const bridge=require('./forge-native-host-bridge');
 if(typeof bridge.assertOwnedChannel!=='function')fail('native-host-owned-channel-producer-unavailable');
 const row=bridge.assertOwnedChannel(channel,context);
@@ -254,5 +322,6 @@ if(digest(row.request)!==row.sha256)fail('native-host-request-changed');return s
 function readExecutionRequest(handle){return assertExecutionRequest(handle);}
 function validateExecutionRequest(handle,nativeInvocation){const r=assertExecutionRequest(handle);
 if(!nativeInvocation||nativeInvocation.ok!==true)fail('native-host-preflight-required');
-const check=require('./forge-unit-sidecar').validateRecoveryRequest(r,{nativeInvocation});if(check.supported!==true)fail('native-host-request-preflight-refused');return r;}
-module.exports={normalizeOwnerInput,scanSecurityPlan,buildOwnerContext,assertOwnerContext,describeOwnerContext,ownerAdapters,buildExecutionRequest,assertExecutionRequest,readExecutionRequest,validateExecutionRequest};
+const validate=()=>require('./forge-unit-sidecar').validateRecoveryRequest(r,{nativeInvocation}),adapter=executionPlanGateAdapter(requests.get(handle).context);
+const check=adapter?require('./forge-task-execution').withAutoPlanGateAdapterSync(adapter,r,validate):validate();if(check.supported!==true)fail('native-host-request-preflight-refused');return r;}
+module.exports={runSynchronousReadPrelude,synchronousReadPreludeActive,normalizeOwnerInput,scanSecurityPlan,buildOwnerContext,assertOwnerContext,describeOwnerContext,ownerAdapters,buildExecutionRequest,assertExecutionRequest,readExecutionRequest,validateExecutionRequest};
