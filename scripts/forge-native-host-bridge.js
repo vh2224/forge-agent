@@ -4,7 +4,7 @@
 // The retained owner is this exact module, not a caller-selected JS adapter.
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
 const crypto = require('node:crypto'), net = require('node:net'), child = require('node:child_process');
-const LIMIT = Object.freeze({ header: 2048, input: 2097152, body: 1048576,
+const LIMIT = Object.freeze({ header: 2048, input: 2097152, manifest: 8388608, body: 1048576,
   aggregate: 16777216, terminal: 65536, candidates: 8, returns: 2, evidence: 1024, checkpoints: 32 });
 const channels = new WeakMap(), admissions = new WeakMap(), reservations = new WeakMap();
 const hostWitnesses = new WeakMap(), capabilities = new WeakMap(), observations = new WeakMap(), candidates = new WeakMap();
@@ -185,9 +185,11 @@ function spoolBytes(row) {
     physical(file);total+=fs.statSync(file).size; }
   return total;
 }
+// The owner-produced manifest embeds protected metadata; it is not a worker body.
+function spoolBound(role) { return role==='native-manifest'?LIMIT.manifest:['candidate','return'].includes(role)?LIMIT.body:role==='checkpoint'?LIMIT.terminal:LIMIT.input; }
 function reserve(row,role,bytes,target,stagingTargets=[]) {
   currentChannel(row); ownedTarget(row,target);
-  const bound = ['candidate','return'].includes(role)?LIMIT.body:role==='checkpoint'?LIMIT.terminal:LIMIT.input;
+  const bound = spoolBound(role);
   if (!Number.isSafeInteger(bytes)||bytes<0||bytes>bound||!Array.isArray(stagingTargets)||stagingTargets.length>4) fail('native-host-spool-bound');
   for(const p of stagingTargets) ownedTarget(row,p);
   if([...row.reservations].some(h=>{const r=reservations.get(h);return [r.target,...r.staging].some(p=>[target,...stagingTargets].includes(p));})) fail('native-host-spool-reservation-conflict');
@@ -199,7 +201,7 @@ function reserve(row,role,bytes,target,stagingTargets=[]) {
 function reservationOf(row,handle) {const r=reservations.get(handle);if(!r||r.row!==row||!row.reservations.has(handle))fail('native-host-reservation-required');return r;}
 function commit(row,handle) { currentChannel(row);const r=reservationOf(row,handle);if(read(r.target,r.bytes).length!==r.bytes)fail('native-host-spool-write-size');
   for(const p of r.staging)if(fs.existsSync(p))fail('native-host-staging-not-settled');row.reservations.delete(handle);reservations.delete(handle);return true; }
-function reconcile(row,handle) { currentChannel(row);const r=reservationOf(row,handle);for(const p of [r.target,...r.staging])if(fs.existsSync(p))read(p,LIMIT.input);
+function reconcile(row,handle) { currentChannel(row);const r=reservationOf(row,handle);for(const p of [r.target,...r.staging])if(fs.existsSync(p))read(p,spoolBound(r.role));
   row.reservations.delete(handle);reservations.delete(handle);if(spoolBytes(row)>LIMIT.aggregate)fail('native-host-spool-aggregate');return true; }
 function writeImmutable(row,role,target,bytes) {
   if(!Buffer.isBuffer(bytes))fail('native-host-spool-buffer');ownedTarget(row,target);
@@ -408,7 +410,7 @@ function readback(row,record) {
 function persistReceipt(row,pointer) {
   closed(pointer,['file','sha256'],'native-host-receipt-pointer');ownedTarget(row,pointer.file);const bytes=read(pointer.file,LIMIT.body);
   if(hash(bytes)!==pointer.sha256)fail('native-host-receipt-pointer-hash');const record=parse(bytes,LIMIT.body);
-  const request=api('native-host-request').assertExecutionRequest(row.requestHandle),manifestBytes=read(request.resultFile+'.manifest.json'),manifest=parse(manifestBytes);
+  const request=api('native-host-request').assertExecutionRequest(row.requestHandle),manifestBytes=read(request.resultFile+'.manifest.json',LIMIT.manifest),manifest=parse(manifestBytes,LIMIT.manifest);
   const recovery=api('attempt-recovery');
   if(pointer.file!==request.resultFile+'.receipt.json.'+pointer.sha256+'.json'||record.dispatch_id!==row.dispatch
     ||record.fingerprint!==api('unit-sidecar').artifactFingerprint(request)||nativeDigest(record.route)!==nativeDigest(request.route)
@@ -487,7 +489,7 @@ function runOriginalReplayPublication(operation,runtime,request){
   const row=entry.row;currentChannel(row);terminalAdmission(row);
   const current=api('native-host-request').readExecutionRequest(row.requestHandle);
   if(nativeDigest(current)!==entry.request_sha256)fail('native-host-replay-request-changed');
-  const manifest=parse(read(current.resultFile+'.manifest.json'));
+  const manifest=parse(read(current.resultFile+'.manifest.json',LIMIT.manifest),LIMIT.manifest);
   const session=api('native-recovery-delivery').prepare({request:current,nativeInvocation:row.originalInvocation,savedManifest:manifest,
     ...api('native-host-request').ownerAdapters(row.context),persistDeliveryReceipt:pointer=>persistReceipt(row,pointer),nativeHostAdmission:row.admission});
   const actual=session.replayReady(entry.receipt),witness=publicationCurrent(row,actual,current),proof=readback(row,actual);

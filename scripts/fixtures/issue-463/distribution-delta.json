@@ -579,16 +579,16 @@
     },
     "scripts/forge-native-host-bridge.js": {
       "before": null,
-      "after": "6b522a5b7e5c5d7a61a478a7441faee9d1d4d76005770c951d2ce19ea9ea0202",
+      "after": "246780271511f754bbc68b568ec80efbc75e638bf6abb0e6befd93b6ab7e3e79",
       "attributed_before": null,
-      "attributed_after": "6b522a5b7e5c5d7a61a478a7441faee9d1d4d76005770c951d2ce19ea9ea0202",
+      "attributed_after": "246780271511f754bbc68b568ec80efbc75e638bf6abb0e6befd93b6ab7e3e79",
       "before_gzip_base64": null
     },
     "scripts/forge-native-host-bridge.test.js": {
       "before": null,
-      "after": "809df5225ad61155a2b666f52130ffd12d1beb6296fe6677b5133fe4336262e9",
+      "after": "76a93435858d63571de54ab0fcaf9e3a39043af45514d32beeed7f3455b70e4e",
       "attributed_before": null,
-      "attributed_after": "809df5225ad61155a2b666f52130ffd12d1beb6296fe6677b5133fe4336262e9",
+      "attributed_after": "76a93435858d63571de54ab0fcaf9e3a39043af45514d32beeed7f3455b70e4e",
       "before_gzip_base64": null
     },
     "scripts/forge-native-host-profile.js": {
@@ -8466,20 +8466,20 @@
   },
   "provenance": {
     "logical_after_inventory_excludes_current_own4": true,
-    "physical_after_inventory_sha256": "f0992239ac7b3b8a5ebc85a7d82f8dcd12bb384249182bc9ab6f62959cd95894",
+    "physical_after_inventory_sha256": "1120e72e0790a3cc41842a8b2b37ac9d796fca5054e31e6e3f48dd665e6aa7d4",
     "current_own4_exclusion": {
       "schema_version": 1,
       "files": {
         "scripts/fixtures/issue-463/README.md": {
-          "sha256": "1afb00b4205a386add37235326b872b84b64753bfec3864ede9a7bd50e812716",
-          "bytes": 3217
+          "sha256": "6c3de156e90577fbe90c1efcc5f47e4cfc7b7941c49a333e887e201fa04b27a5",
+          "bytes": 3577
         },
         "scripts/fixtures/issue-463/distribution-delta.json": {
-          "sha256": "4841a6ea765008bad9dce7340c2154a8dd62eda59fa36c702aec403ee0441482",
-          "bytes": 4386953
+          "sha256": "7aab76b3d4096597a2be002697c48b80e245154d1efe0b992e8963827af6eaef",
+          "bytes": 4388087
         },
         "scripts/fixtures/issue-463/distribution.cjs": {
-          "sha256": "5abd6ee51c4cbc7dca03bda75f0e2764a5e4decee30425423c99f99ce9bc70d2",
+          "sha256": "1f5e1f586294d9cbafac6c9f8f913d602942418a34a2717dddf17907bc2a1c90",
           "bytes": 20163
         },
         "scripts/forge-issue-463-distribution.test.js": {
@@ -8491,8 +8491,8 @@
     "baseline_version": "4.52.5",
     "baseline_pin_sha256": "6b90f5919d91f86a34d63b09cc7eb752380fe7effa13f63d9932408927ee6938",
     "before_inventory_sha256": "69a97ad785244aec822a5ba9406f9e6dfaf08f38aaf4a9edde49160370200516",
-    "after_inventory_sha256": "f824a96e85c454525286ba90a872acfbc45fb913648dabad6e47305addec714e",
-    "render_proof_sha256": "9633e52a1144b836ab7e1d428a68aa5bd220e8e0f132addb7c686d549309e087",
+    "after_inventory_sha256": "11f7b7f5cdd0c211139c085e2864f1ebc49bdc896a93eb8112ef481ca3b68554",
+    "render_proof_sha256": "682f90e6e96cb1b593cb39bfcbec05e3db3b309a0811ffc2f4c3d5645a2dee7f",
     "artifact_inventory_sha256": "07eb89ede681fa63bf8557b419d5cbab2d4ecd822ad146e70b83fe6068ef2886",
     "surface_sha256": "277c6dc6aab50bf39736dac97de6f5ec2dcadf751f1f2b752471adf8371ea810",
     "rendered_changes": 12,

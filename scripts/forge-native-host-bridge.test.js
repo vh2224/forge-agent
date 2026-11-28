@@ -278,7 +278,69 @@ async function assertSynchronousPreludeWiring(){
  console.log('PASS bridge closed synchronous preflight wiring before activity/native.run; TEST DATA only');
 }
 
-async function main({partialPublication=false}={}){
+// Private Module DATA exercises the original spool functions. These rows are
+// never exported by production or admitted as a host/profile/Agent capability.
+async function assertManifestSpoolBounds(){
+ const Module=require('node:module'),filename=require.resolve('./forge-native-host-bridge'),raw=fs.readFileSync(filename,'utf8'),copy=new Module(filename+'#manifest-spool-data',module);
+ copy.filename=filename;copy.paths=Module._nodeModulePaths(path.dirname(filename));
+ const context={},request={resultFile:null,route:{fixture:true}},realRequire=copy.require.bind(copy);
+ copy.require=name=>name==='./forge-native-host-request'?{assertOwnerContext(value){assert.equal(value,context);return{};},assertExecutionRequest(){return request;}}:name==='./forge-unit-sidecar'?{artifactFingerprint(){return'fixture';}}:name==='./forge-attempt-recovery'?{canonicalRequest:r=>r,requestIdentity:()=>({fixture:true})}:realRequire(name);
+ copy._compile(raw.replace(/^#![^\n]*(?:\n|$)/,'')+'\nmodule.exports.__spoolData={writeImmutable,reserve,reconcile,read,parse,persistReceipt,spoolBound};\n',filename);
+ const d=copy.exports.__spoolData,limit=copy.exports.LIMIT,root=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'forge-manifest-bound-'))),st=fs.statSync(root),row={context,directory:root,identity:{dev:st.dev,ino:st.ino},reservations:new Set(),dispatch:'fixture'};
+ const target=path.join(root,'native-result.manifest.json'),clear=()=>{for(const name of fs.readdirSync(root))fs.unlinkSync(path.join(root,name));};request.resultFile=path.join(root,'native-result');
+ try{
+  assert.equal(limit.manifest,8*1024*1024);assert.equal(limit.input,2*1024*1024);assert.equal(limit.aggregate,16*1024*1024);assert.equal(limit.body,1024*1024);
+  // Representative 19,940-entry owner metadata map: no source/provider contents.
+  const map={};for(let i=0;i<19940;i++)map[('.gsd/fixture/'+String(i).padStart(5,'0')+'/').padEnd(100,'x')+(i<1547?'/':'')]=i<1547?'directory':'a'.repeat(64);
+  const manifest=Buffer.from(JSON.stringify({request,prepared:{protected_owner:map}}));assert(manifest.length>3247653&&manifest.length<limit.manifest);
+  const written=d.writeImmutable(row,'native-manifest',target,manifest);assert.equal(written.sha256,hash(manifest));assert.equal(row.reservations.size,0);assert.equal(Object.keys(d.parse(d.read(target,limit.manifest),limit.manifest).prepared.protected_owner).length,19940);
+  assert.throws(()=>d.read(target),e=>e.code==='native-host-read-bound');assert.throws(()=>d.parse(manifest),e=>e.code==='native-host-json-bound');
+  assert.deepEqual(d.writeImmutable(row,'native-manifest',target,manifest),written);
+  const tampered=Buffer.from(manifest);tampered[tampered.length-2]^=1;fs.writeFileSync(target,tampered);assert.throws(()=>d.writeImmutable(row,'native-manifest',target,manifest),e=>e.code==='native-host-immutable-conflict');clear();
+  for(const size of [limit.manifest-1,limit.manifest]){const bytes=Buffer.from('{"padding":"'+'x'.repeat(size-14)+'"}');assert.equal(bytes.length,size);d.writeImmutable(row,'native-manifest',target,bytes);assert.equal(d.parse(d.read(target,limit.manifest),limit.manifest).padding.length,size-14);clear();}
+  assert.throws(()=>d.writeImmutable(row,'native-manifest',target,Buffer.alloc(limit.manifest+1)),e=>e.code==='native-host-spool-bound');assert(!fs.existsSync(target));
+  for(const role of ['context','sealed','native-evidence','native-receipt','native-review','native-verification','unknown'])assert.throws(()=>d.reserve(row,role,limit.input+1,target),e=>e.code==='native-host-spool-bound');
+  for(const role of ['candidate','return'])assert.throws(()=>d.reserve(row,role,limit.body+1,target),e=>e.code==='native-host-spool-bound');assert.throws(()=>d.reserve(row,'checkpoint',limit.terminal+1,target),e=>e.code==='native-host-spool-bound');
+  for(const size of [-1,NaN,Infinity,1.5])assert.throws(()=>d.reserve(row,'native-manifest',size,target),e=>e.code==='native-host-spool-bound');assert.throws(()=>d.reserve(row,'native-manifest',0,target,Array(5).fill(path.join(root,'stage'))),e=>e.code==='native-host-spool-bound');
+  const reservation=d.reserve(row,'native-manifest',manifest.length,target);fs.writeFileSync(target,manifest);assert.equal(d.reconcile(row,reservation),true,'failed-write reconciliation uses the manifest role bound');assert.equal(row.reservations.size,0);clear();
+  fs.writeFileSync(path.join(root,'occupied'),Buffer.alloc(9*1024*1024));assert.throws(()=>d.reserve(row,'native-manifest',limit.manifest,target),e=>e.code==='native-host-spool-aggregate');clear();
+  fs.writeFileSync(target,'{');assert.throws(()=>d.parse(d.read(target,limit.manifest),limit.manifest),e=>e.code==='native-host-json-invalid');clear();
+  d.writeImmutable(row,'native-manifest',target,manifest);
+  const record={phase:'failed',dispatch_id:row.dispatch,fingerprint:'fixture',route:request.route,manifest_sha256:hash(manifest),recovery_identity_sha256:require('./forge-code-roots').digest({fixture:true})};
+  const receipt=Buffer.from(JSON.stringify(record)),receiptSHA=hash(receipt),receiptFile=request.resultFile+'.receipt.json.'+receiptSHA+'.json';fs.writeFileSync(receiptFile,receipt);const pointer={file:receiptFile,sha256:receiptSHA};
+  assert.doesNotThrow(()=>d.persistReceipt(row,pointer),'actual receipt consumer reads and parses the larger manifest');
+  fs.writeFileSync(target,tampered);assert.throws(()=>d.persistReceipt(row,pointer),e=>e.code==='native-host-json-invalid'||e.code==='native-host-receipt-binding');fs.writeFileSync(target,manifest);
+  fs.writeFileSync(receiptFile,Buffer.from(receipt.toString().replace('failed','FAILED')));assert.throws(()=>d.persistReceipt(row,pointer),e=>e.code==='native-host-receipt-pointer-hash');
+  assert(raw.includes("parse(read(current.resultFile+'.manifest.json',LIMIT.manifest),LIMIT.manifest)"),'replay uses the same explicit manifest read/parse budget');
+  console.log('PASS manifest spool DATA: metadata19940,8MiBboundary,otherroles,aggregate,reconcile,receipt,malformed/hash/tamper; not LIVE');
+ }finally{clear();fs.rmdirSync(root);}
+}
+
+async function assertAutoManifestStart(f,observationFile){
+ const Module=require('node:module'),filename=require.resolve('./forge-native-host-bridge'),raw=fs.readFileSync(filename,'utf8'),cached=require.cache[filename],copy=new Module(filename+'#private-auto-manifest',module);
+ copy.filename=filename;copy.paths=Module._nodeModulePaths(path.dirname(filename));
+ copy._compile(raw.replace(/^#![^\n]*(?:\n|$)/,'')+'\nmodule.exports.__manifestFixture={enrollHost,originalOwnerChannel,row:c=>channels.get(c),executeOwner};\n',filename);
+ const execution=require('./forge-task-execution'),delivery=require('./forge-native-recovery-delivery'),originalSnapshot=execution.protectedSnapshot,originalAssert=execution.assertProtected,originalPrepare=delivery.prepare;
+ const stop=Object.assign(new Error('TEST_ONLY_STOP_AFTER_REAL_MANIFEST_START'),{code:'TEST_ONLY_STOP_AFTER_REAL_MANIFEST_START'}),extraPrefix='.gsd/fixture-spool-metadata/',metrics={snapshots:0,guards:0,start:0,Agent:0};
+ require.cache[filename]=copy;
+ try{
+  const requestApi=require('./forge-native-host-request'),profileApi=require('./forge-native-host-profile'),context=requestApi.buildOwnerContext(f.input),facts=requestApi.assertOwnerContext(context);
+  assert.equal(facts.gates.plan,'skipped');assert.equal(facts.gates.planSkipReason,'auto-defer');
+  const host=copy.exports.__manifestFixture.enrollHost(context,observationFile),channel=copy.exports.__manifestFixture.originalOwnerChannel(context,host,'fixture-only-input'),row=copy.exports.__manifestFixture.row(channel);
+  row.profile=profileApi.enrollForegroundProfile(context,host);row.requestHandle=requestApi.buildExecutionRequest(context,channel);profileApi.assertCapabilityAdmission(row.profile);
+  // The private fixture keeps the ORIGINAL snapshot producer and all its real
+  // rechecks. Synthetic hash-only metadata pads that snapshot to the real-world
+  // shape; it never mints owner authority or claims filesystem entries exist.
+  execution.protectedSnapshot=root=>{const map=originalSnapshot(root);metrics.snapshots++;if(path.resolve(root)===path.resolve(f.owner))for(let i=0;i<19940;i++)map[(extraPrefix+String(i).padStart(5,'0')).padEnd(100,'x')]='a'.repeat(64);return map;};
+  execution.assertProtected=(root,expected)=>{metrics.guards++;const real=Object.fromEntries(Object.entries(expected).filter(([key])=>!key.startsWith(extraPrefix)));return originalAssert(root,real);};
+  delivery.prepare=options=>{const session=originalPrepare(options);return{...session,start(){const result=session.start(),bytes=fs.readFileSync(result.manifest_file),manifest=JSON.parse(bytes);metrics.start++;assert(bytes.length>3247653&&bytes.length<=copy.exports.LIMIT.manifest);assert.equal(manifest.request.gates.planSkipReason,'auto-defer');assert.equal(result.manifest_sha256,hash(bytes));assert(Object.keys(manifest.prepared.protected_owner).length>=19940);throw stop;}};};
+  await assert.rejects(copy.exports.__manifestFixture.executeOwner(row),error=>error===stop);
+  assert(metrics.snapshots>0&&metrics.guards>0);assert.equal(metrics.start,1);assert.equal(row.sealed,null,'stop is BEFORE original Agent callback');
+  console.log('PASS private combined auto-defer + synchronous prelude + ORIGINAL snapshot/guards + native.run/prepare/start with padded owner metadata; stop before Agent, not LIVE');
+ }finally{execution.protectedSnapshot=originalSnapshot;execution.assertProtected=originalAssert;delivery.prepare=originalPrepare;if(cached)require.cache[filename]=cached;else delete require.cache[filename];}
+}
+
+async function main({partialPublication=false,manifestOnly=false}={}){
   await assertSynchronousPreludeWiring();
   await assertLiveIPCTimeoutDiagnostics();
   assertBridgeCohortSelectors();
@@ -347,6 +409,7 @@ async function main({partialPublication=false}={}){
       effort_observation:{transport:'agent-argument',value:'high',source_fingerprint:hash(fs.readFileSync(effortFile)),observation_reference:effortFile},
       agent_definition:{agent_type:'forge-executor',physical_path:agentFile,sha256:hash(fs.readFileSync(agentFile))},provenance:'fixture-origin'};
     const observationFile=path.join(root,'host-observation.json');put(observationFile,observation);
+    if(manifestOnly){await assertAutoManifestStart(f,observationFile);return;}
     const ownerDigest=()=>{const rows=[];function walk(dir){for(const name of fs.readdirSync(dir).sort()){const file=path.join(dir,name),st=fs.lstatSync(file);assert(!st.isSymbolicLink());if(st.isDirectory())walk(file);else rows.push([path.relative(f.owner,file),hash(fs.readFileSync(file))]);}}walk(f.owner);return digest(rows);};
     const beforeBudget=ownerDigest(),budget=await cli('prepare-budget',['--input',input],{env:{...process.env,BASH_DEFAULT_TIMEOUT_MS:'240_000',BASH_MAX_TIMEOUT_MS:'120000'}});
     assert.equal(budget.value.kind,'native-host-prepare-budget');assert.equal(budget.value.prepare_timeout_ms,240000);assert.equal(budget.value.profile_cap_ms,600000);assert.equal(budget.value.admission,false);assert.equal(ownerDigest(),beforeBudget,'budget lookup creates no run/claim/BEGIN/publication/spool or owner metadata');
@@ -506,6 +569,7 @@ module.exports={main};
 if(require.main===module){
   const kind=process.argv[2],file=process.argv[3];
   if(kind==='--fixture-worker')fixtureWorker(JSON.parse(fs.readFileSync(file,'utf8')));
+  else if(kind==='--manifest-spool-only')assertManifestSpoolBounds().then(()=>main({manifestOnly:true})).catch(e=>{console.error(e.code||e.message);process.exitCode=1;});
   else if(kind==='--synchronous-prelude-only')assertSynchronousPreludeWiring().catch(e=>{console.error(e.code||'prelude-data-failed');process.exitCode=1;});
   else if(kind==='--fixture-host')fixtureHost(JSON.parse(fs.readFileSync(file,'utf8'))).catch(e=>{console.error(e.code||e.message);process.exitCode=1;});
   else runBridgeCohort(process.argv.slice(2)).catch(e=>{const code=typeof e.code==='string'&&/^[A-Za-z0-9_.-]{1,160}$/.test(e.code)?e.code:'native463-fixture-failed';const testSourceError=fixtureTestSourceError(e);console.error(JSON.stringify({code,...(testSourceError?{test_source_error:testSourceError}:{}),...(e.native463_diagnostic?{diagnostic:e.native463_diagnostic}:{})}));process.exitCode=1;});
