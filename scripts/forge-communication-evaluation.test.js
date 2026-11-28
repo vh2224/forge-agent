@@ -187,7 +187,7 @@ function validateSample(sample, side) {
     assert.strictEqual(sample.text, reproduce(sample), 'rendered bytes drift');
   } else if (sample.label === 'modelo-da-skill') {
     assert([ARCHIVE, ...['auto', 'next', 'task', 'status'].map(name => `skills/forge-${name}/SKILL.md`)].includes(sample.source.file));
-    const bytes = sample.source.file === 'skills/forge-next/SKILL.md' ? require('./fixtures/issue-463/distribution.cjs').projectRead(p => fs.readFileSync(path.join(ROOT, p)))(sample.source.file).toString('utf8') : read(sample.source.file);
+    const bytes = ['skills/forge-next/SKILL.md', 'skills/forge-task/SKILL.md'].includes(sample.source.file) ? require('./fixtures/issue-463/distribution.cjs').projectRead(p => fs.readFileSync(path.join(ROOT, p)))(sample.source.file).toString('utf8') : read(sample.source.file);
     assert.strictEqual(sample.source.sha256, delivery.sha256(bytes), 'literal source drift');
     assert(bytes.includes(sample.text), 'not a literal skill quotation');
     assert.strictEqual(sample.human_view.rule, 'complete-v1');
