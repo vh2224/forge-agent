@@ -6,6 +6,14 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const discoveryPrivateKeys = ['HOME', 'USERPROFILE', 'FORGE_HOME', 'FORGE_PERSONAL_DIR', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR'];
+const discoveryPreviousEnv = Object.fromEntries(discoveryPrivateKeys.map(key => [key, process.env[key]]));
+const discoveryPrivateHome = process.argv[2] === '--discovery-reads-only' ? fs.mkdtempSync(path.join(os.tmpdir(), 'forge-discovery-homes-')) : null;
+if (discoveryPrivateHome) {
+  Object.assign(process.env, { HOME: discoveryPrivateHome, USERPROFILE: discoveryPrivateHome,
+    FORGE_HOME: path.join(discoveryPrivateHome, '.forge-agent'), FORGE_PERSONAL_DIR: path.join(discoveryPrivateHome, '.forge-personal'),
+    CODEX_HOME: path.join(discoveryPrivateHome, '.codex'), CLAUDE_CONFIG_DIR: path.join(discoveryPrivateHome, '.claude') });
+}
 const controller = require('./forge-unit-controller.js');
 const state = require('./forge-state.js');
 const lease = require('./forge-unit-lease.js');
@@ -345,6 +353,60 @@ function testBoundedNamesAndLongKeys() {
       assert.strictEqual(controller.readEvents(controller.eventsFile(fixture.cwd, fixture.milestone)).length, 2);
     } finally { cleanup(fixture.cwd); }
   }
+}
+
+function testDiscoveryReadCountAndFreshness() {
+  const fixture = setup();
+  try {
+    const key = 'discovery-read-count';
+    assert.throws(() => controller.begin(fixture.cwd, request(fixture, { idempotency_key: key }),
+      { prefsReader, failpoint: name => name === 'after-intent' }), /failpoint/);
+    const modern = controller.transactionFile(fixture.cwd, key), legacy = legacyFile(fixture.cwd, 'transaction', key);
+    const original = fs.readFileSync(modern);
+    const Module = require('module'), filename = require.resolve('./forge-unit-controller.js');
+    const text = fs.readFileSync(filename, 'utf8');
+    const oldLine = '    const record = readJson(path.join(dir, name));';
+    const newLine = '    const record = readRecordJson(path.join(dir, name));';
+    assert(text.includes(oldLine) !== text.includes(newLine), 'one observed controller discovery variant');
+    // A private TEST baseline differs only at the exact one-line discovery seam.
+    const baselineText = text.includes(newLine) ? text.replace(newLine, () => oldLine) : text;
+    const baseline = new Module(filename, module);
+    baseline.filename = filename; baseline.paths = Module._nodeModulePaths(path.dirname(filename));
+    baseline._compile(baselineText, filename);
+    function observedReads(api, file) {
+      const saved = fs.readFileSync; let count = 0, rows;
+      fs.readFileSync = function(input, ...args) {
+        if (typeof input === 'string' && path.resolve(input) === path.resolve(file)) count++;
+        return saved.call(this, input, ...args);
+      };
+      try { rows = api.pendingTransactions(fixture.cwd); }
+      finally { fs.readFileSync = saved; }
+      assert.strictEqual(rows.length, 1);
+      return count;
+    }
+    assert.strictEqual(observedReads(baseline.exports, modern), 5, 'modern-only baseline reads the same file five times');
+    assert.strictEqual(observedReads(controller, modern), 3, 'modern-only discovery retains one complete lookup');
+    assert.deepStrictEqual(fs.readFileSync(modern), original, 'counting does not modify the observed record');
+    const committed = JSON.parse(original); delete committed.storage_checksum; delete committed.storage_legacy_checksum;
+    committed.phase = 'committed'; controller.writeAtomic(modern, committed, false);
+    assert.strictEqual(controller.pendingTransactions(fixture.cwd).length, 0, 'separate observation sees a changed committed record');
+    fs.writeFileSync(modern, original);
+    assert.strictEqual(controller.pendingTransactions(fixture.cwd).length, 1, 'separate observation sees the restored intent');
+    const bad = JSON.parse(original); bad.phase = 'committed'; fs.writeFileSync(modern, JSON.stringify(bad));
+    assert.throws(() => controller.pendingTransactions(fixture.cwd), /checksum/, 'separate observation refuses newly corrupted storage');
+    fs.writeFileSync(modern, original);
+    assert.strictEqual(controller.pendingTransactions(fixture.cwd).length, 1);
+    const wrongAddress = path.join(path.dirname(modern), 'invalid-address.json');
+    fs.writeFileSync(wrongAddress, original);
+    assert.throws(() => controller.pendingTransactions(fixture.cwd), /record-conflict/, 'new invalid address is discovered on the next call');
+    fs.unlinkSync(wrongAddress);
+    assert.strictEqual(controller.pendingTransactions(fixture.cwd).length, 1);
+    fs.writeFileSync(legacy, original); fs.unlinkSync(modern);
+    assert.strictEqual(observedReads(baseline.exports, legacy), 3, 'legacy-only baseline reads three times');
+    assert.strictEqual(observedReads(controller, legacy), 2, 'legacy-only discovery retains the complete legacy lookup');
+    assert.deepStrictEqual(fs.readFileSync(legacy), original);
+    console.log('discovery reads modern 5->3, legacy 3->2; fresh changed/corrupt/new-address observations retained (TEST fixture only)');
+  } finally { cleanup(fixture.cwd); }
 }
 
 function testLegacyLookupAndConflicts() {
@@ -2229,6 +2291,7 @@ function main() {
   test('legacy fixture remains readable', testLegacyFixtureRemainsReadable);
   test('Claude/Codex logical projection is neutral', testProviderProjectionIsNeutral);
   test('bounded names reproduce 213/261 and oversized legacy destinations', testBoundedNamesAndLongKeys);
+  test('discovery read count and fresh observations', testDiscoveryReadCountAndFreshness);
   test('legacy lookup, discovery, result/boundary handoff and divergence refusal', testLegacyLookupAndConflicts);
   test('interrupted modern/legacy publication resumes with one authority', testInterruptedDualRecordPublication);
   test('checksums and identity collisions fail closed', testChecksumsAndAddressCollisions);
@@ -2239,7 +2302,20 @@ function main() {
   test('own temporary cleanup and distinct path capability diagnostics', testOwnTemporaryCleanupAndPathDiagnostics);
   console.log('forge-unit-controller tests passed');
 }
-if (process.argv[2] === '--superseded-interruption-only') {
+if (process.argv[2] === '--discovery-reads-only') {
+  try {
+    test('discovery read count and fresh observations', testDiscoveryReadCountAndFreshness);
+    test('legacy lookup and conflicts', testLegacyLookupAndConflicts);
+    test('interrupted dual records and anchors', testInterruptedDualRecordPublication);
+    test('checksums and address collisions', testChecksumsAndAddressCollisions);
+    test('observational paths do not authorize partial replay', testObservationalPathCompatibility);
+  } finally {
+    for (const key of discoveryPrivateKeys) {
+      if (discoveryPreviousEnv[key] === undefined) delete process.env[key]; else process.env[key] = discoveryPreviousEnv[key];
+    }
+    fs.rmSync(discoveryPrivateHome, { recursive: true, force: true });
+  }
+} else if (process.argv[2] === '--superseded-interruption-only') {
   testSupersededInterruptedOwner();
 } else if (process.argv[2] === '--selection-phases-only') {
   test('phase ordering, canonical skip preferences and stale slice selection', testSelectionPhasesAndCanonicalPrefs);
