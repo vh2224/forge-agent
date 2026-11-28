@@ -28,7 +28,7 @@ try{
  // They neither create a real owner context nor a production profile capability.
  let dataBindingCalls=0;const dataBindings=[],dataFacts={actor:{hostRuntime:'claude',sessionId:'DATA-only-session'},route:{effort:'high',model:'DATA-only-model'}},originalCopyRequire=copy.require.bind(copy);
  copy.require=name=>name==='./forge-native-host-request'?{assertOwnerContext(){return dataFacts;}}:name==='./forge-native-invocation'?{observeClaudeAgentBinding(binding){dataBindingCalls++;dataBindings.push(binding);return{ok:true};}}:originalCopyRequire(name);
- copy._compile(sourceBytes.toString('utf8')+'\nmodule.exports.__frameData={withIntentFrame,canBorrowIntent,assertLiveHostBinary,liveHostState};\n',filename);const frameData=copy.exports.__frameData;
+ copy._compile(sourceBytes.toString('utf8')+'\nmodule.exports.__frameData={withIntentFrame,canBorrowIntent,assertLiveHostBinary,liveHostState,seedPreludeProfile:(h,row)=>profiles.set(h,row)};\n',filename);const frameData=copy.exports.__frameData;
  // live-host-binary is private DATA validation, never enrollment authority.
  const binary={physical_path:path.join(root,'host.cjs'),sha256:'1'.repeat(64),observed_version:'2.1.322'};
  const dataObservation={schema_version:1,profile_id:profile.LIVE_PROFILE_ID,host_session:dataFacts.actor.sessionId,provenance:'observed-host',host_binary:binary,agent_definition:{agent_type:'forge-native-files',physical_path:path.join(root,'agent.md'),sha256:'3'.repeat(64)},effort_requested:dataFacts.route.effort,model_requested:dataFacts.route.model},dataSource={provenance:'observed-host',host_session:dataFacts.actor.sessionId};
@@ -52,6 +52,14 @@ try{
  assert.throws(()=>frameData.withIntentFrame(scratch,handle,request,()=>({then(){}})),e=>e.code==='native-host-intent-sync-required');assert.equal(scratch.intentFrame,undefined);
  let getterCalls=0;const getter=Object.defineProperty({},'then',{get(){getterCalls++;throw sentinel;}});assert.throws(()=>frameData.withIntentFrame(scratch,handle,request,()=>getter),e=>e===sentinel);assert.equal(getterCalls,1);assert.equal(scratch.intentFrame,undefined);
  frameData.withIntentFrame(scratch,handle,request,()=>{scratch.invalid=sentinel;assert.equal(frameData.canBorrowIntent(scratch,handle,request),false);delete scratch.invalid;});assert.equal(scratch.intentFrame,undefined);
+
+ const pc={},ph={},rh={},differentRequest={},prow={context:pc,preparedRequestHandle:rh};frameData.seedPreludeProfile(ph,prow);
+ assert.equal(copy.exports.assertSynchronousReadBinding(ph,pc,rh),true);
+ for(const args of [[{},pc,rh],[ph,{},rh],[ph,pc,differentRequest]])assert.throws(()=>copy.exports.assertSynchronousReadBinding(...args),e=>e.code==='native-host-read-prelude-profile-binding');
+ let delegated=0;const previousRequire=copy.require;copy.require=name=>name==='./forge-native-host-request'?{synchronousReadPreludeActive(h,p){assert.equal(h,rh);assert.equal(p,ph);return false;},runSynchronousReadPrelude(h,p,kind,r){delegated++;assert.equal(h,rh);assert.equal(p,ph);assert.equal(kind,'activity-admission');assert.equal(r,differentRequest);return{test_only:true};}}:previousRequire(name);
+ assert.deepEqual(copy.exports.assertActivityAdmission(ph,differentRequest),{test_only:true});assert.equal(delegated,1);
+ const invalidPrelude=new Error('TEST_INVALID_PROFILE');prow.invalid=invalidPrelude;assert.throws(()=>copy.exports.assertActivityAdmission(ph,differentRequest),e=>e===invalidPrelude);assert.throws(()=>copy.exports.assertSynchronousReadBinding(ph,pc,rh),e=>e===invalidPrelude);assert.equal(delegated,1);copy.require=previousRequire;
+
  assert.equal(crypto.createHash('sha256').update(fs.readFileSync(filename)).digest('hex'),crypto.createHash('sha256').update(sourceBytes).digest('hex'),'private DATA inspection leaves actual Source untouched');
  assert.equal(profile.prepareTimeoutCapMs(),600000,'initial prepare protocol cap matches the documented Bash maximum; resolved lower limits remain required');
  assert.equal(profile.LIVE_PROFILE_ID,'claude-agent-files-foreground-v1');

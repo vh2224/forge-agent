@@ -41,6 +41,64 @@ function createOwnerFixture({root=null,legacy=false,workflow='M901',mode='step',
  return{...f,milestone,workflow,base,planFile,input,begin,key,securityFile,securityScan,securitySha256};
 }
 module.exports={createOwnerFixture};
+function assertSynchronousReadPrelude(){
+ const Module=require('node:module'),saved={...process.env},root=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'forge-native-prelude-'))),marker=crypto.randomBytes(16).toString('hex');
+ fs.writeFileSync(path.join(root,'OWNED'),marker);
+ for(const key of ['HOME','USERPROFILE','CODEX_HOME','CLAUDE_CONFIG_DIR','FORGE_HOME']){process.env[key]=path.join(root,key.toLowerCase());fs.mkdirSync(process.env[key]);}
+ const owner=path.join(root,'owner'),spool=path.join(root,'spool');fs.mkdirSync(owner);fs.mkdirSync(path.join(owner,'.gsd'));fs.mkdirSync(spool);
+ const contextFile=path.join(spool,'context.md'),text='TEST ONLY: no live authority';fs.writeFileSync(contextFile,text);
+ const filename=require.resolve('./forge-native-host-request'),raw=fs.readFileSync(filename,'utf8'),hash=x=>crypto.createHash('sha256').update(x).digest('hex'),copy=new Module(filename+'#prelude-data',module);copy.filename=filename;copy.paths=Module._nodeModulePaths(path.dirname(filename));
+ const context={},handle={},profile={},badProfile={},request={contextFile,resultFile:path.join(spool,'result'),dispatchId:'TEST-ONLY',verification:{bindings:[1]}},state={generation:1},calls={inspect:0,profile:0,builder:0,sidecar:0};let action=null,active=false;
+ const initial={owner,actor:{sessionId:'TEST-ONLY'},gates:{plan:'approved'},claim_generation:1};let api;
+ const actualRequire=copy.require.bind(copy),fakeProfile={
+  assertSynchronousReadBinding(p,c,h){assert.equal(p,profile);assert.equal(c,context);assert.equal(h,handle);return true;},
+  invocationOptions(p,h){calls.profile++;assert(api.synchronousReadPreludeActive(h,p));for(let i=0;i<8;i++)assert.equal(api.assertOwnerContext(context).claim_generation,1);if(action)action();return{nativeHostIntent:p,nativeHostRequest:request};},
+  assertCapabilityAdmission(){assert.equal(api.assertOwnerContext(context).claim_generation,1);return{};},
+  assertActivityAdmission(p,r){assert.equal(p,profile);assert.deepEqual(r,request);assert.notEqual(r,request);assert(api.synchronousReadPreludeActive(handle,p));for(let i=0;i<8;i++)api.assertOwnerContext(context);if(action)return action();return{test_only:true};}
+ };
+ copy.require=id=>{
+  if(id==='./forge-native-host-profile')return fakeProfile;
+  if(id==='./forge-native-invocation')return{buildNativeInvocation(){calls.builder++;api.assertOwnerContext(context);return{ok:true};}};
+  if(id==='./forge-unit-sidecar')return{validateRecoveryRequest(){calls.sidecar++;api.assertOwnerContext(context);return{supported:true};}};
+  return actualRequire(id);
+ };
+ copy._compile(raw+String.raw`
+ module.exports.__preludeTest={seed(v){
+  inspect=()=>{v.inspect();return{facts:{...v.initial,claim_generation:v.state.generation},stamp:digest({...v.initial,claim_generation:v.state.generation})};};
+  contexts.set(v.context,{input:{},initial:{facts:v.initial,stamp:digest(v.initial)},request:v.handle});
+  requests.set(v.handle,{context:v.context,request:v.request,sha256:digest(v.request),context_sha256:hash(v.text),renderSources:[],channel:{}});
+  channelState=()=>({result_file:v.request.resultFile,context_file:v.request.contextFile,dispatch_id:v.request.dispatchId,admission:{}});
+ },clear(){return [...[]];}};
+ `,filename);api=copy.exports;
+ api.__preludeTest.seed({context,handle,request,initial,state,text,inspect(){calls.inspect++;}});
+ const windows=actualRequire('./forge-owner-transport-window');
+ const run=()=>api.runSynchronousReadPrelude(handle,profile,'execute-owner-preflight');
+ const refusal=(code,fn)=>assert.throws(fn,e=>e.code===code);
+ try{
+  const start=calls.inspect,value=run();assert.deepEqual(value.request,request);assert.equal(calls.inspect-start,2,'many internal inspections borrow only inside the closed fenced operation');assert.equal(calls.builder,1);assert.equal(calls.sidecar,1);
+  assert.equal(api.synchronousReadPreludeActive(handle,profile),false);assert.equal(windows.currentPublicationGuard(owner,true),undefined);
+  const outside=calls.inspect;api.assertOwnerContext(context);api.assertOwnerContext(context);assert.equal(calls.inspect-outside,2,'no reuse survives EXIT');
+  const second=calls.inspect;run();assert.equal(calls.inspect-second,2,'next boundary must revalidate ENTRY and EXIT');
+  assert.deepEqual(api.runSynchronousReadPrelude(handle,profile,'activity-admission',request),{test_only:true});
+  refusal('native-host-request-handle-required',()=>api.runSynchronousReadPrelude({},profile,'execute-owner-preflight'));
+  assert.throws(()=>api.runSynchronousReadPrelude(handle,badProfile,'execute-owner-preflight'));
+  refusal('native-host-read-prelude-operation',()=>api.runSynchronousReadPrelude(handle,profile,()=>{}));
+  refusal('native-host-read-prelude-operation',()=>api.runSynchronousReadPrelude(handle,profile,'execute-owner-preflight',request));
+  let getterCalls=0,insideCallbacks=0;const getterBindings=[1];Object.defineProperty(getterBindings,'0',{enumerable:true,get(){getterCalls++;if(api.synchronousReadPreludeActive(handle,profile))insideCallbacks++;return 1;}});
+  const getterRequest={...request,verification:{bindings:getterBindings}};assert.deepEqual(api.runSynchronousReadPrelude(handle,profile,'activity-admission',getterRequest),{test_only:true});assert.equal(getterCalls,1);assert.equal(insideCallbacks,0,'getter executes only before the fenced frame exists');
+  let mapCalls=0;const ownMap=[1];ownMap.map=()=>{mapCalls++;if(api.synchronousReadPreludeActive(handle,profile))insideCallbacks++;return[1];};assert.throws(()=>api.runSynchronousReadPrelude(handle,profile,'activity-admission',{...request,verification:{bindings:ownMap}}),e=>e.name==='DataCloneError');assert.equal(mapCalls,0);
+  const proxyRequest=new Proxy(request,{ownKeys(){if(api.synchronousReadPreludeActive(handle,profile))insideCallbacks++;return Reflect.ownKeys(request);}});assert.throws(()=>api.runSynchronousReadPrelude(handle,profile,'activity-admission',proxyRequest),e=>e.name==='DataCloneError');assert.equal(insideCallbacks,0);assert.equal(api.synchronousReadPreludeActive(handle,profile),false);
+  const sentinel=new Error('TEST_BODY_SENTINEL');action=()=>{throw sentinel;};assert.throws(run,e=>e===sentinel);action=null;assert.equal(api.synchronousReadPreludeActive(handle,profile),false);
+  action=()=>api.runSynchronousReadPrelude(handle,profile,'execute-owner-preflight');refusal('native-host-read-prelude-nested',run);action=null;
+  action=()=>({then(){}});refusal('native-host-read-prelude-sync-required',()=>api.runSynchronousReadPrelude(handle,profile,'activity-admission',request));action=null;
+  action=()=>{state.generation++;};refusal('native-host-owner-authority-changed',run);state.generation=1;action=null;assert.equal(api.synchronousReadPreludeActive(handle,profile),false);
+  const target=path.join(owner,'.gsd','TEST-ONLY-TAMPER');action=()=>fs.writeFileSync(target,'intrusion');refusal('native-host-read-prelude-owner-changed',run);action=null;fs.unlinkSync(target);
+  assert.equal(api.synchronousReadPreludeActive(handle,profile),false);assert.equal(windows.currentPublicationGuard(owner,true),undefined);run();
+  assert.equal(hash(fs.readFileSync(filename)),hash(raw),'test private module leaves Source unchanged');
+  console.log('PASS closed synchronous Native prelude: real owner fence/snapshot ENTRY EXIT, bounded inspection reuse, no cross-boundary reuse, genuine-handle binding, throw/nested/thenable/generation/tamper refusal; TEST DATA only');
+ }finally{process.env=saved;assert.equal(fs.readFileSync(path.join(root,'OWNED'),'utf8'),marker);assert(!fs.lstatSync(root).isSymbolicLink());assert.equal(path.dirname(fs.realpathSync.native(root)),fs.realpathSync.native(os.tmpdir()));fs.rmSync(root,{recursive:true,force:true});}
+}
+
 function main({autoOnly=false}={}){
 const saved={...process.env},privateRoot=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'forge-native463-request-'))),marker=crypto.randomBytes(16).toString('hex');
 fs.writeFileSync(path.join(privateRoot,'OWNED'),marker);
@@ -174,4 +232,4 @@ try{
 }
 
 }
-if(require.main===module){const args=process.argv.slice(2);assert(args.length===0||args.length===1&&args[0]==='--auto-plan-gate-only','unknown request test selector');main({autoOnly:args.length===1});}
+if(require.main===module){const args=process.argv.slice(2);assert(args.length===0||args.length===1&&['--auto-plan-gate-only','--synchronous-prelude-only'].includes(args[0]),'unknown request test selector');assertSynchronousReadPrelude();if(args[0]!=='--synchronous-prelude-only')main({autoOnly:args.length===1});}

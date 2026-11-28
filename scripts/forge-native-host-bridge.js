@@ -440,13 +440,12 @@ async function awaitReturn(row) {
 }
 async function executeOwner(row) {
   const requestApi=api('native-host-request'),profile=api('native-host-profile'),native=api('native-execution');
-  const request=requestApi.readExecutionRequest(row.requestHandle),options=profile.invocationOptions(row.profile,row.requestHandle);
+  const {request,options}=requestApi.runSynchronousReadPrelude(row.requestHandle,row.profile,'execute-owner-preflight');
   const lifecycleFile=path.join(row.directory,'native-lifecycle.json');
   options.lifecycle={journal:{root:row.directory,file:lifecycleFile,authorize:probe=>{
     currentChannel(row);return probe.root===row.directory&&probe.file===lifecycleFile;
   }},adapter:lifecycleAdapter(row)};
   options.terminalResult=result=>profile.terminalResult(row.profile,result)&&terminalAdmission(row);
-  const preflight=api('native-invocation').buildNativeInvocation(options);requestApi.validateExecutionRequest(row.requestHandle,preflight);profile.assertCapabilityAdmission(row.profile);
   const activity=api('protected-owner-activity');if(typeof activity.withNativeExecutionActivity!=='function')fail('native-host-activity-unavailable');
   let runtime;
   const result=await activity.withNativeExecutionActivity(request,row.profile,async actual=>{

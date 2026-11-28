@@ -267,7 +267,19 @@ async function assertLiveIPCTimeoutDiagnostics(){
  assert.equal(hash(fs.readFileSync(file,'utf8')),sourceHash);console.log('PASS actual relay timeout callback: both client-local queue stages, unchanged code/20s/rejection/key clearing; synthetic only');
 }
 
+async function assertSynchronousPreludeWiring(){
+ const Module=require('node:module'),filename=require.resolve('./forge-native-host-bridge'),raw=fs.readFileSync(filename,'utf8'),copy=new Module(filename+'#closed-prelude-data',module);copy.filename=filename;copy.paths=Module._nodeModulePaths(path.dirname(filename));
+ const requestHandle={},profileHandle={},request={test_only:true},options={},calls=[],sentinel=Object.assign(new Error('TEST_STOP_BEFORE_NATIVE_RUN'),{code:'TEST_STOP_BEFORE_NATIVE_RUN'}),actualRequire=copy.require.bind(copy);
+ copy.require=name=>name==='./forge-native-host-request'?{runSynchronousReadPrelude(h,p,kind){assert.equal(h,requestHandle);assert.equal(p,profileHandle);assert.equal(kind,'execute-owner-preflight');calls.push(kind);return{request,options};}}:name==='./forge-native-host-profile'?{}:name==='./forge-native-execution'?{}:name==='./forge-protected-owner-activity'?{async withNativeExecutionActivity(r,p){assert.equal(r,request);assert.equal(p,profileHandle);assert(options.lifecycle?.journal);assert.equal(typeof options.lifecycle.adapter.subscribe,'function');calls.push('activity');throw sentinel;}}:actualRequire(name);
+ copy._compile(raw.replace(/^#![^\n]*(?:\n|$)/,'')+'\nmodule.exports.__preludeExecuteOwner=executeOwner;\n',filename);
+ await assert.rejects(copy.exports.__preludeExecuteOwner({requestHandle,profile:profileHandle,directory:path.dirname(filename),attempt:'TEST-ONLY'}),e=>e===sentinel);
+ assert.deepEqual(calls,['execute-owner-preflight','activity']);
+ assert.equal(hash(fs.readFileSync(filename)),hash(raw));
+ console.log('PASS bridge closed synchronous preflight wiring before activity/native.run; TEST DATA only');
+}
+
 async function main({partialPublication=false}={}){
+  await assertSynchronousPreludeWiring();
   await assertLiveIPCTimeoutDiagnostics();
   assertBridgeCohortSelectors();
   // Unix socket paths have a small OS byte limit. Keep the entirely owned
@@ -494,6 +506,7 @@ module.exports={main};
 if(require.main===module){
   const kind=process.argv[2],file=process.argv[3];
   if(kind==='--fixture-worker')fixtureWorker(JSON.parse(fs.readFileSync(file,'utf8')));
+  else if(kind==='--synchronous-prelude-only')assertSynchronousPreludeWiring().catch(e=>{console.error(e.code||'prelude-data-failed');process.exitCode=1;});
   else if(kind==='--fixture-host')fixtureHost(JSON.parse(fs.readFileSync(file,'utf8'))).catch(e=>{console.error(e.code||e.message);process.exitCode=1;});
   else runBridgeCohort(process.argv.slice(2)).catch(e=>{const code=typeof e.code==='string'&&/^[A-Za-z0-9_.-]{1,160}$/.test(e.code)?e.code:'native463-fixture-failed';const testSourceError=fixtureTestSourceError(e);console.error(JSON.stringify({code,...(testSourceError?{test_source_error:testSourceError}:{}),...(e.native463_diagnostic?{diagnostic:e.native463_diagnostic}:{})}));process.exitCode=1;});
 }
