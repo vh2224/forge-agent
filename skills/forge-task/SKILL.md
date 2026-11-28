@@ -1268,7 +1268,9 @@ TRANSPORT_REASON=$(node "$FORGE_SCRIPTS_DIR/forge-transport.js" --result "$RESUL
 TRANSPORT_TAIL="\"transport\":\"${TRANSPORT:-unknown}\""
 [ -n "$TRANSPORT_VERSION" ] && TRANSPORT_TAIL="$TRANSPORT_TAIL,\"transport_version\":\"$TRANSPORT_VERSION\""
 [ -n "$TRANSPORT_REASON" ] && TRANSPORT_TAIL="$TRANSPORT_TAIL,\"transport_reason\":\"$TRANSPORT_REASON\""
-node "$FORGE_SCRIPTS_DIR/forge-dispatch-event.js" --route-json "$ROUTE_JSON" \
+# The full resolver route (~70 KB) does not fit in argv ("Argument list too long"): pass it by file.
+ROUTE_JSON_FILE=$(mktemp); printf '%s' "$ROUTE_JSON" > "$ROUTE_JSON_FILE"
+node "$FORGE_SCRIPTS_DIR/forge-dispatch-event.js" --route-json-file "$ROUTE_JSON_FILE" \
   --unit "execute-task/{TASK_ID}" --model "${CODEX_MODEL_LABEL}" --tier "$TIER" \
   --reason "$ENGINE_REASON" --effort "$EFFORT" --effort-reason "$EFFORT_REASON" \
   --engine codex --domain "$DOMAIN_USED" --route-source "$ROUTE_SOURCE" --chain-len "$CHAIN_LEN" \
@@ -1529,7 +1531,9 @@ Do NOT modify STATE.md. Return ---GSD-WORKER-RESULT---.
 mkdir -p "$WORKING_DIR/.gsd/forge/"
 # shared/forge-dispatch.md § DISPATCH_VCS prelude (canonical — VCS-agnostic)
 DISPATCH_VCS=$(node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --detect --field vcs --cwd "${CODE_DIR:-$WORKING_DIR}" 2>/dev/null || echo "unknown")
-node "$FORGE_SCRIPTS_DIR/forge-dispatch-event.js" --route-json "$ROUTE_JSON" \
+# The full resolver route (~70 KB) does not fit in argv ("Argument list too long"): pass it by file.
+ROUTE_JSON_FILE=$(mktemp); printf '%s' "$ROUTE_JSON" > "$ROUTE_JSON_FILE"
+node "$FORGE_SCRIPTS_DIR/forge-dispatch-event.js" --route-json-file "$ROUTE_JSON_FILE" \
   --unit "execute-task/{TASK_ID}" --model "$MODEL_ID" --tier "$TIER" --reason "$REASON" \
   --effort "$EFFORT" --effort-reason "$EFFORT_REASON" --engine "${DISPATCH_ENGINE:-claude}" \
   --domain "$DOMAIN_USED" --route-source "$ROUTE_SOURCE" --chain-len "$CHAIN_LEN" \

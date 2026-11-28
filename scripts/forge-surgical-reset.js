@@ -336,6 +336,11 @@ function parseSvnBaseline(raw) {
   return { ok: true, range: hi === null ? String(lo) : `${lo}:${hi}` };
 }
 
+function sameRoot(a, b) {
+  const key = value => { const real = fs.realpathSync.native(value); return process.platform === 'win32' ? real.toLowerCase() : real; };
+  return typeof a === 'string' && key(a) === key(b);
+}
+
 /** Capture baseline and dirty hashes as one attempt boundary. A second baseline
  * read closes the commit/update race before an external worker is spawned. */
 function captureAttemptSnapshot(cwd, options = {}) {
@@ -355,7 +360,12 @@ function captureAttemptSnapshot(cwd, options = {}) {
     const error = new Error(`baseline moved while capturing attempt (${before} -> ${after})`);
     error.code = 'snapshot-baseline-moved'; throw error;
   }
-  const svnState = vcsName === 'svn' ? vcs.captureDirty(cwd, { maxBuffer: OPTS.maxBuffer, vcs: 'svn', strict: true }) : null;
+  // A review-fix attempt observes the claim-derived scope of its native
+  // preparation (native-review-source-containers-v1); other roots stay whole.
+  const scope = options.svnReviewScope;
+  const reviewObservation = vcsName === 'svn' && scope && sameRoot(scope.code_dir, cwd) ? scope.observation : null;
+  const svnState = vcsName === 'svn' ? vcs.captureDirty(cwd, { maxBuffer: OPTS.maxBuffer, vcs: 'svn', strict: true,
+    ...(reviewObservation ? { reviewObservation } : {}) }) : null;
   if (svnState && !svnState.ok) throw snapshotFailure(svnState, svnState.error || 'svn-snapshot-unavailable');
   return { attempt_id: options.attemptId || null, start_sha: before, pre_dirty: preDirty, code_dir: path.resolve(cwd), vcs: vcsName,
     ...(svnState ? { svn_state: svnState } : {}) };
@@ -378,7 +388,7 @@ function captureMultiAttemptSnapshot(repoRoots, options = {}) {
   if (new Set(roots.map(root => process.platform === 'win32' ? root.toLowerCase() : root)).size !== roots.length) {
     throw new Error('multi-repo snapshot roots must be unique');
   }
-  const repos = roots.map(root => captureAttemptSnapshot(root, { attemptId: options.attemptId }));
+  const repos = roots.map(root => captureAttemptSnapshot(root, { attemptId: options.attemptId, svnReviewScope: options.svnReviewScope }));
   for (const repo of repos) {
     const current = currentBaseline(repo.code_dir, repo.vcs);
     if (current !== repo.start_sha) {
@@ -393,7 +403,7 @@ function captureMultiAttemptSnapshot(repoRoots, options = {}) {
  * Capture START_SHA + the pre-dirty snapshot and write BOTH in ONE atomic write.
  * @returns {object} the written state
  */
-function initState(stateFile, { cwd, attempt, repoRoots, executionContract }) {
+function initState(stateFile, { cwd, attempt, repoRoots, executionContract, svnReviewScope }) {
   if (executionContract) {
     const roots = require('./forge-code-roots');
     const contract = roots.validateContract(executionContract, { revalidate: true });
@@ -406,7 +416,7 @@ function initState(stateFile, { cwd, attempt, repoRoots, executionContract }) {
   }
   if (Array.isArray(repoRoots) && repoRoots.length > 1) {
     const primary = path.resolve(cwd);
-    const repos = captureMultiAttemptSnapshot(repoRoots, { attemptId: attempt });
+    const repos = captureMultiAttemptSnapshot(repoRoots, { attemptId: attempt, svnReviewScope });
     if (!repos.some(repo => path.resolve(repo.code_dir) === primary)) throw new Error('primary cwd must be one of repo roots');
     const primaryState = repos.find(repo => path.resolve(repo.code_dir) === primary);
     const state = {
@@ -419,7 +429,7 @@ function initState(stateFile, { cwd, attempt, repoRoots, executionContract }) {
     writeJsonAtomic(stateFile, state);
     return state;
   }
-  const snapshot = captureAttemptSnapshot(cwd, { attemptId: attempt });
+  const snapshot = captureAttemptSnapshot(cwd, { attemptId: attempt, svnReviewScope });
   const state = {
     attempt: attempt == null ? 1 : attempt,
     start_sha: snapshot.start_sha,

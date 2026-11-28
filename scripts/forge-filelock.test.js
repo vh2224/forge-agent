@@ -443,8 +443,149 @@ function testGuardReleaseFailuresAreReportedAndRecoverable() {
   }
 }
 
+// The actual pre-canonical format has five fields, not the nine-field v1 fixture.
+function seedRelativeLegacy(cwd, raw = 'src/relative.txt', patch = {}) {
+  const meta = { run_id: 'legacy-run', session_id: 'legacy-session', file_path: raw, acquired_at: 1, intent: 'edit', ...patch };
+  const file = path.join(cwd, '.gsd', 'forge', 'file-locks', filelock.encodePath(raw) + '.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const bytes = JSON.stringify(meta);
+  fs.writeFileSync(file, bytes);
+  writeRunFile(cwd, 'legacy-run', JSON.stringify({ id: 'legacy-run', session_id: 'legacy-session', active: false, write_claim: null }));
+  return { file, bytes, raw };
+}
+function testRelativeFiveFieldRecovery() {
+  const cwd = temporary();
+  const kill = process.kill;
+  try {
+    const old = seedRelativeLegacy(cwd);
+    process.kill = () => { throw Error('relative recovery must not use PID or age as authority'); };
+    assert.strictEqual(filelock.acquireFileLock(cwd, old.raw, 'new', 'new').reason, 'legacy_lock_present');
+    assert.strictEqual(filelock.checkFileLock(cwd, old.raw).held, true);
+    assert.strictEqual(filelock.recoverFileLock(cwd, old.raw).reason, 'recovery_requires_stopped_writers');
+    const recovered = filelock.recoverFileLock(cwd, old.raw, { confirmStopped: true });
+    assert.strictEqual(recovered.ok, true, JSON.stringify(recovered));
+    assert.strictEqual(recovered.profile, 'relative-five-field');
+    assert.strictEqual(fs.readFileSync(recovered.evidence, 'utf8'), old.bytes);
+    assert.strictEqual(path.dirname(recovered.evidence), path.join(cwd, '.gsd', 'forge', 'file-lock-recovery'));
+    assert.deepStrictEqual(fs.readdirSync(path.dirname(old.file)), [], 'the unchanged resume empty gate needs a genuinely empty active directory');
+    const next = filelock.acquireFileLock(cwd, old.raw, 'new', 'new');
+    assert.strictEqual(next.acquired, true);
+    assert.strictEqual(next.release(), true);
+  } finally { process.kill = kill; remove(cwd); }
+}
+function testRelativeRecoveryRefusals() {
+  for (const variant of ['live', 'missing', 'invalid-registry', 'claim', 'session', 'filename-mismatch', 'extra-key', 'traversal', 'ambiguous', 'v2', 'raw-guard', 'canonical-guard', 'v2-guard', 'archive-symlink']) {
+    const cwd = temporary(); const mutex = require('./forge-lock.js'); let held;
+    try {
+      const raw = variant === 'traversal' ? 'src/../relative.txt' : 'src/relative.txt';
+      const old = seedRelativeLegacy(cwd, raw, variant === 'extra-key' ? { owner_token: 'not-the-five-field-profile' } : variant === 'filename-mismatch' ? { file_path: 'foreign.txt' } : {});
+      const registry = path.join(cwd, '.gsd', 'forge', 'runs', 'legacy-run.json');
+      if (variant === 'live') writeRunFile(cwd, 'legacy-run', JSON.stringify({ id: 'legacy-run', session_id: 'legacy-session', active: true }));
+      if (variant === 'missing') fs.unlinkSync(registry);
+      if (variant === 'invalid-registry') fs.writeFileSync(registry, '{broken');
+      if (variant === 'claim') writeRunFile(cwd, 'legacy-run', JSON.stringify({ id: 'legacy-run', session_id: 'legacy-session', active: false, write_claim: { paths: [] } }));
+      if (variant === 'session') writeRunFile(cwd, 'legacy-run', JSON.stringify({ id: 'legacy-run', session_id: 'foreign-session', active: false }));
+      if (variant === 'ambiguous') {
+        const alias = 'src\\relative.txt';
+        fs.writeFileSync(path.join(path.dirname(old.file), filelock.encodePath(alias) + '.json'), JSON.stringify({ ...JSON.parse(old.bytes), file_path: alias }));
+      }
+      if (variant === 'v2') fs.writeFileSync(filelock.lockPathFor(cwd, raw), '{}');
+      if (variant.endsWith('-guard')) {
+        const canonical = process.platform === 'win32' ? path.resolve(cwd, raw).toLowerCase() : path.resolve(cwd, raw);
+        const value = variant === 'raw-guard' ? raw : canonical;
+        const name = 'filelock-' + crypto.createHash('sha256').update(value).digest('hex') + (variant === 'v2-guard' ? '-v2' : '');
+        held = mutex.tryAcquireSync(cwd, name, { ttlMs: 5000, allowStaleRecovery: false });
+        assert(held);
+        const stale = { ...held.metadata, acquired_at: 1, renewed_at: 1 };
+        fs.writeFileSync(mutex.metaPath(held.lockDir), JSON.stringify(stale));
+      }
+      if (variant === 'archive-symlink') {
+        const outside = path.join(cwd, 'foreign-archive'); fs.mkdirSync(outside);
+        fs.symlinkSync(outside, path.join(cwd, '.gsd', 'forge', 'file-lock-recovery'), process.platform === 'win32' ? 'junction' : 'dir');
+      }
+      let result;
+      try { result = filelock.recoverFileLock(cwd, raw, { confirmStopped: true }); }
+      catch (error) { assert.strictEqual(variant, 'archive-symlink', error.stack); result = { ok: false }; }
+      assert.strictEqual(Boolean(result.ok), false, variant);
+      assert.strictEqual(fs.readFileSync(old.file, 'utf8'), old.bytes, variant);
+      if (held) assert.strictEqual(mutex.assertOwned(held), true, variant);
+    } finally { if (held) held.release(); remove(cwd); }
+  }
+}
+function testRelativeRecoveryDriftAndGuardLifetime() {
+  for (const variant of ['lock', 'registry', 'guards']) {
+    const cwd = temporary(), open = fs.openSync, close = fs.closeSync, rename = fs.renameSync;
+    const observed = new Map(); let injected = false, checked = false;
+    try {
+      const old = seedRelativeLegacy(cwd), registry = path.join(cwd, '.gsd', 'forge', 'runs', 'legacy-run.json');
+      fs.openSync = function(file, ...args) { const fd = open.call(this, file, ...args); observed.set(fd, String(file)); return fd; };
+      // Mutate only after the measured registry FD has closed. This avoids a
+      // Windows held-FD rename/write error being mistaken for a drift control.
+      fs.closeSync = function(fd) {
+        const file = observed.get(fd); observed.delete(fd); const result = close.call(this, fd);
+        if (!injected && file === registry && variant !== 'guards') {
+          injected = true;
+          fs.writeFileSync(variant === 'lock' ? old.file : registry, variant === 'lock' ? old.bytes + ' ' : JSON.stringify({ id: 'legacy-run', session_id: 'legacy-session', active: true }));
+        }
+        return result;
+      };
+      fs.renameSync = function(from, to) {
+        if (String(from) === old.file && variant === 'guards') {
+          const mutex = require('./forge-lock.js'), canonical = process.platform === 'win32' ? path.resolve(cwd, old.raw).toLowerCase() : path.resolve(cwd, old.raw);
+          const name = value => 'filelock-' + crypto.createHash('sha256').update(value).digest('hex');
+          for (const guard of [name(canonical), name(canonical) + '-v2', name(old.raw)]) {
+            assert.strictEqual(mutex.tryAcquireSync(cwd, guard, { allowStaleRecovery: false }), null, guard);
+          }
+          assert.throws(() => require('./forge-runs.js').update(cwd, 'legacy-run', { active: true }), { code: 'EOWNERSHIPBUSY' }, 'registry fence is held at archive');
+          checked = true;
+        }
+        return rename.call(this, from, to);
+      };
+      const result = filelock.recoverFileLock(cwd, old.raw, { confirmStopped: true });
+      assert.strictEqual(Boolean(result.ok), variant === 'guards', variant);
+      if (variant === 'guards') assert(checked, 'all three guards are held at archive');
+      else { assert(injected, 'the exact post-measurement drift was injected'); assert(fs.existsSync(old.file), 'changed lock remains active'); }
+    } finally { fs.openSync = open; fs.closeSync = close; fs.renameSync = rename; remove(cwd); }
+  }
+}
+
+function testRelativeAppearsAfterRecoveryRouteProbe() {
+  const cwd = temporary(), mutex = require('./forge-lock.js'), acquire = mutex.tryAcquireSync;
+  let injected = false, rawGuard, old;
+  try {
+    mutex.tryAcquireSync = function(root, name, options) {
+      const result = acquire.call(this, root, name, options);
+      if (!injected && result && root === cwd && name.endsWith('-v2')) {
+        injected = true;
+        old = seedRelativeLegacy(cwd);
+        writeRunFile(cwd, 'legacy-run', JSON.stringify({ id: 'legacy-run', session_id: 'legacy-session', active: true, write_claim: null }));
+        const rawName = 'filelock-' + crypto.createHash('sha256').update(old.raw).digest('hex');
+        rawGuard = acquire.call(this, cwd, rawName, { ttlMs: 5000, allowStaleRecovery: false });
+        assert(rawGuard);
+      }
+      return result;
+    };
+    const denied = filelock.recoverFileLock(cwd, 'src/relative.txt', { confirmStopped: true });
+    assert(injected, 'relative LIVE record appeared after initial routing probe');
+    assert.strictEqual(denied.ok, false);
+    assert.strictEqual(denied.reason, 'legacy_lock_changed');
+    assert.strictEqual(fs.readFileSync(old.file, 'utf8'), old.bytes);
+    assert.strictEqual(mutex.assertOwned(rawGuard), true);
+    assert.strictEqual(fs.existsSync(path.join(cwd, '.gsd', 'forge', 'file-lock-recovery')), false, 'no archive created');
+    mutex.tryAcquireSync = acquire;
+    assert.strictEqual(filelock.recoverFileLock(cwd, old.raw, { confirmStopped: true }).reason, 'guard_busy', 'dedicated retry still needs the raw guard');
+    rawGuard.release(); rawGuard = null;
+    assert.strictEqual(filelock.recoverFileLock(cwd, old.raw, { confirmStopped: true }).reason, 'holder_unmeasured_or_live', 'dedicated retry still measures the LIVE registry');
+    assert.strictEqual(fs.readFileSync(old.file, 'utf8'), old.bytes);
+  } finally { mutex.tryAcquireSync = acquire; if (rawGuard) rawGuard.release(); remove(cwd); }
+}
+
 function main() {
   console.log(`forge-filelock tests on ${process.platform}`);
+  testRelativeAppearsAfterRecoveryRouteProbe();
+  testRelativeFiveFieldRecovery();
+  testRelativeRecoveryRefusals();
+  testRelativeRecoveryDriftAndGuardLifetime();
   testOwnerScopedLifecycle();
   testNonOwnerAndABA();
   testFreshOtherOwnerIsBusy();

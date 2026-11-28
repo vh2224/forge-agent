@@ -202,8 +202,9 @@ process.stdin.on('data', chunk => {
       // the message, code, diagnostic or census. stderr goes out first and the turn
       // after a short delay, so the tail is already held when the session fails.
       if (mode.startsWith('client-upgrade-')) {
-        const text = "The 'fixture-model-any' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again. " + PROVIDER_SENTINEL;
-        if (mode === 'client-upgrade-rpc') {
+        const sentence = "The 'fixture-model-any' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again. " + PROVIDER_SENTINEL;
+        const text = mode.includes('-json') ? JSON.stringify({error:{message:sentence,type:'invalid_request_error',code:null}}) : sentence;
+        if (mode === 'client-upgrade-rpc' || mode === 'client-upgrade-json-rpc') {
           send({ id: message.id, error: { code: 400, message: text, data: { privatePayload: PROVIDER_SENTINEL } } });
           continue;
         }
@@ -971,13 +972,16 @@ async function testClientUpgradeRequired(mock,dir){
   const {explicitCodexUpgrade,APPSERVER_TERMINAL_CODES,APPSERVER_TERMINAL_MESSAGES}=require('./forge-appserver-client');
   const sentence="The 'arbitrary-model-token' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again.";
   assert(explicitCodexUpgrade({message:sentence}));assert(explicitCodexUpgrade({additionalDetails:sentence}));
+  const envelope=JSON.stringify({error:{message:sentence,type:'invalid_request_error',code:null}});
+  assert(explicitCodexUpgrade({message:envelope}));assert(explicitCodexUpgrade({additionalDetails:envelope}));
+  for(const message of['{',JSON.stringify([{error:{message:sentence}}]),JSON.stringify({error:{message:7}}),JSON.stringify({error:[]}),JSON.stringify({message:sentence}),JSON.stringify({other:{message:sentence}}),JSON.stringify({error:{message:'Example: '+sentence}}),JSON.stringify({error:{message:'Model metadata unavailable, using default values.'}}),JSON.stringify({error:{message:sentence,padding:'x'.repeat(8192)}}),envelope+' trailing'])assert.strictEqual(explicitCodexUpgrade({message}),false);
   for(const error of[{},null,{message:'Model metadata unavailable, using default values.'},{codexErrorInfo:'modelNotFound'},{message:'Example: '+sentence},{message:{toString(){throw Error('must not coerce');}}},{message:sentence+'x'.repeat(8193)}])assert.strictEqual(explicitCodexUpgrade(error),false);
   let getters=0;const accessor={};Object.defineProperty(accessor,'message',{get(){getters++;return sentence;}});assert.strictEqual(explicitCodexUpgrade(accessor),false);assert.strictEqual(getters,0);
-  for(const mode of['client-upgrade-message','client-upgrade-details','client-upgrade-rpc']){
+  for(const mode of['client-upgrade-message','client-upgrade-details','client-upgrade-rpc','client-upgrade-json','client-upgrade-json-rpc']){
     const error=await typedFailure(mock,dir,mode);
     assert.strictEqual(error.code,APPSERVER_TERMINAL_CODES.CLIENT_UPGRADE_REQUIRED);assert.strictEqual(error.message,APPSERVER_TERMINAL_MESSAGES.CLIENT_UPGRADE_REQUIRED);
     assert.strictEqual(error.diagnostic.reason,'codex-client-upgrade-required');assertNoProviderText(mode,error);assert(!Object.hasOwn(error,'rpcError'),'typed RPC verdict retains no provider object');
-    if(mode!=='client-upgrade-rpc')assert(error.turnCompletions.records.some(row=>row.terminalCode==='codex-client-upgrade-required'));
+    if(mode!=='client-upgrade-rpc'&&mode!=='client-upgrade-json-rpc')assert(error.turnCompletions.records.some(row=>row.terminalCode==='codex-client-upgrade-required'));
   }
   for(const mode of['client-upgrade-foreign','client-upgrade-interrupted']){
     const error=await typedFailure(mock,dir,mode);assert.strictEqual(error.code,undefined,'only the matching failed turn is classified');assertNoProviderText(mode,error);

@@ -108,9 +108,21 @@ function explicitCodexUpgrade(error) {
   if (!error || typeof error !== 'object') return false;
   return ['message', 'additionalDetails'].some(key => {
     const field = Object.getOwnPropertyDescriptor(error, key);
-    return field && Object.hasOwn(field, 'value') && typeof field.value === 'string'
-      && field.value.length <= 8192
-      && /^The '[^'\r\n]{1,200}' model requires a newer version of Codex\.(?:\s|$)/.test(field.value);
+    if (!field || !Object.hasOwn(field, 'value') || typeof field.value !== 'string'
+      || field.value.length > 8192) return false;
+    const matches = value => typeof value === 'string' && value.length <= 8192
+      && /^The '[^'\r\n]{1,200}' model requires a newer version of Codex\.(?:\s|$)/.test(value);
+    if (matches(field.value)) return true;
+    if (!field.value.trimStart().startsWith('{')) return false;
+    try {
+      const envelope = JSON.parse(field.value);
+      if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) return false;
+      const inner = Object.getOwnPropertyDescriptor(envelope, 'error');
+      if (!inner || !Object.hasOwn(inner, 'value') || !inner.value
+        || typeof inner.value !== 'object' || Array.isArray(inner.value)) return false;
+      const message = Object.getOwnPropertyDescriptor(inner.value, 'message');
+      return !!message && Object.hasOwn(message, 'value') && matches(message.value);
+    } catch (_) { return false; }
   });
 }
 // Only a `failed` turn can carry a terminal route failure; `interrupted` keeps its
