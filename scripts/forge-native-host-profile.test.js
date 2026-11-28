@@ -61,7 +61,7 @@ try{
  const invalidPrelude=new Error('TEST_INVALID_PROFILE');prow.invalid=invalidPrelude;assert.throws(()=>copy.exports.assertActivityAdmission(ph,differentRequest),e=>e===invalidPrelude);assert.throws(()=>copy.exports.assertSynchronousReadBinding(ph,pc,rh),e=>e===invalidPrelude);assert.equal(delegated,1);copy.require=previousRequire;
 
  assert.equal(crypto.createHash('sha256').update(fs.readFileSync(filename)).digest('hex'),crypto.createHash('sha256').update(sourceBytes).digest('hex'),'private DATA inspection leaves actual Source untouched');
- assert.equal(profile.prepareTimeoutCapMs(),600000,'initial prepare protocol cap matches the documented Bash maximum; resolved lower limits remain required');
+ assert.equal(profile.prepareTimeoutCapMs(),1800000,'prepare protocol remains bounded; resolved unit and effective Bash limits remain required');
  assert.equal(profile.LIVE_PROFILE_ID,'claude-agent-files-foreground-v1');
  assert.throws(()=>profile.assertInvocationIntent(Object.freeze({}),{request:{}}),e=>e.code==='native-host-profile-required');
  assert.throws(()=>profile.assertSealedIntent(Object.freeze({})),e=>e.code==='native-host-profile-required');

@@ -586,23 +586,23 @@
     },
     "scripts/forge-native-host-bridge.test.js": {
       "before": null,
-      "after": "76a93435858d63571de54ab0fcaf9e3a39043af45514d32beeed7f3455b70e4e",
+      "after": "378a39f1e206bde90b61b278b49ccf489c68ba182141b05b78968fc63cf2d348",
       "attributed_before": null,
-      "attributed_after": "76a93435858d63571de54ab0fcaf9e3a39043af45514d32beeed7f3455b70e4e",
+      "attributed_after": "378a39f1e206bde90b61b278b49ccf489c68ba182141b05b78968fc63cf2d348",
       "before_gzip_base64": null
     },
     "scripts/forge-native-host-profile.js": {
       "before": null,
-      "after": "3be2e076d4eeabc60758afbca560968b0977b5ddb40c7cc9c6700d4daccd45f9",
+      "after": "7e8c3c254ff2f44e5b3c6e53394b46735e0c565059477ca65735a40bdb61b39b",
       "attributed_before": null,
-      "attributed_after": "3be2e076d4eeabc60758afbca560968b0977b5ddb40c7cc9c6700d4daccd45f9",
+      "attributed_after": "7e8c3c254ff2f44e5b3c6e53394b46735e0c565059477ca65735a40bdb61b39b",
       "before_gzip_base64": null
     },
     "scripts/forge-native-host-profile.test.js": {
       "before": null,
-      "after": "b26fc497ef4b5c24068c4f71f9d989ef330368a60a4b1c2142cf11098091e852",
+      "after": "927cf609d9d16365c6e2d43d57a8aa3f2c890422af7e9dc4e40befe1a8c55219",
       "attributed_before": null,
-      "attributed_after": "b26fc497ef4b5c24068c4f71f9d989ef330368a60a4b1c2142cf11098091e852",
+      "attributed_after": "927cf609d9d16365c6e2d43d57a8aa3f2c890422af7e9dc4e40befe1a8c55219",
       "before_gzip_base64": null
     },
     "scripts/forge-native-host-request.js": {
@@ -8466,7 +8466,7 @@
   },
   "provenance": {
     "logical_after_inventory_excludes_current_own4": true,
-    "physical_after_inventory_sha256": "f9242ba3d425cd7c779b03ec2ca9538fd8b1e11f8914c240fbbb0fbc5692b773",
+    "physical_after_inventory_sha256": "cd4d3e90bf476677456a3dde863bb4a2d11762f46596485242a30c2f1852d353",
     "current_own4_exclusion": {
       "schema_version": 1,
       "files": {
@@ -8475,11 +8475,11 @@
           "bytes": 3577
         },
         "scripts/fixtures/issue-463/distribution-delta.json": {
-          "sha256": "df2624e5a9d75f5fbc8699d382ed4c48974e60d882fa5b9bf6ebfc258e38e087",
+          "sha256": "06293e0ba75bf0967b1b06fa0904c0365801ca340aa609eb8bb2ce7e6b61cb3e",
           "bytes": 4388911
         },
         "scripts/fixtures/issue-463/distribution.cjs": {
-          "sha256": "32eae656bb8dad3a9e4f6bc2d9b9cae0fa2ff9a8050ab7b4835149207a8595d8",
+          "sha256": "1885f8617fdf63ab08cc9732dbd6a593a6597be879090e8efb9e2fb2a1788920",
           "bytes": 20163
         },
         "scripts/forge-issue-463-distribution.test.js": {
@@ -8491,8 +8491,8 @@
     "baseline_version": "4.52.5",
     "baseline_pin_sha256": "6b90f5919d91f86a34d63b09cc7eb752380fe7effa13f63d9932408927ee6938",
     "before_inventory_sha256": "69a97ad785244aec822a5ba9406f9e6dfaf08f38aaf4a9edde49160370200516",
-    "after_inventory_sha256": "630748502d28cabb0b585e4bbf4932261d4efad84f06e96520985aa34fe9aafc",
-    "render_proof_sha256": "c373a1ab2108ef9fa1f673e224a66013f172948d0dabe8c7ca73774514c42b34",
+    "after_inventory_sha256": "0a765b93f0e0c4f7b4c850e506ad72526a8e6f06276e7b45461a69d93f4368e8",
+    "render_proof_sha256": "430467a0d137b21ec1ee443e84c522fff4e7a2c0df0b983f62898d4bc70b08c3",
     "artifact_inventory_sha256": "fe920f8d25e61fa7b09536d5c9c1f2aaaf1ef13bcc4db0af8c11719276ede5ec",
     "surface_sha256": "cbac9d055aec11abb50e0b9a287932550e141e00da28466575499d94c2aa45b7",
     "rendered_changes": 12,

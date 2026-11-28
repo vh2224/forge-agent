@@ -3,7 +3,7 @@
 // Actual Claude foreground/descendant semantics remain unknown and refuse.
 const crypto=require('node:crypto'),path=require('node:path');
 const profiles=new WeakMap(),PROFILE_ID='claude-agent-foreground-v1',FIXTURE_PROFILE_ID='forge-native463-fixture-foreground-v1',MAX_INPUT=2*1024*1024,METADATA_BYTES=2048;
-const INITIAL_PREPARE_TIMEOUT_CAP_MS=600000;
+const INITIAL_PREPARE_TIMEOUT_CAP_MS=1800000;
 function prepareTimeoutCapMs(){return INITIAL_PREPARE_TIMEOUT_CAP_MS;}
 function fail(code){throw Object.assign(new Error(code),{code,stage:'native-host-profile'});}
 function plain(value){return value!==null&&typeof value==='object'&&Object.getPrototypeOf(value)===Object.prototype&&Reflect.ownKeys(value).every(k=>typeof k==='string')&&Object.values(Object.getOwnPropertyDescriptors(value)).every(d=>Object.hasOwn(d,'value')&&d.enumerable);}

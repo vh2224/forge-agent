@@ -94,6 +94,19 @@ async function waitReady(attempt){
 // Data-only access to ORIGINAL private normalizers/policy. No channel, profile,
 // witness factory, mock producer or approved handle is exposed or used here.
 function readonlyBridgeData(){const Module=require('node:module'),filename=require.resolve('./forge-native-host-bridge'),raw=fs.readFileSync(filename);assert(raw.length<2*1024*1024);const copy=new Module(filename+'#readonly-data',module);copy.filename=filename;copy.paths=Module._nodeModulePaths(path.dirname(filename));copy._compile(raw.toString('utf8').replace(/^\uFEFF/,'').replace(/^#![^\n]*(?:\n|$)/,'')+'\nmodule.exports.__readonlyData={normalizeReference,liveRuntimeHome,liveHistoricalStatusAllowed,safeError,validateInitialPrepareCommand,assertClosedPrepareShell,assertNativePreSettings,validateInitialPreparePost,parseObservedPrepareBody,canonicalPrepareSessionExports,canonicalPrepareSessionValues,checkedHookCarrier,assertOriginalHookSession,validateObservedPrepareSnapshot,calculatePrepareBudget,assertInitialPrepareTimeout,unverifiedPrechallengeRefusal,macLive,checkLiveMac};\n',filename);assert.equal(hash(fs.readFileSync(filename)),hash(raw));return copy.exports.__readonlyData;}
+function assertPrepareBudgetRegressions(data=readonlyBridgeData()){
+ const cap=require('./forge-native-host-profile').prepareTimeoutCapMs();assert.equal(cap,1800000);
+ assert.equal(data.calculatePrepareBudget(1800000,{}).prepare_timeout_ms,600000);
+ assert.equal(data.calculatePrepareBudget(90000,{}).prepare_timeout_ms,90000);
+ assert.equal(data.calculatePrepareBudget(1800000,{BASH_DEFAULT_TIMEOUT_MS:'120000',BASH_MAX_TIMEOUT_MS:'180000'}).prepare_timeout_ms,180000,'applied lower Bash cap is preserved');
+ assert.equal(data.calculatePrepareBudget(1800000,{BASH_DEFAULT_TIMEOUT_MS:'60000',BASH_MAX_TIMEOUT_MS:'90000'}).prepare_timeout_ms,90000,'both applied lower limits are preserved');
+ assert.equal(data.calculatePrepareBudget(1800000,{BASH_MAX_TIMEOUT_MS:'2400000'}).prepare_timeout_ms,cap,'larger host allowance cannot exceed the profile cap');
+ assert.equal(data.calculatePrepareBudget(1800000,{BASH_MAX_TIMEOUT_MS:'1.2e5',BASH_DEFAULT_TIMEOUT_MS:'240_000'}).prepare_timeout_ms,240000);
+ for(const raw of ['0','-1','Infinity','2;writer','1__2'])assert.throws(()=>data.calculatePrepareBudget(1800000,{BASH_MAX_TIMEOUT_MS:raw}),e=>e.code==='native-host-prepare-bash-timeout-invalid');
+ for(const value of [90000,180000,240000,cap])assert.doesNotThrow(()=>data.assertInitialPrepareTimeout(value,value));for(const raw of [undefined,'1800000','600000',0,600000,1799999,1800001])assert.throws(()=>data.assertInitialPrepareTimeout(raw,cap),e=>e.code==='native-host-original-prepare-timeout-mismatch');
+ assert.equal(data.calculatePrepareBudget(1800000,{BASH_MAX_TIMEOUT_MS:'1800000'}).prepare_timeout_ms,1800000,'real host allowance and canonical unit ceiling permit the bounded prepare');
+ assert.equal(data.calculatePrepareBudget(90000,{BASH_MAX_TIMEOUT_MS:'1800000'}).prepare_timeout_ms,90000,'larger host allowance does not enlarge a smaller unit ceiling');
+}
 function assertLiveDataRegressions(ref,request){const data=readonlyBridgeData();
  // Pure DATA controls exercise the actual comparison helpers, not originalHook,
  // an OS producer, enrollment, admission, HMAC, Agent or a genuine SDK session.
@@ -106,16 +119,8 @@ function assertLiveDataRegressions(ref,request){const data=readonlyBridgeData();
  for(const bad of [undefined,'',carrierSession+'\n','x'.repeat(257)])assert.throws(()=>data.checkedHookCarrier(bad,carrierBootstrap,{}),e=>e.code==='native-host-live-hook-binding');
  for(const argv of [['claude.exe'],['claude.exe','--session-id',carrierSession],['claude.exe','--session-id='+carrierSession]])assert.doesNotThrow(()=>data.assertOriginalHookSession(carrierSession,argv));
  for(const argv of [['claude.exe','--session-id'],['claude.exe','--session-id','foreign'],['claude.exe','--session-id=foreign'],['claude.exe','--session-id',carrierSession,'--session-id='+carrierSession]])assert.throws(()=>data.assertOriginalHookSession(carrierSession,argv),e=>e.code==='native-host-live-hook-binding');
- const cap=require('./forge-native-host-profile').prepareTimeoutCapMs();assert.equal(cap,600000);
  const combined=require('./forge-native-host-bridge').assertHostObservationAndIngress;assert.equal(typeof combined,'function');assert.throws(()=>combined(Object.freeze({}),Object.freeze({})),e=>e.code==='native-host-host-witness-required');
- assert.equal(data.calculatePrepareBudget(1800000,{}).prepare_timeout_ms,cap);
- assert.equal(data.calculatePrepareBudget(90000,{}).prepare_timeout_ms,90000);
- assert.equal(data.calculatePrepareBudget(1800000,{BASH_DEFAULT_TIMEOUT_MS:'120000',BASH_MAX_TIMEOUT_MS:'180000'}).prepare_timeout_ms,180000,'applied lower Bash cap is preserved');
- assert.equal(data.calculatePrepareBudget(1800000,{BASH_DEFAULT_TIMEOUT_MS:'60000',BASH_MAX_TIMEOUT_MS:'90000'}).prepare_timeout_ms,90000,'both applied lower limits are preserved');
- assert.equal(data.calculatePrepareBudget(1800000,{BASH_MAX_TIMEOUT_MS:'900000'}).prepare_timeout_ms,cap,'larger host allowance cannot exceed the profile cap');
- assert.equal(data.calculatePrepareBudget(1800000,{BASH_MAX_TIMEOUT_MS:'1.2e5',BASH_DEFAULT_TIMEOUT_MS:'240_000'}).prepare_timeout_ms,240000);
- for(const raw of ['0','-1','Infinity','2;writer','1__2'])assert.throws(()=>data.calculatePrepareBudget(1800000,{BASH_MAX_TIMEOUT_MS:raw}),e=>e.code==='native-host-prepare-bash-timeout-invalid');
- for(const value of [90000,180000,240000,cap])assert.doesNotThrow(()=>data.assertInitialPrepareTimeout(value,value));for(const raw of [undefined,'600000','300000',0,300000,599999,600001])assert.throws(()=>data.assertInitialPrepareTimeout(raw,cap),e=>e.code==='native-host-original-prepare-timeout-mismatch');
+ assertPrepareBudgetRegressions(data);
  const quoted=value=>'"'+value.replace(/\\/g,'/')+'"',command=quoted(process.execPath)+' '+quoted(require.resolve('./forge-native-host-bridge'))+' prepare --input '+quoted(request.contextFile);const selected=data.validateInitialPrepareCommand(command);assert.equal(path.resolve(selected.nodeToken),path.resolve(process.execPath));assert.equal(path.resolve(selected.script),require.resolve('./forge-native-host-bridge'));assert.equal(path.resolve(selected.input),path.resolve(request.contextFile));assert.equal(data.validateInitialPrepareCommand('git status'),null);
  for(const bad of [command+'; echo writer',command+' | cat',command+' > out','ENV=value '+command,'node '+quoted(require.resolve('./forge-native-host-bridge'))+' prepare --input '+quoted(request.contextFile),command.replace(quoted(request.contextFile),'relative.json')])assert.throws(()=>data.validateInitialPrepareCommand(bad),e=>e.code==='native-host-initial-prepare-command');
  const shell='"C:/fixture/bash.exe" -lc "'+command.replace(/"/g,'\\"')+'"',proof={input:request.contextFile,node_exe:process.execPath};assert.doesNotThrow(()=>data.assertClosedPrepareShell(shell,proof));for(const bad of ['"C:/fixture/bash.exe" -lc "'+command.replace(/"/g,'\\"')+'; echo writer"','"C:/fixture/bash.exe" /tmp/unknown-script.sh'])assert.throws(()=>data.assertClosedPrepareShell(bad,proof));
@@ -412,7 +417,7 @@ async function main({partialPublication=false,manifestOnly=false}={}){
     if(manifestOnly){await assertAutoManifestStart(f,observationFile);return;}
     const ownerDigest=()=>{const rows=[];function walk(dir){for(const name of fs.readdirSync(dir).sort()){const file=path.join(dir,name),st=fs.lstatSync(file);assert(!st.isSymbolicLink());if(st.isDirectory())walk(file);else rows.push([path.relative(f.owner,file),hash(fs.readFileSync(file))]);}}walk(f.owner);return digest(rows);};
     const beforeBudget=ownerDigest(),budget=await cli('prepare-budget',['--input',input],{env:{...process.env,BASH_DEFAULT_TIMEOUT_MS:'240_000',BASH_MAX_TIMEOUT_MS:'120000'}});
-    assert.equal(budget.value.kind,'native-host-prepare-budget');assert.equal(budget.value.prepare_timeout_ms,240000);assert.equal(budget.value.profile_cap_ms,600000);assert.equal(budget.value.admission,false);assert.equal(ownerDigest(),beforeBudget,'budget lookup creates no run/claim/BEGIN/publication/spool or owner metadata');
+    assert.equal(budget.value.kind,'native-host-prepare-budget');assert.equal(budget.value.prepare_timeout_ms,240000);assert.equal(budget.value.profile_cap_ms,1800000);assert.equal(budget.value.admission,false);assert.equal(ownerDigest(),beforeBudget,'budget lookup creates no run/claim/BEGIN/publication/spool or owner metadata');
     const malformedBudget=await cli('prepare-budget',['--input',input],{expect:1,env:{...process.env,BASH_MAX_TIMEOUT_MS:'unknown'}});assert.equal(JSON.parse(malformedBudget.stderr.toString().trim()).code,'native-host-prepare-bash-timeout-invalid');assert.equal(ownerDigest(),beforeBudget);
     // No genuine SessionStart OS bootstrap exists in this isolated fixture.
     const noBootstrap=await cli('prepare',['--input',input],{expect:1});
@@ -570,6 +575,7 @@ if(require.main===module){
   const kind=process.argv[2],file=process.argv[3];
   if(kind==='--fixture-worker')fixtureWorker(JSON.parse(fs.readFileSync(file,'utf8')));
   else if(kind==='--manifest-spool-only')assertManifestSpoolBounds().then(()=>main({manifestOnly:true})).catch(e=>{console.error(e.code||e.message);process.exitCode=1;});
+  else if(kind==='--prepare-budget-only')assertPrepareBudgetRegressions();
   else if(kind==='--synchronous-prelude-only')assertSynchronousPreludeWiring().catch(e=>{console.error(e.code||'prelude-data-failed');process.exitCode=1;});
   else if(kind==='--fixture-host')fixtureHost(JSON.parse(fs.readFileSync(file,'utf8'))).catch(e=>{console.error(e.code||e.message);process.exitCode=1;});
   else runBridgeCohort(process.argv.slice(2)).catch(e=>{const code=typeof e.code==='string'&&/^[A-Za-z0-9_.-]{1,160}$/.test(e.code)?e.code:'native463-fixture-failed';const testSourceError=fixtureTestSourceError(e);console.error(JSON.stringify({code,...(testSourceError?{test_source_error:testSourceError}:{}),...(e.native463_diagnostic?{diagnostic:e.native463_diagnostic}:{})}));process.exitCode=1;});
