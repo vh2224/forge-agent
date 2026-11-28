@@ -240,10 +240,17 @@ function bindLinkedRequest(request, options) {
   if (!entry.roots.some(root => canonical(root.path) === canonical(request.cwd))) fail('linked-entry-roots-mismatch');
   if (request.execution_contract && request.execution_contract.code_roots.some(root => !entry.roots.some(bound => bound.root_id === root.id
     && canonical(bound.path) === canonical(root.path)))) fail('linked-entry-roots-mismatch');
-  const handle = Object.freeze({});
   const owner = fs.realpathSync(request.contextRoot || request.cwd);
-  linkedEntries.set(handle, { ...entry, owner: process.platform === 'win32' ? owner.toLowerCase() : owner,
-    host_runtime: begin.host_runtime, milestone: begin.milestone });
+  const current = { ...entry, owner: process.platform === 'win32' ? owner.toLowerCase() : owner,
+    host_runtime: begin.host_runtime, milestone: begin.milestone };
+  if (request.linkedEntryBinding !== undefined) {
+    const held = linkedEntries.get(request.linkedEntryBinding);
+    if (!held || digest(held) !== digest(current)) fail('linked-entry-binding-required');
+    requestIdentity(canonicalRequest(request));
+    return request;
+  }
+  const handle = Object.freeze({});
+  linkedEntries.set(handle, current);
   const bound = { ...request, linkedEntryBinding: handle };
   requestIdentity(canonicalRequest(bound));
   return bound;

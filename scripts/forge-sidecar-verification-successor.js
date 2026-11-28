@@ -111,19 +111,22 @@ function create({request,timeoutMs,reference,assertAuthority,assertBoundary,atte
     if(fs.existsSync(path.join(primary.path,...prefix.split('/').filter(Boolean))))fail('verification-successor-scratch-present');
     // Only the measured delta is projected; the worker's own declarations stay as returned.
     const projected={...returned.result,files_changed:kept};
+    const codeState=execution.replayState(r.cwd,contract);
     const verifiedFiles=execution.verifyResult(r.cwd,{execution_contract:contract,claims,snapshots:state.repos},projected);
+    if(roots.digest(execution.replayState(r.cwd,contract))!==roots.digest(codeState))fail('verification-successor-source-changed');
     const removedPaths=removed.map(entryPath).sort();
     const challenge=Object.freeze({dispatch_id:r.dispatchId,parent_receipt_sha256:hash(parentBytes),returned_response_sha256:hash(returnedBytes),
       scratch_prefix:prefix,removed_entries:removedPaths.length,removed_entries_sha256:hash(JSON.stringify(removedPaths)),
       claim_paths:Object.freeze(claims.map(claim=>String(claim.root_id||primary.id)+'::'+String(claim.path))),verified_files_sha256:roots.digest(verifiedFiles)});
     const approval=scratchReconciliation.approveScratch(challenge);
     if(approval?.approved!==true||typeof approval.reference!=='string'||!approval.reference.trim()||approval.reference.length>512)fail('verification-successor-scratch-approval-required');
+    if(roots.digest(execution.replayState(r.cwd,contract))!==roots.digest(codeState))fail('verification-successor-source-changed');
     scratchEvidence={kind:'operator-scratch-outside-claim-reconciliation',reference:approval.reference,parent_failure_reason_code:'execution-outside-claim',
       returned_response_sha256:challenge.returned_response_sha256,scratch_prefix:prefix,removed_entries:challenge.removed_entries,
       removed_entries_sha256:challenge.removed_entries_sha256,verified_files_sha256:challenge.verified_files_sha256};
     const {failure,...base}=structuredClone(parent);
     saved={plan_sha256:hash(plan),verified_files:verifiedFiles,protected_owner:structuredClone(baseline.protected_owner),
-      protected_roots:structuredClone(baseline.protected_roots),code_state:execution.replayState(r.cwd,contract)};
+      protected_roots:structuredClone(baseline.protected_roots),code_state:codeState};
     scratchSeed={...base,phase:'executed',provider_called:true,
       final_evidence:failure.final_evidence?{...failure.final_evidence,stage:'returned',provider_called:true}:base.final_evidence||null,
       milestone_delivery:saved,

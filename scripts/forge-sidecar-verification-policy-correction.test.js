@@ -197,6 +197,24 @@ async function scratchOutsideClaim(){
     fs.writeFileSync(returnedFile,Buffer.concat([returnedBytes,Buffer.from(' ')]));
     assert.throws(()=>create(),/returned-response-changed/);
     fs.writeFileSync(returnedFile,returnedBytes);
+    // The approval must bind the exact tree already censused and displayed.
+    // A callback cannot promote its own Source writes into a fresh baseline.
+    const duringApprovalStray=path.join(primary.path,'stray-during-scratch-approval.txt');
+    try{
+      assert.throws(()=>create({scratchReconciliation:{prefix:'.worker-temp/',approveScratch:challenge=>{
+        const accepted=approve(challenge);
+        fs.writeFileSync(duringApprovalStray,'outside claim during approval\n');
+        return accepted;
+      }}}),{code:'verification-successor-source-changed'});
+    }finally{if(fs.existsSync(duringApprovalStray))fs.unlinkSync(duringApprovalStray);}
+    const duringApprovalClaimed=path.join(primary.path,'same.txt'),beforeClaimed=fs.readFileSync(duringApprovalClaimed);
+    try{
+      assert.throws(()=>create({scratchReconciliation:{prefix:'.worker-temp/',approveScratch:challenge=>{
+        const accepted=approve(challenge);
+        fs.writeFileSync(duringApprovalClaimed,'claimed bytes changed during approval\n');
+        return accepted;
+      }}}),{code:'verification-successor-source-changed'});
+    }finally{fs.writeFileSync(duringApprovalClaimed,beforeClaimed);}
     console.log('PASS scratch reconciliation refuses present/foreign/claimed scratch, mixing, missing approval, stray deltas and a changed response');
     // The host hook kept appending to an evidence journal and the operator wrote a note.
     const note='.gsd/HANDOFF-scratch.md';fs.writeFileSync(path.join(f.owner,note),'scratch removed by the owner\n');
