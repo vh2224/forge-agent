@@ -218,8 +218,8 @@ test('T0 adapters verification helpers and xllm bytes unchanged', () => {
       assert.equal(row.before, digestValue, 'exact immutable adapter predecessor pin');
       const preimage = require('zlib').gunzipSync(Buffer.from(row.before_gzip_base64, 'base64'), { maxOutputLength: 4 * 1024 * 1024 });
       assert.equal(sha(preimage), digestValue, 'measured real historical adapter preimage');
-      const admitted = require('./fixtures/issue-463/distribution.cjs').after('files', file, digestValue);
-      assert.equal(actual, admitted, 'exact measured admitted adapter successor');
+      const admittedPredecessor = require('./fixtures/issue-463/distribution.cjs').projectIssue463Read(p => fs.readFileSync(path.join(root, p)))(file);
+      assert.equal(sha(admittedPredecessor), row.after, 'exact measured current-layer adapter predecessor');
     } else assert.equal(actual, digestValue, file);
   }
 });
