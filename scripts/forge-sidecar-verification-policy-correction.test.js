@@ -140,5 +140,103 @@ async function withOwnerDelta(){
     console.log('PASS owner reconciliation accepts the approved corrected plan and composes with the correction successor');
   }finally{if(previousThread===undefined)delete process.env.CODEX_THREAD_ID;else process.env.CODEX_THREAD_ID=previousThread;xllm.runExecute=original;f.cleanup();}
 }
-async function all(){await main();await withOwnerDelta();}
+// Issue 510: the worker finished (`done`) but left attempt-attributable scratch
+// (its own TEMP caches) inside CODE_DIR, so verifyResult refused the retained
+// response with execution-outside-claim. After the owner removes the scratch, an
+// approved scratch-reconciliation successor publishes that same response through
+// the normal sealed verification and publication, without a second inference.
+async function scratchOutsideClaim(){
+  const f=await require('./forge-native-recovery-delivery.test').fixture();
+  const original=xllm.runExecute,previousThread=process.env.CODEX_THREAD_ID;
+  const activity=require('./forge-protected-owner-activity'),questions=require('./forge-pending-questions'),roots=require('./forge-code-roots');
+  try{
+    process.env.CODEX_THREAD_ID='fixture-sidecar-scratch-outside-claim';
+    require('./forge-runs').update(f.owner,f.request.runId,{session_id:process.env.CODEX_THREAD_ID,host_runtime:'codex',owner_session_source:'CODEX_THREAD_ID',active:true});
+    const r=f.request;fs.unlinkSync(f.receiptFile);delete r.verification.commandsByRoot;
+    const primary=f.contract.code_roots.find(row=>row.id===f.contract.primary_root_id);
+    const scratchDir=path.join(primary.path,'.worker-temp'),scratchFiles=['.worker-temp/node-compile-cache/a1','.worker-temp/tsx-user/b2'];
+    let calls=0;
+    xllm.runExecute=async()=>{calls++;
+      for(const row of f.contract.code_roots)fs.writeFileSync(path.join(row.path,'same.txt'),'after\n');
+      for(const rel of scratchFiles){fs.mkdirSync(path.dirname(path.join(primary.path,rel)),{recursive:true});fs.writeFileSync(path.join(primary.path,rel),'cache\n');}
+      const base=f.result();
+      return {...base,files_changed:[...base.files_changed,...scratchFiles.map(rel=>({status:'A',path:rel,root_id:primary.id}))]};};
+    await assert.rejects(side.runUnitSidecar(r),{code:'execution-outside-claim'});
+    const parentBytes=fs.readFileSync(f.receiptFile),parent=JSON.parse(parentBytes),outputBytes=fs.readFileSync(r.resultFile);
+    const returnedFile=r.resultFile+'.returned.json',returnedBytes=fs.readFileSync(returnedFile);
+    assert.equal(calls,1);assert.equal(parent.phase,'failed');assert.equal(parent.failure.reason_code,'execution-outside-claim');
+    assert.equal(parent.failure.returned_response.sha256,hash(returnedBytes));
+    // The failed receipt neither replays nor relaunches the provider.
+    await assert.rejects(side.runUnitSidecar(r),{code:'execution-outside-claim'});assert.equal(calls,1);
+    console.log('PASS worker scratch outside the claim retains a valid done response behind a failed receipt');
+    let approvals=0;const approve=challenge=>{approvals++;
+      assert.equal(challenge.scratch_prefix,'.worker-temp/');assert.equal(challenge.removed_entries,scratchFiles.length);
+      assert.equal(challenge.returned_response_sha256,hash(returnedBytes));
+      assert.deepEqual(challenge.claim_paths,f.contract.code_roots.map(row=>row.id+'::same.txt'));
+      return {approved:true,reference:'conversation:fixture-operator-approved-scratch'};};
+    const create=overrides=>successor.create({request:r,reference:'conversation:fixture-scratch-reconciliation',
+      assertAuthority:f.assertBoundary,assertBoundary:f.assertBoundary,attestStoppedWriter:()=>true,
+      scratchReconciliation:{prefix:'.worker-temp/',approveScratch:approve},...overrides});
+    // Still present: the owner has not removed the scratch yet.
+    assert.throws(()=>create(),/scratch-present/);
+    fs.rmSync(scratchDir,{recursive:true,force:true});
+    assert.throws(()=>create({scratchReconciliation:{prefix:'.worker-temp/'}}),/scratch-proof-required/);
+    assert.throws(()=>create({timeoutMs:600000}),/policy-mixing/);
+    assert.throws(()=>create({attestFailure:()=>({observed:true})}),/policy-mixing/);
+    assert.throws(()=>create({scratchReconciliation:{prefix:'../outside/',approveScratch:approve}}),/scratch-prefix-invalid/);
+    assert.throws(()=>create({scratchReconciliation:{prefix:'.gsd/',approveScratch:approve}}),/scratch-prefix-invalid/);
+    assert.throws(()=>create({scratchReconciliation:{prefix:'same.txt/',approveScratch:approve}}),/scratch-prefix-claimed/);
+    assert.throws(()=>create({scratchReconciliation:{prefix:'.other-temp/',approveScratch:approve}}),/scratch-unchanged/);
+    assert.throws(()=>create({scratchReconciliation:{prefix:'.worker-temp/node-compile-cache/',approveScratch:approve}}),/scratch-outside-prefix/);
+    assert.throws(()=>create({scratchReconciliation:{prefix:'.worker-temp/',approveScratch:()=>({approved:false})}}),/scratch-approval-required/);
+    // An unrelated new file outside the claim is still caught by the live census.
+    fs.writeFileSync(path.join(primary.path,'stray.txt'),'stray\n');
+    assert.throws(()=>create(),/execution-outside-claim/);
+    fs.unlinkSync(path.join(primary.path,'stray.txt'));
+    // A changed retained response is refused.
+    fs.writeFileSync(returnedFile,Buffer.concat([returnedBytes,Buffer.from(' ')]));
+    assert.throws(()=>create(),/returned-response-changed/);
+    fs.writeFileSync(returnedFile,returnedBytes);
+    console.log('PASS scratch reconciliation refuses present/foreign/claimed scratch, mixing, missing approval, stray deltas and a changed response');
+    // The host hook kept appending to an evidence journal and the operator wrote a note.
+    const note='.gsd/HANDOFF-scratch.md';fs.writeFileSync(path.join(f.owner,note),'scratch removed by the owner\n');
+    const scratchOptions={};
+    let cap;
+    const before=approvals;
+    try{cap=create();}catch(error){throw error;}
+    assert.equal(approvals,before+1);
+    let view;
+    try{view=successor.read(cap,r);}catch(error){
+      // Owner surfaces changed since the attempt: only a bound owner reconciliation may admit them.
+      assert.match(String(error.code),/owner-reconciliation-required/);
+      const description=activity.reconciliationDecision(r);
+      const opened=questions.openQuestions(description);
+      questions.answer({cwd:f.owner,identity:opened.identity_sha256,answers:[{id:'owner-delta-approval',answer:'Autorizar (Recomendado)',source:'tool-answer'}]});
+      const reconciliation=activity.createOwnerReconciliation({request:r,hostRuntime:r.route.host_runtime,assertAuthority:()=>true,
+        attestStoppedWriter:()=>true,readPendingQuestions:()=>[],operatorDecision:opened.identity_sha256,
+        attestChanges:challenge=>({challenge_sha256:roots.digest(challenge),changes:challenge.changes.map(row=>({...row,
+          kind:row.path.includes('/questions')?'decision-record':'operator-reviewed',reference:'fixture explicit bounded decision'}))})});
+      cap=activity.withOwnerReconciliationRead(reconciliation,r,()=>create());
+      successor.bindOwnerReconciliation(cap,r,reconciliation);
+      scratchOptions.reconciled=true;
+      view=successor.read(cap,r);
+    }
+    assert.equal(view.info.kind,'scratch-reconciliation-successor');
+    assert.equal(view.info.scratch_reconciliation.reference,'conversation:fixture-operator-approved-scratch');
+    const published=await side.runUnitSidecar(r,{verificationSuccessor:cap});
+    assert.equal(published.status,'done');assert.equal(calls,1,'no second provider inference');
+    const next=JSON.parse(fs.readFileSync(view.receiptFile));
+    assert.equal(next.phase,'ready');assert.equal(next.delivery_capture.passed,true);
+    assert.equal(next.verification_seal.sha256,parent.verification_seal.sha256,'the sealed verification is unchanged');
+    assert.deepEqual(next.result.files_changed.map(row=>typeof row==='string'?row:row.root_id+'::'+row.path).sort(),f.contract.code_roots.map(row=>row.id+'::same.txt').sort());
+    assert.deepEqual(fs.readFileSync(f.receiptFile),parentBytes);assert.deepEqual(fs.readFileSync(r.resultFile),outputBytes);
+    assert.deepEqual(fs.readFileSync(returnedFile),returnedBytes);
+    assert(fs.readFileSync(path.join(f.owner,'.gsd/milestones/M901/slices/S01/S01-PLAN.md'),'utf8').includes('[x]'));
+    assert.equal(fs.readFileSync(path.join(f.owner,note),'utf8'),'scratch removed by the owner\n');
+    await assert.rejects(side.runUnitSidecar(r,{verificationSuccessor:cap}),/already-used|protected|source-changed/);
+    console.log('PASS approved scratch reconciliation publishes the retained response with its original seal and no new inference'
+      +(scratchOptions.reconciled?' (owner delta through a bound reconciliation)':''));
+  }finally{if(previousThread===undefined)delete process.env.CODEX_THREAD_ID;else process.env.CODEX_THREAD_ID=previousThread;xllm.runExecute=original;f.cleanup();}
+}
+async function all(){await main();await withOwnerDelta();await scratchOutsideClaim();}
 module.exports={main:all};if(require.main===module)all().catch(e=>{console.error(e);process.exitCode=1;});

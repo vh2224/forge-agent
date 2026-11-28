@@ -24,18 +24,42 @@ function withoutVerifyBlock(text){
   if(seen!==1)fail('verification-successor-correction-plan-invalid');
   return out.join('');
 }
-function create({request,timeoutMs,reference,assertAuthority,assertBoundary,attestStoppedWriter,attestFailure,lease,ownerVerificationEvents,policyCorrection}={}){
-  if([assertAuthority,assertBoundary,attestStoppedWriter,attestFailure].some(fn=>typeof fn!=='function')||typeof reference!=='string'||!reference.trim()||reference.length>512)fail('verification-successor-live-authority-required');
-  const r=structuredClone(request),side=require('./forge-unit-sidecar'),recovery=require('./forge-attempt-recovery'),verify=require('./forge-verify');
+function create({request,timeoutMs,reference,assertAuthority,assertBoundary,attestStoppedWriter,attestFailure,lease,ownerVerificationEvents,policyCorrection,scratchReconciliation}={}){
+  const scratch=scratchReconciliation!==undefined;
+  // Issue 510: the scratch mode has no verification failure to attest; the parent's
+  // own failed receipt is the observation (execution-outside-claim).
+  if([assertAuthority,assertBoundary,attestStoppedWriter,...(scratch?[]:[attestFailure])].some(fn=>typeof fn!=='function')||typeof reference!=='string'||!reference.trim()||reference.length>512)fail('verification-successor-live-authority-required');
+  // A linked begin binding is an opaque in-process handle: keep it, clone the rest.
+  const {linkedEntryBinding:linkedHandle,...plainRequest}=request||{};
+  const r={...structuredClone(plainRequest),...(scratch&&linkedHandle?{linkedEntryBinding:linkedHandle}:{})},side=require('./forge-unit-sidecar'),recovery=require('./forge-attempt-recovery'),verify=require('./forge-verify');
   const standalone=r.scope==='standalone-task',correction=policyCorrection!==undefined;
   if(correction&&(standalone||timeoutMs!==undefined))fail('verification-successor-policy-mixing');
+  if(scratch&&(correction||timeoutMs!==undefined||attestFailure!==undefined))fail('verification-successor-policy-mixing');
+  if(scratch&&(standalone||typeof scratchReconciliation?.prefix!=='string'||typeof scratchReconciliation.approveScratch!=='function'))fail('verification-successor-scratch-proof-required');
   if(correction&&(!Buffer.isBuffer(policyCorrection?.originalPlanBytes)||typeof policyCorrection.approveCorrection!=='function'))fail('verification-successor-correction-proof-required');
-  if(!['milestone','standalone-task'].includes(r.scope)||r.unitType!=='execute-task'||r.route?.worker_mode!=='sidecar'||r.linked_begin_key)fail('verification-successor-scope-unsupported');
+  if(!['milestone','standalone-task'].includes(r.scope)||r.unitType!=='execute-task'||r.route?.worker_mode!=='sidecar'||r.linked_begin_key&&!scratch)fail('verification-successor-scope-unsupported');
   if(standalone&&(lease!==undefined||require('./forge-linked-task').linkedTaskFor(r.contextRoot,r.taskId)!==null))fail('verification-successor-scope-unsupported');
   side.validateRecoveryRequest(r);
   const parentFile=r.resultFile+'.receipt.json',parentBytes=readBytes(parentFile),parent=JSON.parse(parentBytes),outputBytes=readBytes(r.resultFile),output=JSON.parse(outputBytes);
-  const deliveryKey=standalone?'execution':'milestone_delivery',otherKey=standalone?'milestone_delivery':'execution',saved=parent[deliveryKey];
-  if(parent.phase!=='executed'||parent.result?.status!=='done'||!saved||typeof saved!=='object'||Array.isArray(saved)||Object.hasOwn(parent,otherKey)
+  const deliveryKey=standalone?'execution':'milestone_delivery',otherKey=standalone?'milestone_delivery':'execution';
+  let saved=parent[deliveryKey],returnedBytes=null,returned=null;
+  if(scratch){
+    // Issue 510: the retained normalized response, bound to the failed receipt by hash.
+    const retainedRef=parent.failure?.returned_response;
+    if(parent.phase!=='failed'||parent.failure?.reason_code!=='execution-outside-claim'||Object.hasOwn(parent,'milestone_delivery')||Object.hasOwn(parent,'execution')
+      ||!retainedRef||retainedRef.channel!=='resultFile.returned.json'||!/^[a-f0-9]{64}$/.test(retainedRef.sha256||'')
+      ||parent.dispatch_id!==r.dispatchId||parent.fingerprint!==side.artifactFingerprint(r)
+      ||parent.recovery_identity_sha256!==roots.digest(recovery.requestIdentity(recovery.canonicalRequest(r)))
+      ||output.status!=='adapter-failed'||output.dispatch_id!==r.dispatchId||output.reason_code!=='execution-outside-claim')fail('verification-successor-parent-binding');
+    returnedBytes=readBytes(r.resultFile+'.returned.json');
+    if(hash(returnedBytes)!==retainedRef.sha256)fail('verification-successor-returned-response-changed');
+    returned=JSON.parse(returnedBytes);
+    if(returned.version!==1||returned.dispatch_id!==r.dispatchId||returned.request_fingerprint!==parent.fingerprint
+      ||returned.result?.status!=='done'||!Array.isArray(returned.result.files_changed))fail('verification-successor-returned-response-invalid');
+    saved={};
+  }
+  if(scratch);
+  else if(parent.phase!=='executed'||parent.result?.status!=='done'||!saved||typeof saved!=='object'||Array.isArray(saved)||Object.hasOwn(parent,otherKey)
     ||standalone&&roots.digest(saved.execution_contract)!==roots.digest(r.execution_contract)
     ||parent.dispatch_id!==r.dispatchId||parent.fingerprint!==side.artifactFingerprint(r)
     ||parent.recovery_identity_sha256!==roots.digest(recovery.requestIdentity(recovery.canonicalRequest(r)))
@@ -56,8 +80,56 @@ function create({request,timeoutMs,reference,assertAuthority,assertBoundary,atte
   const originalPlan=correction?policyCorrection.originalPlanBytes:plan;
   const original=verify.normalizeExecutionVerification(r.execution_contract,originalPlan.toString('utf8'),r.verification||{},{},identity);
   if(roots.digest(original)!==roots.digest(parent.verification_seal))fail('verification-successor-original-seal');
-  let seal,correctionEvidence=null;
-  if(correction){
+  let seal,correctionEvidence=null,scratchEvidence=null,scratchSeed=null;
+  if(scratch){
+    seal=original;
+    const contract=r.execution_contract,primary=contract.code_roots.find(row=>row.id===contract.primary_root_id);
+    const raw=scratchReconciliation.prefix.replace(/\\/g,'/');
+    const prefix=raw.endsWith('/')?raw:raw+'/';
+    if(!primary||primary.vcs!=='git'||prefix==='/'||path.isAbsolute(raw)||/(^|\/)\.\.?(\/|$)/.test(prefix)||/[\x00-\x1f:]/.test(prefix)
+      ||prefix.split('/').filter(Boolean)[0]==='.gsd'||prefix.startsWith('.git/'))fail('verification-successor-scratch-prefix-invalid');
+    const checked=roots.validatePlan(plan.toString('utf8'),contract),claims=checked.writes;
+    const prefixResolved=roots.resolvePath(contract,{root_id:primary.id,path:prefix.slice(0,-1)});
+    if(claims.some(claim=>roots.covers(claim,prefixResolved)||(claim.root_id||primary.id)===primary.id&&String(claim.path||'').replace(/\\/g,'/').startsWith(prefix)))fail('verification-successor-scratch-prefix-claimed');
+    const qualified=entry=>typeof entry==='string'&&entry.includes('::');
+    const entryPath=entry=>(typeof entry==='string'?(qualified(entry)?entry.slice(entry.indexOf('::')+2):entry):entry?.path||'').replace(/\\/g,'/');
+    const entryRoot=entry=>typeof entry==='string'?(qualified(entry)?entry.slice(0,entry.indexOf('::')):primary.id):entry?.root_id||primary.id;
+    const inScratch=entry=>entryRoot(entry)===primary.id&&entryPath(entry).startsWith(prefix);
+    const removed=returned.result.files_changed.filter(inScratch),kept=returned.result.files_changed.filter(entry=>!inScratch(entry));
+    if(!removed.length)fail('verification-successor-scratch-unchanged');
+    if(removed.some(entry=>typeof entry!=='string'&&entry.status!==undefined&&entry.status!=='A'))fail('verification-successor-scratch-not-added');
+    for(const entry of kept){
+      const resolved=roots.resolvePath(contract,typeof entry==='string'?entry:{root_id:entryRoot(entry),path:entryPath(entry)},{legacy:contract.code_roots.length===1});
+      if(!claims.some(claim=>roots.covers(claim,resolved)))fail('verification-successor-scratch-outside-prefix');
+    }
+    // Attempt-attributable: absent from the start revision and from the pre-attempt dirt.
+    const repo=state.repos.find(row=>row.root_id===primary.id);
+    if(!repo||repo.vcs!=='git'||(repo.pre_dirty||[]).some(row=>String(row.path).replace(/\\/g,'/').startsWith(prefix)))fail('verification-successor-scratch-preexisting');
+    const tracked=require('child_process').execFileSync('git',['-C',primary.path,'ls-tree','-r','--name-only',repo.start_sha,'--',prefix],{encoding:'utf8'});
+    if(tracked.trim())fail('verification-successor-scratch-tracked');
+    // The owner removed it before the successor; the live census below proves the rest.
+    if(fs.existsSync(path.join(primary.path,...prefix.split('/').filter(Boolean))))fail('verification-successor-scratch-present');
+    const projected={...returned.result,files_changed:kept,
+      ...(Array.isArray(returned.result.files_changed_declared)?{files_changed_declared:returned.result.files_changed_declared.filter(entry=>!entryPath(entry).startsWith(prefix))}:{})};
+    const verifiedFiles=execution.verifyResult(r.cwd,{execution_contract:contract,claims,snapshots:state.repos},projected);
+    const removedPaths=removed.map(entryPath).sort();
+    const challenge=Object.freeze({dispatch_id:r.dispatchId,parent_receipt_sha256:hash(parentBytes),returned_response_sha256:hash(returnedBytes),
+      scratch_prefix:prefix,removed_entries:removedPaths.length,removed_entries_sha256:hash(JSON.stringify(removedPaths)),
+      claim_paths:Object.freeze(claims.map(claim=>String(claim.root_id||primary.id)+'::'+String(claim.path))),verified_files_sha256:roots.digest(verifiedFiles)});
+    const approval=scratchReconciliation.approveScratch(challenge);
+    if(approval?.approved!==true||typeof approval.reference!=='string'||!approval.reference.trim()||approval.reference.length>512)fail('verification-successor-scratch-approval-required');
+    scratchEvidence={kind:'operator-scratch-outside-claim-reconciliation',reference:approval.reference,parent_failure_reason_code:'execution-outside-claim',
+      returned_response_sha256:challenge.returned_response_sha256,scratch_prefix:prefix,removed_entries:challenge.removed_entries,
+      removed_entries_sha256:challenge.removed_entries_sha256,verified_files_sha256:challenge.verified_files_sha256};
+    const {failure,...base}=structuredClone(parent);
+    saved={plan_sha256:hash(plan),verified_files:verifiedFiles,protected_owner:structuredClone(baseline.protected_owner),
+      protected_roots:structuredClone(baseline.protected_roots),code_state:execution.replayState(r.cwd,contract)};
+    scratchSeed={...base,phase:'executed',provider_called:true,
+      final_evidence:failure.final_evidence?{...failure.final_evidence,stage:'returned',provider_called:true}:base.final_evidence||null,
+      milestone_delivery:saved,
+      result:{...projected,dispatch_id:r.dispatchId,workflow_id:r.workflowId,host_runtime:parent.route?.host_runtime,worker_engine:parent.route?.resolved_worker_engine}};
+  }
+  else if(correction){
     // Issue 498: a caller/plan defect in `verify:` is corrected by an explicit,
     // live operator decision. Only that block may differ; the new seal is derived
     // from the corrected plan with the same request, identity and bindings.
@@ -71,7 +143,8 @@ function create({request,timeoutMs,reference,assertAuthority,assertBoundary,atte
     const {sha256:ignored,...base}=original,policy={...base,command_timeout_ms:timeoutMs,timeout_origin:'owner-verification-successor'};
     seal={...policy,sha256:roots.digest(policy)};
   }
-  const observation=attestFailure({dispatch_id:r.dispatchId,parent_receipt_sha256:hash(parentBytes),original_output_sha256:hash(outputBytes),original_seal_sha256:original.sha256,roots:original.roots.map(row=>({root_id:row.root_id,command_sha256:row.commands.map(hash)}))});
+  const observation=scratch?null:attestFailure({dispatch_id:r.dispatchId,parent_receipt_sha256:hash(parentBytes),original_output_sha256:hash(outputBytes),original_seal_sha256:original.sha256,roots:original.roots.map(row=>({root_id:row.root_id,command_sha256:row.commands.map(hash)}))});
+  if(!scratch){
   const observedRoot=original.roots.find(row=>row.root_id===observation?.root_id),command=observedRoot?.commands[observation?.check_index];
   const observedExit=correction?Number.isInteger(observation?.exit_code)&&observation.exit_code!==0:observation?.exit_code===124&&observation.timed_out===true;
   if(observation?.observed!==true||observation.reason_code!=='execution-verification-failed'||!observedExit
@@ -80,6 +153,7 @@ function create({request,timeoutMs,reference,assertAuthority,assertBoundary,atte
   if(parent.delivery_capture){const check=parent.delivery_capture.gate?.roots.find(row=>row.root_id===observation.root_id)?.result.checks[observation.check_index];
     if(parent.delivery_capture.passed!==false||check?.exitCode!==(correction?observation.exit_code:124))fail('verification-successor-failure-capture-mismatch');}
   else if(correction)fail('verification-successor-failure-capture-mismatch');
+  }
   if(correction){
     const challenge=Object.freeze({dispatch_id:r.dispatchId,parent_receipt_sha256:hash(parentBytes),original_plan_sha256:hash(originalPlan),corrected_plan_sha256:hash(plan),
       original_seal_sha256:original.sha256,corrected_seal_sha256:seal.sha256,
@@ -94,8 +168,8 @@ function create({request,timeoutMs,reference,assertAuthority,assertBoundary,atte
   if(standalone&&(!Array.isArray(baseline.protected_roots)||baseline.protected_roots.length!==r.execution_contract.code_roots.length
     ||r.execution_contract.code_roots.some(root=>baseline.protected_roots.filter(row=>row.root_id===root.id&&row.path===root.path).length!==1)))fail('verification-successor-baseline-binding');
   const eventsRelative='.gsd/forge/events.jsonl',eventsFile=path.join(r.contextRoot,eventsRelative),eventsBytes=readBytes(eventsFile);
-  let eventEvidence=null;
-  if(hash(eventsBytes)!==originalOwner[eventsRelative]){
+  let eventEvidence=null;const deferred={lease:false,events:false};
+  if(hash(eventsBytes)!==originalOwner[eventsRelative]&&!(scratch&&ownerVerificationEvents===undefined&&(deferred.events=true))){
     const e=ownerVerificationEvents;
     if(!Buffer.isBuffer(e?.originalBytes)||!Buffer.isBuffer(e.appendedBytes)||typeof e.attestAppend!=='function'
       ||hash(e.originalBytes)!==originalOwner[eventsRelative]||e.appendedBytes.length===0||e.appendedBytes.length>65536
@@ -113,7 +187,7 @@ function create({request,timeoutMs,reference,assertAuthority,assertBoundary,atte
   if(!standalone){
   leaseFile=leaseApi.leaseFile(r.contextRoot,unit);relative=path.relative(r.contextRoot,leaseFile).replace(/\\/g,'/');currentLeaseBytes=readBytes(leaseFile);
   const currentLease=JSON.parse(currentLeaseBytes);
-  if(originalOwner[relative]!==hash(currentLeaseBytes)){
+  if(originalOwner[relative]!==hash(currentLeaseBytes)&&!(scratch&&lease===undefined&&(deferred.lease=true))){
     if(!Buffer.isBuffer(lease?.originalBytes)||hash(lease.originalBytes)!==originalOwner[relative])fail('verification-successor-original-lease-required');
     const old=JSON.parse(lease.originalBytes),nonClock=x=>Object.fromEntries(Object.entries(x).filter(([key])=>!['heartbeat_at','expires_at'].includes(key)));
     if(!leaseApi.validRecord(old,unit)||!leaseApi.validRecord(currentLease,unit)||old.owner_token!==lease.ownerToken||currentLease.owner_token!==lease.ownerToken||old.generation!==lease.generation||currentLease.generation!==lease.generation
@@ -137,17 +211,18 @@ function create({request,timeoutMs,reference,assertAuthority,assertBoundary,atte
     roots.validateContract(r.execution_contract,{owner:r.contextRoot,revalidate:true});
   };
   check();
-  const info={schema_version:1,kind:correction?'verification-policy-correction-successor':'verification-timeout-successor',reference,parent_receipt_sha256:hash(parentBytes),original_output_sha256:hash(outputBytes),original_baseline_state_sha256:hash(stateBytes),original_verification_seal_sha256:original.sha256,verification_seal_sha256:seal.sha256,command_timeout_ms:seal.command_timeout_ms,provider_called:false,worker_budget_unchanged:true,...(eventEvidence?{owner_event_reconciliation:eventEvidence}:{}),
+  const info={schema_version:1,kind:scratch?'scratch-reconciliation-successor':correction?'verification-policy-correction-successor':'verification-timeout-successor',reference,parent_receipt_sha256:hash(parentBytes),original_output_sha256:hash(outputBytes),original_baseline_state_sha256:hash(stateBytes),original_verification_seal_sha256:original.sha256,verification_seal_sha256:seal.sha256,command_timeout_ms:seal.command_timeout_ms,provider_called:false,worker_budget_unchanged:true,...(eventEvidence?{owner_event_reconciliation:eventEvidence}:{}),
     ...(correctionEvidence?{policy_correction:correctionEvidence}:{}),
-    failure_observation:{reference:observation.reference,root_id:observation.root_id,check_index:observation.check_index,command_sha256:observation.command_sha256,exit_code:correction?observation.exit_code:124,timed_out:correction?observation.timed_out===true:true,legacy_uncaptured:!parent.delivery_capture}};
+    ...(scratchEvidence?{scratch_reconciliation:scratchEvidence,owner_deferred:{...deferred}}:{}),
+    failure_observation:scratch?{reference:'receipt:failure.reason_code',reason_code:'execution-outside-claim',legacy_uncaptured:false}:{reference:observation.reference,root_id:observation.root_id,check_index:observation.check_index,command_sha256:observation.command_sha256,exit_code:correction?observation.exit_code:124,timed_out:correction?observation.timed_out===true:true,legacy_uncaptured:!parent.delivery_capture}};
   // A successor is single-use. Never import a ready record/capture from disk:
   // persisted JSON cannot attest that this process actually executed the gate.
   const key=crypto.randomBytes(24).toString('hex'),prefix=path.join(path.dirname(r.resultFile),'forge-verification-successor-'+key);
   const receiptFile=prefix+'.receipt.json',resultFile=prefix+'.result.json';
   for(const file of [receiptFile,resultFile])for(const root of [r.contextRoot,...r.execution_contract.code_roots.map(row=>row.path)])require('./forge-xllm').validateResultFileTarget(file,root);
-  const seed={...structuredClone(parent),verification_seal:seal,verification_successor:info,...(leaseEvidence?{owner_clock_reconciliation:leaseEvidence}:{})};delete seed.delivery_capture;
+  const seed={...structuredClone(scratchSeed||parent),verification_seal:seal,verification_successor:info,...(leaseEvidence?{owner_clock_reconciliation:leaseEvidence}:{})};delete seed.delivery_capture;
   const assertRecord=record=>{
-    check();const expected={...parent,verification_successor:info,verification_seal:seal};
+    check();const expected=scratchSeed?{...scratchSeed,verification_successor:info,verification_seal:seal}:{...parent,verification_successor:info,verification_seal:seal};
     for(const key of ['verification_successor','verification_seal','result','fingerprint','dispatch_id','recovery_identity_sha256','kind','execution','route','before','milestone_delivery']){
       if(roots.digest(record[key]??null)!==roots.digest(expected[key]??null))fail('verification-successor-record-changed-'+key);
     }
@@ -162,7 +237,8 @@ function create({request,timeoutMs,reference,assertAuthority,assertBoundary,atte
     return {...expected,...(!standalone?{[relative]:hash(currentLeaseBytes)}:{}),[eventsRelative]:hash(eventsBytes),
       ...(correction&&Object.hasOwn(expected,planRelative)?{[planRelative]:hash(plan)}:{})};
   };
-  const capability=Object.freeze({});records.set(capability,{request_digest:roots.digest(r),check,assertRecord,expectedOwner,seal,info,receiptFile,resultFile,seed,used:false});return capability;
+  const capability=Object.freeze({});records.set(capability,{request_digest:roots.digest(r),check,assertRecord,expectedOwner,seal,info,receiptFile,resultFile,seed,used:false,
+    ownerDeferred:deferred.lease||deferred.events});return capability;
 }
 function readUnscoped(capability,request){
   const value=records.get(capability);if(!value)return require('./forge-sidecar-verification-repair').read(capability,request);
@@ -185,7 +261,10 @@ function bindOwnerReconciliation(capability, request, ownerReconciliation) {
 }
 function read(capability, request) {
   const ownerReconciliation = ownerReconciliations.get(capability);
-  if (!ownerReconciliation) return readUnscoped(capability, request);
+  if (!ownerReconciliation) {
+    if (records.get(capability)?.ownerDeferred) fail('verification-successor-owner-reconciliation-required');
+    return readUnscoped(capability, request);
+  }
   const activity = require('./forge-protected-owner-activity');
   const scoped = action => activity.withOwnerReconciliationRead(ownerReconciliation, request, action);
   const value = scoped(() => readUnscoped(capability, request));
