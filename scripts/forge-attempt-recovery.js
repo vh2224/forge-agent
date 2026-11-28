@@ -245,9 +245,14 @@ function bindLinkedRequest(request, options) {
     host_runtime: begin.host_runtime, milestone: begin.milestone };
   if (request.linkedEntryBinding !== undefined) {
     const held = linkedEntries.get(request.linkedEntryBinding);
-    if (!held || digest(held) !== digest(current)) fail('linked-entry-binding-required');
-    requestIdentity(canonicalRequest(request));
-    return request;
+    if (!held) fail('linked-entry-binding-required');
+    // A host-issued handle for an earlier linked begin is superseded by a fresh bind of the new begin;
+    // the same begin must still match exactly (copied or forged handles are never in the WeakMap).
+    if (held.begin_key === current.begin_key) {
+      if (digest(held) !== digest(current)) fail('linked-entry-binding-required');
+      requestIdentity(canonicalRequest(request));
+      return request;
+    }
   }
   const handle = Object.freeze({});
   linkedEntries.set(handle, current);
