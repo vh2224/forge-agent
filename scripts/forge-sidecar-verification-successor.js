@@ -109,8 +109,8 @@ function create({request,timeoutMs,reference,assertAuthority,assertBoundary,atte
     if(tracked.trim())fail('verification-successor-scratch-tracked');
     // The owner removed it before the successor; the live census below proves the rest.
     if(fs.existsSync(path.join(primary.path,...prefix.split('/').filter(Boolean))))fail('verification-successor-scratch-present');
-    const projected={...returned.result,files_changed:kept,
-      ...(Array.isArray(returned.result.files_changed_declared)?{files_changed_declared:returned.result.files_changed_declared.filter(entry=>!entryPath(entry).startsWith(prefix))}:{})};
+    // Only the measured delta is projected; the worker's own declarations stay as returned.
+    const projected={...returned.result,files_changed:kept};
     const verifiedFiles=execution.verifyResult(r.cwd,{execution_contract:contract,claims,snapshots:state.repos},projected);
     const removedPaths=removed.map(entryPath).sort();
     const challenge=Object.freeze({dispatch_id:r.dispatchId,parent_receipt_sha256:hash(parentBytes),returned_response_sha256:hash(returnedBytes),
