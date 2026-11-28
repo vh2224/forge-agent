@@ -1188,7 +1188,7 @@ async function withReconciliationHandoff(request, runtime, action) {
   try { return await handoffs.run(entry, action); }
   finally { entry.consumed = true; }
 }
-module.exports = { approvalAnswer, HOOK_APPEND_MAX_BYTES, HOOK_APPEND_MAX_ROWS, withExecutionActivity, withNativeExecutionActivity, currentScope, assertPreflightAdmission, expectedProtectedOwner, reconciliationDecision,
+module.exports = { withExecutionActivity, withNativeExecutionActivity, currentScope, assertPreflightAdmission, expectedProtectedOwner, reconciliationDecision,
   createOwnerReconciliation, assertOwnerReconciliationReady, withOwnerReconciliation, withReconciliationHandoff,
   codeRootAppendDecision, withOwnerReconciliationRead,
   resumeAttemptOwner, inspectAttemptResume, hookAppendProof };

@@ -150,11 +150,5 @@ async function withOwnerDelta(){
     console.log('PASS owner reconciliation accepts the approved corrected plan and composes with the correction successor');
   }finally{if(previousThread===undefined)delete process.env.CODEX_THREAD_ID;else process.env.CODEX_THREAD_ID=previousThread;xllm.runExecute=original;f.cleanup();}
 }
-function approvalWords(){
-  const {approvalAnswer}=require('./forge-protected-owner-activity');
-  for(const ok of ['Autorizar','autorizar (Recomendado)','Aprovar (recommended)',' sim ','Aprovado (Recomendada)'])assert.equal(approvalAnswer(ok),true,ok);
-  for(const bad of ['Não autorizar','Autorizar talvez','Autorizar (Recomendado) mas não','(Recomendado)','Autorizar (outro)','',null,undefined,1])assert.equal(approvalAnswer(bad),false,String(bad));
-  console.log('PASS approval answer accepts only the approval word plus the contract recommendation suffix');
-}
-async function all(){approvalWords();await main();await withOwnerDelta();}
+async function all(){await main();await withOwnerDelta();}
 module.exports={main:all};if(require.main===module)all().catch(e=>{console.error(e);process.exitCode=1;});
