@@ -362,6 +362,38 @@ test('native without commit rejects new outside changes and preserves unchanged 
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+for (const scenario of ['ignored', 'not ignored']) {
+  test(`Git native hook evidence append: ${scenario}`, () => {
+    const dir = repo();
+    const rel = '.gsd/milestones/M001/slices/S01/S01-REVIEW.md';
+    const journal = path.join(dir, '.gsd/forge/evidence~_no-milestone_~_no-slice_~adhoc.jsonl');
+    const row = tool => JSON.stringify({ ts: 1, tool, cmd: '', file: null, ok: true, interrupted: false }) + '\n';
+    fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+    fs.mkdirSync(path.dirname(journal), { recursive: true });
+    fs.writeFileSync(path.join(dir, rel), REVIEW);
+    if (scenario === 'ignored') {
+      fs.writeFileSync(path.join(dir, '.gitignore'), require('./forge-ignore').LOCAL_IGNORE_PATHS.join('\n') + '\n');
+      git(dir, 'add', '.gitignore'); git(dir, 'commit', '-q', '-m', 'ignore');
+    }
+    fs.writeFileSync(journal, row('Bash'));
+    const xllm = require('./forge-xllm');
+    const request = { cwd: dir, contextRoot: dir, milestoneId: 'M001', sliceId: 'S01',
+      startSha: git(dir, 'rev-parse', 'HEAD'), preDirty: xllm.captureDirtySnapshot(dir),
+      constraints: { auto_commit: false },
+      reviewFix: { boundary: 'slice', decision: 'proceed', claimPaths: ['src/a.js'], items: [{ r: 'R1', path: 'src/a.js' }] },
+      rawResult: { status: 'done', items: [{ r: 'R1', outcome: 'fixed', note: '' }] } };
+    try {
+      fs.writeFileSync(path.join(dir, 'src/a.js'), 'fixed\n');
+      fs.appendFileSync(journal, row('Edit'));
+      if (scenario === 'ignored') {
+        const accepted = acceptLegacyFixture(request);
+        assert.strictEqual(accepted.items[0].verified, true);
+        assert.deepStrictEqual(accepted.files_changed, ['src/a.js']);
+      } else assert.strictEqual(code(() => acceptLegacyFixture(request)), 'review-fix-protected-metadata');
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+}
+
 test('native committed preexisting dirty bytes are not evidence of a new fix', () => {
   const dir = repo();
   try {
@@ -663,6 +695,25 @@ for (const scenario of ['new outside', 'dirty modified', 'dirty removed', 'dirty
     if (scenario === 'metadata removed') fs.unlinkSync(path.join(lab.wc, '.gsd/hidden/old.md'));
     const expected = scenario.startsWith('metadata') ? 'review-fix-protected-metadata' : 'review-fix-outside-claim';
     assert.strictEqual(code(() => acceptLegacyFixture(request)), expected);
+  }));
+}
+
+for (const scenario of ['evidence append', 'evidence created', 'evidence rewritten', 'evidence truncated', 'evidence append plus metadata']) {
+  test(`SVN native hook ${scenario}`, () => svnFixture(({ lab, write, request }) => {
+    const journal = path.join(lab.wc, '.gsd/forge/evidence~_no-milestone_~_no-slice_~adhoc.jsonl');
+    const row = tool => JSON.stringify({ ts: 1, tool, cmd: '', file: null, ok: true, interrupted: false }) + '\n';
+    write('.gsd/hidden/old.md', 'metadata\n');
+    if (scenario !== 'evidence created') write('.gsd/forge/evidence~_no-milestone_~_no-slice_~adhoc.jsonl', row('Bash') + row('Edit'));
+    request.nativePreparation = prepareFixture(request);
+    write('src/a.js', 'fixed\n');
+    if (['evidence append', 'evidence created', 'evidence append plus metadata'].includes(scenario)) fs.appendFileSync(journal, row('Edit') + row('Bash'));
+    if (scenario === 'evidence rewritten') fs.writeFileSync(journal, row('Edit') + row('Bash') + row('Write'));
+    if (scenario === 'evidence truncated') fs.writeFileSync(journal, row('Bash'));
+    if (scenario === 'evidence append plus metadata') write('.gsd/hidden/old.md', 'changed\n');
+    if (scenario === 'evidence append' || scenario === 'evidence created') {
+      const result = acceptLegacyFixture(request);
+      assert.deepStrictEqual(result.files_changed, ['src/a.js']); assert(result.items[0].verified);
+    } else assert.strictEqual(code(() => acceptLegacyFixture(request)), 'review-fix-protected-metadata');
   }));
 }
 

@@ -45,6 +45,7 @@ const LOCAL_IGNORE_PATHS = Object.freeze([
   '.gsd/forge/runs/',
   '.gsd/forge/events.jsonl',
   '.gsd/forge/evidence-*.jsonl',
+  '.gsd/forge/evidence~*.jsonl',
   '.gsd/forge/compact-signal.json',
   '.gsd/forge/prompts/',
   '.gsd/forge/projection-state.json',

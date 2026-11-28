@@ -971,6 +971,22 @@ function acceptNativeReviewFix(request, options) {
             && prior.kind === current.kind && prior.properties_hash === current.properties_hash
             && JSON.stringify(prior.status) === JSON.stringify(current.status)) replayPaths.add(pathKey(relative));
       }
+      // The Forge hook's own evidence journal (no owner window deferring it) may
+      // also only grow by whole JSONL rows: same kind, properties and status
+      // (normal may become modified), or a new unversioned/ignored file. Any
+      // other evidence or metadata delta stays in `changed` and is refused.
+      for (const entry of svnDelta.entries) {
+        const prior = preparation.svnSnapshot.entries.find(value => value.path === entry.path);
+        const current = svnDelta.snapshot.entries.find(value => value.path === entry.path);
+        if (!current || current.kind !== 'file') continue;
+        const status = JSON.stringify(current.status);
+        if (prior ? prior.kind !== 'file' || prior.properties_hash !== current.properties_hash || (JSON.stringify(prior.status) !== status
+            && JSON.stringify({ ...prior.status, ...(prior.status.item === 'normal' ? { item: 'modified' } : {}) }) !== status)
+          : current.properties_hash !== hash('[]') || !['unversioned', 'ignored'].includes(current.status.item) || current.status.props !== 'none'
+            || current.status.copied || current.status.scheduling) continue;
+        const relative = path.relative(root, path.resolve(cwd, entry.path)).replace(/\\/g, '/');
+        if (require('./forge-managed-surfaces').hookEvidenceAppendOnly(root, relative, prior ? prior.hash : null, [current.hash])) replayPaths.add(pathKey(entry.path));
+      }
       changed = svnDelta.entries.filter(entry => !replayPaths.has(pathKey(entry.path))).map(entry => entry.path);
       if (changed.some(file => require('./forge-vcs').isSvnProtectedMetadata(file))) reasonCode = 'review-fix-protected-metadata';
       try { require('./forge-xllm').assertNoProtectedSidecarChanges(changed.map(file => ({ path: pathKey(file) }))); }

@@ -1073,6 +1073,29 @@ async function main() {
     assert.equal(groupedResult.reason_code, 'artifact-direct-write-detected');
   });
 
+  await test('native preparation tolerates only pure appends to the hook evidence journal', async () => {
+    const row = tool => JSON.stringify({ ts: 1, tool, cmd: '', file: null, ok: true, interrupted: false }) + '\n';
+    for (const scenario of ['append', 'created', 'rewritten', 'truncated', 'other metadata']) {
+      const request = fixture({ phase: 'research', model: 'gpt-5.6-sol' });
+      request.activeCapabilities = codexCapabilities();
+      const forge = path.join(request.contextRoot, '.gsd', 'forge');
+      const journal = path.join(forge, 'evidence~_no-milestone_~_no-slice_~adhoc.jsonl');
+      fs.mkdirSync(forge, { recursive: true });
+      if (scenario !== 'created') fs.writeFileSync(journal, row('Bash') + row('Edit'));
+      const started = await prep.startStandaloneTaskPreparation(request);
+      if (scenario === 'append' || scenario === 'created' || scenario === 'other metadata') fs.appendFileSync(journal, row('Write') + row('Bash'));
+      if (scenario === 'rewritten') fs.writeFileSync(journal, row('Edit') + row('Bash') + row('Write'));
+      if (scenario === 'truncated') fs.writeFileSync(journal, row('Bash'));
+      if (scenario === 'other metadata') fs.writeFileSync(path.join(request.contextRoot, '.gsd', 'STATE.md'), '# Written by native worker\n');
+      const result = await prep.acceptStandaloneTaskPreparation(request, {
+        route: started.route, rawResult: framed(envelope(request)),
+        invocationTelemetry: started.invocation.telemetry, providerCalled: true,
+      });
+      if (scenario === 'append' || scenario === 'created') assert.equal(result.ok, true, `${scenario}: ${result.reason_code}`);
+      else assert.equal(result.reason_code, 'artifact-direct-write-detected', scenario);
+    }
+  });
+
   await test('wrong phase formats, non-done artifacts and malformed final native frames are refused', async () => {
     const wrong = fixture({ phase: 'brainstorm' });
     const wrongEnvelope = envelope(wrong);

@@ -103,6 +103,16 @@ function fileState(file) {
 function preparationSurfaceSnapshot(request) {
   return require('./forge-task-execution').protectedSnapshot(fs.realpathSync(request.contextRoot || request.cwd));
 }
+// The Forge hook appends one row to its own evidence journal per host tool call
+// when no owner window defers it. That pure append is the only drift tolerated;
+// any other key change, removal or addition still refuses as whole-owner drift.
+function samePreparationSurface(request, expected, observed) {
+  if (JSON.stringify(observed) === JSON.stringify(expected)) return true;
+  if (!expected || !observed || typeof expected !== 'object' || typeof observed !== 'object') return false;
+  const root = fs.realpathSync(request.contextRoot || request.cwd), own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+  return [...new Set([...Object.keys(expected), ...Object.keys(observed)])].every(key => (own(expected, key) && own(observed, key) && expected[key] === observed[key])
+    || (own(observed, key) && require('./forge-managed-surfaces').hookEvidenceAppendOnly(root, key, own(expected, key) ? expected[key] : null, [observed[key]])));
+}
 
 function sameUnit(value, expected) {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -1514,7 +1524,7 @@ async function acceptArtifactResultCore(request, rawResult, metadata = {}, publi
       broker.verify();
     } else {
       const observed = preparationSurfaceSnapshot(request);
-      if (JSON.stringify(observed) !== JSON.stringify(existing.preparation_surface)) {
+      if (!samePreparationSurface(request, existing.preparation_surface, observed)) {
         existing.preparation_surface_drift = { scope: 'whole-owner', attribution: 'unproven',
           expected_sha256: hash(JSON.stringify(existing.preparation_surface)), observed_sha256: hash(JSON.stringify(observed)) };
         json(files.receiptFile, existing);
@@ -4111,7 +4121,7 @@ async function runUnitSidecarCore(request, runtime, identity, memberHandle) {
         if (r.ownerBroker) require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker).verify();
         else {
           const observed = preparationSurfaceSnapshot(r);
-          if (JSON.stringify(observed) !== JSON.stringify(saved.preparation_surface)) {
+          if (!samePreparationSurface(r, saved.preparation_surface, observed)) {
             saved.preparation_surface_drift = { scope: 'whole-owner', attribution: 'unproven',
               expected_sha256: hash(JSON.stringify(saved.preparation_surface)), observed_sha256: hash(JSON.stringify(observed)) };
             json(receiptFile, saved);
