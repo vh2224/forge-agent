@@ -79,14 +79,13 @@ const APPSERVER_LIVENESS_CODES = Object.freeze({
   BUDGET_EXCEEDED: 'budget-exceeded-while-active',
 });
 // Terminal failures of the requested route (S01/T04, issue 279), recognised from the
-// pinned TurnError.codexErrorInfo of the completion matched to THIS turn. Closed map:
-// only an exact string key is recognised; every other value, the object variants and
-// null keep the generic `turn ended with status failed` with no code. Same rules as
-// the liveness codes: a string code, never `rpcError`, a fixed message free of
-// `terminated`/`timeout`/`network`, and no provider text (TurnError.message and
-// additionalDetails are never read, so they cannot reach the error or the census).
+// pinned modelNotFound enum of the completion matched to THIS turn, or the
+// explicit client-upgrade sentence in its error fields. Other values keep the
+// generic failure. Like liveness codes these are closed strings and fixed messages;
+// raw TurnError.message/additionalDetails never reach the error or the census.
 const APPSERVER_TERMINAL_CODES = Object.freeze({
   MODEL_NOT_FOUND: 'model-not-found',
+  CLIENT_UPGRADE_REQUIRED: 'codex-client-upgrade-required',
 });
 // Typed verdict for the app-server child closing with a NONZERO exit code while its
 // turn was still unsettled (issue 440 R3). Narrow on purpose: signals, a zero exit,
@@ -98,10 +97,34 @@ const APPSERVER_EXIT_CODES = Object.freeze({
 });
 const APPSERVER_TERMINAL_MESSAGES = Object.freeze({
   MODEL_NOT_FOUND: 'forge-appserver-client: turn ended with status failed (modelNotFound)',
+  CLIENT_UPGRADE_REQUIRED: 'forge-appserver-client: requested model requires a newer version of Codex; upgrade the app or CLI',
 });
 const CODEX_TERMINAL_ERROR_INFO = Object.freeze({
   modelNotFound: APPSERVER_TERMINAL_CODES.MODEL_NOT_FOUND,
 });
+// Only the explicit error sentence is evidence of this compatibility failure.
+// Catalog absence, error-info enums and arbitrary object coercion are not.
+function explicitCodexUpgrade(error) {
+  if (!error || typeof error !== 'object') return false;
+  return ['message', 'additionalDetails'].some(key => {
+    const field = Object.getOwnPropertyDescriptor(error, key);
+    if (!field || !Object.hasOwn(field, 'value') || typeof field.value !== 'string'
+      || field.value.length > 8192) return false;
+    const matches = value => typeof value === 'string' && value.length <= 8192
+      && /^The '[^'\r\n]{1,200}' model requires a newer version of Codex\.(?:\s|$)/.test(value);
+    if (matches(field.value)) return true;
+    if (!field.value.trimStart().startsWith('{')) return false;
+    try {
+      const envelope = JSON.parse(field.value);
+      if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) return false;
+      const inner = Object.getOwnPropertyDescriptor(envelope, 'error');
+      if (!inner || !Object.hasOwn(inner, 'value') || !inner.value
+        || typeof inner.value !== 'object' || Array.isArray(inner.value)) return false;
+      const message = Object.getOwnPropertyDescriptor(inner.value, 'message');
+      return !!message && Object.hasOwn(message, 'value') && matches(message.value);
+    } catch (_) { return false; }
+  });
+}
 // Only a `failed` turn can carry a terminal route failure; `interrupted` keeps its
 // own generic message even if the server attached the marker.
 const TURN_STATUS_FAILED = 'failed';
@@ -459,10 +482,11 @@ function startAppServerTurn(options) {
         : (typeof params.turnId === 'string' ? params.turnId : null);
       const status = typeof turn.status === 'string' ? turn.status
         : (typeof params.status === 'string' ? params.status : null);
-      // Only the closed marker is kept, never TurnError.message/additionalDetails.
+      // Keep closed markers only. Error text is inspected for one explicit compatibility sentence, never retained.
       const info = turn.error && typeof turn.error === 'object' ? turn.error.codexErrorInfo : undefined;
       const marker = typeof info === 'string' && Object.hasOwn(CODEX_TERMINAL_ERROR_INFO, info) ? info : null;
-      keep(completions, marker ? { id, status, codexErrorInfo: marker } : { id, status }, 'turnCompletions');
+      const terminalCode = explicitCodexUpgrade(turn.error) ? APPSERVER_TERMINAL_CODES.CLIENT_UPGRADE_REQUIRED : null;
+      keep(completions, { id, status, ...(marker ? { codexErrorInfo: marker } : {}), ...(terminalCode ? { terminalCode } : {}) }, 'turnCompletions');
     };
     // The latch, derived. `null` means "no completion for THIS turn yet"; a record with
     // a non-success status is still a match — it ends the wait, it just does not end it
@@ -655,10 +679,15 @@ function startAppServerTurn(options) {
         if (!waiter) { discard('unmatched-response', JSON.stringify(message)); return; }
         pending.delete(message.id);
         if (message.error) {
-          const rpcError = sessionError(message.error.message || `JSON-RPC error ${message.error.code}`, {
-            code: message.error.code,
-            rpcError: message.error,
-          });
+          const upgrade = explicitCodexUpgrade(message.error);
+          const rpcError = upgrade
+            ? sessionError(APPSERVER_TERMINAL_MESSAGES.CLIENT_UPGRADE_REQUIRED.replace(/^forge-appserver-client: /, ''), {
+              code: APPSERVER_TERMINAL_CODES.CLIENT_UPGRADE_REQUIRED,
+              diagnostic: diagnostic(APPSERVER_TERMINAL_CODES.CLIENT_UPGRADE_REQUIRED),
+            })
+            : sessionError(message.error.message || `JSON-RPC error ${message.error.code}`, {
+              code: message.error.code, rpcError: message.error,
+            });
           waiter.reject(rpcError);
         } else {
           waiter.resolve(message.result);
@@ -990,11 +1019,13 @@ function startAppServerTurn(options) {
         // A terminal failure of the requested route is recognised here, BEFORE
         // forge-xllm sees the error: the fixed message and closed code keep the
         // stderr tail out of the message and the keyword heuristic out of the class.
-        if (completion.status === TURN_STATUS_FAILED && completion.codexErrorInfo) {
-          const code = CODEX_TERMINAL_ERROR_INFO[completion.codexErrorInfo];
-          fail(APPSERVER_TERMINAL_MESSAGES.MODEL_NOT_FOUND.replace(/^forge-appserver-client: /, ''), {
+        if (completion.status === TURN_STATUS_FAILED && (completion.terminalCode || completion.codexErrorInfo)) {
+          const code = completion.terminalCode || CODEX_TERMINAL_ERROR_INFO[completion.codexErrorInfo];
+          const fixed = code === APPSERVER_TERMINAL_CODES.CLIENT_UPGRADE_REQUIRED
+            ? APPSERVER_TERMINAL_MESSAGES.CLIENT_UPGRADE_REQUIRED : APPSERVER_TERMINAL_MESSAGES.MODEL_NOT_FOUND;
+          fail(fixed.replace(/^forge-appserver-client: /, ''), {
             code,
-            codexErrorInfo: completion.codexErrorInfo,
+            ...(completion.codexErrorInfo ? { codexErrorInfo: completion.codexErrorInfo } : {}),
             turnStatus: completion.status,
             turnId: turnId || null,
             turnCompletions: completionCensus(),
@@ -1036,7 +1067,11 @@ function startAppServerTurn(options) {
         // guard the anchored timeout assertion fails with exactly that message.
         if (!settled && !timedOut) {
           const message = error && error.message ? error.message.replace(/^forge-appserver-client: /, '') : String(error);
-          fail(message, error && error.code !== undefined ? { code: error.code, rpcError: error.rpcError } : null, true);
+          const upgrade = error?.code === APPSERVER_TERMINAL_CODES.CLIENT_UPGRADE_REQUIRED
+            && error.diagnostic?.reason === APPSERVER_TERMINAL_CODES.CLIENT_UPGRADE_REQUIRED;
+          fail(message, upgrade ? { code: APPSERVER_TERMINAL_CODES.CLIENT_UPGRADE_REQUIRED,
+            diagnostic: diagnostic(APPSERVER_TERMINAL_CODES.CLIENT_UPGRADE_REQUIRED) }
+            : error && error.code !== undefined ? { code: error.code, rpcError: error.rpcError } : null, true);
         }
       }
     })();
@@ -1056,6 +1091,7 @@ module.exports = {
   INTERRUPT_GRACE_MS,
   APPSERVER_LIVENESS_CODES,
   APPSERVER_TERMINAL_CODES,
+  explicitCodexUpgrade,
   APPSERVER_EXIT_CODES,
   APPSERVER_TERMINAL_MESSAGES,
   CODEX_TERMINAL_ERROR_INFO,

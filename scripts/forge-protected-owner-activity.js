@@ -78,7 +78,7 @@ async function withExecutionActivity(request, runtime, action) {
   if (!lease.validRecord(observed.record, unit)) fail('protected-owner-lease-invalid');
   const initialBytes = regular(leaseFile);
   if (roots.digest(JSON.parse(initialBytes)) !== roots.digest(observed.record)) fail('protected-owner-source-unstable');
-  require('./forge-unit-sidecar').validateRecoveryRequest(r, { verification: runtime.verification });
+  require('./forge-unit-sidecar').validateRecoveryRequest(r, { verification: runtime.verification, linkedEntryOptions: runtime.linkedEntryOptions });
   const original = observed.record, controller = require('./forge-unit-controller');
   const begin = controller.lookupRecord(owner, 'transaction', original.request_id);
   const token = original.owner_token, generation = original.generation;

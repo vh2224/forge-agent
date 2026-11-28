@@ -1,5 +1,7 @@
 ## Não lançado
 
+- Scratch do worker fora do claim (#510): uma execute-task de milestone com resposta `done` retida, recusada só por scratch atribuível à tentativa dentro do CODE_DIR (`execution-outside-claim`), pode ser publicada pelo sucessor `scratchReconciliation` depois que o owner remove o scratch e o operador aprova. O restante passa pelo censo normal e pela verificação selada original, sem nova inferência; receipt, resultado e resposta originais ficam intactos.
+
 - Correção da política de verificação (#498): uma tentativa `execute-task` de milestone já executada, cujo `verify:` do plano nunca poderia passar, pode ser reverificada com o bloco `verify:` corrigido por um sucessor só de verificação (`policyCorrection`), com decisão viva do operador, sem nova inferência. Só o bloco `verify:` pode mudar; o selo novo vem do plano corrigido, a publicação aceita o hash corrigido apenas pela capacidade viva e o snapshot do owner admite só a transição exata do plano. Receipt, resultado e S0 originais ficam intactos. Testado offline em owners temporários.
 
 - Integração nativa de arquivos (#463, em preparação): owner retido com entrada por BEGIN canônico, intenção separada da admissão observada, hooks diretos e retorno capturado. Join, verificação, publicação e settlement permanecem independentes. O perfil cooperativo não é sandbox do sistema; validação integrada, comportamento do host e instalação continuam pendentes.

@@ -1542,7 +1542,7 @@ engine.
    ID, while the adapter derives the distinct operational label `review-fix/{M###}-triage`.
    `$ITEMS_JSON` holds the cycle's grouped items (`r`,
    `path`/`path_line`, `claim`, `action`, `context`, `verdict`/`basis` per § Política executável
-   de review-fix, plus `review_file` per item at the triage boundary); `$RF_CLAIM_PATHS_FILE` holds exactly the `paths` the claim gate returned with `proceed`;
+   de review-fix, plus `review_file` per item at the triage boundary); `$RF_CLAIM_PATHS_FILE` holds exactly `.claim.paths` from the claim gate result that returned `proceed` (the derived claim the adapter re-derives and compares; the top-level `paths` field lists conflicting counterpart paths and is usually empty);
    `RF_AUTO_COMMIT` is the operator's `auto_commit`; `RF_WRITABLE_ROOTS_JSON` is set only for
    multi-repo attribution. Run it in the background with the polling, heartbeat and orphan detection
    of `shared/forge-bidirectional-sidecar.md § Execução em background` and relay every

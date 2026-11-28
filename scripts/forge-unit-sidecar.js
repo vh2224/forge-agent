@@ -4298,6 +4298,13 @@ function prepareReviewFix(request, loc, context) {
     fail('review-fix-claim-mismatch', 'The cross-run claim gate decision must be proceed before a review-fix worker starts.');
   }
   reviewFix.assertClaimTargetsPhysical(context.cwd, supplied);
+  // SVN observes the native profile's claim-derived containers (+ physical
+  // .gsd), never the whole shared checkout; an unscopable claim fails closed.
+  let svnReviewScope = null;
+  if (require('./forge-vcs').detectVcs(context.cwd) === 'svn') {
+    try { svnReviewScope = { code_dir: context.cwd, observation: require('./forge-vcs').deriveSvnReviewObservation(supplied) }; }
+    catch { fail('svn-review-scope-invalid', 'The claim cannot form the SVN review observation scope; no worker was launched.'); }
+  }
   const stateFile = xllm.validateResultFileTarget(`${context.resultFile}.reset-state.json`, context.cwd);
   xllm.validateResultFileTarget(stateFile, context.root);
   const writable = Array.isArray(request.writableRoots) ? request.writableRoots.map(root => fs.realpathSync(root)) : [];
@@ -4311,7 +4318,7 @@ function prepareReviewFix(request, loc, context) {
     try { reviewSnapshot[reviewFile] = hash(fs.readFileSync(target(context.root, reviewFile))); }
     catch { fail('review-fix-review-item-missing', `${reviewFile} is not readable; no worker was launched.`); }
   }
-  return { items, brief, stateFile, repoRoots, cwd: context.cwd, reviewSnapshot };
+  return { items, brief, stateFile, repoRoots, cwd: context.cwd, reviewSnapshot, svnReviewScope };
 }
 
 // review-fix-policy-v1 admission: the last gate after validation and the
@@ -4332,7 +4339,8 @@ function admitReviewFix(request, loc, fix, context) {
 }
 
 function createReviewFixResetState(fix, context) {
-  require('./forge-surgical-reset').initState(fix.stateFile, { cwd: fix.cwd, attempt: context.dispatchId, repoRoots: fix.repoRoots });
+  require('./forge-surgical-reset').initState(fix.stateFile, { cwd: fix.cwd, attempt: context.dispatchId, repoRoots: fix.repoRoots,
+    ...(fix.svnReviewScope ? { svnReviewScope: fix.svnReviewScope } : {}) });
   return fix;
 }
 
@@ -4404,6 +4412,9 @@ function appendProtectedOwnerEvents(root, receiptFile, record, lines) {
 }
 
 async function runUnitSidecar(request, runtime = {}) {
+  // Bind before activity fingerprints/tree custody; the inside entry revalidates
+  // through the same producer without replacing this genuine opaque handle.
+  if (request?.linked_begin_key) request = require('./forge-attempt-recovery').bindLinkedRequest(request, runtime.linkedEntryOptions);
   const windows = require('./forge-owner-transport-window');
   if (request?.scope === 'standalone-task' && ['brainstorm','discuss','research','plan'].includes(request.phase)) {
     windows.assertMutationAllowed(request.contextRoot || request.cwd);
