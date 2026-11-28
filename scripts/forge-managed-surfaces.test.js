@@ -15,7 +15,7 @@ const FIXTURES = path.join(__dirname, 'fixtures', 'issue-440');
 const MODULE = path.join(__dirname, 'forge-managed-surfaces.js');
 // sha256 of the canonical declaration text (managed-surfaces-v1). A change here
 // is a reviewed declaration change, never a silent update.
-const DECLARATION_PIN = '0f78362e0f22b2a4d700865d31a790d688816f5a14a2c6faf6e1130fa7a8eb8f';
+const DECLARATION_PIN = '0a26edb8c30f46a35c5cfeb1fa5e218eb838f5d8204d2b4670247b11fada1e6b';
 const DECLARED_IDS = ['owner-events', 'unit-lease', 'hook-evidence'];
 const sha = value => crypto.createHash('sha256').update(value).digest('hex');
 const readFixture = name => fs.readFileSync(path.join(FIXTURES, name));
@@ -287,6 +287,26 @@ function cliList() {
 }
 
 // ── Named transition cases ───────────────────────────────────────────────────
+
+// Issue 502: shared declaration and the real transition validator agree on
+// finite hook-only budgets; a previous large journal can be the next baseline.
+function hookAppendBudget() {
+  const specs=surfaces.getDeclaration().surfaces,limits=specs.find(s=>s.id==='hook-evidence').limits;
+  assert.deepEqual(limits,{max_bytes:2097152,max_append_bytes:1048576,max_append_lines:4096,max_line_bytes:2048});
+  assert.deepEqual(specs.find(s=>s.id==='owner-events').limits,{max_bytes:8388608,max_append_bytes:65536,max_append_lines:128,max_line_bytes:32768});
+  assert.deepEqual(specs.find(s=>s.id==='unit-lease').limits,{max_bytes:16384});
+  const line=n=>Buffer.from(JSON.stringify({pad:'x'.repeat(n-Buffer.byteLength('{"pad":""}\n'))})+'\n');
+  const check=(before,suffix)=>surfaces.validateTransition('hook-evidence',before,Buffer.concat([before||Buffer.alloc(0),suffix]),{binding:BINDING});
+  assert.equal(check(null,Buffer.from('{}\n'.repeat(193))).ok,true);
+  assert.equal(check(null,Buffer.from('{}\n'.repeat(4096))).ok,true);
+  const exact=Buffer.from(line(2048).toString().repeat(512));assert.equal(exact.length,1048576);assert.equal(check(Buffer.from('{}\n'),exact).ok,true);
+  const prior=Buffer.from(line(2048).toString().repeat(768)),tail=Buffer.from(line(2048).toString().repeat(256));
+  assert.equal(prior.length,1572864);assert.equal(check(prior,tail).ok,true);assert.equal(prior.length+tail.length,2097152);
+  for(const [before,suffix]of [[null,Buffer.from('{}\n'.repeat(4097))],[null,Buffer.concat([line(2049),Buffer.from(line(2048).toString().repeat(511))])],[prior,Buffer.concat([tail,Buffer.from('{}\n')])],[null,line(2050)],[null,Buffer.from('{bad}\n')],[null,Buffer.from('{}')]])
+    assert.equal(check(before,suffix).ok,false,'over-budget or invalid hook suffix remains refused');
+  assert.equal(surfaces.validateTransition('hook-evidence',Buffer.from('{}\n'),Buffer.from('{"rewrite":true}\n'),{binding:BINDING}).ok,false);
+}
+
 function deltaCases() {
   assert.equal(deltas.label, 'mock');
   assert.equal(deltas.origin, 'synthetic');
@@ -803,6 +823,7 @@ const cases = [
   ['declaration-pin', declarationPin],
   ['cli-list', cliList],
   ['delta-cases', deltaCases],
+  ['hook-append-budget', hookAppendBudget],
   ['sanitized-diff-private', sanitizedDiffPrivate],
   ['windows-paths', windowsPaths],
   ['physical-links', physicalLinks],
