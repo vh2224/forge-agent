@@ -839,6 +839,9 @@ function terminalLinkedNegatives(f) {
 if (require.main === module) {
   if (['--linked-consume-worker', '--linked-resume-worker', '--linked-negative-worker'].includes(process.argv[2])) {
     const f = JSON.parse(fs.readFileSync(path.join(process.argv[3], 'fixture.json')));
+    // A fresh process reloads the request from disk: the parent's opaque handle does not survive
+    // serialization, so the worker rebinds from live authority (a copied handle is refused).
+    if (f.request) delete f.request.linkedEntryBinding;
     if (process.argv[2] === '--linked-consume-worker') {
       f.request = recovery.bindLinkedRequest(f.request, { ...liveOptions(f), ownerToken: f.input.owner_token });
       if (process.argv[4] === 'after-release-before-phase') {
