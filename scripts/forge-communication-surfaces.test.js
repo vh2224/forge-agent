@@ -787,9 +787,9 @@ function checkSamples(fixture = {}) {
     const attributedHash = hash(attributedBytes(source.file, () => raw));
     const rawHash = hash(raw);
     // Only a measured Next successor can supply the corpus historical view; attribution and text stay current.
-    const citationRawHash = source.file === 'skills/forge-next/SKILL.md'
+    const citationRawHash = ['skills/forge-next/SKILL.md', 'skills/forge-task/SKILL.md'].includes(source.file)
       ? hash(unitEntry.projectRead(() => raw)(source.file)) : rawHash;
-    const hasMeasuredHistory = source.file === 'skills/forge-next/SKILL.md' && citationRawHash !== rawHash;
+    const hasMeasuredHistory = ['skills/forge-next/SKILL.md', 'skills/forge-task/SKILL.md'].includes(source.file) && citationRawHash !== rawHash;
     const text = raw.toString('utf8').replace(/\r\n/g, '\n');
     // Strict historical attribution in BOTH sample states: outside its linked blocks the source is the pre-T06 file
     // (#341: or the measured delta after of that declared file, whose before is the pre-T06 value).

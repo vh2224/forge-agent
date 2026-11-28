@@ -45,12 +45,25 @@ function readLock(file, canonical) {
   }
   return { state: 'present', metadata: meta };
 }
+function legacyCandidates(cwd, canonical) {
+  const canonicalName = encodePath(canonical) + '.json';
+  const found = [];
+  for (const name of fs.readdirSync(locksDir(cwd))) {
+    if (name === canonicalName) { found.push({ file: path.join(locksDir(cwd), name), relative: null }); continue; }
+    if (!/^[A-Za-z0-9_-]+\.json$/.test(name) || name.startsWith('v2-')) continue;
+    const encoded = name.slice(0, -5);
+    const raw = Buffer.from(encoded.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+    if (encodePath(raw) !== encoded || path.isAbsolute(raw) || /^[A-Za-z]:/.test(raw)) continue;
+    try { if (canonicalPath(cwd, raw) === canonical) found.push({ file: path.join(locksDir(cwd), name), relative: raw }); }
+    catch { /* Not a target alias; never use malformed filename data as authority. */ }
+  }
+  return found;
+}
 function readLockState(cwd, canonical) {
-  // Enumerate rather than stat an arbitrarily long legacy basename: on Windows
-  // an invalid component can report ENOENT, which is not evidence of absence.
-  const legacyName = `${encodePath(canonical)}.json`;
   try {
-    if (fs.readdirSync(locksDir(cwd)).includes(legacyName)) return { state: 'unreadable', reason: 'legacy_lock_present', file: path.join(locksDir(cwd), legacyName) };
+    const candidates = legacyCandidates(cwd, canonical);
+    if (candidates.length > 1) return { state: 'unreadable', reason: 'legacy_lock_ambiguous' };
+    if (candidates.length === 1) return { state: 'unreadable', reason: 'legacy_lock_present', ...candidates[0] };
   } catch (error) {
     if (error.code !== 'ENOENT') return { state: 'unreadable', reason: 'lock_read_failed', errno: error.code };
   }
@@ -122,9 +135,9 @@ function classifyHolder(cwd, runId) {
 function isHolderRunActive(cwd, runId) { return classifyHolder(cwd, runId).activity === 'live'; }
 // Keep this name byte-identical to v1: it is the shared compatibility authority.
 function guardName(filePath) { return `filelock-${crypto.createHash('sha256').update(String(filePath), 'utf8').digest('hex')}`; }
-function withGuard(cwd, filePath, fn) {
+function withGuard(cwd, filePath, fn, allowStaleRecovery = true) {
   const name = guardName(filePath);
-  const guard = mutex.tryAcquireSync(cwd, `${name}-v2`, { ttlMs: 5_000 });
+  const guard = mutex.tryAcquireSync(cwd, `${name}-v2`, { ttlMs: 5_000, allowStaleRecovery });
   if (!guard) return { acquired: false, reason: 'guard_busy', holder: null };
   let compatibility;
   let outcome;
@@ -235,6 +248,80 @@ function checkFileLock(cwd, filePath, opts) {
   return { held: true, holder, age_ms: holder.age_ms };
 }
 
+// Recovery-only pre-canonical profile. It grants no acquire/renew/release authority.
+function recoverySnapshot(file) {
+  const before = fs.lstatSync(file);
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size > 1024 * 1024) throw Error('recovery_unsafe_file');
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+  try {
+    const opened = fs.fstatSync(fd);
+    const same = (a, b, pathToFd = false) => a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs && a.nlink === b.nlink &&
+      (a.dev === b.dev || (pathToFd && process.platform === 'win32' && a.dev === 0));
+    if (!opened.isFile() || !same(before, opened, true)) throw Error('recovery_file_changed');
+    const bounded = Buffer.alloc(opened.size + 1);
+    let count = 0, n;
+    while (count < bounded.length && (n = fs.readSync(fd, bounded, count, bounded.length - count, null)) > 0) count += n;
+    if (count !== opened.size) throw Error('recovery_file_changed');
+    const bytes = bounded.subarray(0, count);
+    if (!same(opened, fs.fstatSync(fd)) || !same(before, fs.lstatSync(file))) throw Error('recovery_file_changed');
+    return { bytes, stat: before };
+  } finally { fs.closeSync(fd); }
+}
+function sameRecoverySnapshot(a, b) {
+  return a.bytes.equals(b.bytes) && ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs', 'nlink'].every(k => a.stat[k] === b.stat[k]);
+}
+function recoveryEvidencePath(cwd, canonical) {
+  const parent = path.dirname(locksDir(cwd));
+  const dir = path.join(parent, 'file-lock-recovery');
+  fs.mkdirSync(dir, { recursive: true });
+  if (fs.lstatSync(dir).isSymbolicLink() || !fs.lstatSync(dir).isDirectory() ||
+      path.dirname(fs.realpathSync(dir)) !== fs.realpathSync(parent)) throw Error('recovery_unsafe_archive');
+  return path.join(dir, path.basename(lockPathFor(cwd, canonical)) + '.recovery-' + crypto.randomUUID());
+}
+function recoverRelativeLegacy(cwd, canonical, expected) {
+  if (!runs || typeof runs.withRegistryFence !== 'function') return { ok: false, reason: 'holder_unmeasured_or_live' };
+  return runs.withRegistryFence(cwd, () => withGuard(cwd, canonical, guard => {
+    const state = readLockState(cwd, canonical);
+    if (state.relative !== expected.relative || state.file !== expected.file || state.reason !== 'legacy_lock_present' ||
+        readLock(lockPathFor(cwd, canonical), canonical).state !== 'absent') return { ok: false, reason: 'legacy_lock_changed' };
+    const rawGuard = mutex.tryAcquireSync(cwd, guardName(state.relative), { ttlMs: 5_000, allowStaleRecovery: false });
+    if (!rawGuard) return { ok: false, reason: 'guard_busy' };
+    try {
+      const locked = recoverySnapshot(state.file);
+      let meta;
+      try { meta = JSON.parse(locked.bytes.toString('utf8')); } catch { return { ok: false, reason: 'legacy_invalid_metadata' }; }
+      if (!meta || typeof meta !== 'object' || Array.isArray(meta) ||
+          Object.keys(meta).sort().join(',') !== 'acquired_at,file_path,intent,run_id,session_id' ||
+          meta.file_path !== state.relative || !/^[^\x00-\x1f\x7f:]+$/.test(meta.file_path) ||
+          meta.file_path.split(/[\\/]/).some(p => !p || p === '.' || p === '..') ||
+          typeof meta.run_id !== 'string' || !/^[A-Za-z0-9_-]+$/.test(meta.run_id) ||
+          typeof meta.session_id !== 'string' || !meta.session_id ||
+          !Number.isFinite(meta.acquired_at) || typeof meta.intent !== 'string' || !meta.intent) return { ok: false, reason: 'legacy_invalid_metadata' };
+      const registryFile = runs.runFile(cwd, meta.run_id);
+      let registry, record;
+      try { registry = recoverySnapshot(registryFile); record = JSON.parse(registry.bytes.toString('utf8')); }
+      catch { return { ok: false, reason: 'holder_unmeasured_or_live' }; }
+      if (!record || record.id !== meta.run_id || record.active !== false ||
+          (record.session_id || record.session) !== meta.session_id ||
+          require('./forge-write-claim.js').isHeld(record.write_claim)) return { ok: false, reason: 'holder_unmeasured_or_live' };
+      const evidence = recoveryEvidencePath(cwd, canonical);
+      assertGuard(guard);
+      if (!mutex.assertOwned(rawGuard) || !sameRecoverySnapshot(locked, recoverySnapshot(state.file)) ||
+          !sameRecoverySnapshot(registry, recoverySnapshot(registryFile))) return { ok: false, reason: 'legacy_lock_changed' };
+      // The registry fence and all three file mutexes remain held through rename.
+      fs.renameSync(state.file, evidence);
+      const archived = recoverySnapshot(evidence);
+      if (!archived.bytes.equals(locked.bytes) || archived.stat.ino !== locked.stat.ino || archived.stat.dev !== locked.stat.dev) {
+        return { ok: false, reason: 'recovery_archive_changed', evidence };
+      }
+      return { ok: true, reason: 'recovered', evidence, previous_reason: 'legacy_lock_present', profile: 'relative-five-field' };
+    } finally {
+      const released = rawGuard.release();
+      if (!released.ok) throw Object.assign(new Error('forge-filelock: legacy guard release failed'), { code: 'GUARD_RELEASE_FAILED' });
+    }
+  }, false));
+}
+
 // Recovery is deliberately separate from acquire/release: the operator must
 // stop writers first. Rename retains the exact previous bytes (including invalid
 // JSON) and the returned evidence path is never silently cleaned up.
@@ -242,6 +329,9 @@ function recoverFileLock(cwd, filePath, opts) {
   if (!opts || opts.confirmStopped !== true) return { ok: false, reason: 'recovery_requires_stopped_writers' };
   const canonical = canonicalPath(cwd, filePath);
   fs.mkdirSync(locksDir(cwd), { recursive: true });
+  const initial = readLockState(cwd, canonical);
+  if (initial.relative !== undefined && initial.relative !== null) return recoverRelativeLegacy(cwd, canonical, initial);
+  if (initial.reason === 'legacy_lock_ambiguous') return { ok: false, reason: initial.reason };
   const operationBootstrap = mutex.recoverIncompleteLock(cwd, `${guardName(canonical)}-v2`, { ...opts, allowDeadProcessOwner: true });
   if (!operationBootstrap.ok && !['guard_not_held', 'guard_metadata_present'].includes(operationBootstrap.reason)) return operationBootstrap;
   // The v1 bridge was a 5s process mutex; the v2 bridge is a durable fence.
@@ -253,6 +343,9 @@ function recoverFileLock(cwd, filePath, opts) {
   if (!bootstrap.ok && !['guard_not_held', 'guard_metadata_present'].includes(bootstrap.reason)) return bootstrap;
   const result = withGuard(cwd, canonical, (guard) => {
     const state = readLockState(cwd, canonical);
+    // A relative entry may have appeared since the unguarded route probe.
+    // Never send it through generic corrupt/v2 recovery without its raw guard and registry fence.
+    if (state.relative !== undefined && state.relative !== null) return { ok: false, reason: 'legacy_lock_changed' };
     if (state.state === 'absent') return bootstrap.ok || operationBootstrap.ok
       ? { ok: true, reason: 'guard_recovered', evidence: bootstrap.evidence || operationBootstrap.evidence }
       : { ok: false, reason: 'already_released' };
@@ -265,7 +358,7 @@ function recoverFileLock(cwd, filePath, opts) {
         if (activity === 'live' || activity === 'unmeasured') return { ok: false, reason: 'holder_unmeasured_or_live' };
       }
     }
-    const evidence = `${lockPathFor(cwd, canonical)}.recovery-${crypto.randomUUID()}`;
+    const evidence = recoveryEvidencePath(cwd, canonical);
     try { assertGuard(guard); fs.renameSync(state.file, evidence); }
     catch (error) { return { ok: false, reason: 'recovery_failed', errno: error.code }; }
     return { ok: true, reason: 'recovered', evidence, previous_reason: state.reason };

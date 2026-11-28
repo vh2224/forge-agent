@@ -2271,6 +2271,37 @@ async function reviewFixRecoveryContracts(standalone=false,contractBearing=false
   } finally { xllm.runFix = originalRunFix; lab.cleanup(); }
 }
 
+// The sidecar review-fix reset state on SVN observes the claim-derived scope of
+// the native profile: an unrelated ignored tree of a shared checkout cannot
+// exhaust the strict snapshot before the provider (svn-snapshot-limit).
+async function reviewFixSvnScopedState() {
+  const fs = require('fs'), path = require('path'), xllm = require('./forge-xllm'), vcs = require('./forge-vcs');
+  if (!require('./forge-svn-lab').hasSvnToolchain()) { console.log('SKIP review-fix SVN scoped reset state: svn and svnadmin are required'); return; }
+  const lab = require('./forge-code-roots.test').fixture('svn'), originalRunFix = xllm.runFix, originalCapture = vcs.captureDirty;
+  const taskId = 'T-20261127000000-svn-scope', reviewFile = `.gsd/tasks/${taskId}/${taskId}-REVIEW.md`;
+  fs.mkdirSync(path.dirname(path.join(lab.owner, reviewFile)), { recursive: true });
+  fs.writeFileSync(path.join(lab.owner, reviewFile), '# Review\n\n### R1 — bug\n- **Veredito:** CONCEDED\n');
+  fs.writeFileSync(path.join(lab.owner, '.gsd/forge-prefs.jsonc'), JSON.stringify({ tier_models: Object.fromEntries(
+    ['light', 'standard', 'heavy', 'max'].map(tier => [tier, ['claude-sonnet-5', 'gpt-6-sol']])) }));
+  require('./forge-code-roots.test').command('svn', ['propset', 'svn:ignore', 'vendor', '.'], lab.a);
+  for (let i = 0; i < 60; i += 1) { const file = path.join(lab.a, 'vendor', `pkg${i}`, 'index.js'); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, 'dependency\n'); }
+  const request = resolveContext({ unitType: 'review-fix', scope: 'standalone-task', phase: 'review-fix', taskId, cwd: lab.a, contextRoot: lab.owner,
+    resultFile: path.join(lab.dir, 'svn-fix.json'), workflowId: 'fixture', dispatchId: 'fix-svn-scoped', constraints: { auto_commit: false },
+    reviewFix: { boundary: 'task', decision: 'proceed', claimPaths: ['same.txt'],
+      items: [{ r: 'R1', path: 'same.txt', claim: 'broken', action: 'repair', verdict: { resolution: 'conceded', severity: 'high', reachable: 'yes', reproduced: 'yes', in_scope: 'yes' } }] } });
+  let reached = 0;
+  try {
+    vcs.captureDirty = (cwd, opts) => originalCapture(cwd, opts.strict ? { ...opts, strictLimits: { maxEntries: 40 } } : opts);
+    assert.strictEqual(vcs.captureDirty(lab.a, { vcs: 'svn', strict: true }).error, 'svn-snapshot-limit', 'whole checkout exceeds the lowered limit');
+    xllm.runFix = async () => { reached += 1; throw Object.assign(new Error('fixture stop after reset state'), { code: 'fixture-stop', provider_called: false }); };
+    await assert.rejects(sidecar.runUnitSidecar(request), error => error.code === 'fixture-stop');
+    assert.strictEqual(reached, 1, 'the reset state fits the claim scope and the worker turn is reached');
+    const state = require('./forge-surgical-reset').readState(request.resultFile + '.reset-state.json');
+    assert.strictEqual(state.vcs, 'svn'); assert.strictEqual(fs.readFileSync(path.join(lab.a, 'same.txt'), 'utf8'), 'before\n');
+    console.log('PASS review-fix SVN sidecar reset state: claim-scoped strict capture fits a lowered limit the whole checkout exceeds');
+  } finally { xllm.runFix = originalRunFix; vcs.captureDirty = originalCapture; lab.cleanup(); }
+}
+
 async function reviewFixAdmissionContracts() {
   const fs = require('fs'), path = require('path');
   const policy = require('./forge-review-policy'), fix = require('./forge-review-fix');
@@ -2379,7 +2410,7 @@ async function runScenarios() {
   try {
     if (!selectedScenario || selectedScenario === '--review-fix-admission') await reviewFixAdmissionContracts();
     if (!selectedScenario || selectedScenario === '--review-fix-recovery') {for(const standalone of [false,true])for(const contractBearing of [false,true])await reviewFixRecoveryContracts(standalone,contractBearing);
-      await reviewFixRecoveryContracts(false,true,true);}
+      await reviewFixRecoveryContracts(false,true,true); await reviewFixSvnScopedState();}
     if (!selectedScenario || selectedScenario === '--delivery-publication-limits') await deliveryPublicationLimits();
     if (!selectedScenario || selectedScenario === '--recovery-contracts') await recoveryContracts();
     if (!selectedScenario || selectedScenario === '--pre-spawn-sidecar') await preSpawnRecoveryContracts();

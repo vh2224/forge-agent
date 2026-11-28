@@ -1411,7 +1411,7 @@ test('linked-task scoped pins follow the owner pre-T06 capture and the measured 
     if (node341) {
       assert.strictEqual(node341.file, prior.source.file, `${prior.pointer}: #341 node cites the same source`);
       assert.strictEqual(node341.before, afterSha, `${prior.pointer}: #341 before is the owner after measurement`);
-      assert.strictEqual(identitySampleAfter(prior.pointer, node341.after), sha256(prior.source.file === 'skills/forge-next/SKILL.md' ? unitEntry.projectRead(file => fs.readFileSync(path.join(ROOT, file)))(prior.source.file) : fs.readFileSync(path.join(ROOT, prior.source.file))), `${prior.pointer}: #341 after is the raw source bytes`);
+      assert.strictEqual(identitySampleAfter(prior.pointer, node341.after), sha256(['skills/forge-next/SKILL.md', 'skills/forge-task/SKILL.md'].includes(prior.source.file) ? unitEntry.projectRead(file => fs.readFileSync(path.join(ROOT, file)))(prior.source.file) : fs.readFileSync(path.join(ROOT, prior.source.file))), `${prior.pointer}: #341 after is the raw source bytes`);
       assert(sampleReadme.includes(node341.before) && sampleReadme.includes(node341.after), `samples README records the #341 ${prior.pointer}`);
     }
     const cited = identitySampleAfter(prior.pointer, node341 ? node341.after : afterSha);
